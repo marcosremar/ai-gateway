@@ -30,6 +30,28 @@ const log = createLogger('standby-pool');
 export const POOL_TICK_MS = 30_000;
 export const POOL_IDLE_TTL_MS = 15 * 60_000;
 
+/**
+ * #283 — pool refill cap decision (extracted + documented).
+ *
+ * `refillProfile` historically allowed `poolSize >= maxStandby + 1` before
+ * refusing, so the pool could exceed the configured max by one (a silent +1
+ * slack that defeats an exact cost cap). This makes the slack an explicit,
+ * testable parameter. `slack` defaults to 0 → the cap is now exact: refill is
+ * refused once the pool has reached `maxStandby`. Returns true when another
+ * pod may be deployed.
+ */
+export function canRefillPool(
+  poolSize: number,
+  healthyInPool: number,
+  minStandby: number,
+  maxStandby: number,
+  slack = 0,
+): boolean {
+  if (healthyInPool >= minStandby) return false; // already at/above the floor
+  if (poolSize >= maxStandby + Math.max(0, slack)) return false; // at the cap
+  return true;
+}
+
 export type StandbyTier = 'vast-vm' | 'hyperstack';
 
 export interface StandbyProfileConfig {
@@ -229,8 +251,9 @@ async function refillProfile(profile: string): Promise<void> {
   if (!cfg) return;
   if (deployInProgressFor.has(profile)) return;
   const healthy = [...pool.values()].filter((p) => p.profile === profile && p.inPool).length;
-  if (healthy >= cfg.minStandby) return;
-  if (pool.size >= cfg.maxStandby + 1) return;
+  // #283: exact cap (slack 0) so the pool can no longer overshoot maxStandby by
+  // one — keeps dollar/hr caps honest.
+  if (!canRefillPool(pool.size, healthy, cfg.minStandby, cfg.maxStandby, 0)) return;
 
   deployInProgressFor.add(profile);
   try {

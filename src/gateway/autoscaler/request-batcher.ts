@@ -14,6 +14,15 @@ export interface BatcherConfig {
   maxWaitMs: number;
   /** Scale wait time with load (more pending → wait longer, up to maxWaitMs). Default: true */
   adaptiveWindow: boolean;
+  /**
+   * #271 — minimum wait for the first item under adaptive mode. The bare
+   * proportional formula gives the first item a tiny window
+   * (maxWaitMs/maxBatchSize) so batches rarely accumulate under bursty load;
+   * set this to give the first item a real chance to gather a batch. Defaults
+   * to 0 (legacy proportional-only behavior) so existing callers are
+   * unaffected. Never exceeds maxWaitMs.
+   */
+  minFirstWaitMs?: number;
 }
 
 const DEFAULT_CONFIG: BatcherConfig = {
@@ -21,6 +30,34 @@ const DEFAULT_CONFIG: BatcherConfig = {
   maxWaitMs: 50,
   adaptiveWindow: true,
 };
+
+/**
+ * #271 — adaptive batch wait with a first-item floor.
+ *
+ * The old adaptive formula computed `maxWaitMs * (pending/maxBatchSize)`, so
+ * the first item got `maxWaitMs * (1/maxBatchSize)` — a tiny window (e.g. 6ms
+ * for 8 items @50ms) that almost never lets a batch accumulate under
+ * bursty-but-not-saturated load, defeating the point of batching. This floors
+ * the wait at `minFirstWaitMs` (default 25% of maxWaitMs) so the first item
+ * still gives later items a real chance to join the batch, while never
+ * exceeding `maxWaitMs`. Non-adaptive mode always returns `maxWaitMs`.
+ *
+ * `minFirstWaitMs` defaults to 0 (legacy proportional-only behavior). Pass a
+ * positive value (e.g. 25% of maxWaitMs) to floor the first-item wait.
+ */
+export function computeBatchWaitMs(
+  pendingCount: number,
+  maxBatchSize: number,
+  maxWaitMs: number,
+  adaptive: boolean,
+  minFirstWaitMs = 0,
+): number {
+  if (!adaptive) return maxWaitMs;
+  const size = Math.max(1, maxBatchSize);
+  const proportional = maxWaitMs * (Math.max(1, pendingCount) / size);
+  const floor = Math.min(maxWaitMs, Math.max(0, minFirstWaitMs));
+  return Math.min(maxWaitMs, Math.max(floor, proportional));
+}
 
 interface BatchItem<T> {
   data: T;
@@ -60,9 +97,16 @@ export class RequestBatcher<T> {
 
       // If this is the first item, schedule a flush
       if (this.pending.length === 1) {
-        const waitMs = this.config.adaptiveWindow
-          ? Math.min(this.config.maxWaitMs, this.config.maxWaitMs * (this.pending.length / this.config.maxBatchSize))
-          : this.config.maxWaitMs;
+        // #271: route through computeBatchWaitMs so an optional minFirstWaitMs
+        // can floor the (otherwise tiny) first-item window. With the default
+        // minFirstWaitMs=0 this is byte-identical to the legacy formula.
+        const waitMs = computeBatchWaitMs(
+          this.pending.length,
+          this.config.maxBatchSize,
+          this.config.maxWaitMs,
+          this.config.adaptiveWindow,
+          this.config.minFirstWaitMs ?? 0,
+        );
 
         // For single items under adaptive mode, flush almost immediately
         if (waitMs <= 0) {

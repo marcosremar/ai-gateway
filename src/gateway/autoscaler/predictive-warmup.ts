@@ -62,6 +62,27 @@ export async function recordUsageForPrediction(
   }
 }
 
+/**
+ * #278 — size the warm count to the forecast instead of always booting tier 0.
+ *
+ * `triggerBoot` warms only the first tier, so a multi-tier user facing a
+ * forecasted spike still cold-starts tiers 1..N. This maps predicted hourly
+ * requests to the number of tiers to pre-warm: one tier per `reqsPerTier`
+ * predicted requests, clamped to `[1, maxTiers]` (always at least one when a
+ * warm is warranted). Returns 0 when there are no tiers.
+ */
+export function warmCountForForecast(
+  predictedRequests: number,
+  maxTiers: number,
+  reqsPerTier = 5,
+): number {
+  if (maxTiers <= 0) return 0;
+  if (predictedRequests <= 0) return Math.min(1, maxTiers);
+  const per = Math.max(1, reqsPerTier);
+  const want = Math.ceil(predictedRequests / per);
+  return Math.max(1, Math.min(maxTiers, want));
+}
+
 // ── Prediction ────────────────────────────────────────────────────────────────
 
 /**

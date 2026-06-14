@@ -29,6 +29,49 @@ import {
 } from '../src/gpu-providers/deploy-settings';
 import { runStandbyReadinessCheck } from './gpu-readiness';
 
+// ── Pure helpers (exported for unit testing — no state, no I/O) ──────────────
+
+/**
+ * #285 — resolve the P95 latency multiplier that triggers a standby spin-up.
+ *
+ * The trigger was a hardcoded `p95 > targetMs * 2` that operators couldn't
+ * tune and that silently disagreed with the monitor-loop's demotion multiplier.
+ * This resolves the multiplier from `STANDBY_P95_MULTIPLIER` (falling back to a
+ * supplied default, then 2), clamped to a sane `[1.2, 10]` band so a
+ * mis-set env can't make the standby fire on every blip or never fire.
+ */
+export function standbyP95Multiplier(envValue?: string, fallback = 2): number {
+  const parsed = envValue != null ? Number(envValue) : NaN;
+  const base = Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return Math.min(10, Math.max(1.2, base));
+}
+
+/**
+ * #285 — latency-trigger decision using the resolved multiplier.
+ * Returns true when a valid P95 exceeds `targetMs * multiplier`.
+ */
+export function shouldTriggerStandbyOnLatency(
+  p95: number | null,
+  targetMs: number,
+  multiplier: number,
+): boolean {
+  if (p95 === null || !Number.isFinite(p95) || p95 <= 0) return false;
+  if (!(targetMs > 0)) return false;
+  return p95 > targetMs * multiplier;
+}
+
+/**
+ * #287 — event-driven drain completion check.
+ *
+ * The handover drain loop sleeps a fixed 200ms even once `activeRequests`
+ * hits 0, needlessly lengthening handover. This lets the loop exit the instant
+ * the condition is met: drain is complete when there are no active requests OR
+ * the timeout has elapsed.
+ */
+export function isDrainComplete(activeRequests: number, elapsedMs: number, timeoutMs: number): boolean {
+  return activeRequests <= 0 || elapsedMs >= timeoutMs;
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let standbyDeployInProgress = false;
@@ -68,11 +111,12 @@ function checkStandbyTriggers(): void {
     return;
   }
 
-  // Trigger 2: P95 latency degradation
+  // Trigger 2: P95 latency degradation (#285: multiplier is now configurable)
   const p95 = getP95Latency();
   const targetMs = getLlmTargetLatencyMs();
-  if (p95 !== null && p95 > targetMs * 2) {
-    log.log(`[standby] Auto-trigger: P95=${p95}ms > 2× target (${targetMs * 2}ms)`);
+  const p95Mult = standbyP95Multiplier(process.env.STANDBY_P95_MULTIPLIER);
+  if (shouldTriggerStandbyOnLatency(p95, targetMs, p95Mult)) {
+    log.log(`[standby] Auto-trigger: P95=${p95}ms > ${p95Mult}× target (${targetMs * p95Mult}ms)`);
     triggerStandbyDeploy('latency_degradation').catch(err =>
       log.error('[standby] Auto-trigger failed:', err instanceof Error ? err.message : err),
     );
@@ -205,7 +249,9 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
 
     const drainTimeout = getStandbyDrainTimeoutMs();
     const drainStart = Date.now();
-    while (activeRequests > 0 && Date.now() - drainStart < drainTimeout) {
+    // #287: exit the instant activeRequests hits 0 (or on timeout) instead of
+    // always sleeping a fixed 200ms tick past completion.
+    while (!isDrainComplete(activeRequests, Date.now() - drainStart, drainTimeout)) {
       if ((Date.now() - drainStart) % 2000 < 200) {
         broadcastWs({ type: 'gpu:draining', activeRequests, elapsed: Math.round((Date.now() - drainStart) / 1000), timeout: Math.round(drainTimeout / 1000) });
       }

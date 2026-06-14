@@ -419,6 +419,58 @@ export class LoadBalancer {
   }
 
   /**
+   * #294 — consume tokens AND return the resulting balance in one KV
+   * round-trip.
+   *
+   * `checkRateLimit` previously called `tryConsume` then `getTokenBalance`
+   * separately — two reads + a recompute of the refill on every gated request.
+   * This does the read-modify-write once and reports the post-consume balance
+   * (the refill-adjusted balance on a rejection), so callers don't need a
+   * second KV op. Fails closed (`allowed:false, remaining:0`) on store errors,
+   * matching `tryConsume`.
+   */
+  async tryConsumeWithBalance(
+    clientId: string,
+    tokens: number = 1,
+  ): Promise<{ allowed: boolean; remaining: number }> {
+    const key = tokenBucketKey(clientId);
+    const now = Date.now();
+
+    try {
+      const raw = await this.stateStore.get(key);
+      let state: TokenBucketState;
+
+      if (raw) {
+        state = JSON.parse(raw) as TokenBucketState;
+        const elapsedSeconds = (now - state.lastRefill) / 1000;
+        const refillAmount = Math.floor(elapsedSeconds * this.tokenBucketConfig.refillRate);
+        state.tokens = Math.min(this.tokenBucketConfig.capacity, state.tokens + refillAmount);
+        if (refillAmount > 0) {
+          state.lastRefill += (refillAmount / this.tokenBucketConfig.refillRate) * 1000;
+        }
+      } else {
+        state = {
+          tokens: this.tokenBucketConfig.initialTokens ?? this.tokenBucketConfig.capacity,
+          lastRefill: now,
+        };
+      }
+
+      if (state.tokens >= tokens) {
+        state.tokens -= tokens;
+        await this.stateStore.set(key, JSON.stringify(state), 3600);
+        return { allowed: true, remaining: state.tokens };
+      }
+
+      // Not enough — persist the refill credit so the next call sees it.
+      await this.stateStore.set(key, JSON.stringify(state), 3600);
+      return { allowed: false, remaining: state.tokens };
+    } catch (err) {
+      console.warn('[load-balancer] tryConsumeWithBalance failed-closed:', err instanceof Error ? err.message : String(err));
+      return { allowed: false, remaining: 0 };
+    }
+  }
+
+  /**
    * Get current token balance for a client.
    */
   async getTokenBalance(clientId: string): Promise<number> {
@@ -461,8 +513,9 @@ export class LoadBalancer {
     priority: RequestPriority = 'normal',
   ): Promise<{ allowed: boolean; remainingTokens: number; retryAfterMs?: number }> {
     const tokensNeeded = priority === 'urgent' ? 1 : priority === 'high' ? 2 : 3;
-    const allowed = await this.tryConsume(clientId, tokensNeeded);
-    const remaining = await this.getTokenBalance(clientId);
+    // #294: single read-modify-write returns both the decision and the
+    // resulting balance — halves the per-request KV ops on the hot path.
+    const { allowed, remaining } = await this.tryConsumeWithBalance(clientId, tokensNeeded);
 
     return {
       allowed,

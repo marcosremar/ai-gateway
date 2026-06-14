@@ -142,6 +142,69 @@ export function shouldGiveUpProbing(
   return currentDelayMs >= maxDelayMs && msAtMaxBackoff >= giveUpAfterMs;
 }
 
+/**
+ * #208 — escalating idle-warning level.
+ *
+ * The old code latched a single warning at 75% of the timeout, so a user away
+ * past the timeout got exactly one heads-up. This maps the idle fraction
+ * (idleMs / timeoutMs) to a discrete warn level so the caller can re-warn as
+ * stop becomes imminent: `none` < 75%, `warn` at ≥75%, `imminent` at ≥90%.
+ * Returning distinct levels lets the caller fire one alert per level (instead
+ * of one ever).
+ */
+export function computeIdleWarnLevel(
+  idleMs: number,
+  idleTimeoutMs: number,
+  warnAt = 0.75,
+  imminentAt = 0.9,
+): 'none' | 'warn' | 'imminent' {
+  if (!(idleTimeoutMs > 0) || idleMs <= 0) return 'none';
+  const frac = idleMs / idleTimeoutMs;
+  if (frac >= imminentAt) return 'imminent';
+  if (frac >= warnAt) return 'warn';
+  return 'none';
+}
+
+/**
+ * #242 — crash-loop counter decay after a sustained healthy window.
+ *
+ * `monitorCrashRecoveryAttempts` only reset on a fresh deploy, so a pod that
+ * recovered and ran healthy for hours still had 0 budget for a later genuine
+ * crash. This decays the counter by one once the pod has been continuously
+ * healthy for `healthyWindowMs`, restoring recovery budget over time without
+ * the blanket per-request reset that would reopen the infinite crash→reset
+ * loop (#243). Returns the new (never-negative) counter.
+ */
+export function decayCrashCounter(
+  attempts: number,
+  healthyForMs: number,
+  healthyWindowMs: number = 60 * 60_000,
+): number {
+  if (attempts <= 0) return 0;
+  if (healthyForMs >= healthyWindowMs) return attempts - 1;
+  return attempts;
+}
+
+/**
+ * #255 — map a latency trend slope to an early action.
+ *
+ * The 20%-slope trend detector only logged/broadcast. This turns a measured
+ * slope (fractional change, e.g. 0.25 = +25%) into a discrete recommendation
+ * so the caller can act *before* P95 demotion: `warm` (pre-warm standby) at
+ * ≥ `warmSlope`, `rebenchmark` at ≥ `rebenchSlope`, else `none`. Negative /
+ * flat slopes never act.
+ */
+export function latencyTrendAction(
+  slope: number,
+  warmSlope = 0.2,
+  rebenchSlope = 0.5,
+): 'none' | 'warm' | 'rebenchmark' {
+  if (!Number.isFinite(slope) || slope <= 0) return 'none';
+  if (slope >= rebenchSlope) return 'rebenchmark';
+  if (slope >= warmSlope) return 'warm';
+  return 'none';
+}
+
 // ── GPU Monitoring ───────────────────────────────────────────────────────────
 
 let monitorRunning = false;
@@ -171,6 +234,12 @@ let lastBudgetCalcTime = 0;
 // Crash auto-recovery: redeploy on different provider after crash (max 2 attempts)
 let monitorCrashRecoveryAttempts = 0;
 const MAX_MONITOR_CRASH_RECOVERY = 2;
+// #242: timestamp the current continuous-healthy streak so we can decay the
+// crash-recovery counter after a long healthy window (restoring recovery budget
+// for a genuinely-later crash) — without the blanket per-request reset that
+// would reopen the infinite crash→reset loop (#243). Reset to 0 on any failure.
+let monitorHealthySinceMs = 0;
+const CRASH_DECAY_HEALTHY_WINDOW_MS = 60 * 60_000; // 1h continuously healthy → -1
 
 // Idle warning: warn once before auto-terminate, reset on activity
 let idleWarned = false;
@@ -193,6 +262,7 @@ export function startGpuMonitoring() {
   monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
   monitorBackoffMaxAlerted = false;
   monitorCrashRecoveryAttempts = 0;
+  monitorHealthySinceMs = 0;
   crashRecordedForCurrentDeploy = false;
   sshRecoveryAttemptedForCurrentDeploy = false;
   crashRedeployTriggeredForCurrentDeploy = false;
@@ -270,6 +340,20 @@ export function scheduleNextMonitorProbe() {
         crashRecordedForCurrentDeploy = false;
         monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
         monitorBackoffMaxAlerted = false;
+        // #242: start/continue the healthy streak and decay the crash counter
+        // once the pod has been continuously healthy long enough.
+        const nowMs = Date.now();
+        if (monitorHealthySinceMs === 0) monitorHealthySinceMs = nowMs;
+        const decayed = decayCrashCounter(
+          monitorCrashRecoveryAttempts,
+          nowMs - monitorHealthySinceMs,
+          CRASH_DECAY_HEALTHY_WINDOW_MS,
+        );
+        if (decayed < monitorCrashRecoveryAttempts) {
+          monitorCrashRecoveryAttempts = decayed;
+          monitorHealthySinceMs = nowMs; // reset window so each decay needs a fresh healthy hour
+          log.log(`[gpu] Crash-recovery budget restored after sustained health — attempts now ${monitorCrashRecoveryAttempts}/${MAX_MONITOR_CRASH_RECOVERY}`);
+        }
         // If health data indicates active training/work, treat as "not idle"
         // (prevents idle timeout from killing fine-tuning or long-running jobs)
         // Compute effective timeout for health-based idle check (same context as idle check below)
@@ -285,6 +369,7 @@ export function scheduleNextMonitorProbe() {
         }
       } else {
         monitorConsecFails++;
+        monitorHealthySinceMs = 0; // #242: a failed probe breaks the healthy streak
         // Only mark unhealthy after 2+ consecutive failures to tolerate
         // transient timeouts when GPU is under heavy load (e.g. benchmark)
         if (monitorConsecFails >= 2) {

@@ -34,6 +34,9 @@ export interface TierCircuitBreakerConfig {
   analysisWindow: number;
   /** Enable adaptive thresholds based on performance history. Default: true */
   adaptiveThresholds: boolean;
+  /** #237 — force a full reset after this many elapsed recovery windows while
+   *  open/half-open, so a recovered tier is never blocked forever. Default: 5 */
+  maxRecoveryWindows: number;
 }
 
 const DEFAULT_CONFIG: TierCircuitBreakerConfig = {
@@ -45,6 +48,7 @@ const DEFAULT_CONFIG: TierCircuitBreakerConfig = {
   predictiveAnalysis: true,
   analysisWindow: 100,
   adaptiveThresholds: true,
+  maxRecoveryWindows: 5,
 };
 
 interface PersistedCircuitState {
@@ -65,6 +69,9 @@ interface PersistedCircuitState {
   failureReasons: string[];
   adaptiveThreshold: number; // Currently adapted failure threshold
   predictiveScore: number; // 0-1 risk score for future failures
+  /** #233 — id of the most recent failure already counted, for dedup. Optional
+   *  (legacy state has none → no dedup, preserving prior behavior). */
+  lastCountedFailureId?: string;
 }
 
 function storeKey(tierIndex: number): string {
@@ -132,6 +139,63 @@ export function shouldPredictiveOpen(
   return predictiveScore > riskThreshold;
 }
 
+/**
+ * #235 — half-open concurrency gate.
+ *
+ * `halfOpenMaxConcurrent` is documented (default 1) but was never enforced: a
+ * burst of requests arriving while the circuit is half-open all hit the
+ * recovering pod simultaneously. This returns whether a *new* probe may be
+ * admitted given the number already in flight. Only meaningful in the
+ * half-open state; closed/open admission is decided elsewhere.
+ */
+export function canAdmitHalfOpenProbe(
+  inFlightProbes: number,
+  halfOpenMaxConcurrent = 1,
+): boolean {
+  const cap = Math.max(1, Math.floor(halfOpenMaxConcurrent));
+  return inFlightProbes < cap;
+}
+
+/**
+ * #233 — failure double-count guard.
+ *
+ * Both `recordRequest(..., success=false)` and `recordFailure()` increment the
+ * same `failures` counter; a caller that (mistakenly or by layered middleware)
+ * invokes both per request trips the threshold at half the intended count. This
+ * decides whether a failure write should actually be applied, given the id of
+ * the last failure already counted. Passing the same `requestId` twice is a
+ * no-op; omitting the id preserves the legacy always-count behavior.
+ */
+export function shouldCountFailure(
+  requestId: string | undefined,
+  lastCountedFailureId: string | undefined,
+): boolean {
+  if (!requestId) return true; // no dedup key → preserve legacy behavior
+  return requestId !== lastCountedFailureId;
+}
+
+/**
+ * #237 — forced full-reset after the circuit has been open/half-open too long.
+ *
+ * Once open the breaker only re-tests after `recoveryTimeoutMs`; if half-open
+ * keeps failing it can stay open forever, permanently blocking a tier that may
+ * have recovered. After `maxRecoveryWindows` elapsed recovery windows since it
+ * first opened, force a full reset (back to closed) so the tier gets a clean
+ * trial instead of being stuck. Returns false when not open or not yet stuck.
+ */
+export function shouldForceReset(
+  state: CircuitState,
+  openedAt: number,
+  recoveryTimeoutMs: number,
+  now: number,
+  maxRecoveryWindows = 5,
+): boolean {
+  if (state === 'closed') return false;
+  if (!(openedAt > 0) || !(recoveryTimeoutMs > 0)) return false;
+  const windows = Math.max(1, Math.floor(maxRecoveryWindows));
+  return now - openedAt >= recoveryTimeoutMs * windows;
+}
+
 export class TierCircuitBreaker {
   private readonly config: TierCircuitBreakerConfig;
 
@@ -163,8 +227,22 @@ export class TierCircuitBreaker {
     await this.store.set(storeKey(tierIndex), JSON.stringify(s));
   }
 
-  /** Evaluate time-based transitions (open → half-open) */
+  /** Evaluate time-based transitions (open → half-open → forced reset) */
   private applyTimeTransition(s: PersistedCircuitState): PersistedCircuitState {
+    // #237: if the breaker has been stuck (open/half-open) for too many
+    // recovery windows, force a clean reset so a recovered tier isn't blocked
+    // forever by a half-open path that keeps failing.
+    if (
+      shouldForceReset(
+        s.state,
+        s.openedAt,
+        this.config.recoveryTimeoutMs,
+        Date.now(),
+        this.config.maxRecoveryWindows,
+      )
+    ) {
+      return defaultState();
+    }
     if (s.state === 'open' && s.openedAt > 0) {
       const elapsed = Date.now() - s.openedAt;
       if (elapsed >= this.config.recoveryTimeoutMs) {
@@ -190,10 +268,16 @@ export class TierCircuitBreaker {
     await this.save(tierIndex, s);
   }
 
-  async recordFailure(tierIndex: number): Promise<void> {
+  async recordFailure(tierIndex: number, requestId?: string): Promise<void> {
     let s = this.applyTimeTransition(await this.load(tierIndex));
 
-    s.failures++;
+    // #233: skip the increment if this exact request's failure was already
+    // counted by a recordRequest/recordFailure call (dedup by id). Without an
+    // id we preserve the legacy always-count behavior.
+    if (shouldCountFailure(requestId, s.lastCountedFailureId)) {
+      s.failures++;
+      if (requestId) s.lastCountedFailureId = requestId;
+    }
 
     if (s.state === 'half-open') {
       // Any failure in half-open re-opens
@@ -230,6 +314,20 @@ export class TierCircuitBreaker {
     return state !== 'open';
   }
 
+  /**
+   * #235 — admission decision honoring half-open concurrency.
+   *
+   * In the half-open state, only `halfOpenMaxConcurrent` probes may hit the
+   * recovering tier at once; further requests are refused (caller should route
+   * to cloud/another tier). Closed → always admit; open → never admit.
+   */
+  async canProbe(tierIndex: number, inFlightProbes: number): Promise<boolean> {
+    const state = await this.getState(tierIndex);
+    if (state === 'open') return false;
+    if (state === 'closed') return true;
+    return canAdmitHalfOpenProbe(inFlightProbes, this.config.halfOpenMaxConcurrent);
+  }
+
   /** Get circuit states for all tracked tiers. */
   async getAll(): Promise<Map<number, CircuitState>> {
     const result = new Map<number, CircuitState>();
@@ -258,7 +356,7 @@ export class TierCircuitBreaker {
   private performanceHistory: Map<number, Array<{latencyMs: number, success: boolean, timestamp: number}>> = new Map();
 
   /** Record detailed request information for advanced analysis */
-  async recordRequest(tierIndex: number, latencyMs: number, success: boolean, failureReason?: string): Promise<void> {
+  async recordRequest(tierIndex: number, latencyMs: number, success: boolean, failureReason?: string, requestId?: string): Promise<void> {
     const now = Date.now();
     let s = this.applyTimeTransition(await this.load(tierIndex));
 
@@ -267,7 +365,13 @@ export class TierCircuitBreaker {
     if (success) {
       s.successCount++;
     } else {
-      s.failures++;
+      // #233: dedup the failure increment by request id so a caller that also
+      // invokes recordFailure() for the same request can't trip the threshold
+      // at half the intended count. failureReasons still records the reason.
+      if (shouldCountFailure(requestId, s.lastCountedFailureId)) {
+        s.failures++;
+        if (requestId) s.lastCountedFailureId = requestId;
+      }
       if (failureReason) {
         s.failureReasons.push(failureReason);
         // Keep only last 10 failures

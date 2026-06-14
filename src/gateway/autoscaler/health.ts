@@ -11,6 +11,24 @@ import { defaultLogger } from '../../logger';
 const GPU_HEALTH_SKIP_TLS = !!process.env.GPU_HEALTH_SKIP_TLS;
 
 /**
+ * #249 — classify a `/health` status string into a distinct tri-state.
+ *
+ * `probeGpuHealth` treats `degraded` as fully healthy, so a pod with (say) STT
+ * down but TTS up counts ready and receives full traffic. This separates
+ * `degraded` from `healthy` so routing can *downgrade* a partially-available
+ * pod (serve what works, fall back per-stage) instead of trusting it fully.
+ * `healthy`/`ok`/`ready` → 'healthy'; `degraded` → 'degraded'; anything else
+ * (incl. missing) → 'unhealthy'.
+ */
+export function classifyHealthStatus(status: unknown): 'healthy' | 'degraded' | 'unhealthy' {
+  if (typeof status !== 'string') return 'unhealthy';
+  const s = status.toLowerCase();
+  if (s === 'healthy' || s === 'ok' || s === 'ready') return 'healthy';
+  if (s === 'degraded') return 'degraded';
+  return 'unhealthy';
+}
+
+/**
  * Probe a GPU endpoint's `/health` endpoint to check if it's serving.
  *
  * Sends an HTTP GET to `{endpoint}/health` and checks the response's

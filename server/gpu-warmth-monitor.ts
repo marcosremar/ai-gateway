@@ -13,6 +13,28 @@ const log = createLogger('gpu-deploy');
 
 let warmthMonitorTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * #256 — escalation decision for sustained warmth-probe failure.
+ *
+ * The monitor marked `stt_ready:false` at exactly 10 consecutive failures but
+ * then kept the same cadence forever and never escalated to terminate/redeploy
+ * a pod that was clearly not coming up. This maps the consecutive-failure count
+ * to a staged action: `none` below the warn threshold, `mark-unhealthy` at
+ * `markThreshold` (so the existing behaviour is preserved), and `escalate`
+ * once failures reach `escalateThreshold` so the caller can terminate/redeploy.
+ * Uses `>=` so the action still fires even if the counter skips the exact
+ * threshold.
+ */
+export function warmthFailureAction(
+  consecutiveFailures: number,
+  markThreshold = 10,
+  escalateThreshold = 20,
+): 'none' | 'mark-unhealthy' | 'escalate' {
+  if (consecutiveFailures >= escalateThreshold) return 'escalate';
+  if (consecutiveFailures >= markThreshold) return 'mark-unhealthy';
+  return 'none';
+}
+
 export function stopWarmthMonitor() {
   if (warmthMonitorTimer) { clearTimeout(warmthMonitorTimer); warmthMonitorTimer = null; }
 }
@@ -77,9 +99,17 @@ export function startBackgroundWarmthMonitor(endpoint: string) {
     } catch (err) {
       log.debug(`[gpu] Warmth poll failed: ${err instanceof Error ? err.message : err}`);
       consecutiveFailures++;
-      if (consecutiveFailures >= 10) {
-        log.warn('Health check failed 10 consecutive times — marking unhealthy');
+      // #256: staged escalation instead of a one-time mark-unhealthy that then
+      // polls forever at the same cadence.
+      const action = warmthFailureAction(consecutiveFailures);
+      if (action === 'mark-unhealthy') {
+        log.warn(`Health check failed ${consecutiveFailures} consecutive times — marking unhealthy`);
         updateGpuModelWarmth({ stt_ready: false, llm_ready: false });
+      } else if (action === 'escalate') {
+        log.warn(`Warmth probe failed ${consecutiveFailures} consecutive times during warmup — pod not coming up; stopping warmth monitor for recovery`);
+        updateGpuModelWarmth({ stt_ready: false, llm_ready: false });
+        stopWarmthMonitor();
+        return;
       }
     }
     warmthPollCount++;
