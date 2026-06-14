@@ -109,6 +109,25 @@ interface ProvisionResult {
   stdout?: string;
   stderr?: string;
   error?: string;
+  /** True when install.sh timed out mid-way, leaving the pod half-provisioned —
+   *  the caller can safely retry (install.sh is idempotent) instead of treating
+   *  it as a hard failure (#187). */
+  partial?: boolean;
+}
+
+/**
+ * Whether an install.sh failure left the pod half-provisioned and is safely
+ * retryable (#187).
+ *
+ * `sshExec` returns `code === null` and a "[provisioner] timeout" stderr marker
+ * when the command is killed by the timeout. A non-null exit code is a genuine
+ * script failure (not partial). Pure so it can be unit-tested.
+ */
+export function isPartialInstallFailure(
+  result: { code: number | null; stderr?: string },
+): boolean {
+  if (result.code !== null) return false; // real non-zero exit = not partial
+  return (result.stderr ?? '').includes('timeout');
 }
 
 /**
@@ -267,13 +286,17 @@ export async function provisionPod(cfg: ProvisionConfig): Promise<ProvisionResul
   const durationMs = Date.now() - start;
 
   if (!installResult.ok) {
-    log.warn(`[provision] install failed for ${podId}: code=${installResult.code}`);
+    const partial = isPartialInstallFailure(installResult);
+    log.warn(`[provision] install ${partial ? 'timed out (partial — retryable)' : 'failed'} for ${podId}: code=${installResult.code}`);
     return {
       ok: false,
+      partial,
       durationMs,
       stdout: installResult.stdout,
       stderr: installResult.stderr,
-      error: `install.sh exited with code ${installResult.code}`,
+      error: partial
+        ? `install.sh timed out after ${Math.round(durationMs / 1000)}s — pod is half-provisioned; retry (install.sh is idempotent)`
+        : `install.sh exited with code ${installResult.code}`,
     };
   }
 

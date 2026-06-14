@@ -143,10 +143,43 @@ export function resolveSnapshotStoreConfig(env: NodeJS.ProcessEnv = process.env)
   };
 }
 
+/**
+ * Stable fingerprint of the snapshot-store-relevant env (#178).
+ *
+ * The store client is a process-singleton cached on first use, so changing
+ * `R2_SNAPSHOTS_*` / `HYPERSTACK_SNAPSHOTS_*` at runtime had no effect without a
+ * restart. Comparing this fingerprint lets `getSnapshotStore` rebuild the client
+ * when config changes. Pure; secrets are length-hashed (not echoed) so the
+ * fingerprint is safe to log.
+ */
+export function snapshotStoreFingerprint(env: NodeJS.ProcessEnv = process.env): string {
+  const keys = [
+    'HYPERSTACK_SNAPSHOTS_BUCKET', 'HYPERSTACK_SNAPSHOTS_ENDPOINT', 'HYPERSTACK_SNAPSHOTS_REGION',
+    'HYPERSTACK_SNAPSHOTS_ACCESS_KEY', 'HYPERSTACK_SNAPSHOTS_SECRET_KEY',
+    'R2_SNAPSHOTS_BUCKET', 'R2_SNAPSHOTS_ENDPOINT', 'R2_SNAPSHOTS_REGION', 'R2_ACCOUNT_ID',
+    'R2_SNAPSHOTS_ACCESS_KEY', 'R2_SNAPSHOTS_SECRET_KEY',
+  ];
+  return keys
+    .map((k) => {
+      const v = env[k] ?? '';
+      // Hash secret material to length so rotation still changes the fingerprint
+      // without leaking the value into logs.
+      return /ACCESS_KEY|SECRET_KEY/.test(k) ? `${k}=#${v.length}` : `${k}=${v}`;
+    })
+    .join('|');
+}
+
 /** Singleton snapshot bucket client. Returns null if config not provided. */
 let _store: ObjectStore | null | undefined;
+let _storeFingerprint: string | undefined;
 function getSnapshotStore(): ObjectStore | null {
-  if (_store !== undefined) return _store;
+  const fingerprint = snapshotStoreFingerprint();
+  // Rebuild when the snapshot config env changed at runtime (#178).
+  if (_store !== undefined && _storeFingerprint === fingerprint) return _store;
+  if (_store !== undefined && _storeFingerprint !== fingerprint) {
+    log.log('[snapshot] store config changed — reloading client');
+  }
+  _storeFingerprint = fingerprint;
   const cfg = resolveSnapshotStoreConfig();
   switch (cfg.kind) {
     case 'disabled':
@@ -183,6 +216,7 @@ function getSnapshotStore(): ObjectStore | null {
 /** Exposed for tests — reset the cached client. */
 export function _resetSnapshotStoreForTests(): void {
   _store = undefined;
+  _storeFingerprint = undefined;
 }
 
 /** Inject a custom store (tests). */

@@ -154,6 +154,71 @@ export function validateDockerImageReference(
   return { ok: true };
 }
 
+// ── Registry parsing & verification policy (#199) ─────────────────────────────
+
+/** Parsed image reference: registry host + repo + tag. */
+export interface ParsedImageRef {
+  registry: string;
+  repo: string;
+  tag: string;
+}
+
+/**
+ * Parse a Docker image reference into registry/repo/tag (#199).
+ *
+ * Mirrors `checkImageExists`'s inline parsing but as a pure, reusable helper so
+ * the registry-verification policy can be unit-tested. Defaults the registry to
+ * `docker.io` and the tag to `latest`.
+ */
+export function parseImageRegistry(imageName: string): ParsedImageRef {
+  let registry = 'docker.io';
+  let imageWithTag = imageName.trim();
+  if (imageWithTag.includes('/')) {
+    const parts = imageWithTag.split('/');
+    if (parts[0].includes('.') || parts[0].includes(':') || parts[0] === 'localhost') {
+      registry = parts.shift()!;
+      imageWithTag = parts.join('/');
+    }
+  }
+  // Strip any digest before splitting on the tag colon.
+  const [refNoDigest] = imageWithTag.split('@');
+  const lastColon = refNoDigest.lastIndexOf(':');
+  let repo = refNoDigest;
+  let tag = 'latest';
+  if (lastColon > refNoDigest.lastIndexOf('/')) {
+    repo = refNoDigest.slice(0, lastColon);
+    tag = refNoDigest.slice(lastColon + 1) || 'latest';
+  }
+  return { registry, repo, tag };
+}
+
+/** Whether a registry is GitHub Container Registry (ghcr.io). */
+export function isGhcrRegistry(registry: string): boolean {
+  return registry.toLowerCase() === 'ghcr.io';
+}
+
+/**
+ * Decide whether a non-Docker-Hub registry's image can be verified pre-deploy
+ * (#199).
+ *
+ * Previously ALL non-Docker-Hub registries were skipped with a warning, so a
+ * typo'd `ghcr.io/...:tag` only failed after the (billed) instance was created.
+ * ghcr.io supports a token+HEAD-manifest check when a token is available; other
+ * private registries still can't be checked without creds. Pure decision helper.
+ */
+export function registryVerifiable(
+  registry: string,
+  creds: { ghcrToken?: string } = {},
+): { verifiable: boolean; reason: string } {
+  if (registry === 'docker.io') return { verifiable: true, reason: 'docker-hub' };
+  if (isGhcrRegistry(registry)) {
+    return creds.ghcrToken
+      ? { verifiable: true, reason: 'ghcr-token' }
+      : { verifiable: false, reason: 'ghcr-no-token' };
+  }
+  return { verifiable: false, reason: 'unsupported-registry' };
+}
+
 // ── Check: Docker Image Existence ─────────────────────────────────────────────
 
 /**
@@ -223,8 +288,33 @@ async function checkImageExists(config: PreFlightConfig): Promise<{ passed: bool
       return { passed: true };
     }
 
-    // For other registries, just warn (we can't check without credentials)
-    return { passed: true, warning: `Skipping image check for non-Docker Hub registry: ${registry}` };
+    // ghcr.io supports an anonymous/token HEAD-manifest check (#199): a typo'd
+    // ghcr image should fail here, not after the (billed) instance is created.
+    const ghcrToken = process.env.GHCR_TOKEN || process.env.GITHUB_TOKEN;
+    const verdict = registryVerifiable(registry, { ghcrToken });
+    if (isGhcrRegistry(registry) && verdict.verifiable) {
+      // GHCR accepts a base64(token) bearer for the pull scope.
+      const bearer = Buffer.from(ghcrToken!).toString('base64');
+      const manifestUrl = `https://ghcr.io/v2/${repo}/manifests/${tag}`;
+      const manifestRes = await fetch(manifestUrl, {
+        method: 'HEAD',
+        headers: {
+          'Authorization': `Bearer ${bearer}`,
+          'Accept': 'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json',
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (manifestRes.status === 404) {
+        return { passed: false, error: `Image not found in GHCR: ${imageName}` };
+      }
+      if (manifestRes.status === 401 || manifestRes.status === 403) {
+        return { passed: true, warning: `GHCR auth rejected for ${imageName} — set GHCR_TOKEN/GITHUB_TOKEN with read:packages. Skipping verification.` };
+      }
+      return { passed: true };
+    }
+
+    // For other registries (or ghcr without a token), warn — can't verify without creds.
+    return { passed: true, warning: `Skipping image check for ${registry} (${verdict.reason}). Provide credentials to enable pre-deploy verification.` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('ENOTFOUND') || msg.includes('EAI_AGAIN')) {
@@ -376,22 +466,64 @@ async function checkDnsResolution(config: PreFlightConfig): Promise<{ passed: bo
  *
  * Fixes #13: Detects price changes mid-deploy.
  */
-async function checkCostValidation(config: PreFlightConfig): Promise<{ passed: boolean; error?: string; warning?: string }> {
-  if (!config.quotedPricePerHr || config.quotedPricePerHr <= 0) {
+/** $5/hr is very expensive for a single GPU — absolute reasonableness cap. */
+export const MAX_REASONABLE_PRICE_PER_HR = 5.0;
+
+/** Fractional price increase (current vs quoted) above which we flag a spike. */
+export const COST_SPIKE_THRESHOLD = 0.20; // 20%
+
+/**
+ * Decide the cost-validation verdict (#197).
+ *
+ * The check previously only warned above a hardcoded $5/hr and never actually
+ * compared against a re-queried current price. This pure helper folds in both
+ * signals: an absolute reasonableness cap AND, when a live `currentPricePerHr`
+ * is supplied, a relative-spike check so a mid-deploy price jump is caught.
+ * Pure so the live fetch can stay thin and the policy is unit-tested.
+ */
+export function evaluateCostValidation(
+  quotedPricePerHr: number | undefined,
+  currentPricePerHr?: number,
+  opts: { maxPerHr?: number; spikeThreshold?: number } = {},
+): { passed: boolean; error?: string; warning?: string } {
+  if (!quotedPricePerHr || quotedPricePerHr <= 0) {
     return { passed: true, warning: 'No quoted price provided — skipping cost validation.' };
   }
+  const maxPerHr = opts.maxPerHr ?? MAX_REASONABLE_PRICE_PER_HR;
+  const spikeThreshold = opts.spikeThreshold ?? COST_SPIKE_THRESHOLD;
 
-  // For now, just warn if price seems unreasonable
-  // In production, this would re-query the provider's current offers
-  const MAX_REASONABLE_PRICE = 5.0; // $5/hr is very expensive for a single GPU
-  if (config.quotedPricePerHr > MAX_REASONABLE_PRICE) {
+  if (quotedPricePerHr > maxPerHr) {
     return {
       passed: false,
-      error: `Quoted price $${config.quotedPricePerHr}/hr exceeds maximum reasonable price of $${MAX_REASONABLE_PRICE}/hr. Verify this is correct.`,
+      error: `Quoted price $${quotedPricePerHr}/hr exceeds maximum reasonable price of $${maxPerHr}/hr. Verify this is correct.`,
     };
   }
 
+  if (typeof currentPricePerHr === 'number' && currentPricePerHr > 0) {
+    if (currentPricePerHr > maxPerHr) {
+      return {
+        passed: false,
+        error: `Current price $${currentPricePerHr.toFixed(2)}/hr exceeds maximum reasonable price of $${maxPerHr}/hr.`,
+      };
+    }
+    const increase = (currentPricePerHr - quotedPricePerHr) / quotedPricePerHr;
+    if (increase > spikeThreshold) {
+      return {
+        passed: true,
+        warning: `Current price $${currentPricePerHr.toFixed(2)}/hr is ${Math.round(increase * 100)}% above the quote $${quotedPricePerHr.toFixed(2)}/hr — possible price spike.`,
+      };
+    }
+  }
+
   return { passed: true };
+}
+
+async function checkCostValidation(config: PreFlightConfig): Promise<{ passed: boolean; error?: string; warning?: string }> {
+  // Policy lives in the pure `evaluateCostValidation` helper (#197). A live
+  // current-price re-query is not wired here (needs provider-offer access this
+  // module intentionally lacks); when a caller supplies one in future, pass it
+  // as the second arg and the spike check activates automatically.
+  return evaluateCostValidation(config.quotedPricePerHr);
 }
 
 // ── Check: Vast.ai Template Validity ─────────────────────────────────────────
@@ -401,6 +533,30 @@ async function checkCostValidation(config: PreFlightConfig): Promise<{ passed: b
  *
  * Fixes #16: Prevents deploy with invalid template that would cause silent failures.
  */
+/**
+ * Classify the outcome of a Vast template lookup (#198).
+ *
+ * `reachable=false` (network/API error) → warning (we can't confirm anything).
+ * `reachable=true && found=false` → hard error: the template is CONFIRMED
+ * missing, so proceeding would cause a silent boot failure. `found=true` passes.
+ * Pure decision helper — separates "couldn't check" from "confirmed missing".
+ */
+export function classifyTemplateCheck(
+  templateId: string,
+  state: { reachable: boolean; found?: boolean },
+): { passed: boolean; error?: string; warning?: string } {
+  if (!state.reachable) {
+    return { passed: true, warning: `Could not reach Vast.ai API to validate template ${templateId} — proceeding.` };
+  }
+  if (state.found === false) {
+    return {
+      passed: false,
+      error: `Template ID ${templateId} not found in your Vast.ai account — fix the templateHashId or remove it.`,
+    };
+  }
+  return { passed: true };
+}
+
 async function checkTemplateValidity(config: PreFlightConfig): Promise<{ passed: boolean; error?: string; warning?: string }> {
   if (!config.templateId) {
     return { passed: true, warning: 'No template ID specified — deploy will use default settings.' };
@@ -421,25 +577,19 @@ async function checkTemplateValidity(config: PreFlightConfig): Promise<{ passed:
       signal: AbortSignal.timeout(10_000),
     }).catch(() => null);
 
-    if (!res) {
-      return { passed: true, warning: 'Could not reach Vast.ai API to validate template.' };
-    }
-
-    if (!res.ok) {
-      return { passed: true, warning: `Vast.ai API returned ${res.status} — template validation skipped.` };
+    if (!res || !res.ok) {
+      // Couldn't confirm — warning, not a hard error.
+      return classifyTemplateCheck(config.templateId, { reachable: false });
     }
 
     const data = await res.json() as { templates?: Record<string, unknown> };
     const templates = data.templates || {};
-
-    if (!templates[config.templateId]) {
-      return {
-        passed: false,
-        error: `Template ID ${config.templateId} not found in your Vast.ai account. Deploy will proceed without template.`,
-      };
-    }
-
-    return { passed: true };
+    // Confirmed-missing → hard error (#198); previously this only warned and the
+    // invalid template proceeded to a silent boot failure.
+    return classifyTemplateCheck(config.templateId, {
+      reachable: true,
+      found: !!templates[config.templateId],
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { passed: true, warning: `Template validation failed: ${msg}. Deploy will proceed without template check.` };

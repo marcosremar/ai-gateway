@@ -25,6 +25,7 @@ import { broadcastWs } from './ws-state';
 import { emitGatewayEvent } from './event-bus';
 import { cooldownTracker, categorizeDeployFailure } from './gpu-deploy-tiers';
 import { startDeployLoop, type DeployExtra } from './gpu-deploy-loop';
+import { pickCheapestTierName } from './tier-ranking';
 
 const log = createLogger('gpu-deploy');
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
@@ -221,8 +222,12 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
 
   if (availableTiers.length === 0 && tiers.length > 0) {
     const earliestName = cooldownTracker.pickEarliestExpiry(tiers.map(t => t.name));
-    const earliest = tiers.find(t => t.name === earliestName) ?? tiers[0];
-    log.log(`[gpu] All providers in cooldown, trying ${earliest.label} anyway (forced=${tiers.length === 1}, tiers=${tiers.map(t => t.name).join(',')})`);
+    // If no tier has a CooldownEntry (pickEarliestExpiry → null), fall back to
+    // the CHEAPEST tier rather than the first configured one (#141) — forcing
+    // an expensive tier (e.g. Modal) just because it's first wastes spend.
+    const fallbackName = earliestName ?? pickCheapestTierName(tiers.map(t => t.name));
+    const earliest = tiers.find(t => t.name === fallbackName) ?? tiers[0];
+    log.log(`[gpu] All providers in cooldown, trying ${earliest.label} anyway (forced=${tiers.length === 1}, picked=${earliestName ? 'earliest-expiry' : 'cheapest'}, tiers=${tiers.map(t => t.name).join(',')})`);
     availableTiers = [earliest];
   }
 

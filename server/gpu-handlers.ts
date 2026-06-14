@@ -1045,6 +1045,13 @@ async function _selectDeploymentTier(
     }
   } catch { /* cost estimate is best-effort */ }
 
+  // Fail fast if every provider got filtered out (balance + modal-drop) so we
+  // don't kick off a deploy against an empty tier list (#139).
+  const emptyTiersError = resolvedTiersError(tiers.length, balanceExcluded);
+  if (emptyTiersError) {
+    throw { status: balanceExcluded.length > 0 ? 402 : 400, message: emptyTiersError };
+  }
+
   return {
     tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider,
     balanceWarnings: balanceExcluded,
@@ -1100,11 +1107,45 @@ export function buildDeployIdempotencyHash(body: Record<string, unknown>): strin
 }
 
 /**
+ * Status to echo for an idempotent-hit deploy response (#123/#131).
+ *
+ * The 200 idempotent response previously hardcoded `'creating'` even when the
+ * deploy had already advanced to `booting`/`ready` or, worse, already `error`
+ * within the 5s window — masquerading a dead deploy as in-progress. Echo the
+ * real current status; only map the resting `idle` state back to `creating`
+ * (the client asked to deploy, so "creating" is the honest in-flight label).
+ * Pure so it can be unit-tested without global state.
+ */
+export function idempotentResponseStatus(currentStatus: string): string {
+  return currentStatus === 'idle' ? 'creating' : currentStatus;
+}
+
+/**
  * Start the async deploy, set up the deploy promise, and write the 202 response.
  */
 /** Generate a unique deploy ID: deploy-{base36-timestamp}-{random-4-chars} */
 function generateDeployId(): string {
   return `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/**
+ * Validate that tier selection produced at least one usable tier (#139).
+ *
+ * Balance exclusions + the modal-drop (when the image isn't a `.py` script) can
+ * collapse the cascade to an empty list while Modal isn't usable — the deploy
+ * then proceeds to an empty tier list and fails late with a confusing message.
+ * Returns a descriptive error string to reject early, or null when at least one
+ * tier remains. Pure so it can be unit-tested.
+ */
+export function resolvedTiersError(
+  tierCount: number,
+  excludedProviders: readonly string[],
+): string | null {
+  if (tierCount > 0) return null;
+  const hint = excludedProviders.length > 0
+    ? ` (excluded: ${excludedProviders.join(', ')})`
+    : '';
+  return `No deployable GPU provider remains after balance and image-compatibility filtering${hint}. Add funds, configure another provider, or pass --provider.`;
 }
 
 /**
@@ -1301,7 +1342,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   if (lastDeployRequest && lastDeployRequest.hash === requestHash && Date.now() - lastDeployRequest.ts < 5000) {
     // Echo the real current status instead of a hardcoded 'creating' (#123/#131):
     // a deploy that already failed within the window shouldn't masquerade as in-progress.
-    const liveStatus = deployState.status === 'idle' ? 'creating' : deployState.status;
+    const liveStatus = idempotentResponseStatus(deployState.status);
     log.log(`[req=${requestId}] Idempotent deploy — returning existing deployId=${lastDeployRequest.deployId} (status=${liveStatus})`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ deployId: lastDeployRequest.deployId, status: liveStatus, message: 'Deploy already in progress (idempotent)', idempotent: true }));

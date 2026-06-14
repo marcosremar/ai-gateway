@@ -78,6 +78,39 @@ export function deployTimeoutMsForProvider(provider: string, globalDefaultMin: n
   return deployTimeoutMinForProvider(provider, globalDefaultMin) * 60_000;
 }
 
+/**
+ * Whether the actually-selected host's hourly cost breaches the per-deploy cap
+ * (#107).
+ *
+ * The handler only compares `maxCostUsd` to the *cheapest matching offer* before
+ * deploy, but the deploy can land on a pricier host; this re-checks the real
+ * `instance.costPerHr` after `createInstance`. Returns false when no cap is set
+ * or the real cost is unknown (0) so we never abort on missing data. Pure.
+ */
+export function actualCostExceedsCap(
+  actualCostPerHr: number | undefined | null,
+  maxCostUsd: number | undefined | null,
+): boolean {
+  if (typeof maxCostUsd !== 'number' || !(maxCostUsd > 0)) return false;
+  if (typeof actualCostPerHr !== 'number' || !(actualCostPerHr > 0)) return false;
+  return actualCostPerHr > maxCostUsd;
+}
+
+/**
+ * Whether attaching a network volume to a pre-baked image is wasted spend (#179).
+ *
+ * Per CLAUDE.md, network volumes only help when the image lazy-downloads models
+ * to `/workspace`; a pre-baked image gets zero benefit but still pays the volume
+ * cost (~$0.10/GB/mo). This predicate lets the loop warn at attach time. Pure —
+ * "pre-baked" is inferred from the explicit flag (callers know their images).
+ */
+export function networkVolumeIsWasted(
+  volumeId: string | undefined | null,
+  imageIsPreBaked: boolean | undefined,
+): boolean {
+  return !!volumeId && imageIsPreBaked === true;
+}
+
 export interface DeployExtra {
   region?: string;
   storageGb?: number;
@@ -316,6 +349,21 @@ export async function startDeployLoop(
         || (instance.providerMeta?.costPerHr as number)
         || (instance.providerMeta?.pricePerHr as number)
         || 0;
+      // Re-check the real selected-host price against the per-deploy cap (#107).
+      // The handler only gated on the cheapest matching offer; the deploy may
+      // have landed on a pricier host. Tear it down immediately so a forgotten
+      // over-cap loser doesn't bill during boot.
+      if (actualCostExceedsCap(instanceCostPerHr, extra.maxCostUsd)) {
+        const msg = `Selected ${label} host costs $${instanceCostPerHr.toFixed(2)}/hr, exceeding maxCostUsd ($${extra.maxCostUsd!.toFixed(2)}) — terminating`;
+        log.warn(`[gpu] ${msg}`);
+        try { await providerClient.deleteInstance(instance.instanceId, credentials); }
+        catch (err) { log.warn(`[gpu] Failed to clean up over-cap instance ${instance.instanceId}: ${err}`); }
+        logGpuEvent('deploy_rejected', providerName, false, {
+          metadata: { reason: 'cost_cap_exceeded', costPerHr: instanceCostPerHr, maxCostUsd: extra.maxCostUsd },
+        });
+        setDeployState({ status: 'error', message: msg });
+        return;
+      }
       setDeployState({
         status: 'booting',
         podId: instance.instanceId,

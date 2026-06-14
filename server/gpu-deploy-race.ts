@@ -160,6 +160,38 @@ export function tiersForRace(tiers: GpuTier[], noTierCascade?: boolean): GpuTier
 }
 
 /**
+ * Default `interruptible`/spot for cost-sensitive race deploys (#113).
+ *
+ * A multi-slot race bills `raceN-1` losers for their boot time before discarding
+ * them — exactly the throwaway workload that should run on cheap spot instances.
+ * When the caller didn't set `interruptible` explicitly, default it to true for
+ * a real race (raceN > 1); single-instance deploys keep the on-demand default
+ * (the winner is the production pod). An explicit value always wins. Pure.
+ */
+export function defaultRaceInterruptible(
+  explicit: boolean | undefined,
+  raceN: number,
+): boolean {
+  if (typeof explicit === 'boolean') return explicit;
+  return raceN > 1;
+}
+
+/**
+ * Normalize a provider's `resolveInstanceEndpoint` result to a string|null (#168).
+ *
+ * Providers inconsistently return either a bare URL string or `{ endpoint }`;
+ * the race/resume loops papered over this with `as any`. This pure helper
+ * accepts both shapes (and null/undefined) and yields a clean `string | null`.
+ */
+export function normalizeResolvedEndpoint(
+  resolved: string | { endpoint?: string | null } | null | undefined,
+): string | null {
+  if (!resolved) return null;
+  if (typeof resolved === 'string') return resolved || null;
+  return resolved.endpoint || null;
+}
+
+/**
  * Estimate the per-instance hourly race cost from real offer prices instead of
  * the flat $2 prior (#151).
  *
@@ -429,7 +461,7 @@ export async function startDeployRace(
         {
           gpuTypes: slot.gpuTypes, dockerImage: slot.tierDockerImage, storageGb,
           region: extra.region, hfToken: extra.hfToken, env: extra.env,
-          bareMetal: slot.tier.name === 'tensordock', interruptible: extra.interruptible,
+          bareMetal: slot.tier.name === 'tensordock', interruptible: defaultRaceInterruptible(extra.interruptible, raceN),
           ...(slot.tier.name === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
           // Vast-only flags that opt the offer search out of the verified-host
           // filter / the strict-fast-boot reliability tier. The handler already
@@ -522,6 +554,10 @@ export async function startDeployRace(
     const credentials = { apiKey: c.tier.apiKey, authId: c.tier.authId };
     let localEndpoint = c.endpoint;
     const timeoutMs = getDeployTimeoutMinForProvider(c.tier.name) * 60_000;
+    // Cumulative endpoint-resolution budget for this slot (#149). Vast re-resolves
+    // every 5s for the whole window; if the resolver hangs, bound total resolution
+    // time to the slot deadline so one stuck slot can't overrun the race.
+    const resolutionStartedAt = Date.now();
 
     while (!raceDone && !deployCancelled) {
       if (Date.now() - deployStartedAt > timeoutMs) {
@@ -530,12 +566,15 @@ export async function startDeployRace(
       }
 
       // Re-resolve endpoint (needed for Vast.ai and others that assign ports mid-boot)
-      if (!localEndpoint || c.tier.name === 'vast') {
+      if ((!localEndpoint || c.tier.name === 'vast')
+        && !resolutionDeadlineExceeded(resolutionStartedAt, Date.now(), timeoutMs)) {
         try {
-          const resolved = await Promise.race([
+          const rawResolved = await Promise.race([
             c.tier.client.resolveInstanceEndpoint(c.instanceId, credentials),
             new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${c.tier.name} resolveInstanceEndpoint timed out`)), 30_000)),
           ]);
+          // Providers return string | { endpoint } inconsistently (#168).
+          const resolved = normalizeResolvedEndpoint(rawResolved as string | { endpoint?: string | null } | null);
           if (resolved && resolved !== localEndpoint) {
             localEndpoint = resolved;
             if (idx === 0) setDeployState({ endpoint: localEndpoint });
@@ -547,13 +586,10 @@ export async function startDeployRace(
       if (localEndpoint && !raceDone) {
         try {
           // Wire raceAbort.signal so winner-decided losers cancel in-flight
-          // /health fetches immediately. Previous code used only a per-fetch
-          // 8s timeout — losers wasted up to 8s+contract-validation per slot
-          // after the winner was already chosen. AbortSignal.any combines the
-          // two signals in Node 20.3+ / Bun.
-          const healthSignal = (typeof (AbortSignal as { any?: Function }).any === 'function')
-            ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([raceAbort.signal, AbortSignal.timeout(8000)])
-            : raceAbort.signal;
+          // /health fetches immediately, AND always pair it with a per-fetch 8s
+          // timeout so a hung /health on a loser never blocks until the whole
+          // race times out — even on runtimes lacking AbortSignal.any (#155).
+          const healthSignal = combineHealthSignal(raceAbort.signal, 8000);
           const res = await fetch(`${localEndpoint}/health`, { signal: healthSignal });
           if (res.ok) {
             const data = await res.json() as { status?: string };

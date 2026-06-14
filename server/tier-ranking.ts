@@ -169,6 +169,31 @@ export function modalIsCostDeprioritized(
 }
 
 /**
+ * Pick the cheapest provider name from a candidate list by cost prior (#141).
+ *
+ * When every tier is cooling down, the cascade forces one anyway; it previously
+ * fell back to `tiers[0]` (configured order) which can be the most expensive
+ * (e.g. Modal). Choosing the lowest cost prior keeps the forced attempt cheap.
+ * Returns null for an empty list. Pure — priors are injectable for tests.
+ */
+export function pickCheapestTierName(
+  names: readonly string[],
+  priors: Record<string, number> = PROVIDER_COST_PRIOR,
+): string | null {
+  if (names.length === 0) return null;
+  let best = names[0];
+  let bestCost = priors[best] ?? Number.POSITIVE_INFINITY;
+  for (const name of names.slice(1)) {
+    const cost = priors[name] ?? Number.POSITIVE_INFINITY;
+    if (cost < bestCost) {
+      best = name;
+      bestCost = cost;
+    }
+  }
+  return best;
+}
+
+/**
  * Reorder a tier list by observed P50 cold-start latency (ascending).
  *
  * Rules:

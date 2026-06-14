@@ -10,20 +10,60 @@ const log = createLogger('gpu-deploy');
 export const GPU_TYPE_CACHE_TTL_MS = 30 * 60_000; // refresh GPU type cache every 30 min
 export let gpuTypeCacheRefreshTimer: Timer | null = null;
 
+export interface CacheProviderQuery {
+  name: string;
+  client: GpuProviderClient;
+  credentials: ProviderCredentials;
+}
+
+/** Minimal env shape consumed by `buildGpuCacheProviderQueries` (for tests). */
+export type GpuCacheEnv = Record<string, string | undefined>;
+
+/**
+ * Decide which providers to query for the GPU-type cache from available
+ * credentials (#188).
+ *
+ * The refresh previously only queried runpod/vast/tensordock/modal, so
+ * Hyperstack and Vast-VM GPU names could never be validated and silently passed.
+ * This pure helper adds them (Vast-VM shares the Vast key; Hyperstack uses its
+ * own key) so `validateGpuTypesFromCache` covers every configured provider.
+ * Pure: env + clients are injected so it can be unit-tested without network.
+ */
+export function buildGpuCacheProviderQueries(
+  env: GpuCacheEnv,
+  clients: Partial<Record<string, GpuProviderClient>>,
+): CacheProviderQuery[] {
+  const queries: CacheProviderQuery[] = [];
+  const rpKey = env.RUNPOD_API_KEY || '';
+  const vastKey = env.VAST_API_KEY || '';
+  const tdKey = env.TENSORDOCK_API_KEY || '';
+  const tdAuth = env.TENSORDOCK_AUTH_ID || '';
+  const modalId = env.MODAL_TOKEN_ID || '';
+  const modalSecret = env.MODAL_TOKEN_SECRET || '';
+  const hsKey = env.HYPERSTACK_API_KEY || '';
+
+  const push = (name: string, credentials: ProviderCredentials) => {
+    const client = clients[name];
+    if (client) queries.push({ name, client, credentials });
+  };
+
+  if (rpKey) push('runpod', { apiKey: rpKey });
+  if (vastKey) push('vast', { apiKey: vastKey });
+  // Vast-VM mode reuses the Vast key but reports VM-mode GPU names separately.
+  if (vastKey) push('vast-vm', { apiKey: vastKey });
+  if (tdKey && tdAuth) push('tensordock', { apiKey: tdKey, authId: tdAuth });
+  if (modalId && modalSecret) push('modal', { apiKey: `${modalId}:${modalSecret}` });
+  if (hsKey) push('hyperstack', { apiKey: hsKey });
+
+  return queries;
+}
+
 /** Refresh GPU type cache from all providers and save to DB. */
 export async function refreshGpuTypeCache(): Promise<void> {
-  const providerQueries: Array<{ name: string; client: GpuProviderClient; credentials: ProviderCredentials }> = [];
-  const rpKey = process.env.RUNPOD_API_KEY || '';
-  const vastKey = process.env.VAST_API_KEY || '';
-  const tdKey = process.env.TENSORDOCK_API_KEY || '';
-  const tdAuth = process.env.TENSORDOCK_AUTH_ID || '';
-  const modalId = process.env.MODAL_TOKEN_ID || '';
-  const modalSecret = process.env.MODAL_TOKEN_SECRET || '';
-
-  if (rpKey) providerQueries.push({ name: 'runpod', client: runpod, credentials: { apiKey: rpKey } });
-  if (vastKey) providerQueries.push({ name: 'vast', client: vast, credentials: { apiKey: vastKey } });
-  if (tdKey && tdAuth) providerQueries.push({ name: 'tensordock', client: tensordock, credentials: { apiKey: tdKey, authId: tdAuth } });
-  if (modalId && modalSecret) providerQueries.push({ name: 'modal', client: modal, credentials: { apiKey: `${modalId}:${modalSecret}` } });
+  const { vastVm, hyperstack } = await import('./providers');
+  const providerQueries = buildGpuCacheProviderQueries(process.env, {
+    runpod, vast, 'vast-vm': vastVm, tensordock, modal, hyperstack,
+  });
 
   if (providerQueries.length === 0) {
     log.log('[gpu-cache] No provider API keys configured — skipping GPU type cache refresh');
