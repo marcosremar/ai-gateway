@@ -111,6 +111,24 @@ export function networkVolumeIsWasted(
   return !!volumeId && imageIsPreBaked === true;
 }
 
+/**
+ * Build the credentials object for a cleanup `deleteInstance` call, preserving
+ * the TensorDock `authId` (#148).
+ *
+ * Several in-loop cleanup deletes (cancelled-resume, unhealthy-resume,
+ * cancelled-create) were passing `{ apiKey }` only, dropping `authId`. A
+ * TensorDock `deleteInstance` without `authId` fails, leaving the just-created
+ * (or just-resumed) instance running and billing until the orphan sweep. This
+ * helper returns the full credentials so every cleanup path carries `authId`
+ * when one is present. Pure — never mutates its input; omits an absent `authId`
+ * so non-TensorDock providers get an unchanged `{ apiKey }` shape.
+ */
+export function cleanupCredentials(
+  creds: ProviderCredentials,
+): ProviderCredentials {
+  return creds.authId ? { apiKey: creds.apiKey, authId: creds.authId } : { apiKey: creds.apiKey };
+}
+
 /** Default attempts for the post-restore health probe (#171). */
 export const RESTORE_PROBE_ATTEMPTS = 3;
 /** Delay (ms) between post-restore health probes (#171). */
@@ -179,6 +197,10 @@ export interface DeployExtra {
   /** Maximum total cost (USD) for this deploy. Threaded so race/monitor cost
    *  accounting can trim slots or auto-stop when cumulative cost would exceed it. */
   maxCostUsd?: number;
+  /** Cheapest matching offer price ($/hr) the handler resolved from live offers.
+   *  Threaded so the race budget gate can size loser cost from the real price
+   *  instead of the flat $2/instance prior (#151). */
+  estimatedCostPerHr?: number;
   /** Vast.ai offer search mode: 'full' widens the host pool (skips the strict
    *  fast-boot reliability tier). Forwarded to the provider client's offer search. */
   searchMode?: 'full' | 'fast';
@@ -261,14 +283,16 @@ export async function startDeployLoop(
             // Don't leave the just-resumed instance billing — terminate before
             // returning. Without this, cancel mid-poll-health left the
             // resumed pod running until orphan sweep.
-            try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
+            // Carry authId so the TensorDock delete actually succeeds (#148).
+            try { await providerClient.deleteInstance(existing.instanceId, cleanupCredentials(credentials)); }
             catch (e) { log.warn(`[gpu] Cleanup of cancelled-resume failed: ${e instanceof Error ? e.message : e}`); }
             setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
           }
           log.log(`[gpu] Resumed TensorDock instance failed health check — terminating before creating new`);
           // Health-fail path also leaked the resumed instance — kill it now,
           // otherwise we end up with TWO billable pods (resumed + new).
-          try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
+          // Carry authId so the TensorDock delete actually succeeds (#148).
+          try { await providerClient.deleteInstance(existing.instanceId, cleanupCredentials(credentials)); }
           catch (e) { log.warn(`[gpu] Cleanup of unhealthy-resume failed: ${e instanceof Error ? e.message : e}`); }
         } else if (isRunning && existing.endpoint) {
           log.log(`[gpu] TensorDock: found running instance ${existing.instanceId} at ${existing.endpoint}`);
@@ -299,12 +323,14 @@ export async function startDeployLoop(
             return;
           }
           if (res2 === 'cancelled') {
-            try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
+            // Carry authId so the TensorDock delete actually succeeds (#148).
+            try { await providerClient.deleteInstance(existing.instanceId, cleanupCredentials(credentials)); }
             catch (e) { log.warn(`[gpu] Cleanup of cancelled-running failed: ${e instanceof Error ? e.message : e}`); }
             setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
           }
           log.log(`[gpu] Running TensorDock instance not healthy — terminating before creating new`);
-          try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
+          // Carry authId so the TensorDock delete actually succeeds (#148).
+          try { await providerClient.deleteInstance(existing.instanceId, cleanupCredentials(credentials)); }
           catch (e) { log.warn(`[gpu] Cleanup of unhealthy-running failed: ${e instanceof Error ? e.message : e}`); }
         }
       }
@@ -509,7 +535,8 @@ export async function startDeployLoop(
         // deploys leaked instances that orphan-sweep might skip because
         // status flipped to 'error' immediately.
         try {
-          await providerClient.deleteInstance(instance.instanceId, { apiKey });
+          // Carry authId so the TensorDock delete actually succeeds (#148).
+          await providerClient.deleteInstance(instance.instanceId, cleanupCredentials(credentials));
           log.log(`[gpu] Cancelled deploy: terminated ${instance.instanceId}`);
         } catch (e) {
           log.warn(`[gpu] Failed to terminate cancelled instance ${instance.instanceId}: ${e instanceof Error ? e.message : e}`);

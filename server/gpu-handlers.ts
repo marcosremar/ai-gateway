@@ -26,7 +26,7 @@ import {
   startGpuMonitoring, stopGpuMonitoring, startDeployWithTiers, startDeployRace, buildGpuTiers, cooldownTracker,
   cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps, cleanupHyperstackInstances,
   autoSelectCheapestGpu, getVerifiedGpuTypes, validateGpuTypesFromCache,
-  IDLE_TIMEOUT_MS, clearAutoDestroyTimer, resumeOrDeploy,
+  IDLE_TIMEOUT_MS, clearAutoDestroyTimer, resumeOrDeploy, stopCanary,
 } from './gpu-deploy';
 import { logGpuEvent, updateDeploySession, upsertHostReputation } from './metrics';
 import {
@@ -60,6 +60,24 @@ import { errorSummary } from '../src/error-summary';
  */
 export function isBalanceTooLow(balance: number, threshold: number): boolean {
   return balance < threshold;
+}
+
+/**
+ * Atomically acquire the global deploy lock (#130).
+ *
+ * The deploy/resume/terminate/stop handlers all hand-rolled the same
+ * check-then-set: `if (deployLock) { reject } setDeployLock(true)`. That pair is
+ * only atomic because JS is single-threaded and there is no `await` between the
+ * two lines — an invariant easily broken by a future edit that inserts an
+ * `await` in the gap. Encapsulating it here means the check and the set can
+ * never be separated by an async boundary. Returns true if the lock was newly
+ * acquired (caller now owns it and must release), false if it was already held
+ * (caller must reject without releasing). No `await` inside — keep it that way.
+ */
+export function tryAcquireDeployLock(): boolean {
+  if (deployLock) return false;
+  setDeployLock(true);
+  return true;
 }
 
 /** Max total keepalive-extended session length (#167). A misbehaving client can
@@ -1240,6 +1258,9 @@ function _startDeployAndRespond(
     // Per-deploy cost cap — threaded so race-loser accounting and the monitor
     // can trim slots / auto-stop when cumulative cost would exceed it (#101/#104).
     ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
+    // Cheapest live-offer price so the race budget gate sizes loser cost from
+    // the real price instead of the flat $2/instance prior (#151).
+    ...(tierResult.estimatedCostPerHr ? { estimatedCostPerHr: tierResult.estimatedCostPerHr } : {}),
   };
 
   const deployFn = raceCount > 1
@@ -1401,16 +1422,15 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     setDeployLock(false);
   }
 
-  // SAFETY: check-then-set is atomic here because JS is single-threaded and there
-  // is no `await` between the check and the set. No other code can interleave.
-  // Do NOT insert any async operation between these two lines.
-  if (deployLock) {
+  // SAFETY: the check-then-set is atomic inside tryAcquireDeployLock (#130) —
+  // no `await` separates the check from the set, so a concurrent redeploy can't
+  // interleave.
+  if (!tryAcquireDeployLock()) {
     log.log(`[req=${requestId}] GPU deploy rejected: lock held`);
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
     return;
   }
-  setDeployLock(true);
 
   // Once _startDeployAndRespond is called, it takes ownership of the lock
   // (released in the deploy promise's .finally()). Track this so we only
@@ -1516,7 +1536,7 @@ export async function autoBootFromProfile(): Promise<void> {
     log.log('[gpu] autoBootFromProfile: deploy already in progress, skipping');
     return;
   }
-  if (deployLock) {
+  if (!tryAcquireDeployLock()) {
     log.log('[gpu] autoBootFromProfile: deploy lock held, skipping');
     return;
   }
@@ -1525,7 +1545,6 @@ export async function autoBootFromProfile(): Promise<void> {
   log.log(`[gpu] Auto-booting GPU for app: ${activeApp.name} (${gd.dockerImage})`);
   const requestId = 'startup:autoboot';
 
-  setDeployLock(true);
   let lockTransferred = false;
   try {
     const body: Record<string, unknown> = {
@@ -1627,13 +1646,12 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   setRequestIdHeader(res, requestId);
   log.log(`GPU terminate requested`);
 
-  // Acquire lock to prevent concurrent lifecycle operations
-  if (deployLock) {
+  // Acquire lock to prevent concurrent lifecycle operations (#130).
+  if (!tryAcquireDeployLock()) {
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
     return;
   }
-  setDeployLock(true);
 
   let body: Record<string, unknown>;
   try { body = await readJsonBody(req); }
@@ -1809,6 +1827,9 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
 
   try {
     stopGpuMonitoring();
+    // Stop the canary eval interval too — otherwise a 60s promote/rollback timer
+    // keeps firing against the now-dead endpoint (#160).
+    stopCanary();
     resetDeployState(); // sets deployCancelled=true, stops the deploy loop
     deploymentSM.reset();
     updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuTerminate');
@@ -2006,6 +2027,9 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
     const allowHibernate = body.hibernate === true;
     const pausedMode = await pauseInstanceForIdle(provider, podId, credentials, client, { allowHibernate });
     stopGpuMonitoring();
+    // Stop the canary eval interval too — a paused pod has no endpoint to
+    // promote/rollback against, so the 60s timer would just churn (#160).
+    stopCanary();
     updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuStop');
     // Transition to 'stopped' — preserves pod info for fast resume
     const gpuType = deployState.gpuType;
@@ -2064,12 +2088,12 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   setRequestIdHeader(res, requestId);
   log.log(`[req=${requestId}] GPU resume requested`);
 
-  if (deployLock) {
+  // Acquire lock to prevent concurrent lifecycle operations (#130).
+  if (!tryAcquireDeployLock()) {
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
     return;
   }
-  setDeployLock(true);
 
   let body: Record<string, unknown> = {};
   try { body = await readJsonBody(req); }

@@ -22,6 +22,7 @@ import { emitGatewayEvent } from './event-bus';
 import { logGpuEvent, upsertHostReputation } from './metrics';
 import { getDeployTimeoutMinForProvider } from '../src/gpu-providers/deploy-settings';
 import { activeRaceInstanceIds } from './gpu-orphan-cleanup';
+import { validateDockerImageReference } from '../src/preflight-checks';
 import type { DeployExtra } from './gpu-deploy';
 
 const log = createLogger('gpu-deploy');
@@ -248,6 +249,29 @@ export function estimateRaceCostPerInstance(
 }
 
 /**
+ * Fail-fast pre-flight for a race deploy: validate the image reference *once*
+ * before spawning N slots (#154).
+ *
+ * Unlike the cascade (`startDeployWithTiers`), the race path ran zero
+ * pre-flight, so a malformed/typo'd image failed all N slots simultaneously
+ * (and billed each until its createInstance rejected) instead of failing fast
+ * once. This pure helper returns an error string when the image is invalid, or
+ * `null` when it's acceptable. A Modal deploy-script reference (`*.py`) is only
+ * permitted when `modal` is one of the participating tiers.
+ *
+ * @param dockerImage   The deploy image (or Modal deploy-script path).
+ * @param tierNames     Participating provider names (post credential filter).
+ */
+export function racePreflightImageError(
+  dockerImage: string,
+  tierNames: ReadonlyArray<string>,
+): string | null {
+  const allowModalDeployScript = tierNames.includes('modal');
+  const v = validateDockerImageReference(dockerImage, { allowModalDeployScript });
+  return v.ok ? null : v.error;
+}
+
+/**
  * Whether the total elapsed resolution time has exceeded its hard deadline
  * (#149).
  *
@@ -357,25 +381,45 @@ export async function startDeployRace(
     }
   }
 
+  // ── Fail-fast image pre-flight (#154) ───────────────────────────────────
+  // The race path otherwise runs no pre-flight, so a malformed image would fail
+  // (and bill) all N slots at once. Validate the image reference once up front.
+  {
+    const imgError = racePreflightImageError(dockerImage, tiers.map(t => t.name));
+    if (imgError) {
+      const msg = `[race] Pre-flight failed: ${imgError}`;
+      log.error(msg);
+      logGpuEvent('preflight_failed', tiers[0]?.name ?? 'unknown', false, { metadata: { reason: 'invalid_image', dockerImage } });
+      setDeployState({ status: 'error', message: msg });
+      deploymentSM.markError(msg);
+      return;
+    }
+  }
+
+  // Size the per-instance hourly cost from the cheapest live offer the handler
+  // resolved, falling back to the flat $2/instance prior when no price is known
+  // (#151). Used for both the cost-cap trim and the budget gate below so a cheap
+  // 4090 isn't over-rejected and an expensive A100 isn't under-protected.
+  const perInstanceHr = estimateRaceCostPerInstance(extra.estimatedCostPerHr);
+
   // ── Per-deploy cost cap on race losers (#105) ───────────────────────────
   // Race fires N instances that all bill during boot. When the caller set a
   // maxCostUsd, trim raceN so the simultaneous hourly burn stays under the cap
-  // (or reject if even a single instance exceeds it). Uses the same flat
-  // $2/instance/hr prior as the budget gate below.
+  // (or reject if even a single instance exceeds it).
   {
     const cap = extra.maxCostUsd;
     if (cap !== undefined) {
-      const plan = computeRaceBudget(raceN, RACE_EST_PER_INSTANCE_HR, cap);
+      const plan = computeRaceBudget(raceN, perInstanceHr, cap);
       if (plan.rejected) {
-        const msg = `[budget] Race deploy refused: estimated per-instance cost ($${RACE_EST_PER_INSTANCE_HR.toFixed(2)}/hr) exceeds maxCostUsd ($${cap.toFixed(2)})`;
+        const msg = `[budget] Race deploy refused: estimated per-instance cost ($${perInstanceHr.toFixed(2)}/hr) exceeds maxCostUsd ($${cap.toFixed(2)})`;
         log.error(msg);
-        logGpuEvent('deploy_rejected', tiers[0]?.name ?? 'unknown', false, { metadata: { reason: 'maxCostUsd', maxCostUsd: cap, raceN } });
+        logGpuEvent('deploy_rejected', tiers[0]?.name ?? 'unknown', false, { metadata: { reason: 'maxCostUsd', maxCostUsd: cap, raceN, perInstanceHr } });
         setDeployState({ status: 'error', message: msg });
         deploymentSM.markError(msg);
         return;
       }
       if (plan.allowedRaceN < raceN) {
-        log.warn(`[race] Trimming raceN ${raceN}→${plan.allowedRaceN} to honor maxCostUsd=$${cap.toFixed(2)} (est $${RACE_EST_PER_INSTANCE_HR.toFixed(2)}/instance/hr)`);
+        log.warn(`[race] Trimming raceN ${raceN}→${plan.allowedRaceN} to honor maxCostUsd=$${cap.toFixed(2)} (est $${perInstanceHr.toFixed(2)}/instance/hr)`);
         raceN = plan.allowedRaceN;
       }
     }
@@ -383,10 +427,11 @@ export async function startDeployRace(
 
   // ── Budget gate (same as startDeployWithTiers) ──────────────────────────
   // Race deploys bypass startDeployWithTiers, so we must guard here too.
-  // Estimate: $2 per instance (N instances run simultaneously during boot).
+  // Estimate from the real per-instance price (N instances run simultaneously
+  // during boot); minimum $2 so a free/credit offer still gates sanely.
   {
     const { canAffordDeploy } = await import('./state');
-    const estimatedCost = Math.max(2, raceN * RACE_EST_PER_INSTANCE_HR);
+    const estimatedCost = Math.max(2, raceN * perInstanceHr);
     const decision = canAffordDeploy(estimatedCost);
     if (!decision.allowed) {
       const msg = `[budget] Race deploy refused: ${decision.reason} (spend=$${decision.currentSpend.toFixed(2)}, projected=$${decision.projected.toFixed(2)}, cap=$${decision.cap.toFixed(2)}, raceN=${raceN})`;
