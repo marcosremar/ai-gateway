@@ -56,6 +56,19 @@ export interface LanguageDetectResult {
 /** Minimum word count for reliable detection. Short texts are unreliable. */
 const MIN_WORDS = 4;
 
+/**
+ * Normalize a caller-supplied language code to the bare lower-case ISO 639-1
+ * form used as the map key. Callers may pass `en-US` / `EN` / `pt_BR`; without
+ * this, `ISO1_TO_ISO3['EN']` misses and detection silently returns
+ * `{ language:'', confidence:0 }`. Mirrors the blocklist normalizer in
+ * `stt-hallucination-filter.ts`.
+ */
+export function normalizeLangCode(code: string | undefined | null): string {
+  if (!code) return '';
+  const m = code.toLowerCase().match(/^[a-z]+/);
+  return m ? m[0] : '';
+}
+
 // ── Unrestricted-franc result cache (#25) ────────────────────────────────────
 // The confidence estimate runs `franc()` a SECOND time with no `only` allow-list.
 // That unrestricted pass depends ONLY on the text, so in the dub-fanout path —
@@ -134,8 +147,11 @@ export function detectLanguage(text: string, source: string, target: string): La
 
   // Restrict franc to only consider source and target.
   // franc uses ISO 639-3 codes, so we convert via the hoisted inverse map.
-  const srcIso3 = ISO1_TO_ISO3[source];
-  const tgtIso3 = ISO1_TO_ISO3[target];
+  // Normalize the codes first so `en-US`/`EN` don't miss the lookup.
+  const src = normalizeLangCode(source);
+  const tgt = normalizeLangCode(target);
+  const srcIso3 = ISO1_TO_ISO3[src];
+  const tgtIso3 = ISO1_TO_ISO3[tgt];
 
   if (!srcIso3 || !tgtIso3) {
     return { language: '', confidence: 0 };
@@ -172,7 +188,7 @@ export function detectLanguage(text: string, source: string, target: string): La
   if (unrestrictedIso1 === detectedIso1) {
     // Both restricted and unrestricted agree — high confidence
     confidence = CONFIDENCE_AGREE;
-  } else if (unrestrictedIso1 === source || unrestrictedIso1 === target) {
+  } else if (unrestrictedIso1 === src || unrestrictedIso1 === tgt) {
     // Unrestricted picked the other candidate — medium confidence
     confidence = CONFIDENCE_OTHER_CANDIDATE;
   } else {
@@ -220,8 +236,10 @@ export function detectLanguageWithSwap(
 ): { detected: LanguageDetectResult; shouldSwap: boolean } {
   const detected = detectLanguage(text, source, target);
 
+  // `detected.language` is a normalized ISO 639-1 code; normalize the caller's
+  // `target` too so `en-US`/`EN` still trigger a swap.
   const shouldSwap =
-    detected.language === target &&
+    detected.language === normalizeLangCode(target) &&
     detected.confidence >= minConfidence;
 
   return { detected, shouldSwap };

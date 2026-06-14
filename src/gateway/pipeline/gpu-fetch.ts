@@ -14,7 +14,17 @@ export interface GpuSTTResult {
   text: string;
   language: string;
   used_gpu: boolean;
-  avg_logprob: number;
+  /**
+   * Avg log-probability from the pod's Whisper output. `undefined` when the pod
+   * didn't report it (#17) — distinct from a real, very-confident `0`, so the
+   * metadata hallucination filter (NaN-sentinel) doesn't mistake "missing" for
+   * "0.0". Previously hard-coded to `0`, masking the missing case.
+   */
+  avg_logprob?: number;
+  /** Compression ratio from the pod (#17) — feeds the repetitive-hallucination filter. */
+  compression_ratio?: number;
+  /** No-speech probability from the pod (#17) — feeds the silence/hallucination filter. */
+  no_speech_prob?: number;
   segments?: unknown[];
   words?: unknown[];
 }
@@ -34,6 +44,40 @@ export interface GpuTTSResult {
 export interface StageRecorder {
   recordSuccess(stage: 'stt' | 'llm' | 'tts'): void;
   recordFailure(stage: 'stt' | 'llm' | 'tts'): void;
+}
+
+// ── STT metadata extraction (#17) ─────────────────────────────────────────────
+
+/**
+ * Pull Whisper metadata signals (`avg_logprob`, `compression_ratio`,
+ * `no_speech_prob`) from a GPU pod's transcription response (#17).
+ *
+ * Prefer a top-level numeric value; if absent, fall back to averaging the
+ * per-segment metrics (verbose_json shape). Any signal that can't be resolved
+ * is left `undefined` — callers treat that as "missing" (NaN sentinel
+ * downstream), never as a confident `0`. Pure + synchronous → unit-testable.
+ */
+export function extractSttMetrics(data: Record<string, unknown>): {
+  avg_logprob?: number; compression_ratio?: number; no_speech_prob?: number;
+} {
+  const topNum = (k: string): number | undefined =>
+    typeof data[k] === 'number' && Number.isFinite(data[k] as number) ? (data[k] as number) : undefined;
+
+  const segs = Array.isArray(data.segments) ? (data.segments as Array<Record<string, unknown>>) : [];
+  const segAvg = (k: string): number | undefined => {
+    let sum = 0; let n = 0;
+    for (const s of segs) {
+      const v = s?.[k];
+      if (typeof v === 'number' && Number.isFinite(v)) { sum += v; n++; }
+    }
+    return n > 0 ? sum / n : undefined;
+  };
+
+  return {
+    avg_logprob: topNum('avg_logprob') ?? segAvg('avg_logprob'),
+    compression_ratio: topNum('compression_ratio') ?? segAvg('compression_ratio'),
+    no_speech_prob: topNum('no_speech_prob') ?? segAvg('no_speech_prob'),
+  };
 }
 
 // ── GPU STT ─────────────────────────────────────────────────────────────────
@@ -66,12 +110,23 @@ export async function fetchGpuSTT(
     }
     const data = await gpuRes.json() as Record<string, unknown>;
     recorder.recordSuccess('stt');
+    const metrics = extractSttMetrics(data);
     return {
       text: (data.text as string) || '',
       language: (data.language as string) || '',
       used_gpu: true,
-      avg_logprob: typeof data.avg_logprob === 'number' ? data.avg_logprob : 0,
+      // #17 — forward all three Whisper signals (top-level, else segment-averaged)
+      // so the metadata hallucination filter can operate on GPU output too;
+      // omit (undefined) when truly absent rather than masking with 0.
+      ...(metrics.avg_logprob !== undefined ? { avg_logprob: metrics.avg_logprob } : {}),
+      ...(metrics.compression_ratio !== undefined ? { compression_ratio: metrics.compression_ratio } : {}),
+      ...(metrics.no_speech_prob !== undefined ? { no_speech_prob: metrics.no_speech_prob } : {}),
       ...(Array.isArray(data.segments) ? { segments: data.segments } : {}),
+      // Forward word-level timestamps when the pod returns them (requested via
+      // `word_timestamps=true`). Previously the `words` field was declared on
+      // GpuSTTResult and read by the /v1/transcribe handler but never populated,
+      // so word timestamps from the GPU were silently dropped.
+      ...(Array.isArray(data.words) ? { words: data.words } : {}),
     };
   } catch (err) {
     if (!(err instanceof DOMException && err.name === 'AbortError')) recorder.recordFailure('stt');
@@ -86,11 +141,21 @@ export async function fetchGpuLLM(
   glossary: string, context: string, signal: AbortSignal,
   recorder: StageRecorder,
   requestId?: string,
+  maxTokens?: number,
 ): Promise<GpuLLMResult> {
   await validateRemoteEndpointResolved(gpuEndpoint);
-  const body: Record<string, string> = { text, source_lang: sourceLang, target_lang: targetLang };
+  const body: Record<string, string | number> = { text, source_lang: sourceLang, target_lang: targetLang };
   if (glossary) body.glossary = glossary;
   if (context) body.context = context;
+  // #30 — bound GPU generation so a self-hosted model can't over-generate on a
+  // short utterance (GPU $/min tracks tokens). Send both common field names so
+  // either server shape (OpenAI-style `max_tokens` / HF-style `max_new_tokens`)
+  // picks it up; omitted entirely when unset to keep the body back-compat.
+  if (typeof maxTokens === 'number' && Number.isFinite(maxTokens) && maxTokens > 0) {
+    const mt = Math.floor(maxTokens);
+    body.max_tokens = mt;
+    body.max_new_tokens = mt;
+  }
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (requestId) headers['X-Request-Id'] = requestId;

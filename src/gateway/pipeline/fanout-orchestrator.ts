@@ -30,6 +30,36 @@ export function resolveFanoutMax(optMax?: number, env: { FANOUT_MAX?: string } =
   return DEFAULT_FANOUT_MAX;
 }
 
+/**
+ * Resolve the per-target budget (ms) from a per-call opt → env → 0 (#59).
+ * 0 means "no budget" (legacy behaviour — never abandons a target).
+ */
+export function resolvePerTargetTimeout(optMs?: number, env: { FANOUT_TARGET_TIMEOUT_MS?: string } = (typeof process !== 'undefined' ? process.env : {}) as any): number {
+  if (typeof optMs === 'number' && Number.isFinite(optMs) && optMs > 0) return Math.floor(optMs);
+  const raw = env?.FANOUT_TARGET_TIMEOUT_MS;
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return 0;
+}
+
+/**
+ * Race a per-target promise against a deadline (#59). On timeout the underlying
+ * work is left running (race candidates carry their own abort), but the fan-out
+ * stops awaiting it so one slow target can't wedge `Promise.allSettled`. The
+ * timer is `unref`'d so it never keeps the process alive, and always cleared.
+ */
+export function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  if (!ms || ms <= 0) return p;
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms budget`)), ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([p, deadline]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface FanoutOpts {
@@ -38,6 +68,21 @@ export interface FanoutOpts {
   targets: string[];
   /** Override the cost-amplification cap for this fan-out (#63). */
   maxTargets?: number;
+  /**
+   * Per-target wall-clock budget in ms (#59). Without an outer bound, one slow
+   * target's LLM+TTS race (each candidate may have no overall deadline) holds
+   * the `Promise.allSettled` and ties up resources. When set, a target that
+   * exceeds this is abandoned (logged) instead of blocking the fan-out. 0/unset
+   * = no budget (legacy behaviour). Resolved via opt → `FANOUT_TARGET_TIMEOUT_MS`.
+   */
+  perTargetTimeoutMs?: number;
+  /**
+   * The primary pipeline's already-computed translation (#58/#62). When a dub
+   * target's language equals `primaryTranslation.target`, the fan-out reuses the
+   * text (and seeds the cache) instead of paying a redundant LLM call for a
+   * translation the primary path already produced.
+   */
+  primaryTranslation?: { target: string; translation: string };
 }
 
 /**
@@ -135,10 +180,14 @@ export async function runFanoutOrchestrator(
   }
 
   const { routing, sideEffects: fx, executors: ex, langNames: langs } = deps;
+  const perTargetTimeout = resolvePerTargetTimeout(opts.perTargetTimeoutMs);
+  // #58/#62 — the primary path already translated source→primaryTarget; reuse it
+  // for a matching dub target instead of re-paying the LLM.
+  const primary = opts.primaryTranslation;
 
   log.log(`Fan-out for ${targets.length} targets: [${targets.join(',')}]`);
 
-  await Promise.allSettled(targets.map(async (target) => {
+  await Promise.allSettled(targets.map((target) => withDeadline((async () => {
     const t0 = Date.now();
     const sourceName = langs[source] || source;
     const targetName = langs[target] || target;
@@ -150,7 +199,13 @@ export async function runFanoutOrchestrator(
       let llmProvider = '';
       let llmMs = 0;
 
-      if (cached !== null) {
+      if (primary && primary.target === target && primary.translation.trim()) {
+        // #58/#62 — reuse the primary's translation; skip the LLM call entirely
+        // and seed the cache so a later identical request hits.
+        translatedText = primary.translation;
+        llmProvider = 'primary';
+        ex.setCachedTranslation(sttText, source, target, translatedText, style);
+      } else if (cached !== null) {
         translatedText = cached;
         llmProvider = 'cache';
       } else {
@@ -197,5 +252,10 @@ export async function runFanoutOrchestrator(
     } catch (err) {
       log.warn(`${target} failed:`, err instanceof Error ? err.message : err);
     }
-  }));
+  })(), perTargetTimeout, `[dub:${target}]`).catch((err) => {
+    // #59 — deadline overrun is surfaced here (not inside the inner try, whose
+    // own catch only sees stage errors) so a budget-exceeded target is logged
+    // rather than silently swallowed by allSettled.
+    log.warn(`${target} abandoned:`, err instanceof Error ? err.message : err);
+  })));
 }

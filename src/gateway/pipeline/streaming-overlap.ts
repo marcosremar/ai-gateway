@@ -46,6 +46,14 @@ export interface StreamingOverlapOptions {
   stripThinking?: boolean;
   /** Custom delimited blocks to strip. e.g. [{ start: '<scratch>', end: '</scratch>' }] */
   stripPatterns?: Array<{ start: string; end: string }>;
+  /**
+   * Per-chunk TTS deadline in ms (#52). A single hung TTS call (e.g. the GPU
+   * stalls) otherwise holds every later, already-finished chunk in
+   * `completedChunks` until it resolves, growing memory and stalling ordered
+   * emit. With a deadline the slow chunk is marked failed at `chunkTimeoutMs`,
+   * releasing the buffered tail. 0/unset = no deadline (legacy behaviour).
+   */
+  chunkTimeoutMs?: number;
 }
 
 function countWords(text: string): number {
@@ -58,6 +66,7 @@ export class StreamingOverlap {
   private minTokens: number;
   private maxWords: number;
   private stripThinking: boolean;
+  private chunkTimeoutMs: number;
   private extraPatterns: Array<{ start: string; end: string }>;
   private _totalRequests = 0;
   private _totalChunks = 0;
@@ -70,7 +79,13 @@ export class StreamingOverlap {
     this.minTokens = Math.max(1, opts.minTokens ?? 3);
     this.maxWords = Math.max(this.minTokens, opts.maxWords ?? DEFAULT_MAX_WORDS);
     this.stripThinking = opts.stripThinking ?? false;
+    this.chunkTimeoutMs = Math.max(0, opts.chunkTimeoutMs ?? 0);
     this.extraPatterns = opts.stripPatterns ?? [];
+  }
+
+  /** Update the per-chunk TTS deadline (#52). 0 disables it. */
+  setChunkTimeoutMs(n: number): void {
+    this.chunkTimeoutMs = Math.max(0, n);
   }
 
   /** Update min tokens from Labs settings. */
@@ -147,13 +162,33 @@ export class StreamingOverlap {
     let pendingWords = 0;
     const resetPending = () => { pending = []; pendingWords = 0; };
 
+    const chunkTimeoutMs = this.chunkTimeoutMs;
     const fire = (text: string) => {
       const idx = chunkIndex++;
       if (firstTtsFiredAt === null) firstTtsFiredAt = Date.now();
 
-      const p = ttsFn(text)
-        .then((audio) => { completedChunks.set(idx, audio); emitReady(); })
+      // #52 — bound a single TTS call so a hung chunk doesn't hold the whole
+      // ordered-emit tail in memory. On deadline, mark this chunk failed and
+      // release the buffer; the underlying ttsFn promise is left to settle
+      // (its result is ignored once the slot is marked failed).
+      let work = ttsFn(text);
+      if (chunkTimeoutMs > 0) {
+        let timer: ReturnType<typeof setTimeout>;
+        const deadline = new Promise<Buffer>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`chunk ${idx} TTS exceeded ${chunkTimeoutMs}ms`)), chunkTimeoutMs);
+          (timer as { unref?: () => void }).unref?.();
+        });
+        work = Promise.race([work, deadline]).finally(() => clearTimeout(timer!));
+      }
+
+      const p = work
+        .then((audio) => {
+          // Ignore a late resolve after the slot was already marked failed.
+          if (failedChunks.has(idx)) return;
+          completedChunks.set(idx, audio); emitReady();
+        })
         .catch((err) => {
+          if (completedChunks.has(idx)) return; // already emitted before the reject
           failedChunks.add(idx); emitReady();
           log.warn(`TTS chunk ${idx} failed: ${err instanceof Error ? err.message : err}`);
         });

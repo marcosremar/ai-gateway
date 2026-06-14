@@ -334,8 +334,11 @@ export async function fetchGpuLLM(
   gpuEndpoint: string, text: string, sourceLang: string, targetLang: string,
   glossary: string, context: string, signal: AbortSignal,
   requestId?: string,
+  // #30 — optional per-call max-tokens hint, forwarded to the pod so GPU
+  // generation tracks input size. Omitted by all existing callers (back-compat).
+  maxTokens?: number,
 ): Promise<GpuLLMResult> {
-  return _fetchGpuLLMCore(gpuEndpoint, text, sourceLang, targetLang, glossary, context, signal, stageRecorder, requestId);
+  return _fetchGpuLLMCore(gpuEndpoint, text, sourceLang, targetLang, glossary, context, signal, stageRecorder, requestId, maxTokens);
 }
 
 export async function fetchGpuTTS(

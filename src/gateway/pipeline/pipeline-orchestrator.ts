@@ -611,6 +611,13 @@ export async function runPipelineOrchestrator(
             } catch {
               // TTS optional — subtitles still work
             }
+          } else {
+            // #77 — non-clone TTS failure previously vanished (only `provider:'none'`
+            // signalled it). Surface a non-fatal warning so a persistent TTS
+            // outage is visible; we deliberately do NOT call cb.onError (that
+            // ends the SSE stream) because the transcription+translation are
+            // still useful.
+            log.warn(`TTS dropped (no audio): ${ttsErr instanceof Error ? ttsErr.message : ttsErr}`);
           }
         }
       }
@@ -623,7 +630,12 @@ export async function runPipelineOrchestrator(
     const totalMs = Date.now() - pipeT0;
     const usedAnyGpu = isGpuProvider(sttProvider) || isGpuProvider(llmProvider) || isGpuProvider(ttsProvider);
 
-    fx.logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'stream', latencyMs: totalMs, success: true, inputSize: audio.length, outputPreview: (translatedText || '').slice(0, 80) });
+    // #89 — don't blanket-log success when the pipeline produced a translation
+    // but dropped the audio. A request that translated text yet emitted no audio
+    // is a partial failure; reporting it as success made the failure-rate metric
+    // dishonest. (A genuinely empty translation already early-returned above.)
+    const pipelineSuccess = !(translatedText && !audioB64);
+    fx.logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'stream', latencyMs: totalMs, success: pipelineSuccess, inputSize: audio.length, outputPreview: (translatedText || '').slice(0, 80) });
     fx.stampProfile();
 
     log.log(`── Done: ${totalMs}ms (STT=${sttMs}[${sttProvider}] LLM=${llmMs}[${llmProvider}] TTS=${ttsMs}[${ttsProvider || '-'}]) ──`);

@@ -17,7 +17,7 @@ import {
   buildSystemPrompt, getCloudProviderName,
   fetchGpuLLM, fetchGpuTTS,
   resolveVoiceForProfile,
-  adaptiveStageTimeout,
+  adaptiveStageTimeout, adaptiveMaxTokens,
   GPU_LLM_TIMEOUT_MS, GPU_TTS_TIMEOUT_MS,
   type GpuLLMResult, type GpuTTSResult,
 } from './ai-handlers';
@@ -88,9 +88,12 @@ function buildFanoutDeps(routing: FanoutRouting): FanoutDeps {
       const candidates: RaceCandidate<GpuLLMResult>[] = [];
       if (rt.llmOnGpu) {
         const llmTimeout = adaptiveStageTimeout('llm', GPU_LLM_TIMEOUT_MS);
+        // #30 — hint the pod with an input-sized token bound so the GPU doesn't
+        // over-generate on a short dub utterance.
+        const gpuMaxTokens = adaptiveMaxTokens(sttText);
         candidates.push({
           name: 'gpu', timeoutMs: llmTimeout,
-          run: (signal) => fetchGpuLLM(rt.gpuEndpoint!, sttText, source, target, '', '', signal),
+          run: (signal) => fetchGpuLLM(rt.gpuEndpoint!, sttText, source, target, '', '', signal, undefined, gpuMaxTokens),
         });
       }
       candidates.push({

@@ -102,6 +102,19 @@ function jaccardSimilarity(a: string, b: string): number {
   return intersection / (setA.size + setB.size - intersection);
 }
 
+/**
+ * Cosine similarity between two equal-length embedding vectors (#5). Returns a
+ * value in [-1, 1]; 0 if either vector is degenerate. Exported for unit tests.
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length);
+  if (n === 0) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
 // ── Core implementation ───────────────────────────────────────────────────────
 
 /**
@@ -249,9 +262,40 @@ export async function runVerifiedSTT(
       if (name !== winnerName && score < outlierThreshold) outliers.push(name);
     }
 
+    // #5 — Embedding fallback. The result type advertised a `'embedding'`
+    // similarity_method that nothing ever produced. When losers disagree with
+    // the winner on a word level (Jaccard outliers) but an embedding provider is
+    // configured, re-score semantically: two correct transcripts can be lexically
+    // different (synonyms, word order) yet embed close. Fully guarded — any
+    // failure falls back to the Jaccard view already computed above.
+    let similarityMethod: 'jaccard' | 'embedding' = 'jaccard';
+    const embProvider = deps.embeddingFallbacks?.find(p => p.isConfigured());
+    const others = [...byName.keys()].filter(n => n !== winnerName);
+    if (embProvider && outliers.length > 0 && others.length > 0) {
+      try {
+        const names = [winnerName, ...others];
+        const vectors = await embProvider.embed(names.map(n => byName.get(n) || ''));
+        if (Array.isArray(vectors) && vectors.length === names.length) {
+          const winnerVec = vectors[0];
+          const embThreshold = deps.embeddingFallbackThreshold ?? outlierThreshold;
+          // Recompute scores + outliers under the semantic view.
+          outliers.length = 0; // clear the Jaccard outliers in place
+          for (let i = 0; i < names.length; i++) {
+            const name = names[i];
+            const score = name === winnerName ? 1 : cosineSimilarity(winnerVec, vectors[i]);
+            scores[name] = score;
+            if (name !== winnerName && score < embThreshold) outliers.push(name);
+          }
+          similarityMethod = 'embedding';
+        }
+      } catch {
+        // Keep the Jaccard scores/outliers/method already set.
+      }
+    }
+
     return {
       consensus: winnerText,
-      similarity_method: 'jaccard',
+      similarity_method: similarityMethod,
       used_providers: byName.size,
       providers: providersMap,
       scores,
