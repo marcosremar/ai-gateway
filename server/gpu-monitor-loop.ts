@@ -121,9 +121,87 @@ export function computeBudgetForecast(
   currentSpendUsd: number,
   costPerHr: number,
   now: Date = new Date(),
+  resetHourUtc = 0,
 ): number {
-  const hoursRemaining = Math.max(0, 24 - now.getUTCHours() - now.getUTCMinutes() / 60);
+  const hoursRemaining = budgetDayHoursRemaining(now, resetHourUtc);
   return currentSpendUsd + costPerHr * hoursRemaining;
+}
+
+/**
+ * #539 — hours remaining until the budget day rolls over, honoring a
+ * configurable reset hour (UTC) instead of hardcoding midnight UTC.
+ *
+ * Ops teams that bill/track on a local-midnight (or any fixed-hour) boundary
+ * got an EOD forecast that was hours off because the loop assumed a 24:00 UTC
+ * reset. This computes the fractional hours from `now` until the next
+ * `resetHourUtc` boundary (1–24h range; exactly on the boundary = a full day).
+ * Pure + exported for unit testing.
+ */
+export function budgetDayHoursRemaining(now: Date = new Date(), resetHourUtc = 0): number {
+  const reset = ((Math.trunc(resetHourUtc) % 24) + 24) % 24;
+  const nowFracHours = now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
+  let remaining = reset - nowFracHours;
+  if (remaining <= 0) remaining += 24;
+  return remaining;
+}
+
+/**
+ * #539 — resolve the configured budget-day reset hour (UTC) from the env,
+ * clamped to [0,23]. Defaults to 0 (midnight UTC, the historical behavior).
+ * Pure + exported for unit testing.
+ */
+export function resolveBudgetResetHourUtc(
+  env: Record<string, string | undefined> = process.env,
+  defaultHour = 0,
+): number {
+  const raw = env.BUDGET_DAY_RESET_HOUR_UTC;
+  if (raw == null) return defaultHour;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return defaultHour;
+  return Math.min(23, Math.max(0, Math.trunc(n)));
+}
+
+/**
+ * #549 — the spend ratio at which the loop hard-terminates the pod.
+ *
+ * The loop terminated only at `pct >= 1.0`, i.e. *after* the cap was already
+ * breached; with a multi-second monitor tick a pricey pod overspends past the
+ * cap by up to a full tick. This returns a configurable kill ratio (default
+ * 0.95) so termination leaves headroom below the cap. Clamped to (0,1] — a
+ * garbage/over-1 value falls back to 1.0 (the old behavior). Pure + exported.
+ */
+export function budgetHardLimitRatio(
+  env: Record<string, string | undefined> = process.env,
+  defaultRatio = 0.95,
+): number {
+  const raw = env.BUDGET_HARD_LIMIT_RATIO;
+  const n = raw != null ? Number(raw) : defaultRatio;
+  if (!Number.isFinite(n) || n <= 0 || n > 1) return 1.0;
+  return n;
+}
+
+/**
+ * #546 — sticky per-threshold-per-day "already warned" tracking.
+ *
+ * `budgetSoftWarned` / `budgetWarned50` are plain booleans reset only on a day
+ * rollover, so if spend dips below a threshold and re-crosses it the same day
+ * (possible after a manual reset), the alert never re-fires. This returns
+ * whether to fire for a given threshold key today: fire when the threshold is
+ * crossed AND it hasn't already fired for *this* date. Caller records the key in
+ * `firedKeys` on fire. Pure + exported for unit testing.
+ *
+ * @param firedKeys set of "<date>:<thresholdPct>" already alerted today.
+ */
+export function shouldFireBudgetThreshold(
+  spendRatio: number,
+  thresholdRatio: number,
+  date: string,
+  firedKeys: Set<string>,
+): boolean {
+  if (!(thresholdRatio > 0)) return false;
+  if (spendRatio < thresholdRatio) return false;
+  const key = `${date}:${thresholdRatio}`;
+  return !firedKeys.has(key);
 }
 
 /**
@@ -631,10 +709,16 @@ export function scheduleNextMonitorProbe() {
           const pct = dailyGpuSpendUsd / DAILY_BUDGET_USD;
           // #299: single forecast helper (minute precision) — used for both the
           // soft-limit broadcast and the EOD forecast warning below.
-          const forecast = computeBudgetForecast(dailyGpuSpendUsd, deployState.costPerHr);
-          if (pct >= 1.0) {
+          // #539: honor the configurable budget-day reset hour (UTC) instead of
+          // hardcoding midnight UTC.
+          const forecast = computeBudgetForecast(
+            dailyGpuSpendUsd, deployState.costPerHr, new Date(), resolveBudgetResetHourUtc(),
+          );
+          // #549: terminate with headroom (default 95%) so a pricey pod can't
+          // overspend the cap by a full monitor tick before we react.
+          if (pct >= budgetHardLimitRatio()) {
             // HARD BUDGET: auto-terminate to prevent overspend
-            log.error(`[budget] HARD LIMIT: $${dailyGpuSpendUsd.toFixed(2)} >= $${DAILY_BUDGET_USD.toFixed(2)} — auto-terminating GPU`);
+            log.error(`[budget] HARD LIMIT: $${dailyGpuSpendUsd.toFixed(2)} >= $${(DAILY_BUDGET_USD * budgetHardLimitRatio()).toFixed(2)} (${Math.round(budgetHardLimitRatio() * 100)}% of $${DAILY_BUDGET_USD.toFixed(2)}) — auto-terminating GPU`);
             broadcastWs({ type: 'gpu:budget', action: 'hard-limit', spend: dailyGpuSpendUsd, budget: DAILY_BUDGET_USD });
             emitGatewayEvent('budget.exceeded', { spend: +dailyGpuSpendUsd.toFixed(2), budget: DAILY_BUDGET_USD });
             const { autoTerminateGpu } = await import('./gpu-terminate');

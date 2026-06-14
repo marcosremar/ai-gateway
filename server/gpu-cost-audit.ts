@@ -4,7 +4,7 @@
 
 import { createLogger } from '../src/logger';
 import { deployApiKey, deployState, standbyDeployState } from './state';
-import { runpod, vast } from './providers';
+import { runpod, vast, tensordock, hyperstack } from './providers';
 
 const log = createLogger('gpu-deploy');
 
@@ -18,7 +18,8 @@ export interface VolumeAudit {
 }
 
 export interface StoppedPodAudit {
-  provider: 'vast' | 'runpod';
+  /** #536 — audit now covers more than vast/runpod. */
+  provider: 'vast' | 'runpod' | 'tensordock' | 'hyperstack';
   instanceId: string;
   status: string;
   gpuType?: string;
@@ -26,6 +27,61 @@ export interface StoppedPodAudit {
   /** #537 — storage cost a stopped pod keeps accruing per month, so operators
    *  can prioritize cleanup by dollars rather than a bare count. */
   estMonthlyUsd: number;
+}
+
+/**
+ * #110 — resolve the RunPod API key for the audit.
+ *
+ * `deployApiKey` is only populated while a deploy is active, so on an idle
+ * gateway the audit silently skipped RunPod even though `RUNPOD_API_KEY` was
+ * set. Worse, a *stale* `deployApiKey` from a prior session could be preferred
+ * over the env. This prefers the live deploy key only when one is actually set,
+ * otherwise falls back to the env var. Pure + exported for unit testing.
+ */
+export function resolveAuditApiKey(
+  deployKey: string | undefined,
+  envKey: string | undefined,
+): string {
+  const dk = (deployKey || '').trim();
+  if (dk) return dk;
+  return (envKey || '').trim();
+}
+
+/**
+ * #535 — decide whether a RunPod network volume is tracked (in use) by the
+ * gateway, preferring provider attachment metadata over a brittle name match.
+ *
+ * The old logic flagged a volume as "tracked" only when its *name* contained
+ * the active/standby podId — so volumes named after the image (the common case)
+ * were mis-flagged as orphans and could be auto-deleted under
+ * `RUNPOD_VOLUME_SWEEP_DESTROY=1`. This first trusts an explicit attachment
+ * signal (a non-empty list of attached pod IDs, or an `inUse`/`attached` flag),
+ * and only falls back to the name-substring heuristic when no attachment info
+ * is available. Pure + exported for unit testing.
+ */
+export function isVolumeTracked(opts: {
+  name?: string;
+  /** Pod IDs the provider reports as attached to this volume, if known. */
+  attachedPodIds?: string[];
+  /** Provider attachment flag, if the API exposes one. */
+  inUse?: boolean;
+  activePodId?: string;
+  standbyPodId?: string;
+}): boolean {
+  // 1) Trust explicit provider attachment metadata when present.
+  if (Array.isArray(opts.attachedPodIds) && opts.attachedPodIds.some(Boolean)) return true;
+  if (opts.inUse === true) return true;
+
+  // 2) Fall back to the (conservative) name-substring heuristic. Guard against
+  //    empty-string match — ''.includes('') is true.
+  const name = opts.name || '';
+  if (!name) return false;
+  const active = (opts.activePodId || '').trim();
+  const standby = (opts.standbyPodId || '').trim();
+  return (
+    (active.length > 0 && name.includes(active)) ||
+    (standby.length > 0 && name.includes(standby))
+  );
 }
 
 export interface CostAuditReport {
@@ -67,6 +123,32 @@ export function estStoppedPodMonthlyUsd(diskGb?: number): number {
   return Math.round(gb * STOPPED_POD_USD_PER_GB_MONTH * 100) / 100;
 }
 
+/** #536 — statuses across providers that mean "stopped but still billing storage". */
+const STOPPED_POD_STATUSES = new Set(['exited', 'stopped', 'shutoff', 'hibernated', 'paused', 'suspended']);
+
+/**
+ * #536 — is this instance status a stopped/hibernated state that still accrues
+ * storage (or reserved-IP) cost? Normalizes case. Pure + exported for testing.
+ */
+export function isStoppedPodStatus(status: string | undefined): boolean {
+  return STOPPED_POD_STATUSES.has((status ?? '').toLowerCase());
+}
+
+/**
+ * #536 — pull a disk size (GB) off a provider instance regardless of whether
+ * the provider returns it as a top-level field or nested under providerMeta.
+ * Returns undefined when unknown so {@link estStoppedPodMonthlyUsd} applies its
+ * default. Pure + exported for testing.
+ */
+export function instanceDiskGb(inst: Record<string, unknown>): number | undefined {
+  const top = inst.diskGb;
+  if (typeof top === 'number' && top > 0) return top;
+  const meta = inst.providerMeta as Record<string, unknown> | undefined;
+  const nested = meta?.diskGb;
+  if (typeof nested === 'number' && nested > 0) return nested;
+  return undefined;
+}
+
 /**
  * Comprehensive cost audit — finds non-instance cost leaks.
  *
@@ -88,32 +170,31 @@ export async function auditGpuCosts(opts: { destroyOrphans?: boolean } = {}): Pr
   if (standbyDeployState.podId) tracked.add(standbyDeployState.podId);
 
   // ── RunPod network volumes ────────────────────────────────────────────
-  const rpKey = deployApiKey || process.env.RUNPOD_API_KEY || '';
+  // #110: prefer the live deploy key only when set, else always fall back to
+  // the env var so an idle gateway still audits RunPod.
+  const rpKey = resolveAuditApiKey(deployApiKey, process.env.RUNPOD_API_KEY);
   if (rpKey) {
     try {
       const volumes = await runpod.listNetworkVolumes({ apiKey: rpKey });
       for (const v of volumes) {
         const est = estRunpodVolumeMonthlyUsd(v.size);
-        // A volume is "tracked" if its name matches the gateway's current or
-        // standby pod, OR if its id is referenced in any running tracked pod.
-        // Without provider-side attachment info we default to conservative:
-        // any volume the gateway didn't create this session = orphan candidate.
-        // Guard against empty-string match — ''.includes('') is true, which
-        // would mark every volume as tracked when no pod is active.
-        const activePodId = deployState.podId || '';
-        const standbyPodId = standbyDeployState.podId || '';
-        const isTrackedByName = Boolean(
-          v.name && (
-            (activePodId.length > 0 && v.name.includes(activePodId)) ||
-            (standbyPodId.length > 0 && v.name.includes(standbyPodId))
-          ),
-        );
+        // #535: prefer provider attachment metadata (when the API exposes it)
+        // over the brittle name-substring heuristic so image-named volumes
+        // aren't mis-flagged as orphans (and possibly auto-deleted).
+        const vv = v as Record<string, unknown>;
+        const tracked = isVolumeTracked({
+          name: v.name,
+          attachedPodIds: Array.isArray(vv.attachedPodIds) ? vv.attachedPodIds as string[] : undefined,
+          inUse: typeof vv.inUse === 'boolean' ? vv.inUse : (typeof vv.attached === 'boolean' ? vv.attached : undefined),
+          activePodId: deployState.podId || '',
+          standbyPodId: standbyDeployState.podId || '',
+        });
         const audit: VolumeAudit = {
           id: v.id,
           name: v.name,
           sizeGb: v.size,
           dataCenterId: v.dataCenterId,
-          tracked: isTrackedByName,
+          tracked,
           estMonthlyUsd: est,
         };
         report.volumes.runpod.push(audit);
@@ -141,14 +222,14 @@ export async function auditGpuCosts(opts: { destroyOrphans?: boolean } = {}): Pr
   }
 
   // ── Stopped pods (Vast.ai exited/stopped consume storage) ─────────────
-  const vastKey = process.env.VAST_API_KEY || '';
+  const vastKey = resolveAuditApiKey(undefined, process.env.VAST_API_KEY);
   if (vastKey) {
     try {
       const vastInstances = await vast.listInstances({ apiKey: vastKey });
       for (const inst of vastInstances) {
         const st = (inst.status ?? '').toLowerCase();
-        if ((st === 'exited' || st === 'stopped') && !tracked.has(inst.instanceId)) {
-          const est = estStoppedPodMonthlyUsd((inst as { diskGb?: number }).diskGb);
+        if (isStoppedPodStatus(st) && !tracked.has(inst.instanceId)) {
+          const est = estStoppedPodMonthlyUsd(instanceDiskGb(inst as unknown as Record<string, unknown>));
           report.stoppedPods.push({
             provider: 'vast',
             instanceId: inst.instanceId,
@@ -161,6 +242,55 @@ export async function auditGpuCosts(opts: { destroyOrphans?: boolean } = {}): Pr
       }
     } catch (err) {
       report.warnings.push(`vast stopped-pod list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // ── #109/#536: TensorDock stopped instances also keep paying for storage ──
+  const tdKey = resolveAuditApiKey(undefined, process.env.TENSORDOCK_API_KEY);
+  const tdAuth = process.env.TENSORDOCK_AUTH_ID || '';
+  if (tdKey) {
+    try {
+      const tdInstances = await tensordock.listInstances({ apiKey: tdKey, authId: tdAuth });
+      for (const inst of tdInstances) {
+        const st = (inst.status ?? '').toLowerCase();
+        if (isStoppedPodStatus(st) && !tracked.has(inst.instanceId)) {
+          const est = estStoppedPodMonthlyUsd(instanceDiskGb(inst as unknown as Record<string, unknown>));
+          report.stoppedPods.push({
+            provider: 'tensordock',
+            instanceId: inst.instanceId,
+            status: st,
+            gpuType: inst.gpuType,
+            estMonthlyUsd: est,
+          });
+          report.stoppedPodsMonthlyUsd += est;
+        }
+      }
+    } catch (err) {
+      report.warnings.push(`tensordock stopped-pod list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // ── #109/#536: Hyperstack hibernated/shutoff VMs keep billing IP+disk ──
+  const hsKey = resolveAuditApiKey(undefined, process.env.HYPERSTACK_API_KEY);
+  if (hsKey) {
+    try {
+      const hsInstances = await hyperstack.listInstances({ apiKey: hsKey });
+      for (const inst of hsInstances) {
+        const st = (inst.status ?? '').toLowerCase();
+        if (isStoppedPodStatus(st) && !tracked.has(inst.instanceId)) {
+          const est = estStoppedPodMonthlyUsd(instanceDiskGb(inst as unknown as Record<string, unknown>));
+          report.stoppedPods.push({
+            provider: 'hyperstack',
+            instanceId: inst.instanceId,
+            status: st,
+            gpuType: inst.gpuType,
+            estMonthlyUsd: est,
+          });
+          report.stoppedPodsMonthlyUsd += est;
+        }
+      }
+    } catch (err) {
+      report.warnings.push(`hyperstack stopped-pod list failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

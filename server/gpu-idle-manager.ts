@@ -51,6 +51,29 @@ export function shouldTerminateOnMissingClient(opts: {
 }
 
 /**
+ * #111 — decide the effective hibernate flag for an idle stop.
+ *
+ * `autoStopGpu` only hibernated when the caller *explicitly* passed
+ * `allowHibernate`. But on Hyperstack a plain stop (SHUTOFF) still bills 100%,
+ * while hibernate drops billing to ~10–15% (IP + disk only). So Hyperstack idle
+ * stops should default to hibernate even when the caller didn't ask — unless the
+ * operator opts out via `HYPERSTACK_HIBERNATE_ON_IDLE=0`. Other providers keep
+ * the caller's explicit choice (default plain stop). Pure + exported for testing.
+ */
+export function shouldDefaultHibernate(
+  provider: string,
+  callerAllowHibernate: boolean,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (callerAllowHibernate) return true;
+  if (provider === 'hyperstack') {
+    // Default ON for Hyperstack; explicit "0" disables.
+    return env.HYPERSTACK_HIBERNATE_ON_IDLE !== '0';
+  }
+  return false;
+}
+
+/**
  * Automatically stop (pause) the active GPU pod when idle or on a trigger.
  *
  * Preserves disk/data — the pod can be resumed quickly (~19s on Vast.ai)
@@ -104,9 +127,12 @@ export async function autoStopGpu(
   }
 
   let pausedMode: 'stop' | 'hibernate' = 'stop';
+  // #111: Hyperstack idle stops default to hibernate (plain SHUTOFF still bills
+  // 100%) unless the operator disables it; other providers honor the caller flag.
+  const allowHibernate = shouldDefaultHibernate(provider, opts.allowHibernate === true);
   try {
     pausedMode = await pauseInstanceForIdle(provider, podId, credentials, client, {
-      allowHibernate: opts.allowHibernate === true,
+      allowHibernate,
     });
     const modeLabel = pausedMode === 'hibernate'
       ? 'hibernated (billing paused — IP+disk only)'

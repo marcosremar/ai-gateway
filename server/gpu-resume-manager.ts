@@ -42,6 +42,27 @@ export function canFreshDeployReplaceResumable(availableTierCount: number): bool
 }
 
 /**
+ * #162 — resolve the docker image to use for the resume→fresh-deploy fallback.
+ *
+ * The old code did `dockerImage || 'marcosremar/babelcast-subtitle:latest'`,
+ * which could silently deploy a completely unrelated app if state was partially
+ * cleared (e.g. the image was lost but a resume was still attempted). Deploying
+ * the wrong app is worse than failing: it wastes a full boot + bills for a pod
+ * the caller never asked for. This returns the original image when present and
+ * throws otherwise so the caller fails loudly. Pure + exported for unit testing.
+ */
+export function resolveFallbackImage(dockerImage: string | undefined): string {
+  const img = (dockerImage || '').trim();
+  if (!img) {
+    throw new Error(
+      'Resume fallback aborted: original dockerImage is missing — refusing to ' +
+      'substitute an unrelated default image (would deploy the wrong app)',
+    );
+  }
+  return img;
+}
+
+/**
  * #213 — adaptive resume health-poll interval with exponential backoff.
  *
  * The resume loop polled at a flat 3s for up to 5 min (~100 probes) against a
@@ -263,7 +284,9 @@ export async function resumeOrDeploy(opts: {
       throw new Error('Resume failed and no provider tiers available for fresh deploy');
     }
 
-    const image = dockerImage || 'marcosremar/babelcast-subtitle:latest';
+    // #162: fail loudly rather than silently deploying an unrelated default
+    // image when the original dockerImage was lost from state.
+    const image = resolveFallbackImage(dockerImage);
     const gpuTypes = getGpuPriorityList();
 
     log.log(`[gpu] Starting fresh deploy as fallback (image=${image}, tiers=${tiers.length})`);

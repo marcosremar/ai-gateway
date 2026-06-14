@@ -56,6 +56,54 @@ export const POD_NAME_PREFIX = 'parle-autoscale-';
 export const GATEWAY_NAME_PREFIXES: string[] = [POD_NAME_PREFIX, 'ai-gateway-'];
 
 /**
+ * #165 — does an instance name match ANY gateway-owned prefix?
+ *
+ * `cleanupAllPods` previously filtered RunPod instances by `POD_NAME_PREFIX`
+ * only, so a pod created with the newer `ai-gateway-` prefix was never reaped on
+ * terminate. This checks the full {@link GATEWAY_NAME_PREFIXES} list. An empty
+ * name never matches. Pure + exported for unit testing.
+ */
+export function matchesGatewayPrefix(
+  instanceName: string | undefined,
+  prefixes: string[] = GATEWAY_NAME_PREFIXES,
+): boolean {
+  const name = instanceName || '';
+  if (!name) return false;
+  return prefixes.some(p => p.length > 0 && name.startsWith(p));
+}
+
+/**
+ * #273 — extract provider-shaped instance IDs from a free-text transition
+ * detail string, WITHOUT the old catch-all `\b[a-z0-9]{8,}\b` that scraped
+ * arbitrary lowercase words (e.g. "marcosremar", "completed") and falsely
+ * marked them as tracked instance IDs — protecting non-existent instances and,
+ * worse, sometimes failing to protect real ones because a stray word "shadowed"
+ * the set semantics.
+ *
+ * Only the concrete provider ID shapes are matched:
+ *   - `inst-12345`         (Vast.ai / RunPod numeric)
+ *   - `ap-AbC123`          (Modal app)
+ *   - 24+ hex char IDs     (RunPod pod IDs / UUID-like — long enough to be
+ *                           unambiguous, unlike the old 8-char threshold)
+ *
+ * Pure + exported for unit testing.
+ */
+export function extractInstanceIds(detail: string | undefined): string[] {
+  if (!detail) return [];
+  const ids = new Set<string>();
+  const patterns = [
+    /\binst-\d+\b/g,            // vast / runpod numeric instance ids
+    /\bap-[A-Za-z0-9]{6,}\b/g,  // modal app ids
+    /\b[0-9a-f]{24,}\b/g,       // long hex ids (runpod pod / uuid-like)
+  ];
+  for (const re of patterns) {
+    const matches = detail.match(re);
+    if (matches) for (const m of matches) ids.add(m);
+  }
+  return [...ids];
+}
+
+/**
  * Instance IDs that are currently part of an active race deploy.
  * The orphan sweep must not terminate these — they are legitimately booting.
  * Populated by startDeployRace, cleared when race resolves.
@@ -117,8 +165,11 @@ function getModalApiKey(): string {
 export async function cleanupAllPods(apiKey: string, knownPodIds: string[] = []): Promise<void> {
   try {
     const instances = await runpod.listInstances({ apiKey });
+    // #165: match the full GATEWAY_NAME_PREFIXES list (parle-autoscale- AND
+    // ai-gateway-), not just the legacy POD_NAME_PREFIX, so newer-prefixed pods
+    // are reaped on terminate too.
     const toTerminate = instances.filter(inst =>
-      (inst.instanceName || '').startsWith(POD_NAME_PREFIX) && inst.status !== 'EXITED'
+      matchesGatewayPrefix(inst.instanceName) && inst.status !== 'EXITED'
     );
 
     if (toTerminate.length === 0) return;
@@ -269,9 +320,9 @@ async function collectTrackedInstanceIds(): Promise<Set<string>> {
   try {
     const { deployState: ds } = await import('./state');
     for (const t of (ds.transitions || []).slice(-10)) {
-      const detail = t.detail || '';
-      const matches = detail.match(/\binst-\d+|\bap-[a-zA-Z0-9]+|\b[a-z0-9]{8,}\b/g);
-      if (matches) for (const id of matches) tracked.add(id);
+      // #273: extract only concrete provider-shaped IDs (no arbitrary 8-char
+      // lowercase words) so we don't falsely "track"/protect random tokens.
+      for (const id of extractInstanceIds(t.detail)) tracked.add(id);
     }
   } catch { /* best effort */ }
 
