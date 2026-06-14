@@ -5,9 +5,59 @@
  */
 
 import OpenAI from 'openai';
-import type { ProviderId, LLMProvider, ChatRequest, ChatResponse } from '../types';
+import type { ProviderId, LLMProvider, ChatRequest, ChatMessage, ChatResponse } from '../types';
 import { getOrCreateClient } from './client-cache';
 import { buildSamplingParams } from './chat-params';
+
+/**
+ * Shared timeout marker symbol (#372). Must match `fallback.ts`'s
+ * `Symbol.for('__parle_fallback_timeout')` so `isTimeoutError()` recognizes
+ * abort-derived timeouts thrown here. Using the registry symbol (Symbol.for)
+ * keeps the two modules in sync without an import cycle.
+ */
+const TIMEOUT_MARKER = Symbol.for('__parle_fallback_timeout');
+
+/** Tag an error as a timeout + give it a 408 status for reliable classification. */
+export function markTimeout(err: Error): Error & { status?: number } {
+  (err as Error & { [k: symbol]: boolean })[TIMEOUT_MARKER] = true;
+  (err as Error & { status?: number }).status = 408;
+  return err as Error & { status?: number };
+}
+
+/**
+ * Rough token estimate from a character count (#377).
+ *
+ * When a provider omits the `usage` block, formatResponse defaulted token
+ * counts to 0, which silently breaks cost accounting / budget tracking. A
+ * ~4-chars-per-token heuristic (OpenAI's published rule of thumb) gives a
+ * usable approximation instead of zero. Intentionally coarse — used only as a
+ * fallback when real usage is unavailable.
+ */
+export function estimateTokensFromChars(chars: number): number {
+  if (chars <= 0) return 0;
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
+/** Flatten a chat message's content (string or multimodal parts) to plain text. */
+function messageText(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content.map((p) => (p.type === 'text' ? p.text ?? '' : '')).join(' ');
+}
+
+/**
+ * Estimate prompt/completion/total tokens for a request+response when the
+ * provider returned no usage (#377). Prompt tokens come from the request
+ * messages, completion tokens from the response content.
+ */
+export function estimateUsage(
+  messages: ChatMessage[],
+  completion: string,
+): { promptTokens: number; completionTokens: number; totalTokens: number } {
+  const promptChars = messages.reduce((n, m) => n + messageText(m.content).length, 0);
+  const promptTokens = estimateTokensFromChars(promptChars);
+  const completionTokens = estimateTokensFromChars(completion.length);
+  return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens };
+}
 
 export interface OpenAICompatLLMConfig {
   providerId: ProviderId;
@@ -75,19 +125,24 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       ...(request.stream && { stream: request.stream }),
     } as OpenAI.ChatCompletionCreateParamsNonStreaming, { signal: controller.signal }) as OpenAI.ChatCompletion;
 
+    const content = completion.choices[0]?.message?.content || '';
     return {
-      content: completion.choices[0]?.message?.content || '',
+      content,
       model: completion.model,
+      // When the provider omits usage, estimate it (#377) instead of reporting
+      // zero tokens, which would silently zero out cost accounting.
       usage: completion.usage ? {
         promptTokens: completion.usage.prompt_tokens,
         completionTokens: completion.usage.completion_tokens,
         totalTokens: completion.usage.total_tokens,
-      } : undefined,
+      } : estimateUsage(request.messages, content),
       raw: completion,
     };
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`[openai-compat] chat() timed out after ${timeoutMs}ms`);
+        // Mark the rethrown timeout so the fallback layer classifies it as a
+        // timeout (move-on, no retry) rather than an opaque Error (#372).
+        throw markTimeout(new Error(`[openai-compat] chat() timed out after ${timeoutMs}ms`));
       }
       throw err;
     } finally {
@@ -137,7 +192,8 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       }
     } catch (err: unknown) {
       if (err instanceof Error && (err.name === 'AbortError' || err.message?.includes('aborted'))) {
-        throw new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms`);
+        // Mark so the fallback layer treats it as a timeout (#372).
+        throw markTimeout(new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms`));
       }
       throw err;
     } finally {

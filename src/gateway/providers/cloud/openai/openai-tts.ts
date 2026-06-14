@@ -7,6 +7,10 @@
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, TTSAudioFormat, TTSProvider, TTSRequest, TTSResponse, VoiceInfo } from '../types';
 import { OPENAI_TTS_MODELS, OPENAI_VOICES } from './models';
+import { getOrCreateClient } from '../openai-compat/client-cache';
+
+/** OpenAI API base used for the shared client-cache key. */
+const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
 const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   mp3: 'audio/mpeg',
@@ -47,7 +51,9 @@ export class OpenAITTSProvider implements TTSProvider {
     if (!this.client) {
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) throw new Error('[OpenAI TTS] OPENAI_API_KEY environment variable is not set');
-      this.client = new OpenAI({ apiKey });
+      // Share the connection pool with OpenAI STT/embeddings via the client
+      // cache (#373) instead of constructing a fresh OpenAI client per provider.
+      this.client = getOrCreateClient(OPENAI_BASE_URL, apiKey);
     }
     return this.client;
   }
@@ -64,7 +70,7 @@ export class OpenAITTSProvider implements TTSProvider {
 
   withApiKey(apiKey: string): OpenAITTSProvider {
     const provider = new OpenAITTSProvider();
-    provider.client = new OpenAI({ apiKey });
+    provider.client = getOrCreateClient(OPENAI_BASE_URL, apiKey);
     return provider;
   }
 

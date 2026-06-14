@@ -8,6 +8,10 @@ import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from '../types';
 import { OPENAI_STT_MODELS } from './models';
 import { prepareAudioFile } from '../openai-compat/audio-utils';
+import { getOrCreateClient } from '../openai-compat/client-cache';
+
+/** OpenAI API base used for the shared client-cache key. */
+const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
 /**
  * Default OpenAI STT model when the caller doesn't specify one. The mini
@@ -28,14 +32,17 @@ export class OpenAISTTProvider implements STTProvider {
     if (!this.client) {
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) throw new Error('[OpenAI STT] OPENAI_API_KEY environment variable is not set');
-      this.client = new OpenAI({ apiKey });
+      // Route through the shared client cache (#373) so OpenAI STT + TTS +
+      // embeddings sharing the same key reuse one connection pool instead of
+      // each opening its own (extra TLS handshakes on cold start).
+      this.client = getOrCreateClient(OPENAI_BASE_URL, apiKey);
     }
     return this.client;
   }
 
   withApiKey(apiKey: string): OpenAISTTProvider {
     const provider = new OpenAISTTProvider();
-    provider.client = new OpenAI({ apiKey });
+    provider.client = getOrCreateClient(OPENAI_BASE_URL, apiKey);
     return provider;
   }
 

@@ -269,6 +269,42 @@ export class CooldownTracker {
 /** Default module-level instance for backward compat */
 export const defaultCooldownTracker = new CooldownTracker();
 
+/**
+ * Decide whether the "all providers cooling down → retry them anyway" bypass
+ * should fire (#302).
+ *
+ * The bypass exists so the chain doesn't fail with zero attempts when every
+ * provider happens to be cooling down — better to retry a cooled-down provider
+ * than return nothing. BUT a credit-blocked (402) or circuit-OPEN provider will
+ * still instantly fail, so retrying *those* is pointless and just burns a
+ * guaranteed-fail call. This returns true only when EVERY entry is cooling down
+ * AND at least one of them is genuinely viable (not credit-blocked, not
+ * circuit-open) — i.e. there is something worth retrying. When the only
+ * cooled-down entries are also blocked/open, it returns false so the normal
+ * skip-and-fail path runs instead of looping over doomed providers.
+ *
+ * Pure + exported for unit testing; all collaborators are passed as predicates.
+ *
+ * @param chain        the (credit-filtered) chain about to be iterated
+ * @param isCoolingDown returns true if an entry is currently cooling down
+ * @param isViable     returns true if an entry is genuinely callable right now
+ *   (NOT credit-blocked and NOT circuit-open). Defaults to "always viable",
+ *   reproducing the legacy all-cooled-down behavior for callers that don't
+ *   supply credit/circuit state.
+ */
+export function computeAllCooledDown(
+  chain: FallbackEntry[],
+  isCoolingDown: (entry: FallbackEntry) => boolean,
+  isViable: (entry: FallbackEntry) => boolean = () => true,
+): boolean {
+  if (chain.length === 0) return false;
+  if (!chain.every((e) => isCoolingDown(e))) return false;
+  // Every entry is cooling down. Only bypass cooldowns if at least one of them
+  // is actually worth retrying (not blocked / not open) — otherwise the bypass
+  // would just iterate guaranteed failures.
+  return chain.some((e) => isViable(e));
+}
+
 /** Export for testing / monitoring */
 export function getCooldownState(): Map<string, CooldownState> {
   return defaultCooldownTracker.getState();
@@ -446,8 +482,21 @@ export async function withProviderFallback<T>(
   let lastRetryAfterSec: number | null = null;
 
   // Check if ALL providers are in cooldown — if so, ignore cooldowns entirely
-  // (better to retry a cooled-down provider than to fail with no attempt)
-  const allCooledDown = iterChain.length > 0 && iterChain.every((e) => tracker.isCoolingDown(e));
+  // (better to retry a cooled-down provider than to fail with no attempt).
+  // BUT exclude credit-blocked (402) and circuit-OPEN providers from the
+  // "retry anyway" decision (#302): retrying those instantly fails, so the
+  // bypass should only fire when at least one cooled-down provider is genuinely
+  // viable. `allowRequest()` mutates breaker state (HALF_OPEN probe), so the
+  // viability check uses the non-mutating getStats().state instead.
+  const allCooledDown = computeAllCooledDown(
+    iterChain,
+    (e) => tracker.isCoolingDown(e),
+    (e) => {
+      if (creditTracker.isBlocked(e.provider, blockHashFor(e.provider))) return false;
+      if (circuitBreakers && circuitBreakers.get(e.provider).getStats().state === 'open') return false;
+      return true;
+    },
+  );
   if (allCooledDown) {
     log.warn(
       `${logPrefix} all ${iterChain.length} providers in cooldown — ignoring cooldowns to avoid total failure`,
