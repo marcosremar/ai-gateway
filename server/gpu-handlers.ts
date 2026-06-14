@@ -43,6 +43,7 @@ import {
 import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
 import { runPreFlightChecks, validateDockerImageReference } from '../src/preflight-checks';
 import { detectModelSizeClass } from '../src/gpu-compat';
+import { snapshotProviderEligible } from './gpu-snapshot';
 import type { DockerCapability } from '../src/gateway/providers/gpu/docker-manifest';
 import { defaultApiPathsForCapabilities } from '../src/gateway/providers/gpu/docker-manifest';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
@@ -903,6 +904,17 @@ async function _selectDeploymentTier(
       log.log(`[req=${requestId}] SnapGPU enabled (backend=${config.snapgpuBackend}, preloadApp=${config.snapgpuPreloadApp}, autoSnapshot=${config.autoSnapshot})`);
     } else {
       log.warn(`[req=${requestId}] SnapGPU requested but no API key for backend=${config.snapgpuBackend} — falling back to regular deploy`);
+    }
+  }
+
+  // Warn when snapshots/fast-boot were requested but no resolved provider can
+  // actually snapshot (#116). `autoSnapshot` defaults true, yet capture only
+  // works on vast-vm/hyperstack/snapgpu-backed tiers; surfacing this keeps users
+  // from assuming fast boots they won't get.
+  if (config.autoSnapshot && config.useSnapgpu === false) {
+    const anyEligible = allTiers.some((t) => snapshotProviderEligible(t.name) || t.name === 'snapgpu');
+    if (!anyEligible && allTiers.length > 0) {
+      log.warn(`[req=${requestId}] autoSnapshot requested but no snapshot-eligible provider in cascade [${allTiers.map(t => t.name).join(', ')}] — capture will no-op (eligible: vast-vm, hyperstack)`);
     }
   }
 

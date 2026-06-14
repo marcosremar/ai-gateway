@@ -26,8 +26,53 @@ import { emitGatewayEvent } from './event-bus';
 import { cooldownTracker, categorizeDeployFailure } from './gpu-deploy-tiers';
 import { startDeployLoop, type DeployExtra } from './gpu-deploy-loop';
 import { pickCheapestTierName } from './tier-ranking';
+import { filterUsableTiers } from '../src/modules/gpu-providers/provider-readiness';
 
 const log = createLogger('gpu-deploy');
+
+/**
+ * Canonical deploy ID for profiling/logging (#128).
+ *
+ * The handler generates `deploy-{base36}-{rand}` and sets it on `deployState`,
+ * but `startDeployWithTiers` historically overwrote it with `deploy-${Date.now()}`
+ * for profiling — so logs/events referenced two different ids for one deploy.
+ * Reuse the handler's id when present; only synthesize a fallback when state has
+ * none (e.g. a direct call path). Pure.
+ */
+export function canonicalDeployId(
+  stateDeployId: string | undefined | null,
+  now: number = Date.now(),
+): string {
+  const id = (stateDeployId ?? '').trim();
+  return id.length > 0 ? id : `deploy-${now}`;
+}
+
+/** One tier's parallel-probe result, summarized for the deploy session (#140). */
+export interface TierProbeResult {
+  name: string;
+  label?: string;
+  available: boolean;
+  offerCount: number;
+  ms: number;
+}
+
+/**
+ * Summarize parallel tier-probe results for the deploy response/UI (#140).
+ *
+ * The probe logged offer availability then discarded it; operators couldn't see
+ * which providers had stock before the cascade started. This pure reducer builds
+ * a compact summary (per-tier availability + which had any offers) the session
+ * can surface. Pure.
+ */
+export function summarizeTierProbes(probes: readonly TierProbeResult[]): {
+  probes: TierProbeResult[];
+  availableProviders: string[];
+  anyAvailable: boolean;
+} {
+  const list = probes.map((p) => ({ ...p }));
+  const availableProviders = list.filter((p) => p.available && p.offerCount > 0).map((p) => p.name);
+  return { probes: list, availableProviders, anyAvailable: availableProviders.length > 0 };
+}
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 // Per-image Modal app script lookup. `gpu-deploy-race.ts` documents the
 // fallback rationale; we mirror the same shim here so both deploy paths
@@ -84,7 +129,9 @@ export function budgetProjectionHours(extra: {
 }
 
 export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
-  const deployId = `deploy-${Date.now()}`;
+  // Reuse the handler-assigned deployId so profiling/logs reference one canonical
+  // id instead of a second `deploy-${Date.now()}` (#128).
+  const deployId = canonicalDeployId(deployState.deployId);
   const { result, profile } = await profileOperation(
     deployId,
     async () => {
@@ -231,6 +278,21 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     availableTiers = [earliest];
   }
 
+  // Drop providers with no/invalid credentials, exactly like the race path does
+  // (#136). The cooldown filter above only skips rate-limited tiers; a tier with
+  // an empty/invalid key would otherwise waste a full attempt (and a cooldown).
+  // SAFE: filterUsableTiers never empties the list — if every tier looks
+  // unconfigured it returns the original set untouched (fellBack).
+  {
+    const r = filterUsableTiers(availableTiers);
+    if (r.skipped.length > 0) {
+      log.log(`[gpu] Skipping ${r.skipped.length} unconfigured provider(s): ${r.skipped.map(t => t.name).join(', ')} — cascade: ${r.usable.map(t => t.name).join(', ')}`);
+      availableTiers = r.usable;
+    } else if (r.fellBack) {
+      log.warn('[gpu] all cascade providers look unconfigured (no creds detected) — proceeding with original set; check provider API keys');
+    }
+  }
+
   // Probe all providers in parallel (20s timeout) to check availability and log results.
   // DO NOT reorder - preserve the configured cascade order (Vast.ai → RunPod → Modal).
   // Reordering by response time breaks the intended priority and can cause Modal (0ms, non-working)
@@ -257,6 +319,20 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
       .filter((r): r is PromiseFulfilledResult<{tier: GpuTier; available: boolean; ms: number; offerCount: number}> => r.status === 'fulfilled')
       .map(r => r.value);
     log.log(`[gpu] Provider probe: ${probed.map(p => `${p.tier.label}(${p.available ? p.offerCount + ' offers' : 'unavailable'}, ${p.ms}ms)`).join(', ')}`);
+    // Surface probe availability instead of discarding it (#140): emit a
+    // structured summary so operators (and the UI via the event bus) can see
+    // which providers had stock before the cascade started.
+    try {
+      const summary = summarizeTierProbes(
+        probed.map(p => ({ name: p.tier.name, label: p.tier.label, available: p.available, offerCount: p.offerCount, ms: p.ms })),
+      );
+      emitGatewayEvent('gpu.tier_probe', {
+        deployId: deployState.deployId,
+        availableProviders: summary.availableProviders,
+        anyAvailable: summary.anyAvailable,
+        probes: summary.probes,
+      });
+    } catch { /* probe summary is best-effort */ }
     // availableTiers stays in original order - do NOT reorder
   }
 
@@ -316,6 +392,9 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
           endpoint: deployState.endpoint,
           costPerHr: deployState.costPerHr,
           durationMs,
+          // Propagate the deploy's autoSnapshot opt-out so the snapshot hook can
+          // honor it (#172). Undefined keeps the historical default-on capture.
+          autoSnapshot: extra.snapgpuAutoSnapshot,
         });
         return;
       }

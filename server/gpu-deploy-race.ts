@@ -145,6 +145,46 @@ export function summarizeRaceWaste(
 }
 
 /**
+ * Count the non-winner race slots whose teardown is still outstanding (#150).
+ *
+ * The winner sets `raceDone`, starts monitoring/canary, and returns while loser
+ * cleanup runs in other promise branches; if a loser delete throws, the orphan
+ * sweep is the only safety net. This pure count lets the winner path log how many
+ * losers are still pending teardown (observability) without changing timing.
+ * Pure — `winnerInstanceId` null means no winner yet (all are outstanding).
+ */
+export function countOutstandingLoserDeletes(
+  candidates: ReadonlyArray<{ instanceId: string }>,
+  winnerInstanceId: string | null | undefined,
+): number {
+  return candidates.filter((c) => c.instanceId !== winnerInstanceId).length;
+}
+
+/** Number of times to retry a failed race-loser delete before giving up (#153). */
+export const LOSER_DELETE_MAX_ATTEMPTS = 3;
+/** Base backoff (ms) between race-loser delete retries (#153). */
+export const LOSER_DELETE_BACKOFF_MS = 2_000;
+
+/**
+ * Backoff schedule for retrying a failed race-loser delete (#153).
+ *
+ * A failed loser `deleteInstance` previously only logged and waited for the
+ * orphan sweep, but the sweep's grace window (45 min) far exceeds its 10-min
+ * interval, so a stray loser could bill up to 45 min. This returns the
+ * per-attempt delay schedule for an immediate bounded retry. `attempts <= 1`
+ * yields a single immediate attempt (historical behavior). Pure.
+ */
+export function loserDeleteRetryPlan(
+  attempts: number = LOSER_DELETE_MAX_ATTEMPTS,
+  backoffMs: number = LOSER_DELETE_BACKOFF_MS,
+): number[] {
+  const n = Math.max(1, Math.floor(attempts));
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) out.push(i === 0 ? 0 : Math.max(0, backoffMs) * i);
+  return out;
+}
+
+/**
  * When the caller wants a single-provider race (`noTierCascade` or a forced
  * provider), keep all slots on one tier instead of diversifying across
  * providers (#152).
@@ -645,7 +685,8 @@ export async function startDeployRace(
                 const { startBackgroundWarmthMonitor } = await import('./gpu-health-monitor');
                 startBackgroundWarmthMonitor(localEndpoint);
                 startCanaryIfEnabled(extra, dockerImage, c.gpuType);
-                log.log(`[race] Winner: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
+                const outstandingLosers = countOutstandingLoserDeletes(candidates, c.instanceId);
+                log.log(`[race] Winner: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s (losers pending teardown=${outstandingLosers})`);
                 logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
                 upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
                 if (await cooldownTracker.recordSuccess(c.tier.name)) {
@@ -659,6 +700,8 @@ export async function startDeployRace(
                   costPerHr: c.costPerHr,
                   durationMs,
                   raceCount: candidates.length,
+                  // Propagate autoSnapshot opt-out for the capture hook (#172).
+                  autoSnapshot: extra.snapgpuAutoSnapshot,
                 });
                 return; // winner exits cleanly — no cleanup needed
               }
@@ -683,11 +726,25 @@ export async function startDeployRace(
       const reason = raceDone ? 'lost' : deployCancelled ? 'cancelled' : 'timed out';
       const aliveMs = Date.now() - deployStartedAt;
       const wastedUsd = c.costPerHr > 0 ? c.costPerHr * aliveMs / 3_600_000 : 0;
-      try {
-        await Promise.race([
-          c.tier.client.deleteInstance(c.instanceId, credentials),
-          new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${c.tier.name} deleteInstance timed out`)), 15_000)),
-        ]);
+      // Retry the delete a few times immediately instead of relying solely on the
+      // orphan sweep (#153) — a transient API 5xx otherwise leaves a billable
+      // loser running for up to the sweep's 45-min grace window.
+      let deleted = false;
+      let lastErr: unknown;
+      for (const delay of loserDeleteRetryPlan()) {
+        if (delay > 0) await new Promise(r => setTimeout(r, delay));
+        try {
+          await Promise.race([
+            c.tier.client.deleteInstance(c.instanceId, credentials),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${c.tier.name} deleteInstance timed out`)), 15_000)),
+          ]);
+          deleted = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      if (deleted) {
         log.log(
           `[race] Loser destroyed: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} ` +
           `provider=${c.tier.name} gpu=${c.gpuType || '-'} reason=${reason} ` +
@@ -698,9 +755,9 @@ export async function startDeployRace(
           durationMs: aliveMs,
           metadata: { instanceId: c.instanceId, gpuType: c.gpuType, reason, wastedUsd: +wastedUsd.toFixed(4), raceCount: candidates.length },
         });
-      } catch (err) {
+      } else {
         // Orphan sweep will eventually terminate this stray instance when race completes
-        log.warn(`[race] Failed to terminate slot ${idx} (${reason}): ${err}`);
+        log.warn(`[race] Failed to terminate slot ${idx} (${reason}) after ${LOSER_DELETE_MAX_ATTEMPTS} attempts: ${lastErr}`);
       }
     }
   }));

@@ -111,6 +111,35 @@ export function networkVolumeIsWasted(
   return !!volumeId && imageIsPreBaked === true;
 }
 
+/** Default attempts for the post-restore health probe (#171). */
+export const RESTORE_PROBE_ATTEMPTS = 3;
+/** Delay (ms) between post-restore health probes (#171). */
+export const RESTORE_PROBE_DELAY_MS = 3_000;
+/** Per-probe fetch timeout (ms) for the post-restore health check (#171). */
+export const RESTORE_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Build the retry schedule for the post-snapshot-restore health probe (#171).
+ *
+ * After a "restored" snapshot the loop previously made a single 5s `/health`
+ * probe; a slow VRAM re-materialization was treated as failure and fell back to
+ * the (slow) cold path, wasting the restore. This returns the per-attempt
+ * `{ delayMs }` schedule (first probe immediate, then short gaps) so the loop
+ * retries briefly before abandoning. Pure — `attempts <= 1` yields one immediate
+ * probe (the historical behavior).
+ */
+export function restoreProbePlan(
+  attempts: number = RESTORE_PROBE_ATTEMPTS,
+  delayMs: number = RESTORE_PROBE_DELAY_MS,
+): Array<{ attempt: number; delayMs: number }> {
+  const n = Math.max(1, Math.floor(attempts));
+  const plan: Array<{ attempt: number; delayMs: number }> = [];
+  for (let i = 0; i < n; i++) {
+    plan.push({ attempt: i + 1, delayMs: i === 0 ? 0 : Math.max(0, delayMs) });
+  }
+  return plan;
+}
+
 export interface DeployExtra {
   region?: string;
   storageGb?: number;
@@ -398,35 +427,45 @@ export async function startDeployLoop(
               models: modelsFromDeployState(),
             });
             if (restore.restored) {
-              // Quick health probe — if ready, short-circuit to ready.
+              // Health probe with a short retry schedule (#171): a slow VRAM
+              // re-materialization shouldn't be treated as failure after a single
+              // 5s probe (which would waste the restore and fall to the cold
+              // path). Retry briefly before abandoning.
               const endpoint = instance.endpoint;
               if (endpoint) {
-                try {
-                  const probe = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(5_000) });
-                  if (probe.ok) {
-                    const durationMs = Date.now() - deployState.startedAt;
-                    setGpuHealthy(true);
-                    setLastRequestTime(Date.now());
-                    setDeployState({
-                      status: 'ready',
-                      message: `GPU ready via snapshot restore (${label}): ${endpoint} — ${restore.durationMs}ms`,
-                      step: 'ready',
-                      stepDetail: `snapshot:${restore.entry?.r2Key ?? '?'}`,
-                      deployDurationMs: durationMs,
-                      alert: '',
-                      alertLevel: 'info',
-                    });
-                    broadcastProviderStatus('booting', 'cloud', `GPU deployed via snapshot (${restore.durationMs}ms)`);
-                    deploymentSM.markReady(deployState.podId, endpoint, deployState.gpuType, deployState.costPerHr);
-                    log.log(`[gpu] Snapshot restore succeeded in ${restore.durationMs}ms (${label})`);
-                    startGpuMonitoring();
-                    startBackgroundWarmthMonitor(endpoint);
-                    startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
-                    return;
+                let probedOk = false;
+                for (const step of restoreProbePlan()) {
+                  if (deployCancelled) break;
+                  if (step.delayMs > 0) await new Promise(r => setTimeout(r, step.delayMs));
+                  try {
+                    const probe = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(RESTORE_PROBE_TIMEOUT_MS) });
+                    if (probe.ok) { probedOk = true; break; }
+                  } catch (probeErr) {
+                    log.warn(`[gpu] Snapshot restore probe ${step.attempt} failed: ${probeErr instanceof Error ? probeErr.message : probeErr}`);
                   }
-                } catch (probeErr) {
-                  log.warn(`[gpu] Snapshot restored but health probe failed: ${probeErr instanceof Error ? probeErr.message : probeErr}`);
                 }
+                if (probedOk) {
+                  const durationMs = Date.now() - deployState.startedAt;
+                  setGpuHealthy(true);
+                  setLastRequestTime(Date.now());
+                  setDeployState({
+                    status: 'ready',
+                    message: `GPU ready via snapshot restore (${label}): ${endpoint} — ${restore.durationMs}ms`,
+                    step: 'ready',
+                    stepDetail: `snapshot:${restore.entry?.r2Key ?? '?'}`,
+                    deployDurationMs: durationMs,
+                    alert: '',
+                    alertLevel: 'info',
+                  });
+                  broadcastProviderStatus('booting', 'cloud', `GPU deployed via snapshot (${restore.durationMs}ms)`);
+                  deploymentSM.markReady(deployState.podId, endpoint, deployState.gpuType, deployState.costPerHr);
+                  log.log(`[gpu] Snapshot restore succeeded in ${restore.durationMs}ms (${label})`);
+                  startGpuMonitoring();
+                  startBackgroundWarmthMonitor(endpoint);
+                  startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
+                  return;
+                }
+                log.warn(`[gpu] Snapshot restored but health never responded after ${RESTORE_PROBE_ATTEMPTS} probes — falling back to cold path`);
               }
             } else if (restore.reason && restore.reason !== 'no matching snapshot' && restore.reason !== 'provider not snapshot-eligible' && restore.reason !== 'no snapshot bucket configured') {
               log.warn(`[gpu] Snapshot restore not used: ${restore.reason}`);

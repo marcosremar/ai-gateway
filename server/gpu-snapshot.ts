@@ -86,6 +86,106 @@ export function getSnapshotMetrics(): Readonly<SnapshotMetrics> {
   return { ...metrics };
 }
 
+// ── Provider eligibility & capture gating ───────────────────────────────────
+
+/** The only providers whose pods can run CRIU/cuda-checkpoint snapshots. */
+export const SNAPSHOT_ELIGIBLE_PROVIDERS: readonly string[] = ['vast-vm', 'hyperstack'];
+
+/**
+ * Whether a provider's pods can participate in snapshot capture/restore (#116).
+ *
+ * Only `vast-vm` and `hyperstack` grant the CAP_CHECKPOINT_RESTORE / CAP_SYS_ADMIN
+ * + driver 570+ a snapshot needs. `autoSnapshot` defaults true, so a deploy on
+ * RunPod/Vast-container/TensorDock silently no-ops capture; callers use this to
+ * *warn* at deploy time so users don't wrongly expect fast boots. Pure.
+ */
+export function snapshotProviderEligible(provider: string | undefined | null): boolean {
+  return !!provider && SNAPSHOT_ELIGIBLE_PROVIDERS.includes(provider);
+}
+
+/**
+ * Whether the deploy-time snapshot warning should fire (#116).
+ *
+ * Fires only when snapshotting was explicitly requested (`autoSnapshot === true`)
+ * AND the provider can't actually snapshot — i.e. the user asked for fast boots
+ * they won't get. A non-eligible provider with snapshotting off (or defaulted)
+ * stays quiet. Pure.
+ */
+export function shouldWarnSnapshotIneligible(
+  provider: string | undefined | null,
+  autoSnapshot: boolean | undefined,
+): boolean {
+  return autoSnapshot === true && !snapshotProviderEligible(provider);
+}
+
+/**
+ * Whether the `gpu.deployed` hook should actually capture a snapshot (#172).
+ *
+ * The hook previously captured on every `gpu.deployed` for vast-vm/hyperstack
+ * regardless of the deploy's `autoSnapshot` flag, burning CRIU time + storage on
+ * deploys that opted out. Capture only when the provider is eligible AND
+ * `autoSnapshot` is not explicitly false (undefined keeps the historical
+ * default-on behavior for eligible providers). Pure.
+ */
+export function shouldCaptureOnDeployed(
+  provider: string | undefined | null,
+  autoSnapshot: boolean | undefined,
+): boolean {
+  if (!snapshotProviderEligible(provider)) return false;
+  return autoSnapshot !== false;
+}
+
+// ── Capture concurrency guard (#173) ────────────────────────────────────────
+// A redeploy that fires `gpu.deployed` while a prior capture is mid-`criu dump`
+// could run two CRIU dumps against the same pod. Track in-flight captures by a
+// per-pod key so a second capture for the same pod is skipped until the first
+// finishes. Keyed by pod identity (deployId|host:port) so distinct pods still
+// capture concurrently.
+
+const _capturesInFlight = new Set<string>();
+
+/** Build the per-pod capture key used by the concurrency guard (#173). */
+export function captureLockKey(deployId: string, host: string, port: number): string {
+  return `${deployId || '-'}|${host}:${port}`;
+}
+
+/** Try to acquire the capture lock for a pod. Returns false if already held (#173). */
+export function acquireCaptureLock(key: string): boolean {
+  if (_capturesInFlight.has(key)) return false;
+  _capturesInFlight.add(key);
+  return true;
+}
+
+/** Release a previously-acquired capture lock (#173). */
+export function releaseCaptureLock(key: string): void {
+  _capturesInFlight.delete(key);
+}
+
+/** Test/diagnostic: number of captures currently in flight (#173). */
+export function capturesInFlightCount(): number {
+  return _capturesInFlight.size;
+}
+
+/**
+ * Canonicalize the model list used for snapshot hashing so capture and restore
+ * always derive the same `modelHash` (#174).
+ *
+ * `modelsFromDeployState()` is best-effort and order-dependent on warmth status,
+ * so capture and restore could feed differently-ordered/duplicated lists into
+ * `hashModels`, producing mismatched hashes that silently defeat reuse. Trim,
+ * drop empties, de-dupe, and sort so both sides agree regardless of source
+ * ordering. Pure.
+ */
+export function canonicalizeModelList(models: readonly string[] | undefined | null): string[] {
+  if (!models || models.length === 0) return [];
+  const seen = new Set<string>();
+  for (const m of models) {
+    const t = String(m ?? '').trim();
+    if (t) seen.add(t);
+  }
+  return [...seen].sort();
+}
+
 // ── R2/S3 helpers ───────────────────────────────────────────────────────────
 
 /** Resolve the snapshot store provider from env. Pure — returns a descriptor
@@ -298,7 +398,9 @@ export function hashImage(ref: string, digest?: string): string {
 }
 
 export function hashModels(models: readonly string[]): string {
-  const joined = [...models].sort().join('|');
+  // Canonicalize (trim/dedupe/drop-empty/sort) so capture and restore always
+  // agree on the modelHash regardless of source ordering (#174).
+  const joined = canonicalizeModelList(models).join('|');
   return createHash('sha256').update(joined).digest('hex').slice(0, 16);
 }
 
@@ -446,6 +548,44 @@ export interface PreCheckResult {
   driverMajor?: number;
 }
 
+/**
+ * Single SSH command that probes both the driver version and the checkpoint
+ * capability in one round-trip (#180).
+ *
+ * The pre-check previously did two serial SSH connections (`nvidia-smi`, then
+ * `capsh`) on the hot path before every capture/restore. Combining them halves
+ * the connection latency. Output is two labelled lines parsed by
+ * {@link parseSnapshotPreCheckOutput}. Pure (no I/O). Inputs are whitelisted
+ * literals — no interpolation.
+ */
+export function snapshotPreCheckCommand(): string {
+  return (
+    `echo "DRIVER:$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"; ` +
+    `if capsh --has-p=CAP_CHECKPOINT_RESTORE 2>/dev/null || capsh --has-p=CAP_SYS_ADMIN 2>/dev/null; ` +
+    `then echo "CAP:ok"; else echo "CAP:missing"; fi`
+  );
+}
+
+/**
+ * Parse the combined pre-check output into a {@link PreCheckResult} (#180).
+ * Pure so the parsing rules can be unit-tested without SSH.
+ */
+export function parseSnapshotPreCheckOutput(stdout: string): PreCheckResult {
+  const driverMatch = stdout.match(/DRIVER:(.*)/);
+  const driverStr = (driverMatch?.[1] ?? '').trim();
+  const driverMajor = parseInt(driverStr.split('.')[0] ?? '0', 10);
+  if (!driverStr || !Number.isFinite(driverMajor) || driverMajor === 0) {
+    return { ok: false, reason: `nvidia-smi returned no driver version` };
+  }
+  if (driverMajor < 570) {
+    return { ok: false, reason: `driver ${driverStr} < 570`, driverMajor };
+  }
+  if (!/CAP:ok/.test(stdout)) {
+    return { ok: false, reason: 'missing CAP_CHECKPOINT_RESTORE and CAP_SYS_ADMIN', driverMajor };
+  }
+  return { ok: true, driverMajor };
+}
+
 export async function snapshotPreCheck(
   tgt: SshTarget,
   provider: string,
@@ -453,22 +593,13 @@ export async function snapshotPreCheck(
   if (provider !== 'vast-vm' && provider !== 'hyperstack') {
     return { ok: false, reason: `provider ${provider} not snapshot-eligible` };
   }
-  // nvidia-smi query — whitelisted, no interpolation.
-  const driver = await sshExec(tgt, 'nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1', { timeoutMs: 15_000 });
-  if (driver.code !== 0) {
-    return { ok: false, reason: `nvidia-smi failed: ${driver.stderr.slice(0, 200)}` };
+  // One combined SSH round-trip for driver + capability (#180). Whitelisted
+  // literals, no interpolation.
+  const res = await sshExec(tgt, snapshotPreCheckCommand(), { timeoutMs: 15_000 });
+  if (res.code !== 0 && !/DRIVER:/.test(res.stdout)) {
+    return { ok: false, reason: `precheck ssh failed: ${res.stderr.slice(0, 200)}` };
   }
-  const driverStr = driver.stdout.trim();
-  const driverMajor = parseInt(driverStr.split('.')[0] ?? '0', 10);
-  if (!Number.isFinite(driverMajor) || driverMajor < 570) {
-    return { ok: false, reason: `driver ${driverStr} < 570`, driverMajor };
-  }
-  // Cap check — need either CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN.
-  const caps = await sshExec(tgt, 'capsh --has-p=CAP_CHECKPOINT_RESTORE || capsh --has-p=CAP_SYS_ADMIN', { timeoutMs: 10_000 });
-  if (caps.code !== 0) {
-    return { ok: false, reason: 'missing CAP_CHECKPOINT_RESTORE and CAP_SYS_ADMIN', driverMajor };
-  }
-  return { ok: true, driverMajor };
+  return parseSnapshotPreCheckOutput(res.stdout);
 }
 
 // ── cuda-checkpoint bootstrap ───────────────────────────────────────────────
@@ -788,7 +919,17 @@ export function installSnapshotHook(): void {
   onGatewayEvent((event, data) => {
     if (event !== 'gpu.deployed') return;
     const provider = String(data.provider ?? '');
-    if (provider !== 'vast-vm' && provider !== 'hyperstack') return;
+    // Gate capture on provider eligibility AND the deploy's autoSnapshot flag
+    // (#172) — previously every eligible deploy captured regardless of opt-out,
+    // burning CRIU time + storage. `autoSnapshot` rides on the event payload;
+    // when absent we keep the historical default-on for eligible providers.
+    const autoSnapshot = typeof data.autoSnapshot === 'boolean' ? data.autoSnapshot : undefined;
+    if (!shouldCaptureOnDeployed(provider, autoSnapshot)) {
+      if (snapshotProviderEligible(provider) && autoSnapshot === false) {
+        log.log(`[snapshot] capture skipped: autoSnapshot disabled for this deploy`);
+      }
+      return;
+    }
 
     // Pull fields from deployState to avoid requiring the handler to
     // thread them through. The state has been set ready by the time this
@@ -800,6 +941,14 @@ export function installSnapshotHook(): void {
       return;
     }
     const ssh: SshTarget = { host: deployState.sshHost, port: deployState.sshPort };
+    // Per-pod concurrency guard (#173): a redeploy firing gpu.deployed while a
+    // prior criu dump is still running would dump the same pod twice. Skip if a
+    // capture for this pod is already in flight; release in the .finally.
+    const lockKey = captureLockKey(deployId, deployState.sshHost, deployState.sshPort);
+    if (!acquireCaptureLock(lockKey)) {
+      log.log(`[snapshot] capture already in flight for ${lockKey} — skipping duplicate`);
+      return;
+    }
     // Fire-and-forget; capture is best-effort and must not block callers.
     captureSnapshot({
       deployId,
@@ -807,7 +956,9 @@ export function installSnapshotHook(): void {
       ssh,
       imageRef,
       models: modelsFromDeployState(),
-    }).catch((err) => log.warn(`[snapshot] capture threw: ${err instanceof Error ? err.message : err}`));
+    })
+      .catch((err) => log.warn(`[snapshot] capture threw: ${err instanceof Error ? err.message : err}`))
+      .finally(() => releaseCaptureLock(lockKey));
   });
   log.log('[snapshot] event-bus hook installed — will capture on gpu.deployed');
 }
