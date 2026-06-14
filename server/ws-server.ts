@@ -10,7 +10,7 @@ import { timingSafeEqual } from 'crypto';
 import { botState, deployState, gpuHealthy, gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, isStageWarm, isTtsWarm } from './state';
 import { shouldPreferGpuTts } from './providers';
 import { isGpuAvailable } from './state';
-import { wsClients, unsubscribeDub, isBackpressured } from './ws-state';
+import { wsClients, unsubscribeDub, isBackpressured, shouldEmitLegacyProviderStatus } from './ws-state';
 import type { BabelCastWS } from './ws-state';
 import { PORT } from './config';
 import { speculativeCache } from './speculative-cache';
@@ -85,6 +85,32 @@ export function clampConnCount(n: number): number {
 const MAX_WS_TOTAL = 200;
 let wsConnectionCount = 0;
 
+/** Seconds clients should wait before retrying after a connection-cap 429 (#404). */
+export const WS_CONN_CAP_RETRY_AFTER_SEC = 5;
+
+/**
+ * Build the 429 response for the global connection-cap rejection (#404). The
+ * previous bare "Too many connections" gave clients no backoff hint, inviting a
+ * tight reconnect storm against a full pool. This adds a `Retry-After` header and
+ * a JSON body carrying the limit so well-behaved clients back off. Pure (returns
+ * a `Response`) so the header/body contract is unit-testable without Bun.
+ */
+export function buildConnCapRejection(
+  limit = MAX_WS_TOTAL,
+  retryAfterSec = WS_CONN_CAP_RETRY_AFTER_SEC,
+): Response {
+  return new Response(
+    JSON.stringify({ error: 'too_many_connections', limit, retryAfter: retryAfterSec }),
+    {
+      status: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': String(retryAfterSec),
+      },
+    },
+  );
+}
+
 /** Per-message byte ceiling (documented "5MB / 1009" contract). */
 export const MAX_WS_MESSAGE_SIZE = 5 * 1024 * 1024;
 
@@ -106,6 +132,56 @@ export function exceedsWsMessageLimit(msg: string | { byteLength: number }, limi
 /** A 1009 close reason the client can parse to learn the byte limit (#480). */
 export function wsTooLargeCloseReason(limit = MAX_WS_MESSAGE_SIZE): string {
   return `Message too large (max ${limit} bytes)`;
+}
+
+/**
+ * Normalize an inbound WS frame to a Buffer exactly once (#445). The relay paths
+ * did `Buffer.isBuffer(msg) ? msg : Buffer.from(msg)` and then handled the bytes
+ * again; for `Uint8Array`/`ArrayBuffer` payloads this risks double-copying. This
+ * single helper returns the existing Buffer untouched, or wraps a view without
+ * copying when possible. Pure.
+ */
+export function toFrameBuffer(msg: string | Buffer | ArrayBuffer | Uint8Array): Buffer {
+  if (Buffer.isBuffer(msg)) return msg;
+  if (typeof msg === 'string') return Buffer.from(msg);
+  if (msg instanceof Uint8Array) return Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength);
+  return Buffer.from(msg as ArrayBuffer);
+}
+
+/**
+ * Format a structured close-code log line for a disconnecting socket (#494).
+ * `close()` only logged the id, so idle-timeout vs backpressure-close vs
+ * client-leave were indistinguishable in the logs. This emits the id, type,
+ * numeric close code, and (sanitized, length-capped) reason. Pure → easy to test.
+ */
+export function formatWsCloseLog(
+  id: string,
+  type: string,
+  code?: number,
+  reason?: string,
+): string {
+  const safeReason = (reason ?? '').replace(/[\r\n\t]/g, ' ').slice(0, 120);
+  return `[ws] close id=${id} type=${type} code=${code ?? 'n/a'}${safeReason ? ` reason="${safeReason}"` : ''}`;
+}
+
+/**
+ * A live snapshot of WS connection counters for `/metrics` / debugging (#489).
+ * These gauges were not exported anywhere, so operators couldn't see leaks or
+ * backpressure drops. Pure read of the current counts (the dropped-frame counter
+ * lives in ws-state as `wsBroadcastDropped`).
+ */
+export function getWsConnectionStats(): {
+  total: number;
+  max: number;
+  botEvents: number;
+  sttSessions: number;
+} {
+  return {
+    total: wsConnectionCount,
+    max: MAX_WS_TOTAL,
+    botEvents: wsClients.size,
+    sttSessions: sttSessions.size,
+  };
 }
 
 /** Known WS endpoint paths → the `WsData.type` they upgrade to (#413). */
@@ -167,11 +243,51 @@ export function validateStartupConfig(): string[] {
   return warnings;
 }
 
+/**
+ * Extract the WS auth token, preferring the `Authorization: Bearer` header over
+ * the `?token=` query param (#471). Tokens in the query string leak into proxy
+ * access logs and browser history; the header is the safer channel. We still
+ * accept the query param for browser WebSocket clients (which can't set headers),
+ * but header wins when both are present. Returns the token plus where it came
+ * from so the caller can redact / warn on query-sourced tokens. Pure.
+ */
+export function extractWsAuthToken(
+  headerAuth: string | null | undefined,
+  queryToken: string | null | undefined,
+): { token: string | null; source: 'header' | 'query' | 'none' } {
+  const fromHeader = headerAuth?.replace(/^Bearer\s+/i, '').trim();
+  if (fromHeader) return { token: fromHeader, source: 'header' };
+  const fromQuery = (queryToken ?? '').trim();
+  if (fromQuery) return { token: fromQuery, source: 'query' };
+  return { token: null, source: 'none' };
+}
+
+/**
+ * Allowlist check for a browser-originated WS upgrade `Origin` (#478). HTTP has
+ * CORS handling but the WS upgrade did not validate `Origin`, so any web page
+ * holding a token could open an authenticated socket. Behavior is fail-OPEN when
+ * no allowlist is configured (`AIGW_WS_ALLOWED_ORIGINS` unset/empty) so existing
+ * non-browser clients and dev setups are unaffected; once an allowlist is set,
+ * only listed origins (exact match, comma-separated) pass. A missing `Origin`
+ * header (non-browser client) is always allowed — only browsers send it. Pure.
+ */
+export function isAllowedWsOrigin(
+  origin: string | null | undefined,
+  allowed: string | null | undefined,
+): boolean {
+  const list = (allowed ?? '').split(',').map(s => s.trim()).filter(Boolean);
+  if (list.length === 0) return true;        // no allowlist configured → allow all
+  if (!origin) return true;                  // non-browser client → no Origin to check
+  return list.includes(origin.trim());
+}
+
 /** Constant-time string comparison to prevent timing attacks on auth tokens.
  *  Length mismatches are still compared in constant time (against a padded
  *  copy of `b`) so the response time doesn't leak the expected token length.
+ *  Exported so the recall-token path reuses the same padded compare rather than
+ *  a fast-returning `===` that leaks the empty/short case (#476).
  */
-function safeCompare(a: string, b: string): boolean {
+export function safeCompare(a: string, b: string): boolean {
   if (!a || !b) return false;
   if (a.length !== b.length) {
     try {
@@ -242,8 +358,11 @@ function sendInitialGpuStatus(ws: import('bun').ServerWebSocket<WsData>): void {
       shadowRuns: gpuReadinessState.shadowCompletedRuns,
     },
   }));
-  // Legacy provider:status for Python app backward compat
-  ws.send(JSON.stringify({ type: 'provider:status', gpu: _gpuStatus, tier: _tier, reason: deployState.message || 'Current status' }));
+  // Legacy provider:status for Python app backward compat — gated so newer
+  // fleets can drop the duplicate connect frame too (#493).
+  if (shouldEmitLegacyProviderStatus()) {
+    ws.send(JSON.stringify({ type: 'provider:status', gpu: _gpuStatus, tier: _tier, reason: deployState.message || 'Current status' }));
+  }
   log.log(`[ws] Client connected id=${ws.data.id} (total=${wsClients.size}), sent gpu:status gpu=${_gpuStatus} tier=${_tier}`);
 }
 
@@ -278,8 +397,10 @@ export async function startWsServer(): Promise<number> {
       const url = new URL(req.url);
 
       // ── Global WS connection limit — reject before any per-session upgrade ──
+      // 429 now carries Retry-After + a JSON body with the limit so a client
+      // hitting a full pool backs off instead of reconnect-storming (#404).
       if (wsConnectionCount >= MAX_WS_TOTAL) {
-        return new Response('Too many connections', { status: 429 });
+        return buildConnCapRejection();
       }
 
       // ── Recall.ai audio endpoint — uses its own secret, checked before gateway auth ──
@@ -297,9 +418,22 @@ export async function startWsServer(): Promise<number> {
         return new Response('WebSocket upgrade failed', { status: 400 });
       }
 
+      // ── Origin allowlist for browser-originated upgrades (#478) ──────────────
+      // Fail-open when AIGW_WS_ALLOWED_ORIGINS is unset so non-browser/dev
+      // clients are unaffected; only enforce once an allowlist is configured.
+      if (!isAllowedWsOrigin(req.headers.get('origin'), process.env.AIGW_WS_ALLOWED_ORIGINS)) {
+        return new Response('Forbidden origin', { status: 403 });
+      }
+
       // WebSocket authentication.
       // Localhost exemption: if no GATEWAY_API_KEY is set AND connection is from localhost, allow it.
-      const authToken = url.searchParams.get('token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+      // Prefer the Authorization header over the ?token= query param (#471) — a
+      // query token lands in proxy/access logs and browser history.
+      const ext = extractWsAuthToken(req.headers.get('authorization'), url.searchParams.get('token'));
+      const authToken = ext.token ?? undefined;
+      if (ext.source === 'query') {
+        log.warn('[ws] auth token supplied via ?token= query (logged/cacheable) — prefer Authorization header');
+      }
       if (!isGatewayWsAuthorized(req, server, authToken)) {
         if (!process.env.GATEWAY_API_KEY) {
           return new Response('Unauthorized — no GATEWAY_API_KEY configured, only localhost allowed', { status: 401 });
@@ -465,7 +599,7 @@ export async function startWsServer(): Promise<number> {
             ws.close(1008, 'Rate limit exceeded');
             return;
           }
-          const recallChunk = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
+          const recallChunk = toFrameBuffer(msg);  // normalize once, no double-copy (#445)
           for (const client of wsClients) {
             // Drop frames for saturated viewers (same rationale as bot-audio relay).
             if (isBackpressured(client)) continue;
@@ -478,6 +612,10 @@ export async function startWsServer(): Promise<number> {
               ws.data.__handshakeSeen = true;
               log.log(`[bot-audio] Handshake: sample_rate=${hs.sampleRate}`);
               setBotAudioSampleRate(hs.sampleRate);
+            } else {
+              // Unexpected text on a binary audio socket — nack instead of
+              // silently swallowing the frame so the client gets feedback (#486).
+              try { ws.send(JSON.stringify({ type: 'error', code: 'unexpected_text', message: 'bot-audio expects binary PCM or a handshake JSON' })); } catch { /* socket closing */ }
             }
             return;
           }
@@ -499,7 +637,7 @@ export async function startWsServer(): Promise<number> {
             if (isBackpressured(client)) continue;
             try { client.send(msg); } catch { wsClients.delete(client); }
           }
-          const audioChunk = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
+          const audioChunk = toFrameBuffer(msg);  // normalize once, no double-copy (#445)
           appendBotAudioChunk(audioChunk);
           if (shouldProcessBotAudio()) {
             processBotAudioBuffer().catch(e => log.warn('buffer processing failed: %s', e instanceof Error ? e.message : e));
@@ -512,7 +650,10 @@ export async function startWsServer(): Promise<number> {
           } catch { /* ignore parse errors */ }
         }
       },
-      close(ws) {
+      close(ws, code, reason) {
+        // Structured close-code logging so idle-timeout vs backpressure-close vs
+        // client-leave are distinguishable in the logs (#494).
+        log.log(formatWsCloseLog(ws.data.id, ws.data.type, code, reason));
         // Only decrement for a socket that was actually counted in open(), and
         // clamp at zero so a double-close / un-opened socket can't drive the
         // counter negative and shrink effective capacity (#403).
@@ -531,6 +672,9 @@ export async function startWsServer(): Promise<number> {
           log.log(`[speech-ws] Client disconnected id=${ws.data.id}`);
         } else if (ws.data.type === 'stt') {
           const backend = sttSessions.get(ws.data.id);
+          // Flush any pending un-flushed text before tearing down so the last
+          // utterance in shortBuf/accumulator still reaches the client (#448).
+          try { (backend as any)?._flushAccum?.(); } catch { /* no-op */ }
           (backend as any)?._clearSttAccumTimer?.();
           backend?.close();
           sttSessions.delete(ws.data.id);

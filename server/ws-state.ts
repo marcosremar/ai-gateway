@@ -57,13 +57,31 @@ export function broadcastWs(msg: Record<string, unknown>): void {
  * tier: "gpu" | "cloud"
  * reason: human-readable explanation
  */
+/**
+ * Whether to also emit the legacy `provider:status` frame alongside `gpu:status`
+ * (#493). Every status change currently sends BOTH events, doubling broadcast
+ * volume purely for old-Python-app backward compat. New deployments that no
+ * longer run the legacy client can set `AIGW_DISABLE_LEGACY_PROVIDER_STATUS=1`
+ * to halve status-broadcast traffic. Defaults to ON (emit) for compatibility.
+ * Pure (reads only env) so it's unit-testable.
+ */
+export function shouldEmitLegacyProviderStatus(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const flag = (env.AIGW_DISABLE_LEGACY_PROVIDER_STATUS ?? '').toLowerCase();
+  return !(flag === '1' || flag === 'true' || flag === 'yes');
+}
+
 export function broadcastProviderStatus(
   gpu: 'ready' | 'offline' | 'booting' | 'error',
   tier: 'gpu' | 'cloud',
   reason: string,
 ): void {
-  // Legacy event (Python app backward compat)
-  broadcastWs({ type: 'provider:status', gpu, tier, reason });
+  // Legacy event (Python app backward compat) — gated so newer fleets can drop
+  // the duplicate frame and halve status broadcast volume (#493).
+  if (shouldEmitLegacyProviderStatus()) {
+    broadcastWs({ type: 'provider:status', gpu, tier, reason });
+  }
   // Richer event with routing + warmth info (new clients + web UI)
   broadcastGpuStatusEvent(gpu, tier, reason);
   log.log(`provider:status → gpu=${gpu} tier=${tier} (${reason})`);
@@ -203,6 +221,21 @@ export function unsubscribeDub(clientId: string): void {
 
 export function getActiveTargets(): string[] {
   return [...dubTargetClients.keys()].filter(t => (dubTargetClients.get(t)?.size ?? 0) > 0);
+}
+
+/**
+ * Build a `transcript:reconnect` hint frame carrying the server-global transcript
+ * cursor (#491). `botTranscriptCursor` is process-global, so a client that
+ * drops and reconnects has no way to know how many transcript items it already
+ * saw and may miss or duplicate them. Sending the current cursor lets the client
+ * request a delta (or skip what it has). Pure builder so it's unit-testable and
+ * reusable by both the connect snapshot and an explicit reconnect handler.
+ */
+export function buildTranscriptReconnectHint(cursor = botTranscriptCursor): {
+  type: 'transcript:reconnect';
+  cursor: number;
+} {
+  return { type: 'transcript:reconnect', cursor: Math.max(0, Math.floor(cursor) || 0) };
 }
 
 /**

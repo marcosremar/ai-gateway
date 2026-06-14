@@ -202,6 +202,25 @@ export function trimChunksToByteBudget(chunks: Buffer[], maxBytes: number): { ch
   return { chunks: kept, bytes: keptBytes };
 }
 
+/**
+ * Trim held PCM to at most `maxBytes`, keeping the trailing (most recent) audio
+ * (#446). When a short/meaningless segment is held and re-prepended to the next
+ * chunk, the held buffer grows every cycle and the same leading audio is
+ * re-transcribed (re-paying STT) until it finally produces a meaningful result.
+ * Capping to the trailing window bounds that growth and stops re-billing the
+ * oldest, already-tried audio. Pure (no module state) — returns the slice to
+ * keep (or the original buffer when already within budget, or null for empty).
+ */
+export function trimHeldPcm(pcm: Buffer | null, maxBytes: number): Buffer | null {
+  if (!pcm || pcm.length === 0) return null;
+  if (pcm.length <= maxBytes) return pcm;
+  // Keep only the trailing maxBytes; align to a 16-bit sample boundary so we
+  // never start mid-sample (odd offset would corrupt the PCM framing).
+  let start = pcm.length - maxBytes;
+  if (start % 2 !== 0) start += 1;
+  return pcm.subarray(start);
+}
+
 /** Force-flush bot audio buffer (called on disconnect or when buffer is too large) */
 export function flushBotAudioBuffer(): void {
   if (botAudioBufferBytes > 0 && botAudioBufferBytes >= 16000) { // at least 0.5s of audio
@@ -260,7 +279,9 @@ export async function processBotAudioBuffer(): Promise<void> {
           botAudioHeldMergeCount < BOT_AUDIO_MAX_MERGE_COUNT &&
           pcmData.length < BOT_AUDIO_MAX_HELD_BYTES
         ) {
-          botAudioHeldPcm = pcmData;
+          // Bound held growth to the trailing window so re-prepended audio can't
+          // grow unbounded and re-bill STT for the oldest already-tried audio (#446).
+          botAudioHeldPcm = trimHeldPcm(pcmData, BOT_AUDIO_MAX_HELD_BYTES);
           botAudioHeldMergeCount++;
           log.log(`[bot-audio] Short segment "${transcription.slice(0, 30)}" — holding audio for merge #${botAudioHeldMergeCount}`);
           return;

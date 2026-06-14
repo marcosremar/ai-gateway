@@ -31,6 +31,47 @@ export function shouldForceFlush(
   return words >= minWords || t.length >= minChars;
 }
 
+/** Default minimum gap (ms) between client `partial` frames (#427). */
+export const STT_PARTIAL_MIN_INTERVAL_MS = 100; // ≤10 partials/sec
+
+/**
+ * Make a rate-limiter for STT `partial` frames (#427). Under fast ASR every
+ * upstream result emits a client `partial` AND an observer frame (two
+ * allocations/sends per token); a chatty provider can flood the socket. This
+ * returns `shouldEmit(now, force)` → true at most once per `minIntervalMs`,
+ * with `force` (e.g. on the final result) always allowed through so the last
+ * partial of an utterance is never swallowed. Pure/closure-based, time injected
+ * so it's deterministic in tests.
+ */
+export function makePartialThrottle(minIntervalMs = STT_PARTIAL_MIN_INTERVAL_MS) {
+  let last = -Infinity;
+  return function shouldEmit(now: number, force = false): boolean {
+    if (force || now - last >= minIntervalMs) {
+      last = now;
+      return true;
+    }
+    return false;
+  };
+}
+
+/** Max chars of accumulated STT context to re-send upstream as the prior-segment seed (#456). */
+export const STT_SEED_MAX_CHARS = 600;
+
+/**
+ * Cap the prior-segment context seed sent back to the upstream STT provider
+ * (#456). Each final pushes text into a rolling context (max N segments) whose
+ * joined string is re-uploaded as the seed on every final; long segments make
+ * that seed large and re-sent each time. Keep only the trailing `maxChars`
+ * (most recent context matters most for ASR) on a word boundary. Pure.
+ */
+export function capSeedChars(seed: string, maxChars = STT_SEED_MAX_CHARS): string {
+  if (seed.length <= maxChars) return seed;
+  const tail = seed.slice(seed.length - maxChars);
+  // Avoid starting mid-word: drop up to the first space so the seed begins clean.
+  const sp = tail.indexOf(' ');
+  return sp > 0 && sp < tail.length - 1 ? tail.slice(sp + 1) : tail;
+}
+
 type WsData = {
   id: string;
   type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
@@ -77,6 +118,8 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
     let sttFlushedLen = 0;
     let sttAccumTimer: ReturnType<typeof setTimeout> | null = null;
     let shortBuf = '';
+    // Throttle intermediate `partial` frames to ≤10/s; finals always pass (#427).
+    const partialThrottle = makePartialThrottle();
     const sttContext: string[] = [];
     const STT_CONTEXT_MAX = 5;
     const STT_ACCUM_TIMEOUT_MS = ws.data.pauseMs ?? 700;
@@ -92,7 +135,9 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
       emitFrame({ kind: 'stt_final', ts: Date.now(), stage: 'stt', provider: backend.provider, meta: { sessionId: ws.data.id, len: text.length } });
       sttContext.push(text);
       while (sttContext.length > STT_CONTEXT_MAX) sttContext.shift();
-      (backend as any).sendSeed?.(sttContext.join(' '));
+      // Cap the re-uploaded seed by chars so long segments don't bloat every
+      // final's upstream payload (#456).
+      (backend as any).sendSeed?.(capSeedChars(sttContext.join(' ')));
       const labs = getLabsFlags();
       if (labs.speculativeTranslation && ws.data.speculateTarget && text) {
         const srcLang = ws.data.language || 'fr';
@@ -122,8 +167,12 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
       const pending = sttFullText.slice(sttFlushedLen).trim();
 
       const partialText = shortBuf ? (shortBuf + ' ' + pending).trim() : (pending || newText);
-      ws.send(JSON.stringify({ type: 'partial', text: partialText, provider: evt.provider }));
-      emitFrame({ kind: 'stt_partial', ts: Date.now(), stage: 'stt', provider: evt.provider, meta: { sessionId: ws.data.id, len: partialText.length } });
+      // Skip intermediate partials that arrive faster than ~10/s to cut
+      // bandwidth + per-token allocations; the final partial always emits (#427).
+      if (partialThrottle(Date.now(), evt.isFinal)) {
+        ws.send(JSON.stringify({ type: 'partial', text: partialText, provider: evt.provider }));
+        emitFrame({ kind: 'stt_partial', ts: Date.now(), stage: 'stt', provider: evt.provider, meta: { sessionId: ws.data.id, len: partialText.length } });
+      }
 
       if (!pending) return;
 
