@@ -79,7 +79,7 @@ async function pollGpuUtilViaSsh(host: string, port: number): Promise<number> {
  * or the value is non-positive/garbage. Pure + exported for unit testing.
  */
 export function resolveIdleTimeoutFromEnv(
-  env: { IDLE_TIMEOUT_MIN?: string; IDLE_TIMEOUT_MS?: string } = process.env,
+  env: Record<string, string | undefined> = process.env,
   defaultMs = 5 * 60_000,
 ): number {
   const min = env.IDLE_TIMEOUT_MIN != null ? Number(env.IDLE_TIMEOUT_MIN) : NaN;
