@@ -13,6 +13,24 @@ import { emitFrame } from '../../src/observers';
 
 const log = createLogger('stt-lifecycle');
 
+/**
+ * Whether an accumulated STT segment should be force-flushed once the max-accum
+ * timer elapses (#452). The original guard only fired when the word count
+ * reached the min-flush threshold, so a long monologue of short (<3-word)
+ * tokens never force-flushed and latency grew unbounded. Force-flush by chars
+ * too: enough words OR enough characters means we have something worth sending.
+ */
+export function shouldForceFlush(
+  pending: string,
+  minWords: number,
+  minChars: number,
+): boolean {
+  const t = pending.trim();
+  if (!t) return false;
+  const words = t.split(/\s+/).filter(Boolean).length;
+  return words >= minWords || t.length >= minChars;
+}
+
 type WsData = {
   id: string;
   type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
@@ -35,13 +53,17 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
   const connectBackend = () => {
     const backend = getSttRouter().createBackend(language, excluded);
     if (!backend) {
-      ws.send(JSON.stringify({ type: 'error', message: 'No STT backend available (no GPU and no Fireworks key)' }));
-      ws.close();
+      ws.send(JSON.stringify({ type: 'error', code: 'no_backend', message: 'No STT backend available (no GPU and no Fireworks key)' }));
+      // Application close code (4002) so clients can distinguish a config/backend
+      // failure from a transport-level network drop (#417).
+      ws.close(4002, 'No STT backend available');
       return;
     }
     backend.onConnected = () => {
       log.log(`[stt-ws] Backend connected: ${backend.provider} id=${ws.data.id}`);
-      ws.send(JSON.stringify({ type: 'connected', provider: backend.provider }));
+      // Echo the effective pause window so a client that sent an out-of-range
+      // (or omitted) pause_ms learns the value the server actually applied (#455).
+      ws.send(JSON.stringify({ type: 'connected', provider: backend.provider, pauseMs: STT_ACCUM_TIMEOUT_MS }));
       emitFrame({ kind: 'user_speech_start', ts: Date.now(), stage: 'stt', provider: backend.provider, meta: { sessionId: ws.data.id } });
     };
     // Text accumulator: the STT backend emits the FULL running text on each
@@ -107,8 +129,10 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
 
       if (!sttAccumStartTime) sttAccumStartTime = Date.now();
       const accumAge = Date.now() - sttAccumStartTime;
-      if (accumAge >= STT_MAX_ACCUM_MS && pending.split(/\s+/).length >= STT_MIN_FLUSH_WORDS) {
-        log.log(`[stt-ws] Max accum timeout (${accumAge}ms, ${pending.split(/\s+/).length}w) — forcing flush id=${ws.data.id}`);
+      // Force-flush by words OR chars so a long run of short tokens can't grow
+      // latency unbounded under the word-only threshold (#452).
+      if (accumAge >= STT_MAX_ACCUM_MS && shouldForceFlush(pending, STT_MIN_FLUSH_WORDS, STT_MIN_FLUSH_CHARS)) {
+        log.log(`[stt-ws] Max accum timeout (${accumAge}ms, ${pending.split(/\s+/).length}w/${pending.length}c) — forcing flush id=${ws.data.id}`);
         flushSttAccum();
         return;
       }

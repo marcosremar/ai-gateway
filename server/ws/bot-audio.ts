@@ -47,6 +47,32 @@ export function trySetBotAudioSource(ws: BabelCastWS): boolean {
 export let botAudioSampleRate = 48000;
 export function setBotAudioSampleRate(rate: number): void { botAudioSampleRate = rate; }
 
+/**
+ * Default sample rate to assume when a bot-audio source streams binary PCM
+ * without first sending the `{protocol_version, sample_rate}` handshake (#444).
+ * Recall/meeting bots negotiate 48 kHz, so guessing 16 kHz here would mislabel
+ * the WAV header and corrupt STT; default explicitly to 48 kHz instead.
+ */
+export const BOT_AUDIO_DEFAULT_SAMPLE_RATE = 48000;
+
+/**
+ * Parse a bot-audio control message. Returns the negotiated sample rate when
+ * the JSON is a valid handshake (has `protocol_version`), else null. Pure —
+ * lets the server validate/handshake-gate before touching module state (#444).
+ */
+export function parseBotAudioHandshake(raw: string): { sampleRate: number } | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.protocol_version) {
+      const rate = typeof parsed.sample_rate === 'number' && parsed.sample_rate > 0
+        ? parsed.sample_rate
+        : BOT_AUDIO_DEFAULT_SAMPLE_RATE;
+      return { sampleRate: rate };
+    }
+  } catch { /* not JSON */ }
+  return null;
+}
+
 let botAudioChunks = 0;
 export function getBotAudioChunks(): number { return botAudioChunks; }
 export function incBotAudioChunks(): number { return ++botAudioChunks; }
@@ -91,9 +117,12 @@ export function appendBotAudioChunk(chunk: Buffer): void {
   botAudioBufferBytes += chunk.length;
   if (botAudioBufferBytes > BOT_AUDIO_MAX_BUFFER_BYTES) {
     log.warn(`[bot-audio] Buffer exceeded ${BOT_AUDIO_MAX_BUFFER_BYTES / 1024 / 1024}MB — dropping oldest chunks`);
-    while (botAudioBufferBytes > BOT_AUDIO_CHUNK_THRESHOLD && botAudioBuffer.length > 1) {
-      botAudioBufferBytes -= botAudioBuffer.shift()!.length;
-    }
+    // Drop oldest by byte budget while preserving the latest audio (#447);
+    // shifting until under a count threshold could discard the newest speech
+    // when chunks are large.
+    const trimmed = trimChunksToByteBudget(botAudioBuffer, BOT_AUDIO_CHUNK_THRESHOLD);
+    botAudioBuffer = trimmed.chunks;
+    botAudioBufferBytes = trimmed.bytes;
   }
 }
 
@@ -120,6 +149,57 @@ function isMeaningfulTranscription(text: string): boolean {
   const trimmed = text.trim();
   const words = trimmed.split(/\s+/).filter(w => w.length > 0);
   return words.length >= 3 || trimmed.length >= 15;
+}
+
+/**
+ * Build a canonical 44-byte WAV header for 16-bit mono PCM at the negotiated
+ * sample rate (#442 cache the field layout in one place, #443 use the
+ * handshake-negotiated rate and derive byte-rate from it instead of assuming
+ * 16 kHz / 32000 B/s). byteRate = sampleRate * channels * bytesPerSample
+ * = sampleRate * 1 * 2; blockAlign = 2.
+ */
+export function buildWavHeader(sampleRate: number, dataSize: number): Buffer {
+  const rate = sampleRate > 0 ? sampleRate : 16000;
+  const h = Buffer.alloc(44);
+  h.write('RIFF', 0);
+  h.writeUInt32LE(dataSize + 36, 4);     // fileSize
+  h.write('WAVE', 8);
+  h.write('fmt ', 12);
+  h.writeUInt32LE(16, 16);               // fmt chunk size
+  h.writeUInt16LE(1, 20);                // PCM
+  h.writeUInt16LE(1, 22);                // mono
+  h.writeUInt32LE(rate, 24);             // sample rate
+  h.writeUInt32LE(rate * 2, 28);         // byte rate = rate * channels(1) * bytes(2)
+  h.writeUInt16LE(2, 32);                // block align
+  h.writeUInt16LE(16, 34);               // bits per sample
+  h.write('data', 36);
+  h.writeUInt32LE(dataSize, 40);
+  return h;
+}
+
+/**
+ * Trim a list of PCM chunks down to at most `maxBytes`, preserving the most
+ * recent audio (#447). The old overflow path shifted from the front until the
+ * total fell under a count-ish threshold, which on large chunks could discard
+ * the *latest* speech. Here we always keep the trailing bytes (newest first
+ * from the end) and drop the oldest, returning the kept chunks + their byte
+ * total. Pure — no module state.
+ */
+export function trimChunksToByteBudget(chunks: Buffer[], maxBytes: number): { chunks: Buffer[]; bytes: number } {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  if (total <= maxBytes) return { chunks, bytes: total };
+  // Walk from the newest chunk backwards, keeping until we'd exceed the budget.
+  const kept: Buffer[] = [];
+  let keptBytes = 0;
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const c = chunks[i];
+    if (keptBytes + c.length > maxBytes) break;
+    kept.push(c);
+    keptBytes += c.length;
+  }
+  kept.reverse(); // restore chronological order
+  return { chunks: kept, bytes: keptBytes };
 }
 
 /** Force-flush bot audio buffer (called on disconnect or when buffer is too large) */
@@ -151,23 +231,10 @@ export async function processBotAudioBuffer(): Promise<void> {
       pcmData = Buffer.concat([botAudioHeldPcm, pcmData]);
       botAudioHeldPcm = null;
     }
+    // Use the handshake-negotiated sample rate (#443). byte-rate is derived
+    // from it inside buildWavHeader so a 48 kHz stream isn't mislabeled 16 kHz.
     const sampleRate = botAudioSampleRate || 16000;
-    const wavHeader = Buffer.alloc(44);
-    const dataSize = pcmData.length;
-    const fileSize = dataSize + 36;
-    wavHeader.write('RIFF', 0);
-    wavHeader.writeUInt32LE(fileSize, 4);
-    wavHeader.write('WAVE', 8);
-    wavHeader.write('fmt ', 12);
-    wavHeader.writeUInt32LE(16, 16); // fmt chunk size
-    wavHeader.writeUInt16LE(1, 20);  // PCM
-    wavHeader.writeUInt16LE(1, 22);  // mono
-    wavHeader.writeUInt32LE(sampleRate, 24);
-    wavHeader.writeUInt32LE(sampleRate * 2, 28); // byte rate
-    wavHeader.writeUInt16LE(2, 32);  // block align
-    wavHeader.writeUInt16LE(16, 34); // bits per sample
-    wavHeader.write('data', 36);
-    wavHeader.writeUInt32LE(dataSize, 40);
+    const wavHeader = buildWavHeader(sampleRate, pcmData.length);
     const wavBuffer = Buffer.concat([wavHeader, pcmData]);
 
     const { source, target } = getBotSourceTarget();

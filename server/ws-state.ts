@@ -165,6 +165,20 @@ const dubClientWs = new Map<string, BabelCastWS>();
 /** Clients that opted into binary audio frames (binaryAudio: true in dub:subscribe). */
 const dubBinaryClients = new Set<string>();
 
+/**
+ * Validate a dub `target` value before it becomes a Map key (#483).
+ * `dubTargetClients` is keyed by arbitrary `target` strings; a client
+ * subscribing to thousands of bogus targets would grow the Map unboundedly.
+ * A valid target is a short language code (BCP-47-ish: 2–8 chars, letters /
+ * digits / `-`), e.g. `en`, `pt`, `zh-Hant`. We don't hard-restrict to the
+ * `langNames` set so new locales work without a code change, but we cap the
+ * length and charset so the key space stays bounded.
+ */
+const DUB_TARGET_RE = /^[A-Za-z0-9-]{2,8}$/;
+export function isValidDubTarget(target: unknown): target is string {
+  return typeof target === 'string' && DUB_TARGET_RE.test(target);
+}
+
 export function subscribeDub(clientId: string, ws: BabelCastWS, target: string, binaryAudio?: boolean): void {
   unsubscribeDub(clientId); // clean up previous subscription
   dubClientTarget.set(clientId, target);
@@ -199,8 +213,20 @@ export function getActiveTargets(): string[] {
  *   [N bytes: JSON metadata (without audio field)]
  *   [remaining bytes: raw audio (WAV)]
  */
+/**
+ * Max bytes the JSON metadata of a binary dub frame may occupy (#438). The
+ * frame is `Buffer.allocUnsafe(4 + json + audio)`, which returns uninitialised
+ * memory equal to its size; trusting an arbitrarily large `metadata` object
+ * would let a caller allocate that much uninitialised RAM. Real dub metadata is
+ * a handful of small fields, so 64 KB is generous.
+ */
+export const MAX_DUB_FRAME_META_BYTES = 64 * 1024;
+
 export function packBinaryDubFrame(metadata: Record<string, unknown>, audio: Buffer): Buffer {
   const jsonBuf = Buffer.from(JSON.stringify(metadata));
+  if (jsonBuf.length > MAX_DUB_FRAME_META_BYTES) {
+    throw new RangeError(`dub frame metadata too large: ${jsonBuf.length} > ${MAX_DUB_FRAME_META_BYTES} bytes`);
+  }
   const frame = Buffer.allocUnsafe(4 + jsonBuf.length + audio.length);
   frame.writeUInt32LE(jsonBuf.length, 0);
   jsonBuf.copy(frame, 4);

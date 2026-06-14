@@ -25,6 +25,28 @@ export function isSpeechBackpressured(
   return (ws.getBufferedAmount?.() ?? 0) >= limit;
 }
 
+/** Smallest WAV file: 44-byte RIFF header + at least one 16-bit mono sample. */
+const MIN_WAV_BYTES = 44;
+
+/**
+ * Cheap pre-pipeline framing validation for inbound speech audio (#441).
+ * Previously only `length === 0` was rejected, so a truncated or odd-length PCM
+ * buffer (16-bit samples must be byte-pairs) or a buffer that claims to be a
+ * RIFF/WAV file but is shorter than a header reached STT and burned a full
+ * pipeline run. Returns a reason string when the buffer is unusable, else null.
+ */
+export function validateSpeechAudio(buf: Buffer): string | null {
+  if (buf.length === 0) return 'No audio data';
+  const hasRiff = buf.length >= 4 && buf.toString('latin1', 0, 4) === 'RIFF';
+  if (hasRiff) {
+    if (buf.length < MIN_WAV_BYTES) return 'Truncated WAV (shorter than 44-byte header)';
+    return null; // header present and plausibly complete
+  }
+  // Raw 16-bit PCM: an odd byte count means a split sample → corrupt framing.
+  if (buf.length % 2 !== 0) return 'PCM buffer not aligned to 16-bit samples';
+  return null;
+}
+
 type WsData = {
   id: string;
   type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
@@ -56,8 +78,9 @@ export function handleSpeechMessage(
 
   // Binary message = WAV audio → run pipeline
   const audioBuffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
-  if (audioBuffer.length === 0) {
-    ws.send(JSON.stringify({ status: 'error', message: 'No audio data' }));
+  const framingError = validateSpeechAudio(audioBuffer);
+  if (framingError) {
+    ws.send(JSON.stringify({ status: 'error', message: framingError }));
     return;
   }
   const config = ws.data.speechConfig || { source: 'fr', target: 'en' };
@@ -82,8 +105,12 @@ export function handleSpeechMessage(
     },
     onComplete(result: PipelineResult) {
       if (ws.readyState !== 1) return;
+      // Distinguish silence from a successful translation so clients don't treat
+      // an empty transcript as an error or a real result (#458).
+      const noSpeech = !result.transcription || result.transcription.trim().length === 0;
       ws.send(JSON.stringify({
         status: 'complete',
+        noSpeech,
         transcript: result.transcription,
         response: result.translation,
         timing: result.timing,

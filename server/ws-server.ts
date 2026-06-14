@@ -21,6 +21,8 @@ import {
   setBotAudioSource,
   trySetBotAudioSource,
   setBotAudioSampleRate,
+  parseBotAudioHandshake,
+  BOT_AUDIO_DEFAULT_SAMPLE_RATE,
   getBotAudioChunks as _getBotAudioChunks,
   incBotAudioChunks,
   resetBotAudioChunks,
@@ -63,11 +65,80 @@ type WsData = {
   speechConfig?: { source: string; target: string; speaker?: string };
   /** For frame-inspector: unsubscribe fn returned by subscribeFrames. */
   __unsubscribe?: () => void;
+  /** True once this socket has been counted into wsConnectionCount (#403). */
+  __counted?: boolean;
+  /** bot-audio: true once the protocol handshake JSON has arrived (#444). */
+  __handshakeSeen?: boolean;
 };
+
+/**
+ * Clamp the global connection counter so it can never go negative (#403). Any
+ * path where `open()` didn't run (or `close()` fires twice under a hot reload)
+ * would otherwise drive the counter below zero and permanently lower effective
+ * capacity. Pure helper so the clamp is unit-testable without booting Bun.
+ */
+export function clampConnCount(n: number): number {
+  return Math.max(0, n);
+}
 
 /** Global WebSocket connection limit — prevents resource exhaustion from unlimited connections. */
 const MAX_WS_TOTAL = 200;
 let wsConnectionCount = 0;
+
+/** Per-message byte ceiling (documented "5MB / 1009" contract). */
+export const MAX_WS_MESSAGE_SIZE = 5 * 1024 * 1024;
+
+/**
+ * Byte length of an inbound WS message (#481). Binary frames already expose
+ * `byteLength`, but strings were measured with `.length` (UTF-16 code units),
+ * so a multibyte 5M-char string could be ~10 MB of bytes yet pass the guard.
+ * Measure UTF-8 bytes for strings so the size cap is a true byte cap.
+ */
+export function wsMessageByteLength(msg: string | { byteLength: number }): number {
+  return typeof msg === 'string' ? Buffer.byteLength(msg, 'utf8') : msg.byteLength;
+}
+
+/** True when the message exceeds the byte ceiling (#479/#481). */
+export function exceedsWsMessageLimit(msg: string | { byteLength: number }, limit = MAX_WS_MESSAGE_SIZE): boolean {
+  return wsMessageByteLength(msg) > limit;
+}
+
+/** A 1009 close reason the client can parse to learn the byte limit (#480). */
+export function wsTooLargeCloseReason(limit = MAX_WS_MESSAGE_SIZE): string {
+  return `Message too large (max ${limit} bytes)`;
+}
+
+/** Known WS endpoint paths → the `WsData.type` they upgrade to (#413). */
+const WS_PATH_TYPES: Record<string, WsData['type']> = {
+  '/v1/speech/ws': 'speech',
+  '/v1/stt/stream': 'stt',
+  '/ws/bot-audio': 'bot-audio',
+  '/v1/observability/frames': 'frame-inspector',
+};
+
+/**
+ * Classify a WS upgrade path. Returns the connection type for a known endpoint,
+ * `'bot'` for the bot-events root (`/` or `/ws`), or null for an unknown path
+ * so the caller can 404 instead of silently upgrading a typo to a bot-events
+ * client that consumes a slot while doing nothing (#413).
+ */
+export function classifyWsPath(pathname: string): WsData['type'] | null {
+  if (pathname in WS_PATH_TYPES) return WS_PATH_TYPES[pathname];
+  if (pathname === '/' || pathname === '' || pathname === '/ws' || pathname === '/v1/events') return 'bot';
+  return null;
+}
+
+/**
+ * Resolve the STT silence-flush window from a raw query value (#455). Clamped
+ * to [50, 30000] ms with a 700 ms default; returned so the server can echo the
+ * effective value back to the client (a client sending pause_ms=0 otherwise
+ * silently gets 700).
+ */
+export function resolvePauseMs(raw: string | null | undefined): number {
+  const parsed = parseInt(raw ?? '', 10);
+  const v = Number.isFinite(parsed) ? parsed : 700;
+  return Math.max(50, Math.min(30_000, v || 700));
+}
 
 /**
  * Validate critical configuration at startup and return warnings.
@@ -245,7 +316,7 @@ export async function startWsServer(): Promise<number> {
       } else if (url.pathname === '/v1/stt/stream') {
         const language = url.searchParams.get('language') || undefined;
         const speculateTarget = url.searchParams.get('target') || undefined;
-        const pauseMs = Math.max(50, Math.min(30_000, parseInt(url.searchParams.get('pause_ms') || '700', 10) || 700));
+        const pauseMs = resolvePauseMs(url.searchParams.get('pause_ms'));
         const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'stt', language, speculateTarget, pauseMs } });
         if (upgraded) return;
       } else if (url.pathname === '/ws/bot-audio') {
@@ -254,9 +325,13 @@ export async function startWsServer(): Promise<number> {
       } else if (url.pathname === '/v1/observability/frames') {
         const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'frame-inspector' } });
         if (upgraded) return;
-      } else {
+      } else if (classifyWsPath(url.pathname) === 'bot') {
+        // Bot-events channel root only — unknown paths fall through to 404 below
+        // instead of silently becoming a bot client that wastes a slot (#413).
         const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'bot' } });
         if (upgraded) return;
+      } else {
+        return new Response('Not found', { status: 404 });
       }
       return new Response(
         `BabelCast WebSocket gateway. Connect: ws://localhost:${WS_PORT}`,
@@ -269,6 +344,7 @@ export async function startWsServer(): Promise<number> {
       idleTimeout: 120,
       open(ws) {
         wsConnectionCount++;
+        ws.data.__counted = true;  // gate the close() decrement on this (#403)
         if (ws.data.type === 'speech') {
           ws.send(JSON.stringify({ type: 'connected', message: 'Speech pipeline ready. Send config JSON then binary WAV.' }));
           log.log(`[speech-ws] Client connected id=${ws.data.id}`);
@@ -321,14 +397,12 @@ export async function startWsServer(): Promise<number> {
         }
       },
       message(ws, msg) {
-        // ── Message size guard — reject oversized payloads ──
-        const MAX_WS_MESSAGE_SIZE = 5 * 1024 * 1024;
-        if (typeof msg !== 'string' && msg.byteLength > MAX_WS_MESSAGE_SIZE) {
-          ws.close(1009, 'Message too large');
-          return;
-        }
-        if (typeof msg === 'string' && msg.length > MAX_WS_MESSAGE_SIZE) {
-          ws.close(1009, 'Message too large');
+        // ── Message size guard — reject oversized payloads (byte-accurate) ──
+        // Strings are measured in UTF-8 bytes, not UTF-16 code units, so a
+        // multibyte payload can't sneak ~2× its char count past the cap (#481).
+        // The 1009 reason carries the byte limit so clients can chunk (#480).
+        if (exceedsWsMessageLimit(msg)) {
+          ws.close(1009, wsTooLargeCloseReason());
           return;
         }
 
@@ -399,14 +473,21 @@ export async function startWsServer(): Promise<number> {
           }
         } else if (ws.data.type === 'bot-audio') {
           if (typeof msg === 'string') {
-            try {
-              const parsed = JSON.parse(msg);
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.protocol_version) {
-                log.log(`[bot-audio] Handshake: sample_rate=${parsed.sample_rate} bot_id=${parsed.bot_id}`);
-                setBotAudioSampleRate(parsed.sample_rate ?? 16000);
-              }
-            } catch { /* ignore */ }
+            const hs = parseBotAudioHandshake(msg);
+            if (hs) {
+              ws.data.__handshakeSeen = true;
+              log.log(`[bot-audio] Handshake: sample_rate=${hs.sampleRate}`);
+              setBotAudioSampleRate(hs.sampleRate);
+            }
             return;
+          }
+          // Binary audio before the handshake: don't guess 16 kHz silently —
+          // default the rate explicitly once and note it, so the WAV header and
+          // STT aren't fed a mislabeled stream (#444).
+          if (!ws.data.__handshakeSeen) {
+            ws.data.__handshakeSeen = true;
+            log.warn(`[bot-audio] Binary audio before handshake — defaulting sample_rate=${BOT_AUDIO_DEFAULT_SAMPLE_RATE} id=${ws.data.id}`);
+            setBotAudioSampleRate(BOT_AUDIO_DEFAULT_SAMPLE_RATE);
           }
           const chunkCount = incBotAudioChunks();
           if (chunkCount === 1 || chunkCount % 500 === 0) {
@@ -432,7 +513,13 @@ export async function startWsServer(): Promise<number> {
         }
       },
       close(ws) {
-        wsConnectionCount--;
+        // Only decrement for a socket that was actually counted in open(), and
+        // clamp at zero so a double-close / un-opened socket can't drive the
+        // counter negative and shrink effective capacity (#403).
+        if (ws.data.__counted) {
+          ws.data.__counted = false;
+          wsConnectionCount = clampConnCount(wsConnectionCount - 1);
+        }
         speculativeCache.clear(ws.data.id);
 
         if (ws.data.type === 'frame-inspector') {

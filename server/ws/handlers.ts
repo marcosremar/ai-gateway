@@ -3,7 +3,7 @@
 
 import { createLogger } from '../../src/logger';
 import { botState } from '../state';
-import { broadcastWs, subscribeDub, unsubscribeDub, getActiveTargets, stopBotTranscriptPoll } from '../ws-state';
+import { broadcastWs, subscribeDub, unsubscribeDub, getActiveTargets, stopBotTranscriptPoll, isValidDubTarget } from '../ws-state';
 import type { BabelCastWS } from '../ws-state';
 import { setBotState, isPrivateUrl, isPrivateUrlResolved } from '../bot-handlers';
 import { PORT } from '../config';
@@ -13,7 +13,25 @@ import { setBotLangPair, resetBotLangPair, startParecCapture, stopParecCapture, 
 
 const log = createLogger('ws-handlers');
 
+/** Command types the bot-events channel understands (#482/#485). */
+export const KNOWN_WS_COMMANDS = new Set([
+  'bot:join', 'bot:leave',
+  'dub:subscribe', 'dub:switch', 'dub:unsubscribe',
+  'speculation:feed', 'ping',
+]);
+
+/** True when `cmd.type` is a string naming a command we handle (#482/#485). */
+export function isKnownWsCommand(cmd: Record<string, unknown>): boolean {
+  return typeof cmd.type === 'string' && KNOWN_WS_COMMANDS.has(cmd.type);
+}
+
 export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unknown>): Promise<void> {
+  // Reject malformed / unknown commands so typos get explicit feedback instead
+  // of silently no-op'ing (#482 shape, #485 unknown-command nack).
+  if (!isKnownWsCommand(cmd)) {
+    try { ws.send(JSON.stringify({ type: 'error', code: 'unknown_command', received: typeof cmd.type === 'string' ? cmd.type : null })); } catch { /* socket closing */ }
+    return;
+  }
   const type = cmd.type as string;
   log.log(`[ws] Command from client: ${type}`);
 
@@ -137,6 +155,11 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     const target = String(cmd.target || '');
     if (!target) {
       ws.send(JSON.stringify({ type: 'error', message: 'target is required for dub:subscribe' }));
+      return;
+    }
+    // Reject bogus targets before they become an unbounded Map key (#483).
+    if (!isValidDubTarget(target)) {
+      ws.send(JSON.stringify({ type: 'error', code: 'invalid_target', message: 'target must be a 2-8 char language code' }));
       return;
     }
     const binaryAudio = cmd.binaryAudio === true;

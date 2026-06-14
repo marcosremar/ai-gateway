@@ -55,6 +55,8 @@ export interface WebhookConfig {
   retries?: number;
   /** Timeout per attempt in ms (default: 10_000) */
   timeoutMs?: number;
+  /** Max events retained in the in-memory dead-letter queue (default: 1000). */
+  maxDeadLetters?: number;
   /** Called on delivery failure after all retries */
   onDeadLetter?: (event: WebhookEvent, error: Error) => void;
 }
@@ -63,6 +65,7 @@ const DEFAULT_CONFIG: Required<Omit<WebhookConfig, 'url' | 'secret' | 'onDeadLet
   Pick<WebhookConfig, 'url' | 'secret' | 'onDeadLetter'> = {
   retries: 3,
   timeoutMs: 10_000,
+  maxDeadLetters: 1000,
   url: '',
   secret: undefined,
   onDeadLetter: undefined,
@@ -74,6 +77,40 @@ const DEFAULT_CONFIG: Required<Omit<WebhookConfig, 'url' | 'secret' | 'onDeadLet
 export function signWebhook(payload: WebhookEvent, secret: string): string {
   const body = JSON.stringify(payload);
   return createHmac('sha256', secret).update(body).digest('hex');
+}
+
+/**
+ * Sign over a canonical `timestamp.body` string so the signature commits to the
+ * delivery time (#498). A receiver recomputes `HMAC(timestamp + '.' + rawBody)`
+ * and rejects requests whose `X-Webhook-Timestamp` is too old, preventing
+ * indefinite replay of a captured request. The exact body string passed here
+ * must be the same bytes sent on the wire.
+ */
+export function signWebhookV2(rawBody: string, timestamp: string, secret: string): string {
+  return createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
+}
+
+/**
+ * Verify a v2 (timestamped) webhook signature and freshness (#498). Returns
+ * false if the signature mismatches or the timestamp is older than
+ * `toleranceMs` (default 5 min) — the server-side replay guard.
+ */
+export function verifyWebhookV2(
+  rawBody: string,
+  timestamp: string,
+  signature: string,
+  secret: string,
+  toleranceMs = 5 * 60 * 1000,
+): boolean {
+  const ts = Date.parse(timestamp);
+  if (!Number.isFinite(ts)) return false;
+  if (Math.abs(Date.now() - ts) > toleranceMs) return false;
+  const expected = signWebhookV2(rawBody, timestamp, secret);
+  // Length-checked constant-ish comparison (hex strings of equal length).
+  if (expected.length !== signature.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
+  return diff === 0;
 }
 
 /**
@@ -95,7 +132,12 @@ export function createWebhookDelivery(config: WebhookConfig) {
         timestamp: event.timestamp ?? new Date().toISOString(),
       };
 
+      // Serialize once so the bytes signed match the bytes sent (#498).
+      const rawBody = JSON.stringify(enrichedEvent);
+      const sigTimestamp = enrichedEvent.timestamp!;
       const signature = cfg.secret ? signWebhook(enrichedEvent, cfg.secret) : undefined;
+      // v2 signature commits to the timestamp to block replay.
+      const signatureV2 = cfg.secret ? signWebhookV2(rawBody, sigTimestamp, cfg.secret) : undefined;
 
       // SSRF guard — webhook URL is operator-supplied via config; refuse
       // private/metadata hosts so a misconfigured webhook can't probe
@@ -121,12 +163,14 @@ export function createWebhookDelivery(config: WebhookConfig) {
                   ...(signature
                     ? {
                         'X-Webhook-Signature': signature,
+                        'X-Webhook-Signature-V2': signatureV2!,
+                        'X-Webhook-Timestamp': sigTimestamp,
                         'X-Webhook-Event': enrichedEvent.event,
                         'X-Webhook-Id': eventId,
                       }
                     : {}),
                 },
-                body: JSON.stringify(enrichedEvent),
+                body: rawBody,
                 signal: controller.signal,
               });
 
@@ -157,7 +201,11 @@ export function createWebhookDelivery(config: WebhookConfig) {
           'Webhook delivery failed — moving to dead letter queue',
         );
 
+        // Bound the in-memory DLQ so sustained delivery failures can't grow it
+        // without limit (#497). Drop the oldest entry when at capacity. (Retry
+        // backoff jitter is already provided by withRetry's `jitter` option.)
         deadLetters.push({ event: enrichedEvent, error: err, attempts: cfg.retries });
+        while (deadLetters.length > cfg.maxDeadLetters) deadLetters.shift();
 
         if (cfg.onDeadLetter) {
           cfg.onDeadLetter(enrichedEvent, err);
