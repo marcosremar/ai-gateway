@@ -12,8 +12,20 @@ import type { SpeculativeCache } from './speculative-cache';
 import type { StreamingOverlap } from './streaming-overlap';
 import type { PipelinePluginRegistry, PluginContext } from './plugin-registry';
 import { GPU_STT_TIMEOUT_MS, GPU_LLM_TIMEOUT_MS, GPU_TTS_TIMEOUT_MS, GPU_PIPELINE_TIMEOUT_MS } from './timeouts';
+import { DEFAULT_SPEAKER } from './system-prompt';
 
 const log = createLogger('pipeline-orchestrator');
+
+/**
+ * Whether a stage's resolved provider name denotes a GPU path (#91). Replaces
+ * the brittle `=== 'gpu'` string compare, which missed structured GPU provider
+ * names like `'gpu-modal'` / `'gpu/preset-fallback'`, under-reporting GPU use.
+ */
+export function isGpuProvider(provider: string | undefined | null): boolean {
+  if (!provider) return false;
+  const p = provider.toLowerCase();
+  return p === 'gpu' || p.startsWith('gpu-') || p.startsWith('gpu/') || p.startsWith('gpu:');
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -417,7 +429,7 @@ export async function runPipelineOrchestrator(
           cb.onStageStart('tts');
 
           const llmStream = ex.createLlmStream(systemPrompt, sttText);
-          const overlapTtsFn = ex.getOverlapTtsFn(routing, targetName, speaker || 'Ryan', referenceAudio, refText);
+          const overlapTtsFn = ex.getOverlapTtsFn(routing, targetName, speaker || DEFAULT_SPEAKER, referenceAudio, refText);
 
           // Collect audio chunks in order for concatenation
           const orderedChunks: Map<number, Buffer> = new Map();
@@ -544,7 +556,7 @@ export async function runPipelineOrchestrator(
 
         const ttsCandidates = ttsSkipped
           ? []
-          : ex.buildTtsCandidates(routing, ttsInput, targetName, speaker || 'Ryan', referenceAudio, refText, deps.adaptiveStageTimeout);
+          : ex.buildTtsCandidates(routing, ttsInput, targetName, speaker || DEFAULT_SPEAKER, referenceAudio, refText, deps.adaptiveStageTimeout);
 
         try {
           let audioBuffer = Buffer.alloc(0);
@@ -609,7 +621,7 @@ export async function runPipelineOrchestrator(
     if (audioB64) fx.forwardToAvatar(audioB64);
 
     const totalMs = Date.now() - pipeT0;
-    const usedAnyGpu = sttProvider === 'gpu' || llmProvider === 'gpu' || ttsProvider === 'gpu';
+    const usedAnyGpu = isGpuProvider(sttProvider) || isGpuProvider(llmProvider) || isGpuProvider(ttsProvider);
 
     fx.logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'stream', latencyMs: totalMs, success: true, inputSize: audio.length, outputPreview: (translatedText || '').slice(0, 80) });
     fx.stampProfile();

@@ -56,6 +56,13 @@ export class SpeculativeCache {
   private _total = 0;
   private _hits = 0;
   private _misses = 0;
+  // Speculative spend tracking (#37): every speculate() launches a background
+  // LLM call that is wasted when the speculation isn't reused or fails. Without
+  // these counters operators can't tell whether speculation saves more than it
+  // costs.
+  private _speculations = 0;       // total background translations launched
+  private _speculationsFailed = 0; // background translations that errored/emptied
+  private _speculationsWasted = 0; // launched but never turned into a hit
 
   /** Normalize text for similarity comparison. */
   private normalize(text: string): string {
@@ -87,16 +94,19 @@ export class SpeculativeCache {
       }
     }
 
+    this._speculations++; // #37 — count the wasted-unless-reused background call
     const entry: SpeculationEntry = {
       partialText: trimmed,
       normalizedPartial: this.normalize(trimmed),
       translationPromise: translateFn(trimmed).then(result => {
         entry.translatedText = result;
         entry.resolved = true;
+        if (!result) this._speculationsFailed++; // empty result is effectively wasted
         return result;
       }).catch(err => {
         log.warn(`Background translation failed: ${err instanceof Error ? err.message : err}`);
         entry.resolved = true;
+        this._speculationsFailed++; // #37
         return '';
       }),
       startedAt: Date.now(),
@@ -134,6 +144,7 @@ export class SpeculativeCache {
     // Skip if partial is empty or too short to be meaningful
     if (normalizedPartial.length < 3) {
       this._misses++;
+      this._speculationsWasted++; // #37 — the background call won't be reused
       log.log(`MISS — partial too short (${normalizedPartial.length} chars) session=${sessionId}`);
       return null;
     }
@@ -143,6 +154,7 @@ export class SpeculativeCache {
 
     if (!isSimilar) {
       this._misses++;
+      this._speculationsWasted++; // #37 — speculated text didn't match the final
       log.log(`MISS — partial="${entry.partialText.slice(0, 40)}" final="${finalText.slice(0, 40)}" session=${sessionId}`);
       return null;
     }
@@ -184,6 +196,17 @@ export class SpeculativeCache {
     // 3. Levenshtein-based similarity ratio
     const maxLen = Math.max(normalizedPartial.length, normalizedFinal.length);
     if (maxLen === 0) return false;
+
+    // Early-exit before the O(la*lb) DP (#35): the edit distance is at least the
+    // absolute length difference, so similarity = 1 - dist/maxLen is at most
+    // 1 - |la-lb|/maxLen. If that ceiling is already below minConfidence the DP
+    // cannot possibly pass — skip it. This is the common case for a partial that
+    // is far shorter than the final.
+    const lenDiff = Math.abs(normalizedPartial.length - normalizedFinal.length);
+    if (1 - lenDiff / maxLen < minConfidence) {
+      return false;
+    }
+
     const dist = editDistance(normalizedPartial, normalizedFinal);
     const similarity = 1 - (dist / maxLen);
     if (similarity >= minConfidence) {
@@ -209,7 +232,10 @@ export class SpeculativeCache {
   }
 
   /** Stats for monitoring. */
-  stats(): { total: number; hits: number; misses: number; hitRate: number; pendingCount: number } {
+  stats(): {
+    total: number; hits: number; misses: number; hitRate: number; pendingCount: number;
+    speculations: number; speculationsFailed: number; speculationsWasted: number; wasteRate: number;
+  } {
     this.evictExpired();
     return {
       total: this._total,
@@ -217,6 +243,11 @@ export class SpeculativeCache {
       misses: this._misses,
       hitRate: this._total > 0 ? this._hits / this._total : 0,
       pendingCount: this.pending.size,
+      // #37 — speculative spend: launched vs failed vs never-reused.
+      speculations: this._speculations,
+      speculationsFailed: this._speculationsFailed,
+      speculationsWasted: this._speculationsWasted,
+      wasteRate: this._speculations > 0 ? this._speculationsWasted / this._speculations : 0,
     };
   }
 }

@@ -19,11 +19,29 @@ export interface OverlapStats {
   totalRequests: number;
   avgChunks: number;
   avgLatencySavedMs: number;
+  /**
+   * Latency saved on the MOST RECENT overlap (#50): the wall-clock gap between
+   * the first TTS chunk firing and the LLM stream completing. NOTE this is a
+   * lower-bound proxy for the true sequential-vs-overlap delta (it measures
+   * "LLM time that overlapped with TTS", not a measured sequential baseline),
+   * so treat the Labs number as "≥ this much saved".
+   */
+  lastSavedMs: number;
 }
+
+/** Default upper bound on words accumulated before a forced first-chunk flush. */
+export const DEFAULT_MAX_WORDS = 40;
 
 export interface StreamingOverlapOptions {
   /** Min words before a sentence boundary triggers a TTS chunk. */
   minTokens?: number;
+  /**
+   * Max words to accumulate before forcing a flush even if no sentence
+   * boundary was hit (#51). Without an upper bound, a run of clauses with no
+   * terminal punctuation merges into an over-long first chunk and delays
+   * first-audio. Default 40.
+   */
+  maxWords?: number;
   /** Strip <thinking>...</thinking> blocks before TTS (reasoning models). */
   stripThinking?: boolean;
   /** Custom delimited blocks to strip. e.g. [{ start: '<scratch>', end: '</scratch>' }] */
@@ -38,16 +56,19 @@ function countWords(text: string): number {
 
 export class StreamingOverlap {
   private minTokens: number;
+  private maxWords: number;
   private stripThinking: boolean;
   private extraPatterns: Array<{ start: string; end: string }>;
   private _totalRequests = 0;
   private _totalChunks = 0;
   private _totalLatencySavedMs = 0;
+  private _lastSavedMs = 0;
 
   constructor(minTokensOrOpts: number | StreamingOverlapOptions = 3) {
     const opts: StreamingOverlapOptions =
       typeof minTokensOrOpts === 'number' ? { minTokens: minTokensOrOpts } : minTokensOrOpts;
     this.minTokens = Math.max(1, opts.minTokens ?? 3);
+    this.maxWords = Math.max(this.minTokens, opts.maxWords ?? DEFAULT_MAX_WORDS);
     this.stripThinking = opts.stripThinking ?? false;
     this.extraPatterns = opts.stripPatterns ?? [];
   }
@@ -55,6 +76,13 @@ export class StreamingOverlap {
   /** Update min tokens from Labs settings. */
   setMinTokens(n: number): void {
     this.minTokens = Math.max(1, n);
+    // Keep the max-words flush at or above minTokens so it never fires first.
+    if (this.maxWords < this.minTokens) this.maxWords = this.minTokens;
+  }
+
+  /** Update the max-words flush cap (#51). */
+  setMaxWords(n: number): void {
+    this.maxWords = Math.max(this.minTokens, n);
   }
 
   /**
@@ -113,6 +141,11 @@ export class StreamingOverlap {
     const t0 = Date.now();
 
     let pending: string[] = [];
+    // Running word count of `pending` (#54). Previously countWords(pending.join)
+    // re-split the entire buffer on every dispatched aggregation — O(n²) over a
+    // long response. Maintain it incrementally instead.
+    let pendingWords = 0;
+    const resetPending = () => { pending = []; pendingWords = 0; };
 
     const fire = (text: string) => {
       const idx = chunkIndex++;
@@ -131,23 +164,49 @@ export class StreamingOverlap {
     // then fire as one combined chunk. Avoids firing one-word TTS calls when
     // sentences are short ("Hi.", "OK.") — caller wants chunks sized for
     // natural speech, not per-sentence atoms.
+    //
+    // Upper bound (#51): if accumulated words reach maxWords WITHOUT a sentence
+    // boundary, flush anyway so a long run of unterminated clauses doesn't merge
+    // into one over-long first chunk that delays first-audio.
     const dispatchChunk = (chunkText: string) => {
       const text = chunkText.trim();
       if (!text) return;
       pending.push(text);
-      if (countWords(pending.join(' ')) < this.minTokens) return;
+      pendingWords += countWords(text); // #54 — incremental, not full re-split
+      if (pendingWords < this.minTokens) return;
       fire(pending.join(' '));
-      pending = [];
+      resetPending();
     };
+
+    // Track words streamed since the last TTS fire so an unterminated run
+    // (no sentence boundary) is force-flushed at maxWords (#51).
+    let wordsSinceFire = 0;
+    const fireCountBefore = () => chunkIndex;
 
     for await (const token of llmStream) {
       fullTextParts.push(token);
+      wordsSinceFire += countWords(token);
 
+      const firedBefore = fireCountBefore();
       for await (const aggregation of aggregator.aggregate(token)) {
         // PatternPairAggregator may yield non-sentence aggregation types
         // (e.g. AGGREGATE actions) — pass through unchanged.
         if (!aggregation.text) continue;
         dispatchChunk(aggregation.text);
+      }
+      // If a sentence boundary fired this token, reset the run counter.
+      if (chunkIndex > firedBefore) wordsSinceFire = 0;
+
+      // #51 — no boundary for a long stretch: force the aggregator to flush its
+      // partial so first-audio isn't held hostage by a missing period.
+      if (wordsSinceFire >= this.maxWords) {
+        const forced = isPatternAgg
+          ? await (aggregator as PatternPairAggregator).flush()
+          : await (aggregator as SentenceAggregator).flush();
+        if (forced?.text) dispatchChunk(forced.text);
+        // Flush whatever is pending now, even below minTokens, to release audio.
+        if (pending.length > 0) { fire(pending.join(' ')); resetPending(); }
+        wordsSinceFire = 0;
       }
     }
 
@@ -158,19 +217,20 @@ export class StreamingOverlap {
       ? await (aggregator as PatternPairAggregator).flush()
       : await (aggregator as SentenceAggregator).flush();
     if (tail?.text) {
-      pending.push(tail.text.trim());
+      const t = tail.text.trim();
+      if (t) { pending.push(t); pendingWords += countWords(t); }
     }
     // End-of-stream:
     //   • If accumulated pending reached minTokens, fire as one combined chunk.
     //   • Otherwise fire each atom individually so short sentences ("Hi.",
     //     "Done.") still emit as separate TTS calls instead of one merged blob.
     if (pending.length > 0) {
-      if (countWords(pending.join(' ')) >= this.minTokens) {
+      if (pendingWords >= this.minTokens) {
         fire(pending.join(' '));
       } else {
         for (const p of pending) if (p) fire(p);
       }
-      pending = [];
+      resetPending();
     }
 
     await Promise.all(ttsPromises);
@@ -182,10 +242,14 @@ export class StreamingOverlap {
       const savedMs = llmDoneAt - firstTtsFiredAt;
       if (savedMs > 0) {
         this._totalLatencySavedMs += savedMs;
+        this._lastSavedMs = savedMs; // #50 — expose the per-request value
         const totalTokens = countWords(fullText);
         log.log(
+          // Clarify (#50): this is LLM time that overlapped with TTS — a
+          // lower bound on the true sequential-vs-overlap saving, not a
+          // measured baseline delta.
           `First TTS chunk fired with ~${this.minTokens}/${totalTokens} words` +
-          ` — saved ~${savedMs}ms (${chunkIndex} chunks, total LLM time ${llmDoneAt - t0}ms)`,
+          ` — overlapped ~${savedMs}ms of LLM time (${chunkIndex} chunks, total LLM time ${llmDoneAt - t0}ms)`,
         );
       }
     }
@@ -200,6 +264,7 @@ export class StreamingOverlap {
       avgChunks: this._totalRequests > 0 ? this._totalChunks / this._totalRequests : 0,
       avgLatencySavedMs: this._totalRequests > 0
         ? this._totalLatencySavedMs / this._totalRequests : 0,
+      lastSavedMs: this._lastSavedMs, // #50
     };
   }
 

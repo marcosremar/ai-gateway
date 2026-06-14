@@ -115,8 +115,21 @@ export function stopTranslationCacheSweep(): void {
 // Start sweep on import (same as original)
 startTranslationCacheSweep();
 
-export function getCachedTranslation(text: string, srcLang: string, tgtLang: string, style = 'default'): string | null {
-  const key = `${srcLang}|${tgtLang}|${style}|${text}`;
+/**
+ * Build the cache key (#31). The base key is `src|tgt|style|text`; an optional
+ * `paramsKey` (e.g. a temperature/maxTokens bucket) is appended so that two
+ * routes generating with DIFFERENT generation params don't share an entry — a
+ * truncated translation from a low-maxTokens route would otherwise be served to
+ * a request expecting full output. Omit `paramsKey` when the route is
+ * deterministic (temp=0, fixed maxTokens) to keep the cache shared.
+ */
+export function buildTranslationCacheKey(text: string, srcLang: string, tgtLang: string, style = 'default', paramsKey?: string): string {
+  const base = `${srcLang}|${tgtLang}|${style}|${text}`;
+  return paramsKey ? `${base}|${paramsKey}` : base;
+}
+
+export function getCachedTranslation(text: string, srcLang: string, tgtLang: string, style = 'default', paramsKey?: string): string | null {
+  const key = buildTranslationCacheKey(text, srcLang, tgtLang, style, paramsKey);
   // Peek first so an expired entry doesn't get LRU-promoted ahead of valid
   // ones. Previous code called .get() (which promotes), then checked TTL —
   // expired entries kept getting bumped to MRU end and evicted younger
@@ -134,8 +147,18 @@ export function getCachedTranslation(text: string, srcLang: string, tgtLang: str
   return entry.text;
 }
 
-export function setCachedTranslation(text: string, srcLang: string, tgtLang: string, translated: string, style = 'default'): void {
-  const key = `${srcLang}|${tgtLang}|${style}|${text}`;
+export function setCachedTranslation(text: string, srcLang: string, tgtLang: string, translated: string, style = 'default', paramsKey?: string): void {
+  const key = buildTranslationCacheKey(text, srcLang, tgtLang, style, paramsKey);
+  // Prefer the longer translation for the same key (#32). If a truncated /
+  // incomplete translation (e.g. maxTokens too low) landed first, it would
+  // otherwise be cached for the full TTL and served to later requests; keep
+  // whichever is longer (and refresh ts so it survives the sweep).
+  const existing = translationCache.peek(key);
+  if (existing && Date.now() - existing.ts <= TRANSLATION_CACHE_TTL_MS && existing.text.length >= translated.length) {
+    // Existing is at least as complete and still fresh — promote it, keep it.
+    translationCache.get(key);
+    return;
+  }
   translationCache.set(key, { text: translated, ts: Date.now() });
 }
 

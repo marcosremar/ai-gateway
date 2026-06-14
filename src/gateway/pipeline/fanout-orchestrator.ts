@@ -7,8 +7,28 @@ import { createLogger } from '../../logger';
 import type { RaceCandidate } from '../routing/provider-racer';
 import { raceProviders } from '../routing/provider-racer';
 import type { GpuLLMResult, GpuTTSResult } from './gpu-fetch';
+import { DEFAULT_SPEAKER } from './system-prompt';
 
 const log = createLogger('fanout-orchestrator');
+
+/**
+ * Default cost-amplification cap for a single fan-out (#63). High-capacity GPU
+ * deployments can raise it (more parallel dub targets) and low-budget ones can
+ * lower it — override per call via `FanoutOpts.maxTargets` or the
+ * `FANOUT_MAX` env var (call-level opt wins).
+ */
+export const DEFAULT_FANOUT_MAX = 16;
+
+/** Resolve the effective fan-out cap from a per-call opt → env → default (#63). */
+export function resolveFanoutMax(optMax?: number, env: { FANOUT_MAX?: string } = (typeof process !== 'undefined' ? process.env : {}) as any): number {
+  if (typeof optMax === 'number' && Number.isFinite(optMax) && optMax > 0) return Math.floor(optMax);
+  const raw = env?.FANOUT_MAX;
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return DEFAULT_FANOUT_MAX;
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -16,6 +36,8 @@ export interface FanoutOpts {
   speaker?: string;
   style?: string;
   targets: string[];
+  /** Override the cost-amplification cap for this fan-out (#63). */
+  maxTargets?: number;
 }
 
 /**
@@ -104,12 +126,12 @@ export async function runFanoutOrchestrator(
   // Dedupe + cap to prevent cost amplification from malformed or malicious
   // requests. Without this, `targets:['fr','fr','fr',...]` ran LLM+TTS once
   // per duplicate (translation cache populated AFTER race resolves, so
-  // concurrent dupes all miss). FANOUT_MAX caps the worst case at 16
-  // targets per audio chunk.
-  const FANOUT_MAX = 16;
-  const targets = [...new Set(rawTargets)].slice(0, FANOUT_MAX);
+  // concurrent dupes all miss). The cap is configurable (#63) via
+  // FanoutOpts.maxTargets or the FANOUT_MAX env var.
+  const fanoutMax = resolveFanoutMax(opts.maxTargets);
+  const targets = [...new Set(rawTargets)].slice(0, fanoutMax);
   if (targets.length < rawTargets.length) {
-    log.warn(`Fan-out targets reduced ${rawTargets.length}→${targets.length} (dedupe + cap ${FANOUT_MAX})`);
+    log.warn(`Fan-out targets reduced ${rawTargets.length}→${targets.length} (dedupe + cap ${fanoutMax})`);
   }
 
   const { routing, sideEffects: fx, executors: ex, langNames: langs } = deps;
@@ -154,7 +176,7 @@ export async function runFanoutOrchestrator(
 
       // ── TTS Synthesis ──
       const ttsT0 = Date.now();
-      const ttsCandidates = ex.buildTtsCandidates(routing, translatedText, targetName, speaker || 'Ryan');
+      const ttsCandidates = ex.buildTtsCandidates(routing, translatedText, targetName, speaker || DEFAULT_SPEAKER);
       const ttsRace = await raceProviders(ttsCandidates, { logPrefix: `[dub-tts:${target}]` });
       const ttsMs = Date.now() - ttsT0;
       const ttsAudioBuffer = ttsRace.result.audio;

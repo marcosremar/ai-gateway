@@ -385,6 +385,22 @@ export function capSttPrompt(prompt: string): string {
   return prompt.slice(0, STT_PROMPT_MAX_CHARS);
 }
 
+/**
+ * Map a pipeline error message to an HTTP status + client error string (#44).
+ * "No providers available" is a capacity condition (503, retryable), distinct
+ * from an upstream failure (500). Extracted as a pure helper so the mapping is
+ * unit-testable and identical across stages.
+ */
+export function statusForPipelineError(
+  msg: string,
+  stage: 'translation' | 'STT' | 'TTS' = 'translation',
+): { status: number; error: string } {
+  if (msg.includes('No providers available')) {
+    return { status: 503, error: `No providers available for ${stage}` };
+  }
+  return { status: 500, error: `All providers failed for ${stage}` };
+}
+
 export async function handleTranscribe(req: IncomingMessage, res: ServerResponse): Promise<void> {
   touchRequest(); touchModelRequest();
   const t0 = Date.now();
@@ -777,13 +793,10 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
     logRequest({ timestamp: Date.now(), stage: 'llm', provider: getCloudProviderName(), latencyMs: Date.now() - llmReqTs, success: false, error: msg, inputSize: text.length });
     // "No providers available" is a capacity condition (503, retryable),
     // distinct from an upstream failure (500). The previous `500 : 500`
-    // ternary was dead and clients couldn't tell the cases apart.
-    const status = msg.includes('No providers available') ? 503 : 500;
+    // ternary was dead and clients couldn't tell the cases apart (#44).
+    const { status, error } = statusForPipelineError(msg, 'translation');
     res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      error: msg.includes('No providers available') ? 'No providers available for translation' : 'All providers failed for translation',
-      translated_text: '',
-    }));
+    res.end(JSON.stringify({ error, translated_text: '' }));
   }
 }
 
