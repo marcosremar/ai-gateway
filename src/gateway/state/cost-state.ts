@@ -2,7 +2,7 @@
 // Daily GPU spend tracking and budget gate logic.
 // Extracted from server/state.ts — Phase 5 DDD migration.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, fsyncSync, closeSync, renameSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { createLogger } from '../../platform/logger';
@@ -129,6 +129,14 @@ export function loadPersistedDailySpend(): void {
     const today = new Date().toISOString().slice(0, 10);
     if (data.date !== today) {
       log.log(`[budget] Persisted spend is from ${data.date}, today is ${today} — resetting to $0`);
+      // #717: rewrite the on-disk file to a $0/today record immediately so a
+      // crash before the first new write does not let yesterday's spend be
+      // re-read and re-arm the budget gate at a stale value.
+      try {
+        dailyGpuSpendUsd = 0;
+        dailySpendResetDate = today;
+        persistDailySpend();
+      } catch { /* best-effort rollover reset */ }
       return;
     }
     if (typeof data.spendUsd === 'number' && isFinite(data.spendUsd) && data.spendUsd >= 0) {
@@ -150,8 +158,33 @@ export function persistDailySpend(): void {
     if (!existsSync(BABELCAST_DIR)) mkdirSync(BABELCAST_DIR, { recursive: true });
     const today = new Date().toISOString().slice(0, 10);
     const data = { date: today, spendUsd: dailyGpuSpendUsd, savedAt: Date.now() };
-    writeFileSync(DAILY_SPEND_FILE, JSON.stringify(data));
+    // #701: write to a temp file, fsync the bytes, then rename. A bare
+    // writeFileSync left the budget-gate file half-written (and unparseable)
+    // if the process died mid-write, despite CLAUDE.md claiming atomicity.
+    atomicWriteSyncWithFsync(DAILY_SPEND_FILE, JSON.stringify(data));
   } catch (e) {
     log.warn('[budget] Failed to persist daily spend: ' + (e instanceof Error ? e.message : String(e)));
   }
+}
+
+/**
+ * Crash-safe synchronous write: tmp file → fsync(data) → rename → fsync(dir).
+ * fdatasync is preferred but Node only exposes fsyncSync; the cost on a tiny
+ * JSON file is negligible. Directory fsync is best-effort (unsupported on some
+ * platforms) and never blocks the rename's atomicity.
+ */
+function atomicWriteSyncWithFsync(filePath: string, data: string): void {
+  const tmp = `${filePath}.tmp`;
+  const fd = openSync(tmp, 'w');
+  try {
+    writeFileSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, filePath);
+  try {
+    const dirFd = openSync(BABELCAST_DIR, 'r');
+    try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+  } catch { /* best-effort dir fsync */ }
 }

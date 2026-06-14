@@ -5,7 +5,7 @@
 import { createLogger } from '../../src/logger';
 import type { Subprocess } from 'bun';
 import { botState } from '../state';
-import { broadcastWs, wsClients } from '../ws-state';
+import { broadcastWs, wsClients, isBackpressured } from '../ws-state';
 import type { BabelCastWS } from '../ws-state';
 import { runStreamingPipeline } from '../pipeline-runner';
 import type { PipelineCallbacks, PipelineResult } from '../pipeline-runner';
@@ -20,6 +20,29 @@ const log = createLogger('ws-bot-audio');
 // ── Exported state (imported by ws-server and bot-handlers) ──────────────────
 export let botAudioSource: BabelCastWS | null = null;
 export function setBotAudioSource(ws: BabelCastWS | null): void { botAudioSource = ws; }
+
+/**
+ * Claim the single global bot-audio source slot for `ws`.
+ *
+ * The bot-audio buffer/relay is process-global, so a second concurrent
+ * `/ws/bot-audio` connection would silently hijack the stream — and the first
+ * one's `close` (`if (botAudioSource === ws) setBotAudioSource(null)`) would no
+ * longer match, leaving stale state. Rather than clobber, reject the newcomer
+ * unless the incumbent socket is already gone (readyState !== OPEN), in which
+ * case we take over (handles a half-open socket whose `close` never fired).
+ *
+ * @returns true if the slot was claimed, false if an active source already holds it.
+ */
+export function trySetBotAudioSource(ws: BabelCastWS): boolean {
+  const current = botAudioSource;
+  if (current && current !== ws) {
+    // OPEN === 1 in the WS readyState enum; treat anything else as not-live.
+    const incumbentLive = (current as { readyState?: number }).readyState === 1;
+    if (incumbentLive) return false;
+  }
+  botAudioSource = ws;
+  return true;
+}
 
 export let botAudioSampleRate = 48000;
 export function setBotAudioSampleRate(rate: number): void { botAudioSampleRate = rate; }
@@ -278,6 +301,10 @@ export function startParecCapture(): void {
           }
 
           for (const client of wsClients) {
+            // Real-time PCM: drop frames for saturated viewers rather than
+            // accumulating megabytes of late audio (wastes RAM + risks
+            // backpressure-close). A dropped 20ms frame is a non-event.
+            if (isBackpressured(client)) continue;
             try { client.send(chunk); } catch { wsClients.delete(client); }
           }
 

@@ -117,9 +117,34 @@ export async function upsertHostMeta(hostId: string, meta: HostMeta): Promise<vo
   });
 }
 
-export async function saveProbeResult(hostId: string, result: ProbeResult, now = Date.now()): Promise<void> {
+/**
+ * Minimal structural type for the (transactional or top-level) Prisma client
+ * surface this module needs. Kept local so we don't depend on @prisma/client
+ * types in server/ (state.ts exports `prisma` as `any`).
+ */
+type ProbeTxClient = {
+  hostLatencyHistory: {
+    create(args: unknown): Promise<unknown>;
+    findMany(args: unknown): Promise<Array<{ id?: number; medianMs?: number | null }>>;
+    deleteMany(args: unknown): Promise<unknown>;
+    count(args: unknown): Promise<number>;
+  };
+  hostLatency: { update(args: unknown): Promise<unknown> };
+};
+
+/**
+ * The 5 dependent operations for a probe result, run against either an
+ * interactive-transaction client (`tx`) or the top-level client. Exported for
+ * unit testing without a live DB. (#721)
+ */
+export async function runProbeOps(
+  client: ProbeTxClient,
+  hostId: string,
+  result: ProbeResult,
+  now: number,
+): Promise<void> {
   // 1. Append history entry
-  await prisma.hostLatencyHistory.create({
+  await client.hostLatencyHistory.create({
     data: {
       hostId,
       probedAt: BigInt(now),
@@ -130,7 +155,7 @@ export async function saveProbeResult(hostId: string, result: ProbeResult, now =
   });
 
   // 2. Prune to last HISTORY_SIZE entries
-  const toKeep = await prisma.hostLatencyHistory.findMany({
+  const toKeep = await client.hostLatencyHistory.findMany({
     where:   { hostId },
     orderBy: { probedAt: 'desc' },
     take:    HISTORY_SIZE,
@@ -138,27 +163,27 @@ export async function saveProbeResult(hostId: string, result: ProbeResult, now =
   });
   if (toKeep.length === HISTORY_SIZE) {
     const minId = toKeep[HISTORY_SIZE - 1].id;
-    await prisma.hostLatencyHistory.deleteMany({
+    await client.hostLatencyHistory.deleteMany({
       where: { hostId, id: { lt: minId } },
     });
   }
 
   // 3. Compute rolling stats
-  const history = await prisma.hostLatencyHistory.findMany({
+  const history = await client.hostLatencyHistory.findMany({
     where:   { hostId, medianMs: { not: null } },
     orderBy: { probedAt: 'desc' },
     take:    HISTORY_SIZE,
     select:  { medianMs: true },
   });
 
-  const totalInWindow = await prisma.hostLatencyHistory.count({ where: { hostId } });
+  const totalInWindow = await client.hostLatencyHistory.count({ where: { hostId } });
 
-  const medians     = history.map((r: { medianMs: number | null }) => r.medianMs!);
+  const medians     = history.map((r: { medianMs?: number | null }) => r.medianMs!);
   const successRate = totalInWindow > 0 ? medians.length / totalInWindow : 1;
   const stats       = medians.length > 0 ? computeStats(medians) : null;
 
   // 4. Update host row
-  await prisma.hostLatency.update({
+  await client.hostLatency.update({
     where: { hostId },
     data: {
       medianMs:            stats?.median  ?? null,
@@ -170,6 +195,18 @@ export async function saveProbeResult(hostId: string, result: ProbeResult, now =
       consecutiveFailures: result.samples > 0 ? 0 : { increment: 1 },
     },
   });
+}
+
+export async function saveProbeResult(hostId: string, result: ProbeResult, now = Date.now()): Promise<void> {
+  // #721: collapse the 5 dependent round-trips into one interactive
+  // transaction so a crash between them can't leave the host row stale vs its
+  // history. Fall back to the bare client when $transaction is unavailable
+  // (e.g. the no-op proxy in state.ts, or a unit-test mock).
+  if (typeof prisma.$transaction === 'function') {
+    await prisma.$transaction((tx: ProbeTxClient) => runProbeOps(tx, hostId, result, now));
+  } else {
+    await runProbeOps(prisma as ProbeTxClient, hostId, result, now);
+  }
 }
 
 export async function getHostsToProbe(now = Date.now(), stableIntervalMs = INTERVAL_STABLE_MS): Promise<HostLatencyRow[]> {

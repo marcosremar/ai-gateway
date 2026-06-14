@@ -24,6 +24,12 @@ export interface GatewayConfig {
     health?: number;
     deploy?: number;
   };
+  /** Max retry attempts for connection-level failures (gateway restart tolerance).
+   *  Default: 4. Set 0 to disable retries (HTTP errors and timeouts are never retried). */
+  maxRetries?: number;
+  /** Per-attempt backoff delays in ms. The last entry is reused for further attempts.
+   *  Default: [500, 1000, 2000, 4000]. */
+  retryBackoffMs?: number[];
 }
 
 // ── Inference responses ─────────────────────────────────────────────────────
@@ -108,6 +114,15 @@ export interface DeployOptions {
   apiKey: string;
   dockerImage?: string;
   gpuTypes?: string[];
+  /** Region hint passed through to the provider (e.g. "US"). */
+  region?: string;
+  /** Per-deploy hourly cost ceiling (USD). The gateway rejects the deploy if the
+   *  cheapest matching offer exceeds this — prevents a fat-fingered expensive GPU. */
+  maxCostUsd?: number;
+  /** Container disk size in GB (0–100). */
+  containerDiskInGb?: number;
+  /** Request a cheaper interruptible/spot instance. */
+  interruptible?: boolean;
 }
 
 export interface DeployResponse {

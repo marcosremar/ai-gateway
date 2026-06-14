@@ -18,12 +18,19 @@ export interface CostAnomalyDetectorConfig {
   highSpendThresholdUsd: number;
   backgroundSpikeMultiplier: number;
   expensiveModels: string[];
+  /**
+   * Absolute background-call count that is itself anomalous when there is no
+   * prior-day baseline (first day, or after retention purge). Without this the
+   * multiplier-based check no-ops on day one and a cost explosion is invisible.
+   */
+  absoluteBackgroundSpikeCount: number;
 }
 
 const DEFAULT_CONFIG: CostAnomalyDetectorConfig = {
   highSpendThresholdUsd: 1.0,
   backgroundSpikeMultiplier: 3,
   expensiveModels: ['gpt-4o', 'llama-3.3-70b-versatile', 'llama-3.1-70b-instruct'],
+  absoluteBackgroundSpikeCount: 1000,
 };
 
 export function createCostAnomalyDetector(
@@ -71,6 +78,15 @@ export function createCostAnomalyDetector(
             severity: 'warning',
             message: `Background calls spiked: ${bgToday} today vs ${bgYesterday} yesterday (${(bgToday / bgYesterday).toFixed(1)}x)`,
             data: { today: bgToday, yesterday: bgYesterday },
+          });
+        } else if (bgYesterday === 0 && bgToday >= cfg.absoluteBackgroundSpikeCount) {
+          // No baseline to compare against — fall back to an absolute threshold
+          // so a day-one background-call explosion is still detected.
+          anomalies.push({
+            type: 'background_spike',
+            severity: 'warning',
+            message: `Background calls high with no prior-day baseline: ${bgToday} today (>= ${cfg.absoluteBackgroundSpikeCount})`,
+            data: { today: bgToday, yesterday: bgYesterday, absolute: true },
           });
         }
 

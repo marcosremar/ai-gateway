@@ -5,7 +5,7 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, openSync, fsyncSync, closeSync, renameSync } from 'fs';
 import { defaultCooldownTracker } from '../src/providers/fallback';
 import { defaultCreditBlockTracker } from '../src/providers/credit-block';
 import { createLogger } from '../src/logger';
@@ -71,9 +71,34 @@ export function saveCooldownState(): void {
     if (totalEntries === 0) return; // nothing to persist
 
     mkdirSync(BABELCAST_DIR, { recursive: true });
-    writeFileSync(COOLDOWNS_FILE, JSON.stringify(data, null, 2));
+    // #702: a bare writeFileSync left a half-written (invalid-JSON) cooldowns
+    // file on a crash mid-write; loadCooldownState then silently falls back and
+    // re-hammers rate-limited/credit-exhausted providers (defeating ADR-009).
+    // Write tmp → fsync → rename so the file is always valid on disk.
+    atomicWriteSyncWithFsync(COOLDOWNS_FILE, JSON.stringify(data, null, 2));
     log.log(`Saved ${totalEntries} entries to ${COOLDOWNS_FILE}`);
   } catch (err) {
     log.warn('Failed to save state:', err instanceof Error ? err.message : err);
   }
+}
+
+/**
+ * Crash-safe synchronous write: tmp file → fsync(data) → rename → fsync(dir).
+ * Directory fsync is best-effort (unsupported on some platforms) and never
+ * blocks the rename's atomicity.
+ */
+function atomicWriteSyncWithFsync(filePath: string, data: string): void {
+  const tmp = `${filePath}.tmp`;
+  const fd = openSync(tmp, 'w');
+  try {
+    writeFileSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, filePath);
+  try {
+    const dirFd = openSync(BABELCAST_DIR, 'r');
+    try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+  } catch { /* best-effort dir fsync */ }
 }

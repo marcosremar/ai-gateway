@@ -41,11 +41,16 @@ const STANDBY_MONITOR_INTERVAL_MS = 60_000; // check every 60s
 export function startStandbyMonitor(): void {
   stopStandbyMonitor();
   standbyMonitorTimer = setInterval(checkStandbyTriggers, STANDBY_MONITOR_INTERVAL_MS);
+  // unref so the 60s standby monitor never pins the event loop on shutdown.
+  if (standbyMonitorTimer.unref) standbyMonitorTimer.unref();
   log.log('[standby] Monitor started');
 }
 
 export function stopStandbyMonitor(): void {
   if (standbyMonitorTimer) { clearInterval(standbyMonitorTimer); standbyMonitorTimer = null; }
+  // Also clear any pending error-reset timer so shutdown isn't pinned and a
+  // stale 30s timer can't flip a now-deploying standby state.
+  if (_standbyErrorResetTimer) { clearTimeout(_standbyErrorResetTimer); _standbyErrorResetTimer = null; }
 }
 
 function checkStandbyTriggers(): void {

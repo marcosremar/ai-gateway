@@ -35,10 +35,21 @@ export function extractRequestText(body: unknown): string {
 }
 
 /**
+ * Largest serialized response body we will attempt to `JSON.parse` while
+ * extracting text. A response far larger than any real LLM completion is
+ * almost certainly not JSON we need to introspect; parsing multi-MB strings
+ * just to extract a verdict is a CPU-spike vector, so we treat oversized
+ * bodies as opaque text instead of parsing them.
+ */
+const MAX_PARSEABLE_RESPONSE_CHARS = 1_000_000;
+
+/**
  * Extracts plain text from an OpenAI-format response body.
  */
 export function extractResponseText(body: unknown): string {
   if (typeof body === 'string') {
+    // Don't JSON.parse pathologically large bodies (CPU amplification).
+    if (body.length > MAX_PARSEABLE_RESPONSE_CHARS) return body;
     // Try to parse as JSON first (response might be serialized)
     try {
       const parsed = JSON.parse(body) as Record<string, unknown>;

@@ -90,6 +90,13 @@ let monitorBackoffMaxAlerted = false;
 // Track whether the current deploy already had a crash recorded — prevents
 // double-recording when monitorConsecFails crosses thresholds repeatedly.
 let crashRecordedForCurrentDeploy = false;
+// One-shot guards for the failure-threshold actions. Using `>=` + a flag (the
+// same pattern as crashRecordedForCurrentDeploy) instead of exact `===` ensures
+// each recovery step fires reliably even if monitorConsecFails skips the exact
+// threshold value (e.g. a burst of increments), and still fires only once per
+// crash. All reset in startGpuMonitoring() on a fresh deploy.
+let sshRecoveryAttemptedForCurrentDeploy = false;
+let crashRedeployTriggeredForCurrentDeploy = false;
 
 // P95 demotion: require N consecutive violations before demoting (avoids transient spike false positives)
 const P95_DEMOTION_CONSECUTIVE_VIOLATIONS = 3;
@@ -125,6 +132,9 @@ export function startGpuMonitoring() {
   monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
   monitorBackoffMaxAlerted = false;
   monitorCrashRecoveryAttempts = 0;
+  crashRecordedForCurrentDeploy = false;
+  sshRecoveryAttemptedForCurrentDeploy = false;
+  crashRedeployTriggeredForCurrentDeploy = false;
   // Reset idle clock so the timer starts fresh from GPU-ready, not from last session's request.
   // Without this, a pod that boots 12 min after the previous session's last request immediately
   // hits the 10-min idle timeout and self-terminates.
@@ -244,11 +254,13 @@ export function scheduleNextMonitorProbe() {
           // enough to bring the FastAPI server back without rebooting the
           // pod and re-paying the image-pull tax.
           if (
-            monitorConsecFails === 3 &&
+            monitorConsecFails >= 3 &&
+            !sshRecoveryAttemptedForCurrentDeploy &&
             activeProvider === 'vast' &&
             deployState.sshHost &&
             deployState.sshPort
           ) {
+            sshRecoveryAttemptedForCurrentDeploy = true;
             try {
               log.log(`[gpu] App-level recovery: SSH-restart /app/start.sh on ${deployState.sshHost}:${deployState.sshPort}...`);
               const { spawn } = await import('child_process');
@@ -274,6 +286,8 @@ export function scheduleNextMonitorProbe() {
                 log.log(`[gpu] App-level recovery succeeded — server.py back up. Resetting health counter.`);
                 monitorConsecFails = 0;
                 monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
+                // Allow another cheap SSH recovery on a fresh failure climb.
+                sshRecoveryAttemptedForCurrentDeploy = false;
                 setDeployState({ alert: `App auto-restarted via SSH after 3 health failures` });
               } else {
                 log.warn(`[gpu] App-level recovery did not confirm server up — falling through to pod restart at 5.`);
@@ -282,7 +296,9 @@ export function scheduleNextMonitorProbe() {
               log.warn(`[gpu] App-level SSH recovery failed: ${sshErr instanceof Error ? sshErr.message : sshErr}`);
             }
           }
-          // Auto-restart: attempt to restart the pod before declaring it dead
+          // Auto-restart: attempt to restart the pod before declaring it dead.
+          // Kept as exact `=== 5` (after a restart monitorConsecFails resets to
+          // 0, so the next attempt naturally re-arms when it climbs back to 5).
           if (monitorConsecFails === 5 && deployState.podId) {
             const restartProvider = activeProvider === 'runpod' ? runpod : activeProvider === 'vast' ? vast : null;
             if (restartProvider && (deployApiKey || deployVastApiKey)) {
@@ -301,10 +317,13 @@ export function scheduleNextMonitorProbe() {
           }
 
           // Auto-redeploy on crash with different provider: after 10 consecutive failures
-          // (restart at 5 didn't help), try redeploying on a different provider
-          if (monitorConsecFails === 10 && getAutoRecoveryEnabled()) {
+          // (restart at 5 didn't help), try redeploying on a different provider.
+          // `>=` + a one-shot flag avoids silently skipping recovery if the
+          // counter jumps past 10.
+          if (monitorConsecFails >= 10 && !crashRedeployTriggeredForCurrentDeploy && getAutoRecoveryEnabled()) {
             const maxRetries = getAutoRecoveryMaxRetries() || MAX_MONITOR_CRASH_RECOVERY;
             if (monitorCrashRecoveryAttempts < maxRetries) {
+              crashRedeployTriggeredForCurrentDeploy = true;
               const crashedProvider = deployState.provider;
               monitorCrashRecoveryAttempts++;
               log.warn(`[gpu] Auto-recovery: redeploying on different provider after crash on ${crashedProvider} (attempt ${monitorCrashRecoveryAttempts}/${maxRetries})`);

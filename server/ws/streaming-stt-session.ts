@@ -78,3 +78,8 @@ export const sttCleanupTimer: ReturnType<typeof setInterval> = setInterval(() =>
   }
   if (stale.length) log.log(`[ws] Cleaned ${stale.length} stale STT session(s)`);
 }, 60_000); // check every minute
+// Process-lifetime sweep: don't hold the event loop open on an otherwise-idle
+// process (zero sessions) just to fire this 60s tick. `.unref()` lets the
+// runtime exit when nothing else is pending; the timer still fires while the
+// server is alive. Guarded for non-Node timer shapes in tests.
+sttCleanupTimer?.unref?.();

@@ -11,6 +11,7 @@ export const GPU_MONITOR_INTERVAL_MS = 30_000; // health check every 30s
 
 /** Track consecutive zero-utilization probes to detect idle GPU (5+ min at 0% = warning). */
 let consecutiveZeroUtilProbes = 0;
+let zeroUtilWarned = false; // one-shot guard so the warning fires reliably even if the counter jumps
 const ZERO_UTIL_WARNING_THRESHOLD = 10; // 10 probes * 30s = 5 min
 
 /**
@@ -51,14 +52,19 @@ export function parseAndStoreGpuMetrics(data: Record<string, unknown>): void {
     setDeployState({ alert: `GPU temperature high: ${temp}C (throttling risk above 85C)` });
   }
 
-  // Idle GPU warning: 0% utilization for 5+ minutes (10 consecutive probes at 30s interval)
+  // Idle GPU warning: 0% utilization for 5+ minutes (10 consecutive probes at 30s interval).
+  // Use `>=` + a one-shot flag so the warning is not silently skipped if the
+  // probe counter ever jumps past the threshold, and still fires only once per
+  // sustained-idle window (reset when utilization resumes).
   if (util === 0) {
     consecutiveZeroUtilProbes++;
-    if (consecutiveZeroUtilProbes === ZERO_UTIL_WARNING_THRESHOLD) {
+    if (consecutiveZeroUtilProbes >= ZERO_UTIL_WARNING_THRESHOLD && !zeroUtilWarned) {
+      zeroUtilWarned = true;
       log.warn(`[gpu] GPU utilization 0% for ~${Math.round(ZERO_UTIL_WARNING_THRESHOLD * GPU_MONITOR_INTERVAL_MS / 60_000)}min — GPU idle (wasting compute)`);
     }
   } else if (util > 0) {
     consecutiveZeroUtilProbes = 0;
+    zeroUtilWarned = false;
   }
 
   // Near-OOM warning: memory usage >95%

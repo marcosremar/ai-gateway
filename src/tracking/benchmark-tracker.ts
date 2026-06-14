@@ -94,7 +94,12 @@ function computeStats(values: number[]): BenchmarkStats | null {
   return {
     count: sorted.length,
     mean: Math.round(sum / sorted.length),
-    p50: sorted[Math.floor(sorted.length * 0.5)]!,
+    // Both percentiles use nearest-rank so the p50 <= p95 invariant always
+    // holds — previously p50 used Math.floor and p95 used ceil-1, which could
+    // invert for tiny samples (e.g. n=2: floor(2*0.5)=1 > ceil(2*0.95)-1=1 ok,
+    // but n=3: floor(3*0.5)=1, ceil(3*0.95)-1=2 — still fine, yet the mixed
+    // convention drifted from the rest of the gateway). Unify on ceil-1.
+    p50: sorted[Math.max(0, Math.ceil(sorted.length * 0.5) - 1)]!,
     p95: sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)]!,
     min: sorted[0]!,
     max: sorted[sorted.length - 1]!,

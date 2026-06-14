@@ -11,7 +11,7 @@
 //      emits a warning pointing the operator at `ai-gateway gpu list`.
 //   3. SIGINT/SIGTERM handlers release the lock on graceful shutdown.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createLogger } from '../../src/logger';
@@ -21,6 +21,39 @@ const log = createLogger('pid-lock');
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const PID_FILE = join(BABELCAST_DIR, 'ws-server.pid');
 const ACTIVE_DEPLOY_FILE = join(BABELCAST_DIR, 'active_deploy.json');
+
+// ── Shutdown flush registry ─────────────────────────────────────────────────
+// #711/#712/#713: the SIGINT/SIGTERM handlers previously called only
+// releasePidLock() before process.exit(), dropping the debounced daily_spend
+// write, all provider cooldown/credit-block state, and the pull-history
+// estimator data. Each lost up to 10s of cost accounting / re-armed the budget
+// gate / re-hammered cooled-down providers on the next start. Modules register
+// a synchronous flush here; runShutdownFlushes() runs them all before exit.
+type ShutdownFlush = { name: string; fn: () => void };
+const _shutdownFlushes: ShutdownFlush[] = [];
+
+/** Register a synchronous flush to run on graceful shutdown (idempotent by name). */
+export function registerShutdownFlush(name: string, fn: () => void): void {
+  if (_shutdownFlushes.some((f) => f.name === name)) return;
+  _shutdownFlushes.push({ name, fn });
+}
+
+/** Run every registered shutdown flush synchronously. Best-effort: one failure
+ * never blocks the others or the subsequent process exit. */
+export function runShutdownFlushes(): void {
+  for (const { name, fn } of _shutdownFlushes) {
+    try {
+      fn();
+    } catch (err) {
+      log.warn(`Shutdown flush "${name}" failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+}
+
+/** Test-only: drop all registered flushes. */
+export function __clearShutdownFlushes(): void {
+  _shutdownFlushes.length = 0;
+}
 
 function isProcessAlive(pid: number): boolean {
   if (!Number.isFinite(pid) || pid <= 0) return false;
@@ -89,7 +122,15 @@ export function acquirePidLock(): void {
 
   try {
     const tmp = PID_FILE + '.tmp';
-    writeFileSync(tmp, String(process.pid));
+    // #710: fsync the tmp file before rename so a power loss can't leave a
+    // stale/empty PID file that misleads the next start's single-instance check.
+    const fd = openSync(tmp, 'w');
+    try {
+      writeFileSync(fd, String(process.pid));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, PID_FILE);
     log.log(`[startup] PID lock acquired (pid=${process.pid}) at ${PID_FILE}`);
   } catch (err) {
@@ -97,10 +138,36 @@ export function acquirePidLock(): void {
     return;
   }
 
-  const release = () => releasePidLock();
-  process.once('SIGINT', () => { release(); process.exit(130); });
-  process.once('SIGTERM', () => { release(); process.exit(143); });
-  process.once('exit', release);
+  // #711/#712/#713: ensure debounced/in-memory state is durably flushed before
+  // exit. Registration is fire-and-forget (the flush only needs to be present
+  // by the time a signal actually arrives, which is far in the future).
+  wireDefaultShutdownFlushes();
+
+  const onSignal = (exitCode: number) => {
+    runShutdownFlushes();
+    releasePidLock();
+    process.exit(exitCode);
+  };
+  process.once('SIGINT', () => onSignal(130));
+  process.once('SIGTERM', () => onSignal(143));
+  // 'exit' cannot run async work; flush synchronously here too as a backstop
+  // for non-signal exits (e.g. uncaught-exception teardown elsewhere).
+  process.once('exit', () => { runShutdownFlushes(); releasePidLock(); });
+}
+
+/** Lazily register the known runtime-state flushes (daily spend, provider
+ * cooldowns, pull-history). Dynamic imports keep pid-lock's static import graph
+ * small and avoid load-order coupling with the state modules. */
+function wireDefaultShutdownFlushes(): void {
+  import('../../src/gateway/state/cost-state')
+    .then(({ flushDailySpend }) => registerShutdownFlush('daily-spend', flushDailySpend))
+    .catch(() => { /* module optional — best-effort */ });
+  import('../cooldown-persistence')
+    .then(({ saveCooldownState }) => registerShutdownFlush('cooldowns', saveCooldownState))
+    .catch(() => { /* best-effort */ });
+  import('../pull-history-persistence')
+    .then(({ savePullHistoryNow }) => registerShutdownFlush('pull-history', savePullHistoryNow))
+    .catch(() => { /* best-effort */ });
 }
 
 /** Release the PID lock if we own it. Idempotent. */

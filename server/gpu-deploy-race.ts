@@ -41,6 +41,32 @@ function modalScriptFor(image: string): string {
   }
 }
 
+/** Flat per-instance hourly cost prior used to gate race deploys when no live
+ *  offer price is available. Matches the budget-gate estimate ($2/instance). */
+export const RACE_EST_PER_INSTANCE_HR = 2;
+
+/**
+ * Decide how many race slots fit under a per-deploy cost cap (#105).
+ *
+ * Race losers all bill during boot, so N simultaneous instances burn
+ * `N × estPerInstanceHr` per hour. Given `maxCostUsd` (interpreted as the
+ * acceptable simultaneous hourly burn), return the largest `allowedRaceN ≤
+ * raceN` whose burn stays at or under the cap. If even one instance exceeds
+ * the cap, `rejected` is true.
+ */
+export function computeRaceBudget(
+  raceN: number,
+  estPerInstanceHr: number,
+  maxCostUsd: number,
+): { allowedRaceN: number; estimatedCost: number; rejected: boolean } {
+  const per = estPerInstanceHr > 0 ? estPerInstanceHr : RACE_EST_PER_INSTANCE_HR;
+  if (per > maxCostUsd) {
+    return { allowedRaceN: 0, estimatedCost: per, rejected: true };
+  }
+  const allowedRaceN = Math.max(1, Math.min(raceN, Math.floor(maxCostUsd / per)));
+  return { allowedRaceN, estimatedCost: allowedRaceN * per, rejected: false };
+}
+
 interface RaceCandidate {
   index: number;
   tier: GpuTier;
@@ -66,7 +92,7 @@ export async function startDeployRace(
   const { cooldownTracker } = await import('./gpu-deploy');
 
   const deployStartedAt = Date.now();
-  const raceN = Math.min(raceCount, 10); // cap at 10
+  let raceN = Math.min(raceCount, 10); // cap at 10
 
   // ── Provider readiness pre-filter ───────────────────────────────────────
   // Don't waste race slots on providers with no credentials (e.g. Modal with no
@@ -84,12 +110,36 @@ export async function startDeployRace(
     tiers = r.usable;
   }
 
+  // ── Per-deploy cost cap on race losers (#105) ───────────────────────────
+  // Race fires N instances that all bill during boot. When the caller set a
+  // maxCostUsd, trim raceN so the simultaneous hourly burn stays under the cap
+  // (or reject if even a single instance exceeds it). Uses the same flat
+  // $2/instance/hr prior as the budget gate below.
+  {
+    const cap = extra.maxCostUsd;
+    if (cap !== undefined) {
+      const plan = computeRaceBudget(raceN, RACE_EST_PER_INSTANCE_HR, cap);
+      if (plan.rejected) {
+        const msg = `[budget] Race deploy refused: estimated per-instance cost ($${RACE_EST_PER_INSTANCE_HR.toFixed(2)}/hr) exceeds maxCostUsd ($${cap.toFixed(2)})`;
+        log.error(msg);
+        logGpuEvent('deploy_rejected', tiers[0]?.name ?? 'unknown', false, { metadata: { reason: 'maxCostUsd', maxCostUsd: cap, raceN } });
+        setDeployState({ status: 'error', message: msg });
+        deploymentSM.markError(msg);
+        return;
+      }
+      if (plan.allowedRaceN < raceN) {
+        log.warn(`[race] Trimming raceN ${raceN}→${plan.allowedRaceN} to honor maxCostUsd=$${cap.toFixed(2)} (est $${RACE_EST_PER_INSTANCE_HR.toFixed(2)}/instance/hr)`);
+        raceN = plan.allowedRaceN;
+      }
+    }
+  }
+
   // ── Budget gate (same as startDeployWithTiers) ──────────────────────────
   // Race deploys bypass startDeployWithTiers, so we must guard here too.
   // Estimate: $2 per instance (N instances run simultaneously during boot).
   {
     const { canAffordDeploy } = await import('./state');
-    const estimatedCost = Math.max(2, raceN * 2);
+    const estimatedCost = Math.max(2, raceN * RACE_EST_PER_INSTANCE_HR);
     const decision = canAffordDeploy(estimatedCost);
     if (!decision.allowed) {
       const msg = `[budget] Race deploy refused: ${decision.reason} (spend=$${decision.currentSpend.toFixed(2)}, projected=$${decision.projected.toFixed(2)}, cap=$${decision.cap.toFixed(2)}, raceN=${raceN})`;

@@ -61,25 +61,72 @@ for (const [lang, phrases] of Object.entries(hallucinations as Record<string, st
   blocklistByLang.set(lang, new Set(phrases));
 }
 
-// Language-agnostic set: union of all phrases (for when language is unknown)
-const blocklistAll = new Set<string>();
-for (const phrases of blocklistByLang.values()) {
-  for (const p of phrases) blocklistAll.add(p);
+// Language-agnostic set: union of all phrases (for when language is unknown).
+// Built lazily on first language-unknown lookup — flattening 7,770 phrases
+// across 100 languages into one Set at module load is pure waste when the
+// language is (almost) always known on the live path.
+let _blocklistAll: Set<string> | null = null;
+function getBlocklistAll(): Set<string> {
+  if (_blocklistAll) return _blocklistAll;
+  const all = new Set<string>();
+  for (const phrases of blocklistByLang.values()) {
+    for (const p of phrases) all.add(p);
+  }
+  _blocklistAll = all;
+  return all;
 }
 
-/** Check if text matches a known hallucination phrase (exact match, case-insensitive). */
-function isBlocklisted(text: string, language?: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  if (!normalized) return false;
+/**
+ * Normalize a language code to the bare ISO 639-1 form used as the blocklist
+ * key — callers may pass `en-US` / `EN` / `fr_FR`, which would otherwise miss.
+ */
+function normalizeLang(language?: string): string | undefined {
+  if (!language) return undefined;
+  const m = language.toLowerCase().match(/^[a-z]+/);
+  return m ? m[0] : undefined;
+}
 
-  // Check language-specific blocklist first
-  if (language) {
-    const langSet = blocklistByLang.get(language);
-    if (langSet?.has(normalized)) return true;
+/**
+ * Normalize a candidate phrase for blocklist comparison: lower-case, collapse
+ * whitespace, and strip leading/trailing punctuation. Whisper hallucinations
+ * frequently arrive padded with trailing periods ("Thank you.") that defeat a
+ * raw exact-match.
+ */
+function normalizePhrase(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.,!?;:…"'`-]+|[\s.,!?;:…"'`-]+$/g, '')
+    .trim();
+}
+
+/**
+ * Collapse a doubled phrase ("thank you. thank you." → "thank you") so the
+ * common repeated-hallucination pattern reduces to a single blocklist key.
+ */
+function dedupeRepeated(normalized: string): string {
+  const parts = normalized.split(/[.!?]+/).map(p => p.trim()).filter(Boolean);
+  if (parts.length >= 2 && parts.every(p => p === parts[0])) return parts[0];
+  return normalized;
+}
+
+/** Check if text matches a known hallucination phrase (normalized, repeated-aware). */
+function isBlocklisted(text: string, language?: string): boolean {
+  const normalized = normalizePhrase(text);
+  if (!normalized) return false;
+  const deduped = dedupeRepeated(normalized);
+  const lang = normalizeLang(language);
+
+  // Check language-specific blocklist first (try both the normalized form and
+  // the doubled-collapsed form).
+  if (lang) {
+    const langSet = blocklistByLang.get(lang);
+    if (langSet && (langSet.has(normalized) || langSet.has(deduped))) return true;
   }
 
-  // Fall back to global blocklist
-  return blocklistAll.has(normalized);
+  // Fall back to global blocklist.
+  const all = getBlocklistAll();
+  return all.has(normalized) || all.has(deduped);
 }
 
 // ---------------------------------------------------------------------------
@@ -223,8 +270,15 @@ export function filterHallucinations(
         text = '';
         reasons.push('all segments rejected by metadata filter');
       } else {
-        // Reconstruct text from kept segments only
-        text = result.kept.map(s => s.text).join('').trim();
+        // Reconstruct text from kept segments only. Join on a single space and
+        // collapse runs — naive join('') glued words together whenever a
+        // provider's segment text wasn't already space-prefixed.
+        text = result.kept
+          .map(s => s.text.trim())
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
       }
     }
   }

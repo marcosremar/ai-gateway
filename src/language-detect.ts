@@ -30,6 +30,15 @@ const ISO3_TO_ISO1: Record<string, string> = {
 // `franc` can return via the ISO3_TO_ISO1 mapping.
 export const SUPPORTED_LANGUAGES = new Set(Object.values(ISO3_TO_ISO1));
 
+// Inverse map (ISO 639-1 → ISO 639-3). Hoisted to module scope — it is pure
+// over ISO3_TO_ISO1 and was previously rebuilt on every detection in the hot
+// path (dub fanout detects the same text once per target).
+const ISO1_TO_ISO3: Record<string, string> = (() => {
+  const inv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(ISO3_TO_ISO1)) inv[v] = k;
+  return inv;
+})();
+
 // ── Confidence estimation ────────────────────────────────────────────────────
 // franc doesn't return confidence directly, but we can estimate it by comparing
 // the probability gap between the top two candidates.
@@ -46,6 +55,22 @@ export interface LanguageDetectResult {
 
 /** Minimum word count for reliable detection. Short texts are unreliable. */
 const MIN_WORDS = 4;
+
+// ── Confidence tuning constants ──────────────────────────────────────────────
+// Previously these were inline magic numbers. Named so operators reading the
+// detection logic can see (and tune) exactly how confidence is scored.
+
+/** Restricted and unrestricted franc passes agree → high confidence. */
+const CONFIDENCE_AGREE = 0.9;
+/** Unrestricted picked the *other* candidate (src/tgt) → medium confidence. */
+const CONFIDENCE_OTHER_CANDIDATE = 0.6;
+/** Unrestricted picked a completely different language → low confidence. */
+const CONFIDENCE_MISMATCH = 0.4;
+/** Word-count thresholds that each add a small confidence boost. */
+const CONFIDENCE_BOOST_WORDS_1 = 15;
+const CONFIDENCE_BOOST_WORDS_2 = 30;
+/** Per-band confidence boost added at each word-count threshold. */
+const CONFIDENCE_BOOST_STEP = 0.05;
 
 /**
  * Detect the language of a text, restricted to a source and target language.
@@ -76,23 +101,28 @@ export function detectLanguage(text: string, source: string, target: string): La
     return { language: '', confidence: 0 };
   }
 
-  // Restrict franc to only consider source and target
-  // franc uses ISO 639-3 codes, so we need to convert
-  const iso1ToIso3: Record<string, string> = {};
-  for (const [k, v] of Object.entries(ISO3_TO_ISO1)) {
-    iso1ToIso3[v] = k;
-  }
-
-  const srcIso3 = iso1ToIso3[source];
-  const tgtIso3 = iso1ToIso3[target];
+  // Restrict franc to only consider source and target.
+  // franc uses ISO 639-3 codes, so we convert via the hoisted inverse map.
+  const srcIso3 = ISO1_TO_ISO3[source];
+  const tgtIso3 = ISO1_TO_ISO3[target];
 
   if (!srcIso3 || !tgtIso3) {
     return { language: '', confidence: 0 };
   }
 
   // Build allow list — only these two languages
-  // franc's `only` parameter restricts to specific ISO 639-3 codes
-  const detected = franc(text, { only: [srcIso3, tgtIso3], minLength: 10 });
+  // franc's `only` parameter restricts to specific ISO 639-3 codes.
+  // Guard against franc throwing on pathological input — a detection failure
+  // must never propagate and break the pipeline; degrade to "undetermined".
+  let detected: string;
+  let unrestricted: string;
+  try {
+    detected = franc(text, { only: [srcIso3, tgtIso3], minLength: 10 });
+    // Estimate confidence: run again unrestricted and compare.
+    unrestricted = franc(text, { minLength: 10 });
+  } catch {
+    return { language: '', confidence: 0 };
+  }
 
   if (detected === 'und') {
     return { language: '', confidence: 0 };
@@ -103,28 +133,25 @@ export function detectLanguage(text: string, source: string, target: string): La
     return { language: '', confidence: 0 };
   }
 
-  // Estimate confidence: run again unrestricted and compare
-  // If the unrestricted result matches, confidence is higher
-  const unrestricted = franc(text, { minLength: 10 });
   const unrestrictedIso1 = ISO3_TO_ISO1[unrestricted] || '';
 
   let confidence: number;
   if (unrestrictedIso1 === detectedIso1) {
     // Both restricted and unrestricted agree — high confidence
-    confidence = 0.9;
+    confidence = CONFIDENCE_AGREE;
   } else if (unrestrictedIso1 === source || unrestrictedIso1 === target) {
     // Unrestricted picked the other candidate — medium confidence
-    confidence = 0.6;
+    confidence = CONFIDENCE_OTHER_CANDIDATE;
   } else {
     // Unrestricted picked a completely different language — low confidence
     // The text might not be in either source or target
-    confidence = 0.4;
+    confidence = CONFIDENCE_MISMATCH;
   }
 
   // Boost confidence for longer texts
   const wordCount = text.trim().split(/\s+/).length;
-  if (wordCount >= 15) confidence = Math.min(1, confidence + 0.05);
-  if (wordCount >= 30) confidence = Math.min(1, confidence + 0.05);
+  if (wordCount >= CONFIDENCE_BOOST_WORDS_1) confidence = Math.min(1, confidence + CONFIDENCE_BOOST_STEP);
+  if (wordCount >= CONFIDENCE_BOOST_WORDS_2) confidence = Math.min(1, confidence + CONFIDENCE_BOOST_STEP);
 
   return { language: detectedIso1, confidence };
 }

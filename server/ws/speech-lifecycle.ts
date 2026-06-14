@@ -9,6 +9,22 @@ import type { PipelineCallbacks, PipelineResult } from '../pipeline-runner';
 
 const log = createLogger('speech-lifecycle');
 
+/**
+ * Per-socket buffered-bytes ceiling for outbound audio. With
+ * `closeOnBackpressureLimit: true`, a slow client whose buffer keeps growing
+ * gets force-disconnected mid-stream. Dropping a late audio chunk degrades
+ * gracefully (a brief gap) instead of killing the whole session.
+ */
+export const SPEECH_AUDIO_BACKPRESSURE_BYTES = 2 * 1024 * 1024;
+
+/** True when the socket's buffered bytes are at/over the audio ceiling. */
+export function isSpeechBackpressured(
+  ws: { getBufferedAmount?: () => number },
+  limit = SPEECH_AUDIO_BACKPRESSURE_BYTES,
+): boolean {
+  return (ws.getBufferedAmount?.() ?? 0) >= limit;
+}
+
 type WsData = {
   id: string;
   type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
@@ -59,6 +75,9 @@ export function handleSpeechMessage(
     },
     onAudioChunk(chunk: Buffer, _isFirst: boolean) {
       if (ws.readyState !== 1) return;
+      // Skip the chunk if the client is already saturated; sending would grow
+      // the per-socket buffer and trip the backpressure-close instead.
+      if (isSpeechBackpressured(ws as unknown as { getBufferedAmount?: () => number })) return;
       ws.send(chunk);
     },
     onComplete(result: PipelineResult) {

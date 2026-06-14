@@ -51,6 +51,8 @@ export interface BudgetStatus {
 const SPEND_LIST_PREFIX = 'spend:records:';
 const SPEND_DAILY_PREFIX = 'spend:daily:';
 const MAX_RECORDS_PER_DAY = 10_000;
+/** Scale factor for storing fractional dollars as integers (atomic hincrby). */
+const MICROS_PER_USD = 1_000_000;
 
 function recordsKey(userId: string, date: string): string {
   const sanitized = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -96,20 +98,47 @@ export class SpendTracker {
       await this.stateStore.rpush(rKey, JSON.stringify(record));
       await this.stateStore.ltrim(rKey, -MAX_RECORDS_PER_DAY, -1);
 
-      // Update daily aggregates in hash (fast path for budget checks)
-      // Use HINCRBYFLOAT pattern via hset with computed value to ensure atomic-ish update
-      // Read current state and update atomically via hash store
-      const daily = await this.stateStore.hgetall(dKey);
-      const existingCost = parseFloat(daily['totalCost'] ?? '0');
-      const existingCount = parseInt(daily['requestCount'] ?? '0', 10);
-      // Only update if both operations succeed - prevents partial state
+      // Update daily aggregates in hash (fast path for budget checks).
+      //
+      // Previously this was a read-modify-write (hgetall → add → hset): two
+      // concurrent records read the same `existingCost`/`existingCount` and the
+      // later write clobbered the earlier increment, so per-user daily spend was
+      // silently undercounted under concurrency. Use the store's atomic
+      // increment instead.
+      //
+      // `hincrby` is integer-only across backends (Redis HINCRBY), so cost is
+      // accumulated in integer micro-dollars (USD * 1e6). getDailyTotalFast()
+      // divides back to dollars. requestCount is a plain integer increment.
+      const micros = Math.round(record.costUsd * MICROS_PER_USD);
       await Promise.all([
-        this.stateStore.hset(dKey, 'totalCost', (existingCost + record.costUsd).toFixed(6)),
-        this.stateStore.hset(dKey, 'requestCount', String(existingCount + 1)),
+        this.stateStore.hincrby(dKey, 'totalCostMicros', micros),
+        this.stateStore.hincrby(dKey, 'requestCount', 1),
       ]);
     } catch (err) {
       // Non-critical — swallow but log for debugging
       console.warn('[spend-tracker] Failed to record spend:', err);
+    }
+  }
+
+  /**
+   * Fast O(1) read of a user's atomically-accumulated daily total + request
+   * count from the `spend:daily:` hash. Unlike getDailySummary (which scans
+   * and JSON-parses the whole records list), this reads the precomputed hash
+   * maintained by record(). Use it for hot-path budget checks.
+   */
+  async getDailyTotalFast(userId: string, date?: string): Promise<{ totalCostUsd: number; requestCount: number }> {
+    const d = date ?? todayStr();
+    const dKey = dailyKey(userId, d);
+    try {
+      const daily = await this.stateStore.hgetall(dKey);
+      const micros = parseInt(daily['totalCostMicros'] ?? '0', 10);
+      const count = parseInt(daily['requestCount'] ?? '0', 10);
+      return {
+        totalCostUsd: (Number.isFinite(micros) ? micros : 0) / MICROS_PER_USD,
+        requestCount: Number.isFinite(count) ? count : 0,
+      };
+    } catch {
+      return { totalCostUsd: 0, requestCount: 0 };
     }
   }
 

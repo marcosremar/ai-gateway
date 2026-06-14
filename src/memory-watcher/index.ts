@@ -96,7 +96,10 @@ export function startMemoryWatcher(config: MemoryWatcherConfig = {}): {
   const cfg: Required<MemoryWatcherConfig> = { ...DEFAULT_CONFIG, ...config };
   let running = true;
   let lastStats: MemoryStats | null = null;
-  let lastRequestTime = Date.now();
+  // Single activity timestamp: written by the setTimeout hook below and read by
+  // the idle-GC check. Previously the GC check read a separate `lastRequestTime`
+  // that nothing ever updated, so idle GC never fired (#267).
+  let lastActivity = Date.now();
 
   const interval = setInterval(() => {
     if (!running) return;
@@ -134,7 +137,7 @@ export function startMemoryWatcher(config: MemoryWatcherConfig = {}): {
 
     // GC on idle
     if (cfg.gcOnIdle) {
-      const idleMs = Date.now() - lastRequestTime;
+      const idleMs = Date.now() - lastActivity;
       if (idleMs > cfg.idleThresholdMs) {
         log.log({ idleMs }, 'Idle detected — triggering GC');
         forceGC();
@@ -156,10 +159,11 @@ export function startMemoryWatcher(config: MemoryWatcherConfig = {}): {
 
   interval.unref();
 
-  // Track request activity for idle detection
-  let lastActivity = Date.now();
+  // Track request activity for idle detection by wrapping global.setTimeout.
+  // We keep the original so stop() can restore it — leaving the patch in place
+  // leaks globally and stacks across repeated watcher starts (#266).
   const originalSetTimeout = global.setTimeout;
-  global.setTimeout = function patchedSetTimeout(
+  const patchedSetTimeout = function patchedSetTimeout(
     fn: (...args: unknown[]) => void,
     ms?: number,
     ...args: unknown[]
@@ -167,11 +171,17 @@ export function startMemoryWatcher(config: MemoryWatcherConfig = {}): {
     lastActivity = Date.now();
     return originalSetTimeout(fn, ms, ...args);
   } as typeof global.setTimeout;
+  global.setTimeout = patchedSetTimeout;
 
   return {
     stop: () => {
       running = false;
       clearInterval(interval);
+      // Restore the original only if nobody else re-patched on top of ours;
+      // overwriting a newer patch would clobber another watcher's hook.
+      if (global.setTimeout === patchedSetTimeout) {
+        global.setTimeout = originalSetTimeout;
+      }
       log.log({}, 'Memory watcher stopped');
     },
     getStats: () => lastStats ?? getMemoryStats(),

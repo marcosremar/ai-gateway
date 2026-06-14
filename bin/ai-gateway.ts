@@ -20,6 +20,7 @@ import { readFileSync, writeFileSync, existsSync, createWriteStream, createReadS
 import { resolve, dirname, join } from 'path';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { createHash } from 'crypto';
+import { validateNumericFlag, parseMaxCostUsd, classifyExitCode, UsageError, EXIT_USAGE } from '../cli/cli-helpers';
 
 // ── Colors (minimal, no deps) ────────────────────────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -794,7 +795,7 @@ async function cmdGpuDeploy(opts: {
   image?: string; gpuTypes?: string; onstart?: string; storageGb?: number;
   env?: string; numGpus?: number; devMode?: boolean; readinessProbe?: string;
   label?: string; strictFastBoot?: boolean; searchMode?: string; allowUnverified?: boolean;
-  provider?: string;
+  provider?: string; maxCostUsd?: number;
 }) {
   const { url, key } = getConfig();
   const body: Record<string, unknown> = {};
@@ -803,6 +804,9 @@ async function cmdGpuDeploy(opts: {
   if (opts.onstart) body.onstart = opts.onstart;
   if (opts.storageGb) body.storageGb = opts.storageGb;
   if (opts.numGpus) body.gpuCount = opts.numGpus;
+  // --max-cost-usd: hourly cost ceiling. The server rejects the deploy if the
+  // cheapest matching offer exceeds it — prevents a fat-fingered expensive GPU.
+  if (opts.maxCostUsd !== undefined) body.maxCostUsd = opts.maxCostUsd;
   if (opts.devMode) body.devMode = true;
   if (opts.readinessProbe === 'ssh' || opts.readinessProbe === 'health') body.readinessProbe = opts.readinessProbe;
   if (opts.provider) body.provider = opts.provider;
@@ -6040,6 +6044,9 @@ Subcommands:
     --search-mode <high_quality|full>  Vast offer search profile (default: high_quality)
     --provider <name>            Restrict to one provider (vast, runpod, modal,
                                  hyperstack, tensordock). Skips tier cascade race.
+    --max-cost-usd <usd>         Reject deploy if cheapest matching offer exceeds
+                                 this hourly cost (USD). Guards against a
+                                 fat-fingered expensive GPU.
   stop                         Stop (pause) the current GPU instance
   resume [instanceId]          Resume a stopped instance
     --provider <name>            Provider hint (runpod, vast, tensordock)
@@ -7014,26 +7021,33 @@ Per-app isolation:
             limit: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
             provider: getArg(args, '--provider'),
           }); break;
-          case 'deploy': await cmdGpuDeploy({
-            image: getArg(args, '--image'),
-            gpuTypes: getArg(args, '--gpu-types'),
-            onstart: getArg(args, '--onstart'),
-            storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : undefined,
-            numGpus: getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : undefined,
-            env: getArg(args, '--env'),
-            devMode: hasFlag(args, '--dev-mode'),
-            readinessProbe: getArg(args, '--readiness-probe'),
-            label: getArg(args, '--label'),
-            // --no-strict-fast-boot opts OUT of the strict filter (default ON)
-            strictFastBoot: hasFlag(args, '--no-strict-fast-boot') ? false : undefined,
-            searchMode: getArg(args, '--search-mode'),
-            // --allow-unverified opts INTO Vast deverified/unverified rentable hosts
-            // (only path when no verified offer is rentable for the requested GPU)
-            allowUnverified: hasFlag(args, '--allow-unverified') ? true : undefined,
-            // --provider restricts deploy to a single provider (vast, runpod, modal,
-            // hyperstack, tensordock). Bypasses tier cascade race.
-            provider: getArg(args, '--provider'),
-          }); break;
+          case 'deploy': {
+            const maxCost = parseMaxCostUsd(getArg(args, '--max-cost-usd'));
+            if (maxCost.error) { console.error(`Error: ${maxCost.error}`); process.exit(EXIT_USAGE); }
+            await cmdGpuDeploy({
+              image: getArg(args, '--image'),
+              gpuTypes: getArg(args, '--gpu-types'),
+              onstart: getArg(args, '--onstart'),
+              storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : undefined,
+              numGpus: getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : undefined,
+              env: getArg(args, '--env'),
+              devMode: hasFlag(args, '--dev-mode'),
+              readinessProbe: getArg(args, '--readiness-probe'),
+              label: getArg(args, '--label'),
+              // --no-strict-fast-boot opts OUT of the strict filter (default ON)
+              strictFastBoot: hasFlag(args, '--no-strict-fast-boot') ? false : undefined,
+              searchMode: getArg(args, '--search-mode'),
+              // --allow-unverified opts INTO Vast deverified/unverified rentable hosts
+              // (only path when no verified offer is rentable for the requested GPU)
+              allowUnverified: hasFlag(args, '--allow-unverified') ? true : undefined,
+              // --provider restricts deploy to a single provider (vast, runpod, modal,
+              // hyperstack, tensordock). Bypasses tier cascade race.
+              provider: getArg(args, '--provider'),
+              // --max-cost-usd caps the hourly spend (see cmdGpuDeploy).
+              maxCostUsd: maxCost.value,
+            });
+            break;
+          }
           case 'stop': await cmdGpuStop({
             deployId: getArg(args, '--deploy-id'),
           }); break;
@@ -7704,14 +7718,22 @@ Per-app isolation:
       case 'whoami':
         await cmdWhoami();
         break;
-      case 'ping':
-        await cmdPing(getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : getArg(args, '--count') ? parseInt(getArg(args, '--count')!) : 5);
+      case 'ping': {
+        const rawCount = getArg(args, '-n') ?? getArg(args, '--count');
+        const flagName = getArg(args, '-n') !== undefined ? '-n' : '--count';
+        const parsed = validateNumericFlag(rawCount, flagName, { integer: true, min: 1 });
+        if (parsed.error) throw new UsageError(parsed.error);
+        await cmdPing(parsed.value ?? 5);
         break;
-      case 'benchmark':
-        await cmdBenchmark({
-          count: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : getArg(args, '--count') ? parseInt(getArg(args, '--count')!) : undefined,
-        });
+      }
+      case 'benchmark': {
+        const rawCount = getArg(args, '-n') ?? getArg(args, '--count');
+        const flagName = getArg(args, '-n') !== undefined ? '-n' : '--count';
+        const parsed = validateNumericFlag(rawCount, flagName, { integer: true, min: 1 });
+        if (parsed.error) throw new UsageError(parsed.error);
+        await cmdBenchmark({ count: parsed.value });
         break;
+      }
       case 'lightning':
         await cmdLightning(args.slice(1));
         break;
@@ -7725,7 +7747,8 @@ Per-app isolation:
     } else {
       console.error(`Error: ${err.message || err}`);
     }
-    process.exit(1);
+    // Usage errors (bad args/flags) exit 2; runtime/HTTP/network errors exit 1.
+    process.exit(classifyExitCode(err));
   }
 }
 

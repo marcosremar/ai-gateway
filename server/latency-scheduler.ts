@@ -86,8 +86,11 @@ export async function startLatencyScheduler(): Promise<void> {
   const gpuList = getGpuPriorityList();
   log.log(`Scheduler started (check every 30min, discovery every ${intervalMin}min)`);
   log.log(`GPU priority: ${gpuList.map(g => g.replace('NVIDIA ', '').replace('GeForce ', '')).join(' → ')}`);
-  setTimeout(() => void runCycle(), 10_000); // short delay on startup
+  const startupTimer = setTimeout(() => void runCycle(), 10_000); // short delay on startup
+  if (startupTimer.unref) startupTimer.unref();
   _timer = setInterval(() => void runCycle(), CHECK_INTERVAL_MS);
+  // unref so the discovery loop never pins the process on shutdown.
+  if (_timer.unref) _timer.unref();
 }
 
 export function stopLatencyScheduler(): void {

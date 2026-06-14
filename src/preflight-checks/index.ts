@@ -248,6 +248,30 @@ async function checkImageExists(config: PreFlightConfig): Promise<{ passed: bool
  *   - CUDA 11.8 requires driver >= 520.x
  *   - CUDA 11.0 requires driver >= 450.x
  */
+/**
+ * Compare two CUDA version strings ("major.minor[.patch]") numerically (#196).
+ *
+ * Returns a negative number if `a < b`, zero if equal, positive if `a > b`.
+ * A lexicographic string compare is wrong for CUDA versions because
+ * `'12.10' < '12.8'` (string) but `12.10 > 12.8` (numeric). Missing/garbage
+ * components are treated as 0.
+ */
+export function compareCudaVersions(a: string, b: string): number {
+  const parse = (v: string): number[] =>
+    v.split('.').map((p) => {
+      const n = parseInt(p, 10);
+      return Number.isFinite(n) ? n : 0;
+    });
+  const pa = parse(a);
+  const pb = parse(b);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 async function checkCudaCompatibility(config: PreFlightConfig): Promise<{ passed: boolean; error?: string; warning?: string }> {
   const imageName = config.imageName.toLowerCase();
 
@@ -294,8 +318,10 @@ async function checkCudaCompatibility(config: PreFlightConfig): Promise<{ passed
 
   // Check if any target GPUs support this driver version
   // Most Vast.ai/RunPod hosts have drivers 535-570, so CUDA 12.4+ should be fine
-  // but CUDA 12.8 (Blackwell) requires 570+ which is less common
-  if (cudaVersion >= '12.8') {
+  // but CUDA 12.8 (Blackwell) requires 570+ which is less common.
+  // NOTE: numeric compare — a lexicographic `cudaVersion >= '12.8'` wrongly
+  // treats '12.10' as < '12.8' (#196).
+  if (compareCudaVersions(cudaVersion, '12.8') >= 0) {
     return {
       passed: true,
       warning: `CUDA ${cudaVersion} requires driver >= ${minDriver}. This is only available on newer hosts. Blackwell GPUs (RTX 5090) have this driver.`,

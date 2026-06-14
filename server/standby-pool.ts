@@ -177,6 +177,8 @@ export function startStandbyPoolMonitor(): void {
   tickTimer = setInterval(() => {
     tick().catch((err) => log.warn(`[standby-pool] tick failed: ${err instanceof Error ? err.message : err}`));
   }, POOL_TICK_MS);
+  // unref so the pool monitor never pins the event loop on shutdown.
+  if (tickTimer.unref) tickTimer.unref();
   log.log('[standby-pool] monitor started');
   installPoolEventHook();
 }

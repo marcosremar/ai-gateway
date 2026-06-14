@@ -10,13 +10,27 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, statSync } from 'fs';
+import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, statSync, unlinkSync } from 'fs';
 import { createLogger } from '../src/logger';
 
 const log = createLogger('deploy-diagnostics');
 
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const DEPLOYS_DIR = join(BABELCAST_DIR, 'deploys');
+
+/** Maximum number of diagnostic JSON files to retain (#190). Older files beyond
+ *  this are pruned after each write so the directory can't grow unbounded.
+ *  Mirrors the snapshot catalog's bounded-retention policy. */
+export const MAX_DIAGNOSTIC_FILES = 200;
+
+/**
+ * Given diagnostic filenames sorted newest-first, return the ones to delete to
+ * keep at most `max` files (#190). Pure so it can be unit-tested without disk.
+ */
+export function selectDiagnosticsToPrune(filesNewestFirst: string[], max = MAX_DIAGNOSTIC_FILES): string[] {
+  if (max < 0) return [];
+  return filesNewestFirst.slice(max);
+}
 
 /** Inputs the orchestrator gives us at the moment a deploy attempt fails. */
 export interface DeployDiagnosticsInput {
@@ -84,7 +98,29 @@ export async function persistDeployDiagnostics(
   } catch (e) {
     log.warn(`writeFile ${path} failed: ${e instanceof Error ? e.message : e}`);
   }
+  pruneOldDiagnostics();
   return id;
+}
+
+/** Delete diagnostic files beyond MAX_DIAGNOSTIC_FILES (newest kept). Best-effort. */
+function pruneOldDiagnostics(): void {
+  try {
+    const files = readdirSync(DEPLOYS_DIR).filter((f) => f.endsWith('.json'));
+    if (files.length <= MAX_DIAGNOSTIC_FILES) return;
+    const withMtime = files.map((f) => {
+      let mtime = 0;
+      try { mtime = statSync(join(DEPLOYS_DIR, f)).mtimeMs; } catch { /* ignore */ }
+      return { f, mtime };
+    });
+    withMtime.sort((a, b) => b.mtime - a.mtime);
+    const toDelete = selectDiagnosticsToPrune(withMtime.map((x) => x.f));
+    for (const f of toDelete) {
+      try { unlinkSync(join(DEPLOYS_DIR, f)); } catch { /* best effort */ }
+    }
+    if (toDelete.length > 0) log.log(`Pruned ${toDelete.length} old diagnostic file(s)`);
+  } catch {
+    // Directory read failures are non-fatal — pruning is best-effort.
+  }
 }
 
 /** Lightweight summary returned by listDeployDiagnostics. */

@@ -38,7 +38,7 @@ function auditLog(action: string, requestId: string, details: Record<string, unk
   log.log(`${action} by=${userId} req=${requestId} ${JSON.stringify(details).slice(0, 200)}`);
   try { logGpuEvent(`config:${action}`, 'gateway', true, { metadata: { requestId, ...details } }); } catch { /* best-effort */ }
 }
-import { loadProviderConfig, patchProviderConfig, saveProviderConfig, applyAppLatencyTargets } from './config-persistence';
+import { loadProviderConfig, loadProviderConfigCloned, withConfigLock, patchProviderConfig, saveProviderConfig, applyAppLatencyTargets } from './config-persistence';
 import type { PipelineChainEntry } from './config-persistence';
 import { reloadStreamingSTTRouter } from './ws-server';
 import type { GatewayApp, ProviderConfig } from './config-persistence';
@@ -278,45 +278,51 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
 
   const { id, name, stt, llm, tts, gpuDeploy, voice, audioFormat, temperature, maxTokens, language } = profileData;
 
-  const config = await loadProviderConfig();
-  const existing = config.apps.find(p => p.id === id);
+  // Serialize the load→mutate→save sequence so two concurrent profile writes
+  // can't read the same base and clobber each other (#770). Mutate a private
+  // deep clone so the shared 5s cache is never touched pre-save (#771).
+  const { config, created } = await withConfigLock(async () => {
+    const config = await loadProviderConfigCloned();
+    const existing = config.apps.find(p => p.id === id);
 
-  // Start from existing app (preserves services, latencyTargetsMs, loadBalanceStrategy,
-  // timestamps, and all AIProfile fields). Then overlay only explicitly-sent fields.
-  const base: Record<string, unknown> = existing ? { ...existing } : {};
-  const app: GatewayApp = {
-    ...base,
-    id,
-    name,
-    stt: Array.isArray(stt) ? stt : (existing?.stt ?? config.pipelineStt),
-    llm: Array.isArray(llm) ? llm : (existing?.llm ?? config.pipelineLlm),
-    tts: Array.isArray(tts) ? tts : (existing?.tts ?? config.pipelineTts),
-    ...(gpuDeploy !== undefined ? { gpuDeploy } : {}),
-    ...(voice !== undefined ? { voice } : {}),
-    ...(audioFormat !== undefined ? { audioFormat: audioFormat as GatewayApp['audioFormat'] } : {}),
-    ...(temperature !== undefined ? { temperature } : {}),
-    ...(maxTokens !== undefined ? { maxTokens } : {}),
-    ...(language !== undefined ? { language } : {}),
-    // Preserve additional fields from request body (services, latencyTargetsMs, etc.)
-    ...(body.services !== undefined ? { services: body.services } : {}),
-    ...(body.latencyTargetsMs !== undefined ? { latencyTargetsMs: body.latencyTargetsMs } : {}),
-    ...(body.loadBalanceStrategy !== undefined ? { loadBalanceStrategy: body.loadBalanceStrategy } : {}),
-    ...(body.latency !== undefined ? { latency: body.latency } : {}),
-    ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-  } as GatewayApp;
+    // Start from existing app (preserves services, latencyTargetsMs, loadBalanceStrategy,
+    // timestamps, and all AIProfile fields). Then overlay only explicitly-sent fields.
+    const base: Record<string, unknown> = existing ? { ...existing } : {};
+    const app: GatewayApp = {
+      ...base,
+      id,
+      name,
+      stt: Array.isArray(stt) ? stt : (existing?.stt ?? config.pipelineStt),
+      llm: Array.isArray(llm) ? llm : (existing?.llm ?? config.pipelineLlm),
+      tts: Array.isArray(tts) ? tts : (existing?.tts ?? config.pipelineTts),
+      ...(gpuDeploy !== undefined ? { gpuDeploy } : {}),
+      ...(voice !== undefined ? { voice } : {}),
+      ...(audioFormat !== undefined ? { audioFormat: audioFormat as GatewayApp['audioFormat'] } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+      ...(language !== undefined ? { language } : {}),
+      // Preserve additional fields from request body (services, latencyTargetsMs, etc.)
+      ...(body.services !== undefined ? { services: body.services } : {}),
+      ...(body.latencyTargetsMs !== undefined ? { latencyTargetsMs: body.latencyTargetsMs } : {}),
+      ...(body.loadBalanceStrategy !== undefined ? { loadBalanceStrategy: body.loadBalanceStrategy } : {}),
+      ...(body.latency !== undefined ? { latency: body.latency } : {}),
+      ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+    } as GatewayApp;
 
-  // Upsert: replace existing app with same id, or append
-  const idx = config.apps.findIndex(p => p.id === id);
-  if (idx >= 0) {
-    config.apps[idx] = app;
-  } else {
-    config.apps.push(app);
-  }
+    // Upsert: replace existing app with same id, or append
+    const idx = config.apps.findIndex(p => p.id === id);
+    if (idx >= 0) {
+      config.apps[idx] = app;
+    } else {
+      config.apps.push(app);
+    }
 
-  await saveProviderConfig(config);
-  log.log(`App ${idx >= 0 ? 'updated' : 'created'}: ${id} (${name})`);
+    await saveProviderConfig(config);
+    log.log(`App ${idx >= 0 ? 'updated' : 'created'}: ${id} (${name})`);
+    return { config, created: idx < 0 };
+  });
 
-  res.writeHead(idx >= 0 ? 200 : 201, { 'Content-Type': 'application/json' });
+  res.writeHead(created ? 201 : 200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(config));
 }
 
@@ -337,26 +343,34 @@ export async function handleDeleteProfile(req: IncomingMessage, res: ServerRespo
   }
   const { id } = validationResult.data;
 
-  const config = await loadProviderConfig();
-  const before = config.apps.length;
-  config.apps = config.apps.filter(p => p.id !== id);
+  // Serialize + clone (#770/#771) — see handleCreateProfile.
+  const result = await withConfigLock(async () => {
+    const config = await loadProviderConfigCloned();
+    const before = config.apps.length;
+    config.apps = config.apps.filter(p => p.id !== id);
 
-  if (config.apps.length === before) {
+    if (config.apps.length === before) {
+      return { notFound: true as const, config };
+    }
+
+    // If we deleted the active app, clear activeAppId
+    if (config.activeAppId === id) {
+      config.activeAppId = null;
+    }
+
+    await saveProviderConfig(config);
+    log.log(`App deleted: ${id}`);
+    return { notFound: false as const, config };
+  });
+
+  if (result.notFound) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `App not found: ${id}` }));
     return;
   }
 
-  // If we deleted the active app, clear activeAppId
-  if (config.activeAppId === id) {
-    config.activeAppId = null;
-  }
-
-  await saveProviderConfig(config);
-  log.log(`App deleted: ${id}`);
-
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(config));
+  res.end(JSON.stringify(result.config));
 }
 
 /** POST /v1/config/profiles/activate — activate a profile, copying its chains to top-level pipeline */
@@ -376,42 +390,54 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
   }
   const { id } = validationResult.data;
 
-  const config = await loadProviderConfig();
-
-  // Allow deactivating by passing null/empty id
+  // Allow deactivating by passing null/empty id (serialized like the other mutations).
   if (!id) {
-    config.activeAppId = null;
-    await saveProviderConfig(config);
+    const config = await withConfigLock(async () => {
+      const config = await loadProviderConfigCloned();
+      config.activeAppId = null;
+      await saveProviderConfig(config);
+      return config;
+    });
     log.log('App deactivated (no active app)');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(config));
     return;
   }
 
-  const app = config.apps.find(p => p.id === id);
-  if (!app) {
+  // Serialize the read-modify-write (#770) on a private clone (#771). The
+  // runtime side-effects (router reload, broadcast, pipeline update) run after
+  // the lock using the returned config.
+  const result = await withConfigLock(async () => {
+    const config = await loadProviderConfigCloned();
+    const app = config.apps.find(p => p.id === id);
+    if (!app) return { notFound: true as const, config, app: null };
+
+    // Copy app chains to top-level pipeline fields (use copies to avoid mutating cached config)
+    config.activeAppId = id;
+    config.pipelineStt = [...(app.stt || [])] as unknown as PipelineChainEntry[];
+    config.pipelineLlm = [...(app.llm || [])] as unknown as PipelineChainEntry[];
+    config.pipelineTts = [...(app.tts || [])] as unknown as PipelineChainEntry[];
+
+    // Apply app GPU deploy settings if present
+    if (app.gpuDeploy) {
+      if (app.gpuDeploy.dockerImage) setDeployDockerImage(app.gpuDeploy.dockerImage);
+      if (app.gpuDeploy.region !== undefined) setDeployRegion(app.gpuDeploy.region);
+      if (app.gpuDeploy.timeoutMin) setDeployTimeoutMin(app.gpuDeploy.timeoutMin);
+      if (typeof app.gpuDeploy.raceCount === 'number') setDeployRaceCount(app.gpuDeploy.raceCount);
+      log.log(`Applied gpuDeploy from app: image=${app.gpuDeploy.dockerImage}, region=${app.gpuDeploy.region}, timeout=${app.gpuDeploy.timeoutMin}min, race=${app.gpuDeploy.raceCount ?? 1}`);
+    }
+
+    await saveProviderConfig(config);
+    applyAppLatencyTargets(id, config.apps);
+    return { notFound: false as const, config, app };
+  });
+
+  if (result.notFound) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `App not found: ${id}` }));
     return;
   }
-
-  // Copy app chains to top-level pipeline fields (use copies to avoid mutating cached config)
-  config.activeAppId = id;
-  config.pipelineStt = [...(app.stt || [])] as unknown as PipelineChainEntry[];
-  config.pipelineLlm = [...(app.llm || [])] as unknown as PipelineChainEntry[];
-  config.pipelineTts = [...(app.tts || [])] as unknown as PipelineChainEntry[];
-
-  // Apply app GPU deploy settings if present
-  if (app.gpuDeploy) {
-    if (app.gpuDeploy.dockerImage) setDeployDockerImage(app.gpuDeploy.dockerImage);
-    if (app.gpuDeploy.region !== undefined) setDeployRegion(app.gpuDeploy.region);
-    if (app.gpuDeploy.timeoutMin) setDeployTimeoutMin(app.gpuDeploy.timeoutMin);
-    if (typeof app.gpuDeploy.raceCount === 'number') setDeployRaceCount(app.gpuDeploy.raceCount);
-    log.log(`Applied gpuDeploy from app: image=${app.gpuDeploy.dockerImage}, region=${app.gpuDeploy.region}, timeout=${app.gpuDeploy.timeoutMin}min, race=${app.gpuDeploy.raceCount ?? 1}`);
-  }
-
-  await saveProviderConfig(config);
-  applyAppLatencyTargets(id, config.apps);
+  const { config, app } = result;
 
   // ── Apply chains + extended fields to runtime translationDefaults ──
   const appPatch: Partial<AIProfile> = {

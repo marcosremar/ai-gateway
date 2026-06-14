@@ -50,14 +50,20 @@ export function createValidator<T>(schema: z.ZodType<T>) {
 
 /**
  * Validate and sanitize string input.
+ *
+ * By default an over-length value is silently truncated to `maxLength`. For
+ * security-relevant fields pass `rejectOverLength: true` so the caller learns
+ * the input was malformed (returns `null`) instead of receiving a mangled,
+ * possibly-meaning-changed string.
  */
 export function sanitizeString(
   value: string,
-  options: { maxLength?: number; pattern?: RegExp; trim?: boolean } = {},
+  options: { maxLength?: number; pattern?: RegExp; trim?: boolean; rejectOverLength?: boolean } = {},
 ): string | null {
   let result = options.trim !== false ? value.trim() : value;
 
   if (options.maxLength && result.length > options.maxLength) {
+    if (options.rejectOverLength) return null;
     result = result.slice(0, options.maxLength);
   }
 
@@ -75,7 +81,11 @@ export function validateNumber(
   value: number,
   options: { min?: number; max?: number; integer?: boolean } = {},
 ): number | null {
-  if (isNaN(value)) return null;
+  // `isNaN(Infinity)` is false, so a bare `isNaN` check let `Infinity` /
+  // `-Infinity` through whenever no min/max bound was supplied — a value that
+  // poisons downstream arithmetic (e.g. unbounded `max_tokens`). Require a
+  // finite number.
+  if (!Number.isFinite(value)) return null;
   if (options.integer && !Number.isInteger(value)) return null;
   if (options.min != null && value < options.min) return null;
   if (options.max != null && value > options.max) return null;

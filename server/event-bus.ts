@@ -34,6 +34,9 @@ export type GatewayEventHandler = (event: GatewayEventName, data: GatewayEventDa
 
 const handlers: GatewayEventHandler[] = [];
 
+/** Per-event-name count of handler exceptions (for diagnostics / metrics). */
+const handlerErrorCounts: Record<string, number> = {};
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -60,6 +63,9 @@ export function emitGatewayEvent(event: GatewayEventName, data: GatewayEventData
     try {
       h(event, payload);
     } catch (err) {
+      // Count handler failures per event name. A consistently-throwing handler
+      // (e.g. a broken alert sink) was previously invisible — only a log line.
+      handlerErrorCounts[event] = (handlerErrorCounts[event] ?? 0) + 1;
       log.warn(`[event-bus] Handler error for "${event}":`, err);
     }
   }
@@ -74,4 +80,15 @@ export function emitGatewayEvent(event: GatewayEventName, data: GatewayEventData
  */
 export function handlerCount(): number {
   return handlers.length;
+}
+
+/**
+ * Total handler exceptions across all events, or for a single event name.
+ * Surfaces silently-failing handlers (broken alert/metric sinks) to /metrics.
+ */
+export function handlerErrorCount(event?: GatewayEventName): number {
+  if (event) return handlerErrorCounts[event] ?? 0;
+  let total = 0;
+  for (const n of Object.values(handlerErrorCounts)) total += n;
+  return total;
 }

@@ -8,7 +8,42 @@ import { createLogger } from '../../../logger';
 
 const log = createLogger('ssh-tunnel');
 
-let nextLocalPort = 19000;
+const LOCAL_PORT_MIN = 19000;
+const LOCAL_PORT_MAX = 19999;
+
+// Track local ports currently bound by a tunnel so two concurrent tunnels
+// can't be handed the same port (#181). The previous `nextLocalPort++` global
+// counter wrapped at 19999→19000 and could collide with a still-open tunnel.
+const inUseLocalPorts = new Set<number>();
+let portCursor = LOCAL_PORT_MIN;
+
+/**
+ * Allocate a local port not currently in use by another tunnel. Scans the
+ * [LOCAL_PORT_MIN, LOCAL_PORT_MAX] window starting from a rotating cursor so
+ * we spread allocations out and don't immediately reuse a just-freed port.
+ * Falls back to the cursor value if every slot is occupied (extreme overload).
+ */
+export function allocateLocalPort(): number {
+  const span = LOCAL_PORT_MAX - LOCAL_PORT_MIN + 1;
+  for (let i = 0; i < span; i++) {
+    const candidate = LOCAL_PORT_MIN + ((portCursor - LOCAL_PORT_MIN + i) % span);
+    if (!inUseLocalPorts.has(candidate)) {
+      inUseLocalPorts.add(candidate);
+      portCursor = candidate + 1 > LOCAL_PORT_MAX ? LOCAL_PORT_MIN : candidate + 1;
+      return candidate;
+    }
+  }
+  // All ports occupied — reuse the cursor (best effort). Shouldn't happen in
+  // practice (1000 slots ≫ MAX_WS connections).
+  const fallback = portCursor;
+  portCursor = fallback + 1 > LOCAL_PORT_MAX ? LOCAL_PORT_MIN : fallback + 1;
+  return fallback;
+}
+
+/** Release a previously-allocated local port back to the pool. */
+export function releaseLocalPort(port: number): void {
+  inUseLocalPorts.delete(port);
+}
 
 const DEFAULT_OPEN_RETRIES = 20;
 const RECONNECT_BACKOFF_MS = [2_000, 5_000, 10_000, 20_000, 30_000, 30_000, 30_000, 30_000, 30_000, 30_000];
@@ -52,8 +87,10 @@ export class SshTunnel {
   }
 
   private _spawnOnce(timeoutMs: number): Promise<boolean> {
-    this._localPort = nextLocalPort++;
-    if (nextLocalPort > 19999) nextLocalPort = 19000;
+    // Release any port from a prior (failed/reconnecting) spawn before grabbing
+    // a fresh one so the pool doesn't leak across retries.
+    if (this._localPort) releaseLocalPort(this._localPort);
+    this._localPort = allocateLocalPort();
 
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
@@ -172,6 +209,10 @@ export class SshTunnel {
     }
     this._killProc();
     this._open = false;
+    if (this._localPort) {
+      releaseLocalPort(this._localPort);
+      this._localPort = 0;
+    }
   }
 }
 

@@ -77,6 +77,20 @@ export interface DeployExtra {
   expectedCapabilities?: DockerCapability[];
   requireDockerManifest?: boolean;
   runSmokeTests?: boolean;
+  /** Explicit race count from caller — when 1, suppress in-loop retry. */
+  raceCount?: number;
+  /** When true, single-tier deploy: no fallback to next provider. */
+  noTierCascade?: boolean;
+  /** Minimum inet_down (Mbps) the host must have. Forwarded to the Vast offer search. */
+  minInetDownMbps?: number;
+  /** Maximum total cost (USD) for this deploy. Threaded so race/monitor cost
+   *  accounting can trim slots or auto-stop when cumulative cost would exceed it. */
+  maxCostUsd?: number;
+  /** Vast.ai offer search mode: 'full' widens the host pool (skips the strict
+   *  fast-boot reliability tier). Forwarded to the provider client's offer search. */
+  searchMode?: 'full' | 'fast';
+  /** Require at least one direct (non-SSH) port on the host. Forwarded to Vast. */
+  requireDirectPort?: boolean;
 }
 
 export async function startDeployLoop(
@@ -293,13 +307,16 @@ export async function startDeployLoop(
       // and the metric tracks for auto-disable (ADR-005).
       if (providerName === 'vast-vm' || providerName === 'hyperstack') {
         try {
-          const { maybeRestoreSnapshot } = await import('./gpu-snapshot');
+          const { maybeRestoreSnapshot, modelsFromDeployState } = await import('./gpu-snapshot');
           if (instance.sshHost && instance.sshPort) {
             const restore = await maybeRestoreSnapshot({
               provider: providerName,
               ssh: { host: instance.sshHost, port: instance.sshPort },
               imageRef: dockerImage,
-              models: [],
+              // Use the same model list the capture side hashes (#175). Passing
+              // a hardcoded [] here produced a different modelHash than capture,
+              // so a captured snapshot was never matched — silently disabling fast boot.
+              models: modelsFromDeployState(),
             });
             if (restore.restored) {
               // Quick health probe — if ready, short-circuit to ready.

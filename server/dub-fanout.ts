@@ -101,7 +101,11 @@ function buildFanoutDeps(routing: FanoutRouting): FanoutDeps {
             { role: 'system' as const, content: systemPrompt },
             { role: 'user' as const, content: sttText },
           ];
-          const profile = { ...baseProfile, gpuEndpoint: undefined, language: source };
+          // temperature:0 keeps dubbed translations deterministic — the
+          // streaming/translate legs already pin temp 0, and without it the
+          // same source text yields varying output that defeats the translation
+          // cache (cache key is src|tgt|style|text).
+          const profile = { ...baseProfile, gpuEndpoint: undefined, language: source, temperature: 0 };
           const r = await client.chat(messages, profile);
           return { translated_text: r.content, used_gpu: false };
         },

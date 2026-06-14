@@ -107,6 +107,26 @@ export interface GatewayHooks {
 
 // ── Emitter ───────────────────────────────────────────────────────────────────
 
+/**
+ * Per-hook count of callback failures (sync throw or rejected promise).
+ * A failing hook (e.g. Langfuse export down) was previously only logged;
+ * this lets callers surface it as a metric / alert.
+ */
+const hookErrorCounts: Record<string, number> = {};
+
+/** Read hook failure counts (all hooks, or a single hook name). */
+export function getHookErrorCount(hook?: keyof GatewayHooks): number {
+  if (hook) return hookErrorCounts[hook] ?? 0;
+  let total = 0;
+  for (const n of Object.values(hookErrorCounts)) total += n;
+  return total;
+}
+
+/** Reset hook failure counts (tests / daily reset). */
+export function resetHookErrorCounts(): void {
+  for (const k of Object.keys(hookErrorCounts)) delete hookErrorCounts[k];
+}
+
 type HookName = keyof GatewayHooks;
 type HookPayloadMap = {
   onRequestStart: RequestStartEvent;
@@ -154,11 +174,13 @@ export function emitHook<K extends HookName>(
   try {
     const result = fn(data);
     if (result && typeof (result as Promise<void>).catch === 'function') {
-      (result as Promise<void>).catch((err) =>
-        defaultLogger.warn(`[hooks] ${event} async error:`, err),
-      );
+      (result as Promise<void>).catch((err) => {
+        hookErrorCounts[event] = (hookErrorCounts[event] ?? 0) + 1;
+        defaultLogger.warn(`[hooks] ${event} async error:`, err);
+      });
     }
   } catch (err) {
+    hookErrorCounts[event] = (hookErrorCounts[event] ?? 0) + 1;
     defaultLogger.warn(`[hooks] ${event} sync error:`, err);
   }
 }

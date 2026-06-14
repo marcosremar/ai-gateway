@@ -695,12 +695,15 @@ export function startOrphanSweep(): void {
       log.warn(`[orphan-sweep] Initial sweep failed: ${err instanceof Error ? err.message : err}`),
     );
   }, 15_000);
+  // unref so the sweep countdown never pins the process on shutdown.
+  if (orphanSweepInitialTimer.unref) orphanSweepInitialTimer.unref();
   // Then every 10 minutes
   orphanSweepTimer = setInterval(() => {
     sweepOrphanInstances().catch(err =>
       log.warn(`[orphan-sweep] Periodic sweep failed: ${err instanceof Error ? err.message : err}`),
     );
   }, ORPHAN_SWEEP_INTERVAL_MS);
+  if (orphanSweepTimer.unref) orphanSweepTimer.unref();
   modalIdleSweepTimer = setInterval(() => {
     const abortReason = getSweepSafetyAbortReason();
     if (abortReason) {

@@ -105,6 +105,9 @@ export function startPredictiveWarmer(
       ensureCapacity(target).catch(() => {});
     }
   }, cfg.tickMs);
+  // unref so the warmer tick never pins the event loop on shutdown
+  // (matches predictive-warmup.ts which already unrefs its ticker).
+  if (tickTimer.unref) tickTimer.unref();
 }
 
 /** Stop the predictive loop. Safe to call repeatedly. */

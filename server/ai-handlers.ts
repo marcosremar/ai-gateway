@@ -17,6 +17,7 @@ import type { STTRaceProvider } from '../src/stt-race';
 import type { AIProfile } from '../src/client';
 import { OllamaSTTProvider } from '../src/providers/ollama';
 import { createLogger } from '../src/logger';
+import { IncompleteTurnFilter } from '../src/llm-context';
 // ── Domain logic extracted to src/gateway/pipeline/ ─────────────────────────
 import {
   // SSRF protection
@@ -261,6 +262,15 @@ export function getCloudProviderName(): 'gpu' | 'groq' | 'ollama' | 'ensemble' |
 
 // ── GPU-aware STT endpoint (with request hedging) ───────────────────────────
 
+/** Whisper honors at most ~224 prompt tokens; ~800 chars is a safe ceiling. */
+const STT_PROMPT_MAX_CHARS = 800;
+
+/** Trim an STT prompt to Whisper's effective prompt window. */
+export function capSttPrompt(prompt: string): string {
+  if (prompt.length <= STT_PROMPT_MAX_CHARS) return prompt;
+  return prompt.slice(0, STT_PROMPT_MAX_CHARS);
+}
+
 export async function handleTranscribe(req: IncomingMessage, res: ServerResponse): Promise<void> {
   touchRequest(); touchModelRequest();
   const t0 = Date.now();
@@ -269,7 +279,10 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const rawLang = url.searchParams.get('language') || '';
   const language = rawLang ? validateLang(rawLang, 'fr') : '';  // empty = auto-detect
-  const prompt = url.searchParams.get('prompt') || '';
+  // Cap the STT prompt — Whisper only honors ~224 prompt tokens (~800 chars),
+  // and a runaway prompt inflates STT token cost while being silently truncated
+  // upstream. Trim to the window so cost tracks the actual bias applied.
+  const prompt = capSttPrompt(url.searchParams.get('prompt') || '');
   const hotwords = url.searchParams.get('hotwords') || '';
   const wordTimestamps = url.searchParams.get('word_timestamps') === 'true';
   let audio: Buffer;
@@ -582,7 +595,9 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
     || (body && (body as Record<string, unknown>).filter_incomplete_user_turns === true);
   let _turnFilter: { classify: (s: string) => { kind: string; cleanedText: string; timeoutMs: number } } | null = null;
   if (filterIncompleteTurns) {
-    const { IncompleteTurnFilter } = await import('../src/llm-context');
+    // IncompleteTurnFilter is now imported statically at module top — the
+    // per-request dynamic import() re-resolved the module on every filtered
+    // request on the hot translate path.
     const f = new IncompleteTurnFilter();
     systemPrompt = f.augmentSystemPrompt(systemPrompt);
     _turnFilter = f;
@@ -643,8 +658,13 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error(`All translation providers failed: ${msg}`);
-    logRequest({ timestamp: Date.now(), stage: 'llm', provider: getCloudProviderName(), latencyMs: Date.now() - t0, success: false, error: msg, inputSize: text.length });
-    const status = msg.includes('No providers available') ? 500 : 500;
+    // Measure from LLM dispatch (llmReqTs), not request start (t0) — including
+    // body-read time skewed provider error-latency metrics.
+    logRequest({ timestamp: Date.now(), stage: 'llm', provider: getCloudProviderName(), latencyMs: Date.now() - llmReqTs, success: false, error: msg, inputSize: text.length });
+    // "No providers available" is a capacity condition (503, retryable),
+    // distinct from an upstream failure (500). The previous `500 : 500`
+    // ternary was dead and clients couldn't tell the cases apart.
+    const status = msg.includes('No providers available') ? 503 : 500;
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       error: msg.includes('No providers available') ? 'No providers available for translation' : 'All providers failed for translation',

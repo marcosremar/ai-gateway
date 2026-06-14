@@ -21,6 +21,7 @@
 import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
+  open as fsOpen,
   mkdir,
   rename,
   stat,
@@ -80,26 +81,76 @@ export async function writeJson(path: string, data: unknown): Promise<void> {
  * Safe against crashes during write.
  *
  * Fixes: #546, #547, #548, #561 (atomic writes for config/state)
+ *
+ * Durability (#705): `renameSync` is only crash-durable once the file's data
+ * has been flushed to disk. With `fsync` enabled (default for state files) we
+ * fsync the temp file's data before the rename and then fsync the containing
+ * directory so the rename itself is durable on power loss. Set `fsync:false`
+ * for caches/scratch where the extra syscall is not worth the latency.
  */
-export async function atomicWrite(path: string, data: string): Promise<void> {
+export async function atomicWrite(
+  path: string,
+  data: string,
+  options: { fsync?: boolean } = {},
+): Promise<void> {
+  const fsyncEnabled = options.fsync !== false; // default ON for state durability
   const dir = path.substring(0, path.lastIndexOf('/'));
   const tempPath = `${path}.tmp.${Date.now()}`;
 
   // Ensure directory exists
   await ensureDir(dir);
 
-  // Write to temp file
-  await fsWriteFile(tempPath, data, 'utf-8');
+  if (fsyncEnabled) {
+    // Write + fsync the temp file via an explicit handle so the bytes are on
+    // disk before the rename, then fsync the directory so the rename survives
+    // a power loss.
+    const handle = await fsOpen(tempPath, 'w');
+    try {
+      await handle.writeFile(data, 'utf-8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tempPath, path);
+    await fsyncDir(dir);
+  } else {
+    // Write to temp file
+    await fsWriteFile(tempPath, data, 'utf-8');
+    // Atomic rename
+    await rename(tempPath, path);
+  }
+}
 
-  // Atomic rename
-  await rename(tempPath, path);
+/**
+ * fsync a directory entry so a preceding rename is durable. Best-effort: some
+ * platforms (notably Windows) reject opening a directory for fsync — those
+ * cases are swallowed because the rename itself is still atomic, just not
+ * guaranteed durable across an immediate power loss.
+ */
+async function fsyncDir(dir: string): Promise<void> {
+  if (!dir) return;
+  let handle: Awaited<ReturnType<typeof fsOpen>> | null = null;
+  try {
+    handle = await fsOpen(dir, 'r');
+    await handle.sync();
+  } catch {
+    /* best-effort: directory fsync unsupported on this platform */
+  } finally {
+    if (handle) {
+      try { await handle.close(); } catch { /* ignore */ }
+    }
+  }
 }
 
 /**
  * Atomic JSON write.
  */
-export async function atomicWriteJson(path: string, data: unknown): Promise<void> {
-  await atomicWrite(path, JSON.stringify(data, null, 2));
+export async function atomicWriteJson(
+  path: string,
+  data: unknown,
+  options: { fsync?: boolean } = {},
+): Promise<void> {
+  await atomicWrite(path, JSON.stringify(data, null, 2), options);
 }
 
 /**
@@ -200,7 +251,19 @@ export function createWriteBuffer(
 
   const scheduleFlush = () => {
     if (flushTimer) return;
-    flushTimer = setTimeout(() => flush(), flushIntervalMs);
+    // #718: the timer fires fire-and-forget, so swallow nothing — catch inside
+    // so a rejected write is logged (and the data restored for the next flush)
+    // instead of vanishing with an unhandled rejection.
+    flushTimer = setTimeout(() => {
+      void flush().catch((err) => {
+        log.warn({ path, err: err instanceof Error ? err.message : String(err) }, 'Buffered flush failed');
+      });
+    }, flushIntervalMs);
+    // #719: don't keep the event loop alive for a buffer that may never be
+    // written again — mirrors pull-history-persistence.ts.
+    if (typeof (flushTimer as unknown as { unref?: () => void }).unref === 'function') {
+      (flushTimer as unknown as { unref: () => void }).unref();
+    }
   };
 
   const flush = async () => {
@@ -208,10 +271,17 @@ export function createWriteBuffer(
     if (pendingData) {
       const data = pendingData;
       pendingData = null;
-      if (options.atomic) {
-        await atomicWrite(path, data);
-      } else {
-        await writeFile(path, data);
+      try {
+        if (options.atomic) {
+          await atomicWrite(path, data);
+        } else {
+          await writeFile(path, data);
+        }
+      } catch (err) {
+        // Restore the data so a later flush can retry rather than silently
+        // dropping it. Keep only the freshest write if one arrived meanwhile.
+        if (pendingData === null) pendingData = data;
+        throw err;
       }
     }
   };

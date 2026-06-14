@@ -6,6 +6,21 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { runStreamingPipeline } from './pipeline-runner';
 import type { PipelineCallbacks, PipelineResult } from './pipeline-runner';
 import { getOrCreateRequestId, setRequestIdHeader, readRawBody, validateLang, BodyTimeoutError } from './http-utils';
+import { TRANSLATION_STYLES } from '../src/gateway/pipeline/system-prompt';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('pipeline-sse');
+
+/**
+ * Validate a translation style against the known set. Unknown styles silently
+ * fell back to "default" inside buildSystemPrompt — warn so a typo'd style
+ * isn't invisibly ignored, then use the safe default.
+ */
+function validateStyle(style: string): string {
+  if (style in TRANSLATION_STYLES) return style;
+  log.warn(`Unknown translation style "${style}" — falling back to "default" (valid: ${Object.keys(TRANSLATION_STYLES).join(', ')})`);
+  return 'default';
+}
 
 function sseWrite(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -66,7 +81,7 @@ export async function handlePipelineSSE(req: IncomingMessage, res: ServerRespons
   let source = validateLang(url.searchParams.get('source') || 'fr', 'fr');
   let target = validateLang(url.searchParams.get('target') || 'en', 'en');
   let speaker = url.searchParams.get('speaker') || undefined;
-  const style = url.searchParams.get('style') || 'default';
+  const style = validateStyle(url.searchParams.get('style') || 'default');
   const sttPrompt = url.searchParams.get('prompt') || '';
   const refId = url.searchParams.get('ref_id') || undefined;
 
@@ -149,6 +164,10 @@ export async function handlePipelineSSE(req: IncomingMessage, res: ServerRespons
         transcription: result.transcription,
         response: result.translation,
         timing: result.timing,
+        // Echo the resolved language pair so clients can confirm what was
+        // actually used (defaults are silent; relevant once auto-detect lands).
+        source,
+        target,
       });
       try { res.end(); } catch { /* best-effort: cleanup or optional side-effect */ }
     },

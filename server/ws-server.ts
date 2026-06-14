@@ -10,7 +10,7 @@ import { timingSafeEqual } from 'crypto';
 import { botState, deployState, gpuHealthy, gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, isStageWarm, isTtsWarm } from './state';
 import { shouldPreferGpuTts } from './providers';
 import { isGpuAvailable } from './state';
-import { wsClients, unsubscribeDub } from './ws-state';
+import { wsClients, unsubscribeDub, isBackpressured } from './ws-state';
 import type { BabelCastWS } from './ws-state';
 import { PORT } from './config';
 import { speculativeCache } from './speculative-cache';
@@ -19,6 +19,7 @@ import { speculativeCache } from './speculative-cache';
 import {
   botAudioSource,
   setBotAudioSource,
+  trySetBotAudioSource,
   setBotAudioSampleRate,
   getBotAudioChunks as _getBotAudioChunks,
   incBotAudioChunks,
@@ -274,8 +275,15 @@ export async function startWsServer(): Promise<number> {
         } else if (ws.data.type === 'stt') {
           openSttSession(ws);
         } else if (ws.data.type === 'bot-audio') {
+          // Only one bot-audio source at a time — the buffer/relay is global.
+          // Reject a second concurrent source instead of silently clobbering
+          // the first (which cross-talks all sessions and breaks close cleanup).
+          if (!trySetBotAudioSource(ws as unknown as BabelCastWS)) {
+            log.warn(`[bot-audio] Rejecting second bot-audio source id=${ws.data.id} — one already active`);
+            ws.close(1013, 'Bot audio source already connected');
+            return;
+          }
           log.log(`[bot-audio] Bot audio source connected id=${ws.data.id}`);
-          setBotAudioSource(ws as unknown as BabelCastWS);
         } else if (ws.data.type === 'recall-audio') {
           log.log(`[recall-audio] Recall bot connected id=${ws.data.id}`);
           import('./recall-handlers').then(({ setRecallState }) => {
@@ -385,6 +393,8 @@ export async function startWsServer(): Promise<number> {
           }
           const recallChunk = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
           for (const client of wsClients) {
+            // Drop frames for saturated viewers (same rationale as bot-audio relay).
+            if (isBackpressured(client)) continue;
             try { client.send(recallChunk); } catch { wsClients.delete(client); }
           }
         } else if (ws.data.type === 'bot-audio') {
@@ -403,6 +413,9 @@ export async function startWsServer(): Promise<number> {
             log.log(`[bot-audio] Relaying audio chunk #${chunkCount} (${msg.byteLength} bytes) to ${wsClients.size} clients`);
           }
           for (const client of wsClients) {
+            // Drop frames for saturated viewers — buffering real-time PCM for a
+            // slow client wastes RAM/bandwidth and risks a backpressure-close.
+            if (isBackpressured(client)) continue;
             try { client.send(msg); } catch { wsClients.delete(client); }
           }
           const audioChunk = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
@@ -446,7 +459,14 @@ export async function startWsServer(): Promise<number> {
             }
           }).catch(safeCatch('ws-recall-disconnect'));
         } else if (ws.data.type === 'bot-audio') {
-          if (botAudioSource === ws) setBotAudioSource(null);
+          // A rejected second source (see open()) also fires close() — only run
+          // teardown for the socket that actually owns the global source slot,
+          // otherwise we'd flush/clear the active source's buffer out from under it.
+          if (botAudioSource !== ws) {
+            log.log(`[bot-audio] Ignoring close for non-active bot-audio socket id=${ws.data.id}`);
+            return;
+          }
+          setBotAudioSource(null);
           log.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${_getBotAudioChunks()} chunks relayed, ${getBotAudioBufferBytes()} bytes buffered)`);
           if (getBotAudioBufferBytes() >= 16000) {
             processBotAudioBuffer().catch(e => log.warn('final buffer flush failed: %s', e instanceof Error ? e.message : e));

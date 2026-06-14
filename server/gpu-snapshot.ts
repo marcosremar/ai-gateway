@@ -725,7 +725,7 @@ export function installSnapshotHook(): void {
   log.log('[snapshot] event-bus hook installed — will capture on gpu.deployed');
 }
 
-function modelsFromDeployState(): readonly string[] {
+export function modelsFromDeployState(): readonly string[] {
   // Best-effort: pull service model names from the warming status. Defaults
   // to an empty list (produces a deterministic modelHash).
   const ws = deployState.warmingStatus;

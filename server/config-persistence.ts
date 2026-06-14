@@ -29,6 +29,48 @@ let _cachedConfig: ProviderConfig | null = null;
 let _cacheTime = 0;
 const CONFIG_CACHE_TTL_MS = 5_000;
 
+// ── Config write serialization (#770) ────────────────────────────────────────
+// Concurrent profile mutations each do load → mutate → saveProviderConfig with
+// no coordination, so two overlapping HTTP requests read the same base config
+// and the second clobbers the first. withConfigLock serializes any read-modify-
+// write sequence behind a single in-process promise chain.
+let _configWriteChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Run `fn` with exclusive access to the config read-modify-write critical
+ * section. Calls are serialized in arrival order; a rejected `fn` does not
+ * break the chain for subsequent callers.
+ */
+export function withConfigLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = _configWriteChain.then(fn, fn);
+  // Keep the chain alive regardless of success/failure of this link.
+  _configWriteChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+/**
+ * Deep-clone a config so HTTP handlers can mutate it freely without touching
+ * the shared cached object (#771). Uses structuredClone when available (Node
+ * 17+/Bun), falling back to a JSON round-trip — config is plain JSON-safe data.
+ */
+export function cloneProviderConfig(config: ProviderConfig): ProviderConfig {
+  try {
+    if (typeof (globalThis as { structuredClone?: unknown }).structuredClone === 'function') {
+      return structuredClone(config);
+    }
+  } catch { /* fall through to JSON clone */ }
+  return JSON.parse(JSON.stringify(config)) as ProviderConfig;
+}
+
+/**
+ * Load the provider config and return a private deep copy. Use this in any
+ * handler that mutates the result before saving, so the 5s cache is never
+ * corrupted by an in-place edit that hasn't been persisted (#771).
+ */
+export async function loadProviderConfigCloned(): Promise<ProviderConfig> {
+  return cloneProviderConfig(await loadProviderConfig());
+}
+
 export interface PipelineChainEntry {
   provider: string;
   model?: string;

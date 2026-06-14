@@ -23,6 +23,22 @@ import { createLogger } from '../src/logger';
 
 const log = createLogger('pod-provisioner');
 
+/**
+ * Validate a remote path before interpolating it into an SSH shell command (#186).
+ *
+ * `writeRemoteFile` builds `mkdir -p $(dirname X) && cat > X`; an X containing
+ * shell metacharacters (`;`, `$`, backtick, `&`, `|`, `>`, spaces, …) would let
+ * a future caller inject commands. Paths are internal constants today, but
+ * validate defensively like the snapshot `assertSafe` guard. Allows only
+ * absolute-ish paths made of safe filename characters.
+ */
+const SAFE_REMOTE_PATH_RE = /^[A-Za-z0-9_./-]+$/;
+export function isSafeRemotePath(remotePath: string): boolean {
+  return remotePath.length > 0
+    && SAFE_REMOTE_PATH_RE.test(remotePath)
+    && !remotePath.includes('..');
+}
+
 const AGENT_DIR = join(__dirname, 'pod-agent');
 const SSH_OPTS = [
   '-o', 'StrictHostKeyChecking=no',
@@ -120,6 +136,12 @@ async function writeRemoteFile(host: string, port: number, content: string, remo
     content.endsWith('\nAIGW_EOF')
   ) {
     log.warn(`writeRemoteFile: content contains delimiter, refusing to write ${remotePath}`);
+    return false;
+  }
+  // Reject paths with shell metacharacters before interpolating into the
+  // SSH command (#186) — prevents command injection via a crafted path.
+  if (!isSafeRemotePath(remotePath)) {
+    log.warn(`writeRemoteFile: unsafe remotePath, refusing to write: ${remotePath}`);
     return false;
   }
   const cmd = `mkdir -p $(dirname ${remotePath}) && cat > ${remotePath} <<'AIGW_EOF'\n${content}\nAIGW_EOF\nchmod ${mode} ${remotePath}`;

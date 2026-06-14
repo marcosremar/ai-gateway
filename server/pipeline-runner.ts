@@ -54,7 +54,7 @@ import {
   getCachedTranslation, setCachedTranslation,
   buildSystemPrompt, getCloudProviderName, getCloudProfile,
   resolveVoiceForProfile, forwardToAvatar,
-  adaptiveStageTimeout,
+  adaptiveStageTimeout, adaptiveMaxTokens,
   GPU_STT_TIMEOUT_MS, GPU_LLM_TIMEOUT_MS, GPU_TTS_TIMEOUT_MS, GPU_PIPELINE_TIMEOUT_MS,
   getVoiceReference, touchModalKeepalive,
   type GpuSTTResult, type GpuLLMResult, type GpuTTSResult,
@@ -286,11 +286,14 @@ function buildStageExecutors(routing: PipelineRouting): PipelineStageExecutors {
 
     createLlmStream(systemPrompt, sttText) {
       const messages = [{ role: 'system' as const, content: systemPrompt }, { role: 'user' as const, content: sttText }];
+      // Size the output budget to the input — a short utterance ("oui") never
+      // needs 200 output tokens. Caps at 200 for long input, so this only ever
+      // *reduces* generation cost on the hot streaming path (never raises it).
       return groqLLM.chatStream({
         messages,
         model: groqLlmModel,
         temperature: 0,
-        maxTokens: 200,
+        maxTokens: adaptiveMaxTokens(sttText),
       });
     },
 

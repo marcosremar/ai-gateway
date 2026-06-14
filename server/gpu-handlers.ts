@@ -47,6 +47,19 @@ import { defaultApiPathsForCapabilities } from '../src/gateway/providers/gpu/doc
 import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { errorSummary } from '../src/error-summary';
 
+/**
+ * Whether a provider balance is too low to deploy (#137/#138).
+ *
+ * Previously RunPod used `< $1.0`, TensorDock `< $0.5`, and Vast a two-step
+ * `<= 0 || < LOW_BALANCE_THRESHOLD_USD`, so identical balances produced
+ * inconsistent exclusions and the "balance < $1" hint could be wrong. This
+ * collapses all three to one configurable threshold so behavior is uniform
+ * and the surfaced threshold matches the one actually applied.
+ */
+export function isBalanceTooLow(balance: number, threshold: number): boolean {
+  return balance < threshold;
+}
+
 // ── GPU management endpoints ────────────────────────────────────────────────
 
 // ── VRAM vs Model Size Pre-Deploy Validation ────────────────────────────────
@@ -708,8 +721,8 @@ async function _selectDeploymentTier(
       if (runpodBal !== null) {
         log.log(`[gpu] RunPod balance: $${runpodBal.balance.toFixed(2)}`);
         totalBalance += runpodBal.balance;
-        if (runpodBal.balance < 1.0) {
-          log.warn(`[gpu] RunPod balance too low ($${runpodBal.balance.toFixed(2)}) — skipping provider`);
+        if (isBalanceTooLow(runpodBal.balance, LOW_BALANCE_THRESHOLD_USD)) {
+          log.warn(`[gpu] RunPod balance too low ($${runpodBal.balance.toFixed(2)} < $${LOW_BALANCE_THRESHOLD_USD}) — skipping provider`);
           runpodApiKey = '';  // exclude from tier list
         }
       }
@@ -730,8 +743,8 @@ async function _selectDeploymentTier(
       if (bal !== null) {
         log.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly cost: $${bal.hourlyCost.toFixed(3)})`);
         totalBalance += bal.balance;
-        if (bal.balance < 0.5) {
-          log.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)}) — skipping provider`);
+        if (isBalanceTooLow(bal.balance, LOW_BALANCE_THRESHOLD_USD)) {
+          log.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)} < $${LOW_BALANCE_THRESHOLD_USD}) — skipping provider`);
           tensordockOpts = undefined;  // exclude from tier list
         }
       }
@@ -752,11 +765,8 @@ async function _selectDeploymentTier(
       if (bal !== null) {
         log.log(`[gpu] Vast.ai balance: $${bal.balance.toFixed(2)}`);
         totalBalance += bal.balance;
-        if (bal.balance <= 0) {
-          log.warn(`[gpu] Vast.ai balance is $${bal.balance.toFixed(2)} — skipping provider`);
-          effectiveVastApiKey = '';  // exclude from tier list
-        } else if (bal.balance < LOW_BALANCE_THRESHOLD_USD) {
-          log.warn(`[gpu] Vast.ai balance low ($${bal.balance.toFixed(2)}) — skipping provider`);
+        if (isBalanceTooLow(bal.balance, LOW_BALANCE_THRESHOLD_USD)) {
+          log.warn(`[gpu] Vast.ai balance too low ($${bal.balance.toFixed(2)} < $${LOW_BALANCE_THRESHOLD_USD}) — skipping provider`);
           effectiveVastApiKey = '';  // exclude from tier list
         }
       }
@@ -978,6 +988,45 @@ let lastDeployRequest: { hash: string; deployId: string; ts: number } | null = n
 let finetuneDeployActive = false;
 
 /**
+ * Build the idempotency hash for a deploy request (#122).
+ *
+ * The previous hash only covered `{dockerImage, gpuTypes}`, so two deploys that
+ * differed only in region / storageGb / env / raceCount / provider / maxCostUsd /
+ * autoSelectGpu collided and the second was silently dropped as "idempotent".
+ * Include the full normalized request so genuinely-different deploys don't
+ * collide. Built from the raw request body so the write side (after validation)
+ * and the check side (before validation) produce identical hashes for the same
+ * request — fields are sorted for stability regardless of key order.
+ */
+export function buildDeployIdempotencyHash(body: Record<string, unknown>): string {
+  const norm = (v: unknown): unknown => {
+    if (Array.isArray(v)) return [...v].map(String).sort();
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        out[k] = (v as Record<string, unknown>)[k];
+      }
+      return out;
+    }
+    return v;
+  };
+  const key = {
+    dockerImage: body.dockerImage ?? '',
+    gpuTypes: norm(body.gpuTypes ?? []),
+    region: body.region ?? '',
+    storageGb: body.storageGb ?? null,
+    raceCount: body.raceCount ?? null,
+    provider: body.provider ?? body.providerFilter ?? '',
+    maxCostUsd: body.maxCostUsd ?? null,
+    autoSelectGpu: body.autoSelectGpu ?? body.autoSelect ?? null,
+    env: norm(body.env ?? {}),
+    templateHashId: body.templateHashId ?? '',
+    noTierCascade: body.noTierCascade ?? null,
+  };
+  return JSON.stringify(key);
+}
+
+/**
  * Start the async deploy, set up the deploy promise, and write the 202 response.
  */
 /** Generate a unique deploy ID: deploy-{base36-timestamp}-{random-4-chars} */
@@ -1003,6 +1052,7 @@ function _startDeployAndRespond(
   requestId: string,
   res: ServerResponse,
   isFinetune = false,
+  idempotencyHash?: string,
 ): void {
   const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, strictFastBoot, allowUnverified, noTierCascade, minInetDownMbps } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
@@ -1012,8 +1062,14 @@ function _startDeployAndRespond(
 
   // Generate a unique deploy ID for tracking this deploy through its lifecycle
   const deployId = generateDeployId();
-  // Record for idempotency — subsequent identical requests within 5s return this deployId
-  lastDeployRequest = { hash: JSON.stringify({ dockerImage: tierResult.resolvedDockerImage, gpuTypes: tierResult.gpuTypes }), deployId, ts: Date.now() };
+  // Record for idempotency — subsequent identical requests within 5s return this deployId.
+  // Reuse the hash computed at the check site (from the raw body) so the write and
+  // check sides agree (#122); fall back to a request-derived hash if not provided.
+  lastDeployRequest = {
+    hash: idempotencyHash ?? buildDeployIdempotencyHash({ dockerImage: tierResult.resolvedDockerImage, gpuTypes: tierResult.gpuTypes }),
+    deployId,
+    ts: Date.now(),
+  };
   // Clear stale SSH fields from previous deploy so poll loops don't exit early on old host:port
   setDeployState({ deployId, devMode: config.devMode === true, sshHost: '', sshPort: 0, podId: '' });
   try {
@@ -1055,6 +1111,9 @@ function _startDeployAndRespond(
     // Cost-control flags propagated to deploy loop / cascade.
     raceCount,
     ...(noTierCascade ? { noTierCascade } : {}),
+    // Per-deploy cost cap — threaded so race-loser accounting and the monitor
+    // can trim slots / auto-stop when cumulative cost would exceed it (#101/#104).
+    ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
   };
 
   const deployFn = raceCount > 1
@@ -1163,11 +1222,16 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   if (isFinetuneDeploy) finetuneDeployActive = true;
 
   // ── Idempotency: prevent double-deploy when user clicks twice rapidly ──
-  const requestHash = JSON.stringify({ dockerImage: body.dockerImage, gpuTypes: body.gpuTypes });
+  // Hash the full normalized request (#122) so distinct deploys differing only
+  // in region/storage/env/raceCount/provider/maxCostUsd don't collide.
+  const requestHash = buildDeployIdempotencyHash(body);
   if (lastDeployRequest && lastDeployRequest.hash === requestHash && Date.now() - lastDeployRequest.ts < 5000) {
-    log.log(`[req=${requestId}] Idempotent deploy — returning existing deployId=${lastDeployRequest.deployId}`);
+    // Echo the real current status instead of a hardcoded 'creating' (#123/#131):
+    // a deploy that already failed within the window shouldn't masquerade as in-progress.
+    const liveStatus = deployState.status === 'idle' ? 'creating' : deployState.status;
+    log.log(`[req=${requestId}] Idempotent deploy — returning existing deployId=${lastDeployRequest.deployId} (status=${liveStatus})`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ deployId: lastDeployRequest.deployId, status: 'creating', message: 'Deploy already in progress (idempotent)', idempotent: true }));
+    res.end(JSON.stringify({ deployId: lastDeployRequest.deployId, status: liveStatus, message: 'Deploy already in progress (idempotent)', idempotent: true }));
     return;
   }
 
@@ -1303,7 +1367,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     // _startDeployAndRespond takes ownership of the lock (released in .finally()).
     lockTransferred = true;
     setDeployState({ readinessProbe });
-    _startDeployAndRespond(config, tierResult, requestId, res, isFinetuneDeploy);
+    _startDeployAndRespond(config, tierResult, requestId, res, isFinetuneDeploy, requestHash);
   } finally {
     if (!lockTransferred) {
       setDeployLock(false);

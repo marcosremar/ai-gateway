@@ -53,6 +53,25 @@ function logDebug(logger: Console | undefined, msg: string, ...args: unknown[]):
   else console.debug(msg, ...args);
 }
 
+/**
+ * Extract a finality flag from a provider transcription message. Streaming STT
+ * backends spell this differently: Fireworks/Whisper-style use `is_final` or
+ * `final` booleans; some emit `type: 'final' | 'transcript'`. Returns
+ * `true`/`false` when the signal is present, or `undefined` when the provider
+ * gives no hint (caller treats that as a partial).
+ */
+export function parseIsFinal(parsed: Record<string, unknown>): boolean | undefined {
+  if (typeof parsed.isFinal === 'boolean') return parsed.isFinal;
+  if (typeof parsed.is_final === 'boolean') return parsed.is_final;
+  if (typeof parsed.final === 'boolean') return parsed.final;
+  const t = parsed.type;
+  if (typeof t === 'string') {
+    if (t === 'final' || t === 'final_transcript') return true;
+    if (t === 'partial' || t === 'interim' || t === 'partial_transcript') return false;
+  }
+  return undefined;
+}
+
 /** Per-session streaming STT parameters (passed as query params to backend). */
 export interface StreamingSTTParams {
   chunkSize?: number;        // seconds (0.5-10, default 1.0)
@@ -253,7 +272,12 @@ export class StreamingSTTBackend {
           return;
         }
         if (text) {
-          this.onResult?.({ text, provider: this.provider });
+          // Surface finality so downstream can distinguish partial vs final
+          // transcripts (needed for end-of-utterance LLM triggering and
+          // speculative-cache wiring). Providers signal it in different
+          // shapes — accept the common ones; default undefined (partial).
+          const isFinal = parseIsFinal(parsed);
+          this.onResult?.({ text, provider: this.provider, ...(isFinal !== undefined ? { isFinal } : {}) });
         }
       } catch (e) {
         logError(this._logger, '[StreamingSTT] Parse error: %s', e);

@@ -67,17 +67,27 @@ export const TranscriptionResponseSchema = z.object({
 
 // ── Chat / LLM ───────────────────────────────────────────────────────────────
 
+/** Upper bound on a single chat message's content. ~256 KB of text — well above
+ *  any legitimate prompt/turn, but low enough to reject runaway/abusive payloads
+ *  before they reach an upstream provider (and bill us). */
+export const MAX_CHAT_CONTENT_CHARS = 256_000;
+/** Upper bound on the number of messages in one chat completion request. */
+export const MAX_CHAT_MESSAGES = 256;
+/** Upper bound on requested completion tokens. Caps spend on a fat-fingered
+ *  `max_tokens`; far above any real model context window. */
+export const MAX_COMPLETION_TOKENS = 131_072;
+
 export const ChatMessageSchema = z.object({
   role: z.enum(['system', 'user', 'assistant', 'tool']),
-  content: z.string(),
+  content: z.string().max(MAX_CHAT_CONTENT_CHARS),
   name: z.string().optional(),
 });
 
 export const ChatCompletionRequestSchema = z.object({
   model: z.string(),
-  messages: z.array(ChatMessageSchema),
+  messages: z.array(ChatMessageSchema).min(1).max(MAX_CHAT_MESSAGES),
   temperature: z.number().min(0).max(2).optional().default(1),
-  max_tokens: z.number().int().positive().optional(),
+  max_tokens: z.number().int().positive().max(MAX_COMPLETION_TOKENS).optional(),
   stream: z.boolean().optional().default(false),
   top_p: z.number().min(0).max(1).optional(),
   frequency_penalty: z.number().min(-2).max(2).optional(),

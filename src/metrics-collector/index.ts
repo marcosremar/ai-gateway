@@ -21,6 +21,36 @@ import { createLogger } from '../logger';
 
 const log = createLogger('metrics');
 
+/**
+ * Nearest-rank percentile over an already-sorted ascending array.
+ * `p` is a fraction in [0, 1]. Returns 0 for an empty array.
+ * This is the gateway-wide percentile convention (see server/metrics.ts
+ * computePercentile) and guarantees the p50 <= p95 <= p99 ordering for
+ * any sample size, unlike a raw `Math.floor(n * p)` index.
+ */
+export function percentileIndex(sortedAsc: number[], p: number): number {
+  if (sortedAsc.length === 0) return 0;
+  const idx = Math.ceil(p * sortedAsc.length) - 1;
+  return sortedAsc[Math.max(0, Math.min(sortedAsc.length - 1, idx))];
+}
+
+/**
+ * Split a serialized metric key (`name{k="v",...}` or `name`) into its base
+ * name and the inner label string (without braces). Used by the Prometheus
+ * summary export to inject the `quantile` label alongside existing labels.
+ */
+function splitKey(key: string): { base: string; labels: string } {
+  const brace = key.indexOf('{');
+  if (brace === -1) return { base: key, labels: '' };
+  return { base: key.slice(0, brace), labels: key.slice(brace + 1, key.lastIndexOf('}')) };
+}
+
+/** Append a `name="value"` label to an existing (possibly empty) label string. */
+function appendLabel(labels: string, name: string, value: string): string {
+  const pair = `${name}="${value}"`;
+  return labels ? `${labels},${pair}` : pair;
+}
+
 export type MetricType = 'counter' | 'gauge' | 'histogram';
 
 export interface MetricSample {
@@ -42,8 +72,13 @@ class MetricsCollector {
   private counters = new Map<string, number>();
   private gauges = new Map<string, number>();
   private histograms = new Map<string, MetricSeries>();
-  private samples: MetricSample[] = [];
-  private maxSamples = 10_000;
+  /**
+   * Total samples observed. Previously every record pushed a full MetricSample
+   * object (incl. `new Date().toISOString()`) into a 10k ring that was only
+   * ever read as `.length` — pure hot-path allocation for a number. Keep the
+   * count, drop the array.
+   */
+  private sampleCount = 0;
 
   /**
    * Increment a counter.
@@ -52,8 +87,7 @@ class MetricsCollector {
     const key = this.makeKey(name, labels);
     const current = this.counters.get(key) ?? 0;
     this.counters.set(key, current + value);
-
-    this.addSample({ type: 'counter', name, value: current + value, labels, timestamp: new Date().toISOString() });
+    this.sampleCount++;
   }
 
   /**
@@ -62,8 +96,7 @@ class MetricsCollector {
   gauge(name: string, value: number, labels: Record<string, string> = {}): void {
     const key = this.makeKey(name, labels);
     this.gauges.set(key, value);
-
-    this.addSample({ type: 'gauge', name, value, labels, timestamp: new Date().toISOString() });
+    this.sampleCount++;
   }
 
   /**
@@ -84,7 +117,7 @@ class MetricsCollector {
       series.samples.shift();
     }
 
-    this.addSample({ type: 'histogram', name, value, labels, timestamp: new Date().toISOString() });
+    this.sampleCount++;
   }
 
   /**
@@ -130,9 +163,13 @@ class MetricsCollector {
       avg: sum / count,
       min: sorted[0],
       max: sorted[count - 1],
-      p50: sorted[Math.floor(count * 0.5)],
-      p95: sorted[Math.floor(count * 0.95)],
-      p99: sorted[Math.floor(count * 0.99)],
+      // Nearest-rank percentile (matches server/metrics.ts computePercentile).
+      // The previous `Math.floor(count * p)` overshot for small samples —
+      // e.g. floor(3 * 0.99) = 2 = the last element, so p99 collapsed to max
+      // and overstated tail latency. `ceil(count * p) - 1` keeps p50 <= p95 <= p99.
+      p50: percentileIndex(sorted, 0.5),
+      p95: percentileIndex(sorted, 0.95),
+      p99: percentileIndex(sorted, 0.99),
     };
   }
 
@@ -169,7 +206,7 @@ class MetricsCollector {
       counters: this.getCounters(),
       gauges: this.getGauges(),
       histograms: histogramStats,
-      recentSamples: this.samples.length,
+      recentSamples: this.sampleCount,
     };
   }
 
@@ -180,7 +217,7 @@ class MetricsCollector {
     this.counters.clear();
     this.gauges.clear();
     this.histograms.clear();
-    this.samples = [];
+    this.sampleCount = 0;
   }
 
   /**
@@ -199,15 +236,22 @@ class MetricsCollector {
       lines.push(`${key} ${value}`);
     }
 
-    // Histograms
+    // Histograms — exported as Prometheus *summaries*, not histograms.
+    // We hold precomputed quantiles (p50/p95/p99), so emitting them as
+    // `_bucket{le="0.5"}` was invalid: `le` is a cumulative upper-bound count,
+    // and feeding a quantile value into it makes histogram_quantile() return
+    // garbage. A summary exposes precomputed quantiles via the `quantile`
+    // label, which is exactly what we have. See:
+    // https://prometheus.io/docs/concepts/metric_types/#summary
     for (const [key, series] of this.histograms.entries()) {
       const stats = this.getHistogramStats(series.name, series.labels);
       if (stats) {
-        lines.push(`${key}_count ${stats.count}`);
-        lines.push(`${key}_sum ${stats.sum}`);
-        lines.push(`${key}_bucket{le="0.5"} ${stats.p50}`);
-        lines.push(`${key}_bucket{le="0.95"} ${stats.p95}`);
-        lines.push(`${key}_bucket{le="0.99"} ${stats.p99}`);
+        const { base, labels } = splitKey(key);
+        lines.push(`${base}{${appendLabel(labels, 'quantile', '0.5')}} ${stats.p50}`);
+        lines.push(`${base}{${appendLabel(labels, 'quantile', '0.95')}} ${stats.p95}`);
+        lines.push(`${base}{${appendLabel(labels, 'quantile', '0.99')}} ${stats.p99}`);
+        lines.push(`${base}_sum${labels ? `{${labels}}` : ''} ${stats.sum}`);
+        lines.push(`${base}_count${labels ? `{${labels}}` : ''} ${stats.count}`);
       }
     }
 
@@ -219,13 +263,6 @@ class MetricsCollector {
       .map(([k, v]) => `${k}="${v}"`)
       .join(',');
     return labelStr ? `${name}{${labelStr}}` : name;
-  }
-
-  private addSample(sample: MetricSample): void {
-    this.samples.push(sample);
-    if (this.samples.length > this.maxSamples) {
-      this.samples.shift();
-    }
   }
 }
 

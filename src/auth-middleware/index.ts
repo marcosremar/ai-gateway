@@ -18,7 +18,6 @@
  */
 
 import { IncomingMessage, ServerResponse } from 'http';
-import { safeGet, requireDefined } from '../null-safety';
 
 export interface AuthResult {
   ok: boolean;

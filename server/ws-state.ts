@@ -13,11 +13,36 @@ export const wsClients = new Set<BabelCastWS>();
 export let botTranscriptPollTimer: ReturnType<typeof setInterval> | null = null;
 export let botTranscriptCursor = 0;  // index of last seen transcript
 
+/**
+ * Per-connection buffered-bytes ceiling for broadcasts. Bun is configured with
+ * `closeOnBackpressureLimit: true`, so a single slow subscriber whose send
+ * buffer keeps growing will eventually be force-closed — and until then it
+ * forces Bun to buffer the broadcast for everyone. We skip clients already over
+ * this threshold so one stalled socket can't stall (or trip backpressure-close
+ * on) healthy ones. 1 MB ≈ several seconds of mixed audio / many status frames.
+ */
+export const WS_BROADCAST_BACKPRESSURE_BYTES = 1 * 1024 * 1024;
+
+/** Count of broadcast frames skipped because the client was over its buffer ceiling. */
+export let wsBroadcastDropped = 0;
+/** Reset the dropped-frame counter (used by tests / metrics rollover). */
+export function resetWsBroadcastDropped(): void { wsBroadcastDropped = 0; }
+
+/** True when the socket's buffered bytes are at/over the broadcast ceiling. */
+export function isBackpressured(ws: { getBufferedAmount?: () => number }, limit = WS_BROADCAST_BACKPRESSURE_BYTES): boolean {
+  const buffered = ws.getBufferedAmount?.() ?? 0;
+  return buffered >= limit;
+}
+
 export function broadcastWs(msg: Record<string, unknown>): void {
   if (wsClients.size === 0) return;
   const json = JSON.stringify(msg);
   const dead: BabelCastWS[] = [];
   for (const ws of wsClients) {
+    // Skip clients whose send buffer is already saturated — sending more would
+    // grow the per-socket buffer and risk a backpressure-close. A dropped
+    // status/transcript frame is recoverable; a dropped connection is not.
+    if (isBackpressured(ws)) { wsBroadcastDropped++; continue; }
     try { ws.send(json); } catch { dead.push(ws); }
   }
   for (const ws of dead) wsClients.delete(ws);
@@ -116,6 +141,9 @@ export function startBotTranscriptPoll(): void {
       // bot pod not reachable or endpoint missing — ignore silently
     }
   }, 1500);
+  // Don't keep the process alive solely for this poll loop; if everything else
+  // has shut down, an orphaned 1.5s poll against a dead pod shouldn't block exit.
+  botTranscriptPollTimer?.unref?.();
   log.log('Bot transcript polling started');
 }
 
@@ -199,7 +227,13 @@ export function broadcastDubAudio(target: string, msg: Record<string, unknown>, 
   let jsonStr: string | null = null;
   let binaryFrame: Buffer | null = null;
 
+  // Collect dead/saturated sockets and delete after iterating. Deleting from
+  // the live Set while iterating it can skip the next element (#433).
+  const dead: BabelCastWS[] = [];
   for (const ws of clients) {
+    // Drop late audio frames for saturated subscribers rather than buffering
+    // unbounded PCM (dropping late real-time audio is correct + far cheaper).
+    if (isBackpressured(ws)) { wsBroadcastDropped++; continue; }
     // Look up the client ID from the WS data to check binary opt-in
     const clientId = (ws.data as { id: string }).id;
     const isBinary = audioBuffer && dubBinaryClients.has(clientId);
@@ -218,9 +252,10 @@ export function broadcastDubAudio(target: string, msg: Record<string, unknown>, 
         ws.send(jsonStr);
       }
     } catch {
-      clients.delete(ws);
+      dead.push(ws);
     }
   }
+  for (const ws of dead) clients.delete(ws);
   // Clean up empty target entries to prevent memory leak
   if (clients.size === 0) dubTargetClients.delete(target);
 }

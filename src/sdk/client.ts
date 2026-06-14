@@ -58,9 +58,10 @@ const DEFAULT_TIMEOUTS = {
   deploy: 30_000,
 };
 
-/** Retry config for connection-level errors (gateway restart tolerance). */
-const MAX_RETRIES = 4;
-const RETRY_BACKOFF_MS = [500, 1000, 2000, 4000];
+/** Default retry config for connection-level errors (gateway restart tolerance).
+ *  Override per-instance via GatewayConfig.maxRetries / retryBackoffMs. */
+const DEFAULT_MAX_RETRIES = 4;
+const DEFAULT_RETRY_BACKOFF_MS = [500, 1000, 2000, 4000];
 
 /** Check if an error is a connection-level failure (retryable). */
 function isRetryableError(err: unknown): boolean {
@@ -83,6 +84,8 @@ export class GatewaySDK {
   private readonly headers: Record<string, string>;
   private readonly timeouts: Required<NonNullable<GatewayConfig['timeouts']>>;
   private readonly groqApiKey: string;
+  private readonly maxRetries: number;
+  private readonly retryBackoffMs: number[];
 
   constructor(config: GatewayConfig) {
     if (!config.baseUrl) {
@@ -98,6 +101,13 @@ export class GatewaySDK {
       : {};
     this.timeouts = { ...DEFAULT_TIMEOUTS, ...config.timeouts };
     this.groqApiKey = config.groqApiKey ?? (typeof process !== 'undefined' ? (process.env.GROQ_API_KEY ?? '') : '');
+    // Retry tuning — clamp to non-negative integer; fall back to defaults on bad input.
+    this.maxRetries = Number.isFinite(config.maxRetries) && (config.maxRetries as number) >= 0
+      ? Math.floor(config.maxRetries as number)
+      : DEFAULT_MAX_RETRIES;
+    this.retryBackoffMs = Array.isArray(config.retryBackoffMs) && config.retryBackoffMs.length > 0
+      ? config.retryBackoffMs
+      : DEFAULT_RETRY_BACKOFF_MS;
   }
 
   // ── Inference ───────────────────────────────────────────────────────────
@@ -255,19 +265,29 @@ export class GatewaySDK {
 
   // ── GPU management ──────────────────────────────────────────────────────
 
-  /** Deploy a GPU pod (non-blocking — returns immediately, poll gpuStatus()). */
+  /** Deploy a GPU pod (non-blocking — returns immediately, poll gpuStatus()).
+   *  Pass `maxCostUsd` to cap the hourly spend — the gateway rejects the deploy
+   *  if the cheapest matching offer exceeds it. */
   async deployGpu(options: DeployOptions): Promise<DeployResponse> {
     if (!options.apiKey?.trim()) {
       throw new TypeError('deployGpu: options.apiKey is required');
     }
+    if (options.maxCostUsd !== undefined && (!Number.isFinite(options.maxCostUsd) || options.maxCostUsd <= 0)) {
+      throw new TypeError('deployGpu: maxCostUsd must be a positive number');
+    }
+    const body: Record<string, unknown> = {
+      apiKey: options.apiKey,
+      dockerImage: options.dockerImage,
+      gpuTypes: options.gpuTypes,
+    };
+    if (options.region !== undefined) body.region = options.region;
+    if (options.maxCostUsd !== undefined) body.maxCostUsd = options.maxCostUsd;
+    if (options.containerDiskInGb !== undefined) body.containerDiskInGb = options.containerDiskInGb;
+    if (options.interruptible !== undefined) body.interruptible = options.interruptible;
     const res = await this.fetch('/v1/gpu/deploy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: options.apiKey,
-        dockerImage: options.dockerImage,
-        gpuTypes: options.gpuTypes,
-      }),
+      body: JSON.stringify(body),
       timeout: this.timeouts.deploy,
       allowedStatuses: [202, 409], // 409 = deploy already in progress
     });
@@ -921,10 +941,12 @@ export class GatewaySDK {
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
     let lastError: unknown;
+    const maxRetries = this.maxRetries;
+    const backoff = this.retryBackoffMs;
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
-        const delay = RETRY_BACKOFF_MS[Math.min(attempt - 1, RETRY_BACKOFF_MS.length - 1)];
+        const delay = backoff[Math.min(attempt - 1, backoff.length - 1)];
         await new Promise(r => setTimeout(r, delay));
       }
 
@@ -976,7 +998,7 @@ export class GatewaySDK {
         lastError = err;
 
         // Only retry connection-level errors
-        if (!isRetryableError(err) || attempt >= MAX_RETRIES) {
+        if (!isRetryableError(err) || attempt >= maxRetries) {
           if (err instanceof TypeError) {
             throw new GatewayError(
               `${options.method} ${path} network error: ${err.message}`,
@@ -994,7 +1016,7 @@ export class GatewaySDK {
     // Unreachable, but satisfies TS
     if (lastError instanceof TypeError) {
       throw new GatewayError(
-        `${options.method} ${path} network error after ${MAX_RETRIES + 1} attempts: ${(lastError as Error).message}`,
+        `${options.method} ${path} network error after ${maxRetries + 1} attempts: ${(lastError as Error).message}`,
         0,
         path,
         true, // isNetworkError

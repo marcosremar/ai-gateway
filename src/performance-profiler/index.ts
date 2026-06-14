@@ -114,8 +114,11 @@ export function getOperationStats(): Record<string, { count: number; avg: number
     stats[operation] = {
       count: timings.length,
       avg: Math.round(timings.reduce((a, b) => a + b, 0) / timings.length),
-      p50: sorted[Math.floor(sorted.length * 0.5)],
-      p95: sorted[Math.floor(sorted.length * 0.95)],
+      // Nearest-rank percentile (matches server/metrics.ts computePercentile).
+      // `Math.floor(len * p)` overshot for small samples (e.g. floor(2*0.95)=1
+      // = max), overstating tail latency; `ceil(len*p)-1` keeps p50 <= p95.
+      p50: sorted[Math.max(0, Math.ceil(sorted.length * 0.5) - 1)],
+      p95: sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)],
       max: sorted[sorted.length - 1],
     };
   }

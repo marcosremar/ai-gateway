@@ -22,4 +22,8 @@ export interface AlertRouterOptions {
   dedupeWindowMs?: number;
   /** Rate limit — max alerts per window. Default { max: 10, windowMs: 60_000 } */
   rateLimit?: { max: number; windowMs: number };
+  /** Extra send attempts after the first on channel failure. Default 1. */
+  retries?: number;
+  /** Backoff between retries in ms. Default 200. Set 0 for immediate (tests). */
+  retryDelayMs?: number;
 }

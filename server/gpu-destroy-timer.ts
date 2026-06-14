@@ -65,6 +65,9 @@ export function scheduleAutoDestroy(delayMs: number) {
     await autoTerminateGpu('auto_destroy');
     clearPersistedDeadline();
   }, delayMs) as unknown as Timer;
+  // unref so an otherwise-idle process is never kept alive purely by the
+  // destroy countdown (the deadline is persisted and re-armed on next boot).
+  (destroyTimer as unknown as { unref?: () => void }).unref?.();
 }
 
 export function clearAutoDestroyTimer() {
@@ -106,4 +109,5 @@ export async function recoverPersistedDestroyTimer(): Promise<void> {
     await autoTerminateGpu('auto_destroy');
     clearPersistedDeadline();
   }, remaining) as unknown as Timer;
+  (destroyTimer as unknown as { unref?: () => void }).unref?.();
 }
