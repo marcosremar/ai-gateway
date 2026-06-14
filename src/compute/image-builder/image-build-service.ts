@@ -102,6 +102,28 @@ export function isTerminalBuildStatus(status: ImageBuildStatus): boolean {
   return TERMINAL_BUILD_STATUSES.has(status);
 }
 
+/**
+ * Decide whether a persisted build record can be resumed after a process
+ * restart by re-deriving its status from the GitHub Actions API (#970).
+ *
+ * `pollBuildStatus` only reads the in-memory catalog updated by `_runBuild`; if
+ * the process restarts mid-build the CLI poller would spin forever on a record
+ * that nobody is advancing. A record is **resumable** only when it is
+ * non-terminal AND carries the `runId` persisted at step 3 — then a caller can
+ * call `getRunStatus(token, owner, repoName, runId)` to advance it. A
+ * non-terminal record *without* a `runId` is orphaned (the push/run-lookup never
+ * completed) and should be failed out instead of polled indefinitely.
+ *
+ * Pure — the record is injected; no catalog/network access.
+ */
+export function isResumableBuild(
+  record: Pick<ImageBuildRecord, 'status' | 'runId'> | null | undefined,
+): boolean {
+  if (!record) return false;
+  if (isTerminalBuildStatus(record.status)) return false;
+  return typeof record.runId === 'number' && record.runId > 0;
+}
+
 export function resolveAllowedBuildRoots(): string[] {
   const roots = new Set<string>();
   const addRoot = (input: string | undefined) => {

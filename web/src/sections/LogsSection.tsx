@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, type ComponentType } from 'react';
+import { useState, useEffect, useCallback, Fragment, type ComponentType } from 'react';
 import { getRequestLog, getMetrics, type RequestLogEntry, type MetricsResponse } from '@/lib/gateway';
 import { Card, CardHeader, CardBody, Button, StatusBadge, AlertBanner, Spinner, Toggle } from '@/components/ui';
 import { ScrollText, BarChart3, RefreshCw, ChevronDown, ChevronUp, Clock, AlertCircle, Activity, Cpu } from 'lucide-react';
@@ -210,9 +210,11 @@ export function LogsSection() {
                     const pi = PROVIDER_ICON[e.provider];
                     const ProviderIcon = pi?.icon;
                     return (
-                      <>
+                      // Key the Fragment (the list item), not the inner <tr> —
+                      // a key on a Fragment-wrapped child triggers duplicate-key
+                      // warnings + reconciliation churn (#932).
+                      <Fragment key={e.id}>
                         <tr
-                          key={e.id}
                           style={{
                             borderTop: '1px solid var(--color-border)',
                             background: rowTint,
@@ -265,7 +267,6 @@ export function LogsSection() {
                         </tr>
                         {isExpanded && e.outputPreview && (
                           <tr
-                            key={`${e.id}-expand`}
                             style={{ background: rowTint, borderTop: '1px solid var(--color-border)' }}
                           >
                             <td colSpan={7} className="pb-3 pt-1 px-2">
@@ -282,7 +283,7 @@ export function LogsSection() {
                             </td>
                           </tr>
                         )}
-                      </>
+                      </Fragment>
                     );
                   })}
                 </tbody>

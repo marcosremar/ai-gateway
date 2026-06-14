@@ -1,3 +1,5 @@
+import { normalizeServiceStats, type ServiceStatsData } from './service-stats';
+
 const GATEWAY = typeof window !== 'undefined'
   ? (process.env.NEXT_PUBLIC_GATEWAY_URL || window.location.origin)
   : 'http://localhost:4000';
@@ -79,6 +81,18 @@ export interface MetricsResponse {
 
 export async function getMetrics(): Promise<MetricsResponse> {
   return gwJson('/metrics');
+}
+
+// ── Service latency stats (#949) ──
+//
+// Previously `FallbackChainList` was the only component to call `fetch('/v1/...')`
+// directly (no `credentials`, no error typing). Route it through the typed client
+// so auth/error handling is consistent, and defensively normalize the payload so
+// a partial response can't poison the latency-suffix render.
+
+export async function getServiceStats(): Promise<ServiceStatsData | null> {
+  const raw = await gwJson<unknown>('/v1/metrics/service-stats');
+  return normalizeServiceStats(raw);
 }
 
 export interface RequestLogEntry {

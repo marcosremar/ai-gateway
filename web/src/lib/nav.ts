@@ -93,6 +93,63 @@ export function validRoutesFromNav(items: ReadonlyArray<NavItemLike>): Set<strin
   return new Set(items.filter(isNavLink).map((item) => item.id));
 }
 
+// ── Static-export route constraint (#963) ─────────────────────────────────────
+//
+// The `[...slug]` catch-all pre-renders one HTML shell per route under
+// `output: 'export'`. The slug list was a hand-maintained array inline in the
+// page, easy to drift from the real nav/redirect set and capable of exploding
+// the export if widened carelessly. Centralizing it here gives one source of
+// truth and lets `generateStaticParams` be derived + unit-tested.
+
+/**
+ * The explicit, bounded set of client routes that get their own pre-rendered
+ * HTML file in the static export. Deliberately a closed allow-list (NOT derived
+ * from every nav id) so the export can't explode and unknown deep links still
+ * fall back to the SPA's `index.html`. Includes legacy-compat routes that
+ * `ROUTE_REDIRECTS` maps to live pages so a direct refresh of an old URL works.
+ */
+export const STATIC_EXPORT_ROUTES: readonly string[] = [
+  // Dashboard root
+  'dashboard',
+  // Config
+  'config/services',
+  'config/apps',
+  'config/apps/new',
+  'config/guardrails',
+  'config/api-keys',
+  'config/labs',
+  'config/vast-serverless',
+  // Legacy compat (kept routable via ROUTE_REDIRECTS)
+  'config/profiles',
+  'config/profiles/new',
+  // Tools
+  'tools/playground',
+  'tools/bot',
+  'tools/auto-swap',
+  'tools/standby',
+  // Monitor
+  'monitor/latency',
+  'monitor/reputation',
+  'monitor/logs',
+  'monitor/readiness',
+];
+
+/**
+ * Build the Next `generateStaticParams` payload from the bounded route list:
+ * each `a/b/c` route → `{ slug: ['a','b','c'] }`. Pure; exported for tests so the
+ * static-export surface is verifiable without a Next build. Empty/whitespace
+ * routes are dropped so a stray entry can't emit a `{ slug: [] }` (which would
+ * collide with the index route).
+ */
+export function staticSlugParams(
+  routes: readonly string[] = STATIC_EXPORT_ROUTES,
+): Array<{ slug: string[] }> {
+  return routes
+    .map((r) => r.split('/').map((s) => s.trim()).filter(Boolean))
+    .filter((slug) => slug.length > 0)
+    .map((slug) => ({ slug }));
+}
+
 /**
  * Push a raw URL path and notify the in-app router (#936).
  *

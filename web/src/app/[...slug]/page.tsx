@@ -10,33 +10,12 @@
  * own pre-rendered HTML files too.
  */
 import { DashboardApp } from '../page';
+import { staticSlugParams } from '@/lib/nav';
 
+// Bounded static-export route list lives in `lib/nav` (#963) so the
+// pre-rendered-shell surface is a single source of truth and unit-testable.
 export function generateStaticParams() {
-  return [
-    // Dashboard root
-    { slug: ['dashboard'] },
-    // Config
-    { slug: ['config', 'services'] },
-    { slug: ['config', 'apps'] },
-    { slug: ['config', 'apps', 'new'] },
-    { slug: ['config', 'guardrails'] },
-    { slug: ['config', 'api-keys'] },
-    { slug: ['config', 'labs'] },
-    { slug: ['config', 'vast-serverless'] },
-    // Legacy compat
-    { slug: ['config', 'profiles'] },
-    { slug: ['config', 'profiles', 'new'] },
-    // Tools
-    { slug: ['tools', 'playground'] },
-    { slug: ['tools', 'bot'] },
-    { slug: ['tools', 'auto-swap'] },
-    { slug: ['tools', 'standby'] },
-    // Monitor
-    { slug: ['monitor', 'latency'] },
-    { slug: ['monitor', 'reputation'] },
-    { slug: ['monitor', 'logs'] },
-    { slug: ['monitor', 'readiness'] },
-  ];
+  return staticSlugParams();
 }
 
 export default function CatchAllPage() {

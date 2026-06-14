@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { getProviderConfig } from '@/lib/gateway';
 import { Spinner } from '@/components/ui';
-import { deriveProvides, STAGE_ACCENTS, type Service, type App } from './provider-types';
+import { deriveProvides, type Service, type App } from './provider-types';
 import { Cloud, Server, Zap, HardDrive, Package, Cpu, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
 import { stageColor, stageLabel } from '@/lib/phase-colors';
 

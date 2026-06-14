@@ -7,6 +7,7 @@ import type { LucideIcon } from 'lucide-react';
 import { Button, Toggle, DropdownList, type DropdownOption } from '@/components/ui';
 import { type PipelineChainEntry, type Service, PIPELINE_CATALOG, DEFAULT_DOCKER_IMAGES } from './provider-types';
 import { latencySuffix, type ServiceStatsData } from '@/lib/service-stats';
+import { getServiceStats } from '@/lib/gateway';
 
 interface Accent { iconColor: string; dot: string; }
 
@@ -47,24 +48,21 @@ interface FallbackChainListProps {
   services?: Service[];
 }
 
-// Latency stats per stage::provider from /v1/metrics/service-stats
-interface ServiceStats extends ServiceStatsData {
-  warmth: { stt: { warm: boolean; avgLatencyMs: number | null; requests: number }; llm: { warm: boolean; avgLatencyMs: number | null; requests: number }; tts: { warm: boolean; avgLatencyMs: number | null; requests: number } } | null;
-}
-
 export default function FallbackChainList({ stage, chain, setChain, accent, services }: FallbackChainListProps) {
   const [addingFallback, setAddingFallback] = useState(false);
   const [selectedKey, setSelectedKey] = useState('');
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [serviceStats, setServiceStats] = useState<ServiceStats | null>(null);
+  // Latency stats per `stage::provider` from /v1/metrics/service-stats.
+  const [serviceStats, setServiceStats] = useState<ServiceStatsData | null>(null);
 
   const catalog = PIPELINE_CATALOG[stage];
   const providers = catalog.providers;
 
-  // Fetch service latency stats
+  // Fetch service latency stats via the typed gateway client (#949) — auth +
+  // error handling are consistent and the payload is defensively normalized,
+  // instead of a bare `fetch('/v1/...')` with untyped JSON.
   useEffect(() => {
-    fetch('/v1/metrics/service-stats')
-      .then(r => r.ok ? r.json() : null)
+    getServiceStats()
       .then(d => { if (d) setServiceStats(d); })
       .catch(() => {});
   }, []);
