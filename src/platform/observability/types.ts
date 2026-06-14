@@ -42,6 +42,21 @@ export interface TraceEvent {
   attributes: Record<string, any>;
 }
 
+/**
+ * Per-stage metrics carried on a PipelineMetrics. Token counts and cost are
+ * optional so existing callers stay valid (#565) — when present, the tracer
+ * stamps them onto the stage span for per-trace cost attribution in
+ * Tempo/Jaeger.
+ */
+export interface StageMetrics {
+  latencyMs: number;
+  provider: string;
+  success: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+}
+
 export interface PipelineMetrics {
   requestId: string;
   pipeline: 'speech' | 'tts' | 'stt';
@@ -49,9 +64,9 @@ export interface PipelineMetrics {
   ttfcMs?: number;        // Time To First Content (transcript)
   ttfaMs?: number;        // Time To First Audio (first audio chunk)
   stages: {
-    stt?: { latencyMs: number; provider: string; success: boolean; ttfcMs?: number };
-    llm?: { latencyMs: number; provider: string; success: boolean };
-    tts?: { latencyMs: number; provider: string; success: boolean; ttfacMs?: number; ttfaMs?: number };
+    stt?: StageMetrics & { ttfcMs?: number };
+    llm?: StageMetrics;
+    tts?: StageMetrics & { ttfacMs?: number; ttfaMs?: number };
   };
   routing: {
     decision: string;

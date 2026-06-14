@@ -37,6 +37,11 @@ export interface OtelConfig {
   sampleRate?: number;
   /** Additional resource attributes */
   resourceAttributes?: Record<string, string>;
+  /**
+   * Log each completed span (one line per span). Off by default — high log
+   * volume on hot pipelines (#570). Also enabled via OTEL_LOG_SPANS=1.
+   */
+  logSpans?: boolean;
 }
 
 export interface SpanContext {
@@ -136,6 +141,29 @@ let otelConfig: OtelConfig | null = null;
 const activeSpans = new Map<string, InMemorySpan>();
 const completedSpans: InMemorySpan[] = [];
 
+/**
+ * #571: bound the completed-span ring. Without a cap, `withSpan` pushed one
+ * span per request forever, leaking memory on long-running servers (the
+ * DistributedTracer caps at 5000; this had no cap at all). Keep the most
+ * recent N and drop the oldest.
+ */
+const MAX_COMPLETED_SPANS = 5_000;
+
+/**
+ * #570: spans were logged at info level on every completion — one structured
+ * line per stage per request, which is high log volume/cost on a hot pipeline.
+ * Gate completion logging behind an explicit opt-in (env or initOtel option)
+ * so it's off by default and only enabled when debugging.
+ */
+function spanLoggingEnabled(): boolean {
+  if (otelConfig?.logSpans) return true;
+  const v =
+    typeof process !== 'undefined'
+      ? process.env.OTEL_LOG_SPANS ?? process.env.AIGW_OTEL_LOG_SPANS
+      : undefined;
+  return v === '1' || v === 'true';
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -219,17 +247,24 @@ export async function withSpan<T>(
     activeSpans.delete(span.spanContext().spanId);
     if (inMemorySpan) {
       completedSpans.push(inMemorySpan);
+      // #571: keep the ring bounded so a long-running server doesn't leak one
+      // span per request forever.
+      if (completedSpans.length > MAX_COMPLETED_SPANS) {
+        completedSpans.splice(0, completedSpans.length - MAX_COMPLETED_SPANS);
+      }
 
-      // Log completed spans at debug level
-      log.log(
-        {
-          name,
-          traceId: span.spanContext().traceId,
-          durationMs: inMemorySpan.durationMs,
-          attributes: inMemorySpan.getAttributes(),
-        },
-        `Span completed: ${name}`,
-      );
+      // #570: only emit the per-span completion line when explicitly enabled.
+      if (spanLoggingEnabled()) {
+        log.log(
+          {
+            name,
+            traceId: span.spanContext().traceId,
+            durationMs: inMemorySpan.durationMs,
+            attributes: inMemorySpan.getAttributes(),
+          },
+          `Span completed: ${name}`,
+        );
+      }
     }
   }
 }
@@ -249,6 +284,17 @@ export function getCurrentSpan(): Span | undefined {
  */
 export function getCompletedSpans(limit = 100): unknown[] {
   return completedSpans.slice(-limit).map((s) => s.toJSON());
+}
+
+/** Current number of retained completed spans (bounded by MAX_COMPLETED_SPANS). */
+export function getCompletedSpanCount(): number {
+  return completedSpans.length;
+}
+
+/** Test-only: clear in-memory span buffers so cases don't leak into each other. */
+export function _resetOtelSpansForTests(): void {
+  activeSpans.clear();
+  completedSpans.length = 0;
 }
 
 /**

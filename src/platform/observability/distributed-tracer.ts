@@ -70,12 +70,24 @@ export class DistributedTracer {
     };
 
     this.spans.set(span.spanId, span);
-    // Cap the retained span count — drop the oldest entry once we exceed the
-    // limit. Map preserves insertion order so the first key is always the
-    // oldest, giving us a cheap FIFO eviction.
+    // Cap the retained span count once we exceed the limit.
+    //
+    // #566: a naive oldest-first (FIFO) eviction can drop a long-running PARENT
+    // span (inserted first) while its child stage spans are still arriving,
+    // orphaning the children. Prefer evicting the oldest *ended* span (one with
+    // `duration_ms` set, i.e. endSpan() was called); only if every retained
+    // span is still open do we fall back to plain FIFO to keep the bound hard.
     if (this.spans.size > DistributedTracer.MAX_RETAINED_SPANS) {
-      const oldest = this.spans.keys().next();
-      if (!oldest.done) this.spans.delete(oldest.value);
+      let victim: string | undefined;
+      for (const [id, s] of this.spans) {
+        if (s.spanId === span.spanId) continue; // never evict the one we just added
+        if (s.tags.duration_ms !== undefined) { victim = id; break; }
+      }
+      if (victim === undefined) {
+        const oldest = this.spans.keys().next();
+        if (!oldest.done) victim = oldest.value;
+      }
+      if (victim !== undefined) this.spans.delete(victim);
     }
     return span;
   }
@@ -141,6 +153,19 @@ export class DistributedTracer {
         this.addTag(stageSpan.spanId, 'stage.provider', stageData.provider);
         this.addTag(stageSpan.spanId, 'stage.success', stageData.success);
 
+        // #565: per-trace cost attribution — stamp token counts and cost on the
+        // stage span when the caller supplied them so Tempo/Jaeger can break
+        // cost down by stage/provider. Skipped when undefined (back-compat).
+        if (stageData.inputTokens !== undefined) {
+          this.addTag(stageSpan.spanId, 'stage.input_tokens', stageData.inputTokens);
+        }
+        if (stageData.outputTokens !== undefined) {
+          this.addTag(stageSpan.spanId, 'stage.output_tokens', stageData.outputTokens);
+        }
+        if (stageData.costUsd !== undefined) {
+          this.addTag(stageSpan.spanId, 'stage.cost_usd', stageData.costUsd);
+        }
+
         if (!stageData.success) {
           this.addEvent(stageSpan.spanId, 'stage_failure', {
             stage: stageName,
@@ -151,6 +176,15 @@ export class DistributedTracer {
 
         this.endSpan(stageSpan.spanId);
       }
+    }
+
+    // #565: roll the per-stage costs up onto the parent so the whole-pipeline
+    // cost is queryable on the root span (not only the routing estimate).
+    const stageCosts = Object.values(metrics.stages)
+      .filter((s): s is NonNullable<typeof s> => !!s && typeof s.costUsd === 'number')
+      .map((s) => s.costUsd as number);
+    if (stageCosts.length > 0) {
+      this.addTag(span.spanId, 'cost.stages_usd', stageCosts.reduce((a, b) => a + b, 0));
     }
 
     // Routing decision event
@@ -173,8 +207,12 @@ export class DistributedTracer {
     p95LatencyMs: number;
     failureRate: number;
   } {
+    // An *ended* span has a defined `duration_ms` (endSpan sets it) — including
+    // a legitimate 0 for fast/synchronous spans. The previous truthy check
+    // (`span.tags.duration_ms`) dropped every 0ms span, which on a fast pipeline
+    // is most of them, so `analyzeBottlenecks` returned 'none' even with data.
     const recentSpans = Array.from(this.spans.values())
-      .filter(span => span.tags.duration_ms && (Date.now() - span.startTime) < sinceMs);
+      .filter(span => span.tags.duration_ms !== undefined && (Date.now() - span.startTime) < sinceMs);
 
     if (recentSpans.length === 0) {
       return {
@@ -186,7 +224,7 @@ export class DistributedTracer {
       };
     }
 
-    const latencies = recentSpans.map(span => span.tags.duration_ms);
+    const latencies = recentSpans.map(span => span.tags.duration_ms as number);
     latencies.sort((a, b) => a - b);
 
     // P95 = the value at rank ceil(N*0.95)-1 (0-indexed). Using Math.floor
@@ -199,9 +237,38 @@ export class DistributedTracer {
       span.events.some(event => event.name === 'stage_failure')
     ).length;
 
-    // Find slowest stage/provider (simplified - would need more sophisticated analysis)
-    const slowestStage = 'pipeline'; // Could analyze stage spans
-    const slowestProvider = 'gpu'; // Could analyze provider tags
+    // #512: derive the slowest stage/provider from the recent stage spans
+    // instead of returning hardcoded 'pipeline'/'gpu' literals. We average the
+    // observed stage latency per `stage.name` and per `stage.provider` tag and
+    // pick the max; callers can finally trust these fields.
+    const stageLatencies = new Map<string, { sum: number; n: number }>();
+    const providerLatencies = new Map<string, { sum: number; n: number }>();
+    for (const sp of recentSpans) {
+      const stageName = sp.tags['stage.name'];
+      const stageLatency = sp.tags['stage.latency_ms'];
+      const provider = sp.tags['stage.provider'];
+      if (typeof stageName === 'string' && typeof stageLatency === 'number') {
+        const e = stageLatencies.get(stageName) ?? { sum: 0, n: 0 };
+        e.sum += stageLatency; e.n += 1;
+        stageLatencies.set(stageName, e);
+      }
+      if (typeof provider === 'string' && typeof stageLatency === 'number') {
+        const e = providerLatencies.get(provider) ?? { sum: 0, n: 0 };
+        e.sum += stageLatency; e.n += 1;
+        providerLatencies.set(provider, e);
+      }
+    }
+    const pickSlowest = (m: Map<string, { sum: number; n: number }>): string => {
+      let best = 'none';
+      let bestAvg = -1;
+      for (const [k, { sum, n }] of m) {
+        const avg = sum / n;
+        if (avg > bestAvg) { bestAvg = avg; best = k; }
+      }
+      return best;
+    };
+    const slowestStage = pickSlowest(stageLatencies);
+    const slowestProvider = pickSlowest(providerLatencies);
 
     return {
       slowestStage,
@@ -283,7 +350,17 @@ export class DistributedTracer {
   }
 
   // Benchmark automation
-  async runRealtimeBenchmark(requestCount: number = 10, intervalMs: number = 2000): Promise<{
+  //
+  // #521: the benchmark uses `simulateRequestLatency()` (random numbers). By
+  // default these synthetic samples are NOT persisted as `benchmark_request`
+  // spans, because doing so polluted `analyzeBottlenecks`/`getRealtimeMetrics`
+  // (which read the same ring) with fabricated data. Pass
+  // `{ persistSpans: true }` only for explicit benchmarking sessions.
+  async runRealtimeBenchmark(
+    requestCount: number = 10,
+    intervalMs: number = 2000,
+    opts: { persistSpans?: boolean } = {},
+  ): Promise<{
     ttfcStats: { min: number, max: number, avg: number, p95: number };
     reliability: number; // success rate 0-1
     throughput: number;   // req/sec
@@ -312,10 +389,14 @@ export class DistributedTracer {
         const ttfc = Date.now() - benchmarkStart;
         log.log(`[tracer] Request ${i+1}/${requestCount}: TTFC=${ttfc}ms`);
 
-        // Record in tracer for analysis
-        const span = this.startSpan('benchmark_request');
-        span.ttfcMs = ttfc;
-        this.endSpan(span.spanId);
+        // #521: only store synthetic spans in the production ring when the
+        // caller explicitly opts in, so default benchmark runs can't skew the
+        // real-traffic metrics that share `this.spans`.
+        if (opts.persistSpans) {
+          const span = this.startSpan('benchmark_request');
+          span.ttfcMs = ttfc;
+          this.endSpan(span.spanId);
+        }
 
       } catch (error) {
         const safeError = error instanceof Error 

@@ -4,10 +4,29 @@
  * Automatically redacts sensitive fields before sending to Langfuse.
  */
 
+import { createHash } from 'crypto';
 import type { GatewayHooks } from '../../hooks';
 import type { LangfuseConfig } from './types';
 
 const DEFAULT_BASE_URL = 'https://cloud.langfuse.com';
+
+/**
+ * #600: derive a STABLE Langfuse trace id from the fields shared by both
+ * `RequestStartEvent` and `RequestEndEvent` (userId/stage/provider). Previously
+ * `onRequestStart` used `trace-${Date.now()}-${random}` while `onRequestEnd`
+ * used `trace-${timestamp}-redacted`; those never matched, so spans never
+ * attached to their trace. Using the same derivation in both handlers links the
+ * span to its trace. (The events carry no requestId; the shared-identity tuple
+ * is the best stable correlation key available without a cross-module change.)
+ */
+export function langfuseTraceId(event: {
+  userId?: unknown;
+  stage?: unknown;
+  provider?: unknown;
+}): string {
+  const key = `${String(event.userId ?? 'anon')}|${String(event.stage ?? '')}|${String(event.provider ?? '')}`;
+  return 'trace-' + createHash('sha256').update(key).digest('hex').slice(0, 24);
+}
 
 const SENSITIVE_KEYS = new Set([
   'apiKey', 'secret', 'token', 'password', 'credential',
@@ -73,12 +92,14 @@ export function createLangfuseHooks(config: LangfuseConfig): Partial<GatewayHook
   return {
     onRequestStart: (event) => {
       const safeEvent = redactEvent(event);
+      const traceId = langfuseTraceId(safeEvent as Record<string, unknown>);
       post('/api/public/ingestion', {
         batch: [{
-          id: `trace-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          id: `event-trace-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
           type: 'trace-create',
           timestamp: new Date(safeEvent.timestamp as number).toISOString(),
           body: {
+            id: traceId,
             name: `${safeEvent.stage}/${safeEvent.provider}`,
             userId: safeEvent.userId ? '[redacted]' : undefined,
             metadata: {
@@ -93,6 +114,7 @@ export function createLangfuseHooks(config: LangfuseConfig): Partial<GatewayHook
 
     onRequestEnd: (event) => {
       const safeEvent = redactEvent(event);
+      const traceId = langfuseTraceId(safeEvent as Record<string, unknown>);
       post('/api/public/ingestion', {
         batch: [{
           id: `span-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -100,7 +122,7 @@ export function createLangfuseHooks(config: LangfuseConfig): Partial<GatewayHook
           timestamp: new Date(safeEvent.timestamp as number).toISOString(),
           body: {
             name: `${safeEvent.stage}/${safeEvent.provider}`,
-            traceId: `trace-${safeEvent.timestamp}-redacted`,
+            traceId,
             startTime: new Date((safeEvent.timestamp as number) - (safeEvent.latencyMs as number || 0)).toISOString(),
             endTime: new Date(safeEvent.timestamp as number).toISOString(),
             metadata: {
