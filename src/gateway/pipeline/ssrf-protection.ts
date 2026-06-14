@@ -41,6 +41,21 @@ const NORMALIZED_BLOCKED_HOSTS = new Set(SSRF_BLOCKED_HOSTS.map((host) => host.t
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '0:0:0:0:0:0:0:1']);
 const DNS_SKIP_SUFFIXES = ['.test', '.example', '.invalid'];
 
+/** Only these URL schemes are ever permitted for an outbound fetch (#657).
+ *  Everything else — `ftp:`, `gopher:`, `data:`, `file:`, `dict:`, `ws:` … — is
+ *  an SSRF / local-read vector and is rejected up front, regardless of host. */
+export const ALLOWED_URL_SCHEMES = new Set(['http:', 'https:']);
+
+/** True when the URL's scheme is in the http(s) allowlist. Parse failures and
+ *  non-string input fail closed (return false). */
+export function isAllowedScheme(urlStr: string): boolean {
+  try {
+    return ALLOWED_URL_SCHEMES.has(new URL(urlStr).protocol.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 function normalizeHost(host: string): string {
   let normalized = host.trim().toLowerCase();
   if (normalized.startsWith('[') && normalized.endsWith(']')) {
@@ -156,29 +171,45 @@ function isBlockedHost(host: string, allowLoopback = false): boolean {
   return false;
 }
 
-function shouldSkipDnsResolution(host: string): boolean {
+function shouldSkipDnsResolution(host: string, resolveDotless = false): boolean {
   const normalized = normalizeHost(host);
   if (isIP(normalized) !== 0) return true;
-  if (!normalized.includes('.')) return true;
+  // Single-label hosts (e.g. `etcd`, no dot) normally skip resolution, but a
+  // search-domain can still expand them to a private IP (#655). In strict mode
+  // we resolve them too; only `.test`/`.example`/`.invalid` stay skipped.
+  if (!resolveDotless && !normalized.includes('.')) return true;
   return DNS_SKIP_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
 }
 
-async function resolvesToBlockedAddress(host: string, allowLoopback = false): Promise<boolean> {
+interface ResolveOptions {
+  allowLoopback?: boolean;
+  /** Block on DNS lookup failure rather than allowing the connect (#659). */
+  failClosed?: boolean;
+  /** Resolve single-label (dot-less) hostnames too (#655). */
+  resolveDotless?: boolean;
+}
+
+async function resolvesToBlockedAddress(host: string, opts: boolean | ResolveOptions = false): Promise<boolean> {
+  const { allowLoopback = false, failClosed = false, resolveDotless = false } =
+    typeof opts === 'boolean' ? { allowLoopback: opts } : opts;
   const normalized = normalizeHost(host);
-  if (shouldSkipDnsResolution(normalized)) return false;
+  if (shouldSkipDnsResolution(normalized, resolveDotless)) return false;
   try {
     const records = await lookup(normalized, { all: true, verbatim: true });
+    // An empty record set is suspicious under fail-closed (treat as blocked).
+    if (failClosed && records.length === 0) return true;
     return records.some((record) => isBlockedHost(record.address, allowLoopback));
   } catch {
-    return false;
+    return failClosed;
   }
 }
 
-/** Return true if the URL points to a private/internal/metadata address. */
+/** Return true if the URL points to a private/internal/metadata address, or
+ *  uses a scheme outside the http(s) allowlist (#657). */
 export function isPrivateUrl(urlStr: string): boolean {
   try {
     const url = new URL(urlStr);
-    if (url.protocol === 'file:') return true;
+    if (!ALLOWED_URL_SCHEMES.has(url.protocol.toLowerCase())) return true;
     return isBlockedHost(url.hostname);
   } catch {
     return true;
@@ -189,7 +220,7 @@ export function isPrivateUrl(urlStr: string): boolean {
 export async function isPrivateUrlResolved(urlStr: string): Promise<boolean> {
   try {
     const url = new URL(urlStr);
-    if (url.protocol === 'file:') return true;
+    if (!ALLOWED_URL_SCHEMES.has(url.protocol.toLowerCase())) return true;
     if (isBlockedHost(url.hostname)) return true;
     return resolvesToBlockedAddress(url.hostname);
   } catch {
@@ -204,6 +235,12 @@ export function validateEndpointUrl(urlStr: string): void {
     url = new URL(urlStr);
   } catch {
     throw new Error(`Invalid URL: ${urlStr}`);
+  }
+
+  // Positive scheme allowlist (#657): reject ftp:/gopher:/data:/file:/… before
+  // any host inspection so a non-http(s) scheme can never reach a fetch.
+  if (!ALLOWED_URL_SCHEMES.has(url.protocol.toLowerCase())) {
+    throw new Error(`SSRF blocked: scheme ${url.protocol} is not allowed (http/https only)`);
   }
 
   const host = normalizeHost(url.hostname);
@@ -222,6 +259,20 @@ export async function validateEndpointUrlResolved(urlStr: string): Promise<void>
   const host = normalizeHost(url.hostname);
   if (await resolvesToBlockedAddress(host)) {
     throw new Error(`SSRF blocked: ${host} resolves to a private/internal address`);
+  }
+}
+
+/** Strict, fail-closed resolved validator for untrusted URLs (#655, #659).
+ *  Unlike {@link validateEndpointUrlResolved} this BLOCKS on a DNS lookup
+ *  failure (rather than allowing the connect) and resolves dot-less hostnames
+ *  too, closing the search-domain-to-private bypass. Use for any URL that is
+ *  influenced by request/config input. */
+export async function validateEndpointUrlResolvedStrict(urlStr: string): Promise<void> {
+  validateEndpointUrl(urlStr);
+  const url = new URL(urlStr);
+  const host = normalizeHost(url.hostname);
+  if (await resolvesToBlockedAddress(host, { failClosed: true, resolveDotless: true })) {
+    throw new Error(`SSRF blocked: ${host} resolves to a private/internal address (or did not resolve)`);
   }
 }
 

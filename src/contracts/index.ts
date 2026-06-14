@@ -16,6 +16,69 @@
 
 import { z } from 'zod';
 
+// ── SSRF-safe URL helper (#652) ──────────────────────────────────────────────
+//
+// `z.string().url()` accepts `http://169.254.169.254/` and `file:///etc/passwd`.
+// Several request fields (meetingUrl, page/stream URLs) are forwarded to a
+// server-side fetch downstream, so a private/metadata/non-http host is an SSRF
+// vector. This is a *pure, synchronous, dependency-free* host check kept inline
+// so the contracts entry point stays free of the `node:dns` SSRF module — it
+// rejects only genuinely-unsafe targets, so legitimate public URLs (the only
+// valid meeting URLs) still pass.
+
+/** Only http/https are accepted; ftp:/gopher:/data:/file: are SSRF/local-read vectors. */
+const SSRF_SAFE_SCHEMES = new Set(['http:', 'https:']);
+
+/** Literal private / loopback / link-local / metadata host forms, matched on the
+ *  raw hostname. DNS-name resolution is intentionally NOT done here (that needs
+ *  the async resolver in src/gateway/pipeline/ssrf-protection.ts); this is the
+ *  cheap synchronous first line that rejects the obvious literals. */
+const SSRF_PRIVATE_HOST_PATTERNS: RegExp[] = [
+  /^localhost$/i,
+  /\.localhost$/i,
+  /^127\./,
+  /^10\./,
+  /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./,
+  /^169\.254\./, // link-local + cloud metadata 169.254.169.254
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, // carrier-grade NAT
+  /^0\./,
+  /^(0x[0-9a-f]+|\d{8,10})$/i, // decimal / hex IPv4 (e.g. 2130706433 = 127.0.0.1)
+  /^::1$/i,
+  /^0:0:0:0:0:0:0:1$/i,
+  /^::$/i,
+  /^fe80:/i,
+  /^fc[0-9a-f]{2}:/i,
+  /^fd[0-9a-f]{2}:/i,
+  /^metadata\.google/i,
+];
+
+/** True when `urlStr` parses, uses http(s), and does not target an obvious
+ *  private/metadata/loopback literal. Exported for reuse by request handlers. */
+export function isSsrfSafeUrl(urlStr: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    return false;
+  }
+  if (!SSRF_SAFE_SCHEMES.has(url.protocol.toLowerCase())) return false;
+  let host = url.hostname.trim().toLowerCase().replace(/\.+$/, '');
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  if (!host) return false;
+  return !SSRF_PRIVATE_HOST_PATTERNS.some((re) => re.test(host));
+}
+
+/** A `z.string()` schema that is a syntactically valid http(s) URL AND not an
+ *  obvious SSRF target. Drop-in replacement for `z.string().url()` on any field
+ *  whose value is fetched server-side. */
+export const SsrfSafeUrlSchema = z
+  .string()
+  .url()
+  .refine((u) => isSsrfSafeUrl(u), {
+    message: 'URL must be a public http(s) address (private/metadata/loopback hosts are blocked)',
+  });
+
 // ── Speech Pipeline ──────────────────────────────────────────────────────────
 
 export const SpeechQuerySchema = z.object({
@@ -178,7 +241,7 @@ export const BotDeployRequestSchema = z.object({
 });
 
 export const BotJoinRequestSchema = z.object({
-  meetingUrl: z.string().url(),
+  meetingUrl: SsrfSafeUrlSchema,
   botName: z.string().min(1).max(100).optional(),
   source: z.string().min(2).max(5).optional(),
   target: z.string().min(2).max(5).optional(),
@@ -262,7 +325,7 @@ export const LabsFlagsRequestSchema = z.object({}).passthrough();
 // ── Recall ───────────────────────────────────────────────────────────────────
 
 export const RecallJoinRequestSchema = z.object({
-  meetingUrl: z.string().url(),
+  meetingUrl: SsrfSafeUrlSchema,
   botName: z.string().min(1).max(100).optional(),
 });
 
@@ -273,11 +336,16 @@ export const RecallWebhookRequestSchema = z.object({
 
 // ── Avatar ───────────────────────────────────────────────────────────────────
 
+/** Upper bound on a base64-encoded audio field (#674). ~12 MB of base64 text ≈
+ *  ~9 MB decoded — comfortably above any real reference clip, but bounded so a
+ *  huge per-field blob can't bypass the whole-body size limit. */
+export const MAX_AVATAR_AUDIO_CHARS = 12_000_000;
+
 export const AvatarSpeakRequestSchema = z.object({
   text: z.string().min(1).max(4096).optional(),
   voice: z.string().max(50).optional(),
   lang: z.string().max(10).optional(),
-  audio: z.string().optional(), // base64-encoded audio
+  audio: z.string().max(MAX_AVATAR_AUDIO_CHARS).optional(), // base64-encoded audio
   visemes: z.array(z.number()).optional(),
   vtimes: z.array(z.number()).optional(),
   vdurations: z.array(z.number()).optional(),

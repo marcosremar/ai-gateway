@@ -9,6 +9,8 @@
  * Uses local keyword matching + optional external moderation API.
  */
 
+import { z } from 'zod';
+
 export interface GuardrailConfig {
   /** Enable/disable guardrails */
   enabled: boolean;
@@ -53,6 +55,28 @@ export interface GuardrailOptions {
   filters?: Partial<GuardrailConfig['filters']>;
   /** Skip guardrails for this request */
   skip?: boolean;
+  /** Also match against a de-obfuscated copy of the text (#680): collapse
+   *  inter-letter spacing/punctuation and map common leetspeak so `k i l l`
+   *  and `k1ll` still trip the keyword filter. Opt-in (default off) — best
+   *  effort, NOT a substitute for an external moderation API. */
+  deobfuscate?: boolean;
+}
+
+/**
+ * Normalize text for obfuscation-resistant keyword matching (#680). Lowercases,
+ * maps common leetspeak digits/symbols to letters, and removes separators
+ * (spaces, dots, dashes, underscores) that are used to break up keywords. This
+ * is intentionally aggressive and lossy — only used as an *additional* matching
+ * pass behind the `deobfuscate` opt-in, never as the sole/primary check.
+ */
+export function normalizeForMatching(text: string): string {
+  const leet: Record<string, string> = {
+    '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '@': 'a', '$': 's', '!': 'i',
+  };
+  return text
+    .toLowerCase()
+    .replace(/[013457@$!]/g, (c) => leet[c] ?? c)
+    .replace(/[\s._-]+/g, '');
 }
 
 // Built-in keyword patterns for each category
@@ -119,11 +143,14 @@ export function checkContent(
   }
 
   const textLower = text.toLowerCase();
+  // #680: opt-in de-obfuscated haystack (separators stripped, leetspeak mapped).
+  // Built only when requested so default behavior/confidence math is unchanged.
+  const textDeobfuscated = options?.deobfuscate ? normalizeForMatching(text) : null;
   const triggeredCategories: string[] = [];
   const allMatches: string[] = [];
-  
+
   // Determine which filters to check
-  const filtersToCheck = options?.filters 
+  const filtersToCheck = options?.filters
     ? { ...config.filters, ...options.filters }
     : config.filters;
 
@@ -142,7 +169,12 @@ export function checkContent(
       // or "hate" in "whatever" where there's no leading word boundary.
       const escaped = pattern.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const re = new RegExp(`\\b${escaped}`, 'i');
-      if (re.test(textLower)) {
+      // The de-obfuscated pass strips separators, so word boundaries no longer
+      // apply there — match the (already separator-free) keyword as a substring.
+      const deobfKeyword = textDeobfuscated ? normalizeForMatching(pattern) : '';
+      const hit = re.test(textLower) ||
+        (textDeobfuscated !== null && deobfKeyword.length > 0 && textDeobfuscated.includes(deobfKeyword));
+      if (hit) {
         triggeredCategories.push(category);
         allMatches.push(pattern);
         break; // Only flag category once
@@ -279,6 +311,52 @@ export function createGuardrailMiddleware(config: GuardrailConfig) {
       return checkContent(text, config, options);
     },
   };
+}
+
+/**
+ * Zod schema for operator-supplied guardrail config (#685 sibling). Validates
+ * the `action` enum and filter/threshold shapes so a malformed config fails
+ * loud instead of silently degrading to `allow`. Pure validator, opt-in.
+ */
+export const GuardrailConfigSchema = z.object({
+  enabled: z.boolean(),
+  filters: z
+    .object({
+      hate: z.boolean().optional(),
+      harassment: z.boolean().optional(),
+      self_harm: z.boolean().optional(),
+      sexual: z.boolean().optional(),
+      violence: z.boolean().optional(),
+    })
+    .default({}),
+  action: z.enum(['block', 'audit', 'allow']),
+  customKeywords: z.array(z.string().min(1)).optional(),
+  confidenceThreshold: z.number().min(0).max(100).optional(),
+});
+
+export type GuardrailConfigValidation =
+  | { ok: true; config: GuardrailConfig }
+  | { ok: false; errors: string[] };
+
+/** Validate a candidate guardrail config; discriminated result, never throws. */
+export function validateGuardrailConfig(input: unknown): GuardrailConfigValidation {
+  const parsed = GuardrailConfigSchema.safeParse(input);
+  if (parsed.success) return { ok: true, config: parsed.data as GuardrailConfig };
+  return {
+    ok: false,
+    errors: parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`),
+  };
+}
+
+/**
+ * Coerce an untrusted guardrail `action` to a valid value, falling back to a
+ * SAFE default (#685 companion). Unknown/typo'd → fallback, not silent allow.
+ */
+export function coerceGuardrailAction(
+  value: unknown,
+  fallback: 'block' | 'audit' | 'allow' = 'block',
+): 'block' | 'audit' | 'allow' {
+  return value === 'block' || value === 'audit' || value === 'allow' ? value : fallback;
 }
 
 // Export default config

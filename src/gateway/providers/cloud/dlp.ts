@@ -8,6 +8,8 @@
  * - Compliance support (GDPR, HIPAA, PCI DSS)
  */
 
+import { z } from 'zod';
+
 export interface DLPConfig {
   /** Enable/disable DLP */
   enabled: boolean;
@@ -72,6 +74,9 @@ export interface DLPOptions {
   skip?: boolean;
   /** Return original values (for debugging) */
   includeOriginal?: boolean;
+  /** Gate credit-card matches behind a Luhn checksum to cut false positives
+   *  on order IDs / timestamps (#681). Opt-in (default off for back-compat). */
+  luhnValidate?: boolean;
 }
 
 // Built-in regex patterns
@@ -102,6 +107,31 @@ const PATTERNS = {
 function maskValue(value: string): string {
   if (value.length <= 4) return '****';
   return '*'.repeat(value.length - 4) + value.slice(-4);
+}
+
+/**
+ * Luhn (mod-10) checksum validation (#681). A random 13-16 digit run passes
+ * Luhn only ~10% of the time, so gating credit-card matches behind this cuts
+ * false positives on order IDs / timestamps sharply. Non-digit separators
+ * (spaces, dashes) are ignored.
+ *
+ * @returns true iff the candidate's digits form a valid Luhn sequence.
+ */
+export function luhnCheck(candidate: string): boolean {
+  const digits = candidate.replace(/[\s-]/g, '');
+  if (!/^\d{12,19}$/.test(digits)) return false;
+  let sum = 0;
+  let dbl = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (dbl) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    dbl = !dbl;
+  }
+  return sum % 10 === 0;
 }
 
 /**
@@ -167,6 +197,12 @@ export function detectPII(
       // Guard against zero-width matches (e.g. /a*/g) which would otherwise
       // pin lastIndex and spin forever.
       if (value.length === 0) { regex.lastIndex++; continue; }
+
+      // #681: when Luhn gating is requested, drop credit-card "matches" whose
+      // digits aren't a valid card number (cuts order-ID/timestamp FPs).
+      if (options?.luhnValidate && patternType === 'creditCard' && !luhnCheck(value)) {
+        continue;
+      }
 
       detectedTypes.push(patternType);
       matches.push({
@@ -237,6 +273,32 @@ export function detectPII(
     matches,
     action,
   };
+}
+
+/**
+ * Redact detected PII in-place (#682). Returns the text with every match
+ * replaced by its masked form, so a request can proceed without leaking PII to
+ * the upstream provider instead of being hard-blocked. Replacements are applied
+ * right-to-left so earlier match offsets stay valid.
+ *
+ * @returns `{ text, result }` — the redacted text plus the underlying DLPResult.
+ */
+export function redactPII(
+  text: string,
+  config: DLPConfig = DEFAULT_DLP_CONFIG,
+  options?: DLPOptions,
+): { text: string; result: DLPResult } {
+  // Force detection on so redaction works even when the config is flag/allow.
+  const result = detectPII(text, { ...config, enabled: true, action: config.action }, options);
+  if (result.matches.length === 0) return { text, result };
+
+  let out = text;
+  const ordered = [...result.matches].sort((a, b) => b.start - a.start);
+  for (const m of ordered) {
+    if (m.start < 0 || m.end > out.length || m.start >= m.end) continue;
+    out = out.slice(0, m.start) + maskValue(out.slice(m.start, m.end)) + out.slice(m.end);
+  }
+  return { text: out, result };
 }
 
 /**
@@ -372,6 +434,65 @@ export function createComplianceConfig(framework: 'gdpr' | 'hipaa' | 'pci'): DLP
     patterns,
     action: 'block',
   };
+}
+
+/**
+ * Zod schema for operator-supplied DLP config (#685). Without it a malformed
+ * `action` (typo'd `"bock"`, etc.) or a bad custom pattern is trusted verbatim
+ * and can silently degrade the filter. Pure validator — no I/O, opt-in.
+ */
+export const DLPConfigSchema = z.object({
+  enabled: z.boolean(),
+  patterns: z
+    .object({
+      creditCard: z.boolean().optional(),
+      ssn: z.boolean().optional(),
+      email: z.boolean().optional(),
+      phone: z.boolean().optional(),
+      ipAddress: z.boolean().optional(),
+      dateOfBirth: z.boolean().optional(),
+    })
+    .default({}),
+  customPatterns: z
+    .array(
+      z.object({
+        name: z.string().min(1),
+        pattern: z.string().min(1).max(1000),
+        description: z.string().optional(),
+      }),
+    )
+    .optional(),
+  action: z.enum(['flag', 'block', 'allow']),
+  minMatches: z.number().int().positive().optional(),
+});
+
+export type DLPConfigValidation =
+  | { ok: true; config: DLPConfig }
+  | { ok: false; errors: string[] };
+
+/**
+ * Validate a candidate DLP config. Returns a discriminated result instead of
+ * throwing so callers can reject or fall back to a safe default.
+ */
+export function validateDLPConfig(input: unknown): DLPConfigValidation {
+  const parsed = DLPConfigSchema.safeParse(input);
+  if (parsed.success) return { ok: true, config: parsed.data as DLPConfig };
+  return {
+    ok: false,
+    errors: parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`),
+  };
+}
+
+/**
+ * Coerce an untrusted DLP `action` to a valid value (#685 companion), falling
+ * back to a SAFE default. An unknown/typo'd action returns the fallback rather
+ * than silently behaving as `allow`.
+ */
+export function coerceDLPAction(
+  value: unknown,
+  fallback: 'flag' | 'block' | 'allow' = 'flag',
+): 'flag' | 'block' | 'allow' {
+  return value === 'flag' || value === 'block' || value === 'allow' ? value : fallback;
 }
 
 // Export default config
