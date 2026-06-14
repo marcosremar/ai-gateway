@@ -1,0 +1,44 @@
+# 07 — Security, Auth & Input Validation — Wave 4 (implemented)
+
+Continuation of waves 1–3 (`07-security.test.ts`, `-w2`, `-w3`). All items are
+**localized primitives** — no previously-dead middleware (RBAC / CSRF /
+rate-limiter / DLP) was wired into the live server path, the GPU-token wire
+format is unchanged (sign still uses the current secret; verify gained an
+**optional second key**, identical bytes on the wire), and the vault on-disk blob
+format is unchanged. Tests: `__tests__/opt/07-security-w4.test.ts` (50 tests, all
+passing, unit-only, no network). Full opt suite re-run green (42 files / 1410
+tests). Scoped `tsc --noEmit --strict` on every edited file: 0 errors.
+
+## Implemented
+
+| ID / area | Item | File(s) | What changed |
+|-----------|------|---------|--------------|
+| #604 | Constant-time string compare primitive | `src/middleware/sanitization.ts` | Added `constantTimeEqual(a, b)` — hashes both operands to fixed-width SHA-256 digests, then `timingSafeEqual`, so the compare time is independent of input length/content (a bare length check is itself a length oracle). Does **not** throw on differing lengths (the raw `timingSafeEqual` does). Shared primitive so call sites stop re-rolling pad-and-compare. |
+| #650 / #696 | `redactSecrets` for consistent log masking | `src/middleware/sanitization.ts` | Added `redactSecrets(line)` — replaces provider-prefixed keys (`sk-`, `gsk_`, `xai-`, …), bare 32+ hex (HMAC/master-key shaped), and long base64url runs with `maskApiKey()` so the **same** masking policy applies everywhere logs/audit lines are produced. |
+| #619 | GPU-token rotation overlap (verify-side only) | `src/auth/gpu-token.ts` | `verifyGpuToken` now also accepts a token signed by `GPU_ACCESS_SECRET_PREVIOUS` (≥32 chars, else ignored). Lets an operator rotate `GPU_ACCESS_SECRET` without instantly invalidating in-flight tokens, then drop PREVIOUS after the 60s TTL cycles. **Wire format byte-identical** — `signGpuToken` always signs with the current secret; both compares run constant-time. |
+| #650 | Vault secret-access audit hook | `src/vault/vault.ts` | `Vault` ctor now accepts `{ onAccess }` (3rd arg is `number \| VaultOptions`, **back-compat** with the old numeric `keyVersion`). Emits a **metadata-only** `VaultAccessEvent` (`op`, `name`, `ok`, `at`, `reason`) on every store/retrieve/delete — never the plaintext/ciphertext. A throwing sink is swallowed so audit wiring can't break secret access. Self-contained: the caller chooses the sink (no cross-module decision). |
+| #646-ext | Vault blob field-shape validation | `src/vault/vault.ts` | `retrieve` now shape-checks the parsed blob (`iv`/`ciphertext`/`tag` must be non-empty hex) **before** `decrypt`, surfacing `corrupt (missing/invalid iv, ciphertext, or tag)` instead of a cryptic crypto error that looks identical to a wrong-key failure. `decrypt()` itself is unchanged. |
+| #647 | `initAndScrubVaultFromEnv` convenience | `src/vault/vault-singleton.ts` | One-call helper = `initVaultFromEnv()` + `clearVaultMasterKeyFromEnv()`. Closes the foot-gun of forgetting the scrub (which leaves the raw key in `/proc/self/environ` for the process lifetime). Scrub happens only on a successful init. |
+| #698 | Nonce-based CSP builder | `src/middleware/security-headers.ts`, `server/middleware/security-headers.ts` | Added `buildContentSecurityPolicy({ styleNonce?, scriptNonce? })` — a style/script nonce **replaces** `'unsafe-inline'` for that directive (no fallback). `applySecurityHeaders(res, { styleNonce? })` rebuilds the per-response CSP. The static `SECURITY_HEADERS` constant is **untouched** (wave-1/2/3 asserted the `'unsafe-inline'` default). Both header copies updated byte-identically (drift rule). |
+| #686 | Cost-weighted per-key rate limit | `src/middleware/per-key-rate-limit.ts` | `check(apiKey, { cost })` — a single expensive request (speech/STT→LLM→TTS) can consume >1 quota unit so one key can't drain the shared GPU/token budget under a flat request count. Default `cost = 1` (unchanged); `cost < 1`/non-finite clamps to 1. **Primitive only — not wired into the live server.** |
+| #664 | `clampNumber` cost-cap helper | `src/input-validator/index.ts` | `clampNumber(value, { min, max })` — clamps `max_tokens`-style values to a ceiling instead of rejecting the whole request; non-finite returns `min` (or 0) so `NaN`/`Infinity` never propagate. |
+| #662 / #663 | `BoundedString` / `BoundedArray` schema helpers | `src/input-validator/index.ts` | `Schemas.BoundedString(max, { min? })` and `Schemas.BoundedArray(item, max, { min? })` — reusable bounded variants a schema can drop in to cap chat `content` length / `messages` count without editing `src/contracts` (out of scope). |
+| — | contains-code `any`-mode threshold | `src/gateway/guardrails/rules/contains-code.ts` | `language: 'any'` now requires **≥2 structural markers within ONE language** (same threshold as a specific language). The old single-`.some()` flagged code on a lone keyword (e.g. "SELECT"/"import" in prose) — a noisy false positive. |
+| — | regex rule pattern-length cap | `src/gateway/guardrails/rules/regex-match.ts` | Rejects an operator-supplied `pattern` >4000 chars (or non-string) before compiling — a giant pattern is a separate amplification vector from a long input (compile + match cost scale with pattern size). |
+| #685 | `coerceGuardrailAction` (fail-closed) | `src/gateway/guardrails/config-validation.ts`, `index.ts` | Companion to wave-3's validator: coerces an untrusted `action` to a valid `GuardrailAction`, falling back to `'block'` (fail-closed) on a typo/unknown value (`"adit"`, `"allow"`, `undefined`) instead of the engine silently degrading to allow. |
+| — | CSRF nonce min-length guard | `src/middleware/csrf.ts` | `verifyCsrfToken` rejects a token whose nonce is <16 chars (a real nonce is 43) before recomputing the HMAC — structural defense against degenerate/forged tokens. Real generated tokens are unaffected. |
+| — | `safeParseInt` strict mode for any radix | `src/null-safety/index.ts` | Strict mode previously only built a validity pattern for radix 10/16 — for any other base it silently fell back to lenient `parseInt`. Now builds the valid digit set from the radix (2–36), so `{ strict: true }` actually enforces validity for every base; out-of-range radix → NaN. Non-strict default unchanged. |
+| #612 | `isDevBypassActive` predicate | `src/auth-middleware/index.ts` | Extracted a pure predicate (`allowDevBypass && NODE_ENV==='development'`) so a startup self-check / `/health` can explicitly flag the dangerous "auth is OFF" state, and it's unit-testable. `requireAuth` behavior unchanged (now calls the predicate). |
+
+## Deferred (intentionally out of scope this wave)
+
+| ID | Item | Why deferred |
+|----|------|--------------|
+| #620, #621, #622 | GPU-token `kid` / `aud` / `jti` claims | Change the signed token **wire format** → migration risk (the #619 PREVIOUS-secret support added here does NOT, hence it was safe). |
+| #641, #642 | Vault AAD binding / version-keyed decrypt | Change the on-disk **blob format** → migration risk. |
+| #618, #626, #628–#639, #676, #677, #682, #683, #686 (wiring), #687–#696 | Wire dead middleware/handlers into the live path; GPU-token server verify; Recall webhook; WS/per-key/global/spend limiters; DLP defaults & redaction; ReDoS-safe custom-pattern engine | Task constraint: **do not** wire dead middleware into the live server (record wiring deferred). #686 was landed as a cost-weighting **primitive** only. |
+| #601–#603, #605–#609, #616, #617, #697, #700 | HTTP RBAC wiring, localhost/proxy-trust, CORS local-origin regex, 404 endpoint enumeration, WS broadcast host masking | Live in `server/ws/http-api-server.ts` / `server/ws-server.ts` / `src/gateway/proxy/server.ts` — **outside the ownership scope** for this wave. |
+| #652–#661 | SSRF hardening (DNS-rebinding, IPv6 allowlist, fail-closed on lookup error) | Lives in `src/gateway/pipeline/ssrf-protection.ts` — **outside ownership scope**. |
+| #662–#664, #672, #674 (in `src/contracts`) | Apply the bounds directly to `ChatMessageSchema` / `messages` / `max_tokens` / content-type | The schemas live in `src/contracts/index.ts` (outside scope). Reusable `BoundedString`/`BoundedArray`/`clampNumber` primitives were added in `src/input-validator` instead, ready for a contracts-owning wave to adopt. |
+| #614, #627, #658 | `src/modules/` & `src/auth/vault/` duplicate-stack collapse | Cross-cutting drift cleanup (re-export consolidation / CI byte-identical check) beyond a localized primitive; risk of touching aliased import paths. Deferred. |
+| #677–#685 (in `src/gateway/providers/cloud/dlp.ts`) | DLP defaults / Luhn-in-DLP / redaction mode | The cloud DLP logic (re-exported by `src/providers/dlp.ts`) lives in `src/gateway/providers/cloud/` — **outside ownership scope**. The `luhnCheck` primitive (w3) and `coerceGuardrailAction` (w4) are the in-scope companions. |
