@@ -92,7 +92,7 @@ export function createLangfuseHooks(config: LangfuseConfig): Partial<GatewayHook
   return {
     onRequestStart: (event) => {
       const safeEvent = redactEvent(event);
-      const traceId = langfuseTraceId(safeEvent as Record<string, unknown>);
+      const traceId = langfuseTraceId(safeEvent as unknown as Record<string, unknown>);
       post('/api/public/ingestion', {
         batch: [{
           id: `event-trace-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -114,7 +114,7 @@ export function createLangfuseHooks(config: LangfuseConfig): Partial<GatewayHook
 
     onRequestEnd: (event) => {
       const safeEvent = redactEvent(event);
-      const traceId = langfuseTraceId(safeEvent as Record<string, unknown>);
+      const traceId = langfuseTraceId(safeEvent as unknown as Record<string, unknown>);
       post('/api/public/ingestion', {
         batch: [{
           id: `span-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
