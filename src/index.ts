@@ -1,5 +1,9 @@
 // @parle/ai-gateway — Unified AI Gateway + GPU autoscaler
 
+// Normalize provider credential env-var aliases (e.g. TENSORDOCK_API_TOKEN ↔
+// TENSORDOCK_API_KEY) before any consumer reads them. Side-effect import.
+import './env-aliases';
+
 // ── HTTP Client SDK ─────────────────────────────────────────────────────────
 export { GatewayHttpClient, GatewayHttpError, CircuitOpenError as HttpCircuitOpenError } from '../sdk/node';
 export { CircuitBreaker as HttpCircuitBreaker } from '../sdk/node';

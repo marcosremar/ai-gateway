@@ -1,6 +1,9 @@
 // ── BabelCast Gateway — Configuration ───────────────────────────────────────
 // Env vars, GPU allowlists, image catalog, startup validation.
 
+// Normalize provider credential env-var aliases (TENSORDOCK_API_TOKEN ↔
+// TENSORDOCK_API_KEY) before any handler reads them. Side-effect import, early.
+import '../src/env-aliases';
 import { createLogger } from '../src/logger';
 import {
   listImages as _listImages,
