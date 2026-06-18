@@ -283,7 +283,7 @@ describe('BootOrchestrator', () => {
       },
     });
 
-    const result = await orchestrator.triggerGpuBoot(tierConfig('runpod'), 0, 'user-1', 2);
+    const result = await orchestrator.triggerGpuBoot(tierConfig('runpod'), 0, 'user-1', 4);
     expect(result.ok).toBe(false);
     expect(result.reason).toContain('Max retry');
   });
