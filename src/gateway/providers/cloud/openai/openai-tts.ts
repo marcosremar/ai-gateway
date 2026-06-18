@@ -6,7 +6,9 @@
 
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, TTSAudioFormat, TTSProvider, TTSRequest, TTSResponse, VoiceInfo } from '../types';
-import { OPENAI_TTS_MODELS, OPENAI_VOICES } from './models';
+import { OPENAI_TTS_MODELS, OPENAI_VOICES, getVoicesForModel } from './models';
+
+const DEFAULT_TTS_MODEL = 'gpt-4o-mini-tts-2025-03-20';
 
 const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   mp3: 'audio/mpeg',
@@ -20,11 +22,6 @@ const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
 export class OpenAITTSProvider implements TTSProvider {
   readonly providerId: ProviderId = 'openai';
   private client: OpenAI | null = null;
-  private readonly voiceIds: Set<string>;
-
-  constructor() {
-    this.voiceIds = new Set(OPENAI_VOICES.map(v => v.id));
-  }
 
   private getClient(): OpenAI {
     if (!this.client) {
@@ -35,10 +32,14 @@ export class OpenAITTSProvider implements TTSProvider {
     return this.client;
   }
 
-  /** Validate voice against known OpenAI voices; fallback to 'coral' for unknown names. */
-  private resolveVoice(requested?: string): string {
-    if (requested && this.voiceIds.has(requested)) return requested;
-    return 'nova';
+  /** Validate the requested voice against the voices the *target model* actually
+   *  supports; fall back to 'coral' (valid on every OpenAI TTS model) otherwise.
+   *  Voices like ballad/verse/marin/cedar only exist on gpt-4o-mini-tts — sending
+   *  them to tts-1 / tts-1-hd is a 400, so this must be per-model, not the union
+   *  of all voice ids. */
+  private resolveVoice(requested: string | undefined, model: string): string {
+    if (requested && getVoicesForModel(model).some(v => v.id === requested)) return requested;
+    return 'coral';
   }
 
   withApiKey(apiKey: string): OpenAITTSProvider {
@@ -55,10 +56,11 @@ export class OpenAITTSProvider implements TTSProvider {
     const client = this.getClient();
     const format = request.responseFormat || 'mp3';
 
+    const model = request.model || DEFAULT_TTS_MODEL;
     const params: OpenAI.Audio.SpeechCreateParams = {
-      model: request.model || 'gpt-4o-mini-tts-2025-03-20',
+      model,
       input: request.input,
-      voice: this.resolveVoice(request.voice) as OpenAI.Audio.SpeechCreateParams['voice'],
+      voice: this.resolveVoice(request.voice, model) as OpenAI.Audio.SpeechCreateParams['voice'],
       response_format: format as OpenAI.Audio.SpeechCreateParams['response_format'],
       ...(request.speed && { speed: request.speed }),
       ...(request.instructions && { instructions: request.instructions }),
@@ -73,10 +75,11 @@ export class OpenAITTSProvider implements TTSProvider {
     const client = this.getClient();
     const format = request.responseFormat || 'mp3';
 
+    const model = request.model || DEFAULT_TTS_MODEL;
     const params: OpenAI.Audio.SpeechCreateParams = {
-      model: request.model || 'gpt-4o-mini-tts-2025-03-20',
+      model,
       input: request.input,
-      voice: this.resolveVoice(request.voice) as OpenAI.Audio.SpeechCreateParams['voice'],
+      voice: this.resolveVoice(request.voice, model) as OpenAI.Audio.SpeechCreateParams['voice'],
       response_format: format as OpenAI.Audio.SpeechCreateParams['response_format'],
       ...(request.speed && { speed: request.speed }),
       ...(request.instructions && { instructions: request.instructions }),
