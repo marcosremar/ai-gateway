@@ -590,7 +590,9 @@ describe('7. Watchdog cleans stuck booting tier', () => {
     const poolAfter = autoscaler.getPoolStatus(USER);
     const t0 = poolAfter[0] as IdleTierState;
     expect(t0.state).toBe('idle');
-    expect(t0.unhealthy).toBe(true);
+    // A single stuck boot must NOT mark the tier unhealthy (that only happens
+    // once failCount >= MAX_BOOT_FAILURES) — it gets a cooldown and can retry.
+    expect(t0.unhealthy).toBeFalsy();
     expect(t0.bootFailCount).toBeGreaterThan(0);
   });
 });
