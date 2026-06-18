@@ -10,6 +10,7 @@ import type { Logger } from '../../deps';
 import { fileLifecycleLogger } from './file-lifecycle-logger';
 import { emitHook } from '../../hooks';
 import { cleanupProviderInstance } from './cleanup';
+import { handleBootTimeout } from './boot-timeout';
 import { defaultLogger } from '../../logger';
 
 /** Rate-limit per-user watchdog to 2 min */
@@ -285,24 +286,16 @@ async function runWatchdogForUser(
       await cleanupProviderInstance(tierConfig, registry, `stuck booting tier ${i} (${Math.round(bootingMs / 1000)}s)`);
     }
 
-    const failCount = booting.prevBootFailCount + 1;
-    const newIdle: IdleTierState = {
-      state: 'idle',
-      tierIndex: i,
-      bootFailCount: failCount,
-      unhealthy: true,
-    };
-    tierStates[i] = newIdle;
+    // Route through the shared boot-timeout helper (same path engine.ts and
+    // health-checker.ts use) so a stuck boot gets an exponential cooldown and
+    // only flips the tier to `unhealthy` once failCount >= MAX_BOOT_FAILURES.
+    // The previous inline state hard-coded `unhealthy: true` on the FIRST stuck
+    // boot and set no cooldownUntil, which permanently removed the tier from
+    // autoscaling (tier-selector skips unhealthy tiers) until a gateway restart.
+    const { newState, logEntry } = handleBootTimeout(i, booting, tierConfig, maxBootMs, now, 'watchdog');
+    tierStates[i] = newState;
 
-    void logger.log({
-      userId, tierIndex: i, provider: tierProvider,
-      eventType: 'boot_timeout', durationMs: bootingMs,
-      instanceId: booting.discoveredInstanceId,
-      endpoint: booting.endpoint, trigger: booting.trigger,
-      oldState: 'booting', newState: 'idle',
-      error: `Watchdog: stuck booting for ${Math.round(bootingMs / 1000)}s`,
-      metadata: { failCount, unhealthy: true, source: 'watchdog' },
-    });
+    void logger.log({ userId, ...logEntry });
   }
 
   const changed = tierStates.some((ts, i) => ts.state !== prevStates[i]);
