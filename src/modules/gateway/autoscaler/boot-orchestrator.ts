@@ -213,7 +213,12 @@ export class BootOrchestrator {
     userId: string,
     attempt = 0,
   ): Promise<BootResult> {
-    if (attempt >= 2) return { ok: false, reason: 'Max retry attempts reached' };
+    // Recursion safety net — must agree with the slot-recovery retry cap below
+    // (both read AUTOSCALER_BOOT_RETRY_MAX, default 3). A hard-coded `attempt >= 2`
+    // here used to fire BEFORE that cap, silently making the env var a no-op and
+    // capping retries at 2 regardless of configuration.
+    const maxBootRetries = parseInt(process.env.AUTOSCALER_BOOT_RETRY_MAX || '3', 10);
+    if (attempt > maxBootRetries) return { ok: false, reason: 'Max retry attempts reached' };
 
     // Validate the tier config up front. Without this, missing/invalid fields
     // surface as cryptic errors deep inside the provider client (e.g. "TypeError:
@@ -490,10 +495,9 @@ export class BootOrchestrator {
             this.logger.warn(`[autoscaler] Instance ${cfg.instanceId} gone — retrying with auto-discover`);
           }
           // Cap recursion depth — even with successful delete, prevent infinite loop
-          const MAX_BOOT_RETRIES = parseInt(process.env.AUTOSCALER_BOOT_RETRY_MAX || '3', 10);
-          if (attempt + 1 > MAX_BOOT_RETRIES) {
-            this.logger.error(`[autoscaler] Boot retry depth exceeded (${MAX_BOOT_RETRIES}) for tier ${tierIndex}`);
-            return { ok: false, reason: `${cfg.provider}: max boot retries (${MAX_BOOT_RETRIES}) exceeded` };
+          if (attempt + 1 > maxBootRetries) {
+            this.logger.error(`[autoscaler] Boot retry depth exceeded (${maxBootRetries}) for tier ${tierIndex}`);
+            return { ok: false, reason: `${cfg.provider}: max boot retries (${maxBootRetries}) exceeded` };
           }
           return this.triggerGpuBoot(
             { ...tierConfig, instanceId: undefined, endpoint: undefined },
