@@ -93,8 +93,25 @@ function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: s
           if (clientGone) break;
           const { done, value } = await reader.read();
           if (done) break;
-          // Respect backpressure
-          if (!res.write(value)) await new Promise<void>(r => res.once('drain', r));
+          // Respect backpressure — but race 'drain' against 'close'/'error'.
+          // If the client disconnects while the socket buffer is full, 'drain'
+          // never fires on the destroyed socket, so awaiting it alone would hang
+          // this loop forever and leak the reader + closure. Wake on either and
+          // re-check clientGone.
+          if (!res.write(value)) {
+            await new Promise<void>((resolve) => {
+              const cleanup = () => {
+                res.off('drain', onWake);
+                res.off('close', onWake);
+                res.off('error', onWake);
+              };
+              const onWake = () => { cleanup(); resolve(); };
+              res.once('drain', onWake);
+              res.once('close', onWake);
+              res.once('error', onWake);
+            });
+            if (clientGone) break;
+          }
         }
       } catch {
         // Client disconnected mid-stream — not an error

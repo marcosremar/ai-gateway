@@ -52,4 +52,14 @@ describe('SSRF protection hardening', () => {
     await expect(validateRemoteEndpointResolved('https://gpu-pod.test:8000')).resolves.toBeUndefined();
     expect(lookupMock).not.toHaveBeenCalled();
   });
+
+  it('fails CLOSED when DNS resolution errors (no rebinding/TOCTOU bypass)', async () => {
+    lookupMock.mockRejectedValue(new Error('getaddrinfo ENOTFOUND rebind.example.net'));
+
+    // An unresolvable host cannot be proven safe — treat it as blocked so an
+    // attacker controlling authoritative DNS can't fail the validation lookup
+    // and then have fetch() rebind to a private/metadata address.
+    await expect(isPrivateUrlResolved('https://rebind.example.net/meeting')).resolves.toBe(true);
+    await expect(validateRemoteEndpointResolved('https://rebind.example.net:8000')).rejects.toThrow();
+  });
 });

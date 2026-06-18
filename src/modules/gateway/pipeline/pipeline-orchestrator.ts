@@ -445,9 +445,13 @@ export async function runPipelineOrchestrator(
 
           if (translatedText) ex.setCachedTranslation(sttText, source, target, translatedText, style);
 
-          // Assemble results
+          // Assemble results — iterate up to the highest chunk index, not the
+          // map's size. Chunks are keyed by their real index; a failed TTS chunk
+          // leaves a gap (no entry), so `size` undercounts and would silently
+          // drop every chunk that came after the first failure.
           const allChunks: Buffer[] = [];
-          for (let i = 0; i < orderedChunks.size; i++) {
+          const maxChunkIdx = orderedChunks.size > 0 ? Math.max(...orderedChunks.keys()) : -1;
+          for (let i = 0; i <= maxChunkIdx; i++) {
             const chunk = orderedChunks.get(i);
             if (chunk) allChunks.push(chunk);
           }
