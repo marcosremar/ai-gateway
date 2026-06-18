@@ -66,7 +66,8 @@ function runSpawn(
       if (finished) return;
       finished = true;
       try { proc.kill('SIGTERM'); } catch { /* noop */ }
-      err ? reject(err) : resolve(value ?? '');
+      if (err) reject(err);
+      else resolve(value ?? '');
     };
     const timer = setTimeout(
       () => finish(new Error(`[local-cli:${bin}] timed out after ${timeoutMs}ms`)),
