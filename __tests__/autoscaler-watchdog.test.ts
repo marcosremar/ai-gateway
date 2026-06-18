@@ -18,14 +18,14 @@ function makeReadyState(idx: number, lastHealthyMs = 0): ReadyTierState {
   };
 }
 
-function makeBootingState(idx: number, bootAgoMs = 0): BootingTierState {
+function makeBootingState(idx: number, bootAgoMs = 0, prevBootFailCount = 0): BootingTierState {
   return {
     state: 'booting',
     tierIndex: idx,
     endpoint: `http://gpu${idx}:8000`,
     bootTriggeredAt: Date.now() - bootAgoMs,
     trigger: 'sessions',
-    prevBootFailCount: 0,
+    prevBootFailCount,
   };
 }
 
@@ -114,7 +114,7 @@ describe('runWatchdogCycle', () => {
     expect(client.stopInstance).not.toHaveBeenCalled();
   });
 
-  it('cleans up tiers stuck in booting beyond max boot time', async () => {
+  it('cleans up tiers stuck in booting beyond max boot time (cooldown, not yet unhealthy)', async () => {
     // bootTimeSecs=120 → maxBootMs=240s → stuck at 5min (300s)
     const bootAgoMs = 5 * 60_000;
     const stateMap = new Map([
@@ -127,9 +127,31 @@ describe('runWatchdogCycle', () => {
     // Should have stopped the instance (via cleanupProviderInstance)
     const client = deps.registry.get('runpod')!;
     expect(client.stopInstance).toHaveBeenCalled();
-    // Tier should be set to idle with unhealthy flag
-    expect(stateMap.get('user-1')![0].state).toBe('idle');
-    expect((stateMap.get('user-1')![0] as unknown as IdleTierState).unhealthy).toBe(true);
+    // Tier should be set to idle, fail count bumped, and a cooldown applied so
+    // it can retry later. A single stuck boot must NOT mark the tier unhealthy
+    // (that only happens once failCount >= MAX_BOOT_FAILURES) — otherwise the
+    // tier-selector would drop it from autoscaling until a gateway restart.
+    const idle = stateMap.get('user-1')![0] as unknown as IdleTierState;
+    expect(idle.state).toBe('idle');
+    expect(idle.bootFailCount).toBe(1);
+    expect(idle.unhealthy).toBeFalsy();
+    expect(idle.cooldownUntil).toBeGreaterThan(Date.now());
+  });
+
+  it('marks tier unhealthy only after repeated stuck boots (>= MAX_BOOT_FAILURES)', async () => {
+    // prevBootFailCount=2 → this stuck boot is the 3rd failure (MAX_BOOT_FAILURES).
+    const bootAgoMs = 5 * 60_000;
+    const stateMap = new Map([
+      ['user-1', [makeBootingState(0, bootAgoMs, 2)]],
+    ]);
+    const deps = makeDeps(stateMap);
+
+    await runWatchdogCycle(deps);
+
+    const idle = stateMap.get('user-1')![0] as unknown as IdleTierState;
+    expect(idle.state).toBe('idle');
+    expect(idle.bootFailCount).toBe(3);
+    expect(idle.unhealthy).toBe(true);
   });
 
   it('does not stop tier if still within boot window', async () => {
