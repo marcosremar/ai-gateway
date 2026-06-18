@@ -260,6 +260,12 @@ export async function startDeployLoop(
           ...(extra.onstart ? { onstart: extra.onstart } : {}),
           ...(extra.templateHashId ? { templateHashId: extra.templateHashId } : {}),
           ...(extra.forceSshTunnel ? { forceSshTunnel: extra.forceSshTunnel } : {}),
+          // Vast offer-search knobs — parity with the race deploy path
+          // (gpu-deploy-race.ts). Without these the single-deploy loop silently
+          // dropped requireDirectPort/searchMode/strictFastBoot.
+          ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
+          ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
+          ...(extra.strictFastBoot ? { strictFastBoot: extra.strictFastBoot } : {}),
           // SnapGPU / CRIU options (only used when providerName === 'snapgpu')
           ...(extra.snapgpuPreloadApp ? { snapgpuPreloadApp: extra.snapgpuPreloadApp } : {}),
           ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
