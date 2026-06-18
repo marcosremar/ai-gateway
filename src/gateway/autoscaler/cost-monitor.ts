@@ -550,7 +550,7 @@ export function _resetStaleTracking(): void {
  * Start a background ticker that runs runCostMonitorCycle periodically.
  * Returns a cleanup function.
  *
- * @param intervalMs - defaults to 10 minutes
+ * @param intervalMs - defaults to 5 minutes
  */
 export function startCostMonitorTicker(
   deps: CostMonitorDeps,
