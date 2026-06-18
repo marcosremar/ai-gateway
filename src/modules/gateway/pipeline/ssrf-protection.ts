@@ -170,7 +170,12 @@ async function resolvesToBlockedAddress(host: string, allowLoopback = false): Pr
     const records = await lookup(normalized, { all: true, verbatim: true });
     return records.some((record) => isBlockedHost(record.address, allowLoopback));
   } catch {
-    return false;
+    // Fail CLOSED: if we cannot resolve the host we cannot prove it is safe.
+    // Returning false here ("not blocked") would let an attacker who controls
+    // a domain's authoritative DNS make validation-time lookups fail (timeout /
+    // SERVFAIL) so the SSRF check passes, while the subsequent fetch() resolves
+    // to 169.254.169.254 / 10.x (DNS-rebinding TOCTOU). Treat unresolvable as blocked.
+    return true;
   }
 }
 

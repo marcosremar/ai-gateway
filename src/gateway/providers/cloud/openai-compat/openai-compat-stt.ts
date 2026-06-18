@@ -59,17 +59,24 @@ export class OpenAICompatSTTProvider implements STTProvider {
     const model = request.model || this.config.defaultModel || this.config.models[0]?.id;
     const file = await prepareAudioFile(request.audio);
 
+    // Always prefer verbose_json to get segment-level metadata (no_speech_prob, compression_ratio, avg_logprob)
+    // for hallucination filtering. Only fall back to 'json' for models that don't support it.
+    const responseFormat: 'text' | 'json' | 'verbose_json' =
+      request.responseFormat === 'text' ? 'text'
+        : (model.includes('transcribe') ? 'json' : 'verbose_json');
+
     const params: OpenAI.Audio.TranscriptionCreateParams = {
       file,
       model,
       ...(request.language && { language: request.language }),
       ...(request.prompt && { prompt: request.prompt }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
-      // Always prefer verbose_json to get segment-level metadata (no_speech_prob, compression_ratio, avg_logprob)
-      // for hallucination filtering. Only fall back to 'json' for models that don't support it.
-      response_format: request.responseFormat === 'text' ? 'text'
-        : (model.includes('transcribe') ? 'json' : 'verbose_json'),
-      ...(request.wordTimestamps && this.config.defaultResponseFormat !== 'json' && { timestamp_granularities: ['word'] }),
+      response_format: responseFormat,
+      // `timestamp_granularities` is only accepted alongside response_format
+      // 'verbose_json' — sending it with 'json'/'text' makes OpenAI reject the
+      // whole request (HTTP 400). Gate it on the *effective* format, not an
+      // unrelated static config field.
+      ...(request.wordTimestamps && responseFormat === 'verbose_json' && { timestamp_granularities: ['word'] }),
     };
 
     const t0 = Date.now();
