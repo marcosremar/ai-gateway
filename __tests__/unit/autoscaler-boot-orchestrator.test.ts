@@ -118,8 +118,9 @@ describe('BootOrchestrator.triggerGpuBoot', () => {
   });
 
   it('returns failure when max attempts exceeded', async () => {
+    // Default AUTOSCALER_BOOT_RETRY_MAX is 3, so attempt 4 is over the cap.
     const { orchestrator } = makeOrchestrator();
-    const result = await orchestrator.triggerGpuBoot(makeTierConfig(), 0, 'user', 2);
+    const result = await orchestrator.triggerGpuBoot(makeTierConfig(), 0, 'user', 4);
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/max retry/i);
   });

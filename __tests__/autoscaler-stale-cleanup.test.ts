@@ -540,7 +540,8 @@ describe('Watchdog Stuck Booting Cleanup', () => {
 
     const tierAfter = getIdleTier(autoscaler);
     expect(tierAfter?.state).toBe('idle');
-    expect(tierAfter?.unhealthy).toBe(true);
+    // First stuck boot → cooldown + retry, not permanent unhealthy.
+    expect(tierAfter?.unhealthy).toBeFalsy();
     expect(tierAfter?.bootFailCount).toBeGreaterThanOrEqual(1);
     expect(mockStopInstance).toHaveBeenCalledWith(
       'td-instance-001',
@@ -592,7 +593,8 @@ describe('Watchdog Stuck Booting Cleanup', () => {
     // State should still transition to idle despite stop failure
     const tierAfter = getIdleTier(autoscaler);
     expect(tierAfter?.state).toBe('idle');
-    expect(tierAfter?.unhealthy).toBe(true);
+    // First stuck boot → cooldown + retry, not permanent unhealthy.
+    expect(tierAfter?.unhealthy).toBeFalsy();
   });
 
   // ────────────────────────────────────────────────────────────────────────

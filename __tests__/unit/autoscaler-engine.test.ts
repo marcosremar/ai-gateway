@@ -446,8 +446,8 @@ describe('AutoscalerEngine', () => {
       const tier: GpuTierConfig = {
         provider: 'runpod', gpuTypes: ['RTX3090'], apiKey: 'test-key',
       };
-      // Call with attempt=2 (at max)
-      const result = await engine.triggerGpuBoot(tier, 0, 'user1', 2);
+      // Call with attempt=4 (over AUTOSCALER_BOOT_RETRY_MAX, default 3)
+      const result = await engine.triggerGpuBoot(tier, 0, 'user1', 4);
       expect(result.ok).toBe(false);
       expect(result.reason).toContain('Max retry');
     });
