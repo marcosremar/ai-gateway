@@ -51,7 +51,20 @@ export function verifyGpuToken(token: string): GpuTokenPayload {
     throw new Error('Invalid token payload');
   }
   const payload: GpuTokenPayload = { uid: raw.uid, iat: raw.iat, exp: raw.exp };
-  if (payload.exp < Math.floor(Date.now() / 1000)) {
+  // Enforce the advertised TTL window at verification — not just `exp < now`.
+  // A token minted with an over-long `exp` (or a far-future `iat`) would
+  // otherwise outlive the documented 60s lifetime, defeating the TTL guarantee
+  // the token type advertises. Allow a small clock-skew margin since signer
+  // (gateway) and verifier (GPU pod) run on different hosts.
+  const now = Math.floor(Date.now() / 1000);
+  const SKEW_SECONDS = 30;
+  if (payload.iat > now + SKEW_SECONDS) {
+    throw new Error('Token issued in the future');
+  }
+  if (payload.exp - payload.iat > TTL_SECONDS + SKEW_SECONDS) {
+    throw new Error('Token TTL exceeds maximum');
+  }
+  if (payload.exp < now) {
     throw new Error('Token expired');
   }
   return payload;

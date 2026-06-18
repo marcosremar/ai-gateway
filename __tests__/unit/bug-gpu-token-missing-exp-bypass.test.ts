@@ -49,4 +49,19 @@ describe('verifyGpuToken — strict payload shape', () => {
     const payload = verifyGpuToken(t);
     expect(payload.uid).toBe('user1');
   });
+
+  it('rejects tokens whose TTL window exceeds the advertised 60s lifetime', () => {
+    const now = Math.floor(Date.now() / 1000);
+    // Validly signed, not yet expired, but exp is 10 years out — must be rejected
+    // so the 60s TTL guarantee holds even against a forged-long exp.
+    const t = makeToken({ uid: 'user1', iat: now, exp: now + 10 * 365 * 24 * 3600 });
+    expect(() => verifyGpuToken(t)).toThrow(/TTL/i);
+  });
+
+  it('rejects tokens issued far in the future', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const future = now + 3600;
+    const t = makeToken({ uid: 'user1', iat: future, exp: future + 60 });
+    expect(() => verifyGpuToken(t)).toThrow(/future/i);
+  });
 });

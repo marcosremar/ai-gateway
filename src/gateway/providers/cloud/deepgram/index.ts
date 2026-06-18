@@ -45,7 +45,10 @@ export class DeepgramSTTProvider implements STTProvider {
     const model = request.model || 'nova-3';
     const params = new URLSearchParams({ model, smart_format: 'true' });
     if (request.language) params.set('language', request.language);
-    if (request.wordTimestamps) params.set('punctuate', 'true');
+    // NB: word-level start/end timings are returned unconditionally in
+    // alternatives[].words, so `wordTimestamps` needs no request param. (The
+    // old code set `punctuate=true` here — that toggles punctuation, not
+    // timestamps, and is already implied by smart_format.)
     // VAD / endpointing knobs — exposed via STTRequest.vad. Sensible defaults
     // when unspecified; explicit values let callers tune for snappy vs
     // thoughtful conversation patterns.
