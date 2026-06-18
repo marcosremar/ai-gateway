@@ -77,6 +77,12 @@ export interface DeployExtra {
   expectedCapabilities?: DockerCapability[];
   requireDockerManifest?: boolean;
   runSmokeTests?: boolean;
+  /** Vast.ai offer search mode: 'high_quality' (default — reliable, direct-port
+   *  hosts) or 'full' (widen the search to all rentable offers). Forwarded to
+   *  the Vast client's offer search; see InstanceSpec.searchMode. */
+  searchMode?: 'high_quality' | 'full';
+  /** Require the Vast host to expose at least one direct (non-SSH) port. */
+  requireDirectPort?: boolean;
 }
 
 export async function startDeployLoop(

@@ -37,4 +37,10 @@ export interface DeployExtra {
   raceCount?: number;
   /** When true, single-tier deploy: no fallback to next provider. */
   noTierCascade?: boolean;
+  /** Vast.ai offer search mode: 'high_quality' (default — reliable, direct-port
+   *  hosts) or 'full' (widen the search to all rentable offers). See
+   *  InstanceSpec.searchMode. */
+  searchMode?: 'high_quality' | 'full';
+  /** Require the Vast host to expose at least one direct (non-SSH) port. */
+  requireDirectPort?: boolean;
 }

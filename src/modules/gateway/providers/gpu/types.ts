@@ -208,6 +208,9 @@ export interface InstanceSpec {
   raceCount?: number;
   /** Vast.ai-only: require direct-port, high-reliability offers and skip SSH-only fallback for faster boot. */
   strictFastBoot?: boolean;
+  /** Vast.ai-only: offer search mode. 'high_quality' (default) keeps the
+   *  reliability-tier filter; 'full' widens the search to all rentable offers. */
+  searchMode?: 'high_quality' | 'full';
   /** Vast.ai-only: opt-in to deverified/unverified hosts when no verified offer is rentable.
    *  Trade-off: lower availability blocker, but host may be reclaimed mid-boot.
    *  Default false (verified-only, safer). */
