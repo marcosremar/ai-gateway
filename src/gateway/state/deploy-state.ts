@@ -26,6 +26,9 @@ export interface DeploymentState {
   provider: ProviderName | '';
   alert: string;       // e.g. "RunPod blocked, using Vast.ai fallback"
   alertLevel: 'info' | 'warning' | 'error' | 'critical';  // severity level for UI coloring
+  /** Set when the deploy's network path looks degraded (e.g. repeated SSH/health
+   *  probe timeouts that point at the connection, not the pod). UI surfaces this. */
+  networkDegraded?: boolean;
   alertHistory: Array<{ level: 'info' | 'warning' | 'error' | 'critical'; message: string; ts: number }>;
   sshHost: string;
   sshPort: number;
