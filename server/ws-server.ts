@@ -263,7 +263,13 @@ export async function startWsServer(): Promise<number> {
       );
     },
     websocket: {
-      maxPayloadLength: 4 * 1024 * 1024,
+      // 5 MB cap — the documented limit (see CLAUDE.md "Message Size Limit").
+      // Bun enforces this at the protocol layer and closes with 1009 before
+      // message() runs; the in-handler MAX_WS_MESSAGE_SIZE check below uses the
+      // same value as belt-and-suspenders. Previously this was 4 MB while both
+      // the spec and the in-handler guard said 5 MB, so the real cap silently
+      // disagreed with the documented one.
+      maxPayloadLength: 5 * 1024 * 1024,
       closeOnBackpressureLimit: true,
       idleTimeout: 120,
       open(ws) {
