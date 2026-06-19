@@ -65,6 +65,30 @@ function clearBotIdleTimer() {
   if (botIdleTimer) { clearTimeout(botIdleTimer); botIdleTimer = null; }
 }
 
+/** Delete the bot's provider pod and reset local state. Used by both the idle
+ *  timer and the crash path (which can't wait for the idle timer because its
+ *  status guard requires 'ready'). */
+async function terminateBotPodNow(reason: string) {
+  try {
+    const podId = botState.podId;
+    const wasFly = botState.endpoint?.includes('.fly.dev');
+    const apiKey = botApiKey || deployApiKey || process.env.RUNPOD_API_KEY || '';
+    const flyKey = process.env.FLY_API_TOKEN || '';
+    log.log(`[bot] Terminating bot pod (${reason})`);
+    setBotStateVar({ status: 'idle', podId: '', endpoint: '', sshHost: '', sshPort: 0, message: '', startedAt: 0, botId: '', meetingUrl: '', webcamRtmpUrl: '', youtubeStreamKey: '' });
+    setBotDeployLock(false);
+    if (podId && podId !== 'local') {
+      if (flyKey && wasFly) {
+        await flyio.deleteInstance(podId, { apiKey: flyKey }).catch((err) => log.debug('[bot] Fly.io delete failed (benign): %s', err instanceof Error ? err.message : err));
+      } else if (apiKey) {
+        await runpod.deleteInstance(podId, { apiKey }).catch((err) => log.debug('[bot] RunPod delete failed (benign): %s', err instanceof Error ? err.message : err));
+      }
+    }
+  } catch (e) {
+    log.warn('[bot] Terminate failed:', e instanceof Error ? e.message : e);
+  }
+}
+
 function scheduleBotIdleShutdown() {
   clearBotIdleTimer();
   log.log(`[bot] Meeting ended — auto-terminate in ${BOT_IDLE_SHUTDOWN_MS / 60_000} min if not rejoined`);
@@ -72,22 +96,7 @@ function scheduleBotIdleShutdown() {
     botIdleTimer = null;
     if (botState.status !== 'ready') return; // already terminated or reused
     log.log(`[bot] Auto-terminating idle bot pod after ${BOT_IDLE_SHUTDOWN_MS / 60_000} min`);
-    try {
-      const podId = botState.podId;
-      const apiKey = botApiKey || deployApiKey || process.env.RUNPOD_API_KEY || '';
-      const flyKey = process.env.FLY_API_TOKEN || '';
-      setBotStateVar({ status: 'idle', podId: '', endpoint: '', sshHost: '', sshPort: 0, message: '', startedAt: 0, botId: '', meetingUrl: '', webcamRtmpUrl: '', youtubeStreamKey: '' });
-      setBotDeployLock(false);
-      if (podId && podId !== 'local') {
-        if (flyKey && botState.endpoint?.includes('.fly.dev')) {
-          await flyio.deleteInstance(podId, { apiKey: flyKey }).catch((err) => log.debug('[bot] Fly.io delete failed (benign): %s', err instanceof Error ? err.message : err));
-        } else if (apiKey) {
-          await runpod.deleteInstance(podId, { apiKey }).catch((err) => log.debug('[bot] RunPod delete failed (benign): %s', err instanceof Error ? err.message : err));
-        }
-      }
-    } catch (e) {
-      log.warn('[bot] Auto-terminate failed:', e instanceof Error ? e.message : e);
-    }
+    await terminateBotPodNow('idle timeout');
   }, BOT_IDLE_SHUTDOWN_MS) as unknown as Timer;
 }
 function startBotAudioPull(botEndpoint: string) {
@@ -952,8 +961,11 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
             if (consecutiveProbeFailures >= MAX_PROBE_FAILURES) {
               log.warn(`[bot] Machine unreachable for ${consecutiveProbeFailures} consecutive probes — declaring crashed`);
               broadcastWs({ type: 'bot:status', status: 'ended', message: 'Bot machine crashed' });
-              setBotState({ status: 'idle', message: 'Bot machine crashed — redeploy to reconnect' });
-              scheduleBotIdleShutdown();
+              // The machine is confirmed unreachable — terminate the pod NOW to
+              // stop billing. Don't schedule the idle timer: its status guard
+              // requires 'ready', so on a crashed (status='idle') bot it would
+              // no-op and the dead pod would bill indefinitely.
+              await terminateBotPodNow('machine crashed');
               break;
             }
           }
