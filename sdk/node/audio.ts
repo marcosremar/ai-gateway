@@ -283,10 +283,15 @@ export class AudioSegmenter {
     this.onLevel = config.onLevel;
     this.vadInference = config.vadInference;
 
-    this.preSpeechMaxFrames = Math.max(1, Math.floor(this.cfg.preSpeechPadMs / 32));
+    // ms per VAD frame, derived from the (fixed 512-sample) window and the
+    // configured sample rate. Hardcoding 32 only holds at 16 kHz; at any other
+    // sampleRate the pre-speech/overlap/lookahead windows would be mis-sized.
+    // (32 ms = 512 / 16000 * 1000, so defaults are unchanged.)
+    const frameMs = (VAD_WINDOW_SAMPLES / this.cfg.sampleRate) * 1000;
+    this.preSpeechMaxFrames = Math.max(1, Math.floor(this.cfg.preSpeechPadMs / frameMs));
     this.postPadSamples = Math.floor(this.cfg.postSpeechPadMs * this.cfg.sampleRate / 1000);
-        this.overlapMaxFrames = Math.max(1, Math.floor(this.cfg.overlapWindowMs / 32));
-    this.dualPassLookahead = Math.max(1, Math.floor(this.cfg.dualPassLookaheadMs / 32));
+    this.overlapMaxFrames = Math.max(1, Math.floor(this.cfg.overlapWindowMs / frameMs));
+    this.dualPassLookahead = Math.max(1, Math.floor(this.cfg.dualPassLookaheadMs / frameMs));
   }
 
   /** Whether the most recent frame had an energy spike suggesting overlapping speakers. */
