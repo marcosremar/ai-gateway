@@ -151,6 +151,12 @@ export async function handleDockerAuthPoll(
       return json(res, { status: 'error', error: result.error });
     }
 
+    // Propagate `slow_down` distinctly so the polling client backs off (per the
+    // device-flow spec) instead of hammering at the original cadence.
+    if (result.status === 'slow_down') {
+      return json(res, { status: 'slow_down' });
+    }
+
     return json(res, { status: 'pending' });
   } catch (e: unknown) {
     return internalError(res, e instanceof Error ? e.message : String(e));

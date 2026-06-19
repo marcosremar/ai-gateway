@@ -99,6 +99,7 @@ export async function startDeviceFlow(clientId: string): Promise<GitHubDeviceFlo
 
 export type PollResult =
   | { status: 'pending' }
+  | { status: 'slow_down' }
   | { status: 'complete'; accessToken: string; tokenType: string; scope: string }
   | { status: 'expired' }
   | { status: 'error'; error: string };
@@ -135,8 +136,15 @@ export async function pollDeviceFlow(clientId: string, deviceCode: string): Prom
     };
   }
 
-  if (data.error === 'authorization_pending' || data.error === 'slow_down') {
+  if (data.error === 'authorization_pending') {
     return { status: 'pending' };
+  }
+  // Per the device-flow spec, `slow_down` means we polled too fast and MUST
+  // increase the interval by 5s. Surface it distinctly so the loop can back off
+  // — collapsing it into `pending` keeps polling at the original cadence, so
+  // GitHub returns `slow_down` forever and the code expires unauthorized.
+  if (data.error === 'slow_down') {
+    return { status: 'slow_down' };
   }
   if (data.error === 'expired_token') {
     return { status: 'expired' };
@@ -171,13 +179,19 @@ export async function runDeviceFlowLoop(
   onPoll?: () => void,
 ): Promise<GitHubTokenData> {
   const deadline = Date.now() + expiresIn * 1000;
-  const waitMs = Math.max(intervalSeconds, 5) * 1000;
+  let waitMs = Math.max(intervalSeconds, 5) * 1000;
 
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, waitMs));
     onPoll?.();
 
     const result = await pollDeviceFlow(clientId, deviceCode);
+
+    if (result.status === 'slow_down') {
+      // GitHub told us to back off — add 5s to the interval per spec and retry.
+      waitMs += 5000;
+      continue;
+    }
 
     if (result.status === 'complete') {
       const username = await getGitHubUsername(result.accessToken);
