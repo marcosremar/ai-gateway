@@ -742,6 +742,11 @@ async function cmdAppDispatch(sub: string, args: string[]): Promise<void> {
       const updated = (stripped && !stripped.endsWith('\n') ? stripped + '\n' : stripped)
         + `AIGW_APP_NAME=${name}\nAIGW_APP_KEY=${key}\n`;
       fs.writeFileSync(envPath, updated, { mode: 0o600 });
+      // writeFileSync's `mode` only applies when the file is CREATED. On the
+      // common re-run case (.env already exists) the bits are left untouched, so
+      // a world-readable .env would keep its perms while we claim 0600. chmod
+      // explicitly to make the printed guarantee true for the secret we wrote.
+      fs.chmodSync(envPath, 0o600);
       console.log(`Wrote ${envPath} (mode 0600) with AIGW_APP_NAME=${name} and a new AIGW_APP_KEY.`);
       console.log('');
       console.log('Next: register this key with the gateway by appending to its .env');
@@ -1103,7 +1108,11 @@ async function cmdGpuDoctor(opts: { instance?: string; json?: boolean }) {
       try {
         const u = new URL(inst.endpoint);
         const t0 = Date.now();
-        const alive = await tcpProbe(u.hostname, u.port ? parseInt(u.port, 10) : 80, 3000);
+        // Default to 443 for https endpoints (not 80) — otherwise a healthy
+        // HTTPS instance with no explicit port is probed on the wrong port and
+        // misreported as a zombie. Matches pickProbeTarget / `gpu list`.
+        const probePort = u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80);
+        const alive = await tcpProbe(u.hostname, probePort, 3000);
         checks.http_tcp = { alive, latencyMs: Date.now() - t0 };
         if (alive) {
           // Try /info — most images expose it
@@ -1171,7 +1180,12 @@ async function cmdGpuWaitActive(opts: { timeout?: number }) {
   const { url, key } = getConfig();
   while (Date.now() < deadline) {
     try {
-      const data = await fetchJSON(`${url}/v1/gpu/status`, { headers: headers(key) });
+      // Use raw fetch (not fetchJSON, which process.exit(1)s on any non-2xx) so
+      // a transient 5xx during deploy falls through to the catch and retries
+      // until the deadline instead of killing the whole `gpu wait`.
+      const res = await fetch(`${url}/v1/gpu/status`, { headers: headers(key) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
       const elapsed = Math.round((Date.now() - startMs) / 1000);
       if (data.status === 'ready') {
         process.stderr.write('\n');
