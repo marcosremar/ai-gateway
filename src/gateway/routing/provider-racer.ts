@@ -88,8 +88,12 @@ export async function raceProviders<T>(
     if (headstartMs > 0 && candidates.length >= 2) {
       // Give the primary candidate a head start
       const primary = makeRacer(candidates[0], 0);
+      // Treat primary failure during the headstart window the same as expiry:
+      // swallow the rejection so Promise.race resolves to null and we fall
+      // through to launch remaining candidates. The rejected primary promise
+      // is still passed to Promise.any below, where it is correctly ignored.
       const headstartResult = await Promise.race([
-        primary,
+        primary.catch((): null => null),
         new Promise<null>(r => setTimeout(() => r(null), headstartMs)),
       ]);
 
