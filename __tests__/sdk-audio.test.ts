@@ -52,6 +52,28 @@ describe('AudioSegmenter — Config', () => {
     expect((seg as any).cfg.vadOnsetThreshold).toBe(0.60);
     expect((seg as any).cfg.silenceHangoverMs).toBe(500);
   });
+
+  it('derives frame-count fields from sampleRate, not a hardcoded 32ms', () => {
+    // At 16 kHz: frameMs = 512/16000*1000 = 32 ms (the historical constant)
+    // preSpeechMaxFrames = floor(200/32) = 6
+    // overlapMaxFrames   = floor(100/32) = 3
+    // dualPassLookahead  = floor(150/32) = 4
+    const seg16 = new AudioSegmenter({ sampleRate: 16000 });
+    expect((seg16 as any).preSpeechMaxFrames).toBe(6);
+    expect((seg16 as any).overlapMaxFrames).toBe(3);
+    expect((seg16 as any).dualPassLookahead).toBe(4);
+
+    // At 24 kHz: frameMs = 512/24000*1000 ≈ 21.33 ms
+    // preSpeechMaxFrames = floor(200/21.33) = 9
+    // overlapMaxFrames   = floor(100/21.33) = 4
+    // dualPassLookahead  = floor(150/21.33) = 7
+    // The old hardcoded-32 code would have returned 6, 3, 4 — same as 16 kHz,
+    // which under-counted frames and made the windows ~33% too short.
+    const seg24 = new AudioSegmenter({ sampleRate: 24000 });
+    expect((seg24 as any).preSpeechMaxFrames).toBe(9);
+    expect((seg24 as any).overlapMaxFrames).toBe(4);
+    expect((seg24 as any).dualPassLookahead).toBe(7);
+  });
 });
 
 describe('AudioSegmenter — VAD state machine', () => {
