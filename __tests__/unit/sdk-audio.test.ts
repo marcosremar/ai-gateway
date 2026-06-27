@@ -279,3 +279,64 @@ describe('AudioSegmenter — setVadInference', () => {
     expect(called).toBe(true);
   });
 });
+
+describe('AudioSegmenter — sampleRate-derived frame windows', () => {
+  // Regression test for the bug where preSpeechMaxFrames / overlapMaxFrames /
+  // dualPassLookahead used a hardcoded 32 ms/frame (only valid at 16 kHz).
+  // At 24 kHz the VAD window is 512/24000*1000 ≈ 21.33 ms, so each derived
+  // frame count must be larger to represent the same wall-clock duration.
+
+  it('preSpeechMaxFrames scales with sampleRate', () => {
+    const seg16k = new AudioSegmenter({ sampleRate: 16000, preSpeechPadMs: 200 });
+    const seg24k = new AudioSegmenter({ sampleRate: 24000, preSpeechPadMs: 200 });
+
+    const frames16k = (seg16k as any).preSpeechMaxFrames as number;
+    const frames24k = (seg24k as any).preSpeechMaxFrames as number;
+
+    // At 16 kHz: frameMs = 32ms → floor(200/32) = 6
+    expect(frames16k).toBe(6);
+    // At 24 kHz: frameMs ≈ 21.33ms → floor(200/21.33) = 9 (was 6 before the fix)
+    expect(frames24k).toBe(9);
+    // Higher sample rate → more (shorter) frames needed to fill the same ms window
+    expect(frames24k).toBeGreaterThan(frames16k);
+  });
+
+  it('overlapMaxFrames scales with sampleRate', () => {
+    const seg16k = new AudioSegmenter({ sampleRate: 16000, overlapWindowMs: 160 });
+    const seg24k = new AudioSegmenter({ sampleRate: 24000, overlapWindowMs: 160 });
+
+    const overlap16k = (seg16k as any).overlapMaxFrames as number;
+    const overlap24k = (seg24k as any).overlapMaxFrames as number;
+
+    // floor(160/32) = 5 at 16 kHz; floor(160/21.33) = 7 at 24 kHz
+    expect(overlap16k).toBe(5);
+    expect(overlap24k).toBe(7);
+    expect(overlap24k).toBeGreaterThan(overlap16k);
+  });
+
+  it('dualPassLookahead scales with sampleRate', () => {
+    const seg16k = new AudioSegmenter({ sampleRate: 16000, dualPassLookaheadMs: 150 });
+    const seg24k = new AudioSegmenter({ sampleRate: 24000, dualPassLookaheadMs: 150 });
+
+    const look16k = (seg16k as any).dualPassLookahead as number;
+    const look24k = (seg24k as any).dualPassLookahead as number;
+
+    // floor(150/32) = 4 at 16 kHz; floor(150/21.33) = 7 at 24 kHz
+    expect(look16k).toBe(4);
+    expect(look24k).toBe(7);
+    expect(look24k).toBeGreaterThan(look16k);
+  });
+
+  it('postPadSamples uses sample count (not frame count) and scales linearly', () => {
+    const seg16k = new AudioSegmenter({ sampleRate: 16000, postSpeechPadMs: 150 });
+    const seg24k = new AudioSegmenter({ sampleRate: 24000, postSpeechPadMs: 150 });
+
+    const pad16k = (seg16k as any).postPadSamples as number;
+    const pad24k = (seg24k as any).postPadSamples as number;
+
+    // postPadSamples = floor(postSpeechPadMs * sampleRate / 1000)
+    expect(pad16k).toBe(Math.floor(150 * 16000 / 1000)); // 2400
+    expect(pad24k).toBe(Math.floor(150 * 24000 / 1000)); // 3600
+    expect(pad24k / pad16k).toBeCloseTo(24000 / 16000, 5);
+  });
+});
