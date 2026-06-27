@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveChatProvider } from '../../src/gateway/pipeline/chat-completions-service';
+
+const hasBun = spawnSync('bun', ['--version'], { stdio: 'pipe' }).status === 0;
 
 const fallback = {
   providerId: 'groq',
@@ -42,7 +44,7 @@ describe('chat model resolution', () => {
 });
 
 describe('CLI media help', () => {
-  it('documents image+text, audio+text, and media smoke tests', () => {
+  it.skipIf(!hasBun)('documents image+text, audio+text, and media smoke tests', () => {
     const chatHelp = execFileSync('bun', ['bin/ai-gateway.ts', 'chat', '--help'], { encoding: 'utf8' });
     const transcribeHelp = execFileSync('bun', ['bin/ai-gateway.ts', 'transcribe', '--help'], { encoding: 'utf8' });
     const speechHelp = execFileSync('bun', ['bin/ai-gateway.ts', 'speech', '--help'], { encoding: 'utf8' });
@@ -52,7 +54,7 @@ describe('CLI media help', () => {
     expect(speechHelp).toContain('Full speech pipeline');
   });
 
-  it('rejects unsupported image types before sending a request', () => {
+  it.skipIf(!hasBun)('rejects unsupported image types before sending a request', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aigw-media-'));
     const badImage = join(dir, 'not-image.gif');
     writeFileSync(badImage, 'GIF89a');

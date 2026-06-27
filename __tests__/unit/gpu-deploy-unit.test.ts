@@ -976,7 +976,7 @@ describe('tryRecoverActiveDeploy', () => {
     const fnStart = autoRecoverySource.indexOf('export async function tryRecoverActiveDeploy');
     const fnBody = autoRecoverySource.slice(fnStart, fnStart + 1500);
     expect(fnBody).toContain('probeGpuHealth');
-    expect(fnBody).toContain('not healthy');
+    expect(fnBody).toContain('not health-serving');
     expect(fnBody).toContain('clearPersistedDeploy');
   });
 
