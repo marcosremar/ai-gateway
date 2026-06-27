@@ -27,6 +27,11 @@ interface RequestEntry {
 const requestLog: RequestEntry[] = [];
 const MAX_REQUEST_LOG = 1000;
 
+/** Test helper — clears the in-memory request log between test cases. */
+export function _resetRequestLog(): void {
+  requestLog.length = 0;
+}
+
 export function logRequest(entry: Omit<RequestEntry, 'timestamp'>): void {
   requestLog.push({ ...entry, timestamp: Date.now() });
   if (requestLog.length > MAX_REQUEST_LOG) {
