@@ -279,3 +279,60 @@ describe('AudioSegmenter — setVadInference', () => {
     expect(called).toBe(true);
   });
 });
+
+describe('AudioSegmenter — frameMs derived from sampleRate', () => {
+  // At 16 kHz: frameMs = 512/16000*1000 = 32 ms
+  // At 24 kHz: frameMs = 512/24000*1000 ≈ 21.33 ms
+  // The old code hardcoded 32 ms, giving wrong window sizes at non-16kHz rates.
+  // These tests pin the correct derived values to catch regression.
+
+  it('16kHz default: preSpeechMaxFrames = floor(200/32) = 6', () => {
+    const seg = new AudioSegmenter({ sampleRate: 16000 });
+    expect((seg as any).preSpeechMaxFrames).toBe(6);
+  });
+
+  it('24kHz: preSpeechMaxFrames = floor(200/21.33) = 9, not 6 (old bug)', () => {
+    const seg = new AudioSegmenter({ sampleRate: 24000 });
+    const frameMs = (512 / 24000) * 1000;
+    const expected = Math.max(1, Math.floor(200 / frameMs));
+    expect((seg as any).preSpeechMaxFrames).toBe(expected);
+    // Regression: old hardcoded 32ms gave floor(200/32) = 6, not 9
+    expect(expected).toBeGreaterThan(6);
+  });
+
+  it('24kHz: overlapMaxFrames = floor(100/21.33) = 4, not 3 (old bug)', () => {
+    const seg = new AudioSegmenter({ sampleRate: 24000 });
+    const frameMs = (512 / 24000) * 1000;
+    const expected = Math.max(1, Math.floor(100 / frameMs));
+    expect((seg as any).overlapMaxFrames).toBe(expected);
+    // Regression: old hardcoded 32ms gave floor(100/32) = 3
+    expect(expected).toBeGreaterThan(3);
+  });
+
+  it('24kHz: dualPassLookahead = floor(150/21.33) = 7, not 4 (old bug)', () => {
+    const seg = new AudioSegmenter({ sampleRate: 24000 });
+    const frameMs = (512 / 24000) * 1000;
+    const expected = Math.max(1, Math.floor(150 / frameMs));
+    expect((seg as any).dualPassLookahead).toBe(expected);
+    // Regression: old hardcoded 32ms gave floor(150/32) = 4
+    expect(expected).toBeGreaterThan(4);
+  });
+
+  it('8kHz: preSpeechMaxFrames scales correctly (64ms frame)', () => {
+    // frameMs = 512/8000*1000 = 64ms
+    const seg = new AudioSegmenter({ sampleRate: 8000 });
+    const frameMs = (512 / 8000) * 1000; // 64ms
+    expect(frameMs).toBe(64);
+    const expected = Math.max(1, Math.floor(200 / frameMs)); // floor(200/64) = 3
+    expect((seg as any).preSpeechMaxFrames).toBe(expected);
+  });
+
+  it('postPadSamples is always derived from sampleRate correctly', () => {
+    // postPadSamples was already correct pre-fix; verify it is unaffected
+    const seg16 = new AudioSegmenter({ sampleRate: 16000, postSpeechPadMs: 150 });
+    const seg24 = new AudioSegmenter({ sampleRate: 24000, postSpeechPadMs: 150 });
+    // postPadSamples = floor(postSpeechPadMs * sampleRate / 1000)
+    expect((seg16 as any).postPadSamples).toBe(Math.floor(150 * 16000 / 1000));
+    expect((seg24 as any).postPadSamples).toBe(Math.floor(150 * 24000 / 1000));
+  });
+});
