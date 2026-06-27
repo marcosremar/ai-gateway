@@ -1,6 +1,31 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { handleChatCompletions } from '../src/proxy/routes/chat-completions';
 import type { ProxyRequest } from '../src/proxy/types';
+
+/** Drain a ReadableStream into a string */
+async function drainStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const total = chunks.reduce((acc, c) => acc + c.length, 0);
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) { merged.set(c, offset); offset += c.length; }
+  return new TextDecoder().decode(merged);
+}
+
+/** Parse SSE text into data payloads (skips [DONE]) */
+function parseSSE(raw: string): unknown[] {
+  return raw
+    .split('\n\n')
+    .map(block => block.trim())
+    .filter(block => block.startsWith('data: ') && !block.includes('[DONE]'))
+    .map(block => JSON.parse(block.slice('data: '.length)));
+}
 
 function makeReq(body: Record<string, unknown>): ProxyRequest {
   return { method: 'POST', url: '/v1/chat/completions', headers: {}, body, rawBody: Buffer.alloc(0) };
@@ -282,5 +307,203 @@ describe('handleChatCompletions', () => {
     expect(body.object).toBe('chat.completion');
     expect(body.model).toBe('test-model');
     expect(body.choices).toHaveLength(1);
+  });
+});
+
+// ── Streaming (SSE) path ──────────────────────────────────────────────────────
+
+describe('handleChatCompletions — streaming', () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns text/event-stream content-type when stream: true', async () => {
+    const streamingProvider = {
+      providerId: 'test',
+      chat: vi.fn(),
+      chatStream: async function* () { yield 'hello'; },
+      isConfigured: () => true,
+    };
+    const res = await handleChatCompletions(
+      makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+      { 'test-model': streamingProvider },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers?.['Content-Type']).toBe('text/event-stream');
+    expect(res.stream).toBeDefined();
+    // Drain so we don't leave an open stream
+    if (res.stream) await drainStream(res.stream);
+  });
+
+  it('streams content chunks via chatStream()', async () => {
+    const words = ['Hello', ' ', 'world'];
+    const streamingProvider = {
+      providerId: 'test',
+      chat: vi.fn(),
+      chatStream: async function* () { for (const w of words) yield w; },
+      isConfigured: () => true,
+    };
+    const res = await handleChatCompletions(
+      makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+      { 'test-model': streamingProvider },
+    );
+    expect(res.stream).toBeDefined();
+    const raw = await drainStream(res.stream!);
+    const chunks = parseSSE(raw);
+    // First chunk has role delta; subsequent ones have content deltas; last has finish_reason
+    const roleChunk = chunks[0] as { choices: Array<{ delta: { role?: string; content?: string } }> };
+    expect(roleChunk.choices[0].delta.role).toBe('assistant');
+    const contentChunks = chunks.slice(1, -1);
+    const assembled = contentChunks.map(c => (c as { choices: Array<{ delta: { content?: string } }> }).choices[0].delta.content).join('');
+    expect(assembled).toBe('Hello world');
+    const finalChunk = chunks[chunks.length - 1] as { choices: Array<{ finish_reason: string }> };
+    expect(finalChunk.choices[0].finish_reason).toBe('stop');
+    expect(raw).toContain('data: [DONE]');
+  });
+
+  it('falls back to single-chunk emission when provider lacks chatStream', async () => {
+    const nonStreamingProvider = {
+      providerId: 'test',
+      chat: vi.fn().mockResolvedValue({ content: 'fallback response', model: 'test-model' }),
+      isConfigured: () => true,
+    };
+    const res = await handleChatCompletions(
+      makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+      { 'test-model': nonStreamingProvider },
+    );
+    expect(res.stream).toBeDefined();
+    const raw = await drainStream(res.stream!);
+    const chunks = parseSSE(raw);
+    expect(chunks).toHaveLength(1);
+    const chunk = chunks[0] as { choices: Array<{ delta: { content?: string }; finish_reason?: string }> };
+    expect(chunk.choices[0].delta.content).toBe('fallback response');
+    expect(chunk.choices[0].finish_reason).toBe('stop');
+    expect(raw).toContain('data: [DONE]');
+  });
+
+  it('emits usage chunk when stream_options.include_usage is true (chatStream path)', async () => {
+    const streamingProvider = {
+      providerId: 'test',
+      chat: vi.fn(),
+      chatStream: async function* () {
+        yield 'hi';
+        yield '__usage__:{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}';
+      },
+      isConfigured: () => true,
+    };
+    const res = await handleChatCompletions(
+      makeReq({
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+      { 'test-model': streamingProvider },
+    );
+    const raw = await drainStream(res.stream!);
+    const chunks = parseSSE(raw);
+    const usageChunk = chunks.find(c => (c as { usage?: unknown }).usage !== undefined) as { usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } } | undefined;
+    expect(usageChunk).toBeDefined();
+    expect(usageChunk!.usage.prompt_tokens).toBe(5);
+    expect(usageChunk!.usage.completion_tokens).toBe(2);
+    expect(usageChunk!.usage.total_tokens).toBe(7);
+  });
+
+  it('emits usage chunk when stream_options.include_usage is true (non-streaming fallback)', async () => {
+    const nonStreamingProvider = {
+      providerId: 'test',
+      chat: vi.fn().mockResolvedValue({
+        content: 'ok',
+        model: 'test-model',
+        usage: { promptTokens: 3, completionTokens: 1, totalTokens: 4 },
+      }),
+      isConfigured: () => true,
+    };
+    const res = await handleChatCompletions(
+      makeReq({
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+      { 'test-model': nonStreamingProvider },
+    );
+    const raw = await drainStream(res.stream!);
+    const chunks = parseSSE(raw);
+    const usageChunk = chunks.find(c => (c as { usage?: unknown }).usage !== undefined) as { usage: { prompt_tokens: number } } | undefined;
+    expect(usageChunk).toBeDefined();
+    expect(usageChunk!.usage.prompt_tokens).toBe(3);
+  });
+
+  it('emits onRequestEnd hook after stream is consumed', async () => {
+    const streamingProvider = {
+      providerId: 'test',
+      chat: vi.fn(),
+      chatStream: async function* () { yield 'done'; },
+      isConfigured: () => true,
+    };
+    const onRequestEnd = vi.fn();
+    const res = await handleChatCompletions(
+      makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+      { 'test-model': streamingProvider },
+      undefined,
+      { onRequestEnd },
+    );
+    await drainStream(res.stream!);
+    expect(onRequestEnd).toHaveBeenCalledWith(
+      expect.objectContaining({ success: true, stage: 'llm' }),
+    );
+  });
+
+  it('emits onRequestEnd with success:false and calls cancel when stream is cancelled', async () => {
+    let returnCalled = false;
+    const streamingProvider = {
+      providerId: 'test',
+      chat: vi.fn(),
+      chatStream: async function* () {
+        try {
+          yield 'chunk1';
+          await new Promise(() => {}); // hang forever
+        } finally {
+          returnCalled = true;
+        }
+      },
+      isConfigured: () => true,
+    };
+    const onRequestEnd = vi.fn();
+    const res = await handleChatCompletions(
+      makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+      { 'test-model': streamingProvider },
+      undefined,
+      { onRequestEnd },
+    );
+    const reader = res.stream!.getReader();
+    // Read the first chunk (role delta), then cancel
+    await reader.read();
+    await reader.cancel();
+    // Give microtasks a chance to propagate
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(onRequestEnd).toHaveBeenCalledWith(
+      expect.objectContaining({ success: false }),
+    );
+  });
+
+  it('emits an SSE error chunk when chatStream throws', async () => {
+    const brokenProvider = {
+      providerId: 'test',
+      chat: vi.fn(),
+      chatStream: async function* () {
+        yield 'partial';
+        throw new Error('upstream exploded');
+      },
+      isConfigured: () => true,
+    };
+    const res = await handleChatCompletions(
+      makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+      { 'test-model': brokenProvider },
+    );
+    const raw = await drainStream(res.stream!);
+    expect(raw).toContain('upstream exploded');
+    expect(raw).toContain('"error"');
   });
 });
