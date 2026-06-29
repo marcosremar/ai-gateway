@@ -133,7 +133,7 @@ async function writeRemoteFile(host: string, port: number, content: string, remo
 /**
  * Monta o /etc/aigw-agent.env baseado na config.
  */
-function buildEnvFile(cfg: ProvisionConfig): string {
+export function buildEnvFile(cfg: ProvisionConfig): string {
   const lines: string[] = [
     `AIGW_POD_ID=${cfg.podId}`,
     `AIGW_INTERVAL=${cfg.heartbeatInterval ?? 30}`,
