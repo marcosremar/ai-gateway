@@ -38,7 +38,7 @@ export interface RegisteredCheck {
   critical: boolean;
 }
 
-class HealthChecker {
+export class HealthChecker {
   private checks = new Map<string, RegisteredCheck>();
   private lastResults = new Map<string, HealthCheckResult & { timestamp: string }>();
 
