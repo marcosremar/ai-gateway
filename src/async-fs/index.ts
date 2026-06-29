@@ -85,8 +85,11 @@ export async function atomicWrite(path: string, data: string): Promise<void> {
   const dir = path.substring(0, path.lastIndexOf('/'));
   const tempPath = `${path}.tmp.${Date.now()}`;
 
-  // Ensure directory exists
-  await ensureDir(dir);
+  // Ensure directory exists — skip when path has no directory component
+  // (e.g. "state.json") so mkdir('') doesn't throw ENOENT.
+  if (dir) {
+    await ensureDir(dir);
+  }
 
   // Write to temp file
   await fsWriteFile(tempPath, data, 'utf-8');
