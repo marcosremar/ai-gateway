@@ -407,8 +407,9 @@ describe('toJSON', () => {
     expect(typeof j.startedAt).toBe('number');
   });
 
-  it('ready includes endpoint, gpuType, costPerHr', () => {
+  it('ready includes endpoint, gpuType, costPerHr, and readyAt timestamp', () => {
     const sm = freshSM();
+    const before = Date.now();
     sm.startDeploying();
     sm.startBooting('pod-r');
     sm.markReady('pod-r', 'http://gpu:9000', 'A6000', 0.75);
@@ -418,14 +419,21 @@ describe('toJSON', () => {
     expect(j.gpuType).toBe('A6000');
     expect(j.costPerHr).toBe(0.75);
     expect(j.podId).toBe('pod-r');
+    // readyAt was added so callers can compute time-to-ready
+    expect(typeof j.readyAt).toBe('number');
+    expect(j.readyAt as number).toBeGreaterThanOrEqual(before);
   });
 
-  it('error includes reason (not failedAt)', () => {
+  it('error includes reason and failedAt timestamp', () => {
     const sm = freshSM();
+    const before = Date.now();
     sm.markError('no capacity');
     const j = sm.toJSON();
     expect(j.phase).toBe('error');
     expect(j.reason).toBe('no capacity');
+    // failedAt was added so callers can compute time-since-failure
+    expect(typeof j.failedAt).toBe('number');
+    expect(j.failedAt as number).toBeGreaterThanOrEqual(before);
   });
 
   it('stopped includes all stopped fields', () => {
