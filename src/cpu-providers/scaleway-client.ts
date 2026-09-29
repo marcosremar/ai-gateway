@@ -126,6 +126,10 @@ export interface ScalewayIp {
   address: string;
 }
 
+/** Pre-release GET attempts (for the volume IDs) and the pause between them; a 404 ends the retries at once. */
+const RELEASE_GET_ATTEMPTS = 3;
+const releaseGetRetryMs = () => Number(process.env.SCALEWAY_RELEASE_GET_RETRY_MS ?? 1000);
+
 /** Attempts × SCALEWAY_VOLUME_RETRY_MS: SBS volumes only detach some time after terminate (measured up to ~3 min). */
 const VOLUME_DROP_ATTEMPTS = Number(process.env.SCALEWAY_VOLUME_ATTEMPTS ?? 90);
 
@@ -450,25 +454,33 @@ export class ScalewayClient extends AbstractGpuProvider {
    * `awaitVolumes: false` the call returns once the server is gone and the volumes keep retrying in the
    * background — for hosts that must not block a request for the minutes a volume takes to detach.
    */
-  async releaseInstance(instanceId: string, credentials: ProviderCredentials, opts: { awaitVolumes: boolean }): Promise<void> {
+  async releaseInstance(
+    instanceId: string, credentials: ProviderCredentials, opts: { awaitVolumes: boolean; volumeIds?: string[] },
+  ): Promise<void> {
     const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
     if (!secretKey) throw new Error('Scaleway secret key required');
     const { zone, serverId } = this.decodeId(instanceId);
     const headers = this.scwHeaders(secretKey);
 
-    // Collect volume IDs before the server disappears (SBS volumes are NOT auto-deleted)
-    let volumeIds = this.volumeIdsByInstance.get(instanceId) ?? [];
-    try {
-      const res = await this.fetchJson<ScwGetResponse>(
-        `${this.zoneUrl(zone)}/servers/${serverId}`,
-        { headers },
-        TIMEOUTS.read,
-        'scaleway',
-      );
-      const fromServer = volumeIdsFromServer(res.server);
-      if (fromServer.length) volumeIds = fromServer;
-    } catch {
-      // Server may already be gone — keep cached IDs
+    // Collect volume IDs before the server disappears (SBS volumes are NOT auto-deleted). Sources, unioned: what the
+    // caller already saw (a list response), what this client created in this process, and a fresh GET. The GET is
+    // retried on anything but 404: one transient 429/503 here used to terminate the server and leave its volume
+    // billing whenever the machine was found by list (e.g. after a process restart) rather than created here.
+    const volumeIds = new Set([...(opts.volumeIds ?? []), ...(this.volumeIdsByInstance.get(instanceId) ?? [])]);
+    for (let attempt = 0; attempt < RELEASE_GET_ATTEMPTS; attempt++) {
+      try {
+        const res = await this.fetchJson<ScwGetResponse>(
+          `${this.zoneUrl(zone)}/servers/${serverId}`,
+          { headers },
+          TIMEOUTS.read,
+          'scaleway',
+        );
+        for (const id of volumeIdsFromServer(res.server)) volumeIds.add(id);
+        break;
+      } catch (err) {
+        if (err instanceof FetchError && err.status === 404) break; // already gone
+        if (attempt < RELEASE_GET_ATTEMPTS - 1) await new Promise(r => setTimeout(r, releaseGetRetryMs()));
+      }
     }
 
     // Try to terminate first (force poweroff + delete)
@@ -503,8 +515,8 @@ export class ScalewayClient extends AbstractGpuProvider {
     }
 
     this.volumeIdsByInstance.delete(instanceId);
-    if (volumeIds.length) {
-      const dropping = this.dropVolumes(zone, volumeIds, secretKey);
+    if (volumeIds.size) {
+      const dropping = this.dropVolumes(zone, [...volumeIds], secretKey);
       if (opts.awaitVolumes) await dropping;
       else void dropping.catch(err => this.log.warn(`[scaleway] volume cleanup failed: ${this.errMsg(err)}`));
     }

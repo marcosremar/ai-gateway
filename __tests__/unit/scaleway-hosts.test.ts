@@ -131,6 +131,29 @@ describe('ScalewayClient for hosts', () => {
     expect(volumeDeletes).toBeGreaterThan(0);
   });
 
+  it('regression: a transient 503 on the pre-release GET does not leak the volume (server found by list, not created here)', async () => {
+    let gets = 0;
+    const deleted: string[] = [];
+    route([
+      [/\/servers\/srv-1$/, 'GET', () => (++gets === 1 ? json({ message: 'unavailable' }, 503) : json({ server: SERVER }))],
+      [/\/action$/, 'POST', () => json({})],
+      [/volumes\/vol-1$/, 'DELETE', () => { deleted.push('vol-1'); return json({}, 204); }],
+    ]);
+    await new ScalewayClient().releaseInstance('fr-par-2:srv-1', creds, { awaitVolumes: true });
+    expect(deleted).toEqual(['vol-1']);
+  });
+
+  it('regression: the caller-known volume ids are deleted even when the server GET keeps failing', async () => {
+    const deleted: string[] = [];
+    route([
+      [/\/servers\/srv-1$/, 'GET', () => json({ message: 'unavailable' }, 503)],
+      [/\/action$/, 'POST', () => json({})],
+      [/volumes\/vol-9$/, 'DELETE', () => { deleted.push('vol-9'); return json({}, 204); }],
+    ]);
+    await new ScalewayClient().releaseInstance('fr-par-2:srv-1', creds, { awaitVolumes: true, volumeIds: ['vol-9'] });
+    expect(deleted).toEqual(['vol-9']);
+  });
+
   it('reserves routed IPs and builds a drop-by-default security group with one rule per port', async () => {
     route([
       [/\/ips$/, 'POST', () => json({ ip: { id: 'ip-1', address: '51.15.9.9' } })],
