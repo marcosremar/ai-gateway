@@ -160,4 +160,18 @@ describe('ScalewayClient for hosts', () => {
     expect(await client.getHourlyPrice('fr-par-2', 'L4-1-24G', creds)).toBe(0.7875);
     expect(await client.getHourlyPrice('fr-par-2', 'NOPE', creds)).toBeNull();
   });
+
+  it('cloudInitFor renders the boot script from the created server id (default hostname needs it)', async () => {
+    route([
+      [/\/servers$/, 'POST', () => json({ server: SERVER })],
+      [/\/user_data\/cloud-init$/, 'PATCH', () => json({})],
+      [/\/action$/, 'POST', () => json({})],
+      [/\/servers\/srv-1$/, 'GET', () => json({ server: SERVER })],
+    ]);
+    await new ScalewayClient().createInstance({
+      region: 'fr-par-1', commercialType: 'POP2-HC-8C-16G', projectId: 'proj-1', volumeGb: 50, imageId: 'img',
+      cloudInit: '#cloud-config\nignored: true', cloudInitFor: ({ serverId, ip }) => `#cloud-config\nhost: ${serverId}.pub.instances.scw.cloud\nip: ${ip}`,
+    }, creds);
+    expect(calls().find(c => c.url.endsWith('/user_data/cloud-init'))?.body).toBe('#cloud-config\nhost: srv-1.pub.instances.scw.cloud\nip: 51.15.1.2');
+  });
 });

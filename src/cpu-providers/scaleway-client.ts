@@ -353,11 +353,14 @@ export class ScalewayClient extends AbstractGpuProvider {
       for (const [key, data] of Object.entries(spec.userDataFiles ?? {})) {
         await this.setUserDataKey(zone, server.id, secretKey, key, data);
       }
-      if (spec.cloudInit) {
+      const cloudInit = spec.cloudInitFor
+        ? spec.cloudInitFor({ serverId: server.id, ip: ipv4Of(server) })
+        : spec.cloudInit;
+      if (cloudInit) {
         // '#!' script or '#cloud-config' YAML go as-is; a bare command list becomes a bash script.
-        const script = spec.cloudInit.startsWith('#')
-          ? spec.cloudInit
-          : `#!/bin/bash\n${spec.cloudInit}\n`;
+        const script = cloudInit.startsWith('#')
+          ? cloudInit
+          : `#!/bin/bash\n${cloudInit}\n`;
         await this.setUserData(zone, server.id, secretKey, script);
       } else if (spec.dockerImage) {
         await this.setUserData(zone, server.id, secretKey, this.buildUserData(spec));

@@ -291,6 +291,9 @@ export interface InstanceSpec {
   tags?: string[];
   /** Scaleway project ID override (else resolve from API key). */
   projectId?: string;
+  /** Scaleway: like `cloudInit`, but rendered after the server exists, for boot scripts that embed the server's own
+   *  id (its default hostname is `<id>.pub.instances.scw.cloud`) or IP. Wins over `cloudInit`. */
+  cloudInitFor?: (server: { serverId: string; ip: string | null }) => string;
   /** Scaleway: extra user_data keys written before power-on (the cloud-init key has a size limit, so large
    *  payloads such as reference audio go in their own keys and the boot script fetches them from the metadata API). */
   userDataFiles?: Record<string, string | Uint8Array>;
