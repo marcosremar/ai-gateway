@@ -102,7 +102,7 @@ export class RailwayClient extends AbstractGpuProvider {
       return body.data;
     } finally {
       try {
-        await Bun.file(qFile).exists() && (await Bun.write(qFile, ''));
+        if (await Bun.file(qFile).exists()) await Bun.write(qFile, '');
       } catch {
         /* ignore */
       }

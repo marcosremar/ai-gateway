@@ -23,6 +23,7 @@ import { normalizeInstanceStatus } from '../gateway/providers/gpu/instance-statu
 const SCW_API = process.env.SCALEWAY_API_BASE || 'https://api.scaleway.com/instance/v1';
 const SCW_IAM_API = process.env.SCALEWAY_IAM_API_BASE || 'https://api.scaleway.com/iam/v1alpha1';
 const SCW_BLOCK_API = process.env.SCALEWAY_BLOCK_API_BASE || 'https://api.scaleway.com/block/v1alpha1';
+const SCW_MARKETPLACE_API = process.env.SCALEWAY_MARKETPLACE_API_BASE || 'https://api.scaleway.com/marketplace/v2';
 
 /** All known Scaleway zones — queried in parallel for listInstances. */
 const KNOWN_ZONES = ['fr-par-1', 'fr-par-2', 'fr-par-3', 'nl-ams-1', 'nl-ams-2', 'nl-ams-3', 'pl-waw-1', 'pl-waw-2', 'pl-waw-3'];
@@ -70,9 +71,9 @@ const DEFAULT_BOT_TYPE = 'DEV1-XL';
 interface ScwServer {
   id: string;
   name: string;
-  state: string; // 'running' | 'stopped' | 'stopping' | 'starting' | 'locked'
+  state: string; // 'running' | 'stopped' | 'stopped in place' | 'stopping' | 'starting' | 'locked'
   public_ip?: { address: string } | null;
-  public_ips?: Array<{ address: string }>;
+  public_ips?: Array<{ id?: string; address: string; family?: string }>;
   commercial_type: string;
   tags?: string[];
   creation_date?: string;
@@ -105,6 +106,28 @@ function isGpuCommercialType(type: string): boolean {
 function volumeIdsFromServer(server: ScwServer): string[] {
   return Object.values(server.volumes ?? {}).map(v => v.id).filter(Boolean);
 }
+
+/** IPv4 first: a routed-IP server lists its IPv6 too, and callers dial the v4 address. */
+function ipv4Of(server: ScwServer): string | null {
+  return server.public_ips?.find(ip => ip.family === 'inet')?.address
+    ?? server.public_ip?.address
+    ?? server.public_ips?.find(ip => !ip.address.includes(':'))?.address
+    ?? null;
+}
+
+/** Firewall rule for `createSecurityGroup` (inbound accept from anywhere on one port). */
+export interface ScalewayFirewallRule {
+  protocol: 'TCP' | 'UDP';
+  port: number;
+}
+
+export interface ScalewayIp {
+  id: string;
+  address: string;
+}
+
+/** Attempts × SCALEWAY_VOLUME_RETRY_MS: SBS volumes only detach some time after terminate (measured up to ~3 min). */
+const VOLUME_DROP_ATTEMPTS = Number(process.env.SCALEWAY_VOLUME_ATTEMPTS ?? 90);
 
 // ── Client ───────────────────────────────────────────────────────────────────
 
@@ -260,7 +283,9 @@ export class ScalewayClient extends AbstractGpuProvider {
     } else if (gpuPath) {
       imageId = process.env.SCALEWAY_GPU_IMAGE || DEFAULT_GPU_IMAGE_UUID;
     } else {
-      imageId = await this.findUbuntuImage(zone, secretKey);
+      // With an SBS root volume the image must be an SBS image compatible with the type (marketplace lookup);
+      // the bot path without a volume keeps the legacy listing.
+      imageId = await this.findUbuntuImage(zone, secretKey, attachVolume ? primary.type : undefined);
     }
 
     const projectId = spec.projectId || await this.resolveProjectId(credentials);
@@ -280,7 +305,7 @@ export class ScalewayClient extends AbstractGpuProvider {
         image: imageId,
         project: projectId,
         tags,
-        dynamic_ip_required: true,
+        dynamic_ip_required: !spec.publicIpIds?.length,
       };
       if (attachVolume && volumeGb != null) {
         body.volumes = {
@@ -288,6 +313,11 @@ export class ScalewayClient extends AbstractGpuProvider {
         };
         body.routed_ip_enabled = true;
       }
+      if (spec.publicIpIds?.length) {
+        body.public_ips = spec.publicIpIds;
+        body.routed_ip_enabled = true;
+      }
+      if (spec.securityGroupId) body.security_group = spec.securityGroupId;
       try {
         createRes = await this.fetchJson<ScwCreateResponse>(
           `${this.zoneUrl(zone)}/servers`,
@@ -320,10 +350,17 @@ export class ScalewayClient extends AbstractGpuProvider {
 
     try {
       // user_data: custom cloud-init takes precedence over docker bot script
-      if (spec.cloudInit) {
-        const script = spec.cloudInit.startsWith('#!')
-          ? spec.cloudInit
-          : `#!/bin/bash\n${spec.cloudInit}\n`;
+      for (const [key, data] of Object.entries(spec.userDataFiles ?? {})) {
+        await this.setUserDataKey(zone, server.id, secretKey, key, data);
+      }
+      const cloudInit = spec.cloudInitFor
+        ? spec.cloudInitFor({ serverId: server.id, ip: ipv4Of(server) })
+        : spec.cloudInit;
+      if (cloudInit) {
+        // '#!' script or '#cloud-config' YAML go as-is; a bare command list becomes a bash script.
+        const script = cloudInit.startsWith('#')
+          ? cloudInit
+          : `#!/bin/bash\n${cloudInit}\n`;
         await this.setUserData(zone, server.id, secretKey, script);
       } else if (spec.dockerImage) {
         await this.setUserData(zone, server.id, secretKey, this.buildUserData(spec));
@@ -350,6 +387,8 @@ export class ScalewayClient extends AbstractGpuProvider {
           pricePerHr: usedType.pricePerHr,
           tags,
           ...(volumeIds.length ? { volumeIds } : {}),
+          ...(spec.publicIpIds?.length ? { publicIpIds: spec.publicIpIds } : {}),
+          ...(server.creation_date ? { createdAt: server.creation_date } : {}),
         },
       };
     } catch (err) {
@@ -403,6 +442,15 @@ export class ScalewayClient extends AbstractGpuProvider {
   }
 
   async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    await this.releaseInstance(instanceId, credentials, { awaitVolumes: true });
+  }
+
+  /**
+   * Terminate the server and delete its SBS volumes (Scaleway never deletes them with the server). With
+   * `awaitVolumes: false` the call returns once the server is gone and the volumes keep retrying in the
+   * background — for hosts that must not block a request for the minutes a volume takes to detach.
+   */
+  async releaseInstance(instanceId: string, credentials: ProviderCredentials, opts: { awaitVolumes: boolean }): Promise<void> {
     const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
     if (!secretKey) throw new Error('Scaleway secret key required');
     const { zone, serverId } = this.decodeId(instanceId);
@@ -443,22 +491,155 @@ export class ScalewayClient extends AbstractGpuProvider {
       }
 
       try {
-        await this.fetchRaw(
+        await this.fetchOk(
           `${this.zoneUrl(zone)}/servers/${serverId}`,
           { method: 'DELETE', headers },
           TIMEOUTS.write,
         );
         this.log.log(`[scaleway] Deleted server ${serverId} in ${zone}`);
       } catch (err) {
-        const msg = this.errMsg(err);
-        if (!msg.includes('404') && !msg.includes('not found')) throw err;
+        if (!(err instanceof FetchError && err.status === 404)) throw err;
       }
     }
 
-    if (volumeIds.length) {
-      await this.dropVolumes(zone, volumeIds, secretKey);
-    }
     this.volumeIdsByInstance.delete(instanceId);
+    if (volumeIds.length) {
+      const dropping = this.dropVolumes(zone, volumeIds, secretKey);
+      if (opts.awaitVolumes) await dropping;
+      else void dropping.catch(err => this.log.warn(`[scaleway] volume cleanup failed: ${this.errMsg(err)}`));
+    }
+  }
+
+  /** One server by id, or `null` when it no longer exists (404). Other errors throw. */
+  async getInstance(instanceId: string, credentials: ProviderCredentials): Promise<GpuInstance | null> {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) throw new Error('Scaleway secret key required');
+    const { zone, serverId } = this.decodeId(instanceId);
+    try {
+      const res = await this.fetchJson<ScwGetResponse>(`${this.zoneUrl(zone)}/servers/${serverId}`,
+        { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
+      return this.toGpuInstance(res.server, zone);
+    } catch (err) {
+      if (err instanceof FetchError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Servers carrying `tag` in the given zones (default: all known zones), optionally scoped to a project.
+   * Unlike `listInstances`, a zone that fails to answer throws: a caller deciding "nothing is running, create
+   * one" must not read a failed zone as empty.
+   */
+  async listInstancesByTag(
+    tag: string,
+    credentials: ProviderCredentials,
+    opts: { zones?: string[]; projectId?: string } = {},
+  ): Promise<GpuInstance[]> {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) throw new Error('Scaleway secret key required');
+    const project = opts.projectId ? `project=${encodeURIComponent(opts.projectId)}&` : '';
+    const lists = await Promise.all((opts.zones ?? KNOWN_ZONES).map(async (zone) => {
+      const res = await this.fetchJson<ScwListResponse>(
+        `${this.zoneUrl(zone)}/servers?${project}tags=${encodeURIComponent(tag)}&per_page=50`,
+        { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
+      return res.servers.map(server => this.toGpuInstance(server, zone));
+    }));
+    return lists.flat();
+  }
+
+  /**
+   * Catalog hourly price (EUR) of a commercial type in a zone, from `products/servers`; `null` when the type is
+   * not sold there. Lets a caller cap spend on the live price instead of a table that goes stale.
+   */
+  async getHourlyPrice(zone: string, commercialType: string, credentials: ProviderCredentials): Promise<number | null> {
+    const secretKey = this.requireSecret(credentials);
+    for (let page = 1; page < 20; page++) {
+      const res = await this.fetchJson<{ servers?: Record<string, { hourly_price?: number }> }>(
+        `${this.zoneUrl(zone)}/products/servers?per_page=100&page=${page}`,
+        { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
+      const entries = Object.entries(res.servers ?? {});
+      const hit = entries.find(([name]) => name === commercialType)?.[1];
+      if (hit) return typeof hit.hourly_price === 'number' && Number.isFinite(hit.hourly_price) ? hit.hourly_price : null;
+      if (entries.length < 100) return null;
+    }
+    return null;
+  }
+
+  // ── Network: reserved routed IPs and security groups ───────────────────
+  // A reserved IP survives poweroff and server deletion, so a DNS name pointing at it stays valid; the
+  // security group is the instance-level firewall. Both are project resources the host keeps and reuses.
+
+  async reserveRoutedIp(zone: string, credentials: ProviderCredentials, opts: { projectId: string; tags?: string[] }): Promise<ScalewayIp> {
+    const secretKey = this.requireSecret(credentials);
+    const res = await this.fetchJson<{ ip: ScalewayIp }>(`${this.zoneUrl(zone)}/ips`, {
+      method: 'POST', headers: this.scwHeaders(secretKey),
+      body: JSON.stringify({ project: opts.projectId, type: 'routed_ipv4', tags: opts.tags ?? [] }),
+    }, TIMEOUTS.write, 'scaleway');
+    return { id: res.ip.id, address: res.ip.address };
+  }
+
+  async listIps(zone: string, credentials: ProviderCredentials, opts: { projectId: string; tag?: string }): Promise<ScalewayIp[]> {
+    const secretKey = this.requireSecret(credentials);
+    const tag = opts.tag ? `&tags=${encodeURIComponent(opts.tag)}` : '';
+    const res = await this.fetchJson<{ ips: ScalewayIp[] }>(`${this.zoneUrl(zone)}/ips?project=${encodeURIComponent(opts.projectId)}${tag}`,
+      { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
+    return res.ips.map(ip => ({ id: ip.id, address: ip.address }));
+  }
+
+  async deleteIp(zone: string, ipId: string, credentials: ProviderCredentials): Promise<void> {
+    await this.fetchOk(`${this.zoneUrl(zone)}/ips/${ipId}`, { method: 'DELETE', headers: this.scwHeaders(this.requireSecret(credentials)) });
+  }
+
+  /** Stateful group: inbound drop by default, each rule an inbound accept from anywhere; outbound accept. */
+  async createSecurityGroup(zone: string, credentials: ProviderCredentials, opts: {
+    projectId: string; name: string; rules: ScalewayFirewallRule[]; tags?: string[]; description?: string;
+  }): Promise<string> {
+    const secretKey = this.requireSecret(credentials);
+    const res = await this.fetchJson<{ security_group: { id: string } }>(`${this.zoneUrl(zone)}/security_groups`, {
+      method: 'POST', headers: this.scwHeaders(secretKey),
+      body: JSON.stringify({
+        name: opts.name, project: opts.projectId, tags: opts.tags ?? [], stateful: true,
+        inbound_default_policy: 'drop', outbound_default_policy: 'accept', description: opts.description ?? '',
+      }),
+    }, TIMEOUTS.write, 'scaleway');
+    const id = res.security_group.id;
+    for (const rule of opts.rules) {
+      await this.fetchJson(`${this.zoneUrl(zone)}/security_groups/${id}/rules`, {
+        method: 'POST', headers: this.scwHeaders(secretKey),
+        body: JSON.stringify({ protocol: rule.protocol, direction: 'inbound', action: 'accept', ip_range: '0.0.0.0/0', dest_port_from: rule.port }),
+      }, TIMEOUTS.write, 'scaleway');
+    }
+    return id;
+  }
+
+  async listSecurityGroups(zone: string, credentials: ProviderCredentials, opts: { projectId: string; name?: string }): Promise<Array<{ id: string; name: string }>> {
+    const secretKey = this.requireSecret(credentials);
+    const name = opts.name ? `&name=${encodeURIComponent(opts.name)}` : '';
+    const res = await this.fetchJson<{ security_groups: Array<{ id: string; name: string }> }>(
+      `${this.zoneUrl(zone)}/security_groups?project=${encodeURIComponent(opts.projectId)}${name}`,
+      { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
+    return res.security_groups.map(g => ({ id: g.id, name: g.name }));
+  }
+
+  async deleteSecurityGroup(zone: string, groupId: string, credentials: ProviderCredentials): Promise<void> {
+    await this.fetchOk(`${this.zoneUrl(zone)}/security_groups/${groupId}`, { method: 'DELETE', headers: this.scwHeaders(this.requireSecret(credentials)) });
+  }
+
+  /** `fetchRaw` returns error responses as-is; writes here must fail loudly (a silently failed user_data PATCH
+   *  boots a machine without its boot script, billing until a watchdog notices). */
+  private async fetchOk(url: string, init: RequestInit, timeout = TIMEOUTS.write): Promise<Response> {
+    const res = await this.fetchRaw(url, init, timeout);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new FetchError(`scaleway HTTP ${res.status}: ${body.substring(0, 300)}`, res.status, body);
+    }
+    return res;
+  }
+
+  private requireSecret(credentials: ProviderCredentials): string {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) throw new Error('Scaleway secret key required');
+    return secretKey;
   }
 
   /**
@@ -468,7 +649,7 @@ export class ScalewayClient extends AbstractGpuProvider {
   private async dropVolumes(zone: string, ids: string[], secretKey: string): Promise<void> {
     const remaining = [...ids];
     const retryMs = Number(process.env.SCALEWAY_VOLUME_RETRY_MS ?? 2_000);
-    const maxAttempts = 30;
+    const maxAttempts = VOLUME_DROP_ATTEMPTS;
     for (let attempt = 0; attempt < maxAttempts && remaining.length; attempt++) {
       if (attempt > 0) await new Promise(r => setTimeout(r, retryMs));
       for (const id of [...remaining]) {
@@ -551,7 +732,7 @@ export class ScalewayClient extends AbstractGpuProvider {
         TIMEOUTS.read,
         'scaleway',
       );
-      const ip = res.server.public_ip?.address || res.server.public_ips?.[0]?.address;
+      const ip = ipv4Of(res.server);
       return ip ? `http://${ip}:8080` : null;
     } catch {
       return null;
@@ -561,8 +742,9 @@ export class ScalewayClient extends AbstractGpuProvider {
   // ── Helpers ────────────────────────────────────────────────────────────
 
   private toGpuInstance(s: ScwServer, zone: string): GpuInstance {
-    const ip = s.public_ip?.address || s.public_ips?.[0]?.address;
+    const ip = ipv4Of(s);
     const volumeIds = volumeIdsFromServer(s);
+    const publicIpIds = (s.public_ips ?? []).map(p => p.id).filter((id): id is string => !!id);
     return {
       instanceId: this.encodeId(zone, s.id),
       instanceName: s.name,
@@ -574,7 +756,10 @@ export class ScalewayClient extends AbstractGpuProvider {
         zone,
         commercialType: s.commercial_type,
         tags: s.tags,
+        state: s.state,
+        ...(s.creation_date ? { createdAt: s.creation_date } : {}),
         ...(volumeIds.length ? { volumeIds } : {}),
+        ...(publicIpIds.length ? { publicIpIds } : {}),
       },
     };
   }
@@ -601,7 +786,7 @@ export class ScalewayClient extends AbstractGpuProvider {
           { headers: this.scwHeaders(secretKey) },
           TIMEOUTS.read,
         );
-        const ip = res.server.public_ip?.address || res.server.public_ips?.[0]?.address;
+        const ip = ipv4Of(res.server);
         if (ip) return ip;
       } catch {
         // Server may not be ready yet
@@ -611,9 +796,18 @@ export class ScalewayClient extends AbstractGpuProvider {
     return null;
   }
 
+  private async setUserDataKey(zone: string, serverId: string, secretKey: string, key: string, data: string | Uint8Array): Promise<void> {
+    if (!/^[A-Za-z0-9._-]+$/.test(key) || key === 'cloud-init') throw new Error(`invalid Scaleway user_data key '${key}'`);
+    await this.fetchOk(
+      `${this.zoneUrl(zone)}/servers/${serverId}/user_data/${key}`,
+      { method: 'PATCH', headers: { 'X-Auth-Token': secretKey, 'Content-Type': 'text/plain' }, body: data as BodyInit },
+      TIMEOUTS.write,
+    );
+  }
+
   private async setUserData(zone: string, serverId: string, secretKey: string, data: string): Promise<void> {
     // Scaleway user_data is set via a special endpoint (not JSON — raw text)
-    await this.fetchRaw(
+    await this.fetchOk(
       `${this.zoneUrl(zone)}/servers/${serverId}/user_data/cloud-init`,
       {
         method: 'PATCH',
@@ -677,7 +871,22 @@ docker run -d \\
    * Find the Docker InstantApp image for the given zone.
    * Falls back to a known UUID if the API call fails.
    */
-  private async findUbuntuImage(zone: string, secretKey: string): Promise<string> {
+  private async findUbuntuImage(zone: string, secretKey: string, commercialType?: string): Promise<string> {
+    // Marketplace local image compatible with this commercial type, SBS flavour (the create attaches sbs_volume).
+    if (commercialType) {
+      try {
+        const res = await this.fetchJson<{ local_images: Array<{ id: string; compatible_commercial_types?: string[]; type?: string }> }>(
+          `${SCW_MARKETPLACE_API}/local-images?image_label=ubuntu_noble&zone=${zone}&page_size=100`,
+          { headers: this.scwHeaders(secretKey) },
+          TIMEOUTS.read,
+        );
+        const compatible = res.local_images.filter(i => i.compatible_commercial_types?.includes(commercialType));
+        const pick = compatible.find(i => (i.type ?? 'instance_sbs') === 'instance_sbs') ?? compatible[0];
+        if (pick) return pick.id;
+      } catch {
+        // fall through to the legacy image listing
+      }
+    }
     try {
       const res = await this.fetchJson<{ images: Array<{ id: string; name: string }> }>(
         `${this.zoneUrl(zone)}/images?arch=x86_64&per_page=50`,
