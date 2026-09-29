@@ -524,6 +524,13 @@ describe('handleGpuTerminate', () => {
     expect(fnBody).toContain('stopGpuMonitoring');
   });
 
+  it('cancels an in-progress deploy instead of refusing with 409 (instances bill while it boots)', () => {
+    const fnStart = handlersSource.indexOf('export async function handleGpuTerminate');
+    const fnBody = handlersSource.slice(fnStart, fnStart + 2500);
+    expect(fnBody).toMatch(/inProgress[\s\S]*setDeployCancelled\(true\)[\s\S]*deployPromise/);
+    expect(fnBody).toContain("'creating'");
+  });
+
   it('#136 releases deploy lock', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuTerminate');
     const fnBody = handlersSource.slice(fnStart, fnStart + 10000);

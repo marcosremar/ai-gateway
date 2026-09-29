@@ -15,6 +15,7 @@ import {
   setDeployTensordockAuthId, setDeployModalApiKey, setDeployHyperstackApiKey,
   setGpuHealthy, setLastRequestTime,
   deploymentSM, updateGpuModelWarmth,
+  getDeployAbortSignal,
 } from './state';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
 import { extractAppHealthError, runGlbSmokeTest, validateEndpointApiContract } from './gpu-poll-health';
@@ -230,6 +231,8 @@ export async function startDeployRace(
           // Deploy-level race already creates N instances; pin the internal Vast
           // offer-hedge to 1 so each slot spawns exactly one instance (no 2N blow-up).
           raceCount: 1,
+          // Cancel (terminate / redeploy) stops the provider mid-boot and destroys the instance.
+          signal: getDeployAbortSignal(),
           ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
           ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
           ...(extra.strictFastBoot ? { strictFastBoot: extra.strictFastBoot } : {}),

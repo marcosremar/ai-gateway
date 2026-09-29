@@ -1445,11 +1445,20 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   setRequestIdHeader(res, requestId);
   log.log(`GPU terminate requested`);
 
-  // Acquire lock to prevent concurrent lifecycle operations
+  // Acquire lock to prevent concurrent lifecycle operations. A deploy that is
+  // still booting holds the lock for minutes while its instances bill — terminate
+  // must be able to cancel it (the abort signal makes the provider destroy them).
   if (deployLock) {
-    res.writeHead(409, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
-    return;
+    const inProgress = ['searching', 'creating', 'booting', 'installing'].includes(deployState.status);
+    if (!inProgress || finetuneDeployActive) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
+      return;
+    }
+    log.log(`[req=${requestId}] Terminate during deploy (status=${deployState.status}) — cancelling it first`);
+    setDeployCancelled(true);
+    stopGpuMonitoring();
+    if (deployPromise) await Promise.race([deployPromise, new Promise(r => setTimeout(r, 15_000))]);
   }
   setDeployLock(true);
 
