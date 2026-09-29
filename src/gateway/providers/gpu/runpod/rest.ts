@@ -115,15 +115,16 @@ export function createRunpodRest(opts: {
      * to 160 characters, enough to classify "no instances available" without carrying secrets around.
      */
     async createPod(body: Record<string, unknown>): Promise<
-      { ok: true; status: number; pod: RunpodPod; retryAfterS: number | null } | { ok: false; status: number; body: string; retryAfterS: number | null }
+      { ok: true; status: number; pod: RunpodPod & { id: string }; retryAfterS: number | null } | { ok: false; status: number; body: string; retryAfterS: number | null }
     > {
       const res = await request("/pods", { method: "POST", body: JSON.stringify(body) });
       const raw = await res.text();
       const retryAfterS = runpodRetryAfterS(res.headers);
       if (!res.ok) return { ok: false, status: res.status, body: raw.slice(0, 160), retryAfterS };
       const pod = JSON.parse(raw) as RunpodPod;
-      if (!pod.id) return { ok: false, status: res.status, body: "sem id", retryAfterS };
-      return { ok: true, status: res.status, pod, retryAfterS };
+      const id = pod.id;
+      if (!id) return { ok: false, status: res.status, body: "sem id", retryAfterS };
+      return { ok: true, status: res.status, pod: { ...pod, id }, retryAfterS };
     },
     /** GPU catalog with the cheapest on-demand price and stock (GraphQL `gpuTypes.lowestPrice`); types without a price are skipped. */
     async gpuTypes(): Promise<RunpodGpuType[]> {
