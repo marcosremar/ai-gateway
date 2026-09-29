@@ -16,8 +16,7 @@
  *
  * This script runs locally on your laptop. It:
  *
- *   1. Reads R2 credentials from env (or hardcoded fallback for the
- *      `REDACTED_fallback_1c7a8228` bucket).
+ *   1. Reads R2 credentials from env (required — no hardcoded fallbacks).
  *   2. Uses `createR2Store()` from `@parle/ai-gateway/object-storage` to
  *      generate two presigned URLs (PUT for upload, GET for download).
  *      Both have a 2-hour expiry to comfortably outlast the bench.
@@ -34,7 +33,8 @@
  *
  * ── Usage ────────────────────────────────────────────────────────────────
  *
- *     bun scripts/r2-vs-hf-bench.ts
+ *     R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… \
+ *       bun scripts/r2-vs-hf-bench.ts
  *
  * Then follow the printed instructions to scp+ssh+run on your Vast.ai pod.
  */
@@ -46,22 +46,28 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+function requireEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    console.error(`[bench] ERROR: missing required env ${name}`);
+    process.exit(1);
+  }
+  return value;
+}
+
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const R2 = {
-  accountId: process.env.R2_ACCOUNT_ID ?? 'REDACTED_fallback_47b92696',
-  bucket: process.env.R2_BUCKET ?? 'REDACTED_fallback_1c7a8228',
-  accessKeyId: process.env.R2_ACCESS_KEY_ID ?? 'REDACTED_fallback_c0834adb',
-  secretAccessKey:
-    process.env.R2_SECRET_ACCESS_KEY ??
-    'REDACTED_fallback_2969f4f3',
+  accountId: requireEnv('R2_ACCOUNT_ID'),
+  bucket: process.env.R2_BUCKET?.trim() || 'REDACTED_fallback_1c7a8228',
+  accessKeyId: requireEnv('R2_ACCESS_KEY_ID'),
+  secretAccessKey: requireEnv('R2_SECRET_ACCESS_KEY'),
 };
 
 // Public r2.dev URL — only the GET path uses this. The PUT (upload) still
 // goes through the presigned S3 endpoint because r2.dev is read-only.
 // Set R2_PUBLIC_BASE='' to fall back to presigned-S3 for both directions.
-const R2_PUBLIC_BASE =
-  process.env.R2_PUBLIC_BASE ?? 'REDACTED_fallback_2f30f3e6';
+const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE ?? '';
 
 // The model we benchmark with — same one babelcast-subtitle pre-bakes today.
 // Q8_0 GGUF is ~5 GB, large enough to be CDN-bound rather than handshake-bound.

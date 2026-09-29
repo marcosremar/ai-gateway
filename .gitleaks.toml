@@ -8,6 +8,7 @@ description = "Repository fixtures and documentation may contain non-secret plac
 paths = [
   '''^\.env\.example$''',
   '''^\.env\.test$''',
+  '''^\.env\.ci$''',
   '''^docs/''',
   '''^README\.md$''',
   '''^__tests__/''',
@@ -19,5 +20,7 @@ regexes = [
   '''gw_loadtest_2026''',
   '''mock[_-]?api[_-]?key''',
   '''test[_-]?api[_-]?key''',
-  '''your[_-]?(api|token|secret)[_-]?key'''
+  '''dckr_pat_(test|fallback|preferred|shouldnotuse)''',
+  '''your[_-]?(api|token|secret)[_-]?key''',
+  '''key:demo-client-id-xxxx'''
 ]
