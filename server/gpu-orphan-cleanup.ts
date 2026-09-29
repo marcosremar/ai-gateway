@@ -225,9 +225,12 @@ const modalIdleSince = new Map<string, number>();
 
 function isModalIdleCandidate(status: string): boolean {
   // Modal "Tasks" means a container/process exists, not necessarily that a
-  // user request is in flight. Treat billable apps as idle candidates
-  // unless the gateway is actively tracking them.
-  if (isBillableInstanceStatus(status)) return true;
+  // user request is in flight. Treat live apps as idle candidates unless
+  // the gateway is actively tracking them — but NOT while still booting
+  // (initializing): those must not accrue idle grace until deployed/running.
+  const canonical = normalizeInstanceStatus(status);
+  if (canonical === 'booting') return false;
+  if (canonical === 'running') return true;
   const normalized = status.toLowerCase();
   return normalized.startsWith('ephemeral') || normalized.includes('detached');
 }

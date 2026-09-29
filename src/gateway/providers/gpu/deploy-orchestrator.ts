@@ -8,6 +8,7 @@
 import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import path from 'path';
 import type { GpuProviderClient, ProviderCredentials } from './types';
+import { normalizeInstanceStatus } from './instance-status';
 
 // ── Provider Name & Tier ────────────────────────────────────────────────────
 
@@ -261,7 +262,9 @@ export async function cleanupProviderInstances(
     const statusSet = new Set(activeStatuses.map(s => s.toLowerCase()));
     const prefixes = namePrefixes && namePrefixes.length > 0 ? namePrefixes : null;
     const active = instances.filter(i => {
-      const statusMatch = statusSet.has(i.status?.toLowerCase() ?? '');
+      // Accept raw or canonical statuses (e.g. Modal "deployed" → "running").
+      const raw = i.status?.toLowerCase() ?? '';
+      const statusMatch = statusSet.has(raw) || statusSet.has(normalizeInstanceStatus(i.status));
       if (!statusMatch) return false;
       if (!prefixes) return true;
       const name = i.instanceName || '';
