@@ -1,12 +1,13 @@
 /**
- * Scaleway Instance provider — cheap x86 CPU instances.
+ * Scaleway Instance provider — cheap x86 CPU instances + GPU (L4) workloads.
  *
  * API docs: https://www.scaleway.com/en/developers/api/instances/
+ * Block volumes: https://www.scaleway.com/en/developers/api/block/
  * Auth: X-Auth-Token header with the Scaleway secret key.
  * Pricing: DEV1-L (4 vCPU, 8GB) = €0.042/hr ≈ $0.0007/min
+ *          L4-1-24G = €0.7875/hr (fr-par-2)
  *
- * Used primarily for bot deployment (CPU-only Chromium pods) as a cheaper
- * alternative to RunPod CPU pods ($0.12/hr vs €0.042/hr).
+ * Used for bot deployment (CPU-only Chromium pods) and GPU hosts (Qwen TTS / cloud-play).
  *
  * Region/zone is passed via spec.region (e.g. 'fr-par-1', 'nl-ams-1').
  * Instance IDs are stored as 'zone:serverId' so all management ops know which zone to target.
@@ -21,6 +22,7 @@ import { normalizeInstanceStatus } from '../gateway/providers/gpu/instance-statu
 
 const SCW_API = process.env.SCALEWAY_API_BASE || 'https://api.scaleway.com/instance/v1';
 const SCW_IAM_API = process.env.SCALEWAY_IAM_API_BASE || 'https://api.scaleway.com/iam/v1alpha1';
+const SCW_BLOCK_API = process.env.SCALEWAY_BLOCK_API_BASE || 'https://api.scaleway.com/block/v1alpha1';
 
 /** All known Scaleway zones — queried in parallel for listInstances. */
 const KNOWN_ZONES = ['fr-par-1', 'fr-par-2', 'fr-par-3', 'nl-ams-1', 'nl-ams-2', 'nl-ams-3', 'pl-waw-1', 'pl-waw-2', 'pl-waw-3'];
@@ -30,6 +32,22 @@ const FALLBACK_ZONE = 'fr-par-1';
 
 /** Ubuntu 24.04 Noble Numbat x86_64 image UUID (fallback when image lookup fails). */
 const UBUNTU_IMAGE_UUID = '2d6e9935-3dcd-49bd-a445-89ee55f3d781';
+
+/**
+ * Ubuntu Noble GPU OS (passthrough) in fr-par-2 — default for L4 workloads.
+ * Override via SCALEWAY_GPU_IMAGE or spec.imageId.
+ */
+const DEFAULT_GPU_IMAGE_UUID = '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa';
+
+/** Default SBS root volume size (GB) for GPU commercial types. */
+const DEFAULT_GPU_VOLUME_GB = 60;
+
+/** Scaleway GPU commercial types (table price €/hr, fr-par-2 as of 2026-09). */
+const GPU_TYPES: Array<{ type: string; pricePerHr: number }> = [
+  { type: 'L4-1-24G', pricePerHr: 0.7875 },
+  // Other GPU types for documentation / future use:
+  // L40S-1-48G, H100-1-80G, etc. — add when needed with current table prices.
+];
 
 /** Scaleway commercial types sorted by price (cheapest first). */
 const COMMERCIAL_TYPES: Array<{ type: string; vcpus: number; ramGb: number; pricePerHr: number }> = [
@@ -58,6 +76,7 @@ interface ScwServer {
   commercial_type: string;
   tags?: string[];
   creation_date?: string;
+  volumes?: Record<string, { id: string }>;
 }
 
 interface ScwCreateResponse {
@@ -72,11 +91,29 @@ interface ScwGetResponse {
   server: ScwServer;
 }
 
+interface TypeCandidate {
+  type: string;
+  vcpus?: number;
+  ramGb?: number;
+  pricePerHr: number;
+}
+
+function isGpuCommercialType(type: string): boolean {
+  return GPU_TYPES.some(t => t.type === type) || /L4/i.test(type);
+}
+
+function volumeIdsFromServer(server: ScwServer): string[] {
+  return Object.values(server.volumes ?? {}).map(v => v.id).filter(Boolean);
+}
+
 // ── Client ───────────────────────────────────────────────────────────────────
 
 export class ScalewayClient extends AbstractGpuProvider {
   readonly providerId = 'scaleway';
   readonly bootTimeSecs = 90; // ~60-90s for small instances
+
+  /** In-memory volume IDs by encoded instance id (for destroy when meta not passed). */
+  private volumeIdsByInstance = new Map<string, string[]>();
 
   constructor(opts?: AbstractGpuProviderOptions) {
     super(opts);
@@ -94,6 +131,10 @@ export class ScalewayClient extends AbstractGpuProvider {
 
   private zoneUrl(zone: string): string {
     return `${SCW_API}/zones/${zone}`;
+  }
+
+  private blockZoneUrl(zone: string): string {
+    return `${SCW_BLOCK_API}/zones/${zone}`;
   }
 
   /** Encode zone + server UUID into a composite instanceId. */
@@ -153,6 +194,35 @@ export class ScalewayClient extends AbstractGpuProvider {
     return projectId;
   }
 
+  /** Resolve commercial type candidates from InstanceSpec. */
+  private resolveTypeCandidates(spec: InstanceSpec): TypeCandidate[] {
+    if (spec.commercialType) {
+      const gpu = GPU_TYPES.find(t => t.type === spec.commercialType);
+      if (gpu) return [gpu];
+      const cpu = COMMERCIAL_TYPES.find(t => t.type === spec.commercialType);
+      if (cpu) return [cpu];
+      return [{ type: spec.commercialType, pricePerHr: 0 }];
+    }
+
+    const wantsL4 = (spec.gpuTypes ?? []).some(g => /L4/i.test(g));
+    if (wantsL4) {
+      const l4 = GPU_TYPES.find(t => t.type === 'L4-1-24G')!;
+      return [l4];
+    }
+
+    // CPU bot ladder — largest RAM first with quota fallback
+    const minRam = spec.ramGb ?? 12;
+    const candidates = COMMERCIAL_TYPES
+      .filter(t => t.ramGb >= Math.min(minRam, 8))
+      .sort((a, b) => b.ramGb - a.ramGb);
+    if (candidates.length === 0) {
+      const defaultType = COMMERCIAL_TYPES.find(t => t.type === DEFAULT_BOT_TYPE);
+      if (!defaultType) throw new Error('No Scaleway instance type available');
+      return [defaultType];
+    }
+    return candidates;
+  }
+
   // ── Instance lifecycle ─────────────────────────────────────────────────
 
   async createInstance(
@@ -170,47 +240,61 @@ export class ScalewayClient extends AbstractGpuProvider {
     const zone = spec.region || FALLBACK_ZONE;
     const headers = this.scwHeaders(secretKey);
 
-    // Pick the best type that meets RAM requirements, with quota fallback
-    const minRam = spec.ramGb ?? 12;
-    // Sort candidates: prefer types that meet RAM, sorted by RAM descending
-    const candidates = COMMERCIAL_TYPES
-      .filter(t => t.ramGb >= Math.min(minRam, 8)) // at least 8GB
-      .sort((a, b) => b.ramGb - a.ramGb);
-    if (candidates.length === 0) {
-      const defaultType = COMMERCIAL_TYPES.find(t => t.type === DEFAULT_BOT_TYPE);
-      if (!defaultType) throw new Error('No Scaleway instance type available');
-      candidates.push(defaultType);
+    const candidates = this.resolveTypeCandidates(spec);
+    const primary = candidates[0];
+    const gpuPath = isGpuCommercialType(primary.type);
+    const attachVolume = spec.volumeGb != null || gpuPath;
+    const volumeGb = spec.volumeGb ?? (gpuPath ? DEFAULT_GPU_VOLUME_GB : undefined);
+
+    const name = spec.label || `babelcast-bot-${Date.now()}`;
+    const tags = [
+      'babelcast',
+      ...(gpuPath ? ['gpu'] : ['bot']),
+      ...(spec.tags ?? []),
+    ];
+
+    // Image: explicit override → GPU default → Ubuntu lookup for CPU
+    let imageId: string;
+    if (spec.imageId != null && spec.imageId !== '') {
+      imageId = String(spec.imageId);
+    } else if (gpuPath) {
+      imageId = process.env.SCALEWAY_GPU_IMAGE || DEFAULT_GPU_IMAGE_UUID;
+    } else {
+      imageId = await this.findUbuntuImage(zone, secretKey);
     }
-    const ct = candidates[0];
 
-    const name = `babelcast-bot-${Date.now()}`;
-    const tags = ['babelcast', 'bot'];
+    const projectId = spec.projectId || await this.resolveProjectId(credentials);
 
-    // Find the Docker InstantApp image or use Ubuntu
-    const imageId = await this.findUbuntuImage(zone, secretKey);
-
-    // Resolve the project ID from the API key
-    const projectId = await this.resolveProjectId(credentials);
-
-    // Try candidates in order (largest RAM first), fallback on quota errors
+    // Try candidates in order; GPU / explicit commercialType has a single candidate
     let createRes: ScwCreateResponse | null = null;
-    let usedType = ct;
+    let usedType = primary;
     for (const candidate of candidates) {
-      this.log.log(`[scaleway] Trying ${candidate.type} (${candidate.vcpus} vCPU, ${candidate.ramGb}GB) in ${zone}...`);
+      this.log.log(
+        candidate.vcpus != null
+          ? `[scaleway] Trying ${candidate.type} (${candidate.vcpus} vCPU, ${candidate.ramGb}GB) in ${zone}...`
+          : `[scaleway] Trying ${candidate.type} in ${zone}...`,
+      );
+      const body: Record<string, unknown> = {
+        name,
+        commercial_type: candidate.type,
+        image: imageId,
+        project: projectId,
+        tags,
+        dynamic_ip_required: true,
+      };
+      if (attachVolume && volumeGb != null) {
+        body.volumes = {
+          0: { size: volumeGb * 1e9, volume_type: 'sbs_volume' },
+        };
+        body.routed_ip_enabled = true;
+      }
       try {
         createRes = await this.fetchJson<ScwCreateResponse>(
           `${this.zoneUrl(zone)}/servers`,
           {
             method: 'POST',
             headers,
-            body: JSON.stringify({
-              name,
-              commercial_type: candidate.type,
-              image: imageId,
-              project: projectId,
-              tags,
-              dynamic_ip_required: true,
-            }),
+            body: JSON.stringify(body),
           },
           TIMEOUTS.create,
           'scaleway',
@@ -229,32 +313,51 @@ export class ScalewayClient extends AbstractGpuProvider {
     if (!createRes) throw new Error('No Scaleway instance type available');
 
     const server = createRes.server;
-    this.log.log(`[scaleway] Server created: ${server.id} (${usedType.type})`);
+    const volumeIds = volumeIdsFromServer(server);
+    const encodedId = this.encodeId(zone, server.id);
+    if (volumeIds.length) this.volumeIdsByInstance.set(encodedId, volumeIds);
+    this.log.log(`[scaleway] Server created: ${server.id} (${usedType.type})${volumeIds.length ? ` volumes=[${volumeIds.join(',')}]` : ''}`);
 
-    // Step 2: Set user_data (cloud-init) to pull and run the Docker image
-    if (spec.dockerImage) {
-      const userData = this.buildUserData(spec);
-      await this.setUserData(zone, server.id, secretKey, userData);
+    try {
+      // user_data: custom cloud-init takes precedence over docker bot script
+      if (spec.cloudInit) {
+        const script = spec.cloudInit.startsWith('#!')
+          ? spec.cloudInit
+          : `#!/bin/bash\n${spec.cloudInit}\n`;
+        await this.setUserData(zone, server.id, secretKey, script);
+      } else if (spec.dockerImage) {
+        await this.setUserData(zone, server.id, secretKey, this.buildUserData(spec));
+      }
+
+      await this.serverAction(zone, server.id, 'poweron', secretKey);
+      this.log.log(`[scaleway] Server ${server.id} powering on...`);
+
+      const ip = await this.waitForIp(zone, server.id, secretKey);
+      const endpoint = ip ? `http://${ip}:8080` : '';
+
+      this.log.log(`[scaleway] Server ready: ${server.id} at ${ip || 'no-ip'} (€${usedType.pricePerHr}/hr)`);
+
+      return {
+        instanceId: encodedId,
+        instanceName: name,
+        endpoint,
+        ipAddress: ip || undefined,
+        status: normalizeInstanceStatus('starting'),
+        providerMeta: {
+          provider: 'scaleway',
+          zone,
+          commercialType: usedType.type,
+          pricePerHr: usedType.pricePerHr,
+          tags,
+          ...(volumeIds.length ? { volumeIds } : {}),
+        },
+      };
+    } catch (err) {
+      // Best-effort cleanup of server + SBS volumes (like babylon cloud-play)
+      this.log.warn(`[scaleway] create failed after server ${server.id}; cleaning up: ${this.errMsg(err)}`);
+      await this.deleteInstance(encodedId, credentials).catch(() => {});
+      throw err;
     }
-
-    // Step 3: Power on the server
-    await this.serverAction(zone, server.id, 'poweron', secretKey);
-    this.log.log(`[scaleway] Server ${server.id} powering on...`);
-
-    // Step 4: Wait for public IP
-    const ip = await this.waitForIp(zone, server.id, secretKey);
-    const endpoint = ip ? `http://${ip}:8080` : '';
-
-    this.log.log(`[scaleway] Server ready: ${server.id} at ${ip || 'no-ip'} (€${usedType.pricePerHr}/hr)`);
-
-    return {
-      instanceId: this.encodeId(zone, server.id),
-      instanceName: name,
-      endpoint,
-      ipAddress: ip || undefined,
-      status: normalizeInstanceStatus('starting'),
-      providerMeta: { provider: 'scaleway', zone, commercialType: usedType.type, pricePerHr: usedType.pricePerHr },
-    };
   }
 
   async discoverInstance(
@@ -305,30 +408,92 @@ export class ScalewayClient extends AbstractGpuProvider {
     const { zone, serverId } = this.decodeId(instanceId);
     const headers = this.scwHeaders(secretKey);
 
+    // Collect volume IDs before the server disappears (SBS volumes are NOT auto-deleted)
+    let volumeIds = this.volumeIdsByInstance.get(instanceId) ?? [];
+    try {
+      const res = await this.fetchJson<ScwGetResponse>(
+        `${this.zoneUrl(zone)}/servers/${serverId}`,
+        { headers },
+        TIMEOUTS.read,
+        'scaleway',
+      );
+      const fromServer = volumeIdsFromServer(res.server);
+      if (fromServer.length) volumeIds = fromServer;
+    } catch {
+      // Server may already be gone — keep cached IDs
+    }
+
     // Try to terminate first (force poweroff + delete)
+    let serverGone = false;
     try {
       await this.serverAction(zone, serverId, 'terminate', secretKey);
       this.log.log(`[scaleway] Terminated server ${serverId} in ${zone}`);
-      return;
+      serverGone = true;
     } catch {
       // terminate action may not work if server is in certain states
     }
 
-    // Fallback: poweroff then delete
-    try {
-      await this.serverAction(zone, serverId, 'poweroff', secretKey);
-      // Wait briefly for poweroff
-      await new Promise(r => setTimeout(r, 5000));
-    } catch {
-      // May already be stopped
+    if (!serverGone) {
+      // Fallback: poweroff then delete
+      try {
+        await this.serverAction(zone, serverId, 'poweroff', secretKey);
+        await new Promise(r => setTimeout(r, 5000));
+      } catch {
+        // May already be stopped
+      }
+
+      try {
+        await this.fetchRaw(
+          `${this.zoneUrl(zone)}/servers/${serverId}`,
+          { method: 'DELETE', headers },
+          TIMEOUTS.write,
+        );
+        this.log.log(`[scaleway] Deleted server ${serverId} in ${zone}`);
+      } catch (err) {
+        const msg = this.errMsg(err);
+        if (!msg.includes('404') && !msg.includes('not found')) throw err;
+      }
     }
 
-    await this.fetchRaw(
-      `${this.zoneUrl(zone)}/servers/${serverId}`,
-      { method: 'DELETE', headers },
-      TIMEOUTS.write,
-    );
-    this.log.log(`[scaleway] Deleted server ${serverId} in ${zone}`);
+    if (volumeIds.length) {
+      await this.dropVolumes(zone, volumeIds, secretKey);
+    }
+    this.volumeIdsByInstance.delete(instanceId);
+  }
+
+  /**
+   * Delete SBS volumes via block/v1alpha1. Retries while volumes are still
+   * attached (brief window after terminate). Does not throw if volumes linger.
+   */
+  private async dropVolumes(zone: string, ids: string[], secretKey: string): Promise<void> {
+    const remaining = [...ids];
+    const retryMs = Number(process.env.SCALEWAY_VOLUME_RETRY_MS ?? 2_000);
+    const maxAttempts = 30;
+    for (let attempt = 0; attempt < maxAttempts && remaining.length; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, retryMs));
+      for (const id of [...remaining]) {
+        try {
+          const res = await this.fetchRaw(
+            `${this.blockZoneUrl(zone)}/volumes/${id}`,
+            {
+              method: 'DELETE',
+              headers: { 'X-Auth-Token': secretKey },
+            },
+            TIMEOUTS.write,
+          );
+          if (res.ok || res.status === 404) {
+            remaining.splice(remaining.indexOf(id), 1);
+          }
+        } catch {
+          // Keep retrying
+        }
+      }
+    }
+    if (remaining.length) {
+      this.log.warn(`[scaleway] volume(s) ${remaining.join(',')} not deleted (still attached?)`);
+    } else if (ids.length) {
+      this.log.log(`[scaleway] Deleted ${ids.length} SBS volume(s)`);
+    }
   }
 
   async getInstanceStatus(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
@@ -397,13 +562,20 @@ export class ScalewayClient extends AbstractGpuProvider {
 
   private toGpuInstance(s: ScwServer, zone: string): GpuInstance {
     const ip = s.public_ip?.address || s.public_ips?.[0]?.address;
+    const volumeIds = volumeIdsFromServer(s);
     return {
       instanceId: this.encodeId(zone, s.id),
       instanceName: s.name,
       endpoint: ip ? `http://${ip}:8080` : '',
       ipAddress: ip || undefined,
       status: normalizeInstanceStatus(s.state),
-      providerMeta: { provider: 'scaleway', zone, commercialType: s.commercial_type, tags: s.tags },
+      providerMeta: {
+        provider: 'scaleway',
+        zone,
+        commercialType: s.commercial_type,
+        tags: s.tags,
+        ...(volumeIds.length ? { volumeIds } : {}),
+      },
     };
   }
 

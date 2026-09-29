@@ -85,6 +85,8 @@ export interface ScalewayProviderMeta {
   commercialType?: string;
   pricePerHr?: number;
   tags?: string[];
+  /** SBS volume IDs attached at create (deleted on destroy). */
+  volumeIds?: string[];
   [key: string]: unknown;
 }
 
@@ -230,6 +232,13 @@ export interface InstanceSpec {
   /** Vast.ai-only: offer search mode. 'high_quality' (default) keeps the
    *  reliability-tier filter; 'full' widens the search to all rentable offers. */
   searchMode?: 'high_quality' | 'full';
+  /**
+   * Vast.ai-only: offer quality policy.
+   * - `'default'` — existing search + relaxation (inet_down floor may be ≤500 when unset)
+   * - `'desktop'` — babylon desktop floor: reliability ≥ 0.95, inet_down > 1000 Mbps,
+   *   max ~$0.20/hr (`maxPricePerHr` or default). Does not relax below those floors.
+   */
+  offerPolicy?: 'default' | 'desktop';
   /** Vast.ai-only: opt-in to deverified/unverified hosts when no verified offer is rentable.
    *  Trade-off: lower availability blocker, but host may be reclaimed mid-boot.
    *  Default false (verified-only, safer). */
@@ -259,14 +268,22 @@ export interface InstanceSpec {
    *  Allows callers to broadcast progress updates to show the user
    *  that creation is still in progress (e.g., "Pulling image... 45s"). */
   onPollProgress?: (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => void;
-  /** Hyperstack-only: pin the VM create to a specific Custom OS Image by id
-   *  (promoted from a snapshot via `createImageFromSnapshot`). Preferred over
-   *  `imageName` since it sidesteps name-collisions in region-scoped listings.
-   *  When both are set, `imageId` wins. Other providers ignore this field. */
-  imageId?: number;
+  /** Image override. Hyperstack: numeric Custom OS Image id. Scaleway: marketplace
+   *  image UUID string. Preferred over `imageName` where both apply. */
+  imageId?: string | number;
   /** Hyperstack-only: pin the VM create to a specific image by name. Useful
    *  for ad-hoc testing; most deploys should use `imageId` instead. */
   imageName?: string;
+  /** Scaleway commercial type override (e.g. 'L4-1-24G', 'DEV1-XL'). */
+  commercialType?: string;
+  /** Raw cloud-init / boot script (bash). When set, used instead of docker bot user-data. */
+  cloudInit?: string;
+  /** Scaleway SBS root volume size in GB. When set (or commercialType is GPU), attach sbs_volume. */
+  volumeGb?: number;
+  /** Extra tags for the instance (merged with defaults). */
+  tags?: string[];
+  /** Scaleway project ID override (else resolve from API key). */
+  projectId?: string;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────
