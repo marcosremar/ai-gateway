@@ -110,6 +110,9 @@ function isPrivateIp(ip: string): boolean {
   return false;
 }
 
+/** Server-side fetch size for listOffers when a client-side geo filter applies. */
+const VAST_GEO_FETCH_LIMIT = 1000;
+
 /** Max IPs to track in _recentlyUsedIps before pruning (prevents memory leak). */
 const MAX_RECENTLY_USED_IPS = 200;
 
@@ -2473,9 +2476,14 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     const { apiKey } = credentials;
     const headers = this.jsonHeaders(apiKey);
     const limit = options.limit ?? 100;
+    // The geo filter below runs client-side, so a small server-side limit would
+    // return the N cheapest offers worldwide and then drop most of them
+    // (limit=10 near Lyon → 1 offer). Over-fetch when a region is set and
+    // truncate after filtering.
+    const fetchLimit = options.region ? Math.max(limit, VAST_GEO_FETCH_LIMIT) : limit;
 
     const searchBody: Record<string, unknown> = {
-      limit,
+      limit: fetchLimit,
       type: 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
@@ -2552,7 +2560,9 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         hostDirectPort: Number(offer.direct_port_start) > 0 ? Number(offer.direct_port_start) : undefined,
       }));
 
-      return result.sort((a, b) => a.pricePerHr - b.pricePerHr || (a.gpuType ?? '').localeCompare(b.gpuType ?? ''));
+      return result
+        .sort((a, b) => a.pricePerHr - b.pricePerHr || (a.gpuType ?? '').localeCompare(b.gpuType ?? ''))
+        .slice(0, limit);
     } catch (err) {
       this.log.warn(`[vast] listOffers failed: ${this.errMsg(err)}`);
       return [];

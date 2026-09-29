@@ -1043,6 +1043,22 @@ describe('VastClient — extended unit tests', () => {
       expect(offers[0].region).toContain('FR');
     });
 
+    it('over-fetches when a region is set and applies limit after the geo filter', async () => {
+      fetchSpy.mockResolvedValueOnce(mockFetchResponse({
+        offers: [
+          { id: '1', gpu_name: 'RTX 4090', dph_total: 0.20, public_ipaddr: '1.1.1.1', geolocation: 'Texas, US' },
+          { id: '2', gpu_name: 'RTX 4090', dph_total: 0.30, public_ipaddr: '2.2.2.2', geolocation: 'France, FR' },
+          { id: '3', gpu_name: 'RTX 4090', dph_total: 0.40, public_ipaddr: '3.3.3.3', geolocation: 'France, FR' },
+          { id: '4', gpu_name: 'RTX 4090', dph_total: 0.50, public_ipaddr: '4.4.4.4', geolocation: 'France, FR' },
+        ],
+      }));
+
+      const offers = await client.listOffers({ region: 'FR', limit: 2 }, creds);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      expect(searchBody.limit).toBeGreaterThanOrEqual(1000);
+      expect(offers.map(o => o.pricePerHr)).toEqual([0.30, 0.40]);
+    });
+
     it('includes extended fields in offers', async () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({
         offers: [{
