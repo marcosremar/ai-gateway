@@ -1134,7 +1134,8 @@ describe('VastClient — extended unit tests', () => {
       }));
 
       const status = await client.getInstanceStatus('inst-60', creds);
-      expect(status).toBe('loading');
+      // Vast 'loading' is normalized to the canonical 'booting' (instance-status.ts)
+      expect(status).toBe('booting');
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 
