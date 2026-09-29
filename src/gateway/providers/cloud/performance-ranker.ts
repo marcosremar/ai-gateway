@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import type { FallbackEntry } from './fallback';
+import { entryHealthKey } from './entry-key';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -338,7 +339,7 @@ export class PerformanceRanker {
     const unscored: FallbackEntry[] = [];
 
     for (const entry of chain) {
-      const score = this.scoreEntry(stage, entry.provider, entry.model ?? '*');
+      const score = this.scoreEntry(stage, entryHealthKey(entry), entry.model ?? '*');
       if (score !== null) {
         scored.push({ entry, score });
       } else {
