@@ -88,6 +88,14 @@ export interface ScalewayProviderMeta {
   [key: string]: unknown;
 }
 
+export interface RailwayProviderMeta {
+  provider: 'railway';
+  environmentId?: string;
+  serviceName?: string;
+  dockerImage?: string;
+  [key: string]: unknown;
+}
+
 export interface SnapgpuProviderMeta {
   provider: 'snapgpu';
   /** Underlying provider that hosts the snapgpu container. */
@@ -115,6 +123,7 @@ export type ProviderMeta =
   | ModalProviderMeta
   | FlyioProviderMeta
   | ScalewayProviderMeta
+  | RailwayProviderMeta
   | SnapgpuProviderMeta
   | GenericProviderMeta;
 

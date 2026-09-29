@@ -37,7 +37,7 @@ export interface Service {
   gpuTypes?: string[]
   gpuProvider?: string     // 'vast' | 'runpod' | 'tensordock' | 'modal'
   // if cpu:
-  cpuProvider?: string     // 'flyio' | 'scaleway'
+  cpuProvider?: string     // 'flyio' | 'scaleway' | 'railway'
   // models provided by this service (per stage)
   sttModel?: string          // e.g. 'faster-whisper-large-v3'
   llmModel?: string          // e.g. 'mistral-7b'
@@ -120,6 +120,7 @@ export const SERVERLESS_PROVIDERS = [
 export const CPU_PROVIDERS = [
   { id: 'flyio',    name: 'Fly.io',    iconName: 'Cpu', color: '#a855f7' },
   { id: 'scaleway', name: 'Scaleway',  iconName: 'Cpu', color: '#3b82f6' },
+  { id: 'railway',  name: 'Railway',   iconName: 'Cpu', color: '#c084fc' },
 ] as const;
 
 // ── Pipeline catalog — models/providers per stage ──

@@ -5,3 +5,4 @@
 
 export { FlyioClient } from './flyio-client';
 export { ScalewayClient } from './scaleway-client';
+export { RailwayClient } from './railway-client';

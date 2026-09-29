@@ -47,6 +47,7 @@ import { HyperstackClient } from '../src/gpu-providers/hyperstack';
 import { GpuProviderRegistry } from '../src/gpu-providers/registry';
 import { ScalewayClient } from '../src/cpu-providers/scaleway-client';
 import { FlyioClient } from '../src/cpu-providers/flyio-client';
+import { RailwayClient } from '../src/cpu-providers/railway-client';
 import {
   latencyRing, latencyRingIdx, setLatencyRingIdx, deployState, gpuHealthy, setGpuHealthy,
   isGpuAvailable, isGpuLatencyAcceptable,
@@ -525,6 +526,7 @@ export const tensordock = new TensordockClient();
 export const modal = new ModalClient({ defaultFunctionName: 'serve' });
 export const scaleway = new ScalewayClient();
 export const flyio = new FlyioClient();
+export const railway = new RailwayClient();
 /** Hyperstack (NexGen Cloud) — H100 VMs with driver 570+ out of the box. */
 export const hyperstack = new HyperstackClient();
 

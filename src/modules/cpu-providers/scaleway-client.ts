@@ -351,12 +351,18 @@ export class ScalewayClient extends AbstractGpuProvider {
     const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
     if (!secretKey) return [];
     const headers = this.scwHeaders(secretKey);
+    // Default tag filter keeps bot pods scoped. Set SCALEWAY_LIST_TAG=* (or empty) to list all.
+    const tagFilter = process.env.SCALEWAY_LIST_TAG;
+    const tagQuery =
+      tagFilter === '*' || tagFilter === ''
+        ? ''
+        : `tags=${encodeURIComponent(tagFilter ?? 'babelcast')}&`;
 
     // Query all known zones in parallel
     const results = await Promise.allSettled(
       KNOWN_ZONES.map(async (zone) => {
         const res = await this.fetchJson<ScwListResponse>(
-          `${this.zoneUrl(zone)}/servers?tags=babelcast&per_page=50`,
+          `${this.zoneUrl(zone)}/servers?${tagQuery}per_page=50`,
           { headers },
           TIMEOUTS.read,
           'scaleway',
