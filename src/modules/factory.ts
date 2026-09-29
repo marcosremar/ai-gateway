@@ -14,6 +14,10 @@ import { VastClient } from './gpu-providers/vast-client';
 import { ModalClient } from './gpu-providers/modal-client';
 import { SnapgpuClient } from './gpu-providers/snapgpu-client';
 import { HyperstackClient } from './gpu-providers/hyperstack';
+import { VastVmClient } from './gpu-providers/vast-vm';
+import { FlyioClient } from './cpu-providers/flyio-client';
+import { ScalewayClient } from './cpu-providers/scaleway-client';
+import { RailwayClient } from './cpu-providers/railway-client';
 import { LatencyTracker } from './autoscaler/latency-tracker';
 import { SessionTracker } from './autoscaler/session-tracker';
 import { StatePersistence } from './autoscaler/state-persistence';
@@ -206,6 +210,13 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
     hooks,
     s3Config: _snapgpuS3,
   }));
+  // Vast.ai VM mode — separate from container `vast` for CRIU/snapshot path.
+  registry.register(new VastVmClient({ onInstancePersist, hooks }));
+  // CPU compute providers (bots / lightweight workloads). Registered for
+  // registry.get() lookup only — NOT added to the GPU tier cascade.
+  registry.register(new FlyioClient({ onInstancePersist, hooks }));
+  registry.register(new ScalewayClient({ onInstancePersist, hooks }));
+  registry.register(new RailwayClient({ onInstancePersist, hooks }));
 
   // Core modules
   const latencyTracker = new LatencyTracker(stateStore);

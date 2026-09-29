@@ -109,6 +109,15 @@ export interface SnapgpuProviderMeta {
   [key: string]: unknown;
 }
 
+export interface HyperstackProviderMeta {
+  provider: 'hyperstack';
+  flavorId?: string | number;
+  flavorName?: string;
+  region?: string;
+  createdAt?: string;
+  [key: string]: unknown;
+}
+
 /** Generic fallback metadata for providers that haven't been explicitly typed yet. */
 export interface GenericProviderMeta {
   provider: string;
@@ -125,6 +134,7 @@ export type ProviderMeta =
   | ScalewayProviderMeta
   | RailwayProviderMeta
   | SnapgpuProviderMeta
+  | HyperstackProviderMeta
   | GenericProviderMeta;
 
 export interface GpuInstance {

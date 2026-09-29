@@ -27,11 +27,19 @@ export const MODAL_BABELCAST_URL = process.env.MODAL_BABELCAST_URL;
 export const PROVIDER_CHAIN: string[] = (process.env.PROVIDER_CHAIN || 'gpu,groq')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-/** GPU infrastructure provider IDs (deploy containers to these). */
-export const GPU_PROVIDER_IDS = new Set(['runpod', 'tensordock', 'vast', 'modal', 'gpu']);
+/** GPU infrastructure provider IDs (deploy containers/VMs to these). */
+export const GPU_PROVIDER_IDS = new Set([
+  'runpod', 'tensordock', 'vast', 'vast-vm', 'modal', 'hyperstack', 'snapgpu', 'gpu',
+]);
 
 /** @deprecated Use GPU_PROVIDER_IDS */
 export const GPU_PROVIDERS = GPU_PROVIDER_IDS;
+
+/**
+ * CPU compute provider IDs (bots / lightweight workloads).
+ * Not part of the GPU tier cascade — use for lookup/validation only.
+ */
+export const COMPUTE_PROVIDER_IDS = new Set(['flyio', 'scaleway', 'railway']);
 
 /** AI cloud provider IDs (call APIs on these). */
 export const AI_PROVIDER_IDS = new Set(['groq', 'openai', 'fireworks', 'openrouter', 'deepgram', 'elevenlabs', 'ollama']);

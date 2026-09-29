@@ -92,6 +92,15 @@ describe('createAutoscaler()', () => {
   });
 
   describe('returned object structure', () => {
+    it('should register GPU and CPU compute providers for registry lookup', () => {
+      expect(autoscaler.registry.get('hyperstack')?.providerId).toBe('hyperstack');
+      expect(autoscaler.registry.get('snapgpu')?.providerId).toBe('snapgpu');
+      expect(autoscaler.registry.get('vast-vm')?.providerId).toBe('vast-vm');
+      expect(autoscaler.registry.get('flyio')?.providerId).toBe('flyio');
+      expect(autoscaler.registry.get('scaleway')?.providerId).toBe('scaleway');
+      expect(autoscaler.registry.get('railway')?.providerId).toBe('railway');
+    });
+
     it('should expose registry', () => {
       expect(autoscaler.registry).toBeDefined();
     });

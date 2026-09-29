@@ -65,4 +65,12 @@ describe('GpuProviderRegistry', () => {
     const reg = new GpuProviderRegistry();
     expect(reg.getMonitorable('unknown')).toBeUndefined();
   });
+
+  it('supports railway after register (CPU compute lookup)', () => {
+    const reg = new GpuProviderRegistry();
+    const railway = mockClient('railway');
+    reg.register(railway);
+    expect(reg.get('railway')).toBe(railway);
+    expect(reg.get('railway')?.providerId).toBe('railway');
+  });
 });

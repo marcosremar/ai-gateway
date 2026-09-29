@@ -97,6 +97,14 @@ describe('createAutoscaler()', () => {
       expect(autoscaler.registry.get('hyperstack')).toBeDefined();
     });
 
+    it('should register snapgpu, vast-vm, and CPU compute providers', () => {
+      expect(autoscaler.registry.get('snapgpu')?.providerId).toBe('snapgpu');
+      expect(autoscaler.registry.get('vast-vm')?.providerId).toBe('vast-vm');
+      expect(autoscaler.registry.get('flyio')?.providerId).toBe('flyio');
+      expect(autoscaler.registry.get('scaleway')?.providerId).toBe('scaleway');
+      expect(autoscaler.registry.get('railway')?.providerId).toBe('railway');
+    });
+
     it('should expose registry', () => {
       expect(autoscaler.registry).toBeDefined();
     });
