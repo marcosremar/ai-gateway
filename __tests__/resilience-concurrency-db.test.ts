@@ -302,7 +302,7 @@ describe('Misc: Speculative cache (#342-#346)', () => {
 describe('Misc: GPU latency probing (#384-#388)', () => {
   const src = read('server/gpu-latency.ts');
 
-  it('#384 probeTcp measures RTT', () => { expect(src).toContain('probeTcp'); });
+  it('#384 probeRtt measures RTT (application-level)', () => { expect(src).toContain('probeRtt'); });
   it('#385 probeHostFull runs probes', () => { expect(src).toContain('probeHostFull'); });
   it('#386 dedup set prevents concurrent probes', () => { expect(src).toContain('_probing'); });
   it('#387 probe timeout in finally', () => { expect(src).toContain('.finally(() => _probing.delete'); });

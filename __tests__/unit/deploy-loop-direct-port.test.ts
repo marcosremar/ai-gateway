@@ -49,6 +49,7 @@ vi.mock('../../server/state', () => ({
   setDeployState: vi.fn((patch: Record<string, unknown>) => { Object.assign(stateObj, patch); }),
   deployCancelled: false,
   setDeployCancelled: vi.fn(),
+  getDeployAbortSignal: () => new AbortController().signal,
   setActiveProvider: vi.fn(),
   setGpuHealthy: vi.fn(),
   setLastRequestTime: vi.fn(),

@@ -3852,23 +3852,15 @@ async function cmdGpuBest(opts: { gpu?: string; count?: number }) {
   console.log(`  Eff$ = price / quality (lower = better value for real-time)`);
 }
 
-/** Median TCP-connect time (≈ 1 RTT) from THIS machine to ip, best of the given ports. */
+/** Ports this network fakes (answers for any address) — reported once by `latency nearest`. */
+const interceptedHere = new Set<number>();
+
+/** Median application-level RTT from THIS machine to ip (best port), null when nothing real answered. */
 async function probeTcpFromHere(ip: string, ports: number[], samples = 3, timeoutMs = 2000): Promise<number | null> {
-  const net = await import('net');
-  const once = (port: number) => new Promise<number | null>(resolve => {
-    const t0 = Date.now();
-    const sock = net.createConnection({ host: ip, port });
-    const timer = setTimeout(() => { sock.destroy(); resolve(null); }, timeoutMs);
-    sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(Date.now() - t0); });
-    sock.once('error', () => { clearTimeout(timer); resolve(null); });
-  });
-  const medians = await Promise.all(ports.map(async port => {
-    const ok = (await Promise.all(Array.from({ length: samples }, () => once(port))))
-      .filter((v): v is number => v !== null).sort((a, b) => a - b);
-    return ok.length ? ok[Math.floor(ok.length / 2)] : null;
-  }));
-  const valid = medians.filter((v): v is number => v !== null);
-  return valid.length ? Math.min(...valid) : null;
+  const { probeRtt } = await import('../src/gateway/providers/gpu/rtt-probe');
+  const r = await probeRtt(ip, ports, samples, timeoutMs);
+  for (const p of r.interceptedPorts ?? []) interceptedHere.add(p);
+  return r.medianMs;
 }
 
 /**
@@ -3941,8 +3933,12 @@ async function cmdLatencyNearest(opts: { at?: string; region?: string; gpu?: str
     const o = shown[i];
     console.log(`  ${String(i + 1).padStart(2)} ${String(o.gpuName || o.gpuType || '?').slice(0, 24).padEnd(24)} ${('$' + Number(o.pricePerHr).toFixed(2)).padStart(6)} ${(Math.round(o.rtt) + 'ms').padStart(7)} ${o.rttSrc.padEnd(4)} ${(o.inferenceMs + 'ms').padStart(6)} ${(Math.round(o.total) + 'ms').padStart(6)} ${String(o.provider || '?').padEnd(10)} ${o.geolocation || o.region || '?'}`);
   }
-  console.log(`\n  RTT src: here = TCP connect measured from this machine, geo = distance estimate (host has no public IP to probe)`);
+  console.log(`\n  RTT src: here = first response byte measured from this machine (SSH banner / HTTP), geo = distance estimate (no public IP, or nothing real answered)`);
   console.log(`  infer = estimated Whisper large-v3 time for a 5s chunk on that GPU`);
+  if (interceptedHere.size > 0) {
+    console.log(`  ⚠ this network intercepts port(s) ${[...interceptedHere].join(', ')} (a proxy answers for any address) —`);
+    console.log(`    those measurements were discarded; run from a network without a transparent proxy for real RTTs`);
+  }
   console.log(`  Deploy near this client: POST /v1/gpu/deploy {"region":"near","clientLat":${lat},"clientLon":${lon}, ...}`);
   console.log(`  or set GPU_CLIENT_LOCATION="${lat},${lon}" on the gateway and use region "near"`);
 }

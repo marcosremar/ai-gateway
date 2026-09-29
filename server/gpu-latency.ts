@@ -10,7 +10,7 @@
  * Results persisted to ~/.babelcast/latency.db via latency-db.ts.
  */
 
-import net from 'net';
+import { probeRtt } from '../src/gateway/providers/gpu/rtt-probe';
 import type { GpuOffer } from '../src/gpu-providers/types';
 import { upsertHostMeta, saveProbeResult, getHostRttMap } from './latency-db';
 import type { ProbeResult } from './latency-db';
@@ -103,52 +103,17 @@ export interface RankedOffer extends GpuOffer {
   rttSource: 'host' | 'geo';
 }
 
-// ── TCP probe ─────────────────────────────────────────────────────────────────
-
-const TCP_PROBE_TIMEOUT_MS = 3_000;
-const TCP_PROBE_COUNT      = 5;
-
-/** Single TCP connect. Returns RTT in ms, or null on timeout/error. */
-function probeTcp(ip: string, port: number): Promise<number | null> {
-  return new Promise(resolve => {
-    const t      = Date.now();
-    const socket = net.createConnection({ host: ip, port });
-    const timer  = setTimeout(() => { socket.destroy(); resolve(null); }, TCP_PROBE_TIMEOUT_MS);
-    socket.on('connect', () => { clearTimeout(timer); socket.destroy(); resolve(Date.now() - t); });
-    socket.on('error',   () => { clearTimeout(timer); resolve(null); });
-    socket.on('timeout', () => { socket.destroy(); resolve(null); });
-  });
-}
+// ── Host probe ────────────────────────────────────────────────────────────────
+// Application-level RTT (first response byte), not bare TCP connect: proxies
+// and sandboxed egress complete handshakes locally and report fake RTTs.
 
 /**
- * Run TCP probes on ports 22, 443, 80 + any extra ports (e.g. Vast.ai direct_port_start).
- * All probes fire simultaneously — no sequential fallback, no extra latency.
- * Returns stats from the port with the most successful probes (ties → lowest median).
+ * Probe ports 22, 443, 80 + any extra ports (e.g. Vast.ai direct_port_start),
+ * all in parallel. Returns stats from the port with the most real answers.
  */
 export async function probeHostFull(ip: string, extraPorts: number[] = []): Promise<ProbeResult> {
-  const PORTS = [...new Set([22, 443, 80, ...extraPorts])];
-
-  const portResults = await Promise.all(
-    PORTS.map(port =>
-      Promise.all(Array.from({ length: TCP_PROBE_COUNT }, () => probeTcp(ip, port)))
-        .then(raw => raw.filter((r): r is number => r !== null).sort((a, b) => a - b))
-    )
-  );
-
-  // Pick port with most successes; break ties by lowest median
-  const best = portResults
-    .filter(v => v.length > 0)
-    .sort((a, b) =>
-      b.length !== a.length
-        ? b.length - a.length
-        : a[Math.floor(a.length / 2)] - b[Math.floor(b.length / 2)]
-    )[0];
-
-  if (!best) return { medianMs: null, p90Ms: null, samples: 0 };
-
-  const median = best[Math.floor(best.length / 2)];
-  const p90    = best[Math.min(Math.ceil(best.length * 0.9) - 1, best.length - 1)];
-  return { medianMs: median, p90Ms: p90, samples: best.length };
+  const r = await probeRtt(ip, [22, 443, 80, ...extraPorts], 5, 3_000);
+  return { medianMs: r.medianMs, p90Ms: r.p90Ms, samples: r.samples };
 }
 
 // ── In-flight dedup ───────────────────────────────────────────────────────────
