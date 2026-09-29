@@ -998,6 +998,22 @@ describe('VastClient — extended unit tests', () => {
       expect(offers[2].available).toBe(1);
     });
 
+    it('exposes host IP and direct port so hosts can be latency-probed', async () => {
+      fetchSpy.mockResolvedValueOnce(mockFetchResponse({
+        offers: [
+          { id: '1', gpu_name: 'RTX 4090', dph_total: 0.40, public_ipaddr: '82.64.1.2', direct_port_start: 41000 },
+          { id: '2', gpu_name: 'RTX 4090', dph_total: 0.50, public_ipaddr: '10.0.0.5', direct_port_start: -1 },
+        ],
+      }));
+
+      const offers = await client.listOffers({}, creds);
+      expect(offers[0].hostIp).toBe('82.64.1.2');
+      expect(offers[0].hostDirectPort).toBe(41000);
+      // private IP / no direct port → nothing to probe
+      expect(offers[1].hostIp).toBeUndefined();
+      expect(offers[1].hostDirectPort).toBeUndefined();
+    });
+
     it('returns empty array on error', async () => {
       fetchSpy.mockRejectedValueOnce(new Error('network error'));
 

@@ -2546,6 +2546,10 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         diskGb: (offer.disk_space || undefined) as number | undefined,
         numGpus: (offer.num_gpus || undefined) as number | undefined,
         totalFlops: (offer.total_flops || undefined) as number | undefined,
+        // Host IP + first direct port let the latency scheduler TCP-probe the
+        // machine before renting it (gpu-latency.ts skips offers without an IP).
+        hostIp: offer.public_ipaddr && !isPrivateIp(String(offer.public_ipaddr)) ? String(offer.public_ipaddr) : undefined,
+        hostDirectPort: Number(offer.direct_port_start) > 0 ? Number(offer.direct_port_start) : undefined,
       }));
 
       return result.sort((a, b) => a.pricePerHr - b.pricePerHr || (a.gpuType ?? '').localeCompare(b.gpuType ?? ''));
