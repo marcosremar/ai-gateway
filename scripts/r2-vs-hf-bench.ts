@@ -59,7 +59,7 @@ function requireEnv(name: string): string {
 
 const R2 = {
   accountId: requireEnv('R2_ACCOUNT_ID'),
-  bucket: process.env.R2_BUCKET?.trim() || 'REDACTED_fallback_1c7a8228',
+  bucket: process.env.R2_BUCKET?.trim() || 'parle-models-bench',
   accessKeyId: requireEnv('R2_ACCESS_KEY_ID'),
   secretAccessKey: requireEnv('R2_SECRET_ACCESS_KEY'),
 };
