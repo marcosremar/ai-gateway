@@ -104,6 +104,7 @@ vi.mock('../../server/providers', () => ({
   modal: { listInstances: vi.fn(() => []) },
   flyio: { listInstances: vi.fn(() => []), deleteInstance: vi.fn(), createInstance: vi.fn(), getFlyHost: vi.fn() },
   scaleway: { listInstances: vi.fn(() => []), deleteInstance: vi.fn(), createInstance: vi.fn() },
+  railway: { listInstances: vi.fn(() => []), deleteInstance: vi.fn(), createInstance: vi.fn() },
 }));
 
 // Mock labs-settings

@@ -62,6 +62,10 @@ const mockFlyioDeleteInstance = vi.fn().mockResolvedValue(undefined);
 const mockFlyioCreateInstance = vi.fn();
 const mockFlyioGetFlyHost = vi.fn().mockReturnValue(null);
 
+const mockRailwayListInstances = vi.fn().mockResolvedValue([]);
+const mockRailwayDeleteInstance = vi.fn().mockResolvedValue(undefined);
+const mockRailwayCreateInstance = vi.fn();
+
 vi.mock('../../server/providers', () => ({
   runpod: {
     listInstances: (...a: unknown[]) => mockRunpodListInstances(...a),
@@ -80,6 +84,11 @@ vi.mock('../../server/providers', () => ({
     deleteInstance: (...a: unknown[]) => mockFlyioDeleteInstance(...a),
     createInstance: (...a: unknown[]) => mockFlyioCreateInstance(...a),
     getFlyHost: () => mockFlyioGetFlyHost(),
+  },
+  railway: {
+    listInstances: (...a: unknown[]) => mockRailwayListInstances(...a),
+    deleteInstance: (...a: unknown[]) => mockRailwayDeleteInstance(...a),
+    createInstance: (...a: unknown[]) => mockRailwayCreateInstance(...a),
   },
 }));
 
@@ -272,6 +281,10 @@ describe('Bot handlers — deploy providers', () => {
   it('returns 400 when no deploy credentials available', async () => {
     delete process.env.FLY_API_TOKEN;
     delete process.env.RUNPOD_API_KEY;
+    delete process.env.RAILWAY_PROJECT_ID;
+    delete process.env.RAILWAY_TOKEN;
+    delete process.env.RAILWAY_API_TOKEN;
+    delete process.env.SCALEWAY_SECRET_KEY;
     vi.mocked(readJsonBody).mockResolvedValue({});
 
     const req = mockReq({});
@@ -532,21 +545,37 @@ describe('Bot handlers — cleanupBotPods', () => {
     expect(mockRunpodDeleteInstance).not.toHaveBeenCalledWith('pod-2', expect.anything());
   });
 
-  // #245: cleanupBotPods also handles Scaleway and Fly.io
-  it('cleans up Scaleway and Fly.io instances', async () => {
+  // #245: cleanupBotPods also handles Scaleway and Fly.io — ownership prefix required
+  it('cleans up Scaleway and Fly.io instances with ownership prefix', async () => {
     process.env.SCALEWAY_SECRET_KEY = 'scw-key';
     process.env.FLY_API_TOKEN = 'fly-key';
     mockRunpodListInstances.mockResolvedValue([]);
     mockScalewayListInstances.mockResolvedValue([
-      { instanceId: 'scw-1', status: 'running' },
+      { instanceId: 'scw-1', instanceName: 'babelcast-bot-1', status: 'running' },
+      { instanceId: 'scw-foreign', instanceName: 'parle-livekit', status: 'running' },
     ]);
     mockFlyioListInstances.mockResolvedValue([
-      { instanceId: 'fly-1', status: 'running' },
+      { instanceId: 'fly-1', instanceName: 'babelcast-bot-2', status: 'running' },
     ]);
 
     await cleanupBotPods('rpa_test');
     expect(mockScalewayDeleteInstance).toHaveBeenCalledWith('scw-1', { apiKey: 'scw-key' });
+    expect(mockScalewayDeleteInstance).not.toHaveBeenCalledWith('scw-foreign', expect.anything());
     expect(mockFlyioDeleteInstance).toHaveBeenCalledWith('fly-1', { apiKey: 'fly-key' });
+  });
+
+  it('cleans up Railway bot services with aigw-bot prefix only', async () => {
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_TOKEN = 'rw-tok';
+    mockRunpodListInstances.mockResolvedValue([]);
+    mockRailwayListInstances.mockResolvedValue([
+      { instanceId: 'rw-1', instanceName: 'aigw-bot-9', status: 'running' },
+      { instanceId: 'rw-x', instanceName: 'parle-qwen-tts', status: 'running' },
+    ]);
+
+    await cleanupBotPods('');
+    expect(mockRailwayDeleteInstance).toHaveBeenCalledWith('rw-1', { apiKey: 'rw-tok' });
+    expect(mockRailwayDeleteInstance).not.toHaveBeenCalledWith('rw-x', expect.anything());
   });
 });
 

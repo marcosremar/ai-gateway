@@ -315,6 +315,7 @@ export class FlyioClient extends AbstractGpuProvider {
         .filter(m => m.name.startsWith('babelcast-bot-'))
         .map(m => ({
           instanceId: m.id,
+          instanceName: m.name,
           status: m.state === 'started' ? 'running' : 'stopped',
           endpoint: `https://${app}.fly.dev`,
           sshHost: '',
