@@ -57,6 +57,7 @@ export class InMemoryStateAdapter implements StateStore {
   }
 
   async scan(pattern: string, callback?: (keys: string[]) => boolean | void, limit: number = 1000): Promise<number> {
+    if (limit <= 0) throw new Error(`[InMemoryStateAdapter] scan limit must be positive, got ${limit}`);
     this.sweep();
     const now = Date.now();
     const prefix = pattern.replace('*', '');
@@ -64,7 +65,7 @@ export class InMemoryStateAdapter implements StateStore {
     for (const [k, e] of this.kv) {
       if (k.startsWith(prefix) && e.expiresAt >= now) {
         allKeys.push(k);
-        if (limit && allKeys.length >= limit) break;
+        if (allKeys.length >= limit) break;
       }
     }
     if (callback && allKeys.length > 0) {
@@ -91,12 +92,18 @@ export class InMemoryStateAdapter implements StateStore {
     this.lists.set(key, list.slice(s, e + 1));
   }
 
-  async lrange(key: string, start: number, stop: number): Promise<string[]> {
+  async lrange(key: string, start: number, stop: number, maxElements?: number): Promise<string[]> {
     const list = this.lists.get(key) ?? [];
     const len = list.length;
     const s = start < 0 ? Math.max(len + start, 0) : start;
     const e = stop < 0 ? len + stop : stop;
-    return list.slice(s, e + 1);
+    const slice = list.slice(s, e + 1);
+    if (maxElements !== undefined && slice.length > maxElements) {
+      throw new Error(
+        `[InMemoryStateAdapter] lrange result (${slice.length}) exceeds maxElements (${maxElements})`,
+      );
+    }
+    return slice;
   }
 
   async hset(key: string, field: string, value: string, ttlSecs?: number): Promise<void> {

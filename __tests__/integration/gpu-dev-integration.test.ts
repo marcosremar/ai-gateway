@@ -15,6 +15,11 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 
+const hasBun = (() => {
+  const res = spawnSync('bun', ['--version'], { stdio: 'pipe' });
+  return !res.error && res.status === 0;
+})();
+
 describe('gpu dev — integration', () => {
   // ────────────────────────────────────────────────────────────────────────────
   // 1. Source-code invariants — proves wiring is in the codebase
@@ -102,7 +107,7 @@ describe('gpu dev — integration', () => {
   // 2. CLI dispatcher — verify help text + error paths (subprocess)
   // ────────────────────────────────────────────────────────────────────────────
 
-  describe('CLI dispatcher (subprocess)', () => {
+  describe.skipIf(!hasBun)('CLI dispatcher (subprocess)', () => {
     // Run the CLI with bun — captures stdout, suppresses the "Gateway started"
     // side effect by not making any network calls.
     function runCli(args: string[]) {
@@ -226,7 +231,9 @@ describe('gpu dev — integration', () => {
   // 4. Docker image files — dev base image must exist and be internally consistent
   // ────────────────────────────────────────────────────────────────────────────
 
-  describe('gpu-dev docker context', () => {
+  // dockers/ is a git submodule (ai-gateway-dockers). Skip when not checked out.
+  const dockerSubmodulePresent = existsSync('dockers/gpu-dev');
+  describe.skipIf(!dockerSubmodulePresent)('gpu-dev docker context', () => {
     const dockerDir = 'dockers/gpu-dev';
 
     it('Dockerfile, health_server.py, start.sh, README.md all exist', () => {

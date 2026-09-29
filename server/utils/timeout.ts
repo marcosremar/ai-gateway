@@ -29,19 +29,20 @@ export async function withTimeout<T>(
   timeoutMs: number,
   message?: string,
 ): Promise<T> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  // Use Promise.race so the timeout actively interrupts the promise, instead
+  // of merely setting an AbortController signal that the caller may not check.
+  let timerId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(
+      () => reject(new TimeoutError(message ?? `Operation timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
 
   try {
-    const result = await promise;
-    clearTimeout(timeout);
-    return result;
-  } catch (error) {
-    clearTimeout(timeout);
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new TimeoutError(message ?? `Operation timed out after ${timeoutMs}ms`);
-    }
-    throw error;
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timerId);
   }
 }
 

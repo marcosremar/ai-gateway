@@ -976,7 +976,9 @@ describe('tryRecoverActiveDeploy', () => {
     const fnStart = autoRecoverySource.indexOf('export async function tryRecoverActiveDeploy');
     const fnBody = autoRecoverySource.slice(fnStart, fnStart + 1500);
     expect(fnBody).toContain('probeGpuHealth');
-    expect(fnBody).toContain('not healthy');
+    // SSH fallback: if /health is down but SSH is reachable, re-adopt the pod
+    // rather than clearing it — keeps training runs alive across gateway restarts.
+    expect(fnBody).toContain('sshAlive');
     expect(fnBody).toContain('clearPersistedDeploy');
   });
 

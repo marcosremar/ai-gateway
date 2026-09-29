@@ -279,3 +279,54 @@ describe('AudioSegmenter — setVadInference', () => {
     expect(called).toBe(true);
   });
 });
+
+describe('AudioSegmenter — VAD frame duration scales with sampleRate', () => {
+  // Each VAD window is VAD_WINDOW_SAMPLES (512) samples, so frame duration
+  // in ms = 512 / sampleRate * 1000. At 16 kHz that is exactly 32 ms; at
+  // 24 kHz it is ~21.33 ms. The frame-count fields must reflect the configured
+  // rate, not be stuck at the 16 kHz assumption (regression: they were once
+  // hardcoded to 32 ms, so non-default rates silently got wrong window sizes).
+
+  it('preSpeechMaxFrames is correct at 16 kHz', () => {
+    const seg = new AudioSegmenter({ preSpeechPadMs: 200, sampleRate: 16000 });
+    // frameMs = 512/16000*1000 = 32 ms  →  floor(200/32) = 6
+    expect((seg as any).preSpeechMaxFrames).toBe(6);
+  });
+
+  it('preSpeechMaxFrames scales at 24 kHz', () => {
+    const seg = new AudioSegmenter({ preSpeechPadMs: 200, sampleRate: 24000 });
+    // frameMs = 512/24000*1000 ≈ 21.33 ms  →  floor(200/21.33) = 9
+    expect((seg as any).preSpeechMaxFrames).toBe(9);
+  });
+
+  it('overlapMaxFrames is correct at 16 kHz', () => {
+    const seg = new AudioSegmenter({ overlapWindowMs: 100, sampleRate: 16000 });
+    // frameMs = 32 ms  →  floor(100/32) = 3
+    expect((seg as any).overlapMaxFrames).toBe(3);
+  });
+
+  it('overlapMaxFrames scales at 24 kHz', () => {
+    const seg = new AudioSegmenter({ overlapWindowMs: 100, sampleRate: 24000 });
+    // frameMs ≈ 21.33 ms  →  floor(100/21.33) = 4
+    expect((seg as any).overlapMaxFrames).toBe(4);
+  });
+
+  it('dualPassLookahead is correct at 16 kHz', () => {
+    const seg = new AudioSegmenter({ dualPassLookaheadMs: 150, sampleRate: 16000 });
+    // frameMs = 32 ms  →  floor(150/32) = 4
+    expect((seg as any).dualPassLookahead).toBe(4);
+  });
+
+  it('dualPassLookahead scales at 24 kHz', () => {
+    const seg = new AudioSegmenter({ dualPassLookaheadMs: 150, sampleRate: 24000 });
+    // frameMs ≈ 21.33 ms  →  floor(150/21.33) = 7
+    expect((seg as any).dualPassLookahead).toBe(7);
+  });
+
+  it('postPadSamples is derived from sampleRate, not hardcoded', () => {
+    const seg16 = new AudioSegmenter({ sampleRate: 16000, postSpeechPadMs: 150 });
+    const seg24 = new AudioSegmenter({ sampleRate: 24000, postSpeechPadMs: 150 });
+    expect((seg16 as any).postPadSamples).toBe(Math.floor(150 * 16000 / 1000));
+    expect((seg24 as any).postPadSamples).toBe(Math.floor(150 * 24000 / 1000));
+  });
+});

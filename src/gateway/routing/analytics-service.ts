@@ -68,11 +68,14 @@ export function buildSystemAnalytics(opts: {
 }): SystemAnalyticsPayload {
   const { requestId, realtimeMetrics, routingAdvice } = opts;
 
-  // System Health Calculation
+  // System Health Calculation — produces a 0-100 score.
+  // Weights (30% cold-start health, 40% UX score, 30% audio score) are
+  // normalised to [0,1] then scaled to [0,100] so the status thresholds
+  // (>80 healthy, >60 warning) are meaningful.
   const systemHealthScore = Math.round(
-    (1 - realtimeMetrics.coldStartRate) * 0.3 +
+    ((1 - realtimeMetrics.coldStartRate) * 0.3 +
     realtimeMetrics.userExperienceScore * 0.01 * 0.4 +
-    realtimeMetrics.audioExperienceScore * 0.01 * 0.3,
+    realtimeMetrics.audioExperienceScore * 0.01 * 0.3) * 100,
   );
 
   const recommendations = {

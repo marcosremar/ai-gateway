@@ -257,6 +257,15 @@ export async function _flushCatalogForTests(): Promise<void> {
   if (_catalogCache) await saveCatalog(_catalogCache);
 }
 
+/** Reset in-memory catalog cache (for test isolation). */
+export function _resetCatalogForTests(): void {
+  _catalogCache = null;
+  if (_catalogSaveTimer) {
+    clearTimeout(_catalogSaveTimer);
+    _catalogSaveTimer = null;
+  }
+}
+
 // ── Hashing helpers ─────────────────────────────────────────────────────────
 
 export function hashImage(ref: string, digest?: string): string {
