@@ -22,6 +22,7 @@
 import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import { normalizeInstanceStatus } from './instance-status';
 import os from 'os';
 import path from 'path';
 import { readFile, writeFile, mkdir, access } from 'fs/promises';
@@ -527,7 +528,7 @@ export class VastClient extends AbstractGpuProvider {
     const instances = await this.listInstances(credentials);
     // Prefer instances that are fully running with a reachable endpoint.
     // Fall back to any non-terminal running instance (may still be booting).
-    const USABLE_STATUSES = new Set(['running', 'active', 'loading']);
+    const USABLE_STATUSES = new Set(['running', 'booting']);
     const withEndpoint = instances.find(
       (i) => USABLE_STATUSES.has(i.status?.toLowerCase() ?? '') && !!i.endpoint,
     );
@@ -1735,7 +1736,7 @@ export class VastClient extends AbstractGpuProvider {
         endpoint,
         ipAddress: ip,
         gpuType: gpuName,
-        status: 'creating',
+        status: normalizeInstanceStatus('creating'),
         pricePerHr,
       });
 
@@ -1744,7 +1745,7 @@ export class VastClient extends AbstractGpuProvider {
         instanceId,
         instanceName,
         endpoint,
-        status: 'creating',
+        status: normalizeInstanceStatus('creating'),
         gpuType: gpuName,
         ipAddress: ip,
         sshHost,
@@ -2261,7 +2262,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         }
         const data = (await res.json()) as Record<string, unknown>;
         const workers = (data.current_workers ?? data.cold_workers ?? 0) as number;
-        return workers > 0 ? 'running' : 'idle';
+        return normalizeInstanceStatus(workers > 0 ? 'running' : 'idle');
       } catch (err) {
         this.log.warn(`[vast] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
         return null;
@@ -2271,7 +2272,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     // On-demand instance — try GET /instances/{id}/ first, fallback to list
     try {
       const detail = await this._fetchInstanceDetail(rawId, headers);
-      return detail?.status ?? null;
+      return detail?.status != null ? normalizeInstanceStatus(detail.status) : null;
     } catch (err) {
       this.log.warn(`[vast] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
       return null;
@@ -2382,7 +2383,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
             if (!id) continue;
             // Serverless endpoints that have workers are "running"
             const workers = (ep.current_workers ?? ep.cold_workers ?? 0) as number;
-            const status = workers > 0 ? 'running' : 'idle';
+            const status = normalizeInstanceStatus(workers > 0 ? 'running' : 'idle');
             results.push({
               instanceId: `endpt-${id}`,
               instanceName: ep.endpoint_name as string | undefined,
@@ -2965,7 +2966,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     sshHost?: string; sshPort?: number;
   } {
     const ip = (inst.public_ipaddr || inst.ssh_host || '') as string;
-    const status = String(inst.actual_status ?? inst.cur_state ?? 'unknown');
+    const status = normalizeInstanceStatus(String(inst.actual_status ?? inst.cur_state ?? 'unknown'));
     const sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
     const rawSshPort = inst.ssh_port as number | undefined;
     const sshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;

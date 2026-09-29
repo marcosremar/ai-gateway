@@ -22,6 +22,10 @@ export type {
   ListOffersOptions,
 } from './types';
 
+// ── Instance status vocabulary ───────────────────────────────────────────
+export type { InstanceStatus } from './instance-status';
+export { normalizeInstanceStatus } from './instance-status';
+
 // ── Abstract Base Class ──────────────────────────────────────────────────
 export {
   AbstractGpuProvider,

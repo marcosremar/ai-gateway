@@ -100,7 +100,7 @@ describe('RailwayClient', () => {
       CREDS,
     );
     expect(inst.instanceId).toBe('svc-new');
-    expect(inst.status).toBe('starting');
+    expect(inst.status).toBe('booting');
     expect(fetchMock).toHaveBeenCalled();
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
     expect(body.variables.input.source.image).toBe('nginx:alpine');

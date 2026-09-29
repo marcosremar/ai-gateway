@@ -8,6 +8,7 @@ import type {
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 import { categorizeDeployError } from '../../../errors/deploy-errors';
+import { normalizeInstanceStatus } from './instance-status';
 
 /** GPU types to try in order of preference.
  *  Must match RunPod's REST API enum values exactly.
@@ -593,7 +594,7 @@ export class RunpodClient extends AbstractGpuProvider {
       return {
         instanceId: running.id as string,
         endpoint,
-        status: (running.desiredStatus as string) || 'RUNNING',
+        status: normalizeInstanceStatus((running.desiredStatus as string) || 'RUNNING'),
       };
     } catch (err) {
       const deployErr = categorizeDeployError(err, {
@@ -800,7 +801,7 @@ export class RunpodClient extends AbstractGpuProvider {
         await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
           podId,
           endpoint,
-          status: 'CREATING',
+          status: normalizeInstanceStatus('CREATING'),
           podName,
         });
 
@@ -809,7 +810,7 @@ export class RunpodClient extends AbstractGpuProvider {
           instanceId: podId,
           instanceName: podName,
           endpoint,
-          status: 'CREATING',
+          status: normalizeInstanceStatus('CREATING'),
           gpuType: 'CPU',
         };
       }
@@ -986,7 +987,7 @@ export class RunpodClient extends AbstractGpuProvider {
           await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
             podId,
             endpoint,
-            status: 'CREATING',
+            status: normalizeInstanceStatus('CREATING'),
             podName,
           });
 
@@ -998,7 +999,7 @@ export class RunpodClient extends AbstractGpuProvider {
             instanceId: podId,
             instanceName: podName,
             endpoint,
-            status: 'CREATING',
+            status: normalizeInstanceStatus('CREATING'),
             gpuType,
           };
         }
@@ -1046,7 +1047,7 @@ export class RunpodClient extends AbstractGpuProvider {
             await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
               podId,
               endpoint,
-              status: 'CREATING',
+              status: normalizeInstanceStatus('CREATING'),
               podName,
             });
             this.log.log(
@@ -1056,7 +1057,7 @@ export class RunpodClient extends AbstractGpuProvider {
               instanceId: podId,
               instanceName: podName,
               endpoint,
-              status: 'CREATING',
+              status: normalizeInstanceStatus('CREATING'),
               gpuType,
             };
           }
@@ -1337,7 +1338,7 @@ export class RunpodClient extends AbstractGpuProvider {
           instanceId: pod.id as string,
           instanceName: pod.name as string | undefined,
           endpoint,
-          status: (pod.desiredStatus as string) ?? 'UNKNOWN',
+          status: normalizeInstanceStatus((pod.desiredStatus as string) ?? 'UNKNOWN'),
           gpuType: pod.gpuDisplayName as string | undefined,
         };
       });
@@ -1395,7 +1396,7 @@ export class RunpodClient extends AbstractGpuProvider {
       // NOTE: REST API v1 only exposes `desiredStatus` (RUNNING/EXITED).
       // RUNNING means "pod is scheduled to run" — the container may still be booting.
       // To check actual container readiness, use HTTP health checks on the proxy URL.
-      return (data.desiredStatus as string) ?? null;
+      return normalizeInstanceStatus((data.desiredStatus as string) ?? null);
     } catch (err) {
       this.log.warn(`[runpod] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
       this.emitError({

@@ -54,8 +54,9 @@ describe('ModalClient', () => {
 
       const result = await client.discoverInstance(creds, []);
       expect(result).not.toBeNull();
-      expect(result!.instanceId).toBe('ap-2');
+      // Both deployed/active-task apps normalize to running; first match wins.
       expect(result!.status).toBe('running');
+      expect(['ap-1', 'ap-2']).toContain(result!.instanceId);
     });
 
     it('normalizes "deployed" to "running" when endpoint exists', async () => {
@@ -122,7 +123,7 @@ describe('ModalClient', () => {
         { gpuTypes: ['parle-ultralight'], dockerImage: 'modal_ultralight.py' },
         creds,
       );
-      expect(result.status).toBe('deployed');
+      expect(result.status).toBe('running');
       expect(result.endpoint).toContain('modal.run');
     });
 
@@ -271,7 +272,7 @@ describe('ModalClient', () => {
       });
 
       const result = await client.listInstances(creds);
-      expect(result[0].status).toBe('deployed');
+      expect(result[0].status).toBe('running');
       expect(result[0].endpoint).toBe('https://test-workspace--numeric-app-web.modal.run');
     });
 
@@ -299,7 +300,7 @@ describe('ModalClient', () => {
         stderr: '',
       });
 
-      expect(await client.getInstanceStatus('ap-status', creds)).toBe('deployed');
+      expect(await client.getInstanceStatus('ap-status', creds)).toBe('running');
     });
 
     it('returns null when not found', async () => {

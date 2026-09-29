@@ -15,6 +15,7 @@
 import { AbstractGpuProvider, TIMEOUTS } from '../gpu-providers/abstract-provider';
 import type { AbstractGpuProviderOptions } from '../gpu-providers/abstract-provider';
 import type { GpuInstance, InstanceSpec, ProviderCredentials } from '../gpu-providers/types';
+import { normalizeInstanceStatus } from '../gateway/providers/gpu/instance-status';
 
 const RAILWAY_GQL = process.env.RAILWAY_API_BASE || 'https://backboard.railway.com/graphql/v2';
 const DEFAULT_PREFIX = 'aigw-bot';
@@ -166,7 +167,7 @@ export class RailwayClient extends AbstractGpuProvider {
           instanceId: svc.id,
           instanceName: svc.name,
           endpoint: '',
-          status: status ?? 'unknown',
+          status: normalizeInstanceStatus(status),
           providerMeta: { provider: 'railway', environmentId: envId, serviceName: svc.name },
         });
       }
@@ -182,7 +183,7 @@ export class RailwayClient extends AbstractGpuProvider {
     _gpuTypes: string[],
   ): Promise<GpuInstance | null> {
     const instances = await this.listInstances(credentials);
-    return instances.find((i) => i.status === 'running' || i.status === 'SUCCESS') ?? instances[0] ?? null;
+    return instances.find((i) => i.status === 'running') ?? instances[0] ?? null;
   }
 
   async createInstance(
@@ -233,7 +234,7 @@ export class RailwayClient extends AbstractGpuProvider {
       instanceId: serviceId,
       instanceName: name,
       endpoint: '',
-      status: 'starting',
+      status: normalizeInstanceStatus('starting'),
       providerMeta: {
         provider: 'railway',
         environmentId: envId,
@@ -305,11 +306,7 @@ export class RailwayClient extends AbstractGpuProvider {
       );
       const node = data.deployments?.edges?.[0]?.node;
       if (!node) return 'unknown';
-      const s = node.status?.toUpperCase() ?? 'UNKNOWN';
-      if (s === 'SUCCESS') return 'running';
-      if (s === 'FAILED' || s === 'CRASHED') return 'error';
-      if (s === 'REMOVED') return 'stopped';
-      return s.toLowerCase();
+      return normalizeInstanceStatus(node.status);
     } catch {
       return null;
     }

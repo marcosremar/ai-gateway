@@ -15,6 +15,7 @@
 import { AbstractGpuProvider, TIMEOUTS } from '../gpu-providers/abstract-provider';
 import type { AbstractGpuProviderOptions } from '../gpu-providers/abstract-provider';
 import type { GpuInstance, InstanceSpec, ProviderCredentials } from '../gpu-providers/types';
+import { normalizeInstanceStatus } from '../gateway/providers/gpu/instance-status';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -285,12 +286,7 @@ export class FlyioClient extends AbstractGpuProvider {
       });
       if (!res.ok) return null;
       const machine = await res.json() as FlyMachine;
-      // Map Fly state → canonical status used by the provider registry
-      if (machine.state === 'started') return 'running';
-      if (machine.state === 'stopped') return 'stopped';
-      if (machine.state === 'starting' || machine.state === 'created') return 'booting';
-      if (machine.state === 'stopping' || machine.state === 'destroying' || machine.state === 'destroyed') return 'terminated';
-      return machine.state;
+      return normalizeInstanceStatus(machine.state);
     } catch (e) {
       this.log.log(`[flyio] getInstanceStatus failed: ${e instanceof Error ? e.message : e}`);
       return null;
@@ -316,7 +312,7 @@ export class FlyioClient extends AbstractGpuProvider {
         .map(m => ({
           instanceId: m.id,
           instanceName: m.name,
-          status: m.state === 'started' ? 'running' : 'stopped',
+          status: normalizeInstanceStatus(m.state),
           endpoint: `https://${app}.fly.dev`,
           sshHost: '',
           sshPort: 0,

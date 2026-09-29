@@ -15,6 +15,7 @@
 import { AbstractGpuProvider, TIMEOUTS, FetchError } from '../gpu-providers/abstract-provider';
 import type { AbstractGpuProviderOptions } from '../gpu-providers/abstract-provider';
 import type { GpuInstance, InstanceSpec, ProviderCredentials } from '../gpu-providers/types';
+import { normalizeInstanceStatus } from '../gateway/providers/gpu/instance-status';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -251,7 +252,7 @@ export class ScalewayClient extends AbstractGpuProvider {
       instanceName: name,
       endpoint,
       ipAddress: ip || undefined,
-      status: 'starting',
+      status: normalizeInstanceStatus('starting'),
       providerMeta: { provider: 'scaleway', zone, commercialType: usedType.type, pricePerHr: usedType.pricePerHr },
     };
   }
@@ -341,7 +342,7 @@ export class ScalewayClient extends AbstractGpuProvider {
         TIMEOUTS.read,
         'scaleway',
       );
-      return res.server.state;
+      return normalizeInstanceStatus(res.server.state);
     } catch {
       return null;
     }
@@ -401,7 +402,7 @@ export class ScalewayClient extends AbstractGpuProvider {
       instanceName: s.name,
       endpoint: ip ? `http://${ip}:8080` : '',
       ipAddress: ip || undefined,
-      status: s.state,
+      status: normalizeInstanceStatus(s.state),
       providerMeta: { provider: 'scaleway', zone, commercialType: s.commercial_type, tags: s.tags },
     };
   }

@@ -22,6 +22,7 @@
 import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import { normalizeInstanceStatus } from './instance-status';
 
 let _execFileAsync: ((file: string, args: string[], opts?: { env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number }) => Promise<{ stdout: string; stderr: string }>) | null = null;
 async function getExecFileAsync() {
@@ -229,14 +230,9 @@ export class ModalClient extends AbstractGpuProvider {
       : instances;
 
     const found = candidates.find(i => i.status === 'running')
-      ?? candidates.find(i => i.status === 'deployed')
       ?? null;
 
     if (!found) return null;
-
-    if (found.status === 'deployed' && found.endpoint) {
-      return { ...found, status: 'running' };
-    }
     return found;
   }
 
@@ -294,13 +290,13 @@ export class ModalClient extends AbstractGpuProvider {
       const appName = deployFile.match(/(?:modal_)?(\w+)\.py/)?.[1] ?? 'unknown';
       const found =
         instances.find(i => i.instanceName?.includes(appName)) ??
-        instances.find(i => i.status === 'deployed');
+        instances.find(i => i.status === 'running');
 
       return {
         instanceId: found?.instanceId ?? `modal-${appName}`,
         instanceName: found?.instanceName ?? appName,
         endpoint: endpoint || buildEndpointUrl(workspace, found?.instanceName ?? appName, this.defaultFunctionName),
-        status: 'deployed',
+        status: normalizeInstanceStatus('deployed'),
       };
     } catch (err) {
       throw new Error(`[modal] deploy failed: ${this.errMsg(err).substring(0, 300)}`);
@@ -464,7 +460,7 @@ export class ModalClient extends AbstractGpuProvider {
     const desc = (app['Description'] ?? app.description ?? app.name ?? '') as string;
     const tasks = parseInt(String(app['Tasks'] ?? app.tasks ?? app.n_running_tasks ?? '0'), 10) || 0;
     const state = normalizeModalState(app['State'] ?? app.state);
-    const status = tasks > 0 ? 'running' : state;
+    const status = tasks > 0 ? 'running' : normalizeInstanceStatus(state);
 
     return {
       instanceId: appId,
@@ -496,7 +492,7 @@ export class ModalClient extends AbstractGpuProvider {
 
       if (!appId.startsWith('ap-')) continue;
 
-      const normalizedState = normalizeModalState(state);
+      const normalizedState = normalizeInstanceStatus(normalizeModalState(state));
       const status = tasks > 0 ? 'running' : normalizedState;
 
       results.push({

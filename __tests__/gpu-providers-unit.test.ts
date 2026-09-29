@@ -141,7 +141,7 @@ describe('RunpodClient', () => {
 
     const result = await client.createInstance(spec, creds);
     expect(result.instanceId).toBe('pod-new');
-    expect(result.status).toBe('CREATING');
+    expect(result.status).toBe('booting');
   });
 
   // #449 — createInstance CPU pod
@@ -293,7 +293,7 @@ describe('RunpodClient', () => {
       runtime: {},
     }));
     const status = await client.getInstanceStatus('pod-123', creds);
-    expect(status).toBe('RUNNING');
+    expect(status).toBe('running');
   });
 });
 

@@ -110,7 +110,7 @@ describe('ScalewayClient', () => {
 
       expect(result.instanceId).toContain('fr-par-1:srv-1');
       expect(result.ipAddress).toBe('1.2.3.4');
-      expect(result.status).toBe('starting');
+      expect(result.status).toBe('booting');
 
       const createCall = mockFetch.mock.calls[2];
       expect(createCall[0]).toContain('https://api.scaleway.com/instance/v1/zones/fr-par-1/servers');
