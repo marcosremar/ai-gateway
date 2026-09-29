@@ -284,6 +284,22 @@ export function resolveNearRegion(region: string, client: LatLon | null): string
   return ccs.length > 0 ? ccs.join(',') : countriesNear(client, Infinity).slice(0, 1).join(',');
 }
 
+/**
+ * Deploy-time region: expands `near[:km]` using the deploy body's
+ * clientLat/clientLon, else GPU_CLIENT_LOCATION — never the gateway's own IP,
+ * which is often in another country. Throws a 400 when `near` has no client.
+ */
+export function resolveDeployRegion(region: string, clientLat?: unknown, clientLon?: unknown): string {
+  const bodyClient = typeof clientLat === 'number' && typeof clientLon === 'number'
+    ? parseLatLon(`${clientLat},${clientLon}`)
+    : null;
+  const resolved = resolveNearRegion(region, bodyClient ?? getConfiguredClientLocation());
+  if (resolved === null) {
+    throw { status: 400, message: `region "${region}" needs the client location: pass clientLat/clientLon or set GPU_CLIENT_LOCATION="lat,lon"` };
+  }
+  return resolved;
+}
+
 /** Estimate RTT from distance: 10ms base + 0.012ms/km (fiber ~80% speed-of-light). */
 function estimateRttMs(distanceKm: number): number {
   return Math.round(10 + distanceKm * 0.012);

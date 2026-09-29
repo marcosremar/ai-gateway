@@ -41,7 +41,7 @@ import {
   getDeployRaceCount, getLatencyMaxMs,
 } from '../src/gpu-providers/deploy-settings';
 import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
-import { getConfiguredClientLocation, parseLatLon, resolveNearRegion } from './gpu-latency';
+import { resolveDeployRegion } from './gpu-latency';
 import { runPreFlightChecks, validateDockerImageReference } from '../src/preflight-checks';
 import type { DockerCapability } from '../src/gateway/providers/gpu/docker-manifest';
 import { defaultApiPathsForCapabilities } from '../src/gateway/providers/gpu/docker-manifest';
@@ -525,17 +525,8 @@ async function _validateDeployRequest(
   const requestedRegion = process.env.VAST_NO_DEFAULT_REGION === '1'
     ? ''
     : (typeof body.region === 'string' ? body.region : (appGpu?.region ?? getDeployRegion()));
-  // region "near" / "near:<km>" → country list around the client (where the
-  // audio comes from), e.g. Lyon → "FR,CH,IT,DE,…". Client location comes from
-  // body.clientLat/clientLon, else GPU_CLIENT_LOCATION — never guessed from the
-  // gateway's IP, which is often in another country.
-  const bodyClient = typeof body.clientLat === 'number' && typeof body.clientLon === 'number'
-    ? parseLatLon(`${body.clientLat},${body.clientLon}`)
-    : null;
-  const region = resolveNearRegion(requestedRegion, bodyClient ?? getConfiguredClientLocation());
-  if (region === null) {
-    throw { status: 400, message: `region "${requestedRegion}" needs the client location: pass clientLat/clientLon or set GPU_CLIENT_LOCATION="lat,lon"` };
-  }
+  // region "near[:km]" → countries around the client (ADR-017)
+  const region = resolveDeployRegion(requestedRegion, body.clientLat, body.clientLon);
   if (region !== requestedRegion) log.log(`[gpu] region "${requestedRegion}" → ${region}`);
   // Apply app timeout if provided (and not overridden by body)
   if (appGpu?.timeoutMin && typeof body.timeoutMin !== 'number') {

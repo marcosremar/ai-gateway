@@ -97,3 +97,21 @@ describe('rankOffers — probe origin', () => {
     expect(ranked[0].hostId).toBe('us-host');
   });
 });
+
+describe('resolveDeployRegion', () => {
+  afterEach(() => { delete process.env.GPU_CLIENT_LOCATION; });
+
+  it('prefers body coordinates, then GPU_CLIENT_LOCATION', async () => {
+    const { resolveDeployRegion } = await import('../server/gpu-latency');
+    expect(resolveDeployRegion('near:500', 45.76, 4.84).split(',').sort()).toEqual(['CH', 'FR', 'IT']);
+    process.env.GPU_CLIENT_LOCATION = '45.76,4.84';
+    expect(resolveDeployRegion('near:500').split(',').sort()).toEqual(['CH', 'FR', 'IT']);
+    expect(resolveDeployRegion('EU')).toBe('EU');
+  });
+
+  it('rejects near without a client location with a 400', async () => {
+    const { resolveDeployRegion } = await import('../server/gpu-latency');
+    expect(() => resolveDeployRegion('near')).toThrow();
+    try { resolveDeployRegion('near'); } catch (e: any) { expect(e.status).toBe(400); }
+  });
+});
