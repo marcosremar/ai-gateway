@@ -98,4 +98,31 @@ describe('VastClient — inet_down clamp + desktop policy', () => {
       }
     }
   });
+
+  it('explicit maxPricePerHr does not relax to reliability 0.9 / inet 500', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(mockFetchResponse({ credit: 100 }))
+      .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))
+      .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))
+      .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+
+    await expect(
+      client.createInstance(
+        { dockerImage: 'test:latest', maxPricePerHr: 0.2, minInetDownMbps: 1000, raceCount: 1 },
+        creds,
+      ),
+    ).rejects.toThrow('No GPUs available');
+
+    const bundleCalls = fetchSpy.mock.calls.filter(
+      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/bundles/'),
+    );
+    expect(bundleCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of bundleCalls) {
+      const body = JSON.parse((call[1] as { body: string }).body);
+      expect(body.inet_down).not.toEqual({ gte: 500 });
+      if (body.reliability2?.gte != null) {
+        expect(body.reliability2.gte).toBeGreaterThanOrEqual(0.95);
+      }
+    }
+  });
 });

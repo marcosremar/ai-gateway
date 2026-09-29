@@ -1244,8 +1244,16 @@ export class VastClient extends AbstractGpuProvider {
       }
     }
 
-    // Fallback: relax network requirements to find more hosts (skipped for desktop policy)
-    if (!offers.length && !isDesktopPolicy) {
+    // Fallback: relax network requirements to find more hosts.
+    // Skip quality soft-relax when the caller locked floors (desktop policy, or
+    // explicit minInetDownMbps / maxPricePerHr from a facade). Softening to
+    // reliability 0.9 + 500 Mbps would violate those policies.
+    const floorsLocked =
+      isDesktopPolicy ||
+      spec.minInetDownMbps != null ||
+      spec.maxPricePerHr != null;
+
+    if (!offers.length && !floorsLocked) {
       const slowPullEstSec = Math.round((diskGb * 8 * 1024) / 500);
       this.log.warn(
         `[vast] No offers with strict filters — relaxing to inet_down: 500, reliability: 0.9. ` +
@@ -1266,10 +1274,12 @@ export class VastClient extends AbstractGpuProvider {
       } catch (retryErr) {
         this.log.error(`[vast] Relaxed search also failed: ${this.errMsg(retryErr)}`);
       }
-    } else if (!offers.length && isDesktopPolicy) {
-      // Soft step only: drop verified requirement — never relax below inet_down>1000 / 0.95.
+    } else if (!offers.length && floorsLocked) {
+      // Soft step only: drop verified — never relax inet/reliability floors.
       this.log.warn(
-        '[vast] Desktop policy: no offers — soft step: drop verified=true only (keeping inet_down>1000, reliability≥0.95)',
+        isDesktopPolicy
+          ? '[vast] Desktop policy: no offers — soft step: drop verified=true only (keeping inet_down>1000, reliability≥0.95)'
+          : `[vast] No offers — soft step: drop verified only (caller floors locked: minInetDown=${spec.minInetDownMbps ?? 'default'} maxPrice=${spec.maxPricePerHr ?? 'none'}; not relaxing to 0.9/500)`,
       );
       delete searchBody.verified;
       try {
@@ -1280,7 +1290,7 @@ export class VastClient extends AbstractGpuProvider {
             return createGeoFilter!.some(cc => geoMatchesCountryCode(geo, cc));
           });
         }
-        if (offers.length) {
+        if (offers.length && isDesktopPolicy) {
           const desktopCap = spec.maxPricePerHr ?? VAST_DESKTOP_MAX_PER_HR;
           const rankInputs: VastOfferRankInput[] = offers.map((o) => ({
             id: Number(o.id),
@@ -1299,7 +1309,7 @@ export class VastClient extends AbstractGpuProvider {
             .sort((a, b) => (order.get(Number(a.id)) ?? 0) - (order.get(Number(b.id)) ?? 0));
         }
       } catch (retryErr) {
-        this.log.error(`[vast] Desktop soft-step search failed: ${this.errMsg(retryErr)}`);
+        this.log.error(`[vast] Soft-step search failed: ${this.errMsg(retryErr)}`);
       }
     }
 
