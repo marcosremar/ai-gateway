@@ -87,6 +87,13 @@ export interface ScalewayProviderMeta {
   tags?: string[];
   /** SBS volume IDs attached at create (deleted on destroy). */
   volumeIds?: string[];
+  /** Raw Scaleway state ('running', 'stopped', 'stopped in place', 'stopping', …) — `status` is normalized and
+   *  folds 'stopping' into 'stopped', which hosts that poweroff/poweron need to tell apart. */
+  state?: string;
+  /** Server creation time (ISO), for max-lifetime and boot-deadline policies. */
+  createdAt?: string;
+  /** Reserved IP ids attached to the server (routed IPv4 kept across poweroff). */
+  publicIpIds?: string[];
   [key: string]: unknown;
 }
 
@@ -284,6 +291,14 @@ export interface InstanceSpec {
   tags?: string[];
   /** Scaleway project ID override (else resolve from API key). */
   projectId?: string;
+  /** Scaleway: extra user_data keys written before power-on (the cloud-init key has a size limit, so large
+   *  payloads such as reference audio go in their own keys and the boot script fetches them from the metadata API). */
+  userDataFiles?: Record<string, string | Uint8Array>;
+  /** Scaleway: attach these reserved IPs (see `reserveRoutedIp`) instead of a dynamic one — the address survives
+   *  poweroff and delete, so DNS pointing at it stays valid. */
+  publicIpIds?: string[];
+  /** Scaleway: security group (firewall) to attach, see `createSecurityGroup`. */
+  securityGroupId?: string;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────
