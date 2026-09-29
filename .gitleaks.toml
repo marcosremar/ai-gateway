@@ -22,5 +22,8 @@ regexes = [
   '''test[_-]?api[_-]?key''',
   '''dckr_pat_(test|fallback|preferred|shouldnotuse)''',
   '''your[_-]?(api|token|secret)[_-]?key''',
-  '''key:demo-client-id-xxxx'''
+  '''key:demo-client-id-xxxx''',
+  '''demo-client-id-xxxx''',
+  '''secretKey = env\.B2_APPLICATION_KEY''',
+  '''env\.B2_APPLICATION_KEY'''
 ]
