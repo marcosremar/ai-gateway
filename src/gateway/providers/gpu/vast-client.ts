@@ -24,11 +24,21 @@ import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 import { getMinInetDownMbps } from './deploy-settings';
 import { normalizeInstanceStatus } from './instance-status';
+import {
+  VAST_DESKTOP_MAX_PER_HR,
+  rankVastOffers,
+  vastDesktopSearchFilters,
+  type VastOfferRankInput,
+} from './vast/offer-policy';
 import os from 'os';
 import path from 'path';
 import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import { spawn } from 'child_process';
 import { createLogger } from '../../../logger';
+
+/** When `spec.minInetDownMbps` is unset, floor at this Mbps (never clamp an explicit caller value).
+ *  Deploy-settings often persist 2000 which zeros consumer-GPU inventory; 500 is a sensible default. */
+const DEFAULT_CREATE_INET_DOWN_MBPS = 500;
 
 const log = createLogger('vast-client');
 
@@ -1091,14 +1101,34 @@ export class VastClient extends AbstractGpuProvider {
       // Strict-fast-boot opts into a higher reliability bar (0.97) to filter out
       // hosts that historically zombie. Default 0.95 keeps backwards compat.
       reliability2: { gte: isHighQualitySearch ? 0.97 : 0.95 },
-      // Minimum download bandwidth. spec.minInetDownMbps overrides per call;
-      // the no-spec fallback is clamped to 500 so a stale persisted 2000
-      // default doesn't zero out otherwise-fine offers.
-      inet_down: { gte: spec.minInetDownMbps ?? Math.min(getMinInetDownMbps(), 500) },
+      // Minimum download bandwidth. Explicit spec.minInetDownMbps is never clamped.
+      // When unset, use min(deploy-settings, DEFAULT_CREATE_INET_DOWN_MBPS=500) so a
+      // stale persisted 2000 does not wipe consumer-GPU inventory.
+      inet_down: {
+        gte:
+          spec.minInetDownMbps != null
+            ? spec.minInetDownMbps
+            : Math.min(getMinInetDownMbps(), DEFAULT_CREATE_INET_DOWN_MBPS),
+      },
       inet_up: { gte: 100 },            // Minimum 100 Mb/s upload
       ...(spec.directPortRequired ? { direct_port_count: { gte: spec.directPortRequired } } : {}),
       order: [['dph_total', 'asc']],
     };
+
+    const isDesktopPolicy = spec.offerPolicy === 'desktop';
+    if (isDesktopPolicy) {
+      const desktopCap = spec.maxPricePerHr ?? VAST_DESKTOP_MAX_PER_HR;
+      Object.assign(
+        searchBody,
+        vastDesktopSearchFilters({
+          maxPerHr: desktopCap,
+          ...(spec.minInetDownMbps != null ? { minInetDownMbps: spec.minInetDownMbps } : {}),
+        }),
+      );
+      this.log.log(
+        `[vast] Desktop offer policy: reliability≥0.95 inet_down>1000 dph≤$${desktopCap}/hr`,
+      );
+    }
 
     // Filter by GPU type if specified
     const gpuTypes = spec.gpuTypes?.filter(t => t && t.length > 0 && t.length <= 50);
@@ -1159,17 +1189,21 @@ export class VastClient extends AbstractGpuProvider {
     // (test mock or partial response). Filtering these out caused 100+ unit
     // tests to fail when the bandwidth filter was added.
     {
-      const minDown = (searchBody.inet_down as { gte?: number } | undefined)?.gte;
+      const inetFilter = searchBody.inet_down as { gte?: number; gt?: number } | undefined;
+      const minDownGte = inetFilter?.gte;
+      const minDownGt = inetFilter?.gt;
       const minUp = (searchBody.inet_up as { gte?: number } | undefined)?.gte;
-      if (typeof minDown === 'number' || typeof minUp === 'number') {
+      if (typeof minDownGte === 'number' || typeof minDownGt === 'number' || typeof minUp === 'number') {
         const before = offers.length;
         offers = offers.filter(o => {
-          if (typeof minDown === 'number' && o.inet_down != null && Number(o.inet_down) < minDown) return false;
+          if (typeof minDownGte === 'number' && o.inet_down != null && Number(o.inet_down) < minDownGte) return false;
+          if (typeof minDownGt === 'number' && o.inet_down != null && Number(o.inet_down) <= minDownGt) return false;
           if (typeof minUp === 'number' && o.inet_up != null && Number(o.inet_up) < minUp) return false;
           return true;
         });
         if (offers.length !== before) {
-          this.log.log(`[vast] Bandwidth client-filter: ${before} → ${offers.length} offers (down>=${minDown ?? '-'}, up>=${minUp ?? '-'})`);
+          const downLabel = typeof minDownGt === 'number' ? `>${minDownGt}` : `>=${minDownGte ?? '-'}`;
+          this.log.log(`[vast] Bandwidth client-filter: ${before} → ${offers.length} offers (down${downLabel}, up>=${minUp ?? '-'})`);
         }
       }
     }
@@ -1184,8 +1218,34 @@ export class VastClient extends AbstractGpuProvider {
       this.log.log(`[vast] Geo filter (create): ${before} → ${offers.length} offers matching [${createGeoFilter.join(',')}]`);
     }
 
-    // Fallback: relax network requirements to find more hosts
-    if (!offers.length) {
+    // Desktop policy: client-side rank (strict >1000 Mbps, ≥0.95, price cap). Prefer not
+    // relaxing quality floors — desktop callers need bandwidth/reliability.
+    if (isDesktopPolicy && offers.length) {
+      const desktopCap = spec.maxPricePerHr ?? VAST_DESKTOP_MAX_PER_HR;
+      const before = offers.length;
+      const rankInputs: VastOfferRankInput[] = offers.map((o) => ({
+        id: Number(o.id),
+        dph_total: Number(o.dph_total),
+        reliability2: Number(o.reliability2),
+        inet_down: Number(o.inet_down),
+        num_gpus: Number(o.num_gpus ?? 1),
+        gpu_name: String(o.gpu_name ?? ''),
+        rentable: o.rentable !== false,
+        rented: o.rented === true,
+        verified: o.verified as boolean | undefined,
+      }));
+      const ranked = rankVastOffers(rankInputs, desktopCap);
+      const order = new Map(ranked.map((r, i) => [r.id, i]));
+      offers = offers
+        .filter((o) => order.has(Number(o.id)))
+        .sort((a, b) => (order.get(Number(a.id)) ?? 0) - (order.get(Number(b.id)) ?? 0));
+      if (offers.length !== before) {
+        this.log.log(`[vast] Desktop rankVastOffers: ${before} → ${offers.length} (cap $${desktopCap}/hr)`);
+      }
+    }
+
+    // Fallback: relax network requirements to find more hosts (skipped for desktop policy)
+    if (!offers.length && !isDesktopPolicy) {
       const slowPullEstSec = Math.round((diskGb * 8 * 1024) / 500);
       this.log.warn(
         `[vast] No offers with strict filters — relaxing to inet_down: 500, reliability: 0.9. ` +
@@ -1205,6 +1265,41 @@ export class VastClient extends AbstractGpuProvider {
         }
       } catch (retryErr) {
         this.log.error(`[vast] Relaxed search also failed: ${this.errMsg(retryErr)}`);
+      }
+    } else if (!offers.length && isDesktopPolicy) {
+      // Soft step only: drop verified requirement — never relax below inet_down>1000 / 0.95.
+      this.log.warn(
+        '[vast] Desktop policy: no offers — soft step: drop verified=true only (keeping inet_down>1000, reliability≥0.95)',
+      );
+      delete searchBody.verified;
+      try {
+        offers = await this._searchOffers(searchBody, headers);
+        if (createGeoFilter && offers.length) {
+          offers = offers.filter(o => {
+            const geo = String(o.geolocation || '');
+            return createGeoFilter!.some(cc => geoMatchesCountryCode(geo, cc));
+          });
+        }
+        if (offers.length) {
+          const desktopCap = spec.maxPricePerHr ?? VAST_DESKTOP_MAX_PER_HR;
+          const rankInputs: VastOfferRankInput[] = offers.map((o) => ({
+            id: Number(o.id),
+            dph_total: Number(o.dph_total),
+            reliability2: Number(o.reliability2),
+            inet_down: Number(o.inet_down),
+            num_gpus: Number(o.num_gpus ?? 1),
+            gpu_name: String(o.gpu_name ?? ''),
+            rentable: o.rentable !== false,
+            rented: o.rented === true,
+          }));
+          const ranked = rankVastOffers(rankInputs, desktopCap);
+          const order = new Map(ranked.map((r, i) => [r.id, i]));
+          offers = offers
+            .filter((o) => order.has(Number(o.id)))
+            .sort((a, b) => (order.get(Number(a.id)) ?? 0) - (order.get(Number(b.id)) ?? 0));
+        }
+      } catch (retryErr) {
+        this.log.error(`[vast] Desktop soft-step search failed: ${this.errMsg(retryErr)}`);
       }
     }
 

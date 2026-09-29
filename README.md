@@ -204,7 +204,7 @@ await runpod.terminate(pod.id);
 | TensorDock | Working  | RTX 3090 inference backend.                |
 | Modal      | Working  | Serverless, auto-scales to zero.           |
 | Hyperstack | Working  | KVM w/ nested virt (`/dev/kvm` confirmed). Custom image build pipeline wired. `offloadOnIdle` = 1.3s wake. |
-| Vast.ai    | Limited  | HTTP not viable (SSH proxy only). VM mode marketplace unreliable in practice (hosts fail to materialize contracts). |
+| Vast.ai    | Improved | Desktop offer policy (reliability ≥0.95, download >1 Gbps, ≤~$0.20/hr) + in-memory hot pool (`claim`/`release`). Direct HTTP still often needs SSH proxy on residential hosts; prefer `offerPolicy: 'desktop'` for quality. |
 | SkyPilot   | Working  | Multi-cloud orchestration.                 |
 
 ### Providers to explore — Firecracker / gVisor / Kata GPU sandboxing
