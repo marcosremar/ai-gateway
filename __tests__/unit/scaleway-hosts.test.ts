@@ -149,4 +149,15 @@ describe('ScalewayClient for hosts', () => {
     expect(calls().filter(c => c.url.endsWith('/rules')).map(c => JSON.parse(String(c.body)).dest_port_from)).toEqual([443, 7882]);
     await expect(client.deleteIp('fr-par-1', 'ip-1', creds)).rejects.toThrow(/403/);
   });
+
+  it('getHourlyPrice reads the zone catalog and pages until the type shows up', async () => {
+    const page1 = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`T-${i}`, { hourly_price: 0.01 }]));
+    route([
+      [/products\/servers\?per_page=100&page=1$/, 'GET', () => json({ servers: page1 })],
+      [/products\/servers\?per_page=100&page=2$/, 'GET', () => json({ servers: { 'L4-1-24G': { hourly_price: 0.7875 } } })],
+    ]);
+    const client = new ScalewayClient();
+    expect(await client.getHourlyPrice('fr-par-2', 'L4-1-24G', creds)).toBe(0.7875);
+    expect(await client.getHourlyPrice('fr-par-2', 'NOPE', creds)).toBeNull();
+  });
 });

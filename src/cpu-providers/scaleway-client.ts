@@ -544,6 +544,24 @@ export class ScalewayClient extends AbstractGpuProvider {
     return lists.flat();
   }
 
+  /**
+   * Catalog hourly price (EUR) of a commercial type in a zone, from `products/servers`; `null` when the type is
+   * not sold there. Lets a caller cap spend on the live price instead of a table that goes stale.
+   */
+  async getHourlyPrice(zone: string, commercialType: string, credentials: ProviderCredentials): Promise<number | null> {
+    const secretKey = this.requireSecret(credentials);
+    for (let page = 1; page < 20; page++) {
+      const res = await this.fetchJson<{ servers?: Record<string, { hourly_price?: number }> }>(
+        `${this.zoneUrl(zone)}/products/servers?per_page=100&page=${page}`,
+        { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
+      const entries = Object.entries(res.servers ?? {});
+      const hit = entries.find(([name]) => name === commercialType)?.[1];
+      if (hit) return typeof hit.hourly_price === 'number' && Number.isFinite(hit.hourly_price) ? hit.hourly_price : null;
+      if (entries.length < 100) return null;
+    }
+    return null;
+  }
+
   // ── Network: reserved routed IPs and security groups ───────────────────
   // A reserved IP survives poweroff and server deletion, so a DNS name pointing at it stays valid; the
   // security group is the instance-level firewall. Both are project resources the host keeps and reuses.
