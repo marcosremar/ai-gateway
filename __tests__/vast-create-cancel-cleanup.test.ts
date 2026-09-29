@@ -117,4 +117,19 @@ describe('VastClient.createInstance — cancel & cleanup', () => {
     expect(sshTunnel.getOrCreateTunnel).not.toHaveBeenCalled();
     expect(deleted.length).toBe(contract - 500);
   }, 30_000);
+  it('never falls back to an SSH tunnel when a direct port is required (real-time)', async () => {
+    vi.mocked(sshTunnel.isSshClientAvailable).mockResolvedValue(true);
+    vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
+      endpoint: '', ip: '5.5.5.5', sshHost: 'ssh5.vast.ai', sshPort: 28256,
+    });
+    vi.spyOn(client as any, '_fetchInstanceDetail').mockResolvedValue({
+      ip: '5.5.5.5', status: 'running', sshHost: 'ssh5.vast.ai', sshPort: 28256, endpoint: '',
+    });
+    await expect(client.createInstance(
+      { gpuTypes: ['RTX 4090'], dockerImage: 'test:latest', raceCount: 1, directPortRequired: 1 },
+      creds,
+    )).rejects.toThrow(/direct port required/);
+    expect(sshTunnel.getOrCreateTunnel).not.toHaveBeenCalled();
+    expect(deleted.length).toBe(contract - 500);
+  }, 30_000);
 });

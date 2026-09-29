@@ -33,7 +33,11 @@ Concrete case: an experiment near Lyon, France.
 3. Gateway-origin host probes are only trusted when the gateway is within
    300 km of the client (`PROBE_ORIGIN_MAX_KM`); otherwise ranking falls back
    to a geo estimate from the client.
-4. The authoritative measurement is taken from the client machine:
+4. `region: "near"` implies `requireDirectPort: true` (overridable in the
+   deploy body): SSH-only Vast hosts are reached through Vast's SSH proxy
+   (`sshN.vast.ai`), an extra hop unrelated to the client's location, and a
+   host whose direct port is unreachable is dropped instead of tunnelled.
+5. The authoritative measurement is taken from the client machine:
    `ai-gateway latency nearest` TCP-probes candidate hosts locally.
 
 ## Alternatives Considered

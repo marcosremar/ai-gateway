@@ -317,6 +317,7 @@ interface DeployConfig {
   minVramGb: number;
   minInetDownMbps: number;
   preferSsd: boolean;
+  requireDirectPort: boolean;
   storageGb: number;
   hfToken: string;
   llmModel: string;
@@ -641,6 +642,14 @@ async function _validateDeployRequest(
   // Dev mode: skip auto-destroy after idle-stop (pod stays paused until manually resumed)
   const devMode = body.devMode === true;
 
+  // Real-time (speech-to-speech) traffic must reach the pod directly: SSH-only
+  // Vast hosts are served through Vast's SSH proxy (sshN.vast.ai), an extra hop
+  // that can sit far from the client. region "near" means latency matters, so
+  // it implies a direct port unless the caller opts out (ADR-017).
+  const requireDirectPort = typeof body.requireDirectPort === 'boolean'
+    ? body.requireDirectPort
+    : /^\s*near\b/i.test(requestedRegion);
+
   return {
     apiKey, vastApiKey, hyperstackApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage,
@@ -648,7 +657,7 @@ async function _validateDeployRequest(
     expectedCapabilities: effectiveExpectedCapabilities,
     requireDockerManifest,
     runSmokeTests,
-    gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, preferSsd,
+    gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, preferSsd, requireDirectPort,
     storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
     dockerStartCmd, onstart, containerDiskInGb, volumeId,
     providerFilter,
@@ -1054,6 +1063,7 @@ function _startDeployAndRespond(
     ...(strictFastBoot ? { strictFastBoot } : {}),
     ...(allowUnverified ? { allowUnverified } : {}),
     ...(minInetDownMbps > 0 ? { minInetDownMbps } : {}),
+    ...(config.requireDirectPort ? { requireDirectPort: true } : {}),
     ...(config.expectedApiPaths.length > 0 ? { expectedApiPaths: config.expectedApiPaths } : {}),
     ...(config.expectedCapabilities.length > 0 ? { expectedCapabilities: config.expectedCapabilities } : {}),
     ...(config.requireDockerManifest ? { requireDockerManifest: true } : {}),

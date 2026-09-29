@@ -85,6 +85,8 @@ async function deploy(): Promise<string> {
       dockerImage: 'marcosremar/babelcast-qwen3-tts:latest',
       gpuTypes: [GPU], provider: 'vast',
       region: 'near', clientLat: lat, clientLon: lon,
+      // Real-time path: no SSH-proxied hosts (region near implies it; explicit here)
+      requireDirectPort: true,
       maxCostUsd: MAX_COST,
     }),
   });

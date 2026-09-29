@@ -172,6 +172,14 @@ describe('handleGpuDeploy — validation', () => {
     expect(fnBody).toContain('activeApp');
   });
 
+  it('region "near" implies requireDirectPort unless the body opts out (real-time latency)', () => {
+    const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
+    const fnEnd = handlersSource.indexOf('\n}\n', fnStart);
+    const fnBody = handlersSource.slice(fnStart, fnEnd);
+    expect(fnBody).toMatch(/typeof body\.requireDirectPort === 'boolean'[\s\S]*near/);
+    expect(handlersSource).toContain('requireDirectPort: true');
+  });
+
   it('#090 _validateDeployRequest caps raceCount at 10', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
     const fnBody = handlersSource.slice(fnStart, fnStart + 10000);

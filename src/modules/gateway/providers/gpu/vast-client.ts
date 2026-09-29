@@ -1755,6 +1755,16 @@ export class VastClient extends AbstractGpuProvider {
       }
 
       // SSH-only hosts: use SSH tunnel
+      if (!endpoint && spec.directPortRequired) {
+        // Latency-sensitive caller: an SSH-proxied pod adds a hop through
+        // sshN.vast.ai — drop this host and let the race try the next offer.
+        const reason = 'direct port required but endpoint not reachable — not falling back to SSH tunnel';
+        this.log.warn(`[vast] Instance ${contractId}: ${reason}. Destroying...`);
+        await this._safeCleanupInstance(instanceId, apiKey, reason);
+        failures.push({ offerId, gpu: gpuName, reason });
+        return null;
+      }
+
       if (!endpoint && ip && sshHost && sshPort && !(await isSshClientAvailable())) {
         // Without an ssh binary the tunnel can never open — don't wait for key
         // propagation + 20 retries (~10 min of billing) to find that out.
