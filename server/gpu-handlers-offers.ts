@@ -6,7 +6,7 @@ import { getOrCreateRequestId, setRequestIdHeader, validateGpuCredentials } from
 import { safeCatch } from '../src/safe-catch';
 import { PORT, LOW_BALANCE_THRESHOLD_USD } from './config';
 import { fetchMyLocation } from './ip-location';
-import { rankOffers, scheduleBackgroundProbes, probeAndSaveOffers } from './gpu-latency';
+import { rankOffers, scheduleBackgroundProbes, probeAndSaveOffers, getConfiguredClientLocation, resolveNearRegion } from './gpu-latency';
 import { upsertHostMeta, getHostRttMap, getBestLatencyByGpuModel } from './latency-db';
 import { createLogger } from '../src/logger';
 
@@ -332,24 +332,32 @@ export async function handleGpuOffersRanked(req: IncomingMessage, res: ServerRes
   setRequestIdHeader(res, requestId);
   const url = new URL(req.url || '/', `http://localhost:${PORT}`);
 
-  // Client coordinates — provided or auto-detected
+  // Client coordinates: ?clientLat/clientLon → GPU_CLIENT_LOCATION → gateway's own IP.
+  // Only the last one makes gateway-origin TCP probes representative of the client.
   let clientLat = parseFloat(url.searchParams.get('clientLat') || 'NaN');
   let clientLon = parseFloat(url.searchParams.get('clientLon') || 'NaN');
+  let clientSource: 'query' | 'env' | 'gateway' = 'query';
+  const gatewayLoc = await fetchMyLocation();
 
   if (isNaN(clientLat) || isNaN(clientLon)) {
-    const loc = await fetchMyLocation();
+    const pinned = getConfiguredClientLocation();
+    const loc = pinned ?? gatewayLoc;
     if (!loc) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Could not determine location. Provide clientLat/clientLon params.' }));
+      res.end(JSON.stringify({ error: 'Could not determine location. Provide clientLat/clientLon params or set GPU_CLIENT_LOCATION.' }));
       return;
     }
     clientLat = loc.lat;
     clientLon = loc.lon;
+    clientSource = pinned ? 'env' : 'gateway';
   }
+  // Unknown gateway location → can't tell whether probes are representative; keep them.
+  const probeOrigin = clientSource !== 'gateway' && gatewayLoc ? { lat: gatewayLoc.lat, lon: gatewayLoc.lon } : null;
 
   const gpuTypesParam = url.searchParams.get('gpuTypes');
   const gpuTypes = gpuTypesParam ? gpuTypesParam.split(',').map(s => s.trim()).filter(Boolean) : undefined;
-  const region = url.searchParams.get('region') || undefined;
+  // region=near[:km] → countries around the client (e.g. Lyon → FR,CH,IT,DE,…)
+  const region = resolveNearRegion(url.searchParams.get('region') || '', { lat: clientLat, lon: clientLon }) || undefined;
   const limit = parseInt(url.searchParams.get('limit') || '100', 10);
   const providerFilter = url.searchParams.get('provider') || undefined;
 
@@ -405,7 +413,7 @@ export async function handleGpuOffersRanked(req: IncomingMessage, res: ServerRes
     hostRtts = await getHostRttMap(hostIds);
   }
 
-  const ranked = rankOffers(allOffers, clientLat, clientLon, {}, hostRtts).map(o => ({
+  const ranked = rankOffers(allOffers, clientLat, clientLon, {}, hostRtts, probeOrigin).map(o => ({
     ...o,
     canDeploy: providerBalances[o.provider]?.canDeploy !== false,
     providerBalance: providerBalances[o.provider]?.balance ?? null,
@@ -420,6 +428,9 @@ export async function handleGpuOffersRanked(req: IncomingMessage, res: ServerRes
     offers:         [...deployable, ...blocked].slice(0, limit),
     clientLat,
     clientLon,
+    clientSource,
+    region:         region ?? '',
+    hostProbesUsed: ranked.some(o => o.rttSource === 'host'),
     providers:      providerResults,
     balances:       providerBalances,
     hostRttsCached: Object.keys(hostRtts).length,

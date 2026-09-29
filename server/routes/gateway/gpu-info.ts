@@ -3,6 +3,7 @@
  *
  * Routes:
  *   GET /v1/gpu/offers               — Current market offers
+ *   GET /v1/gpu/offers/ranked        — Offers ranked by client→GPU latency (?clientLat&clientLon&region=near)
  *   GET /v1/gpu/types                — Available GPU types
  *   GET /v1/gpu/catalog              — Full GPU catalog
  *   GET /v1/gpu/compatibility        — GPU compatibility matrix
@@ -15,6 +16,7 @@ export function registerGpuInfoRoutes(handlers: Record<string, Function>): void 
 
   Object.assign(handlers, {
     'GET /v1/gpu/offers': gh.handleGpuOffers,
+    'GET /v1/gpu/offers/ranked': gh.handleGpuOffersRanked,
     'GET /v1/gpu/types': gh.handleGpuTypes,
     'GET /v1/gpu/catalog': gh.handleGpuCatalog,
     'GET /v1/gpu/compatibility': gh.handleGpuCompatibility,

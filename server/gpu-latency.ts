@@ -226,6 +226,64 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// ── Client location ───────────────────────────────────────────────────────────
+// Latency that matters is client → GPU, not gateway → GPU. When the gateway
+// runs somewhere else (cloud VM, other city) its TCP probes say nothing about
+// the client's RTT, so callers can pin where the audio actually comes from.
+
+export interface LatLon { lat: number; lon: number }
+
+/** Beyond this gateway↔client distance, gateway-origin host probes are ignored. */
+export const PROBE_ORIGIN_MAX_KM = 300;
+
+/** Default radius for `region: 'near'` — Lyon → FR, CH, IT, DE, BE, GB, NL, ES, AT… */
+export const NEAR_REGION_DEFAULT_KM = 1200;
+
+/** Parse "45.76,4.84" → { lat, lon }. Returns null on anything malformed/out of range. */
+export function parseLatLon(value: string | undefined | null): LatLon | null {
+  if (!value) return null;
+  const parts = value.split(',').map(s => s.trim());
+  if (parts.length !== 2 || parts.some(p => p === '')) return null;
+  const lat = Number(parts[0]);
+  const lon = Number(parts[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { lat, lon };
+}
+
+/** Client location pinned by env `GPU_CLIENT_LOCATION="lat,lon"` (e.g. Lyon: "45.76,4.84"). */
+export function getConfiguredClientLocation(): LatLon | null {
+  return parseLatLon(process.env.GPU_CLIENT_LOCATION);
+}
+
+/**
+ * Country codes whose datacenter hub lies within `maxKm` of the client,
+ * nearest first. Feeds the provider `region` filter (Vast: country codes,
+ * RunPod: country → datacenter IDs).
+ */
+export function countriesNear(client: LatLon, maxKm = NEAR_REGION_DEFAULT_KM): string[] {
+  return Object.entries(COUNTRY_COORDS)
+    .map(([cc, c]) => ({ cc, km: haversineKm(client.lat, client.lon, c.lat, c.lon) }))
+    .filter(e => e.km <= maxKm)
+    .sort((a, b) => a.km - b.km)
+    .map(e => e.cc);
+}
+
+/**
+ * Expand `region: 'near'` / `'near:800'` into a country list around the client.
+ * Any other region string is returned unchanged. Returns null when the region
+ * asks for `near` but no client location is known.
+ */
+export function resolveNearRegion(region: string, client: LatLon | null): string | null {
+  const m = /^\s*near(?::(\d+))?\s*$/i.exec(region);
+  if (!m) return region;
+  if (!client) return null;
+  const km = m[1] ? Number(m[1]) : NEAR_REGION_DEFAULT_KM;
+  const ccs = countriesNear(client, km);
+  // Never widen to "any region" by accident — fall back to the single nearest hub.
+  return ccs.length > 0 ? ccs.join(',') : countriesNear(client, Infinity).slice(0, 1).join(',');
+}
+
 /** Estimate RTT from distance: 10ms base + 0.012ms/km (fiber ~80% speed-of-light). */
 function estimateRttMs(distanceKm: number): number {
   return Math.round(10 + distanceKm * 0.012);
@@ -254,6 +312,9 @@ export function parseCountryCode(geolocation: string | undefined): string {
 /**
  * Rank GPU offers by estimated total latency (network RTT + Whisper inference).
  * RTT priority: per-host TCP probe from DB > geo-distance estimate.
+ * Host probes are taken from the gateway, so when `probeOrigin` (the gateway's
+ * location) is more than PROBE_ORIGIN_MAX_KM from the client they are ignored
+ * and the geo estimate from the client is used instead.
  * Returns a new sorted array — original is not mutated.
  */
 export function rankOffers(
@@ -262,7 +323,11 @@ export function rankOffers(
   clientLon:    number,
   _unused:      Record<string, number> = {}, // kept for API compat (was country probes)
   hostRtts:     Record<string, number> = {}, // per-host TCP probes from DB
+  probeOrigin?: LatLon | null,               // where hostRtts were measured from (gateway)
 ): RankedOffer[] {
+  const probesApply = !probeOrigin
+    || haversineKm(clientLat, clientLon, probeOrigin.lat, probeOrigin.lon) <= PROBE_ORIGIN_MAX_KM;
+
   const ranked = offers.map(offer => {
     const cc     = parseCountryCode(offer.geolocation);
     const coords = COUNTRY_COORDS[cc];
@@ -274,7 +339,7 @@ export function rankOffers(
     let networkRttMs: number;
     let rttSource: RankedOffer['rttSource'];
 
-    if (offer.hostId && hostRtts[offer.hostId] !== undefined) {
+    if (probesApply && offer.hostId && hostRtts[offer.hostId] !== undefined) {
       networkRttMs = hostRtts[offer.hostId];
       rttSource    = 'host';
     } else {
