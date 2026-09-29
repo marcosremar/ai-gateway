@@ -4,6 +4,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeInstanceStatus,
+  isTerminalInstanceStatus,
+  isBillableInstanceStatus,
   type InstanceStatus,
 } from '../src/gateway/providers/gpu/instance-status';
 
@@ -35,6 +37,7 @@ describe('normalizeInstanceStatus', () => {
     ['DEPLOYING', 'booting'],
     ['deploying', 'booting'],
     ['loading', 'booting'],
+    ['booting', 'booting'], // canonical identity
   ] as const)('maps %s → %s', (raw, expected) => {
     expect(normalizeInstanceStatus(raw)).toBe(expected);
   });
@@ -57,8 +60,11 @@ describe('normalizeInstanceStatus', () => {
     expect(normalizeInstanceStatus(raw)).toBe(expected);
   });
 
+  it('maps idle → running (Vast endpoint with 0 workers)', () => {
+    expect(normalizeInstanceStatus('idle')).toBe('running');
+  });
+
   it('returns unknown for unrecognized values', () => {
-    expect(normalizeInstanceStatus('idle')).toBe('unknown');
     expect(normalizeInstanceStatus('weird-state')).toBe('unknown');
     expect(normalizeInstanceStatus('QUEUED')).toBe('unknown');
   });
@@ -68,5 +74,35 @@ describe('normalizeInstanceStatus', () => {
     for (const raw of ['RUNNING', 'CREATING', 'EXITED', 'FAILED', 'nope', null]) {
       expect(allowed).toContain(normalizeInstanceStatus(raw));
     }
+  });
+});
+
+describe('isTerminalInstanceStatus / isBillableInstanceStatus', () => {
+  it('treats EXITED-normalized-to-stopped as terminal (orphan-sweep skip)', () => {
+    // Critical: listInstances now returns 'stopped', never raw 'EXITED'.
+    expect(normalizeInstanceStatus('EXITED')).toBe('stopped');
+    expect(isTerminalInstanceStatus('EXITED')).toBe(true);
+    expect(isTerminalInstanceStatus('stopped')).toBe(true);
+    expect(isTerminalInstanceStatus('error')).toBe(true);
+    expect(isTerminalInstanceStatus('FAILED')).toBe(true);
+    expect(isBillableInstanceStatus('EXITED')).toBe(false);
+    expect(isBillableInstanceStatus('stopped')).toBe(false);
+  });
+
+  it('treats running/booting as billable', () => {
+    expect(isBillableInstanceStatus('running')).toBe(true);
+    expect(isBillableInstanceStatus('RUNNING')).toBe(true);
+    expect(isBillableInstanceStatus('booting')).toBe(true);
+    expect(isBillableInstanceStatus('loading')).toBe(true);
+    expect(isBillableInstanceStatus('CREATING')).toBe(true);
+    expect(isTerminalInstanceStatus('running')).toBe(false);
+    expect(isTerminalInstanceStatus('booting')).toBe(false);
+  });
+
+  it('unknown is neither terminal nor billable', () => {
+    expect(isTerminalInstanceStatus('unknown')).toBe(false);
+    expect(isBillableInstanceStatus('unknown')).toBe(false);
+    expect(isTerminalInstanceStatus(null)).toBe(false);
+    expect(isBillableInstanceStatus(undefined)).toBe(false);
   });
 });

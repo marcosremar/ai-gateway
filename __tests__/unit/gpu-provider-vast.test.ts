@@ -351,7 +351,7 @@ describe('VastClient', () => {
       expect(result).toEqual([]);
     });
 
-    it('endpoint workers > 0 = running, 0 = unknown', async () => {
+    it('endpoint workers > 0 = running, 0 = running', async () => {
       fetchSpy
         .mockResolvedValueOnce(mockFetchResponse({ instances: [] }))
         .mockResolvedValueOnce(mockFetchResponse([
@@ -360,7 +360,7 @@ describe('VastClient', () => {
         ]));
 
       const result = await client.listInstances(creds);
-      expect(result.find(r => r.instanceId === 'endpt-30')!.status).toBe('unknown');
+      expect(result.find(r => r.instanceId === 'endpt-30')!.status).toBe('running');
       expect(result.find(r => r.instanceId === 'endpt-31')!.status).toBe('running');
     });
   });
@@ -373,9 +373,9 @@ describe('VastClient', () => {
       expect(await client.getInstanceStatus('endpt-50', creds)).toBe('running');
     });
 
-    it('returns unknown for endpoint with no workers', async () => {
+    it('returns running for idle endpoint with no workers', async () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({ current_workers: 0 }));
-      expect(await client.getInstanceStatus('endpt-50', creds)).toBe('unknown');
+      expect(await client.getInstanceStatus('endpt-50', creds)).toBe('running');
     });
 
     it('returns status from instance detail for on-demand', async () => {

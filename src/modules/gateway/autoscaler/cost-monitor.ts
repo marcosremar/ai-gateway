@@ -18,6 +18,11 @@ import type { ProviderCredentials, GpuInstance } from '../providers/gpu/types';
 import type { StatePersistence } from './state-persistence';
 import type { GatewayHooks } from '../../hooks';
 import type { GpuLifecycleLogger } from './lifecycle-logger';
+import {
+  isBillableInstanceStatus,
+  isTerminalInstanceStatus,
+  normalizeInstanceStatus,
+} from '../providers/gpu/instance-status';
 import type { Logger } from '../../deps';
 import { fileLifecycleLogger } from './file-lifecycle-logger';
 import { emitHook } from '../../hooks';
@@ -113,33 +118,37 @@ export interface CostMonitorDeps {
 }
 
 // ─── Statuses that mean "machine is costing money" ─────────────────────────
+// Prefer canonical vocabulary (running|booting). Keep legacy raw aliases for
+// paths that may still see un-normalized Modal/TensorDock strings.
 
 const RUNNING_STATUSES = new Set([
-  // RunPod
-  'RUNNING',
-  // TensorDock
   'running',
+  'booting',
+  // Legacy raw aliases
+  'RUNNING',
   'online',
   'active',
-  // Modal apps with zero tasks still represent a live deployed endpoint. They
-  // may hold warm GPU containers depending on the function autoscaler config.
   'deployed',
   'ephemeral',
   'detached',
   'initializing',
+  'loading',
+  'creating',
 ]);
 
 /** Stopped statuses — machine may still incur storage charges */
 const STOPPED_STATUSES = new Set([
-  // RunPod
-  'EXITED',
-  // TensorDock
   'stopped',
+  'error',
+  // Legacy raw aliases
+  'EXITED',
+  'exited',
   'stoppeddisassociated',
   'StoppedDisassociated',
 ]);
 
 function isRunning(status: string): boolean {
+  if (isBillableInstanceStatus(status)) return true;
   const normalized = status.toLowerCase();
   return RUNNING_STATUSES.has(status)
     || RUNNING_STATUSES.has(normalized)
@@ -149,6 +158,9 @@ function isRunning(status: string): boolean {
 }
 
 function isStopped(status: string): boolean {
+  if (isTerminalInstanceStatus(status)) return true;
+  const n = normalizeInstanceStatus(status);
+  if (n === 'stopped') return true;
   return STOPPED_STATUSES.has(status) || status.toLowerCase().includes('stop');
 }
 

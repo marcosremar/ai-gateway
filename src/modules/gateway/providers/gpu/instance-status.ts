@@ -14,9 +14,11 @@ const RUNNING = new Set([
   'success',
   'active',
   'deployed', // Modal: app is live / wakes on request
+  'idle', // Vast endpoint with 0 workers — still a live deploy
 ]);
 
 const BOOTING = new Set([
+  'booting', // canonical identity
   'creating',
   'starting',
   'pending',
@@ -56,4 +58,16 @@ export function normalizeInstanceStatus(raw: string | null | undefined): Instanc
   if (STOPPED.has(key)) return 'stopped';
   if (ERROR.has(key)) return 'error';
   return 'unknown';
+}
+
+/** Dead / non-recoverable for orphan sweeps and health polls: stopped | error. */
+export function isTerminalInstanceStatus(raw: string | null | undefined): boolean {
+  const s = normalizeInstanceStatus(raw);
+  return s === 'stopped' || s === 'error';
+}
+
+/** Still costing money (or about to): running | booting. */
+export function isBillableInstanceStatus(raw: string | null | undefined): boolean {
+  const s = normalizeInstanceStatus(raw);
+  return s === 'running' || s === 'booting';
 }

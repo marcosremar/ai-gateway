@@ -8,6 +8,11 @@ import {
 } from './state';
 import { runpod, vast, tensordock, modal, hyperstack } from './providers';
 import { logGpuEvent } from '../src/gateway/autoscaler/file-lifecycle-logger';
+import {
+  isBillableInstanceStatus,
+  isTerminalInstanceStatus,
+  normalizeInstanceStatus,
+} from '../src/gateway/providers/gpu/instance-status';
 
 const log = createLogger('gpu-deploy');
 
@@ -117,9 +122,13 @@ function getModalApiKey(): string {
 export async function cleanupAllPods(apiKey: string, knownPodIds: string[] = []): Promise<void> {
   try {
     const instances = await runpod.listInstances({ apiKey });
-    const toTerminate = instances.filter(inst =>
-      (inst.instanceName || '').startsWith(POD_NAME_PREFIX) && inst.status !== 'EXITED'
-    );
+    const toTerminate = instances.filter(inst => {
+      // listInstances returns canonical statuses; skip dead ones (EXITED → stopped).
+      if (isTerminalInstanceStatus(inst.status) || normalizeInstanceStatus(inst.status) === 'unknown') {
+        return false;
+      }
+      return (inst.instanceName || '').startsWith(POD_NAME_PREFIX);
+    });
 
     if (toTerminate.length === 0) return;
 
@@ -146,7 +155,9 @@ export async function cleanupAllPods(apiKey: string, knownPodIds: string[] = [])
 
 
 
-const VAST_SWEEP_STATUSES = ['running', 'active', 'loading', 'creating', 'created', 'exited', 'stopped'];
+// Canonical statuses from normalized listInstances (plus stopped — Vast EXITED
+// instances still appear in the account and need orphan cleanup).
+const VAST_SWEEP_STATUSES = ['running', 'booting', 'stopped'];
 
 // Grace window — don't orphan-sweep instances created within this many ms.
 // Vast race deploys take 5-10 min before the winner+loser bookkeeping
@@ -183,13 +194,13 @@ export async function cleanupVastInstances(apiKey: string, knownInstanceIds: str
 // sweepOrphanInstances. Previously these helpers hard-coded
 // GATEWAY_NAME_PREFIXES, silently dropping the operator opt-in.
 export const cleanupTensordockInstances = (apiKey: string, authId?: string) =>
-  cleanupProviderInstances(tensordock, { apiKey, authId }, ['running', 'active', 'deploying', 'creating'], 'TensorDock', console.log, console.warn, prefixesForProvider('tensordock'));
+  cleanupProviderInstances(tensordock, { apiKey, authId }, ['running', 'booting'], 'TensorDock', console.log, console.warn, prefixesForProvider('tensordock'));
 
 export const cleanupModalApps = (apiKey: string) =>
   cleanupProviderInstances(
     modal,
     { apiKey },
-    ['running', 'deployed', 'active'],
+    ['running', 'booting'],
     'Modal',
     console.log,
     console.warn,
@@ -197,7 +208,7 @@ export const cleanupModalApps = (apiKey: string) =>
   );
 
 export const cleanupHyperstackInstances = (apiKey: string) =>
-  cleanupProviderInstances(hyperstack, { apiKey }, ['running', 'active', 'creating', 'booting'], 'Hyperstack', console.log, console.warn, prefixesForProvider('hyperstack'));
+  cleanupProviderInstances(hyperstack, { apiKey }, ['running', 'booting'], 'Hyperstack', console.log, console.warn, prefixesForProvider('hyperstack'));
 
 // ── Orphan instance sweep ─────────────────────────────────────────────────
 
@@ -214,12 +225,11 @@ const modalIdleSince = new Map<string, number>();
 
 function isModalIdleCandidate(status: string): boolean {
   // Modal "Tasks" means a container/process exists, not necessarily that a
-  // user request is in flight. Treat running/deployed apps as idle candidates
+  // user request is in flight. Treat billable apps as idle candidates
   // unless the gateway is actively tracking them.
+  if (isBillableInstanceStatus(status)) return true;
   const normalized = status.toLowerCase();
-  return ['running', 'active', 'deployed', 'ephemeral', 'detached'].includes(normalized)
-    || normalized.startsWith('ephemeral')
-    || normalized.includes('detached');
+  return normalized.startsWith('ephemeral') || normalized.includes('detached');
 }
 
 function shouldStopModalIdleApp(instanceId: string, status: string, now: number): boolean {
@@ -397,7 +407,10 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
       const instances = await runpod.listInstances({ apiKey: rpKey });
       const rpPrefixes = prefixesForProvider('runpod');
       const orphans = instances.filter(i => {
-        if (i.status === 'EXITED') return false;
+        // Canonical: EXITED → stopped. Also skip error/unknown dead states.
+        if (isTerminalInstanceStatus(i.status) || normalizeInstanceStatus(i.status) === 'unknown') {
+          return false;
+        }
         if (tracked.has(i.instanceId)) return false;
         if (rpPrefixes.length === 0) return nukeUntrackedAllowed('runpod');
         return rpPrefixes.some(p => (i.instanceName || '').startsWith(p));
@@ -528,8 +541,7 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
       const instances = await tensordock.listInstances({ apiKey: tdKey, authId: tdAuth });
       const tdPrefixes = prefixesForProvider('tensordock');
       const orphans = instances.filter(i => {
-        const st = i.status?.toLowerCase() ?? '';
-        if (!['running', 'active', 'deploying', 'creating'].includes(st)) return false;
+        if (!isBillableInstanceStatus(i.status)) return false;
         if (tracked.has(i.instanceId)) return false;
         if (tdPrefixes.length === 0) return nukeUntrackedAllowed('tensordock');
         return tdPrefixes.some(p => (i.instanceName || '').startsWith(p));
@@ -588,8 +600,7 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
       const instances = await hyperstack.listInstances({ apiKey: hyperstackKey });
       const hPrefixes = prefixesForProvider('hyperstack');
       const orphans = instances.filter(i => {
-        const st = i.status?.toLowerCase() ?? '';
-        if (!['running', 'active', 'creating', 'booting'].includes(st)) return false;
+        if (!isBillableInstanceStatus(i.status)) return false;
         if (tracked.has(i.instanceId)) return false;
         if (hPrefixes.length === 0) return nukeUntrackedAllowed('hyperstack');
         return hPrefixes.some(p => (i.instanceName || '').startsWith(p));

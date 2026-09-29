@@ -24,7 +24,11 @@ export type {
 
 // ── Instance status vocabulary ───────────────────────────────────────────
 export type { InstanceStatus } from './instance-status';
-export { normalizeInstanceStatus } from './instance-status';
+export {
+  normalizeInstanceStatus,
+  isTerminalInstanceStatus,
+  isBillableInstanceStatus,
+} from './instance-status';
 
 // ── Abstract Base Class ──────────────────────────────────────────────────
 export {

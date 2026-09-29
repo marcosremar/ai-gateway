@@ -341,11 +341,12 @@ describe('orphan sweep', () => {
     expect(orphanCleanupSource).toContain("export const POD_NAME_PREFIX = 'parle-autoscale-'");
   });
 
-  it('#205 cleanupAllPods filters by prefix and non-EXITED status', () => {
+  it('#205 cleanupAllPods filters by prefix and skips terminal/unknown statuses', () => {
     const fnStart = orphanCleanupSource.indexOf('export async function cleanupAllPods');
     const fnBody = orphanCleanupSource.slice(fnStart, fnStart + 2000);
     expect(fnBody).toContain('startsWith(POD_NAME_PREFIX)');
-    expect(fnBody).toContain("inst.status !== 'EXITED'");
+    expect(fnBody).toContain('isTerminalInstanceStatus');
+    expect(fnBody).not.toContain("inst.status !== 'EXITED'");
   });
 
   it('#206 sweepOrphanInstances excludes tracked pods and race candidates', () => {
