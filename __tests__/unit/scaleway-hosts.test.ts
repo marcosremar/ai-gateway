@@ -154,6 +154,41 @@ describe('ScalewayClient for hosts', () => {
     expect(deleted).toEqual(['vol-9']);
   });
 
+  it('lists GPU offers per zone with price, GPU memory and stock; a failing zone is skipped, all failing throws', async () => {
+    const GiB = 1024 ** 3;
+    route([
+      [/fr-par-2\/products\/servers\?/, 'GET', () => json({ servers: {
+        'L4-1-24G': { hourly_price: 0.7875, gpu: 1, gpu_info: { gpu_name: 'L4', gpu_memory: 24 * GiB } },
+        'L40S-1-48G': { hourly_price: 1.4, gpu: 1, gpu_info: { gpu_name: 'L40S', gpu_memory: 48 * GiB } },
+        'DEV1-S': { hourly_price: 0.0088, gpu: 0 },
+      } })],
+      [/fr-par-2\/products\/servers\/availability/, 'GET', () => json({ servers: { 'L4-1-24G': { availability: 'shortage' }, 'L40S-1-48G': { availability: 'available' } } })],
+      [/pl-waw-2\/products\/servers\?/, 'GET', () => json({ servers: { 'L4-1-24G': { hourly_price: 0.75, gpu: 1, gpu_info: { gpu_name: 'L4', gpu_memory: 24 * GiB } } } })],
+      [/pl-waw-2\/products\/servers\/availability/, 'GET', () => json({ message: 'down' }, 503)],
+      [/nl-ams-1\/products\/servers\?/, 'GET', () => json({ message: 'down' }, 503)],
+    ]);
+    const client = new ScalewayClient();
+    expect(await client.listGpuOffers(['fr-par-2', 'pl-waw-2', 'nl-ams-1'], creds)).toEqual([
+      { zone: 'fr-par-2', commercialType: 'L4-1-24G', hourlyPrice: 0.7875, gpuCount: 1, gpuName: 'L4', gpuMemoryGb: 24, availability: 'shortage' },
+      { zone: 'fr-par-2', commercialType: 'L40S-1-48G', hourlyPrice: 1.4, gpuCount: 1, gpuName: 'L40S', gpuMemoryGb: 48, availability: 'available' },
+      { zone: 'pl-waw-2', commercialType: 'L4-1-24G', hourlyPrice: 0.75, gpuCount: 1, gpuName: 'L4', gpuMemoryGb: 24, availability: null },
+    ]);
+    await expect(client.listGpuOffers(['nl-ams-1'], creds)).rejects.toThrow(/unavailable in all 1 zone/);
+  });
+
+  it('finds the same marketplace image in another zone by label, compatible with the type', async () => {
+    route([
+      [/local-images\/img-par$/, 'GET', () => json({ local_image: { id: 'img-par', label: 'ubuntu_noble_gpu_os_12' } })],
+      [/local-images\?image_label=ubuntu_noble_gpu_os_12&zone=pl-waw-2/, 'GET', () => json({ local_images: [
+        { id: 'img-waw-other', compatible_commercial_types: ['H100-1-80G'], type: 'instance_sbs' },
+        { id: 'img-waw-l4', compatible_commercial_types: ['L4-1-24G'], type: 'instance_sbs' },
+      ] })],
+    ]);
+    const client = new ScalewayClient();
+    expect(await client.imageLike('img-par', 'pl-waw-2', 'L4-1-24G', creds)).toBe('img-waw-l4');
+    expect(await client.imageLike('img-par', 'pl-waw-2', 'RENDER-S', creds)).toBeNull();
+  });
+
   it('reserves routed IPs and builds a drop-by-default security group with one rule per port', async () => {
     route([
       [/\/ips$/, 'POST', () => json({ ip: { id: 'ip-1', address: '51.15.9.9' } })],

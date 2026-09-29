@@ -68,6 +68,19 @@ const DEFAULT_BOT_TYPE = 'DEV1-XL';
 
 // ── Scaleway API response types ──────────────────────────────────────────────
 
+type ScwProduct = { hourly_price?: number; gpu?: number; gpu_info?: { gpu_name?: string; gpu_memory?: number } };
+
+/** One GPU server type in one zone (see `ScalewayClient.listGpuOffers`). */
+export type ScalewayGpuOffer = {
+  zone: string;
+  commercialType: string;
+  hourlyPrice: number;
+  gpuCount: number;
+  gpuName: string | null;
+  gpuMemoryGb: number | null;
+  availability: string | null;
+};
+
 interface ScwServer {
   id: string;
   name: string;
@@ -575,6 +588,71 @@ export class ScalewayClient extends AbstractGpuProvider {
       if (entries.length < 100) return null;
     }
     return null;
+  }
+
+  /**
+   * GPU server types offered in each zone, with table price, GPU and stock, for callers that pick an equivalent
+   * when their usual type is missing, out of stock or over their cap. Sources: `GET /products/servers` (price, `gpu`,
+   * `gpu_info.gpu_memory` in bytes) and `GET /products/servers/availability` (`available` / `scarce` / `shortage`;
+   * null when that read fails). A zone whose catalog fails is skipped; all zones failing throws, so "no offers" is
+   * never confused with "could not read".
+   */
+  async listGpuOffers(zones: string[], credentials: ProviderCredentials): Promise<ScalewayGpuOffer[]> {
+    const secretKey = this.requireSecret(credentials);
+    const headers = this.scwHeaders(secretKey);
+    const out: ScalewayGpuOffer[] = [];
+    let failed = 0;
+    for (const zone of zones) {
+      let products: Record<string, ScwProduct>;
+      try { products = await this.productsOf(zone, secretKey); }
+      catch (err) { failed++; this.log.log(`[scaleway] GPU catalog of ${zone} unavailable: ${this.errMsg(err)}`); continue; }
+      let stock: Record<string, { availability?: string }> = {};
+      try {
+        stock = (await this.fetchJson<{ servers?: Record<string, { availability?: string }> }>(
+          `${this.zoneUrl(zone)}/products/servers/availability?per_page=100`, { headers }, TIMEOUTS.read, 'scaleway')).servers ?? {};
+      } catch { /* availability unknown: the caller decides whether to try */ }
+      for (const [commercialType, product] of Object.entries(products)) {
+        if (!(Number(product.gpu) > 0) || typeof product.hourly_price !== 'number' || !Number.isFinite(product.hourly_price)) continue;
+        out.push({
+          zone, commercialType, hourlyPrice: product.hourly_price, gpuCount: Number(product.gpu),
+          gpuName: product.gpu_info?.gpu_name ?? null,
+          gpuMemoryGb: typeof product.gpu_info?.gpu_memory === 'number' ? product.gpu_info.gpu_memory / 1024 ** 3 : null,
+          availability: stock[commercialType]?.availability ?? null,
+        });
+      }
+    }
+    if (zones.length && failed === zones.length) throw new Error(`scaleway: GPU catalog unavailable in all ${zones.length} zone(s)`);
+    return out;
+  }
+
+  /**
+   * The same OS image in another zone: Scaleway image UUIDs are per zone, so a GPU image pinned in fr-par-2 does not
+   * exist in pl-waw-2. Reads the marketplace label of `imageId` and returns the local image with that label in
+   * `toZone` compatible with `commercialType` (SBS flavour first), or null.
+   */
+  async imageLike(imageId: string, toZone: string, commercialType: string, credentials: ProviderCredentials): Promise<string | null> {
+    const headers = this.scwHeaders(this.requireSecret(credentials));
+    const source = await this.fetchJson<{ local_image?: { label?: string }; label?: string }>(
+      `${SCW_MARKETPLACE_API}/local-images/${imageId}`, { headers }, TIMEOUTS.read, 'scaleway');
+    const label = source.local_image?.label ?? source.label;
+    if (!label) return null;
+    const res = await this.fetchJson<{ local_images: Array<{ id: string; compatible_commercial_types?: string[]; type?: string }> }>(
+      `${SCW_MARKETPLACE_API}/local-images?image_label=${encodeURIComponent(label)}&zone=${toZone}&page_size=100`, { headers }, TIMEOUTS.read, 'scaleway');
+    const compatible = res.local_images.filter(i => i.compatible_commercial_types?.includes(commercialType));
+    return (compatible.find(i => (i.type ?? 'instance_sbs') === 'instance_sbs') ?? compatible[0])?.id ?? null;
+  }
+
+  private async productsOf(zone: string, secretKey: string): Promise<Record<string, ScwProduct>> {
+    const all: Record<string, ScwProduct> = {};
+    for (let page = 1; page < 20; page++) {
+      const res = await this.fetchJson<{ servers?: Record<string, ScwProduct> }>(
+        `${this.zoneUrl(zone)}/products/servers?per_page=100&page=${page}`,
+        { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
+      const entries = Object.entries(res.servers ?? {});
+      Object.assign(all, Object.fromEntries(entries));
+      if (entries.length < 100) break;
+    }
+    return all;
   }
 
   // ── Network: reserved routed IPs and security groups ───────────────────
