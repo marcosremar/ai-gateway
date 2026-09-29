@@ -948,8 +948,10 @@ async function _selectDeploymentTier(
       tiers.map(async (tier) => {
         if (!tier.client.listOffers) return;
         const offers = await Promise.race([
+          // Pass gpuTypes: without it the provider returns the N cheapest offers of
+          // ANY GPU and the requested type is often not among them (estimate too high).
           tier.client.listOffers(
-            { region, limit: 20 },
+            { region, limit: 50, ...(gpuTypes.length > 0 ? { gpuTypes } : {}) },
             { apiKey: tier.apiKey, authId: tier.authId },
           ),
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 10_000)),
@@ -962,7 +964,9 @@ async function _selectDeploymentTier(
       (gpuTypes.length === 0 || gpuTypes.includes(o.gpuType)),
     );
     if (matchingOffers.length > 0) {
-      estimatedCostPerHr = Math.min(...matchingOffers.map(o => o.pricePerHr));
+      const cheapest = matchingOffers.reduce((a, b) => (b.pricePerHr < a.pricePerHr ? b : a));
+      estimatedCostPerHr = cheapest.pricePerHr;
+      log.log(`[gpu] cost estimate $${cheapest.pricePerHr.toFixed(3)}/hr — cheapest of ${matchingOffers.length}/${allOffers.length} offers for [${gpuTypes.join(', ')}] region="${region || 'any'}": ${cheapest.provider} ${cheapest.gpuType} ${cheapest.geolocation ?? cheapest.region ?? ''}`);
     }
   } catch { /* cost estimate is best-effort */ }
 
