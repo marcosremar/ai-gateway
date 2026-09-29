@@ -13,6 +13,10 @@ export default mergeConfig(
   base,
   defineConfig({
     test: {
+      // The base config sets `changed: true` (only tests touched by uncommitted edits) for the
+      // local watch loop. In CI the checkout is clean, so the PR gate ran zero test files and
+      // exited 0. The unit tier must always run the whole unit set.
+      changed: false,
       exclude: [
         '**/node_modules/**',
         '**/dist/**',
@@ -27,7 +31,12 @@ export default mergeConfig(
         '__tests__/**/*-lifecycle.test.ts',
         '__tests__/**/gpu-lifecycle-*.test.ts',
         '__tests__/**/runpod-*.test.ts',
-        '__tests__/**/vast-*.test.ts',
+        // Top-level vast-*.test.ts hit the real Vast API. The pure unit ones under __tests__/unit/
+        // (offer policy, hot pool, desktop policy client, vast-client) must run in the PR gate;
+        // the three below stay out as before (they need the real image/SSH/template stack).
+        '__tests__/vast-*.test.ts',
+        '__tests__/unit/vast-image-login.test.ts',
+        '__tests__/unit/vast-template-ssh-tunnel.test.ts',
         '__tests__/**/tensordock-*.test.ts',
         '__tests__/**/modal-*.test.ts',
         // Benchmarks / soaks / slow suites
