@@ -71,6 +71,19 @@ describe('runpod rest', () => {
       stockStatus: 'High', communityCloud: true, secureCloud: false }]);
   });
 
+  it('GPU catalog: a refused key or a GraphQL error throws instead of reading as an empty catalog', async () => {
+    await expect(rest([reply({ errors: [{ message: 'Unauthorized' }] }, 401)]).r.gpuTypes()).rejects.toThrow(/RunPod gpuTypes: Unauthorized/);
+    await expect(rest([reply({ errors: [{ message: 'bad query' }] })]).r.gpuTypes()).rejects.toThrow(/bad query/);
+    await expect(rest([reply('<html>', 502)]).r.gpuTypes()).rejects.toThrow(/HTTP 502/);
+  });
+
+  it('account: balance and spend from myself; an error throws', async () => {
+    const { r, calls } = rest([reply({ data: { myself: { id: 'u1', clientBalance: 12.5, currentSpendPerHr: 0.4 } } })]);
+    expect(await r.account()).toEqual({ id: 'u1', balance: 12.5, spendPerHr: 0.4 });
+    expect(calls[0]!.url).toBe('https://api.runpod.io/graphql');
+    await expect(rest([reply({ errors: [{ message: 'Unauthorized' }] }, 401)]).r.account()).rejects.toThrow(/RunPod myself: Unauthorized/);
+  });
+
   it('parses Retry-After seconds and Go-format times', () => {
     expect(runpodRetryAfterS(new Headers({ 'retry-after': '4' }))).toBe(4);
     expect(runpodRetryAfterS({ 'retry-after': '' })).toBeNull();
