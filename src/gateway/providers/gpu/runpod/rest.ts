@@ -35,6 +35,8 @@ export type RunpodGpuType = {
   secureCloud: boolean;
 };
 
+export type RunpodAccount = { id: string; balance: number; spendPerHr: number };
+
 export const RUNPOD_REST = "https://rest.runpod.io/v1";
 export const RUNPOD_GRAPHQL = "https://api.runpod.io/graphql";
 /** Longest `Retry-After` worth sitting through; longer hands the 429 back to the caller. */
@@ -77,6 +79,18 @@ export function createRunpodRest(opts: {
     if (wait > budget) return res;
     await sleep(wait * 1000);
     return request(path, init);
+  };
+
+  /** One GraphQL query; non-2xx or `errors` throw with RunPod's first message (never the key). */
+  const graphql = async <T>(what: string, query: string): Promise<T> => {
+    const res = await fetcher()(RUNPOD_GRAPHQL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${opts.apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    const body = await res.json().catch(() => ({})) as { data?: T; errors?: Array<{ message?: string }> };
+    if (!res.ok || body.errors?.length || !body.data) throw new Error(`RunPod ${what}: ${body.errors?.[0]?.message ?? `HTTP ${res.status}`}`);
+    return body.data;
   };
 
   const pods = async (): Promise<RunpodPod[] | null> => {
@@ -126,28 +140,31 @@ export function createRunpodRest(opts: {
       if (!id) return { ok: false, status: res.status, body: "sem id", retryAfterS };
       return { ok: true, status: res.status, pod: { ...pod, id }, retryAfterS };
     },
-    /** GPU catalog with the cheapest on-demand price and stock (GraphQL `gpuTypes.lowestPrice`); types without a price are skipped. */
+    /**
+     * GPU catalog with the cheapest on-demand price and stock (GraphQL `gpuTypes.lowestPrice`); types without a price
+     * are skipped. A refused key or a GraphQL error throws: an empty catalog would read as "no GPU in stock".
+     */
     async gpuTypes(): Promise<RunpodGpuType[]> {
-      const res = await fetcher()(RUNPOD_GRAPHQL, {
-        method: "POST",
-        headers: { authorization: `Bearer ${opts.apiKey}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          query: `query { gpuTypes { id displayName memoryInGb secureCloud communityCloud
-            lowestPrice(input: { gpuCount: 1 }) { uninterruptablePrice stockStatus } } }`,
-        }),
-      });
-      const body = await res.json() as { data?: { gpuTypes?: Array<{
+      const data = await graphql<{ gpuTypes?: Array<{
         id: string; displayName: string; memoryInGb: number; secureCloud?: boolean; communityCloud?: boolean;
         lowestPrice?: { uninterruptablePrice?: number | null; stockStatus?: string | null } | null;
-      }> } };
+      }> }>("gpuTypes", `query { gpuTypes { id displayName memoryInGb secureCloud communityCloud
+            lowestPrice(input: { gpuCount: 1 }) { uninterruptablePrice stockStatus } } }`);
       const out: RunpodGpuType[] = [];
-      for (const g of body.data?.gpuTypes ?? []) {
+      for (const g of data.gpuTypes ?? []) {
         const price = g.lowestPrice?.uninterruptablePrice;
         if (price == null || !Number.isFinite(price)) continue;
         out.push({ id: g.id, displayName: g.displayName, memoryInGb: g.memoryInGb, pricePerHr: price,
           stockStatus: g.lowestPrice?.stockStatus ?? "", communityCloud: !!g.communityCloud, secureCloud: !!g.secureCloud });
       }
       return out;
+    },
+    /** Balance and current spend of the key's account (GraphQL `myself`). */
+    async account(): Promise<RunpodAccount> {
+      const data = await graphql<{ myself?: { id: string; clientBalance: number; currentSpendPerHr: number } }>(
+        "myself", "query { myself { id clientBalance currentSpendPerHr } }");
+      if (!data.myself) throw new Error("RunPod myself: empty answer");
+      return { id: data.myself.id, balance: data.myself.clientBalance, spendPerHr: data.myself.currentSpendPerHr };
     },
   };
 }
