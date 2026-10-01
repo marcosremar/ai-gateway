@@ -998,6 +998,22 @@ describe('VastClient — extended unit tests', () => {
       expect(offers[2].available).toBe(1);
     });
 
+    it('exposes host IP and direct port so hosts can be latency-probed', async () => {
+      fetchSpy.mockResolvedValueOnce(mockFetchResponse({
+        offers: [
+          { id: '1', gpu_name: 'RTX 4090', dph_total: 0.40, public_ipaddr: '82.64.1.2', direct_port_start: 41000 },
+          { id: '2', gpu_name: 'RTX 4090', dph_total: 0.50, public_ipaddr: '10.0.0.5', direct_port_start: -1 },
+        ],
+      }));
+
+      const offers = await client.listOffers({}, creds);
+      expect(offers[0].hostIp).toBe('82.64.1.2');
+      expect(offers[0].hostDirectPort).toBe(41000);
+      // private IP / no direct port → nothing to probe
+      expect(offers[1].hostIp).toBeUndefined();
+      expect(offers[1].hostDirectPort).toBeUndefined();
+    });
+
     it('returns empty array on error', async () => {
       fetchSpy.mockRejectedValueOnce(new Error('network error'));
 
@@ -1025,6 +1041,22 @@ describe('VastClient — extended unit tests', () => {
       const offers = await client.listOffers({ region: 'FR' }, creds);
       expect(offers).toHaveLength(1);
       expect(offers[0].region).toContain('FR');
+    });
+
+    it('over-fetches when a region is set and applies limit after the geo filter', async () => {
+      fetchSpy.mockResolvedValueOnce(mockFetchResponse({
+        offers: [
+          { id: '1', gpu_name: 'RTX 4090', dph_total: 0.20, public_ipaddr: '1.1.1.1', geolocation: 'Texas, US' },
+          { id: '2', gpu_name: 'RTX 4090', dph_total: 0.30, public_ipaddr: '2.2.2.2', geolocation: 'France, FR' },
+          { id: '3', gpu_name: 'RTX 4090', dph_total: 0.40, public_ipaddr: '3.3.3.3', geolocation: 'France, FR' },
+          { id: '4', gpu_name: 'RTX 4090', dph_total: 0.50, public_ipaddr: '4.4.4.4', geolocation: 'France, FR' },
+        ],
+      }));
+
+      const offers = await client.listOffers({ region: 'FR', limit: 2 }, creds);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      expect(searchBody.limit).toBeGreaterThanOrEqual(1000);
+      expect(offers.map(o => o.pricePerHr)).toEqual([0.30, 0.40]);
     });
 
     it('includes extended fields in offers', async () => {
@@ -1102,7 +1134,8 @@ describe('VastClient — extended unit tests', () => {
       }));
 
       const status = await client.getInstanceStatus('inst-60', creds);
-      expect(status).toBe('loading');
+      // Vast 'loading' is normalized to the canonical 'booting' (instance-status.ts)
+      expect(status).toBe('booting');
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 

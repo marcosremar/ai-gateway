@@ -59,6 +59,20 @@ describe('RunPod Constants', () => {
     it('should return undefined for unknown region', () => {
       expect(resolveDatacenterIds('UNKNOWN')).toBeUndefined();
     });
+
+    it('should resolve country codes and names to datacenters', () => {
+      expect(resolveDatacenterIds('FR')).toEqual(['EU-FR-1']);
+      expect(resolveDatacenterIds('fr')).toEqual(['EU-FR-1']);
+      expect(resolveDatacenterIds('France')).toEqual(['EU-FR-1']);
+      expect(resolveDatacenterIds('IS')).toEqual(['EUR-IS-1', 'EUR-IS-2', 'EUR-IS-3']);
+    });
+
+    it('should resolve comma lists, skipping countries without a RunPod DC', () => {
+      // CH/DE/IT have no RunPod Secure Cloud DC — only FR + NL resolve
+      expect(resolveDatacenterIds('FR, CH, DE, IT, NL')).toEqual(['EU-FR-1', 'EU-NL-1']);
+      expect(resolveDatacenterIds('EU-FR-1,EU-NL-1')).toEqual(['EU-FR-1', 'EU-NL-1']);
+      expect(resolveDatacenterIds('CH,IT')).toBeUndefined();
+    });
   });
 
   describe('RUNPOD_GPU_TYPE_MAP', () => {

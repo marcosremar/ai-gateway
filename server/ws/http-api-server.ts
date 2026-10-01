@@ -176,7 +176,8 @@ async function pumpRequestBody(
  * Wraps a Node-style handler(req, res) so it resolves to a Bun Response.
  * Used for both the flat handler map and dynamic Docker/workload handlers.
  */
-function invokeNodeStyleHandler(
+/** Exported for tests. */
+export function invokeNodeStyleHandler(
   req: Request,
   invoke: (fakeReq: any, fakeRes: any) => void,
   corsOrigin: CorsResolution | string | null,
@@ -192,6 +193,12 @@ function invokeNodeStyleHandler(
     url?: string;
     headers?: Record<string, string>;
   };
+  // Body pump failures (client disconnect, 413) destroy fakeReq with the error.
+  // Handlers that answer without reading the body attach no 'error' listener,
+  // and an unhandled 'error' event kills the whole gateway process.
+  fakeReq.on('error', (err: Error) => {
+    log.debug(`[http-api-server] request body error (${method} ${url.pathname}): ${err.message}`);
+  });
   fakeReq.method = method;
   fakeReq.url = url.pathname + url.search;
   fakeReq.headers = (() => {

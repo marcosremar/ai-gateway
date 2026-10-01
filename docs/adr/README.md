@@ -35,6 +35,7 @@ When making architectural decisions during AI-assisted development:
 | [ADR-014](ADR-014-snapshot-capable-provider-landscape-2026.md) | Snapshot-Capable Provider Landscape (2026) | Accepted | 2026-04-17 |
 | [ADR-015](ADR-015-ai-quality-fitness-gates.md) | AI Quality Fitness Gates | Accepted | 2026-05-04 |
 | [ADR-016](ADR-016-automated-ai-control-layers.md) | Automated AI Control Layers | Accepted | 2026-05-04 |
+| [ADR-017](ADR-017-client-location-gpu-latency.md) | Client → GPU latency ranking (`region: near`) | Accepted | 2026-09-29 |
 
 ## Creating a New ADR
 

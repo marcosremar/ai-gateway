@@ -41,6 +41,7 @@ import {
   getDeployRaceCount, getLatencyMaxMs,
 } from '../src/gpu-providers/deploy-settings';
 import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
+import { resolveDeployRegion } from './gpu-latency';
 import { runPreFlightChecks, validateDockerImageReference } from '../src/preflight-checks';
 import type { DockerCapability } from '../src/gateway/providers/gpu/docker-manifest';
 import { defaultApiPathsForCapabilities } from '../src/gateway/providers/gpu/docker-manifest';
@@ -316,6 +317,7 @@ interface DeployConfig {
   minVramGb: number;
   minInetDownMbps: number;
   preferSsd: boolean;
+  requireDirectPort: boolean;
   storageGb: number;
   hfToken: string;
   llmModel: string;
@@ -521,9 +523,12 @@ async function _validateDeployRequest(
   // app-level fallback. The env-level `VAST_NO_DEFAULT_REGION=1` short-
   // circuits to "" entirely (kills the sticky `us-east` that some upstream
   // helpers set during latency probing).
-  const region = process.env.VAST_NO_DEFAULT_REGION === '1'
+  const requestedRegion = process.env.VAST_NO_DEFAULT_REGION === '1'
     ? ''
     : (typeof body.region === 'string' ? body.region : (appGpu?.region ?? getDeployRegion()));
+  // region "near[:km]" → countries around the client (ADR-017)
+  const region = resolveDeployRegion(requestedRegion, body.clientLat, body.clientLon);
+  if (region !== requestedRegion) log.log(`[gpu] region "${requestedRegion}" → ${region}`);
   // Apply app timeout if provided (and not overridden by body)
   if (appGpu?.timeoutMin && typeof body.timeoutMin !== 'number') {
     setDeployTimeoutMin(appGpu.timeoutMin);
@@ -637,6 +642,14 @@ async function _validateDeployRequest(
   // Dev mode: skip auto-destroy after idle-stop (pod stays paused until manually resumed)
   const devMode = body.devMode === true;
 
+  // Real-time (speech-to-speech) traffic must reach the pod directly: SSH-only
+  // Vast hosts are served through Vast's SSH proxy (sshN.vast.ai), an extra hop
+  // that can sit far from the client. region "near" means latency matters, so
+  // it implies a direct port unless the caller opts out (ADR-017).
+  const requireDirectPort = typeof body.requireDirectPort === 'boolean'
+    ? body.requireDirectPort
+    : /^\s*near\b/i.test(requestedRegion);
+
   return {
     apiKey, vastApiKey, hyperstackApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage,
@@ -644,7 +657,7 @@ async function _validateDeployRequest(
     expectedCapabilities: effectiveExpectedCapabilities,
     requireDockerManifest,
     runSmokeTests,
-    gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, preferSsd,
+    gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, preferSsd, requireDirectPort,
     storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
     dockerStartCmd, onstart, containerDiskInGb, volumeId,
     providerFilter,
@@ -944,8 +957,10 @@ async function _selectDeploymentTier(
       tiers.map(async (tier) => {
         if (!tier.client.listOffers) return;
         const offers = await Promise.race([
+          // Pass gpuTypes: without it the provider returns the N cheapest offers of
+          // ANY GPU and the requested type is often not among them (estimate too high).
           tier.client.listOffers(
-            { region, limit: 20 },
+            { region, limit: 50, ...(gpuTypes.length > 0 ? { gpuTypes } : {}) },
             { apiKey: tier.apiKey, authId: tier.authId },
           ),
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 10_000)),
@@ -958,7 +973,9 @@ async function _selectDeploymentTier(
       (gpuTypes.length === 0 || gpuTypes.includes(o.gpuType)),
     );
     if (matchingOffers.length > 0) {
-      estimatedCostPerHr = Math.min(...matchingOffers.map(o => o.pricePerHr));
+      const cheapest = matchingOffers.reduce((a, b) => (b.pricePerHr < a.pricePerHr ? b : a));
+      estimatedCostPerHr = cheapest.pricePerHr;
+      log.log(`[gpu] cost estimate $${cheapest.pricePerHr.toFixed(3)}/hr — cheapest of ${matchingOffers.length}/${allOffers.length} offers for [${gpuTypes.join(', ')}] region="${region || 'any'}": ${cheapest.provider} ${cheapest.gpuType} ${cheapest.geolocation ?? cheapest.region ?? ''}`);
     }
   } catch { /* cost estimate is best-effort */ }
 
@@ -1046,6 +1063,7 @@ function _startDeployAndRespond(
     ...(strictFastBoot ? { strictFastBoot } : {}),
     ...(allowUnverified ? { allowUnverified } : {}),
     ...(minInetDownMbps > 0 ? { minInetDownMbps } : {}),
+    ...(config.requireDirectPort ? { requireDirectPort: true } : {}),
     ...(config.expectedApiPaths.length > 0 ? { expectedApiPaths: config.expectedApiPaths } : {}),
     ...(config.expectedCapabilities.length > 0 ? { expectedCapabilities: config.expectedCapabilities } : {}),
     ...(config.requireDockerManifest ? { requireDockerManifest: true } : {}),
@@ -1437,11 +1455,20 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   setRequestIdHeader(res, requestId);
   log.log(`GPU terminate requested`);
 
-  // Acquire lock to prevent concurrent lifecycle operations
+  // Acquire lock to prevent concurrent lifecycle operations. A deploy that is
+  // still booting holds the lock for minutes while its instances bill — terminate
+  // must be able to cancel it (the abort signal makes the provider destroy them).
   if (deployLock) {
-    res.writeHead(409, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
-    return;
+    const inProgress = ['searching', 'creating', 'booting', 'installing'].includes(deployState.status);
+    if (!inProgress || finetuneDeployActive) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
+      return;
+    }
+    log.log(`[req=${requestId}] Terminate during deploy (status=${deployState.status}) — cancelling it first`);
+    setDeployCancelled(true);
+    stopGpuMonitoring();
+    if (deployPromise) await Promise.race([deployPromise, new Promise(r => setTimeout(r, 15_000))]);
   }
   setDeployLock(true);
 

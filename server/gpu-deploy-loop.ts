@@ -14,6 +14,7 @@ import {
   deployState, setDeployState, deployCancelled, setDeployCancelled,
   setActiveProvider, setGpuHealthy, setLastRequestTime,
   deploymentSM,
+  getDeployAbortSignal,
 } from './state';
 import { logGpuEvent } from './metrics';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
@@ -271,6 +272,8 @@ export async function startDeployLoop(
           ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
           ...(extra.snapgpuBackend ? { snapgpuBackend: extra.snapgpuBackend } : {}),
           onPollProgress,
+          // Cancel (terminate / redeploy) stops the provider mid-boot and destroys the instance.
+          signal: getDeployAbortSignal(),
         },
         credentials,
       );

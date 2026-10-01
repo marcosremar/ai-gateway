@@ -3852,6 +3852,97 @@ async function cmdGpuBest(opts: { gpu?: string; count?: number }) {
   console.log(`  Eff$ = price / quality (lower = better value for real-time)`);
 }
 
+/** Ports this network fakes (answers for any address) — reported once by `latency nearest`. */
+const interceptedHere = new Set<number>();
+
+/** Median application-level RTT from THIS machine to ip (best port), null when nothing real answered. */
+async function probeTcpFromHere(ip: string, ports: number[], samples = 3, timeoutMs = 2000): Promise<number | null> {
+  const { probeRtt } = await import('../src/gateway/providers/gpu/rtt-probe');
+  const r = await probeRtt(ip, ports, samples, timeoutMs);
+  for (const p of r.interceptedPorts ?? []) interceptedHere.add(p);
+  return r.medianMs;
+}
+
+/**
+ * `latency nearest` — rank GPU offers by RTT measured from the machine running
+ * the CLI (where the audio is captured), not from the gateway. The gateway
+ * supplies offers pre-filtered to region "near" the client; each host is then
+ * TCP-probed locally and ranked by local RTT + estimated inference time.
+ */
+async function cmdLatencyNearest(opts: { at?: string; region?: string; gpu?: string; count?: number }) {
+  const { url, key } = getConfig();
+
+  let lat: number | undefined, lon: number | undefined, where = '';
+  const pinned = opts.at || process.env.GPU_CLIENT_LOCATION;
+  if (pinned) {
+    const [a, b] = pinned.split(',').map(s => Number(s.trim()));
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      console.error(`Invalid location "${pinned}" — expected "lat,lon" (e.g. 45.76,4.84 for Lyon)`);
+      process.exit(1);
+    }
+    lat = a; lon = b; where = opts.at ? '--at' : 'GPU_CLIENT_LOCATION';
+  } else {
+    const r = await fetch('https://ipapi.co/json/', { signal: AbortSignal.timeout(5000) }).catch(() => null);
+    const d: any = r?.ok ? await r.json().catch(() => null) : null;
+    if (!d || d.error || !Number.isFinite(Number(d.latitude))) {
+      console.error('Could not geolocate this machine. Pass --at "lat,lon" (Lyon: --at 45.76,4.84).');
+      process.exit(1);
+    }
+    lat = Number(d.latitude); lon = Number(d.longitude); where = `${d.city || '?'}, ${d.country_code || '?'} (IP)`;
+  }
+
+  const q = new URLSearchParams({
+    clientLat: String(lat), clientLon: String(lon),
+    region: opts.region ?? 'near', limit: '60',
+  });
+  if (opts.gpu) q.set('gpuTypes', opts.gpu);
+  const res = await fetch(`${url}/v1/gpu/offers/ranked?${q}`, { headers: headers(key) }).catch(() => null);
+  if (!res || !res.ok) {
+    console.error(`Failed to fetch ranked offers: ${res ? `HTTP ${res.status}` : 'gateway unreachable'}`);
+    process.exit(1);
+  }
+  const data: any = await res.json();
+  const offers: any[] = Array.isArray(data.offers) ? data.offers : [];
+  if (offers.length === 0) {
+    console.log(`No offers in region "${data.region || opts.region || 'near'}". Try --region EU or near:2000.`);
+    return;
+  }
+
+  console.log(`Client: ${lat.toFixed(2)},${lon.toFixed(2)} [${where}]  region: ${data.region || 'any'}`);
+  const ips = [...new Set(offers.map(o => o.hostIp).filter(Boolean))] as string[];
+  console.log(`Probing ${ips.length} host(s) from this machine...\n`);
+
+  const rttByIp = new Map<string, number | null>();
+  for (let i = 0; i < ips.length; i += 16) {
+    await Promise.all(ips.slice(i, i + 16).map(async ip => {
+      const o = offers.find(x => x.hostIp === ip);
+      const ports = [...new Set([o?.hostDirectPort, 22, 443, 80].filter((p): p is number => Number(p) > 0))];
+      rttByIp.set(ip, await probeTcpFromHere(ip, ports));
+    }));
+  }
+
+  const rows = offers.map(o => {
+    const local = o.hostIp ? rttByIp.get(o.hostIp) ?? null : null;
+    const rtt = local ?? o.networkRttMs;
+    return { ...o, rtt, rttSrc: local !== null ? 'here' : 'geo', total: rtt + (o.inferenceMs ?? 0) };
+  }).sort((a, b) => a.total - b.total || a.pricePerHr - b.pricePerHr);
+
+  const shown = rows.slice(0, opts.count || 15);
+  console.log(`  ${'#'.padStart(2)} ${'GPU'.padEnd(24)} ${'$/hr'.padStart(6)} ${'RTT'.padStart(7)} ${'src'.padEnd(4)} ${'infer'.padStart(6)} ${'total'.padStart(6)} ${'Provider'.padEnd(10)} Location`);
+  for (let i = 0; i < shown.length; i++) {
+    const o = shown[i];
+    console.log(`  ${String(i + 1).padStart(2)} ${String(o.gpuName || o.gpuType || '?').slice(0, 24).padEnd(24)} ${('$' + Number(o.pricePerHr).toFixed(2)).padStart(6)} ${(Math.round(o.rtt) + 'ms').padStart(7)} ${o.rttSrc.padEnd(4)} ${(o.inferenceMs + 'ms').padStart(6)} ${(Math.round(o.total) + 'ms').padStart(6)} ${String(o.provider || '?').padEnd(10)} ${o.geolocation || o.region || '?'}`);
+  }
+  console.log(`\n  RTT src: here = first response byte measured from this machine (SSH banner / HTTP), geo = distance estimate (no public IP, or nothing real answered)`);
+  console.log(`  infer = estimated Whisper large-v3 time for a 5s chunk on that GPU`);
+  if (interceptedHere.size > 0) {
+    console.log(`  ⚠ this network intercepts port(s) ${[...interceptedHere].join(', ')} (a proxy answers for any address) —`);
+    console.log(`    those measurements were discarded; run from a network without a transparent proxy for real RTTs`);
+  }
+  console.log(`  Deploy near this client: POST /v1/gpu/deploy {"region":"near","clientLat":${lat},"clientLon":${lon}, ...}`);
+  console.log(`  or set GPU_CLIENT_LOCATION="${lat},${lon}" on the gateway and use region "near"`);
+}
+
 // ── GPU Dev Mode Commands ──────────────────────────────────────────────────
 
 /** Options for targeting a specific GPU instance in multi-GPU setups. */
@@ -6663,6 +6754,11 @@ Subcommands:
   best                         Show best GPU offers ranked by real-time score
     --gpu <filter>               Filter by GPU name
     -n <count>                   Number of offers (default: 10)
+  nearest                      Rank offers by RTT measured from THIS machine
+    --at <lat,lon>               Client location (default: GPU_CLIENT_LOCATION, else this IP)
+    --region <r>                 Offer region (default: near; e.g. near:2000, EU, FR,CH)
+    --gpu <types>                GPU types, comma-separated (e.g. "RTX 4090")
+    -n <count>                   Number of offers (default: 15)
 
 The "best" command combines GPU offers with latency data to rank by
 real-time suitability: quality = TCP_latency×0.6 + reputation×0.3
@@ -6673,6 +6769,7 @@ Examples:
   ai-gateway latency probe
   ai-gateway latency best
   ai-gateway latency best --gpu 4090 -n 5
+  ai-gateway latency nearest --at 45.76,4.84     # run on the machine in Lyon
 `,
     whoami: `
 ai-gateway whoami — Show which user this API key is associated with
@@ -6986,8 +7083,14 @@ Per-app isolation:
             gpu: getArg(args, '--gpu'),
             count: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
           }); break;
+          case 'nearest': await cmdLatencyNearest({
+            at: getArg(args, '--at'),
+            region: getArg(args, '--region'),
+            gpu: getArg(args, '--gpu'),
+            count: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+          }); break;
           default:
-            console.error('Usage: ai-gateway latency <hosts|probe|best>');
+            console.error('Usage: ai-gateway latency <hosts|probe|best|nearest>');
             process.exit(1);
         }
         break;

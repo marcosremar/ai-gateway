@@ -275,6 +275,8 @@ export interface InstanceSpec {
    *  Allows callers to broadcast progress updates to show the user
    *  that creation is still in progress (e.g., "Pulling image... 45s"). */
   onPollProgress?: (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => void;
+  /** Aborts creation: providers stop polling and destroy any instance they already created. */
+  signal?: AbortSignal;
   /** Image override. Hyperstack: numeric Custom OS Image id. Scaleway: marketplace
    *  image UUID string. Preferred over `imageName` where both apply. */
   imageId?: string | number;

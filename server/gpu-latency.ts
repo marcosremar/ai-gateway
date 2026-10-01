@@ -10,7 +10,7 @@
  * Results persisted to ~/.babelcast/latency.db via latency-db.ts.
  */
 
-import net from 'net';
+import { probeRtt } from '../src/gateway/providers/gpu/rtt-probe';
 import type { GpuOffer } from '../src/gpu-providers/types';
 import { upsertHostMeta, saveProbeResult, getHostRttMap } from './latency-db';
 import type { ProbeResult } from './latency-db';
@@ -103,52 +103,17 @@ export interface RankedOffer extends GpuOffer {
   rttSource: 'host' | 'geo';
 }
 
-// ── TCP probe ─────────────────────────────────────────────────────────────────
-
-const TCP_PROBE_TIMEOUT_MS = 3_000;
-const TCP_PROBE_COUNT      = 5;
-
-/** Single TCP connect. Returns RTT in ms, or null on timeout/error. */
-function probeTcp(ip: string, port: number): Promise<number | null> {
-  return new Promise(resolve => {
-    const t      = Date.now();
-    const socket = net.createConnection({ host: ip, port });
-    const timer  = setTimeout(() => { socket.destroy(); resolve(null); }, TCP_PROBE_TIMEOUT_MS);
-    socket.on('connect', () => { clearTimeout(timer); socket.destroy(); resolve(Date.now() - t); });
-    socket.on('error',   () => { clearTimeout(timer); resolve(null); });
-    socket.on('timeout', () => { socket.destroy(); resolve(null); });
-  });
-}
+// ── Host probe ────────────────────────────────────────────────────────────────
+// Application-level RTT (first response byte), not bare TCP connect: proxies
+// and sandboxed egress complete handshakes locally and report fake RTTs.
 
 /**
- * Run TCP probes on ports 22, 443, 80 + any extra ports (e.g. Vast.ai direct_port_start).
- * All probes fire simultaneously — no sequential fallback, no extra latency.
- * Returns stats from the port with the most successful probes (ties → lowest median).
+ * Probe ports 22, 443, 80 + any extra ports (e.g. Vast.ai direct_port_start),
+ * all in parallel. Returns stats from the port with the most real answers.
  */
 export async function probeHostFull(ip: string, extraPorts: number[] = []): Promise<ProbeResult> {
-  const PORTS = [...new Set([22, 443, 80, ...extraPorts])];
-
-  const portResults = await Promise.all(
-    PORTS.map(port =>
-      Promise.all(Array.from({ length: TCP_PROBE_COUNT }, () => probeTcp(ip, port)))
-        .then(raw => raw.filter((r): r is number => r !== null).sort((a, b) => a - b))
-    )
-  );
-
-  // Pick port with most successes; break ties by lowest median
-  const best = portResults
-    .filter(v => v.length > 0)
-    .sort((a, b) =>
-      b.length !== a.length
-        ? b.length - a.length
-        : a[Math.floor(a.length / 2)] - b[Math.floor(b.length / 2)]
-    )[0];
-
-  if (!best) return { medianMs: null, p90Ms: null, samples: 0 };
-
-  const median = best[Math.floor(best.length / 2)];
-  const p90    = best[Math.min(Math.ceil(best.length * 0.9) - 1, best.length - 1)];
-  return { medianMs: median, p90Ms: p90, samples: best.length };
+  const r = await probeRtt(ip, [22, 443, 80, ...extraPorts], 5, 3_000);
+  return { medianMs: r.medianMs, p90Ms: r.p90Ms, samples: r.samples };
 }
 
 // ── In-flight dedup ───────────────────────────────────────────────────────────
@@ -226,6 +191,80 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// ── Client location ───────────────────────────────────────────────────────────
+// Latency that matters is client → GPU, not gateway → GPU. When the gateway
+// runs somewhere else (cloud VM, other city) its TCP probes say nothing about
+// the client's RTT, so callers can pin where the audio actually comes from.
+
+export interface LatLon { lat: number; lon: number }
+
+/** Beyond this gateway↔client distance, gateway-origin host probes are ignored. */
+export const PROBE_ORIGIN_MAX_KM = 300;
+
+/** Default radius for `region: 'near'` — Lyon → FR, CH, IT, DE, BE, GB, NL, ES, AT… */
+export const NEAR_REGION_DEFAULT_KM = 1200;
+
+/** Parse "45.76,4.84" → { lat, lon }. Returns null on anything malformed/out of range. */
+export function parseLatLon(value: string | undefined | null): LatLon | null {
+  if (!value) return null;
+  const parts = value.split(',').map(s => s.trim());
+  if (parts.length !== 2 || parts.some(p => p === '')) return null;
+  const lat = Number(parts[0]);
+  const lon = Number(parts[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { lat, lon };
+}
+
+/** Client location pinned by env `GPU_CLIENT_LOCATION="lat,lon"` (e.g. Lyon: "45.76,4.84"). */
+export function getConfiguredClientLocation(): LatLon | null {
+  return parseLatLon(process.env.GPU_CLIENT_LOCATION);
+}
+
+/**
+ * Country codes whose datacenter hub lies within `maxKm` of the client,
+ * nearest first. Feeds the provider `region` filter (Vast: country codes,
+ * RunPod: country → datacenter IDs).
+ */
+export function countriesNear(client: LatLon, maxKm = NEAR_REGION_DEFAULT_KM): string[] {
+  return Object.entries(COUNTRY_COORDS)
+    .map(([cc, c]) => ({ cc, km: haversineKm(client.lat, client.lon, c.lat, c.lon) }))
+    .filter(e => e.km <= maxKm)
+    .sort((a, b) => a.km - b.km)
+    .map(e => e.cc);
+}
+
+/**
+ * Expand `region: 'near'` / `'near:800'` into a country list around the client.
+ * Any other region string is returned unchanged. Returns null when the region
+ * asks for `near` but no client location is known.
+ */
+export function resolveNearRegion(region: string, client: LatLon | null): string | null {
+  const m = /^\s*near(?::(\d+))?\s*$/i.exec(region);
+  if (!m) return region;
+  if (!client) return null;
+  const km = m[1] ? Number(m[1]) : NEAR_REGION_DEFAULT_KM;
+  const ccs = countriesNear(client, km);
+  // Never widen to "any region" by accident — fall back to the single nearest hub.
+  return ccs.length > 0 ? ccs.join(',') : countriesNear(client, Infinity).slice(0, 1).join(',');
+}
+
+/**
+ * Deploy-time region: expands `near[:km]` using the deploy body's
+ * clientLat/clientLon, else GPU_CLIENT_LOCATION — never the gateway's own IP,
+ * which is often in another country. Throws a 400 when `near` has no client.
+ */
+export function resolveDeployRegion(region: string, clientLat?: unknown, clientLon?: unknown): string {
+  const bodyClient = typeof clientLat === 'number' && typeof clientLon === 'number'
+    ? parseLatLon(`${clientLat},${clientLon}`)
+    : null;
+  const resolved = resolveNearRegion(region, bodyClient ?? getConfiguredClientLocation());
+  if (resolved === null) {
+    throw { status: 400, message: `region "${region}" needs the client location: pass clientLat/clientLon or set GPU_CLIENT_LOCATION="lat,lon"` };
+  }
+  return resolved;
+}
+
 /** Estimate RTT from distance: 10ms base + 0.012ms/km (fiber ~80% speed-of-light). */
 function estimateRttMs(distanceKm: number): number {
   return Math.round(10 + distanceKm * 0.012);
@@ -254,6 +293,9 @@ export function parseCountryCode(geolocation: string | undefined): string {
 /**
  * Rank GPU offers by estimated total latency (network RTT + Whisper inference).
  * RTT priority: per-host TCP probe from DB > geo-distance estimate.
+ * Host probes are taken from the gateway, so when `probeOrigin` (the gateway's
+ * location) is more than PROBE_ORIGIN_MAX_KM from the client they are ignored
+ * and the geo estimate from the client is used instead.
  * Returns a new sorted array — original is not mutated.
  */
 export function rankOffers(
@@ -262,7 +304,11 @@ export function rankOffers(
   clientLon:    number,
   _unused:      Record<string, number> = {}, // kept for API compat (was country probes)
   hostRtts:     Record<string, number> = {}, // per-host TCP probes from DB
+  probeOrigin?: LatLon | null,               // where hostRtts were measured from (gateway)
 ): RankedOffer[] {
+  const probesApply = !probeOrigin
+    || haversineKm(clientLat, clientLon, probeOrigin.lat, probeOrigin.lon) <= PROBE_ORIGIN_MAX_KM;
+
   const ranked = offers.map(offer => {
     const cc     = parseCountryCode(offer.geolocation);
     const coords = COUNTRY_COORDS[cc];
@@ -274,7 +320,7 @@ export function rankOffers(
     let networkRttMs: number;
     let rttSource: RankedOffer['rttSource'];
 
-    if (offer.hostId && hostRtts[offer.hostId] !== undefined) {
+    if (probesApply && offer.hostId && hostRtts[offer.hostId] !== undefined) {
       networkRttMs = hostRtts[offer.hostId];
       rttSource    = 'host';
     } else {

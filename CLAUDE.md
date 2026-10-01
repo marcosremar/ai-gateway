@@ -205,6 +205,7 @@ ai-gateway gpu logs                       # Fetch GPU logs
 ai-gateway gpu latency hosts              # Show latency database
 ai-gateway gpu latency probe              # Trigger probe cycle
 ai-gateway gpu best                       # Score offers by latency*0.6 + reputation*0.3 + price*0.1
+ai-gateway latency nearest --at <lat,lon> # Rank offers by RTT measured from THIS machine (run at the client)
 
 # Docker image builder
 ai-gateway docker auth                   # GitHub OAuth for Docker image builder
@@ -449,6 +450,7 @@ Anti-patterns:
 | Warmth tracking | [ADR-006](docs/adr/ADR-006-per-stage-warmth-tracking.md) |
 | Latency demotion | [ADR-007](docs/adr/ADR-007-p95-latency-demotion.md) |
 | Hybrid routing | [ADR-008](docs/adr/ADR-008-hybrid-routing-gpu-cloud.md) |
+| Client-location GPU choice (`region: near`) | [ADR-017](docs/adr/ADR-017-client-location-gpu-latency.md) |
 | Provider cooldown | [ADR-009](docs/adr/ADR-009-provider-cooldown-tracking.md) |
 
 ## HTTP server pattern
@@ -503,6 +505,8 @@ AI_GATEWAY_GITHUB_CLIENT_ID            # Docker image builder OAuth
 - Trigger build: `gh workflow run build-babelcast-subtitle.yml --repo marcosremar/ai-gateway-dockers`
 
 **Idle:** auto-stop after 15 min idle (`IDLE_TIMEOUT_MIN`). Auto-destroy 2h after stop.
+
+**Client location:** latency is client → GPU. Set `GPU_CLIENT_LOCATION="lat,lon"` (or deploy body `clientLat`/`clientLon`) and deploy with `region: "near"` / `"near:<km>"` to stay in countries around the client (Vast + RunPod). Gateway TCP probes are ignored when the gateway is >300 km from the client — see ADR-017.
 
 ## Docker image builder (`ai-gateway docker`)
 
