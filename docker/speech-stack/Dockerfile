@@ -9,8 +9,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl && rm -rf /var/lib/apt/lists/*
 # llama.cpp is built on CUDA 12.8; this base is CUDA 13: its CUDA 12 runtime libs come from pip (start.sh sets the path).
 COPY --from=llama /app /opt/llama
-RUN python3 -m venv /opt/wenv && /opt/wenv/bin/pip install --no-cache-dir 'faster-whisper==1.2.1' fastapi 'uvicorn[standard]' \
-    python-multipart httpx numpy 'huggingface_hub[hf_xet]' nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' nvidia-cuda-runtime-cu12
+# Python 3.12 venv via uv (in the base), wheels only. huggingface_hub 2.x pulled `tokenizers` back to 0.13.3, which has no
+# wheel for 3.12 and needs Rust to build (both 2026-10-04 builds failed there): pin the pair that resolves to wheels.
+RUN uv venv --python 3.12 /opt/wenv && uv pip install --python /opt/wenv/bin/python --no-cache --only-binary :all: \
+    'faster-whisper==1.2.1' 'tokenizers>=0.21' 'huggingface_hub[hf_xet]<1' fastapi 'uvicorn[standard]' python-multipart httpx \
+    numpy nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' nvidia-cuda-runtime-cu12
 
 ARG LLM_REPO=unsloth/Qwen3.5-9B-GGUF
 ARG LLM_FILE=Qwen3.5-9B-Q4_K_M.gguf
