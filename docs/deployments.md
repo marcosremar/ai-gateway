@@ -86,7 +86,7 @@ after boot as a last resort — a shut-down Scaleway instance is still billed, s
 While the gateway runs it never leaves a machine behind (scale to zero, halted replicas deleted, unknown machines of its
 namespace released on restart). If the gateway itself is down, its machines would keep billing — powering off from
 inside does not stop a Scaleway bill. So a second Railway service, **`ai-gateway-reaper`**, runs the same image as a cron
-job (`*/15 * * * *`, start command `./reap-compiled`, `scripts/reap-orphans.ts` → `src/deployments/reaper.ts`) with
+job (`railway.reaper.json`: `*/15 * * * *`, start command `./reap-compiled`, `scripts/reap-orphans.ts` → `src/deployments/reaper.ts`) with
 `SANDBOX_TOKEN`, `GATEWAY_URL` and the same `DEPLOYMENTS_NAMESPACE`: it probes `GATEWAY_URL/health` 4 times over ~2 min and,
 only if every probe failed, deletes that namespace's machines older than 30 min. A redeploy or a short blip answers
 one of the probes and costs nothing. Worst case for a dead gateway: 15 min + 2 min + the machine's remaining minutes to
