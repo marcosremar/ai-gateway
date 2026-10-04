@@ -11,6 +11,10 @@ rules:
     languages: [typescript, javascript]
     severity: ERROR
     message: Possible hardcoded AI provider credential. Use environment variables or the AES-GCM vault.
+    # Test fixtures carry fake sk-/gsk_ keys on purpose (same policy as the __tests__/ allowlist in .gitleaks.toml).
+    paths:
+      exclude:
+        - "__tests__/"
     patterns:
       - pattern-regex: '(sk-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9_-]{20,}|rpa_[A-Za-z0-9_-]{20,})'
 
