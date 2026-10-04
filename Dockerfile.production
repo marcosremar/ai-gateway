@@ -36,7 +36,9 @@ FROM oven/bun:1-alpine AS production
 WORKDIR /app
 
 # Install wget for healthcheck (curl not available in alpine)
+# apk upgrade: libssl3/libcrypto3 fixes newer than the base image (Trivy HIGH, 2026-10-04)
 RUN apk add --no-cache wget ca-certificates && \
+    apk upgrade --no-cache libssl3 libcrypto3 && \
     rm -rf /var/cache/apk/*
 
 # Copy production dependencies from stage 1
