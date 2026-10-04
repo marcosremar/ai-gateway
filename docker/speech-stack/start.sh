@@ -18,7 +18,12 @@ vllm serve "$TTS_MODEL" --omni --host 127.0.0.1 --port 8091 --trust-remote-code 
 wait_http http://127.0.0.1:8091/health || { tail -50 /var/log/tts.log; exit 1; }
 log "tts up, gpu used $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1) MiB"
 
-LD_LIBRARY_PATH=/opt/llama:$CU12 /opt/llama/llama-server -m "/models/llm/$LLM_FILE" --host 127.0.0.1 --port 8092 -ngl 999 \
+LLAMA_LIBS=/opt/llama:/opt/llama-cu12
+devices=$(LD_LIBRARY_PATH=$LLAMA_LIBS /opt/llama/llama-server --list-devices 2>&1)
+echo "$devices"
+# Never serve the LLM from the CPU by accident: a missing CUDA lib makes llama.cpp fall back silently (7 tokens/s).
+echo "$devices" | grep -q "CUDA0" || { log "llama.cpp sees no CUDA device — refusing to start"; exit 1; }
+LD_LIBRARY_PATH=$LLAMA_LIBS /opt/llama/llama-server -m "/models/llm/$LLM_FILE" --host 127.0.0.1 --port 8092 -ngl 999 \
   -c $((LLM_PARALLEL * LLM_SLOT_CTX)) --parallel "$LLM_PARALLEL" -fa on --jinja --reasoning-budget 0 --alias llm \
   > /var/log/llm.log 2>&1 &
 wait_http http://127.0.0.1:8092/health || { tail -50 /var/log/llm.log; exit 1; }

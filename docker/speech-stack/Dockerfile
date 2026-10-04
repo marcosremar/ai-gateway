@@ -6,9 +6,15 @@ FROM ghcr.io/ggml-org/llama.cpp:${LLAMA_TAG} AS llama
 
 FROM vllm/vllm-omni:v0.28.0
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl && rm -rf /var/lib/apt/lists/*
-# llama.cpp is built on CUDA 12.8; this base is CUDA 13: its CUDA 12 runtime libs come from pip (start.sh sets the path).
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl libgomp1 && rm -rf /var/lib/apt/lists/*
+# llama.cpp is built on CUDA 12.8; this base is CUDA 13: llama-server runs with its own CUDA 12 libs (below)…
 COPY --from=llama /app /opt/llama
+# …and the exact CUDA 12 libs it was built against, NCCL included: without libnccl.so.2 its CUDA backend does not load
+# and llama-server silently falls back to the CPU (2026-10-04 on an L4: 7 tokens/s). start.sh refuses to start without CUDA0.
+COPY --from=llama /usr/local/cuda/lib64/libcudart.so.12.8.90 /usr/local/cuda/lib64/libcublas.so.12.8.4.1 \
+     /usr/local/cuda/lib64/libcublasLt.so.12.8.4.1 /lib/x86_64-linux-gnu/libnccl.so.2.25.1 /opt/llama-cu12/
+RUN cd /opt/llama-cu12 && ln -s libcudart.so.12.8.90 libcudart.so.12 && ln -s libcublas.so.12.8.4.1 libcublas.so.12 \
+ && ln -s libcublasLt.so.12.8.4.1 libcublasLt.so.12 && ln -s libnccl.so.2.25.1 libnccl.so.2
 # Python 3.12 venv via uv (in the base), wheels only. huggingface_hub 2.x pulled `tokenizers` back to 0.13.3, which has no
 # wheel for 3.12 and needs Rust to build (both 2026-10-04 builds failed there): pin the pair that resolves to wheels.
 RUN uv venv --python 3.12 /opt/wenv && uv pip install --python /opt/wenv/bin/python --no-cache --only-binary :all: \
