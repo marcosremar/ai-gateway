@@ -20,7 +20,6 @@ GET  /health                    200 only when the three models answered a warm-u
 
 import asyncio
 import base64
-import io
 import json
 import os
 import re
@@ -49,7 +48,11 @@ SAMPLE_RATE = 24000
 REFS = Path("/srv/refs")
 FILES = Path("/files")
 
-stt = WhisperModel(STT_MODEL, device="cuda", compute_type="int8_float16", num_workers=STT_WORKERS)
+# Full-precision Whisper large-v3 by default (float16 weights, not the int8 quantization): the student's accented
+# speech is where an STT loses most, and the owner asked for the full model (2026-10-04). STT_COMPUTE=int8_float16 saves
+# ~2 GB of GPU memory if a smaller card ever needs it.
+STT_COMPUTE = os.environ.get("STT_COMPUTE", "float16")
+stt = WhisperModel(STT_MODEL, device="cuda", compute_type=STT_COMPUTE, num_workers=STT_WORKERS)
 stt_gate = threading.Semaphore(STT_WORKERS)
 client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), limits=httpx.Limits(max_connections=64))
 voices: dict[str, dict] = {}
@@ -81,10 +84,20 @@ def load_voices() -> None:
 
 # ── Hear ─────────────────────────────────────────────────────────────────────
 
+def decode_16k(data: bytes) -> np.ndarray:
+    """Any container/codec → mono float32 16 kHz via ffmpeg. faster-whisper 1.2.1 decodes with PyAV through an
+    `open(metadata_errors=…)` argument that PyAV 19 removed (2026-10-04: every /v1/s2s failed with TypeError), so the
+    audio never goes through PyAV here."""
+    out = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-f", "f32le", "-ac", "1", "-ar", "16000", "pipe:1"],
+                         input=data, capture_output=True, check=True).stdout
+    return np.frombuffer(out, dtype=np.float32)
+
+
 def transcribe_sync(data: bytes, language: str | None, prompt: str | None) -> dict:
     started = time.perf_counter()
+    audio = decode_16k(data)
     with stt_gate:
-        segments, info = stt.transcribe(io.BytesIO(data), language=(language or None) and language[:2], beam_size=STT_BEAM,
+        segments, info = stt.transcribe(audio, language=(language or None) and language[:2], beam_size=STT_BEAM,
                                         condition_on_previous_text=False, vad_filter=False, without_timestamps=True,
                                         initial_prompt=prompt or None)
         text = " ".join(s.text.strip() for s in segments).strip()

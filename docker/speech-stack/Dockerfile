@@ -18,7 +18,7 @@ RUN uv venv --python 3.12 /opt/wenv && uv pip install --python /opt/wenv/bin/pyt
 ARG LLM_REPO=unsloth/Qwen3.5-9B-GGUF
 ARG LLM_FILE=Qwen3.5-9B-Q4_K_M.gguf
 ARG TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-Base
-ENV HF_HOME=/models/hf LLM_FILE=${LLM_FILE} TTS_MODEL=${TTS_MODEL} STT_MODEL=large-v3
+ENV HF_HOME=/models/hf LLM_FILE=${LLM_FILE} TTS_MODEL=${TTS_MODEL} STT_MODEL=large-v3 STT_COMPUTE=float16
 RUN /opt/wenv/bin/hf download "$LLM_REPO" "$LLM_FILE" --local-dir /models/llm \
  && /opt/wenv/bin/hf download "$TTS_MODEL" \
  && /opt/wenv/bin/hf download Systran/faster-whisper-large-v3 \

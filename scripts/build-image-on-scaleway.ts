@@ -88,6 +88,14 @@ const inst = await client.createInstance({
   label: `aigw-build-${imageName}`, region: ZONE, commercialType: TYPE, volumeGb: 150, tags: ['aigw-build'], cloudInit: script, projectId,
 }, credentials);
 log('machine', inst.instanceId, inst.ipAddress);
+// Stopped from outside (Ctrl-C, kill): still delete the machine and its volume — an orphaned build box keeps billing.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    log(`${signal}: deleting build machine`);
+    client.releaseInstance(inst.instanceId, credentials, { awaitVolumes: true }).catch(e => log('release failed', e))
+      .finally(() => process.exit(130));
+  });
+}
 let result: Record<string, unknown> = {};
 try {
   const deadline = Date.now() + 120 * 60_000;
