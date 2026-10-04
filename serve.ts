@@ -16,8 +16,9 @@ import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/za
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
-import { deploymentsFromEnv } from './src/deployments';
+import { deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
+import { loadSandboxEnv, principalSandboxToken } from './src/config/sandbox-env';
 
 const log = createLogger('serve');
 
@@ -35,10 +36,23 @@ try {
   log.log({}, 'Workload handlers not available (server/ not bundled) — skipping');
 }
 
+// SANDBOX_TOKEN is the only secret the gateway needs in its environment: the rest (SCW_SECRET_KEY, SCW_PROJECT_ID,
+// GROQ_API_KEY, …) comes from the dev API at boot, and the same token is accepted as an admin Bearer.
+const sandboxEnv = await loadSandboxEnv(process.env);
+if (sandboxEnv.source) log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
+else if (sandboxEnv.errors.length) log.warn({ errors: sandboxEnv.errors }, 'Dev API unreachable — using the environment only');
+const SANDBOX_TOKEN = principalSandboxToken(process.env);
+const SANDBOX_USER = 'sandbox';
+
 const PORT = parseInt(process.env.PORT || '4000');
-const API_KEYS = process.env.GATEWAY_API_KEYS
+const configuredKeys = process.env.GATEWAY_API_KEYS
   ? process.env.GATEWAY_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
-  : undefined;
+  : [];
+if (SANDBOX_TOKEN && /[,:]/.test(SANDBOX_TOKEN)) log.warn({}, 'SANDBOX_TOKEN contains , or : — not accepted as an API key');
+const API_KEYS = [
+  ...configuredKeys,
+  ...(SANDBOX_TOKEN && !/[,:]/.test(SANDBOX_TOKEN) ? [`${SANDBOX_TOKEN}:${SANDBOX_USER}`] : []),
+];
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
 // Without Groq the cloud chat/STT/TTS routes answer upstream errors, but deployments (/v1/deployments) still work —
@@ -133,6 +147,7 @@ if (routeWorkloadRequest) {
 // Deployments: Docker image → autoscaled replicas on Scaleway (enabled when SCW_SECRET_KEY is set).
 const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
 const deployments = deploymentsFromEnv(process.env, {
+  alwaysAdmin: [SANDBOX_USER],
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   log: (msg, data) => log.log(data ?? {}, msg),
 });
@@ -141,7 +156,9 @@ if (deployments) {
   deployments.controller.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
-  log.log({ namespace: deployments.controller.namespace }, 'Deployments enabled (scaleway)');
+  // Read by createProxyServer: a cold-start wait must outlive the default 60 s idle cut.
+  process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
+  log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
 } else {
   log.log({}, 'Deployments disabled (no SCW_SECRET_KEY)');
 }

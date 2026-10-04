@@ -85,9 +85,16 @@ after boot as a last resort — a shut-down Scaleway instance is still billed, s
 single-process (two gateways would both scale the same deployments; use another `DEPLOYMENTS_NAMESPACE` for a second
 gateway). Variables:
 
+**One secret: `SANDBOX_TOKEN`** (same token as the parle repo; aliases `PALCO_PROXY_TOKEN`, `PALCO_PROXY`, `PROXY_TOKEN`).
+At boot the gateway calls `GET https://parle-palco.up.railway.app/api/sandbox-env` (fallback `ucast.me`, override
+`SANDBOX_ENV_URL`) with it and fills every missing key (`SCW_SECRET_KEY`, `SCW_PROJECT_ID`, `GROQ_API_KEY`, …); a
+key set in the environment wins. The same token is accepted as a Bearer (user `sandbox`, always admin), so agents call
+the gateway with the credential they already carry. Code: `src/config/sandbox-env.ts`.
+
 | Variable | |
 |---|---|
-| `SCW_SECRET_KEY` (+ optional `SCW_DEFAULT_PROJECT_ID`) | enables deployments |
+| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API |
+| `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables deployments (normally fetched with the token) |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only invoke / read |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
@@ -100,6 +107,27 @@ Railway itself allows ~11k req/s per domain, 10k concurrent connections and requ
 (5 min with none) — not a constraint for model traffic. Machines are found by tag on Scaleway, so a gateway restart
 adopts running replicas instead of creating new ones; machines tagged with the namespace but with no known deployment
 (state lost) are released.
+
+## Measured (2026-10-04, local gateway → real Scaleway, fr-par-2)
+
+Gateway run with only `SANDBOX_TOKEN` in its environment (`bun serve.ts`), namespace `local-test`:
+
+| Check | Result |
+|---|---|
+| `cpu-echo` (DEV1-S, €0.009/h) cold start, first request held until ready | 200 after 109 s (create + boot + nginx + docker) |
+| warm request | 0.24 s (sandbox → Paris) |
+| `PATCH minReplicas: 2` | 2nd replica ready in ~1 min 50 s; 12 parallel calls split 6/6 |
+| one machine powered off from outside (Scaleway API) | seen as halted within 15 s, deleted and replaced; every call during it 200; back to 2 ready in ~1 min 45 s |
+| gateway restarted mid-boot | adopted the running machine (no second create) |
+| `minReplicas: 0, idleMinutes: 1` | both machines deleted ~80 s later; Scaleway list empty |
+| `qwen3-tts` (L4-1-24G, €0.7875/h) after `wake` | ready in ~6 min 50 s |
+| `POST …/invoke/v1/audio/speech` `{"input":"Olá! Bom dia, tudo bem com você?","voice":"vivian","language":"Portuguese","task_type":"CustomVoice"}` | 200, WAV 24 kHz mono 3.6 s, −22 dBFS; Voxtral transcription: "Olá! Bom dia! Tudo bem com você?" |
+| 5 more warm phrases | first byte 0.67–1.16 s, total 0.77–1.47 s |
+| `DELETE` | no server or volume left in any zone |
+
+Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) is a hard idle cut that
+`socket.setTimeout(0)` cannot lift, so a cold-start wait died at 60 s. With deployments on, `serve.ts` raises it to
+15 min unless `PROXY_TOTAL_TIMEOUT_MS` is set (`proxyIdleTimeoutMs`).
 
 ## Tests
 

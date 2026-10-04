@@ -117,6 +117,21 @@ describe('deployments API', () => {
     expect(h.cloud.created[0].namespace).toBe('test');
   });
 
+  it('a cold start longer than the proxy idle timeout is still served (regression: socket killed at 60 s)', async () => {
+    await close(h);
+    await h.cloud.closeAll();
+    process.env.PROXY_TOTAL_TIMEOUT_MS = '300';
+    try {
+      h = await harness();
+    } finally {
+      delete process.env.PROXY_TOTAL_TIMEOUT_MS;
+    }
+    h.cloud.bootMs = 1200;
+    await call(h, 'PUT', '/v1/deployments/longboot', { profile: 'cpu-echo' });
+    const res = await call(h, 'GET', '/v1/deployments/longboot/invoke/x', undefined, SITE);
+    expect(res.status).toBe(200);
+  });
+
   it('answers 503 + Retry-After when the replica is not ready within the wait', async () => {
     h.cloud.bootMs = 60_000;
     await call(h, 'PUT', '/v1/deployments/slow', { profile: 'cpu-echo' });

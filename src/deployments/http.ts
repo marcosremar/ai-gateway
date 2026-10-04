@@ -169,6 +169,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       return send(res, 405, { error: 'method not allowed' });
     }
     if (action === 'invoke') {
+      // The proxy kills sockets idle for PROXY_TOTAL_TIMEOUT_MS (60 s). A request waiting through a cold start sends
+      // and receives nothing for minutes by design; its own bounds are coldStartWaitSeconds and INVOKE_TIMEOUT_MS.
+      req.socket?.setTimeout(0);
       const rest = parts.slice(4).join('/') + (path.endsWith('/') && parts.length > 4 ? '/' : '');
       return invoke(req, res, name, rest, query, method);
     }

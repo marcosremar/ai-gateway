@@ -311,7 +311,11 @@ export class DeploymentController {
     // Keep machines we just created that the provider list does not show yet.
     const recent = this.machines.filter(m => !listed.some(l => l.id === m.id) && this.now() - m.createdAt < 120_000
       && this.deployments.has(m.deployment));
-    this.machines = [...listed.map(l => ({ ...l, ip: l.ip ?? this.machines.find(m => m.id === l.id)?.ip ?? null })), ...recent];
+    // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
+    this.machines = [...listed.map((l) => {
+      const known = this.machines.find(m => m.id === l.id);
+      return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
+    }), ...recent];
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
 
     const orphans = this.machines.filter(m => !this.deployments.has(m.deployment));
