@@ -216,7 +216,6 @@ export function buildSpec(
   }
   if (!merged.image && !merged.bootScript) throw new SpecError('image or bootScript is required (or pass a profile that sets one)');
   if (!merged.port) throw new SpecError('port is required (or pass a profile that sets it)');
-  if (merged.files && !merged.bootScript) throw new SpecError('files need a bootScript to read them');
   if (merged.gpu === undefined) merged.gpu = isGpuMachineType(merged.machineType!);
   const spec = merged as DeploymentSpec;
   if (spec.minReplicas > spec.maxReplicas) throw new SpecError('minReplicas cannot exceed maxReplicas');

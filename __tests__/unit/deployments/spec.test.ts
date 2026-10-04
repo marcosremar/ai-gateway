@@ -103,8 +103,13 @@ describe('boot-script mode', () => {
     expect(() => buildSpec('x', { bootScript: 'x', files: { a: big } }, { profiles })).toThrow(/fit in Scaleway/);
   });
 
-  it('rejects files without a script, bad keys and non-base64', () => {
-    expect(() => buildSpec('x', { image: 'a', port: 1, files: { a: 'YQ==' } }, { profiles })).toThrow(/bootScript/);
+  it('a Docker app gets its files read-only at /files', () => {
+    const spec = buildSpec('x', { image: 'me/app:1', port: 8000, files: { 'voices.json': 'W10=' } }, { profiles });
+    expect(dockerRunCommand(spec)).toContain('-v /srv/aigw/files:/files:ro');
+    expect(replicaCloudInit(spec, TOKEN)).toContain('/srv/aigw/files/voices.json');
+  });
+
+  it('rejects bad file keys and non-base64', () => {
     expect(() => buildSpec('x', { bootScript: 'x', files: { 'cloud-init': 'YQ==' } }, { profiles })).toThrow(/key/);
     expect(() => buildSpec('x', { bootScript: 'x', files: { a: 'not base64!' } }, { profiles })).toThrow(/base64/);
   });

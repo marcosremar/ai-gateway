@@ -35,8 +35,9 @@ export interface DeploymentSpec {
    */
   bootScript?: string;
   /**
-   * Extra files for the boot script, base64 by key (≤ 1.68 MB in total). They are packed into user_data and rebuilt at
-   * `/srv/aigw/files/<key>` before the script starts (`file-pack.ts`). Never returned by the API.
+   * Extra files, base64 by key (≤ 1.68 MB in total). They are packed into user_data and rebuilt at
+   * `/srv/aigw/files/<key>` before the app starts (`file-pack.ts`); a Docker app sees them read-only at `/files`.
+   * Never returned by the API.
    */
   files?: Record<string, string>;
   /** Overrides the image entrypoint. */

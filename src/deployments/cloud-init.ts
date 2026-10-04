@@ -51,6 +51,7 @@ export function dockerRunCommand(spec: DeploymentSpec): string {
     `-p 127.0.0.1:8000:${spec.port}`,
     '--env-file /srv/aigw/app.env',
     '-v /srv/aigw/data:/data -v /srv/aigw/hf:/root/.cache/huggingface',
+    spec.files ? '-v /srv/aigw/files:/files:ro' : '',
     spec.entrypoint ? `--entrypoint ${shellQuote(spec.entrypoint)}` : '',
     shellQuote(spec.image),
     ...spec.args.map(shellQuote),
