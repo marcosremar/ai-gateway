@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { getProviderConfig } from '@/lib/gateway';
-import { Spinner } from '@/components/ui';
+import { KV, Spinner } from '@/components/ui';
 import { deriveProvides, STAGE_ACCENTS, type Service, type App } from './provider-types';
 import { Cloud, Server, Zap, HardDrive, Package, Cpu, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
 
@@ -225,15 +225,6 @@ function ServiceCard({ service, usedByApps }: { service: Service; usedByApps: st
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function KV({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{label}: </span>
-      <span className="text-[11px] font-medium" style={{ color: 'var(--color-text-secondary)' }}>{value}</span>
     </div>
   );
 }
