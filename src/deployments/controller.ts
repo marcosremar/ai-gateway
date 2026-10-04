@@ -383,6 +383,13 @@ export class DeploymentController {
     return this.machines.length + creating;
   }
 
+  /** The spec as the machine sees it: the provider's own registry credentials when the caller sent none. */
+  private withRegistryAuth(spec: DeploymentSpec): DeploymentSpec {
+    if (spec.registryAuth || spec.bootScript) return spec;
+    const auth = this.opts.backend.registryAuthFor?.(spec.image);
+    return auth ? { ...spec, registryAuth: auth } : spec;
+  }
+
   private createReplica(rt: Runtime): void {
     const spec = rt.record.spec;
     if (this.now() < rt.backoffUntil) return;
@@ -402,7 +409,7 @@ export class DeploymentController {
         this.log('deployments: creating replica', { deployment: spec.name, type: spec.machineType, zone: spec.zone, price });
         const machine = await this.opts.backend.createReplica({
           spec, replicaToken: rt.record.replicaToken, namespace: this.namespace,
-          cloudInit: replicaCloudInit(spec, rt.record.replicaToken),
+          cloudInit: replicaCloudInit(this.withRegistryAuth(spec), rt.record.replicaToken),
           ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
         });
         if (this.deployments.get(spec.name) !== rt) {

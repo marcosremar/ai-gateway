@@ -22,6 +22,8 @@ curl -X PUT $GW/v1/deployments/my-model -H "Authorization: Bearer $KEY" -H 'cont
   "minReplicas": 0, "maxReplicas": 3, "targetInflightPerReplica": 4, "idleMinutes": 15,
   "env": {"HF_TOKEN": "..."}, "registryAuth": {"server": "ghcr.io", "username": "me", "password": "..."}
 }'
+# An image in the gateway's own Scaleway registry (rg.<region>.scw.cloud/…) needs no registryAuth: the machine logs in
+# with the gateway's Scaleway key, so no registry secret is ever sent or stored in a spec.
 
 # 2. Call it — the path after /invoke/ goes to the container as-is
 curl $GW/v1/deployments/tts/invoke/v1/audio/speech -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
@@ -78,6 +80,17 @@ across all deployments, back-off after a failed create (1 → 10 min).
 the container on `127.0.0.1:8000`; `/__aigw/ready` appears once the container answered `healthPath`. GPU types use
 the Scaleway GPU OS image (Docker + NVIDIA toolkit) with `--gpus all`. The machine shuts itself down `maxHours + 30 min`
 after boot as a last resort — a shut-down Scaleway instance is still billed, so the gateway deletes halted replicas.
+
+## Orphan guard
+
+While the gateway runs it never leaves a machine behind (scale to zero, halted replicas deleted, unknown machines of its
+namespace released on restart). If the gateway itself is down, its machines would keep billing — powering off from
+inside does not stop a Scaleway bill. So a second Railway service, **`ai-gateway-reaper`**, runs the same image as a cron
+job (`*/15 * * * *`, start command `./reap-compiled`, `scripts/reap-orphans.ts` → `src/deployments/reaper.ts`) with
+`SANDBOX_TOKEN`, `GATEWAY_URL` and the same `DEPLOYMENTS_NAMESPACE`: it probes `GATEWAY_URL/health` 4 times over ~2 min and,
+only if every probe failed, deletes that namespace's machines older than 30 min. A redeploy or a short blip answers
+one of the probes and costs nothing. Worst case for a dead gateway: 15 min + 2 min + the machine's remaining minutes to
+reach 30 min of age.
 
 ## Running on Railway
 

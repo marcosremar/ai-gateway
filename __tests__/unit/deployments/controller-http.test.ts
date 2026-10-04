@@ -113,6 +113,20 @@ describe('deployments API', () => {
     expect(JSON.parse(text).spec).toMatchObject({ envKeys: ['HF_TOKEN'], privateRegistry: true });
   });
 
+  it('a private image in the provider registry gets the backend credentials on the machine, never in the spec', async () => {
+    h.cloud.registryAuthFor = (image: string) => image.startsWith('rg.fr-par.scw.cloud/')
+      ? { server: 'rg.fr-par.scw.cloud', username: 'nologin', password: 'scw-secret-xyz' } : null;
+    await call(h, 'PUT', '/v1/deployments/priv', { image: 'rg.fr-par.scw.cloud/aigw/app:1', port: 80, machineType: 'DEV1-S', minReplicas: 1 });
+    await call(h, 'PUT', '/v1/deployments/pub', { image: 'me/app:1', port: 80, machineType: 'DEV1-S', minReplicas: 1 });
+    await until(() => h.cloud.created.length === 2);
+    const byName = Object.fromEntries(h.cloud.created.map(c => [c.spec.name, c.cloudInit]));
+    expect(byName.priv).toContain("docker login 'rg.fr-par.scw.cloud' -u 'nologin' --password-stdin");
+    expect(byName.pub).not.toContain('docker login');
+    const view = await (await call(h, 'GET', '/v1/deployments/priv')).text();
+    expect(view).not.toContain('scw-secret-xyz');
+    expect(JSON.parse(view).spec.privateRegistry).toBeFalsy();
+  });
+
   it('scales from zero on the first request: waits through boot, then forwards with the replica token', async () => {
     await call(h, 'PUT', '/v1/deployments/echo', { profile: 'cpu-echo' });
     await h.controller.reconcile();

@@ -6,7 +6,7 @@
 
 import { ScalewayClient } from '../cpu-providers/scaleway-client';
 import type { GpuInstance, ProviderCredentials } from '../gpu-providers/types';
-import type { CreateReplicaInput, DeploymentBackend, ReplicaMachine } from './types';
+import type { CreateReplicaInput, DeploymentBackend, RegistryAuth, ReplicaMachine } from './types';
 
 export const DEPLOY_TAG = 'aigw-deploy';
 export const nsTag = (ns: string) => `aigw-ns-${ns}`;
@@ -86,5 +86,11 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   async hourlyPrice(zone: string, machineType: string): Promise<number | null> {
     return this.client.getHourlyPrice(zone, machineType, this.credentials);
+  }
+
+  /** Scaleway Container Registry (`rg.<region>.scw.cloud/<namespace>/…`) logs in with user `nologin` and the API secret. */
+  registryAuthFor(image: string): RegistryAuth | null {
+    const server = /^(rg\.[a-z]{2}-[a-z]{3}\.scw\.cloud)\//.exec(image)?.[1];
+    return server ? { server, username: 'nologin', password: this.credentials.apiKey as string } : null;
   }
 }

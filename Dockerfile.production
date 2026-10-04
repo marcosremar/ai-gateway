@@ -23,10 +23,13 @@ COPY src/ src/
 COPY server/ server/
 COPY sdk/ sdk/
 COPY serve.ts tsconfig.json tsup.config.ts ./
+COPY scripts/reap-orphans.ts scripts/
 
 # Build the library bundle AND compile serve.ts
 RUN bun run build
 RUN bun build --compile --minify --target=bun --outfile serve-compiled serve.ts
+# Orphan guard, run by a separate Railway cron service from this same image (docs/deployments.md § Orphan guard)
+RUN bun build --compile --minify --target=bun --outfile reap-compiled scripts/reap-orphans.ts
 
 # ── Stage 3: Production ─────────────────────────────────────────────────────
 FROM oven/bun:1-alpine AS production
@@ -41,6 +44,7 @@ COPY --from=deps /app/node_modules ./node_modules
 
 # Copy compiled binary and dist from builder
 COPY --from=builder /app/serve-compiled ./serve-compiled
+COPY --from=builder /app/reap-compiled ./reap-compiled
 COPY --from=builder /app/dist ./dist
 
 # Non-root user for security

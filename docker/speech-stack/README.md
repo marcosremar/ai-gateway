@@ -40,8 +40,12 @@ moment the server has the audio; "client" adds the path from the test sandbox th
 - faster-whisper 1.2.1 + PyAV 19: `open(metadata_errors=…)` TypeError on every request; audio is decoded with ffmpeg instead.
 - `huggingface_hub` 2.x pulled `tokenizers` back to a source-only release; the venv is wheels-only with `huggingface_hub<1`.
 
-### Next, not done
+### STT batching (`stt_batch.py`)
 
-- Batch the STT (faster-whisper `BatchedInferencePipeline`) so 4–8 simultaneous students do not wait in line.
-- Retry an STT that hits CUDA OOM instead of failing the request.
-- Measure from a client in France (the client column above crosses the Atlantic from the test sandbox).
+Utterances that arrive within `STT_BATCH_WINDOW_MS` (25 ms) of each other go through Whisper in one encoder + decoder pass,
+up to `STT_BATCH` clips (L4: 4, L40S: 8). Same features and decoding options as faster-whisper's own batched pipeline,
+float16, language given; a batched transcript that looks like a repetition loop (compression ratio > 2.4, Whisper's own
+test) is decoded again alone with the temperature fallback, and clips over 30 s or without a language go alone. CUDA out
+of memory splits the batch in halves (a single clip retries 3×). `GET /health` reports `stt: {batches, clips, largest,
+oom_retries, fallbacks}`. Checked on CPU with Whisper tiny (`test_stt_batch.py`): four clips decoded together give the
+same text as one at a time, and silence comes back empty.

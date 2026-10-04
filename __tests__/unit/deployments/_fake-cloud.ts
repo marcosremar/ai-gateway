@@ -5,7 +5,7 @@
 
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
-import type { CreateReplicaInput, DeploymentBackend, ReplicaMachine } from '../../../src/deployments/types';
+import type { CreateReplicaInput, DeploymentBackend, RegistryAuth, ReplicaMachine } from '../../../src/deployments/types';
 
 export interface FakeMachine {
   machine: ReplicaMachine;
@@ -26,6 +26,7 @@ export class FakeCloud implements DeploymentBackend {
   failList = false;
   failCreate: string | null = null;
   bootMs = 50;
+  registryAuthFor?: (image: string) => RegistryAuth | null;
   appDelayMs = 0;
   private seq = 0;
 

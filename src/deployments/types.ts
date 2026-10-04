@@ -135,6 +135,12 @@ export interface DeploymentBackend {
   releaseReplica(machine: ReplicaMachine): Promise<void>;
   /** Catalog price (EUR/h), `null` when the type is not sold in the zone. */
   hourlyPrice(zone: string, machineType: string): Promise<number | null>;
+  /**
+   * Credentials for an image in the provider's own registry, used when the spec has no `registryAuth` — so a caller
+   * deploying `rg.fr-par.scw.cloud/…` never has to send (and the gateway never stores) a registry secret. `null` for
+   * any other registry.
+   */
+  registryAuthFor?(image: string): RegistryAuth | null;
 }
 
 /** How the controller reaches a replica's HTTP front. */

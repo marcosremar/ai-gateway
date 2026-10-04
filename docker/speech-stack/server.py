@@ -25,7 +25,6 @@ import os
 import re
 import struct
 import subprocess
-import threading
 import time
 from pathlib import Path
 
@@ -35,12 +34,17 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from faster_whisper import WhisperModel
 
+from stt_batch import SttBatcher
+
 TTS_URL = "http://127.0.0.1:8091"
 LLM_URL = "http://127.0.0.1:8092"
 TTS_MODEL = os.environ.get("TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
 STT_MODEL = os.environ.get("STT_MODEL", "large-v3")
 STT_BEAM = int(os.environ.get("STT_BEAM", "1"))
-STT_WORKERS = int(os.environ.get("STT_WORKERS", "4"))
+# Utterances arriving within STT_BATCH_WINDOW_MS share one GPU pass, up to STT_BATCH clips (stt_batch.py). L4: 4,
+# L40S: 8 — the batch's encoder activations must fit next to the TTS and the LLM.
+STT_BATCH = int(os.environ.get("STT_BATCH", "4"))
+STT_BATCH_WINDOW_MS = int(os.environ.get("STT_BATCH_WINDOW_MS", "25"))
 TTS_PARALLEL = int(os.environ.get("TTS_PARALLEL", "2"))
 FIRST_MIN_WORDS = int(os.environ.get("FIRST_MIN_WORDS", "3"))
 MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "160"))
@@ -52,8 +56,8 @@ FILES = Path("/files")
 # speech is where an STT loses most, and the owner asked for the full model (2026-10-04). STT_COMPUTE=int8_float16 saves
 # ~2 GB of GPU memory if a smaller card ever needs it.
 STT_COMPUTE = os.environ.get("STT_COMPUTE", "float16")
-stt = WhisperModel(STT_MODEL, device="cuda", compute_type=STT_COMPUTE, num_workers=STT_WORKERS)
-stt_gate = threading.Semaphore(STT_WORKERS)
+stt = WhisperModel(STT_MODEL, device="cuda", compute_type=STT_COMPUTE, num_workers=1)
+stt_batcher = SttBatcher(stt, max_batch=STT_BATCH, window_ms=STT_BATCH_WINDOW_MS, beam=STT_BEAM)
 client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), limits=httpx.Limits(max_connections=64))
 voices: dict[str, dict] = {}
 ready = {"ok": False, "detail": "starting"}
@@ -95,14 +99,8 @@ def decode_16k(data: bytes) -> np.ndarray:
 
 def transcribe_sync(data: bytes, language: str | None, prompt: str | None) -> dict:
     started = time.perf_counter()
-    audio = decode_16k(data)
-    with stt_gate:
-        segments, info = stt.transcribe(audio, language=(language or None) and language[:2], beam_size=STT_BEAM,
-                                        condition_on_previous_text=False, vad_filter=False, without_timestamps=True,
-                                        initial_prompt=prompt or None)
-        text = " ".join(s.text.strip() for s in segments).strip()
-    return {"text": text, "language": info.language, "duration": round(info.duration, 3),
-            "ms": round((time.perf_counter() - started) * 1000)}
+    heard = stt_batcher.transcribe(decode_16k(data), language, prompt)
+    return {**heard, "ms": round((time.perf_counter() - started) * 1000)}
 
 
 # ── Think: stream tokens, cut sentences ──────────────────────────────────────
@@ -316,7 +314,7 @@ async def list_voices():
 
 @app.get("/health")
 async def health():
-    return JSONResponse(ready, status_code=200 if ready["ok"] else 503)
+    return JSONResponse({**ready, "stt": stt_batcher.stats}, status_code=200 if ready["ok"] else 503)
 
 
 # ── Warm-up: the first real request must not pay kernel loads ───────────────
@@ -324,7 +322,8 @@ async def health():
 async def warm() -> None:
     try:
         load_voices()
-        await asyncio.to_thread(lambda: list(stt.transcribe(np.zeros(16000, dtype=np.float32), language="pt", beam_size=1)[0]))
+        silence = np.zeros(16000, dtype=np.float32)
+        await asyncio.gather(*[asyncio.to_thread(stt_batcher.transcribe, silence, "pt") for _ in range(STT_BATCH)])
         async for _ in llm_stream([{"role": "user", "content": "Diga oi."}], 8, 0.0):
             pass
         voice = next(iter(voices.values()), None)

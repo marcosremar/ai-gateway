@@ -26,6 +26,16 @@ function fakeClient() {
 }
 
 describe('ScalewayDeploymentBackend', () => {
+  it('logs in to its own registry with the API secret, and to nothing else', () => {
+    const backend = new ScalewayDeploymentBackend('the-secret', { client: fakeClient() as never });
+    expect(backend.registryAuthFor('rg.fr-par.scw.cloud/aigw/speech-stack:1'))
+      .toEqual({ server: 'rg.fr-par.scw.cloud', username: 'nologin', password: 'the-secret' });
+    expect(backend.registryAuthFor('rg.nl-ams.scw.cloud/x/y')?.server).toBe('rg.nl-ams.scw.cloud');
+    expect(backend.registryAuthFor('ghcr.io/rg.fr-par.scw.cloud/x')).toBeNull();
+    expect(backend.registryAuthFor('vllm/vllm-omni:v0.28.0')).toBeNull();
+  });
+
+
   it('creates a tagged machine with the GPU OS image, the volume and the cloud-init', async () => {
     const client = fakeClient();
     const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
