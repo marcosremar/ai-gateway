@@ -47,6 +47,8 @@ jobs:
           format: 'sarif'
           output: 'trivy-results-${{ matrix.dockerfile }}.sarif'
           severity: 'CRITICAL,HIGH'
+          # Without this, SARIF output scans (and fails on) every severity and ignores `severity` above.
+          limit-severities-for-sarif: true
           exit-code: '1'
 
       - name: Upload Trivy scan results to GitHub Security tab
@@ -90,6 +92,8 @@ jobs:
           format: 'sarif'
           output: 'trivy-results-${{ matrix.subproject }}.sarif'
           severity: 'CRITICAL,HIGH'
+          # Without this, SARIF output scans (and fails on) every severity and ignores `severity` above.
+          limit-severities-for-sarif: true
           exit-code: '1'
 
       - name: Upload Trivy scan results to GitHub Security tab
