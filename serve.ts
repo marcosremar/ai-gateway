@@ -16,6 +16,8 @@ import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/za
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
+import { deploymentsFromEnv } from './src/deployments';
+import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 
 const log = createLogger('serve');
 
@@ -39,9 +41,10 @@ const API_KEYS = process.env.GATEWAY_API_KEYS
   : undefined;
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
+// Without Groq the cloud chat/STT/TTS routes answer upstream errors, but deployments (/v1/deployments) still work —
+// a gateway that only serves self-hosted models does not need a Groq key.
 if (!process.env.GROQ_API_KEY) {
-  console.error('[serve] GROQ_API_KEY is required');
-  process.exit(1);
+  console.warn('[serve] GROQ_API_KEY is not set — Groq-backed /v1/chat, /v1/audio routes will fail');
 }
 
 function acceptsOpenRouterPassthroughModel(model: string): boolean {
@@ -127,6 +130,22 @@ if (routeWorkloadRequest) {
   prefixRoutes.push({ prefix: '/v1/workloads', handler: routeWorkloadRequest });
 }
 
+// Deployments: Docker image → autoscaled replicas on Scaleway (enabled when SCW_SECRET_KEY is set).
+const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
+const deployments = deploymentsFromEnv(process.env, {
+  userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+if (deployments) {
+  await deployments.controller.init();
+  deployments.controller.start();
+  prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
+  prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
+  log.log({ namespace: deployments.controller.namespace }, 'Deployments enabled (scaleway)');
+} else {
+  log.log({}, 'Deployments disabled (no SCW_SECRET_KEY)');
+}
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
@@ -162,6 +181,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    deployments?.controller.stop();
     console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
 
     // Stop accepting new connections

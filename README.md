@@ -16,6 +16,7 @@ Built with TypeScript, providing a unified interface for AI providers and multi-
 ## Features
 
 - **Transparent Speech API** — Single `POST /v1/speech` endpoint handles STT → LLM → TTS. Transport (GPU vs cloud) is hidden from the caller. No SSE/WebSocket/WebRTC in client code.
+- **Deployments (Scaleway)** — `PUT /v1/deployments/:name` with any Docker image (or a profile like `qwen3-tts`) → autoscaled replicas, scale to zero, cold-start wait, per-deployment replica bounds via API. See [docs/deployments.md](docs/deployments.md)
 - **Multi-tier GPU Autoscaler** — Cascade through GPU providers (RunPod, TensorDock, Modal) with automatic failover, health checking, idle watchdog, and cost monitoring
 - **AI Provider Abstraction** — Unified interface for 8+ providers (OpenAI, Groq, Fireworks, OpenRouter, Modal, self-hosted) across STT, TTS, LLM, Image, and Realtime modalities
 - **Provider Fallback Chains** — Declarative, config-driven fallback with cooldown and credit exhaustion tracking
