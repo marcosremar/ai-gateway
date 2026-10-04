@@ -3,7 +3,7 @@
  * Each replica has its own cooldown, circuit breaker, adaptive timeout and performance ranking; a dead replica
  * fails over to the next one immediately and its siblings stay usable.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { withProviderFallback, CooldownTracker, type FallbackEntry } from '../../src/providers/fallback';
 import { CircuitBreakerRegistry } from '../../src/providers/circuit-breaker';
 import { PerformanceRanker } from '../../src/providers/performance-ranker';
@@ -74,17 +74,24 @@ describe('withProviderFallback with three replicas', () => {
   });
 
   it('recovers: a replica that comes back is used again after its cooldown', async () => {
-    const tracker = new CooldownTracker();
-    const dead = new Set([A]);
-    const opts = { cooldownTracker: tracker, allowedFails: 1, cooldownMs: 1, timeoutMs: 1000 };
-    await withProviderFallback([replica(A), replica(B)], fleet(dead), opts);
-    expect(tracker.isCoolingDown(replica(A))).toBe(true);
-    await new Promise((r) => setTimeout(r, 10));
-    dead.clear();
-    const calls: string[] = [];
-    const out = await withProviderFallback([replica(A), replica(B)], fleet(dead, calls), opts);
-    expect(out.usedEndpoint).toBe(A);
-    expect(calls).toEqual([A]);
+    // The tracker reads Date.now(): drive it by hand. A real 1 ms cooldown expired before the check on slow CI runners.
+    let now = 1_000_000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const tracker = new CooldownTracker();
+      const dead = new Set([A]);
+      const opts = { cooldownTracker: tracker, allowedFails: 1, cooldownMs: 1000, timeoutMs: 1000 };
+      await withProviderFallback([replica(A), replica(B)], fleet(dead), opts);
+      expect(tracker.isCoolingDown(replica(A))).toBe(true);
+      now += 60_000;
+      dead.clear();
+      const calls: string[] = [];
+      const out = await withProviderFallback([replica(A), replica(B)], fleet(dead, calls), opts);
+      expect(out.usedEndpoint).toBe(A);
+      expect(calls).toEqual([A]);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('fails only when every replica failed, with the last error', async () => {
