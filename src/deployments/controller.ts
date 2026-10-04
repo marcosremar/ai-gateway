@@ -11,9 +11,10 @@
 
 import { randomBytes } from 'crypto';
 import { replicaCloudInit } from './cloud-init';
+import { packFiles } from './file-pack';
 import { planReplicas, replicaPhase, type ObservedReplica } from './planner';
 import { BUILTIN_PROFILES } from './profiles';
-import { buildSpec, parsePartialSpec, NAME_RE, SpecError } from './spec';
+import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES } from './spec';
 import type {
   DeploymentBackend, DeploymentRecord, DeploymentSpec, DeploymentStore, DeploymentView, Profile, ReplicaMachine, ReplicaProbe,
 } from './types';
@@ -136,6 +137,10 @@ export class DeploymentController {
   async put(name: string, body: Record<string, unknown>): Promise<{ view: DeploymentView; created: boolean }> {
     const existing = this.deployments.get(name);
     const spec = buildSpec(name, body, { profiles: this.profiles, previous: existing?.record.spec });
+    const initBytes = Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32)));
+    if (initBytes > USER_DATA_KEY_MAX_BYTES) {
+      throw new SpecError(`generated cloud-init is ${initBytes} bytes; Scaleway takes at most ${USER_DATA_KEY_MAX_BYTES} (shrink bootScript/env)`);
+    }
     const now = this.now();
     if (existing) {
       existing.record = { ...existing.record, spec, updatedAt: now };
@@ -398,6 +403,7 @@ export class DeploymentController {
         const machine = await this.opts.backend.createReplica({
           spec, replicaToken: rt.record.replicaToken, namespace: this.namespace,
           cloudInit: replicaCloudInit(spec, rt.record.replicaToken),
+          ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
         });
         if (this.deployments.get(spec.name) !== rt) {
           await this.opts.backend.releaseReplica(machine); // deleted while creating
@@ -430,7 +436,7 @@ export class DeploymentController {
   private view(name: string): DeploymentView | null {
     const rt = this.deployments.get(name);
     if (!rt) return null;
-    const { env, registryAuth, ...publicSpec } = rt.record.spec;
+    const { env, registryAuth, bootScript, files, ...publicSpec } = rt.record.spec;
     const now = this.now();
     const replicas = this.machines.filter(m => m.deployment === name).map(m => ({
       id: m.id,
@@ -454,7 +460,10 @@ export class DeploymentController {
           : ready < desired ? 'degraded' : 'ready';
     return {
       name,
-      spec: { ...publicSpec, envKeys: Object.keys(env), privateRegistry: Boolean(registryAuth) },
+      spec: {
+        ...publicSpec, envKeys: Object.keys(env), privateRegistry: Boolean(registryAuth), bootScript: Boolean(bootScript),
+        fileKeys: Object.keys(files ?? {}),
+      },
       status,
       desiredReplicas: desired,
       replicas,

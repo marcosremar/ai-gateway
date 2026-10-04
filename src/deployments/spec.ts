@@ -29,6 +29,7 @@ export const SPEC_DEFAULTS = {
   zone: 'fr-par-2',
   minReplicas: 0,
   maxReplicas: 1,
+  minActiveReplicas: 1,
   targetInflightPerReplica: 4,
   idleMinutes: 15,
   bootTimeoutMinutes: 30,
@@ -42,6 +43,14 @@ export const SPEC_DEFAULTS = {
 
 /** Hard ceiling regardless of what a caller asks (protects the bill from a typo). */
 export const MAX_REPLICAS_PER_DEPLOYMENT = 10;
+/**
+ * Scaleway refuses a user_data value above 127 998 bytes ("Data too large"; the Scaleway Terraform provider validates
+ * `cloud_init` with StringLenBetween(0, 127998)). Applies to every file key and to the generated cloud-init.
+ */
+export const USER_DATA_KEY_MAX_BYTES = 127_998;
+export const MAX_BOOT_SCRIPT = 90 * 1024; // base64 inside the cloud-init (+33 %) must stay under USER_DATA_KEY_MAX_BYTES
+/** Files are packed into ≤ 14 user_data keys of 120 000 bytes (`file-pack.ts`). */
+export const MAX_FILES_BYTES = 14 * 120_000;
 
 function int(value: unknown, field: string, min: number, max: number): number {
   const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
@@ -87,7 +96,7 @@ const KNOWN_FIELDS = new Set<string>([
   'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'registryAuth', 'healthPath', 'machineType',
   'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas', 'targetInflightPerReplica', 'idleMinutes',
   'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds', 'maxEurPerHour', 'maxHours', 'paused',
-  'description',
+  'description', 'bootScript', 'files', 'minActiveReplicas',
 ]);
 
 /**
@@ -119,6 +128,29 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     }
     if (auth.server !== undefined) str(auth.server, 'registryAuth.server', /^[a-z0-9.\-:]{1,200}$/i);
     out.registryAuth = { username: auth.username, password: auth.password, ...(auth.server ? { server: auth.server as string } : {}) };
+  }
+  if (input.bootScript !== undefined) {
+    if (typeof input.bootScript !== 'string' || !input.bootScript.trim() || input.bootScript.length > MAX_BOOT_SCRIPT) {
+      throw new SpecError(`bootScript must be a non-empty string up to ${MAX_BOOT_SCRIPT / 1024} KB`);
+    }
+    out.bootScript = input.bootScript;
+  }
+  if (input.files !== undefined) {
+    const files = input.files as Record<string, unknown> | null;
+    if (!files || typeof files !== 'object' || Array.isArray(files)) throw new SpecError('files must be an object of base64 strings');
+    let total = 0;
+    const out2: Record<string, string> = {};
+    for (const [key, value] of Object.entries(files)) {
+      if (!/^[A-Za-z0-9._-]{1,100}$/.test(key) || key === 'cloud-init') throw new SpecError(`files key '${key}' is invalid`);
+      if (typeof value !== 'string' || !/^[A-Za-z0-9+/=]*$/.test(value)) throw new SpecError(`files.${key} must be base64`);
+      total += Math.floor(value.length * 3 / 4);
+      out2[key] = value;
+    }
+    if (total > MAX_FILES_BYTES) throw new SpecError(`files total ${total} bytes; at most ${MAX_FILES_BYTES} fit in Scaleway user_data`);
+    out.files = out2;
+  }
+  if (input.minActiveReplicas !== undefined) {
+    out.minActiveReplicas = int(input.minActiveReplicas, 'minActiveReplicas', 1, MAX_REPLICAS_PER_DEPLOYMENT);
   }
   if (input.healthPath !== undefined) out.healthPath = str(input.healthPath, 'healthPath', PATH_RE);
   if (input.machineType !== undefined) out.machineType = str(input.machineType, 'machineType', TYPE_RE);
@@ -178,8 +210,13 @@ export function buildSpec(
   // A profile chosen explicitly on update re-applies its fields over the previous spec.
   if (opts.previous && profileName !== undefined) Object.assign(merged, profileFields, patchFields);
 
-  if (!merged.image) throw new SpecError('image is required (or pass a profile that sets it)');
+  if (merged.bootScript) {
+    merged.image = merged.image ?? '';
+    merged.port = merged.port ?? 8000;
+  }
+  if (!merged.image && !merged.bootScript) throw new SpecError('image or bootScript is required (or pass a profile that sets one)');
   if (!merged.port) throw new SpecError('port is required (or pass a profile that sets it)');
+  if (merged.files && !merged.bootScript) throw new SpecError('files need a bootScript to read them');
   if (merged.gpu === undefined) merged.gpu = isGpuMachineType(merged.machineType!);
   const spec = merged as DeploymentSpec;
   if (spec.minReplicas > spec.maxReplicas) throw new SpecError('minReplicas cannot exceed maxReplicas');

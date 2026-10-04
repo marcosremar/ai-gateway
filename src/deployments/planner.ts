@@ -69,7 +69,7 @@ export function desiredReplicas(input: Pick<PlanInput, 'spec' | 'inflight' | 'wa
   const { spec } = input;
   if (spec.paused) return 0;
   const active = isActive(input);
-  const base = active ? Math.max(spec.minReplicas, 1) : spec.minReplicas;
+  const base = active ? Math.max(spec.minReplicas, spec.minActiveReplicas ?? 1, 1) : spec.minReplicas;
   const byLoad = Math.ceil((input.inflight + input.waiting) / spec.targetInflightPerReplica);
   return Math.min(spec.maxReplicas, Math.max(spec.minReplicas, base, byLoad));
 }

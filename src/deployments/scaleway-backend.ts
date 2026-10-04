@@ -66,6 +66,7 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
       ...(spec.volumeGb ? { volumeGb: spec.volumeGb } : {}),
       tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name)],
       cloudInit: input.cloudInit,
+      ...(input.files && Object.keys(input.files).length ? { userDataFiles: input.files } : {}),
       ...(this.opts.projectId ? { projectId: this.opts.projectId } : {}),
     }, this.credentials);
     const machine = toMachine(inst, spec.name);

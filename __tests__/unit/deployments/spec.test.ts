@@ -35,7 +35,7 @@ describe('buildSpec', () => {
   });
 
   it.each([
-    [{ port: 8000 }, /image is required/],
+    [{ port: 8000 }, /image or bootScript is required/],
     [{ image: 'a', port: 8000, provider: 'vast' }, /only one supported/],
     [{ image: 'a', port: 8000, minReplicas: 3, maxReplicas: 2 }, /minReplicas cannot exceed/],
     [{ image: 'a', port: 8000, maxReplicas: 99 }, /maxReplicas/],
@@ -84,5 +84,28 @@ describe('cloud-init', () => {
   it('refuses a weak replica token', () => {
     const spec = buildSpec('x', { image: 'me/app:1', port: 1 }, { profiles });
     expect(() => replicaCloudInit(spec, 'short')).toThrow(/token/);
+  });
+});
+
+describe('boot-script mode', () => {
+  it('needs no image, defaults the upstream to 127.0.0.1:8000 and runs the script after the nginx front', () => {
+    const spec = buildSpec('vm', { bootScript: 'echo hello', files: { 'ref-1': Buffer.from('abc').toString('base64') } }, { profiles });
+    expect(spec.image).toBe('');
+    const script = replicaCloudInit(spec, TOKEN);
+    expect(script).not.toContain('docker run');
+    expect(script).toContain(Buffer.from('echo hello').toString('base64'));
+    expect(script.indexOf('systemctl restart nginx')).toBeLessThan(script.indexOf('/srv/aigw/boot.sh'));
+    expect(script).toContain('curl -sf -o /dev/null http://127.0.0.1:8000/health');
+  });
+
+  it('rejects files that do not fit in 14 packed user_data keys', () => {
+    const big = Buffer.alloc(14 * 120_000 + 1).toString('base64');
+    expect(() => buildSpec('x', { bootScript: 'x', files: { a: big } }, { profiles })).toThrow(/fit in Scaleway/);
+  });
+
+  it('rejects files without a script, bad keys and non-base64', () => {
+    expect(() => buildSpec('x', { image: 'a', port: 1, files: { a: 'YQ==' } }, { profiles })).toThrow(/bootScript/);
+    expect(() => buildSpec('x', { bootScript: 'x', files: { 'cloud-init': 'YQ==' } }, { profiles })).toThrow(/key/);
+    expect(() => buildSpec('x', { bootScript: 'x', files: { a: 'not base64!' } }, { profiles })).toThrow(/base64/);
   });
 });

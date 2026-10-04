@@ -41,6 +41,12 @@ describe('desiredReplicas', () => {
     expect(desiredReplicas({ ...base, spec: s, inflight: 50 })).toBe(3);
   });
 
+  it('keeps minActiveReplicas while in use (redundancy), back to minReplicas when idle', () => {
+    const s = spec({ minReplicas: 0, maxReplicas: 3, minActiveReplicas: 2, idleMinutes: 15 });
+    expect(desiredReplicas({ ...base, spec: s, lastRequestAt: NOW - MIN })).toBe(2);
+    expect(desiredReplicas({ ...base, spec: s, lastRequestAt: NOW - 20 * MIN })).toBe(0);
+  });
+
   it('never goes below minReplicas, and paused means zero', () => {
     expect(desiredReplicas({ ...base, spec: spec({ minReplicas: 2, maxReplicas: 3 }) })).toBe(2);
     expect(desiredReplicas({ ...base, spec: spec({ minReplicas: 2, maxReplicas: 3, paused: true }) })).toBe(0);

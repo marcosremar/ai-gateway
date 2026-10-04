@@ -12,6 +12,7 @@
  * damage if the gateway is gone.
  */
 
+import { packFiles, unpackScript } from './file-pack';
 import type { DeploymentSpec } from './types';
 
 /** POSIX single-quote escaping for one shell word. */
@@ -57,6 +58,18 @@ export function dockerRunCommand(spec: DeploymentSpec): string {
   return parts.filter(Boolean).join(' ');
 }
 
+/** The pack layout of a spec's files (deterministic: same files → same chunks and index). */
+export function packIndexOf(files: Record<string, string>) {
+  const pack = packFiles(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))])));
+  return { chunkCount: Object.keys(pack.chunks).length, index: pack.index };
+}
+
+/** Boot-script mode: the user script runs in the background (it may take long); readiness is still the health loop. */
+function bootScriptSection(script: string): string {
+  return `echo '${b64(script)}' | base64 -d > /srv/aigw/boot.sh && chmod 700 /srv/aigw/boot.sh
+nohup bash /srv/aigw/boot.sh > /srv/aigw/user-boot.log 2>&1 &`;
+}
+
 export function replicaCloudInit(spec: DeploymentSpec, token: string): string {
   if (!/^[A-Za-z0-9_-]{24,}$/.test(token)) throw new Error('replica token must be 24+ chars of [A-Za-z0-9_-]');
   const envFile = Object.entries(spec.env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
@@ -77,10 +90,11 @@ export DEBIAN_FRONTEND=noninteractive
 command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx; }
 rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf && systemctl restart nginx
-command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+${spec.files ? unpackScript(packIndexOf(spec.files)) : ''}
+${spec.bootScript ? bootScriptSection(spec.bootScript) : `command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 ${login}
 for i in 1 2 3 4 5; do docker pull ${shellQuote(spec.image)} && break; sleep 15; done
-${dockerRunCommand(spec)}
+${dockerRunCommand(spec)}`}
 for i in $(seq 1 ${bootChecks}); do
   curl -sf -o /dev/null http://127.0.0.1:8000${spec.healthPath} && echo '{"ready":true}' > /srv/aigw/ready.json && break
   sleep 5

@@ -88,6 +88,20 @@ describe('deployments API', () => {
     expect((await call(h, 'PATCH', '/v1/deployments/nope', { maxReplicas: 2 })).status).toBe(404);
   });
 
+  it('boot-script deployments ship their files as user_data and never return script or files', async () => {
+    const res = await call(h, 'PUT', '/v1/deployments/vm', {
+      bootScript: 'echo secret-in-script', files: { 'ref-a': Buffer.from('RIFF').toString('base64') },
+      machineType: 'DEV1-S', minReplicas: 1, maxEurPerHour: 0.05,
+    });
+    const text = await res.text();
+    expect(res.status).toBe(201);
+    expect(text).not.toContain('secret-in-script');
+    expect(JSON.parse(text).spec).toMatchObject({ bootScript: true, fileKeys: ['ref-a'] });
+    await until(() => h.cloud.created.length === 1);
+    expect(Object.keys(h.cloud.created[0].files!)).toEqual(['aigw-pack-0']);
+    expect(Buffer.from(h.cloud.created[0].files!['aigw-pack-0']).toString()).toBe('RIFF');
+  });
+
   it('never returns env values or registry credentials', async () => {
     const res = await call(h, 'PUT', '/v1/deployments/sec', {
       image: 'me/app:1', port: 80, machineType: 'DEV1-S', env: { HF_TOKEN: 'hf_secret' },

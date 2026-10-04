@@ -22,7 +22,8 @@ import { SpecError } from './spec';
 import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
-const MAX_ADMIN_BODY = 256 * 1024;
+/** Specs may carry a boot script and its files (up to 8 MB of base64). */
+const MAX_ADMIN_BODY = 16 * 1024 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 const HOP_BY_HOP = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding',

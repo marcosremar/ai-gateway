@@ -24,10 +24,21 @@ export interface DeploymentSpec {
   /** Slug, `[a-z0-9-]`, 2–40 chars. Part of the URL and of the machine tag. */
   name: string;
   provider: DeploymentProvider;
-  /** Docker image reference, e.g. `vllm/vllm-omni:v0.28.0` or `ghcr.io/me/app:1`. */
+  /** Docker image reference, e.g. `vllm/vllm-omni:v0.28.0` or `ghcr.io/me/app:1`. Empty in boot-script mode. */
   image: string;
-  /** Port the container listens on. */
+  /** Port the container listens on (ignored in boot-script mode: the script serves 127.0.0.1:8000). */
   port: number;
+  /**
+   * Boot-script mode: instead of `docker run image`, the replica runs this bash script as root after the gateway's
+   * token-gated nginx is up. The script must serve the app on `127.0.0.1:8000` and answer `healthPath` there once
+   * ready. For apps that need more than one container (reference files, warm-up, sidecars). Never returned by the API.
+   */
+  bootScript?: string;
+  /**
+   * Extra files for the boot script, base64 by key (≤ 1.68 MB in total). They are packed into user_data and rebuilt at
+   * `/srv/aigw/files/<key>` before the script starts (`file-pack.ts`). Never returned by the API.
+   */
+  files?: Record<string, string>;
   /** Overrides the image entrypoint. */
   entrypoint?: string;
   /** Arguments passed after the image (the container command). */
@@ -48,6 +59,11 @@ export interface DeploymentSpec {
   gpu: boolean;
   minReplicas: number;
   maxReplicas: number;
+  /**
+   * Replicas kept while the deployment is in use (a request in the last `idleMinutes`), regardless of load —
+   * redundancy for a live session. Default 1. Idle, it goes back to `minReplicas`.
+   */
+  minActiveReplicas: number;
   /** In-flight requests one replica should carry before another is added. */
   targetInflightPerReplica: number;
   /** With no request for this long the deployment scales down to `minReplicas` (0 = scale to zero). */
@@ -105,6 +121,8 @@ export interface CreateReplicaInput {
   replicaToken: string;
   cloudInit: string;
   namespace: string;
+  /** user_data keys → bytes (boot-script `files`). */
+  files?: Record<string, Uint8Array>;
 }
 
 /** What the controller needs from a cloud. Implemented by `ScalewayDeploymentBackend` (and fakes in tests). */
@@ -146,7 +164,9 @@ export interface ReplicaView {
 
 export interface DeploymentView {
   name: string;
-  spec: Omit<DeploymentSpec, 'env' | 'registryAuth'> & { envKeys: string[]; privateRegistry: boolean };
+  spec: Omit<DeploymentSpec, 'env' | 'registryAuth' | 'bootScript' | 'files'> & {
+    envKeys: string[]; privateRegistry: boolean; bootScript: boolean; fileKeys: string[];
+  };
   status: 'paused' | 'scaled-to-zero' | 'warming' | 'ready' | 'degraded';
   desiredReplicas: number;
   replicas: ReplicaView[];
