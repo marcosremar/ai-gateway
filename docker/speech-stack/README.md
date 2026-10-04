@@ -33,6 +33,28 @@ moment the server has the audio; "client" adds the path from the test sandbox th
   memory on 5/12 and 18/24 requests with `STT_WORKERS=4`). The measured STT time includes that wait.
 - Cold start (create the L4, pull ~57 GB from the registry next door, load, warm): 8–8.6 min.
 
+## Measured on L40S (2026-10-04, L40S-1-48G fr-par-2, image `speech-stack:20261004-2240`, STT batching on)
+
+Same clip, voice and method as the L4 table above. `STT_BATCH=8`, `LLM_PARALLEL=16`, `TTS_STAGE0_MB=12000`.
+Times from the moment the server has the audio. Every student sends at the same instant.
+
+| GPUs | Students at once | STT | LLM 1st token | **1st audio (server)** p50 / p95 | 1st audio (client) | errors |
+|---|---|---|---|---|---|---|
+| 1× L40S | 1 | 230 ms | 284 ms | **417 / 420 ms** | 860 ms | 0 / 3 |
+| 1× L40S | 8 | 707 ms | 1 747 ms | **2 327 / 2 380 ms** | 2 771 ms | 0 / 24 |
+| 1× L40S | 16 | 1 114 ms | 2 690 ms | **3 539 / 3 580 ms** | 3 996 ms | 0 / 48 |
+| 2× L40S | 8 | 417 ms | 1 055 ms | **1 401 / 2 135 ms** | 1 851 ms | 0 / 24 |
+| 2× L40S | 16 | 626 ms | 1 481 ms | **1 939 / 2 391 ms** | 2 407 ms | 0 / 48 |
+
+- With batching, the STT stops being the line. On one L40S, Whisper takes 0.7 s for 8 simultaneous clips, against 2.5 s
+  on the L4 without batching. The wait moves to the LLM's prompt reading: STT → first token takes 1.0–1.6 s with 8–16
+  prompts at once on one card.
+- Cold start of an L40S: 8.6–8.8 min. The two replicas split the students through the gateway (in-flight routing).
+- Price (Scaleway, 2026-10-04): L40S-1-48G €1.47/h, L4-1-24G €0.79/h.
+- In the first run on one L40S, one stream ended mid-body: "incomplete chunked read" between client, local gateway
+  and replica. It aborted the bench before the summary. `bench.py` now records such a failure as an error instead of
+  stopping. The next 75 + 72 requests had none.
+
 ### Found and fixed on the way
 
 - llama.cpp silently fell back to the CPU (7 tokens/s): its CUDA backend needs `libnccl.so.2`. The image carries the exact CUDA 12

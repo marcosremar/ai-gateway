@@ -27,6 +27,15 @@ def pct(values, p):
 
 
 async def one(client, url, key, audio, config):
+    try:
+        return await _one(client, url, key, audio, config)
+    except httpx.HTTPError as error:  # one broken stream is a data point, not the end of the bench
+        return {"status": None, "error": f"{type(error).__name__}: {error}"[:200], "events": [], "audio_bytes": 0,
+                **{k: None for k in ("client_first_audio_ms", "client_total_ms", "stt_ms", "transcript", "llm_first_token_ms",
+                                     "first_sentence", "first_cut_ms", "server_first_audio_ms", "server_total_ms", "reply")}}
+
+
+async def _one(client, url, key, audio, config):
     t0 = time.perf_counter()
     ms = lambda: round((time.perf_counter() - t0) * 1000)  # noqa: E731
     rec = {"events": [], "audio_bytes": 0, "client_first_audio_ms": None}
@@ -92,6 +101,8 @@ async def main():
                     "client_total_ms"]
             row = {k: (pct([r[k] for r in runs], 50), pct([r[k] for r in runs], 95)) for k in keys}
             errors = sum(1 for r in runs if r["error"] or r["status"] != 200)
+            for message in sorted({r["error"] for r in runs if r["error"]}):
+                print(f"  error: {message}")
             print(f"\n== {n} at once ({len(runs)} requests, {errors} errors)")
             for k, (p50, p95) in row.items():
                 print(f"  {k:24s} p50 {p50}  p95 {p95}")
