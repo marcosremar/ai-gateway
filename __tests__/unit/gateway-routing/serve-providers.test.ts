@@ -80,7 +80,7 @@ describe('buildServeProviders — only configured providers are mounted', () => 
   it('without deployments the aliases still serve from OpenRouter', () => {
     keys.openrouter = true;
     const { providers } = buildServeProviders({ instances: instances(), openrouter: { state: 'valid' } });
-    expect(providers.chatRoutes?.['parle-llm']?.map(t => t.model)).toEqual(['qwen/qwen3.5-9b', 'qwen/qwen3.7-flash']);
+    expect(providers.chatRoutes?.['parle-llm']?.map(t => t.model)).toEqual(['qwen/qwen3.5-9b', 'google/gemini-2.5-flash-lite']);
   });
 
   it('MODEL_ROUTES replaces a chain and accepts string and object entries', () => {

@@ -60,7 +60,7 @@ describe('routeRequest — fallback across different providers', () => {
     const b = fake('openrouter', () => Promise.reject(httpError(401, 'Invalid API key')));
     const err = await run([target(a), target(b)]).catch(e => e);
     expect(err).toBeInstanceOf(ProviderUnavailableError);
-    expect(err.reasons).toEqual(['groq: GROQ_API_KEY is not set', 'openrouter failed (HTTP 401): Invalid API key']);
+    expect(err.reasons).toEqual(['openrouter failed (HTTP 401): Invalid API key', 'groq: GROQ_API_KEY is not set']);
   });
 
   it('skips a provider whose circuit is open, and tries it again after the cooldown', async () => {

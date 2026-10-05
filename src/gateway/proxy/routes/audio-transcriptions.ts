@@ -110,9 +110,12 @@ export async function handleAudioTranscriptions(
   );
   const cached = sttCacheGet(cacheKey);
   if (cached !== null) {
+    // Served without the chain: still warm a cold primary deployment, so the next (uncached) turn finds it up.
+    const primary = targets[0]?.provider as { prewarm?: () => void } | undefined;
+    try { primary?.prewarm?.(); } catch { /* best effort */ }
     return {
       status: 200,
-      headers: { 'X-Cache': 'HIT' },
+      headers: { 'X-Cache': 'HIT', 'X-Gateway-Provider': 'cache' },
       body: { text: cached },
     };
   }
@@ -121,14 +124,15 @@ export async function handleAudioTranscriptions(
   try {
     const { result, headers } = await routeRequest(
       targets,
-      (t) => t.provider.transcribe({
+      (t, signal) => t.provider.transcribe({
+        signal,
         audio: req.rawBody,
         model: t.model ?? model,
         language: typeof body.language === 'string' ? body.language : undefined,
         prompt: body.prompt as string | undefined,
         responseFormat: (body.response_format as string) as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt' | undefined,
       }),
-      { stage: 'stt', timeoutMs: 15_000, retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers },
+      { stage: 'stt', timeoutMs: 15_000, retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
     // Cache the result for future identical requests

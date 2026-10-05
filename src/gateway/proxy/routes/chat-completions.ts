@@ -16,7 +16,7 @@ import type { ProxyRequest, ProxyResponse, ChatFallbackEntry, ChatDynamicRoute, 
 import { CooldownTracker } from '../../providers/cloud/fallback';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
 import {
-  describeFailure, errorResponse, failureCode, isClientErrorStatus, originHeaders, proxyCircuitBreakers, ProviderUnavailableError, providerUnavailableResponse,
+  describeFailure, errorResponse, failureCode, type FailureCodes, isClientErrorStatus, originHeaders, proxyCircuitBreakers, ProviderUnavailableError, providerUnavailableResponse,
   redactSecrets, runTargets, selectTargets,
 } from '../provider-routing';
 import { RequestCoalescer } from '../middleware/request-coalescer';
@@ -104,14 +104,15 @@ export async function handleChatCompletions(
     if (reasons) return providerUnavailableResponse('chat', model, reasons);
     return { status: 404, body: { error: { message: `Model "${model}" not found`, type: 'invalid_request_error' } } };
   }
-  const candidateTargets = candidates.map(toTarget);
-  const { usable, skipped, codes: skippedCodes } = selectTargets(candidateTargets, breakers);
+  const candidateTargets = candidates;
+  const { usable, skipped: skippedNow, codes: skippedCodes } = selectTargets(candidateTargets, breakers);
+  // Entries that were never mounted (e.g. OpenRouter without key) belong in the 503 explanation too.
+  const skipped = [...skippedNow, ...(routing.unavailable?.[model] ?? []).filter(r => !skippedNow.includes(r))];
   if (usable.length === 0) return providerUnavailableResponse('chat', model, skipped);
-  const chain = usable.map(t => ({ provider: t.providerId, model: t.model ?? model, instance: t.provider }));
 
   const startTs = Date.now();
-  const primaryProvider = chain[0].provider;
-  const primaryModel = chain[0].model;
+  const primaryProvider = usable[0].providerId;
+  const primaryModel = usable[0].model ?? model;
 
   const chatOpts: ChatRequest = {
     model: primaryModel,
@@ -136,7 +137,7 @@ export async function handleChatCompletions(
     const includeUsage = stream_options !== undefined && (stream_options as Record<string, unknown>).include_usage === true;
     let opened: OpenedStream;
     try {
-      opened = await openStream(chain, chatOpts, breakers);
+      opened = await openStream(usable, chatOpts, breakers);
     } catch (err) {
       log.error(`All providers failed (stream) for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
       return errorResponse(withSkipped(err, skipped), 'chat', model);
@@ -145,8 +146,8 @@ export async function handleChatCompletions(
       emitHook(hooks, 'onRequestEnd', {
         userId: 'proxy',
         stage: 'llm',
-        provider: opened.entry.provider,
-        model: opened.entry.model,
+        provider: opened.target.providerId,
+        model: opened.target.model ?? model,
         latencyMs,
         success,
         ...(error ? { error } : {}),
@@ -159,7 +160,7 @@ export async function handleChatCompletions(
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        ...originHeaders(candidateTargets, toTarget(opened.entry), new Map([...skippedCodes, ...opened.codes])),
+        ...originHeaders(candidateTargets, opened.target, new Map([...skippedCodes, ...opened.codes])),
       },
       body: null,
       stream,
@@ -182,11 +183,11 @@ export async function handleChatCompletions(
 
     // Check cache
     if (cache && cacheKey) {
-      const cached = await cache.get<{ content: string; model: string; usage?: unknown }>(cacheKey);
+      const cached = await cache.get<{ content: string; model: string; usage?: unknown; finishReason?: string }>(cacheKey);
       if (cached) {
         return {
           status: 200,
-          body: formatResponse(cached.content, cached.model, cached.usage),
+          body: formatResponse(cached.content, cached.model, cached.usage, cached.finishReason),
         };
       }
     }
@@ -215,8 +216,13 @@ export async function handleChatCompletions(
         runTargets(
           usable,
           // Each target carries its own upstream model — the same gateway model has different ids per provider.
-          (t) => t.provider.chat({ ...chatOpts, model: t.model ?? model }),
-          { stage: 'llm', timeoutMs: requestTimeoutMs, retriesPerProvider: 1, cooldownTracker: routing.cooldownTracker ?? llmCooldownTracker, breakers },
+          (t, signal) => t.provider.chat({ ...chatOpts, model: t.model ?? model, signal, ...(t.extraBody ? { extraBody: t.extraBody } : {}) }),
+          {
+            stage: 'llm', timeoutMs: requestTimeoutMs, retriesPerProvider: 1,
+            cooldownTracker: routing.cooldownTracker ?? llmCooldownTracker, breakers,
+            // An empty answer (e.g. a reasoning model that spent max_tokens thinking) is a failure: try the next one.
+            validate: (r) => (emptyAnswer(r as ChatResponse) ? `empty answer (finish_reason: ${(r as ChatResponse).finishReason ?? 'unknown'})` : null),
+          },
         ),
       ),
     );
@@ -225,7 +231,7 @@ export async function handleChatCompletions(
 
     // ── afterResponse guardrails ─────────────────────────────────────────────
     if (guardrails) {
-      const responseBody = formatResponse(result.content, result.model, result.usage);
+      const responseBody = formatResponse(result.content, result.model, result.usage, result.finishReason);
       const gr = await guardrails.runAfterResponse(responseBody, result.model || model);
       if (!gr.pass) {
         if (guardrails.action === 'block') {
@@ -260,7 +266,7 @@ export async function handleChatCompletions(
         'X-Upstream-Duration-Ms': String(upstreamMs),
         ...originHeaders(candidateTargets, usedTarget, new Map([...skippedCodes, ...codes])),
       },
-      body: formatResponse(result.content, result.model, result.usage),
+      body: formatResponse(result.content, result.model, result.usage, result.finishReason),
     };
   } catch (err) {
     emitHook(hooks, 'onRequestEnd', {
@@ -282,7 +288,7 @@ export async function handleChatCompletions(
 /** Adds the providers skipped up front (no key, open circuit) to a "nobody answered" error. */
 function withSkipped(err: unknown, skipped: string[]): unknown {
   return err instanceof ProviderUnavailableError && skipped.length
-    ? new ProviderUnavailableError([...skipped, ...err.reasons], err.retryAfterSec) : err;
+    ? new ProviderUnavailableError([...err.reasons, ...skipped], err.retryAfterSec) : err;
 }
 
 function messagesContainImage(messages: unknown[]): boolean {
@@ -305,12 +311,6 @@ export interface ChatRoutingOptions {
   cooldownTracker?: CooldownTracker;
 }
 
-interface ChainEntry { provider: string; model: string; instance: LLMProvider }
-
-function toTarget(e: ChainEntry): RouteTarget<LLMProvider> {
-  return { providerId: e.provider, provider: e.instance, model: e.model };
-}
-
 /**
  * Build the candidate chain for a model: its own providers first, then the generic fallbacks.
  *
@@ -329,20 +329,20 @@ function buildChain(
   fallbackChain?: ChatFallbackEntry[],
   dynamicRoutes?: ChatDynamicRoute[],
   chatRoutes?: Record<string, Array<RouteTarget<LLMProvider>>>,
-): ChainEntry[] {
-  const chain: ChainEntry[] = [];
+): Array<RouteTarget<LLMProvider>> {
+  const chain: Array<RouteTarget<LLMProvider>> = [];
   const seen = new Set<string>();
-  const push = (provider: string, model: string, instance: LLMProvider) => {
-    const key = `${provider}\u0000${model}`;
+  const push = (providerId: string, model: string, provider: LLMProvider, extra?: Partial<RouteTarget<LLMProvider>>) => {
+    const key = `${providerId}\u0000${model}`;
     if (seen.has(key)) return;
     seen.add(key);
-    chain.push({ provider, model, instance });
+    chain.push({ ...extra, providerId, model, provider });
   };
 
   const routed = chatRoutes?.[requestedModel];
   const direct = chatProviders[requestedModel];
   if (routed?.length) {
-    for (const t of routed) push(t.providerId, t.model ?? requestedModel, t.provider);
+    for (const t of routed) push(t.providerId, t.model ?? requestedModel, t.provider, t);
   } else if (direct) {
     push(direct.providerId, requestedModel, direct);
   } else {
@@ -357,58 +357,74 @@ function buildChain(
 
 const STREAM_TIMEOUT_MS = 30_000;
 
-/** The provider that will serve a stream, with its first step already received. */
+/** The provider that will serve a stream, with its first content step already received. */
 interface OpenedStream {
-  entry: ChainEntry;
-  /** Streaming provider: the generator and its first step. */
+  target: RouteTarget<LLMProvider>;
+  /** Streaming provider: the generator, its first content step, and sentinels read before it. */
   gen?: AsyncGenerator<string, void, undefined>;
   first?: IteratorResult<string, void>;
+  prefetched?: string[];
   /** Provider without chatStream: its whole answer. */
   full?: ChatResponse;
-  codes: Map<string, string>;
+  codes: FailureCodes;
 }
 
-function withStreamTimeout<T>(p: Promise<T>): Promise<T> {
+function withStreamTimeout<T>(p: Promise<T>, ms = STREAM_TIMEOUT_MS, onTimeout?: () => void): Promise<T> {
   let t: ReturnType<typeof setTimeout>;
   return Promise.race([
     p,
-    new Promise<never>((_, reject) => { t = setTimeout(() => reject(new Error('Streaming timeout')), STREAM_TIMEOUT_MS); }),
+    new Promise<never>((_, reject) => {
+      t = setTimeout(() => {
+        onTimeout?.();
+        reject(Object.assign(new Error(`Streaming timeout after ${ms}ms`), { gatewayCode: 'timeout' }));
+      }, ms);
+    }),
   ]).finally(() => clearTimeout(t));
 }
 
 /**
- * Picks the provider that serves a stream: walks the chain until one yields its first step (or, without chatStream,
- * its full answer). A provider failing before its first token (cold replica, 401, 429, timeout…) is skipped, so the
- * response headers can already say who answers. Throws `ProviderUnavailableError` when none does, or a client error.
+ * Picks the provider that serves a stream: walks the chain until one yields its first content (or, without
+ * chatStream, a non-empty full answer). A provider failing before that (cold replica, 401, 429, timeout, empty
+ * answer…) is skipped and its call aborted, so the response headers can already say who answers. Throws
+ * `ProviderUnavailableError` when none does, or a client error.
  */
-async function openStream(entries: ChainEntry[], opts: ChatRequest, breakers: CircuitBreakerRegistry): Promise<OpenedStream> {
+async function openStream(targets: Array<RouteTarget<LLMProvider>>, opts: ChatRequest, breakers: CircuitBreakerRegistry): Promise<OpenedStream> {
   const failures: string[] = [];
-  const codes = new Map<string, string>();
-  for (const entry of entries) {
-    const breaker = breakers.get(entry.provider);
-    const request = { ...opts, model: entry.model };
+  const codes: FailureCodes = new Map();
+  for (const target of targets) {
+    const breaker = breakers.get(target.providerId);
+    const abort = new AbortController();
+    const request: ChatRequest = { ...opts, model: target.model ?? opts.model, signal: abort.signal, ...(target.extraBody ? { extraBody: target.extraBody } : {}) };
+    const firstWaitMs = target.timeoutMs ?? STREAM_TIMEOUT_MS;
     try {
-      if (!entry.instance.chatStream) {
-        const full = await withStreamTimeout(entry.instance.chat(request));
+      if (!target.provider.chatStream) {
+        const full = await withStreamTimeout(target.provider.chat(request), firstWaitMs, () => abort.abort());
+        if (emptyAnswer(full)) throw Object.assign(new Error(`empty answer (finish_reason: ${full.finishReason ?? 'unknown'})`), { gatewayCode: 'empty' });
         breaker.recordSuccess();
-        return { entry, full, codes };
+        return { target, full, codes };
       }
-      const gen = entry.instance.chatStream(request);
+      const gen = target.provider.chatStream(request);
       try {
-        const first = await withStreamTimeout(gen.next());
-        breaker.recordSuccess();
-        return { entry, gen, first, codes };
+        const prefetched: string[] = [];
+        for (;;) {
+          const step = await withStreamTimeout(gen.next(), firstWaitMs, () => abort.abort());
+          if (step.done) throw Object.assign(new Error('empty answer (stream ended without content)'), { gatewayCode: 'empty' });
+          if (typeof step.value === 'string' && step.value.startsWith('__usage__:')) { prefetched.push(step.value); continue; }
+          breaker.recordSuccess();
+          return { target, gen, first: step, prefetched, codes };
+        }
       } catch (err) {
         try { void gen.return?.(undefined); } catch { /* no-op */ }
         throw err;
       }
     } catch (err) {
+      abort.abort();
       const status = (err as { status?: unknown })?.status;
       if (isClientErrorStatus(typeof status === 'number' ? status : null)) throw err;
       breaker.recordFailure();
-      failures.push(describeFailure(entry.provider, err));
-      codes.set(entry.provider, failureCode(err));
-      log.warn(`stream: ${describeFailure(entry.provider, err)} → next provider`);
+      failures.push(describeFailure(target.providerId, err));
+      codes.set(target, failureCode(err));
+      log.warn(`stream: ${describeFailure(target.providerId, err)} → next provider`);
     }
   }
   throw new ProviderUnavailableError(failures);
@@ -429,7 +445,7 @@ function buildSSEStream(
   const sse = (data: unknown) => enc.encode(`data: ${JSON.stringify(data)}\n\n`);
   const created = Math.floor(Date.now() / 1000);
   const startMs = Date.now();
-  const model = opened.entry.model;
+  const model = opened.target.model ?? 'unknown';
 
   // Track the active generator from outside `start()` so cancel() (fired when the consumer disconnects) can stop
   // it. Without this, a client that drops mid-stream leaves the upstream generator running and the gateway keeps
@@ -449,7 +465,7 @@ function buildSSEStream(
           // Provider doesn't support streaming — emit full response as one chunk
           const res = opened.full;
           controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model: res.model || model,
-            choices: [{ index: 0, delta: { role: 'assistant', content: res.content }, finish_reason: 'stop' }] }));
+            choices: [{ index: 0, delta: { role: 'assistant', content: res.content }, finish_reason: res.finishReason ?? 'stop' }] }));
           if (includeUsage && res.usage) {
             controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model: res.model || model,
               choices: [], usage: { prompt_tokens: res.usage.promptTokens, completion_tokens: res.usage.completionTokens, total_tokens: res.usage.totalTokens } }));
@@ -468,6 +484,9 @@ function buildSSEStream(
         controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
           choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] }));
 
+        for (const v of opened.prefetched ?? []) {
+          try { usageData = JSON.parse(v.slice('__usage__:'.length)); } catch { /* malformed — skip */ }
+        }
         let step = opened.first!;
         while (!step.done) {
           const value = step.value;
@@ -512,7 +531,12 @@ function buildSSEStream(
   });
 }
 
-function formatResponse(content: string, model: string, usage?: unknown) {
+/** No text at all — a provider that answered nothing has failed this request. */
+function emptyAnswer(r: ChatResponse): boolean {
+  return !r.content || !r.content.trim();
+}
+
+function formatResponse(content: string, model: string, usage?: unknown, finishReason?: string) {
   // ChatResponse.usage uses camelCase internally; OpenAI wire format requires snake_case
   const u = usage as { promptTokens?: number; completionTokens?: number; totalTokens?: number } | undefined;
   return {
@@ -523,7 +547,8 @@ function formatResponse(content: string, model: string, usage?: unknown) {
     choices: [{
       index: 0,
       message: { role: 'assistant', content },
-      finish_reason: 'stop',
+      // The upstream value is passed through (a 'length' must not become 'stop').
+      finish_reason: finishReason ?? 'stop',
     }],
     usage: {
       prompt_tokens: u?.promptTokens ?? 0,

@@ -41,7 +41,9 @@ class DeploymentCallError extends Error {
 }
 
 /** Calls `path` on a ready replica of `name`; throws an Error with `.status` the fallback chain understands. */
-async function callReplica(controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions): Promise<Response> {
+async function callReplica(
+  controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal,
+): Promise<Response> {
   let lease;
   try {
     lease = await controller.acquire(name, { waitMs: opts.waitMs ?? 0 });
@@ -58,7 +60,9 @@ async function callReplica(controller: Leaser, name: string, path: string, init:
     res = await (opts.fetchImpl ?? fetch)(`${replicaBase(lease.machine)}${path}`, {
       ...init,
       headers: { ...(init.headers as Record<string, string> | undefined), 'X-Aigw-Token': lease.token },
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 120_000),
+      // The gateway aborts through `signal` when it gives up on this replica (route/target timeout): the request is
+      // cancelled at once and the lease released, instead of hanging until the provider's own 120 s cap.
+      signal: AbortSignal.any([AbortSignal.timeout(opts.timeoutMs ?? 120_000), ...(signal ? [signal] : [])]),
     });
   } catch (err) {
     lease.done(true);
@@ -83,8 +87,13 @@ abstract class DeploymentProviderBase {
   /** "Configured" = the deployment exists on this gateway (its replicas may still be scaled to zero). */
   isConfigured(): boolean { return this.controller.get(this.deployment) !== null; }
   getModels(): ModelInfo[] { return []; }
-  protected call(path: string, init: RequestInit): Promise<Response> {
-    return callReplica(this.controller, this.deployment, path, init, this.opts);
+  /** Starts scaling up a cold deployment without sending a request (e.g. when an answer came from the cache). */
+  prewarm(): void {
+    const status = (this.controller.get(this.deployment) as { status?: string } | null)?.status;
+    if (status === 'scaled-to-zero' || status === 'warming') this.controller.wake?.(this.deployment);
+  }
+  protected call(path: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
+    return callReplica(this.controller, this.deployment, path, init, this.opts, signal);
   }
 }
 
@@ -99,17 +108,19 @@ export class DeploymentLLMProvider extends DeploymentProviderBase implements LLM
         ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
         ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
         ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
+        ...request.extraBody,
       }),
-    });
+    }, request.signal);
     const payload = await res.json() as {
       model?: string;
-      choices?: Array<{ message?: { content?: string } }>;
+      choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
     };
     const u = payload.usage;
     return {
       content: payload.choices?.[0]?.message?.content ?? '',
       model: payload.model ?? request.model,
+      ...(payload.choices?.[0]?.finish_reason ? { finishReason: payload.choices[0].finish_reason } : {}),
       ...(u ? { usage: { promptTokens: u.prompt_tokens ?? 0, completionTokens: u.completion_tokens ?? 0, totalTokens: u.total_tokens ?? 0 } } : {}),
       raw: payload,
     };
@@ -126,7 +137,7 @@ export class DeploymentSTTProvider extends DeploymentProviderBase implements STT
     if (request.language) form.append('language', request.language);
     if (request.prompt) form.append('prompt', request.prompt);
     form.append('response_format', 'json');
-    const res = await this.call('/v1/audio/transcriptions', { method: 'POST', body: form });
+    const res = await this.call('/v1/audio/transcriptions', { method: 'POST', body: form }, request.signal);
     const payload = await res.json() as { text?: string };
     return { text: payload.text ?? '', raw: payload, timing: { total_ms: Date.now() - t0 } };
   }
@@ -147,7 +158,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
         ...(request.speed !== undefined ? { speed: request.speed } : {}),
         ...(request.instructions ? { instructions: request.instructions } : {}),
       }),
-    });
+    }, request.signal);
   }
 
   async synthesize(request: TTSRequest): Promise<TTSResponse> {

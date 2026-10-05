@@ -23,7 +23,17 @@ export interface RouteTarget<P> {
   model?: string;
   /** TTS only: voice to use with this provider (voices are provider-specific). Default: the requested voice. */
   voice?: string;
+  /**
+   * Max time for one attempt on this target before moving to the next one (the call is aborted). Default: the
+   * route's timeout. Deployments get a short one so a stuck replica does not delay the fallback.
+   */
+  timeoutMs?: number;
+  /** Chat only: provider-specific body fields (e.g. OpenRouter `reasoning: { enabled: false }`). */
+  extraBody?: Record<string, unknown>;
 }
+
+/** Codes (see `failureCode`) of targets left behind, keyed by the target object (two targets may share a provider). */
+export type FailureCodes = Map<object, string>;
 
 /** Gateway model → one provider (legacy shape) or an ordered fallback list. */
 export type StageRoutes<P> = Record<string, P | Array<RouteTarget<P>>>;
@@ -63,19 +73,19 @@ export function normalizeTargets<P extends Configurable>(value: P | Array<RouteT
 export function selectTargets<P extends Configurable>(
   targets: Array<RouteTarget<P>>,
   breakers: CircuitBreakerRegistry = proxyCircuitBreakers,
-): { usable: Array<RouteTarget<P>>; skipped: string[]; codes: Map<string, string> } {
+): { usable: Array<RouteTarget<P>>; skipped: string[]; codes: FailureCodes } {
   const usable: Array<RouteTarget<P>> = [];
   const skipped: string[] = [];
-  const codes = new Map<string, string>();
+  const codes: FailureCodes = new Map();
   for (const target of targets) {
     if (!target.provider.isConfigured()) {
       skipped.push(notConfiguredReason(target.providerId));
-      codes.set(target.providerId, 'not_configured');
+      codes.set(target, 'not_configured');
       continue;
     }
     if (breakers.get(entryHealthKey({ provider: target.providerId })).isOpen()) {
       skipped.push(`${target.providerId}: circuit open after repeated failures (retrying in <30 s)`);
-      codes.set(target.providerId, 'circuit_open');
+      codes.set(target, 'circuit_open');
       continue;
     }
     usable.push(target);
@@ -111,12 +121,13 @@ export function providerHeader(target: Pick<RouteTarget<unknown>, 'providerId' |
 export function originHeaders(
   candidates: Array<Pick<RouteTarget<unknown>, 'providerId' | 'model'>>,
   used: Pick<RouteTarget<unknown>, 'providerId' | 'model'>,
-  codes: Map<string, string>,
+  codes: FailureCodes,
 ): Record<string, string> {
   const headers: Record<string, string> = { 'X-Gateway-Provider': providerHeader(used) };
   const first = candidates[0];
-  if (first && first.providerId !== used.providerId) {
-    headers['X-Gateway-Fallback'] = codes.get(first.providerId) ?? 'cooldown';
+  // Compared by identity: openrouter → openrouter (two models) is a fallback too.
+  if (first && first !== used) {
+    headers['X-Gateway-Fallback'] = codes.get(first) ?? 'cooldown';
     headers['X-Gateway-Fallback-From'] = providerHeader(first);
   }
   return headers;
@@ -172,47 +183,84 @@ export interface RunTargetsOptions {
   retriesPerProvider?: number;
   cooldownTracker?: CooldownTracker;
   breakers?: CircuitBreakerRegistry;
+  /**
+   * Rejects a result that must count as a provider failure (e.g. an empty chat answer): return an error message
+   * and the chain moves on to the next target (code `empty`).
+   */
+  validate?: (result: unknown) => string | null;
+}
+
+class AttemptError extends Error {
+  readonly skipRetry = true;
+  constructor(readonly status: number, message: string, readonly gatewayCode: string) { super(message); }
+}
+
+/**
+ * Runs one attempt with its own timeout: on expiry the call is ABORTED (the signal reaches the provider's fetch, so
+ * a replica lease is released at once) and the attempt fails with code `timeout`.
+ */
+async function attempt<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: number | undefined, label: string): Promise<T> {
+  const controller = new AbortController();
+  if (!timeoutMs) return fn(controller.signal);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new AttemptError(504, `${label} timed out after ${timeoutMs}ms`, 'timeout'));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([fn(controller.signal), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
  * Calls `fn` on each target in order until one succeeds. Throws `ProviderUnavailableError` (one reason per
  * provider tried) when all fail, or the provider's own error when it is a client error (bad request).
+ * Targets are tracked by position, so two targets of the same provider (e.g. OpenRouter with two models) stay apart.
  */
 export async function runTargets<P, T>(
   targets: Array<RouteTarget<P>>,
-  fn: (target: RouteTarget<P>) => Promise<T>,
+  fn: (target: RouteTarget<P>, signal: AbortSignal) => Promise<T>,
   opts: RunTargetsOptions,
-): Promise<{ result: T; target: RouteTarget<P>; codes: Map<string, string> }> {
-  const byLabel = new Map(targets.map((t) => [t.providerId, t]));
+): Promise<{ result: T; target: RouteTarget<P>; codes: FailureCodes }> {
   const entries: FallbackEntry[] = targets.map((t) => ({ provider: t.providerId, model: t.model }));
-  const failures = new Map<string, string>();
-  const codes = new Map<string, string>();
+  const indexOf = new Map(entries.map((e, i) => [e, i]));
+  const failures = new Map<number, string>();
+  const codes: FailureCodes = new Map();
+  let winner = -1;
   try {
-    const { result, usedProvider } = await withProviderFallback(
+    const { result } = await withProviderFallback(
       entries,
       async (entry) => {
-        const target = byLabel.get(entry.provider)!;
+        const i = indexOf.get(entry)!;
+        const target = targets[i];
         try {
-          return await fn(entry.model === target.model ? target : { ...target, model: entry.model });
+          const result = await attempt((signal) => fn(target, signal), target.timeoutMs ?? opts.timeoutMs, target.providerId);
+          const invalid = opts.validate?.(result);
+          if (invalid) throw new AttemptError(502, invalid, 'empty');
+          winner = i;
+          return result;
         } catch (err) {
-          failures.set(entry.provider, describeFailure(entry.provider, err));
-          codes.set(entry.provider, failureCode(err));
+          failures.set(i, describeFailure(target.providerId, err));
+          codes.set(target, failureCode(err));
           throw err;
         }
       },
       {
         logPrefix: `[proxy:${opts.stage}]`,
-        timeoutMs: opts.timeoutMs,
         retriesPerProvider: opts.retriesPerProvider ?? 0,
         retryBaseDelayMs: 200,
         ...(opts.cooldownTracker ? { cooldownTracker: opts.cooldownTracker } : {}),
         circuitBreakers: opts.breakers ?? proxyCircuitBreakers,
       },
     );
-    return { result, target: byLabel.get(usedProvider)!, codes };
+    return { result, target: targets[winner], codes };
   } catch (err) {
     if (isClientErrorStatus(statusOf(err))) throw err;
-    const reasons = targets.map((t) => failures.get(t.providerId) ?? `${t.providerId}: skipped (cooling down or circuit open)`);
+    const reasons = targets.map((t, i) => failures.get(i) ?? `${t.providerId}: skipped (cooling down or circuit open)`);
     if (failures.size === 0 && err instanceof Error && !/fallback chain/.test(err.message)) {
       reasons.push(describeFailure('gateway', err));
     }
@@ -226,16 +274,18 @@ export async function runTargets<P, T>(
  */
 export async function routeRequest<P extends Configurable, T>(
   candidates: Array<RouteTarget<P>>,
-  fn: (target: RouteTarget<P>) => Promise<T>,
-  opts: RunTargetsOptions,
+  fn: (target: RouteTarget<P>, signal: AbortSignal) => Promise<T>,
+  opts: RunTargetsOptions & { notMounted?: string[] },
 ): Promise<{ result: T; target: RouteTarget<P>; headers: Record<string, string> }> {
-  const { usable, skipped, codes: skippedCodes } = selectTargets(candidates, opts.breakers);
+  const { usable, skipped: skippedNow, codes: skippedCodes } = selectTargets(candidates, opts.breakers);
+  // Entries that were never mounted (missing key, deployments off) are part of the explanation too.
+  const skipped = [...skippedNow, ...(opts.notMounted ?? []).filter(r => !skippedNow.includes(r))];
   if (usable.length === 0) throw new ProviderUnavailableError(skipped);
   try {
     const { result, target, codes } = await runTargets(usable, fn, opts);
     return { result, target, headers: originHeaders(candidates, target, new Map([...skippedCodes, ...codes])) };
   } catch (err) {
-    if (err instanceof ProviderUnavailableError) throw new ProviderUnavailableError([...skipped, ...err.reasons], err.retryAfterSec);
+    if (err instanceof ProviderUnavailableError) throw new ProviderUnavailableError([...err.reasons, ...skipped], err.retryAfterSec);
     throw err;
   }
 }

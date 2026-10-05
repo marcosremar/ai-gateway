@@ -97,7 +97,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
       ...(request.instructions && { instructions: request.instructions }),
     };
 
-    const response = await client.audio.speech.create(params);
+    const response = await client.audio.speech.create(params, request.signal ? { signal: request.signal } : undefined);
     const arrayBuffer = await response.arrayBuffer();
     return { audio: Buffer.from(arrayBuffer), contentType: FORMAT_TO_CONTENT_TYPE[format] || 'audio/mpeg' };
   }
@@ -115,7 +115,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
       ...(request.instructions && { instructions: request.instructions }),
     };
 
-    const response = await client.audio.speech.create(params);
+    const response = await client.audio.speech.create(params, request.signal ? { signal: request.signal } : undefined);
 
     if (response.body) {
       return response.body as unknown as ReadableStream<Uint8Array>;

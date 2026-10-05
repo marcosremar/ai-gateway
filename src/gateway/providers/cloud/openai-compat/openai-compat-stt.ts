@@ -87,7 +87,7 @@ export class OpenAICompatSTTProvider implements STTProvider {
     };
 
     const t0 = Date.now();
-    const transcription = await client.audio.transcriptions.create(params);
+    const transcription = await client.audio.transcriptions.create(params, request.signal ? { signal: request.signal } : undefined);
     const total_ms = Date.now() - t0;
 
     if (typeof transcription === 'string') {

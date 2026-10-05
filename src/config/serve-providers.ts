@@ -66,6 +66,12 @@ const TTS_CHAINS: Record<string, Array<[string, string]>> = {
  * Groq is an extra fallback when it has a key. Deployment names come from SPEECH_DEPLOYMENT (STT + LLM, default
  * parle-speech) and TTS_DEPLOYMENT (default parle-qwen-tts). MODEL_ROUTES replaces any of these per model.
  */
+/** OpenRouter: answer without a reasoning phase (ignored by models that do not reason). */
+const NO_REASONING = { reasoning: { enabled: false } };
+
+/** Default per-attempt timeout of a deployment target before falling back (DEPLOYMENT_TIMEOUT_MS overrides). */
+export const DEPLOYMENT_TIMEOUT_MS = 10_000;
+
 export function defaultAliasRoutes(env: Record<string, string | undefined>): Record<Stage, Record<string, RouteEntrySpec[]>> {
   const speech = env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech';
   const tts = env.TTS_DEPLOYMENT?.trim() || env.QWEN_TTS_DEPLOYMENT?.trim() || 'parle-qwen-tts';
@@ -85,8 +91,11 @@ export function defaultAliasRoutes(env: Record<string, string | undefined>): Rec
     chat: {
       'parle-llm': [
         { provider: 'deployment', deployment: speech, model: 'qwen3.5-9b' },
-        { provider: 'openrouter', model: 'qwen/qwen3.5-9b' },
-        { provider: 'openrouter', model: 'qwen/qwen3.7-flash' },
+        // Qwen3.5 is a reasoning model: with reasoning on it spends max_tokens thinking and answers nothing
+        // (content null, finish_reason length). A spoken turn needs the answer, so reasoning is off.
+        { provider: 'openrouter', model: 'qwen/qwen3.5-9b', extraBody: NO_REASONING },
+        // Must work with the account's privacy settings (ZDR / data policy): qwen/qwen3.7-flash answers 404 there.
+        { provider: 'openrouter', model: 'google/gemini-2.5-flash-lite', extraBody: NO_REASONING },
       ],
     },
     tts: { 'parle-tts': ttsChain, 'qwen/qwen3-tts': ttsChain },
@@ -112,7 +121,14 @@ export async function checkOpenRouterKey(
   return { state: 'unknown', detail: redactSecrets(probe.error ?? 'unreachable') };
 }
 
-export interface RouteEntrySpec { provider: string; model?: string; voice?: string; deployment?: string }
+export interface RouteEntrySpec {
+  provider: string;
+  model?: string;
+  voice?: string;
+  deployment?: string;
+  /** Chat only: provider-specific body fields (e.g. `{ "reasoning": { "enabled": false } }`). */
+  extraBody?: Record<string, unknown>;
+}
 export type ModelRoutesSpec = Partial<Record<Stage, Record<string, RouteEntrySpec[]>>>;
 
 function parseEntry(raw: unknown): RouteEntrySpec | null {
@@ -132,6 +148,7 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
       ...(typeof e.model === 'string' ? { model: e.model } : {}),
       ...(typeof e.voice === 'string' ? { voice: e.voice } : {}),
       ...(typeof e.deployment === 'string' ? { deployment: e.deployment } : {}),
+      ...(e.extraBody && typeof e.extraBody === 'object' && !Array.isArray(e.extraBody) ? { extraBody: e.extraBody } : {}),
     };
   }
   return null;
@@ -191,6 +208,10 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
     return notConfiguredReason(providerId);
   };
 
+  const configuredTimeout = Number(opts.env?.DEPLOYMENT_TIMEOUT_MS);
+  const deploymentTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : DEPLOYMENT_TIMEOUT_MS;
+  const extras = (e: RouteEntrySpec) => ({ ...(e.voice ? { voice: e.voice } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}) });
+
   /** Resolves one entry to a mounted target, or a reason why it cannot be mounted. */
   function resolve<S extends Stage>(stage: S, gatewayModel: string, e: RouteEntrySpec): RouteTarget<StageProvider<S>> | string {
     if (e.provider === 'deployment') {
@@ -200,13 +221,13 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       if (!provider) return `${label}: deployments are disabled on this gateway (SCW_SECRET_KEY is not set)`;
       // Mounted even if the deployment does not exist yet: it may be created later through /v1/deployments.
       // Until then selectTargets skips it per request and /v1/models does not list a model served only by it.
-      return { providerId: label, provider, model: e.model ?? gatewayModel, ...(e.voice ? { voice: e.voice } : {}) };
+      return { ...extras(e), providerId: label, provider, model: e.model ?? gatewayModel, timeoutMs: deploymentTimeoutMs };
     }
     const provider = (instances[stage] as Record<string, StageProvider<S>>)[e.provider];
     if (!provider) return `${e.provider}: no ${stage} provider with this id`;
     const usable = e.provider === 'openrouter' ? openrouterUsable : provider.isConfigured();
     if (!usable) return reasonFor(e.provider);
-    return { providerId: e.provider, provider, model: e.model ?? gatewayModel, ...(e.voice ? { voice: e.voice } : {}) };
+    return { ...extras(e), providerId: e.provider, provider, model: e.model ?? gatewayModel };
   }
 
   const unavailable: Record<Stage, Record<string, string[]>> = { chat: {}, stt: {}, tts: {} };
@@ -218,7 +239,8 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       if (typeof r !== 'string') targets.push(r);
       else if (!reasons.includes(r)) reasons.push(r);
     }
-    if (targets.length === 0) (unavailable[stage as Stage] as Record<string, string[]>)[model] = reasons;
+    // Kept even when other entries were mounted: the 503 must also say that the fallback has no key.
+    if (reasons.length) (unavailable[stage as Stage] as Record<string, string[]>)[model] = reasons;
     return targets;
   }
 
@@ -289,7 +311,12 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       sttModels: Object.keys(stt),
       ttsModels: Object.keys(tts),
       chatFallback: chatFallbackChain.map(e => `${e.providerId}:${e.model}`),
-      unavailable: Object.fromEntries((['chat', 'stt', 'tts'] as const).map(s => [s, Object.keys(unavailable[s])])),
+      // Models with no provider at all (the rest of `unavailable` are chains that lost some entries).
+      unavailable: {
+        chat: Object.keys(unavailable.chat).filter(m => !chatRoutes[m]),
+        stt: Object.keys(unavailable.stt).filter(m => !stt[m]),
+        tts: Object.keys(unavailable.tts).filter(m => !tts[m]),
+      },
     },
   };
 }

@@ -70,6 +70,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     const timeoutMs = request.timeoutMs || 120_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const signal = request.signal ? AbortSignal.any([controller.signal, request.signal]) : controller.signal;
 
     try {
     const completion = await client.chat.completions.create({
@@ -79,11 +80,13 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),
       ...(request.stream && { stream: request.stream }),
-    }, { signal: controller.signal }) as OpenAI.ChatCompletion;
+      ...request.extraBody,
+    }, { signal }) as OpenAI.ChatCompletion;
 
     return {
       content: completion.choices[0]?.message?.content || '',
       model: completion.model,
+      ...(completion.choices[0]?.finish_reason ? { finishReason: completion.choices[0].finish_reason } : {}),
       usage: completion.usage ? {
         promptTokens: completion.usage.prompt_tokens,
         completionTokens: completion.usage.completion_tokens,
@@ -115,6 +118,8 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     const timeoutMs = request.timeoutMs || 120_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = () => controller.abort();
+    request.signal?.addEventListener('abort', onAbort, { once: true });
 
     let stream: AsyncIterable<OpenAI.ChatCompletionChunk> | null = null;
     try {
@@ -126,7 +131,8 @@ export class OpenAICompatLLMProvider implements LLMProvider {
         ...(request.responseFormat && { response_format: request.responseFormat }),
         stream: true,
         stream_options: { include_usage: true },
-      }, { signal: controller.signal });
+        ...request.extraBody,
+      } as OpenAI.ChatCompletionCreateParamsStreaming, { signal: controller.signal });
 
       for await (const chunk of stream) {
         if (chunk.usage) {
@@ -147,6 +153,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       throw err;
     } finally {
       clearTimeout(timer);
+      request.signal?.removeEventListener('abort', onAbort);
       // Best-effort signal abort so caller-side early-termination (consumer
       // breaks out of for-await) also cancels in-flight HTTP request.
       try { controller.abort(); } catch { /* no-op */ }

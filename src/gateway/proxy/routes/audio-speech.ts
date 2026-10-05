@@ -56,7 +56,8 @@ export async function handleAudioSpeech(
   try {
     const { result, headers } = await routeRequest(
       targets,
-      (t) => t.provider.synthesize({
+      (t, signal) => t.provider.synthesize({
+        signal,
         model: t.model ?? model,
         input: body.input as string,
         // Voices are provider-specific: a fallback uses `fallback_voice` from the request, else its configured voice.
@@ -65,7 +66,7 @@ export async function handleAudioSpeech(
         responseFormat: (body.response_format as string) as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm' | undefined || 'mp3',
         speed: body.speed as number | undefined,
       }),
-      { stage: 'tts', timeoutMs: 15_000, retriesPerProvider: 1, cooldownTracker: ttsCooldownTracker, breakers: circuitBreakers },
+      { stage: 'tts', timeoutMs: 15_000, retriesPerProvider: 1, cooldownTracker: ttsCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
     return {

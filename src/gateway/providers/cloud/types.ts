@@ -108,6 +108,8 @@ export interface STTProvider {
 export type TTSAudioFormat = 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm';
 
 export interface TTSRequest {
+  /** Aborts the upstream call (e.g. the gateway gave up on this provider and moved to the next one). */
+  signal?: AbortSignal;
   input: string;
   model: string;
   voice: string;
@@ -165,11 +167,17 @@ export interface ChatRequest {
   responseFormat?: { type: 'json_object' | 'text' };
   stream?: boolean;
   timeoutMs?: number;
+  /** Aborts the upstream call (e.g. the gateway gave up on this provider and moved to the next one). */
+  signal?: AbortSignal;
+  /** Provider-specific body fields sent as-is (e.g. OpenRouter `reasoning: { enabled: false }`). */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface ChatResponse {
   content: string;
   model: string;
+  /** Upstream finish_reason (stop, length, …) — passed through, never rewritten. */
+  finishReason?: string;
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
   raw?: unknown;
 }

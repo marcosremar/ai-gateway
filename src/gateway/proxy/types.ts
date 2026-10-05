@@ -79,8 +79,9 @@ export interface ProviderMapping {
   /** model name -> TTS provider instance, or an ordered fallback list */
   tts?: StageRoutes<TTSProvider>;
   /**
-   * Models this gateway knows but cannot serve (no provider configured), with the reasons
-   * (e.g. "groq: GROQ_API_KEY is not set"). Not listed in /v1/models; requests get 503 provider_unavailable.
+   * Chain entries that could not be mounted, per model, with the reasons (e.g. "groq: GROQ_API_KEY is not set").
+   * A model whose whole chain is here has no provider: not listed in /v1/models, requests get 503
+   * provider_unavailable. For a partly mounted chain the reasons are appended to its 503 when the rest fails.
    */
   unavailable?: Partial<Record<'chat' | 'stt' | 'tts', Record<string, string[]>>>;
   /** Image generation + inpainting provider (used by POST /v1/images/generate and /v1/images/inpaint) */

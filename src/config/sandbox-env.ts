@@ -9,7 +9,8 @@
  *
  * Priority: the palco value WINS over the process environment (Railway variables) for every key except the few
  * that must stay with the host — `isEnvPinned`: the token and its aliases, PORT, NODE_ENV, GATEWAY_API_KEYS,
- * HOSTNAME, RAILWAY_* and infra URLs (*_URL). So rotating a key on the palco is enough; a stale Railway variable
+ * HOSTNAME, RAILWAY_* and infra URLs (*_URL); DEPLOYMENTS_NAMESPACE / DEPLOYMENTS_STATE_DIR / DEPLOYMENTS_ENABLED are
+ * never taken from the palco at all. So rotating a key on the palco is enough; a stale Railway variable
  * cannot shadow it. Keys are re-read periodically and on demand by `KeyManager` (src/config/key-manager.ts).
  *
  * The same token is also accepted as a Bearer by the gateway itself (see `serve.ts`), so agents call it with the
@@ -22,8 +23,20 @@ const TOKEN_ALIASES = ['SANDBOX_TOKEN', 'PALCO_PROXY_TOKEN', 'PALCO_PROXY', 'VMO
 /** Keys the palco never overrides (they configure the host itself, not a provider). */
 const ENV_PINNED = new Set<string>([...TOKEN_ALIASES, 'PORT', 'NODE_ENV', 'GATEWAY_API_KEYS', 'HOSTNAME', 'SANDBOX_ENV_URL']);
 
+/**
+ * Keys the palco never provides at all, even when the host lacks them: they decide WHICH machines this gateway owns.
+ * A local gateway that got the real SCW_SECRET_KEY from the palco plus the production namespace would release the
+ * production replicas as orphans (controller reconcile) — the namespace must come from the host only.
+ */
+const HOST_ONLY = new Set<string>(['DEPLOYMENTS_NAMESPACE', 'DEPLOYMENTS_STATE_DIR', 'DEPLOYMENTS_ENABLED']);
+
+export function isHostOnly(name: string): boolean {
+  // RAILWAY_* tells the gateway it runs on Railway (see deploymentsFromEnv): never inherited from the palco.
+  return HOST_ONLY.has(name) || name.startsWith('RAILWAY_');
+}
+
 export function isEnvPinned(name: string): boolean {
-  return ENV_PINNED.has(name) || name.startsWith('RAILWAY_') || name.endsWith('_URL');
+  return ENV_PINNED.has(name) || HOST_ONLY.has(name) || name.startsWith('RAILWAY_') || name.endsWith('_URL');
 }
 
 export const DEFAULT_SANDBOX_ENV_URLS = [
@@ -78,7 +91,7 @@ export async function loadSandboxEnv(
       for (const [key, value] of Object.entries(payload)) {
         if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof value !== 'string' || !value.trim()) continue;
         // Pinned keys stay with the host when it has them; everything else follows the palco.
-        if (isEnvPinned(key) && env[key]?.trim()) continue;
+        if (isHostOnly(key) || (isEnvPinned(key) && env[key]?.trim())) continue;
         result.received.push(key);
         if (env[key] === value.trim()) continue;
         env[key] = value.trim();
