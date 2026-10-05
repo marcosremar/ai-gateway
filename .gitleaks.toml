@@ -25,5 +25,6 @@ regexes = [
   '''key:demo-client-id-xxxx''',
   '''demo-client-id-xxxx''',
   '''secretKey = env\.B2_APPLICATION_KEY''',
-  '''env\.B2_APPLICATION_KEY'''
+  '''env\.B2_APPLICATION_KEY''',
+  '''e2e-key-0123456789abcdef'''
 ]

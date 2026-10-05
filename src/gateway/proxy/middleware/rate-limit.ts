@@ -92,7 +92,23 @@ export class RateLimiter {
         return `key:${hashToken(token)}`;
       }
     }
-    return `ip:${req.socket.remoteAddress || 'unknown'}`;
+    return `ip:${RateLimiter.clientIp(req)}`;
+  }
+
+  /**
+   * Caller IP. Behind a platform proxy (Railway, Fly) the socket peer is the proxy itself, so every unauthenticated
+   * caller would share one bucket. With `TRUST_PROXY=1` the IP comes from `X-Real-IP` (set by Railway) or the LAST
+   * `X-Forwarded-For` hop (the one the platform appended — the leftmost entries are caller-controlled).
+   */
+  static clientIp(req: IncomingMessage): string {
+    if (process.env.TRUST_PROXY === '1') {
+      const real = req.headers['x-real-ip'];
+      if (typeof real === 'string' && real.trim()) return real.trim();
+      const xff = req.headers['x-forwarded-for'];
+      const hops = (Array.isArray(xff) ? xff.join(',') : xff ?? '').split(',').map(s => s.trim()).filter(Boolean);
+      if (hops.length) return hops[hops.length - 1];
+    }
+    return req.socket.remoteAddress || 'unknown';
   }
 
   /**
