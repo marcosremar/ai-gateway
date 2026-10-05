@@ -12,8 +12,14 @@ import { createLogger } from '../../../logger';
 
 const log = createLogger('audio-transcriptions');
 import type { STTProvider } from '../../providers/cloud/types';
-import type { ProxyRequest, ProxyResponse } from '../types';
-import { withProxyRetry } from './retry';
+import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
+import { CooldownTracker } from '../../providers/cloud/fallback';
+import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
+import {
+  errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest,
+} from '../provider-routing';
+
+const sttCooldownTracker = new CooldownTracker();
 
 // ── STT response cache ──────────────────────────────────────────────────
 const STT_CACHE_TTL_MS = 5 * 60_000;
@@ -64,7 +70,9 @@ function sttCacheSet(key: string, text: string): void {
 
 export async function handleAudioTranscriptions(
   req: ProxyRequest,
-  sttProviders: Record<string, STTProvider>,
+  sttProviders: StageRoutes<STTProvider>,
+  unavailable?: Record<string, string[]>,
+  circuitBreakers?: CircuitBreakerRegistry,
 ): Promise<ProxyResponse> {
   if (!req.body || typeof req.body !== 'object') {
     return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
@@ -85,9 +93,11 @@ export async function handleAudioTranscriptions(
     return { status: 400, body: { error: { message: `response_format must be one of: ${validResponseFormats.join(', ')}`, type: 'invalid_request_error' } } };
   }
 
-  const provider = sttProviders[body.model];
-  if (!provider) {
-    return { status: 404, body: { error: { message: `STT model "${body.model}" not found`, type: 'invalid_request_error' } } };
+  const model = body.model;
+  const targets = normalizeTargets(sttProviders[model]);
+  if (targets.length === 0) {
+    if (unavailable?.[model]) return providerUnavailableResponse('stt', model, unavailable[model]);
+    return { status: 404, body: { error: { message: `STT model "${model}" not found`, type: 'invalid_request_error' } } };
   }
 
   // Check STT cache — identical audio + model + language returns cached result
@@ -107,18 +117,18 @@ export async function handleAudioTranscriptions(
     };
   }
 
+
   try {
-    const result = await withProxyRetry(
-      provider.providerId,
-      body.model,
-      () => provider.transcribe({
+    const { result, headers } = await routeRequest(
+      targets,
+      (t) => t.provider.transcribe({
         audio: req.rawBody,
-        model: body.model as string,
+        model: t.model ?? model,
         language: typeof body.language === 'string' ? body.language : undefined,
         prompt: body.prompt as string | undefined,
         responseFormat: (body.response_format as string) as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt' | undefined,
       }),
-      'STT',
+      { stage: 'stt', timeoutMs: 15_000, retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers },
     );
 
     // Cache the result for future identical requests
@@ -126,14 +136,11 @@ export async function handleAudioTranscriptions(
 
     return {
       status: 200,
-      headers: { 'X-Cache': 'MISS' },
+      headers: { 'X-Cache': 'MISS', ...headers },
       body: { text: result.text },
     };
   } catch (err) {
-    log.error(`STT error for model ${body.model}:`, err);
-    return {
-      status: 500,
-      body: { error: { message: 'Transcription failed', type: 'server_error' } },
-    };
+    log.error(`STT error for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
+    return errorResponse(err, 'stt', model);
   }
 }

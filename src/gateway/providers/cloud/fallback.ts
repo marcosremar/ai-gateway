@@ -652,7 +652,9 @@ export async function withProviderFallback<T>(
         const isLastRetry = retryNum >= maxAttempts - 1;
         const hasNextProvider = iterChain.slice(i + 1).some((e) => !tracker.isCoolingDown(e));
 
-        if (!isLastRetry && is5xxError(err)) {
+        // An error flagged `skipRetry` (e.g. a deployment with no ready replica) goes straight to the next provider:
+        // retrying it a few hundred ms later cannot succeed and only delays the fallback.
+        if (!isLastRetry && is5xxError(err) && !(err as { skipRetry?: boolean }).skipRetry) {
           // Will retry this provider after backoff (handled at top of loop)
           log.warn(
             `${logPrefix} ${entry.provider}/${entry.model ?? 'default'} ` +

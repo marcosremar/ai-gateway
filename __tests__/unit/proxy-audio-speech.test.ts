@@ -88,7 +88,7 @@ describe('handleAudioSpeech', () => {
     const res = await handleAudioSpeech(makeReq(validBody), providers);
     expect(res.status).toBe(200);
     expect(res.body).toEqual(Buffer.from([1, 2, 3]));
-    expect(res.headers).toEqual({ 'Content-Type': 'audio/mp3' });
+    expect(res.headers).toEqual({ 'Content-Type': 'audio/mp3', 'X-Gateway-Provider': 'test' });
   });
 
   it('calls provider.synthesize with correct args', async () => {
@@ -119,10 +119,13 @@ describe('handleAudioSpeech', () => {
     );
   });
 
-  it('returns 500 when provider throws', async () => {
-    mockTtsProvider.synthesize.mockRejectedValueOnce(new Error('tts fail'));
+  it('returns 503 provider_unavailable naming the provider when it throws', async () => {
+    mockTtsProvider.synthesize.mockRejectedValue(new Error('tts fail'));
     const res = await handleAudioSpeech(makeReq(validBody), providers);
-    expect(res.status).toBe(500);
+    mockTtsProvider.synthesize.mockResolvedValue({ audio: Buffer.from([1, 2, 3]), contentType: 'audio/mp3' });
+    expect(res.status).toBe(503);
+    expect((res.body as { error: { type: string; message: string } }).error.type).toBe('provider_unavailable');
+    expect((res.body as { error: { message: string } }).error.message).toContain('test failed: tts fail');
   });
 
   it('accepts valid formats: mp3, opus, aac, flac, wav, pcm', async () => {

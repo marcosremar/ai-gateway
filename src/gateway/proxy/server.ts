@@ -462,6 +462,20 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Skip auth for health endpoint (Fly.io health checks don't send tokens)
     const urlPath = url.split('?')[0];
     if (method === 'GET' && urlPath === '/health') {
+      if (/[?&]deep=(1|true)(&|$)/.test(url)) {
+        // Deep check: live provider probes + deployments. Costs upstream calls, so it needs an admin Bearer.
+        if (!config.deepHealth) { sendError(res, 404, 'Deep health is not enabled on this gateway', requestId); return; }
+        const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        if (!token || !config.deepHealth.authorize(token)) { sendError(res, 401, 'Deep health needs an admin API key', requestId); return; }
+        try {
+          const report = await config.deepHealth.report();
+          sendResponse(res, { status: report.status, body: report.body }, requestId);
+        } catch (err) {
+          log.error({ err }, 'deep health failed');
+          sendError(res, 500, 'Deep health check failed', requestId);
+        }
+        return;
+      }
       sendResponse(res, { status: 200, body: {
         status: 'ok',
         connections: { active: activeConnections, peak: peakConnections },
@@ -691,17 +705,19 @@ export function createProxyServer(config: ProxyConfig): Server {
       if (method === 'GET' && url === '/v1/models') {
         proxyRes = await handleModelsWithDynamic(config.providers);
       } else if (method === 'POST' && url === '/v1/chat/completions') {
-        if (!config.providers.chat) {
+        const { chat, chatRoutes, chatDynamicRoutes, unavailable } = config.providers;
+        if (!chat && !chatRoutes && !chatDynamicRoutes && !unavailable?.chat) {
           proxyRes = { status: 404, body: { error: { message: 'No chat providers configured', type: 'invalid_request_error' } } };
         } else {
           proxyRes = await handleChatCompletions(
             proxyReq,
-            config.providers.chat,
+            chat ?? {},
             config.cache,
             config.hooks,
             config.providers.chatFallbackChain,
             config.guardrails,
-            config.providers.chatDynamicRoutes,
+            chatDynamicRoutes,
+            { chatRoutes, unavailable: unavailable?.chat },
           );
         }
       } else if (method === 'POST' && url === '/v1/embeddings') {
@@ -711,16 +727,16 @@ export function createProxyServer(config: ProxyConfig): Server {
           proxyRes = await handleEmbeddings(proxyReq, config.providers.embedding, config.cache);
         }
       } else if (method === 'POST' && url === '/v1/audio/speech') {
-        if (!config.providers.tts) {
+        if (!config.providers.tts && !config.providers.unavailable?.tts) {
           proxyRes = { status: 404, body: { error: { message: 'No TTS providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts);
+          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts);
         }
       } else if (method === 'POST' && url === '/v1/audio/transcriptions') {
-        if (!config.providers.stt) {
+        if (!config.providers.stt && !config.providers.unavailable?.stt) {
           proxyRes = { status: 404, body: { error: { message: 'No STT providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleAudioTranscriptions(proxyReq, config.providers.stt);
+          proxyRes = await handleAudioTranscriptions(proxyReq, config.providers.stt ?? {}, config.providers.unavailable?.stt);
         }
       } else if (method === 'POST' && url === '/v1/images/generate') {
         proxyRes = await handleImageGenerate(proxyReq, config.providers.image);
