@@ -45,7 +45,11 @@ of providers and tries them in order:
 
 A provider is skipped without being called when it has no key or its circuit breaker is open (5 consecutive
 failures → skipped for 30 s, then one probe request). A provider that fails moves the request to the next one on
-401/402/403/404/429, 5xx, timeout or a dropped connection. A **cold deployment** (no ready replica) is not waited
+401/402/403/404/429 (a 404 from a data/privacy policy — e.g. OpenRouter ZDR — counts as a provider failure), 5xx,
+timeout, a dropped connection, or an **empty chat answer** (e.g. a reasoning model that spent `max_tokens`
+thinking). Each attempt has a timeout and is aborted when it expires; deployment targets use a short one
+(`DEPLOYMENT_TIMEOUT_MS`, default 10 s) so a stuck replica does not delay the fallback. `finish_reason` is passed
+through as the provider sent it. A **cold deployment** (no ready replica) is not waited
 for: the gateway starts scaling it up and answers from the fallback in the same call; once a replica is ready,
 traffic returns to it. A real client error (e.g. `400` invalid request) is returned as is.
 
@@ -54,7 +58,7 @@ traffic returns to it. A real client error (e.g. `400` invalid request) is retur
 | Model (alias) | Route | Chain |
 |---|---|---|
 | `parle-stt` | `/v1/audio/transcriptions` | `deployment:$SPEECH_DEPLOYMENT` (whisper-large-v3-turbo) → `openrouter:openai/whisper-large-v3-turbo` → `groq:whisper-large-v3-turbo` |
-| `parle-llm` | `/v1/chat/completions` | `deployment:$SPEECH_DEPLOYMENT` (Qwen3.5-9B) → `openrouter:qwen/qwen3.5-9b` → `openrouter:qwen/qwen3.7-flash` |
+| `parle-llm` | `/v1/chat/completions` | `deployment:$SPEECH_DEPLOYMENT` (Qwen3.5-9B) → `openrouter:qwen/qwen3.5-9b` → `openrouter:google/gemini-2.5-flash-lite` (both with `reasoning: {enabled: false}`) |
 | `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:$TTS_DEPLOYMENT` (Qwen3-TTS 1.7B CustomVoice) → `openrouter:hexgrad/kokoro-82m` (voice `pf_dora`) |
 
 `SPEECH_DEPLOYMENT` defaults to `parle-speech` (the image with Whisper + Qwen3.5-9B + Qwen3-TTS on one GPU) and
@@ -73,7 +77,8 @@ followed by the generic chat fallback. PlayAI TTS was retired by Groq and is no 
 ### Changing the map — `MODEL_ROUTES`
 
 A JSON env var adds or replaces chains (same model = replaced). Entries: `"provider"`, `"provider:upstreamModel"`,
-`"deployment:<name>[:upstreamModel]"`, or `{"provider", "model", "voice", "deployment"}`. The chat key `"*"`
+`"deployment:<name>[:upstreamModel]"`, or `{"provider", "model", "voice", "deployment", "extraBody"}` (`extraBody`:
+provider-specific chat body fields, e.g. `{"reasoning": {"enabled": false}}`). The chat key `"*"`
 replaces the generic chat fallback (default: Groq `llama-3.3-70b-versatile`, then OpenRouter
 `meta-llama/llama-3.3-70b-instruct`).
 
@@ -93,15 +98,18 @@ Every successful response of the three routes carries (no secrets):
 | Header | Example | Meaning |
 |---|---|---|
 | `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:hexgrad/kokoro-82m` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
-| `X-Gateway-Fallback` | `cold` | only when the first provider of the chain did not answer: `cold`, `paused`, `5xx`, `timeout`, `unreachable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `circuit_open`, `cooldown`, `error` |
+| `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `unreachable`, `empty`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
+An STT answer served from the gateway's 5-minute cache (same audio, model, language and format) carries
+`X-Gateway-Provider: cache` and `X-Cache: HIT`; it still wakes a cold primary deployment for the next turn.
 
 ### `503 provider_unavailable`
 
 When no provider of the chain can serve the request — keys missing, keys rejected, every provider failing — the
-gateway answers `503` and says which key is missing or which provider failed (never a key value):
+gateway answers `503` and says which key is missing or which provider failed (never a key value). Entries that
+were never mounted (e.g. the OpenRouter fallback without key) are listed too, even when the deployment was tried:
 
 ```json
 {
@@ -166,6 +174,15 @@ Image generation (`dit360` → self-hosted 360° GPU, `fal-ai/*` → fal.ai).
 Docker image → autoscaled replicas on Scaleway machines. Enabled when `SCW_SECRET_KEY` is set. Mutations need an
 admin key.
 
+::: danger Namespace = ownership
+A gateway releases, as orphans, every machine tagged with its `DEPLOYMENTS_NAMESPACE` that belongs to no deployment
+it knows. A local or test gateway holding the real `SCW_SECRET_KEY` with the production namespace would therefore
+release the production replicas. Rules: outside Railway the namespace is **required** (deployments stay off without
+it) — use your own (`dev-<name>`, `gwtest`); the namespace (and `DEPLOYMENTS_STATE_DIR`, `DEPLOYMENTS_ENABLED`,
+`RAILWAY_*`) is never taken from the palco, only from the host environment. Only the production service uses the
+production namespace (`default` on Railway).
+:::
+
 | Method | Path | |
 |---|---|---|
 | `GET` | `/v1/deployments` | list, with controller health |
@@ -188,7 +205,8 @@ for a cold start.
 The palco (`SANDBOX_ENV_URL`, default `https://parle-palco.up.railway.app/api/sandbox-env`, Bearer
 `SANDBOX_TOKEN`) is the single home of the provider keys. Its values **win** over the service environment
 (Railway variables), except for host settings that always stay in the environment: `SANDBOX_TOKEN` and its
-aliases, `PORT`, `NODE_ENV`, `GATEWAY_API_KEYS`, `HOSTNAME`, `RAILWAY_*` and `*_URL`.
+aliases, `PORT`, `NODE_ENV`, `GATEWAY_API_KEYS`, `HOSTNAME`, `RAILWAY_*` and `*_URL`. `DEPLOYMENTS_NAMESPACE`,
+`DEPLOYMENTS_STATE_DIR`, `DEPLOYMENTS_ENABLED` and `RAILWAY_*` are never read from the palco at all.
 
 The gateway re-reads the palco every 5 minutes. Providers read their key on every request, and a reload that
 changes a key re-mounts the providers in place: a provider that gained a key starts serving (and appears in
