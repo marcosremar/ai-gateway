@@ -459,23 +459,11 @@ export function createProxyServer(config: ProxyConfig): Server {
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
     }
 
-    // Skip auth for health endpoint (Fly.io health checks don't send tokens)
+    // Only the shallow health check skips auth (the platform probe sends no token). The deep check calls upstream
+    // providers, so it goes through the normal auth below and then needs an admin key.
     const urlPath = url.split('?')[0];
-    if (method === 'GET' && urlPath === '/health') {
-      if (/[?&]deep=(1|true)(&|$)/.test(url)) {
-        // Deep check: live provider probes + deployments. Costs upstream calls, so it needs an admin Bearer.
-        if (!config.deepHealth) { sendError(res, 404, 'Deep health is not enabled on this gateway', requestId); return; }
-        const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-        if (!token || !config.deepHealth.authorize(token)) { sendError(res, 401, 'Deep health needs an admin API key', requestId); return; }
-        try {
-          const report = await config.deepHealth.report();
-          sendResponse(res, { status: report.status, body: report.body }, requestId);
-        } catch (err) {
-          log.error({ err }, 'deep health failed');
-          sendError(res, 500, 'Deep health check failed', requestId);
-        }
-        return;
-      }
+    const deepHealth = method === 'GET' && urlPath === '/health' && /[?&]deep=(1|true)(&|$)/.test(url);
+    if (method === 'GET' && urlPath === '/health' && !deepHealth) {
       sendResponse(res, { status: 200, body: {
         status: 'ok',
         connections: { active: activeConnections, peak: peakConnections },
@@ -510,6 +498,20 @@ export function createProxyServer(config: ProxyConfig): Server {
       config.onAuth(token).catch((err) => {
         log.error('Auth callback failed', { error: err instanceof Error ? err.message : String(err) });
       });
+    }
+
+    if (deepHealth) {
+      if (!config.deepHealth) { sendError(res, 404, 'Deep health is not enabled on this gateway', requestId); return; }
+      const adminToken = (authHeader || '').replace(/^Bearer\s+/i, '');
+      if (!adminToken || !config.deepHealth.authorize(adminToken)) { sendError(res, 401, 'Deep health needs an admin API key', requestId); return; }
+      try {
+        const report = await config.deepHealth.report();
+        sendResponse(res, { status: report.status, body: report.body }, requestId);
+      } catch (err) {
+        log.error({ err }, 'deep health failed');
+        sendError(res, 500, 'Deep health check failed', requestId);
+      }
+      return;
     }
 
     // Per-user concurrent request limit
