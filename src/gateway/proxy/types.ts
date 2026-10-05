@@ -8,6 +8,9 @@ import type { ResponseCache } from '../../caching/response-cache';
 import type { LLMProvider, STTProvider, TTSProvider, ImageProvider } from '../providers/cloud/types';
 import type { EmbeddingProvider } from '../providers/cloud/openai-compat/openai-compat-embedding';
 import type { GuardrailEngine } from '../guardrails';
+import type { RouteTarget, StageRoutes } from './provider-routing';
+
+export type { RouteTarget, StageRoutes } from './provider-routing';
 
 /**
  * A single entry in the LLM provider fallback chain.
@@ -40,6 +43,8 @@ export interface ChatDynamicRoute {
   acceptsModel: (model: string) => boolean;
   /** Optional mapping from gateway model alias to upstream provider model. */
   upstreamModel?: (model: string) => string;
+  /** Set when the provider cannot be used (e.g. key rejected): matching models answer 503 with this reason. */
+  unavailableReason?: string;
 }
 
 export interface DynamicModelCatalog {
@@ -66,10 +71,21 @@ export interface ProviderMapping {
   dynamicModelCatalogs?: DynamicModelCatalog[];
   /** model name -> Embedding provider instance */
   embedding?: Record<string, EmbeddingProvider>;
-  /** model name -> STT provider instance */
-  stt?: Record<string, STTProvider>;
-  /** model name -> TTS provider instance */
-  tts?: Record<string, TTSProvider>;
+  /**
+   * model name -> ordered providers for that model (first = primary, rest = fallback on 401/402/403/429/5xx/
+   * timeout). Takes precedence over `chat` for the same model.
+   */
+  chatRoutes?: Record<string, Array<RouteTarget<LLMProvider>>>;
+  /** model name -> STT provider instance, or an ordered fallback list */
+  stt?: StageRoutes<STTProvider>;
+  /** model name -> TTS provider instance, or an ordered fallback list */
+  tts?: StageRoutes<TTSProvider>;
+  /**
+   * Chain entries that could not be mounted, per model, with the reasons (e.g. "groq: GROQ_API_KEY is not set").
+   * A model whose whole chain is here has no provider: not listed in /v1/models, requests get 503
+   * provider_unavailable. For a partly mounted chain the reasons are appended to its 503 when the rest fails.
+   */
+  unavailable?: Partial<Record<'chat' | 'stt' | 'tts', Record<string, string[]>>>;
   /** Image generation + inpainting provider (used by POST /v1/images/generate and /v1/images/inpaint) */
   image?: ImageProvider;
 }
@@ -142,6 +158,14 @@ export interface ProxyConfig {
    * Runs beforeRequest and afterResponse hooks on /v1/chat/completions.
    */
   guardrails?: GuardrailEngine;
+  /**
+   * `GET /health?deep=1`: per-provider probes + deployments. Plain `GET /health` stays a cheap unauthenticated
+   * liveness check; the deep one needs a Bearer that `authorize` accepts (401 otherwise, 404 when not set).
+   */
+  deepHealth?: {
+    authorize: (bearerToken: string) => boolean;
+    report: () => Promise<{ status: number; body: unknown }>;
+  };
 }
 
 /**

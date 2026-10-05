@@ -26,17 +26,24 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     this.providerId = config.providerId;
   }
 
+  /** True when the client was built from an explicit key (withApiKey/withConfig): never swapped for the env key. */
+  private pinnedClient = false;
+
+  /**
+   * The key is read from the environment on EVERY call, so a key rotated at runtime (KeyManager reload) is used by
+   * the next request. Clients are shared per baseURL + key hash (client-cache), so this costs a hash lookup.
+   */
   protected getClient(): OpenAI {
-    if (!this.client) {
-      const apiKey = process.env[this.config.envKey];
-      if (!apiKey) throw new Error(`[${this.config.providerId} LLM] ${this.config.envKey} is not set`);
-      this.client = getOrCreateClient(this.config.baseURL, apiKey, this.config.defaultHeaders);
-    }
+    if (this.client && this.pinnedClient) return this.client;
+    const apiKey = process.env[this.config.envKey];
+    if (!apiKey) throw new Error(`[${this.config.providerId} LLM] ${this.config.envKey} is not set`);
+    this.client = getOrCreateClient(this.config.baseURL, apiKey, this.config.defaultHeaders);
     return this.client;
   }
 
   withApiKey(apiKey: string): OpenAICompatLLMProvider {
     const provider = new OpenAICompatLLMProvider(this.config);
+    provider.pinnedClient = true;
     provider.client = new OpenAI({
       apiKey,
       baseURL: this.config.baseURL,
@@ -47,6 +54,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
 
   withConfig(opts: { apiKey: string; baseURL?: string }): OpenAICompatLLMProvider {
     const provider = new OpenAICompatLLMProvider(this.config);
+    provider.pinnedClient = true;
     provider.client = new OpenAI({
       apiKey: opts.apiKey,
       baseURL: opts.baseURL || this.config.baseURL,
@@ -62,6 +70,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     const timeoutMs = request.timeoutMs || 120_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const signal = request.signal ? AbortSignal.any([controller.signal, request.signal]) : controller.signal;
 
     try {
     const completion = await client.chat.completions.create({
@@ -71,11 +80,13 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),
       ...(request.stream && { stream: request.stream }),
-    }, { signal: controller.signal }) as OpenAI.ChatCompletion;
+      ...request.extraBody,
+    }, { signal }) as OpenAI.ChatCompletion;
 
     return {
       content: completion.choices[0]?.message?.content || '',
       model: completion.model,
+      ...(completion.choices[0]?.finish_reason ? { finishReason: completion.choices[0].finish_reason } : {}),
       usage: completion.usage ? {
         promptTokens: completion.usage.prompt_tokens,
         completionTokens: completion.usage.completion_tokens,
@@ -107,6 +118,8 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     const timeoutMs = request.timeoutMs || 120_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = () => controller.abort();
+    request.signal?.addEventListener('abort', onAbort, { once: true });
 
     let stream: AsyncIterable<OpenAI.ChatCompletionChunk> | null = null;
     try {
@@ -118,7 +131,8 @@ export class OpenAICompatLLMProvider implements LLMProvider {
         ...(request.responseFormat && { response_format: request.responseFormat }),
         stream: true,
         stream_options: { include_usage: true },
-      }, { signal: controller.signal });
+        ...request.extraBody,
+      } as OpenAI.ChatCompletionCreateParamsStreaming, { signal: controller.signal });
 
       for await (const chunk of stream) {
         if (chunk.usage) {
@@ -139,6 +153,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       throw err;
     } finally {
       clearTimeout(timer);
+      request.signal?.removeEventListener('abort', onAbort);
       // Best-effort signal abort so caller-side early-termination (consumer
       // breaks out of for-await) also cancels in-flight HTTP request.
       try { controller.abort(); } catch { /* no-op */ }

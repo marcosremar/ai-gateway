@@ -38,30 +38,32 @@ export async function handleModelsWithDynamic(providers: ProviderMapping): Promi
   return response;
 }
 
-function collectStaticModels(providers: ProviderMapping): Array<{ id: string; object: string; created: number; owned_by: string }> {
-  const models: Array<{ id: string; object: string; created: number; owned_by: string }> = [];
-  const now = Math.floor(Date.now() / 1000);
+type ModelEntry = { id: string; object: string; created: number; owned_by: string };
+type Servable = { isConfigured(): boolean } | Array<{ provider: { isConfigured(): boolean } }>;
 
-  if (providers.chat) {
-    for (const id of Object.keys(providers.chat)) {
+/** A model is listed only when at least one of its providers is configured (has its key) right now. */
+function servable(value: Servable | undefined): boolean {
+  if (!value) return false;
+  if (Array.isArray(value)) return value.some((t) => t.provider.isConfigured());
+  return value.isConfigured();
+}
+
+function collectStaticModels(providers: ProviderMapping): ModelEntry[] {
+  const models: ModelEntry[] = [];
+  const seen = new Set<string>();
+  const now = Math.floor(Date.now() / 1000);
+  const add = (map: Record<string, Servable> | undefined) => {
+    for (const [id, value] of Object.entries(map ?? {})) {
+      if (seen.has(id) || !servable(value)) continue;
+      seen.add(id);
       models.push({ id, object: 'model', created: now, owned_by: 'ai-gateway' });
     }
-  }
-  if (providers.embedding) {
-    for (const id of Object.keys(providers.embedding)) {
-      models.push({ id, object: 'model', created: now, owned_by: 'ai-gateway' });
-    }
-  }
-  if (providers.stt) {
-    for (const id of Object.keys(providers.stt)) {
-      models.push({ id, object: 'model', created: now, owned_by: 'ai-gateway' });
-    }
-  }
-  if (providers.tts) {
-    for (const id of Object.keys(providers.tts)) {
-      models.push({ id, object: 'model', created: now, owned_by: 'ai-gateway' });
-    }
-  }
+  };
+  add(providers.chatRoutes);
+  add(providers.chat);
+  add(providers.embedding);
+  add(providers.stt);
+  add(providers.tts);
   return models;
 }
 

@@ -34,6 +34,10 @@ export function proxyIdleTimeoutMs(env: Record<string, string | undefined>, depl
   return deploymentsEnabled ? String(DEPLOYMENTS_PROXY_IDLE_MS) : null;
 }
 
+function onRailway(env: Record<string, string | undefined>): boolean {
+  return Boolean(env.RAILWAY_ENVIRONMENT_ID || env.RAILWAY_ENVIRONMENT || env.RAILWAY_PROJECT_ID);
+}
+
 export interface DeploymentsFromEnv {
   controller: DeploymentController;
   handler: ReturnType<typeof createDeploymentRoutes>;
@@ -45,7 +49,8 @@ export interface DeploymentsFromEnv {
  *   SCW_SECRET_KEY | SCALEWAY_SECRET_KEY   required
  *   SCW_DEFAULT_PROJECT_ID | SCW_PROJECT_ID | SCALEWAY_PROJECT_ID   optional (default: the key's default project)
  *   DEPLOYMENTS_STATE_DIR    where specs/profiles persist (mount a volume here on Railway); default ~/.ai-gateway
- *   DEPLOYMENTS_NAMESPACE    machine tag namespace, one gateway per namespace; default "default"
+ *   DEPLOYMENTS_NAMESPACE    machine tag namespace, one gateway per namespace; default "default" ON RAILWAY ONLY —
+ *                            elsewhere it is required (machines of the namespace unknown here are released as orphans)
  *   DEPLOYMENTS_MAX_REPLICAS replica cap across all deployments; default 6
  *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = all
  */
@@ -61,6 +66,13 @@ export function deploymentsFromEnv(
   if (env.DEPLOYMENTS_ENABLED === '0') return null;
   const secret = env.SCW_SECRET_KEY || env.SCALEWAY_SECRET_KEY;
   if (!secret) return null;
+  // Every machine tagged with this namespace that belongs to no deployment known HERE is released as an orphan.
+  // Off Railway (a dev box that got the real SCW key from the palco), an implicit "default" namespace would reap
+  // the production replicas — so outside Railway the namespace must be set explicitly.
+  if (!env.DEPLOYMENTS_NAMESPACE?.trim() && !onRailway(env)) {
+    opts.log?.('Deployments disabled: set DEPLOYMENTS_NAMESPACE (use your own, e.g. "dev-<name>") when running outside Railway');
+    return null;
+  }
   const projectId = env.SCW_DEFAULT_PROJECT_ID || env.SCW_PROJECT_ID || env.SCALEWAY_PROJECT_ID || undefined;
   const maxTotal = Number(env.DEPLOYMENTS_MAX_REPLICAS ?? 6);
   const controller = new DeploymentController({

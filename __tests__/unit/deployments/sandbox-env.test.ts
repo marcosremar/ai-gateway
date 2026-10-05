@@ -1,19 +1,30 @@
 import { describe, expect, it, vi } from 'vitest';
-import { loadSandboxEnv, principalSandboxToken } from '../../../src/config/sandbox-env';
+import { isEnvPinned, loadSandboxEnv, principalSandboxToken } from '../../../src/config/sandbox-env';
 import { proxyIdleTimeoutMs } from '../../../src/deployments';
 
 describe('SANDBOX_TOKEN → dev API', () => {
-  it('fills only missing keys from the first URL that answers, with the token as Bearer', async () => {
+  it('applies the palco keys (palco wins over the env, pinned keys excepted) from the first URL that answers', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response('nope', { status: 502 }))
       .mockResolvedValueOnce(Response.json({ SCW_SECRET_KEY: 'scw', SCW_PROJECT_ID: 'proj', GROQ_API_KEY: 'from-api', bad: 'x' }));
-    const env: Record<string, string | undefined> = { SANDBOX_TOKEN: 'tok', GROQ_API_KEY: 'mine' };
+    const env: Record<string, string | undefined> = { SANDBOX_TOKEN: 'tok', GROQ_API_KEY: 'mine', SCW_PROJECT_ID: 'proj' };
     const r = await loadSandboxEnv(env, { fetchImpl: fetchImpl as unknown as typeof fetch });
     expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe('Bearer tok');
     expect(r.source).toBe('https://ucast.me/api/sandbox-env');
-    expect(r.applied.sort()).toEqual(['SCW_PROJECT_ID', 'SCW_SECRET_KEY']);
-    expect(env).toMatchObject({ SCW_SECRET_KEY: 'scw', GROQ_API_KEY: 'mine' });
+    expect(r.applied.sort()).toEqual(['GROQ_API_KEY', 'SCW_SECRET_KEY']);
+    expect(r.received.sort()).toEqual(['GROQ_API_KEY', 'SCW_PROJECT_ID', 'SCW_SECRET_KEY']);
+    expect(env).toMatchObject({ SCW_SECRET_KEY: 'scw', GROQ_API_KEY: 'from-api' });
     expect(env.bad).toBeUndefined();
+  });
+
+  it('never lets the palco override the token, its aliases, PORT or infra URLs', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(Response.json({ SANDBOX_TOKEN: 'other', PORT: '1', DATABASE_URL: 'x', OPENROUTER_API_KEY: 'or' }));
+    const env: Record<string, string | undefined> = { SANDBOX_TOKEN: 'tok', PORT: '4000', DATABASE_URL: 'pg' };
+    const r = await loadSandboxEnv(env, { fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(env).toMatchObject({ SANDBOX_TOKEN: 'tok', PORT: '4000', DATABASE_URL: 'pg', OPENROUTER_API_KEY: 'or' });
+    expect(r.applied).toEqual(['OPENROUTER_API_KEY']);
+    expect(isEnvPinned('PALCO_PROXY_TOKEN')).toBe(true);
+    expect(isEnvPinned('GROQ_API_KEY')).toBe(false);
   });
 
   it('does nothing without a token and never throws when the API is down', async () => {

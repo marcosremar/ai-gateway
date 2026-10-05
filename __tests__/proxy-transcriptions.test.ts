@@ -91,9 +91,11 @@ describe('handleAudioTranscriptions', () => {
     );
   });
 
-  it('returns 500 when provider throws', async () => {
+  it('returns 503 provider_unavailable naming the provider when it throws', async () => {
     mockSttProvider.transcribe.mockRejectedValueOnce(new Error('stt fail'));
     const res = await handleAudioTranscriptions(makeReq({ model: 'test-model' }), providers);
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
+    expect((res.body as { error: { type: string; message: string } }).error.type).toBe('provider_unavailable');
+    expect((res.body as { error: { message: string } }).error.message).toContain('test failed: stt fail');
   });
 });

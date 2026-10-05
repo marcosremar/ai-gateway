@@ -88,6 +88,22 @@ export class CircuitBreaker {
     return true;
   }
 
+  /**
+   * True while the circuit is open and its cooldown has not elapsed. Unlike `allowRequest()` it never moves the
+   * breaker to half-open, so a caller can filter a chain without consuming the single probe slot.
+   */
+  isOpen(): boolean {
+    return this.state === 'open' && this.now() - (this.openedAt ?? 0) < this.resetTimeoutMs;
+  }
+
+  /**
+   * The request that held the half-open probe slot ended without saying anything about health (e.g. the deployment
+   * is still booting): free the slot so the next request can probe, without changing the state.
+   */
+  releaseProbe(): void {
+    this.probeInFlight = false;
+  }
+
   /** Record a successful request. Closes the circuit if half-open. */
   recordSuccess(): void {
     this.consecutiveFailures = 0;

@@ -108,6 +108,15 @@ export interface STTProvider {
 export type TTSAudioFormat = 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm';
 
 export interface TTSRequest {
+  /** Aborts the upstream call (e.g. the gateway gave up on this provider and moved to the next one). */
+  signal?: AbortSignal;
+  /**
+   * Extra body fields from the client, sent as-is by providers that understand them (self-hosted Qwen3-TTS:
+   * `task_type`, `ref_audio`, `ref_text`, `language`, `stream_format`…). Cloud providers ignore them.
+   */
+  extra?: Record<string, unknown>;
+  /** Ask for the audio as a live stream (first bytes before the whole sentence is synthesized), when supported. */
+  stream?: boolean;
   input: string;
   model: string;
   voice: string;
@@ -121,6 +130,8 @@ export interface TTSRequest {
 export interface TTSResponse {
   audio: Buffer;
   contentType: string;
+  /** Set instead of `audio` (which is then empty) when the provider streams the audio. */
+  stream?: ReadableStream<Uint8Array>;
   raw?: unknown;
 }
 
@@ -165,11 +176,17 @@ export interface ChatRequest {
   responseFormat?: { type: 'json_object' | 'text' };
   stream?: boolean;
   timeoutMs?: number;
+  /** Aborts the upstream call (e.g. the gateway gave up on this provider and moved to the next one). */
+  signal?: AbortSignal;
+  /** Provider-specific body fields sent as-is (e.g. OpenRouter `reasoning: { enabled: false }`). */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface ChatResponse {
   content: string;
   model: string;
+  /** Upstream finish_reason (stop, length, …) — passed through, never rewritten. */
+  finishReason?: string;
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
   raw?: unknown;
 }
