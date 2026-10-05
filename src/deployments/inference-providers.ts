@@ -36,7 +36,7 @@ class DeploymentCallError extends Error {
   readonly skipRetry: boolean;
   constructor(readonly status: number, message: string, readonly gatewayCode: string) {
     super(message);
-    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout'].includes(gatewayCode);
+    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found'].includes(gatewayCode);
   }
 }
 
@@ -176,8 +176,9 @@ function catalogOf(raw: unknown): ReplicaCatalog | null {
  * - Voice cloning (Qwen3-TTS **Base**, the parle `parle-qwen-tts` image): when the client sends a cast voice id and no
  *   `ref_audio`, the voice is looked up in the replica's catalog (`/refs/voices.json`, cached 5 min) and the request
  *   becomes `task_type: "Base"` + `ref_audio` + `ref_text` (+ `language` from the voice, + the catalog's model) — the
- *   same request parle's qwen-speech.ts builds. A replica without catalog (CustomVoice / OpenAI-shaped) gets the
- *   request as sent.
+ *   same request parle's qwen-speech.ts builds, WITHOUT `voice` (vLLM-Omni would read it as a precomputed speaker).
+ *   A voice missing from the catalog is never sent (code `voice_not_found` → fallback): it kills the vLLM-Omni engine.
+ *   A replica without catalog (CustomVoice / OpenAI-shaped) gets the request as sent.
  * - Streaming: with `stream` and wav/pcm, asks for `stream: true, stream_format: "audio"` and returns the body as it
  *   arrives (first bytes before the whole sentence is synthesized).
  */
@@ -215,7 +216,15 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     if (extra.ref_audio === undefined && request.voice) {
       const catalog = await this.voiceCatalog(request.signal);
       const voice = catalog?.voices.find(v => v.id === request.voice);
+      if (catalog && !voice) {
+        // A Base replica with a voice it cannot clone: vLLM-Omni treats the id as a precomputed speaker and its engine
+        // dies on the missing cache entry (measured 2026-10-05: "speaker 'x' was requested without ref_audio" took
+        // stage-0 down for every later request). Never send it — fall back instead.
+        throw new DeploymentCallError(404, `deployment '${this.deployment}': voice '${request.voice}' is not in the replica catalog`, 'voice_not_found');
+      }
       if (voice) {
+        // Cloning request exactly as parle's qwen-speech.ts sends it: no `voice` (it would be read as a speaker name).
+        delete body.voice;
         Object.assign(body, {
           task_type: 'Base', ref_audio: voice.audio, ref_text: voice.text,
           ...(catalog?.model ? { model: catalog.model } : {}),
@@ -223,6 +232,8 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
         });
       }
     }
+    // Explicit references from the client: same rule, `voice` would be read as a speaker name.
+    if (extra.ref_audio !== undefined) delete body.voice;
     Object.assign(body, extra);
     if (extra.language !== undefined) body.language = languageName(extra.language);
     if (request.stream && (format === 'wav' || format === 'pcm') && extra.stream === undefined) {

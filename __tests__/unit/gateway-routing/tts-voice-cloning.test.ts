@@ -74,6 +74,8 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
       model: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base', input: 'Bom dia', task_type: 'Base', language: 'Portuguese',
       ref_audio: 'http://replica/refs/br-f-01.wav', ref_text: 'Olá, eu sou a Ana.', stream: true, stream_format: 'audio',
     });
+    // `voice` next to ref_audio is read by vLLM-Omni as a precomputed speaker (and kills its engine): never sent.
+    expect(r.speechBodies[0]).not.toHaveProperty('voice');
     expect(or.synthesize).not.toHaveBeenCalled();
   });
 
@@ -87,6 +89,7 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     expect(r.speechBodies[0]).toMatchObject({
       task_type: 'Base', ref_audio: 'data:audio/wav;base64,UklGRg==', ref_text: 'Bonjour.', language: 'French', stream_format: 'audio', x_custom: 1,
     });
+    expect(r.speechBodies[0]).not.toHaveProperty('voice');
     // An explicit ref_audio skips the catalog lookup.
     expect(r.fetchImpl.mock.calls.some(([u]) => String(u).endsWith('/refs/voices.json'))).toBe(false);
   });
@@ -111,6 +114,17 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     const sent = or.synthesize.mock.calls[0][0];
     expect(sent).toMatchObject({ model: 'hexgrad/kokoro-82m', voice: 'pm_alex' });
     expect(sent.extra).toBeUndefined();
+  });
+
+  it('a voice missing from a Base catalog is never sent to the replica (it kills vLLM-Omni) → fallback', async () => {
+    const r = replica();
+    const dep = new DeploymentTTSProvider(controller(), 'parle-qwen-tts', { fetchImpl: r.fetchImpl as never });
+    const or = kokoro();
+    const res = await handleAudioSpeech(req({ model: 'parle-tts', input: 'x', voice: 'unknown-voice', fallback_voice: 'pf_dora' }),
+      chain(dep, or), undefined, new CircuitBreakerRegistry());
+    expect(r.speechBodies).toHaveLength(0);
+    expect(res.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:hexgrad/kokoro-82m', 'X-Gateway-Fallback': 'voice_not_found' });
+    expect(JSON.stringify(res.headers)).not.toContain('replica');
   });
 
   it('a JSON answer from the replica (error / SSE) is not audio → fallback', async () => {

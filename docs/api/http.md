@@ -72,8 +72,10 @@ Voices are provider-specific: on `/v1/audio/speech`, `voice` goes to the first p
 
 - `voice` may be a **cast voice id** of the replica's catalog (`GET /refs/voices.json` on the replica, cached 5 min).
   When the client sends no `ref_audio`, the gateway turns it into `task_type: "Base"`, `ref_audio`, `ref_text`,
-  `language` (from the voice) and the catalog's `model` — the request parle's `qwen-speech.ts` builds. A replica
-  without catalog gets the request as sent.
+  `language` (from the voice) and the catalog's `model` — the request parle's `qwen-speech.ts` builds, without
+  `voice` (vLLM-Omni would read it as a precomputed speaker). A voice that is not in the catalog is **never sent**
+  to the replica (vLLM-Omni's engine dies on it): the request falls back with `X-Gateway-Fallback: voice_not_found`.
+  A replica without catalog gets the request as sent.
 - Any other body field (`task_type`, `ref_audio`, `ref_text`, `language` — ISO codes become `Portuguese`/`French`/… —,
   `stream_format`, …) is forwarded intact. The OpenRouter fallback never receives these fields.
 - With `response_format` `wav` or `pcm` the audio is **streamed** from the replica to the client
@@ -113,7 +115,7 @@ Every successful response of the three routes carries (no secrets):
 | Header | Example | Meaning |
 |---|---|---|
 | `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:hexgrad/kokoro-82m` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
-| `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `unreachable`, `empty`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `circuit_open`, `cooldown`, `error` |
+| `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `unreachable`, `empty`, `voice_not_found`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
