@@ -94,14 +94,24 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     expect(r.fetchImpl.mock.calls.some(([u]) => String(u).endsWith('/refs/voices.json'))).toBe(false);
   });
 
-  it('a replica without catalog gets the request as sent (OpenAI / CustomVoice shape); mp3 is not streamed', async () => {
+  it('a CustomVoice replica without catalog gets the request as sent (OpenAI shape), mp3 not in stream mode', async () => {
     const r = replica({ catalog: false });
     const dep = new DeploymentTTSProvider(controller(), 'qwen3-tts', { fetchImpl: r.fetchImpl as never });
-    const res = await handleAudioSpeech(req({ model: 'parle-tts', input: 'Hi', voice: 'vivian', response_format: 'mp3' }),
-      chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
+    const res = await handleAudioSpeech(req({ model: 'qwen-cv', input: 'Hi', voice: 'vivian', response_format: 'mp3' }),
+      { 'qwen-cv': [{ providerId: 'deployment:qwen3-tts', provider: dep, model: 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' }] },
+      undefined, new CircuitBreakerRegistry());
     expect(res.status).toBe(200);
-    expect(res.stream).toBeUndefined();
-    expect(r.speechBodies[0]).toEqual({ model: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base', input: 'Hi', voice: 'vivian', response_format: 'mp3' });
+    expect(r.speechBodies[0]).toEqual({ model: 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice', input: 'Hi', voice: 'vivian', response_format: 'mp3' });
+  });
+
+  it('a Base deployment without catalog never gets voice-only: falls back with catalog_unavailable', async () => {
+    const r = replica({ catalog: false });
+    const dep = new DeploymentTTSProvider(controller(), 'parle-qwen-tts', { fetchImpl: r.fetchImpl as never });
+    const or = kokoro();
+    const res = await handleAudioSpeech(req({ model: 'parle-tts', input: 'Hi', voice: 'br-f-01', fallback_voice: 'pf_dora' }),
+      chain(dep, or), undefined, new CircuitBreakerRegistry());
+    expect(r.speechBodies).toHaveLength(0);
+    expect(res.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:hexgrad/kokoro-82m', 'X-Gateway-Fallback': 'catalog_unavailable' });
   });
 
   it('cold deployment: the OpenRouter fallback speaks with fallback_voice and never sees the Qwen extras', async () => {

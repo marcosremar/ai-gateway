@@ -47,9 +47,27 @@ A provider is skipped without being called when it has no key or its circuit bre
 failures → skipped for 30 s, then one probe request). A provider that fails moves the request to the next one on
 401/402/403/404/429 (a 404 from a data/privacy policy — e.g. OpenRouter ZDR — counts as a provider failure), 5xx,
 timeout, a dropped connection, or an **empty chat answer** (e.g. a reasoning model that spent `max_tokens`
-thinking). Each attempt has a timeout and is aborted when it expires; deployment targets use a short one
-(`DEPLOYMENT_TIMEOUT_MS`, default 10 s) so a stuck replica does not delay the fallback. `finish_reason` is passed
-through as the provider sent it. A **cold deployment** (no ready replica) is not waited
+thinking). `finish_reason` is passed through as the provider sent it.
+
+### Time budget (numbers for the client's deadlines)
+
+| Knob | Default | Env |
+|---|---|---|
+| Deployment, time to **first byte** — STT / chat / TTS | 4 s / 4 s / 3 s | `DEPLOYMENT_STT_TIMEOUT_MS`, `DEPLOYMENT_CHAT_TIMEOUT_MS`, `DEPLOYMENT_TTS_TIMEOUT_MS` (or `DEPLOYMENT_TIMEOUT_MS` for all) |
+| Hedge: fallback starts in parallel when the deployment has not answered | 1.5 s | `DEPLOYMENT_HEDGE_MS` (`0` = off) |
+| Whole stage (deployment + fallbacks + hedge) | 8 s | `GATEWAY_STT_BUDGET_MS`, `GATEWAY_CHAT_BUDGET_MS`, `GATEWAY_TTS_BUDGET_MS` |
+
+Every attempt is aborted when its time is up (a replica lease is released at once), and no attempt outlives the
+stage budget: the answer — or the `503` — arrives within **8 s** per stage. Set the client deadlines above that
+with margin (parle: TTS 15 s, chat 12 s are fine; ≥ 10 s recommended). With hedging, a slow or recovering
+deployment costs at most ~1.5 s before the fallback is on its way; the first answer wins and the other call is
+aborted (`X-Gateway-Fallback: slow`). Hedging can bill the fallback for requests the deployment would have served a
+bit later — raise `DEPLOYMENT_HEDGE_MS` to trade latency for cost. For TTS, "first byte" of a non-streamed format
+(`mp3`) is the whole synthesis on vLLM-Omni; ask for `wav` to get the audio streamed.
+
+Circuit breaker: 5 consecutive real failures open the circuit for 30 s; the next request then probes the deployment,
+with the fallback hedged in, so the probe never makes the client wait the full timeout. `cold` / `paused` /
+`voice_not_found` / `catalog_unavailable` never count: as soon as the replica is ready, traffic goes back to it. A **cold deployment** (no ready replica) is not waited
 for: the gateway starts scaling it up and answers from the fallback in the same call; once a replica is ready,
 traffic returns to it. A real client error (e.g. `400` invalid request) is returned as is.
 
@@ -75,7 +93,10 @@ Voices are provider-specific: on `/v1/audio/speech`, `voice` goes to the first p
   `language` (from the voice) and the catalog's `model` — the request parle's `qwen-speech.ts` builds, without
   `voice` (vLLM-Omni would read it as a precomputed speaker). A voice that is not in the catalog is **never sent**
   to the replica (vLLM-Omni's engine dies on it): the request falls back with `X-Gateway-Fallback: voice_not_found`.
-  A replica without catalog gets the request as sent.
+  A Base deployment (model name ending in `-Base`, or a replica that ever showed a catalog) whose catalog is
+  unavailable (404 while its refs server starts, error) is not sent `voice` either: the request falls back with
+  `X-Gateway-Fallback: catalog_unavailable`. A missing catalog is trusted for 15 s only; a catalog for 5 min.
+  A CustomVoice / OpenAI-shaped replica without catalog gets the request as sent.
 - Any other body field (`task_type`, `ref_audio`, `ref_text`, `language` — ISO codes become `Portuguese`/`French`/… —,
   `stream_format`, …) is forwarded intact. The OpenRouter fallback never receives these fields.
 - With `response_format` `wav` or `pcm` the audio is **streamed** from the replica to the client
@@ -88,8 +109,9 @@ Voices are provider-specific: on `/v1/audio/speech`, `voice` goes to the first p
 Built-in cloud models keep their own chains: Groq chat models fall back to the same weights on OpenRouter
 (`llama-3.3-70b-versatile` → `meta-llama/llama-3.3-70b-instruct`, `openai/gpt-oss-120b` → same id, …), GLM models
 go Z.AI → OpenRouter `z-ai/<id>`, `whisper-large-v3(-turbo)` goes Groq → OpenRouter → OpenAI → Fireworks →
-Deepgram, Orpheus TTS is Groq only. Any other `org/model` id goes to OpenRouter as-is (only while its key is valid),
-followed by the generic chat fallback. PlayAI TTS was retired by Groq and is no longer offered.
+Deepgram, Orpheus TTS is Groq only. Any other `org/model` id goes to OpenRouter as-is,
+followed by the generic chat fallback; without a usable OpenRouter key it answers `503 provider_unavailable`
+naming the key (not `404`). PlayAI TTS was retired by Groq and is no longer offered.
 
 ### Changing the map — `MODEL_ROUTES`
 
@@ -115,7 +137,7 @@ Every successful response of the three routes carries (no secrets):
 | Header | Example | Meaning |
 |---|---|---|
 | `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:hexgrad/kokoro-82m` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
-| `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `unreachable`, `empty`, `voice_not_found`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `circuit_open`, `cooldown`, `error` |
+| `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.

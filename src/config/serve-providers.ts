@@ -69,8 +69,20 @@ const TTS_CHAINS: Record<string, Array<[string, string]>> = {
 /** OpenRouter: answer without a reasoning phase (ignored by models that do not reason). */
 const NO_REASONING = { reasoning: { enabled: false } };
 
-/** Default per-attempt timeout of a deployment target before falling back (DEPLOYMENT_TIMEOUT_MS overrides). */
-export const DEPLOYMENT_TIMEOUT_MS = 10_000;
+/**
+ * Time a deployment target gets to send its FIRST BYTE before the chain moves on, per stage. Overrides:
+ * DEPLOYMENT_<STAGE>_TIMEOUT_MS (STT, CHAT, TTS), else DEPLOYMENT_TIMEOUT_MS for all stages.
+ * Sized so deployment + fallback fit the stage budget (8 s, `GATEWAY_<STAGE>_BUDGET_MS`) below parle's deadlines.
+ */
+export const DEPLOYMENT_FIRST_BYTE_MS: Record<Stage, number> = { stt: 4_000, chat: 4_000, tts: 3_000 };
+
+/** After this long without an answer from a deployment, the fallback starts in parallel (DEPLOYMENT_HEDGE_MS; 0 = off). */
+export const DEPLOYMENT_HEDGE_MS = 1_500;
+
+function positiveMs(value: string | undefined): number | undefined {
+  const n = Number(value);
+  return value !== undefined && value.trim() !== '' && Number.isFinite(n) && n >= 0 ? n : undefined;
+}
 
 export function defaultAliasRoutes(env: Record<string, string | undefined>): Record<Stage, Record<string, RouteEntrySpec[]>> {
   const speech = env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech';
@@ -210,8 +222,10 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
     return notConfiguredReason(providerId);
   };
 
-  const configuredTimeout = Number(opts.env?.DEPLOYMENT_TIMEOUT_MS);
-  const deploymentTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : DEPLOYMENT_TIMEOUT_MS;
+  const env = opts.env ?? {};
+  const deploymentTimeoutMs = (stage: Stage) =>
+    positiveMs(env[`DEPLOYMENT_${stage.toUpperCase()}_TIMEOUT_MS`]) || positiveMs(env.DEPLOYMENT_TIMEOUT_MS) || DEPLOYMENT_FIRST_BYTE_MS[stage];
+  const hedgeMs = positiveMs(env.DEPLOYMENT_HEDGE_MS) ?? DEPLOYMENT_HEDGE_MS;
   const extras = (e: RouteEntrySpec) => ({ ...(e.voice ? { voice: e.voice } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}) });
 
   /** Resolves one entry to a mounted target, or a reason why it cannot be mounted. */
@@ -223,7 +237,10 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       if (!provider) return `${label}: deployments are disabled on this gateway (SCW_SECRET_KEY is not set)`;
       // Mounted even if the deployment does not exist yet: it may be created later through /v1/deployments.
       // Until then selectTargets skips it per request and /v1/models does not list a model served only by it.
-      return { ...extras(e), providerId: label, provider, model: e.model ?? gatewayModel, timeoutMs: deploymentTimeoutMs };
+      return {
+        ...extras(e), providerId: label, provider, model: e.model ?? gatewayModel,
+        timeoutMs: deploymentTimeoutMs(stage), ...(hedgeMs > 0 ? { hedgeAfterMs: hedgeMs } : {}),
+      };
     }
     const provider = (instances[stage] as Record<string, StageProvider<S>>)[e.provider];
     if (!provider) return `${e.provider}: no ${stage} provider with this id`;
@@ -286,11 +303,14 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
     .map(t => ({ providerId: t.providerId, model: t.model ?? '', provider: t.provider }));
 
   const openrouterLLM = instances.chat.openrouter;
-  const chatDynamicRoutes: ChatDynamicRoute[] = openrouterUsable && openrouterLLM ? [{
+  // Mounted even without a usable key: an `org/model` id is then a known-but-unavailable model (503 naming the key),
+  // not an unknown one (404).
+  const chatDynamicRoutes: ChatDynamicRoute[] = openrouterLLM ? [{
     providerId: 'openrouter',
     provider: openrouterLLM,
     acceptsModel: (model) => OPENROUTER_PASSTHROUGH.test(model),
     upstreamModel: (model) => (model.startsWith('openrouter/') ? model.slice('openrouter/'.length) : model),
+    ...(openrouterUsable ? {} : { unavailableReason: reasonFor('openrouter') }),
   }] : [];
   const dynamicModelCatalogs: DynamicModelCatalog[] = openrouter.state === 'valid' && opts.listOpenRouterModels
     ? [{ providerId: 'openrouter', listModels: opts.listOpenRouterModels }] : [];
@@ -308,7 +328,7 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
     },
     summary: {
       openrouterKey: openrouter.state,
-      openrouterRouting: chatDynamicRoutes.length ? 'dynamic-passthrough' : 'disabled',
+      openrouterRouting: openrouterUsable ? 'dynamic-passthrough' : 'disabled',
       chatModels: Object.keys(chatRoutes),
       sttModels: Object.keys(stt),
       ttsModels: Object.keys(tts),

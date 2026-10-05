@@ -16,7 +16,7 @@ import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
 import {
-  errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest,
+  errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
 } from '../provider-routing';
 
 const sttCooldownTracker = new CooldownTracker();
@@ -132,7 +132,7 @@ export async function handleAudioTranscriptions(
         prompt: body.prompt as string | undefined,
         responseFormat: (body.response_format as string) as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt' | undefined,
       }),
-      { stage: 'stt', timeoutMs: 15_000, retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
+      { stage: 'stt', timeoutMs: 15_000, budgetMs: stageBudgetMs('stt'), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
     // Cache the result for future identical requests

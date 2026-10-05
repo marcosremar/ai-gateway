@@ -36,7 +36,7 @@ class DeploymentCallError extends Error {
   readonly skipRetry: boolean;
   constructor(readonly status: number, message: string, readonly gatewayCode: string) {
     super(message);
-    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found'].includes(gatewayCode);
+    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable'].includes(gatewayCode);
   }
 }
 
@@ -148,6 +148,7 @@ export interface ReplicaVoice { id: string; lang?: string; audio: string; text: 
 interface ReplicaCatalog { model?: string; format?: string; voices: ReplicaVoice[] }
 
 const CATALOG_TTL_MS = 5 * 60_000;
+const NO_CATALOG_TTL_MS = 15_000;
 
 /** Qwen3-TTS takes the language by name; clients may send an ISO code ("pt", "pt-BR") instead. */
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -183,22 +184,42 @@ function catalogOf(raw: unknown): ReplicaCatalog | null {
  *   arrives (first bytes before the whole sentence is synthesized).
  */
 export class DeploymentTTSProvider extends DeploymentProviderBase implements TTSProvider {
-  private catalog: { at: number; value: ReplicaCatalog | null } | null = null;
+  /** Last catalog seen (positive results only are kept for CATALOG_TTL_MS). */
+  private catalog: { at: number; value: ReplicaCatalog } | null = null;
+  /** A missing catalog is only trusted briefly: a 404 may just mean the replica's refs server is still starting. */
+  private noCatalogUntil = 0;
+  /** Set once this deployment showed a voice catalog: it is a Base (cloning) server for good. */
+  private cloning = false;
 
-  getVoices(): VoiceInfo[] { return (this.catalog?.value?.voices ?? []).map(v => ({ id: v.id, name: v.id })); }
+  getVoices(): VoiceInfo[] { return (this.catalog?.value.voices ?? []).map(v => ({ id: v.id, name: v.id })); }
 
-  /** The replica's voice catalog, or null when it has none (404 / not JSON). Errors of the call itself propagate. */
+  /** True when the target model is a Qwen3-TTS Base (cloning) model, or the replica already showed a catalog. */
+  private isCloningModel(model: string): boolean {
+    return this.cloning || /(^|[-_/])base($|[-_.])/i.test(model);
+  }
+
+  /**
+   * The replica's voice catalog, or null when the replica answered that it has none (404 / not JSON). A positive
+   * answer is cached for CATALOG_TTL_MS; a negative one only for NO_CATALOG_TTL_MS, never as a long-lived fact.
+   * Errors of the call itself (cold, unreachable, timeout) propagate and are not cached at all.
+   */
   private async voiceCatalog(signal?: AbortSignal): Promise<ReplicaCatalog | null> {
     if (this.catalog && Date.now() - this.catalog.at < CATALOG_TTL_MS) return this.catalog.value;
+    if (Date.now() < this.noCatalogUntil) return null;
     let value: ReplicaCatalog | null = null;
     try {
       const res = await this.call('/refs/voices.json', { method: 'GET' }, signal);
       value = (res.headers.get('content-type') ?? '').includes('json') ? catalogOf(await res.json().catch(() => null)) : null;
     } catch (err) {
-      // No catalog on this replica (HTTP 404 → status 502 'error' from callReplica): plain OpenAI-shaped TTS.
+      // The replica answered an HTTP error for the catalog (callReplica code 'error'): treated as "no catalog" below.
       if (!(err instanceof DeploymentCallError) || err.gatewayCode !== 'error') throw err;
     }
-    this.catalog = { at: Date.now(), value };
+    if (value) {
+      this.catalog = { at: Date.now(), value };
+      this.cloning = true;
+    } else {
+      this.noCatalogUntil = Date.now() + NO_CATALOG_TTL_MS;
+    }
     return value;
   }
 
@@ -215,6 +236,10 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     };
     if (extra.ref_audio === undefined && request.voice) {
       const catalog = await this.voiceCatalog(request.signal);
+      if (!catalog && this.isCloningModel(request.model)) {
+        // A Base server must never get `voice` without `ref_audio` (its engine dies on it): no catalog → fall back.
+        throw new DeploymentCallError(503, `deployment '${this.deployment}': voice catalog unavailable, cannot clone '${request.voice}'`, 'catalog_unavailable');
+      }
       const voice = catalog?.voices.find(v => v.id === request.voice);
       if (catalog && !voice) {
         // A Base replica with a voice it cannot clone: vLLM-Omni treats the id as a precomputed speaker and its engine
@@ -256,11 +281,13 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     return res;
   }
 
+  /**
+   * Resolves as soon as the replica sends its response headers (= first byte), returning the body as a stream: the
+   * gateway's per-attempt timeout then measures time-to-first-byte, not the whole synthesis.
+   */
   async synthesize(request: TTSRequest): Promise<TTSResponse> {
     const res = await this.request(request);
-    const contentType = res.headers.get('content-type') ?? 'audio/wav';
-    if (request.stream) return { audio: Buffer.alloc(0), stream: res.body!, contentType };
-    return { audio: Buffer.from(await res.arrayBuffer()), contentType };
+    return { audio: Buffer.alloc(0), stream: res.body!, contentType: res.headers.get('content-type') ?? 'audio/wav' };
   }
 
   async synthesizeStream(request: TTSRequest): Promise<ReadableStream<Uint8Array>> {

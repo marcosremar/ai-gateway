@@ -25,7 +25,7 @@ describe('buildServeProviders — only configured providers are mounted', () => 
     const { providers } = buildServeProviders({ instances: instances(), openrouter: { state: 'missing' } });
     expect(providers.chatRoutes).toEqual({});
     expect(providers.stt).toEqual({});
-    expect(providers.chatDynamicRoutes).toBeUndefined();
+    expect(providers.chatDynamicRoutes?.[0].unavailableReason).toMatch(/OPENROUTER_API_KEY/);
     expect(providers.unavailable?.chat?.['llama-3.3-70b-versatile']).toEqual(['groq: GROQ_API_KEY is not set', 'openrouter: OPENROUTER_API_KEY is not set']);
     expect(providers.unavailable?.stt?.['whisper-large-v3']).toContain('groq: GROQ_API_KEY is not set');
     expect((await handleModelsWithDynamic(providers)).body).toEqual({ object: 'list', data: [] });
@@ -46,7 +46,7 @@ describe('buildServeProviders — only configured providers are mounted', () => 
   it('a rejected OpenRouter key is not mounted (no dynamic route, no catalog) and the reason says so', () => {
     keys.openrouter = true;
     const { providers } = buildServeProviders({ instances: instances(), openrouter: { state: 'invalid', detail: 'HTTP 401' } });
-    expect(providers.chatDynamicRoutes).toBeUndefined();
+    expect(providers.chatDynamicRoutes?.[0].unavailableReason).toMatch(/OPENROUTER_API_KEY/);
     expect(providers.dynamicModelCatalogs).toBeUndefined();
     expect(providers.unavailable?.chat?.['qwen/qwen3-32b']).toContain('openrouter: OPENROUTER_API_KEY was rejected by OpenRouter (HTTP 401)');
   });

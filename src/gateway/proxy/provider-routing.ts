@@ -10,9 +10,12 @@
  */
 
 import { CircuitBreakerRegistry } from '../providers/cloud/circuit-breaker';
-import { isTimeoutError, withProviderFallback, type CooldownTracker, type FallbackEntry } from '../providers/cloud/fallback';
+import { isTimeoutError, type CooldownTracker, type FallbackEntry } from '../providers/cloud/fallback';
+import { createLogger } from '../../logger';
 import { entryHealthKey } from '../providers/cloud/entry-key';
 import type { ProxyResponse } from './types';
+
+const log = createLogger('provider-routing');
 
 /** One provider able to serve a gateway model. */
 export interface RouteTarget<P> {
@@ -30,6 +33,10 @@ export interface RouteTarget<P> {
   timeoutMs?: number;
   /** Chat only: provider-specific body fields (e.g. OpenRouter `reasoning: { enabled: false }`). */
   extraBody?: Record<string, unknown>;
+  /** Start the next target in parallel when this one has not answered after this many ms (see `runTargets`). */
+  hedgeAfterMs?: number;
+  /** Known to be unusable (e.g. OpenRouter key rejected): skipped with this reason, never called. */
+  unavailableReason?: string;
 }
 
 /** Codes (see `failureCode`) of targets left behind, keyed by the target object (two targets may share a provider). */
@@ -78,6 +85,11 @@ export function selectTargets<P extends Configurable>(
   const skipped: string[] = [];
   const codes: FailureCodes = new Map();
   for (const target of targets) {
+    if (target.unavailableReason) {
+      skipped.push(target.unavailableReason);
+      codes.set(target, 'not_configured');
+      continue;
+    }
     if (!target.provider.isConfigured()) {
       skipped.push(notConfiguredReason(target.providerId));
       codes.set(target, 'not_configured');
@@ -179,7 +191,13 @@ export function isClientErrorStatus(status: number | null): boolean {
 
 export interface RunTargetsOptions {
   stage: string;
+  /** Per-attempt timeout for targets without their own `timeoutMs`. */
   timeoutMs?: number;
+  /**
+   * Total time for the whole chain (primary + fallbacks + hedges). Every attempt is capped by what is left, so the
+   * answer (or the 503) arrives before the client's own deadline.
+   */
+  budgetMs?: number;
   retriesPerProvider?: number;
   cooldownTracker?: CooldownTracker;
   breakers?: CircuitBreakerRegistry;
@@ -196,18 +214,41 @@ class AttemptError extends Error {
 }
 
 /**
+ * Failures that say nothing about the provider's health: a deployment still booting (`cold`), paused, or a request it
+ * must not receive (`voice_not_found`, `catalog_unavailable`). They never open the circuit nor start a cooldown, so
+ * traffic goes back to the deployment as soon as its replica is ready.
+ */
+const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable']);
+
+/** Default total time per stage (deployment + fallbacks), under parle's deadlines (TTS 15 s, chat 12 s). */
+export const DEFAULT_STAGE_BUDGET_MS = 8_000;
+
+/** Stage budget: `GATEWAY_<STAGE>_BUDGET_MS` (STT, CHAT, TTS), default 8 s. */
+export function stageBudgetMs(stage: 'stt' | 'chat' | 'tts', env: Record<string, string | undefined> = process.env): number {
+  const n = Number(env[`GATEWAY_${stage.toUpperCase()}_BUDGET_MS`]);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_STAGE_BUDGET_MS;
+}
+
+/** True for failure codes that must not open a circuit or start a cooldown (see NEUTRAL_CODES). */
+export function isNeutralFailure(code: string): boolean {
+  return NEUTRAL_CODES.has(code);
+}
+
+const COOLDOWN_ALLOWED_FAILS = 3;
+const COOLDOWN_MS = 15_000;
+
+/**
  * Runs one attempt with its own timeout: on expiry the call is ABORTED (the signal reaches the provider's fetch, so
  * a replica lease is released at once) and the attempt fails with code `timeout`.
  */
-async function attempt<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: number | undefined, label: string): Promise<T> {
-  const controller = new AbortController();
-  if (!timeoutMs) return fn(controller.signal);
+async function attempt<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: number | undefined, label: string, controller: AbortController): Promise<T> {
+  if (!timeoutMs || !Number.isFinite(timeoutMs)) return fn(controller.signal);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new AttemptError(504, `${label} timed out after ${timeoutMs}ms`, 'timeout'));
-    }, timeoutMs);
+      reject(new AttemptError(504, `${label} timed out after ${Math.round(timeoutMs)}ms`, 'timeout'));
+    }, Math.max(1, timeoutMs));
   });
   try {
     return await Promise.race([fn(controller.signal), expired]);
@@ -216,56 +257,148 @@ async function attempt<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: nu
   }
 }
 
+function retryAfterOf(err: unknown): number | undefined {
+  const headers = (err as { headers?: Record<string, string> } | null)?.headers;
+  const raw = headers?.['retry-after'] ?? headers?.['Retry-After'];
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 /**
- * Calls `fn` on each target in order until one succeeds. Throws `ProviderUnavailableError` (one reason per
- * provider tried) when all fail, or the provider's own error when it is a client error (bad request).
- * Targets are tracked by position, so two targets of the same provider (e.g. OpenRouter with two models) stay apart.
+ * Calls `fn` on the targets in order until one succeeds. Throws `ProviderUnavailableError` (one reason per target)
+ * when all fail, or the provider's own error when it is a client error (bad request).
+ *
+ * - Targets are tracked by position (two targets of the same provider stay apart).
+ * - Each attempt has a timeout (target's own, else `timeoutMs`), capped by the stage budget, and is aborted on expiry.
+ * - **Hedging:** a target with `hedgeAfterMs` that has not answered by then starts the next target in parallel; the
+ *   first success wins and the other call is aborted. A slow or half-open (recovering) deployment therefore costs
+ *   the client at most `hedgeAfterMs` before the fallback is on its way.
+ * - Circuit breakers and cooldowns are fed by real failures only (`NEUTRAL_CODES` excluded).
  */
-export async function runTargets<P, T>(
+export function runTargets<P, T>(
   targets: Array<RouteTarget<P>>,
   fn: (target: RouteTarget<P>, signal: AbortSignal) => Promise<T>,
   opts: RunTargetsOptions,
 ): Promise<{ result: T; target: RouteTarget<P>; codes: FailureCodes }> {
-  const entries: FallbackEntry[] = targets.map((t) => ({ provider: t.providerId, model: t.model }));
-  const indexOf = new Map(entries.map((e, i) => [e, i]));
+  const breakers = opts.breakers ?? proxyCircuitBreakers;
+  const cooldown = opts.cooldownTracker;
+  const retries = opts.retriesPerProvider ?? 0;
+  const deadline = opts.budgetMs ? Date.now() + opts.budgetMs : Infinity;
+  const entryOf = (t: RouteTarget<P>): FallbackEntry => ({ provider: t.providerId, model: t.model });
   const failures = new Map<number, string>();
   const codes: FailureCodes = new Map();
-  let winner = -1;
-  try {
-    const { result } = await withProviderFallback(
-      entries,
-      async (entry) => {
-        const i = indexOf.get(entry)!;
-        const target = targets[i];
-        try {
-          const result = await attempt((signal) => fn(target, signal), target.timeoutMs ?? opts.timeoutMs, target.providerId);
+  const controllers = new Set<AbortController>();
+  const inFlight = new Map<AbortController, RouteTarget<P>>();
+  const ignoreCooldown = !!cooldown && targets.every((t) => cooldown.isCoolingDown(entryOf(t)));
+
+  return new Promise((resolve, reject) => {
+    let next = 0;
+    let running = 0;
+    let done = false;
+    let retryAfterSec: number | undefined;
+
+    const fail = (clientError?: unknown) => {
+      if (done) return;
+      done = true;
+      for (const c of controllers) c.abort();
+      if (clientError) { reject(clientError); return; }
+      const reasons = targets.map((t, i) => failures.get(i) ?? `${t.providerId}: not tried (stage time budget used up)`);
+      reject(new ProviderUnavailableError(reasons, retryAfterSec));
+    };
+
+    /** Starts the next eligible target; false when none is left. */
+    const launchNext = (): boolean => {
+      while (next < targets.length) {
+        const i = next++;
+        const t = targets[i];
+        if (Date.now() >= deadline) { failures.set(i, `${t.providerId}: not tried (stage time budget used up)`); codes.set(t, 'timeout'); continue; }
+        if (cooldown && !ignoreCooldown && cooldown.isCoolingDown(entryOf(t))) {
+          failures.set(i, `${t.providerId}: cooling down after repeated failures`);
+          codes.set(t, 'cooldown');
+          continue;
+        }
+        if (!breakers.get(entryHealthKey({ provider: t.providerId })).allowRequest()) {
+          failures.set(i, `${t.providerId}: circuit open after repeated failures (retrying in <30 s)`);
+          codes.set(t, 'circuit_open');
+          continue;
+        }
+        run(i, t, 0);
+        return true;
+      }
+      return false;
+    };
+
+    const run = (i: number, t: RouteTarget<P>, retry: number) => {
+      running++;
+      const controller = new AbortController();
+      controllers.add(controller);
+      inFlight.set(controller, t);
+      const breaker = breakers.get(entryHealthKey({ provider: t.providerId }));
+      let successorLaunched = false;
+      const hedge = t.hedgeAfterMs && i + 1 < targets.length
+        ? setTimeout(() => { if (!done && !successorLaunched) { successorLaunched = true; launchNext(); } }, t.hedgeAfterMs)
+        : null;
+      const timeout = Math.min(t.timeoutMs ?? opts.timeoutMs ?? Infinity, deadline - Date.now());
+
+      attempt((signal) => fn(t, signal), timeout, t.providerId, controller)
+        .then((result) => {
           const invalid = opts.validate?.(result);
           if (invalid) throw new AttemptError(502, invalid, 'empty');
-          winner = i;
           return result;
-        } catch (err) {
-          failures.set(i, describeFailure(target.providerId, err));
-          codes.set(target, failureCode(err));
-          throw err;
-        }
-      },
-      {
-        logPrefix: `[proxy:${opts.stage}]`,
-        retriesPerProvider: opts.retriesPerProvider ?? 0,
-        retryBaseDelayMs: 200,
-        ...(opts.cooldownTracker ? { cooldownTracker: opts.cooldownTracker } : {}),
-        circuitBreakers: opts.breakers ?? proxyCircuitBreakers,
-      },
-    );
-    return { result, target: targets[winner], codes };
-  } catch (err) {
-    if (isClientErrorStatus(statusOf(err))) throw err;
-    const reasons = targets.map((t, i) => failures.get(i) ?? `${t.providerId}: skipped (cooling down or circuit open)`);
-    if (failures.size === 0 && err instanceof Error && !/fallback chain/.test(err.message)) {
-      reasons.push(describeFailure('gateway', err));
-    }
-    throw new ProviderUnavailableError(reasons, (err as { retryAfterSec?: number })?.retryAfterSec);
-  }
+        })
+        .then((result) => {
+          if (hedge) clearTimeout(hedge);
+          running--;
+          controllers.delete(controller);
+          inFlight.delete(controller);
+          if (done) return;
+          done = true;
+          // Targets still running lost a hedge race: they were slower than this one.
+          for (const other of inFlight.values()) if (!codes.has(other)) codes.set(other, 'slow');
+          breaker.recordSuccess();
+          cooldown?.recordSuccess(entryOf(t));
+          // The other in-flight call lost the race: abort it (releases its replica lease / upstream request).
+          for (const c of controllers) c.abort();
+          resolve({ result, target: t, codes });
+        })
+        .catch((err: unknown) => {
+          if (hedge) clearTimeout(hedge);
+          running--;
+          controllers.delete(controller);
+          inFlight.delete(controller);
+          if (done) {
+            // Aborted because another target won. A recovery probe that lost is a failed probe (keeps the circuit
+            // open); otherwise a hedged loser says nothing about health.
+            if (breaker.getStats().state === 'half_open') breaker.recordFailure();
+            return;
+          }
+          const status = statusOf(err);
+          if (isClientErrorStatus(status)) { fail(err); return; }
+          const code = failureCode(err);
+          if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
+          else {
+            breaker.recordFailure();
+            if (cooldown && !ignoreCooldown) cooldown.recordFailure(entryOf(t), COOLDOWN_ALLOWED_FAILS, COOLDOWN_MS);
+          }
+          if (status === 429) retryAfterSec = retryAfterOf(err) ?? retryAfterSec;
+          const retryable = status !== null && status >= 500 && !(err as { skipRetry?: boolean }).skipRetry;
+          if (retryable && retry < retries && deadline - Date.now() > 300) {
+            setTimeout(() => { if (!done) run(i, t, retry + 1); }, 200);
+            return;
+          }
+          failures.set(i, describeFailure(t.providerId, err));
+          codes.set(t, code);
+          log.warn(`[proxy:${opts.stage}] ${describeFailure(t.providerId, err)}`);
+          if (!successorLaunched) {
+            successorLaunched = true;
+            if (launchNext()) return;
+          }
+          if (running === 0 && !launchNext()) fail();
+        });
+    };
+
+    if (!launchNext()) fail();
+  });
 }
 
 /**

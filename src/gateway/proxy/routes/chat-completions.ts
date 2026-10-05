@@ -17,7 +17,7 @@ import { CooldownTracker } from '../../providers/cloud/fallback';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
 import {
   describeFailure, errorResponse, failureCode, type FailureCodes, isClientErrorStatus, originHeaders, proxyCircuitBreakers, ProviderUnavailableError, providerUnavailableResponse,
-  redactSecrets, runTargets, selectTargets,
+  redactSecrets, runTargets, selectTargets, stageBudgetMs, isNeutralFailure,
 } from '../provider-routing';
 import { RequestCoalescer } from '../middleware/request-coalescer';
 import { ProviderSemaphores } from '../middleware/semaphore';
@@ -80,7 +80,10 @@ export async function handleChatCompletions(
   if (max_tokens !== undefined && (max_tokens < 1 || max_tokens > 128000)) {
     return { status: 400, body: { error: { message: 'max_tokens must be between 1 and 128000', type: 'invalid_request_error' } } };
   }
-  const requestTimeoutMs = messagesContainImage(messages as unknown[]) ? 90_000 : 15_000;
+  const hasImage = messagesContainImage(messages as unknown[]);
+  const requestTimeoutMs = hasImage ? 90_000 : 15_000;
+  // Whole chain (deployment + fallbacks) must answer before the client gives up; vision requests get their own time.
+  const budgetMs = hasImage ? requestTimeoutMs : stageBudgetMs('chat');
 
   // ── beforeRequest guardrails ───────────────────────────────────────────────
   if (guardrails) {
@@ -137,7 +140,7 @@ export async function handleChatCompletions(
     const includeUsage = stream_options !== undefined && (stream_options as Record<string, unknown>).include_usage === true;
     let opened: OpenedStream;
     try {
-      opened = await openStream(usable, chatOpts, breakers);
+      opened = await openStream(usable, chatOpts, breakers, budgetMs);
     } catch (err) {
       log.error(`All providers failed (stream) for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
       return errorResponse(withSkipped(err, skipped), 'chat', model);
@@ -218,7 +221,7 @@ export async function handleChatCompletions(
           // Each target carries its own upstream model — the same gateway model has different ids per provider.
           (t, signal) => t.provider.chat({ ...chatOpts, model: t.model ?? model, signal, ...(t.extraBody ? { extraBody: t.extraBody } : {}) }),
           {
-            stage: 'llm', timeoutMs: requestTimeoutMs, retriesPerProvider: 1,
+            stage: 'llm', timeoutMs: requestTimeoutMs, budgetMs, retriesPerProvider: 1,
             cooldownTracker: routing.cooldownTracker ?? llmCooldownTracker, breakers,
             // An empty answer (e.g. a reasoning model that spent max_tokens thinking) is a failure: try the next one.
             validate: (r) => (emptyAnswer(r as ChatResponse) ? `empty answer (finish_reason: ${(r as ChatResponse).finishReason ?? 'unknown'})` : null),
@@ -347,7 +350,10 @@ function buildChain(
     push(direct.providerId, requestedModel, direct);
   } else {
     const route = (dynamicRoutes ?? []).find(r => r.acceptsModel(requestedModel));
-    if (route) push(route.providerId, route.upstreamModel?.(requestedModel) ?? requestedModel, route.provider);
+    if (route) {
+      push(route.providerId, route.upstreamModel?.(requestedModel) ?? requestedModel, route.provider,
+        route.unavailableReason ? { unavailableReason: route.unavailableReason } : undefined);
+    }
   }
   if (chain.length === 0) return chain;
 
@@ -388,14 +394,20 @@ function withStreamTimeout<T>(p: Promise<T>, ms = STREAM_TIMEOUT_MS, onTimeout?:
  * answer…) is skipped and its call aborted, so the response headers can already say who answers. Throws
  * `ProviderUnavailableError` when none does, or a client error.
  */
-async function openStream(targets: Array<RouteTarget<LLMProvider>>, opts: ChatRequest, breakers: CircuitBreakerRegistry): Promise<OpenedStream> {
+async function openStream(
+  targets: Array<RouteTarget<LLMProvider>>, opts: ChatRequest, breakers: CircuitBreakerRegistry, budgetMs: number,
+): Promise<OpenedStream> {
   const failures: string[] = [];
   const codes: FailureCodes = new Map();
+  const deadline = Date.now() + budgetMs;
   for (const target of targets) {
     const breaker = breakers.get(target.providerId);
+    if (Date.now() >= deadline) { failures.push(`${target.providerId}: not tried (stage time budget used up)`); codes.set(target, 'timeout'); continue; }
+    if (!breaker.allowRequest()) { failures.push(`${target.providerId}: circuit open after repeated failures`); codes.set(target, 'circuit_open'); continue; }
     const abort = new AbortController();
     const request: ChatRequest = { ...opts, model: target.model ?? opts.model, signal: abort.signal, ...(target.extraBody ? { extraBody: target.extraBody } : {}) };
-    const firstWaitMs = target.timeoutMs ?? STREAM_TIMEOUT_MS;
+    // Time to the first token: the target's own (deployments: short), capped by what is left of the stage budget.
+    const firstWaitMs = Math.max(1, Math.min(target.timeoutMs ?? STREAM_TIMEOUT_MS, deadline - Date.now()));
     try {
       if (!target.provider.chatStream) {
         const full = await withStreamTimeout(target.provider.chat(request), firstWaitMs, () => abort.abort());
@@ -421,9 +433,10 @@ async function openStream(targets: Array<RouteTarget<LLMProvider>>, opts: ChatRe
       abort.abort();
       const status = (err as { status?: unknown })?.status;
       if (isClientErrorStatus(typeof status === 'number' ? status : null)) throw err;
-      breaker.recordFailure();
+      const code = failureCode(err);
+      if (isNeutralFailure(code)) breaker.releaseProbe(); else breaker.recordFailure();
       failures.push(describeFailure(target.providerId, err));
-      codes.set(target, failureCode(err));
+      codes.set(target, code);
       log.warn(`stream: ${describeFailure(target.providerId, err)} → next provider`);
     }
   }

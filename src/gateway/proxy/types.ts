@@ -43,6 +43,8 @@ export interface ChatDynamicRoute {
   acceptsModel: (model: string) => boolean;
   /** Optional mapping from gateway model alias to upstream provider model. */
   upstreamModel?: (model: string) => string;
+  /** Set when the provider cannot be used (e.g. key rejected): matching models answer 503 with this reason. */
+  unavailableReason?: string;
 }
 
 export interface DynamicModelCatalog {
