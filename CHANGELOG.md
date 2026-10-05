@@ -12,6 +12,19 @@ on release via `bunx changeset version`.
 
 ### Added
 
+- **Honest providers + cross-provider fallback on `serve.ts`** — only providers with a key are mounted and listed
+  in `/v1/models`; each model has an ordered chain across different providers (self-hosted deployment → OpenRouter
+  → Groq/others), with circuit breakers; nothing available → `503 provider_unavailable` naming the missing key or
+  the failed provider. `parle-stt` / `parle-llm` / `parle-tts` aliases route to the Scaleway deployments first,
+  with `X-Gateway-Provider` / `X-Gateway-Fallback` origin headers. `MODEL_ROUTES` changes the map.
+- **Runtime keys** — palco keys win over the environment, are re-read every 5 min and on
+  `POST /v1/admin/keys/reload`; `PUT /v1/admin/keys` writes them to the palco. Providers read keys per request.
+- **`GET /health?deep=1`** (admin) — live per-provider probes (OpenRouter via `/api/v1/key`), circuits, deployments.
+
+### Removed
+
+- `playai-tts` / `playai-tts-arabic` from `serve.ts` (retired by Groq).
+
 - **Z.AI (Zhipu) cloud provider** (`src/gateway/providers/cloud/zai/`) — registers
   the OpenAI-compatible `https://api.z.ai/api/paas/v4` endpoint as provider id
   `zai`, exposing `glm-4.6` (200K-context text + tools), `glm-4.5`, `glm-4.5-air`,
