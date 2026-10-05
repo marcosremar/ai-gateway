@@ -3,7 +3,8 @@
  * caller-facing message on bad input; the HTTP layer maps it to 400.
  */
 
-import type { DeploymentSpec, Profile, ProfileSpec } from './types';
+import { MAX_PLACEMENT_CANDIDATES } from './placement';
+import type { DeploymentSpec, PlacementCandidate, Profile, ProfileSpec } from './types';
 
 export class SpecError extends Error {}
 
@@ -92,11 +93,33 @@ function envMap(value: unknown): Record<string, string> {
   return out;
 }
 
+/** `[{ zone, machineType, maxEurPerHour }]` in order of preference; `[]` clears the list (spec zone/type only). */
+function candidateList(value: unknown): PlacementCandidate[] {
+  if (!Array.isArray(value)) throw new SpecError('candidates must be an array of { zone, machineType, maxEurPerHour }');
+  if (value.length > MAX_PLACEMENT_CANDIDATES) throw new SpecError(`candidates has more than ${MAX_PLACEMENT_CANDIDATES} entries`);
+  const seen = new Set<string>();
+  return value.map((raw, i) => {
+    const c = (raw ?? {}) as Record<string, unknown>;
+    if (typeof raw !== 'object' || Array.isArray(raw) || Object.keys(c).some(k => !['zone', 'machineType', 'maxEurPerHour'].includes(k))) {
+      throw new SpecError(`candidates[${i}] must be { zone, machineType, maxEurPerHour }`);
+    }
+    const out = {
+      zone: str(c.zone, `candidates[${i}].zone`, ZONE_RE),
+      machineType: str(c.machineType, `candidates[${i}].machineType`, TYPE_RE),
+      maxEurPerHour: num(c.maxEurPerHour, `candidates[${i}].maxEurPerHour`, 0.001, 50),
+    };
+    const key = `${out.zone}/${out.machineType}`;
+    if (seen.has(key)) throw new SpecError(`candidates[${i}] repeats ${key}`);
+    seen.add(key);
+    return out;
+  });
+}
+
 const KNOWN_FIELDS = new Set<string>([
   'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'registryAuth', 'healthPath', 'machineType',
   'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas', 'targetInflightPerReplica', 'idleMinutes',
   'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds', 'maxEurPerHour', 'maxHours', 'paused',
-  'description', 'bootScript', 'files', 'minActiveReplicas',
+  'description', 'bootScript', 'files', 'minActiveReplicas', 'candidates',
 ]);
 
 /**
@@ -175,6 +198,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     out.coldStartWaitSeconds = int(input.coldStartWaitSeconds, 'coldStartWaitSeconds', 0, 840);
   }
   if (input.maxEurPerHour !== undefined) out.maxEurPerHour = num(input.maxEurPerHour, 'maxEurPerHour', 0.001, 50);
+  if (input.candidates !== undefined) out.candidates = candidateList(input.candidates);
   if (input.maxHours !== undefined) out.maxHours = num(input.maxHours, 'maxHours', 0.25, 24 * 7);
   if (input.paused !== undefined) {
     if (typeof input.paused !== 'boolean') throw new SpecError('paused must be a boolean');
@@ -216,8 +240,17 @@ export function buildSpec(
   }
   if (!merged.image && !merged.bootScript) throw new SpecError('image or bootScript is required (or pass a profile that sets one)');
   if (!merged.port) throw new SpecError('port is required (or pass a profile that sets it)');
+  if (merged.candidates && merged.candidates.length === 0) delete merged.candidates;
+  if (merged.candidates) {
+    // The first candidate is the spec's own zone/type/cap, so the status and old readers stay truthful.
+    const [first] = merged.candidates;
+    Object.assign(merged, { zone: first!.zone, machineType: first!.machineType, maxEurPerHour: first!.maxEurPerHour });
+  }
   if (merged.gpu === undefined) merged.gpu = isGpuMachineType(merged.machineType!);
   const spec = merged as DeploymentSpec;
+  if (spec.candidates?.some(c => isGpuMachineType(c.machineType) !== spec.gpu)) {
+    throw new SpecError('candidates must all be GPU types when gpu is true (and CPU types otherwise)');
+  }
   if (spec.minReplicas > spec.maxReplicas) throw new SpecError('minReplicas cannot exceed maxReplicas');
   if (spec.gpu && !isGpuMachineType(spec.machineType)) throw new SpecError(`gpu: true needs a GPU machineType (got ${spec.machineType})`);
   return spec;

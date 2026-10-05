@@ -77,10 +77,24 @@ export interface DeploymentSpec {
   coldStartWaitSeconds: number;
   /** Refuse to create a replica whose catalog price is above this (EUR/h). */
   maxEurPerHour: number;
+  /**
+   * Ordered fallbacks for a new replica (`placement.ts`): each create walks the list and takes the first candidate
+   * that is sold in its zone, fits its own `maxEurPerHour`, is not in `shortage` and is accepted by the provider; an
+   * `out_of_stock`/quota refusal moves on to the next one. When set, `zone`/`machineType`/`maxEurPerHour` above are
+   * the first candidate's. Absent: the spec's own zone and type only.
+   */
+  candidates?: PlacementCandidate[];
   /** Hard lifetime of a machine (safety net); it is replaced when reached. */
   maxHours: number;
   /** Paused deployments keep their spec but run no replicas and refuse invokes. */
   paused: boolean;
+}
+
+/** One `{ zone, machineType }` a replica may be placed on, with the most it may cost there (EUR/h). */
+export interface PlacementCandidate {
+  zone: string;
+  machineType: string;
+  maxEurPerHour: number;
 }
 
 /** Fields a profile may preset. */
@@ -124,6 +138,11 @@ export interface CreateReplicaInput {
   namespace: string;
   /** user_data keys → bytes (boot-script `files`). */
   files?: Record<string, Uint8Array>;
+  /**
+   * Zone the spec was written for. When a placement candidate moves the replica to another zone, a pinned
+   * `osImageId` (per-zone on Scaleway) is translated to the same image there instead of being sent as-is.
+   */
+  baseZone?: string;
 }
 
 /** What the controller needs from a cloud. Implemented by `ScalewayDeploymentBackend` (and fakes in tests). */
@@ -135,6 +154,11 @@ export interface DeploymentBackend {
   releaseReplica(machine: ReplicaMachine): Promise<void>;
   /** Catalog price (EUR/h), `null` when the type is not sold in the zone. */
   hourlyPrice(zone: string, machineType: string): Promise<number | null>;
+  /**
+   * The provider's own stock read (`available` · `scarce` · `shortage`), `null` when unknown. Optional: without it every
+   * candidate is tried with a create, and the provider's refusal decides.
+   */
+  availability?(zone: string, machineType: string): Promise<'available' | 'scarce' | 'shortage' | null>;
   /**
    * Credentials for an image in the provider's own registry, used when the spec has no `registryAuth` — so a caller
    * deploying `rg.fr-par.scw.cloud/…` never has to send (and the gateway never stores) a registry secret. `null` for
@@ -181,5 +205,7 @@ export interface DeploymentView {
   waiting: number;
   lastRequestAt: string | null;
   lastError: string | null;
+  /** Where the last replica went and, when it was not the first candidate, why the earlier ones were skipped. */
+  lastPlacement: string | null;
   invokeUrl: string;
 }

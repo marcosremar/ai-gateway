@@ -15,7 +15,8 @@ export const depTag = (name: string) => `aigw-dep-${name}`;
 /** Ubuntu Noble GPU OS 12 in fr-par-2 (Docker + NVIDIA container toolkit preinstalled). */
 const GPU_OS_IMAGE_FR_PAR_2 = '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa';
 
-type ScalewayLike = Pick<ScalewayClient, 'createInstance' | 'listInstancesByTag' | 'releaseInstance' | 'getHourlyPrice' | 'imageLike'>;
+type ScalewayLike = Pick<ScalewayClient, 'createInstance' | 'listInstancesByTag' | 'releaseInstance' | 'getHourlyPrice' | 'imageLike'>
+  & Partial<Pick<ScalewayClient, 'listGpuOffers'>>;
 
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
@@ -47,7 +48,13 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   private async osImage(input: CreateReplicaInput): Promise<string | undefined> {
     const { spec } = input;
-    if (spec.osImageId) return spec.osImageId;
+    if (spec.osImageId) {
+      // Image ids are per zone: a pinned image follows a replica moved to another zone as "the same image there".
+      if (!input.baseZone || input.baseZone === spec.zone) return spec.osImageId;
+      const moved = await this.client.imageLike(spec.osImageId, spec.zone, spec.machineType, this.credentials);
+      if (!moved) throw new Error(`no image like ${spec.osImageId} for ${spec.machineType} in ${spec.zone}`);
+      return moved;
+    }
     if (!spec.gpu) return undefined; // CPU: the client looks up Ubuntu in the zone
     if (spec.zone === 'fr-par-2') return GPU_OS_IMAGE_FR_PAR_2;
     const like = await this.client.imageLike(GPU_OS_IMAGE_FR_PAR_2, spec.zone, spec.machineType, this.credentials);
@@ -86,6 +93,14 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   async hourlyPrice(zone: string, machineType: string): Promise<number | null> {
     return this.client.getHourlyPrice(zone, machineType, this.credentials);
+  }
+
+  /** Stock of a GPU type in a zone (`products/servers/availability`); `null` for CPU types or when unread. */
+  async availability(zone: string, machineType: string): Promise<'available' | 'scarce' | 'shortage' | null> {
+    if (!this.client.listGpuOffers) return null;
+    const offers = await this.client.listGpuOffers([zone], this.credentials).catch(() => []);
+    const stock = offers.find(o => o.zone === zone && o.commercialType === machineType)?.availability;
+    return stock === 'available' || stock === 'scarce' || stock === 'shortage' ? stock : null;
   }
 
   /** Scaleway Container Registry (`rg.<region>.scw.cloud/<namespace>/…`) logs in with user `nologin` and the API secret. */

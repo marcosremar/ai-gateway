@@ -237,6 +237,14 @@ production namespace (`default` on Railway).
 `invoke` is the raw passthrough; the OpenAI routes above use the same replicas with fallback and without waiting
 for a cold start.
 
+**Fallback zones and GPU types.** A spec may send `candidates`: an ordered list of
+`{ "zone", "machineType", "maxEurPerHour" }` (≤ 40, no repeats, all GPU when `gpu` is true). Each new replica goes to
+the first candidate that is sold in its zone, costs at most **its own** `maxEurPerHour`, is not `shortage` in the
+provider's stock read, and is accepted by the create; a `412 out_of_stock` / quota refusal moves to the next one.
+The spec's `zone`/`machineType`/`maxEurPerHour` become the first candidate's; `"candidates": []` clears the list.
+`GET /v1/deployments/:name` shows where the last replica went and why earlier candidates were skipped (`lastPlacement`).
+Details: [Deployments](../deployments.md#placement-fallback).
+
 ---
 
 ## Keys at runtime

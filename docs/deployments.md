@@ -71,8 +71,35 @@ never returned. Spec fields and defaults: `src/deployments/spec.ts` (`SPEC_DEFAU
 `base = max(minReplicas, 1)` while there was a request in the last `idleMinutes`, else `minReplicas`.
 Surplus replicas go after `scaleDownDelaySeconds` of low load (at once when idle), never one with requests in flight.
 Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, 3 failed health checks in a row,
-older than `maxHours`. Safety: price checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS`
+older than `maxHours`. Safety: price checked against `maxEurPerHour` (per candidate, see [Placement fallback](#placement-fallback)) before each create, `DEPLOYMENTS_MAX_REPLICAS`
 across all deployments, back-off after a failed create (1 → 10 min).
+
+## Placement fallback
+
+A GPU type can be out of stock in a zone (2026-10-05: Scaleway answered `412 out_of_stock` for `L4-1-24G` in
+fr-par-2 while pl-waw-2 had it). A spec may carry `candidates`, its own ordered list of where a replica may go, each
+with the most it may cost there:
+
+```json
+"candidates": [
+  { "zone": "fr-par-2", "machineType": "L4-1-24G",   "maxEurPerHour": 1.0 },
+  { "zone": "fr-par-1", "machineType": "L4-1-24G",   "maxEurPerHour": 1.0 },
+  { "zone": "pl-waw-2", "machineType": "L4-1-24G",   "maxEurPerHour": 1.0 },
+  { "zone": "fr-par-2", "machineType": "L40S-1-48G", "maxEurPerHour": 1.6 },
+  { "zone": "fr-par-2", "machineType": "H100-1-80G", "maxEurPerHour": 3.1 }
+]
+```
+
+For every create the controller walks the list in order (`placement.ts`): a candidate not sold in its zone, above its
+own cap, or reported `shortage` by `products/servers/availability` is skipped without creating anything; a create
+refused for capacity (`out_of_stock`, `quotas_exceeded`, insufficient capacity) moves on to the next; any other error
+stops the walk. The first candidate that takes the replica wins, and the log line `deployments: replica placed` (and
+`lastPlacement` in the status) names it, its price and every skipped candidate with the reason. Nothing matched:
+`lastError` lists every reason and the usual back-off applies. The order is the caller's: the gateway never reorders
+it by price, so a caller that wants "cheaper GPU first, then dearer" writes it that way. A pinned `osImageId` is
+translated to the same image in the candidate's zone (Scaleway image ids are per zone). Idle scale-down, `maxHours` and
+`DEPLOYMENTS_MAX_REPLICAS` apply to every replica whatever candidate it came from. Without `candidates`, a spec uses its
+own `zone`/`machineType`/`maxEurPerHour` only, as before.
 
 ## Replica machine
 

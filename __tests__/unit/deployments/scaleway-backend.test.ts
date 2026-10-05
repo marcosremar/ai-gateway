@@ -58,6 +58,25 @@ describe('ScalewayDeploymentBackend', () => {
     expect((client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>])[0].imageId).toBe('img-in-ams');
   });
 
+  it('a pinned image follows a replica moved to another zone (image ids are per zone)', async () => {
+    const client = fakeClient();
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never });
+    const pinned = '11111111-2222-3333-4444-555555555555';
+    const spec = buildSpec('tts', { profile: 'qwen3-tts', osImageId: pinned }, { profiles });
+    await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'p', baseZone: 'fr-par-2' });
+    await backend.createReplica({ spec: { ...spec, zone: 'pl-waw-2' }, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'p', baseZone: 'fr-par-2' });
+    const images = client.createInstance.mock.calls.map(c => (c as unknown as [Record<string, unknown>])[0].imageId);
+    expect(images).toEqual([pinned, 'img-in-ams']);
+    expect(client.imageLike).toHaveBeenCalledWith(pinned, 'pl-waw-2', 'L4-1-24G', expect.anything());
+  });
+
+  it('reads the stock of a GPU type from the catalog', async () => {
+    const client = { ...fakeClient(), listGpuOffers: vi.fn(async () => [{ zone: 'fr-par-2', commercialType: 'L4-1-24G', availability: 'shortage' }]) };
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never });
+    expect(await backend.availability('fr-par-2', 'L4-1-24G')).toBe('shortage');
+    expect(await backend.availability('fr-par-2', 'H100-1-80G')).toBeNull();
+  });
+
   it('CPU deployments let the client pick Ubuntu (no image, no volume)', async () => {
     const client = fakeClient();
     const backend = new ScalewayDeploymentBackend('secret', { client: client as never });

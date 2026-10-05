@@ -12,6 +12,7 @@
 import { randomBytes } from 'crypto';
 import { replicaCloudInit } from './cloud-init';
 import { packFiles } from './file-pack';
+import { placeReplica, placementSummary } from './placement';
 import { planReplicas, replicaPhase, type ObservedReplica } from './planner';
 import { BUILTIN_PROFILES } from './profiles';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES } from './spec';
@@ -34,6 +35,7 @@ interface Runtime {
   perReplica: Map<string, number>;
   aboveSince: number | null;
   lastError: string | null;
+  lastPlacement: string | null;
   creating: number;
   backoffUntil: number;
   createFailures: number;
@@ -103,7 +105,7 @@ export class DeploymentController {
 
   private runtime(record: DeploymentRecord): Runtime {
     return {
-      record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
+      record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, lastPlacement: null, creating: 0,
       backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(),
     };
   }
@@ -401,16 +403,23 @@ export class DeploymentController {
     rt.creating++;
     void (async () => {
       try {
-        const price = await this.opts.backend.hourlyPrice(spec.zone, spec.machineType);
-        if (price == null) throw new Error(`${spec.machineType} is not sold in ${spec.zone}`);
-        if (price > spec.maxEurPerHour) {
-          throw new Error(`${spec.machineType} costs €${price}/h in ${spec.zone}, above maxEurPerHour €${spec.maxEurPerHour}`);
-        }
-        this.log('deployments: creating replica', { deployment: spec.name, type: spec.machineType, zone: spec.zone, price });
-        const machine = await this.opts.backend.createReplica({
-          spec, replicaToken: rt.record.replicaToken, namespace: this.namespace,
-          cloudInit: replicaCloudInit(this.withRegistryAuth(spec), rt.record.replicaToken),
-          ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
+        const files = spec.files
+          ? packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks
+          : undefined;
+        const placed = await placeReplica(spec, this.opts.backend, async (at) => {
+          this.log('deployments: creating replica', { deployment: spec.name, type: at.machineType, zone: at.zone });
+          return this.opts.backend.createReplica({
+            spec: at, replicaToken: rt.record.replicaToken, namespace: this.namespace, baseZone: spec.zone,
+            cloudInit: replicaCloudInit(this.withRegistryAuth(at), rt.record.replicaToken),
+            ...(files ? { files } : {}),
+          });
+        });
+        const { machine, price } = placed;
+        rt.lastPlacement = `${placed.candidate.machineType}@${placed.candidate.zone} €${price}/h (candidate ${placed.index + 1})`
+          + (placed.skipped.length ? `; skipped ${placementSummary(placed.skipped)}` : '');
+        this.log('deployments: replica placed', {
+          deployment: spec.name, type: placed.candidate.machineType, zone: placed.candidate.zone, price,
+          candidate: placed.index, ...(placed.skipped.length ? { skipped: placementSummary(placed.skipped) } : {}),
         });
         if (this.deployments.get(spec.name) !== rt) {
           await this.opts.backend.releaseReplica(machine); // deleted while creating
@@ -478,6 +487,7 @@ export class DeploymentController {
       waiting: rt.waiting,
       lastRequestAt: rt.record.lastRequestAt ? new Date(rt.record.lastRequestAt).toISOString() : null,
       lastError: rt.lastError,
+      lastPlacement: rt.lastPlacement,
       invokeUrl: `/v1/deployments/${name}/invoke/`,
     };
   }

@@ -227,6 +227,21 @@ describe('deployments API', () => {
     expect(h.cloud.created).toHaveLength(0);
   });
 
+  it('out of stock in the first zone: the replica goes to the next candidate and the view says why', async () => {
+    h.cloud.outOfStock.add('fr-par-1/DEV1-S');
+    const logs: string[] = [];
+    (h.controller as unknown as { log: (m: string, d?: unknown) => void }).log = (m, d) => logs.push(`${m} ${JSON.stringify(d ?? {})}`);
+    await call(h, 'PUT', '/v1/deployments/moved', {
+      profile: 'cpu-echo', minReplicas: 1,
+      candidates: [{ zone: 'fr-par-1', machineType: 'DEV1-S', maxEurPerHour: 0.05 }, { zone: 'nl-ams-1', machineType: 'DEV1-S', maxEurPerHour: 0.05 }],
+    });
+    await until(() => h.controller.get('moved')!.status === 'ready');
+    const view = h.controller.get('moved')!;
+    expect(view.replicas.map(r => r.zone)).toEqual(['nl-ams-1']);
+    expect(view.lastPlacement).toMatch(/DEV1-S@nl-ams-1 .*candidate 2.*skipped DEV1-S@fr-par-1: capacity/);
+    expect(logs.find(l => l.startsWith('deployments: replica placed'))).toContain('"zone":"nl-ams-1"');
+  });
+
   it('a failed provider list never creates machines', async () => {
     h.cloud.failList = true;
     await call(h, 'PUT', '/v1/deployments/blind', { profile: 'cpu-echo', minReplicas: 2, maxReplicas: 2 });

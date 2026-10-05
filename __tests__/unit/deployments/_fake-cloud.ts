@@ -25,6 +25,8 @@ export class FakeCloud implements DeploymentBackend {
   price: number | null = 0.01;
   failList = false;
   failCreate: string | null = null;
+  /** `zone/machineType` keys whose create answers like Scaleway out of stock (412 out_of_stock). */
+  outOfStock = new Set<string>();
   bootMs = 50;
   registryAuthFor?: (image: string) => RegistryAuth | null;
   appDelayMs = 0;
@@ -34,6 +36,9 @@ export class FakeCloud implements DeploymentBackend {
 
   async createReplica(input: CreateReplicaInput): Promise<ReplicaMachine> {
     if (this.failCreate) throw new Error(this.failCreate);
+    if (this.outOfStock.has(`${input.spec.zone}/${input.spec.machineType}`)) {
+      throw new Error('scaleway HTTP 412: {"type":"out_of_stock","message":"Out of stock"}');
+    }
     this.created.push(input);
     const id = `fr-par-2:fake-${++this.seq}`;
     const fake: FakeMachine = {
