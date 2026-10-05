@@ -26,17 +26,24 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     this.providerId = config.providerId;
   }
 
+  /** True when the client was built from an explicit key (withApiKey/withConfig): never swapped for the env key. */
+  private pinnedClient = false;
+
+  /**
+   * The key is read from the environment on EVERY call, so a key rotated at runtime (KeyManager reload) is used by
+   * the next request. Clients are shared per baseURL + key hash (client-cache), so this costs a hash lookup.
+   */
   protected getClient(): OpenAI {
-    if (!this.client) {
-      const apiKey = process.env[this.config.envKey];
-      if (!apiKey) throw new Error(`[${this.config.providerId} LLM] ${this.config.envKey} is not set`);
-      this.client = getOrCreateClient(this.config.baseURL, apiKey, this.config.defaultHeaders);
-    }
+    if (this.client && this.pinnedClient) return this.client;
+    const apiKey = process.env[this.config.envKey];
+    if (!apiKey) throw new Error(`[${this.config.providerId} LLM] ${this.config.envKey} is not set`);
+    this.client = getOrCreateClient(this.config.baseURL, apiKey, this.config.defaultHeaders);
     return this.client;
   }
 
   withApiKey(apiKey: string): OpenAICompatLLMProvider {
     const provider = new OpenAICompatLLMProvider(this.config);
+    provider.pinnedClient = true;
     provider.client = new OpenAI({
       apiKey,
       baseURL: this.config.baseURL,
@@ -47,6 +54,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
 
   withConfig(opts: { apiKey: string; baseURL?: string }): OpenAICompatLLMProvider {
     const provider = new OpenAICompatLLMProvider(this.config);
+    provider.pinnedClient = true;
     provider.client = new OpenAI({
       apiKey: opts.apiKey,
       baseURL: opts.baseURL || this.config.baseURL,

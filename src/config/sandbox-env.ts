@@ -1,15 +1,30 @@
 /**
  * One principal token (`SANDBOX_TOKEN`) instead of one secret per provider — the same scheme the parle repo uses.
  *
- *   SANDBOX_TOKEN → GET <hub>/api/sandbox-env (Bearer) → { SCW_SECRET_KEY, SCW_PROJECT_ID, GROQ_API_KEY, … }
+ *   SANDBOX_TOKEN → GET <hub>/api/sandbox-env (Bearer) → { SCW_SECRET_KEY, SCW_PROJECT_ID, OPENROUTER_API_KEY, … }
  *
- * The gateway only needs the token in its environment; every other key comes from the dev API at boot. Keys
- * already present in the environment win (an operator can still override one). The same token is also accepted as
- * a Bearer by the gateway itself (see `serve.ts`), so agents call it with the credential they already carry.
+ * The palco (dev API) is the single home of the keys: the gateway only needs the token in its environment and gets
+ * whatever keys the palco catalog holds (which keys it returns is decided on the palco side — check its catalog
+ * rather than assuming a given provider key is there).
+ *
+ * Priority: the palco value WINS over the process environment (Railway variables) for every key except the few
+ * that must stay with the host — `isEnvPinned`: the token and its aliases, PORT, NODE_ENV, GATEWAY_API_KEYS,
+ * HOSTNAME, RAILWAY_* and infra URLs (*_URL). So rotating a key on the palco is enough; a stale Railway variable
+ * cannot shadow it. Keys are re-read periodically and on demand by `KeyManager` (src/config/key-manager.ts).
+ *
+ * The same token is also accepted as a Bearer by the gateway itself (see `serve.ts`), so agents call it with the
+ * credential they already carry.
  */
 
 /** Aliases that carry the same secret on Railway / Cloud Agent (kept in sync with parle `principalSandboxToken`). */
 const TOKEN_ALIASES = ['SANDBOX_TOKEN', 'PALCO_PROXY_TOKEN', 'PALCO_PROXY', 'VMOS_PROXY_TOKEN', 'VMOS_PROXY', 'PROXY_TOKEN'] as const;
+
+/** Keys the palco never overrides (they configure the host itself, not a provider). */
+const ENV_PINNED = new Set<string>([...TOKEN_ALIASES, 'PORT', 'NODE_ENV', 'GATEWAY_API_KEYS', 'HOSTNAME', 'SANDBOX_ENV_URL']);
+
+export function isEnvPinned(name: string): boolean {
+  return ENV_PINNED.has(name) || name.startsWith('RAILWAY_') || name.endsWith('_URL');
+}
 
 export const DEFAULT_SANDBOX_ENV_URLS = [
   'https://parle-palco.up.railway.app/api/sandbox-env',
@@ -32,13 +47,15 @@ export function sandboxEnvUrls(env: Record<string, string | undefined>): string[
 export interface SandboxEnvResult {
   /** URL that answered, or null when none did / no token. */
   source: string | null;
-  /** Keys written into env (only the ones that were missing). Values are never logged. */
+  /** Keys written into env (missing before, or with a different value). Values are never logged. */
   applied: string[];
+  /** Every key the palco returned (written or already up to date), pinned ones excluded. */
+  received: string[];
   errors: string[];
 }
 
 /**
- * Fills missing keys of `env` from the dev API. Never throws: a gateway without the dev API still boots with
+ * Writes the palco keys into `env` (palco wins, except `isEnvPinned` keys). Never throws: a gateway without the dev API still boots with
  * whatever its own environment has.
  */
 export async function loadSandboxEnv(
@@ -46,7 +63,7 @@ export async function loadSandboxEnv(
   opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
 ): Promise<SandboxEnvResult> {
   const token = principalSandboxToken(env);
-  const result: SandboxEnvResult = { source: null, applied: [], errors: [] };
+  const result: SandboxEnvResult = { source: null, applied: [], received: [], errors: [] };
   if (!token) return result;
   const fetchImpl = opts.fetchImpl ?? fetch;
   for (const url of sandboxEnvUrls(env)) {
@@ -60,7 +77,10 @@ export async function loadSandboxEnv(
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) { result.errors.push(`${url}: not an object`); continue; }
       for (const [key, value] of Object.entries(payload)) {
         if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof value !== 'string' || !value.trim()) continue;
-        if (env[key]?.trim()) continue;
+        // Pinned keys stay with the host when it has them; everything else follows the palco.
+        if (isEnvPinned(key) && env[key]?.trim()) continue;
+        result.received.push(key);
+        if (env[key] === value.trim()) continue;
         env[key] = value.trim();
         result.applied.push(key);
       }

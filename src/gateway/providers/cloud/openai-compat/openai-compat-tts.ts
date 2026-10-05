@@ -30,6 +30,8 @@ export interface OpenAICompatTTSConfig {
    *  format not in this list (e.g. 'mp3' but the model only supports 'wav'),
    *  the provider silently falls back to `defaultFormat`. */
   allowedFormats?: TTSAudioFormat[];
+  /** Send the requested voice as-is (aggregators whose voices depend on the model, e.g. OpenRouter). */
+  passthroughVoices?: boolean;
 }
 
 export class OpenAICompatTTSProvider implements TTSProvider {
@@ -46,21 +48,28 @@ export class OpenAICompatTTSProvider implements TTSProvider {
 
   /** Return the requested voice if this provider supports it, otherwise the default. */
   private resolveVoice(requested?: string): string {
-    if (requested && this.voiceIds.has(requested)) return requested;
+    if (requested && (this.config.passthroughVoices || this.voiceIds.has(requested))) return requested;
     return this.config.defaultVoice || 'alloy';
   }
 
+  /** True when the client was built from an explicit key (withApiKey/withConfig): never swapped for the env key. */
+  private pinnedClient = false;
+
+  /**
+   * The key is read from the environment on EVERY call, so a key rotated at runtime (KeyManager reload) is used by
+   * the next request. Clients are shared per baseURL + key hash (client-cache), so this costs a hash lookup.
+   */
   protected getClient(): OpenAI {
-    if (!this.client) {
-      const apiKey = process.env[this.config.envKey];
-      if (!apiKey) throw new Error(`[${this.config.providerId} TTS] ${this.config.envKey} is not set`);
-      this.client = getOrCreateClient(this.config.baseURL, apiKey);
-    }
+    if (this.client && this.pinnedClient) return this.client;
+    const apiKey = process.env[this.config.envKey];
+    if (!apiKey) throw new Error(`[${this.config.providerId} TTS] ${this.config.envKey} is not set`);
+    this.client = getOrCreateClient(this.config.baseURL, apiKey);
     return this.client;
   }
 
   withApiKey(apiKey: string): OpenAICompatTTSProvider {
     const provider = new OpenAICompatTTSProvider(this.config);
+    provider.pinnedClient = true;
     provider.client = new OpenAI({ apiKey, baseURL: this.config.baseURL });
     return provider;
   }
