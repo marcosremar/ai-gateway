@@ -72,7 +72,7 @@ describe('buildServeProviders — only configured providers are mounted', () => 
       instances: instances(), openrouter: { state: 'valid' }, deploymentProvider, env: { TTS_DEPLOYMENT: 'my-tts' },
     });
     expect(providers.tts?.['parle-tts']?.map(t => `${t.providerId}:${t.model}`))
-      .toEqual(['deployment:my-tts:Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice', 'openrouter:hexgrad/kokoro-82m']);
+      .toEqual(['deployment:my-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base', 'openrouter:hexgrad/kokoro-82m']);
     expect(providers.chatRoutes?.['parle-llm']?.[0].providerId).toBe('deployment:parle-speech');
     expect(providers.stt?.['parle-stt']?.map(t => t.providerId)).toEqual(['deployment:parle-speech', 'openrouter']);
   });

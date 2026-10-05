@@ -15,6 +15,9 @@ const ttsCooldownTracker = new CooldownTracker();
 
 const log = createLogger('audio-speech');
 
+/** Request fields the route itself interprets; the rest is forwarded to self-hosted targets as-is. */
+const KNOWN_FIELDS = new Set(['model', 'input', 'voice', 'response_format', 'speed', 'fallback_voice', 'stream']);
+
 export async function handleAudioSpeech(
   req: ProxyRequest,
   ttsProviders: StageRoutes<TTSProvider>,
@@ -53,22 +56,33 @@ export async function handleAudioSpeech(
     return { status: 404, body: { error: { message: `TTS model "${model}" not found`, type: 'invalid_request_error' } } };
   }
 
+  // Everything the gateway does not interpret goes to providers that understand it (self-hosted Qwen3-TTS:
+  // ref_audio, ref_text, task_type, language, stream_format…); cloud providers ignore it.
+  const extra = Object.fromEntries(Object.entries(body).filter(([k]) => !KNOWN_FIELDS.has(k)));
+  const format = (body.response_format as string | undefined) || 'mp3';
+  // wav/pcm can be streamed (first bytes before the whole sentence); `stream: false` turns it off.
+  const stream = (format === 'wav' || format === 'pcm') && body.stream !== false;
+
   try {
     const { result, headers } = await routeRequest(
       targets,
       (t, signal) => t.provider.synthesize({
         signal,
+        ...(t.providerId.startsWith('deployment:') ? { extra, stream } : {}),
         model: t.model ?? model,
         input: body.input as string,
         // Voices are provider-specific: a fallback uses `fallback_voice` from the request, else its configured voice.
-        voice: (t.providerId !== targets[0].providerId && typeof body.fallback_voice === 'string' && body.fallback_voice)
+        voice: (t !== targets[0] && typeof body.fallback_voice === 'string' && body.fallback_voice)
           || t.voice || (body.voice as string),
-        responseFormat: (body.response_format as string) as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm' | undefined || 'mp3',
+        responseFormat: format as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm',
         speed: body.speed as number | undefined,
       }),
       { stage: 'tts', timeoutMs: 15_000, retriesPerProvider: 1, cooldownTracker: ttsCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
+    if (result.stream) {
+      return { status: 200, headers: { 'Content-Type': result.contentType, ...headers }, body: null, stream: result.stream };
+    }
     return {
       status: 200,
       headers: { 'Content-Type': result.contentType, ...headers },

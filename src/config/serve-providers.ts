@@ -10,7 +10,7 @@
  *   - `MODEL_ROUTES` (JSON) adds or replaces chains — this is where a self-hosted deployment becomes the primary:
  *       {"chat": {"parle-llm": ["deployment:parle-speech:Qwen/Qwen3.5-9B", "openrouter:qwen/qwen3.5-9b"]},
  *        "stt":  {"whisper-large-v3": ["deployment:parle-speech", "openrouter:openai/whisper-large-v3", "groq"]},
- *        "tts":  {"qwen3-tts": ["deployment:parle-qwen-tts:Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+ *        "tts":  {"qwen3-tts": ["deployment:parle-qwen-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base",
  *                              {"provider": "openrouter", "model": "qwen/qwen-audio-3.0-tts-flash", "voice": "Cherry"}]}}
  *     Entry: "provider" | "provider:upstreamModel" | "deployment:<name>[:upstreamModel]" |
  *            {provider, model?, voice?, deployment?}. The special chat key "*" replaces the generic chat fallback.
@@ -76,7 +76,9 @@ export function defaultAliasRoutes(env: Record<string, string | undefined>): Rec
   const speech = env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech';
   const tts = env.TTS_DEPLOYMENT?.trim() || env.QWEN_TTS_DEPLOYMENT?.trim() || 'parle-qwen-tts';
   const ttsChain: RouteEntrySpec[] = [
-    { provider: 'deployment', deployment: tts, model: 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' },
+    // The parle image runs Qwen3-TTS Base (voice cloning from the replica's /refs/voices.json); the replica's catalog
+    // model wins when it publishes one. TTS_DEPLOYMENT_MODEL overrides the default.
+    { provider: 'deployment', deployment: tts, model: env.TTS_DEPLOYMENT_MODEL?.trim() || 'Qwen/Qwen3-TTS-12Hz-0.6B-Base' },
     // Qwen3-TTS voices do not exist on Kokoro: the fallback uses its own voice (request `fallback_voice` overrides).
     { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pf_dora' },
   ];

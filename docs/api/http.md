@@ -59,7 +59,7 @@ traffic returns to it. A real client error (e.g. `400` invalid request) is retur
 |---|---|---|
 | `parle-stt` | `/v1/audio/transcriptions` | `deployment:$SPEECH_DEPLOYMENT` (whisper-large-v3-turbo) → `openrouter:openai/whisper-large-v3-turbo` → `groq:whisper-large-v3-turbo` |
 | `parle-llm` | `/v1/chat/completions` | `deployment:$SPEECH_DEPLOYMENT` (Qwen3.5-9B) → `openrouter:qwen/qwen3.5-9b` → `openrouter:google/gemini-2.5-flash-lite` (both with `reasoning: {enabled: false}`) |
-| `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:$TTS_DEPLOYMENT` (Qwen3-TTS 1.7B CustomVoice) → `openrouter:hexgrad/kokoro-82m` (voice `pf_dora`) |
+| `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:$TTS_DEPLOYMENT` (Qwen3-TTS Base, voice cloning; `TTS_DEPLOYMENT_MODEL`, default `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) → `openrouter:hexgrad/kokoro-82m` (voice `pf_dora`) |
 
 `SPEECH_DEPLOYMENT` defaults to `parle-speech` (the image with Whisper + Qwen3.5-9B + Qwen3-TTS on one GPU) and
 `TTS_DEPLOYMENT` (or `QWEN_TTS_DEPLOYMENT`) to `parle-qwen-tts`. The replica must expose the OpenAI shapes
@@ -67,6 +67,21 @@ traffic returns to it. A real client error (e.g. `400` invalid request) is retur
 
 Voices are provider-specific: on `/v1/audio/speech`, `voice` goes to the first provider and a fallback uses
 `fallback_voice` from the request, else its own configured voice.
+
+**Self-hosted TTS (Qwen3-TTS Base).** For a deployment target:
+
+- `voice` may be a **cast voice id** of the replica's catalog (`GET /refs/voices.json` on the replica, cached 5 min).
+  When the client sends no `ref_audio`, the gateway turns it into `task_type: "Base"`, `ref_audio`, `ref_text`,
+  `language` (from the voice) and the catalog's `model` — the request parle's `qwen-speech.ts` builds. A replica
+  without catalog gets the request as sent.
+- Any other body field (`task_type`, `ref_audio`, `ref_text`, `language` — ISO codes become `Portuguese`/`French`/… —,
+  `stream_format`, …) is forwarded intact. The OpenRouter fallback never receives these fields.
+- With `response_format` `wav` or `pcm` the audio is **streamed** from the replica to the client
+  (`stream: true, stream_format: "audio"`; send `"stream": false` to turn it off). Other formats come whole.
+
+```json
+{ "model": "parle-tts", "input": "Bom dia!", "voice": "br-f-01", "fallback_voice": "pf_dora", "response_format": "wav" }
+```
 
 Built-in cloud models keep their own chains: Groq chat models fall back to the same weights on OpenRouter
 (`llama-3.3-70b-versatile` → `meta-llama/llama-3.3-70b-instruct`, `openai/gpt-oss-120b` → same id, …), GLM models
@@ -86,7 +101,7 @@ replaces the generic chat fallback (default: Groq `llama-3.3-70b-versatile`, the
 {
   "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
   "chat": { "parle-llm": ["deployment:parle-speech", "openrouter:qwen/qwen3.5-9b"] },
-  "tts":  { "parle-tts": ["deployment:parle-qwen-tts:Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  "tts":  { "parle-tts": ["deployment:parle-qwen-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base",
                           { "provider": "openrouter", "model": "fish-audio/s2-pro", "voice": "<voice id>" }] }
 }
 ```
@@ -156,7 +171,7 @@ curl -X POST https://<gateway>/v1/chat/completions -H "Authorization: Bearer $KE
 ```bash
 curl -X POST https://<gateway>/v1/audio/speech -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"parle-tts","input":"Olá","voice":"vivian","fallback_voice":"pf_dora"}' --output speech.wav
+  -d '{"model":"parle-tts","input":"Olá","voice":"br-f-01","fallback_voice":"pf_dora","response_format":"wav"}' --output speech.wav
 ```
 
 ### `GET /v1/models`

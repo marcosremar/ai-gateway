@@ -158,7 +158,8 @@ describe('STT and TTS: deployment primary, OpenRouter fallback', () => {
     );
     expect(res.status).toBe(200);
     expect(res.headers).toMatchObject({ 'Content-Type': 'audio/wav', 'X-Gateway-Provider': 'deployment:parle-qwen-tts' });
-    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toMatchObject({ model: 'Qwen/Qwen3-TTS', voice: 'vivian' });
+    const speechCall = fetchImpl.mock.calls.find(([u]) => String(u).endsWith('/v1/audio/speech'))!;
+    expect(JSON.parse(String(speechCall[1]?.body))).toMatchObject({ model: 'Qwen/Qwen3-TTS', voice: 'vivian' });
   });
 
   it('TTS: cold deployment → OpenRouter with the fallback voice', async () => {
