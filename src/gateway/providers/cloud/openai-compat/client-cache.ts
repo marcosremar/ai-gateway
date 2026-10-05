@@ -13,7 +13,6 @@
  */
 
 import OpenAI from 'openai';
-import { createHmac, randomBytes } from 'crypto';
 
 interface CacheEntry {
   client: OpenAI;
@@ -27,14 +26,18 @@ const MAX_ENTRY_AGE_MS = 30 * 60 * 1000; // 30 minutes
 
 let lastCleanup = 0;
 
-/** Per-process secret for the cache label of an API key (never persisted, never logged). */
-const KEY_LABEL_SECRET = randomBytes(32);
+/** Per-process numeric label per API key: the key never appears in the map key, and no hash is involved. */
+const keyLabels = new Map<string, number>();
+function keyLabel(apiKey: string): number {
+  let id = keyLabels.get(apiKey);
+  if (id === undefined) { id = keyLabels.size + 1; keyLabels.set(apiKey, id); }
+  return id;
+}
 
 /**
  * Get or create a shared OpenAI SDK client for the given config.
  * Clients are cached by `baseURL + apiKeyHash` (+ defaultHeaders hash).
- * The API key never appears in the map key: it is reduced to an HMAC under a per-process random secret (a cache
- * label, not password storage — it only has to tell two keys apart inside this process).
+ * The API key never appears in the map key: each distinct key gets a per-process numeric label (`keyLabel`).
  */
 export function getOrCreateClient(
   baseURL: string,
@@ -44,7 +47,7 @@ export function getOrCreateClient(
   const headersKey = defaultHeaders !== undefined
     ? JSON.stringify(defaultHeaders)
     : '\0';
-  const keyHash = apiKey ? createHmac('sha256', KEY_LABEL_SECRET).update(apiKey).digest('hex').slice(0, 32) : '';
+  const keyHash = apiKey ? String(keyLabel(apiKey)) : '';
   const key = `${baseURL}\0${keyHash}\0${headersKey}`;
 
   const now = Date.now();
