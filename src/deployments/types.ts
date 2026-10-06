@@ -136,7 +136,7 @@ export interface DeploymentSpec {
   /**
    * Vast: lowest CUDA version the host driver must support (`cuda_max_good`), for the image's own CUDA. A driver older
    * than the image's runtime fails at the first CUDA call (error 804, "forward compatibility"): vllm/vllm-omni v0.28 is
-   * CUDA 12.9 and a 5090 host on driver 570 (CUDA 12.8) could not start it (2026-10-06). Never below the GPU's own floor
+   * CUDA 13.0 (torch 2.13+cu130, driver ≥ 580) and a 5090 host on driver 570 (CUDA 12.8) could not start it (2026-10-06). Never below the GPU's own floor
    * (`minCudaFor`).
    */
   minCuda?: number;

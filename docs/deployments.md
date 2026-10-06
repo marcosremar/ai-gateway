@@ -176,7 +176,8 @@ With `candidates`, each create walks a **ranked ladder**:
   false). `maxRttMs` (Vast): see [RTT gate](#rtt-gate-vast). `minCuda` (Vast, 11–14): lowest CUDA the host driver
   must support, for the image's own CUDA (`cuda_max_good`); never below the GPU's floor (12.8 for Blackwell, else 12.4).
   A driver older than the image fails at the first CUDA call with error 804 ("forward compatibility"): `vllm/vllm-omni`
-  v0.28 is CUDA 12.9, and a 5090 host on driver 570 (CUDA 12.8) could not start it — such an image needs `minCuda: 12.9`.
+  v0.28 is CUDA 13.0 (torch 2.13+cu130, driver ≥ 580), and a 5090 host on driver 570 (CUDA 12.8) could not start it —
+  such an image needs `minCuda: 13.0`.
   `candidates` cannot be combined with `exposure` (the reserved IP is zonal).
 - **How placement decides — distance, not EU membership.** The owner, in France, measured ~60 ms to a Vast host in
   Slovakia: inside the EU, but ~1100 km away. So geography is the great-circle distance (`geo.ts`) between the main
