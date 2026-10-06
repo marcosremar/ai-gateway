@@ -42,6 +42,7 @@ export default defineConfig({
         items: [
           { text: 'TypeScript SDK', link: '/api/sdk' },
           { text: 'HTTP API', link: '/api/http' },
+          { text: 'Gateway client', link: '/api/client' },
           { text: 'Configuration', link: '/api/config' },
         ],
       },

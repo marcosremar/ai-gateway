@@ -11,6 +11,7 @@ import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend } from './scaleway-backend';
 import { FileDeploymentStore } from './store';
 import { AppRegistry, FileAppStore } from './apps';
+import { AppFallbackService, OpenRouterKeyProvisioner } from './app-fallback';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
 
@@ -23,6 +24,7 @@ export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
 export { FileDeploymentStore, MemoryDeploymentStore } from './store';
 export { AppRegistry, FileAppStore, MemoryAppStore } from './apps';
+export { AppFallbackService, OpenRouterKeyProvisioner, fallbackRoutes } from './app-fallback';
 export type * from './types';
 
 /**
@@ -60,6 +62,9 @@ export interface DeploymentsFromEnv {
  *                            elsewhere it is required (machines of the namespace unknown here are released as orphans)
  *   DEPLOYMENTS_MAX_REPLICAS replica cap across all deployments; default 6
  *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = all
+ *   Direct fallback (`GET /v1/apps/:app/fallback`, app-fallback.ts): OPENROUTER_PROVISIONING_KEY (mint per-app keys),
+ *   APP_FALLBACK_KEY_LIMIT_USD (5), APP_FALLBACK_KEY_ROTATE_DAYS (7), APP_FALLBACK_PLAN_TTL_SECONDS (3600),
+ *   APP_FALLBACK_SHARE_KEY=0 (do not hand out the gateway's own keys)
  */
 /** DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES (default 60, 0 = off): how long a `minReplicas` pin may sit unused. */
 export const PINNED_IDLE_MAX_MINUTES = 60;
@@ -109,6 +114,10 @@ export function deploymentsFromEnv(
     apps,
     userOf: opts.userOf,
     ...(opts.onRoutesChange ? { onRoutesChange: opts.onRoutesChange } : {}),
+    fallback: new AppFallbackService({
+      env, store: apps, log: opts.log,
+      provisioner: new OpenRouterKeyProvisioner(() => env.OPENROUTER_PROVISIONING_KEY),
+    }),
     isAdmin: admins.length ? (req) => [...admins, ...(opts.alwaysAdmin ?? [])].includes(opts.userOf(req) ?? '') : undefined,
   });
   // In-process janitor (build machines and detached volumes that no deployment owns). On by default on Railway, where
