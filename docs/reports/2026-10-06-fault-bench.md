@@ -121,6 +121,35 @@ Das opções de «Para decidir», o que entrou no código (testes em
 
 Ficam como estavam: keep-alive vs orçamento de 8 s (ajuste por alias) e o rótulo `unreachable`.
 
+## Stress de produção depois do #35 (mesmo dia, PR #36)
+
+Dois defeitos que o stress de produção achou e que a bancada não cobria:
+
+- **Breaker por estágio + alvo** (fecha o item «Breaker por provedor» de «Para decidir»). Cinco timeouts de 8 s do
+  STT do OpenRouter abriam o breaker `openrouter`, e chat e TTS no OpenRouter respondiam 503 «openrouter: circuit
+  open after repeated failures» por 30 s+. Agora a chave é `<estágio>:<provedor>:<modelo>` para alvo de nuvem e
+  `<estágio>:deployment:<nome>` para deployment (as réplicas seguem falhando cada uma dentro do provedor do
+  deployment), igual em `selectTargets`, `runTargets`, no caminho stream do chat (`openStream`/`buildSSEStream`, que
+  também passou a pausar o modelo em 429 em vez de contar no breaker) e no `/health` (cadeias e `circuits` do
+  `?deep=1`). O s2s passa pelas mesmas rotas. **Falha de conta é do provedor inteiro:** 401 (chave recusada) e 402
+  (sem crédito) alimentam também um breaker `account:<provedor>`, que todo estágio e modelo do provedor consulta; abre
+  depois de 5 falhas de conta seguidas sem nenhum sucesso no provedor, e qualquer sucesso o fecha. Timeout, 5xx e 403
+  não contam para ele (403 do OpenRouter pode ser de um modelo só). Troca de chave zera todos os breakers do provedor
+  (`resetProviderBreakers`). Testes: `__tests__/unit/gateway-routing/breaker-scope.test.ts`.
+- **Réplica apagada no meio do próprio create** (`create: scaleway HTTP 404 … instance_server` em parle-speech e
+  parle-qwen-tts, quatro GPUs seguidas). Não era consistência eventual: os logs mostram, para cada servidor,
+  `deployments: releasing replica … reason: halted` e `Deleted server …` antes dos 404. A Scaleway lista o servidor
+  novo como `stopped` desde o POST, e o create ainda está gravando o user_data, antes do power-on; o reconcile do
+  controller via a máquina parada, o planner a marcava `halted` e a apagava; o PATCH de user_data seguinte dava 404
+  até esgotar as tentativas. Conserto: o cliente avisa o id assim que o servidor existe (`onServerCreated` →
+  `CreateReplicaInput.onCreated`), e o controller deixa essa máquina fora da lista e de todo plano até o create
+  voltar (`creatingIds`; `rt.creating` já a conta). Create que falha limpa servidor e volume no próprio cliente; se a
+  limpeza falhar, agora loga (antes engolia), e a máquina que sobrar volta à lista e é liberada no próximo reconcile.
+  Os 404 de retry passam a dizer o passo (`user_data <chave>`, `poweron`). Testes:
+  `__tests__/unit/deployments/create-in-flight.test.ts`, `__tests__/unit/cpu-provider-scaleway.test.ts`.
+- **Trivy «Dockerfile»** vermelho no `main`: o `.dockerignore` excluía `scripts/` e o `bun install` do `Dockerfile`
+  roda o postinstall `bash scripts/postinstall.sh` (exit 127). `scripts/postinstall.sh` entrou na exceção.
+
 ## Fontes da pesquisa
 
 - OpenRouter, erros e streaming: https://openrouter.ai/docs/api/reference/errors-and-debugging ,

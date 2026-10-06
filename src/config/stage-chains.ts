@@ -16,13 +16,15 @@
  */
 
 import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-breaker';
-import { entryHealthKey } from '../gateway/providers/cloud/entry-key';
+import { isTargetCircuitOpen } from '../gateway/proxy/provider-routing';
 
 export interface ChainLinkSpec {
   /** `deployment:<name>` or `<provider>:<upstream model>`. */
   target: string;
-  /** Circuit-breaker label (`deployment:<name>` or the provider id). */
+  /** Provider label (`deployment:<name>` or the provider id); with `model` and the stage it names the breaker. */
   providerId: string;
+  /** Upstream model of a cloud link (breakers are per stage + provider + model, `breakerKey`). */
+  model?: string;
   deployment?: string;
   /** Why the link could not be mounted at all. */
   notMounted?: string;
@@ -49,7 +51,7 @@ export interface ChainHealthDeps {
   breakers?: CircuitBreakerRegistry;
 }
 
-function linkReport(link: ChainLinkSpec, deps: ChainHealthDeps): LinkReport {
+function linkReport(link: ChainLinkSpec, deps: ChainHealthDeps, stage: string): LinkReport {
   const { target } = link;
   if (link.deployment !== undefined) {
     if (!deps.deploymentStatus) {
@@ -71,14 +73,14 @@ function linkReport(link: ChainLinkSpec, deps: ChainHealthDeps): LinkReport {
   }
   const blocked = link.unavailableNow?.();
   if (blocked) return { target, state: 'blocked', reason: blocked };
-  if (deps.breakers?.get(entryHealthKey({ provider: link.providerId })).isOpen()) {
+  if (deps.breakers && isTargetCircuitOpen(deps.breakers, stage, link)) {
     return { target, state: 'circuit_open', reason: 'repeated failures (retrying in < 30 s)' };
   }
   return { target, state: 'ready' };
 }
 
-export function chainReport(links: ChainLinkSpec[], deps: ChainHealthDeps): ChainReport {
-  const reports = links.map(l => linkReport(l, deps));
+export function chainReport(links: ChainLinkSpec[], deps: ChainHealthDeps, stage: string): ChainReport {
+  const reports = links.map(l => linkReport(l, deps, stage));
   const serving = reports.find(r => r.state === 'ready')?.target ?? null;
   return { serving, onFallback: serving !== null && serving !== reports[0]?.target, links: reports };
 }
@@ -91,7 +93,7 @@ export function stageChainsReport(
   const warnings: string[] = [];
   for (const [stage, byModel] of Object.entries(chains)) {
     for (const [model, links] of Object.entries(byModel)) {
-      const report = chainReport(links, deps);
+      const report = chainReport(links, deps, stage);
       (stages[stage] ??= {})[model] = report;
       const first = report.links[0];
       // `cold` is the normal scale-to-zero state; anything else on the primary means it is not going to serve.

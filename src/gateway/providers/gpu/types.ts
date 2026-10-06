@@ -296,6 +296,10 @@ export interface InstanceSpec {
   /** Scaleway: like `cloudInit`, but rendered after the server exists, for boot scripts that embed the server's own
    *  id (its default hostname is `<id>.pub.instances.scw.cloud`) or IP. Wins over `cloudInit`. */
   cloudInitFor?: (server: { serverId: string; ip: string | null }) => string;
+  /** Scaleway: called with the new instance id as soon as the server exists, before user_data and power-on (the
+   *  server is listed — `stopped` — from that moment, and a caller that reconciles by listing must know it is
+   *  still being created, not halted). */
+  onServerCreated?: (instanceId: string) => void;
   /** Scaleway: extra user_data keys written before power-on (the cloud-init key has a size limit, so large
    *  payloads such as reference audio go in their own keys and the boot script fetches them from the metadata API). */
   userDataFiles?: Record<string, string | Uint8Array>;

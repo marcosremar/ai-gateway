@@ -4,6 +4,7 @@ import {
   type ServeInstances,
 } from '../../../src/config/serve-providers';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
+import { breakerKey } from '../../../src/gateway/proxy/provider-routing';
 import { handleModelsWithDynamic } from '../../../src/gateway/proxy/routes/models';
 import { probeCloudProvider } from '../../../src/gateway/providers/cloud/cloud-health';
 import { parleRoutes } from './_parle-routes';
@@ -141,7 +142,7 @@ describe('deep health report', () => {
     const env = { GROQ_API_KEY: 'gsk_secretvalue000001', OPENROUTER_API_KEY: 'sk-or-v1-secretvalue000002' };
     const fetchImpl = vi.fn(async (url: string) => (String(url).includes('openrouter') ? new Response('', { status: 401 }) : Response.json({})));
     const breakers = new CircuitBreakerRegistry();
-    breakers.get('deployment:parle-speech').recordFailure();
+    breakers.get(breakerKey('chat', { providerId: 'deployment:parle-speech' })).recordFailure();
     const { status, body } = await deepHealthReport({
       env, fetchImpl: fetchImpl as never, breakers, providers: { chatRoutes: {}, stt: {}, tts: {}, unavailable: { chat: { x: ['r'] } } },
       deployments: {
@@ -159,6 +160,6 @@ describe('deep health report', () => {
     expect(b.providers.find(x => x.provider === 'groq')).toMatchObject({ ok: true });
     expect(b.providers.find(x => x.provider === 'openai')).toMatchObject({ configured: false, error: 'OPENAI_API_KEY is not set' });
     expect(b.deployments.items).toEqual([{ name: 'parle-speech', status: 'scaled-to-zero', replicas: 0, ready: 0, lastError: null }]);
-    expect(b.circuits['deployment:parle-speech']).toBeDefined();
+    expect(b.circuits['chat:deployment:parle-speech']).toBeDefined();
   });
 });

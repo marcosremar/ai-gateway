@@ -139,6 +139,31 @@ describe('ScalewayClient', () => {
       expect(urls.some(u => u.startsWith('DELETE'))).toBe(false);
     });
 
+    it('names the new server to the caller before configuring it (a reconciler must not take it for halted)', async () => {
+      const client = new ScalewayClient();
+      const creds = { apiKey: FAKE_SECRET, authId: 'SCW-access-key' };
+      const order: string[] = [];
+      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        order.push(`${method} ${url.replace(/^.*\/zones\/[^/]+/, '')}`);
+        if (url.includes('/images')) return mockJsonResponse({ images: [{ id: 'img-uuid', name: 'Ubuntu 24.04' }] });
+        if (url.includes('/projects') || url.includes('api-keys') || url.includes('iam')) return mockJsonResponse({ default_project_id: 'proj-123' });
+        if (method === 'POST' && url.endsWith('/servers')) return mockJsonResponse({ server: { id: 'srv-1', name: 't', state: 'stopped', commercial_type: 'DEV1-XL' } });
+        if (method === 'GET' && url.endsWith('/servers/srv-1')) return mockJsonResponse({ server: { id: 'srv-1', name: 't', state: 'running', public_ip: { address: '1.2.3.4' } } });
+        return mockJsonResponse({});
+      });
+
+      await client.createInstance({
+        region: 'fr-par-1', cloudInit: '#!/bin/bash\necho hi',
+        onServerCreated: (id) => order.push(`created ${id}`),
+      }, creds);
+
+      const created = order.indexOf('created fr-par-1:srv-1');
+      expect(created).toBeGreaterThan(order.findIndex(o => o === 'POST /servers'));
+      expect(created).toBeLessThan(order.findIndex(o => o.startsWith('PATCH /servers/srv-1/user_data')));
+      expect(created).toBeLessThan(order.findIndex(o => o === 'POST /servers/srv-1/action'));
+    });
+
     it('throws on API error', async () => {
       const client = new ScalewayClient();
       const creds = { apiKey: FAKE_SECRET, authId: 'SCW-access-key' };

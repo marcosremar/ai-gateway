@@ -25,7 +25,7 @@ import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
 import { createS2SRoute } from './src/s2s/route';
 import { loopbackStages } from './src/s2s/loopback-stages';
-import { proxyCircuitBreakers } from './src/gateway/proxy/provider-routing';
+import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
@@ -182,7 +182,7 @@ const keyManager = new KeyManager(process.env, {
   onChange: async (names) => {
     if (names.includes('OPENROUTER_API_KEY')) openrouterKey = await checkOpenRouterKey(process.env);
     for (const id of providersOfKeys(names)) {
-      proxyCircuitBreakers.get(id).reset();
+      resetProviderBreakers(id);
       accountPolicyGuards.resetProvider(id);
     }
     // A credential or image that appeared (GHCR_READ_TOKEN, SPEECH_IMAGE) registers the declared deployment now.

@@ -166,6 +166,11 @@ export interface CreateReplicaInput {
   files?: Record<string, Uint8Array>;
   /** Exposed deployments: the reserved IP and firewall the replica attaches to. */
   network?: DeploymentNetwork;
+  /**
+   * Called with the machine id as soon as the provider has created it, before it is configured and powered on. The
+   * controller keeps that machine out of its plan until `createReplica` returns (see `DeploymentController.creatingIds`).
+   */
+  onCreated?: (machineId: string) => void;
 }
 
 /** What the controller needs from a cloud. Implemented by `ScalewayDeploymentBackend` (and fakes in tests). */

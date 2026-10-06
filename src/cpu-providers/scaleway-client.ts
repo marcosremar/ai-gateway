@@ -370,12 +370,15 @@ export class ScalewayClient extends AbstractGpuProvider {
     this.log.log(`[scaleway] Server created: ${server.id} (${usedType.type})${volumeIds.length ? ` volumes=[${volumeIds.join(',')}]` : ''}`);
 
     try {
-      // A server Scaleway has just created can answer 404 for a moment (seen 06/10/2026: the user_data/poweron calls
-      // right after the create failed with `instance_server not found` and the replica was thrown away).
-      const fresh = <T>(step: () => Promise<T>) => this.retryNotFound(step);
+      // From here the server exists and is listed (state `stopped` until the power-on below): tell the caller first.
+      spec.onServerCreated?.(encodedId);
+      // A server Scaleway has just created may answer 404 for a moment (eventual consistency). NB the 404s of the
+      // 06/10/2026 stress were NOT that: the deployment controller listed the still-`stopped` server mid-create, read it
+      // as halted and deleted it (fixed with `onServerCreated`). Each retry names its step so the next 404 says which.
+      const fresh = <T>(label: string, step: () => Promise<T>) => this.retryNotFound(step, `${server.id} ${label}`);
       // user_data: custom cloud-init takes precedence over docker bot script
       for (const [key, data] of Object.entries(spec.userDataFiles ?? {})) {
-        await fresh(() => this.setUserDataKey(zone, server.id, secretKey, key, data));
+        await fresh(`user_data ${key}`, () => this.setUserDataKey(zone, server.id, secretKey, key, data));
       }
       const cloudInit = spec.cloudInitFor
         ? spec.cloudInitFor({ serverId: server.id, ip: ipv4Of(server) })
@@ -385,12 +388,12 @@ export class ScalewayClient extends AbstractGpuProvider {
         const script = cloudInit.startsWith('#')
           ? cloudInit
           : `#!/bin/bash\n${cloudInit}\n`;
-        await fresh(() => this.setUserData(zone, server.id, secretKey, script));
+        await fresh('user_data cloud-init', () => this.setUserData(zone, server.id, secretKey, script));
       } else if (spec.dockerImage) {
-        await fresh(() => this.setUserData(zone, server.id, secretKey, this.buildUserData(spec)));
+        await fresh('user_data cloud-init', () => this.setUserData(zone, server.id, secretKey, this.buildUserData(spec)));
       }
 
-      await fresh(() => this.serverAction(zone, server.id, 'poweron', secretKey));
+      await fresh('poweron', () => this.serverAction(zone, server.id, 'poweron', secretKey));
       this.log.log(`[scaleway] Server ${server.id} powering on...`);
 
       const ip = await this.waitForIp(zone, server.id, secretKey);
@@ -418,7 +421,11 @@ export class ScalewayClient extends AbstractGpuProvider {
     } catch (err) {
       // Best-effort cleanup of server + SBS volumes (like babylon cloud-play)
       this.log.warn(`[scaleway] create failed after server ${server.id}; cleaning up: ${this.errMsg(err)}`);
-      await this.deleteInstance(encodedId, credentials).catch(() => {});
+      // A cleanup that fails must say so: the server and its volume keep billing until something else deletes them
+      // (the deployment controller releases a tagged server it does not know on its next list).
+      await this.deleteInstance(encodedId, credentials).catch((cleanupErr: unknown) => {
+        this.log.warn(`[scaleway] cleanup of server ${server.id} failed, it may still bill: ${this.errMsg(cleanupErr)}`);
+      });
       throw err;
     }
   }
@@ -885,13 +892,13 @@ export class ScalewayClient extends AbstractGpuProvider {
   /** Waits between retries of a call on a just-created server that answered 404 (eventual consistency); then gives up. */
   freshServerRetryMs: number[] = [1_000, 2_000, 4_000];
 
-  private async retryNotFound<T>(step: () => Promise<T>): Promise<T> {
+  private async retryNotFound<T>(step: () => Promise<T>, label: string): Promise<T> {
     for (const waitMs of this.freshServerRetryMs) {
       try {
         return await step();
       } catch (err) {
         if (!(err instanceof FetchError && err.status === 404)) throw err;
-        this.log.log(`[scaleway] new server not visible yet (404), retrying in ${waitMs} ms`);
+        this.log.log(`[scaleway] new server not visible yet (404 on ${label}), retrying in ${waitMs} ms`);
         await new Promise(r => setTimeout(r, waitMs));
       }
     }

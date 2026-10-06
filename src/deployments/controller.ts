@@ -81,6 +81,13 @@ export class DeploymentController {
   private readonly deployments = new Map<string, Runtime>();
   private readonly profiles = new Map<string, Profile>();
   private machines: ReplicaMachine[] = [];
+  /**
+   * Machines the provider already created but `createReplica` has not finished configuring (user_data, power-on).
+   * The list shows them `stopped` in that window: planned like any machine they read as halted and were deleted
+   * mid-create, and the create then failed with a 404 on its own server (production stress 2026-10-06). They stay out
+   * of `machines` (and of every plan) until the create returns; `rt.creating` already counts them.
+   */
+  private readonly creatingIds = new Set<string>();
   private readonly probes = new Map<string, ProbeState>();
   private reconciling: Promise<void> | null = null;
   private rerun = false;
@@ -383,7 +390,7 @@ export class DeploymentController {
     this.machines = [...listed.map((l) => {
       const known = this.machines.find(m => m.id === l.id);
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
-    }), ...recent];
+    }), ...recent].filter(m => !this.creatingIds.has(m.id));
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
 
     const orphans = this.machines.filter(m => !this.deployments.has(m.deployment));
@@ -501,6 +508,7 @@ export class DeploymentController {
       return;
     }
     rt.creating++;
+    const created: { id?: string } = {};
     void (async () => {
       try {
         const skipped: string[] = [];
@@ -519,6 +527,7 @@ export class DeploymentController {
               spec: placed, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
               cloudInit: replicaCloudInit(this.withRegistryAuth(placed), rt.record.replicaToken),
               ...(placed.files ? { files: packFiles(Object.fromEntries(Object.entries(placed.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
+              onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
             });
           } catch (err) {
             // Out of stock in this zone/type: the next placement may still have one. Any other error is the spec's
@@ -532,7 +541,7 @@ export class DeploymentController {
             await this.opts.backend.releaseReplica(machine); // deleted while creating
             return;
           }
-          this.machines.push({ ...machine, pricePerHour: machine.pricePerHour ?? price });
+          this.machines = [...this.machines.filter(m => m.id !== machine.id), { ...machine, pricePerHour: machine.pricePerHour ?? price }];
           rt.createFailures = 0;
           rt.lastError = null;
           return;
@@ -544,6 +553,8 @@ export class DeploymentController {
         rt.createFailures++;
         this.log('deployments: create failed', { deployment: spec.name, error: rt.lastError });
       } finally {
+        // A failed create cleans its own server up; anything left behind is listed again and planned as usual.
+        if (created.id) this.creatingIds.delete(created.id);
         rt.creating--;
       }
     })();

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { buildServeProviders, deepHealthReport, type ServeInstances } from '../../../src/config/serve-providers';
 import { stageChainsReport } from '../../../src/config/stage-chains';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
+import { accountBreakerKey, breakerKey } from '../../../src/gateway/proxy/provider-routing';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
 import { parleRoutes } from './_parle-routes';
 
@@ -66,12 +67,29 @@ describe('stageChainsReport', () => {
     expect(warnings.join('\n')).toMatch(/no link can serve/);
   });
 
-  it('an open breaker is reported', () => {
+  it('an open breaker is reported on its own stage and model only', () => {
     const { chains } = build({ deployments: true });
     const breakers = new CircuitBreakerRegistry({ failureThreshold: 1, resetTimeoutMs: 30_000 });
-    breakers.get('openrouter').recordFailure();
+    const sttLink = chains.stt['parle-stt'][1];
+    expect(sttLink.providerId).toBe('openrouter');
+    breakers.get(breakerKey('stt', sttLink)).recordFailure();
     const { stages } = stageChainsReport(chains, { deploymentStatus: () => 'ready', breakers });
     expect(stages.stt['parle-stt'].links[1].state).toBe('circuit_open');
+    // The same provider in the other stages is not affected (production stress 2026-10-06).
+    for (const stage of ['chat', 'tts'] as const) {
+      for (const report of Object.values(stages[stage])) {
+        for (const l of report.links) if (l.target.startsWith('openrouter:')) expect(l.state).not.toBe('circuit_open');
+      }
+    }
+  });
+
+  it('an open account breaker (401/402) is reported on every link of that provider', () => {
+    const { chains } = build({ deployments: true });
+    const breakers = new CircuitBreakerRegistry({ failureThreshold: 1, resetTimeoutMs: 30_000 });
+    breakers.get(accountBreakerKey('openrouter')).recordFailure();
+    const { stages } = stageChainsReport(chains, { deploymentStatus: () => 'ready', breakers });
+    expect(stages.stt['parle-stt'].links[1].state).toBe('circuit_open');
+    expect(stages.stt['parle-stt'].links[0].state).toBe('ready');
   });
 });
 

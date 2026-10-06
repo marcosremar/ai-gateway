@@ -71,6 +71,8 @@ monitoring/
 # Scripts (some may be needed, but most are build-time)
 scripts/
 !scripts/reap-orphans.ts
+# `bun install` in Dockerfile runs package.json's postinstall (`bash scripts/postinstall.sh`): without it the build exits 127.
+!scripts/postinstall.sh
 tools/
 
 # Dockers subproject (separate images)
