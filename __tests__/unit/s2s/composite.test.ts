@@ -89,3 +89,16 @@ describe('WavStripper', () => {
     expect(Array.from(s.push(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])))).toHaveLength(13);
   });
 });
+
+describe('runComposite with speak_field (JSON answers)', () => {
+  it('voices only the field, as it streams; the whole JSON comes back in done.reply_raw', async () => {
+    const json = '{"utterance": "Bom dia, querida! Aqui está.", "end": false, "mood": "warm"}';
+    const { events, voiced, calls } = await run({ reply: json }, {
+      config: { voice: 'br-m-08', speak_field: 'utterance', response_format: { type: 'json_object' } },
+    });
+    expect(voiced).toBe('Bom dia, querida!Aqui está.');
+    const done = events[events.length - 1];
+    expect(done).toMatchObject({ type: 'done', reply: 'Bom dia, querida! Aqui está.', reply_raw: json });
+    expect(calls.find(c => c.stage === 'llm')?.cfg?.response_format).toEqual({ type: 'json_object' });
+  });
+});

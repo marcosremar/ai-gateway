@@ -10,6 +10,7 @@
  */
 
 import type { S2SEvent } from './frames';
+import { createJsonFieldExtractor } from './json-field';
 import { SentenceCutter } from './sentence-cutter';
 
 export interface ChatMessage { role: string; content: string }
@@ -25,6 +26,10 @@ export interface S2SConfig {
   max_tokens?: number;
   temperature?: number;
   stt_prompt?: string;
+  /** Ask the LLM for JSON (`{"type":"json_object"}`): only `speak_field` is voiced, the whole JSON comes in `done`. */
+  response_format?: { type: string };
+  /** Field of the JSON answer that is spoken (e.g. "utterance"). Without it the whole answer is spoken. */
+  speak_field?: string;
 }
 
 export interface StageAnswer { provider: string | null; fallback: string | null }
@@ -57,7 +62,7 @@ export interface CompositeOptions {
   now?: () => number;
 }
 
-export interface CompositeResult { transcript: string; reply: string; firstAudioMs: number | null; missingAudio: number }
+export interface CompositeResult { transcript: string; reply: string; replyRaw: string; firstAudioMs: number | null; missingAudio: number }
 
 /** Strips a (possibly streamed, size-less) WAV header; reports the sample rate. Non-RIFF input passes through. */
 export class WavStripper {
@@ -110,7 +115,7 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
   }
   if (!transcript) {
     opts.emitEvent({ type: 'done', reply: '', transcript: '', first_audio_ms: null, total_ms: ms(), empty: true });
-    return { transcript: '', reply: '', firstAudioMs: null, missingAudio: 0 };
+    return { transcript: '', reply: '', replyRaw: '', firstAudioMs: null, missingAudio: 0 };
   }
 
   const messages: ChatMessage[] = [
@@ -135,6 +140,7 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
   };
   const release = () => { running--; waiters.shift()?.(); };
   const reply: string[] = [];
+  let raw = '';
 
   const speakLater = (text: string): Spoken => {
     const audio = (async () => {
@@ -152,16 +158,24 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
   let thinkError: Error | null = null;
   const think = (async () => {
     const cutter = new SentenceCutter();
+    const field = config.speak_field ? createJsonFieldExtractor(config.speak_field) : null;
+    let fieldClosed = false;
     let firstToken = true;
+    const say = (texts: string[]) => { for (const text of texts) { reply.push(text); queue.push(speakLater(text)); notify(); } };
     try {
       for await (const delta of chat.deltas) {
+        raw += delta;
         if (firstToken) {
           firstToken = false;
           opts.emitEvent({ type: 'llm_first_token', at_ms: ms(), provider: chat.provider, fallback: chat.fallback });
         }
-        for (const text of cutter.push(delta)) { reply.push(text); queue.push(speakLater(text)); notify(); }
+        if (!field) { say(cutter.push(delta)); continue; }
+        if (fieldClosed) continue;
+        const part = field.push(delta);
+        say(cutter.push(part.text));
+        if (part.closed) { fieldClosed = true; say(cutter.end()); }
       }
-      for (const text of cutter.end()) { reply.push(text); queue.push(speakLater(text)); notify(); }
+      if (!fieldClosed) say(cutter.end());
     } catch (err) {
       thinkError = err instanceof Error ? err : new Error(String(err));
     } finally {
@@ -219,7 +233,8 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
   if (thinkError) opts.emitEvent({ type: 'error', stage: 'llm', message: (thinkError as Error).message.slice(0, 300), partial: true, at_ms: ms() });
   opts.emitEvent({
     type: 'done', reply: reply.join(' '), transcript, first_audio_ms: firstAudio, total_ms: ms(),
+    ...(config.speak_field ? { reply_raw: raw } : {}),
     ...(missingAudio ? { missing_audio: missingAudio } : {}),
   });
-  return { transcript, reply: reply.join(' '), firstAudioMs: firstAudio, missingAudio };
+  return { transcript, reply: reply.join(' '), replyRaw: raw, firstAudioMs: firstAudio, missingAudio };
 }

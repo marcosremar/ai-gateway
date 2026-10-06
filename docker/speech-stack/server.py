@@ -141,9 +141,95 @@ def cut(buffer: str, first: bool, final: bool) -> tuple[str | None, str]:
     return None, buffer
 
 
-async def llm_stream(messages: list[dict], max_tokens: int, temperature: float):
+class JsonField:
+    """Streams the value of one top-level string field out of a JSON answer arriving in chunks (same rules as the
+    gateway's src/s2s/json-field.ts, itself from parle's createUtteranceExtractor): text before the root object and
+    <think> blocks are skipped; returns (new_text, closed)."""
+    ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}
+
+    def __init__(self, key: str):
+        self.key, self.phase, self.preamble, self.thinking = key, "seek", "", False
+        self.depth, self.in_string, self.escape, self.unicode = 0, False, False, None
+        self.reading_key, self.expect_key, self.key_text, self.value_of, self.capturing = False, False, "", None, False
+
+    def push(self, chunk: str) -> tuple[str, bool]:
+        text, closed = "", False
+        for ch in chunk:
+            if self.phase == "over":
+                break
+            if self.phase == "seek":
+                self.preamble = (self.preamble + ch)[-64:]
+                if not self.thinking and self.preamble.endswith("<think>"):
+                    self.thinking = True
+                elif self.thinking and self.preamble.endswith("</think>"):
+                    self.thinking = False
+                elif not self.thinking and ch == "{":
+                    self.phase, self.depth, self.expect_key = "object", 1, True
+                continue
+            if self.in_string:
+                if not self.escape and self.unicode is None and ch == '"':
+                    self.in_string = False
+                    if self.capturing:
+                        self.capturing, closed, self.phase = False, True, "over"
+                    elif self.reading_key:
+                        self.reading_key, self.expect_key = False, False
+                    continue
+                value = self._char(ch)
+                if value is None:
+                    continue
+                if self.capturing:
+                    text += value
+                elif self.reading_key:
+                    self.key_text += value
+                continue
+            if ch == '"':
+                self.in_string = True
+                self.reading_key = self.depth == 1 and self.expect_key
+                if self.reading_key:
+                    self.key_text = ""
+                self.capturing = self.depth == 1 and not self.reading_key and self.value_of == self.key
+                continue
+            if ch in "{[":
+                self.depth += 1
+            elif ch in "}]":
+                self.depth -= 1
+                if self.depth <= 0:
+                    self.phase = "over"
+            elif self.depth == 1 and ch == ",":
+                self.expect_key, self.value_of = True, None
+            elif self.depth == 1 and ch == ":":
+                self.value_of = self.key_text
+        if self.phase == "over" and not closed and not self.capturing:
+            closed = True
+        return text, closed
+
+    def _char(self, ch: str):
+        if self.unicode is not None:
+            self.unicode += ch
+            if len(self.unicode) < 4:
+                return None
+            code, self.unicode = self.unicode, None
+            try:
+                return chr(int(code, 16))
+            except ValueError:
+                return None
+        if self.escape:
+            self.escape = False
+            if ch == "u":
+                self.unicode = ""
+                return None
+            return self.ESCAPES.get(ch, ch)
+        if ch == "\\":
+            self.escape = True
+            return None
+        return ch
+
+
+async def llm_stream(messages: list[dict], max_tokens: int, temperature: float, response_format: dict | None = None):
     body = {"model": "llm", "messages": messages, "stream": True, "max_tokens": max_tokens, "temperature": temperature,
             "chat_template_kwargs": {"enable_thinking": False}}
+    if response_format:
+        body["response_format"] = response_format
     async with client.stream("POST", f"{LLM_URL}/v1/chat/completions", json=body) as res:
         if res.status_code != 200:
             raise RuntimeError(f"llm http {res.status_code}: {(await res.aread())[:200]!r}")
@@ -212,12 +298,21 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
             sentences: asyncio.Queue = asyncio.Queue()  # (text, audio queue) in speaking order, None at the end
             reply = []
 
+            field = JsonField(cfg["speak_field"]) if cfg.get("speak_field") else None
+            raw: list[str] = []
+
             async def think():
-                buffer, first, first_token = "", True, None
-                async for delta in llm_stream(messages, int(cfg.get("max_tokens", 160)), float(cfg.get("temperature", 0.6))):
+                buffer, first, first_token, field_closed = "", True, None, False
+                async for delta in llm_stream(messages, int(cfg.get("max_tokens", 160)), float(cfg.get("temperature", 0.6)),
+                                              cfg.get("response_format")):
                     if first_token is None:
                         first_token = ms()
                         await sentences.put(("__event__", {"type": "llm_first_token", "at_ms": first_token}))
+                    raw.append(delta)
+                    if field is not None:
+                        if field_closed:
+                            continue
+                        delta, field_closed = field.push(delta)
                     buffer += delta
                     while True:
                         chunk, buffer = cut(buffer, first, False)
@@ -258,7 +353,8 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                     yield pcm(chunk)
             await thinker
             yield event({"type": "done", "reply": " ".join(reply), "transcript": heard["text"], "stt_ms": heard["ms"],
-                         "first_audio_ms": first_audio, "total_ms": ms()})
+                         "first_audio_ms": first_audio, "total_ms": ms(),
+                         **({"reply_raw": "".join(raw)} if field is not None else {})})
         except Exception as error:  # noqa: BLE001 — the stream already started: report in-band
             yield event({"type": "error", "message": repr(error)[:300], "at_ms": ms()})
 

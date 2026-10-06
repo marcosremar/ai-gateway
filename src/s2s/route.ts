@@ -36,6 +36,11 @@ export interface S2SRouteOptions {
   maxBodyBytes?: number;
   fetchImpl?: typeof fetch;
   log?: (msg: string, data?: Record<string, unknown>) => void;
+  /**
+   * The speech-stack image voices only `speak_field` of a JSON answer from docker/speech-stack 2026-10-06 on. Until the
+   * deployment runs that image, JSON turns go to the composed pipeline (an older replica would speak the raw JSON).
+   */
+  primarySpeaksJson?: boolean;
 }
 
 export const S2S_HEDGE_MS = 2_500;
@@ -159,6 +164,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       let lease: Awaited<ReturnType<Controller['acquire']>> | null = null;
       let skip: string | null = null;
       if (!opts.controller || !opts.controller.get(deployment)) skip = 'not_found';
+      else if (config.speak_field && !opts.primarySpeaksJson) skip = 'unsupported';
       else {
         try {
           lease = await opts.controller.acquire(deployment, { waitMs: 0 });

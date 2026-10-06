@@ -169,6 +169,7 @@ const s2sRoute = createS2SRoute({
   deployment: process.env.S2S_DEPLOYMENT?.trim() || process.env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech',
   hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
   budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
+  primarySpeaksJson: process.env.S2S_PRIMARY_SPEAK_FIELD === '1',
   stagesFor: (req) => loopbackStages({
     baseUrl: `http://127.0.0.1:${PORT}`,
     authorization: String(req.headers.authorization ?? ''),

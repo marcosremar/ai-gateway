@@ -92,6 +92,7 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
         body: JSON.stringify({
           model: models.chat, messages, stream: true,
           max_tokens: cfg.max_tokens ?? 160, temperature: cfg.temperature ?? 0.6,
+          ...(cfg.response_format ? { response_format: cfg.response_format } : {}),
         }),
         signal,
       });

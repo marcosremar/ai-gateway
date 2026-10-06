@@ -43,10 +43,12 @@ async function harness(opts: {
   const fake = fakeStages(opts.stages);
   const route = createS2SRoute({ controller, stagesFor: () => fake.stages, hedgeMs: opts.hedgeMs ?? 2_000 });
   const host = await listen((req, res) => { void route(req, res); });
-  async function call(query = '') {
-    const form = new FormData();
-    form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'a.webm');
-    form.set('config', JSON.stringify({ system: 'Seu Jorge', voice: 'br-m-08', language: 'pt' }));
+  async function call(query = '', custom?: FormData) {
+    const form = custom ?? new FormData();
+    if (!custom) {
+      form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'a.webm');
+      form.set('config', JSON.stringify({ system: 'Seu Jorge', voice: 'br-m-08', language: 'pt' }));
+    }
     const res = await fetch(`http://${host}/v1/s2s${query}`, { method: 'POST', body: form });
     return { res, bytes: new Uint8Array(await res.arrayBuffer()) };
   }
@@ -154,6 +156,19 @@ describe('POST /v1/s2s routing', () => {
     const body = JSON.parse(new TextDecoder().decode(bytes)) as { error: { type: string; message: string } };
     expect(body.error.type).toBe('provider_unavailable');
     expect(body.error.message).toMatch(/no provider for parle-stt/);
+  });
+
+  it('JSON turn (speak_field) skips a primary that does not voice JSON yet; goes to it once enabled', async () => {
+    const h = await harness({ replica: res => writeFrames(res, replicaFrames('Oi!', ['Bom dia!']))() });
+    const form = () => {
+      const f = new FormData();
+      f.set('file', new Blob([new Uint8Array([1])], { type: 'audio/webm' }), 'a.webm');
+      f.set('config', JSON.stringify({ voice: 'br-m-08', speak_field: 'utterance', response_format: { type: 'json_object' } }));
+      return f;
+    };
+    const { events } = decodeAll((await h.call('', form())).bytes);
+    expect(events[0]).toMatchObject({ provider: 'composite', fallback: 'unsupported' });
+    expect(h.replicaHits()).toBe(0);
   });
 
   it('?format=ndjson: one JSON per line, audio base64', async () => {
