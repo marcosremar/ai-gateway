@@ -6,7 +6,7 @@
 
 import OpenAI from 'openai';
 import type { ProviderId, LLMProvider, ChatRequest, ChatResponse } from '../types';
-import { getOrCreateClient } from './client-cache';
+import { GATEWAY_SDK_MAX_RETRIES, getOrCreateClient } from './client-cache';
 
 export interface OpenAICompatLLMConfig {
   providerId: ProviderId;
@@ -47,6 +47,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     provider.client = new OpenAI({
       apiKey,
       baseURL: this.config.baseURL,
+      maxRetries: GATEWAY_SDK_MAX_RETRIES,
       ...(this.config.defaultHeaders && { defaultHeaders: this.config.defaultHeaders }),
     });
     return provider;
@@ -58,6 +59,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     provider.client = new OpenAI({
       apiKey: opts.apiKey,
       baseURL: opts.baseURL || this.config.baseURL,
+      maxRetries: GATEWAY_SDK_MAX_RETRIES,
       ...(this.config.defaultHeaders && { defaultHeaders: this.config.defaultHeaders }),
     });
     return provider;
@@ -110,18 +112,25 @@ export class OpenAICompatLLMProvider implements LLMProvider {
    */
   async *chatStream(request: ChatRequest): AsyncGenerator<string, void, undefined> {
     const client = this.getClient();
-    // Match non-streaming chat() timeout behaviour. Without abort wiring, a
-    // stalled provider stream hangs the consumer indefinitely; the for-await
-    // loop only releases on normal stream end. AbortSignal.timeout fires the
-    // signal after `timeoutMs` of inactivity at the OpenAI SDK layer, which
-    // the SDK propagates to the underlying fetch.
+    // Inactivity timeout: re-armed on every chunk, so a long but steady answer is never cut, while a provider that
+    // goes silent is. It used to be a TOTAL timer: a stream longer than `timeoutMs` (15 s from the proxy) was aborted
+    // mid-answer, and because the SDK swallows its own abort the stream simply ended — the client got the truncated
+    // text with finish_reason "stop" and [DONE] (fault bench 2026-10-06, item 5).
     const timeoutMs = request.timeoutMs || 120_000;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    };
+    arm();
     const onAbort = () => controller.abort();
     request.signal?.addEventListener('abort', onAbort, { once: true });
+    if (request.signal?.aborted) controller.abort();
 
     let stream: AsyncIterable<OpenAI.ChatCompletionChunk> | null = null;
+    let finished = false;
     try {
       stream = await client.chat.completions.create({
         model: request.model || this.config.defaultModel || '',
@@ -135,6 +144,8 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       } as OpenAI.ChatCompletionCreateParamsStreaming, { signal: controller.signal });
 
       for await (const chunk of stream) {
+        arm();
+        if (chunk.choices?.some((c) => c.finish_reason)) finished = true;
         if (chunk.usage) {
           yield `__usage__:${JSON.stringify({
             prompt_tokens: chunk.usage.prompt_tokens,
@@ -146,9 +157,14 @@ export class OpenAICompatLLMProvider implements LLMProvider {
         const delta = chunk.choices[0]?.delta?.content;
         if (delta) yield delta;
       }
+      // The SDK ends the iteration quietly on its own abort and on a body that stops without `[DONE]`: neither is a
+      // finished answer. Every OpenAI-compatible provider closes a stream with a finish_reason.
+      if (timedOut) throw Object.assign(new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms without data`), { gatewayCode: 'timeout' });
+      if (request.signal?.aborted) throw Object.assign(new Error('[openai-compat] chatStream() aborted by the caller'), { gatewayCode: 'aborted' });
+      if (!finished) throw Object.assign(new Error('[openai-compat] stream ended without finish_reason (truncated upstream)'), { gatewayCode: 'truncated' });
     } catch (err: unknown) {
-      if (err instanceof Error && (err.name === 'AbortError' || err.message?.includes('aborted'))) {
-        throw new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms`);
+      if (timedOut && !(err as { gatewayCode?: unknown })?.gatewayCode) {
+        throw Object.assign(new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms without data`), { gatewayCode: 'timeout' });
       }
       throw err;
     } finally {

@@ -130,12 +130,25 @@ export function failureCode(err: unknown): string {
   if (isTimeoutError(err)) return 'timeout';
   const status = statusOf(err);
   if (status === null) return 'unreachable';
+  if (status === 403 && isModerationRefusal(err)) return 'moderation';
   if (status === 401 || status === 403) return 'auth';
   if (status === 402) return 'credit';
   if (status === 404) return 'not_found';
   if (status === 429) return 'rate_limited';
   if (status >= 500) return '5xx';
   return 'error';
+}
+
+/**
+ * OpenRouter's 403 for a prompt flagged by a model's moderation (`error.metadata.reasons` / `flagged_input`): the
+ * prompt was refused, the provider is healthy. Another target may still take it; it must not count toward the breaker
+ * every model of the provider shares (errors-and-debugging docs: 403 = "input was flagged").
+ */
+export function isModerationRefusal(err: unknown): boolean {
+  const body = (err as { error?: unknown } | null)?.error as { metadata?: { reasons?: unknown; flagged_input?: unknown } } | undefined;
+  if (body?.metadata && (Array.isArray(body.metadata.reasons) || typeof body.metadata.flagged_input === 'string')) return true;
+  const message = err instanceof Error ? err.message : '';
+  return /moderation|flagged/i.test(message);
 }
 
 /** `X-Gateway-Provider` value: `deployment:<name>` or `<provider>:<upstream model>`. */
@@ -146,7 +159,7 @@ export function providerHeader(target: Pick<RouteTarget<unknown>, 'providerId' |
 /**
  * Origin headers for a served request: which provider answered and, when it was not the first candidate, why the
  * earlier ones were left (`X-Gateway-Fallback`: cold | 5xx | timeout | unreachable | auth | rate_limited | credit |
- * not_found | not_configured | policy | circuit_open | cooldown | error) and which one that was (`X-Gateway-Fallback-From`).
+ * not_found | not_configured | policy | moderation | circuit_open | cooldown | error) and which one that was (`X-Gateway-Fallback-From`).
  */
 export function originHeaders(
   candidates: Array<Pick<RouteTarget<unknown>, 'providerId' | 'model'>>,
@@ -224,6 +237,11 @@ export interface RunTargetsOptions {
    * and the chain moves on to the next target (code `empty`).
    */
   validate?: (result: unknown) => string | null;
+  /**
+   * The client's request: when it aborts (the client went away), every attempt in flight is aborted at once and the
+   * chain stops (nothing else is tried, no breaker or cooldown is fed).
+   */
+  signal?: AbortSignal;
 }
 
 class AttemptError extends Error {
@@ -237,7 +255,7 @@ class AttemptError extends Error {
  * one OpenRouter model refused under ZDR must not open the breaker shared by every OpenRouter model). They never open the circuit nor start a cooldown, so
  * traffic goes back to the deployment as soon as its replica is ready.
  */
-const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy']);
+const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation']);
 
 /** Default total time per stage (deployment + fallbacks), under parle's deadlines (TTS 15 s, chat 12 s). */
 export const DEFAULT_STAGE_BUDGET_MS = 8_000;
@@ -319,11 +337,23 @@ export function runTargets<P, T>(
     const fail = (clientError?: unknown) => {
       if (done) return;
       done = true;
+      opts.signal?.removeEventListener('abort', onClientGone);
       for (const c of controllers) c.abort();
       if (clientError) { reject(clientError); return; }
       const reasons = targets.map((t, i) => failures.get(i) ?? `${t.providerId}: not tried (stage time budget used up)`);
       reject(new ProviderUnavailableError(reasons, retryAfterSec));
     };
+
+    // The client went away: stop now. Attempts in flight are aborted (their signal reaches the provider's fetch).
+    let clientGone = false;
+    function onClientGone() {
+      if (done) return;
+      clientGone = true;
+      for (const t of inFlight.values()) breakers.get(entryHealthKey({ provider: t.providerId })).releaseProbe();
+      fail(Object.assign(new Error('client disconnected'), { gatewayCode: 'client_gone', status: 499 }));
+    }
+    if (opts.signal?.aborted) { onClientGone(); return; }
+    opts.signal?.addEventListener('abort', onClientGone, { once: true });
 
     /** Starts the next eligible target; false when none is left. */
     const launchNext = (): boolean => {
@@ -372,6 +402,7 @@ export function runTargets<P, T>(
           inFlight.delete(controller);
           if (done) return;
           done = true;
+          opts.signal?.removeEventListener('abort', onClientGone);
           // Targets still running lost a hedge race: they were slower than this one.
           for (const other of inFlight.values()) if (!codes.has(other)) codes.set(other, 'slow');
           breaker.recordSuccess();
@@ -388,7 +419,7 @@ export function runTargets<P, T>(
           if (done) {
             // Aborted because another target won. A recovery probe that lost is a failed probe (keeps the circuit
             // open); otherwise a hedged loser says nothing about health.
-            if (breaker.getStats().state === 'half_open') breaker.recordFailure();
+            if (!clientGone && breaker.getStats().state === 'half_open') breaker.recordFailure();
             return;
           }
           const status = statusOf(err);

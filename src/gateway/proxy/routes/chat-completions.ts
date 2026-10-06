@@ -140,12 +140,12 @@ export async function handleChatCompletions(
     const includeUsage = stream_options !== undefined && (stream_options as Record<string, unknown>).include_usage === true;
     let opened: OpenedStream;
     try {
-      opened = await openStream(usable, chatOpts, breakers, budgetMs);
+      opened = await openStream(usable, chatOpts, breakers, budgetMs, req.signal);
     } catch (err) {
       log.error(`All providers failed (stream) for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
       return errorResponse(withSkipped(err, skipped), 'chat', model);
     }
-    const stream = buildSSEStream(opened, completionId, includeUsage, (latencyMs, success, error) => {
+    const stream = buildSSEStream(opened, completionId, includeUsage, breakers, (latencyMs, success, error) => {
       emitHook(hooks, 'onRequestEnd', {
         userId: 'proxy',
         stage: 'llm',
@@ -221,7 +221,7 @@ export async function handleChatCompletions(
           // Each target carries its own upstream model — the same gateway model has different ids per provider.
           (t, signal) => t.provider.chat({ ...chatOpts, model: t.model ?? model, signal, ...(t.extraBody ? { extraBody: t.extraBody } : {}) }),
           {
-            stage: 'llm', timeoutMs: requestTimeoutMs, budgetMs, retriesPerProvider: 1,
+            stage: 'llm', timeoutMs: requestTimeoutMs, budgetMs, retriesPerProvider: 1, signal: req.signal,
             cooldownTracker: routing.cooldownTracker ?? llmCooldownTracker, breakers,
             // An empty answer (e.g. a reasoning model that spent max_tokens thinking) is a failure: try the next one.
             validate: (r) => (emptyAnswer(r as ChatResponse) ? `empty answer (finish_reason: ${(r as ChatResponse).finishReason ?? 'unknown'})` : null),
@@ -373,6 +373,8 @@ interface OpenedStream {
   /** Provider without chatStream: its whole answer. */
   full?: ChatResponse;
   codes: FailureCodes;
+  /** Aborts the upstream request of the opened stream (the client went away). */
+  abort?: () => void;
 }
 
 function withStreamTimeout<T>(p: Promise<T>, ms = STREAM_TIMEOUT_MS, onTimeout?: () => void): Promise<T> {
@@ -396,6 +398,7 @@ function withStreamTimeout<T>(p: Promise<T>, ms = STREAM_TIMEOUT_MS, onTimeout?:
  */
 async function openStream(
   targets: Array<RouteTarget<LLMProvider>>, opts: ChatRequest, breakers: CircuitBreakerRegistry, budgetMs: number,
+  clientSignal?: AbortSignal,
 ): Promise<OpenedStream> {
   const failures: string[] = [];
   const codes: FailureCodes = new Map();
@@ -404,7 +407,10 @@ async function openStream(
     const breaker = breakers.get(target.providerId);
     if (Date.now() >= deadline) { failures.push(`${target.providerId}: not tried (stage time budget used up)`); codes.set(target, 'timeout'); continue; }
     if (!breaker.allowRequest()) { failures.push(`${target.providerId}: circuit open after repeated failures`); codes.set(target, 'circuit_open'); continue; }
+    if (clientSignal?.aborted) throw clientGone();
     const abort = new AbortController();
+    const onClientGone = () => abort.abort();
+    clientSignal?.addEventListener('abort', onClientGone, { once: true });
     const request: ChatRequest = { ...opts, model: target.model ?? opts.model, signal: abort.signal, ...(target.extraBody ? { extraBody: target.extraBody } : {}) };
     // Time to the first token: the target's own (deployments: short), capped by what is left of the stage budget.
     const firstWaitMs = Math.max(1, Math.min(target.timeoutMs ?? STREAM_TIMEOUT_MS, deadline - Date.now()));
@@ -413,6 +419,7 @@ async function openStream(
         const full = await withStreamTimeout(target.provider.chat(request), firstWaitMs, () => abort.abort());
         if (emptyAnswer(full)) throw Object.assign(new Error(`empty answer (finish_reason: ${full.finishReason ?? 'unknown'})`), { gatewayCode: 'empty' });
         breaker.recordSuccess();
+        clientSignal?.removeEventListener('abort', onClientGone);
         return { target, full, codes };
       }
       const gen = target.provider.chatStream(request);
@@ -422,8 +429,10 @@ async function openStream(
           const step = await withStreamTimeout(gen.next(), firstWaitMs, () => abort.abort());
           if (step.done) throw Object.assign(new Error('empty answer (stream ended without content)'), { gatewayCode: 'empty' });
           if (typeof step.value === 'string' && step.value.startsWith('__usage__:')) { prefetched.push(step.value); continue; }
-          breaker.recordSuccess();
-          return { target, gen, first: step, prefetched, codes };
+          // Health is recorded when the stream ends (buildSSEStream): a provider that always breaks after its first
+          // token must still open its breaker, and a success here would reset the count on every request.
+          clientSignal?.removeEventListener('abort', onClientGone);
+          return { target, gen, first: step, prefetched, codes, abort: () => abort.abort() };
         }
       } catch (err) {
         try { void gen.return?.(undefined); } catch { /* no-op */ }
@@ -431,6 +440,8 @@ async function openStream(
       }
     } catch (err) {
       abort.abort();
+      clientSignal?.removeEventListener('abort', onClientGone);
+      if (clientSignal?.aborted) { breaker.releaseProbe(); throw clientGone(); }
       const status = (err as { status?: unknown })?.status;
       if (isClientErrorStatus(typeof status === 'number' ? status : null)) throw err;
       const code = failureCode(err);
@@ -443,6 +454,10 @@ async function openStream(
   throw new ProviderUnavailableError(failures);
 }
 
+function clientGone(): Error {
+  return Object.assign(new Error('client disconnected'), { gatewayCode: 'client_gone' });
+}
+
 /**
  * Turns an opened stream into a ReadableStream of SSE-encoded chunks compatible with the OpenAI streaming format.
  * Once a token was sent, an error ends the stream with an error event (switching provider mid-answer would splice
@@ -452,6 +467,7 @@ function buildSSEStream(
   opened: OpenedStream,
   id: string,
   includeUsage: boolean,
+  breakers: CircuitBreakerRegistry,
   onEnd?: (latencyMs: number, success: boolean, error?: string) => void,
 ): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -521,8 +537,12 @@ function buildSSEStream(
         }
         controller.enqueue(enc.encode('data: [DONE]\n\n'));
         controller.close();
+        if (!ended) breakers.get(opened.target.providerId).recordSuccess();
         finish(true);
       } catch (err) {
+        // A provider that breaks mid-answer is a provider failure (the client leaving is not): it counts toward the
+        // breaker like a failure before the first token does.
+        if (!ended) breakers.get(opened.target.providerId).recordFailure();
         const msg = redactSecrets(err instanceof Error ? err.message : 'Streaming error');
         try {
           controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: msg, type: 'server_error' } })}\n\n`));
@@ -534,7 +554,10 @@ function buildSSEStream(
       }
     },
     cancel() {
-      // Consumer disconnected. Stop the upstream generator so we stop consuming (and billing) tokens.
+      // Consumer disconnected. Abort the upstream request at once: `return()` on a generator that is awaiting the next
+      // token only runs after that token arrives, so a slow provider kept streaming (and billing) until then.
+      opened.abort?.();
+      if (!ended && opened.gen) breakers.get(opened.target.providerId).releaseProbe();
       if (activeGen) {
         try { void activeGen.return?.(undefined); } catch { /* no-op */ }
         activeGen = null;

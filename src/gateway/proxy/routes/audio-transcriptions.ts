@@ -132,11 +132,12 @@ export async function handleAudioTranscriptions(
         prompt: body.prompt as string | undefined,
         responseFormat: (body.response_format as string) as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt' | undefined,
       }),
-      { stage: 'stt', timeoutMs: 15_000, budgetMs: stageBudgetMs('stt'), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
+      { stage: 'stt', signal: req.signal, timeoutMs: 15_000, budgetMs: stageBudgetMs('stt'), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
-    // Cache the result for future identical requests
-    sttCacheSet(cacheKey, result.text);
+    // Never cache an empty text (silence, or a provider that answered 200 with nothing): it would be served for 5 min
+    // to every retry of the same audio, even after the provider recovered (fault bench 2026-10-06, item 23).
+    if (result.text?.trim()) sttCacheSet(cacheKey, result.text);
 
     return {
       status: 200,

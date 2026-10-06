@@ -36,19 +36,32 @@ class BodyTimeoutError extends Error {
   }
 }
 
+/** Body larger than the limit with no (or a lying) Content-Length, e.g. a chunked upload. Answered 413. */
+class BodyTooLargeError extends Error {
+  constructor(maxSize: number) {
+    super(`Payload too large: body exceeds ${Math.round(maxSize / 1024 / 1024)}MB limit`);
+    this.name = 'BodyTooLargeError';
+  }
+}
+
 function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer> {
   const inner = new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalSize = 0;
-    req.on('data', (chunk: Buffer) => {
+    const onData = (chunk: Buffer) => {
       totalSize += chunk.length;
       if (totalSize > maxSize) {
-        req.destroy();
-        reject(new Error(`Request body too large (limit: ${Math.round(maxSize / 1024 / 1024)}MB)`));
+        // Stop keeping it, but do not destroy the socket yet: the client must still read the 413 (destroying here
+        // reset the connection mid-upload, fault bench 2026-10-06 item 21). The caller closes it once answered.
+        chunks.length = 0;
+        req.off('data', onData);
+        req.resume();
+        reject(new BodyTooLargeError(maxSize));
         return;
       }
       chunks.push(chunk);
-    });
+    };
+    req.on('data', onData);
     req.on('end', () => resolve(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks)));
     req.on('error', reject);
   });
@@ -699,12 +712,17 @@ export function createProxyServer(config: ProxyConfig): Server {
         }
       }
 
+      // The client leaving (tab closed, timeout, RST) aborts the upstream calls of this request: without it a
+      // non-streamed chat / STT / TTS kept running (and billing) to the end (fault bench 2026-10-06, item 18).
+      const clientGone = new AbortController();
+      res.on('close', () => { if (!res.writableFinished) clientGone.abort(); });
       const proxyReq: ProxyRequest = {
         method,
         url,
         headers: req.headers as Record<string, string>,
         body,
         rawBody,
+        signal: clientGone.signal,
       };
 
       let proxyRes: ProxyResponse;
@@ -761,6 +779,12 @@ export function createProxyServer(config: ProxyConfig): Server {
     } catch (err) {
       if (err instanceof BodyTimeoutError) {
         sendError(res, 408, 'Request Timeout', requestId);
+        return;
+      }
+      if (err instanceof BodyTooLargeError) {
+        res.setHeader('Connection', 'close');
+        res.on('finish', () => req.destroy());
+        sendError(res, 413, err.message, requestId);
         return;
       }
       log.error({ err, requestId }, 'Internal error in proxy handler');
