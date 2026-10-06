@@ -52,7 +52,8 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |
 | PUT / DELETE | `/v1/profiles/:name` | store / delete your own profile (same fields as a spec) |
 
-Mutations require a key whose user is in `DEPLOYMENTS_ADMIN_USERS` (when set). `env` values and `registryAuth` are
+Mutations require an admin key: the `SANDBOX_TOKEN` user or a user in `DEPLOYMENTS_ADMIN_USERS` (empty = no other
+admin). A non-admin key invokes only its own app's deployments. `env` values and `registryAuth` are
 never returned. Spec fields and defaults: `src/deployments/spec.ts` (`SPEC_DEFAULTS`).
 
 ## Declared deployments
@@ -246,6 +247,14 @@ the container on `127.0.0.1:8000`; `/__aigw/ready` appears once the container an
 the Scaleway GPU OS image (Docker + NVIDIA toolkit) with `--gpus all`. The machine shuts itself down `maxHours + 30 min`
 after boot as a last resort — a shut-down Scaleway instance is still billed, so the gateway deletes halted replicas.
 
+Hardening (06/10/2026): the token check runs in nginx's access phase (`auth_request`), so requests **without** the
+token are rate-limited per IP (5 r/s, burst 10, 5 connections → `429`) while the gateway's own traffic is never
+limited; `server_tokens off`. Every Scaleway replica gets a firewall: a gateway-only one joins the namespace's
+`aigw-<namespace>-gateway-only` security group (one per zone, inbound DROP except TCP 80, outbound ACCEPT, made once
+and kept), never the project's default group (inbound ACCEPT, SSH open). A replica whose firewall cannot be made is not
+created. Machines created before keep the default group until they are replaced. Gateway → replica traffic is still
+plain HTTP (TLS with a pinned per-deployment certificate is a follow-up).
+
 ## Orphan guard
 
 While the gateway runs it never leaves a machine behind (scale to zero, halted replicas deleted, unknown machines of its
@@ -276,7 +285,8 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables Scaleway replicas (normally fetched with the token) |
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
-| `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only invoke / read |
+| `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = only the `SANDBOX_TOKEN` user is admin |
+| `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000; `docs/api/http.md` § App keys) |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
 | `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 150) caps parallel requests per key user, `MAX_CONCURRENT_PER_USER_OVERRIDES` (`user:limit,…`) per user |
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |

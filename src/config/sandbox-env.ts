@@ -9,8 +9,9 @@
  *
  * Priority: the palco value WINS over the process environment (Railway variables) for every key except the few
  * that must stay with the host — `isEnvPinned`: the token and its aliases, PORT, NODE_ENV, GATEWAY_API_KEYS,
- * HOSTNAME, RAILWAY_* and infra URLs (*_URL); DEPLOYMENTS_NAMESPACE / DEPLOYMENTS_STATE_DIR / DEPLOYMENTS_ENABLED are
- * never taken from the palco at all. So rotating a key on the palco is enough; a stale Railway variable
+ * HOSTNAME, RAILWAY_* and every endpoint override (`isEndpointOverride`: *_URL, *_BASE, *_HOST, *_ENDPOINT); none of
+ * them can be written through `PUT /v1/admin/keys` either. DEPLOYMENTS_NAMESPACE / DEPLOYMENTS_STATE_DIR /
+ * DEPLOYMENTS_ENABLED and the provider API bases (`*_BASE`, `*_BASE_URL`) are never taken from the palco at all. So rotating a key on the palco is enough; a stale Railway variable
  * cannot shadow it. Keys are re-read periodically and on demand by `KeyManager` (src/config/key-manager.ts).
  *
  * The same token is also accepted as a Bearer by the gateway itself (see `serve.ts`), so agents call it with the
@@ -30,13 +31,29 @@ const ENV_PINNED = new Set<string>([...TOKEN_ALIASES, 'PORT', 'NODE_ENV', 'GATEW
  */
 const HOST_ONLY = new Set<string>(['DEPLOYMENTS_NAMESPACE', 'DEPLOYMENTS_STATE_DIR', 'DEPLOYMENTS_ENABLED']);
 
+/**
+ * Names that point the gateway at a host: `OPENROUTER_API_BASE`, `GROQ_API_BASE`, `WHISPER_SERVER_BASE_URL`,
+ * `GATEWAY_HOST`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `SANDBOX_ENV_URL`… A remote value there redirects traffic (with the
+ * students' audio and text, and the provider key in the Authorization header) to whatever host it names — QA
+ * 06/10/2026: an admin key could write `OPENROUTER_API_BASE` through `PUT /v1/admin/keys` (only `_URL` was protected)
+ * and every speech call would go there after the next restart.
+ */
+export function isEndpointOverride(name: string): boolean {
+  return /(^|_)(URL|BASE|HOST|HOSTNAME|ENDPOINT)$/.test(name);
+}
+
+/** Provider API bases: code defaults are the real provider; only the host (Railway) may change them. */
+function isProviderBase(name: string): boolean {
+  return /(^|_)BASE(_URL)?$/.test(name);
+}
+
 export function isHostOnly(name: string): boolean {
   // RAILWAY_* tells the gateway it runs on Railway (see deploymentsFromEnv): never inherited from the palco.
-  return HOST_ONLY.has(name) || name.startsWith('RAILWAY_');
+  return HOST_ONLY.has(name) || name.startsWith('RAILWAY_') || isProviderBase(name);
 }
 
 export function isEnvPinned(name: string): boolean {
-  return ENV_PINNED.has(name) || HOST_ONLY.has(name) || name.startsWith('RAILWAY_') || name.endsWith('_URL');
+  return ENV_PINNED.has(name) || isHostOnly(name) || isEndpointOverride(name);
 }
 
 export const DEFAULT_SANDBOX_ENV_URLS = [

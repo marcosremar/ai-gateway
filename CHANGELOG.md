@@ -10,6 +10,26 @@ on release via `bunx changeset version`.
 
 ## [Unreleased]
 
+### Security
+
+- **Admin keys fail closed** — an empty `DEPLOYMENTS_ADMIN_USERS` no longer makes every `GATEWAY_API_KEYS` key an
+  admin: only the `SANDBOX_TOKEN` user is, and the boot logs a `WARNING` (`adminUsersFromEnv`, one rule for
+  deployments, `/v1/admin/keys` and `/health?deep=1`). Set `DEPLOYMENTS_ADMIN_USERS` before deploying if another key
+  needs admin.
+- **Direct-fallback plan hands out no master key by default** — without `OPENROUTER_PROVISIONING_KEY` the plan lists
+  routes and no credential; sharing the gateway's own `OPENROUTER_API_KEY` / `GROQ_API_KEY` needs
+  `APP_FALLBACK_SHARE_KEY=1`.
+- **Endpoint overrides are host-only** — `*_URL`, `*_BASE`, `*_HOST`, `*_ENDPOINT` cannot be written through
+  `PUT /v1/admin/keys`, the host value always wins, and provider API bases (`*_BASE`, `*_BASE_URL`) are never taken
+  from the palco.
+- **App-key limits** (`src/gateway/proxy/app-limits.ts`) — a non-admin key calls only its app's aliases (no `org/model`
+  passthrough), `max_tokens` is clamped (`APP_MAX_TOKENS`, 1024) and a daily budget applies (`APP_DAILY_REQUESTS`
+  5000, `APP_DAILY_TOKENS` 2 000 000 → `429`). Its route rewrites may only reuse targets it already has or its own
+  deployments, and it invokes only its own app's deployments.
+- **Replica firewall + nginx** — every Scaleway replica gets a security group (gateway-only replicas: the namespace's
+  drop-by-default group with TCP 80 only; before, the project default with inbound ACCEPT). nginx checks the token in
+  the access phase, rate-limits unauthenticated requests only, and hides its version.
+
 ### Added
 
 - **Deployments on Vast.ai + placement ladder** — `provider: "vast"` (`src/deployments/vast-backend.ts`, boot-script

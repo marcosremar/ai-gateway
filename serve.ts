@@ -29,8 +29,9 @@ import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
-import { deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
+import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
+import { AppLimits } from './src/gateway/proxy/app-limits';
 import { loadSandboxEnv, principalSandboxToken } from './src/config/sandbox-env';
 
 const log = createLogger('serve');
@@ -193,14 +194,26 @@ const keyManager = new KeyManager(process.env, {
 keyManager.adopt(sandboxEnv.received);
 if (SANDBOX_TOKEN) keyManager.start();
 
-// GET /health?deep=1 — same admins as deployments (SANDBOX_TOKEN user + DEPLOYMENTS_ADMIN_USERS; with no admin
-// list, any gateway API key).
-const adminUsers = (process.env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
+// GET /health?deep=1 and /v1/admin/keys — same admins as deployments: the SANDBOX_TOKEN user + DEPLOYMENTS_ADMIN_USERS.
+// An empty list grants nobody else (fail closed; it used to make every key an admin).
+const adminUsers = adminUsersFromEnv(process.env, [SANDBOX_USER]);
+const adminWarning = adminListWarning(process.env, [SANDBOX_USER]);
+if (adminWarning) log.warn({}, `WARNING: ${adminWarning}`);
 const isAdminToken = (token: string) => {
   const userId = keyRegistry.resolve(token)?.userId;
-  if (!userId) return false;
-  return adminUsers.length === 0 || [...adminUsers, SANDBOX_USER].includes(userId);
+  return Boolean(userId && adminUsers.has(userId));
 };
+// What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
+// clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
+const appLimits = API_KEYS.length ? new AppLimits({
+  env: process.env,
+  isAdmin: (userId) => adminUsers.has(userId),
+  aliasesOf: (userId, stage) => {
+    const routes = deployments?.apps.get(userId)?.routes?.[stage];
+    return routes ? new Set(Object.keys(routes)) : null;
+  },
+}) : undefined;
+
 const deepHealth = {
   authorize: isAdminToken,
   report: () => deepHealthReport({
@@ -236,6 +249,7 @@ const server = await startProxy({
   apiKeys: API_KEYS,
   providers,
   deepHealth,
+  ...(appLimits ? { appLimits } : {}),
   healthDetails: () => chainHealth(),
   customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),

@@ -18,9 +18,10 @@
  *     (`POST /api/v1/keys`, `DELETE /api/v1/keys/:hash`), USD-limited (APP_FALLBACK_KEY_LIMIT_USD, default 5), rotated
  *     after APP_FALLBACK_KEY_ROTATE_DAYS (default 7). Only its hash is stored in the app account; the key itself lives
  *     in memory, so a restart mints a new one. Replaced keys keep working for a grace day, then are deleted.
- *   - otherwise the gateway's own OPENROUTER_API_KEY (and GROQ_API_KEY) are shared (`keyKind: 'shared'`), unless
- *     APP_FALLBACK_SHARE_KEY=0.
- *   - nothing configured → the provider is absent (`openrouter: null`): the client gets no direct fallback for it.
+ *   - otherwise NO key (owner decision 2026-10-06, after the security test found the master OpenRouter key handed out
+ *     in `keyKind: 'shared'`): the plan still lists the routes, but `providers` is empty and `openrouter: null`, so the
+ *     client's direct fallback is off. Sharing the gateway's own OPENROUTER_API_KEY / GROQ_API_KEY (the whole
+ *     account, no limit, no expiry) needs an explicit APP_FALLBACK_SHARE_KEY=1.
  * Keys are never logged and never appear in another response.
  */
 
@@ -174,7 +175,8 @@ export class AppFallbackService {
   private get limitUsd() { return num(this.opts.env.APP_FALLBACK_KEY_LIMIT_USD, 5); }
   private get rotateMs() { return num(this.opts.env.APP_FALLBACK_KEY_ROTATE_DAYS, 7) * DAY_MS; }
   private get planTtlSeconds() { return Math.round(num(this.opts.env.APP_FALLBACK_PLAN_TTL_SECONDS, 3600)); }
-  private get shareKeys() { return this.opts.env.APP_FALLBACK_SHARE_KEY?.trim() !== '0'; }
+  /** Explicit opt-in only: a shared key is the gateway's master key (whole account, no limit, no expiry). */
+  private get shareKeys() { return this.opts.env.APP_FALLBACK_SHARE_KEY?.trim() === '1'; }
 
   async plan(app: string, routes: ModelRoutesSpec | undefined): Promise<FallbackPlan> {
     const wanted = fallbackRoutes(routes, new Set(Object.keys(FALLBACK_PROVIDER_URLS)));
@@ -197,7 +199,9 @@ export class AppFallbackService {
     return {
       app, issuedAt: new Date(this.now()).toISOString(), ttlSeconds: ttl, providers,
       openrouter: providers.openrouter ?? null,
-      routes: fallbackRoutes(routes, new Set(Object.keys(providers))),
+      // Every direct-callable entry, keyed or not: a client only calls entries whose provider has a credential here
+      // (sdk/node/direct-fallback.ts), so routes without keys document the chain without enabling anything.
+      routes: wanted,
     };
   }
 
@@ -214,7 +218,7 @@ export class AppFallbackService {
         return await this.serialized(app, () => this.provisioned(app, provisioner));
       } catch (err) {
         // The message carries an HTTP status only (OpenRouterKeyProvisioner never echoes a body).
-        this.log('app fallback: key provisioning failed, using the shared key if allowed', { app, error: String((err as Error).message ?? err).slice(0, 200) });
+        this.log('app fallback: key provisioning failed, using the shared key only if APP_FALLBACK_SHARE_KEY=1', { app, error: String((err as Error).message ?? err).slice(0, 200) });
       }
     }
     return this.shared('openrouter');

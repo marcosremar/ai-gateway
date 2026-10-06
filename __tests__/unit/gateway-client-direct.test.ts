@@ -69,6 +69,15 @@ describe('direct fallback — when to go direct', () => {
     expect(changes).toEqual([{ route: 'direct', reason: 'network' }]);
   });
 
+  // The gateway hands out no key unless APP_FALLBACK_SHARE_KEY=1 or a provisioning key mints one (06/10/2026): a plan
+  // with routes and no credentials must leave the client on the gateway's own error, never call a provider.
+  it('a plan with routes but no keys → no direct call, the gateway error is rethrown', async () => {
+    const keyless = (): FallbackPlan => ({ ...plan(), providers: {}, openrouter: null });
+    const { gw, f } = await setup({ [`POST ${GW}/v1/chat/completions`]: () => connectionRefused() }, { plan: keyless });
+    await expect(gw.chat({ model: 'parle-llm', messages: MSG })).rejects.toBeInstanceOf(GatewayError);
+    expect(toProviders(f)).toEqual([]);
+  });
+
   it('timeout before the first byte → direct', async () => {
     const { gw } = await setup({
       [`POST ${GW}/v1/audio/transcriptions`]: hang,

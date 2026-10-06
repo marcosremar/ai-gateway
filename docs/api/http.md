@@ -24,8 +24,21 @@ curl -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" ...
 Set `GATEWAY_API_KEYS` on the server (comma-separated; `key:user` names the user). `SANDBOX_TOKEN` is also
 accepted, as the `sandbox` user. When no key is configured, only localhost requests are allowed.
 
-**Admin keys** — the `sandbox` user plus the users in `DEPLOYMENTS_ADMIN_USERS` (when that list is empty, every
-key is admin). Admin keys are required for deployment mutations, `GET /health?deep=1` and `/v1/admin/keys*`.
+**Admin keys** — the `sandbox` user plus the users in `DEPLOYMENTS_ADMIN_USERS`. When that list is empty, no other
+key is admin (fail closed since 06/10/2026; the boot logs a `WARNING`). Admin keys are required for deployment
+mutations, `X-App`, `GET /health?deep=1` and `/v1/admin/keys*`.
+
+**App keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
+
+- **Models**: only the aliases of its own app (`PUT /v1/apps/:app/routes`), per stage — no `org/model` passthrough,
+  no embeddings or images. Anything else → `403 permission_error`, before any provider is called.
+- **`max_tokens`** (chat): clamped to `APP_MAX_TOKENS` (default `1024`); a request without one gets the cap.
+- **Daily budget** per app (UTC day, in memory): `APP_DAILY_REQUESTS` (default `5000`) requests and
+  `APP_DAILY_TOKENS` (default `2000000`) estimated tokens (prompt characters / 4 + `max_tokens` for chat, input
+  characters / 4 for TTS). Over → `429 budget_exceeded` with `Retry-After` until 00:00 UTC. `0` turns one off.
+- **Routes**: `PUT /v1/apps/:app/routes` with the app's own key may reorder, drop or re-alias the targets its routes
+  already have (set by an admin) and add the app's own deployments; any new target → `403`.
+- **Deployments**: `…/invoke` only on its own app's deployments (`403` otherwise).
 
 ## Rate Limiting
 
@@ -163,11 +176,12 @@ an admin key with `X-App: <app>`; anything else → `403` (an admin key without 
               "tts": { "parle-tts": [{ "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora", "fixedVoice": true }] } } }
 ```
 
-- **Routes**: the app's aliases (`PUT /v1/apps/:app/routes`), keeping per alias only the entries of a provider that
-  comes with a key in `providers` (OpenRouter; Groq when the chain has Groq entries and the gateway has
-  `GROQ_API_KEY`), in chain order, with `voice` / `fixedVoice` / `extraBody`. Deployments and other providers are
-  dropped: the client cannot reach them without the gateway. An entry without `model` calls the alias itself.
-- **Keys**: the gateway keeps the provider keys and hands them out here.
+- **Routes**: the app's aliases (`PUT /v1/apps/:app/routes`), keeping per alias the entries of a direct-callable
+  provider (OpenRouter, Groq), in chain order, with `voice` / `fixedVoice` / `extraBody`. Deployments and other
+  providers are dropped: the client cannot reach them without the gateway. An entry without `model` calls the alias
+  itself. The client only calls entries whose provider has a credential in `providers`.
+- **Keys**: a per-app minted key when `OPENROUTER_PROVISIONING_KEY` is set; otherwise **none** — `providers: {}`,
+  `openrouter: null`, and the client's direct fallback stays off (it rethrows the gateway's error).
 
 | Env | Default | |
 |---|---|---|
@@ -175,10 +189,11 @@ an admin key with `X-App: <app>`; anything else → `403` (an admin key without 
 | `APP_FALLBACK_KEY_LIMIT_USD` | `5` | USD limit of a minted key |
 | `APP_FALLBACK_KEY_ROTATE_DAYS` | `7` | a minted key is replaced after this; the old one keeps working one more day, then is deleted (each key also expires on its own at rotation + 1 day) |
 | `APP_FALLBACK_PLAN_TTL_SECONDS` | `3600` | `ttlSeconds` of the plan (shorter when a rotation is closer) |
-| `APP_FALLBACK_SHARE_KEY` | on | `0` = never hand out the gateway's own `OPENROUTER_API_KEY` / `GROQ_API_KEY`; without a minted key the provider is then absent (`openrouter: null`) |
+| `APP_FALLBACK_SHARE_KEY` | off | `1` = when no key can be minted, hand out the gateway's own `OPENROUTER_API_KEY` / `GROQ_API_KEY` (`keyKind: "shared"`: the whole account, no limit, no expiry). Any other value, or unset, never does |
 
-Without provisioning, the gateway's own keys are shared (`keyKind: "shared"`) — the default. A failed provisioning
-falls back to the shared key (when allowed). Keys are never logged and appear in no other response. Security: the
+Since 06/10/2026 the gateway's own master keys are **not** shared by default (a security test found the master
+OpenRouter key handed out to any admin key with `X-App`). Without provisioning and without `APP_FALLBACK_SHARE_KEY=1`,
+the plan carries routes and no key. A failed provisioning falls back to the shared key only when that opt-in is set. Keys are never logged and appear in no other response. Security: the
 plan goes only over HTTPS, only to authenticated app keys, and only to **server-side** clients — never to a browser
 bundle; a minted key's limit bounds what a leak can cost. Needs app accounts (deployments enabled).
 
@@ -384,8 +399,11 @@ for a cold start.
 The palco (`SANDBOX_ENV_URL`, default `https://parle-palco.up.railway.app/api/sandbox-env`, Bearer
 `SANDBOX_TOKEN`) is the single home of the provider keys. Its values **win** over the service environment
 (Railway variables), except for host settings that always stay in the environment: `SANDBOX_TOKEN` and its
-aliases, `PORT`, `NODE_ENV`, `GATEWAY_API_KEYS`, `HOSTNAME`, `RAILWAY_*` and `*_URL`. `DEPLOYMENTS_NAMESPACE`,
-`DEPLOYMENTS_STATE_DIR`, `DEPLOYMENTS_ENABLED` and `RAILWAY_*` are never read from the palco at all.
+aliases, `PORT`, `NODE_ENV`, `GATEWAY_API_KEYS`, `HOSTNAME`, `RAILWAY_*` and every endpoint override (`*_URL`,
+`*_BASE`, `*_HOST`, `*_HOSTNAME`, `*_ENDPOINT`). `DEPLOYMENTS_NAMESPACE`, `DEPLOYMENTS_STATE_DIR`,
+`DEPLOYMENTS_ENABLED`, `RAILWAY_*` and the provider API bases (`*_BASE`, `*_BASE_URL`, e.g. `OPENROUTER_API_BASE`)
+are never read from the palco at all: a remote value there would send every request, with the provider key and the
+users' audio and text, to another host.
 
 The gateway re-reads the palco every 5 minutes. Providers read their key on every request, and a reload that
 changes a key re-mounts the providers in place: a provider that gained a key starts serving (and appears in
@@ -410,7 +428,8 @@ contain names only.
 { "written": ["OPENROUTER_API_KEY"], "reloaded": true, "changed": ["OPENROUTER_API_KEY"], "removed": [] }
 ```
 
-`400` for protected names (`SANDBOX_TOKEN` and aliases, `PORT`, `*_URL`, …) or malformed input; `502` when the
+`400` for protected names (`SANDBOX_TOKEN` and aliases, `PORT`, `*_URL`, `*_BASE`, `*_HOST`, `*_ENDPOINT`, …) or
+malformed input; `502` when the
 palco refuses the write.
 
 ---
