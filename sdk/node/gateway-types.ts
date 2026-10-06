@@ -21,6 +21,41 @@ export interface DirectFallbackOptions {
   failureThreshold?: number;
   /** How long the gateway is skipped once the breaker opened. Default 30 000 ms. */
   cooldownMs?: number;
+  /**
+   * A gateway call that takes longer than this counts as gateway instability: it is logged (`slow`) and counts
+   * toward `failureThreshold`, so persistent slowness opens the breaker and routes calls direct. 0 = only hard
+   * failures count. Default 0. (To abandon a slow call mid-flight, use `timeoutMs` — a timeout already goes direct.)
+   */
+  slowMs?: number;
+}
+
+// ── Instability reporting ───────────────────────────────────────────────────
+
+/** One observation of the gateway's health, recorded by GatewayClient and posted back once it recovers. */
+export interface InstabilityEvent {
+  /** epoch ms of the observation. */
+  at: number;
+  kind: 'unreachable' | 'slow' | 'direct' | 'direct_failed' | 'recovered' | 'breaker_open';
+  /** Gateway path that suffered (`/v1/chat/completions`, …). */
+  path?: string;
+  /** Error code (`network`, `timeout`, `http_502`, `breaker_open`, …). */
+  code?: string;
+  route?: GatewayRoute;
+  latencyMs?: number;
+  detail?: string;
+}
+
+export interface InstabilityOptions {
+  /** Reported as `client` — the service this SDK instance serves (default 'gateway-client'). */
+  client?: string;
+  /** Buffered events kept in memory (oldest dropped). Default 500. */
+  bufferSize?: number;
+  /**
+   * POST the buffered events to `POST /v1/apps/:app/stability-report` automatically once the gateway answers
+   * again (the app comes from `directFallback.app`, else `app`). Default true. Off = the app reads
+   * `instabilityEvents()` / calls `reportInstabilities()` itself.
+   */
+  report?: boolean;
 }
 
 /** The part of `fetch` the client uses (the global fetch, undici's, a test fake…). */
@@ -39,6 +74,8 @@ export interface GatewayClientOptions {
   timeoutMs?: Partial<Record<TimeoutGroup, number>>;
   /** Server-side clients only: call the same models on the providers directly while the gateway is unreachable. */
   directFallback?: DirectFallbackOptions;
+  /** Buffer gateway-instability events and report them back once the gateway recovers. */
+  instability?: InstabilityOptions;
   /** The route of a direct-capable call changed (gateway ↔ direct). */
   onRouteChange?: (change: RouteChange) => void;
   /** Clock (tests). */

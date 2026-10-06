@@ -1007,7 +1007,8 @@ export { GATEWAY_CLIENT_TIMEOUTS } from './gateway-types';
 export type {
   AppImage, AppView, CallOptions, ChatCompletion, ChatMessage, ChatRequest, ChatStream, ChatUsage, DeploymentList,
   DeploymentPutBody, DeploymentSpec, DeploymentView, DirectFallbackOptions, FallbackCredential, FallbackEntry,
-  FallbackPlan, FetchLike, GatewayClientOptions, GatewayRoute, GatewayState, HealthReport, ModelRoutesSpec, Profile, ReplicaView,
+  FallbackPlan, FetchLike, GatewayClientOptions, GatewayRoute, GatewayState, HealthReport, InstabilityEvent,
+  InstabilityOptions, ModelRoutesSpec, Profile, ReplicaView,
   RouteChange, RouteEntrySpec, S2SConfig, S2SEvent, S2SFrame, S2SRequest, S2SStream, Served, SpeechRequest,
   SpeechResult, TimeoutGroup, Transcription, TranscribeRequest,
 } from './gateway-types';

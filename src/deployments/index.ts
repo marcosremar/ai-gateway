@@ -12,6 +12,7 @@ import { ScalewayDeploymentBackend } from './scaleway-backend';
 import { FileDeploymentStore } from './store';
 import { AppRegistry, FileAppStore } from './apps';
 import { AppFallbackService, OpenRouterKeyProvisioner } from './app-fallback';
+import { ClientStabilityLog } from './stability';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
 
@@ -27,6 +28,8 @@ export { DeclaredDeploymentReconciler, DECLARED_DEPLOYMENTS, declaredBody, decla
 export type { DeclaredDeployment, DeclaredStatus } from './declared';
 export { AppRegistry, FileAppStore, MemoryAppStore } from './apps';
 export { AppFallbackService, OpenRouterKeyProvisioner, fallbackRoutes } from './app-fallback';
+export { ClientStabilityLog, cleanEvent } from './stability';
+export type { ClientStabilityBatch, ClientInstabilityEvent } from './stability';
 export type * from './types';
 
 /**
@@ -67,6 +70,8 @@ export interface DeploymentsFromEnv {
  *   Direct fallback (`GET /v1/apps/:app/fallback`, app-fallback.ts): OPENROUTER_PROVISIONING_KEY (mint per-app keys),
  *   APP_FALLBACK_KEY_LIMIT_USD (5), APP_FALLBACK_KEY_ROTATE_DAYS (7), APP_FALLBACK_PLAN_TTL_SECONDS (3600),
  *   APP_FALLBACK_SHARE_KEY=0 (do not hand out the gateway's own keys)
+ *   Stability reports (`POST /v1/apps/:app/stability-report`, stability.ts): SDK clients post the instability events
+ *   they buffered while the gateway was down; persisted to client-stability.jsonl in the state dir.
  */
 /** DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES (default 60, 0 = off): how long a `minReplicas` pin may sit unused. */
 export const PINNED_IDLE_MAX_MINUTES = 60;
@@ -122,6 +127,8 @@ export function deploymentsFromEnv(
       env, store: apps, log: opts.log,
       provisioner: new OpenRouterKeyProvisioner(() => env.OPENROUTER_PROVISIONING_KEY),
     }),
+    // SDK instability reports persist next to the deployments state (client-stability.jsonl).
+    stability: new ClientStabilityLog({ file: join(stateDir, 'client-stability.jsonl'), log: opts.log }),
     isAdmin: admins.length ? (req) => [...admins, ...(opts.alwaysAdmin ?? [])].includes(opts.userOf(req) ?? '') : undefined,
     declaredStatus: opts.declaredStatus,
   });

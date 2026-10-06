@@ -195,6 +195,26 @@ falls back to the shared key (when allowed). Keys are never logged and appear in
 plan goes only over HTTPS, only to authenticated app keys, and only to **server-side** clients — never to a browser
 bundle; a minted key's limit bounds what a leak can cost. Needs app accounts (deployments enabled).
 
+### Instability reports — `POST /v1/apps/:app/stability-report`
+
+The SDK client ([client § Instability report](./client.md)) buffers what it saw while the gateway was unreachable or
+slow — `unreachable`, `direct`, `slow`, `direct_failed`, `recovered` events — and posts the batch here once the
+gateway answers again. The caller rules of the app's other paths apply (the app's own key, or an admin key; `X-App`
+for another app).
+
+```json
+{ "client": "parle-backend", "sentAt": 1750000000000,
+  "events": [{ "at": 1750000000000, "kind": "unreachable", "path": "/v1/chat/completions", "code": "network", "latencyMs": 40 },
+             { "at": 1750000000100, "kind": "direct", "route": "direct", "detail": "network" }] }
+```
+
+→ `200 { ok: true, accepted: <n> }`. Malformed events are dropped (`accepted` counts the kept ones — `at` + `kind`
+required, string fields capped); an eventless report stores nothing. Reports land in an in-memory ring (last 200) and,
+best-effort, `client-stability.jsonl` under `DEPLOYMENTS_STATE_DIR`.
+
+`GET /v1/apps/:app/stability-report?limit=50` → `{ app, reports: [{ app, client, receivedAt, events }] }` (newest
+last) — the app's own outages, readable by the same callers.
+
 ### Changing the map — `MODEL_ROUTES`
 
 A JSON env var adds or replaces chains (same model = replaced). Entries: `"provider"`, `"provider:upstreamModel"`,
