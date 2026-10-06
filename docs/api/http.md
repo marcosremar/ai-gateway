@@ -181,6 +181,11 @@ Built for low latency: no round trip between stages, the first sentence is voice
   "language": "pt", "voice": "br-m-08", "fallback_voice": "pf_dora", "max_tokens": 160, "temperature": 0.6 }
 ```
 
+**JSON answers** (a character that also decides something): send `"response_format": {"type": "json_object"}` and
+`"speak_field": "utterance"`. Only that field is voiced, as it streams; `done.reply_raw` carries the whole JSON. The
+speech-stack primary takes JSON turns only with `S2S_PRIMARY_SPEAK_FIELD=1` (image from 2026-10-06 on); until then
+they go to the composed pipeline (`route.fallback: "unsupported"`).
+
 **Response** — `application/x-aigw-s2s` frames `[1 byte kind][4 bytes BE length][payload]`: `E` = one JSON event,
 `A` = raw PCM s16le mono (24 kHz unless an `audio_format` event says otherwise). `?format=ndjson` gives one JSON per
 line with audio as `{"type":"audio","pcm":"<base64>"}` (debugging, browsers without a frame parser).
