@@ -17,7 +17,7 @@ on release via `bunx changeset version`.
   others) and released as `expiring`, so the caller never sees the host go. `expiresInMinutes` per replica in the view.
 - **`minCuda` deployment field (Vast)** — lowest CUDA the host driver must support (`cuda_max_good`), for the image's own
   CUDA; the search and the local re-check use the higher of it and the GPU's floor (12.8 Blackwell, else 12.4). A 5090
-  host on driver 570 (CUDA 12.8) could not start `vllm/vllm-omni:v0.28.0` (CUDA 12.9): error 804 at the first CUDA call.
+  host on driver 570 (CUDA 12.8) could not start `vllm/vllm-omni:v0.28.0` (CUDA 13.0, torch cu130): error 804 at the first CUDA call.
 - **Deployments on Vast.ai + placement ladder** — `provider: "vast"` (`src/deployments/vast-backend.ts`, boot-script
   mode only: `image` is the container, `bootScript` its onstart, app on `127.0.0.1:<port>`; `vastReplicaInit` starts
   nginx without systemd), enabled by `VAST_API_KEY`. The controller takes `backends` (one per provider; `backend`
