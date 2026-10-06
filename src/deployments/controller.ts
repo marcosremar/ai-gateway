@@ -25,7 +25,7 @@ export class DeploymentError extends Error {
   }
 }
 
-interface ProbeState { everReady: boolean; readyNow: boolean; failures: number }
+interface ProbeState { everReady: boolean; readyNow: boolean; failures: number; readyAt?: number }
 
 interface Runtime {
   record: DeploymentRecord;
@@ -307,7 +307,7 @@ export class DeploymentController {
 
   private observed(m: ReplicaMachine, inflight: number): ObservedReplica {
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
-    return { machine: m, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight };
+    return { machine: m, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight, ...(p.readyAt ? { readyAt: p.readyAt } : {}) };
   }
 
   private async reconcileOnce(): Promise<void> {
@@ -368,7 +368,7 @@ export class DeploymentController {
     } catch {
       ok = false;
     }
-    if (ok) { p.everReady = true; p.readyNow = true; p.failures = 0; }
+    if (ok) { p.readyAt ??= Date.now(); p.everReady = true; p.readyNow = true; p.failures = 0; }
     else { p.readyNow = false; if (p.everReady) p.failures++; }
     this.probes.set(m.id, p);
   }

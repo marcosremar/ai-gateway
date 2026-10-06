@@ -195,9 +195,12 @@ describe('deployments API', () => {
     const replicasUsed = new Set(await Promise.all(spread.map(async r => ((await r.json()) as { replica: string }).replica)));
     expect(replicasUsed.size).toBe(3);
 
-    // Idle: push lastRequestAt back past idleMinutes.
-    (h.controller as unknown as { deployments: Map<string, { record: { lastRequestAt: number } }> })
-      .deployments.get('busy')!.record.lastRequestAt = Date.now() - 2 * 60_000;
+    // Idle: push lastRequestAt (and when the replicas became ready) back past idleMinutes.
+    const internals = h.controller as unknown as {
+      deployments: Map<string, { record: { lastRequestAt: number } }>; probes: Map<string, { readyAt?: number }>;
+    };
+    internals.deployments.get('busy')!.record.lastRequestAt = Date.now() - 2 * 60_000;
+    for (const p of internals.probes.values()) if (p.readyAt) p.readyAt = Date.now() - 3 * 60_000;
     await until(() => h.cloud.machines.size === 0, 3000);
     expect(h.controller.get('busy')!.status).toBe('scaled-to-zero');
   });
