@@ -11,7 +11,7 @@ describe('internal sub-requests', () => {
       headers = init?.headers as Record<string, string>;
       return new Response(JSON.stringify({ text: 'oi' }), { status: 200 });
     }) as typeof fetch;
-    const stages = loopbackStages({ baseUrl: 'http://127.0.0.1:1', authorization: 'Bearer k', fetchImpl });
+    const stages = loopbackStages({ baseUrl: 'http://127.0.0.1:1', authorization: 'Bearer k', fetchImpl, models: { stt: 'app-stt' } });
     await stages.transcribe(new Uint8Array([1]), 'audio/wav', { language: 'pt' } as never, new AbortController().signal);
     expect(headers[SUBREQUEST_HEADER]).toBe(SUBREQUEST_TOKEN);
     expect(headers.Authorization).toBe('Bearer k');

@@ -6,6 +6,7 @@ import {
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import { handleModelsWithDynamic } from '../../../src/gateway/proxy/routes/models';
 import { probeCloudProvider } from '../../../src/gateway/providers/cloud/cloud-health';
+import { parleRoutes } from './_parle-routes';
 
 const keys: Record<string, boolean> = {};
 const p = (providerId: string) => ({ providerId, isConfigured: () => Boolean(keys[providerId]) }) as never;
@@ -65,11 +66,11 @@ describe('buildServeProviders — only configured providers are mounted', () => 
     expect(Object.keys(providers.tts ?? {})).toContain('canopylabs/orpheus-v1-english');
   });
 
-  it('parle aliases: deployment first, OpenRouter fallback; deployment names from env', () => {
+  it("an app's aliases: deployment first, OpenRouter fallback; deployment names from its routes", () => {
     keys.openrouter = true;
     const deploymentProvider = vi.fn((_stage: string, name: string) => ({ providerId: 'self-hosted', isConfigured: () => name === 'my-tts' }) as never);
     const { providers } = buildServeProviders({
-      instances: instances(), openrouter: { state: 'valid' }, deploymentProvider, env: { TTS_DEPLOYMENT: 'my-tts' },
+      instances: instances(), openrouter: { state: 'valid' }, deploymentProvider, appRoutes: parleRoutes({ tts: 'my-tts' }),
     });
     expect(providers.tts?.['parle-tts']?.map(t => `${t.providerId}:${t.model}`))
       .toEqual(['deployment:my-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base', 'openrouter:microsoft/mai-voice-2.1-flash', 'openrouter:hexgrad/kokoro-82m']);
@@ -79,9 +80,9 @@ describe('buildServeProviders — only configured providers are mounted', () => 
     expect(providers.stt?.['parle-stt']?.map(t => t.providerId)).toEqual(['deployment:parle-speech', 'openrouter']);
   });
 
-  it('without deployments the aliases still serve from OpenRouter', () => {
+  it("without deployments an app's aliases still serve from OpenRouter", () => {
     keys.openrouter = true;
-    const { providers } = buildServeProviders({ instances: instances(), openrouter: { state: 'valid' } });
+    const { providers } = buildServeProviders({ instances: instances(), openrouter: { state: 'valid' }, appRoutes: parleRoutes() });
     expect(providers.chatRoutes?.['parle-llm']?.map(t => t.model)).toEqual(['qwen/qwen3.5-9b', 'google/gemini-2.5-flash-lite']);
   });
 

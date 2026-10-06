@@ -1,8 +1,8 @@
 /**
  * The composed speech-to-speech pipeline: the gateway's own stage routes chained in one streamed answer.
  *
- *   audio ─► STT (parle-stt chain) ─► LLM tokens (parle-llm chain, streamed) ─► SentenceCutter
- *         ─► TTS per sentence (parle-tts chain, up to `ttsParallel` ahead) ─► events + audio, in speaking order
+ *   audio ─► STT (models.stt chain) ─► LLM tokens (models.chat chain, streamed) ─► SentenceCutter
+ *         ─► TTS per sentence (models.tts chain, up to `ttsParallel` ahead) ─► events + audio, in speaking order
  *
  * Every stage keeps its own fallback chain, hedge, circuit breaker and time budget (provider-routing.ts): this module
  * only orders them and streams. It is the fallback of a speech-stack deployment and can also resume one that broke
@@ -35,6 +35,10 @@ export interface S2SConfig {
    * context around the student's words) before the transcript exists. Default: the transcript alone.
    */
   user_template?: string;
+  /** The speech-stack deployment that answers the whole turn on one GPU (the app's own; default `S2S_DEPLOYMENT`). */
+  deployment?: string;
+  /** The app's stage aliases for the composed fallback (`PUT /v1/apps/:app/routes`); default `S2S_<STAGE>_MODEL`. */
+  models?: { stt?: string; chat?: string; tts?: string };
 }
 
 export const TRANSCRIPT_SLOT = '{{transcript}}';

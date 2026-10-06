@@ -70,12 +70,14 @@ const LANGUAGE_NAMES: Record<string, string> = { pt: 'pt', fr: 'fr', en: 'en', e
 
 export function loopbackStages(opts: LoopbackOptions): StageClient {
   const f = opts.fetchImpl ?? fetch;
-  // An unset override (`S2S_STT_MODEL` absent → undefined) keeps the alias: spreading it would send model "undefined".
-  const models = {
-    stt: opts.models?.stt || 'parle-stt',
-    chat: opts.models?.chat || 'parle-llm',
-    tts: opts.models?.tts || 'parle-tts',
+  // The app names its own aliases (config.models, or S2S_<STAGE>_MODEL); the gateway names no app. An unset one is a
+  // loud error, never a model called "undefined".
+  const pick = (stage: 'stt' | 'chat' | 'tts'): string => {
+    const model = opts.models?.[stage];
+    if (!model) throw new Error(`no ${stage} model for the composed fallback: send config.models.${stage} or set S2S_${stage.toUpperCase()}_MODEL`);
+    return model;
   };
+  const models = { get stt() { return pick('stt'); }, get chat() { return pick('chat'); }, get tts() { return pick('tts'); } };
   const auth = { Authorization: opts.authorization, [SUBREQUEST_HEADER]: SUBREQUEST_TOKEN };
   return {
     async transcribe(audio, contentType, cfg, signal) {

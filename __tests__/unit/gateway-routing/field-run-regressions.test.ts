@@ -14,6 +14,7 @@ import { handleAudioTranscriptions, _resetSttCache } from '../../../src/gateway/
 import { handleChatCompletions } from '../../../src/gateway/proxy/routes/chat-completions';
 import { handleAudioSpeech } from '../../../src/gateway/proxy/routes/audio-speech';
 import type { ProxyRequest, RouteTarget } from '../../../src/gateway/proxy/types';
+import { parleRoutes } from './_parle-routes';
 
 const chatReq = (model = 'parle-llm', extra: Record<string, unknown> = {}): ProxyRequest => ({
   method: 'POST', url: '/v1/chat/completions', headers: {}, rawBody: Buffer.alloc(0),
@@ -67,7 +68,7 @@ describe('1) empty LLM answers are failures; reasoning off; finish_reason passed
   it('the parle-llm OpenRouter targets have reasoning off and no ZDR-blocked model', () => {
     const p = { providerId: 'openrouter', isConfigured: () => true } as never;
     const instances: ServeInstances = { chat: { openrouter: p }, stt: { openrouter: p }, tts: { openrouter: p } };
-    const { providers } = buildServeProviders({ instances, openrouter: { state: 'valid' } });
+    const { providers } = buildServeProviders({ instances, openrouter: { state: 'valid' }, appRoutes: parleRoutes() });
     const chain = providers.chatRoutes!['parle-llm'];
     expect(chain.map(t => t.model)).not.toContain('qwen/qwen3.7-flash');
     for (const t of chain) expect(t.extraBody).toEqual({ reasoning: { enabled: false } });
@@ -164,7 +165,7 @@ describe('4) a replica timeout is labelled timeout and the replica call is abort
     const p = { providerId: 'x', isConfigured: () => true } as never;
     const instances: ServeInstances = { chat: { openrouter: p }, stt: { openrouter: p }, tts: { openrouter: p } };
     const dep = vi.fn(() => p);
-    const { providers } = buildServeProviders({ instances, openrouter: { state: 'valid' }, deploymentProvider: dep, env: { DEPLOYMENT_TIMEOUT_MS: '4000' } });
+    const { providers } = buildServeProviders({ instances, openrouter: { state: 'valid' }, deploymentProvider: dep, env: { DEPLOYMENT_TIMEOUT_MS: '4000' }, appRoutes: parleRoutes() });
     expect(providers.tts!['parle-tts'][0]).toMatchObject({ providerId: 'deployment:parle-qwen-tts', timeoutMs: 4000 });
     expect(providers.tts!['parle-tts'][1].timeoutMs).toBeUndefined();
   });
@@ -174,7 +175,7 @@ describe('5) the 503 names the fallback key even when the deployment is still in
   it('buildServeProviders keeps the reasons of dropped entries of a mounted chain', () => {
     const p = { providerId: 'x', isConfigured: () => false } as never;
     const instances: ServeInstances = { chat: { openrouter: p }, stt: { openrouter: p }, tts: { openrouter: p } };
-    const { providers, summary } = buildServeProviders({ instances, openrouter: { state: 'missing' }, deploymentProvider: () => ({ providerId: 'self-hosted', isConfigured: () => true }) as never });
+    const { providers, summary } = buildServeProviders({ instances, openrouter: { state: 'missing' }, deploymentProvider: () => ({ providerId: 'self-hosted', isConfigured: () => true }) as never, appRoutes: parleRoutes() });
     expect(providers.tts!['parle-tts']).toHaveLength(1);
     expect(providers.unavailable!.tts!['parle-tts']).toEqual(['openrouter: OPENROUTER_API_KEY is not set']);
     expect((summary.unavailable as { tts: string[] }).tts).not.toContain('parle-tts');

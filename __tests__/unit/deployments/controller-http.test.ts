@@ -21,7 +21,7 @@ const SITE = 'site-key-0123456789';
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
@@ -36,6 +36,7 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
     apps,
     isAdmin: (req) => req.headers.authorization === `Bearer ${ADMIN}`,
     userOf: (req) => (req.headers.authorization === `Bearer ${SITE}` ? 'site-a' : req.headers.authorization === `Bearer ${ADMIN}` ? 'owner' : null),
+    onRoutesChange: opts.onRoutesChange,
   });
   const server = createProxyServer({
     apiKeys: [`${ADMIN}:owner`, `${SITE}:site-a`],
@@ -397,6 +398,29 @@ describe('app accounts: saved image addresses per app', () => {
     expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: SPEECH, registryAuth: { password: 'p' } }, ADMIN, asParle)).status).toBe(400);
     expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'missing' }, ADMIN, asParle)).status).toBe(404);
     expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'speech-stack' }, ADMIN)).status).toBe(400);
+  });
+
+  it('an app owns its aliases: PUT routes validates, re-mounts the providers, and refuses another app\'s alias', async () => {
+    let remounts = 0;
+    const r = await harness({ onRoutesChange: () => { remounts++; } });
+    extra.push(r);
+    const chain = { tts: { 'parle-tts': [
+      { provider: 'deployment', deployment: 'parle-qwen-tts' },
+      { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pf_dora', fixedVoice: true },
+    ] } };
+    let res = await call(r, 'PUT', '/v1/apps/parle/routes', chain, ADMIN, asParle);
+    expect(res.status).toBe(200);
+    expect(remounts).toBe(1);
+    const got = await (await call(r, 'GET', '/v1/apps/parle/routes', undefined, ADMIN, asParle)).json() as { routes: typeof chain };
+    expect(got.routes.tts['parle-tts'][1]).toMatchObject({ voice: 'pf_dora', fixedVoice: true });
+    // Invalid entries and non-objects are refused, and nothing is re-mounted
+    expect((await call(r, 'PUT', '/v1/apps/parle/routes', { chat: { x: [42] } }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(r, 'PUT', '/v1/apps/parle/routes', '[1]', ADMIN, asParle)).status).toBe(400);
+    // site-a cannot take parle's alias, nor write parle's routes
+    res = await call(r, 'PUT', '/v1/apps/site-a/routes', { tts: { 'parle-tts': [{ provider: 'openrouter', model: 'm' }] } }, SITE);
+    expect(res.status).toBe(409);
+    expect((await call(r, 'PUT', '/v1/apps/parle/routes', chain, SITE)).status).toBe(403);
+    expect(remounts).toBe(1);
   });
 
   it('accounts persist across a gateway restart (file store)', async () => {
