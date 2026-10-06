@@ -13,6 +13,7 @@ import type { LLMProvider } from '../../../src/gateway/providers/cloud/types';
 import { routeRequest, stageBudgetMs, type RouteTarget } from '../../../src/gateway/proxy/provider-routing';
 import { handleChatCompletions } from '../../../src/gateway/proxy/routes/chat-completions';
 import type { ProxyRequest } from '../../../src/gateway/proxy/types';
+import { parleRoutes } from './_parle-routes';
 
 interface Fake { providerId: string; isConfigured(): boolean; call: ReturnType<typeof vi.fn> }
 const fake = (providerId: string, impl: (signal: AbortSignal) => Promise<string>): Fake =>
@@ -63,7 +64,7 @@ describe('hung deployment: hedge + first-byte timeout + stage budget', () => {
     expect(stageBudgetMs('chat', { GATEWAY_CHAT_BUDGET_MS: '6000' })).toBe(6_000);
     const p = { providerId: 'x', isConfigured: () => true } as never;
     const instances: ServeInstances = { chat: { openrouter: p }, stt: { openrouter: p }, tts: { openrouter: p } };
-    const { providers } = buildServeProviders({ instances, openrouter: { state: 'valid' }, deploymentProvider: () => p, env: { DEPLOYMENT_TTS_TIMEOUT_MS: '2500' } });
+    const { providers } = buildServeProviders({ instances, openrouter: { state: 'valid' }, deploymentProvider: () => p, env: { DEPLOYMENT_TTS_TIMEOUT_MS: '2500' }, appRoutes: parleRoutes() });
     expect(providers.tts!['parle-tts'][0]).toMatchObject({ timeoutMs: 2_500, hedgeAfterMs: 1_500 });
     expect(providers.chatRoutes!['parle-llm'][0]).toMatchObject({ timeoutMs: 4_000, hedgeAfterMs: 1_500 });
   });

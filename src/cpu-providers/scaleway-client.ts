@@ -26,7 +26,7 @@ const SCW_BLOCK_API = process.env.SCALEWAY_BLOCK_API_BASE || 'https://api.scalew
 const SCW_MARKETPLACE_API = process.env.SCALEWAY_MARKETPLACE_API_BASE || 'https://api.scaleway.com/marketplace/v2';
 
 /** All known Scaleway zones — queried in parallel for listInstances. */
-const KNOWN_ZONES = ['fr-par-1', 'fr-par-2', 'fr-par-3', 'nl-ams-1', 'nl-ams-2', 'nl-ams-3', 'pl-waw-1', 'pl-waw-2', 'pl-waw-3'];
+export const KNOWN_ZONES = ['fr-par-1', 'fr-par-2', 'fr-par-3', 'nl-ams-1', 'nl-ams-2', 'nl-ams-3', 'pl-waw-1', 'pl-waw-2', 'pl-waw-3'];
 
 /** Fallback zone used only when no region is specified. */
 const FALLBACK_ZONE = 'fr-par-1';
@@ -147,6 +147,10 @@ const releaseGetRetryMs = () => Number(process.env.SCALEWAY_RELEASE_GET_RETRY_MS
 const VOLUME_DROP_ATTEMPTS = Number(process.env.SCALEWAY_VOLUME_ATTEMPTS ?? 90);
 
 // ── Client ───────────────────────────────────────────────────────────────────
+
+export interface ScalewayBlockVolume {
+  id: string; zone: string; name: string; status: string; attached: boolean; createdAt: number; updatedAt: number; sizeGb: number;
+}
 
 export class ScalewayClient extends AbstractGpuProvider {
   readonly providerId = 'scaleway';
@@ -366,9 +370,12 @@ export class ScalewayClient extends AbstractGpuProvider {
     this.log.log(`[scaleway] Server created: ${server.id} (${usedType.type})${volumeIds.length ? ` volumes=[${volumeIds.join(',')}]` : ''}`);
 
     try {
+      // A server Scaleway has just created can answer 404 for a moment (seen 06/10/2026: the user_data/poweron calls
+      // right after the create failed with `instance_server not found` and the replica was thrown away).
+      const fresh = <T>(step: () => Promise<T>) => this.retryNotFound(step);
       // user_data: custom cloud-init takes precedence over docker bot script
       for (const [key, data] of Object.entries(spec.userDataFiles ?? {})) {
-        await this.setUserDataKey(zone, server.id, secretKey, key, data);
+        await fresh(() => this.setUserDataKey(zone, server.id, secretKey, key, data));
       }
       const cloudInit = spec.cloudInitFor
         ? spec.cloudInitFor({ serverId: server.id, ip: ipv4Of(server) })
@@ -378,12 +385,12 @@ export class ScalewayClient extends AbstractGpuProvider {
         const script = cloudInit.startsWith('#')
           ? cloudInit
           : `#!/bin/bash\n${cloudInit}\n`;
-        await this.setUserData(zone, server.id, secretKey, script);
+        await fresh(() => this.setUserData(zone, server.id, secretKey, script));
       } else if (spec.dockerImage) {
-        await this.setUserData(zone, server.id, secretKey, this.buildUserData(spec));
+        await fresh(() => this.setUserData(zone, server.id, secretKey, this.buildUserData(spec)));
       }
 
-      await this.serverAction(zone, server.id, 'poweron', secretKey);
+      await fresh(() => this.serverAction(zone, server.id, 'poweron', secretKey));
       this.log.log(`[scaleway] Server ${server.id} powering on...`);
 
       const ip = await this.waitForIp(zone, server.id, secretKey);
@@ -570,6 +577,27 @@ export class ScalewayClient extends AbstractGpuProvider {
       return res.servers.map(server => this.toGpuInstance(server, zone));
     }));
     return lists.flat();
+  }
+
+  /** SBS volumes of a zone (block/v1alpha1), optionally scoped to a project: id, name, status, attachments, times. */
+  async listBlockVolumes(zone: string, credentials: ProviderCredentials, opts: { projectId?: string } = {}): Promise<ScalewayBlockVolume[]> {
+    const secretKey = this.requireSecret(credentials);
+    const project = opts.projectId ? `project_id=${encodeURIComponent(opts.projectId)}&` : '';
+    const res = await this.fetchJson<{ volumes?: Array<Record<string, unknown>> }>(
+      `${this.blockZoneUrl(zone)}/volumes?${project}page_size=100`, { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
+    return (res.volumes ?? []).map(v => ({
+      id: String(v.id), zone, name: String(v.name ?? ''), status: String(v.status ?? ''),
+      attached: Array.isArray(v.references) && v.references.length > 0,
+      createdAt: Date.parse(String(v.created_at ?? '')), updatedAt: Date.parse(String(v.updated_at ?? v.created_at ?? '')),
+      sizeGb: Math.round(Number(v.size ?? 0) / 1e9),
+    }));
+  }
+
+  /** Deletes one SBS volume (404 = already gone). */
+  async deleteBlockVolume(zone: string, volumeId: string, credentials: ProviderCredentials): Promise<void> {
+    const res = await this.fetchRaw(`${this.blockZoneUrl(zone)}/volumes/${volumeId}`,
+      { method: 'DELETE', headers: { 'X-Auth-Token': this.requireSecret(credentials) } }, TIMEOUTS.write);
+    if (!res.ok && res.status !== 404) throw new Error(`delete volume ${volumeId}: HTTP ${res.status}`);
   }
 
   /**
@@ -852,6 +880,22 @@ export class ScalewayClient extends AbstractGpuProvider {
         ...(publicIpIds.length ? { publicIpIds } : {}),
       },
     };
+  }
+
+  /** Waits between retries of a call on a just-created server that answered 404 (eventual consistency); then gives up. */
+  freshServerRetryMs: number[] = [1_000, 2_000, 4_000];
+
+  private async retryNotFound<T>(step: () => Promise<T>): Promise<T> {
+    for (const waitMs of this.freshServerRetryMs) {
+      try {
+        return await step();
+      } catch (err) {
+        if (!(err instanceof FetchError && err.status === 404)) throw err;
+        this.log.log(`[scaleway] new server not visible yet (404), retrying in ${waitMs} ms`);
+        await new Promise(r => setTimeout(r, waitMs));
+      }
+    }
+    return step();
   }
 
   private async serverAction(zone: string, serverId: string, action: string, secretKey: string): Promise<void> {

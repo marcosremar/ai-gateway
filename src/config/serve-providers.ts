@@ -171,6 +171,8 @@ export interface RouteEntrySpec {
   provider: string;
   model?: string;
   voice?: string;
+  /** TTS only: this entry keeps its own voice even when the request sends `fallback_voice`. */
+  fixedVoice?: boolean;
   deployment?: string;
   /** Chat only: provider-specific body fields (e.g. `{ "reasoning": { "enabled": false } }`). */
   extraBody?: Record<string, unknown>;
@@ -199,6 +201,7 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
       provider: e.provider,
       ...(typeof e.model === 'string' ? { model: e.model } : {}),
       ...(typeof e.voice === 'string' ? { voice: e.voice } : {}),
+      ...(e.fixedVoice === true ? { fixedVoice: true } : {}),
       ...(typeof e.deployment === 'string' ? { deployment: e.deployment } : {}),
       ...(e.extraBody && typeof e.extraBody === 'object' && !Array.isArray(e.extraBody) ? { extraBody: e.extraBody } : {}),
       ...(e.voices && typeof e.voices.feminine === 'string' && typeof e.voices.masculine === 'string'
@@ -234,12 +237,14 @@ export function parseModelRoutes(raw: string | undefined): { routes: ModelRoutes
 
 export interface BuildServeProvidersOptions {
   instances: ServeInstances;
-  /** Read for the deployment names of the default aliases (SPEECH_DEPLOYMENT, TTS_DEPLOYMENT). */
+  /** Read for the deployment first-byte timeouts and hedge (DEPLOYMENT_*_TIMEOUT_MS, DEPLOYMENT_HEDGE_MS). */
   env?: Record<string, string | undefined>;
   openrouter: OpenRouterKeyState;
   /** Returns a provider backed by deployment `name`, or null when the deployments service is off. */
   deploymentProvider?: (stage: Stage, name: string) => StageProvider<Stage> | null;
   modelRoutes?: ModelRoutesSpec;
+  /** Every app's own aliases (`PUT /v1/apps/:app/routes`), merged; MODEL_ROUTES wins over them. */
+  appRoutes?: ModelRoutesSpec;
   /** Static Z.AI model ids (from ZAI_LLM_MODELS). */
   zaiModels?: string[];
   /** OpenRouter catalog lister for /v1/models (only used when the key is valid). */
@@ -276,7 +281,7 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   const hedgeMs = positiveMs(env.DEPLOYMENT_HEDGE_MS) ?? DEPLOYMENT_HEDGE_MS;
   const guards = opts.policyGuards ?? accountPolicyGuards;
   const extras = (e: RouteEntrySpec) => ({
-    ...(e.voice ? { voice: e.voice } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}),
+    ...(e.voice ? { voice: e.voice } : {}), ...(e.fixedVoice ? { fixedVoice: true } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}),
     ...(e.voices ? { voiceFor: voiceForGender(e.voices, e.preferFallbackVoice) } : {}),
   });
 
@@ -340,6 +345,8 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   for (const [model, chain] of Object.entries(TTS_CHAINS)) specs.tts[model] = chain.map(([provider, m]) => ({ provider, model: m }));
   const aliases = defaultAliasRoutes(opts.env ?? {}, { speechConfigured: opts.speechDeploymentConfigured });
   for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], aliases[stage]);
+  // Each app's own aliases (PUT /v1/apps/:app/routes), then MODEL_ROUTES on top (same model = replaced).
+  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.appRoutes?.[stage] ?? {});
   for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.modelRoutes?.[stage] ?? {});
   // Chains reported by /health: the parle aliases and whatever MODEL_ROUTES declares.
   described = {

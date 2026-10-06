@@ -57,7 +57,7 @@ async function callReplica(
   }
   let res: Response;
   try {
-    res = await (opts.fetchImpl ?? fetch)(`${replicaBase(lease.machine)}${path}`, {
+    res = await (opts.fetchImpl ?? fetch)(`${replicaBase(lease.machine, lease.exposed)}${path}`, {
       ...init,
       headers: { ...(init.headers as Record<string, string> | undefined), 'X-Aigw-Token': lease.token },
       // The gateway aborts through `signal` when it gives up on this replica (route/target timeout): the request is
