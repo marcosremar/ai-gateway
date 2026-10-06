@@ -48,18 +48,20 @@ class BodyTooLargeError extends Error {
 const LINGER_MS = 5_000;
 
 /**
- * Close after answering a request whose body is still arriving, the way nginx does (lingering close): send FIN and keep
- * draining instead of destroying. Destroying with unread data in the receive buffer makes the kernel send an RST, which
- * can wipe the 413 from the client's buffer before it is read (ECONNRESET, flaky fault bench item 21). A timer caps the
- * drain so a client that never stops cannot hold the socket.
+ * Close after answering a request whose body is still arriving, the way nginx does (lingering close). Destroying the
+ * socket with unread upload in the receive buffer makes the kernel send an RST, which can wipe the 413 from the client's
+ * buffer before it is read (ECONNRESET/EPIPE, flaky fault bench item 21). `Connection: close` is not enough: Node's
+ * server then calls `destroySoon()` itself as soon as the response is flushed. So the response goes out keep-alive, the
+ * rest of the body is drained, and the socket is ended once the upload stops; a timer caps the drain so a client that
+ * never stops cannot hold the socket.
  */
 function lingeringClose(req: IncomingMessage): void {
   const socket = req.socket;
-  req.resume();
-  socket.end();
   const timer = setTimeout(() => socket.destroy(), LINGER_MS);
   timer.unref();
   socket.once('close', () => clearTimeout(timer));
+  req.once('end', () => socket.end());
+  req.resume();
 }
 
 function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer> {
@@ -829,8 +831,7 @@ export function createProxyServer(config: ProxyConfig): Server {
         return;
       }
       if (err instanceof BodyTooLargeError) {
-        res.setHeader('Connection', 'close');
-        res.on('finish', () => lingeringClose(req));
+        lingeringClose(req);
         sendError(res, 413, err.message, requestId);
         return;
       }
