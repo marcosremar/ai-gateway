@@ -26,6 +26,22 @@ const HEALTH_ENDPOINTS: Partial<Record<ProviderId, string>> = {
   openrouter: 'https://openrouter.ai/api/v1/key',
 };
 
+/**
+ * Base URL overrides the provider clients already honour (`OPENROUTER_API_BASE`, `GROQ_API_BASE`): the key probe goes
+ * to the same host as the calls, so a gateway pointed at a local fake never probes the real provider.
+ */
+const BASE_OVERRIDES: Partial<Record<ProviderId, { env: string; path: string }>> = {
+  openrouter: { env: 'OPENROUTER_API_BASE', path: '/key' },
+  groq: { env: 'GROQ_API_BASE', path: '/models' },
+};
+
+function healthEndpoint(provider: ProviderId): string | undefined {
+  const override = BASE_OVERRIDES[provider];
+  const base = override ? process.env[override.env]?.trim() : undefined;
+  if (base) return `${base.replace(/\/+$/, '')}${override!.path}`;
+  return HEALTH_ENDPOINTS[provider];
+}
+
 /** Auth header format per provider (most use Bearer, Deepgram uses Token). */
 function authHeader(provider: ProviderId, apiKey: string): Record<string, string> {
   if (provider === 'deepgram') return { Authorization: `Token ${apiKey}` };
@@ -42,7 +58,7 @@ export async function probeCloudProvider(
   timeoutMs = 5_000,
   fetchImpl: typeof fetch = fetch,
 ): Promise<CloudProbeResult> {
-  const url = HEALTH_ENDPOINTS[provider];
+  const url = healthEndpoint(provider);
   if (!url) return { provider, ok: false, latencyMs: 0, error: `No health endpoint for ${provider}` };
 
   const t0 = Date.now();

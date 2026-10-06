@@ -7,7 +7,7 @@
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse, STTSegment } from '../types';
 import { prepareAudioFile } from './audio-utils';
-import { getOrCreateClient } from './client-cache';
+import { GATEWAY_SDK_MAX_RETRIES, getOrCreateClient } from './client-cache';
 
 export interface OpenAICompatSTTConfig {
   providerId: ProviderId;
@@ -47,7 +47,7 @@ export class OpenAICompatSTTProvider implements STTProvider {
   withApiKey(apiKey: string): OpenAICompatSTTProvider {
     const provider = new OpenAICompatSTTProvider(this.config);
     provider.pinnedClient = true;
-    provider.client = new OpenAI({ apiKey, baseURL: this.config.baseURL });
+    provider.client = new OpenAI({ apiKey, baseURL: this.config.baseURL, maxRetries: GATEWAY_SDK_MAX_RETRIES });
     return provider;
   }
 

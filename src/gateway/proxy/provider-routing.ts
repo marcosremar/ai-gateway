@@ -130,12 +130,25 @@ export function failureCode(err: unknown): string {
   if (isTimeoutError(err)) return 'timeout';
   const status = statusOf(err);
   if (status === null) return 'unreachable';
+  if (status === 403 && isModerationRefusal(err)) return 'moderation';
   if (status === 401 || status === 403) return 'auth';
   if (status === 402) return 'credit';
   if (status === 404) return 'not_found';
   if (status === 429) return 'rate_limited';
   if (status >= 500) return '5xx';
   return 'error';
+}
+
+/**
+ * OpenRouter's 403 for a prompt flagged by a model's moderation (`error.metadata.reasons` / `flagged_input`): the
+ * prompt was refused, the provider is healthy. Another target may still take it; it must not count toward the breaker
+ * every model of the provider shares (errors-and-debugging docs: 403 = "input was flagged").
+ */
+export function isModerationRefusal(err: unknown): boolean {
+  const body = (err as { error?: unknown } | null)?.error as { metadata?: { reasons?: unknown; flagged_input?: unknown } } | undefined;
+  if (body?.metadata && (Array.isArray(body.metadata.reasons) || typeof body.metadata.flagged_input === 'string')) return true;
+  const message = err instanceof Error ? err.message : '';
+  return /moderation|flagged/i.test(message);
 }
 
 /** `X-Gateway-Provider` value: `deployment:<name>` or `<provider>:<upstream model>`. */
@@ -146,7 +159,7 @@ export function providerHeader(target: Pick<RouteTarget<unknown>, 'providerId' |
 /**
  * Origin headers for a served request: which provider answered and, when it was not the first candidate, why the
  * earlier ones were left (`X-Gateway-Fallback`: cold | 5xx | timeout | unreachable | auth | rate_limited | credit |
- * not_found | not_configured | policy | circuit_open | cooldown | error) and which one that was (`X-Gateway-Fallback-From`).
+ * not_found | not_configured | policy | moderation | circuit_open | cooldown | error) and which one that was (`X-Gateway-Fallback-From`).
  */
 export function originHeaders(
   candidates: Array<Pick<RouteTarget<unknown>, 'providerId' | 'model'>>,
@@ -216,6 +229,11 @@ export interface RunTargetsOptions {
    * answer (or the 503) arrives before the client's own deadline.
    */
   budgetMs?: number;
+  /**
+   * Same-target retries on a 5xx. Only deployment targets are retried: a replica restarting answers 502/503 for a
+   * moment and comes back, while a cloud target is an aggregator that already retried upstream and has a next target
+   * right behind it (fault bench 2026-10-06, item 11: a cloud 502 cost one extra round trip before the fallback).
+   */
   retriesPerProvider?: number;
   cooldownTracker?: CooldownTracker;
   breakers?: CircuitBreakerRegistry;
@@ -224,6 +242,11 @@ export interface RunTargetsOptions {
    * and the chain moves on to the next target (code `empty`).
    */
   validate?: (result: unknown) => string | null;
+  /**
+   * The client's request: when it aborts (the client went away), every attempt in flight is aborted at once and the
+   * chain stops (nothing else is tried, no breaker or cooldown is fed).
+   */
+  signal?: AbortSignal;
 }
 
 class AttemptError extends Error {
@@ -237,7 +260,7 @@ class AttemptError extends Error {
  * one OpenRouter model refused under ZDR must not open the breaker shared by every OpenRouter model). They never open the circuit nor start a cooldown, so
  * traffic goes back to the deployment as soon as its replica is ready.
  */
-const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy']);
+const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation']);
 
 /** Default total time per stage (deployment + fallbacks), under parle's deadlines (TTS 15 s, chat 12 s). */
 export const DEFAULT_STAGE_BUDGET_MS = 8_000;
@@ -255,6 +278,50 @@ export function isNeutralFailure(code: string): boolean {
 
 const COOLDOWN_ALLOWED_FAILS = 3;
 const COOLDOWN_MS = 15_000;
+
+/** Pause of a rate-limited target (429) without `Retry-After`. */
+export const RATE_LIMIT_DEFAULT_COOLDOWN_MS = 5_000;
+/** Longest pause honored from a `Retry-After` header (a misbehaving upstream must not park a target for an hour). */
+export const RATE_LIMIT_MAX_COOLDOWN_MS = 60_000;
+
+/**
+ * Rate limits are per upstream model, not per provider: OpenRouter throttling one model (429) says nothing about its
+ * other models, so a 429 must not feed the provider's circuit breaker shared by all of them (fault bench 2026-10-06,
+ * item 7). Instead that one target (provider + model) pauses for the `Retry-After` the upstream asked for. The pauses
+ * live beside the breakers they replace (one table per registry), so routes sharing a registry share them.
+ */
+const rateLimitTables = new WeakMap<CircuitBreakerRegistry, Map<string, number>>();
+
+function rateLimitTable(breakers: CircuitBreakerRegistry): Map<string, number> {
+  let table = rateLimitTables.get(breakers);
+  if (!table) { table = new Map(); rateLimitTables.set(breakers, table); }
+  return table;
+}
+
+function rateLimitKey(t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>): string {
+  return `${t.providerId}|${t.model ?? ''}`;
+}
+
+/** True while a target is paused by a 429 (see `rateLimitTables`). */
+export function isRateLimited(
+  t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>, breakers: CircuitBreakerRegistry = proxyCircuitBreakers, now = Date.now(),
+): boolean {
+  const table = rateLimitTable(breakers);
+  const until = table.get(rateLimitKey(t));
+  if (until === undefined) return false;
+  if (until > now) return true;
+  table.delete(rateLimitKey(t));
+  return false;
+}
+
+/** Pauses a target after a 429 for `retryAfterSec` (capped), or the default pause. */
+export function markRateLimited(
+  t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>, retryAfterSec: number | undefined,
+  breakers: CircuitBreakerRegistry = proxyCircuitBreakers, now = Date.now(),
+): void {
+  const ms = retryAfterSec ? Math.min(retryAfterSec * 1000, RATE_LIMIT_MAX_COOLDOWN_MS) : RATE_LIMIT_DEFAULT_COOLDOWN_MS;
+  rateLimitTable(breakers).set(rateLimitKey(t), now + ms);
+}
 
 /**
  * Runs one attempt with its own timeout: on expiry the call is ABORTED (the signal reaches the provider's fetch, so
@@ -309,6 +376,8 @@ export function runTargets<P, T>(
   const controllers = new Set<AbortController>();
   const inFlight = new Map<AbortController, RouteTarget<P>>();
   const ignoreCooldown = !!cooldown && targets.every((t) => cooldown.isCoolingDown(entryOf(t)));
+  // Every target rate-limited: try them anyway (the pause is a hint, a 503 without trying would be worse).
+  const ignoreRateLimit = targets.every((t) => isRateLimited(t, breakers));
 
   return new Promise((resolve, reject) => {
     let next = 0;
@@ -319,11 +388,23 @@ export function runTargets<P, T>(
     const fail = (clientError?: unknown) => {
       if (done) return;
       done = true;
+      opts.signal?.removeEventListener('abort', onClientGone);
       for (const c of controllers) c.abort();
       if (clientError) { reject(clientError); return; }
       const reasons = targets.map((t, i) => failures.get(i) ?? `${t.providerId}: not tried (stage time budget used up)`);
       reject(new ProviderUnavailableError(reasons, retryAfterSec));
     };
+
+    // The client went away: stop now. Attempts in flight are aborted (their signal reaches the provider's fetch).
+    let clientGone = false;
+    function onClientGone() {
+      if (done) return;
+      clientGone = true;
+      for (const t of inFlight.values()) breakers.get(entryHealthKey({ provider: t.providerId })).releaseProbe();
+      fail(Object.assign(new Error('client disconnected'), { gatewayCode: 'client_gone', status: 499 }));
+    }
+    if (opts.signal?.aborted) { onClientGone(); return; }
+    opts.signal?.addEventListener('abort', onClientGone, { once: true });
 
     /** Starts the next eligible target; false when none is left. */
     const launchNext = (): boolean => {
@@ -331,6 +412,11 @@ export function runTargets<P, T>(
         const i = next++;
         const t = targets[i];
         if (Date.now() >= deadline) { failures.set(i, `${t.providerId}: not tried (stage time budget used up)`); codes.set(t, 'timeout'); continue; }
+        if (!ignoreRateLimit && isRateLimited(t, breakers)) {
+          failures.set(i, `${t.providerId}: rate limited, waiting for the upstream's Retry-After`);
+          codes.set(t, 'rate_limited');
+          continue;
+        }
         if (cooldown && !ignoreCooldown && cooldown.isCoolingDown(entryOf(t))) {
           failures.set(i, `${t.providerId}: cooling down after repeated failures`);
           codes.set(t, 'cooldown');
@@ -372,6 +458,7 @@ export function runTargets<P, T>(
           inFlight.delete(controller);
           if (done) return;
           done = true;
+          opts.signal?.removeEventListener('abort', onClientGone);
           // Targets still running lost a hedge race: they were slower than this one.
           for (const other of inFlight.values()) if (!codes.has(other)) codes.set(other, 'slow');
           breaker.recordSuccess();
@@ -388,19 +475,25 @@ export function runTargets<P, T>(
           if (done) {
             // Aborted because another target won. A recovery probe that lost is a failed probe (keeps the circuit
             // open); otherwise a hedged loser says nothing about health.
-            if (breaker.getStats().state === 'half_open') breaker.recordFailure();
+            if (!clientGone && breaker.getStats().state === 'half_open') breaker.recordFailure();
             return;
           }
           const status = statusOf(err);
           if (isClientErrorStatus(status)) { fail(err); return; }
           const code = failureCode(err);
-          if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
+          if (status === 429) {
+            const after = retryAfterOf(err);
+            retryAfterSec = after ?? retryAfterSec;
+            // Per-model pause instead of the provider's breaker (see `rateLimitedUntil`).
+            markRateLimited(t, after, breakers);
+            breaker.releaseProbe();
+          } else if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
           else {
             breaker.recordFailure();
             if (cooldown && !ignoreCooldown) cooldown.recordFailure(entryOf(t), COOLDOWN_ALLOWED_FAILS, COOLDOWN_MS);
           }
-          if (status === 429) retryAfterSec = retryAfterOf(err) ?? retryAfterSec;
-          const retryable = status !== null && status >= 500 && !(err as { skipRetry?: boolean }).skipRetry;
+          const retryable = status !== null && status >= 500 && !(err as { skipRetry?: boolean }).skipRetry
+            && t.providerId.startsWith('deployment:');
           if (retryable && retry < retries && deadline - Date.now() > 300) {
             setTimeout(() => { if (!done) run(i, t, retry + 1); }, 200);
             return;

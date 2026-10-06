@@ -3,7 +3,7 @@
  * caller-facing message on bad input; the HTTP layer maps it to 400.
  */
 
-import type { DeploymentSpec, ExposedPort, Profile, ProfileSpec } from './types';
+import type { DeploymentSpec, ExposedPort, Placement, Profile, ProfileSpec } from './types';
 
 export class SpecError extends Error {}
 
@@ -97,8 +97,11 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction',
+  'idleAction', 'placements',
 ]);
+
+/** Most alternative placements a spec may list. */
+export const MAX_PLACEMENTS = 6;
 
 /** The gateway's own probe port on an exposed replica (80/443 stay with the app). */
 export const PROBE_PORT = 8089;
@@ -199,11 +202,28 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     out.description = input.description;
   }
   if (input.exposure !== undefined) out.exposure = exposureOf(input.exposure);
+  if (input.placements !== undefined) out.placements = placementsOf(input.placements);
   if (input.idleAction !== undefined) {
     if (input.idleAction !== 'delete' && input.idleAction !== 'stop') throw new SpecError("idleAction must be 'delete' or 'stop'");
     out.idleAction = input.idleAction;
   }
   return out;
+}
+
+function placementsOf(raw: unknown): Placement[] {
+  if (!Array.isArray(raw) || raw.length > MAX_PLACEMENTS) throw new SpecError(`placements must list at most ${MAX_PLACEMENTS} entries`);
+  return raw.map((p, i) => {
+    const entry = p as { zone?: unknown; machineType?: unknown } | null;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new SpecError(`placements[${i}] must be an object`);
+    for (const key of Object.keys(entry)) {
+      if (key !== 'zone' && key !== 'machineType') throw new SpecError(`placements[${i}]: unknown field '${key}'`);
+    }
+    if (entry.zone === undefined && entry.machineType === undefined) throw new SpecError(`placements[${i}] needs zone or machineType`);
+    return {
+      ...(entry.zone !== undefined ? { zone: str(entry.zone, `placements[${i}].zone`, ZONE_RE) } : {}),
+      ...(entry.machineType !== undefined ? { machineType: str(entry.machineType, `placements[${i}].machineType`, TYPE_RE) } : {}),
+    };
+  });
 }
 
 function exposureOf(raw: unknown): { ports: ExposedPort[] } {
@@ -253,5 +273,13 @@ export function buildSpec(
   const spec = merged as DeploymentSpec;
   if (spec.minReplicas > spec.maxReplicas) throw new SpecError('minReplicas cannot exceed maxReplicas');
   if (spec.gpu && !isGpuMachineType(spec.machineType)) throw new SpecError(`gpu: true needs a GPU machineType (got ${spec.machineType})`);
+  for (const [i, p] of (spec.placements ?? []).entries()) {
+    if (p.machineType && isGpuMachineType(p.machineType) !== spec.gpu) {
+      throw new SpecError(`placements[${i}].machineType ${p.machineType} must be a ${spec.gpu ? 'GPU' : 'CPU'} type like machineType`);
+    }
+    if (spec.exposure && p.zone && p.zone !== spec.zone) {
+      throw new SpecError(`placements[${i}].zone: an exposed deployment stays in ${spec.zone} (its reserved IP lives there)`);
+    }
+  }
   return spec;
 }

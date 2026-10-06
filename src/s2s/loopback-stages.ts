@@ -63,7 +63,11 @@ async function* bodyChunks(res: Response): AsyncIterable<Uint8Array> {
   }
 }
 
-/** OpenAI SSE → content deltas. Ends on `[DONE]` or end of stream. */
+/**
+ * OpenAI SSE → content deltas. Ends on `[DONE]`. An in-band error (the chat route's `{"error":…}` event after a provider
+ * broke mid-answer) or a body that stops before `[DONE]` throws: the composed pipeline then reports a partial answer
+ * instead of voicing a cut reply as if it were complete (fault bench 2026-10-06, items 1 and 6).
+ */
 export async function* sseDeltas(body: AsyncIterable<Uint8Array>): AsyncIterable<string> {
   const decoder = new TextDecoder();
   let buffer = '';
@@ -76,12 +80,14 @@ export async function* sseDeltas(body: AsyncIterable<Uint8Array>): AsyncIterable
       if (!line.startsWith('data:')) continue;
       const data = line.slice(5).trim();
       if (data === '[DONE]') return;
-      try {
-        const delta = (JSON.parse(data) as { choices?: Array<{ delta?: { content?: string | null } }> }).choices?.[0]?.delta?.content;
-        if (delta) yield delta;
-      } catch { /* keep-alive or partial line: ignore */ }
+      let payload: { error?: { message?: string }; choices?: Array<{ delta?: { content?: string | null } }> };
+      try { payload = JSON.parse(data); } catch { continue; /* keep-alive or partial line: ignore */ }
+      if (payload.error) throw new Error(`llm stream broke: ${payload.error.message ?? 'error'}`);
+      const delta = payload.choices?.[0]?.delta?.content;
+      if (delta) yield delta;
     }
   }
+  throw new Error('llm stream ended before [DONE] (truncated)');
 }
 
 const LANGUAGE_NAMES: Record<string, string> = { pt: 'pt', fr: 'fr', en: 'en', es: 'es' };

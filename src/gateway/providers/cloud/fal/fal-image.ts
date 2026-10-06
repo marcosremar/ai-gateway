@@ -17,6 +17,8 @@
 
 import type { ProviderId, ImageProvider, ImageRequest, ImageResponse } from '../types';
 
+const FAL_MODEL_ID = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9._-]*){1,3}$/i;
+
 const ENV_KEY = 'FAL_KEY';
 
 // FAL model endpoints
@@ -67,6 +69,9 @@ export class FalImageProvider implements ImageProvider {
   private async textToImage(request: ImageRequest): Promise<ImageResponse> {
     const apiKey = this.getApiKey();
     const model = request.model || MODELS.textToImage;
+    // The model comes from the request: only a fal app id (`owner/app[/sub]`), never a host or a path escape
+    // (CodeQL js/request-forgery).
+    if (!FAL_MODEL_ID.test(model)) throw new Error(`invalid fal model id '${String(model).slice(0, 80)}'`);
     const url = `https://fal.run/${model}`;
 
     const body = {
