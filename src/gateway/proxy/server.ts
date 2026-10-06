@@ -20,6 +20,7 @@ import { handleImageGenerate, handleImageInpaint } from './routes/images';
 import { createLogger, withLogContext } from '../../logger';
 import { ApiKeyRegistry } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
+import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
 
 const log = createLogger('proxy');
 
@@ -514,8 +515,8 @@ export function createProxyServer(config: ProxyConfig): Server {
       return;
     }
 
-    // Per-user concurrent request limit
-    if (userId !== 'anonymous') {
+    // Per-user concurrent request limit (a gateway sub-request of a turn already counted is not counted again)
+    if (userId !== 'anonymous' && !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress)) {
       const currentConcurrent = userConcurrency.get(userId) || 0;
       if (currentConcurrent >= MAX_CONCURRENT_PER_USER) {
         sendError(res, 429, `Too many concurrent requests (limit: ${MAX_CONCURRENT_PER_USER})`, requestId);

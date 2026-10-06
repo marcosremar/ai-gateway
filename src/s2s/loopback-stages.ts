@@ -5,6 +5,7 @@
  * accounting stay per client.
  */
 
+import { SUBREQUEST_HEADER, SUBREQUEST_TOKEN } from '../gateway/proxy/internal-subrequest';
 import type { ChatMessage, S2SConfig, SpokenAudio, StageAnswer, StageClient } from './composite';
 
 export interface LoopbackOptions {
@@ -75,7 +76,7 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
     chat: opts.models?.chat || 'parle-llm',
     tts: opts.models?.tts || 'parle-tts',
   };
-  const auth = { Authorization: opts.authorization };
+  const auth = { Authorization: opts.authorization, [SUBREQUEST_HEADER]: SUBREQUEST_TOKEN };
   return {
     async transcribe(audio, contentType, cfg, signal) {
       const form = new FormData();
