@@ -289,9 +289,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         const own = appOf(req);
         const filter = own ?? new URLSearchParams(query.slice(1)).get('app');
         const deployments = controller.list().filter(d => !filter || d.app === filter);
+        // Declared deployments are the operator's (gateway-wide): not shown to an app-scoped caller.
         return send(res, 200, {
           namespace: controller.namespace, health: controller.health(), deployments,
-          ...(opts.declaredStatus ? { declared: opts.declaredStatus() } : {}),
+          ...(opts.declaredStatus && !own ? { declared: opts.declaredStatus() } : {}),
         });
       }
       return send(res, 405, { error: 'method not allowed' });

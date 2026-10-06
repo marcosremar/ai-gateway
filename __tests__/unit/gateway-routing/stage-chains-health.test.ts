@@ -1,5 +1,5 @@
 /**
- * /health shows the effective chain of every parle stage and the state of each link, so a primary deployment that
+ * /health shows the effective chain of every app alias (here the parle's, as it PUTs them) and the state of each link, so a primary deployment that
  * never serves (the old silent `X-Gateway-Fallback: not_configured`) is visible.
  */
 
@@ -9,6 +9,7 @@ import { buildServeProviders, deepHealthReport, type ServeInstances } from '../.
 import { stageChainsReport } from '../../../src/config/stage-chains';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
+import { parleRoutes } from './_parle-routes';
 
 const on = (providerId: string) => ({ providerId, isConfigured: () => true }) as never;
 const off = (providerId: string) => ({ providerId, isConfigured: () => false }) as never;
@@ -20,7 +21,7 @@ function build(opts: { deployments: boolean; openrouter?: 'valid' | 'missing' })
     tts: { openrouter: on('openrouter') },
   };
   return buildServeProviders({
-    instances, openrouter: { state: opts.openrouter ?? 'valid' }, env: {},
+    instances, openrouter: { state: opts.openrouter ?? 'valid' }, env: {}, appRoutes: parleRoutes(),
     ...(opts.deployments ? { deploymentProvider: () => on('self-hosted') } : {}),
   });
 }

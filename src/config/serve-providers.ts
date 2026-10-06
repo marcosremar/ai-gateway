@@ -22,9 +22,7 @@ import { notConfiguredReason, PROVIDER_KEY_ENV, redactSecrets } from '../gateway
 import { hasCloudProbe, probeAllCloudProviders, probeCloudProvider } from '../gateway/providers/cloud/cloud-health';
 import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-breaker';
 import { accountPolicyGuards, type AccountPolicyGuards } from '../gateway/proxy/account-policy-guard';
-import {
-  KOKORO_TTS_MODEL, KOKORO_VOICES, QWEN_AUDIO_TTS_MODEL, QWEN_AUDIO_VOICES, voiceForGender, type VoiceByGender,
-} from './tts-fallback-voices';
+import { voiceForGender, type VoiceByGender, type VoiceGender } from './tts-fallback-voices';
 import type { ChainLinkSpec } from './stage-chains';
 
 type Stage = 'chat' | 'stt' | 'tts';
@@ -66,20 +64,6 @@ const TTS_CHAINS: Record<string, Array<[string, string]>> = {
 };
 
 /**
- * Gateway aliases the parle client calls. The self-hosted Scaleway deployment is the primary; OpenRouter is the
- * fallback of every stage (same models the parle client used directly, see parle core/lang/speech-config.ts);
- * Groq is an extra fallback when it has a key. MODEL_ROUTES replaces any of these per model.
- *
- * Deployment names: SPEECH_DEPLOYMENT (STT + LLM, default parle-speech). TTS:
- *   - TTS_DEPLOYMENT (or the older QWEN_TTS_DEPLOYMENT) set: that deployment (e.g. the separate parle-qwen-tts L4);
- *   - unset and the speech deployment is configured on this gateway: TTS goes to the speech deployment too
- *     (**one-GPU mode**: Whisper + Qwen3.5 + Qwen3-TTS on the same machine, the parle-speech image);
- *   - unset and no speech deployment: parle-qwen-tts (legacy default).
- */
-/** OpenRouter: answer without a reasoning phase (ignored by models that do not reason). */
-const NO_REASONING = { reasoning: { enabled: false } };
-
-/**
  * Time a deployment target gets to send its FIRST BYTE before the chain moves on, per stage. Overrides:
  * DEPLOYMENT_<STAGE>_TIMEOUT_MS (STT, CHAT, TTS), else DEPLOYMENT_TIMEOUT_MS for all stages.
  * Sized so deployment + fallback fit the stage budget (8 s, `GATEWAY_<STAGE>_BUDGET_MS`) below parle's deadlines.
@@ -92,60 +76,6 @@ export const DEPLOYMENT_HEDGE_MS = 1_500;
 function positiveMs(value: string | undefined): number | undefined {
   const n = Number(value);
   return value !== undefined && value.trim() !== '' && Number.isFinite(n) && n >= 0 ? n : undefined;
-}
-
-export type TtsDeploymentMode = 'dedicated' | 'one-gpu' | 'legacy-default';
-
-export function speechDeploymentName(env: Record<string, string | undefined>): string {
-  return env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech';
-}
-
-/** Which deployment serves parle TTS, and why (see `defaultAliasRoutes`). */
-export function ttsDeploymentOf(
-  env: Record<string, string | undefined>, opts: { speechConfigured?: boolean } = {},
-): { name: string; mode: TtsDeploymentMode } {
-  const explicit = env.TTS_DEPLOYMENT?.trim() || env.QWEN_TTS_DEPLOYMENT?.trim();
-  if (explicit) return { name: explicit, mode: 'dedicated' };
-  if (opts.speechConfigured) return { name: speechDeploymentName(env), mode: 'one-gpu' };
-  return { name: 'parle-qwen-tts', mode: 'legacy-default' };
-}
-
-export function defaultAliasRoutes(
-  env: Record<string, string | undefined>, opts: { speechConfigured?: boolean } = {},
-): Record<Stage, Record<string, RouteEntrySpec[]>> {
-  const speech = speechDeploymentName(env);
-  const tts = ttsDeploymentOf(env, opts).name;
-  const ttsChain: RouteEntrySpec[] = [
-    // The parle image runs Qwen3-TTS Base (voice cloning from the replica's /refs/voices.json); the replica's catalog
-    // model wins when it publishes one. TTS_DEPLOYMENT_MODEL overrides the default.
-    { provider: 'deployment', deployment: tts, model: env.TTS_DEPLOYMENT_MODEL?.trim() || 'Qwen/Qwen3-TTS-12Hz-0.6B-Base' },
-    // Fallbacks cannot clone: stock voices by the gender of the requested cast voice (tts-fallback-voices.ts).
-    // Qwen-Audio is refused while the OpenRouter account has ZDR on: the guard takes it out of the chain for 30 min
-    // after the first refusal, so Kokoro answers at once (account-policy-guard.ts).
-    { provider: 'openrouter', model: QWEN_AUDIO_TTS_MODEL, voices: QWEN_AUDIO_VOICES, accountPolicyGuard: true },
-    // Last link. The request's `fallback_voice` (the parle client's Kokoro voice per character) wins.
-    { provider: 'openrouter', model: KOKORO_TTS_MODEL, voice: KOKORO_VOICES.feminine, voices: KOKORO_VOICES, preferFallbackVoice: true },
-  ];
-  return {
-    stt: {
-      'parle-stt': [
-        { provider: 'deployment', deployment: speech, model: 'whisper-large-v3-turbo' },
-        { provider: 'openrouter', model: 'openai/whisper-large-v3-turbo' },
-        { provider: 'groq', model: 'whisper-large-v3-turbo' },
-      ],
-    },
-    chat: {
-      'parle-llm': [
-        { provider: 'deployment', deployment: speech, model: 'qwen3.5-9b' },
-        // Qwen3.5 is a reasoning model: with reasoning on it spends max_tokens thinking and answers nothing
-        // (content null, finish_reason length). A spoken turn needs the answer, so reasoning is off.
-        { provider: 'openrouter', model: 'qwen/qwen3.5-9b', extraBody: NO_REASONING },
-        // Must work with the account's privacy settings (ZDR / data policy): qwen/qwen3.7-flash answers 404 there.
-        { provider: 'openrouter', model: 'google/gemini-2.5-flash-lite', extraBody: NO_REASONING },
-      ],
-    },
-    tts: { 'parle-tts': ttsChain, 'qwen/qwen3-tts': ttsChain },
-  };
 }
 
 export type OpenRouterKeyState = { state: 'missing' | 'valid' | 'invalid' | 'unknown'; detail?: string };
@@ -174,10 +104,18 @@ export interface RouteEntrySpec {
   /** TTS only: this entry keeps its own voice even when the request sends `fallback_voice`. */
   fixedVoice?: boolean;
   deployment?: string;
+  /**
+   * Deployment entries only — **one-GPU mode**: when `deployment` is not registered on this gateway and this one is,
+   * the entry goes to this one (e.g. TTS declared on a dedicated `x-tts` machine, served by the `x-speech` machine
+   * that runs every stage). A registered `deployment` always wins; with neither registered the entry keeps `deployment`.
+   */
+  oneGpuDeployment?: string;
   /** Chat only: provider-specific body fields (e.g. `{ "reasoning": { "enabled": false } }`). */
   extraBody?: Record<string, unknown>;
   /** TTS only: stock voice by the gender of the requested voice (`tts-fallback-voices.ts`). */
   voices?: VoiceByGender;
+  /** TTS only, with `voices`: the app's voice ids → gender (checked before the `xx-f-`/`xx-m-` slug pattern). */
+  voiceGenders?: Record<string, VoiceGender>;
   /** TTS only, with `voices`: the request's `fallback_voice` wins over the gender table. */
   preferFallbackVoice?: boolean;
   /** TTS only: a refusal by the account's data policy (ZDR) takes this target out for a while (`account-policy-guard.ts`). */
@@ -203,14 +141,21 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
       ...(typeof e.voice === 'string' ? { voice: e.voice } : {}),
       ...(e.fixedVoice === true ? { fixedVoice: true } : {}),
       ...(typeof e.deployment === 'string' ? { deployment: e.deployment } : {}),
+      ...(typeof e.oneGpuDeployment === 'string' && e.oneGpuDeployment ? { oneGpuDeployment: e.oneGpuDeployment } : {}),
       ...(e.extraBody && typeof e.extraBody === 'object' && !Array.isArray(e.extraBody) ? { extraBody: e.extraBody } : {}),
       ...(e.voices && typeof e.voices.feminine === 'string' && typeof e.voices.masculine === 'string'
         ? { voices: { feminine: e.voices.feminine, masculine: e.voices.masculine } } : {}),
+      ...(isVoiceGenders(e.voiceGenders) ? { voiceGenders: e.voiceGenders } : {}),
       ...(e.preferFallbackVoice === true ? { preferFallbackVoice: true } : {}),
       ...(e.accountPolicyGuard === true ? { accountPolicyGuard: true } : {}),
     };
   }
   return null;
+}
+
+function isVoiceGenders(v: unknown): v is Record<string, VoiceGender> {
+  return Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+    && Object.values(v as Record<string, unknown>).every(g => g === 'feminine' || g === 'masculine');
 }
 
 /** Parses MODEL_ROUTES. Invalid JSON or entries are reported in `errors` and skipped (the boot goes on). */
@@ -249,8 +194,8 @@ export interface BuildServeProvidersOptions {
   zaiModels?: string[];
   /** OpenRouter catalog lister for /v1/models (only used when the key is valid). */
   listOpenRouterModels?: () => Promise<string[]>;
-  /** The speech deployment exists on this gateway: without TTS_DEPLOYMENT, TTS goes to it too (one-GPU mode). */
-  speechDeploymentConfigured?: boolean;
+  /** Whether deployment `name` is registered on this gateway (resolves `oneGpuDeployment`). Absent = none is. */
+  deploymentExists?: (name: string) => boolean;
   /** Account-policy guards (default: the process-wide registry, kept across remounts). */
   policyGuards?: AccountPolicyGuards;
 }
@@ -258,7 +203,7 @@ export interface BuildServeProvidersOptions {
 export interface ServeProvidersResult {
   providers: Omit<ProviderMapping, 'image'>;
   summary: Record<string, unknown>;
-  /** Every link of the alias chains (parle-stt / parle-llm / parle-tts and MODEL_ROUTES models), mounted or not. */
+  /** Every link of the app alias chains (`PUT /v1/apps/:app/routes`) and MODEL_ROUTES models, mounted or not. */
   chains: Record<Stage, Record<string, ChainLinkSpec[]>>;
 }
 
@@ -282,13 +227,22 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   const guards = opts.policyGuards ?? accountPolicyGuards;
   const extras = (e: RouteEntrySpec) => ({
     ...(e.voice ? { voice: e.voice } : {}), ...(e.fixedVoice ? { fixedVoice: true } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}),
-    ...(e.voices ? { voiceFor: voiceForGender(e.voices, e.preferFallbackVoice) } : {}),
+    ...(e.voices ? { voiceFor: voiceForGender(e.voices, { preferFallbackVoice: e.preferFallbackVoice, genders: e.voiceGenders }) } : {}),
   });
+
+  const exists = opts.deploymentExists ?? (() => false);
+  const oneGpu: string[] = [];
+  /** Deployment an entry goes to: its own, or its `oneGpuDeployment` while only that one is registered. */
+  const deploymentOf = (e: RouteEntrySpec): string => {
+    const own = e.deployment ?? '';
+    return e.oneGpuDeployment && !exists(own) && exists(e.oneGpuDeployment) ? e.oneGpuDeployment : own;
+  };
 
   /** Resolves one entry to a mounted target, or a reason why it cannot be mounted. */
   function resolve<S extends Stage>(stage: S, gatewayModel: string, e: RouteEntrySpec): RouteTarget<StageProvider<S>> | string {
     if (e.provider === 'deployment') {
-      const name = e.deployment ?? '';
+      const name = deploymentOf(e);
+      if (name !== (e.deployment ?? '')) oneGpu.push(`${stage} ${gatewayModel}: ${e.deployment} → ${name}`);
       const label = `deployment:${name}`;
       const provider = opts.deploymentProvider?.(stage, name) as StageProvider<S> | null | undefined;
       if (!provider) return `${label}: deployments are disabled on this gateway (SCW_SECRET_KEY is not set)`;
@@ -323,7 +277,7 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
     const links: ChainLinkSpec[] = [];
     for (const e of entries) {
       const r = resolve(stage, model, e);
-      links.push(linkOf(e, model, r));
+      links.push(linkOf(e.provider === 'deployment' ? { ...e, deployment: deploymentOf(e) } : e, model, r));
       if (typeof r !== 'string') targets.push(r);
       else if (!reasons.includes(r)) reasons.push(r);
     }
@@ -343,16 +297,15 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   }
   for (const [model, chain] of Object.entries(STT_CHAINS)) specs.stt[model] = chain.map(([provider, m]) => ({ provider, model: m }));
   for (const [model, chain] of Object.entries(TTS_CHAINS)) specs.tts[model] = chain.map(([provider, m]) => ({ provider, model: m }));
-  const aliases = defaultAliasRoutes(opts.env ?? {}, { speechConfigured: opts.speechDeploymentConfigured });
-  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], aliases[stage]);
   // Each app's own aliases (PUT /v1/apps/:app/routes), then MODEL_ROUTES on top (same model = replaced).
   for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.appRoutes?.[stage] ?? {});
   for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.modelRoutes?.[stage] ?? {});
-  // Chains reported by /health: the parle aliases and whatever MODEL_ROUTES declares.
+  // Chains reported by /health: every app's aliases and whatever MODEL_ROUTES declares.
+  const declaredModels = (stage: Stage) => [...Object.keys(opts.appRoutes?.[stage] ?? {}), ...Object.keys(opts.modelRoutes?.[stage] ?? {})];
   described = {
-    chat: new Set([...Object.keys(aliases.chat), ...Object.keys(opts.modelRoutes?.chat ?? {})].filter(m => m !== '*')),
-    stt: new Set([...Object.keys(aliases.stt), ...Object.keys(opts.modelRoutes?.stt ?? {})]),
-    tts: new Set([...Object.keys(aliases.tts), ...Object.keys(opts.modelRoutes?.tts ?? {})]),
+    chat: new Set(declaredModels('chat').filter(m => m !== '*')),
+    stt: new Set(declaredModels('stt')),
+    tts: new Set(declaredModels('tts')),
   };
 
   const genericFallback = specs.chat['*'] ?? [
@@ -411,7 +364,8 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       sttModels: Object.keys(stt),
       ttsModels: Object.keys(tts),
       chatFallback: chatFallbackChain.map(e => `${e.providerId}:${e.model}`),
-      ttsDeployment: ttsDeploymentOf(env, { speechConfigured: opts.speechDeploymentConfigured }),
+      // Entries whose own deployment is not registered and that go to their `oneGpuDeployment` instead.
+      ...(oneGpu.length ? { oneGpu } : {}),
       // Models with no provider at all (the rest of `unavailable` are chains that lost some entries).
       unavailable: {
         chat: Object.keys(unavailable.chat).filter(m => !chatRoutes[m]),

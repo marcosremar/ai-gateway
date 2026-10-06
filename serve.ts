@@ -18,7 +18,6 @@ import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/za
 import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } from './src/deployments/inference-providers';
 import {
   buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,
-  speechDeploymentName,
 } from './src/config/serve-providers';
 import { stageChainsReport, type ChainLinkSpec } from './src/config/stage-chains';
 import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
@@ -99,7 +98,7 @@ const deployments = deploymentsFromEnv(process.env, {
   log: (msg, data) => log.log(data ?? {}, msg),
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
-  onRoutesChange: () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>),
+  onRoutesChange: () => remount?.(),
 });
 if (deployments) {
   await deployments.controller.init();
@@ -149,7 +148,8 @@ function mountProviders() {
     appRoutes: deployments?.apps.allRoutes() ?? {},
     zaiModels: ZAI_LLM_MODELS.map(m => m.id),
     listOpenRouterModels,
-    speechDeploymentConfigured: Boolean(controller?.get(speechDeploymentName(process.env))),
+    // One-GPU mode: an entry whose own deployment is not registered goes to its `oneGpuDeployment` when that one is.
+    deploymentExists: (name) => Boolean(controller?.get(name)),
     deploymentProvider: controller ? (stage, name) => (
       stage === 'chat' ? new DeploymentLLMProvider(controller, name)
         : stage === 'stt' ? new DeploymentSTTProvider(controller, name)

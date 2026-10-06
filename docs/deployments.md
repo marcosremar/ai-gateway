@@ -88,9 +88,11 @@ boot; cold start ≈ 8 min), 100 GB volume, 2 h max lifetime. `TRUST_UPSTREAM_AU
 nginx forwards only `X-Aigw-Token`, so the image's own nginx sets the Bearer for its servers (babylon-cinema PR #1508).
 The default image is the first build with that change (`9a87056…`); set `SPEECH_IMAGE` to a newer commit tag.
 
-With `parle-speech` registered and no `TTS_DEPLOYMENT`, `parle-tts` goes to it too (one-GPU mode, see
-[docs/api/http.md](api/http.md#aliases-for-the-parle-client)); `parle-qwen-tts` is then unused (pause it with
-`PATCH {"paused": true}` to keep its spec and reference files).
+One-GPU mode: the parle TTS entry names `parle-qwen-tts` with `"oneGpuDeployment": "parle-speech"` (the app's own
+routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` is not registered
+and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register
+`parle-qwen-tts` (a registered `deployment` always wins); to go back to one GPU, delete it (pausing keeps it
+registered, so it would stay the target).
 
 ## App accounts — saved image addresses
 
@@ -181,7 +183,6 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
 | `GHCR_READ_TOKEN` | registry credential of the declared `parle-speech` (GHCR `read:packages`); from the dev API |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
-| `TTS_DEPLOYMENT` | unset = one-GPU mode (TTS on the speech deployment); set to e.g. `parle-qwen-tts` for a separate TTS machine |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
 
 Railway itself allows ~11k req/s per domain, 10k concurrent connections and requests up to 15 min while bytes flow
