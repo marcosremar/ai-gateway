@@ -69,7 +69,12 @@ const LANGUAGE_NAMES: Record<string, string> = { pt: 'pt', fr: 'fr', en: 'en', e
 
 export function loopbackStages(opts: LoopbackOptions): StageClient {
   const f = opts.fetchImpl ?? fetch;
-  const models = { stt: 'parle-stt', chat: 'parle-llm', tts: 'parle-tts', ...opts.models };
+  // An unset override (`S2S_STT_MODEL` absent → undefined) keeps the alias: spreading it would send model "undefined".
+  const models = {
+    stt: opts.models?.stt || 'parle-stt',
+    chat: opts.models?.chat || 'parle-llm',
+    tts: opts.models?.tts || 'parle-tts',
+  };
   const auth = { Authorization: opts.authorization };
   return {
     async transcribe(audio, contentType, cfg, signal) {
