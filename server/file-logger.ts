@@ -155,10 +155,13 @@ function readTailLines(filePath: string, lines: number): string[] {
       const buf = Buffer.alloc(MAX_FILE_READ_BYTES);
       fs.readSync(fd, buf, 0, MAX_FILE_READ_BYTES, stat.size - MAX_FILE_READ_BYTES);
       fs.closeSync(fd);
-      return buf.toString('utf-8').trim().split('\n').slice(-capped);
+      const tail = buf.toString('utf-8').trim();
+      if (!tail) return [];
+      return tail.split('\n').slice(-capped);
     }
-    const content = fs.readFileSync(filePath, 'utf-8');
-    return content.trim().split('\n').slice(-capped);
+    const content = fs.readFileSync(filePath, 'utf-8').trim();
+    if (!content) return [];
+    return content.split('\n').slice(-capped);
   } catch { return []; }
 }
 

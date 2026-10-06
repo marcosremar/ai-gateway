@@ -80,8 +80,8 @@ export class DeploymentStateMachine {
     if (s.phase === 'stopped') return { ...base, podId: s.podId, provider: s.provider, gpuType: s.gpuType, costPerHr: s.costPerHr, stoppedAt: s.stoppedAt, dockerImage: s.dockerImage };
     if (s.phase === 'deploying') return { ...base, startedAt: s.startedAt, podId: s.podId };
     if (s.phase === 'booting') return { ...base, startedAt: s.startedAt, podId: s.podId };
-    if (s.phase === 'ready') return { ...base, podId: s.podId, endpoint: s.endpoint, gpuType: s.gpuType, costPerHr: s.costPerHr };
-    if (s.phase === 'error') return { ...base, reason: s.reason };
+    if (s.phase === 'ready') return { ...base, podId: s.podId, endpoint: s.endpoint, gpuType: s.gpuType, costPerHr: s.costPerHr, readyAt: s.readyAt };
+    if (s.phase === 'error') return { ...base, reason: s.reason, failedAt: s.failedAt };
     return base;
   }
 }

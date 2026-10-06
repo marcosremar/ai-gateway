@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync } from 'node:fs';
+import { existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveChatProvider } from '../../src/gateway/pipeline/chat-completions-service';
+
+const hasBun = (() => { try { const r = execFileSync('bun', ['--version'], { stdio: 'pipe' }); return !!r; } catch { return false; } })();
 
 const fallback = {
   providerId: 'groq',
@@ -41,7 +43,7 @@ describe('chat model resolution', () => {
   });
 });
 
-describe('CLI media help', () => {
+describe.skipIf(!hasBun)('CLI media help', () => {
   it('documents image+text, audio+text, and media smoke tests', () => {
     const chatHelp = execFileSync('bun', ['bin/ai-gateway.ts', 'chat', '--help'], { encoding: 'utf8' });
     const transcribeHelp = execFileSync('bun', ['bin/ai-gateway.ts', 'transcribe', '--help'], { encoding: 'utf8' });

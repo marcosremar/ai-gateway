@@ -85,7 +85,6 @@ export default defineConfig({
     hookTimeout: 30_000,
     sequence: { concurrent: false },
     retry: 1,
-    changed: true,
     // `EnvironmentTeardownError: Closing rpc while onUserConsoleLog was pending`
     // surfaces as an "unhandled error" in vitest's final report even though
     // every individual test passes. It's a worker-internal race between the
