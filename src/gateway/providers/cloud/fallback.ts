@@ -362,6 +362,22 @@ function sleep(ms: number): Promise<void> {
 
 // ─── Main fallback executor ───────────────────────────────────────────────────
 
+/** A log line built from request fields (model names) must not break into extra lines. */
+function oneLine(value: unknown): unknown {
+  return typeof value === 'string' ? value.replace(/[\r\n]+/g, ' ') : value;
+}
+
+type LineLogger = { log: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
+
+function singleLineLogger<L extends LineLogger>(l: L): L {
+  return {
+    ...l,
+    log: (...args: unknown[]) => l.log(...args.map(oneLine)),
+    warn: (...args: unknown[]) => l.warn(...args.map(oneLine)),
+    error: (...args: unknown[]) => l.error(...args.map(oneLine)),
+  };
+}
+
 /**
  * Executes `fn` with each entry in `chain` until one succeeds.
  *
@@ -391,11 +407,14 @@ export async function withProviderFallback<T>(
     creditBlockTracker: creditTracker = defaultCreditBlockTracker,
     apiKeyHashes = {},
     adaptiveTimeout,
-    logger: log = { log: console.log, warn: console.warn, error: console.error },
+    logger: rawLog = { log: console.log, warn: console.warn, error: console.error },
     performanceRanker,
     stage: perfStage,
     circuitBreakers,
   } = opts;
+
+  // Model and provider names come from the request: one line per entry, never a forged log line (CodeQL js/log-injection).
+  const log = singleLineLogger(rawLog);
 
   // Clone so we can splice in context-window upgrades without mutating the caller's array
   const workChain = [...chain];

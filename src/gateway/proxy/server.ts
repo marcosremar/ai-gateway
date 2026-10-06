@@ -408,6 +408,7 @@ let peakConnections = 0;
 
 /** Per-user concurrency limiter -- prevents a single user from monopolizing connections. */
 const userConcurrency = new Map<string, number>();
+const RESERVED_FIELD_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 const MAX_CONCURRENT_PER_USER = parseInt(process.env.MAX_CONCURRENT_PER_USER || '20', 10);
 
 export function createProxyServer(config: ProxyConfig): Server {
@@ -692,14 +693,16 @@ export function createProxyServer(config: ProxyConfig): Server {
               return;
             }
             const parts = parseMultipart(rawBody, boundary);
-            const fields: Record<string, string> = {};
+            // Field names come from the client: a map without prototype, and no reserved names (CodeQL
+            // js/remote-property-injection; `__proto__` would otherwise rewrite the object's prototype).
+            const fields: Record<string, string> = Object.create(null);
             let hasFile = false;
             for (const part of parts) {
               if (part.filename) {
                 // File part — use its content as rawBody for the route handler
                 rawBody = part.data;
                 hasFile = true;
-              } else if (part.name) {
+              } else if (part.name && !RESERVED_FIELD_NAMES.has(part.name)) {
                 fields[part.name] = part.data.toString();
               }
             }
