@@ -141,32 +141,10 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Check bundle size (uncompressed)
-        run: |
-          # Budget: 512KB uncompressed for main bundle
-          # Note: gzipped size will be significantly smaller
-          MAX_SIZE_KB=512
-          for file in dist/index.js; do
-            if [ -f "$file" ]; then
-              SIZE=$(wc -c < "$file")
-              SIZE_KB=$((SIZE / 1024))
-              if [ "$SIZE_KB" -gt "$MAX_SIZE_KB" ]; then
-                echo "::error::$file is ${SIZE_KB}KB (budget: ${MAX_SIZE_KB}KB)"
-                exit 1
-              fi
-              echo "$file: ${SIZE_KB}KB (budget: ${MAX_SIZE_KB}KB)"
-            fi
-          done
-          echo "All bundles within size budget"
-
-      - name: Check gzip size (informational)
-        run: |
-          # Report gzip size for visibility (not enforced)
-          if [ -f "dist/index.js" ]; then
-            GZIP_SIZE=$(gzip -c dist/index.js | wc -c)
-            GZIP_KB=$((GZIP_SIZE / 1024))
-            echo "Gzip size: ${GZIP_KB}KB"
-          fi
+      - name: Bundle size ratchet (every entry, raw + gzip, vs quality-bundle-baseline.json)
+        # scripts/bundle-size.ts: fails when an entry grows past the tolerance or a new entry has no baseline.
+        # Shrinking: `bun run quality:bundle:update`; deliberate growth: `-- --accept-growth "<why>"`.
+        run: bun run quality:bundle
 
   # ── Shard 7: Dependency Audit ───────────────────────────────────────────
   audit:

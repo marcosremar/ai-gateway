@@ -12,6 +12,11 @@ on release via `bunx changeset version`.
 
 ### Added
 
+- **Bundle size ratchet** (`bun run quality:bundle`, CI "Bundle Size Budget") — every tsup entry in `dist/`, raw and
+  gzip -9, against `quality-bundle-baseline.json`; fails when an entry grows more than 2 % and 8 KB, or a new entry has
+  no baseline. `quality:bundle:update` only tightens; deliberate growth needs `-- --accept-growth "<why>"`, recorded in
+  the baseline. Replaces the fixed 512 KB cap on `dist/index.js`, which the library entry (1.4 MB: it re-exports the
+  gateway, the autoscaler and every provider) had long outgrown, so the job was red on every PR and caught nothing.
 - **Declared deployments** (`src/deployments/declared/*.json`) — the gateway registers them itself at boot and every
   5 min through the idempotent `controller.put`; secrets mounted from the environment (`GHCR_READ_TOKEN` →
   `registryAuth`, `SPEECH_IMAGE`), `SPEECH_TOKEN` generated once and persisted in the store; `pending` with the reason

@@ -32,6 +32,8 @@
     "lint:warnings": "eslint 'src/**/*.ts' 'server/**/*.ts'",
     "lint:fix": "eslint 'src/**/*.ts' 'server/**/*.ts' --fix",
     "quality:fitness": "bun run scripts/quality-fitness.ts",
+    "quality:bundle": "bun run scripts/bundle-size.ts",
+    "quality:bundle:update": "bun run scripts/bundle-size.ts --update",
     "quality:fitness:debt": "bun run scripts/quality-fitness.ts --warnings",
     "quality:fitness:strict": "bun run scripts/quality-fitness.ts --strict",
     "quality:architecture": "depcruise --config .dependency-cruiser.cjs --output-type err-long src server sdk web/src",
