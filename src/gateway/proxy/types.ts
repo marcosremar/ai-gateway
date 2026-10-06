@@ -166,6 +166,11 @@ export interface ProxyConfig {
     authorize: (bearerToken: string) => boolean;
     report: () => Promise<{ status: number; body: unknown }>;
   };
+  /**
+   * Extra fields of the plain `GET /health` (unauthenticated, so never a secret): e.g. the effective chain per stage
+   * and why a primary is not serving. Must be cheap (no upstream call).
+   */
+  healthDetails?: () => Record<string, unknown>;
 }
 
 /**

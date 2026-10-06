@@ -78,8 +78,8 @@ traffic returns to it. A real client error (e.g. `400` invalid request) is retur
 
 ### App aliases — `PUT /v1/apps/:app/routes`
 
-The gateway's code names no app model. An app that wants its own model names (`parle-stt`, `parle-llm`,
-`parle-tts`…) routed to its deployment first and to cloud fallbacks after puts them on its account, in the
+The parle aliases are built in (the table below); an app that wants its own model names routed to its deployment
+first and to cloud fallbacks after — or wants to replace a built-in alias — puts them on its account, in the
 `MODEL_ROUTES` shape below. The change is live (the providers are re-mounted, no restart) and stored in the account
 (`DEPLOYMENTS_STATE_DIR/apps.json`).
 
@@ -95,11 +95,43 @@ curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
 
 - A PUT replaces all of the app's routes. Invalid entries → `400`; an alias another app already routes → `409`
   (an app cannot take over another app's model names); another app's routes → `403`.
-- `MODEL_ROUTES` (below) wins over every app's routes for the same model.
+- App routes win over the built-in aliases; `MODEL_ROUTES` (below) wins over every app's routes for the same model.
 - `fixedVoice: true` (TTS): the entry keeps its own `voice` even when the request sends `fallback_voice`.
 
-Voices are provider-specific: on `/v1/audio/speech`, `voice` goes to the first provider and a fallback uses
-`fallback_voice` from the request, else its own configured voice.
+The built-in chains of the parle aliases:
+
+| Model (alias) | Route | Chain |
+|---|---|---|
+| `parle-stt` | `/v1/audio/transcriptions` | `deployment:$SPEECH_DEPLOYMENT` (whisper-large-v3-turbo) → `openrouter:openai/whisper-large-v3-turbo` → `groq:whisper-large-v3-turbo` |
+| `parle-llm` | `/v1/chat/completions` | `deployment:$SPEECH_DEPLOYMENT` (Qwen3.5-9B) → `openrouter:qwen/qwen3.5-9b` → `openrouter:google/gemini-2.5-flash-lite` (both with `reasoning: {enabled: false}`) |
+| `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:<TTS deployment>` (Qwen3-TTS Base, voice cloning; `TTS_DEPLOYMENT_MODEL`, default `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) → `openrouter:qwen/qwen-audio-3.0-tts-flash` (stock voice by gender) → `openrouter:hexgrad/kokoro-82m` (`fallback_voice`, else by gender) |
+
+`SPEECH_DEPLOYMENT` defaults to `parle-speech` (the image with Whisper + Qwen3.5-9B + Qwen3-TTS on one GPU, declared
+in the repo — see [Declared deployments](../deployments.md#declared-deployments)). The TTS deployment is:
+
+- `TTS_DEPLOYMENT` (or `QWEN_TTS_DEPLOYMENT`) when set — e.g. `parle-qwen-tts`, a separate L4 for TTS only;
+- otherwise, when the speech deployment exists on the gateway, **the speech deployment itself (one-GPU mode)**:
+  STT, LLM and TTS on the same machine;
+- otherwise `parle-qwen-tts` (legacy default).
+
+The replica must expose the OpenAI shapes (`/v1/audio/transcriptions`, `/v1/chat/completions`, `/v1/audio/speech`).
+
+**TTS fallbacks cannot clone**, so each gets a stock voice of the **gender** of the requested cast voice
+(`src/config/tts-fallback-voices.ts`):
+
+| Gender | `openrouter:qwen/qwen-audio-3.0-tts-flash` | `openrouter:hexgrad/kokoro-82m` |
+|---|---|---|
+| feminine | `Cherry` | `pf_dora` |
+| masculine | `Ethan` | `pm_alex` (the request's `fallback_voice` wins, e.g. `pm_santa`) |
+
+The gender comes from the parle cast table (`pt-PT-1baab6` …, `br-f-01` …), the `br-f-`/`br-m-` slug, or the gender
+letter of the Kokoro `fallback_voice` (`pf_…`/`pm_…`); default feminine.
+
+**Account data policy.** With Zero Data Retention on the OpenRouter account, Qwen-Audio (a DashScope endpoint) is
+refused (`404 … data policy / ZDR violation`). The first refusal takes that link out of the chain for 30 min
+(code `policy`, `X-Gateway-Fallback: policy`): later requests go straight to Kokoro without calling it, the refusal
+does not open the OpenRouter breaker that Kokoro shares, and `/health` shows the link as `blocked` with the reason.
+A key reload lifts the block. The gateway never changes the account's privacy setting.
 
 **Self-hosted TTS (Qwen3-TTS Base).** For a deployment target:
 
@@ -186,8 +218,8 @@ Every successful response of the three routes carries (no secrets):
 
 | Header | Example | Meaning |
 |---|---|---|
-| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
-| `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `circuit_open`, `cooldown`, `error` |
+| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:hexgrad/kokoro-82m` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
+| `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `policy`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
@@ -380,11 +412,32 @@ palco refuses the write.
 
 ### `GET /health`
 
-Cheap liveness check, no auth (used by Railway's healthcheck).
+Cheap liveness check, no auth (used by Railway's healthcheck; always `200` while the process is up). It also shows
+the **effective chain of every parle stage** and the state of each link, so a primary that never serves is visible
+(no upstream call, no secret):
 
 ```json
-{ "status": "ok", "connections": { "active": 1, "peak": 3 } }
+{
+  "status": "ok", "connections": { "active": 1, "peak": 3 },
+  "stages": {
+    "stt": { "parle-stt": { "serving": "openrouter:openai/whisper-large-v3-turbo", "onFallback": true, "links": [
+      { "target": "deployment:parle-speech", "state": "pending", "reason": "GHCR_READ_TOKEN is not set (registry credential for ghcr.io)" },
+      { "target": "openrouter:openai/whisper-large-v3-turbo", "state": "ready" },
+      { "target": "groq:whisper-large-v3-turbo", "state": "no_key", "reason": "groq: GROQ_API_KEY is not set" } ] } },
+    "tts": { "parle-tts": { "serving": "openrouter:hexgrad/kokoro-82m", "onFallback": true, "links": [
+      { "target": "deployment:parle-speech", "state": "cold", "reason": "scaled to zero (starts on the next request)" },
+      { "target": "openrouter:qwen/qwen-audio-3.0-tts-flash", "state": "blocked", "reason": "openrouter:qwen/qwen-audio-3.0-tts-flash: refused by the provider account's data policy (ZDR) — skipped until …" },
+      { "target": "openrouter:hexgrad/kokoro-82m", "state": "ready" } ] } }
+  },
+  "warnings": ["stt parle-stt: primary deployment:parle-speech is pending (GHCR_READ_TOKEN is not set …) — serving from openrouter:openai/whisper-large-v3-turbo"]
+}
 ```
+
+Link states: `ready`, `cold` (deployment scaled to zero / starting — requests fall back at once and wake it), `paused`,
+`pending` (declared deployment not registered yet, with the missing credential/image), `missing` (deployment does not
+exist: every request falls back with `not_configured`), `disabled` (no `SCW_SECRET_KEY`), `no_key`, `blocked`
+(account data policy), `circuit_open`. `warnings` has one line per chain whose first link is neither `ready` nor
+`cold`.
 
 ### `GET /health?deep=1` (admin)
 
@@ -401,6 +454,8 @@ admin key.
   ],
   "circuits": { "deployment:parle-speech": { "state": "closed", "failures": 0 } },
   "models": { "chat": ["parle-llm"], "stt": ["parle-stt"], "tts": ["parle-tts"], "unavailable": {} },
+  "stages": { "…": "same as GET /health" }, "warnings": [],
+  "declared": [{ "name": "parle-speech", "state": "in_sync", "reason": null, "image": "ghcr.io/marcosremar/parle-speech:<sha>" }],
   "deployments": { "deployments": 2, "replicas": 1, "listError": null,
     "items": [{ "name": "parle-qwen-tts", "status": "ready", "replicas": 1, "ready": 1, "lastError": null }] }
 }

@@ -1,0 +1,26 @@
+{
+  "name": "parle-speech",
+  "description": "parle: Whisper large-v3-turbo + Qwen3.5-9B + Qwen3-TTS 0.6B Base on one Scaleway L4 (image built by babylon-cinema .github/workflows/speech-image.yml)",
+  "image": {
+    "env": "SPEECH_IMAGE",
+    "repository": "ghcr.io/marcosremar/parle-speech",
+    "default": "ghcr.io/marcosremar/parle-speech:9a87056aa1fe979ca8d73347fb0454f058c30e6d"
+  },
+  "registryAuth": { "server": "ghcr.io", "username": "marcosremar", "passwordEnv": "GHCR_READ_TOKEN" },
+  "generatedSecrets": ["SPEECH_TOKEN"],
+  "spec": {
+    "port": 80,
+    "healthPath": "/health",
+    "machineType": "L4-1-24G",
+    "zone": "fr-par-2",
+    "gpu": true,
+    "volumeGb": 100,
+    "minReplicas": 0,
+    "maxReplicas": 1,
+    "idleMinutes": 15,
+    "bootTimeoutMinutes": 45,
+    "maxHours": 2,
+    "maxEurPerHour": 1,
+    "env": { "TRUST_UPSTREAM_AUTH": "1" }
+  }
+}

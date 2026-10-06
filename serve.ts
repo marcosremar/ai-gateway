@@ -18,7 +18,11 @@ import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/za
 import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } from './src/deployments/inference-providers';
 import {
   buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,
+  speechDeploymentName,
 } from './src/config/serve-providers';
+import { stageChainsReport, type ChainLinkSpec } from './src/config/stage-chains';
+import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
+import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
 import { createS2SRoute } from './src/s2s/route';
 import { loopbackStages } from './src/s2s/loopback-stages';
@@ -87,10 +91,13 @@ if (routeWorkloadRequest) {
 
 // Deployments: Docker image → autoscaled replicas on Scaleway (enabled when SCW_SECRET_KEY is set).
 const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
+// Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
+let declared: DeclaredDeploymentReconciler | null = null;
 const deployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: [SANDBOX_USER],
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   log: (msg, data) => log.log(data ?? {}, msg),
+  declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>),
 });
@@ -114,9 +121,23 @@ const modelRoutes = parseModelRoutes(process.env.MODEL_ROUTES);
 if (modelRoutes.errors.length) log.warn({ errors: modelRoutes.errors }, 'MODEL_ROUTES has invalid parts — skipped');
 const controller = deployments?.controller ?? null;
 let openrouterKey = await checkOpenRouterKey(process.env);
+let chains: Record<string, Record<string, ChainLinkSpec[]>> = {};
+// Assigned below; the reconciler's onChange (periodic runs) remounts the routes once they exist.
+let remount: (() => void) | null = null;
+declared = process.env.DECLARED_DEPLOYMENTS === '0' ? null : new DeclaredDeploymentReconciler({
+  target: controller,
+  env: process.env,
+  log: (msg, data) => log.log(data ?? {}, msg),
+  onChange: () => remount?.(),
+});
+if (declared) {
+  const status = await declared.reconcile();
+  log.log({ declared: status.map(s => ({ name: s.name, state: s.state, reason: s.reason })) }, 'Declared deployments');
+  declared.start();
+}
 
 function mountProviders() {
-  const { providers: routed, summary } = buildServeProviders({
+  const built = buildServeProviders({
     instances: {
       chat: { groq: groqLLM, openrouter: openrouterLLM, zai: zaiLLM },
       stt: { groq: groqSTT, openrouter: openrouterSTT, openai: openaiSTT, fireworks: fireworksSTT, deepgram: deepgramSTT },
@@ -128,17 +149,31 @@ function mountProviders() {
     appRoutes: deployments?.apps.allRoutes() ?? {},
     zaiModels: ZAI_LLM_MODELS.map(m => m.id),
     listOpenRouterModels,
+    speechDeploymentConfigured: Boolean(controller?.get(speechDeploymentName(process.env))),
     deploymentProvider: controller ? (stage, name) => (
       stage === 'chat' ? new DeploymentLLMProvider(controller, name)
         : stage === 'stt' ? new DeploymentSTTProvider(controller, name)
           : new DeploymentTTSProvider(controller, name)
     ) : undefined,
   });
+  const { providers: routed, summary } = built;
   log.log(summary, 'Providers configured');
+  chains = built.chains;
   // Image routing: dit360 → local GPU 360°, fal-ai/* → fal.ai cloud
   return { ...routed, image: routingImage };
 }
 const providers = mountProviders();
+remount = () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>);
+
+/** Effective chain of every parle stage and the state of each link (shown by /health — nothing silent). */
+const chainHealth = () => stageChainsReport(chains, {
+  ...(controller ? { deploymentStatus: (name: string) => controller.get(name)?.status ?? null } : {}),
+  declaredPending: (name) => {
+    const s = declared?.statusOf(name);
+    return s && (s.state === 'pending' || s.state === 'error') ? s.reason : null;
+  },
+  breakers: proxyCircuitBreakers,
+});
 
 // Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys
 // writes them to the palco. A key that appears or disappears re-mounts the providers in place.
@@ -146,8 +181,13 @@ const keyManager = new KeyManager(process.env, {
   log: (msg, data) => log.log(data ?? {}, msg),
   onChange: async (names) => {
     if (names.includes('OPENROUTER_API_KEY')) openrouterKey = await checkOpenRouterKey(process.env);
-    for (const id of providersOfKeys(names)) proxyCircuitBreakers.get(id).reset();
-    replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>);
+    for (const id of providersOfKeys(names)) {
+      proxyCircuitBreakers.get(id).reset();
+      accountPolicyGuards.resetProvider(id);
+    }
+    // A credential or image that appeared (GHCR_READ_TOKEN, SPEECH_IMAGE) registers the declared deployment now.
+    await declared?.reconcile();
+    remount?.();
   },
 });
 keyManager.adopt(sandboxEnv.received);
@@ -163,7 +203,10 @@ const isAdminToken = (token: string) => {
 };
 const deepHealth = {
   authorize: isAdminToken,
-  report: () => deepHealthReport({ env: process.env, breakers: proxyCircuitBreakers, providers, deployments: controller }),
+  report: () => deepHealthReport({
+    env: process.env, breakers: proxyCircuitBreakers, providers, deployments: controller, chains: chainHealth,
+    ...(declared ? { declared: () => declared!.status() } : {}),
+  }),
 };
 
 // POST /v1/s2s — speech-to-speech in one streamed request: the speech-stack deployment first, the composed pipeline
@@ -193,6 +236,7 @@ const server = await startProxy({
   apiKeys: API_KEYS,
   providers,
   deepHealth,
+  healthDetails: () => chainHealth(),
   customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
@@ -225,6 +269,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     deployments?.controller.stop();
+    declared?.stop();
     keyManager.stop();
     console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
 

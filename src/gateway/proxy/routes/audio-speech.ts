@@ -72,8 +72,9 @@ export async function handleAudioSpeech(
         model: t.model ?? model,
         input: body.input as string,
         // Voices are provider-specific: a fallback uses `fallback_voice` from the request, else its configured voice.
-        voice: (t !== targets[0] && !t.fixedVoice && typeof body.fallback_voice === 'string' && body.fallback_voice)
-          || t.voice || (body.voice as string),
+        voice: t.voiceFor?.({
+          voice: body.voice as string, ...(typeof body.fallback_voice === 'string' ? { fallbackVoice: body.fallback_voice } : {}),
+        }) ?? ((t !== targets[0] && !t.fixedVoice && typeof body.fallback_voice === 'string' && body.fallback_voice) || t.voice || (body.voice as string)),
         responseFormat: format as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm',
         speed: body.speed as number | undefined,
       }),

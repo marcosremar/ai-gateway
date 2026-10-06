@@ -23,6 +23,8 @@ export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
 export { FileDeploymentStore, MemoryDeploymentStore } from './store';
+export { DeclaredDeploymentReconciler, DECLARED_DEPLOYMENTS, declaredBody, declaredImage } from './declared';
+export type { DeclaredDeployment, DeclaredStatus } from './declared';
 export { AppRegistry, FileAppStore, MemoryAppStore } from './apps';
 export { AppFallbackService, OpenRouterKeyProvisioner, fallbackRoutes } from './app-fallback';
 export type * from './types';
@@ -81,6 +83,8 @@ export function deploymentsFromEnv(
     /** userIds that may always manage (e.g. the SANDBOX_TOKEN user), on top of DEPLOYMENTS_ADMIN_USERS. */
     alwaysAdmin?: string[];
     log?: (msg: string, data?: Record<string, unknown>) => void;
+    /** Declared deployments' status, added to `GET /v1/deployments` as `declared`. */
+    declaredStatus?: () => unknown;
     /** An app replaced its routes: the caller re-mounts the providers. */
     onRoutesChange?: () => void;
   },
@@ -119,6 +123,7 @@ export function deploymentsFromEnv(
       provisioner: new OpenRouterKeyProvisioner(() => env.OPENROUTER_PROVISIONING_KEY),
     }),
     isAdmin: admins.length ? (req) => [...admins, ...(opts.alwaysAdmin ?? [])].includes(opts.userOf(req) ?? '') : undefined,
+    declaredStatus: opts.declaredStatus,
   });
   // In-process janitor (build machines and detached volumes that no deployment owns). On by default on Railway, where
   // the gateway is the one owner of the project's leftovers; elsewhere opt in with DEPLOYMENTS_JANITOR=1.

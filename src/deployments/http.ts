@@ -95,6 +95,8 @@ export interface DeploymentRoutesOptions {
   /** Mutations (PUT/PATCH/DELETE/wake, profiles) require this. Default: every authenticated caller. */
   isAdmin?: (req: IncomingMessage) => boolean;
   fetchImpl?: typeof fetch;
+  /** Status of the declared deployments (`declared.ts`), listed as `declared` by `GET /v1/deployments`. */
+  declaredStatus?: () => unknown;
   /** An app replaced its routes (`PUT /v1/apps/:app/routes`): re-mount the providers. */
   onRoutesChange?: () => void;
   /** Direct-fallback plans (`GET /v1/apps/:app/fallback`). Without it that path answers 404. */
@@ -255,7 +257,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         const own = appOf(req);
         const filter = own ?? new URLSearchParams(query.slice(1)).get('app');
         const deployments = controller.list().filter(d => !filter || d.app === filter);
-        return send(res, 200, { namespace: controller.namespace, health: controller.health(), deployments });
+        return send(res, 200, {
+          namespace: controller.namespace, health: controller.health(), deployments,
+          ...(opts.declaredStatus ? { declared: opts.declaredStatus() } : {}),
+        });
       }
       return send(res, 405, { error: 'method not allowed' });
     }
