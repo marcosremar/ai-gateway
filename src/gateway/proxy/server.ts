@@ -695,7 +695,7 @@ export function createProxyServer(config: ProxyConfig): Server {
             const parts = parseMultipart(rawBody, boundary);
             // Field names come from the client: a map without prototype, and no reserved names (CodeQL
             // js/remote-property-injection; `__proto__` would otherwise rewrite the object's prototype).
-            const fields: Record<string, string> = Object.create(null);
+            const named = new Map<string, string>();
             let hasFile = false;
             for (const part of parts) {
               if (part.filename) {
@@ -703,9 +703,10 @@ export function createProxyServer(config: ProxyConfig): Server {
                 rawBody = part.data;
                 hasFile = true;
               } else if (part.name && !RESERVED_FIELD_NAMES.has(part.name)) {
-                fields[part.name] = part.data.toString();
+                named.set(part.name, part.data.toString());
               }
             }
+            const fields: Record<string, string> = Object.assign(Object.create(null), Object.fromEntries(named));
             // If no file part found, clear rawBody so downstream handlers
             // see length=0 and return 400 "audio data is required" instead
             // of trying to transcribe multipart boundary markers → 500.

@@ -364,7 +364,7 @@ function sleep(ms: number): Promise<void> {
 
 /** A log line built from request fields (model names) must not break into extra lines. */
 function oneLine(value: unknown): unknown {
-  return typeof value === 'string' ? value.replace(/[\r\n]+/g, ' ') : value;
+  return typeof value === 'string' ? value.replace(/\n|\r/g, '') : value;
 }
 
 type LineLogger = { log: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void };
