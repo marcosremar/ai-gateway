@@ -14,6 +14,7 @@ import { wsClients, unsubscribeDub } from './ws-state';
 import type { BabelCastWS } from './ws-state';
 import { PORT } from './config';
 import { speculativeCache } from './speculative-cache';
+import { resolveBearer } from './ws/api-key-resolver';
 
 // ── Extracted modules ────────────────────────────────────────────────────────
 import {
@@ -34,6 +35,7 @@ import {
 } from './ws/bot-audio';
 import {
   reloadStreamingSTTRouter as _reloadStreamingSTTRouter,
+  setStreamingSttDeployment,
   sttSessions,
   sttCleanupTimer as _sttCleanupTimer,
 } from './ws/streaming-stt-session';
@@ -85,8 +87,8 @@ export function validateStartupConfig(): string[] {
   if (!process.env.DAILY_BUDGET_USD) {
     warnings.push('DAILY_BUDGET_USD not set — no spending limit. Set to prevent runaway costs.');
   }
-  if (!process.env.GATEWAY_API_KEY) {
-    warnings.push('GATEWAY_API_KEY not set — only localhost connections will be allowed.');
+  if (!process.env.GATEWAY_API_KEYS && !process.env.GATEWAY_API_KEY) {
+    warnings.push('GATEWAY_API_KEYS/GATEWAY_API_KEY not set — only localhost connections will be allowed.');
   }
   if (process.env.RECALL_API_KEY && !process.env.RECALL_WS_SECRET) {
     warnings.push('RECALL_API_KEY is set but RECALL_WS_SECRET is missing — Recall audio ingress will fall back to gateway auth only.');
@@ -127,10 +129,9 @@ function isGatewayWsAuthorized(
   server: import('bun').Server<WsData>,
   overrideToken?: string | null,
 ): boolean {
-  const expectedToken = process.env.GATEWAY_API_KEY;
   const authToken = overrideToken ?? req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
-  if (expectedToken) {
-    return Boolean(authToken) && safeCompare(authToken, expectedToken);
+  if (process.env.GATEWAY_API_KEYS || process.env.GATEWAY_API_KEY) {
+    return resolveBearer(authToken).ok;
   }
   const remoteAddr = server.requestIP(req)?.address || '';
   return isLoopbackAddress(remoteAddr);
@@ -226,11 +227,12 @@ export async function startWsServer(): Promise<number> {
       }
 
       // WebSocket authentication.
-      // Localhost exemption: if no GATEWAY_API_KEY is set AND connection is from localhost, allow it.
+      // Localhost exemption: if neither GATEWAY_API_KEYS nor GATEWAY_API_KEY is
+      // set AND the connection is from localhost, allow it.
       const authToken = url.searchParams.get('token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
       if (!isGatewayWsAuthorized(req, server, authToken)) {
-        if (!process.env.GATEWAY_API_KEY) {
-          return new Response('Unauthorized — no GATEWAY_API_KEY configured, only localhost allowed', { status: 401 });
+        if (!process.env.GATEWAY_API_KEYS && !process.env.GATEWAY_API_KEY) {
+          return new Response('Unauthorized — no GATEWAY_API_KEY(S) configured, only localhost allowed', { status: 401 });
         }
         return new Response('Unauthorized', { status: 401 });
       }
@@ -473,6 +475,30 @@ export async function startWsServer(): Promise<number> {
   initDatabase();
   startHttpApiServer();
   await runStartupTasks();
+
+  // Real-time STT on a Scaleway speech-stack (opt-in): STT_DEPLOYMENT names the deployment; the controller that
+  // wakes/acquires it is the same `deploymentsFromEnv` machinery the proxy uses, gated on the Scaleway key.
+  const sttDeployment = process.env.STT_DEPLOYMENT?.trim();
+  if (sttDeployment) {
+    try {
+      const { deploymentsFromEnv } = await import('../src/deployments/index');
+      const deployments = deploymentsFromEnv(process.env, {
+        userOf: () => null,
+        log: (msg, data) => log.log(data ?? {}, msg),
+      });
+      if (deployments) {
+        await deployments.controller.init();
+        deployments.controller.start();
+        await setStreamingSttDeployment(deployments.controller, sttDeployment);
+        log.log({ namespace: deployments.controller.namespace, deployment: sttDeployment },
+          'Streaming STT deployment provider enabled');
+      } else {
+        log.warn('STT_DEPLOYMENT set but deployments are disabled (no SCW_SECRET_KEY / DEPLOYMENTS_NAMESPACE)');
+      }
+    } catch (e) {
+      log.warn('STT deployment provider failed to init: %s', e instanceof Error ? e.message : e);
+    }
+  }
 
   return WS_PORT;
 }
