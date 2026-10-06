@@ -94,6 +94,33 @@ do Groq e falha de propósito. Nenhuma chamada saiu da máquina: chaves falsas, 
   o gateway local com Bun antigo deve atualizar.
 - **Código `unreachable`** para erro in-band antes do 1º token (o erro do SDK não tem status) — só rótulo.
 
+## Decisões implementadas (follow-up do mesmo dia)
+
+Das opções de «Para decidir», o que entrou no código (testes em
+`__tests__/unit/gateway-routing/bench-decisions.test.ts` e `__tests__/unit/deployments/placements.test.ts`):
+
+- **Retry 5xx no mesmo alvo só para `deployment:`** (`src/gateway/proxy/provider-routing.ts`). Réplica reiniciando
+  volta logo; alvo de nuvem é agregador que já refez lá dentro e tem o próximo alvo atrás — um 502 de nuvem vai
+  direto ao fallback.
+- **429 pausa o par provedor + modelo**, não alimenta o breaker do provedor. A pausa segue o `Retry-After` do upstream
+  (teto 60 s, padrão 5 s sem cabeçalho), numa tabela por registro de breakers. Se todos os alvos estão pausados, tenta
+  assim mesmo (503 sem tentar seria pior).
+- **Cache STT:** resposta servida depois de falha real do primário (5xx/timeout) não é cacheada; a que veio porque o
+  deployment estava frio continua cacheada, para o HIT seguir acordando o deployment
+  (`src/gateway/proxy/routes/audio-transcriptions.ts`).
+- **`finish_reason` no stream:** sentinela `__finish__:` (`src/gateway/providers/cloud/openai-compat/stream-markers.ts`),
+  como o `__usage__:`; o `length` do upstream chega ao SSE do cliente.
+- **Tamanho unificado em 413:** STT acima de 25 MB responde `413 request_too_large`; multipart acima do total também
+  (`BodyTooLargeError`).
+- **Concorrência por usuário:** padrão 150 (era 20; a chave do parle serve a turma inteira e o stress de prod deu
+  «limit: 20» a 50 simultâneos), com `MAX_CONCURRENT_PER_USER_OVERRIDES=user:limite,...` por usuário
+  (`concurrencyLimits` em `src/gateway/proxy/server.ts`).
+- **Bun fixado em 1.4.2** nos dois Dockerfiles e em `engines` (o 1.3.x vaza o slot por usuário quando o cliente cai).
+- **Deployments com `placements`:** zona/tipo alternativos tentados em ordem quando a Scaleway responde `out_of_stock`
+  (`src/deployments/placements.ts`; spec, types, controller e profiles).
+
+Ficam como estavam: keep-alive vs orçamento de 8 s (ajuste por alias) e o rótulo `unreachable`.
+
 ## Fontes da pesquisa
 
 - OpenRouter, erros e streaming: https://openrouter.ai/docs/api/reference/errors-and-debugging ,

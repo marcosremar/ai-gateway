@@ -249,7 +249,7 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
     // Enforce total upload size across all parts
     totalBytes += partData.length;
     if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-      throw new Error(`Total upload size exceeds limit (${MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)}MB)`);
+      throw new BodyTooLargeError(MAX_TOTAL_UPLOAD_BYTES);
     }
 
     parts.push({
@@ -409,7 +409,30 @@ let peakConnections = 0;
 /** Per-user concurrency limiter -- prevents a single user from monopolizing connections. */
 const userConcurrency = new Map<string, number>();
 const RESERVED_FIELD_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
-const MAX_CONCURRENT_PER_USER = parseInt(process.env.MAX_CONCURRENT_PER_USER || '20', 10);
+/**
+ * Requests in flight per API key user. One key usually serves a whole application (parle: every student of a school
+ * on the same key), so the old default of 20 turned a class of 25 speaking at once into 429s (prod stress 2026-10-06:
+ * 21/50 served at 50 concurrent, the rest "Too many concurrent requests (limit: 20)"). The limit guards the gateway
+ * against one runaway caller, not against an app's normal load; upstream capacity is governed by the providers.
+ */
+export const DEFAULT_MAX_CONCURRENT_PER_USER = 150;
+
+/**
+ * Per-user limits: `MAX_CONCURRENT_PER_USER` (default for every user) and `MAX_CONCURRENT_PER_USER_OVERRIDES`
+ * (`user:limit,user:limit`, the user names of `API_KEYS="key:user"`). Bad entries are ignored.
+ */
+export function concurrencyLimits(env: Record<string, string | undefined> = process.env): { fallback: number; perUser: Map<string, number> } {
+  const n = parseInt(env.MAX_CONCURRENT_PER_USER ?? '', 10);
+  const fallback = Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_CONCURRENT_PER_USER;
+  const perUser = new Map<string, number>();
+  for (const item of (env.MAX_CONCURRENT_PER_USER_OVERRIDES ?? '').split(',')) {
+    const at = item.lastIndexOf(':');
+    if (at <= 0) continue;
+    const limit = parseInt(item.slice(at + 1), 10);
+    if (Number.isFinite(limit) && limit > 0) perUser.set(item.slice(0, at).trim(), limit);
+  }
+  return { fallback, perUser };
+}
 
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
@@ -417,6 +440,7 @@ export function createProxyServer(config: ProxyConfig): Server {
   // Supports both legacy format ("key1,key2") and new format ("key1:user1,key2:user2").
   const keyRegistry = new ApiKeyRegistry(apiKeys.join(','));
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
+  const concurrency = concurrencyLimits();
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const method = req.method?.toUpperCase() || 'GET';
@@ -537,8 +561,9 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Per-user concurrent request limit (a gateway sub-request of a turn already counted is not counted again)
     if (userId !== 'anonymous' && !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress)) {
       const currentConcurrent = userConcurrency.get(userId) || 0;
-      if (currentConcurrent >= MAX_CONCURRENT_PER_USER) {
-        sendError(res, 429, `Too many concurrent requests (limit: ${MAX_CONCURRENT_PER_USER})`, requestId);
+      const userLimit = concurrency.perUser.get(userId) ?? concurrency.fallback;
+      if (currentConcurrent >= userLimit) {
+        sendError(res, 429, `Too many concurrent requests (limit: ${userLimit})`, requestId);
         return;
       }
       userConcurrency.set(userId, currentConcurrent + 1);

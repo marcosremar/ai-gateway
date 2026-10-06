@@ -12,6 +12,7 @@
 import { randomBytes } from 'crypto';
 import { replicaCloudInit } from './cloud-init';
 import { packFiles } from './file-pack';
+import { isOutOfStock, placementsOf } from './placements';
 import { planReplicas, replicaPhase, type ObservedReplica } from './planner';
 import { BUILTIN_PROFILES } from './profiles';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES } from './spec';
@@ -502,25 +503,41 @@ export class DeploymentController {
     rt.creating++;
     void (async () => {
       try {
-        const price = await this.opts.backend.hourlyPrice(spec.zone, spec.machineType);
-        if (price == null) throw new Error(`${spec.machineType} is not sold in ${spec.zone}`);
-        if (price > spec.maxEurPerHour) {
-          throw new Error(`${spec.machineType} costs €${price}/h in ${spec.zone}, above maxEurPerHour €${spec.maxEurPerHour}`);
-        }
-        this.log('deployments: creating replica', { deployment: spec.name, type: spec.machineType, zone: spec.zone, price });
-        const network = spec.exposure ? await this.networkOf(rt) : undefined;
-        const machine = await this.opts.backend.createReplica({
-          spec, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
-          cloudInit: replicaCloudInit(this.withRegistryAuth(spec), rt.record.replicaToken),
-          ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
-        });
-        if (this.deployments.get(spec.name) !== rt) {
-          await this.opts.backend.releaseReplica(machine); // deleted while creating
+        const skipped: string[] = [];
+        for (const placed of placementsOf(spec)) {
+          const price = await this.opts.backend.hourlyPrice(placed.zone, placed.machineType);
+          if (price == null) { skipped.push(`${placed.machineType} is not sold in ${placed.zone}`); continue; }
+          if (price > spec.maxEurPerHour) {
+            skipped.push(`${placed.machineType} costs €${price}/h in ${placed.zone}, above maxEurPerHour €${spec.maxEurPerHour}`);
+            continue;
+          }
+          this.log('deployments: creating replica', { deployment: spec.name, type: placed.machineType, zone: placed.zone, price });
+          const network = placed.exposure ? await this.networkOf(rt) : undefined;
+          let machine: Awaited<ReturnType<DeploymentBackend['createReplica']>>;
+          try {
+            machine = await this.opts.backend.createReplica({
+              spec: placed, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
+              cloudInit: replicaCloudInit(this.withRegistryAuth(placed), rt.record.replicaToken),
+              ...(placed.files ? { files: packFiles(Object.fromEntries(Object.entries(placed.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
+            });
+          } catch (err) {
+            // Out of stock in this zone/type: the next placement may still have one. Any other error is the spec's
+            // or the account's and would fail everywhere, so it stops here.
+            if (!isOutOfStock(err)) throw err;
+            skipped.push(`${placed.machineType} out of stock in ${placed.zone}`);
+            this.log('deployments: out of stock, trying the next placement', { deployment: spec.name, type: placed.machineType, zone: placed.zone });
+            continue;
+          }
+          if (this.deployments.get(spec.name) !== rt) {
+            await this.opts.backend.releaseReplica(machine); // deleted while creating
+            return;
+          }
+          this.machines.push({ ...machine, pricePerHour: machine.pricePerHour ?? price });
+          rt.createFailures = 0;
+          rt.lastError = null;
           return;
         }
-        this.machines.push({ ...machine, pricePerHour: machine.pricePerHour ?? price });
-        rt.createFailures = 0;
-        rt.lastError = null;
+        throw new Error(skipped.join('; ') || 'no placement');
       } catch (err) {
         rt.lastError = `create: ${err instanceof Error ? err.message : String(err)}`;
         rt.backoffUntil = this.now() + CREATE_BACKOFF_MS[Math.min(rt.createFailures, CREATE_BACKOFF_MS.length - 1)];

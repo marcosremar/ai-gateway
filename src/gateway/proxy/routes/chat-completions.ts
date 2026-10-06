@@ -22,6 +22,7 @@ import {
 import { RequestCoalescer } from '../middleware/request-coalescer';
 import { ProviderSemaphores } from '../middleware/semaphore';
 import type { GuardrailEngine } from '../../guardrails';
+import { finishReasonOf, isStreamMarker, USAGE_MARKER } from '../../providers/cloud/openai-compat/stream-markers';
 
 /** Shared cooldown tracker for LLM proxy route */
 const llmCooldownTracker = new CooldownTracker();
@@ -428,7 +429,7 @@ async function openStream(
         for (;;) {
           const step = await withStreamTimeout(gen.next(), firstWaitMs, () => abort.abort());
           if (step.done) throw Object.assign(new Error('empty answer (stream ended without content)'), { gatewayCode: 'empty' });
-          if (typeof step.value === 'string' && step.value.startsWith('__usage__:')) { prefetched.push(step.value); continue; }
+          if (isStreamMarker(step.value)) { prefetched.push(step.value); continue; }
           // Health is recorded when the stream ends (buildSSEStream): a provider that always breaks after its first
           // token must still open its breaker, and a success here would reset the count on every request.
           clientSignal?.removeEventListener('abort', onClientGone);
@@ -513,14 +514,19 @@ function buildSSEStream(
         controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
           choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] }));
 
-        for (const v of opened.prefetched ?? []) {
-          try { usageData = JSON.parse(v.slice('__usage__:'.length)); } catch { /* malformed — skip */ }
-        }
+        // The upstream finish_reason from the `__finish__:` marker: a cut answer ('length') must reach the client as such.
+        let finishReason = 'stop';
+        const readMarker = (v: string) => {
+          const reason = finishReasonOf(v);
+          if (reason) { finishReason = reason; return; }
+          try { usageData = JSON.parse(v.slice(USAGE_MARKER.length)); } catch { /* malformed — skip */ }
+        };
+        for (const v of opened.prefetched ?? []) readMarker(v);
         let step = opened.first!;
         while (!step.done) {
           const value = step.value;
-          if (typeof value === 'string' && value.startsWith('__usage__:')) {
-            try { usageData = JSON.parse(value.slice('__usage__:'.length)); } catch { /* malformed — skip */ }
+          if (isStreamMarker(value)) {
+            readMarker(value);
           } else {
             controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
               choices: [{ index: 0, delta: { content: value }, finish_reason: null }] }));
@@ -531,7 +537,7 @@ function buildSSEStream(
 
         // Finish chunk, then usage (OpenAI spec for stream_options.include_usage), then [DONE]
         controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
-          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
+          choices: [{ index: 0, delta: {}, finish_reason: finishReason }] }));
         if (includeUsage && usageData) {
           controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model, choices: [], usage: usageData }));
         }

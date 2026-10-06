@@ -7,6 +7,7 @@
 import OpenAI from 'openai';
 import type { ProviderId, LLMProvider, ChatRequest, ChatResponse } from '../types';
 import { GATEWAY_SDK_MAX_RETRIES, getOrCreateClient } from './client-cache';
+import { FINISH_MARKER, USAGE_MARKER } from './stream-markers';
 
 export interface OpenAICompatLLMConfig {
   providerId: ProviderId;
@@ -130,7 +131,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     if (request.signal?.aborted) controller.abort();
 
     let stream: AsyncIterable<OpenAI.ChatCompletionChunk> | null = null;
-    let finished = false;
+    let finishReason: string | null = null;
     try {
       stream = await client.chat.completions.create({
         model: request.model || this.config.defaultModel || '',
@@ -145,9 +146,10 @@ export class OpenAICompatLLMProvider implements LLMProvider {
 
       for await (const chunk of stream) {
         arm();
-        if (chunk.choices?.some((c) => c.finish_reason)) finished = true;
+        const reason = chunk.choices?.find((c) => c.finish_reason)?.finish_reason;
+        if (reason) finishReason = reason;
         if (chunk.usage) {
-          yield `__usage__:${JSON.stringify({
+          yield `${USAGE_MARKER}${JSON.stringify({
             prompt_tokens: chunk.usage.prompt_tokens,
             completion_tokens: chunk.usage.completion_tokens,
             total_tokens: chunk.usage.total_tokens,
@@ -161,7 +163,8 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       // finished answer. Every OpenAI-compatible provider closes a stream with a finish_reason.
       if (timedOut) throw Object.assign(new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms without data`), { gatewayCode: 'timeout' });
       if (request.signal?.aborted) throw Object.assign(new Error('[openai-compat] chatStream() aborted by the caller'), { gatewayCode: 'aborted' });
-      if (!finished) throw Object.assign(new Error('[openai-compat] stream ended without finish_reason (truncated upstream)'), { gatewayCode: 'truncated' });
+      if (!finishReason) throw Object.assign(new Error('[openai-compat] stream ended without finish_reason (truncated upstream)'), { gatewayCode: 'truncated' });
+      yield `${FINISH_MARKER}${finishReason}`;
     } catch (err: unknown) {
       if (timedOut && !(err as { gatewayCode?: unknown })?.gatewayCode) {
         throw Object.assign(new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms without data`), { gatewayCode: 'timeout' });

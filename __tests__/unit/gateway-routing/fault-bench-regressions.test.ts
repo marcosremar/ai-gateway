@@ -18,6 +18,7 @@ import type { ProxyRequest, RouteTarget } from '../../../src/gateway/proxy/types
 import { sseDeltas } from '../../../src/s2s/loopback-stages';
 import { createS2SRoute } from '../../../src/s2s/route';
 import { request as httpRequest } from 'node:http';
+import { isStreamMarker } from '../../../src/gateway/providers/cloud/openai-compat/stream-markers';
 
 let fake: FakeUpstream;
 const KEY_ENV = 'FAULT_BENCH_TEST_KEY';
@@ -33,7 +34,7 @@ beforeEach(() => { fake.reset(); clearClientCache(); });
 
 async function drain(gen: AsyncGenerator<string, void, undefined>): Promise<string> {
   let out = '';
-  for await (const d of gen) if (!d.startsWith('__usage__:')) out += d;
+  for await (const d of gen) if (!isStreamMarker(d)) out += d;
   return out;
 }
 

@@ -229,6 +229,11 @@ export interface RunTargetsOptions {
    * answer (or the 503) arrives before the client's own deadline.
    */
   budgetMs?: number;
+  /**
+   * Same-target retries on a 5xx. Only deployment targets are retried: a replica restarting answers 502/503 for a
+   * moment and comes back, while a cloud target is an aggregator that already retried upstream and has a next target
+   * right behind it (fault bench 2026-10-06, item 11: a cloud 502 cost one extra round trip before the fallback).
+   */
   retriesPerProvider?: number;
   cooldownTracker?: CooldownTracker;
   breakers?: CircuitBreakerRegistry;
@@ -273,6 +278,50 @@ export function isNeutralFailure(code: string): boolean {
 
 const COOLDOWN_ALLOWED_FAILS = 3;
 const COOLDOWN_MS = 15_000;
+
+/** Pause of a rate-limited target (429) without `Retry-After`. */
+export const RATE_LIMIT_DEFAULT_COOLDOWN_MS = 5_000;
+/** Longest pause honored from a `Retry-After` header (a misbehaving upstream must not park a target for an hour). */
+export const RATE_LIMIT_MAX_COOLDOWN_MS = 60_000;
+
+/**
+ * Rate limits are per upstream model, not per provider: OpenRouter throttling one model (429) says nothing about its
+ * other models, so a 429 must not feed the provider's circuit breaker shared by all of them (fault bench 2026-10-06,
+ * item 7). Instead that one target (provider + model) pauses for the `Retry-After` the upstream asked for. The pauses
+ * live beside the breakers they replace (one table per registry), so routes sharing a registry share them.
+ */
+const rateLimitTables = new WeakMap<CircuitBreakerRegistry, Map<string, number>>();
+
+function rateLimitTable(breakers: CircuitBreakerRegistry): Map<string, number> {
+  let table = rateLimitTables.get(breakers);
+  if (!table) { table = new Map(); rateLimitTables.set(breakers, table); }
+  return table;
+}
+
+function rateLimitKey(t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>): string {
+  return `${t.providerId}|${t.model ?? ''}`;
+}
+
+/** True while a target is paused by a 429 (see `rateLimitTables`). */
+export function isRateLimited(
+  t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>, breakers: CircuitBreakerRegistry = proxyCircuitBreakers, now = Date.now(),
+): boolean {
+  const table = rateLimitTable(breakers);
+  const until = table.get(rateLimitKey(t));
+  if (until === undefined) return false;
+  if (until > now) return true;
+  table.delete(rateLimitKey(t));
+  return false;
+}
+
+/** Pauses a target after a 429 for `retryAfterSec` (capped), or the default pause. */
+export function markRateLimited(
+  t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>, retryAfterSec: number | undefined,
+  breakers: CircuitBreakerRegistry = proxyCircuitBreakers, now = Date.now(),
+): void {
+  const ms = retryAfterSec ? Math.min(retryAfterSec * 1000, RATE_LIMIT_MAX_COOLDOWN_MS) : RATE_LIMIT_DEFAULT_COOLDOWN_MS;
+  rateLimitTable(breakers).set(rateLimitKey(t), now + ms);
+}
 
 /**
  * Runs one attempt with its own timeout: on expiry the call is ABORTED (the signal reaches the provider's fetch, so
@@ -327,6 +376,8 @@ export function runTargets<P, T>(
   const controllers = new Set<AbortController>();
   const inFlight = new Map<AbortController, RouteTarget<P>>();
   const ignoreCooldown = !!cooldown && targets.every((t) => cooldown.isCoolingDown(entryOf(t)));
+  // Every target rate-limited: try them anyway (the pause is a hint, a 503 without trying would be worse).
+  const ignoreRateLimit = targets.every((t) => isRateLimited(t, breakers));
 
   return new Promise((resolve, reject) => {
     let next = 0;
@@ -361,6 +412,11 @@ export function runTargets<P, T>(
         const i = next++;
         const t = targets[i];
         if (Date.now() >= deadline) { failures.set(i, `${t.providerId}: not tried (stage time budget used up)`); codes.set(t, 'timeout'); continue; }
+        if (!ignoreRateLimit && isRateLimited(t, breakers)) {
+          failures.set(i, `${t.providerId}: rate limited, waiting for the upstream's Retry-After`);
+          codes.set(t, 'rate_limited');
+          continue;
+        }
         if (cooldown && !ignoreCooldown && cooldown.isCoolingDown(entryOf(t))) {
           failures.set(i, `${t.providerId}: cooling down after repeated failures`);
           codes.set(t, 'cooldown');
@@ -425,13 +481,19 @@ export function runTargets<P, T>(
           const status = statusOf(err);
           if (isClientErrorStatus(status)) { fail(err); return; }
           const code = failureCode(err);
-          if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
+          if (status === 429) {
+            const after = retryAfterOf(err);
+            retryAfterSec = after ?? retryAfterSec;
+            // Per-model pause instead of the provider's breaker (see `rateLimitedUntil`).
+            markRateLimited(t, after, breakers);
+            breaker.releaseProbe();
+          } else if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
           else {
             breaker.recordFailure();
             if (cooldown && !ignoreCooldown) cooldown.recordFailure(entryOf(t), COOLDOWN_ALLOWED_FAILS, COOLDOWN_MS);
           }
-          if (status === 429) retryAfterSec = retryAfterOf(err) ?? retryAfterSec;
-          const retryable = status !== null && status >= 500 && !(err as { skipRetry?: boolean }).skipRetry;
+          const retryable = status !== null && status >= 500 && !(err as { skipRetry?: boolean }).skipRetry
+            && t.providerId.startsWith('deployment:');
           if (retryable && retry < retries && deadline - Date.now() > 300) {
             setTimeout(() => { if (!done) run(i, t, retry + 1); }, 200);
             return;
