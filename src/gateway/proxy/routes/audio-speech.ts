@@ -71,10 +71,12 @@ export async function handleAudioSpeech(
         ...(t.providerId.startsWith('deployment:') ? { extra, stream } : {}),
         model: t.model ?? model,
         input: body.input as string,
-        // Voices are provider-specific: a fallback uses `fallback_voice` from the request, else its configured voice.
+        // Voices are provider-specific. A target with `voiceFor` (stock voice by gender) picks its own; otherwise a
+        // fallback uses `fallback_voice` from the request (unless `fixedVoice`), else its configured voice.
         voice: t.voiceFor?.({
           voice: body.voice as string, ...(typeof body.fallback_voice === 'string' ? { fallbackVoice: body.fallback_voice } : {}),
-        }) ?? ((t !== targets[0] && !t.fixedVoice && typeof body.fallback_voice === 'string' && body.fallback_voice) || t.voice || (body.voice as string)),
+        }) ?? ((t !== targets[0] && !t.fixedVoice && typeof body.fallback_voice === 'string' && body.fallback_voice)
+          || t.voice || (body.voice as string)),
         responseFormat: format as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm',
         speed: body.speed as number | undefined,
       }),

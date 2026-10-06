@@ -21,7 +21,7 @@ const SITE = 'site-key-0123456789';
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
@@ -37,6 +37,7 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
     isAdmin: (req) => req.headers.authorization === `Bearer ${ADMIN}`,
     userOf: (req) => (req.headers.authorization === `Bearer ${SITE}` ? 'site-a' : req.headers.authorization === `Bearer ${ADMIN}` ? 'owner' : null),
     onRoutesChange: opts.onRoutesChange,
+    ...(opts.declaredStatus ? { declaredStatus: opts.declaredStatus } : {}),
   });
   const server = createProxyServer({
     apiKeys: [`${ADMIN}:owner`, `${SITE}:site-a`],
@@ -74,6 +75,15 @@ describe('deployments API', () => {
     expect((await fetch(`${h.base}/v1/deployments`)).status).toBe(401);
     expect((await call(h, 'GET', '/v1/deployments', undefined, SITE)).status).toBe(200);
     expect((await call(h, 'PUT', '/v1/deployments/x', { profile: 'cpu-echo' }, SITE)).status).toBe(403);
+  });
+
+  it('GET /v1/deployments lists the declared deployments for an admin, not for an app-scoped key', async () => {
+    const d = await harness({ declaredStatus: () => [{ name: 'parle-speech', state: 'pending', reason: 'GHCR_READ_TOKEN is not set' }] });
+    extra.push(d);
+    const admin = await (await call(d, 'GET', '/v1/deployments')).json() as { declared?: unknown };
+    expect(admin.declared).toEqual([{ name: 'parle-speech', state: 'pending', reason: 'GHCR_READ_TOKEN is not set' }]);
+    const site = await (await call(d, 'GET', '/v1/deployments', undefined, SITE)).json() as { declared?: unknown };
+    expect(site.declared).toBeUndefined();
   });
 
   it('lists built-in profiles and stores new ones', async () => {

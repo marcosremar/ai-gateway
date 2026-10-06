@@ -1,11 +1,13 @@
 /**
- * parle TTS chain: deployment → OpenRouter Qwen-Audio (stock voice by gender) → OpenRouter Kokoro. Qwen-Audio refused
- * by the account's data policy (ZDR) is taken out of the chain after the first refusal, without opening the breaker
- * shared with Kokoro, and /health says why. One-GPU mode: without TTS_DEPLOYMENT, TTS goes to the speech deployment.
+ * Optional route-entry capabilities (the parle's own chain is MAI-Voice → Kokoro; see _parle-routes.ts). A TTS chain
+ * built from an app's routes: deployment → OpenRouter Qwen-Audio (stock voice by gender) → OpenRouter Kokoro.
+ * Qwen-Audio refused by the account's data policy (ZDR) is taken out of the chain after the first refusal, without
+ * opening the breaker shared with Kokoro, and /health says why. One-GPU mode: an entry whose own deployment is not
+ * registered goes to its `oneGpuDeployment`.
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { buildServeProviders, ttsDeploymentOf, type ServeInstances } from '../../../src/config/serve-providers';
+import { buildServeProviders, parseModelRoutes, type ModelRoutesSpec, type ServeInstances } from '../../../src/config/serve-providers';
 import { stageChainsReport } from '../../../src/config/stage-chains';
 import { genderOfVoice, voiceForGender, KOKORO_VOICES, QWEN_AUDIO_VOICES } from '../../../src/config/tts-fallback-voices';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
@@ -13,6 +15,22 @@ import type { TTSRequest } from '../../../src/gateway/providers/cloud/types';
 import { AccountPolicyGuards, isAccountPolicyRefusal } from '../../../src/gateway/proxy/account-policy-guard';
 import { handleAudioSpeech } from '../../../src/gateway/proxy/routes/audio-speech';
 import type { ProxyRequest } from '../../../src/gateway/proxy/types';
+import { parleRoutes } from './_parle-routes';
+
+/** Part of the app's cast (its voice ids do not all say the gender). */
+const CAST_GENDERS = { 'pt-PT-1baab6': 'masculine', 'pt-PT-2537db': 'feminine', 'pt-PT-2e0907': 'feminine' } as const;
+
+/** The routes as an app sends them in JSON (`PUT /v1/apps/:app/routes`), through the same parser. */
+function qwenAudioRoutes(): ModelRoutesSpec {
+  const tts = [
+    { provider: 'deployment', deployment: 'parle-qwen-tts', oneGpuDeployment: 'parle-speech', model: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base' },
+    { provider: 'openrouter', model: 'qwen/qwen-audio-3.0-tts-flash', voices: QWEN_AUDIO_VOICES, voiceGenders: CAST_GENDERS, accountPolicyGuard: true },
+    { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pf_dora', voices: KOKORO_VOICES, voiceGenders: CAST_GENDERS, preferFallbackVoice: true },
+  ];
+  const { routes, errors } = parseModelRoutes(JSON.stringify({ ...parleRoutes(), tts: { 'parle-tts': tts } }));
+  expect(errors).toEqual([]);
+  return routes;
+}
 
 const ZDR_ERROR = Object.assign(new Error('404 No endpoints found matching your data policy (Zero data retention). ZDR violation'), { status: 404 });
 
@@ -33,16 +51,17 @@ const coldDeployment = {
   synthesize: vi.fn(async () => { throw Object.assign(new Error("deployment 'parle-speech': replicas are starting"), { status: 503, gatewayCode: 'cold', skipRetry: true }); }),
 };
 
-function setup(opts: { refuseQwen: boolean; env?: Record<string, string>; speechConfigured?: boolean }) {
+function setup(opts: { refuseQwen: boolean; registered?: string[] }) {
   const calls: TTSRequest[] = [];
   const openrouter = fakeOpenRouterTTS(r => calls.push(r), m => opts.refuseQwen && m.startsWith('qwen/'));
   const p = { providerId: 'x', isConfigured: () => false } as never;
   const instances: ServeInstances = { chat: { openrouter: p }, stt: { openrouter: p }, tts: { openrouter: openrouter as never } };
   const guards = new AccountPolicyGuards();
   const breakers = new CircuitBreakerRegistry({ failureThreshold: 5, resetTimeoutMs: 30_000 });
+  const registered = new Set(opts.registered ?? ['parle-speech']);
   const built = buildServeProviders({
-    instances, openrouter: { state: 'valid' }, env: opts.env ?? {}, policyGuards: guards,
-    speechDeploymentConfigured: opts.speechConfigured ?? true,
+    instances, openrouter: { state: 'valid' }, env: {}, policyGuards: guards, appRoutes: qwenAudioRoutes(),
+    deploymentExists: (name) => registered.has(name),
     deploymentProvider: (stage) => (stage === 'tts' ? coldDeployment : p) as never,
   });
   const speak = (body: Record<string, unknown>) => handleAudioSpeech(
@@ -52,30 +71,43 @@ function setup(opts: { refuseQwen: boolean; env?: Record<string, string>; speech
   return { built, calls, openrouter, guards, breakers, speak };
 }
 
-describe('one-GPU mode', () => {
-  it('without TTS_DEPLOYMENT and with the speech deployment configured, TTS goes to the speech deployment', () => {
-    expect(ttsDeploymentOf({}, { speechConfigured: true })).toEqual({ name: 'parle-speech', mode: 'one-gpu' });
-    expect(ttsDeploymentOf({ SPEECH_DEPLOYMENT: 'speech-x' }, { speechConfigured: true })).toEqual({ name: 'speech-x', mode: 'one-gpu' });
-    const { built } = setup({ refuseQwen: false });
+describe('one-GPU mode (oneGpuDeployment)', () => {
+  it('own deployment not registered, speech deployment registered: TTS goes to the speech deployment', () => {
+    const { built } = setup({ refuseQwen: false, registered: ['parle-speech'] });
     expect(built.providers.tts?.['parle-tts']?.[0].providerId).toBe('deployment:parle-speech');
     expect(built.providers.stt?.['parle-stt']?.[0].providerId).toBe('deployment:parle-speech');
+    expect(built.summary.oneGpu).toEqual(['tts parle-tts: parle-qwen-tts → parle-speech']);
+    // /health shows the effective target, not the name in the routes.
+    expect(built.chains.tts['parle-tts'][0]).toMatchObject({ target: 'deployment:parle-speech', deployment: 'parle-speech' });
   });
 
-  it('TTS_DEPLOYMENT set keeps the dedicated deployment (parle-qwen-tts)', () => {
-    expect(ttsDeploymentOf({ TTS_DEPLOYMENT: 'parle-qwen-tts' }, { speechConfigured: true })).toEqual({ name: 'parle-qwen-tts', mode: 'dedicated' });
-    const { built } = setup({ refuseQwen: false, env: { TTS_DEPLOYMENT: 'parle-qwen-tts' } });
+  it('the dedicated TTS deployment registered always wins', () => {
+    const { built } = setup({ refuseQwen: false, registered: ['parle-speech', 'parle-qwen-tts'] });
+    expect(built.providers.tts?.['parle-tts']?.[0].providerId).toBe('deployment:parle-qwen-tts');
+    expect(built.summary.oneGpu).toBeUndefined();
+  });
+
+  it('neither registered: the entry keeps its own deployment (reported missing by /health)', () => {
+    const { built } = setup({ refuseQwen: false, registered: [] });
     expect(built.providers.tts?.['parle-tts']?.[0].providerId).toBe('deployment:parle-qwen-tts');
   });
 
-  it('no speech deployment and no TTS_DEPLOYMENT: legacy default parle-qwen-tts', () => {
-    expect(ttsDeploymentOf({}, { speechConfigured: false })).toEqual({ name: 'parle-qwen-tts', mode: 'legacy-default' });
+  it('without the field nothing is redirected (an entry that names a deployment gets that deployment)', () => {
+    const p = { providerId: 'x', isConfigured: () => true } as never;
+    const { providers } = buildServeProviders({
+      instances: { chat: {}, stt: {}, tts: { openrouter: p } }, openrouter: { state: 'valid' },
+      appRoutes: parleRoutes(), deploymentExists: (n) => n === 'parle-speech', deploymentProvider: () => p,
+    });
+    expect(providers.tts?.['parle-tts']?.[0].providerId).toBe('deployment:parle-qwen-tts');
   });
 });
 
 describe('fallback voices by gender', () => {
-  it('reads the gender from the cast table, the slug, then the Kokoro fallback_voice', () => {
-    expect(genderOfVoice({ voice: 'pt-PT-1baab6' })).toBe('masculine');
-    expect(genderOfVoice({ voice: 'pt-PT-2537db' })).toBe('feminine');
+  it("reads the gender from the app's table, the slug, then the Kokoro fallback_voice", () => {
+    expect(genderOfVoice({ voice: 'pt-PT-1baab6' }, CAST_GENDERS)).toBe('masculine');
+    expect(genderOfVoice({ voice: 'pt-PT-2537db' }, CAST_GENDERS)).toBe('feminine');
+    expect(genderOfVoice({ voice: 'pt-PT-1baab6' })).toBe('feminine');
+    expect(genderOfVoice({ voice: 'constructor' }, CAST_GENDERS)).toBe('feminine');
     expect(genderOfVoice({ voice: 'br-m-99' })).toBe('masculine');
     expect(genderOfVoice({ voice: 'rafa', fallbackVoice: 'pm_alex' })).toBe('masculine');
     expect(genderOfVoice({ voice: 'unknown' })).toBe('feminine');
@@ -84,9 +116,11 @@ describe('fallback voices by gender', () => {
   it('Qwen-Audio gets Cherry/Ethan; Kokoro keeps the client fallback_voice, else pf_dora/pm_alex', () => {
     expect(voiceForGender(QWEN_AUDIO_VOICES)({ voice: 'br-m-04', fallbackVoice: 'pm_santa' })).toBe('Ethan');
     expect(voiceForGender(QWEN_AUDIO_VOICES)({ voice: 'br-f-01' })).toBe('Cherry');
-    expect(voiceForGender(KOKORO_VOICES, true)({ voice: 'br-m-04', fallbackVoice: 'pm_santa' })).toBe('pm_santa');
-    expect(voiceForGender(KOKORO_VOICES, true)({ voice: 'br-m-04' })).toBe('pm_alex');
-    expect(voiceForGender(KOKORO_VOICES, true)({ voice: 'pt-PT-2e0907' })).toBe('pf_dora');
+    const kokoro = voiceForGender(KOKORO_VOICES, { preferFallbackVoice: true, genders: CAST_GENDERS });
+    expect(kokoro({ voice: 'br-m-04', fallbackVoice: 'pm_santa' })).toBe('pm_santa');
+    expect(kokoro({ voice: 'br-m-04' })).toBe('pm_alex');
+    expect(kokoro({ voice: 'pt-PT-2e0907' })).toBe('pf_dora');
+    expect(kokoro({ voice: 'pt-PT-1baab6' })).toBe('pm_alex');
   });
 });
 

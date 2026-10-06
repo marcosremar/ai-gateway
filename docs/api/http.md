@@ -78,15 +78,16 @@ traffic returns to it. A real client error (e.g. `400` invalid request) is retur
 
 ### App aliases — `PUT /v1/apps/:app/routes`
 
-The parle aliases are built in (the table below); an app that wants its own model names routed to its deployment
-first and to cloud fallbacks after — or wants to replace a built-in alias — puts them on its account, in the
+The gateway's code names no app model. An app that wants its own model names (`parle-stt`, `parle-llm`,
+`parle-tts`…) routed to its deployment first and to cloud fallbacks after puts them on its account, in the
 `MODEL_ROUTES` shape below. The change is live (the providers are re-mounted, no restart) and stored in the account
 (`DEPLOYMENTS_STATE_DIR/apps.json`).
 
 ```bash
 curl -X PUT $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
   "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
-  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-qwen-tts", "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
+  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-qwen-tts", "oneGpuDeployment": "parle-speech",
+                            "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
                           { "provider": "openrouter", "model": "microsoft/mai-voice-2.1-flash", "voice": "pt-BR-Luana:MAI-Voice-2-Flash" },
                           { "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora", "fixedVoice": true }] }
 }'
@@ -95,43 +96,29 @@ curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
 
 - A PUT replaces all of the app's routes. Invalid entries → `400`; an alias another app already routes → `409`
   (an app cannot take over another app's model names); another app's routes → `403`.
-- App routes win over the built-in aliases; `MODEL_ROUTES` (below) wins over every app's routes for the same model.
+- `MODEL_ROUTES` (below) wins over every app's routes for the same model.
 - `fixedVoice: true` (TTS): the entry keeps its own `voice` even when the request sends `fallback_voice`.
+- `oneGpuDeployment` (deployment entries) — **one-GPU mode**: while `deployment` is not registered on this gateway
+  and `oneGpuDeployment` is, the entry goes to `oneGpuDeployment` (e.g. TTS on the `parle-speech` machine that already
+  runs Whisper + Qwen3.5 + Qwen3-TTS). A registered `deployment` always wins. Resolved when the providers are mounted
+  (boot, routes PUT, key reload, a declared deployment registered); `/health` shows the effective target and the
+  boot log lists it under `oneGpu`.
+- `voices: {feminine, masculine}` (TTS; capability, not in the parle's chain, which is MAI-Voice → Kokoro): a fallback that cannot clone speaks a stock voice of the **gender** of the
+  requested voice (`src/config/tts-fallback-voices.ts`). The gender comes from the entry's `voiceGenders`
+  (`{"pt-PT-1baab6": "masculine", …}`, the app's cast), the `xx-f-`/`xx-m-` slug, or the gender letter of a Kokoro
+  `fallback_voice` (`pf_…`/`pm_…`); default feminine. With `preferFallbackVoice: true` the request's `fallback_voice`
+  wins over the table. Known stock voices: Qwen-Audio `Cherry`/`Ethan`, Kokoro `pf_dora`/`pm_alex`.
+- `accountPolicyGuard: true` (TTS): **account data policy**. With Zero Data Retention on the OpenRouter account,
+  some models (e.g. Qwen-Audio, a DashScope endpoint) are refused (`404 … data policy / ZDR violation`). The first refusal takes that link
+  out of the chain for 30 min (code `policy`, `X-Gateway-Fallback: policy`): later requests go to the next link without
+  calling it, the refusal does not open the OpenRouter breaker that the next link may share, and `/health` shows the
+  link as `blocked` with the reason. A key reload lifts the block. The gateway never changes the account's privacy
+  setting.
 
-The built-in chains of the parle aliases:
-
-| Model (alias) | Route | Chain |
-|---|---|---|
-| `parle-stt` | `/v1/audio/transcriptions` | `deployment:$SPEECH_DEPLOYMENT` (whisper-large-v3-turbo) → `openrouter:openai/whisper-large-v3-turbo` → `groq:whisper-large-v3-turbo` |
-| `parle-llm` | `/v1/chat/completions` | `deployment:$SPEECH_DEPLOYMENT` (Qwen3.5-9B) → `openrouter:qwen/qwen3.5-9b` → `openrouter:google/gemini-2.5-flash-lite` (both with `reasoning: {enabled: false}`) |
-| `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:<TTS deployment>` (Qwen3-TTS Base, voice cloning; `TTS_DEPLOYMENT_MODEL`, default `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) → `openrouter:qwen/qwen-audio-3.0-tts-flash` (stock voice by gender) → `openrouter:hexgrad/kokoro-82m` (`fallback_voice`, else by gender) |
-
-`SPEECH_DEPLOYMENT` defaults to `parle-speech` (the image with Whisper + Qwen3.5-9B + Qwen3-TTS on one GPU, declared
-in the repo — see [Declared deployments](../deployments.md#declared-deployments)). The TTS deployment is:
-
-- `TTS_DEPLOYMENT` (or `QWEN_TTS_DEPLOYMENT`) when set — e.g. `parle-qwen-tts`, a separate L4 for TTS only;
-- otherwise, when the speech deployment exists on the gateway, **the speech deployment itself (one-GPU mode)**:
-  STT, LLM and TTS on the same machine;
-- otherwise `parle-qwen-tts` (legacy default).
-
-The replica must expose the OpenAI shapes (`/v1/audio/transcriptions`, `/v1/chat/completions`, `/v1/audio/speech`).
-
-**TTS fallbacks cannot clone**, so each gets a stock voice of the **gender** of the requested cast voice
-(`src/config/tts-fallback-voices.ts`):
-
-| Gender | `openrouter:qwen/qwen-audio-3.0-tts-flash` | `openrouter:hexgrad/kokoro-82m` |
-|---|---|---|
-| feminine | `Cherry` | `pf_dora` |
-| masculine | `Ethan` | `pm_alex` (the request's `fallback_voice` wins, e.g. `pm_santa`) |
-
-The gender comes from the parle cast table (`pt-PT-1baab6` …, `br-f-01` …), the `br-f-`/`br-m-` slug, or the gender
-letter of the Kokoro `fallback_voice` (`pf_…`/`pm_…`); default feminine.
-
-**Account data policy.** With Zero Data Retention on the OpenRouter account, Qwen-Audio (a DashScope endpoint) is
-refused (`404 … data policy / ZDR violation`). The first refusal takes that link out of the chain for 30 min
-(code `policy`, `X-Gateway-Fallback: policy`): later requests go straight to Kokoro without calling it, the refusal
-does not open the OpenRouter breaker that Kokoro shares, and `/health` shows the link as `blocked` with the reason.
-A key reload lifts the block. The gateway never changes the account's privacy setting.
+Voices are provider-specific: on `/v1/audio/speech`, `voice` goes to the first provider; a fallback with `voices`
+picks its stock voice as above, any other fallback uses `fallback_voice` from the request (unless `fixedVoice`),
+else its own configured voice. The replica must expose the OpenAI shapes (`/v1/audio/transcriptions`,
+`/v1/chat/completions`, `/v1/audio/speech`).
 
 **Self-hosted TTS (Qwen3-TTS Base).** For a deployment target:
 
@@ -218,7 +205,7 @@ Every successful response of the three routes carries (no secrets):
 
 | Header | Example | Meaning |
 |---|---|---|
-| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:hexgrad/kokoro-82m` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
+| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
 | `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `policy`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 
