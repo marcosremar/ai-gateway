@@ -40,6 +40,7 @@ export function unpackScript(pack: { chunkCount: number; index: Record<string, [
     `for i in 1 2 3 4 5; do curl -sf --local-port 1-1024 http://169.254.42.42/user_data/aigw-pack-${n} -o /srv/aigw/pack.${n} && break; sleep 3; done`);
   const parts = Array.from({ length: pack.chunkCount }, (_, n) => `/srv/aigw/pack.${n}`).join(' ');
   const splits = Object.entries(pack.index).map(([key, [off, len]]) =>
-    `tail -c +${off + 1} /srv/aigw/pack.bin | head -c ${len} > /srv/aigw/files/${key}`);
+    // `head -c 0` is rejected by BSD/macOS head — an empty file is just truncated.
+    len === 0 ? `: > /srv/aigw/files/${key}` : `tail -c +${off + 1} /srv/aigw/pack.bin | head -c ${len} > /srv/aigw/files/${key}`);
   return ['mkdir -p /srv/aigw/files', ...fetches, `cat ${parts} > /srv/aigw/pack.bin`, ...splits, 'rm -f /srv/aigw/pack.*'].join('\n');
 }
