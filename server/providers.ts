@@ -445,7 +445,16 @@ let ttsChain = [
 
 // Profiles for each cloud/local provider
 export const groqDefaults: AIProfile | null = groqAvailable ? {
-  stt: [{ provider: 'groq', model: groqSttModel }],
+  // STT chain: Groq first (fastest hosted whisper), then OpenAI/Fireworks — a provider
+  // account block (billing/region) must degrade to the next whisper, not fail the request.
+  stt: [
+    { provider: 'groq', model: groqSttModel },
+    ...(openaiAvailable ? [{ provider: 'openai' as const, model: 'whisper-1' }] : []),
+    ...(fireworksAvailable ? [{ provider: 'fireworks' as const, model: 'whisper-v3' }] : []),
+    // Local whisper server (WHISPER_HOST + PROVIDER_CHAIN including ollama) as last resort:
+    // survives every cloud account being down — the student still gets transcription.
+    ...(ollamaAvailable ? [{ provider: 'ollama' as const, model: 'whisper-large-v3' }] : []),
+  ],
   llm: [
     { provider: 'groq', model: groqLlmModel },
     { provider: 'modal-qwen3asr-pipeline', model: 'translategemma-12b' },

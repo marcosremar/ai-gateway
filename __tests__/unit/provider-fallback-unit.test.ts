@@ -178,6 +178,23 @@ describe('withProviderFallback', () => {
     expect(callOrder).toEqual(['groq']);
   });
 
+  it('moves to next provider on 400 account-restriction errors', async () => {
+    // Groq returns 400 "Organization has been restricted because of overdue
+    // payment(s)" — a provider-down condition that must fall through, not abort.
+    const callOrder: string[] = [];
+    const chain = [entry('groq', 'model'), entry('openai', 'model')];
+    const fn = async (e: FallbackEntry) => {
+      callOrder.push(e.provider);
+      if (e.provider === 'groq') {
+        throw makeError(400, 'Organization has been restricted because of overdue payment(s). Please update the payment method');
+      }
+      return 'ok';
+    };
+    const result = await withProviderFallback(chain, fn, baseOpts());
+    expect(callOrder).toEqual(['groq', 'openai']);
+    expect(result.usedProvider).toBe('openai');
+  });
+
   // #430 — 401/403 skip retries but move to next provider
   it('moves to next provider on 401 without retrying', async () => {
     const callOrder: string[] = [];

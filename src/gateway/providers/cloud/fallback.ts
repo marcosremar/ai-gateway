@@ -280,6 +280,13 @@ const RETRYABLE_STATUSES = new Set([401, 402, 403, 404, 429, 500, 502, 503, 504]
 /** Error codes that should be treated as retryable even on 400 status (provider-specific issues) */
 const RETRYABLE_ERROR_CODES = new Set(['model_terms_required', 'model_not_found', 'model_decommissioned']);
 
+// Provider account-level blocks that arrive as a generic 400 instead of 402/403 —
+// e.g. Groq "Organization has been restricted because of overdue payment(s)".
+// Semantically provider-down: the next provider's credentials are unaffected,
+// so the chain must move on instead of aborting.
+const ACCOUNT_RESTRICTION_PATTERN =
+  /overdue payment|organization.{0,30}restricted|account.{0,30}(restricted|suspended|disabled|deactivated)|billing.{0,20}(problem|issue|past due|failed|restriction)/i;
+
 /**
  * HTTP status codes that are retryable by switching provider but not by retrying.
  * 401/402/403: auth/billing errors — each provider has its own API key, so failure
@@ -311,6 +318,10 @@ export function isRetryableError(err: unknown): boolean {
   if (code && RETRYABLE_ERROR_CODES.has(code)) return true;
   const status = extractStatus(err);
   if (status === null) return true;
+  if (status === 400) {
+    const msg = typeof e.message === 'string' ? e.message : '';
+    return ACCOUNT_RESTRICTION_PATTERN.test(msg);
+  }
   return RETRYABLE_STATUSES.has(status);
 }
 
