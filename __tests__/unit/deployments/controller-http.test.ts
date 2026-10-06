@@ -206,7 +206,11 @@ describe('deployments API', () => {
     const replicasUsed = new Set(await Promise.all(spread.map(async r => ((await r.json()) as { replica: string }).replica)));
     expect(replicasUsed.size).toBe(3);
 
-    // Idle: push lastRequestAt (and when the replicas became ready) back past idleMinutes.
+    // Idle: push lastRequestAt (and when the replicas became ready) back past idleMinutes. First wait until every lease is
+    // done: the proxy ends a lease (`done()`, which stamps lastRequestAt = now) AFTER the client has read the body, so
+    // rewinding the clock right after `r.json()` could be overwritten a tick later and the deployment never went idle
+    // (the flake of this test).
+    await until(() => h.controller.get('busy')!.inflight === 0 && h.controller.get('busy')!.replicas.every(r => r.inflight === 0));
     const internals = h.controller as unknown as {
       deployments: Map<string, { record: { lastRequestAt: number } }>; probes: Map<string, { readyAt?: number }>;
     };

@@ -25,6 +25,7 @@ import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
 import { createS2SRoute } from './src/s2s/route';
 import { loopbackStages } from './src/s2s/loopback-stages';
+import { appForCall, appStageModels } from './src/s2s/app-stage-models';
 import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
@@ -212,6 +213,18 @@ const deepHealth = {
 // POST /v1/s2s — speech-to-speech in one streamed request: the speech-stack deployment first, the composed pipeline
 // over the stage chains (loopback into this gateway, with the caller's own key) as fallback. See src/s2s/route.ts.
 const optionalMs = (v: string | undefined) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+// Stage models of the composed fallback: config.models, else S2S_<STAGE>_MODEL, else the calling app's own route aliases.
+const s2sStageModels = (req: import('http').IncomingMessage, config: { deployment?: string; models?: { stt?: string; chat?: string; tts?: string } }) => {
+  const deployment = config.deployment?.trim() || process.env.S2S_DEPLOYMENT?.trim() || undefined;
+  const callerApp = keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId;
+  const app = appForCall({ deploymentApp: deployment ? controller?.get(deployment)?.app : null, callerApp });
+  const derived = appStageModels(app ? deployments?.apps.get(app)?.routes : undefined, deployment);
+  return {
+    stt: config.models?.stt || process.env.S2S_STT_MODEL?.trim() || derived.stt,
+    chat: config.models?.chat || process.env.S2S_CHAT_MODEL?.trim() || derived.chat,
+    tts: config.models?.tts || process.env.S2S_TTS_MODEL?.trim() || derived.tts,
+  };
+};
 const s2sRoute = createS2SRoute({
   controller,
   deployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
@@ -221,11 +234,7 @@ const s2sRoute = createS2SRoute({
   stagesFor: (req, config) => loopbackStages({
     baseUrl: `http://127.0.0.1:${PORT}`,
     authorization: String(req.headers.authorization ?? ''),
-    models: {
-      stt: config.models?.stt || process.env.S2S_STT_MODEL?.trim() || undefined,
-      chat: config.models?.chat || process.env.S2S_CHAT_MODEL?.trim() || undefined,
-      tts: config.models?.tts || process.env.S2S_TTS_MODEL?.trim() || undefined,
-    },
+    models: s2sStageModels(req, config),
   }),
   log: (msg, data) => log.log(data ?? {}, msg),
 });

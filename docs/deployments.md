@@ -139,8 +139,29 @@ curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # ima
 `base = max(minReplicas, 1)` while there was a request in the last `idleMinutes`, else `minReplicas`.
 Surplus replicas go after `scaleDownDelaySeconds` of low load (at once when idle), never one with requests in flight.
 Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, 3 failed health checks in a row,
-older than `maxHours`. Safety: price checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS`
-across all deployments, back-off after a failed create (1 → 10 min).
+older than `maxHours` (counted from the last power-on of a parked replica, not from its creation). Safety: price
+checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS` across all deployments, back-off after a
+failed create (1 → 10 min). More cost guards below.
+
+## Cost guards (gateway-wide)
+
+| Variable | Default | What it limits |
+|---|---|---|
+| `DEPLOYMENTS_MAX_REPLICAS` | 6 | RUNNING replicas across all deployments. Parked (stopped) replicas do not count: they bill no compute. A `PUT` with `maxReplicas` above it is refused (400) with the cap in the message. |
+| `DEPLOYMENTS_MAX_STOPPED` | 8 | Parked replicas (`idleAction: "stop"`, they bill disk). Past it, an idle replica is deleted instead of parked. |
+| `DEPLOYMENTS_MAX_EUR_PER_HOUR` | 6 | Sum of `pricePerHour` of all running replicas (+ creates in flight). A create or power-on that would pass it is refused; `lastError` says `spend ceiling reached` (a market-priced Vast offer counts at its `maxEurPerHour` cap). `0` = off. |
+| `DEPLOYMENTS_PARKED_MAX_HOURS` | 72 | A parked replica unused this long is deleted (a forgotten park bills its disk forever). `0` = off. |
+| `DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES` | 60 | A `minReplicas` pin unused this long goes to zero (running replicas; it does not touch parked ones — that is the line above). |
+
+`GET /v1/deployments` (`health`) and `GET /health?deep=1` show `running`, `maxReplicas`, `stopped`, `maxStopped`,
+`eurPerHour` (current burn) and `maxEurPerHour`.
+
+A replica the provider lists as `stopping` (a stop takes ~1 min on Scaleway) is neither halted nor parked: it is left
+alone until the list shows `stopped` (10 min at most), never deleted or counted for a plan. When a provider's list fails
+(Vast answers 429 under load) the controller still releases what the plan says to release from the last known machines,
+but creates and powers on nothing; the Vast backend reuses its last list for 5 s, waits `retry_after` after a 429/5xx and
+serves the last good list for up to 90 s meanwhile. A machine whose deployment was deleted while it was being created is
+released as soon as the create ends (bounded retries; the orphan sweep stays as the net).
 
 ## Placement: `placements`, `candidates`, `near` (reliable, cheap, close to France)
 
