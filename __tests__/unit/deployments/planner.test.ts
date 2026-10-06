@@ -124,6 +124,21 @@ describe('planReplicas', () => {
     expect(later.release.map(r => r.id)).toEqual(['a']);
   });
 
+  it('a minReplicas pin unused for pinnedIdleMaxMs goes to zero; a request or a spec change restarts the clock', () => {
+    // Owner's ask (06/10/2026): idle machines must stop billing on their own, a forgotten pin included.
+    const s = spec({ minReplicas: 2, maxReplicas: 2, idleMinutes: 5 });
+    const pin = { pinnedIdleMaxMs: 60 * MIN };
+    const two = [replica('a', { age: 3 * 60 * MIN }), replica('b', { age: 3 * 60 * MIN })];
+    const off = planReplicas({ ...base, spec: s, ...pin, specUpdatedAt: NOW - 3 * 60 * MIN, lastRequestAt: NOW - 61 * MIN, replicas: two });
+    expect(off.desired).toBe(0);
+    expect(off.release.map(r => r.id).sort()).toEqual(['a', 'b']);
+    // Used 30 min ago, or the pin set 10 min ago: kept.
+    expect(planReplicas({ ...base, spec: s, ...pin, specUpdatedAt: NOW - 3 * 60 * MIN, lastRequestAt: NOW - 30 * MIN, replicas: two }).desired).toBe(2);
+    expect(planReplicas({ ...base, spec: s, ...pin, specUpdatedAt: NOW - 10 * MIN, lastRequestAt: null, replicas: two }).desired).toBe(2);
+    // Guard off (0/absent): the pin holds forever, as before.
+    expect(planReplicas({ ...base, spec: s, specUpdatedAt: NOW - 3 * 60 * MIN, lastRequestAt: null, replicas: two }).desired).toBe(2);
+  });
+
   it('paused releases everything', () => {
     const plan = planReplicas({ ...base, spec: spec({ minReplicas: 1, paused: true }), replicas: [replica('a', { inflight: 2 })] });
     expect(plan.release).toEqual([{ id: 'a', reason: 'paused' }]);

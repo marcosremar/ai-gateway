@@ -49,6 +49,8 @@ export interface ControllerOptions {
   /** Cap on replicas across all deployments (protects the bill). */
   maxTotalReplicas?: number;
   reconcileMs?: number;
+  /** Replicas kept only by `minReplicas` go to zero after this long unused (planner `pinnedIdleOver`); 0 = off. */
+  pinnedIdleMaxMs?: number;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
@@ -346,6 +348,7 @@ export class DeploymentController {
         lastRequestAt: rt.record.lastRequestAt,
         aboveSince: rt.aboveSince,
         now: this.now(),
+        ...(this.opts.pinnedIdleMaxMs ? { pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt } : {}),
       });
       rt.aboveSince = plan.aboveSince;
       for (const r of plan.release) {
