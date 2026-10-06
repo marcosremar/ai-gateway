@@ -17,6 +17,7 @@ import { createProxyServer } from '../../../src/gateway/proxy/server';
 import type { ProxyRequest, RouteTarget } from '../../../src/gateway/proxy/types';
 import { sseDeltas } from '../../../src/s2s/loopback-stages';
 import { createS2SRoute } from '../../../src/s2s/route';
+import { request as httpRequest } from 'node:http';
 
 let fake: FakeUpstream;
 const KEY_ENV = 'FAULT_BENCH_TEST_KEY';
@@ -261,17 +262,24 @@ describe('21) body over the limit without Content-Length (chunked)', () => {
     const server: Server = createProxyServer({ providers: {} as never });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const port = (server.address() as AddressInfo).port;
-    let sent = 0;
-    const big = new ReadableStream<Uint8Array>({
-      pull(ctl) {
-        if (sent >= 120 * 1024 * 1024) { ctl.close(); return; }
-        sent += 1 << 20;
-        ctl.enqueue(new Uint8Array(1 << 20));
-      },
+    /* `http.request`, não `fetch`: o servidor responde 413 e fecha enquanto o corpo ainda sobe, e o undici troca a
+       resposta por `ECONNRESET` na escrita (corrida que dependia do tempo e falhou na CI). Aqui a resposta chega pelo
+       evento `response`, e o erro de escrita depois dela é o esperado. */
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: '/v1/audio/transcriptions',
+        headers: { 'content-type': 'multipart/form-data; boundary=x', 'transfer-encoding': 'chunked' } });
+      let answered = false;
+      req.on('response', (r) => { answered = true; r.resume(); resolve(r.statusCode ?? 0); });
+      req.on('error', (err) => { if (!answered) reject(err); });
+      const mb = new Uint8Array(1 << 20);
+      let sent = 0;
+      const pump = () => {
+        while (!answered && sent < 120) { sent++; if (!req.write(mb)) { req.once('drain', pump); return; } }
+        if (!answered) req.end();
+      };
+      pump();
     });
-    const res = await fetch(`http://127.0.0.1:${port}/v1/audio/transcriptions`, {
-      method: 'POST', body: big, headers: { 'content-type': 'multipart/form-data; boundary=x' }, duplex: 'half',
-    } as RequestInit);
+    const res = { status };
     expect(res.status).toBe(413);
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
