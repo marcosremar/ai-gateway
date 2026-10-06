@@ -49,7 +49,7 @@ async function setup(routes: Record<string, FakeHandler>, opts: { threshold?: nu
   return { gw, f, changes, advance: (ms: number) => { t += ms; } };
 }
 
-const toProviders = (f: ReturnType<typeof fakeFetch>) => f.calls.filter(c => !c.url.startsWith(GW));
+const toProviders = (f: ReturnType<typeof fakeFetch>) => f.calls.filter(c => new URL(c.url).origin !== GW);
 
 describe('direct fallback — when to go direct', () => {
   it('connection error → direct, with the plan key, served label and route change', async () => {
@@ -118,7 +118,7 @@ describe('direct fallback — when to go direct', () => {
     const f = fakeFetch({ [`POST ${GW}/v1/chat/completions`]: () => connectionRefused() });
     const cold = new GatewayClient({ baseUrl: GW, fetch: f.fetch, directFallback: { app: 'parle' } });
     await expect(cold.chat({ model: 'parle-llm', messages: MSG })).rejects.toMatchObject({ code: 'network' });
-    expect(f.calls.every(c => c.url.startsWith(GW))).toBe(true);
+    expect(f.calls.every(c => new URL(c.url).origin === GW)).toBe(true);
   });
 });
 
@@ -192,7 +192,7 @@ describe('direct fallback — how it calls', () => {
     await gw.chat({ model: 'parle-llm', messages: MSG });
     for (const c of f.calls) {
       const sent = JSON.stringify([c.headers, typeof c.body === 'string' ? c.body : '']);
-      if (c.url.startsWith(GW)) {
+      if (new URL(c.url).origin === GW) {
         expect(sent).not.toContain(OR_KEY);
         expect(sent).not.toContain(GROQ_KEY);
         expect(c.headers.authorization).toBe('Bearer gw-key');

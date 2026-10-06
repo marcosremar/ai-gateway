@@ -282,7 +282,7 @@ describe('GatewayClient — retry, abort, timeout', () => {
     try {
       const f = fakeFetch({ [`POST ${BASE}/v1/audio/transcriptions`]: () => connectionRefused() });
       await expect(client(f).transcribe({ file: new Uint8Array([1]), model: 'whisper-large-v3' })).rejects.toBeInstanceOf(GatewayError);
-      expect(f.calls.every(c => c.url.startsWith(BASE))).toBe(true);
+      expect(f.calls.every(c => new URL(c.url).origin === BASE)).toBe(true);
     } finally {
       delete process.env.GROQ_API_KEY;
     }

@@ -13,6 +13,13 @@ import type {
   SpeechRequest, SpeechResult, TimeoutGroup, Transcription, TranscribeRequest,
 } from './gateway-types';
 
+/** Strips trailing `/` without a backtracking regex (CodeQL js/polynomial-redos on caller-supplied URLs). */
+export function trimTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end--;
+  return url.slice(0, end);
+}
+
 /** Plan cache: refreshed before `ttlSeconds` runs out; the last good plan stays usable while the gateway is down. */
 export class FallbackPlanStore {
   private plan: FallbackPlan | null = null;
@@ -113,7 +120,7 @@ export class DirectCaller {
     call: CallOptions, timeoutMs: number, read: (res: Response) => Promise<R>): Promise<R> {
     return exchange({
       fetch: this.fetchImpl,
-      url: `${cred.baseUrl.replace(/\/+$/, '')}${path}`,
+      url: `${trimTrailingSlashes(cred.baseUrl)}${path}`,
       path, method: 'POST',
       headers: { Authorization: `Bearer ${cred.apiKey}`, ...(init.json ? { 'Content-Type': 'application/json' } : {}) },
       body: init.body, signal: call.signal, timeoutMs, retries: 0, origin: entry.provider,

@@ -12,7 +12,7 @@
  * - `GatewayHttpClient` (index.ts) is the legacy client of the old routes (`/v1/transcribe`, `/v1/gpu/*`, …).
  */
 
-import { DirectCaller, FallbackPlanStore } from './direct-fallback';
+import { DirectCaller, FallbackPlanStore, trimTrailingSlashes } from './direct-fallback';
 import { GatewayBreaker } from './gateway-breaker';
 import { exchange, GatewayError, servedFrom } from './gateway-http';
 import { chatStreamOf, s2sStreamOf } from './gateway-streams';
@@ -58,7 +58,7 @@ export class GatewayClient {
 
   constructor(opts: GatewayClientOptions) {
     if (!opts.baseUrl) throw new Error('GatewayClient: baseUrl is required');
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
+    this.baseUrl = trimTrailingSlashes(opts.baseUrl);
     this.apiKey = opts.apiKey;
     this.app = opts.app;
     // A bare reference to window.fetch throws "Illegal invocation" when called unbound in browsers.
