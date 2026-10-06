@@ -13,6 +13,7 @@
  */
 
 import { packFiles, unpackScript } from './file-pack';
+import { PROBE_PORT } from './spec';
 import type { DeploymentSpec } from './types';
 
 /** POSIX single-quote escaping for one shell word. */
@@ -22,9 +23,13 @@ export function shellQuote(value: string): string {
 
 const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
 
-export function nginxConfig(token: string): string {
+/**
+ * `listen` is :80 for a gateway-only replica and `PROBE_PORT` for an exposed one (80/443 belong to the app there);
+ * `upstream` is the container mapped on 127.0.0.1:8000, or the exposed app's own port.
+ */
+export function nginxConfig(token: string, listen: number = 80, upstream = 8000): string {
   return `server {
-  listen 80 default_server;
+  listen ${listen} default_server;
   client_max_body_size 100m;
   location = /__aigw/ready {
     if ($http_x_aigw_token != "${token}") { return 401; }
@@ -34,7 +39,7 @@ export function nginxConfig(token: string): string {
   location / {
     if ($http_x_aigw_token != "${token}") { return 401; }
     proxy_set_header X-Aigw-Token "";
-    proxy_pass http://127.0.0.1:8000;
+    proxy_pass http://127.0.0.1:${upstream};
     proxy_http_version 1.1;
     proxy_buffering off;
     proxy_read_timeout 900;
@@ -76,6 +81,9 @@ export function replicaCloudInit(spec: DeploymentSpec, token: string): string {
   const envFile = Object.entries(spec.env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
   const shutdownMinutes = Math.round(spec.maxHours * 60) + 30;
   const bootChecks = Math.max(12, Math.ceil((spec.bootTimeoutMinutes * 60) / 5));
+  // Exposed replica: the probe moves to PROBE_PORT and the app answers health on its own port (it owns 80/443).
+  const appPort = spec.exposure ? spec.port : 8000;
+  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort) : nginxConfig(token);
   const login = spec.registryAuth
     ? `echo ${shellQuote(spec.registryAuth.password)} | docker login ${spec.registryAuth.server ? shellQuote(spec.registryAuth.server) + ' ' : ''}`
       + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin`
@@ -85,7 +93,7 @@ mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
 set -x
 shutdown -h +${shutdownMinutes}
-echo '${b64(nginxConfig(token))}' | base64 -d > /srv/aigw/nginx.conf
+echo '${b64(nginx)}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
 command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx; }
@@ -97,7 +105,7 @@ ${login}
 for i in 1 2 3 4 5; do docker pull ${shellQuote(spec.image)} && break; sleep 15; done
 ${dockerRunCommand(spec)}`}
 for i in $(seq 1 ${bootChecks}); do
-  curl -sf -o /dev/null http://127.0.0.1:8000${spec.healthPath} && echo '{"ready":true}' > /srv/aigw/ready.json && break
+  curl -sf -o /dev/null http://127.0.0.1:${appPort}${spec.healthPath} && echo '{"ready":true}' > /srv/aigw/ready.json && break
   sleep 5
 done
 `;

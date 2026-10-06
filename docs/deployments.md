@@ -88,9 +88,36 @@ boot; cold start ≈ 8 min), 100 GB volume, 2 h max lifetime. `TRUST_UPSTREAM_AU
 nginx forwards only `X-Aigw-Token`, so the image's own nginx sets the Bearer for its servers (babylon-cinema PR #1508).
 The default image is the first build with that change (`9a87056…`); set `SPEECH_IMAGE` to a newer commit tag.
 
-With `parle-speech` registered and no `TTS_DEPLOYMENT`, `parle-tts` goes to it too (one-GPU mode, see
-[docs/api/http.md](api/http.md#aliases-for-the-parle-client)); `parle-qwen-tts` is then unused (pause it with
-`PATCH {"paused": true}` to keep its spec and reference files).
+One-GPU mode: the parle TTS entry names `parle-qwen-tts` with `"oneGpuDeployment": "parle-speech"` (the app's own
+routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` is not registered
+and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register
+`parle-qwen-tts` (a registered `deployment` always wins); to go back to one GPU, delete it (pausing keeps it
+registered, so it would stay the target).
+
+## App accounts — saved image addresses
+
+The gateway serves many apps; each has an **account** with the addresses of its Docker images, so a deploy names an
+image instead of carrying a registry address, and the app finds it again later (scale up for a class, roll back).
+
+```bash
+# Save (or move) an image address — build-image-on-scaleway.ts --app parle does this after a push
+curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
+  "image": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107", "port": 8000, "healthPath": "/health",
+  "defaults": {"machineType": "L40S-1-48G", "volumeGb": 120, "maxReplicas": 2, "bootTimeoutMinutes": 45}
+}'
+# Deploy it by name (or roll back: "appImageVersion": 1 = the previous address)
+curl -X PUT $GW/v1/deployments/parle-speech -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{"appImage": "speech-stack"}'
+curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # images + deployments of the app
+```
+
+- **Which app**: the user id of the calling key (`GATEWAY_API_KEYS` `key:app`). An admin key (the `SANDBOX_TOKEN` user,
+  `DEPLOYMENTS_ADMIN_USERS`) acts for any app with `X-App: <app>`; a normal key cannot use `X-App`.
+- **Isolation**: a key sees and edits only its own app's images and deployments (`403` otherwise); `GET /v1/deployments`
+  lists only its app's. Admins see all (`?app=` filters). Deploys still need an admin key (they spend money).
+- **Saved per image**: `image`, `digest`, `port`, `healthPath`, `description`, `defaults` (spec fields: machineType, zone,
+  gpu, volumeGb, replicas, timeouts, price cap, args) and the **last 5 previous addresses**. Never secrets: `env`
+  values and `registryAuth` are refused (an image in the gateway's own Scaleway registry needs none).
+- Stored in `DEPLOYMENTS_STATE_DIR/apps.json` (the Railway volume), next to `deployments.json`.
 
 ## Cold start
 
@@ -156,7 +183,6 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
 | `GHCR_READ_TOKEN` | registry credential of the declared `parle-speech` (GHCR `read:packages`); from the dev API |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
-| `TTS_DEPLOYMENT` | unset = one-GPU mode (TTS on the speech deployment); set to e.g. `parle-qwen-tts` for a separate TTS machine |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
 
 Railway itself allows ~11k req/s per domain, 10k concurrent connections and requests up to 15 min while bytes flow
@@ -192,3 +218,45 @@ Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) i
   replacement, price cap, list failure, replica cap, orphan sweep, restart adoption, pause).
 - `scripts/deployments-docker-e2e.ts` — the real cloud-init in a local Docker "machine"
   (`docker build -t aigw-machine -f scripts/deployments-machine.Dockerfile scripts/`), whole HTTP path, no cloud bill.
+
+
+## Idle and leftovers stop billing on their own
+
+Inside the gateway process, without a cron of its own:
+
+| What | Who turns it off | When |
+|---|---|---|
+| Replicas of an unused deployment | the controller loop (every 20 s) | `idleMinutes` with no request (scale to `minReplicas`) |
+| Replicas kept only by `minReplicas` (a pin left on) | the controller loop | `DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES` (default 60, `0` = off) with no request and no spec change; the next request, `wake` or PATCH brings them back |
+| A replica still booting for the current use | nobody: the idle clock starts when it is ready | `bootTimeoutMinutes` replaces a stuck one |
+| Orphan replicas of this namespace, failed releases | the controller loop | next tick (retried until gone) |
+| Image build machines (`aigw-build`) | the janitor (`src/deployments/janitor.ts`, every 5 min) | older than 3 h |
+| SBS volumes Scaleway created with a server (`…_sbs_volume_N`), detached | the janitor | detached for 1 h |
+
+The janitor is on by default on Railway (`DEPLOYMENTS_JANITOR=0` turns it off; `=1` turns it on elsewhere). When the
+gateway itself is down nothing in its process runs: the reaper (`scripts/reap-orphans.ts`, a separate Railway cron
+every 15 min) releases the namespace's replicas after the gateway missed its health checks for ~2 min.
+
+
+## Exposed deployments (WebRTC, own TLS) and `idleAction: "stop"`
+
+For an app the clients reach directly, not through the gateway (LiveKit: WebRTC over UDP, Caddy with its own
+certificate), the spec adds:
+
+```json
+{
+  "exposure": { "ports": [{ "protocol": "tcp", "port": 443 }, { "protocol": "udp", "port": 7882 }] },
+  "idleAction": "stop"
+}
+```
+
+- **Reserved IP:** reserved with the first replica, kept in the deployment record, and reused by every later replica, so
+  DNS keeps pointing at it. It is shown as `publicIp` in `GET /v1/deployments/:name` and released on `DELETE`.
+- **Firewall:** the deployment's own security group opens only the listed ports plus `8089/tcp`.
+- **Gateway probe:** the token-gated probe moves to 8089, so 80/443 stay with the app. In this mode the app serves
+  `healthPath` on its own `port`.
+- **`idleAction: "stop"`:** going idle powers the replica off instead of deleting it. Disk, IP and firewall stay, and
+  only disk and IP are billed. The next demand (a request or `wake`) powers it back on, which takes about 2 min instead
+  of a full boot, and the certificate on disk survives.
+- **Traffic that bypasses the gateway:** direct client traffic (LiveKit rooms) does not count as a request. `POST /v1/deployments/:name/park` says the app is done now (powers off at once under `idleAction: "stop"`). The app keeps
+  the deployment in use with `POST /v1/deployments/:name/wake` while it needs it. When the wakes stop, `idleMinutes` parks it.

@@ -105,6 +105,40 @@ describe('planReplicas', () => {
     expect(plan.release.map(r => r.id).sort()).toEqual(['a', 'b']);
   });
 
+  it('a cold start longer than idleMinutes is not killed by its own idle clock (wake at 0, still booting at 5 min)', () => {
+    // Regression (06/10/2026): a pre-warm wake with idleMinutes 4 released the L40S at 5 min, mid 12 min boot.
+    const s = spec({ minReplicas: 0, idleMinutes: 4 });
+    const booting = replica('a', { age: 5 * MIN, everReady: false, readyNow: false });
+    const plan = planReplicas({ ...base, spec: s, lastRequestAt: NOW - 5 * MIN, replicas: [booting] });
+    expect(plan.desired).toBe(1);
+    expect(plan.release).toEqual([]);
+  });
+
+  it('the idle window starts when the replica became ready, then going idle scales to zero', () => {
+    const s = spec({ minReplicas: 0, idleMinutes: 4 });
+    const readyAt = NOW - 2 * MIN;
+    const ready = replica('a', { age: 14 * MIN, readyAt });
+    expect(planReplicas({ ...base, spec: s, lastRequestAt: NOW - 14 * MIN, replicas: [ready] }).desired).toBe(1);
+    const later = planReplicas({ ...base, spec: s, now: readyAt + 5 * MIN, lastRequestAt: NOW - 14 * MIN, replicas: [ready] });
+    expect(later.desired).toBe(0);
+    expect(later.release.map(r => r.id)).toEqual(['a']);
+  });
+
+  it('a minReplicas pin unused for pinnedIdleMaxMs goes to zero; a request or a spec change restarts the clock', () => {
+    // Owner's ask (06/10/2026): idle machines must stop billing on their own, a forgotten pin included.
+    const s = spec({ minReplicas: 2, maxReplicas: 2, idleMinutes: 5 });
+    const pin = { pinnedIdleMaxMs: 60 * MIN };
+    const two = [replica('a', { age: 3 * 60 * MIN }), replica('b', { age: 3 * 60 * MIN })];
+    const off = planReplicas({ ...base, spec: s, ...pin, specUpdatedAt: NOW - 3 * 60 * MIN, lastRequestAt: NOW - 61 * MIN, replicas: two });
+    expect(off.desired).toBe(0);
+    expect(off.release.map(r => r.id).sort()).toEqual(['a', 'b']);
+    // Used 30 min ago, or the pin set 10 min ago: kept.
+    expect(planReplicas({ ...base, spec: s, ...pin, specUpdatedAt: NOW - 3 * 60 * MIN, lastRequestAt: NOW - 30 * MIN, replicas: two }).desired).toBe(2);
+    expect(planReplicas({ ...base, spec: s, ...pin, specUpdatedAt: NOW - 10 * MIN, lastRequestAt: null, replicas: two }).desired).toBe(2);
+    // Guard off (0/absent): the pin holds forever, as before.
+    expect(planReplicas({ ...base, spec: s, specUpdatedAt: NOW - 3 * 60 * MIN, lastRequestAt: null, replicas: two }).desired).toBe(2);
+  });
+
   it('paused releases everything', () => {
     const plan = planReplicas({ ...base, spec: spec({ minReplicas: 1, paused: true }), replicas: [replica('a', { inflight: 2 })] });
     expect(plan.release).toEqual([{ id: 'a', reason: 'paused' }]);

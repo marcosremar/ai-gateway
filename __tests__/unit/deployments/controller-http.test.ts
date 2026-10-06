@@ -12,6 +12,7 @@ import { createProxyServer } from '../../../src/gateway/proxy/server';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { createDeploymentRoutes, HttpReplicaProbe } from '../../../src/deployments/http';
 import { FileDeploymentStore, MemoryDeploymentStore } from '../../../src/deployments/store';
+import { AppRegistry, FileAppStore, MemoryAppStore } from '../../../src/deployments/apps';
 import type { DeploymentStore } from '../../../src/deployments/types';
 import { FakeCloud, until } from './_fake-cloud';
 
@@ -20,7 +21,7 @@ const SITE = 'site-key-0123456789';
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
@@ -28,14 +29,20 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
   });
   await controller.init();
   controller.start();
+  const apps = new AppRegistry(new MemoryAppStore());
+  await apps.init();
   const handler = createDeploymentRoutes({
     controller,
+    apps,
     isAdmin: (req) => req.headers.authorization === `Bearer ${ADMIN}`,
+    userOf: (req) => (req.headers.authorization === `Bearer ${SITE}` ? 'site-a' : req.headers.authorization === `Bearer ${ADMIN}` ? 'owner' : null),
+    onRoutesChange: opts.onRoutesChange,
+    ...(opts.declaredStatus ? { declaredStatus: opts.declaredStatus } : {}),
   });
   const server = createProxyServer({
     apiKeys: [`${ADMIN}:owner`, `${SITE}:site-a`],
     providers: { stt: {}, chat: {}, tts: {} } as never,
-    prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }],
+    prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }, { prefix: '/v1/apps', handler }],
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
@@ -68,6 +75,15 @@ describe('deployments API', () => {
     expect((await fetch(`${h.base}/v1/deployments`)).status).toBe(401);
     expect((await call(h, 'GET', '/v1/deployments', undefined, SITE)).status).toBe(200);
     expect((await call(h, 'PUT', '/v1/deployments/x', { profile: 'cpu-echo' }, SITE)).status).toBe(403);
+  });
+
+  it('GET /v1/deployments lists the declared deployments for an admin, not for an app-scoped key', async () => {
+    const d = await harness({ declaredStatus: () => [{ name: 'parle-speech', state: 'pending', reason: 'GHCR_READ_TOKEN is not set' }] });
+    extra.push(d);
+    const admin = await (await call(d, 'GET', '/v1/deployments')).json() as { declared?: unknown };
+    expect(admin.declared).toEqual([{ name: 'parle-speech', state: 'pending', reason: 'GHCR_READ_TOKEN is not set' }]);
+    const site = await (await call(d, 'GET', '/v1/deployments', undefined, SITE)).json() as { declared?: unknown };
+    expect(site.declared).toBeUndefined();
   });
 
   it('lists built-in profiles and stores new ones', async () => {
@@ -190,11 +206,53 @@ describe('deployments API', () => {
     const replicasUsed = new Set(await Promise.all(spread.map(async r => ((await r.json()) as { replica: string }).replica)));
     expect(replicasUsed.size).toBe(3);
 
-    // Idle: push lastRequestAt back past idleMinutes.
-    (h.controller as unknown as { deployments: Map<string, { record: { lastRequestAt: number } }> })
-      .deployments.get('busy')!.record.lastRequestAt = Date.now() - 2 * 60_000;
+    // Idle: push lastRequestAt (and when the replicas became ready) back past idleMinutes.
+    const internals = h.controller as unknown as {
+      deployments: Map<string, { record: { lastRequestAt: number } }>; probes: Map<string, { readyAt?: number }>;
+    };
+    internals.deployments.get('busy')!.record.lastRequestAt = Date.now() - 2 * 60_000;
+    for (const p of internals.probes.values()) if (p.readyAt) p.readyAt = Date.now() - 3 * 60_000;
     await until(() => h.cloud.machines.size === 0, 3000);
     expect(h.controller.get('busy')!.status).toBe('scaled-to-zero');
+  });
+
+  it('exposed deployment: one reserved IP + firewall for all its replicas, shown as publicIp, released with it', async () => {
+    // LiveKit-like: clients reach the machine directly (WebRTC), so the address must outlive the replica.
+    await call(h, 'PUT', '/v1/deployments/rtc', {
+      profile: 'cpu-echo', minReplicas: 1, exposure: { ports: [{ protocol: 'tcp', port: 443 }, { protocol: 'udp', port: 7882 }] },
+    });
+    await until(() => h.controller.get('rtc')!.status === 'ready');
+    const view = h.controller.get('rtc')!;
+    expect(view.publicIp).toBe('51.15.0.1');
+    expect(h.cloud.created[0]!.network).toMatchObject({ ipId: 'ip-rtc', groupId: 'sg-rtc' });
+    const nginx = /echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/nginx\.conf/.exec(h.cloud.created[0]!.cloudInit)![1]!;
+    expect(Buffer.from(nginx, 'base64').toString()).toContain('listen 8089 default_server');
+    expect((await call(h, 'DELETE', '/v1/deployments/rtc')).status).toBe(200);
+    await until(() => h.cloud.releasedNetworks.includes('ip-rtc'));
+  });
+
+  it("idleAction 'stop': idle powers the replica off (kept, not deleted) and the next demand powers it back on", async () => {
+    await call(h, 'PUT', '/v1/deployments/park', { profile: 'cpu-echo', idleMinutes: 1, idleAction: 'stop' });
+    await call(h, 'POST', '/v1/deployments/park/wake');
+    await until(() => h.controller.get('park')!.status === 'ready');
+    const internals = h.controller as unknown as {
+      deployments: Map<string, { record: { lastRequestAt: number } }>; probes: Map<string, { readyAt?: number }>;
+    };
+    internals.deployments.get('park')!.record.lastRequestAt = Date.now() - 2 * 60_000;
+    for (const p of internals.probes.values()) if (p.readyAt) p.readyAt = Date.now() - 3 * 60_000;
+    await until(() => h.cloud.stops.length === 1, 3000);
+    expect(h.cloud.released).toEqual([]);
+    expect([...h.cloud.machines.values()].map(m => m.machine.state)).toEqual(['stopped']);
+
+    await call(h, 'POST', '/v1/deployments/park/wake');
+    await until(() => h.controller.get('park')!.status === 'ready', 3000);
+    expect(h.cloud.starts).toHaveLength(1);
+    expect(h.cloud.created).toHaveLength(1);
+
+    // POST /park: the caller is done now (its traffic bypassed the gateway) → powered off at once, no idle wait.
+    expect((await call(h, 'POST', '/v1/deployments/park/park')).status).toBe(202);
+    await until(() => h.cloud.stops.length === 2, 3000);
+    expect(h.cloud.released).toEqual([]);
   });
 
   it('retries on another replica when one dies, and replaces the dead one', async () => {
@@ -286,5 +344,106 @@ describe('deployments API', () => {
     await call(h, 'PATCH', '/v1/deployments/p', { paused: true });
     await until(() => h.cloud.machines.size === 0);
     expect((await call(h, 'GET', '/v1/deployments/p/invoke/', undefined, SITE)).status).toBe(409);
+  });
+});
+
+describe('app accounts: saved image addresses per app', () => {
+  const SPEECH = 'rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107';
+  const SPEECH_OLD = 'rg.fr-par.scw.cloud/aigw/speech-stack:20261004-2240';
+  const asParle = { 'x-app': 'parle' };
+
+  beforeEach(async () => { h = await harness(); });
+  afterEach(async () => { await close(h); for (const x of extra.splice(0)) await close(x); });
+
+  it('an app saves its image address once and deploys it by name; the deployment belongs to the app', async () => {
+    let res = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', {
+      image: SPEECH_OLD, port: 8000, healthPath: '/health', description: 'Whisper + Qwen3.5-9B + Qwen3-TTS',
+      defaults: { machineType: 'DEV1-S', gpu: false, maxReplicas: 2 },
+    }, ADMIN, asParle);
+    expect(res.status).toBe(201);
+    res = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH }, ADMIN, asParle);
+    const saved = await res.json() as { image: string; port: number; history: Array<{ image: string }> };
+    expect(saved).toMatchObject({ image: SPEECH, port: 8000 });
+    expect(saved.history.map(v => v.image)).toEqual([SPEECH_OLD]); // the previous address is kept
+
+    res = await call(h, 'PUT', '/v1/deployments/parle-speech', { appImage: 'speech-stack', minReplicas: 0 }, ADMIN, asParle);
+    expect(res.status).toBe(201);
+    const view = await res.json() as { app: string; appImage: string; spec: { image: string; port: number; machineType: string; maxReplicas: number } };
+    expect(view).toMatchObject({ app: 'parle', appImage: 'speech-stack' });
+    expect(view.spec).toMatchObject({ image: SPEECH, port: 8000, machineType: 'DEV1-S', maxReplicas: 2 });
+
+    // Roll back to the previous address by version
+    res = await call(h, 'PATCH', '/v1/deployments/parle-speech', { appImage: 'speech-stack', appImageVersion: 1 }, ADMIN, asParle);
+    expect(((await res.json()) as { spec: { image: string } }).spec.image).toBe(SPEECH_OLD);
+
+    // The app's account lists its images and deployments
+    const account = await (await call(h, 'GET', '/v1/apps/parle', undefined, ADMIN, asParle)).json() as {
+      images: Array<{ name: string }>; deployments: Array<{ name: string }>;
+    };
+    expect(account.images.map(i => i.name)).toEqual(['speech-stack']);
+    expect(account.deployments.map(d => d.name)).toEqual(['parle-speech']);
+  });
+
+  it('apps are isolated: a key sees and edits only its own app, cannot act for another', async () => {
+    await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000 }, ADMIN, asParle);
+    await call(h, 'PUT', '/v1/deployments/parle-echo', { profile: 'cpu-echo' }, ADMIN, asParle);
+    // site-a (a normal key) manages its own account…
+    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE)).status).toBe(201);
+    // …but not parle's, and cannot impersonate it
+    expect((await call(h, 'GET', '/v1/apps/parle', undefined, SITE)).status).toBe(403);
+    expect((await call(h, 'GET', '/v1/apps/site-a', undefined, SITE, asParle)).status).toBe(403);
+    expect((await call(h, 'GET', '/v1/deployments/parle-echo', undefined, SITE)).status).toBe(403);
+    const list = await (await call(h, 'GET', '/v1/deployments', undefined, SITE)).json() as { deployments: unknown[] };
+    expect(list.deployments).toEqual([]);
+    const apps = await (await call(h, 'GET', '/v1/apps', undefined, SITE)).json() as { apps: Array<{ id: string }> };
+    expect(apps.apps.map(a => a.id)).toEqual(['site-a']);
+    // The admin sees every app
+    const all = await (await call(h, 'GET', '/v1/apps', undefined, ADMIN)).json() as { apps: Array<{ id: string }> };
+    expect(all.apps.map(a => a.id).sort()).toEqual(['parle', 'site-a']);
+  });
+
+  it('refuses bad image addresses, secrets in defaults, unknown images and appImage without an app', async () => {
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: 'not an image; rm -rf /' }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: SPEECH, defaults: { env: { KEY: 'secret' } } }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: SPEECH, registryAuth: { password: 'p' } }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'missing' }, ADMIN, asParle)).status).toBe(404);
+    expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'speech-stack' }, ADMIN)).status).toBe(400);
+  });
+
+  it('an app owns its aliases: PUT routes validates, re-mounts the providers, and refuses another app\'s alias', async () => {
+    let remounts = 0;
+    const r = await harness({ onRoutesChange: () => { remounts++; } });
+    extra.push(r);
+    const chain = { tts: { 'parle-tts': [
+      { provider: 'deployment', deployment: 'parle-qwen-tts' },
+      { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pf_dora', fixedVoice: true },
+    ] } };
+    let res = await call(r, 'PUT', '/v1/apps/parle/routes', chain, ADMIN, asParle);
+    expect(res.status).toBe(200);
+    expect(remounts).toBe(1);
+    const got = await (await call(r, 'GET', '/v1/apps/parle/routes', undefined, ADMIN, asParle)).json() as { routes: typeof chain };
+    expect(got.routes.tts['parle-tts'][1]).toMatchObject({ voice: 'pf_dora', fixedVoice: true });
+    // Invalid entries and non-objects are refused, and nothing is re-mounted
+    expect((await call(r, 'PUT', '/v1/apps/parle/routes', { chat: { x: [42] } }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(r, 'PUT', '/v1/apps/parle/routes', '[1]', ADMIN, asParle)).status).toBe(400);
+    // site-a cannot take parle's alias, nor write parle's routes
+    res = await call(r, 'PUT', '/v1/apps/site-a/routes', { tts: { 'parle-tts': [{ provider: 'openrouter', model: 'm' }] } }, SITE);
+    expect(res.status).toBe(409);
+    expect((await call(r, 'PUT', '/v1/apps/parle/routes', chain, SITE)).status).toBe(403);
+    expect(remounts).toBe(1);
+  });
+
+  it('accounts persist across a gateway restart (file store)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'aigw-apps-'));
+    try {
+      const first = new AppRegistry(FileAppStore.inDir(dir));
+      await first.init();
+      await first.putImage('parle', 'speech-stack', { image: SPEECH, port: 8000 });
+      const second = new AppRegistry(FileAppStore.inDir(dir));
+      await second.init();
+      expect(second.image('parle', 'speech-stack')).toMatchObject({ image: SPEECH, port: 8000 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

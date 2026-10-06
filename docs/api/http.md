@@ -8,6 +8,11 @@ deployed by `railway.json`, default port `4000`). The larger reference server in
 WebSocket (`/ws/stream`) and WebRTC return `410 Gone`. Streaming is supported via SSE on `POST /v1/chat/completions` with `stream: true`. All other client code must use the JSON endpoints below.
 :::
 
+::: tip Client
+Apps call these routes through `GatewayClient` (`@parle/ai-gateway/client`): see [Gateway client](./client.md).
+`GatewayHttpClient` is the legacy client of the old `server/` routes.
+:::
+
 ## Authentication
 
 All endpoints (except `GET /health`) require a Bearer token:
@@ -71,40 +76,51 @@ with the fallback hedged in, so the probe never makes the client wait the full t
 for: the gateway starts scaling it up and answers from the fallback in the same call; once a replica is ready,
 traffic returns to it. A real client error (e.g. `400` invalid request) is returned as is.
 
-### Aliases for the parle client
+### App aliases — `PUT /v1/apps/:app/routes`
 
-| Model (alias) | Route | Chain |
-|---|---|---|
-| `parle-stt` | `/v1/audio/transcriptions` | `deployment:$SPEECH_DEPLOYMENT` (whisper-large-v3-turbo) → `openrouter:openai/whisper-large-v3-turbo` → `groq:whisper-large-v3-turbo` |
-| `parle-llm` | `/v1/chat/completions` | `deployment:$SPEECH_DEPLOYMENT` (Qwen3.5-9B) → `openrouter:qwen/qwen3.5-9b` → `openrouter:google/gemini-2.5-flash-lite` (both with `reasoning: {enabled: false}`) |
-| `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:<TTS deployment>` (Qwen3-TTS Base, voice cloning; `TTS_DEPLOYMENT_MODEL`, default `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) → `openrouter:qwen/qwen-audio-3.0-tts-flash` (stock voice by gender) → `openrouter:hexgrad/kokoro-82m` (`fallback_voice`, else by gender) |
+The gateway's code names no app model. An app that wants its own model names (`parle-stt`, `parle-llm`,
+`parle-tts`…) routed to its deployment first and to cloud fallbacks after puts them on its account, in the
+`MODEL_ROUTES` shape below. The change is live (the providers are re-mounted, no restart) and stored in the account
+(`DEPLOYMENTS_STATE_DIR/apps.json`).
 
-`SPEECH_DEPLOYMENT` defaults to `parle-speech` (the image with Whisper + Qwen3.5-9B + Qwen3-TTS on one GPU, declared
-in the repo — see [Declared deployments](../deployments.md#declared-deployments)). The TTS deployment is:
+```bash
+curl -X PUT $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
+  "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
+  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-qwen-tts", "oneGpuDeployment": "parle-speech",
+                            "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
+                          { "provider": "openrouter", "model": "qwen/qwen-audio-3.0-tts-flash",
+                            "voices": { "feminine": "Cherry", "masculine": "Ethan" }, "accountPolicyGuard": true },
+                          { "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora",
+                            "voices": { "feminine": "pf_dora", "masculine": "pm_alex" }, "preferFallbackVoice": true }] }
+}'
+curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
+```
 
-- `TTS_DEPLOYMENT` (or `QWEN_TTS_DEPLOYMENT`) when set — e.g. `parle-qwen-tts`, a separate L4 for TTS only;
-- otherwise, when the speech deployment exists on the gateway, **the speech deployment itself (one-GPU mode)**:
-  STT, LLM and TTS on the same machine;
-- otherwise `parle-qwen-tts` (legacy default).
+- A PUT replaces all of the app's routes. Invalid entries → `400`; an alias another app already routes → `409`
+  (an app cannot take over another app's model names); another app's routes → `403`.
+- `MODEL_ROUTES` (below) wins over every app's routes for the same model.
+- `fixedVoice: true` (TTS): the entry keeps its own `voice` even when the request sends `fallback_voice`.
+- `oneGpuDeployment` (deployment entries) — **one-GPU mode**: while `deployment` is not registered on this gateway
+  and `oneGpuDeployment` is, the entry goes to `oneGpuDeployment` (e.g. TTS on the `parle-speech` machine that already
+  runs Whisper + Qwen3.5 + Qwen3-TTS). A registered `deployment` always wins. Resolved when the providers are mounted
+  (boot, routes PUT, key reload, a declared deployment registered); `/health` shows the effective target and the
+  boot log lists it under `oneGpu`.
+- `voices: {feminine, masculine}` (TTS): a fallback that cannot clone speaks a stock voice of the **gender** of the
+  requested voice (`src/config/tts-fallback-voices.ts`). The gender comes from the entry's `voiceGenders`
+  (`{"pt-PT-1baab6": "masculine", …}`, the app's cast), the `xx-f-`/`xx-m-` slug, or the gender letter of a Kokoro
+  `fallback_voice` (`pf_…`/`pm_…`); default feminine. With `preferFallbackVoice: true` the request's `fallback_voice`
+  wins over the table. Known stock voices: Qwen-Audio `Cherry`/`Ethan`, Kokoro `pf_dora`/`pm_alex`.
+- `accountPolicyGuard: true` (TTS): **account data policy**. With Zero Data Retention on the OpenRouter account,
+  Qwen-Audio (a DashScope endpoint) is refused (`404 … data policy / ZDR violation`). The first refusal takes that link
+  out of the chain for 30 min (code `policy`, `X-Gateway-Fallback: policy`): later requests go to the next link without
+  calling it, the refusal does not open the OpenRouter breaker that the next link may share, and `/health` shows the
+  link as `blocked` with the reason. A key reload lifts the block. The gateway never changes the account's privacy
+  setting.
 
-The replica must expose the OpenAI shapes (`/v1/audio/transcriptions`, `/v1/chat/completions`, `/v1/audio/speech`).
-
-**TTS fallbacks cannot clone**, so each gets a stock voice of the **gender** of the requested cast voice
-(`src/config/tts-fallback-voices.ts`):
-
-| Gender | `openrouter:qwen/qwen-audio-3.0-tts-flash` | `openrouter:hexgrad/kokoro-82m` |
-|---|---|---|
-| feminine | `Cherry` | `pf_dora` |
-| masculine | `Ethan` | `pm_alex` (the request's `fallback_voice` wins, e.g. `pm_santa`) |
-
-The gender comes from the parle cast table (`pt-PT-1baab6` …, `br-f-01` …), the `br-f-`/`br-m-` slug, or the gender
-letter of the Kokoro `fallback_voice` (`pf_…`/`pm_…`); default feminine.
-
-**Account data policy.** With Zero Data Retention on the OpenRouter account, Qwen-Audio (a DashScope endpoint) is
-refused (`404 … data policy / ZDR violation`). The first refusal takes that link out of the chain for 30 min
-(code `policy`, `X-Gateway-Fallback: policy`): later requests go straight to Kokoro without calling it, the refusal
-does not open the OpenRouter breaker that Kokoro shares, and `/health` shows the link as `blocked` with the reason.
-A key reload lifts the block. The gateway never changes the account's privacy setting.
+Voices are provider-specific: on `/v1/audio/speech`, `voice` goes to the first provider; a fallback with `voices`
+picks its stock voice as above, any other fallback uses `fallback_voice` from the request (unless `fixedVoice`),
+else its own configured voice. The replica must expose the OpenAI shapes (`/v1/audio/transcriptions`,
+`/v1/chat/completions`, `/v1/audio/speech`).
 
 **Self-hosted TTS (Qwen3-TTS Base).** For a deployment target:
 
@@ -133,10 +149,45 @@ Deepgram, Orpheus TTS is Groq only. Any other `org/model` id goes to OpenRouter 
 followed by the generic chat fallback; without a usable OpenRouter key it answers `503 provider_unavailable`
 naming the key (not `404`). PlayAI TTS was retired by Groq and is no longer offered.
 
+### Direct-fallback plan — `GET /v1/apps/:app/fallback`
+
+What an app's server-side client needs to call the **same aliases directly** on the cloud providers while the
+gateway itself is unreachable ([client § Direct fallback](./client.md)). Allowed for the app's own key, or
+an admin key with `X-App: <app>`; anything else → `403` (an admin key without `X-App` too). `Cache-Control: no-store`.
+
+```json
+{ "app": "parle", "issuedAt": "2026-10-06T10:00:00.000Z", "ttlSeconds": 3600,
+  "providers": { "openrouter": { "baseUrl": "https://openrouter.ai/api/v1", "apiKey": "sk-or-v1-…", "keyKind": "provisioned",
+                                 "expiresAt": "2026-10-14T10:00:00.000Z", "limitUsd": 5 } },
+  "openrouter": { "…": "same as providers.openrouter, or null" },
+  "routes": { "stt": { "parle-stt": [{ "provider": "openrouter", "model": "openai/whisper-large-v3-turbo" }] },
+              "chat": { "parle-llm": [{ "provider": "openrouter", "model": "qwen/qwen3.5-9b", "extraBody": { "reasoning": { "enabled": false } } }] },
+              "tts": { "parle-tts": [{ "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora", "fixedVoice": true }] } } }
+```
+
+- **Routes**: the app's aliases (`PUT /v1/apps/:app/routes`), keeping per alias only the entries of a provider that
+  comes with a key in `providers` (OpenRouter; Groq when the chain has Groq entries and the gateway has
+  `GROQ_API_KEY`), in chain order, with `voice` / `fixedVoice` / `extraBody`. Deployments and other providers are
+  dropped: the client cannot reach them without the gateway. An entry without `model` calls the alias itself.
+- **Keys**: the gateway keeps the provider keys and hands them out here.
+
+| Env | Default | |
+|---|---|---|
+| `OPENROUTER_PROVISIONING_KEY` | unset | mint a per-app OpenRouter key (`aigw-<app>`) through OpenRouter's provisioning API (`POST /api/v1/keys`, `DELETE /api/v1/keys/:hash`) instead of sharing the gateway's; only its hash is stored in the app account, the key lives in memory (a restart mints a new one) |
+| `APP_FALLBACK_KEY_LIMIT_USD` | `5` | USD limit of a minted key |
+| `APP_FALLBACK_KEY_ROTATE_DAYS` | `7` | a minted key is replaced after this; the old one keeps working one more day, then is deleted (each key also expires on its own at rotation + 1 day) |
+| `APP_FALLBACK_PLAN_TTL_SECONDS` | `3600` | `ttlSeconds` of the plan (shorter when a rotation is closer) |
+| `APP_FALLBACK_SHARE_KEY` | on | `0` = never hand out the gateway's own `OPENROUTER_API_KEY` / `GROQ_API_KEY`; without a minted key the provider is then absent (`openrouter: null`) |
+
+Without provisioning, the gateway's own keys are shared (`keyKind: "shared"`) — the default. A failed provisioning
+falls back to the shared key (when allowed). Keys are never logged and appear in no other response. Security: the
+plan goes only over HTTPS, only to authenticated app keys, and only to **server-side** clients — never to a browser
+bundle; a minted key's limit bounds what a leak can cost. Needs app accounts (deployments enabled).
+
 ### Changing the map — `MODEL_ROUTES`
 
 A JSON env var adds or replaces chains (same model = replaced). Entries: `"provider"`, `"provider:upstreamModel"`,
-`"deployment:<name>[:upstreamModel]"`, or `{"provider", "model", "voice", "deployment", "extraBody"}` (`extraBody`:
+`"deployment:<name>[:upstreamModel]"`, or `{"provider", "model", "voice", "fixedVoice", "deployment", "extraBody"}` (`extraBody`:
 provider-specific chat body fields, e.g. `{"reasoning": {"enabled": false}}`). The chat key `"*"`
 replaces the generic chat fallback (default: Groq `llama-3.3-70b-versatile`, then OpenRouter
 `meta-llama/llama-3.3-70b-instruct`).
@@ -156,7 +207,7 @@ Every successful response of the three routes carries (no secrets):
 
 | Header | Example | Meaning |
 |---|---|---|
-| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:hexgrad/kokoro-82m` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
+| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
 | `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `policy`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 
@@ -188,6 +239,57 @@ A model the gateway does not know answers `404`. `GET /v1/models` lists only mod
 provider (and the OpenRouter catalog only while `OPENROUTER_API_KEY` is accepted by OpenRouter's `/api/v1/key`).
 
 ---
+
+## Speech-to-speech — `POST /v1/s2s`
+
+One streamed request for a whole spoken turn: the student's audio in, the character's voice out, sentence by sentence.
+Built for low latency: no round trip between stages, the first sentence is voiced while the LLM is still writing.
+
+**Request** — multipart: `file` (the utterance: webm/ogg/wav/mp3/m4a) and `config` (JSON):
+
+```json
+{ "system": "Você é o Seu Jorge, padeiro…", "messages": [{"role": "assistant", "content": "Bom dia!"}],
+  "language": "pt", "voice": "br-m-08", "fallback_voice": "pf_dora", "max_tokens": 160, "temperature": 0.6 }
+```
+
+**Which deployment and models** (the gateway names no app's): `"deployment": "parle-speech"` is the speech-stack
+primary (default `S2S_DEPLOYMENT`; none = composed pipeline only) and `"models": {"stt": "parle-stt", "chat":
+"parle-llm", "tts": "parle-tts"}` the stage models of the composed pipeline (default `S2S_STT_MODEL` /
+`S2S_CHAT_MODEL` / `S2S_TTS_MODEL`; a stage with no model fails that turn with `503`, never a model called
+"undefined").
+
+**Prompt built before the transcript exists**: `"user_template": "…The player says: \"{{transcript}}\"…"` — the user
+turn becomes the template with `{{transcript}}` replaced by what was heard (default: the transcript alone). A client
+that must look at the transcript before committing to the reply (commands, low confidence) reads the `transcript`
+event and cancels the request if the turn is not for the character.
+
+**JSON answers** (a character that also decides something): send `"response_format": {"type": "json_object"}` and
+`"speak_field": "utterance"`. Only that field is voiced, as it streams; `done.reply_raw` carries the whole JSON. The
+speech-stack primary takes JSON turns only with `S2S_PRIMARY_SPEAK_FIELD=1` (image from 2026-10-06 on); until then
+they go to the composed pipeline (`route.fallback: "unsupported"`).
+
+**Response** — `application/x-aigw-s2s` frames `[1 byte kind][4 bytes BE length][payload]`: `E` = one JSON event,
+`A` = raw PCM s16le mono (24 kHz unless an `audio_format` event says otherwise). `?format=ndjson` gives one JSON per
+line with audio as `{"type":"audio","pcm":"<base64>"}` (debugging, browsers without a frame parser).
+
+Events, in order: `route` {provider, fallback?, from?} · `transcript` {text, stt_ms} · `llm_first_token` · per sentence
+`sentence` {text} then its audio · `audio_format` {encoding, sample_rate} when it changes · `first_audio` {at_ms} ·
+`done` {reply, transcript, first_audio_ms, total_ms, missing_audio?, partial?}. `sentence_failed` = that sentence has no
+audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`partial: true` → what was sent is valid).
+
+**Routing**
+
+| Situation | What answers | `route` event |
+|---|---|---|
+| speech-stack deployment ready (`config.deployment`, else `S2S_DEPLOYMENT`) | its own `/v1/s2s`: STT + LLM + TTS on one GPU (0.4–0.8 s to first audio measured) | `deployment:parle-speech` |
+| deployment cold / paused / absent | woken for the next turns; this turn by the **composed pipeline**: `models.stt` → streamed `models.chat` → `models.tts` per sentence, each stage with its own chain, hedge and breaker (above) | `composite`, `fallback: cold\|paused\|not_found` |
+| deployment has not sent the transcript after `S2S_HEDGE_MS` (2.5 s) | composed pipeline in parallel; first to produce audio wins, the other is aborted | `composite`, `fallback: slow` |
+| deployment breaks after the transcript, before audio | composed pipeline resumes at the LLM with that transcript (no second STT) | `composite`, `fallback: resumed` |
+| deployment breaks after audio started | in-band `error` (`partial: true`) and `done` | — |
+| nothing can answer before the first byte | `503 provider_unavailable` (JSON, as the other routes) | — |
+
+Whole turn budget: `S2S_BUDGET_MS` (45 s). The composed pipeline calls this gateway's own routes over loopback with the
+caller's key (stage models: `config.models`, else `S2S_STT_MODEL` / `S2S_CHAT_MODEL` / `S2S_TTS_MODEL`).
 
 ## OpenAI-compatible routes
 

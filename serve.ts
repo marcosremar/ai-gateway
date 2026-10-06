@@ -18,12 +18,13 @@ import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/za
 import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } from './src/deployments/inference-providers';
 import {
   buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,
-  speechDeploymentName,
 } from './src/config/serve-providers';
 import { stageChainsReport, type ChainLinkSpec } from './src/config/stage-chains';
 import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
 import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
+import { createS2SRoute } from './src/s2s/route';
+import { loopbackStages } from './src/s2s/loopback-stages';
 import { proxyCircuitBreakers } from './src/gateway/proxy/provider-routing';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
@@ -96,12 +97,16 @@ const deployments = deploymentsFromEnv(process.env, {
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   log: (msg, data) => log.log(data ?? {}, msg),
   declaredStatus: () => declared?.status() ?? [],
+  // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
+  onRoutesChange: () => remount?.(),
 });
 if (deployments) {
   await deployments.controller.init();
+  await deployments.apps.init();
   deployments.controller.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
+  prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
   // Read by createProxyServer: a cold-start wait must outlive the default 60 s idle cut.
   process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
   log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
@@ -109,8 +114,8 @@ if (deployments) {
   log.log({}, 'Deployments disabled (no SCW_SECRET_KEY)');
 }
 
-// Providers: only the configured ones are mounted. A self-hosted deployment is the primary of the parle-* aliases
-// (and of any model routed to it through MODEL_ROUTES); OpenRouter is the fallback. See src/config/serve-providers.ts.
+// Providers: only the configured ones are mounted. Each app sends its own aliases (PUT /v1/apps/:app/routes: a
+// self-hosted deployment first, OpenRouter as the fallback); MODEL_ROUTES on top. See src/config/serve-providers.ts.
 const modelRoutes = parseModelRoutes(process.env.MODEL_ROUTES);
 if (modelRoutes.errors.length) log.warn({ errors: modelRoutes.errors }, 'MODEL_ROUTES has invalid parts — skipped');
 const controller = deployments?.controller ?? null;
@@ -140,9 +145,11 @@ function mountProviders() {
     env: process.env,
     openrouter: openrouterKey,
     modelRoutes: modelRoutes.routes,
+    appRoutes: deployments?.apps.allRoutes() ?? {},
     zaiModels: ZAI_LLM_MODELS.map(m => m.id),
     listOpenRouterModels,
-    speechDeploymentConfigured: Boolean(controller?.get(speechDeploymentName(process.env))),
+    // One-GPU mode: an entry whose own deployment is not registered goes to its `oneGpuDeployment` when that one is.
+    deploymentExists: (name) => Boolean(controller?.get(name)),
     deploymentProvider: controller ? (stage, name) => (
       stage === 'chat' ? new DeploymentLLMProvider(controller, name)
         : stage === 'stt' ? new DeploymentSTTProvider(controller, name)
@@ -202,6 +209,27 @@ const deepHealth = {
   }),
 };
 
+// POST /v1/s2s — speech-to-speech in one streamed request: the speech-stack deployment first, the composed pipeline
+// over the stage chains (loopback into this gateway, with the caller's own key) as fallback. See src/s2s/route.ts.
+const optionalMs = (v: string | undefined) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+const s2sRoute = createS2SRoute({
+  controller,
+  deployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
+  hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
+  budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
+  primarySpeaksJson: process.env.S2S_PRIMARY_SPEAK_FIELD === '1',
+  stagesFor: (req, config) => loopbackStages({
+    baseUrl: `http://127.0.0.1:${PORT}`,
+    authorization: String(req.headers.authorization ?? ''),
+    models: {
+      stt: config.models?.stt || process.env.S2S_STT_MODEL?.trim() || undefined,
+      chat: config.models?.chat || process.env.S2S_CHAT_MODEL?.trim() || undefined,
+      tts: config.models?.tts || process.env.S2S_TTS_MODEL?.trim() || undefined,
+    },
+  }),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
@@ -209,7 +237,7 @@ const server = await startProxy({
   providers,
   deepHealth,
   healthDetails: () => chainHealth(),
-  customRoutes: createKeyAdminRoutes(keyManager, isAdminToken),
+  customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });

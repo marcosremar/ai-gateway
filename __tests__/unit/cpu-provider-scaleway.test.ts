@@ -117,6 +117,28 @@ describe('ScalewayClient', () => {
       expect((createCall[1] as RequestInit).method).toBe('POST');
     });
 
+    it('a just-created server that answers 404 is retried, not thrown away (eventual consistency)', async () => {
+      const client = new ScalewayClient();
+      client.freshServerRetryMs = [0, 0, 0];
+      const creds = { apiKey: FAKE_SECRET, authId: 'SCW-access-key' };
+      const notFound = () => new Response(JSON.stringify({ type: 'not_found', resource: 'instance_server' }), { status: 404 });
+      // findUbuntuImage, resolveProjectId, create, poweron 404 ×2, poweron ok, waitForIp
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({ images: [{ id: 'img-uuid', name: 'Ubuntu 24.04' }] }));
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({ default_project_id: 'proj-123' }));
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({ server: { id: 'srv-1', name: 'test', state: 'stopped', commercial_type: 'DEV1-XL' } }));
+      mockFetch.mockResolvedValueOnce(notFound());
+      mockFetch.mockResolvedValueOnce(notFound());
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({}));
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({ server: { id: 'srv-1', name: 'test', state: 'running', public_ip: { address: '1.2.3.4' } } }));
+
+      const result = await client.createInstance({ region: 'fr-par-1' }, creds);
+
+      expect(result.ipAddress).toBe('1.2.3.4');
+      const urls = mockFetch.mock.calls.map(c => `${(c[1] as RequestInit | undefined)?.method ?? 'GET'} ${String(c[0])}`);
+      expect(urls.filter(u => u.endsWith('/servers/srv-1/action'))).toHaveLength(3);
+      expect(urls.some(u => u.startsWith('DELETE'))).toBe(false);
+    });
+
     it('throws on API error', async () => {
       const client = new ScalewayClient();
       const creds = { apiKey: FAKE_SECRET, authId: 'SCW-access-key' };

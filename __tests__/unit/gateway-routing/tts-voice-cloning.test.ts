@@ -126,6 +126,28 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     expect(sent.extra).toBeUndefined();
   });
 
+  it('cold deployment: MAI flash speaks with fallback_voice; Kokoro (last) keeps its own voice when MAI fails', async () => {
+    const dep = new DeploymentTTSProvider(controller(true), 'parle-qwen-tts');
+    const last = kokoro();
+    const maiChain = (m: TTSProvider) => ({ 'parle-tts': [
+      { providerId: 'deployment:parle-qwen-tts', provider: dep, model: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base' },
+      { providerId: 'openrouter:mai', provider: m, model: 'microsoft/mai-voice-2.1-flash', voice: 'pt-BR-Luana:MAI-Voice-2-Flash' },
+      { providerId: 'openrouter', provider: last, model: 'hexgrad/kokoro-82m', voice: 'pf_dora', fixedVoice: true },
+    ] });
+    const body = { model: 'parle-tts', input: 'Bom dia', voice: 'br-m-08', fallback_voice: 'pt-BR-Caio:MAI-Voice-2-Flash' };
+    const mai = kokoro();
+    const res = await handleAudioSpeech(req(body), maiChain(mai), undefined, new CircuitBreakerRegistry());
+    expect(res.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:mai:microsoft/mai-voice-2.1-flash' });
+    expect(mai.synthesize.mock.calls[0][0]).toMatchObject({ model: 'microsoft/mai-voice-2.1-flash', voice: 'pt-BR-Caio:MAI-Voice-2-Flash' });
+
+    const down = kokoro();
+    down.synthesize.mockRejectedValue(Object.assign(new Error('upstream 503'), { status: 503 }));
+    const res2 = await handleAudioSpeech(req(body), maiChain(down), undefined, new CircuitBreakerRegistry());
+    expect(res2.status).toBe(200);
+    expect(res2.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:hexgrad/kokoro-82m' });
+    expect(last.synthesize.mock.calls.at(-1)?.[0]).toMatchObject({ model: 'hexgrad/kokoro-82m', voice: 'pf_dora' });
+  });
+
   it('a voice missing from a Base catalog is never sent to the replica (it kills vLLM-Omni) → fallback', async () => {
     const r = replica();
     const dep = new DeploymentTTSProvider(controller(), 'parle-qwen-tts', { fetchImpl: r.fetchImpl as never });

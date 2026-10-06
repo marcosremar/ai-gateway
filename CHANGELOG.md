@@ -16,10 +16,15 @@ on release via `bunx changeset version`.
   5 min through the idempotent `controller.put`; secrets mounted from the environment (`GHCR_READ_TOKEN` →
   `registryAuth`, `SPEECH_IMAGE`), `SPEECH_TOKEN` generated once and persisted in the store; `pending` with the reason
   when the credential/image is missing; never starts a machine. First one: `parle-speech` (one L4 for STT+LLM+TTS).
-- **One-GPU mode** — without `TTS_DEPLOYMENT`, `parle-tts` goes to the speech deployment when it exists.
-- **TTS fallback `openrouter:qwen/qwen-audio-3.0-tts-flash`** between the deployment and Kokoro, with stock voices by
-  the gender of the cast voice (Cherry/Ethan; Kokoro pf_dora/pm_alex). A refusal by the account's data policy (ZDR)
-  takes it out of the chain for 30 min (code `policy`, neutral for the shared OpenRouter breaker).
+- **One-GPU mode** — a deployment route entry may name `oneGpuDeployment`: while its own `deployment` is not
+  registered and that one is, the entry goes there (the parle sends `parle-qwen-tts` + `oneGpuDeployment: parle-speech`
+  for `parle-tts` in its app routes).
+- **TTS stock voices by gender and the account-policy guard, as route-entry fields** (`PUT /v1/apps/:app/routes`,
+  `MODEL_ROUTES`): `voices: {feminine, masculine}` (+ `voiceGenders`, `preferFallbackVoice`) gives a fallback that
+  cannot clone a stock voice of the requested voice's gender (Qwen-Audio Cherry/Ethan; Kokoro pf_dora/pm_alex);
+  `accountPolicyGuard: true` takes a link refused by the account's data policy (ZDR) out of the chain for 30 min (code
+  `policy`, neutral for the shared OpenRouter breaker). The chain itself (e.g. deployment →
+  `openrouter:qwen/qwen-audio-3.0-tts-flash` → Kokoro) is the app's.
 - **`GET /health` shows the effective chain per stage** and the state of every link (ready, cold, pending, missing,
   disabled, no_key, blocked, circuit_open) plus warnings — `not_configured` no longer passes unnoticed.
 

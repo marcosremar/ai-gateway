@@ -4,6 +4,8 @@
  * (docker/speech-stack: CUDA base + three models ≈ 25 GB).
  *
  *   SCW_SECRET_KEY=… [SCW_PROJECT_ID=…] bun scripts/build-image-on-scaleway.ts docker/speech-stack speech-stack
+ *   … --app parle [--gateway https://parle-ai-gateway.up.railway.app]   also saves the address in the app's account
+ *       (PUT /v1/apps/parle/images/speech-stack, with SANDBOX_TOKEN), so deploys name it: {"appImage": "speech-stack"}
  *
  * The machine serves only its build status on :80 (/done.json, /build.log — no secrets), the script polls it, prints
  * the log tail, and deletes the machine (and its volume) whatever happens.
@@ -15,7 +17,11 @@ import { ScalewayClient } from '../src/cpu-providers/scaleway-client';
 import type { ProviderCredentials } from '../src/gpu-providers/types';
 import { loadSandboxEnv } from '../src/config/sandbox-env';
 
-const [contextDir, imageName] = process.argv.slice(2);
+const args = process.argv.slice(2);
+const flag = (name: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
+const appId = flag('app');
+const gatewayUrl = (flag('gateway') ?? process.env.GATEWAY_URL ?? 'https://parle-ai-gateway.up.railway.app').replace(/\/$/, '');
+const [contextDir, imageName] = args;
 if (!contextDir || !imageName || !/^[a-z0-9-]+$/.test(imageName)) {
   console.error('usage: bun scripts/build-image-on-scaleway.ts <context-dir> <image-name>');
   process.exit(2);
@@ -115,4 +121,15 @@ try {
   await client.releaseInstance(inst.instanceId, credentials, { awaitVolumes: true }).catch(e => log('release failed', e));
 }
 log('result', JSON.stringify(result));
+if (result.ok && appId) {
+  // Save the address in the app's account: later deploys name the image instead of carrying the registry address.
+  const token = process.env.SANDBOX_TOKEN || process.env.PALCO_PROXY_TOKEN || process.env.PALCO_PROXY;
+  const digest = typeof result.digest === 'string' ? result.digest.split('@')[1] ?? null : null;
+  const res = await fetch(`${gatewayUrl}/v1/apps/${appId}/images/${imageName}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'X-App': appId, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image, ...(digest ? { digest } : {}) }),
+  }).catch((err) => ({ ok: false, status: 0, text: async () => String(err) }) as const);
+  log(res.ok ? `saved in app '${appId}' as image '${imageName}'` : `could not save in app '${appId}': HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+}
 process.exit(result.ok ? 0 : 1);

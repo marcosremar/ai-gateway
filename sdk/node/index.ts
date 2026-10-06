@@ -998,3 +998,16 @@ export class GatewayHttpClient {
     return this.circuitBreaker;
   }
 }
+
+// ── GatewayClient: the client of the current API (docs/client.md). GatewayHttpClient above is the legacy client. ──
+export { GatewayClient } from './gateway-client';
+export { GatewayError, servedFrom } from './gateway-http';
+export { S2SFrameDecoder } from './s2s-frames';
+export { GATEWAY_CLIENT_TIMEOUTS } from './gateway-types';
+export type {
+  AppImage, AppView, CallOptions, ChatCompletion, ChatMessage, ChatRequest, ChatStream, ChatUsage, DeploymentList,
+  DeploymentPutBody, DeploymentSpec, DeploymentView, DirectFallbackOptions, FallbackCredential, FallbackEntry,
+  FallbackPlan, FetchLike, GatewayClientOptions, GatewayRoute, GatewayState, HealthReport, ModelRoutesSpec, Profile, ReplicaView,
+  RouteChange, RouteEntrySpec, S2SConfig, S2SEvent, S2SFrame, S2SRequest, S2SStream, Served, SpeechRequest,
+  SpeechResult, TimeoutGroup, Transcription, TranscribeRequest,
+} from './gateway-types';
