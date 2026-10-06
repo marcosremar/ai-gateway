@@ -34,21 +34,22 @@ const vastScript = { image: 'vllm/vllm-omni:v0.28.0', bootScript: 'serve', port:
 describe('placement ladder', () => {
   it('walks the candidates: out_of_stock on the first, lands on the second, and says so', async () => {
     const scaleway = new FakeCloud();
-    scaleway.failCreateFor = (spec) => (spec.zone === 'fr-par-2' ? 'scaleway: out_of_stock (HTTP 412)' : null);
+    scaleway.failCreateFor = (spec) => (spec.zone === 'nl-ams-1' ? 'scaleway: out_of_stock (HTTP 412)' : null);
     const controller = await make({ scaleway });
     await controller.put('tts', {
       image: 'me/app:1', port: 8000, minReplicas: 1,
       candidates: [
+        { zone: 'pl-waw-2', machineType: 'L4-1-24G', maxEurPerHour: 1 },
         { zone: 'nl-ams-1', machineType: 'L4-1-24G', maxEurPerHour: 1 },
         { zone: 'fr-par-2', machineType: 'L4-1-24G', maxEurPerHour: 1 },
       ],
     });
     await until(() => controller.get('tts')!.status === 'ready');
     const view = controller.get('tts')!;
-    expect(view.replicas).toEqual([expect.objectContaining({ zone: 'nl-ams-1', machineType: 'L4-1-24G' })]);
-    // fr-par-2 ranked first (France), failed out of stock, nl-ams-1 took it.
-    expect(view.lastPlacement).toBe('scaleway L4-1-24G@nl-ams-1 (€0.01/h) near FR; skipped: L4-1-24G out of stock in fr-par-2');
-    expect(scaleway.created.map(c => c.spec.zone)).toEqual(['nl-ams-1']);
+    expect(view.replicas).toEqual([expect.objectContaining({ zone: 'fr-par-2', machineType: 'L4-1-24G' })]);
+    // Same price: band 0 (nl-ams, fr-par) before pl-waw (~1370 km), caller order inside the band; nl-ams was out of stock.
+    expect(view.lastPlacement).toBe('scaleway L4-1-24G@fr-par-2 (€0.01/h) near FR; skipped: L4-1-24G out of stock in nl-ams-1');
+    expect(scaleway.created.map(c => c.spec.zone)).toEqual(['fr-par-2']);
   });
 
   it('skips a candidate over its cap by catalog price and lands on Vast', async () => {
@@ -171,5 +172,75 @@ describe('reaper over several backends', () => {
     });
     expect(released).toEqual(['v1']);
     expect(r).toMatchObject({ gatewayUp: false, seen: 1, released: ['v1'], failed: ['list:scaleway'] });
+  });
+});
+
+describe('RTT gate (Vast)', () => {
+  const gpu = { ...vastScript, provider: 'vast', machineType: 'RTX 5090', minReplicas: 1 };
+
+  it('a host at 60 ms is released as too-far and the next one (20 ms) is kept; the view shows rttMs', async () => {
+    const vast = new FakeCloud(Date.now, 'vast');
+    vast.marketPriced = true;
+    const rtts = [60, 20];
+    const measured = new Map<string, number>();
+    vast.measureRtt = async (m) => {
+      if (!measured.has(m.id)) measured.set(m.id, rtts.shift() ?? 20);
+      return measured.get(m.id)!;
+    };
+    const controller = await make({ vast });
+    await controller.put('gpu', gpu);
+    await until(() => controller.get('gpu')!.status === 'ready');
+    expect(vast.created).toHaveLength(2);
+    expect(vast.releaseReasons).toEqual(['too-far']);
+    const view = controller.get('gpu')!;
+    expect(view.replicas).toEqual([expect.objectContaining({ rttMs: 20, phase: 'ready' })]);
+    expect(view.lastPlacement).toMatch(/^vast RTX 5090 \(≤ €1\/h\); earlier: host .*RTT 60 ms > maxRttMs 35: released \(too-far\); RTT 20 ms ≤ maxRttMs 35: kept$/);
+    // Passed once = never measured again.
+    const calls = measured.size;
+    await controller.reconcile();
+    await controller.reconcile();
+    expect(measured.size).toBe(calls);
+  });
+
+  it('records the too-far decision in lastPlacement, and honours a spec maxRttMs', async () => {
+    const vast = new FakeCloud(Date.now, 'vast');
+    vast.marketPriced = true;
+    vast.measureRtt = async () => 60;
+    const controller = await make({ vast });
+    await controller.put('gpu', { ...gpu, maxRttMs: 50 });
+    await until(() => vast.releaseReasons.filter(r => r === 'too-far').length >= 2);
+    // The next create keeps the earlier decision visible.
+    await until(() => /earlier: .*RTT 60 ms > maxRttMs 50: released \(too-far\)/.test(controller.get('gpu')!.lastPlacement ?? ''));
+  });
+
+  it('no RTT answer within the budget counts as too far; before it, the replica just waits (not served)', async () => {
+    let offset = 0;
+    const clock = () => Date.now() + offset;
+    const vast = new FakeCloud(clock, 'vast');
+    vast.marketPriced = true;
+    vast.measureRtt = async () => { throw new Error('probe failed'); };
+    const controller = new DeploymentController({
+      backends: { vast }, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000), namespace: 'test', now: clock,
+    });
+    await controller.init();
+    controllers.push(controller);
+    clouds.push(vast);
+    await controller.put('gpu', gpu);
+    await until(() => vast.machines.size === 1);
+    await controller.reconcile();
+    expect(controller.get('gpu')!.replicas[0]).toMatchObject({ phase: 'booting', rttMs: null });
+    expect(vast.released).toEqual([]);
+    offset += 5 * 60_000 + 1;
+    await controller.reconcile();
+    expect(vast.releaseReasons).toEqual(['too-far']);
+    expect(controller.get('gpu')!.lastPlacement).toMatch(/no RTT answer > maxRttMs 35: released \(too-far\)/);
+  });
+
+  it('Scaleway replicas are not gated (no measureRtt)', async () => {
+    const scaleway = new FakeCloud();
+    const controller = await make({ scaleway });
+    await controller.put('scw', { image: 'me/app:1', port: 8000, minReplicas: 1 });
+    await until(() => controller.get('scw')!.status === 'ready');
+    expect(controller.get('scw')!.replicas[0].rttMs).toBeNull();
   });
 });

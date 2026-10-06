@@ -126,8 +126,13 @@ export interface DeploymentSpec {
   candidates?: PlacementCandidate[];
   /** ISO country the users are in (latency preference); default `DEFAULT_NEAR` (placements.ts). */
   near?: string;
-  /** Accept a far host/zone (outside the EU/EEA) when nothing nearer exists. Default false. */
+  /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
   allowFar?: boolean;
+  /**
+   * Vast: a freshly rented host whose measured RTT from the gateway (median, ms) is above this is released as
+   * `too-far` and avoided 24 h (`rtt-gate.ts`). Default `DEFAULT_MAX_RTT_MS` (35, measured from NL).
+   */
+  maxRttMs?: number;
 }
 
 export interface ExposedPort { protocol: 'tcp' | 'udp'; port: number }
@@ -212,6 +217,8 @@ export interface DeploymentBackend {
    * catalog price check (`hourlyPrice` means nothing per zone there).
    */
   readonly marketPriced?: boolean;
+  /** RTT (median ms) from the gateway to the replica's front, null when no sample came back (the RTT gate). */
+  measureRtt?(machine: ReplicaMachine): Promise<number | null>;
   /** Price + stock of types in zones, for ranking `candidates` (Scaleway). Absent: candidates are ranked without it. */
   catalog?(zones: string[]): Promise<CatalogEntry[]>;
   /**
@@ -248,6 +255,8 @@ export interface ReplicaView {
   pricePerHour: number | null;
   ageSeconds: number;
   inflight: number;
+  /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
+  rttMs: number | null;
 }
 
 export interface DeploymentView {

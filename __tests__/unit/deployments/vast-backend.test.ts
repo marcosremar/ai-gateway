@@ -3,7 +3,7 @@ import { vastReplicaInit } from '../../../src/deployments/cloud-init';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { buildSpec } from '../../../src/deployments/spec';
 import {
-  BAD_HOST_MS, EUR_TO_USD, MIN_RELIABILITY, VastDeploymentBackend, vastState,
+  BAD_HOST_MS, EUR_TO_USD, MIN_RELIABILITY, TOO_FAR_HOST_MS, VastDeploymentBackend, vastState,
 } from '../../../src/deployments/vast-backend';
 import type { DeploymentSpec } from '../../../src/deployments/types';
 
@@ -33,7 +33,7 @@ function fakeVast(routes: (call: Call) => { status?: number; body: unknown }) {
 const offers = [
   { id: 1, machine_id: 101, geolocation: 'Dallas, US', dph_total: 0.30, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
   { id: 2, machine_id: 102, geolocation: 'Paris, FR', dph_total: 0.45, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
-  { id: 3, machine_id: 103, geolocation: 'Frankfurt, DE', dph_total: 0.40, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
+  { id: 3, machine_id: 103, geolocation: 'Frankfurt, DE', dph_total: 0.47, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
   // Over the cap (the API filter is not trusted): never rented.
   { id: 4, machine_id: 104, geolocation: 'Paris, FR', dph_total: 0.90, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
 ];
@@ -141,6 +141,34 @@ describe('VastDeploymentBackend', () => {
     now += BAD_HOST_MS + 1;
     expect((await backend.createReplica(input)).id).toBe('200'); // forgiven after an hour
     await expect(backend.releaseReplica({ ...first, id: '404' })).resolves.toBeUndefined();
+  });
+});
+
+describe('VastDeploymentBackend RTT', () => {
+  it('measures the mapped port of the nginx front through the injected probe', async () => {
+    const seen: string[] = [];
+    const backend = new VastDeploymentBackend('k', { fetch: fakeVast(() => ({ body: {} })).fetchImpl, rtt: async (h, p) => { seen.push(`${h}:${p}`); return 22; } });
+    const m = { id: '1', deployment: 'x', ip: '1.2.3.4:40123', state: 'running', createdAt: 0, zone: '', machineType: '', pricePerHour: null };
+    expect(await backend.measureRtt(m)).toBe(22);
+    expect(seen).toEqual(['1.2.3.4:40123']);
+    expect(await backend.measureRtt({ ...m, ip: null })).toBeNull();
+  });
+
+  it('a too-far host is avoided for 24 h, not 1 h', async () => {
+    let now = 0;
+    const { fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers: offers.filter(o => o.id === 2 || o.id === 3) } };
+      if (method === 'PUT') return { body: { success: true, new_contract: Number(url.match(/asks\/(\d+)/)![1]) * 100 } };
+      return { body: { success: true } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => now });
+    const input = { spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' };
+    const first = await backend.createReplica(input);
+    await backend.releaseReplica(first, 'too-far');
+    now += BAD_HOST_MS + 1;
+    expect((await backend.createReplica(input)).id).toBe('300'); // still avoided after an hour
+    now = TOO_FAR_HOST_MS + 1;
+    expect((await backend.createReplica(input)).id).toBe('200');
   });
 });
 

@@ -6,10 +6,11 @@
  *   - `candidates` (Scaleway and Vast): a ladder ranked here (`rankCandidates`), each entry with its own cap.
  *
  * The ranking is pure, no I/O — the Vast backend ranks market offers with `rankOffers`. The owner's three goals:
- * reliable, cheap, low latency for users in France. Geography decides the tier (latency is physics: a host in Paris
- * answers in ~5 ms, one in Virginia in ~80 ms); inside a tier, the cheapest *effective* price wins, where an
- * unreliable host is priced as if it cost more.
+ * reliable, cheap, low latency for users in France. Distance decides first (`geo.ts`: great-circle km from the `near`
+ * country, in 500-km bands — latency is physics, EU membership is not); inside a band, the cheapest *effective* price
+ * wins, where an unreliable host is priced as if it cost more. Vast hosts are then measured (`maxRttMs`, controller).
  */
+import { countryDistanceKm } from './geo';
 import type { CatalogEntry, DeploymentProvider, DeploymentSpec, PlacementCandidate } from './types';
 
 export type { CatalogEntry };
@@ -50,25 +51,27 @@ export function isOutOfStock(err: unknown): boolean {
 /** The owner's region: users (students, teachers) are in France. Used when a spec sets no `near`. */
 export const DEFAULT_NEAR = 'FR';
 
-/** Neighbors of France with short, well-peered paths to Paris (≤ ~20 ms): Benelux, DE, CH, ES, IT, GB, MC, AD. */
-const FR_NEIGHBORS = new Set(['BE', 'LU', 'DE', 'CH', 'NL', 'ES', 'IT', 'GB', 'MC', 'AD']);
+/**
+ * Width of a distance band (km). Within ~500 km, RTT differences are a few ms (≈ 1 ms per 100 km of fibre) and
+ * routing noise dominates, so price decides; across bands, distance does.
+ */
+export const DISTANCE_BUCKET_KM = 500;
+/**
+ * Beyond this a host is "far": ~25 ms of fibre alone before routing, so ≥ 40–60 ms in practice — too slow for a
+ * conversation. Covers western and central Europe from France (Warsaw 1370 km, Bucharest ~1870 km, Lisbon ~1450 km).
+ * Far hosts are used only when nothing nearer exists and the spec has `allowFar`.
+ */
+export const MAX_NEAR_KM = 2500;
 
-/** EU + EEA: same legal space and typically 20–50 ms from France. */
-const EU_EEA = new Set([
-  'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL',
-  'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE', 'IS', 'LI', 'NO',
-]);
+/** Distance band of a country from `near`: 0 = < 500 km, 1 = 500–1000 km, …; `Infinity` when unknown. */
+export function distanceBucket(country: string | null, near: string): number {
+  const km = countryDistanceKm(near, country);
+  return Number.isFinite(km) ? Math.floor(km / DISTANCE_BUCKET_KM) : Infinity;
+}
 
-/** Tier of a country for users near `near`: 0 same country, 1 neighbor, 2 rest of EU/EEA, 3 far. */
-export function geoTier(country: string | null, near: string): 0 | 1 | 2 | 3 {
-  const cc = (country ?? '').toUpperCase();
-  const home = near.toUpperCase();
-  if (!cc) return 3;
-  if (cc === home) return 0;
-  // The neighbor table is France's; for another `near`, only "same country" and "EU/EEA" are meaningful.
-  if (home === 'FR' && FR_NEIGHBORS.has(cc)) return 1;
-  if (EU_EEA.has(cc)) return 2;
-  return 3;
+/** Within `MAX_NEAR_KM` of `near`. */
+export function isNear(country: string | null, near: string): boolean {
+  return countryDistanceKm(near, country) <= MAX_NEAR_KM;
 }
 
 /** Country code of a Vast `geolocation` ("Paris, FR", "Quebec, CA", "FR"): what follows the last comma. */
@@ -105,20 +108,24 @@ export function effectivePrice(o: Pick<VastOffer, 'dph_total' | 'reliability2'>)
 
 export interface RankOffersOptions {
   near: string;
-  /** Allow far (tier 3) offers when no tier ≤ 2 offer exists. */
+  /** Allow far (> `MAX_NEAR_KM`) offers when no near offer exists. */
   allowFar?: boolean;
   /** Host machine ids to leave out (recent boot failures). */
   avoidMachines?: ReadonlySet<number>;
 }
 
-/** Offers ordered best first: geography tier, then effective price, then download bandwidth (faster image pull). */
+/** Offers ordered best first: distance band, then effective price, then download bandwidth (faster image pull). */
 export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: RankOffersOptions): T[] {
   const usable = offers.filter(o => o.machine_id === undefined || !opts.avoidMachines?.has(o.machine_id));
-  const tiered = usable.map(o => ({ o, tier: geoTier(countryOf(o.geolocation), opts.near), eff: effectivePrice(o) }));
-  const near = tiered.filter(t => t.tier <= 2);
-  const pool = near.length ? near : opts.allowFar ? tiered : [];
+  const scored = usable.map((o) => {
+    const cc = countryOf(o.geolocation);
+    return { o, near: isNear(cc, opts.near), bucket: distanceBucket(cc, opts.near), eff: effectivePrice(o) };
+  });
+  const near = scored.filter(t => t.near);
+  const pool = near.length ? near : opts.allowFar ? scored : [];
+  const byBucket = (a: number, b: number) => (a === b ? 0 : a < b ? -1 : 1); // Infinity-safe
   return pool
-    .sort((a, b) => a.tier - b.tier || a.eff - b.eff || (b.o.inet_down || 0) - (a.o.inet_down || 0))
+    .sort((a, b) => byBucket(a.bucket, b.bucket) || a.eff - b.eff || (b.o.inet_down || 0) - (a.o.inet_down || 0))
     .map(t => t.o);
 }
 
@@ -131,23 +138,24 @@ export function zoneCountry(zone: string | undefined): string | null {
 }
 
 /**
- * A Vast candidate has no zone: the backend picks the host near `near` itself. It ranks after a Scaleway zone in the
- * same country (a marketplace host is less reliable than a datacenter) and with the neighbors, priced at its cap
- * (the market price is at most that).
+ * Distance band given to a Vast candidate (it has no zone: the backend picks the host near `near` itself, and the RTT
+ * gate rejects a far one): after a Scaleway zone within 500 km (a datacenter is more reliable than a marketplace
+ * host), level with zones 500–1000 km away, priced at its cap (the market price is at most that).
  */
-export const VAST_CANDIDATE_TIER = 1;
+export const VAST_CANDIDATE_BUCKET = 1;
 
 export interface RankedCandidate extends PlacementCandidate {
   provider: DeploymentProvider;
   /** Known price for the ranking (catalog price, or the cap when unknown). */
   rankPrice: number;
-  tier: number;
+  /** Distance band from `near` (`distanceBucket`; Vast = `VAST_CANDIDATE_BUCKET`). */
+  bucket: number;
 }
 
 /**
- * Candidates ordered best first: geography tier (Scaleway zone country; Vast = `VAST_CANDIDATE_TIER`), then price.
- * Dropped: a zone in `shortage`, a type the catalog prices above the candidate's cap, and far zones (tier 3) unless
- * `allowFar`. A candidate the catalog does not know stays in, priced at its cap (the create checks the live price).
+ * Candidates ordered best first: distance band (Scaleway zone country: fr-par 0 km, nl-ams ~430 km, pl-waw ~1370 km;
+ * Vast = `VAST_CANDIDATE_BUCKET`), then price. Dropped: a zone in `shortage`, a type the catalog prices above the
+ * candidate's cap, and zones beyond `MAX_NEAR_KM` unless `allowFar`. A candidate the catalog does not know stays in, priced at its cap (the create checks the live price).
  * Stable: equal candidates keep the caller's order.
  */
 export function rankCandidates(
@@ -160,22 +168,24 @@ export function rankCandidates(
   for (const c of candidates) {
     const provider = c.provider ?? opts.defaultProvider;
     if (provider === 'vast') {
-      ranked.push({ ...c, provider, rankPrice: c.maxEurPerHour, tier: VAST_CANDIDATE_TIER });
+      ranked.push({ ...c, provider, rankPrice: c.maxEurPerHour, bucket: VAST_CANDIDATE_BUCKET });
       continue;
     }
     const zone = c.zone ?? opts.defaultZone;
     const label = `scaleway ${c.machineType}@${zone}`;
-    const tier = geoTier(zoneCountry(zone), opts.near);
-    if (tier === 3 && !opts.allowFar) { skipped.push(`${label}: far from ${opts.near}`); continue; }
+    const country = zoneCountry(zone);
+    const bucket = distanceBucket(country, opts.near);
+    if (!isNear(country, opts.near) && !opts.allowFar) { skipped.push(`${label}: far from ${opts.near}`); continue; }
     const entry = catalog.find(e => e.zone === zone && e.machineType === c.machineType);
     if (entry?.availability === 'shortage') { skipped.push(`${label}: shortage`); continue; }
     if (entry?.hourlyPrice != null && entry.hourlyPrice > c.maxEurPerHour) {
       skipped.push(`${label}: €${entry.hourlyPrice}/h over cap €${c.maxEurPerHour}`);
       continue;
     }
-    ranked.push({ ...c, provider, zone, rankPrice: entry?.hourlyPrice ?? c.maxEurPerHour, tier });
+    ranked.push({ ...c, provider, zone, rankPrice: entry?.hourlyPrice ?? c.maxEurPerHour, bucket });
   }
   const order = ranked.map((c, i) => ({ c, i }));
-  order.sort((a, b) => a.c.tier - b.c.tier || a.c.rankPrice - b.c.rankPrice || a.i - b.i);
+  const byBucket = (a: number, b: number) => (a === b ? 0 : a < b ? -1 : 1); // Infinity-safe
+  order.sort((a, b) => byBucket(a.c.bucket, b.c.bucket) || a.c.rankPrice - b.c.rankPrice || a.i - b.i);
   return { ranked: order.map(x => x.c), skipped };
 }

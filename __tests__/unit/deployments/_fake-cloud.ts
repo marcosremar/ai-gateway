@@ -29,6 +29,9 @@ export class FakeCloud implements DeploymentBackend {
   /** Per-place catalog price; falls back to `price`. */
   priceFor?: (zone: string, machineType: string) => number | null;
   marketPriced?: boolean;
+  /** RTT gate hook (Vast-like backends); absent = no gate. */
+  measureRtt?: (machine: ReplicaMachine) => Promise<number | null>;
+  releaseReasons: Array<string | undefined> = [];
   bootMs = 50;
   registryAuthFor?: (image: string) => RegistryAuth | null;
   appDelayMs = 0;
@@ -84,9 +87,10 @@ export class FakeCloud implements DeploymentBackend {
     return [...this.machines.values()].map(m => ({ ...m.machine }));
   }
 
-  async releaseReplica(machine: ReplicaMachine): Promise<void> {
+  async releaseReplica(machine: ReplicaMachine, reason?: string): Promise<void> {
     const fake = this.machines.get(machine.id);
     this.released.push(machine.id);
+    this.releaseReasons.push(reason);
     if (!fake) return;
     this.machines.delete(machine.id);
     fake.server.closeAllConnections();

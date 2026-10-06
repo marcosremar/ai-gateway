@@ -16,6 +16,7 @@ import { planReplicas, replicaPhase, type ObservedReplica } from './planner';
 import { BUILTIN_PROFILES } from './profiles';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway, usesVast } from './spec';
 import { placeReplica, PlacementError } from './placement-walk';
+import { DEFAULT_MAX_RTT_MS, gateDecision, type GateState } from './rtt-gate';
 import type {
   DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, DeploymentStore, DeploymentView, Profile, ReplicaMachine,
   ReplicaProbe,
@@ -45,6 +46,8 @@ interface Runtime {
   starting: Map<string, number>;
   /** Where the last create landed (or failed) and which candidates were skipped. */
   lastPlacement: string | null;
+  /** Hosts the RTT gate released since the last replica that passed it (kept in `lastPlacement` across creates). */
+  rejected: string[];
 }
 
 export interface ControllerOptions {
@@ -95,6 +98,10 @@ export class DeploymentController {
   private readonly backends: Partial<Record<DeploymentProvider, DeploymentBackend>>;
   /** Provider of a machine that does not say (fakes, records from before `provider`). */
   private readonly defaultProvider: DeploymentProvider;
+  /** RTT gate per replica (backends with `measureRtt`, i.e. Vast), by machine id. */
+  private readonly gates = new Map<string, GateState>();
+  /** Machines created before this process started were adopted: measured for the view, never released by the gate. */
+  private readonly startedAt: number;
   readonly namespace: string;
   private readonly now: () => number;
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
@@ -103,6 +110,7 @@ export class DeploymentController {
     this.namespace = opts.namespace ?? 'default';
     if (!NAME_RE.test(this.namespace)) throw new Error(`invalid deployments namespace '${this.namespace}'`);
     this.now = opts.now ?? Date.now;
+    this.startedAt = this.now();
     this.log = opts.log ?? (() => {});
     this.backends = opts.backends ?? (opts.backend ? { [opts.backend.provider]: opts.backend } : {});
     const providers = Object.keys(this.backends) as DeploymentProvider[];
@@ -143,7 +151,7 @@ export class DeploymentController {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
-      lastPlacement: null,
+      lastPlacement: null, rejected: [],
     };
   }
 
@@ -417,6 +425,7 @@ export class DeploymentController {
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
     }), ...recent, ...unlisted];
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
+    for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
 
     const orphans = this.machines.filter(m => !this.deployments.has(m.deployment) && !failed.has(this.providerOf(m)));
     for (const m of orphans) await this.release(m, 'orphan');
@@ -473,6 +482,7 @@ export class DeploymentController {
   private async probeOne(m: ReplicaMachine): Promise<void> {
     const rt = this.deployments.get(m.deployment);
     if (!rt || !m.ip) return;
+    if (!(await this.rttGate(rt, m))) return; // still measuring, or released as too far
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
     let ok = false;
     try {
@@ -483,6 +493,43 @@ export class DeploymentController {
     if (ok) { p.readyAt ??= Date.now(); p.everReady = true; p.readyNow = true; p.failures = 0; rt.starting.delete(m.id); }
     else { p.readyNow = false; if (p.everReady) p.failures++; }
     this.probes.set(m.id, p);
+  }
+
+  /**
+   * RTT gate (`rtt-gate.ts`): true once the replica may serve. A fresh replica on a backend that measures RTT (Vast)
+   * is kept only if the median from the gateway is within `maxRttMs`; otherwise it is released as `too-far` (the
+   * backend avoids the host) and the next create picks another offer. Passed once = never measured again.
+   */
+  private async rttGate(rt: Runtime, m: ReplicaMachine): Promise<boolean> {
+    const backend = this.backends[this.providerOf(m)];
+    if (!backend?.measureRtt) return true;
+    const now = this.now();
+    const gate = this.gates.get(m.id) ?? { status: 'pending', firstSeenAt: now, rttMs: null };
+    this.gates.set(m.id, gate);
+    if (gate.status !== 'pending') return true;
+    let rtt: number | null = null;
+    try { rtt = await backend.measureRtt(m); } catch { rtt = null; }
+    if (rtt != null) gate.rttMs = rtt;
+    if (m.createdAt < this.startedAt) { // adopted after a restart: it may be serving a class, never cut it here
+      if (rtt != null) gate.status = 'adopted';
+      return true;
+    }
+    const maxRttMs = rt.record.spec.maxRttMs ?? DEFAULT_MAX_RTT_MS;
+    const decision = gateDecision({ rttMs: rtt, maxRttMs, firstSeenAt: gate.firstSeenAt, now });
+    if (decision === 'wait') return false;
+    const measured = rtt != null ? `RTT ${rtt} ms` : 'no RTT answer';
+    if (decision === 'pass') {
+      gate.status = 'passed';
+      rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${measured} ≤ maxRttMs ${maxRttMs}: kept`;
+      rt.rejected = [];
+      return true;
+    }
+    const note = `host ${m.zone || m.id}: ${measured} > maxRttMs ${maxRttMs}: released (too-far)`;
+    rt.rejected = [...rt.rejected.slice(-4), note]; // the last few are enough to see a pattern
+    rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${note}`;
+    this.log('deployments: replica too far', { deployment: m.deployment, id: m.id, rttMs: rtt, maxRttMs });
+    await this.release(m, 'too-far');
+    return false;
   }
 
   private async release(m: ReplicaMachine, reason: string): Promise<void> {
@@ -552,7 +599,7 @@ export class DeploymentController {
           return;
         }
         this.machines.push({ ...machine, pricePerHour: machine.pricePerHour ?? price });
-        rt.lastPlacement = placement;
+        rt.lastPlacement = rt.rejected.length ? `${placement}; earlier: ${rt.rejected.join('; ')}` : placement;
         rt.createFailures = 0;
         rt.lastError = null;
       } catch (err) {
@@ -616,6 +663,7 @@ export class DeploymentController {
       pricePerHour: m.pricePerHour,
       ageSeconds: Math.round((now - m.createdAt) / 1000),
       inflight: rt.perReplica.get(m.id) ?? 0,
+      rttMs: this.gates.get(m.id)?.rttMs ?? null,
     }));
     const ready = replicas.filter(r => r.phase === 'ready').length;
     const desired = planReplicas({

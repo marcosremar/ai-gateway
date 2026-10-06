@@ -8,6 +8,7 @@
  * unchanged. Machines are found by label `aigw:<namespace>:<deployment>` (Vast has no tags).
  */
 
+import { probeRtt } from '../gateway/providers/gpu/rtt-probe';
 import { vastReplicaInit } from './cloud-init';
 import { DEFAULT_NEAR, rankOffers, type VastOffer } from './placements';
 import type { CreateReplicaInput, DeploymentBackend, DeploymentSpec, ReplicaMachine } from './types';
@@ -29,6 +30,17 @@ export const MIN_INET_DOWN_MBPS = 500;
 export const DEFAULT_DISK_GB = 50;
 /** A host that failed to boot our image is skipped this long (it may be a bad driver, disk or network). */
 export const BAD_HOST_MS = 3_600_000;
+/** A host too far by measured RTT (`rtt-gate.ts`) is skipped a day: distance does not change by the hour. */
+export const TOO_FAR_HOST_MS = 24 * 3_600_000;
+/** RTT samples per measurement (median) and per-sample timeout: one gate check stays within a few seconds. */
+export const RTT_SAMPLES = 5;
+export const RTT_SAMPLE_TIMEOUT_MS = 2_000;
+
+/** Median RTT (ms) to host:port counting only real response bytes, or null. Injectable for tests. */
+export type RttMeasure = (host: string, port: number) => Promise<number | null>;
+
+const defaultRtt: RttMeasure = async (host, port) => (await probeRtt(host, [port], RTT_SAMPLES, RTT_SAMPLE_TIMEOUT_MS)).medianMs;
+
 /** Offers tried per create (a rented-in-between offer answers "not available"); more would only slow the walk. */
 export const MAX_RENT_TRIES = 5;
 
@@ -70,14 +82,16 @@ export class VastDeploymentBackend implements DeploymentBackend {
   readonly marketPriced = true;
   private readonly fetchImpl: FetchLike;
   private readonly now: () => number;
+  private readonly rtt: RttMeasure;
   /** machine_id → skip until. */
   private readonly badHosts = new Map<number, number>();
   /** instance id → host machine_id (from create and list). */
   private readonly hostOf = new Map<string, number>();
 
-  constructor(private readonly apiKey: string, opts: { fetch?: FetchLike; now?: () => number } = {}) {
+  constructor(private readonly apiKey: string, opts: { fetch?: FetchLike; now?: () => number; rtt?: RttMeasure } = {}) {
     this.fetchImpl = opts.fetch ?? ((url, init) => fetch(url, init));
     this.now = opts.now ?? Date.now;
+    this.rtt = opts.rtt ?? defaultRtt;
   }
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -187,18 +201,27 @@ export class VastDeploymentBackend implements DeploymentBackend {
     });
   }
 
-  /** Deletes the instance (its disk goes with it). A host that never booted our image is avoided for `BAD_HOST_MS`. */
+  /**
+   * Deletes the instance (its disk goes with it). A host that never booted our image is avoided for `BAD_HOST_MS`;
+   * one released by the RTT gate (`too-far`) for `TOO_FAR_HOST_MS`.
+   */
   async releaseReplica(machine: ReplicaMachine, reason?: string): Promise<void> {
-    if (reason === 'boot-timeout') {
-      const host = this.hostOf.get(machine.id);
-      if (host !== undefined) this.badHosts.set(host, this.now() + BAD_HOST_MS);
-    }
+    const avoidMs = reason === 'too-far' ? TOO_FAR_HOST_MS : reason === 'boot-timeout' ? BAD_HOST_MS : 0;
+    const host = this.hostOf.get(machine.id);
+    if (avoidMs && host !== undefined) this.badHosts.set(host, this.now() + avoidMs);
     try {
       await this.call('DELETE', `/instances/${machine.id}/`);
     } catch (err) {
       if (!(err instanceof VastApiError && err.status === 404)) throw err;
     }
     this.hostOf.delete(machine.id);
+  }
+
+  /** RTT from the gateway to the replica's nginx front (`ip` = public address:mapped port of :80). */
+  async measureRtt(machine: ReplicaMachine): Promise<number | null> {
+    const m = /^(.+):(\d+)$/.exec(machine.ip ?? '');
+    if (!m) return null;
+    return this.rtt(m[1], Number(m[2]));
   }
 
   /** Not meaningful per zone on Vast: the backend picks a market offer under the cap at create (`marketPriced`). */

@@ -161,6 +161,9 @@ describe('candidates, near and provider vast', () => {
     [{ candidates: [{ machineType: 'L4-1-24G', maxEurPerHour: 1, provider: 'aws' }] }, /'scaleway' or 'vast'/],
     [{ candidates: [{ machineType: 'RTX 5090', maxEurPerHour: 1 }] }, /not a Scaleway type/],
     [{ near: 'France' }, /near is invalid/],
+    [{ maxRttMs: 4 }, /maxRttMs must be an integer between 5 and 500/],
+    [{ maxRttMs: 501 }, /maxRttMs must be an integer between 5 and 500/],
+    [{ maxRttMs: 20.5 }, /maxRttMs/],
   ])('rejects %j', (body, message) => {
     expect(() => buildSpec('x', { image: 'a', port: 8000, ...body }, { profiles })).toThrow(message);
   });
@@ -168,6 +171,7 @@ describe('candidates, near and provider vast', () => {
   it('vast: boot-script mode with the base image, GPU on, any port; no files, exposure or stop', () => {
     const spec = buildSpec('x', { ...vast, port: 8010 }, { profiles });
     expect(spec).toMatchObject({ provider: 'vast', gpu: true, port: 8010, machineType: 'RTX 5090' });
+    expect(buildSpec('x', { ...vast, port: 8010, maxRttMs: 40 }, { profiles }).maxRttMs).toBe(40);
     expect(() => buildSpec('x', { ...vast, port: 8000, bootScript: undefined }, { profiles })).toThrow(/need bootScript and image/);
     expect(() => buildSpec('x', { ...vast, files: { a: 'YQ==' } }, { profiles })).toThrow(/files are not supported on vast/);
     expect(() => buildSpec('x', { ...vast, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles })).toThrow(/exposure/);

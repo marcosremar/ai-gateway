@@ -22,6 +22,11 @@ on release via `bunx changeset version`.
   (default `FR`) and `allowFar`. `placements` (ordered Scaleway alternatives) and `candidates` share one walk
   (`placement-walk.ts`) and one stock detector (`isOutOfStock`); a spec uses one or the other. Ranking lives with
   `placementsOf` in `src/deployments/placements.ts` (`rankOffers`, `rankCandidates`).
+- **Placement by distance + RTT gate (Vast)** — geography is now the great-circle distance from the `near` country's
+  hub (`src/deployments/geo.ts`) in 500-km bands, far beyond 2500 km (instead of FR/neighbour/EU tiers: an EU host in
+  Slovakia measured ~60 ms from France). New spec field `maxRttMs` (5–500, default 35 measured from the gateway in
+  NL): a fresh Vast replica whose median RTT is above it is released as `too-far` and its host skipped 24 h; no
+  answer within 5 min counts as too far. `rttMs` per replica in the view; decisions in `lastPlacement`.
 
 - **Declared deployments** (`src/deployments/declared/*.json`) — the gateway registers them itself at boot and every
   5 min through the idempotent `controller.put`; secrets mounted from the environment (`GHCR_READ_TOKEN` →

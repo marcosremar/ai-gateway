@@ -172,13 +172,20 @@ With `candidates`, each create walks a **ranked ladder**:
 
 - `candidates`: 1–20 entries `{ provider?, zone?, machineType, maxEurPerHour }` (`provider` defaults to the spec's,
   `zone` to the spec's; Vast ignores `zone`). `near`: ISO country of the users, default **`FR`** (`DEFAULT_NEAR`, the
-  owner's region). `allowFar`: accept hosts/zones outside the EU/EEA when nothing nearer exists (default false).
+  owner's region). `allowFar`: accept hosts/zones beyond 2500 km of `near` when nothing nearer exists (default
+  false). `maxRttMs` (Vast): see [RTT gate](#rtt-gate-vast).
   `candidates` cannot be combined with `exposure` (the reserved IP is zonal).
-- **Order** (`rankCandidates`): geography tier first — Scaleway `fr-*` zones tier 0; neighbors (BE, LU, DE, CH, NL, ES,
-  IT, GB, MC, AD; so `nl-ams-*`) tier 1; rest of the EU/EEA (`pl-waw-*`) tier 2; anything else excluded unless
-  `allowFar`. A Vast candidate is tier 1 (a marketplace host is less reliable than a datacenter in France; the Vast
-  backend itself picks a host near `near`). Inside a tier, cheapest first (catalog price; the cap when unknown);
-  ties keep the caller's order. Zones in `shortage` and types the catalog prices above the candidate's cap are
+- **How placement decides — distance, not EU membership.** The owner, in France, measured ~60 ms to a Vast host in
+  Slovakia: inside the EU, but ~1100 km away. So geography is the great-circle distance (`geo.ts`) between the main
+  datacenter hub of the `near` country and that of the host's country (Paris → Amsterdam ≈ 430 km, → Frankfurt
+  ≈ 480 km, → Bratislava ≈ 1090 km, → Warsaw ≈ 1370 km), in **500-km bands** (`DISTANCE_BUCKET_KM`: inside a band
+  the RTT difference is a few ms and price decides). Beyond **2500 km** (`MAX_NEAR_KM`, ~25 ms of fibre alone, ≥ 40–60 ms
+  in practice) a host or zone is "far": excluded unless `allowFar` and nothing nearer exists. Unknown country = far.
+- **Order** (`rankCandidates`): distance band first — a Scaleway zone by its country (`fr-par-*` 0 km and `nl-ams-*`
+  ~430 km share band 0, `pl-waw-*` ~1370 km is band 2). A Vast candidate is band 1 (`VAST_CANDIDATE_BUCKET`: after a
+  zone within 500 km — a datacenter is more reliable than a marketplace host — and the Vast backend picks the host
+  near `near` itself, then the RTT gate checks it). Inside a band, cheapest first (catalog price; the cap when
+  unknown); ties keep the caller's order. Zones in `shortage` and types the catalog prices above the candidate's cap are
   skipped before trying.
 - **Walk**: as above, each candidate against its own cap; the Vast backend reports "no offer under the cap" and
   "every offer taken" as `out_of_stock`, so the walk moves on. Example `lastPlacement`:
@@ -204,15 +211,33 @@ With `candidates`, each create walks a **ranked ladder**:
   `reliability2 ≥ 0.97` (0.95 only when nothing passes), `inet_down ≥ 500`, `direct_port_count ≥ 1`,
   `dph_total ≤ maxEurPerHour × 1.05` (`EUR_TO_USD`, deliberately below the market rate so the USD cap is never looser
   than the EUR one). Cap and floors are re-checked client side.
-- **Ranking** (`rankOffers`): tier from `geolocation` (country after the last comma): FR 0; BE, LU, DE, CH, NL, ES, IT,
-  GB, MC, AD 1; rest of the EU/EEA 2; others 3, used only when no tier ≤ 2 offer exists and the spec has `allowFar`.
-  Inside a tier: effective price `dph_total × (1 + 4 × (1 − reliability2))` (an unreliable host costs more), then
+- **Ranking** (`rankOffers`): distance band of the host's country (from `geolocation`, the country after the last
+  comma) from `near`; hosts beyond 2500 km only when no nearer one exists and the spec has `allowFar`. From France,
+  DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3) even when those are cheaper. Inside a band: effective price `dph_total × (1 + 4 × (1 − reliability2))` (an unreliable host costs more), then
   `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label `aigw:<namespace>:<deployment>`, env `-p 80:80`);
   one rented in between goes to the next.
 - The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
   whose replica hit `bootTimeoutMinutes` is skipped for 1 h (in memory). States: `running`; `loading`/`created` →
   `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
   (its disk goes with it).
+
+### RTT gate (Vast)
+
+Distance is only a prior; a fresh Vast replica is **measured**. Once it has an address (its nginx front answers
+before the app is ready), the controller asks the backend for the RTT (`measureRtt`: `src/gateway/providers/gpu/rtt-probe.ts`
+on the mapped port, 5 samples × 2 s, median, counting only real response bytes). Median above `maxRttMs` → the
+replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and the next create
+takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too far. Until
+it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never measured again;
+one adopted after a gateway restart is measured for the view only, never released by the gate (it may be serving).
+`GET /v1/deployments/:name` shows `rttMs` per replica, and `lastPlacement` the decisions, e.g.
+`vast RTX 5090 (≤ €0.6/h) near FR; earlier: host Bratislava, SK: RTT 52 ms > maxRttMs 35: released (too-far); RTT 18 ms ≤ maxRttMs 35: kept`.
+
+- `maxRttMs`: integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`, `src/deployments/rtt-gate.ts`).
+- **Vantage-point caveat:** the gateway runs on Railway europe-west4 (Netherlands), so it measures **NL → host**, not
+  user → host. France → host is typically 10–20 ms more; 35 ms from NL keeps a French user near ~50 ms. A host east
+  of the Netherlands can pass from NL and still be slower for France than the number suggests — the distance ranking
+  (from `near`) is what keeps those behind closer hosts. Scaleway replicas are not gated.
 
 ## Replica machine
 
@@ -292,7 +317,7 @@ Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) i
 - `__tests__/unit/deployments/` — planner, spec/cloud-init, Scaleway adapter (fake client), controller + HTTP on the
   real proxy against in-process fake replicas (cold start, load scale-up, scale to zero, failover, unhealthy
   replacement, price cap, list failure, replica cap, orphan sweep, restart adoption, pause); placement ranking
-  (`placement-ranking.test.ts`), ordered Scaleway placements (`placements.test.ts`), the candidate walk and per-provider list failures (`controller-placement.test.ts`), and the
+  (`placement-ranking.test.ts`), ordered Scaleway placements (`placements.test.ts`), the RTT gate (fake probe, in `controller-placement.test.ts`), the candidate walk and per-provider list failures (`controller-placement.test.ts`), and the
   Vast backend + `vastReplicaInit` against a fake fetch (`vast-backend.test.ts`). Nothing here calls Vast or Scaleway.
 - `scripts/deployments-docker-e2e.ts` — the real cloud-init in a local Docker "machine"
   (`docker build -t aigw-machine -f scripts/deployments-machine.Dockerfile scripts/`), whole HTTP path, no cloud bill.
