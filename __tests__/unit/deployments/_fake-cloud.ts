@@ -5,7 +5,7 @@
 
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
-import type { CreateReplicaInput, DeploymentBackend, RegistryAuth, ReplicaMachine } from '../../../src/deployments/types';
+import type { CreateReplicaInput, DeploymentBackend, DeploymentNetwork, DeploymentSpec, RegistryAuth, ReplicaMachine } from '../../../src/deployments/types';
 
 export interface FakeMachine {
   machine: ReplicaMachine;
@@ -89,6 +89,42 @@ export class FakeCloud implements DeploymentBackend {
 
   async hourlyPrice(): Promise<number | null> {
     return this.price;
+  }
+
+  /** Exposed deployments: reserved IP + firewall per deployment, reused while they exist. */
+  networks = new Map<string, DeploymentNetwork>();
+  networkCalls = 0;
+  releasedNetworks: string[] = [];
+  starts: string[] = [];
+  stops: string[] = [];
+
+  async ensureNetwork(spec: DeploymentSpec, _ns: string, known?: DeploymentNetwork): Promise<DeploymentNetwork> {
+    this.networkCalls++;
+    const have = this.networks.get(spec.name);
+    if (have && (!known || known.ipId === have.ipId)) return have;
+    const net = { zone: spec.zone, ipId: `ip-${spec.name}`, ip: `51.15.0.${this.networks.size + 1}`, groupId: `sg-${spec.name}` };
+    this.networks.set(spec.name, net);
+    return net;
+  }
+
+  async releaseNetwork(network: DeploymentNetwork): Promise<void> {
+    this.releasedNetworks.push(network.ipId);
+    for (const [k, v] of this.networks) if (v.ipId === network.ipId) this.networks.delete(k);
+  }
+
+  /** Power off: the machine stays listed as `stopped` and stops answering until powered on (boots again). */
+  async stopReplica(machine: ReplicaMachine): Promise<void> {
+    const fake = this.machines.get(machine.id)!;
+    this.stops.push(machine.id);
+    fake.machine.state = 'stopped';
+    fake.bootedAt = Infinity;
+  }
+
+  async startReplica(machine: ReplicaMachine): Promise<void> {
+    const fake = this.machines.get(machine.id)!;
+    this.starts.push(machine.id);
+    fake.machine.state = 'running';
+    fake.bootedAt = Date.now() + this.bootMs;
   }
 
   /** Machine dies without the provider noticing (connection refused). */

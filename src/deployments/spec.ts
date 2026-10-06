@@ -3,7 +3,7 @@
  * caller-facing message on bad input; the HTTP layer maps it to 400.
  */
 
-import type { DeploymentSpec, Profile, ProfileSpec } from './types';
+import type { DeploymentSpec, ExposedPort, Profile, ProfileSpec } from './types';
 
 export class SpecError extends Error {}
 
@@ -96,8 +96,11 @@ const KNOWN_FIELDS = new Set<string>([
   'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'registryAuth', 'healthPath', 'machineType',
   'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas', 'targetInflightPerReplica', 'idleMinutes',
   'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds', 'maxEurPerHour', 'maxHours', 'paused',
-  'description', 'bootScript', 'files', 'minActiveReplicas',
+  'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure', 'idleAction',
 ]);
+
+/** The gateway's own probe port on an exposed replica (80/443 stay with the app). */
+export const PROBE_PORT = 8089;
 
 /**
  * Validates the fields present in `input` (all optional) — used for profiles and as the merge step for specs.
@@ -184,7 +187,26 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     if (typeof input.description !== 'string' || input.description.length > 500) throw new SpecError('description is invalid');
     out.description = input.description;
   }
+  if (input.exposure !== undefined) out.exposure = exposureOf(input.exposure);
+  if (input.idleAction !== undefined) {
+    if (input.idleAction !== 'delete' && input.idleAction !== 'stop') throw new SpecError("idleAction must be 'delete' or 'stop'");
+    out.idleAction = input.idleAction;
+  }
   return out;
+}
+
+function exposureOf(raw: unknown): { ports: ExposedPort[] } {
+  const ports = (raw as { ports?: unknown } | null)?.ports;
+  if (!Array.isArray(ports) || ports.length === 0 || ports.length > 20) throw new SpecError('exposure.ports must list 1–20 ports');
+  return {
+    ports: ports.map((p, i) => {
+      const port = p as { protocol?: unknown; port?: unknown };
+      if (port.protocol !== 'tcp' && port.protocol !== 'udp') throw new SpecError(`exposure.ports[${i}].protocol must be 'tcp' or 'udp'`);
+      const n = int(port.port, `exposure.ports[${i}].port`, 1, 65535);
+      if (n === PROBE_PORT) throw new SpecError(`exposure.ports[${i}]: ${PROBE_PORT} is the gateway's probe port`);
+      return { protocol: port.protocol, port: n };
+    }),
+  };
 }
 
 /**

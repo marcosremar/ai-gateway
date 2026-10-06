@@ -6,7 +6,8 @@
 
 import { ScalewayClient } from '../cpu-providers/scaleway-client';
 import type { GpuInstance, ProviderCredentials } from '../gpu-providers/types';
-import type { CreateReplicaInput, DeploymentBackend, RegistryAuth, ReplicaMachine } from './types';
+import { PROBE_PORT } from './spec';
+import type { CreateReplicaInput, DeploymentBackend, DeploymentNetwork, DeploymentSpec, RegistryAuth, ReplicaMachine } from './types';
 
 export const DEPLOY_TAG = 'aigw-deploy';
 export const nsTag = (ns: string) => `aigw-ns-${ns}`;
@@ -15,7 +16,9 @@ export const depTag = (name: string) => `aigw-dep-${name}`;
 /** Ubuntu Noble GPU OS 12 in fr-par-2 (Docker + NVIDIA container toolkit preinstalled). */
 const GPU_OS_IMAGE_FR_PAR_2 = '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa';
 
-type ScalewayLike = Pick<ScalewayClient, 'createInstance' | 'listInstancesByTag' | 'releaseInstance' | 'getHourlyPrice' | 'imageLike'>;
+type ScalewayLike = Pick<ScalewayClient, 'createInstance' | 'listInstancesByTag' | 'releaseInstance' | 'getHourlyPrice' | 'imageLike'>
+  & Partial<Pick<ScalewayClient, 'reserveRoutedIp' | 'listIps' | 'deleteIp' | 'createSecurityGroup' | 'listSecurityGroups'
+    | 'deleteSecurityGroup' | 'startInstance' | 'stopInstance'>>;
 
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
@@ -66,6 +69,7 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
       ...(spec.volumeGb ? { volumeGb: spec.volumeGb } : {}),
       tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name)],
       cloudInit: input.cloudInit,
+      ...(input.network ? { publicIpIds: [input.network.ipId], securityGroupId: input.network.groupId } : {}),
       ...(input.files && Object.keys(input.files).length ? { userDataFiles: input.files } : {}),
       ...(this.opts.projectId ? { projectId: this.opts.projectId } : {}),
     }, this.credentials);
@@ -82,6 +86,54 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   async releaseReplica(machine: ReplicaMachine): Promise<void> {
     await this.client.releaseInstance(machine.id, this.credentials, { awaitVolumes: false });
+  }
+
+  private need<K extends keyof ScalewayLike>(key: K): NonNullable<ScalewayLike[K]> {
+    const fn = this.client[key];
+    if (!fn) throw new Error(`scaleway client has no ${String(key)}`);
+    return (fn as (...a: unknown[]) => unknown).bind(this.client) as NonNullable<ScalewayLike[K]>;
+  }
+
+  private projectOr(): string {
+    if (!this.opts.projectId) throw new Error('exposed deployments need SCW_PROJECT_ID (reserved IP and firewall belong to a project)');
+    return this.opts.projectId;
+  }
+
+  /**
+   * Reserved IP + firewall of an exposed deployment, tagged like its replicas. `known` (from the deployment record) is
+   * reused while it still exists; otherwise any IP/firewall already tagged for this deployment is (a create that died
+   * after reserving must not leak a second IP — the 06/10/2026 LiveKit leak).
+   */
+  async ensureNetwork(spec: DeploymentSpec, namespace: string, known?: DeploymentNetwork): Promise<DeploymentNetwork> {
+    if (!spec.exposure) throw new Error(`deployment '${spec.name}' has no exposure`);
+    const projectId = this.projectOr();
+    const zone = spec.zone;
+    const tags = [DEPLOY_TAG, nsTag(namespace), depTag(spec.name)];
+    const ips = await this.need('listIps')(zone, this.credentials, { projectId, tag: depTag(spec.name) });
+    const ip = (known?.zone === zone ? ips.find(i => i.id === known.ipId) : undefined) ?? ips[0]
+      ?? await this.need('reserveRoutedIp')(zone, this.credentials, { projectId, tags });
+    const groupName = `aigw-${namespace}-${spec.name}`;
+    const groups = await this.need('listSecurityGroups')(zone, this.credentials, { projectId, name: groupName });
+    const groupId = (known?.zone === zone ? groups.find(g => g.id === known.groupId)?.id : undefined) ?? groups[0]?.id
+      ?? await this.need('createSecurityGroup')(zone, this.credentials, {
+        projectId, name: groupName, tags, description: `ai-gateway exposed deployment ${spec.name}`,
+        rules: [...spec.exposure.ports, { protocol: 'tcp' as const, port: PROBE_PORT }]
+          .map(r => ({ protocol: r.protocol === 'udp' ? 'UDP' as const : 'TCP' as const, port: r.port })),
+      });
+    return { zone, ipId: ip.id, ip: ip.address, groupId };
+  }
+
+  async releaseNetwork(network: DeploymentNetwork): Promise<void> {
+    await this.need('deleteIp')(network.zone, network.ipId, this.credentials);
+    await this.need('deleteSecurityGroup')(network.zone, network.groupId, this.credentials);
+  }
+
+  async stopReplica(machine: ReplicaMachine): Promise<void> {
+    await this.need('stopInstance')(machine.id, this.credentials);
+  }
+
+  async startReplica(machine: ReplicaMachine): Promise<void> {
+    await this.need('startInstance')(machine.id, this.credentials);
   }
 
   async hourlyPrice(zone: string, machineType: string): Promise<number | null> {

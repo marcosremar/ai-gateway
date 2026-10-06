@@ -217,7 +217,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         const form = new FormData();
         form.set('file', new Blob([new Uint8Array(audio)], { type: contentType }), 'turn');
         form.set('config', rawConfig);
-        const upstream = await f(`${replicaBase(lease.machine)}/v1/s2s`, {
+        const upstream = await f(`${replicaBase(lease.machine, lease.exposed)}/v1/s2s`, {
           method: 'POST', body: form, headers: { 'X-Aigw-Token': lease.token },
           signal: AbortSignal.any([primarySignal.signal, budget.signal]),
         });
