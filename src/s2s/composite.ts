@@ -30,6 +30,17 @@ export interface S2SConfig {
   response_format?: { type: string };
   /** Field of the JSON answer that is spoken (e.g. "utterance"). Without it the whole answer is spoken. */
   speak_field?: string;
+  /**
+   * The user turn as a template: `{{transcript}}` is replaced by what was heard. Lets a client build its prompt (game
+   * context around the student's words) before the transcript exists. Default: the transcript alone.
+   */
+  user_template?: string;
+}
+
+export const TRANSCRIPT_SLOT = '{{transcript}}';
+
+export function userTurn(cfg: S2SConfig, transcript: string): string {
+  return cfg.user_template?.includes(TRANSCRIPT_SLOT) ? cfg.user_template.split(TRANSCRIPT_SLOT).join(transcript) : transcript;
 }
 
 export interface StageAnswer { provider: string | null; fallback: string | null }
@@ -121,7 +132,7 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
   const messages: ChatMessage[] = [
     ...(config.system ? [{ role: 'system', content: config.system }] : []),
     ...(config.messages ?? []),
-    { role: 'user', content: transcript },
+    { role: 'user', content: userTurn(config, transcript) },
   ];
   const chat = await stages.chatStream(messages, config, signal);
 

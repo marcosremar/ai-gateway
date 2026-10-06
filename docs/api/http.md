@@ -181,6 +181,11 @@ Built for low latency: no round trip between stages, the first sentence is voice
   "language": "pt", "voice": "br-m-08", "fallback_voice": "pf_dora", "max_tokens": 160, "temperature": 0.6 }
 ```
 
+**Prompt built before the transcript exists**: `"user_template": "…The player says: \"{{transcript}}\"…"` — the user
+turn becomes the template with `{{transcript}}` replaced by what was heard (default: the transcript alone). A client
+that must look at the transcript before committing to the reply (commands, low confidence) reads the `transcript`
+event and cancels the request if the turn is not for the character.
+
 **JSON answers** (a character that also decides something): send `"response_format": {"type": "json_object"}` and
 `"speak_field": "utterance"`. Only that field is voiced, as it streams; `done.reply_raw` carries the whole JSON. The
 speech-stack primary takes JSON turns only with `S2S_PRIMARY_SPEAK_FIELD=1` (image from 2026-10-06 on); until then

@@ -292,8 +292,10 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         try:
             heard = await asyncio.to_thread(transcribe_sync, audio, lang, cfg.get("stt_prompt"))
             yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": ms()})
+            template = cfg.get("user_template") or ""
+            user = template.replace("{{transcript}}", heard["text"]) if "{{transcript}}" in template else heard["text"]
             messages = ([{"role": "system", "content": cfg["system"]}] if cfg.get("system") else []) \
-                + list(cfg.get("messages") or []) + [{"role": "user", "content": heard["text"]}]
+                + list(cfg.get("messages") or []) + [{"role": "user", "content": user}]
             gate = asyncio.Semaphore(TTS_PARALLEL)
             sentences: asyncio.Queue = asyncio.Queue()  # (text, audio queue) in speaking order, None at the end
             reply = []

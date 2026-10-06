@@ -102,3 +102,12 @@ describe('runComposite with speak_field (JSON answers)', () => {
     expect(calls.find(c => c.stage === 'llm')?.cfg?.response_format).toEqual({ type: 'json_object' });
   });
 });
+
+describe('runComposite with user_template', () => {
+  it('puts what was heard into the client-built prompt', async () => {
+    const { calls } = await run({}, {
+      config: { voice: 'br-m-08', user_template: 'You are at the bakery.\nThe player says: "{{transcript}}".\nReply.' },
+    });
+    expect(calls.find(c => c.stage === 'llm')?.text).toBe('You are at the bakery.\nThe player says: "Bom dia, eu queria um pão.".\nReply.');
+  });
+});
