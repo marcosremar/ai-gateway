@@ -26,6 +26,8 @@ export interface RouteTarget<P> {
   model?: string;
   /** TTS only: voice to use with this provider (voices are provider-specific). Default: the requested voice. */
   voice?: string;
+  /** TTS only: keep `voice` even when the request sends `fallback_voice` (a voice of another family). */
+  fixedVoice?: boolean;
   /**
    * Max time for one attempt on this target before moving to the next one (the call is aborted). Default: the
    * route's timeout. Deployments get a short one so a stuck replica does not delay the fallback.

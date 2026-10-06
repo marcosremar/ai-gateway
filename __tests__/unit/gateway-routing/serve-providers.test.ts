@@ -72,7 +72,9 @@ describe('buildServeProviders — only configured providers are mounted', () => 
       instances: instances(), openrouter: { state: 'valid' }, deploymentProvider, env: { TTS_DEPLOYMENT: 'my-tts' },
     });
     expect(providers.tts?.['parle-tts']?.map(t => `${t.providerId}:${t.model}`))
-      .toEqual(['deployment:my-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base', 'openrouter:hexgrad/kokoro-82m']);
+      .toEqual(['deployment:my-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base', 'openrouter:microsoft/mai-voice-2.1-flash', 'openrouter:hexgrad/kokoro-82m']);
+    // Kokoro, the last resort, keeps its own voice: the client's fallback_voice is a MAI voice.
+    expect(providers.tts?.['parle-tts']?.[2]).toMatchObject({ voice: 'pf_dora', fixedVoice: true });
     expect(providers.chatRoutes?.['parle-llm']?.[0].providerId).toBe('deployment:parle-speech');
     expect(providers.stt?.['parle-stt']?.map(t => t.providerId)).toEqual(['deployment:parle-speech', 'openrouter']);
   });

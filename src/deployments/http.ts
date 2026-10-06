@@ -19,6 +19,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { Readable } from 'stream';
 import { DeploymentController, DeploymentError } from './controller';
 import { SpecError } from './spec';
+import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
@@ -83,6 +84,10 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 
 export interface DeploymentRoutesOptions {
   controller: DeploymentController;
+  /** App accounts (apps.ts). Without it /v1/apps answers 404 and `appImage` is refused. */
+  apps?: AppRegistry;
+  /** The calling key's user id (the app it belongs to). */
+  userOf?: (req: IncomingMessage) => string | null;
   /** Mutations (PUT/PATCH/DELETE/wake, profiles) require this. Default: every authenticated caller. */
   isAdmin?: (req: IncomingMessage) => boolean;
   fetchImpl?: typeof fetch;
@@ -92,6 +97,61 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
   const { controller } = opts;
   const isAdmin = opts.isAdmin ?? (() => true);
   const fetchImpl = opts.fetchImpl ?? fetch;
+
+  /** The app this request acts for: `X-App` from an admin key, else the key's own user; null = admin acting globally. */
+  function appOf(req: IncomingMessage): string | null {
+    const header = req.headers['x-app'];
+    if (typeof header === 'string' && header.trim()) {
+      if (!isAdmin(req)) throw new DeploymentError(403, 'only an admin key may act for another app (X-App)');
+      if (!APP_ID_RE.test(header.trim())) throw new DeploymentError(400, `X-App must match ${APP_ID_RE}`);
+      return header.trim();
+    }
+    if (isAdmin(req)) return null;
+    const user = opts.userOf?.(req) ?? null;
+    return user && APP_ID_RE.test(user) ? user : null;
+  }
+
+  /** Admin, or the app named in the path is the caller's own. */
+  function mayUseApp(req: IncomingMessage, app: string): boolean {
+    return isAdmin(req) || appOf(req) === app;
+  }
+
+  async function appRoutes(req: IncomingMessage, res: ServerResponse, parts: string[], method: string): Promise<void> {
+    const registry = opts.apps;
+    if (!registry) return send(res, 404, { error: 'app accounts are not enabled on this gateway' });
+    const [, , app, sub, imageName, extra] = parts; // ['v1', 'apps', app?, 'images'?, name?]
+    if (!app) {
+      if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+      const own = appOf(req);
+      if (isAdmin(req) && !own) return send(res, 200, { apps: registry.list() });
+      return send(res, 200, { apps: registry.list().filter(a => a.id === own) });
+    }
+    if (!mayUseApp(req, app)) return send(res, 403, { error: `this key cannot use app '${app}'` });
+    if (!sub) {
+      if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+      const account = registry.get(app);
+      const deployments = controller.list().filter(d => d.app === app).map(d => ({ name: d.name, status: d.status, appImage: d.appImage }));
+      return send(res, 200, { id: app, createdAt: account?.createdAt ?? null, images: Object.values(account?.images ?? {}), deployments });
+    }
+    if (sub !== 'images' || extra) return send(res, 404, { error: `unknown path '/${parts.join('/')}'` });
+    if (!imageName) {
+      if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+      return send(res, 200, { app, images: Object.values(registry.get(app)?.images ?? {}) });
+    }
+    if (method === 'GET') {
+      const image = registry.image(app, imageName);
+      return image ? send(res, 200, image) : send(res, 404, { error: `app '${app}' has no image '${imageName}'` });
+    }
+    if (method === 'PUT') {
+      const { image, created } = await registry.putImage(app, imageName, await readJson(req));
+      return send(res, created ? 201 : 200, image);
+    }
+    if (method === 'DELETE') {
+      return (await registry.deleteImage(app, imageName)) ? send(res, 200, { deleted: imageName })
+        : send(res, 404, { error: `app '${app}' has no image '${imageName}'` });
+    }
+    return send(res, 405, { error: 'method not allowed' });
+  }
 
   async function invoke(req: IncomingMessage, res: ServerResponse, name: string, rest: string, query: string, method: string) {
     const body = method === 'GET' || method === 'HEAD' ? undefined : await readBody(req, MAX_INVOKE_BODY);
@@ -153,6 +213,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     const admin = () => {
       if (!isAdmin(req)) throw new DeploymentError(403, 'this API key cannot manage deployments');
     };
+    if (kind === 'apps') return appRoutes(req, res, parts, method);
 
     if (kind === 'profiles') {
       if (!name && method === 'GET') return send(res, 200, { profiles: controller.listProfiles() });
@@ -166,7 +227,12 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
 
     if (!name) {
-      if (method === 'GET') return send(res, 200, { namespace: controller.namespace, health: controller.health(), deployments: controller.list() });
+      if (method === 'GET') {
+        const own = appOf(req);
+        const filter = own ?? new URLSearchParams(query.slice(1)).get('app');
+        const deployments = controller.list().filter(d => !filter || d.app === filter);
+        return send(res, 200, { namespace: controller.namespace, health: controller.health(), deployments });
+      }
       return send(res, 405, { error: 'method not allowed' });
     }
     if (action === 'invoke') {
@@ -179,14 +245,26 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (action === 'wake' && method === 'POST') { admin(); return send(res, 202, controller.wake(name)); }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 
+    const existing = controller.get(name);
+    const caller = appOf(req);
+    if (existing && caller && existing.app && existing.app !== caller) {
+      return send(res, 403, { error: `deployment '${name}' belongs to app '${existing.app}'` });
+    }
     if (method === 'GET') {
-      const view = controller.get(name);
-      return view ? send(res, 200, view) : send(res, 404, { error: `deployment '${name}' not found` });
+      return existing ? send(res, 200, existing) : send(res, 404, { error: `deployment '${name}' not found` });
     }
     if (method === 'PUT' || method === 'PATCH') {
       admin();
-      if (method === 'PATCH' && !controller.get(name)) return send(res, 404, { error: `deployment '${name}' not found` });
-      const { view, created } = await controller.put(name, await readJson(req));
+      if (method === 'PATCH' && !existing) return send(res, 404, { error: `deployment '${name}' not found` });
+      let body = await readJson(req);
+      const app = existing?.app ?? caller;
+      const appImage = typeof body.appImage === 'string' ? body.appImage : undefined;
+      if (body.appImage !== undefined) {
+        if (!opts.apps) throw new DeploymentError(400, 'appImage needs app accounts, not enabled on this gateway');
+        if (!app) throw new DeploymentError(400, 'appImage: say which app the deployment belongs to (X-App header)');
+        body = opts.apps.resolveDeployBody(app, body);
+      }
+      const { view, created } = await controller.put(name, body, { ...(app ? { app } : {}), ...(appImage ? { appImage } : {}) });
       return send(res, created ? 201 : 200, view);
     }
     if (method === 'DELETE') {
@@ -198,11 +276,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
 
   /** `PrefixRoute` handler: owns every path under /v1/deployments and /v1/profiles. */
   return function handle(req: IncomingMessage, res: ServerResponse, path: string, method: string): boolean {
-    if (!(path === '/v1/deployments' || path.startsWith('/v1/deployments/') || path === '/v1/profiles' || path.startsWith('/v1/profiles/'))) {
-      return false;
-    }
+    const owns = ['/v1/deployments', '/v1/profiles', '/v1/apps'].some(p => path === p || path.startsWith(`${p}/`));
+    if (!owns) return false;
     route(req, res, path, method).catch((err) => {
       if (err instanceof SpecError) return send(res, 400, { error: err.message });
+      if (err instanceof AppError) return send(res, err.status, { error: err.message });
       if (err instanceof DeploymentError) {
         return send(res, err.status, { error: err.message, ...(err.status === 503 ? { status: 'warming' } : {}) },
           err.retryAfterSeconds ? { 'Retry-After': err.retryAfterSeconds } : {});

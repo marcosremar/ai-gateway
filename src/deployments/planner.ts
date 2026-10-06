@@ -8,6 +8,9 @@
  *     `idleMinutes`) and `min` otherwise — so `minReplicas: 0` scales to zero after the idle window.
  *   - Broken replicas are replaced: provider halted it, boot took longer than `bootTimeoutMinutes`, it stopped
  *     answering health for `unhealthyStrikes` checks in a row, or it reached `maxHours`.
+ *   - The idle window counts from the later of the last request and the moment a replica became ready after it,
+ *     and a replica booting for the current activity keeps the deployment active: a cold start longer than
+ *     `idleMinutes` (a 59 GB speech image boots in ~12 min) is never killed mid-boot by its own idle clock.
  *   - Scale-down above the idle base waits `scaleDownDelaySeconds` of low load (no flapping on bursts) and never
  *     picks a replica with requests in flight. Going idle scales down at once.
  */
@@ -27,6 +30,8 @@ export interface ObservedReplica {
   /** Consecutive failed probes since the last success (only counted after `everReady`). */
   failures: number;
   inflight: number;
+  /** First successful ready probe (ms). */
+  readyAt?: number;
 }
 
 export interface PlanInput {
@@ -60,12 +65,24 @@ export function replicaPhase(r: ObservedReplica): ReplicaPhase {
   return 'booting';
 }
 
-export function isActive(input: Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now'>): boolean {
+type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now'> & { replicas?: ObservedReplica[] };
+
+export function isActive(input: ActivityInput): boolean {
   if (input.inflight > 0 || input.waiting > 0) return true;
-  return input.lastRequestAt != null && input.now - input.lastRequestAt < input.spec.idleMinutes * 60_000;
+  const last = input.lastRequestAt;
+  if (last == null) return false;
+  const windowMs = input.spec.idleMinutes * 60_000;
+  const replicas = input.replicas ?? [];
+  // Still warming up for this activity: a replica created inside the window that has not answered ready yet.
+  if (replicas.some(r => !r.everReady && r.machine.createdAt >= last - windowMs && replicaPhase(r) === 'booting')) return true;
+  // Cold start: if nothing was ready at the request, the clock starts when the first replica could serve it.
+  const servedAtRequest = replicas.some(r => r.readyAt != null && r.readyAt <= last);
+  const firstReadyAfter = Math.min(...replicas.map(r => r.readyAt ?? Infinity).filter(t => t > last));
+  const idleFrom = servedAtRequest || !Number.isFinite(firstReadyAfter) ? last : firstReadyAfter;
+  return input.now - idleFrom < windowMs;
 }
 
-export function desiredReplicas(input: Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now'>): number {
+export function desiredReplicas(input: ActivityInput): number {
   const { spec } = input;
   if (spec.paused) return 0;
   const active = isActive(input);

@@ -10,6 +10,7 @@ import { DeploymentController } from './controller';
 import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend } from './scaleway-backend';
 import { FileDeploymentStore } from './store';
+import { AppRegistry, FileAppStore } from './apps';
 
 export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
@@ -19,6 +20,7 @@ export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
 export { FileDeploymentStore, MemoryDeploymentStore } from './store';
+export { AppRegistry, FileAppStore, MemoryAppStore } from './apps';
 export type * from './types';
 
 /**
@@ -40,6 +42,7 @@ function onRailway(env: Record<string, string | undefined>): boolean {
 
 export interface DeploymentsFromEnv {
   controller: DeploymentController;
+  apps: AppRegistry;
   handler: ReturnType<typeof createDeploymentRoutes>;
 }
 
@@ -75,9 +78,11 @@ export function deploymentsFromEnv(
   }
   const projectId = env.SCW_DEFAULT_PROJECT_ID || env.SCW_PROJECT_ID || env.SCALEWAY_PROJECT_ID || undefined;
   const maxTotal = Number(env.DEPLOYMENTS_MAX_REPLICAS ?? 6);
+  const stateDir = env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway');
+  const apps = new AppRegistry(FileAppStore.inDir(stateDir));
   const controller = new DeploymentController({
     backend: new ScalewayDeploymentBackend(secret, { projectId }),
-    store: FileDeploymentStore.inDir(env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway')),
+    store: FileDeploymentStore.inDir(stateDir),
     probe: new HttpReplicaProbe(),
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
@@ -86,7 +91,9 @@ export function deploymentsFromEnv(
   const admins = (env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
   const handler = createDeploymentRoutes({
     controller,
+    apps,
+    userOf: opts.userOf,
     isAdmin: admins.length ? (req) => [...admins, ...(opts.alwaysAdmin ?? [])].includes(opts.userOf(req) ?? '') : undefined,
   });
-  return { controller, handler };
+  return { controller, apps, handler };
 }

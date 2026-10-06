@@ -25,7 +25,7 @@ export class DeploymentError extends Error {
   }
 }
 
-interface ProbeState { everReady: boolean; readyNow: boolean; failures: number }
+interface ProbeState { everReady: boolean; readyNow: boolean; failures: number; readyAt?: number }
 
 interface Runtime {
   record: DeploymentRecord;
@@ -134,7 +134,9 @@ export class DeploymentController {
 
   // ── Deployments ───────────────────────────────────────────────────────────
 
-  async put(name: string, body: Record<string, unknown>): Promise<{ view: DeploymentView; created: boolean }> {
+  async put(
+    name: string, body: Record<string, unknown>, meta: { app?: string; appImage?: string } = {},
+  ): Promise<{ view: DeploymentView; created: boolean }> {
     const existing = this.deployments.get(name);
     const spec = buildSpec(name, body, { profiles: this.profiles, previous: existing?.record.spec });
     const initBytes = Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32)));
@@ -143,11 +145,17 @@ export class DeploymentController {
     }
     const now = this.now();
     if (existing) {
-      existing.record = { ...existing.record, spec, updatedAt: now };
+      existing.record = {
+        ...existing.record, spec, updatedAt: now,
+        ...(existing.record.app || !meta.app ? {} : { app: meta.app }),
+        ...(meta.appImage ? { appImage: meta.appImage } : {}),
+      };
       await this.opts.store.saveDeployment(existing.record);
     } else {
       const record: DeploymentRecord = {
         spec, replicaToken: randomBytes(24).toString('base64url'), createdAt: now, updatedAt: now, lastRequestAt: null,
+        ...(meta.app ? { app: meta.app } : {}),
+        ...(meta.appImage ? { appImage: meta.appImage } : {}),
       };
       this.deployments.set(name, this.runtime(record));
       await this.opts.store.saveDeployment(record);
@@ -299,7 +307,7 @@ export class DeploymentController {
 
   private observed(m: ReplicaMachine, inflight: number): ObservedReplica {
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
-    return { machine: m, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight };
+    return { machine: m, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight, ...(p.readyAt ? { readyAt: p.readyAt } : {}) };
   }
 
   private async reconcileOnce(): Promise<void> {
@@ -360,7 +368,7 @@ export class DeploymentController {
     } catch {
       ok = false;
     }
-    if (ok) { p.everReady = true; p.readyNow = true; p.failures = 0; }
+    if (ok) { p.readyAt ??= Date.now(); p.everReady = true; p.readyNow = true; p.failures = 0; }
     else { p.readyNow = false; if (p.everReady) p.failures++; }
     this.probes.set(m.id, p);
   }
@@ -479,6 +487,8 @@ export class DeploymentController {
       lastRequestAt: rt.record.lastRequestAt ? new Date(rt.record.lastRequestAt).toISOString() : null,
       lastError: rt.lastError,
       invokeUrl: `/v1/deployments/${name}/invoke/`,
+      app: rt.record.app ?? null,
+      appImage: rt.record.appImage ?? null,
     };
   }
 }

@@ -20,6 +20,8 @@ import {
   buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,
 } from './src/config/serve-providers';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
+import { createS2SRoute } from './src/s2s/route';
+import { loopbackStages } from './src/s2s/loopback-stages';
 import { proxyCircuitBreakers } from './src/gateway/proxy/provider-routing';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
@@ -92,9 +94,11 @@ const deployments = deploymentsFromEnv(process.env, {
 });
 if (deployments) {
   await deployments.controller.init();
+  await deployments.apps.init();
   deployments.controller.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
+  prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
   // Read by createProxyServer: a cold-start wait must outlive the default 60 s idle cut.
   process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
   log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
@@ -159,13 +163,34 @@ const deepHealth = {
   report: () => deepHealthReport({ env: process.env, breakers: proxyCircuitBreakers, providers, deployments: controller }),
 };
 
+// POST /v1/s2s — speech-to-speech in one streamed request: the speech-stack deployment first, the composed pipeline
+// over the stage chains (loopback into this gateway, with the caller's own key) as fallback. See src/s2s/route.ts.
+const optionalMs = (v: string | undefined) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+const s2sRoute = createS2SRoute({
+  controller,
+  deployment: process.env.S2S_DEPLOYMENT?.trim() || process.env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech',
+  hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
+  budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
+  primarySpeaksJson: process.env.S2S_PRIMARY_SPEAK_FIELD === '1',
+  stagesFor: (req) => loopbackStages({
+    baseUrl: `http://127.0.0.1:${PORT}`,
+    authorization: String(req.headers.authorization ?? ''),
+    models: {
+      stt: process.env.S2S_STT_MODEL?.trim() || undefined,
+      chat: process.env.S2S_CHAT_MODEL?.trim() || undefined,
+      tts: process.env.S2S_TTS_MODEL?.trim() || undefined,
+    },
+  }),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
   apiKeys: API_KEYS,
   providers,
   deepHealth,
-  customRoutes: createKeyAdminRoutes(keyManager, isAdminToken),
+  customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });

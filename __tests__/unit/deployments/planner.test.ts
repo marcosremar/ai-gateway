@@ -105,6 +105,25 @@ describe('planReplicas', () => {
     expect(plan.release.map(r => r.id).sort()).toEqual(['a', 'b']);
   });
 
+  it('a cold start longer than idleMinutes is not killed by its own idle clock (wake at 0, still booting at 5 min)', () => {
+    // Regression (06/10/2026): a pre-warm wake with idleMinutes 4 released the L40S at 5 min, mid 12 min boot.
+    const s = spec({ minReplicas: 0, idleMinutes: 4 });
+    const booting = replica('a', { age: 5 * MIN, everReady: false, readyNow: false });
+    const plan = planReplicas({ ...base, spec: s, lastRequestAt: NOW - 5 * MIN, replicas: [booting] });
+    expect(plan.desired).toBe(1);
+    expect(plan.release).toEqual([]);
+  });
+
+  it('the idle window starts when the replica became ready, then going idle scales to zero', () => {
+    const s = spec({ minReplicas: 0, idleMinutes: 4 });
+    const readyAt = NOW - 2 * MIN;
+    const ready = replica('a', { age: 14 * MIN, readyAt });
+    expect(planReplicas({ ...base, spec: s, lastRequestAt: NOW - 14 * MIN, replicas: [ready] }).desired).toBe(1);
+    const later = planReplicas({ ...base, spec: s, now: readyAt + 5 * MIN, lastRequestAt: NOW - 14 * MIN, replicas: [ready] });
+    expect(later.desired).toBe(0);
+    expect(later.release.map(r => r.id)).toEqual(['a']);
+  });
+
   it('paused releases everything', () => {
     const plan = planReplicas({ ...base, spec: spec({ minReplicas: 1, paused: true }), replicas: [replica('a', { inflight: 2 })] });
     expect(plan.release).toEqual([{ id: 'a', reason: 'paused' }]);

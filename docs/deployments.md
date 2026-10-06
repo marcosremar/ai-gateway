@@ -53,6 +53,31 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 Mutations require a key whose user is in `DEPLOYMENTS_ADMIN_USERS` (when set). `env` values and `registryAuth` are
 never returned. Spec fields and defaults: `src/deployments/spec.ts` (`SPEC_DEFAULTS`).
 
+## App accounts — saved image addresses
+
+The gateway serves many apps; each has an **account** with the addresses of its Docker images, so a deploy names an
+image instead of carrying a registry address, and the app finds it again later (scale up for a class, roll back).
+
+```bash
+# Save (or move) an image address — build-image-on-scaleway.ts --app parle does this after a push
+curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
+  "image": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107", "port": 8000, "healthPath": "/health",
+  "defaults": {"machineType": "L40S-1-48G", "volumeGb": 120, "maxReplicas": 2, "bootTimeoutMinutes": 45}
+}'
+# Deploy it by name (or roll back: "appImageVersion": 1 = the previous address)
+curl -X PUT $GW/v1/deployments/parle-speech -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{"appImage": "speech-stack"}'
+curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # images + deployments of the app
+```
+
+- **Which app**: the user id of the calling key (`GATEWAY_API_KEYS` `key:app`). An admin key (the `SANDBOX_TOKEN` user,
+  `DEPLOYMENTS_ADMIN_USERS`) acts for any app with `X-App: <app>`; a normal key cannot use `X-App`.
+- **Isolation**: a key sees and edits only its own app's images and deployments (`403` otherwise); `GET /v1/deployments`
+  lists only its app's. Admins see all (`?app=` filters). Deploys still need an admin key (they spend money).
+- **Saved per image**: `image`, `digest`, `port`, `healthPath`, `description`, `defaults` (spec fields: machineType, zone,
+  gpu, volumeGb, replicas, timeouts, price cap, args) and the **last 5 previous addresses**. Never secrets: `env`
+  values and `registryAuth` are refused (an image in the gateway's own Scaleway registry needs none).
+- Stored in `DEPLOYMENTS_STATE_DIR/apps.json` (the Railway volume), next to `deployments.json`.
+
 ## Cold start
 
 - A request that finds no ready replica **waits** (`coldStartWaitSeconds`, default 240 s; per request with header

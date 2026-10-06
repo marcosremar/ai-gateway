@@ -12,6 +12,7 @@ import { createProxyServer } from '../../../src/gateway/proxy/server';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { createDeploymentRoutes, HttpReplicaProbe } from '../../../src/deployments/http';
 import { FileDeploymentStore, MemoryDeploymentStore } from '../../../src/deployments/store';
+import { AppRegistry, FileAppStore, MemoryAppStore } from '../../../src/deployments/apps';
 import type { DeploymentStore } from '../../../src/deployments/types';
 import { FakeCloud, until } from './_fake-cloud';
 
@@ -28,14 +29,18 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
   });
   await controller.init();
   controller.start();
+  const apps = new AppRegistry(new MemoryAppStore());
+  await apps.init();
   const handler = createDeploymentRoutes({
     controller,
+    apps,
     isAdmin: (req) => req.headers.authorization === `Bearer ${ADMIN}`,
+    userOf: (req) => (req.headers.authorization === `Bearer ${SITE}` ? 'site-a' : req.headers.authorization === `Bearer ${ADMIN}` ? 'owner' : null),
   });
   const server = createProxyServer({
     apiKeys: [`${ADMIN}:owner`, `${SITE}:site-a`],
     providers: { stt: {}, chat: {}, tts: {} } as never,
-    prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }],
+    prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }, { prefix: '/v1/apps', handler }],
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
@@ -190,9 +195,12 @@ describe('deployments API', () => {
     const replicasUsed = new Set(await Promise.all(spread.map(async r => ((await r.json()) as { replica: string }).replica)));
     expect(replicasUsed.size).toBe(3);
 
-    // Idle: push lastRequestAt back past idleMinutes.
-    (h.controller as unknown as { deployments: Map<string, { record: { lastRequestAt: number } }> })
-      .deployments.get('busy')!.record.lastRequestAt = Date.now() - 2 * 60_000;
+    // Idle: push lastRequestAt (and when the replicas became ready) back past idleMinutes.
+    const internals = h.controller as unknown as {
+      deployments: Map<string, { record: { lastRequestAt: number } }>; probes: Map<string, { readyAt?: number }>;
+    };
+    internals.deployments.get('busy')!.record.lastRequestAt = Date.now() - 2 * 60_000;
+    for (const p of internals.probes.values()) if (p.readyAt) p.readyAt = Date.now() - 3 * 60_000;
     await until(() => h.cloud.machines.size === 0, 3000);
     expect(h.controller.get('busy')!.status).toBe('scaled-to-zero');
   });
@@ -286,5 +294,83 @@ describe('deployments API', () => {
     await call(h, 'PATCH', '/v1/deployments/p', { paused: true });
     await until(() => h.cloud.machines.size === 0);
     expect((await call(h, 'GET', '/v1/deployments/p/invoke/', undefined, SITE)).status).toBe(409);
+  });
+});
+
+describe('app accounts: saved image addresses per app', () => {
+  const SPEECH = 'rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107';
+  const SPEECH_OLD = 'rg.fr-par.scw.cloud/aigw/speech-stack:20261004-2240';
+  const asParle = { 'x-app': 'parle' };
+
+  beforeEach(async () => { h = await harness(); });
+  afterEach(async () => { await close(h); for (const x of extra.splice(0)) await close(x); });
+
+  it('an app saves its image address once and deploys it by name; the deployment belongs to the app', async () => {
+    let res = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', {
+      image: SPEECH_OLD, port: 8000, healthPath: '/health', description: 'Whisper + Qwen3.5-9B + Qwen3-TTS',
+      defaults: { machineType: 'DEV1-S', gpu: false, maxReplicas: 2 },
+    }, ADMIN, asParle);
+    expect(res.status).toBe(201);
+    res = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH }, ADMIN, asParle);
+    const saved = await res.json() as { image: string; port: number; history: Array<{ image: string }> };
+    expect(saved).toMatchObject({ image: SPEECH, port: 8000 });
+    expect(saved.history.map(v => v.image)).toEqual([SPEECH_OLD]); // the previous address is kept
+
+    res = await call(h, 'PUT', '/v1/deployments/parle-speech', { appImage: 'speech-stack', minReplicas: 0 }, ADMIN, asParle);
+    expect(res.status).toBe(201);
+    const view = await res.json() as { app: string; appImage: string; spec: { image: string; port: number; machineType: string; maxReplicas: number } };
+    expect(view).toMatchObject({ app: 'parle', appImage: 'speech-stack' });
+    expect(view.spec).toMatchObject({ image: SPEECH, port: 8000, machineType: 'DEV1-S', maxReplicas: 2 });
+
+    // Roll back to the previous address by version
+    res = await call(h, 'PATCH', '/v1/deployments/parle-speech', { appImage: 'speech-stack', appImageVersion: 1 }, ADMIN, asParle);
+    expect(((await res.json()) as { spec: { image: string } }).spec.image).toBe(SPEECH_OLD);
+
+    // The app's account lists its images and deployments
+    const account = await (await call(h, 'GET', '/v1/apps/parle', undefined, ADMIN, asParle)).json() as {
+      images: Array<{ name: string }>; deployments: Array<{ name: string }>;
+    };
+    expect(account.images.map(i => i.name)).toEqual(['speech-stack']);
+    expect(account.deployments.map(d => d.name)).toEqual(['parle-speech']);
+  });
+
+  it('apps are isolated: a key sees and edits only its own app, cannot act for another', async () => {
+    await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000 }, ADMIN, asParle);
+    await call(h, 'PUT', '/v1/deployments/parle-echo', { profile: 'cpu-echo' }, ADMIN, asParle);
+    // site-a (a normal key) manages its own account…
+    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE)).status).toBe(201);
+    // …but not parle's, and cannot impersonate it
+    expect((await call(h, 'GET', '/v1/apps/parle', undefined, SITE)).status).toBe(403);
+    expect((await call(h, 'GET', '/v1/apps/site-a', undefined, SITE, asParle)).status).toBe(403);
+    expect((await call(h, 'GET', '/v1/deployments/parle-echo', undefined, SITE)).status).toBe(403);
+    const list = await (await call(h, 'GET', '/v1/deployments', undefined, SITE)).json() as { deployments: unknown[] };
+    expect(list.deployments).toEqual([]);
+    const apps = await (await call(h, 'GET', '/v1/apps', undefined, SITE)).json() as { apps: Array<{ id: string }> };
+    expect(apps.apps.map(a => a.id)).toEqual(['site-a']);
+    // The admin sees every app
+    const all = await (await call(h, 'GET', '/v1/apps', undefined, ADMIN)).json() as { apps: Array<{ id: string }> };
+    expect(all.apps.map(a => a.id).sort()).toEqual(['parle', 'site-a']);
+  });
+
+  it('refuses bad image addresses, secrets in defaults, unknown images and appImage without an app', async () => {
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: 'not an image; rm -rf /' }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: SPEECH, defaults: { env: { KEY: 'secret' } } }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: SPEECH, registryAuth: { password: 'p' } }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'missing' }, ADMIN, asParle)).status).toBe(404);
+    expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'speech-stack' }, ADMIN)).status).toBe(400);
+  });
+
+  it('accounts persist across a gateway restart (file store)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'aigw-apps-'));
+    try {
+      const first = new AppRegistry(FileAppStore.inDir(dir));
+      await first.init();
+      await first.putImage('parle', 'speech-stack', { image: SPEECH, port: 8000 });
+      const second = new AppRegistry(FileAppStore.inDir(dir));
+      await second.init();
+      expect(second.image('parle', 'speech-stack')).toMatchObject({ image: SPEECH, port: 8000 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
