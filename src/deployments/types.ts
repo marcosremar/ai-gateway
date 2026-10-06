@@ -81,7 +81,24 @@ export interface DeploymentSpec {
   maxHours: number;
   /** Paused deployments keep their spec but run no replicas and refuse invokes. */
   paused: boolean;
+  /**
+   * Reached from the internet on these ports, not only through the gateway (WebRTC, TLS with its own certificate):
+   * a reserved IP that outlives the replicas (DNS keeps pointing at it), a firewall that opens only these ports plus
+   * the probe port, and the gateway's token-gated probe moved to `PROBE_PORT` so 80/443 stay with the app. The app
+   * (boot-script mode) serves its health on `127.0.0.1:<port>`.
+   */
+  exposure?: { ports: ExposedPort[] };
+  /**
+   * What going idle does: `delete` (default) removes the machine; `stop` powers it off and keeps its disk, IP and
+   * firewall (billed for disk and IP only), and the next demand powers it back on (~2 min instead of a full boot).
+   */
+  idleAction?: 'delete' | 'stop';
 }
+
+export interface ExposedPort { protocol: 'tcp' | 'udp'; port: number }
+
+/** Reserved IP and firewall of an exposed deployment (`exposure`), kept across replicas. */
+export interface DeploymentNetwork { zone: string; ipId: string; ip: string; groupId: string }
 
 /** Fields a profile may preset. */
 export type ProfileSpec = Partial<Omit<DeploymentSpec, 'name'>> & { description?: string };
@@ -104,6 +121,8 @@ export interface DeploymentRecord {
   app?: string;
   /** Saved image of the app it was deployed from (`appImage`), for traceability. */
   appImage?: string;
+  /** Exposed deployments: reserved IP and firewall, created with the first replica and deleted with the deployment. */
+  network?: DeploymentNetwork;
 }
 
 export type ReplicaPhase = 'booting' | 'ready' | 'unhealthy' | 'halted';
@@ -128,6 +147,8 @@ export interface CreateReplicaInput {
   namespace: string;
   /** user_data keys → bytes (boot-script `files`). */
   files?: Record<string, Uint8Array>;
+  /** Exposed deployments: the reserved IP and firewall the replica attaches to. */
+  network?: DeploymentNetwork;
 }
 
 /** What the controller needs from a cloud. Implemented by `ScalewayDeploymentBackend` (and fakes in tests). */
@@ -137,6 +158,12 @@ export interface DeploymentBackend {
   /** Every replica of every deployment of this namespace. Must throw (not return []) when the provider fails. */
   listReplicas(namespace: string): Promise<ReplicaMachine[]>;
   releaseReplica(machine: ReplicaMachine): Promise<void>;
+  /** Exposed deployments: reserve the IP and create the firewall (`known` is reused when it still exists). */
+  ensureNetwork?(spec: DeploymentSpec, namespace: string, known?: DeploymentNetwork): Promise<DeploymentNetwork>;
+  releaseNetwork?(network: DeploymentNetwork): Promise<void>;
+  /** `idleAction: 'stop'`: power off keeping disk and IP, and power back on. */
+  stopReplica?(machine: ReplicaMachine): Promise<void>;
+  startReplica?(machine: ReplicaMachine): Promise<void>;
   /** Catalog price (EUR/h), `null` when the type is not sold in the zone. */
   hourlyPrice(zone: string, machineType: string): Promise<number | null>;
   /**
@@ -188,4 +215,6 @@ export interface DeploymentView {
   invokeUrl: string;
   app: string | null;
   appImage: string | null;
+  /** Exposed deployments: the reserved IP clients connect to (it outlives replicas); null otherwise. */
+  publicIp: string | null;
 }

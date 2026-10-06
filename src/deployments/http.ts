@@ -7,6 +7,7 @@
  *   GET    /v1/deployments/:name               status + replicas
  *   DELETE /v1/deployments/:name               release every replica and forget the spec
  *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic)
+ *   POST   /v1/deployments/:name/park          done for now: scale to minReplicas at once (power off under idleAction stop)
  *   *      /v1/deployments/:name/invoke/<path> forwarded to a ready replica as /<path> (waits through cold start)
  *   GET    /v1/profiles                        list profiles (built-in + stored)
  *   PUT    /v1/profiles/:name                  create or replace a profile
@@ -18,7 +19,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { Readable } from 'stream';
 import { DeploymentController, DeploymentError } from './controller';
-import { SpecError } from './spec';
+import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
 
@@ -39,7 +40,7 @@ export class HttpReplicaProbe implements ReplicaProbe {
   async ready(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<boolean> {
     if (!machine.ip) return false;
     const headers = { 'X-Aigw-Token': token };
-    const get = (path: string) => this.fetchImpl(`${replicaBase(machine)}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
+    const get = (path: string) => this.fetchImpl(`${replicaBase(machine, !!spec.exposure)}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
     const marker = await get('/__aigw/ready');
     if (!marker.ok) return false;
     const health = await get(spec.healthPath);
@@ -47,9 +48,9 @@ export class HttpReplicaProbe implements ReplicaProbe {
   }
 }
 
-/** `ip` may carry a port (local tests); real replicas listen on :80. */
-export function replicaBase(machine: ReplicaMachine): string {
-  return `http://${machine.ip}`;
+/** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`. */
+export function replicaBase(machine: ReplicaMachine, exposed = false): string {
+  return exposed && machine.ip && !machine.ip.includes(':') ? `http://${machine.ip}:${PROBE_PORT}` : `http://${machine.ip}`;
 }
 
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string | number> = {}): void {
@@ -169,7 +170,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const lease = await controller.acquire(name, { waitMs, exclude, signal: abort.signal });
       let upstream: Response;
       try {
-        upstream = await fetchImpl(`${replicaBase(lease.machine)}/${rest}${query}`, {
+        upstream = await fetchImpl(`${replicaBase(lease.machine, lease.exposed)}/${rest}${query}`, {
           method,
           headers: { ...headers, 'X-Aigw-Token': lease.token },
           body: body && body.length ? new Uint8Array(body) : undefined,
@@ -243,6 +244,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       return invoke(req, res, name, rest, query, method);
     }
     if (action === 'wake' && method === 'POST') { admin(); return send(res, 202, controller.wake(name)); }
+    if (action === 'park' && method === 'POST') { admin(); return send(res, 202, await controller.park(name)); }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 
     const existing = controller.get(name);

@@ -205,6 +205,45 @@ describe('deployments API', () => {
     expect(h.controller.get('busy')!.status).toBe('scaled-to-zero');
   });
 
+  it('exposed deployment: one reserved IP + firewall for all its replicas, shown as publicIp, released with it', async () => {
+    // LiveKit-like: clients reach the machine directly (WebRTC), so the address must outlive the replica.
+    await call(h, 'PUT', '/v1/deployments/rtc', {
+      profile: 'cpu-echo', minReplicas: 1, exposure: { ports: [{ protocol: 'tcp', port: 443 }, { protocol: 'udp', port: 7882 }] },
+    });
+    await until(() => h.controller.get('rtc')!.status === 'ready');
+    const view = h.controller.get('rtc')!;
+    expect(view.publicIp).toBe('51.15.0.1');
+    expect(h.cloud.created[0]!.network).toMatchObject({ ipId: 'ip-rtc', groupId: 'sg-rtc' });
+    const nginx = /echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/nginx\.conf/.exec(h.cloud.created[0]!.cloudInit)![1]!;
+    expect(Buffer.from(nginx, 'base64').toString()).toContain('listen 8089 default_server');
+    expect((await call(h, 'DELETE', '/v1/deployments/rtc')).status).toBe(200);
+    await until(() => h.cloud.releasedNetworks.includes('ip-rtc'));
+  });
+
+  it("idleAction 'stop': idle powers the replica off (kept, not deleted) and the next demand powers it back on", async () => {
+    await call(h, 'PUT', '/v1/deployments/park', { profile: 'cpu-echo', idleMinutes: 1, idleAction: 'stop' });
+    await call(h, 'POST', '/v1/deployments/park/wake');
+    await until(() => h.controller.get('park')!.status === 'ready');
+    const internals = h.controller as unknown as {
+      deployments: Map<string, { record: { lastRequestAt: number } }>; probes: Map<string, { readyAt?: number }>;
+    };
+    internals.deployments.get('park')!.record.lastRequestAt = Date.now() - 2 * 60_000;
+    for (const p of internals.probes.values()) if (p.readyAt) p.readyAt = Date.now() - 3 * 60_000;
+    await until(() => h.cloud.stops.length === 1, 3000);
+    expect(h.cloud.released).toEqual([]);
+    expect([...h.cloud.machines.values()].map(m => m.machine.state)).toEqual(['stopped']);
+
+    await call(h, 'POST', '/v1/deployments/park/wake');
+    await until(() => h.controller.get('park')!.status === 'ready', 3000);
+    expect(h.cloud.starts).toHaveLength(1);
+    expect(h.cloud.created).toHaveLength(1);
+
+    // POST /park: the caller is done now (its traffic bypassed the gateway) → powered off at once, no idle wait.
+    expect((await call(h, 'POST', '/v1/deployments/park/park')).status).toBe(202);
+    await until(() => h.cloud.stops.length === 2, 3000);
+    expect(h.cloud.released).toEqual([]);
+  });
+
   it('retries on another replica when one dies, and replaces the dead one', async () => {
     await call(h, 'PUT', '/v1/deployments/ha', { profile: 'cpu-echo', minReplicas: 2, maxReplicas: 2 });
     await until(() => h.controller.get('ha')!.replicas.filter(r => r.phase === 'ready').length === 2);

@@ -192,3 +192,27 @@ Inside the gateway process, without a cron of its own:
 The janitor is on by default on Railway (`DEPLOYMENTS_JANITOR=0` turns it off; `=1` turns it on elsewhere). When the
 gateway itself is down nothing in its process runs: the reaper (`scripts/reap-orphans.ts`, a separate Railway cron
 every 15 min) releases the namespace's replicas after the gateway missed its health checks for ~2 min.
+
+
+## Exposed deployments (WebRTC, own TLS) and `idleAction: "stop"`
+
+For an app the clients reach directly, not through the gateway (LiveKit: WebRTC over UDP, Caddy with its own
+certificate), the spec adds:
+
+```json
+{
+  "exposure": { "ports": [{ "protocol": "tcp", "port": 443 }, { "protocol": "udp", "port": 7882 }] },
+  "idleAction": "stop"
+}
+```
+
+- **Reserved IP:** reserved with the first replica, kept in the deployment record, and reused by every later replica, so
+  DNS keeps pointing at it. It is shown as `publicIp` in `GET /v1/deployments/:name` and released on `DELETE`.
+- **Firewall:** the deployment's own security group opens only the listed ports plus `8089/tcp`.
+- **Gateway probe:** the token-gated probe moves to 8089, so 80/443 stay with the app. In this mode the app serves
+  `healthPath` on its own `port`.
+- **`idleAction: "stop"`:** going idle powers the replica off instead of deleting it. Disk, IP and firewall stay, and
+  only disk and IP are billed. The next demand (a request or `wake`) powers it back on, which takes about 2 min instead
+  of a full boot, and the certificate on disk survives.
+- **Traffic that bypasses the gateway:** direct client traffic (LiveKit rooms) does not count as a request. `POST /v1/deployments/:name/park` says the app is done now (powers off at once under `idleAction: "stop"`). The app keeps
+  the deployment in use with `POST /v1/deployments/:name/wake` while it needs it. When the wakes stop, `idleMinutes` parks it.

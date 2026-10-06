@@ -114,3 +114,21 @@ describe('boot-script mode', () => {
     expect(() => buildSpec('x', { bootScript: 'x', files: { a: 'not base64!' } }, { profiles })).toThrow(/base64/);
   });
 });
+
+describe('exposure and idleAction', () => {
+  const base = { image: 'a/b:1', port: 7880 };
+  it('accepts tcp/udp ports and the stop idle action', () => {
+    const spec = buildSpec('rtc', { ...base, idleAction: 'stop', exposure: { ports: [{ protocol: 'udp', port: 7882 }, { protocol: 'tcp', port: 443 }] } },
+      { profiles: new Map() });
+    expect(spec.exposure?.ports).toEqual([{ protocol: 'udp', port: 7882 }, { protocol: 'tcp', port: 443 }]);
+    expect(spec.idleAction).toBe('stop');
+  });
+
+  it('refuses the probe port, empty or bad ports, and unknown idle actions', () => {
+    const bad = (body: Record<string, unknown>) => () => buildSpec('rtc', { ...base, ...body }, { profiles: new Map() });
+    expect(bad({ exposure: { ports: [{ protocol: 'tcp', port: 8089 }] } })).toThrow(/probe port/);
+    expect(bad({ exposure: { ports: [] } })).toThrow(/1–20 ports/);
+    expect(bad({ exposure: { ports: [{ protocol: 'icmp', port: 1 }] } })).toThrow(/tcp' or 'udp/);
+    expect(bad({ idleAction: 'hibernate' })).toThrow(/idleAction/);
+  });
+});

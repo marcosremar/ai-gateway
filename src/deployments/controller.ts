@@ -39,6 +39,8 @@ interface Runtime {
   createFailures: number;
   lastPersistedRequestAt: number | null;
   waiters: Set<() => void>;
+  /** Parked replicas (`idleAction: 'stop'`) being powered back on, by id → when: not started twice while the list lags. */
+  starting: Map<string, number>;
 }
 
 export interface ControllerOptions {
@@ -58,11 +60,21 @@ export interface ControllerOptions {
 export interface Lease {
   machine: ReplicaMachine;
   token: string;
+  /** The deployment is exposed (`exposure`): its token-gated front is on `PROBE_PORT`, not :80. */
+  exposed: boolean;
   /** Call once the forwarded request finished. `failed` = connection-level failure (marks the replica suspect). */
   done(failed?: boolean): void;
 }
 
 const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
+/** A parked replica just powered on still lists as stopped for a while: do not power it on again before this. */
+const PARKED_START_GRACE_MS = 90_000;
+const NETWORK_RELEASE_RETRY_MS = 15_000;
+
+/** Powered off by the provider's normal stop (not billed for compute): a parked replica under `idleAction: 'stop'`. */
+function isParked(m: ReplicaMachine): boolean {
+  return m.state === 'stopped';
+}
 
 export class DeploymentController {
   private readonly deployments = new Map<string, Runtime>();
@@ -106,7 +118,7 @@ export class DeploymentController {
   private runtime(record: DeploymentRecord): Runtime {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
-      backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(),
+      backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
     };
   }
 
@@ -175,13 +187,43 @@ export class DeploymentController {
     const mine = this.machines.filter(m => m.deployment === name);
     this.machines = this.machines.filter(m => m.deployment !== name);
     await Promise.all(mine.map(m => this.release(m, 'deleted')));
+    if (rt.record.network) void this.releaseNetwork(name, rt.record.network);
     return true;
+  }
+
+  /** The reserved IP and firewall go with the deployment; the IP detaches some time after its server is deleted. */
+  private async releaseNetwork(name: string, network: NonNullable<DeploymentRecord['network']>): Promise<void> {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        await this.opts.backend.releaseNetwork?.(network);
+        this.log('deployments: released network', { deployment: name, ip: network.ip });
+        return;
+      } catch (err) {
+        if (attempt === 9) this.log('deployments: release network failed', { deployment: name, error: err instanceof Error ? err.message : String(err) });
+        await new Promise(r => setTimeout(r, NETWORK_RELEASE_RETRY_MS));
+      }
+    }
   }
 
   /** Marks the deployment as in use (scales from zero) without sending a request. */
   wake(name: string): DeploymentView {
     const rt = this.require(name);
     rt.record.lastRequestAt = this.now();
+    this.kick();
+    return this.view(name)!;
+  }
+
+  /**
+   * The caller is done with the deployment now (its traffic bypasses the gateway, so the idle clock cannot see it):
+   * forget the last use, and the next tick scales to `minReplicas` — powering off under `idleAction: 'stop'`. A
+   * request or `wake` brings it back; in-flight requests are never cut (the planner keeps busy replicas).
+   */
+  async park(name: string): Promise<DeploymentView> {
+    const rt = this.require(name);
+    rt.record.lastRequestAt = null;
+    rt.lastPersistedRequestAt = null;
+    rt.aboveSince = null;
+    await this.opts.store.saveDeployment(rt.record);
     this.kick();
     return this.view(name)!;
   }
@@ -259,6 +301,7 @@ export class DeploymentController {
     return {
       machine: chosen,
       token: rt.record.replicaToken,
+      exposed: !!rt.record.spec.exposure,
       done: (failed = false) => {
         if (released) return;
         released = true;
@@ -309,7 +352,10 @@ export class DeploymentController {
 
   private observed(m: ReplicaMachine, inflight: number): ObservedReplica {
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
-    return { machine: m, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight, ...(p.readyAt ? { readyAt: p.readyAt } : {}) };
+    // A parked replica powered back on boots again: its boot (timeout, booting phase) counts from the power-on.
+    const startedAt = this.deployments.get(m.deployment)?.starting.get(m.id);
+    const machine = startedAt !== undefined && !p.everReady ? { ...m, createdAt: Math.max(m.createdAt, startedAt) } : m;
+    return { machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight, ...(p.readyAt ? { readyAt: p.readyAt } : {}) };
   }
 
   private async reconcileOnce(): Promise<void> {
@@ -336,10 +382,13 @@ export class DeploymentController {
     const orphans = this.machines.filter(m => !this.deployments.has(m.deployment));
     for (const m of orphans) await this.release(m, 'orphan');
 
-    await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment)).map(m => this.probeOne(m)));
+    await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment) && !this.parkedNow(m)).map(m => this.probeOne(m)));
 
     for (const [name, rt] of this.deployments) {
-      const mine = this.machines.filter(m => m.deployment === name);
+      const all = this.machines.filter(m => m.deployment === name);
+      // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
+      const parked = rt.record.spec.idleAction === 'stop' ? all.filter(m => isParked(m)) : [];
+      const mine = all.filter(m => !parked.includes(m));
       const plan = planReplicas({
         spec: rt.record.spec,
         replicas: mine.map(m => this.observed(m, rt.perReplica.get(m.id) ?? 0)),
@@ -353,12 +402,25 @@ export class DeploymentController {
       rt.aboveSince = plan.aboveSince;
       for (const r of plan.release) {
         const m = mine.find(x => x.id === r.id);
-        if (m) await this.release(m, r.reason);
+        if (!m) continue;
+        if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
+        else await this.release(m, r.reason);
       }
-      const toCreate = plan.create - rt.creating;
+      if (rt.record.spec.paused) for (const m of parked) await this.release(m, 'paused');
+      let toCreate = plan.create - rt.creating;
+      for (const m of rt.record.spec.paused ? [] : parked) {
+        if (toCreate <= 0) break;
+        toCreate--;
+        if (this.now() - (rt.starting.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
+        await this.unpark(rt, m);
+      }
       for (let i = 0; i < toCreate; i++) this.createReplica(rt);
       if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
     }
+  }
+
+  private parkedNow(m: ReplicaMachine): boolean {
+    return this.deployments.get(m.deployment)?.record.spec.idleAction === 'stop' && isParked(m);
   }
 
   private async probeOne(m: ReplicaMachine): Promise<void> {
@@ -371,7 +433,7 @@ export class DeploymentController {
     } catch {
       ok = false;
     }
-    if (ok) { p.readyAt ??= Date.now(); p.everReady = true; p.readyNow = true; p.failures = 0; }
+    if (ok) { p.readyAt ??= Date.now(); p.everReady = true; p.readyNow = true; p.failures = 0; rt.starting.delete(m.id); }
     else { p.readyNow = false; if (p.everReady) p.failures++; }
     this.probes.set(m.id, p);
   }
@@ -385,6 +447,28 @@ export class DeploymentController {
     } catch (err) {
       const rt = this.deployments.get(m.deployment);
       if (rt) rt.lastError = `release ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  /** `idleAction: 'stop'`: power off, keeping disk, IP and firewall (the next demand powers it back on). */
+  private async parkReplica(m: ReplicaMachine): Promise<void> {
+    this.log('deployments: parking replica (power off)', { deployment: m.deployment, id: m.id });
+    try {
+      await this.opts.backend.stopReplica!(m);
+      this.probes.delete(m.id);
+    } catch (err) {
+      const rt = this.deployments.get(m.deployment);
+      if (rt) rt.lastError = `stop ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  private async unpark(rt: Runtime, m: ReplicaMachine): Promise<void> {
+    rt.starting.set(m.id, this.now());
+    this.log('deployments: powering parked replica on', { deployment: m.deployment, id: m.id });
+    try {
+      await this.opts.backend.startReplica!(m);
+    } catch (err) {
+      rt.lastError = `start ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -418,8 +502,9 @@ export class DeploymentController {
           throw new Error(`${spec.machineType} costs €${price}/h in ${spec.zone}, above maxEurPerHour €${spec.maxEurPerHour}`);
         }
         this.log('deployments: creating replica', { deployment: spec.name, type: spec.machineType, zone: spec.zone, price });
+        const network = spec.exposure ? await this.networkOf(rt) : undefined;
         const machine = await this.opts.backend.createReplica({
-          spec, replicaToken: rt.record.replicaToken, namespace: this.namespace,
+          spec, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
           cloudInit: replicaCloudInit(this.withRegistryAuth(spec), rt.record.replicaToken),
           ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
         });
@@ -439,6 +524,17 @@ export class DeploymentController {
         rt.creating--;
       }
     })();
+  }
+
+  /** Reserved IP + firewall of an exposed deployment, created once and kept in the record (it outlives replicas). */
+  private async networkOf(rt: Runtime): Promise<NonNullable<DeploymentRecord['network']>> {
+    if (!this.opts.backend.ensureNetwork) throw new Error(`provider ${this.opts.backend.provider} cannot expose a deployment`);
+    const network = await this.opts.backend.ensureNetwork(rt.record.spec, this.namespace, rt.record.network);
+    if (JSON.stringify(network) !== JSON.stringify(rt.record.network)) {
+      rt.record = { ...rt.record, network };
+      await this.opts.store.saveDeployment(rt.record);
+    }
+    return network;
   }
 
   // ── Views ─────────────────────────────────────────────────────────────────
@@ -492,6 +588,7 @@ export class DeploymentController {
       invokeUrl: `/v1/deployments/${name}/invoke/`,
       app: rt.record.app ?? null,
       appImage: rt.record.appImage ?? null,
+      publicIp: rt.record.network?.ip ?? null,
     };
   }
 }
