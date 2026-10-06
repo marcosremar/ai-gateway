@@ -85,6 +85,23 @@ export interface ScalewayProviderMeta {
   commercialType?: string;
   pricePerHr?: number;
   tags?: string[];
+  /** SBS volume IDs attached at create (deleted on destroy). */
+  volumeIds?: string[];
+  /** Raw Scaleway state ('running', 'stopped', 'stopped in place', 'stopping', …) — `status` is normalized and
+   *  folds 'stopping' into 'stopped', which hosts that poweroff/poweron need to tell apart. */
+  state?: string;
+  /** Server creation time (ISO), for max-lifetime and boot-deadline policies. */
+  createdAt?: string;
+  /** Reserved IP ids attached to the server (routed IPv4 kept across poweroff). */
+  publicIpIds?: string[];
+  [key: string]: unknown;
+}
+
+export interface RailwayProviderMeta {
+  provider: 'railway';
+  environmentId?: string;
+  serviceName?: string;
+  dockerImage?: string;
   [key: string]: unknown;
 }
 
@@ -98,6 +115,15 @@ export interface SnapgpuProviderMeta {
   restoredFromSnapshotId?: string;
   /** Most recent snapshot captured for this instance. */
   latestSnapshotId?: string;
+  [key: string]: unknown;
+}
+
+export interface HyperstackProviderMeta {
+  provider: 'hyperstack';
+  flavorId?: string | number;
+  flavorName?: string;
+  region?: string;
+  createdAt?: string;
   [key: string]: unknown;
 }
 
@@ -115,7 +141,9 @@ export type ProviderMeta =
   | ModalProviderMeta
   | FlyioProviderMeta
   | ScalewayProviderMeta
+  | RailwayProviderMeta
   | SnapgpuProviderMeta
+  | HyperstackProviderMeta
   | GenericProviderMeta;
 
 export interface GpuInstance {
@@ -211,6 +239,13 @@ export interface InstanceSpec {
   /** Vast.ai-only: offer search mode. 'high_quality' (default) keeps the
    *  reliability-tier filter; 'full' widens the search to all rentable offers. */
   searchMode?: 'high_quality' | 'full';
+  /**
+   * Vast.ai-only: offer quality policy.
+   * - `'default'` — existing search + relaxation (inet_down floor may be ≤500 when unset)
+   * - `'desktop'` — babylon desktop floor: reliability ≥ 0.95, inet_down > 1000 Mbps,
+   *   max ~$0.20/hr (`maxPricePerHr` or default). Does not relax below those floors.
+   */
+  offerPolicy?: 'default' | 'desktop';
   /** Vast.ai-only: opt-in to deverified/unverified hosts when no verified offer is rentable.
    *  Trade-off: lower availability blocker, but host may be reclaimed mid-boot.
    *  Default false (verified-only, safer). */
@@ -240,14 +275,35 @@ export interface InstanceSpec {
    *  Allows callers to broadcast progress updates to show the user
    *  that creation is still in progress (e.g., "Pulling image... 45s"). */
   onPollProgress?: (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => void;
-  /** Hyperstack-only: pin the VM create to a specific Custom OS Image by id
-   *  (promoted from a snapshot via `createImageFromSnapshot`). Preferred over
-   *  `imageName` since it sidesteps name-collisions in region-scoped listings.
-   *  When both are set, `imageId` wins. Other providers ignore this field. */
-  imageId?: number;
+  /** Aborts creation: providers stop polling and destroy any instance they already created. */
+  signal?: AbortSignal;
+  /** Image override. Hyperstack: numeric Custom OS Image id. Scaleway: marketplace
+   *  image UUID string. Preferred over `imageName` where both apply. */
+  imageId?: string | number;
   /** Hyperstack-only: pin the VM create to a specific image by name. Useful
    *  for ad-hoc testing; most deploys should use `imageId` instead. */
   imageName?: string;
+  /** Scaleway commercial type override (e.g. 'L4-1-24G', 'DEV1-XL'). */
+  commercialType?: string;
+  /** Raw cloud-init / boot script (bash). When set, used instead of docker bot user-data. */
+  cloudInit?: string;
+  /** Scaleway SBS root volume size in GB. When set (or commercialType is GPU), attach sbs_volume. */
+  volumeGb?: number;
+  /** Extra tags for the instance (merged with defaults). */
+  tags?: string[];
+  /** Scaleway project ID override (else resolve from API key). */
+  projectId?: string;
+  /** Scaleway: like `cloudInit`, but rendered after the server exists, for boot scripts that embed the server's own
+   *  id (its default hostname is `<id>.pub.instances.scw.cloud`) or IP. Wins over `cloudInit`. */
+  cloudInitFor?: (server: { serverId: string; ip: string | null }) => string;
+  /** Scaleway: extra user_data keys written before power-on (the cloud-init key has a size limit, so large
+   *  payloads such as reference audio go in their own keys and the boot script fetches them from the metadata API). */
+  userDataFiles?: Record<string, string | Uint8Array>;
+  /** Scaleway: attach these reserved IPs (see `reserveRoutedIp`) instead of a dynamic one — the address survives
+   *  poweroff and delete, so DNS pointing at it stays valid. */
+  publicIpIds?: string[];
+  /** Scaleway: security group (firewall) to attach, see `createSecurityGroup`. */
+  securityGroupId?: string;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────

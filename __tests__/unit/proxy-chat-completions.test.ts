@@ -148,16 +148,17 @@ describe('handleChatCompletions', () => {
       undefined,
       { onRequestEnd },
     );
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
     expect(onRequestEnd).toHaveBeenCalledWith(
       expect.objectContaining({ success: false }),
     );
   });
 
-  it('returns 500 when provider throws', async () => {
+  it('returns 503 provider_unavailable when the only provider throws', async () => {
     mockProvider.chat.mockRejectedValueOnce(new Error('upstream fail'));
     const res = await handleChatCompletions(makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }] }), providers);
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
+    expect((res.body as { error: { type: string } }).error.type).toBe('provider_unavailable');
   });
 
   it('response has chat.completion structure', async () => {

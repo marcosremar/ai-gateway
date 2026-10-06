@@ -23,17 +23,22 @@ COPY src/ src/
 COPY server/ server/
 COPY sdk/ sdk/
 COPY serve.ts tsconfig.json tsup.config.ts ./
+COPY scripts/reap-orphans.ts scripts/
 
 # Build the library bundle AND compile serve.ts
 RUN bun run build
 RUN bun build --compile --minify --target=bun --outfile serve-compiled serve.ts
+# Orphan guard, run by a separate Railway cron service from this same image (docs/deployments.md § Orphan guard)
+RUN bun build --compile --minify --target=bun --outfile reap-compiled scripts/reap-orphans.ts
 
 # ── Stage 3: Production ─────────────────────────────────────────────────────
 FROM oven/bun:1-alpine AS production
 WORKDIR /app
 
 # Install wget for healthcheck (curl not available in alpine)
+# apk upgrade: libssl3/libcrypto3 fixes newer than the base image (Trivy HIGH, 2026-10-04)
 RUN apk add --no-cache wget ca-certificates && \
+    apk upgrade --no-cache libssl3 libcrypto3 && \
     rm -rf /var/cache/apk/*
 
 # Copy production dependencies from stage 1
@@ -41,6 +46,7 @@ COPY --from=deps /app/node_modules ./node_modules
 
 # Copy compiled binary and dist from builder
 COPY --from=builder /app/serve-compiled ./serve-compiled
+COPY --from=builder /app/reap-compiled ./reap-compiled
 COPY --from=builder /app/dist ./dist
 
 # Non-root user for security

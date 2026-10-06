@@ -1,21 +1,34 @@
 /**
  * Lightweight production entry point — starts the AI Gateway proxy server.
  *
- * Wires Groq providers directly to avoid the server/state.ts → Prisma dependency.
+ * Wires providers directly to avoid the server/state.ts → Prisma dependency. Every provider is optional: only the
+ * ones with a key are mounted (see src/config/serve-providers.ts); deployments (/v1/deployments) need SCW_SECRET_KEY.
  *
  * Usage:
  *   bun run serve.ts
- *
- * Requires GROQ_API_KEY in env.
  */
 
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
-import { openrouterLLM } from './src/gateway/providers/cloud/openrouter';
+import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/providers/cloud/openrouter';
+import { openaiSTT } from './src/gateway/providers/cloud/openai';
+import { fireworksSTT } from './src/gateway/providers/cloud/fireworks';
+import { deepgramSTT } from './src/gateway/providers/cloud/deepgram';
 import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/zai';
+import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } from './src/deployments/inference-providers';
+import {
+  buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,
+} from './src/config/serve-providers';
+import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
+import { createS2SRoute } from './src/s2s/route';
+import { loopbackStages } from './src/s2s/loopback-stages';
+import { proxyCircuitBreakers } from './src/gateway/proxy/provider-routing';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
-import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
+import type { PrefixRoute } from './src/proxy/types';
+import { deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
+import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
+import { loadSandboxEnv, principalSandboxToken } from './src/config/sandbox-env';
 
 const log = createLogger('serve');
 
@@ -33,30 +46,29 @@ try {
   log.log({}, 'Workload handlers not available (server/ not bundled) — skipping');
 }
 
+// SANDBOX_TOKEN is the only secret the gateway needs in its environment: the rest (SCW_SECRET_KEY, SCW_PROJECT_ID,
+// OPENROUTER_API_KEY, … — whatever the palco catalog holds) comes from the dev API, whose values win over Railway
+// variables (see sandbox-env.ts). The same token is accepted as an admin Bearer.
+const sandboxEnv = await loadSandboxEnv(process.env);
+if (sandboxEnv.source) log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
+else if (sandboxEnv.errors.length) log.warn({ errors: sandboxEnv.errors }, 'Dev API unreachable — using the environment only');
+const SANDBOX_TOKEN = principalSandboxToken(process.env);
+const SANDBOX_USER = 'sandbox';
+
 const PORT = parseInt(process.env.PORT || '4000');
-const API_KEYS = process.env.GATEWAY_API_KEYS
+const configuredKeys = process.env.GATEWAY_API_KEYS
   ? process.env.GATEWAY_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
-  : undefined;
+  : [];
+if (SANDBOX_TOKEN && /[,:]/.test(SANDBOX_TOKEN)) log.warn({}, 'SANDBOX_TOKEN contains , or : — not accepted as an API key');
+const API_KEYS = [
+  ...configuredKeys,
+  ...(SANDBOX_TOKEN && !/[,:]/.test(SANDBOX_TOKEN) ? [`${SANDBOX_TOKEN}:${SANDBOX_USER}`] : []),
+];
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
-if (!process.env.GROQ_API_KEY) {
-  console.error('[serve] GROQ_API_KEY is required');
-  process.exit(1);
-}
-
-function acceptsOpenRouterPassthroughModel(model: string): boolean {
-  return /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i.test(model);
-}
-
-function openRouterUpstreamModel(model: string): string {
-  return model.startsWith('openrouter/') ? model.slice('openrouter/'.length) : model;
-}
-
 async function listOpenRouterModels(): Promise<string[]> {
-  const headers: Record<string, string> = {};
-  if (process.env.OPENROUTER_API_KEY) headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY}`;
   const response = await fetch('https://openrouter.ai/api/v1/models', {
-    headers,
+    headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
     signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) throw new Error(`OpenRouter models failed: ${response.status}`);
@@ -66,72 +78,122 @@ async function listOpenRouterModels(): Promise<string[]> {
     .filter((id): id is string => typeof id === 'string' && id.length > 0);
 }
 
-// Wire providers directly — no Prisma dependency
-const providers: ProviderMapping = {
-  stt: {
-    'whisper-large-v3': groqSTT,
-    'whisper-large-v3-turbo': groqSTT,
-  },
-  chat: {
-    'llama-3.3-70b-versatile': groqLLM,
-    'llama-3.1-8b-instant': groqLLM,
-    'meta-llama/llama-4-scout-17b-16e-instruct': groqLLM,
-    'openai/gpt-oss-120b': groqLLM,
-    'openai/gpt-oss-20b': groqLLM,
-    'qwen/qwen3-32b': groqLLM,
-    'groq/compound': groqLLM,
-    // Z.AI — GLM-4.6 / GLM-4.5V (vision) / GLM-4.5 / GLM-4.5-Air. Registered
-    // dynamically from ZAI_LLM_MODELS so the model catalog is the single
-    // source of truth (capability flags + pricing live there).
-    ...Object.fromEntries(ZAI_LLM_MODELS.map(m => [m.id, zaiLLM])),
-  },
-  chatFallbackChain: [
-    { providerId: 'groq', model: 'llama-3.3-70b-versatile', provider: groqLLM },
-  ],
-  ...(process.env.OPENROUTER_API_KEY ? {
-    chatDynamicRoutes: [{
-      providerId: 'openrouter',
-      provider: openrouterLLM,
-      acceptsModel: acceptsOpenRouterPassthroughModel,
-      upstreamModel: openRouterUpstreamModel,
-    }],
-    dynamicModelCatalogs: [{
-      providerId: 'openrouter',
-      listModels: listOpenRouterModels,
-    }],
-  } : {}),
-  tts: {
-    'canopylabs/orpheus-v1-english': groqTTS,
-    'canopylabs/orpheus-arabic-saudi': groqTTS,
-    // Groq PlayAI TTS — multilingual (PT-BR supported), needed for Sofia/Marcos
-    // dialogue in the Copacabana Unity scene.
-    'playai-tts': groqTTS,
-    'playai-tts-arabic': groqTTS,
-  },
-  // Routing image provider: dit360 → local GPU 360°, fal-ai/* → fal.ai cloud
-  image: routingImage,
-};
-
 log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
-log.log({
-  groqConfigured: Boolean(process.env.GROQ_API_KEY),
-  openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
-  openrouterRouting: process.env.OPENROUTER_API_KEY ? 'dynamic-passthrough' : 'disabled',
-  zaiConfigured: Boolean(process.env.ZAI_API_KEY),
-  zaiModels: process.env.ZAI_API_KEY ? ZAI_LLM_MODELS.map(m => m.id) : [],
-  tts: 'groq/orpheus',
-}, 'Providers configured');
 
 const prefixRoutes: PrefixRoute[] = [];
 if (routeWorkloadRequest) {
   prefixRoutes.push({ prefix: '/v1/workloads', handler: routeWorkloadRequest });
 }
 
+// Deployments: Docker image → autoscaled replicas on Scaleway (enabled when SCW_SECRET_KEY is set).
+const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
+const deployments = deploymentsFromEnv(process.env, {
+  alwaysAdmin: [SANDBOX_USER],
+  userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
+  log: (msg, data) => log.log(data ?? {}, msg),
+  // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
+  onRoutesChange: () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>),
+});
+if (deployments) {
+  await deployments.controller.init();
+  await deployments.apps.init();
+  deployments.controller.start();
+  prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
+  prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
+  prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
+  // Read by createProxyServer: a cold-start wait must outlive the default 60 s idle cut.
+  process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
+  log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
+} else {
+  log.log({}, 'Deployments disabled (no SCW_SECRET_KEY)');
+}
+
+// Providers: only the configured ones are mounted. Each app sends its own aliases (PUT /v1/apps/:app/routes: a
+// self-hosted deployment first, OpenRouter as the fallback); MODEL_ROUTES on top. See src/config/serve-providers.ts.
+const modelRoutes = parseModelRoutes(process.env.MODEL_ROUTES);
+if (modelRoutes.errors.length) log.warn({ errors: modelRoutes.errors }, 'MODEL_ROUTES has invalid parts — skipped');
+const controller = deployments?.controller ?? null;
+let openrouterKey = await checkOpenRouterKey(process.env);
+
+function mountProviders() {
+  const { providers: routed, summary } = buildServeProviders({
+    instances: {
+      chat: { groq: groqLLM, openrouter: openrouterLLM, zai: zaiLLM },
+      stt: { groq: groqSTT, openrouter: openrouterSTT, openai: openaiSTT, fireworks: fireworksSTT, deepgram: deepgramSTT },
+      tts: { groq: groqTTS, openrouter: openrouterTTS },
+    },
+    env: process.env,
+    openrouter: openrouterKey,
+    modelRoutes: modelRoutes.routes,
+    appRoutes: deployments?.apps.allRoutes() ?? {},
+    zaiModels: ZAI_LLM_MODELS.map(m => m.id),
+    listOpenRouterModels,
+    deploymentProvider: controller ? (stage, name) => (
+      stage === 'chat' ? new DeploymentLLMProvider(controller, name)
+        : stage === 'stt' ? new DeploymentSTTProvider(controller, name)
+          : new DeploymentTTSProvider(controller, name)
+    ) : undefined,
+  });
+  log.log(summary, 'Providers configured');
+  // Image routing: dit360 → local GPU 360°, fal-ai/* → fal.ai cloud
+  return { ...routed, image: routingImage };
+}
+const providers = mountProviders();
+
+// Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys
+// writes them to the palco. A key that appears or disappears re-mounts the providers in place.
+const keyManager = new KeyManager(process.env, {
+  log: (msg, data) => log.log(data ?? {}, msg),
+  onChange: async (names) => {
+    if (names.includes('OPENROUTER_API_KEY')) openrouterKey = await checkOpenRouterKey(process.env);
+    for (const id of providersOfKeys(names)) proxyCircuitBreakers.get(id).reset();
+    replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>);
+  },
+});
+keyManager.adopt(sandboxEnv.received);
+if (SANDBOX_TOKEN) keyManager.start();
+
+// GET /health?deep=1 — same admins as deployments (SANDBOX_TOKEN user + DEPLOYMENTS_ADMIN_USERS; with no admin
+// list, any gateway API key).
+const adminUsers = (process.env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
+const isAdminToken = (token: string) => {
+  const userId = keyRegistry.resolve(token)?.userId;
+  if (!userId) return false;
+  return adminUsers.length === 0 || [...adminUsers, SANDBOX_USER].includes(userId);
+};
+const deepHealth = {
+  authorize: isAdminToken,
+  report: () => deepHealthReport({ env: process.env, breakers: proxyCircuitBreakers, providers, deployments: controller }),
+};
+
+// POST /v1/s2s — speech-to-speech in one streamed request: the speech-stack deployment first, the composed pipeline
+// over the stage chains (loopback into this gateway, with the caller's own key) as fallback. See src/s2s/route.ts.
+const optionalMs = (v: string | undefined) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+const s2sRoute = createS2SRoute({
+  controller,
+  deployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
+  hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
+  budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
+  primarySpeaksJson: process.env.S2S_PRIMARY_SPEAK_FIELD === '1',
+  stagesFor: (req, config) => loopbackStages({
+    baseUrl: `http://127.0.0.1:${PORT}`,
+    authorization: String(req.headers.authorization ?? ''),
+    models: {
+      stt: config.models?.stt || process.env.S2S_STT_MODEL?.trim() || undefined,
+      chat: config.models?.chat || process.env.S2S_CHAT_MODEL?.trim() || undefined,
+      tts: config.models?.tts || process.env.S2S_TTS_MODEL?.trim() || undefined,
+    },
+  }),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
   apiKeys: API_KEYS,
   providers,
+  deepHealth,
+  customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
@@ -162,6 +224,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    deployments?.controller.stop();
+    keyManager.stop();
     console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
 
     // Stop accepting new connections

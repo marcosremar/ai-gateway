@@ -87,7 +87,7 @@ describe('RunpodClient', () => {
       expect(result).toEqual({
         instanceId: 'pod-1',
         endpoint: 'http://1.2.3.4:18000',
-        status: 'RUNNING',
+        status: 'running',
       });
     });
 
@@ -107,7 +107,7 @@ describe('RunpodClient', () => {
       expect(result).toEqual({
         instanceId: 'pod-2',
         endpoint: 'http://5.6.7.8:28000',
-        status: 'RUNNING',
+        status: 'running',
       });
     });
 
@@ -119,7 +119,7 @@ describe('RunpodClient', () => {
       expect(result).toEqual({
         instanceId: 'pod-3',
         endpoint: 'https://pod-3-8000.proxy.runpod.net',
-        status: 'RUNNING',
+        status: 'running',
       });
     });
 
@@ -221,7 +221,7 @@ describe('RunpodClient', () => {
 
       expect(onPersist).toHaveBeenCalledWith('user-1', 'runpodPod', expect.objectContaining({
         podId: 'pod-persist',
-        status: 'CREATING',
+        status: 'booting',
       }));
     });
 
@@ -357,10 +357,10 @@ describe('RunpodClient', () => {
         instanceId: 'pod-a',
         instanceName: 'my-pod',
         endpoint: 'https://pod-a-8000.proxy.runpod.net',
-        status: 'RUNNING',
+        status: 'running',
         gpuType: 'RTX 4090',
       });
-      expect(result[1].status).toBe('STOPPED');
+      expect(result[1].status).toBe('stopped');
     });
 
     it('returns empty array on HTTP error', async () => {
@@ -379,7 +379,7 @@ describe('RunpodClient', () => {
   describe('getInstanceStatus', () => {
     it('returns desiredStatus', async () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({ desiredStatus: 'RUNNING' }));
-      expect(await client.getInstanceStatus('pod-1', creds)).toBe('RUNNING');
+      expect(await client.getInstanceStatus('pod-1', creds)).toBe('running');
     });
 
     it('returns null on 404', async () => {

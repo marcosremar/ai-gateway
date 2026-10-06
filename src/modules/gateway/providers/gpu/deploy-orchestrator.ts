@@ -8,6 +8,7 @@
 import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import path from 'path';
 import type { GpuProviderClient, ProviderCredentials } from './types';
+import { normalizeInstanceStatus } from './instance-status';
 
 // ── Provider Name & Tier ────────────────────────────────────────────────────
 
@@ -261,7 +262,9 @@ export async function cleanupProviderInstances(
     const statusSet = new Set(activeStatuses.map(s => s.toLowerCase()));
     const prefixes = namePrefixes && namePrefixes.length > 0 ? namePrefixes : null;
     const active = instances.filter(i => {
-      const statusMatch = statusSet.has(i.status?.toLowerCase() ?? '');
+      // Accept raw or canonical statuses (e.g. Modal "deployed" → "running").
+      const raw = i.status?.toLowerCase() ?? '';
+      const statusMatch = statusSet.has(raw) || statusSet.has(normalizeInstanceStatus(i.status));
       if (!statusMatch) return false;
       if (!prefixes) return true;
       const name = i.instanceName || '';
@@ -302,6 +305,26 @@ export function filterTiers(
     return { error: `Provider '${forceProvider}' not available. Available: ${tiers.map(t => t.name).join(', ')}` };
   }
   return { tiers: [forced] };
+}
+
+/**
+ * Drop the Modal tier when the deploy is for a Docker image (not a `.py` serve
+ * script). The race loop silently substitutes Docker images with
+ * `docker/modal/babelcast.py` and "wins" against the existing babelcast Modal
+ * serve endpoint in a few seconds, hijacking the user's intended deploy.
+ *
+ * Modal is kept when:
+ *   - `forceProvider === 'modal'` (user explicitly asked for it), OR
+ *   - `dockerImage` ends with `.py` (legitimate Modal deploy script).
+ */
+export function dropModalForDockerImage(
+  tiers: GpuTier[],
+  dockerImage: string,
+  forceProvider?: ProviderName,
+): GpuTier[] {
+  if (forceProvider === 'modal') return tiers;
+  if (dockerImage.endsWith('.py')) return tiers;
+  return tiers.filter(t => t.name !== 'modal');
 }
 
 // ── Default Storage per Provider ────────────────────────────────────────────

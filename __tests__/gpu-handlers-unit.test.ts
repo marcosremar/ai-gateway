@@ -172,6 +172,14 @@ describe('handleGpuDeploy — validation', () => {
     expect(fnBody).toContain('activeApp');
   });
 
+  it('region "near" implies requireDirectPort unless the body opts out (real-time latency)', () => {
+    const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
+    const fnEnd = handlersSource.indexOf('\n}\n', fnStart);
+    const fnBody = handlersSource.slice(fnStart, fnEnd);
+    expect(fnBody).toMatch(/typeof body\.requireDirectPort === 'boolean'[\s\S]*near/);
+    expect(handlersSource).toContain('requireDirectPort: true');
+  });
+
   it('#090 _validateDeployRequest caps raceCount at 10', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
     const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
@@ -543,6 +551,13 @@ describe('handleGpuTerminate', () => {
     const fnEnd = handlersSource.indexOf('\n// ──', fnStart + 100);
     const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
     expect(fnBody).toContain('stopGpuMonitoring');
+  });
+
+  it('cancels an in-progress deploy instead of refusing with 409 (instances bill while it boots)', () => {
+    const fnStart = handlersSource.indexOf('export async function handleGpuTerminate');
+    const fnBody = handlersSource.slice(fnStart, fnStart + 2500);
+    expect(fnBody).toMatch(/inProgress[\s\S]*setDeployCancelled\(true\)[\s\S]*deployPromise/);
+    expect(fnBody).toContain("'creating'");
   });
 
   it('#136 releases deploy lock', () => {

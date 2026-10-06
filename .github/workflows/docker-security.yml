@@ -37,15 +37,18 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Build Docker image (${{ matrix.dockerfile }})
-        run: docker build -t ai-gateway-${{ matrix.dockerfile }}:scan -f ${{ matrix.dockerfile }} .
+        # Image names must be lowercase; the matrix value is a file name (Dockerfile.production), so tag by job index.
+        run: docker build -t ai-gateway-scan-${{ strategy.job-index }}:scan -f ${{ matrix.dockerfile }} .
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
-          image-ref: 'ai-gateway-${{ matrix.dockerfile }}:scan'
+          image-ref: 'ai-gateway-scan-${{ strategy.job-index }}:scan'
           format: 'sarif'
           output: 'trivy-results-${{ matrix.dockerfile }}.sarif'
           severity: 'CRITICAL,HIGH'
+          # Without this, SARIF output scans (and fails on) every severity and ignores `severity` above.
+          limit-severities-for-sarif: true
           exit-code: '1'
 
       - name: Upload Trivy scan results to GitHub Security tab
@@ -89,6 +92,8 @@ jobs:
           format: 'sarif'
           output: 'trivy-results-${{ matrix.subproject }}.sarif'
           severity: 'CRITICAL,HIGH'
+          # Without this, SARIF output scans (and fails on) every severity and ignores `severity` above.
+          limit-severities-for-sarif: true
           exit-code: '1'
 
       - name: Upload Trivy scan results to GitHub Security tab

@@ -105,7 +105,19 @@ export let gpuHealthy = false;
 
 // ── Setters for mutable state ───────────────────────────────────────────────
 
-export function setDeployCancelled(v: boolean) { deployCancelled = v; }
+// Aborted whenever the in-flight deploy is cancelled. Provider createInstance()
+// calls receive it so a cancel stops polling and destroys the instance right
+// away instead of after a multi-minute boot/tunnel wait (billing meanwhile).
+let deployAbort = new AbortController();
+export function getDeployAbortSignal(): AbortSignal { return deployAbort.signal; }
+export function setDeployCancelled(v: boolean) {
+  deployCancelled = v;
+  if (v) {
+    if (!deployAbort.signal.aborted) deployAbort.abort(new DOMException('Deploy cancelled', 'AbortError'));
+  } else if (deployAbort.signal.aborted) {
+    deployAbort = new AbortController();
+  }
+}
 export function setDeployLock(v: boolean) { deployLock = v; }
 export function setDeployPromise(v: Promise<void> | null) { deployPromise = v; }
 export function setDeployApiKey(v: string) { deployApiKey = v; }

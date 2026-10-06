@@ -25,6 +25,7 @@
 import type { GpuInstance } from '../providers/gpu/types';
 import { logGpuEvent } from './file-lifecycle-logger';
 import { defaultLogger as log } from '../../logger';
+import { isBillableInstanceStatus } from '../providers/gpu/instance-status';
 
 export interface SweepInstance extends GpuInstance {
   provider: string;
@@ -98,8 +99,10 @@ const PROVIDER_CONFIGS: ProviderSweepConfig[] = [
   },
 ];
 
+// Canonical billable statuses + legacy raw aliases for un-normalized paths.
 const RUNNING_STATUSES = new Set([
-  'running', 'active', 'loading', 'creating', 'booting',
+  'running', 'booting',
+  'active', 'loading', 'creating',
   'RUNNING', 'ACTIVE', 'CREATING',
   'deployed', 'ephemeral', 'initializing',
 ]);
@@ -150,7 +153,9 @@ export async function sweepAllProviders(
 
       for (const inst of instances) {
         const status = (inst.status || 'unknown').toLowerCase();
-        const isRunning = RUNNING_STATUSES.has(status) || RUNNING_STATUSES.has(inst.status || '');
+        const isRunning = isBillableInstanceStatus(inst.status)
+          || RUNNING_STATUSES.has(status)
+          || RUNNING_STATUSES.has(inst.status || '');
         const isTracked = trackedIds.has(inst.instanceId);
         let costPerHr: number | undefined;
 

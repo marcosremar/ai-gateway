@@ -7,10 +7,14 @@ import {
   botState, setBotStateVar, botDeployLock, setBotDeployLock, setBotApiKey,
   botApiKey, botPodApiKey, setBotPodApiKey, deployApiKey,
 } from '../../state';
-import { runpod, scaleway, flyio } from '../../providers';
+import { runpod, scaleway, flyio, railway } from '../../providers';
 import { readJsonBody, handleBodyError } from '../../http-utils';
 import { validateInput } from '../../../src/input-validator';
 import { BotDeployRequestSchema } from '../../../src/contracts';
+import {
+  isBotCleanupCandidate,
+  detectBotProviderFromEndpoint,
+} from '../../../src/compute/bot-provider-chain';
 import {
   log, BOT_POD_PREFIX, BOT_DOCKER_IMAGE, BOT_PORTS, BOT_LOCAL_CONTAINER,
   setBotState,
@@ -19,9 +23,7 @@ import {
 export async function cleanupBotPods(apiKey: string): Promise<void> {
   try {
     const instances = await runpod.listInstances({ apiKey });
-    const toTerminate = instances.filter(inst =>
-      (inst.instanceName || '').startsWith(BOT_POD_PREFIX) && inst.status !== 'EXITED'
-    );
+    const toTerminate = instances.filter(isBotCleanupCandidate);
     if (toTerminate.length > 0) {
       log.log(`[bot] Cleaning up ${toTerminate.length} RunPod bot pod(s)...`);
       await Promise.allSettled(
@@ -42,7 +44,7 @@ export async function cleanupBotPods(apiKey: string): Promise<void> {
   if (scwKey) {
     try {
       const scwInstances = await scaleway.listInstances({ apiKey: scwKey });
-      const scwToTerminate = scwInstances.filter(inst => inst.status === 'running');
+      const scwToTerminate = scwInstances.filter(isBotCleanupCandidate);
       if (scwToTerminate.length > 0) {
         log.log(`[bot] Cleaning up ${scwToTerminate.length} Scaleway bot instance(s)...`);
         await Promise.allSettled(
@@ -64,7 +66,7 @@ export async function cleanupBotPods(apiKey: string): Promise<void> {
   if (flyKey) {
     try {
       const flyInstances = await flyio.listInstances({ apiKey: flyKey });
-      const flyToTerminate = flyInstances.filter(inst => inst.status === 'running');
+      const flyToTerminate = flyInstances.filter(isBotCleanupCandidate);
       if (flyToTerminate.length > 0) {
         log.log(`[bot] Cleaning up ${flyToTerminate.length} Fly.io bot machine(s)...`);
         await Promise.allSettled(
@@ -80,6 +82,32 @@ export async function cleanupBotPods(apiKey: string): Promise<void> {
       }
     } catch (err) {
       log.warn(`[bot] Failed to list Fly.io machines for cleanup: ${err}`);
+    }
+  }
+  // Railway — only prefix-owned services (never untagged project VMs)
+  if (process.env.RAILWAY_PROJECT_ID) {
+    try {
+      const rwInstances = await railway.listInstances({
+        apiKey: process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '',
+      });
+      const rwToTerminate = rwInstances.filter(isBotCleanupCandidate);
+      if (rwToTerminate.length > 0) {
+        log.log(`[bot] Cleaning up ${rwToTerminate.length} Railway bot service(s)...`);
+        await Promise.allSettled(
+          rwToTerminate.map(async (inst) => {
+            try {
+              await railway.deleteInstance(inst.instanceId, {
+                apiKey: process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '',
+              });
+              log.log(`[bot] Terminated Railway bot ${inst.instanceId}`);
+            } catch (err) {
+              log.warn(`[bot] Failed to terminate Railway bot ${inst.instanceId}: ${err}`);
+            }
+          })
+        );
+      }
+    } catch (err) {
+      log.warn(`[bot] Failed to list Railway services for cleanup: ${err}`);
     }
   }
 }
@@ -282,11 +310,12 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
   }
 
   const flyKey = process.env.FLY_API_TOKEN || '';
+  const railwayProjectId = process.env.RAILWAY_PROJECT_ID || '';
   const apiKey = deployData.apiKey || deployApiKey || process.env.RUNPOD_API_KEY || '';
-  if (!flyKey && !apiKey) {
+  if (!flyKey && !apiKey && !railwayProjectId) {
     setBotDeployLock(false);
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'No deploy credentials — set FLY_API_TOKEN or RUNPOD_API_KEY in .env' }));
+    res.end(JSON.stringify({ error: 'No deploy credentials — set FLY_API_TOKEN, RAILWAY_PROJECT_ID, or RUNPOD_API_KEY in .env' }));
     return;
   }
   if (apiKey) setBotApiKey(apiKey);
@@ -302,6 +331,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
   };
 
   if (apiKey) await cleanupBotPods(apiKey);
+  else if (flyKey || railwayProjectId) await cleanupBotPods('');
 
   const podName = `${BOT_POD_PREFIX}${Date.now()}`;
   setBotState({
@@ -314,6 +344,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
       let isCpuPod = forceCpu;
       let isScalewayPod = false;
       let isFlyioPod = false;
+      let isRailwayPod = false;
       let instance: Awaited<ReturnType<typeof runpod.createInstance>> | null = null;
 
       if (preferFlyio) {
@@ -329,13 +360,31 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
           log.warn(`[bot] Fly.io failed: ${flyErr instanceof Error ? flyErr.message : flyErr}`);
           isFlyioPod = false;
           instance = null;
-          if (!apiKey) throw flyErr;
-          log.log('[bot] Falling back to RunPod...');
-          setBotState({ message: 'Fly.io failed, trying RunPod...' });
+          log.log('[bot] Falling back after Fly.io...');
+          setBotState({ message: 'Fly.io failed, trying next provider...' });
         }
       }
 
-      if (!instance && !forceCpu) {
+      // Railway after Fly (selectBotProviderChain order)
+      if (!instance && railwayProjectId) {
+        try {
+          log.log('[bot] Deploying on Railway...');
+          isRailwayPod = true;
+          isCpuPod = true;
+          instance = await railway.createInstance(
+            { dockerImage: botDockerImage, env: podEnv },
+            { apiKey: process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '' },
+          );
+          if (instance?.endpoint) setBotState({ endpoint: instance.endpoint });
+        } catch (rwErr) {
+          log.warn(`[bot] Railway failed: ${rwErr instanceof Error ? rwErr.message : rwErr}`);
+          isRailwayPod = false;
+          instance = null;
+          if (!apiKey && !process.env.SCALEWAY_SECRET_KEY) throw rwErr;
+        }
+      }
+
+      if (!instance && !forceCpu && apiKey) {
         try {
           instance = await runpod.createInstance(
             {
@@ -355,7 +404,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
           isCpuPod = true;
         }
       }
-      if (!instance) {
+      if (!instance && apiKey) {
         isCpuPod = true;
         try {
           instance = await runpod.createInstance(
@@ -389,7 +438,15 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
             } catch (scwErr) {
               log.warn(`[bot] Scaleway failed: ${scwErr instanceof Error ? scwErr.message : scwErr}`);
               isScalewayPod = false;
-              if (flyKeyInner) {
+              if (railwayProjectId && !isRailwayPod) {
+                log.log('[bot] Trying Railway fallback...');
+                setBotState({ message: 'Scaleway unavailable, deploying on Railway...' });
+                isRailwayPod = true;
+                instance = await railway.createInstance(
+                  { dockerImage: botDockerImage, env: podEnv },
+                  { apiKey: process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '' },
+                );
+              } else if (flyKeyInner) {
                 log.log('[bot] Trying Fly.io fallback...');
                 setBotState({ message: 'Scaleway unavailable, deploying on Fly.io...' });
                 isFlyioPod = true;
@@ -401,6 +458,14 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
                 throw scwErr;
               }
             }
+          } else if (railwayProjectId && !isRailwayPod) {
+            log.log('[bot] Trying Railway fallback...');
+            setBotState({ message: 'RunPod unavailable, deploying on Railway...' });
+            isRailwayPod = true;
+            instance = await railway.createInstance(
+              { dockerImage: botDockerImage, env: podEnv },
+              { apiKey: process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '' },
+            );
           } else if (flyKeyInner) {
             log.log('[bot] Trying Fly.io fallback...');
             setBotState({ message: 'RunPod unavailable, deploying on Fly.io...' });
@@ -415,9 +480,12 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
         }
       }
 
+      if (!instance) throw new Error('All bot deploy providers failed');
+
       setBotState({
         status: 'booting', podId: instance.instanceId,
-        endpoint: '', sshHost: instance.sshHost || '', sshPort: instance.sshPort || 0,
+        endpoint: instance.endpoint || botState.endpoint || '',
+        sshHost: instance.sshHost || '', sshPort: instance.sshPort || 0,
         message: `Bot pod created (${instance.instanceId.slice(0, 8)}), waiting for startup...`,
       });
 
@@ -429,6 +497,10 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
           try {
             if (isFlyioPod) {
               await flyio.deleteInstance(instance.instanceId, { apiKey: flyKey });
+            } else if (isRailwayPod) {
+              await railway.deleteInstance(instance.instanceId, {
+                apiKey: process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '',
+              });
             } else if (isScalewayPod) {
               await scaleway.deleteInstance(instance.instanceId, { apiKey: process.env.SCALEWAY_SECRET_KEY || '' });
             } else {
@@ -443,6 +515,9 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
           if (isFlyioPod) {
             endpoint = instance.endpoint || `https://${process.env.BOT_FLY_APP_NAME || 'babelcast-bot'}.fly.dev`;
             setBotState({ endpoint });
+          } else if (isRailwayPod) {
+            endpoint = instance.endpoint || '';
+            if (endpoint) setBotState({ endpoint });
           } else if (isScalewayPod) {
             if (botState.endpoint) {
               endpoint = botState.endpoint;
@@ -478,8 +553,8 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
               let sshHost = '';
               let sshPort = 0;
 
-              if (isFlyioPod || isCpuPod) {
-                log.log(`[bot] ${isFlyioPod ? 'Fly.io' : 'CPU'} pod ready (HTTPS only — no RTMP/SSH)`);
+              if (isFlyioPod || isRailwayPod || isCpuPod) {
+                log.log(`[bot] ${isFlyioPod ? 'Fly.io' : isRailwayPod ? 'Railway' : 'CPU'} pod ready (HTTPS only — no RTMP/SSH)`);
               } else {
                 try {
                   const podDetail = await runpod.getInstanceDetail(instance.instanceId, { apiKey });
@@ -534,6 +609,8 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
 export async function handleBotTerminate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const apiKey = botApiKey || deployApiKey || process.env.RUNPOD_API_KEY || '';
   const podId = botState.podId;
+  const endpoint = botState.endpoint || '';
+  const provider = detectBotProviderFromEndpoint(endpoint);
 
   const { clearBotIdleTimer } = await import('./bot-meeting');
   clearBotIdleTimer();
@@ -555,26 +632,41 @@ export async function handleBotTerminate(req: IncomingMessage, res: ServerRespon
     log.log(`[bot] Stopped local Docker container`);
   } else if (podId) {
     const flyKey = process.env.FLY_API_TOKEN || '';
-    if (flyKey && (botState.endpoint?.includes('.fly.dev') || botState.endpoint?.includes('66.'))) {
-      try {
+    const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
+    const rwKey = process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '';
+    // Capture-before-clear already done via `endpoint` / `provider`
+    const resolved =
+      provider ||
+      (flyKey && (endpoint.includes('.fly.dev') || endpoint.includes('66.')) ? 'flyio' as const : null) ||
+      (process.env.RAILWAY_PROJECT_ID && endpoint.includes('railway') ? 'railway' as const : null);
+
+    try {
+      if (resolved === 'flyio' && flyKey) {
         await flyio.deleteInstance(podId, { apiKey: flyKey });
         log.log(`[bot] Terminated Fly.io bot machine ${podId}`);
-      } catch (err) {
-        log.warn(`[bot] Failed to terminate Fly.io bot ${podId}: ${err}`);
-      }
-    } else if (apiKey) {
-      try {
+      } else if (resolved === 'railway' && process.env.RAILWAY_PROJECT_ID) {
+        await railway.deleteInstance(podId, { apiKey: rwKey });
+        log.log(`[bot] Terminated Railway bot ${podId}`);
+      } else if (resolved === 'scaleway' && scwKey) {
+        await scaleway.deleteInstance(podId, { apiKey: scwKey });
+        log.log(`[bot] Terminated Scaleway bot ${podId}`);
+      } else if (apiKey) {
         await runpod.deleteInstance(podId, { apiKey });
         log.log(`[bot] Terminated RunPod bot pod ${podId}`);
-      } catch (err) {
-        log.warn(`[bot] Failed to terminate RunPod pod ${podId}: ${err}`);
+      } else if (process.env.RAILWAY_PROJECT_ID) {
+        await railway.deleteInstance(podId, { apiKey: rwKey });
+        log.log(`[bot] Terminated Railway bot ${podId}`);
+      } else if (flyKey) {
+        await flyio.deleteInstance(podId, { apiKey: flyKey });
+        log.log(`[bot] Terminated Fly.io bot machine ${podId}`);
       }
+    } catch (err) {
+      log.warn(`[bot] Failed to terminate bot ${podId}: ${err}`);
     }
   }
   if (apiKey) await cleanupBotPods(apiKey);
-  else {
-    const flyKey = process.env.FLY_API_TOKEN || '';
-    if (flyKey) await cleanupBotPods('');
+  else if (process.env.FLY_API_TOKEN || process.env.RAILWAY_PROJECT_ID) {
+    await cleanupBotPods('');
   }
 
   res.writeHead(200, { 'Content-Type': 'application/json' });

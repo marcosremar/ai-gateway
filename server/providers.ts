@@ -47,6 +47,7 @@ import { HyperstackClient } from '../src/gpu-providers/hyperstack';
 import { GpuProviderRegistry } from '../src/gpu-providers/registry';
 import { ScalewayClient } from '../src/cpu-providers/scaleway-client';
 import { FlyioClient } from '../src/cpu-providers/flyio-client';
+import { RailwayClient } from '../src/cpu-providers/railway-client';
 import {
   latencyRing, latencyRingIdx, setLatencyRingIdx, deployState, gpuHealthy, setGpuHealthy,
   isGpuAvailable, isGpuLatencyAcceptable,
@@ -525,16 +526,24 @@ export const tensordock = new TensordockClient();
 export const modal = new ModalClient({ defaultFunctionName: 'serve' });
 export const scaleway = new ScalewayClient();
 export const flyio = new FlyioClient();
+export const railway = new RailwayClient();
 /** Hyperstack (NexGen Cloud) — H100 VMs with driver 570+ out of the box. */
 export const hyperstack = new HyperstackClient();
 
-// SnapgpuClient needs a registry to look up its backend (vast/runpod). We
-// build a minimal registry here that wraps the singletons. The factory.ts path
-// uses its own registry; this constant is used by server/gpu-deploy.ts which
-// pre-dates that pattern.
-const _snapgpuRegistry = new GpuProviderRegistry();
-_snapgpuRegistry.register(runpod);
-_snapgpuRegistry.register(vast);
+/**
+ * Shared GPU provider registry — one place that documents constructed backends.
+ * Mirrors `src/factory.ts`: register backends first, then SnapgpuClient (which
+ * looks up SnapgpuBackend = 'vast' | 'runpod' only — hyperstack is not a
+ * Snapgpu backend).
+ */
+export const gpuRegistry = new GpuProviderRegistry();
+gpuRegistry.register(runpod);
+gpuRegistry.register(vast);
+gpuRegistry.register(vastVm);
+gpuRegistry.register(tensordock);
+gpuRegistry.register(modal);
+gpuRegistry.register(hyperstack);
+
 const _snapgpuS3Config: import('../src/gpu-providers/snapgpu-client').SnapgpuS3Config | undefined =
   process.env.SNAPGPU_S3_ENDPOINT
     ? {
@@ -551,10 +560,15 @@ if (_snapgpuS3Config)
 else
   log.log("S3 not configured — snapshots won't persist cross-host (add SNAPGPU_S3_ENDPOINT to .env)");
 export const snapgpu = new SnapgpuClient({
-  registry: _snapgpuRegistry,
+  registry: gpuRegistry,
   defaultBackend: (process.env.SNAPGPU_DEFAULT_BACKEND as 'vast' | 'runpod') ?? 'vast',
   s3Config: _snapgpuS3Config,
 });
+gpuRegistry.register(snapgpu);
+// CPU compute providers — registry lookup only (not GPU cascade).
+gpuRegistry.register(flyio);
+gpuRegistry.register(scaleway);
+gpuRegistry.register(railway);
 
 // ── Centralized translationDefaults mutator ─────────────────────────────────
 

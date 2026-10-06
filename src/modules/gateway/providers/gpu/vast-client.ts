@@ -22,11 +22,24 @@
 import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import { getMinInetDownMbps } from './deploy-settings';
+import { normalizeInstanceStatus } from './instance-status';
+import {
+  VAST_DESKTOP_MAX_PER_HR,
+  rankVastOffers,
+  vastDesktopSearchFilters,
+  type VastOfferRankInput,
+} from './vast/offer-policy';
 import os from 'os';
 import path from 'path';
 import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import { spawn } from 'child_process';
+import { isSshClientAvailable } from './ssh-tunnel';
 import { createLogger } from '../../../logger';
+
+/** When `spec.minInetDownMbps` is unset, floor at this Mbps (never clamp an explicit caller value).
+ *  Deploy-settings often persist 2000 which zeros consumer-GPU inventory; 500 is a sensible default. */
+const DEFAULT_CREATE_INET_DOWN_MBPS = 500;
 
 const log = createLogger('vast-client');
 
@@ -44,35 +57,6 @@ const POLL_MAX_MS = 30_000;
 // but large images (e.g. 52GB Blackwell) can take 15-25 min to pull + start.
 // We poll generously here; the boot health poller (engine.ts) handles "app ready".
 const POLL_TOTAL_MAX_MS = 1_800_000; // 30 minutes
-
-// Fast-fail: if the SSH proxy doesn't accept TCP connections within this
-// window from instance creation, mark the offer as a slow/dead host and
-// abort the slot. Override via VAST_SSH_FASTFAIL_MS (set 0 to disable).
-const SSH_FASTFAIL_MS = parseInt(
-  process.env.VAST_SSH_FASTFAIL_MS || String(60_000), 10,
-);
-
-const LOG_FASTFAIL_MS = parseInt(
-  process.env.VAST_LOG_FASTFAIL_MS || String(60_000), 10,
-);
-const CONTAINER_LOG_PROBE_MS = parseInt(
-  process.env.VAST_LOG_PROBE_MS || String(15_000), 10,
-);
-const CONTAINER_LOG_ERROR_PATTERNS = (
-  process.env.VAST_LOG_ERROR_PATTERNS ||
-  'Traceback \\(most recent call last\\)|' +
-  'Error response from daemon|' +
-  'failed to (create|inject|start)|' +
-  'OCI runtime|CDI devices|' +
-  'CUDA error|no kernel image is available|' +
-  'CUDA out of memory|RuntimeError|' +
-  'pull access denied|repository does not exist|' +
-  'toomanyrequests|pull rate limit|' +
-  'manifest unknown|manifest not found|' +
-  'OOMKilled|out of memory|' +
-  'permission denied|' +
-  'killed (by signal|: signal)'
-).split('|');
 
 // ── Host reliability tracking ────────────────────────────────────────────────
 // Hosts that reclaim instances during loading are blacklisted for a cooldown period.
@@ -126,6 +110,25 @@ function isPrivateIp(ip: string): boolean {
   if (ip.startsWith('fc') || ip.startsWith('fd')) return true;       // ULA (unique local)
   return false;
 }
+
+/** AbortError raised when a caller cancels createInstance via spec.signal. */
+function deployCancelledError(): DOMException {
+  return new DOMException('Deploy cancelled', 'AbortError');
+}
+
+/** setTimeout that rejects early when `signal` aborts. */
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((r) => setTimeout(r, ms));
+  if (signal.aborted) return Promise.reject(deployCancelledError());
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(t); reject(deployCancelledError()); };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Server-side fetch size for listOffers when a client-side geo filter applies. */
+const VAST_GEO_FETCH_LIMIT = 1000;
 
 /** Max IPs to track in _recentlyUsedIps before pruning (prevents memory leak). */
 const MAX_RECENTLY_USED_IPS = 200;
@@ -255,12 +258,8 @@ export class VastClient extends AbstractGpuProvider {
   private _hostFailuresPath = HOST_BLACKLIST_PATH;
   /** Debounce timer for persisting host blacklist. */
   private _hostFailuresSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Pending auto-snapshot timers — cleared on dispose. */
-  private _autoSnapshotTimers: Set<ReturnType<typeof setTimeout>> = new Set();
-  private _disposed = false;
 
   dispose(): void {
-    this._disposed = true;
     if (this._reputationSaveTimer) {
       clearTimeout(this._reputationSaveTimer);
       this._reputationSaveTimer = null;
@@ -269,8 +268,6 @@ export class VastClient extends AbstractGpuProvider {
       clearTimeout(this._hostFailuresSaveTimer);
       this._hostFailuresSaveTimer = null;
     }
-    for (const t of this._autoSnapshotTimers) clearTimeout(t);
-    this._autoSnapshotTimers.clear();
   }
 
   constructor(opts?: VastClientOptions) {
@@ -526,8 +523,8 @@ export class VastClient extends AbstractGpuProvider {
   ): Promise<GpuInstance | null> {
     const instances = await this.listInstances(credentials);
     // Prefer instances that are fully running with a reachable endpoint.
-    // Fall back to any non-terminal running instance (may still be booting).
-    const USABLE_STATUSES = new Set(['running', 'active', 'loading']);
+    // Fall back to any running/booting instance (may still be coming up).
+    const USABLE_STATUSES = new Set(['running', 'booting']);
     const withEndpoint = instances.find(
       (i) => USABLE_STATUSES.has(i.status?.toLowerCase() ?? '') && !!i.endpoint,
     );
@@ -1080,27 +1077,8 @@ export class VastClient extends AbstractGpuProvider {
     if (!spec.dockerImage) {
       throw new Error('[vast] spec.dockerImage is required — no default image');
     }
-    // Image mirror translation — see canonical comment in src/gateway/.
-    const imageName = (() => {
-      const raw = spec.dockerImage;
-      if (process.env.VAST_PREFER_GHCR === '0') return raw;
-      const m = raw.match(/^marcosremar\/([^/].*)$/);
-      if (!m) return raw;
-      const mirrored = `ghcr.io/marcosremar/${m[1]}`;
-      this.log.log(`[vast] Image mirror: ${raw} → ${mirrored} (VAST_PREFER_GHCR)`);
-      return mirrored;
-    })();
-
-    if (process.env.VAST_SKIP_IMAGE_PRECHECK !== '1') {
-      const exists = await this._imageExistsInRegistry(imageName);
-      if (exists === false) {
-        throw new Error(
-          `[vast] Image ${imageName} not found in registry — refusing to create instance. ` +
-          `Verify the tag was pushed (CI green?) or pass VAST_SKIP_IMAGE_PRECHECK=1 to bypass.`,
-        );
-      }
-    }
-    const { getMinDiskGb, getMinInetDownMbps } = await import('./deploy-settings');
+    const imageName = spec.dockerImage;
+    const { getMinDiskGb } = await import('./deploy-settings');
     let diskGb = spec.storageGb ?? 0;
     if (diskGb <= 0) {
       diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 20);
@@ -1115,7 +1093,10 @@ export class VastClient extends AbstractGpuProvider {
     const isHighQualitySearch = spec.searchMode === 'full' ? false : spec.strictFastBoot !== false;
     const searchBody: Record<string, unknown> = {
       limit: 50,
-      type: 'on-demand',
+      // Spot/interruptible offers are searched with type:'bid' (≈50-70% cheaper
+      // than on-demand). On-demand otherwise. Without this, --prefer-spot was a
+      // no-op on Vast and every job paid on-demand price.
+      type: spec.interruptible ? 'bid' : 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
       // gpu_frac=1.0 → only the WHOLE physical GPU. This also excludes a
@@ -1128,9 +1109,8 @@ export class VastClient extends AbstractGpuProvider {
       cpu_ram: { gte: 16384 },
       // Verified hosts only in strict mode — most quality hosts are
       // unverified but carry high reliability2, so don't hard-require it
-      // outside strict (it alone zeroed A6000 offers). spec.allowUnverified
-      // still drops the filter entirely.
-      ...(spec.allowUnverified ? {} : (isHighQualitySearch ? { verified: { eq: true } } : {})),
+      // outside strict (it alone zeroed A6000 offers).
+      ...(isHighQualitySearch ? { verified: { eq: true } } : {}),
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
       // P0b: Phase-1 — prefer direct-port hosts (no SSH tunnel needed, faster)
@@ -1141,14 +1121,34 @@ export class VastClient extends AbstractGpuProvider {
       // Strict-fast-boot opts into a higher reliability bar (0.97) to filter out
       // hosts that historically zombie. Default 0.95 keeps backwards compat.
       reliability2: { gte: isHighQualitySearch ? 0.97 : 0.95 },
-      // Minimum download bandwidth. spec.minInetDownMbps overrides per call;
-      // the no-spec fallback is clamped to 500 so a stale persisted 2000
-      // default doesn't zero out otherwise-fine offers.
-      inet_down: { gte: spec.minInetDownMbps ?? Math.min(getMinInetDownMbps(), 500) },
+      // Minimum download bandwidth. Explicit spec.minInetDownMbps is never clamped.
+      // When unset, use min(deploy-settings, DEFAULT_CREATE_INET_DOWN_MBPS=500) so a
+      // stale persisted 2000 does not wipe consumer-GPU inventory.
+      inet_down: {
+        gte:
+          spec.minInetDownMbps != null
+            ? spec.minInetDownMbps
+            : Math.min(getMinInetDownMbps(), DEFAULT_CREATE_INET_DOWN_MBPS),
+      },
       inet_up: { gte: 100 },            // Minimum 100 Mb/s upload
       ...(spec.directPortRequired ? { direct_port_count: { gte: spec.directPortRequired } } : {}),
       order: [['dph_total', 'asc']],
     };
+
+    const isDesktopPolicy = spec.offerPolicy === 'desktop';
+    if (isDesktopPolicy) {
+      const desktopCap = spec.maxPricePerHr ?? VAST_DESKTOP_MAX_PER_HR;
+      Object.assign(
+        searchBody,
+        vastDesktopSearchFilters({
+          maxPerHr: desktopCap,
+          ...(spec.minInetDownMbps != null ? { minInetDownMbps: spec.minInetDownMbps } : {}),
+        }),
+      );
+      this.log.log(
+        `[vast] Desktop offer policy: reliability≥0.95 inet_down>1000 dph≤$${desktopCap}/hr`,
+      );
+    }
 
     // Filter by GPU type if specified
     const gpuTypes = spec.gpuTypes?.filter(t => t && t.length > 0 && t.length <= 50);
@@ -1209,17 +1209,21 @@ export class VastClient extends AbstractGpuProvider {
     // (test mock or partial response). Filtering these out caused 100+ unit
     // tests to fail when the bandwidth filter was added.
     {
-      const minDown = (searchBody.inet_down as { gte?: number } | undefined)?.gte;
+      const inetFilter = searchBody.inet_down as { gte?: number; gt?: number } | undefined;
+      const minDownGte = inetFilter?.gte;
+      const minDownGt = inetFilter?.gt;
       const minUp = (searchBody.inet_up as { gte?: number } | undefined)?.gte;
-      if (typeof minDown === 'number' || typeof minUp === 'number') {
+      if (typeof minDownGte === 'number' || typeof minDownGt === 'number' || typeof minUp === 'number') {
         const before = offers.length;
         offers = offers.filter(o => {
-          if (typeof minDown === 'number' && o.inet_down != null && Number(o.inet_down) < minDown) return false;
+          if (typeof minDownGte === 'number' && o.inet_down != null && Number(o.inet_down) < minDownGte) return false;
+          if (typeof minDownGt === 'number' && o.inet_down != null && Number(o.inet_down) <= minDownGt) return false;
           if (typeof minUp === 'number' && o.inet_up != null && Number(o.inet_up) < minUp) return false;
           return true;
         });
         if (offers.length !== before) {
-          this.log.log(`[vast] Bandwidth client-filter: ${before} → ${offers.length} offers (down>=${minDown ?? '-'}, up>=${minUp ?? '-'})`);
+          const downLabel = typeof minDownGt === 'number' ? `>${minDownGt}` : `>=${minDownGte ?? '-'}`;
+          this.log.log(`[vast] Bandwidth client-filter: ${before} → ${offers.length} offers (down${downLabel}, up>=${minUp ?? '-'})`);
         }
       }
     }
@@ -1234,8 +1238,42 @@ export class VastClient extends AbstractGpuProvider {
       this.log.log(`[vast] Geo filter (create): ${before} → ${offers.length} offers matching [${createGeoFilter.join(',')}]`);
     }
 
-    // Fallback: relax network requirements to find more hosts
-    if (!offers.length) {
+    // Desktop policy: client-side rank (strict >1000 Mbps, ≥0.95, price cap). Prefer not
+    // relaxing quality floors — desktop callers need bandwidth/reliability.
+    if (isDesktopPolicy && offers.length) {
+      const desktopCap = spec.maxPricePerHr ?? VAST_DESKTOP_MAX_PER_HR;
+      const before = offers.length;
+      const rankInputs: VastOfferRankInput[] = offers.map((o) => ({
+        id: Number(o.id),
+        dph_total: Number(o.dph_total),
+        reliability2: Number(o.reliability2),
+        inet_down: Number(o.inet_down),
+        num_gpus: Number(o.num_gpus ?? 1),
+        gpu_name: String(o.gpu_name ?? ''),
+        rentable: o.rentable !== false,
+        rented: o.rented === true,
+        verified: o.verified as boolean | undefined,
+      }));
+      const ranked = rankVastOffers(rankInputs, desktopCap);
+      const order = new Map(ranked.map((r, i) => [r.id, i]));
+      offers = offers
+        .filter((o) => order.has(Number(o.id)))
+        .sort((a, b) => (order.get(Number(a.id)) ?? 0) - (order.get(Number(b.id)) ?? 0));
+      if (offers.length !== before) {
+        this.log.log(`[vast] Desktop rankVastOffers: ${before} → ${offers.length} (cap $${desktopCap}/hr)`);
+      }
+    }
+
+    // Fallback: relax network requirements to find more hosts.
+    // Skip quality soft-relax when the caller locked floors (desktop policy, or
+    // explicit minInetDownMbps / maxPricePerHr from a facade). Softening to
+    // reliability 0.9 + 500 Mbps would violate those policies.
+    const floorsLocked =
+      isDesktopPolicy ||
+      spec.minInetDownMbps != null ||
+      spec.maxPricePerHr != null;
+
+    if (!offers.length && !floorsLocked) {
       const slowPullEstSec = Math.round((diskGb * 8 * 1024) / 500);
       this.log.warn(
         `[vast] No offers with strict filters — relaxing to inet_down: 500, reliability: 0.9. ` +
@@ -1256,19 +1294,56 @@ export class VastClient extends AbstractGpuProvider {
       } catch (retryErr) {
         this.log.error(`[vast] Relaxed search also failed: ${this.errMsg(retryErr)}`);
       }
+    } else if (!offers.length && floorsLocked) {
+      // Soft step only: drop verified — never relax inet/reliability floors.
+      this.log.warn(
+        isDesktopPolicy
+          ? '[vast] Desktop policy: no offers — soft step: drop verified=true only (keeping inet_down>1000, reliability≥0.95)'
+          : `[vast] No offers — soft step: drop verified only (caller floors locked: minInetDown=${spec.minInetDownMbps ?? 'default'} maxPrice=${spec.maxPricePerHr ?? 'none'}; not relaxing to 0.9/500)`,
+      );
+      delete searchBody.verified;
+      try {
+        offers = await this._searchOffers(searchBody, headers);
+        if (createGeoFilter && offers.length) {
+          offers = offers.filter(o => {
+            const geo = String(o.geolocation || '');
+            return createGeoFilter!.some(cc => geoMatchesCountryCode(geo, cc));
+          });
+        }
+        if (offers.length && isDesktopPolicy) {
+          const desktopCap = spec.maxPricePerHr ?? VAST_DESKTOP_MAX_PER_HR;
+          const rankInputs: VastOfferRankInput[] = offers.map((o) => ({
+            id: Number(o.id),
+            dph_total: Number(o.dph_total),
+            reliability2: Number(o.reliability2),
+            inet_down: Number(o.inet_down),
+            num_gpus: Number(o.num_gpus ?? 1),
+            gpu_name: String(o.gpu_name ?? ''),
+            rentable: o.rentable !== false,
+            rented: o.rented === true,
+          }));
+          const ranked = rankVastOffers(rankInputs, desktopCap);
+          const order = new Map(ranked.map((r, i) => [r.id, i]));
+          offers = offers
+            .filter((o) => order.has(Number(o.id)))
+            .sort((a, b) => (order.get(Number(a.id)) ?? 0) - (order.get(Number(b.id)) ?? 0));
+        }
+      } catch (retryErr) {
+        this.log.error(`[vast] Soft-step search failed: ${this.errMsg(retryErr)}`);
+      }
     }
 
-    // P0b: Phase-2 fallback — SSH-only hosts (no direct ports). Critical for
-    // RTX 5090 Blackwell hosts which often have direct_port_end: -1.
-    // Only run if Phase-1 yielded NOTHING — we don't want to consume API
-    // bandwidth on this when we already have offers.
-    // strictFastBoot suppresses Phase-2 entirely: SSH-only hosts go through
-    // ssh*.vast.ai proxies which are the source of the "zombie" status
-    // (status=running but SSH refused). When the caller asks for fast-boot
-    // we'd rather fail loudly here than ship a slow/zombie pod.
-    // directPortRequired also suppresses Phase-2: caller explicitly requires
-    // direct ports — adding SSH-only hosts defeats the purpose and causes
-    // tunnel hangs (direct_port=-1 forever while container loads).
+      // P0b: Phase-2 fallback — SSH-only hosts (no direct ports). Critical for
+      // RTX 5090 Blackwell hosts which often have direct_port_end: -1.
+      // Only run if Phase-1 yielded NOTHING — we don't want to consume API
+      // bandwidth on this when we already have offers.
+      // strictFastBoot suppresses Phase-2 entirely: SSH-only hosts go through
+      // ssh*.vast.ai proxies which are the source of the "zombie" status
+      // (status=running but SSH refused). When the caller asks for fast-boot
+      // we'd rather fail loudly here than ship a slow/zombie pod.
+      // directPortRequired also suppresses Phase-2: caller explicitly requires
+      // direct ports — adding SSH-only hosts defeats the purpose and causes
+      // tunnel hangs (direct_port=-1 forever while container loads).
     if (offers.length === 0 && !spec.strictFastBoot && !spec.directPortRequired) {
       this.log.log('[vast] Phase-2: searching SSH-only hosts (no direct_port filter)');
       const sshOnlyBody = { ...searchBody };
@@ -1345,12 +1420,12 @@ export class VastClient extends AbstractGpuProvider {
     // others are torn down to avoid runaway costs.
     const offerFailures: Array<{ offerId: string; gpu: string; reason: string }> = [];
     const failuresMutex = { push: (f: typeof offerFailures[number]) => offerFailures.push(f) };
-    // Internal offer-hedge count. Honour spec.raceCount when the caller pins it —
-    // raceCount:1 ⇒ exactly ONE instance created (no duplicate billing).
-    // VAST_OFFER_RACE (preferred) / VAST_DEFAULT_RACE_COUNT (legacy) override default.
-    const _envRace = parseInt(process.env.VAST_OFFER_RACE ?? process.env.VAST_DEFAULT_RACE_COUNT ?? '', 10);
-    const _defaultRace = Number.isFinite(_envRace) && _envRace > 0 ? _envRace : 2;
-    const raceCount = Math.max(1, Math.min(5, spec.raceCount ?? _defaultRace));
+    // Internal offer-hedge count. Default 2 (Vast hosts reclaim/zombie often), but
+    // honour spec.raceCount when the caller pins it — raceCount:1 ⇒ exactly ONE
+    // instance created (no duplicate billing). VAST_OFFER_RACE overrides the default.
+    const envOfferRace = parseInt(process.env.VAST_OFFER_RACE ?? '', 10);
+    const defaultOfferRace = Number.isFinite(envOfferRace) && envOfferRace > 0 ? envOfferRace : 2;
+    const raceCount = Math.max(1, Math.min(5, spec.raceCount ?? defaultOfferRace));
     const offerPool = offers.slice(0, 10);
     const losers: Array<{ instanceId: string; contractId: string }> = [];
 
@@ -1370,12 +1445,10 @@ export class VastClient extends AbstractGpuProvider {
       losers,
     });
 
-    // Tear down losing parallel attempts (fire-and-forget but logged).
-    // Dedupe against entries already cleaned by _raceOffers async branch.
-    const toClean = losers.filter(l => !(l as { _cleaned?: boolean })._cleaned);
-    if (toClean.length > 0) {
-      this.log.log(`[vast] Tearing down ${toClean.length} losing parallel attempts`);
-      for (const loser of toClean) {
+    // Tear down losing parallel attempts (fire-and-forget but logged)
+    if (losers.length > 0) {
+      this.log.log(`[vast] Tearing down ${losers.length} losing parallel attempts`);
+      for (const loser of losers) {
         this.deleteInstance(loser.instanceId, { apiKey })
           .then(() => this.log.log(`[vast] Cleaned up loser ${loser.contractId}`))
           .catch((e) => this.log.warn(`[vast] Failed to clean up loser ${loser.contractId}: ${this.errMsg(e)}`));
@@ -1385,17 +1458,16 @@ export class VastClient extends AbstractGpuProvider {
     if (winner) {
       // P1a: Auto-snapshot in background (no await — non-blocking)
       if ((spec as any).autoSnapshot !== false && !(spec as any)._sshOnlyHint) {
-        const timer = setTimeout(() => {
-          this._autoSnapshotTimers.delete(timer);
-          if (this._disposed) return;
+        setTimeout(() => {
           this.takeSnapshot(winner.instanceId, { apiKey })
             .then((ref) => ref && this.log.log(`[vast] Auto-snapshot scheduled for ${winner.instanceId}: ${ref}`))
             .catch((e) => this.log.debug(`[vast] Auto-snapshot failed for ${winner.instanceId}: ${this.errMsg(e)}`));
         }, 60_000); // wait 1min so container is fully booted
-        this._autoSnapshotTimers.add(timer);
       }
       return winner;
     }
+
+    if (spec.signal?.aborted) throw deployCancelledError();
 
     const failSummary = offerFailures.map(f => `${f.gpu}(${f.offerId}): ${f.reason}`).join(' | ');
     this.log.error(`[vast] All ${offerPool.length} offers exhausted. Failures: ${failSummary}`);
@@ -1443,15 +1515,23 @@ export class VastClient extends AbstractGpuProvider {
     const created = new Map<string, { instanceId: string; contractId: string }>();
 
     const deleteLoser = (rec: { instanceId: string; contractId: string }) => {
-      losers.push({ ...rec, _cleaned: true } as { instanceId: string; contractId: string });
+      losers.push(rec);
       this.deleteInstance(rec.instanceId, { apiKey })
         .then(() => this.log.log(`[vast] Eagerly deleted loser ${rec.contractId}`))
         .catch((e) => this.log.warn(`[vast] Failed to delete loser ${rec.contractId}: ${this.errMsg(e)}`));
     };
 
+    const aborted = () => spec.signal?.aborted === true;
+    const abortWake: Promise<null> | null = spec.signal
+      ? new Promise((resolve) => {
+          if (spec.signal!.aborted) resolve(null);
+          else spec.signal!.addEventListener('abort', () => resolve(null), { once: true });
+        })
+      : null;
+
     const onCreated = (rec: { instanceId: string; contractId: string }) => {
-      // Late create after a winner already exists — kill it on sight.
-      if (winner && rec.instanceId !== winnerInstanceId) {
+      // Late create after a winner already exists (or after a cancel) — kill it on sight.
+      if ((winner && rec.instanceId !== winnerInstanceId) || aborted()) {
         deleteLoser(rec);
         return;
       }
@@ -1459,7 +1539,7 @@ export class VastClient extends AbstractGpuProvider {
     };
 
     const launch = (): boolean => {
-      if (nextOfferIdx >= offers.length) return false;
+      if (aborted() || nextOfferIdx >= offers.length) return false;
       const idx = nextOfferIdx++;
       const offer = offers[idx];
       const offerId = String(offer.id);
@@ -1476,7 +1556,16 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     while (inflight.size > 0 && !winner) {
-      const settled = await Promise.race(inflight.values());
+      const settled = await (abortWake ? Promise.race([...inflight.values(), abortWake]) : Promise.race(inflight.values()));
+      if (!settled || aborted()) {
+        // Cancelled — destroy everything created so far; in-flight attempts
+        // notice the signal and clean up whatever they create later.
+        this.log.log(`[vast] Deploy cancelled — destroying ${created.size} instance(s) created by this race`);
+        for (const rec of created.values()) deleteLoser(rec);
+        created.clear();
+        inflight.clear();
+        break;
+      }
       inflight.delete(settled.idx);
       if (settled.result) {
         // Winner! Eagerly tear down every loser instance that already exists.
@@ -1534,12 +1623,25 @@ export class VastClient extends AbstractGpuProvider {
     // ssh_direct: Vast.ai provides SSH access + runs onstart script.
     // Works on ALL hosts (including those without direct ports like RTX 5090).
     const onstart = spec.onstart || '/app/start.sh';
+    // Spot bid: on Vast, setting `price` on create makes the instance
+    // interruptible (bid). Bid ~1.4× the offer's market floor to lower the
+    // preemption rate while staying well under on-demand; cap at maxPricePerHr.
+    let bidPrice = 0;
+    if (spec.interruptible) {
+      bidPrice = Math.max(pricePerHr * 1.4, pricePerHr + 0.01);
+      if (spec.maxPricePerHr && spec.maxPricePerHr > 0) {
+        bidPrice = Math.min(bidPrice, spec.maxPricePerHr);
+      }
+      bidPrice = Math.round(bidPrice * 1000) / 1000;
+      this.log.log(`[vast] interruptible bid $${bidPrice}/hr on offer ${offerId} (floor $${pricePerHr}/hr, ${gpuName})`);
+    }
     const createBody: Record<string, unknown> = {
       client_id: 'me',
       image: imageName,
       label: instanceName,
       disk: diskGb + 15,
       runtype: this._runtype,
+      ...(spec.interruptible && bidPrice > 0 ? { price: bidPrice } : {}),
       onstart: `nohup bash -c ${JSON.stringify(onstart)} > /var/log/app.log 2>&1 &`,
       env: {
         TZ: 'UTC',
@@ -1558,7 +1660,11 @@ export class VastClient extends AbstractGpuProvider {
         : {}),
     };
 
+    // Set once the contract exists: any exception after that point must destroy
+    // it, otherwise it keeps billing when no other attempt wins the race.
+    let createdInstanceId: string | null = null;
     try {
+      if (spec.signal?.aborted) throw deployCancelledError();
       const createRes = await this._vastFetch(`${VAST_API_BASE}/asks/${offerId}/`, {
         method: 'PUT',
         headers,
@@ -1587,6 +1693,7 @@ export class VastClient extends AbstractGpuProvider {
 
       const contractId = String(createData.new_contract);
       const instanceId = `inst-${contractId}`;
+      createdInstanceId = instanceId;
       // Register the live contract immediately so a parallel winner can tear
       // this down right away — before the (potentially multi-minute) endpoint
       // poll / SSH-tunnel wait below. Prevents dual-billing on SSH-only hosts.
@@ -1605,7 +1712,8 @@ export class VastClient extends AbstractGpuProvider {
         Math.min(Math.round(pullEstimateS * safetyMultiplier * 1000), 1_800_000), // cap 30 min (matches POLL_TOTAL_MAX_MS)
         isLargeImage ? 600_000 : 180_000, // floor: 10 min for large images, 3 min otherwise
       );
-      let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown, spec.onPollProgress);
+      let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown, spec.onPollProgress, spec.signal);
+      if (spec.signal?.aborted) throw deployCancelledError();
 
       // forceSshTunnel: skip the direct endpoint even if it looks reachable.
       // Use this on residential hosts where the direct port is unreliable but
@@ -1647,6 +1755,26 @@ export class VastClient extends AbstractGpuProvider {
       }
 
       // SSH-only hosts: use SSH tunnel
+      if (!endpoint && spec.directPortRequired) {
+        // Latency-sensitive caller: an SSH-proxied pod adds a hop through
+        // sshN.vast.ai — drop this host and let the race try the next offer.
+        const reason = 'direct port required but endpoint not reachable — not falling back to SSH tunnel';
+        this.log.warn(`[vast] Instance ${contractId}: ${reason}. Destroying...`);
+        await this._safeCleanupInstance(instanceId, apiKey, reason);
+        failures.push({ offerId, gpu: gpuName, reason });
+        return null;
+      }
+
+      if (!endpoint && ip && sshHost && sshPort && !(await isSshClientAvailable())) {
+        // Without an ssh binary the tunnel can never open — don't wait for key
+        // propagation + 20 retries (~10 min of billing) to find that out.
+        const reason = 'ssh client not installed on the gateway host — SSH-only instance unusable';
+        this.log.warn(`[vast] Instance ${contractId}: ${reason}. Destroying...`);
+        await this._safeCleanupInstance(instanceId, apiKey, reason);
+        failures.push({ offerId, gpu: gpuName, reason });
+        return null;
+      }
+
       if (!endpoint && ip && sshHost && sshPort) {
         this.log.log(`[vast] Instance ${contractId} is SSH-only (no direct ports). Setting up SSH tunnel to ${sshHost}:${sshPort}...`);
         // P2-1 (docs/improvement-plan.md): capture the full SSH tunnel error
@@ -1662,8 +1790,10 @@ export class VastClient extends AbstractGpuProvider {
           // Vast.ai propagates user SSH keys to the container at boot, but there's
           // a ~10-15s delay between status=running and the keys being available.
           // Sleeping here avoids the first-attempt "Permission denied" failure.
-          this.log.log(`[vast] Instance ${contractId} waiting 10s for SSH key propagation...`);
-          await new Promise(r => setTimeout(r, 10_000));
+          // VMs take longer for SSH key propagation (~30s) than containers (~10s).
+          const keyPropMs = this._runtype === 'vm' ? 30_000 : 10_000;
+          this.log.log(`[vast] Instance ${contractId} waiting ${keyPropMs / 1000}s for SSH key propagation...`);
+          await sleepAbortable(keyPropMs, spec.signal);
           const ok = await tunnel.open(15_000);
           if (ok) {
             this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);
@@ -1735,7 +1865,7 @@ export class VastClient extends AbstractGpuProvider {
         endpoint,
         ipAddress: ip,
         gpuType: gpuName,
-        status: 'creating',
+        status: normalizeInstanceStatus('creating'),
         pricePerHr,
       });
 
@@ -1744,7 +1874,7 @@ export class VastClient extends AbstractGpuProvider {
         instanceId,
         instanceName,
         endpoint,
-        status: 'creating',
+        status: normalizeInstanceStatus('creating'),
         gpuType: gpuName,
         ipAddress: ip,
         sshHost,
@@ -1771,6 +1901,7 @@ export class VastClient extends AbstractGpuProvider {
       };
     } catch (e) {
       this.log.warn(`[vast] Create on offer ${offerId} error: ${this.errMsg(e)}`);
+      if (createdInstanceId) await this._safeCleanupInstance(createdInstanceId, apiKey, `create aborted: ${this.errMsg(e)}`);
       failures.push({ offerId, gpu: gpuName, reason: this.errMsg(e) });
       return null;
     }
@@ -2261,7 +2392,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         }
         const data = (await res.json()) as Record<string, unknown>;
         const workers = (data.current_workers ?? data.cold_workers ?? 0) as number;
-        return workers > 0 ? 'running' : 'idle';
+        return normalizeInstanceStatus(workers > 0 ? 'running' : 'idle');
       } catch (err) {
         this.log.warn(`[vast] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
         return null;
@@ -2271,7 +2402,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     // On-demand instance — try GET /instances/{id}/ first, fallback to list
     try {
       const detail = await this._fetchInstanceDetail(rawId, headers);
-      return detail?.status ?? null;
+      return detail?.status != null ? normalizeInstanceStatus(detail.status) : null;
     } catch (err) {
       this.log.warn(`[vast] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
       return null;
@@ -2382,7 +2513,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
             if (!id) continue;
             // Serverless endpoints that have workers are "running"
             const workers = (ep.current_workers ?? ep.cold_workers ?? 0) as number;
-            const status = workers > 0 ? 'running' : 'idle';
+            const status = normalizeInstanceStatus(workers > 0 ? 'running' : 'idle');
             results.push({
               instanceId: `endpt-${id}`,
               instanceName: ep.endpoint_name as string | undefined,
@@ -2408,9 +2539,14 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     const { apiKey } = credentials;
     const headers = this.jsonHeaders(apiKey);
     const limit = options.limit ?? 100;
+    // The geo filter below runs client-side, so a small server-side limit would
+    // return the N cheapest offers worldwide and then drop most of them
+    // (limit=10 near Lyon → 1 offer). Over-fetch when a region is set and
+    // truncate after filtering.
+    const fetchLimit = options.region ? Math.max(limit, VAST_GEO_FETCH_LIMIT) : limit;
 
     const searchBody: Record<string, unknown> = {
-      limit,
+      limit: fetchLimit,
       type: 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
@@ -2481,9 +2617,15 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         diskGb: (offer.disk_space || undefined) as number | undefined,
         numGpus: (offer.num_gpus || undefined) as number | undefined,
         totalFlops: (offer.total_flops || undefined) as number | undefined,
+        // Host IP + first direct port let the latency scheduler TCP-probe the
+        // machine before renting it (gpu-latency.ts skips offers without an IP).
+        hostIp: offer.public_ipaddr && !isPrivateIp(String(offer.public_ipaddr)) ? String(offer.public_ipaddr) : undefined,
+        hostDirectPort: Number(offer.direct_port_start) > 0 ? Number(offer.direct_port_start) : undefined,
       }));
 
-      return result.sort((a, b) => a.pricePerHr - b.pricePerHr || (a.gpuType ?? '').localeCompare(b.gpuType ?? ''));
+      return result
+        .sort((a, b) => a.pricePerHr - b.pricePerHr || (a.gpuType ?? '').localeCompare(b.gpuType ?? ''))
+        .slice(0, limit);
     } catch (err) {
       this.log.warn(`[vast] listOffers failed: ${this.errMsg(err)}`);
       return [];
@@ -2502,17 +2644,13 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     maxWaitMs: number = POLL_TOTAL_MAX_MS,
     inetDownMbps?: number,
     onPollProgress?: (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => void,
+    signal?: AbortSignal,
   ): Promise<{ endpoint: string; ip: string; sshHost?: string; sshPort?: number }> {
     let endpoint = '';
     let ip = '';
     let sshHost: string | undefined;
     let sshPort: number | undefined;
-    // Real wall-clock anchor — fast-fail thresholds were drifting because the
-    // synthetic `elapsed` accumulator only counted scheduled sleeps, ignoring
-    // time spent inside slow API calls. Use Date.now() so guards behave as
-    // documented.
-    const startedAt = Date.now();
-    const elapsedMs = (): number => Date.now() - startedAt;
+    let elapsed = 0;
     let attempt = 0;
 
     // Terminal statuses that mean the instance will never recover
@@ -2529,88 +2667,15 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     // Initial delay: Vast.ai API takes 3-5s to propagate. Fast hosts: 2s; slow: 5s.
     if (attempt === 0) {
       const initialDelay = isFastHost ? 2_000 : 5_000;
-      await new Promise((r) => setTimeout(r, initialDelay));
+      await sleepAbortable(initialDelay, signal);
+      elapsed += initialDelay;
     }
 
-    let sshProxyReachable = false;
-    let lastLogProbeAt = 0;
-    let logErrorAbort: string | null = null;
-    let elapsed = elapsedMs();
     while (elapsed < maxWaitMs) {
       const delay = Math.min(baseMs * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
-      await new Promise((r) => setTimeout(r, delay));
+      await sleepAbortable(delay, signal);
+      elapsed += delay;
       attempt++;
-      elapsed = elapsedMs();
-
-      // Fast-fail: probe SSH proxy as soon as we know its host:port. If TCP
-      // connect doesn't succeed within SSH_FASTFAIL_MS from start, abort —
-      // host is stuck and the race controller picks another offer.
-      if (
-        SSH_FASTFAIL_MS > 0 &&
-        !sshProxyReachable &&
-        sshHost &&
-        sshPort &&
-        elapsed > 5_000
-      ) {
-        const reachable = await this._probeTcp(sshHost, sshPort, 4_000);
-        if (reachable) {
-          sshProxyReachable = true;
-          this.log.log(
-            `[vast] Instance ${contractId} SSH proxy reachable at ${sshHost}:${sshPort} (${Math.round(elapsed / 1000)}s)`,
-          );
-        } else if (elapsed >= SSH_FASTFAIL_MS) {
-          this.log.warn(
-            `[vast] Instance ${contractId} SSH proxy ${sshHost}:${sshPort} unreachable after ${Math.round(elapsed / 1000)}s — fast-fail abort (override with VAST_SSH_FASTFAIL_MS=0)`,
-          );
-          if (ip) this._markHostUnstable(ip);
-          this.emitError({
-            operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
-            message: `SSH proxy unreachable for ${Math.round(elapsed / 1000)}s — slow/dead host`,
-            errorCode: 'SSH_FASTFAIL', retryable: true,
-            metadata: { sshHost, sshPort, elapsedSecs: Math.round(elapsed / 1000) },
-          });
-          break;
-        }
-      }
-
-      // Container-log fast-fail: once SSH is reachable, sample the log and
-      // abort early on CUDA / OCI / Python failures.
-      if (
-        LOG_FASTFAIL_MS > 0 &&
-        sshProxyReachable &&
-        !logErrorAbort &&
-        elapsed - lastLogProbeAt >= CONTAINER_LOG_PROBE_MS
-      ) {
-        lastLogProbeAt = elapsed;
-        const errLine = await this._probeContainerLogs(sshHost!, sshPort!, { timeoutMs: 6_000 });
-        if (errLine) {
-          logErrorAbort = errLine;
-          this.log.warn(
-            `[vast] Instance ${contractId} container error detected via SSH log probe (${Math.round(elapsed / 1000)}s): ${errLine}`,
-          );
-          const hostBanRe = /Error response from daemon|OCI runtime|CDI devices|toomanyrequests|pull rate limit|manifest unknown|manifest not found|OOMKilled|killed (by signal|: signal)/i;
-          if (ip && hostBanRe.test(errLine)) this._markHostUnstable(ip);
-          this.emitError({
-            operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
-            message: `Container log shows error after ${Math.round(elapsed / 1000)}s: ${errLine}`,
-            errorCode: 'CONTAINER_LOG_FASTFAIL', retryable: true,
-            metadata: { sshHost, sshPort, elapsedSecs: Math.round(elapsed / 1000), pattern: errLine },
-          });
-          break;
-        } else if (elapsed >= LOG_FASTFAIL_MS && !endpoint) {
-          this.log.warn(
-            `[vast] Instance ${contractId} no endpoint and no error in container logs after ${Math.round(elapsed / 1000)}s — treating as slow host, aborting`,
-          );
-          if (ip) this._markHostUnstable(ip);
-          this.emitError({
-            operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
-            message: `No endpoint after ${Math.round(elapsed / 1000)}s, container log silent — slow host`,
-            errorCode: 'CONTAINER_LOG_FASTFAIL', retryable: true,
-            metadata: { sshHost, sshPort, elapsedSecs: Math.round(elapsed / 1000) },
-          });
-          break;
-        }
-      }
 
       try {
         const detail = await this._fetchInstanceDetail(contractId, headers);
@@ -2713,134 +2778,6 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
    * we need an actual HTTP response (or even an HTTP-shaped error like
    * 404, which still proves something is listening at L7).
    */
-  /** HEAD the manifest endpoint of a docker registry to verify the image+tag
-   *  exists before creating a Vast instance. true=present, false=404,
-   *  null=can't tell (private/transient). See canonical doc in src/gateway/. */
-  private async _imageExistsInRegistry(imageName: string): Promise<boolean | null> {
-    try {
-      let registry: string;
-      let repo: string;
-      let tag = 'latest';
-      const lastColon = imageName.lastIndexOf(':');
-      const lastSlash = imageName.lastIndexOf('/');
-      let imageWithoutTag = imageName;
-      if (lastColon > lastSlash) {
-        tag = imageName.slice(lastColon + 1);
-        imageWithoutTag = imageName.slice(0, lastColon);
-      }
-      if (imageWithoutTag.startsWith('ghcr.io/')) {
-        registry = 'ghcr.io';
-        repo = imageWithoutTag.slice('ghcr.io/'.length);
-      } else if (/^[\w.-]+(:\d+)?\//.test(imageWithoutTag) && imageWithoutTag.includes('.')) {
-        return null;
-      } else {
-        registry = 'registry-1.docker.io';
-        repo = imageWithoutTag.includes('/') ? imageWithoutTag : `library/${imageWithoutTag}`;
-      }
-      let token: string | undefined;
-      if (registry === 'registry-1.docker.io') {
-        const tokenRes = await fetch(
-          `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`,
-          { signal: AbortSignal.timeout(4_000) },
-        );
-        if (!tokenRes.ok) return null;
-        token = ((await tokenRes.json()) as { token?: string }).token;
-      } else if (registry === 'ghcr.io') {
-        const tokenRes = await fetch(
-          `https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull`,
-          { signal: AbortSignal.timeout(4_000) },
-        );
-        if (tokenRes.ok) {
-          token = ((await tokenRes.json()) as { token?: string }).token;
-        }
-      }
-      const url = `https://${registry === 'ghcr.io' ? 'ghcr.io' : 'registry-1.docker.io'}/v2/${repo}/manifests/${encodeURIComponent(tag)}`;
-      const headers: Record<string, string> = {
-        Accept: [
-          'application/vnd.oci.image.index.v1+json',
-          'application/vnd.docker.distribution.manifest.list.v2+json',
-          'application/vnd.docker.distribution.manifest.v2+json',
-          'application/vnd.oci.image.manifest.v1+json',
-        ].join(', '),
-      };
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(url, { method: 'HEAD', headers, signal: AbortSignal.timeout(4_000) });
-      if (res.status === 200) return true;
-      if (res.status === 404) return false;
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Pure TCP-connect probe to host:port. Resolves true if SYN-ACK received
-   *  before timeoutMs, else false. Used to verify Vast SSH proxy is up. */
-  private async _probeTcp(host: string, port: number, timeoutMs: number = 4_000): Promise<boolean> {
-    const { createConnection } = await import('net');
-    return new Promise<boolean>((resolve) => {
-      const socket = createConnection(
-        { host, port, timeout: timeoutMs },
-        () => { socket.destroy(); resolve(true); },
-      );
-      socket.on('error', () => { socket.destroy(); resolve(false); });
-      socket.on('timeout', () => { socket.destroy(); resolve(false); });
-    });
-  }
-
-  /** SSH-tail the container log and grep for known failure patterns —
-   *  surfaces CUDA/OCI/Python errors that the network layer won't catch. */
-  private async _probeContainerLogs(
-    sshHost: string,
-    sshPort: number,
-    options: { timeoutMs?: number; maxLines?: number } = {},
-  ): Promise<string | null> {
-    const timeoutMs = options.timeoutMs ?? 6_000;
-    const maxLines = options.maxLines ?? 200;
-    const { spawn } = await import('child_process');
-
-    return new Promise<string | null>((resolve) => {
-      const cmd = `(tail -n ${maxLines} /tmp/container.log 2>/dev/null` +
-        ` || tail -n ${maxLines} /var/log/onstart.log 2>/dev/null` +
-        ` || dmesg | tail -n ${maxLines} 2>/dev/null) | head -c 65536`;
-      const proc = spawn('ssh', [
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'UserKnownHostsFile=/dev/null',
-        '-o', 'BatchMode=yes',
-        '-o', `ConnectTimeout=${Math.max(2, Math.floor(timeoutMs / 2 / 1000))}`,
-        '-o', 'LogLevel=ERROR',
-        '-p', String(sshPort),
-        `root@${sshHost}`,
-        cmd,
-      ], { stdio: ['ignore', 'pipe', 'ignore'] });
-
-      let buf = '';
-      const timer = setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch {}
-        resolve(null);
-      }, timeoutMs);
-      proc.stdout?.on('data', (chunk) => { buf += chunk.toString('utf8'); });
-      proc.on('close', () => {
-        clearTimeout(timer);
-        if (!buf) return resolve(null);
-        for (const pat of CONTAINER_LOG_ERROR_PATTERNS) {
-          try {
-            const re = new RegExp(pat, 'i');
-            const match = buf.match(re);
-            if (match) {
-              const idx = buf.indexOf(match[0]);
-              const lineStart = buf.lastIndexOf('\n', Math.max(0, idx - 1)) + 1;
-              const lineEnd = buf.indexOf('\n', idx);
-              const line = buf.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
-              return resolve(line.slice(0, 240));
-            }
-          } catch { /* invalid pattern */ }
-        }
-        resolve(null);
-      });
-      proc.on('error', () => { clearTimeout(timer); resolve(null); });
-    });
-  }
-
   private async _probeEndpoint(endpoint: string, timeoutMs: number = 8_000): Promise<boolean> {
     try {
       const url = new URL(endpoint);
@@ -2965,10 +2902,12 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     sshHost?: string; sshPort?: number;
   } {
     const ip = (inst.public_ipaddr || inst.ssh_host || '') as string;
-    const status = String(inst.actual_status ?? inst.cur_state ?? 'unknown');
+    const status = normalizeInstanceStatus(String(inst.actual_status ?? inst.cur_state ?? 'unknown'));
     const sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
     const rawSshPort = inst.ssh_port as number | undefined;
-    const sshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
+    const parsedSshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
+    // VM-mode Vast.ai instances expose SSH on port 22 directly; the API often omits ssh_port for VMs.
+    const sshPort = parsedSshPort ?? (this._runtype === 'vm' && sshHost ? 22 : undefined);
 
     if (!ip) {
       this.log.log(`[vast] _parseInstance: no IP yet (status=${status}, cur_state=${inst.cur_state}, actual_status=${inst.actual_status})`);

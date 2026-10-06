@@ -26,6 +26,7 @@
 import { AdaptiveTimeoutCalculator } from './adaptive-timeout';
 import { CreditBlockTracker, defaultCreditBlockTracker } from './credit-block';
 import { CreditExhaustedError } from './errors';
+import { entryHealthKey } from './entry-key';
 import { PerformanceRanker } from './performance-ranker';
 
 export interface FallbackEntry {
@@ -135,7 +136,7 @@ const DEFAULT_ALLOWED_FAILS = 3;
 const DEFAULT_COOLDOWN_MS = 15_000;
 
 function cooldownKey(entry: FallbackEntry): string {
-  return `${entry.provider}:${entry.model ?? '*'}`;
+  return `${entryHealthKey(entry)}:${entry.model ?? '*'}`;
 }
 
 /**
@@ -363,7 +364,7 @@ export async function withProviderFallback<T>(
   chain: FallbackEntry[],
   fn: (entry: FallbackEntry, attempt: number) => Promise<T>,
   options: FallbackOptions | string = {},
-): Promise<{ result: T; usedProvider: string; usedModel?: string; attempts: number }> {
+): Promise<{ result: T; usedProvider: string; usedModel?: string; usedEndpoint?: string; attempts: number }> {
   const opts: FallbackOptions =
     typeof options === 'string' ? { logPrefix: options } : options;
 
@@ -449,7 +450,7 @@ export async function withProviderFallback<T>(
     // timeout cost (5-15s per attempt). When it transitions to HALF_OPEN
     // (after resetTimeoutMs), one probe request is allowed through.
     if (circuitBreakers) {
-      const cb = circuitBreakers.get(entry.provider);
+      const cb = circuitBreakers.get(entryHealthKey(entry));
       if (!cb.allowRequest()) {
         log.log(
           `${logPrefix} ${entry.provider}/${entry.model ?? 'default'} ` +
@@ -483,7 +484,7 @@ export async function withProviderFallback<T>(
 
       // Resolve effective timeout outside try so catch can reference it
       const effectiveTimeout = adaptiveTimeout
-        ? adaptiveTimeout.getTimeout(entry.provider, entry.model ?? '*', timeoutMs ?? 0)
+        ? adaptiveTimeout.getTimeout(entryHealthKey(entry), entry.model ?? '*', timeoutMs ?? 0)
         : timeoutMs;
 
       try {
@@ -514,17 +515,17 @@ export async function withProviderFallback<T>(
         const elapsed = Date.now() - t0;
 
         tracker.recordSuccess(entry);
-        if (circuitBreakers) circuitBreakers.get(entry.provider).recordSuccess();
+        if (circuitBreakers) circuitBreakers.get(entryHealthKey(entry)).recordSuccess();
 
         // ── Record latency for adaptive timeout ──────────────────────────────
         if (adaptiveTimeout) {
-          adaptiveTimeout.record(entry.provider, entry.model ?? '*', elapsed);
+          adaptiveTimeout.record(entryHealthKey(entry), entry.model ?? '*', elapsed);
         }
 
         // Record successful latency sample
         if (performanceRanker && perfStage) {
           performanceRanker.record(
-            perfStage, entry.provider, entry.model ?? '*', elapsed, true,
+            perfStage, entryHealthKey(entry), entry.model ?? '*', elapsed, true,
           );
         }
 
@@ -539,6 +540,8 @@ export async function withProviderFallback<T>(
           result,
           usedProvider: entry.provider,
           usedModel: entry.model,
+          // Which replica answered, when the chain has several endpoints of one provider.
+          ...(entry.endpoint ? { usedEndpoint: entry.endpoint } : {}),
           attempts: i + 1,
         };
       } catch (err: unknown) {
@@ -551,7 +554,7 @@ export async function withProviderFallback<T>(
         // Record failed latency sample
         if (performanceRanker && perfStage) {
           performanceRanker.record(
-            perfStage, entry.provider, entry.model ?? '*', elapsed, false,
+            perfStage, entryHealthKey(entry), entry.model ?? '*', elapsed, false,
           );
         }
 
@@ -560,7 +563,7 @@ export async function withProviderFallback<T>(
         // On other failures: record actual elapsed so fast-fail providers don't inflate timeouts
         if (adaptiveTimeout) {
           const latencyForTimeout = isTimeout && effectiveTimeout ? effectiveTimeout : elapsed;
-          adaptiveTimeout.record(entry.provider, entry.model ?? '*', latencyForTimeout);
+          adaptiveTimeout.record(entryHealthKey(entry), entry.model ?? '*', latencyForTimeout);
         }
 
         // ── Non-retryable: abort everything ──────────────────────────────────
@@ -581,7 +584,7 @@ export async function withProviderFallback<T>(
             `context window exceeded (${elapsed}ms) → next`,
           );
           if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
-          if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure();
+          if (circuitBreakers) circuitBreakers.get(entryHealthKey(entry)).recordFailure();
 
           // Optionally insert a larger-context model upgrade into the chain
           if (contextWindowFallbacks && entry.model) {
@@ -605,7 +608,7 @@ export async function withProviderFallback<T>(
         const moveOnStatus = extractStatus(err);
         if (isTimeout || MOVE_ON_STATUSES.has(moveOnStatus ?? 0)) {
           if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
-          if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure();
+          if (circuitBreakers) circuitBreakers.get(entryHealthKey(entry)).recordFailure();
 
           // ── Record 402 in credit block tracker ──────────────────────────────
           if (moveOnStatus === 402) {
@@ -644,12 +647,14 @@ export async function withProviderFallback<T>(
         }
 
         // ── 5xx transient error ───────────────────────────────────────────────
-        if (!allCooledDown) { tracker.recordFailure(entry, allowedFails, cooldownMs); if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure(); }
+        if (!allCooledDown) { tracker.recordFailure(entry, allowedFails, cooldownMs); if (circuitBreakers) circuitBreakers.get(entryHealthKey(entry)).recordFailure(); }
 
         const isLastRetry = retryNum >= maxAttempts - 1;
         const hasNextProvider = iterChain.slice(i + 1).some((e) => !tracker.isCoolingDown(e));
 
-        if (!isLastRetry && is5xxError(err)) {
+        // An error flagged `skipRetry` (e.g. a deployment with no ready replica) goes straight to the next provider:
+        // retrying it a few hundred ms later cannot succeed and only delays the fallback.
+        if (!isLastRetry && is5xxError(err) && !(err as { skipRetry?: boolean }).skipRetry) {
           // Will retry this provider after backoff (handled at top of loop)
           log.warn(
             `${logPrefix} ${entry.provider}/${entry.model ?? 'default'} ` +

@@ -1,0 +1,4 @@
+# ip@2.0.1 (no fixed release): CVE-2024-29415 is isPublic()/isPrivate() misclassifying addresses (SSRF gates).
+# Only werift/werift-ice (optional WebRTC transport) use it, and only isLoopback/isV4Format/toBuffer/toString while
+# gathering ICE candidates — never as an access-control decision. Revisit when werift drops `ip`.
+CVE-2024-29415

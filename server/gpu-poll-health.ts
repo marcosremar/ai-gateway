@@ -17,7 +17,11 @@ import {
   validateDockerContractManifest,
   defaultApiPathsForCapabilities,
 } from '../src/gateway/providers/gpu/docker-manifest';
-
+import {
+  isTerminalInstanceStatus,
+  normalizeInstanceStatus,
+} from '../src/gateway/providers/gpu/instance-status';
+import type { InstanceStatus } from '../src/gateway/providers/gpu/instance-status';
 const log = createLogger('gpu-deploy');
 
 export interface PollHealthResult {
@@ -522,7 +526,7 @@ async function pollSshUntilReady(
     // Check provider says instance is still alive — bail fast if it died.
     try {
       const status = await providerClient.getInstanceStatus(podId, credentials);
-      if (status === 'exited' || status === 'deleted' || status === 'terminated') {
+      if (isTerminalInstanceStatus(status)) {
         setDeployState({ status: 'error', step: 'waiting_ssh', message: `Instance ${status} before SSH came up` });
         return { result: 'exited' };
       }
@@ -849,11 +853,13 @@ export async function pollHealthUntilReady(
         const status = await providerClient.getInstanceStatus(podId, credentials);
         if (status) {
           const statusLower = status.toLowerCase();
+          const canonical: InstanceStatus = normalizeInstanceStatus(status);
           // Progress signal: status string changed
           if (status !== lastProviderStatus) { markProgress(`${providerName} status → ${status}`); lastProviderStatus = status; }
-          const TERMINAL = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted']);
+          // Canonical dead states + legacy raw aliases (in case a client still returns raw).
+          const TERMINAL = new Set(['stopped', 'error', 'exited', 'failed', 'destroyed', 'deleted', 'terminated']);
           const DISASSOCIATED = statusLower === 'stoppeddisassociated' || statusLower === 'stopped_disassociated';
-          if (TERMINAL.has(statusLower) || DISASSOCIATED) {
+          if (isTerminalInstanceStatus(status) || TERMINAL.has(statusLower) || DISASSOCIATED) {
             consecutiveExited++;
             if (DISASSOCIATED) {
               log.warn(`[gpu] ${providerName} instance ${podId} GPU disassociated (hostnode reclaimed GPU)`);
@@ -864,29 +870,21 @@ export async function pollHealthUntilReady(
             consecutiveExited = 0;
           }
 
-          const isRunning = ['running', 'active'].includes(statusLower);
+          const isRunning = canonical === 'running';
           if (isRunning && !containerStartedAt) {
             containerStartedAt = Date.now();
             if (pullStartedAt > 0) actualPullTimeS = Math.round((containerStartedAt - pullStartedAt) / 1000);
           }
 
           if (!containerStartedAt) {
-            const isQueued = ['created', 'pending', 'queued', 'provisioning'].includes(statusLower);
-            const isPulling = ['loading', 'pulling', 'starting', 'initializing'].includes(statusLower) || (!isQueued && !isRunning);
-            if (isQueued) {
-              setDeployState({
-                status: 'queued', step: 'queued',
-                message: `GPU allocated, waiting in queue... [${elapsed}s]`,
-                stepDetail: deployState.gpuType || '',
-              });
-            } else {
-              if (!pullStartedAt) pullStartedAt = Date.now();
-              setDeployState({
-                status: 'installing', step: 'pulling_image',
-                message: `Pulling Docker image... [${elapsed}s]`,
-                stepDetail: deployState.gpuType || '',
-              });
-            }
+            // Canonical `booting` covers former queued/pulling raw names
+            // (created/pending/loading/starting/…). Show installing progress.
+            if (!pullStartedAt) pullStartedAt = Date.now();
+            setDeployState({
+              status: 'installing', step: 'pulling_image',
+              message: `Pulling Docker image... [${elapsed}s]`,
+              stepDetail: deployState.gpuType || '',
+            });
           } else {
             const appElapsed = Math.round((Date.now() - containerStartedAt) / 1000);
             setDeployState({
@@ -1593,8 +1591,9 @@ export async function pollHealthUntilReady(
         try {
           const podStatus = await providerClient.getInstanceStatus(podId, credentials);
           const statusLower = podStatus?.toLowerCase() || '';
-          const CRASHED_STATES = new Set(['exited', 'terminated', 'error', 'failed', 'destroyed', 'deleted', 'stopped']);
-          if (CRASHED_STATES.has(statusLower)) {
+          // Canonical stopped/error plus legacy raw aliases.
+          const CRASHED_STATES = new Set(['stopped', 'error', 'exited', 'terminated', 'failed', 'destroyed', 'deleted']);
+          if (isTerminalInstanceStatus(podStatus) || CRASHED_STATES.has(statusLower)) {
             const uptime = Math.round((Date.now() - containerStartedAt) / 1000);
             log.error(`[gpu] ${providerName} pod ${podId} crashed: status=${podStatus} after ${consecutiveHealthFailures} health failures (container was up ${uptime}s, endpoint=${endpoint})`);
             setDeployState({ status: 'error', message: `Pod crashed (status: ${podStatus}) after ${uptime}s — check GPU logs for details` });

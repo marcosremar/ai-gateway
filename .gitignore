@@ -3,7 +3,14 @@ dist/
 .env
 .env.local
 .env.*.local
+.env.bak
+.env.bak.*
 .vault.json
+*.pem
+*.p12
+id_rsa
+id_rsa.pub
+web/.lightning-cookies.json
 *.pyc
 __pycache__/
 .vercel

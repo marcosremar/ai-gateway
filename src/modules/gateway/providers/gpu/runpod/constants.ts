@@ -96,18 +96,50 @@ export const RUNPOD_MAX_RETRIES = 2;
 export const RUNPOD_TIMEOUT_MS = 30000;
 
 /**
+ * Country code → RunPod Secure Cloud datacenter IDs. Lets one `region` string
+ * (e.g. 'FR,CH,DE') mean the same thing for RunPod as it does for Vast.ai,
+ * which filters by the host's country code.
+ */
+export const RUNPOD_COUNTRY_DATACENTERS: Record<string, string[]> = {
+  FR: ['EU-FR-1'],
+  NL: ['EU-NL-1'],
+  CZ: ['EU-CZ-1'],
+  RO: ['EU-RO-1'],
+  SE: ['EU-SE-1'],
+  NO: ['EUR-NO-1'],
+  IS: ['EUR-IS-1', 'EUR-IS-2', 'EUR-IS-3'],
+  US: RUNPOD_DATACENTER_MAP.US,
+  CA: RUNPOD_DATACENTER_MAP.CA,
+  JP: ['AP-JP-1'],
+  AU: ['OC-AU-1'],
+};
+
+const RUNPOD_COUNTRY_NAMES: Record<string, string> = {
+  FRANCE: 'FR', NETHERLANDS: 'NL', CZECHIA: 'CZ', CZECHREPUBLIC: 'CZ', ROMANIA: 'RO',
+  SWEDEN: 'SE', NORWAY: 'NO', ICELAND: 'IS', UNITEDSTATES: 'US', USA: 'US',
+  CANADA: 'CA', JAPAN: 'JP', AUSTRALIA: 'AU', EUROPE: 'EU',
+};
+
+/**
  * Resolve a region string to RunPod datacenter IDs.
- * 'EU-RO-1' → ['EU-RO-1']  (already specific)
- * 'EU'      → ['EU-RO-1', 'EU-SE-1', ...]  (expand generic code)
- * ''        → []  (any datacenter)
+ * 'EU-RO-1'   → ['EU-RO-1']                 (specific datacenter)
+ * 'EU'        → ['EU-RO-1', 'EU-SE-1', ...]  (generic region code)
+ * 'FR'        → ['EU-FR-1']                 (country code / name)
+ * 'FR,CH,DE'  → ['EU-FR-1']                 (list — tokens RunPod has no DC for are skipped)
+ * ''          → undefined                   (any datacenter)
+ * Returns undefined when nothing resolves, so the pod falls back to any datacenter.
  */
 export function resolveDatacenterIds(region: string | undefined): string[] | undefined {
   if (!region) return undefined;
-  // Already a specific datacenter ID (e.g. 'EU-RO-1', 'US-TX-3')
-  if (region.includes('-')) return [region];
-  // Generic region code — expand to all known datacenters
-  const ids = RUNPOD_DATACENTER_MAP[region.toUpperCase()];
-  if (ids) return ids;
-  // Unknown code — omit to avoid schema error (fall back to any datacenter)
-  return undefined;
+  const ids = new Set<string>();
+  for (const raw of region.split(',')) {
+    const token = raw.trim();
+    if (!token) continue;
+    // Already a specific datacenter ID (e.g. 'EU-RO-1', 'US-TX-3')
+    if (token.includes('-')) { ids.add(token); continue; }
+    const upper = token.toUpperCase().replace(/\s+/g, '');
+    const code = RUNPOD_COUNTRY_NAMES[upper] ?? upper;
+    for (const id of RUNPOD_DATACENTER_MAP[code] ?? RUNPOD_COUNTRY_DATACENTERS[code] ?? []) ids.add(id);
+  }
+  return ids.size > 0 ? [...ids] : undefined;
 }

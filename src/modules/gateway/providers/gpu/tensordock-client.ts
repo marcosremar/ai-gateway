@@ -1,6 +1,7 @@
 import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import { normalizeInstanceStatus } from './instance-status';
 
 // Re-export buildCloudInit (and related helpers) from the dedicated module
 // so that existing `import { buildCloudInit } from './tensordock-client'` and
@@ -536,6 +537,7 @@ export class TensordockClient extends AbstractGpuProvider {
           const monitorUrl = ip && monitorPf ? `http://${ip}:${monitorPf.external_port}` : '';
 
           // Persist to user settings via callback
+          const status = normalizeInstanceStatus(attrs.status || 'creating');
           await this.persistInstance(userId, spec.machineKey || 'tensordockInstance', {
             instanceId,
             instanceName,
@@ -543,14 +545,14 @@ export class TensordockClient extends AbstractGpuProvider {
             monitorUrl,
             ipAddress: ip,
             gpuType: gpuShort,
-            status: attrs.status || 'creating',
+            status,
             portForwards: pfs,
           });
 
           this.log.log(`[tensordock] Created ${instanceName} (${instanceId}) at ${candidate.city}`);
           return {
             instanceId, instanceName, endpoint, monitorUrl, ipAddress: ip,
-            status: attrs.status || 'creating', gpuType: gpuShort, portForwards: pfs,
+            status, gpuType: gpuShort, portForwards: pfs,
             providerMeta: {
               provider: 'tensordock',
               hostnodeId: candidate.id,
@@ -755,7 +757,7 @@ export class TensordockClient extends AbstractGpuProvider {
           instanceId: ((it.id || attrs.id) as string),
           instanceName: (it.name || attrs.name) as string | undefined,
           endpoint,
-          status: String(it.status || attrs.status || 'unknown'),
+          status: normalizeInstanceStatus(String(it.status || attrs.status || 'unknown')),
           ipAddress: ip,
           sshPort: sshPf?.external_port,
         });
@@ -781,7 +783,7 @@ export class TensordockClient extends AbstractGpuProvider {
       if (!res.ok) return null;
       const data = await res.json();
       const attrs = data.data?.attributes || data.data || data;
-      return String(attrs.status || 'unknown');
+      return normalizeInstanceStatus(attrs.status || 'unknown');
     } catch (e) {
       this.log.debug(`[tensordock] getInstanceStatus(${instanceId}) failed: ${this.errMsg(e)}`);
       return null;
@@ -804,7 +806,7 @@ export class TensordockClient extends AbstractGpuProvider {
       if (data.error || (data.status && data.status >= 400)) return null;
       const attrs = data.data?.attributes || data.data || data;
       const id = (data.data?.id || attrs.id || instanceId) as string;
-      const status = String(attrs.status || 'unknown');
+      const status = normalizeInstanceStatus(attrs.status || 'unknown');
       const ip = (attrs.ipAddress || attrs.ip_address || '') as string;
       const portForwards: Array<{ internal_port: number; external_port: number }> =
         attrs.portForwards || attrs.port_forwards || [];

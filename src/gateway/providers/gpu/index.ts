@@ -22,6 +22,14 @@ export type {
   ListOffersOptions,
 } from './types';
 
+// ── Instance status vocabulary ───────────────────────────────────────────
+export type { InstanceStatus } from './instance-status';
+export {
+  normalizeInstanceStatus,
+  isTerminalInstanceStatus,
+  isBillableInstanceStatus,
+} from './instance-status';
+
 // ── Abstract Base Class ──────────────────────────────────────────────────
 export {
   AbstractGpuProvider,
@@ -63,6 +71,15 @@ export type {
 // ── Vast.ai ───────────────────────────────────────────────────────────────
 export { VastClient } from './vast-client';
 export type { VastClientOptions } from './vast-client';
+export {
+  VAST_DESKTOP_MAX_PER_HR,
+  rankVastOffers,
+  vastDesktopSearchFilters,
+} from './vast/offer-policy';
+export type {
+  VastOfferRankInput,
+  VastDesktopSearchFilterOpts,
+} from './vast/offer-policy';
 
 // ── Vast.ai VM mode (KVM — snapshot-capable) ──────────────────────────────
 export { VastVmClient } from './vast-vm-client';

@@ -47,6 +47,11 @@ vi.mock('../../../server/providers', () => ({
     listInstances: vi.fn().mockResolvedValue([]),
     getFlyHost: vi.fn().mockReturnValue(''),
   },
+  railway: {
+    createInstance: vi.fn(),
+    deleteInstance: vi.fn(),
+    listInstances: vi.fn().mockResolvedValue([]),
+  },
 }));
 
 vi.mock('../../../server/http-utils', () => ({

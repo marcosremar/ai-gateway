@@ -20,6 +20,7 @@ export default defineConfig({
     caching: 'src/caching/index.ts',
     proxy: 'src/proxy/index.ts',
     workloads: 'src/workloads/index.ts',
+    compute: 'src/compute/index.ts',
     'object-storage': 'src/object-storage/index.ts',
   },
   format: ['esm', 'cjs'],

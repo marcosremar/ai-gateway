@@ -13,13 +13,17 @@ export interface CloudProbeResult {
   error?: string;
 }
 
-/** Lightweight health-check endpoints per cloud provider (no credits consumed). */
+/**
+ * Lightweight health-check endpoints per cloud provider (no credits consumed). Each must REJECT a bad key:
+ * OpenRouter's `/models` is public (200 even with a revoked key), so it is probed through `/key`, which
+ * answers 401 for an invalid or revoked key.
+ */
 const HEALTH_ENDPOINTS: Partial<Record<ProviderId, string>> = {
   groq: 'https://api.groq.com/openai/v1/models',
   openai: 'https://api.openai.com/v1/models',
   fireworks: 'https://api.fireworks.ai/inference/v1/models',
   deepgram: 'https://api.deepgram.com/v1/projects',
-  openrouter: 'https://openrouter.ai/api/v1/models',
+  openrouter: 'https://openrouter.ai/api/v1/key',
 };
 
 /** Auth header format per provider (most use Bearer, Deepgram uses Token). */
@@ -36,13 +40,14 @@ export async function probeCloudProvider(
   provider: ProviderId,
   apiKey: string,
   timeoutMs = 5_000,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<CloudProbeResult> {
   const url = HEALTH_ENDPOINTS[provider];
   if (!url) return { provider, ok: false, latencyMs: 0, error: `No health endpoint for ${provider}` };
 
   const t0 = Date.now();
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       headers: authHeader(provider, apiKey),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -68,14 +73,20 @@ export async function probeCloudProvider(
  * Probe all configured cloud providers in parallel.
  * Only probes providers with keys present in the `keys` map.
  */
+/** True when this module knows how to probe `provider`. */
+export function hasCloudProbe(provider: string): boolean {
+  return Boolean(HEALTH_ENDPOINTS[provider as ProviderId]);
+}
+
 export async function probeAllCloudProviders(
   keys: Partial<Record<string, string>>,
   timeoutMs = 5_000,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<CloudProbeResult[]> {
   const probes: Promise<CloudProbeResult>[] = [];
   for (const [provider, apiKey] of Object.entries(keys)) {
     if (!apiKey || !HEALTH_ENDPOINTS[provider as ProviderId]) continue;
-    probes.push(probeCloudProvider(provider as ProviderId, apiKey, timeoutMs));
+    probes.push(probeCloudProvider(provider as ProviderId, apiKey, timeoutMs, fetchImpl));
   }
   if (probes.length === 0) return [];
   const settled = await Promise.allSettled(probes);

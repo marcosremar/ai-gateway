@@ -45,7 +45,7 @@ describe('detectOrphanDeployOnBoot', () => {
   });
   afterEach(cleanup);
 
-  it('keeps a recent in-flight record with a podId for re-adoption', async () => {
+  it('keeps recent in-flight deploy with podId for re-adoption', async () => {
     // A recent booting record with a real podId is KEPT so that tryRecoverActiveDeploy
     // can re-adopt the still-running pod instead of orphaning it.
     writeFileSync(ACTIVE_DEPLOY_FILE, JSON.stringify({
@@ -54,10 +54,11 @@ describe('detectOrphanDeployOnBoot', () => {
     }));
     const { detectOrphanDeployOnBoot } = await import('../server/ws/pid-lock');
     detectOrphanDeployOnBoot();
+    // Keeping avoids orphaning a live provider pod across gateway restart.
     expect(existsSync(ACTIVE_DEPLOY_FILE)).toBe(true);
   });
 
-  it('clears a booting record with no podId (nameless — cannot re-adopt)', async () => {
+  it('clears nameless in-flight deploy (no usable podId — cannot re-adopt)', async () => {
     writeFileSync(ACTIVE_DEPLOY_FILE, JSON.stringify({
       podId: '', endpoint: 'http://x:8000', status: 'booting',
       provider: 'hyperstack', savedAt: Date.now(),

@@ -20,6 +20,7 @@ import { handleImageGenerate, handleImageInpaint } from './routes/images';
 import { createLogger, withLogContext } from '../../logger';
 import { ApiKeyRegistry } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
+import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
 
 const log = createLogger('proxy');
 
@@ -459,9 +460,11 @@ export function createProxyServer(config: ProxyConfig): Server {
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
     }
 
-    // Skip auth for health endpoint (Fly.io health checks don't send tokens)
+    // Only the shallow health check skips auth (the platform probe sends no token). The deep check calls upstream
+    // providers, so it goes through the normal auth below and then needs an admin key.
     const urlPath = url.split('?')[0];
-    if (method === 'GET' && urlPath === '/health') {
+    const deepHealth = method === 'GET' && urlPath === '/health' && /[?&]deep=(1|true)(&|$)/.test(url);
+    if (method === 'GET' && urlPath === '/health' && !deepHealth) {
       sendResponse(res, { status: 200, body: {
         status: 'ok',
         connections: { active: activeConnections, peak: peakConnections },
@@ -498,8 +501,22 @@ export function createProxyServer(config: ProxyConfig): Server {
       });
     }
 
-    // Per-user concurrent request limit
-    if (userId !== 'anonymous') {
+    if (deepHealth) {
+      if (!config.deepHealth) { sendError(res, 404, 'Deep health is not enabled on this gateway', requestId); return; }
+      const adminToken = (authHeader || '').replace(/^Bearer\s+/i, '');
+      if (!adminToken || !config.deepHealth.authorize(adminToken)) { sendError(res, 401, 'Deep health needs an admin API key', requestId); return; }
+      try {
+        const report = await config.deepHealth.report();
+        sendResponse(res, { status: report.status, body: report.body }, requestId);
+      } catch (err) {
+        log.error({ err }, 'deep health failed');
+        sendError(res, 500, 'Deep health check failed', requestId);
+      }
+      return;
+    }
+
+    // Per-user concurrent request limit (a gateway sub-request of a turn already counted is not counted again)
+    if (userId !== 'anonymous' && !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress)) {
       const currentConcurrent = userConcurrency.get(userId) || 0;
       if (currentConcurrent >= MAX_CONCURRENT_PER_USER) {
         sendError(res, 429, `Too many concurrent requests (limit: ${MAX_CONCURRENT_PER_USER})`, requestId);
@@ -691,17 +708,19 @@ export function createProxyServer(config: ProxyConfig): Server {
       if (method === 'GET' && url === '/v1/models') {
         proxyRes = await handleModelsWithDynamic(config.providers);
       } else if (method === 'POST' && url === '/v1/chat/completions') {
-        if (!config.providers.chat) {
+        const { chat, chatRoutes, chatDynamicRoutes, unavailable } = config.providers;
+        if (!chat && !chatRoutes && !chatDynamicRoutes && !unavailable?.chat) {
           proxyRes = { status: 404, body: { error: { message: 'No chat providers configured', type: 'invalid_request_error' } } };
         } else {
           proxyRes = await handleChatCompletions(
             proxyReq,
-            config.providers.chat,
+            chat ?? {},
             config.cache,
             config.hooks,
             config.providers.chatFallbackChain,
             config.guardrails,
-            config.providers.chatDynamicRoutes,
+            chatDynamicRoutes,
+            { chatRoutes, unavailable: unavailable?.chat },
           );
         }
       } else if (method === 'POST' && url === '/v1/embeddings') {
@@ -711,16 +730,16 @@ export function createProxyServer(config: ProxyConfig): Server {
           proxyRes = await handleEmbeddings(proxyReq, config.providers.embedding, config.cache);
         }
       } else if (method === 'POST' && url === '/v1/audio/speech') {
-        if (!config.providers.tts) {
+        if (!config.providers.tts && !config.providers.unavailable?.tts) {
           proxyRes = { status: 404, body: { error: { message: 'No TTS providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts);
+          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts);
         }
       } else if (method === 'POST' && url === '/v1/audio/transcriptions') {
-        if (!config.providers.stt) {
+        if (!config.providers.stt && !config.providers.unavailable?.stt) {
           proxyRes = { status: 404, body: { error: { message: 'No STT providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleAudioTranscriptions(proxyReq, config.providers.stt);
+          proxyRes = await handleAudioTranscriptions(proxyReq, config.providers.stt ?? {}, config.providers.unavailable?.stt);
         }
       } else if (method === 'POST' && url === '/v1/images/generate') {
         proxyRes = await handleImageGenerate(proxyReq, config.providers.image);

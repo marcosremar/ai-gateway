@@ -54,6 +54,15 @@ export {
   type OfferSearchFilters,
 } from './offers';
 
+// Desktop offer policy (reliability ≥ 0.95, inet_down > 1000, ≤ $0.20/hr)
+export {
+  VAST_DESKTOP_MAX_PER_HR,
+  rankVastOffers,
+  vastDesktopSearchFilters,
+  type VastOfferRankInput,
+  type VastDesktopSearchFilterOpts,
+} from './offer-policy';
+
 // Templates
 export {
   listTemplates,

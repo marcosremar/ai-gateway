@@ -392,7 +392,7 @@ describe('TensordockClient', () => {
       const result = await client.createInstance(spec, creds);
       expect(result.instanceId).toBe('new-vm-1');
       expect(result.endpoint).toBe('http://10.0.0.5:20002');
-      expect(result.status).toBe('creating');
+      expect(result.status).toBe('booting');
     });
 
     it('calls onInstancePersist when userId provided', async () => {

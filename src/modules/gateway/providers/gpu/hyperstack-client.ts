@@ -25,6 +25,7 @@ import type {
 } from './types';
 import { AbstractGpuProvider, TIMEOUTS, pollUntilReady } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import { normalizeInstanceStatus } from './instance-status';
 
 const HYPERSTACK_API_BASE =
   process.env.HYPERSTACK_API_BASE || 'https://infrahub-api.nexgencloud.com/v1';
@@ -199,12 +200,10 @@ export class HyperstackClient extends AbstractGpuProvider {
   private mapStatus(raw: HyperstackVmRaw): string {
     const status = (raw.status || '').toLowerCase();
     const power = (raw.power_state || '').toLowerCase();
-    if (status === 'active' && power === 'running') return 'running';
-    if (status === 'creating' || status === 'building') return 'creating';
-    if (status === 'error' || status === 'failed') return 'error';
-    if (status === 'stopped' || power === 'shutdown') return 'stopped';
-    if (status === 'deleting' || status === 'deleted') return 'deleted';
-    return status || power || 'unknown';
+    // Prefer combined active+running signal, then fall back to raw fields.
+    if (status === 'active' && power === 'running') return normalizeInstanceStatus('running');
+    if (power === 'shutdown') return normalizeInstanceStatus('stopped');
+    return normalizeInstanceStatus(raw.status || raw.power_state || 'unknown');
   }
 
   private toGpuInstance(raw: HyperstackVmRaw): GpuInstance {

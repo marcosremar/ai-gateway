@@ -70,6 +70,7 @@ monitoring/
 
 # Scripts (some may be needed, but most are build-time)
 scripts/
+!scripts/reap-orphans.ts
 tools/
 
 # Dockers subproject (separate images)

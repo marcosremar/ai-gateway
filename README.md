@@ -16,6 +16,7 @@ Built with TypeScript, providing a unified interface for AI providers and multi-
 ## Features
 
 - **Transparent Speech API** — Single `POST /v1/speech` endpoint handles STT → LLM → TTS. Transport (GPU vs cloud) is hidden from the caller. No SSE/WebSocket/WebRTC in client code.
+- **Deployments (Scaleway)** — `PUT /v1/deployments/:name` with any Docker image (or a profile like `qwen3-tts`) → autoscaled replicas, scale to zero, cold-start wait, per-deployment replica bounds via API. See [docs/deployments.md](docs/deployments.md)
 - **Multi-tier GPU Autoscaler** — Cascade through GPU providers (RunPod, TensorDock, Modal) with automatic failover, health checking, idle watchdog, and cost monitoring
 - **AI Provider Abstraction** — Unified interface for 8+ providers (OpenAI, Groq, Fireworks, OpenRouter, Modal, self-hosted) across STT, TTS, LLM, Image, and Realtime modalities
 - **Provider Fallback Chains** — Declarative, config-driven fallback with cooldown and credit exhaustion tracking
@@ -204,7 +205,7 @@ await runpod.terminate(pod.id);
 | TensorDock | Working  | RTX 3090 inference backend.                |
 | Modal      | Working  | Serverless, auto-scales to zero.           |
 | Hyperstack | Working  | KVM w/ nested virt (`/dev/kvm` confirmed). Custom image build pipeline wired. `offloadOnIdle` = 1.3s wake. |
-| Vast.ai    | Limited  | HTTP not viable (SSH proxy only). VM mode marketplace unreliable in practice (hosts fail to materialize contracts). |
+| Vast.ai    | Improved | Desktop offer policy (reliability ≥0.95, download >1 Gbps, ≤~$0.20/hr) + in-memory hot pool (`claim`/`release`). Direct HTTP still often needs SSH proxy on residential hosts; prefer `offerPolicy: 'desktop'` for quality. |
 | SkyPilot   | Working  | Multi-cloud orchestration.                 |
 
 ### Providers to explore — Firecracker / gVisor / Kata GPU sandboxing

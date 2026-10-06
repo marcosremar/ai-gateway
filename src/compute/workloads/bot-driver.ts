@@ -6,6 +6,11 @@
 import type { Workload, WorkloadConfig, WorkloadDriver, BotWorkloadConfig } from './types';
 import { WorkloadRegistry } from './registry';
 import { getWorkloadServerRuntime } from './server-runtime';
+import {
+  selectBotProviderChain,
+  detectBotProviderFromEndpoint,
+  type BotProviderId,
+} from '../bot-provider-chain';
 
 export class BotWorkloadDriver implements WorkloadDriver {
   readonly type = 'bot' as const;
@@ -29,10 +34,11 @@ export class BotWorkloadDriver implements WorkloadDriver {
       throw new Error('Bot deploy already in progress');
     }
 
-    const flyKey = process.env.FLY_API_TOKEN || '';
-    const apiKey = cfg.apiKey || process.env.RUNPOD_API_KEY || '';
-    if (!flyKey && !apiKey) {
-      throw new Error('No deploy credentials — set FLY_API_TOKEN or RUNPOD_API_KEY');
+    const chain = selectBotProviderChain(process.env);
+    if (chain.length === 0) {
+      throw new Error(
+        'No deploy credentials — set FLY_API_TOKEN, RAILWAY_PROJECT_ID, SCALEWAY_SECRET_KEY, or RUNPOD_API_KEY',
+      );
     }
 
     const botDockerImage = cfg.dockerImage || process.env.BOT_DOCKER_IMAGE || 'marcosremar/meet-teams-bot:latest';
@@ -48,37 +54,64 @@ export class BotWorkloadDriver implements WorkloadDriver {
     state.setBotDeployLock(true);
     state.setBotPodApiKey(podApiKey);
 
+    const primaryId = chain[0]!.id;
     // Non-blocking deploy — kick off and return immediately
-    const preferFlyio = !!flyKey;
     (async () => {
       try {
         let instance: { instanceId: string; endpoint?: string; sshHost?: string; sshPort?: number } | null = null;
+        let usedProvider: BotProviderId | null = null;
 
-        if (preferFlyio) {
+        for (const entry of chain) {
           try {
-            instance = await prov.flyio.createInstance(
-              { dockerImage: botDockerImage, ramGb: 8, vcpus: 2, env: podEnv },
-              { apiKey: flyKey },
-            );
+            if (entry.id === 'flyio') {
+              const flyKey = process.env.FLY_API_TOKEN || '';
+              if (!flyKey) continue;
+              instance = await prov.flyio.createInstance(
+                { dockerImage: botDockerImage, ramGb: 8, vcpus: 2, env: podEnv },
+                { apiKey: flyKey },
+              );
+            } else if (entry.id === 'railway') {
+              instance = await prov.railway.createInstance(
+                { dockerImage: botDockerImage, env: podEnv },
+                { apiKey: process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '' },
+              );
+            } else if (entry.id === 'scaleway') {
+              const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
+              instance = await prov.scaleway.createInstance(
+                {
+                  dockerImage: botDockerImage,
+                  region: process.env.SCALEWAY_ZONE || 'fr-par-1',
+                  ramGb: 12,
+                  env: podEnv,
+                },
+                { apiKey: scwKey },
+              );
+            } else if (entry.id === 'runpod') {
+              const apiKey = cfg.apiKey || process.env.RUNPOD_API_KEY || '';
+              if (!apiKey) continue;
+              instance = await prov.runpod.createInstance(
+                {
+                  gpuTypes: ['NVIDIA RTX A4000', 'NVIDIA RTX A4500', 'NVIDIA RTX 2000 Ada Generation'],
+                  dockerImage: botDockerImage,
+                  storageGb: 20,
+                  ports: ['8080/http', '1936/tcp', '5900/tcp', '22/tcp', '3099/http'],
+                  cloudType: 'SECURE',
+                  interruptible: false,
+                  env: podEnv,
+                },
+                { apiKey },
+              );
+            }
+            if (instance) {
+              usedProvider = entry.id;
+              break;
+            }
           } catch (err) {
-            console.warn(`[workloads:bot] Fly.io failed: ${err instanceof Error ? err.message : err}`);
-            if (!apiKey) throw err;
+            console.warn(
+              `[workloads:bot] ${entry.id} failed: ${err instanceof Error ? err.message : err}`,
+            );
+            instance = null;
           }
-        }
-
-        if (!instance && apiKey) {
-          instance = await prov.runpod.createInstance(
-            {
-              gpuTypes: ['NVIDIA RTX A4000', 'NVIDIA RTX A4500', 'NVIDIA RTX 2000 Ada Generation'],
-              dockerImage: botDockerImage,
-              storageGb: 20,
-              ports: ['8080/http', '1936/tcp', '5900/tcp', '22/tcp', '3099/http'],
-              cloudType: 'SECURE',
-              interruptible: false,
-              env: podEnv,
-            },
-            { apiKey },
-          );
         }
 
         if (!instance) throw new Error('All bot deploy providers failed');
@@ -89,7 +122,7 @@ export class BotWorkloadDriver implements WorkloadDriver {
           endpoint: instance.endpoint || '',
           sshHost: instance.sshHost || '',
           sshPort: instance.sshPort || 0,
-          message: 'Bot pod created, waiting for boot...',
+          message: `Bot pod created via ${usedProvider}, waiting for boot...`,
           startedAt: Date.now(),
           botId: crypto.randomUUID(),
           meetingUrl: cfg.meetingUrl || '',
@@ -115,7 +148,7 @@ export class BotWorkloadDriver implements WorkloadDriver {
       type: 'bot',
       name,
       status: 'deploying',
-      provider: preferFlyio ? 'fly' : 'runpod',
+      provider: primaryId === 'flyio' ? 'fly' : primaryId,
       costPerHr: 0,
       metadata: {
         botKind: cfg.botKind,
@@ -149,15 +182,27 @@ export class BotWorkloadDriver implements WorkloadDriver {
     const prov = await this.providers();
 
     const podId = state.botState.podId || (workload.instanceId as string);
+    const endpoint = state.botState.endpoint || '';
+    const provider = detectBotProviderFromEndpoint(endpoint);
     const apiKey = process.env.RUNPOD_API_KEY || '';
     const flyKey = process.env.FLY_API_TOKEN || '';
+    const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
+    const rwKey = process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN || '';
 
     if (podId && podId !== 'local') {
-      if (flyKey && state.botState.endpoint?.includes('.fly.dev')) {
-        try { await prov.flyio.deleteInstance(podId, { apiKey: flyKey }); } catch { /* best-effort cleanup */ }
-      } else if (apiKey) {
-        try { await prov.runpod.deleteInstance(podId, { apiKey }); } catch { /* best-effort cleanup */ }
-      }
+      try {
+        if (provider === 'flyio' || (flyKey && endpoint.includes('.fly.dev'))) {
+          await prov.flyio.deleteInstance(podId, { apiKey: flyKey });
+        } else if (provider === 'railway' && process.env.RAILWAY_PROJECT_ID) {
+          await prov.railway.deleteInstance(podId, { apiKey: rwKey });
+        } else if (provider === 'scaleway' && scwKey) {
+          await prov.scaleway.deleteInstance(podId, { apiKey: scwKey });
+        } else if (apiKey) {
+          await prov.runpod.deleteInstance(podId, { apiKey });
+        } else if (process.env.RAILWAY_PROJECT_ID) {
+          await prov.railway.deleteInstance(podId, { apiKey: rwKey });
+        }
+      } catch { /* best-effort cleanup */ }
     }
 
     // Reset bot state

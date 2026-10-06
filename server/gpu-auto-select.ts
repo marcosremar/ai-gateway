@@ -206,13 +206,20 @@ export async function autoSelectCheapestGpu(
   // Sort based on user-configured criteria: price, latency, or balanced (default)
   const sortBy = getGpuSortBy();
   const normalize_name = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
-  const latencyMap = sortBy !== 'price' ? await getBestLatencyByGpuModel() : {};
+  // latency-db keys keep inner spaces ("rtx 4090") — re-key with the same
+  // normalizer used for offers ("rtx4090"), otherwise no offer ever matches
+  // and the latency/realtime sorts silently degrade to "unknown latency".
+  const latencyMap = new Map<string, { bestMs: number; region: string }>();
+  if (sortBy !== 'price') {
+    for (const [k, v] of Object.entries(await getBestLatencyByGpuModel() ?? {})) {
+      const key = normalize_name(k);
+      const prev = latencyMap.get(key);
+      if (!prev || v.bestMs < prev.bestMs) latencyMap.set(key, v);
+    }
+  }
 
-  const getLatencyMs = (o: GpuOffer): number | null => {
-    const key = normalize_name(o.gpuName || o.gpuType);
-    const entry = (latencyMap as Record<string, { bestMs: number; region: string }>)[key];
-    return entry?.bestMs ?? null;
-  };
+  const getLatencyMs = (o: GpuOffer): number | null =>
+    latencyMap.get(normalize_name(o.gpuName || o.gpuType))?.bestMs ?? null;
 
   // Unified latency score: normalize TCP RTT (0-1) — <30ms=1.0, 150ms=0.5, 300ms+=0.0
   // This puts TCP latency on the same 0-1 scale as reputationScore (which embeds pipeline latency)

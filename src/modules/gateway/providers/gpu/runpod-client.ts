@@ -8,6 +8,8 @@ import type {
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 import { categorizeDeployError } from '../../../errors/deploy-errors';
+import { normalizeInstanceStatus } from './instance-status';
+import { resolveDatacenterIds } from './runpod/constants';
 
 /** GPU types to try in order of preference.
  *  Must match RunPod's REST API enum values exactly.
@@ -50,59 +52,6 @@ export const RUNPOD_GPU_TYPE_MAP: Record<string, string> = {
   'RTX A4000': 'NVIDIA RTX A5000',
   RTXA4000: 'NVIDIA RTX A5000',
 };
-
-/**
- * Map generic region codes → RunPod-specific datacenter IDs.
- * RunPod REST API now requires exact datacenter IDs (e.g. 'EU-RO-1') in
- * dataCenterIds[] — generic codes like 'EU' or 'US' are no longer accepted.
- * If a region is already a specific ID (contains '-'), it's used as-is.
- */
-const RUNPOD_DATACENTER_MAP: Record<string, string[]> = {
-  EU: [
-    'EU-RO-1',
-    'EU-SE-1',
-    'EU-CZ-1',
-    'EU-NL-1',
-    'EU-FR-1',
-    'EUR-IS-1',
-    'EUR-IS-2',
-    'EUR-IS-3',
-    'EUR-NO-1',
-  ],
-  US: [
-    'US-TX-3',
-    'US-TX-1',
-    'US-TX-4',
-    'US-IL-1',
-    'US-KS-2',
-    'US-KS-3',
-    'US-GA-1',
-    'US-GA-2',
-    'US-WA-1',
-    'US-CA-2',
-    'US-NC-1',
-    'US-DE-1',
-  ],
-  CA: ['CA-MTL-1', 'CA-MTL-2', 'CA-MTL-3'],
-  AP: ['AP-JP-1'],
-  OC: ['OC-AU-1'],
-};
-
-/** Resolve a region string to RunPod datacenter IDs.
- * 'EU-RO-1' → ['EU-RO-1']  (already specific)
- * 'EU'      → ['EU-RO-1', 'EU-SE-1', ...]  (expand generic code)
- * ''        → []  (any datacenter)
- */
-function resolveDatacenterIds(region: string | undefined): string[] | undefined {
-  if (!region) return undefined;
-  // Already a specific datacenter ID (e.g. 'EU-RO-1', 'US-TX-3')
-  if (region.includes('-')) return [region];
-  // Generic region code — expand to all known datacenters
-  const ids = RUNPOD_DATACENTER_MAP[region.toUpperCase()];
-  if (ids) return ids;
-  // Unknown code — omit to avoid schema error (fall back to any datacenter)
-  return undefined;
-}
 
 export interface RunpodClientOptions extends AbstractGpuProviderOptions {}
 
@@ -593,7 +542,7 @@ export class RunpodClient extends AbstractGpuProvider {
       return {
         instanceId: running.id as string,
         endpoint,
-        status: (running.desiredStatus as string) || 'RUNNING',
+        status: normalizeInstanceStatus((running.desiredStatus as string) || 'RUNNING'),
       };
     } catch (err) {
       const deployErr = categorizeDeployError(err, {
@@ -800,7 +749,7 @@ export class RunpodClient extends AbstractGpuProvider {
         await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
           podId,
           endpoint,
-          status: 'CREATING',
+          status: normalizeInstanceStatus('CREATING'),
           podName,
         });
 
@@ -809,7 +758,7 @@ export class RunpodClient extends AbstractGpuProvider {
           instanceId: podId,
           instanceName: podName,
           endpoint,
-          status: 'CREATING',
+          status: normalizeInstanceStatus('CREATING'),
           gpuType: 'CPU',
         };
       }
@@ -982,7 +931,7 @@ export class RunpodClient extends AbstractGpuProvider {
           await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
             podId,
             endpoint,
-            status: 'CREATING',
+            status: normalizeInstanceStatus('CREATING'),
             podName,
           });
 
@@ -994,7 +943,7 @@ export class RunpodClient extends AbstractGpuProvider {
             instanceId: podId,
             instanceName: podName,
             endpoint,
-            status: 'CREATING',
+            status: normalizeInstanceStatus('CREATING'),
             gpuType,
           };
         }
@@ -1042,7 +991,7 @@ export class RunpodClient extends AbstractGpuProvider {
             await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
               podId,
               endpoint,
-              status: 'CREATING',
+              status: normalizeInstanceStatus('CREATING'),
               podName,
             });
             this.log.log(
@@ -1052,7 +1001,7 @@ export class RunpodClient extends AbstractGpuProvider {
               instanceId: podId,
               instanceName: podName,
               endpoint,
-              status: 'CREATING',
+              status: normalizeInstanceStatus('CREATING'),
               gpuType,
             };
           }
@@ -1333,7 +1282,7 @@ export class RunpodClient extends AbstractGpuProvider {
           instanceId: pod.id as string,
           instanceName: pod.name as string | undefined,
           endpoint,
-          status: (pod.desiredStatus as string) ?? 'UNKNOWN',
+          status: normalizeInstanceStatus((pod.desiredStatus as string) ?? 'UNKNOWN'),
           gpuType: pod.gpuDisplayName as string | undefined,
         };
       });
@@ -1391,7 +1340,7 @@ export class RunpodClient extends AbstractGpuProvider {
       // NOTE: REST API v1 only exposes `desiredStatus` (RUNNING/EXITED).
       // RUNNING means "pod is scheduled to run" — the container may still be booting.
       // To check actual container readiness, use HTTP health checks on the proxy URL.
-      return (data.desiredStatus as string) ?? null;
+      return normalizeInstanceStatus((data.desiredStatus as string) ?? null);
     } catch (err) {
       this.log.warn(`[runpod] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
       this.emitError({

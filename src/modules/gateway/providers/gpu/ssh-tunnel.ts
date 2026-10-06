@@ -11,6 +11,29 @@ const log = createLogger('ssh-tunnel');
 let nextLocalPort = 19000;
 
 const DEFAULT_OPEN_RETRIES = 20;
+
+let _sshAvailable: Promise<boolean> | null = null;
+
+/**
+ * Whether an `ssh` client can be spawned on this host (cached). Without it an
+ * SSH-only GPU instance can never be reached, so callers should give up on it
+ * immediately instead of waiting through key propagation and retries.
+ */
+export function isSshClientAvailable(): Promise<boolean> {
+  _sshAvailable ??= new Promise<boolean>((resolve) => {
+    try {
+      const p = spawn('ssh', ['-V'], { stdio: 'ignore' });
+      p.once('error', () => resolve(false));
+      p.once('exit', () => resolve(true));
+    } catch {
+      resolve(false);
+    }
+  });
+  return _sshAvailable;
+}
+
+/** Test hook: forget the cached ssh availability. */
+export function _resetSshClientAvailabilityForTests(): void { _sshAvailable = null; }
 const RECONNECT_BACKOFF_MS = [2_000, 5_000, 10_000, 20_000, 30_000, 30_000, 30_000, 30_000, 30_000, 30_000];
 const MAX_RECONNECT_ATTEMPTS = 30;
 
@@ -21,6 +44,10 @@ export class SshTunnel {
   private _closed = false;
   private _reconnectAttempts = 0;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Last failure reason (read by providers for their failure summaries). */
+  lastError = '';
+  /** Set when retrying is pointless (ssh binary missing). */
+  private _fatal = false;
 
   constructor(
     public readonly sshHost: string,
@@ -46,7 +73,7 @@ export class SshTunnel {
       }
       const ok = await this._spawnOnce(timeoutMs);
       if (ok) return true;
-      if (this._closed) return false;
+      if (this._closed || this._fatal) return false;
     }
     return false;
   }
@@ -87,8 +114,10 @@ export class SshTunnel {
           `root@${this.sshHost}`,
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-        this.proc.on('error', (err) => {
+        this.proc.on('error', (err: NodeJS.ErrnoException) => {
           log.warn(`Process error: ${err.message}`);
+          this.lastError = err.message;
+          if (err.code === 'ENOENT') this._fatal = true; // no ssh binary — retries cannot help
           this._open = false;
           finish(false);
         });
@@ -99,6 +128,7 @@ export class SshTunnel {
           this._open = false;
           if (code !== 0 && code !== null) {
             log.warn(`Exited with code ${code}`);
+            this.lastError = `ssh exited with code ${code}`;
           }
           if (wasOpen && !this._closed) {
             this._scheduleReconnect();
@@ -135,7 +165,7 @@ export class SshTunnel {
   }
 
   private _scheduleReconnect(): void {
-    if (this._closed) return;
+    if (this._closed || this._fatal) return;
     if (this._reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       log.warn(`Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached for ${this.sshHost}:${this.sshPort} - giving up`);
       return;
