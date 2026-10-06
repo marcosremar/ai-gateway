@@ -6,7 +6,7 @@
 //   bun run quality:bundle:update                                    # tighten after something shrank
 //   bun run quality:bundle:update -- --accept-growth "<why>"         # deliberate growth / new entry, reason recorded
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import tsupConfig from '../tsup.config';
@@ -27,14 +27,23 @@ const config = (Array.isArray(tsupConfig) ? tsupConfig[0] : tsupConfig) as { ent
 const entries = Object.keys(config.entry ?? {});
 if (!entries.length) throw new Error('tsup.config.ts has no named entries');
 
+/** File contents, or null when it does not exist (read directly: no exists-then-read race). */
+function readIfPresent(path: string): Buffer | null {
+  try {
+    return readFileSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
 const measured: Record<string, EntrySize | null> = {};
 for (const entry of entries) {
-  const file = resolve(ROOT, 'dist', `${entry}.js`);
-  if (!existsSync(file)) { measured[entry] = null; continue; }
-  const bytes = readFileSync(file);
-  measured[entry] = { raw: bytes.length, gzip: gzipSync(bytes, { level: 9 }).length };
+  const bytes = readIfPresent(resolve(ROOT, 'dist', `${entry}.js`));
+  measured[entry] = bytes ? { raw: bytes.length, gzip: gzipSync(bytes, { level: 9 }).length } : null;
 }
-const baseline: Baseline = existsSync(BASELINE_PATH) ? JSON.parse(readFileSync(BASELINE_PATH, 'utf8')) : {};
+const baselineBytes = readIfPresent(BASELINE_PATH);
+const baseline: Baseline = baselineBytes ? JSON.parse(baselineBytes.toString('utf8')) : {};
 
 console.log(formatTable(baseline, measured));
 
