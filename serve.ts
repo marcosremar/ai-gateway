@@ -94,9 +94,11 @@ const deployments = deploymentsFromEnv(process.env, {
 });
 if (deployments) {
   await deployments.controller.init();
+  await deployments.apps.init();
   deployments.controller.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
+  prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
   // Read by createProxyServer: a cold-start wait must outlive the default 60 s idle cut.
   process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
   log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');

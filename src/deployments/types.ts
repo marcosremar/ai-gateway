@@ -100,6 +100,10 @@ export interface DeploymentRecord {
   createdAt: number;
   updatedAt: number;
   lastRequestAt: number | null;
+  /** App account that owns the deployment (see apps.ts); absent on deployments made before app accounts. */
+  app?: string;
+  /** Saved image of the app it was deployed from (`appImage`), for traceability. */
+  appImage?: string;
 }
 
 export type ReplicaPhase = 'booting' | 'ready' | 'unhealthy' | 'halted';
@@ -182,4 +186,6 @@ export interface DeploymentView {
   lastRequestAt: string | null;
   lastError: string | null;
   invokeUrl: string;
+  app: string | null;
+  appImage: string | null;
 }
