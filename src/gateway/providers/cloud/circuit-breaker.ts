@@ -162,9 +162,8 @@ export class CircuitBreaker {
 }
 
 /**
- * Registry of circuit breakers keyed by provider ID.
- * Shared across the fallback chain so all requests to the same provider
- * contribute to the same failure count.
+ * Registry of circuit breakers keyed by a health key. The proxy keys them per stage + target
+ * (`breakerKey` in gateway/proxy/provider-routing.ts); the legacy fallback chain keys them per entry (`entryHealthKey`).
  */
 export class CircuitBreakerRegistry {
   private breakers = new Map<string, CircuitBreaker>();
@@ -182,6 +181,16 @@ export class CircuitBreakerRegistry {
       this.breakers.set(providerId, cb);
     }
     return cb;
+  }
+
+  /** The breaker under `key` if one was ever created, without creating it (a read must not add a /health row). */
+  peek(key: string): CircuitBreaker | undefined {
+    return this.breakers.get(key);
+  }
+
+  /** Resets every breaker whose key matches (e.g. all breakers of a provider after its key changed). */
+  resetWhere(match: (key: string) => boolean): void {
+    for (const [key, cb] of this.breakers) if (match(key)) cb.reset();
   }
 
   /** Get stats for all providers (for /health or /metrics). */

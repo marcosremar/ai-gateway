@@ -11,6 +11,7 @@ import { buildServeProviders, parseModelRoutes, type ModelRoutesSpec, type Serve
 import { stageChainsReport } from '../../../src/config/stage-chains';
 import { genderOfVoice, voiceForGender, KOKORO_VOICES, QWEN_AUDIO_VOICES } from '../../../src/config/tts-fallback-voices';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
+import { breakerKey } from '../../../src/gateway/proxy/provider-routing';
 import type { TTSRequest } from '../../../src/gateway/providers/cloud/types';
 import { AccountPolicyGuards, isAccountPolicyRefusal } from '../../../src/gateway/proxy/account-policy-guard';
 import { handleAudioSpeech } from '../../../src/gateway/proxy/routes/audio-speech';
@@ -148,7 +149,7 @@ describe('TTS chain: deployment → Qwen-Audio → Kokoro', () => {
     }
     expect(calls.every(c => c.model === 'hexgrad/kokoro-82m' && c.voice === 'pm_santa')).toBe(true);
     expect(calls).toHaveLength(6);
-    expect(breakers.get('openrouter').isOpen()).toBe(false);
+    expect(breakers.get(breakerKey('tts', { providerId: 'openrouter', model: 'hexgrad/kokoro-82m' })).isOpen()).toBe(false);
 
     const { stages } = stageChainsReport(built.chains, { deploymentStatus: () => 'scaled-to-zero', breakers });
     const links = stages.tts['parle-tts'].links;

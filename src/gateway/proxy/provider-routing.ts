@@ -9,10 +9,9 @@
  * Error text that reaches a client goes through `redactSecrets` — a key value never leaves the gateway.
  */
 
-import { CircuitBreakerRegistry } from '../providers/cloud/circuit-breaker';
+import { CircuitBreakerRegistry, type CircuitBreaker } from '../providers/cloud/circuit-breaker';
 import { isTimeoutError, type CooldownTracker, type FallbackEntry } from '../providers/cloud/fallback';
 import { createLogger } from '../../logger';
-import { entryHealthKey } from '../providers/cloud/entry-key';
 import type { ProxyResponse } from './types';
 
 const log = createLogger('provider-routing');
@@ -79,8 +78,101 @@ export function notConfiguredReason(providerId: string): string {
   return env ? `${providerId}: ${env} is not set` : `${providerId}: not configured`;
 }
 
-/** Circuit breakers of every proxy route (one per provider label). Shared so /health?deep=1 can report them. */
+/**
+ * Circuit breakers of every proxy route (one per stage + target, see `breakerKey`). Shared so /health?deep=1 can
+ * report them.
+ */
 export const proxyCircuitBreakers = new CircuitBreakerRegistry({ failureThreshold: 5, resetTimeoutMs: 30_000 });
+
+/**
+ * Circuit-breaker key of a target within a stage: `<stage>:<provider>:<upstream model>` for a cloud target,
+ * `<stage>:deployment:<name>` for a deployment (its replicas fail on their own inside the deployment provider).
+ *
+ * Keyed by provider alone, five 8 s timeouts of OpenRouter's STT model opened the one `openrouter` breaker and every
+ * chat and TTS request routed to OpenRouter got 503 "circuit open" for 30 s (production stress 2026-10-06, after PR
+ * #35). A timeout or 5xx says something about one upstream model in one stage (OpenRouter routes each model to its own
+ * upstream providers), not about the whole account, so that is the unit that opens. `llm` (chat route) and `chat`
+ * (/health chains) name the same stage.
+ *
+ * What IS account-wide — a rejected key (401) or no credit (402) — feeds a second breaker per provider
+ * (`accountBreakerKey`) that every stage and model of that provider checks; see `TargetHealth`.
+ */
+export function breakerKey(stage: string, t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>): string {
+  const s = stage === 'llm' ? 'chat' : stage;
+  return t.providerId.startsWith('deployment:') || !t.model ? `${s}:${t.providerId}` : `${s}:${t.providerId}:${t.model}`;
+}
+
+/** Breaker of a provider account (401 / 402 on any of its targets). Deployments have none (no shared account). */
+export function accountBreakerKey(providerId: string): string {
+  return `account:${providerId}`;
+}
+
+/** Upstream failures that belong to the provider account, not to a model: key rejected (401) or no credit (402). */
+export function isAccountFailure(err: unknown): boolean {
+  const status = statusOf(err);
+  return status === 401 || status === 402;
+}
+
+/** Resets every breaker of a provider (all its stages and models, and its account), e.g. after its key changed. */
+export function resetProviderBreakers(providerId: string, breakers: CircuitBreakerRegistry = proxyCircuitBreakers): void {
+  breakers.resetWhere((key) => key === accountBreakerKey(providerId) || key.split(':')[1] === providerId);
+}
+
+/**
+ * Health of one target in one stage: its own breaker (`breakerKey`) plus, for cloud targets, the provider account's
+ * (`accountBreakerKey`). The account breaker is only read with `isOpen()` (never the half-open probe slot); it opens
+ * after `failureThreshold` account failures in a row with no success anywhere on that provider, and any success
+ * closes it.
+ */
+export class TargetHealth {
+  readonly breaker: CircuitBreaker;
+  private readonly account: CircuitBreaker | null;
+
+  constructor(breakers: CircuitBreakerRegistry, stage: string, t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>) {
+    this.breaker = breakers.get(breakerKey(stage, t));
+    this.account = t.providerId.startsWith('deployment:') ? null : breakers.get(accountBreakerKey(t.providerId));
+  }
+
+  /** Open (own circuit or account), without consuming the half-open probe slot. */
+  isOpen(): boolean {
+    return !!this.account?.isOpen() || this.breaker.isOpen();
+  }
+
+  /** May this request go out? Takes the half-open probe slot of the target's own breaker when it is recovering. */
+  allowRequest(): boolean {
+    return !this.account?.isOpen() && this.breaker.allowRequest();
+  }
+
+  recordSuccess(): void {
+    this.breaker.recordSuccess();
+    if (this.account && this.account.getStats().state !== 'closed') this.account.reset();
+    this.account?.recordSuccess();
+  }
+
+  recordFailure(err?: unknown): void {
+    this.breaker.recordFailure();
+    if (this.account && isAccountFailure(err)) this.account.recordFailure();
+  }
+
+  releaseProbe(): void {
+    this.breaker.releaseProbe();
+  }
+
+  isHalfOpen(): boolean {
+    return this.breaker.getStats().state === 'half_open';
+  }
+}
+
+/**
+ * Read-only check for reports (/health chains): open without creating breakers that were never used (each would add a
+ * row to /health?deep=1 `circuits`).
+ */
+export function isTargetCircuitOpen(
+  breakers: CircuitBreakerRegistry, stage: string, t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>,
+): boolean {
+  if (breakers.peek(breakerKey(stage, t))?.isOpen()) return true;
+  return !t.providerId.startsWith('deployment:') && !!breakers.peek(accountBreakerKey(t.providerId))?.isOpen();
+}
 
 export function normalizeTargets<P extends Configurable>(value: P | Array<RouteTarget<P>> | undefined): Array<RouteTarget<P>> {
   if (!value) return [];
@@ -91,6 +183,7 @@ export function normalizeTargets<P extends Configurable>(value: P | Array<RouteT
 /** Splits targets into the ones worth trying and the reasons the others were skipped. */
 export function selectTargets<P extends Configurable>(
   targets: Array<RouteTarget<P>>,
+  stage: string,
   breakers: CircuitBreakerRegistry = proxyCircuitBreakers,
 ): { usable: Array<RouteTarget<P>>; skipped: string[]; codes: FailureCodes } {
   const usable: Array<RouteTarget<P>> = [];
@@ -113,7 +206,7 @@ export function selectTargets<P extends Configurable>(
       codes.set(target, 'not_configured');
       continue;
     }
-    if (breakers.get(entryHealthKey({ provider: target.providerId })).isOpen()) {
+    if (isTargetCircuitOpen(breakers, stage, target)) {
       skipped.push(`${target.providerId}: circuit open after repeated failures (retrying in <30 s)`);
       codes.set(target, 'circuit_open');
       continue;
@@ -343,7 +436,7 @@ async function attempt<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: nu
   }
 }
 
-function retryAfterOf(err: unknown): number | undefined {
+export function retryAfterOf(err: unknown): number | undefined {
   const headers = (err as { headers?: Record<string, string> } | null)?.headers;
   const raw = headers?.['retry-after'] ?? headers?.['Retry-After'];
   const n = raw ? parseInt(raw, 10) : NaN;
@@ -378,6 +471,7 @@ export function runTargets<P, T>(
   const ignoreCooldown = !!cooldown && targets.every((t) => cooldown.isCoolingDown(entryOf(t)));
   // Every target rate-limited: try them anyway (the pause is a hint, a 503 without trying would be worse).
   const ignoreRateLimit = targets.every((t) => isRateLimited(t, breakers));
+  const healthOf = (t: RouteTarget<P>) => new TargetHealth(breakers, opts.stage, t);
 
   return new Promise((resolve, reject) => {
     let next = 0;
@@ -400,7 +494,7 @@ export function runTargets<P, T>(
     function onClientGone() {
       if (done) return;
       clientGone = true;
-      for (const t of inFlight.values()) breakers.get(entryHealthKey({ provider: t.providerId })).releaseProbe();
+      for (const t of inFlight.values()) healthOf(t).releaseProbe();
       fail(Object.assign(new Error('client disconnected'), { gatewayCode: 'client_gone', status: 499 }));
     }
     if (opts.signal?.aborted) { onClientGone(); return; }
@@ -422,7 +516,7 @@ export function runTargets<P, T>(
           codes.set(t, 'cooldown');
           continue;
         }
-        if (!breakers.get(entryHealthKey({ provider: t.providerId })).allowRequest()) {
+        if (!healthOf(t).allowRequest()) {
           failures.set(i, `${t.providerId}: circuit open after repeated failures (retrying in <30 s)`);
           codes.set(t, 'circuit_open');
           continue;
@@ -438,7 +532,7 @@ export function runTargets<P, T>(
       const controller = new AbortController();
       controllers.add(controller);
       inFlight.set(controller, t);
-      const breaker = breakers.get(entryHealthKey({ provider: t.providerId }));
+      const breaker = healthOf(t);
       let successorLaunched = false;
       const hedge = t.hedgeAfterMs && i + 1 < targets.length
         ? setTimeout(() => { if (!done && !successorLaunched) { successorLaunched = true; launchNext(); } }, t.hedgeAfterMs)
@@ -475,7 +569,7 @@ export function runTargets<P, T>(
           if (done) {
             // Aborted because another target won. A recovery probe that lost is a failed probe (keeps the circuit
             // open); otherwise a hedged loser says nothing about health.
-            if (!clientGone && breaker.getStats().state === 'half_open') breaker.recordFailure();
+            if (!clientGone && breaker.isHalfOpen()) breaker.recordFailure();
             return;
           }
           const status = statusOf(err);
@@ -489,7 +583,7 @@ export function runTargets<P, T>(
             breaker.releaseProbe();
           } else if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
           else {
-            breaker.recordFailure();
+            breaker.recordFailure(err);
             if (cooldown && !ignoreCooldown) cooldown.recordFailure(entryOf(t), COOLDOWN_ALLOWED_FAILS, COOLDOWN_MS);
           }
           const retryable = status !== null && status >= 500 && !(err as { skipRetry?: boolean }).skipRetry
@@ -522,7 +616,7 @@ export async function routeRequest<P extends Configurable, T>(
   fn: (target: RouteTarget<P>, signal: AbortSignal) => Promise<T>,
   opts: RunTargetsOptions & { notMounted?: string[] },
 ): Promise<{ result: T; target: RouteTarget<P>; headers: Record<string, string> }> {
-  const { usable, skipped: skippedNow, codes: skippedCodes } = selectTargets(candidates, opts.breakers);
+  const { usable, skipped: skippedNow, codes: skippedCodes } = selectTargets(candidates, opts.stage, opts.breakers);
   // Entries that were never mounted (missing key, deployments off) are part of the explanation too.
   const skipped = [...skippedNow, ...(opts.notMounted ?? []).filter(r => !skippedNow.includes(r))];
   if (usable.length === 0) throw new ProviderUnavailableError(skipped);

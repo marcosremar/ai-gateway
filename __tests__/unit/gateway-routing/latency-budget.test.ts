@@ -10,7 +10,7 @@ import { DeploymentLLMProvider } from '../../../src/deployments/inference-provid
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import { CooldownTracker } from '../../../src/gateway/providers/cloud/fallback';
 import type { LLMProvider } from '../../../src/gateway/providers/cloud/types';
-import { routeRequest, stageBudgetMs, type RouteTarget } from '../../../src/gateway/proxy/provider-routing';
+import { breakerKey, routeRequest, stageBudgetMs, type RouteTarget } from '../../../src/gateway/proxy/provider-routing';
 import { handleChatCompletions } from '../../../src/gateway/proxy/routes/chat-completions';
 import type { ProxyRequest } from '../../../src/gateway/proxy/types';
 import { parleRoutes } from './_parle-routes';
@@ -74,8 +74,8 @@ describe('circuit breaker', () => {
   it('the half-open recovery probe does not make the student wait: the fallback is hedged in, and a losing probe keeps the circuit open', async () => {
     let now = 0;
     const breakers = new CircuitBreakerRegistry({ failureThreshold: 1, resetTimeoutMs: 1_000, now: () => now });
-    breakers.get('deployment:tts').recordFailure();
-    expect(breakers.get('deployment:tts').getStats().state).toBe('open');
+    breakers.get(breakerKey('test', { providerId: 'deployment:tts' })).recordFailure();
+    expect(breakers.get(breakerKey('test', { providerId: 'deployment:tts' })).getStats().state).toBe('open');
     now = 2_000; // cooldown over → next request probes
     const dep = fake('deployment:tts', hang);
     const t0 = Date.now();
@@ -84,7 +84,7 @@ describe('circuit breaker', () => {
     expect(Date.now() - t0).toBeLessThan(500);
     expect(dep.call).toHaveBeenCalledTimes(1);
     await new Promise((r) => setTimeout(r, 10)); // the aborted probe settles right after the answer
-    expect(breakers.get('deployment:tts').getStats().state).toBe('open');
+    expect(breakers.get(breakerKey('test', { providerId: 'deployment:tts' })).getStats().state).toBe('open');
   });
 
   it('cold failures do not open the circuit; when the replica is ready, the very next request uses it', async () => {
@@ -104,7 +104,7 @@ describe('circuit breaker', () => {
       {}, undefined, undefined, undefined, undefined, undefined,
       { chatRoutes: { 'parle-llm': [{ providerId: 'deployment:parle-speech', provider: dep, model: 'q' }, { providerId: 'openrouter', provider: or, model: 'm' }] }, circuitBreakers: breakers, cooldownTracker });
     for (let i = 0; i < 6; i++) expect((await ask()).headers?.['X-Gateway-Fallback']).toBe('cold');
-    expect(breakers.get('deployment:parle-speech').getStats().state).toBe('closed');
+    expect(breakers.get(breakerKey('chat', { providerId: 'deployment:parle-speech' })).getStats().state).toBe('closed');
     ready = true;
     const res = await ask();
     expect(res.headers?.['X-Gateway-Provider']).toBe('deployment:parle-speech');

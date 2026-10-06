@@ -17,7 +17,7 @@ import { CooldownTracker } from '../../providers/cloud/fallback';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
 import {
   describeFailure, errorResponse, failureCode, type FailureCodes, isClientErrorStatus, originHeaders, proxyCircuitBreakers, ProviderUnavailableError, providerUnavailableResponse,
-  redactSecrets, runTargets, selectTargets, stageBudgetMs, isNeutralFailure,
+  redactSecrets, runTargets, selectTargets, stageBudgetMs, isNeutralFailure, TargetHealth, isRateLimited, markRateLimited, retryAfterOf,
 } from '../provider-routing';
 import { RequestCoalescer } from '../middleware/request-coalescer';
 import { ProviderSemaphores } from '../middleware/semaphore';
@@ -109,7 +109,7 @@ export async function handleChatCompletions(
     return { status: 404, body: { error: { message: `Model "${model}" not found`, type: 'invalid_request_error' } } };
   }
   const candidateTargets = candidates;
-  const { usable, skipped: skippedNow, codes: skippedCodes } = selectTargets(candidateTargets, breakers);
+  const { usable, skipped: skippedNow, codes: skippedCodes } = selectTargets(candidateTargets, 'chat', breakers);
   // Entries that were never mounted (e.g. OpenRouter without key) belong in the 503 explanation too.
   const skipped = [...skippedNow, ...(routing.unavailable?.[model] ?? []).filter(r => !skippedNow.includes(r))];
   if (usable.length === 0) return providerUnavailableResponse('chat', model, skipped);
@@ -404,9 +404,14 @@ async function openStream(
   const failures: string[] = [];
   const codes: FailureCodes = new Map();
   const deadline = Date.now() + budgetMs;
+  // Same rules as runTargets: a 429 pauses that one model (not the breaker), unless every target is paused.
+  const ignoreRateLimit = targets.every((t) => isRateLimited(t, breakers));
   for (const target of targets) {
-    const breaker = breakers.get(target.providerId);
+    const breaker = new TargetHealth(breakers, 'chat', target);
     if (Date.now() >= deadline) { failures.push(`${target.providerId}: not tried (stage time budget used up)`); codes.set(target, 'timeout'); continue; }
+    if (!ignoreRateLimit && isRateLimited(target, breakers)) {
+      failures.push(`${target.providerId}: rate limited, waiting for the upstream's Retry-After`); codes.set(target, 'rate_limited'); continue;
+    }
     if (!breaker.allowRequest()) { failures.push(`${target.providerId}: circuit open after repeated failures`); codes.set(target, 'circuit_open'); continue; }
     if (clientSignal?.aborted) throw clientGone();
     const abort = new AbortController();
@@ -446,7 +451,9 @@ async function openStream(
       const status = (err as { status?: unknown })?.status;
       if (isClientErrorStatus(typeof status === 'number' ? status : null)) throw err;
       const code = failureCode(err);
-      if (isNeutralFailure(code)) breaker.releaseProbe(); else breaker.recordFailure();
+      if (status === 429) { markRateLimited(target, retryAfterOf(err), breakers); breaker.releaseProbe(); }
+      else if (isNeutralFailure(code)) breaker.releaseProbe();
+      else breaker.recordFailure(err);
       failures.push(describeFailure(target.providerId, err));
       codes.set(target, code);
       log.warn(`stream: ${describeFailure(target.providerId, err)} → next provider`);
@@ -476,6 +483,7 @@ function buildSSEStream(
   const created = Math.floor(Date.now() / 1000);
   const startMs = Date.now();
   const model = opened.target.model ?? 'unknown';
+  const health = new TargetHealth(breakers, 'chat', opened.target);
 
   // Track the active generator from outside `start()` so cancel() (fired when the consumer disconnects) can stop
   // it. Without this, a client that drops mid-stream leaves the upstream generator running and the gateway keeps
@@ -543,12 +551,12 @@ function buildSSEStream(
         }
         controller.enqueue(enc.encode('data: [DONE]\n\n'));
         controller.close();
-        if (!ended) breakers.get(opened.target.providerId).recordSuccess();
+        if (!ended) health.recordSuccess();
         finish(true);
       } catch (err) {
         // A provider that breaks mid-answer is a provider failure (the client leaving is not): it counts toward the
         // breaker like a failure before the first token does.
-        if (!ended) breakers.get(opened.target.providerId).recordFailure();
+        if (!ended) health.recordFailure(err);
         const msg = redactSecrets(err instanceof Error ? err.message : 'Streaming error');
         try {
           controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: msg, type: 'server_error' } })}\n\n`));
@@ -563,7 +571,7 @@ function buildSSEStream(
       // Consumer disconnected. Abort the upstream request at once: `return()` on a generator that is awaiting the next
       // token only runs after that token arrives, so a slow provider kept streaming (and billing) until then.
       opened.abort?.();
-      if (!ended && opened.gen) breakers.get(opened.target.providerId).releaseProbe();
+      if (!ended && opened.gen) health.releaseProbe();
       if (activeGen) {
         try { void activeGen.return?.(undefined); } catch { /* no-op */ }
         activeGen = null;

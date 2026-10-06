@@ -72,6 +72,7 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
       ...(input.network ? { publicIpIds: [input.network.ipId], securityGroupId: input.network.groupId } : {}),
       ...(input.files && Object.keys(input.files).length ? { userDataFiles: input.files } : {}),
       ...(this.opts.projectId ? { projectId: this.opts.projectId } : {}),
+      ...(input.onCreated ? { onServerCreated: input.onCreated } : {}),
     }, this.credentials);
     const machine = toMachine(inst, spec.name);
     if (!machine) throw new Error('scaleway returned an instance without tags');

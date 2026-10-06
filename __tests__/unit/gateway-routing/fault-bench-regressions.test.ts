@@ -10,7 +10,7 @@ import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/cir
 import { OpenAICompatLLMProvider } from '../../../src/gateway/providers/cloud/openai-compat/openai-compat-llm';
 import { clearClientCache } from '../../../src/gateway/providers/cloud/openai-compat/client-cache';
 import type { ChatRequest, LLMProvider, STTProvider } from '../../../src/gateway/providers/cloud/types';
-import { failureCode, runTargets } from '../../../src/gateway/proxy/provider-routing';
+import { breakerKey, failureCode, runTargets } from '../../../src/gateway/proxy/provider-routing';
 import { handleChatCompletions } from '../../../src/gateway/proxy/routes/chat-completions';
 import { handleAudioTranscriptions, _resetSttCache } from '../../../src/gateway/proxy/routes/audio-transcriptions';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
@@ -160,7 +160,7 @@ describe('1) a provider that always breaks mid-stream opens its breaker', () => 
       expect(text).toContain('Provider disconnected');
       expect(text).not.toContain('[DONE]');
     }
-    expect(breakers.get('openrouter').getStats().state).toBe('open');
+    expect(breakers.get(breakerKey('chat', { providerId: 'openrouter', model: 'm' })).getStats().state).toBe('open');
   });
 });
 
@@ -211,8 +211,8 @@ describe('11) a moderation 403 says nothing about the provider health', () => {
       expect(out.result).toBe('ok');
       expect(out.codes.get([...out.codes.keys()][0])).toBe('moderation');
     }
-    expect(breakers.get('openrouter').getStats().state).toBe('closed');
-    expect(breakers.get('openrouter').getStats().failures).toBe(0);
+    expect(breakers.get(breakerKey('llm', { providerId: 'openrouter', model: 'a' })).getStats().state).toBe('closed');
+    expect(breakers.get(breakerKey('llm', { providerId: 'openrouter', model: 'a' })).getStats().failures).toBe(0);
   });
 });
 
