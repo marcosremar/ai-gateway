@@ -6,6 +6,7 @@
 
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse, TTSProvider, TTSRequest, TTSResponse, TTSAudioFormat, VoiceInfo, LLMProvider, ChatRequest, ChatResponse } from '../types';
+import { applyWhisperSegments } from '../stt-segments';
 import { prepareAudioFile } from '../openai-compat/audio-utils';
 
 const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
@@ -76,6 +77,7 @@ export class SelfHostedSTTProvider implements STTProvider {
     if ('duration' in transcription && transcription.duration) {
       response.duration = transcription.duration as number;
     }
+    applyWhisperSegments(response, transcription);
     return response;
   }
 }

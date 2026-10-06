@@ -122,8 +122,14 @@ class SttBatcher:
         segments, info = self.model.transcribe(job["audio"], language=job["language"], beam_size=self.beam,
                                                condition_on_previous_text=False, vad_filter=False,
                                                without_timestamps=True, initial_prompt=job["prompt"])
+        segments = list(segments)
         text = " ".join(s.text.strip() for s in segments).strip()
-        return {"text": text, "language": info.language, "duration": round(info.duration, 3)}
+        result = {"text": text, "language": info.language, "duration": round(info.duration, 3)}
+        if segments:  # metadata for the gateway's hallucination filter (worst case over the segments)
+            result["no_speech_prob"] = round(max(s.no_speech_prob for s in segments), 4)
+            result["avg_logprob"] = round(sum(s.avg_logprob for s in segments) / len(segments), 4)
+            result["compression_ratio"] = round(max(s.compression_ratio for s in segments), 4)
+        return result
 
     def _decode(self, jobs: list) -> list:
         language, prompt = jobs[0]["language"], jobs[0]["prompt"]
@@ -151,5 +157,9 @@ class SttBatcher:
                 self.stats["fallbacks"] += 1
                 results.append(self._with_oom_retry(lambda job=job: self._one(job)))
                 continue
-            results.append({"text": text, "language": language, "duration": round(len(job["audio"]) / SAMPLE_RATE, 3)})
+            # no_speech_prob / avg_logprob / compression_ratio ride along: the gateway's hallucination filter reads them
+            # (src/stt-hallucination-filter.ts). Radford et al. 2023, ICML, arXiv:2212.04356.
+            results.append({"text": text, "language": language, "duration": round(len(job["audio"]) / SAMPLE_RATE, 3),
+                            "no_speech_prob": round(float(out["no_speech_prob"]), 4), "avg_logprob": round(float(out["avg_logprob"]), 4),
+                            "compression_ratio": round(float(get_compression_ratio(text)), 4) if text else 0.0})
         return results

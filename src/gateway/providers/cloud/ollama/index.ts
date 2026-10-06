@@ -20,6 +20,7 @@ import type {
   ChatRequest,
   ChatResponse,
 } from '../types';
+import { applyWhisperSegments } from '../stt-segments';
 import { prepareAudioFile } from '../openai-compat/audio-utils';
 import { OLLAMA_STT_MODELS } from './models';
 
@@ -130,6 +131,7 @@ export class OllamaSTTProvider implements STTProvider {
     if ('duration' in transcription && transcription.duration) {
       response.duration = transcription.duration as number;
     }
+    applyWhisperSegments(response, transcription);
     if ('words' in transcription && Array.isArray(transcription.words)) {
       response.words = (transcription.words as Array<{ word: string; start: number; end: number }>).map((w) => ({
         word: w.word, start: w.start, end: w.end,

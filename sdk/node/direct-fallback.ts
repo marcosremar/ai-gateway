@@ -6,6 +6,8 @@
  * only and are sent only to their own provider's `baseUrl`. Server-side clients only: never ship a plan to a browser.
  */
 
+import { filterHallucinations } from '../../src/stt-hallucination-filter';
+import type { STTSegment } from '../../src/gateway/providers/cloud/types';
 import { exchange, GatewayError } from './gateway-http';
 import { chatStreamOf } from './gateway-streams';
 import type {
@@ -134,12 +136,23 @@ export class DirectCaller {
       form.set('model', entry.model);
       if (req.language) form.set('language', req.language);
       if (req.prompt) form.set('prompt', req.prompt);
-      form.set('response_format', req.responseFormat ?? 'json');
+      // The gateway filters hallucinations; this path runs when the gateway is down, so it filters here, with the same
+      // library (src/stt-hallucination-filter.ts). Whisper models are asked for segments so the metadata layer works.
+      const filterOn = req.filterHallucinations !== false && !['0', 'false', 'off'].includes((process.env.STT_HALLUCINATION_FILTER ?? '').toLowerCase());
+      const askVerbose = filterOn && !req.responseFormat && /whisper/i.test(entry.model);
+      form.set('response_format', askVerbose ? 'verbose_json' : req.responseFormat ?? 'json');
       return this.send(cred, entry, '/audio/transcriptions', { body: form, json: false }, req, timeoutMs, async (res) => {
         const raw = await res.text();
         let body: Record<string, unknown>;
         try { body = JSON.parse(raw) as Record<string, unknown>; } catch { body = { text: raw }; }
-        return { ...body, text: String(body.text ?? ''), served: directServed(entry) };
+        const text = String(body.text ?? '');
+        if (!filterOn) return { ...body, text, served: directServed(entry) };
+        const out = filterHallucinations({ text, ...(Array.isArray(body.segments) ? { segments: body.segments as STTSegment[] } : {}) }, req.language);
+        // Only what the caller asked for comes back: the segments we requested for the filter are not forwarded.
+        const rest = { ...body };
+        if (askVerbose) delete rest.segments;
+        const visible = askVerbose ? rest : body;
+        return { ...visible, text: out.text, ...(out.filtered ? { filtered: out.reasonCodes } : {}), served: directServed(entry) };
       });
     });
   }

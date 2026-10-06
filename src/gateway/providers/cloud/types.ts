@@ -42,6 +42,8 @@ export interface STTRequest {
   responseFormat?: 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt';
   temperature?: number;
   wordTimestamps?: boolean;
+  /** Ask the provider for segment metadata (no_speech_prob…) when it can give it: the gateway's hallucination filter reads it. */
+  wantSegments?: boolean;
   signal?: AbortSignal;
   /**
    * Endpointing / VAD configuration. Provider-native turn detection knobs.

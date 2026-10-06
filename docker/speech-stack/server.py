@@ -294,7 +294,8 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
     async def run():
         try:
             heard = await asyncio.to_thread(transcribe_sync, audio, lang, cfg.get("stt_prompt"))
-            yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": ms()})
+            meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio") if k in heard}
+            yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": ms(), **meta})
             template = cfg.get("user_template") or ""
             user = template.replace("{{transcript}}", heard["text"]) if "{{transcript}}" in template else heard["text"]
             messages = ([{"role": "system", "content": cfg["system"]}] if cfg.get("system") else []) \

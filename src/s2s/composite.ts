@@ -26,6 +26,8 @@ export interface S2SConfig {
   max_tokens?: number;
   temperature?: number;
   stt_prompt?: string;
+  /** `false` skips the STT hallucination filter for this turn (QA only; default on, `STT_HALLUCINATION_FILTER=0` turns it off). */
+  filter_hallucinations?: boolean;
   /** Ask the LLM for JSON (`{"type":"json_object"}`): only `speak_field` is voiced, the whole JSON comes in `done`. */
   response_format?: { type: string };
   /** Field of the JSON answer that is spoken (e.g. "utterance"). Without it the whole answer is spoken. */
@@ -47,7 +49,12 @@ export function userTurn(cfg: S2SConfig, transcript: string): string {
   return cfg.user_template?.includes(TRANSCRIPT_SLOT) ? cfg.user_template.split(TRANSCRIPT_SLOT).join(transcript) : transcript;
 }
 
-export interface StageAnswer { provider: string | null; fallback: string | null }
+export interface StageAnswer {
+  provider: string | null;
+  fallback: string | null;
+  /** STT only: reason codes when the gateway's hallucination filter emptied or trimmed the transcript. */
+  filtered?: string[];
+}
 
 export interface SpokenAudio extends StageAnswer {
   /** Audio bytes as they arrive: WAV (header parsed here), raw PCM, or an encoded format reported as such. */
@@ -127,6 +134,7 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
     const heard = await stages.transcribe(opts.audio, opts.contentType, config, signal);
     transcript = heard.text.trim();
     opts.emitEvent({ type: 'transcript', text: transcript, stt_ms: ms(), at_ms: ms(), provider: heard.provider, fallback: heard.fallback });
+    if (heard.filtered?.length) opts.emitEvent({ type: 'filtered', stage: 'stt', reasons: heard.filtered });
   }
   if (!transcript) {
     opts.emitEvent({ type: 'done', reply: '', transcript: '', first_audio_ms: null, total_ms: ms(), empty: true });
