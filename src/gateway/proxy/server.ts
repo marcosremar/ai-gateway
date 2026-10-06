@@ -44,6 +44,24 @@ class BodyTooLargeError extends Error {
   }
 }
 
+/** How long a refused upload may keep sending after the 413 before the socket is torn down. */
+const LINGER_MS = 5_000;
+
+/**
+ * Close after answering a request whose body is still arriving, the way nginx does (lingering close): send FIN and keep
+ * draining instead of destroying. Destroying with unread data in the receive buffer makes the kernel send an RST, which
+ * can wipe the 413 from the client's buffer before it is read (ECONNRESET, flaky fault bench item 21). A timer caps the
+ * drain so a client that never stops cannot hold the socket.
+ */
+function lingeringClose(req: IncomingMessage): void {
+  const socket = req.socket;
+  req.resume();
+  socket.end();
+  const timer = setTimeout(() => socket.destroy(), LINGER_MS);
+  timer.unref();
+  socket.once('close', () => clearTimeout(timer));
+}
+
 function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer> {
   const inner = new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -812,7 +830,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
       if (err instanceof BodyTooLargeError) {
         res.setHeader('Connection', 'close');
-        res.on('finish', () => req.destroy());
+        res.on('finish', () => lingeringClose(req));
         sendError(res, 413, err.message, requestId);
         return;
       }
