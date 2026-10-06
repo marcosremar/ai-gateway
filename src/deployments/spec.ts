@@ -3,7 +3,7 @@
  * caller-facing message on bad input; the HTTP layer maps it to 400.
  */
 
-import type { DeploymentSpec, ExposedPort, Profile, ProfileSpec } from './types';
+import type { DeploymentProvider, DeploymentSpec, ExposedPort, PlacementCandidate, Profile, ProfileSpec } from './types';
 
 export class SpecError extends Error {}
 
@@ -11,6 +11,12 @@ export const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const IMAGE_RE = /^[a-z0-9][a-z0-9._\-/:@]{0,254}$/i;
 const ZONE_RE = /^[a-z]{2}-[a-z]{3}-\d$/;
 const TYPE_RE = /^[A-Z0-9][A-Z0-9-]{1,40}$/i;
+/** Vast GPU names carry spaces (`RTX 5090`, `RTX A6000`); Scaleway types never do (checked per provider in buildSpec). */
+const MACHINE_RE = /^[A-Z0-9][A-Z0-9 _-]{1,40}$/i;
+const COUNTRY_RE = /^[A-Z]{2}$/;
+const PROVIDERS: readonly DeploymentProvider[] = ['scaleway', 'vast'];
+/** Placement ladder length: enough for every zone × a few types, small enough to walk in one create. */
+export const MAX_CANDIDATES = 20;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const PATH_RE = /^\/[A-Za-z0-9._~\-/]*$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -97,8 +103,32 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction',
+  'idleAction', 'candidates', 'near', 'allowFar',
 ]);
+const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
+
+function providerOf(value: unknown, field: string): DeploymentProvider {
+  if (!PROVIDERS.includes(value as DeploymentProvider)) throw new SpecError(`${field} must be 'scaleway' or 'vast'`);
+  return value as DeploymentProvider;
+}
+
+function candidatesOf(raw: unknown): PlacementCandidate[] {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_CANDIDATES) {
+    throw new SpecError(`candidates must list 1–${MAX_CANDIDATES} entries`);
+  }
+  return raw.map((entry, i) => {
+    const f = `candidates[${i}]`;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new SpecError(`${f} must be an object`);
+    const c = entry as Record<string, unknown>;
+    for (const key of Object.keys(c)) if (!CANDIDATE_FIELDS.has(key)) throw new SpecError(`${f}: unknown field '${key}'`);
+    return {
+      ...(c.provider !== undefined ? { provider: providerOf(c.provider, `${f}.provider`) } : {}),
+      ...(c.zone !== undefined ? { zone: str(c.zone, `${f}.zone`, ZONE_RE) } : {}),
+      machineType: str(c.machineType, `${f}.machineType`, MACHINE_RE),
+      maxEurPerHour: num(c.maxEurPerHour, `${f}.maxEurPerHour`, 0.001, 50),
+    };
+  });
+}
 
 /** The gateway's own probe port on an exposed replica (80/443 stay with the app). */
 export const PROBE_PORT = 8089;
@@ -111,9 +141,12 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     if (!KNOWN_FIELDS.has(key)) throw new SpecError(`unknown field '${key}'`);
   }
   const out: ProfileSpec = {};
-  if (input.provider !== undefined) {
-    if (input.provider !== 'scaleway') throw new SpecError("provider must be 'scaleway' (the only one supported for now)");
-    out.provider = 'scaleway';
+  if (input.provider !== undefined) out.provider = providerOf(input.provider, 'provider');
+  if (input.candidates !== undefined) out.candidates = candidatesOf(input.candidates);
+  if (input.near !== undefined) out.near = str(input.near, 'near', COUNTRY_RE);
+  if (input.allowFar !== undefined) {
+    if (typeof input.allowFar !== 'boolean') throw new SpecError('allowFar must be a boolean');
+    out.allowFar = input.allowFar;
   }
   if (input.image !== undefined) out.image = str(input.image, 'image', IMAGE_RE);
   if (input.port !== undefined) out.port = int(input.port, 'port', 1, 65535);
@@ -167,7 +200,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     out.minActiveReplicas = int(input.minActiveReplicas, 'minActiveReplicas', 1, MAX_REPLICAS_PER_DEPLOYMENT);
   }
   if (input.healthPath !== undefined) out.healthPath = str(input.healthPath, 'healthPath', PATH_RE);
-  if (input.machineType !== undefined) out.machineType = str(input.machineType, 'machineType', TYPE_RE);
+  if (input.machineType !== undefined) out.machineType = str(input.machineType, 'machineType', MACHINE_RE);
   if (input.zone !== undefined) out.zone = str(input.zone, 'zone', ZONE_RE);
   if (input.osImageId !== undefined) out.osImageId = str(input.osImageId, 'osImageId', UUID_RE);
   if (input.volumeGb !== undefined) out.volumeGb = int(input.volumeGb, 'volumeGb', 10, 2000);
@@ -249,9 +282,47 @@ export function buildSpec(
   }
   if (!merged.image && !merged.bootScript) throw new SpecError('image or bootScript is required (or pass a profile that sets one)');
   if (!merged.port) throw new SpecError('port is required (or pass a profile that sets it)');
-  if (merged.gpu === undefined) merged.gpu = isGpuMachineType(merged.machineType!);
+  // Vast rents GPU hosts only.
+  if (merged.gpu === undefined) merged.gpu = merged.provider === 'vast' || isGpuMachineType(merged.machineType!);
   const spec = merged as DeploymentSpec;
   if (spec.minReplicas > spec.maxReplicas) throw new SpecError('minReplicas cannot exceed maxReplicas');
-  if (spec.gpu && !isGpuMachineType(spec.machineType)) throw new SpecError(`gpu: true needs a GPU machineType (got ${spec.machineType})`);
+  if (spec.provider === 'scaleway') {
+    if (!TYPE_RE.test(spec.machineType)) throw new SpecError('machineType is invalid');
+    if (spec.gpu && !isGpuMachineType(spec.machineType)) throw new SpecError(`gpu: true needs a GPU machineType (got ${spec.machineType})`);
+  }
+  for (const [i, c] of (spec.candidates ?? []).entries()) {
+    if ((c.provider ?? spec.provider) === 'scaleway' && !TYPE_RE.test(c.machineType)) {
+      throw new SpecError(`candidates[${i}].machineType is not a Scaleway type`);
+    }
+  }
+  // A reserved IP and firewall are zonal: an exposed deployment stays in its one zone.
+  if (spec.exposure && spec.candidates?.length) throw new SpecError('candidates cannot be combined with exposure (the reserved IP is zonal)');
+  if (usesVast(spec)) checkVastSpec(spec);
   return spec;
+}
+
+/** The spec may land on Vast (its provider, or one of its candidates). */
+export function usesVast(spec: Pick<DeploymentSpec, 'provider' | 'candidates'>): boolean {
+  return spec.provider === 'vast' || (spec.candidates ?? []).some(c => (c.provider ?? spec.provider) === 'vast');
+}
+
+/** The spec may land on Scaleway. */
+export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates'>): boolean {
+  return spec.candidates?.length
+    ? spec.candidates.some(c => (c.provider ?? spec.provider) === 'scaleway')
+    : spec.provider === 'scaleway';
+}
+
+/**
+ * Vast runs ONE container per host (no systemd, no Docker-in-Docker): the replica is `image` as the container with
+ * `bootScript` as its onstart, the app on `127.0.0.1:<port>`. No user_data metadata service (no `files`), no reserved
+ * IP/firewall (no `exposure`), no power-off parking (no `idleAction: 'stop'`).
+ */
+function checkVastSpec(spec: DeploymentSpec): void {
+  if (!spec.bootScript || !spec.image) {
+    throw new SpecError('vast replicas need bootScript and image (the base container image the script runs in)');
+  }
+  if (spec.files && Object.keys(spec.files).length) throw new SpecError('files are not supported on vast (no user_data service)');
+  if (spec.exposure) throw new SpecError('exposure is not supported on vast');
+  if (spec.idleAction === 'stop') throw new SpecError("idleAction 'stop' is not supported on vast");
 }

@@ -14,9 +14,11 @@ import { replicaCloudInit } from './cloud-init';
 import { packFiles } from './file-pack';
 import { planReplicas, replicaPhase, type ObservedReplica } from './planner';
 import { BUILTIN_PROFILES } from './profiles';
-import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES } from './spec';
+import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway, usesVast } from './spec';
+import { placeReplica, PlacementError } from './placement-walk';
 import type {
-  DeploymentBackend, DeploymentRecord, DeploymentSpec, DeploymentStore, DeploymentView, Profile, ReplicaMachine, ReplicaProbe,
+  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, DeploymentStore, DeploymentView, Profile, ReplicaMachine,
+  ReplicaProbe,
 } from './types';
 
 export class DeploymentError extends Error {
@@ -41,10 +43,15 @@ interface Runtime {
   waiters: Set<() => void>;
   /** Parked replicas (`idleAction: 'stop'`) being powered back on, by id → when: not started twice while the list lags. */
   starting: Map<string, number>;
+  /** Where the last create landed (or failed) and which candidates were skipped. */
+  lastPlacement: string | null;
 }
 
 export interface ControllerOptions {
-  backend: DeploymentBackend;
+  /** One backend per provider (Scaleway, Vast); at least one. */
+  backends?: Partial<Record<DeploymentProvider, DeploymentBackend>>;
+  /** Single-backend shorthand (kept for callers and tests from before `backends`). */
+  backend?: DeploymentBackend;
   store: DeploymentStore;
   probe: ReplicaProbe;
   namespace?: string;
@@ -85,6 +92,9 @@ export class DeploymentController {
   private rerun = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastListError: string | null = null;
+  private readonly backends: Partial<Record<DeploymentProvider, DeploymentBackend>>;
+  /** Provider of a machine that does not say (fakes, records from before `provider`). */
+  private readonly defaultProvider: DeploymentProvider;
   readonly namespace: string;
   private readonly now: () => number;
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
@@ -94,6 +104,20 @@ export class DeploymentController {
     if (!NAME_RE.test(this.namespace)) throw new Error(`invalid deployments namespace '${this.namespace}'`);
     this.now = opts.now ?? Date.now;
     this.log = opts.log ?? (() => {});
+    this.backends = opts.backends ?? (opts.backend ? { [opts.backend.provider]: opts.backend } : {});
+    const providers = Object.keys(this.backends) as DeploymentProvider[];
+    if (!providers.length) throw new Error('deployments controller needs at least one backend');
+    this.defaultProvider = providers.includes('scaleway') ? 'scaleway' : providers[0];
+  }
+
+  private backendOf(provider: DeploymentProvider | undefined): DeploymentBackend {
+    const backend = this.backends[provider ?? this.defaultProvider];
+    if (!backend) throw new Error(`no backend configured for provider '${provider}'`);
+    return backend;
+  }
+
+  private providerOf(m: ReplicaMachine): DeploymentProvider {
+    return m.provider ?? this.defaultProvider;
   }
 
   async init(): Promise<void> {
@@ -119,6 +143,7 @@ export class DeploymentController {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
+      lastPlacement: null,
     };
   }
 
@@ -153,7 +178,7 @@ export class DeploymentController {
   ): Promise<{ view: DeploymentView; created: boolean }> {
     const existing = this.deployments.get(name);
     const spec = buildSpec(name, body, { profiles: this.profiles, previous: existing?.record.spec });
-    const initBytes = Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32)));
+    const initBytes = usesScaleway(spec) ? Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32))) : 0;
     if (initBytes > USER_DATA_KEY_MAX_BYTES) {
       throw new SpecError(`generated cloud-init is ${initBytes} bytes; Scaleway takes at most ${USER_DATA_KEY_MAX_BYTES} (shrink bootScript/env)`);
     }
@@ -195,7 +220,7 @@ export class DeploymentController {
   private async releaseNetwork(name: string, network: NonNullable<DeploymentRecord['network']>): Promise<void> {
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
-        await this.opts.backend.releaseNetwork?.(network);
+        await this.backendOf('scaleway').releaseNetwork?.(network);
         this.log('deployments: released network', { deployment: name, ip: network.ip });
         return;
       } catch (err) {
@@ -365,32 +390,41 @@ export class DeploymentController {
   }
 
   private async reconcileOnce(): Promise<void> {
-    let listed: ReplicaMachine[];
-    try {
-      listed = await this.opts.backend.listReplicas(this.namespace);
-      this.lastListError = null;
-    } catch (err) {
-      // A failed list must never read as "nothing is running" (that would create duplicates).
-      this.lastListError = err instanceof Error ? err.message : String(err);
-      this.log('deployments: list failed', { error: this.lastListError });
-      return;
-    }
+    // Each provider lists on its own. A failed list must never read as "nothing is running" (that would create
+    // duplicates): that provider's known machines are kept as they were, and deployments that may land on it
+    // neither create nor release this tick; the other providers' deployments carry on.
+    const listed: ReplicaMachine[] = [];
+    const failed = new Set<DeploymentProvider>();
+    const errors: string[] = [];
+    await Promise.all((Object.entries(this.backends) as Array<[DeploymentProvider, DeploymentBackend]>).map(async ([provider, backend]) => {
+      try {
+        listed.push(...(await backend.listReplicas(this.namespace)).map(m => ({ ...m, provider })));
+      } catch (err) {
+        failed.add(provider);
+        errors.push(`${provider}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }));
+    this.lastListError = errors.length ? errors.sort().join('; ') : null;
+    if (errors.length) this.log('deployments: list failed', { error: this.lastListError });
+    if (failed.size === Object.keys(this.backends).length) return;
+    const unlisted = this.machines.filter(m => failed.has(this.providerOf(m)));
     // Keep machines we just created that the provider list does not show yet.
-    const recent = this.machines.filter(m => !listed.some(l => l.id === m.id) && this.now() - m.createdAt < 120_000
-      && this.deployments.has(m.deployment));
+    const recent = this.machines.filter(m => !failed.has(this.providerOf(m)) && !listed.some(l => l.id === m.id)
+      && this.now() - m.createdAt < 120_000 && this.deployments.has(m.deployment));
     // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
     this.machines = [...listed.map((l) => {
       const known = this.machines.find(m => m.id === l.id);
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
-    }), ...recent];
+    }), ...recent, ...unlisted];
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
 
-    const orphans = this.machines.filter(m => !this.deployments.has(m.deployment));
+    const orphans = this.machines.filter(m => !this.deployments.has(m.deployment) && !failed.has(this.providerOf(m)));
     for (const m of orphans) await this.release(m, 'orphan');
 
     await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment) && !this.parkedNow(m)).map(m => this.probeOne(m)));
 
     for (const [name, rt] of this.deployments) {
+      if (this.touchesFailed(rt.record.spec, failed)) continue;
       const all = this.machines.filter(m => m.deployment === name);
       // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
       const parked = rt.record.spec.idleAction === 'stop' ? all.filter(m => isParked(m)) : [];
@@ -425,6 +459,13 @@ export class DeploymentController {
     }
   }
 
+  /** The deployment may have (or create) machines on a provider whose list just failed. */
+  private touchesFailed(spec: DeploymentSpec, failed: Set<DeploymentProvider>): boolean {
+    if (!failed.size) return false;
+    return (failed.has('scaleway') && usesScaleway(spec)) || (failed.has('vast') && usesVast(spec))
+      || this.machines.some(m => m.deployment === spec.name && failed.has(this.providerOf(m)));
+  }
+
   private parkedNow(m: ReplicaMachine): boolean {
     return this.deployments.get(m.deployment)?.record.spec.idleAction === 'stop' && isParked(m);
   }
@@ -447,7 +488,7 @@ export class DeploymentController {
   private async release(m: ReplicaMachine, reason: string): Promise<void> {
     this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason });
     try {
-      await this.opts.backend.releaseReplica(m);
+      await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
       this.machines = this.machines.filter(x => x.id !== m.id);
       this.probes.delete(m.id);
     } catch (err) {
@@ -460,7 +501,7 @@ export class DeploymentController {
   private async parkReplica(m: ReplicaMachine): Promise<void> {
     this.log('deployments: parking replica (power off)', { deployment: m.deployment, id: m.id });
     try {
-      await this.opts.backend.stopReplica!(m);
+      await this.backendOf(this.providerOf(m)).stopReplica!(m);
       this.probes.delete(m.id);
     } catch (err) {
       const rt = this.deployments.get(m.deployment);
@@ -472,7 +513,7 @@ export class DeploymentController {
     rt.starting.set(m.id, this.now());
     this.log('deployments: powering parked replica on', { deployment: m.deployment, id: m.id });
     try {
-      await this.opts.backend.startReplica!(m);
+      await this.backendOf(this.providerOf(m)).startReplica!(m);
     } catch (err) {
       rt.lastError = `start ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -485,9 +526,9 @@ export class DeploymentController {
   }
 
   /** The spec as the machine sees it: the provider's own registry credentials when the caller sent none. */
-  private withRegistryAuth(spec: DeploymentSpec): DeploymentSpec {
+  private withRegistryAuth(backend: DeploymentBackend, spec: DeploymentSpec): DeploymentSpec {
     if (spec.registryAuth || spec.bootScript) return spec;
-    const auth = this.opts.backend.registryAuthFor?.(spec.image);
+    const auth = backend.registryAuthFor?.(spec.image);
     return auth ? { ...spec, registryAuth: auth } : spec;
   }
 
@@ -502,26 +543,20 @@ export class DeploymentController {
     rt.creating++;
     void (async () => {
       try {
-        const price = await this.opts.backend.hourlyPrice(spec.zone, spec.machineType);
-        if (price == null) throw new Error(`${spec.machineType} is not sold in ${spec.zone}`);
-        if (price > spec.maxEurPerHour) {
-          throw new Error(`${spec.machineType} costs €${price}/h in ${spec.zone}, above maxEurPerHour €${spec.maxEurPerHour}`);
-        }
-        this.log('deployments: creating replica', { deployment: spec.name, type: spec.machineType, zone: spec.zone, price });
-        const network = spec.exposure ? await this.networkOf(rt) : undefined;
-        const machine = await this.opts.backend.createReplica({
-          spec, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
-          cloudInit: replicaCloudInit(this.withRegistryAuth(spec), rt.record.replicaToken),
-          ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
+        const { machine, price, placement } = await placeReplica({
+          spec, log: this.log, backendFor: (p) => this.backends[p],
+          create: (backend, placed) => this.createOn(rt, backend, placed),
         });
         if (this.deployments.get(spec.name) !== rt) {
-          await this.opts.backend.releaseReplica(machine); // deleted while creating
+          await this.backendOf(this.providerOf(machine)).releaseReplica(machine); // deleted while creating
           return;
         }
         this.machines.push({ ...machine, pricePerHour: machine.pricePerHour ?? price });
+        rt.lastPlacement = placement;
         rt.createFailures = 0;
         rt.lastError = null;
       } catch (err) {
+        if (err instanceof PlacementError) rt.lastPlacement = err.placement;
         rt.lastError = `create: ${err instanceof Error ? err.message : String(err)}`;
         rt.backoffUntil = this.now() + CREATE_BACKOFF_MS[Math.min(rt.createFailures, CREATE_BACKOFF_MS.length - 1)];
         rt.createFailures++;
@@ -532,10 +567,23 @@ export class DeploymentController {
     })();
   }
 
+  /** One create on one backend, the spec already narrowed to one place (zone, type, cap). */
+  private async createOn(rt: Runtime, backend: DeploymentBackend, spec: DeploymentSpec): Promise<ReplicaMachine> {
+    this.log('deployments: creating replica', { deployment: spec.name, provider: backend.provider, type: spec.machineType, zone: spec.zone });
+    const network = spec.exposure ? await this.networkOf(rt, backend) : undefined;
+    const machine = await backend.createReplica({
+      spec, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
+      // Vast builds its own init (`vastReplicaInit`) from spec + token; Scaleway takes this cloud-init as user_data.
+      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), rt.record.replicaToken) : '',
+      ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
+    });
+    return { ...machine, provider: backend.provider };
+  }
+
   /** Reserved IP + firewall of an exposed deployment, created once and kept in the record (it outlives replicas). */
-  private async networkOf(rt: Runtime): Promise<NonNullable<DeploymentRecord['network']>> {
-    if (!this.opts.backend.ensureNetwork) throw new Error(`provider ${this.opts.backend.provider} cannot expose a deployment`);
-    const network = await this.opts.backend.ensureNetwork(rt.record.spec, this.namespace, rt.record.network);
+  private async networkOf(rt: Runtime, backend: DeploymentBackend): Promise<NonNullable<DeploymentRecord['network']>> {
+    if (!backend.ensureNetwork) throw new Error(`provider ${backend.provider} cannot expose a deployment`);
+    const network = await backend.ensureNetwork(rt.record.spec, this.namespace, rt.record.network);
     if (JSON.stringify(network) !== JSON.stringify(rt.record.network)) {
       rt.record = { ...rt.record, network };
       await this.opts.store.saveDeployment(rt.record);
@@ -595,6 +643,7 @@ export class DeploymentController {
       app: rt.record.app ?? null,
       appImage: rt.record.appImage ?? null,
       publicIp: rt.record.network?.ip ?? null,
+      lastPlacement: rt.lastPlacement,
     };
   }
 }

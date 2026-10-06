@@ -88,7 +88,7 @@ if (routeWorkloadRequest) {
   prefixRoutes.push({ prefix: '/v1/workloads', handler: routeWorkloadRequest });
 }
 
-// Deployments: Docker image → autoscaled replicas on Scaleway (enabled when SCW_SECRET_KEY is set).
+// Deployments: Docker image → autoscaled replicas on Scaleway and/or Vast (enabled when SCW_SECRET_KEY or VAST_API_KEY is set).
 const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
@@ -111,7 +111,7 @@ if (deployments) {
   process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
   log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
 } else {
-  log.log({}, 'Deployments disabled (no SCW_SECRET_KEY)');
+  log.log({}, 'Deployments disabled (no SCW_SECRET_KEY / VAST_API_KEY)');
 }
 
 // Providers: only the configured ones are mounted. Each app sends its own aliases (PUT /v1/apps/:app/routes: a

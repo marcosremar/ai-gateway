@@ -1,10 +1,12 @@
-# Deployments — a Docker image behind an autoscaled endpoint (Scaleway)
+# Deployments — a Docker image behind an autoscaled endpoint (Scaleway, Vast)
 
 Register a Docker image once; the gateway rents Scaleway machines for it, scales them with traffic (down to zero),
 and forwards requests to a ready replica. Other sites only see `https://<gateway>/v1/deployments/<name>/invoke/...`.
 
 Code: `src/deployments/` (pure planner in `planner.ts`, loop in `controller.ts`, HTTP in `http.ts`, boot script in
-`cloud-init.ts`). Mounted by `serve.ts` when `SCW_SECRET_KEY` is set. **Only Scaleway for now** (`provider: "scaleway"`).
+`cloud-init.ts`, placement in `placement.ts` / `placement-walk.ts`). Mounted by `serve.ts` when `SCW_SECRET_KEY` and/or
+`VAST_API_KEY` is set. Providers: **`scaleway`** (datacenter VMs, any image; the default) and **`vast`** (Vast.ai
+marketplace GPU hosts, boot-script mode only — see [Vast replicas](#vast-replicas)).
 
 ## Quick start
 
@@ -140,6 +142,69 @@ Replaced automatically: halted by the provider, not ready after `bootTimeoutMinu
 older than `maxHours`. Safety: price checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS`
 across all deployments, back-off after a failed create (1 → 10 min).
 
+## Placement: `candidates`, `near` (reliable, cheap, close to France)
+
+Without `candidates` a spec has one place: `provider` + `zone` + `machineType`, refused above `maxEurPerHour` (as
+before). With them, each create walks a **ladder**:
+
+```json
+{
+  "image": "vllm/vllm-omni:v0.28.0", "bootScript": "…", "port": 8010, "near": "FR",
+  "candidates": [
+    { "zone": "fr-par-2", "machineType": "L4-1-24G", "maxEurPerHour": 0.9 },
+    { "zone": "nl-ams-1", "machineType": "L4-1-24G", "maxEurPerHour": 0.9 },
+    { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.6 }
+  ]
+}
+```
+
+- `candidates`: 1–20 entries `{ provider?, zone?, machineType, maxEurPerHour }` (`provider` defaults to the spec's,
+  `zone` to the spec's; Vast ignores `zone`). `near`: ISO country of the users, default **`FR`** (`DEFAULT_NEAR`, the
+  owner's region). `allowFar`: accept hosts/zones outside the EU/EEA when nothing nearer exists (default false).
+  `candidates` cannot be combined with `exposure` (the reserved IP is zonal).
+- **Order** (`rankCandidates`): geography tier first — Scaleway `fr-*` zones tier 0; neighbors (BE, LU, DE, CH, NL, ES,
+  IT, GB, MC, AD; so `nl-ams-*`) tier 1; rest of the EU/EEA (`pl-waw-*`) tier 2; anything else excluded unless
+  `allowFar`. A Vast candidate is tier 1 (a marketplace host is less reliable than a datacenter in France; the Vast
+  backend itself picks a host near `near`). Inside a tier, cheapest first (catalog price; the cap when unknown);
+  ties keep the caller's order. Zones in `shortage` and types the catalog prices above the candidate's cap are
+  skipped before trying.
+- **Walk**: each candidate gets the live price check against its own cap, then the create; not sold / over cap /
+  out of stock (`out_of_stock`, `shortage`, HTTP 412, quota/capacity/insufficient, Vast "no offer"/"not available")
+  moves to the next one, first success wins. Any other error (credentials, a bug) stops the walk and backs off as
+  before — no burning through the ladder on a 401.
+- `GET /v1/deployments/:name` shows **`lastPlacement`**: where the last replica landed and why earlier candidates were
+  skipped, e.g. `scaleway L4-1-24G@nl-ams-1 (€0.8/h) near FR; skipped: scaleway L4-1-24G@fr-par-2: … out_of_stock`.
+
+## Vast replicas
+
+`provider: "vast"` (or a Vast candidate) needs `VAST_API_KEY` (from the dev API, like the Scaleway key). Code:
+`src/deployments/vast-backend.ts` (lean, separate from the GPU-pod client in `src/gateway/providers/gpu/`).
+
+- **Boot-script mode only.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
+  container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Both are required.
+  `files`, `exposure` and `idleAction: "stop"` are refused for Vast (no user_data service, no reserved IP).
+- **App port = `port`** (default 8000): nginx proxies to `127.0.0.1:<port>` and the health loop polls
+  `http://127.0.0.1:<port><healthPath>`. Everything shares one container, so a stack that already runs a model server
+  on 8000 serves its health responder on another port (e.g. `"port": 8010`).
+- Boot (`vastReplicaInit`, `cloud-init.ts`): nginx installed if missing and started as a daemon (`nginx`, never
+  `systemctl`) with the same token-gated config on container :80; the boot script in the background; `/__aigw/ready`
+  once the health path answers; the container stops itself `maxHours + 30 min` after boot as a last resort. The
+  script travels base64 in the env var `AIGW_INIT_B64` and the onstart decodes and runs it.
+- **Offer search** (`POST /bundles/`): on-demand, rentable, verified, 1 GPU, `gpu_name` = `machineType`
+  (e.g. `RTX 5090`), `disk_space ≥ volumeGb` (default 50), `cuda_max_good ≥ 12.8` for Blackwell / 12.4 otherwise,
+  `reliability2 ≥ 0.97` (0.95 only when nothing passes), `inet_down ≥ 500`, `direct_port_count ≥ 1`,
+  `dph_total ≤ maxEurPerHour × 1.05` (`EUR_TO_USD`, deliberately below the market rate so the USD cap is never looser
+  than the EUR one). Cap and floors are re-checked client side.
+- **Ranking** (`rankOffers`): tier from `geolocation` (country after the last comma): FR 0; BE, LU, DE, CH, NL, ES, IT,
+  GB, MC, AD 1; rest of the EU/EEA 2; others 3, used only when no tier ≤ 2 offer exists and the spec has `allowFar`.
+  Inside a tier: effective price `dph_total × (1 + 4 × (1 − reliability2))` (an unreliable host costs more), then
+  `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label `aigw:<namespace>:<deployment>`, env `-p 80:80`);
+  one rented in between goes to the next.
+- The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
+  whose replica hit `bootTimeoutMinutes` is skipped for 1 h (in memory). States: `running`; `loading`/`created` →
+  `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
+  (its disk goes with it).
+
 ## Replica machine
 
 `cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-deployment secret only the gateway knows) and proxies to
@@ -151,9 +216,10 @@ after boot as a last resort — a shut-down Scaleway instance is still billed, s
 
 While the gateway runs it never leaves a machine behind (scale to zero, halted replicas deleted, unknown machines of its
 namespace released on restart). If the gateway itself is down, its machines would keep billing — powering off from
-inside does not stop a Scaleway bill. So a second Railway service, **`ai-gateway-reaper`**, runs the same image as a cron
+inside does not stop a Scaleway bill (nor an exited Vast instance's disk). So a second Railway service, **`ai-gateway-reaper`**, runs the same image as a cron
 job (`*/15 * * * *`, start command `./reap-compiled`; it is published with `railway.reaper.json` as its `railway.json`, `scripts/reap-orphans.ts` → `src/deployments/reaper.ts`) with
-`SANDBOX_TOKEN`, `GATEWAY_URL` and the same `DEPLOYMENTS_NAMESPACE`: it probes `GATEWAY_URL/health` 4 times over ~2 min and,
+`SANDBOX_TOKEN`, `GATEWAY_URL` and the same `DEPLOYMENTS_NAMESPACE` (it reaps every provider with a key — Scaleway
+and Vast — each listed on its own, so one provider failing does not spare the other's machines): it probes `GATEWAY_URL/health` 4 times over ~2 min and,
 only if every probe failed, deletes that namespace's machines older than 30 min. A redeploy or a short blip answers
 one of the probes and costs nothing. Worst case for a dead gateway: 15 min + 2 min + the machine's remaining minutes to
 reach 30 min of age.
@@ -173,7 +239,8 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | Variable | |
 |---|---|
 | `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API |
-| `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables deployments (normally fetched with the token) |
+| `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables Scaleway replicas (normally fetched with the token) |
+| `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only invoke / read |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
@@ -215,7 +282,9 @@ Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) i
 
 - `__tests__/unit/deployments/` — planner, spec/cloud-init, Scaleway adapter (fake client), controller + HTTP on the
   real proxy against in-process fake replicas (cold start, load scale-up, scale to zero, failover, unhealthy
-  replacement, price cap, list failure, replica cap, orphan sweep, restart adoption, pause).
+  replacement, price cap, list failure, replica cap, orphan sweep, restart adoption, pause); placement ranking
+  (`placement.test.ts`), the candidate walk and per-provider list failures (`controller-placement.test.ts`), and the
+  Vast backend + `vastReplicaInit` against a fake fetch (`vast-backend.test.ts`). Nothing here calls Vast or Scaleway.
 - `scripts/deployments-docker-e2e.ts` — the real cloud-init in a local Docker "machine"
   (`docker build -t aigw-machine -f scripts/deployments-machine.Dockerfile scripts/`), whole HTTP path, no cloud bill.
 
@@ -233,6 +302,7 @@ Inside the gateway process, without a cron of its own:
 | Image build machines (`aigw-build`) | the janitor (`src/deployments/janitor.ts`, every 5 min) | older than 3 h |
 | SBS volumes Scaleway created with a server (`…_sbs_volume_N`), detached | the janitor | detached for 1 h |
 
+The janitor covers Scaleway only (a deleted Vast instance takes its disk with it; Vast has no build machines).
 The janitor is on by default on Railway (`DEPLOYMENTS_JANITOR=0` turns it off; `=1` turns it on elsewhere). When the
 gateway itself is down nothing in its process runs: the reaper (`scripts/reap-orphans.ts`, a separate Railway cron
 every 15 min) releases the namespace's replicas after the gateway missed its health checks for ~2 min.

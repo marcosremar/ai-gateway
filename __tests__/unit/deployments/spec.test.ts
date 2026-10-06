@@ -36,7 +36,8 @@ describe('buildSpec', () => {
 
   it.each([
     [{ port: 8000 }, /image or bootScript is required/],
-    [{ image: 'a', port: 8000, provider: 'vast' }, /only one supported/],
+    [{ image: 'a', port: 8000, provider: 'vast' }, /vast replicas need bootScript and image/],
+    [{ image: 'a', port: 8000, provider: 'aws' }, /provider must be 'scaleway' or 'vast'/],
     [{ image: 'a', port: 8000, minReplicas: 3, maxReplicas: 2 }, /minReplicas cannot exceed/],
     [{ image: 'a', port: 8000, maxReplicas: 99 }, /maxReplicas/],
     [{ image: 'a', port: 8000, env: { 'BAD KEY': 'x' } }, /env key/],
@@ -130,5 +131,49 @@ describe('exposure and idleAction', () => {
     expect(bad({ exposure: { ports: [] } })).toThrow(/1–20 ports/);
     expect(bad({ exposure: { ports: [{ protocol: 'icmp', port: 1 }] } })).toThrow(/tcp' or 'udp/);
     expect(bad({ idleAction: 'hibernate' })).toThrow(/idleAction/);
+  });
+});
+
+describe('candidates, near and provider vast', () => {
+  const vast = { provider: 'vast', image: 'vllm/vllm-omni:v0.28.0', bootScript: 'serve', machineType: 'RTX 5090' };
+
+  it('accepts a ladder across Scaleway zones and Vast, plus near/allowFar', () => {
+    const spec = buildSpec('speech', {
+      bootScript: 'serve', image: 'vllm/vllm-omni:v0.28.0', near: 'FR', allowFar: false,
+      candidates: [
+        { zone: 'fr-par-2', machineType: 'L4-1-24G', maxEurPerHour: 0.9 },
+        { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.6 },
+      ],
+    }, { profiles });
+    expect(spec.candidates).toEqual([
+      { zone: 'fr-par-2', machineType: 'L4-1-24G', maxEurPerHour: 0.9 },
+      { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.6 },
+    ]);
+    expect(spec.near).toBe('FR');
+  });
+
+  it.each([
+    [{ candidates: [] }, /1–20 entries/],
+    [{ candidates: Array(21).fill({ machineType: 'L4-1-24G', maxEurPerHour: 1 }) }, /1–20 entries/],
+    [{ candidates: [{ machineType: 'L4-1-24G', maxEurPerHour: 1, gpu: 'x' }] }, /unknown field 'gpu'/],
+    [{ candidates: [{ machineType: 'L4-1-24G' }] }, /candidates\[0\].maxEurPerHour/],
+    [{ candidates: [{ machineType: 'L4-1-24G', maxEurPerHour: 1, zone: 'paris' }] }, /candidates\[0\].zone/],
+    [{ candidates: [{ machineType: 'L4-1-24G', maxEurPerHour: 1, provider: 'aws' }] }, /'scaleway' or 'vast'/],
+    [{ candidates: [{ machineType: 'RTX 5090', maxEurPerHour: 1 }] }, /not a Scaleway type/],
+    [{ near: 'France' }, /near is invalid/],
+  ])('rejects %j', (body, message) => {
+    expect(() => buildSpec('x', { image: 'a', port: 8000, ...body }, { profiles })).toThrow(message);
+  });
+
+  it('vast: boot-script mode with the base image, GPU on, any port; no files, exposure or stop', () => {
+    const spec = buildSpec('x', { ...vast, port: 8010 }, { profiles });
+    expect(spec).toMatchObject({ provider: 'vast', gpu: true, port: 8010, machineType: 'RTX 5090' });
+    expect(() => buildSpec('x', { ...vast, port: 8000, bootScript: undefined }, { profiles })).toThrow(/need bootScript and image/);
+    expect(() => buildSpec('x', { ...vast, files: { a: 'YQ==' } }, { profiles })).toThrow(/files are not supported on vast/);
+    expect(() => buildSpec('x', { ...vast, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles })).toThrow(/exposure/);
+    expect(() => buildSpec('x', { ...vast, idleAction: 'stop' }, { profiles })).toThrow(/idleAction 'stop'/);
+    // A Vast candidate on a Scaleway spec brings the same rules.
+    expect(() => buildSpec('x', { image: 'a', port: 8000, candidates: [{ provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 1 }] },
+      { profiles })).toThrow(/need bootScript and image/);
   });
 });

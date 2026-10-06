@@ -12,6 +12,15 @@ on release via `bunx changeset version`.
 
 ### Added
 
+- **Deployments on Vast.ai + placement ladder** — `provider: "vast"` (`src/deployments/vast-backend.ts`, boot-script
+  mode only: `image` is the container, `bootScript` its onstart, app on `127.0.0.1:<port>`; `vastReplicaInit` starts
+  nginx without systemd), enabled by `VAST_API_KEY`. The controller takes `backends` (one per provider; `backend`
+  still works), lists each on its own (a provider failing to list keeps its known machines and pauses only the
+  deployments that touch it), and the reaper covers every provider. New spec fields: `candidates` (≤ 20
+  `{provider?, zone?, machineType, maxEurPerHour}`, ranked near the users then cheapest, each tried with its own
+  cap, out-of-stock/over-cap/not-sold skipped; `lastPlacement` in the view says where it landed and why), `near`
+  (default `FR`) and `allowFar`. Pure ranking in `src/deployments/placement.ts` (`rankOffers`, `rankCandidates`).
+
 - **Declared deployments** (`src/deployments/declared/*.json`) — the gateway registers them itself at boot and every
   5 min through the idempotent `controller.put`; secrets mounted from the environment (`GHCR_READ_TOKEN` →
   `registryAuth`, `SPEECH_IMAGE`), `SPEECH_TOKEN` generated once and persisted in the store; `pending` with the reason

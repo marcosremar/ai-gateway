@@ -1,0 +1,166 @@
+import { describe, expect, it } from 'vitest';
+import { vastReplicaInit } from '../../../src/deployments/cloud-init';
+import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
+import { buildSpec } from '../../../src/deployments/spec';
+import {
+  BAD_HOST_MS, EUR_TO_USD, MIN_RELIABILITY, VastDeploymentBackend, vastState,
+} from '../../../src/deployments/vast-backend';
+import type { DeploymentSpec } from '../../../src/deployments/types';
+
+const TOKEN = 'abcdefghijklmnopqrstuvwxyz012345';
+const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
+
+function vastSpec(extra: Record<string, unknown> = {}): DeploymentSpec {
+  return buildSpec('speech', {
+    provider: 'vast', image: 'vllm/vllm-omni:v0.28.0', bootScript: 'python3 -m http.server 8010', port: 8010,
+    machineType: 'RTX 5090', maxEurPerHour: 0.5, volumeGb: 80, env: { HF_TOKEN: 'hf' }, ...extra,
+  }, { profiles });
+}
+
+interface Call { method: string; url: string; body: Record<string, unknown> | null }
+
+function fakeVast(routes: (call: Call) => { status?: number; body: unknown }) {
+  const calls: Call[] = [];
+  const fetchImpl = async (url: string, init?: RequestInit) => {
+    const call = { method: init?.method ?? 'GET', url, body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null };
+    calls.push(call);
+    const { status = 200, body } = routes(call);
+    return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+  };
+  return { calls, fetchImpl };
+}
+
+const offers = [
+  { id: 1, machine_id: 101, geolocation: 'Dallas, US', dph_total: 0.30, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
+  { id: 2, machine_id: 102, geolocation: 'Paris, FR', dph_total: 0.45, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
+  { id: 3, machine_id: 103, geolocation: 'Frankfurt, DE', dph_total: 0.40, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
+  // Over the cap (the API filter is not trusted): never rented.
+  { id: 4, machine_id: 104, geolocation: 'Paris, FR', dph_total: 0.90, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
+];
+
+describe('VastDeploymentBackend', () => {
+  it('searches with the cap in USD, reliability, direct port and GPU; rents the French offer with the namespace label', async () => {
+    const { calls, fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST' && url.endsWith('/bundles/')) return { body: { offers } };
+      if (method === 'PUT' && url.endsWith('/asks/2/')) return { body: { success: true, new_contract: 777 } };
+      return { status: 500, body: 'unexpected' };
+    });
+    const backend = new VastDeploymentBackend('vast-key', { fetch: fetchImpl, now: () => 1_000 });
+    const machine = await backend.createReplica({ spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' });
+
+    const search = calls[0].body!;
+    expect(search).toMatchObject({
+      rentable: { eq: true }, verified: { eq: true }, num_gpus: { eq: 1 }, gpu_name: { in: ['RTX 5090'] },
+      disk_space: { gte: 80 }, cuda_max_good: { gte: 12.8 }, reliability2: { gte: MIN_RELIABILITY },
+      inet_down: { gte: 500 }, direct_port_count: { gte: 1 }, dph_total: { lte: Math.round(0.5 * EUR_TO_USD * 1000) / 1000 },
+    });
+    const rent = calls[1];
+    expect(rent.url).toBe('https://console.vast.ai/api/v0/asks/2/');
+    expect(rent.body).toMatchObject({ image: 'vllm/vllm-omni:v0.28.0', label: 'aigw:prod:speech', disk: 80 });
+    const env = rent.body!.env as Record<string, string>;
+    expect(env['-p 80:80']).toBe('1');
+    expect(env.HF_TOKEN).toBe('hf');
+    expect(Buffer.from(env.AIGW_INIT_B64, 'base64').toString('utf8')).toBe(vastReplicaInit(vastSpec(), TOKEN));
+    expect(String(rent.body!.onstart)).toContain('AIGW_INIT_B64');
+    expect(machine).toMatchObject({ id: '777', deployment: 'speech', provider: 'vast', ip: null, zone: 'Paris, FR', state: 'starting' });
+    expect(machine.pricePerHour).toBeCloseTo(0.45 / EUR_TO_USD, 3);
+    for (const c of calls) expect(c.url.startsWith('https://console.vast.ai/api/v0/')).toBe(true);
+  });
+
+  it('falls to 0.95 reliability only when nothing passes 0.97, and says out_of_stock when nothing fits at all', async () => {
+    const seen: number[] = [];
+    const { fetchImpl } = fakeVast(({ method, body }) => {
+      if (method === 'POST') { seen.push((body!.reliability2 as { gte: number }).gte); return { body: { offers: [] } }; }
+      return { status: 500, body: '' };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    await expect(backend.createReplica({ spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' }))
+      .rejects.toThrow(/out_of_stock/);
+    expect(seen).toEqual([0.97, 0.95]);
+  });
+
+  it('an offer rented in between goes to the next one; a credential error stops at once', async () => {
+    const { calls, fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers } };
+      if (url.endsWith('/asks/2/')) return { status: 400, body: '{"error":"no_such_ask","msg":"not available"}' };
+      if (url.endsWith('/asks/3/')) return { body: { success: true, new_contract: 9 } };
+      return { status: 500, body: '' };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    const m = await backend.createReplica({ spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' });
+    expect(m.id).toBe('9');
+    expect(calls.filter(c => c.method === 'PUT').map(c => c.url.split('/asks/')[1])).toEqual(['2/', '3/']);
+
+    const denied = new VastDeploymentBackend('bad', { fetch: fakeVast(({ method }) => (method === 'POST'
+      ? { body: { offers } } : { status: 401, body: 'unauthorized' })).fetchImpl });
+    await expect(denied.createReplica({ spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' })).rejects.toThrow(/HTTP 401/);
+  });
+
+  it('lists only the namespace instances, ip = public_ipaddr:<host port of 80/tcp>, states mapped', async () => {
+    const { fetchImpl } = fakeVast(() => ({
+      body: {
+        instances: [
+          { id: 1, label: 'aigw:prod:speech', actual_status: 'running', public_ipaddr: '1.2.3.4 ', ports: { '80/tcp': [{ HostPort: '40123' }] },
+            machine_id: 5, dph_total: 0.42, start_date: 1700000000.5, gpu_name: 'RTX 5090', geolocation: 'Paris, FR' },
+          { id: 2, label: 'aigw:prod:tts', actual_status: 'loading', public_ipaddr: '1.2.3.5', ports: null },
+          { id: 3, label: 'aigw:prod-2:speech', actual_status: 'running' },
+          { id: 4, label: 'someone-else', actual_status: 'running' },
+          { id: 5, label: 'aigw:prod:old', actual_status: 'exited' },
+        ],
+      },
+    }));
+    const list = await new VastDeploymentBackend('k', { fetch: fetchImpl }).listReplicas('prod');
+    expect(list.map(m => [m.id, m.deployment, m.ip, m.state])).toEqual([
+      ['1', 'speech', '1.2.3.4:40123', 'running'], ['2', 'tts', null, 'starting'], ['5', 'old', null, 'exited'],
+    ]);
+    expect(list[0].createdAt).toBe(1700000000500);
+    expect(vastState('created')).toBe('starting');
+  });
+
+  it('a failed list throws (never reads as "nothing is running")', async () => {
+    const { fetchImpl } = fakeVast(() => ({ status: 502, body: 'bad gateway' }));
+    await expect(new VastDeploymentBackend('k', { fetch: fetchImpl }).listReplicas('prod')).rejects.toThrow(/HTTP 502/);
+  });
+
+  it('release deletes the instance (404 = already gone) and a boot-timeout host is avoided for an hour', async () => {
+    let now = 0;
+    const { calls, fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers: offers.filter(o => o.id === 2 || o.id === 3) } };
+      if (method === 'PUT') return { body: { success: true, new_contract: Number(url.match(/asks\/(\d+)/)![1]) * 100 } };
+      if (method === 'DELETE' && url.endsWith('/instances/404/')) return { status: 404, body: '' };
+      return { body: { success: true } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => now });
+    const input = { spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' };
+    const first = await backend.createReplica(input);
+    expect(first.id).toBe('200'); // Paris
+    await backend.releaseReplica(first, 'boot-timeout');
+    expect(calls.at(-1)).toMatchObject({ method: 'DELETE', url: 'https://console.vast.ai/api/v0/instances/200/' });
+    expect(backend.avoidedHosts()).toEqual([102]);
+    expect((await backend.createReplica(input)).id).toBe('300'); // Paris host skipped → Frankfurt
+    now += BAD_HOST_MS + 1;
+    expect((await backend.createReplica(input)).id).toBe('200'); // forgiven after an hour
+    await expect(backend.releaseReplica({ ...first, id: '404' })).resolves.toBeUndefined();
+  });
+});
+
+describe('vastReplicaInit', () => {
+  it('no systemctl; starts nginx itself, token-gated config proxying to spec.port, boot script in background, health loop', () => {
+    const script = vastReplicaInit(vastSpec(), TOKEN);
+    expect(script).not.toContain('systemctl');
+    expect(script).toMatch(/nginx -t && \{ nginx -s reload 2>\/dev\/null \|\| nginx; \}/);
+    const nginx = Buffer.from(/echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/nginx.conf/.exec(script)![1], 'base64').toString();
+    expect(nginx).toContain(`if ($http_x_aigw_token != "${TOKEN}") { return 401; }`);
+    expect(nginx).toContain('listen 80 default_server;');
+    expect(nginx).toContain('proxy_pass http://127.0.0.1:8010;');
+    expect(script).toContain('nohup bash /srv/aigw/boot.sh');
+    expect(script).toContain(`curl -sf -o /dev/null http://127.0.0.1:8010/health && echo '{"ready":true}' > /srv/aigw/ready.json`);
+    expect(script).not.toContain('docker');
+  });
+
+  it('defaults the app port to 8000 when the spec sets none', () => {
+    const spec = buildSpec('speech', { provider: 'vast', image: 'ubuntu:24.04', bootScript: 'true', machineType: 'RTX 4090' }, { profiles });
+    expect(spec.port).toBe(8000);
+    expect(vastReplicaInit(spec, TOKEN)).toContain('http://127.0.0.1:8000/health');
+  });
+});
