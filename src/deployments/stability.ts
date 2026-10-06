@@ -1,0 +1,106 @@
+/**
+ * Client instability reports — `POST/GET /v1/apps/:app/stability-report` (wired in http.ts).
+ *
+ * A server-side SDK client (sdk/node `GatewayClient`) buffers what it saw while the gateway was unreachable or slow
+ * — route switches to the direct fallback, failures, recoveries — and posts the batch here once the gateway answers
+ * again. Reports go to a small in-memory ring (for `GET`) and, best-effort, one JSONL line per report in
+ * `<DEPLOYMENTS_STATE_DIR>/client-stability.jsonl`. A filesystem that rejects the write never fails the request.
+ */
+
+import { appendFile, mkdir } from 'fs/promises';
+import { dirname } from 'path';
+
+/** One observation a client recorded (mirror of sdk/node `InstabilityEvent`). */
+export interface ClientInstabilityEvent {
+  at: number;
+  kind: string;
+  path?: string;
+  code?: string;
+  route?: string;
+  latencyMs?: number;
+  detail?: string;
+}
+
+export interface ClientStabilityBatch {
+  app: string;
+  client: string;
+  receivedAt: number;
+  events: ClientInstabilityEvent[];
+}
+
+const MAX_EVENTS_PER_REPORT = 200;
+const MAX_BATCHES_KEPT = 200;
+const MAX_FIELD = { kind: 40, path: 120, code: 60, route: 20, detail: 300 };
+const SKEW_MS = 5 * 60_000;
+
+const cleanString = (v: unknown, max: number): string | undefined =>
+  typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined;
+
+/** One event, sanitized: bad rows are dropped, fields are capped. Returns null when unusable. */
+export function cleanEvent(raw: unknown, now: number): ClientInstabilityEvent | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const e = raw as Record<string, unknown>;
+  const kind = cleanString(e.kind, MAX_FIELD.kind);
+  if (typeof e.at !== 'number' || !Number.isFinite(e.at) || e.at < 0 || !kind) return null;
+  const out: ClientInstabilityEvent = { at: Math.min(e.at, now + SKEW_MS), kind };
+  const path = cleanString(e.path, MAX_FIELD.path); if (path) out.path = path;
+  const code = cleanString(e.code, MAX_FIELD.code); if (code) out.code = code;
+  const route = cleanString(e.route, MAX_FIELD.route); if (route) out.route = route;
+  const detail = cleanString(e.detail, MAX_FIELD.detail); if (detail) out.detail = detail;
+  if (typeof e.latencyMs === 'number' && Number.isFinite(e.latencyMs) && e.latencyMs >= 0) out.latencyMs = Math.round(e.latencyMs);
+  return out;
+}
+
+export interface ClientStabilityOptions {
+  /** JSONL file to append reports to (e.g. `<DEPLOYMENTS_STATE_DIR>/client-stability.jsonl`); absent = memory only. */
+  file?: string;
+  now?: () => number;
+  log?: (msg: string, data?: Record<string, unknown>) => void;
+}
+
+export class ClientStabilityLog {
+  private readonly ring: ClientStabilityBatch[] = [];
+  private chain: Promise<void> = Promise.resolve();
+  private readonly now: () => number;
+  private readonly log: (msg: string, data?: Record<string, unknown>) => void;
+
+  constructor(private readonly opts: ClientStabilityOptions = {}) {
+    this.now = opts.now ?? Date.now;
+    this.log = opts.log ?? (() => {});
+  }
+
+  /** Stores one report; returns how many events were accepted. Never throws on a bad body shape. */
+  append(app: string, body: Record<string, unknown>): number {
+    const now = this.now();
+    const rawEvents = Array.isArray(body.events) ? body.events.slice(0, MAX_EVENTS_PER_REPORT) : [];
+    const events = rawEvents.map(e => cleanEvent(e, now)).filter((e): e is ClientInstabilityEvent => e !== null);
+    const client = cleanString(body.client, 80) ?? 'unknown';
+    if (!events.length) return 0;
+    const batch: ClientStabilityBatch = { app, client, receivedAt: now, events };
+    this.ring.push(batch);
+    if (this.ring.length > MAX_BATCHES_KEPT) this.ring.splice(0, this.ring.length - MAX_BATCHES_KEPT);
+    this.log('client stability report', { app, client, events: events.length });
+    this.persist(batch);
+    return events.length;
+  }
+
+  /** Most recent batches for one app (`app` null = all), newest last. */
+  recent(app: string | null, limit = 50): ClientStabilityBatch[] {
+    const all = app === null ? this.ring : this.ring.filter(b => b.app === app);
+    return all.slice(Math.max(0, all.length - Math.min(Math.max(limit, 1), MAX_BATCHES_KEPT)));
+  }
+
+  /** Serialized, best-effort JSONL append. */
+  private persist(batch: ClientStabilityBatch): void {
+    const file = this.opts.file;
+    if (!file) return;
+    this.chain = this.chain.then(async () => {
+      try {
+        await mkdir(dirname(file), { recursive: true });
+        await appendFile(file, `${JSON.stringify(batch)}\n`, 'utf8');
+      } catch (err) {
+        this.log('client stability report: could not persist', { error: String((err as Error).message ?? err).slice(0, 120) });
+      }
+    });
+  }
+}

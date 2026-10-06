@@ -14,6 +14,9 @@
  *   DELETE /v1/profiles/:name                  delete a stored profile
  *   GET    /v1/apps/:app/fallback              direct-fallback plan with provider keys (app-fallback.ts); the app's
  *                                              own key, or an admin key with `X-App: <app>`
+ *   POST   /v1/apps/:app/stability-report      instability events buffered by the SDK while the gateway was down
+ *                                              (stability.ts); same callers as the app's other paths
+ *   GET    /v1/apps/:app/stability-report      recent reports (`?limit=`, default 50 batches)
  *
  * Auth already happened in the proxy (Bearer from GATEWAY_API_KEYS). Mutations additionally need `isAdmin(req)`.
  */
@@ -24,6 +27,7 @@ import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppFallbackService } from './app-fallback';
+import type { ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
@@ -133,6 +137,8 @@ export interface DeploymentRoutesOptions {
   onRoutesChange?: () => void;
   /** Direct-fallback plans (`GET /v1/apps/:app/fallback`). Without it that path answers 404. */
   fallback?: AppFallbackService;
+  /** SDK instability reports (`/v1/apps/:app/stability-report`). Without it those paths answer 404. */
+  stability?: ClientStabilityLog;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
@@ -190,6 +196,19 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       if (!opts.fallback) return send(res, 404, { error: 'direct fallback is not enabled on this gateway' });
       const plan = await opts.fallback.plan(app, registry.get(app)?.routes);
       return send(res, 200, plan, { 'Cache-Control': 'no-store' });
+    }
+    if (sub === 'stability-report' && !imageName) {
+      if (!opts.stability) return send(res, 404, { error: 'stability reports are not enabled on this gateway' });
+      if (method === 'POST') {
+        const accepted = opts.stability.append(app, await readJson(req));
+        return send(res, 200, { ok: true, accepted });
+      }
+      if (method === 'GET') {
+        const raw = new URLSearchParams((req.url ?? '').split('?')[1] ?? '').get('limit');
+        const limit = raw && /^\d+$/.test(raw) ? Number(raw) : 50;
+        return send(res, 200, { app, reports: opts.stability.recent(app, limit) });
+      }
+      return send(res, 405, { error: 'method not allowed' });
     }
     if (sub !== 'images' || extra) return send(res, 404, { error: `unknown path '/${parts.join('/')}'` });
     if (!imageName) {

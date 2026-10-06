@@ -142,6 +142,31 @@ An alias without entries (or no plan) rethrows the gateway's error.
 soon as it answers, the breaker closes and the next call uses the gateway again (`onRouteChange({route: 'gateway',
 reason: 'recovered'})`). The gateway still owns the provider breakers; this one only decides the switch.
 
+**Slow counts too** — `directFallback.slowMs` (default `0` = off): a gateway call that takes longer counts as a
+failure toward the breaker (the answer is still used) — so a gateway that stays slow opens the breaker and the next
+calls go direct even though it answers. To abandon a slow call mid-flight instead, set a tighter `timeoutMs`: a
+timeout already counts as unreachable.
+
+## Instability report
+
+The client keeps a ring buffer (default 500, `instability.bufferSize`) of what it saw of the gateway's health —
+`unreachable` (with the code: `network`, `timeout`, `breaker_open`), `slow` (with `latencyMs`), `direct`,
+`direct_failed`, `recovered` — and, once the gateway answers again, posts it to
+[`POST /v1/apps/:app/stability-report`](./http.md) (the app of `directFallback.app`, else `app`).
+
+```ts
+const gw = new GatewayClient({
+  baseUrl, apiKey: process.env.GATEWAY_API_KEY,
+  directFallback: { app: 'parle', slowMs: 8_000 },
+  instability: { client: 'parle-backend' },   // report: false to flush by hand
+});
+gw.instabilityEvents();          // buffered events (copy)
+await gw.reportInstabilities();  // { sent } — posts and clears what the gateway accepted
+```
+
+The report is fire-and-forget: a failed POST keeps the buffer for the next recovery. With no app known
+(`directFallback.app`/`app` unset) or `instability.report: false`, events stay in memory for `instabilityEvents()`.
+
 **Plan** — kept in memory only (never on disk, never logged), refreshed in the background once 80 % of its
 `ttlSeconds` passed, and again when a provider answers 401 (then the same entry is retried once with the new key).
 The last good plan stays usable while the gateway is down.

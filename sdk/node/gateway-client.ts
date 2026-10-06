@@ -20,7 +20,7 @@ import {
   GATEWAY_CLIENT_TIMEOUTS,
   type AppImage, type AppView, type CallOptions, type ChatCompletion, type ChatRequest, type ChatStream,
   type DeploymentList, type DeploymentPutBody, type DeploymentView, type FallbackPlan, type FetchLike, type GatewayClientOptions,
-  type GatewayState, type HealthReport, type ModelRoutesSpec, type S2SRequest, type S2SStream, type SpeechRequest,
+  type GatewayState, type HealthReport, type InstabilityEvent, type ModelRoutesSpec, type S2SRequest, type S2SStream, type SpeechRequest,
   type SpeechResult, type TimeoutGroup, type Transcription, type TranscribeRequest,
 } from './gateway-types';
 
@@ -46,6 +46,9 @@ function bodyOf<T extends CallOptions>(req: T): Omit<T, 'signal' | 'timeoutMs'> 
   return out as Omit<T, 'signal' | 'timeoutMs'>;
 }
 
+const INSTABILITY_BUFFER_DEFAULT = 500;
+const INSTABILITY_REPORT_BATCH = 500;
+
 export class GatewayClient {
   readonly baseUrl: string;
   private readonly apiKey: string | undefined;
@@ -55,6 +58,16 @@ export class GatewayClient {
   private readonly breaker: GatewayBreaker | null = null;
   private readonly plans: FallbackPlanStore | null = null;
   private readonly direct: DirectCaller | null = null;
+  private readonly now: () => number;
+  private readonly slowMs: number;
+  /** Buffered gateway-instability observations (oldest dropped past `instabilityCap`). */
+  private readonly instability: InstabilityEvent[] = [];
+  private readonly instabilityCap: number;
+  private readonly instabilityClient: string;
+  private readonly instabilityReport: boolean;
+  /** App that receives the instability report (`directFallback.app`, else `app`). */
+  private readonly reportApp: string | undefined;
+  private reporting: Promise<unknown> | null = null;
 
   constructor(opts: GatewayClientOptions) {
     if (!opts.baseUrl) throw new Error('GatewayClient: baseUrl is required');
@@ -64,16 +77,62 @@ export class GatewayClient {
     // A bare reference to window.fetch throws "Illegal invocation" when called unbound in browsers.
     this.fetchImpl = opts.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.timeouts = { ...GATEWAY_CLIENT_TIMEOUTS, ...opts.timeoutMs };
+    this.now = opts.now ?? Date.now;
+    this.slowMs = Math.max(0, opts.directFallback?.slowMs ?? 0);
+    this.instabilityCap = Math.max(1, opts.instability?.bufferSize ?? INSTABILITY_BUFFER_DEFAULT);
+    this.instabilityClient = opts.instability?.client ?? 'gateway-client';
+    this.instabilityReport = opts.instability?.report !== false;
+    this.reportApp = opts.directFallback?.app ?? opts.app;
     const df = opts.directFallback;
     if (df && df.enabled !== false) {
-      const now = opts.now ?? Date.now;
+      const now = this.now;
       this.plans = new FallbackPlanStore(() => this.apps.fallbackPlan(df.app, { timeoutMs: this.timeouts.health }), now);
       this.direct = new DirectCaller(this.plans, this.fetchImpl, this.timeouts);
       this.breaker = new GatewayBreaker({
         threshold: df.failureThreshold ?? 3, cooldownMs: df.cooldownMs ?? 30_000, now,
-        probe: () => this.probe(), onRouteChange: opts.onRouteChange,
+        probe: () => this.probe(),
+        onRouteChange: (change) => {
+          // Every route switch is an instability worth reporting: 'direct' = the gateway was left, 'gateway' = it recovered.
+          this.record({ at: now(), kind: change.route === 'direct' ? 'direct' : 'recovered', route: change.route, detail: change.reason });
+          try { opts.onRouteChange?.(change); } catch { /* the app's callback must not break the call */ }
+        },
       });
     }
+  }
+
+  // ── instability log ─────────────────────────────────────────────────────────
+
+  private record(event: InstabilityEvent): void {
+    this.instability.push(event);
+    if (this.instability.length > this.instabilityCap) this.instability.splice(0, this.instability.length - this.instabilityCap);
+  }
+
+  /** The buffered instability events (copy). */
+  instabilityEvents(): InstabilityEvent[] {
+    return this.instability.slice();
+  }
+
+  /**
+   * POSTs the buffered events to `POST /v1/apps/:app/stability-report` and drops the ones the gateway accepted.
+   * `{ sent: 0 }` when there is nothing to send or no app is known; failures keep the buffer for the next try.
+   */
+  async reportInstabilities(call?: CallOptions): Promise<{ sent: number }> {
+    if (!this.reportApp || !this.instability.length) return { sent: 0 };
+    const batch = this.instability.slice(0, INSTABILITY_REPORT_BATCH);
+    await this.gw({
+      method: 'POST', path: `/v1/apps/${enc(this.reportApp)}/stability-report`, group: 'admin', call,
+      json: { client: this.instabilityClient, sentAt: this.now(), events: batch }, idempotent: true,
+    }, r => r.json());
+    this.instability.splice(0, batch.length);
+    return { sent: batch.length };
+  }
+
+  /** Fire-and-forget report once the gateway answers again (deduplicated; a failure keeps the buffer). */
+  private maybeReport(): void {
+    if (!this.instabilityReport || this.reporting || !this.instability.length) return;
+    this.reporting = this.reportInstabilities()
+      .catch(() => { /* stays buffered for the next recovery */ })
+      .finally(() => { this.reporting = null; });
   }
 
   // ── transport ─────────────────────────────────────────────────────────────
@@ -110,25 +169,50 @@ export class GatewayClient {
   }
 
   /** Gateway first; the direct fallback when the gateway itself is unreachable (see docs/client.md). */
-  private async routed<R>(viaGateway: () => Promise<R>, viaDirect: (cause: GatewayError) => Promise<R>): Promise<R> {
+  private async routed<R>(path: string, viaGateway: () => Promise<R>, viaDirect: (cause: GatewayError) => Promise<R>): Promise<R> {
     const breaker = this.breaker;
     if (!breaker) return viaGateway();
     if (breaker.skipGateway()) {
+      this.record({ at: this.now(), kind: 'unreachable', path, code: 'breaker_open', route: 'direct' });
       breaker.used('direct', 'breaker_open');
-      return viaDirect(new GatewayError({ message: 'gateway skipped: unreachable recently (breaker open)', code: 'gateway_unreachable', path: '', unreachable: true }));
+      return this.viaDirect(path, viaDirect, new GatewayError({ message: 'gateway skipped: unreachable recently (breaker open)', code: 'gateway_unreachable', path, unreachable: true }));
     }
     this.plans!.refreshIfStale();
+    const started = this.now();
     try {
       const out = await viaGateway();
-      breaker.success();
-      breaker.used('gateway', 'recovered');
+      const latencyMs = Math.max(0, this.now() - started);
+      if (this.slowMs > 0 && latencyMs > this.slowMs) {
+        // Alive but too slow: still a failure toward the breaker — persistent slowness routes calls direct.
+        this.record({ at: this.now(), kind: 'slow', path, latencyMs, route: 'gateway' });
+        breaker.failure('slow');
+        breaker.used('gateway', 'slow');
+      } else {
+        breaker.success();
+        breaker.used('gateway', 'recovered');
+      }
+      this.maybeReport();
       return out;
     } catch (err) {
       if (!(err instanceof GatewayError)) throw err; // includes the caller's own abort
-      if (!err.unreachable) { breaker.success(); throw err; } // the gateway answered: its errors are final
+      if (!err.unreachable) { breaker.success(); this.maybeReport(); throw err; } // the gateway answered: its errors are final
+      this.record({ at: this.now(), kind: 'unreachable', path, code: err.code, latencyMs: Math.max(0, this.now() - started), route: 'direct' });
       breaker.failure(err.code);
       breaker.used('direct', err.code);
-      return viaDirect(err);
+      return this.viaDirect(path, viaDirect, err);
+    }
+  }
+
+  private async viaDirect<R>(path: string, viaDirect: (cause: GatewayError) => Promise<R>, cause: GatewayError): Promise<R> {
+    try {
+      return await viaDirect(cause);
+    } catch (err) {
+      this.record({
+        at: this.now(), kind: 'direct_failed', path, route: 'direct',
+        code: err instanceof GatewayError ? err.code : 'error',
+        detail: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+      });
+      throw err;
     }
   }
 
@@ -136,7 +220,7 @@ export class GatewayClient {
 
   /** `POST /v1/audio/transcriptions` (multipart). */
   transcribe(req: TranscribeRequest): Promise<Transcription> {
-    return this.routed(() => {
+    return this.routed('/v1/audio/transcriptions', () => {
       const form = new FormData();
       form.set('file', toBlob(req.file), req.filename ?? 'audio');
       form.set('model', req.model);
@@ -159,7 +243,7 @@ export class GatewayClient {
 
   /** `POST /v1/chat/completions` (non-streamed). */
   chat(req: ChatRequest): Promise<ChatCompletion> {
-    return this.routed(
+    return this.routed('/v1/chat/completions',
       () => this.gw({ method: 'POST', path: '/v1/chat/completions', group: 'chat', call: req, json: this.chatJson(req, false) },
         async res => ({ ...(await res.json() as Omit<ChatCompletion, 'served'>), served: servedFrom(res.headers) })),
       cause => this.direct!.chat(req, cause),
@@ -168,7 +252,7 @@ export class GatewayClient {
 
   /** `POST /v1/chat/completions` with `stream: true`: resolves once the headers arrived; iterate for deltas. */
   chatStream(req: ChatRequest): Promise<ChatStream> {
-    return this.routed(
+    return this.routed('/v1/chat/completions',
       () => this.gw({ method: 'POST', path: '/v1/chat/completions', group: 'chat', call: req, json: this.chatJson(req, true) },
         async res => chatStreamOf(res, servedFrom(res.headers), { path: '/v1/chat/completions', signal: req.signal })),
       cause => this.direct!.chatStream(req, cause),
@@ -178,7 +262,7 @@ export class GatewayClient {
   /** `POST /v1/audio/speech`: the body is returned as a stream, never buffered. */
   speech(req: SpeechRequest): Promise<SpeechResult> {
     const json = bodyOf(req);
-    return this.routed(
+    return this.routed('/v1/audio/speech',
       () => this.gw({ method: 'POST', path: '/v1/audio/speech', group: 'tts', call: req, json }, async (res) => {
         if (!res.body) throw new GatewayError({ message: 'empty speech body', code: 'bad_response', path: '/v1/audio/speech' });
         return { body: res.body, contentType: res.headers.get('content-type') ?? 'application/octet-stream', served: servedFrom(res.headers) };
@@ -199,7 +283,10 @@ export class GatewayClient {
       message: cause ? `gateway unreachable for s2s: ${cause.message}` : 'gateway skipped for s2s: unreachable recently (breaker open)',
       code: 'gateway_unreachable', status: cause?.status, path: '/v1/s2s', unreachable: true, cause,
     });
-    if (this.breaker?.skipGateway()) throw unreachable();
+    if (this.breaker?.skipGateway()) {
+      this.record({ at: this.now(), kind: 'unreachable', path: '/v1/s2s', code: 'breaker_open', route: 'direct' });
+      throw unreachable();
+    }
     const form = new FormData();
     form.set('file', toBlob(req.file), req.filename ?? 'turn');
     form.set('config', JSON.stringify(req.config));
@@ -207,10 +294,12 @@ export class GatewayClient {
       const stream = await this.gw({ method: 'POST', path: '/v1/s2s', group: 's2s', call: req, form },
         async res => s2sStreamOf(res, { path: '/v1/s2s', signal: req.signal }));
       this.breaker?.success();
+      this.maybeReport();
       return stream;
     } catch (err) {
       if (!(err instanceof GatewayError)) throw err;
-      if (!err.unreachable) { this.breaker?.success(); throw err; }
+      if (!err.unreachable) { this.breaker?.success(); this.maybeReport(); throw err; }
+      this.record({ at: this.now(), kind: 'unreachable', path: '/v1/s2s', code: err.code });
       this.breaker?.failure(err.code);
       throw unreachable(err);
     }
@@ -288,6 +377,7 @@ export class GatewayClient {
   async health(opts: CallOptions & { deep?: boolean } = {}): Promise<HealthReport> {
     const report = await this.getJson<HealthReport>(opts.deep ? '/health?deep=1' : '/health', 'health', opts);
     this.breaker?.success();
+    this.maybeReport();
     return report;
   }
 
