@@ -77,7 +77,7 @@ traffic returns to it. A real client error (e.g. `400` invalid request) is retur
 |---|---|---|
 | `parle-stt` | `/v1/audio/transcriptions` | `deployment:$SPEECH_DEPLOYMENT` (whisper-large-v3-turbo) → `openrouter:openai/whisper-large-v3-turbo` → `groq:whisper-large-v3-turbo` |
 | `parle-llm` | `/v1/chat/completions` | `deployment:$SPEECH_DEPLOYMENT` (Qwen3.5-9B) → `openrouter:qwen/qwen3.5-9b` → `openrouter:google/gemini-2.5-flash-lite` (both with `reasoning: {enabled: false}`) |
-| `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:$TTS_DEPLOYMENT` (Qwen3-TTS Base, voice cloning; `TTS_DEPLOYMENT_MODEL`, default `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) → `openrouter:hexgrad/kokoro-82m` (voice `pf_dora`) |
+| `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:$TTS_DEPLOYMENT` (Qwen3-TTS Base, voice cloning; `TTS_DEPLOYMENT_MODEL`, default `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) → `openrouter:microsoft/mai-voice-2.1-flash` (request `fallback_voice`, else `TTS_FALLBACK_VOICE`, default `pt-BR-Luana:MAI-Voice-2-Flash`) → `openrouter:hexgrad/kokoro-82m` (last resort, own voice `pf_dora`) |
 
 `SPEECH_DEPLOYMENT` defaults to `parle-speech` (the image with Whisper + Qwen3.5-9B + Qwen3-TTS on one GPU) and
 `TTS_DEPLOYMENT` (or `QWEN_TTS_DEPLOYMENT`) to `parle-qwen-tts`. The replica must expose the OpenAI shapes
@@ -136,7 +136,7 @@ Every successful response of the three routes carries (no secrets):
 
 | Header | Example | Meaning |
 |---|---|---|
-| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:hexgrad/kokoro-82m` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
+| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
 | `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 

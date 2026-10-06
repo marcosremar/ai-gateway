@@ -91,12 +91,11 @@ export function defaultAliasRoutes(env: Record<string, string | undefined>): Rec
     // The parle image runs Qwen3-TTS Base (voice cloning from the replica's /refs/voices.json); the replica's catalog
     // model wins when it publishes one. TTS_DEPLOYMENT_MODEL overrides the default.
     { provider: 'deployment', deployment: tts, model: env.TTS_DEPLOYMENT_MODEL?.trim() || 'Qwen/Qwen3-TTS-12Hz-0.6B-Base' },
-    // Fallback = the same family on OpenRouter (Qwen-Audio-3.0-TTS, Alibaba's DashScope TTS), so a GPU outage does not
-    // change the voice family. Its only endpoint (Alibaba) is not zero-data-retention: an account that enforces ZDR
-    // gets 404 here, the breaker opens and the chain goes on to Kokoro. Qwen preset voice: the cloned ones are GPU only.
-    { provider: 'openrouter', model: 'qwen/qwen-audio-3.0-tts-flash', voice: env.TTS_FALLBACK_QWEN_VOICE?.trim() || 'Ethan', fixedVoice: true },
-    // Last resort: Kokoro (has pt-BR voices, ZDR endpoints). Request `fallback_voice` overrides the voice.
-    { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pf_dora' },
+    // Fallback: Microsoft MAI-Voice flash on OpenRouter (ZDR endpoint, pt-BR/fr/en voices of both genders, first byte
+    // ~0.5–1.3 s measured 06/10/2026). Speaks with the request's `fallback_voice` (the app picks it by character).
+    { provider: 'openrouter', model: 'microsoft/mai-voice-2.1-flash', voice: env.TTS_FALLBACK_VOICE?.trim() || 'pt-BR-Luana:MAI-Voice-2-Flash' },
+    // Last resort: Kokoro with its own pt-BR voice (`fallback_voice` is a MAI voice, unknown to Kokoro).
+    { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pf_dora', fixedVoice: true },
   ];
   return {
     stt: {
