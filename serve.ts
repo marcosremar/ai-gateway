@@ -20,6 +20,8 @@ import {
   buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,
 } from './src/config/serve-providers';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
+import { createS2SRoute } from './src/s2s/route';
+import { loopbackStages } from './src/s2s/loopback-stages';
 import { proxyCircuitBreakers } from './src/gateway/proxy/provider-routing';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
@@ -159,13 +161,33 @@ const deepHealth = {
   report: () => deepHealthReport({ env: process.env, breakers: proxyCircuitBreakers, providers, deployments: controller }),
 };
 
+// POST /v1/s2s — speech-to-speech in one streamed request: the speech-stack deployment first, the composed pipeline
+// over the stage chains (loopback into this gateway, with the caller's own key) as fallback. See src/s2s/route.ts.
+const optionalMs = (v: string | undefined) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+const s2sRoute = createS2SRoute({
+  controller,
+  deployment: process.env.S2S_DEPLOYMENT?.trim() || process.env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech',
+  hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
+  budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
+  stagesFor: (req) => loopbackStages({
+    baseUrl: `http://127.0.0.1:${PORT}`,
+    authorization: String(req.headers.authorization ?? ''),
+    models: {
+      stt: process.env.S2S_STT_MODEL?.trim() || undefined,
+      chat: process.env.S2S_CHAT_MODEL?.trim() || undefined,
+      tts: process.env.S2S_TTS_MODEL?.trim() || undefined,
+    },
+  }),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
   apiKeys: API_KEYS,
   providers,
   deepHealth,
-  customRoutes: createKeyAdminRoutes(keyManager, isAdminToken),
+  customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });

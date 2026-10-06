@@ -169,6 +169,41 @@ provider (and the OpenRouter catalog only while `OPENROUTER_API_KEY` is accepted
 
 ---
 
+## Speech-to-speech — `POST /v1/s2s`
+
+One streamed request for a whole spoken turn: the student's audio in, the character's voice out, sentence by sentence.
+Built for low latency: no round trip between stages, the first sentence is voiced while the LLM is still writing.
+
+**Request** — multipart: `file` (the utterance: webm/ogg/wav/mp3/m4a) and `config` (JSON):
+
+```json
+{ "system": "Você é o Seu Jorge, padeiro…", "messages": [{"role": "assistant", "content": "Bom dia!"}],
+  "language": "pt", "voice": "br-m-08", "fallback_voice": "pf_dora", "max_tokens": 160, "temperature": 0.6 }
+```
+
+**Response** — `application/x-aigw-s2s` frames `[1 byte kind][4 bytes BE length][payload]`: `E` = one JSON event,
+`A` = raw PCM s16le mono (24 kHz unless an `audio_format` event says otherwise). `?format=ndjson` gives one JSON per
+line with audio as `{"type":"audio","pcm":"<base64>"}` (debugging, browsers without a frame parser).
+
+Events, in order: `route` {provider, fallback?, from?} · `transcript` {text, stt_ms} · `llm_first_token` · per sentence
+`sentence` {text} then its audio · `audio_format` {encoding, sample_rate} when it changes · `first_audio` {at_ms} ·
+`done` {reply, transcript, first_audio_ms, total_ms, missing_audio?, partial?}. `sentence_failed` = that sentence has no
+audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`partial: true` → what was sent is valid).
+
+**Routing**
+
+| Situation | What answers | `route` event |
+|---|---|---|
+| speech-stack deployment ready (`S2S_DEPLOYMENT`, default `SPEECH_DEPLOYMENT` / `parle-speech`) | its own `/v1/s2s`: STT + LLM + TTS on one GPU (0.4–0.8 s to first audio measured) | `deployment:parle-speech` |
+| deployment cold / paused / absent | woken for the next turns; this turn by the **composed pipeline**: `parle-stt` → streamed `parle-llm` → `parle-tts` per sentence, each stage with its own chain, hedge and breaker (above) | `composite`, `fallback: cold\|paused\|not_found` |
+| deployment has not sent the transcript after `S2S_HEDGE_MS` (2.5 s) | composed pipeline in parallel; first to produce audio wins, the other is aborted | `composite`, `fallback: slow` |
+| deployment breaks after the transcript, before audio | composed pipeline resumes at the LLM with that transcript (no second STT) | `composite`, `fallback: resumed` |
+| deployment breaks after audio started | in-band `error` (`partial: true`) and `done` | — |
+| nothing can answer before the first byte | `503 provider_unavailable` (JSON, as the other routes) | — |
+
+Whole turn budget: `S2S_BUDGET_MS` (45 s). The composed pipeline calls this gateway's own routes over loopback with the
+caller's key (stage models: `S2S_STT_MODEL` / `S2S_CHAT_MODEL` / `S2S_TTS_MODEL`, default the parle aliases).
+
 ## OpenAI-compatible routes
 
 ### `POST /v1/audio/transcriptions`
