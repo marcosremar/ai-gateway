@@ -1,0 +1,107 @@
+{
+  "adapters": {
+    "raw": 6197,
+    "gzip": 1706,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "alerting": {
+    "raw": 16617,
+    "gzip": 5156,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "auth": {
+    "raw": 2051,
+    "gzip": 792,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "autoscaler": {
+    "raw": 474706,
+    "gzip": 106238,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "benchmarking": {
+    "raw": 19954,
+    "gzip": 5671,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "browser": {
+    "raw": 131312,
+    "gzip": 28425,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "caching": {
+    "raw": 9463,
+    "gzip": 2814,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "client": {
+    "raw": 86750,
+    "gzip": 20245,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "compute": {
+    "raw": 4521,
+    "gzip": 1544,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "gpu-providers": {
+    "raw": 392687,
+    "gzip": 93096,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "handlers": {
+    "raw": 225705,
+    "gzip": 50286,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "index": {
+    "raw": 1468372,
+    "gzip": 318860,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "infra": {
+    "raw": 4116,
+    "gzip": 1516,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "object-storage": {
+    "raw": 4681,
+    "gzip": 1475,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "observability": {
+    "raw": 29449,
+    "gzip": 7724,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "providers": {
+    "raw": 187864,
+    "gzip": 39384,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "proxy": {
+    "raw": 137401,
+    "gzip": 33732,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "tracking": {
+    "raw": 20369,
+    "gzip": 5706,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "vault": {
+    "raw": 7772,
+    "gzip": 2181,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "voice": {
+    "raw": 24544,
+    "gzip": 6709,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  },
+  "workloads": {
+    "raw": 36351,
+    "gzip": 7838,
+    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+  }
+}
