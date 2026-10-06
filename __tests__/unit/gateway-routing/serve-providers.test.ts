@@ -72,7 +72,9 @@ describe('buildServeProviders — only configured providers are mounted', () => 
       instances: instances(), openrouter: { state: 'valid' }, deploymentProvider, env: { TTS_DEPLOYMENT: 'my-tts' },
     });
     expect(providers.tts?.['parle-tts']?.map(t => `${t.providerId}:${t.model}`))
-      .toEqual(['deployment:my-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base', 'openrouter:hexgrad/kokoro-82m']);
+      .toEqual(['deployment:my-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base', 'openrouter:qwen/qwen-audio-3.0-tts-flash', 'openrouter:hexgrad/kokoro-82m']);
+    // The Qwen fallback keeps its own preset voice: the client's fallback_voice is a Kokoro voice.
+    expect(providers.tts?.['parle-tts']?.[1]).toMatchObject({ voice: 'Ethan', fixedVoice: true });
     expect(providers.chatRoutes?.['parle-llm']?.[0].providerId).toBe('deployment:parle-speech');
     expect(providers.stt?.['parle-stt']?.map(t => t.providerId)).toEqual(['deployment:parle-speech', 'openrouter']);
   });

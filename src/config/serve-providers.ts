@@ -91,7 +91,11 @@ export function defaultAliasRoutes(env: Record<string, string | undefined>): Rec
     // The parle image runs Qwen3-TTS Base (voice cloning from the replica's /refs/voices.json); the replica's catalog
     // model wins when it publishes one. TTS_DEPLOYMENT_MODEL overrides the default.
     { provider: 'deployment', deployment: tts, model: env.TTS_DEPLOYMENT_MODEL?.trim() || 'Qwen/Qwen3-TTS-12Hz-0.6B-Base' },
-    // Qwen3-TTS voices do not exist on Kokoro: the fallback uses its own voice (request `fallback_voice` overrides).
+    // Fallback = the same family on OpenRouter (Qwen-Audio-3.0-TTS, Alibaba's DashScope TTS), so a GPU outage does not
+    // change the voice family. Its only endpoint (Alibaba) is not zero-data-retention: an account that enforces ZDR
+    // gets 404 here, the breaker opens and the chain goes on to Kokoro. Qwen preset voice: the cloned ones are GPU only.
+    { provider: 'openrouter', model: 'qwen/qwen-audio-3.0-tts-flash', voice: env.TTS_FALLBACK_QWEN_VOICE?.trim() || 'Ethan', fixedVoice: true },
+    // Last resort: Kokoro (has pt-BR voices, ZDR endpoints). Request `fallback_voice` overrides the voice.
     { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pf_dora' },
   ];
   return {
@@ -139,6 +143,8 @@ export interface RouteEntrySpec {
   provider: string;
   model?: string;
   voice?: string;
+  /** TTS only: this entry keeps its own voice even when the request sends `fallback_voice`. */
+  fixedVoice?: boolean;
   deployment?: string;
   /** Chat only: provider-specific body fields (e.g. `{ "reasoning": { "enabled": false } }`). */
   extraBody?: Record<string, unknown>;
@@ -161,6 +167,7 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
       provider: e.provider,
       ...(typeof e.model === 'string' ? { model: e.model } : {}),
       ...(typeof e.voice === 'string' ? { voice: e.voice } : {}),
+      ...(e.fixedVoice === true ? { fixedVoice: true } : {}),
       ...(typeof e.deployment === 'string' ? { deployment: e.deployment } : {}),
       ...(e.extraBody && typeof e.extraBody === 'object' && !Array.isArray(e.extraBody) ? { extraBody: e.extraBody } : {}),
     };
@@ -226,7 +233,9 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   const deploymentTimeoutMs = (stage: Stage) =>
     positiveMs(env[`DEPLOYMENT_${stage.toUpperCase()}_TIMEOUT_MS`]) || positiveMs(env.DEPLOYMENT_TIMEOUT_MS) || DEPLOYMENT_FIRST_BYTE_MS[stage];
   const hedgeMs = positiveMs(env.DEPLOYMENT_HEDGE_MS) ?? DEPLOYMENT_HEDGE_MS;
-  const extras = (e: RouteEntrySpec) => ({ ...(e.voice ? { voice: e.voice } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}) });
+  const extras = (e: RouteEntrySpec) => ({
+    ...(e.voice ? { voice: e.voice } : {}), ...(e.fixedVoice ? { fixedVoice: true } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}),
+  });
 
   /** Resolves one entry to a mounted target, or a reason why it cannot be mounted. */
   function resolve<S extends Stage>(stage: S, gatewayModel: string, e: RouteEntrySpec): RouteTarget<StageProvider<S>> | string {

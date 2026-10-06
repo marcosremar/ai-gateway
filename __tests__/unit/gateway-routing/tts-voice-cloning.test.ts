@@ -126,6 +126,29 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     expect(sent.extra).toBeUndefined();
   });
 
+  it('cold deployment: the OpenRouter fallback is Qwen TTS with its own voice; Kokoro (fallback_voice) only when Qwen fails', async () => {
+    const dep = new DeploymentTTSProvider(controller(true), 'parle-qwen-tts');
+    const qwen = kokoro();
+    const or = kokoro();
+    const qwenChain = (q: TTSProvider) => ({ 'parle-tts': [
+      { providerId: 'deployment:parle-qwen-tts', provider: dep, model: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base' },
+      { providerId: 'openrouter:qwen', provider: q, model: 'qwen/qwen-audio-3.0-tts-flash', voice: 'Ethan', fixedVoice: true },
+      { providerId: 'openrouter', provider: or, model: 'hexgrad/kokoro-82m', voice: 'pf_dora' },
+    ] });
+    const body = { model: 'parle-tts', input: 'Bom dia', voice: 'br-f-01', fallback_voice: 'pm_alex' };
+    const res = await handleAudioSpeech(req(body), qwenChain(qwen), undefined, new CircuitBreakerRegistry());
+    expect(res.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:qwen:qwen/qwen-audio-3.0-tts-flash' });
+    expect(qwen.synthesize.mock.calls[0][0]).toMatchObject({ model: 'qwen/qwen-audio-3.0-tts-flash', voice: 'Ethan' });
+
+    // Account enforcing ZDR: OpenRouter answers 404 for Qwen → Kokoro speaks with the client's fallback_voice.
+    const refused = kokoro();
+    refused.synthesize.mockRejectedValue(Object.assign(new Error('zdr-violation-by-account'), { status: 404 }));
+    const res2 = await handleAudioSpeech(req(body), qwenChain(refused), undefined, new CircuitBreakerRegistry());
+    expect(res2.status).toBe(200);
+    expect(res2.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:hexgrad/kokoro-82m' });
+    expect(or.synthesize.mock.calls.at(-1)?.[0]).toMatchObject({ model: 'hexgrad/kokoro-82m', voice: 'pm_alex' });
+  });
+
   it('a voice missing from a Base catalog is never sent to the replica (it kills vLLM-Omni) → fallback', async () => {
     const r = replica();
     const dep = new DeploymentTTSProvider(controller(), 'parle-qwen-tts', { fetchImpl: r.fetchImpl as never });
