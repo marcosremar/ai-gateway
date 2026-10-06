@@ -174,3 +174,21 @@ Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) i
   replacement, price cap, list failure, replica cap, orphan sweep, restart adoption, pause).
 - `scripts/deployments-docker-e2e.ts` — the real cloud-init in a local Docker "machine"
   (`docker build -t aigw-machine -f scripts/deployments-machine.Dockerfile scripts/`), whole HTTP path, no cloud bill.
+
+
+## Idle and leftovers stop billing on their own
+
+Inside the gateway process, without a cron of its own:
+
+| What | Who turns it off | When |
+|---|---|---|
+| Replicas of an unused deployment | the controller loop (every 20 s) | `idleMinutes` with no request (scale to `minReplicas`) |
+| Replicas kept only by `minReplicas` (a pin left on) | the controller loop | `DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES` (default 60, `0` = off) with no request and no spec change; the next request, `wake` or PATCH brings them back |
+| A replica still booting for the current use | nobody: the idle clock starts when it is ready | `bootTimeoutMinutes` replaces a stuck one |
+| Orphan replicas of this namespace, failed releases | the controller loop | next tick (retried until gone) |
+| Image build machines (`aigw-build`) | the janitor (`src/deployments/janitor.ts`, every 5 min) | older than 3 h |
+| SBS volumes Scaleway created with a server (`…_sbs_volume_N`), detached | the janitor | detached for 1 h |
+
+The janitor is on by default on Railway (`DEPLOYMENTS_JANITOR=0` turns it off; `=1` turns it on elsewhere). When the
+gateway itself is down nothing in its process runs: the reaper (`scripts/reap-orphans.ts`, a separate Railway cron
+every 15 min) releases the namespace's replicas after the gateway missed its health checks for ~2 min.

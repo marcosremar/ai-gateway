@@ -11,6 +11,9 @@
  *   - The idle window counts from the later of the last request and the moment a replica became ready after it,
  *     and a replica booting for the current activity keeps the deployment active: a cold start longer than
  *     `idleMinutes` (a 59 GB speech image boots in ~12 min) is never killed mid-boot by its own idle clock.
+ *   - Gateway-wide guard (`pinnedIdleMaxMs`, DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES): replicas kept only by `minReplicas`
+ *     go to zero after that long with no request and no change to the spec — a pin left on by mistake (a test, a
+ *     class that ended) stops billing. The spec stays: the next request, `wake` or PATCH brings them back.
  *   - Scale-down above the idle base waits `scaleDownDelaySeconds` of low load (no flapping on bursts) and never
  *     picks a replica with requests in flight. Going idle scales down at once.
  */
@@ -40,6 +43,10 @@ export interface PlanInput {
   inflight: number;
   waiting: number;
   lastRequestAt: number | null;
+  /** Gateway-wide: replicas kept by `minReplicas` alone go to zero after this long unused (0/absent = off). */
+  pinnedIdleMaxMs?: number;
+  /** When the spec last changed (a PUT/PATCH is intent: it restarts the pinned-idle clock). */
+  specUpdatedAt?: number;
   /** Since when the live replica count has been above desired (hysteresis memory), or null. */
   aboveSince: number | null;
   now: number;
@@ -65,7 +72,16 @@ export function replicaPhase(r: ObservedReplica): ReplicaPhase {
   return 'booting';
 }
 
-type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now'> & { replicas?: ObservedReplica[] };
+type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now' | 'pinnedIdleMaxMs' | 'specUpdatedAt'>
+  & { replicas?: ObservedReplica[] };
+
+/** A `minReplicas` pin nobody used (no request, no spec change) for `pinnedIdleMaxMs`. */
+export function pinnedIdleOver(input: ActivityInput): boolean {
+  const max = input.pinnedIdleMaxMs;
+  if (!max || input.spec.minReplicas === 0 || input.inflight > 0 || input.waiting > 0) return false;
+  const lastUse = Math.max(input.lastRequestAt ?? 0, input.specUpdatedAt ?? 0);
+  return input.now - lastUse >= max;
+}
 
 export function isActive(input: ActivityInput): boolean {
   if (input.inflight > 0 || input.waiting > 0) return true;
@@ -84,7 +100,7 @@ export function isActive(input: ActivityInput): boolean {
 
 export function desiredReplicas(input: ActivityInput): number {
   const { spec } = input;
-  if (spec.paused) return 0;
+  if (spec.paused || pinnedIdleOver(input)) return 0;
   const active = isActive(input);
   const base = active ? Math.max(spec.minReplicas, spec.minActiveReplicas ?? 1, 1) : spec.minReplicas;
   const byLoad = Math.ceil((input.inflight + input.waiting) / spec.targetInflightPerReplica);
