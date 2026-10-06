@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { loopbackStages } from '../../../src/s2s/loopback-stages.js';
 
-// Regression: serve.ts passes { stt: undefined } when S2S_STT_MODEL is unset; the composite must still ask the aliases.
+// Regression: serve.ts passes { stt: undefined } when S2S_STT_MODEL is unset; the gateway names no app alias, so that must fail loudly.
 describe('loopbackStages models', () => {
   function capture() {
     const seen: string[] = [];
@@ -13,11 +13,12 @@ describe('loopbackStages models', () => {
     return { seen, fetchImpl };
   }
 
-  it('unset overrides keep the parle aliases (never "undefined")', async () => {
+  it('an unset model is a loud error, never a model called "undefined"', async () => {
     const { seen, fetchImpl } = capture();
     const stages = loopbackStages({ baseUrl: 'http://gw', authorization: 'Bearer k', fetchImpl, models: { stt: undefined, chat: undefined, tts: undefined } });
-    await stages.transcribe(new Uint8Array([1]), 'audio/wav', { language: 'pt' } as never, new AbortController().signal);
-    expect(seen).toEqual(['parle-stt']);
+    await expect(stages.transcribe(new Uint8Array([1]), 'audio/wav', { language: 'pt' } as never, new AbortController().signal))
+      .rejects.toThrow(/no stt model/);
+    expect(seen).toEqual([]);
   });
 
   it('a set override wins', async () => {

@@ -123,9 +123,20 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
     return { zone, ipId: ip.id, ip: ip.address, groupId };
   }
 
+  /**
+   * Each piece on its own, and an already-deleted one (404) counts as done: a retry after the IP went must still reach
+   * the firewall (a live test on 06/10/2026 left the security group behind because every retry stopped at the IP's 404).
+   */
   async releaseNetwork(network: DeploymentNetwork): Promise<void> {
-    await this.need('deleteIp')(network.zone, network.ipId, this.credentials);
-    await this.need('deleteSecurityGroup')(network.zone, network.groupId, this.credentials);
+    const gone = (err: unknown) => (err as { status?: number })?.status === 404 || /HTTP 404/.test(String(err));
+    const errors: unknown[] = [];
+    for (const del of [
+      () => this.need('deleteIp')(network.zone, network.ipId, this.credentials),
+      () => this.need('deleteSecurityGroup')(network.zone, network.groupId, this.credentials),
+    ]) {
+      try { await del(); } catch (err) { if (!gone(err)) errors.push(err); }
+    }
+    if (errors.length) throw errors[0];
   }
 
   async stopReplica(machine: ReplicaMachine): Promise<void> {

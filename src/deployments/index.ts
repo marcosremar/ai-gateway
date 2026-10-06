@@ -76,6 +76,8 @@ export function deploymentsFromEnv(
     /** userIds that may always manage (e.g. the SANDBOX_TOKEN user), on top of DEPLOYMENTS_ADMIN_USERS. */
     alwaysAdmin?: string[];
     log?: (msg: string, data?: Record<string, unknown>) => void;
+    /** An app replaced its routes: the caller re-mounts the providers. */
+    onRoutesChange?: () => void;
   },
 ): DeploymentsFromEnv | null {
   if (env.DEPLOYMENTS_ENABLED === '0') return null;
@@ -106,6 +108,7 @@ export function deploymentsFromEnv(
     controller,
     apps,
     userOf: opts.userOf,
+    ...(opts.onRoutesChange ? { onRoutesChange: opts.onRoutesChange } : {}),
     isAdmin: admins.length ? (req) => [...admins, ...(opts.alwaysAdmin ?? [])].includes(opts.userOf(req) ?? '') : undefined,
   });
   // In-process janitor (build machines and detached volumes that no deployment owns). On by default on Railway, where

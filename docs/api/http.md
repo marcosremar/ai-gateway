@@ -71,17 +71,27 @@ with the fallback hedged in, so the probe never makes the client wait the full t
 for: the gateway starts scaling it up and answers from the fallback in the same call; once a replica is ready,
 traffic returns to it. A real client error (e.g. `400` invalid request) is returned as is.
 
-### Aliases for the parle client
+### App aliases — `PUT /v1/apps/:app/routes`
 
-| Model (alias) | Route | Chain |
-|---|---|---|
-| `parle-stt` | `/v1/audio/transcriptions` | `deployment:$SPEECH_DEPLOYMENT` (whisper-large-v3-turbo) → `openrouter:openai/whisper-large-v3-turbo` → `groq:whisper-large-v3-turbo` |
-| `parle-llm` | `/v1/chat/completions` | `deployment:$SPEECH_DEPLOYMENT` (Qwen3.5-9B) → `openrouter:qwen/qwen3.5-9b` → `openrouter:google/gemini-2.5-flash-lite` (both with `reasoning: {enabled: false}`) |
-| `parle-tts`, `qwen/qwen3-tts` | `/v1/audio/speech` | `deployment:$TTS_DEPLOYMENT` (Qwen3-TTS Base, voice cloning; `TTS_DEPLOYMENT_MODEL`, default `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) → `openrouter:microsoft/mai-voice-2.1-flash` (request `fallback_voice`, else `TTS_FALLBACK_VOICE`, default `pt-BR-Luana:MAI-Voice-2-Flash`) → `openrouter:hexgrad/kokoro-82m` (last resort, own voice `pf_dora`) |
+The gateway's code names no app model. An app that wants its own model names (`parle-stt`, `parle-llm`,
+`parle-tts`…) routed to its deployment first and to cloud fallbacks after puts them on its account, in the
+`MODEL_ROUTES` shape below. The change is live (the providers are re-mounted, no restart) and stored in the account
+(`DEPLOYMENTS_STATE_DIR/apps.json`).
 
-`SPEECH_DEPLOYMENT` defaults to `parle-speech` (the image with Whisper + Qwen3.5-9B + Qwen3-TTS on one GPU) and
-`TTS_DEPLOYMENT` (or `QWEN_TTS_DEPLOYMENT`) to `parle-qwen-tts`. The replica must expose the OpenAI shapes
-(`/v1/audio/transcriptions`, `/v1/chat/completions`, `/v1/audio/speech`).
+```bash
+curl -X PUT $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
+  "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
+  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-qwen-tts", "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
+                          { "provider": "openrouter", "model": "microsoft/mai-voice-2.1-flash", "voice": "pt-BR-Luana:MAI-Voice-2-Flash" },
+                          { "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora", "fixedVoice": true }] }
+}'
+curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
+```
+
+- A PUT replaces all of the app's routes. Invalid entries → `400`; an alias another app already routes → `409`
+  (an app cannot take over another app's model names); another app's routes → `403`.
+- `MODEL_ROUTES` (below) wins over every app's routes for the same model.
+- `fixedVoice: true` (TTS): the entry keeps its own `voice` even when the request sends `fallback_voice`.
 
 Voices are provider-specific: on `/v1/audio/speech`, `voice` goes to the first provider and a fallback uses
 `fallback_voice` from the request, else its own configured voice.
@@ -116,7 +126,7 @@ naming the key (not `404`). PlayAI TTS was retired by Groq and is no longer offe
 ### Changing the map — `MODEL_ROUTES`
 
 A JSON env var adds or replaces chains (same model = replaced). Entries: `"provider"`, `"provider:upstreamModel"`,
-`"deployment:<name>[:upstreamModel]"`, or `{"provider", "model", "voice", "deployment", "extraBody"}` (`extraBody`:
+`"deployment:<name>[:upstreamModel]"`, or `{"provider", "model", "voice", "fixedVoice", "deployment", "extraBody"}` (`extraBody`:
 provider-specific chat body fields, e.g. `{"reasoning": {"enabled": false}}`). The chat key `"*"`
 replaces the generic chat fallback (default: Groq `llama-3.3-70b-versatile`, then OpenRouter
 `meta-llama/llama-3.3-70b-instruct`).
@@ -181,6 +191,12 @@ Built for low latency: no round trip between stages, the first sentence is voice
   "language": "pt", "voice": "br-m-08", "fallback_voice": "pf_dora", "max_tokens": 160, "temperature": 0.6 }
 ```
 
+**Which deployment and models** (the gateway names no app's): `"deployment": "parle-speech"` is the speech-stack
+primary (default `S2S_DEPLOYMENT`; none = composed pipeline only) and `"models": {"stt": "parle-stt", "chat":
+"parle-llm", "tts": "parle-tts"}` the stage models of the composed pipeline (default `S2S_STT_MODEL` /
+`S2S_CHAT_MODEL` / `S2S_TTS_MODEL`; a stage with no model fails that turn with `503`, never a model called
+"undefined").
+
 **Prompt built before the transcript exists**: `"user_template": "…The player says: \"{{transcript}}\"…"` — the user
 turn becomes the template with `{{transcript}}` replaced by what was heard (default: the transcript alone). A client
 that must look at the transcript before committing to the reply (commands, low confidence) reads the `transcript`
@@ -204,15 +220,15 @@ audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`part
 
 | Situation | What answers | `route` event |
 |---|---|---|
-| speech-stack deployment ready (`S2S_DEPLOYMENT`, default `SPEECH_DEPLOYMENT` / `parle-speech`) | its own `/v1/s2s`: STT + LLM + TTS on one GPU (0.4–0.8 s to first audio measured) | `deployment:parle-speech` |
-| deployment cold / paused / absent | woken for the next turns; this turn by the **composed pipeline**: `parle-stt` → streamed `parle-llm` → `parle-tts` per sentence, each stage with its own chain, hedge and breaker (above) | `composite`, `fallback: cold\|paused\|not_found` |
+| speech-stack deployment ready (`config.deployment`, else `S2S_DEPLOYMENT`) | its own `/v1/s2s`: STT + LLM + TTS on one GPU (0.4–0.8 s to first audio measured) | `deployment:parle-speech` |
+| deployment cold / paused / absent | woken for the next turns; this turn by the **composed pipeline**: `models.stt` → streamed `models.chat` → `models.tts` per sentence, each stage with its own chain, hedge and breaker (above) | `composite`, `fallback: cold\|paused\|not_found` |
 | deployment has not sent the transcript after `S2S_HEDGE_MS` (2.5 s) | composed pipeline in parallel; first to produce audio wins, the other is aborted | `composite`, `fallback: slow` |
 | deployment breaks after the transcript, before audio | composed pipeline resumes at the LLM with that transcript (no second STT) | `composite`, `fallback: resumed` |
 | deployment breaks after audio started | in-band `error` (`partial: true`) and `done` | — |
 | nothing can answer before the first byte | `503 provider_unavailable` (JSON, as the other routes) | — |
 
 Whole turn budget: `S2S_BUDGET_MS` (45 s). The composed pipeline calls this gateway's own routes over loopback with the
-caller's key (stage models: `S2S_STT_MODEL` / `S2S_CHAT_MODEL` / `S2S_TTS_MODEL`, default the parle aliases).
+caller's key (stage models: `config.models`, else `S2S_STT_MODEL` / `S2S_CHAT_MODEL` / `S2S_TTS_MODEL`).
 
 ## OpenAI-compatible routes
 

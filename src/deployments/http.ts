@@ -92,6 +92,8 @@ export interface DeploymentRoutesOptions {
   /** Mutations (PUT/PATCH/DELETE/wake, profiles) require this. Default: every authenticated caller. */
   isAdmin?: (req: IncomingMessage) => boolean;
   fetchImpl?: typeof fetch;
+  /** An app replaced its routes (`PUT /v1/apps/:app/routes`): re-mount the providers. */
+  onRoutesChange?: () => void;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
@@ -133,6 +135,13 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const account = registry.get(app);
       const deployments = controller.list().filter(d => d.app === app).map(d => ({ name: d.name, status: d.status, appImage: d.appImage }));
       return send(res, 200, { id: app, createdAt: account?.createdAt ?? null, images: Object.values(account?.images ?? {}), deployments });
+    }
+    if (sub === 'routes' && !imageName) {
+      if (method === 'GET') return send(res, 200, { app, routes: registry.get(app)?.routes ?? {} });
+      if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
+      const routes = await registry.putRoutes(app, await readJson(req));
+      opts.onRoutesChange?.();
+      return send(res, 200, { app, routes });
     }
     if (sub !== 'images' || extra) return send(res, 404, { error: `unknown path '/${parts.join('/')}'` });
     if (!imageName) {

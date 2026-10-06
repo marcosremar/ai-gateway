@@ -91,6 +91,8 @@ const deployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: [SANDBOX_USER],
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   log: (msg, data) => log.log(data ?? {}, msg),
+  // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
+  onRoutesChange: () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>),
 });
 if (deployments) {
   await deployments.controller.init();
@@ -106,8 +108,8 @@ if (deployments) {
   log.log({}, 'Deployments disabled (no SCW_SECRET_KEY)');
 }
 
-// Providers: only the configured ones are mounted. A self-hosted deployment is the primary of the parle-* aliases
-// (and of any model routed to it through MODEL_ROUTES); OpenRouter is the fallback. See src/config/serve-providers.ts.
+// Providers: only the configured ones are mounted. Each app sends its own aliases (PUT /v1/apps/:app/routes: a
+// self-hosted deployment first, OpenRouter as the fallback); MODEL_ROUTES on top. See src/config/serve-providers.ts.
 const modelRoutes = parseModelRoutes(process.env.MODEL_ROUTES);
 if (modelRoutes.errors.length) log.warn({ errors: modelRoutes.errors }, 'MODEL_ROUTES has invalid parts — skipped');
 const controller = deployments?.controller ?? null;
@@ -123,6 +125,7 @@ function mountProviders() {
     env: process.env,
     openrouter: openrouterKey,
     modelRoutes: modelRoutes.routes,
+    appRoutes: deployments?.apps.allRoutes() ?? {},
     zaiModels: ZAI_LLM_MODELS.map(m => m.id),
     listOpenRouterModels,
     deploymentProvider: controller ? (stage, name) => (
@@ -168,17 +171,17 @@ const deepHealth = {
 const optionalMs = (v: string | undefined) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
 const s2sRoute = createS2SRoute({
   controller,
-  deployment: process.env.S2S_DEPLOYMENT?.trim() || process.env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech',
+  deployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
   hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
   budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
   primarySpeaksJson: process.env.S2S_PRIMARY_SPEAK_FIELD === '1',
-  stagesFor: (req) => loopbackStages({
+  stagesFor: (req, config) => loopbackStages({
     baseUrl: `http://127.0.0.1:${PORT}`,
     authorization: String(req.headers.authorization ?? ''),
     models: {
-      stt: process.env.S2S_STT_MODEL?.trim() || undefined,
-      chat: process.env.S2S_CHAT_MODEL?.trim() || undefined,
-      tts: process.env.S2S_TTS_MODEL?.trim() || undefined,
+      stt: config.models?.stt || process.env.S2S_STT_MODEL?.trim() || undefined,
+      chat: config.models?.chat || process.env.S2S_CHAT_MODEL?.trim() || undefined,
+      tts: config.models?.tts || process.env.S2S_TTS_MODEL?.trim() || undefined,
     },
   }),
   log: (msg, data) => log.log(data ?? {}, msg),

@@ -61,15 +61,6 @@ const TTS_CHAINS: Record<string, Array<[string, string]>> = {
 };
 
 /**
- * Gateway aliases the parle client calls. The self-hosted Scaleway deployment is the primary; OpenRouter is the
- * fallback of every stage (same models the parle client used directly, see parle core/lang/speech-config.ts);
- * Groq is an extra fallback when it has a key. Deployment names come from SPEECH_DEPLOYMENT (STT + LLM, default
- * parle-speech) and TTS_DEPLOYMENT (default parle-qwen-tts). MODEL_ROUTES replaces any of these per model.
- */
-/** OpenRouter: answer without a reasoning phase (ignored by models that do not reason). */
-const NO_REASONING = { reasoning: { enabled: false } };
-
-/**
  * Time a deployment target gets to send its FIRST BYTE before the chain moves on, per stage. Overrides:
  * DEPLOYMENT_<STAGE>_TIMEOUT_MS (STT, CHAT, TTS), else DEPLOYMENT_TIMEOUT_MS for all stages.
  * Sized so deployment + fallback fit the stage budget (8 s, `GATEWAY_<STAGE>_BUDGET_MS`) below parle's deadlines.
@@ -82,41 +73,6 @@ export const DEPLOYMENT_HEDGE_MS = 1_500;
 function positiveMs(value: string | undefined): number | undefined {
   const n = Number(value);
   return value !== undefined && value.trim() !== '' && Number.isFinite(n) && n >= 0 ? n : undefined;
-}
-
-export function defaultAliasRoutes(env: Record<string, string | undefined>): Record<Stage, Record<string, RouteEntrySpec[]>> {
-  const speech = env.SPEECH_DEPLOYMENT?.trim() || 'parle-speech';
-  const tts = env.TTS_DEPLOYMENT?.trim() || env.QWEN_TTS_DEPLOYMENT?.trim() || 'parle-qwen-tts';
-  const ttsChain: RouteEntrySpec[] = [
-    // The parle image runs Qwen3-TTS Base (voice cloning from the replica's /refs/voices.json); the replica's catalog
-    // model wins when it publishes one. TTS_DEPLOYMENT_MODEL overrides the default.
-    { provider: 'deployment', deployment: tts, model: env.TTS_DEPLOYMENT_MODEL?.trim() || 'Qwen/Qwen3-TTS-12Hz-0.6B-Base' },
-    // Fallback: Microsoft MAI-Voice flash on OpenRouter (ZDR endpoint, pt-BR/fr/en voices of both genders, first byte
-    // ~0.5–1.3 s measured 06/10/2026). Speaks with the request's `fallback_voice` (the app picks it by character).
-    { provider: 'openrouter', model: 'microsoft/mai-voice-2.1-flash', voice: env.TTS_FALLBACK_VOICE?.trim() || 'pt-BR-Luana:MAI-Voice-2-Flash' },
-    // Last resort: Kokoro with its own pt-BR voice (`fallback_voice` is a MAI voice, unknown to Kokoro).
-    { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pf_dora', fixedVoice: true },
-  ];
-  return {
-    stt: {
-      'parle-stt': [
-        { provider: 'deployment', deployment: speech, model: 'whisper-large-v3-turbo' },
-        { provider: 'openrouter', model: 'openai/whisper-large-v3-turbo' },
-        { provider: 'groq', model: 'whisper-large-v3-turbo' },
-      ],
-    },
-    chat: {
-      'parle-llm': [
-        { provider: 'deployment', deployment: speech, model: 'qwen3.5-9b' },
-        // Qwen3.5 is a reasoning model: with reasoning on it spends max_tokens thinking and answers nothing
-        // (content null, finish_reason length). A spoken turn needs the answer, so reasoning is off.
-        { provider: 'openrouter', model: 'qwen/qwen3.5-9b', extraBody: NO_REASONING },
-        // Must work with the account's privacy settings (ZDR / data policy): qwen/qwen3.7-flash answers 404 there.
-        { provider: 'openrouter', model: 'google/gemini-2.5-flash-lite', extraBody: NO_REASONING },
-      ],
-    },
-    tts: { 'parle-tts': ttsChain, 'qwen/qwen3-tts': ttsChain },
-  };
 }
 
 export type OpenRouterKeyState = { state: 'missing' | 'valid' | 'invalid' | 'unknown'; detail?: string };
@@ -198,12 +154,14 @@ export function parseModelRoutes(raw: string | undefined): { routes: ModelRoutes
 
 export interface BuildServeProvidersOptions {
   instances: ServeInstances;
-  /** Read for the deployment names of the default aliases (SPEECH_DEPLOYMENT, TTS_DEPLOYMENT). */
+  /** Read for the deployment first-byte timeouts and hedge (DEPLOYMENT_*_TIMEOUT_MS, DEPLOYMENT_HEDGE_MS). */
   env?: Record<string, string | undefined>;
   openrouter: OpenRouterKeyState;
   /** Returns a provider backed by deployment `name`, or null when the deployments service is off. */
   deploymentProvider?: (stage: Stage, name: string) => StageProvider<Stage> | null;
   modelRoutes?: ModelRoutesSpec;
+  /** Every app's own aliases (`PUT /v1/apps/:app/routes`), merged; MODEL_ROUTES wins over them. */
+  appRoutes?: ModelRoutesSpec;
   /** Static Z.AI model ids (from ZAI_LLM_MODELS). */
   zaiModels?: string[];
   /** OpenRouter catalog lister for /v1/models (only used when the key is valid). */
@@ -281,8 +239,8 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   }
   for (const [model, chain] of Object.entries(STT_CHAINS)) specs.stt[model] = chain.map(([provider, m]) => ({ provider, model: m }));
   for (const [model, chain] of Object.entries(TTS_CHAINS)) specs.tts[model] = chain.map(([provider, m]) => ({ provider, model: m }));
-  const aliases = defaultAliasRoutes(opts.env ?? {});
-  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], aliases[stage]);
+  // Each app's own aliases (PUT /v1/apps/:app/routes), then MODEL_ROUTES on top (same model = replaced).
+  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.appRoutes?.[stage] ?? {});
   for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.modelRoutes?.[stage] ?? {});
 
   const genericFallback = specs.chat['*'] ?? [

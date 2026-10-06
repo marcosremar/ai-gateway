@@ -5,7 +5,7 @@
  * Response: frames (frames.ts) — binary by default, `?format=ndjson` for debugging/browsers.
  *
  * Routing, in order:
- *  1. primary: the speech-stack deployment (`S2S_DEPLOYMENT`, default `SPEECH_DEPLOYMENT` or `parle-speech`) answers
+ *  1. primary: the speech-stack deployment (`config.deployment`, else `S2S_DEPLOYMENT`) answers
  *     on its own `/v1/s2s` — STT, LLM and TTS on one GPU, the lowest latency (0.4–0.8 s to first audio measured);
  *  2. no ready replica (cold, paused, absent, refused): the deployment is woken for the next turns and this one is
  *     answered at once by the composed pipeline (composite.ts) over the stage chains, each with its own fallback;
@@ -29,7 +29,8 @@ type Controller = Pick<DeploymentController, 'acquire' | 'get' | 'wake'>;
 export interface S2SRouteOptions {
   controller: Controller | null;
   /** Stage client for the composed fallback, built per request (it forwards the caller's key). */
-  stagesFor: (req: IncomingMessage) => StageClient;
+  stagesFor: (req: IncomingMessage, config: S2SConfig) => StageClient;
+  /** Default speech-stack deployment (`S2S_DEPLOYMENT`); a request's `config.deployment` wins. None = composed only. */
   deployment?: string;
   hedgeMs?: number;
   budgetMs?: number;
@@ -117,7 +118,6 @@ class Lane {
 }
 
 export function createS2SRoute(opts: S2SRouteOptions) {
-  const deployment = opts.deployment ?? 'parle-speech';
   const hedgeMs = opts.hedgeMs ?? S2S_HEDGE_MS;
   const budgetMs = opts.budgetMs ?? S2S_BUDGET_MS;
   const log = opts.log ?? (() => {});
@@ -147,6 +147,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       return sendJson(res, status, { error: { message: `bad s2s request: ${(err as Error).message}`, type: 'invalid_request' } });
     }
 
+    const deployment = typeof config.deployment === 'string' && config.deployment ? config.deployment : opts.deployment ?? '';
     const sink = new Sink(res, format);
     const budget = new AbortController();
     const budgetTimer = setTimeout(() => budget.abort(new Error(`s2s budget of ${budgetMs} ms exceeded`)), budgetMs);
@@ -155,7 +156,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
     const outcome: Record<string, unknown> = {};
 
     const composite = (lane: Lane, signal: AbortSignal, transcript?: { text: string }) => runComposite({
-      stages: opts.stagesFor(req), audio, contentType, config, signal, transcript,
+      stages: opts.stagesFor(req, config), audio, contentType, config, signal, transcript,
       emitEvent: e => lane.event(e), emitAudio: a => lane.audio(a),
     });
 
@@ -163,7 +164,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       // ── 1. primary: a ready replica of the speech-stack deployment ──
       let lease: Awaited<ReturnType<Controller['acquire']>> | null = null;
       let skip: string | null = null;
-      if (!opts.controller || !opts.controller.get(deployment)) skip = 'not_found';
+      if (!deployment || !opts.controller || !opts.controller.get(deployment)) skip = 'not_found';
       else if (config.speak_field && !opts.primarySpeaksJson) skip = 'unsupported';
       else {
         try {

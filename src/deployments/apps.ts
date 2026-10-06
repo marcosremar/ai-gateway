@@ -13,6 +13,7 @@
 
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
+import { parseModelRoutes, type ModelRoutesSpec } from '../config/serve-providers';
 
 export const APP_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
 export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
@@ -43,7 +44,16 @@ export interface AppImage {
   history: AppImageVersion[];
 }
 
-export interface AppAccount { id: string; createdAt: number; images: Record<string, AppImage> }
+export interface AppAccount {
+  id: string;
+  createdAt: number;
+  images: Record<string, AppImage>;
+  /**
+   * The app's model aliases (`parle-stt` → deployment, then OpenRouter…), in the MODEL_ROUTES shape. The gateway's code
+   * names no app: each app sends its own chains (`PUT /v1/apps/:app/routes`) and they are mounted at once.
+   */
+  routes?: ModelRoutesSpec;
+}
 
 export class AppError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -139,6 +149,36 @@ export class AppRegistry {
     account.images[name] = image;
     await this.store.save(this.apps);
     return { image, created: !prev };
+  }
+
+  /**
+   * Replaces the app's routes. An alias belongs to one app: an alias another app already routes is refused (409), so
+   * no app can take over another app's model names. Validation is MODEL_ROUTES' (`parseModelRoutes`).
+   */
+  async putRoutes(app: string, body: unknown): Promise<ModelRoutesSpec> {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'routes must be an object { chat?, stt?, tts? }');
+    const { routes, errors } = parseModelRoutes(JSON.stringify(body));
+    if (errors.length) throw new AppError(400, errors.join('; '));
+    for (const [stage, byModel] of Object.entries(routes) as Array<[keyof ModelRoutesSpec, Record<string, unknown> | undefined]>) {
+      for (const model of Object.keys(byModel ?? {})) {
+        const owner = Object.values(this.apps).find(a => a.id !== app && a.routes?.[stage]?.[model]);
+        if (owner) throw new AppError(409, `${stage} alias '${model}' belongs to app '${owner.id}'`);
+      }
+    }
+    this.account(app).routes = routes;
+    await this.store.save(this.apps);
+    return routes;
+  }
+
+  /** Every app's routes, merged (aliases are unique across apps). */
+  allRoutes(): ModelRoutesSpec {
+    const out: ModelRoutesSpec = {};
+    for (const account of Object.values(this.apps)) {
+      for (const [stage, byModel] of Object.entries(account.routes ?? {}) as Array<[keyof ModelRoutesSpec, ModelRoutesSpec[keyof ModelRoutesSpec]]>) {
+        out[stage] = { ...(out[stage] ?? {}), ...(byModel ?? {}) };
+      }
+    }
+    return out;
   }
 
   async deleteImage(app: string, name: string): Promise<boolean> {

@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'net';
 import { DeploymentError } from '../../../src/deployments/controller';
 import { createS2SRoute } from '../../../src/s2s/route';
+import { loopbackStages } from '../../../src/s2s/loopback-stages';
 import { decodeAll, fakeStages, replicaFrames, sleep, type FakeStagesOptions } from './_fakes';
 
 type ReplicaScript = (res: ServerResponse) => Promise<void>;
@@ -41,7 +42,7 @@ async function harness(opts: {
     },
   };
   const fake = fakeStages(opts.stages);
-  const route = createS2SRoute({ controller, stagesFor: () => fake.stages, hedgeMs: opts.hedgeMs ?? 2_000 });
+  const route = createS2SRoute({ controller, deployment: 'parle-speech', stagesFor: () => fake.stages, hedgeMs: opts.hedgeMs ?? 2_000 });
   const host = await listen((req, res) => { void route(req, res); });
   async function call(query = '', custom?: FormData) {
     const form = custom ?? new FormData();
@@ -181,9 +182,26 @@ describe('POST /v1/s2s routing', () => {
     expect(Buffer.from(audio.pcm, 'base64').toString()).toBe('Bom dia, querida!');
   });
 
+  it('the request names the deployment and models; none → composed only, and a missing model is a 503', async () => {
+    let fetched = 0;
+    const fetchImpl = (async () => { fetched++; return new Response('{}'); }) as unknown as typeof fetch;
+    const route = createS2SRoute({
+      controller: null,
+      stagesFor: (_req, config) => loopbackStages({ baseUrl: 'http://gw', authorization: 'Bearer k', fetchImpl, models: config.models }),
+    });
+    const host = await listen((req, res) => { void route(req, res); });
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1])]), 'a.webm');
+    form.set('config', JSON.stringify({ system: 'x', language: 'pt' }));
+    const res = await fetch(`http://${host}/v1/s2s?format=ndjson`, { method: 'POST', body: form });
+    expect(res.status).toBe(503);
+    expect(await res.text()).toContain('no stt model');
+    expect(fetched).toBe(0);
+  });
+
   it('bad request: 400 without a file, and bad config JSON', async () => {
     const fake = fakeStages();
-    const route = createS2SRoute({ controller: null, stagesFor: () => fake.stages });
+    const route = createS2SRoute({ controller: null, deployment: 'parle-speech', stagesFor: () => fake.stages });
     const host = await listen((req, res) => { void route(req, res); });
     const noFile = new FormData();
     noFile.set('config', '{}');
