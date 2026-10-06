@@ -10,6 +10,7 @@
 
 import { probeRtt } from '../gateway/providers/gpu/rtt-probe';
 import { vastReplicaInit } from './cloud-init';
+import { MIN_HOST_LEFT_MS, vastEndsAt } from './expiry';
 import { DEFAULT_NEAR, rankOffers, type VastOffer } from './placements';
 import type { CreateReplicaInput, DeploymentBackend, DeploymentSpec, ReplicaMachine } from './types';
 
@@ -57,6 +58,9 @@ interface VastInstance {
   machine_id?: number;
   dph_total?: number;
   start_date?: number | null;
+  /** Rental end (Unix seconds): the host is taken back then (`expiry.ts`). */
+  end_date?: number | string | null;
+  duration?: number | null;
   gpu_name?: string;
   geolocation?: string | null;
 }
@@ -140,14 +144,20 @@ export class VastDeploymentBackend implements DeploymentBackend {
       const { offers = [] } = await this.call<{ offers?: VastOffer[] }>('POST', '/bundles/', this.searchBody(spec, reliability));
       // The API's numeric filters are not always applied: check cap and floors again here.
       const cuda = cudaFloorOf(spec);
+      // A host whose rental ends within a day would be taken back mid-use: skipped (unknown end = kept).
       const valid = offers.filter(o => o.dph_total <= usdCap && o.reliability2 >= reliability && o.inet_down >= MIN_INET_DOWN_MBPS
-        && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda));
+        && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda) && this.lastsLongEnough(o, now));
       const ranked = rankOffers(valid, {
         near: spec.near ?? DEFAULT_NEAR, ...(spec.allowFar ? { allowFar: true } : {}), avoidMachines: new Set(this.badHosts.keys()),
       });
       if (ranked.length) return ranked;
     }
     return [];
+  }
+
+  private lastsLongEnough(offer: VastOffer, now: number): boolean {
+    const end = vastEndsAt(offer.end_date, offer.duration, now);
+    return end === null || end - now >= MIN_HOST_LEFT_MS;
   }
 
   async createReplica(input: CreateReplicaInput): Promise<ReplicaMachine> {
@@ -181,6 +191,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
           id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast',
           zone: offer.geolocation ?? '', machineType: offer.gpu_name ?? spec.machineType,
           pricePerHour: Math.round((offer.dph_total / EUR_TO_USD) * 1000) / 1000,
+          expiresAt: vastEndsAt(offer.end_date, offer.duration, this.now()),
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -205,6 +216,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         createdAt: typeof i.start_date === 'number' ? Math.round(i.start_date * 1000) : this.now(),
         zone: i.geolocation ?? '', machineType: i.gpu_name ?? '',
         pricePerHour: typeof i.dph_total === 'number' ? Math.round((i.dph_total / EUR_TO_USD) * 1000) / 1000 : null,
+        expiresAt: vastEndsAt(i.end_date, i.duration, this.now()),
       };
     });
   }

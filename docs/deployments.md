@@ -242,6 +242,19 @@ one adopted after a gateway restart is measured for the view only, never release
   of the Netherlands can pass from NL and still be slower for France than the number suggests — the distance ranking
   (from `near`) is what keeps those behind closer hosts. Scaleway replicas are not gated.
 
+### Host rental end (Vast) — handover before the host goes
+
+A Vast host is rented until its owner's contract ends (`end_date` on the offer and the instance; `duration` as the
+fallback); then the instance is taken away, whatever it is serving. `src/deployments/expiry.ts`:
+
+- **Not rented:** an offer ending in less than **24 h** (`MIN_HOST_LEFT_MS`). An offer with no end date is kept.
+- **Handover:** a replica whose host ends within **1 h** (`EXPIRY_HANDOVER_MS`) stops counting as capacity, so its
+  replacement is created at once (even at `maxReplicas`). The old one keeps serving while the new one boots; the router
+  sends new requests to any other ready replica first; once the others cover `desired` and it has no request in
+  flight, it is released with reason `expiring`. A caller of the deployment (SDK, `/v1/...` through the gateway) sees
+  no error and no wait.
+- `GET /v1/deployments/:name` shows `expiresInMinutes` per replica (null when the provider never takes it back).
+
 ## Replica machine
 
 `cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-deployment secret only the gateway knows) and proxies to

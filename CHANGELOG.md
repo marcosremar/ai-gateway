@@ -12,6 +12,9 @@ on release via `bunx changeset version`.
 
 ### Added
 
+- **Vast host rental end** (`src/deployments/expiry.ts`) — offers ending within 24 h are not rented; a replica whose
+  host ends within 1 h gets its replacement first, keeps serving until it is ready, is drained (the router prefers the
+  others) and released as `expiring`, so the caller never sees the host go. `expiresInMinutes` per replica in the view.
 - **`minCuda` deployment field (Vast)** — lowest CUDA the host driver must support (`cuda_max_good`), for the image's own
   CUDA; the search and the local re-check use the higher of it and the GPU's floor (12.8 Blackwell, else 12.4). A 5090
   host on driver 570 (CUDA 12.8) could not start `vllm/vllm-omni:v0.28.0` (CUDA 12.9): error 804 at the first CUDA call.

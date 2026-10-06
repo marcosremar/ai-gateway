@@ -94,6 +94,9 @@ export interface VastOffer {
   gpu_name?: string;
   /** Highest CUDA version the host driver supports. */
   cuda_max_good?: number;
+  /** Rental end (Unix seconds) and seconds left: `expiry.ts`. */
+  end_date?: number | string | null;
+  duration?: number | null;
 }
 
 /**

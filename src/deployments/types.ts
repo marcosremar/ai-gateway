@@ -190,6 +190,8 @@ export interface ReplicaMachine {
   pricePerHour: number | null;
   /** Backend that owns the machine (set by the controller from the backend that listed/created it). */
   provider?: DeploymentProvider;
+  /** When the provider takes the host back (Vast rental end, ms); absent when it never does (`expiry.ts`). */
+  expiresAt?: number | null;
 }
 
 export interface CreateReplicaInput {
@@ -269,6 +271,8 @@ export interface ReplicaView {
   inflight: number;
   /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
   rttMs: number | null;
+  /** Minutes until the provider takes the host back (Vast); null when it never does. */
+  expiresInMinutes: number | null;
 }
 
 export interface DeploymentView {

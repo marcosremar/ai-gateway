@@ -14,10 +14,14 @@
  *   - Gateway-wide guard (`pinnedIdleMaxMs`, DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES): replicas kept only by `minReplicas`
  *     go to zero after that long with no request and no change to the spec — a pin left on by mistake (a test, a
  *     class that ended) stops billing. The spec stays: the next request, `wake` or PATCH brings them back.
+ *   - A replica whose host ends within `EXPIRY_HANDOVER_MS` (Vast rental end, `expiry.ts`) no longer counts as
+ *     capacity, so its replacement is created at once; it keeps serving until enough other replicas are ready, then
+ *     is released as `expiring` as soon as it has no request in flight (the router already sends new ones elsewhere).
  *   - Scale-down above the idle base waits `scaleDownDelaySeconds` of low load (no flapping on bursts) and never
  *     picks a replica with requests in flight. Going idle scales down at once.
  */
 
+import { isExpiring } from './expiry';
 import type { DeploymentSpec, ReplicaMachine, ReplicaPhase } from './types';
 
 export const UNHEALTHY_STRIKES = 3;
@@ -55,7 +59,7 @@ export interface PlanInput {
 
 export interface PlanRelease {
   id: string;
-  reason: 'halted' | 'boot-timeout' | 'unhealthy' | 'max-hours' | 'scale-down' | 'paused';
+  reason: 'halted' | 'boot-timeout' | 'unhealthy' | 'max-hours' | 'scale-down' | 'paused' | 'expiring';
 }
 
 export interface Plan {
@@ -131,10 +135,17 @@ export function planReplicas(input: PlanInput): Plan {
   const release: PlanRelease[] = [];
 
   const live: ObservedReplica[] = [];
+  const expiring: ObservedReplica[] = [];
   for (const r of input.replicas) {
     const reason = spec.paused ? 'paused' : brokenReason(r, spec, now);
     if (reason) release.push({ id: r.machine.id, reason });
+    else if (isExpiring(r.machine, now)) expiring.push(r);
     else live.push(r);
+  }
+  // Handover: the expiring host serves until the others cover the demand, then goes once drained.
+  const readyLive = live.filter(r => replicaPhase(r) === 'ready').length;
+  for (const r of expiring) {
+    if (r.inflight === 0 && readyLive >= desired) release.push({ id: r.machine.id, reason: 'expiring' });
   }
 
   if (live.length < desired) {

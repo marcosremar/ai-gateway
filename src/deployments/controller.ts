@@ -9,6 +9,7 @@
  * Single-process by design: run ONE gateway replica per namespace (two would both scale the same deployment).
  */
 
+import { isExpiring } from './expiry';
 import { randomBytes } from 'crypto';
 import { replicaCloudInit } from './cloud-init';
 import { packFiles } from './file-pack';
@@ -298,7 +299,10 @@ export class DeploymentController {
   private pick(rt: Runtime, exclude: Set<string>): ReplicaMachine | null {
     const ready = this.readyMachines(rt.record.spec.name).filter(m => !exclude.has(m.id));
     if (!ready.length) return null;
-    return ready.reduce((best, m) => ((rt.perReplica.get(m.id) ?? 0) < (rt.perReplica.get(best.id) ?? 0) ? m : best));
+    // A host about to be taken back (`expiry.ts`) only serves while nothing else can: new requests drain it.
+    const now = this.now();
+    const lasting = ready.filter(m => !isExpiring(m, now));
+    return (lasting.length ? lasting : ready).reduce((best, m) => ((rt.perReplica.get(m.id) ?? 0) < (rt.perReplica.get(best.id) ?? 0) ? m : best));
   }
 
   /**
@@ -675,6 +679,7 @@ export class DeploymentController {
       ageSeconds: Math.round((now - m.createdAt) / 1000),
       inflight: rt.perReplica.get(m.id) ?? 0,
       rttMs: this.gates.get(m.id)?.rttMs ?? null,
+      expiresInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
     }));
     const ready = replicas.filter(r => r.phase === 'ready').length;
     const desired = planReplicas({
