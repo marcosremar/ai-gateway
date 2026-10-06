@@ -12,6 +12,26 @@ on release via `bunx changeset version`.
 
 ### Added
 
+- **Deployments on Vast.ai + placement ladder** — `provider: "vast"` (`src/deployments/vast-backend.ts`, boot-script
+  mode only: `image` is the container, `bootScript` its onstart, app on `127.0.0.1:<port>`; `vastReplicaInit` starts
+  nginx without systemd), enabled by `VAST_API_KEY`. The controller takes `backends` (one per provider; `backend`
+  still works), lists each on its own (a provider failing to list keeps its known machines and pauses only the
+  deployments that touch it), and the reaper covers every provider. New spec fields: `candidates` (≤ 20
+  `{provider?, zone?, machineType, maxEurPerHour}`, ranked near the users then cheapest, each tried with its own
+  cap, out-of-stock/over-cap/not-sold skipped; `lastPlacement` in the view says where it landed and why), `near`
+  (default `FR`) and `allowFar`. `placements` (ordered Scaleway alternatives) and `candidates` share one walk
+  (`placement-walk.ts`) and one stock detector (`isOutOfStock`); a spec uses one or the other. Ranking lives with
+  `placementsOf` in `src/deployments/placements.ts` (`rankOffers`, `rankCandidates`).
+- **Placement by distance + RTT gate (Vast)** — geography is now the great-circle distance from the `near` country's
+  hub (`src/deployments/geo.ts`) in 500-km bands, far beyond 2500 km (instead of FR/neighbour/EU tiers: an EU host in
+  Slovakia measured ~60 ms from France). New spec field `maxRttMs` (5–500, default 35 measured from the gateway in
+  NL): a fresh Vast replica whose median RTT is above it is released as `too-far` and its host skipped 24 h; no
+  answer within 5 min counts as too far. `rttMs` per replica in the view; decisions in `lastPlacement`.
+- **Bundle size ratchet** (`bun run quality:bundle`, CI "Bundle Size Budget") — every tsup entry in `dist/`, raw and
+  gzip -9, against `quality-bundle-baseline.json`; fails when an entry grows more than 2 % and 8 KB, or a new entry has
+  no baseline. `quality:bundle:update` only tightens; deliberate growth needs `-- --accept-growth "<why>"`, recorded in
+  the baseline. Replaces the fixed 512 KB cap on `dist/index.js`, which the library entry (1.4 MB: it re-exports the
+  gateway, the autoscaler and every provider) had long outgrown, so the job was red on every PR and caught nothing.
 - **Declared deployments** (`src/deployments/declared/*.json`) — the gateway registers them itself at boot and every
   5 min through the idempotent `controller.put`; secrets mounted from the environment (`GHCR_READ_TOKEN` →
   `registryAuth`, `SPEECH_IMAGE`), `SPEECH_TOKEN` generated once and persisted in the store; `pending` with the reason

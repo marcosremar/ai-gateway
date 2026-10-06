@@ -9,10 +9,25 @@
  *   - **Replica**: one machine running the image. The provider (Scaleway) is the source of truth for which
  *     replicas exist — they are found by tag, so a gateway restart never loses track of a billed machine.
  *
- * Only Scaleway is supported as a backend for now (`provider: 'scaleway'`).
+ * Backends: Scaleway (`provider: 'scaleway'`, datacenter VMs, any image) and Vast.ai (`provider: 'vast'`, marketplace
+ * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
-export type DeploymentProvider = 'scaleway';
+export type DeploymentProvider = 'scaleway' | 'vast';
+
+/**
+ * One rung of the placement ladder: where a replica may run and the most it may cost there. The controller tries the
+ * candidates best first (`rankCandidates`: near the users, then cheap) and the first that rents wins.
+ */
+export interface PlacementCandidate {
+  /** Default: the spec's `provider`. */
+  provider?: DeploymentProvider;
+  /** Scaleway zone (default: the spec's `zone`); ignored on Vast (the backend picks the host near `near`). */
+  zone?: string;
+  /** Scaleway commercial type (`L4-1-24G`) or Vast GPU name (`RTX 5090`). */
+  machineType: string;
+  maxEurPerHour: number;
+}
 
 export interface RegistryAuth {
   server?: string;
@@ -107,6 +122,17 @@ export interface DeploymentSpec {
    * firewall (billed for disk and IP only), and the next demand powers it back on (~2 min instead of a full boot).
    */
   idleAction?: 'delete' | 'stop';
+  /** Placement ladder (≤ 20). Absent: one place only, `zone` + `machineType` + `maxEurPerHour` (on `provider`). */
+  candidates?: PlacementCandidate[];
+  /** ISO country the users are in (latency preference); default `DEFAULT_NEAR` (placements.ts). */
+  near?: string;
+  /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
+  allowFar?: boolean;
+  /**
+   * Vast: a freshly rented host whose measured RTT from the gateway (median, ms) is above this is released as
+   * `too-far` and avoided 24 h (`rtt-gate.ts`). Default `DEFAULT_MAX_RTT_MS` (35, measured from NL).
+   */
+  maxRttMs?: number;
 }
 
 export interface ExposedPort { protocol: 'tcp' | 'udp'; port: number }
@@ -155,6 +181,8 @@ export interface ReplicaMachine {
   zone: string;
   machineType: string;
   pricePerHour: number | null;
+  /** Backend that owns the machine (set by the controller from the backend that listed/created it). */
+  provider?: DeploymentProvider;
 }
 
 export interface CreateReplicaInput {
@@ -179,7 +207,8 @@ export interface DeploymentBackend {
   createReplica(input: CreateReplicaInput): Promise<ReplicaMachine>;
   /** Every replica of every deployment of this namespace. Must throw (not return []) when the provider fails. */
   listReplicas(namespace: string): Promise<ReplicaMachine[]>;
-  releaseReplica(machine: ReplicaMachine): Promise<void>;
+  /** `reason` is the planner's (`boot-timeout`, `scale-down`, …): a backend may learn from it (Vast avoids bad hosts). */
+  releaseReplica(machine: ReplicaMachine, reason?: string): Promise<void>;
   /** Exposed deployments: reserve the IP and create the firewall (`known` is reused when it still exists). */
   ensureNetwork?(spec: DeploymentSpec, namespace: string, known?: DeploymentNetwork): Promise<DeploymentNetwork>;
   releaseNetwork?(network: DeploymentNetwork): Promise<void>;
@@ -189,12 +218,23 @@ export interface DeploymentBackend {
   /** Catalog price (EUR/h), `null` when the type is not sold in the zone. */
   hourlyPrice(zone: string, machineType: string): Promise<number | null>;
   /**
+   * The backend picks a market offer under `spec.maxEurPerHour` itself at create (Vast): the controller skips the
+   * catalog price check (`hourlyPrice` means nothing per zone there).
+   */
+  readonly marketPriced?: boolean;
+  /** RTT (median ms) from the gateway to the replica's front, null when no sample came back (the RTT gate). */
+  measureRtt?(machine: ReplicaMachine): Promise<number | null>;
+  /** Price + stock of types in zones, for ranking `candidates` (Scaleway). Absent: candidates are ranked without it. */
+  catalog?(zones: string[]): Promise<CatalogEntry[]>;
+  /**
    * Credentials for an image in the provider's own registry, used when the spec has no `registryAuth` — so a caller
    * deploying `rg.fr-par.scw.cloud/…` never has to send (and the gateway never stores) a registry secret. `null` for
    * any other registry.
    */
   registryAuthFor?(image: string): RegistryAuth | null;
 }
+
+export interface CatalogEntry { zone: string; machineType: string; hourlyPrice: number | null; availability: string | null }
 
 /** How the controller reaches a replica's HTTP front. */
 export interface ReplicaProbe {
@@ -220,6 +260,8 @@ export interface ReplicaView {
   pricePerHour: number | null;
   ageSeconds: number;
   inflight: number;
+  /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
+  rttMs: number | null;
 }
 
 export interface DeploymentView {
@@ -239,4 +281,6 @@ export interface DeploymentView {
   appImage: string | null;
   /** Exposed deployments: the reserved IP clients connect to (it outlives replicas); null otherwise. */
   publicIp: string | null;
+  /** Where the last replica landed and why earlier candidates were skipped (null before the first create). */
+  lastPlacement: string | null;
 }

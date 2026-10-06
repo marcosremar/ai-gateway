@@ -9,6 +9,8 @@ import type { IncomingMessage } from 'http';
 import { DeploymentController } from './controller';
 import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend } from './scaleway-backend';
+import { VastDeploymentBackend } from './vast-backend';
+import type { DeploymentBackend, DeploymentProvider } from './types';
 import { FileDeploymentStore } from './store';
 import { AppRegistry, FileAppStore } from './apps';
 import { AppFallbackService, OpenRouterKeyProvisioner } from './app-fallback';
@@ -23,6 +25,8 @@ export { BUILTIN_PROFILES } from './profiles';
 export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
+export { VastDeploymentBackend } from './vast-backend';
+export { rankOffers, rankCandidates, DEFAULT_NEAR } from './placements';
 export { FileDeploymentStore, MemoryDeploymentStore } from './store';
 export { DeclaredDeploymentReconciler, DECLARED_DEPLOYMENTS, declaredBody, declaredImage } from './declared';
 export type { DeclaredDeployment, DeclaredStatus } from './declared';
@@ -58,9 +62,10 @@ export interface DeploymentsFromEnv {
 }
 
 /**
- * Builds the deployments service from env, or `null` when Scaleway is not configured.
+ * Builds the deployments service from env, or `null` when no provider is configured.
  *
- *   SCW_SECRET_KEY | SCALEWAY_SECRET_KEY   required
+ *   SCW_SECRET_KEY | SCALEWAY_SECRET_KEY   enables Scaleway replicas
+ *   VAST_API_KEY             enables Vast replicas (boot-script mode only); at least one of the two is required
  *   SCW_DEFAULT_PROJECT_ID | SCW_PROJECT_ID | SCALEWAY_PROJECT_ID   optional (default: the key's default project)
  *   DEPLOYMENTS_STATE_DIR    where specs/profiles persist (mount a volume here on Railway); default ~/.ai-gateway
  *   DEPLOYMENTS_NAMESPACE    machine tag namespace, one gateway per namespace; default "default" ON RAILWAY ONLY —
@@ -96,7 +101,8 @@ export function deploymentsFromEnv(
 ): DeploymentsFromEnv | null {
   if (env.DEPLOYMENTS_ENABLED === '0') return null;
   const secret = env.SCW_SECRET_KEY || env.SCALEWAY_SECRET_KEY;
-  if (!secret) return null;
+  const vastKey = env.VAST_API_KEY?.trim();
+  if (!secret && !vastKey) return null;
   // Every machine tagged with this namespace that belongs to no deployment known HERE is released as an orphan.
   // Off Railway (a dev box that got the real SCW key from the palco), an implicit "default" namespace would reap
   // the production replicas — so outside Railway the namespace must be set explicitly.
@@ -108,8 +114,12 @@ export function deploymentsFromEnv(
   const maxTotal = Number(env.DEPLOYMENTS_MAX_REPLICAS ?? 6);
   const stateDir = env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway');
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
+  const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
+    ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId }) } : {}),
+    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey) } : {}),
+  };
   const controller = new DeploymentController({
-    backend: new ScalewayDeploymentBackend(secret, { projectId }),
+    backends,
     store: FileDeploymentStore.inDir(stateDir),
     probe: new HttpReplicaProbe(),
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
@@ -135,7 +145,9 @@ export function deploymentsFromEnv(
   // In-process janitor (build machines and detached volumes that no deployment owns). On by default on Railway, where
   // the gateway is the one owner of the project's leftovers; elsewhere opt in with DEPLOYMENTS_JANITOR=1.
   const janitorOn = env.DEPLOYMENTS_JANITOR === '1' || (env.DEPLOYMENTS_JANITOR !== '0' && onRailway(env));
-  const stopJanitor = janitorOn ? startJanitor({ cloud: scalewayJanitorCloud(secret, projectId), log: opts.log }) : undefined;
+  // The janitor's leftovers (build servers, detached SBS volumes) exist only on Scaleway; a deleted Vast instance
+  // takes its disk with it.
+  const stopJanitor = janitorOn && secret ? startJanitor({ cloud: scalewayJanitorCloud(secret, projectId), log: opts.log }) : undefined;
   return { controller, apps, handler, ...(stopJanitor ? { stopJanitor } : {}) };
 }
 

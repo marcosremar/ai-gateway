@@ -22,7 +22,8 @@ import type { DeploymentSpec, ReplicaMachine, ReplicaPhase } from './types';
 
 export const UNHEALTHY_STRIKES = 3;
 
-const HALTED_STATES = new Set(['stopped', 'stopped in place', 'stopping', 'locked', 'archived']);
+// `exited`: a Vast container that stopped (it still bills its disk), deleted like any halted replica.
+const HALTED_STATES = new Set(['stopped', 'stopped in place', 'stopping', 'locked', 'archived', 'exited']);
 
 export interface ObservedReplica {
   machine: ReplicaMachine;

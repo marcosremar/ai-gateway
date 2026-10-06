@@ -10,8 +10,13 @@
 
 import type { DeploymentBackend, ReplicaMachine } from './types';
 
+type ReapBackend = Pick<DeploymentBackend, 'listReplicas' | 'releaseReplica'> & { provider?: string };
+
 export interface ReaperOptions {
-  backend: Pick<DeploymentBackend, 'listReplicas' | 'releaseReplica'>;
+  /** Single backend (kept for callers from before `backends`). */
+  backend?: ReapBackend;
+  /** Every configured backend (Scaleway, Vast): each is listed and reaped on its own. */
+  backends?: ReapBackend[];
   namespace: string;
   /** Resolves true when the gateway's `/health` answered 2xx. */
   gatewayUp: () => Promise<boolean>;
@@ -42,19 +47,32 @@ export async function reapIfGatewayDown(opts: ReaperOptions): Promise<ReapResult
   }
   const now = (opts.now ?? Date.now)();
   const minAge = opts.minAgeMs ?? 30 * 60_000;
-  const machines = await opts.backend.listReplicas(opts.namespace);
-  const old = machines.filter((m: ReplicaMachine) => now - m.createdAt >= minAge);
-  log('reaper: gateway down, releasing replicas', { namespace: opts.namespace, seen: machines.length, releasing: old.length });
+  const backends = opts.backends ?? (opts.backend ? [opts.backend] : []);
   const released: string[] = [];
   const failed: string[] = [];
-  for (const machine of old) {
+  let seen = 0;
+  for (const backend of backends) {
+    let machines: ReplicaMachine[];
     try {
-      await opts.backend.releaseReplica(machine);
-      released.push(machine.id);
+      machines = await backend.listReplicas(opts.namespace);
     } catch (err) {
-      failed.push(machine.id);
-      log('reaper: release failed', { id: machine.id, error: err instanceof Error ? err.message : String(err) });
+      // One provider failing to list must not spare the other provider's machines; the next run retries this one.
+      failed.push(`list:${backend.provider ?? 'backend'}`);
+      log('reaper: list failed', { provider: backend.provider, error: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
+    seen += machines.length;
+    const old = machines.filter((m: ReplicaMachine) => now - m.createdAt >= minAge);
+    log('reaper: gateway down, releasing replicas', { namespace: opts.namespace, provider: backend.provider, seen: machines.length, releasing: old.length });
+    for (const machine of old) {
+      try {
+        await backend.releaseReplica(machine, 'reaper');
+        released.push(machine.id);
+      } catch (err) {
+        failed.push(machine.id);
+        log('reaper: release failed', { id: machine.id, error: err instanceof Error ? err.message : String(err) });
+      }
     }
   }
-  return { gatewayUp: false, seen: machines.length, released, failed };
+  return { gatewayUp: false, seen, released, failed };
 }
