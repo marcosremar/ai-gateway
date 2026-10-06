@@ -24,6 +24,24 @@ const served = (res: Response): StageAnswer => ({
   fallback: res.headers.get('x-gateway-fallback'),
 });
 
+/** A replica mid cold-start answers 502/503; a dropped loopback socket is a TypeError. Both are worth one retry —
+ * the retry is idempotent because it only re-runs a stage that failed before returning (no bytes streamed yet). */
+const RETRYABLE_STAGE_STATUS = new Set([502, 503]);
+
+export function isRetryableStageError(err: unknown): boolean {
+  if (err instanceof StageError) return RETRYABLE_STAGE_STATUS.has(err.status);
+  return err instanceof TypeError; // fetch network failure (connection reset, DNS, incomplete chunked read)
+}
+
+async function retryStage<T>(fn: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (signal.aborted || !isRetryableStageError(err)) throw err;
+    return fn();
+  }
+}
+
 async function failure(stage: string, res: Response): Promise<StageError> {
   const text = await res.text().catch(() => '');
   let message = text.slice(0, 300);
@@ -81,47 +99,53 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
   const auth = { Authorization: opts.authorization, [SUBREQUEST_HEADER]: SUBREQUEST_TOKEN };
   return {
     async transcribe(audio, contentType, cfg, signal) {
-      const form = new FormData();
-      const ext = /wav/.test(contentType) ? 'wav' : /ogg/.test(contentType) ? 'ogg' : /mp4|m4a|aac/.test(contentType) ? 'm4a' : /mpeg|mp3/.test(contentType) ? 'mp3' : 'webm';
-      form.set('file', new Blob([new Uint8Array(audio)], { type: contentType || 'application/octet-stream' }), `turn.${ext}`);
-      form.set('model', models.stt);
-      if (cfg.language) form.set('language', LANGUAGE_NAMES[cfg.language.slice(0, 2)] ?? cfg.language.slice(0, 2));
-      if (cfg.stt_prompt) form.set('prompt', cfg.stt_prompt);
-      const res = await f(`${opts.baseUrl}/v1/audio/transcriptions`, { method: 'POST', headers: auth, body: form, signal });
-      if (!res.ok) throw await failure('stt', res);
-      const payload = await res.json() as { text?: string };
-      return { ...served(res), text: payload.text ?? '' };
+      return retryStage(async () => {
+        const form = new FormData();
+        const ext = /wav/.test(contentType) ? 'wav' : /ogg/.test(contentType) ? 'ogg' : /mp4|m4a|aac/.test(contentType) ? 'm4a' : /mpeg|mp3/.test(contentType) ? 'mp3' : 'webm';
+        form.set('file', new Blob([new Uint8Array(audio)], { type: contentType || 'application/octet-stream' }), `turn.${ext}`);
+        form.set('model', models.stt);
+        if (cfg.language) form.set('language', LANGUAGE_NAMES[cfg.language.slice(0, 2)] ?? cfg.language.slice(0, 2));
+        if (cfg.stt_prompt) form.set('prompt', cfg.stt_prompt);
+        const res = await f(`${opts.baseUrl}/v1/audio/transcriptions`, { method: 'POST', headers: auth, body: form, signal });
+        if (!res.ok) throw await failure('stt', res);
+        const payload = await res.json() as { text?: string };
+        return { ...served(res), text: payload.text ?? '' };
+      }, signal);
     },
 
     async chatStream(messages: ChatMessage[], cfg: S2SConfig, signal) {
-      const res = await f(`${opts.baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: models.chat, messages, stream: true,
-          max_tokens: cfg.max_tokens ?? 160, temperature: cfg.temperature ?? 0.6,
-          ...(cfg.response_format ? { response_format: cfg.response_format } : {}),
-        }),
-        signal,
-      });
-      if (!res.ok) throw await failure('llm', res);
-      return { ...served(res), deltas: sseDeltas(bodyChunks(res)) };
+      return retryStage(async () => {
+        const res = await f(`${opts.baseUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { ...auth, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: models.chat, messages, stream: true,
+            max_tokens: cfg.max_tokens ?? 160, temperature: cfg.temperature ?? 0.6,
+            ...(cfg.response_format ? { response_format: cfg.response_format } : {}),
+          }),
+          signal,
+        });
+        if (!res.ok) throw await failure('llm', res);
+        return { ...served(res), deltas: sseDeltas(bodyChunks(res)) };
+      }, signal);
     },
 
     async speak(text: string, cfg: S2SConfig, signal): Promise<SpokenAudio> {
-      const res = await f(`${opts.baseUrl}/v1/audio/speech`, {
-        method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: models.tts, input: text, response_format: 'wav',
-          ...(cfg.voice ? { voice: cfg.voice } : {}),
-          ...(cfg.fallback_voice ? { fallback_voice: cfg.fallback_voice } : {}),
-          ...(cfg.language ? { language: cfg.language.slice(0, 2) } : {}),
-        }),
-        signal,
-      });
-      if (!res.ok) throw await failure('tts', res);
-      return { ...served(res), body: bodyChunks(res), contentType: res.headers.get('content-type') ?? '' };
+      return retryStage(async () => {
+        const res = await f(`${opts.baseUrl}/v1/audio/speech`, {
+          method: 'POST',
+          headers: { ...auth, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: models.tts, input: text, response_format: 'wav',
+            ...(cfg.voice ? { voice: cfg.voice } : {}),
+            ...(cfg.fallback_voice ? { fallback_voice: cfg.fallback_voice } : {}),
+            ...(cfg.language ? { language: cfg.language.slice(0, 2) } : {}),
+          }),
+          signal,
+        });
+        if (!res.ok) throw await failure('tts', res);
+        return { ...served(res), body: bodyChunks(res), contentType: res.headers.get('content-type') ?? '' };
+      }, signal);
     },
   };
 }

@@ -93,10 +93,11 @@ function envMap(value: unknown): Record<string, string> {
 }
 
 const KNOWN_FIELDS = new Set<string>([
-  'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'registryAuth', 'healthPath', 'machineType',
-  'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas', 'targetInflightPerReplica', 'idleMinutes',
-  'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds', 'maxEurPerHour', 'maxHours', 'paused',
-  'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure', 'idleAction',
+  'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'envByMachineType', 'registryAuth',
+  'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
+  'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
+  'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
+  'idleAction',
 ]);
 
 /** The gateway's own probe port on an exposed replica (80/443 stay with the app). */
@@ -124,6 +125,16 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   }
   if (input.args !== undefined) out.args = strings(input.args, 'args');
   if (input.env !== undefined) out.env = envMap(input.env);
+  if (input.envByMachineType !== undefined) {
+    const raw = input.envByMachineType as Record<string, unknown> | null;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('envByMachineType must be an object');
+    const out2: Record<string, Record<string, string>> = {};
+    for (const [type, env] of Object.entries(raw)) {
+      str(type, 'envByMachineType key', TYPE_RE);
+      out2[type] = envMap(env);
+    }
+    out.envByMachineType = out2;
+  }
   if (input.registryAuth !== undefined) {
     const auth = input.registryAuth as Record<string, unknown> | null;
     if (!auth || typeof auth.username !== 'string' || typeof auth.password !== 'string' || !auth.username || !auth.password) {

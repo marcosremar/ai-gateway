@@ -556,7 +556,7 @@ export class DeploymentController {
   private view(name: string): DeploymentView | null {
     const rt = this.deployments.get(name);
     if (!rt) return null;
-    const { env, registryAuth, bootScript, files, ...publicSpec } = rt.record.spec;
+    const { env, envByMachineType, registryAuth, bootScript, files, ...publicSpec } = rt.record.spec;
     const now = this.now();
     const replicas = this.machines.filter(m => m.deployment === name).map(m => ({
       id: m.id,

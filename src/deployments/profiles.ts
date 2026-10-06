@@ -46,6 +46,38 @@ export const BUILTIN_PROFILES: Profile[] = [
     },
   },
   {
+    name: 'speech-stack',
+    builtin: true,
+    spec: {
+      // docker/speech-stack: Whisper large-v3 + Qwen3.5-9B (llama.cpp) + Qwen3-TTS (vLLM-Omni) in one image.
+      image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261004-2240',
+      port: 8000,
+      healthPath: '/health',
+      machineType: 'L4-1-24G',
+      zone: 'fr-par-2',
+      gpu: true,
+      // ~57 GB image: the boot disk must hold it plus the Docker layers.
+      volumeGb: 80,
+      minReplicas: 0,
+      maxReplicas: 2,
+      targetInflightPerReplica: 8,
+      idleMinutes: 15,
+      // Cold start is a measured 8–9 min (pull + model load + warm-up): the 240 s default would fail every cold call.
+      coldStartWaitSeconds: 600,
+      bootTimeoutMinutes: 20,
+      // Park instead of delete: a powered-off replica keeps its disk and IP and comes back in ~2 min, not 9.
+      idleAction: 'stop',
+      maxEurPerHour: 2,
+      // Measured 2026-10-04 (docker/speech-stack/README.md): L4 24 GB fits STT_BATCH 4 / LLM 8 slots beside the TTS
+      // (more OOMs); the L40S 48 GB takes STT_BATCH 8 / LLM 16 / a 12 GB TTS stage.
+      envByMachineType: {
+        'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400' },
+        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000' },
+      },
+      description: 'Whisper + Qwen LLM + Qwen3-TTS in one container (STT, S2S, /ws/audio-stream). POST /v1/s2s.',
+    },
+  },
+  {
     name: 'cpu-echo',
     builtin: true,
     spec: {

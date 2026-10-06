@@ -28,7 +28,10 @@ const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
  * `upstream` is the container mapped on 127.0.0.1:8000, or the exposed app's own port.
  */
 export function nginxConfig(token: string, listen: number = 80, upstream = 8000): string {
-  return `server {
+  // The upgrade map lets streaming endpoints (e.g. the speech-stack's /ws/audio-stream) pass a WebSocket through
+  // the token-gated front; on plain requests $aigw_conn is empty and proxying stays unchanged.
+  return `map $http_upgrade $aigw_conn { default "upgrade"; "" ""; }
+server {
   listen ${listen} default_server;
   client_max_body_size 100m;
   location = /__aigw/ready {
@@ -39,6 +42,8 @@ export function nginxConfig(token: string, listen: number = 80, upstream = 8000)
   location / {
     if ($http_x_aigw_token != "${token}") { return 401; }
     proxy_set_header X-Aigw-Token "";
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $aigw_conn;
     proxy_pass http://127.0.0.1:${upstream};
     proxy_http_version 1.1;
     proxy_buffering off;
@@ -78,7 +83,10 @@ nohup bash /srv/aigw/boot.sh > /srv/aigw/user-boot.log 2>&1 &`;
 
 export function replicaCloudInit(spec: DeploymentSpec, token: string): string {
   if (!/^[A-Za-z0-9_-]{24,}$/.test(token)) throw new Error('replica token must be 24+ chars of [A-Za-z0-9_-]');
-  const envFile = Object.entries(spec.env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+  // Machine-tuned env (envByMachineType) applies under the explicit env, which always wins — and stays out of
+  // spec.env, so changing machineType later re-resolves instead of dragging stale GPU settings along.
+  const env = { ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env };
+  const envFile = Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
   const shutdownMinutes = Math.round(spec.maxHours * 60) + 30;
   const bootChecks = Math.max(12, Math.ceil((spec.bootTimeoutMinutes * 60) / 5));
   // Exposed replica: the probe moves to PROBE_PORT and the app answers health on its own port (it owns 80/443).

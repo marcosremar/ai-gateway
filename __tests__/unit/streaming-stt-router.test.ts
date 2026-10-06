@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { StreamingSTTBackend, StreamingSTTRouter } from '../../src/streaming-stt';
 import type { StreamingSTTEvent } from '../../src/streaming-stt';
 
@@ -123,5 +123,86 @@ describe('StreamingSTTBackend', () => {
     const events: StreamingSTTEvent[] = [];
     backend.onResult = (e) => events.push(e);
     expect(backend.onResult).toBeDefined();
+  });
+});
+
+describe('StreamingSTTRouter — deployment provider', () => {
+  const lease = () => ({
+    machine: { id: 'm1', deployment: 'speech', ip: '10.1.2.3', state: 'running', createdAt: 0, zone: 'fr-par-2', machineType: 'L40S-1-48G', pricePerHour: 1.47 },
+    token: 'replica-token',
+    exposed: false,
+    done: vi.fn(),
+  });
+  const controller = (acquire: ReturnType<typeof vi.fn>) => ({
+    acquire,
+    wake: vi.fn(),
+    get: vi.fn(() => ({ spec: { paused: false }, status: 'ready', replicas: [{ phase: 'ready' }] })),
+  });
+
+  it('createBackendAsync acquires a replica and points the WS at its /ws/audio-stream', async () => {
+    const l = lease();
+    const ctl = controller(vi.fn(async () => l));
+    const router = new StreamingSTTRouter({
+      getGpuUrl: () => null,
+      fireworksApiKey: 'fw-key',
+      deployment: { controller: ctl as never, name: 'speech' },
+      providerOrder: ['deployment', 'fireworks'],
+    });
+    const backend = await router.createBackendAsync('pt');
+    expect(backend).not.toBeNull();
+    expect(backend!.provider).toBe('deployment');
+    expect((backend as any).url).toBe('ws://10.1.2.3/ws/audio-stream?language=pt');
+    expect((backend as any).headers['X-Aigw-Token']).toBe('replica-token');
+    expect(ctl.acquire).toHaveBeenCalledWith('speech', expect.objectContaining({ waitMs: expect.any(Number) }));
+  });
+
+  it('a cold deployment wakes and hedges to the next provider', async () => {
+    const ctl = controller(vi.fn(async () => { throw new Error('replicas are starting'); }));
+    const router = new StreamingSTTRouter({
+      getGpuUrl: () => null,
+      fireworksApiKey: 'fw-key',
+      deployment: { controller: ctl as never, name: 'speech' },
+      providerOrder: ['deployment', 'fireworks'],
+    });
+    const backend = await router.createBackendAsync('pt');
+    expect(backend!.provider).toBe('fireworks');
+    expect(ctl.wake).toHaveBeenCalledWith('speech');
+  });
+
+  it('sync createBackend skips the async deployment provider', () => {
+    const ctl = controller(vi.fn());
+    const router = new StreamingSTTRouter({
+      getGpuUrl: () => null,
+      fireworksApiKey: 'fw-key',
+      deployment: { controller: ctl as never, name: 'speech' },
+      providerOrder: ['deployment', 'fireworks'],
+    });
+    const backend = router.createBackend('pt');
+    expect(backend!.provider).toBe('fireworks');
+    expect(ctl.acquire).not.toHaveBeenCalled();
+  });
+
+  it('closing the backend releases the lease (failed=false); an abnormal disconnect marks it failed', async () => {
+    const l = lease();
+    const ctl = controller(vi.fn(async () => l));
+    const router = new StreamingSTTRouter({
+      getGpuUrl: () => null,
+      deployment: { controller: ctl as never, name: 'speech' },
+      providerOrder: ['deployment'],
+    });
+    const backend = (await router.createBackendAsync('pt'))!;
+    backend.close();
+    expect(l.done).toHaveBeenCalledWith(false);
+  });
+
+  it('a deployment whose name does not resolve is skipped', async () => {
+    const ctl = controller(vi.fn());
+    const router = new StreamingSTTRouter({
+      getGpuUrl: () => null,
+      deployment: { controller: ctl as never, name: () => null },
+      providerOrder: ['deployment'],
+    });
+    expect(await router.createBackendAsync('pt')).toBeNull();
+    expect(ctl.acquire).not.toHaveBeenCalled();
   });
 });

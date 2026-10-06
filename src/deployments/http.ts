@@ -36,6 +36,37 @@ const HOP_BY_HOP = new Set([
   'x-forwarded-proto', 'x-real-ip', 'cookie',
 ]);
 
+/**
+ * Stage values a health body may report while a model is still coming up. A replica that answers 200 with
+ * `{"stt": "downloading"}` is not ready: the first real request would fail instead of waiting.
+ */
+const NOT_READY_STAGE = /^(down|off|pending|starting|booting|loading|downloading|warming|failed|error|not_ready)$/i;
+
+function stageReady(value: unknown): boolean {
+  if (value === undefined || value === null) return true; // the app does not report this stage at all
+  if (typeof value === 'string') return !NOT_READY_STAGE.test(value);
+  if (value === false) return false;
+  if (typeof value === 'object') {
+    const stage = value as { ready?: unknown; ok?: unknown; status?: unknown; state?: unknown };
+    if (stage.ready === false || stage.ok === false) return false;
+    if (typeof stage.status === 'string' && NOT_READY_STAGE.test(stage.status)) return false;
+    if (typeof stage.state === 'string' && NOT_READY_STAGE.test(stage.state)) return false;
+  }
+  return true;
+}
+
+/**
+ * Interprets a health endpoint's JSON body. `null`/non-JSON keeps the old contract (HTTP 200 = ready). Structured
+ * bodies are checked: a top-level `ok`/`ready` false, or a known pipeline stage (`stt`, `llm`, `tts`) reporting a
+ * not-ready status, means the replica is warming — even when it answers 200.
+ */
+export function healthBodyReady(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return true;
+  const top = body as { ok?: unknown; ready?: unknown };
+  if (top.ok === false || top.ready === false) return false;
+  return ['stt', 'llm', 'tts'].every(stage => stageReady((body as Record<string, unknown>)[stage]));
+}
+
 /** Probe over the replica's nginx front: boot finished (`/__aigw/ready`) AND the app still answers its health path. */
 export class HttpReplicaProbe implements ReplicaProbe {
   constructor(private readonly timeoutMs = 4_000, private readonly fetchImpl: typeof fetch = fetch) {}
@@ -47,7 +78,8 @@ export class HttpReplicaProbe implements ReplicaProbe {
     const marker = await get('/__aigw/ready');
     if (!marker.ok) return false;
     const health = await get(spec.healthPath);
-    return health.ok;
+    if (!health.ok) return false;
+    return healthBodyReady(await health.json().catch(() => null));
   }
 }
 

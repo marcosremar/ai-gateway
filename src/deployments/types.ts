@@ -46,6 +46,12 @@ export interface DeploymentSpec {
   args: string[];
   /** Environment for the container. Never returned by the API (values may be secrets). */
   env: Record<string, string>;
+  /**
+   * Environment presets per `machineType` (`{ "L40S-1-48G": { STT_BATCH: "8" } }`): the entry for the spec's
+   * machine type is merged under `env` at build time, so a profile can carry tuned GPU settings (an L4 and an
+   * L40S need different STT/TTS concurrency) while an explicit `env` value still wins. Never returned by the API.
+   */
+  envByMachineType?: Record<string, Record<string, string>>;
   /** Credentials for a private registry. Never returned by the API. */
   registryAuth?: RegistryAuth;
   /** Path the replica answers 2xx on once the model is loaded. */
@@ -202,7 +208,7 @@ export interface ReplicaView {
 
 export interface DeploymentView {
   name: string;
-  spec: Omit<DeploymentSpec, 'env' | 'registryAuth' | 'bootScript' | 'files'> & {
+  spec: Omit<DeploymentSpec, 'env' | 'envByMachineType' | 'registryAuth' | 'bootScript' | 'files'> & {
     envKeys: string[]; privateRegistry: boolean; bootScript: boolean; fileKeys: string[];
   };
   status: 'paused' | 'scaled-to-zero' | 'warming' | 'ready' | 'degraded';

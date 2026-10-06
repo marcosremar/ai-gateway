@@ -12,6 +12,11 @@ sent to the TTS at once, so the student hears the first words before the reply i
 `/v1/s2s` config may carry `response_format` (passed to llama.cpp) and `speak_field`: then only that field of the JSON
 answer is voiced, as it streams, and `done.reply_raw` has the whole JSON (`JsonField`, tests in `test_json_field.py`).
 
+`WS /ws/audio-stream?language=pt&chunk_size=1.0` is the real-time STT the gateway's streaming router rides: binary
+Int16 PCM 16 kHz frames in, `{"text": "<full running transcript>"}` out on every decode (`stt_stream.py` — windowed
+decode on the same `SttBatcher`, commits on silence; `test_stt_stream.py`). A `{"type":"flush"}` text frame forces the
+open buffer through the decoder. Until `/health` is warm the socket closes with 1013 so the client can hedge.
+
 Files: `Dockerfile`, `start.sh` (start order TTS → LLM → STT; refuses to start if llama.cpp sees no `CUDA0`),
 `server.py` (orchestrator + API, see its docstring), `test_cut.py` (sentence cutter), `bench.py` (latency bench).
 Build: `bun scripts/build-image-on-scaleway.ts docker/speech-stack speech-stack` → `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>`.

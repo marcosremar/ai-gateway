@@ -32,14 +32,37 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
   const language = ws.data.language;
   const excluded = new Set<string>();
 
-  const connectBackend = () => {
-    const backend = getSttRouter().createBackend(language, excluded);
-    if (!backend) {
-      ws.send(JSON.stringify({ type: 'error', message: 'No STT backend available (no GPU and no Fireworks key)' }));
-      ws.close();
+  const connectBackend = async () => {
+    // While an async provider resolves (a deployment's replica acquire), PCM frames must not be dropped: a
+    // buffering placeholder sits in the session map and drains into the real backend once it connects.
+    const pendingAudio: (ArrayBuffer | Buffer)[] = [];
+    sttSessions.set(ws.data.id, {
+      provider: 'deployment',
+      sendAudio: (pcm: ArrayBuffer | Buffer) => { if (pendingAudio.length < 512) pendingAudio.push(pcm); },
+      close: () => { pendingAudio.length = 0; },
+      abort: () => { pendingAudio.length = 0; },
+      get isOpen() { return false; },
+      get isConnecting() { return true; },
+    } as unknown as import('../../src/streaming-stt').StreamingSTTBackend);
+
+    // Async factory: a 'deployment' provider acquires a replica through the deployments controller (waking a cold
+    // speech-stack and hedging to the next provider when none is ready in time).
+    const backend = await getSttRouter().createBackendAsync(language, excluded);
+    if (!backend || ws.readyState !== 1) {
+      backend?.close();
+      sttSessions.delete(ws.data.id);
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'error', message: 'No STT backend available (no GPU and no Fireworks key)' }));
+        ws.close();
+      }
       return;
     }
     backend.onConnected = () => {
+      if (ws.readyState !== 1) { backend.close(); return; }
+      // The placeholder leaves the map only now — frames sent while the upstream socket was still opening are
+      // drained into the live backend instead of dropped by sendAudio's not-open guard.
+      sttSessions.set(ws.data.id, backend);
+      for (const pcm of pendingAudio.splice(0)) backend.sendAudio(pcm);
       log.log(`[stt-ws] Backend connected: ${backend.provider} id=${ws.data.id}`);
       ws.send(JSON.stringify({ type: 'connected', provider: backend.provider }));
       emitFrame({ kind: 'user_speech_start', ts: Date.now(), stage: 'stt', provider: backend.provider, meta: { sessionId: ws.data.id } });
@@ -136,21 +159,21 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
       if (ws.readyState === 1) {
         excluded.add(backend.provider);
         log.log(`[stt-ws] Reconnecting (excluded: ${[...excluded].join(',')}) id=${ws.data.id}`);
-        try {
-          connectBackend();
-        } catch (e) {
+        connectBackend().catch((e) => {
           log.warn(`[stt-ws] Reconnect failed — closing client WS:`, e instanceof Error ? e.message : e);
-          ws.close(1001, 'STT backend reconnect failed');
-        }
+          if (ws.readyState === 1) ws.close(1001, 'STT backend reconnect failed');
+        });
       }
     };
     backend.connect();
-    sttSessions.set(ws.data.id, backend);
     (backend as any)._sttAccumTimer = () => sttAccumTimer;
     (backend as any)._clearSttAccumTimer = () => { if (sttAccumTimer) { clearTimeout(sttAccumTimer); sttAccumTimer = null; } };
     // Expose flush for client-driven Smart-Turn `{action:'turn_complete'}` ctrl.
     (backend as any)._flushAccum = () => flushSttAccum();
     log.log(`[stt-ws] Client connected id=${ws.data.id} lang=${language || 'auto'} provider=${backend.provider}`);
   };
-  connectBackend();
+  connectBackend().catch((e) => {
+    log.warn(`[stt-ws] Initial backend connect failed id=${ws.data.id}:`, e instanceof Error ? e.message : e);
+    if (ws.readyState === 1) ws.close(1001, 'STT backend connect failed');
+  });
 }

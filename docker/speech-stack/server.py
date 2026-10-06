@@ -12,6 +12,8 @@ POST /v1/s2s       multipart: `file` (audio, any ffmpeg/PyAV format) + `config` 
                      kind "E" = JSON event (transcript, sentence, timing, done, error), kind "A" = raw PCM s16le mono
                      24 kHz. No base64 on the hot path. `?format=ndjson` gives JSON lines (audio as base64) for debugging.
 POST /v1/audio/transcriptions   OpenAI-shaped STT (multipart `file`, `language`, `prompt`).
+WS   /ws/audio-stream           real-time STT: binary Int16 PCM 16 kHz frames in, {"text": <full running text>}
+                                out per decode — the protocol the gateway's streaming STT router already speaks.
 POST /v1/chat/completions       proxied to the LLM (streaming passes through).
 POST /v1/audio/speech           proxied to the TTS (streaming passes through).
 GET  /refs/<id>.wav             reference voices (from /files/voices.json, see load_voices).
@@ -30,11 +32,12 @@ from pathlib import Path
 
 import httpx
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from faster_whisper import WhisperModel
 
 from stt_batch import SttBatcher
+from stt_stream import SttStream
 
 TTS_URL = "http://127.0.0.1:8091"
 LLM_URL = "http://127.0.0.1:8092"
@@ -369,6 +372,58 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
 @app.post("/v1/audio/transcriptions")
 async def transcriptions(file: UploadFile = File(...), language: str = Form(""), prompt: str = Form("")):
     return await asyncio.to_thread(transcribe_sync, await file.read(), language, prompt)
+
+
+@app.websocket("/ws/audio-stream")
+async def audio_stream(ws: WebSocket, language: str = "", chunk_size: float = 1.0):
+    """Real-time STT for the gateway's streaming router: binary Int16 PCM frames in, {"text": <full transcript>} out.
+    Decoding rides the same SttBatcher as /v1/audio/transcriptions, so a stream shares GPU passes with batch calls."""
+    await ws.accept()
+    if not ready["ok"]:
+        # Warm-up still running: closing now lets the gateway hedge instead of streaming into a cold replica.
+        await ws.close(code=1013, reason=ready.get("detail", "warming"))
+        return
+    session = SttStream(stt_batcher, language or None, chunk_seconds=chunk_size)
+    closed = False
+
+    async def send(msg: dict) -> None:
+        if not closed:
+            try:
+                await ws.send_text(json.dumps(msg))
+            except Exception:  # noqa: BLE001 — client gone
+                pass
+
+    async def decode_loop() -> None:
+        while not closed:
+            await asyncio.sleep(max(0.2, session.chunk_samples / (2 * 16000)))
+            for msg in await asyncio.to_thread(session.tick):
+                await send(msg)
+
+    decoder = asyncio.create_task(decode_loop())
+    try:
+        while True:
+            message = await ws.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                session.push(message["bytes"])
+            elif message.get("text"):
+                # Control frames: {"type": "flush"} forces a decode of the open buffer now.
+                try:
+                    if json.loads(message["text"]).get("type") == "flush":
+                        for msg in await asyncio.to_thread(session.finish):
+                            await send(msg)
+                except (ValueError, AttributeError):
+                    pass
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # noqa: BLE001 — malformed frame or transport error: end the session, don't kill the app
+        pass
+    finally:
+        closed = True
+        decoder.cancel()
+        for msg in await asyncio.to_thread(session.finish):
+            await send(msg)
 
 
 async def proxy(request: Request, url: str):

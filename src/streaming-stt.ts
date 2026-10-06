@@ -20,12 +20,17 @@
  *   Fireworks:  11.5% WER, 1113ms TTFR
  */
 
+import type { DeploymentController, Lease } from './deployments/controller';
+import { replicaBase } from './deployments/http';
+
 const FIREWORKS_STREAMING_URL =
   'wss://audio-streaming.api.fireworks.ai/v1/audio/transcriptions/streaming';
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_TEXT_LENGTH = 10_000;
 const DEFAULT_MAX_AUDIO_BUFFER_BYTES = 10 * 1024 * 1024;
+/** How long a streaming STT session waits for a warm deployment replica before hedging to a cloud provider. */
+const DEFAULT_DEPLOYMENT_ACQUIRE_MS = 20_000;
 
 function sanitizeQueryParam(value: unknown): string {
   if (typeof value === 'string') {
@@ -69,6 +74,17 @@ export interface StreamingSTTConfig {
   fireworksApiKey?: string;
   /** Returns the Qwen3-ASR endpoint URL (e.g. Modal) or null if not available. */
   getQwen3AsrUrl?: () => string | null;
+  /**
+   * Speech-stack deployment on the gateway's own autoscaler (Scaleway). When set, provider id `deployment` may
+   * appear in `providerOrder`: its backend is the replica's `/ws/audio-stream` behind the token-gated front.
+   */
+  deployment?: {
+    controller: Pick<DeploymentController, 'acquire' | 'get' | 'wake'>;
+    /** Deployment name, or a resolver (the deployment can be created after the gateway boots). */
+    name: string | (() => string | null);
+    /** Wait for a warm replica before hedging to the next provider (default 20 s — a cold boot is minutes). */
+    acquireWaitMs?: number;
+  };
   /** Ordered list of provider IDs to try. Default: ["gpu", "qwen3-asr", "fireworks"] */
   providerOrder?: string[];
   /** Optional logger for debugging. */
@@ -81,7 +97,7 @@ export interface StreamingSTTConfig {
   maxBufferBytes?: number;
 }
 
-export type StreamingSTTProvider = 'gpu' | 'qwen3-asr' | 'fireworks';
+export type StreamingSTTProvider = 'gpu' | 'qwen3-asr' | 'fireworks' | 'deployment';
 
 export interface StreamingSTTStatus {
   provider: StreamingSTTProvider | null;
@@ -116,6 +132,18 @@ export class StreamingSTTBackend {
   onResult?: (event: StreamingSTTEvent) => void;
   onConnected?: () => void;
   onDisconnected?: (reason: string) => void;
+  /**
+   * Terminal hook, fires once on every end path: `failed` marks connection-level failure (timeouts, socket errors,
+   * abnormal close — the upstream may be suspect), `false` for deliberate close/abort. A provider holding a resource
+   * (a deployment lease) releases it here; callers keep using onDisconnected for control flow.
+   */
+  onFinalize?: (failed: boolean) => void;
+  private _finalized = false;
+  private _finalize(failed: boolean): void {
+    if (this._finalized) return;
+    this._finalized = true;
+    this.onFinalize?.(failed);
+  }
 
   constructor(
     private readonly url: string,
@@ -149,6 +177,7 @@ export class StreamingSTTBackend {
         logError(this._logger, '[StreamingSTT] Connection timeout');
         this._aborted = true;
         this._closeWs('timeout');
+        this._finalize(true);
         this.onDisconnected?.('Connection timeout');
       }
     }, this._connectTimeoutMs);
@@ -268,6 +297,7 @@ export class StreamingSTTBackend {
 
       if (!wasClosedIntentionally) {
         logDebug(this._logger, '[StreamingSTT] Disconnected: %s', evt.code);
+        this._finalize(true);
         this.onDisconnected?.(`${evt.code}: ${evt.reason || 'closed'}`);
       }
     };
@@ -275,6 +305,7 @@ export class StreamingSTTBackend {
     ws.onerror = () => {
       this._clearConnectTimer();
       logError(this._logger, '[StreamingSTT] WebSocket error');
+      this._finalize(true);
       this.onDisconnected?.('WebSocket error');
       // Close socket to release FD; otherwise repeated upstream failures grow
       // open-FD count without bound (onerror fires but socket sticks until GC).
@@ -320,6 +351,7 @@ export class StreamingSTTBackend {
     this._closedIntentionally = true;
     this._aborted = true;
     this._closeWs('close called');
+    this._finalize(false);
     this.onDisconnected?.('Closed by client');
     this._cleanupCallbacks();
   }
@@ -328,6 +360,7 @@ export class StreamingSTTBackend {
     this._aborted = true;
     this._closedIntentionally = false;
     this._closeWs('abort');
+    this._finalize(false);
     this.onDisconnected?.('Aborted');
     this._cleanupCallbacks();
   }
@@ -364,6 +397,7 @@ export class StreamingSTTRouter {
       if (id === 'gpu' && this.config.getGpuUrl()) return 'gpu';
       if (id === 'qwen3-asr' && this.config.getQwen3AsrUrl?.()) return 'qwen3-asr';
       if (id === 'fireworks' && this.config.fireworksApiKey) return 'fireworks';
+      if (id === 'deployment' && this._deploymentName()) return 'deployment';
     }
     return null;
   }
@@ -380,49 +414,114 @@ export class StreamingSTTRouter {
     return p.toString();
   }
 
-  /** Returns a connected backend for the given language, or null if unavailable. */
-  createBackend(language?: string, excludeProviders?: Set<string>, params?: StreamingSTTParams): StreamingSTTBackend | null {
+  private _deploymentName(): string | null {
+    const dep = this.config.deployment;
+    if (!dep) return null;
+    const name = typeof dep.name === 'function' ? dep.name() : dep.name;
+    return name || null;
+  }
+
+  /** A backend for a synchronous provider id, or null when that provider cannot serve right now. */
+  private _backendFor(id: string, language?: string, params?: StreamingSTTParams): StreamingSTTBackend | null {
     const backendOptions = {
       logger: this.config.logger,
       connectTimeoutMs: this.config.connectTimeoutMs,
       maxTextLength: this.config.maxTextLength,
       maxBufferBytes: this.config.maxBufferBytes,
     };
+    if (id === 'gpu') {
+      const gpuUrl = this.config.getGpuUrl();
+      if (!gpuUrl) return null;
+      const qs = this._buildParams(language, params);
+      const wsUrl = gpuUrl.replace(/^http/, 'ws').replace(/\/$/, '')
+        + `/ws/audio-stream?${qs}`;
+      return new StreamingSTTBackend(wsUrl, {}, 'gpu', backendOptions);
+    }
+    if (id === 'qwen3-asr') {
+      const url = this.config.getQwen3AsrUrl?.();
+      if (!url) return null;
+      const qs = this._buildParams(language, params);
+      const wsUrl = url.replace(/^http/, 'ws').replace(/\/$/, '')
+        + `/ws/audio-stream?${qs}`;
+      return new StreamingSTTBackend(wsUrl, {}, 'qwen3-asr', backendOptions);
+    }
+    if (id === 'fireworks') {
+      const key = this.config.fireworksApiKey;
+      if (!key) return null;
+      const lang = sanitizeQueryParam(language);
+      const wsUrl = `${FIREWORKS_STREAMING_URL}`
+        + `?language=${lang}&response_format=verbose_json`;
+      return new StreamingSTTBackend(
+        wsUrl,
+        { Authorization: `Bearer ${key}` },
+        'fireworks',
+        backendOptions,
+      );
+    }
+    return null;
+  }
 
+  /**
+   * Acquire a ready replica of the speech-stack deployment and return a backend connected (on connect()) to its
+   * `/ws/audio-stream` through the token-gated front. `null` when no replica became ready within `acquireWaitMs` —
+   * the deployment is woken so the next attempt is warm, and the caller hedges to the next provider.
+   */
+  private async _deploymentBackend(language?: string, params?: StreamingSTTParams): Promise<StreamingSTTBackend | null> {
+    const dep = this.config.deployment;
+    const name = this._deploymentName();
+    if (!dep || !name) return null;
+    let lease: Lease;
+    try {
+      lease = await dep.controller.acquire(name, { waitMs: dep.acquireWaitMs ?? DEFAULT_DEPLOYMENT_ACQUIRE_MS });
+    } catch (err) {
+      // Cold or saturated: start replicas so the next session lands warm, then let the caller fall through.
+      try { dep.controller.wake(name); } catch { /* deployment gone */ }
+      logDebug(this.config.logger, '[StreamingSTT] Deployment acquire failed (hedging): %s',
+        err instanceof Error ? err.message : err);
+      return null;
+    }
+    const backendOptions = {
+      logger: this.config.logger,
+      connectTimeoutMs: this.config.connectTimeoutMs,
+      maxTextLength: this.config.maxTextLength,
+      maxBufferBytes: this.config.maxBufferBytes,
+    };
+    const qs = this._buildParams(language, params);
+    const wsUrl = replicaBase(lease.machine, lease.exposed).replace(/^http/, 'ws')
+      + `/ws/audio-stream?${qs}`;
+    const backend = new StreamingSTTBackend(wsUrl, { 'X-Aigw-Token': lease.token }, 'deployment', backendOptions);
+    // The lease spans the whole stream: released on close, failed on a connection-level drop.
+    backend.onFinalize = (failed) => lease.done(failed);
+    return backend;
+  }
+
+  /** Returns a backend for the given language from a synchronous provider, or null if unavailable. */
+  createBackend(language?: string, excludeProviders?: Set<string>, params?: StreamingSTTParams): StreamingSTTBackend | null {
     for (const id of this.order) {
-      if (excludeProviders?.has(id)) continue;
-      if (id === 'gpu') {
-        const gpuUrl = this.config.getGpuUrl();
-        if (gpuUrl) {
-          const qs = this._buildParams(language, params);
-          const wsUrl = gpuUrl.replace(/^http/, 'ws').replace(/\/$/, '')
-            + `/ws/audio-stream?${qs}`;
-          return new StreamingSTTBackend(wsUrl, {}, 'gpu', backendOptions);
-        }
+      if (excludeProviders?.has(id) || id === 'deployment') continue;
+      const backend = this._backendFor(id, language, params);
+      if (backend) return backend;
+    }
+    return null;
+  }
+
+  /**
+   * `createBackend` plus the `deployment` provider, whose replica acquire is async. A deployment that cannot serve
+   * in time is treated like a failed provider (skipped, woken for next time) and the order continues — so a cold
+   * speech-stack hedges to the cloud instead of failing the session.
+   */
+  async createBackendAsync(language?: string, excludeProviders?: Set<string>, params?: StreamingSTTParams): Promise<StreamingSTTBackend | null> {
+    const excluded = new Set(excludeProviders ?? []);
+    for (const id of this.order) {
+      if (excluded.has(id)) continue;
+      if (id === 'deployment') {
+        const backend = await this._deploymentBackend(language, params);
+        if (backend) return backend;
+        excluded.add(id);
+        continue;
       }
-      if (id === 'qwen3-asr') {
-        const url = this.config.getQwen3AsrUrl?.();
-        if (url) {
-          const qs = this._buildParams(language, params);
-          const wsUrl = url.replace(/^http/, 'ws').replace(/\/$/, '')
-            + `/ws/audio-stream?${qs}`;
-          return new StreamingSTTBackend(wsUrl, {}, 'qwen3-asr', backendOptions);
-        }
-      }
-      if (id === 'fireworks') {
-        const key = this.config.fireworksApiKey;
-        if (key) {
-          const lang = sanitizeQueryParam(language);
-          const wsUrl = `${FIREWORKS_STREAMING_URL}`
-            + `?language=${lang}&response_format=verbose_json`;
-          return new StreamingSTTBackend(
-            wsUrl,
-            { Authorization: `Bearer ${key}` },
-            'fireworks',
-            backendOptions,
-          );
-        }
-      }
+      const backend = this._backendFor(id, language, params);
+      if (backend) return backend;
     }
     return null;
   }
@@ -447,6 +546,22 @@ export class StreamingSTTRouter {
         available: Boolean(this.config.fireworksApiKey),
         reason: this.config.fireworksApiKey ? 'API key configured' : 'No API key',
       },
+      // Only listed when a deployment is configured — an absent provider should not appear in the status panel.
+      ...(this.config.deployment ? {
+        deployment: (() => {
+          const name = this._deploymentName();
+          if (!name) return { provider: 'deployment' as const, available: false, reason: 'No deployment name' };
+          const view = this.config.deployment!.controller.get(name);
+          const ready = view?.replicas.filter(r => r.phase === 'ready').length ?? 0;
+          return {
+            provider: 'deployment' as const,
+            available: Boolean(view && !view.spec.paused),
+            reason: !view ? `deployment '${name}' not found`
+              : view.spec.paused ? 'paused'
+                : ready ? `${ready} replica(s) ready` : `status: ${view.status} (wakes on demand)`,
+          };
+        })(),
+      } : {}),
     };
   }
 }

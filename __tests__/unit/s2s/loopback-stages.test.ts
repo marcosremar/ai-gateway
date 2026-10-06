@@ -28,3 +28,64 @@ describe('loopbackStages models', () => {
     expect(seen).toEqual(['whisper-x']);
   });
 });
+
+describe('loopbackStages stage retry', () => {
+  const cfg = { language: 'pt' } as never;
+  const signal = () => new AbortController().signal;
+
+  it('retries once on a network failure (connection reset, incomplete chunked read)', async () => {
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => {
+      calls++;
+      if (calls === 1) throw new TypeError('fetch failed: incomplete chunked read');
+      return new Response(JSON.stringify({ text: 'oi' }), { status: 200 });
+    }) as typeof fetch;
+    const stages = loopbackStages({ baseUrl: 'http://gw', authorization: 'Bearer k', fetchImpl, models: { stt: 'w' } });
+    const heard = await stages.transcribe(new Uint8Array([1]), 'audio/wav', cfg, signal());
+    expect(heard.text).toBe('oi');
+    expect(calls).toBe(2);
+  });
+
+  it('retries once on a warming replica (503), not on a semantic error (400)', async () => {
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => {
+      calls++;
+      return calls === 1
+        ? new Response(JSON.stringify({ error: { message: 'warming' } }), { status: 503 })
+        : new Response(JSON.stringify({ text: 'ok' }), { status: 200 });
+    }) as typeof fetch;
+    const stages = loopbackStages({ baseUrl: 'http://gw', authorization: 'Bearer k', fetchImpl, models: { stt: 'w' } });
+    expect((await stages.transcribe(new Uint8Array([1]), 'audio/wav', cfg, signal())).text).toBe('ok');
+    expect(calls).toBe(2);
+
+    calls = 0;
+    const bad = loopbackStages({
+      baseUrl: 'http://gw', authorization: 'Bearer k', models: { stt: 'w' },
+      fetchImpl: (async () => { calls++; return new Response('{"error":{"message":"bad audio"}}', { status: 400 }); }) as typeof fetch,
+    });
+    await expect(bad.transcribe(new Uint8Array([1]), 'audio/wav', cfg, signal())).rejects.toThrow(/400/);
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry when the caller aborted', async () => {
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => { calls++; throw new TypeError('fetch failed'); }) as typeof fetch;
+    const stages = loopbackStages({ baseUrl: 'http://gw', authorization: 'Bearer k', fetchImpl, models: { stt: 'w' } });
+    const aborted = AbortSignal.abort();
+    await expect(stages.transcribe(new Uint8Array([1]), 'audio/wav', cfg, aborted)).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+
+  it('retries the speak request connect, never the audio stream itself', async () => {
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => {
+      calls++;
+      if (calls === 1) return new Response('{"error":{"message":"replica unreachable"}}', { status: 502 });
+      return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'audio/pcm' } });
+    }) as typeof fetch;
+    const stages = loopbackStages({ baseUrl: 'http://gw', authorization: 'Bearer k', fetchImpl, models: { tts: 'v' } });
+    const spoken = await stages.speak('oi', cfg, signal());
+    expect(spoken.contentType).toBe('audio/pcm');
+    expect(calls).toBe(2);
+  });
+});
