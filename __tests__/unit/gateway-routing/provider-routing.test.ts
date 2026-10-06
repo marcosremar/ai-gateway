@@ -101,7 +101,7 @@ describe('503 provider_unavailable', () => {
   });
 
   it('selectTargets keeps only configured providers', () => {
-    const { usable, skipped } = selectTargets([target(fake('groq', async () => '', false)), target(fake('openrouter', async () => ''))], new CircuitBreakerRegistry());
+    const { usable, skipped } = selectTargets([target(fake('groq', async () => '', false)), target(fake('openrouter', async () => ''))], 'chat', new CircuitBreakerRegistry());
     expect(usable.map(t => t.providerId)).toEqual(['openrouter']);
     expect(skipped).toEqual(['groq: GROQ_API_KEY is not set']);
   });

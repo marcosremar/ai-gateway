@@ -90,6 +90,13 @@ export class DeploymentController {
   private readonly deployments = new Map<string, Runtime>();
   private readonly profiles = new Map<string, Profile>();
   private machines: ReplicaMachine[] = [];
+  /**
+   * Machines the provider already created but `createReplica` has not finished configuring (user_data, power-on).
+   * The list shows them `stopped` in that window: planned like any machine they read as halted and were deleted
+   * mid-create, and the create then failed with a 404 on its own server (production stress 2026-10-06). They stay out
+   * of `machines` (and of every plan) until the create returns; `rt.creating` already counts them.
+   */
+  private readonly creatingIds = new Set<string>();
   private readonly probes = new Map<string, ProbeState>();
   private reconciling: Promise<void> | null = null;
   private rerun = false;
@@ -423,7 +430,7 @@ export class DeploymentController {
     this.machines = [...listed.map((l) => {
       const known = this.machines.find(m => m.id === l.id);
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
-    }), ...recent, ...unlisted];
+    }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
 
@@ -588,17 +595,18 @@ export class DeploymentController {
       return;
     }
     rt.creating++;
+    const created: { id?: string } = {};
     void (async () => {
       try {
         const { machine, price, placement } = await placeReplica({
           spec, log: this.log, backendFor: (p) => this.backends[p],
-          create: (backend, placed) => this.createOn(rt, backend, placed),
+          create: (backend, placed) => this.createOn(rt, backend, placed, created),
         });
         if (this.deployments.get(spec.name) !== rt) {
           await this.backendOf(this.providerOf(machine)).releaseReplica(machine); // deleted while creating
           return;
         }
-        this.machines.push({ ...machine, pricePerHour: machine.pricePerHour ?? price });
+        this.machines = [...this.machines.filter(m => m.id !== machine.id), { ...machine, pricePerHour: machine.pricePerHour ?? price }];
         rt.lastPlacement = rt.rejected.length ? `${placement}; earlier: ${rt.rejected.join('; ')}` : placement;
         rt.createFailures = 0;
         rt.lastError = null;
@@ -609,13 +617,15 @@ export class DeploymentController {
         rt.createFailures++;
         this.log('deployments: create failed', { deployment: spec.name, error: rt.lastError });
       } finally {
+        // A failed create cleans its own server up; anything left behind is listed again and planned as usual.
+        if (created.id) this.creatingIds.delete(created.id);
         rt.creating--;
       }
     })();
   }
 
   /** One create on one backend, the spec already narrowed to one place (zone, type, cap). */
-  private async createOn(rt: Runtime, backend: DeploymentBackend, spec: DeploymentSpec): Promise<ReplicaMachine> {
+  private async createOn(rt: Runtime, backend: DeploymentBackend, spec: DeploymentSpec, created: { id?: string }): Promise<ReplicaMachine> {
     this.log('deployments: creating replica', { deployment: spec.name, provider: backend.provider, type: spec.machineType, zone: spec.zone });
     const network = spec.exposure ? await this.networkOf(rt, backend) : undefined;
     const machine = await backend.createReplica({
@@ -623,6 +633,7 @@ export class DeploymentController {
       // Vast builds its own init (`vastReplicaInit`) from spec + token; Scaleway takes this cloud-init as user_data.
       cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), rt.record.replicaToken) : '',
       ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
+      onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
     });
     return { ...machine, provider: backend.provider };
   }

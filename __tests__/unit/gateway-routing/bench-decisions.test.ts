@@ -11,7 +11,7 @@ import { clearClientCache } from '../../../src/gateway/providers/cloud/openai-co
 import { OpenAICompatLLMProvider } from '../../../src/gateway/providers/cloud/openai-compat/openai-compat-llm';
 import { finishReasonOf, isStreamMarker } from '../../../src/gateway/providers/cloud/openai-compat/stream-markers';
 import type { ChatRequest, STTProvider } from '../../../src/gateway/providers/cloud/types';
-import { isRateLimited, routeRequest, type RouteTarget } from '../../../src/gateway/proxy/provider-routing';
+import { breakerKey, isRateLimited, routeRequest, type RouteTarget } from '../../../src/gateway/proxy/provider-routing';
 import { handleAudioTranscriptions, _resetSttCache } from '../../../src/gateway/proxy/routes/audio-transcriptions';
 import { handleChatCompletions } from '../../../src/gateway/proxy/routes/chat-completions';
 import { concurrencyLimits, DEFAULT_MAX_CONCURRENT_PER_USER } from '../../../src/gateway/proxy/server';
@@ -47,7 +47,7 @@ describe('b) a 429 pauses that model, not the provider', () => {
     const or = fake('openrouter', () => Promise.reject(httpError(429)));
     const groq = fake('groq', () => Promise.resolve('ok'));
     for (let i = 0; i < 3; i++) await route([target(or, `busy-${i}`), target(groq, 'g')], breakers);
-    expect(breakers.get('openrouter').isOpen()).toBe(false);
+    for (let i = 0; i < 3; i++) expect(breakers.get(breakerKey('test', { providerId: 'openrouter', model: `busy-${i}` })).isOpen()).toBe(false);
     const other = fake('openrouter', () => Promise.resolve('fine'));
     expect((await route([target(other, 'other-model')], breakers)).result).toBe('fine');
   });

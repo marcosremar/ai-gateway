@@ -168,6 +168,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         });
         if (!res.success || res.new_contract == null) throw new Error(`not available: ${res.error ?? res.msg ?? 'success=false'}`);
         const id = String(res.new_contract);
+        input.onCreated?.(id);
         if (offer.machine_id !== undefined) this.hostOf.set(id, offer.machine_id);
         return {
           id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast',
