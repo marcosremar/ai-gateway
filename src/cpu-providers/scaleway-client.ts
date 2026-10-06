@@ -370,9 +370,12 @@ export class ScalewayClient extends AbstractGpuProvider {
     this.log.log(`[scaleway] Server created: ${server.id} (${usedType.type})${volumeIds.length ? ` volumes=[${volumeIds.join(',')}]` : ''}`);
 
     try {
+      // A server Scaleway has just created can answer 404 for a moment (seen 06/10/2026: the user_data/poweron calls
+      // right after the create failed with `instance_server not found` and the replica was thrown away).
+      const fresh = <T>(step: () => Promise<T>) => this.retryNotFound(step);
       // user_data: custom cloud-init takes precedence over docker bot script
       for (const [key, data] of Object.entries(spec.userDataFiles ?? {})) {
-        await this.setUserDataKey(zone, server.id, secretKey, key, data);
+        await fresh(() => this.setUserDataKey(zone, server.id, secretKey, key, data));
       }
       const cloudInit = spec.cloudInitFor
         ? spec.cloudInitFor({ serverId: server.id, ip: ipv4Of(server) })
@@ -382,12 +385,12 @@ export class ScalewayClient extends AbstractGpuProvider {
         const script = cloudInit.startsWith('#')
           ? cloudInit
           : `#!/bin/bash\n${cloudInit}\n`;
-        await this.setUserData(zone, server.id, secretKey, script);
+        await fresh(() => this.setUserData(zone, server.id, secretKey, script));
       } else if (spec.dockerImage) {
-        await this.setUserData(zone, server.id, secretKey, this.buildUserData(spec));
+        await fresh(() => this.setUserData(zone, server.id, secretKey, this.buildUserData(spec)));
       }
 
-      await this.serverAction(zone, server.id, 'poweron', secretKey);
+      await fresh(() => this.serverAction(zone, server.id, 'poweron', secretKey));
       this.log.log(`[scaleway] Server ${server.id} powering on...`);
 
       const ip = await this.waitForIp(zone, server.id, secretKey);
@@ -877,6 +880,22 @@ export class ScalewayClient extends AbstractGpuProvider {
         ...(publicIpIds.length ? { publicIpIds } : {}),
       },
     };
+  }
+
+  /** Waits between retries of a call on a just-created server that answered 404 (eventual consistency); then gives up. */
+  freshServerRetryMs: number[] = [1_000, 2_000, 4_000];
+
+  private async retryNotFound<T>(step: () => Promise<T>): Promise<T> {
+    for (const waitMs of this.freshServerRetryMs) {
+      try {
+        return await step();
+      } catch (err) {
+        if (!(err instanceof FetchError && err.status === 404)) throw err;
+        this.log.log(`[scaleway] new server not visible yet (404), retrying in ${waitMs} ms`);
+        await new Promise(r => setTimeout(r, waitMs));
+      }
+    }
+    return step();
   }
 
   private async serverAction(zone: string, serverId: string, action: string, secretKey: string): Promise<void> {
