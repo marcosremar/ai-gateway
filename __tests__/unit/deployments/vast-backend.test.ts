@@ -67,6 +67,26 @@ describe('VastDeploymentBackend', () => {
     for (const c of calls) expect(c.url.startsWith('https://console.vast.ai/api/v0/')).toBe(true);
   });
 
+  it('minCuda raises the CUDA floor to the image\'s and skips a host whose driver is older (error 804 on 2026-10-06)', async () => {
+    const { calls, fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST' && url.endsWith('/bundles/')) {
+        // The API filter is not trusted: the French host on driver 570 (CUDA 12.8) comes back anyway.
+        return { body: { offers: [{ ...offers[1], cuda_max_good: 12.8 }, { ...offers[2], cuda_max_good: 12.9 }] } };
+      }
+      if (method === 'PUT' && url.endsWith('/asks/3/')) return { body: { success: true, new_contract: 778 } };
+      return { status: 500, body: 'unexpected' };
+    });
+    const backend = new VastDeploymentBackend('vast-key', { fetch: fetchImpl, now: () => 1_000 });
+    const machine = await backend.createReplica({ spec: vastSpec({ minCuda: 12.9 }), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' });
+    expect(calls[0].body).toMatchObject({ cuda_max_good: { gte: 12.9 } });
+    expect(machine).toMatchObject({ id: '778', zone: 'Frankfurt, DE' });
+    // Below the GPU's own floor it changes nothing: Blackwell still needs 12.8.
+    const low = fakeVast(() => ({ body: { offers: [] } }));
+    await new VastDeploymentBackend('vast-key', { fetch: low.fetchImpl, now: () => 1_000 })
+      .createReplica({ spec: vastSpec({ minCuda: 12.0 }), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' }).catch(() => null);
+    expect(low.calls[0].body).toMatchObject({ cuda_max_good: { gte: 12.8 } });
+  });
+
   it('falls to 0.95 reliability only when nothing passes 0.97, and says out_of_stock when nothing fits at all', async () => {
     const seen: number[] = [];
     const { fetchImpl } = fakeVast(({ method, body }) => {

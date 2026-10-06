@@ -92,6 +92,8 @@ export interface VastOffer {
   inet_down: number;
   geolocation?: string | null;
   gpu_name?: string;
+  /** Highest CUDA version the host driver supports. */
+  cuda_max_good?: number;
 }
 
 /**
