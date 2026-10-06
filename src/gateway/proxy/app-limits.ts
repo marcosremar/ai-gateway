@@ -3,7 +3,7 @@
  * any of ~480 OpenRouter models by `org/model` passthrough, with `max_tokens` up to 128 000, 150 parallel streams and
  * no daily cap; the remaining OpenRouter credit would go in minutes and the students' fallback with it).
  *
- * For a non-admin key (admins — the SANDBOX_TOKEN user and DEPLOYMENTS_ADMIN_USERS — are never limited):
+ * For a non-admin key (admins — DEPLOYMENTS_ADMIN_USERS — are never limited):
  *   - **models**: only the aliases of its own app (`PUT /v1/apps/:app/routes`, the key's userId is the app id), per
  *     stage. No `org/model` passthrough, no gateway-wide model, no embeddings or images → 403.
  *   - **max_tokens** (chat): clamped to APP_MAX_TOKENS (default 1024); a request without one gets the cap.

@@ -159,7 +159,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * Admin routes (mounted as proxy custom routes, i.e. after the API-key check):
  *   POST /v1/admin/keys/reload   re-read the palco now          → { ok, changed, removed, errors }
  *   PUT  /v1/admin/keys          {NAME: value} → palco, reload   → { written, changed, removed }
- * `authorize(bearer)` restricts them to admin keys (SANDBOX_TOKEN user / DEPLOYMENTS_ADMIN_USERS).
+ * `authorize(bearer)` restricts them to admin keys (DEPLOYMENTS_ADMIN_USERS).
  */
 export function createKeyAdminRoutes(manager: KeyManager, authorize: (bearerToken: string) => boolean): CustomRoute[] {
   const guard = (req: IncomingMessage, res: ServerResponse): boolean => {

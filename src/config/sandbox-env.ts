@@ -69,6 +69,29 @@ export function principalSandboxToken(env: Record<string, string | undefined>): 
   return '';
 }
 
+/** User id of the SANDBOX_TOKEN when `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only). */
+export const SANDBOX_USER = 'sandbox';
+
+/**
+ * The gateway's client keys: `GATEWAY_API_KEYS` ("key:user", comma-separated). The SANDBOX_TOKEN (and its aliases)
+ * is the dev API's master key — the gateway uses it only to FETCH its own provider keys from the palco — and is NOT a
+ * client key nor an admin (owner decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` restores the old behaviour
+ * (accepted as user `sandbox`, admin) for the transition, until the parle build that sends its own AI_GATEWAY_KEY ships.
+ */
+export function gatewayClientKeys(env: Record<string, string | undefined>): { keys: string[]; sandboxAdmins: string[]; warnings: string[] } {
+  const keys = (env.GATEWAY_API_KEYS ?? '').split(',').map(k => k.trim()).filter(Boolean);
+  const warnings: string[] = [];
+  const token = principalSandboxToken(env);
+  if (env.ACCEPT_SANDBOX_TOKEN_AS_KEY?.trim() !== '1' || !token) return { keys, sandboxAdmins: [], warnings };
+  if (/[,:]/.test(token)) {
+    warnings.push('SANDBOX_TOKEN contains , or : — not accepted as an API key');
+    return { keys, sandboxAdmins: [], warnings };
+  }
+  warnings.push('ACCEPT_SANDBOX_TOKEN_AS_KEY=1: the SANDBOX_TOKEN is accepted as an admin client key (transition only — '
+    + 'give the client its own GATEWAY_API_KEYS entry and remove the flag)');
+  return { keys: [...keys, `${token}:${SANDBOX_USER}`], sandboxAdmins: [SANDBOX_USER], warnings };
+}
+
 export function sandboxEnvUrls(env: Record<string, string | undefined>): string[] {
   const custom = env.SANDBOX_ENV_URL?.trim();
   return custom ? [custom] : DEFAULT_SANDBOX_ENV_URLS;

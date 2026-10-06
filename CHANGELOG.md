@@ -13,9 +13,11 @@ on release via `bunx changeset version`.
 ### Security
 
 - **Admin keys fail closed** — an empty `DEPLOYMENTS_ADMIN_USERS` no longer makes every `GATEWAY_API_KEYS` key an
-  admin: only the `SANDBOX_TOKEN` user is, and the boot logs a `WARNING` (`adminUsersFromEnv`, one rule for
-  deployments, `/v1/admin/keys` and `/health?deep=1`). Set `DEPLOYMENTS_ADMIN_USERS` before deploying if another key
-  needs admin.
+  admin: no key is, and the boot logs a `WARNING` (`adminUsersFromEnv`, one rule for deployments, `/v1/admin/keys`
+  and `/health?deep=1`). Set `DEPLOYMENTS_ADMIN_USERS` before deploying.
+- **The `SANDBOX_TOKEN` is no longer a gateway key** — it only fetches the gateway's provider keys from the palco; as
+  a Bearer it gets `401` and it is never admin (`gatewayClientKeys`). Transition flag `ACCEPT_SANDBOX_TOKEN_AS_KEY=1`
+  (default off) re-accepts it as the admin user `sandbox` until the clients send their own key.
 - **Direct-fallback plan hands out no master key by default** — without `OPENROUTER_PROVISIONING_KEY` the plan lists
   routes and no credential; sharing the gateway's own `OPENROUTER_API_KEY` / `GROQ_API_KEY` needs
   `APP_FALLBACK_SHARE_KEY=1`.

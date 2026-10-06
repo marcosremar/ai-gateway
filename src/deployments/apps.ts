@@ -5,7 +5,7 @@
  *
  *   app account ─ images: name → { image (registry ref), digest, port, healthPath, defaults, history[≤5] }
  *
- * Who is the app: the user id of the calling key (GATEWAY_API_KEYS `key:app`). An admin key (the SANDBOX_TOKEN user,
+ * Who is the app: the user id of the calling key (GATEWAY_API_KEYS `key:app`). An admin key (a user in
  * DEPLOYMENTS_ADMIN_USERS) may act for any app with `X-App: <app>`. Persisted as one JSON file next to the
  * deployments (`DEPLOYMENTS_STATE_DIR/apps.json`, atomic writes). No secrets here: registry credentials stay out
  * (the gateway logs in to its own Scaleway registry with its own key), env values are not stored.

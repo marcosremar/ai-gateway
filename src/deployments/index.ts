@@ -71,8 +71,8 @@ export interface DeploymentsFromEnv {
  *   DEPLOYMENTS_NAMESPACE    machine tag namespace, one gateway per namespace; default "default" ON RAILWAY ONLY —
  *                            elsewhere it is required (machines of the namespace unknown here are released as orphans)
  *   DEPLOYMENTS_MAX_REPLICAS replica cap across all deployments; default 6
- *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = only
- *                            `alwaysAdmin` (the SANDBOX_TOKEN user) — never "every key" (fail closed, 06/10/2026)
+ *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = no
+ *                            admin at all — never "every key" (fail closed, 06/10/2026)
  *   Direct fallback (`GET /v1/apps/:app/fallback`, app-fallback.ts): OPENROUTER_PROVISIONING_KEY (mint per-app keys),
  *   APP_FALLBACK_KEY_LIMIT_USD (5), APP_FALLBACK_KEY_ROTATE_DAYS (7), APP_FALLBACK_PLAN_TTL_SECONDS (3600),
  *   APP_FALLBACK_SHARE_KEY=1 (opt-in: hand out the gateway's own master keys when no key can be minted; off by default)
@@ -80,7 +80,8 @@ export interface DeploymentsFromEnv {
  *   they buffered while the gateway was down; persisted to client-stability.jsonl in the state dir.
  */
 /**
- * Admin userIds: DEPLOYMENTS_ADMIN_USERS plus `alwaysAdmin`. An empty list grants admin to NOBODY else — until
+ * Admin userIds: DEPLOYMENTS_ADMIN_USERS plus `alwaysAdmin` (empty in production; the `sandbox` user only under the
+ * transition flag ACCEPT_SANDBOX_TOKEN_AS_KEY=1). An empty list grants admin to NOBODY — until
  * 06/10/2026 it made every GATEWAY_API_KEYS key an admin (deployments, keys, `X-App` for any app's fallback plan).
  * The one source of the rule for deployments, `PUT /v1/admin/keys` and `/health?deep=1` (serve.ts).
  */
@@ -109,7 +110,7 @@ export function deploymentsFromEnv(
   env: Record<string, string | undefined>,
   opts: {
     userOf: (req: IncomingMessage) => string | null;
-    /** userIds that may always manage (e.g. the SANDBOX_TOKEN user), on top of DEPLOYMENTS_ADMIN_USERS. */
+    /** userIds that may always manage, on top of DEPLOYMENTS_ADMIN_USERS (serve.ts: none, or `sandbox` under ACCEPT_SANDBOX_TOKEN_AS_KEY=1). */
     alwaysAdmin?: string[];
     log?: (msg: string, data?: Record<string, unknown>) => void;
     /** Declared deployments' status, added to `GET /v1/deployments` as `declared`. */

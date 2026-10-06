@@ -52,8 +52,7 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |
 | PUT / DELETE | `/v1/profiles/:name` | store / delete your own profile (same fields as a spec) |
 
-Mutations require an admin key: the `SANDBOX_TOKEN` user or a user in `DEPLOYMENTS_ADMIN_USERS` (empty = no other
-admin). A non-admin key invokes only its own app's deployments. `env` values and `registryAuth` are
+Mutations require an admin key: a user in `DEPLOYMENTS_ADMIN_USERS` (empty = no admin at all). A non-admin key invokes only its own app's deployments. `env` values and `registryAuth` are
 never returned. Spec fields and defaults: `src/deployments/spec.ts` (`SPEC_DEFAULTS`).
 
 ## Declared deployments
@@ -113,7 +112,7 @@ curl -X PUT $GW/v1/deployments/parle-speech -H "Authorization: Bearer $KEY" -H '
 curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # images + deployments of the app
 ```
 
-- **Which app**: the user id of the calling key (`GATEWAY_API_KEYS` `key:app`). An admin key (the `SANDBOX_TOKEN` user,
+- **Which app**: the user id of the calling key (`GATEWAY_API_KEYS` `key:app`). An admin key (a user in
   `DEPLOYMENTS_ADMIN_USERS`) acts for any app with `X-App: <app>`; a normal key cannot use `X-App`.
 - **Isolation**: a key sees and edits only its own app's images and deployments (`403` otherwise); `GET /v1/deployments`
   lists only its app's. Admins see all (`?app=` filters). Deploys still need an admin key (they spend money).
@@ -281,11 +280,11 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 
 | Variable | |
 |---|---|
-| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API |
+| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition |
 | `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables Scaleway replicas (normally fetched with the token) |
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
-| `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = only the `SANDBOX_TOKEN` user is admin |
+| `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
 | `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000; `docs/api/http.md` § App keys) |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
 | `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 150) caps parallel requests per key user, `MAX_CONCURRENT_PER_USER_OVERRIDES` (`user:limit,…`) per user |

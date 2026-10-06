@@ -21,11 +21,13 @@ All endpoints (except `GET /health`) require a Bearer token:
 curl -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" ...
 ```
 
-Set `GATEWAY_API_KEYS` on the server (comma-separated; `key:user` names the user). `SANDBOX_TOKEN` is also
-accepted, as the `sandbox` user. When no key is configured, only localhost requests are allowed.
+Set `GATEWAY_API_KEYS` on the server (comma-separated; `key:user` names the user). When no key is configured, only
+localhost requests are allowed. The `SANDBOX_TOKEN` (and its aliases) is **not** a client key: it is the dev API's
+master key, which the gateway uses only to fetch its own provider keys from the palco, and it gets `401` here (owner
+decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only, default off, logs a `WARNING`) accepts it
+again as the admin user `sandbox`, until every client sends its own key.
 
-**Admin keys** — the `sandbox` user plus the users in `DEPLOYMENTS_ADMIN_USERS`. When that list is empty, no other
-key is admin (fail closed since 06/10/2026; the boot logs a `WARNING`). Admin keys are required for deployment
+**Admin keys** — the users in `DEPLOYMENTS_ADMIN_USERS`. When that list is empty, no key is admin (fail closed since 06/10/2026; the boot logs a `WARNING`). Admin keys are required for deployment
 mutations, `X-App`, `GET /health?deep=1` and `/v1/admin/keys*`.
 
 **App keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
