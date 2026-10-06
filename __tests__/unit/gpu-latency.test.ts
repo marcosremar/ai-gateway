@@ -247,6 +247,9 @@ describe('probeHostFull', () => {
           }
           return socket;
         },
+        once(event: string, cb: (...args: unknown[]) => void) {
+          return socket.on(event, cb);
+        },
         destroy: vi.fn(),
       };
       return socket;
