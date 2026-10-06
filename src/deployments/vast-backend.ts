@@ -66,6 +66,11 @@ export function minCudaFor(gpuName: string): number {
   return /RTX\s*50\d\d|\bB[12]00\b/i.test(gpuName) ? 12.8 : 12.4;
 }
 
+/** The CUDA floor of a spec: the GPU's own and the image's (`spec.minCuda`), whichever is higher. */
+export function cudaFloorOf(spec: Pick<DeploymentSpec, 'machineType' | 'minCuda'>): number {
+  return Math.max(minCudaFor(spec.machineType), spec.minCuda ?? 0);
+}
+
 /** Vast `actual_status` → the controller's vocabulary: `running`, `starting` (loading/created), `exited` (halted). */
 export function vastState(status: string | null | undefined): string {
   if (status === 'running') return 'running';
@@ -116,7 +121,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       num_gpus: { eq: 1 },
       gpu_name: { in: [spec.machineType] },
       disk_space: { gte: spec.volumeGb ?? DEFAULT_DISK_GB },
-      cuda_max_good: { gte: minCudaFor(spec.machineType) },
+      cuda_max_good: { gte: cudaFloorOf(spec) },
       reliability2: { gte: reliability },
       inet_down: { gte: MIN_INET_DOWN_MBPS },
       direct_port_count: { gte: 1 },
@@ -134,7 +139,9 @@ export class VastDeploymentBackend implements DeploymentBackend {
     for (const reliability of [MIN_RELIABILITY, FALLBACK_RELIABILITY]) {
       const { offers = [] } = await this.call<{ offers?: VastOffer[] }>('POST', '/bundles/', this.searchBody(spec, reliability));
       // The API's numeric filters are not always applied: check cap and floors again here.
-      const valid = offers.filter(o => o.dph_total <= usdCap && o.reliability2 >= reliability && o.inet_down >= MIN_INET_DOWN_MBPS);
+      const cuda = cudaFloorOf(spec);
+      const valid = offers.filter(o => o.dph_total <= usdCap && o.reliability2 >= reliability && o.inet_down >= MIN_INET_DOWN_MBPS
+        && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda));
       const ranked = rankOffers(valid, {
         near: spec.near ?? DEFAULT_NEAR, ...(spec.allowFar ? { allowFar: true } : {}), avoidMachines: new Set(this.badHosts.keys()),
       });

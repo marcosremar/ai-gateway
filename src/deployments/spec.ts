@@ -103,7 +103,7 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs',
+  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 
@@ -148,6 +148,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   if (input.candidates !== undefined) out.candidates = candidatesOf(input.candidates);
   if (input.near !== undefined) out.near = str(input.near, 'near', COUNTRY_RE);
   if (input.maxRttMs !== undefined) out.maxRttMs = int(input.maxRttMs, 'maxRttMs', 5, 500);
+  if (input.minCuda !== undefined) out.minCuda = num(input.minCuda, 'minCuda', 11, 14);
   if (input.allowFar !== undefined) {
     if (typeof input.allowFar !== 'boolean') throw new SpecError('allowFar must be a boolean');
     out.allowFar = input.allowFar;
