@@ -7,7 +7,7 @@
 import { ScalewayClient } from '../cpu-providers/scaleway-client';
 import type { GpuInstance, ProviderCredentials } from '../gpu-providers/types';
 import { PROBE_PORT } from './spec';
-import type { CreateReplicaInput, DeploymentBackend, DeploymentNetwork, DeploymentSpec, RegistryAuth, ReplicaMachine } from './types';
+import type { CatalogEntry, CreateReplicaInput, DeploymentBackend, DeploymentNetwork, DeploymentSpec, RegistryAuth, ReplicaMachine } from './types';
 
 export const DEPLOY_TAG = 'aigw-deploy';
 export const nsTag = (ns: string) => `aigw-ns-${ns}`;
@@ -18,7 +18,7 @@ const GPU_OS_IMAGE_FR_PAR_2 = '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa';
 
 type ScalewayLike = Pick<ScalewayClient, 'createInstance' | 'listInstancesByTag' | 'releaseInstance' | 'getHourlyPrice' | 'imageLike'>
   & Partial<Pick<ScalewayClient, 'reserveRoutedIp' | 'listIps' | 'deleteIp' | 'createSecurityGroup' | 'listSecurityGroups'
-    | 'deleteSecurityGroup' | 'startInstance' | 'stopInstance'>>;
+    | 'deleteSecurityGroup' | 'startInstance' | 'stopInstance' | 'listGpuOffers'>>;
 
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
@@ -35,6 +35,7 @@ function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachi
     zone: String(meta.zone ?? ''),
     machineType: String(meta.commercialType ?? ''),
     pricePerHour: typeof meta.pricePerHr === 'number' && meta.pricePerHr > 0 ? meta.pricePerHr : null,
+    provider: 'scaleway',
   };
 }
 
@@ -150,6 +151,13 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   async hourlyPrice(zone: string, machineType: string): Promise<number | null> {
     return this.client.getHourlyPrice(zone, machineType, this.credentials);
+  }
+
+  /** GPU types' price and stock per zone (`products/servers` + availability), for ranking `candidates`. */
+  async catalog(zones: string[]): Promise<CatalogEntry[]> {
+    if (!this.client.listGpuOffers) return [];
+    const offers = await this.client.listGpuOffers(zones, this.credentials);
+    return offers.map(o => ({ zone: o.zone, machineType: o.commercialType, hourlyPrice: o.hourlyPrice, availability: o.availability }));
   }
 
   /** Scaleway Container Registry (`rg.<region>.scw.cloud/<namespace>/…`) logs in with user `nologin` and the API secret. */

@@ -118,3 +118,43 @@ for i in $(seq 1 ${bootChecks}); do
 done
 `;
 }
+
+/**
+ * Boot script of a Vast replica. Vast runs ONE container per host — no systemd, no Docker-in-Docker — so this is the
+ * boot-script mode only, inside the spec's `image` (a public base image) as the instance's onstart:
+ *
+ *   host :<mapped> ─► container :80 nginx (requires `X-Aigw-Token`) ──► 127.0.0.1:<spec.port> (the boot script's app)
+ *
+ * The app port is `spec.port` (default 8000), not a fixed 8000: everything shares one container, and a caller's stack
+ * may already use 127.0.0.1:8000 for a model server, so its health responder lives on another port (e.g. 8010).
+ * nginx is started as a plain daemon (`nginx`, reloaded if already up), never `systemctl`. Safety net: the container
+ * stops itself `maxHours + 30 min` after boot (an exited Vast instance bills only its disk; the controller or the reaper
+ * deletes it).
+ */
+export function vastReplicaInit(spec: DeploymentSpec, token: string): string {
+  if (!/^[A-Za-z0-9_-]{24,}$/.test(token)) throw new Error('replica token must be 24+ chars of [A-Za-z0-9_-]');
+  if (!spec.bootScript) throw new Error('vast replicas run in boot-script mode only');
+  const env = { ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env };
+  const envFile = Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+  const stopAfterSeconds = (Math.round(spec.maxHours * 60) + 30) * 60;
+  const bootChecks = Math.max(12, Math.ceil((spec.bootTimeoutMinutes * 60) / 5));
+  const appPort = spec.port;
+  return `#!/bin/bash
+mkdir -p /srv/aigw/data /srv/aigw/hf
+exec > >(tee -a /srv/aigw/boot.log) 2>&1
+set -x
+( sleep ${stopAfterSeconds}; kill -TERM 1 ) >/dev/null 2>&1 &
+echo '${b64(nginxConfig(token, 80, appPort))}' | base64 -d > /srv/aigw/nginx.conf
+echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
+export DEBIAN_FRONTEND=noninteractive
+command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx curl; }
+mkdir -p /etc/nginx/conf.d && rm -f /etc/nginx/sites-enabled/default
+cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf
+nginx -t && { nginx -s reload 2>/dev/null || nginx; }
+${bootScriptSection(spec.bootScript)}
+for i in $(seq 1 ${bootChecks}); do
+  curl -sf -o /dev/null http://127.0.0.1:${appPort}${spec.healthPath} && echo '{"ready":true}' > /srv/aigw/ready.json && break
+  sleep 5
+done
+`;
+}

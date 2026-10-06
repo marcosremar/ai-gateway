@@ -5,7 +5,7 @@
 
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
-import type { CreateReplicaInput, DeploymentBackend, DeploymentNetwork, DeploymentSpec, RegistryAuth, ReplicaMachine } from '../../../src/deployments/types';
+import type { CreateReplicaInput, DeploymentBackend, DeploymentProvider, DeploymentNetwork, DeploymentSpec, RegistryAuth, ReplicaMachine } from '../../../src/deployments/types';
 
 export interface FakeMachine {
   machine: ReplicaMachine;
@@ -18,24 +18,33 @@ export interface FakeMachine {
 }
 
 export class FakeCloud implements DeploymentBackend {
-  readonly provider = 'scaleway' as const;
   machines = new Map<string, FakeMachine>();
   created: CreateReplicaInput[] = [];
   released: string[] = [];
   price: number | null = 0.01;
   failList = false;
   failCreate: string | null = null;
+  /** Per-place create failure (placement ladder tests): an error message for that spec, or null to succeed. */
+  failCreateFor?: (spec: DeploymentSpec) => string | null;
+  /** Per-place catalog price; falls back to `price`. */
+  priceFor?: (zone: string, machineType: string) => number | null;
+  marketPriced?: boolean;
+  /** RTT gate hook (Vast-like backends); absent = no gate. */
+  measureRtt?: (machine: ReplicaMachine) => Promise<number | null>;
+  releaseReasons: Array<string | undefined> = [];
   bootMs = 50;
   registryAuthFor?: (image: string) => RegistryAuth | null;
   appDelayMs = 0;
   private seq = 0;
 
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(private readonly now: () => number = Date.now, readonly provider: DeploymentProvider = 'scaleway') {}
 
   async createReplica(input: CreateReplicaInput): Promise<ReplicaMachine> {
     if (this.failCreate) throw new Error(this.failCreate);
+    const placeError = this.failCreateFor?.(input.spec);
+    if (placeError) throw new Error(placeError);
     this.created.push(input);
-    const id = `fr-par-2:fake-${++this.seq}`;
+    const id = `${this.provider === 'vast' ? 'vast' : input.spec.zone}:fake-${++this.seq}`;
     const fake: FakeMachine = {
       machine: {
         id, deployment: input.spec.name, ip: null, state: 'running', createdAt: this.now(),
@@ -74,21 +83,22 @@ export class FakeCloud implements DeploymentBackend {
   }
 
   async listReplicas(): Promise<ReplicaMachine[]> {
-    if (this.failList) throw new Error('scaleway list failed');
+    if (this.failList) throw new Error(`${this.provider} list failed`);
     return [...this.machines.values()].map(m => ({ ...m.machine }));
   }
 
-  async releaseReplica(machine: ReplicaMachine): Promise<void> {
+  async releaseReplica(machine: ReplicaMachine, reason?: string): Promise<void> {
     const fake = this.machines.get(machine.id);
     this.released.push(machine.id);
+    this.releaseReasons.push(reason);
     if (!fake) return;
     this.machines.delete(machine.id);
     fake.server.closeAllConnections();
     await new Promise<void>(r => fake.server.close(() => r()));
   }
 
-  async hourlyPrice(): Promise<number | null> {
-    return this.price;
+  async hourlyPrice(zone: string, machineType: string): Promise<number | null> {
+    return this.priceFor ? this.priceFor(zone, machineType) : this.price;
   }
 
   /** Exposed deployments: reserved IP + firewall per deployment, reused while they exist. */

@@ -1,10 +1,12 @@
-# Deployments — a Docker image behind an autoscaled endpoint (Scaleway)
+# Deployments — a Docker image behind an autoscaled endpoint (Scaleway, Vast)
 
 Register a Docker image once; the gateway rents Scaleway machines for it, scales them with traffic (down to zero),
 and forwards requests to a ready replica. Other sites only see `https://<gateway>/v1/deployments/<name>/invoke/...`.
 
 Code: `src/deployments/` (pure planner in `planner.ts`, loop in `controller.ts`, HTTP in `http.ts`, boot script in
-`cloud-init.ts`). Mounted by `serve.ts` when `SCW_SECRET_KEY` is set. **Only Scaleway for now** (`provider: "scaleway"`).
+`cloud-init.ts`, placement in `placements.ts` / `placement-walk.ts`). Mounted by `serve.ts` when `SCW_SECRET_KEY` and/or
+`VAST_API_KEY` is set. Providers: **`scaleway`** (datacenter VMs, any image; the default) and **`vast`** (Vast.ai
+marketplace GPU hosts, boot-script mode only — see [Vast replicas](#vast-replicas)).
 
 ## Quick start
 
@@ -140,6 +142,103 @@ Replaced automatically: halted by the provider, not ready after `bootTimeoutMinu
 older than `maxHours`. Safety: price checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS`
 across all deployments, back-off after a failed create (1 → 10 min).
 
+## Placement: `placements`, `candidates`, `near` (reliable, cheap, close to France)
+
+One walk (`placement-walk.ts`) serves two spec fields; a spec may use **one of them, not both** (400 otherwise; send
+`"placements": []` to drop a profile's placements). Every place first gets the live price check (not sold or over the
+cap → skipped without a create), then the create; an out-of-stock answer (`isOutOfStock`, `placements.ts`: Scaleway's
+`412 {"type":"out_of_stock"}`, shortage, capacity wordings) moves to the next place, any other error (quota, 401, a
+bug) stops the walk and backs off. `lastPlacement` in `GET /v1/deployments/:name` says where it landed and why the
+earlier places were skipped.
+
+- **`placements`** (Scaleway only, ≤ 6 `{ zone?, machineType? }`): the spec's own zone/type first, then each entry
+  **in the given order** (never re-ranked), all at the spec's `maxEurPerHour`. A pinned `osImageId` only applies in
+  its own zone; an exposed deployment may change only `machineType`. The `speech-stack` profile carries some.
+- **`candidates`**: the ranked, multi-provider ladder below, a cap per entry.
+
+Without either, a spec has one place: `provider` + `zone` + `machineType`, refused above `maxEurPerHour` (as before).
+With `candidates`, each create walks a **ranked ladder**:
+
+```json
+{
+  "image": "vllm/vllm-omni:v0.28.0", "bootScript": "…", "port": 8010, "near": "FR",
+  "candidates": [
+    { "zone": "fr-par-2", "machineType": "L4-1-24G", "maxEurPerHour": 0.9 },
+    { "zone": "nl-ams-1", "machineType": "L4-1-24G", "maxEurPerHour": 0.9 },
+    { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.6 }
+  ]
+}
+```
+
+- `candidates`: 1–20 entries `{ provider?, zone?, machineType, maxEurPerHour }` (`provider` defaults to the spec's,
+  `zone` to the spec's; Vast ignores `zone`). `near`: ISO country of the users, default **`FR`** (`DEFAULT_NEAR`, the
+  owner's region). `allowFar`: accept hosts/zones beyond 2500 km of `near` when nothing nearer exists (default
+  false). `maxRttMs` (Vast): see [RTT gate](#rtt-gate-vast).
+  `candidates` cannot be combined with `exposure` (the reserved IP is zonal).
+- **How placement decides — distance, not EU membership.** The owner, in France, measured ~60 ms to a Vast host in
+  Slovakia: inside the EU, but ~1100 km away. So geography is the great-circle distance (`geo.ts`) between the main
+  datacenter hub of the `near` country and that of the host's country (Paris → Amsterdam ≈ 430 km, → Frankfurt
+  ≈ 480 km, → Bratislava ≈ 1090 km, → Warsaw ≈ 1370 km), in **500-km bands** (`DISTANCE_BUCKET_KM`: inside a band
+  the RTT difference is a few ms and price decides). Beyond **2500 km** (`MAX_NEAR_KM`, ~25 ms of fibre alone, ≥ 40–60 ms
+  in practice) a host or zone is "far": excluded unless `allowFar` and nothing nearer exists. Unknown country = far.
+- **Order** (`rankCandidates`): distance band first — a Scaleway zone by its country (`fr-par-*` 0 km and `nl-ams-*`
+  ~430 km share band 0, `pl-waw-*` ~1370 km is band 2). A Vast candidate is band 1 (`VAST_CANDIDATE_BUCKET`: after a
+  zone within 500 km — a datacenter is more reliable than a marketplace host — and the Vast backend picks the host
+  near `near` itself, then the RTT gate checks it). Inside a band, cheapest first (catalog price; the cap when
+  unknown); ties keep the caller's order. Zones in `shortage` and types the catalog prices above the candidate's cap are
+  skipped before trying.
+- **Walk**: as above, each candidate against its own cap; the Vast backend reports "no offer under the cap" and
+  "every offer taken" as `out_of_stock`, so the walk moves on. Example `lastPlacement`:
+  `scaleway L4-1-24G@nl-ams-1 (€0.8/h) near FR; skipped: L4-1-24G out of stock in fr-par-2`.
+
+## Vast replicas
+
+`provider: "vast"` (or a Vast candidate) needs `VAST_API_KEY` (from the dev API, like the Scaleway key). Code:
+`src/deployments/vast-backend.ts` (lean, separate from the GPU-pod client in `src/gateway/providers/gpu/`).
+
+- **Boot-script mode only.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
+  container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Both are required.
+  `files`, `exposure` and `idleAction: "stop"` are refused for Vast (no user_data service, no reserved IP).
+- **App port = `port`** (default 8000): nginx proxies to `127.0.0.1:<port>` and the health loop polls
+  `http://127.0.0.1:<port><healthPath>`. Everything shares one container, so a stack that already runs a model server
+  on 8000 serves its health responder on another port (e.g. `"port": 8010`).
+- Boot (`vastReplicaInit`, `cloud-init.ts`): nginx installed if missing and started as a daemon (`nginx`, never
+  `systemctl`) with the same token-gated config on container :80; the boot script in the background; `/__aigw/ready`
+  once the health path answers; the container stops itself `maxHours + 30 min` after boot as a last resort. The
+  script travels base64 in the env var `AIGW_INIT_B64` and the onstart decodes and runs it.
+- **Offer search** (`POST /bundles/`): on-demand, rentable, verified, 1 GPU, `gpu_name` = `machineType`
+  (e.g. `RTX 5090`), `disk_space ≥ volumeGb` (default 50), `cuda_max_good ≥ 12.8` for Blackwell / 12.4 otherwise,
+  `reliability2 ≥ 0.97` (0.95 only when nothing passes), `inet_down ≥ 500`, `direct_port_count ≥ 1`,
+  `dph_total ≤ maxEurPerHour × 1.05` (`EUR_TO_USD`, deliberately below the market rate so the USD cap is never looser
+  than the EUR one). Cap and floors are re-checked client side.
+- **Ranking** (`rankOffers`): distance band of the host's country (from `geolocation`, the country after the last
+  comma) from `near`; hosts beyond 2500 km only when no nearer one exists and the spec has `allowFar`. From France,
+  DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3) even when those are cheaper. Inside a band: effective price `dph_total × (1 + 4 × (1 − reliability2))` (an unreliable host costs more), then
+  `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label `aigw:<namespace>:<deployment>`, env `-p 80:80`);
+  one rented in between goes to the next.
+- The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
+  whose replica hit `bootTimeoutMinutes` is skipped for 1 h (in memory). States: `running`; `loading`/`created` →
+  `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
+  (its disk goes with it).
+
+### RTT gate (Vast)
+
+Distance is only a prior; a fresh Vast replica is **measured**. Once it has an address (its nginx front answers
+before the app is ready), the controller asks the backend for the RTT (`measureRtt`: `src/gateway/providers/gpu/rtt-probe.ts`
+on the mapped port, 5 samples × 2 s, median, counting only real response bytes). Median above `maxRttMs` → the
+replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and the next create
+takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too far. Until
+it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never measured again;
+one adopted after a gateway restart is measured for the view only, never released by the gate (it may be serving).
+`GET /v1/deployments/:name` shows `rttMs` per replica, and `lastPlacement` the decisions, e.g.
+`vast RTX 5090 (≤ €0.6/h) near FR; earlier: host Bratislava, SK: RTT 52 ms > maxRttMs 35: released (too-far); RTT 18 ms ≤ maxRttMs 35: kept`.
+
+- `maxRttMs`: integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`, `src/deployments/rtt-gate.ts`).
+- **Vantage-point caveat:** the gateway runs on Railway europe-west4 (Netherlands), so it measures **NL → host**, not
+  user → host. France → host is typically 10–20 ms more; 35 ms from NL keeps a French user near ~50 ms. A host east
+  of the Netherlands can pass from NL and still be slower for France than the number suggests — the distance ranking
+  (from `near`) is what keeps those behind closer hosts. Scaleway replicas are not gated.
+
 ## Replica machine
 
 `cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-deployment secret only the gateway knows) and proxies to
@@ -151,9 +250,10 @@ after boot as a last resort — a shut-down Scaleway instance is still billed, s
 
 While the gateway runs it never leaves a machine behind (scale to zero, halted replicas deleted, unknown machines of its
 namespace released on restart). If the gateway itself is down, its machines would keep billing — powering off from
-inside does not stop a Scaleway bill. So a second Railway service, **`ai-gateway-reaper`**, runs the same image as a cron
+inside does not stop a Scaleway bill (nor an exited Vast instance's disk). So a second Railway service, **`ai-gateway-reaper`**, runs the same image as a cron
 job (`*/15 * * * *`, start command `./reap-compiled`; it is published with `railway.reaper.json` as its `railway.json`, `scripts/reap-orphans.ts` → `src/deployments/reaper.ts`) with
-`SANDBOX_TOKEN`, `GATEWAY_URL` and the same `DEPLOYMENTS_NAMESPACE`: it probes `GATEWAY_URL/health` 4 times over ~2 min and,
+`SANDBOX_TOKEN`, `GATEWAY_URL` and the same `DEPLOYMENTS_NAMESPACE` (it reaps every provider with a key — Scaleway
+and Vast — each listed on its own, so one provider failing does not spare the other's machines): it probes `GATEWAY_URL/health` 4 times over ~2 min and,
 only if every probe failed, deletes that namespace's machines older than 30 min. A redeploy or a short blip answers
 one of the probes and costs nothing. Worst case for a dead gateway: 15 min + 2 min + the machine's remaining minutes to
 reach 30 min of age.
@@ -173,7 +273,8 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | Variable | |
 |---|---|
 | `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API |
-| `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables deployments (normally fetched with the token) |
+| `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables Scaleway replicas (normally fetched with the token) |
+| `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only invoke / read |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
@@ -215,7 +316,9 @@ Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) i
 
 - `__tests__/unit/deployments/` — planner, spec/cloud-init, Scaleway adapter (fake client), controller + HTTP on the
   real proxy against in-process fake replicas (cold start, load scale-up, scale to zero, failover, unhealthy
-  replacement, price cap, list failure, replica cap, orphan sweep, restart adoption, pause).
+  replacement, price cap, list failure, replica cap, orphan sweep, restart adoption, pause); placement ranking
+  (`placement-ranking.test.ts`), ordered Scaleway placements (`placements.test.ts`), the RTT gate (fake probe, in `controller-placement.test.ts`), the candidate walk and per-provider list failures (`controller-placement.test.ts`), and the
+  Vast backend + `vastReplicaInit` against a fake fetch (`vast-backend.test.ts`). Nothing here calls Vast or Scaleway.
 - `scripts/deployments-docker-e2e.ts` — the real cloud-init in a local Docker "machine"
   (`docker build -t aigw-machine -f scripts/deployments-machine.Dockerfile scripts/`), whole HTTP path, no cloud bill.
 
@@ -233,6 +336,7 @@ Inside the gateway process, without a cron of its own:
 | Image build machines (`aigw-build`) | the janitor (`src/deployments/janitor.ts`, every 5 min) | older than 3 h |
 | SBS volumes Scaleway created with a server (`…_sbs_volume_N`), detached | the janitor | detached for 1 h |
 
+The janitor covers Scaleway only (a deleted Vast instance takes its disk with it; Vast has no build machines).
 The janitor is on by default on Railway (`DEPLOYMENTS_JANITOR=0` turns it off; `=1` turns it on elsewhere). When the
 gateway itself is down nothing in its process runs: the reaper (`scripts/reap-orphans.ts`, a separate Railway cron
 every 15 min) releases the namespace's replicas after the gateway missed its health checks for ~2 min.
