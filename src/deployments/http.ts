@@ -86,6 +86,8 @@ export interface DeploymentRoutesOptions {
   /** Mutations (PUT/PATCH/DELETE/wake, profiles) require this. Default: every authenticated caller. */
   isAdmin?: (req: IncomingMessage) => boolean;
   fetchImpl?: typeof fetch;
+  /** Status of the declared deployments (`declared.ts`), listed as `declared` by `GET /v1/deployments`. */
+  declaredStatus?: () => unknown;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
@@ -166,7 +168,12 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
 
     if (!name) {
-      if (method === 'GET') return send(res, 200, { namespace: controller.namespace, health: controller.health(), deployments: controller.list() });
+      if (method === 'GET') {
+        return send(res, 200, {
+          namespace: controller.namespace, health: controller.health(), deployments: controller.list(),
+          ...(opts.declaredStatus ? { declared: opts.declaredStatus() } : {}),
+        });
+      }
       return send(res, 405, { error: 'method not allowed' });
     }
     if (action === 'invoke') {

@@ -184,6 +184,12 @@ export class DeploymentController {
     return this.view(name);
   }
 
+  /** The stored spec, secrets included — for in-process callers only (declared reconcile); never sent over HTTP. */
+  specOf(name: string): DeploymentSpec | null {
+    const rt = this.deployments.get(name);
+    return rt ? structuredClone(rt.record.spec) : null;
+  }
+
   private require(name: string): Runtime {
     const rt = this.deployments.get(name);
     if (!rt) throw new DeploymentError(404, `deployment '${name}' not found`);

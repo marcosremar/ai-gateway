@@ -37,6 +37,16 @@ export interface RouteTarget<P> {
   hedgeAfterMs?: number;
   /** Known to be unusable (e.g. OpenRouter key rejected): skipped with this reason, never called. */
   unavailableReason?: string;
+  /**
+   * Checked per request: a reason while the target is temporarily unusable (e.g. refused by the account's data
+   * policy, `account-policy-guard.ts`), null otherwise. Skipped with code `policy`, never called.
+   */
+  unavailableNow?: () => string | null;
+  /**
+   * TTS only: picks this target's voice from the request (voices are provider-specific). Wins over `voice` and over
+   * the request's `fallback_voice`.
+   */
+  voiceFor?: (request: { voice: string; fallbackVoice?: string }) => string;
 }
 
 /** Codes (see `failureCode`) of targets left behind, keyed by the target object (two targets may share a provider). */
@@ -90,6 +100,12 @@ export function selectTargets<P extends Configurable>(
       codes.set(target, 'not_configured');
       continue;
     }
+    const blocked = target.unavailableNow?.() ?? null;
+    if (blocked) {
+      skipped.push(blocked);
+      codes.set(target, 'policy');
+      continue;
+    }
     if (!target.provider.isConfigured()) {
       skipped.push(notConfiguredReason(target.providerId));
       codes.set(target, 'not_configured');
@@ -128,7 +144,7 @@ export function providerHeader(target: Pick<RouteTarget<unknown>, 'providerId' |
 /**
  * Origin headers for a served request: which provider answered and, when it was not the first candidate, why the
  * earlier ones were left (`X-Gateway-Fallback`: cold | 5xx | timeout | unreachable | auth | rate_limited | credit |
- * not_found | not_configured | circuit_open | cooldown | error) and which one that was (`X-Gateway-Fallback-From`).
+ * not_found | not_configured | policy | circuit_open | cooldown | error) and which one that was (`X-Gateway-Fallback-From`).
  */
 export function originHeaders(
   candidates: Array<Pick<RouteTarget<unknown>, 'providerId' | 'model'>>,
@@ -214,11 +230,12 @@ class AttemptError extends Error {
 }
 
 /**
- * Failures that say nothing about the provider's health: a deployment still booting (`cold`), paused, or a request it
- * must not receive (`voice_not_found`, `catalog_unavailable`). They never open the circuit nor start a cooldown, so
+ * Failures that say nothing about the provider's health: a deployment still booting (`cold`), paused, a request it
+ * must not receive (`voice_not_found`, `catalog_unavailable`), or a model the account's data policy refuses (`policy`:
+ * one OpenRouter model refused under ZDR must not open the breaker shared by every OpenRouter model). They never open the circuit nor start a cooldown, so
  * traffic goes back to the deployment as soon as its replica is ready.
  */
-const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable']);
+const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy']);
 
 /** Default total time per stage (deployment + fallbacks), under parle's deadlines (TTS 15 s, chat 12 s). */
 export const DEFAULT_STAGE_BUDGET_MS = 8_000;

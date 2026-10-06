@@ -40,7 +40,7 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 
 | Method | Path | |
 |---|---|---|
-| GET | `/v1/deployments` | all deployments + `health` (last provider error) |
+| GET | `/v1/deployments` | all deployments + `health` (last provider error) + `declared` (see below) |
 | PUT | `/v1/deployments/:name` | create or update (fields merge over the current spec; `profile` re-applies a profile) |
 | PATCH | `/v1/deployments/:name` | update an existing one |
 | GET | `/v1/deployments/:name` | status (`scaled-to-zero` · `warming` · `ready` · `degraded` · `paused`), replicas, `lastError` |
@@ -52,6 +52,45 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 
 Mutations require a key whose user is in `DEPLOYMENTS_ADMIN_USERS` (when set). `env` values and `registryAuth` are
 never returned. Spec fields and defaults: `src/deployments/spec.ts` (`SPEC_DEFAULTS`).
+
+## Declared deployments
+
+Some deployments are declared in the repo and the gateway keeps them registered by itself — nobody has to remember a
+`PUT`. Each `src/deployments/declared/<name>.json` (listed in `DECLARED_DEPLOYMENTS`, `src/deployments/declared.ts`)
+holds the spec **without secrets**; at boot (before the routes are mounted) and every 5 min the gateway builds the
+body, compares it with the stored spec and calls the same idempotent `controller.put` only when something changed
+(new image, rotated credential). Registering never starts a machine: declared specs keep `minReplicas: 0` and the
+reconciler never wakes them — a replica starts on the first request that needs it, as for any deployment.
+
+Secrets are mounted from the environment (the dev API) at each reconcile:
+
+| Declaration field | Source |
+|---|---|
+| `image.env` (`SPEECH_IMAGE`) | a full reference, or just a tag of `image.repository`; unset → `image.default` |
+| `registryAuth.passwordEnv` (`GHCR_READ_TOKEN`) | a GHCR token with `read:packages` (server `ghcr.io`, user `marcosremar`) |
+| `generatedSecrets` (`SPEECH_TOKEN`) | generated once (32 chars `[A-Za-z0-9_-]`), persisted with the spec in the deployment store, reused afterwards; never logged nor returned |
+
+**Pending, never broken:** without the credential or an image the deployment is not registered and its status is
+`pending` with the reason (`GHCR_READ_TOKEN is not set …`) — a replica that cannot pull its private image would be a
+billed machine that never serves. A deployment already registered keeps its stored spec while the credential is
+missing. The status is in `GET /v1/deployments` (`declared`), `GET /health?deep=1` and, per stage, in `GET /health`.
+A key that appears through a key reload registers the deployment at once. `DECLARED_DEPLOYMENTS=0` turns the
+reconciler off. Fields the declaration does not hold (`paused`, …) are left as an operator set them; declared fields
+changed by hand are put back.
+
+### `parle-speech` (one GPU for STT + LLM + TTS)
+
+`src/deployments/declared/parle-speech.json`: the `ghcr.io/marcosremar/parle-speech:<commit sha>` image (Whisper
+large-v3-turbo + Qwen3.5-9B + Qwen3-TTS 0.6B Base; built by the babylon-cinema workflow
+`.github/workflows/speech-image.yml`, commit tags only, no `latest`), port 80, `/health` (answers only when the
+models are loaded), L4-1-24G in fr-par-2, 0..1 replica, 15 min idle, 45 min boot timeout (models download at
+boot; cold start ≈ 8 min), 100 GB volume, 2 h max lifetime. `TRUST_UPSTREAM_AUTH=1`: behind the gateway the host
+nginx forwards only `X-Aigw-Token`, so the image's own nginx sets the Bearer for its servers (babylon-cinema PR #1508).
+The default image is the first build with that change (`9a87056…`); set `SPEECH_IMAGE` to a newer commit tag.
+
+With `parle-speech` registered and no `TTS_DEPLOYMENT`, `parle-tts` goes to it too (one-GPU mode, see
+[docs/api/http.md](api/http.md#aliases-for-the-parle-client)); `parle-qwen-tts` is then unused (pause it with
+`PATCH {"paused": true}` to keep its spec and reference files).
 
 ## Cold start
 
@@ -115,6 +154,10 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |
 | `CORS_ORIGINS` | browser origins allowed to call directly |
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
+| `GHCR_READ_TOKEN` | registry credential of the declared `parle-speech` (GHCR `read:packages`); from the dev API |
+| `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
+| `TTS_DEPLOYMENT` | unset = one-GPU mode (TTS on the speech deployment); set to e.g. `parle-qwen-tts` for a separate TTS machine |
+| `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
 
 Railway itself allows ~11k req/s per domain, 10k concurrent connections and requests up to 15 min while bytes flow
 (5 min with none) — not a constraint for model traffic. Machines are found by tag on Scaleway, so a gateway restart

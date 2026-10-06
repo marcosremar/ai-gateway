@@ -464,9 +464,14 @@ export function createProxyServer(config: ProxyConfig): Server {
     const urlPath = url.split('?')[0];
     const deepHealth = method === 'GET' && urlPath === '/health' && /[?&]deep=(1|true)(&|$)/.test(url);
     if (method === 'GET' && urlPath === '/health' && !deepHealth) {
+      let details: Record<string, unknown> = {};
+      try { details = config.healthDetails?.() ?? {}; } catch (err) {
+        log.error('health details failed', { error: err instanceof Error ? err.message : String(err) });
+      }
       sendResponse(res, { status: 200, body: {
         status: 'ok',
         connections: { active: activeConnections, peak: peakConnections },
+        ...details,
       } }, requestId);
       return;
     }

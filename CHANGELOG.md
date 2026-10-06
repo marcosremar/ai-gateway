@@ -12,6 +12,17 @@ on release via `bunx changeset version`.
 
 ### Added
 
+- **Declared deployments** (`src/deployments/declared/*.json`) — the gateway registers them itself at boot and every
+  5 min through the idempotent `controller.put`; secrets mounted from the environment (`GHCR_READ_TOKEN` →
+  `registryAuth`, `SPEECH_IMAGE`), `SPEECH_TOKEN` generated once and persisted in the store; `pending` with the reason
+  when the credential/image is missing; never starts a machine. First one: `parle-speech` (one L4 for STT+LLM+TTS).
+- **One-GPU mode** — without `TTS_DEPLOYMENT`, `parle-tts` goes to the speech deployment when it exists.
+- **TTS fallback `openrouter:qwen/qwen-audio-3.0-tts-flash`** between the deployment and Kokoro, with stock voices by
+  the gender of the cast voice (Cherry/Ethan; Kokoro pf_dora/pm_alex). A refusal by the account's data policy (ZDR)
+  takes it out of the chain for 30 min (code `policy`, neutral for the shared OpenRouter breaker).
+- **`GET /health` shows the effective chain per stage** and the state of every link (ready, cold, pending, missing,
+  disabled, no_key, blocked, circuit_open) plus warnings — `not_configured` no longer passes unnoticed.
+
 - **Honest providers + cross-provider fallback on `serve.ts`** — only providers with a key are mounted and listed
   in `/v1/models`; each model has an ordered chain across different providers (self-hosted deployment → OpenRouter
   → Groq/others), with circuit breakers; nothing available → `503 provider_unavailable` naming the missing key or

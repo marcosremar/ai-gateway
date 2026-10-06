@@ -19,6 +19,8 @@ export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
 export { FileDeploymentStore, MemoryDeploymentStore } from './store';
+export { DeclaredDeploymentReconciler, DECLARED_DEPLOYMENTS, declaredBody, declaredImage } from './declared';
+export type { DeclaredDeployment, DeclaredStatus } from './declared';
 export type * from './types';
 
 /**
@@ -61,6 +63,8 @@ export function deploymentsFromEnv(
     /** userIds that may always manage (e.g. the SANDBOX_TOKEN user), on top of DEPLOYMENTS_ADMIN_USERS. */
     alwaysAdmin?: string[];
     log?: (msg: string, data?: Record<string, unknown>) => void;
+    /** Declared deployments' status, added to `GET /v1/deployments` as `declared`. */
+    declaredStatus?: () => unknown;
   },
 ): DeploymentsFromEnv | null {
   if (env.DEPLOYMENTS_ENABLED === '0') return null;
@@ -87,6 +91,7 @@ export function deploymentsFromEnv(
   const handler = createDeploymentRoutes({
     controller,
     isAdmin: admins.length ? (req) => [...admins, ...(opts.alwaysAdmin ?? [])].includes(opts.userOf(req) ?? '') : undefined,
+    declaredStatus: opts.declaredStatus,
   });
   return { controller, handler };
 }
