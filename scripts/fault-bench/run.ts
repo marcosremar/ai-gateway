@@ -9,7 +9,7 @@
  */
 
 import { startFakeUpstream, type FakeUpstream, type LoggedRequest } from './fake-upstream';
-import { FAKE_KEYS, startGateway, type RunningGateway } from './gateway';
+import { FAKE_KEYS, fakeKey, startGateway, type RunningGateway } from './gateway';
 
 type Verdict = 'PASS' | 'FAIL' | 'N/A' | 'INFO';
 interface Result { item: string; check: string; verdict: Verdict; evidence: string }
@@ -696,7 +696,7 @@ scenarios['10'] = async (fake) => {
   const { runTargets } = await import('../../src/gateway/proxy/provider-routing');
   const { CircuitBreakerRegistry } = await import('../../src/gateway/providers/cloud/circuit-breaker');
   const { OpenAICompatLLMProvider } = await import('../../src/gateway/providers/cloud/openai-compat/openai-compat-llm');
-  process.env.FAULT_BENCH_KEY = 'sk-fake-hedge-0123456789';
+  process.env.FAULT_BENCH_KEY = fakeKey('hedge');
   const p = new OpenAICompatLLMProvider({ providerId: 'openrouter', baseURL: `${fake.url}/or`, envKey: 'FAULT_BENCH_KEY' });
   fake.setFaults({ 'h-primary': { kind: 'ok', delayMs: 3000, text: 'primary' }, 'h-secondary': { kind: 'ok', delayMs: 1500, text: 'secondary' } });
   const t0 = now();

@@ -24,7 +24,7 @@ const provider = () => new OpenAICompatLLMProvider({ providerId: 'openrouter', b
 const ask = (model: string, extra: Partial<ChatRequest> = {}): ChatRequest => ({ model, messages: [{ role: 'user', content: 'oi' }], ...extra });
 
 beforeAll(async () => {
-  process.env[KEY_ENV] = 'sk-fake-0123456789abcdef';
+  process.env[KEY_ENV] = 'unit-test-provider-key';
   fake = await startFakeUpstream();
 });
 afterAll(async () => { await fake.close(); delete process.env[KEY_ENV]; });

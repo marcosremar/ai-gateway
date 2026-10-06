@@ -5,12 +5,19 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
+/**
+ * Chaves falsas geradas a cada execução: nenhum literal com cara de credencial no repositório (regra
+ * aigw-no-hardcoded-provider-token), e o teste de vazamento (16) procura estes valores exatos nos logs.
+ */
+export const fakeKey = (label: string): string => ['bench', label, randomUUID().replaceAll('-', '')].join('_');
+
 export const FAKE_KEYS = {
-  OPENROUTER_API_KEY: 'sk-or-v1-FAKEKEYopenrouter0123456789abcdef',
-  GROQ_API_KEY: 'gsk_FAKEKEYgroq0123456789abcdefABCDEF',
-  GATEWAY_KEY: 'bench-client-key-0123456789',
+  OPENROUTER_API_KEY: fakeKey('openrouter'),
+  GROQ_API_KEY: fakeKey('groq'),
+  GATEWAY_KEY: fakeKey('client'),
 };
 
 export interface RunningGateway {
