@@ -214,5 +214,5 @@ certificate), the spec adds:
 - **`idleAction: "stop"`:** going idle powers the replica off instead of deleting it. Disk, IP and firewall stay, and
   only disk and IP are billed. The next demand (a request or `wake`) powers it back on, which takes about 2 min instead
   of a full boot, and the certificate on disk survives.
-- **Traffic that bypasses the gateway:** direct client traffic (LiveKit rooms) does not count as a request. The app keeps
+- **Traffic that bypasses the gateway:** direct client traffic (LiveKit rooms) does not count as a request. `POST /v1/deployments/:name/park` says the app is done now (powers off at once under `idleAction: "stop"`). The app keeps
   the deployment in use with `POST /v1/deployments/:name/wake` while it needs it. When the wakes stop, `idleMinutes` parks it.

@@ -7,6 +7,7 @@
  *   GET    /v1/deployments/:name               status + replicas
  *   DELETE /v1/deployments/:name               release every replica and forget the spec
  *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic)
+ *   POST   /v1/deployments/:name/park          done for now: scale to minReplicas at once (power off under idleAction stop)
  *   *      /v1/deployments/:name/invoke/<path> forwarded to a ready replica as /<path> (waits through cold start)
  *   GET    /v1/profiles                        list profiles (built-in + stored)
  *   PUT    /v1/profiles/:name                  create or replace a profile
@@ -243,6 +244,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       return invoke(req, res, name, rest, query, method);
     }
     if (action === 'wake' && method === 'POST') { admin(); return send(res, 202, controller.wake(name)); }
+    if (action === 'park' && method === 'POST') { admin(); return send(res, 202, await controller.park(name)); }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 
     const existing = controller.get(name);

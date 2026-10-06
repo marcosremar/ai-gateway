@@ -213,6 +213,21 @@ export class DeploymentController {
     return this.view(name)!;
   }
 
+  /**
+   * The caller is done with the deployment now (its traffic bypasses the gateway, so the idle clock cannot see it):
+   * forget the last use, and the next tick scales to `minReplicas` — powering off under `idleAction: 'stop'`. A
+   * request or `wake` brings it back; in-flight requests are never cut (the planner keeps busy replicas).
+   */
+  async park(name: string): Promise<DeploymentView> {
+    const rt = this.require(name);
+    rt.record.lastRequestAt = null;
+    rt.lastPersistedRequestAt = null;
+    rt.aboveSince = null;
+    await this.opts.store.saveDeployment(rt.record);
+    this.kick();
+    return this.view(name)!;
+  }
+
   list(): DeploymentView[] {
     return [...this.deployments.keys()].sort().map(n => this.view(n)!);
   }
@@ -388,7 +403,7 @@ export class DeploymentController {
       for (const r of plan.release) {
         const m = mine.find(x => x.id === r.id);
         if (!m) continue;
-        if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.park(m);
+        if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
         else await this.release(m, r.reason);
       }
       if (rt.record.spec.paused) for (const m of parked) await this.release(m, 'paused');
@@ -436,7 +451,7 @@ export class DeploymentController {
   }
 
   /** `idleAction: 'stop'`: power off, keeping disk, IP and firewall (the next demand powers it back on). */
-  private async park(m: ReplicaMachine): Promise<void> {
+  private async parkReplica(m: ReplicaMachine): Promise<void> {
     this.log('deployments: parking replica (power off)', { deployment: m.deployment, id: m.id });
     try {
       await this.opts.backend.stopReplica!(m);

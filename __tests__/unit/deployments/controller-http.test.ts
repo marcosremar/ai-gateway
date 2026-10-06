@@ -237,6 +237,11 @@ describe('deployments API', () => {
     await until(() => h.controller.get('park')!.status === 'ready', 3000);
     expect(h.cloud.starts).toHaveLength(1);
     expect(h.cloud.created).toHaveLength(1);
+
+    // POST /park: the caller is done now (its traffic bypassed the gateway) → powered off at once, no idle wait.
+    expect((await call(h, 'POST', '/v1/deployments/park/park')).status).toBe(202);
+    await until(() => h.cloud.stops.length === 2, 3000);
+    expect(h.cloud.released).toEqual([]);
   });
 
   it('retries on another replica when one dies, and replaces the dead one', async () => {
