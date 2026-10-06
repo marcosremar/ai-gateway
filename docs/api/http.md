@@ -8,6 +8,11 @@ deployed by `railway.json`, default port `4000`). The larger reference server in
 WebSocket (`/ws/stream`) and WebRTC return `410 Gone`. Streaming is supported via SSE on `POST /v1/chat/completions` with `stream: true`. All other client code must use the JSON endpoints below.
 :::
 
+::: tip Client
+Apps call these routes through `GatewayClient` (`@parle/ai-gateway/client`): see [Gateway client](./client.md).
+`GatewayHttpClient` is the legacy client of the old `server/` routes.
+:::
+
 ## Authentication
 
 All endpoints (except `GET /health`) require a Bearer token:
@@ -122,6 +127,41 @@ go Z.AI → OpenRouter `z-ai/<id>`, `whisper-large-v3(-turbo)` goes Groq → Ope
 Deepgram, Orpheus TTS is Groq only. Any other `org/model` id goes to OpenRouter as-is,
 followed by the generic chat fallback; without a usable OpenRouter key it answers `503 provider_unavailable`
 naming the key (not `404`). PlayAI TTS was retired by Groq and is no longer offered.
+
+### Direct-fallback plan — `GET /v1/apps/:app/fallback`
+
+What an app's server-side client needs to call the **same aliases directly** on the cloud providers while the
+gateway itself is unreachable ([client § Direct fallback](./client.md)). Allowed for the app's own key, or
+an admin key with `X-App: <app>`; anything else → `403` (an admin key without `X-App` too). `Cache-Control: no-store`.
+
+```json
+{ "app": "parle", "issuedAt": "2026-10-06T10:00:00.000Z", "ttlSeconds": 3600,
+  "providers": { "openrouter": { "baseUrl": "https://openrouter.ai/api/v1", "apiKey": "sk-or-v1-…", "keyKind": "provisioned",
+                                 "expiresAt": "2026-10-14T10:00:00.000Z", "limitUsd": 5 } },
+  "openrouter": { "…": "same as providers.openrouter, or null" },
+  "routes": { "stt": { "parle-stt": [{ "provider": "openrouter", "model": "openai/whisper-large-v3-turbo" }] },
+              "chat": { "parle-llm": [{ "provider": "openrouter", "model": "qwen/qwen3.5-9b", "extraBody": { "reasoning": { "enabled": false } } }] },
+              "tts": { "parle-tts": [{ "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora", "fixedVoice": true }] } } }
+```
+
+- **Routes**: the app's aliases (`PUT /v1/apps/:app/routes`), keeping per alias only the entries of a provider that
+  comes with a key in `providers` (OpenRouter; Groq when the chain has Groq entries and the gateway has
+  `GROQ_API_KEY`), in chain order, with `voice` / `fixedVoice` / `extraBody`. Deployments and other providers are
+  dropped: the client cannot reach them without the gateway. An entry without `model` calls the alias itself.
+- **Keys**: the gateway keeps the provider keys and hands them out here.
+
+| Env | Default | |
+|---|---|---|
+| `OPENROUTER_PROVISIONING_KEY` | unset | mint a per-app OpenRouter key (`aigw-<app>`) through OpenRouter's provisioning API (`POST /api/v1/keys`, `DELETE /api/v1/keys/:hash`) instead of sharing the gateway's; only its hash is stored in the app account, the key lives in memory (a restart mints a new one) |
+| `APP_FALLBACK_KEY_LIMIT_USD` | `5` | USD limit of a minted key |
+| `APP_FALLBACK_KEY_ROTATE_DAYS` | `7` | a minted key is replaced after this; the old one keeps working one more day, then is deleted (each key also expires on its own at rotation + 1 day) |
+| `APP_FALLBACK_PLAN_TTL_SECONDS` | `3600` | `ttlSeconds` of the plan (shorter when a rotation is closer) |
+| `APP_FALLBACK_SHARE_KEY` | on | `0` = never hand out the gateway's own `OPENROUTER_API_KEY` / `GROQ_API_KEY`; without a minted key the provider is then absent (`openrouter: null`) |
+
+Without provisioning, the gateway's own keys are shared (`keyKind: "shared"`) — the default. A failed provisioning
+falls back to the shared key (when allowed). Keys are never logged and appear in no other response. Security: the
+plan goes only over HTTPS, only to authenticated app keys, and only to **server-side** clients — never to a browser
+bundle; a minted key's limit bounds what a leak can cost. Needs app accounts (deployments enabled).
 
 ### Changing the map — `MODEL_ROUTES`
 

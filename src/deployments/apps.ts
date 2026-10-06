@@ -14,6 +14,7 @@
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { parseModelRoutes, type ModelRoutesSpec } from '../config/serve-providers';
+import type { FallbackKeyStore, ProvisionedKeyRecord } from './app-fallback';
 
 export const APP_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
 export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
@@ -53,6 +54,8 @@ export interface AppAccount {
    * names no app: each app sends its own chains (`PUT /v1/apps/:app/routes`) and they are mounted at once.
    */
   routes?: ModelRoutesSpec;
+  /** The app's provisioned OpenRouter key for the direct fallback (app-fallback.ts): its hash, never the key. */
+  fallbackKey?: ProvisionedKeyRecord;
 }
 
 export class AppError extends Error {
@@ -100,7 +103,7 @@ function str(v: unknown, field: string, max = 300): string | null {
   return v.trim();
 }
 
-export class AppRegistry {
+export class AppRegistry implements FallbackKeyStore {
   private apps: Record<string, AppAccount> = {};
   constructor(private readonly store: AppStore, private readonly now: () => number = Date.now) {}
 
@@ -113,6 +116,13 @@ export class AppRegistry {
   get(app: string): AppAccount | null { return this.apps[app] ?? null; }
 
   image(app: string, name: string): AppImage | null { return this.apps[app]?.images[name] ?? null; }
+
+  fallbackKey(app: string): ProvisionedKeyRecord | null { return this.apps[app]?.fallbackKey ?? null; }
+
+  async setFallbackKey(app: string, record: ProvisionedKeyRecord): Promise<void> {
+    this.account(app).fallbackKey = record;
+    await this.store.save(this.apps);
+  }
 
   private account(app: string): AppAccount {
     if (!APP_ID_RE.test(app)) throw new AppError(400, `app id must match ${APP_ID_RE}`);

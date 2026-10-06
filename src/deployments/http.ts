@@ -12,6 +12,8 @@
  *   GET    /v1/profiles                        list profiles (built-in + stored)
  *   PUT    /v1/profiles/:name                  create or replace a profile
  *   DELETE /v1/profiles/:name                  delete a stored profile
+ *   GET    /v1/apps/:app/fallback              direct-fallback plan with provider keys (app-fallback.ts); the app's
+ *                                              own key, or an admin key with `X-App: <app>`
  *
  * Auth already happened in the proxy (Bearer from GATEWAY_API_KEYS). Mutations additionally need `isAdmin(req)`.
  */
@@ -21,6 +23,7 @@ import { Readable } from 'stream';
 import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
+import type { AppFallbackService } from './app-fallback';
 import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
@@ -94,6 +97,8 @@ export interface DeploymentRoutesOptions {
   fetchImpl?: typeof fetch;
   /** An app replaced its routes (`PUT /v1/apps/:app/routes`): re-mount the providers. */
   onRoutesChange?: () => void;
+  /** Direct-fallback plans (`GET /v1/apps/:app/fallback`). Without it that path answers 404. */
+  fallback?: AppFallbackService;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
@@ -142,6 +147,15 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const routes = await registry.putRoutes(app, await readJson(req));
       opts.onRoutesChange?.();
       return send(res, 200, { app, routes });
+    }
+    if (sub === 'fallback' && !imageName) {
+      if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+      // Stricter than the other app paths: the plan carries provider keys, so it goes to the app's own key, or to an
+      // admin key that names the app (X-App) — never to an admin acting globally.
+      if (appOf(req) !== app) return send(res, 403, { error: `the fallback plan of '${app}' needs its app key (or an admin key with X-App: ${app})` });
+      if (!opts.fallback) return send(res, 404, { error: 'direct fallback is not enabled on this gateway' });
+      const plan = await opts.fallback.plan(app, registry.get(app)?.routes);
+      return send(res, 200, plan, { 'Cache-Control': 'no-store' });
     }
     if (sub !== 'images' || extra) return send(res, 404, { error: `unknown path '/${parts.join('/')}'` });
     if (!imageName) {
