@@ -91,3 +91,25 @@ describe('RateLimiter.clientIp behind a platform proxy', () => {
     expect(RateLimiter.clientId(req({ 'x-forwarded-for': '3.3.3.3' }))).toBe('ip:3.3.3.3');
   });
 });
+
+describe('releaseNetwork', () => {
+  it('a retry after the IP is gone (404) still deletes the firewall', async () => {
+    const deleted: string[] = [];
+    const client = {
+      deleteIp: async () => { throw Object.assign(new Error('scaleway HTTP 404: not found'), { status: 404 }); },
+      deleteSecurityGroup: async (_z: string, id: string) => { deleted.push(id); },
+    };
+    const backend = new ScalewayDeploymentBackend('k', { projectId: 'p', client: client as never });
+    await backend.releaseNetwork({ zone: 'fr-par-1', ipId: 'ip-1', ip: '1.2.3.4', groupId: 'sg-1' });
+    expect(deleted).toEqual(['sg-1']);
+  });
+
+  it('a real failure still throws (the controller retries)', async () => {
+    const client = {
+      deleteIp: async () => { throw Object.assign(new Error('scaleway HTTP 500'), { status: 500 }); },
+      deleteSecurityGroup: async () => {},
+    };
+    const backend = new ScalewayDeploymentBackend('k', { projectId: 'p', client: client as never });
+    await expect(backend.releaseNetwork({ zone: 'fr-par-1', ipId: 'ip-1', ip: '1.2.3.4', groupId: 'sg-1' })).rejects.toThrow(/500/);
+  });
+});
