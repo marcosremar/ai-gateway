@@ -10,7 +10,7 @@
  *     replicas exist — they are found by tag, so a gateway restart never loses track of a billed machine.
  *
  * Backends: Scaleway (`provider: 'scaleway'`, datacenter VMs, any image) and Vast.ai (`provider: 'vast'`, marketplace
- * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placement.ts`).
+ * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
 export type DeploymentProvider = 'scaleway' | 'vast';
@@ -74,6 +74,14 @@ export interface DeploymentSpec {
   /** Scaleway commercial type, e.g. `L4-1-24G` (GPU) or `DEV1-S` (CPU). */
   machineType: string;
   zone: string;
+  /**
+   * Where else a replica may go when `zone`/`machineType` is out of stock, tried in order (each entry overrides the
+   * zone, the type or both). Scaleway GPUs run out per zone and per type (2026-10-06: L4 and L40S in shortage in
+   * fr-par-1, fr-par-2 and pl-waw-2, only L4 "scarce" in pl-waw-2), so one fixed placement leaves the deployment
+   * without a replica while another zone still has one. Every entry still obeys `maxEurPerHour`. An exposed
+   * deployment keeps its zone (its reserved IP lives there): only `machineType` may change.
+   */
+  placements?: Placement[];
   /** Scaleway OS image id; default: GPU OS image for GPU types, Ubuntu for CPU types. */
   osImageId?: string;
   volumeGb?: number;
@@ -116,13 +124,16 @@ export interface DeploymentSpec {
   idleAction?: 'delete' | 'stop';
   /** Placement ladder (≤ 20). Absent: one place only, `zone` + `machineType` + `maxEurPerHour` (on `provider`). */
   candidates?: PlacementCandidate[];
-  /** ISO country the users are in (latency preference); default `DEFAULT_NEAR` (placement.ts). */
+  /** ISO country the users are in (latency preference); default `DEFAULT_NEAR` (placements.ts). */
   near?: string;
   /** Accept a far host/zone (outside the EU/EEA) when nothing nearer exists. Default false. */
   allowFar?: boolean;
 }
 
 export interface ExposedPort { protocol: 'tcp' | 'udp'; port: number }
+
+/** An alternative placement of a replica (see `DeploymentSpec.placements`). */
+export interface Placement { zone?: string; machineType?: string }
 
 /** Reserved IP and firewall of an exposed deployment (`exposure`), kept across replicas. */
 export interface DeploymentNetwork { zone: string; ipId: string; ip: string; groupId: string }

@@ -47,7 +47,7 @@ describe('placement ladder', () => {
     const view = controller.get('tts')!;
     expect(view.replicas).toEqual([expect.objectContaining({ zone: 'nl-ams-1', machineType: 'L4-1-24G' })]);
     // fr-par-2 ranked first (France), failed out of stock, nl-ams-1 took it.
-    expect(view.lastPlacement).toMatch(/^scaleway L4-1-24G@nl-ams-1 \(€0.01\/h\) near FR; skipped: scaleway L4-1-24G@fr-par-2: .*out_of_stock/);
+    expect(view.lastPlacement).toBe('scaleway L4-1-24G@nl-ams-1 (€0.01/h) near FR; skipped: L4-1-24G out of stock in fr-par-2');
     expect(scaleway.created.map(c => c.spec.zone)).toEqual(['nl-ams-1']);
   });
 
@@ -66,7 +66,7 @@ describe('placement ladder', () => {
     });
     await until(() => controller.get('speech')!.status === 'ready');
     const view = controller.get('speech')!;
-    expect(view.lastPlacement).toMatch(/^vast RTX 5090 \(≤ €0.6\/h\) near FR; skipped: scaleway L4-1-24G@fr-par-2: L4-1-24G costs €0.9\/h/);
+    expect(view.lastPlacement).toBe('vast RTX 5090 (≤ €0.6/h) near FR; skipped: L4-1-24G costs €0.9/h in fr-par-2, above maxEurPerHour €0.8');
     expect(vast.created).toHaveLength(1);
     expect(vast.created[0].spec).toMatchObject({ provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.6, gpu: true });
     expect(vast.created[0].cloudInit).toBe(''); // Vast builds its own init from spec + token
@@ -84,6 +84,17 @@ describe('placement ladder', () => {
     await until(() => controller.get('tts')!.lastPlacement !== null);
     expect(controller.get('tts')!.lastPlacement).toMatch(/^failed at scaleway L4-1-24G@fr-par-2: HTTP 401/);
     expect(controller.get('tts')!.lastError).toMatch(/HTTP 401/);
+  });
+
+  it('placements go through the same walk, in the given order, and record lastPlacement too', async () => {
+    const scaleway = new FakeCloud();
+    scaleway.failCreateFor = (spec) => (spec.zone === 'fr-par-2' ? 'scaleway HTTP 412: {"type":"out_of_stock"}' : null);
+    const controller = await make({ scaleway });
+    // pl-waw-2 is listed before fr-par-1 and is tried first: placements are never re-ranked.
+    await controller.put('tts', { image: 'me/app:1', port: 8000, minReplicas: 1, placements: [{ zone: 'pl-waw-2' }, { zone: 'fr-par-1' }] });
+    await until(() => controller.get('tts')!.status === 'ready');
+    expect(controller.get('tts')!.lastPlacement).toBe('scaleway L4-1-24G@pl-waw-2 (€0.01/h); skipped: L4-1-24G out of stock in fr-par-2');
+    expect(scaleway.created.map(c => c.spec.zone)).toEqual(['pl-waw-2']);
   });
 
   it('without candidates nothing changes: one place, catalog price checked, same errors', async () => {

@@ -4,7 +4,7 @@ Register a Docker image once; the gateway rents Scaleway machines for it, scales
 and forwards requests to a ready replica. Other sites only see `https://<gateway>/v1/deployments/<name>/invoke/...`.
 
 Code: `src/deployments/` (pure planner in `planner.ts`, loop in `controller.ts`, HTTP in `http.ts`, boot script in
-`cloud-init.ts`, placement in `placement.ts` / `placement-walk.ts`). Mounted by `serve.ts` when `SCW_SECRET_KEY` and/or
+`cloud-init.ts`, placement in `placements.ts` / `placement-walk.ts`). Mounted by `serve.ts` when `SCW_SECRET_KEY` and/or
 `VAST_API_KEY` is set. Providers: **`scaleway`** (datacenter VMs, any image; the default) and **`vast`** (Vast.ai
 marketplace GPU hosts, boot-script mode only — see [Vast replicas](#vast-replicas)).
 
@@ -142,10 +142,22 @@ Replaced automatically: halted by the provider, not ready after `bootTimeoutMinu
 older than `maxHours`. Safety: price checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS`
 across all deployments, back-off after a failed create (1 → 10 min).
 
-## Placement: `candidates`, `near` (reliable, cheap, close to France)
+## Placement: `placements`, `candidates`, `near` (reliable, cheap, close to France)
 
-Without `candidates` a spec has one place: `provider` + `zone` + `machineType`, refused above `maxEurPerHour` (as
-before). With them, each create walks a **ladder**:
+One walk (`placement-walk.ts`) serves two spec fields; a spec may use **one of them, not both** (400 otherwise; send
+`"placements": []` to drop a profile's placements). Every place first gets the live price check (not sold or over the
+cap → skipped without a create), then the create; an out-of-stock answer (`isOutOfStock`, `placements.ts`: Scaleway's
+`412 {"type":"out_of_stock"}`, shortage, capacity wordings) moves to the next place, any other error (quota, 401, a
+bug) stops the walk and backs off. `lastPlacement` in `GET /v1/deployments/:name` says where it landed and why the
+earlier places were skipped.
+
+- **`placements`** (Scaleway only, ≤ 6 `{ zone?, machineType? }`): the spec's own zone/type first, then each entry
+  **in the given order** (never re-ranked), all at the spec's `maxEurPerHour`. A pinned `osImageId` only applies in
+  its own zone; an exposed deployment may change only `machineType`. The `speech-stack` profile carries some.
+- **`candidates`**: the ranked, multi-provider ladder below, a cap per entry.
+
+Without either, a spec has one place: `provider` + `zone` + `machineType`, refused above `maxEurPerHour` (as before).
+With `candidates`, each create walks a **ranked ladder**:
 
 ```json
 {
@@ -168,12 +180,9 @@ before). With them, each create walks a **ladder**:
   backend itself picks a host near `near`). Inside a tier, cheapest first (catalog price; the cap when unknown);
   ties keep the caller's order. Zones in `shortage` and types the catalog prices above the candidate's cap are
   skipped before trying.
-- **Walk**: each candidate gets the live price check against its own cap, then the create; not sold / over cap /
-  out of stock (`out_of_stock`, `shortage`, HTTP 412, quota/capacity/insufficient, Vast "no offer"/"not available")
-  moves to the next one, first success wins. Any other error (credentials, a bug) stops the walk and backs off as
-  before — no burning through the ladder on a 401.
-- `GET /v1/deployments/:name` shows **`lastPlacement`**: where the last replica landed and why earlier candidates were
-  skipped, e.g. `scaleway L4-1-24G@nl-ams-1 (€0.8/h) near FR; skipped: scaleway L4-1-24G@fr-par-2: … out_of_stock`.
+- **Walk**: as above, each candidate against its own cap; the Vast backend reports "no offer under the cap" and
+  "every offer taken" as `out_of_stock`, so the walk moves on. Example `lastPlacement`:
+  `scaleway L4-1-24G@nl-ams-1 (€0.8/h) near FR; skipped: L4-1-24G out of stock in fr-par-2`.
 
 ## Vast replicas
 
@@ -244,7 +253,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only invoke / read |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
-| `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 20) caps parallel requests per key |
+| `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 150) caps parallel requests per key user, `MAX_CONCURRENT_PER_USER_OVERRIDES` (`user:limit,…`) per user |
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |
 | `CORS_ORIGINS` | browser origins allowed to call directly |
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
@@ -283,7 +292,7 @@ Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) i
 - `__tests__/unit/deployments/` — planner, spec/cloud-init, Scaleway adapter (fake client), controller + HTTP on the
   real proxy against in-process fake replicas (cold start, load scale-up, scale to zero, failover, unhealthy
   replacement, price cap, list failure, replica cap, orphan sweep, restart adoption, pause); placement ranking
-  (`placement.test.ts`), the candidate walk and per-provider list failures (`controller-placement.test.ts`), and the
+  (`placement-ranking.test.ts`), ordered Scaleway placements (`placements.test.ts`), the candidate walk and per-provider list failures (`controller-placement.test.ts`), and the
   Vast backend + `vastReplicaInit` against a fake fetch (`vast-backend.test.ts`). Nothing here calls Vast or Scaleway.
 - `scripts/deployments-docker-e2e.ts` — the real cloud-init in a local Docker "machine"
   (`docker build -t aigw-machine -f scripts/deployments-machine.Dockerfile scripts/`), whole HTTP path, no cloud bill.

@@ -1,6 +1,6 @@
 /**
  * `DeploymentBackend` over the Vast.ai REST API, lean and separate from the GPU-pod client
- * (`gateway/providers/gpu/vast-client.ts`): search offers, rank them (`placement.ts`), rent the first that accepts.
+ * (`gateway/providers/gpu/vast-client.ts`): search offers, rank them (`placements.ts`), rent the first that accepts.
  *
  * Vast runs ONE container per host, so a Vast replica is boot-script mode only: the spec's `image` is the container
  * (a public base image) and `vastReplicaInit` runs as its onstart. The token-gated nginx listens on container :80,
@@ -9,7 +9,7 @@
  */
 
 import { vastReplicaInit } from './cloud-init';
-import { DEFAULT_NEAR, rankOffers, type VastOffer } from './placement';
+import { DEFAULT_NEAR, rankOffers, type VastOffer } from './placements';
 import type { CreateReplicaInput, DeploymentBackend, DeploymentSpec, ReplicaMachine } from './types';
 
 export const VAST_API = 'https://console.vast.ai/api/v0';

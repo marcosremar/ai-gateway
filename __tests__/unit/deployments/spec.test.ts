@@ -176,4 +176,13 @@ describe('candidates, near and provider vast', () => {
     expect(() => buildSpec('x', { image: 'a', port: 8000, candidates: [{ provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 1 }] },
       { profiles })).toThrow(/need bootScript and image/);
   });
+
+  it('placements and candidates are two ways to say "elsewhere": one at a time; placements stay Scaleway only', () => {
+    const ladder = [{ zone: 'fr-par-1', machineType: 'L4-1-24G', maxEurPerHour: 1 }];
+    expect(() => buildSpec('x', { image: 'a', port: 8000, placements: [{ zone: 'pl-waw-2' }], candidates: ladder }, { profiles }))
+      .toThrow(/placements and candidates cannot be combined: pick one/);
+    // A profile's placements are dropped with an explicit empty list.
+    expect(buildSpec('x', { profile: 'speech-stack', placements: [], candidates: ladder }, { profiles }).candidates).toEqual(ladder);
+    expect(() => buildSpec('x', { ...vast, port: 8000, placements: [{ zone: 'pl-waw-2' }] }, { profiles })).toThrow(/Scaleway only/);
+  });
 });

@@ -14,6 +14,14 @@
 
 import OpenAI from 'openai';
 
+/**
+ * The OpenAI SDK retries 408/409/429/5xx and connection errors twice by default, sleeping `retry-after` (≤ 60 s) on a
+ * 429. Under the gateway that multiplied every failure (fault bench 2026-10-06: 17 upstream calls for one request when
+ * every provider answered 503; a 429 `retry-after: 5` held the request on the same provider until the 8 s stage budget
+ * ran out, the next provider never tried). Retries, fallback and hedging belong to `runTargets`: the SDK makes one call.
+ */
+export const GATEWAY_SDK_MAX_RETRIES = 0;
+
 interface CacheEntry {
   client: OpenAI;
   lastAccess: number;
@@ -70,6 +78,7 @@ export function getOrCreateClient(
   const client = new OpenAI({
     apiKey,
     baseURL,
+    maxRetries: GATEWAY_SDK_MAX_RETRIES,
     ...(defaultHeaders && Object.keys(defaultHeaders).length > 0 && { defaultHeaders }),
   });
 

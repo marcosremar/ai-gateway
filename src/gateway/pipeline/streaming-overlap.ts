@@ -10,6 +10,7 @@
 import { createLogger } from '../../logger';
 import { SentenceAggregator } from '../../llm-context/sentence-aggregator';
 import { PatternPairAggregator } from '../../llm-context/pattern-pair-aggregator';
+import { isStreamMarker } from '../providers/cloud/openai-compat/stream-markers';
 
 const log = createLogger('streaming-overlap');
 
@@ -141,6 +142,7 @@ export class StreamingOverlap {
     };
 
     for await (const token of llmStream) {
+      if (isStreamMarker(token)) continue;
       fullTextParts.push(token);
 
       for await (const aggregation of aggregator.aggregate(token)) {

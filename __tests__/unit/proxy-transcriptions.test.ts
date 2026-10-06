@@ -36,10 +36,11 @@ describe('handleAudioTranscriptions', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 when audio exceeds 25MB', async () => {
+  it('returns 413 when audio exceeds 25MB', async () => {
     const bigAudio = Buffer.alloc(25 * 1024 * 1024 + 1);
     const res = await handleAudioTranscriptions(makeReq({ model: 'test-model' }, bigAudio), providers);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(413);
+    expect((res.body as { error: { type: string } }).error.type).toBe('request_too_large');
   });
 
   it('returns 400 for invalid response_format', async () => {

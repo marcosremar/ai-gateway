@@ -28,6 +28,7 @@
  */
 
 import type { LLMProvider, ChatMessage } from '../providers/types';
+import { isStreamMarker } from '../gateway/providers/cloud/openai-compat/stream-markers';
 
 export interface StreamingOverlapOptions {
   /** Minimum tokens from STT before starting LLM. Default: 10. */
@@ -118,8 +119,8 @@ export async function runStreamingOverlap(
         messages,
         maxTokens: opts.maxTokens ?? 256,
       })) {
-        // Filter out the __usage__ sentinel from our modified chatStream
-        if (token.startsWith('__usage__:')) continue;
+        // Skip the in-band markers (`__usage__:`, `__finish__:`) of chatStream
+        if (isStreamMarker(token)) continue;
         result += token;
       }
       return result;

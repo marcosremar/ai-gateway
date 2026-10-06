@@ -16,7 +16,7 @@ import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
 import {
-  errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
+  errorResponse, isNeutralFailure, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
 } from '../provider-routing';
 
 const sttCooldownTracker = new CooldownTracker();
@@ -86,7 +86,8 @@ export async function handleAudioTranscriptions(
     return { status: 400, body: { error: { message: 'audio data is required', type: 'invalid_request_error' } } };
   }
   if (req.rawBody.length > 25 * 1024 * 1024) {
-    return { status: 400, body: { error: { message: 'audio file exceeds 25MB limit', type: 'invalid_request_error' } } };
+    // 413 like the body-size guard of the server (chunked uploads): one status for "too big" whatever the path.
+    return { status: 413, body: { error: { message: 'audio file exceeds 25MB limit', type: 'request_too_large' } } };
   }
   const validResponseFormats = ['json', 'text', 'srt', 'verbose_json', 'vtt'];
   if (body.response_format !== undefined && (typeof body.response_format !== 'string' || !validResponseFormats.includes(body.response_format))) {
@@ -132,11 +133,17 @@ export async function handleAudioTranscriptions(
         prompt: body.prompt as string | undefined,
         responseFormat: (body.response_format as string) as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt' | undefined,
       }),
-      { stage: 'stt', timeoutMs: 15_000, budgetMs: stageBudgetMs('stt'), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
+      { stage: 'stt', signal: req.signal, timeoutMs: 15_000, budgetMs: stageBudgetMs('stt'), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
-    // Cache the result for future identical requests
-    sttCacheSet(cacheKey, result.text);
+    // Never cache an empty text (silence, or a provider that answered 200 with nothing): it would be served for 5 min
+    // to every retry of the same audio, even after the provider recovered (fault bench 2026-10-06, item 23).
+    // Nor an answer a fallback served because the primary FAILED (5xx, timeout…): the client's retry of the same audio
+    // must reach the primary again once it is back, not get the fallback model's text for 5 min (fault bench
+    // 2026-10-06, item 23). A primary that was only booting (`cold`) or is not configured did not fail: cached.
+    const fallbackCode = headers['X-Gateway-Fallback'];
+    const servedAfterFailure = !!fallbackCode && fallbackCode !== 'not_configured' && !isNeutralFailure(fallbackCode);
+    if (result.text?.trim() && !servedAfterFailure) sttCacheSet(cacheKey, result.text);
 
     return {
       status: 200,

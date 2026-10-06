@@ -1,15 +1,51 @@
 /**
- * Placement: where a replica should run. Pure ranking, no I/O — the Vast backend ranks market offers with
- * `rankOffers`, and the controller orders a spec's `candidates` with `rankCandidates`.
+ * Placement: where a replica may run. Two spec fields, one walk (`placement-walk.ts`):
  *
- * The owner's three goals, in this order of tie-breaking: reliable, cheap, low latency for users in France.
- * Geography decides the tier (latency is physics: a host in Paris answers in ~5 ms, one in Virginia in ~80 ms);
- * inside a tier, the cheapest *effective* price wins, where an unreliable host is priced as if it cost more.
+ *   - `placements` (Scaleway): the spec's own zone/type first, then each entry IN ORDER (`placementsOf`), at the spec's
+ *     `maxEurPerHour`; the walk moves on only when the type is not sold, over the cap, or out of stock (`isOutOfStock`).
+ *   - `candidates` (Scaleway and Vast): a ladder ranked here (`rankCandidates`), each entry with its own cap.
+ *
+ * The ranking is pure, no I/O — the Vast backend ranks market offers with `rankOffers`. The owner's three goals:
+ * reliable, cheap, low latency for users in France. Geography decides the tier (latency is physics: a host in Paris
+ * answers in ~5 ms, one in Virginia in ~80 ms); inside a tier, the cheapest *effective* price wins, where an
+ * unreliable host is priced as if it cost more.
  */
-
-import type { CatalogEntry, DeploymentProvider, PlacementCandidate } from './types';
+import type { CatalogEntry, DeploymentProvider, DeploymentSpec, PlacementCandidate } from './types';
 
 export type { CatalogEntry };
+
+// ── `placements`: ordered Scaleway alternatives ─────────────────────────────
+
+/** The spec once per placement, primary first, duplicates dropped. */
+export function placementsOf(spec: DeploymentSpec): DeploymentSpec[] {
+  const seen = new Set<string>();
+  const out: DeploymentSpec[] = [];
+  for (const p of [{}, ...(spec.placements ?? [])]) {
+    const zone = p.zone ?? spec.zone;
+    const machineType = p.machineType ?? spec.machineType;
+    const key = `${zone}/${machineType}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // Scaleway image ids are per zone: a pinned image only holds in its own zone (elsewhere the backend looks up the
+    // same image there).
+    const { osImageId, ...rest } = spec;
+    out.push({ ...rest, ...(zone === spec.zone && osImageId ? { osImageId } : {}), zone, machineType });
+  }
+  return out;
+}
+
+/**
+ * The provider has no machine of this type in this zone right now. Scaleway answers a server create with
+ * `412 {"type":"out_of_stock"}` (seen 2026-10-06 for L40S and L4 in fr-par-2); quota and capacity wordings count too.
+ */
+export function isOutOfStock(err: unknown): boolean {
+  const e = err as { status?: unknown; body?: unknown; message?: unknown } | null;
+  const text = `${typeof e?.message === 'string' ? e.message : ''} ${typeof e?.body === 'string' ? e.body : ''}`;
+  if (/out_of_stock|out of stock|shortage|insufficient capacity|no (?:more )?capacity|not enough (?:stock|capacity)/i.test(text)) return true;
+  return e?.status === 412 && /stock|capacity|available/i.test(text);
+}
+
+// ── Geography and ranking (`candidates`, Vast offers) ───────────────────────
 
 /** The owner's region: users (students, teachers) are in France. Used when a spec sets no `near`. */
 export const DEFAULT_NEAR = 'FR';
@@ -142,15 +178,4 @@ export function rankCandidates(
   const order = ranked.map((c, i) => ({ c, i }));
   order.sort((a, b) => a.c.tier - b.c.tier || a.c.rankPrice - b.c.rankPrice || a.i - b.i);
   return { ranked: order.map(x => x.c), skipped };
-}
-
-/**
- * A create error that means "this place has no machine for us now" (try the next candidate), not a bug or a
- * credential problem (stop and back off): sold out, quota, capacity, HTTP 412 (Scaleway's precondition failure on
- * an exhausted zone), and the backend's own "no offer" errors.
- */
-export function isPlacementMiss(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  const status = (err as { status?: number } | null)?.status;
-  return status === 412 || /out[_ ]of[_ ]stock|shortage|\b412\b|quota|capacity|insufficient|not sold|no (vast )?offer|not available|already rented/i.test(msg);
 }

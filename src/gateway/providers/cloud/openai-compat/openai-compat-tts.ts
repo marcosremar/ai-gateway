@@ -6,7 +6,7 @@
 
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, TTSAudioFormat, TTSProvider, TTSRequest, TTSResponse, VoiceInfo } from '../types';
-import { getOrCreateClient } from './client-cache';
+import { GATEWAY_SDK_MAX_RETRIES, getOrCreateClient } from './client-cache';
 
 const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   mp3: 'audio/mpeg',
@@ -70,7 +70,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
   withApiKey(apiKey: string): OpenAICompatTTSProvider {
     const provider = new OpenAICompatTTSProvider(this.config);
     provider.pinnedClient = true;
-    provider.client = new OpenAI({ apiKey, baseURL: this.config.baseURL });
+    provider.client = new OpenAI({ apiKey, baseURL: this.config.baseURL, maxRetries: GATEWAY_SDK_MAX_RETRIES });
     return provider;
   }
 

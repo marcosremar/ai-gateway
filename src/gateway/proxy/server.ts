@@ -36,19 +36,32 @@ class BodyTimeoutError extends Error {
   }
 }
 
+/** Body larger than the limit with no (or a lying) Content-Length, e.g. a chunked upload. Answered 413. */
+class BodyTooLargeError extends Error {
+  constructor(maxSize: number) {
+    super(`Payload too large: body exceeds ${Math.round(maxSize / 1024 / 1024)}MB limit`);
+    this.name = 'BodyTooLargeError';
+  }
+}
+
 function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer> {
   const inner = new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalSize = 0;
-    req.on('data', (chunk: Buffer) => {
+    const onData = (chunk: Buffer) => {
       totalSize += chunk.length;
       if (totalSize > maxSize) {
-        req.destroy();
-        reject(new Error(`Request body too large (limit: ${Math.round(maxSize / 1024 / 1024)}MB)`));
+        // Stop keeping it, but do not destroy the socket yet: the client must still read the 413 (destroying here
+        // reset the connection mid-upload, fault bench 2026-10-06 item 21). The caller closes it once answered.
+        chunks.length = 0;
+        req.off('data', onData);
+        req.resume();
+        reject(new BodyTooLargeError(maxSize));
         return;
       }
       chunks.push(chunk);
-    });
+    };
+    req.on('data', onData);
     req.on('end', () => resolve(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks)));
     req.on('error', reject);
   });
@@ -236,7 +249,7 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
     // Enforce total upload size across all parts
     totalBytes += partData.length;
     if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-      throw new Error(`Total upload size exceeds limit (${MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)}MB)`);
+      throw new BodyTooLargeError(MAX_TOTAL_UPLOAD_BYTES);
     }
 
     parts.push({
@@ -395,7 +408,31 @@ let peakConnections = 0;
 
 /** Per-user concurrency limiter -- prevents a single user from monopolizing connections. */
 const userConcurrency = new Map<string, number>();
-const MAX_CONCURRENT_PER_USER = parseInt(process.env.MAX_CONCURRENT_PER_USER || '20', 10);
+const RESERVED_FIELD_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+/**
+ * Requests in flight per API key user. One key usually serves a whole application (parle: every student of a school
+ * on the same key), so the old default of 20 turned a class of 25 speaking at once into 429s (prod stress 2026-10-06:
+ * 21/50 served at 50 concurrent, the rest "Too many concurrent requests (limit: 20)"). The limit guards the gateway
+ * against one runaway caller, not against an app's normal load; upstream capacity is governed by the providers.
+ */
+export const DEFAULT_MAX_CONCURRENT_PER_USER = 150;
+
+/**
+ * Per-user limits: `MAX_CONCURRENT_PER_USER` (default for every user) and `MAX_CONCURRENT_PER_USER_OVERRIDES`
+ * (`user:limit,user:limit`, the user names of `API_KEYS="key:user"`). Bad entries are ignored.
+ */
+export function concurrencyLimits(env: Record<string, string | undefined> = process.env): { fallback: number; perUser: Map<string, number> } {
+  const n = parseInt(env.MAX_CONCURRENT_PER_USER ?? '', 10);
+  const fallback = Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_CONCURRENT_PER_USER;
+  const perUser = new Map<string, number>();
+  for (const item of (env.MAX_CONCURRENT_PER_USER_OVERRIDES ?? '').split(',')) {
+    const at = item.lastIndexOf(':');
+    if (at <= 0) continue;
+    const limit = parseInt(item.slice(at + 1), 10);
+    if (Number.isFinite(limit) && limit > 0) perUser.set(item.slice(0, at).trim(), limit);
+  }
+  return { fallback, perUser };
+}
 
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
@@ -403,6 +440,7 @@ export function createProxyServer(config: ProxyConfig): Server {
   // Supports both legacy format ("key1,key2") and new format ("key1:user1,key2:user2").
   const keyRegistry = new ApiKeyRegistry(apiKeys.join(','));
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
+  const concurrency = concurrencyLimits();
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const method = req.method?.toUpperCase() || 'GET';
@@ -523,8 +561,9 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Per-user concurrent request limit (a gateway sub-request of a turn already counted is not counted again)
     if (userId !== 'anonymous' && !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress)) {
       const currentConcurrent = userConcurrency.get(userId) || 0;
-      if (currentConcurrent >= MAX_CONCURRENT_PER_USER) {
-        sendError(res, 429, `Too many concurrent requests (limit: ${MAX_CONCURRENT_PER_USER})`, requestId);
+      const userLimit = concurrency.perUser.get(userId) ?? concurrency.fallback;
+      if (currentConcurrent >= userLimit) {
+        sendError(res, 429, `Too many concurrent requests (limit: ${userLimit})`, requestId);
         return;
       }
       userConcurrency.set(userId, currentConcurrent + 1);
@@ -679,17 +718,20 @@ export function createProxyServer(config: ProxyConfig): Server {
               return;
             }
             const parts = parseMultipart(rawBody, boundary);
-            const fields: Record<string, string> = {};
+            // Field names come from the client: a map without prototype, and no reserved names (CodeQL
+            // js/remote-property-injection; `__proto__` would otherwise rewrite the object's prototype).
+            const named = new Map<string, string>();
             let hasFile = false;
             for (const part of parts) {
               if (part.filename) {
                 // File part — use its content as rawBody for the route handler
                 rawBody = part.data;
                 hasFile = true;
-              } else if (part.name) {
-                fields[part.name] = part.data.toString();
+              } else if (part.name && !RESERVED_FIELD_NAMES.has(part.name)) {
+                named.set(part.name, part.data.toString());
               }
             }
+            const fields: Record<string, string> = Object.assign(Object.create(null), Object.fromEntries(named));
             // If no file part found, clear rawBody so downstream handlers
             // see length=0 and return 400 "audio data is required" instead
             // of trying to transcribe multipart boundary markers → 500.
@@ -699,12 +741,17 @@ export function createProxyServer(config: ProxyConfig): Server {
         }
       }
 
+      // The client leaving (tab closed, timeout, RST) aborts the upstream calls of this request: without it a
+      // non-streamed chat / STT / TTS kept running (and billing) to the end (fault bench 2026-10-06, item 18).
+      const clientGone = new AbortController();
+      res.on('close', () => { if (!res.writableFinished) clientGone.abort(); });
       const proxyReq: ProxyRequest = {
         method,
         url,
         headers: req.headers as Record<string, string>,
         body,
         rawBody,
+        signal: clientGone.signal,
       };
 
       let proxyRes: ProxyResponse;
@@ -761,6 +808,12 @@ export function createProxyServer(config: ProxyConfig): Server {
     } catch (err) {
       if (err instanceof BodyTimeoutError) {
         sendError(res, 408, 'Request Timeout', requestId);
+        return;
+      }
+      if (err instanceof BodyTooLargeError) {
+        res.setHeader('Connection', 'close');
+        res.on('finish', () => req.destroy());
+        sendError(res, 413, err.message, requestId);
         return;
       }
       log.error({ err, requestId }, 'Internal error in proxy handler');

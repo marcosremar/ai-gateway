@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  countryOf, effectivePrice, geoTier, isPlacementMiss, rankCandidates, rankOffers, zoneCountry, type VastOffer,
-} from '../../../src/deployments/placement';
+  countryOf, effectivePrice, geoTier, isOutOfStock, rankCandidates, rankOffers, zoneCountry, type VastOffer,
+} from '../../../src/deployments/placements';
 import type { CatalogEntry } from '../../../src/deployments/types';
 
 const offer = (id: number, geolocation: string, dph: number, rel = 0.99, down = 1000, machine_id = id * 10): VastOffer =>
@@ -100,13 +100,11 @@ describe('rankCandidates', () => {
   });
 });
 
-describe('isPlacementMiss', () => {
-  it.each(['out_of_stock', 'Out of stock', 'zone in shortage', 'HTTP 412 precondition failed', 'quota exceeded',
-    'insufficient capacity', 'L4 is not sold in nl-ams-3', 'no vast offer for RTX 5090'])('%s → next candidate', (msg) => {
-    expect(isPlacementMiss(new Error(msg))).toBe(true);
-  });
-  it('a credential error stops the walk', () => {
-    expect(isPlacementMiss(new Error('HTTP 401 unauthorized'))).toBe(false);
-    expect(isPlacementMiss(Object.assign(new Error('precondition'), { status: 412 }))).toBe(true);
+describe('one out-of-stock detector for both walks', () => {
+  it("the Vast backend's no-offer errors read as out of stock (next candidate); quota and credentials do not", () => {
+    expect(isOutOfStock(new Error('out_of_stock: no vast offer for RTX 5090 under €0.5/h near FR'))).toBe(true);
+    expect(isOutOfStock(new Error('out_of_stock: every vast offer tried was taken (offer 2: not available)'))).toBe(true);
+    expect(isOutOfStock(new Error('vast PUT /asks/2/: HTTP 401 unauthorized'))).toBe(false);
+    expect(isOutOfStock(Object.assign(new Error('scaleway HTTP 403: quota'), { status: 403 }))).toBe(false);
   });
 });

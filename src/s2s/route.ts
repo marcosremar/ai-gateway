@@ -151,7 +151,10 @@ export function createS2SRoute(opts: S2SRouteOptions) {
     const sink = new Sink(res, format);
     const budget = new AbortController();
     const budgetTimer = setTimeout(() => budget.abort(new Error(`s2s budget of ${budgetMs} ms exceeded`)), budgetMs);
-    req.on('close', () => { if (!res.writableEnded) budget.abort(new Error('client went away')); });
+    // `res` close, not `req` close: the request side closes as soon as its body has been read (Node, Bun ≥ 1.4), so
+    // the old listener, attached after the body, never fired and a client that left kept the whole turn running
+    // (fault bench 2026-10-06, item 18).
+    res.on('close', () => { if (!res.writableFinished) budget.abort(new Error('client went away')); });
     const elapsed = () => Math.round(performance.now() - t0);
     const outcome: Record<string, unknown> = {};
 

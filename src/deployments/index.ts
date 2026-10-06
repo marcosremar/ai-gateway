@@ -26,7 +26,7 @@ export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
 export { VastDeploymentBackend } from './vast-backend';
-export { rankOffers, rankCandidates, DEFAULT_NEAR } from './placement';
+export { rankOffers, rankCandidates, DEFAULT_NEAR } from './placements';
 export { FileDeploymentStore, MemoryDeploymentStore } from './store';
 export { DeclaredDeploymentReconciler, DECLARED_DEPLOYMENTS, declaredBody, declaredImage } from './declared';
 export type { DeclaredDeployment, DeclaredStatus } from './declared';

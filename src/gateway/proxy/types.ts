@@ -205,6 +205,8 @@ export interface ProxyRequest {
   body: unknown;
   /** Raw request body buffer */
   rawBody: Buffer;
+  /** Aborted when the client goes away before the response is finished: routes pass it to the upstream calls. */
+  signal?: AbortSignal;
 }
 
 /**

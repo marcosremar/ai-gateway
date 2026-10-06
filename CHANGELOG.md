@@ -19,7 +19,9 @@ on release via `bunx changeset version`.
   deployments that touch it), and the reaper covers every provider. New spec fields: `candidates` (≤ 20
   `{provider?, zone?, machineType, maxEurPerHour}`, ranked near the users then cheapest, each tried with its own
   cap, out-of-stock/over-cap/not-sold skipped; `lastPlacement` in the view says where it landed and why), `near`
-  (default `FR`) and `allowFar`. Pure ranking in `src/deployments/placement.ts` (`rankOffers`, `rankCandidates`).
+  (default `FR`) and `allowFar`. `placements` (ordered Scaleway alternatives) and `candidates` share one walk
+  (`placement-walk.ts`) and one stock detector (`isOutOfStock`); a spec uses one or the other. Ranking lives with
+  `placementsOf` in `src/deployments/placements.ts` (`rankOffers`, `rankCandidates`).
 
 - **Declared deployments** (`src/deployments/declared/*.json`) — the gateway registers them itself at boot and every
   5 min through the idempotent `controller.put`; secrets mounted from the environment (`GHCR_READ_TOKEN` →

@@ -55,6 +55,8 @@ export const BUILTIN_PROFILES: Profile[] = [
       healthPath: '/health',
       machineType: 'L4-1-24G',
       zone: 'fr-par-2',
+      // Out of stock there: an L40S in the same zone, then an L4 in Warsaw (the zones with GPU stock on 2026-10-06).
+      placements: [{ machineType: 'L40S-1-48G' }, { zone: 'pl-waw-2' }, { zone: 'fr-par-1' }],
       gpu: true,
       // ~57 GB image: the boot disk must hold it plus the Docker layers.
       volumeGb: 80,
