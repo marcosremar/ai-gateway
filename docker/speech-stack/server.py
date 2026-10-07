@@ -449,8 +449,6 @@ async def audio_stream(ws: WebSocket, language: str = "", chunk_size: float = 1.
     finally:
         closed = True
         decoder.cancel()
-        for msg in await asyncio.to_thread(session.finish):
-            await send(msg)
 
 
 async def proxy(request: Request, url: str):

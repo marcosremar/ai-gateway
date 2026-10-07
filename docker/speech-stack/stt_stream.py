@@ -11,7 +11,7 @@ stretch of speech never queues a 30 s decode behind real-time audio.
     session = SttStream(batcher, "pt")
     session.push(pcm_bytes)            # on every binary frame
     for msg in session.tick(): send(msg)   # from a periodic task
-    for msg in session.finish(): send(msg) # when the client disconnects
+    for msg in session.finish(): send(msg) # on a flush frame
 """
 
 import numpy as np
@@ -56,8 +56,8 @@ class SttStream:
         self.audio = self.audio[-keep_samples:] if keep_samples else np.zeros(0, dtype=np.float32)
         self.undecoded = min(self.undecoded, keep_samples)
 
-    def _decode_text(self) -> str:
-        heard = self.batcher.transcribe(self.audio, self.language)
+    def _decode_text(self, partial: bool = False) -> str:
+        heard = self.batcher.transcribe(self.audio, self.language, partial=partial)
         return (heard.get("text") or "").strip()
 
     def tick(self) -> list[dict]:
@@ -65,7 +65,7 @@ class SttStream:
         if self.undecoded < self.chunk_samples or not len(self.audio):
             return []
         try:
-            heard_text = self._decode_text()
+            heard_text = self._decode_text(partial=True)
         except Exception as error:  # noqa: BLE001 — one bad decode must not kill the stream
             self.undecoded = 0
             return [{"error": repr(error)[:200]}]
