@@ -1,8 +1,3 @@
-/**
- * Session start with WebRTC and WS raced (sdk/browser/realtime/session.ts): the session is usable on whichever is up
- * first, moves to WebRTC between turns, and never has two transports carrying the microphone or the audio. Fake
- * transports whose `connect` the test settles; then the real WebRTC and WS transports with fake browser APIs.
- */
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_TIMEOUTS, createRealtimeSession, createWebRtcTransport, createWsTransport, type PcmPlayer, type RealtimeEvent, type RealtimeSessionOptions,
