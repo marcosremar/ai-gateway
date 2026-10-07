@@ -122,6 +122,13 @@ export interface DeploymentSpec {
    */
   exposure?: { ports: ExposedPort[] };
   /**
+   * Realtime voice on this replica (docs/realtime-edge.md): the generic `aigw-edge` sidecar runs next to the model
+   * container (`docker run --network host`, same on any GPU and any model image), terminates WebRTC (UDP `udpPorts`)
+   * and the gateway-relayed WebSocket behind the token-gated nginx (`/__aigw/rt/*`), and calls the model over
+   * 127.0.0.1. Scaleway only for now (Vast runs one container per host: no sidecar).
+   */
+  realtime?: RealtimeSpec;
+  /**
    * What going idle does: `delete` (default) removes the machine; `stop` powers it off and keeps its disk, IP and
    * firewall (billed for disk and IP only), and the next demand powers it back on (~2 min instead of a full boot).
    */
@@ -146,7 +153,18 @@ export interface DeploymentSpec {
   minCuda?: number;
 }
 
-export interface ExposedPort { protocol: 'tcp' | 'udp'; port: number }
+/** One exposed port, or the range `port`..`to` (e.g. a TURN relay range). */
+export interface ExposedPort { protocol: 'tcp' | 'udp'; port: number; to?: number }
+
+/** `DeploymentSpec.realtime`: the edge sidecar's knobs. */
+export interface RealtimeSpec {
+  /** Concurrent realtime sessions per replica (`RT_MAX_SESSIONS`). Default: the machine type's `RT_MAX_SESSIONS` env, else 8. */
+  maxSessions?: number;
+  /** Edge image; default `DEFAULT_EDGE_IMAGE` (cloud-init.ts). */
+  edgeImage?: string;
+  /** UDP range for WebRTC media, opened in the replica's firewall. Default `DEFAULT_RT_UDP_PORTS`. */
+  udpPorts?: [number, number];
+}
 
 /** An alternative placement of a replica (see `DeploymentSpec.placements`). */
 export interface Placement { zone?: string; machineType?: string }
