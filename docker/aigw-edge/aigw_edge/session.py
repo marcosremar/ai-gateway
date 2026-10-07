@@ -37,6 +37,10 @@ def resample_pcm16(pcm: bytes, src: int, dst: int) -> bytes:
     return np.clip(y, -32768, 32767).astype(np.int16).tobytes()
 
 
+def ms_between(start: float | None, end: float) -> int | None:
+    return round((end - start) * 1000) if start else None
+
+
 def ttfa_from_speech(metrics: dict) -> int | None:
     if metrics["endpoint_ms"] is None or metrics["ttfa_ms"] is None:
         return None
@@ -87,6 +91,9 @@ class Session:
         self.turn_buf = bytearray()
         self.turn_start: int | None = None  # byte offset in turn_buf where speech began (server VAD)
         self.last_speech_at: float | None = None
+        speculate_frames = settings.speculate_ms // 20
+        self.speculate_frames = speculate_frames if speculate_frames < self.vad.silence_frames else 0
+        self.confirmed: asyncio.Future | None = None
         self.pending = np.zeros(0, dtype=np.float32)
         self.turn_task: asyncio.Task | None = None
         self.partials = None
@@ -116,6 +123,9 @@ class Session:
             change = self.vad.push(frame)
             if self.vad.speaking and not self.vad.quiet_run:
                 self.last_speech_at = time.monotonic()
+                self._discard_speculation()
+            elif self.vad.speaking and self.vad.quiet_run == self.speculate_frames:
+                self._speculate()
             self._on_vad(change)
         max_bytes = self.s.max_turn_seconds * 16000 * 2
         if self.turn_start is not None and len(self.turn_buf) - self.turn_start >= max_bytes:
@@ -153,6 +163,7 @@ class Session:
         elif kind == "end_turn":
             self.end_turn(reason="client")
         elif kind == "config_update":
+            self._discard_speculation()
             if isinstance(msg.get("messages"), list):
                 # Appended to the history (docs/realtime.md): the SDK replays a broken session's turns into the new one.
                 self.messages += [m for m in msg["messages"] if isinstance(m, dict) and "role" in m and "content" in m]
@@ -165,7 +176,7 @@ class Session:
             self.emit({"type": "error", "code": "bad_message", "message": f"unknown type {kind!r}"})
 
     def interrupt(self) -> None:
-        if self.busy:
+        if self.busy and self.confirmed is None:
             self.turn_task.cancel()
             self.out.clear()
             self.emit({"type": "interrupted"})
@@ -177,6 +188,10 @@ class Session:
         self.turn_buf.clear()
         self.turn_start = None
         self._partials_close()
+        if self.confirmed is not None:
+            self.confirmed.set_result(time.monotonic())
+            self.confirmed = None
+            return
         if self.busy:
             if reason == "client":
                 self.interrupt()  # a new client turn supersedes the old one
@@ -186,9 +201,26 @@ class Session:
             if reason == "client":
                 self.emit({"type": "done", "empty": True})
             return
+        self._start_turn(audio)
+
+    def _start_turn(self, audio: bytes, confirmed: asyncio.Future | None = None) -> None:
         self.turns += 1
         self.turn_id = f"{self.sid}:{self.turns}"
-        self.turn_task = asyncio.create_task(self._turn(audio, time.monotonic(), self.turn_id, self.last_speech_at))
+        self.turn_task = asyncio.create_task(self._turn(audio, time.monotonic(), self.turn_id, self.last_speech_at, confirmed))
+
+    def _speculate(self) -> None:
+        if not self.server_vad or self.turn_start is None or self.busy or self.s.upstream_mode == "s2s":
+            return
+        self.confirmed = asyncio.get_running_loop().create_future()
+        self._start_turn(bytes(self.turn_buf[self.turn_start:]), self.confirmed)
+
+    def _discard_speculation(self) -> None:
+        if self.confirmed is None:
+            return
+        self.confirmed = None
+        self.turn_task.cancel()
+        self.turn_task = None
+        self.turns -= 1
 
     # ── partial transcripts (the replica's /ws/audio-stream, best effort) ─────
 
@@ -233,11 +265,13 @@ class Session:
 
     # ── one turn ─────────────────────────────────────────────────────────────
 
-    async def _turn(self, audio: bytes, ended: float, turn_id: str, last_speech_at: float | None = None) -> None:
+    async def _turn(self, audio: bytes, ended: float, turn_id: str, last_speech_at: float | None = None,
+                    confirmed: asyncio.Future | None = None) -> None:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
         metrics: dict = {"ttfa_ms": None, "stt_ms": None, "llm_ttft_ms": None, "tts_ttfb_ms": None,
-                         "endpoint_ms": round((ended - last_speech_at) * 1000) if last_speech_at else None}
+                         "endpoint_ms": ms_between(last_speech_at, ended)}
         user_text, spoken = None, []
+        thinking = deltas = None
         self.outcome = "ok"
         tel = lambda event, **kw: self.tel(event, turn_id=turn_id, **kw)  # noqa: E731
         try:
@@ -245,18 +279,24 @@ class Session:
                 user_text = await self._turn_s2s(audio, ended, metrics, spoken, tel)
                 return
             t = time.monotonic()
-            heard = await asyncio.wait_for(self.up.transcribe(audio, self.lang, self.cfg.get("stt_prompt"), self.trace_id), 60)
+            heard = await asyncio.wait_for(self._transcribe(audio, confirmed), 60)
             metrics["stt_ms"] = ms(t)
             text = (heard.get("text") or "").strip()
+            if confirmed is not None:
+                kept, codes = self._verdict(text, heard)
+                if kept and not codes:
+                    thinking, deltas = self._llm_ahead(text, metrics, tel)
+                ended = await asyncio.shield(confirmed)
+                metrics["endpoint_ms"] = ms_between(last_speech_at, ended)
             passed = self._guard(text, heard)
             tel("edge.stt.done", dur_ms=metrics["stt_ms"], filtered=self.outcome == "filtered", audioMs=len(audio) // 32,
                 chars=len(text))
             if not passed:
                 return
             user_text = text
-            await self._answer(text, ended, metrics, spoken, tel)
+            await self._answer(text, ended, metrics, spoken, tel, deltas)
         except asyncio.CancelledError:
-            self.outcome = "interrupted"
+            self.outcome = "interrupted" if confirmed is None or confirmed.done() else "discarded"
             raise
         except Exception as error:  # noqa: BLE001 — the turn fails, the session stays
             self.outcome = "error"
@@ -269,7 +309,9 @@ class Session:
             tel("edge.turn.done", dur_ms=ms(ended), outcome=self.outcome, ttfaMs=metrics["ttfa_ms"],
                 sttMs=metrics["stt_ms"], llmTtftMs=metrics["llm_ttft_ms"], ttsTtfbMs=metrics["tts_ttfb_ms"],
                 sentences=len(spoken), replyChars=sum(len(x) for x in spoken), endpointMs=metrics["endpoint_ms"],
-                ttfaFromSpeechMs=ttfa_from_speech(metrics))
+                ttfaFromSpeechMs=ttfa_from_speech(metrics), speculated=confirmed is not None)
+            if thinking is not None:
+                thinking.cancel()
             if user_text:
                 template = self.cfg.get("user_template") or ""
                 user = template.replace("{{transcript}}", user_text) if "{{transcript}}" in template else user_text
@@ -277,9 +319,43 @@ class Session:
                 if spoken:
                     self.messages.append({"role": "assistant", "content": " ".join(spoken)})
 
+    async def _transcribe(self, audio: bytes, confirmed: asyncio.Future | None) -> dict:
+        try:
+            return await self.up.transcribe(audio, self.lang, self.cfg.get("stt_prompt"), self.trace_id)
+        except Exception:
+            if confirmed is not None:
+                await asyncio.shield(confirmed)
+            raise
+
+    def _llm_ahead(self, text: str, metrics: dict, tel) -> tuple:
+        read: asyncio.Queue = asyncio.Queue()
+
+        async def think() -> None:
+            t = time.monotonic()
+            try:
+                async for delta in self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
+                    if metrics["llm_ttft_ms"] is None:
+                        metrics["llm_ttft_ms"] = ms_between(t, time.monotonic())
+                        tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])
+                    read.put_nowait(delta)
+                read.put_nowait(None)
+            except Exception as error:  # noqa: BLE001
+                read.put_nowait(error)
+
+        async def deltas():
+            while (delta := await read.get()) is not None:
+                if isinstance(delta, Exception):
+                    raise delta
+                yield delta
+
+        return asyncio.create_task(think()), deltas()
+
+    def _verdict(self, text: str, heard: dict) -> tuple[str, list[str]]:
+        return (text, []) if self.cfg.get("filter_hallucinations") is False else filter_transcript(text, self.lang, heard)
+
     def _guard(self, text: str, heard: dict) -> bool:
         """transcript / filtered / done{empty} — False when the turn stops here."""
-        kept, codes = (text, []) if self.cfg.get("filter_hallucinations") is False else filter_transcript(text, self.lang, heard)
+        kept, codes = self._verdict(text, heard)
         if codes:
             self.outcome = "filtered"
             self.tel("edge.stt.filtered", turn_id=self.turn_id, codes=",".join(codes), chars=len(text))
@@ -299,7 +375,7 @@ class Session:
         system = [{"role": "system", "content": self.cfg["system"]}] if self.cfg.get("system") else []
         return system + self.messages + [{"role": "user", "content": user}]
 
-    async def _answer(self, text: str, ended: float, metrics: dict, spoken: list[str], tel) -> None:
+    async def _answer(self, text: str, ended: float, metrics: dict, spoken: list[str], tel, deltas=None) -> None:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
         fields = await self.up.voice_fields(self.cfg)
         gate = asyncio.Semaphore(self.s.tts_parallel)
@@ -335,7 +411,7 @@ class Session:
         async def think() -> None:
             t = time.monotonic()
             buffer, first, closed = "", True, False
-            async for delta in self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
+            async for delta in deltas or self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
                 if metrics["llm_ttft_ms"] is None:
                     metrics["llm_ttft_ms"] = ms(t)
                     tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])
