@@ -14,6 +14,11 @@ on:
     paths:
       - 'docker/aigw-edge/**'
       - '.github/workflows/aigw-edge.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/aigw-edge/**'
+      - '.github/workflows/aigw-edge.yml'
 
 permissions:
   contents: read
@@ -30,7 +35,10 @@ jobs:
         id: meta
         run: |
           tag="${{ github.event.inputs.tag }}"
-          [ -n "$tag" ] || tag="$(git rev-parse --short HEAD)"
+          if [ -z "$tag" ]; then
+            sha="${{ github.event.pull_request.head.sha || github.sha }}"
+            tag="${sha:0:8}"
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
