@@ -55,9 +55,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "index": {
-    "raw": 1565557,
-    "gzip": 347104,
-    "reason": "realtime speech + telemetry (#54): new realtime entry (sdk/browser/realtime); client gains createServerTelemetry (sdk/node/telemetry -> sdk/browser/telemetry/emitter + src/telemetry/contract); index and proxy gain the W3C trace context (src/telemetry/trace-context) and the public-route + header-size changes in src/gateway/proxy/server"
+    "raw": 1566626,
+    "gzip": 347314,
+    "reason": "realtime TURN health (src/realtime/turn-health.ts: the Allocate check and its state) and the shorter media-path re-probe in the service: +1.0 KB"
   },
   "infra": {
     "raw": 4116,
@@ -85,9 +85,9 @@
     "reason": "realtime speech + telemetry (#54): new realtime entry (sdk/browser/realtime); client gains createServerTelemetry (sdk/node/telemetry -> sdk/browser/telemetry/emitter + src/telemetry/contract); index and proxy gain the W3C trace context (src/telemetry/trace-context) and the public-route + header-size changes in src/gateway/proxy/server"
   },
   "realtime": {
-    "raw": 65230,
-    "gzip": 17018,
-    "reason": "realtime speech + telemetry (#54): new realtime entry (sdk/browser/realtime); client gains createServerTelemetry (sdk/node/telemetry -> sdk/browser/telemetry/emitter + src/telemetry/contract); index and proxy gain the W3C trace context (src/telemetry/trace-context) and the public-route + header-size changes in src/gateway/proxy/server"
+    "raw": 75923,
+    "gzip": 19471,
+    "reason": "realtime (#56 + connect race): 63.7 -> 68.5 KB from #56's own SDK commits (offer at first srflx, playout delay, reply recovery, reconnect on a network change), 68.5 -> 74.1 KB from the WS/WebRTC start race with standby WebRTC and the upgrade between turns (session.ts), and the reconnect with a fresh peer connection (webrtc.ts)"
   },
   "tracking": {
     "raw": 20369,
