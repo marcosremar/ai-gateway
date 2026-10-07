@@ -80,9 +80,11 @@ describe('placements: spec', () => {
     expect(otherZone.osImageId).toBeUndefined();
   });
 
-  it('the speech-stack profile falls back beyond the L4 in fr-par-2', () => {
+  it('the speech-stack profile: L40S fr-par-2, then the L40S elsewhere, then L4s (fr-par-2, pl-waw-2, fr-par-1)', () => {
     const spec = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
-    expect(placementsOf(spec).length).toBeGreaterThan(1);
+    expect(placementsOf(spec).map(p => `${p.zone}/${p.machineType}`)).toEqual([
+      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G', 'fr-par-2/L4-1-24G', 'pl-waw-2/L4-1-24G', 'fr-par-1/L4-1-24G',
+    ]);
   });
 
   it('recognises out-of-stock answers and nothing else', () => {

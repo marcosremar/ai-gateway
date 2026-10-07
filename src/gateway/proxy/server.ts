@@ -5,7 +5,6 @@
 
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse, type Server } from 'http';
 import { request as httpsRequest } from 'https';
-import { randomUUID } from 'crypto';
 import { existsSync, readFileSync, statSync } from 'fs';
 import { join, extname, resolve, sep } from 'path';
 import { validateAuth } from './middleware/auth';
@@ -24,6 +23,10 @@ import { createLogger, withLogContext } from '../../logger';
 import { ApiKeyRegistry } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
+import {
+  CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS, CORS_EXPOSE_HEADERS, errorTypeForStatus, requestIdOf,
+} from './http-conventions';
+import { minimalHealth, wantsDeepHealth, wantsHealthDetails } from './health-view';
 
 const log = createLogger('proxy');
 
@@ -36,6 +39,14 @@ class BodyTimeoutError extends Error {
   constructor(ms: number) {
     super(`Body read timed out after ${ms}ms`);
     this.name = 'BodyTimeoutError';
+  }
+}
+
+/** A multipart body the parser refuses (truncated, oversized name, oversized file): the client's fault, not a 500. */
+class MultipartError extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+    this.name = 'MultipartError';
   }
 }
 
@@ -179,7 +190,7 @@ function sendError(res: ServerResponse, status: number, message: string, request
     ...(existingCors !== undefined ? { 'Access-Control-Allow-Origin': String(existingCors) } : {}),
   };
   res.writeHead(status, headers);
-  res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
+  res.end(JSON.stringify({ error: { message, type: errorTypeForStatus(status) } }));
 }
 
 interface MultipartPart {
@@ -207,7 +218,7 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
 
   // Validate that the body contains the closing boundary
   if (body.indexOf(endBuf) === -1) {
-    throw new Error('Malformed multipart body: missing closing boundary (truncated upload?)');
+    throw new MultipartError('Malformed multipart body: missing closing boundary (truncated upload?)');
   }
 
   let start = body.indexOf(boundaryBuf);
@@ -241,17 +252,17 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
 
     // Bounds check for field names (prevent DoS via memory exhaustion)
     if (nameMatch && nameMatch[1].length > MAX_FIELD_NAME_LENGTH) {
-      throw new Error(`Field name too long (max ${MAX_FIELD_NAME_LENGTH} chars)`);
+      throw new MultipartError(`Field name too long (max ${MAX_FIELD_NAME_LENGTH} chars)`);
     }
     // Bounds check for filenames (prevent path traversal via oversized names)
     if (filenameMatch && filenameMatch[1].length > MAX_FILENAME_LENGTH) {
-      throw new Error(`Filename too long (max ${MAX_FILENAME_LENGTH} chars)`);
+      throw new MultipartError(`Filename too long (max ${MAX_FILENAME_LENGTH} chars)`);
     }
 
     // Enforce max upload file size
     if (filenameMatch && partData.length > MAX_UPLOAD_SIZE_BYTES) {
-      throw new Error(
-        `File "${filenameMatch[1]}" exceeds max upload size of ${MAX_UPLOAD_SIZE_BYTES / (1024 * 1024)}MB`,
+      throw new MultipartError(
+        `File "${filenameMatch[1]}" exceeds max upload size of ${MAX_UPLOAD_SIZE_BYTES / (1024 * 1024)}MB`, 413,
       );
     }
 
@@ -468,7 +479,10 @@ export function createProxyServer(config: ProxyConfig): Server {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const method = req.method?.toUpperCase() || 'GET';
     const url = req.url || '/';
-    const requestId = (req.headers['x-request-id'] as string) || randomUUID();
+    // Only a short [\w.-] id is echoed (headers, logs, error bodies); anything else is replaced by a fresh one, and the
+    // request carries the effective id from here on (route handlers read it from the headers).
+    const requestId = requestIdOf(req.headers['x-request-id']);
+    req.headers['x-request-id'] = requestId;
 
     // Establish an AsyncLocalStorage frame so every log emitted during this
     // request (here AND inside any downstream async module) carries the same
@@ -508,8 +522,8 @@ export function createProxyServer(config: ProxyConfig): Server {
     if (method === 'OPTIONS') {
       res.writeHead(204, {
         ...(allowedOrigin !== null ? { 'Access-Control-Allow-Origin': allowedOrigin } : {}),
-        'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key, X-Gateway-No-Wake',
+        'Access-Control-Allow-Methods': CORS_ALLOW_METHODS,
+        'Access-Control-Allow-Headers': CORS_ALLOW_HEADERS,
         'X-Request-Id': requestId,
         ...SECURITY_HEADERS,
       });
@@ -520,24 +534,18 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Set CORS origin header for all non-preflight responses
     if (allowedOrigin !== null) {
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+      res.setHeader('Access-Control-Expose-Headers', CORS_EXPOSE_HEADERS);
     }
+    // Every answer carries the request id, including the routes that write their own response (s2s, deployments, apps).
+    res.setHeader('X-Request-Id', requestId);
 
-    // Only the shallow health check skips auth (the platform probe sends no token). The deep check calls upstream
-    // providers, so it goes through the normal auth below and then needs an admin key.
+    // Only the minimal health check skips auth (the platform probe, the reaper and the SDK breaker send no token and
+    // read the status alone). `?details=1` (stage chains) and `?deep=1` (upstream probes) need a key (health-view.ts).
     const urlPath = url.split('?')[0];
-    const deepHealth = method === 'GET' && urlPath === '/health' && /[?&]deep=(1|true)(&|$)/.test(url);
-    if (method === 'GET' && urlPath === '/health' && !deepHealth) {
-      let details: Record<string, unknown> = {};
-      try { details = config.healthDetails?.() ?? {}; } catch (err) {
-        log.error('health details failed', { error: err instanceof Error ? err.message : String(err) });
-      }
-      sendResponse(res, { status: 200, body: {
-        status: 'ok',
-        connections: { active: activeConnections, peak: peakConnections },
-        sttFilter: sttFilterStats(),
-        noWake: noWakeStats(),
-        ...details,
-      } }, requestId);
+    const deepHealth = method === 'GET' && urlPath === '/health' && wantsDeepHealth(url);
+    const detailedHealth = method === 'GET' && urlPath === '/health' && !deepHealth && wantsHealthDetails(url);
+    if (method === 'GET' && urlPath === '/health' && !deepHealth && !detailedHealth) {
+      sendResponse(res, { status: 200, body: minimalHealth() }, requestId);
       return;
     }
 
@@ -572,10 +580,27 @@ export function createProxyServer(config: ProxyConfig): Server {
       });
     }
 
+    // Open mode (no keys, localhost only) is the operator's own machine: it sees everything. Otherwise the admin
+    // decision is the authorizer's alone, on the key that passed auth above (an absent one is never admin).
+    const bearer = (authHeader ?? '').replace(/^Bearer\s+/i, '');
+    const callerIsAdmin = keyRegistry.size === 0 ? true : config.deepHealth?.authorize(bearer) === true;
+    if (detailedHealth) {
+      let details: Record<string, unknown> = {};
+      try { details = config.healthDetails?.({ userId, admin: callerIsAdmin }) ?? {}; } catch (err) {
+        log.error('health details failed', { error: err instanceof Error ? err.message : String(err) });
+      }
+      sendResponse(res, { status: 200, body: {
+        ...minimalHealth(),
+        // Gateway-wide counters: the operator's, not an app's.
+        ...(callerIsAdmin ? { connections: { active: activeConnections, peak: peakConnections }, sttFilter: sttFilterStats(), noWake: noWakeStats() } : {}),
+        ...details,
+      } }, requestId);
+      return;
+    }
     if (deepHealth) {
       if (!config.deepHealth) { sendError(res, 404, 'Deep health is not enabled on this gateway', requestId); return; }
-      const adminToken = (authHeader || '').replace(/^Bearer\s+/i, '');
-      if (!adminToken || !config.deepHealth.authorize(adminToken)) { sendError(res, 401, 'Deep health needs an admin API key', requestId); return; }
+      // The key is valid (auth above): a non-admin one is forbidden, not unauthenticated.
+      if (!callerIsAdmin) { sendError(res, 403, 'Deep health needs an admin API key', requestId); return; }
       try {
         const report = await config.deepHealth.report();
         sendResponse(res, { status: report.status, body: report.body }, requestId);
@@ -591,6 +616,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       const currentConcurrent = userConcurrency.get(userId) || 0;
       const userLimit = concurrency.perUser.get(userId) ?? concurrency.fallback;
       if (currentConcurrent >= userLimit) {
+        res.setHeader('Retry-After', 1);
         sendError(res, 429, `Too many concurrent requests (limit: ${userLimit})`, requestId);
         return;
       }
@@ -628,7 +654,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
     }
 
-    // Block direct streaming transport routes — clients must use POST /v1/speech
+    // Block the removed streaming transport routes (410)
     const path = url.split('?')[0];
 
     // Request-level logging: entry + auto-wired exit on res.end(). /health
@@ -647,7 +673,7 @@ export function createProxyServer(config: ProxyConfig): Server {
     }
 
     if (path === '/api/stream-audio' || path === '/ws/stream') {
-      sendError(res, 410, `Streaming transport ${path} is removed. Use POST /v1/speech instead.`, requestId);
+      sendError(res, 410, `Streaming transport ${path} is removed. Use POST /v1/s2s (speech-to-speech) or POST /v1/chat/completions instead.`, requestId);
       return;
     }
 
@@ -657,7 +683,7 @@ export function createProxyServer(config: ProxyConfig): Server {
         proxyToNextDev(config.nextDevUrl, req, res);
         return;
       }
-      sendError(res, 410, 'WebSocket transport is removed. Use POST /v1/speech instead.', requestId);
+      sendError(res, 410, 'WebSocket transport is removed. Use POST /v1/s2s (speech-to-speech) or POST /v1/chat/completions instead.', requestId);
       return;
     }
 
@@ -785,10 +811,13 @@ export function createProxyServer(config: ProxyConfig): Server {
       let proxyRes: ProxyResponse;
 
       // Per-app limits (allowed models, max_tokens cap, daily budget) before any provider is called.
-      const kind = config.appLimits ? inferenceKindOf(method, url) : null;
+      // An s2s turn's own stages (loopback, internal sub-request) were charged once when the turn was admitted
+      // (src/s2s/access.ts): their aliases are still checked, the daily budget is not charged twice.
+      const kind = config.appLimits ? inferenceKindOf(method, path) : null;
       if (kind && config.appLimits) {
         const fields = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
-        const denial = config.appLimits.check(userId, kind, fields);
+        const charge = !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress);
+        const denial = config.appLimits.check(userId, kind, fields, { charge });
         if (denial) {
           if (denial.retryAfterSeconds) res.setHeader('Retry-After', denial.retryAfterSeconds);
           sendResponse(res, { status: denial.status, body: { error: { message: denial.message, type: denial.type } } }, requestId);
@@ -796,10 +825,10 @@ export function createProxyServer(config: ProxyConfig): Server {
         }
       }
 
-      // Route matching
-      if (method === 'GET' && url === '/v1/models') {
+      // Route matching — on the path: a query string (`/v1/models?x=1`) must not turn a route into a 404.
+      if (method === 'GET' && path === '/v1/models') {
         proxyRes = await handleModelsWithDynamic(config.providers);
-      } else if (method === 'POST' && url === '/v1/chat/completions') {
+      } else if (method === 'POST' && path === '/v1/chat/completions') {
         const { chat, chatRoutes, chatDynamicRoutes, unavailable } = config.providers;
         if (!chat && !chatRoutes && !chatDynamicRoutes && !unavailable?.chat) {
           proxyRes = { status: 404, body: { error: { message: 'No chat providers configured', type: 'invalid_request_error' } } };
@@ -815,27 +844,27 @@ export function createProxyServer(config: ProxyConfig): Server {
             { chatRoutes, unavailable: unavailable?.chat },
           );
         }
-      } else if (method === 'POST' && url === '/v1/embeddings') {
+      } else if (method === 'POST' && path === '/v1/embeddings') {
         if (!config.providers.embedding) {
           proxyRes = { status: 404, body: { error: { message: 'No embedding providers configured', type: 'invalid_request_error' } } };
         } else {
           proxyRes = await handleEmbeddings(proxyReq, config.providers.embedding, config.cache);
         }
-      } else if (method === 'POST' && url === '/v1/audio/speech') {
+      } else if (method === 'POST' && path === '/v1/audio/speech') {
         if (!config.providers.tts && !config.providers.unavailable?.tts) {
           proxyRes = { status: 404, body: { error: { message: 'No TTS providers configured', type: 'invalid_request_error' } } };
         } else {
           proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts);
         }
-      } else if (method === 'POST' && url === '/v1/audio/transcriptions') {
+      } else if (method === 'POST' && path === '/v1/audio/transcriptions') {
         if (!config.providers.stt && !config.providers.unavailable?.stt) {
           proxyRes = { status: 404, body: { error: { message: 'No STT providers configured', type: 'invalid_request_error' } } };
         } else {
           proxyRes = await handleAudioTranscriptions(proxyReq, config.providers.stt ?? {}, config.providers.unavailable?.stt);
         }
-      } else if (method === 'POST' && url === '/v1/images/generate') {
+      } else if (method === 'POST' && path === '/v1/images/generate') {
         proxyRes = await handleImageGenerate(proxyReq, config.providers.image);
-      } else if (method === 'POST' && url === '/v1/images/inpaint') {
+      } else if (method === 'POST' && path === '/v1/images/inpaint') {
         proxyRes = await handleImageInpaint(proxyReq, config.providers.image);
       // /health is handled before auth (line 345) — no need to match here
       } else if (method === 'GET' && config.staticDir && serveStaticFile(config.staticDir, path, res, requestId)) {
@@ -853,6 +882,10 @@ export function createProxyServer(config: ProxyConfig): Server {
       if (err instanceof BodyTooLargeError) {
         lingeringClose(req);
         sendError(res, 413, err.message, requestId);
+        return;
+      }
+      if (err instanceof MultipartError) {
+        sendError(res, err.status, err.message, requestId);
         return;
       }
       log.error({ err, requestId }, 'Internal error in proxy handler');
@@ -904,7 +937,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       return;
     }
     // All other WebSocket upgrades: return 410 Gone
-    const body = JSON.stringify({ error: { message: 'WebSocket transport is removed. Use POST /v1/speech instead.', type: 'gone' } });
+    const body = JSON.stringify({ error: { message: 'WebSocket transport is removed. Use POST /v1/s2s (speech-to-speech) or POST /v1/chat/completions instead.', type: 'gone' } });
     socket.write(
       `HTTP/1.1 410 Gone\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
     );

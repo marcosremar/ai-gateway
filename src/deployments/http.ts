@@ -29,11 +29,11 @@ import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppFallbackService } from './app-fallback';
 import type { ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
-import { randomUUID } from 'crypto';
 import { createLogger } from '../logger';
 
 const log = createLogger('deployments-http');
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
+import { requestIdOf } from '../gateway/proxy/http-conventions';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
@@ -195,17 +195,22 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
   const isAdmin = opts.isAdmin ?? (() => false);
   const fetchImpl = opts.fetchImpl ?? fetch;
 
-  /** The app this request acts for: `X-App` from an admin key, else the key's own user; null = admin acting globally. */
+  /**
+   * The app this request acts for: `X-App` from an admin key, else the key's own user; null = admin acting globally.
+   * A non-admin key may send `X-App` naming its own app (the SDK's `GatewayClient({ app })` always does; it used to be
+   * a 403) — never another one. The same rule applies to any other app-scoped route (e.g. a machines API).
+   */
   function appOf(req: IncomingMessage): string | null {
     const header = req.headers['x-app'];
+    const user = opts.userOf?.(req) ?? null;
+    const own = user && APP_ID_RE.test(user) ? user : null;
     if (typeof header === 'string' && header.trim()) {
-      if (!isAdmin(req)) throw new DeploymentError(403, 'only an admin key may act for another app (X-App)');
+      if (!isAdmin(req) && header.trim() !== own) throw new DeploymentError(403, 'only an admin key may act for another app (X-App)');
       if (!APP_ID_RE.test(header.trim())) throw new DeploymentError(400, `X-App must match ${APP_ID_RE}`);
       return header.trim();
     }
     if (isAdmin(req)) return null;
-    const user = opts.userOf?.(req) ?? null;
-    return user && APP_ID_RE.test(user) ? user : null;
+    return own;
   }
 
   /** Admin, or the app named in the path is the caller's own. */
@@ -449,7 +454,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           err.retryAfterSeconds ? { 'Retry-After': err.retryAfterSeconds } : {});
       }
       // Never the raw error (message/stack) to the client: a generic message + an id to find the log line.
-      const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'].slice(0, 100) : randomUUID();
+      const requestId = requestIdOf(req.headers['x-request-id']);
       log.error({ requestId, path, error: err instanceof Error ? err.stack ?? err.message : String(err) }, 'deployments route failed');
       send(res, 500, { error: 'internal error', requestId });
     });

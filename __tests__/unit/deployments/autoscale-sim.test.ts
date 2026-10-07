@@ -111,4 +111,52 @@ describe('autoscale simulation', () => {
     expect(r.fallbackByMinute.speech.slice(12, 30).reduce((a, b) => a + (b ?? 0), 0)).toBe(0);
     expect(row(r, '40:00').ready).toBe(0);
   });
+  // D1 (live QA 2026-10-07): the 2nd replica was asked but every create failed `out of stock` for 17 min; with the
+  // hysteresis on the live count, `desired` stayed 2 at load 3–4 and the back-off kept retrying the create.
+  it('out of stock under rising then falling load: the pending create is cancelled once the pressure is gone', async () => {
+    const r = await run('stockOutRiseFall');
+    common(r);
+    const failed = r.events.filter(e => e.type === 'create-failed');
+    expect(failed.length).toBeGreaterThan(0);
+    for (const t of ['11:00', '14:00', '17:00']) {
+      expect(row(r, t).desired).toBe(2);
+      expect(row(r, t).blockedBy).toMatch(/^out of stock since \d\d:\d\d:\d\dZ: \d+ creates? failed, next try/);
+    }
+    expect(row(r, '19:00').desired).toBe(1); // load 4 fits one replica at 50 %: the 2nd is no longer wanted
+    expect(row(r, '19:00').reason).toMatch(/pending create of 1 cancelled/);
+    expect(row(r, '19:00').blockedBy).toBe('');
+    expect(failed.every(e => sec('stockOutRiseFall', e.t) < 18 * 60 + 60)).toBe(true); // no retry without pressure
+    expect(creates(r)).toHaveLength(1); // stock back at 24:00 with load 4: no L40S created for nothing
+    for (const t of ['20:00', '25:00', '30:00']) expect(row(r, t).ready).toBe(1); // the serving replica is kept
+    // While asked and waiting, the reason says so instead of a window count that re-arms every 20 s.
+    expect(r.rows.filter(x => x.t >= '12:00' && x.t <= '17:00').some(x => /asked, waiting for 1/.test(x.reason))).toBe(true);
+  });
+
+  it('out of stock, then stock comes back: the 2nd replica is created at the next try and serves', async () => {
+    const r = await run('stockOutRecovers');
+    common(r);
+    expect(r.events.filter(e => e.type === 'create-failed').length).toBeGreaterThan(0);
+    expect(creates(r)).toHaveLength(2);
+    const second = sec('stockOutRecovers', creates(r)[1].t);
+    expect(second).toBeGreaterThanOrEqual(16 * 60);
+    expect(second).toBeLessThanOrEqual(16 * 60 + 300); // the back-off ladder caps the wait at its current step
+    expect(row(r, '30:00').ready).toBe(2);
+    expect(row(r, '30:00').blockedBy).toBe('maxReplicas 2');
+  });
+
+  // D4 (live QA 2026-10-07): at 16 / 25 concurrent on one L40S the fixed 1.5 s hedge ran ~60 % of the requests twice.
+  it.each([['hedge16', 'hedge16Fixed'], ['hedge25', 'hedge25Fixed']] as const)(
+    'adaptive hedge (%s): far fewer double runs than the fixed hedge, no worse p95, no 5xx',
+    async (adaptiveKey, fixedKey) => {
+      const [a, f] = await Promise.all([run(adaptiveKey), run(fixedKey)]);
+      common(a);
+      common(f);
+      expect(f.doubleRuns.speech).toBeGreaterThan(1000); // the defect, reproduced
+      expect(a.doubleRuns.speech).toBeLessThanOrEqual(f.doubleRuns.speech / 20);
+      expect(a.latency.speech.p95).toBeLessThanOrEqual(f.latency.speech.p95);
+      // Calls to the fallback (spilled + hedged; with this model every hedged GPU call still won) do not grow either.
+      const fallbackCalls = (r: SimResult) => r.served.speech.fallback + r.doubleRuns.speech;
+      expect(fallbackCalls(a)).toBeLessThan(fallbackCalls(f));
+    },
+  );
 });

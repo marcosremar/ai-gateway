@@ -15,7 +15,9 @@ import {
 import { createDeploymentRoutes, HttpReplicaProbe } from '../../../src/deployments/http';
 import { FileDeploymentStore, MemoryDeploymentStore } from '../../../src/deployments/store';
 import type { DeploymentStore } from '../../../src/deployments/types';
-import { FakeCloud } from './_fake-cloud';
+import { placementsOf } from '../../../src/deployments/placements';
+import { buildSpec } from '../../../src/deployments/spec';
+import { FakeCloud, until } from './_fake-cloud';
 
 const GHCR = 'ghp_fake_read_token_0123456789';
 const speech = DECLARED_DEPLOYMENTS.find(d => d.name === 'parle-speech')!;
@@ -35,9 +37,9 @@ async function controller(store: DeploymentStore = new MemoryDeploymentStore(), 
 }
 
 describe('declared parle-speech spec', () => {
-  it('is the one-GPU speech image: port 80, /health, L4, minReplicas 0, 45 min boot, ≥ 100 GB, upstream auth trusted', () => {
+  it('is the one-GPU speech image: port 80, /health, L40S, minReplicas 0, 45 min boot, ≥ 100 GB, upstream auth trusted', () => {
     expect(speech.spec).toMatchObject({
-      port: 80, healthPath: '/health', machineType: 'L4-1-24G', minReplicas: 0, bootTimeoutMinutes: 45,
+      port: 80, healthPath: '/health', machineType: 'L40S-1-48G', zone: 'fr-par-2', minReplicas: 0, bootTimeoutMinutes: 45,
       env: { TRUST_UPSTREAM_AUTH: '1' },
     });
     expect(speech.spec.volumeGb as number).toBeGreaterThanOrEqual(100);
@@ -45,6 +47,29 @@ describe('declared parle-speech spec', () => {
     expect(speech.generatedSecrets).toEqual(['SPEECH_TOKEN']);
     expect(JSON.stringify(speech)).not.toMatch(/ghp_|password"\s*:/);
     expect(speech.image?.default).toMatch(/^ghcr\.io\/marcosremar\/parle-speech:[0-9a-f]{40}$/);
+  });
+
+  // D3, live QA 2026-10-07: one placement only, `L40S-1-48G out of stock in fr-par-2` for 17 min, no 2nd replica.
+  it('has a stock fallback: L40S fr-par-1, then L4 fr-par-2, then L4 pl-waw-2, every one under its € cap', () => {
+    const spec = buildSpec('parle-speech', { ...speech.spec, image: 'x/y:1' }, { profiles: new Map() });
+    expect(placementsOf(spec).map(p => `${p.zone}/${p.machineType}`)).toEqual([
+      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G', 'fr-par-2/L4-1-24G', 'pl-waw-2/L4-1-24G',
+    ]);
+    expect(spec.maxEurPerHour).toBeGreaterThanOrEqual(1.47); // the L40S's price: below it the primary is never created
+    expect(spec.maxEurPerHour).toBeLessThan(2);
+    for (const p of placementsOf(spec)) expect(spec.envByMachineType?.[p.machineType]?.LLM_PARALLEL).toMatch(/^\d+$/);
+  });
+
+  it('out of stock in fr-par-2: the replica lands on the next placement', async () => {
+    const cloud = new FakeCloud();
+    cloud.failCreateFor = (s) => (s.machineType === 'L40S-1-48G' ? `scaleway HTTP 412: {"type":"out_of_stock"} ${s.zone}` : null);
+    const { c } = await controller(new MemoryDeploymentStore(), cloud);
+    await new DeclaredDeploymentReconciler({ target: c, env: { GHCR_READ_TOKEN: GHCR } }).reconcile();
+    c.start();
+    c.wake('parle-speech');
+    await until(() => cloud.created.length === 1, 3000);
+    expect(cloud.created[0].spec).toMatchObject({ zone: 'fr-par-2', machineType: 'L4-1-24G' });
+    expect(c.get('parle-speech')!.lastPlacement).toMatch(/L40S-1-48G out of stock in fr-par-2; L40S-1-48G out of stock in fr-par-1/);
   });
 
   it('SPEECH_IMAGE takes a tag of the repository or a full reference', () => {

@@ -14,7 +14,7 @@ import type {
   ChatRequest, ChatResponse, LLMProvider, ModelInfo, STTProvider, STTRequest, STTResponse, TTSProvider, TTSRequest,
   TTSResponse, VoiceInfo,
 } from '../gateway/providers/cloud/types';
-import { DeploymentError, type DeploymentController } from './controller';
+import { DeploymentError, type DeploymentController, type Lease, type LeaseOutcome } from './controller';
 import { replicaBase } from './http';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
@@ -82,16 +82,56 @@ async function callReplica(
     throw new DeploymentCallError(timedOut ? 504 : 502, `deployment '${name}': replica ${timedOut ? 'timed out' : 'unreachable'}`,
       timedOut ? 'timeout' : 'unreachable');
   }
-  // A 429 is the replica's own queue full: pressure for the autoscaler and a busy mark, never a strike.
-  lease.done(res.status === 429 ? 'overloaded' : false);
   if (!res.ok) {
+    // A 429 is the replica's own queue full: pressure for the autoscaler and a busy mark, never a strike.
+    lease.done(res.status === 429 ? 'overloaded' : false);
     const text = await res.text().catch(() => '');
     // Any replica error moves on to the fallback (a 4xx from our own server is a deployment problem, not the
     // client's: the gateway already validated the request).
     throw new DeploymentCallError(res.status >= 500 ? res.status : 502, `deployment '${name}' answered HTTP ${res.status}: ${text.slice(0, 200)}`,
       res.status >= 500 ? '5xx' : 'error');
   }
-  return res;
+  return leasedBody(res, lease, opts.timeoutMs ?? 120_000, signal);
+}
+
+/**
+ * The lease covers the whole answer, body included (fault bench 2026-10-07, S1): it used to be released as healthy at
+ * the response headers, so a replica that died mid-body was handed the very next request, and a streamed TTS answer
+ * counted 0 in flight while it played. Outcomes follow `Lease.done`: `ok` when the body ends; `failed` when it breaks
+ * (connection-level); `timeout` when our own or the caller's time limit cut it (busy, not dead); `cancelled` when the
+ * caller cancels or aborts (hedge lost, client gone) or nobody read it within `maxMs` (it must not hold the lease, and
+ * the deployment's demand, forever).
+ */
+function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSignal): Response {
+  if (!res.body) { lease.done(false); return res; }
+  const reader = res.body.getReader();
+  const safety = setTimeout(() => release('cancelled'), maxMs);
+  (safety as { unref?: () => void }).unref?.();
+  const callerOutcome = (): LeaseOutcome => ((signal?.reason as { name?: string } | undefined)?.name === 'TimeoutError' ? 'timeout' : 'cancelled');
+  const onAbort = () => { release(callerOutcome()); reader.cancel().catch(() => {}); };
+  let released = false;
+  function release(outcome: boolean | LeaseOutcome) {
+    if (released) return;
+    released = true;
+    clearTimeout(safety);
+    signal?.removeEventListener('abort', onAbort);
+    lease.done(outcome);
+  }
+  if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { value, done } = await reader.read();
+        if (done) { release(false); controller.close(); } else controller.enqueue(value);
+      } catch (err) {
+        const timedOut = err instanceof Error && err.name === 'TimeoutError';
+        release(signal?.aborted ? callerOutcome() : timedOut ? 'timeout' : true);
+        controller.error(err);
+      }
+    },
+    cancel(reason) { release('cancelled'); return reader.cancel(reason); },
+  });
+  return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 
 abstract class DeploymentProviderBase {
@@ -240,7 +280,9 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     let value: ReplicaCatalog | null = null;
     try {
       const res = await this.call('/refs/voices.json', { method: 'GET' }, signal);
-      value = (res.headers.get('content-type') ?? '').includes('json') ? catalogOf(await res.json().catch(() => null)) : null;
+      // A body left unread would hold the replica's lease until its safety timeout (leasedBody): read or cancel it.
+      if ((res.headers.get('content-type') ?? '').includes('json')) value = catalogOf(await res.json().catch(() => null));
+      else await res.body?.cancel().catch(() => {});
     } catch (err) {
       // The replica answered an HTTP error for the catalog (callReplica code 'error'): treated as "no catalog" below.
       if (!(err instanceof DeploymentCallError) || err.gatewayCode !== 'error') throw err;

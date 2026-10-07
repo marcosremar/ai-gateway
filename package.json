@@ -58,6 +58,7 @@
     "test": "vitest run --config vitest.config.ts",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "bench:faults": "bun scripts/fault-bench/run.ts",
+    "bench:fault-scenarios": "bun scripts/fault-bench/scenarios.ts",
     "test:watch": "vitest --config vitest.config.ts",
     "test:groq": "vitest run --config vitest.config.ts __tests__/groq-integration.test.ts",
     "test:openai": "vitest run --config vitest.config.ts __tests__/openai-integration.test.ts",

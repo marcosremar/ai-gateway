@@ -87,7 +87,7 @@ await gw.appRoutes.put('parle', { stt: { 'parle-stt': ['deployment:parle-speech'
 const routes = await gw.appRoutes.get('parle');
 await gw.apps.putImage('parle', 'speech-stack', { image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261006', port: 8000 });
 
-await gw.health();                 // GET /health
+await gw.health();                 // GET /health: { status, version, uptimeSeconds } only (stage chains: GET /health?details=1 with a key)
 await gw.health({ deep: true });   // GET /health?deep=1 (admin key)
 ```
 
@@ -135,12 +135,16 @@ body shapes, the entry's `model`, the request's `extraBody` then the entry's `ex
 on 5xx / 429 / timeout / connection error. TTS uses the entry's `voice` when `fixedVoice`, else the request's
 `fallback_voice`, else the entry's `voice`; OpenRouter speech gets `mp3` unless `pcm` was asked (as the gateway does).
 `served` then reads `{ provider: 'openrouter-direct:<model>', fallback: 'gateway_unreachable', fallbackFrom: 'gateway' }`.
-An alias without entries (or no plan) rethrows the gateway's error.
+An alias without entries (or no plan) rethrows the gateway's error, with `; no direct fallback: <why>` appended (a
+keyless plan — no `OPENROUTER_PROVISIONING_KEY` on the gateway — or no plan fetched).
 
 **Breaker** — after `failureThreshold` consecutive unreachable failures the gateway is skipped for `cooldownMs`
 (calls go straight to the providers). The first call after the cooldown starts a background `GET /health` probe; as
 soon as it answers, the breaker closes and the next call uses the gateway again (`onRouteChange({route: 'gateway',
 reason: 'recovered'})`). The gateway still owns the provider breakers; this one only decides the switch.
+A call whose alias has no direct entry (keyless plan; `s2s` when the plan has no entry at all) is never just skipped:
+it probes `GET /health` first (at most once a second) and goes to the gateway as soon as it answers — so a restarted
+gateway serves the next call, not the one after the cooldown (fault bench 2026-10-07, S3).
 
 **Slow counts too** — `directFallback.slowMs` (default `0` = off): a gateway call that takes longer counts as a
 failure toward the breaker (the answer is still used) — so a gateway that stays slow opens the breaker and the next

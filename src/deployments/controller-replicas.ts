@@ -8,6 +8,7 @@ import { replicaCloudInit } from './cloud-init';
 import { ControllerState, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
 import { placeReplica, PlacementError } from './placement-walk';
+import { isOutOfStock } from './placements';
 import { DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
 import type { DeploymentBackend, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
@@ -150,6 +151,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
         this.machines = [...this.machines.filter(m => m.id !== machine.id), { ...machine, pricePerHour: machine.pricePerHour ?? price }];
         rt.lastPlacement = rt.rejected.length ? `${placement}; earlier: ${rt.rejected.join('; ')}` : placement;
         rt.createFailures = 0;
+        rt.stockOut = null;
         rt.lastError = rt.spendNote ? `create: ${rt.spendNote}` : null;
       } catch (err) {
         if (err instanceof PlacementError) rt.lastPlacement = err.placement;
@@ -157,8 +159,11 @@ export abstract class ReplicaLifecycle extends ControllerState {
         // The € ceiling frees up as soon as something idles: retry soon, without the escalating back-off of a broken create.
         if (rt.spendNote && err instanceof PlacementError) rt.backoffUntil = this.now() + SPEND_RETRY_MS;
         else {
+          // Out of stock everywhere is the provider's capacity, not a broken spec: same escalating ladder (bounded retry
+          // rate, ≤ 1 create per 10 min once it persists), counted apart so the view says what blocks and for how long.
           rt.backoffUntil = this.now() + CREATE_BACKOFF_MS[Math.min(rt.createFailures, CREATE_BACKOFF_MS.length - 1)];
           rt.createFailures++;
+          if (isOutOfStock(err)) rt.stockOut = { since: rt.stockOut?.since ?? this.now(), failures: (rt.stockOut?.failures ?? 0) + 1 };
         }
         this.log('deployments: create failed', { deployment: spec.name, error: rt.lastError });
       } finally {

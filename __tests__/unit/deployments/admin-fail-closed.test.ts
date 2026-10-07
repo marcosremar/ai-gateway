@@ -75,3 +75,16 @@ describe('admin keys fail closed', () => {
     expect((await call(handler, 'anyone', 'POST', '/v1/deployments/x/wake')).status).toBe(403);
   });
 });
+
+describe('X-App naming the key\'s own app (API audit 2026-10-07)', () => {
+  it('a non-admin key may send X-App equal to its own app (the SDK GatewayClient({ app }) does); never another app', async () => {
+    const { handler } = service({ DEPLOYMENTS_ADMIN_USERS: 'ops' });
+    // Was 403 ("only an admin key may act for another app") although the app is the key's own.
+    expect((await call(handler, 'parle', 'GET', '/v1/deployments', { 'x-app': 'parle' })).status).toBe(200);
+    expect((await call(handler, 'parle', 'GET', '/v1/apps', { 'x-app': 'parle' })).status).toBe(200);
+    expect((await call(handler, 'parle', 'GET', '/v1/deployments', { 'x-app': 'other' })).status).toBe(403);
+    expect((await call(handler, 'parle', 'GET', '/v1/apps/other', { 'x-app': 'other' })).status).toBe(403);
+    // Still no admin power: a mutation with its own X-App stays admin-only.
+    expect((await call(handler, 'parle', 'POST', '/v1/deployments/x/wake', { 'x-app': 'parle' })).status).toBe(403);
+  });
+});

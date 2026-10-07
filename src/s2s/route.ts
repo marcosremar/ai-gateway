@@ -26,6 +26,7 @@ import { applySttFilter, filterEnabled } from '../gateway/proxy/routes/stt-filte
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { runComposite, type S2SConfig, type StageClient } from './composite';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
+import type { S2SAdmission } from './access';
 
 type Controller = Pick<DeploymentController, 'acquire' | 'get' | 'wake'>;
 
@@ -35,6 +36,11 @@ export interface S2SRouteOptions {
   stagesFor: (req: IncomingMessage, config: S2SConfig) => StageClient;
   /** Default speech-stack deployment (`S2S_DEPLOYMENT`); a request's `config.deployment` wins. None = composed only. */
   deployment?: string;
+  /**
+   * Who may use which deployment, and the app's limits (access.ts), checked once the config is parsed and before the
+   * audio is read or any deployment is acquired or woken. Absent = no check (tests, open mode).
+   */
+  admit?: (req: IncomingMessage, config: S2SConfig, requested: { deployment: string; explicit: boolean }) => S2SAdmission;
   hedgeMs?: number;
   budgetMs?: number;
   maxBodyBytes?: number;
@@ -62,9 +68,9 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown) {
+function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string | number> = {}) {
   if (res.headersSent) return;
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
   res.end(JSON.stringify(body));
 }
 
@@ -151,23 +157,39 @@ export function createS2SRoute(opts: S2SRouteOptions) {
     let contentType: string;
     let config: S2SConfig;
     let rawConfig: string;
+    let deployment: string;
     try {
       const body = await readBody(req, opts.maxBodyBytes ?? MAX_BODY);
       const form = await new Request('http://local/', {
         method: 'POST', headers: { 'content-type': req.headers['content-type'] ?? '' }, body: new Uint8Array(body),
       }).formData();
       const file = form.get('file');
-      if (!(file instanceof Blob)) return sendJson(res, 400, { error: { message: 'multipart field "file" (audio) is required', type: 'invalid_request' } });
+      if (!(file instanceof Blob)) return sendJson(res, 400, { error: { message: 'multipart field "file" (audio) is required', type: 'invalid_request_error' } });
+      rawConfig = String(form.get('config') ?? '{}');
+      const parsed = JSON.parse(rawConfig) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('config must be a JSON object');
+      config = parsed as S2SConfig;
+      const explicit = typeof config.deployment === 'string' && config.deployment !== '';
+      deployment = explicit ? config.deployment! : opts.deployment ?? '';
+      // Ownership and app limits before the audio is read and before any deployment is acquired or woken.
+      if (opts.admit) {
+        const admission = opts.admit(req, config, { deployment, explicit });
+        if (!admission.ok) {
+          return sendJson(res, admission.status, { error: { message: admission.message, type: admission.type } },
+            admission.retryAfterSeconds ? { 'Retry-After': admission.retryAfterSeconds } : {});
+        }
+        deployment = admission.deployment;
+        rawConfig = JSON.stringify(config); // the replica gets the clamped config (max_tokens)
+      }
       audio = new Uint8Array(await file.arrayBuffer());
       contentType = file.type || 'application/octet-stream';
-      rawConfig = String(form.get('config') ?? '{}');
-      config = JSON.parse(rawConfig) as S2SConfig;
     } catch (err) {
       const status = (err as { status?: number }).status ?? 400;
-      return sendJson(res, status, { error: { message: `bad s2s request: ${(err as Error).message}`, type: 'invalid_request' } });
+      return sendJson(res, status, {
+        error: { message: `bad s2s request: ${(err as Error).message}`, type: status === 413 ? 'request_too_large' : 'invalid_request_error' },
+      });
     }
 
-    const deployment = typeof config.deployment === 'string' && config.deployment ? config.deployment : opts.deployment ?? '';
     const sink = new Sink(res, format);
     const budget = new AbortController();
     const budgetTimer = setTimeout(() => budget.abort(new Error(`s2s budget of ${budgetMs} ms exceeded`)), budgetMs);

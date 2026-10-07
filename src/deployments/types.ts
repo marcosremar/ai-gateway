@@ -338,7 +338,7 @@ export interface DeploymentView {
   lastPlacement: string | null;
   /** Why the deployment has the replica count it has: pressure, floor, what blocks a scale-out (`autoscale.ts`). */
   autoscale: {
-    desired: number; pressureWant: number; reason: string; blockedBy: string | null; floor: number;
+    desired: number; pressureWant: number; reason: string; blockedBy: string | null; floor: number; warmFloor: number;
     load: number; p95Ms: number | null; errorRate: number;
   };
   /** Client warm window in force (`POST …/warm`), or null. */

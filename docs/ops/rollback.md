@@ -1,5 +1,11 @@
 # Rollback Runbook
 
+::: warning Not implemented on `serve.ts`
+The production gateway (`serve.ts`) exposes **no** `GET /metrics` endpoint (API audit 2026-10-07). The references to
+`/metrics` below describe a planned setup; until it exists use the request logs, `GET /health?details=1` (admin key:
+connections, stage chains, STT filter and no-wake counters) and `GET /health?deep=1` (admin).
+:::
+
 > **When in doubt, roll back.** Rolling back is never the wrong first move
 > during an incident — you can always forward-fix after the fire is out.
 

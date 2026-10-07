@@ -69,11 +69,15 @@ export interface LoggedRequest {
   abortedAt: number | null;
 }
 
+export interface Chaos { p5xx: number; pTimeout: number; pDrop: number; seed?: number }
+
 export interface FakeUpstream {
   url: string;
   port: number;
   server: Server;
   setFaults(faults: Record<string, Fault | Fault[]>): void;
+  /** Random faults for every request without an explicit one (soak): probabilities per request. `null` turns it off. */
+  setChaos(chaos: Chaos | null): void;
   reset(): void;
   log(): LoggedRequest[];
   close(): Promise<void>;
@@ -126,9 +130,20 @@ export async function startFakeUpstream(port = 0): Promise<FakeUpstream> {
   const requests: LoggedRequest[] = [];
   let nextId = 1;
 
+  let chaos: Chaos | null = null;
+  let rng = 1;
+  const random = () => { rng = (rng * 1103515245 + 12345) % 2147483648; return rng / 2147483648; };
+  const chaosFault = (): Fault | null => {
+    if (!chaos) return null;
+    const x = random();
+    if (x < chaos.p5xx) return { kind: 'status', status: 502 + Math.floor(random() * 2) };
+    if (x < chaos.p5xx + chaos.pTimeout) return { kind: 'no-answer' };
+    if (x < chaos.p5xx + chaos.pTimeout + chaos.pDrop) return { kind: 'close-mid', deltas: 2 };
+    return null;
+  };
   const faultFor = (model: string | null): Fault | null => {
     const list = model ? faults.get(model) : undefined;
-    if (!list || list.length === 0) return null;
+    if (!list || list.length === 0) return chaosFault();
     return list.length > 1 ? list.shift()! : list[0];
   };
 
@@ -207,7 +222,7 @@ export async function startFakeUpstream(port = 0): Promise<FakeUpstream> {
     const gone = () => res.destroyed || res.writableEnded;
     switch (fault.kind) {
       case 'reset':
-        req.socket.resetAndDestroy?.() ?? req.socket.destroy();
+        if (req.socket.resetAndDestroy) req.socket.resetAndDestroy(); else req.socket.destroy();
         return;
       case 'no-answer':
         return; // never answers; the connection stays open until the client gives up
@@ -276,7 +291,7 @@ export async function startFakeUpstream(port = 0): Promise<FakeUpstream> {
         await send(chunk(model, null, fault.finishReason ?? 'stop'));
         break;
       case 'empty':
-        if (fault.shape === 'content') await send(chunk(model, '')), await send(chunk(model, null, 'length'));
+        if (fault.shape === 'content') { await send(chunk(model, '')); await send(chunk(model, null, 'length')); }
         else await send(`data: ${JSON.stringify({ id: 'gen', object: 'chat.completion.chunk', model, choices: [] })}\n\n`);
         break;
       case 'sse-error':
@@ -361,6 +376,7 @@ export async function startFakeUpstream(port = 0): Promise<FakeUpstream> {
     server,
     setFaults: (f) => { for (const [model, x] of Object.entries(f)) faults.set(model, Array.isArray(x) ? [...x] : [x]); },
     reset: () => { faults.clear(); requests.length = 0; },
+    setChaos: (c) => { chaos = c; rng = c?.seed ?? 1; },
     log: () => requests.map((r) => ({ ...r })),
     close: () => new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }),
   };

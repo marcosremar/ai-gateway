@@ -1,6 +1,6 @@
 {
   "name": "parle-speech",
-  "description": "parle: Whisper large-v3-turbo + Qwen3.5-9B + Qwen3-TTS 0.6B Base on one Scaleway L4 (image built by babylon-cinema .github/workflows/speech-image.yml)",
+  "description": "parle: Whisper large-v3-turbo + Qwen3.5-9B + Qwen3-TTS 0.6B Base on one Scaleway L40S, an L4 when no L40S is in stock (image built by babylon-cinema .github/workflows/speech-image.yml)",
   "image": {
     "env": "SPEECH_IMAGE",
     "repository": "ghcr.io/marcosremar/parle-speech",
@@ -11,16 +11,26 @@
   "spec": {
     "port": 80,
     "healthPath": "/health",
-    "machineType": "L4-1-24G",
+    "machineType": "L40S-1-48G",
     "zone": "fr-par-2",
+    "placements": [
+      { "zone": "fr-par-1" },
+      { "machineType": "L4-1-24G" },
+      { "zone": "pl-waw-2", "machineType": "L4-1-24G" }
+    ],
     "gpu": true,
     "volumeGb": 100,
     "minReplicas": 0,
-    "maxReplicas": 1,
+    "maxReplicas": 2,
+    "targetInflightPerReplica": 8,
     "idleMinutes": 15,
     "bootTimeoutMinutes": 45,
     "maxHours": 2,
-    "maxEurPerHour": 1,
+    "maxEurPerHour": 1.5,
+    "envByMachineType": {
+      "L4-1-24G": { "LLM_PARALLEL": "4" },
+      "L40S-1-48G": { "LLM_PARALLEL": "8" }
+    },
     "env": { "TRUST_UPSTREAM_AUTH": "1" }
   }
 }
