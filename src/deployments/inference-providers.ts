@@ -17,6 +17,7 @@ import type {
 import { DeploymentError, type DeploymentController } from './controller';
 import { replicaBase } from './http';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
+import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 
 type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
 
@@ -46,14 +47,17 @@ async function callReplica(
   controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal,
 ): Promise<Response> {
   let lease;
+  // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves, a cold one is skipped as `cold` and never woken.
+  const noWake = noWakeActive();
   try {
-    lease = await controller.acquire(name, { waitMs: opts.waitMs ?? 0 });
+    lease = await controller.acquire(name, noWake ? { waitMs: 0, noWake: true } : { waitMs: opts.waitMs ?? 0 });
   } catch (err) {
     if (!(err instanceof DeploymentError)) throw err;
     if (err.status === 404) throw new DeploymentCallError(404, err.message, 'not_found');
     if (err.status === 409) throw new DeploymentCallError(503, err.message, 'paused');
     // No ready replica (scaled to zero / booting): make sure it is scaling up, and let the chain fall back now.
-    try { controller.wake?.(name); } catch { /* deployment vanished meanwhile */ }
+    if (noWake) recordNoWakeSkip();
+    else try { controller.wake?.(name); } catch { /* deployment vanished meanwhile */ }
     throw new DeploymentCallError(503, err.message, 'cold');
   }
   let res: Response;
@@ -90,6 +94,7 @@ abstract class DeploymentProviderBase {
   getModels(): ModelInfo[] { return []; }
   /** Starts scaling up a cold deployment without sending a request (e.g. when an answer came from the cache). */
   prewarm(): void {
+    if (noWakeActive()) return;
     const status = (this.controller.get(this.deployment) as { status?: string } | null)?.status;
     if (status === 'scaled-to-zero' || status === 'warming') this.controller.wake?.(this.deployment);
   }

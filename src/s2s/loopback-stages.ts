@@ -6,6 +6,7 @@
  */
 
 import { SUBREQUEST_HEADER, SUBREQUEST_TOKEN } from '../gateway/proxy/internal-subrequest';
+import { NO_WAKE_HEADER, noWakeActive } from '../gateway/proxy/no-wake';
 import type { ChatMessage, S2SConfig, SpokenAudio, StageAnswer, StageClient } from './composite';
 
 export interface LoopbackOptions {
@@ -102,7 +103,10 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
     return model;
   };
   const models = { get stt() { return pick('stt'); }, get chat() { return pick('chat'); }, get tts() { return pick('tts'); } };
-  const auth = { Authorization: opts.authorization, [SUBREQUEST_HEADER]: SUBREQUEST_TOKEN };
+  // A no-wake turn (gateway/proxy/no-wake.ts) keeps its stage sub-requests no-wake too (built inside the request scope).
+  const auth: Record<string, string> = {
+    Authorization: opts.authorization, [SUBREQUEST_HEADER]: SUBREQUEST_TOKEN, ...(noWakeActive() ? { [NO_WAKE_HEADER]: '1' } : {}),
+  };
   return {
     async transcribe(audio, contentType, cfg, signal) {
       return retryStage(async () => {

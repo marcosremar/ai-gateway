@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile.production"
   },
   "deploy": {
-    "startCommand": "./reap-compiled",
+    "startCommand": "./reap-compiled --apply",
     "cronSchedule": "*/15 * * * *",
     "restartPolicyType": "NEVER"
   }

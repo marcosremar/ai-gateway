@@ -91,6 +91,23 @@ with the fallback hedged in, so the probe never makes the client wait the full t
 for: the gateway starts scaling it up and answers from the fallback in the same call; once a replica is ready,
 traffic returns to it. A real client error (e.g. `400` invalid request) is returned as is.
 
+### No-wake mode — `X-Gateway-No-Wake: 1` / `GATEWAY_NO_WAKE_USERS`
+
+A request that must never start a rented machine (a test, a probe, a batch job, a dev box) sends
+`X-Gateway-No-Wake: 1` (`true`/`yes` too); a key user listed in `GATEWAY_NO_WAKE_USERS` (comma list of the user names
+of `API_KEYS="key:user"`, read per request) is always in this mode. Found 2026-10-07: one STT request to `parle-stt`
+woke a €1.47/h L40S, because its primary is `deployment:parle-speech` and a cold primary is woken for the next turns.
+
+| Route | Deployment with a **ready** replica | Deployment cold / stopped / booting / absent |
+|---|---|---|
+| `/v1/audio/transcriptions`, `/v1/chat/completions`, `/v1/audio/speech` | served by it | skipped with `X-Gateway-Fallback: cold` (neutral: no circuit, no cooldown); the cloud fallback answers; nothing woken |
+| cached STT answer | — | served from the cache; the primary is **not** prewarmed |
+| `/v1/s2s` | its own `/v1/s2s` | composed pipeline (`route` event `fallback: cold`); its stage sub-requests stay no-wake |
+| `/v1/deployments/:name/invoke/…` | forwarded | `503 {"status":"cold","code":"cold","noWake":true}` + `Retry-After: 30` at once (no wait) |
+
+Nothing is created, and the deployment's idle clock (`lastRequestAt`) is not touched, so a replica already running
+idles out on its own schedule. `GET /health` counts the skips: `"noWake": {"skips": N}`.
+
 ### App aliases — `PUT /v1/apps/:app/routes`
 
 The gateway's code names no app model. An app that wants its own model names (`parle-stt`, `parle-llm`,
@@ -248,7 +265,8 @@ Every successful response of the three routes carries (no secrets):
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
 An STT answer served from the gateway's 5-minute cache (same audio, model, language and format) carries
-`X-Gateway-Provider: cache` and `X-Cache: HIT`; it still wakes a cold primary deployment for the next turn.
+`X-Gateway-Provider: cache` and `X-Cache: HIT`; it still wakes a cold primary deployment for the next turn (not in
+no-wake mode).
 
 ### `503 provider_unavailable`
 
@@ -319,7 +337,7 @@ audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`part
 | Situation | What answers | `route` event |
 |---|---|---|
 | speech-stack deployment ready (`config.deployment`, else `S2S_DEPLOYMENT`) | its own `/v1/s2s`: STT + LLM + TTS on one GPU (0.4–0.8 s to first audio measured) | `deployment:parle-speech` |
-| deployment cold / paused / absent | woken for the next turns; this turn by the **composed pipeline**: `models.stt` → streamed `models.chat` → `models.tts` per sentence, each stage with its own chain, hedge and breaker (above) | `composite`, `fallback: cold\|paused\|not_found` |
+| deployment cold / paused / absent | woken for the next turns (not in no-wake mode); this turn by the **composed pipeline**: `models.stt` → streamed `models.chat` → `models.tts` per sentence, each stage with its own chain, hedge and breaker (above) | `composite`, `fallback: cold\|paused\|not_found` |
 | deployment has not sent the transcript after `S2S_HEDGE_MS` (2.5 s) | composed pipeline in parallel; first to produce audio wins, the other is aborted | `composite`, `fallback: slow` |
 | deployment breaks after the transcript, before audio | composed pipeline resumes at the LLM with that transcript (no second STT) | `composite`, `fallback: resumed` |
 | deployment breaks after audio started | in-band `error` (`partial: true`) and `done` | — |
@@ -419,7 +437,7 @@ production namespace (`default` on Railway).
 | `GET` | `/v1/deployments/:name` | status + replicas |
 | `DELETE` | `/v1/deployments/:name` | release every replica and forget the spec |
 | `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) |
-| any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it). Raw passthrough: the STT hallucination filter does NOT apply here (use `/v1/audio/transcriptions` or `/v1/s2s`) |
+| any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it; `X-Gateway-No-Wake: 1` → 503 `cold` at once instead). Raw passthrough: the STT hallucination filter does NOT apply here (use `/v1/audio/transcriptions` or `/v1/s2s`) |
 | `GET` | `/v1/profiles` | built-in + stored profiles (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`, …) |
 | `PUT` / `DELETE` | `/v1/profiles/:name` | store / delete a profile |
 
@@ -478,7 +496,7 @@ the **effective chain of every parle stage** and the state of each link, so a pr
 
 ```json
 {
-  "status": "ok", "connections": { "active": 1, "peak": 3 },
+  "status": "ok", "connections": { "active": 1, "peak": 3 }, "noWake": { "skips": 0 },
   "stages": {
     "stt": { "parle-stt": { "serving": "openrouter:openai/whisper-large-v3-turbo", "onFallback": true, "links": [
       { "target": "deployment:parle-speech", "state": "pending", "reason": "GHCR_READ_TOKEN is not set (registry credential for ghcr.io)" },
@@ -498,6 +516,7 @@ Link states: `ready`, `cold` (deployment scaled to zero / starting — requests 
 exist: every request falls back with `not_configured`), `disabled` (no `SCW_SECRET_KEY`), `no_key`, `blocked`
 (account data policy), `circuit_open`. `warnings` has one line per chain whose first link is neither `ready` nor
 `cold`.
+`noWake.skips`: deployment targets skipped (and invokes refused) by no-wake requests since the process started.
 
 ### `GET /health?deep=1` (admin)
 

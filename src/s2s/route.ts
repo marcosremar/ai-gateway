@@ -7,8 +7,9 @@
  * Routing, in order:
  *  1. primary: the speech-stack deployment (`config.deployment`, else `S2S_DEPLOYMENT`) answers
  *     on its own `/v1/s2s` — STT, LLM and TTS on one GPU, the lowest latency (0.4–0.8 s to first audio measured);
- *  2. no ready replica (cold, paused, absent, refused): the deployment is woken for the next turns and this one is
- *     answered at once by the composed pipeline (composite.ts) over the stage chains, each with its own fallback;
+ *  2. no ready replica (cold, paused, absent, refused): the deployment is woken for the next turns (never in no-wake
+ *     mode, gateway/proxy/no-wake.ts) and this one is answered at once by the composed pipeline (composite.ts) over
+ *     the stage chains, each with its own fallback;
  *  3. hedge: the primary has not sent its transcript after `S2S_HEDGE_MS` (default 2.5 s) → the composed pipeline
  *     starts in parallel; the first one to produce audio wins, the other is aborted;
  *  4. the primary breaks after its transcript but before audio → the composed pipeline resumes at the LLM with that
@@ -22,6 +23,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { DeploymentError, type DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
 import { applySttFilter, filterEnabled } from '../gateway/proxy/routes/stt-filter';
+import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { runComposite, type S2SConfig, type StageClient } from './composite';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
 
@@ -188,12 +190,15 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       if (!deployment || !opts.controller || !opts.controller.get(deployment)) skip = 'not_found';
       else if (config.speak_field && !opts.primarySpeaksJson) skip = 'unsupported';
       else {
+        // No-wake mode (gateway/proxy/no-wake.ts): a ready replica still answers; a cold one is not woken (composed).
+        const noWake = noWakeActive();
         try {
-          lease = await opts.controller.acquire(deployment, { waitMs: 0 });
+          lease = await opts.controller.acquire(deployment, noWake ? { waitMs: 0, noWake: true } : { waitMs: 0 });
         } catch (err) {
           if (!(err instanceof DeploymentError)) throw err;
           skip = err.status === 409 ? 'paused' : err.status === 404 ? 'not_found' : 'cold';
-          if (skip === 'cold') { try { opts.controller.wake(deployment); } catch { /* vanished */ } }
+          if (skip === 'cold' && noWake) recordNoWakeSkip();
+          else if (skip === 'cold') { try { opts.controller.wake(deployment); } catch { /* vanished */ } }
         }
       }
 

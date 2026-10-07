@@ -130,6 +130,11 @@ curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # ima
 - How long a boot takes is mostly the image + model: a small CPU image is ready in ~1–2 min; Qwen3-TTS on an L4 took
   ~7–8 min in the parle measurement (`babylon-cinema/docs/reports/2026-10-01-tts-l4-ai-gateway`). For those, use
   `minReplicas: 1` while there is traffic, or `POST …/wake` ahead of time, or accept the 503 + retry.
+- **No-wake mode**: a request with `X-Gateway-No-Wake: 1`, or from a key user in `GATEWAY_NO_WAKE_USERS` (comma list),
+  never wakes a deployment. A ready replica still serves it; with none ready the deployment is skipped as `cold` and
+  the route's cloud fallback answers (`/v1/s2s`: composed; `invoke`: 503 `cold` at once), nothing is created and the
+  idle clock is not touched. Use it for tests, probes and batch keys (2026-10-07: one STT test request woke a €1.47/h
+  L40S through `parle-stt` → `deployment:parle-speech`). `GET /health` → `noWake.skips`. Details: `docs/api/http.md`.
 - While a request is being served, extra replicas boot when `inflight > targetInflightPerReplica × ready`; requests go
   to the ready replica with the fewest requests in flight; a connection failure retries once on another replica.
 
@@ -295,14 +300,29 @@ plain HTTP (TLS with a pinned per-deployment certificate is a follow-up).
 ## Orphan guard
 
 While the gateway runs it never leaves a machine behind (scale to zero, halted replicas deleted, unknown machines of its
-namespace released on restart). If the gateway itself is down, its machines would keep billing — powering off from
-inside does not stop a Scaleway bill (nor an exited Vast instance's disk). So a second Railway service, **`ai-gateway-reaper`**, runs the same image as a cron
-job (`*/15 * * * *`, start command `./reap-compiled`; it is published with `railway.reaper.json` as its `railway.json`, `scripts/reap-orphans.ts` → `src/deployments/reaper.ts`) with
-`SANDBOX_TOKEN`, `GATEWAY_URL` and the same `DEPLOYMENTS_NAMESPACE` (it reaps every provider with a key — Scaleway
-and Vast — each listed on its own, so one provider failing does not spare the other's machines): it probes `GATEWAY_URL/health` 4 times over ~2 min and,
-only if every probe failed, deletes that namespace's machines older than 30 min. A redeploy or a short blip answers
-one of the probes and costs nothing. Worst case for a dead gateway: 15 min + 2 min + the machine's remaining minutes to
-reach 30 min of age.
+namespace released on restart). If the gateway itself is down, or its bookkeeping lost a machine, that machine would keep
+billing — powering off from inside does not stop a Scaleway bill (nor an exited Vast instance's disk). So a second
+Railway service, **`ai-gateway-reaper`**, runs the same image as a cron job (`*/15 * * * *`, start command
+`./reap-compiled --apply`; it is published with `railway.reaper.json` as its `railway.json`, `scripts/reap-orphans.ts` →
+`src/deployments/reaper.ts`). It reaps every provider with a key — Scaleway servers tagged `aigw-ns-<namespace>` and Vast
+instances labelled `aigw:<namespace>:<deployment>` — each listed on its own, so one provider failing does not spare the
+other's machines. It probes `GATEWAY_URL/health` 4 times over ~2 min, then:
+
+| Gateway | What it releases |
+|---|---|
+| **down** (every probe failed) | every machine of the namespace older than 30 min. A redeploy or a short blip answers one probe and costs nothing. Worst case for a dead gateway: 15 min + 2 min + the machine's remaining minutes to reach 30 min of age. Network resources are left alone (it cannot know which deployments exist). |
+| **up**, with `AI_GATEWAY_ADMIN_KEY` | cross-check: `GET /v1/deployments` with that admin key says which deployments exist; a machine whose deployment is not among them and older than `REAPER_GRACE_MINUTES` (default 30) is released (Scaleway: server **and** its SBS volumes, awaited). Scaleway reserved IPs and security groups tagged for a deployment the gateway does not have, used by no server, go too; the namespace's shared `aigw-<ns>-gateway-only` firewall never does. |
+| **up**, no admin key | nothing (as before 2026-10-07). |
+
+The cross-check trusts only a full list of its own namespace (`"scope": "all"` and `"namespace"` in the answer): a
+non-admin key, another namespace, a non-2xx, or a gateway build from before `scope` skips it (`skipped` in the log)
+instead of reading "nothing exists". Run by hand it is a **dry run** (`bun scripts/reap-orphans.ts` lists what it would
+release); `--apply` releases. Exit 1 when a list or a release failed (the next run retries).
+
+Env of the reaper service: `GATEWAY_URL`, `DEPLOYMENTS_NAMESPACE` (same as the gateway), `SANDBOX_TOKEN` (fetches
+`SCW_SECRET_KEY` / `VAST_API_KEY` from the dev API — or set those directly), `AI_GATEWAY_ADMIN_KEY` (a gateway key whose
+user is in the gateway's `DEPLOYMENTS_ADMIN_USERS`; never the `SANDBOX_TOKEN`, which the script refuses), optional
+`SCW_DEFAULT_PROJECT_ID`, `REAPER_GRACE_MINUTES`.
 
 ## Running on Railway
 
@@ -386,7 +406,8 @@ Inside the gateway process, without a cron of its own:
 The janitor covers Scaleway only (a deleted Vast instance takes its disk with it; Vast has no build machines).
 The janitor is on by default on Railway (`DEPLOYMENTS_JANITOR=0` turns it off; `=1` turns it on elsewhere). When the
 gateway itself is down nothing in its process runs: the reaper (`scripts/reap-orphans.ts`, a separate Railway cron
-every 15 min) releases the namespace's replicas after the gateway missed its health checks for ~2 min.
+every 15 min) releases the namespace's replicas after the gateway missed its health checks for ~2 min, and while the
+gateway is up it releases machines (and Scaleway IPs/firewalls) that no deployment owns (see Orphan guard).
 
 
 ## Exposed deployments (WebRTC, own TLS) and `idleAction: "stop"`

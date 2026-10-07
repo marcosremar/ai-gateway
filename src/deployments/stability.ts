@@ -51,6 +51,49 @@ export function cleanEvent(raw: unknown, now: number): ClientInstabilityEvent | 
   return out;
 }
 
+// ── What goes to disk ───────────────────────────────────────────────────────
+// The file gets a rebuilt copy, not the request's strings (CodeQL js/http-to-file-access, PR #45): numbers as numbers,
+// `kind`/`route` only from the SDK's own vocabulary, and every free-text field re-spelled character by character from
+// a fixed alphabet (anything else, newlines included, becomes `_`), bounded in length. One report stays one line.
+
+const EVENT_KINDS = ['unreachable', 'slow', 'direct', 'direct_failed', 'recovered', 'breaker_open'] as const;
+const ROUTES = ['gateway', 'direct'] as const;
+const SAFE_CHARS = new Map<string, string>(
+  [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_.:/@()[],;=+#%?&\'éèêàçãõáíóúâôü'].map(c => [c, c]),
+);
+
+/** Free text for the file: only `SAFE_CHARS` (each taken from the table, not from the input), at most `max` chars. */
+export function fileText(v: string | undefined, max: number): string | undefined {
+  if (v === undefined) return undefined;
+  let out = '';
+  for (const c of v.slice(0, max)) out += SAFE_CHARS.get(c) ?? '_';
+  return out;
+}
+
+const pick = <T extends string>(allowed: readonly T[], v: string | undefined): T | 'other' | undefined =>
+  v === undefined ? undefined : allowed.find(a => a === v) ?? 'other';
+
+const finite = (n: number | undefined): number | undefined => (typeof n === 'number' && Number.isFinite(n) ? Math.round(n) : undefined);
+
+/** The JSONL record of one batch: whitelisted fields and types only. */
+export function fileRecord(batch: ClientStabilityBatch): Record<string, unknown> {
+  return {
+    app: fileText(batch.app, 40),
+    client: fileText(batch.client, 80),
+    receivedAt: finite(batch.receivedAt),
+    receivedAtIso: new Date(finite(batch.receivedAt) ?? 0).toISOString(),
+    events: batch.events.slice(0, MAX_EVENTS_PER_REPORT).map(e => ({
+      at: finite(e.at),
+      kind: pick(EVENT_KINDS, e.kind),
+      ...(e.path !== undefined ? { path: fileText(e.path, MAX_FIELD.path) } : {}),
+      ...(e.code !== undefined ? { code: fileText(e.code, MAX_FIELD.code) } : {}),
+      ...(e.route !== undefined ? { route: pick(ROUTES, e.route) } : {}),
+      ...(e.latencyMs !== undefined ? { latencyMs: finite(e.latencyMs) } : {}),
+      ...(e.detail !== undefined ? { detail: fileText(e.detail, MAX_FIELD.detail) } : {}),
+    })),
+  };
+}
+
 export interface ClientStabilityOptions {
   /** JSONL file to append reports to (e.g. `<DEPLOYMENTS_STATE_DIR>/client-stability.jsonl`); absent = memory only. */
   file?: string;
@@ -97,7 +140,7 @@ export class ClientStabilityLog {
     this.chain = this.chain.then(async () => {
       try {
         await mkdir(dirname(file), { recursive: true });
-        await appendFile(file, `${JSON.stringify(batch)}\n`, 'utf8');
+        await appendFile(file, `${JSON.stringify(fileRecord(batch))}\n`, 'utf8');
       } catch (err) {
         this.log('client stability report: could not persist', { error: String((err as Error).message ?? err).slice(0, 120) });
       }

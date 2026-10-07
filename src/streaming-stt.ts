@@ -21,6 +21,7 @@
  */
 
 import type { DeploymentController, Lease } from './deployments/controller';
+import { noWakeActive, recordNoWakeSkip } from './gateway/proxy/no-wake';
 import { replicaBase } from './deployments/http';
 
 const FIREWORKS_STREAMING_URL =
@@ -471,11 +472,13 @@ export class StreamingSTTRouter {
     const name = this._deploymentName();
     if (!dep || !name) return null;
     let lease: Lease;
+    const noWake = noWakeActive(); // gateway/proxy/no-wake.ts: use a ready replica, never wake a cold one
     try {
-      lease = await dep.controller.acquire(name, { waitMs: dep.acquireWaitMs ?? DEFAULT_DEPLOYMENT_ACQUIRE_MS });
+      lease = await dep.controller.acquire(name, noWake ? { waitMs: 0, noWake: true } : { waitMs: dep.acquireWaitMs ?? DEFAULT_DEPLOYMENT_ACQUIRE_MS });
     } catch (err) {
       // Cold or saturated: start replicas so the next session lands warm, then let the caller fall through.
-      try { dep.controller.wake(name); } catch { /* deployment gone */ }
+      if (noWake) recordNoWakeSkip();
+      else try { dep.controller.wake(name); } catch { /* deployment gone */ }
       logDebug(this.config.logger, '[StreamingSTT] Deployment acquire failed (hedging): %s',
         err instanceof Error ? err.message : err);
       return null;
