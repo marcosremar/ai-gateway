@@ -15,8 +15,8 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "autoscaler": {
-    "raw": 474706,
-    "gzip": 106238,
+    "raw": 474698,
+    "gzip": 106235,
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "benchmarking": {
@@ -35,9 +35,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "client": {
-    "raw": 125460,
-    "gzip": 30330,
-    "reason": "2026-10-07: the client entry now builds sdk/node (GatewayClient, the package's ./client export) instead of the deprecated src/client AIClient; size measured with a single-entry tsup build (esm, treeshake, es2017)"
+    "raw": 127987,
+    "gzip": 31181,
+    "reason": "2026-10-07 dead-code cleanup: src/index.ts re-exported the stale src/modules copies; it now re-exports the live src/ implementations serve.ts runs (provider-routing, circuit breakers, STT filter/segments, chat/audio routes), +~75 KB of real code. client = sdk/node (GatewayClient), the ./client export"
   },
   "compute": {
     "raw": 4521,
@@ -45,19 +45,19 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "gpu-providers": {
-    "raw": 392687,
-    "gzip": 93096,
+    "raw": 392679,
+    "gzip": 93092,
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "handlers": {
-    "raw": 225705,
-    "gzip": 50286,
+    "raw": 225697,
+    "gzip": 50283,
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "index": {
-    "raw": 1472035,
-    "gzip": 319579,
-    "reason": "API audit 2026-10-07: s2s access/app limits, /health views, error types, request ids, CORS lists (#47 routing hedge on top)"
+    "raw": 1557915,
+    "gzip": 344237,
+    "reason": "2026-10-07 dead-code cleanup: src/index.ts re-exported the stale src/modules copies; it now re-exports the live src/ implementations serve.ts runs (provider-routing, circuit breakers, STT filter/segments, chat/audio routes), +~75 KB of real code. client = sdk/node (GatewayClient), the ./client export"
   },
   "infra": {
     "raw": 4116,
@@ -80,9 +80,9 @@
     "reason": "API audit 2026-10-07: s2s access/app limits, /health views, error types, request ids, CORS lists (#47 routing hedge on top)"
   },
   "proxy": {
-    "raw": 173561,
-    "gzip": 45224,
-    "reason": "API audit 2026-10-07: s2s access/app limits, /health views, error types, request ids, CORS lists (#47 routing hedge on top)"
+    "raw": 173608,
+    "gzip": 45245,
+    "reason": "2026-10-07 dead-code cleanup: src/index.ts re-exported the stale src/modules copies; it now re-exports the live src/ implementations serve.ts runs (provider-routing, circuit breakers, STT filter/segments, chat/audio routes), +~75 KB of real code. client = sdk/node (GatewayClient), the ./client export"
   },
   "tracking": {
     "raw": 20369,
