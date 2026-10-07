@@ -43,6 +43,7 @@ export interface RealtimeSessionOptions {
   onEvent: (event: RealtimeEvent) => void;
   /** The NPC's audio on WebRTC (null when it ends). Absent: played by an `<audio>` element the SDK creates. */
   onRemoteAudio?: (stream: MediaStream | null) => void;
+  playoutDelayMs?: number;
   preferredTransports?: TransportType[];
   timeouts?: Partial<RealtimeTimeouts>;
   /** Where the winner is remembered (default `localStorage`, guarded); null = never remembered. */
@@ -147,6 +148,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   const ctx: TransportContext = {
     get descriptor() { return descriptor; },
     timeouts, fetchImpl, telemetry,
+    playoutDelayMs: opts.playoutDelayMs,
     get traceparent() { return telemetry.traceparent; },
     mic: () => (mic ??= opts.getMicStream()),
     emit,

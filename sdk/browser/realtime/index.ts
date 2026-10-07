@@ -25,7 +25,7 @@ export {
 } from './pcm';
 export { CAPTURE_WORKLET, PLAYER_WORKLET, createPcmCapture, createPcmPlayer } from './audio-io';
 export type { PcmCapture, PcmPlayer } from './audio-io';
-export { createWebRtcTransport } from './transports/webrtc';
+export { createWebRtcTransport, setPlayoutDelay } from './transports/webrtc';
 export { createWsTransport } from './transports/ws';
 export { createPostTransport, createS2SStreamTransport, mapS2SEvent } from './transports/clip';
 export type { PostTurn, PostTurnResult, S2SEndpoint } from './transports/clip';

@@ -83,6 +83,18 @@ async function reportRelay(pc: RTCPeerConnection, ctx: TransportContext): Promis
   } catch { /* stats unavailable */ }
 }
 
+export function setPlayoutDelay(receiver: RTCRtpReceiver | undefined, ms: number): 'jitterBufferTarget' | 'playoutDelayHint' | null {
+  const r = receiver as { jitterBufferTarget?: number | null; playoutDelayHint?: number | null } | undefined;
+  if (!r) return null;
+  try {
+    if ('jitterBufferTarget' in r) { r.jitterBufferTarget = ms; return 'jitterBufferTarget'; }
+    if ('playoutDelayHint' in r) { r.playoutDelayHint = ms / 1000; return 'playoutDelayHint'; }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer, deps?: Partial<WebRtcDeps>): RealtimeTransport {
   const PC = deps?.RTCPeerConnection ?? (globalThis as { RTCPeerConnection?: typeof RTCPeerConnection }).RTCPeerConnection;
   let pc: RTCPeerConnection | null = null;
@@ -117,7 +129,10 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
         try { ctx.emit(JSON.parse(String(e.data))); } catch { /* not JSON: ignored */ }
       };
       channel.onclose = () => failOnce('data channel closed');
-      pc.ontrack = (e: RTCTrackEvent) => ctx.remoteAudio(e.streams[0] ?? new MediaStream([e.track]));
+      pc.ontrack = (e: RTCTrackEvent) => {
+        setPlayoutDelay(e.receiver, ctx.playoutDelayMs ?? 0);
+        ctx.remoteAudio(e.streams[0] ?? new MediaStream([e.track]));
+      };
       pc.oniceconnectionstatechange = () => {
         const state = pc?.iceConnectionState;
         ctx.telemetry.emit('rt.ice.state', { attrs: { state } });
