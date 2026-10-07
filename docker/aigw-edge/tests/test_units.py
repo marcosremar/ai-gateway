@@ -63,6 +63,20 @@ def rejects(claims_, reason, k=key):
 
 
 check("token: replay", rejects(good, "replayed"))
+ladder = sign({**good, "sid": "s-ladder"}, key)
+v.verify(ladder, transport="webrtc")
+check("token: the ladder's next rung (ws) may use the token webrtc used", v.verify(ladder, transport="ws")["sid"] == "s-ladder")
+
+
+def rejects_on(token_, transport):
+    try:
+        v.verify(token_, transport=transport)
+    except TokenError as e:
+        return e.reason == "replayed"
+    return False
+
+
+check("token: but each transport only once", rejects_on(ladder, "webrtc") and rejects_on(ladder, "ws"))
 check("token: expired", rejects({**good, "sid": "s2", "iat": int(now) - 400, "exp": int(now) - 100}, "expired"))
 check("token: lifetime", rejects({**good, "sid": "s3", "exp": int(now) + 3600}, "ttl_too_long"))
 check("token: replica", rejects({**good, "sid": "s4", "rep": "fr-par-2:other"}, "replica"))

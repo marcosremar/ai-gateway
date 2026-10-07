@@ -61,10 +61,7 @@ export interface GatewayTelemetryEvent {
   attrs?: Record<string, string | number | boolean | null>;
 }
 
-/**
- * TODO(telemetry): once the telemetry PR is merged and this branch rebased, serve.ts passes
- * `realtimeSinkToTelemetry(...)` here instead of the log default.
- */
+/** Where gateway realtime events go; serve.ts passes `realtimeSinkToTelemetry(...)`, the default is the log. */
 export type RealtimeTelemetrySink = (event: GatewayTelemetryEvent) => void;
 
 export function makeEmitter(sink: RealtimeTelemetrySink | undefined, log: (msg: string, data?: Record<string, unknown>) => void) {

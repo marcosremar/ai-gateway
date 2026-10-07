@@ -69,7 +69,10 @@ class TokenVerifier:
         self.key, self.replica_id, self.deployment, self.now = key, replica_id, deployment, now
         self._used: dict[str, float] = {}
 
-    def verify(self, token: str, consume: bool = True) -> dict:
+    def verify(self, token: str, consume: bool = True, transport: str = "") -> dict:
+        """Single use per transport: the SDK's ladder tries WebRTC then WS with the one token of its admission (a second
+        admission would charge the app's budget again and hold a second slot), so `sid` may open one session of each
+        transport; the edge keeps one live session per sid (Server.supersede). Without `transport`, the sid is the key."""
         try:
             head_b, body_b, sig_b = token.split(".")
             head = json.loads(b64url_decode(head_b))
@@ -111,8 +114,9 @@ class TokenVerifier:
         for old, until in list(self._used.items()):
             if until < now:
                 del self._used[old]
-        if sid in self._used:
+        use = f"{sid}/{transport}" if transport else sid
+        if use in self._used or sid in self._used:
             raise TokenError("replayed")
         if consume:
-            self._used[sid] = float(exp)
+            self._used[use] = float(exp)
         return {**claims, "cfg": cfg}

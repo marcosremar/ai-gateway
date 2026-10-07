@@ -125,17 +125,18 @@ class Edge:
     def active(self) -> int:
         return len(self.host.sessions) + len(self.routes)
 
-    def admit(self, token: str | None, trace_id: str) -> tuple[dict | None, tuple[int, str, str] | None]:
+    def admit(self, token: str | None, trace_id: str, transport: str) -> tuple[dict | None, tuple[int, str, str] | None]:
         """(claims, None) or (None, (http status, error code, message)). Capacity is checked before the token is
-        consumed, so a learner refused here can still use the same token on another replica."""
+        consumed, so a learner refused here can still use the same token on another replica. A session of the same
+        sid on the other transport (the ladder's previous rung) does not count: it is superseded once this one is in."""
         if not token:
             return None, (401, "unauthorized", "token missing")
         try:
-            self.verifier.verify(token, consume=False)
+            claims = self.verifier.verify(token, consume=False, transport=transport)
         except TokenError as error:
             telemetry.emit("edge.token.reject", trace_id=trace_id, level="warn", reason=error.reason)
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
-        if self.active() >= self.s.max_sessions:
+        if self.active() - self.holds(claims["sid"]) >= self.s.max_sessions:
             telemetry.emit("edge.capacity.reject", trace_id=trace_id, level="warn", active=self.active(), max=self.s.max_sessions)
             return None, (503, "capacity", f"replica full ({self.active()}/{self.s.max_sessions} sessions)")
         if not self.up.ready:
@@ -143,9 +144,23 @@ class Edge:
                            max=self.s.max_sessions, reason="warming")
             return None, (503, "warming", "models not ready yet")
         try:
-            return self.verifier.verify(token), None
+            return self.verifier.verify(token, transport=transport), None
         except TokenError as error:
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
+
+    def holds(self, sid: str) -> int:
+        return 1 if sid in self.routes or sid in self.host.sessions else 0
+
+    async def supersede(self, sid: str) -> None:
+        """Ends the sid's previous session (the rung the SDK gave up on): one live session per token."""
+        if sid in self.routes:
+            route = self.routes.pop(sid)
+            try:
+                await self.worker_call(route["worker"], "DELETE", f"/__edge/session/{sid}")
+            except Exception:  # noqa: BLE001 — the worker may already have dropped it
+                pass
+        elif sid in self.host.sessions:
+            await self.host.end(sid, "superseded")
 
     # ── HTTP routes ──────────────────────────────────────────────────────────
 
@@ -183,9 +198,10 @@ class Edge:
         except Exception as error:  # noqa: BLE001
             return web.json_response(error_body("bad_request", f"{error}"), status=400)
         trace_id = trace_id_from(req.headers.get("traceparent") or body.get("traceparent")) or new_trace_id()
-        claims, refused = self.admit(body.get("token"), trace_id)
+        claims, refused = self.admit(body.get("token"), trace_id, "webrtc")
         if refused:
             return web.json_response(error_body(refused[1], refused[2]), status=refused[0])
+        await self.supersede(claims["sid"])
         if not self.workers:
             try:
                 return web.json_response(await self.host.offer(sdp, claims, trace_id))
@@ -226,12 +242,13 @@ class Edge:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1 << 20)
         await ws.prepare(req)
         trace_id = trace_id_from(req.headers.get("traceparent") or req.query.get("traceparent")) or new_trace_id()
-        claims, refused = self.admit(req.query.get("token"), trace_id)
+        claims, refused = self.admit(req.query.get("token"), trace_id, "ws")
         if refused:
             await ws.send_str(json.dumps({"type": "error", "code": refused[1], "message": refused[2]}))
             await ws.close(code=4401 if refused[0] == 401 else 1013, message=refused[1].encode())
             return ws
         sid = claims["sid"]
+        await self.supersede(sid)
         outbox: asyncio.Queue = asyncio.Queue()
         session = Session(sid, claims, self.s, self.up, lambda e: outbox.put_nowait(json.dumps(e)), "ws", trace_id)
 

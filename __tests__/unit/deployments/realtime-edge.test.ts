@@ -63,7 +63,8 @@ describe('cloud-init with and without realtime', () => {
   it('realtime fields override: maxSessions, edgeImage, udpPorts; L4 preset; telemetry URL from AIGW_PUBLIC_URL', () => {
     vi.stubEnv('AIGW_PUBLIC_URL', 'https://gw2.example');
     try {
-      expect(edgeEnv(speech({ realtime: {} }), TOKEN)).toMatchObject({ RT_MAX_SESSIONS: '8', GATEWAY_URL: 'https://gw2.example' });
+      expect(edgeEnv(speech({ machineType: 'L4-1-24G', realtime: {} }), TOKEN)).toMatchObject({ RT_MAX_SESSIONS: '8', GATEWAY_URL: 'https://gw2.example' });
+      expect(edgeEnv(speech({ realtime: {} }), TOKEN)).toMatchObject({ RT_MAX_SESSIONS: '16' });
       const spec = speech({ realtime: { maxSessions: 5, edgeImage: 'ghcr.io/x/edge:2', udpPorts: [40000, 40049] } });
       const script = replicaCloudInit(spec, TOKEN);
       expect(edgeEnv(spec, TOKEN)).toMatchObject({ RT_MAX_SESSIONS: '5', RT_UDP_PORTS: '40000-40049' });

@@ -36,7 +36,9 @@ import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeo
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
-import { deploymentLogToTelemetry, setGatewayTelemetrySink, telemetryFromEnv } from './src/telemetry';
+import {
+  deploymentLogToTelemetry, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+} from './src/telemetry';
 import { createRealtime } from './src/realtime';
 
 const log = createLogger('serve');
@@ -216,8 +218,11 @@ const s2sAdmit = createS2SAccess({
 
 // Telemetry (docs/api/telemetry.md): POST /v1/telemetry/events from browsers (session token), edges (replica HMAC) and
 // server apps (app key); admin queries under /v1/telemetry/*. The gateway's own events go to the same store.
+// Telemetry auth resolves realtime session tokens through the realtime service, created further down (it needs the sink).
+let realtimeSessionOf: ((token: string) => { sid: string; app: string; dep: string; rep: string } | null) | null = null;
 const telemetry = telemetryFromEnv(process.env, {
   auth: {
+    resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
     resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
     isMasterKey: (token) => TOKEN_ALIASES.some(k => process.env[k]?.trim() === token),
     deployment: (name) => {
@@ -282,8 +287,10 @@ const realtime = createRealtime({
   userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
   isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),
   ...(appLimits ? { charge: (userId: string, n: number) => appLimits.chargeRequests(userId, n) } : {}),
+  ...(telemetry ? { telemetry: realtimeSinkToTelemetry(telemetry.ingest) } : {}),
   log: (msg, data) => log.log(data ?? {}, msg),
 });
+realtimeSessionOf = sessionResolverFrom(realtime.service);
 
 const server = await startProxy({
   port: PORT,
