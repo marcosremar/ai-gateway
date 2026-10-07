@@ -76,9 +76,13 @@ thinking). `finish_reason` is passed through as the provider sent it.
 | Deployment, time to **first byte** — STT / chat / TTS | 4 s / 4 s / 3 s | `DEPLOYMENT_STT_TIMEOUT_MS`, `DEPLOYMENT_CHAT_TIMEOUT_MS`, `DEPLOYMENT_TTS_TIMEOUT_MS` (or `DEPLOYMENT_TIMEOUT_MS` for all) |
 | Hedge: fallback starts in parallel when the deployment has not answered | 1.5 s | `DEPLOYMENT_HEDGE_MS` (`0` = off) |
 | Whole stage (deployment + fallbacks + hedge) | 8 s | `GATEWAY_STT_BUDGET_MS`, `GATEWAY_CHAT_BUDGET_MS`, `GATEWAY_TTS_BUDGET_MS` |
+| Chat, **non-stream** only: extra budget per requested `max_tokens` above the free ones, and its ceiling | 20 ms/token above 256, max 45 s | `GATEWAY_CHAT_BUDGET_PER_TOKEN_MS` (`0` = flat), `GATEWAY_CHAT_BUDGET_FREE_TOKENS`, `GATEWAY_CHAT_BUDGET_MAX_MS` |
 
 Every attempt is aborted when its time is up (a replica lease is released at once), and no attempt outlives the
-stage budget: the answer — or the `503` — arrives within **8 s** per stage. Set the client deadlines above that
+stage budget: the answer — or the `503` — arrives within **8 s** per stage. One exception: a non-stream chat with a
+large `max_tokens` arrives all at once, so its budget (and each attempt's time) grows by 20 ms per token above 256 —
+`max_tokens: 1024` gets ~23 s — capped at 45 s (QA 2026-10-07: a long answer with the GPU cold was a `503` at 8 s).
+A real-time turn (`max_tokens` ≤ 256) and every streamed answer keep the 8 s. Set the client deadlines above that
 with margin (parle: TTS 15 s, chat 12 s are fine; ≥ 10 s recommended). With hedging, a slow or recovering
 deployment costs at most ~1.5 s before the fallback is on its way; the first answer wins and the other call is
 aborted (`X-Gateway-Fallback: slow`). Hedging can bill the fallback for requests the deployment would have served a
@@ -377,8 +381,8 @@ blocklist marks as invented, and answers `{"text":""}` (still `200`; the client 
 
 | | |
 |---|---|
-| response header `X-STT-Filtered` | reason codes, comma separated (`no_speech_prob`, `compression_ratio`, `avg_logprob`, `blocklist`, `blocklist_corroborated`); never transcript text. Also set when only some segments were trimmed |
-| response header `X-STT-Raw-Length` | length in characters of what the provider returned |
+| response header `X-STT-Filtered` | on every `200`: reason codes, comma separated (`no_speech_prob`, `compression_ratio`, `avg_logprob`, `blocklist`, `blocklist_corroborated`, `pattern_credits`, `music`, `repetition`), `none` when the answer was kept, `off` when the filter did not run; never transcript text. Also set when only some segments were trimmed |
+| response header `X-STT-Raw-Length` | length in characters of what the provider returned (on every `200`) |
 | multipart field `filter_hallucinations=false` | per-request opt-out (QA); `0`/`off` also accepted. Such answers are cached apart from filtered ones |
 | `language` | `pt`, `pt-BR` or `Portuguese` (codes and English/native names). Without it only the high-confidence phrases apply |
 | `response_format=verbose_json` | `language`, `duration` and the kept `segments` are returned next to `text` |

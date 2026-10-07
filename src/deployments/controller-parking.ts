@@ -1,5 +1,5 @@
 /**
- * DeploymentController, part 3 of 6 — `idleAction: 'stop'`: powering replicas off (park) and back on, the `stopping`
+ * DeploymentController, part 3 of 7 — `idleAction: 'stop'`: powering replicas off (park) and back on, the `stopping`
  * set (a machine being powered off is neither live nor parked), and the forgotten-park limit. See controller-state.ts.
  */
 

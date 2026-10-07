@@ -14,8 +14,9 @@
 
 import { randomBytes } from 'crypto';
 import { replicaCloudInit } from './cloud-init';
-import { DeploymentError, type Lease, type Runtime } from './controller-state';
+import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './controller-state';
 import { ControllerViews } from './controller-views';
+import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
 import { BUILTIN_PROFILES } from './profiles';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
@@ -23,6 +24,7 @@ import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, Replica
 
 export {
   DeploymentError, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
+  type LeaseOutcome,
 } from './controller-state';
 
 export class DeploymentController extends ControllerViews {
@@ -111,6 +113,29 @@ export class DeploymentController extends ControllerViews {
   }
 
   /**
+   * Pre-warm (`POST /v1/deployments/:name/warm`): keep `replicas` up for `untilMinutes`, whatever the load — a client
+   * that knows a class starts in 10 min asks for it so the voice never switches to the fallback mid-lesson. A later call
+   * replaces the window; `park` ends it; once it expires the normal rules apply. Counts as a request (wakes it).
+   */
+  async warm(name: string, replicas: number, untilMinutes: number): Promise<DeploymentView> {
+    const rt = this.require(name);
+    const { spec } = rt.record;
+    if (!Number.isInteger(replicas) || replicas < 0 || replicas > spec.maxReplicas) {
+      throw new SpecError(`replicas must be an integer 0–${spec.maxReplicas} (the deployment's maxReplicas)`);
+    }
+    if (typeof untilMinutes !== 'number' || !Number.isFinite(untilMinutes) || untilMinutes <= 0 || untilMinutes > 12 * 60) {
+      throw new SpecError('untilMinutes must be a number in (0, 720]');
+    }
+    const now = this.now();
+    rt.record = { ...rt.record, lastRequestAt: now, warm: { replicas, until: now + untilMinutes * 60_000 } };
+    rt.reclaimedAt = null;
+    await this.opts.store.saveDeployment(rt.record);
+    this.log('deployments: warm window', { deployment: name, replicas, untilMinutes });
+    this.kick();
+    return this.view(name)!;
+  }
+
+  /**
    * The caller is done with the deployment now (its traffic bypasses the gateway, so the idle clock cannot see it):
    * forget the last use, and the next tick scales to `minReplicas` — powering off under `idleAction: 'stop'`. A
    * request or `wake` brings it back; in-flight requests are never cut (the planner keeps busy replicas).
@@ -120,6 +145,10 @@ export class DeploymentController extends ControllerViews {
     rt.record.lastRequestAt = null;
     rt.lastPersistedRequestAt = null;
     rt.aboveSince = null;
+    rt.refusedAt = [];
+    rt.demandPeak = { value: 0, at: 0 };
+    rt.pressure = { highSince: null, desired: 0 };
+    if (rt.record.warm) rt.record = { ...rt.record, warm: undefined };
     await this.opts.store.saveDeployment(rt.record);
     this.kick();
     return this.view(name)!;
@@ -131,7 +160,16 @@ export class DeploymentController extends ControllerViews {
     // A host about to be taken back (`expiry.ts`) only serves while nothing else can: new requests drain it.
     const now = this.now();
     const lasting = ready.filter(m => !isExpiring(m, now));
-    return (lasting.length ? lasting : ready).reduce((best, m) => ((rt.perReplica.get(m.id) ?? 0) < (rt.perReplica.get(best.id) ?? 0) ? m : best));
+    // A replica takes at most `target × maxInflightFactor` (bounded queue: the overflow spills to the fallback at once and
+    // its health check still answers); a busy one (health check timed out under load) nothing beyond its target.
+    const target = rt.record.spec.targetInflightPerReplica;
+    const capacity = replicaCapacity(rt.record.spec);
+    const open = (lasting.length ? lasting : ready).filter((m) => {
+      const n = rt.perReplica.get(m.id) ?? 0;
+      return !this.draining.has(m.id) && n < capacity && (!this.probes.get(m.id)?.busy || n < target);
+    });
+    if (!open.length) return null;
+    return open.reduce((best, m) => ((rt.perReplica.get(m.id) ?? 0) < (rt.perReplica.get(best.id) ?? 0) ? m : best));
   }
 
   /**
@@ -147,6 +185,8 @@ export class DeploymentController extends ControllerViews {
     const { spec } = rt.record;
     if (spec.paused) throw new DeploymentError(409, `deployment '${name}' is paused`);
     if (opts.noWake && !this.pick(rt, opts.exclude ?? new Set<string>())) {
+      // A saturated (not cold) deployment still sees the demand, so it scales out; a cold one stays untouched.
+      if (this.readyMachines(name).length) { rt.refusedAt.push(this.now()); this.noteDemand(rt); }
       throw new DeploymentError(503, `deployment '${name}': no ready replica (no-wake: not woken)`, 30);
     }
     rt.record.lastRequestAt = this.now();
@@ -155,7 +195,9 @@ export class DeploymentController extends ControllerViews {
     const exclude = opts.exclude ?? new Set<string>();
 
     let machine = this.pick(rt, exclude);
-    if (!machine) {
+    // Saturated and the caller has a fallback (waitMs 0): no wait — refused below as `saturated`.
+    const spill = !machine && opts.waitMs === 0 && this.servingMachines(name).length > 0;
+    if (!machine && !spill) {
       rt.waiting++;
       this.kick();
       try {
@@ -174,13 +216,22 @@ export class DeploymentController extends ControllerViews {
       }
     }
     if (!machine) {
+      rt.refusedAt.push(this.now());
+      this.noteDemand(rt);
+      if (this.demandOf(rt) > spec.targetInflightPerReplica * this.readyMachines(name).length) this.kick();
+      if (this.servingMachines(name).length) {
+        // Ready but every replica at capacity: the caller spills to its fallback now (no GPU queue up to a timeout).
+        throw new DeploymentError(503, `deployment '${name}': every ready replica is at capacity`, 1, 'saturated');
+      }
       const msg = rt.lastError ? `no ready replica yet (last error: ${rt.lastError})` : 'replicas are starting';
       throw new DeploymentError(503, `deployment '${name}': ${msg}`, 30);
     }
 
     rt.inflight++;
+    const startedAt = this.now();
     rt.perReplica.set(machine.id, (rt.perReplica.get(machine.id) ?? 0) + 1);
     rt.record.lastRequestAt = this.now();
+    this.noteDemand(rt);
     if (rt.inflight > spec.targetInflightPerReplica * this.readyMachines(name).length) this.kick();
     const chosen = machine;
     let released = false;
@@ -188,20 +239,35 @@ export class DeploymentController extends ControllerViews {
       machine: chosen,
       token: rt.record.replicaToken,
       exposed: !!rt.record.spec.exposure,
-      done: (failed = false) => {
+      done: (failed: boolean | LeaseOutcome = false) => {
         if (released) return;
         released = true;
         rt.inflight--;
         const n = (rt.perReplica.get(chosen.id) ?? 1) - 1;
         if (n <= 0) rt.perReplica.delete(chosen.id); else rt.perReplica.set(chosen.id, n);
         rt.record.lastRequestAt = this.now();
-        if (failed) {
-          const p = this.probes.get(chosen.id);
-          if (p) { p.readyNow = false; p.failures++; }
-          this.kick();
-        }
+        const outcome: LeaseOutcome = failed === true ? 'failed' : failed === false ? 'ok' : failed;
+        if (outcome !== 'cancelled') this.recordSample(rt, this.now() - startedAt, outcome !== 'ok');
+        this.leaseEnded(chosen.id, outcome);
+        const next = rt.waiters.values().next().value; // a slot freed: one waiting request may take it
+        if (next) next();
       },
     };
+  }
+
+  /**
+   * What one request says about its replica. `ok`: alive (the busy grace starts). `timeout`: slow, so busy — never a
+   * strike (live QA 2026-10-07: hedged losers aborted under 16 concurrent chats counted as connection failures, 3 of
+   * them marked the L40S unhealthy in seconds). `cancelled`: nothing. `failed`: suspect, unless it just answered others.
+   */
+  private leaseEnded(id: string, outcome: LeaseOutcome): void {
+    const p = this.probes.get(id);
+    if (!p || outcome === 'cancelled') return;
+    if (outcome === 'ok') { p.lastServedAt = this.now(); p.failures = 0; return; }
+    if (outcome === 'timeout' || outcome === 'overloaded' || this.servedRecently(p)) { p.busy = true; return; }
+    p.readyNow = false;
+    p.failures++;
+    this.kick();
   }
 
   private persistRequestTime(rt: Runtime): void {

@@ -48,6 +48,7 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | GET | `/v1/deployments/:name` | status (`scaled-to-zero` · `warming` · `ready` · `degraded` · `paused`), replicas, `lastError` |
 | DELETE | `/v1/deployments/:name` | releases every machine, forgets the spec |
 | POST | `/v1/deployments/:name/wake` | start replicas now |
+| POST | `/v1/deployments/:name/warm` | `{ "replicas": N, "untilMinutes": M }`: keep N replicas up for M minutes (≤ 720) whatever the load — a class about to start; `park` ends it (admin) |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>` |
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |
 | PUT / DELETE | `/v1/profiles/:name` | store / delete your own profile (same fields as a spec) |
@@ -140,13 +141,59 @@ curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # ima
 
 ## Scaling rules (`planner.ts`)
 
-`desired = clamp(max(base, ceil((inflight + waiting) / targetInflightPerReplica)), minReplicas, maxReplicas)`,
-`base = max(minReplicas, 1)` while there was a request in the last `idleMinutes`, else `minReplicas`.
-Surplus replicas go after `scaleDownDelaySeconds` of low load (at once when idle), never one with requests in flight.
-Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, 3 failed health checks in a row,
-older than `maxHours` (counted from the last power-on of a parked replica, not from its creation). Safety: price
+`desired = clamp(max(base, ceil(load / targetInflightPerReplica)), minReplicas, maxReplicas)`,
+`base = max(minReplicas, 1)` while there was a request in the last `idleMinutes`, else `minReplicas`. `load` is
+`inflight + waiting`, or while active the peak of the last 60 s, where a request turned away for lack of a ready replica
+(cold, or every replica saturated) counts for 2 s: a burst of 16 hedged or cold requests still asks for a second
+replica after it ended (live QA 2026-10-07: under 16–40 concurrent the count stayed at 1).
+Surplus replicas go after `scaleDownDelaySeconds` of low load (at once when idle), never one with requests in flight,
+and never one still booting: the boot finishes and the idle clock runs from its ready time (only a delete, pause, park
+or `bootTimeoutMinutes` end a boot early; live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of a 9 min boot).
+Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, `DEPLOYMENTS_UNHEALTHY_STRIKES`
+(3) failed health checks in a row with nothing in flight and no answered request in the last
+`DEPLOYMENTS_BUSY_GRACE_SECONDS` (120), older than `maxHours` (counted from the last power-on of a parked replica, not
+from its creation).
+
+**Busy is not dead.** The probe tells liveness (`/__aigw/ready`, answered by nginx even while the app is saturated) from
+readiness (the app's health path, `DEPLOYMENTS_PROBE_TIMEOUT_MS`, 4 s). A replica whose health check times out while it
+has work, or that answered a request recently, is `busy` (shown per replica in the view): it keeps what it serves, gets no
+new request beyond `targetInflightPerReplica` (the rest falls back and counts as load for scale-out), and is never
+replaced for it. A request the caller aborted (a hedged fallback won, the client left) is neutral, a request that hit
+its time limit marks the replica busy; only a connection failure is a strike. Live QA 2026-10-07: 16 concurrent chats on
+one L40S were 15 hedge losers counted as connection failures, plus health checks queued behind the LLM: the replica was
+replaced twice, 9 min of boot each. Safety: price
 checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS` across all deployments, back-off after a
 failed create (1 → 10 min). More cost guards below.
+
+## Pressure autoscaling (`autoscale.ts`, `controller-autoscale.ts`)
+
+A GPU replica boots in 8–9 min, so the controller scales on pressure, early, and keeps the overflow off the GPU:
+
+- **Signals** per deployment: load (in flight + waiting + requests refused for lack of capacity, peak of the last 60 s),
+  p95 latency of the requests the replicas answered, and the share that timed out or got a 429 (last 60 s, ≥ 5 samples).
+- **Scale-out** when load passes `autoscale.scaleOutAt` (0.75) of `targetInflightPerReplica` × live replicas, or p95 /
+  errors pass `autoscale.latencyP95Ms` (off by default) / `autoscale.errorRate` (0.1), for `autoscale.windowSeconds` (20)
+  in a row — one step per window. Booting replicas count as capacity: latency and errors (which measure the ready ones)
+  ask nothing more while one boots; only load beyond ready + booting capacity does.
+- **Scale-in** only when the load fits one replica fewer at `autoscale.scaleInAt` (0.5) — hysteresis, no flapping —
+  then after `scaleDownDelaySeconds`, never below `minActiveReplicas` while active. A surplus replica with requests in
+  flight is **drained**: no new request, released once empty or after `autoscale.drainSeconds` (120).
+- **Overflow**: a replica takes at most `targetInflightPerReplica` × `autoscale.maxInflightFactor` (1.5); with every ready
+  replica full, a request with a fallback spills to it at once (`X-Gateway-Fallback: saturated`, neutral for breakers)
+  instead of queueing on the GPU until a timeout; an invoke (no fallback) waits in the gateway for a free slot.
+- **Warm-up**: `warmSchedule: [{ "days": [1,2,3,4,5], "start": "08:50", "end": "12:00", "timeZone": "Europe/Paris",
+  "minReplicas": 2 }]` keeps replicas up in those windows (days 0 = Sunday, overnight windows allowed), and `POST …/warm`
+  does the same for one window on demand. Expired windows fall back to the normal rules.
+- **Caps without starvation**: when the replica cap or the € ceiling blocks a deployment under pressure, the controller
+  takes a replica of another deployment that has been idle (no answered request and no request to its deployment) for
+  3 min, above its own floor; that deployment then counts as idle until its next request (no ping-pong).
+- **Explained**: every view carries `autoscale: { desired, pressureWant, reason, blockedBy, floor, load, p95Ms,
+  errorRate }` (e.g. `reason: "load 16 > 75% of 2×8 (at maxReplicas 2)"`, `blockedBy: "maxReplicas 2"`), logged when it changes.
+
+Simulation bench: `bun scripts/autoscale-sim/run.ts [scenario…]` runs the real controller on a virtual clock (9 min boots,
+LLM slow-down past 8 parallel, health check timing out at 12, hedge 1.5 s → fallback 1.2 s) and prints the timelines;
+`__tests__/unit/deployments/autoscale-sim.test.ts` asserts them (ramp, spike, flapping, drain, crash, contention,
+schedule, warm). The 75 % / 50 % / 20 s / 1.5× defaults are design choices to pilot, not published values.
 
 ## Cost guards (gateway-wide)
 
@@ -378,6 +425,13 @@ Gateway run with only `SANDBOX_TOKEN` in its environment (`bun serve.ts`), names
 Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) is a hard idle cut that
 `socket.setTimeout(0)` cannot lift, so a cold-start wait died at 60 s. With deployments on, `serve.ts` raises it to
 15 min unless `PROXY_TOTAL_TIMEOUT_MS` is set (`proxyIdleTimeoutMs`).
+
+**Releasing a Scaleway replica.** The GPU OS images boot from SBS volumes, and Scaleway refuses `terminate` for those and
+answers DELETE with `400 resource_still_in_use` ("instance should be powered off") until the server is `stopped`. The
+release powers it off, polls its state every `SCALEWAY_POWEROFF_POLL_MS` (5 s) for at most `SCALEWAY_POWEROFF_WAIT_MS`
+(180 s), then deletes it — retrying while the API still says in use — and its volumes. The gateway does not wait for
+that (its loop goes on once the power-off was asked; a second release of the same server joins the first); the reaper
+does. Before 2026-10-07 every release logged the 400 and the server went only on a later tick.
 
 ## Tests
 

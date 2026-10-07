@@ -1,5 +1,5 @@
 /**
- * DeploymentController, part 5 of 6 — what callers see: deployment views (secrets stripped), the stored spec for
+ * DeploymentController, part 6 of 7 — what callers see: deployment views (secrets stripped), the stored spec for
  * in-process callers, and the counts `/health` shows. See controller-state.ts.
  */
 
@@ -27,16 +27,34 @@ export abstract class ControllerViews extends ReconcileLoop {
     return this.deployments.get(name)?.record.replicaToken ?? null;
   }
 
-  /** Counts plus the bill: what runs now, the € ceiling and the stopped replicas against their own cap. */
-  health(): {
+  /**
+   * Counts plus the bill: what runs now, the € ceiling and the stopped replicas against their own cap. With `app`, only
+   * that app's deployments are counted and the provider list error is withheld: an app key must not read the other
+   * apps' replicas or the namespace's € burn (live QA 2026-10-07: `GET /v1/deployments` with an app key showed the whole
+   * namespace in `health`). The caps are the gateway's limits, the same for everyone, and stay.
+   */
+  health(app?: string): {
     deployments: number; replicas: number; listError: string | null;
     running: number; maxReplicas: number; stopped: number; maxStopped: number; eurPerHour: number; maxEurPerHour: number;
   } {
+    const limits = {
+      maxReplicas: this.opts.maxTotalReplicas ?? 6, maxStopped: this.opts.maxStoppedReplicas ?? DEFAULT_MAX_STOPPED,
+      maxEurPerHour: this.opts.maxEurPerHour ?? DEFAULT_MAX_EUR_PER_HOUR,
+    };
+    if (app === undefined) {
+      return {
+        deployments: this.deployments.size, replicas: this.machines.length, listError: this.lastListError,
+        running: this.runningMachines().length, stopped: this.stoppedCount(), eurPerHour: round3(this.burnEurPerHour()), ...limits,
+      };
+    }
+    const own = new Set([...this.deployments].filter(([, rt]) => rt.record.app === app).map(([name]) => name));
+    const mine = (m: { deployment: string }) => own.has(m.deployment);
+    const running = this.runningMachines().filter(mine);
     return {
-      deployments: this.deployments.size, replicas: this.machines.length, listError: this.lastListError,
-      running: this.runningMachines().length, maxReplicas: this.opts.maxTotalReplicas ?? 6,
-      stopped: this.stoppedCount(), maxStopped: this.opts.maxStoppedReplicas ?? DEFAULT_MAX_STOPPED,
-      eurPerHour: round3(this.burnEurPerHour()), maxEurPerHour: this.opts.maxEurPerHour ?? DEFAULT_MAX_EUR_PER_HOUR,
+      deployments: own.size, replicas: this.machines.filter(mine).length, listError: null,
+      running: running.length,
+      stopped: this.machines.filter(m => mine(m) && ((this.parkedNow(m) && !this.isStarting(m)) || this.stoppingNow(m))).length,
+      eurPerHour: round3(running.reduce((sum, m) => sum + (m.pricePerHour ?? 0), 0)), ...limits,
     };
   }
 
@@ -55,14 +73,17 @@ export abstract class ControllerViews extends ReconcileLoop {
       pricePerHour: m.pricePerHour,
       ageSeconds: Math.round((now - m.createdAt) / 1000),
       inflight: rt.perReplica.get(m.id) ?? 0,
+      busy: this.probes.get(m.id)?.busy === true,
+      draining: this.draining.has(m.id),
       rttMs: this.gates.get(m.id)?.rttMs ?? null,
       expiresInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
     }));
     const ready = replicas.filter(r => r.phase === 'ready').length;
-    const desired = planReplicas({
+    // The last tick's decision when there is one (pressure and floors included), else the base rules.
+    const desired = Math.max(rt.autoscale.desired, planReplicas({
       spec: rt.record.spec, replicas: [], inflight: rt.inflight, waiting: rt.waiting,
       lastRequestAt: rt.record.lastRequestAt, aboveSince: null, now,
-    }).desired;
+    }).desired);
     const status: DeploymentView['status'] = rt.record.spec.paused ? 'paused'
       : replicas.length === 0 && rt.creating === 0 ? 'scaled-to-zero'
         : ready === 0 ? 'warming'
@@ -85,6 +106,9 @@ export abstract class ControllerViews extends ReconcileLoop {
       appImage: rt.record.appImage ?? null,
       publicIp: rt.record.network?.ip ?? null,
       lastPlacement: rt.lastPlacement,
+      autoscale: { ...rt.autoscale },
+      warm: rt.record.warm && rt.record.warm.until > now
+        ? { replicas: rt.record.warm.replicas, until: new Date(rt.record.warm.until).toISOString() } : null,
     };
   }
 }

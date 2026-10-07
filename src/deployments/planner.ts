@@ -3,11 +3,14 @@
  * counters), calls `planReplicas`, and executes the returned actions. No I/O here, so every rule is unit-tested.
  *
  * Rules:
- *   - desired = clamp(max(base, ceil((inflight + waiting) / targetInflightPerReplica)), min, max)
+ *   - desired = clamp(max(base, ceil(load / targetInflightPerReplica)), min, max), load = inflight + waiting, or
+ *     while active the recent peak `demand` (requests refused for lack of a ready replica included)
  *     where base = max(min, 1) while the deployment is active (a request in flight / waiting, or one in the last
  *     `idleMinutes`) and `min` otherwise — so `minReplicas: 0` scales to zero after the idle window.
  *   - Broken replicas are replaced: provider halted it, boot took longer than `bootTimeoutMinutes`, it stopped
- *     answering health for `unhealthyStrikes` checks in a row, or it reached `maxHours`.
+ *     answering health for `unhealthyStrikes` checks in a row, or it reached `maxHours`. A replica with requests in
+ *     flight, or that answered one recently (`servedRecently`), is busy, not dead: never released as unhealthy (live
+ *     QA 2026-10-07: under 16 concurrent chats the L40S missed its health checks and was replaced twice, 9 min each).
  *   - The idle window counts from the later of the last request and the moment a replica became ready after it,
  *     and a replica booting for the current activity keeps the deployment active: a cold start longer than
  *     `idleMinutes` (a 59 GB speech image boots in ~12 min) is never killed mid-boot by its own idle clock.
@@ -18,7 +21,13 @@
  *     capacity, so its replacement is created at once; it keeps serving until enough other replicas are ready, then
  *     is released as `expiring` as soon as it has no request in flight (the router already sends new ones elsewhere).
  *   - Scale-down above the idle base waits `scaleDownDelaySeconds` of low load (no flapping on bursts) and never
- *     picks a replica with requests in flight. Going idle scales down at once.
+ *     releases a replica with requests in flight: with `drainBusy` such surplus is returned in `drain` (no new request,
+ *     released once empty). Going idle scales down at once.
+ *   - `floor` (warm-up schedule / client warm window) and `autoscaleWant` (pressure, `autoscale.ts`) raise `desired`.
+ *   - A replica still booting is never released for idleness or surplus: the boot finishes and the idle rules apply
+ *     from its ready time (live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of its ~9 min boot, and each
+ *     sparse request paid a new boot). Only a delete, pause, park (`lastRequestAt` null), the pinned-idle guard or the
+ *     boot timeout end a boot early.
  */
 
 import { isExpiring } from './expiry';
@@ -40,7 +49,14 @@ export interface ObservedReplica {
   inflight: number;
   /** First successful ready probe (ms). */
   readyAt?: number;
+  /** Answered a forwarded request within the controller's busy grace: alive, whatever the probe says. */
+  servedRecently?: boolean;
+  /** How long its liveness probe (the front, `/__aigw/ready`) has failed without a break (absent = it answers). */
+  downForMs?: number;
 }
+
+/** A replica whose front stopped answering this long is dead (crashed host), whatever it served before. */
+export const DOWN_GRACE_MS = 30_000;
 
 export interface PlanInput {
   spec: DeploymentSpec;
@@ -55,6 +71,19 @@ export interface PlanInput {
   /** Since when the live replica count has been above desired (hysteresis memory), or null. */
   aboveSince: number | null;
   now: number;
+  /** Failed probes in a row before an idle, silent replica is replaced. Default `UNHEALTHY_STRIKES`. */
+  unhealthyStrikes?: number;
+  /**
+   * Recent peak load (served + waiting + refused for lack of a ready replica), when above the instant `inflight +
+   * waiting`: sizes the replica count while the deployment is active, so a burst still scales out after it ended.
+   */
+  demand?: number;
+  /** Surplus replicas with requests in flight are returned in `drain` instead of being kept (the controller drains). */
+  drainBusy?: boolean;
+  /** Replicas pressure asks for (`autoscale.ts` `pressureDecision`); applies while active. */
+  autoscaleWant?: number;
+  /** Replicas a warm-up schedule or a client warm window keeps up now, whatever the load (`warmFloor`). */
+  floor?: number;
 }
 
 export interface PlanRelease {
@@ -66,6 +95,8 @@ export interface Plan {
   desired: number;
   create: number;
   release: PlanRelease[];
+  /** Surplus replicas that still have requests in flight: drained (no new request) and released once empty. */
+  drain: string[];
   aboveSince: number | null;
   active: boolean;
 }
@@ -77,7 +108,8 @@ export function replicaPhase(r: ObservedReplica): ReplicaPhase {
   return 'booting';
 }
 
-type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now' | 'pinnedIdleMaxMs' | 'specUpdatedAt'>
+type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now' | 'pinnedIdleMaxMs' | 'specUpdatedAt' | 'demand'
+  | 'autoscaleWant' | 'floor'>
   & { replicas?: ObservedReplica[] };
 
 /** A `minReplicas` pin nobody used (no request, no spec change) for `pinnedIdleMaxMs`. */
@@ -105,20 +137,27 @@ export function isActive(input: ActivityInput): boolean {
 
 export function desiredReplicas(input: ActivityInput): number {
   const { spec } = input;
-  if (spec.paused || pinnedIdleOver(input)) return 0;
+  if (spec.paused) return 0;
+  const floor = input.floor ?? 0;
+  if (pinnedIdleOver(input)) return Math.min(spec.maxReplicas, floor);
   const active = isActive(input);
   const base = active ? Math.max(spec.minReplicas, spec.minActiveReplicas ?? 1, 1) : spec.minReplicas;
-  const byLoad = Math.ceil((input.inflight + input.waiting) / spec.targetInflightPerReplica);
-  return Math.min(spec.maxReplicas, Math.max(spec.minReplicas, base, byLoad));
+  const load = Math.max(input.inflight + input.waiting, active ? input.demand ?? 0 : 0);
+  const byLoad = Math.ceil(load / spec.targetInflightPerReplica);
+  const pressure = active ? input.autoscaleWant ?? 0 : 0;
+  return Math.min(spec.maxReplicas, Math.max(spec.minReplicas, base, byLoad, floor, pressure));
 }
 
-function brokenReason(r: ObservedReplica, spec: DeploymentSpec, now: number): PlanRelease['reason'] | null {
+function brokenReason(r: ObservedReplica, spec: DeploymentSpec, now: number, strikes: number): PlanRelease['reason'] | null {
   const phase = replicaPhase(r);
   if (phase === 'halted') return 'halted';
   const age = now - r.machine.createdAt;
   if (age >= spec.maxHours * 3_600_000) return 'max-hours';
   if (phase === 'booting' && age >= spec.bootTimeoutMinutes * 60_000) return 'boot-timeout';
-  if (phase === 'unhealthy' && r.failures >= UNHEALTHY_STRIKES) return 'unhealthy';
+  // Busy is not dead: work in flight or a recent answer keeps it (it gets no new request meanwhile, see `readyNow`).
+  if (phase === 'unhealthy' && r.failures >= strikes && r.inflight === 0 && !r.servedRecently) return 'unhealthy';
+  // …but a front that has not answered its liveness probe for DOWN_GRACE_MS is a dead machine (nginx answers even under load).
+  if (phase === 'unhealthy' && r.failures >= strikes && (r.downForMs ?? 0) >= DOWN_GRACE_MS) return 'unhealthy';
   return null;
 }
 
@@ -137,7 +176,7 @@ export function planReplicas(input: PlanInput): Plan {
   const live: ObservedReplica[] = [];
   const expiring: ObservedReplica[] = [];
   for (const r of input.replicas) {
-    const reason = spec.paused ? 'paused' : brokenReason(r, spec, now);
+    const reason = spec.paused ? 'paused' : brokenReason(r, spec, now, input.unhealthyStrikes ?? UNHEALTHY_STRIKES);
     if (reason) release.push({ id: r.machine.id, reason });
     else if (isExpiring(r.machine, now)) expiring.push(r);
     else live.push(r);
@@ -149,16 +188,25 @@ export function planReplicas(input: PlanInput): Plan {
   }
 
   if (live.length < desired) {
-    return { desired, create: desired - live.length, release, aboveSince: null, active };
+    return { desired, create: desired - live.length, release, drain: [], aboveSince: null, active };
   }
-  if (live.length === desired) return { desired, create: 0, release, aboveSince: null, active };
+  if (live.length === desired) return { desired, create: 0, release, drain: [], aboveSince: null, active };
 
   const aboveSince = input.aboveSince ?? now;
   const delayOver = now - aboveSince >= spec.scaleDownDelaySeconds * 1000;
-  if (active && !delayOver) return { desired, create: 0, release, aboveSince, active };
+  if (active && !delayOver) return { desired, create: 0, release, drain: [], aboveSince, active };
 
-  const surplus = [...live].filter(r => r.inflight === 0).sort(removalOrder).slice(0, live.length - desired);
-  for (const r of surplus) release.push({ id: r.machine.id, reason: 'scale-down' });
+  // A boot in progress is finished, not thrown away (its cost is already paid), unless parked or the pin guard fired.
+  const keepBooting = input.lastRequestAt != null && !spec.paused && !pinnedIdleOver(input);
+  // Idle surplus goes at once; surplus with requests in flight is drained (only when `drainBusy`: the controller then
+  // stops routing to it and releases it once empty), so a steady trickle can no longer pin a scaled-out replica.
+  const surplus = [...live].filter(r => (input.drainBusy || r.inflight === 0) && !(keepBooting && replicaPhase(r) === 'booting'))
+    .sort(removalOrder).slice(0, live.length - desired);
+  const drain: string[] = [];
+  for (const r of surplus) {
+    if (r.inflight === 0) release.push({ id: r.machine.id, reason: 'scale-down' });
+    else drain.push(r.machine.id);
+  }
   const stillAbove = live.length - surplus.length > desired;
-  return { desired, create: 0, release, aboveSince: stillAbove ? aboveSince : null, active };
+  return { desired, create: 0, release, drain, aboveSince: stillAbove ? aboveSince : null, active };
 }

@@ -1,5 +1,5 @@
 /**
- * DeploymentController, part 2 of 6 — replica lifecycle: create (placement ladder, € ceiling, back-off), release (and
+ * DeploymentController, part 2 of 7 — replica lifecycle: create (placement ladder, € ceiling, back-off), release (and
  * the release of a create that outlived its deployment), probe (readiness + the RTT gate), and an exposed deployment's
  * reserved network. See controller-state.ts for the layout of the parts.
  */
@@ -9,7 +9,7 @@ import { ControllerState, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
 import { placeReplica, PlacementError } from './placement-walk';
 import { DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
-import type { DeploymentBackend, DeploymentRecord, DeploymentSpec, ReplicaMachine } from './types';
+import type { DeploymentBackend, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
 const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
 const NETWORK_RELEASE_RETRY_MS = 15_000;
@@ -22,15 +22,29 @@ export abstract class ReplicaLifecycle extends ControllerState {
     if (!rt || !m.ip) return;
     if (!(await this.rttGate(rt, m))) return; // still measuring, or released as too far
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
-    let ok = false;
-    try {
-      ok = await this.opts.probe.ready(m, rt.record.spec, rt.record.replicaToken);
-    } catch {
-      ok = false;
+    const result = await this.checkReplica(rt, m);
+    if (result === 'down') p.downSince ??= this.now(); else delete p.downSince;
+    if (result === 'ready') {
+      p.readyAt ??= this.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
+    } else if (result === 'busy' && p.everReady && ((rt.perReplica.get(m.id) ?? 0) > 0 || this.servedRecently(p))) {
+      // Alive (its front answers) and working: the health check queued behind the work. Keep it serving what it can.
+      p.busy = true;
+    } else {
+      p.readyNow = false;
+      if (p.everReady) p.failures++;
     }
-    if (ok) { p.readyAt ??= Date.now(); p.everReady = true; p.readyNow = true; p.failures = 0; rt.starting.delete(m.id); }
-    else { p.readyNow = false; if (p.everReady) p.failures++; }
     this.probes.set(m.id, p);
+  }
+
+  /** `ProbeResult` of one replica; a probe without `check` answers ready/down, and a throwing probe is `down`. */
+  private async checkReplica(rt: Runtime, m: ReplicaMachine): Promise<ProbeResult> {
+    const { probe } = this.opts;
+    try {
+      if (probe.check) return await probe.check(m, rt.record.spec, rt.record.replicaToken);
+      return (await probe.ready(m, rt.record.spec, rt.record.replicaToken)) ? 'ready' : 'down';
+    } catch {
+      return 'down';
+    }
   }
 
   /**

@@ -280,10 +280,16 @@ describe('filterHallucinations — edge cases', () => {
   });
 
   it('handles very long text', () => {
-    const longText = 'word '.repeat(500).trim();
+    const longText = Array.from({ length: 500 }, (_, i) => `word${i}`).join(' ');
     const response = makeResponse({ text: longText });
     const result = filterHallucinations(response);
     expect(result.text).toBe(longText);
+  });
+
+  it('a long loop of one word is a decoder loop, dropped by the repetition rule (QA 2026-10-07)', () => {
+    const result = filterHallucinations(makeResponse({ text: 'word '.repeat(500).trim() }));
+    expect(result.text).toBe('');
+    expect(result.reasonCodes).toEqual(['repetition']);
   });
 
   it('reason array includes the segment array index when segment is rejected', () => {

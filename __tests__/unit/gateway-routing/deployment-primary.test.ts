@@ -97,7 +97,8 @@ describe('chat: deployment primary, OpenRouter fallback', () => {
       const res = await chat(new DeploymentLLMProvider(ctl, 'parle-speech', { fetchImpl: fetchImpl as never }), or);
       expect(res.status).toBe(200);
       expect(res.headers?.['X-Gateway-Fallback']).toBe(code);
-      expect(ctl.lease.done).toHaveBeenCalledWith(true);
+      // A timeout is a busy replica, not a broken one (QA 2026-10-07); only the dropped connection is a strike.
+      expect(ctl.lease.done).toHaveBeenCalledWith(code === 'timeout' ? 'timeout' : true);
     }
   });
 

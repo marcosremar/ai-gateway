@@ -143,6 +143,18 @@ export interface ScalewayIp {
 const RELEASE_GET_ATTEMPTS = 3;
 const releaseGetRetryMs = () => Number(process.env.SCALEWAY_RELEASE_GET_RETRY_MS ?? 1000);
 
+/**
+ * A server with SBS volumes cannot be `terminate`d, and DELETE answers 400 `resource_still_in_use` ("instance should be
+ * powered off") until it is `stopped` (live QA 2026-10-07: every replica release logged it, the 5 s pause was never
+ * enough for an L40S). Poll its state every SCALEWAY_POWEROFF_POLL_MS for at most SCALEWAY_POWEROFF_WAIT_MS before the
+ * DELETE, which is itself retried while the API still says the server is in use.
+ */
+const poweroffWaitMs = () => Number(process.env.SCALEWAY_POWEROFF_WAIT_MS ?? 180_000);
+const poweroffPollMs = () => Number(process.env.SCALEWAY_POWEROFF_POLL_MS ?? 5_000);
+const DELETABLE_STATES = new Set(['stopped', 'stopped in place']);
+const stillInUse = (err: unknown) => err instanceof FetchError && (err.status === 400 || err.status === 409 || err.status === 412)
+  && /resource_still_in_use|powered off|in use/i.test(`${err.body} ${err.message}`);
+
 /** Attempts × SCALEWAY_VOLUME_RETRY_MS: SBS volumes only detach some time after terminate (measured up to ~3 min). */
 const VOLUME_DROP_ATTEMPTS = Number(process.env.SCALEWAY_VOLUME_ATTEMPTS ?? 90);
 
@@ -158,6 +170,9 @@ export class ScalewayClient extends AbstractGpuProvider {
 
   /** In-memory volume IDs by encoded instance id (for destroy when meta not passed). */
   private volumeIdsByInstance = new Map<string, string[]>();
+
+  /** Releases still powering off / deleting, by instance id: a second call (the list still shows it) joins, never repeats. */
+  private readonly releasing = new Map<string, Promise<void>>();
 
   constructor(opts?: AbstractGpuProviderOptions) {
     super(opts);
@@ -491,6 +506,8 @@ export class ScalewayClient extends AbstractGpuProvider {
   ): Promise<void> {
     const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
     if (!secretKey) throw new Error('Scaleway secret key required');
+    const pending = this.releasing.get(instanceId);
+    if (pending) return opts.awaitVolumes ? pending : undefined;
     const { zone, serverId } = this.decodeId(instanceId);
     const headers = this.scwHeaders(secretKey);
 
@@ -515,42 +532,62 @@ export class ScalewayClient extends AbstractGpuProvider {
       }
     }
 
-    // Try to terminate first (force poweroff + delete)
+    // Try to terminate first (force poweroff + delete); refused for servers with SBS volumes (the GPU OS images).
     let serverGone = false;
     try {
       await this.serverAction(zone, serverId, 'terminate', secretKey);
       this.log.log(`[scaleway] Terminated server ${serverId} in ${zone}`);
       serverGone = true;
     } catch {
-      // terminate action may not work if server is in certain states
+      // terminate is refused for SBS-backed servers and in some states: power off, wait for `stopped`, then DELETE.
     }
 
-    if (!serverGone) {
-      // Fallback: poweroff then delete
-      try {
-        await this.serverAction(zone, serverId, 'poweroff', secretKey);
-        await new Promise(r => setTimeout(r, 5000));
-      } catch {
-        // May already be stopped
-      }
-
-      try {
-        await this.fetchOk(
-          `${this.zoneUrl(zone)}/servers/${serverId}`,
-          { method: 'DELETE', headers },
-          TIMEOUTS.write,
-        );
-        this.log.log(`[scaleway] Deleted server ${serverId} in ${zone}`);
-      } catch (err) {
-        if (!(err instanceof FetchError && err.status === 404)) throw err;
-      }
-    }
-
-    this.volumeIdsByInstance.delete(instanceId);
-    if (volumeIds.size) {
-      const dropping = this.dropVolumes(zone, [...volumeIds], secretKey);
+    const dropVolumes = async () => {
+      this.volumeIdsByInstance.delete(instanceId);
+      if (volumeIds.size) await this.dropVolumes(zone, [...volumeIds], secretKey);
+    };
+    if (serverGone) {
+      const dropping = dropVolumes();
       if (opts.awaitVolumes) await dropping;
       else void dropping.catch(err => this.log.warn(`[scaleway] volume cleanup failed: ${this.errMsg(err)}`));
+      return;
+    }
+    // The power-off takes a minute or more: a host that must not block (the gateway's reconcile) gets the call back
+    // once the power-off was asked, and the wait + DELETE + volumes finish in the background (a failure there is
+    // logged; the server is listed again and released by the next tick). The reaper (`awaitVolumes`) waits for it all.
+    const finishing = this.powerOffAndDelete(zone, serverId, secretKey).then(dropVolumes)
+      .finally(() => this.releasing.delete(instanceId));
+    this.releasing.set(instanceId, finishing);
+    if (opts.awaitVolumes) return finishing;
+    void finishing.catch(err => this.log.warn(`[scaleway] release of ${serverId} failed: ${this.errMsg(err)}`));
+  }
+
+  /** Power off, wait (bounded) for a deletable state, then DELETE — retried while the API answers `resource_still_in_use`. */
+  private async powerOffAndDelete(zone: string, serverId: string, secretKey: string): Promise<void> {
+    const headers = this.scwHeaders(secretKey);
+    const url = `${this.zoneUrl(zone)}/servers/${serverId}`;
+    const deadline = Date.now() + poweroffWaitMs();
+    const powerOff = () => this.serverAction(zone, serverId, 'poweroff', secretKey).catch(() => { /* stopping or stopped already */ });
+    await powerOff();
+    for (let poll = 1; ; poll++) {
+      let state: string | null = 'unknown';
+      try {
+        state = (await this.fetchJson<ScwGetResponse>(url, { headers }, TIMEOUTS.read, 'scaleway')).server?.state ?? 'unknown';
+      } catch (err) {
+        if (err instanceof FetchError && err.status === 404) return; // gone already
+      }
+      const timedOut = Date.now() >= deadline;
+      if (DELETABLE_STATES.has(String(state)) || timedOut) {
+        try {
+          await this.fetchOk(url, { method: 'DELETE', headers }, TIMEOUTS.write);
+          this.log.log(`[scaleway] Deleted server ${serverId} in ${zone}`);
+          return;
+        } catch (err) {
+          if (err instanceof FetchError && err.status === 404) return;
+          if (timedOut || !stillInUse(err)) throw err;
+        }
+      } else if (state === 'running' && poll % 6 === 0) await powerOff(); // the first power-off did not take
+      await new Promise(r => setTimeout(r, poweroffPollMs()));
     }
   }
 

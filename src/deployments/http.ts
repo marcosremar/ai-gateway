@@ -28,7 +28,7 @@ import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppFallbackService } from './app-fallback';
 import type { ClientStabilityLog } from './stability';
-import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
+import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
 import { randomUUID } from 'crypto';
 import { createLogger } from '../logger';
 
@@ -76,19 +76,26 @@ export function healthBodyReady(body: unknown): boolean {
   return ['stt', 'llm', 'tts'].every(stage => stageReady((body as Record<string, unknown>)[stage]));
 }
 
-/** Probe over the replica's nginx front: boot finished (`/__aigw/ready`) AND the app still answers its health path. */
+/**
+ * Probe over the replica's nginx front: boot finished (`/__aigw/ready`, liveness — nginx answers it even while the app
+ * is saturated) AND the app still answers its health path (readiness). `timeoutMs` per call: DEPLOYMENTS_PROBE_TIMEOUT_MS.
+ */
 export class HttpReplicaProbe implements ReplicaProbe {
   constructor(private readonly timeoutMs = 4_000, private readonly fetchImpl: typeof fetch = fetch) {}
 
   async ready(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<boolean> {
-    if (!machine.ip) return false;
+    return (await this.check(machine, spec, token)) === 'ready';
+  }
+
+  async check(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult> {
+    if (!machine.ip) return 'down';
     const headers = { 'X-Aigw-Token': token };
     const get = (path: string) => this.fetchImpl(`${replicaBase(machine, !!spec.exposure)}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
-    const marker = await get('/__aigw/ready');
-    if (!marker.ok) return false;
-    const health = await get(spec.healthPath);
-    if (!health.ok) return false;
-    return healthBodyReady(await health.json().catch(() => null));
+    const marker = await get('/__aigw/ready').catch(() => null);
+    if (!marker?.ok) return 'down';
+    const health = await get(spec.healthPath).catch(() => null);
+    if (!health?.ok) return 'busy';
+    return healthBodyReady(await health.json().catch(() => null)) ? 'ready' : 'busy';
   }
 }
 
@@ -299,7 +306,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         return send(res, 503, { error: err.message, status: 'cold', code: 'cold', noWake: true }, { 'Retry-After': err.retryAfterSeconds ?? 30 });
       }
       const target = replicaTarget(replicaBase(lease.machine, lease.exposed), rest, query);
-      if (!target) { lease.done(false); return send(res, 400, { error: 'invoke path does not resolve on the replica' }); }
+      if (!target) { lease.done('cancelled'); return send(res, 400, { error: 'invoke path does not resolve on the replica' }); }
       let upstream: Response;
       try {
         upstream = await fetchImpl(target.href, {
@@ -309,7 +316,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS)]),
         });
       } catch (err) {
-        lease.done(true);
+        // The client going away says nothing about the replica, and running out of time means busy: neither is a strike
+        // (only a connection failure is; QA 2026-10-07).
+        const timedOut = err instanceof Error && err.name === 'TimeoutError';
+        lease.done(abort.signal.aborted ? 'cancelled' : timedOut ? 'timeout' : true);
         if (abort.signal.aborted) return;
         exclude.add(lease.machine.id);
         if (attempt === 1) {
@@ -370,7 +380,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         // Declared deployments are the operator's (gateway-wide): not shown to an app-scoped caller.
         // `scope: "all"` = the full list (admin, no app filter): the external reaper trusts only that (reaper.ts).
         return send(res, 200, {
-          namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(), deployments,
+          // An app key sees its own deployments' counts and bill, never the namespace's (QA 2026-10-07).
+          namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(own ?? undefined), deployments,
           ...(opts.declaredStatus && !own ? { declared: opts.declaredStatus() } : {}),
         });
       }
@@ -390,6 +401,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
     if (action === 'wake' && method === 'POST') { admin(); return send(res, 202, controller.wake(name)); }
     if (action === 'park' && method === 'POST') { admin(); return send(res, 202, await controller.park(name)); }
+    if (action === 'warm' && method === 'POST') {
+      admin();
+      const body = await readJson(req);
+      return send(res, 202, await controller.warm(name, body.replicas as number, body.untilMinutes as number));
+    }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 
     const existing = controller.get(name);

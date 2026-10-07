@@ -88,6 +88,33 @@ describe('deployments API', () => {
     expect(site.declared).toBeUndefined();
   });
 
+  it('GET /v1/deployments: an app key sees health of its own deployments only, never the namespace (QA 2026-10-07)', async () => {
+    await call(h, 'PUT', '/v1/deployments/mine', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, AS_SITE);
+    await call(h, 'PUT', '/v1/deployments/other', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, { 'x-app': 'site-b' });
+    await call(h, 'PUT', '/v1/deployments/ops', { profile: 'cpu-echo', minReplicas: 1 });
+    await until(() => h.cloud.machines.size === 3);
+    await until(() => h.controller.health().running === 3);
+    type Health = { deployments: number; replicas: number; running: number; eurPerHour: number; listError: unknown; maxReplicas: number };
+    const site = await (await call(h, 'GET', '/v1/deployments', undefined, SITE)).json() as { health: Health; deployments: Array<{ name: string }> };
+    expect(site.deployments.map(d => d.name)).toEqual(['mine']);
+    expect(site.health).toMatchObject({ deployments: 1, replicas: 1, running: 1, eurPerHour: 0.01, listError: null });
+    expect(site.health.maxReplicas).toBe(h.controller.health().maxReplicas); // the gateway's limit, the same for all
+    const admin = await (await call(h, 'GET', '/v1/deployments')).json() as { health: Health };
+    expect(admin.health).toMatchObject({ deployments: 3, replicas: 3, running: 3, eurPerHour: 0.03 });
+  });
+
+  it('POST /v1/deployments/:name/warm: admin pre-warm window, validated, shown in the view with the autoscale reason', async () => {
+    await call(h, 'PUT', '/v1/deployments/class', { profile: 'cpu-echo', maxReplicas: 2 }, ADMIN, AS_SITE);
+    expect((await call(h, 'POST', '/v1/deployments/class/warm', { replicas: 2, untilMinutes: 30 }, SITE)).status).toBe(403);
+    expect((await call(h, 'POST', '/v1/deployments/class/warm', { replicas: 7, untilMinutes: 30 })).status).toBe(400);
+    const res = await call(h, 'POST', '/v1/deployments/class/warm', { replicas: 2, untilMinutes: 30 });
+    expect(res.status).toBe(202);
+    expect(((await res.json()) as { warm: { replicas: number } }).warm.replicas).toBe(2);
+    await until(() => h.cloud.created.length === 2);
+    const view = await (await call(h, 'GET', '/v1/deployments/class')).json() as { autoscale: { floor: number; desired: number } };
+    expect(view.autoscale).toMatchObject({ floor: 2, desired: 2 });
+  });
+
   it('lists built-in profiles and stores new ones', async () => {
     const names = ((await (await call(h, 'GET', '/v1/profiles')).json()) as { profiles: { name: string }[] }).profiles.map(p => p.name);
     expect(names).toEqual(expect.arrayContaining(['qwen3-tts', 'qwen3-tts-clone', 'cpu-echo']));
@@ -273,6 +300,29 @@ describe('deployments API', () => {
     }
     await until(() => h.cloud.released.includes(first), 3000);
     await until(() => h.controller.get('ha')!.replicas.filter(r => r.phase === 'ready').length === 2, 3000);
+  });
+
+  it('regression: a client that aborts an invoke does not mark the replica suspect (lease ends `cancelled`)', async () => {
+    await call(h, 'PUT', '/v1/deployments/slowapp', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, AS_SITE);
+    await until(() => h.controller.get('slowapp')!.status === 'ready');
+    h.cloud.appDelayMs = 2_000;
+    const outcomes: unknown[] = [];
+    const acquire = h.controller.acquire.bind(h.controller);
+    h.controller.acquire = (async (...args: Parameters<typeof acquire>) => {
+      const lease = await acquire(...args);
+      const done = lease.done;
+      lease.done = (outcome) => { outcomes.push(outcome); done(outcome); };
+      return lease;
+    }) as typeof h.controller.acquire;
+    const abort = new AbortController();
+    const pending = fetch(`${h.base}/v1/deployments/slowapp/invoke/`, { headers: { authorization: `Bearer ${SITE}` }, signal: abort.signal }).catch(() => null);
+    await until(() => h.controller.get('slowapp')!.inflight === 1);
+    abort.abort();
+    await pending;
+    await until(() => outcomes.length === 1);
+    expect(outcomes).toEqual(['cancelled']); // before: true — a connection failure strike for the client's own abort
+    expect(h.controller.get('slowapp')!.replicas[0].phase).toBe('ready');
+    h.cloud.appDelayMs = 0;
   });
 
   it('replaces a replica whose app health fails 3 checks in a row', async () => {

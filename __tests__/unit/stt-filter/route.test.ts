@@ -16,6 +16,16 @@ beforeEach(() => { _resetSttCache(); _resetSttFilterStats(); delete process.env.
 afterEach(() => { delete process.env.STT_HALLUCINATION_FILTER; });
 
 describe('STT route: hallucination filter', () => {
+  it('drops the live misses of 2026-10-07 by pattern (credit line with a name, ♫ loop)', async () => {
+    for (const [text, code] of [[' Legenda por Sônia Ruberti', 'pattern_credits'], [' E aí ♫ E aí E aí E aí E aí E aí E aí', 'music']]) {
+      _resetSttCache();
+      const { p } = provider({ text });
+      const res = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'Portuguese' }), p);
+      expect(res.body).toEqual({ text: '' });
+      expect(res.headers?.['X-STT-Filtered']).toBe(code);
+    }
+  });
+
   it('drops a blocklisted invention on a silent clip (language as full name, as the s2s loopback/parle send it)', async () => {
     const { p } = provider({ text: 'E aí.' });
     const res = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'Portuguese' }), p);
@@ -40,7 +50,12 @@ describe('STT route: hallucination filter', () => {
       const { p } = provider({ text, ...(segs ? { segments: segs } : {}) });
       const res = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'pt' }), p);
       expect(res.body).toEqual({ text });
-      expect(res.headers?.['X-STT-Filtered']).toBeUndefined();
+      // On every answer, so a client can count (QA 2026-10-07: absent when kept); before, undefined here.
+      expect(res.headers?.['X-STT-Filtered']).toBe('none');
+      expect(res.headers?.['X-STT-Raw-Length']).toBe(String(text.length));
+      const hit = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'pt' }), p);
+      expect(hit.headers?.['X-Cache']).toBe('HIT');
+      expect(hit.headers?.['X-STT-Filtered']).toBe('none');
     }
     expect(sttFilterStats().filtered).toBe(0);
   });
@@ -61,6 +76,7 @@ describe('STT route: hallucination filter', () => {
     const res = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'pt' }), p);
     expect(res.body).toEqual({ text: 'E aí.' });
     expect(transcribe.mock.calls[0][0].wantSegments).toBe(false);
+    expect(res.headers?.['X-STT-Filtered']).toBe('off');
   });
 
   it('multipart field filter_hallucinations=false opts one request out (QA) and never poisons the cache', async () => {
