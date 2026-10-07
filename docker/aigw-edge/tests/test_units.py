@@ -104,6 +104,46 @@ t = vec["turn"]
 check("vectors: TURN credential", turn_credential(t["secret"], t["sessionId"], t["expiresAtSeconds"]) == (t["username"], t["credential"]))
 
 try:
+    import asyncio
+
+    from aiohttp import web
+
+    from aigw_edge.config import Settings
+    from aigw_edge.upstream import Upstream, UpstreamError
+
+    async def cut_tts_stream():
+        async def speech(request):
+            res = web.StreamResponse()
+            await res.prepare(request)
+            await res.write(b"\0" * 4800)
+            request.transport.close()
+            return res
+
+        app = web.Application()
+        app.router.add_post("/v1/audio/speech", speech)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        up = Upstream(Settings(upstream=f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"))
+        await up.start()
+        got, error = 0, None
+        try:
+            async for chunk in up.speak("oi", {}, {"voice": "x"}):
+                got += len(chunk)
+        except Exception as raised:  # noqa: BLE001
+            error = raised
+        await up.close()
+        await runner.cleanup()
+        return got, error
+
+    got, error = asyncio.run(cut_tts_stream())
+    check("upstream: a TTS stream cut mid-body raises UpstreamError with stage tts",
+          got == 4800 and isinstance(error, UpstreamError) and error.stage == "tts" and error.status is None)
+except ImportError:
+    print("SKIP upstream (no aiohttp)")
+
+try:
     import numpy as np
 
     from aigw_edge.vad import EnergyVad
