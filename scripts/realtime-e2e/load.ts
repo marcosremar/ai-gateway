@@ -273,7 +273,7 @@ try {
   const cfg: ClientConfig = {
     gw, key, deployment: DEP, config, students: N, rtc: RTC, chrome: CHROME,
     chromeTransports: (opt('chrome-transports') ?? 'webrtc,ws,s2s-stream').split(','), clipEndSilenceMs: num('clip-end-silence', 700), rtcProcs: num('rtc-procs', Math.ceil(RTC / 8)),
-    rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), clipS: num('clip-s', 1.4),
+    rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), burst: argv.includes('--burst'), clipS: num('clip-s', 1.4),
     clip: opt('clip') ?? null, turnTimeoutS: num('turn-timeout', 30), turn: (opt('turn') ?? (PROFILE === 'udp-blocked' ? 'tcp' : 'udp')) as 'udp' | 'tcp',
     python: process.env.EDGE_PYTHON || 'python3', chromePath: process.env.CHROME_PATH || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
     work: WORK, out: join(WORK, 'client.json'),
