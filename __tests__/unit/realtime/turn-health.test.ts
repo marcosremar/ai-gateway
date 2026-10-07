@@ -1,8 +1,3 @@
-/**
- * TURN health and the media-path re-probe (src/realtime/turn-health.ts, service.ts): the unauthenticated Allocate
- * check over UDP and TCP against local sockets, the alive/dead transitions, dead URLs left out of a session's
- * `iceServers`, and the shorter re-probe after a verdict that is not `direct`.
- */
 import { createSocket } from 'dgram';
 import { createServer, type AddressInfo } from 'net';
 import { afterEach, describe, expect, it } from 'vitest';
