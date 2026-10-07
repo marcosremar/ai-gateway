@@ -86,6 +86,9 @@ export interface UnifiedSpeechClientConfig {
 
 // ── Implementation ────────────────────────────────────────────────────────
 
+/**
+ * @deprecated Legacy browser client (see `SpeechClient`). Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
+ */
 export class UnifiedSpeechClient extends TypedEmitter<UnifiedSpeechClientEventMap> {
   private realtimeClient: InstanceType<typeof import('./openai-realtime').OpenAIRealtimeClient> | null = null;
   private speechClient: InstanceType<typeof import('./speech-client').SpeechClient> | null = null;

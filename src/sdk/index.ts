@@ -1,4 +1,6 @@
 /**
+ * @deprecated Legacy, kept until the next major. Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
+ *
  * @ai-gateway/sdk — HTTP SDK for consuming the BabelCast AI Gateway REST API.
  *
  * TypeScript client:

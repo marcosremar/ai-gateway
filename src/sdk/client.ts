@@ -78,6 +78,9 @@ function validatePositiveInt(value: number, name: string, defaultVal: number, ma
   return Math.floor(value);
 }
 
+/**
+ * @deprecated Legacy REST SDK (unmounted routes; the `./sdk` package export never resolved). Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
+ */
 export class GatewaySDK {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
