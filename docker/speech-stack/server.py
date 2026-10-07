@@ -249,18 +249,38 @@ class JsonField:
         return ch
 
 
-async def llm_stream(messages: list[dict], max_tokens: int, temperature: float, response_format: dict | None = None):
+LLM_TIMINGS = ("cache_n", "prompt_n", "prompt_ms", "predicted_n", "predicted_ms")
+STT_TIMINGS = ("audio_ms", "queue_ms", "decode_ms", "batch")
+
+
+def llm_chunk(line: str, timings: dict) -> str | None:
+    if not line.startswith("data: ") or line == "data: [DONE]":
+        return None
+    chunk = json.loads(line[6:])
+    timings.update({k: v for k, v in (chunk.get("timings") or {}).items() if k in LLM_TIMINGS})
+    return ((chunk.get("choices") or [{}])[0].get("delta") or {}).get("content")
+
+
+def stage_times(heard: dict, heard_at: int, first_token: int | None, first_cut: int | None, first_audio: int | None,
+                timings: dict) -> dict:
+    gap = lambda later, earlier: None if later is None or earlier is None else later - earlier  # noqa: E731
+    return {**{f"stt_{k}": heard[k] for k in STT_TIMINGS if k in heard},
+            "llm_first_token_ms": gap(first_token, heard_at), **{f"llm_{k}": v for k, v in timings.items()},
+            "text_wait_ms": gap(first_cut, first_token), "tts_first_chunk_ms": gap(first_audio, first_cut)}
+
+
+async def llm_stream(messages: list[dict], max_tokens: int, temperature: float, response_format: dict | None = None,
+                     timings: dict | None = None):
+    timings = {} if timings is None else timings
     body = {"model": "llm", "messages": messages, "stream": True, "max_tokens": max_tokens, "temperature": temperature,
-            "chat_template_kwargs": {"enable_thinking": False}}
+            "chat_template_kwargs": {"enable_thinking": False}, "timings_per_token": True}
     if response_format:
         body["response_format"] = response_format
     async with client.stream("POST", f"{LLM_URL}/v1/chat/completions", json=body) as res:
         if res.status_code != 200:
             raise RuntimeError(f"llm http {res.status_code}: {(await res.aread())[:200]!r}")
         async for line in res.aiter_lines():
-            if not line.startswith("data: ") or line == "data: [DONE]":
-                continue
-            delta = json.loads(line[6:])["choices"][0].get("delta", {}).get("content")
+            delta = llm_chunk(line, timings)
             if delta:
                 yield delta
 
@@ -319,7 +339,9 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         try:
             heard = await asyncio.to_thread(transcribe_sync, audio, lang, cfg.get("stt_prompt"))
             meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio") if k in heard}
-            yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": ms(), **meta})
+            heard_at = ms()
+            yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": heard_at, **meta,
+                         "stt": {k: heard[k] for k in STT_TIMINGS if k in heard}})
             template = cfg.get("user_template") or ""
             user = template.replace("{{transcript}}", heard["text"]) if "{{transcript}}" in template else heard["text"]
             messages = ([{"role": "system", "content": cfg["system"]}] if cfg.get("system") else []) \
@@ -330,14 +352,16 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
 
             field = JsonField(cfg["speak_field"]) if cfg.get("speak_field") else None
             raw: list[str] = []
+            timings: dict = {}
+            marks: dict = {}
 
             async def think():
                 buffer, first, first_token, field_closed = "", True, None, False
                 async for delta in llm_stream(messages, int(cfg.get("max_tokens", 160)), float(cfg.get("temperature", 0.6)),
-                                              cfg.get("response_format")):
+                                              cfg.get("response_format"), timings):
                     if first_token is None:
-                        first_token = ms()
-                        await sentences.put(("__event__", {"type": "llm_first_token", "at_ms": first_token}))
+                        first_token = marks["first_token"] = ms()
+                        await sentences.put(("__event__", {"type": "llm_first_token", "at_ms": first_token, "llm": dict(timings)}))
                     raw.append(delta)
                     if field is not None:
                         if field_closed:
@@ -375,6 +399,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                     yield event(item[1])
                     continue
                 text, queue, cut_at = item
+                marks.setdefault("first_cut", cut_at)
                 yield event({"type": "sentence", "text": text, "cut_at_ms": cut_at})
                 while (chunk := await queue.get()) is not None:
                     if isinstance(chunk, Exception):
@@ -386,6 +411,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
             await thinker
             yield event({"type": "done", "reply": " ".join(reply), "transcript": heard["text"], "stt_ms": heard["ms"],
                          "first_audio_ms": first_audio, "total_ms": ms(),
+                         "stages": stage_times(heard, heard_at, marks.get("first_token"), marks.get("first_cut"), first_audio, timings),
                          **({"reply_raw": "".join(raw)} if field is not None else {})})
         except Exception as error:  # noqa: BLE001 — the stream already started: report in-band
             yield event({"type": "error", "message": repr(error)[:300], "at_ms": ms()})
