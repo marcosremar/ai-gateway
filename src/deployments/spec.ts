@@ -295,7 +295,7 @@ function realtimeOf(raw: unknown): RealtimeSpec {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('realtime must be an object');
   const r = raw as Record<string, unknown>;
   for (const key of Object.keys(r)) {
-    if (!['maxSessions', 'edgeImage', 'udpPorts'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
+    if (!['maxSessions', 'edgeImage', 'udpPorts', 'env'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
   }
   const out: RealtimeSpec = {};
   if (r.maxSessions !== undefined) out.maxSessions = int(r.maxSessions, 'realtime.maxSessions', 1, 256);
@@ -305,6 +305,26 @@ function realtimeOf(raw: unknown): RealtimeSpec {
     const lo = int(r.udpPorts[0], 'realtime.udpPorts[0]', 10000, 65535);
     const hi = int(r.udpPorts[1], 'realtime.udpPorts[1]', lo + 1, Math.min(65535, lo + MAX_PORT_RANGE - 1));
     out.udpPorts = [lo, hi];
+  }
+  if (r.env !== undefined) out.env = edgeTuningOf(r.env);
+  return out;
+}
+
+/** The edge settings a spec may set (`realtime.env`): what `docker/aigw-edge/aigw_edge` reads and the gateway does not own. */
+export const EDGE_TUNING_KEYS = [
+  'RT_VAD_SILENCE_MS', 'RT_SILERO_ONNX', 'RT_MAX_SESSION_SECONDS', 'RT_MAX_TURN_SECONDS', 'RT_IDLE_SECONDS',
+  'RT_SESSIONS_PER_WORKER', 'RT_RTC_WORKERS', 'EDGE_UPSTREAM_MODE', 'EDGE_UPSTREAM_HEALTH', 'EDGE_STT_PARTIALS',
+  'EDGE_LLM_MODEL', 'EDGE_TTS_MODEL', 'EDGE_TTS_RATE', 'EDGE_TTS_PARALLEL', 'EDGE_REF_BASE', 'EDGE_TELEMETRY_STDOUT',
+  'FIRST_MIN_WORDS', 'MAX_CHUNK_CHARS',
+];
+const EDGE_TUNING_VALUE_RE = /^[\x20-\x7e]{0,256}$/;
+
+function edgeTuningOf(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('realtime.env must be an object');
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!EDGE_TUNING_KEYS.includes(key)) throw new SpecError(`realtime.env: '${key}' is not an edge setting`);
+    out[key] = str(value, `realtime.env.${key}`, EDGE_TUNING_VALUE_RE);
   }
   return out;
 }

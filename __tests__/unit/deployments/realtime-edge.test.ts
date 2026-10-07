@@ -3,14 +3,14 @@
  * first-boot script, its nginx front, its firewall, and the coturn TURN profile.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_EDGE_IMAGE, edgeEnv, nginxConfig, replicaCloudInit, RT_EDGE_PORT } from '../../../src/deployments/cloud-init';
 import { BUILTIN_PROFILES, COTURN_RELAY_PORTS } from '../../../src/deployments/profiles';
 import { realtimeGroupName, ScalewayDeploymentBackend } from '../../../src/deployments/scaleway-backend';
-import { buildSpec } from '../../../src/deployments/spec';
+import { buildSpec, EDGE_TUNING_KEYS } from '../../../src/deployments/spec';
 
 const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
 const TOKEN = 'r'.repeat(32);
@@ -103,6 +103,35 @@ describe('realtime spec validation', () => {
     expect(() => speech({ realtime: { udpPorts: [80, 100] } })).toThrow(/udpPorts\[0\]/);
     expect(() => speech({ realtime: { udpPorts: [50000, 52000] } })).toThrow(/udpPorts\[1\]/);
     expect(() => speech({ realtime: { maxSessions: 0 } })).toThrow(/maxSessions/);
+  });
+
+  it('realtime.env: allow-listed edge settings reach edge.env, under the keys the gateway owns', () => {
+    const env = { RT_VAD_SILENCE_MS: '500', EDGE_STT_PARTIALS: '1', EDGE_UPSTREAM_MODE: 's2s', RT_SESSIONS_PER_WORKER: '4' };
+    const spec = speech({ realtime: { maxSessions: 5, env } });
+    expect(spec.realtime).toEqual({ maxSessions: 5, env });
+    expect(edgeEnv(spec, TOKEN)).toMatchObject({ ...env, RT_MAX_SESSIONS: '5', RT_BIND: '127.0.0.1', AIGW_REPLICA_TOKEN: TOKEN });
+    const file = written(replicaCloudInit(spec, TOKEN), '/srv/aigw/edge.env')!;
+    expect(file.split('\n')).toEqual(expect.arrayContaining(['RT_VAD_SILENCE_MS=500', 'EDGE_UPSTREAM_MODE=s2s', 'RT_SESSIONS_PER_WORKER=4']));
+    expect(Object.keys(edgeEnv(speech({ realtime: {} }), TOKEN))).not.toContain('RT_VAD_SILENCE_MS');
+  });
+
+  it('realtime.env: refuses keys the edge does not read, keys the gateway owns, and values that are not one short line', () => {
+    const bad = (env: unknown) => () => speech({ realtime: { env } });
+    expect(bad({ PATH: '/x' })).toThrow(/'PATH' is not an edge setting/);
+    for (const owned of ['AIGW_REPLICA_TOKEN', 'RT_MAX_SESSIONS', 'RT_UDP_PORTS', 'RT_BIND', 'RT_PORT', 'EDGE_UPSTREAM', 'GATEWAY_URL', 'RT_PUBLIC_IP']) {
+      expect(bad({ [owned]: 'x' })).toThrow(/is not an edge setting/);
+    }
+    expect(bad({ RT_VAD_SILENCE_MS: 500 })).toThrow(/realtime\.env\.RT_VAD_SILENCE_MS is invalid/);
+    expect(bad({ EDGE_LLM_MODEL: 'llm\nAIGW_REPLICA_TOKEN=stolen' })).toThrow(/EDGE_LLM_MODEL is invalid/);
+    expect(bad({ EDGE_LLM_MODEL: 'x'.repeat(257) })).toThrow(/EDGE_LLM_MODEL is invalid/);
+    expect(bad(['RT_VAD_SILENCE_MS'])).toThrow(/realtime\.env must be an object/);
+    expect(bad({ EDGE_LLM_MODEL: 'x'.repeat(256) })).not.toThrow();
+  });
+
+  it('every allow-listed key is one the edge reads', () => {
+    const edge = join(__dirname, '../../../docker/aigw-edge/aigw_edge');
+    const source = ['config.py', 'vad.py', 'text.py', 'telemetry.py'].map(f => readFileSync(join(edge, f), 'utf8')).join('\n');
+    for (const key of EDGE_TUNING_KEYS) expect(source, key).toContain(`"${key}"`);
   });
 
   it('is refused on vast (one container per host: no sidecar)', () => {

@@ -137,6 +137,8 @@ export function edgeEnv(spec: DeploymentSpec, token: string, opts: ReplicaInitOp
   const upstreamPort = spec.exposure || spec.bootScript ? spec.port : 8000;
   const gatewayUrl = opts.gatewayUrl ?? process.env.AIGW_PUBLIC_URL ?? '';
   return {
+    ...(machineEnv.RT_SESSIONS_PER_WORKER ? { RT_SESSIONS_PER_WORKER: machineEnv.RT_SESSIONS_PER_WORKER } : {}),
+    ...rt.env,
     RT_MAX_SESSIONS: String(maxSessions),
     RT_UDP_PORTS: `${lo}-${hi}`,
     RT_PORT: String(RT_EDGE_PORT),
@@ -146,7 +148,6 @@ export function edgeEnv(spec: DeploymentSpec, token: string, opts: ReplicaInitOp
     // The edge derives its session key (HMAC-SHA256(token, "aigw-rt-v1")) and telemetry credential from it.
     AIGW_REPLICA_TOKEN: token,
     ...(gatewayUrl ? { GATEWAY_URL: gatewayUrl.replace(/\/$/, '') } : {}),
-    ...(machineEnv.RT_SESSIONS_PER_WORKER ? { RT_SESSIONS_PER_WORKER: machineEnv.RT_SESSIONS_PER_WORKER } : {}),
   };
 }
 
