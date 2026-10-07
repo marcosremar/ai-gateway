@@ -83,10 +83,14 @@ and every step is logged:
 - The **last port** of `RT_UDP_PORTS` answers `AIGWP1<nonce>` with `AIGWR1<nonce>` (same size, ≤ 64 bytes); media uses
   the rest of the range. Same firewall rule, so the echo tests what a browser would hit.
 - The gateway probes every ready replica of a realtime deployment whose path is `unknown` (a fresh edge) or older than
-  30 min, from a 15 s loop and on admission; at most once a minute per replica. It posts the result to
+  30 min, from a 15 s loop and on admission; at most once a minute per replica. A verdict that is not `direct` (a TURN
+  blip at probe time would otherwise pin the replica to `relay` or `ws`) is re-probed after 1 min, then 2, 4, 8, 16,
+  up to the 30 min. It posts the result to
   `POST /__aigw/rt/net` `{udpInbound, rttMs, iceServers}` with TURN credentials valid 1 h for the relay test; the
   answer is the decision (`path`, `relay`, `reasons`). Each offer then carries the session's own TURN credentials, used
-  on the URL that worked.
+  on the URL that worked. On `relay` the edge allocates on that URL for every offer and waits at most
+  `RT_TURN_ALLOCATE_MS` (default 1500, below the SDK's 3 s signalling budget); past it the answer goes out with the
+  host candidates only.
 - Per session: `edge.ice.selected` and `rt.ice.selected` (browser) say which pair carries the media (`host`/`relay` on
   each side, protocol, RTT), in the session's trace.
 - `GET /__aigw/rt/status` → `net: {path, udpInbound, probePort, publicIp, probeHits, relay, reasons, checkedAt}`.

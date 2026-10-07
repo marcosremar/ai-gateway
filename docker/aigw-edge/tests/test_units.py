@@ -140,6 +140,23 @@ try:
     got, error = asyncio.run(cut_tts_stream())
     check("upstream: a TTS stream cut mid-body raises UpstreamError with stage tts",
           got == 4800 and isinstance(error, UpstreamError) and error.stage == "tts" and error.status is None)
+    from aioice import Connection
+
+    from aigw_edge import ice as edge_ice
+
+    async def offer_with_dead_turn():
+        edge_ice.install(Settings(udp_ports=(50200, 50240), turn_allocate_ms=200))
+        conn = Connection(ice_controlling=False, turn_server=("192.0.2.1", 3478), turn_username="u", turn_password="p")
+        started = time.monotonic()
+        candidates = await conn.get_component_candidates(1, [])
+        elapsed = time.monotonic() - started
+        await conn.close()
+        return [c.type for c in candidates], elapsed
+
+    kinds, elapsed = asyncio.run(offer_with_dead_turn())
+    check(f"ice: a TURN server that does not answer costs RT_TURN_ALLOCATE_MS, host candidates still go out ({elapsed:.2f} s)",
+          kinds and set(kinds) == {"host"} and elapsed < 1.0)
+    check("ice: RT_TURN_ALLOCATE_MS defaults below the SDK's 3 s signalling budget", Settings().turn_allocate_ms == 1500)
 except ImportError:
     print("SKIP upstream (no aiohttp)")
 

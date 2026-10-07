@@ -151,6 +151,17 @@ Per session (TURN REST API, what coturn implements): `username = "<exp>:<sid>"`,
 base64(HMAC-SHA1(secret, username))`, valid until the token expires. No URLs or no secret → no TURN server offered.
 The coturn deployment itself is a builtin deployment profile on the edge side; the gateway only consumes URL + secret.
 
+**Health** (`src/realtime/turn-health.ts`). Every `REALTIME_TURN_CHECK_MS` (default 30 s; `0` turns the check off) the
+gateway sends each TURN URL the first message of any TURN client — an Allocate request without credentials, over the
+URL's own transport (UDP, TCP, or TLS for `turns:`) — and takes any STUN reply with its transaction id (coturn answers
+401) as alive. A URL that answered before and then misses two checks in a row is `dead` and left out of the
+`iceServers` a session receives until it answers again; a URL that has never answered this process stays `unknown` and
+is still handed out (a gateway whose own egress drops UDP must not take TURN away from every learner). Each change is
+logged (`realtime: turn server`, telemetry `rt.turn.health`), and `GET /health?details=1` (admin) lists
+`turn: [{url, state, since, checkedAt, rttMs, failures}]`. The check does not prove that an allocation succeeds (the
+shared secret, the relay port range) nor that a learner's network reaches the server; the edge's own relay test
+(netcheck.py) and its per-offer credentials always get every configured URL.
+
 ## Load and the autoscaler
 
 WebRTC audio never crosses the gateway, so the controller's lease counters do not see a talking class. The service

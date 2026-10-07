@@ -19,6 +19,7 @@ import {
 import { iceServersFor, type IceConfig, DEFAULT_STUN_URLS } from './ice';
 import { reportExternalLoad } from './external-load';
 import { probeUdp } from './net-probe';
+import { TurnHealth, type TurnProbe, type TurnUrlHealth } from './turn-health';
 import { echoTrace, makeEmitter, newTrace, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
 import {
   deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, verifySessionToken,
@@ -56,10 +57,13 @@ export interface RealtimeServiceOptions {
   /** A replica's path is re-checked after this long. Default 30 min. */
   netRecheckMs?: number;
   probeUdpImpl?: typeof probeUdp;
+  turnCheckMs?: number;
+  probeTurnImpl?: TurnProbe;
 }
 
 export const REALTIME_DEFAULT_TTL_SECONDS = 600;
 const MAX_SESSION_BODY = 256 * 1024;
+const NET_RETRY_MS = 60_000;
 const FALLBACK = { transport: 's2s-stream', url: '/v1/s2s' } as const;
 
 export interface ResolvedSession {
@@ -110,6 +114,9 @@ export class RealtimeService {
   private poller: ReturnType<typeof setInterval> | null = null;
   private netLoop: ReturnType<typeof setInterval> | null = null;
   private readonly netProbed = new Map<string, number>();
+  private readonly netNotDirect = new Map<string, number>();
+  private readonly turn: TurnHealth;
+  private turnLoop: ReturnType<typeof setInterval> | null = null;
   readonly emit: GatewayEmit;
 
   constructor(private readonly opts: RealtimeServiceOptions) {
@@ -119,6 +126,19 @@ export class RealtimeService {
     this.status = new EdgeStatusCache({
       fetchImpl: opts.fetchImpl, now: this.now, ttlMs: opts.statusTtlMs, timeoutMs: opts.statusTimeoutMs,
     });
+    this.turn = new TurnHealth(opts.ice?.turnSecret ? opts.ice.turn : [], {
+      probe: opts.probeTurnImpl, now: this.now,
+      onChange: (entry, previous) => {
+        this.log('realtime: turn server', { ...entry, previous });
+        this.emit(newTrace(), 'rt.turn.health', { level: entry.state === 'alive' ? 'info' : 'warn', attrs: { ...entry, previous } });
+      },
+    });
+    const turnEvery = opts.turnCheckMs ?? 30_000;
+    if (turnEvery > 0 && this.turn.view().length) {
+      void this.turn.check();
+      this.turnLoop = setInterval(() => { void this.turn.check(); }, turnEvery);
+      this.turnLoop.unref?.();
+    }
     const every = opts.netProbeMs ?? 15_000;
     if (every > 0 && typeof opts.controller?.list === 'function') {
       this.netLoop = setInterval(() => { void this.probeAll().catch(() => {}); }, every);
@@ -153,7 +173,7 @@ export class RealtimeService {
     const net = status.net;
     if (!status.probePort || !net) return;
     const now = this.now();
-    const stale = net.udpInbound === 'unknown' || !net.checkedAt || now - net.checkedAt * 1000 > (this.opts.netRecheckMs ?? 30 * 60_000);
+    const stale = net.udpInbound === 'unknown' || !net.checkedAt || now - net.checkedAt * 1000 > this.netRecheckAfterMs(r.id, net.path);
     if (!stale || now - (this.netProbed.get(r.id) ?? 0) < 60_000) return;
     this.netProbed.set(r.id, now);
     const trace = newTrace();
@@ -173,6 +193,8 @@ export class RealtimeService {
     } catch (err) {
       this.log('realtime: net report to the edge failed', { replica: r.id, error: (err as Error).message });
     }
+    if (decided.path === 'direct') this.netNotDirect.delete(r.id);
+    else this.netNotDirect.set(r.id, (this.netNotDirect.get(r.id) ?? 0) + 1);
     this.status.invalidate(r.id);
     this.log('realtime: media path', { deployment: dep, replica: r.id, udpInbound: udp.result, rttMs: udp.rttMs, path: decided.path ?? 'unknown', reasons: decided.reasons });
     this.emit(trace, 'rt.net.probe', {
@@ -180,6 +202,15 @@ export class RealtimeService {
       attrs: { deployment: dep, replica: r.id, udpInbound: udp.result, rttMs: udp.rttMs, tries: udp.tries, path: decided.path ?? 'unknown', relay: decided.relay?.url ?? null, relayTransport: decided.relay?.transport ?? null, turnConfigured: turn.length > 0 },
     });
   }
+
+  private netRecheckAfterMs(replicaId: string, path: string): number {
+    const full = this.opts.netRecheckMs ?? 30 * 60_000;
+    return path === 'direct' ? full : Math.min(full, NET_RETRY_MS * 2 ** Math.max(0, (this.netNotDirect.get(replicaId) ?? 1) - 1));
+  }
+
+  turnHealth(): TurnUrlHealth[] { return this.turn.view(); }
+
+  checkTurn(): Promise<void> { return this.turn.check(); }
 
   /** TURN servers for the edge's own side of one session (path `relay`), with that session's credentials. */
   edgeIceServers(sid: string, expSeconds: number) {
@@ -311,7 +342,7 @@ export class RealtimeService {
     const base = this.publicBase(req);
     const wsBase = base.replace(/^http/, 'ws');
     const ice = this.opts.ice ?? { stun: [...DEFAULT_STUN_URLS], turn: [], turnSecret: null };
-    const iceServers = iceServersFor(ice, sid, exp);
+    const iceServers = iceServersFor({ ...ice, turn: this.turn.usable() }, sid, exp);
     const transports = ordered.order
       .filter(t => !isEdgeTransport(t) || placed.replica.status.transports.includes(t))
       .map((t: RealtimeTransportType) => {
@@ -428,6 +459,7 @@ export class RealtimeService {
   stop(): void {
     if (this.poller) clearInterval(this.poller);
     if (this.netLoop) clearInterval(this.netLoop);
+    if (this.turnLoop) clearInterval(this.turnLoop);
     this.poller = null;
     this.netLoop = null;
   }
