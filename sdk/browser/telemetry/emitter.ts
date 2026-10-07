@@ -86,7 +86,13 @@ export function traceparentOf(traceId: string): string {
   return `00-${traceId}-${span}-01`;
 }
 
-const ingestUrl_ = (endpoint: string) => (endpoint.includes(TELEMETRY_INGEST_PATH) ? endpoint : `${endpoint.replace(/\/+$/, '')}${TELEMETRY_INGEST_PATH}`);
+function withoutTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url[end - 1] === '/') end--;
+  return url.slice(0, end);
+}
+
+const ingestUrl_ = (endpoint: string) => (endpoint.includes(TELEMETRY_INGEST_PATH) ? endpoint : `${withoutTrailingSlashes(endpoint)}${TELEMETRY_INGEST_PATH}`);
 
 export class TelemetryEmitter {
   private queue: TelemetryEvent[] = [];

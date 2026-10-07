@@ -381,14 +381,9 @@ function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse
     candidates.unshift(join(staticDir, 'index.html'));
   }
 
-  // Validate all candidates are within static dir — same prefix-trap fix as
-  // above: accept exact match or `${dir}${sep}…`, never a sibling prefix.
-  const validCandidates = candidates.filter(c => {
-    const r = resolve(c);
-    return r === resolvedStaticDir || r.startsWith(resolvedStaticDir + sep);
-  });
-
-  for (const filePath of validCandidates) {
+  for (const candidate of candidates) {
+    const filePath = resolve(candidate);
+    if (!filePath.startsWith(resolvedStaticDir + sep)) continue;
     try {
       if (!existsSync(filePath)) continue;
       const stat = statSync(filePath);

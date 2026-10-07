@@ -47,6 +47,16 @@ describe('browser telemetry emitter', () => {
     expect(e).toMatchObject({ source: 'browser', level: 'warn', event: 'rt.ladder.fallback', traceId: t.traceId, sessionId: 's-1', turnId: 't-1', durMs: 12, attrs: { from: 'webrtc', to: 'ws' } });
   });
 
+  it('builds the ingest url in linear time for an endpoint with a long run of slashes', async () => {
+    const slashes = '/'.repeat(200_000);
+    const { t, f } = make({ endpoint: `https://gw.test${slashes}x${slashes}` });
+    const started = performance.now();
+    t.emit('vad.segment');
+    await t.flush();
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(f.calls[0]!.url).toBe(`https://gw.test${slashes}x/v1/telemetry/events`);
+  });
+
   it('flushes every 5 s, and immediately at maxBatch events', async () => {
     const { t, f } = make({ maxBatch: 3 });
     t.emit('vad.segment');

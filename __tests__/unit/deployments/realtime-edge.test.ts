@@ -18,7 +18,8 @@ const speech = (extra: Record<string, unknown> = {}) => buildSpec('speech', { pr
 
 /** The base64 file a cloud-init writes to `path`, decoded. */
 function written(script: string, path: string): string | null {
-  const m = new RegExp(`echo '([A-Za-z0-9+/=]+)' \\| base64 -d > ${path.replace(/\//g, '\\/')}`).exec(script);
+  const line = script.split('\n').find(l => l.includes(` | base64 -d > ${path}`));
+  const m = line && /echo '([A-Za-z0-9+/=]+)'/.exec(line);
   return m ? Buffer.from(m[1], 'base64').toString('utf8') : null;
 }
 
