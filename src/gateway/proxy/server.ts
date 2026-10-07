@@ -927,7 +927,8 @@ export function createProxyServer(config: ProxyConfig): Server {
   // 2× the stream timeout — anything still alive after that is genuinely stuck.
   const TOTAL_REQUEST_TIMEOUT_MS = parseInt(process.env.PROXY_TOTAL_TIMEOUT_MS || '60000', 10);
   server.setTimeout(TOTAL_REQUEST_TIMEOUT_MS, (socket) => {
-    log.warn({ timeoutMs: TOTAL_REQUEST_TIMEOUT_MS }, 'Request killed by total timeout');
+    const responseInFlight = Boolean((socket as { _httpMessage?: unknown })._httpMessage);
+    if (responseInFlight) log.warn({ timeoutMs: TOTAL_REQUEST_TIMEOUT_MS }, 'Request killed by total timeout');
     socket.destroy();
   });
 
