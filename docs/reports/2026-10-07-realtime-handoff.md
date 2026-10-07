@@ -288,3 +288,144 @@ Proven against the real gateway without change: the NAT path under load, the `GE
 the cost line.
 
 Not run: the L4; `flap`; a second cold boot; the admission limit at the profile's cap; TURN.
+
+## Live A/B, night of 2026-10-07
+
+Two replicas, one at a time, both **L40S-1-48G, fr-par-2, €1.4699/h**, image
+`rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107`, edge `ghcr.io/marcosremar/aigw-edge:ea107bd`
+(`realtime: { maxSessions: 128, env: { RT_RTC_WORKERS: "6" } }`, as the capacity run), local gateway on :4101, namespace
+`marcos-ab`. Machine 1 21:49:32–22:39:18 Europe/Paris (ready after 10 min 13 s; edge default `EDGE_SPECULATE_MS=300`),
+machine 2 22:39:26–23:02:30 (ready after 9 min; `EDGE_SPECULATE_MS=0`, this commit's `start.sh`). 73 machine-minutes, about €1.80. A first create at 21:48:49
+was deleted 35 s later to change the edge settings. From 20:32 to 21:38 every create was refused, `403 quotas_exceeded`
+(L40S 2 of 2 and L4 2 of 2 in use by others). Everything deleted afterwards.
+
+Stack code and flags were switched on the running machine: the deployment's entrypoint was a test supervisor shipped
+through `files` that holds the image's code, `7d041e1` (arm A) and this branch (arm B) side by side; a restart of the
+orchestrator alone is warm in 6–16 s, of `llama-server` alone in 2.1 s, of the whole stack in 4 min 5 s (the TTS load).
+One catalog voice (6.9 s reference, macOS `say`), a 329-word Portuguese shop-clerk system prompt (487 tokens), a 4.5 s
+Portuguese utterance (`say`, PCM16 mono 16 kHz).
+
+### The LLM first-token drift is llama.cpp's host-RAM prompt cache
+
+llama.cpp b11382 defaults to `--cache-ram 8192` with `--cache-idle-slots`: on every new task the server saves idle slots
+to a prompt cache in host RAM. The cache fills with use; once it is at its limit every task first evicts the oldest
+entry (`srv alloc: making room for prompt cache entry, removing oldest entry`) and the task waits for that before its
+prompt is evaluated. The state lives in the process, so only a restart clears it.
+
+`bun scripts/realtime-e2e/load.ts --n <N> --clip <wav> --profile clean --duration <120|180>` (`ws` clients from the Mac,
+30 s ramp, a turn every 15 ± 5 s), same machine, in this order. Clock: last voiced sample sent → first non-silent
+audio received (the edge's 700 ms endpointing is inside). Edge stages are after its endpointing. "Wait" is, per llama
+task, launch → timings minus (prompt eval + generation), from `llm.log`.
+
+| llama flags | Phase | Turns ok | First audio p50 / p95 ms | Edge p50: stt · llm first token · tts | llama `prompt_n` p50 | Wait p50 / p90 / max ms | Evictions | `llama-server` RSS after |
+|---|---|---|---|---|---|---|---|---|
+| default | N = 4, fresh, 120 s | 28 / 28 | 1146 / 1858 | 209 · 144 · 93 | 194 | 0 / 167 / 199 | 0 | 1.1 GB at start |
+| default | N = 16, 180 s | 177 / 177 | 2065 / 3408 | 404 · 604 · 147 | 163 | not kept | 119 | 12.7 GB |
+| default | N = 4 again, 120 s | 29 / 29 | 1416 / 1819 | 209 · 394 · 96 | 58 | 202 / 590 / 807 | 31 in 29 tasks | 12.4 GB |
+| `--cache-ram 0` (LLM restarted, 2.1 s) | N = 4, 120 s | 29 / 29 | 1028 / 1487 | 208 · 138 · 93 | 169 | 0 / 0 / 0 | 0 | |
+| `--cache-ram 0` | N = 16, 180 s | 175 / 175 | 1678 / 2646 | 416 · 305 · 114 | 266 | 0 / 0 / 93 | 0 | |
+| `--cache-ram 0` | N = 4 again, 120 s | 30 / 30 | 1018 / 1251 | 208 · 136 · 93 | 72 | 0 / 0 / 0 | 0 | 2.9 GB |
+| `--cache-ram 0` + one slot per session | N = 4, 120 s | 28 / 28 | 1120 / 1623 | 210 · 128 · 96 | 59 | 0 / 0 / 0 | 0 | |
+| `--cache-ram 0` + one slot per session | N = 16, 180 s | 171 / 171 | 1974 / 3312 | 447 · 414 · 124 | 56 | 0 / 38 / 118 | 0 | |
+
+- Reproduced in 3 minutes of N = 16: the same N = 4 went from 144 to 394 ms of LLM first token (first audio p50 1146 →
+  1416) with STT and TTS unchanged, and the prompt the LLM had to read got smaller, not larger (194 → 58 tokens): the
+  time is the wait before the prompt, not the prompt.
+- With `--cache-ram 0` there is no drift (138 → 136 ms) and the loaded run is faster too (N = 16 first audio p50 2065 →
+  1678, p95 3408 → 2646). **`start.sh` now passes `--cache-ram 0`.**
+- Machine 2 booted with this commit's `start.sh` (`ps`: `--cache-ram 0`): after N = 16 for 180 s (171 / 171 ok, LLM
+  first token 314 ms), N = 4 had 135 ms of LLM first token, wait 0 / 0 / 0, RSS 3.9 GB. Its first-audio numbers
+  (2064 and 1398 ms p50) are not comparable with the rows above: that edge ran without speculation.
+- Restarting only `llama-server` takes 2.1 s and restores the first-token time: an operational mitigation for a
+  replica on the old image (its `start.sh` has no `LLM_EXTRA_ARGS`; the flag reaches it through `files` or a rebuild).
+- Not the cause: GPU memory (27.9 GB before and after), temperature (41 → 52 °C), throttle reasons (`0x0`), clock
+  (2520 MHz), growing context (`n_tokens` ≤ 1101 of 2048, no truncation), leaked generations (below).
+- **Slots are shared between sessions.** Every session has the same system prompt, so a new session's first prompt
+  matches any used slot better than an empty one (`selected slot by LCP similarity`, `f_sim_best` 1.0): 16 sessions
+  ran on 6–8 of the 16 slots, and 62–75 % of turns re-read more than 100 prompt tokens (the other session's history).
+  Pinning one slot per session (`id_slot` from the edge's trace id, test shim only) cut `prompt_n` to 56 and used all
+  16 slots, but N = 16 was slower (LLM first token 305 → 414 ms, generation 45 → 96 ms per token): not adopted, cause
+  not investigated.
+- A discarded speculation does not leak: on a clip with a 450 ms pause (6 turns, `ws`) the stack decoded 12 clips
+  (the discarded STT runs to its end) and llama.cpp logged `stop: cancel task` for 5 of 11 tasks, all 11 released.
+
+### TTS chunk cadence
+
+Straight at the stack, `/v1/audio/speech` through the gateway invoke route, streamed PCM, one two-sentence line (7.5 s of
+audio). Clock: request sent → event, at the Mac. "300 ms continuous" is a player that starts on the first byte and
+never stalls more than 60 ms; "voiced onset" is when that player reaches the first 20 ms window with RMS > 200.
+Median (min–max).
+
+| Arm | Parallel | n | First byte ms | 300 ms continuous ms | Longest stall in 2 s ms | Voiced onset ms | Total ms | Audio ms |
+|---|---|---|---|---|---|---|---|---|
+| default (`initial_codec_chunk_frames: 1`) | 1 | 10 | 152 (107–188) | 660 (540–686) | 126 (53–161) | 521 (248–801) | 936 (889–1044) | 7560 (7200–8240) |
+| default | 4 | 12 | 224 (221–404) | 802 (747–1043) | 192 (145–259) | 610 (281–841) | 1262 (1128–1365) | 7240 (6880–7840) |
+| default | 8 | 16 | 393 (208–444) | 928 (794–984) | 178 (109–252) | 770 (494–1059) | 1486 (1348–2294) | 7560 (7200–15440) |
+| default, repeated | 8 | 16 | 350 (342–364) | 931 (807–1050) | 202 (80–317) | 725 (373–1180) | 1404 (1306–1563) | 7280 (7040–8400) |
+| per request `initial_codec_chunk_frames: 4` | 1 | 10 | 176 (159–300) | 476 (459–600) | 0 (0–0) | 394 (214–540) | 904 (872–991) | 7400 (7120–7840) |
+| per request 4 | 4 | 12 | 348 (335–444) | 654 (635–745) | 0 (0–71) | 540 (482–948) | 1209 (1168–1312) | 7440 (7120–8160) |
+| per request 4 | 8 | 16 | 588 (560–618) | 888 (860–918) | 0 (0–0) | 778 (640–1124) | 1518 (1441–1663) | 7560 (6960–8720) |
+| per request `initial_codec_chunk_frames: 6` | 1 | 10 | 208 (183–234) | 508 (483–534) | 0 (0–0) | 362 (257–534) | 932 (907–986) | 7520 (7280–7840) |
+
+- The default is an 80 ms first chunk (3840 bytes), then nothing for 125 ms alone and 180–200 ms at 4–8 in parallel,
+  then the rest in a burst: the L40S synthesizes 8 × faster than real time, so the gap is far from the 0.4–0.5 s
+  guessed. The first 150–240 ms of every answer are silence (20–580), so the stall falls inside it.
+- A first chunk of 4 frames removes the stall and brings the voiced onset forward by 127 ms alone and 70 ms at 4 in
+  parallel; at 8 in parallel the first byte comes 200 ms later and the onset does not move. Ranges overlap; the
+  leading silence varies more than the effect. **No default changed.**
+- Joins are clean in every arm: 0 (0–1) sample jumps at chunk boundaries, audio length unchanged. One default
+  request at 8 in parallel returned 15.4 s of audio with 64 zero runs; not seen again in 60 more requests.
+- `codec_chunk_ramp` / `codec_chunk_adaptive` (`TTS_DEPLOY_CONFIG`): **not run** (a 4-minute TTS reload per arm, and
+  the per-request field already leaves no stall).
+
+### Stack arm A (`7d041e1`) vs arm B (this branch), `--cache-ram 0`
+
+`/v1/audio/transcriptions` with the 4.5 s clip: total at the Mac, median (min–max); 8 sequential, then 3 rounds of 8
+and of 16 at once.
+
+| Arm | Sequential | 8 at once | 16 at once | queue / decode ms (16 at once) |
+|---|---|---|---|---|
+| A | 396 (358–477) | 1009 (388–1177) | 1318 (403–1999) | not reported |
+| B | 332 (289–434) | 938 (311–1071) | 1258 (369–1936) | 156 (0–517) / 373 (180–515) |
+| B, `STT_BATCH_WINDOW_MS=0` | 328 (303–404) | 877 (307–1124) | 1260 (335–1901) | 148 (0–400) / 375 (179–451) |
+| B, `CUT_EAGER=1` | 331 (290–370) | 902 (337–1094) | 1083 (305–1866) | 126 (0–599) / 511 (176–649) |
+
+`bench.py --concurrency 1,4,8 --rounds 3` on `/v1/s2s`, server first audio p50 / p95 ms from the moment the server has
+the clip (3, 12 and 24 requests, 0 errors in every arm):
+
+| Arm | 1 | 4 at once | 8 at once | Stages at 1: stt queue + decode · llm first token · text wait · tts first chunk |
+|---|---|---|---|---|
+| A | 453 / 455 | 1264 / 1532 | 2239 / 2455 | stt 265 |
+| B | 393 / 398 | 1134 / 1381 | 1609 / 2242 | 25 + 180 · 55 · 40 · 95 |
+| B, `STT_BATCH_WINDOW_MS=0` | 370 / 371 | 954 / 1144 | 1885 / 2011 | 0 + 181 · 55 · 40 · 93 |
+| B, `CUT_EAGER=1` | 387 / 392 | 1189 / 1257 | 2029 / 2171 | 25 + 182 · 54 · 31 · 92 |
+
+- Arm B is faster at every level (−60 ms alone, −630 ms at 8 at once). The two env arms are inside the run-to-run
+  spread of B (better at 1 and 4, worse at 8): no default changed.
+- llama.cpp on arm B, same system prompt: turn 1 `cache_n` 483 / `prompt_n` 4 / 51 ms; turn 2 456 / 66 / 126 ms; another
+  student with a different history 456 / 60 / 129 ms; back to the first after 8 others 456 / 136 / 129 ms. The system
+  prompt is never read again; what is re-read is the history after it.
+
+### Speculative end of turn, `EDGE_SPECULATE_MS` 300 vs 0
+
+`e2e-live.ts turn webrtc|ws`, real Chrome, the clip as the fake microphone, one warm-up discarded then 8 turns each.
+Clock: last voiced sample of the clip (the page's meter) → the edge's `audio_start` received ("received") and → first
+loud output sample ("audible"); "edge ttfa" is the edge's own time after its end-of-turn decision. 300 ran on
+machine 1 and 0 on machine 2 (the edge reads the setting once, at start): same machine type, zone and night, both with
+`--cache-ram 0`, not the same machine. Median (min–max).
+
+| Transport | `EDGE_SPECULATE_MS` | Turns complete | Received ms | Audible ms | Edge ttfa ms | Edge stt · llm first token · tts ms |
+|---|---|---|---|---|---|---|
+| WebRTC | 0 | 8 / 8 | 1259 (1227–1399) | 1627 (1413–1886) | 418 (398–555) | 207 · 76 · 94 |
+| WebRTC | 300 | 8 / 8 | 944 (917–986) | 1292 (1116–1796) | 98 (96–156) | 210 · 58 · 96 |
+| WS | 0 | 8 / 8 | 1184 (1171–1291) | 1498 (1222–1702) | 400 (395–436) | 208 · 56 · 94 |
+| WS | 300 | 7 / 7 (one run's output not parsed) | 884 (849–958) | 1073 (1053–1190) | 99 (94–120) | 208 · 58 · 98 |
+| WS, clip with a 450 ms pause | 0 | 5 / 5 | 1190 (1182–1287) | 1463 (1252–1756) | 404 (394–407) | 213 · 56 · 94 |
+| WS, clip with a 450 ms pause | 300 | 5 / 5 | 907 (870–916) | 1191 (932–1270) | 96 (94–106) | 215 · 56 · 96 |
+
+- 300 ms brings the first audio 300–315 ms earlier at the edge and 335–425 ms earlier in the ear; the 300 the branch
+  already defaults to stays. 200 was not run.
+- Discard cost on the paused clip: one extra STT decode per turn (12 clips for 6 turns against 6 for 6), the STT of
+  the confirmed turn unchanged (215 vs 213 ms), the LLM task of the discarded attempt cancelled by llama.cpp.
+- 150–500 ms pass between `audio_start` and the first loud sample in every row: the leading silence of the TTS.
+- `s2s-stream` and the combination table per transport: **not run**.

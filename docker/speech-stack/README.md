@@ -91,6 +91,12 @@ same text as one at a time, and silence comes back empty.
 | `LLM_EXTRA_ARGS` | unset | Extra `llama-server` flags, e.g. `-b 4096 -ub 2048` (prompt-eval batch; b11382 defaults are 2048 / 512). |
 | `S2S_DIR` | `/opt/s2s` | Directory uvicorn loads `server.py` from. |
 
+`start.sh` starts llama.cpp with `--cache-ram 0` (b11382 default: 8192 MiB, with `--cache-idle-slots`). With the default,
+the server saves idle slots to a host-RAM prompt cache on every new task; once the cache is full (about 3 min at 16
+sessions, `llama-server` RSS 1.1 → 12.4 GB) every task first evicts an entry, 200 ms p50 / 800 ms max before prompt
+evaluation, until the process restarts. Measured 2026-10-07, `docs/reports/2026-10-07-realtime-handoff.md` § Live A/B.
+`LLM_EXTRA_ARGS="--cache-ram 8192"` restores the old behaviour.
+
 Always on: a WAV that is already PCM16 mono 16 kHz skips the ffmpeg subprocess; final transcriptions are taken before the
 partial decodes of `/ws/audio-stream`; closing that socket no longer decodes the buffer (a `flush` frame still does); the
 warm-up speaks one line with every catalog voice.
