@@ -37,6 +37,12 @@ def resample_pcm16(pcm: bytes, src: int, dst: int) -> bytes:
     return np.clip(y, -32768, 32767).astype(np.int16).tobytes()
 
 
+def ttfa_from_speech(metrics: dict) -> int | None:
+    if metrics["endpoint_ms"] is None or metrics["ttfa_ms"] is None:
+        return None
+    return metrics["endpoint_ms"] + metrics["ttfa_ms"]
+
+
 class AudioOut:
     """PCM16 24 kHz waiting to be played; the transport pulls 20 ms frames at real time."""
 
@@ -80,6 +86,7 @@ class Session:
         self.last_input = time.monotonic()
         self.turn_buf = bytearray()
         self.turn_start: int | None = None  # byte offset in turn_buf where speech began (server VAD)
+        self.last_speech_at: float | None = None
         self.pending = np.zeros(0, dtype=np.float32)
         self.turn_task: asyncio.Task | None = None
         self.partials = None
@@ -106,7 +113,10 @@ class Session:
         self.pending = np.concatenate([self.pending, samples])
         while len(self.pending) >= FRAME_SAMPLES:
             frame, self.pending = self.pending[:FRAME_SAMPLES], self.pending[FRAME_SAMPLES:]
-            self._on_vad(self.vad.push(frame))
+            change = self.vad.push(frame)
+            if self.vad.speaking and not self.vad.quiet_run:
+                self.last_speech_at = time.monotonic()
+            self._on_vad(change)
         max_bytes = self.s.max_turn_seconds * 16000 * 2
         if self.turn_start is not None and len(self.turn_buf) - self.turn_start >= max_bytes:
             self.end_turn(reason="max_turn")
@@ -178,7 +188,7 @@ class Session:
             return
         self.turns += 1
         self.turn_id = f"{self.sid}:{self.turns}"
-        self.turn_task = asyncio.create_task(self._turn(audio, time.monotonic(), self.turn_id))
+        self.turn_task = asyncio.create_task(self._turn(audio, time.monotonic(), self.turn_id, self.last_speech_at))
 
     # ── partial transcripts (the replica's /ws/audio-stream, best effort) ─────
 
@@ -223,9 +233,10 @@ class Session:
 
     # ── one turn ─────────────────────────────────────────────────────────────
 
-    async def _turn(self, audio: bytes, ended: float, turn_id: str) -> None:
+    async def _turn(self, audio: bytes, ended: float, turn_id: str, last_speech_at: float | None = None) -> None:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
-        metrics: dict = {"ttfa_ms": None, "stt_ms": None, "llm_ttft_ms": None, "tts_ttfb_ms": None}
+        metrics: dict = {"ttfa_ms": None, "stt_ms": None, "llm_ttft_ms": None, "tts_ttfb_ms": None,
+                         "endpoint_ms": round((ended - last_speech_at) * 1000) if last_speech_at else None}
         user_text, spoken = None, []
         self.outcome = "ok"
         tel = lambda event, **kw: self.tel(event, turn_id=turn_id, **kw)  # noqa: E731
@@ -257,7 +268,8 @@ class Session:
         finally:
             tel("edge.turn.done", dur_ms=ms(ended), outcome=self.outcome, ttfaMs=metrics["ttfa_ms"],
                 sttMs=metrics["stt_ms"], llmTtftMs=metrics["llm_ttft_ms"], ttsTtfbMs=metrics["tts_ttfb_ms"],
-                sentences=len(spoken), replyChars=sum(len(x) for x in spoken))
+                sentences=len(spoken), replyChars=sum(len(x) for x in spoken), endpointMs=metrics["endpoint_ms"],
+                ttfaFromSpeechMs=ttfa_from_speech(metrics))
             if user_text:
                 template = self.cfg.get("user_template") or ""
                 user = template.replace("{{transcript}}", user_text) if "{{transcript}}" in template else user_text
@@ -368,7 +380,7 @@ class Session:
             if metrics["ttfa_ms"] is not None:
                 await self.out.drained.wait()
                 self.emit({"type": "audio_end"})
-            self.emit({"type": "metrics", **metrics, "turnId": self.turn_id})
+            self.emit({"type": "metrics", **metrics, "ttfa_from_speech_ms": ttfa_from_speech(metrics), "turnId": self.turn_id})
             self.emit({"type": "done", "turnId": self.turn_id})
         finally:
             thinker.cancel()
@@ -410,7 +422,7 @@ class Session:
         if metrics["ttfa_ms"] is not None:
             await self.out.drained.wait()
             self.emit({"type": "audio_end"})
-        self.emit({"type": "metrics", **metrics, "turnId": self.turn_id})
+        self.emit({"type": "metrics", **metrics, "ttfa_from_speech_ms": ttfa_from_speech(metrics), "turnId": self.turn_id})
         self.emit({"type": "done", "turnId": self.turn_id})
         return heard_text
 
