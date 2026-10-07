@@ -16,6 +16,7 @@ import { createLogger } from '../../logger';
 import type { AIProfile } from '../../client';
 import { validateRemoteEndpointResolved } from './ssrf-protection';
 import { GPU_TTS_TIMEOUT_MS } from './timeouts';
+import { localSay } from './local-say';
 
 const log = createLogger('tts-preview');
 
@@ -30,7 +31,7 @@ export interface TtsPreviewInput {
 export interface TtsPreviewResult {
   audio: Buffer;
   contentType: string;
-  source: 'gpu' | 'local-kokoro' | 'modal-clone' | 'minimax' | 'cloud';
+  source: 'gpu' | 'local-kokoro' | 'modal-clone' | 'minimax' | 'cloud' | 'local-say';
   latencyMs: number;
 }
 
@@ -193,18 +194,32 @@ export async function generateTtsPreview(
     throw new Error(`preview: engine='${engine}' requested but no matching backend succeeded`);
   }
   log.log('preview: no GPU/local, using cloud fallback');
-  const result = await deps.client.synthesize(text, {
-    ...deps.translationProfile,
-    gpuEndpoint: undefined,
-    voice: speaker,
-    audioFormat: 'wav',
-  });
-  const latencyMs = Date.now() - t0;
-  log.log(`preview [cloud]: speaker=${speaker} lang=${language} ${result.audio.length}B ${latencyMs}ms`);
-  return {
-    audio: Buffer.isBuffer(result.audio) ? result.audio : Buffer.from(result.audio),
-    contentType: result.contentType || 'audio/wav',
-    source: 'cloud',
-    latencyMs,
-  };
+  try {
+    const result = await deps.client.synthesize(text, {
+      ...deps.translationProfile,
+      gpuEndpoint: undefined,
+      voice: speaker,
+      audioFormat: 'wav',
+    });
+    const latencyMs = Date.now() - t0;
+    log.log(`preview [cloud]: speaker=${speaker} lang=${language} ${result.audio.length}B ${latencyMs}ms`);
+    return {
+      audio: Buffer.isBuffer(result.audio) ? result.audio : Buffer.from(result.audio),
+      contentType: result.contentType || 'audio/wav',
+      source: 'cloud',
+      latencyMs,
+    };
+  } catch (cloudErr) {
+    // Último recurso: `say` do macOS (dublagem nunca falha por falta de nuvem).
+    const fallback = await localSay(text, speaker, language);
+    if (fallback) {
+      const latencyMs = Date.now() - t0;
+      log.warn(
+        `preview cloud failed (${cloudErr instanceof Error ? cloudErr.message : cloudErr}); ` +
+        `usando local-say (${fallback.audio.length}B, ${latencyMs}ms)`,
+      );
+      return { audio: fallback.audio, contentType: 'audio/wav', source: 'local-say', latencyMs };
+    }
+    throw cloudErr;
+  }
 }
