@@ -304,6 +304,7 @@ const realtime = createRealtime({
   // Test/e2e knobs: a shorter media-path recheck (default 30 min) and a fake "firewall dropped our UDP probe" for
   // boxes where neither the security group nor iptables can be touched (REALTIME_PROBE_UDP=blocked).
   netRecheckMs: optionalMs(process.env.REALTIME_NET_RECHECK_MS),
+  turnCheckMs: optionalMs(process.env.REALTIME_TURN_CHECK_MS),
   ...(process.env.REALTIME_PROBE_UDP === 'blocked'
     ? { probeUdpImpl: async () => ({ result: 'blocked' as const, rttMs: null, tries: 0 }) }
     : {}),
@@ -324,7 +325,7 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
-  healthDetails: (viewer) => (viewer.admin ? chainHealth() : appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage))),
+  healthDetails: (viewer) => (viewer.admin ? { ...chainHealth(), turn: realtime.service.turnHealth() } : appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage))),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
     ...(telemetry?.adminRoutes ?? []),

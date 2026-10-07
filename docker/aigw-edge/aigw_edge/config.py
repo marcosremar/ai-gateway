@@ -48,6 +48,7 @@ class Settings:
     udp_bind: str = ""
     public_ip: str = ""
     port_map: dict[int, int] = field(default_factory=dict)
+    turn_allocate_ms: int = 1500
     replica_id: str = ""
     deployment: str = ""
     key: bytes = b""
@@ -90,6 +91,7 @@ class Settings:
             udp_bind=env.get("RT_UDP_BIND", ""),
             public_ip=env.get("RT_PUBLIC_IP") or env.get("PUBLIC_IPADDR", ""),
             port_map=port_map,
+            turn_allocate_ms=max(100, _int("RT_TURN_ALLOCATE_MS", 1500)),
             replica_id=env.get("AIGW_REPLICA_ID") or env.get("CONTAINER_ID", ""),
             deployment=env.get("AIGW_DEPLOYMENT", ""),
             key=key,
