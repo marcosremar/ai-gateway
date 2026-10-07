@@ -35,7 +35,7 @@ function open(opts = {}) {
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     }),
     onEvent: (e) => {
-      state.events.push(e);
+      state.events.push({ ...e, at: performance.now() });
       if (e.type === 'vad' && e.state === 'end' && state.vadEndAt === null) state.vadEndAt = performance.now();
       for (const w of [...state.waiters]) if (w.pred(e)) { state.waiters.splice(state.waiters.indexOf(w), 1); w.done(); }
     },
@@ -80,7 +80,7 @@ function summary(state, error) {
   const s = state.session;
   return {
     transport: s.transport,
-    events: state.events.map((e) => Object.fromEntries(Object.entries(e).filter(([k]) => KEEP.has(k)))),
+    events: state.events.map((e) => ({ ...Object.fromEntries(Object.entries(e).filter(([k]) => KEEP.has(k))), ...(e.type === 'error' ? { message: String(e.message).slice(0, 120) } : {}), at: Math.round(e.at ?? 0) })),
     loudFrames: state.loudFrames, traceId: s.traceId, sessionId: s.sessionId,
     history: s.history.map((m) => m.role),
     interruptMs: state.interruptMs ?? null,
