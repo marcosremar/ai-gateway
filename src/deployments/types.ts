@@ -309,10 +309,20 @@ export interface ReplicaProbe {
   check?(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult>;
 }
 
+export interface PendingNetworkRelease {
+  deployment: string;
+  network: DeploymentNetwork;
+  since: number;
+  attempts: number;
+  lastAttemptAt: number | null;
+  lastError: string | null;
+}
+
 export interface DeploymentStore {
-  load(): Promise<{ deployments: DeploymentRecord[]; profiles: Profile[] }>;
+  load(): Promise<{ deployments: DeploymentRecord[]; profiles: Profile[]; networkReleases?: PendingNetworkRelease[] }>;
   saveDeployment(record: DeploymentRecord): Promise<void>;
-  deleteDeployment(name: string): Promise<void>;
+  deleteDeployment(name: string, release?: PendingNetworkRelease): Promise<void>;
+  deleteNetworkRelease(ipId: string): Promise<void>;
   saveProfile(profile: Profile): Promise<void>;
   deleteProfile(name: string): Promise<void>;
 }

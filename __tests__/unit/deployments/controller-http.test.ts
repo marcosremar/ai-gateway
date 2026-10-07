@@ -265,6 +265,8 @@ describe('deployments API', () => {
     await until(() => h.cloud.networkCalls > before);
     expect((await call(h, 'DELETE', '/v1/deployments/rtc')).status).toBe(200);
     await until(() => h.cloud.releasedNetworks.includes('ip-rtc'));
+    await until(async () => (await (await call(h, 'GET', '/v1/deployments')).json() as { pendingNetworkReleases: unknown[] }).pendingNetworkReleases.length === 0);
+    expect((await (await call(h, 'GET', '/v1/deployments', undefined, SITE)).json() as Record<string, unknown>).pendingNetworkReleases).toBeUndefined();
   });
 
   it("idleAction 'stop': idle powers the replica off (kept, not deleted) and the next demand powers it back on", async () => {

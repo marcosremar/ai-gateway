@@ -14,7 +14,8 @@ import { replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
 import type {
-  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, Profile, ReplicaMachine, ReplicaProbe,
+  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
+  ReplicaProbe,
 } from './types';
 
 export class DeploymentError extends Error {
@@ -194,6 +195,7 @@ export abstract class ControllerState {
   protected readonly probes = new Map<string, ProbeState>();
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
+  protected readonly networkReleases = new Map<string, PendingNetworkRelease>();
   protected reconciling: Promise<void> | null = null;
   protected rerun = false;
   protected timer: ReturnType<typeof setInterval> | null = null;

@@ -88,6 +88,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       .map(m => this.probeOne(m)));
 
     for (const [name, rt] of this.deployments) await this.reconcileDeployment(name, rt, failed);
+    await this.settleNetworkReleases();
   }
 
   /** One deployment's tick: pressure decision → plan → releases / drains → power-ons / creates (or reclaim when capped). */
