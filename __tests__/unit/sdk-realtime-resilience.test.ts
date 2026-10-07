@@ -4,7 +4,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_TIMEOUTS, createWebRtcTransport, setPlayoutDelay, type RealtimeEvent, type TransportContext, type TransportOffer,
+  DEFAULT_TIMEOUTS, createRealtimeSession, createWebRtcTransport, setPlayoutDelay, type RealtimeEvent, type RealtimeSessionOptions,
+  type SessionDescriptor, type TelemetryEvent, type TransportContext, type TransportOffer,
 } from '../../sdk/browser/realtime/index';
 import { createLocalTelemetry } from '../../sdk/browser/realtime/telemetry';
 
@@ -40,7 +41,11 @@ class FakePc extends EventTarget {
   localDescription: { sdp: string } | null = null;
   offers: unknown[] = [];
   answers = 0;
-  channel = Object.assign(new EventTarget(), { readyState: 'connecting', send: () => {}, close: () => {}, onmessage: null, onclose: null });
+  sent: unknown[] = [];
+  channel = Object.assign(new EventTarget(), {
+    readyState: 'connecting', send: (d: string) => { this.sent.push(JSON.parse(d)); }, close: () => {},
+    onmessage: null as ((e: { data: string }) => void) | null, onclose: null as (() => void) | null,
+  });
   ontrack: ((e: unknown) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
@@ -71,8 +76,31 @@ class FakePc extends EventTarget {
     this.dispatchEvent(new Event('connectionstatechange'));
     this.onconnectionstatechange?.();
   }
+  edge(event: Record<string, unknown>) { this.channel.onmessage?.({ data: JSON.stringify(event) }); }
   async getStats() { return new Map(); }
   close() {}
+}
+
+const OFFER = { type: 'webrtc' as const, offerUrl: 'https://gw/v1/realtime/sessions/rt_1/offer' };
+const DESCRIPTOR: SessionDescriptor = { sessionId: 'rt_1', token: 'tok', expiresAt: '', transports: [OFFER, { type: 'ws', url: 'wss://gw/ws' }] };
+
+function session(extra: Partial<RealtimeSessionOptions> = {}) {
+  const events: RealtimeEvent[] = [];
+  const telemetry: TelemetryEvent[] = [];
+  const counts = { admissions: 0, mics: 0 };
+  const fetchImpl = (async (_url: string, init: RequestInit) => (
+    init.method === 'DELETE' ? new Response(null, { status: 204 }) : Response.json({ sdp: 'v=0\r\nanswer', type: 'answer' })
+  )) as unknown as typeof fetch;
+  const s = createRealtimeSession({
+    sessionEndpoint: async () => { counts.admissions++; return DESCRIPTOR; },
+    getMicStream: async () => { counts.mics++; return { getAudioTracks: () => [{ kind: 'audio' }] } as unknown as MediaStream; },
+    onEvent: e => events.push(e), onRemoteAudio: () => {}, storage: null, fetchImpl,
+    timeouts: { iceGatherMs: 50, webrtcConnectMs: 200, disconnectGraceMs: 10 },
+    transports: { webrtc: c => createWebRtcTransport(c, OFFER, { RTCPeerConnection: FakePc as unknown as typeof RTCPeerConnection }) },
+    telemetry: { send: false, onEvent: e => telemetry.push(e) },
+    ...extra,
+  });
+  return { s, events, telemetry, counts };
 }
 
 function webrtc(c: TransportContext, offer: Partial<Extract<TransportOffer, { type: 'webrtc' }>> = {}) {
@@ -148,5 +176,30 @@ describe('playout delay', () => {
       expect(receiver.jitterBufferTarget).toBe(want);
       t.close();
     }
+  });
+});
+
+describe('pre-connect', () => {
+  it('connect() pays admission, transport and microphone once and stays idle: no end_turn, no turn, no history', async () => {
+    FakePc.candidates = [[1, 'srflx']];
+    const { s, events, telemetry, counts } = session();
+    expect(await s.connect()).toBe('webrtc');
+    const pc = FakePc.last;
+    await new Promise(r => setTimeout(r, 60));
+    expect(counts).toEqual({ admissions: 1, mics: 1 });
+    expect(pc.sent).toEqual([]);
+    expect(s.history).toEqual([]);
+    expect(telemetry.filter(e => e.event.startsWith('turn.'))).toEqual([]);
+    expect(events.map(e => e.type)).toEqual(['transport']);
+
+    s.sendEndTurn();
+    pc.edge({ type: 'transcript', text: 'Bom dia', final: true });
+    pc.edge({ type: 'reply', text: 'Olá!' });
+    pc.edge({ type: 'done' });
+    expect(pc.sent).toEqual([{ type: 'end_turn' }]);
+    expect(counts).toEqual({ admissions: 1, mics: 1 });
+    expect(s.history).toEqual([{ role: 'user', content: 'Bom dia' }, { role: 'assistant', content: 'Olá!' }]);
+    expect(telemetry.filter(e => e.event === 'turn.done')).toHaveLength(1);
+    s.close();
   });
 });
