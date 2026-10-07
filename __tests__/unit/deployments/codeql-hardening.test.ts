@@ -29,6 +29,8 @@ describe('invoke: the forwarded URL stays on the replica (request forgery)', () 
   it('plain paths and queries resolve on the replica', () => {
     expect(replicaTarget(base, 'v1/audio/speech', '?x=1')!.href).toBe('http://10.0.0.9:8000/v1/audio/speech?x=1');
     expect(replicaTarget(base, 'health/', '')!.href).toBe('http://10.0.0.9:8000/health/');
+    // Re-spelled from a fixed table: URL characters as they are, anything else percent-encoded.
+    expect(replicaTarget(base, 'v1/x', '?q=a|b&v=é')!.href).toBe('http://10.0.0.9:8000/v1/x?q=a%7Cb&v=%C3%A9');
   });
 
   it('refuses scheme, authority, backslash and dot segments (raw or encoded)', () => {

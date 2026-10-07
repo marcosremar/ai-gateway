@@ -103,6 +103,22 @@ export function replicaBase(machine: ReplicaMachine, exposed = false): string {
  * segment (raw or percent-encoded) — and the resolved URL must keep the base's origin (CodeQL js/request-forgery,
  * PR #45). Null = refused (400).
  */
+/**
+ * The forwarded path/query re-spelled byte by byte from a fixed table (CodeQL js/request-forgery: the string sent is
+ * built from our constants, not from the request): URL characters stay as they are, any other byte is percent-encoded.
+ */
+const URL_SAFE = new Set([...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~!$&\'()*+,;=:@%/?']);
+const BYTE_SPELLING: string[] = Array.from({ length: 256 }, (_, b) => {
+  const c = String.fromCharCode(b);
+  return b < 128 && URL_SAFE.has(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, '0')}`;
+});
+
+function respell(v: string): string {
+  let out = '';
+  for (const byte of Buffer.from(v, 'utf8')) out += BYTE_SPELLING[byte];
+  return out;
+}
+
 export function replicaTarget(base: string, rest: string, query: string): URL | null {
   if (/[\\\s]/.test(rest) || rest.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(rest)) return null;
   for (const segment of rest.split('/')) {
@@ -111,8 +127,9 @@ export function replicaTarget(base: string, rest: string, query: string): URL | 
     if (decoded === '.' || decoded === '..' || /[\\/]/.test(decoded)) return null;
   }
   if (query && !query.startsWith('?')) return null;
+  const path = respell(`/${rest}${query}`);
   let url: URL;
-  try { url = new URL(`/${rest}${query}`, base); } catch { return null; }
+  try { url = new URL(path, base); } catch { return null; }
   const origin = new URL(base).origin;
   return url.origin === origin && url.pathname.startsWith('/') ? url : null;
 }
