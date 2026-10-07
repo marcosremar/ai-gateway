@@ -32,7 +32,8 @@ async def one(client, url, key, audio, config):
     except httpx.HTTPError as error:  # one broken stream is a data point, not the end of the bench
         return {"status": None, "error": f"{type(error).__name__}: {error}"[:200], "events": [], "audio_bytes": 0,
                 **{k: None for k in ("client_first_audio_ms", "client_total_ms", "stt_ms", "transcript", "llm_first_token_ms",
-                                     "first_sentence", "first_cut_ms", "server_first_audio_ms", "server_total_ms", "reply")}}
+                                     "first_sentence", "first_cut_ms", "server_first_audio_ms", "server_total_ms", "reply")},
+                "stages": {}}
 
 
 async def _one(client, url, key, audio, config):
@@ -67,6 +68,7 @@ async def _one(client, url, key, audio, config):
     rec["first_cut_ms"] = first_sentence.get("cut_at_ms")
     rec["server_first_audio_ms"] = ev.get("first_audio", {}).get("at_ms")
     rec["server_total_ms"] = ev.get("done", {}).get("total_ms")
+    rec["stages"] = ev.get("done", {}).get("stages") or {}
     rec["reply"] = ev.get("done", {}).get("reply")
     rec["error"] = ev.get("error", {}).get("message")
     rec["audio_seconds"] = round(rec["audio_bytes"] / 2 / 24000, 2)
@@ -106,6 +108,9 @@ async def main():
             print(f"\n== {n} at once ({len(runs)} requests, {errors} errors)")
             for k, (p50, p95) in row.items():
                 print(f"  {k:24s} p50 {p50}  p95 {p95}")
+            for k in sorted({k for r in runs for k in r["stages"]}):
+                values = [r["stages"].get(k) for r in runs]
+                print(f"  stage {k:24s} p50 {pct(values, 50)}  p95 {pct(values, 95)}")
             sample = runs[0]
             print(f"  heard: {sample['transcript']!r}\n  first sentence: {sample['first_sentence']!r}\n  reply: {sample['reply']!r}")
     json.dump(results, open(args.out, "w"), ensure_ascii=False, indent=1)
