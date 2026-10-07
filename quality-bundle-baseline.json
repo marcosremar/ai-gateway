@@ -55,9 +55,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "index": {
-    "raw": 1468372,
-    "gzip": 318860,
-    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+    "raw": 1472035,
+    "gzip": 319579,
+    "reason": "re-measured with the realtime entry (2026-10-07): includes AppLimits.chargeRequests (realtime budget); the rest of the growth was already on origin/main bf909f7 vs the old baseline (not re-built here to separate them)"
   },
   "infra": {
     "raw": 4116,
@@ -75,14 +75,19 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "providers": {
-    "raw": 187864,
-    "gzip": 39384,
-    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+    "raw": 188396,
+    "gzip": 39538,
+    "reason": "re-measured with the realtime entry (2026-10-07): includes AppLimits.chargeRequests (realtime budget); the rest of the growth was already on origin/main bf909f7 vs the old baseline (not re-built here to separate them)"
   },
   "proxy": {
-    "raw": 164929,
-    "gzip": 42281,
-    "reason": "proxy: STT hallucination filter on /v1/audio/transcriptions + s2s (filter code + 14 KB core blocklist pt/fr/en/es/it/de; full dataset stays out, #44)"
+    "raw": 169788,
+    "gzip": 44231,
+    "reason": "re-measured with the realtime entry (2026-10-07): includes AppLimits.chargeRequests (realtime budget); the rest of the growth was already on origin/main bf909f7 vs the old baseline (not re-built here to separate them)"
+  },
+  "realtime": {
+    "raw": 64579,
+    "gzip": 16889,
+    "reason": "realtime: new entry @parle/ai-gateway/realtime (browser SDK: ladder, WebRTC/WS/s2s-stream/post, voice bridge, telemetry)"
   },
   "tracking": {
     "raw": 20369,
