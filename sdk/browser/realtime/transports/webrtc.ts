@@ -12,8 +12,8 @@ export interface WebRtcDeps {
   RTCPeerConnection: typeof RTCPeerConnection;
 }
 
-function waitIceGathering(pc: RTCPeerConnection, ms: number, signal: AbortSignal, relayOnly: boolean): Promise<void> {
-  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+function waitIceGathering(pc: RTCPeerConnection, ms: number, signal: AbortSignal, relayOnly: boolean, restart: boolean): Promise<void> {
+  if (!restart && pc.iceGatheringState === 'complete') return Promise.resolve();
   return new Promise((resolve) => {
     const done = () => {
       clearTimeout(timer);
@@ -35,7 +35,7 @@ function waitIceGathering(pc: RTCPeerConnection, ms: number, signal: AbortSignal
   });
 }
 
-function waitConnected(pc: RTCPeerConnection, channel: RTCDataChannel, ms: number, signal: AbortSignal): Promise<void> {
+function waitConnected(pc: RTCPeerConnection, channel: RTCDataChannel, ms: number, signal: AbortSignal, failFast = true): Promise<void> {
   const ok = () => channel.readyState === 'open' && (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed');
   if (ok()) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -48,7 +48,7 @@ function waitConnected(pc: RTCPeerConnection, channel: RTCDataChannel, ms: numbe
     };
     const check = () => {
       if (ok()) { cleanup(); resolve(); return; }
-      if (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed') { cleanup(); reject(new Error('ICE failed')); }
+      if (failFast && (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed')) { cleanup(); reject(new Error('ICE failed')); }
     };
     const onAbort = () => { cleanup(); reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')); };
     const timer = setTimeout(() => { cleanup(); reject(new Error(`not connected within ${ms} ms`)); }, ms);
@@ -102,6 +102,7 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
   let connected = false;
   let closing = false;
   let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let restarting = false;
   const token = ctx.descriptor?.token ?? '';
   const sessionUrl = offer.offerUrl.replace(/\/offer$/, '');
 
@@ -109,6 +110,41 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     if (closing || !connected) return;
     closing = true;
     ctx.fail(new Error(`webrtc: ${why}`));
+  };
+
+  const negotiate = async (conn: RTCPeerConnection, signal: AbortSignal, iceRestart: boolean) => {
+    await conn.setLocalDescription(await conn.createOffer(iceRestart ? { iceRestart } : undefined));
+    await waitIceGathering(conn, ctx.timeouts.iceGatherMs, signal, offer.iceTransportPolicy === 'relay', iceRestart);
+    if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
+    const res = await ctx.fetchImpl(offer.offerUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', traceparent: ctx.traceparent },
+      body: JSON.stringify({ sdp: conn.localDescription?.sdp ?? '', type: 'offer' }),
+      signal: AbortSignal.any ? AbortSignal.any([signal, AbortSignal.timeout(ctx.timeouts.signalingMs)]) : signal,
+    });
+    const answer = await res.json().catch(() => null) as { sdp?: string; type?: string; error?: { code?: string } } | null;
+    if (!res.ok || !answer?.sdp) throw new Error(`offer refused: HTTP ${res.status}${answer?.error?.code ? ` ${answer.error.code}` : ''}`);
+    await conn.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+  };
+
+  const restartIce = async () => {
+    if (restarting || closing || !connected || !pc || !channel) return;
+    restarting = true;
+    const started = performance.now();
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(new Error(`no path within ${ctx.timeouts.iceRestartMs} ms`)), ctx.timeouts.iceRestartMs);
+    try {
+      await negotiate(pc, abort.signal, true);
+      await waitConnected(pc, channel, ctx.timeouts.iceRestartMs, abort.signal, false);
+      ctx.telemetry.emit('rt.ice.restart', { durMs: performance.now() - started, attrs: { ok: true } });
+      void reportRelay(pc, ctx);
+    } catch (err) {
+      ctx.telemetry.emit('rt.ice.restart', { level: 'warn', durMs: performance.now() - started, attrs: { ok: false } });
+      failOnce(`ice restart failed: ${(err as Error).message}`);
+    } finally {
+      clearTimeout(timer);
+      restarting = false;
+    }
   };
 
   return {
@@ -140,23 +176,12 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
       };
       pc.onconnectionstatechange = () => {
         const state = pc?.connectionState;
-        if (state === 'failed') failOnce('connection failed');
+        if (state === 'failed') void restartIce();
         else if (state === 'disconnected' && connected && !disconnectTimer) {
-          disconnectTimer = setTimeout(() => { disconnectTimer = null; if (pc?.connectionState !== 'connected') failOnce('connection lost'); }, ctx.timeouts.disconnectGraceMs);
+          disconnectTimer = setTimeout(() => { disconnectTimer = null; if (pc?.connectionState !== 'connected') void restartIce(); }, ctx.timeouts.disconnectGraceMs);
         } else if (state === 'connected' && disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
       };
-      await pc.setLocalDescription(await pc.createOffer());
-      await waitIceGathering(pc, ctx.timeouts.iceGatherMs, signal, offer.iceTransportPolicy === 'relay');
-      if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
-      const res = await ctx.fetchImpl(offer.offerUrl, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', traceparent: ctx.traceparent },
-        body: JSON.stringify({ sdp: pc.localDescription?.sdp ?? '', type: 'offer' }),
-        signal: AbortSignal.any ? AbortSignal.any([signal, AbortSignal.timeout(ctx.timeouts.signalingMs)]) : signal,
-      });
-      const answer = await res.json().catch(() => null) as { sdp?: string; type?: string; error?: { code?: string } } | null;
-      if (!res.ok || !answer?.sdp) throw new Error(`offer refused: HTTP ${res.status}${answer?.error?.code ? ` ${answer.error.code}` : ''}`);
-      await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+      await negotiate(pc, signal, false);
       await waitConnected(pc, channel, ctx.timeouts.webrtcConnectMs, signal);
       connected = true;
       void reportRelay(pc, ctx);

@@ -2,7 +2,7 @@
  * Connection speed and resilience of the realtime SDK with fake browser APIs: when the WebRTC offer leaves, the playout
  * delay of the receiver, pre-connecting, recovering a reply cut by an upstream error, and surviving a network change.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_TIMEOUTS, createRealtimeSession, createWebRtcTransport, setPlayoutDelay, type PcmPlayer, type RealtimeEvent, type RealtimeSessionOptions,
   type SessionDescriptor, type TelemetryEvent, type TransportContext, type TransportOffer,
@@ -35,6 +35,7 @@ function ctx(over: Partial<TransportContext> = {}) {
 class FakePc extends EventTarget {
   static last: FakePc;
   static candidates: Array<[number, string | null]> = [];
+  static reconnects = true;
   iceGatheringState = 'new';
   connectionState = 'new';
   iceConnectionState = 'new';
@@ -56,7 +57,7 @@ class FakePc extends EventTarget {
   async createOffer(options?: unknown) { this.offers.push(options); return { type: 'offer', sdp: 'v=0\r\n' }; }
   async setLocalDescription(d: { sdp: string }) {
     this.localDescription = { sdp: d.sdp };
-    this.iceGatheringState = 'gathering';
+    setTimeout(() => { this.iceGatheringState = 'gathering'; }, 0);
     for (const [at, type] of FakePc.candidates) {
       setTimeout(() => {
         if (type === null) { this.iceGatheringState = 'complete'; this.dispatchEvent(new Event('icegatheringstatechange')); return; }
@@ -67,7 +68,7 @@ class FakePc extends EventTarget {
   }
   async setRemoteDescription() {
     this.answers++;
-    setTimeout(() => this.state('connected'), 5);
+    if (this.answers === 1 || FakePc.reconnects) setTimeout(() => this.state('connected'), 5);
   }
   state(state: string) {
     this.connectionState = state;
@@ -84,23 +85,32 @@ class FakePc extends EventTarget {
 const OFFER = { type: 'webrtc' as const, offerUrl: 'https://gw/v1/realtime/sessions/rt_1/offer' };
 const DESCRIPTOR: SessionDescriptor = { sessionId: 'rt_1', token: 'tok', expiresAt: '', transports: [OFFER, { type: 'ws', url: 'wss://gw/ws' }] };
 
+const refuseReoffer = { on: false };
+
 function session(extra: Partial<RealtimeSessionOptions> = {}) {
   const events: RealtimeEvent[] = [];
   const telemetry: TelemetryEvent[] = [];
   const counts = { admissions: 0, mics: 0 };
-  const fetchImpl = (async (_url: string, init: RequestInit) => (
-    init.method === 'DELETE' ? new Response(null, { status: 204 }) : Response.json({ sdp: 'v=0\r\nanswer', type: 'answer' })
-  )) as unknown as typeof fetch;
+  const offers: string[] = [];
+  const wsSent: unknown[] = [];
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    if (init.method === 'DELETE') return new Response(null, { status: 204 });
+    offers.push((JSON.parse(String(init.body)) as { sdp: string }).sdp);
+    return offers.length > 1 && refuseReoffer.on ? Response.json({ error: { code: 'unauthorized' } }, { status: 401 }) : Response.json({ sdp: 'v=0\r\nanswer', type: 'answer' });
+  }) as unknown as typeof fetch;
   const s = createRealtimeSession({
     sessionEndpoint: async () => { counts.admissions++; return DESCRIPTOR; },
     getMicStream: async () => { counts.mics++; return { getAudioTracks: () => [{ kind: 'audio' }] } as unknown as MediaStream; },
     onEvent: e => events.push(e), onRemoteAudio: () => {}, storage: null, fetchImpl,
-    timeouts: { iceGatherMs: 50, webrtcConnectMs: 200, disconnectGraceMs: 10 },
-    transports: { webrtc: c => createWebRtcTransport(c, OFFER, { RTCPeerConnection: FakePc as unknown as typeof RTCPeerConnection }) },
+    timeouts: { iceGatherMs: 50, webrtcConnectMs: 200, disconnectGraceMs: 10, iceRestartMs: 80 },
+    transports: {
+      webrtc: c => createWebRtcTransport(c, OFFER, { RTCPeerConnection: FakePc as unknown as typeof RTCPeerConnection }),
+      ws: () => ({ type: 'ws', clipBased: false, connect: async () => {}, send: (m) => { wsSent.push(m); }, close: () => {} }),
+    },
     telemetry: { send: false, onEvent: e => telemetry.push(e) },
     ...extra,
   });
-  return { s, events, telemetry, counts };
+  return { s, events, telemetry, counts, offers, wsSent };
 }
 
 function webrtc(c: TransportContext, offer: Partial<Extract<TransportOffer, { type: 'webrtc' }>> = {}) {
@@ -305,6 +315,99 @@ describe('reply cut by an upstream error', () => {
     expect(types(events).slice(-2)).toEqual(['interrupted', 'done']);
     expect(events.filter(e => e.type === 'done')).toHaveLength(1);
     expect(pc.sent).toEqual([{ type: 'end_turn' }]);
+    s.close();
+  });
+});
+
+describe('network change during a WebRTC session', () => {
+  afterEach(() => { refuseReoffer.on = false; FakePc.reconnects = true; });
+
+  async function live() {
+    FakePc.candidates = [[2, 'srflx'], [4, null]];
+    const out = session();
+    await out.s.connect();
+    const pc = FakePc.last;
+    pc.edge({ type: 'transcript', text: 'Bom dia', final: true });
+    pc.edge({ type: 'reply', text: 'Olá!' });
+    pc.edge({ type: 'done' });
+    return { ...out, pc };
+  }
+
+  const restarts = (telemetry: TelemetryEvent[]) => telemetry.filter(e => e.event === 'rt.ice.restart').map(e => e.attrs?.ok);
+
+  it('disconnected past the grace: ICE restart on the same peer connection, same session, nothing shown to the page', async () => {
+    const { s, events, telemetry, counts, offers, pc } = await live();
+    pc.state('disconnected');
+    await vi.waitFor(() => expect(restarts(telemetry)).toEqual([true]));
+    expect(pc.offers).toEqual([undefined, { iceRestart: true }]);
+    expect(offers[1]).toMatch(/typ srflx/);
+    expect(FakePc.last).toBe(pc);
+    expect(counts.admissions).toBe(1);
+    expect(s.transport).toBe('webrtc');
+    expect(s.metrics.failovers).toBe(0);
+    expect(types(events)).toEqual(['transcript', 'reply', 'done']);
+    expect(s.history).toEqual([{ role: 'user', content: 'Bom dia' }, { role: 'assistant', content: 'Olá!' }]);
+    s.close();
+  });
+
+  it('a blip that heals inside the grace restarts nothing; failed restarts at once', async () => {
+    const { s, telemetry, pc } = await live();
+    pc.state('disconnected');
+    pc.state('connected');
+    await new Promise(r => setTimeout(r, 30));
+    expect(pc.offers).toHaveLength(1);
+    pc.state('failed');
+    await vi.waitFor(() => expect(restarts(telemetry)).toEqual([true]));
+    expect(pc.offers).toHaveLength(2);
+    s.close();
+  });
+
+  it('the restart is refused, or finds no path within iceRestartMs: WebSocket with a new session and the history', async () => {
+    for (const mode of ['refused', 'no path'] as const) {
+      refuseReoffer.on = mode === 'refused';
+      FakePc.reconnects = mode === 'refused';
+      const { s, events, telemetry, counts, wsSent, pc } = await live();
+      pc.state('failed');
+      await vi.waitFor(() => expect(s.transport).toBe('ws'));
+      expect(restarts(telemetry)).toEqual([false]);
+      expect(counts.admissions).toBe(2);
+      expect(wsSent).toEqual([{ type: 'config_update', messages: [{ role: 'user', content: 'Bom dia' }, { role: 'assistant', content: 'Olá!' }] }]);
+      expect(events.at(-1)).toEqual({ type: 'transport', transport: 'ws', reason: 'failover', from: 'webrtc' });
+      expect(events.some(e => e.type === 'error')).toBe(false);
+      expect(s.metrics.failovers).toBe(1);
+      s.close();
+    }
+  });
+
+  it('a drop in the middle of a turn: the restart keeps the turn, and its reply lands once in the history', async () => {
+    const { s, events, telemetry, pc } = await live();
+    s.sendEndTurn();
+    pc.edge({ type: 'transcript', text: 'Um pão', final: true });
+    pc.state('disconnected');
+    await vi.waitFor(() => expect(restarts(telemetry)).toEqual([true]));
+    pc.edge({ type: 'reply', text: 'Claro!' });
+    pc.edge({ type: 'done' });
+    expect(s.history.slice(2)).toEqual([{ role: 'user', content: 'Um pão' }, { role: 'assistant', content: 'Claro!' }]);
+    expect(events.some(e => e.type === 'error')).toBe(false);
+    expect(telemetry.filter(e => e.event === 'turn.done')).toHaveLength(2);
+    s.close();
+  });
+
+  it('a drop in the middle of a turn with no path back: the turn ends once with turn_lost, the user message is replayed once', async () => {
+    refuseReoffer.on = true;
+    const { s, events, wsSent, pc } = await live();
+    s.sendEndTurn();
+    pc.edge({ type: 'transcript', text: 'Um pão', final: true });
+    pc.state('failed');
+    await vi.waitFor(() => expect(s.transport).toBe('ws'));
+    expect(types(events).slice(-3)).toEqual(['transcript', 'error', 'done']);
+    expect(events.filter(e => e.type === 'error')).toMatchObject([{ code: 'turn_lost' }]);
+    expect(events.at(-2)).toEqual({ type: 'done', error: true });
+    expect((wsSent[0] as { messages: unknown[] }).messages).toEqual([
+      { role: 'user', content: 'Bom dia' }, { role: 'assistant', content: 'Olá!' }, { role: 'user', content: 'Um pão' },
+    ]);
+    s.sendEndTurn();
+    expect(wsSent.at(-1)).toEqual({ type: 'end_turn' });
     s.close();
   });
 });

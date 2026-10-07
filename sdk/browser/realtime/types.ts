@@ -97,8 +97,9 @@ export interface RealtimeTimeouts {
   wsReadyMs: number;
   /** One s2s-stream / post turn, end to end. */
   turnMs: number;
-  /** A WebRTC connection `disconnected` this long is a failure. */
+  /** A WebRTC connection `disconnected` this long gets an ICE restart. */
   disconnectGraceMs: number;
+  iceRestartMs: number;
 }
 
 export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
@@ -110,6 +111,7 @@ export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
   wsReadyMs: 3_000,
   turnMs: 45_000,
   disconnectGraceMs: 3_000,
+  iceRestartMs: 5_000,
 };
 
 export interface AttemptRecord {

@@ -295,6 +295,10 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       current = null;
       cancelRecovery();
       npcSpeaking = false;
+      if (turn && isRealtime(from)) {
+        emit({ type: 'error', code: 'turn_lost', message: `transport ${from} failed during the turn: ${err.message}` });
+        emit({ type: 'done', error: true });
+      }
       bridge?.reset();
       metrics.failovers++;
       const rest = order.slice(order.indexOf(from) + 1);
