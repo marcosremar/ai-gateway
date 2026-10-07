@@ -465,18 +465,22 @@ export function createProxyServer(config: ProxyConfig): Server {
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
   const concurrency = concurrencyLimits();
 
-  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    const method = req.method?.toUpperCase() || 'GET';
-    const url = req.url || '/';
-    const requestId = (req.headers['x-request-id'] as string) || randomUUID();
+  const server = createServer(
+    // Realtime edge sends WebSocket tokens in the URL (~8.3 KB total); need to accept ≥9 KB request lines
+    { maxHeaderSize: 32 * 1024 },
+    (req: IncomingMessage, res: ServerResponse) => {
+      const method = req.method?.toUpperCase() || 'GET';
+      const url = req.url || '/';
+      const requestId = (req.headers['x-request-id'] as string) || randomUUID();
 
-    // Establish an AsyncLocalStorage frame so every log emitted during this
-    // request (here AND inside any downstream async module) carries the same
-    // requestId field. Correlation becomes automatic rather than manual
-    // argument threading.
-    // Plus a no-wake scope (no-wake.ts), switched on after auth when the request or its key user asks for it.
-    void withNoWakeScope(() => withLogContext({ requestId }, () => handleRequest(req, res, method, url, requestId)));
-  });
+      // Establish an AsyncLocalStorage frame so every log emitted during this
+      // request (here AND inside any downstream async module) carries the same
+      // requestId field. Correlation becomes automatic rather than manual
+      // argument threading.
+      // Plus a no-wake scope (no-wake.ts), switched on after auth when the request or its key user asks for it.
+      void withNoWakeScope(() => withLogContext({ requestId }, () => handleRequest(req, res, method, url, requestId)));
+    }
+  );
 
   // The actual request handler runs inside the ALS frame established above.
   // Keeping it a named function rather than inlining keeps the stack trace
