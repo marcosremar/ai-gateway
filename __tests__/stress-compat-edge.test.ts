@@ -72,60 +72,6 @@ describe.skipIf(SKIP)('Stress: Concurrent requests (#816-#825)', { timeout: 120_
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// GPU IMAGE COMPATIBILITY (#911-#918)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-describe('GPU Image Compatibility (#911-#918)', () => {
-  // Image names moved from config.ts to the dynamic app-registry.ts; grep both.
-  const config = read('server/config.ts') + '\n' + read('server/app-registry.ts');
-  const providerTypes = fs.existsSync('web/src/sections/provider-types.ts')
-    ? read('web/src/sections/provider-types.ts') : '';
-
-  it('#911 babelcast-subtitle supports RTX 4090', () => {
-    expect(config).toContain('babelcast-subtitle');
-    // Subtitle image is universal (CUDA 12.8.1)
-  });
-
-  it('#912 babelcast-translategemma supports RTX 4090', () => {
-    expect(config).toContain('babelcast-translategemma');
-  });
-
-  it('#913 babelcast-mistral supports RTX 4090', () => {
-    expect(config).toContain('babelcast-mistral');
-  });
-
-  it('#914 GPU images have /health endpoint documented', () => {
-    // The images expose /health — verified by the config
-    if (providerTypes) {
-      expect(providerTypes).toMatch(/babelcast-subtitle|babelcast-translategemma/);
-    }
-    expect(config).toContain('DOCKER_IMAGE_NAMES');
-  });
-
-  it('#915 babelcast-subtitle has STT (Faster Whisper)', () => {
-    if (providerTypes) {
-      expect(providerTypes).toContain('faster-whisper');
-    }
-  });
-
-  it('#916 babelcast-translategemma has LLM (TranslateGemma)', () => {
-    if (providerTypes) {
-      expect(providerTypes).toContain('translategemma');
-    }
-  });
-
-  it('#917 babelcast-translategemma has TTS (Qwen3)', () => {
-    if (providerTypes) {
-      expect(providerTypes).toContain('qwen3-tts');
-    }
-  });
-
-  it('#918 Docker image version tracked', () => {
-    expect(config).toContain('DOCKER_IMAGE_VERSION');
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // PYTHON SDK COMPATIBILITY (#919-#924)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -192,20 +138,6 @@ describe('Browser Client Structure (#951-#958)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Migration / Compatibility (#959-#963)', () => {
-  it('#959 config has updatedAt for versioning', () => {
-    const src = read('server/config-persistence.ts');
-    expect(src).toContain('updatedAt');
-  });
-
-  it('#960 cooldown persistence file format', () => {
-    const src = read('server/cooldown-persistence.ts');
-    expect(src).toMatch(/cooldown.*json|cooldowns\.json/i);
-  });
-
-  it('#961 deploy persist file format', () => {
-    const src = read('server/state.ts');
-    expect(src).toMatch(/active_deploy\.json|persistDeployState/);
-  });
 
   it('#962 SDK types exported for consumers', () => {
     const tsup = read('tsup.config.ts');
@@ -223,32 +155,10 @@ describe('Migration / Compatibility (#959-#963)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Edge Cases: Input boundary testing (#725-#750)', () => {
-  it('#727 UTF-8 text with emojis in types', () => {
-    // Chat messages support UTF-8 — verify handler accepts string content
-    const src = read('server/ai-handlers.ts');
-    expect(src).toContain('content');
-  });
-
-  it('#728 translation handler accepts text input', () => {
-    const src = read('server/ai-handlers.ts');
-    expect(src).toContain('handleTranslate');
-    expect(src).toContain('text');
-  });
 
   it('#734 GPU deploy with empty gpuTypes uses fallback', () => {
     const src = read('src/gateway/providers/gpu/runpod/constants.ts');
     expect(src).toContain('RUNPOD_GPU_FALLBACK');
-  });
-
-  it('#735 Docker image non-existent handled', () => {
-    const src = read('server/gpu-deploy-tiers.ts');
-    expect(src).toMatch(/docker.*image|image.*pull|image.*not found/i);
-  });
-
-  it('#740 config save with special characters', () => {
-    // JSON.stringify handles special chars natively
-    const src = read('server/config-persistence.ts');
-    expect(src).toContain('JSON.stringify');
   });
 
   it('#744 SDK retries with alternating success/fail', () => {
@@ -265,28 +175,6 @@ describe('Edge Cases: Input boundary testing (#725-#750)', () => {
   it('#746 SDK handles non-JSON response', () => {
     const src = read('src/sdk/client.ts');
     expect(src).toContain('invalid JSON');
-  });
-
-  it('#747 deploy during cleanup handled by lock', () => {
-    const src = read('server/gpu-handlers.ts');
-    expect(src).toContain('deployLock');
-  });
-
-  it('#748 monitor skips probe when not ready', () => {
-    const src = read('server/gpu-monitor-loop.ts');
-    expect(src).toContain("deployState.status !== 'ready'");
-  });
-
-  it('#749 resume validates pod exists', () => {
-    const src = read('server/gpu-handlers.ts');
-    expect(src).toContain('handleGpuResume');
-    expect(src).toContain('No pod');
-  });
-
-  it('#750 two pipeline requests share GPU endpoint', () => {
-    const src = read('server/pipeline-runner.ts');
-    // GPU endpoint comes from shared deployState
-    expect(src).toContain('deployState.endpoint');
   });
 });
 

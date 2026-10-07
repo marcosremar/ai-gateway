@@ -17,7 +17,8 @@ import { createLogger } from '../src/logger';
 
 const log = createLogger('dev');
 
-const SERVER_FILE = resolve(process.cwd(), 'server/ws-server.ts');
+// The live gateway entry point (the legacy server/ws-server.ts was removed with the rest of the old server).
+const SERVER_FILE = resolve(process.cwd(), 'serve.ts');
 const WATCH_DIRS = [
   resolve(process.cwd(), 'src'),
   resolve(process.cwd(), 'server'),

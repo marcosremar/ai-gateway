@@ -35,16 +35,4 @@ describe('HTTP Body Size Limits', () => {
     const timeout = parseInt(match![1].replace(/_/g, ''), 10);
     expect(timeout).toBeGreaterThanOrEqual(60_000);
   });
-
-  it('should stream HTTP bodies instead of using req.arrayBuffer in the adapter', () => {
-    const source = readSource('server/ws/http-api-server.ts');
-    expect(source).toContain('pumpRequestBody');
-    expect(source).not.toContain('req.arrayBuffer()');
-  });
-
-  it('should not default admin HTTP CORS to wildcard reflection', () => {
-    const source = readSource('server/ws/http-api-server.ts');
-    expect(source).toContain('resolveHttpCorsOrigin');
-    expect(source).not.toContain("req.headers.get('origin') || '*'");
-  });
 });

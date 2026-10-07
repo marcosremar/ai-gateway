@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync-pod.sh — rsync local server/ + src/ to running GPU pod, then restart.
+# sync-pod.sh — rsync local serve.ts + src/ + sdk/ (+ server/) to running GPU pod, then restart.
 #
 # Usage:
 #   ./scripts/sync-pod.sh              # sync + restart
@@ -105,7 +105,7 @@ do_sync() {
   fi
 
   rsync "${rsync_opts[@]}" \
-    server/ src/ package.json tsconfig.json \
+    serve.ts src sdk server package.json tsconfig.json \
     "root@${SSH_HOST}:${REMOTE_DIR}/"
 
   grn "Sync done."
@@ -122,7 +122,7 @@ restart_remote() {
     -o StrictHostKeyChecking=no \
     -o ConnectTimeout=10 \
     "root@${SSH_HOST}" \
-    "cd ${REMOTE_DIR} && pkill -f 'bun.*ws-server' 2>/dev/null || true && nohup bun server/ws-server.ts > /tmp/gw.log 2>&1 &" \
+    "cd ${REMOTE_DIR} && pkill -f 'bun.*serve.ts' 2>/dev/null || true && nohup bun serve.ts > /tmp/gw.log 2>&1 &" \
     && grn "Gateway restarted. Logs: ssh -p ${SSH_PORT} root@${SSH_HOST} tail -f /tmp/gw.log"
 }
 

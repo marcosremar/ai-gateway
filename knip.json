@@ -4,7 +4,6 @@
     "src/index.ts",
     "sdk/node/index.ts",
     "bin/ai-gateway.ts",
-    "server/ws-server.ts",
     "server/**/*.ts",
     "scripts/**/*.ts",
     "vitest.config.ts",
