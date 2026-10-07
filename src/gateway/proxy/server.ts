@@ -580,8 +580,10 @@ export function createProxyServer(config: ProxyConfig): Server {
       });
     }
 
-    // Open mode (no keys, localhost only) is the operator's own machine: it sees everything.
-    const callerIsAdmin = keyRegistry.size === 0 || Boolean(authHeader && config.deepHealth?.authorize(authHeader.replace(/^Bearer\s+/i, '')));
+    // Open mode (no keys, localhost only) is the operator's own machine: it sees everything. Otherwise the admin
+    // decision is the authorizer's alone, on the key that passed auth above (an absent one is never admin).
+    const bearer = (authHeader ?? '').replace(/^Bearer\s+/i, '');
+    const callerIsAdmin = keyRegistry.size === 0 ? true : config.deepHealth?.authorize(bearer) === true;
     if (detailedHealth) {
       let details: Record<string, unknown> = {};
       try { details = config.healthDetails?.({ userId, admin: callerIsAdmin }) ?? {}; } catch (err) {
