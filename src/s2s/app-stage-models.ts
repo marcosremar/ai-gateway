@@ -30,7 +30,13 @@ export function appStageModels(routes: ModelRoutesSpec | undefined, deployment?:
   return out;
 }
 
-/** The app whose aliases serve a call: the owner of the named deployment, else the caller's own app. */
-export function appForCall(opts: { deploymentApp: string | null | undefined; callerApp: string | null | undefined }): string | null {
+/**
+ * The app whose aliases serve a call: a non-admin key always its own app (its key may call only its own aliases,
+ * AppLimits; API audit 2026-10-07), an admin key the owner of the named deployment, else its own.
+ */
+export function appForCall(opts: {
+  deploymentApp: string | null | undefined; callerApp: string | null | undefined; callerIsAdmin?: boolean;
+}): string | null {
+  if (opts.callerApp && opts.callerIsAdmin === false) return opts.callerApp;
   return opts.deploymentApp || opts.callerApp || null;
 }

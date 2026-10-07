@@ -163,21 +163,25 @@ export interface ProxyConfig {
    * `max_tokens` clamped and a daily budget. Checked after auth and body parsing, before the route. Absent = none.
    */
   appLimits?: {
-    check(userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>): import('./app-limits').AppLimitDenial | null;
+    check(
+      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>, opts?: { charge?: boolean },
+    ): import('./app-limits').AppLimitDenial | null;
   };
   /**
    * `GET /health?deep=1`: per-provider probes + deployments. Plain `GET /health` stays a cheap unauthenticated
-   * liveness check; the deep one needs a Bearer that `authorize` accepts (401 otherwise, 404 when not set).
+   * liveness check (status only); the deep one needs a valid key that `authorize` accepts as admin (403 for another
+   * valid key, 404 when not set). `authorize` is also who sees the admin view of `?details=1`.
    */
   deepHealth?: {
     authorize: (bearerToken: string) => boolean;
     report: () => Promise<{ status: number; body: unknown }>;
   };
   /**
-   * Extra fields of the plain `GET /health` (unauthenticated, so never a secret): e.g. the effective chain per stage
-   * and why a primary is not serving. Must be cheap (no upstream call).
+   * Extra fields of `GET /health?details=1` (any valid key; health-view.ts): e.g. the effective chain per stage and why
+   * a primary is not serving. `viewer.admin` false = an app key: show only what is that app's own. Must be cheap (no
+   * upstream call). The unauthenticated `GET /health` never carries them.
    */
-  healthDetails?: () => Record<string, unknown>;
+  healthDetails?: (viewer: import('./health-view').HealthViewer) => Record<string, unknown>;
 }
 
 /**

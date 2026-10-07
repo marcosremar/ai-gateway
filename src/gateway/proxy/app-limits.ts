@@ -60,7 +60,7 @@ export class AppLimits {
    * Admission of one inference request. Returns a denial, or null after clamping `body.max_tokens` (chat) and charging
    * the app's daily budget. `body` is the parsed JSON (or the multipart text fields).
    */
-  check(userId: string, kind: InferenceKind, body: Record<string, unknown>): AppLimitDenial | null {
+  check(userId: string, kind: InferenceKind, body: Record<string, unknown>, opts: { charge?: boolean } = {}): AppLimitDenial | null {
     if (this.opts.isAdmin(userId)) return null;
     if (kind !== 'chat' && kind !== 'stt' && kind !== 'tts') {
       return { status: 403, type: 'permission_error', message: `this API key cannot use ${kind}: only its app's own model aliases` };
@@ -76,14 +76,43 @@ export class AppLimits {
     }
     let tokens = 0;
     if (kind === 'chat') {
-      const cap = this.maxTokens;
-      const asked = typeof body.max_tokens === 'number' && Number.isFinite(body.max_tokens) ? body.max_tokens : cap;
-      body.max_tokens = Math.min(asked, cap);
+      body.max_tokens = this.clampMaxTokens(body.max_tokens);
       tokens = estimateTokens(JSON.stringify(body.messages ?? '')) + (body.max_tokens as number);
     } else if (kind === 'tts') {
       tokens = estimateTokens(typeof body.input === 'string' ? body.input : '');
     }
-    return this.charge(userId, tokens);
+    // `charge: false` = a stage of a turn already charged as a whole (an s2s loopback stage): limits, no second charge.
+    return opts.charge === false ? null : this.charge(userId, tokens);
+  }
+
+  /**
+   * Admission of one `POST /v1/s2s` turn (API audit 2026-10-07: the primary path called the speech-stack replica with
+   * no limit at all). Every stage model the turn names must be an alias of the app; `max_tokens` is clamped (the
+   * caller re-sends the clamped config to the replica); the turn is charged once — one request, prompt + max_tokens —
+   * and its composed-fallback stages are not charged again (`check(..., { charge: false })`).
+   */
+  checkS2S(userId: string, config: { max_tokens?: unknown; system?: unknown; messages?: unknown; user_template?: unknown;
+    models?: { stt?: unknown; chat?: unknown; tts?: unknown } }): AppLimitDenial | null {
+    if (this.opts.isAdmin(userId)) return null;
+    for (const stage of ['stt', 'chat', 'tts'] as const) {
+      const model = config.models?.[stage];
+      if (model === undefined || model === null || model === '') continue;
+      const aliases = this.opts.aliasesOf(userId, stage);
+      if (typeof model !== 'string' || !aliases?.has(model)) {
+        return {
+          status: 403, type: 'permission_error',
+          message: `config.models.${stage} '${String(model)}' is not an alias of app '${userId}' — an app key may only use its own aliases`,
+        };
+      }
+    }
+    config.max_tokens = this.clampMaxTokens(config.max_tokens);
+    const prompt = JSON.stringify([config.system ?? '', config.messages ?? '', config.user_template ?? '']);
+    return this.charge(userId, estimateTokens(prompt) + (config.max_tokens as number));
+  }
+
+  private clampMaxTokens(asked: unknown): number {
+    const cap = this.maxTokens;
+    return Math.min(typeof asked === 'number' && Number.isFinite(asked) ? asked : cap, cap);
   }
 
   private charge(userId: string, tokens: number): AppLimitDenial | null {

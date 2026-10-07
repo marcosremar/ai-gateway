@@ -79,7 +79,9 @@ describe('Proxy Server — multipart upload security', () => {
       },
       body: truncated as any,
     });
-    expect(res.status).toBe(500);
+    // The client's malformed upload is a 400, not a gateway 500 (API audit 2026-10-07).
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: { type: string } }).error.type).toBe('invalid_request_error');
   });
 
   it('accepts well-formed multipart with file', async () => {

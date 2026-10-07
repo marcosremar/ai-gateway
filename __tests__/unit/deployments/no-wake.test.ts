@@ -53,6 +53,8 @@ async function harness(): Promise<Harness> {
     } as never,
     prefixRoutes: [{ prefix: '/v1/deployments', handler }],
     customRoutes: [{ method: 'POST', path: '/v1/s2s', handler: s2s }],
+    // The tester key is the admin of this gateway: it sees the gateway-wide counters of /health?details=1.
+    deepHealth: { authorize: (token) => token === KEY, report: async () => ({ status: 200, body: {} }) },
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, cloudStt, woken };
@@ -140,7 +142,7 @@ describe('no-wake: STT route with a cold deployment primary (the 2026-10-07 L40S
 
   it('/health counts the no-wake skips', async () => {
     await stt(h, { 'X-Gateway-No-Wake': '1' });
-    const health = await (await fetch(`${h.base}/health`)).json() as { noWake: { skips: number } };
+    const health = await (await fetch(`${h.base}/health?details=1`, { headers: { authorization: `Bearer ${KEY}` } })).json() as { noWake: { skips: number } };
     expect(health.noWake.skips).toBe(1);
     expect(noWakeStats().skips).toBe(1);
   });

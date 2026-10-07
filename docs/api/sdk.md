@@ -1,5 +1,12 @@
 # TypeScript SDK Reference
 
+::: warning Legacy
+`GatewaySDK` targets the routes of the old reference server in `server/` (`/v1/speech`, `/v1/gpu/*`, …), most of which
+the production entry point (`serve.ts`) does not mount. New code uses `GatewayClient` (`@parle/ai-gateway/client`,
+[Gateway client](./client.md)) against the routes in the [HTTP API reference](./http.md). This page is kept for the
+existing callers only.
+:::
+
 Full method list for `GatewaySDK` — the typed HTTP client for the AI Gateway.
 
 ```typescript

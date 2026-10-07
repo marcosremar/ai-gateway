@@ -44,3 +44,10 @@ describe('speech-stack profile', () => {
     expect(BUILTIN_PROFILES.find(p => p.name === 'speech-stack')!.spec.targetInflightPerReplica).toBe(6);
   });
 });
+
+describe('appForCall: a non-admin key reads its own aliases (API audit 2026-10-07)', () => {
+  it('the default deployment of another app does not pick that app\'s aliases for a non-admin caller', () => {
+    expect(appForCall({ deploymentApp: 'parle', callerApp: 'other', callerIsAdmin: false })).toBe('other');
+    expect(appForCall({ deploymentApp: 'parle', callerApp: 'ops', callerIsAdmin: true })).toBe('parle');
+  });
+});

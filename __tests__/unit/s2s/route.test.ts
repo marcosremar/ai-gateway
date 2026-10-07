@@ -97,7 +97,12 @@ describe('POST /v1/s2s routing', () => {
   it('slow primary (no transcript before the hedge): the composed pipeline wins, the replica is cut', async () => {
     const h = await harness({
       hedgeMs: 50,
-      replica: async res => { res.writeHead(200); await sleep(1_000); writeFrames(res, replicaFrames('tarde', ['Tarde demais.']))(); },
+      // Headers once (writeFrames would send them a second time: ERR_HTTP_HEADERS_SENT when the cut socket lingers).
+      replica: async res => {
+        res.writeHead(200, { 'Content-Type': 'application/x-aigw-s2s' });
+        await sleep(1_000);
+        if (!res.destroyed) { for (const f of replicaFrames('tarde', ['Tarde demais.'])) res.write(f); res.end(); }
+      },
     });
     const t0 = performance.now();
     const { events, audio } = decodeAll((await h.call()).bytes);
