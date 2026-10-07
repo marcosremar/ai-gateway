@@ -16,12 +16,16 @@ interface GatewayBreakerOptions {
   onRouteChange?: (change: RouteChange) => void;
 }
 
+/** `recheck` probes at most this often (a failed probe stands for that long). */
+const RECHECK_MIN_GAP_MS = 1_000;
+
 export class GatewayBreaker {
   private failures = 0;
   private openUntil: number | null = null;
   private probing: Promise<void> | null = null;
   private lastError: string | null = null;
   private route: GatewayRoute = 'gateway';
+  private lastProbeFailedAt = -Infinity;
 
   constructor(private readonly opts: GatewayBreakerOptions) {}
 
@@ -32,6 +36,20 @@ export class GatewayBreaker {
     if (this.opts.now() < this.openUntil) return true;
     this.probing = this.runProbe();
     return true;
+  }
+
+  /**
+   * Probes the gateway NOW, whatever the cooldown (joining a probe in flight); true once it answered (breaker closed).
+   * For calls the direct route cannot serve: skipping the gateway would only fail them, so they check it first.
+   */
+  async recheck(): Promise<boolean> {
+    if (this.openUntil === null) return true;
+    // A probe that failed just now answers for the next second: a hung gateway (probe = 3 s timeout) must not make every
+    // call wait for its own probe.
+    if (!this.probing && this.opts.now() - this.lastProbeFailedAt < RECHECK_MIN_GAP_MS) return false;
+    this.probing ??= this.runProbe();
+    await this.probing;
+    return this.openUntil === null;
   }
 
   /** The in-flight probe, if any (tests, and callers that want to wait for recovery). */
@@ -72,6 +90,9 @@ export class GatewayBreaker {
     try { ok = await this.opts.probe(); } catch { ok = false; }
     this.probing = null;
     if (ok) this.success();
-    else this.openUntil = this.opts.now() + this.opts.cooldownMs;
+    else {
+      this.openUntil = this.opts.now() + this.opts.cooldownMs;
+      this.lastProbeFailedAt = this.opts.now();
+    }
   }
 }

@@ -72,6 +72,8 @@ export const DEPLOYMENT_FIRST_BYTE_MS: Record<Stage, number> = { stt: 4_000, cha
 
 /** After this long without an answer from a deployment, the fallback starts in parallel (DEPLOYMENT_HEDGE_MS; 0 = off). */
 export const DEPLOYMENT_HEDGE_MS = 1_500;
+/** Adaptive hedge (`deploymentHedge`): the longest wait before the fallback starts, as a share of the target's timeout. */
+export const HEDGE_CAP_OF_TIMEOUT = 0.75;
 
 function positiveMs(value: string | undefined): number | undefined {
   const n = Number(value);
@@ -187,6 +189,11 @@ export interface BuildServeProvidersOptions {
   openrouter: OpenRouterKeyState;
   /** Returns a provider backed by deployment `name`, or null when the deployments service is off. */
   deploymentProvider?: (stage: Stage, name: string) => StageProvider<Stage> | null;
+  /**
+   * Adaptive hedge of a deployment target (`DeploymentController.hedgeDelayMs`): the delay before the fallback starts in
+   * parallel, from the replica's state and recent p95, between `baseMs` (DEPLOYMENT_HEDGE_MS) and `capMs`; null = none.
+   */
+  deploymentHedge?: (name: string, baseMs: number, capMs: number) => number | null;
   modelRoutes?: ModelRoutesSpec;
   /** Every app's own aliases (`PUT /v1/apps/:app/routes`), merged; MODEL_ROUTES wins over them. */
   appRoutes?: ModelRoutesSpec;
@@ -230,6 +237,13 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
     ...(e.voices ? { voiceFor: voiceForGender(e.voices, { preferFallbackVoice: e.preferFallbackVoice, genders: e.voiceGenders }) } : {}),
   });
 
+  // Hedge no later than 3/4 of the attempt's timeout: past that the timeout itself moves the chain on.
+  const adaptiveHedge = (name: string, stage: Stage) => {
+    const hedge = opts.deploymentHedge;
+    if (!hedge) return {};
+    const capMs = Math.max(hedgeMs, Math.round(deploymentTimeoutMs(stage) * HEDGE_CAP_OF_TIMEOUT));
+    return { hedgeDelay: () => hedge(name, hedgeMs, capMs) };
+  };
   const exists = opts.deploymentExists ?? (() => false);
   const oneGpu: string[] = [];
   /** Deployment an entry goes to: its own, or its `oneGpuDeployment` while only that one is registered. */
@@ -250,7 +264,7 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       // Until then selectTargets skips it per request and /v1/models does not list a model served only by it.
       return {
         ...extras(e), providerId: label, provider, model: e.model ?? gatewayModel,
-        timeoutMs: deploymentTimeoutMs(stage), ...(hedgeMs > 0 ? { hedgeAfterMs: hedgeMs } : {}),
+        timeoutMs: deploymentTimeoutMs(stage), ...(hedgeMs > 0 ? { hedgeAfterMs: hedgeMs, ...adaptiveHedge(name, stage) } : {}),
       };
     }
     const provider = (instances[stage] as Record<string, StageProvider<S>>)[e.provider];

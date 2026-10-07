@@ -145,7 +145,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
         const note = await this.reclaimFor(rt);
         if (note) { refusal = this.capRefusal(price); blockedBy = refusal ? `${refusal} (${note}, more needed)` : null; }
         else blockedBy = refusal;
-      } else blockedBy = refusal ?? (this.now() < rt.backoffUntil ? `create back-off (${rt.lastError ?? 'last create failed'})` : null);
+      } else blockedBy = refusal ?? (this.now() < rt.backoffUntil ? this.backoffNote(rt) : null);
     }
     for (let i = 0; i < toCreate; i++) this.createReplica(rt);
     this.explain(rt, plan, decision, floor, blockedBy);

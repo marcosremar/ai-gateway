@@ -11,9 +11,10 @@
  *     the live capacity, or latency / errors above their targets, for `windowSeconds` (20 s) in a row → one scale step.
  *   - **Boot-time aware.** Booting replicas count as capacity: latency and error signals (which only measure the ready
  *     replicas) add nothing while one boots; only load that exceeds ready + booting capacity asks for more.
- *   - **Hysteresis.** Out at 75 % of capacity, in only when the load fits in one replica fewer at `scaleInAt` (50 %), so a
- *     load hovering around a threshold never flaps; the planner's `scaleDownDelaySeconds` then delays the release, and
- *     the controller drains it first.
+ *   - **Hysteresis.** Out at 75 % of capacity, in only when the load fits in one replica fewer (than the count asked
+ *     for, or the live one if larger) at `scaleInAt` (50 %), so a load hovering around a threshold never flaps, and a
+ *     create that never succeeded is dropped once its pressure is gone; the planner's `scaleDownDelaySeconds` then
+ *     delays the release, and the controller drains it first.
  *   - **Floors.** A warm-up schedule (`warmSchedule`) and a client warm window (`POST …/warm`) keep N replicas up for a
  *     time window regardless of load (a class starting at 9:00 must not switch voice mid-lesson).
  *
@@ -123,15 +124,31 @@ export function pressureDecision(input: PressureInput): PressureDecision {
   if (capped) {
     desired = spec.maxReplicas; // nothing more to ask: say why, and do not re-arm a window for nothing
     reason = `${why()} (at maxReplicas ${spec.maxReplicas})`;
+  } else if (high && desired > live && desired >= Math.min(step, spec.maxReplicas)) {
+    // Already asked, the replica is not there yet (its create is in flight or keeps failing): say so instead of a window
+    // count that re-arms every 20 s for nothing; the next step needs a full window once the asked replica exists.
+    reason = `${why()} (${desired} asked, waiting for ${desired - live})`;
+    highSince = now;
   } else if (high && highSince !== null && now - highSince >= s.windowMs) {
     desired = Math.min(spec.maxReplicas, Math.max(desired, step));
     reason = why();
     highSince = now; // the next step needs another full window: one step at a time, no runaway while replicas boot
   } else if (high) {
     reason = `pressure for ${Math.round((now - (highSince ?? now)) / 1000)} s (step after ${s.windowMs / 1000} s)`;
-  } else if (live > 0 && load <= s.scaleInAt * target * (live - 1)) {
-    const fits = Math.ceil(load / (s.scaleInAt * target));
-    if (fits < desired) { desired = fits; reason = `low load ${round1(load)} ≤ ${pct(s.scaleInAt)} of ${live - 1}×${target}`; }
+  } else {
+    // Hysteresis against the count ASKED for, not only the live one: a replica that was asked but never born (create
+    // failing `out of stock`, live QA 2026-10-07: 17 min) left `live` at 1, so `load ≤ 50 % × target × (live − 1)` only
+    // held at load 0 and the pending create kept being retried with no pressure left. Comparing with one fewer than
+    // max(desired, live) lets the pressure that went away cancel the create it asked for.
+    const count = Math.max(desired, live);
+    if (count > 0 && load <= s.scaleInAt * target * (count - 1)) {
+      const fits = Math.ceil(load / (s.scaleInAt * target));
+      if (fits < desired) {
+        const pending = desired > live ? `, pending create of ${desired - live} cancelled` : '';
+        desired = fits;
+        reason = `low load ${round1(load)} ≤ ${pct(s.scaleInAt)} of ${count - 1}×${target}${pending}`;
+      }
+    }
   }
   return { desired: Math.max(0, desired), highSince, reason, capped };
 }

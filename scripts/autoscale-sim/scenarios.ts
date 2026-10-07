@@ -57,6 +57,40 @@ export const SCENARIOS: Record<string, Scenario> = {
       concurrency: steps([[20, 16], [44, 0]]),
     }],
   },
+  stockOutRiseFall: {
+    name: 'create fails out_of_stock for 15 min (09–24) under rising then falling load: 4 → 8 → 16 → 25 → 4',
+    durationMin: 36,
+    outOfStock: [[9, 24]],
+    loads: [{ name: 'speech', spec: SPEECH_SPEC, concurrency: steps([[0, 4], [10, 8], [12, 16], [14, 25], [18, 4], [32, 0]]) }],
+  },
+  stockOutRecovers: {
+    name: 'out_of_stock for 6 min (10–16) under a sustained 16, then stock comes back',
+    durationMin: 40,
+    outOfStock: [[10, 16]],
+    loads: [{ name: 'speech', spec: SPEECH_SPEC, concurrency: steps([[0, 4], [10, 16], [36, 0]]) }],
+  },
+  hedge16: {
+    name: 'one replica (maxReplicas 1) held at 16 concurrent — adaptive hedge',
+    durationMin: 24,
+    loads: [{ name: 'speech', spec: { ...SPEECH_SPEC, maxReplicas: 1 }, concurrency: steps([[0, 4], [10, 16], [22, 0]]) }],
+  },
+  hedge16Fixed: {
+    name: 'same, fixed 1.5 s hedge (before 2026-10-07)',
+    durationMin: 24,
+    model: { adaptiveHedge: false },
+    loads: [{ name: 'speech', spec: { ...SPEECH_SPEC, maxReplicas: 1 }, concurrency: steps([[0, 4], [10, 16], [22, 0]]) }],
+  },
+  hedge25: {
+    name: 'one replica (maxReplicas 1) held at 25 concurrent — adaptive hedge',
+    durationMin: 24,
+    loads: [{ name: 'speech', spec: { ...SPEECH_SPEC, maxReplicas: 1 }, concurrency: steps([[0, 4], [10, 25], [22, 0]]) }],
+  },
+  hedge25Fixed: {
+    name: 'same, fixed 1.5 s hedge (before 2026-10-07)',
+    durationMin: 24,
+    model: { adaptiveHedge: false },
+    loads: [{ name: 'speech', spec: { ...SPEECH_SPEC, maxReplicas: 1 }, concurrency: steps([[0, 4], [10, 25], [22, 0]]) }],
+  },
   warmEndpoint: {
     name: 'POST /warm {replicas: 2, untilMinutes: 30} at 08:00, class of 16 at 08:12',
     durationMin: 40,

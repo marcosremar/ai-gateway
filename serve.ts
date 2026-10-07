@@ -142,6 +142,8 @@ function mountProviders() {
         : stage === 'stt' ? new DeploymentSTTProvider(controller, name)
           : new DeploymentTTSProvider(controller, name)
     ) : undefined,
+    // Adaptive hedge (D4, live QA 2026-10-07): spill or wait for the replica instead of running each request twice.
+    deploymentHedge: controller ? (name, baseMs, capMs) => controller.hedgeDelayMs(name, baseMs, capMs) : undefined,
   });
   const { providers: routed, summary } = built;
   log.log(summary, 'Providers configured');

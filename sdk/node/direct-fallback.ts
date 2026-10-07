@@ -70,6 +70,20 @@ function moveOn(err: unknown): boolean {
   return err.code === 'timeout' || err.code === 'network' || err.status === 429 || err.status >= 500;
 }
 
+/**
+ * The gateway is unreachable and the direct route has nothing for this alias: the gateway's own error, saying why there
+ * is no fallback (fault bench 2026-10-07, S2 — "breaker open" alone left the app guessing).
+ */
+function noDirect(cause: GatewayError, stage: Stage, alias: string, planLoaded: boolean): GatewayError {
+  const why = planLoaded
+    ? `the fallback plan has no provider key for ${stage} '${alias}' (keyless plan: the gateway mints none without OPENROUTER_PROVISIONING_KEY)`
+    : 'no fallback plan could be fetched from the gateway';
+  return new GatewayError({
+    message: `${cause.message}; no direct fallback: ${why}`, status: cause.status, code: cause.code, path: cause.path,
+    unreachable: cause.unreachable, origin: cause.origin, cause,
+  });
+}
+
 export class DirectCaller {
   constructor(
     private readonly plans: FallbackPlanStore,
@@ -78,8 +92,24 @@ export class DirectCaller {
   ) {}
 
   /**
+   * The plan in hand has a direct entry (with a key) for this alias. A keyless plan (no OPENROUTER_PROVISIONING_KEY,
+   * no APP_FALLBACK_SHARE_KEY) has none: the direct route can only fail, so the gateway must not be skipped for it.
+   */
+  canServe(stage: Stage, alias: string): boolean {
+    const plan = this.plans.current();
+    return !!plan && (plan.routes[stage]?.[alias] ?? []).some(e => plan.providers[e.provider]);
+  }
+
+  /** Any direct entry at all (s2s has no direct route: the app falls back to its separate stage calls). */
+  canServeAny(): boolean {
+    const plan = this.plans.current();
+    return !!plan && (['stt', 'chat', 'tts'] as const).some(stage =>
+      Object.values(plan.routes[stage] ?? {}).some(entries => entries.some(e => plan.providers[e.provider])));
+  }
+
+  /**
    * Tries the alias's entries in chain order (next one on 5xx / 429 / timeout / connection error; a 401 asks the
-   * gateway for a new plan once). No usable entry → rethrows `cause` (the gateway's own failure).
+   * gateway for a new plan once). No usable entry → the gateway's own failure, saying why there is no fallback (`noDirect`).
    */
   private async run<R>(
     stage: Stage, alias: string, call: CallOptions, cause: GatewayError,
@@ -88,7 +118,7 @@ export class DirectCaller {
     let plan = this.plans.current() ?? await this.plans.refresh();
     const usable = (p: FallbackPlan | null) => (p?.routes[stage]?.[alias] ?? []).filter(e => p!.providers[e.provider]);
     let entries = usable(plan);
-    if (!entries.length) throw cause;
+    if (!entries.length) throw noDirect(cause, stage, alias, plan !== null);
     const timeoutMs = call.timeoutMs ?? this.timeouts[stage];
     let refreshed = false;
     let last: unknown = cause;

@@ -103,7 +103,11 @@ describe('envByMachineType', () => {
     const spec = buildSpec('s2s', { profile: 'speech-stack' }, { profiles: new Map([['speech-stack', profile!]]) });
     const init = replicaCloudInit(spec, 'x'.repeat(24));
     const envFile = /echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/app\.env/.exec(init)![1]!;
-    expect(Buffer.from(envFile, 'base64').toString()).toContain('STT_BATCH=4'); // default machineType is the L4
+    expect(Buffer.from(envFile, 'base64').toString()).toContain('STT_BATCH=8'); // default machineType is the L40S
+    // The L4 fallback placements get the L4's settings (the walk narrows the spec to each place before cloud-init).
+    const l4 = replicaCloudInit({ ...spec, machineType: 'L4-1-24G' }, 'x'.repeat(24));
+    const l4Env = /echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/app\.env/.exec(l4)![1]!;
+    expect(Buffer.from(l4Env, 'base64').toString()).toContain('STT_BATCH=4');
   });
 });
 
