@@ -34,6 +34,7 @@ import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeo
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken } from './src/config/sandbox-env';
+import { createRealtime } from './src/realtime';
 
 const log = createLogger('serve');
 
@@ -249,6 +250,17 @@ const s2sRoute = createS2SRoute({
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 
+// Realtime voice (src/realtime, docs/realtime.md): POST /v1/realtime/sessions with the app key; the browser routes
+// (signaling, WS relay) authenticate with the session token and are mounted in front of the proxy below.
+const realtime = createRealtime({
+  controller, defaultDeployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
+  // No keys configured: the proxy only lets localhost in, as `localhost` (dev), which may use any deployment.
+  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
+  isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),
+  ...(appLimits ? { charge: (userId: string, n: number) => appLimits.chargeRequests(userId, n) } : {}),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
@@ -257,10 +269,12 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   healthDetails: () => chainHealth(),
-  customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
+  customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
+
+realtime.mount(server);
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 
@@ -289,6 +303,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     deployments?.controller.stop();
+    realtime.stop();
     declared?.stop();
     keyManager.stop();
     console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
