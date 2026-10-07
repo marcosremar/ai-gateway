@@ -103,7 +103,10 @@ Still referenced, kept:
 | File | Why |
 |---|---|
 | `server/orphan-sweep-vast.ts` (+ its test) | `bin/ai-gateway-cost-audit.ts` |
-| `server/workload-handlers.ts`, `server/http-utils.ts` | `serve.ts` still `require`s them for `/v1/workloads`; delete them when the workloads mount is removed |
+
+`server/workload-handlers.ts` and `server/http-utils.ts` were kept at first because `serve.ts` mounted `/v1/workloads`;
+#48 unmounted it, so they were deleted after the merge with `main` (with their 4 test files and the cases of 12 mixed
+test files that read them). `bin/ai-gateway.ts` auto-start now always runs `serve.ts`.
 
 Nothing else in `serve.ts`, `src/`, `sdk/`, `bin/` or the package scripts reached `server/` (dependency-cruiser graph,
 plus a grep for dynamic `require`/`import`). `scripts/dev.ts`, `start-ws-server.sh`, `sync-pod.sh` and

@@ -25,16 +25,6 @@ describe('SSH tunnel lifecycle', () => {
 
 // ── 13. Security: JSON body size limit ──────────────────────────────────────
 
-describe('JSON body size limit', () => {
-  it('readJsonBody enforces a max size', async () => {
-    const source = (await import('fs')).readFileSync('server/http-utils.ts', 'utf8');
-    const fnStart = source.indexOf('export function readJsonBody');
-    const fnBody = source.slice(fnStart, fnStart + 600);
-    expect(fnBody).toContain('totalSize');
-    expect(fnBody).toContain('JSON_BODY_MAX_BYTES');
-    expect(fnBody).toContain('req.destroy()');
-  });
-});
 
 // ── 15. Vault key rotation rollback ─────────────────────────────────────────
 

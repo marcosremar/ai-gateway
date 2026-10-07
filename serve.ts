@@ -40,7 +40,7 @@ import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken } from './src/
 const log = createLogger('serve');
 
 // /v1/workloads (server/workload-handlers) is NOT mounted: it answered any app key with no admin check (API audit
-// 2026-10-07). The code stays in server/ until it is removed or put behind the deployments' admin rule.
+// 2026-10-07). Its handlers (server/workload-handlers, server/http-utils) were removed with the rest of the legacy server/.
 
 // SANDBOX_TOKEN is the only secret the gateway needs in its environment: the rest (SCW_SECRET_KEY, SCW_PROJECT_ID,
 // OPENROUTER_API_KEY, … — whatever the palco catalog holds) comes from the dev API, whose values win over Railway

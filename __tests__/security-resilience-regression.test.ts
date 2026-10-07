@@ -28,25 +28,6 @@ function fnBody(source: string, fnName: string, maxLen = 5000): string {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Security: Input validation', () => {
-  // #671
-  it('#671 JSON body limited to 2MB', () => {
-    const src = readSrc('server/http-utils.ts');
-    expect(src).toContain('JSON_BODY_MAX_BYTES');
-    const match = src.match(/JSON_BODY_MAX_BYTES\s*=\s*(\d+)/);
-    expect(match).toBeTruthy();
-    const limit = parseInt(match![1]);
-    expect(limit).toBeLessThanOrEqual(5 * 1024 * 1024); // max 5MB
-    expect(limit).toBeGreaterThan(0);
-  });
-
-  // #672
-  it('#672 readJsonBody enforces size with chunk tracking', () => {
-    const src = readSrc('server/http-utils.ts');
-    const fn = fnBody(src, 'export function readJsonBody');
-    expect(fn).toContain('totalSize');
-    expect(fn).toContain('req.destroy()');
-  });
-
   // #686
   it('#686 GPU token tampering detected', () => {
     const src = readSrc('src/auth/gpu-token.ts');
@@ -175,14 +156,6 @@ describe('Regression: Ensemble timers (#853)', () => {
   });
 });
 
-describe('Regression: JSON body cap (#858)', () => {
-  it('enforced with chunk tracking', () => {
-    const src = readSrc('server/http-utils.ts');
-    const fn = fnBody(src, 'export function readJsonBody');
-    expect(fn).toContain('totalSize += chunk.length');
-    expect(fn).toContain('JSON_BODY_MAX_BYTES');
-  });
-});
 
 describe('Regression: Vault rollback (#860)', () => {
   it('uses createDecipheriv not hex decode', () => {

@@ -31,20 +31,6 @@ const fn = (src: string, name: string, len = 3000) => {
 // WORKLOAD HANDLERS — #281-#310
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Workload Handlers (#281-#293)', () => {
-  const src = read('server/workload-handlers.ts');
-
-  it('#281 handleWorkloadList exists', () => { expect(src).toContain('handleWorkloadList'); });
-  it('#282 supports type filter', () => { expect(src).toContain('type'); });
-  it('#283 handleWorkloadDeploy exists', () => { expect(src).toContain('handleWorkloadDeploy'); });
-  it('#286 validates name required', () => { expect(src).toMatch(/!name|validateInput|WorkloadDeployRequestSchema/); });
-  it('#287 validates type required', () => { expect(src).toMatch(/!type|validateInput|WorkloadDeployRequestSchema/); });
-  it('#289 handleWorkloadStatus exists', () => { expect(src).toContain('handleWorkloadStatus'); });
-  it('#290 returns 404 for unknown', () => { expect(src).toContain('404'); });
-  it('#291 handleWorkloadStop exists', () => { expect(src).toContain('handleWorkloadStop'); });
-  it('#292 handleWorkloadStart exists', () => { expect(src).toContain('handleWorkloadStart'); });
-  it('#293 handleWorkloadTerminate exists', () => { expect(src).toContain('handleWorkloadTerminate'); });
-});
 
 describe('WorkloadRegistry (#294-#299)', () => {
   it('#294 list returns all workloads', async () => {

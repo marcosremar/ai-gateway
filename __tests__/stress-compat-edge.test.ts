@@ -222,16 +222,6 @@ describe('Fly.io Architecture (#905-#910)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Completeness: All modules have tests', () => {
-  it('#964 every handler file has corresponding test', () => {
-    const handlerFiles = ['ai-handlers', 'gpu-handlers', 'bot-handlers', 'config-handlers', 'workload-handlers'];
-    for (const h of handlerFiles) {
-      // Either direct test file or covered in handler-coverage
-      const hasTest = fs.existsSync(`__tests__/${h}.test.ts`)
-        || fs.existsSync(`__tests__/${h}-unit.test.ts`)
-        || fs.existsSync('__tests__/handler-coverage.test.ts');
-      expect(hasTest).toBe(true);
-    }
-  });
 
   it('#966 every provider has tests', () => {
     expect(fs.existsSync('__tests__/providers-individual-unit.test.ts')).toBe(true);

@@ -134,14 +134,12 @@ async function ensureLocalServer(): Promise<void> {
     // Not running — start it
   }
 
-  // Find server entry point — prefer ws-server.ts (full GPU management) over serve.ts (proxy only)
+  // The gateway entry point (the legacy server/ws-server.ts was removed with the rest of server/).
   const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), '..');
-  const wsServerPath = resolve(repoRoot, 'server/ws-server.ts');
-  const servePath = resolve(repoRoot, 'serve.ts');
-  const entryPath = existsSync(wsServerPath) ? wsServerPath : servePath;
+  const entryPath = resolve(repoRoot, 'serve.ts');
   if (!existsSync(entryPath)) {
-    console.error(`Cannot auto-start: neither server/ws-server.ts nor serve.ts found`);
-    console.error('Start the server manually: bun run server/ws-server.ts');
+    console.error('Cannot auto-start: serve.ts not found');
+    console.error('Start the server manually: bun run serve.ts');
     process.exit(1);
   }
 
