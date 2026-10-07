@@ -348,12 +348,13 @@ class AttemptError extends Error {
 }
 
 /**
- * Failures that say nothing about the provider's health: a deployment still booting (`cold`), paused, a request it
+ * Failures that say nothing about the provider's health: a deployment still booting (`cold`) or at capacity
+ * (`saturated`: the overflow spills to the fallback while it scales out), paused, a request it
  * must not receive (`voice_not_found`, `catalog_unavailable`), or a model the account's data policy refuses (`policy`:
  * one OpenRouter model refused under ZDR must not open the breaker shared by every OpenRouter model). They never open the circuit nor start a cooldown, so
  * traffic goes back to the deployment as soon as its replica is ready.
  */
-const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation']);
+const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation', 'saturated']);
 
 /** Default total time per stage (deployment + fallbacks), under parle's deadlines (TTS 15 s, chat 12 s). */
 export const DEFAULT_STAGE_BUDGET_MS = 8_000;
@@ -362,6 +363,35 @@ export const DEFAULT_STAGE_BUDGET_MS = 8_000;
 export function stageBudgetMs(stage: 'stt' | 'chat' | 'tts', env: Record<string, string | undefined> = process.env): number {
   const n = Number(env[`GATEWAY_${stage.toUpperCase()}_BUDGET_MS`]);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_STAGE_BUDGET_MS;
+}
+
+/** Tokens a non-stream chat may ask for inside the plain stage budget (a parle turn asks ~120–160). */
+export const CHAT_BUDGET_FREE_TOKENS = 256;
+/** Extra budget per requested token above the free ones: ~50 tok/s, the slow end of a cloud 9–35B model. */
+export const CHAT_BUDGET_PER_TOKEN_MS = 20;
+/** Ceiling of the scaled chat budget. */
+export const CHAT_BUDGET_MAX_MS = 45_000;
+
+/**
+ * Chat stage budget for one request. A NON-stream answer arrives all at once, so its time grows with `max_tokens`:
+ * `GATEWAY_CHAT_BUDGET_MS` (8 s) + `GATEWAY_CHAT_BUDGET_PER_TOKEN_MS` (20 ms) per token above
+ * `GATEWAY_CHAT_BUDGET_FREE_TOKENS` (256), capped at `GATEWAY_CHAT_BUDGET_MAX_MS` (45 s, under the proxy socket timeout PROXY_TOTAL_TIMEOUT_MS 60 s). Live QA 2026-10-07: with the
+ * GPU cold, `max_tokens: 1024` non-stream fell back to OpenRouter, which needed more than the flat 8 s → 503 for every
+ * long answer. Streaming keeps the flat budget: it bounds the time to the first token, not the whole answer.
+ */
+export function chatBudgetMs(
+  maxTokens: number | undefined, stream: boolean, env: Record<string, string | undefined> = process.env,
+): number {
+  const base = stageBudgetMs('chat', env);
+  if (stream || maxTokens === undefined) return base;
+  const n = (key: string, fallback: number) => {
+    const v = Number(env[key]);
+    return env[key] !== undefined && env[key]!.trim() !== '' && Number.isFinite(v) && v >= 0 ? v : fallback;
+  };
+  const free = n('GATEWAY_CHAT_BUDGET_FREE_TOKENS', CHAT_BUDGET_FREE_TOKENS);
+  const perToken = n('GATEWAY_CHAT_BUDGET_PER_TOKEN_MS', CHAT_BUDGET_PER_TOKEN_MS);
+  const max = Math.max(base, n('GATEWAY_CHAT_BUDGET_MAX_MS', CHAT_BUDGET_MAX_MS));
+  return Math.min(max, base + Math.max(0, maxTokens - free) * perToken);
 }
 
 /** True for failure codes that must not open a circuit or start a cooldown (see NEUTRAL_CODES). */
@@ -425,7 +455,9 @@ async function attempt<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: nu
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      controller.abort();
+      // The reason tells the provider this attempt ran out of time (a slow replica is busy, not broken), unlike an
+      // abort because another target won or the client left (inference-providers.ts `callReplica`).
+      controller.abort(new DOMException(`${label} timed out`, 'TimeoutError'));
       reject(new AttemptError(504, `${label} timed out after ${Math.round(timeoutMs)}ms`, 'timeout'));
     }, Math.max(1, timeoutMs));
   });

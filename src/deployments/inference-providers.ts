@@ -14,9 +14,10 @@ import type {
   ChatRequest, ChatResponse, LLMProvider, ModelInfo, STTProvider, STTRequest, STTResponse, TTSProvider, TTSRequest,
   TTSResponse, VoiceInfo,
 } from '../gateway/providers/cloud/types';
-import { DeploymentError, type DeploymentController, type Lease } from './controller';
+import { DeploymentError, type DeploymentController, type Lease, type LeaseOutcome } from './controller';
 import { replicaBase } from './http';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
+import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 
 type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
 
@@ -37,7 +38,8 @@ class DeploymentCallError extends Error {
   readonly skipRetry: boolean;
   constructor(readonly status: number, message: string, readonly gatewayCode: string) {
     super(message);
-    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable'].includes(gatewayCode);
+    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable', 'saturated']
+      .includes(gatewayCode);
   }
 }
 
@@ -46,14 +48,19 @@ async function callReplica(
   controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal,
 ): Promise<Response> {
   let lease;
+  // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves, a cold one is skipped as `cold` and never woken.
+  const noWake = noWakeActive();
   try {
-    lease = await controller.acquire(name, { waitMs: opts.waitMs ?? 0 });
+    lease = await controller.acquire(name, noWake ? { waitMs: 0, noWake: true } : { waitMs: opts.waitMs ?? 0 });
   } catch (err) {
     if (!(err instanceof DeploymentError)) throw err;
     if (err.status === 404) throw new DeploymentCallError(404, err.message, 'not_found');
     if (err.status === 409) throw new DeploymentCallError(503, err.message, 'paused');
+    // Every ready replica at capacity: spill this request to the fallback now (the replicas keep what they serve).
+    if (err.code === 'saturated') throw new DeploymentCallError(503, err.message, 'saturated');
     // No ready replica (scaled to zero / booting): make sure it is scaling up, and let the chain fall back now.
-    try { controller.wake?.(name); } catch { /* deployment vanished meanwhile */ }
+    if (noWake) recordNoWakeSkip();
+    else try { controller.wake?.(name); } catch { /* deployment vanished meanwhile */ }
     throw new DeploymentCallError(503, err.message, 'cold');
   }
   let res: Response;
@@ -66,13 +73,18 @@ async function callReplica(
       signal: AbortSignal.any([AbortSignal.timeout(opts.timeoutMs ?? 120_000), ...(signal ? [signal] : [])]),
     });
   } catch (err) {
-    lease.done(true);
     const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    // The caller aborting (a hedged fallback won, the client left, the stage budget ran out) says nothing about the
+    // replica; a timeout means busy; only a connection failure makes it suspect (live QA 2026-10-07: 15 hedge losers
+    // counted as failures marked a working L40S unhealthy and it was replaced).
+    const callerTimedOut = (signal?.reason as { name?: string } | undefined)?.name === 'TimeoutError';
+    lease.done(signal?.aborted && !callerTimedOut ? 'cancelled' : timedOut ? 'timeout' : true);
     throw new DeploymentCallError(timedOut ? 504 : 502, `deployment '${name}': replica ${timedOut ? 'timed out' : 'unreachable'}`,
       timedOut ? 'timeout' : 'unreachable');
   }
   if (!res.ok) {
-    lease.done(false);
+    // A 429 is the replica's own queue full: pressure for the autoscaler and a busy mark, never a strike.
+    lease.done(res.status === 429 ? 'overloaded' : false);
     const text = await res.text().catch(() => '');
     // Any replica error moves on to the fallback (a 4xx from our own server is a deployment problem, not the
     // client's: the gateway already validated the request).
@@ -85,23 +97,25 @@ async function callReplica(
 /**
  * The lease covers the whole answer, body included (fault bench 2026-10-07, S1): it used to be released as healthy at
  * the response headers, so a replica that died mid-body was handed the very next request, and a streamed TTS answer
- * counted 0 in flight while it played. Released when the body ends, as failed when the body breaks (a connection-level
- * failure), as healthy when the caller cancels or gives up (`signal`), and after `maxMs` at the latest: a body nobody
- * reads must not hold the lease (and the deployment's demand) forever.
+ * counted 0 in flight while it played. Outcomes follow `Lease.done`: `ok` when the body ends; `failed` when it breaks
+ * (connection-level); `timeout` when our own or the caller's time limit cut it (busy, not dead); `cancelled` when the
+ * caller cancels or aborts (hedge lost, client gone) or nobody read it within `maxMs` (it must not hold the lease, and
+ * the deployment's demand, forever).
  */
 function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSignal): Response {
   if (!res.body) { lease.done(false); return res; }
   const reader = res.body.getReader();
-  const safety = setTimeout(() => release(false), maxMs);
+  const safety = setTimeout(() => release('cancelled'), maxMs);
   (safety as { unref?: () => void }).unref?.();
-  const onAbort = () => { release(false); reader.cancel().catch(() => {}); };
+  const callerOutcome = (): LeaseOutcome => ((signal?.reason as { name?: string } | undefined)?.name === 'TimeoutError' ? 'timeout' : 'cancelled');
+  const onAbort = () => { release(callerOutcome()); reader.cancel().catch(() => {}); };
   let released = false;
-  function release(failed: boolean) {
+  function release(outcome: boolean | LeaseOutcome) {
     if (released) return;
     released = true;
     clearTimeout(safety);
     signal?.removeEventListener('abort', onAbort);
-    lease.done(failed);
+    lease.done(outcome);
   }
   if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
   const body = new ReadableStream<Uint8Array>({
@@ -110,11 +124,12 @@ function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSi
         const { value, done } = await reader.read();
         if (done) { release(false); controller.close(); } else controller.enqueue(value);
       } catch (err) {
-        release(!signal?.aborted);
+        const timedOut = err instanceof Error && err.name === 'TimeoutError';
+        release(signal?.aborted ? callerOutcome() : timedOut ? 'timeout' : true);
         controller.error(err);
       }
     },
-    cancel(reason) { release(false); return reader.cancel(reason); },
+    cancel(reason) { release('cancelled'); return reader.cancel(reason); },
   });
   return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
@@ -127,6 +142,7 @@ abstract class DeploymentProviderBase {
   getModels(): ModelInfo[] { return []; }
   /** Starts scaling up a cold deployment without sending a request (e.g. when an answer came from the cache). */
   prewarm(): void {
+    if (noWakeActive()) return;
     const status = (this.controller.get(this.deployment) as { status?: string } | null)?.status;
     if (status === 'scaled-to-zero' || status === 'warming') this.controller.wake?.(this.deployment);
   }

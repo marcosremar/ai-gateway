@@ -3,9 +3,11 @@
  * caller-facing message on bad input; the HTTP layer maps it to 400.
  */
 
+import { autoscaleOf, warmScheduleOf } from './autoscale-spec';
+import { SpecError } from './spec-error';
 import type { DeploymentProvider, DeploymentSpec, ExposedPort, Placement, PlacementCandidate, Profile, ProfileSpec } from './types';
 
-export class SpecError extends Error {}
+export { SpecError };
 
 export const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const IMAGE_RE = /^[a-z0-9][a-z0-9._\-/:@]{0,254}$/i;
@@ -103,7 +105,7 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda',
+  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 
@@ -242,6 +244,8 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     if (input.idleAction !== 'delete' && input.idleAction !== 'stop') throw new SpecError("idleAction must be 'delete' or 'stop'");
     out.idleAction = input.idleAction;
   }
+  if (input.autoscale !== undefined) out.autoscale = autoscaleOf(input.autoscale);
+  if (input.warmSchedule !== undefined) out.warmSchedule = warmScheduleOf(input.warmSchedule, MAX_REPLICAS_PER_DEPLOYMENT);
   return out;
 }
 

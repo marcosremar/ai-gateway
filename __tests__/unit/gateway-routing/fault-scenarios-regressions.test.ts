@@ -82,7 +82,7 @@ describe('S1 — a replica that dies mid-answer is marked failed, and the lease 
     expect(ctl.leases[0].done.mock.calls).toEqual([[false]]);
   });
 
-  it('TTS stream: a listener that cancels, or a caller that gives up, releases the lease as healthy', async () => {
+  it('TTS stream: a listener that cancels, or a caller that gives up, releases the lease as cancelled (neutral)', async () => {
     const ip = await replica(async (req, res) => {
       if (req.url?.startsWith('/refs')) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('no catalog here'); return; }
       res.writeHead(200, { 'content-type': 'audio/wav' });
@@ -92,20 +92,20 @@ describe('S1 — a replica that dies mid-answer is marked failed, and the lease 
     const ctl = leaser(ip);
     const tts = new DeploymentTTSProvider(ctl, 'd');
     const a = await tts.synthesize({ model: 'tts', input: 'oi', voice: 'v', responseFormat: 'wav' });
-    // The non-JSON catalog answer is not read: its body is cancelled at once, so it does not hold a lease.
-    expect(ctl.leases[0].done.mock.calls).toEqual([[false]]);
+    // The non-JSON catalog answer is not read: its body is cancelled at once (neutral), so it does not hold a lease.
+    expect(ctl.leases[0].done.mock.calls).toEqual([['cancelled']]);
     await a.stream!.cancel();
-    expect(ctl.leases[1].done.mock.calls).toEqual([[false]]);
+    expect(ctl.leases[1].done.mock.calls).toEqual([['cancelled']]);
     const abort = new AbortController();
     const b = await tts.synthesize({ model: 'tts', input: 'oi', voice: 'v', responseFormat: 'wav', signal: abort.signal });
     const lease = ctl.leases[ctl.leases.length - 1];
     abort.abort();
     await sleep(10);
-    expect(lease.done.mock.calls).toEqual([[false]]);
+    expect(lease.done.mock.calls).toEqual([['cancelled']]);
     await b.stream!.cancel().catch(() => {});
   });
 
-  it('a body nobody reads does not hold the lease forever: released (healthy) after the call timeout', async () => {
+  it('a body nobody reads does not hold the lease forever: released (cancelled, neutral) after the call timeout', async () => {
     const ip = await replica(async (req, res) => {
       if (req.url?.startsWith('/refs')) { res.writeHead(404); res.end(); return; }
       res.writeHead(200, { 'content-type': 'audio/wav' });
@@ -116,7 +116,7 @@ describe('S1 — a replica that dies mid-answer is marked failed, and the lease 
     const speech = ctl.leases[ctl.leases.length - 1];
     expect(speech.done).not.toHaveBeenCalled();
     await sleep(250);
-    expect(speech.done.mock.calls).toEqual([[false]]);
+    expect(speech.done.mock.calls).toEqual([['cancelled']]);
   });
 
   it('STT: a transcription read whole releases its lease once, healthy', async () => {

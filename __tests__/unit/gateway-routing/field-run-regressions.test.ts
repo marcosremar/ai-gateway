@@ -158,7 +158,8 @@ describe('4) a replica timeout is labelled timeout and the replica call is abort
     expect(res.status).toBe(200);
     expect(res.headers).toMatchObject({ 'X-Gateway-Fallback': 'timeout', 'X-Gateway-Fallback-From': 'deployment:parle-speech' });
     expect(aborted).toBe(true);
-    expect(ctl.lease.done).toHaveBeenCalledWith(true);
+    // The route's attempt timeout reaches the lease as `timeout` (busy), not as a connection failure (QA 2026-10-07).
+    expect(ctl.lease.done).toHaveBeenCalledWith('timeout');
   });
 
   it('deployment targets get a short timeout (DEPLOYMENT_TIMEOUT_MS)', () => {

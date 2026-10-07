@@ -24,6 +24,7 @@ import type { STTResponse, STTSegment } from './providers/types';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import coreHallucinations from './data/whisper-hallucinations.core.json';
+import { patternVerdict } from './stt-hallucination-patterns';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -47,6 +48,11 @@ export interface STTHallucinationFilterConfig {
   /** Enable blocklist-based filtering. Default: true */
   blocklistFilterEnabled: boolean;
   /**
+   * Enable the pattern rules (stt-hallucination-patterns.ts): subtitle credit lines, music symbols, short phrase loops.
+   * Default: true (absent = on, so configs written before the rules existed get them too).
+   */
+  patternFilterEnabled?: boolean;
+  /**
    * Short/generic blocklist entries ("não", "obrigado", "eu não sei"…) are also things a learner says. They are dropped
    * only when the aggregate no_speech_prob of the answer is at least this (needs metadata). Default: 0.4.
    */
@@ -65,6 +71,7 @@ export const DEFAULT_HALLUCINATION_FILTER_CONFIG: STTHallucinationFilterConfig =
   avgLogprobThreshold: -0.8,
   metadataFilterEnabled: true,
   blocklistFilterEnabled: true,
+  patternFilterEnabled: true,
   ambiguousNoSpeechProb: 0.4,
 };
 
@@ -268,7 +275,10 @@ export interface HallucinationFilterResult {
   blocklistRejected: boolean;
   /** Human-readable descriptions of why segments or text were rejected. Never carries transcript text. */
   reasons: string[];
-  /** Short machine codes (no transcript text): no_speech_prob, compression_ratio, avg_logprob, blocklist, blocklist_corroborated. */
+  /**
+   * Short machine codes (no transcript text): no_speech_prob, compression_ratio, avg_logprob, blocklist,
+   * blocklist_corroborated, pattern_credits, music, repetition.
+   */
   reasonCodes: string[];
   /** Aggregate metrics from the STT response (for logging/debugging). */
   metrics?: {
@@ -366,6 +376,16 @@ export function filterHallucinations(
       reasons.push(`blocklist match (${text.length} chars)`);
       reasonCodes.push(verdict === 'high' ? 'blocklist' : 'blocklist_corroborated');
       blocklistRejected = true;
+      text = '';
+    }
+  }
+
+  // Layer 3: pattern rules (credit lines with a name, ♪♫, "E aí E aí E aí…") — high confidence, any language.
+  if (config.patternFilterEnabled !== false && text) {
+    const pattern = patternVerdict(text, normalizeForBlocklist(text));
+    if (pattern) {
+      reasons.push(`pattern match: ${pattern} (${text.length} chars)`);
+      reasonCodes.push(pattern);
       text = '';
     }
   }

@@ -280,7 +280,7 @@ describe('filterHallucinations — edge cases', () => {
   });
 
   it('handles very long text', () => {
-    const longText = 'word '.repeat(500).trim();
+    const longText = Array.from({ length: 500 }, (_, i) => `word${i}`).join(' '); // 'word '×500 is a decoder loop now dropped
     const response = makeResponse({ text: longText });
     const result = filterHallucinations(response);
     expect(result.text).toBe(longText);

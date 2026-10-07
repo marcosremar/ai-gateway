@@ -53,7 +53,12 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
   private readonly credentials: ProviderCredentials;
   private readonly client: ScalewayLike;
 
-  constructor(secretKey: string, private readonly opts: { projectId?: string; client?: ScalewayLike } = {}) {
+  /**
+   * `awaitVolumes`: a release waits until the server's SBS volumes are deleted too. The gateway does not (a request must
+   * not wait minutes for a detach; its process lives on to finish them); the reaper, a cron process that exits right
+   * after, must — or its volumes would keep billing (scripts/reap-orphans.ts).
+   */
+  constructor(secretKey: string, private readonly opts: { projectId?: string; client?: ScalewayLike; awaitVolumes?: boolean } = {}) {
     this.credentials = { apiKey: secretKey } as ProviderCredentials;
     this.client = opts.client ?? new ScalewayClient();
   }
@@ -120,7 +125,7 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
   }
 
   async releaseReplica(machine: ReplicaMachine): Promise<void> {
-    await this.client.releaseInstance(machine.id, this.credentials, { awaitVolumes: false });
+    await this.client.releaseInstance(machine.id, this.credentials, { awaitVolumes: this.opts.awaitVolumes === true });
   }
 
   private need<K extends keyof ScalewayLike>(key: K): NonNullable<ScalewayLike[K]> {

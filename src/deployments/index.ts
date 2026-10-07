@@ -7,7 +7,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import type { IncomingMessage } from 'http';
 import { DeploymentController } from './controller';
-import { spendLimitsFromEnv } from './spend-limits';
+import { probeLimitsFromEnv, spendLimitsFromEnv } from './spend-limits';
 import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend } from './scaleway-backend';
 import { VastDeploymentBackend } from './vast-backend';
@@ -142,10 +142,13 @@ export function deploymentsFromEnv(
     ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId }) } : {}),
     ...(vastKey ? { vast: new VastDeploymentBackend(vastKey) } : {}),
   };
+  const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
   const controller = new DeploymentController({
     backends,
     store: FileDeploymentStore.inDir(stateDir),
-    probe: new HttpReplicaProbe(),
+    probe: new HttpReplicaProbe(probeTimeoutMs),
+    busyGraceMs,
+    unhealthyStrikes,
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
     ...spendLimitsFromEnv(env),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filterHallucinations, normalizeForBlocklist, normalizeLanguage } from '../../../src/stt-hallucination-filter';
+import { DEFAULT_HALLUCINATION_FILTER_CONFIG, filterHallucinations, normalizeForBlocklist, normalizeLanguage } from '../../../src/stt-hallucination-filter';
 import utterances from './a1-utterances.json';
 
 const say = (text: string, extra: Record<string, unknown> = {}) => ({ text, ...extra });
@@ -86,5 +86,47 @@ describe('false-positive rate on 220 plausible A1 learner utterances', () => {
   it('with healthy metadata nothing is dropped either', () => {
     const meta = { no_speech_prob: 0.05, avg_logprob: -0.35, compression_ratio: 1.3 };
     expect(all.filter(([t, l]) => filterHallucinations(say(t, meta), l).text === '')).toEqual([]);
+  });
+});
+
+describe('pattern rules: what passed the blocklist live (QA 2026-10-07, Whisper large-v3 on noise)', () => {
+  const dropped: Array<[string, string, string]> = [
+    // [text, language, expected reason code]
+    [' Legenda por Sônia Ruberti', 'Portuguese', 'pattern_credits'], // room tone + music, 2 of 3 passed
+    [' E aí ♫ E aí E aí E aí E aí E aí E aí', 'Portuguese', 'music'], // keyboard clicks, 3 of 3 passed
+    ['Legendas por Marcos Silva', 'pt', 'pattern_credits'],
+    ['Legendas pela comunidade do YouTube', 'pt', 'pattern_credits'],
+    ['Legendado por João', 'pt', 'pattern_credits'],
+    ['Sous-titres réalisés par Jean Dupont', 'fr', 'pattern_credits'],
+    ['Sous-titrage ST\' 501', 'fr', 'pattern_credits'],
+    ['Subtitles by Jane Doe', 'en', 'pattern_credits'],
+    ['Captions by the BBC', 'pt', 'pattern_credits'],
+    ['Subtítulos por la comunidad', 'es', 'pattern_credits'],
+    ['Subtítulos realizados por Ana', 'es', 'pattern_credits'],
+    ['♪ ♪', 'pt', 'music'],
+    ['♪ la la la ♪', 'pt', 'music'],
+    ['🎵', 'pt', 'music'],
+    ['E aí E aí E aí E aí', 'pt', 'repetition'],
+    ['Obrigado. Obrigado. Obrigado. Obrigado.', 'pt', 'repetition'],
+    ['muito bom muito bom muito bom', 'pt', 'repetition'],
+  ];
+  for (const [text, lang, code] of dropped) {
+    it(`${code}: ${text.trim()}`, () => {
+      const r = filterHallucinations(say(text), lang);
+      expect(r.text).toBe('');
+      expect(r.reasonCodes).toContain(code);
+      expect(JSON.stringify(r.reasons)).not.toMatch(/Sônia|Ruberti|aí/);
+    });
+  }
+  const kept = [
+    'sim sim', 'não, não', 'sim, sim, sim', 'oui oui', 'non non non', 'legenda, por favor', 'eu quero a legenda',
+    'um café, um café por favor', 'não, não, eu quero dois', 'Eu queria um pão de queijo, por favor.',
+  ];
+  for (const text of kept) {
+    it(`kept: ${text}`, () => expect(filterHallucinations(say(text), 'pt').text).toBe(text));
+  }
+  it('can be turned off with the rest of the config', () => {
+    const off = { ...DEFAULT_HALLUCINATION_FILTER_CONFIG, patternFilterEnabled: false };
+    expect(filterHallucinations(say('Legenda por Sônia Ruberti'), 'pt', off).text).toBe('Legenda por Sônia Ruberti');
   });
 });

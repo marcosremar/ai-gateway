@@ -28,7 +28,12 @@ import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppFallbackService } from './app-fallback';
 import type { ClientStabilityLog } from './stability';
-import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
+import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
+import { randomUUID } from 'crypto';
+import { createLogger } from '../logger';
+
+const log = createLogger('deployments-http');
+import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
@@ -36,7 +41,7 @@ const MAX_ADMIN_BODY = 16 * 1024 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 const HOP_BY_HOP = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding',
-  'upgrade', 'authorization', 'content-length', 'x-aigw-token', 'x-aigw-wait', 'x-forwarded-for', 'x-forwarded-host',
+  'upgrade', 'authorization', 'content-length', 'x-aigw-token', 'x-aigw-wait', 'x-gateway-no-wake', 'x-forwarded-for', 'x-forwarded-host',
   'x-forwarded-proto', 'x-real-ip', 'cookie',
 ]);
 
@@ -71,25 +76,69 @@ export function healthBodyReady(body: unknown): boolean {
   return ['stt', 'llm', 'tts'].every(stage => stageReady((body as Record<string, unknown>)[stage]));
 }
 
-/** Probe over the replica's nginx front: boot finished (`/__aigw/ready`) AND the app still answers its health path. */
+/**
+ * Probe over the replica's nginx front: boot finished (`/__aigw/ready`, liveness — nginx answers it even while the app
+ * is saturated) AND the app still answers its health path (readiness). `timeoutMs` per call: DEPLOYMENTS_PROBE_TIMEOUT_MS.
+ */
 export class HttpReplicaProbe implements ReplicaProbe {
   constructor(private readonly timeoutMs = 4_000, private readonly fetchImpl: typeof fetch = fetch) {}
 
   async ready(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<boolean> {
-    if (!machine.ip) return false;
+    return (await this.check(machine, spec, token)) === 'ready';
+  }
+
+  async check(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult> {
+    if (!machine.ip) return 'down';
     const headers = { 'X-Aigw-Token': token };
     const get = (path: string) => this.fetchImpl(`${replicaBase(machine, !!spec.exposure)}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
-    const marker = await get('/__aigw/ready');
-    if (!marker.ok) return false;
-    const health = await get(spec.healthPath);
-    if (!health.ok) return false;
-    return healthBodyReady(await health.json().catch(() => null));
+    const marker = await get('/__aigw/ready').catch(() => null);
+    if (!marker?.ok) return 'down';
+    const health = await get(spec.healthPath).catch(() => null);
+    if (!health?.ok) return 'busy';
+    return healthBodyReady(await health.json().catch(() => null)) ? 'ready' : 'busy';
   }
 }
 
 /** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`. */
 export function replicaBase(machine: ReplicaMachine, exposed = false): string {
   return exposed && machine.ip && !machine.ip.includes(':') ? `http://${machine.ip}:${PROBE_PORT}` : `http://${machine.ip}`;
+}
+
+/**
+ * The URL an `invoke` forwards to: the replica's own base plus the caller's path. The host comes only from our machine
+ * list; the caller's part must stay a plain path on it — no scheme, no `//` authority, no backslash, no `.`/`..`
+ * segment (raw or percent-encoded) — and the resolved URL must keep the base's origin (CodeQL js/request-forgery,
+ * PR #45). Null = refused (400).
+ */
+/**
+ * The forwarded path/query re-spelled byte by byte from a fixed table (CodeQL js/request-forgery: the string sent is
+ * built from our constants, not from the request): URL characters stay as they are, any other byte is percent-encoded.
+ */
+const URL_SAFE = new Set([...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~!$&\'()*+,;=:@%/?']);
+const BYTE_SPELLING: string[] = Array.from({ length: 256 }, (_, b) => {
+  const c = String.fromCharCode(b);
+  return b < 128 && URL_SAFE.has(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, '0')}`;
+});
+
+function respell(v: string): string {
+  let out = '';
+  for (const byte of Buffer.from(v, 'utf8')) out += BYTE_SPELLING[byte];
+  return out;
+}
+
+export function replicaTarget(base: string, rest: string, query: string): URL | null {
+  if (/[\\\s]/.test(rest) || rest.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(rest)) return null;
+  for (const segment of rest.split('/')) {
+    let decoded: string;
+    try { decoded = decodeURIComponent(segment); } catch { return null; }
+    if (decoded === '.' || decoded === '..' || /[\\/]/.test(decoded)) return null;
+  }
+  if (query && !query.startsWith('?')) return null;
+  const path = respell(`/${rest}${query}`);
+  let url: URL;
+  try { url = new URL(path, base); } catch { return null; }
+  const origin = new URL(base).origin;
+  return url.origin === origin && url.pathname.startsWith('/') ? url : null;
 }
 
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string | number> = {}): void {
@@ -243,22 +292,40 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     for (const [k, v] of Object.entries(req.headers)) {
       if (!HOP_BY_HOP.has(k) && typeof v === 'string') headers[k] = v;
     }
+    if (!replicaTarget('http://replica.invalid', rest, query)) return send(res, 400, { error: 'invoke path must be a plain relative path (no scheme, //, backslash or ./.. segments)' });
     const exclude = new Set<string>();
+    // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves; none ready = 503 at once, nothing woken.
+    const noWake = noWakeActive();
     for (let attempt = 0; attempt < 2; attempt++) {
-      const lease = await controller.acquire(name, { waitMs, exclude, signal: abort.signal });
+      let lease;
+      try {
+        lease = await controller.acquire(name, noWake ? { waitMs: 0, exclude, signal: abort.signal, noWake: true } : { waitMs, exclude, signal: abort.signal });
+      } catch (err) {
+        if (!(noWake && err instanceof DeploymentError && err.status === 503)) throw err;
+        recordNoWakeSkip();
+        return send(res, 503, { error: err.message, status: 'cold', code: 'cold', noWake: true }, { 'Retry-After': err.retryAfterSeconds ?? 30 });
+      }
+      const target = replicaTarget(replicaBase(lease.machine, lease.exposed), rest, query);
+      if (!target) { lease.done('cancelled'); return send(res, 400, { error: 'invoke path does not resolve on the replica' }); }
       let upstream: Response;
       try {
-        upstream = await fetchImpl(`${replicaBase(lease.machine, lease.exposed)}/${rest}${query}`, {
+        upstream = await fetchImpl(target.href, {
           method,
           headers: { ...headers, 'X-Aigw-Token': lease.token },
           body: body && body.length ? new Uint8Array(body) : undefined,
           signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS)]),
         });
       } catch (err) {
-        lease.done(true);
+        // The client going away says nothing about the replica, and running out of time means busy: neither is a strike
+        // (only a connection failure is; QA 2026-10-07).
+        const timedOut = err instanceof Error && err.name === 'TimeoutError';
+        lease.done(abort.signal.aborted ? 'cancelled' : timedOut ? 'timeout' : true);
         if (abort.signal.aborted) return;
         exclude.add(lease.machine.id);
-        if (attempt === 1) throw new DeploymentError(502, `replica unreachable: ${err instanceof Error ? err.message : String(err)}`);
+        if (attempt === 1) {
+          log.warn({ deployment: name, error: err instanceof Error ? err.message : String(err) }, 'invoke: replica unreachable');
+          throw new DeploymentError(502, 'replica unreachable');
+        }
         continue;
       }
       try {
@@ -311,8 +378,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         const filter = own ?? new URLSearchParams(query.slice(1)).get('app');
         const deployments = controller.list().filter(d => !filter || d.app === filter);
         // Declared deployments are the operator's (gateway-wide): not shown to an app-scoped caller.
+        // `scope: "all"` = the full list (admin, no app filter): the external reaper trusts only that (reaper.ts).
         return send(res, 200, {
-          namespace: controller.namespace, health: controller.health(), deployments,
+          // An app key sees its own deployments' counts and bill, never the namespace's (QA 2026-10-07).
+          namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(own ?? undefined), deployments,
           ...(opts.declaredStatus && !own ? { declared: opts.declaredStatus() } : {}),
         });
       }
@@ -332,6 +401,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
     if (action === 'wake' && method === 'POST') { admin(); return send(res, 202, controller.wake(name)); }
     if (action === 'park' && method === 'POST') { admin(); return send(res, 202, await controller.park(name)); }
+    if (action === 'warm' && method === 'POST') {
+      admin();
+      const body = await readJson(req);
+      return send(res, 202, await controller.warm(name, body.replicas as number, body.untilMinutes as number));
+    }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 
     const existing = controller.get(name);
@@ -374,7 +448,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         return send(res, err.status, { error: err.message, ...(err.status === 503 ? { status: 'warming' } : {}) },
           err.retryAfterSeconds ? { 'Retry-After': err.retryAfterSeconds } : {});
       }
-      send(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      // Never the raw error (message/stack) to the client: a generic message + an id to find the log line.
+      const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'].slice(0, 100) : randomUUID();
+      log.error({ requestId, path, error: err instanceof Error ? err.stack ?? err.message : String(err) }, 'deployments route failed');
+      send(res, 500, { error: 'internal error', requestId });
     });
     return true;
   };
