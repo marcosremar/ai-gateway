@@ -34,6 +34,22 @@ describe('orderTransports / pickReplica / sessionCharge', () => {
     expect(sessionCharge(600)).toBe(40);
     expect(sessionCharge(61, 2)).toBe(4);
   });
+
+  it('prefers the better media path among replicas with a free slot: direct, unprobed, relay, ws; then free slots', () => {
+    const on = (id: string, path: 'direct' | 'relay' | 'ws' | 'unknown' | null, active: number, pending = 0) => ({
+      id, base: `http://${id}`, pending,
+      status: {
+        active, max: 8, available: 8 - active, transports: (path === 'ws' ? ['ws'] : ['webrtc', 'ws']) as Array<'webrtc' | 'ws'>, udpPorts: null, probePort: 50100,
+        net: path ? { path, udpInbound: 'unknown' as const, publicIp: null, checkedAt: null } : null,
+      },
+    });
+    const ladder = ['webrtc', 'ws'] as const;
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 0), on('direct', 'direct', 7)], [...ladder])!.id).toBe('direct');
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 6), on('direct', 'direct', 7, 1)], [...ladder])!.id).toBe('relay');
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 8), on('direct', 'direct', 8)], [...ladder])!.id).toBe('ws');
+    expect(pickReplica([on('relay', 'relay', 0), on('old-edge', null, 5), on('unprobed', 'unknown', 6)], [...ladder])!.id).toBe('old-edge');
+    expect(pickReplica([on('d1', 'direct', 5), on('d2', 'direct', 2)], [...ladder])!.id).toBe('d2');
+  });
 });
 
 describe('POST /v1/realtime/sessions', () => {

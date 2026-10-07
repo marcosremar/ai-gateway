@@ -91,8 +91,9 @@ Called by the **app's backend** with its app key (the browser never holds a gate
    defaults to `S2S_DEPLOYMENT`.
 2. **Placement** — the ready, non-draining replicas of the deployment are asked `/__aigw/rt/status` (cached 2 s, 1.5 s
    timeout). Free slots = `available − pending`, where *pending* are sessions admitted here in the last 20 s that
-   have not connected yet (a class of 30 arriving at once must not all land on the same 8 slots). The replica with the
-   most free slots that speaks a wanted transport wins.
+   have not connected yet (a class of 30 arriving at once must not all land on the same 8 slots). Among the replicas
+   with a free slot that speak a wanted transport, the best media path wins (`direct`, then not probed yet, then
+   `relay`, then `ws`), then the most free slots.
 3. **Refusals answer at once** with `503`, `Retry-After` and `fallback: {transport:"s2s-stream", url:"/v1/s2s"}`, so the
    client goes down the ladder instead of waiting: `cold` (no ready replica: the deployment is **woken** for the next
    sessions — never under no-wake, `X-Gateway-No-Wake: 1` or `GATEWAY_NO_WAKE_USERS`; Retry-After 30), `saturated`

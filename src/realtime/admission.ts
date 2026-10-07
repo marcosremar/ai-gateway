@@ -42,9 +42,13 @@ export interface ReplicaCandidate {
 
 export const freeSlots = (c: ReplicaCandidate) => Math.max(0, c.status.available - c.pending);
 
+const PATH_RANK = { direct: 0, unknown: 1, relay: 2, ws: 3 } as const;
+const pathRank = (c: ReplicaCandidate) => PATH_RANK[c.status.net?.path ?? 'unknown'];
+
 /**
  * The replica that takes a session: it speaks one of the wanted edge transports and has a free slot after the pending
- * admissions; the one with the most free slots wins, then the least loaded (active / max), then the id (stable).
+ * admissions; the best media path wins (direct, then not probed yet, then relay, then ws), then the most free slots,
+ * then the least loaded (active / max), then the id (stable).
  */
 export function pickReplica(candidates: ReplicaCandidate[], wanted: RealtimeTransportType[]): ReplicaCandidate | null {
   const edge = wanted.filter(isEdgeTransport);
@@ -52,6 +56,8 @@ export function pickReplica(candidates: ReplicaCandidate[], wanted: RealtimeTran
   if (!usable.length) return null;
   const ratio = (c: ReplicaCandidate) => (c.status.max ? (c.status.active + c.pending) / c.status.max : 1);
   return usable.reduce((best, c) => {
+    const dp = pathRank(c) - pathRank(best);
+    if (dp !== 0) return dp < 0 ? c : best;
     const df = freeSlots(c) - freeSlots(best);
     if (df !== 0) return df > 0 ? c : best;
     const dr = ratio(c) - ratio(best);
