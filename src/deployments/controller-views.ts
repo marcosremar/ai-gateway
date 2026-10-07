@@ -1,5 +1,5 @@
 /**
- * DeploymentController, part 5 of 6 — what callers see: deployment views (secrets stripped), the stored spec for
+ * DeploymentController, part 6 of 7 — what callers see: deployment views (secrets stripped), the stored spec for
  * in-process callers, and the counts `/health` shows. See controller-state.ts.
  */
 
@@ -74,14 +74,16 @@ export abstract class ControllerViews extends ReconcileLoop {
       ageSeconds: Math.round((now - m.createdAt) / 1000),
       inflight: rt.perReplica.get(m.id) ?? 0,
       busy: this.probes.get(m.id)?.busy === true,
+      draining: this.draining.has(m.id),
       rttMs: this.gates.get(m.id)?.rttMs ?? null,
       expiresInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
     }));
     const ready = replicas.filter(r => r.phase === 'ready').length;
-    const desired = planReplicas({
+    // The last tick's decision when there is one (pressure and floors included), else the base rules.
+    const desired = Math.max(rt.autoscale.desired, planReplicas({
       spec: rt.record.spec, replicas: [], inflight: rt.inflight, waiting: rt.waiting,
       lastRequestAt: rt.record.lastRequestAt, aboveSince: null, now,
-    }).desired;
+    }).desired);
     const status: DeploymentView['status'] = rt.record.spec.paused ? 'paused'
       : replicas.length === 0 && rt.creating === 0 ? 'scaled-to-zero'
         : ready === 0 ? 'warming'
@@ -104,6 +106,9 @@ export abstract class ControllerViews extends ReconcileLoop {
       appImage: rt.record.appImage ?? null,
       publicIp: rt.record.network?.ip ?? null,
       lastPlacement: rt.lastPlacement,
+      autoscale: { ...rt.autoscale },
+      warm: rt.record.warm && rt.record.warm.until > now
+        ? { replicas: rt.record.warm.replicas, until: new Date(rt.record.warm.until).toISOString() } : null,
     };
   }
 }

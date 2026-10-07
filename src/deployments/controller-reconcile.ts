@@ -1,18 +1,18 @@
 /**
- * DeploymentController, part 4 of 6 — the planning tick: every `reconcileMs` (and on demand) list machines per provider
+ * DeploymentController, part 5 of 7 — the planning tick: every `reconcileMs` (and on demand) list machines per provider
  * → release orphans → probe → `planReplicas` per deployment → release / park / power on / create. See controller-state.ts.
  */
 
-import { isParked } from './controller-state';
-import { ParkingControl } from './controller-parking';
-import { planReplicas } from './planner';
+import { isParked, type Runtime } from './controller-state';
+import { AutoscaleControl } from './controller-autoscale';
+import { isActive, planReplicas, replicaPhase } from './planner';
 import { usesScaleway, usesVast } from './spec';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMachine } from './types';
 
 /** A parked replica just powered on still lists as stopped for a while: do not power it on again before this. */
 const PARKED_START_GRACE_MS = 90_000;
 
-export abstract class ReconcileLoop extends ParkingControl {
+export abstract class ReconcileLoop extends AutoscaleControl {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => void this.reconcile(), this.opts.reconcileMs ?? 20_000);
@@ -87,50 +87,69 @@ export abstract class ReconcileLoop extends ParkingControl {
     await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment) && !this.parkedNow(m) && !this.stoppingNow(m))
       .map(m => this.probeOne(m)));
 
-    for (const [name, rt] of this.deployments) {
-      // The deployment may live on a provider whose list failed: its known machines are planned (stale, but a release only
-      // needs the id) and only the releases run; no create, no power-on until a list answers.
-      const releaseOnly = this.touchesFailed(rt.record.spec, failed);
-      const all = this.machines.filter(m => m.deployment === name);
-      // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
-      // Ones still `stopping` are neither parked nor live: left alone until the list shows `stopped`.
-      let parked = rt.record.spec.idleAction === 'stop' ? all.filter(m => isParked(m) && !this.stoppingNow(m)) : [];
-      const mine = all.filter(m => !parked.includes(m) && !this.stoppingNow(m));
-      const plan = planReplicas({
-        spec: rt.record.spec,
-        replicas: mine.map(m => this.observed(m, rt.perReplica.get(m.id) ?? 0)),
-        inflight: rt.inflight,
-        // Recent peak, not the instant: a burst served by hedges or refused while cold still asks for capacity.
-        demand: this.demandOf(rt),
-        waiting: rt.waiting,
-        lastRequestAt: rt.record.lastRequestAt,
-        aboveSince: rt.aboveSince,
-        now: this.now(),
-        ...(this.opts.unhealthyStrikes ? { unhealthyStrikes: this.opts.unhealthyStrikes } : {}),
-        ...(this.opts.pinnedIdleMaxMs ? { pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt } : {}),
-      });
-      rt.aboveSince = plan.aboveSince;
-      for (const r of plan.release) {
-        const m = mine.find(x => x.id === r.id);
-        if (!m) continue;
-        if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
-        else await this.release(m, r.reason);
-      }
-      if (releaseOnly) continue;
-      if (rt.record.spec.paused) for (const m of parked) await this.release(m, 'paused');
-      parked = await this.releaseForgotten(parked);
-      let toCreate = plan.create - rt.creating;
-      for (const m of rt.record.spec.paused ? [] : parked) {
-        if (toCreate <= 0) break;
-        toCreate--;
-        if (this.now() - (rt.starting.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
-        const refusal = this.capRefusal(m.pricePerHour ?? 0);
-        if (refusal) { rt.lastError = refusal; break; }
-        await this.unpark(rt, m);
-      }
-      for (let i = 0; i < toCreate; i++) this.createReplica(rt);
-      if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
+    for (const [name, rt] of this.deployments) await this.reconcileDeployment(name, rt, failed);
+  }
+
+  /** One deployment's tick: pressure decision → plan → releases / drains → power-ons / creates (or reclaim when capped). */
+  protected async reconcileDeployment(name: string, rt: Runtime, failed: Set<DeploymentProvider>): Promise<void> {
+    // The deployment may live on a provider whose list failed: its known machines are planned (stale, but a release only
+    // needs the id) and only the releases run; no create, no power-on until a list answers.
+    const releaseOnly = this.touchesFailed(rt.record.spec, failed);
+    const all = this.machines.filter(m => m.deployment === name);
+    // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
+    // Ones still `stopping` are neither parked nor live: left alone until the list shows `stopped`. Draining ones are
+    // on their way out: outside the plan too (taken back by `settleDrains` if the plan wants them again).
+    let parked = rt.record.spec.idleAction === 'stop' ? all.filter(m => isParked(m) && !this.stoppingNow(m)) : [];
+    const mine = all.filter(m => !parked.includes(m) && !this.stoppingNow(m) && !this.draining.has(m.id));
+    // A deployment whose idle replica was reclaimed counts as idle until its next request (no ping-pong).
+    const reclaimed = rt.reclaimedAt != null && rt.reclaimedAt >= (rt.record.lastRequestAt ?? 0);
+    const lastRequestAt = reclaimed ? null : rt.record.lastRequestAt;
+    const replicas = mine.map(m => this.observed(m, rt.perReplica.get(m.id) ?? 0));
+    const base = {
+      spec: rt.record.spec, inflight: rt.inflight, waiting: rt.waiting, lastRequestAt, now: this.now(),
+      // Recent peak, not the instant: a burst served by hedges or refused while cold still asks for capacity.
+      demand: this.demandOf(rt),
+    };
+    const live = mine.filter(m => replicaPhase(this.observed(m, 0)) !== 'halted');
+    const { decision, floor } = this.decide(rt, live, isActive({ ...base, replicas }));
+    const plan = planReplicas({
+      ...base, replicas, aboveSince: rt.aboveSince, drainBusy: true, autoscaleWant: decision.desired, floor,
+      ...(this.opts.unhealthyStrikes ? { unhealthyStrikes: this.opts.unhealthyStrikes } : {}),
+      ...(this.opts.pinnedIdleMaxMs ? { pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt } : {}),
+    });
+    rt.aboveSince = plan.aboveSince;
+    for (const r of plan.release) {
+      const m = mine.find(x => x.id === r.id);
+      if (!m) continue;
+      if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
+      else await this.release(m, r.reason);
     }
+    let toCreate = await this.settleDrains(rt, plan, plan.create - rt.creating);
+    if (releaseOnly) { this.explain(rt, plan, decision, floor, 'provider list failed'); return; }
+    if (rt.record.spec.paused) for (const m of parked) await this.release(m, 'paused');
+    parked = await this.releaseForgotten(parked);
+    let blockedBy: string | null = null;
+    for (const m of rt.record.spec.paused ? [] : parked) {
+      if (toCreate <= 0) break;
+      toCreate--;
+      if (this.now() - (rt.starting.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
+      const refusal = this.capRefusal(m.pricePerHour ?? 0);
+      if (refusal) { rt.lastError = refusal; blockedBy = refusal; break; }
+      await this.unpark(rt, m);
+    }
+    if (toCreate > 0) {
+      const price = all.find(m => m.pricePerHour != null)?.pricePerHour ?? 0;
+      let refusal = this.capRefusal(price);
+      // Under pressure and capped: take idle capacity from another deployment first (it frees on this tick).
+      if (refusal && plan.active) {
+        const note = await this.reclaimFor(rt);
+        if (note) { refusal = this.capRefusal(price); blockedBy = refusal ? `${refusal} (${note}, more needed)` : null; }
+        else blockedBy = refusal;
+      } else blockedBy = refusal ?? (this.now() < rt.backoffUntil ? `create back-off (${rt.lastError ?? 'last create failed'})` : null);
+    }
+    for (let i = 0; i < toCreate; i++) this.createReplica(rt);
+    this.explain(rt, plan, decision, floor, blockedBy);
+    if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
   }
 
   /** The deployment may have (or create) machines on a provider whose list just failed. */

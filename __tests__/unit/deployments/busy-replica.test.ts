@@ -171,7 +171,7 @@ describe('controller: 16 concurrent chats on a ready replica', () => {
     expect(x.cloud.released).toEqual([]);
     expect(x.controller.get('speech')!.replicas[0].phase).toBe('ready');
     // Saturated and busy: no third request on it (the chain falls back), but the two in flight finish there.
-    await expect(x.controller.acquire('speech', { waitMs: 0 })).rejects.toThrow(/no ready replica|starting/);
+    await expect(x.controller.acquire('speech', { waitMs: 0 })).rejects.toThrow(/no ready replica|starting|at capacity/);
     for (const l of held) l.done(false);
     // Just served: still never released while its probe keeps timing out (busy grace).
     await wait(150);
@@ -195,8 +195,10 @@ describe('controller: 16 concurrent chats on a ready replica', () => {
     x.controller.wake('speech');
     await until(() => x.controller.get('speech')!.status === 'ready');
     expect(x.cloud.created).toHaveLength(1);
-    const leases = await Promise.all(Array.from({ length: 16 }, () => x.controller.acquire('speech', { waitMs: 0 })));
-    for (const l of leases) l.done('cancelled'); // hedged: all ended before the next tick looked
+    // 12 fit (target 8 × maxInflightFactor 1.5), 4 spill to the fallback; all count as load.
+    const leases = await Promise.all(Array.from({ length: 16 }, () => x.controller.acquire('speech', { waitMs: 0 }).catch(() => null)));
+    expect(leases.filter(Boolean)).toHaveLength(12);
+    for (const l of leases) l?.done('cancelled'); // hedged: all ended before the next tick looked
     await until(() => x.cloud.created.length === 2, 3000);
   });
 

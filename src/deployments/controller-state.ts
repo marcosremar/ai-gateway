@@ -1,13 +1,15 @@
 /**
- * DeploymentController, part 1 of 6 — the state every other part reads: the deployments and their runtime counters, the
+ * DeploymentController, part 1 of 7 — the state every other part reads: the deployments and their runtime counters, the
  * machine list, the probe/gate/parking bookkeeping, and the derived counts behind the cost guards (replica cap, € ceiling).
  *
  * The controller is split by who owns what (pure move of the former `controller.ts`, 2026-10-07); each part extends the
  * previous one and `DeploymentController` (controller.ts) is the public class:
  *   controller-state.ts → controller-replicas.ts (create / release / probe) → controller-parking.ts (stop / park) →
- *   controller-reconcile.ts (the planning tick) → controller-views.ts (views, health) → controller.ts (API, leases).
+ *   controller-autoscale.ts (pressure, drains, reclaim) → controller-reconcile.ts (the planning tick) →
+ *   controller-views.ts (views, health) → controller.ts (API, leases).
  */
 
+import type { PressureState } from './autoscale';
 import { replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
@@ -16,7 +18,8 @@ import type {
 } from './types';
 
 export class DeploymentError extends Error {
-  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number) {
+  /** `saturated`: replicas are ready but all at capacity (the caller should spill to its fallback, not wait). */
+  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated') {
     super(message);
   }
 }
@@ -34,14 +37,17 @@ export interface ProbeState {
    * never released for this (live QA 2026-10-07: 16 concurrent chats made the L40S `unhealthy` and it was replaced).
    */
   busy?: boolean;
+  /** Since when the liveness probe (the replica's front) has failed without a break: the machine is gone, not busy. */
+  downSince?: number;
 }
 
 /**
  * How a forwarded request ended, as `Lease.done` hears it. `true`/`'failed'` = connection-level failure (refused,
  * reset); `'timeout'` = the replica took longer than the caller's limit (busy, not dead); `'cancelled'` = the caller
- * gave up for its own reasons (a hedged fallback won, the client went away) and says nothing about the replica.
+ * gave up for its own reasons (a hedged fallback won, the client went away) and says nothing about the replica;
+ * `'overloaded'` = the replica answered 429 (its own queue is full): busy, and pressure for the autoscaler.
  */
-export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled';
+export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled' | 'overloaded';
 
 export interface Runtime {
   record: DeploymentRecord;
@@ -67,6 +73,29 @@ export interface Runtime {
   refusedAt: number[];
   /** Highest recent load (served + waiting + just refused) and when: what scale-up plans on (`demandOf`). */
   demandPeak: { value: number; at: number };
+  /** Finished requests of the last `SIGNAL_WINDOW_MS`: duration and whether it timed out / got a 429 (autoscale signals). */
+  samples: Array<{ at: number; ms: number; bad: boolean }>;
+  /** Pressure autoscaler memory (`autoscale.ts`). */
+  pressure: PressureState;
+  /** The last scaling decision, for the view and the logs. */
+  autoscale: AutoscaleView;
+  /** When another deployment under pressure took this one's idle replica (it then counts as idle until a new request). */
+  reclaimedAt: number | null;
+}
+
+/** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
+export interface AutoscaleView {
+  desired: number;
+  /** What pressure alone asks for. */
+  pressureWant: number;
+  reason: string;
+  /** What keeps `desired` from being reached (replica cap, € ceiling, maxReplicas, back-off), or null. */
+  blockedBy: string | null;
+  /** Replicas kept by a warm-up schedule or a client warm window right now. */
+  floor: number;
+  load: number;
+  p95Ms: number | null;
+  errorRate: number;
 }
 
 export interface ControllerOptions {
@@ -119,9 +148,10 @@ export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
 export const DEFAULT_BUSY_GRACE_MS = 120_000;
 /**
  * A request turned away for lack of a ready replica counts as load for this long (≈ the time the fallback takes to
- * answer it, Little's law with W ≈ 2 s): 16 refused at once read as 16 concurrent, one a second as ~2.
+ * answer it, Little's law with W ≈ 1.5 s — the cloud LLM's p50 measured live on 2026-10-07 was 1.0–1.9 s): 16 refused
+ * at once read as 16 concurrent, one a second as ~1.5.
  */
-export const REFUSED_HOLD_MS = 2_000;
+export const REFUSED_HOLD_MS = 1_500;
 /** Scale-up remembers the peak load this long: a burst whose hedged requests end in 2 s is still seen by the next tick. */
 export const DEMAND_MEMORY_MS = 60_000;
 
@@ -156,6 +186,8 @@ export abstract class ControllerState {
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
   protected readonly pendingSpend = new Set<{ cost: number }>();
   protected readonly probes = new Map<string, ProbeState>();
+  /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
+  protected readonly draining = new Map<string, number>();
   protected reconciling: Promise<void> | null = null;
   protected rerun = false;
   protected timer: ReturnType<typeof setInterval> | null = null;
@@ -198,6 +230,8 @@ export abstract class ControllerState {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null,
+      autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
 
@@ -241,6 +275,11 @@ export abstract class ControllerState {
     return Math.max(now, peak);
   }
 
+  /** Ready replicas still taking requests (not draining). */
+  protected servingMachines(name: string): ReplicaMachine[] {
+    return this.readyMachines(name).filter(m => !this.draining.has(m.id));
+  }
+
   protected observed(m: ReplicaMachine, inflight: number): ObservedReplica {
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
     // A parked replica powered back on boots again: its boot (timeout, booting phase) AND its `maxHours` lifetime count
@@ -250,6 +289,7 @@ export abstract class ControllerState {
     return {
       machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight,
       ...(p.readyAt ? { readyAt: p.readyAt } : {}), ...(this.servedRecently(p) ? { servedRecently: true } : {}),
+      ...(p.downSince !== undefined ? { downForMs: this.now() - p.downSince } : {}),
     };
   }
 

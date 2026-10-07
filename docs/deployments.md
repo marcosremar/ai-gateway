@@ -48,6 +48,7 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | GET | `/v1/deployments/:name` | status (`scaled-to-zero` · `warming` · `ready` · `degraded` · `paused`), replicas, `lastError` |
 | DELETE | `/v1/deployments/:name` | releases every machine, forgets the spec |
 | POST | `/v1/deployments/:name/wake` | start replicas now |
+| POST | `/v1/deployments/:name/warm` | `{ "replicas": N, "untilMinutes": M }`: keep N replicas up for M minutes (≤ 720) whatever the load — a class about to start; `park` ends it (admin) |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>` |
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |
 | PUT / DELETE | `/v1/profiles/:name` | store / delete your own profile (same fields as a spec) |
@@ -163,6 +164,36 @@ one L40S were 15 hedge losers counted as connection failures, plus health checks
 replaced twice, 9 min of boot each. Safety: price
 checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS` across all deployments, back-off after a
 failed create (1 → 10 min). More cost guards below.
+
+## Pressure autoscaling (`autoscale.ts`, `controller-autoscale.ts`)
+
+A GPU replica boots in 8–9 min, so the controller scales on pressure, early, and keeps the overflow off the GPU:
+
+- **Signals** per deployment: load (in flight + waiting + requests refused for lack of capacity, peak of the last 60 s),
+  p95 latency of the requests the replicas answered, and the share that timed out or got a 429 (last 60 s, ≥ 5 samples).
+- **Scale-out** when load passes `autoscale.scaleOutAt` (0.75) of `targetInflightPerReplica` × live replicas, or p95 /
+  errors pass `autoscale.latencyP95Ms` (off by default) / `autoscale.errorRate` (0.1), for `autoscale.windowSeconds` (20)
+  in a row — one step per window. Booting replicas count as capacity: latency and errors (which measure the ready ones)
+  ask nothing more while one boots; only load beyond ready + booting capacity does.
+- **Scale-in** only when the load fits one replica fewer at `autoscale.scaleInAt` (0.5) — hysteresis, no flapping —
+  then after `scaleDownDelaySeconds`, never below `minActiveReplicas` while active. A surplus replica with requests in
+  flight is **drained**: no new request, released once empty or after `autoscale.drainSeconds` (120).
+- **Overflow**: a replica takes at most `targetInflightPerReplica` × `autoscale.maxInflightFactor` (1.5); with every ready
+  replica full, a request with a fallback spills to it at once (`X-Gateway-Fallback: saturated`, neutral for breakers)
+  instead of queueing on the GPU until a timeout; an invoke (no fallback) waits in the gateway for a free slot.
+- **Warm-up**: `warmSchedule: [{ "days": [1,2,3,4,5], "start": "08:50", "end": "12:00", "timeZone": "Europe/Paris",
+  "minReplicas": 2 }]` keeps replicas up in those windows (days 0 = Sunday, overnight windows allowed), and `POST …/warm`
+  does the same for one window on demand. Expired windows fall back to the normal rules.
+- **Caps without starvation**: when the replica cap or the € ceiling blocks a deployment under pressure, the controller
+  takes a replica of another deployment that has been idle (no answered request and no request to its deployment) for
+  3 min, above its own floor; that deployment then counts as idle until its next request (no ping-pong).
+- **Explained**: every view carries `autoscale: { desired, pressureWant, reason, blockedBy, floor, load, p95Ms,
+  errorRate }` (e.g. `reason: "load 16 > 75% of 2×8 (at maxReplicas 2)"`, `blockedBy: "maxReplicas 2"`), logged when it changes.
+
+Simulation bench: `bun scripts/autoscale-sim/run.ts [scenario…]` runs the real controller on a virtual clock (9 min boots,
+LLM slow-down past 8 parallel, health check timing out at 12, hedge 1.5 s → fallback 1.2 s) and prints the timelines;
+`__tests__/unit/deployments/autoscale-sim.test.ts` asserts them (ramp, spike, flapping, drain, crash, contention,
+schedule, warm). The 75 % / 50 % / 20 s / 1.5× defaults are design choices to pilot, not published values.
 
 ## Cost guards (gateway-wide)
 

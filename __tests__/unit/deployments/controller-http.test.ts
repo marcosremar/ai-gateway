@@ -103,6 +103,18 @@ describe('deployments API', () => {
     expect(admin.health).toMatchObject({ deployments: 3, replicas: 3, running: 3, eurPerHour: 0.03 });
   });
 
+  it('POST /v1/deployments/:name/warm: admin pre-warm window, validated, shown in the view with the autoscale reason', async () => {
+    await call(h, 'PUT', '/v1/deployments/class', { profile: 'cpu-echo', maxReplicas: 2 }, ADMIN, AS_SITE);
+    expect((await call(h, 'POST', '/v1/deployments/class/warm', { replicas: 2, untilMinutes: 30 }, SITE)).status).toBe(403);
+    expect((await call(h, 'POST', '/v1/deployments/class/warm', { replicas: 7, untilMinutes: 30 })).status).toBe(400);
+    const res = await call(h, 'POST', '/v1/deployments/class/warm', { replicas: 2, untilMinutes: 30 });
+    expect(res.status).toBe(202);
+    expect(((await res.json()) as { warm: { replicas: number } }).warm.replicas).toBe(2);
+    await until(() => h.cloud.created.length === 2);
+    const view = await (await call(h, 'GET', '/v1/deployments/class')).json() as { autoscale: { floor: number; desired: number } };
+    expect(view.autoscale).toMatchObject({ floor: 2, desired: 2 });
+  });
+
   it('lists built-in profiles and stores new ones', async () => {
     const names = ((await (await call(h, 'GET', '/v1/profiles')).json()) as { profiles: { name: string }[] }).profiles.map(p => p.name);
     expect(names).toEqual(expect.arrayContaining(['qwen3-tts', 'qwen3-tts-clone', 'cpu-echo']));

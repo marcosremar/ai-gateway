@@ -1,5 +1,5 @@
 /**
- * DeploymentController, part 2 of 6 — replica lifecycle: create (placement ladder, € ceiling, back-off), release (and
+ * DeploymentController, part 2 of 7 — replica lifecycle: create (placement ladder, € ceiling, back-off), release (and
  * the release of a create that outlived its deployment), probe (readiness + the RTT gate), and an exposed deployment's
  * reserved network. See controller-state.ts for the layout of the parts.
  */
@@ -23,8 +23,9 @@ export abstract class ReplicaLifecycle extends ControllerState {
     if (!(await this.rttGate(rt, m))) return; // still measuring, or released as too far
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
     const result = await this.checkReplica(rt, m);
+    if (result === 'down') p.downSince ??= this.now(); else delete p.downSince;
     if (result === 'ready') {
-      p.readyAt ??= Date.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
+      p.readyAt ??= this.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
     } else if (result === 'busy' && p.everReady && ((rt.perReplica.get(m.id) ?? 0) > 0 || this.servedRecently(p))) {
       // Alive (its front answers) and working: the health check queued behind the work. Keep it serving what it can.
       p.busy = true;

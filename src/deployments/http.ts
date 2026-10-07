@@ -351,6 +351,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
     if (action === 'wake' && method === 'POST') { admin(); return send(res, 202, controller.wake(name)); }
     if (action === 'park' && method === 'POST') { admin(); return send(res, 202, await controller.park(name)); }
+    if (action === 'warm' && method === 'POST') {
+      admin();
+      const body = await readJson(req);
+      return send(res, 202, await controller.warm(name, body.replicas as number, body.untilMinutes as number));
+    }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 
     const existing = controller.get(name);

@@ -96,6 +96,10 @@ export interface DeploymentSpec {
   minActiveReplicas: number;
   /** In-flight requests one replica should carry before another is added. */
   targetInflightPerReplica: number;
+  /** Pressure-based autoscaling knobs (scale-out threshold, window, latency / error targets, overflow, drain). */
+  autoscale?: AutoscaleSpec;
+  /** Warm-up windows: keep N replicas up on a schedule (a class at 9:00), whatever the load. */
+  warmSchedule?: WarmScheduleEntry[];
   /** With no request for this long the deployment scales down to `minReplicas` (0 = scale to zero). */
   idleMinutes: number;
   /** A replica not ready after this long is replaced. */
@@ -173,6 +177,31 @@ export interface DeploymentRecord {
   appImage?: string;
   /** Exposed deployments: reserved IP and firewall, created with the first replica and deleted with the deployment. */
   network?: DeploymentNetwork;
+  /** Client warm window (`POST /v1/deployments/:name/warm`): keep `replicas` up until `until` (ms). */
+  warm?: { replicas: number; until: number };
+}
+
+/**
+ * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default UTC; an `end`
+ * before `start` runs past midnight) on `days` (0 = Sunday; absent = every day), keep at least `minReplicas` up.
+ */
+export interface WarmScheduleEntry {
+  days?: number[];
+  start: string;
+  end: string;
+  timeZone?: string;
+  minReplicas: number;
+}
+
+/** Pressure-based autoscaling knobs (`autoscale.ts`); every one optional, defaults in `AUTOSCALE_DEFAULTS`. */
+export interface AutoscaleSpec {
+  scaleOutAt?: number;
+  scaleInAt?: number;
+  windowSeconds?: number;
+  latencyP95Ms?: number;
+  errorRate?: number;
+  maxInflightFactor?: number;
+  drainSeconds?: number;
 }
 
 export type ReplicaPhase = 'booting' | 'ready' | 'unhealthy' | 'halted';
@@ -280,6 +309,8 @@ export interface ReplicaView {
   inflight: number;
   /** Ready but saturated (health check timed out while it had work): no new request beyond its target. */
   busy: boolean;
+  /** Being drained before a scale-in: no new request; released once empty or after `autoscale.drainSeconds`. */
+  draining: boolean;
   /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
   rttMs: number | null;
   /** Minutes until the provider takes the host back (Vast); null when it never does. */
@@ -305,4 +336,11 @@ export interface DeploymentView {
   publicIp: string | null;
   /** Where the last replica landed and why earlier candidates were skipped (null before the first create). */
   lastPlacement: string | null;
+  /** Why the deployment has the replica count it has: pressure, floor, what blocks a scale-out (`autoscale.ts`). */
+  autoscale: {
+    desired: number; pressureWant: number; reason: string; blockedBy: string | null; floor: number;
+    load: number; p95Ms: number | null; errorRate: number;
+  };
+  /** Client warm window in force (`POST …/warm`), or null. */
+  warm: { replicas: number; until: string } | null;
 }

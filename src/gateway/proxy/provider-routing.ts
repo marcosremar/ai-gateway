@@ -348,12 +348,13 @@ class AttemptError extends Error {
 }
 
 /**
- * Failures that say nothing about the provider's health: a deployment still booting (`cold`), paused, a request it
+ * Failures that say nothing about the provider's health: a deployment still booting (`cold`) or at capacity
+ * (`saturated`: the overflow spills to the fallback while it scales out), paused, a request it
  * must not receive (`voice_not_found`, `catalog_unavailable`), or a model the account's data policy refuses (`policy`:
  * one OpenRouter model refused under ZDR must not open the breaker shared by every OpenRouter model). They never open the circuit nor start a cooldown, so
  * traffic goes back to the deployment as soon as its replica is ready.
  */
-const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation']);
+const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation', 'saturated']);
 
 /** Default total time per stage (deployment + fallbacks), under parle's deadlines (TTS 15 s, chat 12 s). */
 export const DEFAULT_STAGE_BUDGET_MS = 8_000;

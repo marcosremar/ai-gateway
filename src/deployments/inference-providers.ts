@@ -38,7 +38,8 @@ class DeploymentCallError extends Error {
   readonly skipRetry: boolean;
   constructor(readonly status: number, message: string, readonly gatewayCode: string) {
     super(message);
-    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable'].includes(gatewayCode);
+    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable', 'saturated']
+      .includes(gatewayCode);
   }
 }
 
@@ -55,6 +56,8 @@ async function callReplica(
     if (!(err instanceof DeploymentError)) throw err;
     if (err.status === 404) throw new DeploymentCallError(404, err.message, 'not_found');
     if (err.status === 409) throw new DeploymentCallError(503, err.message, 'paused');
+    // Every ready replica at capacity: spill this request to the fallback now (the replicas keep what they serve).
+    if (err.code === 'saturated') throw new DeploymentCallError(503, err.message, 'saturated');
     // No ready replica (scaled to zero / booting): make sure it is scaling up, and let the chain fall back now.
     if (noWake) recordNoWakeSkip();
     else try { controller.wake?.(name); } catch { /* deployment vanished meanwhile */ }
@@ -79,7 +82,8 @@ async function callReplica(
     throw new DeploymentCallError(timedOut ? 504 : 502, `deployment '${name}': replica ${timedOut ? 'timed out' : 'unreachable'}`,
       timedOut ? 'timeout' : 'unreachable');
   }
-  lease.done(false);
+  // A 429 is the replica's own queue full: pressure for the autoscaler and a busy mark, never a strike.
+  lease.done(res.status === 429 ? 'overloaded' : false);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     // Any replica error moves on to the fallback (a 4xx from our own server is a deployment problem, not the
