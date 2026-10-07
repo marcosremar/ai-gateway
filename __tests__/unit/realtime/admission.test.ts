@@ -140,4 +140,17 @@ describe('POST /v1/realtime/sessions', () => {
     expect((await gw.create({ transports: ['webrtc'] })).status).toBe(400);
     expect((await gw.create({ config: CONFIG, transports: ['carrier-pigeon'] })).status).toBe(400);
   });
+
+  it('refuses a config without voice (the edge would fail mid-turn with "upstream")', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const { voice: _voice, ...noVoice } = CONFIG;
+    const res = await gw.create({ config: noVoice });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: { code: 'invalid_request' } });
+    expect((await gw.create({ config: { ...noVoice, voice: '' } })).status).toBe(400);
+    expect((await gw.create({ config: { ...noVoice, voice: { audio: 'a.wav' } } })).status).toBe(400);
+    expect((await gw.create({ config: { ...noVoice, voice: { audio: 'a.wav', text: 'ola' } } })).status).toBe(200);
+    expect((await gw.create({ config: CONFIG })).status).toBe(200);
+  });
 });

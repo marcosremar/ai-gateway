@@ -248,6 +248,16 @@ export class RealtimeService {
     if ('error' in ordered) return sendJson(res, 400, errorBody(ordered.error, 'invalid_request'));
 
     const cfgIn = config as Record<string, unknown>;
+    const voice = cfgIn.voice;
+    const voiceOk =
+      (typeof voice === 'string' && voice.trim().length > 0) ||
+      (typeof voice === 'object' && voice !== null && !Array.isArray(voice) &&
+        !!(voice as Record<string, unknown>).audio && !!(voice as Record<string, unknown>).text);
+    if (!voiceOk) {
+      return sendJson(res, 400, errorBody(
+        'session config needs "voice" (a catalog voice id or {audio, text}): without it the edge only fails mid-turn',
+        'invalid_request'));
+    }
     const dep = (typeof cfgIn.deployment === 'string' && cfgIn.deployment.trim()) || this.opts.defaultDeployment || '';
     const controller = this.opts.controller;
     const admin = this.opts.isAdmin(userId);

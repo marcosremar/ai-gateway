@@ -9,7 +9,7 @@ import { startGateway, type TestGateway } from './_gateway';
 import { deriveRealtimeKey, signSessionToken } from '../../../src/realtime';
 import { REPLICA_TOKEN } from './_fakes';
 
-const CONFIG = { system: 'Tu es Lia.', deployment: 'speech' };
+const CONFIG = { system: 'Tu es Lia.', voice: 'lia', deployment: 'speech' };
 const OFFER = 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n';
 
 async function session(gw: TestGateway): Promise<{ sessionId: string; token: string; transports: Array<Record<string, string>> }> {

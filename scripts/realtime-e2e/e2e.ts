@@ -238,9 +238,11 @@ try {
     headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}), ...extra },
   });
   check('no key → 401', (await admit(null)).status === 401);
-  const other = await admit('key-other', { config: { deployment: DEP } });
+  const other = await admit('key-other', { config: { ...LESSON_CONFIG, deployment: DEP } });
   check("another app's key → 403", other.status === 403, other.status);
-  const ok = await admit('key-parle', { config: { system: 'Você é a padeira.', messages: [] } });
+  const noVoice = await admit('key-parle', { config: { system: 'x', deployment: DEP } });
+  check('config without voice → 400 invalid_request', noVoice.status === 400, noVoice.status);
+  const ok = await admit('key-parle', { config: LESSON_CONFIG });
   const desc = await ok.json() as { sessionId: string; token: string; transports: Array<{ type: string }>; limits: unknown };
   check('app key → 200 with webrtc + ws + s2s-stream + post', ok.status === 200
     && ['webrtc', 'ws', 's2s-stream', 'post'].every(t => desc.transports.some(x => x.type === t)), desc.transports.map(t => t.type));
@@ -348,17 +350,17 @@ try {
 
   // ── 8. cold deployment: no-wake keeps it cold, a plain request wakes it ─────────────────────────────────────
   await controller.put('speech-cold', { profile: 'speech-stack', minReplicas: 0, maxReplicas: 1, realtime: { maxSessions: MAX_SESSIONS } }, { app: 'parle' });
-  const nw = await admit('key-parle', { config: { deployment: 'speech-cold' } }, { 'X-Gateway-No-Wake': '1' });
+  const nw = await admit('key-parle', { config: { ...LESSON_CONFIG, deployment: 'speech-cold' } }, { 'X-Gateway-No-Wake': '1' });
   const nwBody = await nw.json() as Record<string, unknown>;
   await sleep(1_500);
   check('cold + X-Gateway-No-Wake: 503 cold, no machine created', nw.status === 503 && (controller.get('speech-cold')?.replicas.length ?? 0) === 0, { status: nw.status, body: nwBody });
-  const wake = await admit('key-parle', { config: { deployment: 'speech-cold' } });
+  const wake = await admit('key-parle', { config: { ...LESSON_CONFIG, deployment: 'speech-cold' } });
   check('cold without no-wake: 503 cold now…', wake.status === 503, wake.status);
   await until('the cold deployment woken', () => (controller.get('speech-cold')?.replicas ?? []).some(r => r.phase === 'ready'), 60_000);
   const coldRep = controller.get('speech-cold')!.replicas.find(r => r.phase === 'ready')!.id;
   await cloud.edgeReady(coldRep);
   await sleep(2_500);
-  const warm = await admit('key-parle', { config: { deployment: 'speech-cold' } });
+  const warm = await admit('key-parle', { config: { ...LESSON_CONFIG, deployment: 'speech-cold' } });
   check('…and admitted once the woken replica is ready', warm.status === 200, warm.status);
 } catch (err) {
   exitCode = 1;
