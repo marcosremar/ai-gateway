@@ -41,7 +41,7 @@ MAX_BATCH_BYTES = 64 * 1024
 MAX_ATTRS = 32
 MAX_ATTR_STRING = 200
 LEVELS = ("debug", "info", "warn", "error")
-EVENT_NAME = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_-]+)+$")
+EVENT_NAME = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_-]+)*$")
 TRACE_ID = re.compile(r"^(?!0{32})[0-9a-f]{32}$")
 TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$")
 

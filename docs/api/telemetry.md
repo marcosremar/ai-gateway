@@ -26,8 +26,10 @@ Code: `src/telemetry/` (server), `sdk/browser/telemetry/` (browser emitter), `sd
 ```
 
 - `ts` ms epoch by the source's clock; the gateway also stores `rxTs` (its receive time) and a `seq` (cursor).
-- `source`: `browser` | `gateway` | `edge` | `model`. `level`: `debug` | `info` | `warn` | `error`.
-- `event`: dotted lowercase (`^[a-z0-9_]+(\.[a-z0-9_-]+)+$`, ≤ 64 chars).
+- `source`: `browser` | `gateway` | `edge` | `model` | `app` (a server app such as the parle backend, reporting with
+  its app key). `level`: `debug` | `info` | `warn` | `error`.
+- `event`: lowercase, dot-separated (`^[a-z0-9_]+(\.[a-z0-9_-]+)*$`, ≤ 64 chars; `error` alone is valid). Names
+  outside the catalogue below are accepted: the catalogue is documentation, not validation.
 - `attrs`: ≤ 32 scalar values (`string` ≤ 200 chars, finite number, boolean, null).
 - Zod schema: `src/telemetry/schema.ts` (`TelemetryEventSchema`); the dependency-free type and limits:
   `src/telemetry/contract.ts` (what the emitters import).
@@ -63,7 +65,7 @@ The route authenticates itself (mounted ahead of the proxy key check, `publicRou
 
 | caller | header | stamped by the gateway |
 |---|---|---|
-| server app (e.g. parle backend) | `Authorization: Bearer <app key>`; refused when `Origin` or `Sec-Fetch-Site` is present (a key never sits in a page) and for the SANDBOX_TOKEN family | `app`; `source` as sent (`browser`/`edge`/`model`; `gateway` is reserved) |
+| server app (e.g. parle backend) | `Authorization: Bearer <app key>`; refused when `Origin` or `Sec-Fetch-Site` is present (a key never sits in a page) and for the SANDBOX_TOKEN family | `app`; `source` as sent (`app`/`browser`/`edge`/`model`; `gateway` is reserved) |
 | browser | `Authorization: Bearer <realtime session token>`, or `"token"` in the body for `navigator.sendBeacon` (sent as `text/plain`, no preflight). Accepted up to 120 s after `exp` so the `pagehide` flush lands | `source:"browser"`, `sessionId`, `app`, `deployment`, `replicaId` from the token |
 | edge | `Authorization: Bearer <hex HMAC-SHA256(key=replicaToken, msg="aigw-telemetry-v1")>` + `X-Aigw-Replica: <replicaId>` | `source:"edge"` (or `"model"`), `deployment`, `replicaId`, `app` |
 
@@ -78,6 +80,58 @@ another deployment.
 Rate limit: token bucket per credential (app / session / replica), `TELEMETRY_RATE_PER_MIN` events per minute (default
 1200); exhausted → 429 + `Retry-After`. Debug events are kept for `TELEMETRY_DEBUG_SAMPLE` of traces (default 0 = none),
 decided per trace so a sampled trace is complete.
+
+## Contract rules (accepted 2026-10-07)
+
+1. **Session-token grace:** a realtime session token is accepted until 120 s after `exp`, so the `pagehide` flush
+   lands; older → 401 `session_expired`.
+2. **Beacon:** `navigator.sendBeacon` cannot set headers, so the session token may ride in the body
+   (`{"token":"…","events":[…]}`), sent as `text/plain` (no CORS preflight).
+3. **App keys are server-to-server:** refused (403 `browser_app_key`) when the request has `Origin` or
+   `Sec-Fetch-Site` (Node and Bun `fetch` send neither); the SANDBOX_TOKEN family is always refused (403 `master_key`).
+4. **Source per credential:** session token → always `browser`; edge → `edge` or `model`; app key → `app`, `browser`,
+   `edge` or `model` as sent; `gateway` only from the gateway itself.
+5. **Clock sanity:** a source `ts` more than 24 h from the receive time is replaced by it and flagged
+   `attrs.clockReplaced = true`.
+6. **Debug sampling** (`TELEMETRY_DEBUG_SAMPLE`) is decided per trace (from the trace id), so a sampled trace is complete.
+7. **Scrubber details:** a sensitive key with a number/boolean/null value is kept (only string values are dropped);
+   credential-looking strings are dropped, including any run of 40+ `[A-Za-z0-9_-]` characters without spaces; IPs
+   are kept only as a salted hash (`TELEMETRY_IP_SALT`, random per process when unset).
+
+## Event catalogue (canonical names)
+
+Unknown names are still accepted; these are the names the components emit.
+
+**Browser** (source `browser`, realtime SDK):
+
+| event | when / useful fields |
+|---|---|
+| `rt.session.admitted` / `rt.session.rejected` | admission answered (`durMs`; rejected: `code`) |
+| `rt.ladder.try` / `rt.ladder.ok` / `rt.ladder.fallback` | transport ladder step tried / connected / given up for the next (`from`, `to`, `reason`) |
+| `rt.ice.state` / `rt.ice.failed` | ICE state changes / failure (`state`, `candidateType`) |
+| `rt.turn.used` | TURN relay in use |
+| `vad.segment` | the browser VAD closed a segment (`durMs`, `speechMs`) |
+| `turn.first_audio` | first reply audio of a turn (`durMs` from end of speech; `turnId`) |
+| `turn.done` | turn finished (`durMs`, outcome code) |
+| `ws.close` | WebSocket closed (`code`) |
+| `error` | client error (name/code only; the emitter's opt-in `captureErrors` reports window errors as `browser.error`) |
+
+**Edge** (source `edge`, aigw-edge sidecar in each replica):
+
+| event | when / useful fields |
+|---|---|
+| `edge.session.open` / `edge.session.close` | session lifecycle on the replica |
+| `edge.capacity.reject` | session refused: replica full |
+| `edge.ice.state` | ICE state on the replica side |
+| `edge.ws.close` | relay WebSocket closed (`code`) |
+| `edge.stt.done` (attr `filtered` when the STT filter hit) | transcription of a turn (`durMs`, `textLen`) |
+| `edge.llm.first_token` | first LLM token (`durMs`) |
+| `edge.tts.first_audio` | first TTS audio (`durMs`) |
+| `edge.turn.done` | end-to-end turn on the replica (`durMs`) |
+| `edge.upstream.error` | model server error (`code`, `status`) |
+| `edge.load` | every 30 s: sessions, inflight, GPU utilisation |
+
+**Gateway** (source `gateway`): the table below.
 
 ## Gateway events (source `gateway`)
 
@@ -146,7 +200,8 @@ Flush every 5 s or at 50 events; on `pagehide`/hidden: `sendBeacon` (token in th
 Queue bounded (500, oldest dropped, reported as one `telemetry.dropped` event). 429/5xx/network keep the batch; other
 4xx drop it. Never throws.
 
-Server app: `createServerTelemetry({ endpoint, apiKey, source: 'browser' | 'edge' | 'model' })` (`sdk/node`).
+Server app: `createServerTelemetry({ endpoint, apiKey })` (`sdk/node`); `source` defaults to `app`, and may be
+`browser` / `edge` / `model` when the app relays what it observed.
 
 Edge (Python): `TelemetryEmitter(gateway_url, replica_id, replica_token)`; `trace_id_from_traceparent(header)` reads
 the trace the gateway propagated.
@@ -156,15 +211,17 @@ the trace the gateway propagated.
 1. Get an id. From the student's report: the session id the app shows/logs, or the `X-Aigw-Trace-Id` of any gateway
    response in the app's logs. From the fleet: `GET /v1/telemetry/events?level=error&since=2h` → `sessionId` /
    `traceId` of the failing events.
-2. Rebuild it: `GET /v1/telemetry/timeline?sessionId=<sid>`. Read top to bottom: browser `rt.session.request` →
-   gateway `route.*` / admission → browser `rt.ice.*` / `rt.ladder.*` → edge `vad.segment` → model `stt.*` →
-   gateway `stt.filtered` → edge `turn.done`, per `turnId`.
+2. Rebuild it: `GET /v1/telemetry/timeline?sessionId=<sid>`. Read top to bottom: browser `rt.session.admitted` →
+   `rt.ladder.try/ok/fallback`, `rt.ice.state` → edge `edge.session.open` → per `turnId`: browser `vad.segment` →
+   edge `edge.stt.done` → `edge.llm.first_token` → `edge.tts.first_audio` → browser `turn.first_audio` →
+   `edge.turn.done` / `turn.done`; gateway `route.*` and `stt.filtered` for HTTP fallbacks in the same trace.
 3. Check `clocks` before trusting order across sources: a browser with a median lag of 40 s has a wrong clock (or a
    tab that slept) — order its events by `rxTs`.
 4. Locate the hop: the last `info` before the first `warn`/`error`, and the `durMs` that is out of line (compare with
-   `GET /v1/telemetry/summary?since=24h&groupBy=event&event=turn.done`).
+   `GET /v1/telemetry/summary?since=24h&groupBy=event&event=edge.*`).
 5. Is it this student or the fleet? Same event grouped by replica / deployment / app:
-   `GET /v1/telemetry/summary?since=24h&groupBy=replicaId&event=rt.ice.failed`. One replica concentrating failures →
+   `GET /v1/telemetry/summary?since=24h&groupBy=replicaId&event=rt.ice.failed` (plus `edge.load` /
+   `edge.capacity.reject` of that replica). One replica concentrating failures →
    look at its `replica.*` lifecycle events (`?replicaId=…&event=replica.*`) and its autoscale decisions; spread over
    every replica → client network / TURN; one app → that app's integration.
 6. Compare with the gateway's own decisions in the same trace (`route.fallback`, `route.hedge`, `breaker.open`): a

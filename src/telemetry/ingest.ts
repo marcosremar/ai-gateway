@@ -8,7 +8,7 @@
  * Stamping (the credential wins over the body):
  *   session → source `browser`; `sessionId`, `app`, `deployment`, `replicaId` from the token;
  *   edge    → source `edge` (or `model`, which the edge relays); `deployment`, `replicaId`, `app` from the replica;
- *   app key → `app` from the key; source `browser` | `edge` | `model` as sent (`gateway` is reserved to the gateway).
+ *   app key → `app` from the key; source `app` | `browser` | `edge` | `model` as sent (`gateway` is reserved).
  */
 
 import { TELEMETRY_LIMITS, type StoredTelemetryEvent, type TelemetryEvent, type TelemetrySource } from './contract';

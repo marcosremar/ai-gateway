@@ -132,6 +132,13 @@ describe('telemetry ingest', () => {
     expect(fromEdge).toMatchObject({ source: 'edge', sessionId: 's-1' });
   });
 
+  it('accepts source "app" from an app key (forced to browser for sessions) and single-segment names like "error"', () => {
+    const { store, ingest } = setup();
+    ingest.ingest(app, { events: [ev({ source: 'app', event: 'lesson.started' }), ev({ event: 'error', level: 'error' })] }, 100);
+    ingest.ingest(session, { events: [ev({ source: 'app' })] }, 100);
+    expect(store.rows().map(r => [r.source, r.event])).toEqual([['app', 'lesson.started'], ['browser', 'error'], ['browser', 'rt.ice.connected']]);
+  });
+
   it('reserves source "gateway" to the gateway itself', () => {
     const { store, ingest } = setup();
     const r = ingest.ingest(app, { events: [ev({ source: 'gateway' })] }, 100);

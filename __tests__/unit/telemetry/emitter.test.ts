@@ -159,6 +159,10 @@ describe('node server telemetry', () => {
     const t = createServerTelemetry({ endpoint: 'https://gw.test', apiKey: 'app-key', source: 'model', fetch: f.fn, flushOnExit: false });
     t.emit('turn.done', { sessionId: 's-9', durMs: 2300 });
     await t.close();
+    const own = createServerTelemetry({ endpoint: 'https://gw.test', apiKey: 'app-key', fetch: f.fn, flushOnExit: false });
+    own.emit('lesson.started');
+    await own.close();
+    expect(f.bodies()[1]![0]).toMatchObject({ source: 'app', event: 'lesson.started' });
     expect(f.calls[0]!.init.headers.Authorization).toBe('Bearer app-key');
     expect(f.bodies()[0]![0]).toMatchObject({ source: 'model', sessionId: 's-9', durMs: 2300 });
   });

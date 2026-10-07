@@ -13,7 +13,8 @@
  * Lengths, counts, durations, codes only. The server scrubber (scrub.ts) enforces it on every attribute.
  */
 
-export const TELEMETRY_SOURCES = ['browser', 'gateway', 'edge', 'model'] as const;
+/** `app` = a server app reporting with its app key (e.g. the parle backend). `gateway` is reserved to the gateway. */
+export const TELEMETRY_SOURCES = ['browser', 'gateway', 'edge', 'model', 'app'] as const;
 export type TelemetrySource = typeof TELEMETRY_SOURCES[number];
 
 export const TELEMETRY_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
@@ -29,7 +30,7 @@ export interface TelemetryEvent {
   ts: number;
   source: TelemetrySource;
   level: TelemetryLevel;
-  /** Dotted lowercase name, e.g. `rt.ladder.fallback`, `rt.ice.failed`, `vad.segment`, `stt.filtered`, `turn.done`. */
+  /** Dotted lowercase name, e.g. `rt.ladder.fallback`, `edge.turn.done`, `stt.filtered` (catalogue: docs/api/telemetry.md). */
   event: string;
   /** W3C trace id: 32 lowercase hex, not all zeros. */
   traceId: string;
@@ -80,7 +81,8 @@ export const TELEMETRY_LIMITS = {
 /** Attribute keys that name content: a STRING value under such a key is dropped (scrub.ts, and the emitters). */
 export const TELEMETRY_SENSITIVE_KEY = /text|transcript|prompt|content|audio|token|key|secret|authorization/i;
 
-export const TELEMETRY_EVENT_NAME = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/;
+/** Lowercase, dot-separated segments (`rt.ladder.fallback`); a single segment (`error`) is valid too. */
+export const TELEMETRY_EVENT_NAME = /^[a-z0-9_]+(\.[a-z0-9_-]+)*$/;
 export const TELEMETRY_TRACE_ID = /^(?!0{32})[0-9a-f]{32}$/;
 export const TELEMETRY_ID = /^[A-Za-z0-9._:@-]{1,128}$/;
 
