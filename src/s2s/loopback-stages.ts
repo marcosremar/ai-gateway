@@ -112,10 +112,12 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
         form.set('model', models.stt);
         if (cfg.language) form.set('language', LANGUAGE_NAMES[cfg.language.slice(0, 2)] ?? cfg.language.slice(0, 2));
         if (cfg.stt_prompt) form.set('prompt', cfg.stt_prompt);
+        if (cfg.filter_hallucinations === false) form.set('filter_hallucinations', 'false');
         const res = await f(`${opts.baseUrl}/v1/audio/transcriptions`, { method: 'POST', headers: auth, body: form, signal });
         if (!res.ok) throw await failure('stt', res);
         const payload = await res.json() as { text?: string };
-        return { ...served(res), text: payload.text ?? '' };
+        const filtered = res.headers.get('x-stt-filtered');
+        return { ...served(res), text: payload.text ?? '', ...(filtered ? { filtered: filtered.split(',') } : {}) };
       }, signal);
     },
 

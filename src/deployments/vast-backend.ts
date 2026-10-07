@@ -45,6 +45,14 @@ const defaultRtt: RttMeasure = async (host, port) => (await probeRtt(host, [port
 /** Offers tried per create (a rented-in-between offer answers "not available"); more would only slow the walk. */
 export const MAX_RENT_TRIES = 5;
 
+/** The instance list is reused this long: a reconcile kick storm must not become a request storm (Vast rate-limits it). */
+export const LIST_CACHE_MS = 5_000;
+/** While Vast rate-limits the list, the last good inventory is served this long, then the list fails (honestly). */
+export const LIST_STALE_MAX_MS = 90_000;
+/** Pause after a 429/5xx on the list when Vast gives no `retry_after`: doubles per consecutive failure, up to the max. */
+export const LIST_BACKOFF_MS = 15_000;
+export const LIST_BACKOFF_MAX_MS = 120_000;
+
 export const vastLabelPrefix = (namespace: string) => `aigw:${namespace}:`;
 
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -83,7 +91,16 @@ export function vastState(status: string | null | undefined): string {
 }
 
 export class VastApiError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  constructor(readonly status: number, message: string, readonly retryAfterMs?: number) { super(message); }
+}
+
+/** `Retry-After` (seconds) header or `retry_after` (seconds) in the JSON body, as ms. */
+function retryAfterOf(res: Response, text: string): number | undefined {
+  let seconds = Number(res.headers?.get?.('retry-after'));
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    try { seconds = Number((JSON.parse(text) as { retry_after?: unknown }).retry_after); } catch { seconds = NaN; }
+  }
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 600) * 1000 : undefined;
 }
 
 export class VastDeploymentBackend implements DeploymentBackend {
@@ -96,6 +113,10 @@ export class VastDeploymentBackend implements DeploymentBackend {
   private readonly badHosts = new Map<number, number>();
   /** instance id → host machine_id (from create and list). */
   private readonly hostOf = new Map<string, number>();
+  /** Last good `/instances/` answer (briefly reused, and served while Vast rate-limits). */
+  private listCache: { at: number; machines: ReplicaMachine[]; namespace: string } | null = null;
+  private listBackoffUntil = 0;
+  private listFailures = 0;
 
   constructor(private readonly apiKey: string, opts: { fetch?: FetchLike; now?: () => number; rtt?: RttMeasure } = {}) {
     this.fetchImpl = opts.fetch ?? ((url, init) => fetch(url, init));
@@ -111,7 +132,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       signal: AbortSignal.timeout(30_000),
     });
     const text = await res.text();
-    if (!res.ok) throw new VastApiError(res.status, `vast ${method} ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
+    if (!res.ok) throw new VastApiError(res.status, `vast ${method} ${path}: HTTP ${res.status} ${text.slice(0, 200)}`, retryAfterOf(res, text));
     return (text ? JSON.parse(text) : {}) as T;
   }
 
@@ -185,7 +206,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         });
         if (!res.success || res.new_contract == null) throw new Error(`not available: ${res.error ?? res.msg ?? 'success=false'}`);
         const id = String(res.new_contract);
-        input.onCreated?.(id);
+        input.onCreated?.(id); // the cached list lacks it; the controller keeps a fresh create until a list shows it
         if (offer.machine_id !== undefined) this.hostOf.set(id, offer.machine_id);
         return {
           id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast',
@@ -202,7 +223,36 @@ export class VastDeploymentBackend implements DeploymentBackend {
     throw new Error(`out_of_stock: every vast offer tried was taken (${misses.join('; ')})`);
   }
 
+  /**
+   * Instance list with a short cache and a back-off. A 429/5xx (Vast answered many of them in prod, 2026-10-06) pauses
+   * list calls for its `retry_after` (else 15 s doubling to 2 min); meanwhile the last good inventory is served for up
+   * to `LIST_STALE_MAX_MS`, and past that the list fails so the controller knows it is blind.
+   */
   async listReplicas(namespace: string): Promise<ReplicaMachine[]> {
+    const now = this.now();
+    const cached = this.listCache?.namespace === namespace ? this.listCache : null;
+    if (cached && now - cached.at < LIST_CACHE_MS) return cached.machines.map(m => ({ ...m }));
+    if (now < this.listBackoffUntil) {
+      if (cached && now - cached.at < LIST_STALE_MAX_MS) return cached.machines.map(m => ({ ...m }));
+      throw new VastApiError(429, `vast GET /instances/: backing off ${Math.ceil((this.listBackoffUntil - now) / 1000)}s after a rate limit`);
+    }
+    try {
+      const machines = await this.fetchReplicas(namespace);
+      this.listCache = { at: this.now(), machines, namespace };
+      this.listFailures = 0;
+      return machines.map(m => ({ ...m }));
+    } catch (err) {
+      if (err instanceof VastApiError && (err.status === 429 || err.status >= 500)) {
+        const wait = err.retryAfterMs ?? Math.min(LIST_BACKOFF_MS * 2 ** this.listFailures, LIST_BACKOFF_MAX_MS);
+        this.listBackoffUntil = this.now() + wait;
+        this.listFailures++;
+        if (cached && this.now() - cached.at < LIST_STALE_MAX_MS) return cached.machines.map(m => ({ ...m }));
+      }
+      throw err;
+    }
+  }
+
+  private async fetchReplicas(namespace: string): Promise<ReplicaMachine[]> {
     const { instances = [] } = await this.call<{ instances?: VastInstance[] }>('GET', '/instances/');
     const prefix = vastLabelPrefix(namespace);
     return instances.filter(i => i.label?.startsWith(prefix)).map((i) => {
@@ -235,6 +285,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       if (!(err instanceof VastApiError && err.status === 404)) throw err;
     }
     this.hostOf.delete(machine.id);
+    if (this.listCache) this.listCache.machines = this.listCache.machines.filter(m => m.id !== machine.id); // not listed again as alive
   }
 
   /** RTT from the gateway to the replica's nginx front (`ip` = public address:mapped port of :80). */

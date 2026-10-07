@@ -7,6 +7,7 @@
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from '../types';
 import { OPENAI_STT_MODELS } from './models';
+import { applyWhisperSegments } from '../stt-segments';
 import { prepareAudioFile } from '../openai-compat/audio-utils';
 
 export class OpenAISTTProvider implements STTProvider {
@@ -79,6 +80,7 @@ export class OpenAISTTProvider implements STTProvider {
       }));
     }
 
+    applyWhisperSegments(response, transcription);
     return response;
   }
 }

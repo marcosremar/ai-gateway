@@ -15,6 +15,7 @@ import { handleChatCompletions } from './routes/chat-completions';
 import { inferenceKindOf } from './app-limits';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
+import { sttFilterStats } from './routes/stt-filter';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
@@ -531,6 +532,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       sendResponse(res, { status: 200, body: {
         status: 'ok',
         connections: { active: activeConnections, peak: peakConnections },
+        sttFilter: sttFilterStats(),
         ...details,
       } }, requestId);
       return;

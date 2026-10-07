@@ -4,6 +4,7 @@ import type { AddressInfo } from 'net';
 import { DeploymentError } from '../../../src/deployments/controller';
 import { createS2SRoute } from '../../../src/s2s/route';
 import { loopbackStages } from '../../../src/s2s/loopback-stages';
+import { encodeEvent } from '../../../src/s2s/frames';
 import { decodeAll, fakeStages, replicaFrames, sleep, type FakeStagesOptions } from './_fakes';
 
 type ReplicaScript = (res: ServerResponse) => Promise<void>;
@@ -211,5 +212,61 @@ describe('POST /v1/s2s routing', () => {
     badConfig.set('config', '{not json');
     expect((await fetch(`http://${host}/v1/s2s`, { method: 'POST', body: badConfig })).status).toBe(400);
     expect(fake.calls).toEqual([]);
+  });
+});
+
+describe('POST /v1/s2s: STT hallucination filter on the primary transcript', () => {
+  const metaFrames = (heard: string, meta: Record<string, unknown>) => {
+    const frames = replicaFrames(heard, ['Resposta inventada.']);
+    frames[0] = encodeEvent({ type: 'transcript', text: heard, stt_ms: 10, at_ms: 10, ...meta }, 'binary');
+    return frames;
+  };
+
+  it('a blocklisted transcript ends the turn: empty transcript + filtered + done, no audio, lease healthy, no fallback', async () => {
+    const h = await harness({ replica: res => writeFrames(res, replicaFrames('E aí.', ['Oi, tudo bem?']))() });
+    const { events, audio } = decodeAll((await h.call()).bytes);
+    expect(events.map(e => e.type)).toEqual(['route', 'transcript', 'filtered', 'done']);
+    expect(events[1]).toMatchObject({ type: 'transcript', text: '' });
+    expect(events[2]).toMatchObject({ type: 'filtered', stage: 'stt', reasons: ['blocklist'], raw_length: 5 });
+    expect(events[3]).toMatchObject({ type: 'done', empty: true, filtered: true, reply: '' });
+    expect(JSON.stringify(events)).not.toContain('E aí');
+    expect(audio).toBe('');
+    expect(h.calls).toEqual([]); // the composed fallback is not triggered
+    expect(h.leases).toEqual([{ failed: false }]);
+  });
+
+  it('metadata in the transcript event (no_speech_prob…) is honoured', async () => {
+    const h = await harness({ replica: res => writeFrames(res, metaFrames('qualquer coisa', { no_speech_prob: 0.9, avg_logprob: -1.3, compression_ratio: 1 }))() });
+    const { events } = decodeAll((await h.call()).bytes);
+    expect(events.find(e => e.type === 'filtered')).toMatchObject({ reasons: expect.arrayContaining(['no_speech_prob']) });
+  });
+
+  it('a real answer passes through untouched', async () => {
+    const h = await harness({ replica: res => writeFrames(res, metaFrames('Bom dia', { no_speech_prob: 0.01, avg_logprob: -0.3, compression_ratio: 1 }))() });
+    const { events, audio } = decodeAll((await h.call()).bytes);
+    expect(events.map(e => e.type)).toEqual(['route', 'transcript', 'sentence', 'done']);
+    expect(audio).toBe('Resposta inventada.');
+  });
+
+  it('config.filter_hallucinations=false opts out (QA)', async () => {
+    const h = await harness({ replica: res => writeFrames(res, replicaFrames('E aí.', ['Oi!']))() });
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', JSON.stringify({ language: 'pt', filter_hallucinations: false }));
+    const { events } = decodeAll((await h.call('', form)).bytes);
+    expect(events.map(e => e.type)).toEqual(['route', 'transcript', 'sentence', 'done']);
+  });
+
+  it('the filtered turn also cancels a running hedge (no LLM/TTS spend)', async () => {
+    const h = await harness({ hedgeMs: 20, stages: { sttMs: 300 }, replica: async res => {
+      res.writeHead(200, { 'Content-Type': 'application/x-aigw-s2s' });
+      await sleep(80);
+      for (const f of replicaFrames('E aí.', ['x'])) res.write(f);
+      res.end();
+    } });
+    const { events } = decodeAll((await h.call()).bytes);
+    expect(events.some(e => e.type === 'filtered')).toBe(true);
+    expect(events.some(e => e.type === 'sentence')).toBe(false);
+    expect(h.calls.filter(c => c.stage === 'llm' || c.stage === 'tts')).toEqual([]);
   });
 });

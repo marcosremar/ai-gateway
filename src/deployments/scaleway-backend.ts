@@ -97,7 +97,26 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
   async listReplicas(namespace: string): Promise<ReplicaMachine[]> {
     const list = await this.client.listInstancesByTag(nsTag(namespace), this.credentials,
       this.opts.projectId ? { projectId: this.opts.projectId } : {});
-    return list.map(inst => toMachine(inst)).filter((m): m is ReplicaMachine => m !== null);
+    const machines = list.map(inst => toMachine(inst)).filter((m): m is ReplicaMachine => m !== null);
+    // The list does not carry the price (a replica adopted after a restart showed `null`): the catalog has it.
+    return Promise.all(machines.map(async m => (m.pricePerHour == null ? { ...m, pricePerHour: await this.priceOrNull(m) } : m)));
+  }
+
+  /** Catalog price of a listed machine, looked up once an hour per zone+type (the list runs every 20 s). */
+  private readonly listedPrices = new Map<string, { at: number; price: number | null }>();
+
+  private async priceOrNull(m: ReplicaMachine): Promise<number | null> {
+    if (!m.zone || !m.machineType) return null;
+    const key = `${m.zone}|${m.machineType}`;
+    const hit = this.listedPrices.get(key);
+    if (hit && Date.now() - hit.at < 3_600_000) return hit.price;
+    try {
+      const price = await this.hourlyPrice(m.zone, m.machineType);
+      this.listedPrices.set(key, { at: Date.now(), price });
+      return price;
+    } catch {
+      return null;
+    }
   }
 
   async releaseReplica(machine: ReplicaMachine): Promise<void> {

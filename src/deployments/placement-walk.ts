@@ -21,6 +21,11 @@ export interface PlaceArgs {
   backendFor: (provider: DeploymentProvider) => DeploymentBackend | undefined;
   /** Creates the replica of `spec` (already narrowed to one place) on `backend`. */
   create: (backend: DeploymentBackend, spec: DeploymentSpec) => Promise<ReplicaMachine>;
+  /**
+   * Gate before each create, given what the place bills per hour (the catalog price, or the cap on a market-priced
+   * backend): a reason to skip the place (spend ceiling), or null. A cheaper place further down may still pass.
+   */
+  admit?: (eurPerHour: number) => string | null;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
@@ -95,6 +100,8 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
     }
     const { price, skip } = await priceOf(backend, step.spec);
     if (skip) { skipped.push(skip); continue; }
+    const refused = args.admit?.(price ?? step.spec.maxEurPerHour);
+    if (refused) { skipped.push(`${where(step)}: ${refused}`); continue; }
     let machine: ReplicaMachine;
     try {
       machine = await args.create(backend, step.spec);

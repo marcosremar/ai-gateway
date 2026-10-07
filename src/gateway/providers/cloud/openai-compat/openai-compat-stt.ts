@@ -5,7 +5,8 @@
  */
 
 import OpenAI from 'openai';
-import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse, STTSegment } from '../types';
+import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from '../types';
+import { applyWhisperSegments } from '../stt-segments';
 import { prepareAudioFile } from './audio-utils';
 import { GATEWAY_SDK_MAX_RETRIES, getOrCreateClient } from './client-cache';
 
@@ -112,42 +113,8 @@ export class OpenAICompatSTTProvider implements STTProvider {
         .map((w) => ({ word: w.word, start: w.start, end: w.end }));
     }
 
-    // Extract per-segment Whisper metadata from verbose_json (no_speech_prob, compression_ratio, avg_logprob)
-    const rawObj = transcription as unknown as Record<string, unknown>;
-    if ('segments' in rawObj && Array.isArray(rawObj.segments)) {
-      const segments: STTSegment[] = [];
-      for (const seg of rawObj.segments as Record<string, unknown>[]) {
-        if (typeof seg.text === 'string') {
-          segments.push({
-            id: typeof seg.id === 'number' ? seg.id : segments.length,
-            start: typeof seg.start === 'number' ? seg.start : 0,
-            end: typeof seg.end === 'number' ? seg.end : 0,
-            text: seg.text,
-            avg_logprob: typeof seg.avg_logprob === 'number' ? seg.avg_logprob : 0,
-            compression_ratio: typeof seg.compression_ratio === 'number' ? seg.compression_ratio : 0,
-            no_speech_prob: typeof seg.no_speech_prob === 'number' ? seg.no_speech_prob : 0,
-          });
-        }
-      }
-      if (segments.length > 0) {
-        response.segments = segments;
-        // Compute aggregate metrics (weighted average by segment duration)
-        let totalDur = 0;
-        let wLogprob = 0, wCompression = 0, wNoSpeech = 0;
-        for (const s of segments) {
-          const dur = Math.max(s.end - s.start, 0.01);
-          totalDur += dur;
-          wLogprob += s.avg_logprob * dur;
-          wCompression += s.compression_ratio * dur;
-          wNoSpeech += s.no_speech_prob * dur;
-        }
-        if (totalDur > 0) {
-          response.avg_logprob = Math.round((wLogprob / totalDur) * 1000) / 1000;
-          response.compression_ratio = Math.round((wCompression / totalDur) * 1000) / 1000;
-          response.no_speech_prob = Math.round((wNoSpeech / totalDur) * 1000) / 1000;
-        }
-      }
-    }
+    // Per-segment Whisper metadata (no_speech_prob, compression_ratio, avg_logprob) for the hallucination filter
+    applyWhisperSegments(response, transcription);
 
     // Extract server-side processing time if the provider returned it (e.g. our Modal endpoints)
     const raw = transcription as unknown as Record<string, unknown>;
