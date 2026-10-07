@@ -169,10 +169,16 @@ export class GatewayClient {
   }
 
   /** Gateway first; the direct fallback when the gateway itself is unreachable (see docs/client.md). */
-  private async routed<R>(path: string, viaGateway: () => Promise<R>, viaDirect: (cause: GatewayError) => Promise<R>): Promise<R> {
+  private async routed<R>(
+    path: string, target: { stage: 'stt' | 'chat' | 'tts'; alias: string },
+    viaGateway: () => Promise<R>, viaDirect: (cause: GatewayError) => Promise<R>,
+  ): Promise<R> {
     const breaker = this.breaker;
     if (!breaker) return viaGateway();
-    if (breaker.skipGateway()) {
+    // Breaker open, but no direct entry for this alias (keyless plan): the direct route would only fail, so probe the
+    // gateway first — it fails as fast while the gateway is down, and serves at once when it is back (fault bench
+    // 2026-10-07, S3: a restarted gateway was skipped for the whole 30 s cooldown, every call failing meanwhile).
+    if (breaker.skipGateway() && (this.direct!.canServe(target.stage, target.alias) || !(await breaker.recheck()))) {
       this.record({ at: this.now(), kind: 'unreachable', path, code: 'breaker_open', route: 'direct' });
       breaker.used('direct', 'breaker_open');
       return this.viaDirect(path, viaDirect, new GatewayError({ message: 'gateway skipped: unreachable recently (breaker open)', code: 'gateway_unreachable', path, unreachable: true }));
@@ -220,7 +226,7 @@ export class GatewayClient {
 
   /** `POST /v1/audio/transcriptions` (multipart). */
   transcribe(req: TranscribeRequest): Promise<Transcription> {
-    return this.routed('/v1/audio/transcriptions', () => {
+    return this.routed('/v1/audio/transcriptions', { stage: 'stt', alias: req.model }, () => {
       const form = new FormData();
       form.set('file', toBlob(req.file), req.filename ?? 'audio');
       form.set('model', req.model);
@@ -243,7 +249,7 @@ export class GatewayClient {
 
   /** `POST /v1/chat/completions` (non-streamed). */
   chat(req: ChatRequest): Promise<ChatCompletion> {
-    return this.routed('/v1/chat/completions',
+    return this.routed('/v1/chat/completions', { stage: 'chat', alias: req.model },
       () => this.gw({ method: 'POST', path: '/v1/chat/completions', group: 'chat', call: req, json: this.chatJson(req, false) },
         async res => ({ ...(await res.json() as Omit<ChatCompletion, 'served'>), served: servedFrom(res.headers) })),
       cause => this.direct!.chat(req, cause),
@@ -252,7 +258,7 @@ export class GatewayClient {
 
   /** `POST /v1/chat/completions` with `stream: true`: resolves once the headers arrived; iterate for deltas. */
   chatStream(req: ChatRequest): Promise<ChatStream> {
-    return this.routed('/v1/chat/completions',
+    return this.routed('/v1/chat/completions', { stage: 'chat', alias: req.model },
       () => this.gw({ method: 'POST', path: '/v1/chat/completions', group: 'chat', call: req, json: this.chatJson(req, true) },
         async res => chatStreamOf(res, servedFrom(res.headers), { path: '/v1/chat/completions', signal: req.signal })),
       cause => this.direct!.chatStream(req, cause),
@@ -262,7 +268,7 @@ export class GatewayClient {
   /** `POST /v1/audio/speech`: the body is returned as a stream, never buffered. */
   speech(req: SpeechRequest): Promise<SpeechResult> {
     const json = bodyOf(req);
-    return this.routed('/v1/audio/speech',
+    return this.routed('/v1/audio/speech', { stage: 'tts', alias: req.model },
       () => this.gw({ method: 'POST', path: '/v1/audio/speech', group: 'tts', call: req, json }, async (res) => {
         if (!res.body) throw new GatewayError({ message: 'empty speech body', code: 'bad_response', path: '/v1/audio/speech' });
         return { body: res.body, contentType: res.headers.get('content-type') ?? 'application/octet-stream', served: servedFrom(res.headers) };
@@ -283,7 +289,8 @@ export class GatewayClient {
       message: cause ? `gateway unreachable for s2s: ${cause.message}` : 'gateway skipped for s2s: unreachable recently (breaker open)',
       code: 'gateway_unreachable', status: cause?.status, path: '/v1/s2s', unreachable: true, cause,
     });
-    if (this.breaker?.skipGateway()) {
+    // Same rule as `routed`: with no direct entry at all, the app's separate calls cannot go direct either — probe first.
+    if (this.breaker?.skipGateway() && (this.direct?.canServeAny() || !(await this.breaker.recheck()))) {
       this.record({ at: this.now(), kind: 'unreachable', path: '/v1/s2s', code: 'breaker_open', route: 'direct' });
       throw unreachable();
     }

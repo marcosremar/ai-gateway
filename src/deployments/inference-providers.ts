@@ -14,7 +14,7 @@ import type {
   ChatRequest, ChatResponse, LLMProvider, ModelInfo, STTProvider, STTRequest, STTResponse, TTSProvider, TTSRequest,
   TTSResponse, VoiceInfo,
 } from '../gateway/providers/cloud/types';
-import { DeploymentError, type DeploymentController } from './controller';
+import { DeploymentError, type DeploymentController, type Lease } from './controller';
 import { replicaBase } from './http';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 
@@ -71,15 +71,52 @@ async function callReplica(
     throw new DeploymentCallError(timedOut ? 504 : 502, `deployment '${name}': replica ${timedOut ? 'timed out' : 'unreachable'}`,
       timedOut ? 'timeout' : 'unreachable');
   }
-  lease.done(false);
   if (!res.ok) {
+    lease.done(false);
     const text = await res.text().catch(() => '');
     // Any replica error moves on to the fallback (a 4xx from our own server is a deployment problem, not the
     // client's: the gateway already validated the request).
     throw new DeploymentCallError(res.status >= 500 ? res.status : 502, `deployment '${name}' answered HTTP ${res.status}: ${text.slice(0, 200)}`,
       res.status >= 500 ? '5xx' : 'error');
   }
-  return res;
+  return leasedBody(res, lease, opts.timeoutMs ?? 120_000, signal);
+}
+
+/**
+ * The lease covers the whole answer, body included (fault bench 2026-10-07, S1): it used to be released as healthy at
+ * the response headers, so a replica that died mid-body was handed the very next request, and a streamed TTS answer
+ * counted 0 in flight while it played. Released when the body ends, as failed when the body breaks (a connection-level
+ * failure), as healthy when the caller cancels or gives up (`signal`), and after `maxMs` at the latest: a body nobody
+ * reads must not hold the lease (and the deployment's demand) forever.
+ */
+function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSignal): Response {
+  if (!res.body) { lease.done(false); return res; }
+  const reader = res.body.getReader();
+  const safety = setTimeout(() => release(false), maxMs);
+  (safety as { unref?: () => void }).unref?.();
+  const onAbort = () => { release(false); reader.cancel().catch(() => {}); };
+  let released = false;
+  function release(failed: boolean) {
+    if (released) return;
+    released = true;
+    clearTimeout(safety);
+    signal?.removeEventListener('abort', onAbort);
+    lease.done(failed);
+  }
+  if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { value, done } = await reader.read();
+        if (done) { release(false); controller.close(); } else controller.enqueue(value);
+      } catch (err) {
+        release(!signal?.aborted);
+        controller.error(err);
+      }
+    },
+    cancel(reason) { release(false); return reader.cancel(reason); },
+  });
+  return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 
 abstract class DeploymentProviderBase {
@@ -227,7 +264,9 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     let value: ReplicaCatalog | null = null;
     try {
       const res = await this.call('/refs/voices.json', { method: 'GET' }, signal);
-      value = (res.headers.get('content-type') ?? '').includes('json') ? catalogOf(await res.json().catch(() => null)) : null;
+      // A body left unread would hold the replica's lease until its safety timeout (leasedBody): read or cancel it.
+      if ((res.headers.get('content-type') ?? '').includes('json')) value = catalogOf(await res.json().catch(() => null));
+      else await res.body?.cancel().catch(() => {});
     } catch (err) {
       // The replica answered an HTTP error for the catalog (callReplica code 'error'): treated as "no catalog" below.
       if (!(err instanceof DeploymentCallError) || err.gatewayCode !== 'error') throw err;
