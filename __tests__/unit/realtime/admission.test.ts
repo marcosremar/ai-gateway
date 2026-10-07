@@ -99,6 +99,18 @@ describe('POST /v1/realtime/sessions', () => {
     expect(gw.charged).toEqual([]);
   });
 
+  it('sessions admitted by a previous gateway process keep the deployment awake (the session table died with it)', async () => {
+    const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    const listed = { ...controller, list: () => [{ name: 'speech' }] as never, specOf: () => ({ realtime: {} }) as never };
+    gw = await startGateway(listed, { netProbeMs: 0 });
+    await gw.realtime.service.probeAll();
+    expect(state.woken).toBe(0);
+    edge.status = { ...edge.status!, active: 2 };
+    gw.realtime.service.status.invalidate('r1');
+    await gw.realtime.service.probeAll();
+    expect(state.woken).toBe(1);
+  });
+
   it('no-wake: a cold deployment is not woken', async () => {
     const { controller, state } = fakeController({ replicas: [] });
     gw = await startGateway(controller);

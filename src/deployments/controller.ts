@@ -119,10 +119,14 @@ export class DeploymentController extends ControllerViews {
     return true;
   }
 
-  /** Marks the deployment as in use (scales from zero) without sending a request. */
+  /**
+   * Marks the deployment as in use (scales from zero) without sending a request. Persisted like a request's time: a
+   * deployment used only through `wake` (realtime sessions) must not read as never used after a restart.
+   */
   wake(name: string): DeploymentView {
     const rt = this.require(name);
     rt.record.lastRequestAt = this.now();
+    this.persistRequestTime(rt);
     this.kick();
     return this.view(name)!;
   }
