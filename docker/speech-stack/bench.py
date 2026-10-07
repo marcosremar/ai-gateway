@@ -84,6 +84,7 @@ async def main():
     ap.add_argument("--concurrency", default="1,4,8")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--out", default="bench.json")
+    ap.add_argument("--config", help="JSON file merged over the /v1/s2s config (system, messages, response_format, speak_field)")
     args = ap.parse_args()
     audio = open(args.audio, "rb").read()
     config = {
@@ -91,6 +92,8 @@ async def main():
         "system": "Você é o Seu Jorge, padeiro em Copacabana. Responda em português do Brasil, em uma ou duas frases curtas "
                   "e simples (nível A1), como numa conversa de balcão.",
     }
+    if args.config:
+        config.update(json.load(open(args.config)))
     results = {}
     async with httpx.AsyncClient(timeout=httpx.Timeout(900.0)) as client:
         await one(client, args.url, args.key, audio, config)  # warm the path (connections, caches)
