@@ -536,6 +536,11 @@ async def warm() -> None:
             for line in ("Olá, bom dia.", "Tudo bem? Então vamos lá."):
                 queue: asyncio.Queue = asyncio.Queue()
                 await tts_stream(line, "Portuguese", voice, queue)
+        for name, other in list(voices.items())[1:]:
+            try:
+                await tts_stream("Olá, bom dia.", LANGUAGE.get(other.get("lang", "pt")[:2], "Portuguese"), other, asyncio.Queue())
+            except Exception as error:  # noqa: BLE001
+                print("warm voice", name, repr(error), flush=True)
         ready.update(ok=True, detail="warm", voices=len(voices))
     except Exception as error:  # noqa: BLE001
         ready.update(ok=False, detail=f"warm failed: {error!r}"[:300])
