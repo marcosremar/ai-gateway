@@ -119,7 +119,7 @@ try {
 
   // ── 3. WebRTC in Chromium: one spoken turn through gateway signaling, media straight to the edge ────────────
   const a = await openPage();
-  const rtc = await a.page.evaluate(() => (window as unknown as { e2eRun: (o: unknown) => Promise<Run> }).e2eRun({}));
+  const rtc = await a.page.evaluate(() => (window as unknown as { e2eRun: (o: unknown) => Promise<Run> }).e2eRun({ raceTransports: false }));
   log(`webrtc run ${JSON.stringify(rtc)}`);
   check('browser: ladder picks webrtc', rtc.transport === 'webrtc', { transport: rtc.transport, error: rtc.error, attempts: rtc.metrics.attempts });
   const t3 = typesOf(rtc);
@@ -186,7 +186,7 @@ try {
   const relaySt = await waitPath(relayRep, 'relay');
   check('net: inbound UDP blocked → the edge allocates on TURN → path relay', relaySt.net.path === 'relay' && relaySt.transports.includes('webrtc'), relaySt.net);
   const d = await openPage();
-  const viaRelay = await d.page.evaluate(() => (window as unknown as { e2eRun: (o: unknown) => Promise<Run> }).e2eRun({ sessionInit: { headers: { 'x-e2e-deployment': 'speech-relay' } } }));
+  const viaRelay = await d.page.evaluate(() => (window as unknown as { e2eRun: (o: unknown) => Promise<Run> }).e2eRun({ raceTransports: false, sessionInit: { headers: { 'x-e2e-deployment': 'speech-relay' } } }));
   log(`relay run ${JSON.stringify(viaRelay)}`);
   check('relay: ladder still picks webrtc', viaRelay.transport === 'webrtc', { transport: viaRelay.transport, attempts: viaRelay.metrics.attempts });
   check('relay: full turn, NPC audio played', typesOf(viaRelay).includes('done') && viaRelay.loudFrames > 20, { loud: viaRelay.loudFrames });
