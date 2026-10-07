@@ -337,8 +337,27 @@ async def speculation_edges() -> None:
           and learner.types() == ["vad"] and learner.session.messages == [], (learner.up.cancelled, learner.types()))
 
 
+async def partials() -> None:
+    defaults = Settings.from_env()
+    os.environ.update(EDGE_STT_PARTIALS="1", EDGE_SPECULATE_MS="0")
+    tuned = Settings.from_env()
+    del os.environ["EDGE_STT_PARTIALS"], os.environ["EDGE_SPECULATE_MS"]
+    check("defaults: partials off, speculation at 300 ms; EDGE_STT_PARTIALS=1 and EDGE_SPECULATE_MS=0 switch them",
+          (defaults.stt_partials, defaults.speculate_ms, tuned.stt_partials, tuned.speculate_ms) == (False, 300, True, 0))
+    for on in (False, True):
+        learner = Learner(stt_partials=on)
+        learner.say(0.8)
+        await learner.wait("done")
+        early = [e for e in learner.of("transcript") if not e["final"]]
+        final = [e for e in learner.of("transcript") if e["final"]]
+        check(f"partials {'on' if on else 'off'}: {'relayed while the learner speaks' if on else 'the replica is not asked'}, one final transcript",
+              learner.up.calls["partials"] == int(on) and bool(early) == on and len(final) == 1 and learner.up.calls["stt"] == 1,
+              (learner.up.calls, len(early)))
+        await learner.close()
+
+
 async def main() -> None:
-    for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges):
+    for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials):
         await scenario()
     print(json.dumps(results))
 

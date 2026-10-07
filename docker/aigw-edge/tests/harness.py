@@ -88,7 +88,8 @@ async def scenario_ws(base: str) -> None:
     check("ws: history grows per turn", roles == ["system", "user", "assistant", "user"], roles)
     check("ws: catalog voice → cloning fields", stats["last_tts"]["task_type"] == "Base"
           and stats["last_tts"]["ref_audio"].endswith("/refs/br-m-08.wav"), stats["last_tts"])
-    check("ws: partial transcripts relayed", stats["partials"] >= 1)
+    check("ws: no partial transcripts by default (EDGE_STT_PARTIALS unset)", stats["partials"] == 0
+          and all(e["final"] for e in learner.events.of("transcript")), stats["partials"])
     await learner.close()
 
 
@@ -233,6 +234,9 @@ async def scenario_s2s(base: str) -> None:
     check("s2s mode: transcript → reply → audio → done", all(k in types for k in
           ("transcript", "reply_delta", "reply", "audio_start", "audio_end", "metrics", "done")), types)
     results["latency"]["s2s_turn"] = learner.events.of("metrics")[0]
+    async with aiohttp.ClientSession() as http:
+        async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+            check("EDGE_STT_PARTIALS=1: partial transcripts relayed", (await r.json())["partials"] >= 1)
     await learner.close()
     learner = await ws_turn(base, {**DEFAULT_CFG, "stt_prompt": "FAKE:Obrigado por assistir"})
     done = await learner.events.wait("done", 10)
@@ -377,7 +381,8 @@ async def main() -> int:
     up = subprocess.Popen([sys.executable, str(ROOT / "tests" / "fake_upstream.py"), "--port", str(UP_PORT)])
     edge = start_edge(EDGE_PORT)
     # The second edge runs everything in one process (RT_RTC_WORKERS=0) and answers turns through /v1/s2s.
-    edge_s2s = start_edge(EDGE_S2S_PORT, EDGE_UPSTREAM_MODE="s2s", RT_UDP_PORTS="50041-50060", RT_RTC_WORKERS="0")
+    edge_s2s = start_edge(EDGE_S2S_PORT, EDGE_UPSTREAM_MODE="s2s", RT_UDP_PORTS="50041-50060", RT_RTC_WORKERS="0",
+                          EDGE_STT_PARTIALS="1")
     base, base_s2s = f"http://127.0.0.1:{EDGE_PORT}", f"http://127.0.0.1:{EDGE_S2S_PORT}"
     try:
         await wait_ready(base)

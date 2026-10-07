@@ -56,7 +56,7 @@ class Settings:
     idle_seconds: int = 120
     vad_silence_ms: int = 700
     speculate_ms: int = 300
-    stt_partials: bool = True
+    stt_partials: bool = False
     llm_model: str = "llm"
     tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
     tts_rate: int = 24000
@@ -98,7 +98,7 @@ class Settings:
             idle_seconds=_int("RT_IDLE_SECONDS", 120),
             vad_silence_ms=_int("RT_VAD_SILENCE_MS", 700),
             speculate_ms=max(0, _int("EDGE_SPECULATE_MS", 300)),
-            stt_partials=env.get("EDGE_STT_PARTIALS", "1") != "0",
+            stt_partials=env.get("EDGE_STT_PARTIALS") == "1",
             llm_model=env.get("EDGE_LLM_MODEL", "llm"),
             tts_model=env.get("EDGE_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
             tts_rate=_int("EDGE_TTS_RATE", 24000),
