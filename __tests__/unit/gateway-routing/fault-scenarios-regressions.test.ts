@@ -8,6 +8,14 @@ import type { AddressInfo } from 'net';
 import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } from '../../../src/deployments/inference-providers';
 import { GatewayClient, type FallbackPlan } from '../../../sdk/node';
 import { connectionRefused, fakeFetch, json } from '../_gateway-client-fakes';
+import { startFakeUpstream } from '../../../scripts/fault-bench/fake-upstream';
+import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
+import { CooldownTracker } from '../../../src/gateway/providers/cloud/fallback';
+import { OpenAICompatLLMProvider } from '../../../src/gateway/providers/cloud/openai-compat/openai-compat-llm';
+import { handleChatCompletions } from '../../../src/gateway/proxy/routes/chat-completions';
+import { cloudHedgeMs } from '../../../src/gateway/proxy/provider-routing';
+import type { LLMProvider } from '../../../src/gateway/providers/cloud/types';
+import type { RouteTarget } from '../../../src/gateway/proxy/types';
 
 const servers: Server[] = [];
 afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections(); await new Promise(r => s.close(r)); } });
@@ -208,4 +216,121 @@ describe('S2/S3 — SDK with a keyless fallback plan: never skips a gateway that
     expect(out.served.provider).toBe('openrouter-direct:qwen/qwen3.5-9b');
     expect(x.f.calls.filter(c => c.url.startsWith(GW)).length).toBe(before);
   });
+});
+
+describe('S5 — a hung cloud link no longer eats the whole stage budget (hedge / first-byte limit)', () => {
+  // Stage budget 2 s here (GATEWAY_CHAT_BUDGET_MS) → cloud hedge min(4 s, budget / 2) = 1 s.
+  const env = { ...process.env };
+  afterEach(() => { process.env = { ...env }; });
+
+  async function chain(stream: boolean, first: 'hang' | 'deployment-hang') {
+    process.env.GATEWAY_CHAT_BUDGET_MS = '2000';
+    process.env.FAULT_REGRESSION_KEY = 'fake-key-for-the-fake-upstream';
+    const fake = await startFakeUpstream();
+    try {
+      fake.setFaults({ a: { kind: 'no-answer' }, b: { kind: 'ok', text: 'resposta do fallback' } });
+      const or = new OpenAICompatLLMProvider({ providerId: 'openrouter', baseURL: `${fake.url}/or`, envKey: 'FAULT_REGRESSION_KEY' });
+      const primary: RouteTarget<LLMProvider> = first === 'hang'
+        ? { providerId: 'openrouter', provider: or, model: 'a' }
+        // A deployment link keeps its own behaviour: no hedge set → no cloud hedge either.
+        : { providerId: 'deployment:parle-speech', provider: or, model: 'a' };
+      const t0 = Date.now();
+      const res = await handleChatCompletions(
+        { method: 'POST', url: '/v1/chat/completions', headers: {}, rawBody: Buffer.alloc(0), body: { model: 'm', stream, messages: [{ role: 'user', content: `oi ${stream} ${first}` }] } },
+        {}, undefined, undefined, undefined, undefined, undefined,
+        { chatRoutes: { m: [primary, { providerId: 'openrouter', provider: or, model: 'b' }] }, circuitBreakers: new CircuitBreakerRegistry(), cooldownTracker: new CooldownTracker() },
+      );
+      const text = res.stream ? await new Response(res.stream).text() : JSON.stringify(res.body);
+      const ms = Date.now() - t0;
+      await sleep(100); // the loser's abort reaches the fake upstream
+      return { res, text, ms, log: fake.log() };
+    } finally { await Promise.race([fake.close(), sleep(500)]); }
+  }
+
+  it('the cloud hedge is min(GATEWAY_CLOUD_HEDGE_MS default 4 s, budget / 2), 0 = off', () => {
+    expect(cloudHedgeMs(8_000, {})).toBe(4_000);
+    expect(cloudHedgeMs(2_000, {})).toBe(1_000);
+    expect(cloudHedgeMs(45_000, {})).toBe(4_000);
+    expect(cloudHedgeMs(8_000, { GATEWAY_CLOUD_HEDGE_MS: '0' })).toBe(0);
+  });
+
+  it('non-streamed chat: the first link hangs → the next one answers within the budget (was a 503 at the budget)', async () => {
+    const x = await chain(false, 'hang');
+    expect(x.res.status).toBe(200);
+    expect(x.text).toContain('resposta do fallback');
+    expect(x.ms).toBeGreaterThanOrEqual(900);
+    expect(x.ms).toBeLessThan(1_900);
+    // The hung call was aborted once the other one won.
+    expect(x.log.find(r => r.model === 'a')?.aborted).toBe(true);
+  });
+
+  it('streamed chat: the first link sends no first byte → the next one streams the answer', async () => {
+    const x = await chain(true, 'hang');
+    expect(x.res.status).toBe(200);
+    expect(x.text).toContain('fallback');
+    expect(x.text).toContain('[DONE]');
+    expect(x.ms).toBeLessThan(1_900);
+  });
+
+  it('a deployment link keeps its own behaviour (no cloud hedge when it has none)', async () => {
+    const x = await chain(false, 'deployment-hang');
+    expect(x.log.filter(r => r.model === 'b')).toHaveLength(0);
+    expect(x.res.status).toBe(503);
+  });
+});
+
+describe('prod 2026-10-07 — deployment (4 s) → slow OpenRouter link → last OpenRouter link: the last link gets a real chance', () => {
+  const env = { ...process.env };
+  afterEach(() => { process.env = { ...env }; });
+
+  /** parle-llm shape: deployment:parle-speech (first byte 4 s, hedge 1.5 s) → qwen (hangs) → gemini (answers). */
+  async function threeLinks(stream: boolean, deployment: 'hangs' | 'cold') {
+    delete process.env.GATEWAY_CHAT_BUDGET_MS; // the real 8 s
+    delete process.env.GATEWAY_CLOUD_HEDGE_MS;
+    process.env.FAULT_REGRESSION_KEY = 'fake-key-for-the-fake-upstream';
+    const fake = await startFakeUpstream();
+    try {
+      fake.setFaults({ dep: { kind: 'no-answer' }, 'qwen/qwen3.5-9b': { kind: 'no-answer' }, 'google/gemini-2.5-flash-lite': { kind: 'ok', text: 'resposta do gemini' } });
+      const or = new OpenAICompatLLMProvider({ providerId: 'openrouter', baseURL: `${fake.url}/or`, envKey: 'FAULT_REGRESSION_KEY' });
+      const cold: LLMProvider = {
+        providerId: 'self-hosted', isConfigured: () => true,
+        chat: async () => { throw Object.assign(new Error("deployment 'parle-speech': replicas are starting"), { status: 503, gatewayCode: 'cold', skipRetry: true }); },
+      };
+      const chainTargets: Array<RouteTarget<LLMProvider>> = [
+        { providerId: 'deployment:parle-speech', provider: deployment === 'cold' ? cold : or, model: 'dep', timeoutMs: 4_000, hedgeAfterMs: 1_500 },
+        { providerId: 'openrouter', provider: or, model: 'qwen/qwen3.5-9b' },
+        { providerId: 'openrouter', provider: or, model: 'google/gemini-2.5-flash-lite' },
+      ];
+      const t0 = Date.now();
+      const res = await handleChatCompletions(
+        { method: 'POST', url: '/v1/chat/completions', headers: {}, rawBody: Buffer.alloc(0), body: { model: 'parle-llm', stream, messages: [{ role: 'user', content: `oi 3 ${stream} ${deployment}` }] } },
+        {}, undefined, undefined, undefined, undefined, undefined,
+        { chatRoutes: { 'parle-llm': chainTargets }, circuitBreakers: new CircuitBreakerRegistry(), cooldownTracker: new CooldownTracker() },
+      );
+      const text = res.stream ? await new Response(res.stream).text() : JSON.stringify(res.body);
+      return { res, text, ms: Date.now() - t0 };
+    } finally { await Promise.race([fake.close(), sleep(500)]); }
+  }
+
+  it('non-streamed, deployment hangs: gemini answers within the 8 s budget (was a 503 at ~8.1 s)', async () => {
+    const x = await threeLinks(false, 'hangs');
+    expect(x.res.status).toBe(200);
+    expect(x.text).toContain('resposta do gemini');
+    expect(x.ms).toBeLessThan(8_000);
+  }, 15_000);
+
+  it('non-streamed, deployment cold: gemini answers (qwen no longer gets the whole 8 s)', async () => {
+    const x = await threeLinks(false, 'cold');
+    expect(x.res.status).toBe(200);
+    expect(x.text).toContain('resposta do gemini');
+    expect(x.ms).toBeLessThan(5_000);
+  }, 15_000);
+
+  it('streamed, deployment hangs: gemini streams the answer within the budget', async () => {
+    const x = await threeLinks(true, 'hangs');
+    expect(x.res.status).toBe(200);
+    expect(x.text).toContain('gemini');
+    expect(x.text).toContain('[DONE]');
+    expect(x.ms).toBeLessThan(8_000);
+  }, 15_000);
 });

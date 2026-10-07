@@ -172,8 +172,10 @@ export async function scenario1(fake: FakeUpstream, record: Record_): Promise<vo
       const next = await nextLeaseGoesTo(controller, 'parle-tts');
       record('S1a\'', 'TTS stream, replica dies after 10 kB: the client sees the cut (not a clean end)', cut !== '' ? 'PASS' : 'FAIL',
         `status=${res.status} received ${bytes} B then ${cut ? `error "${cut.slice(0, 80)}"` : 'a CLEAN END (truncated audio looks complete)'} in ${ms}ms`);
-      record('S1a\'', 'TTS: lease held while the audio streams, released after, dead replica not reused',
-        inflightMidStream === 1 && after.inflight === 0 && next !== dead ? 'PASS' : 'FAIL',
+      // Since #46 ("busy is not dead") a failure right after the replica served (here: the voice-catalog call) marks it
+      // busy, not suspect: the next acquire may still get it until a probe fails. Reported, not judged.
+      record('S1a\'', 'TTS: lease held while the audio streams and released after (reuse of the dead replica: #46 busy policy)',
+        inflightMidStream === 1 && after.inflight === 0 ? 'PASS' : 'FAIL',
         `inflight while streaming=${inflightMidStream} (1 expected); after: inflight=${after.inflight} ${after.replicas}; next acquire → ${next === dead ? 'the SAME dead replica' : next ?? 'none'}`);
     } finally { controller.stop(); await cloud.closeAll(); }
   }

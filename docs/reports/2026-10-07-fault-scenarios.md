@@ -15,9 +15,8 @@ chamada à nuvem real, gasto zero.
   um controller sem chave de nuvem real, por isso os cenários de deployment rodam o mesmo código em processo.
 - Bun: o `serve.ts` e o executor rodaram com **Bun 1.4.2** (o de produção, `oven/bun:1`), baixado para `/tmp` só para
   a bancada; o Bun local é 1.3.14 (ver rodada 1, item 14).
-- Testes de regressão: `__tests__/unit/gateway-routing/fault-scenarios-regressions.test.ts` — 11 testes; com `src/`
-  e `sdk/` revertidos para o `origin/main` **7 falham** (3 do defeito D1, 4 do D2); os outros 4 são controles do
-  caminho feliz e da liberação (passam antes e depois). Com as correções os 11 passam.
+- Testes de regressão: `__tests__/unit/gateway-routing/fault-scenarios-regressions.test.ts` — 18 testes; 13 falham
+  sem a correção correspondente (D1: 3, D2: 4, D3: 6); os outros 5 são controles (passam antes e depois).
 
 ## Consertos na própria bancada
 
@@ -97,12 +96,17 @@ sem resposta (timeout), 1 % conexão derrubada no meio. `/health` lido a cada 2 
 | Breakers | Sem oscilação descontrolada | 33 mudanças de estado, 17 aberturas em 7 elos em 30 min (≈ 1 a cada 2 min com 8 % de falha por chamada); no fim só `chat/t-llm/openrouter:a` aberto | INFO |
 | Cache STT | Limitado | 200 entradas (`STT_CACHE_MAX_ENTRIES`, código); metade das ~19 700 transcrições com áudio único não fez o RSS subir | PASS |
 
-**O p99 de 8 s é o elo pendurado comendo o orçamento do estágio.** Os 503 (chat JSON 1,8 %, ≈ os 2 % de «sem
+**Corrigido depois (D3, abaixo): 5 min com o mesmo caos e a mesma semente, antes (`GATEWAY_CLOUD_HEDGE_MS=0`) ×
+depois:** 503 **3,14 % → 1,83 %** (516/16 439 → 386/21 067); chat JSON 51 → 1, chat SSE 115 → 3, TTS 74 → 37, s2s 42
+→ 54 (o s2s herda o STT), p99 de chat/SSE/TTS 8002 → ~4000–4200 ms; 97,68 % ok (antes 96,35 %), mais requisições no
+mesmo tempo (21 067 × 16 439). Os 503 de STT não mudam (7,1 % → 6,9 %): são falha dupla numa cadeia de 2 elos com o
+sorteio duplicado da bancada, não elo pendurado. Memória igual (RSS 91–95 MB, conexões 1 no fim).
+
+**O p99 de 8 s era o elo pendurado comendo o orçamento do estágio.** Os 503 (chat JSON 1,8 %, ≈ os 2 % de «sem
 resposta») vêm de o 1º alvo não responder: o tempo até o 1º byte de um alvo de nuvem é o orçamento inteiro do estágio
 (8 s), então não sobra tempo para o 2º — o cliente recebe 503 aos 8 s em vez do fallback. É a decisão já registrada
 na rodada 1 («orçamento do estágio», só os elos de deployment têm hedge/timeout curto); o soak mede o preço: ~2 % das
-requisições com um provedor que trava. Para decidir: um timeout de 1º byte por elo de nuvem menor que o orçamento
-(ex. 4 s) ou hedge também nos elos de nuvem. STT tem mais 503 (6,8 %) porque a bancada sorteia a falha duas vezes por
+requisições com um provedor que trava. Decisão do dono: corrigir (D3). STT tem mais 503 (6,8 %) porque a bancada sorteia a falha duas vezes por
 requisição multipart (antes e depois de ler o modelo) e a cadeia tem 2 elos.
 
 ### S6 — limites de gasto sob rajada (controller real, nuvem falsa com create de 300 ms, €1/h por réplica)
@@ -138,10 +142,34 @@ O erro sem fallback agora diz por quê: «…; no direct fallback: the fallback 
 first call after it is back is served», «keyless s2s…», «fails fast with an error that says…», «a failed probe answers
 for the next second» (falham antes); «minted key: … straight to the provider» (controle).
 
+**D3 — um elo de nuvem pendurado comia o orçamento inteiro do estágio** (`src/gateway/proxy/provider-routing.ts`,
+`routes/chat-completions.ts`). No soak, ~2 % de 503 aos 8 s com 2 % das chamadas travadas; em produção (teste de
+autoscale de 07/10, 25 concorrentes em `parle-llm` = `deployment:parle-speech` → `openrouter qwen/qwen3.5-9b` →
+`openrouter google/gemini-2.5-flash-lite`): 25/4710 (0,53 %) de 503 aos ~8,1 s, «deployment timed out after 4000ms;
+openrouter timed out after 6500ms; openrouter: not tried (stage time budget used up)» — o qwen lento ficava com o
+resto do orçamento e o gemini nunca era tentado. Correção: um elo de nuvem com alvo atrás e sem hedge próprio dispara o
+seguinte em paralelo depois de **min(4 s, metade do orçamento que resta)** (`runTargets`: chat não-stream, STT, TTS;
+o primeiro que responde ganha, o outro é abortado); no chat em stream o mesmo valor é o limite de 1º token antes de
+passar ao seguinte. O último elo sempre fica com uma parte real do orçamento. Deployments mantêm o hedge e o timeout
+deles. `GATEWAY_CLOUD_HEDGE_MS` (0 = desliga). Custo: um chat não-stream legítimo de mais de 4 s pode faturar o 2º
+provedor também (o perdedor é abortado). Documentado em `docs/api/http.md`. Testes (falham antes, passam depois):
+«the cloud hedge is min(…)», «non-streamed chat: the first link hangs…», «streamed chat: … no first byte…», e a
+cadeia de produção de 3 elos — deployment pendurado (não-stream e stream) e deployment frio: o gemini responde dentro
+de 8 s (antes: 503 aos 8 s); controle: um elo de deployment sem hedge não ganha hedge de nuvem.
+
+## Integração com o `main` (bf909f7, #45/#46)
+
+- `inference-providers.ts`: o lease do corpo (D1) agora usa os desfechos neutros do #46 — `ok` no fim do corpo,
+  `failed` quando o corpo quebra, `timeout` quando o limite (nosso ou de quem chama) corta, `cancelled` quando quem
+  chama cancela/aborta ou ninguém lê o corpo em `timeoutMs`; 429 da réplica = `overloaded`.
+- S1a' (TTS) depois do #46: o lease vale durante o áudio e sai como `failed`, mas a réplica que acabou de servir (o
+  catálogo de vozes) é tratada como **ocupada**, não suspeita («busy is not dead»), e o próximo `acquire` ainda pode
+  recebê-la até uma sonda falhar. É a política do #46; a bancada registra sem julgar.
+- S6a depois do #46: 12/300 servidos em 3 s (antes 100/300) — o excesso agora é desviado na hora (`saturated`) em vez
+  de esperar; réplicas e teto em € iguais.
+
 ## Observações não consertadas (decisão ou fora do escopo)
 
-- **Elo de nuvem pendurado = 503 aos 8 s, sem fallback** (S5): ~2 % das requisições no soak. Decisão da rodada 1
-  (orçamento do estágio); fica para o dono escolher timeout de 1º byte por elo ou hedge em nuvem.
 - **Sem contrapressão no SSE** (S4): `buildSSEStream` enfileira tudo o que o provedor manda; com respostas de LLM de
   poucos kB não importa. Só valeria mexer se houver respostas grandes ou muitos leitores lentos.
 - **s2s com STT fora faz 2 chamadas por provedor** (S2): o estágio do loopback refaz uma vez um 502/503 (pensado para
@@ -155,7 +183,8 @@ for the next second» (falham antes); «minted key: … straight to the provider
 
 ## Arquivos
 
-- `src/deployments/inference-providers.ts` (D1), `sdk/node/gateway-client.ts`, `sdk/node/gateway-breaker.ts`,
+- `src/deployments/inference-providers.ts` (D1), `src/gateway/proxy/provider-routing.ts`,
+  `src/gateway/proxy/routes/chat-completions.ts`, `docs/api/http.md` (D3), `sdk/node/gateway-client.ts`, `sdk/node/gateway-breaker.ts`,
   `sdk/node/direct-fallback.ts` (D2), `docs/api/client.md`.
 - `scripts/fault-bench/{scenarios,gateway-scenarios,deployment-scenarios,replica-cloud}.ts` (novos),
   `scripts/fault-bench/{gateway,fake-upstream}.ts`, `package.json` (`bench:fault-scenarios`).

@@ -356,6 +356,23 @@ class AttemptError extends Error {
  */
 const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation', 'saturated']);
 
+/**
+ * A cloud link that has not answered (first byte) after this long gets the next target started in parallel (runTargets
+ * hedge) or, for a chat stream, is given up for the next one — capped at half the stage budget. Without it a hung link
+ * ate the whole 8 s budget and the client got a 503 the fallback could have answered (fault bench 2026-10-07, S5:
+ * ~2 % of requests with 2 % of calls hanging). `GATEWAY_CLOUD_HEDGE_MS`, 0 = off. Deployment links keep their own
+ * `hedgeAfterMs` / `timeoutMs` (DEPLOYMENT_HEDGE_MS, DEPLOYMENT_*_TIMEOUT_MS).
+ */
+export const CLOUD_HEDGE_MS = 4_000;
+
+/** Effective cloud hedge / first-byte limit for a chain with this budget (0 = off). */
+export function cloudHedgeMs(budgetMs: number | undefined, env: Record<string, string | undefined> = process.env): number {
+  const raw = env.GATEWAY_CLOUD_HEDGE_MS?.trim();
+  const base = raw === undefined || raw === '' ? CLOUD_HEDGE_MS : Number(raw);
+  if (!Number.isFinite(base) || base <= 0) return 0;
+  return budgetMs && Number.isFinite(budgetMs) ? Math.min(base, budgetMs / 2) : base;
+}
+
 /** Default total time per stage (deployment + fallbacks), under parle's deadlines (TTS 15 s, chat 12 s). */
 export const DEFAULT_STAGE_BUDGET_MS = 8_000;
 
@@ -483,7 +500,8 @@ export function retryAfterOf(err: unknown): number | undefined {
  * - Each attempt has a timeout (target's own, else `timeoutMs`), capped by the stage budget, and is aborted on expiry.
  * - **Hedging:** a target with `hedgeAfterMs` that has not answered by then starts the next target in parallel; the
  *   first success wins and the other call is aborted. A slow or half-open (recovering) deployment therefore costs
- *   the client at most `hedgeAfterMs` before the fallback is on its way.
+ *   the client at most `hedgeAfterMs` before the fallback is on its way. Cloud targets without their own hedge use
+ *   `cloudHedgeMs(budgetMs)` (a hung link no longer eats the whole budget).
  * - Circuit breakers and cooldowns are fed by real failures only (`NEUTRAL_CODES` excluded).
  */
 export function runTargets<P, T>(
@@ -504,6 +522,11 @@ export function runTargets<P, T>(
   // Every target rate-limited: try them anyway (the pause is a hint, a 503 without trying would be worse).
   const ignoreRateLimit = targets.every((t) => isRateLimited(t, breakers));
   const healthOf = (t: RouteTarget<P>) => new TargetHealth(breakers, opts.stage, t);
+  const cloudHedge = cloudHedgeMs(opts.budgetMs);
+  // A cloud link gets at most half of what is LEFT before its successor starts, so the last link keeps a real share
+  // (prod 2026-10-07: deployment 4 s → slow OpenRouter link ran to the 8 s budget → the 3rd link was never tried).
+  const hedgeOf = (t: RouteTarget<P>) => t.hedgeAfterMs
+    ?? (t.providerId.startsWith('deployment:') || !cloudHedge ? 0 : Math.max(1, Math.min(cloudHedge, (deadline - Date.now()) / 2)));
 
   return new Promise((resolve, reject) => {
     let next = 0;
@@ -566,8 +589,9 @@ export function runTargets<P, T>(
       inFlight.set(controller, t);
       const breaker = healthOf(t);
       let successorLaunched = false;
-      const hedge = t.hedgeAfterMs && i + 1 < targets.length
-        ? setTimeout(() => { if (!done && !successorLaunched) { successorLaunched = true; launchNext(); } }, t.hedgeAfterMs)
+      const hedgeAfter = hedgeOf(t);
+      const hedge = hedgeAfter && i + 1 < targets.length
+        ? setTimeout(() => { if (!done && !successorLaunched) { successorLaunched = true; launchNext(); } }, hedgeAfter)
         : null;
       const timeout = Math.min(t.timeoutMs ?? opts.timeoutMs ?? Infinity, deadline - Date.now());
 

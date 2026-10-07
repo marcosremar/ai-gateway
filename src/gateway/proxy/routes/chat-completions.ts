@@ -17,7 +17,7 @@ import { CooldownTracker } from '../../providers/cloud/fallback';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
 import {
   describeFailure, errorResponse, failureCode, type FailureCodes, isClientErrorStatus, originHeaders, proxyCircuitBreakers, ProviderUnavailableError, providerUnavailableResponse,
-  redactSecrets, runTargets, selectTargets, chatBudgetMs, isNeutralFailure, TargetHealth, isRateLimited, markRateLimited, retryAfterOf,
+  redactSecrets, runTargets, selectTargets, chatBudgetMs, cloudHedgeMs, isNeutralFailure, TargetHealth, isRateLimited, markRateLimited, retryAfterOf,
 } from '../provider-routing';
 import { RequestCoalescer } from '../middleware/request-coalescer';
 import { ProviderSemaphores } from '../middleware/semaphore';
@@ -406,6 +406,7 @@ async function openStream(
   const failures: string[] = [];
   const codes: FailureCodes = new Map();
   const deadline = Date.now() + budgetMs;
+  const cloudTtfb = cloudHedgeMs(budgetMs);
   // Same rules as runTargets: a 429 pauses that one model (not the breaker), unless every target is paused.
   const ignoreRateLimit = targets.every((t) => isRateLimited(t, breakers));
   for (const target of targets) {
@@ -420,8 +421,13 @@ async function openStream(
     const onClientGone = () => abort.abort();
     clientSignal?.addEventListener('abort', onClientGone, { once: true });
     const request: ChatRequest = { ...opts, model: target.model ?? opts.model, signal: abort.signal, ...(target.extraBody ? { extraBody: target.extraBody } : {}) };
-    // Time to the first token: the target's own (deployments: short), capped by what is left of the stage budget.
-    const firstWaitMs = Math.max(1, Math.min(target.timeoutMs ?? STREAM_TIMEOUT_MS, deadline - Date.now()));
+    // Time to the first token: the target's own (deployments: short), capped by what is left of the stage budget. A
+    // cloud link with a target behind it gets `cloudHedgeMs` (fault bench 2026-10-07, S5): a hung one no longer eats
+    // the whole budget before the fallback.
+    // At most half of what is left, so the links behind it keep a real share of the budget.
+    const ttfbCap = !target.providerId.startsWith('deployment:') && target !== targets[targets.length - 1] && cloudTtfb
+      ? Math.min(cloudTtfb, Math.max(1, (deadline - Date.now()) / 2)) : 0;
+    const firstWaitMs = Math.max(1, Math.min(target.timeoutMs ?? (ttfbCap || STREAM_TIMEOUT_MS), deadline - Date.now()));
     try {
       if (!target.provider.chatStream) {
         const full = await withStreamTimeout(target.provider.chat(request), firstWaitMs, () => abort.abort());

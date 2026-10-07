@@ -392,7 +392,9 @@ export async function scenario5(fake: FakeUpstream, record: Record_): Promise<vo
   const workers = Number(process.env.SOAK_WORKERS ?? 16);
   fake.reset();
   fake.setChaos({ p5xx: 0.05, pTimeout: 0.02, pDrop: 0.01, seed: 42 });
-  const gw = await startGateway(fake.url, {});
+  // GATEWAY_CLOUD_HEDGE_MS=0 reproduces the gateway before the cloud hedge (a hung link ate the whole budget).
+  const hedgeEnv = process.env.GATEWAY_CLOUD_HEDGE_MS !== undefined ? { GATEWAY_CLOUD_HEDGE_MS: process.env.GATEWAY_CLOUD_HEDGE_MS } : {};
+  const gw = await startGateway(fake.url, hedgeEnv);
   const end = Date.now() + minutes * 60_000;
   const samples: Array<{ t: number; rssMb: number; fds: number; active: number }> = [];
   const outcomes: Record<string, Record<string, number>> = {};
@@ -459,6 +461,9 @@ export async function scenario5(fake: FakeUpstream, record: Record_): Promise<vo
   record('S5', `soak ${minutes} min × ${workers} workers, faults 5 % 5xx / 2 % timeout / 1 % drop: memory flat, connections drained`,
     rssSlope < 10 && final.active <= 1 && upstreamOpen === 0 ? 'PASS' : 'FAIL',
     `${total} requests, ${(100 * okAll / Math.max(1, total)).toFixed(2)} % ok; RSS ${samples[0].rssMb}→${final.rssMb} MB (2nd-half slope ${rssSlope.toFixed(1)} MB/10 min); fds ${samples[0].fds}→${final.fds}; active connections at the end=${final.active}; upstream left open=${upstreamOpen}`);
+  const n503 = Object.values(outcomes).reduce((a, o) => a + (o['503'] ?? 0), 0);
+  record('S5', `soak: 503 rate (GATEWAY_CLOUD_HEDGE_MS=${process.env.GATEWAY_CLOUD_HEDGE_MS ?? 'default'})`, 'INFO',
+    `${n503} of ${total} = ${(100 * n503 / Math.max(1, total)).toFixed(2)} %`);
   record('S5', 'soak: per-kind outcomes and latency', 'INFO',
     Object.keys(outcomes).map(k => `${k}: ${JSON.stringify(outcomes[k])} p50=${pct(lat[k], 0.5)} p95=${pct(lat[k], 0.95)} p99=${pct(lat[k], 0.99)}ms`).join(' | '));
   record('S5', 'soak: breaker flapping (health sampled every 2 s)', 'INFO', `${flips} state changes, ${opens} openings over ${linkState.size} links; final: ${[...linkState].filter(([, s]) => s !== 'ready').map(([k, s]) => `${k}=${s}`).join(', ') || 'all ready'}`);
