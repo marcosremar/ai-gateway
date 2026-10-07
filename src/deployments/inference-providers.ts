@@ -16,6 +16,7 @@ import type {
 } from '../gateway/providers/cloud/types';
 import { DeploymentError, type DeploymentController } from './controller';
 import { replicaBase } from './http';
+import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 
 type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
 
@@ -128,18 +129,35 @@ export class DeploymentLLMProvider extends DeploymentProviderBase implements LLM
 }
 
 export class DeploymentSTTProvider extends DeploymentProviderBase implements STTProvider {
-  async transcribe(request: STTRequest): Promise<STTResponse> {
-    const t0 = Date.now();
+  /** Set once a replica refused `verbose_json` (HTTP 4xx): the next calls go straight to plain json (text only). */
+  private verboseRefused = false;
+
+  private async send(request: STTRequest, format: 'json' | 'verbose_json'): Promise<Response> {
     const form = new FormData();
     const audio = Buffer.isBuffer(request.audio) ? new Blob([new Uint8Array(request.audio)]) : request.audio as Blob;
     form.append('file', audio, 'audio.wav');
     form.append('model', request.model);
     if (request.language) form.append('language', request.language);
     if (request.prompt) form.append('prompt', request.prompt);
-    form.append('response_format', 'json');
-    const res = await this.call('/v1/audio/transcriptions', { method: 'POST', body: form }, request.signal);
+    form.append('response_format', format);
+    return this.call('/v1/audio/transcriptions', { method: 'POST', body: form }, request.signal);
+  }
+
+  async transcribe(request: STTRequest): Promise<STTResponse> {
+    const t0 = Date.now();
+    let res: Response;
+    if (request.wantSegments && !this.verboseRefused) {
+      try { res = await this.send(request, 'verbose_json'); } catch (err) {
+        // The replica's own server may only speak plain json: remember it and ask again without metadata.
+        if (!(err instanceof DeploymentCallError) || err.gatewayCode !== 'error') throw err;
+        this.verboseRefused = true;
+        res = await this.send(request, 'json');
+      }
+    } else res = await this.send(request, 'json');
     const payload = await res.json() as { text?: string };
-    return { text: payload.text ?? '', raw: payload, timing: { total_ms: Date.now() - t0 } };
+    const response: STTResponse = { text: payload.text ?? '', raw: payload, timing: { total_ms: Date.now() - t0 } };
+    applyWhisperSegments(response, payload);
+    return response;
   }
 }
 

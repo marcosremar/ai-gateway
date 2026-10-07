@@ -113,6 +113,8 @@ export interface TranscribeRequest extends CallOptions {
   language?: string;
   prompt?: string;
   responseFormat?: 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt';
+  /** `false` = QA: skip the hallucination filter (gateway: multipart `filter_hallucinations`; direct fallback: local filter). */
+  filterHallucinations?: boolean;
 }
 
 export interface Transcription {

@@ -21,6 +21,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { DeploymentError, type DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
+import { applySttFilter, filterEnabled } from '../gateway/proxy/routes/stt-filter';
 import { runComposite, type S2SConfig, type StageClient } from './composite';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
 
@@ -117,6 +118,23 @@ class Lane {
   }
 }
 
+/**
+ * The primary's transcript comes from the Whisper inside the replica, past the gateway's STT route: same filter here.
+ * Metadata is read when the replica's transcript event carries it (`no_speech_prob`, `avg_logprob`, `compression_ratio`,
+ * docker/speech-stack from 2026-10-06); older images send the text only and get the blocklist alone.
+ */
+function filterPrimaryTranscript(e: S2SEvent, config: S2SConfig): { codes: string[]; rawLength: number } | null {
+  if (config.filter_hallucinations === false || !filterEnabled()) return null;
+  const text = String(e.text ?? '');
+  if (!text.trim()) return null;
+  const n = (k: string) => (typeof e[k] === 'number' ? e[k] as number : undefined);
+  const out = applySttFilter({
+    text, no_speech_prob: n('no_speech_prob'), avg_logprob: n('avg_logprob'), compression_ratio: n('compression_ratio'),
+    ...(Array.isArray(e.segments) ? { segments: e.segments as never } : {}),
+  }, config.language);
+  return out.filtered?.emptied ? { codes: out.filtered.codes, rawLength: out.filtered.rawLength } : null;
+}
+
 export function createS2SRoute(opts: S2SRouteOptions) {
   const hedgeMs = opts.hedgeMs ?? S2S_HEDGE_MS;
   const budgetMs = opts.budgetMs ?? S2S_BUDGET_MS;
@@ -201,6 +219,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       const primaryLane = new Lane(sink, true, () => decide('primary'));
       primaryLane.event({ type: 'route', provider: `deployment:${deployment}` });
       let heard: string | null = null;
+      let filteredByGateway = false;
       let primaryError: string | null = null;
 
       const hedgeTimer = setTimeout(() => {
@@ -236,7 +255,24 @@ export function createS2SRoute(opts: S2SRouteOptions) {
             if (frame.kind === 'audio') { primaryLane.audio(frame.pcm); continue; }
             const e = frame.event;
             if (e.type === 'error') { primaryError = String(e.message ?? 'error'); break read; }
-            if (e.type === 'transcript') heard = String(e.text ?? '');
+            if (e.type === 'transcript') {
+              heard = String(e.text ?? '');
+              const verdict = filterPrimaryTranscript(e, config);
+              if (verdict) {
+                // Whisper inside the replica heard a hallucination: a valid answer ("nothing heard"), not a failure.
+                // Stop the replica before its LLM/TTS spend, release the lease as healthy, and answer like the composed
+                // path does for silence (empty transcript + `filtered` + `done`).
+                filteredByGateway = true;
+                heard = '';
+                decide('primary');
+                primaryLane.event({ ...e, text: '' });
+                primaryLane.event({ type: 'filtered', stage: 'stt', reasons: verdict.codes, raw_length: verdict.rawLength });
+                primaryLane.event({ type: 'done', reply: '', transcript: '', first_audio_ms: null, total_ms: elapsed(), empty: true, filtered: true });
+                sawDone = true;
+                await reader.cancel().catch(() => {});
+                break read;
+              }
+            }
             if (e.type === 'done') sawDone = true;
             primaryLane.event(e);
           }
@@ -252,6 +288,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       }
 
       const runningHedge = hedge as { lane: Lane; run: Promise<unknown> } | null;
+      if (filteredByGateway) { Object.assign(outcome, { provider: `deployment:${deployment}`, filtered: true }); return; }
       if (winner === 'primary' && !primaryError) { outcome.provider = `deployment:${deployment}`; return; }
       if (winner === 'hedge' || (runningHedge && !primaryLane.sawAudio)) {
         // The hedge won, or the primary ended (done or broken) without audio while the hedge runs: it takes over.

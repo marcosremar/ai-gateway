@@ -325,6 +325,17 @@ audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`part
 | deployment breaks after audio started | in-band `error` (`partial: true`) and `done` | — |
 | nothing can answer before the first byte | `503 provider_unavailable` (JSON, as the other routes) | — |
 
+**STT filter in `/v1/s2s`.** The composed path inherits the filter of `/v1/audio/transcriptions` (loopback; `config.language`
+and `config.filter_hallucinations: false` are forwarded). The primary path filters the replica's `transcript` event here
+(blocklist always; metadata when the event carries `no_speech_prob`, `avg_logprob`, `compression_ratio`). A filtered turn is
+a valid answer, not a failure (no fallback, lease released healthy, replica stream cancelled, no LLM/TTS spend):
+
+```
+route → transcript {text:""} → filtered {stage:"stt", reasons:["blocklist"], raw_length:5} → done {empty:true, filtered:true, reply:""}
+```
+
+Clients must treat `done.empty` / empty `transcript.text` as "nothing heard"; `filtered` is informational.
+
 Whole turn budget: `S2S_BUDGET_MS` (45 s). The composed pipeline calls this gateway's own routes over loopback with the
 caller's key (stage models: `config.models`, else `S2S_STT_MODEL` / `S2S_CHAT_MODEL` / `S2S_TTS_MODEL`, else the app's route aliases).
 
@@ -340,6 +351,25 @@ curl -X POST https://<gateway>/v1/audio/transcriptions -H "Authorization: Bearer
 ```json
 { "text": "Bom dia" }
 ```
+
+**Hallucination filter (on by default, every provider, every client).** Whisper and other STT models invent text on
+silence and noise ("E aí", "Obrigado por assistir", "Legendas pela comunidade Amara.org"). The gateway asks the provider
+for segment metadata when it can (`no_speech_prob`, `avg_logprob`, `compression_ratio`), drops what the metadata or the
+blocklist marks as invented, and answers `{"text":""}` (still `200`; the client treats it as "nothing heard"):
+
+| | |
+|---|---|
+| response header `X-STT-Filtered` | reason codes, comma separated (`no_speech_prob`, `compression_ratio`, `avg_logprob`, `blocklist`, `blocklist_corroborated`); never transcript text. Also set when only some segments were trimmed |
+| response header `X-STT-Raw-Length` | length in characters of what the provider returned |
+| multipart field `filter_hallucinations=false` | per-request opt-out (QA); `0`/`off` also accepted. Such answers are cached apart from filtered ones |
+| `language` | `pt`, `pt-BR` or `Portuguese` (codes and English/native names). Without it only the high-confidence phrases apply |
+| `response_format=verbose_json` | `language`, `duration` and the kept `segments` are returned next to `text` |
+| env `STT_HALLUCINATION_FILTER=0` | turns the filter off for the whole gateway |
+| env `STT_FILTER_NO_SPEECH_PROB` (0.6), `STT_FILTER_AVG_LOGPROB` (-1.0), `STT_FILTER_COMPRESSION_RATIO` (2.4), `STT_FILTER_AMBIGUOUS_NO_SPEECH_PROB` (0.4) | thresholds, no deploy of code needed (design choices to pilot) |
+
+A filtered (empty) answer is never cached. `GET /health` carries `sttFilter` (`answered`, `filtered`, `partial`,
+`withMetadata`, `byReason`, `filteredRate`); filtered answers log reasons and lengths only, never the text.
+Entry points, what each filters and how: [docs/stt-hallucination-filter.md](../stt-hallucination-filter.md).
 
 ### `POST /v1/chat/completions`
 
@@ -389,7 +419,7 @@ production namespace (`default` on Railway).
 | `GET` | `/v1/deployments/:name` | status + replicas |
 | `DELETE` | `/v1/deployments/:name` | release every replica and forget the spec |
 | `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) |
-| any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it) |
+| any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it). Raw passthrough: the STT hallucination filter does NOT apply here (use `/v1/audio/transcriptions` or `/v1/s2s`) |
 | `GET` | `/v1/profiles` | built-in + stored profiles (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`, …) |
 | `PUT` / `DELETE` | `/v1/profiles/:name` | store / delete a profile |
 
