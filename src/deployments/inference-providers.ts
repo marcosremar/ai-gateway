@@ -70,8 +70,12 @@ async function callReplica(
       signal: AbortSignal.any([AbortSignal.timeout(opts.timeoutMs ?? 120_000), ...(signal ? [signal] : [])]),
     });
   } catch (err) {
-    lease.done(true);
     const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    // The caller aborting (a hedged fallback won, the client left, the stage budget ran out) says nothing about the
+    // replica; a timeout means busy; only a connection failure makes it suspect (live QA 2026-10-07: 15 hedge losers
+    // counted as failures marked a working L40S unhealthy and it was replaced).
+    const callerTimedOut = (signal?.reason as { name?: string } | undefined)?.name === 'TimeoutError';
+    lease.done(signal?.aborted && !callerTimedOut ? 'cancelled' : timedOut ? 'timeout' : true);
     throw new DeploymentCallError(timedOut ? 504 : 502, `deployment '${name}': replica ${timedOut ? 'timed out' : 'unreachable'}`,
       timedOut ? 'timeout' : 'unreachable');
   }

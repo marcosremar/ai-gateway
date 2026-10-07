@@ -17,7 +17,7 @@ import { CooldownTracker } from '../../providers/cloud/fallback';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
 import {
   describeFailure, errorResponse, failureCode, type FailureCodes, isClientErrorStatus, originHeaders, proxyCircuitBreakers, ProviderUnavailableError, providerUnavailableResponse,
-  redactSecrets, runTargets, selectTargets, stageBudgetMs, isNeutralFailure, TargetHealth, isRateLimited, markRateLimited, retryAfterOf,
+  redactSecrets, runTargets, selectTargets, chatBudgetMs, isNeutralFailure, TargetHealth, isRateLimited, markRateLimited, retryAfterOf,
 } from '../provider-routing';
 import { RequestCoalescer } from '../middleware/request-coalescer';
 import { ProviderSemaphores } from '../middleware/semaphore';
@@ -82,9 +82,11 @@ export async function handleChatCompletions(
     return { status: 400, body: { error: { message: 'max_tokens must be between 1 and 128000', type: 'invalid_request_error' } } };
   }
   const hasImage = messagesContainImage(messages as unknown[]);
-  const requestTimeoutMs = hasImage ? 90_000 : 15_000;
   // Whole chain (deployment + fallbacks) must answer before the client gives up; vision requests get their own time.
-  const budgetMs = hasImage ? requestTimeoutMs : stageBudgetMs('chat');
+  // A long non-stream answer gets a budget that grows with max_tokens (`chatBudgetMs`), and its attempts as long.
+  const textBudgetMs = chatBudgetMs(max_tokens, stream);
+  const requestTimeoutMs = hasImage ? 90_000 : Math.max(15_000, textBudgetMs);
+  const budgetMs = hasImage ? requestTimeoutMs : textBudgetMs;
 
   // ── beforeRequest guardrails ───────────────────────────────────────────────
   if (guardrails) {

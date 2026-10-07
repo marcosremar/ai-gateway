@@ -28,7 +28,7 @@ import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppFallbackService } from './app-fallback';
 import type { ClientStabilityLog } from './stability';
-import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
+import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
@@ -72,19 +72,26 @@ export function healthBodyReady(body: unknown): boolean {
   return ['stt', 'llm', 'tts'].every(stage => stageReady((body as Record<string, unknown>)[stage]));
 }
 
-/** Probe over the replica's nginx front: boot finished (`/__aigw/ready`) AND the app still answers its health path. */
+/**
+ * Probe over the replica's nginx front: boot finished (`/__aigw/ready`, liveness — nginx answers it even while the app
+ * is saturated) AND the app still answers its health path (readiness). `timeoutMs` per call: DEPLOYMENTS_PROBE_TIMEOUT_MS.
+ */
 export class HttpReplicaProbe implements ReplicaProbe {
   constructor(private readonly timeoutMs = 4_000, private readonly fetchImpl: typeof fetch = fetch) {}
 
   async ready(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<boolean> {
-    if (!machine.ip) return false;
+    return (await this.check(machine, spec, token)) === 'ready';
+  }
+
+  async check(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult> {
+    if (!machine.ip) return 'down';
     const headers = { 'X-Aigw-Token': token };
     const get = (path: string) => this.fetchImpl(`${replicaBase(machine, !!spec.exposure)}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
-    const marker = await get('/__aigw/ready');
-    if (!marker.ok) return false;
-    const health = await get(spec.healthPath);
-    if (!health.ok) return false;
-    return healthBodyReady(await health.json().catch(() => null));
+    const marker = await get('/__aigw/ready').catch(() => null);
+    if (!marker?.ok) return 'down';
+    const health = await get(spec.healthPath).catch(() => null);
+    if (!health?.ok) return 'busy';
+    return healthBodyReady(await health.json().catch(() => null)) ? 'ready' : 'busy';
   }
 }
 
@@ -323,7 +330,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         // Declared deployments are the operator's (gateway-wide): not shown to an app-scoped caller.
         // `scope: "all"` = the full list (admin, no app filter): the external reaper trusts only that (reaper.ts).
         return send(res, 200, {
-          namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(), deployments,
+          // An app key sees its own deployments' counts and bill, never the namespace's (QA 2026-10-07).
+          namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(own ?? undefined), deployments,
           ...(opts.declaredStatus && !own ? { declared: opts.declaredStatus() } : {}),
         });
       }

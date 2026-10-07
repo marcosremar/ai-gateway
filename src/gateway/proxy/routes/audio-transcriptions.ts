@@ -9,8 +9,11 @@
  * Hallucination filter (stt-filter.ts): every answer, whichever provider served it, goes through
  * src/stt-hallucination-filter.ts before the client or the cache sees it. A filtered answer is `{"text":""}` with
  * `X-STT-Filtered` (reason codes) and `X-STT-Raw-Length`; it is never cached. Off by env `STT_HALLUCINATION_FILTER=0`
- * or per request by the multipart field `filter_hallucinations=false`.
+ * or per request by the multipart field `filter_hallucinations=false`. Every 200 carries `X-STT-Filtered` so a client can
+ * count: the reason codes, `none` when the answer was kept, `off` when the filter did not run (QA 2026-10-07: the header
+ * appeared only on filtered answers, so a client could not tell "kept" from "not filtered by this gateway").
  */
+
 
 import { createHash } from 'crypto';
 import { createLogger } from '../../../logger';
@@ -26,6 +29,11 @@ import {
 } from '../provider-routing';
 
 const sttCooldownTracker = new CooldownTracker();
+
+/** `X-STT-*` of an answer the filter kept (`none`) or did not judge (`off`). */
+function sttFilterHeaders(filterOn: boolean, rawLength: number): Record<string, string> {
+  return { 'X-STT-Filtered': filterOn ? 'none' : 'off', 'X-STT-Raw-Length': String(rawLength) };
+}
 
 // ── STT response cache ──────────────────────────────────────────────────
 const STT_CACHE_TTL_MS = 5 * 60_000;
@@ -127,7 +135,7 @@ export async function handleAudioTranscriptions(
     try { primary?.prewarm?.(); } catch { /* best effort */ }
     return {
       status: 200,
-      headers: { 'X-Cache': 'HIT', 'X-Gateway-Provider': 'cache' },
+      headers: { 'X-Cache': 'HIT', 'X-Gateway-Provider': 'cache', ...sttFilterHeaders(filterOn, cached.length) },
       body: { text: cached },
     };
   }
@@ -166,7 +174,7 @@ export async function handleAudioTranscriptions(
 
     const filterHeaders: Record<string, string> = applied.filtered
       ? { 'X-STT-Filtered': applied.filtered.codes.join(',').slice(0, 120), 'X-STT-Raw-Length': String(applied.filtered.rawLength) }
-      : {};
+      : sttFilterHeaders(filterOn, (result.text ?? '').length);
     // verbose_json asked by the client: the metadata passes through (only the segments the filter kept).
     const verbose = body.response_format === 'verbose_json'
       ? { language: applied.response.language, duration: applied.response.duration, segments: applied.response.segments }

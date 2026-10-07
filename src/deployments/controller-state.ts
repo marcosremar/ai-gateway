@@ -21,7 +21,27 @@ export class DeploymentError extends Error {
   }
 }
 
-export interface ProbeState { everReady: boolean; readyNow: boolean; failures: number; readyAt?: number }
+export interface ProbeState {
+  everReady: boolean;
+  readyNow: boolean;
+  failures: number;
+  readyAt?: number;
+  /** Last time the replica answered a forwarded request (lease ended `ok`): a replica that just served is alive. */
+  lastServedAt?: number;
+  /**
+   * Alive but saturated: its health check timed out (or a request hit its time limit) while it had work. It keeps
+   * serving what it has and gets no NEW request beyond `targetInflightPerReplica` until a probe answers again; it is
+   * never released for this (live QA 2026-10-07: 16 concurrent chats made the L40S `unhealthy` and it was replaced).
+   */
+  busy?: boolean;
+}
+
+/**
+ * How a forwarded request ended, as `Lease.done` hears it. `true`/`'failed'` = connection-level failure (refused,
+ * reset); `'timeout'` = the replica took longer than the caller's limit (busy, not dead); `'cancelled'` = the caller
+ * gave up for its own reasons (a hedged fallback won, the client went away) and says nothing about the replica.
+ */
+export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled';
 
 export interface Runtime {
   record: DeploymentRecord;
@@ -43,6 +63,10 @@ export interface Runtime {
   lastPlacement: string | null;
   /** Hosts the RTT gate released since the last replica that passed it (kept in `lastPlacement` across creates). */
   rejected: string[];
+  /** Requests turned away with no ready replica (cold, or every replica saturated), by time: demand the fallback took. */
+  refusedAt: number[];
+  /** Highest recent load (served + waiting + just refused) and when: what scale-up plans on (`demandOf`). */
+  demandPeak: { value: number; at: number };
 }
 
 export interface ControllerOptions {
@@ -66,6 +90,13 @@ export interface ControllerOptions {
   reconcileMs?: number;
   /** Replicas kept only by `minReplicas` go to zero after this long unused (planner `pinnedIdleOver`); 0 = off. */
   pinnedIdleMaxMs?: number;
+  /**
+   * A replica that answered a request this recently is never released as unhealthy, whatever its probe says (a busy
+   * LLM queue delays the health check, it does not mean death). Default 120 s (DEPLOYMENTS_BUSY_GRACE_SECONDS).
+   */
+  busyGraceMs?: number;
+  /** Consecutive failed probes (with no recent answer and nothing in flight) before a replica is replaced. Default 3. */
+  unhealthyStrikes?: number;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
@@ -75,13 +106,24 @@ export interface Lease {
   token: string;
   /** The deployment is exposed (`exposure`): its token-gated front is on `PROBE_PORT`, not :80. */
   exposed: boolean;
-  /** Call once the forwarded request finished. `failed` = connection-level failure (marks the replica suspect). */
-  done(failed?: boolean): void;
+  /**
+   * Call once the forwarded request finished. `true`/`'failed'` = connection-level failure (marks the replica suspect),
+   * `'timeout'` = it was too slow (busy), `'cancelled'` = the caller aborted it (hedge lost, client gone): neutral.
+   */
+  done(failed?: boolean | LeaseOutcome): void;
 }
 
 export const DEFAULT_MAX_STOPPED = 8;
 export const DEFAULT_MAX_EUR_PER_HOUR = 6;
 export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
+export const DEFAULT_BUSY_GRACE_MS = 120_000;
+/**
+ * A request turned away for lack of a ready replica counts as load for this long (≈ the time the fallback takes to
+ * answer it, Little's law with W ≈ 2 s): 16 refused at once read as 16 concurrent, one a second as ~2.
+ */
+export const REFUSED_HOLD_MS = 2_000;
+/** Scale-up remembers the peak load this long: a burst whose hedged requests end in 2 s is still seen by the next tick. */
+export const DEMAND_MEMORY_MS = 60_000;
 
 /** Powered off by the provider's normal stop (not billed for compute): a parked replica under `idleAction: 'stop'`. */
 export function isParked(m: ReplicaMachine): boolean {
@@ -155,7 +197,7 @@ export abstract class ControllerState {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
-      lastPlacement: null, rejected: [], spendNote: null,
+      lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
     };
   }
 
@@ -170,13 +212,45 @@ export abstract class ControllerState {
       && replicaPhase(this.observed(m, 0)) === 'ready');
   }
 
+  /** Answered a forwarded request within `busyGraceMs`. */
+  protected servedRecently(p: ProbeState | undefined): boolean {
+    return p?.lastServedAt != null && this.now() - p.lastServedAt < (this.opts.busyGraceMs ?? DEFAULT_BUSY_GRACE_MS);
+  }
+
+  /** Requests refused in the last `REFUSED_HOLD_MS` (older ones pruned). */
+  protected recentRefusals(rt: Runtime): number {
+    const since = this.now() - REFUSED_HOLD_MS;
+    while (rt.refusedAt.length && rt.refusedAt[0] < since) rt.refusedAt.shift();
+    return rt.refusedAt.length;
+  }
+
+  /** Records the load seen right now; the peak is kept for `DEMAND_MEMORY_MS`. */
+  protected noteDemand(rt: Runtime): void {
+    const load = rt.inflight + rt.waiting + this.recentRefusals(rt);
+    const now = this.now();
+    if (load >= rt.demandPeak.value || now - rt.demandPeak.at >= DEMAND_MEMORY_MS) rt.demandPeak = { value: load, at: now };
+  }
+
+  /**
+   * The load scale-up plans on: what runs now, or the recent peak. Sampling `inflight` alone at the tick missed every
+   * burst (live QA 2026-10-07: 16–40 concurrent, `desired` stayed 1 — hedged requests had ended, cold ones had fallen back).
+   */
+  protected demandOf(rt: Runtime): number {
+    const now = rt.inflight + rt.waiting + this.recentRefusals(rt);
+    const peak = this.now() - rt.demandPeak.at < DEMAND_MEMORY_MS ? rt.demandPeak.value : 0;
+    return Math.max(now, peak);
+  }
+
   protected observed(m: ReplicaMachine, inflight: number): ObservedReplica {
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
     // A parked replica powered back on boots again: its boot (timeout, booting phase) AND its `maxHours` lifetime count
     // from the last power-on, not from the day the machine was created (a parked replica is not running).
     const startedAt = this.poweredOnAt.get(m.id);
     const machine = startedAt !== undefined ? { ...m, createdAt: Math.max(m.createdAt, startedAt) } : m;
-    return { machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight, ...(p.readyAt ? { readyAt: p.readyAt } : {}) };
+    return {
+      machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight,
+      ...(p.readyAt ? { readyAt: p.readyAt } : {}), ...(this.servedRecently(p) ? { servedRecently: true } : {}),
+    };
   }
 
   protected parkedNow(m: ReplicaMachine): boolean {

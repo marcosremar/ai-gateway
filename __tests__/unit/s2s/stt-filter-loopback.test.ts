@@ -47,5 +47,12 @@ describe('s2s composed path inherits the STT filter through the loopback route',
     const { seen, events } = await run('E aí.', { language: 'pt', filter_hallucinations: false });
     expect(seen[0].filter).toBe('false');
     expect(events[0]).toMatchObject({ text: 'E aí.' });
+    expect(events.some(e => e.type === 'filtered')).toBe(false); // `X-STT-Filtered: off`
+  });
+
+  it('a kept transcript (`X-STT-Filtered: none`, on every answer since 2026-10-07) is not a `filtered` event', async () => {
+    const { events } = await run('Bom dia.', { language: 'pt' });
+    expect(events[0]).toMatchObject({ type: 'transcript', text: 'Bom dia.' });
+    expect(events.some(e => e.type === 'filtered')).toBe(false);
   });
 });

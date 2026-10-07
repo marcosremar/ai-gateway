@@ -88,6 +88,21 @@ describe('deployments API', () => {
     expect(site.declared).toBeUndefined();
   });
 
+  it('GET /v1/deployments: an app key sees health of its own deployments only, never the namespace (QA 2026-10-07)', async () => {
+    await call(h, 'PUT', '/v1/deployments/mine', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, AS_SITE);
+    await call(h, 'PUT', '/v1/deployments/other', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, { 'x-app': 'site-b' });
+    await call(h, 'PUT', '/v1/deployments/ops', { profile: 'cpu-echo', minReplicas: 1 });
+    await until(() => h.cloud.machines.size === 3);
+    await until(() => h.controller.health().running === 3);
+    type Health = { deployments: number; replicas: number; running: number; eurPerHour: number; listError: unknown; maxReplicas: number };
+    const site = await (await call(h, 'GET', '/v1/deployments', undefined, SITE)).json() as { health: Health; deployments: Array<{ name: string }> };
+    expect(site.deployments.map(d => d.name)).toEqual(['mine']);
+    expect(site.health).toMatchObject({ deployments: 1, replicas: 1, running: 1, eurPerHour: 0.01, listError: null });
+    expect(site.health.maxReplicas).toBe(h.controller.health().maxReplicas); // the gateway's limit, the same for all
+    const admin = await (await call(h, 'GET', '/v1/deployments')).json() as { health: Health };
+    expect(admin.health).toMatchObject({ deployments: 3, replicas: 3, running: 3, eurPerHour: 0.03 });
+  });
+
   it('lists built-in profiles and stores new ones', async () => {
     const names = ((await (await call(h, 'GET', '/v1/profiles')).json()) as { profiles: { name: string }[] }).profiles.map(p => p.name);
     expect(names).toEqual(expect.arrayContaining(['qwen3-tts', 'qwen3-tts-clone', 'cpu-echo']));

@@ -100,10 +100,13 @@ export abstract class ReconcileLoop extends ParkingControl {
         spec: rt.record.spec,
         replicas: mine.map(m => this.observed(m, rt.perReplica.get(m.id) ?? 0)),
         inflight: rt.inflight,
+        // Recent peak, not the instant: a burst served by hedges or refused while cold still asks for capacity.
+        demand: this.demandOf(rt),
         waiting: rt.waiting,
         lastRequestAt: rt.record.lastRequestAt,
         aboveSince: rt.aboveSince,
         now: this.now(),
+        ...(this.opts.unhealthyStrikes ? { unhealthyStrikes: this.opts.unhealthyStrikes } : {}),
         ...(this.opts.pinnedIdleMaxMs ? { pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt } : {}),
       });
       rt.aboveSince = plan.aboveSince;

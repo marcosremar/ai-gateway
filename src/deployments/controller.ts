@@ -14,7 +14,7 @@
 
 import { randomBytes } from 'crypto';
 import { replicaCloudInit } from './cloud-init';
-import { DeploymentError, type Lease, type Runtime } from './controller-state';
+import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './controller-state';
 import { ControllerViews } from './controller-views';
 import { isExpiring } from './expiry';
 import { BUILTIN_PROFILES } from './profiles';
@@ -23,6 +23,7 @@ import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, Replica
 
 export {
   DeploymentError, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
+  type LeaseOutcome,
 } from './controller-state';
 
 export class DeploymentController extends ControllerViews {
@@ -120,6 +121,8 @@ export class DeploymentController extends ControllerViews {
     rt.record.lastRequestAt = null;
     rt.lastPersistedRequestAt = null;
     rt.aboveSince = null;
+    rt.refusedAt = [];
+    rt.demandPeak = { value: 0, at: 0 };
     await this.opts.store.saveDeployment(rt.record);
     this.kick();
     return this.view(name)!;
@@ -131,7 +134,11 @@ export class DeploymentController extends ControllerViews {
     // A host about to be taken back (`expiry.ts`) only serves while nothing else can: new requests drain it.
     const now = this.now();
     const lasting = ready.filter(m => !isExpiring(m, now));
-    return (lasting.length ? lasting : ready).reduce((best, m) => ((rt.perReplica.get(m.id) ?? 0) < (rt.perReplica.get(best.id) ?? 0) ? m : best));
+    // A busy replica (health check timed out under load) keeps its work but takes nothing beyond its target.
+    const target = rt.record.spec.targetInflightPerReplica;
+    const open = (lasting.length ? lasting : ready).filter(m => !this.probes.get(m.id)?.busy || (rt.perReplica.get(m.id) ?? 0) < target);
+    if (!open.length) return null;
+    return open.reduce((best, m) => ((rt.perReplica.get(m.id) ?? 0) < (rt.perReplica.get(best.id) ?? 0) ? m : best));
   }
 
   /**
@@ -147,6 +154,8 @@ export class DeploymentController extends ControllerViews {
     const { spec } = rt.record;
     if (spec.paused) throw new DeploymentError(409, `deployment '${name}' is paused`);
     if (opts.noWake && !this.pick(rt, opts.exclude ?? new Set<string>())) {
+      // A saturated (not cold) deployment still sees the demand, so it scales out; a cold one stays untouched.
+      if (this.readyMachines(name).length) { rt.refusedAt.push(this.now()); this.noteDemand(rt); }
       throw new DeploymentError(503, `deployment '${name}': no ready replica (no-wake: not woken)`, 30);
     }
     rt.record.lastRequestAt = this.now();
@@ -174,6 +183,9 @@ export class DeploymentController extends ControllerViews {
       }
     }
     if (!machine) {
+      rt.refusedAt.push(this.now());
+      this.noteDemand(rt);
+      if (this.demandOf(rt) > spec.targetInflightPerReplica * this.readyMachines(name).length) this.kick();
       const msg = rt.lastError ? `no ready replica yet (last error: ${rt.lastError})` : 'replicas are starting';
       throw new DeploymentError(503, `deployment '${name}': ${msg}`, 30);
     }
@@ -181,6 +193,7 @@ export class DeploymentController extends ControllerViews {
     rt.inflight++;
     rt.perReplica.set(machine.id, (rt.perReplica.get(machine.id) ?? 0) + 1);
     rt.record.lastRequestAt = this.now();
+    this.noteDemand(rt);
     if (rt.inflight > spec.targetInflightPerReplica * this.readyMachines(name).length) this.kick();
     const chosen = machine;
     let released = false;
@@ -188,20 +201,31 @@ export class DeploymentController extends ControllerViews {
       machine: chosen,
       token: rt.record.replicaToken,
       exposed: !!rt.record.spec.exposure,
-      done: (failed = false) => {
+      done: (failed: boolean | LeaseOutcome = false) => {
         if (released) return;
         released = true;
         rt.inflight--;
         const n = (rt.perReplica.get(chosen.id) ?? 1) - 1;
         if (n <= 0) rt.perReplica.delete(chosen.id); else rt.perReplica.set(chosen.id, n);
         rt.record.lastRequestAt = this.now();
-        if (failed) {
-          const p = this.probes.get(chosen.id);
-          if (p) { p.readyNow = false; p.failures++; }
-          this.kick();
-        }
+        this.leaseEnded(chosen.id, failed === true ? 'failed' : failed === false ? 'ok' : failed);
       },
     };
+  }
+
+  /**
+   * What one request says about its replica. `ok`: alive (the busy grace starts). `timeout`: slow, so busy — never a
+   * strike (live QA 2026-10-07: hedged losers aborted under 16 concurrent chats counted as connection failures, 3 of
+   * them marked the L40S unhealthy in seconds). `cancelled`: nothing. `failed`: suspect, unless it just answered others.
+   */
+  private leaseEnded(id: string, outcome: LeaseOutcome): void {
+    const p = this.probes.get(id);
+    if (!p || outcome === 'cancelled') return;
+    if (outcome === 'ok') { p.lastServedAt = this.now(); p.failures = 0; return; }
+    if (outcome === 'timeout' || this.servedRecently(p)) { p.busy = true; return; }
+    p.readyNow = false;
+    p.failures++;
+    this.kick();
   }
 
   private persistRequestTime(rt: Runtime): void {

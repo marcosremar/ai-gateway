@@ -140,11 +140,27 @@ curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # ima
 
 ## Scaling rules (`planner.ts`)
 
-`desired = clamp(max(base, ceil((inflight + waiting) / targetInflightPerReplica)), minReplicas, maxReplicas)`,
-`base = max(minReplicas, 1)` while there was a request in the last `idleMinutes`, else `minReplicas`.
-Surplus replicas go after `scaleDownDelaySeconds` of low load (at once when idle), never one with requests in flight.
-Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, 3 failed health checks in a row,
-older than `maxHours` (counted from the last power-on of a parked replica, not from its creation). Safety: price
+`desired = clamp(max(base, ceil(load / targetInflightPerReplica)), minReplicas, maxReplicas)`,
+`base = max(minReplicas, 1)` while there was a request in the last `idleMinutes`, else `minReplicas`. `load` is
+`inflight + waiting`, or while active the peak of the last 60 s, where a request turned away for lack of a ready replica
+(cold, or every replica saturated) counts for 2 s: a burst of 16 hedged or cold requests still asks for a second
+replica after it ended (live QA 2026-10-07: under 16–40 concurrent the count stayed at 1).
+Surplus replicas go after `scaleDownDelaySeconds` of low load (at once when idle), never one with requests in flight,
+and never one still booting: the boot finishes and the idle clock runs from its ready time (only a delete, pause, park
+or `bootTimeoutMinutes` end a boot early; live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of a 9 min boot).
+Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, `DEPLOYMENTS_UNHEALTHY_STRIKES`
+(3) failed health checks in a row with nothing in flight and no answered request in the last
+`DEPLOYMENTS_BUSY_GRACE_SECONDS` (120), older than `maxHours` (counted from the last power-on of a parked replica, not
+from its creation).
+
+**Busy is not dead.** The probe tells liveness (`/__aigw/ready`, answered by nginx even while the app is saturated) from
+readiness (the app's health path, `DEPLOYMENTS_PROBE_TIMEOUT_MS`, 4 s). A replica whose health check times out while it
+has work, or that answered a request recently, is `busy` (shown per replica in the view): it keeps what it serves, gets no
+new request beyond `targetInflightPerReplica` (the rest falls back and counts as load for scale-out), and is never
+replaced for it. A request the caller aborted (a hedged fallback won, the client left) is neutral, a request that hit
+its time limit marks the replica busy; only a connection failure is a strike. Live QA 2026-10-07: 16 concurrent chats on
+one L40S were 15 hedge losers counted as connection failures, plus health checks queued behind the LLM: the replica was
+replaced twice, 9 min of boot each. Safety: price
 checked against `maxEurPerHour` before each create, `DEPLOYMENTS_MAX_REPLICAS` across all deployments, back-off after a
 failed create (1 → 10 min). More cost guards below.
 
@@ -378,6 +394,13 @@ Gateway run with only `SANDBOX_TOKEN` in its environment (`bun serve.ts`), names
 Found by this run and fixed: under Bun, the proxy's `server.setTimeout` (60 s) is a hard idle cut that
 `socket.setTimeout(0)` cannot lift, so a cold-start wait died at 60 s. With deployments on, `serve.ts` raises it to
 15 min unless `PROXY_TOTAL_TIMEOUT_MS` is set (`proxyIdleTimeoutMs`).
+
+**Releasing a Scaleway replica.** The GPU OS images boot from SBS volumes, and Scaleway refuses `terminate` for those and
+answers DELETE with `400 resource_still_in_use` ("instance should be powered off") until the server is `stopped`. The
+release powers it off, polls its state every `SCALEWAY_POWEROFF_POLL_MS` (5 s) for at most `SCALEWAY_POWEROFF_WAIT_MS`
+(180 s), then deletes it — retrying while the API still says in use — and its volumes. The gateway does not wait for
+that (its loop goes on once the power-off was asked; a second release of the same server joins the first); the reaper
+does. Before 2026-10-07 every release logged the 400 and the server went only on a later tick.
 
 ## Tests
 

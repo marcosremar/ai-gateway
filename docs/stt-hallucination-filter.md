@@ -35,13 +35,27 @@ answered as if the student had spoken. The filter lives in the gateway so that e
      only when the answer's `no_speech_prob` >= 0.4;
    - learner-safe words ("sim", "não", "oi", "obrigado", "tchau", "bom dia", "merci", "oui"…) are never dropped by the blocklist alone.
 
-Measured on 220 plausible A1 utterances (`__tests__/unit/stt-filter/a1-utterances.json`): 0 dropped by the blocklist.
-Known cost: a learner who says exactly "E aí" is dropped.
+3. Pattern layer (`src/stt-hallucination-patterns.ts`, high confidence, any language; QA 2026-10-07 on Whisper large-v3:
+   "Legenda por Sônia Ruberti" over room tone and music, "E aí ♫ E aí E aí…" over keyboard clicks both passed the blocklist):
+   - `pattern_credits`: a subtitle/caption credit line of at most 12 words — "Legenda(s) por/pela…", "Legendado por…",
+     "Legendas pela comunidade…", "Sous-titres réalisés par…", "Sous-titrage…", "Subtitles/Captions by…", "Subtítulos por/realizados
+     por…", "Subtitulado por…" (regex on the normalized text, so any name follows; "legenda, por favor" is not one);
+   - `music`: text wrapped in ♪♫, mostly made of them, or carrying them around a loop;
+   - `repetition`: the same 1–3-word phrase repeated back to back covering ≥ 70 % of the words — 3 repeats of a 2–3-word
+     phrase, 4 of a single word ("sim sim", "não, não" and "sim, sim, sim" stay).
+   Off with the config field `patternFilterEnabled: false` (the env switch `STT_HALLUCINATION_FILTER=0` turns all layers off).
+
+Measured on 242 plausible A1 utterances (`__tests__/unit/stt-filter/a1-utterances.json`, repeated answers such as "sim sim",
+"não, não", "oui, oui, oui" and "legenda, por favor" added on 2026-10-07): 0 dropped by the blocklist and the patterns.
+Known cost: a learner who says exactly "E aí" is dropped; so is a word said four times in a row, or a phrase three times.
+
+Every `200` of the STT route carries `X-STT-Filtered`: the reason codes, `none` when the answer was kept, `off` when the
+filter did not run, plus `X-STT-Raw-Length` — so a client can count kept / filtered / unfiltered answers.
 
 ## Design choices to pilot and pre-register
 
-The thresholds (-1.0 instead of the library's -0.8, 0.4 for ambiguous phrases), the 6-word cut, the learner-safe list and the
-ALWAYS_BLOCK list are design choices, not published values. They should be piloted against recorded silent and real clips
+The thresholds (-1.0 instead of the library's -0.8, 0.4 for ambiguous phrases), the 6-word cut, the learner-safe list, the
+ALWAYS_BLOCK list and the pattern limits (12-word credit lines, 70 % loop coverage, 3/4 repeats) are design choices, not published values. They should be piloted against recorded silent and real clips
 (false-drop rate on learner speech, false-keep rate on silence) and pre-registered before they count in a study. Each threshold
 has an env override (`docs/api/http.md`).
 

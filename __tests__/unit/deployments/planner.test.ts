@@ -89,13 +89,14 @@ describe('planReplicas', () => {
     expect(later.release.every(r => r.reason === 'scale-down')).toBe(true);
   });
 
-  it('removes booting replicas before ready ones and never one with requests in flight', () => {
+  it('never removes one with requests in flight, and lets a booting replica finish its boot (live QA 2026-10-07)', () => {
     const s = spec({ minReplicas: 1, maxReplicas: 3, scaleDownDelaySeconds: 0 });
     const plan = planReplicas({
       ...base, spec: s, lastRequestAt: NOW, inflight: 1,
       replicas: [replica('busy', { inflight: 1 }), replica('ready'), replica('boot', { everReady: false, readyNow: false })],
     });
-    expect(plan.release.map(r => r.id)).toEqual(['boot', 'ready']);
+    // Before: ['boot', 'ready'] — a boot already paid for was thrown away; it is removed once ready if still surplus.
+    expect(plan.release.map(r => r.id)).toEqual(['ready']);
   });
 
   it('going idle scales down to minReplicas at once', () => {

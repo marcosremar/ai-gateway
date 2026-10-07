@@ -120,7 +120,9 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
         const res = await f(`${opts.baseUrl}/v1/audio/transcriptions`, { method: 'POST', headers: auth, body: form, signal });
         if (!res.ok) throw await failure('stt', res);
         const payload = await res.json() as { text?: string };
-        const filtered = res.headers.get('x-stt-filtered');
+        // `none` (kept) and `off` (not judged) are on every answer: only reason codes mean something was removed.
+        const header = res.headers.get('x-stt-filtered');
+        const filtered = header && header !== 'none' && header !== 'off' ? header : null;
         return { ...served(res), text: payload.text ?? '', ...(filtered ? { filtered: filtered.split(',') } : {}) };
       }, signal);
     },

@@ -246,9 +246,18 @@ export interface DeploymentBackend {
 export interface CatalogEntry { zone: string; machineType: string; hourlyPrice: number | null; availability: string | null }
 
 /** How the controller reaches a replica's HTTP front. */
+/**
+ * Liveness and readiness apart: `down` = the replica's front (nginx `/__aigw/ready`) does not answer — the machine or
+ * its boot is not there; `busy` = the front answers but the app's health path does not (timeout, 5xx, a stage not
+ * ready) — warming during a boot, saturated once it served; `ready` = both answer.
+ */
+export type ProbeResult = 'ready' | 'busy' | 'down';
+
 export interface ReplicaProbe {
   /** `true` when the replica finished booting (`/__aigw/ready`) and the app answers its health path. */
   ready(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<boolean>;
+  /** Liveness + readiness in one answer (`ProbeResult`); probes without it are read as `ready` / `down`. */
+  check?(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult>;
 }
 
 export interface DeploymentStore {
@@ -269,6 +278,8 @@ export interface ReplicaView {
   pricePerHour: number | null;
   ageSeconds: number;
   inflight: number;
+  /** Ready but saturated (health check timed out while it had work): no new request beyond its target. */
+  busy: boolean;
   /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
   rttMs: number | null;
   /** Minutes until the provider takes the host back (Vast); null when it never does. */
