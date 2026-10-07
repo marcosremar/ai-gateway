@@ -50,7 +50,7 @@ export interface IceServerInit {
 }
 
 export type TransportOffer =
-  | { type: 'webrtc'; offerUrl: string; iceUrl?: string; iceServers?: IceServerInit[] }
+  | { type: 'webrtc'; offerUrl: string; iceUrl?: string; iceServers?: IceServerInit[]; iceTransportPolicy?: 'all' | 'relay' }
   | { type: 'ws'; url: string }
   | { type: 's2s-stream'; url?: string }
   | { type: 'post' };
@@ -85,7 +85,7 @@ export interface SessionRequest {
 export interface RealtimeTimeouts {
   /** Session request to the app's backend. */
   sessionMs: number;
-  /** ICE gathering before the offer is sent with what was gathered (non-trickle). */
+  /** Ceiling of ICE gathering: the offer goes at the first srflx/relay candidate, or here with what was gathered (non-trickle). */
   iceGatherMs: number;
   /** From the answer to a connected peer connection with an open data channel. */
   webrtcConnectMs: number;
