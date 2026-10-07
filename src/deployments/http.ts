@@ -388,6 +388,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         return send(res, 200, {
           // An app key sees its own deployments' counts and bill, never the namespace's (QA 2026-10-07).
           namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(own ?? undefined), deployments,
+          ...(own ? {} : { pendingNetworkReleases: controller.pendingNetworkReleases() }),
           ...(opts.declaredStatus && !own ? { declared: opts.declaredStatus() } : {}),
         });
       }

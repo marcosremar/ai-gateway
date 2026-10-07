@@ -13,7 +13,8 @@ import { DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
 import type { DeploymentBackend, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
 const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
-const NETWORK_RELEASE_RETRY_MS = 15_000;
+const NETWORK_RELEASE_QUICK_ATTEMPTS = 10;
+const NETWORK_RELEASE_SLOW_RETRY_MS = 5 * 60_000;
 const ORPHAN_RELEASE_ATTEMPTS = 6;
 const SPEND_RETRY_MS = 30_000;
 
@@ -100,17 +101,37 @@ export abstract class ReplicaLifecycle extends ControllerState {
     }
   }
 
-  /** The reserved IP and firewall go with the deployment; the IP detaches some time after its server is deleted. */
-  protected async releaseNetwork(name: string, network: NonNullable<DeploymentRecord['network']>): Promise<void> {
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
-        await this.backendOf('scaleway').releaseNetwork?.(network);
-        this.log('deployments: released network', { deployment: name, ip: network.ip });
-        return;
-      } catch (err) {
-        if (attempt === 9) this.log('deployments: release network failed', { deployment: name, error: err instanceof Error ? err.message : String(err) });
-        await new Promise(r => setTimeout(r, NETWORK_RELEASE_RETRY_MS));
+  private settlingNetworks = false;
+
+  /**
+   * The reserved IP and firewall go with the deployment; the IP detaches some time after its server is deleted. What is
+   * still owed is persisted with the delete (`networkReleases`), so every tick — of this process or of the one after a
+   * restart — tries again: each tick for the first attempts, then every few minutes for as long as it keeps failing.
+   */
+  protected async settleNetworkReleases(): Promise<void> {
+    if (this.settlingNetworks) return;
+    this.settlingNetworks = true;
+    try {
+      for (const [ipId, pending] of [...this.networkReleases]) {
+        const waited = this.now() - (pending.lastAttemptAt ?? -Infinity);
+        if (pending.attempts >= NETWORK_RELEASE_QUICK_ATTEMPTS && waited < NETWORK_RELEASE_SLOW_RETRY_MS) continue;
+        pending.attempts++;
+        pending.lastAttemptAt = this.now();
+        try {
+          await this.backendOf('scaleway').releaseNetwork?.(pending.network);
+          if (this.networkReleases.get(ipId) !== pending) continue;
+          this.networkReleases.delete(ipId);
+          await this.opts.store.deleteNetworkRelease(ipId);
+          this.log('deployments: released network', { deployment: pending.deployment, ip: pending.network.ip });
+        } catch (err) {
+          pending.lastError = err instanceof Error ? err.message : String(err);
+          if (pending.attempts >= NETWORK_RELEASE_QUICK_ATTEMPTS) {
+            this.log('deployments: release network failed', { deployment: pending.deployment, ip: pending.network.ip, attempts: pending.attempts, error: pending.lastError });
+          }
+        }
       }
+    } finally {
+      this.settlingNetworks = false;
     }
   }
 

@@ -32,7 +32,8 @@ export {
 
 export class DeploymentController extends ControllerViews {
   async init(): Promise<void> {
-    const { deployments, profiles } = await this.opts.store.load();
+    const { deployments, profiles, networkReleases } = await this.opts.store.load();
+    for (const pending of networkReleases ?? []) this.networkReleases.set(pending.network.ipId, pending);
     for (const p of BUILTIN_PROFILES) this.profiles.set(p.name, p);
     for (const p of profiles) this.profiles.set(p.name, p);
     for (const record of deployments) this.deployments.set(record.spec.name, this.runtime(record));
@@ -86,13 +87,17 @@ export class DeploymentController extends ControllerViews {
         void this.networkOf(existing, backend).catch((err) => { existing.lastError = `network: ${err instanceof Error ? err.message : String(err)}`; });
       }
     } else {
+      const owed = spec.exposure ? [...this.networkReleases.values()].find(p => p.deployment === name && p.network.zone === spec.zone) : undefined;
       const record: DeploymentRecord = {
         spec, replicaToken: randomBytes(24).toString('base64url'), createdAt: now, updatedAt: now, lastRequestAt: null,
         ...(meta.app ? { app: meta.app } : {}),
         ...(meta.appImage ? { appImage: meta.appImage } : {}),
+        ...(owed ? { network: owed.network } : {}),
       };
       this.deployments.set(name, this.runtime(record));
+      if (owed) this.networkReleases.delete(owed.network.ipId);
       await this.opts.store.saveDeployment(record);
+      if (owed) await this.opts.store.deleteNetworkRelease(owed.network.ipId);
     }
     this.kick();
     return { view: this.view(name)!, created: !existing };
@@ -103,11 +108,14 @@ export class DeploymentController extends ControllerViews {
     if (!rt) return false;
     this.deployments.delete(name);
     for (const w of rt.waiters) w();
-    await this.opts.store.deleteDeployment(name);
+    const { network } = rt.record;
+    const owed = network ? { deployment: name, network, since: this.now(), attempts: 0, lastAttemptAt: null, lastError: null } : undefined;
+    if (owed) this.networkReleases.set(owed.network.ipId, owed);
+    await this.opts.store.deleteDeployment(name, owed);
     const mine = this.machines.filter(m => m.deployment === name);
     this.machines = this.machines.filter(m => m.deployment !== name);
     await Promise.all(mine.map(m => this.release(m, 'deleted')));
-    if (rt.record.network) void this.releaseNetwork(name, rt.record.network);
+    if (owed) void this.settleNetworkReleases();
     return true;
   }
 

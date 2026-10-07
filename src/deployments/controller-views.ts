@@ -38,6 +38,13 @@ export abstract class ControllerViews extends ReconcileLoop {
     return { deployment: machine.deployment, replicaToken: rt.record.replicaToken, ...(rt.record.app ? { app: rt.record.app } : {}) };
   }
 
+  pendingNetworkReleases(): Array<{ deployment: string; ip: string; zone: string; since: string; attempts: number; lastError: string | null }> {
+    return [...this.networkReleases.values()].map(p => ({
+      deployment: p.deployment, ip: p.network.ip, zone: p.network.zone, since: new Date(p.since).toISOString(),
+      attempts: p.attempts, lastError: p.lastError,
+    }));
+  }
+
   /**
    * Counts plus the bill: what runs now, the € ceiling and the stopped replicas against their own cap. With `app`, only
    * that app's deployments are counted and the provider list error is withheld: an app key must not read the other
