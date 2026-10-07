@@ -6,7 +6,6 @@ import type { TTSProvider } from '../../providers/cloud/types';
 import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
 import { createLogger } from '../../../logger';
-import { localSay } from '../../pipeline/local-say';
 import {
   errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
 } from '../provider-routing';
@@ -93,13 +92,6 @@ export async function handleAudioSpeech(
       body: result.audio,
     };
   } catch (err) {
-    // Último recurso: sintetiza localmente com `say` (macOS) — dublagem nunca
-    // falha por falta de nuvem/GPU (mesma filosofia do whisper local no STT).
-    const local = await localSay(body.input as string, body.voice as string, '');
-    if (local) {
-      log.warn(`TTS local-say fallback (${local.audio.length}B) for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
-      return { status: 200, headers: { 'Content-Type': 'audio/wav', 'X-Gateway-Provider': 'local-say' }, body: local.audio };
-    }
     log.error(`TTS error for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
     return errorResponse(err, 'tts', model);
   }
