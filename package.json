@@ -13,7 +13,8 @@
     "./client": "./sdk/node/index.ts",
     "./voice": "./sdk/browser/voice/index.ts",
     "./compute": "./src/compute/index.ts",
-    "./*": "./src/*.ts"
+    "./logger": "./src/logger.ts",
+    "./types": "./src/types.ts"
   },
   "engines": {
     "bun": ">=1.4.2"

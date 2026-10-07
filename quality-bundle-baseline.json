@@ -35,9 +35,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "client": {
-    "raw": 86750,
-    "gzip": 20245,
-    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+    "raw": 125460,
+    "gzip": 30330,
+    "reason": "2026-10-07: the client entry now builds sdk/node (GatewayClient, the package's ./client export) instead of the deprecated src/client AIClient; size measured with a single-entry tsup build (esm, treeshake, es2017)"
   },
   "compute": {
     "raw": 4521,

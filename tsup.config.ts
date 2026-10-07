@@ -9,7 +9,8 @@ export default defineConfig({
     autoscaler: 'src/autoscaler/index.ts',
     'gpu-providers': 'src/gpu-providers/index.ts',
     handlers: 'src/handlers/index.ts',
-    client: 'src/client/index.ts',
+    // Same module as the package's `./client` export: the live GatewayClient SDK (src/client is the deprecated AIClient).
+    client: 'sdk/node/index.ts',
     tracking: 'src/tracking/index.ts',
     adapters: 'src/adapters/index.ts',
     auth: 'src/auth/index.ts',

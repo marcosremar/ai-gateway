@@ -139,9 +139,13 @@ describe('Browser Client Structure (#951-#958)', () => {
 
 describe('Migration / Compatibility (#959-#963)', () => {
 
-  it('#962 SDK types exported for consumers', () => {
+  it('#962 the client build entry is the same module as the ./client package export', () => {
     const tsup = read('tsup.config.ts');
-    expect(tsup).toContain("client: 'src/client/index.ts'");
+    const pkg = JSON.parse(read('package.json')) as { exports: Record<string, string> };
+    expect(pkg.exports['./client']).toBe('./sdk/node/index.ts');
+    expect(tsup).toContain("client: 'sdk/node/index.ts'");
+    // no wildcard: the package does not expose every file under src/
+    expect(pkg.exports['./*']).toBeUndefined();
   });
 
   it('#963 workloads entry point exported', () => {
