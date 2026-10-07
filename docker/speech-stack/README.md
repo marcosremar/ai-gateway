@@ -79,3 +79,54 @@ test) is decoded again alone with the temperature fallback, and clips over 30 s 
 of memory splits the batch in halves (a single clip retries 3×). `GET /health` reports `stt: {batches, clips, largest,
 oom_retries, fallbacks}`. Checked on CPU with Whisper tiny (`test_stt_batch.py`): four clips decoded together give the
 same text as one at a time, and silence comes back empty.
+
+## Tunables added 2026-10-07 (same models, same decoding)
+
+| Env | Default | Effect |
+|---|---|---|
+| `STT_BATCH_WINDOW_MS` | `25` (unchanged) | `0` now means: take what is already queued, never wait for more (before, `0` turned batching off). |
+| `CUT_EAGER` | `0` | `1`: a `!` or `?` at the end of the text so far cuts at once instead of waiting one more LLM token. A `.` still waits (`3.` may become `3.50`). |
+| `TTS_STAGE_OVERRIDES` | unset | JSON for `vllm serve --stage-overrides` (vLLM-Omni 0.28.0, `docs/serving/speech_api.md`); replaces `--gpu-memory-utilization`, so it must carry `gpu_memory_utilization` per stage. |
+| `TTS_DEPLOY_CONFIG` | unset | Path of a deploy YAML for `vllm serve --deploy-config` (connector fields such as `ref_code_context_frames` are not reachable through stage overrides). |
+| `LLM_EXTRA_ARGS` | unset | Extra `llama-server` flags, e.g. `-b 4096 -ub 2048` (prompt-eval batch; b11382 defaults are 2048 / 512). |
+| `S2S_DIR` | `/opt/s2s` | Directory uvicorn loads `server.py` from. |
+
+Always on: a WAV that is already PCM16 mono 16 kHz skips the ffmpeg subprocess; final transcriptions are taken before the
+partial decodes of `/ws/audio-stream`; closing that socket no longer decodes the buffer (a `flush` frame still does); the
+warm-up speaks one line with every catalog voice.
+
+llama.cpp b11382 already reuses the prompt prefix: `cache_prompt` defaults to `true` and an idle slot is chosen by
+prompt similarity (`--slot-prompt-similarity`, default 0.10), so the stack sends neither. What it reused is now visible.
+
+`/v1/s2s` metrics: `transcript.stt` = `{audio_ms, queue_ms, decode_ms, batch}`; `llm_first_token.llm` = llama.cpp
+`{cache_n, prompt_n, prompt_ms, …}`; `done.stages` = `stt_audio_ms`, `stt_queue_ms`, `stt_decode_ms`, `stt_batch`,
+`llm_first_token_ms` (from the transcript to the first token), `llm_cache_n`, `llm_prompt_n`, `llm_prompt_ms`,
+`llm_predicted_n`, `llm_predicted_ms`, `text_wait_ms` (first token → first sentence cut), `tts_first_chunk_ms` (cut → first
+PCM). Numbers only. `/v1/audio/transcriptions` returns the same four STT fields. `bench.py` prints p50/p95 of each stage.
+
+Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times; do python3 docker/speech-stack/test_$t.py; done`
+(numpy only; `git add -f` a new one, the repo's `TEST_*` ignore rule matches them on macOS).
+
+## Shipping server code without rebuilding the image
+
+The image keeps the models; the four files of `/opt/s2s` can come from the deployment's `files` (mounted read-only at
+`/files`, next to `voices.json`). `PUT /v1/deployments/parle-speech`:
+
+```json
+{
+  "entrypoint": "bash",
+  "args": ["/files/start.sh"],
+  "env": { "S2S_DIR": "/files" },
+  "files": {
+    "start.sh": "<base64>", "server.py": "<base64>", "stt_batch.py": "<base64>", "stt_stream.py": "<base64>",
+    "voices.json": "<base64>", "<every voice clip>": "<base64>"
+  }
+}
+```
+
+- `files` and `env` replace the stored ones as a whole (`buildSpec`): send the voice catalog and the current env again.
+- Budget: all files together ≤ 1 680 000 bytes (`MAX_FILES_BYTES`, 14 user_data keys of 120 000); the four code files are
+  about 45 KB. The cloud-init itself must stay under 127 998 bytes and is 3.5 KB with this spec.
+- It reaches machines created after the PUT. A running or parked replica keeps the boot it was created with.
+- Back to the image's own code: `"entrypoint": ""` is not accepted; PUT `"entrypoint": "bash", "args": ["/opt/s2s/start.sh"]`
+  and drop `S2S_DIR`.
