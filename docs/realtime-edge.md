@@ -102,7 +102,7 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 
 | Route | Body → answer |
 |---|---|
-| `POST /__aigw/rt/offer` | `{sdp, type:"offer", token, traceparent?}` → `{sdp, type:"answer", sessionId}`; 401 `unauthorized`, 503 `capacity` / `warming`, 400 `bad_request` |
+| `POST /__aigw/rt/offer` | `{sdp, type:"offer", token, traceparent?}` → `{sdp, type:"answer", sessionId}`; 401 `unauthorized`, 503 `capacity` / `warming`, 400 `bad_request`. Again with the same token while the session lives: a new peer connection for it (re-offer) |
 | `POST /__aigw/rt/ice` | `{sessionId, candidate}` (string or `{candidate, sdpMid, sdpMLineIndex}`; empty = end) — optional, the answer carries all candidates |
 | `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], probePort, net, ready, byTransport, workers}` (`transports` is `["ws"]` on path `ws`) |
 | `POST /__aigw/rt/net` | `{udpInbound:"ok"\|"blocked", rttMs, iceServers}` from the gateway's probe → the decision (see *Reachability*) |
@@ -112,7 +112,11 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 Token checks (the gateway's vectors, `tests/test_units.py`): HS256 only, constant-time signature, `exp > now`,
 `iat ≤ now + 60`, `exp − iat ≤ 900`, `cfg` ≤ 6144 chars and a JSON object, `rep` = this replica (`zone:uuid` also
 matches a bare `uuid`), `dep` = this deployment, `sid` single use **per transport** (remembered until `exp`): the SDK's ladder tries WebRTC
-then WS with the one token of its admission, and a new session of the same `sid` supersedes the previous one. Capacity is checked before
+then WS with the one token of its admission, and a new session of the same `sid` supersedes the previous one. The one exception to
+single use: an offer carrying the very token that opened a WebRTC session **still alive on this edge** is a re-offer (the browser
+changed network) — it gets a fresh peer connection under the same session object (history, turn in progress and queued events kept; the
+previous peer connection closed; `edge.session.reoffer`), on the worker that owns the session. A token of an ended session, another
+token of the same `sid`, or a `sid` that only lives on WS is still `replayed` (401). Capacity is checked before
 the token is consumed. Session limits: 15 min (`RT_MAX_SESSION_SECONDS`), 60 s of audio per turn
 (`RT_MAX_TURN_SECONDS`, the turn is cut there), `RT_IDLE_SECONDS` (120) without input.
 

@@ -77,6 +77,29 @@ def rejects_on(token_, transport):
 
 
 check("token: but each transport only once", rejects_on(ladder, "webrtc") and rejects_on(ladder, "ws"))
+
+
+def replayed(token_, live):
+    try:
+        v.verify(token_, transport="webrtc", live=live)
+    except TokenError as e:
+        return e.reason == "replayed"
+    return False
+
+
+alive = {"s-reoffer"}
+reoffer = sign({**good, "sid": "s-reoffer"}, key)
+v.verify(reoffer, transport="webrtc", live=alive.__contains__)
+check("token: the token that opened a live WebRTC session may offer again",
+      v.verify(reoffer, consume=False, transport="webrtc", live=alive.__contains__)["sid"] == "s-reoffer"
+      and v.verify(reoffer, transport="webrtc", live=alive.__contains__)["sid"] == "s-reoffer")
+check("token: another token of the same live sid is replayed",
+      replayed(sign({**good, "sid": "s-reoffer", "exp": good["exp"] - 1}, key), alive.__contains__))
+check("token: a re-offer without a live-session check is replayed", rejects_on(reoffer, "webrtc"))
+check("token: a live WebRTC session does not let its token open a second WS",
+      v.verify(reoffer, transport="ws")["sid"] == "s-reoffer" and rejects_on(reoffer, "ws"))
+alive.clear()
+check("token: once the session ended its token is replayed", replayed(reoffer, alive.__contains__))
 check("token: expired", rejects({**good, "sid": "s2", "iat": int(now) - 400, "exp": int(now) - 100}, "expired"))
 check("token: lifetime", rejects({**good, "sid": "s3", "exp": int(now) + 3600}, "ttl_too_long"))
 check("token: replica", rejects({**good, "sid": "s4", "rep": "fr-par-2:other"}, "replica"))

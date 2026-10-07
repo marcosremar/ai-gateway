@@ -36,6 +36,9 @@ class FakePc extends EventTarget {
   static last: FakePc;
   static candidates: Array<[number, string | null]> = [];
   static reconnects = true;
+  static made = 0;
+  index = FakePc.made++;
+  closed = false;
   iceGatheringState = 'new';
   connectionState = 'new';
   iceConnectionState = 'new';
@@ -68,7 +71,7 @@ class FakePc extends EventTarget {
   }
   async setRemoteDescription() {
     this.answers++;
-    if (this.answers === 1 || FakePc.reconnects) setTimeout(() => this.state('connected'), 5);
+    if (this.index === 0 || FakePc.reconnects) setTimeout(() => this.state('connected'), 5);
   }
   state(state: string) {
     this.connectionState = state;
@@ -79,7 +82,7 @@ class FakePc extends EventTarget {
   }
   edge(event: Record<string, unknown>) { this.channel.onmessage?.({ data: JSON.stringify(event) }); }
   async getStats() { return new Map(); }
-  close() {}
+  close() { this.closed = true; }
 }
 
 const OFFER = { type: 'webrtc' as const, offerUrl: 'https://gw/v1/realtime/sessions/rt_1/offer' };
@@ -91,10 +94,11 @@ function session(extra: Partial<RealtimeSessionOptions> = {}) {
   const events: RealtimeEvent[] = [];
   const telemetry: TelemetryEvent[] = [];
   const counts = { admissions: 0, mics: 0 };
+  const deleted: string[] = [];
   const offers: string[] = [];
   const wsSent: unknown[] = [];
-  const fetchImpl = (async (_url: string, init: RequestInit) => {
-    if (init.method === 'DELETE') return new Response(null, { status: 204 });
+  const fetchImpl = (async (url: string, init: RequestInit) => {
+    if (init.method === 'DELETE') { deleted.push(url); return new Response(null, { status: 204 }); }
     offers.push((JSON.parse(String(init.body)) as { sdp: string }).sdp);
     return offers.length > 1 && refuseReoffer.on ? Response.json({ error: { code: 'unauthorized' } }, { status: 401 }) : Response.json({ sdp: 'v=0\r\nanswer', type: 'answer' });
   }) as unknown as typeof fetch;
@@ -110,7 +114,7 @@ function session(extra: Partial<RealtimeSessionOptions> = {}) {
     telemetry: { send: false, onEvent: e => telemetry.push(e) },
     ...extra,
   });
-  return { s, events, telemetry, counts, offers, wsSent };
+  return { s, events, telemetry, counts, offers, wsSent, deleted };
 }
 
 function webrtc(c: TransportContext, offer: Partial<Extract<TransportOffer, { type: 'webrtc' }>> = {}) {
@@ -324,6 +328,7 @@ describe('network change during a WebRTC session', () => {
 
   async function live() {
     FakePc.candidates = [[2, 'srflx'], [4, null]];
+    FakePc.made = 0;
     const out = session();
     await out.s.connect();
     const pc = FakePc.last;
@@ -335,13 +340,20 @@ describe('network change during a WebRTC session', () => {
 
   const restarts = (telemetry: TelemetryEvent[]) => telemetry.filter(e => e.event === 'rt.ice.restart').map(e => e.attrs?.ok);
 
-  it('disconnected past the grace: ICE restart on the same peer connection, same session, nothing shown to the page', async () => {
-    const { s, events, telemetry, counts, offers, pc } = await live();
+  it('disconnected past the grace: a fresh peer connection re-offers on the same session, the old one is closed, nothing shown to the page', async () => {
+    const { s, events, telemetry, counts, offers, deleted, pc } = await live();
     pc.state('disconnected');
     await vi.waitFor(() => expect(restarts(telemetry)).toEqual([true]));
-    expect(pc.offers).toEqual([undefined, { iceRestart: true }]);
+    const next = FakePc.last;
+    expect(next).not.toBe(pc);
+    expect(pc.closed).toBe(true);
+    expect(next.closed).toBe(false);
+    expect([pc.offers, next.offers]).toEqual([[undefined], [undefined]]);
+    expect(offers).toHaveLength(2);
     expect(offers[1]).toMatch(/typ srflx/);
-    expect(FakePc.last).toBe(pc);
+    expect(deleted).toEqual([]);
+    s.updateHistory([]);
+    expect([pc.sent, next.sent]).toEqual([[], [{ type: 'config_update', messages: [] }]]);
     expect(counts.admissions).toBe(1);
     expect(s.transport).toBe('webrtc');
     expect(s.metrics.failovers).toBe(0);
@@ -351,14 +363,14 @@ describe('network change during a WebRTC session', () => {
   });
 
   it('a blip that heals inside the grace restarts nothing; failed restarts at once', async () => {
-    const { s, telemetry, pc } = await live();
+    const { s, telemetry, offers, pc } = await live();
     pc.state('disconnected');
     pc.state('connected');
     await new Promise(r => setTimeout(r, 30));
-    expect(pc.offers).toHaveLength(1);
+    expect(offers).toHaveLength(1);
     pc.state('failed');
     await vi.waitFor(() => expect(restarts(telemetry)).toEqual([true]));
-    expect(pc.offers).toHaveLength(2);
+    expect(offers).toHaveLength(2);
     s.close();
   });
 
@@ -385,8 +397,9 @@ describe('network change during a WebRTC session', () => {
     pc.edge({ type: 'transcript', text: 'Um pão', final: true });
     pc.state('disconnected');
     await vi.waitFor(() => expect(restarts(telemetry)).toEqual([true]));
-    pc.edge({ type: 'reply', text: 'Claro!' });
-    pc.edge({ type: 'done' });
+    pc.edge({ type: 'reply', text: 'from the closed peer connection' });
+    FakePc.last.edge({ type: 'reply', text: 'Claro!' });
+    FakePc.last.edge({ type: 'done' });
     expect(s.history.slice(2)).toEqual([{ role: 'user', content: 'Um pão' }, { role: 'assistant', content: 'Claro!' }]);
     expect(events.some(e => e.type === 'error')).toBe(false);
     expect(telemetry.filter(e => e.event === 'turn.done')).toHaveLength(2);

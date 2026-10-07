@@ -26,6 +26,10 @@ class OfferError(Exception):
     pass
 
 
+class SessionGone(OfferError):
+    pass
+
+
 class OutTrack(MediaStreamTrack):
     """The NPC's voice as a WebRTC track: 20 ms frames of the session's AudioOut, silence when nothing is queued."""
 
@@ -111,32 +115,35 @@ class SessionHost:
 
     # ── WebRTC ───────────────────────────────────────────────────────────────
 
-    async def offer(self, sdp: str, claims: dict, trace_id: str, ice_servers: list[dict] | None = None) -> dict:
+    async def offer(self, sdp: str, claims: dict, trace_id: str, ice_servers: list[dict] | None = None,
+                    resume: bool = False) -> dict:
         sid = claims["sid"]
+        entry = self.sessions.get(sid)
+        if resume and (not entry or "pc" not in entry):
+            raise SessionGone(sid)
         servers = [RTCIceServer(urls=x["urls"], username=x.get("username"), credential=x.get("credential")) for x in ice_servers or []]
         pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
-        pending: list[str] = []
-        channel = {"dc": None}
+        link = entry["link"] if resume else {"pc": None, "dc": None, "pending": [], "logged_pair": False}
 
         def emit(event: dict) -> None:
             text = json.dumps(event)
-            dc = channel["dc"]
+            dc = link["dc"]
             if dc is not None and dc.readyState == "open":
                 dc.send(text)
             else:
-                pending.append(text)
+                link["pending"].append(text)
 
-        session = Session(sid, claims, self.s, self.up, emit, "webrtc", trace_id)
+        session = entry["session"] if resume else Session(sid, claims, self.s, self.up, emit, "webrtc", trace_id)
 
         @pc.on("datachannel")
         def on_datachannel(dc):
-            if dc.label != "events":
+            if dc.label != "events" or link["pc"] is not pc:
                 return
-            channel["dc"] = dc
+            link["dc"] = dc
 
             def flush():
-                while pending:
-                    dc.send(pending.pop(0))
+                while link["pending"]:
+                    dc.send(link["pending"].pop(0))
             if dc.readyState == "open":
                 flush()
             dc.on("open", flush)
@@ -158,17 +165,17 @@ class SessionHost:
         def on_ice():
             session.tel("edge.ice.state", level="warn" if pc.iceConnectionState == "failed" else "info",
                         state=pc.iceConnectionState, dur_ms=(time.monotonic() - session.started) * 1000)
-            if pc.iceConnectionState in ("connected", "completed") and not channel.get("logged_pair"):
-                channel["logged_pair"] = True
+            if pc.iceConnectionState in ("connected", "completed") and link["pc"] is pc and not link["logged_pair"]:
+                link["logged_pair"] = True
                 session.tel("edge.ice.selected", **selected_pair(pc), edgeRelay=bool(servers))
 
         @pc.on("connectionstatechange")
         async def on_state():
-            if pc.connectionState in ("failed", "closed"):
+            if pc.connectionState in ("failed", "closed") and link["pc"] is pc:
                 await self.end(sid, f"pc_{pc.connectionState}")
 
         async def close(_reason: str) -> None:
-            await pc.close()
+            await link["pc"].close()
 
         try:
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
@@ -179,8 +186,15 @@ class SessionHost:
         except Exception as error:  # noqa: BLE001
             await pc.close()
             raise OfferError(f"offer rejected: {error!r}"[:300]) from error
-        self.register(session, close, pc=pc)
-        emit({"type": "ready", "sessionId": sid, "transport": "webrtc", "traceId": trace_id})
+        previous = link["pc"]
+        link.update(pc=pc, dc=None, logged_pair=False)
+        if resume:
+            entry["pc"] = pc
+            await previous.close()
+            session.tel("edge.session.reoffer", dur_ms=(time.monotonic() - session.started) * 1000)
+        else:
+            self.register(session, close, pc=pc, link=link)
+            emit({"type": "ready", "sessionId": sid, "transport": "webrtc", "traceId": trace_id})
         return {"sdp": pc.localDescription.sdp, "type": "answer", "sessionId": sid}
 
     async def read_track(self, track, session: Session) -> None:

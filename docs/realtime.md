@@ -214,13 +214,15 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
 - The winner is remembered per network (`localStorage` key `aigw-rt:winner:<network>`, TTL 6 h, every access guarded);
   the next session starts there, the others stay as fallbacks.
 - **Network change on WebRTC** (Wi-Fi → mobile data): on ICE `failed`, or `disconnected` for more than
-  `disconnectGraceMs` (3 s), the SDK restarts ICE on the same peer connection — a new offer with `iceRestart` to the
-  same `offerUrl`, non-trickle, sent at the first srflx/relay candidate — and waits up to `iceRestartMs` (5 s) for a
-  path. The session, its history and a turn in flight are untouched (the edge keeps running the turn; its events
-  arrive on the data channel once the path is back), and the page sees nothing (telemetry `rt.ice.restart`
-  `{ok}`). A refused re-offer or no path in time is a mid-session failure, below. **The edge refuses the re-offer
-  today** (the token is single use per transport, `replayed`), so until it accepts a re-offer for a live `sid` the
-  restart costs one signalling round trip before the failover.
+  `disconnectGraceMs` (3 s), the SDK opens a **fresh peer connection** and sends its offer to the same `offerUrl` with
+  the same token (non-trickle, sent at the first srflx/relay candidate), waiting up to `iceRestartMs` (5 s) for a
+  path. The edge recognises the re-offer of a live session (same `sid`, the token that opened it, its WebRTC session
+  still running on that replica) and attaches the new peer connection to the same session: history and a turn in
+  flight are untouched (the edge keeps running the turn; events it emits meanwhile are queued and arrive on the new
+  data channel), the old peer connection is closed on both sides, and the page sees nothing (telemetry
+  `rt.ice.restart` `{ok}`, edge `edge.session.reoffer`). It is a new peer connection rather than an ICE restart
+  because aiortc cannot restart ICE on a live one. The edge gives up a peer connection ~30 s after its path died, so
+  a re-offer later than that — or one refused, or with no path in time — is a mid-session failure, below.
 - **Mid-session failure** (ICE restart failed, data channel or WS closed) → the next rung *down*, with
   a new session when that rung is realtime; the client keeps the conversation (`transcript` final → user message,
   `reply` → assistant) and replays it with `config_update`; a clip turn that failed is re-sent on the next rung.
@@ -271,8 +273,9 @@ mic.getAudioTracks()[0].enabled = true;
 - A disabled track still sends silence, which keeps the edge's idle clock (`RT_IDLE_SECONDS`, 120 s without input)
   from closing the session; with the track enabled and server VAD, room noise before the scene would open a turn.
 - The limits that bound the wait are the edge's: 15 min per session (`RT_MAX_SESSION_SECONDS`), counted from the
-  connect, and the token's 10 min to connect at all. The token is single use per transport, so a pre-connected
-  session cannot be re-opened: one that the edge ended fails over like any mid-session failure.
+  connect, and the token's 10 min to connect at all. The token is single use per transport (only a WebRTC session
+  still alive on the edge accepts its re-offer), so a pre-connected session cannot be re-opened: one that the edge
+  ended fails over like any mid-session failure.
 - The admission charges the app's budget once, at `connect()`, whether or not a turn follows.
 
 ## Telemetry

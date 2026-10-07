@@ -30,7 +30,7 @@ from aiohttp import web
 
 from . import audio, ice
 from .config import Settings
-from .host import OfferError, SessionHost, load_loop
+from .host import OfferError, SessionGone, SessionHost, load_loop
 from .session import OUT_FRAME_BYTES, Session
 from .netcheck import NetState
 from .telemetry import new_trace_id, telemetry, trace_id_from
@@ -40,6 +40,7 @@ from .upstream import Upstream
 AUDIO_TAG = 0x01
 WS_LEAD_SECONDS = 0.2  # how far ahead of real time WS audio may run (the client's jitter buffer)
 INTERNAL_HEADER = "X-Edge-Internal"
+REPLAYED = ("unauthorized", "token rejected: replayed")
 
 
 def error_body(code: str, message: str) -> dict:
@@ -71,7 +72,10 @@ def worker_main(settings: Settings, index: int, secret: str) -> None:
     async def offer(req):
         body = await req.json()
         try:
-            return web.json_response(await host.offer(body["sdp"], body["claims"], body["traceId"], body.get("iceServers")))
+            return web.json_response(await host.offer(body["sdp"], body["claims"], body["traceId"], body.get("iceServers"),
+                                                      bool(body.get("resume"))))
+        except SessionGone:
+            return web.json_response(error_body(*REPLAYED), status=401)
         except OfferError as error:
             return web.json_response(error_body("bad_request", str(error)), status=400)
 
@@ -127,14 +131,14 @@ class Edge:
     def active(self) -> int:
         return len(self.host.sessions) + len(self.routes)
 
-    def admit(self, token: str | None, trace_id: str, transport: str) -> tuple[dict | None, tuple[int, str, str] | None]:
+    def admit(self, token: str | None, trace_id: str, transport: str, live=None) -> tuple[dict | None, tuple[int, str, str] | None]:
         """(claims, None) or (None, (http status, error code, message)). Capacity is checked before the token is
         consumed, so a learner refused here can still use the same token on another replica. A session of the same
         sid on the other transport (the ladder's previous rung) does not count: it is superseded once this one is in."""
         if not token:
             return None, (401, "unauthorized", "token missing")
         try:
-            claims = self.verifier.verify(token, consume=False, transport=transport)
+            claims = self.verifier.verify(token, consume=False, transport=transport, live=live)
         except TokenError as error:
             telemetry.emit("edge.token.reject", trace_id=trace_id, level="warn", reason=error.reason)
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
@@ -146,9 +150,12 @@ class Edge:
                            max=self.s.max_sessions, reason="warming")
             return None, (503, "warming", "models not ready yet")
         try:
-            return self.verifier.verify(token, transport=transport), None
+            return self.verifier.verify(token, transport=transport, live=live), None
         except TokenError as error:
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
+
+    def rtc_live(self, sid: str) -> bool:
+        return sid in self.routes or self.host.sessions.get(sid, {}).get("transport") == "webrtc"
 
     def holds(self, sid: str) -> int:
         return 1 if sid in self.routes or sid in self.host.sessions else 0
@@ -202,30 +209,37 @@ class Edge:
         except Exception as error:  # noqa: BLE001
             return web.json_response(error_body("bad_request", f"{error}"), status=400)
         trace_id = trace_id_from(req.headers.get("traceparent") or body.get("traceparent")) or new_trace_id()
-        claims, refused = self.admit(body.get("token"), trace_id, "webrtc")
+        claims, refused = self.admit(body.get("token"), trace_id, "webrtc", live=self.rtc_live)
         if refused:
             return web.json_response(error_body(refused[1], refused[2]), status=refused[0])
-        await self.supersede(claims["sid"])
+        sid = claims["sid"]
+        resume = self.rtc_live(sid)
+        if not resume:
+            await self.supersede(sid)
         if "webrtc" not in self.net.transports():
             return web.json_response(error_body("unsupported", "no media path to this replica (net: ws only)"), status=503)
         ice_servers = self.net.ice_servers(body.get("iceServers") if isinstance(body.get("iceServers"), list) else None)
         if not self.workers:
             try:
-                return web.json_response(await self.host.offer(sdp, claims, trace_id, ice_servers))
+                return web.json_response(await self.host.offer(sdp, claims, trace_id, ice_servers, resume))
+            except SessionGone:
+                return web.json_response(error_body(*REPLAYED), status=401)
             except OfferError as error:
                 return web.json_response(error_body("bad_request", str(error)), status=400)
         load = {i: 0 for i in range(len(self.workers))}
         for route in self.routes.values():
             load[route["worker"]] += 1
-        index = min(load, key=load.get)
-        sid = claims["sid"]
-        self.routes[sid] = {"worker": index, "at": time.monotonic()}  # counts against capacity while the worker answers
+        index = self.routes[sid]["worker"] if resume else min(load, key=load.get)
+        if not resume:
+            self.routes[sid] = {"worker": index, "at": time.monotonic()}  # counts against capacity while the worker answers
         try:
-            status, answer = await self.worker_call(index, "POST", "/__edge/offer", {"sdp": sdp, "claims": claims, "traceId": trace_id, "iceServers": ice_servers})
+            status, answer = await self.worker_call(index, "POST", "/__edge/offer", {
+                "sdp": sdp, "claims": claims, "traceId": trace_id, "iceServers": ice_servers, "resume": resume})
         except Exception as error:  # noqa: BLE001
-            self.routes.pop(sid, None)
+            if not resume:
+                self.routes.pop(sid, None)
             return web.json_response(error_body("internal", f"rtc worker {index}: {error!r}"[:200]), status=502)
-        if status != 200:
+        if status != 200 and not resume:
             self.routes.pop(sid, None)
         return web.json_response(answer, status=status)
 
