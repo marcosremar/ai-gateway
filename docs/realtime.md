@@ -185,11 +185,19 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
 
 | Rung | Budget to connect | Notes |
 |---|---|---|
-| webrtc | ICE gathering ≤ 2 s + offer ≤ 3 s + connected ≤ 3 s | non-trickle offer with what was gathered; TURN from the session |
+| webrtc | ICE gathering ≤ 2 s + offer ≤ 3 s + connected ≤ 3 s | non-trickle offer sent at the first srflx or relay candidate (2 s is the ceiling, reached only on a host-only network); TURN from the session |
 | ws | open ≤ 3 s + edge `ready` ≤ 3 s | AudioWorklet capture 16 kHz / 20 ms; ring-buffer playback 24 kHz |
 | s2s-stream | immediate | the first turn proves it; frames/NDJSON decoded incrementally, audio played as it arrives |
 | post | immediate | caller's `postTurn` |
 
+- **Offer timing** — the SDK does not wait out `iceGatherMs`: the offer leaves at the first server-reflexive or relay
+  candidate, when gathering completes, or at the ceiling. A webrtc transport offer with `iceTransportPolicy: "relay"`
+  is passed to the peer connection and then only a relay candidate releases the offer. Candidates gathered later are
+  not signalled (non-trickle): the browser still checks from them, and the edge learns them as peer-reflexive.
+- **Playout delay** — `playoutDelayMs` (session option, default 0) is written to the receiver's `jitterBufferTarget`
+  (milliseconds, 0–4000 in the W3C spec), or to `playoutDelayHint` (seconds) where only that exists; a browser with
+  neither is left alone. 0 is the lowest value the spec allows and asks for no added delay: the browser still buffers
+  what the jitter it measures needs. Raise it (40–80 ms) if a network produces audible gaps.
 - A refused admission (503 + fallback) skips the realtime rungs at once.
 - The winner is remembered per network (`localStorage` key `aigw-rt:winner:<network>`, TTL 6 h, every access guarded);
   the next session starts there, the others stay as fallbacks.

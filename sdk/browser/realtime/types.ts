@@ -158,6 +158,7 @@ export interface TransportContext {
   /** A connected transport broke: the session fails over. */
   fail(error: Error): void;
   remoteAudio(stream: MediaStream | null): void;
+  playoutDelayMs?: number;
   /** Session config (decoded from the token, or the caller's) with the conversation so far. */
   config(): Record<string, unknown>;
   dropped(n: number): void;

@@ -3,7 +3,9 @@
  * delay of the receiver, pre-connecting, recovering a reply cut by an upstream error, and surviving a network change.
  */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TIMEOUTS, createWebRtcTransport, type RealtimeEvent, type TransportContext, type TransportOffer } from '../../sdk/browser/realtime/index';
+import {
+  DEFAULT_TIMEOUTS, createWebRtcTransport, setPlayoutDelay, type RealtimeEvent, type TransportContext, type TransportOffer,
+} from '../../sdk/browser/realtime/index';
 import { createLocalTelemetry } from '../../sdk/browser/realtime/telemetry';
 
 type Calls = Array<{ url: string; init: RequestInit; at: number }>;
@@ -118,5 +120,33 @@ describe('WebRTC offer timing', () => {
     await b.connect(new AbortController().signal);
     expect(fast.calls[0]!.at).toBeLessThan(90);
     b.close();
+  });
+});
+
+describe('playout delay', () => {
+  it('uses jitterBufferTarget (ms), else playoutDelayHint (s), and never throws without either', () => {
+    const modern = { jitterBufferTarget: null as number | null, playoutDelayHint: null as number | null };
+    expect(setPlayoutDelay(modern as unknown as RTCRtpReceiver, 40)).toBe('jitterBufferTarget');
+    expect(modern).toEqual({ jitterBufferTarget: 40, playoutDelayHint: null });
+    const legacy = { playoutDelayHint: null as number | null };
+    expect(setPlayoutDelay(legacy as unknown as RTCRtpReceiver, 40)).toBe('playoutDelayHint');
+    expect(legacy.playoutDelayHint).toBe(0.04);
+    expect(setPlayoutDelay({} as RTCRtpReceiver, 40)).toBeNull();
+    expect(setPlayoutDelay(undefined, 40)).toBeNull();
+    const strict = { set jitterBufferTarget(_: number) { throw new RangeError('out of range'); }, get jitterBufferTarget() { return 0; } };
+    expect(setPlayoutDelay(strict as unknown as RTCRtpReceiver, 9999)).toBeNull();
+  });
+
+  it('the receiver of the remote track gets the session value, 0 ms by default', async () => {
+    FakePc.candidates = [[1, null]];
+    for (const [playoutDelayMs, want] of [[undefined, 0], [60, 60]] as const) {
+      const { c } = ctx({ playoutDelayMs });
+      const t = webrtc(c);
+      await t.connect(new AbortController().signal);
+      const receiver = { jitterBufferTarget: null as number | null };
+      FakePc.last.ontrack!({ receiver, streams: [{}], track: {} });
+      expect(receiver.jitterBufferTarget).toBe(want);
+      t.close();
+    }
   });
 });
