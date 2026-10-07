@@ -31,7 +31,7 @@ export type RealtimeServerEvent =
 
 /** Events the SDK adds: which transport carries the session, and its end. */
 export type RealtimeLocalEvent =
-  | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover'; from?: TransportType; error?: string }
+  | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover' | 'upgrade'; from?: TransportType; error?: string }
   | { type: 'recovered' }
   | { type: 'closed'; reason: string };
 
@@ -100,6 +100,7 @@ export interface RealtimeTimeouts {
   /** A WebRTC connection `disconnected` this long gets an ICE restart. */
   disconnectGraceMs: number;
   iceRestartMs: number;
+  upgradeMs: number;
 }
 
 export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
@@ -112,6 +113,7 @@ export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
   turnMs: 45_000,
   disconnectGraceMs: 3_000,
   iceRestartMs: 5_000,
+  upgradeMs: 5_000,
 };
 
 export interface AttemptRecord {
@@ -148,6 +150,7 @@ export interface RealtimeTransport {
   send(message: ClientMessage): void;
   /** Clip-based rungs: one learner turn (16 kHz WAV). */
   sendTurn?(wav: Blob): Promise<void>;
+  goLive?(): void;
   close(): void;
 }
 
@@ -168,6 +171,7 @@ export interface TransportContext {
   /** W3C trace context of the session, sent on every gateway call. */
   traceparent: string;
   telemetry: RealtimeTelemetry;
+  standby?: boolean;
 }
 
 export type TransportFactory = (ctx: TransportContext) => RealtimeTransport | null;

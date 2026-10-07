@@ -118,6 +118,7 @@ class Edge:
         self.verifier = TokenVerifier(settings.key, settings.replica_id, settings.deployment)
         self.up = Upstream(settings)
         self.host = SessionHost(settings, self.up)
+        self.ws_host = SessionHost(settings, self.up)
         n = settings.rtc_workers
         self.secret = secrets.token_hex(16)
         self.worker_settings = [replace(settings, udp_ports=r) for r in worker_ranges(*settings.udp_ports, n)] if n else []
@@ -129,12 +130,13 @@ class Edge:
     # ── admission ────────────────────────────────────────────────────────────
 
     def active(self) -> int:
-        return len(self.host.sessions) + len(self.routes)
+        return len({*self.host.sessions, *self.ws_host.sessions, *self.routes})
 
     def admit(self, token: str | None, trace_id: str, transport: str, live=None) -> tuple[dict | None, tuple[int, str, str] | None]:
         """(claims, None) or (None, (http status, error code, message)). Capacity is checked before the token is
-        consumed, so a learner refused here can still use the same token on another replica. A session of the same
-        sid on the other transport (the ladder's previous rung) does not count: it is superseded once this one is in."""
+        consumed, so a learner refused here can still use the same token on another replica. A learner holds one slot:
+        a sid with a session on each transport (the SDK starts on WS while WebRTC connects, then closes the WS) counts
+        once."""
         if not token:
             return None, (401, "unauthorized", "token missing")
         try:
@@ -155,28 +157,16 @@ class Edge:
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
 
     def rtc_live(self, sid: str) -> bool:
-        return sid in self.routes or self.host.sessions.get(sid, {}).get("transport") == "webrtc"
+        return sid in self.routes or sid in self.host.sessions
 
     def holds(self, sid: str) -> int:
-        return 1 if sid in self.routes or sid in self.host.sessions else 0
-
-    async def supersede(self, sid: str) -> None:
-        """Ends the sid's previous session (the rung the SDK gave up on): one live session per token."""
-        if sid in self.routes:
-            route = self.routes.pop(sid)
-            try:
-                await self.worker_call(route["worker"], "DELETE", f"/__edge/session/{sid}")
-            except Exception:  # noqa: BLE001 — the worker may already have dropped it
-                pass
-        elif sid in self.host.sessions:
-            await self.host.end(sid, "superseded")
+        return 1 if self.rtc_live(sid) or sid in self.ws_host.sessions else 0
 
     # ── HTTP routes ──────────────────────────────────────────────────────────
 
     async def status(self, _req: web.Request) -> web.Response:
         active = self.active()
-        by = {t: sum(1 for e in self.host.sessions.values() if e["transport"] == t) for t in ("webrtc", "ws")}
-        by["webrtc"] += len(self.routes)
+        by = {"webrtc": len(self.host.sessions) + len(self.routes), "ws": len(self.ws_host.sessions)}
         return web.json_response({
             "active": active, "max": self.s.max_sessions, "available": max(0, self.s.max_sessions - active),
             # Firewall range = media ports + the probe port; `transports` drops webrtc when no media path works.
@@ -214,8 +204,6 @@ class Edge:
             return web.json_response(error_body(refused[1], refused[2]), status=refused[0])
         sid = claims["sid"]
         resume = self.rtc_live(sid)
-        if not resume:
-            await self.supersede(sid)
         if "webrtc" not in self.net.transports():
             return web.json_response(error_body("unsupported", "no media path to this replica (net: ws only)"), status=503)
         ice_servers = self.net.ice_servers(body.get("iceServers") if isinstance(body.get("iceServers"), list) else None)
@@ -283,14 +271,13 @@ class Edge:
             await ws.close(code=4401 if refused[0] == 401 else 1013, message=refused[1].encode())
             return ws
         sid = claims["sid"]
-        await self.supersede(sid)
         outbox: asyncio.Queue = asyncio.Queue()
         session = Session(sid, claims, self.s, self.up, lambda e: outbox.put_nowait(json.dumps(e)), "ws", trace_id)
 
         async def close(reason: str) -> None:
             await ws.close(code=1000, message=reason.encode()[:120])
 
-        self.host.register(session, close)
+        self.ws_host.register(session, close)
         session.emit({"type": "ready", "sessionId": sid, "transport": "ws", "traceId": trace_id})
         writer = asyncio.create_task(self.ws_writer(ws, session, outbox))
         try:
@@ -309,7 +296,7 @@ class Edge:
         finally:
             writer.cancel()
             session.tel("edge.ws.close", code=ws.close_code)
-            await self.host.end(sid, "ws_closed")
+            await self.ws_host.end(sid, "ws_closed")
         return ws
 
     async def ws_writer(self, ws: web.WebSocketResponse, session: Session, outbox: asyncio.Queue) -> None:
@@ -377,6 +364,7 @@ class Edge:
             self.host.spawn(self.watch_workers())
 
     async def on_cleanup(self, _app) -> None:
+        await self.ws_host.close_all()
         await self.host.close_all()
         for proc in self.workers:
             if proc is not None:

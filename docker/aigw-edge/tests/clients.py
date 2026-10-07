@@ -195,11 +195,14 @@ class RtcLearner:
         self.first_audio_at: float | None = None
         self.tasks: list[asyncio.Task] = []
 
-    async def connect(self, token: str) -> "RtcLearner":
+    async def connect(self, token: str, standby: bool = False) -> "RtcLearner":
         self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         self.dc = self.pc.createDataChannel("events")
         self.dc.on("message", lambda m: asyncio.ensure_future(self.events.add(json.loads(m))))
-        self.pc.addTrack(self.mic)
+        if standby:
+            self.sender = self.pc.addTransceiver("audio", direction="sendrecv").sender
+        else:
+            self.pc.addTrack(self.mic)
 
         @self.pc.on("track")
         def on_track(track):
@@ -228,6 +231,9 @@ class RtcLearner:
                         self.first_audio_at = time.monotonic()
         except (MediaStreamError, asyncio.CancelledError):
             pass
+
+    def activate(self) -> None:
+        self.sender.replaceTrack(self.mic)
 
     async def send(self, msg: dict) -> None:
         self.dc.send(json.dumps(msg))

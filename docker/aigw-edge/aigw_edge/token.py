@@ -73,7 +73,7 @@ class TokenVerifier:
     def verify(self, token: str, consume: bool = True, transport: str = "", live=None) -> dict:
         """Single use per transport: the SDK's ladder tries WebRTC then WS with the one token of its admission (a second
         admission would charge the app's budget again and hold a second slot), so `sid` may open one session of each
-        transport; the edge keeps one live session per sid (Server.supersede). Without `transport`, the sid is the key.
+        transport, and the two may run side by side until the SDK closes one. Without `transport`, the sid is the key.
         `live(sid)` says the sid's session of this transport still runs here: the very token that opened it may then
         be presented again (a WebRTC re-offer after a network change). Anything else used twice is `replayed`."""
         try:

@@ -35,7 +35,7 @@ export async function climbLadder(
     opts.onTry?.(type);
     const started = now();
     const abort = new AbortController();
-    const onOuterAbort = () => abort.abort(new Error('session closed'));
+    const onOuterAbort = () => abort.abort(opts.signal?.reason instanceof Error ? opts.signal.reason : new Error('session closed'));
     opts.signal?.addEventListener('abort', onOuterAbort);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

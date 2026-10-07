@@ -106,13 +106,15 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 | `POST /__aigw/rt/ice` | `{sessionId, candidate}` (string or `{candidate, sdpMid, sdpMLineIndex}`; empty = end) — optional, the answer carries all candidates |
 | `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], probePort, net, ready, byTransport, workers}` (`transports` is `["ws"]` on path `ws`) |
 | `POST /__aigw/rt/net` | `{udpInbound:"ok"\|"blocked", rttMs, iceServers}` from the gateway's probe → the decision (see *Reachability*) |
-| `DELETE /__aigw/rt/session/:id` | ends the session (`sessionId` of the offer, = the token's `sid`) |
+| `DELETE /__aigw/rt/session/:id` | ends the WebRTC session (`sessionId` of the offer, = the token's `sid`); a WS session of the same `sid` ends when its socket closes |
 | `GET /__aigw/rt/ws?token=…&traceparent=…` | WebSocket. A refusal still upgrades, sends `{type:"error", code}` and closes 4401 (`unauthorized`) or 1013 (`capacity`/`warming`), so the code survives the relay |
 
 Token checks (the gateway's vectors, `tests/test_units.py`): HS256 only, constant-time signature, `exp > now`,
 `iat ≤ now + 60`, `exp − iat ≤ 900`, `cfg` ≤ 6144 chars and a JSON object, `rep` = this replica (`zone:uuid` also
 matches a bare `uuid`), `dep` = this deployment, `sid` single use **per transport** (remembered until `exp`): the SDK's ladder tries WebRTC
-then WS with the one token of its admission, and a new session of the same `sid` supersedes the previous one. The one exception to
+and WS with the one token of its admission — raced at the start, or one after the other — so a `sid` may have one session of each
+transport at the same time, until the SDK closes one (the WS once WebRTC took over; the WebRTC attempt it gave up, by `DELETE`). The
+learner holds **one slot** whichever it is: `active` counts distinct `sid`s, `byTransport` counts sessions. The one exception to
 single use: an offer carrying the very token that opened a WebRTC session **still alive on this edge** is a re-offer (the browser
 changed network) — it gets a fresh peer connection under the same session object (history, turn in progress and queued events kept; the
 previous peer connection closed; `edge.session.reoffer`), on the worker that owns the session. A token of an ended session, another
