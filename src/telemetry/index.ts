@@ -11,6 +11,9 @@ export { deploymentLogToTelemetry } from './gateway-events';
 export { TelemetryStore, type TelemetryStoreOptions } from './store';
 export { TelemetryIngest, traceSampled, type IngestOptions, type IngestCounters } from './ingest';
 export { authenticateTelemetry, edgeTelemetrySignature, verifySessionPrincipal, type TelemetryPrincipal, type TelemetryAuthDeps } from './auth';
-export { queryEvents, timeline, summarize, percentile, SUMMARY_GROUPS, type EventFilter, type SummaryGroup } from './query';
+export {
+  queryEvents, timeline, summarize, percentile, latencyReport, SUMMARY_GROUPS, TURN_LATENCY_EVENTS,
+  type EventFilter, type LatencyReport, type SummaryGroup,
+} from './query';
 export { createTelemetryRoutes, telemetryFromEnv, type TelemetryService } from './http';
 export { realtimeSinkToTelemetry, sessionResolverFrom, toContractTs, type RealtimeGatewayEvent } from './adapters';

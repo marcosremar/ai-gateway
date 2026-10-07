@@ -139,6 +139,44 @@ export function percentile(sorted: readonly number[], p: number): number | null 
   return sorted[Math.min(sorted.length - 1, Math.max(0, rank - 1))]!;
 }
 
+export const TURN_LATENCY_EVENTS: readonly string[] = ['edge.stt.done', 'edge.llm.first_token', 'edge.tts.first_audio', 'turn.first_audio', 's2s.first_audio'];
+
+export interface LatencyStat { count: number; p50Ms: number | null; p95Ms: number | null }
+
+export interface LatencyReport {
+  windowSeconds: number;
+  stages: Record<string, LatencyStat & { providers: Record<string, LatencyStat> }>;
+  events: Record<string, LatencyStat>;
+}
+
+function latencyStat(durs: number[]): LatencyStat {
+  const sorted = [...durs].sort((a, b) => a - b);
+  return { count: sorted.length, p50Ms: percentile(sorted, 50), p95Ms: percentile(sorted, 95) };
+}
+
+export function latencyReport(rows: readonly StoredTelemetryEvent[], now: number, windowMs = 15 * 60_000): LatencyReport {
+  const stages = new Map<string, Map<string, number[]>>();
+  const events = new Map<string, number[]>();
+  const push = <K>(map: Map<K, number[]>, key: K, ms: number) => { map.set(key, [...(map.get(key) ?? []), ms]); };
+  for (let i = rows.length - 1; i >= 0 && rows[i]!.rxTs >= now - windowMs; i--) {
+    const row = rows[i]!;
+    if (row.durMs === undefined) continue;
+    if (row.event === 'route.served') {
+      const stage = String(row.attrs?.stage ?? '(none)');
+      if (!stages.has(stage)) stages.set(stage, new Map());
+      push(stages.get(stage)!, String(row.attrs?.provider ?? '(none)'), row.durMs);
+    } else if (TURN_LATENCY_EVENTS.includes(row.event)) push(events, row.event, row.durMs);
+  }
+  return {
+    windowSeconds: windowMs / 1000,
+    stages: Object.fromEntries([...stages].map(([stage, providers]) => [stage, {
+      ...latencyStat([...providers.values()].flat()),
+      providers: Object.fromEntries([...providers].map(([provider, durs]) => [provider, latencyStat(durs)])),
+    }])),
+    events: Object.fromEntries([...events].map(([event, durs]) => [event, latencyStat(durs)])),
+  };
+}
+
 export const SUMMARY_GROUPS = ['event', 'source', 'deployment', 'replicaId', 'app'] as const;
 export type SummaryGroup = typeof SUMMARY_GROUPS[number];
 

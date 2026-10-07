@@ -28,6 +28,7 @@ import { runComposite, type S2SConfig, type StageClient } from './composite';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
 import type { S2SAdmission } from './access';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
+import { emitGatewayEvent } from '../telemetry/emit';
 
 type Controller = Pick<DeploymentController, 'acquire' | 'get' | 'wake'>;
 
@@ -79,7 +80,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
 class Sink {
   private started = false;
   closed = false;
-  constructor(private readonly res: ServerResponse, private readonly format: S2SFormat) {}
+  private sawAudio = false;
+  constructor(private readonly res: ServerResponse, private readonly format: S2SFormat, private readonly onFirstAudio?: () => void) {}
   private start() {
     if (this.started) return;
     this.started = true;
@@ -104,6 +106,7 @@ class Sink {
     if (this.closed) return;
     this.start();
     for (const p of this.prelude.splice(0)) this.res.write(encodeEvent(p, this.format));
+    if (!this.sawAudio) { this.sawAudio = true; this.onFirstAudio?.(); }
     this.res.write(encodeAudio(pcm, this.format));
   }
   end() { if (this.closed) return; this.closed = true; this.start(); this.res.end(); }
@@ -191,7 +194,9 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       });
     }
 
-    const sink = new Sink(res, format);
+    const sink = new Sink(res, format, () => emitGatewayEvent('s2s.first_audio', {
+      durMs: Math.round(performance.now() - t0), ...(deployment ? { deployment } : {}),
+    }));
     const budget = new AbortController();
     const budgetTimer = setTimeout(() => budget.abort(new Error(`s2s budget of ${budgetMs} ms exceeded`)), budgetMs);
     // `res` close, not `req` close: the request side closes as soon as its body has been read (Node, Bun ≥ 1.4), so

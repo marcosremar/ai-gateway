@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'f
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { _setIpSaltForTests, hashIp, scrubAttrs } from '../../../src/telemetry/scrub';
-import { percentile, queryEvents, summarize, timeline } from '../../../src/telemetry/query';
+import { latencyReport, percentile, queryEvents, summarize, timeline } from '../../../src/telemetry/query';
 import { parseFileRow, TelemetryStore, type NewTelemetryRow } from '../../../src/telemetry/store';
 import type { StoredTelemetryEvent } from '../../../src/telemetry/contract';
 import { TRACE } from './_helpers';
@@ -102,6 +102,42 @@ describe('telemetry queries', () => {
     expect(p2.nextCursor).toBeNull();
     expect(queryEvents(rows, { event: 'rt.*' }, { order: 'asc' }).events.map(e => e.event)).toEqual(['rt.ice.failed', 'rt.ladder.fallback']);
     expect(queryEvents(rows, { since: 4000 }).events).toHaveLength(2);
+  });
+});
+
+describe('latency report (/health)', () => {
+  const NOW = 2_000_000_000_000;
+  let seq = 0;
+  const at = (agoMs: number, event: string, durMs: number | undefined, attrs?: Record<string, string>): StoredTelemetryEvent => ({
+    seq: ++seq, rxTs: NOW - agoMs, ts: NOW - agoMs, source: 'gateway', level: 'info', event, traceId: 'a'.repeat(32),
+    ...(durMs !== undefined ? { durMs } : {}), ...(attrs ? { attrs } : {}),
+  });
+  const served = (agoMs: number, stage: string, provider: string, durMs: number) => at(agoMs, 'route.served', durMs, { stage, provider });
+
+  it('p50/p95 per stage and per serving provider over the window, plus the turn latencies edges and /v1/s2s report', () => {
+    const rows = [
+      served(20 * 60_000, 'tts', 'deployment:speech', 9_000),
+      ...Array.from({ length: 19 }, (_, i) => served(10 * 60_000 - i, 'tts', 'deployment:speech', 100 + i * 10)),
+      served(60_000, 'tts', 'openrouter', 900),
+      served(50_000, 'stt', 'deployment:speech', 250),
+      at(40_000, 'edge.tts.first_audio', 420),
+      at(30_000, 's2s.first_audio', 640),
+      at(20_000, 's2s.first_audio', 660),
+      at(10_000, 'route.fallback', 5_000, { stage: 'tts', provider: 'deployment:speech' }),
+      at(5_000, 'route.served', undefined, { stage: 'chat', provider: 'groq' }),
+    ];
+    const report = latencyReport(rows, NOW);
+    expect(report.windowSeconds).toBe(900);
+    expect(report.stages.tts).toMatchObject({ count: 20, p50Ms: 190, p95Ms: 280 });
+    expect(report.stages.tts.providers).toEqual({
+      'deployment:speech': { count: 19, p50Ms: 190, p95Ms: 280 }, openrouter: { count: 1, p50Ms: 900, p95Ms: 900 },
+    });
+    expect(report.stages.stt).toMatchObject({ count: 1, p95Ms: 250 });
+    expect(report.stages.chat).toBeUndefined();
+    expect(report.events).toEqual({
+      'edge.tts.first_audio': { count: 1, p50Ms: 420, p95Ms: 420 }, 's2s.first_audio': { count: 2, p50Ms: 640, p95Ms: 660 },
+    });
+    expect(latencyReport(rows, NOW, 1_000)).toEqual({ windowSeconds: 1, stages: {}, events: {} });
   });
 });
 

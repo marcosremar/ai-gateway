@@ -148,6 +148,9 @@ Same sink, same scrubber (`emitGatewayEvent`, `src/telemetry/emit.ts`); inside a
 | `autoscale.decision` / `autoscale.warm` / `autoscale.reclaim` | the controller changed its plan (`desired`, `reason`, `blockedBy`, `load`, `p95Ms`) |
 | `replica.creating` / `.ready` (`durMs` = boot) / `.unhealthy` / `.draining` / `.released` / `.parked` / `.power_on` / `.too_far` / `.create_failed` | replica lifecycle |
 | `provider.list_failed` | the provider list call failed |
+| `replica.stage_out` (warn) / `replica.stage_back` | one stage (`stage`: stt, chat, tts, s2s) of one replica left / rejoined the rotation after repeated failures |
+| `stage.on_fallback` (warn) / `stage.on_primary` (`durMs` = time on fallback) | a stage chain started / stopped being served by a link that is not its first (`stage`, `model`, `primary`, `serving`) |
+| `s2s.first_audio` | first audio of a `/v1/s2s` turn written to the client (`durMs` from the request) |
 
 Realtime control-plane events (`src/realtime/trace.ts`) plug in with `realtimeSinkToTelemetry(telemetry.ingest)`.
 
