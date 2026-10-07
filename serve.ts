@@ -14,7 +14,7 @@ import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/provi
 import { openaiSTT } from './src/gateway/providers/cloud/openai';
 import { fireworksSTT } from './src/gateway/providers/cloud/fireworks';
 import { deepgramSTT } from './src/gateway/providers/cloud/deepgram';
-import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/zai';
+import { zaiLLM, ZAI_LLM_MODELS } from './src/gateway/providers/cloud/zai';
 import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } from './src/deployments/inference-providers';
 import {
   buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,

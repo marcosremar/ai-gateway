@@ -1,1 +1,1 @@
-export * from '../../gateway/providers/cloud/zai';
+export * from '../../../gateway/providers/cloud/zai';
