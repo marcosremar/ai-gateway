@@ -76,6 +76,12 @@ export async function sttRace(
       .then((r) => {
         if (!r.text.trim()) throw new Error(`${name}: empty response`);
         return { name, ...r };
+      })
+      .catch((e: unknown) => {
+        if (abort.signal.aborted) throw e; // another provider won — not a failure
+        const msg = e instanceof Error ? e.message : String(e);
+        log.warn(`[stt-race] ${name} failed: ${msg}`);
+        throw e;
       });
 
     if (options.timeoutMs) {

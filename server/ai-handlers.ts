@@ -417,10 +417,55 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
     return;
   }
 
+  // Two wire formats, same endpoint:
+  //   1. Python SDK: raw WAV body + query params (?language=&prompt=&timeout_ms=&providers=)
+  //   2. Rust client: JSON body { audio: base64, language, providers, prompt, timeout_ms, llm_correct }
+  // Detect JSON by Content-Type and re-derive the query-style fields from the body.
+  const ctype = (req.headers['content-type'] || '').toLowerCase();
+  let language2 = language;
+  let prompt2 = prompt;
+  let timeoutMs2 = timeoutMs;
+  let llmCorrect2 = false;
+  let jsonProvidersList: string[] | null = null;
+  if (ctype.includes('application/json')) {
+    let json: { audio?: string; language?: string; providers?: string[]; prompt?: string; timeout_ms?: number; llm_correct?: boolean };
+    try {
+      json = JSON.parse(audio.toString('utf8'));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+      return;
+    }
+    const rawAudio = json.audio || '';
+    if (!rawAudio) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No audio data' }));
+      return;
+    }
+    audio = Buffer.from(rawAudio, 'base64');
+    if (audio.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No audio data' }));
+      return;
+    }
+    if (json.language) language2 = validateLang(json.language, 'fr');
+    if (json.prompt) prompt2 = json.prompt;
+    if (typeof json.timeout_ms === 'number' && Number.isFinite(json.timeout_ms) && json.timeout_ms > 0) {
+      timeoutMs2 = Math.min(json.timeout_ms, 10_000);
+    }
+    llmCorrect2 = json.llm_correct === true;
+    if (Array.isArray(json.providers)) jsonProvidersList = json.providers.map((p) => String(p).toLowerCase().trim()).filter(Boolean);
+  }
+  const effectiveLanguage = language2;
+  const effectivePrompt = prompt2;
+  const effectiveTimeoutMs = timeoutMs2;
+  const effectiveLlmCorrect = llmCorrect2;
+
   // Wire up available providers, filtered by ENSEMBLE_STT_PROVIDERS and optional ?providers= param
-  const requestedProviders = url.searchParams.get('providers')
+  // (JSON clients like the Rust app send `providers` in the body instead of the query).
+  const requestedProviders = (url.searchParams.get('providers')
     ? url.searchParams.get('providers')!.toLowerCase().split(',').map((s: string) => s.trim()).filter(Boolean)
-    : ENSEMBLE_STT_PROVIDERS;
+    : jsonProvidersList ?? ENSEMBLE_STT_PROVIDERS);
   const useAll = requestedProviders.includes('all');
   const wants = (name: string): boolean => useAll || requestedProviders.includes(name);
 
@@ -432,10 +477,42 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
   if (whisperAvailable && wants('whisper')) activeProviders.push({ name: 'whisper', provider: new OllamaSTTProvider(whisperHost) });
 
   try {
-    const result = await sttRace(audio, language, prompt, {
-      providers: activeProviders,
-      timeoutMs,
-    });
+    let result: Awaited<ReturnType<typeof sttRace>>;
+    try {
+      result = await sttRace(audio, effectiveLanguage, effectivePrompt, {
+        providers: activeProviders,
+        timeoutMs: effectiveTimeoutMs,
+      });
+    } catch (raceErr) {
+      // Safety net: se o race inteiro falhou (providers de nuvem fora do ar,
+      // billing, timeout), tenta o whisper local como último recurso — mesma
+      // garantia da chain do /v1/audio/transcriptions.
+      if (!whisperAvailable || activeProviders.some((p) => p.name === 'whisper')) {
+        throw raceErr;
+      }
+      const local = new OllamaSTTProvider(whisperHost);
+      const modelId = local.getModels()[0]?.id;
+      if (!modelId) throw raceErr;
+      log.warn(`[ensemble] all providers failed (${raceErr instanceof Error ? raceErr.message : raceErr}); falling back to whisper local`);
+      const tLocal = Date.now();
+      const r = await local.transcribe({
+        audio,
+        model: modelId,
+        language: effectiveLanguage,
+        prompt: effectivePrompt,
+        signal: undefined,
+      });
+      if (!r.text.trim()) throw raceErr;
+      result = {
+        text: r.text,
+        provider: 'whisper',
+        latencyMs: Date.now() - tLocal,
+        ...(r.segments ? { segments: r.segments } : {}),
+        ...(r.avg_logprob !== undefined ? { avgLogprob: r.avg_logprob } : {}),
+        ...(r.compression_ratio !== undefined ? { compressionRatio: r.compression_ratio } : {}),
+        ...(r.no_speech_prob !== undefined ? { noSpeechProb: r.no_speech_prob } : {}),
+      };
+    }
 
     let finalText = result.text;
 
@@ -469,10 +546,15 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
     log.log(`${result.provider} → ${result.latencyMs}ms: "${finalText.slice(0, 80)}"`);
     logRequest({ timestamp: Date.now(), stage: 'stt', provider: result.provider as 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid', latencyMs: result.latencyMs, success: true, inputSize: audio.length, outputPreview: finalText.slice(0, 80) });
 
-    // Include filter metadata in response for Python client
+    // Include filter metadata in response for Python client.
+    // `consensus` is the Rust-client field name (EnsembleResponse); both are
+    // included so the raw-WAV (Python SDK) and JSON (Rust) clients work.
     const responseBody = {
       text: finalText,
+      consensus: finalText,
       provider: result.provider as string,
+      used_providers: [result.provider],
+      latency_ms: result.latencyMs,
       latencyMs: result.latencyMs,
       segments: result.segments,
     } as Record<string, unknown>;
