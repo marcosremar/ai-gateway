@@ -129,6 +129,15 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   to close, 300 ms pre-roll; optional Silero ONNX gate with `RT_SILERO_ONNX` + onnxruntime) **and** the client's
   `end_turn` always works. `cfg.vad = "client"` leaves turn-taking to the client (parle's Silero in the browser):
   the edge then answers only `end_turn`, and barge-in is the client's `interrupt`.
+- **Speculative turn** (`EDGE_SPECULATE_MS` = 300, `0` = off; server VAD in `stages` mode only): after that much
+  silence the edge already sends the turn to STT and, once the transcript passes the guard, opens the LLM stream, but
+  holds everything (events, TTS, audio, history, a failed STT's error) until the VAD closes the turn at
+  `RT_VAD_SILENCE_MS`. Then the turn continues from that work (one STT call, one LLM call; `ttfa_ms` shrinks,
+  `stt_ms` / `llm_ttft_ms` stay the upstream's own times, `edge.turn.done` has `speculated: true`). A speech frame
+  before that (or a `config_update`) cancels the two upstream calls and drops their output: the learner sees and hears
+  nothing of it, and `edge.turn.done` reports `outcome: "discarded"` under the turn id the real turn then reuses. The
+  cost is one wasted STT decode (and often the start of an LLM answer) per pause longer than `EDGE_SPECULATE_MS`
+  inside a sentence.
 - **STT**: the whole turn to `/v1/audio/transcriptions` (WAV 16 kHz, `language`, `prompt` = `stt_prompt`) — it returns
   Whisper's `no_speech_prob` / `avg_logprob` / `compression_ratio`, which the guard needs. **Partials** while the learner
   speaks come from the replica's `/ws/audio-stream` (speech-stack) when it has one (`EDGE_STT_PARTIALS=1`, default):
