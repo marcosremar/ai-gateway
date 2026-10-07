@@ -1,8 +1,8 @@
 /**
  * WebRTC rung: browser ↔ GPU replica directly (Opus both ways, events on the "events" data channel), signaled through
- * the gateway (`offerUrl`, session token as Bearer). Non-trickle: the offer goes once ICE gathering completes or after
- * `iceGatherMs` with what was gathered (host + srflx are there within ~100 ms; relay candidates need the TURN round
- * trip). TURN servers come from the session (credentials minted per session by the gateway).
+ * the gateway (`offerUrl`, session token as Bearer). Non-trickle: the offer goes at the first server-reflexive or relay
+ * candidate (relay only under `iceTransportPolicy: 'relay'`), when ICE gathering completes, or after `iceGatherMs` with
+ * what was gathered. TURN servers come from the session (credentials minted per session by the gateway).
  */
 import type { ClientMessage, RealtimeTransport, TransportContext, TransportOffer } from '../types';
 
@@ -12,13 +12,25 @@ export interface WebRtcDeps {
   RTCPeerConnection: typeof RTCPeerConnection;
 }
 
-function waitIceGathering(pc: RTCPeerConnection, ms: number, signal: AbortSignal): Promise<void> {
+function waitIceGathering(pc: RTCPeerConnection, ms: number, signal: AbortSignal, relayOnly: boolean): Promise<void> {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
   return new Promise((resolve) => {
-    const done = () => { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', check); signal.removeEventListener('abort', done); resolve(); };
+    const done = () => {
+      clearTimeout(timer);
+      pc.removeEventListener('icegatheringstatechange', check);
+      pc.removeEventListener('icecandidate', onCandidate);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
     const check = () => { if (pc.iceGatheringState === 'complete') done(); };
+    const onCandidate = (e: Event) => {
+      const c = (e as RTCPeerConnectionIceEvent).candidate;
+      const type = c ? c.type ?? / typ (\w+)/.exec(c.candidate)?.[1] : null;
+      if (!c || type === 'relay' || (type === 'srflx' && !relayOnly)) done();
+    };
     const timer = setTimeout(done, ms);
     pc.addEventListener('icegatheringstatechange', check);
+    pc.addEventListener('icecandidate', onCandidate);
     signal.addEventListener('abort', done);
   });
 }
@@ -92,7 +104,10 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     clipBased: false,
     async connect(signal) {
       if (!PC) throw new Error('RTCPeerConnection is not available');
-      pc = new PC({ iceServers: (offer.iceServers ?? ctx.descriptor?.iceServers ?? []) as RTCIceServer[], bundlePolicy: 'max-bundle' });
+      pc = new PC({
+        iceServers: (offer.iceServers ?? ctx.descriptor?.iceServers ?? []) as RTCIceServer[], bundlePolicy: 'max-bundle',
+        ...(offer.iceTransportPolicy ? { iceTransportPolicy: offer.iceTransportPolicy } : {}),
+      });
       const mic = await ctx.mic();
       const tracks = mic.getAudioTracks();
       if (tracks.length) for (const track of tracks) pc.addTrack(track, mic);
@@ -116,7 +131,7 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
         } else if (state === 'connected' && disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
       };
       await pc.setLocalDescription(await pc.createOffer());
-      await waitIceGathering(pc, ctx.timeouts.iceGatherMs, signal);
+      await waitIceGathering(pc, ctx.timeouts.iceGatherMs, signal, offer.iceTransportPolicy === 'relay');
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
       const res = await ctx.fetchImpl(offer.offerUrl, {
         method: 'POST',
