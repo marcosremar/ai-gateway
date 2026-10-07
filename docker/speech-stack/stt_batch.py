@@ -16,6 +16,7 @@ again alone, with faster-whisper's temperature fallback. CUDA out of memory: the
 a single clip retries three times with a short pause (the TTS and the LLM release memory between their own steps).
 """
 
+import itertools
 import queue
 import threading
 import time
@@ -52,51 +53,57 @@ class SttBatcher:
         self.max_batch = max(1, max_batch)
         self.window = window_ms / 1000
         self.beam = beam
-        self.jobs: queue.Queue = queue.Queue()
+        self.jobs: queue.PriorityQueue = queue.PriorityQueue()
+        self.order = itertools.count()
         self.stats = {"batches": 0, "clips": 0, "largest": 0, "oom_retries": 0, "fallbacks": 0}
         threading.Thread(target=self._loop, name="stt-batcher", daemon=True).start()
 
     # ── public ──────────────────────────────────────────────────────────────
 
-    def transcribe(self, audio: np.ndarray, language: str | None, prompt: str | None = None) -> dict:
-        job = {"audio": audio, "language": (language or None) and language[:2], "prompt": prompt or None, "future": Future()}
-        self.jobs.put(job)
+    def transcribe(self, audio: np.ndarray, language: str | None, prompt: str | None = None, partial: bool = False) -> dict:
+        job = {"audio": audio, "language": (language or None) and language[:2], "prompt": prompt or None, "future": Future(),
+               "queued": time.monotonic()}
+        self.jobs.put((int(partial), next(self.order), job))
         return job["future"].result()
 
     # ── worker ──────────────────────────────────────────────────────────────
 
+    def _take(self) -> list:
+        batch = [self.jobs.get()[2]]
+        deadline = time.monotonic() + self.window
+        while len(batch) < self.max_batch:
+            try:
+                batch.append(self.jobs.get(timeout=max(0.0, deadline - time.monotonic()))[2])
+            except queue.Empty:
+                break
+        return batch
+
     def _loop(self) -> None:
         while True:
-            batch = [self.jobs.get()]
-            deadline = time.monotonic() + self.window
-            while len(batch) < self.max_batch:
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    break
-                try:
-                    batch.append(self.jobs.get(timeout=left))
-                except queue.Empty:
-                    break
+            batch = self._take()
             groups: dict[tuple, list] = {}
             for job in batch:
                 single = job["language"] is None or len(job["audio"]) > WINDOW_SECONDS * SAMPLE_RATE
                 key = ("single", id(job)) if single else (job["language"], job["prompt"])
                 groups.setdefault(key, []).append(job)
             for key, jobs in groups.items():
+                started = time.monotonic()
                 try:
                     if key[0] == "single":
-                        self._settle(jobs, [self._with_oom_retry(lambda: self._one(jobs[0]))])
+                        self._settle(jobs, [self._with_oom_retry(lambda: self._one(jobs[0]))], started)
                     else:
-                        self._settle(jobs, self._batched(jobs))
+                        self._settle(jobs, self._batched(jobs), started)
                 except BaseException as error:  # noqa: BLE001 — the worker thread must survive any request
                     for job in jobs:
                         if not job["future"].done():
                             job["future"].set_exception(error)
 
     @staticmethod
-    def _settle(jobs: list, results: list) -> None:
+    def _settle(jobs: list, results: list, started: float) -> None:
+        decode_ms = round((time.monotonic() - started) * 1000)
         for job, result in zip(jobs, results):
-            job["future"].set_result(result)
+            job["future"].set_result({**result, "queue_ms": round((started - job["queued"]) * 1000), "decode_ms": decode_ms,
+                                      "batch": len(jobs)})
 
     def _with_oom_retry(self, run, tries: int = 3):
         for attempt in range(tries):
