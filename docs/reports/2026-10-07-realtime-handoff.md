@@ -125,10 +125,13 @@ Findings:
 - **The coturn profile boots fine** (ready in 120 s, unmodified). The four boot timeouts were the test network
   dropping outbound TCP to non-standard ports (8089, 3478, 9641), so the local gateway's readiness probe on
   `PROBE_PORT` never got through. `DEPLOYMENTS_PROBE_PORT` now overrides the port (default 8089 unchanged).
-- **`parle-speech` image**: the gateway never tried the pull — every boot logs `GHCR_READ_TOKEN is not set`. The image
-  exists (`speech-image.yml` green for `9a87056aa1`) but the package is private (manifest 403 anonymously). Needs a
-  `read:packages` token stored as `GHCR_READ_TOKEN` in the dev API, or a public package. Until then a production
-  replica of `parle-speech` does not boot.
+- **`parle-speech` image**: the declaration pointed at the private `ghcr.io/marcosremar/parle-speech` with
+  `GHCR_READ_TOKEN`, a token that exists nowhere, so it stayed `pending — keeping the registered spec` and nothing it
+  declared (`realtime` included) reached production. It now points at what production runs,
+  `rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107`, pulled with the gateway's own Scaleway key: no token, no
+  `registryAuth`, never pending for a credential. The reconcile patches only the image, `realtime: {}` and
+  `RT_MAX_SESSIONS` per machine type (merged into the stored `envByMachineType`) over the registered spec; env, files,
+  sizing and limits stay as registered (`docs/deployments.md` § `parle-speech`). Not run against a live gateway.
 - **Restarting the gateway parks a `minReplicas: 0` replica** right after "replica ready"; with the GPU out of stock
   the wake then fails and the halted replica blocks a new create.
 - `error: upstream` after `audio_start` appeared in two of four live turns while the audio still played. Not

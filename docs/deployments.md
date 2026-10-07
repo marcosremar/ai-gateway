@@ -62,7 +62,8 @@ Some deployments are declared in the repo and the gateway keeps them registered 
 `PUT`. Each `src/deployments/declared/<name>.json` (listed in `DECLARED_DEPLOYMENTS`, `src/deployments/declared.ts`)
 holds the spec **without secrets**; at boot (before the routes are mounted) and every 5 min the gateway builds the
 body, compares it with the stored spec and calls the same idempotent `controller.put` only when something changed
-(new image, rotated credential). Registering never starts a machine: declared specs keep `minReplicas: 0` and the
+(new image, rotated credential). A deployment that does not exist yet is created from the declaration's `profile`
+when it names one; an existing one is never reset to the profile. Registering never starts a machine: declared specs keep `minReplicas: 0` and the
 reconciler never wakes them — a replica starts on the first request that needs it, as for any deployment.
 
 Secrets are mounted from the environment (the dev API) at each reconcile:
@@ -70,26 +71,31 @@ Secrets are mounted from the environment (the dev API) at each reconcile:
 | Declaration field | Source |
 |---|---|
 | `image.env` (`SPEECH_IMAGE`) | a full reference, or just a tag of `image.repository`; unset → `image.default` |
-| `registryAuth.passwordEnv` (`GHCR_READ_TOKEN`) | a GHCR token with `read:packages` (server `ghcr.io`, user `marcosremar`) |
-| `generatedSecrets` (`SPEECH_TOKEN`) | generated once (32 chars `[A-Za-z0-9_-]`), persisted with the spec in the deployment store, reused afterwards; never logged nor returned |
+| `registryAuth.passwordEnv` (e.g. `GHCR_READ_TOKEN`) | the password of a private registry (a GHCR token with `read:packages`, …); only for a declaration that has `registryAuth` — `parle-speech` has none |
+| `generatedSecrets` (e.g. `SPEECH_TOKEN`) | generated once (32 chars `[A-Za-z0-9_-]`), persisted with the spec in the deployment store, reused afterwards; never logged nor returned |
 
-**Pending, never broken:** without the credential or an image the deployment is not registered and its status is
-`pending` with the reason (`GHCR_READ_TOKEN is not set …`) — a replica that cannot pull its private image would be a
+**Pending, never broken:** without the credential a declaration asks for, or an image, the deployment is not
+registered and its status is `pending` with the reason (`<passwordEnv> is not set …`) — a replica that cannot pull its private image would be a
 billed machine that never serves. A deployment already registered keeps its stored spec while the credential is
 missing. The status is in `GET /v1/deployments` (`declared`), `GET /health?deep=1` and, per stage, in `GET /health`.
 A key that appears through a key reload registers the deployment at once. `DECLARED_DEPLOYMENTS=0` turns the
-reconciler off. Fields the declaration does not hold (`paused`, …) are left as an operator set them; declared fields
-changed by hand are put back.
+reconciler off. Fields the declaration does not hold (`paused`, sizing and limits it does not list, `env` when it
+declares neither `env` nor `generatedSecrets`, …) are left as an operator set them; declared fields changed by hand
+are put back. `envByMachineType` is merged per key: the declared keys are put back, the stored ones stay.
 
 ### `parle-speech` (one GPU for STT + LLM + TTS)
 
-`src/deployments/declared/parle-speech.json`: the `ghcr.io/marcosremar/parle-speech:<commit sha>` image (Whisper
-large-v3-turbo + Qwen3.5-9B + Qwen3-TTS 0.6B Base; built by the babylon-cinema workflow
-`.github/workflows/speech-image.yml`, commit tags only, no `latest`), port 80, `/health` (answers only when the
-models are loaded), L4-1-24G in fr-par-2, 0..1 replica, 15 min idle, 45 min boot timeout (models download at
-boot; cold start ≈ 8 min), 100 GB volume, 2 h max lifetime. `TRUST_UPSTREAM_AUTH=1`: behind the gateway the host
-nginx forwards only `X-Aigw-Token`, so the image's own nginx sets the Bearer for its servers (babylon-cinema PR #1508).
-The default image is the first build with that change (`9a87056…`); set `SPEECH_IMAGE` to a newer commit tag.
+`src/deployments/declared/parle-speech.json`: the `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` image
+(`docker/speech-stack`: Whisper + Qwen LLM + Qwen3-TTS in one container). It lives in the gateway's own Scaleway
+registry, which the gateway pulls from with the key it already has: **no registry token, no `registryAuth`, nothing
+to set** — it is never `pending` for a credential. The declaration owns three things and patches only them over the
+registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full reference; default
+`20261006-0107`, the one production runs), `realtime: {}` (the edge sidecar, [realtime-edge.md](realtime-edge.md))
+and the edge's `RT_MAX_SESSIONS` per machine type (L4 8, L40S 16, merged into the stored `envByMachineType`). Port,
+machine type, zone, replicas, idle and boot times, € and hour limits, volume, `env` and `files` (the voice catalog)
+stay exactly as registered. On a gateway where `parle-speech` does not exist it is created from the `speech-stack`
+profile with the declared image; that deployment has no `files`, so the voice catalog still has to be sent with a
+`PUT`.
 
 One-GPU mode: the parle TTS entry names `parle-qwen-tts` with `"oneGpuDeployment": "parle-speech"` (the app's own
 routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` is not registered
@@ -406,7 +412,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |
 | `CORS_ORIGINS` | browser origins allowed to call directly |
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
-| `GHCR_READ_TOKEN` | registry credential of the declared `parle-speech` (GHCR `read:packages`); from the dev API |
+| `GHCR_READ_TOKEN` | registry credential of a declared deployment whose `registryAuth.passwordEnv` names it (none today: `parle-speech` needs no token) |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
 

@@ -629,7 +629,7 @@ every chain plus the gateway-wide counters (`connections`, `sttFilter`, `noWake`
   "connections": { "active": 1, "peak": 3 }, "noWake": { "skips": 0 },
   "stages": {
     "stt": { "parle-stt": { "serving": "openrouter:openai/whisper-large-v3-turbo", "onFallback": true, "links": [
-      { "target": "deployment:parle-speech", "state": "pending", "reason": "GHCR_READ_TOKEN is not set (registry credential for ghcr.io)" },
+      { "target": "deployment:parle-speech", "state": "pending", "reason": "SPEECH_IMAGE is not set and the declaration has no default image" },
       { "target": "openrouter:openai/whisper-large-v3-turbo", "state": "ready" },
       { "target": "groq:whisper-large-v3-turbo", "state": "no_key", "reason": "groq: GROQ_API_KEY is not set" } ] } },
     "tts": { "parle-tts": { "serving": "openrouter:hexgrad/kokoro-82m", "onFallback": true, "links": [
@@ -637,7 +637,7 @@ every chain plus the gateway-wide counters (`connections`, `sttFilter`, `noWake`
       { "target": "openrouter:qwen/qwen-audio-3.0-tts-flash", "state": "blocked", "reason": "openrouter:qwen/qwen-audio-3.0-tts-flash: refused by the provider account's data policy (ZDR) — skipped until …" },
       { "target": "openrouter:hexgrad/kokoro-82m", "state": "ready" } ] } }
   },
-  "warnings": ["stt parle-stt: primary deployment:parle-speech is pending (GHCR_READ_TOKEN is not set …) — serving from openrouter:openai/whisper-large-v3-turbo"]
+  "warnings": ["stt parle-stt: primary deployment:parle-speech is pending (SPEECH_IMAGE is not set …) — serving from openrouter:openai/whisper-large-v3-turbo"]
 }
 ```
 
