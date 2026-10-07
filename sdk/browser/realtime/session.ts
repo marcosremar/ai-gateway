@@ -20,6 +20,8 @@ import { createWebRtcTransport } from './transports/webrtc';
 import { createWsTransport } from './transports/ws';
 import { createPostTransport, createS2SStreamTransport, type PostTurn, type S2SEndpoint } from './transports/clip';
 import { createVoiceBridge, type VoiceBridge } from './voice-bridge';
+import { createPcmPlayer, type PcmPlayer } from './audio-io';
+import { DOWNSTREAM_RATE } from './pcm';
 import {
   DEFAULT_TIMEOUTS, TRANSPORT_LADDER, type ChatMessage, type ClientMessage, type RealtimeEvent, type RealtimeMetrics,
   type RealtimeTimeouts, type RealtimeTransport, type SessionDescriptor, type StorageLike, type TransportContext,
@@ -34,6 +36,8 @@ export interface RealtimeVoiceOptions {
   echoTailMs: number;
   tuning?: VoiceActivityTuning;
 }
+
+export type SpeakText = (text: string, ctx: { config: Record<string, unknown>; traceparent: string; signal: AbortSignal }) => Promise<Blob | ArrayBuffer>;
 
 export interface RealtimeSessionOptions {
   /** The app's backend URL that calls `POST /v1/realtime/sessions` server side (POSTed `{transports, prefer}`), or a function. */
@@ -53,6 +57,8 @@ export interface RealtimeSessionOptions {
   config?: Record<string, unknown>;
   s2s?: S2SEndpoint;
   postTurn?: PostTurn;
+  speak?: SpeakText;
+  createPlayer?: (opts: { rate: number }) => Promise<PcmPlayer>;
   /** Client VAD: `end_turn`, barge-in `interrupt`, and the turn clips of the clip rungs. */
   voice?: RealtimeVoiceOptions;
   /** A shared emitter, options of the local one, or false (no telemetry sent). */
@@ -82,6 +88,13 @@ export interface RealtimeSession {
 
 const isRealtime = (t: TransportType) => t === 'webrtc' || t === 'ws';
 
+interface Recovery {
+  error: Extract<RealtimeEvent, { type: 'error' }>;
+  audio: Promise<Blob | ArrayBuffer>;
+  abort: AbortController;
+  playing: boolean;
+}
+
 function playRemote(stream: MediaStream | null, el: { current: HTMLAudioElement | null }): void {
   if (typeof document === 'undefined') return;
   if (!stream) { if (el.current) { el.current.srcObject = null; el.current.remove(); el.current = null; } return; }
@@ -110,6 +123,8 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   let mic: Promise<MediaStream> | null = null;
   let bridge: VoiceBridge | null = null;
   let voiceStop: (() => void) | null = null;
+  let recovery: Recovery | null = null;
+  let recoveryPlayer: PcmPlayer | null = null;
 
   const baseConfig = () => (descriptor ? configFromToken(descriptor.token) : null) ?? opts.config ?? {};
   const config = () => {
@@ -145,13 +160,63 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     try { opts.onEvent(e); } catch { /* the page's handler */ }
   };
 
+  const cancelRecovery = () => {
+    const r = recovery;
+    recovery = null;
+    r?.abort.abort();
+    recoveryPlayer?.flush();
+    return r;
+  };
+
+  async function recover(r: Recovery): Promise<void> {
+    r.playing = true;
+    const timer = setTimeout(() => r.abort.abort(), timeouts.turnMs);
+    const aborted = new Promise<never>((_, reject) => r.abort.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+    try {
+      await Promise.race([aborted, (async () => {
+        const audio = await r.audio;
+        recoveryPlayer ??= await (opts.createPlayer ?? createPcmPlayer)({ rate: DOWNSTREAM_RATE });
+        if (recovery !== r) return;
+        await recoveryPlayer.pushEncoded(audio instanceof Blob ? await audio.arrayBuffer() : audio);
+        if (recovery !== r) return;
+        if (!npcSpeaking) emit({ type: 'audio_start' });
+        telemetry.emit('turn.recovered', { turnId: turn?.id, attrs: { transport: current?.type ?? null } });
+        emit({ type: 'recovered' });
+        await recoveryPlayer.idle();
+      })()]);
+      if (recovery !== r) return;
+      recovery = null;
+      emit({ type: 'audio_end' });
+      emit({ type: 'done' });
+    } catch {
+      if (recovery !== r) return;
+      cancelRecovery();
+      emit(r.error);
+      emit({ type: 'done', error: true });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const fromTransport = (e: RealtimeEvent) => {
+    if (e.type === 'error' && e.code === 'upstream' && e.unspoken && opts.speak && !recovery) {
+      const abort = new AbortController();
+      const audio = Promise.resolve().then(() => opts.speak!(e.unspoken!, { config: config(), traceparent: telemetry.traceparent, signal: abort.signal }));
+      audio.catch(() => {});
+      recovery = { error: e, audio, abort, playing: false };
+      return;
+    }
+    if (e.type === 'done' && e.error && recovery && !recovery.playing) { void recover(recovery); return; }
+    emit(e);
+  };
+
   const ctx: TransportContext = {
     get descriptor() { return descriptor; },
     timeouts, fetchImpl, telemetry,
     playoutDelayMs: opts.playoutDelayMs,
     get traceparent() { return telemetry.traceparent; },
     mic: () => (mic ??= opts.getMicStream()),
-    emit,
+    emit: fromTransport,
     fail: (err) => { const t = current; if (t) void failover(t.type, err); },
     remoteAudio: (stream) => (opts.onRemoteAudio ? opts.onRemoteAudio(stream) : playRemote(stream, audioEl)),
     config,
@@ -228,6 +293,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     switching = (async () => {
       current?.close();
       current = null;
+      cancelRecovery();
       npcSpeaking = false;
       bridge?.reset();
       metrics.failovers++;
@@ -272,6 +338,8 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     closed = true;
     bridge?.reset();
     voiceStop?.();
+    cancelRecovery();
+    recoveryPlayer?.close();
     current?.close();
     current = null;
     telemetry.emit('rt.session.closed', { attrs: { reason: reason.slice(0, 64), failovers: metrics.failovers } });
@@ -293,6 +361,9 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       current.send({ type: 'end_turn' } satisfies ClientMessage);
     },
     interrupt() {
+      const r = cancelRecovery();
+      if (r?.playing) { emit({ type: 'interrupted' }); emit({ type: 'done', interrupted: true }); return; }
+      if (r) emit(r.error);
       current?.send({ type: 'interrupt' });
     },
     updateHistory(messages) {

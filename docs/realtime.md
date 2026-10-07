@@ -208,6 +208,26 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   speaks → `interrupt` (barge-in); on the clip rungs the voice SDK's turn-taking records the clip.
 - Without `voice`, the page calls `sendEndTurn()`, `interrupt()`, `sendTurn(wav)` itself.
 
+### A reply cut by an upstream error
+
+When the edge fails after part of the reply was voiced (`error{code:"upstream"}` then `done{error:true}`), the SDK can
+voice the rest instead of failing the turn. It needs two things and falls back to handing the error to the page when
+either is missing:
+
+- **the cut point, from the edge**: `unspoken` on the `error` event — the text of the reply no audio was sent for,
+  cut on a sentence boundary — and `done{error:true}` sent only once the audio already queued has been played out.
+  The SDK cannot work the cut out by itself (`reply_delta` is LLM text, not what was voiced). **The edge does not send
+  `unspoken` yet**: until it does, behaviour is unchanged.
+- **a way to voice text, from the app**: `speak(text, {config, traceparent, signal})` → encoded audio, the app's
+  backend relaying to the gateway's `/v1/audio/speech` with the session's voice (like `s2s` and `postTurn`; the
+  s2s-stream and post rungs answer a recorded turn and cannot voice a given text).
+
+With both, the `error` is held, `speak(unspoken)` starts at once, and at `done{error:true}` its audio plays after what
+was already heard. The page sees `recovered` (telemetry `turn.recovered`), `audio_end`, then a plain `done`: no
+`error`. If `speak` or the playback fails, or takes longer than `turnMs`, the held `error` and `done{error:true}` are
+delivered once; there is no second attempt. `interrupt()` during the recovered audio stops it (`interrupted`,
+`done{interrupted:true}`).
+
 ### Pre-connect
 
 `connect()` does the admission, the transport and the microphone, and sends nothing else: no `end_turn`, no turn, no

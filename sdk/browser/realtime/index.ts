@@ -5,7 +5,7 @@
  * rest is exported for consumers that wire their own pieces (and for tests).
  */
 export { createRealtimeSession } from './session';
-export type { RealtimeSession, RealtimeSessionOptions, RealtimeVoiceOptions } from './session';
+export type { RealtimeSession, RealtimeSessionOptions, RealtimeVoiceOptions, SpeakText } from './session';
 export {
   DEFAULT_TIMEOUTS, TRANSPORT_LADDER,
 } from './types';

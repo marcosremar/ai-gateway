@@ -2,9 +2,9 @@
  * Connection speed and resilience of the realtime SDK with fake browser APIs: when the WebRTC offer leaves, the playout
  * delay of the receiver, pre-connecting, recovering a reply cut by an upstream error, and surviving a network change.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
-  DEFAULT_TIMEOUTS, createRealtimeSession, createWebRtcTransport, setPlayoutDelay, type RealtimeEvent, type RealtimeSessionOptions,
+  DEFAULT_TIMEOUTS, createRealtimeSession, createWebRtcTransport, setPlayoutDelay, type PcmPlayer, type RealtimeEvent, type RealtimeSessionOptions,
   type SessionDescriptor, type TelemetryEvent, type TransportContext, type TransportOffer,
 } from '../../sdk/browser/realtime/index';
 import { createLocalTelemetry } from '../../sdk/browser/realtime/telemetry';
@@ -200,6 +200,111 @@ describe('pre-connect', () => {
     expect(counts).toEqual({ admissions: 1, mics: 1 });
     expect(s.history).toEqual([{ role: 'user', content: 'Bom dia' }, { role: 'assistant', content: 'Olá!' }]);
     expect(telemetry.filter(e => e.event === 'turn.done')).toHaveLength(1);
+    s.close();
+  });
+});
+
+function fakePlayer() {
+  const played: string[] = [];
+  let release: (() => void) | null = null;
+  let flushed = 0;
+  const player: PcmPlayer = {
+    pushPcm16: () => {}, pushFloat: () => {}, playing: false, close: () => {},
+    pushEncoded: async (data) => { played.push(new TextDecoder().decode(data)); },
+    idle: () => new Promise<void>((resolve) => { release = resolve; }),
+    flush: () => { flushed++; release?.(); },
+  };
+  return { player, played, finish: () => release?.(), flushes: () => flushed };
+}
+
+const audioOf = (text: string) => new TextEncoder().encode(`audio<${text}>`).buffer as ArrayBuffer;
+
+async function failingReply(extra: Partial<RealtimeSessionOptions>) {
+  FakePc.candidates = [[1, 'srflx']];
+  const out = session(extra);
+  await out.s.connect();
+  const pc = FakePc.last;
+  out.s.sendEndTurn();
+  pc.edge({ type: 'transcript', text: 'Um pão, por favor', final: true });
+  pc.edge({ type: 'reply_delta', text: 'Claro! São dois reais. Mais alguma coisa?' });
+  pc.edge({ type: 'reply', text: 'Claro! São dois reais. Mais alguma coisa?' });
+  pc.edge({ type: 'audio_start' });
+  return { ...out, pc };
+}
+
+const types = (events: RealtimeEvent[]) => events.map(e => e.type).filter(t => t !== 'transport');
+
+describe('reply cut by an upstream error', () => {
+  it('error after sentence 1 of 3: sentences 2–3 are spoken once, in order, and the turn ends done without error', async () => {
+    const p = fakePlayer();
+    const spoken: string[] = [];
+    const { s, events, telemetry, pc } = await failingReply({
+      speak: async (text) => { spoken.push(text); return audioOf(text); }, createPlayer: async () => p.player,
+    });
+    pc.edge({ type: 'error', code: 'upstream', message: 'tts 503', unspoken: 'São dois reais. Mais alguma coisa?' });
+    pc.edge({ type: 'audio_end' });
+    expect(p.played).toEqual([]);
+    pc.edge({ type: 'done', error: true });
+    await vi.waitFor(() => expect(p.played).toEqual(['audio<São dois reais. Mais alguma coisa?>']));
+    expect(types(events)).toEqual(['transcript', 'reply_delta', 'reply', 'audio_start', 'audio_end', 'audio_start', 'recovered']);
+    p.finish();
+    await vi.waitFor(() => expect(events.at(-1)).toEqual({ type: 'done' }));
+    expect(types(events)).toEqual(['transcript', 'reply_delta', 'reply', 'audio_start', 'audio_end', 'audio_start', 'recovered', 'audio_end', 'done']);
+    expect(spoken).toEqual(['São dois reais. Mais alguma coisa?']);
+    expect(s.history).toEqual([{ role: 'user', content: 'Um pão, por favor' }, { role: 'assistant', content: 'Claro! São dois reais. Mais alguma coisa?' }]);
+    expect(telemetry.filter(e => e.event === 'turn.recovered')).toHaveLength(1);
+    expect(telemetry.filter(e => e.event === 'turn.done')).toHaveLength(1);
+    expect(telemetry.filter(e => e.event === 'error')).toHaveLength(0);
+    expect(JSON.stringify(telemetry)).not.toMatch(/reais|pão/);
+    s.close();
+  });
+
+  it('no cut point from the edge, or no speak: the error and done{error} reach the page as before', async () => {
+    const spoken: string[] = [];
+    const a = await failingReply({ speak: async (text) => { spoken.push(text); return audioOf(text); }, createPlayer: async () => fakePlayer().player });
+    a.pc.edge({ type: 'error', code: 'upstream', message: 'llm 500' });
+    a.pc.edge({ type: 'done', error: true });
+    expect(a.events.slice(-2)).toEqual([{ type: 'error', code: 'upstream', message: 'llm 500' }, { type: 'done', error: true }]);
+    expect(spoken).toEqual([]);
+    a.s.close();
+
+    const b = await failingReply({});
+    b.pc.edge({ type: 'error', code: 'upstream', message: 'tts 503', unspoken: 'São dois reais.' });
+    b.pc.edge({ type: 'done', error: true });
+    expect(types(b.events).slice(-2)).toEqual(['error', 'done']);
+    expect(b.events.some(e => e.type === 'recovered')).toBe(false);
+    b.s.close();
+  });
+
+  it('the recovery itself fails: one error, one done{error}, no second attempt', async () => {
+    let calls = 0;
+    const { s, events, telemetry, pc } = await failingReply({
+      speak: async () => { calls++; throw new Error('tts relay 502'); }, createPlayer: async () => fakePlayer().player,
+    });
+    pc.edge({ type: 'error', code: 'upstream', message: 'tts 503', unspoken: 'São dois reais.' });
+    pc.edge({ type: 'done', error: true });
+    await vi.waitFor(() => expect(events.at(-1)).toEqual({ type: 'done', error: true }));
+    await new Promise(r => setTimeout(r, 20));
+    expect(calls).toBe(1);
+    expect(events.filter(e => e.type === 'error')).toHaveLength(1);
+    expect(events.filter(e => e.type === 'done')).toHaveLength(1);
+    expect(events.some(e => e.type === 'recovered')).toBe(false);
+    expect(telemetry.filter(e => e.event === 'turn.done')).toHaveLength(1);
+    s.close();
+  });
+
+  it('barge-in during the recovered audio stops it: interrupted, one done, nothing sent to the edge', async () => {
+    const p = fakePlayer();
+    const { s, events, pc } = await failingReply({ speak: async (text) => audioOf(text), createPlayer: async () => p.player });
+    pc.edge({ type: 'error', code: 'upstream', message: 'tts 503', unspoken: 'São dois reais.' });
+    pc.edge({ type: 'done', error: true });
+    await vi.waitFor(() => expect(events.at(-1)).toEqual({ type: 'recovered' }));
+    s.interrupt();
+    await new Promise(r => setTimeout(r, 20));
+    expect(p.flushes()).toBe(1);
+    expect(types(events).slice(-2)).toEqual(['interrupted', 'done']);
+    expect(events.filter(e => e.type === 'done')).toHaveLength(1);
+    expect(pc.sent).toEqual([{ type: 'end_turn' }]);
     s.close();
   });
 });
