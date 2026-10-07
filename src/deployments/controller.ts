@@ -7,194 +7,31 @@
  * gone with the spec, so nothing could reach them anyway).
  *
  * Single-process by design: run ONE gateway replica per namespace (two would both scale the same deployment).
+ *
+ * The implementation is split by responsibility owner into `controller-*.ts` (layout in controller-state.ts); this file
+ * is the public class: lifecycle, profiles, deployment CRUD, wake/park, and leases (`acquire`).
  */
 
-import { isExpiring } from './expiry';
 import { randomBytes } from 'crypto';
 import { replicaCloudInit } from './cloud-init';
-import { packFiles } from './file-pack';
-import { planReplicas, replicaPhase, type ObservedReplica } from './planner';
+import { DeploymentError, type Lease, type Runtime } from './controller-state';
+import { ControllerViews } from './controller-views';
+import { isExpiring } from './expiry';
 import { BUILTIN_PROFILES } from './profiles';
-import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway, usesVast } from './spec';
-import { placeReplica, PlacementError } from './placement-walk';
-import { DEFAULT_MAX_RTT_MS, gateDecision, type GateState } from './rtt-gate';
-import type {
-  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, DeploymentStore, DeploymentView, Profile, ReplicaMachine,
-  ReplicaProbe,
-} from './types';
+import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
+import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
 
-export class DeploymentError extends Error {
-  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number) {
-    super(message);
-  }
-}
+export {
+  DeploymentError, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
+} from './controller-state';
 
-interface ProbeState { everReady: boolean; readyNow: boolean; failures: number; readyAt?: number }
-
-interface Runtime {
-  record: DeploymentRecord;
-  inflight: number;
-  waiting: number;
-  perReplica: Map<string, number>;
-  aboveSince: number | null;
-  lastError: string | null;
-  creating: number;
-  backoffUntil: number;
-  createFailures: number;
-  lastPersistedRequestAt: number | null;
-  waiters: Set<() => void>;
-  /** Parked replicas (`idleAction: 'stop'`) being powered back on, by id → when: not started twice while the list lags. */
-  starting: Map<string, number>;
-  /** Why the last create attempt was refused by the € ceiling (kept visible while siblings of the same tick succeed). */
-  spendNote: string | null;
-  /** Where the last create landed (or failed) and which candidates were skipped. */
-  lastPlacement: string | null;
-  /** Hosts the RTT gate released since the last replica that passed it (kept in `lastPlacement` across creates). */
-  rejected: string[];
-}
-
-export interface ControllerOptions {
-  /** One backend per provider (Scaleway, Vast); at least one. */
-  backends?: Partial<Record<DeploymentProvider, DeploymentBackend>>;
-  /** Single-backend shorthand (kept for callers and tests from before `backends`). */
-  backend?: DeploymentBackend;
-  store: DeploymentStore;
-  probe: ReplicaProbe;
-  namespace?: string;
-  /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
-  maxTotalReplicas?: number;
-  /** Cap on parked (stopped) replicas across all deployments: they bill disk only, but they must not pile up. Default 8. */
-  maxStoppedReplicas?: number;
-  /** Ceiling (EUR/h) on the summed price of the running replicas of all deployments. Default 6; 0 = off. */
-  maxEurPerHour?: number;
-  /** A parked replica unused this long is deleted (a forgotten park bills its disk forever). Default 72 h; 0 = off. */
-  parkedMaxMs?: number;
-  /** Pause between retries of the release of a machine whose deployment was deleted while it was created. Default 2 s. */
-  releaseRetryMs?: number;
-  reconcileMs?: number;
-  /** Replicas kept only by `minReplicas` go to zero after this long unused (planner `pinnedIdleOver`); 0 = off. */
-  pinnedIdleMaxMs?: number;
-  now?: () => number;
-  log?: (msg: string, data?: Record<string, unknown>) => void;
-}
-
-export interface Lease {
-  machine: ReplicaMachine;
-  token: string;
-  /** The deployment is exposed (`exposure`): its token-gated front is on `PROBE_PORT`, not :80. */
-  exposed: boolean;
-  /** Call once the forwarded request finished. `failed` = connection-level failure (marks the replica suspect). */
-  done(failed?: boolean): void;
-}
-
-const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
-/** A parked replica just powered on still lists as stopped for a while: do not power it on again before this. */
-const PARKED_START_GRACE_MS = 90_000;
-const NETWORK_RELEASE_RETRY_MS = 15_000;
-export const DEFAULT_MAX_STOPPED = 8;
-export const DEFAULT_MAX_EUR_PER_HOUR = 6;
-export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
-/** The provider lists `stopping` for a minute or two after a stop; past this the machine is planned like any other. */
-const STOPPING_MAX_MS = 10 * 60_000;
-const ORPHAN_RELEASE_ATTEMPTS = 6;
-const SPEND_RETRY_MS = 30_000;
-
-/** Powered off by the provider's normal stop (not billed for compute): a parked replica under `idleAction: 'stop'`. */
-function isParked(m: ReplicaMachine): boolean {
-  return m.state === 'stopped';
-}
-
-const round3 = (n: number) => Math.round(n * 1000) / 1000;
-
-export class DeploymentController {
-  private readonly deployments = new Map<string, Runtime>();
-  private readonly profiles = new Map<string, Profile>();
-  private machines: ReplicaMachine[] = [];
-  /**
-   * Machines the provider already created but `createReplica` has not finished configuring (user_data, power-on).
-   * The list shows them `stopped` in that window: planned like any machine they read as halted and were deleted
-   * mid-create, and the create then failed with a 404 on its own server (production stress 2026-10-06). They stay out
-   * of `machines` (and of every plan) until the create returns; `rt.creating` already counts them.
-   */
-  private readonly creatingIds = new Set<string>();
-  /**
-   * Machines being powered off (`idleAction: 'stop'`), by id → since when: the provider lists them `stopping` (or still
-   * `running`) for a while, and a stopping machine read as `halted` was deleted — parked replica lost, a new one
-   * created with no demand (production 2026-10-06 18:31). They stay out of every plan until the list shows `stopped`.
-   */
-  private readonly stopping = new Map<string, number>();
-  /** Parked machines, id → since when the controller first saw them stopped (the forgotten-park limit). */
-  private readonly parkedSince = new Map<string, number>();
-  /** Last power-on of a parked replica, id → when: `maxHours` and the boot timeout count from here, not from creation. */
-  private readonly poweredOnAt = new Map<string, number>();
-  /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
-  private readonly pendingSpend = new Set<{ cost: number }>();
-  private readonly probes = new Map<string, ProbeState>();
-  private reconciling: Promise<void> | null = null;
-  private rerun = false;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private lastListError: string | null = null;
-  private readonly backends: Partial<Record<DeploymentProvider, DeploymentBackend>>;
-  /** Provider of a machine that does not say (fakes, records from before `provider`). */
-  private readonly defaultProvider: DeploymentProvider;
-  /** RTT gate per replica (backends with `measureRtt`, i.e. Vast), by machine id. */
-  private readonly gates = new Map<string, GateState>();
-  /** Machines created before this process started were adopted: measured for the view, never released by the gate. */
-  private readonly startedAt: number;
-  readonly namespace: string;
-  private readonly now: () => number;
-  private readonly log: (msg: string, data?: Record<string, unknown>) => void;
-
-  constructor(private readonly opts: ControllerOptions) {
-    this.namespace = opts.namespace ?? 'default';
-    if (!NAME_RE.test(this.namespace)) throw new Error(`invalid deployments namespace '${this.namespace}'`);
-    this.now = opts.now ?? Date.now;
-    this.startedAt = this.now();
-    this.log = opts.log ?? (() => {});
-    this.backends = opts.backends ?? (opts.backend ? { [opts.backend.provider]: opts.backend } : {});
-    const providers = Object.keys(this.backends) as DeploymentProvider[];
-    if (!providers.length) throw new Error('deployments controller needs at least one backend');
-    this.defaultProvider = providers.includes('scaleway') ? 'scaleway' : providers[0];
-  }
-
-  private backendOf(provider: DeploymentProvider | undefined): DeploymentBackend {
-    const backend = this.backends[provider ?? this.defaultProvider];
-    if (!backend) throw new Error(`no backend configured for provider '${provider}'`);
-    return backend;
-  }
-
-  private providerOf(m: ReplicaMachine): DeploymentProvider {
-    return m.provider ?? this.defaultProvider;
-  }
-
+export class DeploymentController extends ControllerViews {
   async init(): Promise<void> {
     const { deployments, profiles } = await this.opts.store.load();
     for (const p of BUILTIN_PROFILES) this.profiles.set(p.name, p);
     for (const p of profiles) this.profiles.set(p.name, p);
     for (const record of deployments) this.deployments.set(record.spec.name, this.runtime(record));
   }
-
-  start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => void this.reconcile(), this.opts.reconcileMs ?? 20_000);
-    this.timer.unref?.();
-    void this.reconcile();
-  }
-
-  stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-  }
-
-  private runtime(record: DeploymentRecord): Runtime {
-    return {
-      record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
-      backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
-      lastPlacement: null, rejected: [], spendNote: null,
-    };
-  }
-
-  // ── Profiles ──────────────────────────────────────────────────────────────
 
   listProfiles(): Profile[] {
     return [...this.profiles.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -217,8 +54,6 @@ export class DeploymentController {
     await this.opts.store.deleteProfile(name);
     return true;
   }
-
-  // ── Deployments ───────────────────────────────────────────────────────────
 
   async put(
     name: string, body: Record<string, unknown>, meta: { app?: string; appImage?: string } = {},
@@ -267,20 +102,6 @@ export class DeploymentController {
     return true;
   }
 
-  /** The reserved IP and firewall go with the deployment; the IP detaches some time after its server is deleted. */
-  private async releaseNetwork(name: string, network: NonNullable<DeploymentRecord['network']>): Promise<void> {
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
-        await this.backendOf('scaleway').releaseNetwork?.(network);
-        this.log('deployments: released network', { deployment: name, ip: network.ip });
-        return;
-      } catch (err) {
-        if (attempt === 9) this.log('deployments: release network failed', { deployment: name, error: err instanceof Error ? err.message : String(err) });
-        await new Promise(r => setTimeout(r, NETWORK_RELEASE_RETRY_MS));
-      }
-    }
-  }
-
   /** Marks the deployment as in use (scales from zero) without sending a request. */
   wake(name: string): DeploymentView {
     const rt = this.require(name);
@@ -304,33 +125,6 @@ export class DeploymentController {
     return this.view(name)!;
   }
 
-  list(): DeploymentView[] {
-    return [...this.deployments.keys()].sort().map(n => this.view(n)!);
-  }
-
-  get(name: string): DeploymentView | null {
-    return this.view(name);
-  }
-
-  /** The stored spec, secrets included — for in-process callers only (declared reconcile); never sent over HTTP. */
-  specOf(name: string): DeploymentSpec | null {
-    const rt = this.deployments.get(name);
-    return rt ? structuredClone(rt.record.spec) : null;
-  }
-
-  private require(name: string): Runtime {
-    const rt = this.deployments.get(name);
-    if (!rt) throw new DeploymentError(404, `deployment '${name}' not found`);
-    return rt;
-  }
-
-  // ── Routing ───────────────────────────────────────────────────────────────
-
-  private readyMachines(name: string): ReplicaMachine[] {
-    return this.machines.filter(m => m.deployment === name && m.ip && this.probes.get(m.id)?.readyNow
-      && replicaPhase(this.observed(m, 0)) === 'ready');
-  }
-
   private pick(rt: Runtime, exclude: Set<string>): ReplicaMachine | null {
     const ready = this.readyMachines(rt.record.spec.name).filter(m => !exclude.has(m.id));
     if (!ready.length) return null;
@@ -343,11 +137,18 @@ export class DeploymentController {
   /**
    * A ready replica for one request, waiting through a cold start up to `waitMs`. Throws `DeploymentError`
    * 503 (+ Retry-After) when none became ready in time.
+   *
+   * `noWake` (no-wake mode, gateway/proxy/no-wake.ts): a ready replica is used as usual, but with none ready the call
+   * fails at once with 503 and touches nothing — no wait, no `lastRequestAt`, no reconcile — so a cold deployment
+   * stays cold.
    */
-  async acquire(name: string, opts: { waitMs?: number; exclude?: Set<string>; signal?: AbortSignal } = {}): Promise<Lease> {
+  async acquire(name: string, opts: { waitMs?: number; exclude?: Set<string>; signal?: AbortSignal; noWake?: boolean } = {}): Promise<Lease> {
     const rt = this.require(name);
     const { spec } = rt.record;
     if (spec.paused) throw new DeploymentError(409, `deployment '${name}' is paused`);
+    if (opts.noWake && !this.pick(rt, opts.exclude ?? new Set<string>())) {
+      throw new DeploymentError(503, `deployment '${name}': no ready replica (no-wake: not woken)`, 30);
+    }
     rt.record.lastRequestAt = this.now();
     this.persistRequestTime(rt);
     const deadline = this.now() + (opts.waitMs ?? spec.coldStartWaitSeconds * 1000);
@@ -408,481 +209,6 @@ export class DeploymentController {
     if (at == null || (rt.lastPersistedRequestAt != null && at - rt.lastPersistedRequestAt < 60_000)) return;
     rt.lastPersistedRequestAt = at;
     void this.opts.store.saveDeployment(rt.record).catch(() => {});
-  }
-
-  // ── Reconcile ─────────────────────────────────────────────────────────────
-
-  /** Schedules a reconcile now (coalesced with one in progress). */
-  kick(): void {
-    void this.reconcile();
-  }
-
-  reconcile(): Promise<void> {
-    if (this.reconciling) {
-      this.rerun = true;
-      return this.reconciling;
-    }
-    this.reconciling = (async () => {
-      try {
-        do {
-          this.rerun = false;
-          await this.reconcileOnce();
-        } while (this.rerun);
-      } finally {
-        this.reconciling = null;
-      }
-    })();
-    return this.reconciling;
-  }
-
-  private observed(m: ReplicaMachine, inflight: number): ObservedReplica {
-    const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
-    // A parked replica powered back on boots again: its boot (timeout, booting phase) AND its `maxHours` lifetime count
-    // from the last power-on, not from the day the machine was created (a parked replica is not running).
-    const startedAt = this.poweredOnAt.get(m.id);
-    const machine = startedAt !== undefined ? { ...m, createdAt: Math.max(m.createdAt, startedAt) } : m;
-    return { machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight, ...(p.readyAt ? { readyAt: p.readyAt } : {}) };
-  }
-
-  private async reconcileOnce(): Promise<void> {
-    // Each provider lists on its own. A failed list must never read as "nothing is running" (that would create
-    // duplicates): that provider's known machines are kept as they were, and deployments that may land on it
-    // neither create nor release this tick; the other providers' deployments carry on.
-    const listed: ReplicaMachine[] = [];
-    const failed = new Set<DeploymentProvider>();
-    const errors: string[] = [];
-    await Promise.all((Object.entries(this.backends) as Array<[DeploymentProvider, DeploymentBackend]>).map(async ([provider, backend]) => {
-      try {
-        listed.push(...(await backend.listReplicas(this.namespace)).map(m => ({ ...m, provider })));
-      } catch (err) {
-        failed.add(provider);
-        errors.push(`${provider}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }));
-    this.lastListError = errors.length ? errors.sort().join('; ') : null;
-    if (errors.length) this.log('deployments: list failed', { error: this.lastListError });
-    // Even with every list failed the tick goes on in release-only mode (below): a failing list (Vast 429s) must never
-    // keep an idle, billing replica up.
-    const unlisted = this.machines.filter(m => failed.has(this.providerOf(m)));
-    // Keep machines we just created that the provider list does not show yet.
-    const recent = this.machines.filter(m => !failed.has(this.providerOf(m)) && !listed.some(l => l.id === m.id)
-      && this.now() - m.createdAt < 120_000 && this.deployments.has(m.deployment));
-    // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
-    this.machines = [...listed.map((l) => {
-      const known = this.machines.find(m => m.id === l.id);
-      return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
-    }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
-    for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
-    for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
-    for (const id of [...this.poweredOnAt.keys()]) if (!this.machines.some(m => m.id === id)) this.poweredOnAt.delete(id);
-    this.trackParking(failed);
-
-    const orphans = this.machines.filter(m => !this.deployments.has(m.deployment) && !failed.has(this.providerOf(m)));
-    for (const m of orphans) await this.release(m, 'orphan');
-
-    await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment) && !this.parkedNow(m) && !this.stoppingNow(m))
-      .map(m => this.probeOne(m)));
-
-    for (const [name, rt] of this.deployments) {
-      // The deployment may live on a provider whose list failed: its known machines are planned (stale, but a release only
-      // needs the id) and only the releases run; no create, no power-on until a list answers.
-      const releaseOnly = this.touchesFailed(rt.record.spec, failed);
-      const all = this.machines.filter(m => m.deployment === name);
-      // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
-      // Ones still `stopping` are neither parked nor live: left alone until the list shows `stopped`.
-      let parked = rt.record.spec.idleAction === 'stop' ? all.filter(m => isParked(m) && !this.stoppingNow(m)) : [];
-      const mine = all.filter(m => !parked.includes(m) && !this.stoppingNow(m));
-      const plan = planReplicas({
-        spec: rt.record.spec,
-        replicas: mine.map(m => this.observed(m, rt.perReplica.get(m.id) ?? 0)),
-        inflight: rt.inflight,
-        waiting: rt.waiting,
-        lastRequestAt: rt.record.lastRequestAt,
-        aboveSince: rt.aboveSince,
-        now: this.now(),
-        ...(this.opts.pinnedIdleMaxMs ? { pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt } : {}),
-      });
-      rt.aboveSince = plan.aboveSince;
-      for (const r of plan.release) {
-        const m = mine.find(x => x.id === r.id);
-        if (!m) continue;
-        if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
-        else await this.release(m, r.reason);
-      }
-      if (releaseOnly) continue;
-      if (rt.record.spec.paused) for (const m of parked) await this.release(m, 'paused');
-      parked = await this.releaseForgotten(parked);
-      let toCreate = plan.create - rt.creating;
-      for (const m of rt.record.spec.paused ? [] : parked) {
-        if (toCreate <= 0) break;
-        toCreate--;
-        if (this.now() - (rt.starting.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
-        const refusal = this.capRefusal(m.pricePerHour ?? 0);
-        if (refusal) { rt.lastError = refusal; break; }
-        await this.unpark(rt, m);
-      }
-      for (let i = 0; i < toCreate; i++) this.createReplica(rt);
-      if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
-    }
-  }
-
-  /** The deployment may have (or create) machines on a provider whose list just failed. */
-  private touchesFailed(spec: DeploymentSpec, failed: Set<DeploymentProvider>): boolean {
-    if (!failed.size) return false;
-    return (failed.has('scaleway') && usesScaleway(spec)) || (failed.has('vast') && usesVast(spec))
-      || this.machines.some(m => m.deployment === spec.name && failed.has(this.providerOf(m)));
-  }
-
-  private parkedNow(m: ReplicaMachine): boolean {
-    return this.deployments.get(m.deployment)?.record.spec.idleAction === 'stop' && isParked(m);
-  }
-
-  /** Being powered off by this gateway (or listed `stopping` under `idleAction: 'stop'`): not stopped yet, so not parked. */
-  private stoppingNow(m: ReplicaMachine): boolean {
-    return this.stopping.has(m.id) && this.deployments.get(m.deployment)?.record.spec.idleAction === 'stop';
-  }
-
-  /** Bookkeeping of parked / stopping machines from the fresh list (`failed`: providers whose list did not answer). */
-  private trackParking(failed: Set<DeploymentProvider>): void {
-    const now = this.now();
-    for (const m of this.machines) {
-      if (failed.has(this.providerOf(m))) continue;
-      const stop = this.deployments.get(m.deployment)?.record.spec.idleAction === 'stop';
-      if (stop && m.state === 'stopping' && !this.stopping.has(m.id)) this.stopping.set(m.id, now); // adopted mid-stop
-      if (this.stopping.has(m.id) && (m.state === 'stopped' || now - this.stopping.get(m.id)! > STOPPING_MAX_MS)) this.stopping.delete(m.id);
-    }
-    for (const id of [...this.stopping.keys()]) if (!this.machines.some(m => m.id === id)) this.stopping.delete(id);
-    const parkedIds = new Set(this.machines.filter(m => this.parkedNow(m) && !this.stoppingNow(m)).map(m => m.id));
-    for (const id of parkedIds) if (!this.parkedSince.has(id)) this.parkedSince.set(id, now);
-    for (const id of [...this.parkedSince.keys()]) if (!parkedIds.has(id)) this.parkedSince.delete(id);
-  }
-
-  /** Parked replicas left unused past `parkedMaxMs` are deleted; returns the ones that stay. */
-  private async releaseForgotten(parked: ReplicaMachine[]): Promise<ReplicaMachine[]> {
-    const max = this.opts.parkedMaxMs ?? DEFAULT_PARKED_MAX_MS;
-    if (!max) return parked;
-    const keep: ReplicaMachine[] = [];
-    for (const m of parked) {
-      const since = this.parkedSince.get(m.id) ?? this.now();
-      if (this.now() - since >= max) await this.release(m, 'parked-too-long');
-      else keep.push(m);
-    }
-    return keep;
-  }
-
-  /** Stopped (parked or stopping) replicas, the count `DEPLOYMENTS_MAX_STOPPED` limits. */
-  private stoppedCount(): number {
-    return this.machines.filter(m => (this.parkedNow(m) && !this.isStarting(m)) || this.stoppingNow(m)).length;
-  }
-
-  private isStarting(m: ReplicaMachine): boolean {
-    return this.deployments.get(m.deployment)?.starting.has(m.id) ?? false;
-  }
-
-  /** Billing compute right now: everything but parked machines (a parked one just powered on counts again). */
-  private runningMachines(): ReplicaMachine[] {
-    return this.machines.filter(m => !this.parkedNow(m) || this.isStarting(m));
-  }
-
-  /** Summed catalog price (EUR/h) of the running replicas, plus the creates in flight. */
-  private burnEurPerHour(): number {
-    let sum = 0;
-    for (const m of this.runningMachines()) sum += m.pricePerHour ?? 0;
-    for (const p of this.pendingSpend) sum += p.cost;
-    return sum;
-  }
-
-  /** Why one more running replica billing `price` EUR/h is refused (replica cap, € ceiling), or null. */
-  private capRefusal(price: number): string | null {
-    const cap = this.opts.maxTotalReplicas ?? 6;
-    if (this.totalReplicas() >= cap) return `replica cap reached (${cap} across all deployments)`;
-    return this.spendRefusal(price);
-  }
-
-  /** The € ceiling alone (a create in flight already holds its replica slot). */
-  private spendRefusal(price: number): string | null {
-    const ceiling = this.opts.maxEurPerHour ?? DEFAULT_MAX_EUR_PER_HOUR;
-    const burn = this.burnEurPerHour();
-    if (ceiling > 0 && burn + price > ceiling + 1e-9) {
-      return `spend ceiling reached: running replicas bill €${round3(burn)}/h and this one €${round3(price)}/h, `
-        + `above the €${ceiling}/h ceiling across all deployments (DEPLOYMENTS_MAX_EUR_PER_HOUR)`;
-    }
-    return null;
-  }
-
-  private async probeOne(m: ReplicaMachine): Promise<void> {
-    const rt = this.deployments.get(m.deployment);
-    if (!rt || !m.ip) return;
-    if (!(await this.rttGate(rt, m))) return; // still measuring, or released as too far
-    const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
-    let ok = false;
-    try {
-      ok = await this.opts.probe.ready(m, rt.record.spec, rt.record.replicaToken);
-    } catch {
-      ok = false;
-    }
-    if (ok) { p.readyAt ??= Date.now(); p.everReady = true; p.readyNow = true; p.failures = 0; rt.starting.delete(m.id); }
-    else { p.readyNow = false; if (p.everReady) p.failures++; }
-    this.probes.set(m.id, p);
-  }
-
-  /**
-   * RTT gate (`rtt-gate.ts`): true once the replica may serve. A fresh replica on a backend that measures RTT (Vast)
-   * is kept only if the median from the gateway is within `maxRttMs`; otherwise it is released as `too-far` (the
-   * backend avoids the host) and the next create picks another offer. Passed once = never measured again.
-   */
-  private async rttGate(rt: Runtime, m: ReplicaMachine): Promise<boolean> {
-    const backend = this.backends[this.providerOf(m)];
-    if (!backend?.measureRtt) return true;
-    const now = this.now();
-    const gate = this.gates.get(m.id) ?? { status: 'pending', firstSeenAt: now, rttMs: null };
-    this.gates.set(m.id, gate);
-    if (gate.status !== 'pending') return true;
-    let rtt: number | null = null;
-    try { rtt = await backend.measureRtt(m); } catch { rtt = null; }
-    if (rtt != null) gate.rttMs = rtt;
-    if (m.createdAt < this.startedAt) { // adopted after a restart: it may be serving a class, never cut it here
-      if (rtt != null) gate.status = 'adopted';
-      return true;
-    }
-    const maxRttMs = rt.record.spec.maxRttMs ?? DEFAULT_MAX_RTT_MS;
-    const decision = gateDecision({ rttMs: rtt, maxRttMs, firstSeenAt: gate.firstSeenAt, now });
-    if (decision === 'wait') return false;
-    const measured = rtt != null ? `RTT ${rtt} ms` : 'no RTT answer';
-    if (decision === 'pass') {
-      gate.status = 'passed';
-      rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${measured} ≤ maxRttMs ${maxRttMs}: kept`;
-      rt.rejected = [];
-      return true;
-    }
-    const note = `host ${m.zone || m.id}: ${measured} > maxRttMs ${maxRttMs}: released (too-far)`;
-    rt.rejected = [...rt.rejected.slice(-4), note]; // the last few are enough to see a pattern
-    rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${note}`;
-    this.log('deployments: replica too far', { deployment: m.deployment, id: m.id, rttMs: rtt, maxRttMs });
-    await this.release(m, 'too-far');
-    return false;
-  }
-
-  private async release(m: ReplicaMachine, reason: string): Promise<void> {
-    this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason });
-    try {
-      await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
-      this.machines = this.machines.filter(x => x.id !== m.id);
-      this.probes.delete(m.id);
-    } catch (err) {
-      const rt = this.deployments.get(m.deployment);
-      if (rt) rt.lastError = `release ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
-
-  /** `idleAction: 'stop'`: power off, keeping disk, IP and firewall (the next demand powers it back on). */
-  private async parkReplica(m: ReplicaMachine): Promise<void> {
-    const backend = this.backendOf(this.providerOf(m));
-    const cap = this.opts.maxStoppedReplicas ?? DEFAULT_MAX_STOPPED;
-    // No stop on this backend (Vast), or too many parked already: delete like `idleAction: 'delete'`.
-    if (!backend.stopReplica || this.stoppedCount() >= cap) return this.release(m, 'scale-down');
-    this.log('deployments: parking replica (power off)', { deployment: m.deployment, id: m.id });
-    try {
-      await backend.stopReplica(m);
-      this.stopping.set(m.id, this.now());
-      this.poweredOnAt.delete(m.id);
-      this.probes.delete(m.id);
-    } catch (err) {
-      const rt = this.deployments.get(m.deployment);
-      if (rt) rt.lastError = `stop ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
-
-  private async unpark(rt: Runtime, m: ReplicaMachine): Promise<void> {
-    rt.starting.set(m.id, this.now());
-    this.poweredOnAt.set(m.id, this.now());
-    this.log('deployments: powering parked replica on', { deployment: m.deployment, id: m.id });
-    try {
-      await this.backendOf(this.providerOf(m)).startReplica!(m);
-    } catch (err) {
-      this.poweredOnAt.delete(m.id);
-      rt.lastError = `start ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
-
-  /** Running replicas plus creates in flight: what `maxTotalReplicas` limits (parked replicas cost no compute). */
-  private totalReplicas(): number {
-    let creating = 0;
-    for (const rt of this.deployments.values()) creating += rt.creating;
-    return this.runningMachines().length + creating;
-  }
-
-  /** The spec as the machine sees it: the provider's own registry credentials when the caller sent none. */
-  private withRegistryAuth(backend: DeploymentBackend, spec: DeploymentSpec): DeploymentSpec {
-    if (spec.registryAuth || spec.bootScript) return spec;
-    const auth = backend.registryAuthFor?.(spec.image);
-    return auth ? { ...spec, registryAuth: auth } : spec;
-  }
-
-  private createReplica(rt: Runtime): void {
-    const spec = rt.record.spec;
-    if (this.now() < rt.backoffUntil) return;
-    const refusal = this.capRefusal(0);
-    if (refusal) {
-      rt.lastError = refusal;
-      return;
-    }
-    rt.creating++;
-    rt.spendNote = null;
-    const created: { id?: string } = {};
-    const spend = { cost: 0 };
-    this.pendingSpend.add(spend);
-    void (async () => {
-      try {
-        const { machine, price, placement } = await placeReplica({
-          spec, log: this.log, backendFor: (p) => this.backends[p],
-          create: (backend, placed) => this.createOn(rt, backend, placed, created),
-          // The place's price (the cap on a market-priced Vast offer) must fit under the € ceiling with what already runs.
-          admit: (cost) => {
-            spend.cost = 0;
-            const why = this.spendRefusal(cost);
-            if (why) rt.spendNote = why; else spend.cost = cost;
-            return why;
-          },
-        });
-        if (this.deployments.get(spec.name) !== rt) {
-          await this.releaseOrphanedCreate(machine); // deleted while creating
-          return;
-        }
-        this.machines = [...this.machines.filter(m => m.id !== machine.id), { ...machine, pricePerHour: machine.pricePerHour ?? price }];
-        rt.lastPlacement = rt.rejected.length ? `${placement}; earlier: ${rt.rejected.join('; ')}` : placement;
-        rt.createFailures = 0;
-        rt.lastError = rt.spendNote ? `create: ${rt.spendNote}` : null;
-      } catch (err) {
-        if (err instanceof PlacementError) rt.lastPlacement = err.placement;
-        rt.lastError = `create: ${err instanceof Error ? err.message : String(err)}`;
-        // The € ceiling frees up as soon as something idles: retry soon, without the escalating back-off of a broken create.
-        if (rt.spendNote && err instanceof PlacementError) rt.backoffUntil = this.now() + SPEND_RETRY_MS;
-        else {
-          rt.backoffUntil = this.now() + CREATE_BACKOFF_MS[Math.min(rt.createFailures, CREATE_BACKOFF_MS.length - 1)];
-          rt.createFailures++;
-        }
-        this.log('deployments: create failed', { deployment: spec.name, error: rt.lastError });
-      } finally {
-        // A failed create cleans its own server up; anything left behind is listed again and planned as usual.
-        if (created.id) this.creatingIds.delete(created.id);
-        this.pendingSpend.delete(spend);
-        rt.creating--;
-      }
-    })();
-  }
-
-  /**
-   * The deployment was deleted while this machine was created: release it at once. The provider refuses while the server
-   * is still starting (`resource_still_in_use`), so retry a bounded number of times — otherwise it would run until the
-   * orphan sweep (QA 2026-10-06: ~20 s billed). A last failure is left to that sweep.
-   */
-  private async releaseOrphanedCreate(machine: ReplicaMachine): Promise<void> {
-    const backend = this.backendOf(this.providerOf(machine));
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await backend.releaseReplica(machine, 'deleted');
-        return;
-      } catch (err) {
-        if (attempt >= ORPHAN_RELEASE_ATTEMPTS) {
-          this.log('deployments: release after delete-during-create failed', { id: machine.id, error: err instanceof Error ? err.message : String(err) });
-          return;
-        }
-        await new Promise<void>(r => setTimeout(r, this.opts.releaseRetryMs ?? 2_000));
-      }
-    }
-  }
-
-  /** One create on one backend, the spec already narrowed to one place (zone, type, cap). */
-  private async createOn(rt: Runtime, backend: DeploymentBackend, spec: DeploymentSpec, created: { id?: string }): Promise<ReplicaMachine> {
-    this.log('deployments: creating replica', { deployment: spec.name, provider: backend.provider, type: spec.machineType, zone: spec.zone });
-    const network = spec.exposure ? await this.networkOf(rt, backend) : undefined;
-    const machine = await backend.createReplica({
-      spec, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
-      // Vast builds its own init (`vastReplicaInit`) from spec + token; Scaleway takes this cloud-init as user_data.
-      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), rt.record.replicaToken) : '',
-      ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
-      onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
-    });
-    return { ...machine, provider: backend.provider };
-  }
-
-  /** Reserved IP + firewall of an exposed deployment, created once and kept in the record (it outlives replicas). */
-  private async networkOf(rt: Runtime, backend: DeploymentBackend): Promise<NonNullable<DeploymentRecord['network']>> {
-    if (!backend.ensureNetwork) throw new Error(`provider ${backend.provider} cannot expose a deployment`);
-    const network = await backend.ensureNetwork(rt.record.spec, this.namespace, rt.record.network);
-    if (JSON.stringify(network) !== JSON.stringify(rt.record.network)) {
-      rt.record = { ...rt.record, network };
-      await this.opts.store.saveDeployment(rt.record);
-    }
-    return network;
-  }
-
-  // ── Views ─────────────────────────────────────────────────────────────────
-
-  tokenOf(name: string): string | null {
-    return this.deployments.get(name)?.record.replicaToken ?? null;
-  }
-
-  /** Counts plus the bill: what runs now, the € ceiling and the stopped replicas against their own cap. */
-  health(): {
-    deployments: number; replicas: number; listError: string | null;
-    running: number; maxReplicas: number; stopped: number; maxStopped: number; eurPerHour: number; maxEurPerHour: number;
-  } {
-    return {
-      deployments: this.deployments.size, replicas: this.machines.length, listError: this.lastListError,
-      running: this.runningMachines().length, maxReplicas: this.opts.maxTotalReplicas ?? 6,
-      stopped: this.stoppedCount(), maxStopped: this.opts.maxStoppedReplicas ?? DEFAULT_MAX_STOPPED,
-      eurPerHour: round3(this.burnEurPerHour()), maxEurPerHour: this.opts.maxEurPerHour ?? DEFAULT_MAX_EUR_PER_HOUR,
-    };
-  }
-
-  private view(name: string): DeploymentView | null {
-    const rt = this.deployments.get(name);
-    if (!rt) return null;
-    const { env, envByMachineType, registryAuth, bootScript, files, ...publicSpec } = rt.record.spec;
-    const now = this.now();
-    const replicas = this.machines.filter(m => m.deployment === name).map(m => ({
-      id: m.id,
-      phase: replicaPhase(this.observed(m, 0)),
-      ip: m.ip,
-      providerState: m.state,
-      zone: m.zone,
-      machineType: m.machineType,
-      pricePerHour: m.pricePerHour,
-      ageSeconds: Math.round((now - m.createdAt) / 1000),
-      inflight: rt.perReplica.get(m.id) ?? 0,
-      rttMs: this.gates.get(m.id)?.rttMs ?? null,
-      expiresInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
-    }));
-    const ready = replicas.filter(r => r.phase === 'ready').length;
-    const desired = planReplicas({
-      spec: rt.record.spec, replicas: [], inflight: rt.inflight, waiting: rt.waiting,
-      lastRequestAt: rt.record.lastRequestAt, aboveSince: null, now,
-    }).desired;
-    const status: DeploymentView['status'] = rt.record.spec.paused ? 'paused'
-      : replicas.length === 0 && rt.creating === 0 ? 'scaled-to-zero'
-        : ready === 0 ? 'warming'
-          : ready < desired ? 'degraded' : 'ready';
-    return {
-      name,
-      spec: {
-        ...publicSpec, envKeys: Object.keys(env), privateRegistry: Boolean(registryAuth), bootScript: Boolean(bootScript),
-        fileKeys: Object.keys(files ?? {}),
-      },
-      status,
-      desiredReplicas: desired,
-      replicas,
-      inflight: rt.inflight,
-      waiting: rt.waiting,
-      lastRequestAt: rt.record.lastRequestAt ? new Date(rt.record.lastRequestAt).toISOString() : null,
-      lastError: rt.lastError,
-      invokeUrl: `/v1/deployments/${name}/invoke/`,
-      app: rt.record.app ?? null,
-      appImage: rt.record.appImage ?? null,
-      publicIp: rt.record.network?.ip ?? null,
-      lastPlacement: rt.lastPlacement,
-    };
   }
 }
 

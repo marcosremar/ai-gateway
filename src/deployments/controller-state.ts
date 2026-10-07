@@ -1,0 +1,237 @@
+/**
+ * DeploymentController, part 1 of 6 — the state every other part reads: the deployments and their runtime counters, the
+ * machine list, the probe/gate/parking bookkeeping, and the derived counts behind the cost guards (replica cap, € ceiling).
+ *
+ * The controller is split by who owns what (pure move of the former `controller.ts`, 2026-10-07); each part extends the
+ * previous one and `DeploymentController` (controller.ts) is the public class:
+ *   controller-state.ts → controller-replicas.ts (create / release / probe) → controller-parking.ts (stop / park) →
+ *   controller-reconcile.ts (the planning tick) → controller-views.ts (views, health) → controller.ts (API, leases).
+ */
+
+import { replicaPhase, type ObservedReplica } from './planner';
+import { NAME_RE } from './spec';
+import type { GateState } from './rtt-gate';
+import type {
+  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, Profile, ReplicaMachine, ReplicaProbe,
+} from './types';
+
+export class DeploymentError extends Error {
+  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number) {
+    super(message);
+  }
+}
+
+export interface ProbeState { everReady: boolean; readyNow: boolean; failures: number; readyAt?: number }
+
+export interface Runtime {
+  record: DeploymentRecord;
+  inflight: number;
+  waiting: number;
+  perReplica: Map<string, number>;
+  aboveSince: number | null;
+  lastError: string | null;
+  creating: number;
+  backoffUntil: number;
+  createFailures: number;
+  lastPersistedRequestAt: number | null;
+  waiters: Set<() => void>;
+  /** Parked replicas (`idleAction: 'stop'`) being powered back on, by id → when: not started twice while the list lags. */
+  starting: Map<string, number>;
+  /** Why the last create attempt was refused by the € ceiling (kept visible while siblings of the same tick succeed). */
+  spendNote: string | null;
+  /** Where the last create landed (or failed) and which candidates were skipped. */
+  lastPlacement: string | null;
+  /** Hosts the RTT gate released since the last replica that passed it (kept in `lastPlacement` across creates). */
+  rejected: string[];
+}
+
+export interface ControllerOptions {
+  /** One backend per provider (Scaleway, Vast); at least one. */
+  backends?: Partial<Record<DeploymentProvider, DeploymentBackend>>;
+  /** Single-backend shorthand (kept for callers and tests from before `backends`). */
+  backend?: DeploymentBackend;
+  store: DeploymentStore;
+  probe: ReplicaProbe;
+  namespace?: string;
+  /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
+  maxTotalReplicas?: number;
+  /** Cap on parked (stopped) replicas across all deployments: they bill disk only, but they must not pile up. Default 8. */
+  maxStoppedReplicas?: number;
+  /** Ceiling (EUR/h) on the summed price of the running replicas of all deployments. Default 6; 0 = off. */
+  maxEurPerHour?: number;
+  /** A parked replica unused this long is deleted (a forgotten park bills its disk forever). Default 72 h; 0 = off. */
+  parkedMaxMs?: number;
+  /** Pause between retries of the release of a machine whose deployment was deleted while it was created. Default 2 s. */
+  releaseRetryMs?: number;
+  reconcileMs?: number;
+  /** Replicas kept only by `minReplicas` go to zero after this long unused (planner `pinnedIdleOver`); 0 = off. */
+  pinnedIdleMaxMs?: number;
+  now?: () => number;
+  log?: (msg: string, data?: Record<string, unknown>) => void;
+}
+
+export interface Lease {
+  machine: ReplicaMachine;
+  token: string;
+  /** The deployment is exposed (`exposure`): its token-gated front is on `PROBE_PORT`, not :80. */
+  exposed: boolean;
+  /** Call once the forwarded request finished. `failed` = connection-level failure (marks the replica suspect). */
+  done(failed?: boolean): void;
+}
+
+export const DEFAULT_MAX_STOPPED = 8;
+export const DEFAULT_MAX_EUR_PER_HOUR = 6;
+export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
+
+/** Powered off by the provider's normal stop (not billed for compute): a parked replica under `idleAction: 'stop'`. */
+export function isParked(m: ReplicaMachine): boolean {
+  return m.state === 'stopped';
+}
+
+export const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
+export abstract class ControllerState {
+  protected readonly deployments = new Map<string, Runtime>();
+  protected readonly profiles = new Map<string, Profile>();
+  protected machines: ReplicaMachine[] = [];
+  /**
+   * Machines the provider already created but `createReplica` has not finished configuring (user_data, power-on).
+   * The list shows them `stopped` in that window: planned like any machine they read as halted and were deleted
+   * mid-create, and the create then failed with a 404 on its own server (production stress 2026-10-06). They stay out
+   * of `machines` (and of every plan) until the create returns; `rt.creating` already counts them.
+   */
+  protected readonly creatingIds = new Set<string>();
+  /**
+   * Machines being powered off (`idleAction: 'stop'`), by id → since when: the provider lists them `stopping` (or still
+   * `running`) for a while, and a stopping machine read as `halted` was deleted — parked replica lost, a new one
+   * created with no demand (production 2026-10-06 18:31). They stay out of every plan until the list shows `stopped`.
+   */
+  protected readonly stopping = new Map<string, number>();
+  /** Parked machines, id → since when the controller first saw them stopped (the forgotten-park limit). */
+  protected readonly parkedSince = new Map<string, number>();
+  /** Last power-on of a parked replica, id → when: `maxHours` and the boot timeout count from here, not from creation. */
+  protected readonly poweredOnAt = new Map<string, number>();
+  /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
+  protected readonly pendingSpend = new Set<{ cost: number }>();
+  protected readonly probes = new Map<string, ProbeState>();
+  protected reconciling: Promise<void> | null = null;
+  protected rerun = false;
+  protected timer: ReturnType<typeof setInterval> | null = null;
+  protected lastListError: string | null = null;
+  protected readonly backends: Partial<Record<DeploymentProvider, DeploymentBackend>>;
+  /** Provider of a machine that does not say (fakes, records from before `provider`). */
+  protected readonly defaultProvider: DeploymentProvider;
+  /** RTT gate per replica (backends with `measureRtt`, i.e. Vast), by machine id. */
+  protected readonly gates = new Map<string, GateState>();
+  /** Machines created before this process started were adopted: measured for the view, never released by the gate. */
+  protected readonly startedAt: number;
+  readonly namespace: string;
+  protected readonly now: () => number;
+  protected readonly log: (msg: string, data?: Record<string, unknown>) => void;
+
+  constructor(protected readonly opts: ControllerOptions) {
+    this.namespace = opts.namespace ?? 'default';
+    if (!NAME_RE.test(this.namespace)) throw new Error(`invalid deployments namespace '${this.namespace}'`);
+    this.now = opts.now ?? Date.now;
+    this.startedAt = this.now();
+    this.log = opts.log ?? (() => {});
+    this.backends = opts.backends ?? (opts.backend ? { [opts.backend.provider]: opts.backend } : {});
+    const providers = Object.keys(this.backends) as DeploymentProvider[];
+    if (!providers.length) throw new Error('deployments controller needs at least one backend');
+    this.defaultProvider = providers.includes('scaleway') ? 'scaleway' : providers[0];
+  }
+
+  protected backendOf(provider: DeploymentProvider | undefined): DeploymentBackend {
+    const backend = this.backends[provider ?? this.defaultProvider];
+    if (!backend) throw new Error(`no backend configured for provider '${provider}'`);
+    return backend;
+  }
+
+  protected providerOf(m: ReplicaMachine): DeploymentProvider {
+    return m.provider ?? this.defaultProvider;
+  }
+
+  protected runtime(record: DeploymentRecord): Runtime {
+    return {
+      record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
+      backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
+      lastPlacement: null, rejected: [], spendNote: null,
+    };
+  }
+
+  protected require(name: string): Runtime {
+    const rt = this.deployments.get(name);
+    if (!rt) throw new DeploymentError(404, `deployment '${name}' not found`);
+    return rt;
+  }
+
+  protected readyMachines(name: string): ReplicaMachine[] {
+    return this.machines.filter(m => m.deployment === name && m.ip && this.probes.get(m.id)?.readyNow
+      && replicaPhase(this.observed(m, 0)) === 'ready');
+  }
+
+  protected observed(m: ReplicaMachine, inflight: number): ObservedReplica {
+    const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
+    // A parked replica powered back on boots again: its boot (timeout, booting phase) AND its `maxHours` lifetime count
+    // from the last power-on, not from the day the machine was created (a parked replica is not running).
+    const startedAt = this.poweredOnAt.get(m.id);
+    const machine = startedAt !== undefined ? { ...m, createdAt: Math.max(m.createdAt, startedAt) } : m;
+    return { machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight, ...(p.readyAt ? { readyAt: p.readyAt } : {}) };
+  }
+
+  protected parkedNow(m: ReplicaMachine): boolean {
+    return this.deployments.get(m.deployment)?.record.spec.idleAction === 'stop' && isParked(m);
+  }
+
+  /** Being powered off by this gateway (or listed `stopping` under `idleAction: 'stop'`): not stopped yet, so not parked. */
+  protected stoppingNow(m: ReplicaMachine): boolean {
+    return this.stopping.has(m.id) && this.deployments.get(m.deployment)?.record.spec.idleAction === 'stop';
+  }
+
+  /** Stopped (parked or stopping) replicas, the count `DEPLOYMENTS_MAX_STOPPED` limits. */
+  protected stoppedCount(): number {
+    return this.machines.filter(m => (this.parkedNow(m) && !this.isStarting(m)) || this.stoppingNow(m)).length;
+  }
+
+  protected isStarting(m: ReplicaMachine): boolean {
+    return this.deployments.get(m.deployment)?.starting.has(m.id) ?? false;
+  }
+
+  /** Billing compute right now: everything but parked machines (a parked one just powered on counts again). */
+  protected runningMachines(): ReplicaMachine[] {
+    return this.machines.filter(m => !this.parkedNow(m) || this.isStarting(m));
+  }
+
+  /** Summed catalog price (EUR/h) of the running replicas, plus the creates in flight. */
+  protected burnEurPerHour(): number {
+    let sum = 0;
+    for (const m of this.runningMachines()) sum += m.pricePerHour ?? 0;
+    for (const p of this.pendingSpend) sum += p.cost;
+    return sum;
+  }
+
+  /** Why one more running replica billing `price` EUR/h is refused (replica cap, € ceiling), or null. */
+  protected capRefusal(price: number): string | null {
+    const cap = this.opts.maxTotalReplicas ?? 6;
+    if (this.totalReplicas() >= cap) return `replica cap reached (${cap} across all deployments)`;
+    return this.spendRefusal(price);
+  }
+
+  /** The € ceiling alone (a create in flight already holds its replica slot). */
+  protected spendRefusal(price: number): string | null {
+    const ceiling = this.opts.maxEurPerHour ?? DEFAULT_MAX_EUR_PER_HOUR;
+    const burn = this.burnEurPerHour();
+    if (ceiling > 0 && burn + price > ceiling + 1e-9) {
+      return `spend ceiling reached: running replicas bill €${round3(burn)}/h and this one €${round3(price)}/h, `
+        + `above the €${ceiling}/h ceiling across all deployments (DEPLOYMENTS_MAX_EUR_PER_HOUR)`;
+    }
+    return null;
+  }
+
+  /** Running replicas plus creates in flight: what `maxTotalReplicas` limits (parked replicas cost no compute). */
+  protected totalReplicas(): number {
+    let creating = 0;
+    for (const rt of this.deployments.values()) creating += rt.creating;
+    return this.runningMachines().length + creating;
+  }
+}

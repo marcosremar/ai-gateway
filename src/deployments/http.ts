@@ -29,6 +29,7 @@ import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppFallbackService } from './app-fallback';
 import type { ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ReplicaMachine, ReplicaProbe } from './types';
+import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
@@ -36,7 +37,7 @@ const MAX_ADMIN_BODY = 16 * 1024 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 const HOP_BY_HOP = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding',
-  'upgrade', 'authorization', 'content-length', 'x-aigw-token', 'x-aigw-wait', 'x-forwarded-for', 'x-forwarded-host',
+  'upgrade', 'authorization', 'content-length', 'x-aigw-token', 'x-aigw-wait', 'x-gateway-no-wake', 'x-forwarded-for', 'x-forwarded-host',
   'x-forwarded-proto', 'x-real-ip', 'cookie',
 ]);
 
@@ -244,8 +245,17 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       if (!HOP_BY_HOP.has(k) && typeof v === 'string') headers[k] = v;
     }
     const exclude = new Set<string>();
+    // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves; none ready = 503 at once, nothing woken.
+    const noWake = noWakeActive();
     for (let attempt = 0; attempt < 2; attempt++) {
-      const lease = await controller.acquire(name, { waitMs, exclude, signal: abort.signal });
+      let lease;
+      try {
+        lease = await controller.acquire(name, noWake ? { waitMs: 0, exclude, signal: abort.signal, noWake: true } : { waitMs, exclude, signal: abort.signal });
+      } catch (err) {
+        if (!(noWake && err instanceof DeploymentError && err.status === 503)) throw err;
+        recordNoWakeSkip();
+        return send(res, 503, { error: err.message, status: 'cold', code: 'cold', noWake: true }, { 'Retry-After': err.retryAfterSeconds ?? 30 });
+      }
       let upstream: Response;
       try {
         upstream = await fetchImpl(`${replicaBase(lease.machine, lease.exposed)}/${rest}${query}`, {
@@ -311,8 +321,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         const filter = own ?? new URLSearchParams(query.slice(1)).get('app');
         const deployments = controller.list().filter(d => !filter || d.app === filter);
         // Declared deployments are the operator's (gateway-wide): not shown to an app-scoped caller.
+        // `scope: "all"` = the full list (admin, no app filter): the external reaper trusts only that (reaper.ts).
         return send(res, 200, {
-          namespace: controller.namespace, health: controller.health(), deployments,
+          namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(), deployments,
           ...(opts.declaredStatus && !own ? { declared: opts.declaredStatus() } : {}),
         });
       }

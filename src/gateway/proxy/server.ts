@@ -16,6 +16,7 @@ import { inferenceKindOf } from './app-limits';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
 import { sttFilterStats } from './routes/stt-filter';
+import { markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, withNoWakeScope } from './no-wake';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
@@ -473,7 +474,8 @@ export function createProxyServer(config: ProxyConfig): Server {
     // request (here AND inside any downstream async module) carries the same
     // requestId field. Correlation becomes automatic rather than manual
     // argument threading.
-    void withLogContext({ requestId }, () => handleRequest(req, res, method, url, requestId));
+    // Plus a no-wake scope (no-wake.ts), switched on after auth when the request or its key user asks for it.
+    void withNoWakeScope(() => withLogContext({ requestId }, () => handleRequest(req, res, method, url, requestId)));
   });
 
   // The actual request handler runs inside the ALS frame established above.
@@ -507,7 +509,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       res.writeHead(204, {
         ...(allowedOrigin !== null ? { 'Access-Control-Allow-Origin': allowedOrigin } : {}),
         'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key, X-Gateway-No-Wake',
         'X-Request-Id': requestId,
         ...SECURITY_HEADERS,
       });
@@ -533,6 +535,7 @@ export function createProxyServer(config: ProxyConfig): Server {
         status: 'ok',
         connections: { active: activeConnections, peak: peakConnections },
         sttFilter: sttFilterStats(),
+        noWake: noWakeStats(),
         ...details,
       } }, requestId);
       return;
@@ -560,6 +563,8 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
       userId = resolved.userId;
     }
+    // No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken.
+    if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId)) markNoWake();
     if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
       config.onAuth(token).catch((err) => {
