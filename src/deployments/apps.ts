@@ -18,6 +18,15 @@ import type { FallbackKeyStore, ProvisionedKeyRecord } from './app-fallback';
 
 export const APP_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
 export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
+/**
+ * Names that are object-prototype members: an app or image called `constructor` matched the id regexes and read
+ * `Object`'s own members instead of a stored record (CodeQL js/remote-property-injection, PR #45). Refused as ids, and
+ * every lookup checks own properties only.
+ */
+const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const ownValue = <T>(rec: Record<string, T> | undefined, key: string): T | undefined =>
+  rec && !RESERVED_KEYS.has(key) && Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined;
+
 const IMAGE_REF_RE = /^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(\/[a-z0-9]+([._-][a-z0-9]+)*)+(:[\w][\w.-]{0,127})?(@sha256:[a-f0-9]{64})?$/;
 export const IMAGE_HISTORY = 5;
 
@@ -148,11 +157,11 @@ export class AppRegistry implements FallbackKeyStore {
     return Object.values(this.apps).map(a => ({ id: a.id, images: Object.keys(a.images).length, createdAt: a.createdAt }));
   }
 
-  get(app: string): AppAccount | null { return this.apps[app] ?? null; }
+  get(app: string): AppAccount | null { return ownValue(this.apps, app) ?? null; }
 
-  image(app: string, name: string): AppImage | null { return this.apps[app]?.images[name] ?? null; }
+  image(app: string, name: string): AppImage | null { return ownValue(ownValue(this.apps, app)?.images, name) ?? null; }
 
-  fallbackKey(app: string): ProvisionedKeyRecord | null { return this.apps[app]?.fallbackKey ?? null; }
+  fallbackKey(app: string): ProvisionedKeyRecord | null { return ownValue(this.apps, app)?.fallbackKey ?? null; }
 
   async setFallbackKey(app: string, record: ProvisionedKeyRecord): Promise<void> {
     this.account(app).fallbackKey = record;
@@ -160,16 +169,18 @@ export class AppRegistry implements FallbackKeyStore {
   }
 
   private account(app: string): AppAccount {
-    if (!APP_ID_RE.test(app)) throw new AppError(400, `app id must match ${APP_ID_RE}`);
-    return (this.apps[app] ??= { id: app, createdAt: this.now(), images: {} });
+    if (!APP_ID_RE.test(app) || RESERVED_KEYS.has(app)) throw new AppError(400, `app id must match ${APP_ID_RE} (not ${[...RESERVED_KEYS].join('/')})`);
+    return ownValue(this.apps, app) ?? (this.apps[app] = { id: app, createdAt: this.now(), images: {} });
   }
 
   /** Saves (or moves to a new address) an image of the app; the previous address goes to the history. */
   async putImage(app: string, name: string, body: Record<string, unknown>): Promise<{ image: AppImage; created: boolean }> {
-    if (!IMAGE_NAME_RE.test(name)) throw new AppError(400, `image name must match ${IMAGE_NAME_RE}`);
+    if (!IMAGE_NAME_RE.test(name) || RESERVED_KEYS.has(name)) {
+      throw new AppError(400, `image name must match ${IMAGE_NAME_RE} (not ${[...RESERVED_KEYS].join('/')})`);
+    }
     const known = new Set(['image', 'digest', 'port', 'healthPath', 'description', 'defaults']);
     for (const key of Object.keys(body)) if (!known.has(key)) throw new AppError(400, `unknown field '${key}'`);
-    const prev = this.apps[app]?.images[name];
+    const prev = this.image(app, name) ?? undefined;
     const imageRef = str(body.image, 'image', 255) ?? prev?.image;
     if (!imageRef || !IMAGE_REF_RE.test(imageRef)) throw new AppError(400, 'image must be a registry reference (host/path[:tag][@sha256:…])');
     const digest = body.digest === undefined ? (imageRef === prev?.image ? prev.digest : null) : str(body.digest, 'digest', 100);
@@ -211,7 +222,7 @@ export class AppRegistry implements FallbackKeyStore {
       }
     }
     if (opts.restrictedTo) {
-      const refused = routeTargetViolations(routes, this.apps[app]?.routes, opts.restrictedTo);
+      const refused = routeTargetViolations(routes, ownValue(this.apps, app)?.routes, opts.restrictedTo);
       if (refused.length) throw new AppError(403, `an app key may only route to its own deployments and to targets its routes already have: ${refused.join('; ')}`);
     }
     this.account(app).routes = routes;
@@ -231,9 +242,12 @@ export class AppRegistry implements FallbackKeyStore {
   }
 
   async deleteImage(app: string, name: string): Promise<boolean> {
-    const account = this.apps[app];
-    if (!account?.images[name]) return false;
-    delete account.images[name];
+    const account = ownValue(this.apps, app);
+    if (!account || !ownValue(account.images, name)) return false;
+    // Rebuilt from a Map rather than `delete images[name]` with a caller-chosen key.
+    const images = new Map(Object.entries(account.images));
+    images.delete(name);
+    account.images = Object.assign(Object.create(null) as Record<string, AppImage>, Object.fromEntries(images));
     await this.store.save(this.apps);
     return true;
   }

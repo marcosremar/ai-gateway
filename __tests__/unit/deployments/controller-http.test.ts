@@ -302,6 +302,29 @@ describe('deployments API', () => {
     await until(() => h.controller.get('ha')!.replicas.filter(r => r.phase === 'ready').length === 2, 3000);
   });
 
+  it('regression: a client that aborts an invoke does not mark the replica suspect (lease ends `cancelled`)', async () => {
+    await call(h, 'PUT', '/v1/deployments/slowapp', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, AS_SITE);
+    await until(() => h.controller.get('slowapp')!.status === 'ready');
+    h.cloud.appDelayMs = 2_000;
+    const outcomes: unknown[] = [];
+    const acquire = h.controller.acquire.bind(h.controller);
+    h.controller.acquire = (async (...args: Parameters<typeof acquire>) => {
+      const lease = await acquire(...args);
+      const done = lease.done;
+      lease.done = (outcome) => { outcomes.push(outcome); done(outcome); };
+      return lease;
+    }) as typeof h.controller.acquire;
+    const abort = new AbortController();
+    const pending = fetch(`${h.base}/v1/deployments/slowapp/invoke/`, { headers: { authorization: `Bearer ${SITE}` }, signal: abort.signal }).catch(() => null);
+    await until(() => h.controller.get('slowapp')!.inflight === 1);
+    abort.abort();
+    await pending;
+    await until(() => outcomes.length === 1);
+    expect(outcomes).toEqual(['cancelled']); // before: true — a connection failure strike for the client's own abort
+    expect(h.controller.get('slowapp')!.replicas[0].phase).toBe('ready');
+    h.cloud.appDelayMs = 0;
+  });
+
   it('replaces a replica whose app health fails 3 checks in a row', async () => {
     await call(h, 'PUT', '/v1/deployments/sick', { profile: 'cpu-echo', minReplicas: 1 });
     await until(() => h.controller.get('sick')!.status === 'ready');
