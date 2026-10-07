@@ -9,7 +9,7 @@ import { clip16k, concat, resample, rms, silence, tone, voiced, wav } from './cl
 export interface ClientConfig {
   gw: string; key: string; deployment: string; config: Record<string, unknown>;
   students: number; rtc: number; chrome: number; chromeTransports: string[]; clipEndSilenceMs: number; rtcProcs: number;
-  rampS: number; durationS: number; turnEveryS: number; jitterS: number; clipS: number; clip: string | null; turnTimeoutS: number;
+  rampS: number; durationS: number; turnEveryS: number; jitterS: number; burst?: boolean; clipS: number; clip: string | null; turnTimeoutS: number;
   turn: 'udp' | 'tcp'; python: string; chromePath: string; work: string; out: string;
 }
 export interface TurnEvent { type: string; at: number; [k: string]: unknown }
@@ -284,7 +284,7 @@ async function student(id: number): Promise<void> {
     }
   })();
   await firstTry;
-  let next = now() + (1 + Math.random() * cfg.turnEveryS) * 1000;
+  let next = cfg.burst ? result.startedAt + (cfg.rampS + 10) * 1000 : now() + (1 + Math.random() * cfg.turnEveryS) * 1000;
   while (next + clipS * 1000 < end) {
     await sleep(next - now());
     const turn: Turn = { student: id, client: rec.client, transport: null, at: now(), speechEnd: null, firstFrame: null, firstLoud: null, audioMs: 0, events: [], lost: null, skipped: null };

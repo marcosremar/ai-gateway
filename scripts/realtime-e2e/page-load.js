@@ -49,8 +49,14 @@ window.loadRun = async ({ durationMs, turnTimeoutMs, transport, turnEveryMs, cli
   } catch (err) {
     error = String(err);
   }
+  const voiced = mic.spans.reduce((out, s) => {
+    const last = out[out.length - 1];
+    if (last && s.start - last.end < clipEndSilenceMs) Object.assign(last, { end: s.end, endGap: s.endGap });
+    else out.push({ ...s });
+    return out;
+  }, []);
   const spoken = clipTurns.length ? clipTurns
-    : mic.spans.filter((s) => s.start > connectedAt + 100 && s.start < endAt && s.end - s.start >= MIN_CLIP_MS).map((s) => ({ at: s.start, ref: s.end, refGap: s.endGap }));
+    : voiced.filter((s) => s.start > connectedAt + 100 && s.start < endAt && s.end - s.start >= MIN_CLIP_MS).map((s) => ({ at: s.start, ref: s.end, refGap: s.endGap }));
   const turns = spoken.map((turn, i) => {
     const until = spoken[i + 1]?.at ?? Infinity;
     return { at: turn.at, speechEnd: turn.ref, events: events.filter((e) => e.at >= turn.at && e.at < until), ...audible(turn, events, until) };
