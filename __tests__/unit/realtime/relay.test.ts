@@ -208,6 +208,7 @@ describe('trace propagation (correlated telemetry)', () => {
     const names = gw.events.map(e => e.event);
     expect(names).toEqual(expect.arrayContaining(['rt.session.admitted', 'rt.signal.offer', 'ws.open', 'ws.close']));
     expect(gw.events.every(e => e.traceId === TRACE && e.source === 'gateway')).toBe(true);
+    expect(gw.events.every(e => typeof e.ts === 'number' && Math.abs(e.ts - Date.now()) < 60_000)).toBe(true);
     // Nothing secret or spoken in the events.
     const flat = JSON.stringify(gw.events);
     expect(flat).not.toContain(s.token);

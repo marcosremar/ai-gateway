@@ -13,7 +13,8 @@
 export type TelemetryLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface TelemetryEvent {
-  ts: string;
+  /** Milliseconds since the epoch (`Date.now()`), as the ingest requires. */
+  ts: number;
   source: 'browser';
   level: TelemetryLevel;
   event: string;
@@ -85,16 +86,21 @@ export interface LocalTelemetryOptions {
   fetchImpl?: typeof fetch;
   /** Also hand each event to the page (debug overlay, its own analytics). */
   onEvent?: (event: TelemetryEvent) => void;
-  now?: () => Date;
+  /** Clock in ms epoch (tests). */
+  now?: () => number;
   /** Send batches (default true). Off = events go only to `onEvent`. */
   send?: boolean;
 }
 
-/** The local emitter: queue, batches of ≤ 100 every 5 s (and on flush/close, `keepalive`), sent with the session token. */
+/**
+ * TODO(telemetry): once the telemetry PR is merged and this branch rebased, replace `createLocalTelemetry()` with
+ * `createTelemetry()` + `telemetry.bind(sid, token, url)` from `sdk/browser/telemetry` (same event contract).
+ *
+ * The local emitter: queue, batches of ≤ 100 every 5 s (and on flush/close, `keepalive`), sent with the session token. */
 export function createLocalTelemetry(opts: LocalTelemetryOptions = {}): RealtimeTelemetry {
   const { traceId, traceparent } = newTraceparent();
   const f = opts.fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
-  const now = opts.now ?? (() => new Date());
+  const now = opts.now ?? (() => Date.now());
   let sessionId: string | undefined;
   let token: string | null = null;
   let url: string | null = null;
@@ -121,7 +127,7 @@ export function createLocalTelemetry(opts: LocalTelemetryOptions = {}): Realtime
     traceparent,
     emit(event, fields = {}) {
       const e: TelemetryEvent = {
-        ts: now().toISOString(), source: 'browser', level: fields.level ?? 'info', event, traceId,
+        ts: now(), source: 'browser', level: fields.level ?? 'info', event, traceId,
         ...(sessionId ? { sessionId } : {}),
         ...(fields.turnId ? { turnId: fields.turnId } : {}),
         ...(typeof fields.durMs === 'number' && Number.isFinite(fields.durMs) ? { durMs: Math.round(fields.durMs) } : {}),

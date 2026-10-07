@@ -50,7 +50,8 @@ export function echoTrace(res: ServerResponse, trace: Trace): void {
 }
 
 export interface GatewayTelemetryEvent {
-  ts: string;
+  /** Milliseconds since the epoch (`Date.now()`), as the ingest requires. */
+  ts: number;
   source: 'gateway';
   level: 'debug' | 'info' | 'warn' | 'error';
   event: string;
@@ -60,6 +61,10 @@ export interface GatewayTelemetryEvent {
   attrs?: Record<string, string | number | boolean | null>;
 }
 
+/**
+ * TODO(telemetry): once the telemetry PR is merged and this branch rebased, serve.ts passes
+ * `realtimeSinkToTelemetry(...)` here instead of the log default.
+ */
 export type RealtimeTelemetrySink = (event: GatewayTelemetryEvent) => void;
 
 export function makeEmitter(sink: RealtimeTelemetrySink | undefined, log: (msg: string, data?: Record<string, unknown>) => void) {
@@ -67,7 +72,7 @@ export function makeEmitter(sink: RealtimeTelemetrySink | undefined, log: (msg: 
   return (trace: Trace, event: string, fields: { level?: GatewayTelemetryEvent['level']; sessionId?: string; durMs?: number; attrs?: GatewayTelemetryEvent['attrs'] } = {}) => {
     try {
       out({
-        ts: new Date().toISOString(), source: 'gateway', level: fields.level ?? 'info', event, traceId: trace.traceId,
+        ts: Date.now(), source: 'gateway', level: fields.level ?? 'info', event, traceId: trace.traceId,
         ...(fields.sessionId ? { sessionId: fields.sessionId } : {}),
         ...(typeof fields.durMs === 'number' ? { durMs: Math.round(fields.durMs) } : {}),
         ...(fields.attrs ? { attrs: fields.attrs } : {}),

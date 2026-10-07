@@ -267,6 +267,8 @@ describe('local telemetry', () => {
     const first = JSON.parse(String(calls[0]!.init.body)) as { events: TelemetryEvent[] };
     expect(first.events).toHaveLength(100);
     expect(first.events[0]).toMatchObject({ source: 'browser', event: 'vad.segment', traceId: t.traceId, sessionId: 'rt_x', durMs: 0, attrs: { code: 1006 } });
+    expect(typeof first.events[0]!.ts).toBe('number');
+    expect(Math.abs(first.events[0]!.ts - Date.now())).toBeLessThan(60_000);
     expect(JSON.stringify(first)).not.toContain('secret');
     expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer session-token');
     expect((calls[0]!.init.headers as Record<string, string>).traceparent).toBe(t.traceparent);
