@@ -36,6 +36,8 @@ export interface RouteTarget<P> {
   extraBody?: Record<string, unknown>;
   /** Start the next target in parallel when this one has not answered after this many ms (see `runTargets`). */
   hedgeAfterMs?: number;
+  /** Per-request hedge delay (adaptive, deployments): read when the attempt starts, wins over `hedgeAfterMs`; null = none. */
+  hedgeDelay?: () => number | null;
   /** Known to be unusable (e.g. OpenRouter key rejected): skipped with this reason, never called. */
   unavailableReason?: string;
   /**
@@ -525,8 +527,12 @@ export function runTargets<P, T>(
   const cloudHedge = cloudHedgeMs(opts.budgetMs);
   // A cloud link gets at most half of what is LEFT before its successor starts, so the last link keeps a real share
   // (prod 2026-10-07: deployment 4 s → slow OpenRouter link ran to the 8 s budget → the 3rd link was never tried).
-  const hedgeOf = (t: RouteTarget<P>) => t.hedgeAfterMs
-    ?? (t.providerId.startsWith('deployment:') || !cloudHedge ? 0 : Math.max(1, Math.min(cloudHedge, (deadline - Date.now()) / 2)));
+  // Deployment links: their adaptive delay (`hedgeDelay`, from the controller's latency) else `hedgeAfterMs`.
+  const hedgeOf = (t: RouteTarget<P>): number => {
+    if (t.hedgeDelay) return t.hedgeDelay() ?? 0; // null = no hedge for this request
+    if (t.hedgeAfterMs !== undefined) return t.hedgeAfterMs;
+    return t.providerId.startsWith('deployment:') || !cloudHedge ? 0 : Math.max(1, Math.min(cloudHedge, (deadline - Date.now()) / 2));
+  };
 
   return new Promise((resolve, reject) => {
     let next = 0;

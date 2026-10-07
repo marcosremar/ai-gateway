@@ -33,6 +33,12 @@ export interface DeclaredDeployment {
   spec: Record<string, unknown>;
 }
 
+/**
+ * `parle-speech`: the L40S it runs on in production, and when Scaleway has none (live QA 2026-10-07: `out of stock` in
+ * fr-par-2 for 17 min, the 2nd replica never came) the walk tries the L40S in fr-par-1 (skipped at no cost when not
+ * sold there), then an L4 in fr-par-2 and in pl-waw-2 — all under `maxEurPerHour` 1.5 (L40S €1.47/h, L4 below). The
+ * image reads `LLM_PARALLEL` (deploy/speech/start.sh): 4 on the 24 GB L4 (its default), 8 on the 48 GB L40S (as run).
+ */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [parleSpeech as DeclaredDeployment];
 
 /** Reconcile period. The boot run happens before the providers are mounted (serve.ts). */

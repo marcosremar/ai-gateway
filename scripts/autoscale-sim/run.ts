@@ -14,6 +14,9 @@ for (const [key, scenario] of Object.entries(SCENARIOS)) {
   const served = Object.entries(result.served).map(([d, s]) => `${d}: gpu ${s.gpu}, fallback ${s.fallback}, failed ${s.failed}`).join('; ');
   const events = result.events.map(e => `${Math.round((e.t - result.events[0].t) / 1000)}s ${e.deployment} ${e.type}${e.reason ? ` (${e.reason})` : ''}`);
   console.log(`served — ${served}`);
+  const quality = Object.entries(result.latency)
+    .map(([d, l]) => `${d}: p50 ${l.p50} ms, p95 ${l.p95} ms, ran twice ${result.doubleRuns[d]} of ${l.n}`).join('; ');
+  console.log(`client latency — ${quality}`);
   console.log(`scale events (${events.length}): ${events.join(', ')}`);
   console.log(`busy replicas killed: ${result.killedBusy.length}\n`);
 }
