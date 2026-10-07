@@ -81,6 +81,10 @@ export class DeploymentController extends ControllerViews {
         ...(meta.appImage ? { appImage: meta.appImage } : {}),
       };
       await this.opts.store.saveDeployment(existing.record);
+      const backend = this.backends.scaleway;
+      if (existing.record.network && spec.exposure && backend?.ensureNetwork) {
+        void this.networkOf(existing, backend).catch((err) => { existing.lastError = `network: ${err instanceof Error ? err.message : String(err)}`; });
+      }
     } else {
       const record: DeploymentRecord = {
         spec, replicaToken: randomBytes(24).toString('base64url'), createdAt: now, updatedAt: now, lastRequestAt: null,

@@ -186,6 +186,64 @@ describe('firewall of realtime replicas (fake Scaleway)', () => {
   });
 });
 
+describe('firewall of an exposed deployment follows its spec (fake Scaleway)', () => {
+  type Rule = { id: string; protocol: string; direction: string; action: string; ipRange: string; port: number | null; portTo: number | null; editable: boolean };
+  const open = (id: string, protocol: string, port: number, portTo: number | null = null): Rule =>
+    ({ id, protocol, direction: 'inbound', action: 'accept', ipRange: '0.0.0.0/0', port, portTo, editable: true });
+
+  function clientWithGroup(name: string, rules: Rule[]) {
+    const client = {
+      ...fakeClient(),
+      listSecurityGroups: vi.fn(async () => [{ id: 'sg-other', name: `${name}-2` }, { id: 'sg-old', name }]),
+      listIps: vi.fn(async () => [{ id: 'ip-1', address: '51.15.0.9' }]),
+      listSecurityGroupRules: vi.fn(async () => [...rules]),
+      addSecurityGroupRule: vi.fn(async (_z: string, _g: string, r: { protocol: string; port: number; portTo?: number }) => {
+        rules.push(open(`new-${rules.length}`, r.protocol, r.port, r.portTo ?? null));
+      }),
+      deleteSecurityGroupRule: vi.fn(async (_z: string, _g: string, id: string) => { rules.splice(rules.findIndex(r => r.id === id), 1); }),
+    };
+    return { client, backend: new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' }) };
+  }
+  const exposed = (extra: Record<string, unknown> = {}) => speech({ placements: [], exposure: { ports: [{ protocol: 'tcp', port: 7880 }] }, ...extra });
+  const opened = (rules: Rule[]) => rules.filter(r => r.editable && r.direction === 'inbound' && r.ipRange === '0.0.0.0/0' && r.port !== null)
+    .map(r => `${r.protocol}:${r.port}${r.portTo ? `-${r.portTo}` : ''}`).sort();
+
+  it('adding realtime to an existing exposed deployment opens the UDP media range on its group', async () => {
+    const rules = [open('r1', 'TCP', 7880), open('r2', 'TCP', 8089)];
+    const { client, backend } = clientWithGroup('aigw-prod-speech', rules);
+    const net = await backend.ensureNetwork(exposed({ realtime: {} }), 'prod', { zone: 'fr-par-2', ipId: 'ip-1', ip: '51.15.0.9', groupId: 'sg-old' });
+    expect(net.groupId).toBe('sg-old');
+    expect(client.createSecurityGroup).not.toHaveBeenCalled();
+    expect(client.addSecurityGroupRule.mock.calls.map(c => c[2])).toEqual([{ protocol: 'UDP', port: 50000, portTo: 50100 }]);
+    expect(client.deleteSecurityGroupRule).not.toHaveBeenCalled();
+    expect(opened(rules)).toEqual(['TCP:7880', 'TCP:8089', 'UDP:50000-50100']);
+  });
+
+  it('a group reused by name loses the stale rules of the earlier deployment and keeps what is not the gateway\'s', async () => {
+    const foreign: Rule[] = [
+      { ...open('smtp', 'TCP', 25), action: 'drop', direction: 'outbound', editable: false },
+      { ...open('office', 'TCP', 22), ipRange: '203.0.113.0/24' },
+      { ...open('ping', 'ICMP', 0), port: null },
+    ];
+    const rules = [open('stale-probe', 'TCP', 9000), open('stale-udp', 'UDP', 50000, 50100), open('r1', 'TCP', 7880), open('dup', 'TCP', 7880), ...foreign];
+    const { client, backend } = clientWithGroup('aigw-prod-speech', rules);
+    const net = await backend.ensureNetwork(exposed(), 'prod');
+    expect(net.groupId).toBe('sg-old');
+    expect(client.deleteSecurityGroupRule.mock.calls.map(c => c[2])).toEqual(['stale-probe', 'stale-udp', 'dup']);
+    expect(client.addSecurityGroupRule.mock.calls.map(c => c[2])).toEqual([{ protocol: 'TCP', port: 8089 }]);
+    expect(rules.filter(r => foreign.some(f => f.id === r.id))).toHaveLength(3);
+    expect(opened(rules)).toEqual(['TCP:7880', 'TCP:8089']);
+  });
+
+  it('a group already at the spec is left alone', async () => {
+    const rules = [open('r1', 'TCP', 7880), open('r2', 'TCP', 8089)];
+    const { client, backend } = clientWithGroup('aigw-prod-speech', rules);
+    await backend.ensureNetwork(exposed(), 'prod');
+    expect(client.addSecurityGroupRule).not.toHaveBeenCalled();
+    expect(client.deleteSecurityGroupRule).not.toHaveBeenCalled();
+  });
+});
+
 describe('coturn profile', () => {
   it('builds, boots coturn with use-auth-secret on the host network, and its scripts parse', () => {
     const spec = buildSpec('turn', { profile: 'coturn', env: { REALTIME_TURN_SECRET: 's'.repeat(32) } }, { profiles });

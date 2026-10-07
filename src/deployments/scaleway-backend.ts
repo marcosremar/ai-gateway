@@ -4,7 +4,7 @@
  * The namespace keeps two gateways sharing one Scaleway project from adopting (or deleting) each other's machines.
  */
 
-import { ScalewayClient } from '../cpu-providers/scaleway-client';
+import { ScalewayClient, type ScalewayFirewallRule } from '../cpu-providers/scaleway-client';
 import type { GpuInstance, ProviderCredentials } from '../gpu-providers/types';
 import { DEFAULT_RT_UDP_PORTS } from './cloud-init';
 import { PROBE_PORT } from './spec';
@@ -19,7 +19,8 @@ const GPU_OS_IMAGE_FR_PAR_2 = '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa';
 
 type ScalewayLike = Pick<ScalewayClient, 'createInstance' | 'listInstancesByTag' | 'releaseInstance' | 'getHourlyPrice' | 'imageLike'>
   & Partial<Pick<ScalewayClient, 'reserveRoutedIp' | 'listIps' | 'deleteIp' | 'createSecurityGroup' | 'listSecurityGroups'
-    | 'deleteSecurityGroup' | 'startInstance' | 'stopInstance' | 'listGpuOffers' | 'defaultProjectId'>>;
+    | 'deleteSecurityGroup' | 'listSecurityGroupRules' | 'addSecurityGroupRule' | 'deleteSecurityGroupRule' | 'startInstance'
+    | 'stopInstance' | 'listGpuOffers' | 'defaultProjectId'>>;
 
 /**
  * The one port a gateway-only replica opens: its token-gated nginx (cloud-init.ts `nginxConfig`, :80). Everything else
@@ -191,7 +192,8 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
   /**
    * Reserved IP + firewall of an exposed deployment, tagged like its replicas. `known` (from the deployment record) is
    * reused while it still exists; otherwise any IP/firewall already tagged for this deployment is (a create that died
-   * after reserving must not leak a second IP — the 06/10/2026 LiveKit leak).
+   * after reserving must not leak a second IP — the 06/10/2026 LiveKit leak). A reused firewall gets its rules brought
+   * to what the spec asks for now (`reconcileRules`).
    */
   async ensureNetwork(spec: DeploymentSpec, namespace: string, known?: DeploymentNetwork): Promise<DeploymentNetwork> {
     if (!spec.exposure) throw new Error(`deployment '${spec.name}' has no exposure`);
@@ -202,17 +204,31 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
     const ip = (known?.zone === zone ? ips.find(i => i.id === known.ipId) : undefined) ?? ips[0]
       ?? await this.need('reserveRoutedIp')(zone, this.credentials, { projectId, tags });
     const groupName = `aigw-${namespace}-${spec.name}`;
-    const groups = await this.need('listSecurityGroups')(zone, this.credentials, { projectId, name: groupName });
-    const groupId = (known?.zone === zone ? groups.find(g => g.id === known.groupId)?.id : undefined) ?? groups[0]?.id
-      ?? await this.need('createSecurityGroup')(zone, this.credentials, {
-        projectId, name: groupName, tags, description: `ai-gateway exposed deployment ${spec.name}`,
-        rules: [
-          ...[...spec.exposure.ports, { protocol: 'tcp' as const, port: PROBE_PORT, to: undefined }]
-            .map(r => ({ protocol: r.protocol === 'udp' ? 'UDP' as const : 'TCP' as const, port: r.port, ...(r.to ? { portTo: r.to } : {}) })),
-          ...(realtimeRule(spec) ? [realtimeRule(spec)!] : []),
-        ],
-      });
+    const groups = (await this.need('listSecurityGroups')(zone, this.credentials, { projectId, name: groupName })).filter(g => g.name === groupName);
+    const rt = realtimeRule(spec);
+    const rules: ScalewayFirewallRule[] = [
+      ...[...spec.exposure.ports, { protocol: 'tcp' as const, port: PROBE_PORT, to: undefined }]
+        .map(r => ({ protocol: r.protocol === 'udp' ? 'UDP' as const : 'TCP' as const, port: r.port, ...(r.to ? { portTo: r.to } : {}) })),
+      ...(rt ? [rt] : []),
+    ];
+    const existing = (known?.zone === zone ? groups.find(g => g.id === known.groupId)?.id : undefined) ?? groups[0]?.id;
+    if (existing) await this.reconcileRules(zone, existing, rules);
+    const groupId = existing ?? await this.need('createSecurityGroup')(zone, this.credentials, {
+      projectId, name: groupName, tags, description: `ai-gateway exposed deployment ${spec.name}`, rules,
+    });
     return { zone, ipId: ip.id, ip: ip.address, groupId };
+  }
+
+  private async reconcileRules(zone: string, groupId: string, wanted: ScalewayFirewallRule[]): Promise<void> {
+    const keyOf = (r: { protocol: string; port: number | null; portTo?: number | null }) => `${r.protocol}:${r.port}-${r.portTo || r.port}`;
+    const missing = new Map(wanted.map(r => [keyOf(r), r]));
+    for (const rule of await this.need('listSecurityGroupRules')(zone, groupId, this.credentials)) {
+      const ours = rule.editable && rule.direction === 'inbound' && rule.action === 'accept' && rule.ipRange === '0.0.0.0/0'
+        && (rule.protocol === 'TCP' || rule.protocol === 'UDP') && rule.port !== null;
+      if (!ours) continue;
+      if (!missing.delete(keyOf(rule))) await this.need('deleteSecurityGroupRule')(zone, groupId, rule.id, this.credentials);
+    }
+    for (const rule of missing.values()) await this.need('addSecurityGroupRule')(zone, groupId, rule, this.credentials);
   }
 
   /**
