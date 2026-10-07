@@ -5,7 +5,7 @@
  * ceiling blocks one under pressure, and the per-deployment `autoscale` explanation. See controller-state.ts.
  */
 
-import { autoscaleSettings, p95, pressureDecision, warmFloor, type PressureDecision } from './autoscale';
+import { autoscaleSettings, MIN_SIGNAL_SAMPLES, p95, pressureDecision, warmFloor, type PressureDecision } from './autoscale';
 import { ParkingControl } from './controller-parking';
 import type { Runtime } from './controller-state';
 import { replicaPhase, type Plan } from './planner';
@@ -22,8 +22,8 @@ const MAX_SAMPLES = 2_000;
 
 export abstract class AutoscaleControl extends ParkingControl {
   /** One finished request (`Lease.done`): its duration, and whether it timed out or got a 429. */
-  protected recordSample(rt: Runtime, ms: number, bad: boolean): void {
-    rt.samples.push({ at: this.now(), ms, bad });
+  protected recordSample(rt: Runtime, ms: number, bad: boolean, replica?: string): void {
+    rt.samples.push({ at: this.now(), ms, bad, ...(replica ? { replica } : {}) });
     if (rt.samples.length > MAX_SAMPLES) rt.samples.splice(0, rt.samples.length - MAX_SAMPLES);
   }
 
@@ -33,6 +33,13 @@ export abstract class AutoscaleControl extends ParkingControl {
     const good = rt.samples.filter(x => !x.bad).map(x => x.ms);
     const n = rt.samples.length;
     return { p95Ms: p95(good), errorRate: n ? (n - good.length) / n : 0, samples: n };
+  }
+
+  /** p95 of the requests one replica answered in the signal window, or null below `MIN_SIGNAL_SAMPLES` (noise). */
+  protected replicaP95(rt: Runtime, id: string): number | null {
+    const since = this.now() - SIGNAL_WINDOW_MS;
+    const ms = rt.samples.filter(x => x.replica === id && !x.bad && x.at >= since).map(x => x.ms);
+    return ms.length >= MIN_SIGNAL_SAMPLES ? p95(ms) : null;
   }
 
   /** The pressure decision for this tick (stored in `rt.pressure`) and the warm floor. */
@@ -45,8 +52,16 @@ export abstract class AutoscaleControl extends ParkingControl {
       active, now: this.now(), state: rt.pressure,
     });
     rt.pressure = { highSince: decision.highSince, desired: decision.desired };
-    const floor = warmFloor(rt.record.spec, rt.record.warm, this.now());
-    rt.autoscale = { ...rt.autoscale, pressureWant: decision.desired, floor, load, p95Ms: sig.p95Ms, errorRate: Math.round(sig.errorRate * 1000) / 1000 };
+    const { spec } = rt.record;
+    const floor = warmFloor(spec, rt.record.warm, this.now());
+    // The view shows the floor in force (live QA 2026-10-07: `floor: 0` while active with minActiveReplicas 1 read as
+    // "nothing kept"): minReplicas, minActiveReplicas while active, and the warm floor; `warmFloor` keeps the warm part.
+    const effective = spec.paused ? 0
+      : Math.min(spec.maxReplicas, Math.max(spec.minReplicas, active ? spec.minActiveReplicas ?? 1 : 0, floor));
+    rt.autoscale = {
+      ...rt.autoscale, pressureWant: decision.desired, floor: effective, warmFloor: floor, load, p95Ms: sig.p95Ms,
+      errorRate: Math.round(sig.errorRate * 1000) / 1000,
+    };
     return { decision, floor };
   }
 
@@ -64,6 +79,20 @@ export abstract class AutoscaleControl extends ParkingControl {
         load: next.load, p95Ms: next.p95Ms, errorRate: next.errorRate, floor });
     }
     rt.autoscale = next;
+  }
+
+  /**
+   * What the create back-off is waiting for, in words an operator can act on: out of stock in every placement (since
+   * when, how many creates, next try) or the last create error. Stable between two tries (no countdown), so the
+   * `deployments: autoscale` log only fires when it changes.
+   */
+  protected backoffNote(rt: Runtime): string {
+    const next = new Date(rt.backoffUntil).toISOString().slice(11, 19);
+    const so = rt.stockOut;
+    if (!so) return `create back-off (${rt.lastError ?? 'last create failed'}; next try ${next}Z)`;
+    const since = new Date(so.since).toISOString().slice(11, 19);
+    const where = (rt.lastError ?? '').replace(/^create:\s*/, '');
+    return `out of stock since ${since}Z: ${so.failures} create${so.failures > 1 ? 's' : ''} failed, next try ${next}Z (${where})`;
   }
 
   /**

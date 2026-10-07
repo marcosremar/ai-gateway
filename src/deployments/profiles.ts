@@ -53,10 +53,15 @@ export const BUILTIN_PROFILES: Profile[] = [
       image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261004-2240',
       port: 8000,
       healthPath: '/health',
-      machineType: 'L4-1-24G',
+      // The L40S the parle class runs on (live QA 2026-10-07), and when it is out of stock (17 min in fr-par-2 that day, the
+      // 2nd replica never came): the same type in fr-par-1 (skipped at no cost when not sold there), then an L4 in
+      // fr-par-2, Warsaw (the zones with GPU stock on 2026-10-06) and fr-par-1 — `envByMachineType` tunes each GPU.
+      machineType: 'L40S-1-48G',
       zone: 'fr-par-2',
-      // Out of stock there: an L40S in the same zone, then an L4 in Warsaw (the zones with GPU stock on 2026-10-06).
-      placements: [{ machineType: 'L40S-1-48G' }, { zone: 'pl-waw-2' }, { zone: 'fr-par-1' }],
+      placements: [
+        { zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }, { zone: 'pl-waw-2', machineType: 'L4-1-24G' },
+        { zone: 'fr-par-1', machineType: 'L4-1-24G' },
+      ],
       gpu: true,
       // ~57 GB image: the boot disk must hold it plus the Docker layers.
       volumeGb: 80,

@@ -61,6 +61,27 @@ describe('pressureDecision', () => {
     expect(pressureDecision(input({ ...two, load: 4 })).desired).toBe(1);
   });
 
+  // D1, live QA 2026-10-07: the 2nd L40S was asked, every create failed `out of stock` for 17 min, and with load 3–4
+  // `desired` stayed 2 (scale-in compared with `live − 1` = 0 replicas) while the back-off kept retrying the create.
+  it('a replica asked but never born: the pressure that went away cancels the pending create', () => {
+    const pending = { live: 1, state: { highSince: null, desired: 2 } };
+    const d = pressureDecision(input({ ...pending, load: 4 }));
+    expect(d.desired).toBe(1);
+    expect(d.reason).toMatch(/low load 4 ≤ 50% of 1×8, pending create of 1 cancelled/);
+    expect(pressureDecision(input({ ...pending, load: 3 })).desired).toBe(1);
+    expect(pressureDecision(input({ ...pending, load: 5 })).desired).toBe(2); // above 50 % of one fewer: hysteresis holds
+    expect(pressureDecision(input({ ...pending, load: 0 })).desired).toBe(0); // the planner's active base keeps 1
+    // Live above desired (a draining surplus) keeps the old reference.
+    expect(pressureDecision(input({ live: 3, load: 7, state: { highSince: null, desired: 2 } })).desired).toBe(2);
+  });
+
+  it('asked and waiting for the replica: the reason says so instead of re-arming the window', () => {
+    const waiting = { spec: spec({ maxReplicas: 2 }), live: 1, load: 16, state: { highSince: NOW, desired: 2 } };
+    const d = pressureDecision(input({ ...waiting, now: NOW + 40_000 }));
+    expect(d).toMatchObject({ desired: 2, capped: false });
+    expect(d.reason).toBe('load 16 > 75% of 1×8 (2 asked, waiting for 1)');
+  });
+
   it('at maxReplicas it says so and asks nothing more; idle asks nothing', () => {
     const d = pressureDecision(input({ load: 40, live: 3, state: { highSince: NOW, desired: 3 } }));
     expect(d).toMatchObject({ desired: 3, capped: true });
@@ -168,6 +189,20 @@ describe('controller: overflow, warm, explanation', () => {
     const parked = await x.controller.park('speech');
     expect(parked.warm).toBeNull();
     await until(() => x.cloud.machines.size === 0, 3000);
+  });
+
+  // D5, live QA 2026-10-07: the view showed `floor: 0` while active with minActiveReplicas 1.
+  it('the view shows the floor in force (minActiveReplicas while active), the warm part apart', async () => {
+    const x = await setup();
+    await x.controller.put('speech', { profile: 'cpu-echo', maxReplicas: 2, minActiveReplicas: 1 });
+    expect(x.controller.get('speech')!.autoscale).toMatchObject({ floor: 0, warmFloor: 0 });
+    x.controller.wake('speech');
+    await until(() => x.controller.get('speech')!.status === 'ready');
+    await until(() => x.controller.get('speech')!.autoscale.floor === 1);
+    expect(x.controller.get('speech')!.autoscale).toMatchObject({ floor: 1, warmFloor: 0, desired: 1 });
+    await x.controller.warm('speech', 2, 10);
+    await until(() => x.controller.get('speech')!.autoscale.warmFloor === 2);
+    expect(x.controller.get('speech')!.autoscale.floor).toBe(2);
   });
 
   it('a 429 from the replica is pressure and a busy mark, never a strike', async () => {

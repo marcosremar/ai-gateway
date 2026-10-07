@@ -75,6 +75,7 @@ thinking). `finish_reason` is passed through as the provider sent it.
 |---|---|---|
 | Deployment, time to **first byte** — STT / chat / TTS | 4 s / 4 s / 3 s | `DEPLOYMENT_STT_TIMEOUT_MS`, `DEPLOYMENT_CHAT_TIMEOUT_MS`, `DEPLOYMENT_TTS_TIMEOUT_MS` (or `DEPLOYMENT_TIMEOUT_MS` for all) |
 | Hedge: fallback starts in parallel when the deployment has not answered | 1.5 s | `DEPLOYMENT_HEDGE_MS` (`0` = off) |
+| Cloud link (OpenRouter, Groq…) with a target behind it: the next one starts in parallel (non-stream, STT, TTS) or takes over (chat stream, no first token) when it has not answered | min(4 s, half of the budget left) | `GATEWAY_CLOUD_HEDGE_MS` (`0` = off) |
 | Whole stage (deployment + fallbacks + hedge) | 8 s | `GATEWAY_STT_BUDGET_MS`, `GATEWAY_CHAT_BUDGET_MS`, `GATEWAY_TTS_BUDGET_MS` |
 | Chat, **non-stream** only: extra budget per requested `max_tokens` above the free ones, and its ceiling | 20 ms/token above 256, max 45 s | `GATEWAY_CHAT_BUDGET_PER_TOKEN_MS` (`0` = flat), `GATEWAY_CHAT_BUDGET_FREE_TOKENS`, `GATEWAY_CHAT_BUDGET_MAX_MS` |
 
@@ -87,7 +88,13 @@ with margin (parle: TTS 15 s, chat 12 s are fine; ≥ 10 s recommended). With he
 deployment costs at most ~1.5 s before the fallback is on its way; the first answer wins and the other call is
 aborted (`X-Gateway-Fallback: slow`). Hedging can bill the fallback for requests the deployment would have served a
 bit later — raise `DEPLOYMENT_HEDGE_MS` to trade latency for cost. For TTS, "first byte" of a non-streamed format
-(`mp3`) is the whole synthesis on vLLM-Omni; ask for `wav` to get the audio streamed.
+(`mp3`) is the whole synthesis on vLLM-Omni; ask for `wav` to get the audio streamed. A **hung cloud link** no longer
+eats the whole stage budget: after min(4 s, half of the budget left) without an answer the next target runs too (the
+first answer wins, the other is aborted); a chat stream with no first token moves on to the next target. So in
+`deployment (4 s) → slow cloud link → last cloud link` the last link always gets a real share (prod 2026-10-07: 25/4710
+`503`s at ~8.1 s where the 3rd link was never tried; fault bench S5: ~2 % `503`s with 2 % of calls hanging). A non-stream chat that legitimately takes longer
+than 4 s (large `max_tokens`) may start the next target too — set `GATEWAY_CLOUD_HEDGE_MS` higher to trade latency
+for cost.
 
 Circuit breaker: 5 consecutive real failures open the circuit for 30 s; the next request then probes the deployment,
 with the fallback hedged in, so the probe never makes the client wait the full timeout. `cold` / `paused` /

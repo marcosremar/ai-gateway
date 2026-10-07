@@ -39,7 +39,8 @@ export const DEFAULT_ROUTES = {
 };
 
 export async function startGateway(upstreamUrl: string, env: Record<string, string> = {}): Promise<RunningGateway> {
-  const port = nextPort++;
+  // A restart on the same port (env.PORT) must also be polled on that port.
+  const port = env.PORT ? Number(env.PORT) : nextPort++;
   let out = '';
   // Same Bun as the bench runner (BENCH_BUN overrides): node:http abort events differ between Bun releases.
   const proc = spawn(process.env.BENCH_BUN ?? process.execPath, ['serve.ts'], {
@@ -54,6 +55,9 @@ export async function startGateway(upstreamUrl: string, env: Record<string, stri
       OPENROUTER_API_KEY: FAKE_KEYS.OPENROUTER_API_KEY,
       GROQ_API_KEY: FAKE_KEYS.GROQ_API_KEY,
       GATEWAY_API_KEYS: `${FAKE_KEYS.GATEWAY_KEY}:bench`,
+      // The bench key is an admin: since the app-key limits (2026-10-06, #41) a non-admin key may only call its own
+      // app's aliases, and the bench's MODEL_ROUTES aliases belong to no app (every call was a 403).
+      DEPLOYMENTS_ADMIN_USERS: 'bench',
       MODEL_ROUTES: JSON.stringify(DEFAULT_ROUTES),
       DECLARED_DEPLOYMENTS: '0',
       S2S_STT_MODEL: 't-stt',
@@ -87,7 +91,8 @@ export async function startGateway(upstreamUrl: string, env: Record<string, stri
     url, port, proc,
     output: () => out,
     stop: () => new Promise<void>((resolve) => {
-      if (proc.exitCode !== null) return resolve();
+      // Killed by a signal: exitCode stays null (signalCode is set) and 'exit' already fired — waiting for it hung.
+      if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
       proc.once('exit', () => resolve());
       proc.kill('SIGKILL');
     }),
