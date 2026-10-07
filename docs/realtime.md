@@ -201,9 +201,20 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
 - A refused admission (503 + fallback) skips the realtime rungs at once.
 - The winner is remembered per network (`localStorage` key `aigw-rt:winner:<network>`, TTL 6 h, every access guarded);
   the next session starts there, the others stay as fallbacks.
-- **Mid-session failure** (ICE failed, connection lost > 3 s, data channel or WS closed) → the next rung *down*, with
+- **Network change on WebRTC** (Wi-Fi → mobile data): on ICE `failed`, or `disconnected` for more than
+  `disconnectGraceMs` (3 s), the SDK restarts ICE on the same peer connection — a new offer with `iceRestart` to the
+  same `offerUrl`, non-trickle, sent at the first srflx/relay candidate — and waits up to `iceRestartMs` (5 s) for a
+  path. The session, its history and a turn in flight are untouched (the edge keeps running the turn; its events
+  arrive on the data channel once the path is back), and the page sees nothing (telemetry `rt.ice.restart`
+  `{ok}`). A refused re-offer or no path in time is a mid-session failure, below. **The edge refuses the re-offer
+  today** (the token is single use per transport, `replayed`), so until it accepts a re-offer for a live `sid` the
+  restart costs one signalling round trip before the failover.
+- **Mid-session failure** (ICE restart failed, data channel or WS closed) → the next rung *down*, with
   a new session when that rung is realtime; the client keeps the conversation (`transcript` final → user message,
   `reply` → assistant) and replays it with `config_update`; a clip turn that failed is re-sent on the next rung.
+  A realtime turn in flight cannot be re-sent (the learner's audio was live, the SDK holds no copy): it ends once
+  with `error{code:"turn_lost"}` + `done{error:true}`, its transcript stays once in the history, and the page asks
+  the learner to repeat.
 - Voice (`@parle/ai-gateway/voice`): Silero `vadEnd` + the rest of `endSilenceMs` → `end_turn`; `vadStart` while the NPC
   speaks → `interrupt` (barge-in); on the clip rungs the voice SDK's turn-taking records the clip.
 - Without `voice`, the page calls `sendEndTurn()`, `interrupt()`, `sendTurn(wav)` itself.
@@ -260,9 +271,9 @@ gateway keeps it, forwards it to the edge on each call (new span id, same trace)
 
 Event shape: `{ts, source:"browser"|"gateway", level, event, traceId, sessionId?, turnId?, durMs?, attrs?}`.
 
-- Browser: `rt.ladder.try|ok|fallback` (from, to, reason), `rt.ice.state`, `rt.ice.failed`, `rt.turn.used`,
+- Browser: `rt.ladder.try|ok|fallback` (from, to, reason), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
   `rt.session.admitted|rejected|closed`, `vad.segment` (durMs), `turn.first_audio` (durMs from end of speech),
-  `turn.done`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
+  `turn.done`, `turn.recovered`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
 - Gateway: `rt.session.admitted|rejected|deleted`, `rt.signal.offer|refused`, `ws.open|close|refused`, `error` (sink
   pluggable, default the log).
 - **Never** audio, transcript, LLM text, SDP or tokens: codes, counts, durations (the SDK's `safeAttrs` drops content keys).
