@@ -187,7 +187,8 @@ describe('runShadowStage — fire-and-forget shadow mode runner', () => {
     await new Promise((r) => setTimeout(r, DELAY + 50));
     expect(deps.recordGpuLatency).toHaveBeenCalledTimes(1);
     const ms = deps.recordGpuLatency.mock.calls[0][0] as number;
-    expect(ms).toBeGreaterThanOrEqual(DELAY);
+    // Timers may fire up to ~1 ms early against Date.now() rounding (CI flake on PR #47: 19 ≥ 20 failed).
+    expect(ms).toBeGreaterThanOrEqual(DELAY - 2);
   });
 
   it('passes the same latency value to recordGpuLatency and recordPerStageLatency', async () => {
