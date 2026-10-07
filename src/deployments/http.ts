@@ -34,6 +34,7 @@ import { createLogger } from '../logger';
 
 const log = createLogger('deployments-http');
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
+import { outgoingTraceHeaders } from '../telemetry/trace-context';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
@@ -311,7 +312,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       try {
         upstream = await fetchImpl(target.href, {
           method,
-          headers: { ...headers, 'X-Aigw-Token': lease.token },
+          headers: { ...headers, ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
           body: body && body.length ? new Uint8Array(body) : undefined,
           signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS)]),
         });

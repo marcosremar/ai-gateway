@@ -28,6 +28,17 @@ export abstract class ControllerViews extends ReconcileLoop {
   }
 
   /**
+   * The replica `id` as the controller lists it: its deployment, that deployment's replica token and owning app — for
+   * in-process verification of what a replica signs (edge telemetry, src/telemetry/auth.ts). Never sent over HTTP.
+   */
+  replicaAuth(id: string): { deployment: string; replicaToken: string; app?: string } | null {
+    const machine = this.machines.find(m => m.id === id);
+    const rt = machine ? this.deployments.get(machine.deployment) : undefined;
+    if (!machine || !rt) return null;
+    return { deployment: machine.deployment, replicaToken: rt.record.replicaToken, ...(rt.record.app ? { app: rt.record.app } : {}) };
+  }
+
+  /**
    * Counts plus the bill: what runs now, the € ceiling and the stopped replicas against their own cap. With `app`, only
    * that app's deployments are counted and the provider list error is withheld: an app key must not read the other
    * apps' replicas or the namespace's € burn (live QA 2026-10-07: `GET /v1/deployments` with an app key showed the whole

@@ -24,6 +24,8 @@ import { createLogger, withLogContext } from '../../logger';
 import { ApiKeyRegistry } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
+import { traceOfRequest } from '../../telemetry/trace-context';
+import { TRACE_ID_RESPONSE_HEADER } from '../../telemetry/contract';
 
 const log = createLogger('proxy');
 
@@ -457,6 +459,21 @@ export function concurrencyLimits(env: Record<string, string | undefined> = proc
   return { fallback, perUser };
 }
 
+/** Runs the matching `publicRoutes` entry (it authenticates itself); false when none matches. */
+async function runPublicRoute(
+  config: ProxyConfig, req: IncomingMessage, res: ServerResponse, method: string, path: string, requestId: string,
+): Promise<boolean> {
+  const route = config.publicRoutes?.find(r => method === r.method.toUpperCase() && path === r.path);
+  if (!route) return false;
+  try {
+    await route.handler(req, res);
+  } catch (err) {
+    log.error({ err, route: `${route.method} ${route.path}` }, 'Unhandled error in public route');
+    if (!res.headersSent) sendError(res, 500, 'Internal server error', requestId);
+  }
+  return true;
+}
+
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   // Build the API key registry for user identity resolution.
@@ -469,13 +486,18 @@ export function createProxyServer(config: ProxyConfig): Server {
     const method = req.method?.toUpperCase() || 'GET';
     const url = req.url || '/';
     const requestId = (req.headers['x-request-id'] as string) || randomUUID();
+    // W3C trace context (src/telemetry/trace-context.ts): the caller's traceparent, else a new trace. Echoed back and
+    // propagated to replicas, so browser, gateway and edge events of one session share the trace id.
+    const trace = traceOfRequest(req.headers, url);
+    res.setHeader(TRACE_ID_RESPONSE_HEADER, trace.traceId);
 
     // Establish an AsyncLocalStorage frame so every log emitted during this
     // request (here AND inside any downstream async module) carries the same
     // requestId field. Correlation becomes automatic rather than manual
     // argument threading.
     // Plus a no-wake scope (no-wake.ts), switched on after auth when the request or its key user asks for it.
-    void withNoWakeScope(() => withLogContext({ requestId }, () => handleRequest(req, res, method, url, requestId)));
+    void withNoWakeScope(() => withLogContext({ requestId, traceId: trace.traceId, spanId: trace.spanId },
+      () => handleRequest(req, res, method, url, requestId)));
   });
 
   // The actual request handler runs inside the ALS frame established above.
@@ -509,7 +531,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       res.writeHead(204, {
         ...(allowedOrigin !== null ? { 'Access-Control-Allow-Origin': allowedOrigin } : {}),
         'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key, X-Gateway-No-Wake',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key, X-Gateway-No-Wake, traceparent',
         'X-Request-Id': requestId,
         ...SECURITY_HEADERS,
       });
@@ -520,6 +542,7 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Set CORS origin header for all non-preflight responses
     if (allowedOrigin !== null) {
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+      res.setHeader('Access-Control-Expose-Headers', `${TRACE_ID_RESPONSE_HEADER}, X-Request-Id`);
     }
 
     // Only the shallow health check skips auth (the platform probe sends no token). The deep check calls upstream
@@ -540,6 +563,9 @@ export function createProxyServer(config: ProxyConfig): Server {
       } }, requestId);
       return;
     }
+
+    // Self-authenticated routes (telemetry ingest: session tokens, replica signatures) run before the key check.
+    if (await runPublicRoute(config, req, res, method, urlPath, requestId)) return;
 
     // Auth — resolve user identity from Bearer token.
     // When no keys are configured, restrict to localhost. When keys are

@@ -33,7 +33,8 @@ import type { PrefixRoute } from './src/proxy/types';
 import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
-import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken } from './src/config/sandbox-env';
+import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
+import { deploymentLogToTelemetry, setGatewayTelemetrySink, telemetryFromEnv } from './src/telemetry';
 
 const log = createLogger('serve');
 
@@ -94,7 +95,8 @@ let declared: DeclaredDeploymentReconciler | null = null;
 const deployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: EXTRA_ADMINS,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
-  log: (msg, data) => log.log(data ?? {}, msg),
+  // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
+  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); },
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
@@ -214,6 +216,28 @@ const appLimits = API_KEYS.length ? new AppLimits({
   },
 }) : undefined;
 
+// Telemetry (docs/api/telemetry.md): POST /v1/telemetry/events from browsers (session token), edges (replica HMAC) and
+// server apps (app key); admin queries under /v1/telemetry/*. The gateway's own events go to the same store.
+const telemetry = telemetryFromEnv(process.env, {
+  auth: {
+    resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
+    isMasterKey: (token) => TOKEN_ALIASES.some(k => process.env[k]?.trim() === token),
+    deployment: (name) => {
+      const replicaToken = controller?.tokenOf(name);
+      const app = controller?.get(name)?.app;
+      return replicaToken ? { replicaToken, ...(app ? { app } : {}) } : null;
+    },
+    replica: (id) => controller?.replicaAuth(id) ?? null,
+  },
+  isAdminToken,
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+if (telemetry) {
+  await telemetry.start();
+  setGatewayTelemetrySink((event) => telemetry.ingest.ingestOwn(event));
+  log.log({ rows: telemetry.store.size }, 'Telemetry enabled');
+}
+
 const deepHealth = {
   authorize: isAdminToken,
   report: () => deepHealthReport({
@@ -259,7 +283,11 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   healthDetails: () => chainHealth(),
-  customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
+  customRoutes: [
+    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute },
+    ...(telemetry?.adminRoutes ?? []),
+  ],
+  ...(telemetry ? { publicRoutes: telemetry.publicRoutes } : {}),
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
@@ -293,6 +321,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     deployments?.controller.stop();
     declared?.stop();
     keyManager.stop();
+    telemetry?.stop();
+    setGatewayTelemetrySink(null);
     console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
 
     // Stop accepting new connections

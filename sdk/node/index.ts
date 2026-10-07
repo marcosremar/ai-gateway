@@ -1012,3 +1012,7 @@ export type {
   RouteChange, RouteEntrySpec, S2SConfig, S2SEvent, S2SFrame, S2SRequest, S2SStream, Served, SpeechRequest,
   SpeechResult, TimeoutGroup, Transcription, TranscribeRequest,
 } from './gateway-types';
+
+// ── Telemetry (docs/api/telemetry.md): server-side batching emitter, authenticated with the app key. ──
+export { createServerTelemetry, TelemetryEmitter, newTraceId, traceparentOf } from './telemetry';
+export type { ServerTelemetryOptions, EmitFields, TelemetryContext, TelemetryStats } from './telemetry';
