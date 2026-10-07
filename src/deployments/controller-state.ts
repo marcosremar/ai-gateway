@@ -190,6 +190,7 @@ export abstract class ControllerState {
   protected readonly parkedSince = new Map<string, number>();
   /** Last power-on of a parked replica, id → when: `maxHours` and the boot timeout count from here, not from creation. */
   protected readonly poweredOnAt = new Map<string, number>();
+  protected readonly startRefused = new Map<string, number>();
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
   protected readonly pendingSpend = new Set<{ cost: number }>();
   protected readonly probes = new Map<string, ProbeState>();

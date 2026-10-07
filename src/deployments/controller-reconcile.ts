@@ -9,7 +9,10 @@ import { isActive, planReplicas, replicaPhase } from './planner';
 import { usesScaleway, usesVast } from './spec';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMachine } from './types';
 
-/** A parked replica just powered on still lists as stopped for a while: do not power it on again before this. */
+/**
+ * A parked replica just powered on still lists as stopped for a while: do not power it on again before this. One the
+ * provider had no stock for is not tried again before this either, and meanwhile does not count as capacity.
+ */
 const PARKED_START_GRACE_MS = 90_000;
 
 export abstract class ReconcileLoop extends AutoscaleControl {
@@ -71,6 +74,11 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     // Keep machines we just created that the provider list does not show yet.
     const recent = this.machines.filter(m => !failed.has(this.providerOf(m)) && !listed.some(l => l.id === m.id)
       && this.now() - m.createdAt < 120_000 && this.deployments.has(m.deployment));
+    for (const l of listed) {
+      const rt = this.deployments.get(l.deployment);
+      if (rt && rt.record.lastRequestAt == null && rt.record.spec.minReplicas === 0 && l.createdAt < this.startedAt
+        && !this.machines.some(m => m.id === l.id) && replicaPhase(this.observed(l, 0)) !== 'halted') rt.record.lastRequestAt = this.startedAt;
+    }
     // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
     this.machines = [...listed.map((l) => {
       const known = this.machines.find(m => m.id === l.id);
@@ -79,6 +87,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
     for (const id of [...this.poweredOnAt.keys()]) if (!this.machines.some(m => m.id === id)) this.poweredOnAt.delete(id);
+    for (const id of [...this.startRefused.keys()]) if (!this.machines.some(m => m.id === id)) this.startRefused.delete(id);
     this.trackParking(failed);
 
     const orphans = this.machines.filter(m => !this.deployments.has(m.deployment) && !failed.has(this.providerOf(m)));
@@ -132,11 +141,12 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     let blockedBy: string | null = null;
     for (const m of rt.record.spec.paused ? [] : parked) {
       if (toCreate <= 0) break;
+      if (this.now() - (this.startRefused.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
       toCreate--;
       if (this.now() - (rt.starting.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
       const refusal = this.capRefusal(m.pricePerHour ?? 0);
       if (refusal) { rt.lastError = refusal; blockedBy = refusal; break; }
-      await this.unpark(rt, m);
+      if (!(await this.unpark(rt, m))) toCreate++;
     }
     if (toCreate > 0) {
       const price = all.find(m => m.pricePerHour != null)?.pricePerHour ?? 0;

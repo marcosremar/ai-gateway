@@ -126,7 +126,11 @@ export class RealtimeService {
     }
   }
 
-  /** Every ready replica of a realtime deployment whose media path is unknown or old gets probed (net-probe.ts). */
+  /**
+   * Every ready replica of a realtime deployment whose media path is unknown or old gets probed (net-probe.ts), and one
+   * with sessions keeps its deployment awake — also for sessions admitted by a previous gateway process, which
+   * `pollOnce` does not know.
+   */
   async probeAll(): Promise<void> {
     for (const d of this.opts.controller?.list?.() ?? []) {
       if (!this.opts.controller?.specOf(d.name)?.realtime) continue;
@@ -134,7 +138,9 @@ export class RealtimeService {
       if (!token) continue;
       for (const r of this.readyReplicas(d.name)) {
         const s = await this.status.get(r.id, r.base, token);
-        if (s.ok) await this.probeNet(d.name, r, s.status, token);
+        if (!s.ok) continue;
+        if (s.status.active > 0) { try { this.opts.controller.wake(d.name); } catch { /* vanished */ } }
+        await this.probeNet(d.name, r, s.status, token);
       }
     }
   }

@@ -5,6 +5,7 @@
 
 import { DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type Runtime } from './controller-state';
 import { ReplicaLifecycle } from './controller-replicas';
+import { isOutOfStock } from './placements';
 import type { DeploymentProvider, ReplicaMachine } from './types';
 
 /** The provider lists `stopping` for a minute or two after a stop; past this the machine is planned like any other. */
@@ -57,7 +58,7 @@ export abstract class ParkingControl extends ReplicaLifecycle {
     }
   }
 
-  protected async unpark(rt: Runtime, m: ReplicaMachine): Promise<void> {
+  protected async unpark(rt: Runtime, m: ReplicaMachine): Promise<boolean> {
     rt.starting.set(m.id, this.now());
     this.poweredOnAt.set(m.id, this.now());
     this.log('deployments: powering parked replica on', { deployment: m.deployment, id: m.id });
@@ -66,6 +67,11 @@ export abstract class ParkingControl extends ReplicaLifecycle {
     } catch (err) {
       this.poweredOnAt.delete(m.id);
       rt.lastError = `start ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
+      if (!isOutOfStock(err)) return true;
+      rt.starting.delete(m.id);
+      this.startRefused.set(m.id, this.now());
+      return false;
     }
+    return true;
   }
 }
