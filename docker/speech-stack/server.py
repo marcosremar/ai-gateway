@@ -258,6 +258,9 @@ async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) 
             async for chunk in res.aiter_bytes():
                 if chunk:
                     await out.put(chunk)
+    except Exception as error:
+        await out.put(error)
+        raise
     finally:
         await out.put(None)
 
@@ -353,6 +356,8 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                 text, queue, cut_at = item
                 yield event({"type": "sentence", "text": text, "cut_at_ms": cut_at})
                 while (chunk := await queue.get()) is not None:
+                    if isinstance(chunk, Exception):
+                        raise chunk
                     if first_audio is None:
                         first_audio = ms()
                         yield event({"type": "first_audio", "at_ms": first_audio})

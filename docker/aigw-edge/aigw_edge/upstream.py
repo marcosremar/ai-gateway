@@ -142,27 +142,30 @@ class Upstream:
         lang = (cfg.get("language") or "pt")[:2]
         body = {"model": self.s.tts_model, "input": text, "language": LANGUAGE_NAMES.get(lang, "Portuguese"),
                 "response_format": "pcm", "stream": True, "stream_format": "audio", **fields}
-        async with self.http.post(self.s.upstream + "/v1/audio/speech", json=body, headers=_headers(trace_id)) as r:
-            if r.status != 200:
-                raise UpstreamError("tts", r.status, (await r.text())[:200])
-            head = b""
-            parsed = False
-            async for chunk in r.content.iter_any():
-                if not parsed:
-                    head += chunk
-                    if len(head) < 44:
-                        continue
-                    parsed = True
-                    if head[:4] == b"RIFF":
-                        yield struct.unpack("<I", head[24:28])[0]
-                        at = head.find(b"data")
-                        chunk = head[at + 8:] if at > 0 else head[44:]
-                    else:
-                        chunk = head
-                if chunk:
-                    yield chunk
-            if not parsed and head:
-                yield head
+        try:
+            async with self.http.post(self.s.upstream + "/v1/audio/speech", json=body, headers=_headers(trace_id)) as r:
+                if r.status != 200:
+                    raise UpstreamError("tts", r.status, (await r.text())[:200])
+                head = b""
+                parsed = False
+                async for chunk in r.content.iter_any():
+                    if not parsed:
+                        head += chunk
+                        if len(head) < 44:
+                            continue
+                        parsed = True
+                        if head[:4] == b"RIFF":
+                            yield struct.unpack("<I", head[24:28])[0]
+                            at = head.find(b"data")
+                            chunk = head[at + 8:] if at > 0 else head[44:]
+                        else:
+                            chunk = head
+                    if chunk:
+                        yield chunk
+                if not parsed and head:
+                    yield head
+        except aiohttp.ClientError as error:
+            raise UpstreamError("tts", None, repr(error)[:200]) from error
 
     # ── whole turn on the replica (/v1/s2s) ──────────────────────────────────
 
