@@ -38,7 +38,8 @@ export interface FakeEdge {
   wss: WebSocketServer;
   host: string;
   status: EdgeStatusBody | null;
-  offers: Array<{ body: Record<string, unknown>; token: string | undefined }>;
+  offers: Array<{ body: Record<string, unknown>; token: string | undefined; traceparent?: string }>;
+  wsTraceparents: Array<string | undefined>;
   ice: Array<Record<string, unknown>>;
   deleted: string[];
   sockets: WsSocket[];
@@ -59,7 +60,7 @@ function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
 export async function startFakeEdge(): Promise<FakeEdge> {
   const edge = {
     status: { active: 0, max: 8, transports: ['webrtc', 'ws'], udpPorts: [40000, 40100] } as EdgeStatusBody | null,
-    offers: [], ice: [], deleted: [], sockets: [], offerStatus: 200, wsRefuse: false,
+    offers: [], wsTraceparents: [], ice: [], deleted: [], sockets: [], offerStatus: 200, wsRefuse: false,
   } as unknown as FakeEdge;
   const server = createServer(async (req, res) => {
     const token = req.headers['x-aigw-token'] as string | undefined;
@@ -73,7 +74,7 @@ export async function startFakeEdge(): Promise<FakeEdge> {
     }
     if (req.method === 'POST' && url === '/__aigw/rt/offer') {
       const body = await readBody(req);
-      edge.offers.push({ body, token });
+      edge.offers.push({ body, token, ...(req.headers.traceparent ? { traceparent: req.headers.traceparent as string } : {}) });
       if (edge.offerStatus !== 200) { res.writeHead(edge.offerStatus); res.end('{}'); return; }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ sdp: 'v=0\r\no=edge answer\r\n', type: 'answer', sessionId: 'edge-1' }));
@@ -100,6 +101,7 @@ export async function startFakeEdge(): Promise<FakeEdge> {
     const ok = req.headers['x-aigw-token'] === REPLICA_TOKEN && url.pathname === '/__aigw/rt/ws'
       && 'claims' in verifySessionToken(token, deriveRealtimeKey(REPLICA_TOKEN), Math.floor(Date.now() / 1000));
     if (!ok || edge.wsRefuse) { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return; }
+    edge.wsTraceparents.push(req.headers.traceparent as string | undefined);
     wss.handleUpgrade(req, socket, head, (ws) => {
       edge.sockets.push(ws);
       ws.send(JSON.stringify({ type: 'ready' }));

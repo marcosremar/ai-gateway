@@ -7,6 +7,7 @@ import type { AddressInfo } from 'net';
 import { createRealtime, type CreateRealtimeOptions } from '../../../src/realtime';
 import { runNoWake } from '../../../src/gateway/proxy/no-wake';
 import type { AppLimitDenial } from '../../../src/gateway/proxy/app-limits';
+import type { GatewayTelemetryEvent } from '../../../src/realtime';
 
 export const KEYS: Record<string, string> = { 'key-parle': 'parle', 'key-other': 'other', 'key-admin': 'admin' };
 
@@ -15,7 +16,8 @@ export interface TestGateway {
   server: Server;
   realtime: ReturnType<typeof createRealtime>;
   charged: Array<[string, number]>;
-  create(body: unknown, opts?: { key?: string; noWake?: boolean }): Promise<Response>;
+  events: GatewayTelemetryEvent[];
+  create(body: unknown, opts?: { key?: string; noWake?: boolean; traceparent?: string }): Promise<Response>;
   close(): Promise<void>;
 }
 
@@ -24,6 +26,7 @@ export async function startGateway(
   extra: Partial<CreateRealtimeOptions> & { deny?: AppLimitDenial } = {},
 ): Promise<TestGateway> {
   const charged: Array<[string, number]> = [];
+  const events: GatewayTelemetryEvent[] = [];
   const realtime = createRealtime({
     controller,
     env: { REALTIME_TURN_URLS: 'turn:198.51.100.7:3478?transport=udp', REALTIME_TURN_SECRET: 'turn-secret' },
@@ -31,6 +34,7 @@ export async function startGateway(
     isAdmin: (u) => u === 'admin',
     charge: (u, n) => { charged.push([u, n]); return extra.deny ?? null; },
     pollMs: 0,
+    telemetry: (e) => events.push(e),
     ...extra,
   });
   const server = createServer((req, res) => {
@@ -48,12 +52,13 @@ export async function startGateway(
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   return {
-    url, server, realtime, charged,
+    url, server, realtime, charged, events,
     create: (body, opts = {}) => fetch(`${url}/v1/realtime/sessions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${opts.key ?? 'key-parle'}`, 'Content-Type': 'application/json',
         ...(opts.noWake ? { 'X-Gateway-No-Wake': '1' } : {}),
+        ...(opts.traceparent ? { traceparent: opts.traceparent } : {}),
       },
       body: JSON.stringify(body),
     }),

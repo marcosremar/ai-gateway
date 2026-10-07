@@ -18,6 +18,7 @@ import {
 } from './admission';
 import { iceServersFor, type IceConfig, DEFAULT_STUN_URLS } from './ice';
 import { reportExternalLoad } from './external-load';
+import { echoTrace, makeEmitter, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
 import {
   deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, verifySessionToken,
   RT_MAX_CFG_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
@@ -47,6 +48,8 @@ export interface RealtimeServiceOptions {
   fetchImpl?: typeof fetch;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
+  /** Gateway telemetry events (trace.ts); default: the log. */
+  telemetry?: RealtimeTelemetrySink;
 }
 
 export const REALTIME_DEFAULT_TTL_SECONDS = 600;
@@ -99,10 +102,12 @@ export class RealtimeService {
   private readonly now: () => number;
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
   private poller: ReturnType<typeof setInterval> | null = null;
+  readonly emit: GatewayEmit;
 
   constructor(private readonly opts: RealtimeServiceOptions) {
     this.now = opts.now ?? Date.now;
     this.log = opts.log ?? (() => {});
+    this.emit = makeEmitter(opts.telemetry, this.log);
     this.status = new EdgeStatusCache({
       fetchImpl: opts.fetchImpl, now: this.now, ttlMs: opts.statusTtlMs, timeoutMs: opts.statusTimeoutMs,
     });
@@ -158,6 +163,9 @@ export class RealtimeService {
 
   /** `POST /v1/realtime/sessions` (behind the proxy's API-key auth). */
   createSession = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const trace = traceOf(req);
+    echoTrace(res, trace);
+    const started = this.now();
     const userId = this.opts.userOf(req);
     if (!userId) return sendJson(res, 401, errorBody('a realtime session needs an app API key', 'unauthorized'));
     let body: Record<string, unknown>;
@@ -195,6 +203,7 @@ export class RealtimeService {
     const placed = await this.place(dep, ordered.order);
     if ('refusal' in placed) {
       const { status, code, message, retryAfter } = placed.refusal;
+      this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: code, status, deployment: dep } });
       return sendJson(res, status, errorBody(message, code, { fallback: FALLBACK }), { 'Retry-After': retryAfter });
     }
     const replicaToken = controller.tokenOf(dep);
@@ -204,6 +213,7 @@ export class RealtimeService {
     const charge = sessionCharge(ttl, this.opts.requestsPerMinute ?? REALTIME_REQUESTS_PER_MINUTE);
     const denial = admin ? null : this.opts.charge?.(userId, charge) ?? null;
     if (denial) {
+      this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: denial.type, status: denial.status, deployment: dep } });
       return sendJson(res, denial.status, errorBody(denial.message, denial.type), denial.retryAfterSeconds ? { 'Retry-After': denial.retryAfterSeconds } : {});
     }
 
@@ -226,9 +236,14 @@ export class RealtimeService {
         if (t === 's2s-stream') return { type: t, url: '/v1/s2s' };
         return { type: t };
       });
-    this.log('realtime: session admitted', { sid, app, deployment: dep, replica: placed.replica.id, charge, transports: transports.map(t => t.type) });
+    this.log('realtime: session admitted', { sid, app, deployment: dep, replica: placed.replica.id, charge, transports: transports.map(t => t.type), traceId: trace.traceId });
+    this.emit(trace, 'rt.session.admitted', {
+      sessionId: sid, durMs: this.now() - started,
+      attrs: { deployment: dep, replica: placed.replica.id, active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1, turn: iceServers.length > 1 },
+    });
     sendJson(res, 200, {
-      sessionId: sid, token, expiresAt: new Date(exp * 1000).toISOString(), deployment: dep,
+      sessionId: sid, token, expiresAt: new Date(exp * 1000).toISOString(), deployment: dep, traceId: trace.traceId,
+      telemetryUrl: `${base}/v1/telemetry/events`,
       transports, iceServers,
       limits: {
         maxSessionSeconds: ttl, maxConfigChars: RT_MAX_CFG_CHARS, requestsCharged: admin ? 0 : charge,

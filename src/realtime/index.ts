@@ -26,6 +26,8 @@ export {
   RT_KEY_INFO, RT_MAX_CFG_CHARS, RT_MAX_TTL_SECONDS,
 } from './token';
 export type { RealtimeClaims } from './token';
+export { TRACE_ID_HEADER, childTraceparent, newTrace, parseTraceparent, traceOf } from './trace';
+export type { GatewayTelemetryEvent, RealtimeTelemetrySink, Trace } from './trace';
 export { orderTransports, pickReplica, sessionCharge, TRANSPORT_LADDER, REALTIME_REQUESTS_PER_MINUTE } from './admission';
 export type { RealtimeTransportType } from './admission';
 

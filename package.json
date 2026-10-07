@@ -12,6 +12,7 @@
     ".": "./src/index.ts",
     "./client": "./sdk/node/index.ts",
     "./voice": "./sdk/browser/voice/index.ts",
+    "./realtime": "./sdk/browser/realtime/index.ts",
     "./compute": "./src/compute/index.ts",
     "./*": "./src/*.ts"
   },

@@ -14,6 +14,7 @@ import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import NodeWebSocket from 'ws';
 import type { RealtimeService } from './service';
+import { TRACE_ID_HEADER, childTraceparent, traceOf } from './trace';
 import {
   OP, WsFrameParser, WsProtocolError, closePayload, encodeFrame, handshakeResponse, httpRefusal,
 } from './ws-frames';
@@ -72,13 +73,20 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
     const key = req.headers['sec-websocket-key'];
     if (typeof key !== 'string' || req.headers['sec-websocket-version'] !== '13') { refuse(socket, 400, 'not a WebSocket 13 upgrade'); return true; }
     const token = url.searchParams.get('token') ?? '';
+    const trace = traceOf(req);
+    const traceHeader = { [TRACE_ID_HEADER]: trace.traceId };
     const session = service.resolveToken(token);
-    if ('status' in session) { refuse(socket, session.status, session.message); return true; }
+    if ('status' in session) {
+      service.emit(trace, 'ws.refused', { level: 'warn', attrs: { status: session.status, code: session.code } });
+      refuse(socket, session.status, session.message, traceHeader);
+      return true;
+    }
+    const startedAt = Date.now();
 
     const target = `${session.base.replace(/^http/, 'ws')}/__aigw/rt/ws?token=${encodeURIComponent(token)}`;
     let upstream: Upstream;
-    try { upstream = open(target, { 'X-Aigw-Token': session.replicaToken }); } catch (err) {
-      refuse(socket, 502, `replica unreachable: ${(err as Error).message}`);
+    try { upstream = open(target, { 'X-Aigw-Token': session.replicaToken, traceparent: childTraceparent(trace) }); } catch (err) {
+      refuse(socket, 502, `replica unreachable: ${(err as Error).message}`, traceHeader);
       return true;
     }
     upstream.binaryType = 'arraybuffer';
@@ -94,7 +102,7 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
       if (opened) return;
       closed = true;
       try { upstream.close(); } catch { /* not open */ }
-      refuse(socket, 504, 'replica did not accept the WebSocket in time');
+      refuse(socket, 504, 'replica did not accept the WebSocket in time', traceHeader);
     }, UPSTREAM_CONNECT_MS);
 
     const parser = new WsFrameParser(MAX_MESSAGE);
@@ -114,6 +122,7 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
       socket.end();
       setTimeout(() => socket.destroy(), 1_000).unref?.();
       log('realtime: ws relay closed', { sid, code, reason: reason.slice(0, 80), from });
+      service.emit(trace, 'ws.close', { level: code === 1000 ? 'info' : 'warn', sessionId: sid, durMs: Date.now() - startedAt, attrs: { code, from } });
     };
 
     const toClient = (opcode: number, payload: Uint8Array) => {
@@ -154,13 +163,14 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
       opened = true;
       active++;
       clearTimeout(connectTimer);
-      socket.write(handshakeResponse(key));
+      socket.write(handshakeResponse(key, traceHeader));
       socket.off('data', collectEarly);
       socket.on('data', onClientData);
       service.settle(sid);
       keepalive = setInterval(() => toClient(OP.ping, new Uint8Array(0)), KEEPALIVE_MS);
       keepalive.unref?.();
       log('realtime: ws relay open', { sid, replica: session.replicaId });
+      service.emit(trace, 'ws.open', { sessionId: sid, durMs: Date.now() - startedAt, attrs: { replica: session.replicaId } });
       for (const c of early.splice(0)) onClientData(c);
     };
     upstream.onmessage = (ev) => {
@@ -172,7 +182,11 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
     upstream.onclose = (ev) => {
       if (!opened) {
         clearTimeout(connectTimer);
-        if (!closed) { closed = true; refuse(socket, 502, `replica refused the WebSocket (${ev.code})`); }
+        if (!closed) {
+          closed = true;
+          service.emit(trace, 'ws.refused', { level: 'warn', sessionId: sid, attrs: { status: 502, code: ev.code } });
+          refuse(socket, 502, `replica refused the WebSocket (${ev.code})`, traceHeader);
+        }
         return;
       }
       shutdown(ev.code, ev.reason || 'replica closed', 'upstream');
@@ -180,7 +194,11 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
     upstream.onerror = () => {
       if (!opened) {
         clearTimeout(connectTimer);
-        if (!closed) { closed = true; refuse(socket, 502, 'replica unreachable'); }
+        if (!closed) {
+          closed = true;
+          service.emit(trace, 'ws.refused', { level: 'warn', sessionId: sid, attrs: { status: 502, code: 'unreachable' } });
+          refuse(socket, 502, 'replica unreachable', traceHeader);
+        }
         try { upstream.close(); } catch { /* never opened */ }
         return;
       }

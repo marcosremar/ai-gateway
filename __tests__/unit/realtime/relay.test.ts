@@ -39,7 +39,7 @@ describe('signaling relay', () => {
     expect(offer.status).toBe(200);
     expect(offer.headers.get('access-control-allow-origin')).toBe('*');
     expect(await offer.json()).toEqual({ sdp: 'v=0\r\no=edge answer\r\n', type: 'answer', sessionId: s.sessionId });
-    expect(edge.offers[0]).toEqual({ body: { sdp: OFFER, type: 'offer', token: s.token }, token: 'replica-token-for-tests' });
+    expect(edge.offers[0]).toMatchObject({ body: { sdp: OFFER, type: 'offer', token: s.token }, token: 'replica-token-for-tests' });
 
     const ice = await fetch(s.transports[0]!.iceUrl!, {
       method: 'POST', headers: { Authorization: `Bearer ${s.token}`, 'Content-Type': 'application/json' },
@@ -172,5 +172,55 @@ describe('WebSocket relay', () => {
     await expect(connect(s.transports[1]!.url!)).rejects.toMatchObject({ status: 410 });
     // Other upgrades still reach the proxy's own listener (410 here).
     await expect(connect(`${gw.url.replace('http', 'ws')}/v1/stt/stream`)).rejects.toMatchObject({ status: 410 });
+  });
+});
+
+describe('trace propagation (correlated telemetry)', () => {
+  const TRACE = '4bf92f3577b34da6a3ce929d0e0e4736';
+  const TP = `00-${TRACE}-00f067aa0ba902b7-01`;
+  let edge: FakeEdge;
+  let gw: TestGateway;
+  beforeEach(async () => {
+    edge = await startFakeEdge();
+    gw = await startGateway(fakeController({ replicas: [{ id: 'r1', ip: edge.host }] }).controller);
+  });
+  afterEach(async () => { await gw.close(); await edge.close(); });
+
+  it('admission, signaling and WS keep the browser trace, forward it to the edge, echo X-Aigw-Trace-Id, emit gateway events', async () => {
+    const res = await gw.create({ config: CONFIG }, { traceparent: TP });
+    expect(res.headers.get('x-aigw-trace-id')).toBe(TRACE);
+    const s = await res.json() as { sessionId: string; token: string; traceId: string; telemetryUrl: string; transports: Array<Record<string, string>> };
+    expect(s.traceId).toBe(TRACE);
+    expect(s.telemetryUrl).toBe(`${gw.url}/v1/telemetry/events`);
+
+    const offer = await fetch(s.transports[0]!.offerUrl!, {
+      method: 'POST', headers: { Authorization: `Bearer ${s.token}`, traceparent: TP }, body: JSON.stringify({ sdp: OFFER }),
+    });
+    expect(offer.headers.get('x-aigw-trace-id')).toBe(TRACE);
+    expect(edge.offers[0]!.traceparent).toMatch(new RegExp(`^00-${TRACE}-[0-9a-f]{16}-01$`));
+
+    const { ws, messages } = await connect(`${s.transports[1]!.url}&traceparent=${TP}`);
+    await until(() => messages.length >= 1);
+    expect(edge.wsTraceparents[0]).toMatch(new RegExp(`^00-${TRACE}-`));
+    ws.close(1000);
+    await until(() => gw.events.some(e => e.event === 'ws.close'));
+
+    const names = gw.events.map(e => e.event);
+    expect(names).toEqual(expect.arrayContaining(['rt.session.admitted', 'rt.signal.offer', 'ws.open', 'ws.close']));
+    expect(gw.events.every(e => e.traceId === TRACE && e.source === 'gateway')).toBe(true);
+    // Nothing secret or spoken in the events.
+    const flat = JSON.stringify(gw.events);
+    expect(flat).not.toContain(s.token);
+    expect(flat).not.toContain('Tu es Lia');
+    expect(flat).not.toContain('v=0');
+  });
+
+  it('a rejection carries the trace too, and a missing traceparent gets a fresh one', async () => {
+    edge.status = { active: 8, max: 8, transports: ['webrtc'] };
+    const res = await gw.create({ config: CONFIG }, { traceparent: TP });
+    expect(res.status).toBe(503);
+    expect(gw.events.find(e => e.event === 'rt.session.rejected')).toMatchObject({ traceId: TRACE, attrs: { reason: 'saturated' } });
+    const fresh = await gw.create({ config: CONFIG });
+    expect(fresh.headers.get('x-aigw-trace-id')).toMatch(/^[0-9a-f]{32}$/);
   });
 });

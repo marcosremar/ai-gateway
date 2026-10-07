@@ -17,9 +17,10 @@ export function acceptKey(key: string): string {
   return createHash('sha1').update(key + GUID).digest('base64');
 }
 
-export function handshakeResponse(key: string): string {
+export function handshakeResponse(key: string, headers: Record<string, string> = {}): string {
+  const extra = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join('');
   return 'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
-    + `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`;
+    + `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n${extra}\r\n`;
 }
 
 /** A plain HTTP refusal on the upgrade socket (before the handshake). */
