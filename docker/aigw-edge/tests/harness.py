@@ -281,6 +281,75 @@ async def scenario_reoffer(base: str) -> None:
     await asyncio.sleep(0.3)
 
 
+async def scenario_race(base: str, stages: bool) -> None:
+    async def status() -> dict:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f"{base}/__aigw/rt/status") as r:
+                return await r.json()
+
+    sid = uuid.uuid4().hex
+    token = mint(sid=sid)
+    ws = await WsLearner(base).connect(token)
+    await ws.events.wait("ready")
+    others = [await WsLearner(base).connect(mint()) for _ in range(2)]
+    for other in others:
+        await other.events.wait("ready")
+    rtc = await RtcLearner(base).connect(token, standby=True)
+    check("race: on a full replica the learner's own WebRTC offer is accepted while its WS session runs",
+          rtc.status == 200 and rtc.session_id == sid, rtc.answer.get("error"))
+    await rtc.events.wait("ready", 10)
+    now = await status()
+    check("race: both transports live, the learner counts once", now["active"] == 3 and now["available"] == 0
+          and now["byTransport"] == {"webrtc": 1, "ws": 3} and "__closed" not in ws.events.types(), now)
+    for other in others:
+        await other.close()
+    ws.say(1.2)
+    await ws.events.wait("done", 15)
+    await asyncio.sleep(0.3)
+    check("race: the turn spoken on WS runs once, the standby WebRTC session hears nothing",
+          rtc.events.types() == ["ready"] and rtc.loud_frames == 0, rtc.events.types())
+    await ws.close()
+    await asyncio.sleep(0.5)
+    now = await status()
+    check("race: closing the WS frees nothing but the WS, WebRTC carries on", now["active"] == 1
+          and now["byTransport"] == {"webrtc": 1, "ws": 0}, now)
+    rtc.activate()
+    await rtc.send({"type": "config_update", "messages": [{"role": "user", "content": "Bom dia"}, {"role": "assistant", "content": "Olá!"}]})
+    rtc.mic.say(1.2)
+    done = await rtc.events.wait("done", 15)
+    check("race: after the switch the microphone reaches the WebRTC session", done.get("turnId", "").endswith(":1")
+          and rtc.loud_frames >= 50, f"{rtc.loud_frames} loud frames")
+    if stages:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+                roles = [msg["role"] for msg in (await r.json())["last_llm_messages"]]
+        check("race: the replayed history reaches the model", roles == ["system", "user", "assistant", "user"], roles)
+    await rtc.close()
+    async with aiohttp.ClientSession() as http:
+        async with http.delete(f"{base}/__aigw/rt/session/{sid}") as r:
+            await r.read()
+    check("race: the slot is free once the WebRTC session ends", (await status())["active"] == 0)
+
+    sid = uuid.uuid4().hex
+    token = mint(sid=sid)
+    rtc = await RtcLearner(base).connect(token, standby=True)
+    await rtc.events.wait("ready", 10)
+    ws = await WsLearner(base).connect(token)
+    await ws.events.wait("ready")
+    async with aiohttp.ClientSession() as http:
+        async with http.delete(f"{base}/__aigw/rt/session/{sid}") as r:
+            deleted = r.status
+    now = await status()
+    check("race: giving up the WebRTC attempt (DELETE) leaves the WS session running", deleted == 200 and now["active"] == 1
+          and now["byTransport"] == {"webrtc": 0, "ws": 1} and "__closed" not in ws.events.types(), now)
+    ws.say(1.2)
+    await ws.events.wait("done", 15)
+    await ws.close()
+    await rtc.close()
+    await asyncio.sleep(0.3)
+    check("race: the slot is free once the WS closes", (await status())["active"] == 0)
+
+
 async def scenario_s2s(base: str) -> None:
     learner = await ws_turn(base)
     await learner.events.wait("done", 15)
@@ -445,9 +514,11 @@ async def main() -> int:
                          scenario_capacity, scenario_webrtc):
             await scenario(base)
         await scenario_reoffer(base)
+        await scenario_race(base, stages=True)
         await scenario_s2s(base_s2s)
         await scenario_webrtc(base_s2s, (50041, 50060))
         await scenario_reoffer(base_s2s)
+        await scenario_race(base_s2s, stages=False)
         await scenario_telemetry(base)
         if nginx:
             await scenario_nginx()

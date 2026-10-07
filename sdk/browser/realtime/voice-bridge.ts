@@ -27,6 +27,7 @@ export interface VoiceBridge {
   onEffect(effect: VadEffect): void;
   /** Drops a pending end of turn (session closing, transport switch). */
   reset(): void;
+  speaking(): boolean;
 }
 
 export function createVoiceBridge(opts: VoiceBridgeOptions): VoiceBridge {
@@ -69,5 +70,6 @@ export function createVoiceBridge(opts: VoiceBridgeOptions): VoiceBridge {
       turnStart = null;
       segmentStart = null;
     },
+    speaking: () => turnStart !== null,
   };
 }

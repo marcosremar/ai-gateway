@@ -105,7 +105,7 @@ function session(extra: Partial<RealtimeSessionOptions> = {}) {
   const s = createRealtimeSession({
     sessionEndpoint: async () => { counts.admissions++; return DESCRIPTOR; },
     getMicStream: async () => { counts.mics++; return { getAudioTracks: () => [{ kind: 'audio' }] } as unknown as MediaStream; },
-    onEvent: e => events.push(e), onRemoteAudio: () => {}, storage: null, fetchImpl,
+    onEvent: e => events.push(e), onRemoteAudio: () => {}, storage: null, fetchImpl, raceTransports: false,
     timeouts: { iceGatherMs: 50, webrtcConnectMs: 200, disconnectGraceMs: 10, iceRestartMs: 80 },
     transports: {
       webrtc: c => createWebRtcTransport(c, OFFER, { RTCPeerConnection: FakePc as unknown as typeof RTCPeerConnection }),

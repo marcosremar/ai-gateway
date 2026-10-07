@@ -98,6 +98,7 @@ export function setPlayoutDelay(receiver: RTCRtpReceiver | undefined, ms: number
 interface Link {
   pc: RTCPeerConnection;
   channel: RTCDataChannel;
+  heldMic?: { sender: RTCRtpSender; track: MediaStreamTrack };
 }
 
 export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer, deps?: Partial<WebRtcDeps>): RealtimeTransport {
@@ -105,6 +106,8 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
   const opened = new Set<Link>();
   let link: Link | null = null;
   let connected = false;
+  let answered = false;
+  let live = !ctx.standby;
   let closing = false;
   let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnecting = false;
@@ -129,11 +132,12 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     });
     const answer = await res.json().catch(() => null) as { sdp?: string; type?: string; error?: { code?: string } } | null;
     if (!res.ok || !answer?.sdp) throw new Error(`offer refused: HTTP ${res.status}${answer?.error?.code ? ` ${answer.error.code}` : ''}`);
+    answered = true;
     await conn.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
   };
 
   const release = (l: Link) => {
-    opened.delete(l);
+    if (!opened.delete(l)) return;
     l.channel.onmessage = null;
     l.channel.onclose = null;
     l.pc.ontrack = null;
@@ -153,8 +157,9 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     try {
       const mic = await ctx.mic();
       const tracks = mic.getAudioTracks();
-      if (tracks.length) for (const track of tracks) pc.addTrack(track, mic);
-      else pc.addTransceiver('audio', { direction: 'recvonly' });
+      if (!tracks.length) pc.addTransceiver('audio', { direction: 'recvonly' });
+      else if (live) for (const track of tracks) pc.addTrack(track, mic);
+      else l.heldMic = { sender: pc.addTransceiver('audio', { direction: 'sendrecv' }).sender, track: tracks[0]! };
       l.channel.onmessage = (e: MessageEvent) => {
         try { ctx.emit(JSON.parse(String(e.data))); } catch { /* not JSON: ignored */ }
       };
@@ -225,15 +230,20 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     send(message: ClientMessage) {
       if (link?.channel.readyState === 'open') link.channel.send(JSON.stringify(message));
     },
+    goLive() {
+      live = true;
+      const held = link?.heldMic;
+      if (held) void held.sender.replaceTrack(held.track);
+    },
     close() {
-      const wasConnected = connected;
       closing = true;
       connected = false;
       if (disconnectTimer) clearTimeout(disconnectTimer);
       for (const l of [...opened]) release(l);
       ctx.remoteAudio(null);
       // Free the replica's slot now rather than when its ICE times out.
-      if (wasConnected && token) {
+      if (answered && token) {
+        answered = false;
         void ctx.fetchImpl(sessionUrl, { method: 'DELETE', headers: { Authorization: `Bearer ${token}`, traceparent: ctx.traceparent }, keepalive: true }).catch(() => {});
       }
     },

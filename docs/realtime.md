@@ -210,9 +210,23 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   (milliseconds, 0–4000 in the W3C spec), or to `playoutDelayHint` (seconds) where only that exists; a browser with
   neither is left alone. 0 is the lowest value the spec allows and asks for no added delay: the browser still buffers
   what the jitter it measures needs. Raise it (40–80 ms) if a network produces audible gaps.
+- **Start: WS and WebRTC raced** (`raceTransports`, default on; `false` = one rung after the other, as in the table).
+  When the session offers both and WebRTC is the first rung, the two are started together with the one token and the
+  session is usable on whichever is ready first — the WS, almost always (~0.1–0.3 s against 2.4–4.6 s). WebRTC goes
+  on connecting on standby: no microphone track on it, its events and audio held back. Once it is connected the SDK
+  switches **between turns** — nobody speaking, no reply pending or playing, 300 ms after the last audio —: it closes
+  the WS (capture and player stop), puts the microphone track on the peer connection (`replaceTrack`), replays the
+  conversation with one `config_update`, and emits `transport {transport:"webrtc", reason:"upgrade", from:"ws"}`.
+  WebRTC not connected `upgradeMs` (5 s) after the start on WS is given up without any error and the session stays
+  on WS. WebRTC ready first: the WS attempt is cancelled. Both failing: the clip rungs, in order. A WS that breaks
+  while WebRTC is still connecting waits for it instead of dropping to a clip rung. The edge runs the two sessions of
+  one `sid` side by side and counts the learner once (docs/realtime-edge.md); the standby one hears nothing, so a
+  turn is never run twice.
 - A refused admission (503 + fallback) skips the realtime rungs at once.
 - The winner is remembered per network (`localStorage` key `aigw-rt:winner:<network>`, TTL 6 h, every access guarded);
-  the next session starts there, the others stay as fallbacks.
+  the next session starts there, the others stay as fallbacks. After a race it is the transport the session settled
+  on: `webrtc` once it took over, `ws` only when the WebRTC attempt failed or ran out of `upgradeMs` — never because
+  the WS merely won the start. A remembered `ws` starts the next session on WS alone, with no WebRTC attempt.
 - **Network change on WebRTC** (Wi-Fi → mobile data): on ICE `failed`, or `disconnected` for more than
   `disconnectGraceMs` (3 s), the SDK opens a **fresh peer connection** and sends its offer to the same `offerUrl` with
   the same token (non-trickle, sent at the first srflx/relay candidate), waiting up to `iceRestartMs` (5 s) for a
@@ -286,7 +300,7 @@ gateway keeps it, forwards it to the edge on each call (new span id, same trace)
 
 Event shape: `{ts, source:"browser"|"gateway", level, event, traceId, sessionId?, turnId?, durMs?, attrs?}`.
 
-- Browser: `rt.ladder.try|ok|fallback` (from, to, reason), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
+- Browser: `rt.ladder.try|ok|fallback` (from, to, reason; `ok` = the session started: transport, durMs, `upgrading` when WebRTC is still connecting), `rt.ladder.upgrade` (from, to, durMs since the start), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
   `rt.session.admitted|rejected|closed`, `vad.segment` (durMs), `turn.first_audio` (durMs from end of speech),
   `turn.done`, `turn.recovered`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
 - Gateway: `rt.session.admitted|rejected|deleted`, `rt.signal.offer|refused`, `ws.open|close|refused`, `error` (sink
