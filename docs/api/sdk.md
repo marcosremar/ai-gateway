@@ -1,16 +1,20 @@
-# TypeScript SDK Reference
+# Legacy TypeScript SDK (`GatewaySDK`)
 
-::: warning Legacy
-`GatewaySDK` targets the routes of the old reference server in `server/` (`/v1/speech`, `/v1/gpu/*`, …), most of which
-the production entry point (`serve.ts`) does not mount. New code uses `GatewayClient` (`@parle/ai-gateway/client`,
-[Gateway client](./client.md)) against the routes in the [HTTP API reference](./http.md). This page is kept for the
-existing callers only.
+::: warning Legacy — do not use in new code
+`GatewaySDK` (`src/sdk`), `GatewayHttpClient` (`sdk/node/index.ts`), `AIClient` (`src/client`) and the browser
+`SpeechClient` (`src/browser`) are deprecated. Most of the routes they call (`/v1/pipeline`, `/v1/speech`,
+`/v1/invoke`, `/api/stream-audio`, ...) are not mounted by the live gateway (`serve.ts`), and the `./sdk` package
+export never resolved (`src/sdk.ts` does not exist). They stay in the tree until the next major version.
+
+Use instead:
+- **Server / Node:** `GatewayClient` from `@parle/ai-gateway/client` — see [Client](./client.md) and [HTTP API](./http.md).
+- **Browser voice (VAD, turn clips):** `@parle/ai-gateway/voice`.
 :::
 
-Full method list for `GatewaySDK` — the typed HTTP client for the AI Gateway.
+Full method list for `GatewaySDK`, kept for existing callers.
 
 ```typescript
-import { GatewaySDK } from '@parle/ai-gateway/sdk';
+import { GatewaySDK } from '@parle/ai-gateway'; // legacy root export
 
 const gw = new GatewaySDK({ baseUrl: 'http://localhost:4000' });
 ```

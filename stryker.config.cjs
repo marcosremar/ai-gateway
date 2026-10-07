@@ -30,7 +30,6 @@ const config = {
     '!src/types/**/*',
     '!src/constants/**/*',
     '!src/browser/**/*',
-    '!src/modules/browser/**/*',
   ],
   files: [
     'src/**/*.ts',

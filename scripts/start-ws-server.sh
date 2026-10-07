@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# start-ws-server.sh — start the ai-gateway WebSocket server with persistent
+# start-ws-server.sh — start the ai-gateway (serve.ts; the legacy server/ws-server.ts is gone) with persistent
 # log capture. Forensic incident 2026-04-26: previous sessions were spawned
 # bare (`bun run server/ws-server.ts &`) and their stdout/stderr was
 # attached to whatever shell launched them. When the shell exited or the
@@ -38,13 +38,11 @@ for arg in "$@"; do
 done
 
 # Refuse to start if a previous run of THIS wrapper is still alive (pid file
-# exists and the recorded pid is a live bun ws-server). Co-listening with the
-# legacy serve.ts proxy on the same port is fine because they bind different
-# address families (IPv4/IPv6).
+# exists and the recorded pid is a live bun serve.ts).
 PID_FILE="$LOG_DIR/ws-server.pid"
 if [ -s "$PID_FILE" ]; then
   prev_pid=$(cat "$PID_FILE")
-  if kill -0 "$prev_pid" 2>/dev/null && ps -p "$prev_pid" -o command= 2>/dev/null | grep -q 'ws-server.ts'; then
+  if kill -0 "$prev_pid" 2>/dev/null && ps -p "$prev_pid" -o command= 2>/dev/null | grep -q 'serve.ts'; then
     echo "[start-ws-server] Refusing to start: PID $prev_pid is the previous ws-server from this wrapper" >&2
     echo "[start-ws-server] Stop it first:  kill $prev_pid && rm $PID_FILE" >&2
     exit 2
@@ -70,7 +68,7 @@ ln -sf "$LOG_FILE" "$LOG_DIR/ws-server.current.log"
 cd "$PROJECT_DIR"
 
 if [ "$DETACH" = 1 ]; then
-  nohup bun run server/ws-server.ts >"$LOG_FILE" 2>&1 &
+  nohup bun run serve.ts >"$LOG_FILE" 2>&1 &
   pid=$!
   echo "$pid" > "$LOG_DIR/ws-server.pid"
   disown "$pid" 2>/dev/null || true
@@ -82,4 +80,4 @@ fi
 # debuggable yet still forensically recoverable.
 echo "[start-ws-server] PID=$$  PORT=$PORT  log=$LOG_FILE"
 echo "$$" > "$LOG_DIR/ws-server.pid"
-exec bun run server/ws-server.ts 2>&1 | tee -a "$LOG_FILE"
+exec bun run serve.ts 2>&1 | tee -a "$LOG_FILE"

@@ -16,6 +16,7 @@ __pycache__/
 .vercel
 load-testing/results/
 snapgpu.egg-info/
+*.egg-info/
 snapgpu.db
 __pycache__/
 

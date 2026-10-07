@@ -134,14 +134,12 @@ async function ensureLocalServer(): Promise<void> {
     // Not running — start it
   }
 
-  // Find server entry point — prefer ws-server.ts (full GPU management) over serve.ts (proxy only)
+  // The gateway entry point (the legacy server/ws-server.ts was removed with the rest of server/).
   const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), '..');
-  const wsServerPath = resolve(repoRoot, 'server/ws-server.ts');
-  const servePath = resolve(repoRoot, 'serve.ts');
-  const entryPath = existsSync(wsServerPath) ? wsServerPath : servePath;
+  const entryPath = resolve(repoRoot, 'serve.ts');
   if (!existsSync(entryPath)) {
-    console.error(`Cannot auto-start: neither server/ws-server.ts nor serve.ts found`);
-    console.error('Start the server manually: bun run server/ws-server.ts');
+    console.error('Cannot auto-start: serve.ts not found');
+    console.error('Start the server manually: bun run serve.ts');
     process.exit(1);
   }
 
@@ -911,7 +909,7 @@ async function cmdGpuLogs() {
 import {
   tcpProbe,
   pickProbeTarget,
-} from '../src/modules/gateway/providers/gpu/livenessProbe';
+} from '../src/gateway/providers/gpu/livenessProbe';
 
 // Finetune module — GPU finetune orchestration with DI + SOLID principles.
 import {
@@ -940,13 +938,13 @@ import {
   parseCalibLine,
   applyObservation,
   BUNDLED_PLUGINS,
-} from '../src/modules/gpu-finetune';
-import type { PreflightResult, WorkloadProfile, CalibStore } from '../src/modules/gpu-finetune';
+} from '../src/gpu-finetune';
+import type { PreflightResult, WorkloadProfile, CalibStore } from '../src/gpu-finetune';
 import type {
   GpuJobRunner,
   FinetuneProbe,
   FinetuneOpts,
-} from '../src/modules/gpu-finetune';
+} from '../src/gpu-finetune';
 import {
   isEvictionError,
   attemptSpendUsd,
@@ -955,7 +953,7 @@ import {
   decideRetry,
   deriveJobId,
   type JobBudget,
-} from '../src/modules/gpu-finetune/spot-resume';
+} from '../src/gpu-finetune/spot-resume';
 
 async function cmdGpuList(opts: { probe?: boolean; json?: boolean; mine?: boolean; label?: string } = {}) {
   const { url, key } = getConfig();
@@ -2436,7 +2434,7 @@ async function detectFinetuneWorkload(
 }
 
 // gpu finetune compare — A/B WER test multiple ckpts via Whisper roundtrip.
-// Delegates to src/modules/gpu-finetune/compare.ts.
+// Delegates to src/gpu-finetune/compare.ts.
 async function cmdGpuFinetuneCompare(opts: {
   ckpts: string[]; prompts: string; max?: number; whisperModel?: string;
 }): Promise<void> {
@@ -2653,7 +2651,7 @@ async function cmdGpuFinetuneSweep(opts: GpuFinetuneOpts & { trials?: number }):
 }
 
 // Plugins (LoRA / QLoRA / grad-ckpt / flash-attn) live in
-// src/modules/gpu-finetune/types.ts:BUNDLED_PLUGINS — single source of truth.
+// src/gpu-finetune/types.ts:BUNDLED_PLUGINS — single source of truth.
 // `loadPreset` and `listPresets` are imported from the module.
 
 // Web dashboard stub — opens browser with URL
@@ -5204,7 +5202,7 @@ function requireHyperstackKey(): string {
 }
 
 async function getHyperstackClient() {
-  const { HyperstackClient } = await import('../src/modules/gateway/providers/gpu/hyperstack-client');
+  const { HyperstackClient } = await import('../src/gateway/providers/gpu/hyperstack-client');
   return new HyperstackClient();
 }
 
@@ -7299,7 +7297,7 @@ Per-app isolation:
               // Resolve project → inject defaults + derive preset name
               let resolvedType = specType;
               if (specProject) {
-                const { loadProject, resolveProjectOpts } = await import('../src/modules/gpu-finetune/index.js');
+                const { loadProject, resolveProjectOpts } = await import('../src/gpu-finetune/index.js');
                 const proj = loadProject(specProject);
                 if (!proj) {
                   console.error(`Unknown project '${specProject}'. Run 'ai-gateway gpu finetune projects' to list available.`);

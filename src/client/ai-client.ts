@@ -48,6 +48,9 @@ import { defaultLogger } from '../logger';
 // AIClient
 // ---------------------------------------------------------------------------
 
+/**
+ * @deprecated Legacy profile client: calls /v1/speech and /v1/invoke, which serve.ts does not mount. Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
+ */
 export class AIClient {
   private readonly registry: AIProviderRegistry;
   private readonly gpuRegistry?: GpuProviderRegistry;

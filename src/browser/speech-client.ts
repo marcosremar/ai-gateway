@@ -78,6 +78,9 @@ const DEFAULT_CB_COOLDOWN = 30_000;
 const BACKOFF_BASE_MS = 100;
 const BACKOFF_MAX_MS = 5_000;
 
+/**
+ * @deprecated Legacy browser client: its SSE transport posts to /api/stream-audio, which the live gateway answers with 410. Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
+ */
 export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
   private config: SpeechClientConfig;
   private transport: Transport | null = null;

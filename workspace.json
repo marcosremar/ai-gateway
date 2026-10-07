@@ -1,8 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/workspace",
   "workspaces": [
-    "packages/ai-gateway",
-    "packages/ai-gateway-service"
+    "packages/ai-gateway"
   ],
   "tasks": {
     "build": {

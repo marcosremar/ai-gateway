@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   calibKey, observeThroughput, parseCalibLine, applyObservation, lookupCalib,
   type CalibStore,
-} from '../src/modules/gpu-finetune/calibration';
+} from '../src/gpu-finetune/calibration';
 
 describe('calibration: calibKey', () => {
   it('buckets model size + canonicalizes GPU name', () => {

@@ -1,5 +1,7 @@
 /**
- * GatewayHttpClient — TypeScript HTTP client for the BabelCast AI Gateway.
+ * Node SDK entry (`@parle/ai-gateway/client`). The live client is `GatewayClient` (exported at the bottom).
+ *
+ * LEGACY below: GatewayHttpClient — TypeScript HTTP client for the BabelCast AI Gateway (deprecated).
  *
  * Mirrors the Python gateway_sdk.GatewaySDK with circuit breaker + retry.
  *
@@ -64,6 +66,7 @@ export { AudioSegmenter, VAD_WINDOW_SAMPLES } from './audio';
 export type { AudioSegmenterConfig, AudioSegment } from './audio';
 
 /** Thrown when the gateway returns an HTTP error. */
+/** @deprecated Error type of the legacy `GatewayHttpClient`; `GatewayClient` throws `GatewayError`. */
 export class GatewayHttpError extends Error {
   constructor(
     message: string,
@@ -87,6 +90,11 @@ function generateRequestId(): string {
   return crypto.randomUUID();
 }
 
+/**
+ * @deprecated Legacy client: about 45 of its routes (/v1/pipeline, /v1/speech, /v1/invoke, ...) are not mounted by
+ * serve.ts. Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
+ * Kept until the next major.
+ */
 export class GatewayHttpClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;

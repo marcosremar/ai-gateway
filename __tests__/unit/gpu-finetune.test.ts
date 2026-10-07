@@ -30,7 +30,7 @@ import {
   listProjects,
   resolveProjectOpts,
   runNumericChecks,
-} from '../../src/modules/gpu-finetune/spec.js';
+} from '../../src/gpu-finetune/spec.js';
 
 import {
   lookupGpuSpec,
@@ -38,9 +38,9 @@ import {
   relSpeed,
   GPU_SPECS,
   BASELINE_GPU,
-} from '../../src/modules/gpu-finetune/gpu-specs.js';
+} from '../../src/gpu-finetune/gpu-specs.js';
 
-import { estimateCost } from '../../src/modules/gpu-finetune/cost.js';
+import { estimateCost } from '../../src/gpu-finetune/cost.js';
 
 import {
   vramNeedGb,
@@ -48,9 +48,9 @@ import {
   detectParamsFromHfConfig,
   precisionFromHint,
   type WorkloadProfile,
-} from '../../src/modules/gpu-finetune/workload.js';
+} from '../../src/gpu-finetune/workload.js';
 
-import type { PresetManifest } from '../../src/modules/gpu-finetune/types.js';
+import type { PresetManifest } from '../../src/gpu-finetune/types.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

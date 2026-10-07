@@ -1,4 +1,6 @@
 /**
+ * @deprecated Legacy, kept until the next major. Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
+ *
  * @parle/ai-gateway Browser SDK
  *
  * Framework-agnostic SpeechClient with automatic transport fallback

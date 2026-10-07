@@ -1,4 +1,6 @@
 /**
+ * @deprecated Legacy, kept until the next major. Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
+ *
  * AIClient — Profile-based unified client with automatic failover.
  */
 
@@ -52,6 +54,8 @@ import type { AIClientOptions } from './types';
  * const client = createAIClient({ registry, defaultProfile: 'voice' });
  * const stt = await client.transcribe(audioBuffer);
  * ```
+ *
+ * @deprecated Legacy (see `AIClient`). Use `GatewayClient` from `@parle/ai-gateway/client` (sdk/node/gateway-client.ts) for HTTP, and `@parle/ai-gateway/voice` (sdk/browser/voice) in the browser.
  */
 export function createAIClient(options: AIClientOptions): AIClient {
   return new AIClient(options);

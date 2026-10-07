@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { InMemoryStateAdapter } from '../../src/modules/platform/adapters/in-memory-state';
+import { InMemoryStateAdapter } from '../../src/platform/adapters/in-memory-state';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 

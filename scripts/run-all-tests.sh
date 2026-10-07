@@ -83,7 +83,7 @@ if curl -sf http://localhost:4000/health > /dev/null 2>&1; then
   echo "  ✓ Gateway running on localhost:4000"
   export GATEWAY_URL=http://localhost:4000
 else
-  echo "  ⚠ Gateway not running (start: bun server/ws-server.ts &)"
+  echo "  ⚠ Gateway not running (start: bun serve.ts &)"
   echo "  → Live tests will be skipped"
 fi
 

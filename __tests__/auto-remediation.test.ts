@@ -1,19 +1,19 @@
 /**
- * Unit tests for src/modules/auto-remediation/index.ts
+ * Unit tests for src/auto-remediation/index.ts
  *
  * Covers: tryAutoRemediation for all handled error codes (OOM, Docker Hub
  * rate limit, healthcheck fail, credit zero, GPU mismatch) and the fall-through
  * null path for unhandled codes.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { tryAutoRemediation } from '../src/modules/auto-remediation/index';
+import { tryAutoRemediation } from '../src/auto-remediation/index';
 import {
   DeployError,
   resourceError,
   networkError,
   containerError,
   gpuError,
-} from '../src/modules/errors/deploy-errors';
+} from '../src/errors/deploy-errors';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

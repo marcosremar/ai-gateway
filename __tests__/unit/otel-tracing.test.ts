@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // ── Mock logger so tests stay silent ─────────────────────────────────────────
 
-vi.mock('../../src/modules/logger', () => ({
+vi.mock('../../src/logger', () => ({
   createLogger: () => ({
     log: vi.fn(),
     warn: vi.fn(),

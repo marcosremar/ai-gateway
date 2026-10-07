@@ -3,11 +3,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { scaffoldPreset, STD_PATHS } from '../src/modules/gpu-finetune/scaffold';
+import { scaffoldPreset, STD_PATHS } from '../src/gpu-finetune/scaffold';
 import {
   validateSpec, loadPreset, setPresetsRoot, lintPresetManifest,
-} from '../src/modules/gpu-finetune/spec';
-import type { PresetManifest } from '../src/modules/gpu-finetune/types';
+} from '../src/gpu-finetune/spec';
+import type { PresetManifest } from '../src/gpu-finetune/types';
 
 describe('scaffoldPreset', () => {
   afterEach(() => setPresetsRoot(null));
