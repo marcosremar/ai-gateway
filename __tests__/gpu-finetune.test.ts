@@ -28,13 +28,13 @@ import {
   InMemoryFinetuneState,
   FileFinetuneState,
   BUNDLED_PLUGINS,
-} from '../src/modules/gpu-finetune';
+} from '../src/gpu-finetune';
 import type {
   GpuJobRunner,
   FinetuneProbe,
   FinetuneOpts,
   GpuJobResult,
-} from '../src/modules/gpu-finetune';
+} from '../src/gpu-finetune';
 
 // ─── validateSpec ──────────────────────────────────────────────────────
 

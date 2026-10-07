@@ -806,8 +806,8 @@ describe('TensorDock discover & resume fast path', () => {
   // Moved from gpu-deploy-loop.ts to per-provider strategy files (tensordock-strategy.ts).
   // Verifying via strategy source instead of deploy-loop body.
   it('attempts to discover and resume stopped instances on TensorDock', () => {
-    // Strategy moved under src/modules/gpu-providers/strategies/.
-    const tensorStrategy = readFileSync('src/modules/gpu-providers/strategies/tensordock-strategy.ts', 'utf8');
+    // Strategy moved under src/gpu-providers/strategies/.
+    const tensorStrategy = readFileSync('src/gpu-providers/strategies/tensordock-strategy.ts', 'utf8');
     expect(tensorStrategy).toContain('discoverInstance');
   });
 

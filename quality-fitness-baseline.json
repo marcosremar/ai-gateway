@@ -4,11 +4,6 @@
       "rule": "publishable-direct-infra",
       "file": "src/database/service.ts",
       "reason": "Legacy Database supporting context still lazy-loads Prisma from src/. Move Prisma behind an injected port before removing this baseline."
-    },
-    {
-      "rule": "publishable-direct-infra",
-      "file": "src/modules/database/service.ts",
-      "reason": "Legacy mirrored Database module still lazy-loads Prisma from src/modules. Remove with the module mirror or move Prisma behind DI."
     }
   ]
 }

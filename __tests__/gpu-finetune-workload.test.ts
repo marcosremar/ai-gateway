@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   GPU_SPECS, lookupGpuSpec, gpuVramGb, relSpeed,
-} from '../src/modules/gpu-finetune/gpu-specs';
+} from '../src/gpu-finetune/gpu-specs';
 import {
   vramNeedGb, scaleStepsPerSec, detectParamsFromHfConfig, precisionFromHint,
   type WorkloadProfile, type ThroughputBaseline,
-} from '../src/modules/gpu-finetune/workload';
+} from '../src/gpu-finetune/workload';
 
 const base = (over: Partial<WorkloadProfile> = {}): WorkloadProfile => ({
   paramsB: 7, precision: 'bf16', task: 'finetune', finetuneMode: 'full',

@@ -6,7 +6,7 @@ import {
   emptyBudget,
   decideRetry,
   deriveJobId,
-} from '../src/modules/gpu-finetune/spot-resume';
+} from '../src/gpu-finetune/spot-resume';
 
 describe('spot-resume: isEvictionError', () => {
   it('flags transient pod-death / preemption signatures', () => {

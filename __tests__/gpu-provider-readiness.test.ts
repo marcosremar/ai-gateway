@@ -3,7 +3,7 @@ import {
   isProviderConfigured,
   computeProviderReadiness,
   filterUsableTiers,
-} from '../src/modules/gpu-providers/provider-readiness';
+} from '../src/gpu-providers/provider-readiness';
 
 describe('provider-readiness: isProviderConfigured', () => {
   it('vast/runpod/tensordock/hyperstack gated on their single key', () => {

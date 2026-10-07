@@ -29,11 +29,11 @@ const log = createLogger('gpu-deploy');
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 // Kept only as a documented constant for the legacy fallback path. The
 // actual per-image script lookup goes through `modalStrategy.resolveImage`
-// (see `src/modules/gpu-providers/strategies/modal-strategy.ts`) so the
+// (see `src/gpu-providers/strategies/modal-strategy.ts`) so the
 // trellis2/babelcast/etc Modal apps each get the right `.py` instead of
 // every modal slot collapsing onto babelcast.py and crashing.
 const MODAL_DEPLOY_SCRIPT_FALLBACK = resolve(SERVER_DIR, '..', 'dockers', 'modal', 'babelcast.py');
-import { modalStrategy } from '../src/modules/gpu-providers/strategies';
+import { modalStrategy } from '../src/gpu-providers/strategies';
 function modalScriptFor(image: string): string {
   try {
     return modalStrategy.resolveImage(image);
@@ -75,7 +75,7 @@ export async function startDeployRace(
   // configured providers behind a misleading "all slots failed". Safe fallback:
   // if everything looks unconfigured, race the original set untouched.
   {
-    const { filterUsableTiers } = await import('../src/modules/gpu-providers/provider-readiness');
+    const { filterUsableTiers } = await import('../src/gpu-providers/provider-readiness');
     const r = filterUsableTiers(tiers);
     if (r.skipped.length > 0) {
       log.log(`[race] skipping ${r.skipped.length} unconfigured provider(s): ${r.skipped.map(t => t.name).join(', ')} — racing: ${r.usable.map(t => t.name).join(', ')}`);

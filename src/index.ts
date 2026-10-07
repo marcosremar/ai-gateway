@@ -27,22 +27,22 @@ export type {
 } from '../sdk/node';
 
 // ── Unified Gateway API ──────────────────────────────────────────────────────
-export { createGateway } from './modules/create-gateway';
-export type { GatewayConfig } from './modules/create-gateway';
-export type { Gateway } from './modules/gateway-api';
-export type { GatewayStorage } from './modules/storage';
+export { createGateway } from './create-gateway';
+export type { GatewayConfig } from './create-gateway';
+export type { Gateway } from './gateway-api';
+export type { GatewayStorage } from './storage';
 
 // ── Autoscaler Factory ──────────────────────────────────────────────────────
-export { createAutoscaler } from './modules/factory';
+export { createAutoscaler } from './factory';
 
 // ── Gateway Singleton (legacy — prefer createGateway) ────────────────────────
-export { initGateway, getGateway, resetGateway } from './modules/gateway';
-export type { InitGatewayOptions } from './modules/gateway';
+export { initGateway, getGateway, resetGateway } from './gateway';
+export type { InitGatewayOptions } from './gateway';
 
 // ── Built-in Adapters ──────────────────────────────────────────────────────
-export { InMemoryStateAdapter } from './modules/adapters/in-memory-state';
-export { RedisStateAdapter } from './modules/adapters/redis-state';
-export type { RedisLike } from './modules/adapters/redis-state';
+export { InMemoryStateAdapter } from './adapters/in-memory-state';
+export { RedisStateAdapter } from './adapters/redis-state';
+export type { RedisLike } from './adapters/redis-state';
 
 // ── Autoscaler Types ────────────────────────────────────────────────────────
 export type {
@@ -60,8 +60,8 @@ export type {
   AutoScaleDecision,
   DeploySessionRecord,
   WorkloadSpec,
-} from './modules/types';
-export { DEFAULT_STAGE_TIMEOUTS, resolveStageTimeouts } from './modules/types';
+} from './types';
+export { DEFAULT_STAGE_TIMEOUTS, resolveStageTimeouts } from './types';
 
 // ── DI Interfaces ────────────────────────────────────────────────────────────
 export type {
@@ -79,7 +79,7 @@ export type {
   BenchmarkStore,
   UsageLogStore,
   VaultStore,
-} from './modules/deps';
+} from './deps';
 
 // ── GPU Provider types ──────────────────────────────────────────────────────
 export type {
@@ -88,15 +88,15 @@ export type {
   GpuProviderClient,
   MonitorableProvider,
   OnInstancePersist,
-} from './modules/gpu-providers/types';
+} from './gpu-providers/types';
 
 // ── GPU Provider base class ─────────────────────────────────────────────────
 /** @internal Base class for GPU providers — use AIClient.deploy()/destroyInstance() instead. */
-export { AbstractGpuProvider, FetchError, TIMEOUTS } from './modules/gpu-providers/abstract-provider';
-export type { AbstractGpuProviderOptions } from './modules/gpu-providers/abstract-provider';
+export { AbstractGpuProvider, FetchError, TIMEOUTS } from './gpu-providers/abstract-provider';
+export type { AbstractGpuProviderOptions } from './gpu-providers/abstract-provider';
 
 // ── GPU Provider Registry (used internally by AIClient + Autoscaler) ────────
-export { GpuProviderRegistry } from './modules/gpu-providers/registry';
+export { GpuProviderRegistry } from './gpu-providers/registry';
 
 // NOTE: Individual GPU provider classes (RunpodClient, TensordockClient, VastClient, ModalClient)
 // are intentionally NOT exported from the public API. They are implementation details.
@@ -104,48 +104,48 @@ export { GpuProviderRegistry } from './modules/gpu-providers/registry';
 // For advanced use (autoscaler factory), import from '@ai-gateway/gpu-providers' directly.
 
 // ── Autoscaler Config Loader ─────────────────────────────────────────────────
-export { loadAutoscalerConfig } from './modules/autoscaler/config-loader';
+export { loadAutoscalerConfig } from './autoscaler/config-loader';
 
 // ── Autoscaler core (advanced use) ──────────────────────────────────────────
-export { probeGpuHealth, probeGpuHealthSsh } from './modules/autoscaler/health';
-export { PROVIDER_BOOT_SECS } from './modules/factory';
-export { MAX_BOOT_FAILURES, BOOT_COOLDOWN_BASE_MS, BOOT_COOLDOWN_MAX_MS, StageTimeoutError } from './modules/autoscaler/engine';
-export type { AutoscalerEngineOptions } from './modules/autoscaler/engine';
-export { handleBootTimeout } from './modules/autoscaler/boot-timeout';
-export { probeAllTiers, processHealthResults } from './modules/autoscaler/health-checker';
-export { buildDecision } from './modules/autoscaler/decision-builder';
-export { defaultLogger } from './modules/logger';
-export { LATENCY_BREACH_COUNT, computeP95, countRecentBreaches } from './modules/autoscaler/latency-tracker';
-export { runWatchdogCycle, startBackgroundTicker } from './modules/autoscaler/watchdog';
-export { StatePersistence } from './modules/autoscaler/state-persistence';
-export { runCostMonitorCycle, startCostMonitorTicker, _resetStaleTracking } from './modules/autoscaler/cost-monitor';
+export { probeGpuHealth, probeGpuHealthSsh } from './autoscaler/health';
+export { PROVIDER_BOOT_SECS } from './factory';
+export { MAX_BOOT_FAILURES, BOOT_COOLDOWN_BASE_MS, BOOT_COOLDOWN_MAX_MS, StageTimeoutError } from './autoscaler/engine';
+export type { AutoscalerEngineOptions } from './autoscaler/engine';
+export { handleBootTimeout } from './autoscaler/boot-timeout';
+export { probeAllTiers, processHealthResults } from './autoscaler/health-checker';
+export { buildDecision } from './autoscaler/decision-builder';
+export { defaultLogger } from './logger';
+export { LATENCY_BREACH_COUNT, computeP95, countRecentBreaches } from './autoscaler/latency-tracker';
+export { runWatchdogCycle, startBackgroundTicker } from './autoscaler/watchdog';
+export { StatePersistence } from './autoscaler/state-persistence';
+export { runCostMonitorCycle, startCostMonitorTicker, _resetStaleTracking } from './autoscaler/cost-monitor';
 export type {
   ProviderAccount,
   OrphanedInstance,
   CostMonitorReport,
   CostMonitorDeps,
   WasteType,
-} from './modules/autoscaler/cost-monitor';
+} from './autoscaler/cost-monitor';
 
 // ── GPU Lifecycle Logger ──────────────────────────────────────────────────
-export { noopLifecycleLogger } from './modules/autoscaler/lifecycle-logger';
-export type { GpuLifecycleLogger, GpuLifecycleLogEntry } from './modules/autoscaler/lifecycle-logger';
+export { noopLifecycleLogger } from './autoscaler/lifecycle-logger';
+export type { GpuLifecycleLogger, GpuLifecycleLogEntry } from './autoscaler/lifecycle-logger';
 
 // ── Tier Lifecycle Management ────────────────────────────────────────────
-export type { TierActionResult, TierDetail } from './modules/autoscaler/tier-lifecycle';
+export type { TierActionResult, TierDetail } from './autoscaler/tier-lifecycle';
 
 // ── Benchmark Tracking ──────────────────────────────────────────────────
-export { BenchmarkTracker } from './modules/tracking/benchmark-tracker';
+export { BenchmarkTracker } from './tracking/benchmark-tracker';
 export type {
   BootBenchmark,
   InferenceBenchmark,
   BenchmarkStats,
   BenchmarkSummary,
   BenchmarkTrend,
-} from './modules/tracking/benchmark-tracker';
+} from './tracking/benchmark-tracker';
 
 // ── Observability Hooks (F8) ──────────────────────────────────────────────
-export { emitHook } from './modules/hooks';
+export { emitHook } from './hooks';
 export type {
   GatewayHooks,
   RequestStartEvent,
@@ -156,23 +156,23 @@ export type {
   CostAlertEvent,
   HealthChangeEvent,
   ErrorEvent,
-} from './modules/hooks';
+} from './hooks';
 
 // ── Health-Aware Load Balancing (F10) ─────────────────────────────────────
-export { LoadBalancer } from './modules/autoscaler/load-balancer';
-export type { LoadBalanceStrategy, TierLatencyMetrics } from './modules/autoscaler/load-balancer';
+export { LoadBalancer } from './autoscaler/load-balancer';
+export type { LoadBalanceStrategy, TierLatencyMetrics } from './autoscaler/load-balancer';
 
 // ── Declarative Fallback Chains (F1) ──────────────────────────────────────
-export { resolveDeclarativeChain, findChainForStage } from './modules/providers/declarative-chain';
-export type { FallbackChainConfig, FallbackChainEntry, ResolvedChain } from './modules/providers/declarative-chain';
+export { resolveDeclarativeChain, findChainForStage } from './providers/declarative-chain';
+export type { FallbackChainConfig, FallbackChainEntry, ResolvedChain } from './providers/declarative-chain';
 
 // ── Spend Tracking (F9) ──────────────────────────────────────────────────
-export { SpendTracker } from './modules/tracking/spend-tracker';
-export type { SpendRecord, SpendSummary, BudgetConfig, BudgetStatus } from './modules/tracking/spend-tracker';
-export { DEFAULT_PRICING_TABLE, lookupPricing, estimateRequestCost } from './modules/tracking/pricing';
-export type { ModelPricing } from './modules/tracking/pricing';
-export { createCostAnomalyDetector } from './modules/tracking/cost-anomaly-detector';
-export type { CostAnomaly, CostAnomalyDetectorConfig } from './modules/tracking/cost-anomaly-detector';
+export { SpendTracker } from './tracking/spend-tracker';
+export type { SpendRecord, SpendSummary, BudgetConfig, BudgetStatus } from './tracking/spend-tracker';
+export { DEFAULT_PRICING_TABLE, lookupPricing, estimateRequestCost } from './tracking/pricing';
+export type { ModelPricing } from './tracking/pricing';
+export { createCostAnomalyDetector } from './tracking/cost-anomaly-detector';
+export type { CostAnomaly, CostAnomalyDetectorConfig } from './tracking/cost-anomaly-detector';
 
 // ── Predictive Pre-Warm (F4) ─────────────────────────────────────────────
 export {
@@ -180,11 +180,11 @@ export {
   shouldPreWarm,
   runPredictiveWarmupForUser,
   startPredictiveWarmupTicker,
-} from './modules/autoscaler/predictive-warmup';
-export type { PredictiveWarmupConfig, PredictiveWarmupDeps } from './modules/autoscaler/predictive-warmup';
+} from './autoscaler/predictive-warmup';
+export type { PredictiveWarmupConfig, PredictiveWarmupDeps } from './autoscaler/predictive-warmup';
 
 // ── AI Provider types ──────────────────────────────────────────────────────
-export { AIProviderRegistry } from './modules/providers/registry';
+export { AIProviderRegistry } from './providers/registry';
 export type {
   ProviderId,
   AIProviderId,
@@ -215,81 +215,81 @@ export type {
   OmniRequest,
   OmniResponse,
   AIProviderSettings,
-} from './modules/providers/types';
-export { withProviderFallback, isRetryableError, isContextWindowError, getCooldownState } from './modules/providers/fallback';
-export type { FallbackEntry, FallbackOptions } from './modules/providers/fallback';
-export { buildFallbackChain, resolveApiKey, getSystemLlmEntryFromSettings, getSystemSttEntryFromSettings } from './modules/providers/chain-builder';
-export type { SavedProfile, PipelineStageConfig, UserProviderSettings } from './modules/providers/chain-builder';
-export { ProviderClassification } from './modules/providers/classification';
+} from './providers/types';
+export { withProviderFallback, isRetryableError, isContextWindowError, getCooldownState } from './providers/fallback';
+export type { FallbackEntry, FallbackOptions } from './providers/fallback';
+export { buildFallbackChain, resolveApiKey, getSystemLlmEntryFromSettings, getSystemSttEntryFromSettings } from './providers/chain-builder';
+export type { SavedProfile, PipelineStageConfig, UserProviderSettings } from './providers/chain-builder';
+export { ProviderClassification } from './providers/classification';
 
 // ── OpenAI-Compatible Base Classes ──────────────────────────────────────────
-export { OpenAICompatSTTProvider } from './modules/providers/openai-compat';
-export { OpenAICompatTTSProvider } from './modules/providers/openai-compat';
-export { OpenAICompatLLMProvider } from './modules/providers/openai-compat';
-export { OpenAICompatEmbeddingProvider } from './modules/providers/openai-compat';
-export type { OpenAICompatSTTConfig, OpenAICompatTTSConfig, OpenAICompatLLMConfig, OpenAICompatEmbeddingConfig } from './modules/providers/openai-compat';
-export type { EmbeddingProvider, EmbeddingRequest, EmbeddingResponse } from './modules/providers/openai-compat';
-export { detectAudioFormat, prepareAudioFile } from './modules/providers/openai-compat';
+export { OpenAICompatSTTProvider } from './providers/openai-compat';
+export { OpenAICompatTTSProvider } from './providers/openai-compat';
+export { OpenAICompatLLMProvider } from './providers/openai-compat';
+export { OpenAICompatEmbeddingProvider } from './providers/openai-compat';
+export type { OpenAICompatSTTConfig, OpenAICompatTTSConfig, OpenAICompatLLMConfig, OpenAICompatEmbeddingConfig } from './providers/openai-compat';
+export type { EmbeddingProvider, EmbeddingRequest, EmbeddingResponse } from './providers/openai-compat';
+export { detectAudioFormat, prepareAudioFile } from './providers/openai-compat';
 
 // ── Groq Provider ───────────────────────────────────────────────────────────
-export { groqSTT, groqTTS, groqLLM } from './modules/providers/groq';
-export { GROQ_STT_MODELS, GROQ_TTS_MODELS, GROQ_TTS_VOICES, GROQ_LLM_MODELS } from './modules/providers/groq';
+export { groqSTT, groqTTS, groqLLM } from './providers/groq';
+export { GROQ_STT_MODELS, GROQ_TTS_MODELS, GROQ_TTS_VOICES, GROQ_LLM_MODELS } from './providers/groq';
 
 // ── Ollama Provider (Local) ─────────────────────────────────────────────────
-export { ollamaLLM, ollamaSTT, OllamaLLMProvider, OllamaSTTProvider } from './modules/providers/ollama';
-export { OLLAMA_STT_MODELS, OLLAMA_LLM_MODELS } from './modules/providers/ollama';
+export { ollamaLLM, ollamaSTT, OllamaLLMProvider, OllamaSTTProvider } from './providers/ollama';
+export { OLLAMA_STT_MODELS, OLLAMA_LLM_MODELS } from './providers/ollama';
 
 // ── OpenRouter Provider ─────────────────────────────────────────────────────
-export { openrouterLLM, openrouterImage, OpenRouterImageProvider } from './modules/providers/openrouter';
-export { OPENROUTER_LLM_MODELS, OPENROUTER_IMAGE_MODELS } from './modules/providers/openrouter';
+export { openrouterLLM, openrouterImage, OpenRouterImageProvider } from './providers/openrouter';
+export { OPENROUTER_LLM_MODELS, OPENROUTER_IMAGE_MODELS } from './providers/openrouter';
 
 // ── Z.AI Provider (Zhipu — GLM-4.6 / GLM-4.5V) ──────────────────────────────
-export { zaiLLM, ZAI_LLM_MODELS, ZAI_VISION_MODELS } from './modules/providers/zai';
+export { zaiLLM, ZAI_LLM_MODELS, ZAI_VISION_MODELS } from './gateway/providers/cloud/zai';
 
 // ── Cloud Provider Health Probes ───────────────────────────────────────────
-export { probeCloudProvider, probeAllCloudProviders } from './modules/providers/cloud-health';
-export type { CloudProbeResult } from './modules/providers/cloud-health';
+export { probeCloudProvider, probeAllCloudProviders } from './providers/cloud-health';
+export type { CloudProbeResult } from './providers/cloud-health';
 
 // ── Provider Errors ────────────────────────────────────────────────────────
-export { PROVIDER_LABELS, BILLING_URLS, buildProviderError, extractErrorStatus, extractErrorMessage, CreditExhaustedError } from './modules/providers/errors';
+export { PROVIDER_LABELS, BILLING_URLS, buildProviderError, extractErrorStatus, extractErrorMessage, CreditExhaustedError } from './providers/errors';
 
 // ── Credit Block Tracking ──────────────────────────────────────────────────
-export { CreditBlockTracker, defaultCreditBlockTracker, hashApiKey } from './modules/providers/credit-block';
+export { CreditBlockTracker, defaultCreditBlockTracker, hashApiKey } from './providers/credit-block';
 
 // ── Voice Catalog ──────────────────────────────────────────────────────────
-export type { VoiceGender, VoiceSlot, ProviderVoice, ProviderVoiceCatalog, VoiceMapping, VoiceMappingConfig } from './modules/providers/voice-catalog';
+export type { VoiceGender, VoiceSlot, ProviderVoice, ProviderVoiceCatalog, VoiceMapping, VoiceMappingConfig } from './providers/voice-catalog';
 export {
   VOICE_SLOTS, OPENAI_VOICE_CATALOG, KOKORO_VOICE_CATALOG, QWEN3_VOICE_CATALOG,
   SKYPILOT_VOICE_CATALOG, MOSS_TTS_VOICE_CATALOG, MODAL_VOICE_CATALOG,
   getAllVoiceCatalogs, getVoiceCatalog, getVoicesForProviderModel,
   getLanguagesFromCatalog, filterVoicesByLanguage, getDefaultVoiceMappings, resolveVoiceSlot,
-} from './modules/providers/voice-catalog';
+} from './providers/voice-catalog';
 
 // ── OpenAI Providers ───────────────────────────────────────────────────────
-export { OpenAISTTProvider } from './modules/providers/openai/openai-stt';
-export { OpenAITTSProvider } from './modules/providers/openai/openai-tts';
-export { OpenAIRealtimeProvider, openaiRealtime } from './modules/providers/openai/openai-realtime';
-export { OpenAIOmniProvider } from './modules/providers/openai/openai-omni';
+export { OpenAISTTProvider } from './providers/openai/openai-stt';
+export { OpenAITTSProvider } from './providers/openai/openai-tts';
+export { OpenAIRealtimeProvider, openaiRealtime } from './providers/openai/openai-realtime';
+export { OpenAIOmniProvider } from './providers/openai/openai-omni';
 
 // ── OpenAI Model Constants ─────────────────────────────────────────────────
-export { OPENAI_STT_MODELS, OPENAI_TTS_MODELS, OPENAI_OMNI_MODELS, OPENAI_REALTIME_MODELS, OPENAI_VOICES } from './modules/providers/openai/models';
+export { OPENAI_STT_MODELS, OPENAI_TTS_MODELS, OPENAI_OMNI_MODELS, OPENAI_REALTIME_MODELS, OPENAI_VOICES } from './providers/openai/models';
 
 // ── OpenAI Image Provider ───────────────────────────────────────────────────
-export { openaiImage, OpenAIImageProvider } from './modules/providers/openai/openai-image';
-export { OPENAI_IMAGE_MODELS } from './modules/providers/openai/models';
+export { openaiImage, OpenAIImageProvider } from './providers/openai/openai-image';
+export { OPENAI_IMAGE_MODELS } from './providers/openai/models';
 
 // ── Fireworks Provider ──────────────────────────────────────────────────────
-export { fireworksSTT, fireworksLLM, fireworksImage, FireworksImageProvider } from './modules/providers/fireworks';
-export { FIREWORKS_STT_MODELS, FIREWORKS_LLM_MODELS, FIREWORKS_IMAGE_MODELS } from './modules/providers/fireworks';
+export { fireworksSTT, fireworksLLM, fireworksImage, FireworksImageProvider } from './providers/fireworks';
+export { FIREWORKS_STT_MODELS, FIREWORKS_LLM_MODELS, FIREWORKS_IMAGE_MODELS } from './providers/fireworks';
 
 // ── Modal Provider (MOSS-TTS) ──────────────────────────────────────────────
-export { ModalTTSProvider, modalTTS, MODAL_TTS_MODELS } from './modules/providers/modal';
+export { ModalTTSProvider, modalTTS, MODAL_TTS_MODELS } from './providers/modal';
 
 // ── Self-Hosted Providers ───────────────────────────────────────────────────
-export { SelfHostedSTTProvider, SelfHostedTTSProvider, SelfHostedLLMProvider } from './modules/providers/self-hosted/self-hosted-provider';
+export { SelfHostedSTTProvider, SelfHostedTTSProvider, SelfHostedLLMProvider } from './providers/self-hosted/self-hosted-provider';
 
 // ── AIClient ───────────────────────────────────────────────────────────────
-export { createAIClient, AIClient } from './modules/client';
+export { createAIClient, AIClient } from './client';
 export {
   VOICE_PROFILE,
   CHAT_PROFILE,
@@ -301,7 +301,7 @@ export {
   SPEECH_TO_SPEECH_PROFILE,
   resolveProfile,
   mergeProfiles,
-} from './modules/client';
+} from './client';
 export type {
   AIProfile,
   PresetName,
@@ -323,95 +323,95 @@ export type {
   PipelineEvent,
   /** @deprecated Use pipeline() instead of pipelineStream(). */
   PipelineStage,
-} from './modules/client';
+} from './client';
 
 // ── Browser SDK (SpeechClient) ──────────────────────────────────────────
 // NOTE: SpeechClient and streaming transports are legacy. Server-side code
 // should use AIClient.pipeline() or POST /v1/speech (JSON, transport-transparent).
-export { SpeechClient } from './modules/browser';
+export { SpeechClient } from './browser';
 /** @deprecated Streaming transports removed from proxy. Use POST /v1/speech. */
-export { WebSocketTransport, SSETransport, WebRTCTransport, TypedEmitter } from './modules/browser';
-export { SpeechSDKError, createLogger as createSDKLogger, setLogLevel, setLogHandler } from './modules/browser';
+export { WebSocketTransport, SSETransport, WebRTCTransport, TypedEmitter } from './browser';
+export { SpeechSDKError, createLogger as createSDKLogger, setLogLevel, setLogHandler } from './browser';
 export type {
   SpeechClientConfig, SpeechResponse, ProtocolId, SpeechClientEventMap,
   SDKMetrics, ModelLoadStatus, CircuitBreakerConfig, SpeechErrorCode,
   DiscoveryResponse,
-} from './modules/browser';
+} from './browser';
 
 // ── Benchmarking ──────────────────────────────────────────────────────
-export { runHealthCheck, runSSEBench, makeTestWav } from './modules/benchmarking/bench';
-export type { ProtoResult, HealthResult } from './modules/benchmarking/bench';
-export { runCliBench, runWSBench, runWebRTCBench, buildTtfaTable, WEBRTC_BENCH_PY } from './modules/benchmarking/cli-bench';
-export type { CliBenchResult } from './modules/benchmarking/cli-bench';
+export { runHealthCheck, runSSEBench, makeTestWav } from './benchmarking/bench';
+export type { ProtoResult, HealthResult } from './benchmarking/bench';
+export { runCliBench, runWSBench, runWebRTCBench, buildTtfaTable, WEBRTC_BENCH_PY } from './benchmarking/cli-bench';
+export type { CliBenchResult } from './benchmarking/cli-bench';
 
 // ── Auth ──────────────────────────────────────────────────────────────
-export { signGpuToken, verifyGpuToken } from './modules/auth/gpu-token';
-export type { GpuTokenPayload } from './modules/auth/gpu-token';
+export { signGpuToken, verifyGpuToken } from './auth/gpu-token';
+export type { GpuTokenPayload } from './auth/gpu-token';
 
 // ── Infra (SkyPilot/SSH/SCP utilities) ────────────────────────────────
 export {
   execAsync, SKY_BIN, getSkySSHArgs, sshCmd, sshExec, sshExecSilent,
   scpToCluster, checkBackendHealthSSH, skyGetClusterIP, skySpawn,
   stripAnsi, sshOpts, sshCmdAsync,
-} from './modules/infra/gpu-backend';
+} from './infra/gpu-backend';
 
 // ── WS Bench Client ──────────────────────────────────────────────────
-export { WS_CLIENT_PY } from './modules/benchmarking/ws-bench-client';
+export { WS_CLIENT_PY } from './benchmarking/ws-bench-client';
 
 // ── Route Handlers ────────────────────────────────────────────────────
-export { handleAutoscalerGet, handleAutoscalerAction } from './modules/handlers/autoscaler-handler';
-export { handleModalApps, handleModalStop } from './modules/handlers/modal-handler';
-export type { HandlerDeps, HandlerResult } from './modules/handlers/types';
-export { ok, err } from './modules/handlers/types';
-export { createCredentialResolver } from './modules/handlers/credential-resolver';
-export { AutoscalerSettingsSchema, AutoscalerTierSchema } from './modules/handlers/autoscaler-schemas';
-export type { AutoscalerSettings } from './modules/handlers/autoscaler-schemas';
+export { handleAutoscalerGet, handleAutoscalerAction } from './handlers/autoscaler-handler';
+export { handleModalApps, handleModalStop } from './handlers/modal-handler';
+export type { HandlerDeps, HandlerResult } from './handlers/types';
+export { ok, err } from './handlers/types';
+export { createCredentialResolver } from './handlers/credential-resolver';
+export { AutoscalerSettingsSchema, AutoscalerTierSchema } from './handlers/autoscaler-schemas';
+export type { AutoscalerSettings } from './handlers/autoscaler-schemas';
 
 // ── Vault (Secret Management) ──────────────────────────────────────────
-export { Vault, FileVaultStore, initVaultFromEnv, getVault, setVault, resetVault } from './modules/vault';
-export type { VaultConfig, EncryptedBlob } from './modules/vault';
+export { Vault, FileVaultStore, initVaultFromEnv, getVault, setVault, resetVault } from './vault';
+export type { VaultConfig, EncryptedBlob } from './vault';
 
 // ── Embedding Providers ──────────────────────────────────────────────
-export { openaiEmbedding, OPENAI_EMBEDDING_MODELS } from './modules/providers/openai/openai-embedding';
-export { openrouterEmbedding } from './modules/providers/openrouter/openrouter-embedding';
-export { fireworksEmbedding } from './modules/providers/fireworks/fireworks-embedding';
+export { openaiEmbedding, OPENAI_EMBEDDING_MODELS } from './providers/openai/openai-embedding';
+export { openrouterEmbedding } from './providers/openrouter/openrouter-embedding';
+export { fireworksEmbedding } from './providers/fireworks/fireworks-embedding';
 
 // ── Reranking Providers ──────────────────────────────────────────────
-export type { RerankProvider, RerankRequest, RerankResponse, RerankResult } from './modules/providers/rerank';
-export { OpenRouterRerankProvider, openrouterRerank } from './modules/providers/rerank';
-export { FireworksRerankProvider, fireworksRerank } from './modules/providers/rerank';
+export type { RerankProvider, RerankRequest, RerankResponse, RerankResult } from './providers/rerank';
+export { OpenRouterRerankProvider, openrouterRerank } from './providers/rerank';
+export { FireworksRerankProvider, fireworksRerank } from './providers/rerank';
 
 // ── Observability ──────────────────────────────────────────────────
-export { mergeHooks } from './modules/observability';
-export { createLangfuseHooks } from './modules/observability';
-export { createWebhookHooks } from './modules/observability';
-export { createConsoleHooks } from './modules/observability';
-export type { ObservabilityConfig, LangfuseConfig, WebhookConfig } from './modules/observability';
+export { mergeHooks } from './observability';
+export { createLangfuseHooks } from './observability';
+export { createWebhookHooks } from './observability';
+export { createConsoleHooks } from './observability';
+export type { ObservabilityConfig, LangfuseConfig, WebhookConfig } from './observability';
 
 // ── Alerting ──────────────────────────────────────────────────────
-export { AlertRouter } from './modules/alerting';
-export { createAlertingHooks } from './modules/alerting';
-export { SlackAlertChannel } from './modules/alerting';
-export { DiscordAlertChannel } from './modules/alerting';
-export { GenericWebhookAlertChannel } from './modules/alerting';
-export type { AlertChannel, AlertPayload, AlertSeverity, AlertRouterOptions } from './modules/alerting';
+export { AlertRouter } from './alerting';
+export { createAlertingHooks } from './alerting';
+export { SlackAlertChannel } from './alerting';
+export { DiscordAlertChannel } from './alerting';
+export { GenericWebhookAlertChannel } from './alerting';
+export type { AlertChannel, AlertPayload, AlertSeverity, AlertRouterOptions } from './alerting';
 
 // ── Response Caching ──────────────────────────────────────────────
-export { ResponseCache } from './modules/caching';
-export { withCache } from './modules/caching';
-export type { WithCacheOptions, CacheConfig, CacheStats } from './modules/caching';
+export { ResponseCache } from './caching';
+export { withCache } from './caching';
+export type { WithCacheOptions, CacheConfig, CacheStats } from './caching';
 
 // ── Streaming STT Router ─────────────────────────────────────────────
-export { StreamingSTTRouter, StreamingSTTBackend } from './modules/streaming-stt';
-export type { StreamingSTTConfig, StreamingSTTProvider, StreamingSTTStatus, StreamingSTTEvent } from './modules/streaming-stt';
+export { StreamingSTTRouter, StreamingSTTBackend } from './streaming-stt';
+export type { StreamingSTTConfig, StreamingSTTProvider, StreamingSTTStatus, StreamingSTTEvent } from './streaming-stt';
 
 // ── OpenAI-Compatible Proxy ──────────────────────────────────────────
-export { createProxyServer, startProxy } from './modules/proxy';
-export { RateLimiter } from './modules/proxy';
-export type { ProxyConfig, ProviderMapping, ProxyRequest, ProxyResponse } from './modules/proxy';
+export { createProxyServer, startProxy } from './proxy';
+export { RateLimiter } from './proxy';
+export type { ProxyConfig, ProviderMapping, ProxyRequest, ProxyResponse } from './proxy';
 
 // ── Rule-Based Guardrails ─────────────────────────────────────────────
-export { GuardrailEngine } from './modules/gateway/guardrails';
+export { GuardrailEngine } from './gateway/guardrails';
 export type {
   GuardrailEngineConfig,
   GuardrailRule,
@@ -425,10 +425,10 @@ export type {
   WebhookRule,
   NotNullRule,
   ModelWhitelistRule,
-} from './modules/gateway/guardrails';
+} from './gateway/guardrails';
 
 // ── HTTP SDK (typed client for consuming the REST API) ────────────────
-export { GatewaySDK } from './modules/sdk';
+export { GatewaySDK } from './sdk';
 export {
   GatewayError as SDKGatewayError,
   type GatewayConfig as SDKGatewayConfig,
@@ -439,11 +439,11 @@ export {
   type GpuStatus as SDKGpuStatus,
   type DeployOptions as SDKDeployOptions,
   type DeployResponse as SDKDeployResponse,
-} from './modules/sdk';
+} from './sdk';
 
 // ── Language Detection ─────────────────────────────────────────────────────
-export { detectLanguage, detectLanguageWithSwap, SUPPORTED_LANGUAGES } from './modules/language-detect';
-export type { LanguageDetectResult } from './modules/language-detect';
+export { detectLanguage, detectLanguageWithSwap, SUPPORTED_LANGUAGES } from './language-detect';
+export type { LanguageDetectResult } from './language-detect';
 
 
 // ── Database abstraction ──────────────────────────────────────────────────────
@@ -460,8 +460,8 @@ export type {
   BackupResult,
   RestoreOptions,
   QueryResult,
-} from './modules/database/index';
-export { DatabaseError } from './modules/database/index';
+} from './database/index';
+export { DatabaseError } from './database/index';
 export {
   detectEnvironment,
   isPooledUrl,
@@ -469,9 +469,9 @@ export {
   buildPrismaUrl,
   getUnpooledUrl,
   getPooledUrl,
-} from './modules/database/index';
-export type { SqlDriver } from './modules/database/index';
-export { createSqlDriver, createNeonDriver, createPgDriver } from './modules/database/index';
-export { NeonManagementClient } from './modules/database/index';
-export { BackupService } from './modules/database/index';
-export { DatabaseService, createDatabaseService, getDatabase } from './modules/database/index';
+} from './database/index';
+export type { SqlDriver } from './database/index';
+export { createSqlDriver, createNeonDriver, createPgDriver } from './database/index';
+export { NeonManagementClient } from './database/index';
+export { BackupService } from './database/index';
+export { DatabaseService, createDatabaseService, getDatabase } from './database/index';

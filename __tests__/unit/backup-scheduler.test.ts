@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync, existsSync 
 import { readdir } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { createBackupScheduler } from '../../src/modules/backup-scheduler';
+import { createBackupScheduler } from '../../src/backup-scheduler';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

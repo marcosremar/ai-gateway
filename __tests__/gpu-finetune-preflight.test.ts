@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { preflightChecks } from '../src/modules/gpu-finetune/preflight';
-import { setPresetsRoot } from '../src/modules/gpu-finetune/spec';
+import { preflightChecks } from '../src/gpu-finetune/preflight';
+import { setPresetsRoot } from '../src/gpu-finetune/spec';
 
 // ─── fetch mock helpers ──────────────────────────────────────────────────────
 

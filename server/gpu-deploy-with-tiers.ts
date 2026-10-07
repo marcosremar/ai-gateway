@@ -32,7 +32,7 @@ const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 // fallback rationale; we mirror the same shim here so both deploy paths
 // agree on which Modal `.py` runs for a given registry image.
 const MODAL_DEPLOY_SCRIPT_FALLBACK = resolve(SERVER_DIR, '..', 'dockers', 'modal', 'babelcast.py');
-import { modalStrategy } from '../src/modules/gpu-providers/strategies';
+import { modalStrategy } from '../src/gpu-providers/strategies';
 function modalScriptFor(image: string): string {
   try {
     return modalStrategy.resolveImage(image);
