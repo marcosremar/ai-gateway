@@ -181,19 +181,29 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
 - **Overflow**: a replica takes at most `targetInflightPerReplica` × `autoscale.maxInflightFactor` (1.5); with every ready
   replica full, a request with a fallback spills to it at once (`X-Gateway-Fallback: saturated`, neutral for breakers)
   instead of queueing on the GPU until a timeout; an invoke (no fallback) waits in the gateway for a free slot.
+- **Adaptive hedge**: a route's deployment target starts its fallback in parallel after `DeploymentController.hedgeDelayMs`
+  — max(`DEPLOYMENT_HEDGE_MS` 1.5 s, the replica's recent p95 × 1.2, scaled by the queue it joins beyond its target),
+  at most 3/4 of the attempt timeout — and beyond its target a replica whose answers would be slower than that hedge
+  takes nothing more (`saturated`: the request spills at once). Live QA 2026-10-07: at 16–25 concurrent chats on one
+  L40S the fixed 1.5 s hedge ran most requests twice (GPU + OpenRouter).
+- **Out of stock**: a create that fails for lack of stock in every placement backs off (1, 2, 5, then 10 min) and the
+  view says so (`blockedBy: "out of stock since …Z: N creates failed, next try …Z (…)"`); scale-in compares the load with
+  one replica fewer than the count *asked* for, so a replica that was never born is dropped once its pressure is gone.
 - **Warm-up**: `warmSchedule: [{ "days": [1,2,3,4,5], "start": "08:50", "end": "12:00", "timeZone": "Europe/Paris",
   "minReplicas": 2 }]` keeps replicas up in those windows (days 0 = Sunday, overnight windows allowed), and `POST …/warm`
   does the same for one window on demand. Expired windows fall back to the normal rules.
 - **Caps without starvation**: when the replica cap or the € ceiling blocks a deployment under pressure, the controller
   takes a replica of another deployment that has been idle (no answered request and no request to its deployment) for
   3 min, above its own floor; that deployment then counts as idle until its next request (no ping-pong).
-- **Explained**: every view carries `autoscale: { desired, pressureWant, reason, blockedBy, floor, load, p95Ms,
-  errorRate }` (e.g. `reason: "load 16 > 75% of 2×8 (at maxReplicas 2)"`, `blockedBy: "maxReplicas 2"`), logged when it changes.
+- **Explained**: every view carries `autoscale: { desired, pressureWant, reason, blockedBy, floor, warmFloor, load, p95Ms,
+  errorRate }` (`floor` = replicas kept whatever the load: `minReplicas`, `minActiveReplicas` while active, warm windows;
+  `warmFloor` = the warm part) (e.g. `reason: "load 16 > 75% of 2×8 (at maxReplicas 2)"`, `blockedBy: "maxReplicas 2"`), logged when it changes.
 
 Simulation bench: `bun scripts/autoscale-sim/run.ts [scenario…]` runs the real controller on a virtual clock (9 min boots,
-LLM slow-down past 8 parallel, health check timing out at 12, hedge 1.5 s → fallback 1.2 s) and prints the timelines;
+LLM slow-down past 8 parallel, health check timing out at 12, adaptive hedge from 1.5 s → fallback 1.2 s, attempt timeout
+4 s, creates failing `out_of_stock` in a window) and prints the timelines, the client p50/p95 and the requests run twice;
 `__tests__/unit/deployments/autoscale-sim.test.ts` asserts them (ramp, spike, flapping, drain, crash, contention,
-schedule, warm). The 75 % / 50 % / 20 s / 1.5× defaults are design choices to pilot, not published values.
+schedule, warm, out of stock rising/falling and recovering, adaptive vs fixed hedge at 16 and 25). The 75 % / 50 % / 20 s / 1.5× defaults are design choices to pilot, not published values.
 
 ## Cost guards (gateway-wide)
 

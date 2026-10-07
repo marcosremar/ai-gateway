@@ -59,6 +59,8 @@ export interface Runtime {
   creating: number;
   backoffUntil: number;
   createFailures: number;
+  /** Creates that failed for lack of stock in every placement, in a row, and since when (null after a success). */
+  stockOut: { since: number; failures: number } | null;
   lastPersistedRequestAt: number | null;
   waiters: Set<() => void>;
   /** Parked replicas (`idleAction: 'stop'`) being powered back on, by id → when: not started twice while the list lags. */
@@ -74,11 +76,13 @@ export interface Runtime {
   /** Highest recent load (served + waiting + just refused) and when: what scale-up plans on (`demandOf`). */
   demandPeak: { value: number; at: number };
   /** Finished requests of the last `SIGNAL_WINDOW_MS`: duration and whether it timed out / got a 429 (autoscale signals). */
-  samples: Array<{ at: number; ms: number; bad: boolean }>;
+  samples: Array<{ at: number; ms: number; bad: boolean; replica?: string }>;
   /** Pressure autoscaler memory (`autoscale.ts`). */
   pressure: PressureState;
   /** The last scaling decision, for the view and the logs. */
   autoscale: AutoscaleView;
+  /** The route's hedge delay (DEPLOYMENT_HEDGE_MS), learnt from `hedgeDelayMs`; unset = no latency-based spill. */
+  hedgeBaseMs?: number;
   /** When another deployment under pressure took this one's idle replica (it then counts as idle until a new request). */
   reclaimedAt: number | null;
 }
@@ -91,8 +95,10 @@ export interface AutoscaleView {
   reason: string;
   /** What keeps `desired` from being reached (replica cap, € ceiling, maxReplicas, back-off), or null. */
   blockedBy: string | null;
-  /** Replicas kept by a warm-up schedule or a client warm window right now. */
+  /** Replicas kept whatever the load right now: minReplicas, minActiveReplicas while active, warm schedule / window. */
   floor: number;
+  /** The part of `floor` a warm-up schedule or a client warm window asks for. */
+  warmFloor: number;
   load: number;
   p95Ms: number | null;
   errorRate: number;
@@ -228,10 +234,10 @@ export abstract class ControllerState {
   protected runtime(record: DeploymentRecord): Runtime {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
-      backoffUntil: 0, createFailures: 0, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
+      backoffUntil: 0, createFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
       samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null,
-      autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, load: 0, p95Ms: null, errorRate: 0 },
+      autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
 

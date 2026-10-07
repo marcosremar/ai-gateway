@@ -22,6 +22,9 @@ import { BUILTIN_PROFILES } from './profiles';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
 import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
 
+/** Adaptive hedge: a request is hedged only once it is this much slower than its replica's recent p95. */
+export const HEDGE_P95_FACTOR = 1.2;
+
 export {
   DeploymentError, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
   type LeaseOutcome,
@@ -161,15 +164,56 @@ export class DeploymentController extends ControllerViews {
     const now = this.now();
     const lasting = ready.filter(m => !isExpiring(m, now));
     // A replica takes at most `target × maxInflightFactor` (bounded queue: the overflow spills to the fallback at once and
-    // its health check still answers); a busy one (health check timed out under load) nothing beyond its target.
+    // its health check still answers); a busy one (health check timed out under load) nothing beyond its target, nor
+    // one whose answers beyond its target would be slower than the route's hedge (`tooSlowBeyondTarget`).
     const target = rt.record.spec.targetInflightPerReplica;
     const capacity = replicaCapacity(rt.record.spec);
     const open = (lasting.length ? lasting : ready).filter((m) => {
       const n = rt.perReplica.get(m.id) ?? 0;
-      return !this.draining.has(m.id) && n < capacity && (!this.probes.get(m.id)?.busy || n < target);
+      return !this.draining.has(m.id) && n < capacity && (!this.probes.get(m.id)?.busy || n < target)
+        && !this.tooSlowBeyondTarget(rt, m.id, n, target);
     });
     if (!open.length) return null;
     return open.reduce((best, m) => ((rt.perReplica.get(m.id) ?? 0) < (rt.perReplica.get(best.id) ?? 0) ? m : best));
+  }
+
+  /**
+   * Adaptive hedge (live QA 2026-10-07: at ≥ 16 concurrent chats on one L40S the fixed 1.5 s hedge fired before the busy
+   * GPU answered, so ~60 % of the requests ran twice — GPU + OpenRouter): how long a route should wait for this
+   * deployment before it starts the fallback in parallel, read when the attempt starts (just before `acquire`).
+   *   - No replica would take it (cold, every one busy, at capacity or too slow beyond its target, see `pick`):
+   *     `acquire` refuses at once and the chain spills — nothing runs twice, the delay never matters (`baseMs`).
+   *   - Otherwise the latency this request should see on the replica it would go to — its recent p95, scaled by the
+   *     queue it joins beyond `targetInflightPerReplica` — × `HEDGE_P95_FACTOR`, between `baseMs` and `capMs`: only a
+   *     request slower than its replica usually is gets hedged, and one queued for a slot it gets soon is not.
+   * Calling it also tells the controller the route's hedge (`baseMs`), which `pick` uses to spill instead of queueing
+   * a request the hedge would duplicate anyway. Returns null when hedging is off (`baseMs` ≤ 0).
+   */
+  hedgeDelayMs(name: string, baseMs: number, capMs: number): number | null {
+    if (baseMs <= 0) return null;
+    const cap = Math.max(baseMs, capMs);
+    const rt = this.deployments.get(name);
+    if (!rt) return baseMs;
+    rt.hedgeBaseMs = baseMs;
+    const machine = rt.record.spec.paused ? null : this.pick(rt, new Set<string>());
+    if (!machine) return baseMs;
+    const n = rt.perReplica.get(machine.id) ?? 0;
+    const target = rt.record.spec.targetInflightPerReplica;
+    const recent = this.replicaP95(rt, machine.id);
+    if (recent == null) return n >= target ? cap : baseMs;
+    const expected = recent * Math.max(1, (n + 1) / target);
+    return Math.min(cap, Math.max(baseMs, Math.round(expected * HEDGE_P95_FACTOR)));
+  }
+
+  /**
+   * Beyond its target a replica only queues: a request whose expected latency there (recent p95 × the queue it joins)
+   * is past the route's hedge would be run twice (GPU, then the hedged fallback) — spill it now instead. Only for a
+   * deployment routed with an adaptive hedge (`hedgeDelayMs` seen), and only with enough recent samples.
+   */
+  private tooSlowBeyondTarget(rt: Runtime, id: string, n: number, target: number): boolean {
+    if (n < target || !rt.hedgeBaseMs) return false;
+    const recent = this.replicaP95(rt, id);
+    return recent != null && recent * ((n + 1) / target) > rt.hedgeBaseMs * HEDGE_P95_FACTOR;
   }
 
   /**
@@ -247,7 +291,7 @@ export class DeploymentController extends ControllerViews {
         if (n <= 0) rt.perReplica.delete(chosen.id); else rt.perReplica.set(chosen.id, n);
         rt.record.lastRequestAt = this.now();
         const outcome: LeaseOutcome = failed === true ? 'failed' : failed === false ? 'ok' : failed;
-        if (outcome !== 'cancelled') this.recordSample(rt, this.now() - startedAt, outcome !== 'ok');
+        if (outcome !== 'cancelled') this.recordSample(rt, this.now() - startedAt, outcome !== 'ok', chosen.id);
         this.leaseEnded(chosen.id, outcome);
         const next = rt.waiters.values().next().value; // a slot freed: one waiting request may take it
         if (next) next();

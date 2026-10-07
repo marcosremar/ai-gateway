@@ -36,6 +36,8 @@ export interface RouteTarget<P> {
   extraBody?: Record<string, unknown>;
   /** Start the next target in parallel when this one has not answered after this many ms (see `runTargets`). */
   hedgeAfterMs?: number;
+  /** Per-request hedge delay (adaptive, deployments): read when the attempt starts, wins over `hedgeAfterMs`; null = none. */
+  hedgeDelay?: () => number | null;
   /** Known to be unusable (e.g. OpenRouter key rejected): skipped with this reason, never called. */
   unavailableReason?: string;
   /**
@@ -566,8 +568,9 @@ export function runTargets<P, T>(
       inFlight.set(controller, t);
       const breaker = healthOf(t);
       let successorLaunched = false;
-      const hedge = t.hedgeAfterMs && i + 1 < targets.length
-        ? setTimeout(() => { if (!done && !successorLaunched) { successorLaunched = true; launchNext(); } }, t.hedgeAfterMs)
+      const hedgeMs = t.hedgeDelay ? t.hedgeDelay() : t.hedgeAfterMs;
+      const hedge = hedgeMs && i + 1 < targets.length
+        ? setTimeout(() => { if (!done && !successorLaunched) { successorLaunched = true; launchNext(); } }, hedgeMs)
         : null;
       const timeout = Math.min(t.timeoutMs ?? opts.timeoutMs ?? Infinity, deadline - Date.now());
 
