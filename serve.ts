@@ -37,6 +37,7 @@ import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
 import { deploymentLogToTelemetry, setGatewayTelemetrySink, telemetryFromEnv } from './src/telemetry';
+import { createRealtime } from './src/realtime';
 
 const log = createLogger('serve');
 
@@ -273,6 +274,17 @@ const s2sRoute = createS2SRoute({
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 
+// Realtime voice (src/realtime, docs/realtime.md): POST /v1/realtime/sessions with the app key; the browser routes
+// (signaling, WS relay) authenticate with the session token and are mounted in front of the proxy below.
+const realtime = createRealtime({
+  controller, defaultDeployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
+  // No keys configured: the proxy only lets localhost in, as `localhost` (dev), which may use any deployment.
+  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
+  isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),
+  ...(appLimits ? { charge: (userId: string, n: number) => appLimits.chargeRequests(userId, n) } : {}),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
@@ -283,13 +295,15 @@ const server = await startProxy({
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin ? chainHealth() : appStagesView(chainHealth(), (stage) => appAliasesOf(viewer.userId, stage))),
   customRoutes: [
-    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute },
+    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
     ...(telemetry?.adminRoutes ?? []),
   ],
   ...(telemetry ? { publicRoutes: telemetry.publicRoutes } : {}),
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
+
+realtime.mount(server);
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 
@@ -318,6 +332,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     deployments?.controller.stop();
+    realtime.stop();
     declared?.stop();
     keyManager.stop();
     telemetry?.stop();

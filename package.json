@@ -13,6 +13,7 @@
     "./client": "./sdk/node/index.ts",
     "./voice": "./sdk/browser/voice/index.ts",
     "./telemetry": "./sdk/browser/telemetry/index.ts",
+    "./realtime": "./sdk/browser/realtime/index.ts",
     "./compute": "./src/compute/index.ts",
     "./logger": "./src/logger.ts",
     "./types": "./src/types.ts"

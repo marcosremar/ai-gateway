@@ -115,7 +115,16 @@ export class AppLimits {
     return Math.min(typeof asked === 'number' && Number.isFinite(asked) ? asked : cap, cap);
   }
 
-  private charge(userId: string, tokens: number): AppLimitDenial | null {
+  /**
+   * Charges `requests` to the app's daily request budget without a model check — a realtime session (src/realtime/:
+   * `perMinute × ⌈ttl/60⌉` requests at admission, since its audio never crosses the gateway as requests). Admins free.
+   */
+  chargeRequests(userId: string, requests: number): AppLimitDenial | null {
+    if (this.opts.isAdmin(userId)) return null;
+    return this.charge(userId, 0, Math.max(1, Math.floor(requests)));
+  }
+
+  private charge(userId: string, tokens: number, requests = 1): AppLimitDenial | null {
     const now = this.now();
     const day = Math.floor(now / DAY_MS);
     let u = this.usage.get(userId);
@@ -125,7 +134,7 @@ export class AppLimits {
     }
     const maxRequests = this.dailyRequests;
     const maxTokens = this.dailyTokens;
-    const over = (maxRequests > 0 && u.requests + 1 > maxRequests) ? `${maxRequests} requests`
+    const over = (maxRequests > 0 && u.requests + requests > maxRequests) ? `${maxRequests} requests`
       : (maxTokens > 0 && u.tokens + tokens > maxTokens) ? `${maxTokens} tokens` : null;
     if (over) {
       return {
@@ -134,7 +143,7 @@ export class AppLimits {
         retryAfterSeconds: Math.max(1, Math.ceil(((day + 1) * DAY_MS - now) / 1000)),
       };
     }
-    u.requests += 1;
+    u.requests += requests;
     u.tokens += tokens;
     return null;
   }

@@ -493,26 +493,28 @@ export function createProxyServer(config: ProxyConfig): Server {
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
   const concurrency = concurrencyLimits();
 
-  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    const method = req.method?.toUpperCase() || 'GET';
-    const url = req.url || '/';
-    // Only a short [\w.-] id is echoed (headers, logs, error bodies); anything else is replaced by a fresh one, and the
-    // request carries the effective id from here on (route handlers read it from the headers).
-    const requestId = requestIdOf(req.headers['x-request-id']);
-    req.headers['x-request-id'] = requestId;
-    // W3C trace context (src/telemetry/trace-context.ts): the caller's traceparent, else a new trace. Echoed back and
-    // propagated to replicas, so browser, gateway and edge events of one session share the trace id.
-    const trace = traceOfRequest(req.headers, url);
-    res.setHeader(TRACE_ID_RESPONSE_HEADER, trace.traceId);
+  const server = createServer(
+    // The realtime WS relay carries its session token in the URL (~8.3 KB): Node's default 16 KB header cap is too
+    // tight once proxies add their own headers.
+    { maxHeaderSize: 32 * 1024 },
+    (req: IncomingMessage, res: ServerResponse) => {
+      const method = req.method?.toUpperCase() || 'GET';
+      const url = req.url || '/';
+      // Only a short [\w.-] id is echoed (headers, logs, error bodies); anything else is replaced by a fresh one, and the
+      // request carries the effective id from here on (route handlers read it from the headers).
+      const requestId = requestIdOf(req.headers['x-request-id']);
+      req.headers['x-request-id'] = requestId;
+      // W3C trace context (src/telemetry/trace-context.ts): the caller's traceparent, else a new trace. Echoed back and
+      // propagated to replicas, so browser, gateway and edge events of one session share the trace id.
+      const trace = traceOfRequest(req.headers, url);
+      res.setHeader(TRACE_ID_RESPONSE_HEADER, trace.traceId);
 
-    // Establish an AsyncLocalStorage frame so every log emitted during this
-    // request (here AND inside any downstream async module) carries the same
-    // requestId field. Correlation becomes automatic rather than manual
-    // argument threading.
-    // Plus a no-wake scope (no-wake.ts), switched on after auth when the request or its key user asks for it.
-    void withNoWakeScope(() => withLogContext({ requestId, traceId: trace.traceId, spanId: trace.spanId },
-      () => handleRequest(req, res, method, url, requestId)));
-  });
+      // AsyncLocalStorage frame: every log of this request (here and downstream) carries the same ids. Plus a no-wake
+      // scope (no-wake.ts), switched on after auth when the request or its key user asks for it.
+      void withNoWakeScope(() => withLogContext({ requestId, traceId: trace.traceId, spanId: trace.spanId },
+        () => handleRequest(req, res, method, url, requestId)));
+    },
+  );
 
   // The actual request handler runs inside the ALS frame established above.
   // Keeping it a named function rather than inlining keeps the stack trace
