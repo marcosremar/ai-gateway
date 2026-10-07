@@ -283,6 +283,12 @@ const s2sRoute = createS2SRoute({
 // (signaling, WS relay) authenticate with the session token and are mounted in front of the proxy below.
 const realtime = createRealtime({
   controller, defaultDeployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
+  // Test/e2e knobs: a shorter media-path recheck (default 30 min) and a fake "firewall dropped our UDP probe" for
+  // boxes where neither the security group nor iptables can be touched (REALTIME_PROBE_UDP=blocked).
+  netRecheckMs: optionalMs(process.env.REALTIME_NET_RECHECK_MS),
+  ...(process.env.REALTIME_PROBE_UDP === 'blocked'
+    ? { probeUdpImpl: async () => ({ result: 'blocked' as const, rttMs: null, tries: 0 }) }
+    : {}),
   // No keys configured: the proxy only lets localhost in, as `localhost` (dev), which may use any deployment.
   userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
   isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),

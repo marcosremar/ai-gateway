@@ -136,7 +136,7 @@ function candidatesOf(raw: unknown): PlacementCandidate[] {
 export const MAX_PLACEMENTS = 6;
 
 /** The gateway's own probe port on an exposed replica (80/443 stay with the app). */
-export const PROBE_PORT = 8089;
+export const PROBE_PORT = Number(process.env.DEPLOYMENTS_PROBE_PORT) || 8089;
 
 /**
  * Validates the fields present in `input` (all optional) — used for profiles and as the merge step for specs.
