@@ -135,6 +135,17 @@ export interface ScalewayFirewallRule {
   portTo?: number;
 }
 
+export interface ScalewayGroupRule {
+  id: string;
+  protocol: string;
+  direction: string;
+  action: string;
+  ipRange: string;
+  port: number | null;
+  portTo: number | null;
+  editable: boolean;
+}
+
 export interface ScalewayIp {
   id: string;
   address: string;
@@ -771,16 +782,35 @@ export class ScalewayClient extends AbstractGpuProvider {
       }),
     }, TIMEOUTS.write, 'scaleway');
     const id = res.security_group.id;
-    for (const rule of opts.rules) {
-      await this.fetchJson(`${this.zoneUrl(zone)}/security_groups/${id}/rules`, {
-        method: 'POST', headers: this.scwHeaders(secretKey),
-        body: JSON.stringify({
-          protocol: rule.protocol, direction: 'inbound', action: 'accept', ip_range: '0.0.0.0/0', dest_port_from: rule.port,
-          ...(rule.portTo && rule.portTo > rule.port ? { dest_port_to: rule.portTo } : {}),
-        }),
-      }, TIMEOUTS.write, 'scaleway');
-    }
+    for (const rule of opts.rules) await this.addSecurityGroupRule(zone, id, rule, credentials);
     return id;
+  }
+
+  async addSecurityGroupRule(zone: string, groupId: string, rule: ScalewayFirewallRule, credentials: ProviderCredentials): Promise<void> {
+    await this.fetchJson(`${this.zoneUrl(zone)}/security_groups/${groupId}/rules`, {
+      method: 'POST', headers: this.scwHeaders(this.requireSecret(credentials)),
+      body: JSON.stringify({
+        protocol: rule.protocol, direction: 'inbound', action: 'accept', ip_range: '0.0.0.0/0', dest_port_from: rule.port,
+        ...(rule.portTo && rule.portTo > rule.port ? { dest_port_to: rule.portTo } : {}),
+      }),
+    }, TIMEOUTS.write, 'scaleway');
+  }
+
+  async listSecurityGroupRules(zone: string, groupId: string, credentials: ProviderCredentials): Promise<ScalewayGroupRule[]> {
+    const res = await this.fetchJson<{ rules: Array<{
+      id: string; protocol: string; direction: string; action: string; ip_range: string;
+      dest_port_from?: number | null; dest_port_to?: number | null; editable?: boolean;
+    }> }>(`${this.zoneUrl(zone)}/security_groups/${groupId}/rules?per_page=100`,
+      { headers: this.scwHeaders(this.requireSecret(credentials)) }, TIMEOUTS.read, 'scaleway');
+    return res.rules.map(r => ({
+      id: r.id, protocol: r.protocol, direction: r.direction, action: r.action, ipRange: r.ip_range,
+      port: r.dest_port_from ?? null, portTo: r.dest_port_to ?? null, editable: r.editable !== false,
+    }));
+  }
+
+  async deleteSecurityGroupRule(zone: string, groupId: string, ruleId: string, credentials: ProviderCredentials): Promise<void> {
+    await this.fetchOk(`${this.zoneUrl(zone)}/security_groups/${groupId}/rules/${ruleId}`,
+      { method: 'DELETE', headers: this.scwHeaders(this.requireSecret(credentials)) });
   }
 
   async listSecurityGroups(zone: string, credentials: ProviderCredentials, opts: { projectId: string; name?: string }): Promise<Array<{ id: string; name: string }>> {

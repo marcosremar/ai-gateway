@@ -260,6 +260,9 @@ describe('deployments API', () => {
     expect(h.cloud.created[0]!.network).toMatchObject({ ipId: 'ip-rtc', groupId: 'sg-rtc' });
     const nginx = /echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/nginx\.conf/.exec(h.cloud.created[0]!.cloudInit)![1]!;
     expect(Buffer.from(nginx, 'base64').toString()).toContain('listen 8089 default_server');
+    const before = h.cloud.networkCalls;
+    await call(h, 'PATCH', '/v1/deployments/rtc', { exposure: { ports: [{ protocol: 'tcp', port: 443 }, { protocol: 'udp', port: 7882 }, { protocol: 'tcp', port: 7881 }] } });
+    await until(() => h.cloud.networkCalls > before);
     expect((await call(h, 'DELETE', '/v1/deployments/rtc')).status).toBe(200);
     await until(() => h.cloud.releasedNetworks.includes('ip-rtc'));
   });
