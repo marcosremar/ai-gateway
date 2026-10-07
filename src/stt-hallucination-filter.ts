@@ -21,7 +21,9 @@
  */
 
 import type { STTResponse, STTSegment } from './providers/types';
-import hallucinations from './data/whisper-hallucinations.json';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import coreHallucinations from './data/whisper-hallucinations.core.json';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -70,13 +72,6 @@ export const DEFAULT_HALLUCINATION_FILTER_CONFIG: STTHallucinationFilterConfig =
 // Blocklist (loaded once from JSON at module init)
 // ---------------------------------------------------------------------------
 
-const blocklistByLang: Map<string, Set<string>> = new Map();
-
-// Build lookup sets from the imported JSON
-for (const [lang, phrases] of Object.entries(hallucinations as Record<string, string[]>)) {
-  blocklistByLang.set(lang, new Set(phrases));
-}
-
 /** Words that mark video/credit boilerplate: an entry containing one is a hallucination, never a learner's sentence. */
 const BOILERPLATE = /amara|legenda|subtitle|sous titres|inscreva|inscrever|abonn|assistir|regarder|regard|watching|subscribe|canal|cha[iî]ne|channel|notific|sininho|instagram|like e|vídeo|video|tipeeee/;
 
@@ -102,13 +97,65 @@ function isHighConfidence(lang: string, phrase: string): boolean {
   return phrase.split(' ').length >= 6 || BOILERPLATE.test(phrase);
 }
 
-const highConfidenceAll = new Set<string>();
-const ambiguousByLang: Map<string, Set<string>> = new Map();
-for (const [lang, set] of blocklistByLang) {
-  const amb = new Set<string>();
-  for (const p of set) { if (isHighConfidence(lang, p)) highConfidenceAll.add(p); else amb.add(p); }
-  for (const p of ALWAYS_BLOCK[lang] ?? []) highConfidenceAll.add(p);
-  ambiguousByLang.set(lang, amb);
+interface BlocklistState {
+  blocklistByLang: Map<string, Set<string>>;
+  highConfidenceAll: Set<string>;
+  ambiguousByLang: Map<string, Set<string>>;
+}
+
+function buildState(data: Record<string, string[]>): BlocklistState {
+  const blocklistByLang = new Map<string, Set<string>>();
+  for (const [lang, phrases] of Object.entries(data)) blocklistByLang.set(lang, new Set(phrases));
+  const highConfidenceAll = new Set<string>();
+  const ambiguousByLang = new Map<string, Set<string>>();
+  for (const [lang, set] of blocklistByLang) {
+    const amb = new Set<string>();
+    for (const p of set) { if (isHighConfidence(lang, p)) highConfidenceAll.add(p); else amb.add(p); }
+    for (const p of ALWAYS_BLOCK[lang] ?? []) highConfidenceAll.add(p);
+    ambiguousByLang.set(lang, amb);
+  }
+  return { blocklistByLang, highConfidenceAll, ambiguousByLang };
+}
+
+/**
+ * The dataset has 100 languages (316 KB), too big for the proxy/index bundles (bundle ratchet), so only the languages
+ * the school teaches are compiled in (whisper-hallucinations.core.json: pt, fr, en, es, it, de). STT_FILTER_LANGUAGES
+ * (comma list, or `all`) selects languages beyond those: the full file is then read once, lazily, on first use, from
+ * STT_FILTER_FULL_BLOCKLIST or src/data/whisper-hallucinations.json under the working directory. The production image
+ * (Dockerfile.production, `bun build --compile serve.ts`) does not copy src/, so there the core languages are the
+ * ones embedded in the binary; set STT_FILTER_FULL_BLOCKLIST to a mounted file to go beyond them. Missing file: warn
+ * once and keep the compiled-in languages. High-confidence ALWAYS_BLOCK phrases stay
+ * for any language.
+ */
+const CORE_LANGS = Object.keys(coreHallucinations as Record<string, string[]>);
+let state: BlocklistState | null = null;
+
+function loadState(): BlocklistState {
+  const raw = (process.env.STT_FILTER_LANGUAGES ?? '').trim().toLowerCase();
+  const core = coreHallucinations as Record<string, string[]>;
+  if (!raw) return buildState(core);
+  const wanted = raw === 'all' ? null : raw.split(',').map((l) => l.trim()).filter(Boolean);
+  if (wanted && wanted.every((l) => CORE_LANGS.includes(l))) {
+    return buildState(Object.fromEntries(wanted.map((l) => [l, core[l]])));
+  }
+  const path = process.env.STT_FILTER_FULL_BLOCKLIST || join(process.cwd(), 'src', 'data', 'whisper-hallucinations.json');
+  try {
+    if (!existsSync(path)) throw new Error('file not found');
+    const full = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string[]>;
+    return buildState(wanted ? Object.fromEntries(wanted.filter((l) => full[l]).map((l) => [l, full[l]])) : full);
+  } catch (err) {
+    console.warn(`[stt-filter] full blocklist unavailable at ${path} (${(err as Error).message}); using core languages`);
+    return buildState(core);
+  }
+}
+
+function blocklistState(): BlocklistState {
+  return (state ??= loadState());
+}
+
+/** Test hook: forget the cached blocklist so a changed STT_FILTER_LANGUAGES is re-read. */
+export function resetBlocklistForTests(): void {
+  state = null;
 }
 
 const LANGUAGE_NAME_TO_CODE: Record<string, string> = {
@@ -124,7 +171,7 @@ export function normalizeLanguage(language?: string | null): string | undefined 
   if (!v) return undefined;
   if (LANGUAGE_NAME_TO_CODE[v]) return LANGUAGE_NAME_TO_CODE[v];
   const code = v.split(/[-_]/)[0];
-  return blocklistByLang.has(code) ? code : undefined;
+  return blocklistState().blocklistByLang.has(code) ? code : undefined;
 }
 
 /** The dataset form: lowercase, punctuation/hyphen/dot → space ("Amara.org" → "amara org"), apostrophes kept as '. */
@@ -141,8 +188,9 @@ type BlocklistVerdict = 'high' | 'ambiguous' | null;
 function blocklistVerdict(text: string, language?: string): BlocklistVerdict {
   const n = normalizeForBlocklist(text);
   if (!n) return null;
-  if (highConfidenceAll.has(n)) return 'high';
-  if (language && !LEARNER_SAFE.has(n) && ambiguousByLang.get(language)?.has(n)) return 'ambiguous';
+  const st = blocklistState();
+  if (st.highConfidenceAll.has(n)) return 'high';
+  if (language && !LEARNER_SAFE.has(n) && st.ambiguousByLang.get(language)?.has(n)) return 'ambiguous';
   return null;
 }
 
