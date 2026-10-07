@@ -211,10 +211,12 @@ describe('S2/S3 — SDK with a keyless fallback plan: never skips a gateway that
   it('minted key: an open breaker still goes straight to the provider (the gateway is not probed per call)', async () => {
     const x = await client(minted);
     for (let i = 0; i < 3; i++) await chat(x.gw);
-    const before = x.f.calls.filter(c => c.url.startsWith(GW)).length;
+    // Compare origins (not a URL prefix: CodeQL js/incomplete-url-substring-sanitization).
+    const toGateway = () => x.f.calls.filter(c => new URL(c.url).origin === GW).length;
+    const before = toGateway();
     const out = await chat(x.gw);
     expect(out.served.provider).toBe('openrouter-direct:qwen/qwen3.5-9b');
-    expect(x.f.calls.filter(c => c.url.startsWith(GW)).length).toBe(before);
+    expect(toGateway()).toBe(before);
   });
 });
 
