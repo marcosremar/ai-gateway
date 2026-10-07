@@ -25,13 +25,14 @@ export type RealtimeServerEvent =
   | { type: 'audio_start' }
   | { type: 'audio_end' }
   | { type: 'interrupted' }
-  | { type: 'done'; empty?: boolean; filtered?: boolean }
-  | { type: 'error'; code: string; message: string }
+  | { type: 'done'; empty?: boolean; filtered?: boolean; error?: boolean; interrupted?: boolean }
+  | { type: 'error'; code: string; message: string; unspoken?: string }
   | { type: 'metrics'; ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null };
 
 /** Events the SDK adds: which transport carries the session, and its end. */
 export type RealtimeLocalEvent =
   | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover'; from?: TransportType; error?: string }
+  | { type: 'recovered' }
   | { type: 'closed'; reason: string };
 
 export type RealtimeEvent = RealtimeServerEvent | RealtimeLocalEvent;
