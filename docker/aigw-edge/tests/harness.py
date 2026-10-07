@@ -12,6 +12,7 @@ import statistics
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import aiohttp
@@ -227,6 +228,59 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
     await learner.close()
 
 
+async def scenario_reoffer(base: str) -> None:
+    async def offer_status(token: str, sdp: str) -> tuple[int, dict]:
+        async with aiohttp.ClientSession() as http:
+            async with http.post(f"{base}/__aigw/rt/offer", json={"sdp": sdp, "type": "offer", "token": token}) as r:
+                return r.status, await r.json()
+
+    async def active() -> int:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f"{base}/__aigw/rt/status") as r:
+                return (await r.json())["active"]
+
+    sid = uuid.uuid4().hex
+    token = mint(sid=sid)
+    first = await RtcLearner(base).connect(token)
+    await first.events.wait("ready", 10)
+    first.mic.say(1.2)
+    await first.events.wait("transcript", 15)
+    second = await RtcLearner(base).connect(token)
+    check("re-offer of a live session: accepted, same session id", second.status == 200 and second.session_id == sid,
+          second.answer.get("error"))
+    done = await second.events.wait("done", 15)
+    check("re-offer: the turn in progress ends on the new peer connection", done.get("turnId", "").endswith(":1")
+          and "done" not in first.events.types(), second.events.types())
+    check("re-offer: no second ready, one session on the replica", "ready" not in second.events.types() and await active() == 1)
+    for _ in range(50):
+        if first.pc.connectionState in ("closed", "failed") or first.dc.readyState == "closed":
+            break
+        await asyncio.sleep(0.1)
+    check("re-offer: the previous peer connection is closed by the edge",
+          first.pc.connectionState in ("closed", "failed") or first.dc.readyState == "closed", first.pc.connectionState)
+    seen = len(second.events.items)
+    second.mic.say(1.2)
+    done = await second.events.wait("done", 15, after=seen)
+    check("re-offer: the session kept its turns (second turn of the same session)", done.get("turnId", "").endswith(":2"), done)
+    sdp = second.pc.localDescription.sdp
+    status, body = await offer_status(mint(sid=sid, ttl=500), sdp)
+    check("re-offer with another token of the same sid → 401 replayed", status == 401 and "replayed" in body["error"]["message"], body)
+    check("re-offer refused: the live session is untouched", await active() == 1)
+    async with aiohttp.ClientSession() as http:
+        async with http.delete(f"{base}/__aigw/rt/session/{sid}") as r:
+            check("re-offer: DELETE ends the session", r.status == 200 and await active() == 0)
+    status, body = await offer_status(token, sdp)
+    check("re-offer after the session ended → 401 replayed", status == 401 and "replayed" in body["error"]["message"], body)
+    fallback = await WsLearner(base).connect(token)
+    await fallback.events.wait("ready")
+    status, body = await offer_status(token, sdp)
+    check("re-offer while the sid only lives on WS → 401 replayed", status == 401 and "replayed" in body["error"]["message"], body)
+    await fallback.close()
+    await first.close()
+    await second.close()
+    await asyncio.sleep(0.3)
+
+
 async def scenario_s2s(base: str) -> None:
     learner = await ws_turn(base)
     await learner.events.wait("done", 15)
@@ -390,8 +444,10 @@ async def main() -> int:
         for scenario in (scenario_tokens, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
                          scenario_capacity, scenario_webrtc):
             await scenario(base)
+        await scenario_reoffer(base)
         await scenario_s2s(base_s2s)
         await scenario_webrtc(base_s2s, (50041, 50060))
+        await scenario_reoffer(base_s2s)
         await scenario_telemetry(base)
         if nginx:
             await scenario_nginx()

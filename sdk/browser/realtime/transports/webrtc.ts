@@ -12,8 +12,8 @@ export interface WebRtcDeps {
   RTCPeerConnection: typeof RTCPeerConnection;
 }
 
-function waitIceGathering(pc: RTCPeerConnection, ms: number, signal: AbortSignal, relayOnly: boolean, restart: boolean): Promise<void> {
-  if (!restart && pc.iceGatheringState === 'complete') return Promise.resolve();
+function waitIceGathering(pc: RTCPeerConnection, ms: number, signal: AbortSignal, relayOnly: boolean): Promise<void> {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
   return new Promise((resolve) => {
     const done = () => {
       clearTimeout(timer);
@@ -35,7 +35,7 @@ function waitIceGathering(pc: RTCPeerConnection, ms: number, signal: AbortSignal
   });
 }
 
-function waitConnected(pc: RTCPeerConnection, channel: RTCDataChannel, ms: number, signal: AbortSignal, failFast = true): Promise<void> {
+function waitConnected(pc: RTCPeerConnection, channel: RTCDataChannel, ms: number, signal: AbortSignal): Promise<void> {
   const ok = () => channel.readyState === 'open' && (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed');
   if (ok()) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -48,7 +48,7 @@ function waitConnected(pc: RTCPeerConnection, channel: RTCDataChannel, ms: numbe
     };
     const check = () => {
       if (ok()) { cleanup(); resolve(); return; }
-      if (failFast && (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed')) { cleanup(); reject(new Error('ICE failed')); }
+      if (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed') { cleanup(); reject(new Error('ICE failed')); }
     };
     const onAbort = () => { cleanup(); reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')); };
     const timer = setTimeout(() => { cleanup(); reject(new Error(`not connected within ${ms} ms`)); }, ms);
@@ -95,14 +95,19 @@ export function setPlayoutDelay(receiver: RTCRtpReceiver | undefined, ms: number
   return null;
 }
 
+interface Link {
+  pc: RTCPeerConnection;
+  channel: RTCDataChannel;
+}
+
 export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer, deps?: Partial<WebRtcDeps>): RealtimeTransport {
   const PC = deps?.RTCPeerConnection ?? (globalThis as { RTCPeerConnection?: typeof RTCPeerConnection }).RTCPeerConnection;
-  let pc: RTCPeerConnection | null = null;
-  let channel: RTCDataChannel | null = null;
+  const opened = new Set<Link>();
+  let link: Link | null = null;
   let connected = false;
   let closing = false;
   let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let restarting = false;
+  let reconnecting = false;
   const token = ctx.descriptor?.token ?? '';
   const sessionUrl = offer.offerUrl.replace(/\/offer$/, '');
 
@@ -112,9 +117,9 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     ctx.fail(new Error(`webrtc: ${why}`));
   };
 
-  const negotiate = async (conn: RTCPeerConnection, signal: AbortSignal, iceRestart: boolean) => {
-    await conn.setLocalDescription(await conn.createOffer(iceRestart ? { iceRestart } : undefined));
-    await waitIceGathering(conn, ctx.timeouts.iceGatherMs, signal, offer.iceTransportPolicy === 'relay', iceRestart);
+  const negotiate = async (conn: RTCPeerConnection, signal: AbortSignal) => {
+    await conn.setLocalDescription(await conn.createOffer());
+    await waitIceGathering(conn, ctx.timeouts.iceGatherMs, signal, offer.iceTransportPolicy === 'relay');
     if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
     const res = await ctx.fetchImpl(offer.offerUrl, {
       method: 'POST',
@@ -127,23 +132,84 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     await conn.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
   };
 
-  const restartIce = async () => {
-    if (restarting || closing || !connected || !pc || !channel) return;
-    restarting = true;
+  const release = (l: Link) => {
+    opened.delete(l);
+    l.channel.onmessage = null;
+    l.channel.onclose = null;
+    l.pc.ontrack = null;
+    l.pc.oniceconnectionstatechange = null;
+    l.pc.onconnectionstatechange = null;
+    try { l.channel.close(); } catch { /* closed */ }
+    try { l.pc.close(); } catch { /* closed */ }
+  };
+
+  const open = async (signal: AbortSignal, connectMs: number): Promise<Link> => {
+    const pc = new PC!({
+      iceServers: (offer.iceServers ?? ctx.descriptor?.iceServers ?? []) as RTCIceServer[], bundlePolicy: 'max-bundle',
+      ...(offer.iceTransportPolicy ? { iceTransportPolicy: offer.iceTransportPolicy } : {}),
+    });
+    const l: Link = { pc, channel: pc.createDataChannel('events', { ordered: true }) };
+    opened.add(l);
+    try {
+      const mic = await ctx.mic();
+      const tracks = mic.getAudioTracks();
+      if (tracks.length) for (const track of tracks) pc.addTrack(track, mic);
+      else pc.addTransceiver('audio', { direction: 'recvonly' });
+      l.channel.onmessage = (e: MessageEvent) => {
+        try { ctx.emit(JSON.parse(String(e.data))); } catch { /* not JSON: ignored */ }
+      };
+      pc.ontrack = (e: RTCTrackEvent) => {
+        setPlayoutDelay(e.receiver, ctx.playoutDelayMs ?? 0);
+        ctx.remoteAudio(e.streams[0] ?? new MediaStream([e.track]));
+      };
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        ctx.telemetry.emit('rt.ice.state', { attrs: { state } });
+        if (state === 'failed') ctx.telemetry.emit('rt.ice.failed', { level: 'warn', attrs: { connected } });
+      };
+      await negotiate(pc, signal);
+      await waitConnected(pc, l.channel, connectMs, signal);
+      if (closing) throw new Error('closed');
+      return l;
+    } catch (err) {
+      release(l);
+      throw err;
+    }
+  };
+
+  const adopt = (l: Link) => {
+    if (disconnectTimer) clearTimeout(disconnectTimer);
+    disconnectTimer = null;
+    link = l;
+    l.channel.onclose = () => failOnce('data channel closed');
+    l.pc.onconnectionstatechange = () => {
+      const state = l.pc.connectionState;
+      if (state === 'failed') void reconnect();
+      else if (state === 'disconnected' && !disconnectTimer) {
+        disconnectTimer = setTimeout(() => { disconnectTimer = null; if (l.pc.connectionState !== 'connected') void reconnect(); }, ctx.timeouts.disconnectGraceMs);
+      } else if (state === 'connected' && disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+    };
+    void reportRelay(l.pc, ctx);
+  };
+
+  const reconnect = async () => {
+    if (reconnecting || closing || !connected) return;
+    reconnecting = true;
     const started = performance.now();
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(new Error(`no path within ${ctx.timeouts.iceRestartMs} ms`)), ctx.timeouts.iceRestartMs);
     try {
-      await negotiate(pc, abort.signal, true);
-      await waitConnected(pc, channel, ctx.timeouts.iceRestartMs, abort.signal, false);
+      const next = await open(abort.signal, ctx.timeouts.iceRestartMs);
+      const previous = link;
+      adopt(next);
+      if (previous) release(previous);
       ctx.telemetry.emit('rt.ice.restart', { durMs: performance.now() - started, attrs: { ok: true } });
-      void reportRelay(pc, ctx);
     } catch (err) {
       ctx.telemetry.emit('rt.ice.restart', { level: 'warn', durMs: performance.now() - started, attrs: { ok: false } });
       failOnce(`ice restart failed: ${(err as Error).message}`);
     } finally {
       clearTimeout(timer);
-      restarting = false;
+      reconnecting = false;
     }
   };
 
@@ -152,50 +218,19 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     clipBased: false,
     async connect(signal) {
       if (!PC) throw new Error('RTCPeerConnection is not available');
-      pc = new PC({
-        iceServers: (offer.iceServers ?? ctx.descriptor?.iceServers ?? []) as RTCIceServer[], bundlePolicy: 'max-bundle',
-        ...(offer.iceTransportPolicy ? { iceTransportPolicy: offer.iceTransportPolicy } : {}),
-      });
-      const mic = await ctx.mic();
-      const tracks = mic.getAudioTracks();
-      if (tracks.length) for (const track of tracks) pc.addTrack(track, mic);
-      else pc.addTransceiver('audio', { direction: 'recvonly' });
-      channel = pc.createDataChannel('events', { ordered: true });
-      channel.onmessage = (e: MessageEvent) => {
-        try { ctx.emit(JSON.parse(String(e.data))); } catch { /* not JSON: ignored */ }
-      };
-      channel.onclose = () => failOnce('data channel closed');
-      pc.ontrack = (e: RTCTrackEvent) => {
-        setPlayoutDelay(e.receiver, ctx.playoutDelayMs ?? 0);
-        ctx.remoteAudio(e.streams[0] ?? new MediaStream([e.track]));
-      };
-      pc.oniceconnectionstatechange = () => {
-        const state = pc?.iceConnectionState;
-        ctx.telemetry.emit('rt.ice.state', { attrs: { state } });
-        if (state === 'failed') ctx.telemetry.emit('rt.ice.failed', { level: 'warn', attrs: { connected } });
-      };
-      pc.onconnectionstatechange = () => {
-        const state = pc?.connectionState;
-        if (state === 'failed') void restartIce();
-        else if (state === 'disconnected' && connected && !disconnectTimer) {
-          disconnectTimer = setTimeout(() => { disconnectTimer = null; if (pc?.connectionState !== 'connected') void restartIce(); }, ctx.timeouts.disconnectGraceMs);
-        } else if (state === 'connected' && disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
-      };
-      await negotiate(pc, signal, false);
-      await waitConnected(pc, channel, ctx.timeouts.webrtcConnectMs, signal);
+      const l = await open(signal, ctx.timeouts.webrtcConnectMs);
       connected = true;
-      void reportRelay(pc, ctx);
+      adopt(l);
     },
     send(message: ClientMessage) {
-      if (channel?.readyState === 'open') channel.send(JSON.stringify(message));
+      if (link?.channel.readyState === 'open') link.channel.send(JSON.stringify(message));
     },
     close() {
       const wasConnected = connected;
       closing = true;
       connected = false;
       if (disconnectTimer) clearTimeout(disconnectTimer);
-      try { channel?.close(); } catch { /* closed */ }
-      try { pc?.close(); } catch { /* closed */ }
+      for (const l of [...opened]) release(l);
       ctx.remoteAudio(null);
       // Free the replica's slot now rather than when its ICE times out.
       if (wasConnected && token) {
