@@ -91,14 +91,15 @@ export const BUILTIN_PROFILES: Profile[] = [
     builtin: true,
     spec: {
       // docker/whisper-stt: Whisper large-v3 (STT) + Qwen3.5-9B Q4 (llama.cpp) in one image. No TTS.
-      // CPU-friendly (int8) — runs on a cheap CPU instance; the L4 placement adds llama.cpp CUDA speed.
+      // CPU-first (int8) — cheap CPU instance. The schema requires every placement to
+      // match `gpu`; a GPU ladder would need `gpu: true` + a GPU-first machineType.
       image: 'rg.fr-par.scw.cloud/aigw/whisper-stt:20261007-0916',
       port: 8000,
       healthPath: '/health',
       machineType: 'POP2-HC-4C-8G',
       zone: 'fr-par-2',
       placements: [
-        { machineType: 'L4-1-24G' }, { zone: 'pl-waw-2' }, { zone: 'fr-par-1' },
+        { zone: 'pl-waw-2' }, { zone: 'fr-par-1' },
       ],
       gpu: false,
       volumeGb: 40,
@@ -111,9 +112,6 @@ export const BUILTIN_PROFILES: Profile[] = [
       bootTimeoutMinutes: 20,
       idleAction: 'stop',
       maxEurPerHour: 0.5,
-      envByMachineType: {
-        'L4-1-24G': { STT_COMPUTE: 'float16', LLM_THREADS: '8' },
-      },
       description: 'Whisper large-v3 STT + Qwen3.5-9B Q4 LLM (translation) in one container. POST /v1/audio/transcriptions, /v1/chat/completions, /ws/audio-stream.',
     },
   },
