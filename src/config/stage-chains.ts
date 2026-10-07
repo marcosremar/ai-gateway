@@ -18,6 +18,7 @@
 
 import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-breaker';
 import { isTargetCircuitOpen } from '../gateway/proxy/provider-routing';
+import { emitGatewayEvent } from '../telemetry/emit';
 
 export interface ChainLinkSpec {
   /** `deployment:<name>` or `<provider>:<upstream model>`. */
@@ -90,6 +91,43 @@ export function chainReport(links: ChainLinkSpec[], deps: ChainHealthDeps, stage
   const reports = links.map(l => linkReport(l, deps, stage));
   const serving = reports.find(r => r.state === 'ready')?.target ?? null;
   return { serving, onFallback: serving !== null && serving !== reports[0]?.target, links: reports };
+}
+
+export interface FallbackStatus {
+  active: boolean;
+  since: string | null;
+  chains: Array<{ stage: string; model: string; primary: string; primaryState: LinkState; serving: string; since: string }>;
+}
+
+export function createFallbackWatch(
+  log: (msg: string, data: Record<string, unknown>) => void, now: () => number = Date.now,
+): (stages: Record<string, Record<string, ChainReport>>) => FallbackStatus {
+  const since = new Map<string, number>();
+  return (stages) => {
+    const chains: FallbackStatus['chains'] = [];
+    for (const [stage, byModel] of Object.entries(stages)) {
+      for (const [model, report] of Object.entries(byModel)) {
+        const key = `${stage} ${model}`;
+        const primary = report.links[0];
+        if (report.onFallback && report.serving && primary) {
+          const data = { stage, model, primary: primary.target, primaryState: primary.state, serving: report.serving };
+          if (!since.has(key)) {
+            since.set(key, now());
+            log('gateway: stage on fallback', { ...data, reason: primary.reason ?? null });
+            emitGatewayEvent('stage.on_fallback', { level: 'warn', attrs: data });
+          }
+          chains.push({ ...data, since: new Date(since.get(key)!).toISOString() });
+        } else if (report.serving && since.has(key)) {
+          const forMs = now() - since.get(key)!;
+          since.delete(key);
+          log('gateway: stage back on primary', { stage, model, primary: report.serving, forMs });
+          emitGatewayEvent('stage.on_primary', { durMs: forMs, attrs: { stage, model, primary: report.serving } });
+        }
+      }
+    }
+    const first = chains.length ? chains.reduce((a, b) => (a.since <= b.since ? a : b)).since : null;
+    return { active: chains.length > 0, since: first, chains };
+  };
 }
 
 /** Per stage → per model chain report, plus one warning per chain whose first link cannot serve. */

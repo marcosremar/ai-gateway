@@ -19,7 +19,7 @@ import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } f
 import {
   buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,
 } from './src/config/serve-providers';
-import { stageChainsReport, type ChainLinkSpec } from './src/config/stage-chains';
+import { createFallbackWatch, stageChainsReport, type ChainLinkSpec } from './src/config/stage-chains';
 import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
 import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
@@ -37,7 +37,8 @@ import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
 import {
-  deploymentLogToTelemetry, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  deploymentLogToTelemetry, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
 
@@ -159,8 +160,7 @@ function mountProviders() {
 const providers = mountProviders();
 remount = () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>);
 
-/** Effective chain of every parle stage and the state of each link (shown by /health — nothing silent). */
-const chainHealth = () => stageChainsReport(chains, {
+const chainsNow = () => stageChainsReport(chains, {
   ...(controller ? {
     deploymentStatus: (name: string) => controller.get(name)?.status ?? null,
     stageOut: (name: string, stage: string) => {
@@ -174,6 +174,17 @@ const chainHealth = () => stageChainsReport(chains, {
   },
   breakers: proxyCircuitBreakers,
 });
+const fallbackWatch = createFallbackWatch((msg, data) => (msg.endsWith('on fallback') ? log.warn(data, msg) : log.log(data, msg)));
+let latency: (() => LatencyReport) | null = null;
+/**
+ * Effective chain of every parle stage and the state of each link (shown by /health — nothing silent), whether any
+ * chain is served by its fallback and since when, and the stage latencies of the last minutes.
+ */
+const chainHealth = () => {
+  const report = chainsNow();
+  return { ...report, fallback: fallbackWatch(report.stages), latency: latency?.() ?? null };
+};
+setInterval(() => fallbackWatch(chainsNow().stages), 15_000).unref();
 
 // Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys
 // writes them to the palco. A key that appears or disappears re-mounts the providers in place.
@@ -244,6 +255,7 @@ const telemetry = telemetryFromEnv(process.env, {
 if (telemetry) {
   await telemetry.start();
   setGatewayTelemetrySink((event) => telemetry.ingest.ingestOwn(event));
+  latency = () => latencyReport(telemetry.store.rows(), Date.now());
   log.log({ rows: telemetry.store.size }, 'Telemetry enabled');
 }
 
@@ -312,7 +324,7 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
-  healthDetails: (viewer) => (viewer.admin ? chainHealth() : appStagesView(chainHealth(), (stage) => appAliasesOf(viewer.userId, stage))),
+  healthDetails: (viewer) => (viewer.admin ? chainHealth() : appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage))),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
     ...(telemetry?.adminRoutes ?? []),

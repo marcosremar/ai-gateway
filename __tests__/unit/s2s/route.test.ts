@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'net';
 import { DeploymentError } from '../../../src/deployments/controller';
 import { createS2SRoute } from '../../../src/s2s/route';
+import { setGatewayTelemetrySink } from '../../../src/telemetry/emit';
 import { loopbackStages } from '../../../src/s2s/loopback-stages';
 import { encodeEvent } from '../../../src/s2s/frames';
 import { decodeAll, fakeStages, replicaFrames, sleep, type FakeStagesOptions } from './_fakes';
@@ -77,6 +78,20 @@ describe('POST /v1/s2s routing', () => {
     expect(audio).toBe('Bom dia, querida!Pão quentinho.');
     expect(h.calls).toEqual([]);
     expect(h.leases).toEqual([{ failed: false }]);
+  });
+
+  it('reports the time to the first audio written to the client as a gateway event (s2s.first_audio)', async () => {
+    const seen: Array<{ event: string; durMs?: number; deployment?: string }> = [];
+    setGatewayTelemetrySink(e => seen.push(e));
+    try {
+      const h = await harness({ replica: res => writeFrames(res, replicaFrames('Oi!', ['Bom dia, querida!', 'Pão quentinho.']))() });
+      await h.call();
+      const first = seen.filter(e => e.event === 's2s.first_audio');
+      expect(first).toHaveLength(1);
+      expect(first[0]).toMatchObject({ deployment: 'parle-speech', durMs: expect.any(Number) });
+    } finally {
+      setGatewayTelemetrySink(null);
+    }
   });
 
   it('cold deployment: woken for the next turns, this turn answered by the composed pipeline at once', async () => {
