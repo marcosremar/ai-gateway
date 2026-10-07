@@ -84,3 +84,44 @@ whitespace and blank lines) and every modules-only (`<`) hunk was read and check
 ## Ported fixes
 
 None. Every modules-only hunk is an older version of code that `src/gateway` has since fixed or extended.
+
+## Follow-up steps (same branch)
+
+| Step | Commit | Effect |
+|---|---|---|
+| 1 | 612b320 | `zai` moved to `src/gateway/providers/cloud/zai`; serve.ts imports it from there |
+| 2 | e9149a2 | this decision table |
+| 3 | a54bf31 | `src/modules` deleted (595 files / 79.6k lines). Moved because still live: `gpu-finetune` (bin), `gpu-providers/{strategies,reservations,provider-readiness,deploy-extra}` (server/gpu-deploy-*), `safe-catch.ts`. `src/index.ts`, `bin/ai-gateway.ts` and 13 tests repointed |
+| 4 | 32ab470 | `@deprecated` on GatewayHttpClient, GatewaySDK, AIClient, SpeechClient/UnifiedSpeechClient; `docs/api/sdk.md` marked legacy; egg-info and the unmounted `proxy/routes/status.ts` removed |
+| 5 | 9cf2478 | `server/` 147 → 4 files (38.9k → 0.7k lines); 154 test files deleted, 31 mixed test files pruned |
+| exports | 92817a9 | `./client` = `sdk/node` in package.json and tsup; `./*` wildcard removed |
+
+### server/ after step 5
+
+Still referenced, kept:
+
+| File | Why |
+|---|---|
+| `server/orphan-sweep-vast.ts` (+ its test) | `bin/ai-gateway-cost-audit.ts` |
+| `server/workload-handlers.ts`, `server/http-utils.ts` | `serve.ts` still `require`s them for `/v1/workloads`; delete them when the workloads mount is removed |
+
+Nothing else in `serve.ts`, `src/`, `sdk/`, `bin/` or the package scripts reached `server/` (dependency-cruiser graph,
+plus a grep for dynamic `require`/`import`). `scripts/dev.ts`, `start-ws-server.sh`, `sync-pod.sh` and
+`run-all-tests.sh` started the removed `server/ws-server.ts`; they now start `serve.ts`.
+
+### What parle uses (must stay)
+
+parle (`babylon-cinema`) never imports the package by name; it reaches `vendor/ai-gateway/src/...` by path:
+
+- `backend/compute/ai-gateway-backend.ts` (`VENDOR_CLIENTS`, loaded dynamically): `src/gpu-providers/vast-client.ts`,
+  `src/gpu-providers/runpod-client.ts`, `src/gpu-providers/hyperstack.ts`, `src/gpu-providers/tensordock-client.ts`,
+  `src/cpu-providers/scaleway-client.ts`, `src/gateway/providers/gpu/instance-status.ts`, `src/gpu-providers/types.ts`
+- `backend/compute/replica-failover.ts`: `src/gateway/routing/hedged-replicas.ts`, `src/gateway/providers/cloud/fallback.ts`,
+  `src/gateway/providers/cloud/performance-ranker.ts`
+- `palco/hub/hub-compute.ts`, `tools/vm/{runpod-api,vast-api,vast-voice}.ts`: `src/gateway/providers/gpu/runpod/rest.ts`,
+  `src/gateway/providers/gpu/vast/marketplace.ts`
+- tests: `src/gateway/providers/gpu/vast/offer-policy.ts`, `src/compute/run-gpu-job.ts`,
+  `src/gateway/providers/cloud/entry-key.ts`; `package.json` (dependencies read by `test/palco/stage.spec.ts`)
+- Railway image copies all of `vendor/ai-gateway/src`.
+
+None of these lived in `src/modules` or `server/`; all still exist.
