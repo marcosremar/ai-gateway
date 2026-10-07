@@ -21,6 +21,11 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+/** Per client IP, requests WITHOUT the right token: sustained rate, burst and parallel connections (`nginxConfig`). */
+export const UNAUTH_RATE_PER_SECOND = 5;
+export const UNAUTH_BURST = 10;
+export const UNAUTH_CONNECTIONS = 5;
+
 const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
 
 /**
@@ -30,17 +35,37 @@ const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
 export function nginxConfig(token: string, listen: number = 80, upstream = 8000): string {
   // The upgrade map lets streaming endpoints (e.g. the speech-stack's /ws/audio-stream) pass a WebSocket through
   // the token-gated front; on plain requests $aigw_conn is empty and proxying stays unchanged.
+  //
+  // Rate limits apply to UNAUTHENTICATED requests only (QA 06/10/2026: a flood of wrong-token requests was never
+  // throttled): $aigw_unauth is empty for the right token, and nginx does not count a request whose key is empty. All
+  // legitimate traffic comes from the gateway's one egress IP, so limiting by IP without that exemption would throttle
+  // a whole class. The token check runs in the ACCESS phase (`auth_request`), after limit_req/limit_conn (PREACCESS):
+  // an `if … return 401` runs in the earlier REWRITE phase and would answer before any limit is counted.
+  // `server_tokens off` drops the nginx version from headers and error pages.
   return `map $http_upgrade $aigw_conn { default "upgrade"; "" ""; }
+map $http_x_aigw_token $aigw_unauth { "${token}" ""; default $binary_remote_addr; }
+limit_req_zone $aigw_unauth zone=aigw_unauth:1m rate=${UNAUTH_RATE_PER_SECOND}r/s;
+limit_conn_zone $aigw_unauth zone=aigw_unauth_conn:1m;
+server_tokens off;
 server {
   listen ${listen} default_server;
   client_max_body_size 100m;
-  location = /__aigw/ready {
+  limit_req zone=aigw_unauth burst=${UNAUTH_BURST} nodelay;
+  limit_conn aigw_unauth_conn ${UNAUTH_CONNECTIONS};
+  limit_req_status 429;
+  limit_conn_status 429;
+  auth_request /__aigw/auth;
+  location = /__aigw/auth {
+    internal;
+    auth_request off;
     if ($http_x_aigw_token != "${token}") { return 401; }
+    return 204;
+  }
+  location = /__aigw/ready {
     default_type application/json;
     alias /srv/aigw/ready.json;
   }
   location / {
-    if ($http_x_aigw_token != "${token}") { return 401; }
     proxy_set_header X-Aigw-Token "";
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $aigw_conn;

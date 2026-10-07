@@ -92,8 +92,20 @@ describe('fallbackRoutes', () => {
 });
 
 describe('AppFallbackService', () => {
-  it('shares the gateway keys by default (openrouter and groq), for providers the routes use', async () => {
+  // Regression (QA 06/10/2026, critical): with no provisioning key, GET /v1/apps/parle/fallback handed out the
+  // gateway's master OPENROUTER_API_KEY (keyKind shared, no limit, no expiry) because sharing was on by default.
+  it('never hands out the gateway master keys by default: routes are listed, no credential', async () => {
     const { svc } = await service({ OPENROUTER_API_KEY: SHARED, GROQ_API_KEY: GROQ });
+    const plan = await svc.plan('parle', ROUTES);
+    expect(plan.openrouter).toBeNull();
+    expect(plan.providers).toEqual({});
+    expect(JSON.stringify(plan)).not.toContain(SHARED);
+    expect(JSON.stringify(plan)).not.toContain(GROQ);
+    expect(plan.routes.stt['parle-stt'].map(e => e.provider)).toEqual(['openrouter', 'groq']);
+  });
+
+  it('shares the gateway keys only with APP_FALLBACK_SHARE_KEY=1 (openrouter and groq), for providers the routes use', async () => {
+    const { svc } = await service({ OPENROUTER_API_KEY: SHARED, GROQ_API_KEY: GROQ, APP_FALLBACK_SHARE_KEY: '1' });
     const plan = await svc.plan('parle', ROUTES);
     expect(plan.openrouter).toEqual({ baseUrl: 'https://openrouter.ai/api/v1', apiKey: SHARED, keyKind: 'shared', expiresAt: null, limitUsd: null });
     expect(plan.providers.groq).toMatchObject({ baseUrl: 'https://api.groq.com/openai/v1', apiKey: GROQ, keyKind: 'shared' });
@@ -104,13 +116,13 @@ describe('AppFallbackService', () => {
     expect(noGroq.providers.groq).toBeUndefined();
   });
 
-  it('APP_FALLBACK_SHARE_KEY=0 or no key → openrouter: null and no entries', async () => {
-    for (const env of [{ OPENROUTER_API_KEY: SHARED, APP_FALLBACK_SHARE_KEY: '0' }, {}]) {
+  it('APP_FALLBACK_SHARE_KEY=0, any other value, or no key → openrouter: null', async () => {
+    for (const env of [{ OPENROUTER_API_KEY: SHARED, APP_FALLBACK_SHARE_KEY: '0' }, { OPENROUTER_API_KEY: SHARED, APP_FALLBACK_SHARE_KEY: 'yes' },
+      { APP_FALLBACK_SHARE_KEY: '1' }, {}]) {
       const { svc } = await service(env);
       const plan = await svc.plan('parle', ROUTES);
       expect(plan.openrouter).toBeNull();
       expect(plan.providers).toEqual({});
-      expect(plan.routes).toEqual({ stt: {}, chat: {}, tts: {} });
     }
   });
 
@@ -148,10 +160,12 @@ describe('AppFallbackService', () => {
     expect(apps.fallbackKey('parle')!.retired).toEqual([{ hash: prov.created[0].hash, deleteAfter: expect.any(Number) }]);
   });
 
-  it('provisioning failure falls back to the shared key, and the log names no key', async () => {
+  it('provisioning failure hands out no key unless sharing is opted in, and the log names no key', async () => {
     const prov = new FakeProvisioner();
     prov.fail = true;
-    const { svc, logs } = await service({ OPENROUTER_API_KEY: SHARED, OPENROUTER_PROVISIONING_KEY: 'sk-or-v1-mgmt-secret' }, prov);
+    const off = await service({ OPENROUTER_API_KEY: SHARED, OPENROUTER_PROVISIONING_KEY: 'sk-or-v1-mgmt-secret' }, prov);
+    expect((await off.svc.plan('parle', ROUTES)).openrouter).toBeNull();
+    const { svc, logs } = await service({ OPENROUTER_API_KEY: SHARED, OPENROUTER_PROVISIONING_KEY: 'sk-or-v1-mgmt-secret', APP_FALLBACK_SHARE_KEY: '1' }, prov);
     const plan = await svc.plan('parle', ROUTES);
     expect(plan.openrouter).toMatchObject({ keyKind: 'shared', apiKey: SHARED });
     expect(logs.join('\n')).toContain('provisioning failed');
@@ -204,7 +218,7 @@ describe('GET /v1/apps/:app/fallback', () => {
       controller, apps,
       isAdmin: (req) => req.headers.authorization === `Bearer ${ADMIN}`,
       userOf: (req) => users[String(req.headers.authorization)] ?? null,
-      fallback: new AppFallbackService({ env: { OPENROUTER_API_KEY: SHARED }, store: apps, log: (m, d) => logs.push(`${m} ${JSON.stringify(d)}`) }),
+      fallback: new AppFallbackService({ env: { OPENROUTER_API_KEY: SHARED, APP_FALLBACK_SHARE_KEY: '1' }, store: apps, log: (m, d) => logs.push(`${m} ${JSON.stringify(d)}`) }),
     });
     server = createProxyServer({
       apiKeys: [`${ADMIN}:owner`, `${PARLE}:parle`, `${OTHER}:other`],

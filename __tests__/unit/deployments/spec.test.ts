@@ -70,8 +70,29 @@ describe('cloud-init', () => {
 
   it('nginx requires the token on every path, including the ready marker', () => {
     const conf = nginxConfig(TOKEN);
-    expect(conf.match(new RegExp(`\\$http_x_aigw_token != "${TOKEN}"`, 'g'))).toHaveLength(2);
+    // One check, server-wide (access phase): every location but the internal auth subrequest inherits it.
+    expect(conf.match(new RegExp(`\\$http_x_aigw_token != "${TOKEN}"`, 'g'))).toHaveLength(1);
+    const server = conf.slice(conf.indexOf('server {'));
+    expect(server.slice(0, server.indexOf('location')).trim()).toContain('auth_request /__aigw/auth;');
+    expect(conf).toMatch(/location = \/__aigw\/auth \{\s+internal;\s+auth_request off;/);
+    expect(conf.match(/auth_request off;/g)).toHaveLength(1);
     expect(conf).toContain('proxy_set_header X-Aigw-Token ""');
+  });
+
+  // Regression (QA 06/10/2026): 1618 wrong-token requests in 33 s were all answered 401, none throttled, and every
+  // answer said `server: nginx/1.24.0 (Ubuntu)`.
+  it('nginx throttles requests without the token only, and hides its version', () => {
+    const conf = nginxConfig(TOKEN);
+    expect(conf).toContain('server_tokens off;');
+    // The right token maps to an empty key (never counted); anything else is keyed by client IP.
+    expect(conf).toContain(`map $http_x_aigw_token $aigw_unauth { "${TOKEN}" ""; default $binary_remote_addr; }`);
+    expect(conf).toMatch(/limit_req_zone \$aigw_unauth zone=aigw_unauth:1m rate=\d+r\/s;/);
+    expect(conf).toContain('limit_conn_zone $aigw_unauth zone=aigw_unauth_conn:1m;');
+    expect(conf).toMatch(/limit_req zone=aigw_unauth burst=\d+ nodelay;/);
+    expect(conf).toMatch(/limit_conn aigw_unauth_conn \d+;/);
+    // A rewrite-phase `return 401` outside the auth subrequest would answer before limit_req/limit_conn count it.
+    const outsideAuth = conf.replace(/location = \/__aigw\/auth \{[^}]*\}[^}]*\}/, '');
+    expect(outsideAuth).not.toContain('return 401');
   });
 
   it('env and secrets travel base64-encoded, never as shell text', () => {

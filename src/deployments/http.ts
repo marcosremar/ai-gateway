@@ -128,7 +128,7 @@ export interface DeploymentRoutesOptions {
   apps?: AppRegistry;
   /** The calling key's user id (the app it belongs to). */
   userOf?: (req: IncomingMessage) => string | null;
-  /** Mutations (PUT/PATCH/DELETE/wake, profiles) require this. Default: every authenticated caller. */
+  /** Mutations (PUT/PATCH/DELETE/wake, profiles) require this. Default: nobody (fail closed). */
   isAdmin?: (req: IncomingMessage) => boolean;
   fetchImpl?: typeof fetch;
   /** Status of the declared deployments (`declared.ts`), listed as `declared` by `GET /v1/deployments`. */
@@ -143,7 +143,7 @@ export interface DeploymentRoutesOptions {
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
   const { controller } = opts;
-  const isAdmin = opts.isAdmin ?? (() => true);
+  const isAdmin = opts.isAdmin ?? (() => false);
   const fetchImpl = opts.fetchImpl ?? fetch;
 
   /** The app this request acts for: `X-App` from an admin key, else the key's own user; null = admin acting globally. */
@@ -184,7 +184,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (sub === 'routes' && !imageName) {
       if (method === 'GET') return send(res, 200, { app, routes: registry.get(app)?.routes ?? {} });
       if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
-      const routes = await registry.putRoutes(app, await readJson(req));
+      // An admin sets any route; the app's own key only reorders/re-aliases what it already has, plus its own deployments.
+      const routes = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? {}
+        : { restrictedTo: (deployment) => controller.get(deployment)?.app === app });
       opts.onRoutesChange?.();
       return send(res, 200, { app, routes });
     }
@@ -317,6 +319,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       return send(res, 405, { error: 'method not allowed' });
     }
     if (action === 'invoke') {
+      // A non-admin key invokes only its own app's deployments (a leaked app key must not reach another app's GPU).
+      if (!isAdmin(req)) {
+        const own = appOf(req);
+        if (!own || controller.get(name)?.app !== own) return send(res, 403, { error: `this API key cannot invoke deployment '${name}'` });
+      }
       // The proxy kills sockets idle for PROXY_TOTAL_TIMEOUT_MS (60 s). A request waiting through a cold start sends
       // and receives nothing for minutes by design; its own bounds are coldStartWaitSeconds and INVOKE_TIMEOUT_MS.
       req.socket?.setTimeout(0);

@@ -5,7 +5,7 @@
  *
  *   app account ─ images: name → { image (registry ref), digest, port, healthPath, defaults, history[≤5] }
  *
- * Who is the app: the user id of the calling key (GATEWAY_API_KEYS `key:app`). An admin key (the SANDBOX_TOKEN user,
+ * Who is the app: the user id of the calling key (GATEWAY_API_KEYS `key:app`). An admin key (a user in
  * DEPLOYMENTS_ADMIN_USERS) may act for any app with `X-App: <app>`. Persisted as one JSON file next to the
  * deployments (`DEPLOYMENTS_STATE_DIR/apps.json`, atomic writes). No secrets here: registry credentials stay out
  * (the gateway logs in to its own Scaleway registry with its own key), env values are not stored.
@@ -13,7 +13,7 @@
 
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
-import { parseModelRoutes, type ModelRoutesSpec } from '../config/serve-providers';
+import { parseModelRoutes, type ModelRoutesSpec, type RouteEntrySpec } from '../config/serve-providers';
 import type { FallbackKeyStore, ProvisionedKeyRecord } from './app-fallback';
 
 export const APP_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
@@ -56,6 +56,41 @@ export interface AppAccount {
   routes?: ModelRoutesSpec;
   /** The app's provisioned OpenRouter key for the direct fallback (app-fallback.ts): its hash, never the key. */
   fallbackKey?: ProvisionedKeyRecord;
+}
+
+type RouteStage = keyof ModelRoutesSpec;
+const ROUTE_STAGES: RouteStage[] = ['chat', 'stt', 'tts'];
+
+/** What an entry points at: deployments by name, any other target by stage + provider + upstream model + extraBody. */
+function routeTargets(stage: RouteStage, alias: string, e: RouteEntrySpec): string[] {
+  if (e.provider === 'deployment') return [e.deployment, e.oneGpuDeployment].filter(Boolean).map(d => `deployment:${d}`);
+  return [`${stage}|${e.provider}|${e.model ?? alias}|${JSON.stringify(e.extraBody ?? null)}`];
+}
+
+/**
+ * Targets of `next` an APP key (not an admin) may not set (security test 06/10/2026: an app key may rewrite its own
+ * routes, so a leaked one could point them at any `org/model` or at another app's GPU deployment). Allowed: a
+ * deployment the app owns (`ownsDeployment`), or any target the app's current routes — set by an admin — already have.
+ * So an app key may reorder, drop or re-alias its routes, never reach something new.
+ */
+export function routeTargetViolations(next: ModelRoutesSpec, current: ModelRoutesSpec | undefined, ownsDeployment: (name: string) => boolean): string[] {
+  const allowed = new Set<string>();
+  for (const stage of ROUTE_STAGES) {
+    for (const [alias, chain] of Object.entries(current?.[stage] ?? {})) for (const e of chain) for (const t of routeTargets(stage, alias, e)) allowed.add(t);
+  }
+  const refused = new Set<string>();
+  for (const stage of ROUTE_STAGES) {
+    for (const [alias, chain] of Object.entries(next[stage] ?? {})) {
+      for (const e of chain) {
+        for (const t of routeTargets(stage, alias, e)) {
+          const deployment = t.startsWith('deployment:') ? t.slice('deployment:'.length) : null;
+          if (allowed.has(t) || (deployment && ownsDeployment(deployment))) continue;
+          refused.add(deployment ? `deployment '${deployment}'` : `${stage} ${e.provider}:${e.model ?? alias}${e.extraBody ? ' (with extraBody)' : ''}`);
+        }
+      }
+    }
+  }
+  return [...refused];
 }
 
 export class AppError extends Error {
@@ -165,7 +200,7 @@ export class AppRegistry implements FallbackKeyStore {
    * Replaces the app's routes. An alias belongs to one app: an alias another app already routes is refused (409), so
    * no app can take over another app's model names. Validation is MODEL_ROUTES' (`parseModelRoutes`).
    */
-  async putRoutes(app: string, body: unknown): Promise<ModelRoutesSpec> {
+  async putRoutes(app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean } = {}): Promise<ModelRoutesSpec> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'routes must be an object { chat?, stt?, tts? }');
     const { routes, errors } = parseModelRoutes(JSON.stringify(body));
     if (errors.length) throw new AppError(400, errors.join('; '));
@@ -174,6 +209,10 @@ export class AppRegistry implements FallbackKeyStore {
         const owner = Object.values(this.apps).find(a => a.id !== app && a.routes?.[stage]?.[model]);
         if (owner) throw new AppError(409, `${stage} alias '${model}' belongs to app '${owner.id}'`);
       }
+    }
+    if (opts.restrictedTo) {
+      const refused = routeTargetViolations(routes, this.apps[app]?.routes, opts.restrictedTo);
+      if (refused.length) throw new AppError(403, `an app key may only route to its own deployments and to targets its routes already have: ${refused.join('; ')}`);
     }
     this.account(app).routes = routes;
     await this.store.save(this.apps);

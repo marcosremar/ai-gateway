@@ -18,7 +18,16 @@ const GPU_OS_IMAGE_FR_PAR_2 = '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa';
 
 type ScalewayLike = Pick<ScalewayClient, 'createInstance' | 'listInstancesByTag' | 'releaseInstance' | 'getHourlyPrice' | 'imageLike'>
   & Partial<Pick<ScalewayClient, 'reserveRoutedIp' | 'listIps' | 'deleteIp' | 'createSecurityGroup' | 'listSecurityGroups'
-    | 'deleteSecurityGroup' | 'startInstance' | 'stopInstance' | 'listGpuOffers'>>;
+    | 'deleteSecurityGroup' | 'startInstance' | 'stopInstance' | 'listGpuOffers' | 'defaultProjectId'>>;
+
+/**
+ * The one port a gateway-only replica opens: its token-gated nginx (cloud-init.ts `nginxConfig`, :80). Everything else
+ * (SSH 22, the container on 127.0.0.1:8000, metrics) is dropped at the Scaleway edge.
+ */
+export const GATEWAY_ONLY_PORTS = [80] as const;
+
+/** Name of the shared firewall of a namespace's gateway-only replicas (one per zone; never deleted, it bills nothing). */
+export const gatewayOnlyGroupName = (namespace: string) => `aigw-${namespace}-gateway-only`;
 
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
@@ -62,6 +71,10 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
   async createReplica(input: CreateReplicaInput): Promise<ReplicaMachine> {
     const { spec } = input;
     const imageId = await this.osImage(input);
+    // Every replica gets a firewall: an exposed one its deployment's (declared ports + probe), any other the
+    // namespace's gateway-only group. Without one Scaleway attaches the project's "Default security group", whose
+    // inbound policy is ACCEPT (QA 06/10/2026: SSH 22 of a speech replica reachable from the internet).
+    const securityGroupId = input.network?.groupId ?? await this.gatewayOnlyGroup(spec.zone, input.namespace);
     const inst = await this.client.createInstance({
       label: `aigw-${spec.name}-${Date.now().toString(36)}`,
       region: spec.zone,
@@ -70,7 +83,8 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
       ...(spec.volumeGb ? { volumeGb: spec.volumeGb } : {}),
       tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name)],
       cloudInit: input.cloudInit,
-      ...(input.network ? { publicIpIds: [input.network.ipId], securityGroupId: input.network.groupId } : {}),
+      securityGroupId,
+      ...(input.network ? { publicIpIds: [input.network.ipId] } : {}),
       ...(input.files && Object.keys(input.files).length ? { userDataFiles: input.files } : {}),
       ...(this.opts.projectId ? { projectId: this.opts.projectId } : {}),
       ...(input.onCreated ? { onServerCreated: input.onCreated } : {}),
@@ -99,6 +113,39 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
   private projectOr(): string {
     if (!this.opts.projectId) throw new Error('exposed deployments need SCW_PROJECT_ID (reserved IP and firewall belong to a project)');
     return this.opts.projectId;
+  }
+
+  /** Group id per zone, resolved once per process (concurrent creates share the same lookup). */
+  private readonly gatewayOnlyGroups = new Map<string, Promise<string>>();
+
+  /**
+   * The namespace's gateway-only firewall in `zone`: stateful, inbound DROP by default, only `GATEWAY_ONLY_PORTS`
+   * accepted, outbound ACCEPT. Found by name (a restart or another replica already made it) or created once. Shared by
+   * every gateway-only deployment of the namespace, so a deployment delete leaves it (no per-deployment leak to clean,
+   * and the janitor never touches security groups). Fails closed: no group → no machine.
+   */
+  private gatewayOnlyGroup(zone: string, namespace: string): Promise<string> {
+    const key = `${zone}|${namespace}`;
+    let pending = this.gatewayOnlyGroups.get(key);
+    if (!pending) {
+      pending = this.findOrCreateGatewayOnlyGroup(zone, namespace);
+      pending.catch(() => this.gatewayOnlyGroups.delete(key)); // a failed lookup is retried by the next create
+      this.gatewayOnlyGroups.set(key, pending);
+    }
+    return pending;
+  }
+
+  private async findOrCreateGatewayOnlyGroup(zone: string, namespace: string): Promise<string> {
+    const projectId = this.opts.projectId ?? await this.need('defaultProjectId')(this.credentials);
+    const name = gatewayOnlyGroupName(namespace);
+    const groups = await this.need('listSecurityGroups')(zone, this.credentials, { projectId, name });
+    const existing = groups.find(g => g.name === name);
+    if (existing) return existing.id;
+    return this.need('createSecurityGroup')(zone, this.credentials, {
+      projectId, name, tags: [DEPLOY_TAG, nsTag(namespace)],
+      description: 'ai-gateway replicas reached only through the gateway (token-gated nginx :80)',
+      rules: GATEWAY_ONLY_PORTS.map(port => ({ protocol: 'TCP' as const, port })),
+    });
   }
 
   /**

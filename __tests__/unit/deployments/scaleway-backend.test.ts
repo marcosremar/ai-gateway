@@ -22,6 +22,9 @@ function fakeClient() {
     releaseInstance: vi.fn(async () => {}),
     getHourlyPrice: vi.fn(async () => 0.7875),
     imageLike: vi.fn(async () => 'img-in-ams'),
+    defaultProjectId: vi.fn(async () => 'default-proj'),
+    listSecurityGroups: vi.fn(async (): Promise<Array<{ id: string; name: string }>> => []),
+    createSecurityGroup: vi.fn(async () => 'sg-gw-only'),
   };
 }
 
@@ -65,6 +68,56 @@ describe('ScalewayDeploymentBackend', () => {
     const call = (client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>])[0];
     expect(call.imageId).toBeUndefined();
     expect(call.volumeGb).toBeUndefined();
+  });
+
+  // Regression (QA 06/10/2026): a replica without `exposure` was created with no security group, so Scaleway attached
+  // the project's "Default security group" (inbound ACCEPT) and SSH 22 was reachable from the internet.
+  it('puts every gateway-only replica behind a drop-by-default firewall that opens only nginx :80', async () => {
+    const client = fakeClient();
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
+    const spec = buildSpec('tts', { profile: 'qwen3-tts' }, { profiles });
+    await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' });
+    await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' });
+    const calls = client.createInstance.mock.calls as unknown as Array<[Record<string, unknown>]>;
+    expect(calls.map(c => c[0].securityGroupId)).toEqual(['sg-gw-only', 'sg-gw-only']);
+    expect(calls[0][0].publicIpIds).toBeUndefined();
+    // Created once per zone and namespace, with only TCP 80 open (createSecurityGroup makes inbound DROP the default).
+    expect(client.createSecurityGroup).toHaveBeenCalledTimes(1);
+    expect(client.createSecurityGroup.mock.calls[0]).toEqual(['fr-par-2', expect.anything(), expect.objectContaining({
+      projectId: 'proj', name: 'aigw-prod-gateway-only', rules: [{ protocol: 'TCP', port: 80 }],
+    })]);
+  });
+
+  it('reuses the gateway-only firewall a previous process created, and resolves the default project without SCW_PROJECT_ID', async () => {
+    const client = fakeClient();
+    client.listSecurityGroups.mockResolvedValue([{ id: 'other', name: 'aigw-prod-gateway-only-x' }, { id: 'sg-old', name: 'aigw-prod-gateway-only' }]);
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never });
+    await backend.createReplica({ spec: buildSpec('e', { profile: 'cpu-echo' }, { profiles }), replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' });
+    expect(client.createSecurityGroup).not.toHaveBeenCalled();
+    expect(client.listSecurityGroups.mock.calls[0][2]).toEqual({ projectId: 'default-proj', name: 'aigw-prod-gateway-only' });
+    expect((client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>])[0].securityGroupId).toBe('sg-old');
+  });
+
+  it('refuses to create a machine when its firewall cannot be made (fail closed), and retries the lookup next time', async () => {
+    const client = fakeClient();
+    client.createSecurityGroup.mockRejectedValueOnce(new Error('scaleway HTTP 500'));
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
+    const spec = buildSpec('tts', { profile: 'qwen3-tts' }, { profiles });
+    await expect(backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' })).rejects.toThrow('HTTP 500');
+    expect(client.createInstance).not.toHaveBeenCalled();
+    await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' });
+    expect((client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>])[0].securityGroupId).toBe('sg-gw-only');
+  });
+
+  it('an exposed replica keeps its own deployment firewall and reserved IP', async () => {
+    const client = fakeClient();
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
+    const spec = buildSpec('tts', { profile: 'qwen3-tts' }, { profiles });
+    await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod',
+      network: { zone: 'fr-par-2', ipId: 'ip-1', ip: '51.0.0.9', groupId: 'sg-exposed' } });
+    const call = (client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>])[0];
+    expect(call).toMatchObject({ securityGroupId: 'sg-exposed', publicIpIds: ['ip-1'] });
+    expect(client.listSecurityGroups).not.toHaveBeenCalled();
   });
 
   it('lists by namespace tag, maps the raw state and skips machines without a deployment tag', async () => {

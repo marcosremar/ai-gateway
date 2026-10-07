@@ -18,6 +18,8 @@ import { FakeCloud, until } from './_fake-cloud';
 
 const ADMIN = 'admin-key-0123456789';
 const SITE = 'site-key-0123456789';
+/** Deployments the site key invokes belong to its app (an app key invokes only its own app's deployments). */
+const AS_SITE = { 'x-app': 'site-a' };
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
@@ -144,7 +146,7 @@ describe('deployments API', () => {
   });
 
   it('scales from zero on the first request: waits through boot, then forwards with the replica token', async () => {
-    await call(h, 'PUT', '/v1/deployments/echo', { profile: 'cpu-echo' });
+    await call(h, 'PUT', '/v1/deployments/echo', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
     await h.controller.reconcile();
     expect(h.cloud.machines.size).toBe(0); // scaled to zero until used
 
@@ -171,14 +173,14 @@ describe('deployments API', () => {
       delete process.env.PROXY_TOTAL_TIMEOUT_MS;
     }
     h.cloud.bootMs = 1200;
-    await call(h, 'PUT', '/v1/deployments/longboot', { profile: 'cpu-echo' });
+    await call(h, 'PUT', '/v1/deployments/longboot', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
     const res = await call(h, 'GET', '/v1/deployments/longboot/invoke/x', undefined, SITE);
     expect(res.status).toBe(200);
   });
 
   it('answers 503 + Retry-After when the replica is not ready within the wait', async () => {
     h.cloud.bootMs = 60_000;
-    await call(h, 'PUT', '/v1/deployments/slow', { profile: 'cpu-echo' });
+    await call(h, 'PUT', '/v1/deployments/slow', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
     const res = await call(h, 'GET', '/v1/deployments/slow/invoke/', undefined, SITE, { 'x-aigw-wait': '0' });
     expect(res.status).toBe(503);
     expect(res.headers.get('retry-after')).toBe('30');
@@ -193,7 +195,7 @@ describe('deployments API', () => {
     h.cloud.appDelayMs = 400;
     await call(h, 'PUT', '/v1/deployments/busy', {
       profile: 'cpu-echo', maxReplicas: 3, targetInflightPerReplica: 1, idleMinutes: 1, scaleDownDelaySeconds: 0,
-    });
+    }, ADMIN, AS_SITE);
     await call(h, 'POST', '/v1/deployments/busy/wake');
     await until(() => h.controller.get('busy')!.status === 'ready');
     const burst = await Promise.all(Array.from({ length: 6 }, () => call(h, 'GET', '/v1/deployments/busy/invoke/', undefined, SITE)));
@@ -256,7 +258,7 @@ describe('deployments API', () => {
   });
 
   it('retries on another replica when one dies, and replaces the dead one', async () => {
-    await call(h, 'PUT', '/v1/deployments/ha', { profile: 'cpu-echo', minReplicas: 2, maxReplicas: 2 });
+    await call(h, 'PUT', '/v1/deployments/ha', { profile: 'cpu-echo', minReplicas: 2, maxReplicas: 2 }, ADMIN, AS_SITE);
     await until(() => h.controller.get('ha')!.replicas.filter(r => r.phase === 'ready').length === 2);
     const [first] = [...h.cloud.machines.keys()];
     await h.cloud.crash(first);
@@ -323,7 +325,7 @@ describe('deployments API', () => {
       await h.cloud.closeAll();
       const cloud = new FakeCloud();
       h = await harness({ store: FileDeploymentStore.inDir(dir), cloud });
-      await call(h, 'PUT', '/v1/deployments/keep', { profile: 'cpu-echo', minReplicas: 1 });
+      await call(h, 'PUT', '/v1/deployments/keep', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, AS_SITE);
       await until(() => h.controller.get('keep')!.status === 'ready');
       await close(h);
 
@@ -339,7 +341,7 @@ describe('deployments API', () => {
   });
 
   it('pausing releases replicas and refuses invokes with 409', async () => {
-    await call(h, 'PUT', '/v1/deployments/p', { profile: 'cpu-echo', minReplicas: 1 });
+    await call(h, 'PUT', '/v1/deployments/p', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, AS_SITE);
     await until(() => h.cloud.machines.size === 1);
     await call(h, 'PATCH', '/v1/deployments/p', { paused: true });
     await until(() => h.cloud.machines.size === 0);
@@ -431,6 +433,47 @@ describe('app accounts: saved image addresses per app', () => {
     expect(res.status).toBe(409);
     expect((await call(r, 'PUT', '/v1/apps/parle/routes', chain, SITE)).status).toBe(403);
     expect(remounts).toBe(1);
+  });
+
+  // Regression (security test 06/10/2026): an app key may rewrite its own routes, so a leaked one could point them at
+  // any OpenRouter model or at another app's GPU deployment; and any key could invoke any deployment.
+  it('an app key rewrites its routes only within what an admin gave it, plus its own deployments', async () => {
+    const asSite = { 'x-app': 'site-a' };
+    const given = { chat: { 'site-llm': [
+      { provider: 'deployment', deployment: 'site-gpu' },
+      { provider: 'openrouter', model: 'qwen/qwen3.5-9b', extraBody: { reasoning: { enabled: false } } },
+    ] } };
+    expect((await call(h, 'PUT', '/v1/apps/site-a/routes', given, ADMIN, asSite)).status).toBe(200);
+    await call(h, 'PUT', '/v1/deployments/site-own', { profile: 'cpu-echo' }, ADMIN, asSite);
+    await call(h, 'PUT', '/v1/deployments/other-gpu', { profile: 'cpu-echo' }, ADMIN, { 'x-app': 'other' });
+
+    // Reorder, re-alias, drop, and add its own deployment: allowed.
+    const reordered = { chat: { 'site-llm-2': [
+      { provider: 'openrouter', model: 'qwen/qwen3.5-9b', extraBody: { reasoning: { enabled: false } } },
+      { provider: 'deployment', deployment: 'site-own' },
+    ] } };
+    expect((await call(h, 'PUT', '/v1/apps/site-a/routes', reordered, SITE)).status).toBe(200);
+    // A new upstream model, the same model with other extraBody, another app's deployment: refused (403), unchanged.
+    for (const entry of [
+      { provider: 'openrouter', model: 'some-org/expensive-model' },
+      { provider: 'openrouter', model: 'qwen/qwen3.5-9b', extraBody: { models: ['some-org/expensive-model'] } },
+      { provider: 'deployment', deployment: 'other-gpu' },
+      { provider: 'deployment', deployment: 'site-own', oneGpuDeployment: 'other-gpu' },
+    ]) {
+      const res = await call(h, 'PUT', '/v1/apps/site-a/routes', { chat: { 'site-llm-2': [entry] } }, SITE);
+      expect(res.status).toBe(403);
+    }
+    // An alias without model calls the alias itself upstream: a new alias name is a new target.
+    expect((await call(h, 'PUT', '/v1/apps/site-a/routes', { chat: { 'some-org/expensive-model': [{ provider: 'openrouter' }] } }, SITE)).status).toBe(403);
+    const now = await (await call(h, 'GET', '/v1/apps/site-a/routes', undefined, SITE)).json() as { routes: typeof reordered };
+    expect(now.routes).toEqual(reordered);
+    // The admin is not restricted.
+    expect((await call(h, 'PUT', '/v1/apps/site-a/routes', { chat: { x: [{ provider: 'openrouter', model: 'any/model' }] } }, ADMIN, asSite)).status).toBe(200);
+
+    // Invoke: an app key reaches only its own app's deployments.
+    expect((await call(h, 'GET', '/v1/deployments/other-gpu/invoke/', undefined, SITE)).status).toBe(403);
+    expect((await call(h, 'GET', '/v1/deployments/nope/invoke/', undefined, SITE)).status).toBe(403);
+    expect(h.cloud.created).toHaveLength(0); // the refused invoke woke nothing
   });
 
   it('accounts persist across a gateway restart (file store)', async () => {

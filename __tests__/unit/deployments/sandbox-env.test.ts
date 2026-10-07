@@ -25,6 +25,10 @@ describe('SANDBOX_TOKEN → dev API', () => {
     expect(r.applied).toEqual(['OPENROUTER_API_KEY']);
     expect(isEnvPinned('PALCO_PROXY_TOKEN')).toBe(true);
     expect(isEnvPinned('GROQ_API_KEY')).toBe(false);
+    for (const name of ['OPENROUTER_API_BASE', 'GROQ_API_BASE', 'MLX_QWEN3_ASR_BASE_URL', 'GATEWAY_HOST', 'B2_ENDPOINT', 'APP_URL']) {
+      expect(isEnvPinned(name)).toBe(true);
+    }
+    for (const name of ['OPENROUTER_API_KEY', 'HF_TOKEN', 'SCW_PROJECT_ID', 'DATABASE_KEY', 'BASELINE_MS']) expect(isEnvPinned(name)).toBe(false);
   });
 
   it('does nothing without a token and never throws when the API is down', async () => {

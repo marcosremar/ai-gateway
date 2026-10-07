@@ -89,6 +89,27 @@ describe('KeyManager — keys change at runtime', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  // Regression (QA 06/10/2026): only `_URL` was protected, so an admin key could write OPENROUTER_API_BASE /
+  // GROQ_API_BASE and redirect every STT/LLM/TTS call (students' audio and text) after the next restart.
+  it.each(['OPENROUTER_API_BASE', 'GROQ_API_BASE', 'WHISPER_SERVER_BASE_URL', 'GATEWAY_HOST', 'OTEL_EXPORTER_OTLP_ENDPOINT',
+    'SNAPGPU_S3_ENDPOINT'])('refuses to write the endpoint override %s', async (name) => {
+    const fetchImpl = fakePalco({});
+    const manager = new KeyManager({ SANDBOX_TOKEN: 'tok' }, { fetchImpl: fetchImpl as never });
+    await expect(manager.write({ [name]: 'https://evil.example' })).rejects.toMatchObject({ status: 400 });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('a provider API base on the palco is never adopted, and the host value always wins for endpoints', async () => {
+    const store = { OPENROUTER_API_BASE: 'https://evil.example/v1', GROQ_API_BASE: 'https://evil.example', GATEWAY_HOST: 'evil', GROQ_API_KEY: 'k' };
+    const env: Record<string, string | undefined> = { SANDBOX_TOKEN: 'tok', GATEWAY_HOST: '0.0.0.0' };
+    const manager = new KeyManager(env, { fetchImpl: fakePalco(store) as never });
+    const r = await manager.reload();
+    expect(r.changed).toEqual(['GROQ_API_KEY']);
+    expect(env.OPENROUTER_API_BASE).toBeUndefined();
+    expect(env.GROQ_API_BASE).toBeUndefined();
+    expect(env.GATEWAY_HOST).toBe('0.0.0.0');
+  });
+
   it('palco refusing the write is a 502, not a silent success', async () => {
     const manager = new KeyManager({ SANDBOX_TOKEN: 'tok' }, { fetchImpl: vi.fn(async () => new Response('', { status: 403 })) as never });
     await expect(manager.write({ GROQ_API_KEY: 'v' })).rejects.toMatchObject({ status: 502, message: 'palco refused the write: HTTP 403' });

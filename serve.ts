@@ -29,9 +29,10 @@ import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
-import { deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
+import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
-import { loadSandboxEnv, principalSandboxToken } from './src/config/sandbox-env';
+import { AppLimits } from './src/gateway/proxy/app-limits';
+import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken } from './src/config/sandbox-env';
 
 const log = createLogger('serve');
 
@@ -51,22 +52,19 @@ try {
 
 // SANDBOX_TOKEN is the only secret the gateway needs in its environment: the rest (SCW_SECRET_KEY, SCW_PROJECT_ID,
 // OPENROUTER_API_KEY, … — whatever the palco catalog holds) comes from the dev API, whose values win over Railway
-// variables (see sandbox-env.ts). The same token is accepted as an admin Bearer.
+// variables (see sandbox-env.ts). It is NOT a client key nor an admin (`gatewayClientKeys`; transition flag
+// ACCEPT_SANDBOX_TOKEN_AS_KEY=1 restores that).
 const sandboxEnv = await loadSandboxEnv(process.env);
 if (sandboxEnv.source) log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
 else if (sandboxEnv.errors.length) log.warn({ errors: sandboxEnv.errors }, 'Dev API unreachable — using the environment only');
 const SANDBOX_TOKEN = principalSandboxToken(process.env);
-const SANDBOX_USER = 'sandbox';
 
 const PORT = parseInt(process.env.PORT || '4000');
-const configuredKeys = process.env.GATEWAY_API_KEYS
-  ? process.env.GATEWAY_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
-  : [];
-if (SANDBOX_TOKEN && /[,:]/.test(SANDBOX_TOKEN)) log.warn({}, 'SANDBOX_TOKEN contains , or : — not accepted as an API key');
-const API_KEYS = [
-  ...configuredKeys,
-  ...(SANDBOX_TOKEN && !/[,:]/.test(SANDBOX_TOKEN) ? [`${SANDBOX_TOKEN}:${SANDBOX_USER}`] : []),
-];
+const clientKeys = gatewayClientKeys(process.env);
+for (const w of clientKeys.warnings) log.warn({}, `WARNING: ${w}`);
+const API_KEYS = clientKeys.keys;
+/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1. */
+const EXTRA_ADMINS = clientKeys.sandboxAdmins;
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
 async function listOpenRouterModels(): Promise<string[]> {
@@ -93,7 +91,7 @@ const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
 const deployments = deploymentsFromEnv(process.env, {
-  alwaysAdmin: [SANDBOX_USER],
+  alwaysAdmin: EXTRA_ADMINS,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   log: (msg, data) => log.log(data ?? {}, msg),
   declaredStatus: () => declared?.status() ?? [],
@@ -193,14 +191,26 @@ const keyManager = new KeyManager(process.env, {
 keyManager.adopt(sandboxEnv.received);
 if (SANDBOX_TOKEN) keyManager.start();
 
-// GET /health?deep=1 — same admins as deployments (SANDBOX_TOKEN user + DEPLOYMENTS_ADMIN_USERS; with no admin
-// list, any gateway API key).
-const adminUsers = (process.env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
+// GET /health?deep=1 and /v1/admin/keys — same admins as deployments: DEPLOYMENTS_ADMIN_USERS only.
+// An empty list grants nobody (fail closed; it used to make every key an admin).
+const adminUsers = adminUsersFromEnv(process.env, EXTRA_ADMINS);
+const adminWarning = adminListWarning(process.env, EXTRA_ADMINS);
+if (adminWarning) log.warn({}, `WARNING: ${adminWarning}`);
 const isAdminToken = (token: string) => {
   const userId = keyRegistry.resolve(token)?.userId;
-  if (!userId) return false;
-  return adminUsers.length === 0 || [...adminUsers, SANDBOX_USER].includes(userId);
+  return Boolean(userId && adminUsers.has(userId));
 };
+// What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
+// clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
+const appLimits = API_KEYS.length ? new AppLimits({
+  env: process.env,
+  isAdmin: (userId) => adminUsers.has(userId),
+  aliasesOf: (userId, stage) => {
+    const routes = deployments?.apps.get(userId)?.routes?.[stage];
+    return routes ? new Set(Object.keys(routes)) : null;
+  },
+}) : undefined;
+
 const deepHealth = {
   authorize: isAdminToken,
   report: () => deepHealthReport({
@@ -236,6 +246,7 @@ const server = await startProxy({
   apiKeys: API_KEYS,
   providers,
   deepHealth,
+  ...(appLimits ? { appLimits } : {}),
   healthDetails: () => chainHealth(),
   customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),

@@ -159,6 +159,13 @@ export interface ProxyConfig {
    */
   guardrails?: GuardrailEngine;
   /**
+   * Per-app limits on inference requests (`app-limits.ts`): a non-admin key may call only its app's aliases, with
+   * `max_tokens` clamped and a daily budget. Checked after auth and body parsing, before the route. Absent = none.
+   */
+  appLimits?: {
+    check(userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>): import('./app-limits').AppLimitDenial | null;
+  };
+  /**
    * `GET /health?deep=1`: per-provider probes + deployments. Plain `GET /health` stays a cheap unauthenticated
    * liveness check; the deep one needs a Bearer that `authorize` accepts (401 otherwise, 404 when not set).
    */

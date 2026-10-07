@@ -12,6 +12,7 @@ import { validateAuth } from './middleware/auth';
 import { RateLimiter } from './middleware/rate-limit';
 import { SECURITY_HEADERS, applySecurityHeaders } from '../../middleware/security-headers';
 import { handleChatCompletions } from './routes/chat-completions';
+import { inferenceKindOf } from './app-limits';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
@@ -775,6 +776,18 @@ export function createProxyServer(config: ProxyConfig): Server {
       };
 
       let proxyRes: ProxyResponse;
+
+      // Per-app limits (allowed models, max_tokens cap, daily budget) before any provider is called.
+      const kind = config.appLimits ? inferenceKindOf(method, url) : null;
+      if (kind && config.appLimits) {
+        const fields = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
+        const denial = config.appLimits.check(userId, kind, fields);
+        if (denial) {
+          if (denial.retryAfterSeconds) res.setHeader('Retry-After', denial.retryAfterSeconds);
+          sendResponse(res, { status: denial.status, body: { error: { message: denial.message, type: denial.type } } }, requestId);
+          return;
+        }
+      }
 
       // Route matching
       if (method === 'GET' && url === '/v1/models') {

@@ -224,6 +224,11 @@ export class ScalewayClient extends AbstractGpuProvider {
     }
   }
 
+  /** The API key's default project (cached): where a resource goes when SCW_PROJECT_ID is not set. */
+  defaultProjectId(credentials: ProviderCredentials): Promise<string> {
+    return this.resolveProjectId(credentials);
+  }
+
   private async resolveProjectIdImpl(secretKey: string, accessKey: string): Promise<string> {
     const res = await this.fetchJson<{ default_project_id?: string }>(
       `${SCW_IAM_API}/api-keys/${accessKey}`,

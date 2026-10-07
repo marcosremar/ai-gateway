@@ -71,13 +71,33 @@ export interface DeploymentsFromEnv {
  *   DEPLOYMENTS_NAMESPACE    machine tag namespace, one gateway per namespace; default "default" ON RAILWAY ONLY —
  *                            elsewhere it is required (machines of the namespace unknown here are released as orphans)
  *   DEPLOYMENTS_MAX_REPLICAS replica cap across all deployments; default 6
- *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = all
+ *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = no
+ *                            admin at all — never "every key" (fail closed, 06/10/2026)
  *   Direct fallback (`GET /v1/apps/:app/fallback`, app-fallback.ts): OPENROUTER_PROVISIONING_KEY (mint per-app keys),
  *   APP_FALLBACK_KEY_LIMIT_USD (5), APP_FALLBACK_KEY_ROTATE_DAYS (7), APP_FALLBACK_PLAN_TTL_SECONDS (3600),
- *   APP_FALLBACK_SHARE_KEY=0 (do not hand out the gateway's own keys)
+ *   APP_FALLBACK_SHARE_KEY=1 (opt-in: hand out the gateway's own master keys when no key can be minted; off by default)
  *   Stability reports (`POST /v1/apps/:app/stability-report`, stability.ts): SDK clients post the instability events
  *   they buffered while the gateway was down; persisted to client-stability.jsonl in the state dir.
  */
+/**
+ * Admin userIds: DEPLOYMENTS_ADMIN_USERS plus `alwaysAdmin` (empty in production; the `sandbox` user only under the
+ * transition flag ACCEPT_SANDBOX_TOKEN_AS_KEY=1). An empty list grants admin to NOBODY — until
+ * 06/10/2026 it made every GATEWAY_API_KEYS key an admin (deployments, keys, `X-App` for any app's fallback plan).
+ * The one source of the rule for deployments, `PUT /v1/admin/keys` and `/health?deep=1` (serve.ts).
+ */
+export function adminUsersFromEnv(env: Record<string, string | undefined>, alwaysAdmin: readonly string[] = []): ReadonlySet<string> {
+  const listed = (env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
+  return new Set([...listed, ...alwaysAdmin.filter(Boolean)]);
+}
+
+/** Boot warning when DEPLOYMENTS_ADMIN_USERS is empty (null when it is set). */
+export function adminListWarning(env: Record<string, string | undefined>, alwaysAdmin: readonly string[] = []): string | null {
+  if ((env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').some(s => s.trim())) return null;
+  const only = alwaysAdmin.filter(Boolean);
+  return `DEPLOYMENTS_ADMIN_USERS is empty: no GATEWAY_API_KEYS key is an admin${only.length ? ` (only ${only.join(', ')})` : ''}`
+    + ' — set DEPLOYMENTS_ADMIN_USERS=<userId,…> to grant admin to a key';
+}
+
 /** DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES (default 60, 0 = off): how long a `minReplicas` pin may sit unused. */
 export const PINNED_IDLE_MAX_MINUTES = 60;
 export function pinnedIdleMaxMs(env: Record<string, string | undefined>): number {
@@ -90,7 +110,7 @@ export function deploymentsFromEnv(
   env: Record<string, string | undefined>,
   opts: {
     userOf: (req: IncomingMessage) => string | null;
-    /** userIds that may always manage (e.g. the SANDBOX_TOKEN user), on top of DEPLOYMENTS_ADMIN_USERS. */
+    /** userIds that may always manage, on top of DEPLOYMENTS_ADMIN_USERS (serve.ts: none, or `sandbox` under ACCEPT_SANDBOX_TOKEN_AS_KEY=1). */
     alwaysAdmin?: string[];
     log?: (msg: string, data?: Record<string, unknown>) => void;
     /** Declared deployments' status, added to `GET /v1/deployments` as `declared`. */
@@ -127,7 +147,9 @@ export function deploymentsFromEnv(
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
     log: opts.log,
   });
-  const admins = (env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
+  const admins = adminUsersFromEnv(env, opts.alwaysAdmin);
+  const adminWarning = adminListWarning(env, opts.alwaysAdmin);
+  if (adminWarning) opts.log?.(`WARNING: ${adminWarning}`);
   const handler = createDeploymentRoutes({
     controller,
     apps,
@@ -139,7 +161,7 @@ export function deploymentsFromEnv(
     }),
     // SDK instability reports persist next to the deployments state (client-stability.jsonl).
     stability: new ClientStabilityLog({ file: join(stateDir, 'client-stability.jsonl'), log: opts.log }),
-    isAdmin: admins.length ? (req) => [...admins, ...(opts.alwaysAdmin ?? [])].includes(opts.userOf(req) ?? '') : undefined,
+    isAdmin: (req) => admins.has(opts.userOf(req) ?? ''),
     declaredStatus: opts.declaredStatus,
   });
   // In-process janitor (build machines and detached volumes that no deployment owns). On by default on Railway, where
