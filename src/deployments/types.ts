@@ -164,6 +164,8 @@ export interface RealtimeSpec {
   edgeImage?: string;
   /** UDP range for WebRTC media, opened in the replica's firewall. Default `DEFAULT_RT_UDP_PORTS`. */
   udpPorts?: [number, number];
+  /** Edge settings written to the sidecar's env (`EDGE_TUNING_KEYS` in spec.ts); the keys the gateway sets itself win. */
+  env?: Record<string, string>;
 }
 
 /** An alternative placement of a replica (see `DeploymentSpec.placements`). */
