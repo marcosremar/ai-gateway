@@ -270,6 +270,7 @@ export interface AppImage {
   port: number | null;
   healthPath: string | null;
   description: string | null;
+  visibility: 'private' | 'shared';
   defaults: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;

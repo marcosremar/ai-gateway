@@ -44,7 +44,7 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
   const server = createProxyServer({
     apiKeys: [`${ADMIN}:owner`, `${SITE}:site-a`],
     providers: { stt: {}, chat: {}, tts: {} } as never,
-    prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }, { prefix: '/v1/apps', handler }],
+    prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }, { prefix: '/v1/apps', handler }, { prefix: '/v1/images', handler }],
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
@@ -528,6 +528,68 @@ describe('app accounts: saved image addresses per app', () => {
     expect((await call(h, 'GET', '/v1/deployments/other-gpu/invoke/', undefined, SITE)).status).toBe(403);
     expect((await call(h, 'GET', '/v1/deployments/nope/invoke/', undefined, SITE)).status).toBe(403);
     expect(h.cloud.created).toHaveLength(0); // the refused invoke woke nothing
+  });
+
+  type Listed = { app: string; name: string; image: string; visibility: string };
+  const listImages = async (key = ADMIN, headers: Record<string, string> = {}) =>
+    ((await (await call(h, 'GET', '/v1/images', undefined, key, headers)).json()) as { images: Listed[] }).images;
+
+  it('images are private by default: another app neither lists nor deploys them, and only the owner or an admin edits them', async () => {
+    const res = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000 }, ADMIN, asParle);
+    expect(((await res.json()) as Listed).visibility).toBe('private');
+    expect(await listImages(SITE)).toEqual([]);
+    expect((await listImages(ADMIN, asParle)).map(i => `${i.app}/${i.name}`)).toEqual(['parle/speech-stack']);
+
+    const hidden = await call(h, 'PUT', '/v1/deployments/site-speech', { appImage: 'parle/speech-stack' }, ADMIN, AS_SITE);
+    const missing = await call(h, 'PUT', '/v1/deployments/site-speech', { appImage: 'parle/nope' }, ADMIN, AS_SITE);
+    expect([hidden.status, missing.status]).toEqual([404, 404]);
+    expect(((await hidden.json()) as { error: string }).error.replace('speech-stack', 'nope')).toBe(((await missing.json()) as { error: string }).error);
+
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'shared' }, SITE)).status).toBe(403);
+    expect((await call(h, 'DELETE', '/v1/apps/parle/images/speech-stack', undefined, SITE)).status).toBe(403);
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'public' }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(h, 'GET', '/v1/apps/parle/images/speech-stack', undefined, ADMIN, asParle).then(r => r.json()) as Listed).visibility).toBe('private');
+    expect((await call(h, 'POST', '/v1/images', {}, SITE)).status).toBe(405);
+  });
+
+  it('a shared image is listed for other apps and deployable by them as owner/name; the deployment stays with the deploying app', async () => {
+    await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000, defaults: { machineType: 'DEV1-S' } }, ADMIN, asParle);
+    await call(h, 'PUT', '/v1/apps/parle/images/internal', { image: SPEECH_OLD, port: 8000 }, ADMIN, asParle);
+    await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE);
+    const shared = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'shared' }, ADMIN, asParle);
+    expect(await shared.json()).toMatchObject({ image: SPEECH, port: 8000, visibility: 'shared' });
+
+    expect((await listImages(SITE)).map(i => `${i.app}/${i.name}:${i.visibility}`).sort()).toEqual(['parle/speech-stack:shared', 'site-a/web:private']);
+    expect(await listImages(ADMIN)).toHaveLength(3);
+
+    const res = await call(h, 'PUT', '/v1/deployments/site-speech', { appImage: 'parle/speech-stack', minReplicas: 0 }, ADMIN, AS_SITE);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ app: 'site-a', appImage: 'parle/speech-stack', spec: { image: SPEECH, port: 8000, machineType: 'DEV1-S' } });
+    expect((await call(h, 'PUT', '/v1/deployments/site-internal', { appImage: 'parle/internal' }, ADMIN, AS_SITE)).status).toBe(404);
+
+    await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'private' }, ADMIN, asParle);
+    expect((await call(h, 'PUT', '/v1/deployments/site-other', { appImage: 'parle/speech-stack' }, ADMIN, AS_SITE)).status).toBe(404);
+  });
+
+  it('a deploy with an explicit image registers it in the app catalog, private, idempotent, with the previous address kept', async () => {
+    const spec = { port: 8000, machineType: 'DEV1-S', minReplicas: 0, env: { HF_TOKEN: 'hf_secret' }, registryAuth: { username: 'u', password: 'p4ss' } };
+    expect((await call(h, 'PUT', '/v1/deployments/parle-speech', { ...spec, image: SPEECH_OLD }, ADMIN, asParle)).status).toBe(201);
+    await call(h, 'PUT', '/v1/deployments/parle-speech', { ...spec, image: SPEECH_OLD }, ADMIN, asParle);
+    let saved = await (await call(h, 'GET', '/v1/apps/parle/images/speech-stack', undefined, ADMIN, asParle)).json() as Listed & { port: number; history: unknown[] };
+    expect(saved).toMatchObject({ image: SPEECH_OLD, port: 8000, visibility: 'private', history: [] });
+
+    await call(h, 'PATCH', '/v1/deployments/parle-speech', { image: SPEECH }, ADMIN, asParle);
+    saved = await (await call(h, 'GET', '/v1/apps/parle/images/speech-stack', undefined, ADMIN, asParle)).json() as typeof saved;
+    expect(saved).toMatchObject({ image: SPEECH, history: [{ image: SPEECH_OLD }] });
+
+    await call(h, 'PUT', '/v1/deployments/no-app', { image: 'me/app:1', port: 80, machineType: 'DEV1-S' });
+    const all = await call(h, 'GET', '/v1/images');
+    const text = await all.text();
+    expect(text).not.toContain('hf_secret');
+    expect(text).not.toContain('p4ss');
+    const images = (JSON.parse(text) as { images: Array<Record<string, unknown>> }).images;
+    expect(images).toHaveLength(1);
+    expect(Object.keys(images[0]).sort()).toEqual(['app', 'createdAt', 'description', 'digest', 'healthPath', 'image', 'name', 'port', 'updatedAt', 'visibility']);
   });
 
   it('accounts persist across a gateway restart (file store)', async () => {

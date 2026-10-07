@@ -120,6 +120,11 @@ curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # ima
 - **Saved per image**: `image`, `digest`, `port`, `healthPath`, `description`, `defaults` (spec fields: machineType, zone,
   gpu, volumeGb, replicas, timeouts, price cap, args) and the **last 5 previous addresses**. Never secrets: `env`
   values and `registryAuth` are refused (an image in the gateway's own Scaleway registry needs none).
+- **Deployed = saved**: a deploy with an explicit `image` for an app saves it in the app's catalog (named after the
+  repository, e.g. `speech-stack`), so no separate `PUT` is needed.
+- **Sharing**: images are `private`; the owner sets `{"visibility": "shared"}` on the image `PUT` to let other apps
+  list it (`GET /v1/images`: own + shared, with the owner app) and deploy it as `{"appImage": "parle/speech-stack"}`.
+  A private image of another app answers `404`, like a missing one.
 - Stored in `DEPLOYMENTS_STATE_DIR/apps.json` (the Railway volume), next to `deployments.json`.
 
 ## Cold start
