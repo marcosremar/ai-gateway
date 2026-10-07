@@ -289,9 +289,11 @@ Built for low latency: no round trip between stages, the first sentence is voice
 
 **Which deployment and models** (the gateway names no app's): `"deployment": "parle-speech"` is the speech-stack
 primary (default `S2S_DEPLOYMENT`; none = composed pipeline only) and `"models": {"stt": "parle-stt", "chat":
-"parle-llm", "tts": "parle-tts"}` the stage models of the composed pipeline (default `S2S_STT_MODEL` /
-`S2S_CHAT_MODEL` / `S2S_TTS_MODEL`; a stage with no model fails that turn with `503`, never a model called
-"undefined").
+"parle-llm", "tts": "parle-tts"}` the stage models of the composed pipeline. Without `config.models` the gateway uses `S2S_STT_MODEL` /
+`S2S_CHAT_MODEL` / `S2S_TTS_MODEL` when set (no default value), else the calling app's own route aliases
+(`PUT /v1/apps/:app/routes`: the app that owns `config.deployment`, else the caller's app; per stage the alias whose
+chain reaches that deployment, else the first), so a cold GPU still has the composed reserve. A stage with no model
+anywhere fails that turn with `503`, never a model called "undefined".
 
 **Prompt built before the transcript exists**: `"user_template": "…The player says: \"{{transcript}}\"…"` — the user
 turn becomes the template with `{{transcript}}` replaced by what was heard (default: the transcript alone). A client
@@ -324,7 +326,7 @@ audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`part
 | nothing can answer before the first byte | `503 provider_unavailable` (JSON, as the other routes) | — |
 
 Whole turn budget: `S2S_BUDGET_MS` (45 s). The composed pipeline calls this gateway's own routes over loopback with the
-caller's key (stage models: `config.models`, else `S2S_STT_MODEL` / `S2S_CHAT_MODEL` / `S2S_TTS_MODEL`).
+caller's key (stage models: `config.models`, else `S2S_STT_MODEL` / `S2S_CHAT_MODEL` / `S2S_TTS_MODEL`, else the app's route aliases).
 
 ## OpenAI-compatible routes
 

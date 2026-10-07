@@ -129,6 +129,24 @@ describe('ScalewayDeploymentBackend', () => {
   });
 });
 
+describe('ScalewayDeploymentBackend list prices', () => {
+  it('fills the catalog price of a listed replica (adopted after a restart it showed null), looked up once', async () => {
+    const client = fakeClient();
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never });
+    const [first] = await backend.listReplicas('prod');
+    await backend.listReplicas('prod');
+    expect(first.pricePerHour).toBe(0.7875);
+    expect(client.getHourlyPrice).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed price lookup leaves null instead of failing the list', async () => {
+    const client = fakeClient();
+    client.getHourlyPrice.mockRejectedValue(new Error('products api down'));
+    const [m] = await new ScalewayDeploymentBackend('secret', { client: client as never }).listReplicas('prod');
+    expect(m.pricePerHour).toBeNull();
+  });
+});
+
 describe('RateLimiter.clientIp behind a platform proxy', () => {
   const req = (headers: Record<string, string>) => ({ headers, socket: { remoteAddress: '10.0.0.1' } }) as unknown as IncomingMessage;
   afterEach(() => { delete process.env.TRUST_PROXY; });

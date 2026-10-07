@@ -62,7 +62,9 @@ export const BUILTIN_PROFILES: Profile[] = [
       volumeGb: 80,
       minReplicas: 0,
       maxReplicas: 2,
-      targetInflightPerReplica: 8,
+      // Measured 2026-10-06 (QA, L40S, 10 simultaneous s2s turns): the first-audio p95 stays under 3 s up to ~5–8 turns per
+      // replica and the LLM's 8 slots queue beyond that, so a replica is added at 6 in flight (was 8).
+      targetInflightPerReplica: 6,
       idleMinutes: 15,
       // Cold start is a measured 8–9 min (pull + model load + warm-up): the 240 s default would fail every cold call.
       coldStartWaitSeconds: 600,

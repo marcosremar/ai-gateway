@@ -3,7 +3,7 @@ import { vastReplicaInit } from '../../../src/deployments/cloud-init';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { buildSpec } from '../../../src/deployments/spec';
 import {
-  BAD_HOST_MS, EUR_TO_USD, MIN_RELIABILITY, TOO_FAR_HOST_MS, VastDeploymentBackend, vastState,
+  BAD_HOST_MS, EUR_TO_USD, LIST_CACHE_MS, LIST_STALE_MAX_MS, MIN_RELIABILITY, TOO_FAR_HOST_MS, VastDeploymentBackend, vastState,
 } from '../../../src/deployments/vast-backend';
 import type { DeploymentSpec } from '../../../src/deployments/types';
 
@@ -140,6 +140,67 @@ describe('VastDeploymentBackend', () => {
   it('a failed list throws (never reads as "nothing is running")', async () => {
     const { fetchImpl } = fakeVast(() => ({ status: 502, body: 'bad gateway' }));
     await expect(new VastDeploymentBackend('k', { fetch: fetchImpl }).listReplicas('prod')).rejects.toThrow(/HTTP 502/);
+  });
+
+  describe('instance list under rate limits', () => {
+    const instances = [{ id: 1, label: 'aigw:prod:speech', actual_status: 'running', dph_total: 0.42 }];
+
+    it('reuses a fresh list briefly (a kick storm is not a request storm)', async () => {
+      let now = 1_000;
+      const { calls, fetchImpl } = fakeVast(() => ({ body: { instances } }));
+      const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => now });
+      await backend.listReplicas('prod');
+      now += 1_000;
+      await backend.listReplicas('prod');
+      expect(calls).toHaveLength(1);
+      now += LIST_CACHE_MS;
+      await backend.listReplicas('prod');
+      expect(calls).toHaveLength(2);
+    });
+
+    it('after a 429 waits `retry_after` before asking again and serves the last good list meanwhile', async () => {
+      let now = 1_000;
+      let limited = false;
+      const { calls, fetchImpl } = fakeVast(() => (limited ? { status: 429, body: { error: 'rate limited', retry_after: 30 } } : { body: { instances } }));
+      const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => now });
+      await backend.listReplicas('prod');
+      limited = true;
+      now += LIST_CACHE_MS + 1;
+      expect((await backend.listReplicas('prod')).map(m => m.id)).toEqual(['1']); // stale, but not "nothing is running"
+      expect(calls).toHaveLength(2);
+      now += 20_000; // inside the 30 s the API asked for: no call at all
+      expect(await backend.listReplicas('prod')).toHaveLength(1);
+      expect(calls).toHaveLength(2);
+      now += 11_000; // past retry_after: asks again (limited again → backs off again)
+      await backend.listReplicas('prod');
+      expect(calls).toHaveLength(3);
+    });
+
+    it('once the last good list is too old the list fails (blind, honestly) and keeps backing off', async () => {
+      let now = 1_000;
+      let limited = false;
+      const { calls, fetchImpl } = fakeVast(() => (limited ? { status: 429, body: 'slow down' } : { body: { instances } }));
+      const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => now });
+      await backend.listReplicas('prod');
+      limited = true;
+      now += LIST_STALE_MAX_MS + 1;
+      await expect(backend.listReplicas('prod')).rejects.toThrow(/HTTP 429/);
+      const before = calls.length;
+      await expect(backend.listReplicas('prod')).rejects.toThrow(/backing off/);
+      expect(calls).toHaveLength(before);
+    });
+
+    it('a released instance is not served again from the cache', async () => {
+      let now = 1_000;
+      let limited = false;
+      const { fetchImpl } = fakeVast(({ method }) => (method === 'DELETE' ? { body: {} } : limited ? { status: 429, body: 'x' } : { body: { instances } }));
+      const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => now });
+      const [m] = await backend.listReplicas('prod');
+      await backend.releaseReplica(m);
+      limited = true;
+      now += LIST_CACHE_MS + 1;
+      expect(await backend.listReplicas('prod')).toEqual([]);
+    });
   });
 
   it('release deletes the instance (404 = already gone) and a boot-timeout host is avoided for an hour', async () => {

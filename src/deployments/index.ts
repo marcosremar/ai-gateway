@@ -7,6 +7,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import type { IncomingMessage } from 'http';
 import { DeploymentController } from './controller';
+import { spendLimitsFromEnv } from './spend-limits';
 import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend } from './scaleway-backend';
 import { VastDeploymentBackend } from './vast-backend';
@@ -71,6 +72,9 @@ export interface DeploymentsFromEnv {
  *   DEPLOYMENTS_NAMESPACE    machine tag namespace, one gateway per namespace; default "default" ON RAILWAY ONLY —
  *                            elsewhere it is required (machines of the namespace unknown here are released as orphans)
  *   DEPLOYMENTS_MAX_REPLICAS replica cap across all deployments; default 6
+ *   DEPLOYMENTS_MAX_STOPPED  parked (stopped) replica cap, apart from the running cap; default 8 (spend-limits.ts)
+ *   DEPLOYMENTS_MAX_EUR_PER_HOUR  ceiling on the summed hourly price of all running replicas; default 6, 0 = off
+ *   DEPLOYMENTS_PARKED_MAX_HOURS  a parked replica unused this long is deleted; default 72, 0 = off
  *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = no
  *                            admin at all — never "every key" (fail closed, 06/10/2026)
  *   Direct fallback (`GET /v1/apps/:app/fallback`, app-fallback.ts): OPENROUTER_PROVISIONING_KEY (mint per-app keys),
@@ -144,6 +148,7 @@ export function deploymentsFromEnv(
     probe: new HttpReplicaProbe(),
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
+    ...spendLimitsFromEnv(env),
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
     log: opts.log,
   });

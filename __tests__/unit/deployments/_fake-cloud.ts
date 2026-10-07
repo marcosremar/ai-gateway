@@ -35,6 +35,9 @@ export class FakeCloud implements DeploymentBackend {
   bootMs = 50;
   registryAuthFor?: (image: string) => RegistryAuth | null;
   appDelayMs = 0;
+  /** A stop is listed `stopping` for this long (Scaleway: ~1 min) before `stopped`; 0 = `stopped` at once. */
+  stoppingMs = 0;
+  private stopSettlesAt = new Map<string, number>();
   private seq = 0;
 
   constructor(private readonly now: () => number = Date.now, readonly provider: DeploymentProvider = 'scaleway') {}
@@ -84,6 +87,11 @@ export class FakeCloud implements DeploymentBackend {
 
   async listReplicas(): Promise<ReplicaMachine[]> {
     if (this.failList) throw new Error(`${this.provider} list failed`);
+    for (const [id, at] of this.stopSettlesAt) {
+      const fake = this.machines.get(id);
+      if (!fake) this.stopSettlesAt.delete(id);
+      else if (Date.now() >= at) { fake.machine.state = 'stopped'; this.stopSettlesAt.delete(id); }
+    }
     return [...this.machines.values()].map(m => ({ ...m.machine }));
   }
 
@@ -126,13 +134,15 @@ export class FakeCloud implements DeploymentBackend {
   async stopReplica(machine: ReplicaMachine): Promise<void> {
     const fake = this.machines.get(machine.id)!;
     this.stops.push(machine.id);
-    fake.machine.state = 'stopped';
+    fake.machine.state = this.stoppingMs > 0 ? 'stopping' : 'stopped';
+    if (this.stoppingMs > 0) this.stopSettlesAt.set(machine.id, Date.now() + this.stoppingMs);
     fake.bootedAt = Infinity;
   }
 
   async startReplica(machine: ReplicaMachine): Promise<void> {
     const fake = this.machines.get(machine.id)!;
     this.starts.push(machine.id);
+    this.stopSettlesAt.delete(machine.id);
     fake.machine.state = 'running';
     fake.bootedAt = Date.now() + this.bootMs;
   }
