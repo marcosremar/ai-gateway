@@ -148,7 +148,11 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
 - `EDGE_UPSTREAM_MODE=s2s` instead sends the turn to the replica's `/v1/s2s` and re-emits its frames as realtime events
   (guard applied on its transcript, the call abandoned when it trips).
 - **Metrics** per turn: `ttfa_ms` (end of the learner's speech → first NPC audio out of the edge), `stt_ms`,
-  `llm_ttft_ms`, `tts_ttfb_ms` (first sentence).
+  `llm_ttft_ms`, `tts_ttfb_ms` (first sentence). `ttfa_ms` starts when the turn is closed, so it leaves out the
+  endpointing wait: `endpoint_ms` is that wait (the VAD's last speech frame → the end of the turn, ≈ `RT_VAD_SILENCE_MS`
+  on a server-VAD turn) and `ttfa_from_speech_ms` = `endpoint_ms` + `ttfa_ms` is first audio counted from the moment
+  the learner stopped (both `null` when the VAD never heard speech). `edge.turn.done` carries them as `endpointMs`
+  and `ttfaFromSpeechMs`.
 
 ## Process model and CPU budget
 

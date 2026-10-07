@@ -67,7 +67,7 @@ Edge → client (data channel "events", JSON, or WS text frames), the s2s vocabu
 `{type:"ready"}`, `{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
 `{type:"reply_delta", text}`, `{type:"reply", text}`, `{type:"audio_start"}`, `{type:"audio_end"}`,
 `{type:"interrupted"}`, `{type:"done", empty?, filtered?}`, `{type:"error", code, message}`,
-`{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms}`.
+`{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms, endpoint_ms, ttfa_from_speech_ms}`.
 
 Client → edge: `{type:"interrupt"}`, `{type:"end_turn"}` (client VAD: the learner stopped), `{type:"config_update",
 messages?}` (append to the history), `{type:"ping"}`.
