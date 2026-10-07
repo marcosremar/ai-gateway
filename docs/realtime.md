@@ -208,6 +208,30 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   speaks → `interrupt` (barge-in); on the clip rungs the voice SDK's turn-taking records the clip.
 - Without `voice`, the page calls `sendEndTurn()`, `interrupt()`, `sendTurn(wav)` itself.
 
+### Pre-connect
+
+`connect()` does the admission, the transport and the microphone, and sends nothing else: no `end_turn`, no turn, no
+history. Call it while the page loads so the 2–5 s of connecting are not paid on the learner's first turn:
+
+```ts
+const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+mic.getAudioTracks()[0].enabled = false;                 // silence goes up: nothing can open a turn yet
+const session = createRealtimeSession({ getMicStream: async () => mic, /* … */ });
+const ready = session.connect();                         // not awaited: the page keeps loading
+// … when the scene starts:
+await ready;
+mic.getAudioTracks()[0].enabled = true;
+```
+
+- The microphone permission prompt and `getUserMedia` must come from a user gesture on iOS; ask for it on the tap that
+  opens the lesson and hand the stream to the session.
+- A disabled track still sends silence, which keeps the edge's idle clock (`RT_IDLE_SECONDS`, 120 s without input)
+  from closing the session; with the track enabled and server VAD, room noise before the scene would open a turn.
+- The limits that bound the wait are the edge's: 15 min per session (`RT_MAX_SESSION_SECONDS`), counted from the
+  connect, and the token's 10 min to connect at all. The token is single use per transport, so a pre-connected
+  session cannot be re-opened: one that the edge ended fails over like any mid-session failure.
+- The admission charges the app's budget once, at `connect()`, whether or not a turn follows.
+
 ## Telemetry
 
 One W3C trace per session: the SDK creates `traceparent` (`00-<traceId>-<span>-01`) and sends it on every gateway call
