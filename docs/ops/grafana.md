@@ -1,5 +1,11 @@
 # Grafana Cloud Setup
 
+::: warning Not implemented on `serve.ts`
+The production gateway (`serve.ts`) exposes **no** `GET /metrics` endpoint (API audit 2026-10-07). The references to
+`/metrics` below describe a planned setup; until it exists use the request logs, `GET /health?details=1` (admin key:
+connections, stage chains, STT filter and no-wake counters) and `GET /health?deep=1` (admin).
+:::
+
 > **Goal**: real-time dashboards for gateway latency, provider health,
 > GPU status, and cost tracking. Uses the Prometheus endpoint already
 > exposed at `GET /metrics`.

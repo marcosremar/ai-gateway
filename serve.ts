@@ -24,6 +24,8 @@ import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
 import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
 import { createS2SRoute } from './src/s2s/route';
+import { createS2SAccess } from './src/s2s/access';
+import { appStagesView } from './src/gateway/proxy/health-view';
 import { loopbackStages } from './src/s2s/loopback-stages';
 import { appForCall, appStageModels } from './src/s2s/app-stage-models';
 import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
@@ -37,19 +39,8 @@ import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken } from './src/
 
 const log = createLogger('serve');
 
-// Workload handlers live in server/ which is NOT included in the Fly.io
-// Docker image (only src/ + serve.ts are copied). Dynamic import with
-// fallback so the proxy starts regardless.
-let routeWorkloadRequest: ((req: any, res: any, path: string, method: string) => boolean) | null = null;
-try {
-  const wh = require('./server/workload-handlers');
-  routeWorkloadRequest = wh.routeWorkloadRequest;
-  const { workloadRegistry, GpuWorkloadDriver } = require('./src/workloads');
-  workloadRegistry.registerDriver(new GpuWorkloadDriver());
-  log.log({}, 'Workload registry initialized (gpu driver)');
-} catch {
-  log.log({}, 'Workload handlers not available (server/ not bundled) — skipping');
-}
+// /v1/workloads (server/workload-handlers) is NOT mounted: it answered any app key with no admin check (API audit
+// 2026-10-07). The code stays in server/ until it is removed or put behind the deployments' admin rule.
 
 // SANDBOX_TOKEN is the only secret the gateway needs in its environment: the rest (SCW_SECRET_KEY, SCW_PROJECT_ID,
 // OPENROUTER_API_KEY, … — whatever the palco catalog holds) comes from the dev API, whose values win over Railway
@@ -83,9 +74,6 @@ async function listOpenRouterModels(): Promise<string[]> {
 log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
 
 const prefixRoutes: PrefixRoute[] = [];
-if (routeWorkloadRequest) {
-  prefixRoutes.push({ prefix: '/v1/workloads', handler: routeWorkloadRequest });
-}
 
 // Deployments: Docker image → autoscaled replicas on Scaleway and/or Vast (enabled when SCW_SECRET_KEY or VAST_API_KEY is set).
 const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
@@ -203,14 +191,23 @@ const isAdminToken = (token: string) => {
 };
 // What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
 // clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
+const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
+  const routes = deployments?.apps.get(userId)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
+  return routes ? new Set(Object.keys(routes)) : null;
+};
 const appLimits = API_KEYS.length ? new AppLimits({
   env: process.env,
   isAdmin: (userId) => adminUsers.has(userId),
-  aliasesOf: (userId, stage) => {
-    const routes = deployments?.apps.get(userId)?.routes?.[stage];
-    return routes ? new Set(Object.keys(routes)) : null;
-  },
+  aliasesOf: appAliasesOf,
 }) : undefined;
+// POST /v1/s2s: a non-admin key uses only its own app's deployments, under its app limits (src/s2s/access.ts).
+const s2sAdmit = createS2SAccess({
+  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? '' : null),
+  isAdmin: (userId) => adminUsers.has(userId),
+  deploymentApp: (name) => { const d = controller?.get(name); return d ? d.app ?? null : undefined; },
+  appRoutes: (app) => deployments?.apps.get(app)?.routes,
+  ...(appLimits ? { limits: appLimits } : {}),
+});
 
 const deepHealth = {
   authorize: isAdminToken,
@@ -227,7 +224,7 @@ const optionalMs = (v: string | undefined) => (v && Number.isFinite(Number(v)) ?
 const s2sStageModels = (req: import('http').IncomingMessage, config: { deployment?: string; models?: { stt?: string; chat?: string; tts?: string } }) => {
   const deployment = config.deployment?.trim() || process.env.S2S_DEPLOYMENT?.trim() || undefined;
   const callerApp = keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId;
-  const app = appForCall({ deploymentApp: deployment ? controller?.get(deployment)?.app : null, callerApp });
+  const app = appForCall({ deploymentApp: deployment ? controller?.get(deployment)?.app : null, callerApp, callerIsAdmin: Boolean(callerApp && adminUsers.has(callerApp)) });
   const derived = appStageModels(app ? deployments?.apps.get(app)?.routes : undefined, deployment);
   return {
     stt: config.models?.stt || process.env.S2S_STT_MODEL?.trim() || derived.stt,
@@ -238,6 +235,7 @@ const s2sStageModels = (req: import('http').IncomingMessage, config: { deploymen
 const s2sRoute = createS2SRoute({
   controller,
   deployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
+  admit: s2sAdmit,
   hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
   budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
   primarySpeaksJson: process.env.S2S_PRIMARY_SPEAK_FIELD === '1',
@@ -256,7 +254,8 @@ const server = await startProxy({
   providers,
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
-  healthDetails: () => chainHealth(),
+  // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
+  healthDetails: (viewer) => (viewer.admin ? chainHealth() : appStagesView(chainHealth(), (stage) => appAliasesOf(viewer.userId, stage))),
   customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),

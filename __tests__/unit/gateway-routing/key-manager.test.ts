@@ -156,11 +156,11 @@ describe('admin routes through the proxy', () => {
     expect(protectedName.status).toBe(400);
   });
 
-  it('GET /health stays open; /health?deep=1 needs the admin key', async () => {
+  it('GET /health stays open; /health?deep=1 needs the admin key (no key 401, another valid key 403)', async () => {
     const base = await start(new KeyManager({}));
     expect((await fetch(`${base}/health`)).status).toBe(200);
     expect((await fetch(`${base}/health?deep=1`)).status).toBe(401);
-    expect((await fetch(`${base}/health?deep=1`, { headers: { Authorization: 'Bearer user-key' } })).status).toBe(401);
+    expect((await fetch(`${base}/health?deep=1`, { headers: { Authorization: 'Bearer user-key' } })).status).toBe(403);
     const ok = await fetch(`${base}/health?deep=1`, { headers: { Authorization: 'Bearer admin-key' } });
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ status: 'ok' });

@@ -87,7 +87,7 @@ await gw.appRoutes.put('parle', { stt: { 'parle-stt': ['deployment:parle-speech'
 const routes = await gw.appRoutes.get('parle');
 await gw.apps.putImage('parle', 'speech-stack', { image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261006', port: 8000 });
 
-await gw.health();                 // GET /health
+await gw.health();                 // GET /health: { status, version, uptimeSeconds } only (stage chains: GET /health?details=1 with a key)
 await gw.health({ deep: true });   // GET /health?deep=1 (admin key)
 ```
 

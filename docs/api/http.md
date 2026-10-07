@@ -5,7 +5,9 @@ deployed by `railway.json`, default port `4000`). The larger reference server in
 (`/v1/speech`, `/v1/gpu/*`, `/v1/request-log`, …); those are **not** available on `serve.ts`.
 
 ::: warning Blocked transports
-WebSocket (`/ws/stream`) and WebRTC return `410 Gone`. Streaming is supported via SSE on `POST /v1/chat/completions` with `stream: true`. All other client code must use the JSON endpoints below.
+WebSocket (`/ws/stream`, `/api/stream-audio`) and WebRTC return `410 Gone`. A spoken turn is `POST /v1/s2s` (one
+streamed request); text streaming is SSE on `POST /v1/chat/completions` with `stream: true`. `/v1/speech` and
+`/v1/workloads` are **not** mounted on `serve.ts` (`404`).
 :::
 
 ::: tip Client
@@ -15,7 +17,7 @@ Apps call these routes through `GatewayClient` (`@parle/ai-gateway/client`): see
 
 ## Authentication
 
-All endpoints (except `GET /health`) require a Bearer token:
+All endpoints except the minimal `GET /health` require a Bearer token:
 
 ```bash
 curl -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" ...
@@ -28,7 +30,9 @@ decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only, default 
 again as the admin user `sandbox`, until every client sends its own key.
 
 **Admin keys** — the users in `DEPLOYMENTS_ADMIN_USERS`. When that list is empty, no key is admin (fail closed since 06/10/2026; the boot logs a `WARNING`). Admin keys are required for deployment
-mutations, `X-App`, `GET /health?deep=1` and `/v1/admin/keys*`.
+mutations, `X-App` naming **another** app, `GET /health?deep=1`, the full view of `GET /health?details=1` and
+`/v1/admin/keys*`. A non-admin key may send `X-App` equal to its own app (what `GatewayClient({ app })` sends); any
+other value → `403`. The same rule holds for every app-scoped route added later (e.g. a machines API).
 
 **App keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
 
@@ -41,12 +45,43 @@ mutations, `X-App`, `GET /health?deep=1` and `/v1/admin/keys*`.
 - **Routes**: `PUT /v1/apps/:app/routes` with the app's own key may reorder, drop or re-alias the targets its routes
   already have (set by an admin) and add the app's own deployments; any new target → `403`.
 - **Deployments**: `…/invoke` only on its own app's deployments (`403` otherwise).
+- **`POST /v1/s2s`**: `config.deployment` only when the deployment is its own app's, or its app's routes (set by an
+  admin) already target it — e.g. the operator's declared `parle-speech` reached by parle's aliases. Any other named
+  deployment → `403 permission_error` before the audio is read, nothing acquired or woken. The gateway default
+  (`S2S_DEPLOYMENT`) that is not the caller's goes to the composed pipeline and is never woken for it. The turn is
+  under the limits above: `config.models` must be the app's own aliases (`403`), `config.max_tokens` is clamped (the
+  replica gets the clamped config), and the turn is charged once to the daily budget (`429 budget_exceeded` +
+  `Retry-After`); its composed-fallback stages are checked but not charged again.
+
+### Errors and request ids
+
+Errors of the proxy and of the OpenAI routes are `{"error": {"message", "type"}}`; `type` follows the status:
+`400` `invalid_request_error` · `401` `authentication_error` · `403` `permission_error` · `404` `not_found_error` ·
+`413` `request_too_large` · `429` `rate_limit_error` (or `budget_exceeded` for an app's daily budget) · `5xx`
+`server_error` / `provider_unavailable`. A malformed multipart body (truncated, oversized field name) is a `400`, an
+oversized file a `413`. A `429` always carries `Retry-After` (seconds).
+
+The **management routes** (`/v1/deployments*`, `/v1/profiles*`, `/v1/apps*`, `/v1/admin/keys*`) answer errors as
+`{"error": "<message>"}` (a string, no `type`; a 503 while warming adds `"status": "warming"`), and a 500 carries
+`requestId` only.
+
+`X-Request-Id`: send one (≤ 128 characters of `[A-Za-z0-9_.-]`) to correlate a call with the gateway log; anything
+else is replaced by a fresh UUID. Every response echoes the effective id — OpenAI routes, `/v1/s2s`, deployments,
+apps, profiles and admin keys alike.
+
+### CORS
+
+Origins: `CORS_ORIGINS` (comma separated, `*` = any; localhost always). Preflight allows `GET, POST, PUT, PATCH,
+DELETE, OPTIONS` and the headers `Content-Type, Authorization, X-API-Key, X-App, X-Request-Id, X-Aigw-Wait,
+X-Gateway-No-Wake`. Responses expose `X-Gateway-Provider, X-Gateway-Fallback, X-Gateway-Fallback-From,
+X-Gateway-Model-Catalog-Warnings, X-STT-Filtered, X-STT-Raw-Length, Retry-After, X-Request-Id` to browser code.
 
 ## Rate Limiting
 
 Optional per-user token bucket (`RATE_LIMIT_RPM`, off when unset or `0`). When on, responses carry
 `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a limited request gets `429` with
-`Retry-After`.
+`Retry-After`. Requests in flight per key user are capped (`MAX_CONCURRENT_PER_USER`, default 150;
+`MAX_CONCURRENT_PER_USER_OVERRIDES=user:n,…`): over it → `429 rate_limit_error` with `Retry-After: 1`.
 
 ## Request Size Limit
 
@@ -110,7 +145,7 @@ woke a €1.47/h L40S, because its primary is `deployment:parle-speech` and a co
 | `/v1/deployments/:name/invoke/…` | forwarded | `503 {"status":"cold","code":"cold","noWake":true}` + `Retry-After: 30` at once (no wait) |
 
 Nothing is created, and the deployment's idle clock (`lastRequestAt`) is not touched, so a replica already running
-idles out on its own schedule. `GET /health` counts the skips: `"noWake": {"skips": N}`.
+idles out on its own schedule. `GET /health?details=1` (admin key) counts the skips: `"noWake": {"skips": N}`.
 
 ### App aliases — `PUT /v1/apps/:app/routes`
 
@@ -137,7 +172,7 @@ curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
 - `oneGpuDeployment` (deployment entries) — **one-GPU mode**: while `deployment` is not registered on this gateway
   and `oneGpuDeployment` is, the entry goes to `oneGpuDeployment` (e.g. TTS on the `parle-speech` machine that already
   runs Whisper + Qwen3.5 + Qwen3-TTS). A registered `deployment` always wins. Resolved when the providers are mounted
-  (boot, routes PUT, key reload, a declared deployment registered); `/health` shows the effective target and the
+  (boot, routes PUT, key reload, a declared deployment registered); `/health?details=1` shows the effective target and the
   boot log lists it under `oneGpu`.
 - `voices: {feminine, masculine}` (TTS; capability, not in the parle's chain, which is MAI-Voice → Kokoro): a fallback that cannot clone speaks a stock voice of the **gender** of the
   requested voice (`src/config/tts-fallback-voices.ts`). The gender comes from the entry's `voiceGenders`
@@ -147,7 +182,7 @@ curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
 - `accountPolicyGuard: true` (TTS): **account data policy**. With Zero Data Retention on the OpenRouter account,
   some models (e.g. Qwen-Audio, a DashScope endpoint) are refused (`404 … data policy / ZDR violation`). The first refusal takes that link
   out of the chain for 30 min (code `policy`, `X-Gateway-Fallback: policy`): later requests go to the next link without
-  calling it, the refusal does not open the OpenRouter breaker that the next link may share, and `/health` shows the
+  calling it, the refusal does not open the OpenRouter breaker that the next link may share, and `/health?details=1` shows the
   link as `blocked` with the reason. A key reload lifts the block. The gateway never changes the account's privacy
   setting.
 
@@ -310,10 +345,11 @@ Built for low latency: no round trip between stages, the first sentence is voice
 ```
 
 **Which deployment and models** (the gateway names no app's): `"deployment": "parle-speech"` is the speech-stack
-primary (default `S2S_DEPLOYMENT`; none = composed pipeline only) and `"models": {"stt": "parle-stt", "chat":
+primary (default `S2S_DEPLOYMENT`; none = composed pipeline only; an app key may name only a deployment of its own
+app, see [Authentication](#authentication)) and `"models": {"stt": "parle-stt", "chat":
 "parle-llm", "tts": "parle-tts"}` the stage models of the composed pipeline. Without `config.models` the gateway uses `S2S_STT_MODEL` /
 `S2S_CHAT_MODEL` / `S2S_TTS_MODEL` when set (no default value), else the calling app's own route aliases
-(`PUT /v1/apps/:app/routes`: the app that owns `config.deployment`, else the caller's app; per stage the alias whose
+(`PUT /v1/apps/:app/routes`: for an app key always its own app; for an admin key the app that owns `config.deployment`, else its own; per stage the alias whose
 chain reaches that deployment, else the first), so a cold GPU still has the composed reserve. A stage with no model
 anywhere fails that turn with `503`, never a model called "undefined".
 
@@ -389,7 +425,7 @@ blocklist marks as invented, and answers `{"text":""}` (still `200`; the client 
 | env `STT_HALLUCINATION_FILTER=0` | turns the filter off for the whole gateway |
 | env `STT_FILTER_NO_SPEECH_PROB` (0.6), `STT_FILTER_AVG_LOGPROB` (-1.0), `STT_FILTER_COMPRESSION_RATIO` (2.4), `STT_FILTER_AMBIGUOUS_NO_SPEECH_PROB` (0.4) | thresholds, no deploy of code needed (design choices to pilot) |
 
-A filtered (empty) answer is never cached. `GET /health` carries `sttFilter` (`answered`, `filtered`, `partial`,
+A filtered (empty) answer is never cached. `GET /health?details=1` (admin key) carries `sttFilter` (`answered`, `filtered`, `partial`,
 `withMetadata`, `byReason`, `filteredRate`); filtered answers log reasons and lengths only, never the text.
 Entry points, what each filters and how: [docs/stt-hallucination-filter.md](../stt-hallucination-filter.md).
 
@@ -421,8 +457,8 @@ Image generation (`dit360` → self-hosted 360° GPU, `fal-ai/*` → fal.ai).
 
 ## Deployments
 
-Docker image → autoscaled replicas on Scaleway machines. Enabled when `SCW_SECRET_KEY` is set. Mutations need an
-admin key.
+Docker image → autoscaled replicas on Scaleway and/or Vast machines. Enabled when `SCW_SECRET_KEY` (Scaleway) or
+`VAST_API_KEY` (Vast) is set. Mutations need an admin key.
 
 ::: danger Namespace = ownership
 A gateway releases, as orphans, every machine tagged with its `DEPLOYMENTS_NAMESPACE` that belongs to no deployment
@@ -441,12 +477,28 @@ production namespace (`default` on Railway).
 | `GET` | `/v1/deployments/:name` | status + replicas |
 | `DELETE` | `/v1/deployments/:name` | release every replica and forget the spec |
 | `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) |
+| `POST` | `/v1/deployments/:name/warm` | body `{ "replicas": n, "untilMinutes": m }`: keep `n` replicas up (0…`maxReplicas`) for `m` minutes (≤ 720) whatever the load; a later call replaces the window, `park` ends it; counts as a request (admin) |
+| `POST` | `/v1/deployments/:name/park` | done for now: forget the last use, scale to `minReplicas` at the next tick (powers off under `idleAction: "stop"`); in-flight requests are never cut (admin) |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it; `X-Gateway-No-Wake: 1` → 503 `cold` at once instead). Raw passthrough: the STT hallucination filter does NOT apply here (use `/v1/audio/transcriptions` or `/v1/s2s`) |
 | `GET` | `/v1/profiles` | built-in + stored profiles (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`, …) |
 | `PUT` / `DELETE` | `/v1/profiles/:name` | store / delete a profile |
 
 `invoke` is the raw passthrough; the OpenAI routes above use the same replicas with fallback and without waiting
 for a cold start.
+
+### App accounts — `/v1/apps`
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/apps` | admin (no `X-App`): every app; an app key (or `X-App`): `{ "apps": [<its own>] }` |
+| `GET` | `/v1/apps/:app` | `{ id, createdAt, images, deployments: [{ name, status, appImage }] }` |
+| `GET` / `PUT` | `/v1/apps/:app/routes` | the app's aliases (see *App aliases* above) |
+| `GET` | `/v1/apps/:app/images` | the app's saved images |
+| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` | `/v1/apps/:app/fallback` | direct-fallback plan (below) |
+| `POST` / `GET` | `/v1/apps/:app/stability-report` | SDK instability reports (below) |
+
+Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
 
 ---
 
@@ -494,13 +546,27 @@ palco refuses the write.
 
 ### `GET /health`
 
-Cheap liveness check, no auth (used by Railway's healthcheck; always `200` while the process is up). It also shows
-the **effective chain of every parle stage** and the state of each link, so a primary that never serves is visible
-(no upstream call, no secret):
+Cheap liveness check, **no auth**, and nothing else (used by Railway's healthcheck, the external reaper and the SDK
+breaker; always `200` while the process is up):
+
+```json
+{ "status": "ok", "version": "bf909f7a1b2c", "uptimeSeconds": 5321 }
+```
+
+`version` is `GATEWAY_VERSION`, else the first 12 characters of `RAILWAY_GIT_COMMIT_SHA`, else `null`. Since
+2026-10-07 the public answer no longer carries the stage chains, deployment names, missing variable names or
+counters: those moved to `?details=1` (API audit).
+
+### `GET /health?details=1` (any key)
+
+The **effective chain of every stage** and the state of each link, so a primary that never serves is visible (no
+upstream call). An app key sees only the chains of its own aliases (and the warnings about them); an admin key sees
+every chain plus the gateway-wide counters (`connections`, `sttFilter`, `noWake`). No key → `401`.
 
 ```json
 {
-  "status": "ok", "connections": { "active": 1, "peak": 3 }, "noWake": { "skips": 0 },
+  "status": "ok", "version": "bf909f7a1b2c", "uptimeSeconds": 5321,
+  "connections": { "active": 1, "peak": 3 }, "noWake": { "skips": 0 },
   "stages": {
     "stt": { "parle-stt": { "serving": "openrouter:openai/whisper-large-v3-turbo", "onFallback": true, "links": [
       { "target": "deployment:parle-speech", "state": "pending", "reason": "GHCR_READ_TOKEN is not set (registry credential for ghcr.io)" },
@@ -525,8 +591,8 @@ exist: every request falls back with `not_configured`), `disabled` (no `SCW_SECR
 ### `GET /health?deep=1` (admin)
 
 Live probe of every provider key (no credits used: OpenRouter is checked through `/api/v1/key`, which rejects a
-revoked key), circuit-breaker states, mounted models and deployments. Never contains a key value. `401` without an
-admin key.
+revoked key), circuit-breaker states, mounted models and deployments. Never contains a key value. `401` without a
+key, `403` with a valid non-admin key.
 
 ```json
 {
@@ -537,7 +603,7 @@ admin key.
   ],
   "circuits": { "deployment:parle-speech": { "state": "closed", "failures": 0 } },
   "models": { "chat": ["parle-llm"], "stt": ["parle-stt"], "tts": ["parle-tts"], "unavailable": {} },
-  "stages": { "…": "same as GET /health" }, "warnings": [],
+  "stages": { "…": "same as GET /health?details=1" }, "warnings": [],
   "declared": [{ "name": "parle-speech", "state": "in_sync", "reason": null, "image": "ghcr.io/marcosremar/parle-speech:<sha>" }],
   "deployments": { "deployments": 2, "replicas": 1, "listError": null,
     "items": [{ "name": "parle-qwen-tts", "status": "ready", "replicas": 1, "ready": 1, "lastError": null }] }

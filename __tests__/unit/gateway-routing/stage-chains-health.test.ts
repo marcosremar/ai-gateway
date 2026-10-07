@@ -94,15 +94,20 @@ describe('stageChainsReport', () => {
 });
 
 describe('/health', () => {
-  it('plain /health carries the chains (no auth, no secret) and deep health too', async () => {
+  it('/health?details=1 (admin key) carries the chains; plain /health does not; deep health too', async () => {
     const built = build({ deployments: true });
     const details = () => stageChainsReport(built.chains, { deploymentStatus: () => null });
     const server = createProxyServer({
       apiKeys: ['admin-key-0123456789:owner'], providers: { stt: {}, chat: {}, tts: {} } as never, healthDetails: details,
+      deepHealth: { authorize: (t) => t === 'admin-key-0123456789', report: async () => ({ status: 200, body: {} }) },
     });
     await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
     try {
-      const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/health`);
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const plain = await (await fetch(`${base}/health`)).json() as Record<string, unknown>;
+      expect(plain.stages).toBeUndefined();
+      expect(plain.warnings).toBeUndefined();
+      const res = await fetch(`${base}/health?details=1`, { headers: { Authorization: 'Bearer admin-key-0123456789' } });
       const body = await res.json() as { status: string; stages: Record<string, unknown>; warnings: string[] };
       expect(res.status).toBe(200);
       expect(body.status).toBe('ok');
