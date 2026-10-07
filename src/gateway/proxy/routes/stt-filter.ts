@@ -7,6 +7,7 @@
 
 import { DEFAULT_HALLUCINATION_FILTER_CONFIG, filterHallucinations, type STTHallucinationFilterConfig } from '../../../stt-hallucination-filter';
 import type { STTResponse } from '../../providers/cloud/types';
+import { emitGatewayEvent } from '../../../telemetry/emit';
 
 /**
  * The gateway's thresholds. DESIGN CHOICE to pilot and pre-register (not a published value): Radford et al. 2023 (ICML,
@@ -71,6 +72,10 @@ export function applySttFilter(result: STTResponse, language: string | undefined
   const emptied = out.text === '';
   if (emptied) stats.filtered++; else stats.partial++;
   for (const c of out.reasonCodes) stats.byReason[c] = (stats.byReason[c] ?? 0) + 1;
+  // Codes and lengths only — never the filtered text (docs/api/telemetry.md § Privacy).
+  emitGatewayEvent('stt.filtered', {
+    attrs: { codes: out.reasonCodes.join(',').slice(0, 200), rawLength: out.originalText.length, emptied, language: language ?? null },
+  });
   return {
     text: out.text,
     response: { ...result, text: out.text, segments: out.keptSegments },

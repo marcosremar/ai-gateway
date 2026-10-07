@@ -27,6 +27,8 @@ import {
   CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS, CORS_EXPOSE_HEADERS, errorTypeForStatus, requestIdOf,
 } from './http-conventions';
 import { minimalHealth, wantsDeepHealth, wantsHealthDetails } from './health-view';
+import { traceOfRequest } from '../../telemetry/trace-context';
+import { TRACE_ID_RESPONSE_HEADER } from '../../telemetry/contract';
 
 const log = createLogger('proxy');
 
@@ -468,6 +470,21 @@ export function concurrencyLimits(env: Record<string, string | undefined> = proc
   return { fallback, perUser };
 }
 
+/** Runs the matching `publicRoutes` entry (it authenticates itself); false when none matches. */
+async function runPublicRoute(
+  config: ProxyConfig, req: IncomingMessage, res: ServerResponse, method: string, path: string, requestId: string,
+): Promise<boolean> {
+  const route = config.publicRoutes?.find(r => method === r.method.toUpperCase() && path === r.path);
+  if (!route) return false;
+  try {
+    await route.handler(req, res);
+  } catch (err) {
+    log.error({ err, route: `${route.method} ${route.path}` }, 'Unhandled error in public route');
+    if (!res.headersSent) sendError(res, 500, 'Internal server error', requestId);
+  }
+  return true;
+}
+
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   // Build the API key registry for user identity resolution.
@@ -483,13 +500,18 @@ export function createProxyServer(config: ProxyConfig): Server {
     // request carries the effective id from here on (route handlers read it from the headers).
     const requestId = requestIdOf(req.headers['x-request-id']);
     req.headers['x-request-id'] = requestId;
+    // W3C trace context (src/telemetry/trace-context.ts): the caller's traceparent, else a new trace. Echoed back and
+    // propagated to replicas, so browser, gateway and edge events of one session share the trace id.
+    const trace = traceOfRequest(req.headers, url);
+    res.setHeader(TRACE_ID_RESPONSE_HEADER, trace.traceId);
 
     // Establish an AsyncLocalStorage frame so every log emitted during this
     // request (here AND inside any downstream async module) carries the same
     // requestId field. Correlation becomes automatic rather than manual
     // argument threading.
     // Plus a no-wake scope (no-wake.ts), switched on after auth when the request or its key user asks for it.
-    void withNoWakeScope(() => withLogContext({ requestId }, () => handleRequest(req, res, method, url, requestId)));
+    void withNoWakeScope(() => withLogContext({ requestId, traceId: trace.traceId, spanId: trace.spanId },
+      () => handleRequest(req, res, method, url, requestId)));
   });
 
   // The actual request handler runs inside the ALS frame established above.
@@ -548,6 +570,9 @@ export function createProxyServer(config: ProxyConfig): Server {
       sendResponse(res, { status: 200, body: minimalHealth() }, requestId);
       return;
     }
+
+    // Self-authenticated routes (telemetry ingest: session tokens, replica signatures) run before the key check.
+    if (await runPublicRoute(config, req, res, method, urlPath, requestId)) return;
 
     // Auth — resolve user identity from Bearer token.
     // When no keys are configured, restrict to localhost. When keys are

@@ -18,6 +18,7 @@ import { DeploymentError, type DeploymentController, type Lease, type LeaseOutco
 import { replicaBase } from './http';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
+import { outgoingTraceHeaders } from '../telemetry/trace-context';
 
 type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
 
@@ -67,7 +68,8 @@ async function callReplica(
   try {
     res = await (opts.fetchImpl ?? fetch)(`${replicaBase(lease.machine, lease.exposed)}${path}`, {
       ...init,
-      headers: { ...(init.headers as Record<string, string> | undefined), 'X-Aigw-Token': lease.token },
+      // Child `traceparent` of the request being served: the replica (and its edge) log under the same trace.
+      headers: { ...(init.headers as Record<string, string> | undefined), ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
       // The gateway aborts through `signal` when it gives up on this replica (route/target timeout): the request is
       // cancelled at once and the lease released, instead of hanging until the provider's own 120 s cap.
       signal: AbortSignal.any([AbortSignal.timeout(opts.timeoutMs ?? 120_000), ...(signal ? [signal] : [])]),

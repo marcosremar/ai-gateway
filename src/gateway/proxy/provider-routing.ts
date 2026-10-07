@@ -12,6 +12,7 @@
 import { CircuitBreakerRegistry, type CircuitBreaker } from '../providers/cloud/circuit-breaker';
 import { isTimeoutError, type CooldownTracker, type FallbackEntry } from '../providers/cloud/fallback';
 import { createLogger } from '../../logger';
+import { emitGatewayEvent } from '../../telemetry/emit';
 import type { ProxyResponse } from './types';
 
 const log = createLogger('provider-routing');
@@ -494,6 +495,15 @@ export function retryAfterOf(err: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/** Gateway telemetry event about one target (src/telemetry/emit.ts); `deployment:<name>` links name their deployment. */
+function emitRoute(
+  event: string, stage: string, t: { providerId: string; model?: string },
+  extra: Record<string, string | number | boolean | null>, level: 'info' | 'warn' = 'info', durMs?: number,
+): void {
+  const deployment = t.providerId.startsWith('deployment:') ? t.providerId.slice(11) : undefined;
+  emitGatewayEvent(event, { level, deployment, durMs, attrs: { stage, provider: t.providerId, model: t.model ?? null, ...extra } });
+}
+
 /**
  * Calls `fn` on the targets in order until one succeeds. Throws `ProviderUnavailableError` (one reason per target)
  * when all fail, or the provider's own error when it is a client error (bad request).
@@ -534,6 +544,7 @@ export function runTargets<P, T>(
     return t.providerId.startsWith('deployment:') || !cloudHedge ? 0 : Math.max(1, Math.min(cloudHedge, (deadline - Date.now()) / 2));
   };
 
+  const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     let next = 0;
     let running = 0;
@@ -546,6 +557,10 @@ export function runTargets<P, T>(
       opts.signal?.removeEventListener('abort', onClientGone);
       for (const c of controllers) c.abort();
       if (clientError) { reject(clientError); return; }
+      emitGatewayEvent('route.unavailable', {
+        level: 'error', durMs: Date.now() - startedAt,
+        attrs: { stage: opts.stage, targets: targets.length, codes: [...new Set(codes.values())].join(',').slice(0, 200) },
+      });
       const reasons = targets.map((t, i) => failures.get(i) ?? `${t.providerId}: not tried (stage time budget used up)`);
       reject(new ProviderUnavailableError(reasons, retryAfterSec));
     };
@@ -597,7 +612,12 @@ export function runTargets<P, T>(
       let successorLaunched = false;
       const hedgeAfter = hedgeOf(t);
       const hedge = hedgeAfter && i + 1 < targets.length
-        ? setTimeout(() => { if (!done && !successorLaunched) { successorLaunched = true; launchNext(); } }, hedgeAfter)
+        ? setTimeout(() => {
+          if (done || successorLaunched) return;
+          successorLaunched = true;
+          emitRoute('route.hedge', opts.stage, t, { afterMs: Math.round(hedgeAfter) });
+          launchNext();
+        }, hedgeAfter)
         : null;
       const timeout = Math.min(t.timeoutMs ?? opts.timeoutMs ?? Infinity, deadline - Date.now());
 
@@ -619,6 +639,7 @@ export function runTargets<P, T>(
           for (const other of inFlight.values()) if (!codes.has(other)) codes.set(other, 'slow');
           breaker.recordSuccess();
           cooldown?.recordSuccess(entryOf(t));
+          emitRoute('route.served', opts.stage, t, { attempt: i, failedBefore: failures.size, raced: inFlight.size > 0 }, 'info', Date.now() - startedAt);
           // The other in-flight call lost the race: abort it (releases its replica lease / upstream request).
           for (const c of controllers) c.abort();
           resolve({ result, target: t, codes });
@@ -645,7 +666,9 @@ export function runTargets<P, T>(
             breaker.releaseProbe();
           } else if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
           else {
+            const wasOpen = breaker.isOpen();
             breaker.recordFailure(err);
+            if (!wasOpen && breaker.isOpen()) emitRoute('breaker.open', opts.stage, t, { code }, 'warn');
             if (cooldown && !ignoreCooldown) cooldown.recordFailure(entryOf(t), COOLDOWN_ALLOWED_FAILS, COOLDOWN_MS);
           }
           const retryable = status !== null && status >= 500 && !(err as { skipRetry?: boolean }).skipRetry
@@ -657,6 +680,7 @@ export function runTargets<P, T>(
           failures.set(i, describeFailure(t.providerId, err));
           codes.set(t, code);
           log.warn(`[proxy:${opts.stage}] ${describeFailure(t.providerId, err)}`);
+          emitRoute('route.fallback', opts.stage, t, { code, status, attempt: i }, 'warn');
           if (!successorLaunched) {
             successorLaunched = true;
             if (launchNext()) return;
