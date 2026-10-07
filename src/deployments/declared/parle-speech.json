@@ -28,8 +28,8 @@
     "maxHours": 2,
     "maxEurPerHour": 1.5,
     "envByMachineType": {
-      "L4-1-24G": { "LLM_PARALLEL": "4" },
-      "L40S-1-48G": { "LLM_PARALLEL": "8" }
+      "L4-1-24G": { "LLM_PARALLEL": "4", "RT_MAX_SESSIONS": "8" },
+      "L40S-1-48G": { "LLM_PARALLEL": "8", "RT_MAX_SESSIONS": "16" }
     },
     "env": { "TRUST_UPSTREAM_AUTH": "1" }
   }

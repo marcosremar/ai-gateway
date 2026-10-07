@@ -28,6 +28,37 @@ function qwenTts(model: string) {
   };
 }
 
+/** coturn image, pinned (Docker Hub `coturn/coturn`, the project's official image). */
+export const COTURN_IMAGE = 'coturn/coturn:4.6.3';
+/** UDP relay range of the coturn deployment (opened in its firewall; ~1 port per relayed leg). */
+export const COTURN_RELAY_PORTS: [number, number] = [49152, 49351];
+
+/**
+ * coturn on the host network: `use-auth-secret` (TURN REST credentials: username "<exp>:<sid>", password
+ * base64(HMAC-SHA1(secret, username)), what the gateway mints per session), no TLS listener (443 is redirected to 3478,
+ * plain TCP), relay ports in COTURN_RELAY_PORTS, the reserved IP as external IP, peers on private ranges denied (a TURN
+ * server must not become a door into the cloud network), and the Prometheus exporter on 127.0.0.1:9641 as the health
+ * the gateway probes. REALTIME_TURN_SECRET comes from the deployment env (/srv/aigw/app.env).
+ */
+const COTURN_BOOT_SCRIPT = `set -eu
+set -a; . /srv/aigw/app.env; set +a
+: "\${REALTIME_TURN_SECRET:?set REALTIME_TURN_SECRET in the deployment env}"
+command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+PUB=$(curl -sf --max-time 5 'http://169.254.42.42/conf?format=json' | python3 -c 'import json,sys; print((json.load(sys.stdin).get("public_ip") or {}).get("address",""))' || true)
+[ -n "$PUB" ] || PUB=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
+iptables -t nat -C PREROUTING -p tcp --dport 443 -j REDIRECT --to-ports 3478 2>/dev/null \
+  || iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-ports 3478
+docker rm -f coturn 2>/dev/null || true
+docker run -d --name coturn --restart unless-stopped --network host ${COTURN_IMAGE} \
+  -n --log-file=stdout --listening-port=3478 --no-tls --no-dtls --fingerprint --realm=aigw \
+  --use-auth-secret --static-auth-secret="$REALTIME_TURN_SECRET" --external-ip="$PUB" \
+  --min-port=${COTURN_RELAY_PORTS[0]} --max-port=${COTURN_RELAY_PORTS[1]} --no-multicast-peers --no-cli \
+  --denied-peer-ip=10.0.0.0-10.255.255.255 --denied-peer-ip=172.16.0.0-172.31.255.255 \
+  --denied-peer-ip=192.168.0.0-192.168.255.255 --denied-peer-ip=100.64.0.0-100.127.255.255 \
+  --denied-peer-ip=169.254.0.0-169.254.255.255 --denied-peer-ip=127.0.0.0-127.255.255.255 \
+  --prometheus --prometheus-port=9641
+`;
+
 export const BUILTIN_PROFILES: Profile[] = [
   {
     name: 'qwen3-tts',
@@ -78,12 +109,47 @@ export const BUILTIN_PROFILES: Profile[] = [
       idleAction: 'stop',
       maxEurPerHour: 2,
       // Measured 2026-10-04 (docker/speech-stack/README.md): L4 24 GB fits STT_BATCH 4 / LLM 8 slots beside the TTS
-      // (more OOMs); the L40S 48 GB takes STT_BATCH 8 / LLM 16 / a 12 GB TTS stage.
+      // (more OOMs); the L40S 48 GB takes STT_BATCH 8 / LLM 16 / a 12 GB TTS stage. RT_MAX_SESSIONS is the realtime
+      // edge's per-replica cap when `realtime` is set (docs/realtime-edge.md): one session per LLM slot.
       envByMachineType: {
-        'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400' },
-        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000' },
+        'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '8' },
+        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '16' },
       },
       description: 'Whisper + Qwen LLM + Qwen3-TTS in one container (STT, S2S, /ws/audio-stream). POST /v1/s2s.',
+    },
+  },
+  {
+    name: 'coturn',
+    builtin: true,
+    spec: {
+      // TURN relay for the realtime edge's WebRTC (docs/realtime-edge.md § TURN): browsers on networks that block UDP
+      // relay through it. Boot-script mode on a small CPU machine with a reserved IP (exposure): the gateway hands each
+      // session `turn:<ip>:3478?transport=udp`, `turn:<ip>:3478?transport=tcp` and `turn:<ip>:443?transport=tcp`
+      // (REALTIME_TURN_URLS) with a per-session credential from REALTIME_TURN_SECRET — the same value goes in this
+      // deployment's env. 443 is plain TURN over TCP (an iptables redirect to 3478): `turns:` with a self-signed
+      // certificate is not trusted by browsers; a real `turns:` needs a domain + certificate (see the doc).
+      image: '',
+      port: 9641,
+      healthPath: '/metrics',
+      machineType: 'DEV1-S',
+      zone: 'fr-par-2',
+      gpu: false,
+      minReplicas: 1,
+      maxReplicas: 1,
+      idleMinutes: 24 * 60,
+      bootTimeoutMinutes: 15,
+      maxEurPerHour: 0.05,
+      exposure: {
+        ports: [
+          { protocol: 'udp', port: 3478 },
+          { protocol: 'tcp', port: 3478 },
+          { protocol: 'tcp', port: 443 },
+          // Relay allocations: one port per relayed browser leg.
+          { protocol: 'udp', port: COTURN_RELAY_PORTS[0], to: COTURN_RELAY_PORTS[1] },
+        ],
+      },
+      bootScript: COTURN_BOOT_SCRIPT,
+      description: 'TURN relay (coturn, use-auth-secret REALTIME_TURN_SECRET) for realtime WebRTC: 3478 udp/tcp + 443 tcp.',
     },
   },
   {
