@@ -22,12 +22,14 @@ GET  /health                    200 only when the three models answered a warm-u
 
 import asyncio
 import base64
+import io
 import json
 import os
 import re
 import struct
 import subprocess
 import time
+import wave
 from pathlib import Path
 
 import httpx
@@ -91,10 +93,27 @@ def load_voices() -> None:
 
 # ── Hear ─────────────────────────────────────────────────────────────────────
 
+def wav_pcm16_16k(data: bytes) -> np.ndarray | None:
+    try:
+        with wave.open(io.BytesIO(data)) as clip:
+            if (clip.getnchannels(), clip.getsampwidth(), clip.getframerate(), clip.getcomptype()) != (1, 2, 16000, "NONE"):
+                return None
+            frames = clip.readframes(clip.getnframes())
+    except (wave.Error, EOFError, struct.error):
+        return None
+    if len(frames) < 2:
+        return None
+    return np.frombuffer(frames[:len(frames) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
+
+
 def decode_16k(data: bytes) -> np.ndarray:
     """Any container/codec → mono float32 16 kHz via ffmpeg. faster-whisper 1.2.1 decodes with PyAV through an
     `open(metadata_errors=…)` argument that PyAV 19 removed (2026-10-04: every /v1/s2s failed with TypeError), so the
-    audio never goes through PyAV here."""
+    audio never goes through PyAV here. A WAV that is already PCM16 mono 16 kHz (what the realtime edge sends) is read
+    in-process, without the ffmpeg subprocess."""
+    pcm = wav_pcm16_16k(data)
+    if pcm is not None:
+        return pcm
     out = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-f", "f32le", "-ac", "1", "-ar", "16000", "pipe:1"],
                          input=data, capture_output=True, check=True).stdout
     return np.frombuffer(out, dtype=np.float32)
@@ -102,8 +121,10 @@ def decode_16k(data: bytes) -> np.ndarray:
 
 def transcribe_sync(data: bytes, language: str | None, prompt: str | None) -> dict:
     started = time.perf_counter()
-    heard = stt_batcher.transcribe(decode_16k(data), language, prompt)
-    return {**heard, "ms": round((time.perf_counter() - started) * 1000)}
+    audio = decode_16k(data)
+    audio_ms = round((time.perf_counter() - started) * 1000)
+    heard = stt_batcher.transcribe(audio, language, prompt)
+    return {**heard, "audio_ms": audio_ms, "ms": round((time.perf_counter() - started) * 1000)}
 
 
 # ── Think: stream tokens, cut sentences ──────────────────────────────────────
