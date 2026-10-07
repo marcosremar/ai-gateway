@@ -311,3 +311,144 @@ key check) — `RealtimeService.resolveToken(token)` verifies a token for it.
 7. Kill the edge → s2s-stream / post; check the remembered winner on the next session.
 8. Barge-in: speak during NPC audio → `interrupted` within one frame; `end_turn` cuts the edge's silence wait.
 9. Telemetry: every event of steps 3–8 shares the session's `traceId` across browser, gateway and edge logs.
+
+## Load and bad-network harness (`scripts/realtime-e2e/load.ts`)
+
+Measures what a class gets: N students, each holding one realtime session and speaking a clip on a duty cycle (default
+3 minutes, one turn every 15 ± 5 s, arrivals spread over 30 s), under a named network profile, against the local fake
+stack or a real gateway. The clock of every turn starts at the **last voiced sample of the clip the client sent** — so
+the edge's endpointing silence (`RT_VAD_SILENCE_MS`, 700 ms) is inside the number — and stops at the first non-silent
+audio received. Output: `<out>/report.json`, a text summary and one `PASS`/`FAIL` line (default target: p50 ≤ 1500 ms,
+p95 ≤ 2000 ms, failures + truncations ≤ 1 %); exit code 0 / 1, 2 when the harness itself broke.
+
+```bash
+# local fake stack (Linux + root; same needs as e2e.ts)
+EDGE_PYTHON=/root/rt-venv/bin/python CHROME_PATH=/path/to/chrome \
+  bun scripts/realtime-e2e/load.ts --n 20 --rtc 8 --chrome 1 --profile campus-slow --replicas 2 --cap 16
+
+# real gateway + deployment (profile clean runs anywhere; the others need Linux + root for netns/tc)
+GW=https://gw.example KEY=<app key of the deployment's app> DEP=parle-speech \
+RT_CONFIG='{"system":"…","messages":[],"voice":"<catalog voice>","language":"pt"}' \
+  bun scripts/realtime-e2e/load.ts --n 100 --rtc 30 --chrome 2 --clip turn.wav --profile campus-slow --out /tmp/run1
+```
+
+Every option is in the header of `load.ts`. Against a real stack `--clip` must be real speech (PCM16 mono WAV, any
+rate; e.g. gTTS + `ffmpeg -ac 1 -c:a pcm_s16le`): the default tone is what the fake stack's energy VAD hears as speech,
+and a real Whisper filters it. Leading and trailing silence of the clip are cut, so the clip's end is the last voiced
+sample. Each session charges the app's daily request budget at admission (40 requests per 10-minute token); an admin
+key is not charged. The `generator` line of the summary says whether the machine running the clients kept up (simulated
+microphone frames sent late): a run marked `SATURATED` measured the load generator, not the service.
+
+### Clients — what each one exercises
+
+| Client | Runs | Exercises | Does not exercise |
+|---|---|---|---|
+| `ws` (Bun, in `load-client.ts`) | every student that is not `--rtc` | admission, the gateway's WS relay, the edge's WS session: PCM16 16 kHz 20 ms frames up in real time (silence between turns, as a live microphone), events and 24 kHz audio down; the SDK's 64 KiB uplink-backlog drop | the browser's AudioWorklet capture and playback buffer, the SDK's own state machine, telemetry upload |
+| `rtc` (aiortc, `load_rtc.py`, 8 peers per process) | `--rtc N` students | admission, signaling through the gateway, ICE (host, TURN), DTLS/SRTP, Opus both ways straight to the edge, the `events` data channel; the ladder: gather ≤ 2 s, offer ≤ 3 s, connected ≤ 3 s, else the `ws` client with the same token | a browser's ICE agent: aiortc uses **one** TURN server per connection (the harness picks the `transport=udp` URL, or `tcp` under `udp-blocked` / `--turn tcp`), gathers completely before the offer, and has no packet-loss concealment or adaptive jitter buffer |
+| `chrome` (`page-load.js`, the real SDK) | `--chrome K` sessions, each forced on one rung (`--chrome-transports webrtc,ws,s2s-stream`, round robin) | everything a learner's browser does on that rung, and the **audible** latency (next section) | load: one Chromium each (~1 vCPU headless) |
+
+The lightweight clients do not speak the `s2s-stream` and `post` rungs (Chrome does `s2s-stream`). A student refused at admission (`503 saturated`/`cold`) retries after
+`Retry-After` and each turn they could not speak counts as a failed turn (`failed:admission:saturated`), so saturation
+shows in the failure rate; the latency a real learner would then get on `/v1/s2s` is not measured.
+
+### What a turn is counted as
+
+- **ok**: `done` without error, audio heard, `audio_end` seen.
+- **failed**: no session at the turn's time (admission refused, connect failed, session lost), no `done` within
+  `--turn-timeout`, `error` before any audio, `empty`/`filtered` transcript, no audio.
+- **truncated**: `error` (or a lost session, or no `done`) *after* audio started — the GPU round-2 case — or a clean
+  `done` whose audio is too short for its reply: audio ms per reply character under `--trunc-ratio` (0.75) of the run's
+  90th-percentile rate for that client (`--ms-per-char` fixes the reference instead; fewer than 5 clean turns: not judged). The realtime events do not
+  announce sentences, so a missing sentence can only be seen as missing duration: one that is under 25 % of the reply
+  passes at the default ratio (with the fake model's fixed-rate audio use `--trunc-ratio 0.9`).
+
+Latency shares (≤ 1.0 / 1.5 / 2.0 s) are over **all attempted turns**: a failed turn counts as over 2 s.
+
+### Audible latency in Chrome — one meter for every rung (`page-meter.js`)
+
+`page-load.js` and `page-live.js` import `/meter.js` before the SDK. It measures at the page's audio **output**, without
+touching `sdk/`: `AudioNode.prototype.connect` is wrapped, and every node connected to an `AudioDestinationNode` (the
+SDK's player worklet on the `ws`, `s2s-stream` and `post` rungs) is mirrored into an `AnalyserNode`; the WebRTC remote
+track goes into the same meter through a `MediaStreamSource`. One definition for all rungs: a ~20 ms window (`fftSize`
+= the power of two nearest 20 ms at the context's rate: 21.3 ms at 24/48 kHz) polled every 5 ms, loud when its RMS is
+over 0.02. The microphone is metered the same way on its own analyser, which is connected to nothing: its samples never
+reach the output meter.
+
+- **Reference instant** = the last voiced sample of the clip. Chrome does not say when its fake capture device starts
+  feeding the file, so it is not derived from the file's timing: the page meters the microphone track itself, and the
+  end of a loud span is `last loud poll − window + poll/2`. On the clip rung there is no live microphone: the page
+  takes "now" as the end of the speech, waits `--clip-end-silence` (700 ms, the edge's `RT_VAD_SILENCE_MS`, standing for
+  the client VAD's `endSilenceMs`) and posts the voiced clip — the same as posting a recording whose voiced range ended
+  that long ago.
+- **Per turn**: `receivedMs` (reference → the `audio_start` event: first audio from the server), `audibleMs` (reference
+  → first loud window at the output), `heardAfterReceivedMs` (the playout path), `audibleFromVadEndMs` (the old figure,
+  from the edge's `vad end` event; none on the clip rung) and `meterErrorMs`.
+- **Error bound**: a loud onset is seen at the next poll, so each edge is known to ±2.5 ms on time and the latency to
+  ±5 ms; when the page's timer runs late the bound of that turn is the real gap between polls, recorded as
+  `meterErrorMs` (5 ms on almost every turn of an unloaded machine; the maximum is in the report). Not included: the
+  device output latency after the Web Audio graph, and Chrome's `MediaStreamSource` input buffering, which delays the
+  microphone reference and the WebRTC output alike.
+- **What is not counted**: the microphone (never connected to a destination); a silent reply (`audio_start` arrives,
+  no loud window: the turn is `failed:no_audio`, reported as *no audible audio*, never as a latency); the tail of the
+  previous reply (output loud at the reference or 100 ms before it → the turn is `overlapped` and gets no figure).
+- The report's `audible` block gives, per rung, audible p50/p95 next to the lightweight clients' p50 and their
+  difference (`offsetMs`), so the lightweight numbers read as *audible ≈ protocol + offset*.
+- **Why the live harness never drove a clip turn on `s2s-stream`** (both in the harness, fixed there): `page-live.js`
+  only waited for `done` and never called `session.sendTurn()` — without the `voice` option nothing records a clip —
+  and it passed no `config`: a session forced to a clip rung asks for no admission (`sdk/browser/realtime/session.ts`
+  `admit()`, no realtime rung wanted), so there is no token and `config()` falls back to `opts.config ?? {}`; the turn
+  would have reached `/v1/s2s` with no system prompt and no voice. The pages now fetch `/config.json` from the app
+  backend and post `/clip.wav`. `e2e-live.ts turn webrtc|ws|s2s-stream` forces each rung.
+
+### Network profiles
+
+On Linux as root the clients always run in a network namespace (`aigwload`, veth `aigwl0` ↔ `aigwl1`, 10.77.0.0/24) and
+the profile is applied to the veth pair only: `netem` on both ends, with an `fq maxrate` child for the rates — per flow,
+so each student has its own slow link instead of the class sharing one. **Shaped**: student ↔ gateway (admission,
+signaling, the whole WS relay path with its audio), student ↔ edge (WebRTC media over UDP), student ↔ TURN.
+**Not shaped**: gateway ↔ edge, edge ↔ model, TURN ↔ edge (loopback / host-local). Against a real gateway the
+namespace is NATed out (MASQUERADE + two FORWARD rules) and the real path to the gateway comes on top of the profile.
+`netDown()` runs in a `finally` and on SIGINT/SIGTERM, and first thing on the next run: it deletes the namespace (the
+veth pair and its qdiscs go with it), the NAT rules and `/etc/netns/aigwload`; the run prints whether `tc qdisc`,
+`iptables -S`, `iptables -t nat -S` and `ip netns` are identical to before (`net-before.txt` / `net-after.txt`).
+
+| Profile | Applied (each direction unless said) | Where the numbers come from |
+|---|---|---|
+| `clean` | namespace only, no qdisc | — |
+| `campus-slow` | down 2 Mbit/s, up 512 kbit/s per flow; 40 ± 10 ms delay (80 ± 20 ms round trip); 1 % loss | **assumption**, not a measurement: a crowded classroom access point. Replace with a measurement in the room (speed test, `ping` to the gateway and `mtr` loss over a class hour) |
+| `udp-blocked` | `iptables` in the namespace: outbound UDP dropped except port 53 | the firewall case of `docs/realtime-edge.md`: TURN over TCP or the WS rung |
+| `lossy` | 75 ms delay (150 ms round trip), 5 % loss | assumption: the bad end of Wi-Fi |
+| `flap` | the link drops (100 % loss) for 3 s every 30 s | assumption: roaming between access points |
+
+netem's jitter reorders packets (each packet draws its own delay), which a real Wi-Fi link does less: `campus-slow`
+is harsher on TCP than its numbers suggest.
+
+### Cost
+
+Against a real gateway the harness reads `GET /v1/deployments/<name>` every 2 s (replica count, phase, machine type,
+catalog `pricePerHour`) and prints machine-hours per type and the € of the run window (replicas not `stopped` × their
+price × time). Warm-up before the first student and the idle minutes after the last are outside the window. Against
+the fake stack: `n/a`.
+
+### Local proof (2026-10-07, fake stack in a 6-vCPU / 8 GB Linux VM, tone clip of 1.4 s)
+
+The fake model answers in ~230 ms after the edge's 700 ms endpointing (STT 80, LLM first token 60, first sentence, TTS
+50), so ~930 ms is the floor; every row is 180 s per student + 30 s ramp unless said.
+
+| Run | Turns ok / attempted | First audio p50 / p95 ms: ws · webrtc (aiortc) | Notes |
+|---|---|---|---|
+| `clean`, N=20 (8 webrtc), 3 Chrome, 2 × 16 | 281 / 281 | 940 / 1005 · 1174 / 1668 | PASS. Chrome audible p50: ws 949, s2s-stream 944, webrtc 1149 |
+| `clean`, N=100 (6 webrtc), 6 × 16 = 96 slots | 1146 / 1186 | 929 / 935 · 1161 / 1164 | 4 students refused 304 times (`503 saturated`, Retry-After 2 s) until slots freed: 40 turns `failed:admission:saturated`, FAIL on 3.37 % |
+| `campus-slow`, N=20, 1 Chrome | 250 / 250 | 1018 / 1083 · 1657 / 1964 | 3 of 9 WebRTC connects missed the 3 s budget and fell to ws; Chrome webrtc p50 1390 |
+| `udp-blocked`, N=20, 1 Chrome | 253 / 253 | 928 / 941 · 1162 / 1165 | every aiortc pair `relay/host` (TURN over TCP), none `host/host` |
+| `flap`, N=20, 1 Chrome | 246 / 248 | 931 / 3097 · 1161 / 3703 | turns that meet the 3 s outage wait for it; 2 timeouts; FAIL on p95 |
+| `lossy`, N=20, 3 Chrome, 90 s | 137 / 139 | 1274 / 2552 · 1952 / 2376 | FAIL; Chrome audible p50: ws 1279, webrtc 1704, s2s-stream 2125 |
+| `FAKE_TTS_DROP_EVERY=4` (empty body), N=10, `--trunc-ratio 0.9` | 24 / 89 | — | 65 `truncated:short_audio` = all 65 turns whose audio was shorter than the full reply |
+| `FAKE_TTS_DROP_EVERY=4 FAKE_TTS_DROP_MODE=abort`, N=10 | 40 / 86 | — | 46 `truncated:error_after_audio:upstream` |
+| `FAKE_TTS_SILENT=1`, N=4, 3 Chrome | 0 / 41 | — | all `failed:no_audio`; Chrome received `audio_start` on the three rungs and reports no audible audio |
+
+Audible vs protocol (clean): ws +9 to +15 ms in four runs (the player worklet); webrtc −63 to −25 ms (Chrome's jitter
+buffer is shorter than aiortc's fixed one, and the spread is ~250 ms, so the aiortc figure is an upper estimate, not an
+offset to add); `s2s-stream` has no lightweight client, its audible p50 equals ws within 20 ms, and its first turn pays
+~120 ms more because the SDK creates its player on the first audio. Limits of this VM: 100 `ws` students run at load
+average 2.3; 24 aiortc students saturate it (the run is marked `SATURATED`); 8 aiortc + 3 Chrome is the most it carried.

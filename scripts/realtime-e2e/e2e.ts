@@ -8,22 +8,14 @@
  * The edge's Python deps: `uv pip install -r docker/aigw-edge/requirements.txt`. Prints PASS/FAIL per check and a JSON
  * summary; exits non-zero on the first failure.
  */
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join, resolve } from 'path';
-import { chromium, type Browser } from 'playwright';
-import { DeploymentController } from '../../src/deployments/controller';
-import { HttpReplicaProbe } from '../../src/deployments/http';
-import { MemoryDeploymentStore } from '../../src/deployments/store';
-import { ApiKeyRegistry } from '../../src/gateway/proxy/middleware/api-keys';
-import { startProxy } from '../../src/gateway/proxy/server';
-import { createRealtime } from '../../src/realtime';
-import { createS2SRoute } from '../../src/s2s/route';
-import { realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv } from '../../src/telemetry';
-import { freePort, LocalEdgeCloud } from './local-cloud';
+import { join } from 'path';
+import type { Browser } from 'playwright';
+import { openMicPage, startAppBackend } from './app-page';
+import { concat, silence, tone, wav } from './clip';
+import { startLocalStack } from './local-stack';
 
-const ROOT = resolve(import.meta.dir, '../..');
 const PYTHON = process.env.EDGE_PYTHON || 'python3';
 const CHROME = process.env.CHROME_PATH || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const WORK = mkdtempSync(join(tmpdir(), 'aigw-rt-e2e-run-'));
@@ -46,143 +38,20 @@ async function until(what: string, fn: () => boolean | Promise<boolean>, ms = 30
   throw new Error(`timed out waiting for ${what}`);
 }
 
-// ── TURN: a real coturn on this machine's interface (the browser and the edge both reach it) ──────────────────
-const LAN_IP = (() => {
-  const out = Bun.spawnSync(['ip', '-4', '-o', 'addr', 'show', 'scope', 'global']).stdout.toString();
-  return out.match(/inet (\d+\.\d+\.\d+\.\d+)/)?.[1] ?? '127.0.0.1';
-})();
-const TURN_SECRET = 'e2e-turn-secret-0123456789';
-const TURN_PORT = 3478;
-let coturn: ReturnType<typeof Bun.spawn> | null = null;
-function startCoturn(): void {
-  coturn = Bun.spawn(['turnserver', '-n', `--listening-ip=${LAN_IP}`, `--relay-ip=${LAN_IP}`, `--listening-port=${TURN_PORT}`,
-    '--min-port=49000', '--max-port=49400', '--use-auth-secret', `--static-auth-secret=${TURN_SECRET}`, '--realm=aigw-e2e',
-    '--no-cli', '--no-tls', '--no-dtls', '--log-file=stdout', '--simple-log', '--fingerprint'], { stdout: 'pipe', stderr: 'pipe' });
-}
-function stopCoturn(): void { coturn?.kill('SIGKILL'); coturn = null; }
+const stack = await startLocalStack({ python: PYTHON, work: WORK, keys: KEYS, deployment: DEP, maxSessions: MAX_SESSIONS, log });
+const { gw: GW, cloud, controller, startCoturn, stopCoturn } = stack;
 
-// ── gateway, wired like serve.ts ─────────────────────────────────────────────────────────────────────────────────
-const gwPort = await freePort();
-const GW = `http://127.0.0.1:${gwPort}`;
-const keyRegistry = new ApiKeyRegistry(KEYS.join(','));
-const userOfReq = (req: IncomingMessage) => keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null;
-const cloud = new LocalEdgeCloud({ python: PYTHON, gatewayUrl: () => GW, maxSessions: MAX_SESSIONS, log });
-const controller = new DeploymentController({
-  backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(2000), namespace: 'e2e', reconcileMs: 300,
-  maxTotalReplicas: 6, log: (msg, data) => log(`controller ${msg} ${data ? JSON.stringify(data) : ''}`),
-});
-await controller.init();
-controller.start();
-
-let realtimeSessionOf: ((token: string) => { sid: string; app: string; dep: string; rep: string } | null) | null = null;
-const telemetry = telemetryFromEnv({ TELEMETRY_DIR: join(WORK, 'telemetry') }, {
-  auth: {
-    resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
-    isMasterKey: () => false,
-    deployment: (name) => {
-      const replicaToken = controller.tokenOf(name);
-      const app = controller.get(name)?.app;
-      return replicaToken ? { replicaToken, ...(app ? { app } : {}) } : null;
-    },
-    replica: (id) => controller.replicaAuth(id) ?? null,
-    resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
-  },
-  isAdminToken: (t) => keyRegistry.resolve(t)?.userId === 'admin',
-  log: (msg, data) => log(`telemetry ${msg} ${data ? JSON.stringify(data) : ''}`),
-})!;
-await telemetry.start();
-setGatewayTelemetrySink((event) => telemetry.ingest.ingestOwn(event));
-
-const s2sRoute = createS2SRoute({
-  controller, deployment: DEP,
-  stagesFor: () => { throw new Error('no composed fallback in the e2e'); },
-  log: (msg, data) => log(`s2s ${msg} ${data ? JSON.stringify(data) : ''}`),
-});
-const realtime = createRealtime({
-  controller, defaultDeployment: DEP,
-  env: { REALTIME_TURN_URLS: `turn:${LAN_IP}:${TURN_PORT}?transport=udp,turn:${LAN_IP}:${TURN_PORT}?transport=tcp`, REALTIME_TURN_SECRET: TURN_SECRET },
-  netProbeMs: 1_000,
-  userOf: userOfReq,
-  isAdmin: (u) => u === 'admin',
-  telemetry: realtimeSinkToTelemetry(telemetry.ingest),
-  pollMs: 0,
-  log: (msg, data) => log(`realtime ${msg} ${data ? JSON.stringify(data) : ''}`),
-});
-realtimeSessionOf = sessionResolverFrom(realtime.service);
-const gateway = await startProxy({
-  port: gwPort, hostname: '127.0.0.1', apiKeys: KEYS, providers: {},
-  customRoutes: [{ method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, ...telemetry.adminRoutes],
-  publicRoutes: telemetry.publicRoutes,
-});
-realtime.mount(gateway);
-
-// ── the app's backend: holds the app key, the browser only sees session tokens ───────────────────────────────────
-const sdkBuild = await Bun.build({ entrypoints: [join(ROOT, 'sdk/browser/realtime/index.ts')], target: 'browser', format: 'esm' });
-if (!sdkBuild.success) throw new Error(`SDK build failed: ${sdkBuild.logs.join('\n')}`);
-const SDK_JS = await sdkBuild.outputs[0].text();
-const PAGE = `<!doctype html><meta charset="utf-8"><title>rt e2e</title><body><script type="module" src="/page.js"></script>`;
-const PAGE_JS = await Bun.file(join(import.meta.dir, 'page.js')).text();
-async function readAll(req: IncomingMessage): Promise<Buffer> { const c: Buffer[] = []; for await (const x of req) c.push(x as Buffer); return Buffer.concat(c); }
 const LESSON_CONFIG = { system: 'Você é a padeira. Responda curto.', messages: [], voice: 'br-m-08' };
-async function relay(req: IncomingMessage, res: ServerResponse, path: string, withConfig = false): Promise<void> {
-  let body = await readAll(req);
-  // The app's backend owns the session config (system prompt, history): the browser only asks for transports.
-  const dep = req.headers['x-e2e-deployment'] ? { deployment: String(req.headers['x-e2e-deployment']) } : {};
-  if (withConfig) body = Buffer.from(JSON.stringify({ ...JSON.parse(body.toString() || '{}'), config: { ...LESSON_CONFIG, ...dep } }));
-  const headers: Record<string, string> = { Authorization: 'Bearer key-parle', 'Content-Type': String(req.headers['content-type'] ?? 'application/json') };
-  if (req.headers.traceparent) headers.traceparent = String(req.headers.traceparent);
-  const up = await fetch(`${GW}${path}`, { method: 'POST', headers, body });
-  const out: Record<string, string> = {};
-  up.headers.forEach((v, k) => { if (!['content-length', 'transfer-encoding', 'connection'].includes(k)) out[k] = v; });
-  res.writeHead(up.status, out);
-  if (up.body) for await (const chunk of up.body) res.write(chunk);
-  res.end();
-}
-const appPort = await freePort();
-const APP = `http://127.0.0.1:${appPort}`;
-const app: Server = createServer((req, res) => {
-  const path = (req.url ?? '/').split('?')[0];
-  if (req.method === 'GET' && path === '/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(PAGE); return; }
-  if (req.method === 'GET' && path === '/sdk.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(SDK_JS); return; }
-  if (req.method === 'GET' && path === '/page.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(PAGE_JS); return; }
-  if (req.method === 'POST' && path === '/api/rt-session') { void relay(req, res, '/v1/realtime/sessions', true); return; }
-  if (req.method === 'POST' && path === '/api/s2s') { void relay(req, res, '/v1/s2s'); return; }
-  res.writeHead(404); res.end();
+const app = await startAppBackend({
+  gw: GW, key: 'key-parle', pageFile: 'page.js',
+  config: (req) => ({ ...LESSON_CONFIG, ...(req.headers['x-e2e-deployment'] ? { deployment: String(req.headers['x-e2e-deployment']) } : {}) }),
 });
-await new Promise<void>(r => app.listen(appPort, '127.0.0.1', r));
 
-// The learner's microphone: Chromium plays this file as the fake capture device, in a loop.
 const MIC_WAV = join(WORK, 'mic.wav');
-const py = Bun.spawnSync([PYTHON, '-c', `
-import math, struct, numpy as np
-sr = 48000
-def tone(s, f=210.0):
-    t = np.arange(int(s * sr)) / sr
-    return 0.25*np.sin(2*math.pi*f*t) + 0.1*np.sin(2*math.pi*2*f*t) + 0.05*np.sin(2*math.pi*3*f*t)
-x = np.concatenate([np.zeros(int(0.8*sr)), tone(1.4), np.zeros(int(9.0*sr))])
-pcm = (x * 32767).astype('<i2').tobytes()
-open(${JSON.stringify(MIC_WAV)}, 'wb').write(b'RIFF' + struct.pack('<I', 36 + len(pcm)) + b'WAVEfmt ' + struct.pack('<IHHIIHH', 16, 1, 1, sr, sr*2, 2, 16) + b'data' + struct.pack('<I', len(pcm)) + pcm)
-`]);
-if (py.exitCode !== 0) throw new Error(`mic wav: ${py.stderr.toString()}`);
+writeFileSync(MIC_WAV, wav(concat(silence(0.8, 48000), tone(1.4, 48000), silence(9, 48000)), 48000));
 
 const browsers: Browser[] = [];
-async function openPage(extraArgs: string[] = []) {
-  const browser = await chromium.launch({
-    executablePath: CHROME,
-    args: [
-      '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${MIC_WAV}`,
-      '--autoplay-policy=no-user-gesture-required', '--disable-features=WebRtcHideLocalIpsWithMdns', ...extraArgs,
-    ],
-  });
-  browsers.push(browser);
-  const ctx = await browser.newContext({ permissions: ['microphone'] });
-  const page = await ctx.newPage();
-  page.on('console', (m) => log(`[page ${m.type()}] ${m.text()}`));
-  page.on('pageerror', (e) => log(`[page error] ${e.message}`));
-  await page.goto(APP);
-  await page.waitForFunction(() => (window as unknown as { e2eReady?: boolean }).e2eReady === true);
-  return { browser, page };
-}
+const openPage = (extraArgs: string[] = []) => openMicPage({ chrome: CHROME, mic: MIC_WAV, url: app.url, readyFlag: 'e2eReady', log, extraArgs, browsers });
 
 type Run = {
   transport: string | null; events: Array<{ type: string; [k: string]: unknown }>; loudFrames: number; traceId: string;
@@ -369,15 +238,9 @@ try {
 } finally {
   if (udpBlock) Bun.spawnSync(['iptables', '-D', ...udpBlock]);
   for (const rule of blocks) Bun.spawnSync(['iptables', '-D', ...rule]);
-  stopCoturn();
   for (const b of browsers) await b.close().catch(() => {});
-  controller.stop();
-  realtime.stop();
-  await cloud.closeAll();
-  gateway.closeAllConnections?.();
-  gateway.close();
+  await stack.stop();
   app.close();
-  await telemetry.stop?.();
   writeFileSync(join(WORK, 'summary.json'), JSON.stringify(results, null, 2));
   console.log(JSON.stringify({ passed: results.checks.filter(c => c.ok).length, failed: results.checks.filter(c => !c.ok).length, latency: results.latency, log: LOG }, null, 2));
   if (!process.env.E2E_KEEP) rmSync(join(WORK, 'telemetry'), { recursive: true, force: true });
