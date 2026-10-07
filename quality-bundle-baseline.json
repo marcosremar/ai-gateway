@@ -80,9 +80,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "proxy": {
-    "raw": 137401,
-    "gzip": 33732,
-    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+    "raw": 164929,
+    "gzip": 42281,
+    "reason": "proxy: STT hallucination filter on /v1/audio/transcriptions + s2s (filter code + 14 KB core blocklist pt/fr/en/es/it/de; full dataset stays out, #44)"
   },
   "tracking": {
     "raw": 20369,
