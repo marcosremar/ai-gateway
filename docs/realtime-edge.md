@@ -69,19 +69,46 @@ also sets `realtime` gets the UDP range added to its own group. Tested against a
 The edge accepts media only for sessions it answered: aioice drops STUN without the ICE credentials of its own SDP, and
 DTLS/SRTP keys are per session. Ports are bound per session from the range (randomized), released on close.
 
+## Reachability — checked, not assumed (`aigw_edge/netcheck.py`, `src/realtime/net-probe.ts`)
+
+A replica's firewall or NAT may not let a browser's UDP in. The edge finds out and picks the fastest path that works,
+and every step is logged:
+
+| Path | When | Media | Log |
+|---|---|---|---|
+| `direct` | the gateway's UDP echo to the probe port came back | browser ↔ edge host candidate (or hole punching through a stateful firewall) | `rt.net.probe` (gateway), `edge.net.path` |
+| `relay` | inbound UDP blocked, the edge's OUTBOUND TURN allocation works (UDP, then TCP, then TLS) | the edge also offers a relay candidate on the TURN server, so no inbound port is needed | `edge.net.relay_try` per URL, `edge.net.path` |
+| `ws` | neither | WebRTC is not listed in `transports`: admission offers the WebSocket rung through the gateway (reverse proxy, slowest) at once, no ~5 s doomed ICE attempt | `edge.net.path` level warn |
+
+- The **last port** of `RT_UDP_PORTS` answers `AIGWP1<nonce>` with `AIGWR1<nonce>` (same size, ≤ 64 bytes); media uses
+  the rest of the range. Same firewall rule, so the echo tests what a browser would hit.
+- The gateway probes every ready replica of a realtime deployment whose path is `unknown` (a fresh edge) or older than
+  30 min, from a 15 s loop and on admission; at most once a minute per replica. It posts the result to
+  `POST /__aigw/rt/net` `{udpInbound, rttMs, iceServers}` with TURN credentials valid 1 h for the relay test; the
+  answer is the decision (`path`, `relay`, `reasons`). Each offer then carries the session's own TURN credentials, used
+  on the URL that worked.
+- Per session: `edge.ice.selected` and `rt.ice.selected` (browser) say which pair carries the media (`host`/`relay` on
+  each side, protocol, RTT), in the session's trace.
+- `GET /__aigw/rt/status` → `net: {path, udpInbound, probePort, publicIp, probeHits, relay, reasons, checkedAt}`.
+
+Proven locally with real coturn, iptables and Chromium (`scripts/realtime-e2e`, 2026-10-07): direct 2.2 s to connect;
+inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first audio ~240 ms on all three.
+
 ## Routes (behind the token gate)
 
 | Route | Body → answer |
 |---|---|
 | `POST /__aigw/rt/offer` | `{sdp, type:"offer", token, traceparent?}` → `{sdp, type:"answer", sessionId}`; 401 `unauthorized`, 503 `capacity` / `warming`, 400 `bad_request` |
 | `POST /__aigw/rt/ice` | `{sessionId, candidate}` (string or `{candidate, sdpMid, sdpMLineIndex}`; empty = end) — optional, the answer carries all candidates |
-| `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], ready, byTransport, workers}` |
+| `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], probePort, net, ready, byTransport, workers}` (`transports` is `["ws"]` on path `ws`) |
+| `POST /__aigw/rt/net` | `{udpInbound:"ok"\|"blocked", rttMs, iceServers}` from the gateway's probe → the decision (see *Reachability*) |
 | `DELETE /__aigw/rt/session/:id` | ends the session (`sessionId` of the offer, = the token's `sid`) |
 | `GET /__aigw/rt/ws?token=…&traceparent=…` | WebSocket. A refusal still upgrades, sends `{type:"error", code}` and closes 4401 (`unauthorized`) or 1013 (`capacity`/`warming`), so the code survives the relay |
 
 Token checks (the gateway's vectors, `tests/test_units.py`): HS256 only, constant-time signature, `exp > now`,
 `iat ≤ now + 60`, `exp − iat ≤ 900`, `cfg` ≤ 6144 chars and a JSON object, `rep` = this replica (`zone:uuid` also
-matches a bare `uuid`), `dep` = this deployment, `sid` single use (remembered until `exp`). Capacity is checked before
+matches a bare `uuid`), `dep` = this deployment, `sid` single use **per transport** (remembered until `exp`): the SDK's ladder tries WebRTC
+then WS with the one token of its admission, and a new session of the same `sid` supersedes the previous one. Capacity is checked before
 the token is consumed. Session limits: 15 min (`RT_MAX_SESSION_SECONDS`), 60 s of audio per turn
 (`RT_MAX_TURN_SECONDS`, the turn is cut there), `RT_IDLE_SECONDS` (120) without input.
 

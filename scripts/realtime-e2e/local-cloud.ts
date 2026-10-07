@@ -104,6 +104,17 @@ export class LocalEdgeCloud implements DeploymentBackend {
     return child;
   }
 
+  /** The UDP range the next replica gets (to firewall it before it boots). */
+  nextUdpRange(): [number, number] {
+    return [this.udpBase, this.udpBase + 40];
+  }
+
+  /** The edge's own status, read locally (not through the gateway). */
+  async edgeStatus(id: string): Promise<{ transports: string[]; net: { path: string; udpInbound: string; reasons: string[] } }> {
+    const rep = this.replicas.get(id)!;
+    return await (await fetch(`http://127.0.0.1:${rep.ports.edge}/__aigw/rt/status`)).json() as never;
+  }
+
   /** (Re)starts the edge sidecar of a replica, the way docker's restart policy would. */
   startEdge(rep: LocalReplica): void {
     rep.procs.edge = this.spawn(rep, 'edge', this.opts.python, ['-m', 'aigw_edge']);

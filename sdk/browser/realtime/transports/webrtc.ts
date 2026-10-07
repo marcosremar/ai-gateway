@@ -47,18 +47,26 @@ function waitConnected(pc: RTCPeerConnection, channel: RTCDataChannel, ms: numbe
   });
 }
 
-/** `rt.turn.used` when the selected candidate pair goes through a TURN relay (and over which protocol). */
+/**
+ * `rt.ice.selected` for every connected session: which pair carries the media (local/remote candidate type — host is
+ * the direct path, relay went through TURN —, protocol, RTT); plus `rt.turn.used` when the browser's side is a relay.
+ */
 async function reportRelay(pc: RTCPeerConnection, ctx: TransportContext): Promise<void> {
   try {
+    type Stat = { type: string; id: string; selectedCandidatePairId?: string; localCandidateId?: string; remoteCandidateId?: string; state?: string;
+      nominated?: boolean; currentRoundTripTime?: number; candidateType?: string; relayProtocol?: string; protocol?: string };
     const stats = await pc.getStats();
-    let pairId: string | undefined;
-    stats.forEach((s: { type: string; selectedCandidatePairId?: string }) => { if (s.type === 'transport' && s.selectedCandidatePairId) pairId = s.selectedCandidatePairId; });
-    let localId: string | undefined;
-    stats.forEach((s: { type: string; id: string; localCandidateId?: string; state?: string; nominated?: boolean }) => {
-      if (s.type === 'candidate-pair' && (s.id === pairId || (!pairId && s.nominated && s.state === 'succeeded'))) localId = s.localCandidateId;
-    });
-    let local: { candidateType?: string; relayProtocol?: string; protocol?: string } | undefined;
-    stats.forEach((s: { id: string; candidateType?: string; relayProtocol?: string; protocol?: string }) => { if (s.id === localId) local = s; });
+    const all: Stat[] = [];
+    stats.forEach((s: Stat) => { all.push(s); });
+    const pairId = all.find(s => s.type === 'transport' && s.selectedCandidatePairId)?.selectedCandidatePairId;
+    const pair = all.find(s => s.type === 'candidate-pair' && (s.id === pairId || (!pairId && s.nominated && s.state === 'succeeded')));
+    const local = all.find(s => s.id === pair?.localCandidateId);
+    const remote = all.find(s => s.id === pair?.remoteCandidateId);
+    ctx.telemetry.emit('rt.ice.selected', { attrs: {
+      local: local?.candidateType ?? null, remote: remote?.candidateType ?? null, protocol: local?.protocol ?? null,
+      relayProtocol: local?.relayProtocol ?? null,
+      rttMs: typeof pair?.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null,
+    } });
     if (local?.candidateType === 'relay') ctx.telemetry.emit('rt.turn.used', { attrs: { relayProtocol: local.relayProtocol ?? null, protocol: local.protocol ?? null } });
   } catch { /* stats unavailable */ }
 }

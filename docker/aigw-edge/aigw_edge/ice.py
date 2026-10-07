@@ -7,8 +7,8 @@ local address. A GPU replica needs instead:
   - the address the browser can reach announced in the SDP (`RT_PUBLIC_IP`; Vast: `PUBLIC_IPADDR`) and, where the
     provider remaps ports (Vast: `VAST_UDP_PORT_<n>`), the public port — the mediasoup "announced IP" model.
 
-No STUN/TURN on the server side: the replica has a public address, and a browser behind a strict NAT relays through the
-TURN deployment (the `coturn` profile) from its own side. `install()` patches aioice once at startup.
+The replica's own TURN allocation is added only on path `relay` (netcheck.py: inbound UDP blocked); otherwise no
+STUN/TURN on the server side, and a browser behind a strict NAT relays through the TURN deployment from its own side. `install()` patches aioice once at startup.
 """
 
 import asyncio
@@ -59,6 +59,17 @@ async def _get_component_candidates(self, component: int, addresses: list[str], 
         )
         self._protocols.append(protocol)
         candidates.append(protocol.local_candidate)
+    # path `relay` (netcheck.py): inbound UDP is blocked, so the edge also allocates on the TURN server, outbound.
+    if self.turn_server:
+        try:
+            candidate, protocol = await asyncio.wait_for(ice.relayed_candidate(
+                component=component, protocol_factory=lambda: ice.StunProtocol(self), turn_server=self.turn_server,
+                turn_username=self.turn_username, turn_password=self.turn_password, turn_ssl=self.turn_ssl,
+                turn_transport=self.turn_transport), timeout)
+            candidates.append(candidate)
+            self._protocols.append(protocol)
+        except Exception as error:  # noqa: BLE001 — host candidates still go out; the failure is in the edge log
+            print(f"[edge] ice: TURN allocation failed: {error!r}"[:200], flush=True)
     return candidates
 
 

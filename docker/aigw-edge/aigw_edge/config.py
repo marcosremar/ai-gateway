@@ -43,6 +43,8 @@ class Settings:
     max_sessions: int = 8
     rtc_workers: int = 0
     udp_ports: tuple[int, int] = (50000, 50100)
+    # The last port of RT_UDP_PORTS answers the gateway's reachability probe (netcheck.py); media uses the rest.
+    probe_port: int = 0
     udp_bind: str = ""
     public_ip: str = ""
     port_map: dict[int, int] = field(default_factory=dict)

@@ -46,6 +46,21 @@ async function until(what: string, fn: () => boolean | Promise<boolean>, ms = 30
   throw new Error(`timed out waiting for ${what}`);
 }
 
+// ── TURN: a real coturn on this machine's interface (the browser and the edge both reach it) ──────────────────
+const LAN_IP = (() => {
+  const out = Bun.spawnSync(['ip', '-4', '-o', 'addr', 'show', 'scope', 'global']).stdout.toString();
+  return out.match(/inet (\d+\.\d+\.\d+\.\d+)/)?.[1] ?? '127.0.0.1';
+})();
+const TURN_SECRET = 'e2e-turn-secret-0123456789';
+const TURN_PORT = 3478;
+let coturn: ReturnType<typeof Bun.spawn> | null = null;
+function startCoturn(): void {
+  coturn = Bun.spawn(['turnserver', '-n', `--listening-ip=${LAN_IP}`, `--relay-ip=${LAN_IP}`, `--listening-port=${TURN_PORT}`,
+    '--min-port=49000', '--max-port=49400', '--use-auth-secret', `--static-auth-secret=${TURN_SECRET}`, '--realm=aigw-e2e',
+    '--no-cli', '--no-tls', '--no-dtls', '--log-file=stdout', '--simple-log', '--fingerprint'], { stdout: 'pipe', stderr: 'pipe' });
+}
+function stopCoturn(): void { coturn?.kill('SIGKILL'); coturn = null; }
+
 // ── gateway, wired like serve.ts ─────────────────────────────────────────────────────────────────────────────────
 const gwPort = await freePort();
 const GW = `http://127.0.0.1:${gwPort}`;
@@ -54,7 +69,7 @@ const userOfReq = (req: IncomingMessage) => keyRegistry.resolve(String(req.heade
 const cloud = new LocalEdgeCloud({ python: PYTHON, gatewayUrl: () => GW, maxSessions: MAX_SESSIONS, log });
 const controller = new DeploymentController({
   backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(2000), namespace: 'e2e', reconcileMs: 300,
-  maxTotalReplicas: 3, log: (msg, data) => log(`controller ${msg} ${data ? JSON.stringify(data) : ''}`),
+  maxTotalReplicas: 6, log: (msg, data) => log(`controller ${msg} ${data ? JSON.stringify(data) : ''}`),
 });
 await controller.init();
 controller.start();
@@ -84,7 +99,9 @@ const s2sRoute = createS2SRoute({
   log: (msg, data) => log(`s2s ${msg} ${data ? JSON.stringify(data) : ''}`),
 });
 const realtime = createRealtime({
-  controller, defaultDeployment: DEP, env: {},
+  controller, defaultDeployment: DEP,
+  env: { REALTIME_TURN_URLS: `turn:${LAN_IP}:${TURN_PORT}?transport=udp,turn:${LAN_IP}:${TURN_PORT}?transport=tcp`, REALTIME_TURN_SECRET: TURN_SECRET },
+  netProbeMs: 1_000,
   userOf: userOfReq,
   isAdmin: (u) => u === 'admin',
   telemetry: realtimeSinkToTelemetry(telemetry.ingest),
@@ -110,7 +127,8 @@ const LESSON_CONFIG = { system: 'Você é a padeira. Responda curto.', messages:
 async function relay(req: IncomingMessage, res: ServerResponse, path: string, withConfig = false): Promise<void> {
   let body = await readAll(req);
   // The app's backend owns the session config (system prompt, history): the browser only asks for transports.
-  if (withConfig) body = Buffer.from(JSON.stringify({ ...JSON.parse(body.toString() || '{}'), config: LESSON_CONFIG }));
+  const dep = req.headers['x-e2e-deployment'] ? { deployment: String(req.headers['x-e2e-deployment']) } : {};
+  if (withConfig) body = Buffer.from(JSON.stringify({ ...JSON.parse(body.toString() || '{}'), config: { ...LESSON_CONFIG, ...dep } }));
   const headers: Record<string, string> = { Authorization: 'Bearer key-parle', 'Content-Type': String(req.headers['content-type'] ?? 'application/json') };
   if (req.headers.traceparent) headers.traceparent = String(req.headers.traceparent);
   const up = await fetch(`${GW}${path}`, { method: 'POST', headers, body });
@@ -174,7 +192,35 @@ type Run = {
 const typesOf = (r: Run) => r.events.map(e => (e.type === 'transport' ? `transport:${String(e.transport)}` : e.type));
 
 let exitCode = 0;
+const blocks: string[][] = [];
+/**
+ * A firewall that drops ALL inbound UDP to a port range. Stateless on purpose: behind a stateful one (cloud security
+ * groups) ICE often still connects host↔host by hole punching — the edge's own checks open the return path — which is
+ * right (the faster pair wins) but would not prove the relay.
+ */
+function blockInboundUdp([lo, hi]: [number, number]): void {
+  const rule = ['INPUT', '-p', 'udp', '--dport', `${lo}:${hi}`, '-j', 'DROP'];
+  if (Bun.spawnSync(['iptables', '-I', ...rule]).exitCode !== 0) throw new Error('iptables refused the UDP block (needs root)');
+  blocks.push(rule);
+}
+async function eventsNamed(event: string): Promise<Array<{ source: string; event: string; attrs?: Record<string, unknown> }>> {
+  const r = await fetch(`${GW}/v1/telemetry/events?event=${event}&limit=50`, { headers: { Authorization: 'Bearer key-admin' } });
+  return ((await r.json()) as { events?: Array<{ source: string; event: string; attrs?: Record<string, unknown> }> }).events ?? [];
+}
+async function bootDeployment(name: string): Promise<string> {
+  await controller.put(name, { profile: 'speech-stack', minReplicas: 1, maxReplicas: 1, realtime: { maxSessions: MAX_SESSIONS } }, { app: 'parle' });
+  await until(`${name} ready`, () => (controller.get(name)?.replicas ?? []).some(r => r.phase === 'ready'), 60_000);
+  const id = controller.get(name)!.replicas.find(r => r.phase === 'ready')!.id;
+  await cloud.edgeReady(id);
+  return id;
+}
+async function waitPath(id: string, want: string): Promise<{ transports: string[]; net: { path: string; udpInbound: string; reasons: string[] } }> {
+  let st = await cloud.edgeStatus(id);
+  await until(`${id} path ${want}`, async () => { st = await cloud.edgeStatus(id); return st.net.path !== 'unknown'; }, 40_000);
+  return st;
+}
 let udpBlock: string[] | null = null;
+startCoturn();
 try {
   // ── 1. deployment boots: controller → local replica → nginx ready → edge status ─────────────────────────────
   const put = await controller.put(DEP, { profile: 'speech-stack', minReplicas: 1, maxReplicas: 1, realtime: { maxSessions: MAX_SESSIONS } }, { app: 'parle' });
@@ -183,6 +229,8 @@ try {
   const replicaId = controller.get(DEP)!.replicas.find(r => r.phase === 'ready')!.id;
   await cloud.edgeReady(replicaId);
   check('replica ready behind the token gate, edge up', true, { replicaId });
+  const direct = await waitPath(replicaId, 'direct');
+  check('net: the gateway probed the replica, inbound UDP ok → path direct', direct.net.path === 'direct' && direct.transports.includes('webrtc'), direct.net);
 
   // ── 2. admission ───────────────────────────────────────────────────────────────────────────────────────────
   const admit = (key: string | null, body: unknown = {}, extra: Record<string, string> = {}) => fetch(`${GW}/v1/realtime/sessions`, {
@@ -214,6 +262,9 @@ try {
   const bySource = (tl.events ?? []).reduce<Record<string, number>>((m, e) => ({ ...m, [e.source]: (m[e.source] ?? 0) + 1 }), {});
   log(`timeline ${JSON.stringify(tl.events?.map(e => `${e.source}:${e.event}`))}`);
   check('telemetry: the session trace has browser, gateway and edge events', ['browser', 'gateway', 'edge'].every(s => (bySource[s] ?? 0) > 0), bySource);
+
+  const sel = (tl.events ?? []).filter(e => e.event === 'rt.ice.selected' || e.event === 'edge.ice.selected') as Array<{ source: string; event: string; attrs?: Record<string, unknown> }>;
+  check('logs: the selected ICE pair is direct (host↔host) on browser and edge', sel.length >= 2 && sel.every(e => e.attrs?.local === 'host'), sel.map(e => `${e.source}:${String(e.attrs?.local)}/${String(e.attrs?.remote)}`));
 
   // ── 5. UDP blocked in the browser → ws rung through the gateway's relay ─────────────────────────────────────
   // A network that drops UDP to the replica (the firewall case): iptables on the edge's media ports, this scenario only.
@@ -258,6 +309,43 @@ try {
     { admitted: held.length, status: full.status, body: fullBody });
   for (const h of held) await fetch(`${GW}/v1/realtime/sessions/${h.sessionId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${h.token}` } });
 
+  // ── 7b. the GPU's firewall drops inbound UDP: the edge relays through TURN itself (outbound), WebRTC still works ───
+  blockInboundUdp(cloud.nextUdpRange());
+  const relayRep = await bootDeployment('speech-relay');
+  const relaySt = await waitPath(relayRep, 'relay');
+  check('net: inbound UDP blocked → the edge allocates on TURN → path relay', relaySt.net.path === 'relay' && relaySt.transports.includes('webrtc'), relaySt.net);
+  const d = await openPage();
+  const viaRelay = await d.page.evaluate(() => (window as unknown as { e2eRun: (o: unknown) => Promise<Run> }).e2eRun({ sessionInit: { headers: { 'x-e2e-deployment': 'speech-relay' } } }));
+  log(`relay run ${JSON.stringify(viaRelay)}`);
+  check('relay: ladder still picks webrtc', viaRelay.transport === 'webrtc', { transport: viaRelay.transport, attempts: viaRelay.metrics.attempts });
+  check('relay: full turn, NPC audio played', typesOf(viaRelay).includes('done') && viaRelay.loudFrames > 20, { loud: viaRelay.loudFrames });
+  results.latency.relay = { connectMs: viaRelay.metrics.connectMs, edge: viaRelay.metrics.lastTurn, browserTtfaMs: viaRelay.ttfaBrowserMs };
+  await sleep(6_000);
+  const relayTl = await (await fetch(`${GW}/v1/telemetry/timeline?traceId=${viaRelay.traceId}`, { headers: { Authorization: 'Bearer key-admin' } })).json() as { events?: Array<{ source: string; event: string; attrs?: Record<string, unknown> }> };
+  const edgeSel = (relayTl.events ?? []).find(e => e.event === 'edge.ice.selected');
+  check('logs: the edge side of the pair is the TURN relay', edgeSel?.attrs?.local === 'relay', edgeSel?.attrs);
+
+  // ── 7c. inbound UDP blocked AND TURN unreachable: no WebRTC offered, straight to ws (no 5 s lost) ──────────────
+  stopCoturn();
+  blockInboundUdp(cloud.nextUdpRange());
+  const wsRep = await bootDeployment('speech-ws');
+  const wsSt = await waitPath(wsRep, 'ws');
+  check('net: no inbound UDP, no TURN → path ws, webrtc no longer listed', wsSt.net.path === 'ws' && !wsSt.transports.includes('webrtc'), wsSt.net);
+  await controller.remove('speech-relay');
+  const e = await openPage();
+  const wsOnly = await e.page.evaluate(() => (window as unknown as { e2eRun: (o: unknown) => Promise<Run> }).e2eRun({ sessionInit: { headers: { 'x-e2e-deployment': 'speech-ws' } } }));
+  log(`ws-only run ${JSON.stringify(wsOnly)}`);
+  check('ws-only replica: first attempt is ws, connected fast', wsOnly.transport === 'ws' && (wsOnly.metrics.attempts[0] as { type: string }).type === 'ws' && (wsOnly.metrics.connectMs ?? 1e9) < 1500,
+    { transport: wsOnly.transport, connectMs: wsOnly.metrics.connectMs, attempts: wsOnly.metrics.attempts });
+  check('ws-only: full turn', typesOf(wsOnly).includes('done'), typesOf(wsOnly));
+  results.latency.wsOnly = { connectMs: wsOnly.metrics.connectMs, edge: wsOnly.metrics.lastTurn };
+  const probes = await eventsNamed('rt.net.probe');
+  const paths = await eventsNamed('edge.net.path');
+  check('logs: one rt.net.probe (gateway) and one edge.net.path (edge) per replica, with the reasons',
+    ['direct', 'relay', 'ws'].every(p => probes.some(x => x.attrs?.path === p) && paths.some(x => x.attrs?.path === p)),
+    { gateway: probes.map(x => `${String(x.attrs?.replica)}:${String(x.attrs?.udpInbound)}→${String(x.attrs?.path)}`), edge: paths.map(x => String(x.attrs?.reasons)) });
+  await controller.remove('speech-ws');
+
   // ── 8. cold deployment: no-wake keeps it cold, a plain request wakes it ─────────────────────────────────────
   await controller.put('speech-cold', { profile: 'speech-stack', minReplicas: 0, maxReplicas: 1, realtime: { maxSessions: MAX_SESSIONS } }, { app: 'parle' });
   const nw = await admit('key-parle', { config: { deployment: 'speech-cold' } }, { 'X-Gateway-No-Wake': '1' });
@@ -278,6 +366,8 @@ try {
   log(`ERROR ${(err as Error).stack}`);
 } finally {
   if (udpBlock) Bun.spawnSync(['iptables', '-D', ...udpBlock]);
+  for (const rule of blocks) Bun.spawnSync(['iptables', '-D', ...rule]);
+  stopCoturn();
   for (const b of browsers) await b.close().catch(() => {});
   controller.stop();
   realtime.stop();

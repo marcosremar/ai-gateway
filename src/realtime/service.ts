@@ -11,20 +11,21 @@ import type { DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import type { AppLimitDenial } from '../gateway/proxy/app-limits';
-import { EdgeStatusCache, type EdgeStatusResult } from './edge-status';
+import { EdgeStatusCache, type EdgeStatus, type EdgeStatusResult } from './edge-status';
 import {
   isEdgeTransport, orderTransports, pickReplica, sessionCharge, REALTIME_REQUESTS_PER_MINUTE,
   type RealtimeTransportType, type ReplicaCandidate,
 } from './admission';
 import { iceServersFor, type IceConfig, DEFAULT_STUN_URLS } from './ice';
 import { reportExternalLoad } from './external-load';
-import { echoTrace, makeEmitter, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
+import { probeUdp } from './net-probe';
+import { echoTrace, makeEmitter, newTrace, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
 import {
   deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, verifySessionToken,
   RT_MAX_CFG_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
 } from './token';
 
-export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'>;
+export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list'>>;
 
 export interface RealtimeServiceOptions {
   controller: RealtimeController | null;
@@ -50,6 +51,11 @@ export interface RealtimeServiceOptions {
   log?: (msg: string, data?: Record<string, unknown>) => void;
   /** Gateway telemetry events (trace.ts); default: the log. */
   telemetry?: RealtimeTelemetrySink;
+  /** Media reachability probe of ready replicas (net-probe.ts): loop period; 0 = only on admission. Default 15 s. */
+  netProbeMs?: number;
+  /** A replica's path is re-checked after this long. Default 30 min. */
+  netRecheckMs?: number;
+  probeUdpImpl?: typeof probeUdp;
 }
 
 export const REALTIME_DEFAULT_TTL_SECONDS = 600;
@@ -102,6 +108,8 @@ export class RealtimeService {
   private readonly now: () => number;
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
   private poller: ReturnType<typeof setInterval> | null = null;
+  private netLoop: ReturnType<typeof setInterval> | null = null;
+  private readonly netProbed = new Map<string, number>();
   readonly emit: GatewayEmit;
 
   constructor(private readonly opts: RealtimeServiceOptions) {
@@ -111,6 +119,66 @@ export class RealtimeService {
     this.status = new EdgeStatusCache({
       fetchImpl: opts.fetchImpl, now: this.now, ttlMs: opts.statusTtlMs, timeoutMs: opts.statusTimeoutMs,
     });
+    const every = opts.netProbeMs ?? 15_000;
+    if (every > 0 && typeof opts.controller?.list === 'function') {
+      this.netLoop = setInterval(() => { void this.probeAll().catch(() => {}); }, every);
+      this.netLoop.unref?.();
+    }
+  }
+
+  /** Every ready replica of a realtime deployment whose media path is unknown or old gets probed (net-probe.ts). */
+  async probeAll(): Promise<void> {
+    for (const d of this.opts.controller?.list?.() ?? []) {
+      if (!this.opts.controller?.specOf(d.name)?.realtime) continue;
+      const token = this.opts.controller.tokenOf(d.name);
+      if (!token) continue;
+      for (const r of this.readyReplicas(d.name)) {
+        const s = await this.status.get(r.id, r.base, token);
+        if (s.ok) await this.probeNet(d.name, r, s.status, token);
+      }
+    }
+  }
+
+  /**
+   * UDP echo to the edge's probe port, then the result (and TURN credentials for the edge's own relay test) to the
+   * edge, which decides direct / relay / ws and lists its transports accordingly. At most one probe a minute per replica.
+   */
+  async probeNet(dep: string, r: { id: string; base: string }, status: EdgeStatus, token: string): Promise<void> {
+    const net = status.net;
+    if (!status.probePort || !net) return;
+    const now = this.now();
+    const stale = net.udpInbound === 'unknown' || !net.checkedAt || now - net.checkedAt * 1000 > (this.opts.netRecheckMs ?? 30 * 60_000);
+    if (!stale || now - (this.netProbed.get(r.id) ?? 0) < 60_000) return;
+    this.netProbed.set(r.id, now);
+    const trace = newTrace();
+    const started = performance.now();
+    const host = net.publicIp ?? new URL(r.base).hostname;
+    const udp = await (this.opts.probeUdpImpl ?? probeUdp)(host, status.probePort);
+    const ice = this.opts.ice ?? { stun: [...DEFAULT_STUN_URLS], turn: [], turnSecret: null };
+    const turn = iceServersFor(ice, `net-${r.id.replace(/[^\w-]/g, '-')}`, Math.floor(now / 1000) + 3600)
+      .filter(x => x.urls.some(u => u.startsWith('turn')));
+    let decided: { path?: string; relay?: { url?: string; transport?: string } | null; reasons?: string[] } = {};
+    try {
+      const res = await (this.opts.fetchImpl ?? fetch)(`${r.base}/__aigw/rt/net`, {
+        method: 'POST', headers: { 'X-Aigw-Token': token, 'Content-Type': 'application/json', traceparent: trace.traceparent },
+        body: JSON.stringify({ udpInbound: udp.result, rttMs: udp.rttMs, iceServers: turn }), signal: AbortSignal.timeout(20_000),
+      });
+      if (res.ok) decided = await res.json() as typeof decided;
+    } catch (err) {
+      this.log('realtime: net report to the edge failed', { replica: r.id, error: (err as Error).message });
+    }
+    this.status.invalidate(r.id);
+    this.log('realtime: media path', { deployment: dep, replica: r.id, udpInbound: udp.result, rttMs: udp.rttMs, path: decided.path ?? 'unknown', reasons: decided.reasons });
+    this.emit(trace, 'rt.net.probe', {
+      level: decided.path === 'ws' || !decided.path ? 'warn' : 'info', durMs: performance.now() - started,
+      attrs: { deployment: dep, replica: r.id, udpInbound: udp.result, rttMs: udp.rttMs, tries: udp.tries, path: decided.path ?? 'unknown', relay: decided.relay?.url ?? null, relayTransport: decided.relay?.transport ?? null, turnConfigured: turn.length > 0 },
+    });
+  }
+
+  /** TURN servers for the edge's own side of one session (path `relay`), with that session's credentials. */
+  edgeIceServers(sid: string, expSeconds: number) {
+    const ice = this.opts.ice ?? { stun: [...DEFAULT_STUN_URLS], turn: [], turnSecret: null };
+    return iceServersFor(ice, sid, expSeconds).filter(x => x.urls.some(u => u.startsWith('turn')));
   }
 
   get ttlSeconds(): number {
@@ -269,6 +337,7 @@ export class RealtimeService {
     const candidates: ReplicaCandidate[] = [];
     for (const { r, s } of results) {
       if (!s.ok) continue;
+      void this.probeNet(dep, r, s.status, token).catch(() => {});
       reportExternalLoad(dep, r.id, s.status.active, s.status.max, this.now());
       candidates.push({ id: r.id, base: r.base, status: s.status, pending: this.pendingOn(r.id) });
     }
@@ -337,6 +406,8 @@ export class RealtimeService {
 
   stop(): void {
     if (this.poller) clearInterval(this.poller);
+    if (this.netLoop) clearInterval(this.netLoop);
     this.poller = null;
+    this.netLoop = null;
   }
 }

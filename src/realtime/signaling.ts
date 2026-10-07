@@ -96,7 +96,9 @@ export function createSignalingHandler(service: RealtimeService, opts: Signaling
       if (action === 'offer') {
         if (typeof body.sdp !== 'string' || !body.sdp.startsWith('v=0')) { fail(res, 400, 'invalid_request', '"sdp" must be an SDP offer'); return true; }
         const token = bearer(req) ?? String(body.token);
-        const upstream = await forward(session, trace, 'POST', '/__aigw/rt/offer', { sdp: body.sdp, type: 'offer', token });
+        // The session's TURN credentials for the edge's own side: used only when the edge's media path is `relay`.
+        const iceServers = service.edgeIceServers(session.claims.sid, session.claims.exp);
+        const upstream = await forward(session, trace, 'POST', '/__aigw/rt/offer', { sdp: body.sdp, type: 'offer', token, ...(iceServers.length ? { iceServers } : {}) });
         const answer = await upstream.json().catch(() => null) as { sdp?: unknown; type?: unknown; sessionId?: unknown } | null;
         if (!upstream.ok || !answer || typeof answer.sdp !== 'string') {
           const status = upstream.status === 409 || upstream.status === 429 || upstream.status === 503 ? 503 : 502;

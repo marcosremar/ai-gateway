@@ -11,7 +11,7 @@ import time
 
 import av
 import numpy as np
-from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription, RTCIceServer
 from aiortc.mediastreams import MediaStreamError
 from aiortc.sdp import candidate_from_sdp
 
@@ -111,9 +111,10 @@ class SessionHost:
 
     # ── WebRTC ───────────────────────────────────────────────────────────────
 
-    async def offer(self, sdp: str, claims: dict, trace_id: str) -> dict:
+    async def offer(self, sdp: str, claims: dict, trace_id: str, ice_servers: list[dict] | None = None) -> dict:
         sid = claims["sid"]
-        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        servers = [RTCIceServer(urls=x["urls"], username=x.get("username"), credential=x.get("credential")) for x in ice_servers or []]
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
         pending: list[str] = []
         channel = {"dc": None}
 
@@ -157,6 +158,9 @@ class SessionHost:
         def on_ice():
             session.tel("edge.ice.state", level="warn" if pc.iceConnectionState == "failed" else "info",
                         state=pc.iceConnectionState, dur_ms=(time.monotonic() - session.started) * 1000)
+            if pc.iceConnectionState in ("connected", "completed") and not channel.get("logged_pair"):
+                channel["logged_pair"] = True
+                session.tel("edge.ice.selected", **selected_pair(pc), edgeRelay=bool(servers))
 
         @pc.on("connectionstatechange")
         async def on_state():
@@ -232,3 +236,16 @@ async def load_loop(label: str, active) -> None:
     while True:
         await asyncio.sleep(30)
         telemetry.emit("edge.load", process=label, active=active(), **load_sample())
+
+
+def selected_pair(pc) -> dict:
+    """Which ICE pair carries the media: host↔host is the direct path, a `relay` side went through TURN."""
+    try:
+        for transceiver in pc.getTransceivers():
+            conn = transceiver.receiver.transport.transport._connection
+            for pair in conn._nominated.values():
+                return {"local": pair.local_candidate.type, "remote": pair.remote_candidate.type,
+                        "protocol": pair.local_candidate.transport}
+    except Exception:  # noqa: BLE001 — aiortc internals: the log line is best effort
+        pass
+    return {"local": None, "remote": None, "protocol": None}

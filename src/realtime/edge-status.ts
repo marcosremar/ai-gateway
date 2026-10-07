@@ -10,12 +10,24 @@
 
 export type EdgeTransport = 'webrtc' | 'ws';
 
+/** The edge's media path (netcheck.py): `unknown` until this gateway probed it. */
+export interface EdgeNet {
+  path: 'unknown' | 'direct' | 'relay' | 'ws';
+  udpInbound: 'unknown' | 'ok' | 'blocked';
+  publicIp: string | null;
+  /** Unix seconds of the last decision, null before the first probe. */
+  checkedAt: number | null;
+}
+
 export interface EdgeStatus {
   active: number;
   max: number;
   available: number;
   transports: EdgeTransport[];
   udpPorts: [number, number] | null;
+  /** UDP port answering the reachability probe; null on an edge from before netcheck. */
+  probePort: number | null;
+  net: EdgeNet | null;
 }
 
 export type EdgeStatusResult = { ok: true; status: EdgeStatus } | { ok: false; reason: 'unsupported' | 'unreachable' };
@@ -32,7 +44,15 @@ export function parseEdgeStatus(body: unknown): EdgeStatus | null {
     ? b.transports.filter((t): t is EdgeTransport => t === 'webrtc' || t === 'ws') : [];
   const ports = Array.isArray(b.udpPorts) && b.udpPorts.length === 2 && b.udpPorts.every(p => Number.isInteger(p))
     ? [b.udpPorts[0], b.udpPorts[1]] as [number, number] : null;
-  return { active, max, available: Math.min(available, max), transports, udpPorts: ports };
+  const probePort = Number.isInteger(b.probePort) ? b.probePort as number : null;
+  const n = b.net && typeof b.net === 'object' ? b.net as Record<string, unknown> : null;
+  const net: EdgeNet | null = n ? {
+    path: (['direct', 'relay', 'ws'] as const).find(p => p === n.path) ?? 'unknown',
+    udpInbound: n.udpInbound === 'ok' || n.udpInbound === 'blocked' ? n.udpInbound : 'unknown',
+    publicIp: typeof n.publicIp === 'string' && n.publicIp ? n.publicIp : null,
+    checkedAt: typeof n.checkedAt === 'number' ? n.checkedAt : null,
+  } : null;
+  return { active, max, available: Math.min(available, max), transports, udpPorts: ports, probePort, net };
 }
 
 export interface EdgeStatusCacheOptions {

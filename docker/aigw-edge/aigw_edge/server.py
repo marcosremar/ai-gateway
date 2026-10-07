@@ -32,6 +32,7 @@ from . import audio, ice
 from .config import Settings
 from .host import OfferError, SessionHost, load_loop
 from .session import OUT_FRAME_BYTES, Session
+from .netcheck import NetState
 from .telemetry import new_trace_id, telemetry, trace_id_from
 from .token import TokenError, TokenVerifier
 from .upstream import Upstream
@@ -70,7 +71,7 @@ def worker_main(settings: Settings, index: int, secret: str) -> None:
     async def offer(req):
         body = await req.json()
         try:
-            return web.json_response(await host.offer(body["sdp"], body["claims"], body["traceId"]))
+            return web.json_response(await host.offer(body["sdp"], body["claims"], body["traceId"], body.get("iceServers")))
         except OfferError as error:
             return web.json_response(error_body("bad_request", str(error)), status=400)
 
@@ -119,6 +120,7 @@ class Edge:
         self.workers: list = [None] * n
         self.routes: dict[str, dict] = {}  # WebRTC sid → {worker, at}
         self.http: aiohttp.ClientSession | None = None
+        self.net = NetState(settings.probe_port, settings.public_ip)
 
     # ── admission ────────────────────────────────────────────────────────────
 
@@ -170,7 +172,9 @@ class Edge:
         by["webrtc"] += len(self.routes)
         return web.json_response({
             "active": active, "max": self.s.max_sessions, "available": max(0, self.s.max_sessions - active),
-            "transports": ["webrtc", "ws"], "udpPorts": list(self.s.udp_ports), "ready": self.up.ready,
+            # Firewall range = media ports + the probe port; `transports` drops webrtc when no media path works.
+            "transports": self.net.transports(), "udpPorts": [self.s.udp_ports[0], self.s.probe_port or self.s.udp_ports[1]],
+            "probePort": self.s.probe_port or None, "net": self.net.view(), "ready": self.up.ready,
             "byTransport": by, "workers": len(self.workers),
         })
 
@@ -202,9 +206,12 @@ class Edge:
         if refused:
             return web.json_response(error_body(refused[1], refused[2]), status=refused[0])
         await self.supersede(claims["sid"])
+        if "webrtc" not in self.net.transports():
+            return web.json_response(error_body("unsupported", "no media path to this replica (net: ws only)"), status=503)
+        ice_servers = self.net.ice_servers(body.get("iceServers") if isinstance(body.get("iceServers"), list) else None)
         if not self.workers:
             try:
-                return web.json_response(await self.host.offer(sdp, claims, trace_id))
+                return web.json_response(await self.host.offer(sdp, claims, trace_id, ice_servers))
             except OfferError as error:
                 return web.json_response(error_body("bad_request", str(error)), status=400)
         load = {i: 0 for i in range(len(self.workers))}
@@ -214,7 +221,7 @@ class Edge:
         sid = claims["sid"]
         self.routes[sid] = {"worker": index, "at": time.monotonic()}  # counts against capacity while the worker answers
         try:
-            status, answer = await self.worker_call(index, "POST", "/__edge/offer", {"sdp": sdp, "claims": claims, "traceId": trace_id})
+            status, answer = await self.worker_call(index, "POST", "/__edge/offer", {"sdp": sdp, "claims": claims, "traceId": trace_id, "iceServers": ice_servers})
         except Exception as error:  # noqa: BLE001
             self.routes.pop(sid, None)
             return web.json_response(error_body("internal", f"rtc worker {index}: {error!r}"[:200]), status=502)
@@ -235,6 +242,20 @@ class Edge:
             return web.json_response({"ok": True})
         except Exception as error:  # noqa: BLE001
             return web.json_response(error_body("bad_request", f"{error!r}"[:200]), status=400)
+
+    async def net_report(self, req: web.Request) -> web.Response:
+        """The gateway's reachability probe result (behind the token gate): decides direct / relay / ws, logged."""
+        try:
+            body = await req.json()
+            udp = str(body.get("udpInbound", "unknown"))
+            servers = body.get("iceServers") or []
+            rtt = body.get("rttMs")
+            if not isinstance(servers, list):
+                raise ValueError("iceServers must be a list")
+        except Exception as error:  # noqa: BLE001
+            return web.json_response(error_body("bad_request", f"{error}"[:200]), status=400)
+        trace_id = trace_id_from(req.headers.get("traceparent")) or new_trace_id()
+        return web.json_response(await self.net.report(udp, servers, rtt if isinstance(rtt, (int, float)) else None, trace_id))
 
     # ── WebSocket ────────────────────────────────────────────────────────────
 
@@ -333,6 +354,7 @@ class Edge:
     async def on_startup(self, _app) -> None:
         await self.up.start()
         self.http = aiohttp.ClientSession()
+        await self.net.start()
         for index in range(len(self.workers)):
             self.start_worker(index)
         self.host.spawn(self.up.health_loop())
@@ -354,6 +376,7 @@ class Edge:
         app.router.add_post("/__aigw/rt/offer", self.offer)
         app.router.add_post("/__aigw/rt/ice", self.add_ice)
         app.router.add_get("/__aigw/rt/status", self.status)
+        app.router.add_post("/__aigw/rt/net", self.net_report)
         app.router.add_delete("/__aigw/rt/session/{sid}", self.delete)
         app.router.add_get("/__aigw/rt/ws", self.websocket)
         app.on_startup.append(self.on_startup)
@@ -363,6 +386,9 @@ class Edge:
 
 def main() -> None:
     settings = Settings.from_env()
+    lo, hi = settings.udp_ports
+    if hi > lo:  # the last port answers the reachability probe; media binds the rest
+        settings = replace(settings, udp_ports=(lo, hi - 1), probe_port=hi)
     ice.install(settings)
     audio.install()
     edge = Edge(settings)
