@@ -141,3 +141,37 @@ Findings:
   `serve.ts` gained two test knobs (`REALTIME_NET_RECHECK_MS`, `REALTIME_PROBE_UDP=blocked`).
 - Worth a look in the Scaleway console: reserved IPs and security groups named `aigw-marcos-rt-*` left by the TURN
   boxes; the gateway API cannot list them.
+
+### GPU test, round 2 — 2026-10-07 (L4-1-24G fr-par-2, `speech-stack:20261004-2240`; every machine deleted)
+
+- **Truncated replies, `error: upstream` after `audio_start`: 10 of 18 live turns.** The first sentence plays, the rest
+  is lost, the turn ends in error. The edge reports an aiohttp `ClientPayloadError` on the `/v1/audio/speech` stream
+  (`docker/aigw-edge/aigw_edge/session.py:250-256`); same on direct WebRTC, relay and WS, so the gateway is not
+  involved. Straight at the stack: sequential TTS requests complete, two in parallel leave one stalled, repeated pairs
+  wedge the TTS for about 2 minutes. The edge synthesizes the next sentence while the current one streams
+  (`EDGE_TTS_PARALLEL` 2). The stack's own `/v1/s2s` also runs 2 in parallel and swallows a failed synth task
+  (`docker/speech-stack/server.py:337-341`), so the old path may return shortened audio silently — not verified.
+  Open; being investigated on the production image (`20261006-0107`).
+- **Relay with a real inbound-UDP block: pass.** Security group without the UDP range, no probe fake:
+  `rt.net.probe` blocked → path relay; 3 of 3 browser turns connected on WebRTC without forcing relay (connect
+  2611–3933 ms, first audio at the edge 1045–1202 ms warm). The selected pair was the browser's TURN allocation to the
+  edge's host candidate, not the edge's own relay candidate.
+- **Adding `realtime` to an existing exposed deployment never opens UDP 50000–50100**: the security group is created
+  once and reused by id (`src/deployments/scaleway-backend.ts:205-214`).
+- **First audio, same replica, one warm-up discarded, 5 turns each** (clock: edge's end-of-speech decision → first
+  audio; the 700 ms endpointing silence is not counted):
+
+  | Transport | At the edge, median (min–max) ms | Audible in the browser ms |
+  |---|---|---|
+  | WebRTC direct | 1015 (810–1195) | 1725 (1242–2198) |
+  | WS via gateway | 899 (885–1234) | not measurable by the harness |
+  | HTTP `/v1/s2s` (clock starts at the request with the finished clip) | 999 (918–1234) | not measured |
+
+  Stages on completed turns: STT 365–521, LLM first token 72–201, TTS first chunk 210–218. The transport does not move
+  the first audio; the models and the endpointing do.
+- **L40S**: out of stock again; the L4 quota is 2 per organisation.
+- **Network leftovers**: none. `scripts/reap-orphans.ts` (dry run) found nothing for today's deployments. DELETE
+  releases the IP and the group, but not awaited (`controller.ts:102-106`): a gateway stopped within ~16 s of a DELETE
+  leaks them until the reaper runs.
+- Still not proven: `edge.net.path` / `edge.ice.selected` from a real GPU, 16 sessions on the L40S, `turns:` over TLS.
+- Local e2e on the PR head after the CodeQL fixes and the declaration change: **29/29**.
