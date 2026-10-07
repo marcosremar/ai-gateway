@@ -341,6 +341,7 @@ export interface ReplicaView {
   busy: boolean;
   /** Being drained before a scale-in: no new request; released once empty or after `autoscale.drainSeconds`. */
   draining: boolean;
+  stagesOut: string[];
   /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
   rttMs: number | null;
   /** Minutes until the provider takes the host back (Vast); null when it never does. */

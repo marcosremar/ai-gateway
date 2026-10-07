@@ -83,6 +83,23 @@ describe('stageChainsReport', () => {
     }
   });
 
+  it('a stage out of rotation on every ready replica of the primary reads circuit_open and on fallback; on some, ready with the reason', () => {
+    const { chains } = build({ deployments: true });
+    const stageOut = (ready: number, out: number) => (_name: string, stage: string) => ({ ready, out: stage === 'tts' ? out : 0 });
+    const all = stageChainsReport(chains, { deploymentStatus: () => 'ready', stageOut: stageOut(1, 1) });
+    for (const report of Object.values(all.stages.tts)) {
+      expect(report.links[0]).toMatchObject({ state: 'circuit_open', reason: expect.stringMatching(/tts out of rotation on 1 of 1 ready replicas/) });
+      expect(report.onFallback).toBe(true);
+    }
+    expect(all.stages.stt['parle-stt'].links[0]).toEqual({ target: expect.any(String), state: 'ready' });
+    expect(all.warnings.join('\n')).toMatch(/tts .*circuit_open/);
+    const some = stageChainsReport(chains, { deploymentStatus: () => 'ready', stageOut: stageOut(2, 1) });
+    for (const report of Object.values(some.stages.tts)) {
+      expect(report.links[0]).toMatchObject({ state: 'ready', reason: expect.stringMatching(/1 of 2 ready replicas/) });
+      expect(report.onFallback).toBe(false);
+    }
+  });
+
   it('an open account breaker (401/402) is reported on every link of that provider', () => {
     const { chains } = build({ deployments: true });
     const breakers = new CircuitBreakerRegistry({ failureThreshold: 1, resetTimeoutMs: 30_000 });

@@ -197,7 +197,8 @@ export function createS2SRoute(opts: S2SRouteOptions) {
     // `res` close, not `req` close: the request side closes as soon as its body has been read (Node, Bun ≥ 1.4), so
     // the old listener, attached after the body, never fired and a client that left kept the whole turn running
     // (fault bench 2026-10-06, item 18).
-    res.on('close', () => { if (!res.writableFinished) budget.abort(new Error('client went away')); });
+    let clientGone = false;
+    res.on('close', () => { if (!res.writableFinished) { clientGone = true; budget.abort(new Error('client went away')); } });
     const elapsed = () => Math.round(performance.now() - t0);
     const outcome: Record<string, unknown> = {};
 
@@ -216,10 +217,10 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         // No-wake mode (gateway/proxy/no-wake.ts): a ready replica still answers; a cold one is not woken (composed).
         const noWake = noWakeActive();
         try {
-          lease = await opts.controller.acquire(deployment, noWake ? { waitMs: 0, noWake: true } : { waitMs: 0 });
+          lease = await opts.controller.acquire(deployment, { waitMs: 0, stage: 's2s', ...(noWake ? { noWake: true } : {}) });
         } catch (err) {
           if (!(err instanceof DeploymentError)) throw err;
-          skip = err.status === 409 ? 'paused' : err.status === 404 ? 'not_found' : 'cold';
+          skip = err.status === 409 ? 'paused' : err.status === 404 ? 'not_found' : err.code === 'stage_out' ? 'circuit_open' : 'cold';
           if (skip === 'cold' && noWake) recordNoWakeSkip();
           else if (skip === 'cold') { try { opts.controller.wake(deployment); } catch { /* vanished */ } }
         }
@@ -310,7 +311,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         lease.done(Boolean(primaryError));
       } catch (err) {
         if (winner === 'hedge') lease.done(false);
-        else { primaryError = (err as Error).message; lease.done(true); }
+        else { primaryError = (err as Error).message; lease.done(clientGone ? 'cancelled' : true); }
       } finally {
         clearTimeout(hedgeTimer);
       }

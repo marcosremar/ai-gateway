@@ -161,7 +161,13 @@ remount = () => replaceProviderMapping(providers as Record<string, unknown>, mou
 
 /** Effective chain of every parle stage and the state of each link (shown by /health — nothing silent). */
 const chainHealth = () => stageChainsReport(chains, {
-  ...(controller ? { deploymentStatus: (name: string) => controller.get(name)?.status ?? null } : {}),
+  ...(controller ? {
+    deploymentStatus: (name: string) => controller.get(name)?.status ?? null,
+    stageOut: (name: string, stage: string) => {
+      const ready = controller.get(name)?.replicas.filter(r => r.phase === 'ready') ?? [];
+      return { ready: ready.length, out: ready.filter(r => r.stagesOut.includes(stage)).length };
+    },
+  } : {}),
   declaredPending: (name) => {
     const s = declared?.statusOf(name);
     return s && (s.state === 'pending' || s.state === 'error') ? s.reason : null;

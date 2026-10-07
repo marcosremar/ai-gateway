@@ -12,7 +12,8 @@
  *   disabled     deployments are off on this gateway (no SCW_SECRET_KEY)
  *   no_key       provider key missing or rejected
  *   blocked      refused by the provider account's data policy (ZDR), skipped for a while
- *   circuit_open repeated failures, skipped for < 30 s
+ *   circuit_open repeated failures, skipped for < 30 s (the target's breaker, or the stage out of rotation on every
+ *                ready replica of a deployment)
  */
 
 import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-breaker';
@@ -46,6 +47,7 @@ export interface ChainReport {
 export interface ChainHealthDeps {
   /** Deployment status (`DeploymentView.status`), or null when it does not exist. Absent = deployments are off. */
   deploymentStatus?: (name: string) => string | null;
+  stageOut?: (name: string, stage: string) => { ready: number; out: number };
   /** Reason a declared deployment is still pending, or null. */
   declaredPending?: (name: string) => string | null;
   breakers?: CircuitBreakerRegistry;
@@ -75,6 +77,11 @@ function linkReport(link: ChainLinkSpec, deps: ChainHealthDeps, stage: string): 
   if (blocked) return { target, state: 'blocked', reason: blocked };
   if (deps.breakers && isTargetCircuitOpen(deps.breakers, stage, link)) {
     return { target, state: 'circuit_open', reason: 'repeated failures (retrying in < 30 s)' };
+  }
+  const replicas = link.deployment !== undefined ? deps.stageOut?.(link.deployment, stage) : undefined;
+  if (replicas?.out) {
+    const reason = `${stage} out of rotation on ${replicas.out} of ${replicas.ready} ready replicas after repeated failures`;
+    return { target, state: replicas.out >= replicas.ready ? 'circuit_open' : 'ready', reason };
   }
   return { target, state: 'ready' };
 }

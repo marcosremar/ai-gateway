@@ -20,9 +20,9 @@ async function listen(handler: (req: IncomingMessage, res: ServerResponse) => vo
 }
 
 async function harness(opts: {
-  replica?: ReplicaScript; deployment?: 'ready' | 'cold' | 'paused' | 'absent'; stages?: FakeStagesOptions; hedgeMs?: number;
+  replica?: ReplicaScript; deployment?: 'ready' | 'cold' | 'paused' | 'absent' | 'stage_out'; stages?: FakeStagesOptions; hedgeMs?: number;
 }) {
-  const leases: Array<{ failed?: boolean }> = [];
+  const leases: Array<{ failed?: boolean | string }> = [];
   const woken: string[] = [];
   let replicaHits = 0;
   const replicaHost = opts.replica ? await listen((req, res) => {
@@ -38,7 +38,8 @@ async function harness(opts: {
     acquire: async () => {
       if (state === 'cold') throw new DeploymentError(503, "deployment 'parle-speech': replicas are starting", 30);
       if (state === 'paused') throw new DeploymentError(409, "deployment 'parle-speech' is paused");
-      const lease = { machine: { ip: replicaHost } as never, token: 'tok', done: (failed?: boolean) => { leases.push({ failed }); } };
+      if (state === 'stage_out') throw new DeploymentError(503, "deployment 'parle-speech': s2s is out of rotation on every ready replica", 30, 'stage_out');
+      const lease = { machine: { ip: replicaHost } as never, token: 'tok', done: (failed?: boolean | string) => { leases.push({ failed }); } };
       return lease;
     },
   };
@@ -54,7 +55,8 @@ async function harness(opts: {
     const res = await fetch(`http://${host}/v1/s2s${query}`, { method: 'POST', body: form });
     return { res, bytes: new Uint8Array(await res.arrayBuffer()) };
   }
-  return { call, calls: fake.calls, leases, woken, replicaHits: () => replicaHits };
+  const post = (form: FormData, signal: AbortSignal) => fetch(`http://${host}/v1/s2s`, { method: 'POST', body: form, signal });
+  return { call, post, calls: fake.calls, leases, woken, replicaHits: () => replicaHits };
 }
 
 const writeFrames = (res: ServerResponse, frames: Uint8Array[], delayMs = 0) => async () => {
@@ -84,6 +86,33 @@ describe('POST /v1/s2s routing', () => {
     expect(h.woken).toEqual(['parle-speech']);
     expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
     expect(h.calls.map(c => c.stage)).toEqual(['stt', 'llm', 'tts', 'tts']);
+  });
+
+  it('s2s out of rotation on every ready replica: composed pipeline at once, reported as circuit_open, nothing woken', async () => {
+    const h = await harness({ deployment: 'stage_out' });
+    const { events, audio } = decodeAll((await h.call()).bytes);
+    expect(events[0]).toEqual({ type: 'route', provider: 'composite', fallback: 'circuit_open', from: 'deployment:parle-speech' });
+    expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
+    expect(h.woken).toEqual([]);
+    expect(h.replicaHits()).toBe(0);
+  });
+
+  it('a client that leaves mid-turn says nothing about the replica (lease cancelled, not failed)', async () => {
+    const h = await harness({
+      hedgeMs: 5_000,
+      replica: async res => { res.writeHead(200, { 'Content-Type': 'application/x-aigw-s2s' }); res.write(replicaFrames('Oi!', ['Bom dia.'])[0]); },
+    });
+    const gone = new AbortController();
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', JSON.stringify({ system: 'Seu Jorge', voice: 'br-m-08', language: 'pt' }));
+    const pending = h.post(form, gone.signal).then(r => r.arrayBuffer()).catch(() => null);
+    while (h.replicaHits() === 0) await sleep(10);
+    await sleep(50);
+    gone.abort();
+    await pending;
+    while (h.leases.length === 0) await sleep(10);
+    expect(h.leases).toEqual([{ failed: 'cancelled' }]);
   });
 
   it('absent or paused deployment: composed pipeline, reason reported', async () => {

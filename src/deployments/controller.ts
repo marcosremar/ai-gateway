@@ -24,6 +24,8 @@ import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, Replica
 
 /** Adaptive hedge: a request is hedged only once it is this much slower than its replica's recent p95. */
 export const HEDGE_P95_FACTOR = 1.2;
+export const STAGE_STRIKES = 3;
+export const STAGE_COOLDOWN_MS = 30_000;
 
 export {
   DeploymentError, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
@@ -173,8 +175,8 @@ export class DeploymentController extends ControllerViews {
     return this.view(name)!;
   }
 
-  private pick(rt: Runtime, exclude: Set<string>): ReplicaMachine | null {
-    const ready = this.readyMachines(rt.record.spec.name).filter(m => !exclude.has(m.id));
+  private pick(rt: Runtime, exclude: Set<string>, stage?: string): ReplicaMachine | null {
+    const ready = this.readyMachines(rt.record.spec.name).filter(m => !exclude.has(m.id) && !this.stageOut(m.id, stage));
     if (!ready.length) return null;
     // A host about to be taken back (`expiry.ts`) only serves while nothing else can: new requests drain it.
     const now = this.now();
@@ -240,11 +242,18 @@ export class DeploymentController extends ControllerViews {
    * fails at once with 503 and touches nothing — no wait, no `lastRequestAt`, no reconcile — so a cold deployment
    * stays cold.
    */
-  async acquire(name: string, opts: { waitMs?: number; exclude?: Set<string>; signal?: AbortSignal; noWake?: boolean } = {}): Promise<Lease> {
+  async acquire(
+    name: string, opts: { waitMs?: number; exclude?: Set<string>; signal?: AbortSignal; noWake?: boolean; stage?: string } = {},
+  ): Promise<Lease> {
     const rt = this.require(name);
     const { spec } = rt.record;
     if (spec.paused) throw new DeploymentError(409, `deployment '${name}' is paused`);
-    if (opts.noWake && !this.pick(rt, opts.exclude ?? new Set<string>())) {
+    const serving = this.servingMachines(name);
+    if (serving.length && serving.every(m => this.stageOut(m.id, opts.stage))) {
+      throw new DeploymentError(503, `deployment '${name}': ${opts.stage} is out of rotation on every ready replica after repeated failures`,
+        STAGE_COOLDOWN_MS / 1000, 'stage_out');
+    }
+    if (opts.noWake && !this.pick(rt, opts.exclude ?? new Set<string>(), opts.stage)) {
       // A saturated (not cold) deployment still sees the demand, so it scales out; a cold one stays untouched.
       if (this.readyMachines(name).length) { rt.refusedAt.push(this.now()); this.noteDemand(rt); }
       throw new DeploymentError(503, `deployment '${name}': no ready replica (no-wake: not woken)`, 30);
@@ -254,7 +263,7 @@ export class DeploymentController extends ControllerViews {
     const deadline = this.now() + (opts.waitMs ?? spec.coldStartWaitSeconds * 1000);
     const exclude = opts.exclude ?? new Set<string>();
 
-    let machine = this.pick(rt, exclude);
+    let machine = this.pick(rt, exclude, opts.stage);
     // Saturated and the caller has a fallback (waitMs 0): no wait — refused below as `saturated`.
     const spill = !machine && opts.waitMs === 0 && this.servingMachines(name).length > 0;
     if (!machine && !spill) {
@@ -269,7 +278,7 @@ export class DeploymentController extends ControllerViews {
             function done() { clearTimeout(t); rt.waiters.delete(done); resolve(); }
             rt.waiters.add(done);
           });
-          machine = this.pick(rt, exclude);
+          machine = this.pick(rt, exclude, opts.stage);
         }
       } finally {
         rt.waiting--;
@@ -306,13 +315,33 @@ export class DeploymentController extends ControllerViews {
         const n = (rt.perReplica.get(chosen.id) ?? 1) - 1;
         if (n <= 0) rt.perReplica.delete(chosen.id); else rt.perReplica.set(chosen.id, n);
         rt.record.lastRequestAt = this.now();
-        const outcome: LeaseOutcome = failed === true ? 'failed' : failed === false ? 'ok' : failed;
+        const reported: LeaseOutcome = failed === true ? 'failed' : failed === false ? 'ok' : failed;
+        this.noteStage(rt, chosen.id, opts.stage, reported, this.now() - startedAt);
+        const outcome = reported === 'abandoned' ? 'cancelled' : reported === 'errored' ? 'ok' : reported;
         if (outcome !== 'cancelled') this.recordSample(rt, this.now() - startedAt, outcome !== 'ok', chosen.id);
         this.leaseEnded(chosen.id, outcome);
         const next = rt.waiters.values().next().value; // a slot freed: one waiting request may take it
         if (next) next();
       },
     };
+  }
+
+  private noteStage(rt: Runtime, id: string, stage: string | undefined, outcome: LeaseOutcome, ms: number): void {
+    if (!stage || outcome === 'cancelled' || outcome === 'overloaded') return;
+    const key = `${id}|${stage}`;
+    const strikes = this.stageStrikes.get(key) ?? { failures: 0, outUntil: 0 };
+    if (outcome === 'ok') {
+      if (strikes.outUntil) this.log('deployments: stage back in rotation', { deployment: rt.record.spec.name, id, stage });
+      this.stageStrikes.delete(key);
+      return;
+    }
+    if (outcome === 'abandoned' && !(rt.hedgeBaseMs && ms >= rt.hedgeBaseMs)) return;
+    strikes.failures++;
+    if (strikes.failures >= STAGE_STRIKES && strikes.outUntil <= this.now()) {
+      strikes.outUntil = this.now() + STAGE_COOLDOWN_MS;
+      this.log('deployments: stage out of rotation', { deployment: rt.record.spec.name, id, stage, failures: strikes.failures, outcome });
+    }
+    this.stageStrikes.set(key, strikes);
   }
 
   /**

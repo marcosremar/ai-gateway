@@ -226,13 +226,13 @@ export class RealtimeService {
   }
 
   /** Ready replicas of a deployment with their base URL (secrets stay here). */
-  private readyReplicas(dep: string): Array<{ id: string; base: string }> {
+  private readyReplicas(dep: string): Array<{ id: string; base: string; stagesOut: string[] }> {
     const view = this.opts.controller?.get(dep);
     if (!view) return [];
     const exposed = !!this.opts.controller?.specOf(dep)?.exposure;
     return view.replicas
       .filter(r => r.phase === 'ready' && !r.draining && r.ip)
-      .map(r => ({ id: r.id, base: replicaBase({ ip: r.ip } as never, exposed) }));
+      .map(r => ({ id: r.id, base: replicaBase({ ip: r.ip } as never, exposed), stagesOut: r.stagesOut ?? [] }));
   }
 
   /** `POST /v1/realtime/sessions` (behind the proxy's API-key auth). */
@@ -341,11 +341,16 @@ export class RealtimeService {
     | { refusal: { status: number; code: string; message: string; retryAfter: number } }> {
     const controller = this.opts.controller!;
     if (controller.get(dep)?.spec.paused) return { refusal: { status: 503, code: 'paused', message: `deployment '${dep}' is paused`, retryAfter: 60 } };
-    const ready = this.readyReplicas(dep);
-    if (!ready.length) {
+    const every = this.readyReplicas(dep);
+    if (!every.length) {
       if (noWakeActive()) recordNoWakeSkip();
       else { try { controller.wake(dep); } catch { /* vanished */ } }
       return { refusal: { status: 503, code: 'cold', message: `deployment '${dep}': no ready replica${noWakeActive() ? ' (no-wake: not woken)' : ' (waking)'}`, retryAfter: 30 } };
+    }
+    const ready = every.filter(r => !r.stagesOut.length);
+    if (!ready.length) {
+      const stages = [...new Set(every.flatMap(r => r.stagesOut))].join(', ');
+      return { refusal: { status: 503, code: 'degraded', message: `deployment '${dep}': ${stages} failing on every ready replica`, retryAfter: 30 } };
     }
     const token = controller.tokenOf(dep) ?? '';
     const results: Array<{ r: { id: string; base: string }; s: EdgeStatusResult }> = await Promise.all(
