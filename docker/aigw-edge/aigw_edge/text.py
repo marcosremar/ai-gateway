@@ -16,6 +16,7 @@ CLAUSE_END = re.compile(r"[,;:—–](?=\s)")  # needs the following space, so "
 
 ABBREVIATIONS = {"sr", "sra", "srta", "dr", "dra", "prof", "profa", "av", "etc", "ex", "nº", "n", "mr", "mrs", "st", "m", "mme"}
 MIN_SENTENCE_WORDS = 2
+CUT_EAGER = os.environ.get("CUT_EAGER", "0") == "1"
 
 
 def cut(buffer: str, first: bool, final: bool) -> tuple[str | None, str]:
@@ -25,7 +26,7 @@ def cut(buffer: str, first: bool, final: bool) -> tuple[str | None, str]:
     The FIRST chunk also cuts at a clause mark once it has FIRST_MIN_WORDS words, so the first audio does not wait for
     a long sentence. Anything longer than MAX_CHUNK_CHARS cuts at the last space."""
     for match in SENTENCE_END.finditer(buffer):
-        if match.end() == len(buffer) and not final:
+        if match.end() == len(buffer) and not final and not (CUT_EAGER and match.group()[-1] in "!?"):
             break  # "3." may still become "3.50": a mark at the end of the stream so far waits for the next token
         head = buffer[:match.end()]
         last_word = head[:match.start()].split()[-1:] or [""]

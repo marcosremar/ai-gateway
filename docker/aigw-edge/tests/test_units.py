@@ -24,7 +24,7 @@ def check(name, ok):
 server = (ROOT.parent / "speech-stack" / "server.py")
 if server.exists():
     src = server.read_text()
-    body = src[src.index("SENTENCE_END ="):src.index("async def llm_stream")].rstrip()
+    body = src[src.index("SENTENCE_END ="):src.index("LLM_TIMINGS =")].rstrip()
     check("text.py = speech-stack server.py cut/JsonField", body in (ROOT / "aigw_edge" / "text.py").read_text())
 
 
