@@ -20,6 +20,8 @@ const MAP: Record<string, { event: string; level?: TelemetryLevel }> = {
   'deployments: replica ready': { event: 'replica.ready' },
   'deployments: replica unhealthy': { event: 'replica.unhealthy', level: 'warn' },
   'deployments: replica too far': { event: 'replica.too_far', level: 'warn' },
+  'deployments: stage out of rotation': { event: 'replica.stage_out', level: 'warn' },
+  'deployments: stage back in rotation': { event: 'replica.stage_back' },
   'deployments: draining replica': { event: 'replica.draining' },
   'deployments: releasing replica': { event: 'replica.released' },
   'deployments: parking replica (power off)': { event: 'replica.parked' },

@@ -19,8 +19,11 @@ import type {
 } from './types';
 
 export class DeploymentError extends Error {
-  /** `saturated`: replicas are ready but all at capacity (the caller should spill to its fallback, not wait). */
-  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated') {
+  /**
+   * `saturated`: replicas are ready but all at capacity (the caller should spill to its fallback, not wait).
+   * `stage_out`: the asked stage is out of rotation on every ready replica after repeated failures (same: fall back).
+   */
+  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated' | 'stage_out') {
     super(message);
   }
 }
@@ -47,8 +50,11 @@ export interface ProbeState {
  * reset); `'timeout'` = the replica took longer than the caller's limit (busy, not dead); `'cancelled'` = the caller
  * gave up for its own reasons (a hedged fallback won, the client went away) and says nothing about the replica;
  * `'overloaded'` = the replica answered 429 (its own queue is full): busy, and pressure for the autoscaler.
+ * Two more only matter to the lease's stage (`acquire` `stage`, `STAGE_STRIKES`): `'errored'` = the replica answered
+ * 5xx (alive, so `ok` for its health, a strike for the stage); `'abandoned'` = the caller gave up before the first byte
+ * (`cancelled` for its health; a strike for the stage once it had waited the route's hedge delay).
  */
-export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled' | 'overloaded';
+export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled' | 'overloaded' | 'errored' | 'abandoned';
 
 export interface Runtime {
   record: DeploymentRecord;
@@ -197,6 +203,7 @@ export abstract class ControllerState {
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
   protected readonly networkReleases = new Map<string, PendingNetworkRelease>();
+  protected readonly stageStrikes = new Map<string, { failures: number; outUntil: number }>();
   protected reconciling: Promise<void> | null = null;
   protected rerun = false;
   protected timer: ReturnType<typeof setInterval> | null = null;
@@ -253,6 +260,14 @@ export abstract class ControllerState {
   protected readyMachines(name: string): ReplicaMachine[] {
     return this.machines.filter(m => m.deployment === name && m.ip && this.probes.get(m.id)?.readyNow
       && replicaPhase(this.observed(m, 0)) === 'ready');
+  }
+
+  protected stageOut(id: string, stage: string | undefined): boolean {
+    return stage !== undefined && (this.stageStrikes.get(`${id}|${stage}`)?.outUntil ?? 0) > this.now();
+  }
+
+  protected stagesOut(id: string): string[] {
+    return [...this.stageStrikes.keys()].filter(k => k.startsWith(`${id}|`)).map(k => k.slice(id.length + 1)).filter(s => this.stageOut(id, s));
   }
 
   /** Answered a forwarded request within `busyGraceMs`. */

@@ -93,6 +93,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       inflight: rt.perReplica.get(m.id) ?? 0,
       busy: this.probes.get(m.id)?.busy === true,
       draining: this.draining.has(m.id),
+      stagesOut: this.stagesOut(m.id),
       rttMs: this.gates.get(m.id)?.rttMs ?? null,
       expiresInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
     }));

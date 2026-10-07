@@ -71,7 +71,7 @@ describe('chat: deployment primary, OpenRouter fallback', () => {
     const res = await chat(new DeploymentLLMProvider(ctl, 'parle-speech'), or);
     expect(res.status).toBe(200);
     expect(ctl.acquire).toHaveBeenCalledTimes(1);
-    expect(ctl.acquire.mock.calls[0][1]).toEqual({ waitMs: 0 });
+    expect(ctl.acquire.mock.calls[0][1]).toEqual({ waitMs: 0, stage: 'chat' });
     expect(ctl.wake).toHaveBeenCalledWith('parle-speech');
     expect(or.chat).toHaveBeenCalledWith(expect.objectContaining({ model: 'qwen/qwen3.5-9b' }));
     expect(res.headers).toMatchObject({

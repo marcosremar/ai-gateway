@@ -111,6 +111,23 @@ describe('POST /v1/realtime/sessions', () => {
     expect(state.woken).toBe(1);
   });
 
+  it('a replica with a stage out of rotation takes no new session: the healthy one does, else 503 degraded + fallback', async () => {
+    const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host, stagesOut: ['tts'] }, { id: 'r2', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const admitted = await gw.create({ config: CONFIG });
+    expect(admitted.status).toBe(200);
+    expect((await admitted.json() as { limits: { replica: { pending: number } } }).limits.replica.pending).toBe(1);
+    expect(gw.events.find(e => e.event === 'rt.session.admitted')!.attrs).toMatchObject({ replica: 'r2' });
+
+    state.replicas = [{ id: 'r1', ip: edge.host, stagesOut: ['tts'] }];
+    const refused = await gw.create({ config: CONFIG });
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get('retry-after')).toBe('30');
+    expect(await refused.json()).toMatchObject({ error: { code: 'degraded', message: expect.stringContaining('tts') }, fallback: { transport: 's2s-stream', url: '/v1/s2s' } });
+    expect(state.woken).toBe(0);
+    expect(gw.charged).toHaveLength(1);
+  });
+
   it('no-wake: a cold deployment is not woken', async () => {
     const { controller, state } = fakeController({ replicas: [] });
     gw = await startGateway(controller);

@@ -39,24 +39,25 @@ class DeploymentCallError extends Error {
   readonly skipRetry: boolean;
   constructor(readonly status: number, message: string, readonly gatewayCode: string) {
     super(message);
-    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable', 'saturated']
+    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable', 'saturated', 'circuit_open']
       .includes(gatewayCode);
   }
 }
 
 /** Calls `path` on a ready replica of `name`; throws an Error with `.status` the fallback chain understands. */
 async function callReplica(
-  controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal,
+  controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal, stage?: string,
 ): Promise<Response> {
   let lease;
   // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves, a cold one is skipped as `cold` and never woken.
   const noWake = noWakeActive();
   try {
-    lease = await controller.acquire(name, noWake ? { waitMs: 0, noWake: true } : { waitMs: opts.waitMs ?? 0 });
+    lease = await controller.acquire(name, { ...(noWake ? { waitMs: 0, noWake: true } : { waitMs: opts.waitMs ?? 0 }), ...(stage ? { stage } : {}) });
   } catch (err) {
     if (!(err instanceof DeploymentError)) throw err;
     if (err.status === 404) throw new DeploymentCallError(404, err.message, 'not_found');
     if (err.status === 409) throw new DeploymentCallError(503, err.message, 'paused');
+    if (err.code === 'stage_out') throw new DeploymentCallError(503, err.message, 'circuit_open');
     // Every ready replica at capacity: spill this request to the fallback now (the replicas keep what they serve).
     if (err.code === 'saturated') throw new DeploymentCallError(503, err.message, 'saturated');
     // No ready replica (scaled to zero / booting): make sure it is scaling up, and let the chain fall back now.
@@ -80,13 +81,13 @@ async function callReplica(
     // replica; a timeout means busy; only a connection failure makes it suspect (live QA 2026-10-07: 15 hedge losers
     // counted as failures marked a working L40S unhealthy and it was replaced).
     const callerTimedOut = (signal?.reason as { name?: string } | undefined)?.name === 'TimeoutError';
-    lease.done(signal?.aborted && !callerTimedOut ? 'cancelled' : timedOut ? 'timeout' : true);
+    lease.done(signal?.aborted && !callerTimedOut ? 'abandoned' : timedOut ? 'timeout' : true);
     throw new DeploymentCallError(timedOut ? 504 : 502, `deployment '${name}': replica ${timedOut ? 'timed out' : 'unreachable'}`,
       timedOut ? 'timeout' : 'unreachable');
   }
   if (!res.ok) {
     // A 429 is the replica's own queue full: pressure for the autoscaler and a busy mark, never a strike.
-    lease.done(res.status === 429 ? 'overloaded' : false);
+    lease.done(res.status === 429 ? 'overloaded' : res.status >= 500 ? 'errored' : false);
     const text = await res.text().catch(() => '');
     // Any replica error moves on to the fallback (a 4xx from our own server is a deployment problem, not the
     // client's: the gateway already validated the request).
@@ -148,8 +149,8 @@ abstract class DeploymentProviderBase {
     const status = (this.controller.get(this.deployment) as { status?: string } | null)?.status;
     if (status === 'scaled-to-zero' || status === 'warming') this.controller.wake?.(this.deployment);
   }
-  protected call(path: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
-    return callReplica(this.controller, this.deployment, path, init, this.opts, signal);
+  protected call(path: string, init: RequestInit, signal?: AbortSignal, stage?: string): Promise<Response> {
+    return callReplica(this.controller, this.deployment, path, init, this.opts, signal, stage);
   }
 }
 
@@ -166,7 +167,7 @@ export class DeploymentLLMProvider extends DeploymentProviderBase implements LLM
         ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
         ...request.extraBody,
       }),
-    }, request.signal);
+    }, request.signal, 'chat');
     const payload = await res.json() as {
       model?: string;
       choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
@@ -195,7 +196,7 @@ export class DeploymentSTTProvider extends DeploymentProviderBase implements STT
     if (request.language) form.append('language', request.language);
     if (request.prompt) form.append('prompt', request.prompt);
     form.append('response_format', format);
-    return this.call('/v1/audio/transcriptions', { method: 'POST', body: form }, request.signal);
+    return this.call('/v1/audio/transcriptions', { method: 'POST', body: form }, request.signal, 'stt');
   }
 
   async transcribe(request: STTRequest): Promise<STTResponse> {
@@ -347,7 +348,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(await this.body(request)),
-    }, request.signal);
+    }, request.signal, 'tts');
     // vLLM-Omni answers some errors (and SSE events without stream_format) as JSON: that is not audio.
     if ((res.headers.get('content-type') ?? '').includes('json') || !res.body) {
       const text = await res.text().catch(() => '');
