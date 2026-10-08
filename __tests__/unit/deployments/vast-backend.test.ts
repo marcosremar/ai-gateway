@@ -10,7 +10,8 @@ import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
 import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
 import {
-  BAD_HOST_MS, EUR_TO_USD, LIST_CACHE_MS, LIST_STALE_MAX_MS, MIN_RELIABILITY, TOO_FAR_HOST_MS, VastDeploymentBackend, vastState,
+  BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, MIN_RELIABILITY, TOO_FAR_HOST_MS,
+  VastDeploymentBackend, vastState,
 } from '../../../src/deployments/vast-backend';
 import type { DeploymentSpec } from '../../../src/deployments/types';
 
@@ -138,7 +139,8 @@ describe('VastDeploymentBackend', () => {
     const m = await backend.createReplica({ spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' });
     expect(m.id).toBe('9');
     expect(logged[0]).toMatchObject({ offer: 3, host: 103, location: 'Frankfurt, DE', rank: 2, of: 2 });
-    expect(String((logged[0]!.skipped as string[])[0])).toMatch(/^offer 2: /);
+    expect(String((logged[0]!.skipped as string[])[0])).toMatch(/^offer 2 \(Paris, FR, \$0\.45\/h\): /);
+    expect(m.placementNote).toMatch(/^offer 2 of 2: Frankfurt, DE, \$0\.47\/h; better-ranked offers passed over: offer 2 \(Paris, FR, \$0\.45\/h\): .*not available/);
     expect(calls.filter(c => c.method === 'PUT').map(c => c.url.split('/asks/')[1])).toEqual(['2/', '3/']);
 
     const denied = new VastDeploymentBackend('bad', { fetch: fakeVast(({ method }) => (method === 'POST'
@@ -280,6 +282,70 @@ describe('VastDeploymentBackend RTT', () => {
     expect((await backend.createReplica(input)).id).toBe('300'); // still avoided after an hour
     now = TOO_FAR_HOST_MS + 1;
     expect((await backend.createReplica(input)).id).toBe('200');
+  });
+});
+
+describe('VastDeploymentBackend known-good hosts and the baseline', () => {
+  const market = [
+    { id: 2, machine_id: 102, geolocation: 'Paris, FR', dph_total: 0.45, reliability2: 0.99, inet_down: 900 },
+    { id: 5, machine_id: 105, geolocation: 'London, GB', dph_total: 0.49, reliability2: 0.99, inet_down: 900 },
+    { id: 6, machine_id: 106, geolocation: 'Zurich, CH', dph_total: 0.30, reliability2: 0.99, inet_down: 900 },
+  ];
+  const rig = () => {
+    const clock = { now: 0 };
+    const { fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers: market } };
+      if (method === 'PUT') return { body: { success: true, new_contract: Number(url.match(/asks\/(\d+)/)![1]) * 100 } };
+      return { body: { success: true } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => clock.now });
+    return { clock, backend, input: { spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' } };
+  };
+
+  it('the users\' country is tried before a cheaper neighbour of the same band', async () => {
+    const { backend, input } = rig();
+    expect((await backend.previewOffers(input.spec)).map(o => o.location)).toEqual(['Paris, FR', 'Zurich, CH', 'London, GB']);
+    expect((await backend.createReplica(input)).placementNote).toBe('offer 1 of 3: Paris, FR, $0.45/h');
+  });
+
+  it('a host that passed the gate is remembered 24 h with its RTT and ranked first; a too-far release forgets it', async () => {
+    const { clock, backend, input } = rig();
+    const uk = await backend.createReplica({ ...input, spec: vastSpec({ near: 'GB' }) });
+    expect(uk.id).toBe('500');
+    backend.recordRtt({ ...uk, id: 'unknown-instance' }, 12);
+    expect((await backend.previewOffers(input.spec)).every(o => o.knownRttMs === null)).toBe(true);
+    backend.recordRtt(uk, 44);
+    expect((await backend.previewOffers(input.spec)).map(o => [o.location, o.knownRttMs]))
+      .toEqual([['London, GB', 44], ['Paris, FR', null], ['Zurich, CH', null]]);
+    expect((await backend.createReplica(input)).placementNote).toBe('offer 1 of 3: London, GB, $0.49/h, passed the RTT gate at 44 ms');
+    clock.now = KNOWN_RTT_MS + 1;
+    expect((await backend.previewOffers(input.spec))[0]).toMatchObject({ location: 'Paris, FR', knownRttMs: null });
+    clock.now = 0;
+    backend.recordRtt(uk, 44);
+    await backend.releaseReplica(uk, 'too-far');
+    expect((await backend.previewOffers(input.spec)).map(o => o.location)).toEqual(['Paris, FR', 'Zurich, CH']);
+  });
+
+  it('the cache of known hosts is bounded', async () => {
+    const many = Array.from({ length: KNOWN_RTT_MAX_HOSTS + 5 }, (_, i) => ({ id: i + 1, label: 'aigw:prod:speech', machine_id: 1000 + i, actual_status: 'running' }));
+    const backend = new VastDeploymentBackend('k', {
+      fetch: fakeVast(({ method }) => (method === 'GET' ? { body: { instances: many } }
+        : { body: { offers: [{ ...market[0], machine_id: 1000 }, { ...market[1], machine_id: 1000 + KNOWN_RTT_MAX_HOSTS + 4 }] } })).fetchImpl,
+    });
+    for (const m of await backend.listReplicas('prod')) backend.recordRtt(m, 30);
+    expect((await backend.previewOffers(vastSpec())).map(o => [o.location, o.knownRttMs])).toEqual([['London, GB', 30], ['Paris, FR', null]]);
+  });
+
+  it('the baseline is the same probe against the anchor of the users\' country; no anchor or no answer = none', async () => {
+    const seen: string[] = [];
+    const answers: Array<number | null> = [45.4, null];
+    const backend = new VastDeploymentBackend('k', {
+      fetch: fakeVast(() => ({ body: {} })).fetchImpl, rtt: async (h, p) => { seen.push(`${h}:${p}`); return answers.shift() ?? null; },
+    });
+    expect(await backend.measureBaselineRtt('fr')).toEqual({ anchor: 's3.fr-par.scw.cloud', rttMs: 45 });
+    expect(await backend.measureBaselineRtt('FR')).toBeNull();
+    expect(await backend.measureBaselineRtt('BR')).toBeNull();
+    expect(seen).toEqual(['s3.fr-par.scw.cloud:80', 's3.fr-par.scw.cloud:80']);
   });
 });
 
