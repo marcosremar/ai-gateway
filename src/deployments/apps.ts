@@ -38,6 +38,8 @@ const DEFAULT_FIELDS = new Set([
 
 export interface AppImageVersion { image: string; digest: string | null; at: number }
 
+export type ImageVisibility = 'private' | 'shared';
+
 export interface AppImage {
   name: string;
   /** Registry reference, e.g. `rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107`. */
@@ -46,6 +48,7 @@ export interface AppImage {
   port: number | null;
   healthPath: string | null;
   description: string | null;
+  visibility: ImageVisibility;
   /** Deployment spec fields this image's deploys start from (machineType, zone, volumeGb, …). */
   defaults: Record<string, unknown>;
   createdAt: number;
@@ -151,7 +154,10 @@ export class AppRegistry implements FallbackKeyStore {
   private apps: Record<string, AppAccount> = {};
   constructor(private readonly store: AppStore, private readonly now: () => number = Date.now) {}
 
-  async init(): Promise<void> { this.apps = await this.store.load(); }
+  async init(): Promise<void> {
+    this.apps = await this.store.load();
+    for (const account of Object.values(this.apps)) for (const image of Object.values(account.images)) image.visibility ??= 'private';
+  }
 
   list(): Array<{ id: string; images: number; createdAt: number }> {
     return Object.values(this.apps).map(a => ({ id: a.id, images: Object.keys(a.images).length, createdAt: a.createdAt }));
@@ -160,6 +166,23 @@ export class AppRegistry implements FallbackKeyStore {
   get(app: string): AppAccount | null { return ownValue(this.apps, app) ?? null; }
 
   image(app: string, name: string): AppImage | null { return ownValue(ownValue(this.apps, app)?.images, name) ?? null; }
+
+  visibleImages(app: string | null) {
+    return Object.values(this.apps).flatMap(account => Object.values(account.images)
+      .filter(i => !app || account.id === app || i.visibility === 'shared')
+      .map(({ name, image, digest, port, healthPath, description, visibility, createdAt, updatedAt }) =>
+        ({ app: account.id, name, image, digest, port, healthPath, description, visibility, createdAt, updatedAt })));
+  }
+
+  async registerDeployed(app: string, ref: string, spec: { port?: number; healthPath?: string }): Promise<void> {
+    const name = ref.split('@')[0].split('/').pop()!.split(':')[0].replace(/[._]/g, '-');
+    if (!IMAGE_REF_RE.test(ref) || !IMAGE_NAME_RE.test(name) || RESERVED_KEYS.has(name)) return;
+    const prev = this.image(app, name);
+    if (prev?.image === ref) return;
+    await this.putImage(app, name, prev ? { image: ref } : { image: ref, port: spec.port, healthPath: spec.healthPath }).catch((err) => {
+      if (!(err instanceof AppError)) throw err;
+    });
+  }
 
   fallbackKey(app: string): ProvisionedKeyRecord | null { return ownValue(this.apps, app)?.fallbackKey ?? null; }
 
@@ -178,7 +201,7 @@ export class AppRegistry implements FallbackKeyStore {
     if (!IMAGE_NAME_RE.test(name) || RESERVED_KEYS.has(name)) {
       throw new AppError(400, `image name must match ${IMAGE_NAME_RE} (not ${[...RESERVED_KEYS].join('/')})`);
     }
-    const known = new Set(['image', 'digest', 'port', 'healthPath', 'description', 'defaults']);
+    const known = new Set(['image', 'digest', 'port', 'healthPath', 'description', 'defaults', 'visibility']);
     for (const key of Object.keys(body)) if (!known.has(key)) throw new AppError(400, `unknown field '${key}'`);
     const prev = this.image(app, name) ?? undefined;
     const imageRef = str(body.image, 'image', 255) ?? prev?.image;
@@ -192,6 +215,8 @@ export class AppRegistry implements FallbackKeyStore {
     for (const key of Object.keys(defaults)) {
       if (!DEFAULT_FIELDS.has(key)) throw new AppError(400, `defaults.${key} is not allowed (allowed: ${[...DEFAULT_FIELDS].join(', ')})`);
     }
+    const visibility = body.visibility ?? prev?.visibility ?? 'private';
+    if (visibility !== 'private' && visibility !== 'shared') throw new AppError(400, "visibility must be 'private' or 'shared'");
     const account = this.account(app);
     const t = this.now();
     const history = prev ? [...prev.history] : [];
@@ -200,7 +225,7 @@ export class AppRegistry implements FallbackKeyStore {
       name, image: imageRef, digest, port,
       healthPath: body.healthPath === undefined ? prev?.healthPath ?? null : str(body.healthPath, 'healthPath', 200),
       description: body.description === undefined ? prev?.description ?? null : str(body.description, 'description', 500),
-      defaults, createdAt: prev?.createdAt ?? t, updatedAt: t, history: history.slice(0, IMAGE_HISTORY),
+      visibility, defaults, createdAt: prev?.createdAt ?? t, updatedAt: t, history: history.slice(0, IMAGE_HISTORY),
     };
     account.images[name] = image;
     await this.store.save(this.apps);
@@ -260,8 +285,12 @@ export class AppRegistry implements FallbackKeyStore {
     if (body.appImage === undefined) return body;
     const name = body.appImage;
     if (typeof name !== 'string') throw new AppError(400, 'appImage must be an image name of the app');
-    const saved = this.image(app, name);
-    if (!saved) throw new AppError(404, `app '${app}' has no image '${name}' (PUT /v1/apps/${app}/images/${name} first)`);
+    const slash = name.indexOf('/');
+    const owner = slash < 0 ? app : name.slice(0, slash);
+    const saved = this.image(owner, name.slice(slash + 1));
+    if (!saved || (owner !== app && saved.visibility !== 'shared')) {
+      throw new AppError(404, owner === app ? `app '${app}' has no image '${name}' (PUT /v1/apps/${app}/images/${name} first)` : `image '${name}' not found`);
+    }
     const version = body.appImageVersion === undefined ? 0 : Number(body.appImageVersion);
     if (!Number.isInteger(version) || version < 0 || version > saved.history.length) {
       throw new AppError(400, `appImageVersion must be 0..${saved.history.length} (0 = current)`);

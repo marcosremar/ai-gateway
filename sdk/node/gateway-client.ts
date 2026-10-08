@@ -371,9 +371,11 @@ export class GatewayClient {
         throw err;
       }
     },
-    putImage: (app: string, name: string, image: Partial<Pick<AppImage, 'image' | 'digest' | 'port' | 'healthPath' | 'description' | 'defaults'>>,
+    putImage: (app: string, name: string, image: Partial<Pick<AppImage, 'image' | 'digest' | 'port' | 'healthPath' | 'description' | 'defaults' | 'visibility'>>,
       call?: CallOptions): Promise<AppImage> =>
       this.gw({ method: 'PUT', path: `/v1/apps/${enc(app)}/images/${enc(name)}`, group: 'admin', call, json: image, idempotent: true }, r => r.json()),
+    listImages: async (call?: CallOptions): Promise<Array<Omit<AppImage, 'defaults' | 'history'> & { app: string }>> =>
+      (await this.getJson<{ images: Array<Omit<AppImage, 'defaults' | 'history'> & { app: string }> }>('/v1/images', 'admin', call)).images,
     /** The direct-fallback plan (carries provider keys: keep it in memory, server-side). */
     fallbackPlan: (app: string, call?: CallOptions): Promise<FallbackPlan> => this.getJson(`/v1/apps/${enc(app)}/fallback`, 'admin', call),
   };
