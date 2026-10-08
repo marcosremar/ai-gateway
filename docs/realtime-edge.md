@@ -77,8 +77,10 @@ port. `realtime` works there as follows (`vastReplicaInit`, `realtime-ports.ts`,
   `net.probePort`) while its responder binds the container port — so the gateway's probe and the
   `direct` / `relay` / `ws` decision work unchanged. `udpPorts` in the status stays the container range.
 - Proven on macOS only (`tests/run.sh harness`, scenario `vast`: candidates carry `PUBLIC_IPADDR` and mapped ports,
-  one port per session, mapped probe port, responder on the container port). Not yet run on a Vast host: whether the
-  onstart shell sees `VAST_UDP_PORT_<n>` (the boot falls back to `/etc/environment`), and media through the host's NAT.
+  one port per session, mapped probe port, responder on the container port) and on two Vast hosts (2026-10-08,
+  `docs/reports/2026-10-07-realtime-handoff.md` § Prova final ao vivo — Vast): the onstart shell sees
+  `VAST_UDP_PORT_<n>` (`/etc/environment` has none); on one host WebRTC media flowed `host/host` over the mapped
+  ports, on the other no inbound UDP arrived at all and the edge fell back to `ws`. UDP reachability is per host.
 
 ## Firewall and public addresses of scaled replicas
 
