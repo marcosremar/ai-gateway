@@ -20,7 +20,7 @@ export interface Turn {
   overlap?: boolean; audibleMs?: number | null; receivedMs?: number | null; heardAfterReceivedMs?: number | null; audibleFromVadEndMs?: number | null; meterErrorMs?: number;
 }
 export interface StudentRecord {
-  id: number; client: Turn['client']; startedAt: number; transport: string | null; connectMs: number | null; reconnects: number;
+  id: number; client: Turn['client']; startedAt: number; transport: string | null; connectMs: number | null; reconnects: number; replica?: string;
   admissions: Array<{ at: number; status: number; code: string; retryAfter: number | null; ms: number }>;
   attempts: Array<{ at: number; type: string; ok: boolean; ms: number; reason?: string; pair?: unknown }>;
 }
@@ -225,6 +225,7 @@ async function connect(rec: StudentRecord): Promise<{ session: Session } | { why
   }
   rec.admissions.push({ at: t0, status, code, retryAfter, ms: Math.round(now() - t0) });
   if (!desc) return { why: `admission:${code}`, retryMs: Math.min(Math.max(retryAfter ?? 2, 1), 30) * 1000 };
+  rec.replica = String(JSON.parse(Buffer.from(desc.token.split('.')[1] ?? '', 'base64url').toString() || '{}').rep ?? '');
   let why = 'connect:no transport offered';
   for (const type of want) {
     const offer = desc.transports.find(t => t.type === type);

@@ -110,6 +110,11 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
   const withLatency = (js: typeof judged) => js.filter(j => j.latency !== null && j.result !== 'failed').map(j => j.latency as number);
   const keys = [...new Set(judged.map(j => j.key))].filter(k => k !== 'none').sort();
   const all = dist(withLatency(judged), attempted);
+  const replicaOf = new Map(client.students.map(st => [st.id, st.replica ?? '']));
+  const byReplica = Object.fromEntries([...new Set(replicaOf.values())].filter(Boolean).sort().map((id) => {
+    const js = judged.filter(j => replicaOf.get(j.t.student) === id);
+    return [id, { students: [...replicaOf.values()].filter(r => r === id).length, ...dist(withLatency(js), js.length) }];
+  }));
   const metric = (name: string) => judged.map(j => Number(j.t.events.find(e => e.type === 'metrics')?.[name])).filter(x => Number.isFinite(x));
   const attempts = client.students.flatMap(s => s.attempts);
   const admissions = client.students.flatMap(s => s.admissions);
@@ -167,7 +172,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
       attempted, ok: bad('ok'), failed: bad('failed'), truncated: bad('truncated'), failurePct: pctOf(bad('failed')), truncationPct: pctOf(bad('truncated')),
       why: count(judged.filter(j => j.why).map(j => `${j.result}:${j.why}`)), audioMsPerChar: rates,
     },
-    firstAudioMs: { all, byTransport: Object.fromEntries(keys.map(k => [k, dist(withLatency(judged.filter(j => j.key === k)), judged.filter(j => j.key === k).length)])) },
+    firstAudioMs: { all, byReplica, byTransport: Object.fromEntries(keys.map(k => [k, dist(withLatency(judged.filter(j => j.key === k)), judged.filter(j => j.key === k).length)])) },
     audible, meters: client.meters,
     wsFirstFrameMs: dist(judged.filter(j => j.t.firstFrame !== null && j.t.speechEnd !== null).map(j => (j.t.firstFrame as number) - (j.t.speechEnd as number))),
     edge: { ttfaMs: dist(metric('ttfa_ms')), sttMs: dist(metric('stt_ms')), llmTtftMs: dist(metric('llm_ttft_ms')), ttsTtfbMs: dist(metric('tts_ttfb_ms')) },
@@ -206,6 +211,7 @@ function summary(r: ReturnType<typeof buildReport>): string {
     'first audio, ms from the last voiced sample sent to the first non-silent audio received (shares over all attempted turns):',
     d('all', r.firstAudioMs.all),
     ...Object.entries(r.firstAudioMs.byTransport).map(([k, x]) => d(k, x)),
+    ...Object.entries(r.firstAudioMs.byReplica).map(([k, x]) => `${d(`rep ${k.slice(-8)}`, x)} (${x.students} students)`),
     ...(Object.keys(r.audible).length ? ['audible in Chrome, ms from the reference to the first loud 20 ms at the page output (received = audio_start event):'] : []),
     ...Object.entries(r.audible).map(([k, a]) => `  ${k.padEnd(11)} n=${a.audibleMs.n}/${a.turns} audible p50 ${a.audibleMs.p50} p95 ${a.audibleMs.p95} | received p50 ${a.receivedMs.p50} | heard − received p50 ${a.heardAfterReceivedMs.p50}`
       + ` | from vad end p50 ${a.audibleFromVadEndMs.p50} | lightweight p50 ${a.lightweightMs.p50} → offset ${a.offsetMs} ms (audible p10–p90 spread ${a.spreadMs} ms) | meter error ≤ p50 ${a.meterErrorMs.p50} max ${a.meterErrorMs.max} ms | no audible audio ${a.noAudibleAudio}, overlapped ${a.overlapped}`),

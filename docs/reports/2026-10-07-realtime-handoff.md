@@ -429,3 +429,134 @@ machine 1 and 0 on machine 2 (the edge reads the setting once, at start): same m
   the confirmed turn unchanged (215 vs 213 ms), the LLM task of the discarded attempt cancelled by llama.cpp.
 - 150–500 ms pass between `audio_start` and the first loud sample in every row: the leading silence of the TTS.
 - `s2s-stream` and the combination table per transport: **not run**.
+
+## New image and class capacity, 2026-10-08
+
+Image **`rg.fr-par.scw.cloud/aigw/speech-stack:20261008-0330`** (digest `sha256:8288cdb46d15c14a26cce5421c954cda7e8e9a1ed08506b0efe7d9f2fb3fd06e`,
+59.0 GB), built from `95091e7` with `bun scripts/build-image-on-scaleway.ts docker/speech-stack speech-stack` (no `--app`:
+nothing written to an app's image catalog). Build machine POP2-HC-8C-16G fr-par-2, 05:30:28–05:45:21 Europe/Paris, build +
+push 828 s, machine and volume deleted by the script. Edge `ghcr.io/marcosremar/aigw-edge:95091e7` (Actions run
+37722788671, success).
+
+One replica, **L40S-1-48G, fr-par-2, €1.4699/h**, through a local gateway (`bun serve.ts` on :4103, namespace
+`marcos-img`, `DEPLOYMENTS_PROBE_PORT=8080`). Spec: profile `speech-stack`, that image, `placements: []` (no silent
+L4), `minReplicas: 1`, `maxHours: 3`, `maxEurPerHour: 1.6`, `realtime: { edgeImage: …:95091e7, maxSessions: 64, env:
+{ RT_RTC_WORKERS: "6" } }`, edge defaults otherwise (`EDGE_SPECULATE_MS` 300). Created 05:45:46, `ready` by 05:54:12
+(≤ 8 min 26 s), deleted 07:02:47: **77 machine-minutes, about €1.89**. One catalog voice (`voices.json` + a 6.9 s
+reference, macOS `say`), a 332-word / 509-token Portuguese shop-clerk system prompt, a 4.1 s Portuguese utterance as
+the clip (`say`, PCM16 mono 16 kHz).
+
+Clock of every latency: last voiced sample sent → first non-silent audio received (the edge's 700 ms endpointing is
+inside). Target: p50 ≤ 1500, p95 ≤ 2000, failures + truncations ≤ 1 %. No run was marked `SATURATED`. All numbers
+below are from this one machine in this one session; last night's rows are another machine and are not compared.
+
+### The new code is what runs
+
+`POST /v1/s2s` through the gateway (`…/invoke/v1/s2s`), one student, the same clip:
+
+| When | `transcript.stt` | `done.stages` |
+|---|---|---|
+| 05:54, first call | `queue_ms` 25, `decode_ms` 162, `batch` 1 | `llm_first_token_ms` 116, `llm_cache_n` 0, `llm_prompt_n` 509, `tts_first_chunk_ms` 94 |
+| 05:54, 2nd / 3rd | 25 / 159–160 | `llm_first_token_ms` 55 / 54, `llm_cache_n` 505, `llm_prompt_n` 4, `tts_first_chunk_ms` 92–94 |
+| 06:27, after 6 runs up to N = 16 | — | `llm` `prompt_ms` 52 / 50 (`cache_n` 505) |
+| 07:02, after 67 min and 2 492 clips | 25 / 161–162 | `llm_first_token_ms` 57 / 55, `tts_first_chunk_ms` 90–91 |
+
+The fields exist only in this branch's `server.py`; the idle first token is the same after 67 min of load (54 → 55 ms),
+where the production image went 260 → 802 ms in 25 min: `--cache-ram 0` is in effect. `/health`: `stt.batches` 2 266,
+`clips` 2 492, `largest` 8, `oom_retries` 0, `fallbacks` 0.
+
+### Capacity of one replica, clean network, `ws` clients from the Mac
+
+`GW=http://localhost:4103 DEP=img-speech bun scripts/realtime-e2e/load.ts --n <N> --clip turn.wav --profile clean`
+(180 s per student + 30 s ramp, a turn every 15 ± 5 s), in the order they ran:
+
+| Start | N | Turns ok / attempted | First audio p50 / p95 / max ms | ≤ 1.0 / 1.5 / 2.0 s % | Edge after endpointing p50 / p95: ttfa · stt · llm first token · tts | Result |
+|---|---|---|---|---|---|---|
+| 05:54:45 | 4 | 47 / 47 | 1184 / 1899 / 2119 | 10.6 / 74.5 / 95.7 | 149/723 · 186/426 · 138/341 · 102/152 | PASS |
+| 06:09:42 | 8 | 91 / 91 | 1325 / 2014 / 2639 | 9.9 / 69.2 / 93.4 | 271/993 · 267/514 · 194/502 · 105/198 | FAIL (p95 +14 ms) |
+| 06:13:15 | 10 | 108 / 108 | 1555 / 2606 / 3048 | 8.3 / 46.3 / 80.6 | 522/1360 · 354/657 · 243/521 · 113/210 | FAIL |
+| 06:16:48 | 12 | 129 / 129 | 1748 / 2525 / 2983 | 0.8 / 33.3 / 78.3 | 635/1340 · 388/683 · 306/579 · 127/212 | FAIL |
+| 06:20:19 | 16 | 170 / 170 | 2255 / 3316 / 3868 | 3.5 / 16.5 / 37.6 | 1135/2178 · 422/836 · 482/1030 · 150/288 | FAIL |
+| 06:23:58 | 8 again | 87 / 87 | 1288 / 2149 / 2828 | 4.6 / 65.5 / 89.7 | 295/1062 · 313/575 · 168/519 · 111/186 | FAIL (p95 +149 ms) |
+| 06:27:40 | 6 | 65 / 65 | 1248 / 2094 / 2389 | 4.6 / 78.5 / 92.3 | 150/933 · 188/420 · 156/482 · 102/182 | FAIL (p95 +94 ms) |
+| 06:33:27 | 4 again | 46 / 46 | 1071 / 1345 / 1492 | 19.6 / 100 / 100 | 140/459 · 185/335 · 128/182 · 100/153 | PASS |
+| 06:55:16 | 16 again | 165 / 165 | 2481 / 3624 / 4444 | 1.8 / 15.2 / 34.5 | 1314/2611 · 421/855 · 525/1234 · 144/285 | FAIL |
+| 06:59:00 | 6 again | 69 / 69 | 1160 / 1894 / 2162 | 13 / 82.6 / 95.7 | 144/758 · 189/403 · 152/422 · 97/156 | PASS |
+
+- **N_pass = 4** (2 of 2 runs). N = 6 passed once and failed once (p95 1894 / 2094); N = 8 failed twice on p95 only
+  (2014 / 2149; p50 1.29–1.33 s, 90–93 % of turns under 2 s). **p95 crosses 2 s at 6–8 students**; p50 crosses 1.5 s
+  between 8 and 10. Two identical runs differ by up to 550 ms on p95 (N = 4: 1899 vs 1345), so 6 and 8 are inside the
+  noise of the limit, and 10 and above are not.
+- **No drift.** N = 8 at 06:24, after N = 10, 12 and 16, is the N = 8 of 06:10 (p50 1288 vs 1325, LLM first token p50
+  168 vs 194 ms); N = 4 and N = 6 were better late than early.
+- No failed or truncated turn in 977 turns; no admission refusal (cap 64).
+- What grows with N is the wait behind other students' turns: STT p50 186 → 422 ms and LLM first token p50 138 →
+  482 ms from N = 4 to 16. At N ≤ 6 the edge's own p50 is 140–150 ms after endpointing (the speculative turn landing);
+  its p95 (460–930 ms) is the turns where it did not, and that tail is what sits on the 2 s line.
+- **Burst at N_pass** (06:31:18, `--n 4 --burst --jitter 0 --turn-every 20 --ramp 5 --duration 120`; 6 bursts, the 4
+  students ending their speech within 6–21 ms): 24 / 24 ok, **p50 1950, p95 2355, max 2436 ms**, 62.5 % under 2 s —
+  FAIL by the target, no collapse (STT 373 ms, LLM first token 539 ms p50).
+
+### Degraded network at N_pass, from the 6-vCPU Linux VM behind the Mac's NAT
+
+`bun scripts/realtime-e2e/load.ts --n 2 --rtc 2 --chrome 3 --clip turn.wav --profile <p> --duration 120 --ramp 15`
+(2 aiortc + 3 Chrome forced on `webrtc`, `ws`, `s2s-stream` = 5 sessions on the replica). `campus-slow` (2 Mbit/s
+down, 512 kbit/s up, 40 ± 10 ms, 1 % loss) and `lossy` (75 ms, 5 %) are assumptions, not measurements of the campus.
+PASS/FAIL is on the lightweight clients only: the Chrome `ws` session's `interrupted` turns are the harness's loop (its
+fake microphone repeats the clip every 15 s over a reply still playing), as last night.
+
+| Start | Profile | aiortc first audio p50 / p95 ms (n), by transport ended on | Chrome audible p50 / p95 ms (n): webrtc · ws · s2s-stream | Connect ms, transport ended on, time lost in failed rungs | Lightweight result |
+|---|---|---|---|---|---|
+| 06:37:16 | clean | webrtc 1466 / 2364 (13) | 1834 / 3134 (8) · 1107 / 1947 (9) · 1928 / 2115 (9) | aiortc 2 of 2 webrtc, host/host (441, 1700); Chrome webrtc 544, ws 166; nothing lost | FAIL (p95) |
+| 06:40:08 | campus-slow | webrtc 2541 / 3016 (7) · ws 1092 / 1595 (6) | 2355 / 3145 (9) · 2410 / 2760 (9) · 4324 / 6119 (9) | aiortc 1 webrtc (1500), 1 on ws after 4.0 s of failed connect (4420 total); Chrome webrtc 2487, ws 347 | FAIL |
+| 06:42:42 | udp-blocked | ws 1097 / 1496 (13) | — · 1239 / 1444 (9) · 1785 / 1974 (9) | aiortc 2 of 2 on ws after 2.0 and 3.0 s of failed gathering (2181, 3143 total); Chrome ws 141; Chrome forced on webrtc never connected | **PASS** |
+| 06:45:09 | lossy | ws 1605 / 8796 (12) | — · 1490 / 2450 (9) · 3307 / 5591 (9) | aiortc 2 of 2 on ws after 4.1–4.2 s of failed connect (5858, 6863 total); Chrome ws 1872; Chrome forced on webrtc never connected | FAIL (1 failed, 1 truncated of 12) |
+
+- WebRTC from this network is direct UDP (`host/host`); this gateway has no TURN, so a blocked or lossy UDP path ends
+  on the `ws` rung. On `ws` the latency is the clean one (1.1 s p50) even on `campus-slow` and `udp-blocked`.
+- The WebRTC rung is the slow one on a bad link: +1.1 s p50 on `campus-slow` against `ws` in the same run.
+- `s2s-stream` uploads the whole clip after the speech: 4.3 s p50 on `campus-slow`, 3.3 s on `lossy`.
+
+**Start race of the SDK (edge `95091e7`), Chrome on its own ladder** (`--n 1 --rtc 1 --chrome 3 --chrome-transports ,
+--duration 75 --ramp 10`; 3 Chrome sessions per profile):
+
+| Start | Profile | Chrome: first transport usable, ms | Chrome: ended on | aiortc (sequential ladder), same run |
+|---|---|---|---|---|
+| 06:50:07 | udp-blocked | ws at 192–201 | ws (WebRTC given up at 5.0 s, in the background) | ws at 3172 after 3.1 s of failed gathering |
+| 06:51:58 | clean | ws at 421–425 | webrtc, up at 643–728 | webrtc at 2513 |
+| 06:53:33 | campus-slow | ws at 374–482 | webrtc, up at 1227–2512 | ws at 4702 after 4.2 s of failed connect |
+
+With the race the learner is connected in 0.2–0.5 s on every profile; without it (aiortc, last night's SDK) a blocked
+UDP path costs 2–4 s before the first word.
+
+### The class case: 24 students on two replicas — not run
+
+`PATCH {"minReplicas":2,"maxReplicas":2,"maxEurPerHour":3.2}` at 06:48:05. Every create until 07:02:32 (14 min 27 s)
+was refused: `403 quotas_exceeded`, `cp_servers_type_L40S_1_48G` quota 2, current 2 — this session held one, the other
+is not ours. No L4 was substituted. In its place, N = 16 on the one replica, twice (table above): p50 2255 / 2481, p95
+3316 / 3624 ms, 35–38 % of turns under 2 s, no failure.
+
+### Verdict
+
+| | Largest class inside the target, clean | `udp-blocked` | `campus-slow` | `lossy` | € / h |
+|---|---|---|---|---|---|
+| 1 × L40S | **4** (6: one run of two; 8: p95 2.01–2.15 s, p50 1.3 s) | passes at 5 sessions (ws) | fails at 5 on the WebRTC rung (2.5 s p50); the ws rung alone would pass (1.1 / 1.6 s, n = 6) | fails at 5 (p95 8.8 s) | 1.47 |
+| 2 × L40S | not measured (quota); derived 8, at most 12 with the N = 6 run that passed | not measured | not measured | not measured | 2.94 |
+
+**24 students at once**: not measured on two replicas. Derived from the one-replica rows, assuming admission splits
+them 12 / 12: each replica is the N = 12 row, **p50 1.75 s, p95 2.5 s, 78 % of turns under 2 s, no failed turn — FAIL
+on both limits**. Inside the target the class needs 24 / 6 = **4 L40S** (€5.88/h) on the borderline run, 24 / 4 = 6
+(€8.82/h) on the level that passed twice; the L40S quota is 2. On two L40S the target that 24 students would meet,
+by the same derivation, is p50 ≤ 1.8 s and p95 ≤ 2.6 s.
+
+Not run: the two-replica measurement and the admission spread (quota); the L4; `flap`; TURN; a burst above 4.
+
+### Harness
+
+`load-client.ts` records the replica of each student (the `rep` claim of the session token) and `load.ts` reports
+`firstAudioMs.byReplica` and one summary line per replica — for the two-replica run that could not happen; with one
+replica it only confirms every session was on it.
+
+At 05:59–06:02 this Mac's disk filled (other sessions; 0.8 GB free of 460): the local gateway process died without a
+log line; one N = 8 run lost its output and the next two ran against the dead gateway (11 GPU minutes). The gateway was restarted on the same
+`DEPLOYMENTS_STATE_DIR` and took the running replica back; nothing was created twice.
