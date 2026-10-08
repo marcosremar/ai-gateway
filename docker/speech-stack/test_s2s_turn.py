@@ -2,10 +2,12 @@
 import asyncio
 import base64
 import json
+import math
 import os
 import re
 import struct
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +25,7 @@ class Upload:
 
 
 turns = {"started": 0, "done": 0, "failed": {}, "stalled": {}}
-ns: dict = {"asyncio": asyncio, "base64": base64, "json": json, "os": os, "re": re, "struct": struct, "time": time,
+ns: dict = {"asyncio": asyncio, "math": math, "uuid": uuid, "TTS_FRAMES_PER_SECOND": 12.5, "base64": base64, "json": json, "os": os, "re": re, "struct": struct, "time": time,
             "app": App(), "Request": object, "UploadFile": object, "File": lambda *_: None, "Form": lambda *_: None,
             "HTTPException": Exception, "StreamingResponse": lambda body, **_: body, "client": None, "TTS_URL": "",
             "LLM_URL": "", "TTS_MODEL": "tts", "FIRST_MIN_WORDS": 3, "MAX_CHUNK_CHARS": 160, "TTS_PARALLEL": 2, "SAMPLE_RATE": 24000,

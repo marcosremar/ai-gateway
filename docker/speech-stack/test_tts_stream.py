@@ -1,5 +1,8 @@
 """Unit test of the per-sentence TTS stream (no GPU): python3 docker/speech-stack/test_tts_stream.py"""
 import asyncio
+import math
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,7 +23,7 @@ class Client:
         yield CutResponse()
 
 
-ns: dict = {"asyncio": asyncio, "client": Client(), "TTS_URL": "", "TTS_MODEL": "tts", "SAMPLE_RATE": 24000,
+ns: dict = {"asyncio": asyncio, "math": math, "time": time, "uuid": uuid, "TTS_FRAMES_PER_SECOND": 12.5, "client": Client(), "TTS_URL": "", "TTS_MODEL": "tts", "SAMPLE_RATE": 24000,
             "TTS_MAX_SECONDS": 3.0, "TTS_MAX_SECONDS_PER_CHAR": 0.2}
 exec(src[src.index("async def tts_stream"):src.index("LANGUAGE =")], ns)
 
