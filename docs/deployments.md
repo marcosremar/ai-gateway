@@ -187,6 +187,10 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
 - **Overflow**: a replica takes at most `targetInflightPerReplica` × `autoscale.maxInflightFactor` (1.5); with every ready
   replica full, a request with a fallback spills to it at once (`X-Gateway-Fallback: saturated`, neutral for breakers)
   instead of queueing on the GPU until a timeout; an invoke (no fallback) waits in the gateway for a free slot.
+  A replica's realtime sessions (docs/realtime.md § Load and the autoscaler) count in the same unit, full =
+  `targetInflightPerReplica`: a replica whose realtime slots are all taken takes no request at all, so the `/v1/s2s`
+  turn of a learner refused at realtime admission is answered by the fallback (`route.fallback: "saturated"`) and not
+  by the GPU the admitted learners are talking to.
 - **Adaptive hedge**: a route's deployment target starts its fallback in parallel after `DeploymentController.hedgeDelayMs`
   — max(`DEPLOYMENT_HEDGE_MS` 1.5 s, the replica's recent p95 × 1.2, scaled by the queue it joins beyond its target),
   at most 3/4 of the attempt timeout — and beyond its target a replica whose answers would be slower than that hedge
