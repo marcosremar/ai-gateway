@@ -25,7 +25,8 @@ in `docker/speech-stack` and implements the contract below.
 ### Session config
 
 The `/v1/s2s` `config` object (`system`, `messages`, `voice`, `fallback_voice`, `language`, `models`, `max_tokens`,
-`temperature`, `stt_prompt`, `speak_field`, …) plus `deployment`. It travels inside the token (`cfg`).
+`temperature`, `stt_prompt`, `speak_field`, `first_audio_deadline_ms`, `opener`, …) plus `deployment`. It travels
+inside the token (`cfg`).
 
 ### Session token
 
@@ -58,9 +59,12 @@ replica's HTTP; only WebRTC media/data go to it directly, and WS goes through th
 | `DELETE /__aigw/rt/session/:id` | ends a session (the `sessionId` the offer answered) |
 | `GET /__aigw/rt/ws?token=…` | WebSocket (relayed from the gateway's `/v1/realtime/ws`) |
 
-`max` comes from the spec env `RT_MAX_SESSIONS` (default L40S 8, L4 2 through `envByMachineType`: what one replica
-serves within first audio p95 ≤ 2 s — measured on the L40S, docs/reports/2026-10-07-realtime-handoff.md § Live capacity;
-the L4 figure is an estimate from its `/v1/s2s` numbers). A replica whose
+`max` comes from the spec env `RT_MAX_SESSIONS` (default L40S 4, L4 2 through `envByMachineType`: what one replica
+serves with the **maximum** first audio under 2.5 s — measured on the L40S, docs/reports/2026-10-07-realtime-handoff.md
+§ New image and class capacity: max 1.49–2.12 s at 4, 2.16–2.39 s at 6, 2.64–2.83 s at 8; the L4 figure is an estimate
+from its `/v1/s2s` numbers). `available` is 0 while the replica sheds load: a learner is seated and the worst first
+reply audio of its last `RT_SHED_WINDOW_S` (30 s) is over the deployment's deadline (`firstAudioMaxMs`, `shedding` in
+the status); admission then places new sessions on another replica or sends them down the ladder (`saturated`). A replica whose
 `/__aigw/rt/status` answers 404 runs no edge and gets no realtime session.
 
 ### Events and control messages
@@ -69,10 +73,72 @@ Edge → client (data channel "events", JSON, or WS text frames), the s2s vocabu
 `{type:"ready"}`, `{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
 `{type:"reply_delta", text}`, `{type:"reply", text}`, `{type:"audio_start"}`, `{type:"audio_end"}`,
 `{type:"interrupted"}`, `{type:"done", empty?, filtered?}`, `{type:"error", code, message}`,
-`{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms, endpoint_ms, ttfa_from_speech_ms}`.
+`{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms, endpoint_ms, ttfa_from_speech_ms, first_sound_ms,
+first_sound_from_speech_ms, opener, deadline_ms, deadline_missed}`, `{type:"opener", state:"start"|"end", text, index,
+audio_ms}`, `{type:"deadline_missed", deadline_ms}` (next section).
 
 Client → edge: `{type:"interrupt"}`, `{type:"end_turn"}` (client VAD: the learner stopped), `{type:"config_update",
 messages?}` (append to the history), `{type:"ping"}`.
+
+### First-audio deadline and opener
+
+Requirement (owner, 2026-10-08): the time from the end of the learner's speech to the first sound must never exceed
+2500 ms. Every component that produces a turn's audio enforces it with the same rule, fields and events: the edge
+session (WebRTC / WS), the speech-stack's `/v1/s2s` and the gateway's composed fallback.
+
+**Config** (session config / `/v1/s2s` `config`, all optional):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `first_audio_deadline_ms` | deployment's (2000) | deadline of the first sound, ms after the end of the speech; capped at 2500 |
+| `opener` | none | `{"lines": ["…", "…"]}`: up to 8 short lines the app authored for the character, in the session's language |
+| `endpoint_ms` | 0 | `/v1/s2s` only: the silence the client waited after the speech before posting the clip. The server only knows when the request arrived; with this the deadline starts at the end of the speech (the edge needs none: its VAD knows the last speech frame) |
+
+Deployment defaults: `RT_FIRST_AUDIO_DEADLINE_MS` / `RT_FIRST_AUDIO_MARGIN_MS` on the edge (`realtime.env`),
+`FIRST_AUDIO_DEADLINE_MS` / `FIRST_AUDIO_MARGIN_MS` on the speech-stack and the gateway: 2000 and 300 ms.
+
+**Rule.** If no audio of the turn has been queued at deadline − margin (1700 ms after the speech by default; the margin
+is the time the audio needs to reach the ear), the component plays one opener line, then the reply when it arrives:
+
+```
+… opener{state:"start", text, index, audio_ms} → [the line's audio] → opener{state:"end", index} → … reply audio …
+```
+
+- Never two openers in a turn, never an opener once reply audio is queued; the reply is queued behind the opener in
+  the same audio stream, so nothing overlaps and nothing is said twice.
+- The line rotates: on the edge the next one after the session's last, on `/v1/s2s` by the turn number of the
+  conversation (`messages.length / 2`), so two turns in a row never get the same line (with ≥ 2 lines).
+- A cancelled turn (barge-in, `interrupt`, speech that resumes, a client that leaves) drops the opener with the rest of
+  the queued audio.
+- The gateway never writes a character's words: no `opener` → none is played, and a turn with no sound at the deadline
+  reports `deadline_missed{deadline_ms}` (in-band, plus `edge.turn.deadline_missed` / the SDK's `turn.deadline_missed`).
+  The same happens when the lines are configured but not synthesized yet (first turn of a new voice) or failed to.
+- **Where the audio comes from.** Each line is synthesized once per voice + language + text with the session's own
+  voice and kept in the process (256 entries, oldest dropped; a failed synthesis is retried by the next session or
+  turn): on the edge at session start and at a `config_update` that changes it (one cache per edge process: the front
+  and each WebRTC worker), on `/v1/s2s` at the first turn that names the lines. Leading silence is trimmed to 10 ms.
+  The composed fallback keeps the bytes in the format its TTS chain answered: a PCM/WAV answer is stored as PCM, an MP3
+  answer (the cloud TTS) stays MP3 — an `audio_format` event precedes the opener and the reply announces its own format
+  again, which is the per-format path the SDK's clip rung already has (no transcoding in the gateway).
+- `/v1/s2s` through the gateway: opener audio does not count as the primary's first audio in the hedge race, and a
+  hedged or resumed composed turn plays no opener of its own (one per turn across both lanes).
+
+**What the app records.** An opener is speech of the character: the `opener{state:"start"}` event (page) and the
+turn's `metrics` / `done` carry which line was played. Fields added to `metrics` (edge) and `done` (`/v1/s2s`):
+`first_sound_ms` (opener or reply), `opener` (the line, or null), `deadline_ms`, `deadline_missed`; the edge adds
+`first_sound_from_speech_ms` next to `ttfa_from_speech_ms`, `/v1/s2s` adds `endpoint_ms`. `ttfa_ms` / `first_audio_ms`
+stay the first **reply** audio (on the edge it now includes the opener audio still queued ahead of it). SDK:
+`{type:"opener", state, text, index, audio_ms}` and `{type:"deadline_missed", deadline_ms}` events,
+`session.metrics.lastTurn.{first_sound_ms, opener, deadline_missed}`, telemetry `turn.opener` (durMs from the end of
+the turn, `index`) and `turn.deadline_missed`; `audio_start` remains the first reply audio.
+
+**Limits — what can still exceed the ceiling.** The deadline is enforced where the audio leaves the server. Not covered:
+a network stall after that (the margin is 300 ms; a WS relay or TURN path that freezes longer delays the opener too), a
+device that is not playing (suspended `AudioContext`, autoplay blocked, a Bluetooth sink waking up), the upload of a
+clip on `/v1/s2s` (the server's clock starts when the request has arrived, `endpoint_ms` earlier), a WebRTC jitter
+buffer under loss, a session with no opener (telemetry only), an opener not cached yet, and an MP3 opener on a client
+that decodes it late. The **reply** behind an opener is as late as it was: the opener bounds the silence, not the
+answer.
 
 ### Audio
 
@@ -175,7 +241,7 @@ polls `/__aigw/rt/status` of the replicas of every deployment with live sessions
 
 The pressure decision adds that figure to the load it already reads (`controller-autoscale.ts` `decide`), under the
 existing rule: occupancy above `scaleOutAt` (75 %) of the ready + booting replicas' slots for `windowSeconds` (20 s) asks
-for one more replica (7 of 8 sessions on one L40S; 6 of 8 is exactly 75 % and asks nothing), a replica that is booting
+for one more replica (4 of 4 sessions on one L40S; 3 of 4 is exactly 75 % and asks nothing), a replica that is booting
 counts as capacity, `maxReplicas`, the replica cap, the € ceiling and the create back-off apply as for any load, and
 when the sessions end the extra replica is released by the scale-in rules. A deployment with no realtime session
 reports nothing and is scaled exactly as before.
@@ -381,7 +447,12 @@ Measures what a class gets: N students, each holding one realtime session and sp
 stack or a real gateway. The clock of every turn starts at the **last voiced sample of the clip the client sent** — so
 the edge's endpointing silence (`RT_VAD_SILENCE_MS`, 700 ms) is inside the number — and stops at the first non-silent
 audio received. Output: `<out>/report.json`, a text summary and one `PASS`/`FAIL` line (default target: p50 ≤ 1500 ms,
-p95 ≤ 2000 ms, failures + truncations ≤ 1 %); exit code 0 / 1, 2 when the harness itself broke.
+p95 ≤ 2000 ms, failures + truncations ≤ 1 %, and **no turn whose first sound is over `--ceiling-ms`**, 2500); exit code
+0 / 1, 2 when the harness itself broke. That number is the first **sound** (an opener or the reply). The report also
+has `ceiling` (`max`, the share of turns over 2000 / 2500 / 3000 ms, how many turns played an opener, how many missed
+the deadline with none) and `firstReplyAudioMs`: the reply alone, which behind an opener is heard when it arrived and
+the opener is over (`scripts/realtime-e2e/ceiling.ts`). To exercise the opener, put `opener.lines` in `RT_CONFIG`; the
+`/v1/s2s` client sends `endpoint_ms` = `--clip-end-silence`.
 
 ```bash
 # local fake stack (Linux + root; same needs as e2e.ts)

@@ -112,6 +112,7 @@ thinking). `finish_reason` is passed through as the provider sent it.
 | Deployment, time to **first byte** — STT / chat / TTS | 4 s / 4 s / 3 s | `DEPLOYMENT_STT_TIMEOUT_MS`, `DEPLOYMENT_CHAT_TIMEOUT_MS`, `DEPLOYMENT_TTS_TIMEOUT_MS` (or `DEPLOYMENT_TIMEOUT_MS` for all) |
 | Hedge: fallback starts in parallel when the deployment has not answered | 1.5 s | `DEPLOYMENT_HEDGE_MS` (`0` = off) |
 | Cloud link (OpenRouter, Groq…) with a target behind it: the next one starts in parallel (non-stream, STT, TTS) or takes over (chat stream, no first token) when it has not answered | min(4 s, half of the budget left) | `GATEWAY_CLOUD_HEDGE_MS` (`0` = off) |
+| A composed `/v1/s2s` turn with `first_audio_deadline_ms` or `opener`: no link of a stage waits longer than this before the next one starts (hedge) or takes over (chat stream), deployment links included | the time left to the turn's deadline, at least 1 s | — (sent by the gateway to its own stage sub-requests as `x-gateway-hedge-ms`; ignored from any other caller) |
 | Whole stage (deployment + fallbacks + hedge) | 8 s | `GATEWAY_STT_BUDGET_MS`, `GATEWAY_CHAT_BUDGET_MS`, `GATEWAY_TTS_BUDGET_MS` |
 | Chat, **non-stream** only: extra budget per requested `max_tokens` above the free ones, and its ceiling | 20 ms/token above 256, max 45 s | `GATEWAY_CHAT_BUDGET_PER_TOKEN_MS` (`0` = flat), `GATEWAY_CHAT_BUDGET_FREE_TOKENS`, `GATEWAY_CHAT_BUDGET_MAX_MS` |
 
@@ -352,6 +353,16 @@ Built for low latency: no round trip between stages, the first sentence is voice
   "language": "pt", "voice": "br-m-08", "fallback_voice": "pf_dora", "max_tokens": 160, "temperature": 0.6 }
 ```
 
+**First-audio deadline and opener** (optional; contract and limits in [realtime.md](../realtime.md) § First-audio
+deadline and opener): `"first_audio_deadline_ms": 2000` (default `FIRST_AUDIO_DEADLINE_MS`, at most 2500),
+`"endpoint_ms": 700` (the silence the client waited after the speech before posting: the deadline then starts at the
+end of the speech, not at the request) and `"opener": {"lines": ["Hum, deixa eu ver.", "Só um instante."]}`. With
+lines, a turn with no audio at deadline − 300 ms gets `opener {state:"start", text, index, audio_ms, at_ms}`, the
+line's audio, `opener {state:"end"}`, then the reply; without, `deadline_missed {deadline_ms, at_ms}` at the deadline.
+`done` adds `first_sound_ms`, `opener`, `deadline_ms`, `deadline_missed`, `endpoint_ms` (`first_audio_ms` stays the first
+reply audio). On the composed path an opener may be MP3: its `audio_format` event precedes it and the reply announces
+its format again. A turn that sends none of the three fields behaves as before, with the new `done` fields only.
+
 **Which deployment and models** (the gateway names no app's): `"deployment": "parle-speech"` is the speech-stack
 primary (default `S2S_DEPLOYMENT`; none = composed pipeline only; an app key may name only a deployment of its own
 app, see [Authentication](#authentication)) and `"models": {"stt": "parle-stt", "chat":
@@ -377,7 +388,8 @@ line with audio as `{"type":"audio","pcm":"<base64>"}` (debugging, browsers with
 
 Events, in order: `route` {provider, fallback?, from?} · `transcript` {text, stt_ms} · `llm_first_token` · per sentence
 `sentence` {text} then its audio · `audio_format` {encoding, sample_rate} when it changes · `first_audio` {at_ms} ·
-`done` {reply, transcript, first_audio_ms, total_ms, missing_audio?, partial?}. `sentence_failed` = that sentence has no
+`opener` {state, text, index} around an opener's audio · `deadline_missed` {deadline_ms} ·
+`done` {reply, transcript, first_audio_ms, first_sound_ms, opener, deadline_ms, deadline_missed, total_ms, missing_audio?, partial?}. `sentence_failed` = that sentence has no
 audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`partial: true` → what was sent is valid).
 
 **Routing**
