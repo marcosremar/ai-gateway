@@ -330,6 +330,8 @@ Every successful response of the three routes carries (no secrets):
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
+A deployment target streams too: the gateway asks the replica for `stream: true` and relays each delta as it arrives
+(until 2026-10-08 it asked for the whole answer and sent it as one SSE chunk).
 An STT answer served from the gateway's 5-minute cache (same audio, model, language and format) carries
 `X-Gateway-Provider: cache` and `X-Cache: HIT`; it still wakes a cold primary deployment for the next turn (not in
 no-wake mode).
