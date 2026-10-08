@@ -431,7 +431,8 @@ export class ScalewayClient extends AbstractGpuProvider {
       const ip = await this.waitForIp(zone, server.id, secretKey);
       const endpoint = ip ? `http://${ip}:8080` : '';
 
-      this.log.log(`[scaleway] Server ready: ${server.id} at ${ip || 'no-ip'} (€${usedType.pricePerHr}/hr)`);
+      const pricePerHr = usedType.pricePerHr || await this.getHourlyPrice(zone, usedType.type, credentials).catch(() => null) || 0;
+      this.log.log(`[scaleway] Server ready: ${server.id} at ${ip || 'no-ip'} (${pricePerHr ? `€${pricePerHr}/hr` : 'price unknown'})`);
 
       return {
         instanceId: encodedId,
@@ -443,7 +444,7 @@ export class ScalewayClient extends AbstractGpuProvider {
           provider: 'scaleway',
           zone,
           commercialType: usedType.type,
-          pricePerHr: usedType.pricePerHr,
+          pricePerHr,
           tags,
           ...(volumeIds.length ? { volumeIds } : {}),
           ...(spec.publicIpIds?.length ? { publicIpIds: spec.publicIpIds } : {}),
@@ -452,7 +453,7 @@ export class ScalewayClient extends AbstractGpuProvider {
       };
     } catch (err) {
       // Best-effort cleanup of server + SBS volumes (like babylon cloud-play)
-      this.log.warn(`[scaleway] create failed after server ${server.id}; cleaning up: ${this.errMsg(err)}`);
+      this.log.warn(`[scaleway] server ${server.id} exists but did not start; cleaning up: ${this.errMsg(err)}`);
       // A cleanup that fails must say so: the server and its volume keep billing until something else deletes them
       // (the deployment controller releases a tagged server it does not know on its next list).
       await this.deleteInstance(encodedId, credentials).catch((cleanupErr: unknown) => {
@@ -968,6 +969,8 @@ export class ScalewayClient extends AbstractGpuProvider {
   /** Waits between retries of a call on a just-created server that answered 404 (eventual consistency); then gives up. */
   freshServerRetryMs: number[] = [1_000, 2_000, 4_000];
 
+  startPollMs = 5_000;
+
   private async retryNotFound<T>(step: () => Promise<T>, label: string): Promise<T> {
     for (const waitMs of this.freshServerRetryMs) {
       try {
@@ -996,20 +999,29 @@ export class ScalewayClient extends AbstractGpuProvider {
 
   private async waitForIp(zone: string, serverId: string, secretKey: string, timeoutMs = 120_000): Promise<string | null> {
     const start = Date.now();
+    let stopped = 0;
     while (Date.now() - start < timeoutMs) {
+      let state: string | undefined;
       try {
         const res = await this.fetchJson<ScwGetResponse>(
           `${this.zoneUrl(zone)}/servers/${serverId}`,
           { headers: this.scwHeaders(secretKey) },
           TIMEOUTS.read,
         );
+        state = res.server.state;
         const ip = ipv4Of(res.server);
-        if (ip) return ip;
+        if (ip && state !== 'stopped') return ip;
       } catch {
         // Server may not be ready yet
       }
-      await new Promise(r => setTimeout(r, 5000));
+      stopped = state === 'stopped' ? stopped + 1 : 0;
+      if (stopped === 2) {
+        this.log.warn(`[scaleway] Server ${serverId} is still stopped after its power-on; asking again`);
+        await this.serverAction(zone, serverId, 'poweron', secretKey);
+      }
+      await new Promise(r => setTimeout(r, this.startPollMs));
     }
+    if (stopped) throw new Error(`server ${serverId} still stopped ${Math.round(timeoutMs / 1000)} s after its power-on`);
     return null;
   }
 

@@ -73,7 +73,7 @@ describe('ScalewayClient for hosts', () => {
       [/\/servers$/, 'POST', () => json({ server: { ...SERVER, commercial_type: 'PLAY2-MICRO' } })],
       [/\/user_data\/cloud-init$/, 'PATCH', () => json({})],
       [/\/action$/, 'POST', () => json({})],
-      [/\/servers\/srv-1$/, 'GET', () => json({ server: SERVER })],
+      [/\/servers\/srv-1$/, 'GET', () => json({ server: { ...SERVER, state: 'starting' } })],
     ]);
     await new ScalewayClient().createInstance({
       region: 'fr-par-1', commercialType: 'PLAY2-MICRO', projectId: 'proj-1', volumeGb: 50,
@@ -224,7 +224,7 @@ describe('ScalewayClient for hosts', () => {
       [/\/servers$/, 'POST', () => json({ server: SERVER })],
       [/\/user_data\/cloud-init$/, 'PATCH', () => json({})],
       [/\/action$/, 'POST', () => json({})],
-      [/\/servers\/srv-1$/, 'GET', () => json({ server: SERVER })],
+      [/\/servers\/srv-1$/, 'GET', () => json({ server: { ...SERVER, state: 'starting' } })],
     ]);
     await new ScalewayClient().createInstance({
       region: 'fr-par-1', commercialType: 'POP2-HC-8C-16G', projectId: 'proj-1', volumeGb: 50, imageId: 'img',
