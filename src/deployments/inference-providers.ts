@@ -19,6 +19,7 @@ import { replicaBase } from './http';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
+import { FINISH_MARKER, USAGE_MARKER } from '../gateway/providers/cloud/openai-compat/stream-markers';
 
 type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
 
@@ -103,7 +104,8 @@ async function callReplica(
  * counted 0 in flight while it played. Outcomes follow `Lease.done`: `ok` when the body ends; `failed` when it breaks
  * (connection-level); `timeout` when our own or the caller's time limit cut it (busy, not dead); `cancelled` when the
  * caller cancels or aborts (hedge lost, client gone) or nobody read it within `maxMs` (it must not hold the lease, and
- * the deployment's demand, forever).
+ * the deployment's demand, forever); `errored` when the reader cancels it with a `DeploymentCallError` (the replica reported a
+ * failure inside a streamed body).
  */
 function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSignal): Response {
   if (!res.body) { lease.done(false); return res; }
@@ -132,7 +134,7 @@ function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSi
         controller.error(err);
       }
     },
-    cancel(reason) { release('cancelled'); return reader.cancel(reason); },
+    cancel(reason) { release(reason instanceof DeploymentCallError ? 'errored' : 'cancelled'); return reader.cancel(reason); },
   });
   return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
@@ -155,8 +157,8 @@ abstract class DeploymentProviderBase {
 }
 
 export class DeploymentLLMProvider extends DeploymentProviderBase implements LLMProvider {
-  async chat(request: ChatRequest): Promise<ChatResponse> {
-    const res = await this.call('/v1/chat/completions', {
+  private post(request: ChatRequest, extra: Record<string, unknown> = {}): Promise<Response> {
+    return this.call('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -165,9 +167,54 @@ export class DeploymentLLMProvider extends DeploymentProviderBase implements LLM
         ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
         ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
         ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
+        ...extra,
         ...request.extraBody,
       }),
     }, request.signal, 'chat');
+  }
+
+  async *chatStream(request: ChatRequest): AsyncGenerator<string, void, undefined> {
+    const res = await this.post(request, { stream: true, stream_options: { include_usage: true } });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finishReason: string | null = null;
+    let failure: DeploymentCallError | undefined;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith('data:')) continue;
+          let chunk: {
+            error?: { message?: string };
+            choices?: Array<{ delta?: { content?: string | null }; finish_reason?: string | null }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          };
+          try { chunk = JSON.parse(line.slice(5)); } catch { continue; }
+          if (chunk.error) {
+            failure = new DeploymentCallError(502, `deployment '${this.deployment}' stream broke: ${chunk.error.message ?? 'error'}`, 'error');
+            throw failure;
+          }
+          finishReason = chunk.choices?.[0]?.finish_reason ?? finishReason;
+          if (chunk.usage) yield `${USAGE_MARKER}${JSON.stringify(chunk.usage)}`;
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (delta) yield delta;
+        }
+      }
+      if (!finishReason) throw new DeploymentCallError(502, `deployment '${this.deployment}' stream ended without finish_reason`, 'truncated');
+      yield `${FINISH_MARKER}${finishReason}`;
+    } finally {
+      await reader.cancel(failure).catch(() => {});
+    }
+  }
+
+  async chat(request: ChatRequest): Promise<ChatResponse> {
+    const res = await this.post(request);
     const payload = await res.json() as {
       model?: string;
       choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
