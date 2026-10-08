@@ -7,6 +7,7 @@ import {
   decodeSessionConfig, deriveRealtimeKey, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
 } from '../../../src/realtime';
 import { _resetExternalLoad } from '../../../src/realtime/external-load';
+import { parseEdgeStatus } from '../../../src/realtime/edge-status';
 import { fakeController, REPLICA_TOKEN, startFakeEdge, type FakeEdge } from './_fakes';
 import { startGateway, type TestGateway } from './_gateway';
 
@@ -33,6 +34,16 @@ describe('orderTransports / pickReplica / sessionCharge', () => {
     expect(pickReplica([{ ...a, pending: 6 }], ['webrtc'])).toBeNull();
     expect(sessionCharge(600)).toBe(40);
     expect(sessionCharge(61, 2)).toBe(4);
+  });
+
+  it('a replica shedding load (first audio over the deadline) reports no free slot under its cap: sessions go elsewhere', () => {
+    const shedding = parseEdgeStatus({ active: 2, max: 4, available: 0, transports: ['webrtc', 'ws'], firstAudioMaxMs: 2300, shedding: true })!;
+    const healthy = parseEdgeStatus({ active: 3, max: 4, available: 1, transports: ['webrtc', 'ws'], firstAudioMaxMs: 1400 })!;
+    expect([shedding.available, shedding.firstAudioMaxMs, healthy.firstAudioMaxMs]).toEqual([0, 2300, 1400]);
+    expect(parseEdgeStatus({ active: 1, max: 4 })!.firstAudioMaxMs).toBeNull();
+    const at = (id: string, status: typeof shedding) => ({ id, base: `http://${id}`, status, pending: 0 });
+    expect(pickReplica([at('shedding', shedding), at('healthy', healthy)], ['ws'])!.id).toBe('healthy');
+    expect(pickReplica([at('shedding', shedding)], ['ws'])).toBeNull();
   });
 
   it('prefers the better media path among replicas with a free slot: direct, unprobed, relay, ws; then free slots', () => {

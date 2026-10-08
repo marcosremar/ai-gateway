@@ -1,7 +1,9 @@
 /**
  * Realtime capacity of each replica, read from the edge's `GET /__aigw/rt/status` (behind the replica's token gate):
  *
- *     { active, max, available, transports: ["webrtc", "ws"], udpPorts: [lo, hi] }
+ *     { active, max, available, transports: ["webrtc", "ws"], udpPorts: [lo, hi], firstAudioMaxMs }
+ *
+ * `available` is 0 while the replica sheds load (its recent first-audio maximum is over the deadline).
  *
  * Cached per replica for `ttlMs` (admission of a class of 30 students at once polls each replica once, not 30 times).
  * A 404 means the replica runs an image without the edge (`unsupported`, cached the same): sessions go elsewhere or
@@ -28,6 +30,7 @@ export interface EdgeStatus {
   /** UDP port answering the reachability probe; null on an edge from before netcheck. */
   probePort: number | null;
   net: EdgeNet | null;
+  firstAudioMaxMs: number | null;
 }
 
 export type EdgeStatusResult = { ok: true; status: EdgeStatus } | { ok: false; reason: 'unsupported' | 'unreachable' };
@@ -52,7 +55,7 @@ export function parseEdgeStatus(body: unknown): EdgeStatus | null {
     publicIp: typeof n.publicIp === 'string' && n.publicIp ? n.publicIp : null,
     checkedAt: typeof n.checkedAt === 'number' ? n.checkedAt : null,
   } : null;
-  return { active, max, available: Math.min(available, max), transports, udpPorts: ports, probePort, net };
+  return { active, max, available: Math.min(available, max), transports, udpPorts: ports, probePort, net, firstAudioMaxMs: count(b.firstAudioMaxMs) };
 }
 
 export interface EdgeStatusCacheOptions {

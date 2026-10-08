@@ -42,7 +42,7 @@ describe('cloud-init with and without realtime', () => {
     expect(script).toContain(`docker run -d --name aigw-edge --restart unless-stopped --network host --env-file /srv/aigw/edge.env '${DEFAULT_EDGE_IMAGE}'`);
     const env = Object.fromEntries(written(script, '/srv/aigw/edge.env')!.trim().split('\n').map(l => l.split(/=(.*)/s).slice(0, 2)));
     expect(env).toEqual({
-      RT_MAX_SESSIONS: '8', // the L40S preset of the speech-stack profile
+      RT_MAX_SESSIONS: '4', // the L40S preset of the speech-stack profile
       RT_UDP_PORTS: '50000-50100', RT_PORT: String(RT_EDGE_PORT), RT_BIND: '127.0.0.1',
       EDGE_UPSTREAM: 'http://127.0.0.1:8000', AIGW_DEPLOYMENT: 'speech', AIGW_REPLICA_TOKEN: TOKEN,
       GATEWAY_URL: 'https://gw.example',
@@ -65,7 +65,7 @@ describe('cloud-init with and without realtime', () => {
     vi.stubEnv('AIGW_PUBLIC_URL', 'https://gw2.example');
     try {
       expect(edgeEnv(speech({ machineType: 'L4-1-24G', realtime: {} }), TOKEN)).toMatchObject({ RT_MAX_SESSIONS: '2', GATEWAY_URL: 'https://gw2.example' });
-      expect(edgeEnv(speech({ realtime: {} }), TOKEN)).toMatchObject({ RT_MAX_SESSIONS: '8' });
+      expect(edgeEnv(speech({ realtime: {} }), TOKEN)).toMatchObject({ RT_MAX_SESSIONS: '4' });
       const spec = speech({ realtime: { maxSessions: 5, edgeImage: 'ghcr.io/x/edge:2', udpPorts: [40000, 40049] } });
       const script = replicaCloudInit(spec, TOKEN);
       expect(edgeEnv(spec, TOKEN)).toMatchObject({ RT_MAX_SESSIONS: '5', RT_UDP_PORTS: '40000-40049' });

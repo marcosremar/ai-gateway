@@ -15,6 +15,7 @@ os.environ["EDGE_TELEMETRY_STDOUT"] = "0"
 from aigw_edge import opener as opener_module  # noqa: E402
 from aigw_edge import session as session_module  # noqa: E402
 from aigw_edge.config import Settings  # noqa: E402
+from aigw_edge.server import Edge  # noqa: E402
 from fake_upstream import HEARD, LLM_TOKEN_MS, LLM_TTFT_MS, REPLY, STT_MS, TTS_TTFB_MS  # noqa: E402
 
 FRAME_S = 0.02
@@ -472,9 +473,34 @@ async def first_audio_deadline() -> None:
     await learner.close()
 
 
+async def admission_shedding() -> None:
+    session_module.recent_first_audio.clear()
+    edge = Edge(Settings(key=b"k" * 32, max_sessions=8, first_audio_deadline_ms=2000, shed_window_s=30))
+    edge.routes["seated"] = {"worker": 0, "at": time.monotonic()}
+    session_module.recent_first_audio.append((time.monotonic(), 1900))
+    status = json.loads((await edge.status(None)).body)
+    check("admission: first audio under the deadline → the replica takes sessions up to its cap",
+          not edge.shedding() and not edge.full("new") and (status["available"], status["firstAudioMaxMs"], status["shedding"]) == (7, 1900, False), status)
+    session_module.recent_first_audio.append((time.monotonic(), 2300))
+    status = json.loads((await edge.status(None)).body)
+    check("admission: a recent first audio over the deadline → full for new sessions, a seated learner keeps the seat",
+          edge.shedding() and edge.full("new") and not edge.full("seated")
+          and (status["available"], status["firstAudioMaxMs"], status["shedding"]) == (0, 2300, True), status)
+    edge.worker_first_audio[0] = 2600
+    check("admission: the worst of the front and the workers counts", edge.first_audio_max() == 2600)
+    edge.worker_first_audio.clear()
+    session_module.recent_first_audio.clear()
+    session_module.recent_first_audio.append((time.monotonic() - 31, 2300))
+    check("admission: outside the rolling window it no longer counts", not edge.shedding() and not edge.full("new"))
+    session_module.recent_first_audio.append((time.monotonic(), 2300))
+    edge.routes.clear()
+    check("admission: an empty replica never sheds", not edge.shedding() and not edge.full("new"))
+    session_module.recent_first_audio.clear()
+
+
 async def main() -> None:
     for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials,
-                     first_audio_deadline):
+                     first_audio_deadline, admission_shedding):
         await scenario()
     print(json.dumps(results))
 
