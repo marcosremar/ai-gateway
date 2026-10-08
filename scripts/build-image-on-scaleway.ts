@@ -77,7 +77,8 @@ echo '${secret}' | docker login ${registry}/${NAMESPACE} -u nologin --password-s
 set -x
 echo '{"state":"building"}' > /srv/status/done.json
 started=$(date +%s)
-if cd /srv/ctx && DOCKER_BUILDKIT=1 docker build --progress=plain -t ${image} . && docker push ${image}; then
+push() { for i in 1 2 3 4 5; do docker push ${image} && return 0; sleep 20; done; return 1; }
+if cd /srv/ctx && DOCKER_BUILDKIT=1 docker build --progress=plain -t ${image} . && push; then
   digest=$(docker image inspect --format '{{index .RepoDigests 0}}' ${image})
   size=$(docker image inspect --format '{{.Size}}' ${image})
   echo "{\\"state\\":\\"done\\",\\"ok\\":true,\\"image\\":\\"${image}\\",\\"digest\\":\\"$digest\\",\\"size\\":$size,\\"seconds\\":$(( $(date +%s) - started ))}" > /srv/status/done.json
