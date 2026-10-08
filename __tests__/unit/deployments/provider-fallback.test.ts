@@ -326,3 +326,26 @@ describe('warm schedule over a vast placement (a class at a known time)', () => 
   });
 });
 
+
+describe('a class-window quota reservation (#63) and the walk to vast (#64)', () => {
+  const MONDAY_CLASS = Date.parse('2026-10-05T16:00:00Z');
+  const CLASS = { days: [1, 2, 3, 4], start: '17:40', end: '20:15', timeZone: 'Europe/Paris', minReplicas: 2 };
+
+  it('inside the window the reserved Scaleway type is skipped with the reason and the replica lands on vast', async () => {
+    const { controller, scaleway, vast } = await make({ now: () => MONDAY_CLASS });
+    await controller.put('tts', { ...SPEC, minReplicas: 0, placements: undefined, reserveQuota: { quota: 2, windows: [CLASS] } });
+    await controller.put('bench', { ...SPEC, minReplicas: 0, placements: [VAST] });
+    controller.wake('bench');
+    await until(() => vast.created.some(c => c.spec.name === 'bench'), 3000);
+    expect(scaleway.created.filter(c => c.spec.name === 'bench')).toEqual([]);
+    expect(controller.get('bench')!.lastPlacement).toMatch(/^vast RTX 5090 \(≤ €0\.85\/h\); skipped: scaleway L40S-1-48G@fr-par-2: L40S-1-48G is reserved for deployment 'tts' until 2026-10-05T18:15:00\.000Z/);
+  });
+
+  it('without a vast placement the same deployment is refused for the window (409 reserved)', async () => {
+    const { controller, scaleway, vast } = await make({ now: () => MONDAY_CLASS });
+    await controller.put('tts', { ...SPEC, minReplicas: 0, placements: undefined, reserveQuota: { quota: 2, windows: [CLASS] } });
+    await controller.put('bench', { ...SPEC, minReplicas: 0, placements: undefined });
+    expect(() => controller.wake('bench')).toThrow(/is reserved for deployment 'tts'/);
+    expect(scaleway.created.length + vast.created.length).toBe(0);
+  });
+});

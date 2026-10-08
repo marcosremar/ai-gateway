@@ -124,6 +124,9 @@ check("token: config by reference: missing, altered or not base64url JSON → cf
 check("token: config by reference: the digest is sha256 over the base64url text (the gateway's vector)",
       config_digest("abc") == "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0" and needs_config(sign(ref, key)) and not needs_config(sign(good, key))
       and not needs_config("x") and not needs_config(None))
+check("token: a device claim, which the edge ignores, next to an inline config or a config by reference",
+      v.verify(sign({**good, "sid": "s-dev", "dev": "install-7f3a9c21"}, key))["sid"] == "s-dev"
+      and v.verify(sign({**ref, "sid": "r-dev", "dev": "install-7f3a9c21"}, key), cfg=by_ref)["cfg"]["system"] == "x" * 16000)
 over = b64url(json.dumps({"system": "x" * MAX_CFG_REF_CHARS}).encode())
 check("token: config by reference over the bound → cfg; an inline cfg keeps its 6144 bound",
       ref_verdict("r5", over, over) == "cfg" and rejects({**good, "sid": "r6", "cfg": "e30" + "A" * MAX_CFG_CHARS}, "cfg"))
@@ -263,11 +266,11 @@ try:
                                    ("break", "Bom dia!", ["break"]), ("cut", "Bom dia!", ["cut"]),
                                    ("lead", "Bom dia!", ["lead"]), ("late", "Bom dia!", ["break", "lead"]),
                                    ("overlong", "Bom dia!", ["overlong"]), ("capped", "Bom dia!", ["capped"]),
-                                   ("long", "a" * 160, [])):
+                                   ("long", "a" * 160, []), ("bare overlong", "Bom dia!", ["overlong"]), ("bare line", "a" * 400, [])):
             fake_upstream.tts_faults.update({text: list(faults)})
             mark, pcm, retries, error, overlong = len(fake_upstream.calls["tts_log"]), b"", [], None, []
             try:
-                async for chunk in up.speak(text, {}, {"voice": "x"}, None, retries.append, overlong.append):
+                async for chunk in up.speak(text, {}, {"voice": "x"}, None, *(() if name.startswith("bare") else (retries.append, overlong.append))):
                     pcm += chunk
             except UpstreamError as raised:
                 error = raised
@@ -304,6 +307,10 @@ try:
     check("tts guard: the engine ending an audible sentence at its token cap is an overlong sentence, not a failed turn",
           guard["capped"][2] is None and guard["capped"][1] == [] and guard["capped"][4] == ids("capped")
           and 0.9 * 4.6 * 48000 <= len(guard["capped"][0]) <= 4.6 * 48000)
+    check("tts cap × say / opener: a line voiced without callbacks (an opener being warmed, an app line) is cut at the same cap and ends normally",
+          len(guard["bare overlong"][0]) == int(4.6 * 24000) * 2 and guard["bare overlong"][2] is None)
+    check("tts cap × say: the cap grows with the text, a 400-character app line may run 83 s, twice a slow reading at 10 characters a second",
+          guard["bare line"][3][0]["max_new_tokens"] == 1038 and 1038 / 12.5 >= 2 * 400 / 10 and guard["bare line"][2] is None)
     check("tts guard: a clean sentence and a short cut are not counted as overlong",
           guard["lead"][4] == [] and guard["cut"][4] == [] and guard["runaway"][4] == [])
     check("tts guard: no upstream request left open", active == 0)

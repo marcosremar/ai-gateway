@@ -274,7 +274,12 @@ class Session:
         fields = await self.up.voice_fields(cfg)
         rate = self.s.tts_rate
         self.emit({"type": "say", "text": line["text"], "tag": line.get("tag"), "turnId": self.turn_id})
-        async for chunk in self.up.speak(line["text"], cfg, fields, self.trace_id):
+
+        def overlong(request_id: str) -> None:
+            metrics["tts_overlong"] += 1
+            self.tel("edge.tts.overlong", level="warn", turn_id=self.turn_id, requestId=request_id)
+
+        async for chunk in self.up.speak(line["text"], cfg, fields, self.trace_id, None, overlong):
             if isinstance(chunk, int):
                 rate = chunk
                 continue

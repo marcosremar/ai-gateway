@@ -66,7 +66,7 @@ export interface RealtimeServiceOptions {
 export const REALTIME_DEFAULT_TTL_SECONDS = 600;
 const MAX_SESSION_BODY = 256 * 1024;
 const NET_RETRY_MS = 60_000;
-const NET_ADMIT_WAIT_MS = 2_500;
+export const NET_ADMIT_WAIT_MS = 2_500;
 const FALLBACK = { transport: 's2s-stream', url: '/v1/s2s' } as const;
 
 export interface ResolvedSession {

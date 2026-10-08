@@ -128,7 +128,11 @@ and every step is logged:
   and the end of its TURN tries). A session admitted on a replica not probed yet waits for that probe, at most 2.5 s
   (`NET_ADMIT_WAIT_MS`; one probe shared by every admission of the moment): UDP that answers costs one round trip
   and WebRTC stays first; UDP that does not sends the learner straight to `ws` — the answer does not list `webrtc`,
-  so no client waits on an ICE timeout. An edge without `net` (before netcheck) is trusted as before.
+  so no client waits on an ICE timeout. An edge without `net` (before netcheck) is trusted as before. The wait is
+  spent inside `POST /v1/realtime/sessions`, before there is a session: it fits the SDK's 5 s session timeout
+  (`timeouts.sessionMs`) with half of it to spare and is no part of a turn, so the first-audio deadline of the
+  learner's first turn (counted from the end of their speech) is untouched. A blocked device (`device_blocked`) is
+  refused before the replica is asked anything.
 - **The result is kept**: `udp: "ok" | "blocked" | null` on each replica of `GET /v1/deployments/:name`
   (`controller.noteUdp`), `udp` in the attributes of `rt.session.admitted`, and on the Vast host's record
   (docs/deployments.md § Host reputation). A replica with blocked UDP keeps serving `ws` and `/v1/s2s`.
@@ -238,7 +242,10 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   engine ending the stream at `max_new_tokens` (≥ 90 % of the cap received) — is cut at the cap and the turn goes on
   (`metrics.tts_overlong`, `edge.tts.overlong` with the request id, `ttsOverlong` on `edge.turn.done`). It is not
   asked again, and nothing is held to detect it earlier: a non-silent runaway only differs from speech once it has
-  outlasted the sentence, and holding audio for that would delay every first sound.
+  outlasted the sentence, and holding audio for that would delay every first sound. The same cap bounds an app line
+  (`say`, an intercept's `text`) and an opener being warmed, since they go through the same request: the cap is by
+  text length (a 400-character line may run 83 s, over twice a slow reading), so a line read normally is never cut;
+  an app line cut at its cap is counted the same way (`edge.tts.overlong`), an opener is cached as cut.
   The three settings are tunable through `realtime.env`.
 - **First-audio deadline** (`RT_FIRST_AUDIO_DEADLINE_MS` = 2000, at most 2500; `cfg.first_audio_deadline_ms` per
   session; `RT_FIRST_AUDIO_MARGIN_MS` = 300): counted from the VAD's last speech frame (from the end of the turn when

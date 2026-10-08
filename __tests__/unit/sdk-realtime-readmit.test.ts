@@ -3,6 +3,7 @@ import {
   DEFAULT_TIMEOUTS, createRealtimeSession, type RealtimeEvent, type RealtimeSessionOptions, type RealtimeTransport,
   type SessionDescriptor, type SessionRefusal, type StorageLike, type TelemetryEvent, type TransportContext, type TransportType,
 } from '../../sdk/browser/realtime/index';
+import { edgeRefusal } from './_edge-client-updates';
 
 const DESCRIPTOR: SessionDescriptor = {
   sessionId: 'rt_later', expiresAt: '', token: 'tok',
@@ -29,7 +30,7 @@ function rig(answers: Array<SessionDescriptor | SessionRefusal>, extra: Partial<
     return {
       type, clipBased: type === 's2s-stream',
       connect: async () => { log.push(`try:${type}${c.standby ? ':standby' : ''}`); if (broken.includes(type)) throw new Error(`${type} refused`); },
-      send: (m) => { sent.push([type, m]); },
+      send: (m) => { expect(edgeRefusal(m)).toBeNull(); sent.push([type, m]); },
       sendTurn: () => new Promise<void>((resolve, reject) => {
         breakTurn = () => reject(new Error('s2s answered HTTP 502'));
         c.emit({ type: 'transcript', text: 'Um pão', final: true });

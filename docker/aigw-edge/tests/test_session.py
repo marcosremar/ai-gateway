@@ -890,12 +890,83 @@ async def tts_guard() -> None:
     await runner.cleanup()
 
 
+async def feature_interactions() -> None:
+    import logging  # noqa: PLC0415
+
+    from aiohttp import web  # noqa: PLC0415
+
+    fixture = json.loads((Path(__file__).parent / "sdk-client-updates.json").read_text())
+    check("sdk × signed config: the allow-list the SDK tests enforce is the edge's own",
+          fixture["keys"] == [*session_module.CLIENT_CONFIG_KEYS, "signed"] and fixture["roles"] == list(session_module.CLIENT_ROLES), fixture["keys"])
+    lines = fixture["frames"][-1]["opener"]["lines"]
+    learner = Learner({**CFG, "opener": {"lines": lines}})
+    for frame in fixture["frames"]:
+        learner.session.control(frame)
+    check("sdk × signed config: no config_update the SDK sends on its own is refused (history replay, notes, the opener switch)",
+          not learner.of("error") and learner.session.refused_updates == 0 and learner.session.cfg["opener"] == {"lines": lines}
+          and [m["content"] for m in learner.session.messages] == ["Bom dia", "Olá!", "(nota)"], (learner.of("error"), learner.session.messages))
+    await learner.close()
+
+    up = FakeUpstream()
+    up.llm_bytes_per_token = 3.6
+    learner = Learner({**CFG, "system": SCHOOL_SYSTEM}, up=up, key=KEY, stt_partials=False)
+    session = learner.session
+    pairs = [{"role": role, "content": f"{role} {i} " + LEARNER_LINES[4]} for i in range(30) for role in ("user", "assistant")]
+    session.control(signed({"messages": [PERSONA, *pairs]}, 1))
+    learner.say(0.5)
+    first = await learner.wait("done", 4)
+    sent = up.llm_prompts[-1] if up.llm_prompts else []
+    check("history fit × signed messages: a replaced history too long for the slot is cut like any other, never a 400",
+          up.llm_rejected == 0 and not learner.of("error") and bool(sent) and sent[0] == {"role": "system", "content": SCHOOL_SYSTEM}
+          and PERSONA in sent and whole_pairs(sent) and sent[-2]["content"].startswith("assistant 29") and len(sent) < len(pairs),
+          (up.llm_rejected, len(sent), learner.of("error")))
+    kept = len(session.messages)
+    session.control(signed({"drop_turn": first["turnId"]}, 2))
+    session.control(signed({"drop_turn": "s:999"}, 3))
+    check("history fit × drop_turn: the dropped turn leaves whole pairs behind; an unknown or already cut turn changes nothing",
+          len(session.messages) == kept - 2 and session.messages[-1]["content"].startswith("assistant 29")
+          and [e["n"] for e in learner.of("config_applied")] == [1, 2, 3] and not learner.of("error"), (kept, len(session.messages)))
+    mark = len(learner.events)
+    learner.say(0.5)
+    await learner.wait("done", 4, after=mark)
+    check("history fit × drop_turn: the next turn is fitted and answered (system prompt, app system message, whole pairs)",
+          up.llm_rejected == 0 and len(up.llm_prompts) == 2 and whole_pairs(up.llm_prompts[-1]) and PERSONA in up.llm_prompts[-1]
+          and not learner.of("error"), (up.llm_rejected, len(up.llm_prompts)))
+    await learner.close()
+
+    logging.getLogger("aiohttp.server").setLevel(logging.CRITICAL)
+    runner = web.AppRunner(fake_upstream.app())
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    settings = {"upstream": f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}", "stt_partials": False}
+    real = Upstream(Settings(**settings))
+    await real.start()
+    line = "Oi."
+    cap = Settings().tts_max_seconds + Settings().tts_max_seconds_per_char * len(line)
+    fake_upstream.tts_faults.update({line: ["overlong"]})
+    learner = Learner(up=real, key=KEY, **settings)
+    mark = len(telemetry_events)
+    learner.session.control(signed({"say": {"text": line, "tag": "opening"}}, 1))
+    done = await learner.wait("done", cap + 6)
+    await asyncio.sleep(0.1)
+    heard = b"".join(learner.heard)
+    overlong = [kw for event, kw in telemetry_events[mark:] if event == "edge.tts.overlong"]
+    check("tts cap × say: an app line the engine runs away with is cut at the cap of its text, said once, counted, and is not an error",
+          done.get("said") is True and done.get("tag") == "opening" and not learner.of("error") and len(overlong) == 1
+          and 0 < len(heard) <= int((cap + 0.1) * session_module.OUT_RATE) * 2, (done, len(heard), overlong))
+    await learner.close()
+    await real.close()
+    fake_upstream.tts_faults.clear()
+    await runner.cleanup()
+
+
 async def main() -> None:
     await signed_config_is_authoritative()
     await app_turn_hook()
     for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials,
                      first_audio_deadline, admission_shedding, tts_guard, llm_failure,
-                     long_session, history_overflow):
+                     long_session, history_overflow, feature_interactions):
         await scenario()
     print(json.dumps(results))
 

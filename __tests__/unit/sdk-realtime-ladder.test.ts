@@ -9,6 +9,7 @@ import {
   orderWithWinner, safeAttrs, type RealtimeEvent, type RealtimeTransport, type SessionDescriptor, type StorageLike,
   type TelemetryEvent, type TransportContext, type TransportType,
 } from '../../sdk/browser/realtime/index';
+import { edgeRefusal } from './_edge-client-updates';
 
 function memoryStorage(): StorageLike & { data: Map<string, string> } {
   const data = new Map<string, string>();
@@ -39,7 +40,7 @@ function fakes(behaviour: Partial<Record<TransportType, Behaviour>>, turnFails: 
           if (b === 'fail') return Promise.reject(new Error(`${type} refused`));
           return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted'))));
         },
-        send: (msg) => { f.sent.push({ type, msg }); },
+        send: (msg) => { expect(edgeRefusal(msg)).toBeNull(); f.sent.push({ type, msg }); },
         sendTurn: async () => {
           f.log.push(`turn:${type}`);
           if (turnFails[type]) throw new Error(`${type} turn failed`);

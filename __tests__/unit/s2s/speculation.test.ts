@@ -53,6 +53,28 @@ async function harness(stages: FakeStagesOptions = {}, lease = false) {
 }
 
 describe('s2s speculation', () => {
+  it('app hooks (#68) on the composed path: intercepts and reply_guard are carried and not evaluated, speculated or not; the turn goes to the LLM and says what served it', async () => {
+    const hooks = {
+      intercepts: [{ tag: 'greeting', action: 'drop', contains: ['bom dia'] }, { tag: 'options', action: 'say', contains: ['pão'], text: 'Você pode pedir um pão.' }],
+      reply_guard: { deny: ['bom dia'] },
+    };
+    const h = await harness({ sttMs: 40 });
+    const plain = decodeAll((await h.post(hooks, clip(2300))).bytes);
+    expect(plain.events.map(e => e.type)).not.toContain('intercept');
+    expect(plain.events.find(e => e.type === 'done')).toMatchObject({ reply: 'Bom dia, querida! Aqui está o seu pão.', served: { transport: 's2s' } });
+    expect(plain.audio).toBe('Bom dia, querida!Aqui está o seu pão.');
+
+    expect(await h.json({ ...hooks, speculation: { id: 't9.0', turn: 't9', action: 'start' } }, clip(2000))).toEqual({ status: 202, body: { speculative: true } });
+    await sleep(80);
+    expect(h.stage('tts')).toHaveLength(2);
+    const speculated = decodeAll((await h.post({ ...hooks, speculation: { id: 't9.0' } }, clip(2300))).bytes);
+    expect(speculated.events.map(e => e.type)).not.toContain('intercept');
+    expect(speculated.events.find(e => e.type === 'done')).toMatchObject({ speculation: 'hit', reply: plain.events.find(e => e.type === 'done')!.reply, served: { transport: 's2s' } });
+    expect(speculated.audio).toBe(plain.audio);
+    expect(h.stage('llm')).toHaveLength(2);
+    expect(h.stage('tts')).toHaveLength(4);
+  });
+
   it('pause → speculative STT → silence completes: the answer starts without a second STT', async () => {
     const h = await harness({ sttMs: 40 });
     const started = await h.json({ speculation: { id: 't1.0', turn: 't1', action: 'start' } }, clip(2000));

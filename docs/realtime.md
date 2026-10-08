@@ -152,6 +152,10 @@ set evaluated on the edge, between the hallucination guard and the LLM.
 - Cost on a turn no rule matches: one in-process string test (0.3 ms for 32 × 64 phrases, measured in
   `tests/test_session.py`), no await, no upstream call: first audio is unchanged.
 - Not evaluated on the clip rungs (`/v1/s2s`, the composed fallback): there the app's own backend sees the transcript.
+  The fields are carried in the config and ignored, so a session with rules still falls back; a command spoken on a
+  clip rung goes to the LLM like any other utterance and enters the history, speculated or not (a speculative start
+  voices nothing: the answer is only streamed for the final clip). `reply_guard` is not applied there either. An app
+  that needs the command on the fallback matches the `transcript` event in its own backend, as before these rules.
 
 **Signed update** — the app changes a live session through the gateway, never through the browser's own word:
 `POST /v1/realtime/updates {token, update}` (app API key; the session must be the app's) → `{sessionId, signed, n}`.
@@ -207,6 +211,8 @@ clip so far (WAV) starts the STT, then the LLM, on what was heard up to a pause 
 (or `false` with a `reason`: `short`, `format`, `turn_cap`, `busy`, `off`); `{id, action: "cancel"}` drops it when the
 speech resumes; the turn names `{id}` and starts from that transcript without a second STT. Nothing speculative is
 voiced, the app is charged once per turn. The SDK does it on the s2s-stream rung when `voice.speculatePauseMs` is set.
+It travels by HTTP to the gateway only: nothing about it is sent to the edge, whose `config_update` allow-list it does
+not touch (`docker/aigw-edge/tests/sdk-client-updates.json` lists every frame the SDK sends there on its own).
 Bounds and measurements: docs/reports/2026-10-07-realtime-handoff.md § Fallback em streaming.
 
 Deployment defaults: `RT_FIRST_AUDIO_DEADLINE_MS` / `RT_FIRST_AUDIO_MARGIN_MS` on the edge (`realtime.env`),
