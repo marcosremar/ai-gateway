@@ -110,7 +110,7 @@ prompt similarity (`--slot-prompt-similarity`, default 0.10), so the stack sends
 `llm_predicted_n`, `llm_predicted_ms`, `text_wait_ms` (first token → first sentence cut), `tts_first_chunk_ms` (cut → first
 PCM). Numbers only. `/v1/audio/transcriptions` returns the same four STT fields. `bench.py` prints p50/p95 of each stage.
 
-Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times; do python3 docker/speech-stack/test_$t.py; done`
+Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times tts_stream s2s_turn debug_logs; do python3 docker/speech-stack/test_$t.py; done`
 (numpy only; `git add -f` a new one, the repo's `TEST_*` ignore rule matches them on macOS).
 
 ## Single-stage proxies never end a broken stream cleanly (2026-10-08)
@@ -130,6 +130,24 @@ One log line each (`proxy failed|stalled chat|speech <ms> <error>`), counted in 
 `proxy: {chat: {started, done, failed, stalled}, speech: {…}}` (`started` − the rest = in flight or left by the
 client). `test_stage_proxy.py` runs the real uvicorn + FastAPI + httpx stack against a fake engine (needs `fastapi`,
 `httpx`, `uvicorn`).
+## Engine logs: `GET /debug/logs`
+
+`start.sh` writes each engine's stdout and stderr to `/var/log/{tts,llm,stt}.log` (`stt` is the orchestrator process:
+Whisper runs inside it, so its log is also where every `/v1/s2s` failure is printed). A file is renamed to `.1` when it
+passes `LOG_MAX_BYTES` (8 MB), so the three logs hold at most 48 MB.
+
+`GET /debug/logs?engine=tts|llm|stt&tail=200&match=<text>` returns the last `tail` lines (at most 2000, each cut at
+2000 characters) that contain `match`, as plain text, read from the rotated file and the current one. Through the
+gateway: `GET /v1/deployments/<name>/invoke/debug/logs?engine=tts&match=status=error`. The replica's front proxy asks
+for the replica token on this route as on every other one, and the route itself answers 403 to a client that is not on
+a private address (a container port published by mistake). Values of environment variables named like a secret, bearer
+tokens, `token=`/`key=`/`password=` values and `hf_…`/`sk-…` keys come out as `[redacted]`.
+
+Following one sentence into the TTS engine: for every TTS request the orchestrator prints
+`tts <request_id> <UTC start> chars=… max_new_tokens=… audio_s=… ms=… outcome=ok|<error>` (in `stt`), and sends the id
+as `extra_params.request_id`. vLLM-Omni 0.28.0 logs `Applied extra_params: {'request_id': '<id>'}` on the line after
+`TTS speech request speech-<uuid>: model=Base`; that `speech-<uuid>` is the id of its `[SpeechE2E] … status=…` line.
+No text, transcript or audio is written by the orchestrator.
 
 ## Shipping server code without rebuilding the image
 

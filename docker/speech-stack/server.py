@@ -25,25 +25,30 @@ POST /v1/audio/speech           proxied to the TTS (streaming passes through).
                      event; any other body (audio, JSON) has its connection aborted. Counted in /health `proxy`.
 GET  /refs/<id>.wav             reference voices (from /files/voices.json, see load_voices).
 GET  /health                    200 only when the three models answered a warm-up.
+GET  /debug/logs?engine=tts|llm|stt&tail=N&match=text   last lines of an engine's log (stt = this process), secrets
+                                scrubbed; every TTS request logs `tts <request_id> …` here and the same id in the TTS log.
 """
 
 import asyncio
 import base64
 import hashlib
 import io
+import ipaddress
 import json
+import math
 import os
 import re
 import struct
 import subprocess
 import time
+import uuid
 import wave
 from pathlib import Path
 
 import httpx
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from faster_whisper import WhisperModel
 
 from stt_batch import SttBatcher
@@ -68,6 +73,7 @@ PROXY_MAX_GAP_S = float(os.environ.get("PROXY_MAX_GAP_S", "8"))
 PROXY_DEADLINE_S = float(os.environ.get("PROXY_DEADLINE_S", "120"))
 TTS_MAX_SECONDS = float(os.environ.get("TTS_MAX_SECONDS", "3"))
 TTS_MAX_SECONDS_PER_CHAR = float(os.environ.get("TTS_MAX_SECONDS_PER_CHAR", "0.2"))
+TTS_FRAMES_PER_SECOND = 12.5
 REFS = Path("/srv/refs")
 FILES = Path("/files")
 
@@ -307,10 +313,12 @@ async def llm_stream(messages: list[dict], max_tokens: int, temperature: float, 
 async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) -> None:
     """Raw PCM s16le 24 kHz chunks of one sentence into `out`, then None. vLLM-Omni streams the Code2Wav chunks as soon
     as they decode with `stream: true` + `stream_format: "audio"` (pcm/wav only)."""
-    body = {"model": TTS_MODEL, "input": text, "task_type": "Base", "language": language, "ref_audio": voice["audio"],
-            "ref_text": voice["text"], "response_format": "pcm", "stream": True, "stream_format": "audio"}
     limit = TTS_MAX_SECONDS + TTS_MAX_SECONDS_PER_CHAR * len(text)
-    sent = 0
+    request_id = uuid.uuid4().hex[:12]
+    body = {"model": TTS_MODEL, "input": text, "task_type": "Base", "language": language, "ref_audio": voice["audio"],
+            "ref_text": voice["text"], "response_format": "pcm", "stream": True, "stream_format": "audio",
+            "max_new_tokens": math.ceil(limit * TTS_FRAMES_PER_SECOND), "extra_params": {"request_id": request_id}}
+    sent, started, outcome = 0, time.time(), "ok"
     try:
         async with client.stream("POST", f"{TTS_URL}/v1/audio/speech", json=body) as res:
             if res.status_code != 200:
@@ -322,9 +330,13 @@ async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) 
                         raise RuntimeError(f"tts runaway: over {limit:.1f} s of audio for {len(text)} characters")
                     await out.put(chunk)
     except Exception as error:
+        outcome = repr(error)[:160]
         await out.put(error)
         raise
     finally:
+        print("tts", request_id, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)), f"chars={len(text)}",
+              f"max_new_tokens={body['max_new_tokens']}", f"audio_s={sent / 2 / SAMPLE_RATE:.2f}",
+              f"ms={round((time.time() - started) * 1000)}", f"outcome={outcome}", flush=True)
         await out.put(None)
 
 
@@ -733,6 +745,48 @@ async def refs(name: str):
 @app.get("/v1/voices")
 async def list_voices():
     return {"voices": [{"id": k, **{f: v[f] for f in v if f != "audio"}} for k, v in voices.items()]}
+
+
+# ── Engine logs ──────────────────────────────────────────────────────────────
+
+LOG_DIR = Path("/var/log")
+LOG_ENGINES = ("tts", "llm", "stt")
+LOG_MAX_TAIL = 2000
+LOG_MAX_LINE = 2000
+SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL", re.I)
+SECRET_VALUES = sorted((v for k, v in os.environ.items() if SECRET_ENV.search(k) and len(v) >= 8), key=len, reverse=True)
+SECRET_TEXT = re.compile(r"(?i)\b(bearer\s+|[\w-]*(?:token|secret|password|passwd|api[_-]?key|authorization)[\w-]*[\"']?\s*[=:]\s*[\"']?)"
+                         r"[^\s\"',;&]{12,}|\b(?:hf|sk|ghp|scw)[_-][A-Za-z0-9_-]{16,}")
+
+
+def scrub(line: str) -> str:
+    for value in SECRET_VALUES:
+        line = line.replace(value, "[redacted]")
+    return SECRET_TEXT.sub(lambda found: (found.group(1) or "") + "[redacted]", line)[:LOG_MAX_LINE]
+
+
+def log_tail(engine: str, tail: int, match: str) -> list[str]:
+    lines: list[str] = []
+    for path in (LOG_DIR / f"{engine}.log.1", LOG_DIR / f"{engine}.log"):
+        if path.exists():
+            lines += [line for line in path.read_text(errors="replace").splitlines() if match in line]
+    return [scrub(line) for line in lines[-max(1, min(tail, LOG_MAX_TAIL)):]]
+
+
+def behind_front(host: str | None) -> bool:
+    try:
+        return ipaddress.ip_address(host or "").is_private
+    except ValueError:
+        return False
+
+
+@app.get("/debug/logs")
+async def debug_logs(request: Request, engine: str = "tts", tail: int = 200, match: str = ""):
+    if not behind_front(request.client.host if request.client else None):
+        raise HTTPException(403, "only through the replica's token-gated front")
+    if engine not in LOG_ENGINES:
+        raise HTTPException(400, f"engine must be one of {', '.join(LOG_ENGINES)}")
+    return PlainTextResponse("\n".join(await asyncio.to_thread(log_tail, engine, tail, match)) + "\n")
 
 
 @app.get("/health")
