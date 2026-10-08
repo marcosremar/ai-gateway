@@ -81,7 +81,7 @@ export interface RealtimeSession {
   /** Client VAD said the learner stopped (realtime rungs). */
   sendEndTurn(): void;
   interrupt(): void;
-  /** Appends messages to the conversation (and tells the edge). */
+  /** Appends user / assistant messages to the conversation (and tells the edge); a `system` message is dropped: the signed session config owns the prompt. */
   updateHistory(messages: ChatMessage[]): void;
   /** Clip rungs: one recorded learner turn (16 kHz WAV). Realtime rungs ignore it (their audio is live). */
   sendTurn(wav: Blob): Promise<void>;
@@ -682,8 +682,9 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       current?.send({ type: 'interrupt' });
     },
     updateHistory(messages) {
-      appended.push(...messages);
-      if (current && !current.clipBased) current.send({ type: 'config_update', messages });
+      const turns = messages.filter(m => m.role !== 'system');
+      appended.push(...turns);
+      if (current && !current.clipBased) current.send({ type: 'config_update', messages: turns });
     },
     async sendTurn(wav) {
       if (!current?.clipBased || closed) return;

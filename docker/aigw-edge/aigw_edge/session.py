@@ -34,6 +34,8 @@ PRE_ROLL_FRAMES = 15  # 300 ms kept before the VAD opened a turn (its first syll
 MIN_TURN_BYTES = int(0.3 * 16000) * 2
 OUT_BYTES_PER_MS = OUT_RATE * 2 // 1000
 recent_first_audio: collections.deque = collections.deque(maxlen=512)
+CLIENT_CONFIG_KEYS = ("messages", "opener")
+CLIENT_ROLES = ("user", "assistant")
 
 
 def first_audio_max(window_s: float) -> int | None:
@@ -117,6 +119,8 @@ class Session:
         self.turn_id: str | None = None
         self.outcome = "ok"
         self.last_opener = -1
+        self.signed_opener = self.cfg.get("opener")
+        self.refused_updates = 0
         self._warm_openers()
 
     def tel(self, event: str, **kw) -> None:
@@ -198,19 +202,29 @@ class Session:
         elif kind == "end_turn":
             self.end_turn(reason="client")
         elif kind == "config_update":
-            self._discard_speculation()
-            if isinstance(msg.get("messages"), list):
-                # Appended to the history (docs/realtime.md): the SDK replays a broken session's turns into the new one.
-                self.messages += [m for m in msg["messages"] if isinstance(m, dict) and "role" in m and "content" in m]
-            for key in ("system", "voice", "fallback_voice", "max_tokens", "temperature", "stt_prompt", "user_template",
-                        "opener", "first_audio_deadline_ms"):
-                if key in msg:
-                    self.cfg[key] = msg[key]
-            self._warm_openers()
+            self._client_update(msg)
         elif kind == "ping":
             self.emit({"type": "pong", "t": msg.get("t")})
         else:
             self.emit({"type": "error", "code": "bad_message", "message": f"unknown type {kind!r}"})
+
+    def _client_update(self, msg: dict) -> None:
+        messages = msg.get("messages", [])
+        refused = sorted(set(msg) - {"type", *CLIENT_CONFIG_KEYS})
+        if not isinstance(messages, list) or any(not isinstance(m, dict) or m.get("role") not in CLIENT_ROLES
+                                                  or not isinstance(m.get("content"), str) for m in messages):
+            refused.append("messages")
+        if refused:
+            self.refused_updates += 1
+            self.tel("edge.config.refused", level="warn", keys=",".join(refused)[:120], count=self.refused_updates)
+            self.emit({"type": "error", "code": "forbidden",
+                       "message": f"config_update refused ({', '.join(refused)[:120]}): the signed session config is authoritative"})
+            return
+        self._discard_speculation()
+        self.messages += messages
+        if "opener" in msg:
+            self.cfg["opener"] = None if msg["opener"] is None else self.signed_opener
+        self._warm_openers()
 
     def interrupt(self) -> None:
         if self.busy and self.confirmed is None:
