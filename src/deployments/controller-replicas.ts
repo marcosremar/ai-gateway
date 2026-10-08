@@ -30,6 +30,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     if (result === 'ready') {
       // Replica lifecycle for telemetry (serve.ts maps these log lines to `replica.ready` / `replica.unhealthy`).
       if (!p.readyNow) this.log('deployments: replica ready', { deployment: m.deployment, id: m.id, bootMs: p.everReady ? null : this.now() - m.createdAt });
+      if (!p.everReady && m.createdAt >= this.startedAt) this.backends[this.providerOf(m)]?.noteHost?.(m, { bootMs: this.now() - m.createdAt });
       p.readyAt ??= this.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
     } else if (result === 'busy' && p.everReady && (this.busyOn(rt, m.id) > 0 || this.servedRecently(p))) {
       // Alive (its front answers) and working: the health check queued behind the work. Keep it serving what it can.
@@ -86,7 +87,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       gate.status = 'passed';
       rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${measured}: kept`;
       rt.rejected = [];
-      if (rtt != null) backend.recordRtt?.(m, rtt);
+      if (rtt != null) backend.recordRtt?.(m, rtt, gate.baseline?.rttMs ?? null);
       return true;
     }
     const note = `host ${m.zone || m.id}: ${measured}: released (too-far)`;
@@ -96,6 +97,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       deployment: m.deployment, id: m.id, rttMs: rtt, baselineMs: gate.baseline?.rttMs ?? null, anchor: gate.baseline?.anchor ?? null,
       maxRttMs: spec.maxRttMs ?? null,
     });
+    if (rtt != null) backend.noteHost?.(m, { rttMs: rtt, baselineMs: gate.baseline?.rttMs ?? null });
     await this.release(m, 'too-far');
     return false;
   }
@@ -169,7 +171,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     void (async () => {
       try {
         const { machine, price, placement } = await placeReplica({
-          spec, log: this.log, backendFor: (p) => this.backends[p],
+          spec, log: this.log, backendFor: (p) => this.backends[p], forVast: (s) => this.forVast(rt, s),
           create: (backend, placed) => {
             spend.provider = backend.provider;
             return this.createOn(rt, backend, placed, created);

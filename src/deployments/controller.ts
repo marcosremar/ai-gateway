@@ -117,6 +117,22 @@ export class DeploymentController extends ControllerViews {
     return { view: this.view(name)!, created: !existing };
   }
 
+  async noteUdp(deployment: string, replicaId: string, udp: 'ok' | 'blocked', seen: { path?: string; active: number }): Promise<void> {
+    const rt = this.deployments.get(deployment);
+    const m = this.machines.find(x => x.id === replicaId && x.deployment === deployment);
+    if (!rt || !m) return;
+    const workedBefore = this.udp.get(m.id) === 'ok';
+    this.udp.set(m.id, udp);
+    this.backends[this.providerOf(m)]?.noteHost?.(m, { udp });
+    const unusable = udp === 'blocked' && seen.path !== 'relay' && rt.record.spec.realtime?.requireWebrtc;
+    if (!unusable || workedBefore || seen.active > 0 || m.createdAt < this.startedAt) return;
+    const note = `host ${m.zone || m.id}: inbound UDP blocked and realtime.requireWebrtc: released (udp-blocked)`;
+    rt.rejected = [...rt.rejected.slice(-4), note];
+    rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${note}`;
+    await this.release(m, 'udp-blocked');
+    this.kick();
+  }
+
   async remove(name: string): Promise<boolean> {
     const rt = this.deployments.get(name);
     if (!rt) return false;

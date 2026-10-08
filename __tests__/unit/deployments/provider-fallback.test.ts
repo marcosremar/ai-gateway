@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
+import { bootFile } from '../../../src/deployments/boot-files';
 import { vastReplicaInit } from '../../../src/deployments/cloud-init';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
@@ -6,6 +8,7 @@ import { placementsOf } from '../../../src/deployments/placements';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { DEFAULT_SCALING_MODE } from '../../../src/deployments/scaling-spec';
 import { buildSpec } from '../../../src/deployments/spec';
+import { reapIfGatewayDown } from '../../../src/deployments/reaper';
 import { MemoryDeploymentStore } from '../../../src/deployments/store';
 import type { DeploymentSpec, DeploymentStore } from '../../../src/deployments/types';
 import { FakeCloud, until } from './_fake-cloud';
@@ -27,9 +30,12 @@ afterEach(async () => {
   for (const c of clouds.splice(0)) await c.closeAll();
 });
 
-async function make(opts: { vast?: boolean; store?: DeploymentStore; log?: (msg: string, data?: Record<string, unknown>) => void } = {}) {
-  const scaleway = new FakeCloud();
-  const vast = new FakeCloud(Date.now, 'vast');
+async function make(opts: {
+  vast?: boolean; store?: DeploymentStore; log?: (msg: string, data?: Record<string, unknown>) => void; publicUrl?: string; now?: () => number;
+  maxEurPerHour?: number;
+} = {}) {
+  const scaleway = new FakeCloud(opts.now);
+  const vast = new FakeCloud(opts.now ?? Date.now, 'vast');
   vast.marketPriced = true;
   const quota = new Set<string>();
   const attempts: string[] = [];
@@ -40,7 +46,8 @@ async function make(opts: { vast?: boolean; store?: DeploymentStore; log?: (msg:
   const controller = new DeploymentController({
     backends: opts.vast === false ? { scaleway } : { scaleway, vast }, store: opts.store ?? new MemoryDeploymentStore(),
     probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 20, defaultScalingMode: DEFAULT_SCALING_MODE,
-    ...(opts.log ? { log: opts.log } : {}),
+    ...(opts.log ? { log: opts.log } : {}), ...(opts.publicUrl ? { publicUrl: opts.publicUrl } : {}), ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.maxEurPerHour ? { maxEurPerHour: opts.maxEurPerHour } : {}),
   });
   await controller.init();
   controller.start();
@@ -206,3 +213,116 @@ describe('default scaling mode', () => {
     expect(controller.capacity('a')!.mode).toBeNull();
   });
 });
+
+describe('files on a vast placement', () => {
+  it('with a public URL the gateway serves them through signed links and the placement is used; the links open the stored bytes', async () => {
+    const { controller, vast, quota } = await make({ publicUrl: 'https://gw.example' });
+    quota.add('L40S-1-48G').add('L4-1-24G');
+    const voice = Buffer.from('reference voice');
+    await controller.put('voices', { ...SPEC, maxReplicas: 1, files: { 'lia.wav': voice.toString('base64') } });
+    await until(() => vast.created.length === 1);
+    const { spec, files } = vast.created[0];
+    expect(files).toBeUndefined();
+    expect(spec.files).toBeUndefined();
+    const link = spec.fileUrls!['lia.wav'];
+    expect(link.sha256).toBe(createHash('sha256').update(voice).digest('hex'));
+    expect(link.url).toMatch(/^https:\/\/gw\.example\/v1\/boot-files\?d=voices&k=lia\.wav&exp=\d+&sig=[\w-]{43}$/);
+    expect(bootFile(controller, new URL(link.url).searchParams, Date.now())).toEqual(voice);
+    expect(vastReplicaInit(spec, 'x'.repeat(32))).toContain(`/srv/aigw/files/lia.wav ${link.sha256}`);
+    const view = controller.get('voices')!;
+    expect(view.warnings).toEqual([]);
+    expect(JSON.stringify(view)).not.toContain('sig=');
+  });
+});
+
+describe('inbound UDP of a replica', () => {
+  const rtc = (requireWebrtc: boolean) => ({ ...SPEC, placements: [], provider: 'vast', machineType: 'RTX 5090', bootScript: 'serve', realtime: { maxSessions: 4, requireWebrtc } });
+
+  it('is recorded on the replica and on its host; a blocked replica keeps serving a deployment that can use WS', async () => {
+    const { controller, vast } = await make();
+    const notes: unknown[] = [];
+    vast.noteHost = (m, note) => { notes.push([m.id, note]); };
+    await controller.put('s', rtc(false));
+    await until(() => controller.get('s')!.status === 'ready');
+    const { id } = controller.get('s')!.replicas[0];
+    expect(controller.get('s')!.replicas[0].udp).toBeNull();
+    await controller.noteUdp('s', id, 'blocked', { path: 'ws', active: 0 });
+    expect(controller.get('s')!.replicas[0]).toMatchObject({ id, udp: 'blocked', phase: 'ready' });
+    expect(vast.released).toEqual([]);
+    expect(notes).toEqual([[id, { bootMs: expect.any(Number) }], [id, { udp: 'blocked' }]]);
+    await controller.noteUdp('s', 'no-such-replica', 'ok', { active: 0 });
+    await controller.noteUdp('nothing', id, 'ok', { active: 0 });
+  });
+
+  it('realtime.requireWebrtc: blocked UDP is a failed boot of that host (released as udp-blocked, replaced), unless a relay works or learners are seated', async () => {
+    const { controller, vast } = await make();
+    await controller.put('s', rtc(true));
+    await until(() => controller.get('s')!.status === 'ready');
+    const first = controller.get('s')!.replicas[0].id;
+    await controller.noteUdp('s', first, 'blocked', { path: 'relay', active: 0 });
+    await controller.noteUdp('s', first, 'blocked', { path: 'ws', active: 2 });
+    expect(vast.released).toEqual([]);
+    await controller.noteUdp('s', first, 'blocked', { path: 'ws', active: 0 });
+    expect(vast.released).toEqual([first]);
+    expect(vast.releaseReasons).toEqual(['udp-blocked']);
+    await until(() => controller.get('s')!.status === 'ready');
+    const view = controller.get('s')!;
+    expect(view.replicas.map(r => r.id)).not.toContain(first);
+    expect(view.lastPlacement).toMatch(/inbound UDP blocked and realtime\.requireWebrtc: released \(udp-blocked\)/);
+    await controller.noteUdp('s', view.replicas[0].id, 'ok', { path: 'direct', active: 0 });
+    await controller.noteUdp('s', view.replicas[0].id, 'blocked', { path: 'ws', active: 0 });
+    expect(controller.get('s')!.replicas[0]).toMatchObject({ udp: 'blocked', phase: 'ready' });
+    expect(vast.released).toEqual([first]);
+    expect(() => buildSpec('s', { ...rtc(true), realtime: { requireWebrtc: 'yes' } }, { profiles })).toThrow(/requireWebrtc must be a boolean/);
+  });
+});
+
+describe('warm schedule over a vast placement (a class at a known time)', () => {
+  const at = (iso: string) => Date.parse(iso);
+  const CLASS = {
+    ...SPEC, minReplicas: 0, maxReplicas: 4, idleMinutes: 1,
+    placements: [{ ...VAST, maxReplicas: 3 }],
+    warmSchedule: [{ days: [1, 2, 3, 4], start: '17:40', end: '20:15', timeZone: 'Europe/Paris', minReplicas: 4 }],
+  };
+
+  it('before the class the floor starts the Scaleway replica the quota allows and the rest on vast, within the placement limit and the hourly ceiling; after it they go', async () => {
+    const clock = { offset: at('2026-10-12T15:00:00Z') - Date.now() };
+    const now = () => Date.now() + clock.offset;
+    const { controller, scaleway, vast } = await make({ now, maxEurPerHour: 1.8 });
+    scaleway.failCreateFor = s => (scaleway.created.length >= 1 ? QUOTA(s.machineType) : null);
+    await controller.put('class', CLASS);
+    await controller.reconcile();
+    expect(controller.get('class')).toMatchObject({ status: 'scaled-to-zero', autoscale: { warmFloor: 0 } });
+    expect(vast.created).toHaveLength(0);
+
+    clock.offset = at('2026-10-12T15:41:00Z') - Date.now();
+    await until(() => controller.get('class')!.replicas.filter(r => r.phase === 'ready').length === 3, 8000);
+    expect(controller.get('class')!.autoscale.warmFloor).toBe(4);
+    expect(scaleway.created).toHaveLength(1);
+    expect(vast.created.map(c => c.spec.maxEurPerHour)).toEqual([0.85, 0.85]);
+    await until(() => /spend ceiling reached/.test(controller.get('class')!.lastError ?? ''));
+    expect(controller.health()).toMatchObject({ running: 3, maxEurPerHour: 1.8 });
+
+    const reaped = await reapIfGatewayDown({
+      namespace: 'test', now: () => now() + 3_600_000, sleep: async () => {}, gatewayUp: async () => false, dryRun: true, backends: [scaleway, vast],
+    });
+    expect(reaped.seen).toBe(3);
+
+    clock.offset = at('2026-10-12T20:30:00Z') - Date.now();
+    await until(() => controller.get('class')!.replicas.length === 0, 8000);
+    expect(vast.released).toHaveLength(2);
+    expect(scaleway.released).toHaveLength(1);
+    expect(controller.get('class')!.autoscale.warmFloor).toBe(0);
+  });
+
+  it('a Friday has no window: nothing is rented', async () => {
+    const offset = at('2026-10-16T16:00:00Z') - Date.now();
+    const { controller, scaleway, vast } = await make({ now: () => Date.now() + offset });
+    await controller.put('class', CLASS);
+    await controller.reconcile();
+    await controller.reconcile();
+    expect(controller.get('class')!.autoscale.warmFloor).toBe(0);
+    expect(scaleway.created.length + vast.created.length).toBe(0);
+  });
+});
+
