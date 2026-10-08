@@ -58,6 +58,7 @@ TTS_URL = "http://127.0.0.1:8091"
 LLM_URL = "http://127.0.0.1:8092"
 TTS_MODEL = os.environ.get("TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
 STT_MODEL = os.environ.get("STT_MODEL", "large-v3")
+MODELS = {"stt": STT_MODEL, "llm": os.environ.get("LLM_FILE", "llm"), "tts": TTS_MODEL}
 STT_BEAM = int(os.environ.get("STT_BEAM", "1"))
 # Utterances arriving within STT_BATCH_WINDOW_MS share one GPU pass, up to STT_BATCH clips (stt_batch.py). L4: 4,
 # L40S: 8 — the batch's encoder activations must fit next to the TTS and the LLM.
@@ -873,7 +874,7 @@ async def debug_logs(request: Request, engine: str = "tts", tail: int = 200, mat
 
 @app.get("/health")
 async def health():
-    return JSONResponse({**ready, "stt": stt_batcher.stats, "s2s": turns, "proxy": proxied}, status_code=200 if ready["ok"] else 503)
+    return JSONResponse({**ready, "models": MODELS, "stt": stt_batcher.stats, "s2s": turns, "proxy": proxied}, status_code=200 if ready["ok"] else 503)
 
 
 # ── Warm-up: the first real request must not pay kernel loads ───────────────

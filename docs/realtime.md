@@ -101,7 +101,8 @@ the status); admission then places new sessions on another replica or sends them
 Edge → client (data channel "events", JSON, or WS text frames), the s2s vocabulary:
 `{type:"ready"}`, `{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
 `{type:"reply_delta", text}`, `{type:"reply", text}`, `{type:"audio_start"}`, `{type:"audio_end"}`,
-`{type:"interrupted"}`, `{type:"done", empty?, filtered?}`, `{type:"error", code, message}`,
+`{type:"interrupted"}`, `{type:"done", empty?, filtered?, intercepted?, said?, tag?, served?}`, `{type:"intercept", tag, action}`,
+`{type:"say", text, tag}`, `{type:"config_applied", n}`, `{type:"error", code, message}`,
 `{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms, endpoint_ms, ttfa_from_speech_ms, first_sound_ms,
 first_sound_from_speech_ms, opener, deadline_ms, deadline_missed}`, `{type:"opener", state:"start"|"end", text, index,
 audio_ms}`, `{type:"deadline_missed", deadline_ms}` (next section).
@@ -109,13 +110,81 @@ audio_ms}`, `{type:"deadline_missed", deadline_ms}` (next section).
 Client → edge: `{type:"interrupt"}`, `{type:"end_turn"}` (client VAD: the learner stopped), `{type:"config_update",
 messages?, opener?}`, `{type:"ping"}`.
 
-**The signed session config is authoritative.** A client `config_update` may carry only `messages` (appended to the
+**The signed session config is authoritative.** A client `config_update` may carry only `signed` (an update the
+gateway signed for the app, § App hooks), or `messages` (appended to the
 history; `user` and `assistant` roles with string content — the SDK replays the turns of a broken session into the new
 one) and `opener` (`null` switches the signed opener off, anything else switches the signed one back on: the value is
 never used). Any other field, a `system` message or a malformed `messages` refuses the whole update: nothing changes,
 the client gets `{type:"error", code:"forbidden"}` and the edge emits `edge.config.refused {keys, count}` (field names
 only). `system`, `voice`, `fallback_voice`, `user_template`, `max_tokens`, `temperature`, `stt_prompt`, `language`,
 `vad` and `first_audio_deadline_ms` change only with a config signed by the gateway for the app.
+
+### App hooks: intercepts, say, signed updates, reply guard, served ids
+
+All optional; a session without these fields behaves exactly as before. They are part of the signed session config
+(checked at admission, 400 `invalid_request` when malformed), so the browser cannot change them.
+
+**`intercepts`** — the app sees the learner's final transcript before the reply is voiced, with no network hop: a rule
+set evaluated on the edge, between the hallucination guard and the LLM.
+
+```json
+"intercepts": [
+  { "tag": "slower",  "action": "drop", "contains": ["mais devagar", "fala devagar"] },
+  { "tag": "repeat",  "action": "drop", "contains": ["pode repetir", "não entendi"], "whole": ["desculpa", "como"] },
+  { "tag": "repeat",  "action": "drop", "whole": ["hã", "hum"], "question": true },
+  { "tag": "options", "action": "say",  "contains": ["opções"], "text": "Você pode pedir um pão.", "voice": "rafa" }
+]
+```
+
+- Matching is a plain normalised-phrase test, no patterns: transcript and phrases are lowercased, stripped of accents
+  (NFD) and of `- , ! ? . ; : ' " ( ) « »`, spaces collapsed — the school's own `normalizeSemanticText`
+  (`core/text/semantic-text.ts`, used by `learnerRequestOf` in `backend/fast-version-routes.ts`). `contains`: the
+  phrase appears as whole words anywhere; `whole`: the phrase is the entire utterance; `question: true`: only when the
+  raw transcript has a `?`. The first matching rule wins. Linear in the text: nothing to backtrack.
+- Bounds: 32 rules, 64 phrases per list, 80 characters per phrase, `tag` `[a-z][a-z0-9_.-]{0,39}`, `text` ≤ 400.
+- A matched turn is **not sent to the LLM** (a speculative turn does not start it either) and **never enters the
+  history**. Events: `transcript{final}` → `intercept{tag, action, turnId}` → (`action:"say"`: `say{text, tag}` →
+  `audio_start` → the line's audio, synthesized with the rule's `voice` / `fallback_voice` or the session's, in the
+  session's audio queue → `audio_end`) → `metrics` → `done{intercepted:true, tag, served?}`. No opener plays for it.
+  The page runs its own behaviour on `intercept` (repeat the last audio, slower, show the transcript).
+- Cost on a turn no rule matches: one in-process string test (0.3 ms for 32 × 64 phrases, measured in
+  `tests/test_session.py`), no await, no upstream call: first audio is unchanged.
+- Not evaluated on the clip rungs (`/v1/s2s`, the composed fallback): there the app's own backend sees the transcript.
+
+**Signed update** — the app changes a live session through the gateway, never through the browser's own word:
+`POST /v1/realtime/updates {token, update}` (app API key; the session must be the app's) → `{sessionId, signed, n}`.
+`signed` is a JWT (HS256, the session's key, claims `sid, upd, n, iat, exp` with `exp` = the session token's) that
+the page forwards as `{type:"config_update", signed}` (SDK: `session.applyUpdate(signed, history?)`). The edge
+verifies it offline, for this `sid`, with `n` (the gateway's clock, ms) greater than the last applied one, then:
+
+| `update` field | Effect |
+|---|---|
+| `drop_turn: "<turnId>"` | removes that turn's user and assistant messages from the history (an interrupted turn) |
+| `messages: [...]` | **replaces** the history (the client's own `config_update{messages}` only appends) |
+| `system`, `voice`, `fallback_voice`, `user_template`, `max_tokens`, `temperature`, `stt_prompt`, `opener`, `first_audio_deadline_ms`, `intercepts`, `reply_guard` | replace that field of the session config |
+| `say: {text, voice?, fallback_voice?, history?, tag?}` | voices the line in the session's audio queue, after the turn in progress; `history: true` appends it as an assistant message; ends with `done{said:true, tag, served}` |
+
+It answers `config_applied{n}`; a bad signature, another session's update, an expired or replayed one is refused like
+any forbidden `config_update`. Withholding an update only leaves the page with its previous signed state. `language`
+and `vad` are fixed for the session.
+
+**`reply_guard: {deny: [phrases], note?}`** — the gateway never decides what language a reply is in; the app names
+phrases a reply of its character must not open with (function words of the wrong language: `sure`, `of course`,
+`bien sûr`…; same matcher, up to 256). The first sentence is checked when the cutter closes it, which is when its TTS
+would start anyway, so a passing reply costs no first audio (the first sentence's `reply_delta` arrives in one piece).
+A denied first sentence is never voiced: the LLM is asked once more with `note` appended to the user turn, and that
+second answer is voiced unchecked (`metrics.reply_retries: 1`, `edge.llm.reply_guard`). The retry costs one more LLM
+time-to-first-token plus the first sentence's generation on that turn only. Not applied with `speak_field`, in
+`s2s` upstream mode or on the clip rungs.
+
+**`served`** — `done` of a voiced turn carries what answered it:
+`{stt, llm, tts, voice, opener, transport}`. On the edge the three ids are the replica's own (`/health` → `models`;
+without it `stt` is `null`, `llm` / `tts` are `EDGE_LLM_MODEL` / `EDGE_TTS_MODEL`), `voice` the id sent to the TTS
+(the catalog voice, the `fallback_voice` when the catalog does not know it, `"custom"` for `{audio, text}`), `opener`
+whether an opener line played, `transport` `webrtc` / `ws`. On the composed path (`/v1/s2s` fallback) the ids are
+each stage's `X-Gateway-Provider` (`deployment:<name>` or `<provider>:<upstream model>`), `transport` is `s2s`, and
+`voice` is the cast voice when the first TTS target served, `null` when a fallback target chose its own. The SDK
+copies it to `metrics.lastTurn.served`.
 
 ### First-audio deadline and opener
 

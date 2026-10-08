@@ -80,6 +80,14 @@ export function signSessionToken(claims: RealtimeClaims, key: Uint8Array): strin
   return `${input}.${sign(input, key).toString('base64url')}`;
 }
 
+interface UpdateClaims { sid: string; upd: string; n: number; iat: number; exp: number }
+
+export function signUpdateToken(claims: UpdateClaims, key: Uint8Array): string {
+  const ordered = { sid: claims.sid, upd: claims.upd, n: claims.n, iat: claims.iat, exp: claims.exp };
+  const input = `${b64url(JSON.stringify(HEADER))}.${b64url(JSON.stringify(ordered))}`;
+  return `${input}.${sign(input, key).toString('base64url')}`;
+}
+
 function claimsOf(value: unknown): RealtimeClaims | null {
   if (!value || typeof value !== 'object') return null;
   const c = value as Record<string, unknown>;

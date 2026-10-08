@@ -188,6 +188,15 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   (same thresholds, same core blocklist, same reason codes). Verdict parity is enforced on > 1000 cases by
   `__tests__/unit/stt-filter/edge-parity.test.ts`. A drop emits `filtered{reasons}` then `done{filtered:true}`;
   `cfg.filter_hallucinations: false` skips it.
+- **App hooks** (`docs/realtime.md` § App hooks; all off unless the signed config names them): `cfg.intercepts`
+  (`aigw_edge/intercept.py`: a normalised-phrase matcher run on the final transcript after the guard — a match skips
+  the LLM, optionally voices the rule's line, emits `intercept` and `done{intercepted}`, and leaves the history
+  untouched; `edge.turn.intercepted {tag, action}`, `edge.turn.done` `outcome: "intercepted"`); a signed
+  `config_update{signed}` (`token.py` `verify_update`: same key, this `sid`, `n` increasing — drops a turn, replaces
+  history or config fields, voices a `say` line; `edge.config.signed {seq, keys}`); `cfg.reply_guard` (first sentence
+  against the app's deny phrases before its TTS, one regeneration; `edge.llm.reply_guard`); `done.served`
+  (`{stt, llm, tts, voice, opener, transport}`, the ids from the upstream's `/health` → `models`, handed to the
+  WebRTC workers with each offer as `llm_ctx` is).
 - **LLM**: `/v1/chat/completions`, `stream: true`, model `EDGE_LLM_MODEL` (`llm`), `system` + history + the user turn
   (`user_template` with `{{transcript}}`), `max_tokens`, `temperature`, `response_format`, `speak_field` (only that JSON
   field is voiced; same extractor as `/v1/s2s`).
@@ -304,7 +313,9 @@ instead of the redirect. `REALTIME_TURN_URLS` example:
 
 ## Tests
 
-- `docker/aigw-edge/tests/run.sh units` — token (and the gateway's vectors: key, every case, TURN credential), cutter
+- `docker/aigw-edge/tests/run.sh units` — the signed-config rule, config by reference, the phrase matcher against the
+  school's four voice commands, signed updates (and the gateway's vector), `tests/test_session.py` `app_turn_hook`
+  (intercept drop / say, speculated or not, no first-audio cost, reply guard, served ids), token (and the gateway's vectors: key, every case, TURN credential), cutter
   copy, VAD, 48→16 kHz filter, telemetry emitter, and `tests/test_session.py`: a session on in-process fakes (endpoint
   metrics, the speculative turn confirmed / discarded / interrupted / closed, partials on and off, the first-audio
   deadline: reply in time, late, opener still playing, barge-in, rotation, cache reuse, no opener; admission shedding).

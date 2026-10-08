@@ -134,6 +134,7 @@ async def scenario_barge_in(base: str) -> None:
     await learner.events.wait("interrupted", 5)
     check("barge-in: speech over NPC audio → interrupted", True)
     after = learner.events.types().index("interrupted") + 1
+    await learner.events.wait("done", 5, after=after)
     check("barge-in: interrupted is followed by done{interrupted}", learner.events.items[after][1] == {
         "type": "done", "interrupted": True, "turnId": learner.events.items[after][1].get("turnId")})
     await learner.events.wait("metrics", 15, after=after)
@@ -250,6 +251,28 @@ async def scenario_config_by_reference(base: str) -> None:
     await rtc.close()
     async with aiohttp.ClientSession() as http:
         await http.delete(f"{base}/__aigw/rt/session/{rtc.session_id}")
+
+
+async def scenario_app_hooks(base: str) -> None:
+    rules = [{"tag": "bread", "action": "say", "contains": ["pão francês"], "text": "Você pode pedir de novo.", "voice": "br-m-08"}]
+    for transport in ("ws", "webrtc"):
+        token = mint({**DEFAULT_CFG, "intercepts": rules if transport == "ws" else []})
+        learner = await (WsLearner(base) if transport == "ws" else RtcLearner(base)).connect(token)
+        await learner.events.wait("ready", 15)
+        (learner if transport == "ws" else learner.mic).say(1.2)
+        done = await learner.events.wait("done", 15)
+        served = {"stt": "fake-stt", "llm": "fake-llm", "tts": "fake-tts", "voice": "br-m-08", "opener": False, "transport": transport}
+        check(f"app hooks ({transport}): done carries what served each stage, from the replica's /health (through the worker too)",
+              done.get("served") == served, done)
+        if transport == "ws":
+            types = learner.events.types()
+            check("app hooks (ws): an intercepted turn voices the app's line and never reaches the LLM",
+                  done.get("intercepted") is True and done.get("tag") == "bread" and "reply" not in types and learner.audio_bytes > 0
+                  and [t for t in types if t in ("intercept", "say", "audio_start")] == ["intercept", "say", "audio_start"], types)
+        await learner.close()
+        if transport == "webrtc":
+            async with aiohttp.ClientSession() as http:
+                await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
 
 
 async def scenario_capacity(base: str) -> None:
@@ -616,7 +639,7 @@ async def main() -> int:
         await wait_ready(base)
         await wait_ready(base_s2s)
         await wait_ready(base_vast)
-        for scenario in (scenario_tokens, scenario_config_by_reference, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
+        for scenario in (scenario_tokens, scenario_config_by_reference, scenario_app_hooks, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
                          scenario_capacity, scenario_webrtc):
             await scenario(base)
         await scenario_reoffer(base)

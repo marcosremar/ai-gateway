@@ -75,6 +75,7 @@ export function createRealtime(opts: CreateRealtimeOptions) {
   return {
     service,
     route: { method: 'POST', path: '/v1/realtime/sessions', handler: service.createSession },
+    updateRoute: { method: 'POST', path: '/v1/realtime/updates', handler: service.signUpdate },
     mount,
     relay,
     stop: () => service.stop(),

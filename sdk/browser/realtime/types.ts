@@ -19,6 +19,15 @@ export interface ChatMessage {
  * who answers the turn (`deployment:<name>` = the GPU, `composite` = the fallback) and why not the GPU (`saturated`,
  * `cold`, `circuit_open`, `slow`, …); a turn on webrtc / ws is always served by the session's GPU replica.
  */
+export interface TurnServed {
+  stt: string | null;
+  llm: string | null;
+  tts: string | null;
+  voice: string | null;
+  opener: boolean;
+  transport: string;
+}
+
 export type RealtimeServerEvent =
   | { type: 'ready' }
   | { type: 'route'; provider: string; fallback?: string }
@@ -32,7 +41,13 @@ export type RealtimeServerEvent =
   | { type: 'opener'; state: 'start' | 'end'; text?: string; index?: number; audio_ms?: number | null; local?: boolean }
   | { type: 'deadline_missed'; deadline_ms: number }
   | { type: 'interrupted' }
-  | { type: 'done'; empty?: boolean; filtered?: boolean; error?: boolean; interrupted?: boolean }
+  | { type: 'intercept'; tag: string; action: 'drop' | 'say'; turnId?: string }
+  | { type: 'say'; text: string; tag?: string | null; turnId?: string }
+  | { type: 'config_applied'; n: number }
+  | {
+    type: 'done'; empty?: boolean; filtered?: boolean; error?: boolean; interrupted?: boolean; intercepted?: boolean; said?: boolean;
+    tag?: string | null; turnId?: string; served?: TurnServed;
+  }
   | { type: 'error'; code: string; message: string; unspoken?: string }
   | {
     type: 'metrics'; ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
@@ -53,6 +68,7 @@ export type ClientMessage =
   | { type: 'interrupt' }
   | { type: 'end_turn' }
   | { type: 'config_update'; messages?: ChatMessage[]; opener?: unknown }
+  | { type: 'config_update'; signed: string }
   | { type: 'ping' };
 
 export interface IceServerInit {
@@ -153,7 +169,7 @@ export interface RealtimeMetrics {
   lastTurn: {
     ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
     first_sound_ms?: number | null; opener?: string | null; deadline_missed?: boolean;
-    learner_first_sound_ms?: number | null; network_delay_ms?: number | null;
+    learner_first_sound_ms?: number | null; network_delay_ms?: number | null; served?: TurnServed | null;
   } | null;
 }
 

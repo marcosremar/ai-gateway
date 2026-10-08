@@ -181,6 +181,28 @@ describe('createRealtimeSession', () => {
     s.close();
   });
 
+  it('an intercepted turn leaves the replayed history; served ids land in metrics; applyUpdate hands the signed update to the edge', async () => {
+    const f = fakes({ webrtc: 'ok' });
+    const { s, events } = session(f);
+    await s.connect();
+    const rtc = f.ctxs.webrtc!;
+    const served = { stt: 'large-v3', llm: 'qwen', tts: 'qwen-tts', voice: 'lia', opener: false, transport: 'webrtc' };
+    rtc.emit({ type: 'transcript', text: 'Bom dia', final: true });
+    rtc.emit({ type: 'reply', text: 'Olá!' });
+    rtc.emit({ type: 'metrics', ttfa_ms: 400 });
+    rtc.emit({ type: 'done', turnId: 'rt:1', served });
+    expect(s.metrics.lastTurn).toMatchObject({ ttfa_ms: 400, served });
+    rtc.emit({ type: 'transcript', text: 'Pode repetir?', final: true });
+    rtc.emit({ type: 'intercept', tag: 'repeat', action: 'drop', turnId: 'rt:2' });
+    rtc.emit({ type: 'done', intercepted: true, tag: 'repeat', turnId: 'rt:2' });
+    expect(s.history).toEqual([{ role: 'user', content: 'Bom dia' }, { role: 'assistant', content: 'Olá!' }]);
+    expect(events).toContainEqual({ type: 'intercept', tag: 'repeat', action: 'drop', turnId: 'rt:2' });
+    s.applyUpdate('h.p.s', [{ role: 'assistant', content: 'Bem-vinda!' }]);
+    expect(f.sent.at(-1)!.msg).toEqual({ type: 'config_update', signed: 'h.p.s' });
+    expect(s.history).toEqual([{ role: 'assistant', content: 'Bem-vinda!' }]);
+    s.close();
+  });
+
   it('updateHistory never sends a system message: the signed session config owns the prompt', async () => {
     const f = fakes({ webrtc: 'ok' });
     const { s } = session(f);

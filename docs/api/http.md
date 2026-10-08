@@ -464,7 +464,7 @@ Auth: app or admin API key. Called by the app's backend, never by the browser.
 
 | Field | Type | |
 |---|---|---|
-| `config` | object | the `/v1/s2s` session config (`system`, `messages`, `voice`, `language`, `models`, `max_tokens`, …, `deployment`; default `S2S_DEPLOYMENT`) |
+| `config` | object | the `/v1/s2s` session config (`system`, `messages`, `voice`, `language`, `models`, `max_tokens`, …, `deployment`; default `S2S_DEPLOYMENT`), plus the realtime-only `intercepts` and `reply_guard` ([realtime.md](../realtime.md) § App hooks) |
 | `transports` | string[] | optional ordered preference among `webrtc`, `ws`, `s2s-stream`, `post` (must include `webrtc` or `ws`) |
 | `prefer` | string | optional: moved first |
 
@@ -473,7 +473,7 @@ Headers: `traceparent` (optional, W3C), `X-Gateway-No-Wake: 1` (a cold deploymen
 | Status | Meaning |
 |---|---|
 | 200 | `{sessionId, token, cfg?, expiresAt, deployment, traceId, telemetryUrl, transports[], iceServers[], limits}` |
-| 400 | bad body, unknown transport |
+| 400 | bad body, unknown transport, malformed `intercepts` / `reply_guard` |
 | 401 | no / unknown key |
 | 403 | the key's app does not own the deployment (also when it does not exist) |
 | 404 | (admin) deployment not found — with `fallback` |
@@ -482,6 +482,26 @@ Headers: `traceparent` (optional, W3C), `X-Gateway-No-Wake: 1` (a cold deploymen
 | 503 | `cold` (woken unless no-wake) / `saturated` / `unsupported` / `unreachable` / `paused`, with `Retry-After` and `fallback: {transport:"s2s-stream", url:"/v1/s2s"}` |
 
 Every answer carries `X-Aigw-Trace-Id`.
+
+### `POST /v1/realtime/updates`
+
+Auth: the app's API key (server side). Signs a change to a live session of the app for the page to hand to the edge.
+
+| Field | Type | |
+|---|---|---|
+| `token` | string | the session token of `POST /v1/realtime/sessions` |
+| `update` | object | `drop_turn`, `messages` (replaces the history), `system`, `voice`, `fallback_voice`, `user_template`, `max_tokens`, `temperature`, `stt_prompt`, `opener`, `first_audio_deadline_ms`, `intercepts`, `reply_guard`, `say {text, voice?, fallback_voice?, history?, tag?}` — [realtime.md](../realtime.md) § App hooks |
+
+| Status | Meaning |
+|---|---|
+| 200 | `{sessionId, signed, n}`: send `{type:"config_update", signed}` on the session (SDK `applyUpdate`); the edge answers `config_applied{n}` and refuses an older `n` |
+| 400 | bad body, malformed `intercepts` / `say` / `reply_guard` |
+| 401 | no / unknown key, or a token that does not verify (`token_expired` when expired) |
+| 403 | the session is another app's |
+| 410 | `replica_gone` |
+| 413 | `update` over 32768 base64url characters |
+
+No call to the replica and no gateway state: the answer is a signature.
 
 ### Browser routes (session token, not an API key)
 
@@ -495,7 +515,7 @@ Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; `?to
 | `GET /v1/realtime/ws?token=…[&traceparent=…]` | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |
 
 Control messages from the browser (WS text frames, WebRTC data channel): `interrupt`, `end_turn`, `ping` and
-`config_update {messages?, opener?}`. The session config signed in the token is authoritative: a `config_update` with
+`config_update {messages?, opener?}` or `config_update {signed}`. The session config signed in the token is authoritative: a `config_update` with
 any other field (`system`, `voice`, `user_template`, …) or a `system` message is refused whole with
 `{type:"error", code:"forbidden"}` ([realtime.md](../realtime.md) § Events and control messages).
 

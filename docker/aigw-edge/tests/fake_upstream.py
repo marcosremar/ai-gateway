@@ -53,7 +53,7 @@ def tone(seconds: float, rate: int = 24000, freq: float = 180.0) -> bytes:
 
 
 async def health(_r):
-    return web.json_response({"ok": True})
+    return web.json_response({"ok": True, "models": {"stt": "fake-stt", "llm": "fake-llm", "tts": "fake-tts"}})
 
 
 async def voices(_r):
