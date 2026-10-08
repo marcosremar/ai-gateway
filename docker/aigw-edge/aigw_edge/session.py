@@ -497,34 +497,36 @@ class Session:
             sentences.put_nowait(queue)
 
         async def think() -> None:
-            t = time.monotonic()
-            buffer, first, closed = "", True, False
-            async for delta in deltas or self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
-                if metrics["llm_ttft_ms"] is None:
-                    metrics["llm_ttft_ms"] = ms(t)
-                    tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])
-                raw.append(delta)
-                if field is not None:
-                    if closed:
-                        continue
-                    delta, closed = field.push(delta)
-                if delta:
-                    self.emit({"type": "reply_delta", "text": delta})
-                buffer += delta
-                while True:
-                    chunk, buffer = cut(buffer, first, False)
-                    if not chunk:
-                        break
-                    first = False
+            try:
+                t = time.monotonic()
+                buffer, first, closed = "", True, False
+                async for delta in deltas or self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
+                    if metrics["llm_ttft_ms"] is None:
+                        metrics["llm_ttft_ms"] = ms(t)
+                        tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])
+                    raw.append(delta)
+                    if field is not None:
+                        if closed:
+                            continue
+                        delta, closed = field.push(delta)
+                    if delta:
+                        self.emit({"type": "reply_delta", "text": delta})
+                    buffer += delta
+                    while True:
+                        chunk, buffer = cut(buffer, first, False)
+                        if not chunk:
+                            break
+                        first = False
+                        speak(chunk)
+                chunk, _ = cut(buffer, first, True)
+                if chunk:
                     speak(chunk)
-            chunk, _ = cut(buffer, first, True)
-            if chunk:
-                speak(chunk)
-            reply = {"type": "reply", "text": " ".join(spoken)}
-            if field is not None:
-                reply["raw"] = "".join(raw)
-            self.emit(reply)
-            sentences.put_nowait(None)
+                reply = {"type": "reply", "text": " ".join(spoken)}
+                if field is not None:
+                    reply["raw"] = "".join(raw)
+                self.emit(reply)
+            finally:
+                sentences.put_nowait(None)
 
         thinker = asyncio.create_task(think())
         try:

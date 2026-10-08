@@ -16,7 +16,7 @@ from aigw_edge import opener as opener_module  # noqa: E402
 from aigw_edge import session as session_module  # noqa: E402
 from aigw_edge.config import Settings  # noqa: E402
 from aigw_edge.server import Edge  # noqa: E402
-from aigw_edge.upstream import Upstream, silent  # noqa: E402
+from aigw_edge.upstream import Upstream, UpstreamError, silent  # noqa: E402
 import fake_upstream  # noqa: E402
 from fake_upstream import HEARD, LLM_TOKEN_MS, LLM_TTFT_MS, REPLY, STT_MS, TTS_TTFB_MS  # noqa: E402
 
@@ -70,6 +70,7 @@ class FakeUpstream:
         self.llm_messages: list[dict] = []
         self.stt_fails = False
         self.llm_delay = 0.0
+        self.llm_fails_after: int | None = None
         self.spoken: list[str] = []
 
     async def transcribe(self, pcm16, language, prompt, trace_id=None):
@@ -90,6 +91,8 @@ class FakeUpstream:
         try:
             await asyncio.sleep(LLM_TTFT_MS / 1000 + self.llm_delay)
             for i, word in enumerate(REPLY.split(" ")):
+                if i == self.llm_fails_after:
+                    raise UpstreamError("llm", 400, "request exceeds the available context size")
                 if i:
                     await asyncio.sleep(LLM_TOKEN_MS / 1000)
                 yield (" " if i else "") + word
@@ -475,6 +478,25 @@ async def first_audio_deadline() -> None:
     await learner.close()
 
 
+async def llm_failure() -> None:
+    for name, after, settings in (("before the first token", 0, {}), ("before the first token, no speculation", 0, {"speculate_ms": 0}),
+                                  ("after the first sentence", len(REPLY.split(" ")) - 1, {})):
+        up = FakeUpstream()
+        up.llm_fails_after = after
+        learner = Learner(up=up, **settings)
+        mark = len(telemetry_events)
+        learner.say(0.5)
+        try:
+            done = await learner.wait("done", 4)
+        except TimeoutError as error:
+            done = {"hung": str(error)}
+        check(f"llm failure {name}: the turn ends with error and done{{error}} instead of hanging",
+              done.get("error") is True and learner.of("error")[0]["code"] == "upstream", (done, learner.types()))
+        check(f"llm failure {name}: edge.upstream.error says stage llm and the status",
+              [(kw["stage"], kw["status"]) for event, kw in telemetry_events[mark:] if event == "edge.upstream.error"] == [("llm", 400)])
+        await learner.close()
+
+
 async def admission_shedding() -> None:
     session_module.recent_first_audio.clear()
     edge = Edge(Settings(key=b"k" * 32, max_sessions=8, first_audio_deadline_ms=2000, shed_window_s=30))
@@ -604,7 +626,7 @@ async def tts_guard() -> None:
 
 async def main() -> None:
     for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials,
-                     first_audio_deadline, admission_shedding, tts_guard):
+                     first_audio_deadline, admission_shedding, tts_guard, llm_failure):
         await scenario()
     print(json.dumps(results))
 
