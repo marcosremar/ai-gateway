@@ -22,7 +22,9 @@
  *     is released as `expiring` as soon as it has no request in flight (the router already sends new ones elsewhere).
  *   - Scale-down above the idle base waits `scaleDownDelaySeconds` of low load (no flapping on bursts) and never
  *     releases a replica with requests in flight: with `drainBusy` such surplus is returned in `drain` (no new request,
- *     released once empty). Going idle scales down at once.
+ *     released once empty). Going idle scales down at once. A ready replica is never surplus while that would leave
+ *     fewer ready replicas than `desired`: with one ready and one still booting for `desired` 1, nothing goes until
+ *     the boot finishes (simulator 2026-10-07: the only ready replica was released the tick it turned ready).
  *   - `floor` (warm-up schedule / client warm window) and `autoscaleWant` (pressure, `autoscale.ts`) raise `desired`.
  *   - `autoscaleOnly` (a spec with a `scaling` block): load no longer sizes the count, `autoscaleWant` alone does;
  *     `hold` (`scaling.hold`) fixes `desired` at that count, whatever the load, floors and activity.
@@ -205,8 +207,9 @@ export function planReplicas(input: PlanInput): Plan {
   const keepBooting = input.lastRequestAt != null && !spec.paused && !pinnedIdleOver(input);
   // Idle surplus goes at once; surplus with requests in flight is drained (only when `drainBusy`: the controller then
   // stops routing to it and releases it once empty), so a steady trickle can no longer pin a scaled-out replica.
+  let readySpare = readyLive - desired;
   const surplus = [...live].filter(r => (input.drainBusy || r.inflight === 0) && !(keepBooting && replicaPhase(r) === 'booting'))
-    .sort(removalOrder).slice(0, live.length - desired);
+    .sort(removalOrder).slice(0, live.length - desired).filter(r => replicaPhase(r) !== 'ready' || readySpare-- > 0);
   const drain: string[] = [];
   for (const r of surplus) {
     if (r.inflight === 0) release.push({ id: r.machine.id, reason: 'scale-down' });
