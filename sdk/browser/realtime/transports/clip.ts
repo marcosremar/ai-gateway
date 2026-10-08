@@ -30,6 +30,8 @@ export interface PostTurnResult {
 
 export type PostTurn = (wav: Blob, ctx: { config: Record<string, unknown>; messages: ChatMessage[]; traceparent: string; signal: AbortSignal }) => Promise<PostTurnResult>;
 
+const MAX_SPECULATIONS_PER_TURN = 2;
+
 type PlayerFactory = (opts: { rate: number }) => Promise<PcmPlayer>;
 
 /** Maps one s2s event onto the realtime vocabulary (null = nothing to show). */
@@ -127,18 +129,49 @@ abstract class ClipTransport implements RealtimeTransport {
 class S2SStreamTransport extends ClipTransport {
   readonly type = 's2s-stream' as const;
 
+  private composed = false;
+  private turnKey = crypto.randomUUID();
+  private asked = 0;
+  private speculation: string | null = null;
+
   constructor(ctx: TransportContext, private readonly endpoint: S2SEndpoint, makePlayer: PlayerFactory) { super(ctx, makePlayer); }
 
-  async sendTurn(wav: Blob): Promise<void> {
-    const signal = this.begin();
+  private post(config: Record<string, unknown>, wav?: Blob, signal?: AbortSignal): Promise<Response> {
     const form = new FormData();
-    form.set('file', wav, 'turn.wav');
-    form.set('config', JSON.stringify(this.ctx.config()));
+    if (wav) form.set('file', wav, 'turn.wav');
+    form.set('config', JSON.stringify(config));
     const format = this.endpoint.format ?? 'binary';
     const url = format === 'ndjson' ? `${this.endpoint.url}${this.endpoint.url.includes('?') ? '&' : '?'}format=ndjson` : this.endpoint.url;
     const headers = new Headers(this.endpoint.init?.headers);
     headers.set('traceparent', this.ctx.traceparent);
-    const res = await this.ctx.fetchImpl(url, { ...this.endpoint.init, method: 'POST', body: form, headers, signal });
+    return this.ctx.fetchImpl(url, { ...this.endpoint.init, method: 'POST', body: form, headers, ...(signal ? { signal } : {}) });
+  }
+
+  speculate(wav: Blob): void {
+    if (!this.composed || this.asked >= MAX_SPECULATIONS_PER_TURN) return;
+    this.cancelSpeculation();
+    const id = `${this.turnKey}.${this.asked++}`;
+    this.speculation = id;
+    this.ctx.telemetry.emit('rt.s2s.speculate', { attrs: { n: this.asked } });
+    void this.post({ ...this.ctx.config(), speculation: { id, turn: this.turnKey, action: 'start' } }, wav).catch(() => {});
+  }
+
+  cancelSpeculation(): void {
+    const id = this.speculation;
+    if (!id) return;
+    this.speculation = null;
+    this.ctx.telemetry.emit('rt.s2s.speculate_cancel', {});
+    void this.post({ speculation: { id, action: 'cancel' } }).catch(() => {});
+  }
+
+  async sendTurn(wav: Blob): Promise<void> {
+    const signal = this.begin();
+    const format = this.endpoint.format ?? 'binary';
+    const speculation = this.speculation;
+    this.speculation = null;
+    this.turnKey = crypto.randomUUID();
+    this.asked = 0;
+    const res = await this.post({ ...this.ctx.config(), ...(speculation ? { speculation: { id: speculation } } : {}) }, wav, signal);
     if (!res.ok || !res.body) throw new Error(`s2s answered HTTP ${res.status}`);
     let rate = 24_000;
     let encoded: string | null = null; // a non-PCM audio_format: chunks are a container, decoded per sentence
@@ -163,6 +196,7 @@ class S2SStreamTransport extends ClipTransport {
         if (typeof e.sample_rate === 'number') rate = e.sample_rate;
         return;
       }
+      if (e.type === 'route') this.composed = e.provider === 'composite';
       if (e.type === 'sentence') end.sentence = String(e.text ?? '');
       if (e.type === 'sentence_failed') end.skipped.push(String(e.text ?? ''));
       if (e.type === 'error') end.error = true;

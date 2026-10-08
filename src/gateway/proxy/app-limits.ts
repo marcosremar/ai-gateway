@@ -136,7 +136,7 @@ export class AppLimits {
    * and its composed-fallback stages are not charged again (`check(..., { charge: false })`).
    */
   checkS2S(userId: string, config: { max_tokens?: unknown; system?: unknown; messages?: unknown; user_template?: unknown;
-    models?: { stt?: unknown; chat?: unknown; tts?: unknown } }): AppLimitDenial | null {
+    models?: { stt?: unknown; chat?: unknown; tts?: unknown } }, charge = true): AppLimitDenial | null {
     if (this.opts.isAdmin(userId)) return null;
     for (const stage of ['stt', 'chat', 'tts'] as const) {
       const model = config.models?.[stage];
@@ -151,7 +151,7 @@ export class AppLimits {
     }
     config.max_tokens = this.clampMaxTokens(config.max_tokens);
     const prompt = JSON.stringify([config.system ?? '', config.messages ?? '', config.user_template ?? '']);
-    return this.charge(userId, estimateTokens(prompt) + (config.max_tokens as number));
+    return charge ? this.charge(userId, estimateTokens(prompt) + (config.max_tokens as number)) : null;
   }
 
   private clampMaxTokens(asked: unknown): number {

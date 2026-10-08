@@ -13,7 +13,7 @@
  * gateway key: the session comes from the app's own backend (`sessionEndpoint`), the audio routes are authenticated by
  * the session token.
  */
-import { turnEndAfterVadEndMs, type VoiceActivityTuning, type VoiceFrameClassifier } from '../voice/voice-activity';
+import { turnEndAfterVadEndMs, VOICE_ACTIVITY_TUNING, VOICE_FRAME_MS, type VoiceActivityTuning, type VoiceFrameClassifier } from '../voice/voice-activity';
 import { startSileroListener, type SileroListener } from '../voice/silero-listener';
 import { createTurnTaking } from '../voice/turn-taking';
 import { clipToWav, createTurnClip } from '../voice/turn-clip';
@@ -39,6 +39,7 @@ export interface RealtimeVoiceOptions {
   maxSpeechMs: number;
   echoTailMs: number;
   tuning?: VoiceActivityTuning;
+  speculatePauseMs?: number;
 }
 
 export type SpeakText = (text: string, ctx: { config: Record<string, unknown>; traceparent: string; signal: AbortSignal }) => Promise<Blob | ArrayBuffer>;
@@ -623,10 +624,13 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const stream = await ctx.mic();
     const audio = new AudioContext();
     const track = stream.getAudioTracks()[0];
+    const pauseFrames = Math.round((v.speculatePauseMs ?? 0) / VOICE_FRAME_MS);
+    const tuning = pauseFrames ? { ...(v.tuning ?? VOICE_ACTIVITY_TUNING), pauseFrames } : v.tuning;
     const turns = track ? createTurnTaking({
       clip: createTurnClip(), track: () => track, toWav: (clip) => clipToWav(clip, audio),
       endSilenceMs: v.endSilenceMs, maxSpeechMs: v.maxSpeechMs, echoTailMs: v.echoTailMs, tuning: v.tuning,
       onVoice: () => {}, onTurn: (wav) => { void session.sendTurn(wav); },
+      ...(pauseFrames ? { onSpeculate: (wav: Blob) => current?.speculate?.(wav), onSpeculateCancel: () => current?.cancelSpeculation?.() } : {}),
     }) : null;
     turns?.setListening(true);
     bridge = createVoiceBridge({
@@ -641,7 +645,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const listener: SileroListener = await startSileroListener(await v.classifier(), (e) => {
       if (e.kind === 'vadStart') clearTimeout(deadlineTimer);
       bridge?.onEffect(e);
-    }, v.tuning);
+    }, tuning);
     listener.connect(stream);
     voiceStop = () => { listener.stop(); turns?.drop(); void audio.close().catch(() => {}); };
   }

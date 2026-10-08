@@ -46,6 +46,7 @@ export interface S2SConfig {
   first_audio_deadline_ms?: number;
   endpoint_ms?: number;
   opener?: { lines?: string[] };
+  speculation?: { id: string; turn?: string; action?: 'start' | 'cancel' };
 }
 
 export const TRANSCRIPT_SLOT = '{{transcript}}';
@@ -91,6 +92,48 @@ export interface CompositeOptions {
   deadlineMs?: number;
   marginMs?: number;
   skipDeadline?: boolean;
+  speculation?: Speculated;
+}
+
+export type Heard = StageAnswer & { text: string };
+export type Chat = StageAnswer & { deltas: AsyncIterable<string> };
+
+export interface Speculated {
+  same: boolean;
+  text: string | null;
+  sttMs: number | null;
+  leadMs: number;
+  heard: Promise<Heard>;
+  chat: Promise<Chat | null>;
+  cancel(reason: string): void;
+}
+
+export const sameWords = (a: string, b: string): boolean => {
+  const words = (t: string) => t.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  return words(a) === words(b);
+};
+
+export function hear(stages: StageClient, audio: Uint8Array, contentType: string, config: S2SConfig, signal: AbortSignal, hedgeMs?: number): Promise<Heard> {
+  const sttHedgeMs = Math.min(hedgeMs ?? Infinity, positive(Number(process.env.S2S_STT_HEDGE_MS)) ?? STT_HEDGE_MS);
+  const sttBudgetMs = positive(Number(process.env.S2S_STT_BUDGET_MS)) ?? STT_BUDGET_MS;
+  return stages.transcribe(audio, contentType, config, signal, sttHedgeMs, sttBudgetMs);
+}
+
+export function askLlm(stages: StageClient, config: S2SConfig, transcript: string, signal: AbortSignal, hedgeMs: () => number | undefined = () => undefined): Promise<Chat> {
+  const user = userTurn(config, transcript);
+  const ctx = positive(Number(process.env.S2S_CHAT_CONTEXT)) ?? DEFAULT_SLOT_CTX;
+  const fitted = (harder: boolean) => fitHistory(config.system, config.messages ?? [], user, config.max_tokens ?? 160, ctx, harder);
+  const ask = (history: ChatMessage[]) => stages.chatStream([
+    ...(config.system ? [{ role: 'system', content: config.system }] : []),
+    ...history,
+    { role: 'user', content: user },
+  ], config, signal, hedgeMs());
+  const history = fitted(false);
+  return ask(history).catch((err: unknown) => {
+    const fewer = fitted(true);
+    if (!CONTEXT_OVERFLOW.test(String((err as Error)?.message)) || fewer.length === history.length) throw err;
+    return ask(fewer);
+  });
 }
 
 export interface CompositeResult { transcript: string; reply: string; replyRaw: string; firstAudioMs: number | null; missingAudio: number }
@@ -136,6 +179,7 @@ export const MAX_FIRST_AUDIO_DEADLINE_MS = 2_500;
 export const STAGE_HEDGE_MIN_MS = 1_000;
 export const STT_HEDGE_MS = 900;
 export const STT_BUDGET_MS = 3_000;
+const SPENT_STAGE_MS = 1_000;
 const MAX_OPENER_LINES = 8;
 const MAX_OPENERS = 256;
 const OPENER_SYNTH_MS = 15_000;
@@ -250,13 +294,25 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
   let transcript = opts.transcript?.text ?? '';
   let sttProvider: string | null = null;
   let voiced: SpokenAudio | null = null;
+  let chat: Chat | null = null;
+  let speculation: string | null = null;
   if (!opts.transcript) {
-    const sttHedgeMs = Math.min(hedgeMs() ?? Infinity, positive(Number(process.env.S2S_STT_HEDGE_MS)) ?? STT_HEDGE_MS);
-    const sttBudgetMs = positive(Number(process.env.S2S_STT_BUDGET_MS)) ?? STT_BUDGET_MS;
-    const heard = await stages.transcribe(opts.audio, opts.contentType, config, signal, sttHedgeMs, sttBudgetMs);
+    const spec = opts.speculation;
+    if (spec) signal.addEventListener('abort', () => spec.cancel('aborted'), { once: true });
+    const early = spec?.same ? await spec.heard.catch((err: Error & { spentMs?: number }) => {
+      if ((err.spentMs ?? 0) > SPENT_STAGE_MS) throw err;
+      return null;
+    }) : null;
+    const heard = early ?? await hear(stages, opts.audio, opts.contentType, config, signal, hedgeMs());
     transcript = heard.text.trim();
     sttProvider = heard.provider;
-    opts.emitEvent({ type: 'transcript', text: transcript, stt_ms: ms(), at_ms: ms(), provider: heard.provider, fallback: heard.fallback });
+    opts.emitEvent({
+      type: 'transcript', text: transcript, stt_ms: early ? spec!.sttMs : ms(), at_ms: ms(), provider: heard.provider, fallback: heard.fallback,
+      ...(spec ? { speculative: Boolean(early), lead_ms: spec.leadMs } : {}),
+    });
+    if (spec && transcript && spec.text !== null && sameWords(spec.text, transcript)) chat = await spec.chat.catch(() => null);
+    if (spec) speculation = early ? (chat ? 'hit' : 'stt') : chat ? 'llm' : 'miss';
+    if (spec && !chat) spec.cancel(early ? 'llm_failed' : 'mismatch');
     if (heard.filtered?.length) opts.emitEvent({ type: 'filtered', stage: 'stt', reasons: heard.filtered });
   }
   if (!transcript) {
@@ -264,20 +320,7 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
     return { transcript: '', reply: '', replyRaw: '', firstAudioMs: null, missingAudio: 0 };
   }
 
-  const user = userTurn(config, transcript);
-  const ctx = positive(Number(process.env.S2S_CHAT_CONTEXT)) ?? DEFAULT_SLOT_CTX;
-  const fitted = (harder: boolean) => fitHistory(config.system, config.messages ?? [], user, config.max_tokens ?? 160, ctx, harder);
-  const ask = (history: ChatMessage[]) => stages.chatStream([
-    ...(config.system ? [{ role: 'system', content: config.system }] : []),
-    ...history,
-    { role: 'user', content: user },
-  ], config, signal, hedgeMs());
-  const history = fitted(false);
-  const chat = await ask(history).catch((err: unknown) => {
-    const fewer = fitted(true);
-    if (!CONTEXT_OVERFLOW.test(String((err as Error)?.message)) || fewer.length === history.length) throw err;
-    return ask(fewer);
-  });
+  const answer = chat ?? await askLlm(stages, config, transcript, signal, hedgeMs);
 
   // Sentences in speaking order; each one's audio is synthesized as soon as a slot is free (ttsParallel ahead).
   type Spoken = { text: string; cutAt: number; audio: Promise<SpokenAudio | Error> };
@@ -317,11 +360,11 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
     let firstToken = true;
     const say = (texts: string[]) => { for (const text of texts) { reply.push(text); queue.push(speakLater(text)); notify(); } };
     try {
-      for await (const delta of chat.deltas) {
+      for await (const delta of answer.deltas) {
         raw += delta;
         if (firstToken) {
           firstToken = false;
-          opts.emitEvent({ type: 'llm_first_token', at_ms: ms(), provider: chat.provider, fallback: chat.fallback });
+          opts.emitEvent({ type: 'llm_first_token', at_ms: ms(), provider: answer.provider, fallback: answer.fallback });
         }
         if (!field) { say(cutter.push(delta)); continue; }
         if (fieldClosed) continue;
@@ -393,11 +436,12 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
   if (thinkError) opts.emitEvent({ type: 'error', stage: 'llm', message: (thinkError as Error).message.slice(0, 300), partial: true, at_ms: ms() });
   opts.emitEvent({
     type: 'done', reply: reply.join(' '), transcript, first_audio_ms: firstAudio, total_ms: ms(), ...report,
+    ...(speculation ? { speculation } : {}),
     ...(config.speak_field ? { reply_raw: raw } : {}),
     ...(missingAudio ? { missing_audio: missingAudio } : {}),
     sentences: index, spoken: index - missingAudio, skipped: missingAudio, audio_ms: Math.round(audioMs),
     served: {
-      stt: sttProvider, llm: chat.provider, tts: voiced?.provider ?? null, voice: voiced && !voiced.fallback ? config.voice ?? null : null,
+      stt: sttProvider, llm: answer.provider, tts: voiced?.provider ?? null, voice: voiced && !voiced.fallback ? config.voice ?? null : null,
       opener: report.opener !== null, transport: 's2s',
     },
   });

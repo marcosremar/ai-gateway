@@ -20,6 +20,8 @@
  *                     --tts-model or RT_CONFIG.models.tts), so the SDK enforces the first-sound deadline on the learner clock
  *   --s2s 0           how many of them post each turn to /v1/s2s instead (no session; the clock starts at the request
  *                     minus --clip-end-silence, the endpointing a page adds)   --no-wake   they send X-Gateway-No-Wake: 1
+ *   --speculate-lead 0  s2s clients: ms before the turn at which the clip is posted speculatively (0 = off)
+ *   --speculate-resume 0  share of those turns (0..1) with an earlier pause whose speculation is cancelled
  *   --ramp 30         seconds over which students arrive    --duration 180   seconds each student talks
  *   --turn-every 15   seconds between turns                 --jitter 5       ± seconds
  *   --think 2-6       ws / webrtc students: instead of --turn-every, listen to the reply in real time, then wait a
@@ -188,10 +190,14 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
     },
     stageMs: {
       stt: finite(posted.map(j => first(j, 'transcript', 'stt_ms'))),
-      llmFirstToken: finite(posted.map(j => first(j, 'llm_first_token', 'at_ms') - first(j, 'transcript', 'stt_ms'))),
+      transcriptAt: finite(posted.map(j => first(j, 'transcript', 'at_ms'))),
+      llmFirstToken: finite(posted.map(j => first(j, 'llm_first_token', 'at_ms') - first(j, 'transcript', 'at_ms'))),
+      firstCut: finite(posted.map(j => first(j, 'sentence', 'cut_at_ms') - first(j, 'llm_first_token', 'at_ms'))),
+      speculationLead: finite(posted.map(j => first(j, 'transcript', 'lead_ms'))),
       ttsFirstByte: finite(posted.map(j => first(j, 'first_audio', 'at_ms') - first(j, 'sentence', 'cut_at_ms'))),
       total: finite(posted.map(j => first(j, 'done', 'total_ms'))),
     },
+    speculation: { sent: evs('speculate').length, cancelled: evs('speculate_cancel').length, ...count(evs('done').map(e => String(e.speculation ?? 'none'))) },
     servedBy: { route: served('route'), stt: served('transcript'), llm: served('llm_first_token'), ttsFirst: served('first_audio'), ttsAny: count(evs('audio_format').map(e => String(e.provider))) },
     errors: count([...evs('error'), ...evs('sentence_failed')].map(e => `${e.type}:${String(e.code ?? 'unknown')}`)),
     refused: count(posted.filter(j => j.t.skipped).map(j => String(j.t.skipped))),
@@ -271,6 +277,7 @@ function summary(r: ReturnType<typeof buildReport>): string {
       d('first frame', r.s2s.fromRequestMs.firstFrame), d('first loud', r.s2s.fromRequestMs.firstLoud),
       ...Object.entries(r.s2s.stageMs).map(([k, x]) => `  ${k.padEnd(14)} n=${x.n} p50 ${x.p50} p90 ${x.p90} p95 ${x.p95} p99 ${x.p99} max ${x.max}`),
       ...Object.entries(r.s2s.servedBy).map(([k, m]) => `  ${k.padEnd(14)} ${kv(m)}`),
+      `  speculation: ${kv(r.s2s.speculation)}`,
       `  errors: ${kv(r.s2s.errors)}; refused: ${kv(r.s2s.refused)}; usage: ${kv(r.s2s.usage)}`,
     ] : []),
     ...(Object.keys(r.audible).length ? ['audible in Chrome, ms from the reference to the first loud 20 ms at the page output (received = audio_start event):'] : []),
@@ -341,7 +348,7 @@ try {
     gw, key, deployment: DEP, config, students: N, rtc: RTC, s2s: S2S, noWake: argv.includes('--no-wake'), chrome: CHROME,
     chromeTransports: (opt('chrome-transports') ?? 'webrtc,ws,s2s-stream').split(','), clipEndSilenceMs: num('clip-end-silence', 700), rtcProcs: num('rtc-procs', Math.ceil(RTC / 8)),
     rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), burst: argv.includes('--burst'), think: parseThink(opt('think')), clipS: num('clip-s', 1.4),
-    uplinkStallMs: num('uplink-stall', 0), uplinkStallEvery: num('uplink-stall-every', 3), clientDeadline: argv.includes('--client-deadline'),
+    uplinkStallMs: num('uplink-stall', 0), uplinkStallEvery: num('uplink-stall-every', 3), clientDeadline: argv.includes('--client-deadline'), speculateLeadMs: num('speculate-lead', 0), speculateResume: num('speculate-resume', 0),
     ttsModel: opt('tts-model') ?? (config.models as { tts?: string } | undefined)?.tts,
     clip: opt('clip') ?? null, turnTimeoutS: num('turn-timeout', 30), turn: (opt('turn') ?? (PROFILE === 'udp-blocked' ? 'tcp' : 'udp')) as 'udp' | 'tcp',
     python: process.env.EDGE_PYTHON || 'python3', chromePath: process.env.CHROME_PATH || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',

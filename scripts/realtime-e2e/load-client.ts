@@ -11,7 +11,7 @@ import { FrameDecoder } from '../../src/s2s/frames';
 export interface ClientConfig {
   gw: string; key: string; deployment: string; config: Record<string, unknown>;
   students: number; rtc: number; s2s: number; noWake?: boolean; chrome: number; chromeTransports: string[]; clipEndSilenceMs: number; rtcProcs: number;
-  uplinkStallMs?: number; uplinkStallEvery?: number; clientDeadline?: boolean; ttsModel?: string;
+  uplinkStallMs?: number; uplinkStallEvery?: number; clientDeadline?: boolean; ttsModel?: string; speculateLeadMs?: number; speculateResume?: number;
   rampS: number; durationS: number; turnEveryS: number; jitterS: number; burst?: boolean; think?: [number, number] | null; clipS: number; clip: string | null; turnTimeoutS: number;
   turn: 'udp' | 'tcp'; python: string; chromePath: string; work: string; out: string;
 }
@@ -186,19 +186,40 @@ async function postTurn(s: Session): Promise<void> {
   const t = s.turn!;
   const pcm = clip.slice();
   for (let i = 0; i < 16; i++) pcm[i] = Math.floor(Math.random() * 8);
-  const form = new FormData();
-  form.set('file', new Blob([new Uint8Array(wav(pcm, 16000))], { type: 'audio/wav' }), 'turn.wav');
-  form.set('config', JSON.stringify({ ...cfg.config, deployment: cfg.deployment, endpoint_ms: cfg.clipEndSilenceMs }));
+  const post = (audio: Int16Array | null, config: Record<string, unknown>, timeoutMs = cfg.turnTimeoutS * 1000) => {
+    const form = new FormData();
+    if (audio) form.set('file', new Blob([new Uint8Array(wav(audio, 16000))], { type: 'audio/wav' }), 'turn.wav');
+    form.set('config', JSON.stringify({ ...cfg.config, deployment: cfg.deployment, endpoint_ms: cfg.clipEndSilenceMs, ...config }));
+    return fetch(`${cfg.gw}/v1/s2s`, {
+      method: 'POST', headers: { Authorization: `Bearer ${cfg.key}`, ...(cfg.noWake ? { 'X-Gateway-No-Wake': '1' } : {}) },
+      body: form, signal: AbortSignal.timeout(timeoutMs),
+    });
+  };
+  let speculation: { id: string } | null = null;
+  if (cfg.speculateLeadMs) {
+    const turn = crypto.randomUUID();
+    const speculate = (audio: Int16Array, n: number) => {
+      t.events.push({ type: 'speculate', at: now() });
+      void post(audio, { speculation: { id: `${turn}.${n}`, turn, action: 'start' } }, 10_000).then(r => r.text()).catch(() => {});
+    };
+    if (Math.random() < (cfg.speculateResume ?? 0)) {
+      speculate(pcm.subarray(0, pcm.length >> 1), 0);
+      await sleep(cfg.speculateLeadMs / 2);
+      t.events.push({ type: 'speculate_cancel', at: now() });
+      void post(null, { speculation: { id: `${turn}.0`, action: 'cancel' } }, 10_000).then(r => r.text()).catch(() => {});
+      await sleep(500);
+    }
+    speculate(pcm, 1);
+    speculation = { id: `${turn}.1` };
+    await sleep(cfg.speculateLeadMs);
+  }
   t.speechEnd = now() - cfg.clipEndSilenceMs;
   let rate = 24000;
   let done = false;
   let encoded = false;
   const packets: Array<{ at: number; bytes: Uint8Array }> = [];
   try {
-    const r = await fetch(`${cfg.gw}/v1/s2s`, {
-      method: 'POST', headers: { Authorization: `Bearer ${cfg.key}`, ...(cfg.noWake ? { 'X-Gateway-No-Wake': '1' } : {}) },
-      body: form, signal: AbortSignal.timeout(cfg.turnTimeoutS * 1000),
-    });
+    const r = await post(pcm, speculation ? { speculation } : {});
     if (!r.ok || !r.body) {
       const stage = /(stt|llm|tts) HTTP (\d+)/.exec(await r.text().catch(() => ''));
       t.skipped = `http_${r.status}:${stage ? `${stage[1]}_${stage[2]}` : 'gateway'}`;

@@ -190,6 +190,8 @@ export interface RealtimeTransport {
   send(message: ClientMessage): void;
   /** Clip-based rungs: one learner turn (16 kHz WAV). */
   sendTurn?(wav: Blob): Promise<void>;
+  speculate?(wav: Blob): void;
+  cancelSpeculation?(): void;
   goLive?(): void;
   playOpener?(samples: Float32Array, rate: number): void;
   uplinkBacklog?(): number;

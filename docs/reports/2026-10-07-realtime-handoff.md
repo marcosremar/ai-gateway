@@ -1741,3 +1741,164 @@ imagem 1317 no L40S, edge `f66b6b80`, 4 alunos, sessão longa, transbordo com a 
 4. `LLM_SLOT_CTX=4096` fica fora do `parle-speech` declarado até haver a leitura de VRAM (funcionou; a margem é
    estimativa).
 5. Não mexer no teto de 4 sessões por L40S no deploy. 8 é a proposta para a próxima medição, com tempos reais da turma.
+
+## Fallback em streaming (2026-10-08 evening, `rt/fallback-streaming`)
+
+Goal: overlap the stages of the composed fallback (STT → LLM → TTS over OpenRouter) and say how close it gets to the
+2500 ms ceiling. No machine, no GPU, production untouched: two local gateways (base `72552d6` on 4161, this branch on
+4162, `DEPLOYMENTS_ENABLED=0`, `--no-wake`) against the real OpenRouter, stopped at the end; $0.83 on the key's counter
+for the whole session (the key is shared).
+
+### Research (web and live probes, 2026-10-08)
+
+| Question | Answer | Source |
+|---|---|---|
+| OpenRouter STT: streaming or partials? | No. `POST /api/v1/audio/transcriptions` answers one JSON; no `stream`, SSE or WebSocket is documented, for any model (`deepgram/nova-3`, the Whispers, `nvidia/nemotron-3.5-asr-streaming…` included: the model streams, the endpoint does not) | openrouter.ai/docs/guides/overview/multimodal/stt · openrouter.ai/blog/tutorials/transcription-on-openrouter (22 Jul 2026, updated 24 Sep 2026) |
+| Mistral streaming STT | Yes: `voxtral-mini-transcribe-realtime-2602` on `wss://api.mistral.ai/v1/audio/transcriptions/realtime`, `pcm_s16le` 16 kHz, Portuguese among its 13 languages, $0.006/min, delay configurable (480 ms recommended). Reachable with `MISTRAL_API_KEY`; not probed here | docs.mistral.ai/capabilities/audio/speech_to_text/realtime_transcription · mistral.ai/news/voxtral-transcribe-2 (4 Feb 2026) |
+| NVIDIA hosted streaming ASR | Streaming models with pt-BR exist in the NIM support matrix; the hosted protocol (gRPC with a function id), whether the pt-BR profile is hosted, limits and production terms could not be confirmed from a fetched page. The realtime WebSocket is documented for self-hosted NIM only | docs.nvidia.com/nim/speech/latest/reference/support-matrix/asr.html (updated 7 Oct 2026) |
+| OpenRouter TTS: formats, streaming | `response_format` is `mp3` or `pcm` only (a `wav` request is a 400); no `stream` parameter. Probed: `microsoft/mai-voice-2.1-flash` (`pt-BR-Luana:MAI-Voice-2-Flash`) sends the first PCM byte at 580–730 ms whatever the length (one clause or three sentences) and the rest within 120–470 ms; `hexgrad/kokoro-82m` (`pf_dora`) first byte 380–2860 ms, body in one burst | openrouter.ai/docs/guides/overview/multimodal/tts · openrouter.ai/docs/api/api-reference/tts/create-speech · probes |
+| Mistral TTS | `voxtral-mini-tts-2603` streams (SSE, PCM), first chunk 505–570 ms (one at 2.6 s) in the probe, but its 30 preset voices are `en_us`, `en_gb`, `fr_fr`: no Portuguese stock voice (`GET /v1/audio/voices`) | docs.mistral.ai/capabilities/audio/text_to_speech (model released 23 Mar 2026) · probe |
+
+So: no STT with partials through OpenRouter (speculation is the only way on this chain), and no stock Portuguese voice
+with a first chunk at 200–300 ms on any key we have. The MAI voice does stream; the gateway was not using it.
+
+### Which transport gives the gateway the audio before the end of the turn: none
+
+The brief assumed `ws` and `s2s-stream` do. They do not, for the fallback: the `ws` rung is a relay to the edge sidecar
+on a GPU replica (a learner without a seat has no `ws` session: admission answers `503` with
+`fallback: {transport: "s2s-stream"}`), and `s2s-stream` posts one finished clip after the client's endpointing. The
+composed pipeline only ever sees `POST /v1/s2s`. The speculation is therefore driven by the client on that rung.
+
+### What changed
+
+- **Speculative turn** (`src/s2s/speculation.ts`, `route.ts`, `composite.ts`). `POST /v1/s2s` takes
+  `config.speculation`: `{id, turn, action: "start"}` with the clip so far → `202 {"speculative": true}` at once, the
+  gateway transcribes it (same 900 ms hedge and 3 s budget as a turn) and, when the transcript exists, opens the LLM
+  stream on it; nothing is synthesized and the answer carries no audio. `{id, action: "cancel"}` (no file) aborts both.
+  The turn itself names `{id}`: when its clip is the same utterance (WAV, length within `endpoint_ms` + 400 ms of the
+  speculative one) the speculative transcript **is** the turn's transcript — no second STT — and the LLM stream already
+  running is the one voiced. Otherwise the turn is transcribed again and the speculative LLM is kept only if both
+  transcripts have the same words (case and punctuation ignored); else it is aborted and asked again. `transcript`
+  carries `speculative` and `lead_ms`, `done` carries `speculation: hit | stt | llm | miss`.
+- **Bounds**: WAV only (the length must be known), at least 600 ms of audio (`S2S_SPECULATE_MIN_MS`), at most 2 per
+  turn (`S2S_SPECULATE_PER_TURN`, the SDK also stops at 2), 256 alive, 4 s to live (`S2S_SPECULATE_TTL_MS`),
+  `S2S_SPECULATE=0` turns it off. A speculative STT that failed after more than 1 s is not run again by the turn.
+- **Budget**: the speculative request passes the ownership and alias checks without charging the app
+  (`checkS2S(..., charge = false)`); the turn is charged once, as before. Telemetry: `s2s.stt_speculative`,
+  `s2s.stt_speculative_discarded {reason: cancelled | expired | mismatch | primary | superseded}`,
+  `s2s.stt_speculative_refused {reason}`; counters in `speculationCounts`.
+- **A seat on the GPU**: the turn tries the primary first, as always; when it takes the turn the speculation is
+  discarded (`primary`). The SDK only speculates after a turn whose `route` was `composite`.
+- **SDK** (`sdk/browser`): `voice.speculatePauseMs` adds two VAD effects (`vadPause` after that many ms under
+  `vadEnd`, `vadResume` when the voice comes back; absent = no change), the clip recorder gets `snapshot()`
+  (`MediaRecorder.requestData`), turn-taking hands the WAV so far to the s2s-stream rung, which posts the speculation,
+  cancels it on `vadResume` / `vadStart`, and names it in the turn. PR #59's client deadline is untouched.
+- **TTS first chunk**: a WAV asked from OpenRouter used to come back as a whole MP3 (the provider has no WAV and the
+  client fell back to MP3, buffered). It is now asked as PCM and streamed behind a WAV header at the rate the provider
+  names, so the composed turn passes chunks through as they arrive and its `A` frames are `pcm_s16le` 24 kHz like the
+  GPU's. **Behaviour change for any caller of `/v1/audio/speech` that asks `wav` on an OpenRouter link: it now gets a
+  WAV (streamed, sizes `0xFFFFFFFF`, as the deployment already answers) instead of an MP3.** No faster voice was
+  wired: none exists on these keys.
+- Untouched: opener and deadline logic (no double opener: the tests of `first-audio-deadline` pass unchanged), barge-in
+  (the turn's abort also aborts the speculative LLM), history fit (#58: `askLlm` is the same code, moved), the STT
+  hedge and budget of #61 on the final path.
+
+### Measured (same clip, prompt, chains and harness as § Fallback fast; base and branch at the same time)
+
+`load.ts --n 4 --s2s 4 --no-wake --ramp 10 --duration 110 --turn-every 8 --jitter 2`, the 5.0 s Portuguese clip,
+opener on (deadline 2000 ms), STT `deepgram/nova-3` → `openai/whisper-large-v3`, LLM `qwen/qwen3.5-9b` →
+`gemini-2.5-flash-lite`, TTS MAI flash → Kokoro. New harness options: `--speculate-lead <ms>` posts the clip that long
+before the turn (what the page does `endSilenceMs − speculatePauseMs − snapshot time` before it closes the turn: 500
+≈ a 160 ms pause, 350 ≈ Silero's own `vadEnd` at 320 ms), `--speculate-resume <share>` adds an earlier pause whose
+speculation (half the clip) is cancelled. Clock: from the end of the speech (request − 700 ms). The three runs of a
+round ran together, 12 learners on the Mac (load average up to 18: other sessions).
+
+| Round (CEST) | Run | Turns | Failed | Opener p50 / max | Reply first audio p50 / p95 / max | ≤ 2.0 / 2.5 / 3.0 s | Speculation |
+|---|---|---|---|---|---|---|---|
+| 1 (22:36) | base | 53 | 0 | 1703 / 1746 | 3548 / 4723 / 6967 | 0 / 0 / 19 % | — |
+| 1 | branch, no speculation (PCM stream only) | 54 | 0 | 1702 / 1719 | 3345 / 4376 / 6066 | 0 / 6 / 22 % | — |
+| 1 | branch, lead 500 | 51 | 0 | 1703 / 1710 | **2689 / 5179 / 5456** | 2 / 29 / 73 % | 51 sent, 51 hit |
+| 2 (22:39) | base | 51 | 2 | 1702 / 1714 | 4488 / 6514 / 7409 | 0 / 0 / 0 % | — |
+| 2 | branch, lead 350 | 52 | 1 | 1702 / 1713 | 3789 / 4967 / 5833 | 0 / 4 / 18 % | 52 sent, 51 hit |
+| 2 | branch, lead 500, 25 % resumed | 54 | 1 | 1702 / 1705 | 3552 / 5083 / 6297 | 0 / 8 / 17 % | 68 sent, 14 cancelled (21 %), 53 hit |
+| 3 (22:42) | base | 52 | 1 | 1702 / 1731 | 4423 / 6548 / 7941 | 0 / 2 / 8 % | — |
+| 3 | branch, no speculation | 52 | 0 | 1702 / 1726 | 4127 / 5802 / 9206 | 0 / 0 / 8 % | — |
+| 3 | branch, lead 500 | 50 | 1 | 1702 / 1735 | **3304 / 5162 / 5362** | 0 / 6 / 33 % | 50 sent, 49 hit |
+
+Failures are provider `503`s (STT 4, LLM 1), on both sides. The providers were slower in rounds 2 and 3 than in round 1
+(base STT 1.08 → 1.54–1.60 s p50), so compare inside a round: speculation with a 500 ms lead took **0.86, 0.94 and
+1.12 s** off the median, 0.70 s with a 350 ms lead; the PCM stream alone 0.20–0.30 s. One evening, about 50 turns per
+run: read ± 0.5 s on every p95 and max.
+
+Per stage, ms, p50 / p95:
+
+| Run | STT (whole) | Transcript after the request | LLM first token after it | First clause | TTS first byte |
+|---|---|---|---|---|---|
+| 1 base | 1075 / 1496 | 1075 / 1496 | 710 / 1367 (max 1642) | 87 / 387 | 819 / 1116 (max 2088) |
+| 1 PCM only | 994 / 1541 | 994 / 1541 | 714 / 1483 (max 1820) | 89 / 349 | 672 / 854 (max 1023) |
+| 1 lead 500 | 936 / 1516 | **435 / 1015** | 695 / 1149 (max 2607) | 103 / 1286 | 677 / 1196 (max 1323) |
+| 3 base | 1598 / 2682 | 1598 / 2682 | 840 / 1907 (max 2760) | 70 / 275 | 1079 / 1566 (max 1919) |
+| 3 lead 500 | 1295 / 2271 | **794 / 1771** | 817 / 1474 (max 1775) | 102 / 495 | 898 / 1418 (max 1465) |
+
+The speculation hides exactly its lead: the transcript exists `STT − lead` after the request. The speculative LLM
+changes nothing while the STT is longer than the lead (the transcript arrives after the turn was committed anyway); it
+pays when the STT is shorter, and it is what the next step (a streaming STT) needs.
+
+### Cost
+
+Prices of § Fallback under load and § Fallback fast. A turn here is ≈ $0.0020: voice $0.0016 (108 characters at
+$15/M), STT $0.00036 with nova-3 first (5 s at $0.0000717/s; $0.00002 with Whisper turbo), LLM $0.00003; measured on
+the key's counter $0.0015–0.0020 per turn. At 240 turns per learner-hour: **$0.48**. A speculation that is committed
+costs nothing more (it replaces the turn's STT). A discarded one costs its STT call and, when the STT had finished,
+≈ 500 prompt tokens ($0.00005): at the share simulated here (0.26 discarded per turn, half the clip) **+$0.011 per
+learner-hour (+2 %)**; at the worst the caps allow (two discarded whole clips every turn) +$0.17 (+36 %) with nova-3,
++$0.01 with Whisper turbo first. The real share of resumed pauses was not measured: it needs learners.
+
+### Verdict against 2500 ms
+
+Not reached, neither as a maximum nor as a median. Reply first audio from the end of the speech: 2.7–3.3 s p50 where
+the same evening's base gave 3.5–4.4 s; maximum 5.4–5.5 s (base 7.0–7.9 s); 6–29 % of the turns under 2.5 s (base
+0–2 %). The first sound (opener) stays at 1.70 s in every turn.
+
+What holds it, in order (round 1, the healthy one): the **LLM first token**, 0.70 s p50 and up to 2.6 s; the **voice's
+first byte**, 0.68 s p50 and up to 1.3 s; the **part of the STT the lead does not hide**, 0.44 s p50 and 1.0 s p95.
+Their sum after a 700 ms endpointing is 0.7 + 0.44 + 0.70 + 0.10 + 0.68 ≈ 2.6 s, which is the median measured.
+
+What would remove each (not built):
+
+- STT remainder (−0.4 to −0.8 s, and its tail): a transcript that exists when the speech ends. Mistral's Voxtral
+  realtime is reachable with the key we have; it needs the learner's audio to reach the gateway while they speak, i.e.
+  a streaming uplink on the fallback (a gateway WebSocket that takes the 16 kHz frames of a learner without a seat),
+  and a `mistral` STT provider. The speculative LLM and the commit-by-id of this branch are the other half of it.
+- LLM first token (−0.3 to −0.4 s): `google/gemini-2.5-flash-lite` answered its first content token in 390 ms p50
+  (341–618, 8 calls, same prompt, same minute) against 800 ms (637–1256) for `qwen/qwen3.5-9b`. That is the order of
+  the school's `parle-llm` route, and a different model answering the turn: the school's decision, with the LLM label
+  it already records.
+- Voice first byte: nothing on these keys is under 0.5 s. A voice on a GPU (the 200–300 ms first chunk of the
+  speech-stack) is the only one seen.
+- With the first two: 0.7 + 0.2 + 0.4 + 0.1 + 0.68 ≈ 2.1 s p50 (reasoned, not measured). A **maximum** of 2.5 s needs
+  every stage's p99 under control, which three cloud calls in a row do not give: seats on a GPU do.
+
+### Limits of this change
+
+- The SDK path is unit-tested only: no browser ran it. `MediaRecorder.requestData` mid-recording, `decodeAudioData` of
+  the partial clip (Safari's mp4 fragments may not decode: then `clipToWav` gives nothing and no speculation is sent)
+  and the time both take (it comes off the lead) are unmeasured.
+- The school's page must turn it on (`voice.speculatePauseMs`, e.g. 160) and its backend relay must forward the
+  speculative `POST` (same route, a JSON answer, `config.speculation`) — **to do in parle**.
+- The gateway trusts the client's VAD, as it already does for the end of the turn: a turn that names a speculation
+  says "nothing was spoken after that clip". The length check is a safety net, not a proof.
+- The speculations live in the gateway process: with more than one gateway instance the turn must reach the instance
+  that got the speculation, otherwise it is a plain turn (safe, no gain).
+- The speculative request cannot know whether a GPU seat will take the turn (no capacity peek without a lease).
+
+### Tests
+
+`__tests__/unit/s2s/speculation.test.ts` (fake stages through the real route): pause → speculative STT → the turn
+answers with one STT call and one LLM call; the turn arrives while the STT still runs; pause → speech resumes →
+aborted, no LLM, no TTS, nothing but JSON was sent, counted `cancelled`; a longer final clip heard differently → LLM
+asked again, only the second reply is voiced; same words → the speculative LLM is kept; caps (`short`, `format`,
+`turn_cap`); the primary takes the turn → `primary`; expiry on a fake clock; a speculative STT that failed late is not run again, one that failed at once is; another key cannot commit; the app is
+charged once (`admit` called with `charge` false then true). `sdk-realtime-speculate.test.ts` (the rung and the VAD
+effects), `sdk-voice-turn.test.ts` (turn-taking), `gateway-routing/tts-pcm-as-wav.test.ts` (streamed WAV header, rate
+from the provider, MP3 untouched).
