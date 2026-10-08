@@ -54,7 +54,10 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, Math.max(0, ms)));
 const FRAME = 320;
 const FRAME_MS = 20;
 const LOUD = 0.02;
-const KEEP = ['type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms'];
+const KEEP = [
+  'type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms',
+  'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms', 'first_sound_from_speech_ms', 'ttfa_from_speech_ms',
+];
 const UPLINK_BACKLOG = 64 * 1024;
 
 const clip = cfg.clip ? clip16k(cfg.clip) : voiced(tone(cfg.clipS, 16000));
@@ -181,7 +184,7 @@ async function postTurn(s: Session): Promise<void> {
   for (let i = 0; i < 16; i++) pcm[i] = Math.floor(Math.random() * 8);
   const form = new FormData();
   form.set('file', new Blob([new Uint8Array(wav(pcm, 16000))], { type: 'audio/wav' }), 'turn.wav');
-  form.set('config', JSON.stringify({ ...cfg.config, deployment: cfg.deployment }));
+  form.set('config', JSON.stringify({ ...cfg.config, deployment: cfg.deployment, endpoint_ms: cfg.clipEndSilenceMs }));
   t.speechEnd = now() - cfg.clipEndSilenceMs;
   let rate = 24000;
   let done = false;

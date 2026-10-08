@@ -2,7 +2,10 @@ import { audible, epoch, makeMeter, output, playRemote } from '/meter.js';
 import { createRealtimeSession } from '/sdk.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const KEEP = ['type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms'];
+const KEEP = [
+  'type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms',
+  'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms',
+];
 const MIN_CLIP_MS = 300;
 
 window.loadRun = async ({ durationMs, turnTimeoutMs, transport, turnEveryMs, clipEndSilenceMs }) => {

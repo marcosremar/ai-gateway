@@ -20,6 +20,7 @@
  *   --turn-every 15   seconds between turns                 --jitter 5       ± seconds
  *   --clip-s 1.4      length of the tone clip               --clip file.wav  real speech instead (PCM16 mono WAV)
  *   --profile clean   clean | campus-slow | udp-blocked | lossy | flap
+ *   --ceiling-ms 2500 any turn whose first sound (opener or reply) comes later fails the run
  *   --replicas 2 --cap 16   fake stack only: replicas and RT_MAX_SESSIONS of each
  *   --p50 1500 --p95 2000 --max-bad 1   the target: first-audio ms and failures + truncations in %
  *   --turn-timeout 30 --trunc-ratio 0.75 --ms-per-char 0 --turn udp|tcp --out <dir>
@@ -31,6 +32,7 @@
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import { cpus, loadavg, tmpdir } from 'os';
 import { join } from 'path';
+import { ceilingReport, firstReplyAudioMs } from './ceiling';
 import type { ClientConfig, ClientResult, Turn } from './load-client';
 import { HOST_IP, NS_EXEC, PROFILES, netDown, netState, netUp } from './net-shape';
 
@@ -47,6 +49,7 @@ const PROFILE = opt('profile') ?? 'clean';
 const REPLICAS = num('replicas', 2);
 const CAP = num('cap', 16);
 const TARGET = { p50: num('p50', 1500), p95: num('p95', 2000), maxBadPct: num('max-bad', 1) };
+const CEILING_MS = num('ceiling-ms', 2500);
 const TRUNC_RATIO = num('trunc-ratio', 0.75);
 const MS_PER_CHAR = num('ms-per-char', 0);
 const DEP = process.env.DEP ?? (REAL_GW ? 'parle-speech' : 'speech-load');
@@ -115,6 +118,8 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
   const withLatency = (js: typeof judged) => js.filter(j => j.latency !== null && j.result !== 'failed').map(j => j.latency as number);
   const keys = [...new Set(judged.map(j => j.key))].filter(k => k !== 'none').sort();
   const all = dist(withLatency(judged), attempted);
+  const ceiling = ceilingReport(client.turns, CEILING_MS);
+  const firstReply = dist(judged.filter(j => j.result !== 'failed').map(j => firstReplyAudioMs(j.t)).filter((x): x is number => x !== null), attempted);
   const replicaOf = new Map(client.students.map(st => [st.id, st.replica ?? '']));
   const byReplica = Object.fromEntries([...new Set(replicaOf.values())].filter(Boolean).sort().map((id) => {
     const js = judged.filter(j => replicaOf.get(j.t.student) === id);
@@ -188,6 +193,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
   const checks = [
     { name: 'first audio p50 ms', value: all.p50, limit: TARGET.p50, ok: all.p50 !== null && all.p50 <= TARGET.p50 },
     { name: 'first audio p95 ms', value: all.p95, limit: TARGET.p95, ok: all.p95 !== null && all.p95 <= TARGET.p95 },
+    { name: 'first sound max ms', value: ceiling.max, limit: CEILING_MS, ok: ceiling.ok },
     { name: 'failures + truncations %', value: pctOf(bad('failed') + bad('truncated')), limit: TARGET.maxBadPct, ok: attempted > 0 && pctOf(bad('failed') + bad('truncated')) <= TARGET.maxBadPct },
   ];
   return {
@@ -202,10 +208,14 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
       attempted, ok: bad('ok'), failed: bad('failed'), truncated: bad('truncated'), failurePct: pctOf(bad('failed')), truncationPct: pctOf(bad('truncated')),
       why: count(judged.filter(j => j.why).map(j => `${j.result}:${j.why}`)), audioMsPerChar: rates,
     },
+    ceiling, firstReplyAudioMs: firstReply,
     firstAudioMs: { all, byReplica, byTransport: Object.fromEntries(keys.map(k => [k, dist(withLatency(judged.filter(j => j.key === k)), judged.filter(j => j.key === k).length)])) },
     audible, meters: client.meters, ...(posted.length ? { s2s } : {}),
     wsFirstFrameMs: dist(judged.filter(j => j.t.firstFrame !== null && j.t.speechEnd !== null).map(j => (j.t.firstFrame as number) - (j.t.speechEnd as number))),
-    edge: { ttfaMs: dist(metric('ttfa_ms')), sttMs: dist(metric('stt_ms')), llmTtftMs: dist(metric('llm_ttft_ms')), ttsTtfbMs: dist(metric('tts_ttfb_ms')) },
+    edge: {
+      ttfaMs: dist(metric('ttfa_ms')), sttMs: dist(metric('stt_ms')), llmTtftMs: dist(metric('llm_ttft_ms')), ttsTtfbMs: dist(metric('tts_ttfb_ms')),
+      firstSoundFromSpeechMs: dist(metric('first_sound_from_speech_ms')), ttfaFromSpeechMs: dist(metric('ttfa_from_speech_ms')),
+    },
     connect: {
       sessionMs: Object.fromEntries(['webrtc', 'ws'].map(k => [k, dist(client.students.filter(s => s.transport === k && s.connectMs !== null).map(s => s.connectMs as number))])),
       attempts: count(attempts.map(a => `${a.type}:${a.ok ? 'ok' : `failed:${String(a.reason).split(':')[0]}`}`)),
@@ -238,8 +248,12 @@ function summary(r: ReturnType<typeof buildReport>): string {
     `load: ${r.run.students} students (${r.run.rtc} start at webrtc, ${r.run.s2s} post to /v1/s2s, ${r.run.students - r.run.rtc - r.run.s2s} ws only, ${r.run.chrome} chrome) profile=${r.run.profile} `
       + `${REAL_GW ? `gateway ${REAL_GW} deployment ${DEP}` : `fake stack ${REPLICAS} replicas × ${CAP} sessions`}, ${r.run.durationS} s each + ${r.run.rampS} s ramp, turn every ${r.run.turnEveryS}±${r.run.jitterS} s`,
     `turns: ${r.turns.attempted} attempted, ${r.turns.ok} ok, ${r.turns.failed} failed (${r.turns.failurePct} %), ${r.turns.truncated} truncated (${r.turns.truncationPct} %) — ${kv(r.turns.why)}`,
-    'first audio, ms from the last voiced sample sent to the first non-silent audio received (shares over all attempted turns):',
+    'first sound (an opener or the reply), ms from the last voiced sample sent to the first non-silent audio received (shares over all attempted turns):',
     d('all', r.firstAudioMs.all),
+    d('reply audio', r.firstReplyAudioMs),
+    `ceiling ${r.ceiling.limitMs} ms: max ${r.ceiling.max} ms over ${r.ceiling.turnsWithSound} turns with sound; > 2.0 s ${r.ceiling.over2000Pct} %, > 2.5 s ${r.ceiling.over2500Pct} %, > 3.0 s ${r.ceiling.over3000Pct} %; `
+      + `${r.ceiling.overLimit} over the ceiling; opener played in ${r.ceiling.openers} turns, deadline missed with none in ${r.ceiling.deadlineMissed}; `
+      + `edge's own first sound from the speech p50 ${r.edge.firstSoundFromSpeechMs.p50} max ${r.edge.firstSoundFromSpeechMs.max}, reply audio p50 ${r.edge.ttfaFromSpeechMs.p50} max ${r.edge.ttfaFromSpeechMs.max}`,
     ...Object.entries(r.firstAudioMs.byTransport).map(([k, x]) => d(k, x)),
     ...Object.entries(r.firstAudioMs.byReplica).map(([k, x]) => `${d(`rep ${k.slice(-8)}`, x)} (${x.students} students)`),
     ...(r.s2s ? [
