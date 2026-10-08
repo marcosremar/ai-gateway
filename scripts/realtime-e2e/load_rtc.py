@@ -15,7 +15,8 @@ from clients import MicTrack  # noqa: E402
 
 CLIP = Path(sys.argv[1]).read_bytes()
 GATHER_S, OFFER_S, CONNECT_S = float(os.environ.get("RTC_GATHER_S", 2)), 3, float(os.environ.get("RTC_CONNECT_S", 3))
-KEEP = ("type", "state", "final", "code", "empty", "filtered", "interrupted", "error", "ttfa_ms", "stt_ms", "llm_ttft_ms", "tts_ttfb_ms", "tts_retries")
+KEEP = ("type", "state", "final", "code", "empty", "filtered", "interrupted", "error", "ttfa_ms", "stt_ms", "llm_ttft_ms", "tts_ttfb_ms", "tts_retries",
+        "first_sound_ms", "first_sound_from_speech_ms", "ttfa_from_speech_ms", "deadline_missed", "opener")
 SKIP = ("reply_delta", "pong")
 peers: dict = {}
 

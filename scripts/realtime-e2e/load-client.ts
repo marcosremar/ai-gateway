@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { appendFileSync, readFileSync, writeFileSync } from 'fs';
+import { mulberry32, nextAfterListening } from './think';
 import { join } from 'path';
 import { createInterface } from 'readline';
 import type { Browser } from 'playwright';
@@ -11,7 +12,7 @@ export interface ClientConfig {
   gw: string; key: string; deployment: string; config: Record<string, unknown>;
   students: number; rtc: number; s2s: number; noWake?: boolean; chrome: number; chromeTransports: string[]; clipEndSilenceMs: number; rtcProcs: number;
   uplinkStallMs?: number; uplinkStallEvery?: number; clientDeadline?: boolean; ttsModel?: string;
-  rampS: number; durationS: number; turnEveryS: number; jitterS: number; burst?: boolean; clipS: number; clip: string | null; turnTimeoutS: number;
+  rampS: number; durationS: number; turnEveryS: number; jitterS: number; burst?: boolean; think?: [number, number] | null; clipS: number; clip: string | null; turnTimeoutS: number;
   turn: 'udp' | 'tcp'; python: string; chromePath: string; work: string; out: string;
 }
 export interface TurnEvent { type: string; at: number; [k: string]: unknown }
@@ -82,7 +83,8 @@ setInterval(() => { for (const tick of tickers) tick(); }, 5);
 
 function slim(e: Record<string, unknown>, at: number): TurnEvent | null {
   if (typeof e.type !== 'string' || e.type === 'reply_delta' || e.type === 'pong' || (e.type === 'transcript' && !e.final)) return null;
-  return { ...Object.fromEntries(KEEP.filter(k => k in e).map(k => [k, e[k]])), type: e.type, at, chars: typeof e.text === 'string' ? e.text.length : Number(e.chars ?? 0) };
+  return { ...Object.fromEntries(KEEP.filter(k => k in e).map(k => [k, e[k]])), type: e.type, at, chars: typeof e.text === 'string' ? e.text.length : Number(e.chars ?? 0),
+    ...(process.env.KEEP_TEXT && typeof e.text === 'string' ? { text: e.text } : {}) };
 }
 function onEvent(s: Session, e: TurnEvent | null): void {
   if (!e) return;
@@ -379,6 +381,7 @@ async function student(id: number): Promise<void> {
     }
   })();
   await firstTry;
+  const rand = mulberry32(id + 1);
   let next = cfg.burst ? result.startedAt + (cfg.rampS + 10) * 1000 : now() + (1 + Math.random() * cfg.turnEveryS) * 1000;
   while (next + clipS * 1000 < end) {
     await sleep(next - now());
@@ -387,7 +390,8 @@ async function student(id: number): Promise<void> {
     const s = session as Session | null;
     if (!s || s.lost) turn.skipped = s?.lost ? `lost:${s.lost}` : why;
     else await speak(s, turn);
-    next = Math.max(next + (cfg.turnEveryS + (Math.random() * 2 - 1) * cfg.jitterS) * 1000, now() + 1_000);
+    next = cfg.think ? nextAfterListening(turn, cfg.think, rand, now())
+      : Math.max(next + (cfg.turnEveryS + (Math.random() * 2 - 1) * cfg.jitterS) * 1000, now() + 1_000);
   }
   await sleep(end - now());
   await connector;
