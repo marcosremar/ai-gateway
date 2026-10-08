@@ -374,4 +374,6 @@ export interface DeploymentView {
   };
   /** Client warm window in force (`POST …/warm`), or null. */
   warm: { replicas: number; until: string } | null;
+  realtime: { active: number; capacity: number; refusedSessions: number; scalingOut: boolean } | null;
+  sessions: number;
 }

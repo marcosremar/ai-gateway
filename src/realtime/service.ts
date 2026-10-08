@@ -17,7 +17,7 @@ import {
   type RealtimeTransportType, type ReplicaCandidate,
 } from './admission';
 import { iceServersFor, type IceConfig, DEFAULT_STUN_URLS } from './ice';
-import { reportExternalLoad } from './external-load';
+import { noteRefusedSession, noteSession, reportExternalLoad } from './external-load';
 import { probeUdp } from './net-probe';
 import { TurnHealth, type TurnProbe, type TurnUrlHealth } from './turn-health';
 import { echoTrace, makeEmitter, newTrace, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
@@ -316,9 +316,11 @@ export class RealtimeService {
         'config_too_large'));
     }
 
+    noteSession(dep, trace.traceId, this.now());
     const placed = await this.place(dep, ordered.order);
     if ('refusal' in placed) {
       const { status, code, message, retryAfter } = placed.refusal;
+      if (code === 'saturated') noteRefusedSession(dep, trace.traceId, this.now());
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: code, status, deployment: dep } });
       return sendJson(res, status, errorBody(message, code, { fallback: FALLBACK }), { 'Retry-After': retryAfter });
     }

@@ -20,7 +20,7 @@ export { createSignalingHandler, isSignalingPath } from './signaling';
 export { createWsRelay, WS_PATH } from './ws-relay';
 export { iceConfigFromEnv, iceServersFor, turnCredentials } from './ice';
 export type { IceConfig, IceServer } from './ice';
-export { reportExternalLoad, externalLoadOf, externalInflightEquivalent } from './external-load';
+export { reportExternalLoad, externalLoadOf, externalInflightEquivalent, distinctSessions, refusedSessions } from './external-load';
 export {
   deriveRealtimeKey, signSessionToken, verifySessionToken, peekClaims, encodeSessionConfig, decodeSessionConfig,
   RT_KEY_INFO, RT_MAX_CFG_CHARS, RT_MAX_TTL_SECONDS,

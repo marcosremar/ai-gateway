@@ -25,7 +25,7 @@ import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
 import { createS2SRoute } from './src/s2s/route';
 import { createS2SAccess } from './src/s2s/access';
-import { appStagesView } from './src/gateway/proxy/health-view';
+import { appStagesView, realtimeHealth } from './src/gateway/proxy/health-view';
 import { loopbackStages } from './src/s2s/loopback-stages';
 import { appForCall, appStageModels } from './src/s2s/app-stage-models';
 import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
@@ -325,7 +325,7 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
-  healthDetails: (viewer) => (viewer.admin ? { ...chainHealth(), turn: realtime.service.turnHealth() } : appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage))),
+  healthDetails: (viewer) => (viewer.admin ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []) } : appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage))),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
     ...(telemetry?.adminRoutes ?? []),

@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  decodeSessionConfig, deriveRealtimeKey, externalLoadOf, orderTransports, pickReplica, sessionCharge, verifySessionToken,
+  decodeSessionConfig, deriveRealtimeKey, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
 } from '../../../src/realtime';
 import { _resetExternalLoad } from '../../../src/realtime/external-load';
 import { fakeController, REPLICA_TOKEN, startFakeEdge, type FakeEdge } from './_fakes';
@@ -102,6 +102,19 @@ describe('POST /v1/realtime/sessions', () => {
     expect(third.headers.get('retry-after')).toBe('2');
     expect(await third.json()).toMatchObject({ error: { code: 'saturated' }, fallback: { transport: 's2s-stream', url: '/v1/s2s' } });
     expect(gw.charged).toHaveLength(2);
+  });
+
+  it('counts students, not requests: one session retrying a full replica is one refused session, two are two', async () => {
+    edge.status = { active: 8, max: 8, transports: ['webrtc', 'ws'] };
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const ana = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+    const rui = '00-1bf7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+    for (let i = 0; i < 3; i++) expect((await gw.create({ config: CONFIG }, { traceparent: ana })).status).toBe(503);
+    expect((await gw.create({ config: CONFIG }, { traceparent: rui })).status).toBe(503);
+    expect(refusedSessions('speech', 60_000)).toBe(2);
+    expect(distinctSessions('speech', 60_000)).toBe(2);
+    expect(externalLoadOf('speech')).toMatchObject({ active: 8, max: 8 });
   });
 
   it('cold deployment: wakes it and answers 503 + Retry-After + fallback at once', async () => {

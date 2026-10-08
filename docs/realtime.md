@@ -180,6 +180,20 @@ counts as capacity, `maxReplicas`, the replica cap, the € ceiling and the crea
 when the sessions end the extra replica is released by the scale-in rules. A deployment with no realtime session
 reports nothing and is scaled exactly as before.
 
+**Visible state.** `GET /v1/deployments/<name>` carries `realtime: {active, capacity, refusedSessions, scalingOut}`
+(sessions on the replicas against their slots, from the edges' status, at most 30 s old; learners refused at admission
+as `saturated` in the last 5 min; whether a replica is on its way while sessions are active — `autoscale.reason` and
+`autoscale.blockedBy` say why, or what holds it: `maxReplicas`, the replica cap, the € ceiling, `out of stock since …`)
+and `sessions`, the distinct sessions seen in the last minute. `GET /health?details=1` (admin) lists the same per
+realtime deployment under `realtime`, with the ready and desired replica counts.
+
+**Students, not requests.** A session is one id: the edge counts distinct session ids (a learner on WS and WebRTC at
+once holds one slot), and the gateway counts the trace id of the SDK's `traceparent` (one per session) on admissions
+and on `/v1/s2s` — the app backend relaying the clip rung must forward the browser's `traceparent` header.
+`distinctSessions(deployment, windowMs)` and `refusedSessions(deployment, windowMs)` (`src/realtime/external-load.ts`)
+give the counts; a learner retrying admission every few seconds is one refused session. The scale-out rule itself still
+counts leases and refused requests per request (two concurrent requests of one learner are two requests on the GPU).
+
 ## The ladder (SDK)
 
 ```ts

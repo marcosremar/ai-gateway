@@ -4,9 +4,12 @@
  *
  *   GET /health              no auth   {status, version, uptimeSeconds} — the platform probe, the reaper, the SDK breaker
  *   GET /health?details=1    app key   the stage chains of the app's own aliases; admin key: everything (stages of every
- *                                      alias, warnings, connections, STT filter and no-wake counters)
+ *                                      alias, warnings, connections, STT filter and no-wake counters, realtime sessions
+ *                                      per deployment)
  *   GET /health?deep=1       admin key upstream probes (deepHealthReport); a non-admin key → 403
  */
+
+import type { DeploymentView } from '../../deployments/types';
 
 export interface HealthViewer {
   /** The key's user (= app id for an app key); `localhost` in open mode. */
@@ -25,6 +28,13 @@ const startedAt = Date.now();
 export function minimalHealth(env: Record<string, string | undefined> = process.env): Record<string, unknown> {
   const version = env.GATEWAY_VERSION?.trim() || env.RAILWAY_GIT_COMMIT_SHA?.trim().slice(0, 12) || null;
   return { status: 'ok', version, uptimeSeconds: Math.round((Date.now() - startedAt) / 1000) };
+}
+
+export function realtimeHealth(views: DeploymentView[]): Array<Record<string, unknown>> {
+  return views.filter(v => v.realtime).map(v => ({
+    deployment: v.name, ...v.realtime, sessions: v.sessions, replicas: v.replicas.filter(r => r.phase === 'ready').length,
+    desiredReplicas: v.desiredReplicas, reason: v.autoscale.reason, blockedBy: v.autoscale.blockedBy,
+  }));
 }
 
 type StageReport = { stages?: Record<string, Record<string, unknown>>; warnings?: string[] };
