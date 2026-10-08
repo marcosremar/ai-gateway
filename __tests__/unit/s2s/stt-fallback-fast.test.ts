@@ -15,15 +15,15 @@ const breaks: Behaviour = () => Promise.reject(Object.assign(new Error('upstream
 
 let chains = 0;
 
-function chain(first: Behaviour, second: Behaviour) {
+function chain(first: Behaviour, second?: Behaviour, firstId = 'openrouter') {
   const model = `whisper-${++chains}`;
   const link = (providerId: string, behaviour: Behaviour) => ({
     providerId, getModels: () => [], isConfigured: () => true,
     transcribe: vi.fn((req: { signal: AbortSignal }) => behaviour(req.signal)),
   });
-  const a = link('openrouter', first);
-  const b = link('groq', second);
-  const routes = { 'stt-m': [{ providerId: 'openrouter', provider: a, model }, { providerId: 'groq', provider: b, model }] };
+  const a = link(firstId, first);
+  const b = link('groq', second ?? breaks);
+  const routes = { 'stt-m': [{ providerId: firstId, provider: a, model }, ...(second ? [{ providerId: 'groq', provider: b, model }] : [])] };
   const breakers = new CircuitBreakerRegistry();
   let clip = 0;
   const call = (headers: Record<string, string>) => handleAudioTranscriptions({
@@ -96,6 +96,13 @@ describe('composed fallback STT: hedge to the second link and a stage budget', (
     const { call } = chain(answers(600, 'Bom dia.'), answers(600, 'outro'));
     const out = await call({ [BUDGET_CAP_HEADER]: '100' });
     expect(out.status).toBe(200);
+  });
+
+  it('fewer than two cloud links: the short budget is not applied, a slow answer is late and not a failure', async () => {
+    const alone = chain(answers(600, 'Bom dia.'));
+    expect(await alone.call(sub(100, 400))).toMatchObject({ status: 200, body: { text: 'Bom dia.' } });
+    const behindDeployment = chain(breaks, answers(600, 'Bom dia.'), 'deployment:parle-speech');
+    expect(await behindDeployment.call(sub(100, 400))).toMatchObject({ status: 200, body: { text: 'Bom dia.' } });
   });
 
   it('a stage that failed after its time is not retried; a quick 503 still is', async () => {
