@@ -15,6 +15,7 @@ import { FileDeploymentStore, MemoryDeploymentStore } from '../../../src/deploym
 import { AppRegistry, FileAppStore, MemoryAppStore } from '../../../src/deployments/apps';
 import type { DeploymentStore } from '../../../src/deployments/types';
 import { FakeCloud, until } from './_fake-cloud';
+import { resetStreamCuts, streamCuts } from '../../../src/telemetry/stream-cuts';
 
 const ADMIN = 'admin-key-0123456789';
 const SITE = 'site-key-0123456789';
@@ -23,7 +24,7 @@ const AS_SITE = { 'x-app': 'site-a' };
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
@@ -39,6 +40,7 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
     isAdmin: (req) => req.headers.authorization === `Bearer ${ADMIN}`,
     userOf: (req) => (req.headers.authorization === `Bearer ${SITE}` ? 'site-a' : req.headers.authorization === `Bearer ${ADMIN}` ? 'owner' : null),
     onRoutesChange: opts.onRoutesChange,
+    ...(opts.invokeIdleMs ? { invokeIdleMs: opts.invokeIdleMs } : {}),
     ...(opts.declaredStatus ? { declaredStatus: opts.declaredStatus } : {}),
   });
   const server = createProxyServer({
@@ -568,5 +570,73 @@ describe('app accounts: saved image addresses per app', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('invoke: a replica stream that does not end', () => {
+  type Script = (res: import('http').ServerResponse, n: number) => void;
+
+  async function scripted(x: Harness, script: Script) {
+    await call(x, 'PUT', '/v1/deployments/cut', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, AS_SITE);
+    await until(() => x.controller.get('cut')!.status === 'ready');
+    const fake = [...x.cloud.machines.values()][0];
+    const probe = fake.server.listeners('request')[0] as (...a: unknown[]) => void;
+    fake.server.removeAllListeners('request');
+    let n = 0;
+    fake.server.on('request', (req, res) => {
+      if (req.url !== '/stream') return probe(req, res);
+      req.resume();
+      script(res, ++n);
+    });
+    const outcomes: unknown[] = [];
+    const acquire = x.controller.acquire.bind(x.controller);
+    x.controller.acquire = (async (...args: Parameters<typeof acquire>) => {
+      const lease = await acquire(...args);
+      const done = lease.done;
+      lease.done = (outcome) => { outcomes.push(outcome); done(outcome); };
+      return lease;
+    }) as typeof x.controller.acquire;
+    resetStreamCuts();
+    return outcomes;
+  }
+
+  const read = async (x: Harness, headers: Record<string, string> = {}) => {
+    const res = await call(x, 'GET', '/v1/deployments/cut/invoke/stream', undefined, SITE, headers);
+    const text = await res.text().then(t => `ended:${t}`, () => 'connection error');
+    return { status: res.status, text };
+  };
+
+  it('regression: a replica that resets mid-body gives the client a connection error, a failed lease and a count', async () => {
+    const outcomes = await scripted(h, (res) => { res.writeHead(200); res.write('half'); setTimeout(() => res.socket!.destroy(), 30); });
+    expect(await read(h)).toEqual({ status: 200, text: 'connection error' }); // before: 'ended:half', a cut that looked complete
+    await until(() => outcomes.length > 0);
+    expect(outcomes[0]).toBe(true);
+    expect(streamCuts()).toEqual([expect.objectContaining({ deployment: 'cut', stage: 'invoke', truncated: 1, stalled: 0 })]);
+  });
+
+  it('regression: a replica that stops sending is cut at the idle limit, as busy (no health strike)', async () => {
+    await close(h);
+    await h.cloud.closeAll();
+    h = await harness({ invokeIdleMs: 150 });
+    const outcomes = await scripted(h, (res) => { res.writeHead(200); res.write('half'); });
+    const started = Date.now();
+    expect(await read(h)).toEqual({ status: 200, text: 'connection error' }); // before: never ended
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(outcomes[0]).toBe('timeout');
+    expect(streamCuts()).toEqual([expect.objectContaining({ stage: 'invoke', truncated: 0, stalled: 1 })]);
+  });
+
+  it('a long gap under the idle limit and a clean end pass through untouched', async () => {
+    const outcomes = await scripted(h, (res) => { res.writeHead(200); res.write('a'); setTimeout(() => res.end('b'), 300); });
+    expect(await read(h)).toEqual({ status: 200, text: 'ended:ab' });
+    expect(outcomes[0]).toBe(false);
+    expect(streamCuts()).toEqual([]);
+  });
+
+  it('regression: a failed connection to the only replica is retried on it, not waited out for the whole X-Aigw-Wait', async () => {
+    await scripted(h, (res, n) => { if (n === 1) res.socket!.destroy(); else res.end('ok'); });
+    const started = Date.now();
+    expect(await read(h, { 'x-aigw-wait': '4' })).toEqual({ status: 200, text: 'ended:ok' }); // before: 503 after the 4 s
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 });
