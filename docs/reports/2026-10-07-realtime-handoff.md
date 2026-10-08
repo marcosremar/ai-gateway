@@ -836,3 +836,124 @@ log (`vast-backend.ts`, wired in `index.ts`). Tests: `__tests__/unit/deployments
 Realtime of any kind on Vast; `image_login` live; the real `speech-stack` image on the 5090 (same base and engine
 builds, assembled at boot instead); a second host side by side; GPU memory headroom; the cold-start split after
 llama.cpp; the rented-offer log in a live create; anything from a phone or a slow network.
+
+## TTS runaway, 2026-10-08
+
+One L40S-1-48G in fr-par-2 (€1.47/h), image `speech-stack:20261008-0330`, stack files from branch `rt/tts-runaway`
+through spec `files`, a local gateway on :4106 (namespace `marcos-run`). Powered on 06:54 UTC, terminated 08:17 UTC:
+83 machine-minutes, about €2.05. Deleted; `GET /v1/deployments?scope=all` → 0 replicas, no pending network release.
+The create at 06:36 UTC left the server stopped for 17 min (L40S out of stock at power-on, L4 quota exceeded); the
+controller logged `Server ready … (€0/hr)` for it and retried the power-on until it took.
+
+### Cause (proven)
+
+The engine's line for every runaway, read through the new `GET /debug/logs`:
+
+```
+ERROR [serving_speech.py:2354] [SpeechE2E] request_id=speech-adfe2ecda00ea66a stream=true status=error total_ms=1881.06
+error=Qwen3-TTS Base did not emit codec EOS before its token budget (192/192 codec tokens); the generated audio is incomplete.
+vllm_omni.entrypoints.openai.tts_adapters.qwen3_tts.Qwen3TTSCodecLimitError
+```
+
+- The talker (stage 0) starts a sentence on silence codes and keeps repeating them. Most sentences leave the loop
+  after a moment (a silent lead of 1–10 s, then the sentence); some never do. The audio of the runaways is silence
+  from the first sample (RMS 0–8 of 32768), sometimes with bursts of speech or noise late in the 15 s.
+- vLLM-Omni 0.28.0 knows the state (`tts_adapters/qwen3_tts.py:235-306`, "can rarely enter a repetitive state in which
+  codec EOS is no longer reachable through top-k sampling") and bounds a Base request at `max(192, 12 × text tokens)`
+  codec frames (`:27-28`, `:273`). At 12.5 frames/s that is 15.36 s: the 15.28 s measured for «Bom dia!» on the 5090
+  and here. A request that ends on that budget fails validation (`:308-333`), and a raw-audio stream that fails it is
+  ended as an error by design (`serving_speech.py:2306`, `:2354`): no chunked terminator, hence httpx
+  `RemoteProtocolError` in the stack and aiohttp `ClientPayloadError` in the edge. The non-streaming path retries once
+  with a new seed (`:3621-3636`), the streaming path cannot.
+- Not the decoder and not load: 2 runaways and 10 leads over 1 s in 600 requests sent one at a time. No position in
+  a burst of 8 stands out. `decode_batch_max_size` (stage 1) was therefore not tested.
+- It depends on the reference clip: with a 16.5 s reference instead of 6.8 s, 5× more.
+- The engine's `silence_ban_frames` (`qwen3_tts.yaml:90`) does not apply: it only masks x-vector-only requests
+  (`qwen3_tts_talker.py:437-440`), and the stack clones with a reference transcript (ICL).
+
+### Reproduction (default engine settings, no cap)
+
+Direct `POST /v1/audio/speech`, streamed PCM, through the gateway invoke route; 18 Portuguese texts of 3–129
+characters ("mix") or «Olá, bom dia.» alone ("one text"); reference `ref-a` (6.8 s, macOS `say`) unless noted. Lead =
+time before the first 50 ms window with RMS > 300. Runaway = stream ended as an error.
+
+| Load | Requests | Runaways | Lead ≥ 1 s | Lead ≥ 2 s |
+|---|---|---|---|---|
+| mix, 8 in parallel (3 runs) | 4320 | 4 (15.03–15.28 s of audio) | 6 of 1440 measured | 3 of 1440 |
+| one text, 8 in parallel (3 runs) | 2560 | 2 | 12 of 1600 measured | 4 of 1600 |
+| one text, 1 at a time | 600 | 2 | 10 (17 ‰) | 3 |
+| one text, 8 in parallel, 16.5 s reference | 960 | 6 | 53 (55 ‰) | 19 |
+| `/v1/s2s`, 1 / 4 / 8 at once, 40 rounds each | 520 turns, 1506 sentences | 0 | one turn of 10.8 s | |
+
+Runaways with the 6.8 s reference: 6 in 6880 requests, 0.9 per thousand; the texts were «Olá, bom dia.» (5) and
+«Obrigado!» (1). Short sentences carry it: of the 6 leads over 1 s in the mix, one was on the 129-character text.
+
+### Settings tried (same machine, same loads, 8 in parallel)
+
+| Change | Requests | Runaways | Lead ≥ 1 s | Lead ≥ 2 s | Speech duration, one text p50 / mix mean |
+|---|---|---|---|---|---|
+| none (rows above, RMS-measured runs) | 3040 | 4 | 18 (5.9 ‰) | 7 | 1.22 s / 1.61 s |
+| request `non_streaming_mode: true` | 2400 | 12 | 36 (15 ‰) | 14 | 1.20 / 1.59 — worse, rejected |
+| YAML talker `repetition_penalty` 1.10 | 2400 | 0 | 2 | 0 | 1.22 / 1.60 |
+| the same, 16.5 s reference | 960 | 1 | 12 (12 ‰) | 3 | 1.31 |
+| **YAML talker `repetition_penalty` 1.15** | 2400 | **0** | **0** (max 0.80 s) | 0 | 1.22 / 1.60 |
+| the same, 16.5 s reference | 1680 | 0 | 17 (10 ‰, max 6.05 s) | 2 | 1.32 (was 1.32) |
+| stack only: hold + one retry + `max_new_tokens` (default YAML) | 2400 | 0 | 2 (max 1.05 s) | 0 | 1.23 / 1.60 |
+| **both** (what is committed), 6.8 s reference | 2400 | 0 | 0 (max 0.75 s) | 0 | 1.22 / 1.60 |
+| **both**, 16.5 s reference | 960 | 0 | 5 (max 1.20 s) | 0 | 1.32 |
+
+- The penalty goes at the cause (the loop is one code repeated): 1.05 → 1.10 → 1.15 lowers leads and runaways in
+  step. Lead p99 0.70–0.75 s → 0.45–0.50 s. Sentences are not shorter or clipped: speech duration equal within 0.01 s,
+  trailing silence p50 0.05 s / p99 0.30 s in every arm. Transcribed back with the replica's own Whisper large-v3
+  (`/v1/audio/transcriptions`): 53 of 59 samples exact with the default, 33 of 36 and 30 of 30 with 1.15, 32 of 36
+  with 1.10 (the misses are «São 3,50.» and «Custa 12 reais» in every arm). Nobody listened to the audio: prosody
+  with 1.15 is not judged.
+- The stack part covers what the penalty leaves with a harder reference. Stack only, 2400 requests: 6 sentences
+  asked again (2.5 ‰), each decided 0.50–0.53 s after the request at 8 in parallel, with 1.45 s of silence dropped;
+  the student hears 80 ms of silence (the first chunk) and the sentence about 0.5 s later than usual. With both, 3360
+  requests: 0 asked again.
+- A peak detector (|sample| > 328) was fooled by a low noise burst before a 4 s silence (one sentence went to its cap,
+  5.52 s); the committed detector is RMS ≤ 300 per chunk.
+- The cap stays `3 s + 0.2 s per character`: of 19 226 clean sentences none came within reach of it; `2.5 + 0.12`
+  would have cut 2. It is now the engine's stop (`max_new_tokens`, e.g. `70/70 codec tokens` for 13 characters, 5.6 s)
+  instead of audio the stack throws away after 15 s.
+
+### `/v1/s2s` before and after (40 rounds per level, same clip, voice and prompt)
+
+| | 1 | 4 at once | 8 at once | Turns failed | GPU memory |
+|---|---|---|---|---|---|
+| before: server first audio p50 / p95 ms | 390 / 392 | 966 / 1334 | 2046 / 2235 | 0 / 520 | 28 205 MiB |
+| stack part only | 392 / 395 | 1150 / 1339 | 2041 / 2211 | 0 / 520 (1 sentence asked again) | 28 173 MiB |
+| both | 389 / 393 | 981 / 1334 | 2010 / 2195 | 1 / 520 | 28 203 MiB |
+| both: TTS first chunk p50 / p95 ms (before) | 92 / 95 (93 / 95) | 184 / 252 (187 / 257) | 342 / 405 (342 / 406) | | |
+
+The failed turn is the second kind of runaway, which is not fixed: the third sentence (34 characters) spoke, did
+not stop, and the engine ended it at its cap (`123/123 codec tokens`, 9.76 s where 2.6 s is usual); the turn ended
+with `error` stage `tts`, as before this branch but 5.6 s earlier. With both changes: this 1 in 1506 sentences of
+`/v1/s2s`, 0 in 3360 direct requests; with the default YAML, 1 in 2400 through the stack. The stack does not ask such a
+sentence again because the student has already heard part of it; it also does not continue the turn. Of 6 non-silent
+runaways transcribed, 2 contained the sentence.
+
+### Committed (`rt/tts-runaway`, not pushed)
+
+- `docker/speech-stack/qwen3_tts.yaml`: the engine's v0.28.0 deploy YAML with `repetition_penalty: 1.15` (line 86);
+  `start.sh` passes the file next to it as `--deploy-config`; `Dockerfile` copies it (one line).
+- `server.py` `tts_stream`: `max_new_tokens`, silent lead held and one retry before any sound, a request id sent as
+  `extra_params.request_id` (the engine logs it on the line after its own id), one `tts <id> …` line per request,
+  `done.tts_retries`.
+- `GET /debug/logs?engine=tts|llm|stt&tail=N&match=text`, `start.sh` bounded logs (32 MB per file, one rotation: the
+  TTS writes about 6 KB per request).
+- Tests: `test_debug_logs.py`, `test_tts_stream.py`, `test_s2s_turn.py`.
+
+The YAML becomes the default only in an image built from this branch (it has to be in `/opt/s2s`). Until then it
+ships like the code: `qwen3_tts.yaml` in the deployment's `files` with `start.sh` (README § shipping without a
+rebuild) — that is how it ran here. The profile is untouched.
+
+### Open
+
+- The realtime edge calls `/v1/audio/speech` through the stack's proxy, not `tts_stream`: it gets the penalty, not
+  the cap nor the retry. The same three request rules belong in `docker/aigw-edge` (not touched here).
+- The non-silent runaway (1 in 4866 sentences with both changes): retrying it would repeat words the student heard. Not decided:
+  continue the turn after the capped sentence, with a field in `done`.
+- Not tested: `repetition_penalty` above 1.15, sampling temperature / top-k, `decode_batch_max_size: 1`, an L4, real
+  catalog voices (both references were `say` clips), a listening check.

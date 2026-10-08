@@ -30,7 +30,7 @@ RUN /opt/wenv/bin/hf download "$LLM_REPO" "$LLM_FILE" --local-dir /models/llm \
  && /opt/wenv/bin/hf download Systran/faster-whisper-large-v3 \
  && rm -rf /models/hf/xet
 
-COPY start.sh server.py stt_batch.py stt_stream.py /opt/s2s/
+COPY start.sh server.py stt_batch.py stt_stream.py qwen3_tts.yaml /opt/s2s/
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=900s CMD curl -sf http://127.0.0.1:8000/health || exit 1
 CMD ["bash", "/opt/s2s/start.sh"]

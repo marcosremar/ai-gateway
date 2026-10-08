@@ -87,7 +87,8 @@ same text as one at a time, and silence comes back empty.
 | `STT_BATCH_WINDOW_MS` | `25` (unchanged) | `0` now means: take what is already queued, never wait for more (before, `0` turned batching off). |
 | `CUT_EAGER` | `0` | `1`: a `!` or `?` at the end of the text so far cuts at once instead of waiting one more LLM token. A `.` still waits (`3.` may become `3.50`). |
 | `TTS_STAGE_OVERRIDES` | unset | JSON for `vllm serve --stage-overrides` (vLLM-Omni 0.28.0, `docs/serving/speech_api.md`); replaces `--gpu-memory-utilization`, so it must carry `gpu_memory_utilization` per stage. |
-| `TTS_DEPLOY_CONFIG` | unset | Path of a deploy YAML for `vllm serve --deploy-config` (connector fields such as `ref_code_context_frames` are not reachable through stage overrides). |
+| `TTS_DEPLOY_CONFIG` | `qwen3_tts.yaml` next to `start.sh` | Path of a deploy YAML for `vllm serve --deploy-config` (connector fields such as `ref_code_context_frames` are not reachable through stage overrides). A path that does not exist means the engine's bundled YAML. |
+| `TTS_MAX_LEAD_SECONDS` | `1` | A sentence whose audio is still silent after this long is asked again once (see § TTS runaway). |
 | `LLM_EXTRA_ARGS` | unset | Extra `llama-server` flags, e.g. `-b 4096 -ub 2048` (prompt-eval batch; b11382 defaults are 2048 / 512). |
 | `S2S_DIR` | `/opt/s2s` | Directory uvicorn loads `server.py` from. |
 
@@ -130,11 +131,29 @@ One log line each (`proxy failed|stalled chat|speech <ms> <error>`), counted in 
 `proxy: {chat: {started, done, failed, stalled}, speech: {…}}` (`started` − the rest = in flight or left by the
 client). `test_stage_proxy.py` runs the real uvicorn + FastAPI + httpx stack against a fake engine (needs `fastapi`,
 `httpx`, `uvicorn`).
+## TTS runaway and silent leads (2026-10-08)
+
+Qwen3-TTS Base sometimes opens a sentence by repeating silence codes: 0.3–1.7 % of sentences started with more than
+1 s of silence (5.5 % with a 16 s reference clip), and about 1 in 1000 never left the loop. vLLM-Omni 0.28.0 then stops at
+its own budget of `max(192, 12 × text tokens)` codec frames (15.4 s for a short sentence) and ends the stream as an error
+(`Qwen3TTSCodecLimitError`, "did not emit codec EOS before its token budget (192/192 codec tokens)"). Three settings,
+measured in `docs/reports/2026-10-07-realtime-handoff.md` § TTS runaway:
+
+- `qwen3_tts.yaml` is vLLM-Omni 0.28.0's `vllm_omni/deploy/qwen3_tts.yaml` with one value changed: the talker's
+  `repetition_penalty` 1.05 → 1.15. `start.sh` passes it as `--deploy-config`. Keep the rest equal to the engine's file
+  when the base image changes.
+- `tts_stream` sends `max_new_tokens` = the sentence's limit (`TTS_MAX_SECONDS` 3 + `TTS_MAX_SECONDS_PER_CHAR` 0.2 per
+  character) in codec frames (12.5 per second), so the engine stops there instead of at 15.4 s.
+- After its first chunk, a sentence's silent chunks (RMS ≤ 300) are held until sound arrives. Still silent after
+  `TTS_MAX_LEAD_SECONDS`, or failed before any sound: the request is dropped and sent again once (new random seed),
+  about 0.5 s later at 8 in parallel; the held silence is not played. `done.tts_retries` counts them. A sentence that
+  fails after sound still ends the turn with `error` (stage `tts`).
+
 ## Engine logs: `GET /debug/logs`
 
 `start.sh` writes each engine's stdout and stderr to `/var/log/{tts,llm,stt}.log` (`stt` is the orchestrator process:
 Whisper runs inside it, so its log is also where every `/v1/s2s` failure is printed). A file is renamed to `.1` when it
-passes `LOG_MAX_BYTES` (8 MB), so the three logs hold at most 48 MB.
+passes `LOG_MAX_BYTES` (32 MB: vLLM-Omni writes about 6 KB per request), so the three logs hold at most 192 MB.
 
 `GET /debug/logs?engine=tts|llm|stt&tail=200&match=<text>` returns the last `tail` lines (at most 2000, each cut at
 2000 characters) that contain `match`, as plain text, read from the rotated file and the current one. Through the
@@ -151,7 +170,7 @@ No text, transcript or audio is written by the orchestrator.
 
 ## Shipping server code without rebuilding the image
 
-The image keeps the models; the four files of `/opt/s2s` can come from the deployment's `files` (mounted read-only at
+The image keeps the models; the five files of `/opt/s2s` can come from the deployment's `files` (mounted read-only at
 `/files`, next to `voices.json`). `PUT /v1/deployments/parle-speech`:
 
 ```json
@@ -161,6 +180,7 @@ The image keeps the models; the four files of `/opt/s2s` can come from the deplo
   "env": { "S2S_DIR": "/files" },
   "files": {
     "start.sh": "<base64>", "server.py": "<base64>", "stt_batch.py": "<base64>", "stt_stream.py": "<base64>",
+    "qwen3_tts.yaml": "<base64>",
     "voices.json": "<base64>", "<every voice clip>": "<base64>"
   }
 }
