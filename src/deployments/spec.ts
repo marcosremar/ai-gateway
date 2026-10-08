@@ -7,7 +7,7 @@ import { autoscaleOf, warmScheduleOf } from './autoscale-spec';
 import { VAST_MAX_PORTS, vastPortCount, vastUdpRange } from './realtime-ports';
 import { scalingOf } from './scaling-spec';
 import { SpecError } from './spec-error';
-import type { DeploymentProvider, DeploymentSpec, ExposedPort, Placement, PlacementCandidate, Profile, ProfileSpec, RealtimeSpec } from './types';
+import type { DeploymentProvider, DeploymentSpec, ExposedPort, FileUrl, Placement, PlacementCandidate, Profile, ProfileSpec, RealtimeSpec } from './types';
 
 export { SpecError };
 
@@ -108,7 +108,7 @@ const KNOWN_FIELDS = new Set<string>([
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
   'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'realtime',
-  'scaling',
+  'scaling', 'fileUrls',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 
@@ -198,7 +198,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     let total = 0;
     const out2: Record<string, string> = {};
     for (const [key, value] of Object.entries(files)) {
-      if (!/^[A-Za-z0-9._-]{1,100}$/.test(key) || key === 'cloud-init') throw new SpecError(`files key '${key}' is invalid`);
+      if (!FILE_KEY_RE.test(key) || key === 'cloud-init') throw new SpecError(`files key '${key}' is invalid`);
       if (typeof value !== 'string' || !/^[A-Za-z0-9+/=]*$/.test(value)) throw new SpecError(`files.${key} must be base64`);
       total += Math.floor(value.length * 3 / 4);
       out2[key] = value;
@@ -206,6 +206,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     if (total > MAX_FILES_BYTES) throw new SpecError(`files total ${total} bytes; at most ${MAX_FILES_BYTES} fit in Scaleway user_data`);
     out.files = out2;
   }
+  if (input.fileUrls !== undefined) out.fileUrls = fileUrlsOf(input.fileUrls);
   if (input.minActiveReplicas !== undefined) {
     out.minActiveReplicas = int(input.minActiveReplicas, 'minActiveReplicas', 1, MAX_REPLICAS_PER_DEPLOYMENT);
   }
@@ -251,6 +252,29 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   if (input.autoscale !== undefined) out.autoscale = autoscaleOf(input.autoscale);
   if (input.warmSchedule !== undefined) out.warmSchedule = warmScheduleOf(input.warmSchedule, MAX_REPLICAS_PER_DEPLOYMENT);
   if (input.scaling !== undefined) out.scaling = input.scaling === null ? undefined : scalingOf(input.scaling);
+  return out;
+}
+
+export const MAX_FILE_URLS = 64;
+const FILE_KEY_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const FILE_URL_RE = /^https:\/\/[A-Za-z0-9._~:/?#[\]@!$&()*+,;=%-]{1,2000}$/;
+
+function fileUrlsOf(raw: unknown): Record<string, FileUrl> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('fileUrls must be an object of { url, sha256 }');
+  const entries = Object.entries(raw);
+  if (entries.length > MAX_FILE_URLS) throw new SpecError(`fileUrls lists at most ${MAX_FILE_URLS} files`);
+  const out: Record<string, FileUrl> = {};
+  for (const [key, value] of entries) {
+    if (!FILE_KEY_RE.test(key)) throw new SpecError(`fileUrls key '${key}' is invalid`);
+    const file = value as Record<string, unknown> | null;
+    if (!file || typeof file !== 'object' || Object.keys(file).some(k => k !== 'url' && k !== 'sha256')) {
+      throw new SpecError(`fileUrls.${key} must be { url, sha256 }`);
+    }
+    out[key] = {
+      url: str(file.url, `fileUrls.${key}.url (an https URL)`, FILE_URL_RE),
+      sha256: str(file.sha256, `fileUrls.${key}.sha256 (64 hex chars)`, /^[0-9a-f]{64}$/),
+    };
+  }
   return out;
 }
 
@@ -391,6 +415,8 @@ export function buildSpec(
   }
   // A reserved IP and firewall are zonal: an exposed deployment stays in its one zone.
   if (spec.exposure && spec.candidates?.length) throw new SpecError('candidates cannot be combined with exposure (the reserved IP is zonal)');
+  const twice = Object.keys(spec.fileUrls ?? {}).find(key => spec.files && key in spec.files);
+  if (twice) throw new SpecError(`'${twice}' is in both files and fileUrls`);
   if (usesVast(spec)) checkVastSpec(spec);
   return spec;
 }
@@ -409,7 +435,8 @@ export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates
 
 /**
  * Vast runs ONE container per host (no systemd, no Docker-in-Docker): the replica is `image` as the container with
- * `bootScript` as its onstart, the app on `127.0.0.1:<port>`. No user_data metadata service (no `files`), no reserved
+ * `bootScript` as its onstart, the app on `127.0.0.1:<port>`. No user_data metadata service (no `files`: `fileUrls`
+ * are downloaded at boot instead), no reserved
  * IP/firewall (no `exposure`), no power-off parking (no `idleAction: 'stop'`). `realtime` runs the edge inside that
  * container, one mapped port per UDP media port (`realtime-ports.ts`). Vast refuses a create whose env passes
  * 32 KB in total (`invalid env arguments, total length > 32KB`, live 2026-10-08), and the init script travels there.
@@ -419,14 +446,18 @@ const VAST_INIT_OVERHEAD_BYTES = 3_000;
 const VAST_RT_INIT_OVERHEAD_BYTES = 2_000;
 const VAST_PORT_ENV_BYTES = 24;
 
-export function vastEnvBytes(spec: Pick<DeploymentSpec, 'bootScript' | 'env' | 'envByMachineType' | 'machineType' | 'realtime'>): number {
+const VAST_FILE_URL_INIT_BYTES = 40;
+
+export function vastEnvBytes(spec: Pick<DeploymentSpec, 'bootScript' | 'env' | 'envByMachineType' | 'machineType' | 'realtime' | 'fileUrls'>): number {
   const b64 = (n: number) => Math.ceil(n / 3) * 4;
   const sizeOf = (map: Record<string, string> = {}, perEntry = 2) =>
     Object.entries(map).reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(v) + perEntry, 0);
   const env = sizeOf({ ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env });
   const edge = spec.realtime ? VAST_RT_INIT_OVERHEAD_BYTES + b64(sizeOf(spec.realtime.env, 16)) : 0;
   const [lo, hi] = vastUdpRange(spec) ?? [1, 0];
-  return b64(VAST_INIT_OVERHEAD_BYTES + edge + b64(Buffer.byteLength(spec.bootScript ?? '')) + b64(env)) + env + (hi - lo + 1) * VAST_PORT_ENV_BYTES;
+  const urls = Object.entries(spec.fileUrls ?? {}).reduce((n, [key, f]) => n + key.length + f.url.length + f.sha256.length + VAST_FILE_URL_INIT_BYTES, 0);
+  return b64(VAST_INIT_OVERHEAD_BYTES + edge + urls + b64(Buffer.byteLength(spec.bootScript ?? '')) + b64(env)) + env
+    + (hi - lo + 1) * VAST_PORT_ENV_BYTES;
 }
 
 function checkVastSpec(spec: DeploymentSpec): void {
