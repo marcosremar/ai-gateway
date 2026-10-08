@@ -15,6 +15,7 @@
  */
 
 
+import { hedgeCapOf } from '../internal-subrequest';
 import { createHash } from 'crypto';
 import { createLogger } from '../../../logger';
 
@@ -153,7 +154,7 @@ export async function handleAudioTranscriptions(
         prompt: body.prompt as string | undefined,
         responseFormat: (body.response_format as string) as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt' | undefined,
       }),
-      { stage: 'stt', signal: req.signal, timeoutMs: 15_000, budgetMs: stageBudgetMs('stt'), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
+      { stage: 'stt', signal: req.signal, timeoutMs: 15_000, budgetMs: stageBudgetMs('stt'), hedgeCapMs: hedgeCapOf(req.headers), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
     const applied = filterOn ? applySttFilter(result, language) : { text: result.text, response: result, filtered: undefined };

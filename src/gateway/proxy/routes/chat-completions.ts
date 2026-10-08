@@ -5,6 +5,7 @@
  * The client never sees a 429 — the gateway absorbs rate limits internally.
  */
 
+import { hedgeCapOf } from '../internal-subrequest';
 import type { LLMProvider, ChatMessage, ChatRequest, ChatResponse } from '../../providers/cloud/types';
 import type { ResponseCache } from '../../../caching/response-cache';
 import type { GatewayHooks } from '../../../hooks';
@@ -143,7 +144,7 @@ export async function handleChatCompletions(
     const includeUsage = stream_options !== undefined && (stream_options as Record<string, unknown>).include_usage === true;
     let opened: OpenedStream;
     try {
-      opened = await openStream(usable, chatOpts, breakers, budgetMs, req.signal);
+      opened = await openStream(usable, chatOpts, breakers, budgetMs, req.signal, hedgeCapOf(req.headers));
     } catch (err) {
       log.error(`All providers failed (stream) for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
       return errorResponse(withSkipped(err, skipped), 'chat', model);
@@ -401,7 +402,7 @@ function withStreamTimeout<T>(p: Promise<T>, ms = STREAM_TIMEOUT_MS, onTimeout?:
  */
 async function openStream(
   targets: Array<RouteTarget<LLMProvider>>, opts: ChatRequest, breakers: CircuitBreakerRegistry, budgetMs: number,
-  clientSignal?: AbortSignal,
+  clientSignal?: AbortSignal, hedgeCapMs = 0,
 ): Promise<OpenedStream> {
   const failures: string[] = [];
   const codes: FailureCodes = new Map();
@@ -427,7 +428,8 @@ async function openStream(
     // At most half of what is left, so the links behind it keep a real share of the budget.
     const ttfbCap = !target.providerId.startsWith('deployment:') && target !== targets[targets.length - 1] && cloudTtfb
       ? Math.min(cloudTtfb, Math.max(1, (deadline - Date.now()) / 2)) : 0;
-    const firstWaitMs = Math.max(1, Math.min(target.timeoutMs ?? (ttfbCap || STREAM_TIMEOUT_MS), deadline - Date.now()));
+    const turnCap = hedgeCapMs && target !== targets[targets.length - 1] ? hedgeCapMs : Infinity;
+    const firstWaitMs = Math.max(1, Math.min(target.timeoutMs ?? (ttfbCap || STREAM_TIMEOUT_MS), deadline - Date.now(), turnCap));
     try {
       if (!target.provider.chatStream) {
         const full = await withStreamTimeout(target.provider.chat(request), firstWaitMs, () => abort.abort());
