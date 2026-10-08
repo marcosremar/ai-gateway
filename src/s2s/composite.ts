@@ -210,6 +210,7 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
   let firstAudio: number | null = null;
   let missingAudio = 0;
   let sentRate: number | null = null;
+  let audioMs = 0;
   let index = 0;
   for (;;) {
     if (index >= queue.length) {
@@ -242,6 +243,7 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
           firstAudio = ms();
           opts.emitEvent({ type: 'first_audio', at_ms: firstAudio, provider: spoken.provider, fallback: spoken.fallback });
         }
+        if (stripper) audioMs += (pcm.length / 2 / rate) * 1000;
         opts.emitAudio(pcm);
       }
     } catch (err) {
@@ -258,6 +260,7 @@ export async function runComposite(opts: CompositeOptions): Promise<CompositeRes
     type: 'done', reply: reply.join(' '), transcript, first_audio_ms: firstAudio, total_ms: ms(),
     ...(config.speak_field ? { reply_raw: raw } : {}),
     ...(missingAudio ? { missing_audio: missingAudio } : {}),
+    sentences: index, spoken: index - missingAudio, skipped: missingAudio, audio_ms: Math.round(audioMs),
   });
   return { transcript, reply: reply.join(' '), replyRaw: raw, firstAudioMs: firstAudio, missingAudio };
 }

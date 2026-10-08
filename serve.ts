@@ -24,6 +24,7 @@ import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
 import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
 import { createS2SRoute } from './src/s2s/route';
+import { streamCuts } from './src/telemetry/stream-cuts';
 import { createS2SAccess } from './src/s2s/access';
 import { appStagesView, realtimeHealth } from './src/gateway/proxy/health-view';
 import { loopbackStages } from './src/s2s/loopback-stages';
@@ -288,6 +289,7 @@ const s2sRoute = createS2SRoute({
   admit: s2sAdmit,
   hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
   budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
+  maxGapMs: optionalMs(process.env.S2S_MAX_GAP_MS),
   primarySpeaksJson: process.env.S2S_PRIMARY_SPEAK_FIELD === '1',
   stagesFor: (req, config) => loopbackStages({
     baseUrl: `http://127.0.0.1:${PORT}`,
@@ -325,7 +327,7 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
-  healthDetails: (viewer) => (viewer.admin ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []) } : appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage))),
+  healthDetails: (viewer) => (viewer.admin ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts() } : appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage))),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
     ...(telemetry?.adminRoutes ?? []),

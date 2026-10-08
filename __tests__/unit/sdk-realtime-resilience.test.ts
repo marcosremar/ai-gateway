@@ -273,6 +273,18 @@ describe('reply cut by an upstream error', () => {
     s.close();
   });
 
+  it('a truncated stream (clip rung) with a known remainder is recovered the same way', async () => {
+    const p = fakePlayer();
+    const { s, events, pc } = await failingReply({ speak: async (text) => audioOf(text), createPlayer: async () => p.player });
+    pc.edge({ type: 'error', code: 'truncated', message: 's2s stream ended without done', unspoken: 'São dois reais.' });
+    pc.edge({ type: 'done', error: true });
+    await vi.waitFor(() => expect(p.played).toEqual(['audio<São dois reais.>'])); // before: only code `upstream` was recovered
+    p.finish();
+    await vi.waitFor(() => expect(events.at(-1)).toEqual({ type: 'done' }));
+    expect(events.some(e => e.type === 'error')).toBe(false);
+    s.close();
+  });
+
   it('no cut point from the edge, or no speak: the error and done{error} reach the page as before', async () => {
     const spoken: string[] = [];
     const a = await failingReply({ speak: async (text) => { spoken.push(text); return audioOf(text); }, createPlayer: async () => fakePlayer().player });
