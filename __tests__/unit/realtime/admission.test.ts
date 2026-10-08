@@ -139,6 +139,15 @@ describe('POST /v1/realtime/sessions', () => {
     expect(gw.charged).toEqual([]);
   });
 
+  it('a draining replica keeps reporting its seated sessions (a stale report reads as empty and the drain releases it)', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host, draining: true }] });
+    const listed = { ...controller, list: () => [{ name: 'speech' }] as never, specOf: () => ({ realtime: {} }) as never };
+    gw = await startGateway(listed, { netProbeMs: 0 });
+    edge.status = { ...edge.status!, active: 2 };
+    await gw.realtime.service.probeAll();
+    expect(externalLoadOf('speech').active).toBe(2);
+  });
+
   it('sessions admitted by a previous gateway process keep the deployment awake (the session table died with it)', async () => {
     const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
     const listed = { ...controller, list: () => [{ name: 'speech' }] as never, specOf: () => ({ realtime: {} }) as never };
