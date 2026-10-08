@@ -11,7 +11,7 @@
  */
 import { FrameDecoder, type S2SEvent } from '../../../../src/s2s/frames';
 import { createPcmPlayer, type PcmPlayer } from '../audio-io';
-import type { ChatMessage, ClientMessage, RealtimeEvent, RealtimeTransport, TransportContext } from '../types';
+import type { ChatMessage, ClientMessage, RealtimeEvent, RealtimeTransport, TransportContext, TurnServed } from '../types';
 
 export interface S2SEndpoint {
   /** The app backend route that relays to the gateway's `/v1/s2s`. */
@@ -58,7 +58,10 @@ export function mapS2SEvent(e: S2SEvent): RealtimeEvent[] {
         ...(typeof e.opener === 'string' ? { opener: e.opener } : {}),
         ...(typeof e.deadline_missed === 'boolean' ? { deadline_missed: e.deadline_missed } : {}),
       });
-      out.push({ type: 'done', ...(e.empty ? { empty: true } : {}), ...(e.filtered ? { filtered: true } : {}), ...(e.partial ? { error: true } : {}) });
+      out.push({
+        type: 'done', ...(e.empty ? { empty: true } : {}), ...(e.filtered ? { filtered: true } : {}), ...(e.partial ? { error: true } : {}),
+        ...(e.served ? { served: e.served as TurnServed } : {}),
+      });
       return out;
     }
     default: return [];

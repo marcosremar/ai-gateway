@@ -83,6 +83,8 @@ export interface RealtimeSession {
   interrupt(): void;
   /** Appends user / assistant messages to the conversation (and tells the edge); a `system` message is dropped: the signed session config owns the prompt. */
   updateHistory(messages: ChatMessage[]): void;
+  /** Hands the edge an update the gateway signed for the app (`POST /v1/realtime/updates`); `history` replaces the turns this session replays. */
+  applyUpdate(signed: string, history?: ChatMessage[]): void;
   /** Clip rungs: one recorded learner turn (16 kHz WAV). Realtime rungs ignore it (their audio is live). */
   sendTurn(wav: Blob): Promise<void>;
   close(): void;
@@ -174,6 +176,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   const clips: OpenerClip[] = [];
   let lastOpener = -1;
   let serverOpenerOff = false;
+  let heardAt: number | null = null;
   let cacheAbort: AbortController | null = null;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   let playingOpener: { index: number; timer: ReturnType<typeof setTimeout> } | null = null;
@@ -183,7 +186,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   let quietSince = 0;
   let heardUntil = 0;
 
-  const baseConfig = () => (descriptor ? configFromToken(descriptor.token) : null) ?? opts.config ?? {};
+  const baseConfig = () => (descriptor ? configFromToken(descriptor.token, descriptor.cfg) : null) ?? opts.config ?? {};
   const config = () => {
     const base = baseConfig();
     const prior = Array.isArray(base.messages) ? base.messages as ChatMessage[] : [];
@@ -282,8 +285,9 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     if (playingOpener && !current?.playOpener && (e.type === 'audio_start' || (e.type === 'opener' && e.state === 'start' && !e.local))) endOpener(true);
     if (e.type === 'transcript' && e.final) {
       if (!turn) startTurn();
-      if (e.text) appended.push({ role: 'user', content: e.text });
+      if (e.text) heardAt = appended.push({ role: 'user', content: e.text }) - 1;
     }
+    if (e.type === 'intercept' && heardAt !== null) appended.splice(heardAt, 1);
     if (e.type === 'reply' && e.text) appended.push({ role: 'assistant', content: e.text });
     if (e.type === 'route' && turn) Object.assign(turn, { provider: e.provider, fallback: e.fallback });
     if (e.type === 'audio_start') {
@@ -317,6 +321,8 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       };
     }
     if (e.type === 'done') {
+      heardAt = null;
+      if (e.served && metrics.lastTurn) metrics.lastTurn.served = e.served;
       clearTimeout(deadlineTimer);
       if (turn?.localOpener) restoreServerOpener();
       if (turn) {
@@ -685,6 +691,10 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       const turns = messages.filter(m => m.role !== 'system');
       appended.push(...turns);
       if (current && !current.clipBased) current.send({ type: 'config_update', messages: turns });
+    },
+    applyUpdate(signed, history) {
+      if (history) appended.splice(0, appended.length, ...history.filter(m => m.role !== 'system'));
+      if (current && !current.clipBased) current.send({ type: 'config_update', signed });
     },
     async sendTurn(wav) {
       if (!current?.clipBased || closed) return;

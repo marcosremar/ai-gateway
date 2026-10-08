@@ -66,6 +66,14 @@ def health_llm_ctx(body: bytes) -> int | None:
         return None
 
 
+def health_models(body: bytes) -> dict | None:
+    try:
+        models = json.loads(body)["models"]
+        return models if isinstance(models, dict) else None
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
 def _headers(trace_id: str | None) -> dict:
     return {"traceparent": child_traceparent(trace_id)} if trace_id else {}
 
@@ -76,6 +84,7 @@ class Upstream:
         self.http: aiohttp.ClientSession | None = None
         self.ready = False
         self.llm_ctx = DEFAULT_SLOT_CTX
+        self.models: dict = {}
         self.voices: dict[str, dict] = {}
         self.voices_at = 0.0
 
@@ -96,7 +105,9 @@ class Upstream:
                 async with self.http.get(self.s.upstream + self.s.upstream_health, timeout=aiohttp.ClientTimeout(total=5)) as r:
                     self.ready = r.status == 200
                     if self.ready:
-                        self.llm_ctx = health_llm_ctx(await r.read()) or self.llm_ctx
+                        body = await r.read()
+                        self.llm_ctx = health_llm_ctx(body) or self.llm_ctx
+                        self.models = health_models(body) or self.models
             except Exception:  # noqa: BLE001 — not up yet
                 self.ready = False
             await asyncio.sleep(5 if self.ready else 2)

@@ -127,7 +127,7 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 
 | Route | Body → answer |
 |---|---|
-| `POST /__aigw/rt/offer` | `{sdp, type:"offer", token, traceparent?}` → `{sdp, type:"answer", sessionId}`; 401 `unauthorized`, 503 `capacity` / `warming`, 400 `bad_request`. Again with the same token while the session lives: a new peer connection for it (re-offer) |
+| `POST /__aigw/rt/offer` | `{sdp, type:"offer", token, cfg?, traceparent?}` → `{sdp, type:"answer", sessionId}`; 401 `unauthorized`, 503 `capacity` / `warming`, 400 `bad_request`. Again with the same token while the session lives: a new peer connection for it (re-offer) |
 | `POST /__aigw/rt/ice` | `{sessionId, candidate}` (string or `{candidate, sdpMid, sdpMLineIndex}`; empty = end) — optional, the answer carries all candidates |
 | `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], probePort, net, ready, byTransport, workers, firstAudioMaxMs, shedding}` (`transports` is `["ws"]` on path `ws`; `available` is 0 while `shedding`) |
 | `POST /__aigw/rt/net` | `{udpInbound:"ok"\|"blocked", rttMs, iceServers}` from the gateway's probe → the decision (see *Reachability*) |
@@ -135,7 +135,9 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 | `GET /__aigw/rt/ws?token=…&traceparent=…` | WebSocket. A refusal still upgrades, sends `{type:"error", code}` and closes 4401 (`unauthorized`) or 1013 (`capacity`/`warming`), so the code survives the relay |
 
 Token checks (the gateway's vectors, `tests/test_units.py`): HS256 only, constant-time signature, `exp > now`,
-`iat ≤ now + 60`, `exp − iat ≤ 900`, `cfg` ≤ 6144 chars and a JSON object, `rep` = this replica (`zone:uuid` also
+`iat ≤ now + 60`, `exp − iat ≤ 900`, `cfg` ≤ 6144 chars and a JSON object (or, with a `cfd` claim, the config handed
+over at session start — offer body `cfg`, first WS frame `{type:"session_config", cfg}` within 5 s — ≤ 32768 chars and
+hashing to `cfd`: `docs/realtime.md` § Token, config by reference), `rep` = this replica (`zone:uuid` also
 matches a bare `uuid`), `dep` = this deployment, `sid` single use **per transport** (remembered until `exp`): the SDK's ladder tries WebRTC
 and WS with the one token of its admission — raced at the start, or one after the other — so a `sid` may have one session of each
 transport at the same time, until the SDK closes one (the WS once WebRTC took over; the WebRTC attempt it gave up, by `DELETE`). The
@@ -186,6 +188,15 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   (same thresholds, same core blocklist, same reason codes). Verdict parity is enforced on > 1000 cases by
   `__tests__/unit/stt-filter/edge-parity.test.ts`. A drop emits `filtered{reasons}` then `done{filtered:true}`;
   `cfg.filter_hallucinations: false` skips it.
+- **App hooks** (`docs/realtime.md` § App hooks; all off unless the signed config names them): `cfg.intercepts`
+  (`aigw_edge/intercept.py`: a normalised-phrase matcher run on the final transcript after the guard — a match skips
+  the LLM, optionally voices the rule's line, emits `intercept` and `done{intercepted}`, and leaves the history
+  untouched; `edge.turn.intercepted {tag, action}`, `edge.turn.done` `outcome: "intercepted"`); a signed
+  `config_update{signed}` (`token.py` `verify_update`: same key, this `sid`, `n` increasing — drops a turn, replaces
+  history or config fields, voices a `say` line; `edge.config.signed {seq, keys}`); `cfg.reply_guard` (first sentence
+  against the app's deny phrases before its TTS, one regeneration; `edge.llm.reply_guard`); `done.served`
+  (`{stt, llm, tts, voice, opener, transport}`, the ids from the upstream's `/health` → `models`, handed to the
+  WebRTC workers with each offer as `llm_ctx` is).
 - **LLM**: `/v1/chat/completions`, `stream: true`, model `EDGE_LLM_MODEL` (`llm`), `system` + history + the user turn
   (`user_template` with `{{transcript}}`), `max_tokens`, `temperature`, `response_format`, `speak_field` (only that JSON
   field is voiced; same extractor as `/v1/s2s`).
@@ -302,7 +313,9 @@ instead of the redirect. `REALTIME_TURN_URLS` example:
 
 ## Tests
 
-- `docker/aigw-edge/tests/run.sh units` — token (and the gateway's vectors: key, every case, TURN credential), cutter
+- `docker/aigw-edge/tests/run.sh units` — the signed-config rule, config by reference, the phrase matcher against the
+  school's four voice commands, signed updates (and the gateway's vector), `tests/test_session.py` `app_turn_hook`
+  (intercept drop / say, speculated or not, no first-audio cost, reply guard, served ids), token (and the gateway's vectors: key, every case, TURN credential), cutter
   copy, VAD, 48→16 kHz filter, telemetry emitter, and `tests/test_session.py`: a session on in-process fakes (endpoint
   metrics, the speculative turn confirmed / discarded / interrupted / closed, partials on and off, the first-audio
   deadline: reply in time, late, opener still playing, barge-in, rotation, cache reuse, no opener; admission shedding).
