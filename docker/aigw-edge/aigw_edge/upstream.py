@@ -5,6 +5,8 @@ servers behind one front).
 
     transcribe(pcm16k)            POST /v1/audio/transcriptions  (multipart WAV + language + prompt)
     chat_stream(messages, cfg)    POST /v1/chat/completions      (stream: true, SSE deltas)
+    health_loop                   GET  /health                   (200 = ready; a JSON `llm_ctx` is the LLM's context per
+                                  slot, the budget of the session's history — text.fit_history)
     speak(text, cfg) → PCM        POST /v1/audio/speech          (stream: true, raw PCM s16le, or WAV whose header is read)
                                   Both raise UpstreamError(stage llm | tts) when the body breaks, when nothing arrives for
                                   EDGE_UPSTREAM_GAP_S (10), and chat_stream also on an SSE `{"error": …}` event.
@@ -29,6 +31,7 @@ import numpy as np
 
 from .config import Settings
 from .telemetry import child_traceparent
+from .text import DEFAULT_SLOT_CTX
 
 TTS_SILENCE_RMS = 300
 TTS_FRAMES_PER_SECOND = 12.5
@@ -56,6 +59,13 @@ class UpstreamError(RuntimeError):
         self.stage, self.status = stage, status
 
 
+def health_llm_ctx(body: bytes) -> int | None:
+    try:
+        return int(json.loads(body)["llm_ctx"])
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
 def _headers(trace_id: str | None) -> dict:
     return {"traceparent": child_traceparent(trace_id)} if trace_id else {}
 
@@ -65,6 +75,7 @@ class Upstream:
         self.s = settings
         self.http: aiohttp.ClientSession | None = None
         self.ready = False
+        self.llm_ctx = DEFAULT_SLOT_CTX
         self.voices: dict[str, dict] = {}
         self.voices_at = 0.0
 
@@ -84,6 +95,8 @@ class Upstream:
             try:
                 async with self.http.get(self.s.upstream + self.s.upstream_health, timeout=aiohttp.ClientTimeout(total=5)) as r:
                     self.ready = r.status == 200
+                    if self.ready:
+                        self.llm_ctx = health_llm_ctx(await r.read()) or self.llm_ctx
             except Exception:  # noqa: BLE001 — not up yet
                 self.ready = False
             await asyncio.sleep(5 if self.ready else 2)

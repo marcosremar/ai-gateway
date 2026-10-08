@@ -130,13 +130,28 @@ for case in vec["cases"]:
 t = vec["turn"]
 check("vectors: TURN credential", turn_credential(t["secret"], t["sessionId"], t["expiresAtSeconds"]) == (t["username"], t["credential"]))
 
+history_vectors = ROOT.parents[1] / "docs" / "s2s-history-vectors.json"
+if history_vectors.exists():
+    for case in json.loads(history_vectors.read_text())["cases"]:
+        kept = text.fit_history(case["system"], case["history"], case["user"], case["max_tokens"], case["ctx"], case.get("harder", False))
+        check(f"history: {case['name']}", kept == [case["history"][i] for i in case["kept"]])
+shop_clerk = " ".join(["Você é a atendente da padaria e responde curto, com uma frase só, sempre em português."] * 21)
+check("history: the estimate is over the 509 tokens llama.cpp counted for a 332-word Portuguese prompt (3 bytes per token)",
+      328 <= len(shop_clerk.split()) <= 340 and text.estimate_tokens(shop_clerk) >= 509 * 1.2)
+check("history: an accented letter counts by its bytes, an empty text costs nothing",
+      text.estimate_tokens("ééé") == text.MESSAGE_TOKENS + 2 and text.estimate_tokens("") == text.estimate_tokens(None) == 0)
+
 try:
     import asyncio
 
     from aiohttp import web
 
     from aigw_edge.config import Settings
-    from aigw_edge.upstream import Upstream, UpstreamError
+    from aigw_edge.upstream import Upstream, UpstreamError, health_llm_ctx
+
+    check("upstream: /health llm_ctx is read when it is there, any other body keeps the default",
+          health_llm_ctx(b'{"ok": true, "llm_ctx": 4096}') == 4096 and health_llm_ctx(b"ok") is None
+          and health_llm_ctx(b'{"ok": true}') is None and Upstream(Settings()).llm_ctx == text.DEFAULT_SLOT_CTX)
 
     async def cut_tts_stream():
         async def speech(request):

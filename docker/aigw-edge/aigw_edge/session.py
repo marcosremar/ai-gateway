@@ -7,9 +7,11 @@ One learner's realtime session, independent of the transport (WebRTC or WebSocke
 
 Barge-in: learner speech (server VAD) or `interrupt` while a turn is thinking or speaking cancels the LLM/TTS calls,
 drops the queued audio and emits `interrupted`. History (`messages`) grows by one user + one assistant message per turn
-(the assistant part is what was generated before an interruption); `config_update{messages}` appends to it. When the
-LLM refuses a turn because the conversation no longer fits its context (HTTP 400, "context size"), the oldest half of
-the history is dropped and the turn is asked once more.
+(the assistant part is what was generated before an interruption); `config_update{messages}` appends to it. Before
+each LLM call the history is cut to the LLM's context per slot (`text.fit_history`: the system prompt, system messages
+and the newest turns stay; the oldest whole user/assistant turns go, DROP_PAIRS at a time so the prompt prefix the LLM
+has cached stays the same between cuts). When the LLM still refuses the turn (HTTP 400, "context size") it is asked
+once more with half the room, before any sound.
 """
 
 import asyncio
@@ -21,7 +23,7 @@ import numpy as np
 from . import opener
 from .config import MAX_FIRST_AUDIO_DEADLINE_MS, Settings
 from .hallucination import filter_transcript
-from .text import JsonField, cut
+from .text import JsonField, cut, fit_history
 from .telemetry import new_trace_id, telemetry
 from .upstream import Upstream, UpstreamError
 from .vad import FRAME_SAMPLES, EnergyVad, load_silero
@@ -455,24 +457,30 @@ class Session:
             return False
         return True
 
-    def _messages_for(self, text: str) -> list[dict]:
+    def _messages_for(self, text: str, harder: bool = False) -> list[dict]:
         template = self.cfg.get("user_template") or ""
         user = template.replace("{{transcript}}", text) if "{{transcript}}" in template else text
-        system = [{"role": "system", "content": self.cfg["system"]}] if self.cfg.get("system") else []
-        return system + self.messages + [{"role": "user", "content": user}]
+        system = self.cfg.get("system")
+        kept = fit_history(system, self.messages, user, int(self.cfg.get("max_tokens", 160)), self.up.llm_ctx, harder)
+        if len(kept) < len(self.messages):
+            self.tel("edge.llm.history_trimmed", turn_id=self.turn_id, dropped=len(self.messages) - len(kept), kept=len(kept),
+                     harder=harder)
+            self.messages = kept
+        return ([{"role": "system", "content": system}] if system else []) + kept + [{"role": "user", "content": user}]
 
     async def _chat(self, text: str):
-        for retry in (False, True):
-            try:
-                async for delta in self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
-                    yield delta
-                return
-            except UpstreamError as error:
-                if retry or error.status != 400 or "context size" not in str(error) or len(self.messages) < 2:
-                    raise
-                dropped = max(2, len(self.messages) // 4 * 2)
-                del self.messages[:dropped]
-                self.tel("edge.llm.history_trimmed", turn_id=self.turn_id, dropped=dropped, kept=len(self.messages))
+        try:
+            async for delta in self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
+                yield delta
+        except UpstreamError as error:
+            size = len(self.messages)
+            if error.status != 400 or "context size" not in str(error):
+                raise
+            messages = self._messages_for(text, harder=True)
+            if len(self.messages) == size:
+                raise
+            async for delta in self.up.chat_stream(messages, self.cfg, self.trace_id):
+                yield delta
 
     async def _answer(self, text: str, ended: float, metrics: dict, spoken: list[str], tel, deltas=None) -> None:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731

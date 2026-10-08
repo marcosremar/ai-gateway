@@ -164,6 +164,10 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   to close, 300 ms pre-roll; optional Silero ONNX gate with `RT_SILERO_ONNX` + onnxruntime) **and** the client's
   `end_turn` always works. `cfg.vad = "client"` leaves turn-taking to the client (parle's Silero in the browser):
   the edge then answers only `end_turn`, and barge-in is the client's `interrupt`.
+- **History**: before each LLM call the session cuts its history to the LLM's context per slot (the upstream's
+  `/health` → `llm_ctx`, default 2048): system prompt, system messages and the newest turns stay, the oldest whole
+  user/assistant turns go, 8 at a time (`edge.llm.history_trimmed {dropped, kept, harder}`). A `400 … context size`
+  is asked once more with half the room. Rule and numbers: `docker/speech-stack/README.md` § Conversation history.
 - **Speculative turn** (`EDGE_SPECULATE_MS` = 300, `0` = off; server VAD in `stages` mode only): after that much
   silence the edge already sends the turn to STT and, once the transcript passes the guard, opens the LLM stream, but
   holds everything (events, TTS, audio, history, a failed STT's error) until the VAD closes the turn at

@@ -1,6 +1,7 @@
 import asyncio
 import collections
 import json
+import math
 import os
 import sys
 import time
@@ -15,6 +16,7 @@ os.environ["EDGE_TELEMETRY_STDOUT"] = "0"
 from aigw_edge import opener as opener_module  # noqa: E402
 from aigw_edge import session as session_module  # noqa: E402
 from aigw_edge.config import Settings  # noqa: E402
+from aigw_edge.text import DROP_PAIRS  # noqa: E402
 from aigw_edge.server import Edge  # noqa: E402
 from aigw_edge.upstream import Upstream, UpstreamError, silent  # noqa: E402
 import fake_upstream  # noqa: E402
@@ -71,7 +73,10 @@ class FakeUpstream:
         self.stt_fails = False
         self.llm_delay = 0.0
         self.llm_fails_after: int | None = None
-        self.llm_context_messages: int | None = None
+        self.llm_ctx = 2048
+        self.llm_bytes_per_token: float | None = None
+        self.llm_rejected = 0
+        self.llm_prompts: list[list[dict]] = []
         self.spoken: list[str] = []
 
     async def transcribe(self, pcm16, language, prompt, trace_id=None):
@@ -88,8 +93,12 @@ class FakeUpstream:
     async def chat_stream(self, messages, cfg, trace_id=None):
         self.calls["llm"] += 1
         self.llm_messages = messages
-        if self.llm_context_messages is not None and len(messages) > self.llm_context_messages:
-            raise UpstreamError("llm", 400, '{"error":{"code":400,"message":"request (2062 tokens) exceeds the available context size (2048 tokens)"}}')
+        if self.llm_bytes_per_token:
+            prompt = sum(4 + math.ceil(len(m["content"].encode()) / self.llm_bytes_per_token) for m in messages)
+            if prompt + int(cfg.get("max_tokens", 160)) > self.llm_ctx:
+                self.llm_rejected += 1
+                raise UpstreamError("llm", 400, f'{{"error":{{"code":400,"message":"request ({prompt} tokens) exceeds the available context size ({self.llm_ctx} tokens)"}}}}')
+            self.llm_prompts.append(messages)
         finished = False
         try:
             await asyncio.sleep(LLM_TTFT_MS / 1000 + self.llm_delay)
@@ -500,25 +509,70 @@ async def llm_failure() -> None:
         await learner.close()
 
 
+SCHOOL_SYSTEM = "Speak only Brazilian Portuguese. Plain text only, no emojis, no stage directions. Answer in about 6-8 words. " * 24
+PERSONA = {"role": "system", "content": "Persona: Lúcia, 52 anos, dona da padaria da esquina."}
+LEARNER_LINES = ["Bom dia, eu queria um pão francês, por favor.", "Quanto custa?", "Não entendi, pode repetir mais devagar?",
+                 "Bonjour, je voudrais deux croissants et une baguette bien cuite, s'il vous plaît, et aussi un café crème.",
+                 "Eu queria também um café com leite e dois pães de queijo para viagem, se a senhora tiver agora de manhã."]
+NPC_LINES = ["Bom dia! O pão francês custa cinquenta centavos.", "Custa três reais e cinquenta.",
+             "Claro. O pão custa cinquenta centavos. Você quer quantos pães? Hoje também tem pão de queijo quentinho e bolo de fubá.",
+             "Bien sûr ! Deux croissants, une baguette bien cuite et un café crème, ça fait sept euros cinquante."]
+
+
+def whole_pairs(messages: list[dict]) -> bool:
+    turns = [m["role"] for m in messages[1:] if m["role"] != "system"]
+    return turns[0::2] == ["user"] * len(turns[0::2]) and turns[1::2] == ["assistant"] * len(turns[1::2]) and turns[-1] == "user"
+
+
+async def long_session() -> None:
+    up = FakeUpstream()
+    up.llm_bytes_per_token, up.llm_delay = 3.6, -LLM_TTFT_MS / 1000
+    learner = Learner({**CFG, "system": SCHOOL_SYSTEM}, up=up)
+    session = learner.session
+    session.control({"type": "config_update", "messages": [PERSONA]})
+    mark, cuts = len(telemetry_events), 0
+    for turn in range(70):
+        before = list(session.messages)
+        user = LEARNER_LINES[turn % len(LEARNER_LINES)]
+        async for _ in session._chat(user):
+            pass
+        cuts += session.messages != before
+        session.messages += [{"role": "user", "content": user}, {"role": "assistant", "content": NPC_LINES[turn % len(NPC_LINES)]}]
+    trims = [kw for event, kw in telemetry_events[mark:] if event == "edge.llm.history_trimmed"]
+    check("long session: 70 turns with the school's prompt size, the LLM never answers 400 and every turn is answered",
+          up.llm_rejected == 0 and len(up.llm_prompts) == 70, (up.llm_rejected, len(up.llm_prompts)))
+    check("long session: the system prompt and the app's system message reach the LLM on every turn",
+          all(sent[0] == {"role": "system", "content": SCHOOL_SYSTEM} and PERSONA in sent for sent in up.llm_prompts))
+    check("long session: the history is cut in whole user/assistant pairs and ends with the current user turn",
+          all(whole_pairs(sent) for sent in up.llm_prompts))
+    check("long session: the newest turns stay, the last prompt carries the previous exchange",
+          [m["content"] for m in up.llm_prompts[-1][-3:]] == [LEARNER_LINES[68 % 5], NPC_LINES[68 % 4], LEARNER_LINES[69 % 5]], up.llm_prompts[-1][-3:])
+    check(f"long session: cuts come {DROP_PAIRS} pairs at a time, so the prompt prefix is unchanged on the turns between",
+          1 <= cuts == len(trims) <= 70 // DROP_PAIRS and all(kw["dropped"] == 2 * DROP_PAIRS and not kw["harder"] for kw in trims)
+          and sum(a == b[:len(a)] for a, b in zip([sent[:-1] for sent in up.llm_prompts], up.llm_prompts[1:])) == 69 - cuts, (cuts, trims))
+    await learner.close()
+
+
 async def history_overflow() -> None:
     for name, settings in (("speculated", {}), ("no speculation", {"speculate_ms": 0})):
         up = FakeUpstream()
-        up.llm_context_messages = 6
-        learner = Learner(up=up, **settings)
-        learner.session.messages += [{"role": role, "content": f"{role} {i}"} for i in range(4) for role in ("user", "assistant")]
+        up.llm_bytes_per_token = 1.2
+        learner = Learner({**CFG, "system": SCHOOL_SYSTEM[:1500]}, up=up, **settings)
+        learner.session.messages += [{"role": role, "content": f"{role} {i} " + LEARNER_LINES[0]} for i in range(12) for role in ("user", "assistant")]
         mark = len(telemetry_events)
         learner.say(0.5)
         try:
             done = await learner.wait("done", 4)
         except TimeoutError as error:
             done = {"hung": str(error)}
-        check(f"history overflow, {name}: the turn is answered after the oldest half of the history is dropped",
-              not done.get("error") and not learner.of("error") and bool(learner.of("audio_start")), (done, learner.types()))
-        check(f"history overflow, {name}: the LLM got the newest messages, the dropped ones are gone for good",
-              [m["content"] for m in up.llm_messages[1:-1]] == ["user 2", "assistant 2", "user 3", "assistant 3"]
-              and len(learner.session.messages) == 6, (up.llm_messages, learner.session.messages))
-        check(f"history overflow, {name}: edge.llm.history_trimmed says what was dropped",
-              [(kw["dropped"], kw["kept"]) for event, kw in telemetry_events[mark:] if event == "edge.llm.history_trimmed"] == [(4, 4)])
+        check(f"history overflow, {name}: an LLM denser than the estimate answers 400 once, the turn is asked again and answered",
+              not done.get("error") and not learner.of("error") and bool(learner.of("audio_start")) and up.llm_rejected == 1,
+              (done, learner.types(), up.llm_rejected))
+        check(f"history overflow, {name}: the second ask keeps the system prompt and the newest whole pairs",
+              up.llm_messages[0]["content"] == SCHOOL_SYSTEM[:1500] and whole_pairs(up.llm_messages)
+              and up.llm_messages[-2]["content"].startswith("assistant 11") and 2 < len(up.llm_messages) < 26, [m["content"][:14] for m in up.llm_messages])
+        check(f"history overflow, {name}: edge.llm.history_trimmed says what was dropped and that it was the harder cut",
+              [(kw["dropped"], kw["kept"], kw["harder"]) for event, kw in telemetry_events[mark:] if event == "edge.llm.history_trimmed"] == [(16, 8, True)])
         await learner.close()
 
 
@@ -652,7 +706,7 @@ async def tts_guard() -> None:
 async def main() -> None:
     for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials,
                      first_audio_deadline, admission_shedding, tts_guard, llm_failure,
-                     history_overflow):
+                     long_session, history_overflow):
         await scenario()
     print(json.dumps(results))
 

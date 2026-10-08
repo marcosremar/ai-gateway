@@ -30,7 +30,7 @@ ns: dict = {"asyncio": asyncio, "math": math, "uuid": uuid, "TTS_FRAMES_PER_SECO
             "HTTPException": Exception, "StreamingResponse": lambda body, **_: body, "client": None, "TTS_URL": "",
             "LLM_URL": "", "TTS_MODEL": "tts", "FIRST_MIN_WORDS": 3, "MAX_CHUNK_CHARS": 160, "TTS_PARALLEL": 2, "SAMPLE_RATE": 24000,
             "S2S_MAX_GAP_S": 0.3, "S2S_DEADLINE_S": 5.0, "TTS_MAX_SECONDS": 3.0, "TTS_MAX_SECONDS_PER_CHAR": 0.2,
-            "voices": {"v": {"audio": "a", "text": "t"}}, "turns": turns}
+            "voices": {"v": {"audio": "a", "text": "t"}}, "turns": turns, "ready": {}}
 exec(src[src.index("SENTENCE_END ="):src.index("# ── Single-stage endpoints")], ns)
 ns["transcribe_sync"] = lambda *_: {"text": "oi", "ms": 1}
 REPLY = ["Bom dia! ", "Aqui está o pão. ", "Até logo, amiga."]
@@ -66,11 +66,27 @@ def tts(fail_on=None, hang_on=None):
     return stream
 
 
-async def turn(llm_stream, tts_stream):
+def strict_llm(ctx, bytes_per_token, seen):
+    async def stream(messages, max_tokens, *_args, **_kwargs):
+        prompt = sum(4 + math.ceil(len(m["content"].encode()) / bytes_per_token) for m in messages)
+        if prompt + max_tokens > ctx:
+            seen.append(None)
+            raise RuntimeError(f"llm http 400: b'request ({prompt} tokens) exceeds the available context size ({ctx} tokens)'")
+        seen.append(messages)
+        yield "Bom dia! "
+    return stream
+
+
+def whole_pairs(messages):
+    roles = [m["role"] for m in messages[1:] if m["role"] != "system"]
+    return roles[0::2] == ["user"] * len(roles[0::2]) and roles[1::2] == ["assistant"] * len(roles[1::2]) and roles[-1] == "user"
+
+
+async def turn(llm_stream, tts_stream, cfg=None):
     running.clear()
     ns["llm_stream"], ns["tts_stream"] = llm_stream, tts_stream
     request = SimpleNamespace(query_params={})
-    body = await ns["s2s"](request, Upload(), json.dumps({"voice": "v"}))
+    body = await ns["s2s"](request, Upload(), json.dumps({"voice": "v", **(cfg or {})}))
     events, audio = [], 0
 
     async def read():
@@ -123,6 +139,36 @@ async def main():
     assert events[-1]["code"] == "upstream_stalled" and time.perf_counter() - started < 1.5, events[-1]
     assert turns == {"started": 7, "done": 1, "failed": {"llm": 2, "tts": 1}, "stalled": {"tts": 1, "llm": 2}}, turns
     print("ok: a turn ends with done (with its sentence count) or an in-band error naming the stage, and never hangs")
+
+    ns["S2S_DEADLINE_S"] = 5.0
+    system = "Speak only Brazilian Portuguese. Plain text only, no emojis, no stage directions. Answer in about 6-8 words. " * 24
+    persona = {"role": "system", "content": "Persona: Lúcia, 52 anos, dona da padaria da esquina."}
+    learner = ["Bom dia, eu queria um pão francês, por favor.", "Quanto custa?", "Não entendi, pode repetir mais devagar?",
+               "Bonjour, je voudrais deux croissants et une baguette bien cuite, s'il vous plaît, et aussi un café crème."]
+    clerk = ["Bom dia! O pão francês custa cinquenta centavos.", "Custa três reais e cinquenta.",
+             "Claro. O pão custa cinquenta centavos. Você quer quantos pães? Hoje também tem pão de queijo quentinho e bolo de fubá."]
+    history, seen = [persona], []
+    for i in range(65):
+        events, _ = await turn(strict_llm(2048, 3.6, seen), tts(), {"system": system, "messages": history})
+        assert events[-1]["type"] == "done", (i, events[-1])
+        history = history + [{"role": "user", "content": learner[i % 4]}, {"role": "assistant", "content": clerk[i % 3]}]
+    assert None not in seen and len(seen) == 65, "the LLM never answers 400 in 65 turns"
+    assert all(sent[0] == {"role": "system", "content": system} and persona in sent and whole_pairs(sent) for sent in seen)
+    assert [m["content"] for m in seen[-1][-3:-1]] == [learner[63 % 4], clerk[63 % 3]], seen[-1][-3:]
+    cuts = sum(a[:-1] != b[:len(a) - 1] for a, b in zip(seen, seen[1:]))
+    assert 1 <= cuts <= 65 // ns["DROP_PAIRS"], cuts
+
+    seen.clear()
+    events, _ = await turn(strict_llm(2048, 1.2, seen), tts(), {"system": system[:1500], "messages": history[:25]})
+    assert events[-1]["type"] == "done" and seen[0] is None and len(seen) == 2, (events[-1], seen[:1])
+    assert seen[1][0]["content"] == system[:1500] and persona in seen[1] and whole_pairs(seen[1]) and len(seen[1]) < 27, len(seen[1])
+
+    seen.clear()
+    ns["ready"]["llm_ctx"] = 4096
+    await turn(strict_llm(4096, 3.6, seen), tts(), {"system": system, "messages": history})
+    assert len(seen) == 1 and len(seen[0]) > 60 and whole_pairs(seen[0]), len(seen[0])
+    print(f"ok: 65 turns never overflow a 2048-token slot ({cuts} cuts of {ns['DROP_PAIRS']} pairs), a 400 for context is asked again "
+          "with half the room, the slot size comes from /health's llm_ctx")
 
 
 asyncio.run(main())

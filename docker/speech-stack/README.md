@@ -149,6 +149,28 @@ measured in `docs/reports/2026-10-07-realtime-handoff.md` § TTS runaway:
   about 0.5 s later at 8 in parallel; the held silence is not played. `done.tts_retries` counts them. A sentence that
   fails after sound still ends the turn with `error` (stage `tts`).
 
+## Conversation history always fits the LLM slot (2026-10-08)
+
+Seen live (Vast and Scaleway, 2026-10-08): llama.cpp runs `LLM_PARALLEL` slots of `LLM_SLOT_CTX` (2048) tokens; a
+session sent the system prompt plus its whole history, and from about the 26th turn every turn came back `400 …
+exceeds the available context size`. Three places build the chat request of a turn and all three now cut the history
+with the same rule (`fit_history` in `server.py`, copied verbatim into `aigw_edge/text.py`; `fitHistory` in
+`src/s2s/history.ts`; shared vectors in `docs/s2s-history-vectors.json`):
+
+- **Budget** = context per slot − `max_tokens` (160) − 64 tokens of margin (chat template, generation prompt). The
+  context per slot is read once at warm-up from llama.cpp's `GET /props` (`default_generation_settings.n_ctx`),
+  published as `llm_ctx` in `/health`; the edge picks it up from the health poll it already makes (no call on the turn).
+  2048 is the default when `/props` or `llm_ctx` is missing. The composed fallback reads `S2S_CHAT_CONTEXT` (default 2048).
+- **Always kept**: `system`, every `system` message inside `messages`, the current user turn.
+- **Dropped**: the oldest whole turns (a user message with everything up to the next user message), 8 turns at a
+  time. Between two cuts the prompt keeps the same prefix, so llama.cpp's prompt cache keeps hitting; on the turn of a
+  cut it re-reads the history after the system prompt (at most the budget; the system prompt itself stays cached).
+- **Counting**: no tokenizer on the turn. 3 UTF-8 bytes per token plus 8 per message. llama.cpp counted 509 tokens for
+  a 332-word Portuguese prompt (about 4 bytes per token), so the estimate is some 25–30 % high for Portuguese and French.
+- **Still 400** (`context size`): the turn is asked once more with half the room for history, before any sound.
+
+`LLM_SLOT_CTX=4096` (env, no rebuild) doubles the room; the code follows by itself through `/props`.
+
 ## Engine logs: `GET /debug/logs`
 
 `start.sh` writes each engine's stdout and stderr to `/var/log/{tts,llm,stt}.log` (`stt` is the orchestrator process:
