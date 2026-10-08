@@ -299,7 +299,7 @@ async function connect(rec: StudentRecord): Promise<{ session: Session } | { why
   const want = rec.client === 'rtc' ? ['webrtc', 'ws'] : ['ws'];
   const t0 = now();
   let status = 0;
-  let code = 'network';
+  let code: string;
   let retryAfter: number | null = null;
   let desc: Descriptor | null = null;
   try {
