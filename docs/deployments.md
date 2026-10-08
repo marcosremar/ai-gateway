@@ -343,8 +343,12 @@ released as soon as the create ends (bounded retries; the orphan sweep stays as 
 One walk (`placement-walk.ts`) serves two spec fields; a spec may use **one of them, not both** (400 otherwise; send
 `"placements": []` to drop a profile's placements). Every place first gets the live price check (not sold or over the
 cap → skipped without a create), then the create; an out-of-stock answer (`isOutOfStock`, `placements.ts`: Scaleway's
-`412 {"type":"out_of_stock"}`, shortage, capacity wordings) moves to the next place, any other error (quota, 401, a
-bug) stops the walk and backs off. `lastPlacement` in `GET /v1/deployments/:name` says where it landed and why the
+`412 {"type":"out_of_stock"}`, shortage, capacity wordings) moves to the next place; a quota refusal (Scaleway's
+`403 quotas_exceeded`, per machine type and organisation) skips every remaining place of that machine type and goes on
+with the other types; any other error (401, a bug) stops the walk and backs off. With no other type listed, a quota
+backs off like any failed create, and `lastError` / `autoscale.blockedBy` say `quota reached for <type> on <provider>`.
+A `PUT`/`PATCH` that changes the spec clears the create back-off, so a corrected spec is tried at the next tick (an
+identical `PUT` does not). `lastPlacement` in `GET /v1/deployments/:name` says where it landed and why the
 earlier places were skipped.
 
 - **`placements`** (Scaleway only, ≤ 6 `{ zone?, machineType? }`): the spec's own zone/type first, then each entry

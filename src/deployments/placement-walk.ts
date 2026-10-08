@@ -6,11 +6,12 @@
  *   - `candidates`: ranked (`rankCandidates`: near the users, then cheap), any provider, each at its own cap.
  *
  * Each place gets the live price check (not sold / over cap → skip, no create), then the create; an out-of-stock
- * answer (`isOutOfStock`) moves to the next place, any other error stops the walk (it would fail everywhere).
+ * answer (`isOutOfStock`) moves to the next place, a quota refusal (`quotaMachineType`) to the next place of another
+ * machine type, any other error stops the walk (it would fail everywhere).
  * `placement` says where the replica landed and why earlier places were skipped (`lastPlacement` in the view).
  */
 
-import { DEFAULT_NEAR, isOutOfStock, placementsOf, rankCandidates } from './placements';
+import { DEFAULT_NEAR, isOutOfStock, placementsOf, quotaMachineType, rankCandidates } from './placements';
 import { isGpuMachineType } from './spec';
 import type { CatalogEntry, DeploymentBackend, DeploymentProvider, DeploymentSpec, PlacementCandidate, ReplicaMachine } from './types';
 
@@ -91,7 +92,9 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
   const { steps, skipped, ranked } = await stepsOf(args);
   const near = ranked ? ` near ${args.spec.near ?? DEFAULT_NEAR}` : '';
   const withSkipped = (text: string) => (skipped.length ? `${text}; skipped: ${skipped.join('; ')}` : text);
+  const overQuota = new Set<string>();
   for (const step of steps) {
+    if (overQuota.has(`${step.provider}/${step.spec.machineType}`)) continue;
     const backend = args.backendFor(step.provider);
     if (!backend) {
       if (!ranked) throw new Error(`no backend configured for provider '${step.provider}'`);
@@ -107,6 +110,13 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
       machine = await args.create(backend, step.spec);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const quotaType = quotaMachineType(err, step.spec.machineType);
+      if (quotaType) {
+        overQuota.add(`${step.provider}/${quotaType}`);
+        skipped.push(`quota reached for ${quotaType} on ${step.provider} (${msg.slice(0, 160)})`);
+        args.log?.('deployments: quota reached, skipping the machine type', { deployment: args.spec.name, place: where(step), machineType: quotaType });
+        continue;
+      }
       // Out of stock here: the next place may still have one. Any other error is the spec's or the account's.
       if (!isOutOfStock(err)) throw new PlacementError(msg, withSkipped(`failed at ${where(step)}: ${msg}`));
       skipped.push(step.provider === 'vast' ? `${where(step)}: ${msg.slice(0, 160)}` : `${step.spec.machineType} out of stock in ${step.spec.zone}`);
@@ -117,5 +127,5 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
     return { machine, price, placement: withSkipped(`${where(step)} (${cost})${near}`) };
   }
   const message = skipped.join('; ') || 'no placement';
-  throw new PlacementError(ranked ? `out_of_stock: ${message}` : message, `no replica placed; skipped: ${message}`);
+  throw new PlacementError(ranked ? `${overQuota.size ? 'quota' : 'out_of_stock'}: ${message}` : message, `no replica placed; skipped: ${message}`);
 }
