@@ -1398,7 +1398,8 @@ measured 1371 ms p50: every number here is one noisy afternoon.
 `{ provider: "openrouter", model: "deepgram/nova-3" }` after the deployment and keep a Whisper behind it, e.g.
 deployment → `openrouter:deepgram/nova-3` → `openrouter:openai/whisper-large-v3`. **Order of rollout: the route first.**
 With one link and the 3 s budget a slow Whisper becomes a failed turn (first row below) instead of a late one;
-`S2S_STT_BUDGET_MS=8000` restores the old wait until the route is in.
+`S2S_STT_BUDGET_MS=8000` restores the old wait until the route is in. **Superseded by § Integration (2026-10-08): the
+3 s budget now applies only when the route has two usable cloud links, so the order of rollout no longer matters.**
 
 ### Measured, three chains at the same time
 
@@ -1447,3 +1448,41 @@ answers in time → one call; first link errors → second at once; both slow �
 called once, no second run; the budget header ignored from a client; a stage that failed late is not retried; the
 composed turn sends hedge 900 and budget 3000 with and without a deadline; a whole turn hedged and a whole turn failed
 fast. `first-audio-deadline.test.ts` updated (the STT hedge is now 900 ms, not the time left to the deadline).
+
+## Integration (2026-10-08, `rt/improvements`, PR #56)
+
+PRs #59 (client deadline), #61 (fallback fast) and #57 (multi-provider placements, scaling mode always present) are
+squashed into `rt/improvements`. On top of them, unit-tested only — nothing below ran on a machine:
+
+- **STT budget only with a second link.** `handleAudioTranscriptions` applies the sub-request's 3 s budget only when
+  two or more **cloud** links of the route are usable at that moment (configured, key present, breaker closed;
+  `selectTargets`). A deployment link does not count: it is the GPU the overflow came from. With one cloud link the
+  route keeps `GATEWAY_STT_BUDGET_MS` (8 s): a slow Whisper is late, not failed, whatever the order in which the
+  gateway and the school's `parle-stt` route are deployed. The 900 ms hedge is unchanged: it only starts the next link
+  in parallel and cannot fail a turn. Production today (`GET /health`): `parle-stt` = `deployment:parle-speech` →
+  `openrouter:openai/whisper-large-v3-turbo` → `groq` (`no_key`), i.e. one cloud link, so the old patience holds
+  until the school adds the second one.
+- **Image per placement.** A `placements` entry may carry `image`. `speech-stack` is `rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317`
+  on Scaleway and `ghcr.io/marcosremar/speech-stack:20261008-1317` (public, same digest
+  `sha256:3ff347aad2f2b2e91b509837570e659a4c0d027d9fcd46d0c44fa710287bf6de`) on Vast, so the Vast place is no longer
+  skipped as "private". The declared `parle-speech` carries the same placements (no L4), `scaling.mode: fast` and the
+  new tag. `SPEECH_IMAGE` moves the Scaleway image only: the GHCR tag is pinned in the declaration.
+- **Vast and the image's `ENV`.** `start.sh` runs under `set -u` and reads `TTS_MODEL` and `LLM_FILE`, which exist only
+  as `ENV` of the image. On Vast the gateway's boot script is started from the onstart shell with `/srv/aigw/app.env`
+  (spec env only). The onstart shell did see the container env on the two hosts of § Prova final ao vivo — Vast, but
+  that was a base image with a boot script, never this image with its own start command, and `vast-backend.ts` itself
+  keeps a `/etc/environment` fallback for the case where it does not. The `RTX 5090` env of the profile and of the
+  declaration now names both variables, so the launch does not depend on it. `STT_MODEL`, `STT_COMPUTE` have defaults
+  in `server.py`; `HF_HOME` is exported by `start.sh`.
+- **Context per slot.** `start.sh` of the image already reads `LLM_SLOT_CTX` (default 2048): no rebuild. The
+  `speech-stack` **profile** sets `LLM_SLOT_CTX=4096` on `L40S-1-48G` (16 slots × 4096 = 65 536 tokens of context) and
+  leaves the L4 and the RTX 5090 at 2048. **To measure in tonight's proof before production: the VRAM it costs on the
+  L40S (estimated +~4.7 GB for the KV cache), with the TTS stage at 12 GB and Whisper loaded, and that `/health` says
+  `llm_ctx: 4096`.** The declared `parle-speech` does not carry it, so the production record keeps 2048 until someone
+  adds it after the measurement (runbook, `docs/reports/2026-10-08-deploy-runbook.md`).
+- **Image workflow.** `speech-stack.yml` builds on dispatch, on `main` and on pull requests of this repository; a fork
+  pull request never ran with a write token (GitHub gives forks a read-only `GITHUB_TOKEN` and no secrets), and the job
+  is now skipped for forks outright. A new push to a pull request cancels the build of the previous one (four builds
+  of the same branch were running at once on 2026-10-08).
+- **Bundle baseline.** `realtime` grew 74.1 → 88.8 KB with #59 (the session imports the PCM player and the clip
+  decoder to play the opener); accepted in `quality-bundle-baseline.json` with that reason.

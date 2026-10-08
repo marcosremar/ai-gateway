@@ -151,7 +151,10 @@ describe('realtime spec validation', () => {
     const spec = buildSpec('v', {
       profile: 'speech-stack', provider: 'vast', machineType: 'RTX 5090', bootScript: 'x', placements: [], idleAction: 'delete', realtime: {},
     }, { profiles });
-    expect(spec.envByMachineType!['RTX 5090']).toEqual({ STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4' });
+    expect(spec.envByMachineType!['RTX 5090']).toEqual({
+      STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4',
+      TTS_MODEL: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base', LLM_FILE: 'Qwen3.5-9B-Q4_K_M.gguf',
+    });
     expect(edgeEnv(spec, TOKEN).RT_MAX_SESSIONS).toBe('4');
     const own = buildSpec('w', {
       provider: 'vast', image: 'vastai/base', bootScript: 'x', machineType: 'RTX 5090', envByMachineType: { 'RTX 5090': { RT_MAX_SESSIONS: '6' } },

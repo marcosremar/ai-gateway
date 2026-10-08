@@ -34,7 +34,7 @@ export function placementsOf(spec: DeploymentSpec): DeploymentSpec[] {
     // Scaleway image ids are per zone: a pinned image only holds in its own zone (elsewhere the backend looks up the
     // same image there).
     const { osImageId, ...rest } = spec;
-    out.push({ ...rest, ...(zone === spec.zone && osImageId ? { osImageId } : {}), provider, zone, machineType, maxEurPerHour: p.maxEurPerHour ?? spec.maxEurPerHour });
+    out.push({ ...rest, ...(zone === spec.zone && osImageId ? { osImageId } : {}), provider, zone, machineType, maxEurPerHour: p.maxEurPerHour ?? spec.maxEurPerHour, ...(p.image ? { image: p.image } : {}) });
   }
   return out;
 }

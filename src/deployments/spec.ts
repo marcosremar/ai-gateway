@@ -111,7 +111,7 @@ const KNOWN_FIELDS = new Set<string>([
   'scaling', 'fileUrls', 'maxRttExcessMs',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
-const PLACEMENT_FIELDS = new Set([...CANDIDATE_FIELDS, 'maxReplicas']);
+const PLACEMENT_FIELDS = new Set([...CANDIDATE_FIELDS, 'maxReplicas', 'image']);
 
 function providerOf(value: unknown, field: string): DeploymentProvider {
   if (!PROVIDERS.includes(value as DeploymentProvider)) throw new SpecError(`${field} must be 'scaleway' or 'vast'`);
@@ -298,6 +298,7 @@ function placementsOf(raw: unknown): Placement[] {
       ...(entry.maxEurPerHour !== undefined ? { maxEurPerHour: num(entry.maxEurPerHour, `placements[${i}].maxEurPerHour`, 0.001, 50) } : {}),
       ...(entry.maxReplicas !== undefined
         ? { maxReplicas: int(entry.maxReplicas, `placements[${i}].maxReplicas`, 1, MAX_REPLICAS_PER_DEPLOYMENT) } : {}),
+      ...(entry.image !== undefined ? { image: str(entry.image, `placements[${i}].image`, IMAGE_RE) } : {}),
     };
   });
 }

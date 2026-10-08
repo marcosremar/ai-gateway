@@ -81,6 +81,23 @@ describe('placements on another provider: spec', () => {
     expect(placementsOf(stt).every(s => s.provider === 'scaleway')).toBe(true);
   });
 
+  it('a placement may pull its own image; the speech stack pulls the public copy on vast and passes the env start.sh needs', () => {
+    const own = buildSpec('s', { ...SPEC, placements: [{ zone: 'fr-par-1' }, { ...VAST, image: 'ghcr.io/me/app:1' }] }, { profiles });
+    expect(placementsOf(own).map(s => s.image)).toEqual([SPEC.image, SPEC.image, 'ghcr.io/me/app:1']);
+    expect(() => buildSpec('s', { ...SPEC, placements: [{ ...VAST, image: 'not an image' }] }, { profiles })).toThrow(/placements\[0\]\.image/);
+    const speech = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
+    expect(placementsOf(speech).map(s => s.image)).toEqual([
+      'rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317', 'rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317',
+      'ghcr.io/marcosremar/speech-stack:20261008-1317',
+    ]);
+    const init = vastReplicaInit(placementsOf(speech).at(-1)!, 'x'.repeat(32));
+    const appEnv = Buffer.from(/echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/app\.env/.exec(init)![1], 'base64').toString('utf8');
+    expect(appEnv).toContain('TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-Base\n');
+    expect(appEnv).toContain('LLM_FILE=Qwen3.5-9B-Q4_K_M.gguf\n');
+    expect(speech.envByMachineType!['L40S-1-48G'].LLM_SLOT_CTX).toBe('4096');
+    expect(speech.envByMachineType!['L4-1-24G'].LLM_SLOT_CTX).toBeUndefined();
+  });
+
   it('an image with a start command runs on vast without a boot script', () => {
     const spec = buildSpec('tts', { profile: 'qwen3-tts' }, { profiles });
     const init = vastReplicaInit(placementsOf(spec).at(-1)!, 'x'.repeat(32));
@@ -141,6 +158,13 @@ describe('placements on another provider: the walk', () => {
     await until(() => vast.created.length === 1);
     expect(vast.created[0].spec).toMatchObject({ name: 'pull', registryAuth: { username: 'pull' } });
     expect(controller.get('pull')!.warnings).toEqual([]);
+    await controller.put('copy', {
+      ...SPEC, maxReplicas: 1, image: 'rg.fr-par.scw.cloud/aigw/speech-stack:1', placements: [{ ...VAST, image: 'ghcr.io/me/speech-stack:1' }],
+    });
+    await until(() => vast.created.length === 2);
+    expect(vast.created[1].spec).toMatchObject({ name: 'copy', image: 'ghcr.io/me/speech-stack:1' });
+    expect(vast.created[1].spec.registryAuth).toBeUndefined();
+    expect(controller.get('copy')!.warnings).toEqual([]);
   });
 
   it('a gateway without a vast key walks the Scaleway placements and says the fallback is off', async () => {

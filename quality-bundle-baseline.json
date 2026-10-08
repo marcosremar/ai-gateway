@@ -55,9 +55,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "index": {
-    "raw": 1566626,
-    "gzip": 347314,
-    "reason": "realtime TURN health (src/realtime/turn-health.ts: the Allocate check and its state) and the shorter media-path re-probe in the service: +1.0 KB"
+    "raw": 1570220,
+    "gzip": 348523,
+    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
   },
   "infra": {
     "raw": 4116,
@@ -80,14 +80,14 @@
     "reason": "API audit 2026-10-07: s2s access/app limits, /health views, error types, request ids, CORS lists (#47 routing hedge on top)"
   },
   "proxy": {
-    "raw": 177457,
-    "gzip": 46517,
-    "reason": "realtime speech + telemetry (#54): new realtime entry (sdk/browser/realtime); client gains createServerTelemetry (sdk/node/telemetry -> sdk/browser/telemetry/emitter + src/telemetry/contract); index and proxy gain the W3C trace context (src/telemetry/trace-context) and the public-route + header-size changes in src/gateway/proxy/server"
+    "raw": 178645,
+    "gzip": 46920,
+    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
   },
   "realtime": {
-    "raw": 75923,
-    "gzip": 19471,
-    "reason": "realtime (#56 + connect race): 63.7 -> 68.5 KB from #56's own SDK commits (offer at first srflx, playout delay, reply recovery, reconnect on a network change), 68.5 -> 74.1 KB from the WS/WebRTC start race with standby WebRTC and the upgrade between turns (session.ts), and the reconnect with a fresh peer connection (webrtc.ts)"
+    "raw": 90979,
+    "gzip": 22655,
+    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
   },
   "tracking": {
     "raw": 20369,

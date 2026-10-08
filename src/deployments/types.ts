@@ -182,7 +182,7 @@ export interface RealtimeSpec {
 }
 
 /** An alternative placement of a replica (see `DeploymentSpec.placements`). */
-export interface Placement { provider?: DeploymentProvider; zone?: string; machineType?: string; maxEurPerHour?: number; maxReplicas?: number }
+export interface Placement { provider?: DeploymentProvider; zone?: string; machineType?: string; maxEurPerHour?: number; maxReplicas?: number; image?: string }
 
 /** Reserved IP and firewall of an exposed deployment (`exposure`), kept across replicas. */
 export interface DeploymentNetwork { zone: string; ipId: string; ip: string; groupId: string }

@@ -10,6 +10,8 @@ const VLLM_OMNI_IMAGE = 'vllm/vllm-omni:v0.28.0';
 
 const VAST_GPU = { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85 } as const;
 const VAST_HOST = { minCuda: 13, maxRttExcessMs: 20 };
+const SPEECH_STACK_TAG = '20261008-1317';
+const SPEECH_STACK_IMAGE_ENV = { TTS_MODEL: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base', LLM_FILE: 'Qwen3.5-9B-Q4_K_M.gguf' };
 const CLASS_VOICE: ScalingSpec = { mode: 'fast' };
 
 function qwenTts(model: string) {
@@ -88,7 +90,7 @@ export const BUILTIN_PROFILES: Profile[] = [
     builtin: true,
     spec: {
       // docker/speech-stack: Whisper large-v3 + Qwen3.5-9B (llama.cpp) + Qwen3-TTS (vLLM-Omni) in one image.
-      image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261004-2240',
+      image: `rg.fr-par.scw.cloud/aigw/speech-stack:${SPEECH_STACK_TAG}`,
       port: 8000,
       healthPath: '/health',
       // The L40S the parle class runs on (live QA 2026-10-07), and when it is out of stock (17 min in fr-par-2 that day, the
@@ -96,7 +98,7 @@ export const BUILTIN_PROFILES: Profile[] = [
       // Vast. No L4: the account's L4 quota (2) belongs to the TTS deployment. `envByMachineType` tunes each GPU.
       machineType: 'L40S-1-48G',
       zone: 'fr-par-2',
-      placements: [{ zone: 'fr-par-1' }, { ...VAST_GPU, maxReplicas: 1 }],
+      placements: [{ zone: 'fr-par-1' }, { ...VAST_GPU, maxReplicas: 1, image: `ghcr.io/marcosremar/speech-stack:${SPEECH_STACK_TAG}` }],
       ...VAST_HOST,
       entrypoint: 'bash',
       args: ['/opt/s2s/start.sh'],
@@ -128,8 +130,8 @@ export const BUILTIN_PROFILES: Profile[] = [
       // as realtime on the 5090 itself.
       envByMachineType: {
         'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '2' },
-        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '4' },
-        'RTX 5090': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4' },
+        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '4', LLM_SLOT_CTX: '4096' },
+        'RTX 5090': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4', ...SPEECH_STACK_IMAGE_ENV },
       },
       description: 'Whisper + Qwen LLM + Qwen3-TTS in one container (STT, S2S, /ws/audio-stream). POST /v1/s2s.',
     },

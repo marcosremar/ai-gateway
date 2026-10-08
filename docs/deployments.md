@@ -89,10 +89,13 @@ are put back. `envByMachineType` is merged per key: the declared keys are put ba
 `src/deployments/declared/parle-speech.json`: the `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` image
 (`docker/speech-stack`: Whisper + Qwen LLM + Qwen3-TTS in one container). It lives in the gateway's own Scaleway
 registry, which the gateway pulls from with the key it already has: **no registry token, no `registryAuth`, nothing
-to set** — it is never `pending` for a credential. The declaration owns three things and patches only them over the
+to set** — it is never `pending` for a credential. The declaration owns five things and patches only them over the
 registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full reference; default
-`20261006-0107`, the one production runs), `realtime: {}` (the edge sidecar, [realtime-edge.md](realtime-edge.md))
-and the edge's `RT_MAX_SESSIONS` per machine type (L4 2, L40S 4, merged into the stored `envByMachineType`). Port,
+`20261008-1317`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
+the same tag: `SPEECH_IMAGE` does not move that copy; no L4), `scaling.mode` `fast`, `realtime: {}` (the edge
+sidecar, [realtime-edge.md](realtime-edge.md)) and env per machine type (the edge's `RT_MAX_SESSIONS`: L4 2, L40S 4;
+the whole RTX 5090 set; merged into the stored `envByMachineType`). A registered spec with `files` skips the Vast
+place (reason in `warnings`) until the voice catalog moves to `fileUrls`. Port,
 machine type, zone, replicas, idle and boot times, € and hour limits, volume, `env` and `files` (the voice catalog)
 stay exactly as registered. On a gateway where `parle-speech` does not exist it is created from the `speech-stack`
 profile with the declared image; that deployment has no `files`, so the voice catalog still has to be sent with a
@@ -380,6 +383,10 @@ earlier places were skipped.
   with the reason in `lastPlacement` and in `warnings` of the view, never refused at `PUT`: `files` (use `fileUrls`),
   an image without `bootScript` or `entrypoint`, an image in the gateway's own Scaleway registry without a
   `registryAuth` (a pull-only credential: the gateway's key is never sent to a marketplace host), no `VAST_API_KEY`.
+  Any entry may carry its own `image` (the same build in a registry that place can pull from): `speech-stack` pulls
+  `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` on Scaleway and the public copy `ghcr.io/marcosremar/speech-stack:<tag>`
+  (same digest) on Vast, where its `RTX 5090` env also names `TTS_MODEL` and `LLM_FILE` (the image's own `ENV`, which
+  `start.sh` reads under `set -u`).
   `idleAction: "stop"` is accepted: the Vast replica is deleted where a Scaleway one is parked. `minCuda`, `near`,
   `maxRttMs` and `maxRttExcessMs` of the spec apply to it. The built-in profiles: `speech-stack` L40S fr-par-2 →
   L40S fr-par-1 → one RTX 5090 on Vast (no L4: the account's L4 quota of 2 belongs to the TTS); `qwen3-tts` and

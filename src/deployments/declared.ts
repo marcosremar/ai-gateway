@@ -19,7 +19,7 @@
  *
  * A declared field the operator changed by hand (PUT/PATCH) is put back at the next reconcile; fields the declaration
  * does not hold (e.g. `paused`, and `env` when it declares neither `env` nor `generatedSecrets`) are left as the
- * operator set them. `envByMachineType` is merged per key: the declared keys are put back, the stored ones stay.
+ * operator set them. `envByMachineType` and `scaling` are merged per key: the declared keys are put back, the stored ones stay.
  */
 
 import { randomBytes } from 'crypto';
@@ -116,6 +116,7 @@ export function declaredBody(
           ...Object.fromEntries(Object.entries(declaredByType).map(([type, vars]) => [type, { ...storedByType[type], ...vars }])),
         },
       } : {}),
+      ...(decl.spec.scaling ? { scaling: { ...previous?.scaling, ...(decl.spec.scaling as object) } } : {}),
       ...(registryAuth ? { registryAuth } : {}),
       ...(decl.description ? { description: decl.description } : {}),
     },
