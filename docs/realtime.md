@@ -246,7 +246,16 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   while WebRTC is still connecting waits for it instead of dropping to a clip rung. The edge runs the two sessions of
   one `sid` side by side and counts the learner once (docs/realtime-edge.md); the standby one hears nothing, so a
   turn is never run twice.
-- A refused admission (503 + fallback) skips the realtime rungs at once.
+- A refused admission (503 + fallback) skips the realtime rungs at once, and the clip rung it lands on is not
+  remembered as the network's winner (the network was not the reason).
+- **Refused as `saturated` or `cold`: the session moves to the GPU when it is admitted.** On its clip rung it asks for
+  a session again in the background — after `Retry-After` (else `readmitMs`, 2 s), then ×1.5 up to `readmitMaxMs`
+  (30 s), for at most `readmitForMs` (20 min; then telemetry `rt.readmit.gave_up`), never after `close()`. Once
+  admitted it connects the realtime rung on standby (WebRTC, then WS; no microphone on either until live) and
+  switches **between turns** by the same move as the start race: one `config_update` with the conversation,
+  `transport {transport, reason:"upgrade", from:"s2s-stream"}`, telemetry `rt.ladder.upgrade {from, to}`. A clip turn
+  that breaks while the standby rung is ready moves at once (`reason:"failover"`, `turn_lost` for that turn). Any other
+  refusal code stops the asking. `readmit: false` turns it off.
 - The winner is remembered per network (`localStorage` key `aigw-rt:winner:<network>`, TTL 6 h, every access guarded);
   the next session starts there, the others stay as fallbacks. After a race it is the transport the session settled
   on: `webrtc` once it took over, `ws` only when the WebRTC attempt failed or ran out of `upgradeMs` — never because
@@ -324,7 +333,7 @@ gateway keeps it, forwards it to the edge on each call (new span id, same trace)
 
 Event shape: `{ts, source:"browser"|"gateway", level, event, traceId, sessionId?, turnId?, durMs?, attrs?}`.
 
-- Browser: `rt.ladder.try|ok|fallback` (from, to, reason; `ok` = the session started: transport, durMs, `upgrading` when WebRTC is still connecting), `rt.ladder.upgrade` (from, to, durMs since the start), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
+- Browser: `rt.ladder.try|ok|fallback` (from, to, reason; `ok` = the session started: transport, durMs, `upgrading` when WebRTC is still connecting), `rt.ladder.upgrade` (from, to, durMs since the start), `rt.readmit.gave_up` (reason: `deadline`, `no_transport` or the refusal code), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
   `rt.session.admitted|rejected|closed`, `vad.segment` (durMs), `turn.first_audio` (durMs from end of speech),
   `turn.done`, `turn.recovered`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
 - Gateway: `rt.session.admitted|rejected|deleted`, `rt.signal.offer|refused`, `ws.open|close|refused`, `error` (sink
