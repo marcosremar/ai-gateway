@@ -17,7 +17,7 @@
 import { packFiles, unpackScript } from './file-pack';
 import { DEFAULT_RT_MAX_SESSIONS, DEFAULT_RT_UDP_PORTS, rtMachineEnv, rtMaxSessions, vastUdpRange } from './realtime-ports';
 import { PROBE_PORT } from './spec';
-import type { DeploymentSpec } from './types';
+import type { DeploymentSpec, FileUrl } from './types';
 
 /**
  * The realtime edge (docker/aigw-edge): one generic image for every replica, whatever the GPU or the model image.
@@ -105,6 +105,19 @@ ${rtPort ? `  location ^~ /__aigw/rt/ {
 `;
 }
 
+export const FILES_DIR = '/srv/aigw/files';
+
+export function fetchFilesScript(fileUrls: Record<string, FileUrl> | undefined): string {
+  const entries = Object.entries(fileUrls ?? {});
+  if (!entries.length) return '';
+  return `mkdir -p ${FILES_DIR}
+aigw_fetch() {
+  for i in 1 2 3 4 5; do curl -fsSL --max-time 300 -o "$2" "$1" && break; sleep 3; done
+  echo "$3  $2" | sha256sum -c - >/dev/null || { echo "aigw: BOOT FAILED: $2 is missing or does not match sha256 $3 ($1)"; exit 1; }
+}
+${entries.map(([key, f]) => `aigw_fetch ${shellQuote(f.url)} ${FILES_DIR}/${key} ${f.sha256}`).join('\n')}`;
+}
+
 export function dockerRunCommand(spec: DeploymentSpec): string {
   const parts = [
     'docker run -d --name app --restart unless-stopped --ipc=host',
@@ -112,7 +125,7 @@ export function dockerRunCommand(spec: DeploymentSpec): string {
     `-p 127.0.0.1:8000:${spec.port}`,
     '--env-file /srv/aigw/app.env',
     '-v /srv/aigw/data:/data -v /srv/aigw/hf:/root/.cache/huggingface',
-    spec.files ? '-v /srv/aigw/files:/files:ro' : '',
+    spec.files || spec.fileUrls ? `-v ${FILES_DIR}:/files:ro` : '',
     spec.entrypoint ? `--entrypoint ${shellQuote(spec.entrypoint)}` : '',
     shellQuote(spec.image),
     ...spec.args.map(shellQuote),
@@ -230,6 +243,7 @@ command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx; 
 rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf && systemctl restart nginx
 ${spec.files ? unpackScript(packIndexOf(spec.files)) : ''}
+${fetchFilesScript(spec.fileUrls)}
 ${spec.bootScript ? bootScriptSection(spec.bootScript) : `command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 ${login}
 for i in 1 2 3 4 5; do docker pull ${shellQuote(spec.image)} && break; sleep 15; done
@@ -253,7 +267,8 @@ done
  * nginx is started as a plain daemon (`nginx`, reloaded if already up), never `systemctl`. With `spec.realtime` the edge
  * runs as a process of this container, from `VAST_EDGE_DIR` (shipped by the image or put there by the boot script), with
  * the same env the Scaleway sidecar gets, but for the UDP range: one port per `-p` mapping (`vastUdpRange`), bound on
- * every address so a session takes exactly one. Safety net: the container
+ * every address so a session takes exactly one. `spec.fileUrls` are downloaded and checked before the boot script
+ * starts, under `FILES_DIR` and as `/files` (where an image expects what Scaleway mounts there). Safety net: the container
  * stops itself `maxHours + 30 min` after boot (an exited Vast instance bills only its disk; the controller or the reaper
  * deletes it).
  */
@@ -273,10 +288,11 @@ set -x
 echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undefined))}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
-command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx curl; }
+command -v nginx >/dev/null && command -v curl >/dev/null || { apt-get update -y && apt-get install -y nginx curl; }
 mkdir -p /etc/nginx/conf.d && rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf
 nginx -t && { nginx -s reload 2>/dev/null || nginx; }
+${spec.fileUrls ? `${fetchFilesScript(spec.fileUrls)}\n[ -e /files ] || ln -s ${FILES_DIR} /files` : ''}
 ${bootScriptSection(spec.bootScript)}
 ${spec.realtime ? vastEdgeSection(spec, token, opts, bootChecks) : ''}
 for i in $(seq 1 ${bootChecks}); do

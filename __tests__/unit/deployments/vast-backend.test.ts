@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { edgeEnv, nginxConfig, RT_EDGE_PORT, VAST_EDGE_DIR, vastEdgeEnv, vastReplicaInit } from '../../../src/deployments/cloud-init';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  edgeEnv, fetchFilesScript, FILES_DIR, nginxConfig, replicaCloudInit, RT_EDGE_PORT, VAST_EDGE_DIR, vastEdgeEnv, vastReplicaInit,
+} from '../../../src/deployments/cloud-init';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
 import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
@@ -394,6 +399,79 @@ describe('realtime UDP ports on Vast', () => {
       const sent = Object.entries(calls[1].body!.env as Record<string, string>).reduce((n, [k, v]) => n + k.length + v.length + 2, 0);
       expect(sent).toBeLessThanOrEqual(vastEnvBytes(spec));
       expect(sent).toBeLessThan(VAST_ENV_MAX_BYTES);
+    }
+  });
+});
+
+describe('fileUrls: the voice catalog without user_data', () => {
+  const SHA = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+  const fileUrls = {
+    'voices.json': { url: 'https://assets.example/voices/2cf24d.json', sha256: SHA },
+    'br-f-01.mp3': { url: "https://assets.example/voices/e9669c.mp3?x=1&y=(2)", sha256: 'e'.repeat(64) },
+  };
+  const vast = { provider: 'vast', image: 'vastai/base', bootScript: 'serve', machineType: 'RTX 5090' };
+
+  it('validated at PUT, on either provider', () => {
+    expect(buildSpec('x', { ...vast, fileUrls }, { profiles }).fileUrls).toEqual(fileUrls);
+    expect(buildSpec('x', { profile: 'speech-stack', fileUrls }, { profiles }).fileUrls).toEqual(fileUrls);
+    const bad = (value: unknown) => () => buildSpec('x', { ...vast, fileUrls: value }, { profiles });
+    expect(bad([])).toThrow(/fileUrls must be an object/);
+    expect(bad({ 'a/b': fileUrls['voices.json'] })).toThrow(/fileUrls key 'a\/b' is invalid/);
+    expect(bad({ a: { url: 'http://assets.example/a', sha256: SHA } })).toThrow(/fileUrls\.a\.url \(an https URL\) is invalid/);
+    expect(bad({ a: { url: "https://assets.example/a'; rm -rf /", sha256: SHA } })).toThrow(/fileUrls\.a\.url/);
+    expect(bad({ a: { url: 'https://assets.example/a', sha256: 'abc' } })).toThrow(/fileUrls\.a\.sha256 \(64 hex chars\) is invalid/);
+    expect(bad({ a: { url: 'https://assets.example/a' } })).toThrow(/fileUrls\.a\.sha256/);
+    expect(bad({ a: { url: 'https://assets.example/a', sha256: SHA, mode: '600' } })).toThrow(/fileUrls\.a must be \{ url, sha256 \}/);
+    expect(bad(Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`f${i}`, fileUrls['voices.json']])))).toThrow(/at most 64 files/);
+    expect(() => buildSpec('x', { profile: 'speech-stack', fileUrls, files: { 'voices.json': 'e30=' } }, { profiles }))
+      .toThrow("'voices.json' is in both files and fileUrls");
+    const many = Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`f${i}`, { url: `https://assets.example/${'p'.repeat(400)}/${i}`, sha256: SHA }]));
+    expect(() => buildSpec('x', { ...vast, fileUrls: many }, { profiles })).toThrow(/vast accepts 32 KB of env/);
+  });
+
+  it('Vast: downloaded and checked before the boot script starts, also visible as /files; a 20-voice catalog fits the env', () => {
+    const catalog = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`voice-${i}.mp3`, {
+      url: `https://parle-prod.up.railway.app/assets/blob/${'ab'.repeat(32)}`, sha256: 'ab'.repeat(32),
+    }]));
+    const spec = buildSpec('x', { ...vast, fileUrls: catalog, bootScript: 'x'.repeat(3_400), realtime: { maxSessions: 4 } }, { profiles });
+    const script = vastReplicaInit(spec, TOKEN);
+    expect(spawnSync('bash', ['-n'], { input: script }).status).toBe(0);
+    expect(script).toContain(`aigw_fetch 'https://parle-prod.up.railway.app/assets/blob/${'ab'.repeat(32)}' ${FILES_DIR}/voice-0.mp3 ${'ab'.repeat(32)}`);
+    expect(script).toContain(`[ -e /files ] || ln -s ${FILES_DIR} /files`);
+    expect(script.indexOf('aigw_fetch \'')).toBeLessThan(script.indexOf('nohup bash /srv/aigw/boot.sh'));
+    expect(script).toMatch(/command -v nginx >\/dev\/null && command -v curl >\/dev\/null \|\|/);
+    const sent = Buffer.from(script).toString('base64').length + 9 * 24 + 40;
+    expect(sent).toBeLessThanOrEqual(vastEnvBytes(spec));
+    expect(vastEnvBytes(spec)).toBeLessThan(VAST_ENV_MAX_BYTES);
+    expect(vastReplicaInit(vastSpec(), TOKEN)).not.toContain('aigw_fetch');
+  });
+
+  it('Scaleway: the same field lands in the directory the container mounts as /files', () => {
+    const script = replicaCloudInit(buildSpec('x', { profile: 'speech-stack', fileUrls }, { profiles }), TOKEN);
+    expect(spawnSync('bash', ['-n'], { input: script }).status).toBe(0);
+    expect(script).toContain(`aigw_fetch 'https://assets.example/voices/e9669c.mp3?x=1&y=(2)' ${FILES_DIR}/br-f-01.mp3 ${'e'.repeat(64)}`);
+    expect(script).toContain(`-v ${FILES_DIR}:/files:ro`);
+    expect(script.indexOf('aigw_fetch \'')).toBeLessThan(script.indexOf('docker run -d --name app'));
+  });
+
+  it.skipIf(spawnSync('sha256sum', ['--version']).status !== 0)('a matching file passes; a mismatch fails the boot loudly before anything else runs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aigw-fileurls-'));
+    try {
+      writeFileSync(join(dir, 'curl'), '#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = "-o" ] && out=$2; shift; done\nprintf hello > "$out"\n');
+      chmodSync(join(dir, 'curl'), 0o755);
+      const run = (sha256: string) => spawnSync('bash', [], {
+        input: fetchFilesScript({ 'voices.json': { url: 'https://assets.example/v', sha256 } }).replaceAll(FILES_DIR, dir) + '\necho started\n',
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+      });
+      const ok = run(SHA);
+      expect([ok.status, ok.stdout.toString()]).toEqual([0, 'started\n']);
+      expect(readFileSync(join(dir, 'voices.json'), 'utf8')).toBe('hello');
+      const bad = run('0'.repeat(64));
+      expect(bad.status).toBe(1);
+      expect(bad.stdout.toString()).toMatch(/^aigw: BOOT FAILED: .*voices\.json is missing or does not match sha256 0{64} \(https:\/\/assets\.example\/v\)\n$/);
+      expect(existsSync(join(dir, 'voices.json'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

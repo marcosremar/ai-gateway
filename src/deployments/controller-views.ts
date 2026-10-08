@@ -89,7 +89,7 @@ export abstract class ControllerViews extends ReconcileLoop {
   protected view(name: string): DeploymentView | null {
     const rt = this.deployments.get(name);
     if (!rt) return null;
-    const { env, envByMachineType, registryAuth, bootScript, files, ...publicSpec } = rt.record.spec;
+    const { env, envByMachineType, registryAuth, bootScript, files, fileUrls, ...publicSpec } = rt.record.spec;
     const now = this.now();
     const replicas = this.machines.filter(m => m.deployment === name).map(m => ({
       id: m.id,
@@ -123,7 +123,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       name,
       spec: {
         ...publicSpec, envKeys: Object.keys(env), privateRegistry: Boolean(registryAuth), bootScript: Boolean(bootScript),
-        fileKeys: Object.keys(files ?? {}),
+        fileKeys: Object.keys({ ...files, ...fileUrls }),
       },
       status,
       desiredReplicas: desired,

@@ -125,6 +125,7 @@ export interface DeploymentSpec {
    * (boot-script mode) serves its health on `127.0.0.1:<port>`.
    */
   exposure?: { ports: ExposedPort[] };
+  fileUrls?: Record<string, FileUrl>;
   /**
    * Realtime voice on this replica (docs/realtime-edge.md): the generic `aigw-edge` sidecar runs next to the model
    * container (`docker run --network host`, same on any GPU and any model image), terminates WebRTC (UDP `udpPorts`)
@@ -157,6 +158,8 @@ export interface DeploymentSpec {
    */
   minCuda?: number;
 }
+
+export interface FileUrl { url: string; sha256: string }
 
 /** One exposed port, or the range `port`..`to` (e.g. a TURN relay range). */
 export interface ExposedPort { protocol: 'tcp' | 'udp'; port: number; to?: number }
@@ -410,7 +413,7 @@ export interface ReplicaView {
 
 export interface DeploymentView {
   name: string;
-  spec: Omit<DeploymentSpec, 'env' | 'envByMachineType' | 'registryAuth' | 'bootScript' | 'files'> & {
+  spec: Omit<DeploymentSpec, 'env' | 'envByMachineType' | 'registryAuth' | 'bootScript' | 'files' | 'fileUrls'> & {
     envKeys: string[]; privateRegistry: boolean; bootScript: boolean; fileKeys: string[];
   };
   status: 'paused' | 'scaled-to-zero' | 'warming' | 'ready' | 'degraded';

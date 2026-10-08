@@ -171,6 +171,18 @@ describe('deployments API', () => {
     expect(Buffer.from(h.cloud.created[0].files!['aigw-pack-0']).toString()).toBe('RIFF');
   });
 
+  it('fileUrls: the view names the files and never returns their URLs', async () => {
+    const res = await call(h, 'PUT', '/v1/deployments/vm2', {
+      bootScript: 'true', machineType: 'DEV1-S', maxEurPerHour: 0.05, files: { 'ref-a': 'UklGRg==' },
+      fileUrls: { 'voices.json': { url: 'https://assets.example/v.json?sig=secret-signature', sha256: 'a'.repeat(64) } },
+    });
+    const text = await res.text();
+    expect(res.status).toBe(201);
+    expect(text).not.toContain('secret-signature');
+    expect(JSON.parse(text).spec.fileKeys).toEqual(['ref-a', 'voices.json']);
+    expect(JSON.parse(text).spec.fileUrls).toBeUndefined();
+  });
+
   it('never returns env values or registry credentials', async () => {
     const res = await call(h, 'PUT', '/v1/deployments/sec', {
       image: 'me/app:1', port: 80, machineType: 'DEV1-S', env: { HF_TOKEN: 'hf_secret' },
