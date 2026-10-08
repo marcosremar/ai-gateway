@@ -22,8 +22,8 @@ export { iceConfigFromEnv, iceServersFor, turnCredentials } from './ice';
 export type { IceConfig, IceServer } from './ice';
 export { reportExternalLoad, externalLoadOf, externalInflightEquivalent, distinctSessions, refusedSessions } from './external-load';
 export {
-  deriveRealtimeKey, signSessionToken, verifySessionToken, peekClaims, encodeSessionConfig, decodeSessionConfig,
-  RT_KEY_INFO, RT_MAX_CFG_CHARS, RT_MAX_TTL_SECONDS,
+  deriveRealtimeKey, signSessionToken, verifySessionToken, peekClaims, encodeSessionConfig, decodeSessionConfig, configDigest,
+  RT_KEY_INFO, RT_MAX_CFG_CHARS, RT_MAX_CFG_REF_CHARS, RT_MAX_TTL_SECONDS,
 } from './token';
 export type { RealtimeClaims } from './token';
 export { TRACE_ID_HEADER, childTraceparent, newTrace, parseTraceparent, traceOf } from './trace';

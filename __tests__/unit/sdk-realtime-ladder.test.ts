@@ -172,6 +172,15 @@ describe('createRealtimeSession', () => {
     s.close();
   });
 
+  it('a config by reference (descriptor.cfg) is the session config, as the cfg of the token was', async () => {
+    const config = { system: 'S'.repeat(9000), messages: [{ role: 'assistant', content: 'Olá!' }] };
+    const f = fakes({ ws: 'ok' });
+    const { s } = session(f, { sessionEndpoint: async () => ({ ...DESCRIPTOR, token: 'h.e30.s', cfg: Buffer.from(JSON.stringify(config)).toString('base64url') }) });
+    await s.connect();
+    expect(f.ctxs.ws!.config()).toMatchObject(config);
+    s.close();
+  });
+
   it('updateHistory never sends a system message: the signed session config owns the prompt', async () => {
     const f = fakes({ webrtc: 'ok' });
     const { s } = session(f);

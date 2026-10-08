@@ -22,8 +22,8 @@ import { probeUdp } from './net-probe';
 import { TurnHealth, type TurnProbe, type TurnUrlHealth } from './turn-health';
 import { echoTrace, makeEmitter, newTrace, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
 import {
-  deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, verifySessionToken,
-  RT_MAX_CFG_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
+  configDigest, deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, verifySessionToken,
+  RT_MAX_CFG_CHARS, RT_MAX_CFG_REF_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
 } from './token';
 
 export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list'>>;
@@ -310,11 +310,12 @@ export class RealtimeService {
     const app = view.app ?? userId;
     const sessionConfig = { ...cfgIn, deployment: dep };
     const cfg = encodeSessionConfig(sessionConfig);
-    if (cfg.length > RT_MAX_CFG_CHARS) {
+    if (cfg.length > RT_MAX_CFG_REF_CHARS) {
       return sendJson(res, 413, errorBody(
-        `session config is ${cfg.length} base64url characters, over ${RT_MAX_CFG_CHARS}: send the long history with config_update once connected`,
+        `session config is ${cfg.length} base64url characters, over ${RT_MAX_CFG_REF_CHARS}: send the long history with config_update once connected`,
         'config_too_large'));
     }
+    const byReference = cfg.length > RT_MAX_CFG_CHARS;
 
     noteSession(dep, trace.traceId, this.now());
     const placed = await this.place(dep, ordered.order);
@@ -338,7 +339,9 @@ export class RealtimeService {
     const sid = `rt_${randomUUID().replace(/-/g, '')}`;
     const iat = Math.floor(this.now() / 1000);
     const exp = iat + ttl;
-    const token = signSessionToken({ sid, app, dep, rep: placed.replica.id, cfg, iat, exp }, deriveRealtimeKey(replicaToken));
+    const token = signSessionToken({
+      sid, app, dep, rep: placed.replica.id, cfg: byReference ? '' : cfg, iat, exp, ...(byReference ? { cfd: configDigest(cfg) } : {}),
+    }, deriveRealtimeKey(replicaToken));
     this.sessions.set(sid, { dep, rep: placed.replica.id, app, exp: exp * 1000, pendingUntil: this.now() + this.reservationMs });
     this.ensurePolling();
 
@@ -360,11 +363,11 @@ export class RealtimeService {
       attrs: { deployment: dep, replica: placed.replica.id, active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1, turn: iceServers.length > 1 },
     });
     sendJson(res, 200, {
-      sessionId: sid, token, expiresAt: new Date(exp * 1000).toISOString(), deployment: dep, traceId: trace.traceId,
+      sessionId: sid, token, ...(byReference ? { cfg } : {}), expiresAt: new Date(exp * 1000).toISOString(), deployment: dep, traceId: trace.traceId,
       telemetryUrl: `${base}/v1/telemetry/events`,
       transports, iceServers,
       limits: {
-        maxSessionSeconds: ttl, maxConfigChars: RT_MAX_CFG_CHARS, requestsCharged: admin ? 0 : charge,
+        maxSessionSeconds: ttl, maxConfigChars: RT_MAX_CFG_REF_CHARS, requestsCharged: admin ? 0 : charge,
         replica: { active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1 },
       },
     });

@@ -183,7 +183,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   let quietSince = 0;
   let heardUntil = 0;
 
-  const baseConfig = () => (descriptor ? configFromToken(descriptor.token) : null) ?? opts.config ?? {};
+  const baseConfig = () => (descriptor ? configFromToken(descriptor.token, descriptor.cfg) : null) ?? opts.config ?? {};
   const config = () => {
     const base = baseConfig();
     const prior = Array.isArray(base.messages) ? base.messages as ChatMessage[] : [];

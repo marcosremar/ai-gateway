@@ -472,12 +472,12 @@ Headers: `traceparent` (optional, W3C), `X-Gateway-No-Wake: 1` (a cold deploymen
 
 | Status | Meaning |
 |---|---|
-| 200 | `{sessionId, token, expiresAt, deployment, traceId, telemetryUrl, transports[], iceServers[], limits}` |
+| 200 | `{sessionId, token, cfg?, expiresAt, deployment, traceId, telemetryUrl, transports[], iceServers[], limits}` |
 | 400 | bad body, unknown transport |
 | 401 | no / unknown key |
 | 403 | the key's app does not own the deployment (also when it does not exist) |
 | 404 | (admin) deployment not found — with `fallback` |
-| 413 | `config` over 6144 base64url characters — send the long history with `config_update` once connected |
+| 413 | `config` over 32768 base64url characters (~24 KB of JSON) — send the long history with `config_update` once connected. Up to 6144 the config rides in the token; above, the answer also carries `cfg` (the config's base64url text, which the SDK hands to the edge) and the token only its digest: [realtime.md](../realtime.md) § Token, with the prompt sizes that fit each LLM context |
 | 429 | app daily budget exhausted (`Retry-After`); a session costs `REALTIME_REQUESTS_PER_MINUTE` × ⌈TTL/60⌉ requests |
 | 503 | `cold` (woken unless no-wake) / `saturated` / `unsupported` / `unreachable` / `paused`, with `Retry-After` and `fallback: {transport:"s2s-stream", url:"/v1/s2s"}` |
 
@@ -489,7 +489,7 @@ Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; `?to
 
 | Route | |
 |---|---|
-| `POST /v1/realtime/sessions/:id/offer` | `{sdp}` → `{sdp, type:"answer", sessionId}`. 401 bad / expired (`token_expired`), 403 token of another session, 410 `replica_gone`, 502 `edge_error` / `edge_unreachable`, 503 `saturated` |
+| `POST /v1/realtime/sessions/:id/offer` | `{sdp, cfg?}` (`cfg`: the descriptor's, for a config by reference) → `{sdp, type:"answer", sessionId}`. 401 bad / expired (`token_expired`), 403 token of another session, 410 `replica_gone`, 502 `edge_error` / `edge_unreachable`, 503 `saturated` |
 | `POST /v1/realtime/sessions/:id/ice` | `{candidate}` (trickle, optional) → 204 |
 | `DELETE /v1/realtime/sessions/:id` | ends the session on the replica (frees its slot) → 204 |
 | `GET /v1/realtime/ws?token=…[&traceparent=…]` | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |

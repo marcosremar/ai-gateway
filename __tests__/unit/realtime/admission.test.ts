@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  decodeSessionConfig, deriveRealtimeKey, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
+  configDigest, decodeSessionConfig, deriveRealtimeKey, RT_MAX_CFG_REF_CHARS, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
 } from '../../../src/realtime';
 import { _resetExternalLoad } from '../../../src/realtime/external-load';
 import { parseEdgeStatus } from '../../../src/realtime/edge-status';
@@ -92,6 +92,33 @@ describe('POST /v1/realtime/sessions', () => {
     expect(body.limits).toMatchObject({ maxSessionSeconds: 600, requestsCharged: 40, replica: { active: 0, max: 8, pending: 1 } });
     expect(gw.charged).toEqual([['parle', 40]]);
     expect(externalLoadOf('speech')).toMatchObject({ active: 0, max: 8, replicas: 1 });
+  });
+
+  it('config size: 3 KB rides in the token as before; 7 KB and 16 KB go by reference (digest in the token, config in the descriptor); 25 KB is refused', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const admit = async (kb: number) => {
+      const config = { ...CONFIG, system: 'é'.repeat(kb * 512) };
+      const res = await gw.create({ config });
+      const body = await res.json() as Record<string, any>;
+      const verdict = res.ok ? verifySessionToken(body.token, deriveRealtimeKey(REPLICA_TOKEN), Math.floor(Date.now() / 1000)) : null;
+      return { config, status: res.status, body, claims: verdict && 'claims' in verdict ? verdict.claims : null };
+    };
+    const small = await admit(3);
+    expect(small.body.cfg).toBeUndefined();
+    expect(small.claims!.cfd).toBeUndefined();
+    expect(decodeSessionConfig(small.claims!.cfg)).toEqual(small.config);
+    for (const kb of [7, 16]) {
+      const large = await admit(kb);
+      expect(large.status).toBe(200);
+      expect(large.claims).toMatchObject({ cfg: '', cfd: configDigest(large.body.cfg) });
+      expect(decodeSessionConfig(large.body.cfg)).toEqual(large.config);
+      expect(large.body.token.length).toBeLessThan(600);
+      expect(large.body.transports[1].url.length).toBeLessThan(700);
+    }
+    expect((await admit(25)).status).toBe(413);
+    expect(small.body.limits.maxConfigChars).toBe(RT_MAX_CFG_REF_CHARS);
+    expect(configDigest('abc')).toBe('ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0');
   });
 
   it('only offers the edge transports the replica speaks', async () => {
@@ -209,8 +236,9 @@ describe('POST /v1/realtime/sessions', () => {
     expect(await denied.json()).toMatchObject({
       error: { code: 'budget_exceeded' }, reason: 'daily_budget_exhausted', budget: 'requests', reset_at: '2026-10-08T00:00:00.000Z',
     });
-    const big = await gw.create({ config: { ...CONFIG, system: 'x'.repeat(7000) } });
+    const big = await gw.create({ config: { ...CONFIG, system: 'x'.repeat(25_000) } });
     expect(big.status).toBe(413);
+    expect(await big.json()).toMatchObject({ error: { code: 'config_too_large' } });
     expect((await gw.create({ transports: ['webrtc'] })).status).toBe(400);
     expect((await gw.create({ config: CONFIG, transports: ['carrier-pigeon'] })).status).toBe(400);
   });

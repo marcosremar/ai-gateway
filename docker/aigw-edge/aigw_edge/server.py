@@ -35,11 +35,12 @@ from .host import OfferError, SessionGone, SessionHost, load_loop
 from .session import OUT_FRAME_BYTES, Session, first_audio_max
 from .netcheck import NetState
 from .telemetry import new_trace_id, telemetry, trace_id_from
-from .token import TokenError, TokenVerifier
+from .token import TokenError, TokenVerifier, needs_config
 from .upstream import Upstream
 
 AUDIO_TAG = 0x01
 WS_LEAD_SECONDS = 0.2  # how far ahead of real time WS audio may run (the client's jitter buffer)
+WS_CONFIG_SECONDS = 5
 INTERNAL_HEADER = "X-Edge-Internal"
 REPLAYED = ("unauthorized", "token rejected: replayed")
 
@@ -135,7 +136,8 @@ class Edge:
     def active(self) -> int:
         return len({*self.host.sessions, *self.ws_host.sessions, *self.routes})
 
-    def admit(self, token: str | None, trace_id: str, transport: str, live=None) -> tuple[dict | None, tuple[int, str, str] | None]:
+    def admit(self, token: str | None, trace_id: str, transport: str, live=None,
+              cfg: str | None = None) -> tuple[dict | None, tuple[int, str, str] | None]:
         """(claims, None) or (None, (http status, error code, message)). Capacity is checked before the token is
         consumed, so a learner refused here can still use the same token on another replica. A learner holds one slot:
         a sid with a session on each transport (the SDK starts on WS while WebRTC connects, then closes the WS) counts
@@ -143,7 +145,7 @@ class Edge:
         if not token:
             return None, (401, "unauthorized", "token missing")
         try:
-            claims = self.verifier.verify(token, consume=False, transport=transport, live=live)
+            claims = self.verifier.verify(token, consume=False, transport=transport, live=live, cfg=cfg)
         except TokenError as error:
             telemetry.emit("edge.token.reject", trace_id=trace_id, level="warn", reason=error.reason)
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
@@ -157,7 +159,7 @@ class Edge:
                            max=self.s.max_sessions, reason="warming")
             return None, (503, "warming", "models not ready yet")
         try:
-            return self.verifier.verify(token, transport=transport, live=live), None
+            return self.verifier.verify(token, transport=transport, live=live, cfg=cfg), None
         except TokenError as error:
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
 
@@ -218,7 +220,7 @@ class Edge:
         except Exception as error:  # noqa: BLE001
             return web.json_response(error_body("bad_request", f"{error}"), status=400)
         trace_id = trace_id_from(req.headers.get("traceparent") or body.get("traceparent")) or new_trace_id()
-        claims, refused = self.admit(body.get("token"), trace_id, "webrtc", live=self.rtc_live)
+        claims, refused = self.admit(body.get("token"), trace_id, "webrtc", live=self.rtc_live, cfg=body.get("cfg"))
         if refused:
             return web.json_response(error_body(refused[1], refused[2]), status=refused[0])
         sid = claims["sid"]
@@ -285,7 +287,8 @@ class Edge:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1 << 20)
         await ws.prepare(req)
         trace_id = trace_id_from(req.headers.get("traceparent") or req.query.get("traceparent")) or new_trace_id()
-        claims, refused = self.admit(req.query.get("token"), trace_id, "ws")
+        token = req.query.get("token")
+        claims, refused = self.admit(token, trace_id, "ws", cfg=await self.ws_config(ws) if needs_config(token) else None)
         if refused:
             await ws.send_str(json.dumps({"type": "error", "code": refused[1], "message": refused[2]}))
             await ws.close(code=4401 if refused[0] == 401 else 1013, message=refused[1].encode())
@@ -318,6 +321,13 @@ class Edge:
             session.tel("edge.ws.close", code=ws.close_code)
             await self.ws_host.end(sid, "ws_closed")
         return ws
+
+    async def ws_config(self, ws: web.WebSocketResponse) -> str | None:
+        try:
+            first = (await asyncio.wait_for(ws.receive(), WS_CONFIG_SECONDS)).json()
+            return first.get("cfg") if first.get("type") == "session_config" else None
+        except Exception:  # noqa: BLE001
+            return None
 
     async def ws_writer(self, ws: web.WebSocketResponse, session: Session, outbox: asyncio.Queue) -> None:
         """Events as they come; audio in 20 ms frames, at most WS_LEAD_SECONDS ahead of real time."""

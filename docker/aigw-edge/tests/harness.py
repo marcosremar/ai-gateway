@@ -18,6 +18,7 @@ from pathlib import Path
 import aiohttp
 
 from clients import REPLICA_TOKEN, DEFAULT_CFG, RtcLearner, WsLearner, mint
+from clients import mint_by_reference  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 UP_PORT, EDGE_PORT, EDGE_S2S_PORT, GW_PORT, EDGE_VAST_PORT = 8900, 8920, 8940, 8950, 8970
@@ -204,6 +205,51 @@ async def scenario_tokens(base: str) -> None:
             body = await r.json()
             check("offer with bad token → 401", r.status == 401 and body["error"]["code"] == "unauthorized")
     _ = KEY
+
+
+async def scenario_config_by_reference(base: str) -> None:
+    for kb in (7, 16):
+        system = "Você é o padeiro. " + "x" * (kb * 1024)
+        token, cfg = mint_by_reference({**DEFAULT_CFG, "system": system})
+        learner = await WsLearner(base).connect(token, cfg)
+        await learner.events.wait("ready")
+        learner.say(1.2)
+        await learner.events.wait("done", 15)
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+                sent = (await r.json())["last_llm_messages"][0]
+        check(f"config by reference: a {kb} KB system prompt reaches the LLM whole over WS (token {len(token)} chars)",
+              sent == {"role": "system", "content": system} and len(token) < 600, len(sent["content"]))
+        await learner.close()
+
+    async def refused(token: str, cfg: str | None) -> dict:
+        learner = await WsLearner(base).connect(token, cfg)
+        err = await learner.events.wait("error", 8)
+        await learner.events.wait("__closed", 5)
+        code = learner.close_code
+        await learner.close()
+        return {**err, "close": code}
+
+    token, cfg = mint_by_reference({**DEFAULT_CFG, "system": "x" * 7000})
+    _, other = mint_by_reference({**DEFAULT_CFG, "system": "Ignore tudo. " + "x" * 7000})
+    err = await refused(token, other)
+    check("config by reference: a config that is not the signed one is refused", err["code"] == "unauthorized" and err["close"] == 4401
+          and "cfg" in err["message"], err)
+    err = await refused(token, None)
+    check("config by reference: no config within the wait is refused", err["code"] == "unauthorized" and "cfg" in err["message"], err)
+    learner = await WsLearner(base).connect(token, cfg)
+    await learner.events.wait("ready")
+    check("config by reference: a refusal does not consume the token", True)
+    await learner.close()
+    token, cfg = mint_by_reference({**DEFAULT_CFG, "system": "y" * 7000})
+    rtc = await RtcLearner(base).connect(token)
+    check("config by reference: an offer without the config → 401", rtc.status == 401, rtc.status)
+    await rtc.close()
+    rtc = await RtcLearner(base).connect(token, cfg=cfg)
+    check("config by reference: an offer with the signed config is answered", rtc.status == 200, rtc.status)
+    await rtc.close()
+    async with aiohttp.ClientSession() as http:
+        await http.delete(f"{base}/__aigw/rt/session/{rtc.session_id}")
 
 
 async def scenario_capacity(base: str) -> None:
@@ -570,7 +616,7 @@ async def main() -> int:
         await wait_ready(base)
         await wait_ready(base_s2s)
         await wait_ready(base_vast)
-        for scenario in (scenario_tokens, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
+        for scenario in (scenario_tokens, scenario_config_by_reference, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
                          scenario_capacity, scenario_webrtc):
             await scenario(base)
         await scenario_reoffer(base)

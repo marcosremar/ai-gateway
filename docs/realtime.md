@@ -36,7 +36,7 @@ JWT HS256. Signing key per deployment, derived from the replica token (never lea
 key = HMAC-SHA256(key = <deployment replicaToken>, message = "aigw-rt-v1")      # 32 raw bytes
 claims = { sid, app, dep, rep, cfg, iat, exp }    # serialized in this order; base64url without padding
   sid  session id (rt_<32 hex>)      app  app account      dep  deployment      rep  replica id
-  cfg  base64url(JSON(session config)), ≤ 6 KB (6144 characters)
+  cfg  base64url(JSON(session config)), ≤ 6 KB (6144 characters); "" with `cfd` when the config goes by reference (below)
   iat/exp  unix seconds, exp − iat ≤ 900 (15 min); default TTL 600 s (REALTIME_SESSION_TTL_SECONDS)
 ```
 
@@ -45,6 +45,35 @@ Verification: header `alg` must be `HS256`; constant-time signature check; `exp 
 TURN credential): [`docs/realtime-token-vectors.json`](realtime-token-vectors.json) — cross-checked in Python too.
 
 The token is **signed, not encrypted**: the browser can read `cfg`. No secret belongs in the session config.
+
+**Config by reference** (configs over 6144 characters, up to `RT_MAX_CFG_REF_CHARS` = 32768 base64url characters,
+~24 KB of JSON; above that admission answers 413). The 6144 cap exists because the token rides in the WebSocket URL
+and is base64url-encoded twice (an 8.3 KB request line, at nginx's and aiohttp's limits). A larger config leaves the
+token: `cfg` is `""` and one more claim, `cfd` = base64url(SHA-256(the config's base64url text)), is appended after
+`exp` (tokens without it are byte-for-byte what they were; the vectors are unchanged). The descriptor then carries
+the text itself in `cfg`, and the client hands it to the edge at session start: the first WS text frame
+`{type:"session_config", cfg}`, or `cfg` next to `sdp` in the offer body (also on a re-offer). The edge accepts the
+session only when the text hashes to the signed `cfd` (reason `cfg` otherwise, before the token is consumed; a WS
+waits 5 s for the frame), so authenticity is still checked offline, with no call to the gateway and no state in it:
+a gateway restart between admission and connect changes nothing. An SDK older than this change cannot open a
+by-reference session (it never sends the config); configs that fit keep riding in the token, as before.
+
+**What fits the LLM.** The bound is on the whole config; what limits the *prompt* is the LLM's context per slot
+(`LLM_SLOT_CTX`, read by the edge from `/health` `llm_ctx`). The history fit keeps the system prompt and every
+`system` message whole and estimates 3 bytes per token + 8 per message, so of `ctx − max_tokens (160) − 64` tokens:
+
+| System prompt (UTF-8) | est. tokens | slot 2048 (L4): 1824 usable | slot 4096 (L40S): 3872 usable | slot 8192: 7968 usable |
+|---|---|---|---|---|
+| 3 KB | ~1030 | ~790 left: about 11 short exchanges of history | ~2840 left | fits |
+| 4.6 KB (the school's largest) | ~1580 | ~240 left: 3 exchanges, then the oldest go | ~2290 left: about 30 exchanges | fits |
+| 5.4 KB | ~1850 | nothing left: the turn itself does not fit | ~2020 left | fits |
+| 7 KB | ~2400 | **cannot work** (LLM answers 400 on every turn) | ~1470 left: about 20 exchanges | fits |
+| 11.5 KB | ~3930 | cannot work | nothing left | ~4000 left |
+| 16 KB | ~5470 | cannot work | **cannot work** | ~2500 left |
+
+The estimate is deliberately high (llama.cpp counts ~3.6 bytes per token for Portuguese), so the real room is a
+little larger; the LLM's own count decides. A prompt over the slot is not refused at admission (the gateway does not
+know the replica's slot): every turn ends with `error{code:"upstream"}`, stage `llm`, HTTP 400 "context size".
 
 ### Edge routes (on the replica, behind the nginx token gate)
 
@@ -220,7 +249,7 @@ Called by the **app's backend** with its app key (the browser never holds a gate
     { "type": "s2s-stream", "url": "/v1/s2s" },
     { "type": "post" } ],
   "iceServers": [ … ],
-  "limits": { "maxSessionSeconds": 600, "maxConfigChars": 6144, "requestsCharged": 40, "replica": { "active": 3, "max": 16, "pending": 1 } } }
+  "limits": { "maxSessionSeconds": 600, "maxConfigChars": 32768, "requestsCharged": 40, "replica": { "active": 3, "max": 16, "pending": 1 } } }
 ```
 
 Edge transports the replica does not list are left out. URLs are absolute (`REALTIME_PUBLIC_URL`, else the request's

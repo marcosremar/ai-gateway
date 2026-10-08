@@ -1,5 +1,6 @@
 """Unit tests of the edge's pure parts (no network): python tests/test_units.py (needs numpy for the VAD)."""
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -9,7 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from aigw_edge import text  # noqa: E402
 from aigw_edge.config import derive_key  # noqa: E402
-from aigw_edge.token import TokenError, TokenVerifier, b64url, sign  # noqa: E402
+from aigw_edge.token import MAX_CFG_CHARS, MAX_CFG_REF_CHARS, TokenError, TokenVerifier, b64url, config_digest, needs_config, sign  # noqa: E402
 
 failures = 0
 
@@ -104,6 +105,26 @@ check("token: a live WebRTC session does not let its token open a second WS",
       v.verify(reoffer, transport="ws")["sid"] == "s-reoffer" and rejects_on(reoffer, "ws"))
 alive.clear()
 check("token: once the session ended its token is replayed", replayed(reoffer, alive.__contains__))
+by_ref = b64url(json.dumps({"voice": "br-m-08", "system": "x" * 16000}).encode())
+ref = {**good, "cfg": "", "cfd": config_digest(by_ref)}
+
+
+def ref_verdict(sid, cfg_, signed=by_ref):
+    try:
+        return v.verify(sign({**ref, "sid": sid, "cfd": config_digest(signed)}, key), cfg=cfg_)["cfg"]
+    except TokenError as e:
+        return e.reason
+
+
+check("token: config by reference, 16 KB: verified against the signed digest", ref_verdict("r1", by_ref)["system"] == "x" * 16000)
+check("token: config by reference: missing, altered or not base64url JSON → cfg",
+      [ref_verdict("r2", None), ref_verdict("r3", by_ref[:-4] + "AAAA"), ref_verdict("r4", "")] == ["cfg"] * 3)
+check("token: config by reference: the digest is sha256 over the base64url text (the gateway's vector)",
+      config_digest("abc") == "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0" and needs_config(sign(ref, key)) and not needs_config(sign(good, key))
+      and not needs_config("x") and not needs_config(None))
+over = b64url(json.dumps({"system": "x" * MAX_CFG_REF_CHARS}).encode())
+check("token: config by reference over the bound → cfg; an inline cfg keeps its 6144 bound",
+      ref_verdict("r5", over, over) == "cfg" and rejects({**good, "sid": "r6", "cfg": "e30" + "A" * MAX_CFG_CHARS}, "cfg"))
 check("token: expired", rejects({**good, "sid": "s2", "iat": int(now) - 400, "exp": int(now) - 100}, "expired"))
 check("token: lifetime", rejects({**good, "sid": "s3", "exp": int(now) + 3600}, "ttl_too_long"))
 check("token: replica", rejects({**good, "sid": "s4", "rep": "fr-par-2:other"}, "replica"))
@@ -113,7 +134,6 @@ check("token: key derivation is HMAC-SHA256(key=token, msg='aigw-rt-v1')",
       derive_key("t" * 32).hex() == __import__("hmac").new(b"t" * 32, b"aigw-rt-v1", "sha256").hexdigest())
 
 # The gateway's contract vectors (docs/realtime-token-vectors.json in the gateway, copied here).
-import json  # noqa: E402
 
 from aigw_edge.token import turn_credential  # noqa: E402
 

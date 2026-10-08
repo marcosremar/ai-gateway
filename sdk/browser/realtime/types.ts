@@ -71,6 +71,8 @@ export type TransportOffer =
 export interface SessionDescriptor {
   sessionId: string;
   token: string;
+  /** The session config (base64url JSON) when it is too large for the token, which then carries its digest: sent to the edge at session start. */
+  cfg?: string;
   expiresAt: string;
   transports: TransportOffer[];
   iceServers?: IceServerInit[];
