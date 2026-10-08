@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { edgeEnv, nginxConfig, RT_EDGE_PORT, VAST_EDGE_DIR, vastEdgeEnv, vastReplicaInit } from '../../../src/deployments/cloud-init';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
-import { buildSpec, VAST_ENV_MAX_BYTES } from '../../../src/deployments/spec';
+import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
 import {
   BAD_HOST_MS, EUR_TO_USD, LIST_CACHE_MS, LIST_STALE_MAX_MS, MIN_RELIABILITY, TOO_FAR_HOST_MS, VastDeploymentBackend, vastState,
 } from '../../../src/deployments/vast-backend';
@@ -382,5 +382,18 @@ describe('realtime UDP ports on Vast', () => {
     expect(mapped).toEqual(['-p 80:80', ...Array.from({ length: 9 }, (_, i) => `-p ${50000 + i}:${50000 + i}/udp`)]);
     expect(Buffer.from(env.AIGW_INIT_B64, 'base64').toString()).toBe(vastReplicaInit(spec, TOKEN));
     expect(backend.searchBody(vastSpec(), 0.97).direct_port_count).toEqual({ gte: 1 });
+  });
+
+  it('the PUT-time env estimate covers what the create really sends, edge and port mappings included', async () => {
+    for (const spec of [
+      vastSpec({ realtime: {} }), vastSpec({ realtime: { maxSessions: 30 } }),
+      vastSpec({ bootScript: 'x'.repeat(9_000), realtime: { maxSessions: 4, env: { EDGE_LLM_MODEL: 'm'.repeat(200), EDGE_TTS_MODEL: 't'.repeat(200) } } }),
+    ]) {
+      const { calls, fetchImpl } = fakeVast(c => (c.url.endsWith('/bundles/') ? { body: { offers } } : { body: { success: true, new_contract: 1 } }));
+      await new VastDeploymentBackend('k', { fetch: fetchImpl }).createReplica({ spec, replicaToken: 'x'.repeat(43), cloudInit: '', namespace: 'ns' });
+      const sent = Object.entries(calls[1].body!.env as Record<string, string>).reduce((n, [k, v]) => n + k.length + v.length + 2, 0);
+      expect(sent).toBeLessThanOrEqual(vastEnvBytes(spec));
+      expect(sent).toBeLessThan(VAST_ENV_MAX_BYTES);
+    }
   });
 });

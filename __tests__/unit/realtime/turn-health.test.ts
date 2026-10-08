@@ -152,4 +152,19 @@ describe('media-path re-probe', () => {
     expect(probes).toEqual([0, 70, 200, 450, 760, 1070]);
     service.stop();
   });
+
+  it('a Vast replica is probed on its public IP at the mapped UDP port its edge reports', async () => {
+    const probed: Array<[string, number]> = [];
+    const service = new RealtimeService({
+      controller: null, userOf: () => null, isAdmin: () => false, netProbeMs: 0, turnCheckMs: 0,
+      probeUdpImpl: async (host, port) => { probed.push([host, port]); return { result: 'ok', rttMs: 31, tries: 1 }; },
+      fetchImpl: (async () => Response.json({ path: 'direct', relay: null, reasons: [] })) as unknown as typeof fetch,
+    });
+    await service.probeNet('speech', { id: '31337', base: 'http://203.0.113.9:41080' }, {
+      active: 0, max: 4, available: 4, transports: ['webrtc', 'ws'], udpPorts: [50000, 50008], probePort: 41008,
+      net: { path: 'unknown', udpInbound: 'unknown', publicIp: '203.0.113.9', checkedAt: null }, firstAudioMaxMs: null,
+    }, 'token');
+    expect(probed).toEqual([['203.0.113.9', 41008]]);
+    service.stop();
+  });
 });

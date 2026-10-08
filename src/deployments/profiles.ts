@@ -115,10 +115,13 @@ export const BUILTIN_PROFILES: Profile[] = [
       // (docs/reports/2026-10-07-realtime-handoff.md § New image and class capacity): max 1.49–2.12 s at 4 learners
       // (2.44 s in a burst of 4), 2.16–2.39 s at 6, 2.64–2.83 s at 8, 3.87–4.44 s at 16 — so 4 (was 8, chosen on the
       // p95). The L4's 2 is an estimate from its /v1/s2s first audio (1.5 s with 1 turn, 4.2 s with 4), not a
-      // realtime measurement.
+      // realtime measurement. The RTX 5090 (Vast, 32 GB) takes the values of the live /v1/s2s run of 2026-10-08, where it
+      // matched the L40S at 1 and 4 at once; its RT_MAX_SESSIONS 4 is the L40S's measured-safe value, to be re-measured
+      // as realtime on the 5090 itself.
       envByMachineType: {
         'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '2' },
         'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '4' },
+        'RTX 5090': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4' },
       },
       description: 'Whisper + Qwen LLM + Qwen3-TTS in one container (STT, S2S, /ws/audio-stream). POST /v1/s2s.',
     },
