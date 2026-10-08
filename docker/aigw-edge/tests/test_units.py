@@ -26,6 +26,10 @@ if server.exists():
     src = server.read_text()
     body = src[src.index("SENTENCE_END ="):src.index("LLM_TIMINGS =")].rstrip()
     check("text.py = speech-stack server.py cut/JsonField", body in (ROOT / "aigw_edge" / "text.py").read_text())
+    edge_tts = (ROOT / "aigw_edge" / "upstream.py").read_text()
+    check("upstream.py = speech-stack server.py silence rule and codec frame rate",
+          src[src.index("def silent("):src.index("async def tts_stream")].rstrip() in edge_tts
+          and all(line in edge_tts for line in ("TTS_SILENCE_RMS = 300\n", "TTS_FRAMES_PER_SECOND = 12.5\n") if line in src))
 
 
 def stream(t: str) -> list[str]:
@@ -138,7 +142,7 @@ try:
         async def speech(request):
             res = web.StreamResponse()
             await res.prepare(request)
-            await res.write(b"\0" * 4800)
+            await res.write(b"\x10\x27" * 2400)
             request.transport.close()
             return res
 
@@ -161,8 +165,62 @@ try:
         return got, error
 
     got, error = asyncio.run(cut_tts_stream())
-    check("upstream: a TTS stream cut mid-body raises UpstreamError with stage tts",
+    check("upstream: a TTS stream cut mid-body, after audible audio, raises UpstreamError with stage tts",
           got == 4800 and isinstance(error, UpstreamError) and error.stage == "tts" and error.status is None)
+
+    import logging
+
+    import fake_upstream
+
+    logging.getLogger("aiohttp.server").setLevel(logging.CRITICAL)
+
+    async def tts_guard():
+        runner = web.AppRunner(fake_upstream.app())
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        up = Upstream(Settings(upstream=f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"))
+        await up.start()
+        out = {}
+        for name, text, faults in (("runaway", "Bom dia!", ["runaway"]), ("twice", "Bom dia!", ["runaway", "runaway"]),
+                                   ("break", "Bom dia!", ["break"]), ("cut", "Bom dia!", ["cut"]),
+                                   ("lead", "Bom dia!", ["lead"]), ("late", "Bom dia!", ["break", "lead"]),
+                                   ("long", "a" * 160, [])):
+            fake_upstream.tts_faults.update({text: list(faults)})
+            mark, pcm, retries, error = len(fake_upstream.calls["tts_log"]), b"", [], None
+            try:
+                async for chunk in up.speak(text, {}, {"voice": "x"}, None, retries.append):
+                    pcm += chunk
+            except UpstreamError as raised:
+                error = raised
+            out[name] = (pcm, [r.request_id for r in retries], error, fake_upstream.calls["tts_log"][mark:])
+        await asyncio.sleep(0.1)
+        await up.close()
+        await runner.cleanup()
+        return out, fake_upstream.calls["tts_active"]
+
+    guard, active = asyncio.run(tts_guard())
+    said = fake_upstream.tone(0.5, freq=180.0)
+    ids = lambda name: [request["request_id"] for request in guard[name][3]]  # noqa: E731
+    check("tts guard: the engine cap is max_new_tokens = (3 s + 0.2 s per character) at 12.5 frames/s",
+          guard["lead"][3][0]["max_new_tokens"] == 58 and guard["long"][3][0]["max_new_tokens"] == 438)
+    check("tts guard: every attempt carries its own 12-character request id",
+          len(set(ids("runaway"))) == 2 and all(len(i) == 12 for i in ids("runaway")))
+    check("tts guard: a silent runaway is dropped and the sentence requested again once, heard once",
+          guard["runaway"][0] == said and guard["runaway"][1] == ids("runaway")[:1] and guard["runaway"][2] is None)
+    check("tts guard: silent again on the retry raises UpstreamError with stage tts, nothing yielded",
+          guard["twice"][0] == b"" and len(guard["twice"][3]) == 2 and isinstance(guard["twice"][2], UpstreamError)
+          and guard["twice"][2].stage == "tts" and guard["twice"][2].request_id == ids("twice")[1])
+    check("tts guard: a stream broken before any audio is requested again once",
+          guard["break"][0] == said and len(guard["break"][1]) == 1 and guard["break"][2] is None)
+    check("tts guard: a stream broken after audible audio raises, with no retry",
+          guard["cut"][0] == said and guard["cut"][1] == [] and len(guard["cut"][3]) == 1
+          and isinstance(guard["cut"][2], UpstreamError) and guard["cut"][2].stage == "tts")
+    check("tts guard: a silent lead under the limit is kept and not retried",
+          guard["lead"][0] == bytes(24000) + said and guard["lead"][1] == [] and len(guard["lead"][3]) == 1)
+    check("tts guard: the retry drops its silent lead",
+          guard["late"][0].endswith(said) and len(guard["late"][0]) < len(said) + 4800 and len(guard["late"][1]) == 1)
+    check("tts guard: no upstream request left open", active == 0)
 
     async def stage_failures():
         delta = b'data: {"choices": [{"delta": {"content": "oi "}}]}\n\n'

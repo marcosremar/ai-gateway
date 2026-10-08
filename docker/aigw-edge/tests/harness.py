@@ -149,6 +149,31 @@ async def scenario_barge_in(base: str) -> None:
     await learner.close()
 
 
+async def scenario_tts_guard(base: str) -> None:
+    async def turn(faults: list[str]) -> tuple[WsLearner, dict]:
+        async with aiohttp.ClientSession() as http:
+            await http.post(f"http://127.0.0.1:{UP_PORT}/__tts_faults", json={"Bom dia!": faults})
+            learner = await ws_turn(base)
+            await learner.events.wait("done", 15)
+            await learner.close()
+            await asyncio.sleep(0.5)
+            async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+                return learner, await r.json()
+
+    learner, stats = await turn(["runaway"])
+    metrics = learner.events.of("metrics")[0]
+    asked = [r for r in stats["tts_log"] if r["input"] == "Bom dia!"][-2:]
+    check("tts guard: a silent runaway is asked again once and counted (metrics.tts_retries)", metrics["tts_retries"] == 1
+          and [r["mode"] for r in asked] == ["runaway", "ok"] and learner.events.types().count("audio_start") == 1, metrics)
+    check("tts guard: the engine cap and a request id go with every attempt",
+          all(r["max_new_tokens"] == 58 and len(r["request_id"]) == 12 for r in asked) and asked[0]["request_id"] != asked[1]["request_id"], asked)
+    learner, stats = await turn(["runaway", "runaway"])
+    done = learner.events.of("done")[-1]
+    check("tts guard: silent again on the retry → error, no audio", done.get("error") is True and learner.audio_bytes == 0
+          and "audio_start" not in learner.events.types() and "tts" in learner.events.of("error")[0]["message"], learner.events.types())
+    check("tts guard: no upstream request left open", stats["tts_active"] == 0, stats["tts_active"])
+
+
 async def scenario_tokens(base: str) -> None:
     async def refused(token: str) -> dict:
         learner = await WsLearner(base).connect(token)
@@ -560,6 +585,7 @@ async def main() -> int:
             await scenario_nginx()
         else:
             print("SKIP nginx scenario (no nginx or bun)")
+        await scenario_tts_guard(base)
         return 0
     except Exception as error:  # noqa: BLE001
         results["error"] = repr(error)

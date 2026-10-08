@@ -303,7 +303,7 @@ class Session:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
         metrics: dict = {"ttfa_ms": None, "stt_ms": None, "llm_ttft_ms": None, "tts_ttfb_ms": None,
                          "endpoint_ms": ms_between(last_speech_at, ended), "first_sound_ms": None, "opener": None,
-                         "deadline_ms": self.deadline_ms(), "deadline_missed": False}
+                         "deadline_ms": self.deadline_ms(), "deadline_missed": False, "tts_retries": 0}
         user_text, spoken = None, []
         thinking = deltas = None
         self.outcome = "ok"
@@ -337,7 +337,7 @@ class Session:
             self.outcome = "error"
             stage = error.stage if isinstance(error, UpstreamError) else ("timeout" if isinstance(error, asyncio.TimeoutError) else "edge")
             tel("edge.upstream.error", level="error", stage=stage, status=getattr(error, "status", None),
-                error=type(error).__name__)
+                error=type(error).__name__, requestId=getattr(error, "request_id", None))
             self.emit({"type": "error", "code": "upstream", "message": repr(error)[:300]})
             self.emit({"type": "done", "error": True, "turnId": turn_id})
         finally:
@@ -352,7 +352,8 @@ class Session:
                 sentences=len(spoken), replyChars=sum(len(x) for x in spoken), endpointMs=metrics["endpoint_ms"],
                 ttfaFromSpeechMs=ttfa_from_speech(metrics), speculated=confirmed is not None,
                 firstSoundMs=metrics["first_sound_ms"], firstSoundFromSpeechMs=ttfa_from_speech(metrics, "first_sound_ms"),
-                opener=metrics["opener"], deadlineMs=metrics["deadline_ms"], deadlineMissed=metrics["deadline_missed"])
+                opener=metrics["opener"], deadlineMs=metrics["deadline_ms"], deadlineMissed=metrics["deadline_missed"],
+                ttsRetries=metrics["tts_retries"])
             if thinking is not None:
                 thinking.cancel()
             if user_text:
@@ -467,12 +468,16 @@ class Session:
         raw: list[str] = []
         synths: list[asyncio.Task] = []
 
+        def retried(error: UpstreamError) -> None:
+            metrics["tts_retries"] += 1
+            tel("edge.tts.retry", level="warn", requestId=error.request_id, reason=str(error)[:160])
+
         async def synth(sentence: str, queue: asyncio.Queue) -> None:
             try:
                 async with gate:
                     t = time.monotonic()
                     rate = self.s.tts_rate
-                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id):
+                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id, retried):
                         if isinstance(chunk, int):
                             rate = chunk
                             continue
@@ -574,6 +579,7 @@ class Session:
             elif kind_e == "error":
                 raise RuntimeError(item.get("message", "s2s error"))
             elif kind_e == "done":
+                metrics["tts_retries"] = item.get("tts_retries", 0)
                 self.emit({"type": "reply", "text": item.get("reply", " ".join(spoken))})
         if metrics["ttfa_ms"] is not None:
             await self.out.drained.wait()

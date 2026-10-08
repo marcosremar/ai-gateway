@@ -191,6 +191,15 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
 - **Stage failures**: an LLM or TTS stream that breaks mid-body, sends nothing for `EDGE_UPSTREAM_GAP_S` (10, just
   above the stack's own 8 s so its in-band error arrives first) or, for the LLM, carries an SSE `{"error": …}` event
   ends the turn with `error` and `stage: llm | tts` (`UpstreamError`, `tests/test_units.py`).
+- **TTS runaway guard** (the speech-stack's `tts_stream` rules, `upstream.py` `speak`): every sentence carries
+  `max_new_tokens` = (`EDGE_TTS_MAX_SECONDS` 3 + `EDGE_TTS_MAX_SECONDS_PER_CHAR` 0.2 × characters) × 12.5 codec
+  frames/s and its own `extra_params.request_id`. Chunks with RMS ≤ 300 before the first audible one are held, not
+  played: no `audio_start`, and the first-audio deadline still sees no reply audio, so an opener may play meanwhile.
+  A sentence still silent after `EDGE_TTS_MAX_LEAD_SECONDS` (1), or whose stream fails before any sound, is dropped
+  and requested again once, in its place in the order (`metrics.tts_retries`, `edge.tts.retry` with the request id,
+  `ttsRetries` on `edge.turn.done`). The second attempt drops its silent lead; when it stays silent or fails, or when
+  any stream fails after sound, the turn ends with the `tts` error (no retry: it would repeat words already heard).
+  The three settings are tunable through `realtime.env`.
 - **First-audio deadline** (`RT_FIRST_AUDIO_DEADLINE_MS` = 2000, at most 2500; `cfg.first_audio_deadline_ms` per
   session; `RT_FIRST_AUDIO_MARGIN_MS` = 300): counted from the VAD's last speech frame (from the end of the turn when
   the VAD heard none). A turn — speculated ones only once confirmed — with no audio queued at deadline − margin plays

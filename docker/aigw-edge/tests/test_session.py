@@ -16,6 +16,8 @@ from aigw_edge import opener as opener_module  # noqa: E402
 from aigw_edge import session as session_module  # noqa: E402
 from aigw_edge.config import Settings  # noqa: E402
 from aigw_edge.server import Edge  # noqa: E402
+from aigw_edge.upstream import Upstream, silent  # noqa: E402
+import fake_upstream  # noqa: E402
 from fake_upstream import HEARD, LLM_TOKEN_MS, LLM_TTFT_MS, REPLY, STT_MS, TTS_TTFB_MS  # noqa: E402
 
 FRAME_S = 0.02
@@ -99,7 +101,7 @@ class FakeUpstream:
     async def voice_fields(self, cfg):
         return {"voice": cfg["voice"]}
 
-    async def speak(self, text, cfg, fields, trace_id=None):
+    async def speak(self, text, cfg, fields, trace_id=None, on_retry=None):
         self.calls["tts"] += 1
         self.spoken.append(text)
         await asyncio.sleep(TTS_TTFB_MS / 1000)
@@ -111,8 +113,8 @@ class FakeUpstream:
 
 
 class Learner:
-    def __init__(self, cfg: dict | None = None, **settings):
-        self.up = FakeUpstream()
+    def __init__(self, cfg: dict | None = None, up=None, **settings):
+        self.up = up or FakeUpstream()
         self.events: list[tuple[float, dict]] = []
         self.session = session_module.Session("s", {"cfg": cfg or CFG}, Settings(**settings), self.up,
                                               lambda e: self.events.append((time.monotonic(), e)), "ws")
@@ -498,9 +500,111 @@ async def admission_shedding() -> None:
     session_module.recent_first_audio.clear()
 
 
+def pitches(pcm: bytes, spans: tuple) -> list[int]:
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    cut = lambda span: samples[int(span[0] * 24000):int(span[1] * 24000)]  # noqa: E731
+    return [round(int(np.argmax(np.abs(np.fft.rfft(cut(span))))) / (span[1] - span[0])) for span in spans]
+
+
+async def tts_guard() -> None:
+    import logging  # noqa: PLC0415
+
+    from aiohttp import web  # noqa: PLC0415
+
+    logging.getLogger("aiohttp.server").setLevel(logging.CRITICAL)
+    runner = web.AppRunner(fake_upstream.app())
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    log = fake_upstream.calls["tts_log"]
+
+    async def turn(faults: list[str], **settings) -> tuple[Learner, Upstream]:
+        settings = {"upstream": f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}", "stt_partials": False, **settings}
+        up = Upstream(Settings(**settings))
+        await up.start()
+        fake_upstream.tts_faults.update({"Bom dia!": list(faults)})
+        log.clear()
+        learner = Learner(up=up, **settings)
+        learner.say(0.5)
+        return learner, up
+
+    async def finish(learner: Learner, up: Upstream) -> tuple[bytes, bytes]:
+        await asyncio.sleep(0.1)
+        await learner.close()
+        await up.close()
+        heard = b"".join(learner.heard)
+        frames = [heard[at:at + 960] for at in range(0, len(heard), 960)]
+        return heard, b"".join(frame for frame in frames if not silent(frame))
+
+    for name, faults in (("silent runaway", ["runaway"]), ("break before any audio", ["break"])):
+        mark = len(telemetry_events)
+        learner, up = await turn(faults)
+        metrics = await learner.wait("metrics", 10)
+        await learner.wait("done", 10)
+        first = learner.heard[0]
+        heard, audible = await finish(learner, up)
+        retried = [kw for event, kw in telemetry_events[mark:] if event == "edge.tts.retry"]
+        check(f"tts guard, {name}: retried once, counted in metrics and telemetry, with the engine's request id",
+              metrics["tts_retries"] == 1 and turn_done(mark)["ttsRetries"] == 1 and turn_done(mark)["outcome"] == "ok"
+              and [r["requestId"] for r in retried] == [log[0]["request_id"]],
+              (metrics["tts_retries"], retried, log[:2]))
+        check(f"tts guard, {name}: one audio_start, on audible audio, and the reply heard once in sentence order",
+              learner.types().count("audio_start") == 1 and not silent(first) and abs(len(audible) - 2.75 * 48000) <= 3 * 960
+              and all(abs(got - want) <= 12 for got, want in zip(pitches(audible, ((0.1, 0.4), (0.6, 1.9), (2.1, 2.7))), (180, 300, 210))),
+              (len(audible), pitches(audible, ((0.1, 0.4), (0.6, 1.9), (2.1, 2.7)))))
+        check(f"tts guard, {name}: the cap went with every request, the next sentence was asked before the retry",
+              [(r["input"], r["max_new_tokens"]) for r in log if r["input"] == "Bom dia!"] == [("Bom dia!", 58)] * 2
+              and [r["input"] for r in log].index("Claro, um pão francês sai já.") < [r["input"] for r in log].index("Bom dia!", 1),
+              [(r["input"], r["max_new_tokens"]) for r in log])
+
+    mark = len(telemetry_events)
+    learner, up = await turn(["runaway", "runaway"])
+    done = await learner.wait("done", 10)
+    heard, audible = await finish(learner, up)
+    failed = [kw for event, kw in telemetry_events[mark:] if event == "edge.upstream.error"]
+    check("tts guard, silent again on the retry: the turn ends with the tts error, nothing was played",
+          done.get("error") is True and "tts" in learner.of("error")[0]["message"] and heard == b""
+          and "audio_start" not in learner.types() and [r["input"] for r in log].count("Bom dia!") == 2
+          and failed[0]["stage"] == "tts" and failed[0]["requestId"] == [r["request_id"] for r in log if r["input"] == "Bom dia!"][1]
+          and turn_done(mark)["ttsRetries"] == 1 and turn_done(mark)["outcome"] == "error",
+          (learner.types(), failed, len(heard)))
+    check("tts guard, silent again on the retry: no upstream request left open", fake_upstream.calls["tts_active"] == 0)
+
+    mark = len(telemetry_events)
+    learner, up = await turn(["cut"])
+    done = await learner.wait("done", 10)
+    heard, audible = await finish(learner, up)
+    check("tts guard, break after audible audio: the turn ends with the tts error, the sentence is not asked again",
+          done.get("error") is True and "tts" in learner.of("error")[0]["message"] and turn_done(mark)["ttsRetries"] == 0
+          and [r["input"] for r in log].count("Bom dia!") == 1 and 0 < len(audible) <= 0.5 * 48000,
+          ([r["input"] for r in log], len(audible)))
+
+    learner, up = await turn(["lead"])
+    metrics = await learner.wait("metrics", 10)
+    await learner.wait("done", 10)
+    heard, audible = await finish(learner, up)
+    check("tts guard, a silent lead under the limit: played as it came, no retry",
+          metrics["tts_retries"] == 0 and [r["input"] for r in log].count("Bom dia!") == 1
+          and abs(len(heard) - 3.25 * 48000) <= 3 * 960 and abs(len(audible) - 2.75 * 48000) <= 3 * 960,
+          (len(heard), len(audible)))
+
+    learner, up = await turn(["runaway"], tts_max_lead_seconds=60, tts_max_seconds=60)
+    await learner.wait("reply_delta", 10)
+    await asyncio.sleep(0.3)
+    held = fake_upstream.calls["tts_active"]
+    learner.session.control({"type": "interrupt"})
+    await learner.wait("interrupted")
+    heard, audible = await finish(learner, up)
+    check("tts guard, interrupt during a held lead: nothing played, no audio_start, the upstream requests are closed",
+          held >= 1 and heard == b"" and "audio_start" not in learner.types() and fake_upstream.calls["tts_active"] == 0
+          and not learner.session.busy, (held, fake_upstream.calls["tts_active"], learner.types()))
+    fake_upstream.tts_faults.clear()
+    await runner.cleanup()
+
+
 async def main() -> None:
     for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials,
-                     first_audio_deadline, admission_shedding):
+                     first_audio_deadline, admission_shedding, tts_guard):
         await scenario()
     print(json.dumps(results))
 

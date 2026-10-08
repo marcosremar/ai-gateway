@@ -66,6 +66,9 @@ class Settings:
     tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
     tts_rate: int = 24000
     tts_parallel: int = 2
+    tts_max_seconds: float = 3.0
+    tts_max_seconds_per_char: float = 0.2
+    tts_max_lead_seconds: float = 1.0
     first_audio_deadline_ms: int = 2000
     first_audio_margin_ms: int = 300
     shed_window_s: int = 30
@@ -116,6 +119,9 @@ class Settings:
             tts_model=env.get("EDGE_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
             tts_rate=_int("EDGE_TTS_RATE", 24000),
             tts_parallel=max(1, _int("EDGE_TTS_PARALLEL", 2)),
+            tts_max_seconds=float(env.get("EDGE_TTS_MAX_SECONDS", "3")),
+            tts_max_seconds_per_char=float(env.get("EDGE_TTS_MAX_SECONDS_PER_CHAR", "0.2")),
+            tts_max_lead_seconds=float(env.get("EDGE_TTS_MAX_LEAD_SECONDS", "1")),
             first_audio_deadline_ms=min(MAX_FIRST_AUDIO_DEADLINE_MS, max(1, _int("RT_FIRST_AUDIO_DEADLINE_MS", 2000))),
             first_audio_margin_ms=max(0, _int("RT_FIRST_AUDIO_MARGIN_MS", 300)),
             shed_window_s=max(0, _int("RT_SHED_WINDOW_S", 30)),

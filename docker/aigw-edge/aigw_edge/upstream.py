@@ -8,6 +8,9 @@ servers behind one front).
     speak(text, cfg) → PCM        POST /v1/audio/speech          (stream: true, raw PCM s16le, or WAV whose header is read)
                                   Both raise UpstreamError(stage llm | tts) when the body breaks, when nothing arrives for
                                   EDGE_UPSTREAM_GAP_S (10), and chat_stream also on an SSE `{"error": …}` event.
+                                  speak applies the speech-stack's `tts_stream` protections: the engine-side cap
+                                  (`max_new_tokens`), a silent lead held and the sentence requested again once before
+                                  any sound, and a request id per attempt (`extra_params.request_id`).
     partials (optional)           WS   /ws/audio-stream          (the speech-stack's incremental STT)
     s2s (EDGE_UPSTREAM_MODE=s2s)  POST /v1/s2s                   (one call per turn, framed events + PCM)
 """
@@ -15,15 +18,20 @@ servers behind one front).
 import asyncio
 import io
 import json
+import math
 import struct
 import time
+import uuid
 import wave
 
 import aiohttp
+import numpy as np
 
 from .config import Settings
 from .telemetry import child_traceparent
 
+TTS_SILENCE_RMS = 300
+TTS_FRAMES_PER_SECOND = 12.5
 LANGUAGE_NAMES = {"pt": "Portuguese", "fr": "French", "en": "English", "es": "Spanish", "it": "Italian", "de": "German"}
 
 
@@ -35,6 +43,11 @@ def wav_bytes(pcm16: bytes, rate: int = 16000) -> bytes:
         w.setframerate(rate)
         w.writeframes(pcm16)
     return buf.getvalue()
+
+
+def silent(chunk: bytes) -> bool:
+    samples = np.frombuffer(chunk[: len(chunk) // 2 * 2], dtype=np.int16).astype(np.float64)
+    return not len(samples) or float(np.sqrt(np.mean(samples ** 2))) <= TTS_SILENCE_RMS
 
 
 class UpstreamError(RuntimeError):
@@ -151,36 +164,66 @@ class Upstream:
             return {"voice": fallback}
         raise ValueError("voice must be a catalog id, {audio, text}, or come with fallback_voice")
 
-    async def speak(self, text: str, cfg: dict, fields: dict, trace_id: str | None = None):
-        """Yields raw PCM s16le mono at `tts_rate` (a WAV answer's header is parsed and its rate reported once as int)."""
+    async def speak(self, text: str, cfg: dict, fields: dict, trace_id: str | None = None, on_retry=None):
+        """Yields raw PCM s16le mono at `tts_rate` (a WAV answer's header is parsed and its rate reported once as int).
+        Silence before the first audible chunk is held: when it outlasts `tts_max_lead_seconds` or the stream fails
+        before any sound, the sentence is requested again once (`on_retry(error)`); the second attempt drops its silent
+        lead, and its failure, or any failure after sound, raises. `error.request_id` is the id the engine logged."""
         lang = (cfg.get("language") or "pt")[:2]
+        limit = self.s.tts_max_seconds + self.s.tts_max_seconds_per_char * len(text)
         body = {"model": self.s.tts_model, "input": text, "language": LANGUAGE_NAMES.get(lang, "Portuguese"),
-                "response_format": "pcm", "stream": True, "stream_format": "audio", **fields}
-        try:
-            async with self.http.post(self.s.upstream + "/v1/audio/speech", json=body, headers=_headers(trace_id),
-                                      timeout=self._gap()) as r:
-                if r.status != 200:
-                    raise UpstreamError("tts", r.status, (await r.text())[:200])
-                head = b""
-                parsed = False
-                async for chunk in r.content.iter_any():
-                    if not parsed:
-                        head += chunk
-                        if len(head) < 44:
+                "response_format": "pcm", "stream": True, "stream_format": "audio",
+                "max_new_tokens": math.ceil(limit * TTS_FRAMES_PER_SECOND), **fields}
+        for attempt in (0, 1):
+            request_id = uuid.uuid4().hex[:12]
+            body["extra_params"] = {"request_id": request_id}
+            held: list[bytes] = []
+            sent, spoke, rate, head, parsed = 0, False, self.s.tts_rate, b"", False
+            try:
+                async with self.http.post(self.s.upstream + "/v1/audio/speech", json=body, headers=_headers(trace_id),
+                                          timeout=self._gap()) as r:
+                    if r.status != 200:
+                        raise UpstreamError("tts", r.status, (await r.text())[:200])
+                    async for chunk in r.content.iter_any():
+                        if not parsed:
+                            head += chunk
+                            if len(head) < 44:
+                                continue
+                            parsed = True
+                            if head[:4] == b"RIFF":
+                                rate = struct.unpack("<I", head[24:28])[0]
+                                yield rate
+                                at = head.find(b"data")
+                                chunk = head[at + 8:] if at > 0 else head[44:]
+                            else:
+                                chunk = head
+                        if not chunk:
                             continue
-                        parsed = True
-                        if head[:4] == b"RIFF":
-                            yield struct.unpack("<I", head[24:28])[0]
-                            at = head.find(b"data")
-                            chunk = head[at + 8:] if at > 0 else head[44:]
-                        else:
-                            chunk = head
-                    if chunk:
-                        yield chunk
-                if not parsed and head:
-                    yield head
-        except aiohttp.ClientError as error:
-            raise UpstreamError("tts", None, repr(error)[:200]) from error
+                        sent += len(chunk)
+                        if sent > limit * rate * 2:
+                            raise UpstreamError("tts", None, f"runaway: over {limit:.1f} s of audio for {len(text)} characters")
+                        if not spoke and silent(chunk):
+                            held.append(chunk)
+                            if not attempt and sent > self.s.tts_max_lead_seconds * rate * 2:
+                                raise UpstreamError("tts", None, "silent lead")
+                            continue
+                        spoke = True
+                        for item in (*([] if attempt else held), chunk):
+                            yield item
+                        held.clear()
+                    if not parsed and head:
+                        held.append(head)
+                for item in held:
+                    yield item
+                return
+            except (aiohttp.ClientError, UpstreamError) as error:
+                if not isinstance(error, UpstreamError):
+                    error = UpstreamError("tts", None, repr(error)[:200])
+                error.request_id = request_id
+                if spoke or attempt:
+                    raise error
+                if on_retry:
+                    on_retry(error)
 
     # ── whole turn on the replica (/v1/s2s) ──────────────────────────────────
 
