@@ -17,7 +17,10 @@
  *     transcript (no second STT); after audio has started → an in-band `error` (partial) and `done`.
  *  5. nothing could answer before the first byte → a real `503 provider_unavailable` (not a 200 with an error inside).
  *
- * Every answer starts with a `route` event: {provider, fallback?, from?} — who is answering and why.
+ * Every answer starts with a `route` event: {provider, fallback?, from?} — who is answering and why (`fallback`: cold |
+ * saturated | paused | not_found | unsupported | circuit_open | slow | error | resumed) — and carries the same in its
+ * `X-Gateway-Provider` / `X-Gateway-Fallback` / `X-Gateway-Fallback-From` headers (who started the answer: a primary
+ * that breaks mid-stream is followed by a second `route` event, which headers cannot show).
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
@@ -86,8 +89,11 @@ class Sink {
   private start() {
     if (this.started) return;
     this.started = true;
+    const route = this.prelude.at(-1);
     this.res.writeHead(200, {
       'Content-Type': S2S_CONTENT_TYPE[this.format], 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no',
+      ...(route ? { 'X-Gateway-Provider': String(route.provider) } : {}),
+      ...(route?.fallback ? { 'X-Gateway-Fallback': String(route.fallback), 'X-Gateway-Fallback-From': String(route.from) } : {}),
     });
     this.res.flushHeaders?.();
   }

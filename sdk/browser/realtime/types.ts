@@ -14,9 +14,14 @@ export interface ChatMessage {
   content: string;
 }
 
-/** Events from the edge (data channel / WS text frames), the s2s vocabulary. */
+/**
+ * Events from the edge (data channel / WS text frames), the s2s vocabulary. `route` only comes on the s2s-stream rung:
+ * who answers the turn (`deployment:<name>` = the GPU, `composite` = the fallback) and why not the GPU (`saturated`,
+ * `cold`, `circuit_open`, `slow`, …); a turn on webrtc / ws is always served by the session's GPU replica.
+ */
 export type RealtimeServerEvent =
   | { type: 'ready' }
+  | { type: 'route'; provider: string; fallback?: string }
   | { type: 'vad'; state: 'start' | 'end' }
   | { type: 'transcript'; text: string; final: boolean }
   | { type: 'filtered'; reasons: string[] }

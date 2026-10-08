@@ -194,6 +194,15 @@ and on `/v1/s2s` — the app backend relaying the clip rung must forward the bro
 give the counts; a learner retrying admission every few seconds is one refused session. The scale-out rule itself still
 counts leases and refused requests per request (two concurrent requests of one learner are two requests on the GPU).
 
+**Who served a turn** (for the study's records). On `webrtc` / `ws` the session's GPU replica serves every turn (the
+SDK's `transport` event and the `transport` attribute of `turn.first_audio` / `turn.done`). On the clip rung each
+`/v1/s2s` answer says it three times: the `X-Gateway-Provider` / `X-Gateway-Fallback` / `X-Gateway-Fallback-From`
+response headers (for the app backend that relays it), the first `route` event of the stream (`{provider:
+"deployment:<name>"}` = the GPU; `{provider: "composite", fallback, from}` = the fallback, with `fallback` =
+`saturated` | `cold` | `circuit_open` | `paused` | `slow` | `error` | `resumed` | …), which the SDK hands to the page as
+`{type: "route", provider, fallback?}`, and the `provider` / `fallback` attributes of the SDK's `turn.done` telemetry.
+Why a learner is on the clip rung at all is the `reason` of the SDK's `rt.session.rejected` (`saturated`, `cold`, …).
+
 ## The ladder (SDK)
 
 ```ts
