@@ -47,6 +47,7 @@ export interface RealtimeSessionOptions {
   /** The app's backend URL that calls `POST /v1/realtime/sessions` server side (POSTed `{transports, prefer}`), or a function. */
   sessionEndpoint: SessionSource;
   sessionInit?: RequestInit;
+  device?: string;
   getMicStream: () => Promise<MediaStream>;
   onEvent: (event: RealtimeEvent) => void;
   /** The NPC's audio on WebRTC (null when it ends). Absent: played by an `<audio>` element the SDK creates. */
@@ -409,7 +410,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const wanted = rungs.filter(isRealtime);
     if (!wanted.length) return null;
     const started = performance.now();
-    const answer = await requestSession(opts.sessionEndpoint, { transports: rungs, prefer: wanted[0] }, {
+    const answer = await requestSession(opts.sessionEndpoint, { transports: rungs, prefer: wanted[0], ...(opts.device ? { device: opts.device } : {}) }, {
       traceparent: telemetry.traceparent, timeoutMs: timeouts.sessionMs, fetchImpl, init: opts.sessionInit,
     });
     if (isRefusal(answer)) {

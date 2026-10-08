@@ -92,6 +92,7 @@ export interface SessionRefusal {
 export interface SessionRequest {
   transports: TransportType[];
   prefer?: TransportType;
+  device?: string;
 }
 
 export interface RealtimeTimeouts {
