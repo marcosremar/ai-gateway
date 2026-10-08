@@ -17,8 +17,9 @@ import {
   type RealtimeTransportType, type ReplicaCandidate,
 } from './admission';
 import { iceServersFor, type IceConfig, DEFAULT_STUN_URLS } from './ice';
-import { reportExternalLoad } from './external-load';
+import { noteRefusedSession, noteSession, reportExternalLoad } from './external-load';
 import { probeUdp } from './net-probe';
+import { TurnHealth, type TurnProbe, type TurnUrlHealth } from './turn-health';
 import { echoTrace, makeEmitter, newTrace, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
 import {
   deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, verifySessionToken,
@@ -56,10 +57,13 @@ export interface RealtimeServiceOptions {
   /** A replica's path is re-checked after this long. Default 30 min. */
   netRecheckMs?: number;
   probeUdpImpl?: typeof probeUdp;
+  turnCheckMs?: number;
+  probeTurnImpl?: TurnProbe;
 }
 
 export const REALTIME_DEFAULT_TTL_SECONDS = 600;
 const MAX_SESSION_BODY = 256 * 1024;
+const NET_RETRY_MS = 60_000;
 const FALLBACK = { transport: 's2s-stream', url: '/v1/s2s' } as const;
 
 export interface ResolvedSession {
@@ -110,6 +114,9 @@ export class RealtimeService {
   private poller: ReturnType<typeof setInterval> | null = null;
   private netLoop: ReturnType<typeof setInterval> | null = null;
   private readonly netProbed = new Map<string, number>();
+  private readonly netNotDirect = new Map<string, number>();
+  private readonly turn: TurnHealth;
+  private turnLoop: ReturnType<typeof setInterval> | null = null;
   readonly emit: GatewayEmit;
 
   constructor(private readonly opts: RealtimeServiceOptions) {
@@ -119,6 +126,19 @@ export class RealtimeService {
     this.status = new EdgeStatusCache({
       fetchImpl: opts.fetchImpl, now: this.now, ttlMs: opts.statusTtlMs, timeoutMs: opts.statusTimeoutMs,
     });
+    this.turn = new TurnHealth(opts.ice?.turnSecret ? opts.ice.turn : [], {
+      probe: opts.probeTurnImpl, now: this.now,
+      onChange: (entry, previous) => {
+        this.log('realtime: turn server', { ...entry, previous });
+        this.emit(newTrace(), 'rt.turn.health', { level: entry.state === 'alive' ? 'info' : 'warn', attrs: { ...entry, previous } });
+      },
+    });
+    const turnEvery = opts.turnCheckMs ?? 30_000;
+    if (turnEvery > 0 && this.turn.view().length) {
+      void this.turn.check();
+      this.turnLoop = setInterval(() => { void this.turn.check(); }, turnEvery);
+      this.turnLoop.unref?.();
+    }
     const every = opts.netProbeMs ?? 15_000;
     if (every > 0 && typeof opts.controller?.list === 'function') {
       this.netLoop = setInterval(() => { void this.probeAll().catch(() => {}); }, every);
@@ -126,15 +146,22 @@ export class RealtimeService {
     }
   }
 
-  /** Every ready replica of a realtime deployment whose media path is unknown or old gets probed (net-probe.ts). */
+  /**
+   * Every ready replica of a realtime deployment whose media path is unknown or old gets probed (net-probe.ts), and one
+   * with sessions keeps its deployment awake — also for sessions admitted by a previous gateway process, which
+   * `pollOnce` does not know.
+   */
   async probeAll(): Promise<void> {
     for (const d of this.opts.controller?.list?.() ?? []) {
       if (!this.opts.controller?.specOf(d.name)?.realtime) continue;
       const token = this.opts.controller.tokenOf(d.name);
       if (!token) continue;
-      for (const r of this.readyReplicas(d.name)) {
+      for (const r of this.readyReplicas(d.name, true)) {
         const s = await this.status.get(r.id, r.base, token);
-        if (s.ok) await this.probeNet(d.name, r, s.status, token);
+        if (!s.ok) continue;
+        reportExternalLoad(d.name, r.id, s.status.active, s.status.max, this.now());
+        if (s.status.active > 0) { try { this.opts.controller.wake(d.name); } catch { /* vanished */ } }
+        await this.probeNet(d.name, r, s.status, token);
       }
     }
   }
@@ -147,7 +174,7 @@ export class RealtimeService {
     const net = status.net;
     if (!status.probePort || !net) return;
     const now = this.now();
-    const stale = net.udpInbound === 'unknown' || !net.checkedAt || now - net.checkedAt * 1000 > (this.opts.netRecheckMs ?? 30 * 60_000);
+    const stale = net.udpInbound === 'unknown' || !net.checkedAt || now - net.checkedAt * 1000 > this.netRecheckAfterMs(r.id, net.path);
     if (!stale || now - (this.netProbed.get(r.id) ?? 0) < 60_000) return;
     this.netProbed.set(r.id, now);
     const trace = newTrace();
@@ -167,6 +194,8 @@ export class RealtimeService {
     } catch (err) {
       this.log('realtime: net report to the edge failed', { replica: r.id, error: (err as Error).message });
     }
+    if (decided.path === 'direct') this.netNotDirect.delete(r.id);
+    else this.netNotDirect.set(r.id, (this.netNotDirect.get(r.id) ?? 0) + 1);
     this.status.invalidate(r.id);
     this.log('realtime: media path', { deployment: dep, replica: r.id, udpInbound: udp.result, rttMs: udp.rttMs, path: decided.path ?? 'unknown', reasons: decided.reasons });
     this.emit(trace, 'rt.net.probe', {
@@ -174,6 +203,15 @@ export class RealtimeService {
       attrs: { deployment: dep, replica: r.id, udpInbound: udp.result, rttMs: udp.rttMs, tries: udp.tries, path: decided.path ?? 'unknown', relay: decided.relay?.url ?? null, relayTransport: decided.relay?.transport ?? null, turnConfigured: turn.length > 0 },
     });
   }
+
+  private netRecheckAfterMs(replicaId: string, path: string): number {
+    const full = this.opts.netRecheckMs ?? 30 * 60_000;
+    return path === 'direct' ? full : Math.min(full, NET_RETRY_MS * 2 ** Math.max(0, (this.netNotDirect.get(replicaId) ?? 1) - 1));
+  }
+
+  turnHealth(): TurnUrlHealth[] { return this.turn.view(); }
+
+  checkTurn(): Promise<void> { return this.turn.check(); }
 
   /** TURN servers for the edge's own side of one session (path `relay`), with that session's credentials. */
   edgeIceServers(sid: string, expSeconds: number) {
@@ -220,13 +258,13 @@ export class RealtimeService {
   }
 
   /** Ready replicas of a deployment with their base URL (secrets stay here). */
-  private readyReplicas(dep: string): Array<{ id: string; base: string }> {
+  private readyReplicas(dep: string, draining = false): Array<{ id: string; base: string; stagesOut: string[] }> {
     const view = this.opts.controller?.get(dep);
     if (!view) return [];
     const exposed = !!this.opts.controller?.specOf(dep)?.exposure;
     return view.replicas
-      .filter(r => r.phase === 'ready' && !r.draining && r.ip)
-      .map(r => ({ id: r.id, base: replicaBase({ ip: r.ip } as never, exposed) }));
+      .filter(r => r.phase === 'ready' && (draining || !r.draining) && r.ip)
+      .map(r => ({ id: r.id, base: replicaBase({ ip: r.ip } as never, exposed), stagesOut: r.stagesOut ?? [] }));
   }
 
   /** `POST /v1/realtime/sessions` (behind the proxy's API-key auth). */
@@ -278,9 +316,11 @@ export class RealtimeService {
         'config_too_large'));
     }
 
+    noteSession(dep, trace.traceId, this.now());
     const placed = await this.place(dep, ordered.order);
     if ('refusal' in placed) {
       const { status, code, message, retryAfter } = placed.refusal;
+      if (code === 'saturated') noteRefusedSession(dep, trace.traceId, this.now());
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: code, status, deployment: dep } });
       return sendJson(res, status, errorBody(message, code, { fallback: FALLBACK }), { 'Retry-After': retryAfter });
     }
@@ -292,7 +332,7 @@ export class RealtimeService {
     const denial = admin ? null : this.opts.charge?.(userId, charge) ?? null;
     if (denial) {
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: denial.type, status: denial.status, deployment: dep } });
-      return sendJson(res, denial.status, errorBody(denial.message, denial.type), denial.retryAfterSeconds ? { 'Retry-After': denial.retryAfterSeconds } : {});
+      return sendJson(res, denial.status, errorBody(denial.message, denial.type, denial.code ? { reason: denial.code, budget: denial.budget, reset_at: denial.resetAt } : {}), denial.retryAfterSeconds ? { 'Retry-After': denial.retryAfterSeconds } : {});
     }
 
     const sid = `rt_${randomUUID().replace(/-/g, '')}`;
@@ -305,7 +345,7 @@ export class RealtimeService {
     const base = this.publicBase(req);
     const wsBase = base.replace(/^http/, 'ws');
     const ice = this.opts.ice ?? { stun: [...DEFAULT_STUN_URLS], turn: [], turnSecret: null };
-    const iceServers = iceServersFor(ice, sid, exp);
+    const iceServers = iceServersFor({ ...ice, turn: this.turn.usable() }, sid, exp);
     const transports = ordered.order
       .filter(t => !isEdgeTransport(t) || placed.replica.status.transports.includes(t))
       .map((t: RealtimeTransportType) => {
@@ -335,11 +375,16 @@ export class RealtimeService {
     | { refusal: { status: number; code: string; message: string; retryAfter: number } }> {
     const controller = this.opts.controller!;
     if (controller.get(dep)?.spec.paused) return { refusal: { status: 503, code: 'paused', message: `deployment '${dep}' is paused`, retryAfter: 60 } };
-    const ready = this.readyReplicas(dep);
-    if (!ready.length) {
+    const every = this.readyReplicas(dep);
+    if (!every.length) {
       if (noWakeActive()) recordNoWakeSkip();
       else { try { controller.wake(dep); } catch { /* vanished */ } }
       return { refusal: { status: 503, code: 'cold', message: `deployment '${dep}': no ready replica${noWakeActive() ? ' (no-wake: not woken)' : ' (waking)'}`, retryAfter: 30 } };
+    }
+    const ready = every.filter(r => !r.stagesOut.length);
+    if (!ready.length) {
+      const stages = [...new Set(every.flatMap(r => r.stagesOut))].join(', ');
+      return { refusal: { status: 503, code: 'degraded', message: `deployment '${dep}': ${stages} failing on every ready replica`, retryAfter: 30 } };
     }
     const token = controller.tokenOf(dep) ?? '';
     const results: Array<{ r: { id: string; base: string }; s: EdgeStatusResult }> = await Promise.all(
@@ -404,7 +449,7 @@ export class RealtimeService {
       const token = this.opts.controller?.tokenOf(dep);
       if (!token) continue;
       let active = 0;
-      for (const r of this.readyReplicas(dep)) {
+      for (const r of this.readyReplicas(dep, true)) {
         const s = await this.status.get(r.id, r.base, token, { fresh: true });
         if (!s.ok) continue;
         reportExternalLoad(dep, r.id, s.status.active, s.status.max, this.now());
@@ -417,6 +462,7 @@ export class RealtimeService {
   stop(): void {
     if (this.poller) clearInterval(this.poller);
     if (this.netLoop) clearInterval(this.netLoop);
+    if (this.turnLoop) clearInterval(this.turnLoop);
     this.poller = null;
     this.netLoop = null;
   }

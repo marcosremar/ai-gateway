@@ -4,6 +4,8 @@
  * (docker/speech-stack: CUDA base + three models ≈ 25 GB).
  *
  *   SCW_SECRET_KEY=… [SCW_PROJECT_ID=…] bun scripts/build-image-on-scaleway.ts docker/speech-stack speech-stack
+ *   … --from ghcr.io/marcosremar/speech-stack:<tag> speech-stack   no build: copies that public image, same tag and
+ *       digest, into the Scaleway registry (crane on the machine; the source is pulled anonymously)
  *   … --app parle [--gateway https://parle-ai-gateway.up.railway.app]   also saves the address in the app's account
  *       (PUT /v1/apps/parle/images/speech-stack, with SANDBOX_TOKEN), so deploys name it: {"appImage": "speech-stack"}
  *
@@ -11,7 +13,7 @@
  * the log tail, and deletes the machine (and its volume) whatever happens.
  */
 
-import { readdirSync, readFileSync, statSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { ScalewayClient } from '../src/cpu-providers/scaleway-client';
 import type { ProviderCredentials } from '../src/gpu-providers/types';
@@ -21,8 +23,9 @@ const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
 const appId = flag('app');
 const gatewayUrl = (flag('gateway') ?? process.env.GATEWAY_URL ?? 'https://parle-ai-gateway.up.railway.app').replace(/\/$/, '');
-const [contextDir, imageName] = args;
-if (!contextDir || !imageName || !/^[a-z0-9-]+$/.test(imageName)) {
+const from = flag('from');
+const [contextDir, imageName] = from ? ['', args[0]] : args;
+if ((!from && !contextDir) || !imageName || !/^[a-z0-9-]+$/.test(imageName)) {
   console.error('usage: bun scripts/build-image-on-scaleway.ts <context-dir> <image-name>');
   process.exit(2);
 }
@@ -34,7 +37,7 @@ const ZONE = process.env.BUILD_ZONE || 'fr-par-2';
 const REGION = ZONE.slice(0, -2);
 const NAMESPACE = process.env.REGISTRY_NAMESPACE || 'aigw';
 const TYPE = process.env.BUILD_TYPE || 'POP2-HC-8C-16G';
-const tag = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
+const tag = from?.split(':').pop() ?? new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
 const registry = `rg.${REGION}.scw.cloud`;
 const image = `${registry}/${NAMESPACE}/${imageName}:${tag}`;
 const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
@@ -58,7 +61,13 @@ if (!list.namespaces.some(n => n.name === NAMESPACE)) {
 }
 
 // 2. Context files, embedded in the boot script (small text files only).
-const files = readdirSync(contextDir).filter(f => statSync(join(contextDir, f)).isFile());
+const ignoreFile = join(contextDir, '.dockerignore');
+const ignored = from || !existsSync(ignoreFile) ? [] : readFileSync(ignoreFile, 'utf8').split('\n').filter(Boolean).map(p => new Bun.Glob(p));
+const files = from ? [] : readdirSync(contextDir).filter(f => statSync(join(contextDir, f)).isFile() && !ignored.some(g => g.match(f)));
+const crane = 'docker run --rm -u 0 -e DOCKER_CONFIG=/root/.docker -v /root/.docker:/root/.docker:ro gcr.io/go-containerregistry/crane:v0.21.5';
+const build = from ? `retry ${crane} copy ${from} ${image}` : `cd /srv/ctx && DOCKER_BUILDKIT=1 docker build --progress=plain -t ${image} . && retry docker push ${image}`;
+const digest = from ? `echo ${image.split(':')[0]}@$(${crane} digest ${image})` : `docker image inspect --format '{{index .RepoDigests 0}}' ${image}`;
+const size = from ? 'echo 0' : `docker image inspect --format '{{.Size}}' ${image}`;
 const total = files.reduce((n, f) => n + statSync(join(contextDir, f)).size, 0);
 if (total > 80_000) throw new Error(`context ${total} bytes: keep it under 80 KB (the boot script must stay under 128 KB)`);
 const b64 = (s: string | Buffer) => Buffer.from(s).toString('base64');
@@ -73,13 +82,15 @@ echo '{"state":"booting"}' > /srv/status/done.json
 ${writes}
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 set +x  # the build log is served on :80: the key must never be traced into it
+export DOCKER_CONFIG=/root/.docker
 echo '${secret}' | docker login ${registry}/${NAMESPACE} -u nologin --password-stdin
 set -x
 echo '{"state":"building"}' > /srv/status/done.json
 started=$(date +%s)
-if cd /srv/ctx && DOCKER_BUILDKIT=1 docker build --progress=plain -t ${image} . && docker push ${image}; then
-  digest=$(docker image inspect --format '{{index .RepoDigests 0}}' ${image})
-  size=$(docker image inspect --format '{{.Size}}' ${image})
+retry() { for i in 1 2 3 4 5; do "$@" && return 0; sleep 20; done; return 1; }
+if ${build}; then
+  digest=$(${digest})
+  size=$(${size})
   echo "{\\"state\\":\\"done\\",\\"ok\\":true,\\"image\\":\\"${image}\\",\\"digest\\":\\"$digest\\",\\"size\\":$size,\\"seconds\\":$(( $(date +%s) - started ))}" > /srv/status/done.json
 else
   echo "{\\"state\\":\\"done\\",\\"ok\\":false,\\"seconds\\":$(( $(date +%s) - started ))}" > /srv/status/done.json
@@ -89,7 +100,7 @@ fi
 // 3. Machine → poll → delete.
 const client = new ScalewayClient();
 const credentials = { apiKey: secret } as ProviderCredentials;
-log(`creating ${TYPE} in ${ZONE} to build ${image}`);
+log(`creating ${TYPE} in ${ZONE} to ${from ? `copy ${from} to` : 'build'} ${image}`);
 const inst = await client.createInstance({
   label: `aigw-build-${imageName}`, region: ZONE, commercialType: TYPE, volumeGb: 150, tags: ['aigw-build'], cloudInit: script, projectId,
 }, credentials);

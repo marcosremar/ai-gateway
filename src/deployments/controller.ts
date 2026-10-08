@@ -13,28 +13,38 @@
  */
 
 import { randomBytes } from 'crypto';
+import { isDeepStrictEqual } from 'util';
 import { replicaCloudInit } from './cloud-init';
 import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './controller-state';
 import { ControllerViews } from './controller-views';
 import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
+import { externalInflightOn, noteSession } from '../realtime/external-load';
 import { BUILTIN_PROFILES } from './profiles';
+import { holdOf, splitHold } from './scaling-spec';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
 import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
 
 /** Adaptive hedge: a request is hedged only once it is this much slower than its replica's recent p95. */
 export const HEDGE_P95_FACTOR = 1.2;
+export const STAGE_STRIKES = 3;
+export const STAGE_COOLDOWN_MS = 30_000;
 
 export {
-  DeploymentError, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
+  DeploymentError, DEFAULT_MAX_COLD_START_WAIT_SECONDS, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
   type LeaseOutcome,
 } from './controller-state';
 
 export class DeploymentController extends ControllerViews {
   async init(): Promise<void> {
-    const { deployments, profiles } = await this.opts.store.load();
+    const { deployments, profiles, networkReleases } = await this.opts.store.load();
+    for (const pending of networkReleases ?? []) this.networkReleases.set(pending.network.ipId, pending);
     for (const p of BUILTIN_PROFILES) this.profiles.set(p.name, p);
     for (const p of profiles) this.profiles.set(p.name, p);
+    const mode = this.opts.defaultScalingMode;
+    const defaulted = mode ? deployments.filter(r => !r.spec.scaling) : [];
+    for (const record of defaulted) record.spec = { ...record.spec, scaling: { mode: mode! } };
+    if (defaulted.length) this.log('deployments: no scaling block, running under the default mode', { mode, deployments: defaulted.map(r => r.spec.name) });
     for (const record of deployments) this.deployments.set(record.spec.name, this.runtime(record));
   }
 
@@ -61,34 +71,47 @@ export class DeploymentController extends ControllerViews {
   }
 
   async put(
-    name: string, body: Record<string, unknown>, meta: { app?: string; appImage?: string } = {},
+    name: string, input: Record<string, unknown>, meta: { app?: string; appImage?: string } = {},
   ): Promise<{ view: DeploymentView; created: boolean }> {
+    const { body, hold: rawHold } = splitHold(input);
     const existing = this.deployments.get(name);
     const cap = this.opts.maxTotalReplicas ?? 6;
     if (typeof body.maxReplicas === 'number' && body.maxReplicas > cap) {
       throw new SpecError(`maxReplicas ${body.maxReplicas} is above this gateway's replica cap of ${cap} across all deployments (DEPLOYMENTS_MAX_REPLICAS)`);
     }
     const spec = buildSpec(name, body, { profiles: this.profiles, previous: existing?.record.spec });
+    if (!spec.scaling && this.opts.defaultScalingMode) spec.scaling = { mode: this.opts.defaultScalingMode };
     const initBytes = usesScaleway(spec) ? Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32))) : 0;
     if (initBytes > USER_DATA_KEY_MAX_BYTES) {
       throw new SpecError(`generated cloud-init is ${initBytes} bytes; Scaleway takes at most ${USER_DATA_KEY_MAX_BYTES} (shrink bootScript/env)`);
     }
     const now = this.now();
+    const hold = rawHold === undefined ? existing?.record.hold : holdOf(rawHold, spec.maxReplicas, now);
     if (existing) {
+      if (!isDeepStrictEqual(existing.record.spec, spec)) Object.assign(existing, { backoffUntil: 0, createFailures: 0, stockOut: null });
       existing.record = {
-        ...existing.record, spec, updatedAt: now,
+        ...existing.record, spec, updatedAt: now, hold,
         ...(existing.record.app || !meta.app ? {} : { app: meta.app }),
         ...(meta.appImage ? { appImage: meta.appImage } : {}),
       };
       await this.opts.store.saveDeployment(existing.record);
+      const backend = this.backends.scaleway;
+      if (existing.record.network && spec.exposure && backend?.ensureNetwork) {
+        void this.networkOf(existing, backend).catch((err) => { existing.lastError = `network: ${err instanceof Error ? err.message : String(err)}`; });
+      }
     } else {
+      const owed = spec.exposure ? [...this.networkReleases.values()].find(p => p.deployment === name && p.network.zone === spec.zone) : undefined;
       const record: DeploymentRecord = {
         spec, replicaToken: randomBytes(24).toString('base64url'), createdAt: now, updatedAt: now, lastRequestAt: null,
         ...(meta.app ? { app: meta.app } : {}),
         ...(meta.appImage ? { appImage: meta.appImage } : {}),
+        ...(owed ? { network: owed.network } : {}),
+        ...(hold ? { hold } : {}),
       };
       this.deployments.set(name, this.runtime(record));
+      if (owed) this.networkReleases.delete(owed.network.ipId);
       await this.opts.store.saveDeployment(record);
+      if (owed) await this.opts.store.deleteNetworkRelease(owed.network.ipId);
     }
     this.kick();
     return { view: this.view(name)!, created: !existing };
@@ -99,18 +122,25 @@ export class DeploymentController extends ControllerViews {
     if (!rt) return false;
     this.deployments.delete(name);
     for (const w of rt.waiters) w();
-    await this.opts.store.deleteDeployment(name);
+    const { network } = rt.record;
+    const owed = network ? { deployment: name, network, since: this.now(), attempts: 0, lastAttemptAt: null, lastError: null } : undefined;
+    if (owed) this.networkReleases.set(owed.network.ipId, owed);
+    await this.opts.store.deleteDeployment(name, owed);
     const mine = this.machines.filter(m => m.deployment === name);
     this.machines = this.machines.filter(m => m.deployment !== name);
     await Promise.all(mine.map(m => this.release(m, 'deleted')));
-    if (rt.record.network) void this.releaseNetwork(name, rt.record.network);
+    if (owed) void this.settleNetworkReleases();
     return true;
   }
 
-  /** Marks the deployment as in use (scales from zero) without sending a request. */
+  /**
+   * Marks the deployment as in use (scales from zero) without sending a request. Persisted like a request's time: a
+   * deployment used only through `wake` (realtime sessions) must not read as never used after a restart.
+   */
   wake(name: string): DeploymentView {
     const rt = this.require(name);
     rt.record.lastRequestAt = this.now();
+    this.persistRequestTime(rt);
     this.kick();
     return this.view(name)!;
   }
@@ -151,30 +181,34 @@ export class DeploymentController extends ControllerViews {
     rt.refusedAt = [];
     rt.demandPeak = { value: 0, at: 0 };
     rt.pressure = { highSince: null, desired: 0 };
+    this.forgetLoad(rt);
     if (rt.record.warm) rt.record = { ...rt.record, warm: undefined };
     await this.opts.store.saveDeployment(rt.record);
     this.kick();
     return this.view(name)!;
   }
 
-  private pick(rt: Runtime, exclude: Set<string>): ReplicaMachine | null {
-    const ready = this.readyMachines(rt.record.spec.name).filter(m => !exclude.has(m.id));
+  private pick(rt: Runtime, exclude: Set<string>, stage?: string): ReplicaMachine | null {
+    const ready = this.readyMachines(rt.record.spec.name).filter(m => !exclude.has(m.id) && !this.stageOut(m.id, stage));
     if (!ready.length) return null;
     // A host about to be taken back (`expiry.ts`) only serves while nothing else can: new requests drain it.
     const now = this.now();
     const lasting = ready.filter(m => !isExpiring(m, now));
     // A replica takes at most `target × maxInflightFactor` (bounded queue: the overflow spills to the fallback at once and
     // its health check still answers); a busy one (health check timed out under load) nothing beyond its target, nor
-    // one whose answers beyond its target would be slower than the route's hedge (`tooSlowBeyondTarget`).
+    // one whose answers beyond its target would be slower than the route's hedge (`tooSlowBeyondTarget`). Its realtime
+    // sessions count in the same unit (external-load.ts): one whose realtime slots are all taken takes nothing.
     const target = rt.record.spec.targetInflightPerReplica;
     const capacity = replicaCapacity(rt.record.spec);
+    const sessions = (m: ReplicaMachine) => externalInflightOn(rt.record.spec.name, m.id, target, now);
+    const load = (m: ReplicaMachine) => (rt.perReplica.get(m.id) ?? 0) + sessions(m);
     const open = (lasting.length ? lasting : ready).filter((m) => {
-      const n = rt.perReplica.get(m.id) ?? 0;
-      return !this.draining.has(m.id) && n < capacity && (!this.probes.get(m.id)?.busy || n < target)
+      const n = load(m);
+      return !this.draining.has(m.id) && sessions(m) < target && n < capacity && (!this.probes.get(m.id)?.busy || n < target)
         && !this.tooSlowBeyondTarget(rt, m.id, n, target);
     });
     if (!open.length) return null;
-    return open.reduce((best, m) => ((rt.perReplica.get(m.id) ?? 0) < (rt.perReplica.get(best.id) ?? 0) ? m : best));
+    return open.reduce((best, m) => (load(m) < load(best) ? m : best));
   }
 
   /**
@@ -224,21 +258,32 @@ export class DeploymentController extends ControllerViews {
    * fails at once with 503 and touches nothing — no wait, no `lastRequestAt`, no reconcile — so a cold deployment
    * stays cold.
    */
-  async acquire(name: string, opts: { waitMs?: number; exclude?: Set<string>; signal?: AbortSignal; noWake?: boolean } = {}): Promise<Lease> {
+  async acquire(
+    name: string,
+    opts: { waitMs?: number; exclude?: Set<string>; signal?: AbortSignal; noWake?: boolean; stage?: string; session?: string } = {},
+  ): Promise<Lease> {
     const rt = this.require(name);
     const { spec } = rt.record;
     if (spec.paused) throw new DeploymentError(409, `deployment '${name}' is paused`);
-    if (opts.noWake && !this.pick(rt, opts.exclude ?? new Set<string>())) {
+    if (opts.session) noteSession(name, opts.session, this.now());
+    const serving = this.servingMachines(name);
+    if (serving.length && serving.every(m => this.stageOut(m.id, opts.stage))) {
+      throw new DeploymentError(503, `deployment '${name}': ${opts.stage} is out of rotation on every ready replica after repeated failures`,
+        STAGE_COOLDOWN_MS / 1000, 'stage_out');
+    }
+    if (opts.noWake && !this.pick(rt, opts.exclude ?? new Set<string>(), opts.stage)) {
       // A saturated (not cold) deployment still sees the demand, so it scales out; a cold one stays untouched.
       if (this.readyMachines(name).length) { rt.refusedAt.push(this.now()); this.noteDemand(rt); }
       throw new DeploymentError(503, `deployment '${name}': no ready replica (no-wake: not woken)`, 30);
     }
     rt.record.lastRequestAt = this.now();
     this.persistRequestTime(rt);
-    const deadline = this.now() + (opts.waitMs ?? spec.coldStartWaitSeconds * 1000);
+    const deadline = this.now() + Math.min(opts.waitMs ?? spec.coldStartWaitSeconds * 1000, this.maxColdStartWaitSeconds * 1000);
     const exclude = opts.exclude ?? new Set<string>();
 
-    let machine = this.pick(rt, exclude);
+    let machine = this.pick(rt, exclude, opts.stage);
+    const spent = machine || serving.length ? null : this.budgetRefusal(rt);
+    if (spent) throw new DeploymentError(503, `deployment '${name}': ${spent}`, 3600);
     // Saturated and the caller has a fallback (waitMs 0): no wait — refused below as `saturated`.
     const spill = !machine && opts.waitMs === 0 && this.servingMachines(name).length > 0;
     if (!machine && !spill) {
@@ -253,7 +298,7 @@ export class DeploymentController extends ControllerViews {
             function done() { clearTimeout(t); rt.waiters.delete(done); resolve(); }
             rt.waiters.add(done);
           });
-          machine = this.pick(rt, exclude);
+          machine = this.pick(rt, exclude, opts.stage);
         }
       } finally {
         rt.waiting--;
@@ -290,13 +335,34 @@ export class DeploymentController extends ControllerViews {
         const n = (rt.perReplica.get(chosen.id) ?? 1) - 1;
         if (n <= 0) rt.perReplica.delete(chosen.id); else rt.perReplica.set(chosen.id, n);
         rt.record.lastRequestAt = this.now();
-        const outcome: LeaseOutcome = failed === true ? 'failed' : failed === false ? 'ok' : failed;
+        this.traceLoad(rt);
+        const reported: LeaseOutcome = failed === true ? 'failed' : failed === false ? 'ok' : failed;
+        this.noteStage(rt, chosen.id, opts.stage, reported, this.now() - startedAt);
+        const outcome = reported === 'abandoned' ? 'cancelled' : reported === 'errored' ? 'ok' : reported;
         if (outcome !== 'cancelled') this.recordSample(rt, this.now() - startedAt, outcome !== 'ok', chosen.id);
         this.leaseEnded(chosen.id, outcome);
         const next = rt.waiters.values().next().value; // a slot freed: one waiting request may take it
         if (next) next();
       },
     };
+  }
+
+  private noteStage(rt: Runtime, id: string, stage: string | undefined, outcome: LeaseOutcome, ms: number): void {
+    if (!stage || outcome === 'cancelled' || outcome === 'overloaded') return;
+    const key = `${id}|${stage}`;
+    const strikes = this.stageStrikes.get(key) ?? { failures: 0, outUntil: 0 };
+    if (outcome === 'ok') {
+      if (strikes.outUntil) this.log('deployments: stage back in rotation', { deployment: rt.record.spec.name, id, stage });
+      this.stageStrikes.delete(key);
+      return;
+    }
+    if (outcome === 'abandoned' && !(rt.hedgeBaseMs && ms >= rt.hedgeBaseMs)) return;
+    strikes.failures++;
+    if (strikes.failures >= STAGE_STRIKES && strikes.outUntil <= this.now()) {
+      strikes.outUntil = this.now() + STAGE_COOLDOWN_MS;
+      this.log('deployments: stage out of rotation', { deployment: rt.record.spec.name, id, stage, failures: strikes.failures, outcome });
+    }
+    this.stageStrikes.set(key, strikes);
   }
 
   /**

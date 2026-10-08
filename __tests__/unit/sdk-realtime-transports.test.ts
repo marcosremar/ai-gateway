@@ -74,6 +74,20 @@ describe('WS rung', () => {
     expect(c.events.map(e => e.type)).toEqual(['ready', 'interrupted']);
   });
 
+  it('standby (connected behind a clip rung): the microphone is not sent until it goes live', async () => {
+    let captures = 0;
+    const t = createWsTransport(ctx({ standby: true }), 'wss://gw/v1/realtime/ws?token=tok', {
+      WebSocket: FakeWs as unknown as typeof WebSocket, player: async () => ({ close: () => {} }) as unknown as PcmPlayer,
+      capture: async () => { captures++; return { stop: () => {} }; },
+    });
+    await t.connect(new AbortController().signal);
+    expect(captures).toBe(0);
+    t.goLive!();
+    await new Promise(r => setTimeout(r, 5));
+    expect(captures).toBe(1);
+    t.close();
+  });
+
   it('no ready from the edge: connect rejects', async () => {
     class Mute {
       binaryType = 'blob'; readyState = 0; bufferedAmount = 0;

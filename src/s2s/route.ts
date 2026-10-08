@@ -9,25 +9,32 @@
  *     on its own `/v1/s2s` — STT, LLM and TTS on one GPU, the lowest latency (0.4–0.8 s to first audio measured);
  *  2. no ready replica (cold, paused, absent, refused): the deployment is woken for the next turns (never in no-wake
  *     mode, gateway/proxy/no-wake.ts) and this one is answered at once by the composed pipeline (composite.ts) over
- *     the stage chains, each with its own fallback;
+ *     the stage chains, each with its own fallback; the same when every ready replica is at capacity, its realtime
+ *     sessions included (`fallback: "saturated"`);
  *  3. hedge: the primary has not sent its transcript after `S2S_HEDGE_MS` (default 2.5 s) → the composed pipeline
  *     starts in parallel; the first one to produce audio wins, the other is aborted;
  *  4. the primary breaks after its transcript but before audio → the composed pipeline resumes at the LLM with that
  *     transcript (no second STT); after audio has started → an in-band `error` (partial) and `done`.
  *  5. nothing could answer before the first byte → a real `503 provider_unavailable` (not a 200 with an error inside).
  *
- * Every answer starts with a `route` event: {provider, fallback?, from?} — who is answering and why.
+ * Every answer starts with a `route` event: {provider, fallback?, from?} — who is answering and why (`fallback`: cold |
+ * saturated | paused | not_found | unsupported | circuit_open | slow | error | resumed) — and carries the same in its
+ * `X-Gateway-Provider` / `X-Gateway-Fallback` / `X-Gateway-Fallback-From` headers (who started the answer: a primary
+ * that breaks mid-stream is followed by a second `route` event, which headers cannot show).
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { DeploymentError, type DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
 import { applySttFilter, filterEnabled } from '../gateway/proxy/routes/stt-filter';
+import { denialError } from '../gateway/proxy/app-limits';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { runComposite, type S2SConfig, type StageClient } from './composite';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
 import type { S2SAdmission } from './access';
-import { outgoingTraceHeaders } from '../telemetry/trace-context';
+import { outgoingTraceHeaders, parseTraceparent } from '../telemetry/trace-context';
+import { emitGatewayEvent } from '../telemetry/emit';
+import { noteStreamCut } from '../telemetry/stream-cuts';
 
 type Controller = Pick<DeploymentController, 'acquire' | 'get' | 'wake'>;
 
@@ -44,6 +51,7 @@ export interface S2SRouteOptions {
   admit?: (req: IncomingMessage, config: S2SConfig, requested: { deployment: string; explicit: boolean }) => S2SAdmission;
   hedgeMs?: number;
   budgetMs?: number;
+  maxGapMs?: number;
   maxBodyBytes?: number;
   fetchImpl?: typeof fetch;
   log?: (msg: string, data?: Record<string, unknown>) => void;
@@ -56,6 +64,7 @@ export interface S2SRouteOptions {
 
 export const S2S_HEDGE_MS = 2_500;
 export const S2S_BUDGET_MS = 45_000;
+export const S2S_MAX_GAP_MS = 10_000;
 const MAX_BODY = 25 * 1024 * 1024;
 
 async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
@@ -79,12 +88,16 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
 class Sink {
   private started = false;
   closed = false;
-  constructor(private readonly res: ServerResponse, private readonly format: S2SFormat) {}
+  private sawAudio = false;
+  constructor(private readonly res: ServerResponse, private readonly format: S2SFormat, private readonly onFirstAudio?: () => void) {}
   private start() {
     if (this.started) return;
     this.started = true;
+    const route = this.prelude.at(-1);
     this.res.writeHead(200, {
       'Content-Type': S2S_CONTENT_TYPE[this.format], 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no',
+      ...(route ? { 'X-Gateway-Provider': String(route.provider) } : {}),
+      ...(route?.fallback ? { 'X-Gateway-Fallback': String(route.fallback), 'X-Gateway-Fallback-From': String(route.from) } : {}),
     });
     this.res.flushHeaders?.();
   }
@@ -104,6 +117,7 @@ class Sink {
     if (this.closed) return;
     this.start();
     for (const p of this.prelude.splice(0)) this.res.write(encodeEvent(p, this.format));
+    if (!this.sawAudio) { this.sawAudio = true; this.onFirstAudio?.(); }
     this.res.write(encodeAudio(pcm, this.format));
   }
   end() { if (this.closed) return; this.closed = true; this.start(); this.res.end(); }
@@ -114,11 +128,17 @@ class Lane {
   private held: Array<{ e?: S2SEvent; a?: Uint8Array }> = [];
   aborted = false;
   sawAudio = false;
+  openerPlayed = false;
+  private inOpener = false;
   constructor(private readonly sink: Sink, public live: boolean, private readonly onFirstAudio?: () => void) {}
-  event(e: S2SEvent) { if (this.aborted) return; if (this.live) this.sink.event(e); else this.held.push({ e }); }
+  event(e: S2SEvent) {
+    if (this.aborted) return;
+    if (e.type === 'opener') { this.inOpener = e.state === 'start'; this.openerPlayed = true; }
+    if (this.live) this.sink.event(e); else this.held.push({ e });
+  }
   audio(a: Uint8Array) {
     if (this.aborted) return;
-    if (!this.sawAudio) { this.sawAudio = true; this.onFirstAudio?.(); }
+    if (!this.sawAudio && !this.inOpener) { this.sawAudio = true; this.onFirstAudio?.(); }
     if (this.live) this.sink.audio(a); else if (!this.aborted) this.held.push({ a });
   }
   goLive() {
@@ -147,6 +167,7 @@ function filterPrimaryTranscript(e: S2SEvent, config: S2SConfig): { codes: strin
 export function createS2SRoute(opts: S2SRouteOptions) {
   const hedgeMs = opts.hedgeMs ?? S2S_HEDGE_MS;
   const budgetMs = opts.budgetMs ?? S2S_BUDGET_MS;
+  const maxGapMs = opts.maxGapMs ?? S2S_MAX_GAP_MS;
   const log = opts.log ?? (() => {});
   const f = opts.fetchImpl ?? fetch;
 
@@ -176,7 +197,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       if (opts.admit) {
         const admission = opts.admit(req, config, { deployment, explicit });
         if (!admission.ok) {
-          return sendJson(res, admission.status, { error: { message: admission.message, type: admission.type } },
+          return sendJson(res, admission.status, { error: denialError(admission) },
             admission.retryAfterSeconds ? { 'Retry-After': admission.retryAfterSeconds } : {});
         }
         deployment = admission.deployment;
@@ -191,18 +212,21 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       });
     }
 
-    const sink = new Sink(res, format);
+    const sink = new Sink(res, format, () => emitGatewayEvent('s2s.first_audio', {
+      durMs: Math.round(performance.now() - t0), ...(deployment ? { deployment } : {}),
+    }));
     const budget = new AbortController();
     const budgetTimer = setTimeout(() => budget.abort(new Error(`s2s budget of ${budgetMs} ms exceeded`)), budgetMs);
     // `res` close, not `req` close: the request side closes as soon as its body has been read (Node, Bun ≥ 1.4), so
     // the old listener, attached after the body, never fired and a client that left kept the whole turn running
     // (fault bench 2026-10-06, item 18).
-    res.on('close', () => { if (!res.writableFinished) budget.abort(new Error('client went away')); });
+    let clientGone = false;
+    res.on('close', () => { if (!res.writableFinished) { clientGone = true; budget.abort(new Error('client went away')); } });
     const elapsed = () => Math.round(performance.now() - t0);
     const outcome: Record<string, unknown> = {};
 
-    const composite = (lane: Lane, signal: AbortSignal, transcript?: { text: string }) => runComposite({
-      stages: opts.stagesFor(req, config), audio, contentType, config, signal, transcript,
+    const composite = (lane: Lane, signal: AbortSignal, transcript?: { text: string }, skipDeadline = false) => runComposite({
+      stages: opts.stagesFor(req, config), audio, contentType, config, signal, transcript, skipDeadline,
       emitEvent: e => lane.event(e), emitAudio: a => lane.audio(a),
     });
 
@@ -216,10 +240,11 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         // No-wake mode (gateway/proxy/no-wake.ts): a ready replica still answers; a cold one is not woken (composed).
         const noWake = noWakeActive();
         try {
-          lease = await opts.controller.acquire(deployment, noWake ? { waitMs: 0, noWake: true } : { waitMs: 0 });
+          const session = parseTraceparent(req.headers.traceparent)?.traceId;
+          lease = await opts.controller.acquire(deployment, { waitMs: 0, stage: 's2s', ...(noWake ? { noWake: true } : {}), ...(session ? { session } : {}) });
         } catch (err) {
           if (!(err instanceof DeploymentError)) throw err;
-          skip = err.status === 409 ? 'paused' : err.status === 404 ? 'not_found' : 'cold';
+          skip = err.status === 409 ? 'paused' : err.status === 404 ? 'not_found' : err.code === 'stage_out' ? 'circuit_open' : err.code ?? 'cold';
           if (skip === 'cold' && noWake) recordNoWakeSkip();
           else if (skip === 'cold') { try { opts.controller.wake(deployment); } catch { /* vanished */ } }
         }
@@ -249,6 +274,17 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       let heard: string | null = null;
       let filteredByGateway = false;
       let primaryError: string | null = null;
+      let cut = { code: 'upstream_error', stage: 'primary', unspoken: '' };
+      let streaming = false;
+      const stall = new AbortController();
+      let gapTimer: ReturnType<typeof setTimeout> | undefined;
+      const armGap = () => {
+        clearTimeout(gapTimer);
+        gapTimer = setTimeout(() => stall.abort(new Error(`no data from the replica for ${maxGapMs} ms`)), maxGapMs);
+      };
+      const upstreamSignal = AbortSignal.any([primarySignal.signal, budget.signal, stall.signal]);
+      const aborted = new Promise<never>((_, reject) => upstreamSignal.addEventListener('abort', () => reject(upstreamSignal.reason)));
+      aborted.catch(() => {});
 
       const hedgeTimer = setTimeout(() => {
         if (heard !== null || winner || budget.signal.aborted) return;
@@ -256,7 +292,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         const signal = new AbortController();
         const lane = new Lane(sink, false, () => decide('hedge'));
         lane.event({ type: 'route', provider: 'composite', fallback: 'slow', from: `deployment:${deployment}` });
-        const run = composite(lane, AbortSignal.any([signal.signal, budget.signal])).catch((err) => {
+        const run = composite(lane, AbortSignal.any([signal.signal, budget.signal]), undefined, true).catch((err) => {
           if (!lane.aborted) log('s2s: hedge failed', { error: String(err) });
           if (winner === 'hedge') throw err;
         });
@@ -268,21 +304,30 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         const form = new FormData();
         form.set('file', new Blob([new Uint8Array(audio)], { type: contentType }), 'turn');
         form.set('config', rawConfig);
+        armGap();
         const upstream = await f(`${replicaBase(lease.machine, lease.exposed)}/v1/s2s`, {
           method: 'POST', body: form, headers: { ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
-          signal: AbortSignal.any([primarySignal.signal, budget.signal]),
+          signal: upstreamSignal,
         });
         if (!upstream.ok || !upstream.body) throw new Error(`replica answered HTTP ${upstream.status}`);
+        streaming = true;
         const decoder = new FrameDecoder();
         const reader = upstream.body.getReader();
         let sawDone = false;
         read: for (;;) {
-          const { value, done } = await reader.read();
+          const { value, done } = await Promise.race([reader.read(), aborted]);
           if (done) break;
+          armGap();
           for (const frame of decoder.push(value)) {
-            if (frame.kind === 'audio') { primaryLane.audio(frame.pcm); continue; }
+            if (frame.kind === 'audio') { cut.unspoken = ''; primaryLane.audio(frame.pcm); continue; }
             const e = frame.event;
-            if (e.type === 'error') { primaryError = String(e.message ?? 'error'); break read; }
+            if (e.type === 'sentence') cut.unspoken = String(e.text ?? '');
+            if (e.type === 'error') {
+              primaryError = String(e.message ?? 'error');
+              cut = { code: String(e.code ?? cut.code), stage: String(e.stage ?? cut.stage), unspoken: String(e.unspoken ?? cut.unspoken) };
+              await reader.cancel().catch(() => {});
+              break read;
+            }
             if (e.type === 'transcript') {
               heard = String(e.text ?? '');
               const verdict = filterPrimaryTranscript(e, config);
@@ -305,14 +350,23 @@ export function createS2SRoute(opts: S2SRouteOptions) {
             primaryLane.event(e);
           }
         }
-        if (!sawDone && !primaryError) primaryError = 'replica stream ended without done';
+        if (!sawDone && !primaryError) { primaryError = 'replica stream ended without done'; cut.code = 'upstream_truncated'; }
         if (sawDone && !hedge) decide('primary');
-        lease.done(Boolean(primaryError));
+        lease.done(primaryError ? (cut.code === 'upstream_stalled' ? 'timeout' : true) : false);
       } catch (err) {
         if (winner === 'hedge') lease.done(false);
-        else { primaryError = (err as Error).message; lease.done(true); }
+        else {
+          primaryError = (err as Error).message;
+          const stalled = stall.signal.aborted || (budget.signal.aborted && !clientGone);
+          if (streaming) cut.code = stalled ? 'upstream_stalled' : 'upstream_truncated';
+          lease.done(clientGone ? 'cancelled' : stalled ? 'timeout' : true);
+        }
       } finally {
         clearTimeout(hedgeTimer);
+        clearTimeout(gapTimer);
+      }
+      if (primaryError && streaming && !clientGone) {
+        noteStreamCut({ deployment, replica: lease.machine.id, stage: cut.stage }, cut.code === 'upstream_stalled' ? 'stalled' : 'truncated', primaryError);
       }
 
       const runningHedge = hedge as { lane: Lane; run: Promise<unknown> } | null;
@@ -328,9 +382,12 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       if (!primaryError) { outcome.provider = `deployment:${deployment}`; return; }
 
       // ── 3. the primary broke and no hedge is running ──
-      log('s2s: primary failed', { deployment, error: primaryError, heard: heard !== null, sawAudio: primaryLane.sawAudio });
+      log('s2s: primary failed', { deployment, replica: lease.machine.id, error: primaryError, code: cut.code, stage: cut.stage, heard: heard !== null, sawAudio: primaryLane.sawAudio });
       if (primaryLane.sawAudio) {
-        sink.event({ type: 'error', stage: 'primary', message: primaryError.slice(0, 300), partial: true, at_ms: elapsed() });
+        sink.event({
+          type: 'error', stage: cut.stage, code: cut.code, message: primaryError.slice(0, 300), partial: true, at_ms: elapsed(),
+          ...(cut.unspoken ? { unspoken: cut.unspoken } : {}),
+        });
         sink.event({ type: 'done', partial: true, transcript: heard, total_ms: elapsed() });
         Object.assign(outcome, { provider: `deployment:${deployment}`, partial: true });
         return;
@@ -338,7 +395,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       const lane = new Lane(sink, true);
       lane.event({ type: 'route', provider: 'composite', fallback: heard !== null ? 'resumed' : 'error', from: `deployment:${deployment}` });
       Object.assign(outcome, { provider: 'composite', fallback: heard !== null ? 'resumed' : 'error' });
-      await composite(lane, budget.signal, heard !== null ? { text: heard } : undefined);
+      await composite(lane, budget.signal, heard !== null ? { text: heard } : undefined, primaryLane.openerPlayed);
     } catch (err) {
       const message = (err as Error).message ?? String(err);
       Object.assign(outcome, { error: message.slice(0, 200) });
@@ -348,7 +405,9 @@ export function createS2SRoute(opts: S2SRouteOptions) {
           error: { message: `No provider could answer speech-to-speech: ${message}`.slice(0, 500), type: 'provider_unavailable', code: 'provider_unavailable' },
         });
       }
-      sink.event({ type: 'error', message: message.slice(0, 300), at_ms: elapsed() });
+      const stalled = budget.signal.aborted && !clientGone;
+      if (stalled) noteStreamCut({ deployment: deployment || 'composite', stage: 'composite' }, 'stalled', message);
+      sink.event({ type: 'error', ...(stalled ? { code: 'upstream_stalled' } : {}), message: message.slice(0, 300), at_ms: elapsed() });
     } finally {
       clearTimeout(budgetTimer);
       log('s2s', { ...outcome, ms: elapsed() });

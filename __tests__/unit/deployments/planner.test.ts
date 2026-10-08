@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { DeploymentController } from '../../../src/deployments/controller';
+import { HttpReplicaProbe } from '../../../src/deployments/http';
+import { MemoryDeploymentStore } from '../../../src/deployments/store';
+import { FakeCloud, until } from './_fake-cloud';
 import { desiredReplicas, planReplicas, type ObservedReplica } from '../../../src/deployments/planner';
 import { buildSpec } from '../../../src/deployments/spec';
 import type { DeploymentSpec } from '../../../src/deployments/types';
@@ -99,6 +103,31 @@ describe('planReplicas', () => {
     expect(plan.release.map(r => r.id)).toEqual(['ready']);
   });
 
+  it('never releases the only ready replica while the other is still booting (simulator 2026-10-07)', () => {
+    const s = spec({ minReplicas: 0, maxReplicas: 2, scaleDownDelaySeconds: 0 });
+    const booting = replica('boot', { everReady: false, readyNow: false, age: MIN });
+    const plan = planReplicas({ ...base, spec: s, lastRequestAt: NOW, replicas: [replica('ready', { readyAt: NOW }), booting] });
+    expect(plan.desired).toBe(1);
+    expect(plan.release).toEqual([]);
+    expect(plan.aboveSince).toBe(NOW);
+    const done = planReplicas({ ...base, spec: s, lastRequestAt: NOW, aboveSince: NOW, replicas: [replica('ready'), replica('boot', { age: MIN })] });
+    expect(done.release).toEqual([{ id: 'boot', reason: 'scale-down' }]);
+  });
+
+  it('with two ready and one booting for desired 1, one ready replica goes and one keeps serving', () => {
+    const s = spec({ minReplicas: 0, maxReplicas: 3, scaleDownDelaySeconds: 0 });
+    const replicas = [replica('a'), replica('b', { age: 2 * MIN }), replica('boot', { everReady: false, readyNow: false, age: MIN })];
+    expect(planReplicas({ ...base, spec: s, lastRequestAt: NOW, replicas }).release).toEqual([{ id: 'b', reason: 'scale-down' }]);
+  });
+
+  it('draining never takes the last ready replica either', () => {
+    const s = spec({ minReplicas: 0, maxReplicas: 2, scaleDownDelaySeconds: 0, targetInflightPerReplica: 4 });
+    const replicas = [replica('ready', { inflight: 1 }), replica('boot', { everReady: false, readyNow: false, age: MIN })];
+    const plan = planReplicas({ ...base, spec: s, lastRequestAt: NOW, inflight: 1, drainBusy: true, replicas });
+    expect(plan.drain).toEqual([]);
+    expect(plan.release).toEqual([]);
+  });
+
   it('going idle scales down to minReplicas at once', () => {
     const s = spec({ minReplicas: 0, idleMinutes: 15, scaleDownDelaySeconds: 3600 });
     const plan = planReplicas({ ...base, spec: s, lastRequestAt: NOW - 20 * MIN, replicas: [replica('a'), replica('b')] });
@@ -143,5 +172,40 @@ describe('planReplicas', () => {
   it('paused releases everything', () => {
     const plan = planReplicas({ ...base, spec: spec({ minReplicas: 1, paused: true }), replicas: [replica('a', { inflight: 2 })] });
     expect(plan.release).toEqual([{ id: 'a', reason: 'paused' }]);
+  });
+});
+
+describe('planReplicas: controller', () => {
+  const controllers: DeploymentController[] = [];
+  const clouds: FakeCloud[] = [];
+  afterEach(async () => {
+    for (const c of controllers.splice(0)) c.stop();
+    for (const c of clouds.splice(0)) await c.closeAll();
+  });
+
+  it('the ready replica keeps serving while a surplus one boots, and the surplus goes once it is ready', async () => {
+    const cloud = new FakeCloud();
+    cloud.bootMs = 0;
+    const controller = new DeploymentController({
+      backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 20, maxTotalReplicas: 6,
+    });
+    await controller.init();
+    controller.start();
+    controllers.push(controller);
+    clouds.push(cloud);
+    await controller.put('s', { image: 'me/app:1', port: 8000, minReplicas: 0, maxReplicas: 2, scaleDownDelaySeconds: 0 });
+    controller.wake('s');
+    await until(() => controller.get('s')?.status === 'ready');
+    const first = [...cloud.machines.keys()][0];
+    cloud.bootMs = 600_000;
+    await controller.put('s', { minReplicas: 2 });
+    await until(() => cloud.machines.size === 2);
+    await controller.put('s', { minReplicas: 0 });
+    await new Promise(r => setTimeout(r, 200));
+    expect(cloud.released).toEqual([]);
+    expect(controller.get('s')?.replicas.find(r => r.id === first)?.phase).toBe('ready');
+    for (const m of cloud.machines.values()) m.bootedAt = 0;
+    await until(() => cloud.machines.size === 1);
+    expect(controller.get('s')?.status).toBe('ready');
   });
 });

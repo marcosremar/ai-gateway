@@ -30,7 +30,7 @@ def announced(host: str, port: int) -> tuple[str, int]:
     s = _settings
     if not s:
         return host, port
-    return (s.public_ip or host), s.port_map.get(port, port)
+    return (s.public_ip or host), s.public_port(port)
 
 
 async def _bind_in_range(loop, factory, address: str):
@@ -65,7 +65,7 @@ async def _get_component_candidates(self, component: int, addresses: list[str], 
             candidate, protocol = await asyncio.wait_for(ice.relayed_candidate(
                 component=component, protocol_factory=lambda: ice.StunProtocol(self), turn_server=self.turn_server,
                 turn_username=self.turn_username, turn_password=self.turn_password, turn_ssl=self.turn_ssl,
-                turn_transport=self.turn_transport), timeout)
+                turn_transport=self.turn_transport), _settings.turn_allocate_ms / 1000)
             candidates.append(candidate)
             self._protocols.append(protocol)
         except Exception as error:  # noqa: BLE001 — host candidates still go out; the failure is in the edge log

@@ -42,7 +42,25 @@ other value → `403`. The same rule holds for every app-scoped route added late
 - **`max_tokens`** (chat): clamped to `APP_MAX_TOKENS` (default `1024`); a request without one gets the cap.
 - **Daily budget** per app (UTC day, in memory): `APP_DAILY_REQUESTS` (default `5000`) requests and
   `APP_DAILY_TOKENS` (default `2000000`) estimated tokens (prompt characters / 4 + `max_tokens` for chat, input
-  characters / 4 for TTS). Over → `429 budget_exceeded` with `Retry-After` until 00:00 UTC. `0` turns one off.
+  characters / 4 for TTS). Over → `429` with `Retry-After` until 00:00 UTC and
+  `{"error": {"type": "budget_exceeded", "code": "daily_budget_exhausted", "budget": "tokens" | "requests", "reset_at":
+  "<ISO time>"}}` (a realtime session: `error.code: "budget_exceeded"` plus top-level `reason`, `budget`, `reset_at`).
+  It is not the per-minute rate limit (`rate_limit_error`): retrying before `reset_at` cannot succeed, so a client
+  shows "limit reached" and stops. `0` turns one off.
+- **Sizing the budget for a class.** Both limits are gateway-wide settings applied to each app (there is no per-app
+  value): size them for the largest app. A `/v1/s2s` turn costs one request and `prompt characters / 4 + max_tokens`
+  tokens, where the prompt is `system` + `messages` + `user_template` and an omitted `max_tokens` counts as
+  `APP_MAX_TOKENS` (1024); a realtime session costs `4 × minutes of its token` requests at admission and no tokens.
+  `APP_DAILY_TOKENS ≥ students × turns per student per day × tokens per turn` and `APP_DAILY_REQUESTS ≥ students ×
+  (turns per day + 4 × realtime minutes per day)`, with a margin (× 1.5). Example: 25 students, 4 turns/min, 580
+  tokens/turn (420 of prompt + `max_tokens: 160`) is 58 000 tokens and 100 requests per minute: the defaults last
+  34 min (tokens) and 50 min (requests); a 90-minute lesson needs `APP_DAILY_TOKENS=8000000` and
+  `APP_DAILY_REQUESTS=14000`. A student whose realtime session falls back to `/v1/s2s` is charged the session's
+  requests and one request per turn: count both.
+- **Watching it.** `GET /health?details=1` lists `appBudgets` (an admin: every app used today; an app key: its own):
+  `used`, `limit`, `perMinute` (last 5–10 min) and `exhaustedAt` (projected at that rate, null when it would not run
+  out before the reset) for requests and tokens. The gateway logs and emits the telemetry events
+  `app.budget_warning` at 80 % and `app.budget_exhausted` at the first refusal, once per app, budget and UTC day.
 - **Routes**: `PUT /v1/apps/:app/routes` with the app's own key may reorder, drop or re-alias the targets its routes
   already have (set by an admin) and add the app's own deployments; any new target → `403`.
 - **Deployments**: `…/invoke` only on its own app's deployments (`403` otherwise).
@@ -112,6 +130,7 @@ thinking). `finish_reason` is passed through as the provider sent it.
 | Deployment, time to **first byte** — STT / chat / TTS | 4 s / 4 s / 3 s | `DEPLOYMENT_STT_TIMEOUT_MS`, `DEPLOYMENT_CHAT_TIMEOUT_MS`, `DEPLOYMENT_TTS_TIMEOUT_MS` (or `DEPLOYMENT_TIMEOUT_MS` for all) |
 | Hedge: fallback starts in parallel when the deployment has not answered | 1.5 s | `DEPLOYMENT_HEDGE_MS` (`0` = off) |
 | Cloud link (OpenRouter, Groq…) with a target behind it: the next one starts in parallel (non-stream, STT, TTS) or takes over (chat stream, no first token) when it has not answered | min(4 s, half of the budget left) | `GATEWAY_CLOUD_HEDGE_MS` (`0` = off) |
+| A composed `/v1/s2s` turn with `first_audio_deadline_ms` or `opener`: no link of a stage waits longer than this before the next one starts (hedge) or takes over (chat stream), deployment links included | the time left to the turn's deadline, at least 1 s | — (sent by the gateway to its own stage sub-requests as `x-gateway-hedge-ms`; ignored from any other caller) |
 | Whole stage (deployment + fallbacks + hedge) | 8 s | `GATEWAY_STT_BUDGET_MS`, `GATEWAY_CHAT_BUDGET_MS`, `GATEWAY_TTS_BUDGET_MS` |
 | Chat, **non-stream** only: extra budget per requested `max_tokens` above the free ones, and its ceiling | 20 ms/token above 256, max 45 s | `GATEWAY_CHAT_BUDGET_PER_TOKEN_MS` (`0` = flat), `GATEWAY_CHAT_BUDGET_FREE_TOKENS`, `GATEWAY_CHAT_BUDGET_MAX_MS` |
 
@@ -214,6 +233,8 @@ else its own configured voice. The replica must expose the OpenAI shapes (`/v1/a
   `stream_format`, …) is forwarded intact. The OpenRouter fallback never receives these fields.
 - With `response_format` `wav` or `pcm` the audio is **streamed** from the replica to the client
   (`stream: true, stream_format: "audio"`; send `"stream": false` to turn it off). Other formats come whole.
+  A streamed body that breaks upstream reaches the client as a cut connection (a transport error), never as a
+  complete answer.
 
 ```json
 { "model": "parle-tts", "input": "Bom dia!", "voice": "br-f-01", "fallback_voice": "pf_dora", "response_format": "wav" }
@@ -311,6 +332,12 @@ Every successful response of the three routes carries (no secrets):
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
+A deployment target streams too: the gateway asks the replica for `stream: true` and relays each delta as it arrives
+(until 2026-10-08 it asked for the whole answer and sent it as one SSE chunk).
+An SSE `{"error": …}` event inside a deployment's chat stream (the speech stack sends one when its LLM breaks or
+stalls) is a failure of that target, never content: before the first token the next target answers
+(`X-Gateway-Fallback: error`); after it the stream ends with the gateway's own `data: {"error": …}` event and no
+`[DONE]`. Either way the replica's `chat` stage gets a strike and the breaker a failure.
 An STT answer served from the gateway's 5-minute cache (same audio, model, language and format) carries
 `X-Gateway-Provider: cache` and `X-Cache: HIT`; it still wakes a cold primary deployment for the next turn (not in
 no-wake mode).
@@ -352,6 +379,16 @@ Built for low latency: no round trip between stages, the first sentence is voice
   "language": "pt", "voice": "br-m-08", "fallback_voice": "pf_dora", "max_tokens": 160, "temperature": 0.6 }
 ```
 
+**First-audio deadline and opener** (optional; contract and limits in [realtime.md](../realtime.md) § First-audio
+deadline and opener): `"first_audio_deadline_ms": 2000` (default `FIRST_AUDIO_DEADLINE_MS`, at most 2500),
+`"endpoint_ms": 700` (the silence the client waited after the speech before posting: the deadline then starts at the
+end of the speech, not at the request) and `"opener": {"lines": ["Hum, deixa eu ver.", "Só um instante."]}`. With
+lines, a turn with no audio at deadline − 300 ms gets `opener {state:"start", text, index, audio_ms, at_ms}`, the
+line's audio, `opener {state:"end"}`, then the reply; without, `deadline_missed {deadline_ms, at_ms}` at the deadline.
+`done` adds `first_sound_ms`, `opener`, `deadline_ms`, `deadline_missed`, `endpoint_ms` (`first_audio_ms` stays the first
+reply audio). On the composed path an opener may be MP3: its `audio_format` event precedes it and the reply announces
+its format again. A turn that sends none of the three fields behaves as before, with the new `done` fields only.
+
 **Which deployment and models** (the gateway names no app's): `"deployment": "parle-speech"` is the speech-stack
 primary (default `S2S_DEPLOYMENT`; none = composed pipeline only; an app key may name only a deployment of its own
 app, see [Authentication](#authentication)) and `"models": {"stt": "parle-stt", "chat":
@@ -376,9 +413,20 @@ they go to the composed pipeline (`route.fallback: "unsupported"`).
 line with audio as `{"type":"audio","pcm":"<base64>"}` (debugging, browsers without a frame parser).
 
 Events, in order: `route` {provider, fallback?, from?} · `transcript` {text, stt_ms} · `llm_first_token` · per sentence
-`sentence` {text} then its audio · `audio_format` {encoding, sample_rate} when it changes · `first_audio` {at_ms} ·
-`done` {reply, transcript, first_audio_ms, total_ms, missing_audio?, partial?}. `sentence_failed` = that sentence has no
-audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`partial: true` → what was sent is valid).
+`sentence` {text}, its audio, then `sentence_end` · `audio_format` {encoding, sample_rate} when it changes · `first_audio` {at_ms} ·
+`opener` {state, text, index} around an opener's audio · `deadline_missed` {deadline_ms} ·
+`done` {reply, transcript, first_audio_ms, first_sound_ms, opener, deadline_ms, deadline_missed, total_ms, sentences, spoken, skipped, audio_ms, missing_audio?, partial?}.
+`sentence_failed` = that sentence has no audio (the rest continues); `error` {stage?, code?, unspoken?, partial?} = the
+turn stopped (`partial: true` → what was sent is valid).
+
+**How a turn ends.** With `done`, or with an `error` (followed by `done {partial: true}` when audio had started);
+a stream that closes any other way was cut and is a failed turn. `done` is complete only when `spoken` = `sentences`
+and `skipped` = 0. `error.code`: `upstream_truncated` (the replica's stream broke or closed without `done`),
+`upstream_stalled` (nothing for `S2S_MAX_GAP_MS`, 10 s, or the whole-turn budget ran out), `stage_failed` (the
+speech stack named its failing `stage`: `stt`, `llm`, `tts`). `error.unspoken` = reply text known and not voiced:
+a client speaks it once (the SDK's `speak`) and never replays what was heard. Each cut is counted per deployment,
+replica and stage in `GET /health?details=1` → `streams` and sent as a `stream.cut` telemetry event; a cut or a stall
+is a failure of the replica's `s2s` stage (three in a row take it out for 30 s), a client that leaves is not.
 
 **Routing**
 

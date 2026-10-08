@@ -135,6 +135,17 @@ export interface ScalewayFirewallRule {
   portTo?: number;
 }
 
+export interface ScalewayGroupRule {
+  id: string;
+  protocol: string;
+  direction: string;
+  action: string;
+  ipRange: string;
+  port: number | null;
+  portTo: number | null;
+  editable: boolean;
+}
+
 export interface ScalewayIp {
   id: string;
   address: string;
@@ -420,7 +431,8 @@ export class ScalewayClient extends AbstractGpuProvider {
       const ip = await this.waitForIp(zone, server.id, secretKey);
       const endpoint = ip ? `http://${ip}:8080` : '';
 
-      this.log.log(`[scaleway] Server ready: ${server.id} at ${ip || 'no-ip'} (€${usedType.pricePerHr}/hr)`);
+      const pricePerHr = usedType.pricePerHr || await this.getHourlyPrice(zone, usedType.type, credentials).catch(() => null) || 0;
+      this.log.log(`[scaleway] Server ready: ${server.id} at ${ip || 'no-ip'} (${pricePerHr ? `€${pricePerHr}/hr` : 'price unknown'})`);
 
       return {
         instanceId: encodedId,
@@ -432,7 +444,7 @@ export class ScalewayClient extends AbstractGpuProvider {
           provider: 'scaleway',
           zone,
           commercialType: usedType.type,
-          pricePerHr: usedType.pricePerHr,
+          pricePerHr,
           tags,
           ...(volumeIds.length ? { volumeIds } : {}),
           ...(spec.publicIpIds?.length ? { publicIpIds: spec.publicIpIds } : {}),
@@ -441,7 +453,7 @@ export class ScalewayClient extends AbstractGpuProvider {
       };
     } catch (err) {
       // Best-effort cleanup of server + SBS volumes (like babylon cloud-play)
-      this.log.warn(`[scaleway] create failed after server ${server.id}; cleaning up: ${this.errMsg(err)}`);
+      this.log.warn(`[scaleway] server ${server.id} exists but did not start; cleaning up: ${this.errMsg(err)}`);
       // A cleanup that fails must say so: the server and its volume keep billing until something else deletes them
       // (the deployment controller releases a tagged server it does not know on its next list).
       await this.deleteInstance(encodedId, credentials).catch((cleanupErr: unknown) => {
@@ -771,16 +783,35 @@ export class ScalewayClient extends AbstractGpuProvider {
       }),
     }, TIMEOUTS.write, 'scaleway');
     const id = res.security_group.id;
-    for (const rule of opts.rules) {
-      await this.fetchJson(`${this.zoneUrl(zone)}/security_groups/${id}/rules`, {
-        method: 'POST', headers: this.scwHeaders(secretKey),
-        body: JSON.stringify({
-          protocol: rule.protocol, direction: 'inbound', action: 'accept', ip_range: '0.0.0.0/0', dest_port_from: rule.port,
-          ...(rule.portTo && rule.portTo > rule.port ? { dest_port_to: rule.portTo } : {}),
-        }),
-      }, TIMEOUTS.write, 'scaleway');
-    }
+    for (const rule of opts.rules) await this.addSecurityGroupRule(zone, id, rule, credentials);
     return id;
+  }
+
+  async addSecurityGroupRule(zone: string, groupId: string, rule: ScalewayFirewallRule, credentials: ProviderCredentials): Promise<void> {
+    await this.fetchJson(`${this.zoneUrl(zone)}/security_groups/${groupId}/rules`, {
+      method: 'POST', headers: this.scwHeaders(this.requireSecret(credentials)),
+      body: JSON.stringify({
+        protocol: rule.protocol, direction: 'inbound', action: 'accept', ip_range: '0.0.0.0/0', dest_port_from: rule.port,
+        ...(rule.portTo && rule.portTo > rule.port ? { dest_port_to: rule.portTo } : {}),
+      }),
+    }, TIMEOUTS.write, 'scaleway');
+  }
+
+  async listSecurityGroupRules(zone: string, groupId: string, credentials: ProviderCredentials): Promise<ScalewayGroupRule[]> {
+    const res = await this.fetchJson<{ rules: Array<{
+      id: string; protocol: string; direction: string; action: string; ip_range: string;
+      dest_port_from?: number | null; dest_port_to?: number | null; editable?: boolean;
+    }> }>(`${this.zoneUrl(zone)}/security_groups/${groupId}/rules?per_page=100`,
+      { headers: this.scwHeaders(this.requireSecret(credentials)) }, TIMEOUTS.read, 'scaleway');
+    return res.rules.map(r => ({
+      id: r.id, protocol: r.protocol, direction: r.direction, action: r.action, ipRange: r.ip_range,
+      port: r.dest_port_from ?? null, portTo: r.dest_port_to ?? null, editable: r.editable !== false,
+    }));
+  }
+
+  async deleteSecurityGroupRule(zone: string, groupId: string, ruleId: string, credentials: ProviderCredentials): Promise<void> {
+    await this.fetchOk(`${this.zoneUrl(zone)}/security_groups/${groupId}/rules/${ruleId}`,
+      { method: 'DELETE', headers: this.scwHeaders(this.requireSecret(credentials)) });
   }
 
   async listSecurityGroups(zone: string, credentials: ProviderCredentials, opts: { projectId: string; name?: string }): Promise<Array<{ id: string; name: string }>> {
@@ -938,6 +969,8 @@ export class ScalewayClient extends AbstractGpuProvider {
   /** Waits between retries of a call on a just-created server that answered 404 (eventual consistency); then gives up. */
   freshServerRetryMs: number[] = [1_000, 2_000, 4_000];
 
+  startPollMs = 5_000;
+
   private async retryNotFound<T>(step: () => Promise<T>, label: string): Promise<T> {
     for (const waitMs of this.freshServerRetryMs) {
       try {
@@ -966,20 +999,29 @@ export class ScalewayClient extends AbstractGpuProvider {
 
   private async waitForIp(zone: string, serverId: string, secretKey: string, timeoutMs = 120_000): Promise<string | null> {
     const start = Date.now();
+    let stopped = 0;
     while (Date.now() - start < timeoutMs) {
+      let state: string | undefined;
       try {
         const res = await this.fetchJson<ScwGetResponse>(
           `${this.zoneUrl(zone)}/servers/${serverId}`,
           { headers: this.scwHeaders(secretKey) },
           TIMEOUTS.read,
         );
+        state = res.server.state;
         const ip = ipv4Of(res.server);
-        if (ip) return ip;
+        if (ip && state !== 'stopped') return ip;
       } catch {
         // Server may not be ready yet
       }
-      await new Promise(r => setTimeout(r, 5000));
+      stopped = state === 'stopped' ? stopped + 1 : 0;
+      if (stopped === 2) {
+        this.log.warn(`[scaleway] Server ${serverId} is still stopped after its power-on; asking again`);
+        await this.serverAction(zone, serverId, 'poweron', secretKey);
+      }
+      await new Promise(r => setTimeout(r, this.startPollMs));
     }
+    if (stopped) throw new Error(`server ${serverId} still stopped ${Math.round(timeoutMs / 1000)} s after its power-on`);
     return null;
   }
 

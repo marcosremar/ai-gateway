@@ -5,7 +5,8 @@ process through WebRTC media (UDP `RT_UDP_PORTS`) or through the gateway's WebSo
 
     POST   /__aigw/rt/offer          {sdp, type: "offer", token} → {sdp, type: "answer", sessionId}
     POST   /__aigw/rt/ice            {sessionId, candidate}       (trickle is optional: the answer carries all candidates)
-    GET    /__aigw/rt/status         {active, max, available, transports, udpPorts, ready, byTransport, workers}
+    GET    /__aigw/rt/status         {active, max, available, transports, udpPorts, ready, byTransport, workers,
+                                      firstAudioMaxMs, shedding}
     DELETE /__aigw/rt/session/{id}
     GET    /__aigw/rt/ws?token=…     WebSocket: JSON events/control as text, audio as binary [0x01][PCM16 LE mono]
                                      (16 kHz up, 24 kHz down, 20 ms frames)
@@ -30,8 +31,8 @@ from aiohttp import web
 
 from . import audio, ice
 from .config import Settings
-from .host import OfferError, SessionHost, load_loop
-from .session import OUT_FRAME_BYTES, Session
+from .host import OfferError, SessionGone, SessionHost, load_loop
+from .session import OUT_FRAME_BYTES, Session, first_audio_max
 from .netcheck import NetState
 from .telemetry import new_trace_id, telemetry, trace_id_from
 from .token import TokenError, TokenVerifier
@@ -40,6 +41,7 @@ from .upstream import Upstream
 AUDIO_TAG = 0x01
 WS_LEAD_SECONDS = 0.2  # how far ahead of real time WS audio may run (the client's jitter buffer)
 INTERNAL_HEADER = "X-Edge-Internal"
+REPLAYED = ("unauthorized", "token rejected: replayed")
 
 
 def error_body(code: str, message: str) -> dict:
@@ -70,8 +72,12 @@ def worker_main(settings: Settings, index: int, secret: str) -> None:
 
     async def offer(req):
         body = await req.json()
+        up.llm_ctx = body.get("llmCtx") or up.llm_ctx
         try:
-            return web.json_response(await host.offer(body["sdp"], body["claims"], body["traceId"], body.get("iceServers")))
+            return web.json_response(await host.offer(body["sdp"], body["claims"], body["traceId"], body.get("iceServers"),
+                                                      bool(body.get("resume"))))
+        except SessionGone:
+            return web.json_response(error_body(*REPLAYED), status=401)
         except OfferError as error:
             return web.json_response(error_body("bad_request", str(error)), status=400)
 
@@ -85,7 +91,7 @@ def worker_main(settings: Settings, index: int, secret: str) -> None:
         return web.json_response({"deleted": ok}, status=200 if ok else 404)
 
     async def sessions(_req):
-        return web.json_response({"sids": list(host.sessions)})
+        return web.json_response({"sids": list(host.sessions), "firstAudioMaxMs": first_audio_max(settings.shed_window_s)})
 
     async def startup(_app):
         await up.start()
@@ -114,67 +120,77 @@ class Edge:
         self.verifier = TokenVerifier(settings.key, settings.replica_id, settings.deployment)
         self.up = Upstream(settings)
         self.host = SessionHost(settings, self.up)
+        self.ws_host = SessionHost(settings, self.up)
         n = settings.rtc_workers
         self.secret = secrets.token_hex(16)
         self.worker_settings = [replace(settings, udp_ports=r) for r in worker_ranges(*settings.udp_ports, n)] if n else []
         self.workers: list = [None] * n
         self.routes: dict[str, dict] = {}  # WebRTC sid → {worker, at}
+        self.worker_first_audio: dict[int, int | None] = {}
         self.http: aiohttp.ClientSession | None = None
-        self.net = NetState(settings.probe_port, settings.public_ip)
+        self.net = NetState(settings.probe_port, settings.public_ip, settings.public_port(settings.probe_port))
 
     # ── admission ────────────────────────────────────────────────────────────
 
     def active(self) -> int:
-        return len(self.host.sessions) + len(self.routes)
+        return len({*self.host.sessions, *self.ws_host.sessions, *self.routes})
 
-    def admit(self, token: str | None, trace_id: str, transport: str) -> tuple[dict | None, tuple[int, str, str] | None]:
+    def admit(self, token: str | None, trace_id: str, transport: str, live=None) -> tuple[dict | None, tuple[int, str, str] | None]:
         """(claims, None) or (None, (http status, error code, message)). Capacity is checked before the token is
-        consumed, so a learner refused here can still use the same token on another replica. A session of the same
-        sid on the other transport (the ladder's previous rung) does not count: it is superseded once this one is in."""
+        consumed, so a learner refused here can still use the same token on another replica. A learner holds one slot:
+        a sid with a session on each transport (the SDK starts on WS while WebRTC connects, then closes the WS) counts
+        once."""
         if not token:
             return None, (401, "unauthorized", "token missing")
         try:
-            claims = self.verifier.verify(token, consume=False, transport=transport)
+            claims = self.verifier.verify(token, consume=False, transport=transport, live=live)
         except TokenError as error:
             telemetry.emit("edge.token.reject", trace_id=trace_id, level="warn", reason=error.reason)
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
-        if self.active() - self.holds(claims["sid"]) >= self.s.max_sessions:
-            telemetry.emit("edge.capacity.reject", trace_id=trace_id, level="warn", active=self.active(), max=self.s.max_sessions)
-            return None, (503, "capacity", f"replica full ({self.active()}/{self.s.max_sessions} sessions)")
+        if self.full(claims["sid"]):
+            telemetry.emit("edge.capacity.reject", trace_id=trace_id, level="warn", active=self.active(), max=self.s.max_sessions,
+                           firstAudioMaxMs=self.first_audio_max())
+            return None, (503, "capacity", f"replica full ({self.active()}/{self.s.max_sessions} sessions"
+                                           f"{', shedding: first audio over the deadline' if self.shedding() else ''})")
         if not self.up.ready:
             telemetry.emit("edge.capacity.reject", trace_id=trace_id, level="warn", active=self.active(),
                            max=self.s.max_sessions, reason="warming")
             return None, (503, "warming", "models not ready yet")
         try:
-            return self.verifier.verify(token, transport=transport), None
+            return self.verifier.verify(token, transport=transport, live=live), None
         except TokenError as error:
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
 
-    def holds(self, sid: str) -> int:
-        return 1 if sid in self.routes or sid in self.host.sessions else 0
+    def first_audio_max(self) -> int | None:
+        seen = [first_audio_max(self.s.shed_window_s), *self.worker_first_audio.values()]
+        return max((ms for ms in seen if ms is not None), default=None)
 
-    async def supersede(self, sid: str) -> None:
-        """Ends the sid's previous session (the rung the SDK gave up on): one live session per token."""
-        if sid in self.routes:
-            route = self.routes.pop(sid)
-            try:
-                await self.worker_call(route["worker"], "DELETE", f"/__edge/session/{sid}")
-            except Exception:  # noqa: BLE001 — the worker may already have dropped it
-                pass
-        elif sid in self.host.sessions:
-            await self.host.end(sid, "superseded")
+    def shedding(self) -> bool:
+        worst = self.first_audio_max()
+        return self.active() > 0 and worst is not None and worst > self.s.first_audio_deadline_ms
+
+    def full(self, sid: str) -> bool:
+        held = self.holds(sid)
+        return self.active() - held >= self.s.max_sessions or (not held and self.shedding())
+
+    def rtc_live(self, sid: str) -> bool:
+        return sid in self.routes or sid in self.host.sessions
+
+    def holds(self, sid: str) -> int:
+        return 1 if self.rtc_live(sid) or sid in self.ws_host.sessions else 0
 
     # ── HTTP routes ──────────────────────────────────────────────────────────
 
     async def status(self, _req: web.Request) -> web.Response:
         active = self.active()
-        by = {t: sum(1 for e in self.host.sessions.values() if e["transport"] == t) for t in ("webrtc", "ws")}
-        by["webrtc"] += len(self.routes)
+        by = {"webrtc": len(self.host.sessions) + len(self.routes), "ws": len(self.ws_host.sessions)}
+        shedding = self.shedding()
         return web.json_response({
-            "active": active, "max": self.s.max_sessions, "available": max(0, self.s.max_sessions - active),
+            "active": active, "max": self.s.max_sessions, "available": 0 if shedding else max(0, self.s.max_sessions - active),
+            "firstAudioMaxMs": self.first_audio_max(), "shedding": shedding,
             # Firewall range = media ports + the probe port; `transports` drops webrtc when no media path works.
             "transports": self.net.transports(), "udpPorts": [self.s.udp_ports[0], self.s.probe_port or self.s.udp_ports[1]],
-            "probePort": self.s.probe_port or None, "net": self.net.view(), "ready": self.up.ready,
+            "probePort": self.s.public_port(self.s.probe_port) or None, "net": self.net.view(), "ready": self.up.ready,
             "byTransport": by, "workers": len(self.workers),
         })
 
@@ -202,30 +218,36 @@ class Edge:
         except Exception as error:  # noqa: BLE001
             return web.json_response(error_body("bad_request", f"{error}"), status=400)
         trace_id = trace_id_from(req.headers.get("traceparent") or body.get("traceparent")) or new_trace_id()
-        claims, refused = self.admit(body.get("token"), trace_id, "webrtc")
+        claims, refused = self.admit(body.get("token"), trace_id, "webrtc", live=self.rtc_live)
         if refused:
             return web.json_response(error_body(refused[1], refused[2]), status=refused[0])
-        await self.supersede(claims["sid"])
+        sid = claims["sid"]
+        resume = self.rtc_live(sid)
         if "webrtc" not in self.net.transports():
             return web.json_response(error_body("unsupported", "no media path to this replica (net: ws only)"), status=503)
         ice_servers = self.net.ice_servers(body.get("iceServers") if isinstance(body.get("iceServers"), list) else None)
         if not self.workers:
             try:
-                return web.json_response(await self.host.offer(sdp, claims, trace_id, ice_servers))
+                return web.json_response(await self.host.offer(sdp, claims, trace_id, ice_servers, resume))
+            except SessionGone:
+                return web.json_response(error_body(*REPLAYED), status=401)
             except OfferError as error:
                 return web.json_response(error_body("bad_request", str(error)), status=400)
         load = {i: 0 for i in range(len(self.workers))}
         for route in self.routes.values():
             load[route["worker"]] += 1
-        index = min(load, key=load.get)
-        sid = claims["sid"]
-        self.routes[sid] = {"worker": index, "at": time.monotonic()}  # counts against capacity while the worker answers
+        index = self.routes[sid]["worker"] if resume else min(load, key=load.get)
+        if not resume:
+            self.routes[sid] = {"worker": index, "at": time.monotonic()}  # counts against capacity while the worker answers
         try:
-            status, answer = await self.worker_call(index, "POST", "/__edge/offer", {"sdp": sdp, "claims": claims, "traceId": trace_id, "iceServers": ice_servers})
+            status, answer = await self.worker_call(index, "POST", "/__edge/offer", {
+                "sdp": sdp, "claims": claims, "traceId": trace_id, "iceServers": ice_servers, "resume": resume,
+                "llmCtx": self.up.llm_ctx})
         except Exception as error:  # noqa: BLE001
-            self.routes.pop(sid, None)
+            if not resume:
+                self.routes.pop(sid, None)
             return web.json_response(error_body("internal", f"rtc worker {index}: {error!r}"[:200]), status=502)
-        if status != 200:
+        if status != 200 and not resume:
             self.routes.pop(sid, None)
         return web.json_response(answer, status=status)
 
@@ -269,14 +291,13 @@ class Edge:
             await ws.close(code=4401 if refused[0] == 401 else 1013, message=refused[1].encode())
             return ws
         sid = claims["sid"]
-        await self.supersede(sid)
         outbox: asyncio.Queue = asyncio.Queue()
         session = Session(sid, claims, self.s, self.up, lambda e: outbox.put_nowait(json.dumps(e)), "ws", trace_id)
 
         async def close(reason: str) -> None:
             await ws.close(code=1000, message=reason.encode()[:120])
 
-        self.host.register(session, close)
+        self.ws_host.register(session, close)
         session.emit({"type": "ready", "sessionId": sid, "transport": "ws", "traceId": trace_id})
         writer = asyncio.create_task(self.ws_writer(ws, session, outbox))
         try:
@@ -295,7 +316,7 @@ class Edge:
         finally:
             writer.cancel()
             session.tel("edge.ws.close", code=ws.close_code)
-            await self.host.end(sid, "ws_closed")
+            await self.ws_host.end(sid, "ws_closed")
         return ws
 
     async def ws_writer(self, ws: web.WebSocketResponse, session: Session, outbox: asyncio.Queue) -> None:
@@ -344,6 +365,7 @@ class Edge:
                     _, body = await self.worker_call(index, "GET", "/__edge/sessions")
                 except Exception:  # noqa: BLE001 — starting up
                     continue
+                self.worker_first_audio[index] = body.get("firstAudioMaxMs")
                 live = set(body.get("sids", []))
                 for sid, route in list(self.routes.items()):
                     if route["worker"] == index and sid not in live and time.monotonic() - route["at"] > 5:
@@ -363,6 +385,7 @@ class Edge:
             self.host.spawn(self.watch_workers())
 
     async def on_cleanup(self, _app) -> None:
+        await self.ws_host.close_all()
         await self.host.close_all()
         for proc in self.workers:
             if proc is not None:

@@ -1,0 +1,88 @@
+name: speech-stack image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag (default UTC date-time)
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - 'docker/speech-stack/**'
+      - '!docker/speech-stack/README.md'
+      - '!docker/speech-stack/bench.py'
+      - '!docker/speech-stack/test_*.py'
+      - '.github/workflows/speech-stack.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/speech-stack/**'
+      - '!docker/speech-stack/README.md'
+      - '!docker/speech-stack/bench.py'
+      - '!docker/speech-stack/test_*.py'
+      - '.github/workflows/speech-stack.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: speech-stack-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Resolve tag
+        id: meta
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          echo "tag=${TAG:-$(date -u +%Y%m%d-%H%M)}" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD
+          sha256sum docker/speech-stack/*
+
+      - name: One volume from the free space of both disks
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/share/swift /usr/local/.ghcup
+          sudo systemctl stop docker docker.socket
+          devices=""
+          for dir in / /mnt; do
+            free=$(( $(df --output=avail -BG "$dir" | tail -1 | tr -dc 0-9) - 6 ))
+            [ "$free" -gt 5 ] || continue
+            sudo fallocate -l "${free}G" "$dir/docker.img"
+            devices="$devices $(sudo losetup --find --show "$dir/docker.img")"
+          done
+          sudo vgcreate docker $devices
+          sudo lvcreate -l 100%FREE -n data docker
+          sudo mkfs.ext4 -q -m 0 /dev/docker/data
+          sudo mount /dev/docker/data /var/lib/docker
+          sudo systemctl start docker
+          df -h / /mnt /var/lib/docker
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: docker/speech-stack
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ghcr.io/${{ github.repository_owner }}/speech-stack:${{ steps.meta.outputs.tag }}
+
+      - run: df -h /var/lib/docker
+        if: always()

@@ -4,9 +4,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  decodeSessionConfig, deriveRealtimeKey, externalLoadOf, orderTransports, pickReplica, sessionCharge, verifySessionToken,
+  decodeSessionConfig, deriveRealtimeKey, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
 } from '../../../src/realtime';
 import { _resetExternalLoad } from '../../../src/realtime/external-load';
+import { parseEdgeStatus } from '../../../src/realtime/edge-status';
 import { fakeController, REPLICA_TOKEN, startFakeEdge, type FakeEdge } from './_fakes';
 import { startGateway, type TestGateway } from './_gateway';
 
@@ -33,6 +34,32 @@ describe('orderTransports / pickReplica / sessionCharge', () => {
     expect(pickReplica([{ ...a, pending: 6 }], ['webrtc'])).toBeNull();
     expect(sessionCharge(600)).toBe(40);
     expect(sessionCharge(61, 2)).toBe(4);
+  });
+
+  it('a replica shedding load (first audio over the deadline) reports no free slot under its cap: sessions go elsewhere', () => {
+    const shedding = parseEdgeStatus({ active: 2, max: 4, available: 0, transports: ['webrtc', 'ws'], firstAudioMaxMs: 2300, shedding: true })!;
+    const healthy = parseEdgeStatus({ active: 3, max: 4, available: 1, transports: ['webrtc', 'ws'], firstAudioMaxMs: 1400 })!;
+    expect([shedding.available, shedding.firstAudioMaxMs, healthy.firstAudioMaxMs]).toEqual([0, 2300, 1400]);
+    expect(parseEdgeStatus({ active: 1, max: 4 })!.firstAudioMaxMs).toBeNull();
+    const at = (id: string, status: typeof shedding) => ({ id, base: `http://${id}`, status, pending: 0 });
+    expect(pickReplica([at('shedding', shedding), at('healthy', healthy)], ['ws'])!.id).toBe('healthy');
+    expect(pickReplica([at('shedding', shedding)], ['ws'])).toBeNull();
+  });
+
+  it('prefers the better media path among replicas with a free slot: direct, unprobed, relay, ws; then free slots', () => {
+    const on = (id: string, path: 'direct' | 'relay' | 'ws' | 'unknown' | null, active: number, pending = 0) => ({
+      id, base: `http://${id}`, pending,
+      status: {
+        active, max: 8, available: 8 - active, transports: (path === 'ws' ? ['ws'] : ['webrtc', 'ws']) as Array<'webrtc' | 'ws'>, udpPorts: null, probePort: 50100,
+        net: path ? { path, udpInbound: 'unknown' as const, publicIp: null, checkedAt: null } : null,
+      },
+    });
+    const ladder = ['webrtc', 'ws'] as const;
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 0), on('direct', 'direct', 7)], [...ladder])!.id).toBe('direct');
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 6), on('direct', 'direct', 7, 1)], [...ladder])!.id).toBe('relay');
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 8), on('direct', 'direct', 8)], [...ladder])!.id).toBe('ws');
+    expect(pickReplica([on('relay', 'relay', 0), on('old-edge', null, 5), on('unprobed', 'unknown', 6)], [...ladder])!.id).toBe('old-edge');
+    expect(pickReplica([on('d1', 'direct', 5), on('d2', 'direct', 2)], [...ladder])!.id).toBe('d2');
   });
 });
 
@@ -88,6 +115,19 @@ describe('POST /v1/realtime/sessions', () => {
     expect(gw.charged).toHaveLength(2);
   });
 
+  it('counts students, not requests: one session retrying a full replica is one refused session, two are two', async () => {
+    edge.status = { active: 8, max: 8, transports: ['webrtc', 'ws'] };
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const ana = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+    const rui = '00-1bf7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+    for (let i = 0; i < 3; i++) expect((await gw.create({ config: CONFIG }, { traceparent: ana })).status).toBe(503);
+    expect((await gw.create({ config: CONFIG }, { traceparent: rui })).status).toBe(503);
+    expect(refusedSessions('speech', 60_000)).toBe(2);
+    expect(distinctSessions('speech', 60_000)).toBe(2);
+    expect(externalLoadOf('speech')).toMatchObject({ active: 8, max: 8 });
+  });
+
   it('cold deployment: wakes it and answers 503 + Retry-After + fallback at once', async () => {
     const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host, phase: 'booting' }] });
     gw = await startGateway(controller);
@@ -97,6 +137,44 @@ describe('POST /v1/realtime/sessions', () => {
     expect(await res.json()).toMatchObject({ error: { code: 'cold' }, fallback: { transport: 's2s-stream' } });
     expect(state.woken).toBe(1);
     expect(gw.charged).toEqual([]);
+  });
+
+  it('a draining replica keeps reporting its seated sessions (a stale report reads as empty and the drain releases it)', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host, draining: true }] });
+    const listed = { ...controller, list: () => [{ name: 'speech' }] as never, specOf: () => ({ realtime: {} }) as never };
+    gw = await startGateway(listed, { netProbeMs: 0 });
+    edge.status = { ...edge.status!, active: 2 };
+    await gw.realtime.service.probeAll();
+    expect(externalLoadOf('speech').active).toBe(2);
+  });
+
+  it('sessions admitted by a previous gateway process keep the deployment awake (the session table died with it)', async () => {
+    const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    const listed = { ...controller, list: () => [{ name: 'speech' }] as never, specOf: () => ({ realtime: {} }) as never };
+    gw = await startGateway(listed, { netProbeMs: 0 });
+    await gw.realtime.service.probeAll();
+    expect(state.woken).toBe(0);
+    edge.status = { ...edge.status!, active: 2 };
+    gw.realtime.service.status.invalidate('r1');
+    await gw.realtime.service.probeAll();
+    expect(state.woken).toBe(1);
+  });
+
+  it('a replica with a stage out of rotation takes no new session: the healthy one does, else 503 degraded + fallback', async () => {
+    const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host, stagesOut: ['tts'] }, { id: 'r2', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const admitted = await gw.create({ config: CONFIG });
+    expect(admitted.status).toBe(200);
+    expect((await admitted.json() as { limits: { replica: { pending: number } } }).limits.replica.pending).toBe(1);
+    expect(gw.events.find(e => e.event === 'rt.session.admitted')!.attrs).toMatchObject({ replica: 'r2' });
+
+    state.replicas = [{ id: 'r1', ip: edge.host, stagesOut: ['tts'] }];
+    const refused = await gw.create({ config: CONFIG });
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get('retry-after')).toBe('30');
+    expect(await refused.json()).toMatchObject({ error: { code: 'degraded', message: expect.stringContaining('tts') }, fallback: { transport: 's2s-stream', url: '/v1/s2s' } });
+    expect(state.woken).toBe(0);
+    expect(gw.charged).toHaveLength(1);
   });
 
   it('no-wake: a cold deployment is not woken', async () => {
@@ -131,10 +209,15 @@ describe('POST /v1/realtime/sessions', () => {
 
   it('budget denial, oversize config and bad bodies', async () => {
     const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
-    gw = await startGateway(controller, { deny: { status: 429, type: 'budget_exceeded', message: 'over', retryAfterSeconds: 99 } });
+    gw = await startGateway(controller, {
+      deny: { status: 429, type: 'budget_exceeded', message: 'over', retryAfterSeconds: 99, code: 'daily_budget_exhausted', budget: 'requests', resetAt: '2026-10-08T00:00:00.000Z' },
+    });
     const denied = await gw.create({ config: CONFIG });
     expect(denied.status).toBe(429);
     expect(denied.headers.get('retry-after')).toBe('99');
+    expect(await denied.json()).toMatchObject({
+      error: { code: 'budget_exceeded' }, reason: 'daily_budget_exhausted', budget: 'requests', reset_at: '2026-10-08T00:00:00.000Z',
+    });
     const big = await gw.create({ config: { ...CONFIG, system: 'x'.repeat(7000) } });
     expect(big.status).toBe(413);
     expect((await gw.create({ transports: ['webrtc'] })).status).toBe(400);

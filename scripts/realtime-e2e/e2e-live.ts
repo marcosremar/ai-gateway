@@ -5,16 +5,14 @@
  *   GW=http://localhost:4100 KEY=$SANDBOX_TOKEN MIC=/tmp/aigw-rt-e2e/mic.wav bun scripts/realtime-e2e/e2e-live.ts <cmd>
  *
  *   admit                     POST /v1/realtime/sessions → status + descriptor summary
- *   turn [transport]          one spoken turn in Chrome (default ladder; 'ws' forces the ws rung)
+ *   turn [transport]          one spoken turn in Chrome (default ladder; webrtc | ws | s2s-stream forces that rung)
  *   barge                     connect, wait for NPC audio_start, interrupt(), measure 'interrupted' latency
  *   hold N [extra]            N admitted sessions held on ws; then one more admit ('extra' any value → also admit one)
  */
-import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import { join, resolve } from 'path';
-import { chromium, type Browser } from 'playwright';
-import { freePort } from './local-cloud';
+import type { Browser } from 'playwright';
+import { openMicPage, startAppBackend } from './app-page';
+import { clip16k, wav } from './clip';
 
-const ROOT = resolve(import.meta.dir, '../..');
 const GW = process.env.GW ?? 'http://localhost:4100';
 const KEY = process.env.KEY ?? process.env.SANDBOX_TOKEN ?? '';
 const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -25,37 +23,13 @@ const CONFIG = JSON.parse(process.env.RT_CONFIG ?? '{"system":"Você é a padeir
 const results: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-const sdkBuild = await Bun.build({ entrypoints: [join(ROOT, 'sdk/browser/realtime/index.ts')], target: 'browser', format: 'esm' });
-if (!sdkBuild.success) throw new Error(`SDK build failed: ${sdkBuild.logs.join('\n')}`);
-const SDK_JS = await sdkBuild.outputs[0].text();
-const PAGE = `<!doctype html><meta charset="utf-8"><title>rt live</title><body><script type="module" src="/page.js"></script>`;
-const PAGE_JS = await Bun.file(join(import.meta.dir, 'page-live.js')).text();
-
-async function readAll(req: IncomingMessage): Promise<Buffer> { const c: Buffer[] = []; for await (const x of req) c.push(x as Buffer); return Buffer.concat(c); }
-async function relay(req: IncomingMessage, res: ServerResponse, path: string, withConfig = false): Promise<void> {
-  let body = await readAll(req);
-  if (withConfig) body = Buffer.from(JSON.stringify({ ...JSON.parse(body.toString() || '{}'), config: { ...CONFIG, deployment: DEP } }));
-  const headers: Record<string, string> = { Authorization: `Bearer ${KEY}`, 'Content-Type': String(req.headers['content-type'] ?? 'application/json') };
-  if (req.headers.traceparent) headers.traceparent = String(req.headers.traceparent);
-  const up = await fetch(`${GW}${path}`, { method: 'POST', headers, body });
-  const out: Record<string, string> = {};
-  up.headers.forEach((v, k) => { if (!['content-length', 'transfer-encoding', 'connection'].includes(k)) out[k] = v; });
-  res.writeHead(up.status, out);
-  if (up.body) for await (const chunk of up.body) res.write(chunk);
-  res.end();
-}
-const appPort = await freePort();
-const APP = `http://127.0.0.1:${appPort}`;
-const app = createServer((req, res) => {
-  const path = (req.url ?? '/').split('?')[0];
-  if (req.method === 'GET' && path === '/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(PAGE); return; }
-  if (req.method === 'GET' && path === '/sdk.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(SDK_JS); return; }
-  if (req.method === 'GET' && path === '/page.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(PAGE_JS); return; }
-  if (req.method === 'POST' && path === '/api/rt-session') { void relay(req, res, '/v1/realtime/sessions', true); return; }
-  if (req.method === 'POST' && path === '/api/s2s') { void relay(req, res, '/v1/s2s'); return; }
-  res.writeHead(404); res.end();
+const app = await startAppBackend({
+  gw: GW, key: KEY, pageFile: 'page-live.js', config: () => ({ ...CONFIG, deployment: DEP }),
+  files: {
+    '/config.json': { type: 'application/json', body: JSON.stringify({ ...CONFIG, deployment: DEP }) },
+    '/clip.wav': { type: 'audio/wav', body: wav(clip16k(MIC), 16000) },
+  },
 });
-await new Promise<void>(r => app.listen(appPort, '127.0.0.1', r));
 
 async function admit(opts: { config?: unknown; transports?: string[] } = {}) {
   const r = await fetch(`${GW}/v1/realtime/sessions`, {
@@ -67,23 +41,9 @@ async function admit(opts: { config?: unknown; transports?: string[] } = {}) {
 }
 
 const browsers: Browser[] = [];
-async function openPage() {
-  const browser = await chromium.launch({
-    executablePath: CHROME,
-    args: [
-      '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${MIC}`,
-      '--autoplay-policy=no-user-gesture-required', '--disable-features=WebRtcHideLocalIpsWithMdns',
-    ],
-  });
-  browsers.push(browser);
-  const ctx = await browser.newContext({ permissions: ['microphone'] });
-  const page = await ctx.newPage();
-  page.on('console', (m) => console.log(`[page ${m.type()}] ${m.text().slice(0, 200)}`));
-  page.on('pageerror', (e) => console.log(`[page error] ${e.message}`));
-  await page.goto(APP);
-  await page.waitForFunction(() => (window as unknown as { liveReady?: boolean }).liveReady === true);
-  return { browser, page };
-}
+const openPage = () => openMicPage({
+  chrome: CHROME, mic: MIC, url: app.url, readyFlag: 'liveReady', log: (line) => console.log(line.slice(0, 220)), browsers,
+});
 
 const cmd = process.argv[2] ?? 'turn';
 const arg = process.argv[3];

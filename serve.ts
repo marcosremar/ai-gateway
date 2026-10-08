@@ -19,13 +19,14 @@ import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } f
 import {
   buildServeProviders, checkOpenRouterKey, deepHealthReport, parseModelRoutes, providersOfKeys, replaceProviderMapping,
 } from './src/config/serve-providers';
-import { stageChainsReport, type ChainLinkSpec } from './src/config/stage-chains';
+import { createFallbackWatch, stageChainsReport, type ChainLinkSpec } from './src/config/stage-chains';
 import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
 import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
 import { createS2SRoute } from './src/s2s/route';
+import { streamCuts } from './src/telemetry/stream-cuts';
 import { createS2SAccess } from './src/s2s/access';
-import { appStagesView } from './src/gateway/proxy/health-view';
+import { appStagesView, realtimeHealth } from './src/gateway/proxy/health-view';
 import { loopbackStages } from './src/s2s/loopback-stages';
 import { appForCall, appStageModels } from './src/s2s/app-stage-models';
 import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
@@ -37,7 +38,8 @@ import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
 import {
-  deploymentLogToTelemetry, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
 
@@ -159,15 +161,31 @@ function mountProviders() {
 const providers = mountProviders();
 remount = () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>);
 
-/** Effective chain of every parle stage and the state of each link (shown by /health — nothing silent). */
-const chainHealth = () => stageChainsReport(chains, {
-  ...(controller ? { deploymentStatus: (name: string) => controller.get(name)?.status ?? null } : {}),
+const chainsNow = () => stageChainsReport(chains, {
+  ...(controller ? {
+    deploymentStatus: (name: string) => controller.get(name)?.status ?? null,
+    stageOut: (name: string, stage: string) => {
+      const ready = controller.get(name)?.replicas.filter(r => r.phase === 'ready') ?? [];
+      return { ready: ready.length, out: ready.filter(r => r.stagesOut.includes(stage)).length };
+    },
+  } : {}),
   declaredPending: (name) => {
     const s = declared?.statusOf(name);
     return s && (s.state === 'pending' || s.state === 'error') ? s.reason : null;
   },
   breakers: proxyCircuitBreakers,
 });
+const fallbackWatch = createFallbackWatch((msg, data) => (msg.endsWith('on fallback') ? log.warn(data, msg) : log.log(data, msg)));
+let latency: (() => LatencyReport) | null = null;
+/**
+ * Effective chain of every parle stage and the state of each link (shown by /health — nothing silent), whether any
+ * chain is served by its fallback and since when, and the stage latencies of the last minutes.
+ */
+const chainHealth = () => {
+  const report = chainsNow();
+  return { ...report, fallback: fallbackWatch(report.stages), latency: latency?.() ?? null };
+};
+setInterval(() => fallbackWatch(chainsNow().stages), 15_000).unref();
 
 // Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys
 // writes them to the palco. A key that appears or disappears re-mounts the providers in place.
@@ -206,6 +224,10 @@ const appLimits = API_KEYS.length ? new AppLimits({
   env: process.env,
   isAdmin: (userId) => adminUsers.has(userId),
   aliasesOf: appAliasesOf,
+  onBudgetEvent: ({ event, ...attrs }) => {
+    log.warn(attrs, `app limits: daily budget ${event === 'app.budget_exhausted' ? 'exhausted' : 'at 80 %'}`);
+    emitGatewayEvent(event, { level: event === 'app.budget_exhausted' ? 'error' : 'warn', attrs });
+  },
 }) : undefined;
 // POST /v1/s2s: a non-admin key uses only its own app's deployments, under its app limits (src/s2s/access.ts).
 const s2sAdmit = createS2SAccess({
@@ -238,6 +260,7 @@ const telemetry = telemetryFromEnv(process.env, {
 if (telemetry) {
   await telemetry.start();
   setGatewayTelemetrySink((event) => telemetry.ingest.ingestOwn(event));
+  latency = () => latencyReport(telemetry.store.rows(), Date.now());
   log.log({ rows: telemetry.store.size }, 'Telemetry enabled');
 }
 
@@ -270,6 +293,7 @@ const s2sRoute = createS2SRoute({
   admit: s2sAdmit,
   hedgeMs: optionalMs(process.env.S2S_HEDGE_MS),
   budgetMs: optionalMs(process.env.S2S_BUDGET_MS),
+  maxGapMs: optionalMs(process.env.S2S_MAX_GAP_MS),
   primarySpeaksJson: process.env.S2S_PRIMARY_SPEAK_FIELD === '1',
   stagesFor: (req, config) => loopbackStages({
     baseUrl: `http://127.0.0.1:${PORT}`,
@@ -286,6 +310,7 @@ const realtime = createRealtime({
   // Test/e2e knobs: a shorter media-path recheck (default 30 min) and a fake "firewall dropped our UDP probe" for
   // boxes where neither the security group nor iptables can be touched (REALTIME_PROBE_UDP=blocked).
   netRecheckMs: optionalMs(process.env.REALTIME_NET_RECHECK_MS),
+  turnCheckMs: optionalMs(process.env.REALTIME_TURN_CHECK_MS),
   ...(process.env.REALTIME_PROBE_UDP === 'blocked'
     ? { probeUdpImpl: async () => ({ result: 'blocked' as const, rttMs: null, tries: 0 }) }
     : {}),
@@ -306,7 +331,9 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
-  healthDetails: (viewer) => (viewer.admin ? chainHealth() : appStagesView(chainHealth(), (stage) => appAliasesOf(viewer.userId, stage))),
+  healthDetails: (viewer) => (viewer.admin
+    ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
+    : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
     ...(telemetry?.adminRoutes ?? []),

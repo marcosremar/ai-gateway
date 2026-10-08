@@ -34,6 +34,7 @@ export async function startGateway(
     isAdmin: (u) => u === 'admin',
     charge: (u, n) => { charged.push([u, n]); return extra.deny ?? null; },
     pollMs: 0,
+    turnCheckMs: 0,
     telemetry: (e) => events.push(e),
     ...extra,
   });

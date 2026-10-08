@@ -86,7 +86,7 @@ describe('s2s-stream rung', () => {
 
   it('posts the clip with config and traceparent, reads binary frames as they stream, plays PCM, maps events', async () => {
     const chunks = [
-      encodeEvent({ type: 'route', provider: 'deployment:speech' }, 'binary'),
+      encodeEvent({ type: 'route', provider: 'composite', fallback: 'saturated', from: 'deployment:speech' }, 'binary'),
       encodeEvent({ type: 'transcript', text: 'um pão' }, 'binary'),
       encodeEvent({ type: 'sentence', text: 'Claro.' }, 'binary'),
       encodeEvent({ type: 'audio_format', encoding: 'pcm_s16le', sample_rate: 24_000 }, 'binary'),
@@ -113,13 +113,145 @@ describe('s2s-stream rung', () => {
     expect(seen!.headers.get('traceparent')).toBe(c.traceparent);
     expect(JSON.parse(String(seen!.form.get('config')))).toEqual({ system: 'S', messages: [] });
     expect(p.pushed).toEqual([{ samples: 480, rate: 24_000 }, { samples: 240, rate: 24_000 }]);
-    expect(events.map(e => e.type)).toEqual(['transcript', 'reply_delta', 'audio_start', 'reply', 'metrics', 'done', 'audio_end']);
-    expect(events[0]).toEqual({ type: 'transcript', text: 'um pão', final: true });
+    expect(events.map(e => e.type)).toEqual(['route', 'transcript', 'reply_delta', 'audio_start', 'reply', 'metrics', 'done', 'audio_end']);
+    expect(events[0]).toEqual({ type: 'route', provider: 'composite', fallback: 'saturated' });
+    expect(events[1]).toEqual({ type: 'transcript', text: 'um pão', final: true });
+  });
+
+  function streamOf(chunks: Uint8Array[], hold?: Promise<void>): typeof fetch {
+    return (async () => new Response(new ReadableStream({
+      async start(c) {
+        for (const chunk of chunks) c.enqueue(chunk);
+        await hold;
+        c.close();
+      },
+    }), { status: 200 })) as unknown as typeof fetch;
+  }
+
+  it('an opener plays ahead of the reply: its audio first, audio_start only at the reply, one audio_end, the line reported', async () => {
+    const events: RealtimeEvent[] = [];
+    const p = fakePlayer();
+    const t = createS2SStreamTransport(ctx(streamOf([
+      encodeEvent({ type: 'audio_format', encoding: 'pcm_s16le', sample_rate: 24_000 }, 'binary'),
+      encodeEvent({ type: 'opener', state: 'start', text: 'Hum.', index: 0, audio_ms: 20, at_ms: 1000 }, 'binary'),
+      encodeAudio(new Uint8Array(960), 'binary'),
+      encodeEvent({ type: 'opener', state: 'end', index: 0 }, 'binary'),
+      encodeEvent({ type: 'transcript', text: 'um pão' }, 'binary'),
+      encodeEvent({ type: 'audio_format', encoding: 'pcm_s16le', sample_rate: 24_000 }, 'binary'),
+      encodeEvent({ type: 'first_audio', at_ms: 2400 }, 'binary'),
+      encodeAudio(new Uint8Array(480), 'binary'),
+      encodeEvent({ type: 'done', reply: 'Claro.', first_audio_ms: 2400, first_sound_ms: 1000, opener: 'Hum.', deadline_missed: false }, 'binary'),
+    ]), events), { url: '/s' }, p.factory);
+    await t.sendTurn!(new Blob(['x']));
+    expect(p.pushed).toEqual([{ samples: 480, rate: 24_000 }, { samples: 240, rate: 24_000 }]);
+    expect(events.map(e => e.type)).toEqual(['opener', 'opener', 'transcript', 'audio_start', 'reply', 'metrics', 'done', 'audio_end']);
+    expect(events[0]).toEqual({ type: 'opener', state: 'start', text: 'Hum.', index: 0, audio_ms: 20 });
+    expect(events.find(e => e.type === 'metrics')).toEqual({ type: 'metrics', ttfa_ms: 2400, first_sound_ms: 1000, opener: 'Hum.', deadline_missed: false });
+  });
+
+  it('an MP3 opener is decoded and queued when it ends, before the PCM reply; an opener with no reply still ends the audio', async () => {
+    const order: string[] = [];
+    const player: PcmPlayer = {
+      pushPcm16: () => { order.push('pcm'); }, pushFloat: () => {}, flush: () => {}, playing: false, idle: async () => {},
+      pushEncoded: async (data) => { order.push(`mp3:${new TextDecoder().decode(data)}`); }, close: () => {},
+    };
+    const opener = [
+      encodeEvent({ type: 'audio_format', encoding: 'audio/mpeg' }, 'binary'), encodeEvent({ type: 'opener', state: 'start', text: 'Hum.', index: 0 }, 'binary'),
+      encodeAudio(new TextEncoder().encode('ID3hum'), 'binary'), encodeEvent({ type: 'opener', state: 'end', index: 0 }, 'binary'),
+    ];
+    const events: RealtimeEvent[] = [];
+    await createS2SStreamTransport(ctx(streamOf([
+      ...opener, encodeEvent({ type: 'audio_format', encoding: 'pcm_s16le', sample_rate: 24_000 }, 'binary'), encodeAudio(new Uint8Array(480), 'binary'),
+      encodeEvent({ type: 'done', reply: 'Claro.' }, 'binary'),
+    ]), events), { url: '/s' }, async () => player).sendTurn!(new Blob(['x']));
+    expect(order).toEqual(['mp3:ID3hum', 'pcm']);
+
+    const alone: RealtimeEvent[] = [];
+    await createS2SStreamTransport(ctx(streamOf([...opener, encodeEvent({ type: 'done', empty: true }, 'binary')]), alone), { url: '/s' }, async () => player).sendTurn!(new Blob(['x']));
+    expect(alone.map(e => e.type)).toEqual(['opener', 'opener', 'metrics', 'done', 'audio_end']);
+  });
+
+  it('an MP3 sentence is played when its audio ends, not at the end of the turn', async () => {
+    const order: string[] = [];
+    const player: PcmPlayer = {
+      pushPcm16: () => {}, pushFloat: () => {}, flush: () => {}, playing: false, idle: async () => {},
+      pushEncoded: async (data) => { order.push(`mp3:${new TextDecoder().decode(data)}`); }, close: () => {},
+    };
+    const events: RealtimeEvent[] = [];
+    const seen = ctx(streamOf([
+      encodeEvent({ type: 'sentence', text: 'Um.' }, 'binary'), encodeEvent({ type: 'audio_format', encoding: 'audio/mpeg' }, 'binary'),
+      encodeAudio(new TextEncoder().encode('ID3um'), 'binary'), encodeEvent({ type: 'sentence_end' }, 'binary'),
+      encodeEvent({ type: 'sentence', text: 'Dois.' }, 'binary'), encodeAudio(new TextEncoder().encode('ID3dois'), 'binary'),
+      encodeEvent({ type: 'sentence_end' }, 'binary'), encodeEvent({ type: 'done', reply: 'Um. Dois.' }, 'binary'),
+    ]), events);
+    const emit = seen.emit;
+    seen.emit = (e: RealtimeEvent) => { if (e.type === 'reply_delta') order.push(`text:${e.text}`); emit(e); };
+    await createS2SStreamTransport(seen, { url: '/s' }, async () => player).sendTurn!(new Blob(['x']));
+    expect(order).toEqual(['text:Um.', 'mp3:ID3um', 'text:Dois.', 'mp3:ID3dois']);
+  });
+
+  it('interrupt during an opener: the player is flushed and the turn is cut like any audio', async () => {
+    let flushed = 0;
+    let release = () => {};
+    const hold = new Promise<void>((r) => { release = r; });
+    const player: PcmPlayer = {
+      pushPcm16: () => {}, pushFloat: () => {}, flush: () => { flushed++; }, playing: true, idle: async () => {}, pushEncoded: async () => {}, close: () => {},
+    };
+    const events: RealtimeEvent[] = [];
+    const t = createS2SStreamTransport(ctx(streamOf([
+      encodeEvent({ type: 'opener', state: 'start', text: 'Hum.', index: 0 }, 'binary'), encodeAudio(new Uint8Array(960), 'binary'),
+      encodeEvent({ type: 'opener', state: 'end', index: 0 }, 'binary'),
+    ], hold), events), { url: '/s' }, async () => player);
+    const turn = t.sendTurn!(new Blob(['x'])).catch(() => {});
+    await new Promise(r => setTimeout(r, 20));
+    t.send({ type: 'interrupt' });
+    release();
+    await turn;
+    expect(flushed).toBe(1);
+    expect(events.map(e => e.type)).toEqual(['opener', 'opener', 'interrupted', 'audio_end']);
   });
 
   it('a non-2xx answer rejects (the session fails over and re-sends the clip)', async () => {
     const t = createS2SStreamTransport(ctx((async () => new Response('{}', { status: 503 })) as unknown as typeof fetch, []), { url: '/s' }, fakePlayer().factory);
     await expect(t.sendTurn!(new Blob(['x']))).rejects.toThrow(/HTTP 503/);
+  });
+
+  const streamed = async (frames: Uint8Array[]) => {
+    const fetchImpl = (async () => new Response(new ReadableStream({ start(c) { for (const f of frames) c.enqueue(f); c.close(); } }), { status: 200 })) as unknown as typeof fetch;
+    const events: RealtimeEvent[] = [];
+    await createS2SStreamTransport(ctx(fetchImpl, events), { url: '/s' }, fakePlayer().factory).sendTurn!(new Blob(['x']));
+    return events;
+  };
+  const E = (e: Record<string, unknown> & { type: string }) => encodeEvent(e, 'binary');
+  const A = encodeAudio(new Uint8Array(960), 'binary');
+
+  it('regression: a stream that ends without done is a failed turn naming the sentence not voiced, never a silent end', async () => {
+    const events = await streamed([E({ type: 'sentence', text: 'Bom dia!' }), A, E({ type: 'sentence', text: 'São dois reais.' })]);
+    expect(events.slice(-3)).toEqual([
+      { type: 'error', code: 'truncated', message: 's2s stream ended without done', unspoken: 'São dois reais.' }, { type: 'done', error: true }, { type: 'audio_end' },
+    ]); // before: reply_delta, audio_end — no done, no error
+    const heard = await streamed([E({ type: 'sentence', text: 'Bom dia!' }), A]);
+    expect(heard.slice(-3, -1)).toEqual([{ type: 'error', code: 'truncated', message: 's2s stream ended without done' }, { type: 'done', error: true }]);
+  });
+
+  it('an in-band error ends the turn as failed, with or without a done after it, and carries the unspoken text', async () => {
+    const error = E({ type: 'error', stage: 'tts', code: 'stage_failed', message: 'cut', unspoken: 'São dois reais.' });
+    for (const tail of [[], [E({ type: 'done', partial: true, total_ms: 9 })]]) {
+      const events = await streamed([E({ type: 'sentence', text: 'Bom dia!' }), A, error, ...tail]);
+      expect(events.filter(e => e.type === 'error')).toEqual([{ type: 'error', code: 'tts', message: 'cut', unspoken: 'São dois reais.' }]);
+      expect(events.filter(e => e.type === 'done')).toEqual([{ type: 'done', error: true }]);
+    }
+  });
+
+  it('a done that reports sentences not voiced is a failed turn with those sentences to recover; a complete one is not', async () => {
+    const events = await streamed([
+      E({ type: 'sentence', text: 'Bom dia!' }), A, E({ type: 'sentence_failed', text: 'São dois reais.' }),
+      E({ type: 'done', reply: 'Bom dia! São dois reais.', sentences: 2, spoken: 1, skipped: 1 }),
+    ]);
+    expect(events.filter(e => e.type === 'error')).toEqual([{ type: 'error', code: 'truncated', message: 'the reply ended with sentences not voiced', unspoken: 'São dois reais.' }]);
+    expect(events.filter(e => e.type === 'done')).toEqual([{ type: 'done', error: true }]);
+    const whole = await streamed([E({ type: 'sentence', text: 'Bom dia!' }), A, E({ type: 'done', reply: 'Bom dia!', sentences: 1, spoken: 1, skipped: 0 })]);
+    expect(whole.filter(e => e.type === 'error' || e.type === 'done')).toEqual([{ type: 'done' }]);
   });
 
   it('maps filtered, error and empty done', () => {

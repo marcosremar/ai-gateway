@@ -68,11 +68,14 @@ class TokenVerifier:
             raise ValueError("edge key missing (AIGW_REPLICA_TOKEN or AIGW_RT_KEY)")
         self.key, self.replica_id, self.deployment, self.now = key, replica_id, deployment, now
         self._used: dict[str, float] = {}
+        self._tokens: dict[str, str] = {}
 
-    def verify(self, token: str, consume: bool = True, transport: str = "") -> dict:
+    def verify(self, token: str, consume: bool = True, transport: str = "", live=None) -> dict:
         """Single use per transport: the SDK's ladder tries WebRTC then WS with the one token of its admission (a second
         admission would charge the app's budget again and hold a second slot), so `sid` may open one session of each
-        transport; the edge keeps one live session per sid (Server.supersede). Without `transport`, the sid is the key."""
+        transport, and the two may run side by side until the SDK closes one. Without `transport`, the sid is the key.
+        `live(sid)` says the sid's session of this transport still runs here: the very token that opened it may then
+        be presented again (a WebRTC re-offer after a network change). Anything else used twice is `replayed`."""
         try:
             head_b, body_b, sig_b = token.split(".")
             head = json.loads(b64url_decode(head_b))
@@ -114,9 +117,13 @@ class TokenVerifier:
         for old, until in list(self._used.items()):
             if until < now:
                 del self._used[old]
+                self._tokens.pop(old, None)
         use = f"{sid}/{transport}" if transport else sid
-        if use in self._used or sid in self._used:
+        opened_by = self._tokens.get(use)
+        resumes = opened_by is not None and live is not None and hmac.compare_digest(opened_by, token) and live(sid)
+        if (use in self._used and not resumes) or sid in self._used:
             raise TokenError("replayed")
         if consume:
             self._used[use] = float(exp)
+            self._tokens[use] = token
         return {**claims, "cfg": cfg}

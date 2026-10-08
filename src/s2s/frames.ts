@@ -6,7 +6,7 @@
  *       kind E = one JSON event · kind A = raw PCM s16le mono (sample rate in the `audio_format` event, 24 kHz default)
  *   `?format=ndjson` (`application/x-ndjson`): one JSON object per line; audio as {"type":"audio","pcm":<base64>}
  *
- * Events: route · transcript · llm_first_token · sentence · audio_format · first_audio · done · error.
+ * Events: route · transcript · llm_first_token · sentence · audio_format · first_audio · opener · deadline_missed · done · error.
  */
 
 export type S2SEvent = { type: string; [key: string]: unknown };

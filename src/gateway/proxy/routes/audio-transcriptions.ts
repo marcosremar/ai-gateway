@@ -15,6 +15,7 @@
  */
 
 
+import { budgetCapOf, hedgeCapOf } from '../internal-subrequest';
 import { createHash } from 'crypto';
 import { createLogger } from '../../../logger';
 
@@ -25,7 +26,7 @@ import { CooldownTracker } from '../../providers/cloud/fallback';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
 import { applySttFilter, filterEnabled, requestOptsOut } from './stt-filter';
 import {
-  errorResponse, isNeutralFailure, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
+  errorResponse, isNeutralFailure, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, selectTargets, stageBudgetMs,
 } from '../provider-routing';
 
 const sttCooldownTracker = new CooldownTracker();
@@ -141,6 +142,7 @@ export async function handleAudioTranscriptions(
   }
 
 
+  const cloudLinks = selectTargets(targets, 'stt', circuitBreakers).usable.filter(t => !t.providerId.startsWith('deployment:')).length;
   try {
     const { result, headers } = await routeRequest(
       targets,
@@ -153,7 +155,7 @@ export async function handleAudioTranscriptions(
         prompt: body.prompt as string | undefined,
         responseFormat: (body.response_format as string) as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt' | undefined,
       }),
-      { stage: 'stt', signal: req.signal, timeoutMs: 15_000, budgetMs: stageBudgetMs('stt'), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
+      { stage: 'stt', signal: req.signal, timeoutMs: 15_000, budgetMs: Math.min(stageBudgetMs('stt'), (cloudLinks > 1 && budgetCapOf(req.headers)) || Infinity), hedgeCapMs: hedgeCapOf(req.headers), retriesPerProvider: 1, cooldownTracker: sttCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
     const applied = filterOn ? applySttFilter(result, language) : { text: result.text, response: result, filtered: undefined };

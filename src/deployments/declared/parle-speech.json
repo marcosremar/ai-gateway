@@ -1,16 +1,25 @@
 {
   "name": "parle-speech",
-  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS in one container (docker/speech-stack) with the realtime edge, on one Scaleway L40S, an L4 when no L40S is in stock",
+  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS in one container (docker/speech-stack) with the realtime edge, on one Scaleway L40S (fr-par-2, then fr-par-1), then one RTX 5090 on Vast from the public copy of the image; no L4 (its quota belongs to the TTS)",
   "profile": "speech-stack",
   "image": {
     "env": "SPEECH_IMAGE",
     "repository": "rg.fr-par.scw.cloud/aigw/speech-stack",
-    "default": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107"
+    "default": "rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317"
   },
   "spec": {
+    "placements": [
+      { "zone": "fr-par-1" },
+      { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85, "maxReplicas": 1, "image": "ghcr.io/marcosremar/speech-stack:20261008-1317" }
+    ],
+    "scaling": { "mode": "fast" },
     "envByMachineType": {
-      "L4-1-24G": { "RT_MAX_SESSIONS": "8" },
-      "L40S-1-48G": { "RT_MAX_SESSIONS": "16" }
+      "L4-1-24G": { "RT_MAX_SESSIONS": "2" },
+      "L40S-1-48G": { "RT_MAX_SESSIONS": "4" },
+      "RTX 5090": {
+        "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "9600", "RT_MAX_SESSIONS": "4",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      }
     },
     "realtime": {}
   }

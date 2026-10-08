@@ -8,7 +8,12 @@ latencies so the harness can check what the edge adds.
                                     Whisper-shaped metadata (no_speech_prob, avg_logprob, compression_ratio)
     POST /v1/chat/completions       SSE: first token after LLM_TTFT_MS, then one word every LLM_TOKEN_MS
     POST /v1/audio/speech           raw PCM16 24 kHz: first bytes after TTS_TTFB_MS, 0.25 s of tone per word, sent at
-                                    4× real time in 40 ms chunks
+                                    4× real time in 40 ms chunks; the tone's pitch tells the sentences apart
+                                    (120 Hz + 30 Hz per word)
+    POST /__tts_faults              {"<sentence>": ["runaway" | "lead" | "break" | "cut", …]}: one fault per request
+                                    for that sentence, in order — runaway = silence up to max_new_tokens then the
+                                    connection dropped, lead = 0.5 s of silence then the sentence, break = dropped
+                                    before any audio, cut = dropped after the sentence's audio
     WS   /ws/audio-stream           {"text": "parcial <n>"} per second of audio received
     POST /v1/s2s                    the same turn as one framed answer ([kind][u32 len][payload], E=JSON, A=PCM)
 
@@ -27,7 +32,9 @@ from aiohttp import web
 STT_MS, LLM_TTFT_MS, LLM_TOKEN_MS, TTS_TTFB_MS = 80, 60, 15, 50
 REPLY = "Bom dia! Claro, um pão francês sai já. Mais alguma coisa?"
 HEARD = "Bom dia, eu queria um pão francês."
-calls = {"stt": 0, "llm": 0, "tts": 0, "s2s": 0, "partials": 0, "last_llm_messages": None, "last_tts": None, "traces": {}}
+calls = {"stt": 0, "llm": 0, "tts": 0, "s2s": 0, "partials": 0, "last_llm_messages": None, "last_tts": None, "traces": {},
+         "tts_active": 0, "tts_log": []}
+tts_faults: dict[str, list[str]] = {}
 
 
 @web.middleware
@@ -83,15 +90,34 @@ async def speech(request):
     body = await request.json()
     calls["tts"] += 1
     calls["last_tts"] = {k: body.get(k) for k in ("input", "voice", "ref_audio", "ref_text", "task_type", "language")}
-    res = web.StreamResponse(headers={"Content-Type": "audio/pcm"})
-    await res.prepare(request)
-    await asyncio.sleep(TTS_TTFB_MS / 1000)
-    pcm = tone(0.25 * max(1, len(body["input"].split())))
-    step = int(0.04 * 24000) * 2
-    for at in range(0, len(pcm), step):
-        await res.write(pcm[at:at + step])
-        await asyncio.sleep(0.01)
-    return res
+    faults = tts_faults.get(body["input"])
+    mode = faults.pop(0) if faults else "ok"
+    calls["tts_log"].append({"input": body["input"], "mode": mode, "max_new_tokens": body.get("max_new_tokens"),
+                             "request_id": (body.get("extra_params") or {}).get("request_id")})
+    calls["tts_active"] += 1
+    try:
+        res = web.StreamResponse(headers={"Content-Type": "audio/pcm"})
+        await res.prepare(request)
+        await asyncio.sleep(TTS_TTFB_MS / 1000)
+        words = max(1, len(body["input"].split()))
+        pcm = tone(0.25 * words, freq=120.0 + 30 * words)
+        pcm = {"runaway": bytes(int(body.get("max_new_tokens", 192) / 12.5 * 24000) * 2), "lead": bytes(24000) + pcm,
+               "break": b""}.get(mode, pcm)
+        step = int(0.04 * 24000) * 2
+        for at in range(0, len(pcm), step):
+            await res.write(pcm[at:at + step])
+            await asyncio.sleep(0.01)
+        if mode in ("runaway", "break", "cut"):
+            request.transport.close()
+        return res
+    finally:
+        calls["tts_active"] -= 1
+
+
+async def set_tts_faults(request):
+    tts_faults.clear()
+    tts_faults.update(await request.json())
+    return web.json_response({"ok": True})
 
 
 async def audio_stream(request):
@@ -147,6 +173,7 @@ def app() -> web.Application:
     a.router.add_get("/ws/audio-stream", audio_stream)
     a.router.add_post("/v1/s2s", s2s)
     a.router.add_get("/__stats", stats)
+    a.router.add_post("/__tts_faults", set_tts_faults)
     return a
 
 

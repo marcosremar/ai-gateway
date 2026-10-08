@@ -411,10 +411,10 @@ export interface DeepHealthDeps {
   providers: Pick<ProviderMapping, 'chatRoutes' | 'stt' | 'tts' | 'unavailable'>;
   deployments?: {
     health(): { deployments: number; replicas: number; listError: string | null };
-    list(): Array<{ name: string; status: string; replicas: Array<{ phase: string }>; lastError: string | null }>;
+    list(): Array<{ name: string; status: string; replicas: Array<{ phase: string; stagesOut?: string[] }>; lastError: string | null }>;
   } | null;
-  /** Effective chain per stage (`stage-chains.ts`). */
-  chains?: () => { stages: unknown; warnings: string[] };
+  /** Effective chain per stage (`stage-chains.ts`), with whatever else the gateway reports beside it (fallback, latency). */
+  chains?: () => { stages: unknown; warnings: string[] } & Record<string, unknown>;
   /** Declared deployments' status (`deployments/declared.ts`). */
   declared?: () => unknown;
 }
@@ -440,13 +440,14 @@ export async function deepHealthReport(deps: DeepHealthDeps): Promise<{ status: 
     items: deps.deployments.list().map(d => ({
       name: d.name, status: d.status, replicas: d.replicas.length,
       ready: d.replicas.filter(r => r.phase === 'ready').length, lastError: d.lastError,
+      stagesOut: [...new Set(d.replicas.flatMap(r => r.stagesOut ?? []))],
     })),
   } : null;
   return {
     status: 200,
     body: {
       status: failing.length ? 'degraded' : 'ok',
-      ...(chains ? { stages: chains.stages, warnings: chains.warnings } : {}),
+      ...chains,
       ...(deps.declared ? { declared: deps.declared() } : {}),
       providers,
       circuits: deps.breakers.allStats(),

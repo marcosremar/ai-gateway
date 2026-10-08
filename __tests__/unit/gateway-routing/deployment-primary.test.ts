@@ -28,6 +28,26 @@ function fakeController(opts: { cold?: boolean; exists?: boolean } = {}) {
   };
 }
 
+const delta = (content: string) => ({ choices: [{ index: 0, delta: { content }, finish_reason: null }] });
+const STREAM_END = [
+  { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+  { choices: [], usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 } },
+  '[DONE]',
+];
+
+function sseReplica(events: unknown[], gapMs = 0, end: unknown[] | 'cut' = STREAM_END): Response {
+  const enc = new TextEncoder();
+  const queue = [...events, ...(end === 'cut' ? [] : end)];
+  return new Response(new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (queue.length === 0) return end === 'cut' ? controller.error(new TypeError('terminated')) : controller.close();
+      if (gapMs) await new Promise((resolve) => setTimeout(resolve, gapMs));
+      const event = queue.shift();
+      controller.enqueue(enc.encode(`data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`));
+    },
+  }), { headers: { 'Content-Type': 'text/event-stream' } });
+}
+
 function cloudLLM(impl: () => Promise<{ content: string; model: string }>, configured = true): LLMProvider & { chat: ReturnType<typeof vi.fn> } {
   return { providerId: 'openrouter', isConfigured: () => configured, chat: vi.fn(impl) };
 }
@@ -71,7 +91,7 @@ describe('chat: deployment primary, OpenRouter fallback', () => {
     const res = await chat(new DeploymentLLMProvider(ctl, 'parle-speech'), or);
     expect(res.status).toBe(200);
     expect(ctl.acquire).toHaveBeenCalledTimes(1);
-    expect(ctl.acquire.mock.calls[0][1]).toEqual({ waitMs: 0 });
+    expect(ctl.acquire.mock.calls[0][1]).toEqual({ waitMs: 0, stage: 'chat' });
     expect(ctl.wake).toHaveBeenCalledWith('parle-speech');
     expect(or.chat).toHaveBeenCalledWith(expect.objectContaining({ model: 'qwen/qwen3.5-9b' }));
     expect(res.headers).toMatchObject({
@@ -131,6 +151,84 @@ describe('chat: deployment primary, OpenRouter fallback', () => {
     expect(text).toContain('[DONE]');
   });
 
+  it('streaming: the deployment answers token by token, each delta relayed when it arrives', async () => {
+    const ctl = fakeController();
+    const fetchImpl = vi.fn<FetchImpl>(async () => sseReplica(['Bom ', 'dia! ', 'Tudo ', 'bem?'].map(delta), 30));
+    const or = cloudLLM(async () => ({ content: 'never', model: 'x' }));
+    const t0 = Date.now();
+    const res = await chat(new DeploymentLLMProvider(ctl, 'parle-speech', { fetchImpl: fetchImpl as never }), or,
+      { stream: true, stream_options: { include_usage: true } });
+    expect(res.headers?.['X-Gateway-Provider']).toBe('deployment:parle-speech');
+    expect(JSON.parse(fetchImpl.mock.calls[0][1]?.body as string)).toMatchObject({ stream: true, model: 'qwen3.5-9b' });
+    const arrivals: Array<{ at: number; text: string }> = [];
+    const reader = res.stream!.getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      arrivals.push({ at: Date.now() - t0, text: new TextDecoder().decode(value) });
+    }
+    const content = arrivals.filter((a) => /"content":"[^"]/.test(a.text));
+    expect(content.map((a) => JSON.parse(a.text.slice(6)).choices[0].delta.content)).toEqual(['Bom ', 'dia! ', 'Tudo ', 'bem?']);
+    expect(content[3].at - content[0].at).toBeGreaterThanOrEqual(60);
+    expect(content[0].at).toBeLessThan(arrivals[arrivals.length - 1].at - 60);
+    const text = arrivals.map((a) => a.text).join('');
+    expect(text).toContain('"finish_reason":"stop"');
+    expect(text).toContain('"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}');
+    expect(text.trimEnd().endsWith('data: [DONE]')).toBe(true);
+    expect(ctl.lease.done).toHaveBeenCalledTimes(1);
+    expect(ctl.lease.done).toHaveBeenCalledWith(false);
+    expect(or.chat).not.toHaveBeenCalled();
+  });
+
+  const streamingOpenRouter = (): LLMProvider => ({
+    providerId: 'openrouter', isConfigured: () => true, chat: vi.fn(),
+    async *chatStream() { yield 'da nuvem'; },
+  });
+  const stalled = { error: { message: "chat upstream stalled: TimeoutError('no data for 8.0 s')", type: 'upstream_error', code: 'upstream_stalled' } };
+
+  it('streaming: an SSE error event before the first token fails the deployment, OpenRouter answers, the stage gets a strike', async () => {
+    const ctl = fakeController();
+    const fetchImpl = vi.fn<FetchImpl>(async () => sseReplica([stalled], 0, []));
+    const res = await chat(new DeploymentLLMProvider(ctl, 'parle-speech', { fetchImpl: fetchImpl as never }), streamingOpenRouter(), { stream: true });
+    expect(res.headers).toMatchObject({
+      'X-Gateway-Provider': 'openrouter:qwen/qwen3.5-9b', 'X-Gateway-Fallback': 'error', 'X-Gateway-Fallback-From': 'deployment:parle-speech',
+    });
+    const text = await new Response(res.stream).text();
+    expect(text).toContain('da nuvem');
+    expect(text).not.toContain('upstream stalled');
+    expect(ctl.acquire.mock.calls[0][1]).toMatchObject({ stage: 'chat' });
+    expect(ctl.lease.done).toHaveBeenCalledTimes(1);
+    expect(ctl.lease.done).toHaveBeenCalledWith('errored');
+  });
+
+  it('streaming: an SSE error event after the first token ends the answer as an error, never as content, and counts against the replica', async () => {
+    const ctl = fakeController();
+    const breakers = new CircuitBreakerRegistry({ failureThreshold: 1, resetTimeoutMs: 60_000 });
+    const fetchImpl = vi.fn<FetchImpl>(async () => sseReplica([delta('Bom '), stalled], 0, []));
+    const dep = new DeploymentLLMProvider(ctl, 'parle-speech', { fetchImpl: fetchImpl as never });
+    const res = await chat(dep, streamingOpenRouter(), { stream: true }, breakers);
+    expect(res.headers?.['X-Gateway-Provider']).toBe('deployment:parle-speech');
+    const events = (await new Response(res.stream).text()).trim().split('\n\n').map((e) => JSON.parse(e.slice(6)));
+    expect(events.map((e) => e.choices?.[0]?.delta?.content).filter(Boolean)).toEqual(['Bom ']);
+    expect(events[events.length - 1]).toEqual({ error: { message: expect.stringContaining('upstream stalled'), type: 'server_error' } });
+    expect(ctl.lease.done).toHaveBeenCalledTimes(1);
+    expect(ctl.lease.done).toHaveBeenCalledWith('errored');
+    const next = await chat(dep, streamingOpenRouter(), { stream: true }, breakers);
+    expect(next.headers?.['X-Gateway-Fallback']).toBe('circuit_open');
+  });
+
+  it('streaming: a replica body cut mid-answer ends with an error event and a failed lease', async () => {
+    const ctl = fakeController();
+    const fetchImpl = vi.fn<FetchImpl>(async () => sseReplica([delta('Bom ')], 0, 'cut'));
+    const res = await chat(new DeploymentLLMProvider(ctl, 'parle-speech', { fetchImpl: fetchImpl as never }), streamingOpenRouter(), { stream: true });
+    const text = await new Response(res.stream).text();
+    expect(text).toContain('"content":"Bom "');
+    expect(text).toContain('"error"');
+    expect(text).not.toContain('[DONE]');
+    expect(ctl.lease.done).toHaveBeenCalledTimes(1);
+    expect(ctl.lease.done).toHaveBeenCalledWith(true);
+  });
+
   it('deployment circuit opens after repeated failures and the next requests go straight to OpenRouter', async () => {
     const breakers = new CircuitBreakerRegistry({ failureThreshold: 2, resetTimeoutMs: 60_000 });
     const fetchImpl = vi.fn<FetchImpl>(async () => new Response('down', { status: 502 }));
@@ -161,6 +259,36 @@ describe('STT and TTS: deployment primary, OpenRouter fallback', () => {
     expect(res.headers).toMatchObject({ 'Content-Type': 'audio/wav', 'X-Gateway-Provider': 'deployment:parle-qwen-tts' });
     const speechCall = fetchImpl.mock.calls.find(([u]) => String(u).endsWith('/v1/audio/speech'))!;
     expect(JSON.parse(String(speechCall[1]?.body))).toMatchObject({ model: 'Qwen/Qwen3-TTS', voice: 'vivian' });
+  });
+
+  it('TTS: streamed PCM reaches the client chunk by chunk, as the replica produces it', async () => {
+    const fetchImpl = vi.fn<FetchImpl>(async () => {
+      let sent = 0;
+      return new Response(new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (sent++ === 4) return controller.close();
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          controller.enqueue(new Uint8Array(480));
+        },
+      }), { headers: { 'content-type': 'audio/pcm' } });
+    });
+    const dep = new DeploymentTTSProvider(fakeController(), 'parle-qwen-tts', { fetchImpl: fetchImpl as never });
+    const res = await handleAudioSpeech(
+      { method: 'POST', url: '/v1/audio/speech', headers: {}, rawBody: Buffer.alloc(0),
+        body: { model: 'parle-tts', input: 'oi', voice: 'x', response_format: 'pcm', ref_audio: 'a', ref_text: 't' } },
+      { 'parle-tts': [{ providerId: 'deployment:parle-qwen-tts', provider: dep, model: 'Qwen/Qwen3-TTS' }] },
+      undefined, new CircuitBreakerRegistry(),
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toMatchObject({ stream: true, stream_format: 'audio' });
+    const arrivals: number[] = [];
+    const reader = res.stream!.getReader();
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+      arrivals.push(Date.now());
+    }
+    expect(arrivals).toHaveLength(4);
+    expect(arrivals[3] - arrivals[0]).toBeGreaterThanOrEqual(60);
   });
 
   it('TTS: cold deployment → OpenRouter with the fallback voice', async () => {

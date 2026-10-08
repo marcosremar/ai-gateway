@@ -35,18 +35,19 @@ export interface ReplicaModel {
   timeoutMs: number;
   /** Hedge delay from `DeploymentController.hedgeDelayMs` (production) or the fixed `hedgeMs` (before 2026-10-07). */
   adaptiveHedge: boolean;
+  resumeMs: number;
 }
 
 export const L40S_MODEL: ReplicaModel = {
   bootMs: 9 * 60_000, parallel: 8, baseMs: 1_500, probeBusyAt: 12, hedgeMs: 1_500, fallbackMs: 1_200, price: 1.47,
-  timeoutMs: 4_000, adaptiveHedge: true,
+  timeoutMs: 4_000, adaptiveHedge: true, resumeMs: 3 * 60_000,
 };
 
 /** The adaptive hedge's cap, as serve-providers.ts computes it (`HEDGE_CAP_OF_TIMEOUT` of the attempt timeout). */
 const HEDGE_CAP_OF_TIMEOUT = 0.75;
 
 export interface ScaleEvent {
-  t: number; deployment: string; type: 'create' | 'release' | 'create-failed'; id: string; reason?: string; inflight?: number;
+  t: number; deployment: string; type: 'create' | 'release' | 'create-failed' | 'stop' | 'start'; id: string; reason?: string; inflight?: number;
 }
 
 interface SimMachine { machine: ReplicaMachine; bootAt: number; crashed: boolean }
@@ -56,7 +57,7 @@ export class SimClock {
   now = () => this.t;
 }
 
-class SimCloud implements DeploymentBackend {
+export class SimCloud implements DeploymentBackend {
   readonly provider = 'scaleway' as const;
   readonly machines = new Map<string, SimMachine>();
   readonly events: ScaleEvent[] = [];
@@ -64,6 +65,7 @@ class SimCloud implements DeploymentBackend {
 
   /** Virtual time windows [from, to) in which every create fails `out of stock` (as Scaleway's 412). */
   stockOut: Array<[number, number]> = [];
+  quotaFull: Array<[number, number]> = [];
 
   constructor(private readonly clock: SimClock, private readonly model: ReplicaModel, private readonly inflightOn: (id: string) => number) {}
 
@@ -71,6 +73,10 @@ class SimCloud implements DeploymentBackend {
     if (this.stockOut.some(([from, to]) => this.clock.t >= from && this.clock.t < to)) {
       this.events.push({ t: this.clock.t, deployment: input.spec.name, type: 'create-failed', id: '', reason: 'out_of_stock' });
       throw Object.assign(new Error(`scaleway HTTP 412: {"type":"out_of_stock","message":"${input.spec.machineType} out of stock"}`), { status: 412 });
+    }
+    if (this.quotaFull.some(([from, to]) => this.clock.t >= from && this.clock.t < to)) {
+      this.events.push({ t: this.clock.t, deployment: input.spec.name, type: 'create-failed', id: '', reason: 'quotas_exceeded' });
+      throw Object.assign(new Error(`scaleway HTTP 403: {"type":"quotas_exceeded","message":"${input.spec.machineType} quota reached"}`), { status: 403 });
     }
     const id = `fr-par-2:sim-${++this.seq}`;
     const machine: ReplicaMachine = {
@@ -91,12 +97,28 @@ class SimCloud implements DeploymentBackend {
     this.events.push({ t: this.clock.t, deployment: machine.deployment, type: 'release', id: machine.id, reason, inflight: this.inflightOn(machine.id) });
   }
 
+  async stopReplica(machine: ReplicaMachine): Promise<void> {
+    const sim = this.machines.get(machine.id);
+    if (!sim) return;
+    sim.machine.state = 'stopped';
+    sim.bootAt = Infinity;
+    this.events.push({ t: this.clock.t, deployment: machine.deployment, type: 'stop', id: machine.id });
+  }
+
+  async startReplica(machine: ReplicaMachine): Promise<void> {
+    const sim = this.machines.get(machine.id);
+    if (!sim) return;
+    sim.machine.state = 'running';
+    sim.bootAt = this.clock.t + this.model.resumeMs;
+    this.events.push({ t: this.clock.t, deployment: machine.deployment, type: 'start', id: machine.id });
+  }
+
   async hourlyPrice(): Promise<number | null> {
     return this.model.price;
   }
 }
 
-class SimProbe implements ReplicaProbe {
+export class SimProbe implements ReplicaProbe {
   constructor(private readonly cloud: SimCloud, private readonly clock: SimClock, private readonly model: ReplicaModel,
     private readonly inflightOn: (id: string) => number) {}
 

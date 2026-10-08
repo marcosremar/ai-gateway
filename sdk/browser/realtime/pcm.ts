@@ -44,6 +44,11 @@ export function decodeAudioFrame(data: ArrayBuffer | Uint8Array): Int16Array | n
   return out;
 }
 
+export function trimLeadingSilence(samples: Float32Array, rate: number, threshold = 0.01): Float32Array {
+  const loud = samples.findIndex(x => Math.abs(x) > threshold);
+  return loud < 0 ? samples : samples.subarray(Math.max(0, loud - Math.round(rate / 100)));
+}
+
 /**
  * Streaming linear resampler: chunks in, chunks out, the fractional position carried across calls so a stream cut in
  * 128-sample render quanta comes out continuous. Linear interpolation is enough for speech to Whisper / from TTS

@@ -3,9 +3,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'net';
 import { DeploymentError } from '../../../src/deployments/controller';
 import { createS2SRoute } from '../../../src/s2s/route';
+import { setGatewayTelemetrySink } from '../../../src/telemetry/emit';
 import { loopbackStages } from '../../../src/s2s/loopback-stages';
-import { encodeEvent } from '../../../src/s2s/frames';
+import { encodeAudio, encodeEvent } from '../../../src/s2s/frames';
 import { decodeAll, fakeStages, replicaFrames, sleep, type FakeStagesOptions } from './_fakes';
+import { resetStreamCuts, streamCuts } from '../../../src/telemetry/stream-cuts';
 
 type ReplicaScript = (res: ServerResponse) => Promise<void>;
 
@@ -20,9 +22,9 @@ async function listen(handler: (req: IncomingMessage, res: ServerResponse) => vo
 }
 
 async function harness(opts: {
-  replica?: ReplicaScript; deployment?: 'ready' | 'cold' | 'paused' | 'absent'; stages?: FakeStagesOptions; hedgeMs?: number;
+  replica?: ReplicaScript; deployment?: 'ready' | 'cold' | 'paused' | 'absent' | 'stage_out'; stages?: FakeStagesOptions; hedgeMs?: number; maxGapMs?: number; budgetMs?: number;
 }) {
-  const leases: Array<{ failed?: boolean }> = [];
+  const leases: Array<{ failed?: boolean | string }> = [];
   const woken: string[] = [];
   let replicaHits = 0;
   const replicaHost = opts.replica ? await listen((req, res) => {
@@ -38,12 +40,13 @@ async function harness(opts: {
     acquire: async () => {
       if (state === 'cold') throw new DeploymentError(503, "deployment 'parle-speech': replicas are starting", 30);
       if (state === 'paused') throw new DeploymentError(409, "deployment 'parle-speech' is paused");
-      const lease = { machine: { ip: replicaHost } as never, token: 'tok', done: (failed?: boolean) => { leases.push({ failed }); } };
+      if (state === 'stage_out') throw new DeploymentError(503, "deployment 'parle-speech': s2s is out of rotation on every ready replica", 30, 'stage_out');
+      const lease = { machine: { ip: replicaHost, id: 'replica-1' } as never, token: 'tok', done: (failed?: boolean | string) => { leases.push({ failed }); } };
       return lease;
     },
   };
   const fake = fakeStages(opts.stages);
-  const route = createS2SRoute({ controller, deployment: 'parle-speech', stagesFor: () => fake.stages, hedgeMs: opts.hedgeMs ?? 2_000 });
+  const route = createS2SRoute({ controller, deployment: 'parle-speech', stagesFor: () => fake.stages, hedgeMs: opts.hedgeMs ?? 2_000, maxGapMs: opts.maxGapMs, budgetMs: opts.budgetMs });
   const host = await listen((req, res) => { void route(req, res); });
   async function call(query = '', custom?: FormData) {
     const form = custom ?? new FormData();
@@ -54,7 +57,8 @@ async function harness(opts: {
     const res = await fetch(`http://${host}/v1/s2s${query}`, { method: 'POST', body: form });
     return { res, bytes: new Uint8Array(await res.arrayBuffer()) };
   }
-  return { call, calls: fake.calls, leases, woken, replicaHits: () => replicaHits };
+  const post = (form: FormData, signal: AbortSignal) => fetch(`http://${host}/v1/s2s`, { method: 'POST', body: form, signal });
+  return { call, post, calls: fake.calls, leases, woken, replicaHits: () => replicaHits };
 }
 
 const writeFrames = (res: ServerResponse, frames: Uint8Array[], delayMs = 0) => async () => {
@@ -71,10 +75,26 @@ describe('POST /v1/s2s routing', () => {
     expect(res.headers.get('content-type')).toBe('application/x-aigw-s2s');
     const { events, audio } = decodeAll(bytes);
     expect(events[0]).toEqual({ type: 'route', provider: 'deployment:parle-speech' });
+    expect(res.headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
+    expect(res.headers.get('x-gateway-fallback')).toBeNull();
     expect(events.map(e => e.type)).toEqual(['route', 'transcript', 'sentence', 'sentence', 'done']);
     expect(audio).toBe('Bom dia, querida!Pão quentinho.');
     expect(h.calls).toEqual([]);
     expect(h.leases).toEqual([{ failed: false }]);
+  });
+
+  it('reports the time to the first audio written to the client as a gateway event (s2s.first_audio)', async () => {
+    const seen: Array<{ event: string; durMs?: number; deployment?: string }> = [];
+    setGatewayTelemetrySink(e => seen.push(e));
+    try {
+      const h = await harness({ replica: res => writeFrames(res, replicaFrames('Oi!', ['Bom dia, querida!', 'Pão quentinho.']))() });
+      await h.call();
+      const first = seen.filter(e => e.event === 's2s.first_audio');
+      expect(first).toHaveLength(1);
+      expect(first[0]).toMatchObject({ deployment: 'parle-speech', durMs: expect.any(Number) });
+    } finally {
+      setGatewayTelemetrySink(null);
+    }
   });
 
   it('cold deployment: woken for the next turns, this turn answered by the composed pipeline at once', async () => {
@@ -84,6 +104,33 @@ describe('POST /v1/s2s routing', () => {
     expect(h.woken).toEqual(['parle-speech']);
     expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
     expect(h.calls.map(c => c.stage)).toEqual(['stt', 'llm', 'tts', 'tts']);
+  });
+
+  it('s2s out of rotation on every ready replica: composed pipeline at once, reported as circuit_open, nothing woken', async () => {
+    const h = await harness({ deployment: 'stage_out' });
+    const { events, audio } = decodeAll((await h.call()).bytes);
+    expect(events[0]).toEqual({ type: 'route', provider: 'composite', fallback: 'circuit_open', from: 'deployment:parle-speech' });
+    expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
+    expect(h.woken).toEqual([]);
+    expect(h.replicaHits()).toBe(0);
+  });
+
+  it('a client that leaves mid-turn says nothing about the replica (lease cancelled, not failed)', async () => {
+    const h = await harness({
+      hedgeMs: 5_000,
+      replica: async res => { res.writeHead(200, { 'Content-Type': 'application/x-aigw-s2s' }); res.write(replicaFrames('Oi!', ['Bom dia.'])[0]); },
+    });
+    const gone = new AbortController();
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', JSON.stringify({ system: 'Seu Jorge', voice: 'br-m-08', language: 'pt' }));
+    const pending = h.post(form, gone.signal).then(r => r.arrayBuffer()).catch(() => null);
+    while (h.replicaHits() === 0) await sleep(10);
+    await sleep(50);
+    gone.abort();
+    await pending;
+    while (h.leases.length === 0) await sleep(10);
+    expect(h.leases).toEqual([{ failed: 'cancelled' }]);
   });
 
   it('absent or paused deployment: composed pipeline, reason reported', async () => {
@@ -105,11 +152,58 @@ describe('POST /v1/s2s routing', () => {
       },
     });
     const t0 = performance.now();
-    const { events, audio } = decodeAll((await h.call()).bytes);
+    const { res, bytes } = await h.call();
+    const { events, audio } = decodeAll(bytes);
     expect(performance.now() - t0).toBeLessThan(900);
     expect(events[0]).toMatchObject({ type: 'route', provider: 'composite', fallback: 'slow' });
+    expect([res.headers.get('x-gateway-provider'), res.headers.get('x-gateway-fallback'), res.headers.get('x-gateway-fallback-from')])
+      .toEqual(['composite', 'slow', 'deployment:parle-speech']);
     expect(events.some(e => e.type === 'route' && e.provider === 'deployment:parle-speech')).toBe(false);
     expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
+  });
+
+  it('an opener of the primary is not its first audio: a primary that stalls after it is still hedged, and no second opener is played', async () => {
+    const opener = [
+      encodeEvent({ type: 'opener', state: 'start', text: 'Hum.', index: 0 }, 'binary'), encodeAudio(new TextEncoder().encode('Hum.'), 'binary'),
+      encodeEvent({ type: 'opener', state: 'end', index: 0 }, 'binary'),
+    ];
+    const h = await harness({
+      hedgeMs: 50, stages: { sttMs: 120 },
+      replica: async res => {
+        res.writeHead(200, { 'Content-Type': 'application/x-aigw-s2s' });
+        for (const f of opener) res.write(f);
+        await sleep(1_000);
+        if (!res.destroyed) res.end();
+      },
+    });
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', JSON.stringify({ voice: 'route-opener', language: 'pt', first_audio_deadline_ms: 60, opener: { lines: ['Hum.'] } }));
+    const { bytes } = await h.call('', form);
+    const { events, audio } = decodeAll(bytes);
+    expect(events.filter(e => e.type === 'opener' && e.state === 'start').length).toBe(1);
+    expect(events.some(e => e.type === 'deadline_missed')).toBe(false);
+    expect(events.find(e => e.type === 'route' && e.provider === 'composite')).toMatchObject({ fallback: 'slow' });
+    expect(audio).toBe('Hum.Bom dia, querida!Aqui está o seu pão.');
+  });
+
+  it('primary breaks after its opener and its transcript: the composed pipeline resumes, the opener is not played again', async () => {
+    const h = await harness({
+      stages: { tokenMs: 30 },
+      replica: res => writeFrames(res, [
+        encodeEvent({ type: 'opener', state: 'start', text: 'Hum.', index: 0 }, 'binary'), encodeAudio(new TextEncoder().encode('Hum.'), 'binary'),
+        encodeEvent({ type: 'opener', state: 'end', index: 0 }, 'binary'), encodeEvent({ type: 'transcript', text: 'Oi!', stt_ms: 10, at_ms: 10 }, 'binary'),
+      ])(),
+    });
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', JSON.stringify({ voice: 'route-opener-2', language: 'pt', first_audio_deadline_ms: 60, opener: { lines: ['Hum.'] } }));
+    const { bytes } = await h.call('', form);
+    const { events, audio } = decodeAll(bytes);
+    expect(events.filter(e => e.type === 'opener' && e.state === 'start').length).toBe(1);
+    expect(events.find(e => e.type === 'route' && e.provider === 'composite')).toMatchObject({ fallback: 'resumed' });
+    expect(h.calls.some(c => c.stage === 'stt')).toBe(false);
+    expect(audio).toBe('Hum.Bom dia, querida!Aqui está o seu pão.');
   });
 
   it('primary breaks after its transcript: the composed pipeline resumes at the LLM (no second STT)', async () => {
@@ -273,5 +367,103 @@ describe('POST /v1/s2s: STT hallucination filter on the primary transcript', () 
     expect(events.some(e => e.type === 'filtered')).toBe(true);
     expect(events.some(e => e.type === 'sentence')).toBe(false);
     expect(h.calls.filter(c => c.stage === 'llm' || c.stage === 'tts')).toEqual([]);
+  });
+});
+
+describe('POST /v1/s2s: a primary stream ends with done or with an explicit error, and is counted', () => {
+  const frames = replicaFrames('Oi!', ['Bom dia, querida!', 'Aqui está o seu pão.']);
+  const head = (res: ServerResponse) => { res.writeHead(200); for (const f of frames.slice(0, 4)) res.write(f); };
+  const turn = async (h: Awaited<ReturnType<typeof harness>>) => {
+    resetStreamCuts();
+    const telemetry: Array<{ event: string; attrs?: unknown; replicaId?: string }> = [];
+    setGatewayTelemetrySink(e => telemetry.push(e as never));
+    try {
+      const started = Date.now();
+      const { events, audio } = decodeAll((await h.call()).bytes);
+      return { events, audio, ms: Date.now() - started, cuts: telemetry.filter(e => e.event === 'stream.cut') };
+    } finally {
+      setGatewayTelemetrySink(null);
+    }
+  };
+
+  it('(a) aborts mid-stream: error upstream_truncated naming the sentence not voiced, failed lease, counted', async () => {
+    const h = await harness({ replica: async (res) => { head(res); await sleep(10); res.destroy(); } });
+    const { events, audio, cuts } = await turn(h);
+    expect(audio).toBe('Bom dia, querida!');
+    expect(events.slice(-2)).toMatchObject([
+      { type: 'error', code: 'upstream_truncated', stage: 'primary', partial: true, unspoken: 'Aqui está o seu pão.' }, { type: 'done', partial: true },
+    ]);
+    expect(h.leases).toEqual([{ failed: true }]);
+    expect(streamCuts()).toEqual([{ deployment: 'parle-speech', replica: 'replica-1', stage: 'primary', truncated: 1, stalled: 0 }]);
+    expect(cuts).toMatchObject([{ replicaId: 'replica-1', attrs: { kind: 'truncated', stage: 'primary' } }]);
+    expect(h.calls).toEqual([]);
+  });
+
+  it('(b) stalls forever mid-stream: error upstream_stalled at the gap limit, lease ends as busy, counted', async () => {
+    const h = await harness({ replica: async (res) => { head(res); }, maxGapMs: 120 });
+    const { events, audio, ms } = await turn(h);
+    expect(ms).toBeLessThan(2_000); // before: the 45 s budget
+    expect(audio).toBe('Bom dia, querida!');
+    expect(events.slice(-2)).toMatchObject([{ type: 'error', code: 'upstream_stalled', partial: true }, { type: 'done', partial: true }]);
+    expect(h.leases).toEqual([{ failed: 'timeout' }]);
+    expect(streamCuts()).toMatchObject([{ stage: 'primary', truncated: 0, stalled: 1 }]);
+  });
+
+  it('(b) never stops sending but never ends: the total deadline ends it the same way', async () => {
+    const h = await harness({
+      replica: async (res) => { head(res); const drip = setInterval(() => res.write(frames[2]), 20); res.on('close', () => clearInterval(drip)); },
+      maxGapMs: 500, budgetMs: 300,
+    });
+    const { events, ms } = await turn(h);
+    expect(ms).toBeLessThan(2_000);
+    expect(events.slice(-2)).toMatchObject([{ type: 'error', code: 'upstream_stalled' }, { type: 'done', partial: true }]);
+    expect(h.leases).toEqual([{ failed: 'timeout' }]);
+  });
+
+  it('(c) a long gap under the limit: the whole reply, ok lease, nothing counted', async () => {
+    const h = await harness({
+      replica: async (res) => { head(res); await sleep(250); for (const f of frames.slice(4)) res.write(f); res.end(); },
+      maxGapMs: 1_000,
+    });
+    const { events, audio } = await turn(h);
+    expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
+    expect(events.at(-1)).toMatchObject({ type: 'done' });
+    expect(events.some(e => e.type === 'error')).toBe(false);
+    expect(h.leases).toEqual([{ failed: false }]);
+    expect(streamCuts()).toEqual([]);
+  });
+
+  it('(d) closes cleanly without done: error upstream_truncated, never a normal end', async () => {
+    const h = await harness({ replica: async (res) => { head(res); res.end(); } });
+    const { events } = await turn(h);
+    expect(events.slice(-2)).toMatchObject([{ type: 'error', code: 'upstream_truncated', unspoken: 'Aqui está o seu pão.' }, { type: 'done', partial: true }]);
+    expect(h.leases).toEqual([{ failed: true }]);
+    expect(streamCuts()).toMatchObject([{ truncated: 1, stalled: 0 }]);
+  });
+
+  it('the replica names its failed stage in-band: the error keeps stage, code and unspoken text; the count is per stage', async () => {
+    const h = await harness({ replica: async (res) => {
+      head(res);
+      res.write(encodeEvent({ type: 'error', stage: 'tts', code: 'stage_failed', message: 'peer closed connection', unspoken: 'E o troco.' }, 'binary'));
+      res.end();
+    } });
+    const { events } = await turn(h);
+    expect(events.slice(-2)).toMatchObject([{ type: 'error', stage: 'tts', code: 'stage_failed', unspoken: 'E o troco.' }, { type: 'done', partial: true }]);
+    expect(streamCuts()).toMatchObject([{ stage: 'tts', truncated: 1 }]);
+  });
+
+  it('a client that leaves mid-stream is not a cut: cancelled lease, nothing counted', async () => {
+    const h = await harness({ replica: async (res) => { head(res); } });
+    resetStreamCuts();
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', '{}');
+    const abort = new AbortController();
+    const res = await h.post(form, abort.signal);
+    await res.body!.getReader().read();
+    abort.abort();
+    for (let i = 0; i < 100 && !h.leases.length; i++) await sleep(10);
+    expect(h.leases).toEqual([{ failed: 'cancelled' }]);
+    expect(streamCuts()).toEqual([]);
   });
 });

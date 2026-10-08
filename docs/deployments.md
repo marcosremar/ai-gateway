@@ -48,6 +48,7 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | GET | `/v1/deployments/:name` | status (`scaled-to-zero` · `warming` · `ready` · `degraded` · `paused`), replicas, `lastError` |
 | DELETE | `/v1/deployments/:name` | releases every machine, forgets the spec |
 | POST | `/v1/deployments/:name/wake` | start replicas now |
+| GET | `/v1/deployments/:name/capacity` | session ceiling in force and measured boot / resume time per machine type + image, mode, budget spent, hold (see Scaling policy) |
 | POST | `/v1/deployments/:name/warm` | `{ "replicas": N, "untilMinutes": M }`: keep N replicas up for M minutes (≤ 720) whatever the load — a class about to start; `park` ends it (admin) |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>` |
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |
@@ -88,10 +89,13 @@ are put back. `envByMachineType` is merged per key: the declared keys are put ba
 `src/deployments/declared/parle-speech.json`: the `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` image
 (`docker/speech-stack`: Whisper + Qwen LLM + Qwen3-TTS in one container). It lives in the gateway's own Scaleway
 registry, which the gateway pulls from with the key it already has: **no registry token, no `registryAuth`, nothing
-to set** — it is never `pending` for a credential. The declaration owns three things and patches only them over the
+to set** — it is never `pending` for a credential. The declaration owns five things and patches only them over the
 registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full reference; default
-`20261006-0107`, the one production runs), `realtime: {}` (the edge sidecar, [realtime-edge.md](realtime-edge.md))
-and the edge's `RT_MAX_SESSIONS` per machine type (L4 8, L40S 16, merged into the stored `envByMachineType`). Port,
+`20261008-1317`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
+the same tag: `SPEECH_IMAGE` does not move that copy; no L4), `scaling.mode` `fast`, `realtime: {}` (the edge
+sidecar, [realtime-edge.md](realtime-edge.md)) and env per machine type (the edge's `RT_MAX_SESSIONS`: L4 2, L40S 4;
+the whole RTX 5090 set; merged into the stored `envByMachineType`). A registered spec with `files` skips the Vast
+place (reason in `warnings`) until the voice catalog moves to `fileUrls`. Port,
 machine type, zone, replicas, idle and boot times, € and hour limits, volume, `env` and `files` (the voice catalog)
 stay exactly as registered. On a gateway where `parle-speech` does not exist it is created from the `speech-stack`
 profile with the declared image; that deployment has no `files`, so the voice catalog still has to be sent with a
@@ -107,6 +111,10 @@ registered, so it would stay the target).
 
 The gateway serves many apps; each has an **account** with the addresses of its Docker images, so a deploy names an
 image instead of carrying a registry address, and the app finds it again later (scale up for a class, roll back).
+
+An app's key is under the daily budget of every non-admin key (`APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS`: one value for
+all apps, no per-app override). Before an app serves a class, size both from students × turns (formula and a worked
+example in `docs/api/http.md` § App keys) and watch `appBudgets` in `GET /health?details=1` during the lesson.
 
 ```bash
 # Save (or move) an image address — build-image-on-scaleway.ts --app parle does this after a push
@@ -134,6 +142,11 @@ curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # ima
   `X-Aigw-Wait: <seconds>`) and is served as soon as a replica is ready. If none is ready in time: **503**
   `{"status":"warming"}` + `Retry-After: 30`; the machine keeps booting. 240 s stays under Railway's 5-minute cut-off
   for a request with no bytes flowing.
+- The gateway never waits longer than `DEPLOYMENTS_MAX_WAIT_SECONDS` (default 240, at most 840), whatever the spec or
+  the header ask: a longer silent wait is cut by the platform in front (Railway: 5 min with no bytes) with an error the
+  caller cannot interpret, while the 503 above tells it to retry. 240 leaves a minute for the replica's first byte. A
+  spec above the maximum is still accepted (profiles and stored specs carry 600–840) and the view lists it under
+  `warnings`; raise the setting only where nothing in front cuts silent requests.
 - How long a boot takes is mostly the image + model: a small CPU image is ready in ~1–2 min; Qwen3-TTS on an L4 took
   ~7–8 min in the parle measurement (`babylon-cinema/docs/reports/2026-10-01-tts-l4-ai-gateway`). For those, use
   `minReplicas: 1` while there is traffic, or `POST …/wake` ahead of time, or accept the 503 + retry.
@@ -155,6 +168,8 @@ replica after it ended (live QA 2026-10-07: under 16–40 concurrent the count s
 Surplus replicas go after `scaleDownDelaySeconds` of low load (at once when idle), never one with requests in flight,
 and never one still booting: the boot finishes and the idle clock runs from its ready time (only a delete, pause, park
 or `bootTimeoutMinutes` end a boot early; live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of a 9 min boot).
+A ready replica is never surplus while that would leave fewer ready replicas than desired: one ready and one booting
+for a desired count of 1 both stay until the boot finishes, then one of them goes.
 Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, `DEPLOYMENTS_UNHEALTHY_STRIKES`
 (3) failed health checks in a row with nothing in flight and no answered request in the last
 `DEPLOYMENTS_BUSY_GRACE_SECONDS` (120), older than `maxHours` (counted from the last power-on of a parked replica, not
@@ -187,6 +202,10 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
 - **Overflow**: a replica takes at most `targetInflightPerReplica` × `autoscale.maxInflightFactor` (1.5); with every ready
   replica full, a request with a fallback spills to it at once (`X-Gateway-Fallback: saturated`, neutral for breakers)
   instead of queueing on the GPU until a timeout; an invoke (no fallback) waits in the gateway for a free slot.
+  A replica's realtime sessions (docs/realtime.md § Load and the autoscaler) count in the same unit, full =
+  `targetInflightPerReplica`: a replica whose realtime slots are all taken takes no request at all, so the `/v1/s2s`
+  turn of a learner refused at realtime admission is answered by the fallback (`route.fallback: "saturated"`) and not
+  by the GPU the admitted learners are talking to.
 - **Adaptive hedge**: a route's deployment target starts its fallback in parallel after `DeploymentController.hedgeDelayMs`
   — max(`DEPLOYMENT_HEDGE_MS` 1.5 s, the replica's recent p95 × 1.2, scaled by the queue it joins beyond its target),
   at most 3/4 of the attempt timeout — and beyond its target a replica whose answers would be slower than that hedge
@@ -204,12 +223,120 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
 - **Explained**: every view carries `autoscale: { desired, pressureWant, reason, blockedBy, floor, warmFloor, load, p95Ms,
   errorRate }` (`floor` = replicas kept whatever the load: `minReplicas`, `minActiveReplicas` while active, warm windows;
   `warmFloor` = the warm part) (e.g. `reason: "load 16 > 75% of 2×8 (at maxReplicas 2)"`, `blockedBy: "maxReplicas 2"`), logged when it changes.
+  A deployment with `realtime` also carries `realtime: { active, capacity, refusedSessions, scalingOut }`, and every
+  view `sessions` (distinct learners of the last minute): docs/realtime.md § Load and the autoscaler.
 
 Simulation bench: `bun scripts/autoscale-sim/run.ts [scenario…]` runs the real controller on a virtual clock (9 min boots,
 LLM slow-down past 8 parallel, health check timing out at 12, adaptive hedge from 1.5 s → fallback 1.2 s, attempt timeout
 4 s, creates failing `out_of_stock` in a window) and prints the timelines, the client p50/p95 and the requests run twice;
 `__tests__/unit/deployments/autoscale-sim.test.ts` asserts them (ramp, spike, flapping, drain, crash, contention,
 schedule, warm, out of stock rising/falling and recovering, adaptive vs fixed hedge at 16 and 25). The 75 % / 50 % / 20 s / 1.5× defaults are design choices to pilot, not published values.
+
+Class simulator: `bun scripts/scaling-sim.ts [scenario…] [--boot 600] [--resume 180] [--ceiling 8] [--price 1.47]
+[--max-replicas 4] [--idle-minutes 2] [--idle-action delete|stop] [--timeline] [--events]` runs the same controller on a
+virtual clock against a scripted class instead of a concurrency curve. A student holding a realtime slot is one lease
+held for the whole session on a replica that takes `ceiling` of them (the unit `externalInflightEquivalent` gives a full
+replica); a student with no free slot is refused by the admission layer as the realtime service does (`wake`, no
+request reaches `acquire`), asks again at each turn (every 15 ± 5 s) and that turn goes to the fallback; a student on
+HTTP turns and an anonymous request are short leases. It prints one row per scenario: when replicas started, how many
+served fewer than `--wasted-below` (20) turns, the replica count per minute, replica-minutes and €, turns on the GPU and
+on the fallback, student-minutes on the fallback, when the excess began, what started after it and how long until it was
+gone, how long after the last student the bill reached zero, sessions cut by a release, and turns refused with no
+fallback (`--no-fallback`). Scenarios (`scripts/scaling-sim/scenarios.ts`): `class-arrival`, `sporadic-blip`,
+`sporadic-blip-repeated`, `blip-below-threshold`, `burst`, `slow-growth`, `drop-to-zero`, `quota-full`,
+`out-of-stock-then-back`, `two-classes-back-to-back`, `hundred-students`. `__tests__/unit/deployments/scaling-sim.test.ts`
+pins the table of today's rule in `fixtures/scaling-sim/today.txt`: a change of rule shows up as a diff of that file.
+
+## Scaling policy: the `scaling` block (`scaling-policy.ts`, `controller-scaling.ts`)
+
+Every deployment runs under one mode (owner, 2026-10-08). A spec sent without the block gets `"scaling": { "mode":
+"balanced" }` (`DEFAULT_SCALING_MODE`) at `PUT`/`PATCH`, and a deployment stored without it gets the same when the
+gateway starts (log `deployments: no scaling block, running under the default mode`, with the names); the mode is in
+`spec.scaling.mode` of `GET /v1/deployments/:name` and in `mode` of the capacity route. The pressure rule of the section
+above ("peak of the last 60 s over 75 % for 20 s") is what a deployment without the block did before that date; it
+remains in the code for a controller built without `defaultScalingMode` (the unit tests and the simulator's `today`
+column). Under a mode the scale-out trigger is how long the excess lasts and where it is going, and the excess that is
+not worth a replica is left to the fallback:
+
+```json
+"scaling": {
+  "target": { "p50Ms": 1500, "p95Ms": 2000 },
+  "budget": { "eurPerHour": 6, "eurPerMonth": 150, "maxReplicas": 6 },
+  "mode": "economy"
+}
+```
+
+`mode` is `economy`, `balanced` (default) or `fast`; `"scaling": null` goes back to the default mode. The built-in
+voice profiles (`speech-stack`, `qwen3-tts`, `qwen3-tts-clone`) declare `fast`, `whisper-stt` declares `balanced`. Load is counted in the unit of
+`targetInflightPerReplica`: requests in flight + waiting, a refused request for the 1.5 s the fallback takes to answer
+it, and, when the controller is given session counts (`ControllerOptions.sessions(deployment)`: distinct realtime
+sessions wanting a slot, seated or refused; `null` = not available, the default), `sessions × target / ceiling`. Booting
+replicas count as capacity. Each tick the policy asks four questions and takes the largest answer:
+
+| Rule | economy | balanced | fast | Asks for |
+|---|---|---|---|---|
+| **Cost**: the load-minutes the fallback served above capacity in the current episode (excess less than 2 min apart, at most boot + idle back), priced at the mode's rate, reach the price of one start (replica price × (boot + idle time)) | €0.02 per load-minute | €0.10 | any excess | `max(live + 1, ceil(load / target))` |
+| **Burst**: the peak of the last 60 s is a full replica or more above capacity | no | yes | yes | `ceil(peak / target)` |
+| **Trend**: sessions have been rising for at least half of the last boot/2 seconds, rose in its second half, and at that pace pass capacity before a replica started now is ready (needs session counts) | no | yes | yes | one replica ahead of the sessions seated now |
+| **Spare**: sessions fill half a replica or more | no | no | yes | `ceil(sessions / target) + 1` |
+
+With an L40S at €1.47/h, a 10 min boot and `idleAction: "delete"` one start is priced at €0.49: `balanced` starts a
+replica after 4.9 load-minutes on the fallback (2 students too many for 2.5 min, 16 for 20 s), `economy` after 24.5
+(2 students for 12 min, 16 for 1.5 min). Two extra requests for 5 s are 0.2 load-minutes: they go to the fallback in both.
+A burst of 16–40 requests beyond capacity starts replicas at the next tick in `balanced` and `fast`; in `economy` one
+burst is 0.5–1.3 load-minutes and is left to the fallback, and the same burst every 20 s pays for a replica after about
+15 min. `fast` keeps one replica more than the sessions need, so a late student or a blip lands on the GPU.
+
+The boot time is the median of the last 5 the controller measured for the machine type + image (creation → first ready;
+600 s until one was seen), or the resume time (180 s until measured) while a parked replica is available.
+
+**Scale-in.** A start is kept for boot + idle time; after that the count drops to what the peak of the last idle time
+needs. Idle time is the break-even between an idle replica and a new cold start: the boot time with `idleAction:
+"delete"`, the resume time with `"stop"`, never below `scaleDownDelaySeconds`; `idleMinutes` is raised to it as well.
+The surplus replica is drained: no new request, released when empty or after `autoscale.drainSeconds` when set, else
+30 min (a class block).
+
+**Budget.** `budget.maxReplicas` and `budget.eurPerHour` (replicas the amount pays for at the replica's price) cap the
+count together with `maxReplicas`: the strictest wins, and the gateway-wide guards below still apply.
+`budget.eurPerMonth` is a ledger in the deployment store (`spend: { month, eur, at }`, replica-hours × price, added every
+tick, saved every minute, reset on the first tick of a UTC month). Once it is spent the log says `deployments: monthly
+budget spent, new load goes to the fallback`, no replica starts, the running ones are drained (seated sessions finish)
+and released, `autoscale.blockedBy` reads `monthly budget spent: €… of €… in 2026-10, new load goes to the fallback`,
+and a request that finds no replica gets that sentence in its 503 at once instead of waiting for a cold start.
+
+**`target`** is stored and returned by the capacity route. Nothing acts on it yet: it is the pass mark of the learned
+session ceiling and of `POST …/calibrate`, which are not built.
+
+**Hold** (`PATCH /v1/deployments/:name` with `{ "scaling": { "hold": { "replicas": N, "untilMinutes": M } } }`, M ≤ 720;
+`"hold": null` ends it): the replica count is exactly N until the window ends, whatever the load, the floors and the
+activity; a paused deployment and a spent budget still win. It works on any deployment, with or without the rest of the
+block, and is shown as `hold` in the view. `POST …/warm` is a floor (the load can still add replicas); a hold is a freeze.
+
+**`GET /v1/deployments/:name/capacity`** (same access as `GET /v1/deployments/:name`):
+
+```json
+{
+  "deployment": "parle-speech", "mode": "balanced", "target": { "p50Ms": 1500, "p95Ms": 2000 },
+  "budget": { "eurPerMonth": 150, "month": "2026-10", "spentEur": 41.2, "exhausted": false },
+  "hold": null,
+  "capacity": [{
+    "machineType": "L40S-1-48G", "image": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107",
+    "ceiling": { "sessions": 16, "source": "configured", "samples": 0 },
+    "boot": { "seconds": 612, "source": "measured", "samples": 3 },
+    "resume": { "seconds": 180, "source": "default", "samples": 0 },
+    "confident": false, "missing": ["resume"]
+  }]
+}
+```
+
+One entry per machine type the spec may land on. `ceiling.source` is `configured` (`realtime.maxSessions` or the machine
+type's `RT_MAX_SESSIONS`) or `default` (8); `measured` is reserved for the learned ceiling, with `samples` its count.
+`missing` lists what is not known well enough: `ceiling` while it is the default, `boot` / `resume` below 3 samples.
+
+Simulated per mode: `bun scripts/scaling-sim.ts --mode economy|balanced|fast|all [--no-session-signal] [--budget
+'{"eurPerMonth":2}']`; the expected tables are `__tests__/unit/deployments/fixtures/scaling-sim/<mode>.txt`
+(`scaling-sim.test.ts`), the rules one by one in `scaling-policy.test.ts`. The two rates, the 2 min episode gap and the
+trend window are design choices to pilot, not published values.
 
 ## Cost guards (gateway-wide)
 
@@ -236,13 +363,35 @@ released as soon as the create ends (bounded retries; the orphan sweep stays as 
 One walk (`placement-walk.ts`) serves two spec fields; a spec may use **one of them, not both** (400 otherwise; send
 `"placements": []` to drop a profile's placements). Every place first gets the live price check (not sold or over the
 cap → skipped without a create), then the create; an out-of-stock answer (`isOutOfStock`, `placements.ts`: Scaleway's
-`412 {"type":"out_of_stock"}`, shortage, capacity wordings) moves to the next place, any other error (quota, 401, a
-bug) stops the walk and backs off. `lastPlacement` in `GET /v1/deployments/:name` says where it landed and why the
+`412 {"type":"out_of_stock"}`, shortage, capacity wordings) moves to the next place; a quota refusal (Scaleway's
+`403 quotas_exceeded`, per machine type and organisation) skips every remaining place of that machine type and goes on
+with the other types; any other error (401, a bug) stops the walk and backs off. With no other type listed, a quota
+backs off like any failed create, and `lastError` / `autoscale.blockedBy` say `quota reached for <type> on <provider>`.
+A `PUT`/`PATCH` that changes the spec clears the create back-off, so a corrected spec is tried at the next tick (an
+identical `PUT` does not). `lastPlacement` in `GET /v1/deployments/:name` says where it landed and why the
 earlier places were skipped.
 
-- **`placements`** (Scaleway only, ≤ 6 `{ zone?, machineType? }`): the spec's own zone/type first, then each entry
-  **in the given order** (never re-ranked), all at the spec's `maxEurPerHour`. A pinned `osImageId` only applies in
-  its own zone; an exposed deployment may change only `machineType`. The `speech-stack` profile carries some.
+- **`placements`** (a Scaleway spec, ≤ 6 entries): the spec's own zone/type first, then each entry **in the given
+  order** (never re-ranked). A Scaleway entry is `{ zone?, machineType? }` at the spec's `maxEurPerHour`; a pinned
+  `osImageId` only applies in its own zone; an exposed deployment may change only `machineType`.
+  An entry on **another provider** is `{ "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85,
+  "maxReplicas": 1 }`, all four required (400 otherwise; GPU deployments without `exposure` only): the price cap of
+  that place and the most replicas of this deployment that provider may hold at once (running or being created). The
+  walk reaches it when the Scaleway places before it are not sold, over the cap, out of stock or over quota. Every
+  create starts again from the top, so once Scaleway places a replica again the next one goes there; a replica already
+  on Vast keeps serving until the usual scale-in, nothing is migrated. A Vast place the spec cannot run on is skipped
+  with the reason in `lastPlacement` and in `warnings` of the view, never refused at `PUT`: `files` (use `fileUrls`),
+  an image without `bootScript` or `entrypoint`, an image in the gateway's own Scaleway registry without a
+  `registryAuth` (a pull-only credential: the gateway's key is never sent to a marketplace host), no `VAST_API_KEY`.
+  Any entry may carry its own `image` (the same build in a registry that place can pull from): `speech-stack` pulls
+  `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` on Scaleway and the public copy `ghcr.io/marcosremar/speech-stack:<tag>`
+  (same digest) on Vast, where its `RTX 5090` env also names `TTS_MODEL` and `LLM_FILE` (the image's own `ENV`, which
+  `start.sh` reads under `set -u`).
+  `idleAction: "stop"` is accepted: the Vast replica is deleted where a Scaleway one is parked. `minCuda`, `near`,
+  `maxRttMs` and `maxRttExcessMs` of the spec apply to it. The built-in profiles: `speech-stack` L40S fr-par-2 →
+  L40S fr-par-1 → one RTX 5090 on Vast (no L4: the account's L4 quota of 2 belongs to the TTS); `qwen3-tts` and
+  `qwen3-tts-clone` L4 fr-par-2 → L4 fr-par-1 → up to two RTX 5090 on Vast; `whisper-stt` is a CPU deployment and
+  stays on Scaleway (Vast rents GPU hosts only). Not run live under these profiles.
 - **`candidates`**: the ranked, multi-provider ladder below, a cap per entry.
 
 Without either, a spec has one place: `provider` + `zone` + `machineType`, refused above `maxEurPerHour` (as before).
@@ -289,9 +438,38 @@ With `candidates`, each create walks a **ranked ladder**:
 `provider: "vast"` (or a Vast candidate) needs `VAST_API_KEY` (from the dev API, like the Scaleway key). Code:
 `src/deployments/vast-backend.ts` (lean, separate from the GPU-pod client in `src/gateway/providers/gpu/`).
 
-- **Boot-script mode only.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
-  container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Both are required.
+- **One container per host.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
+  container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Without a
+  `bootScript` the spec's `entrypoint` + `args` are run there instead (after loading `/srv/aigw/app.env`), so an
+  image-mode spec needs its start command declared; the image's own `CMD` is not run.
   `files`, `exposure` and `idleAction: "stop"` are refused for Vast (no user_data service, no reserved IP).
+  Vast accepts 32 KB of env per instance and the boot script travels there base64 twice: a `bootScript` above
+  ~14 KB is refused at PUT (download large payloads at boot). A private image needs `registryAuth` in the spec
+  (sent as Vast `image_login`; never filled from the provider's own key).
+- **Supported on Vast**: invoke, capacity, `realtime` (below), `fileUrls` (below), `registryAuth`, `candidates`,
+  the RTT gate, host-end handover. **Not supported**: `files`, `exposure`, `idleAction: "stop"` (a `park` deletes the
+  instance and the next call pays a full boot), a boot log through the gateway, a reserved address (the replica's
+  address changes with every rental).
+- **`fileUrls`** — files the replica downloads at boot, for what `files` carries on Scaleway (the speech stack's voice
+  catalog): `{"voices.json": {"url": "https://…", "sha256": "<64 hex>"}, "br-f-01.mp3": {…}}`, same keys as `files`
+  (≤ 64 entries, `https` only, a key cannot be in both). Before the boot script or the container starts, each file is
+  fetched with `curl` (5 tries) into `/srv/aigw/files/<key>` and checked with `sha256sum`; a missing file or a
+  mismatch stops the boot with `aigw: BOOT FAILED: …` in `/srv/aigw/boot.log` (the replica never becomes ready and
+  is released at `bootTimeoutMinutes`). The directory is `/files` in the app: mounted read-only on Scaleway, a symlink
+  in the Vast container. It works on both providers, so one catalog (e.g. the app's content-addressed bucket, whose
+  object names are already the sha256) serves both. The view lists the keys in `fileKeys`, never the URLs. On Vast
+  every entry costs ~250 bytes of the 32 KB env: about 60 files fit beside a 3.4 KB boot script.
+- **`realtime` on Vast** (docs/realtime-edge.md § Vast): the edge runs as a process of the container, started by
+  `vastReplicaInit` from `/opt/aigw-edge` (shipped by the image or put there by the boot script), behind the same
+  `/__aigw/rt/` nginx location. Vast maps no port ranges, so the backend asks for one `-p <n>:<n>/udp` per UDP port:
+  **ports = 2 × workers × ceil(sessions / workers) + 1**, where sessions is `realtime.maxSessions` (else the machine
+  type's `RT_MAX_SESSIONS`, else 8) and workers is ceil(sessions / `RT_SESSIONS_PER_WORKER`) (6). The edge binds one
+  UDP port per peer connection; the factor 2 covers a re-offer, which binds the new connection before closing the old
+  one; the workers split the range evenly; the last port answers the reachability probe. 4 sessions → 9 UDP ports
+  (`50000-50008`), 16 → 37. With the two TCP ports (80 and SSH) the total must stay within 64 per instance, so at most
+  30 sessions per replica (refused at PUT above that, as is an explicit `realtime.udpPorts` wider than that), and only
+  hosts with `direct_port_count` ≥ the total are searched and rented.
+- `GET /v1/deployments/:name/offers` (admin, read-only): the ranked offers a create would try.
 - **App port = `port`** (default 8000): nginx proxies to `127.0.0.1:<port>` and the health loop polls
   `http://127.0.0.1:<port><healthPath>`. Everything shares one container, so a stack that already runs a model server
   on 8000 serves its health responder on another port (e.g. `"port": 8010`).
@@ -301,14 +479,20 @@ With `candidates`, each create walks a **ranked ladder**:
   script travels base64 in the env var `AIGW_INIT_B64` and the onstart decodes and runs it.
 - **Offer search** (`POST /bundles/`): on-demand, rentable, verified, 1 GPU, `gpu_name` = `machineType`
   (e.g. `RTX 5090`), `disk_space ≥ volumeGb` (default 50), `cuda_max_good ≥ 12.8` for Blackwell / 12.4 otherwise,
-  `reliability2 ≥ 0.97` (0.95 only when nothing passes), `inet_down ≥ 500`, `direct_port_count ≥ 1`,
+  `reliability2 ≥ 0.97` (0.95 only when nothing passes), `inet_down ≥ 500`, `direct_port_count ≥ 1` (with `realtime`:
+  its UDP ports + 2),
   `dph_total ≤ maxEurPerHour × 1.05` (`EUR_TO_USD`, deliberately below the market rate so the USD cap is never looser
   than the EUR one). Cap and floors are re-checked client side.
-- **Ranking** (`rankOffers`): distance band of the host's country (from `geolocation`, the country after the last
-  comma) from `near`; hosts beyond 2500 km only when no nearer one exists and the spec has `allowFar`. From France,
-  DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3) even when those are cheaper. Inside a band: effective price `dph_total × (1 + 4 × (1 − reliability2))` (an unreliable host costs more), then
-  `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label `aigw:<namespace>:<deployment>`, env `-p 80:80`);
-  one rented in between goes to the next.
+- **Ranking** (`rankOffers`): first the hosts that already passed the RTT gate in the last 24 h (the backend remembers
+  up to 200 by `machine_id` with the RTT they measured; lowest first, in 5-ms bands), then the distance band of the
+  host's country (from `geolocation`, the country after the last comma) from `near`; hosts beyond 2500 km only when no
+  nearer one exists and the spec has `allowFar`. From France, DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3)
+  even when those are cheaper. Inside a band: a host in the `near` country itself before one across a border (a French
+  host before a cheaper British, Swiss or Dutch one), then effective price `dph_total × (1 + 4 × (1 − reliability2))`
+  (an unreliable host costs more), then `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label
+  `aigw:<namespace>:<deployment>`, env `-p 80:80`); one rented in between goes to the next. `lastPlacement` says which
+  offer was rented and which better-ranked ones were passed over and why, e.g.
+  `vast RTX 5090 (≤ €0.85/h); offer 3 of 21: London, GB, $0.796/h; better-ranked offers passed over: offer 811 (Zurich, CH, $0.563/h): … not available; offer 902 (Amsterdam, NL, $0.597/h): … not available`.
 - The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
   whose replica hit `bootTimeoutMinutes` is skipped for 1 h (in memory). States: `running`; `loading`/`created` →
   `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
@@ -318,19 +502,38 @@ With `candidates`, each create walks a **ranked ladder**:
 
 Distance is only a prior; a fresh Vast replica is **measured**. Once it has an address (its nginx front answers
 before the app is ready), the controller asks the backend for the RTT (`measureRtt`: `src/gateway/providers/gpu/rtt-probe.ts`
-on the mapped port, 5 samples × 2 s, median, counting only real response bytes). Median above `maxRttMs` → the
-replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and the next create
-takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too far. Until
-it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never measured again;
-one adopted after a gateway restart is measured for the view only, never released by the gate (it may be serving).
-`GET /v1/deployments/:name` shows `rttMs` per replica, and `lastPlacement` the decisions, e.g.
-`vast RTX 5090 (≤ €0.6/h) near FR; earlier: host Bratislava, SK: RTT 52 ms > maxRttMs 35: released (too-far); RTT 18 ms ≤ maxRttMs 35: kept`.
+on the mapped port, 3 rounds of 5 samples × 2 s, the lowest round's median — the samples of a round leave together,
+so jitter on the gateway's own link lifts all of them and only the lowest round is the path — counting only real response bytes) and, in the same tick, for a
+**baseline**: the same probe against a fixed anchor in the `near` country (`RTT_ANCHORS`: Scaleway's S3 endpoint
+there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `s3.pl-waw.scw.cloud` for PL).
 
-- `maxRttMs`: integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`, `src/deployments/rtt-gate.ts`).
-- **Vantage-point caveat:** the gateway runs on Railway europe-west4 (Netherlands), so it measures **NL → host**, not
-  user → host. France → host is typically 10–20 ms more; 35 ms from NL keeps a French user near ~50 ms. A host east
-  of the Netherlands can pass from NL and still be slower for France than the number suggests — the distance ranking
-  (from `near`) is what keeps those behind closer hosts. Scaleway replicas are not gated.
+- **Relative rule** (a baseline came back): the replica passes when `rtt − baseline ≤ maxRttExcessMs` (integer 0–500,
+  default **20**, `DEFAULT_MAX_RTT_EXCESS_MS`) and, if the spec sets `maxRttMs`, `rtt ≤ maxRttMs` as well. Why 20: on
+  2026-10-08, from France, UK hosts measured 12–15 ms over Paris and served the speech stack as fast as an L40S, so
+  they stay in with ~5 ms of noise margin; the Slovak host of 2026-10-06 (~60 ms, ≥ 40 over) goes. That day's French
+  host (42 ms while Paris measured 45: −3) passes; the absolute 35 ms had released it.
+- **Absolute rule** (no anchor for the country, or the baseline probe failed — the gate never opens for lack of a
+  baseline): `rtt ≤ maxRttMs`, integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`), meant for the gateway's vantage
+  on Railway europe-west4 (NL), where France → host is typically 10–20 ms more.
+
+Outside the gate the replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and
+the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
+far. Until it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never
+measured again and its host is remembered as known-good for the ranking; one adopted after a gateway restart is
+measured for the view only, never released by the gate (it may be serving).
+`GET /v1/deployments/:name` shows `rttMs` and `rttBaselineMs` per replica, and `lastPlacement` both numbers and the
+verdict, e.g.
+`vast RTX 5090 (≤ €0.6/h); offer 1 of 12: Paris, FR, $0.548/h; RTT 42 ms, baseline 45 ms (s3.fr-par.scw.cloud): −3 ms ≤ maxRttExcessMs 20: kept`
+or `…; earlier: host Bratislava, SK: RTT 61 ms, baseline 14 ms (s3.fr-par.scw.cloud): +47 ms > maxRttExcessMs 20: released (too-far)`.
+`GET /v1/deployments/:name/offers` answers `{offers, gate}`: `gate` is the rule in force with the baseline measured
+at that moment (`{near, rule, anchor, baselineMs, maxRttExcessMs, maxRttMs}`), and each offer carries `knownRttMs`
+and `gateVerdict` when its host was measured before.
+
+- **What the difference means:** `rtt − baseline` is a lower bound of the anchor → host round trip, taken from where
+  the gateway runs, not the user's own latency. From a vantage near the users it is close to what they add over a
+  datacenter of their country; from the Netherlands a host that is as far from the gateway as Paris is (a British
+  one) reads ≈ 0 over. The distance ranking, the own-country preference and an explicit `maxRttMs` cover that side.
+  Scaleway replicas are not gated.
 
 ### Host rental end (Vast) — handover before the host goes
 
@@ -406,7 +609,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
-| `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000; `docs/api/http.md` § App keys) |
+| `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the same for every app: size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
 | `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 150) caps parallel requests per key user, `MAX_CONCURRENT_PER_USER_OVERRIDES` (`user:limit,…`) per user |
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |
@@ -415,6 +618,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GHCR_READ_TOKEN` | registry credential of a declared deployment whose `registryAuth.passwordEnv` names it (none today: `parle-speech` needs no token) |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
+| `DEPLOYMENTS_MAX_WAIT_SECONDS` | longest wait of an invoke through a cold start (240; § Cold start) |
 
 Railway itself allows ~11k req/s per domain, 10k concurrent connections and requests up to 15 min while bytes flow
 (5 min with none) — not a constraint for model traffic. Machines are found by tag on Scaleway, so a gateway restart

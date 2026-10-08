@@ -16,6 +16,7 @@ import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/cir
 import { CooldownTracker } from '../../../src/gateway/providers/cloud/fallback';
 import type { LLMProvider } from '../../../src/gateway/providers/cloud/types';
 import { handleChatCompletions } from '../../../src/gateway/proxy/routes/chat-completions';
+import { _resetExternalLoad, reportExternalLoad } from '../../../src/realtime/external-load';
 import { FakeCloud, until } from './_fake-cloud';
 
 const spec = (over: Record<string, unknown> = {}): DeploymentSpec =>
@@ -218,5 +219,92 @@ describe('controller: overflow, warm, explanation', () => {
     expect(v.replicas[0].busy).toBe(true);
     expect(v.replicas[0].phase).toBe('ready');
     await until(() => x.controller.get('speech')!.autoscale.errorRate === 1);
+  });
+});
+
+describe('controller: realtime sessions are load', () => {
+  let now = NOW;
+  let booted: Set<string> | null = null;
+  afterEach(() => { _resetExternalLoad(); booted = null; });
+
+  async function classroom(maxReplicas: number) {
+    now = NOW;
+    const cloud = new FakeCloud(() => now);
+    clouds.push(cloud);
+    const controller = new DeploymentController({
+      backend: cloud, store: new MemoryDeploymentStore(), probe: { ready: async m => !booted || booted.has(m.id) }, namespace: 'test',
+      now: () => now, maxTotalReplicas: 6,
+    });
+    await controller.init();
+    await controller.put('speech', { profile: 'cpu-echo', maxReplicas, targetInflightPerReplica: 8, scaleDownDelaySeconds: 0 });
+    controller.wake('speech');
+    await until(async () => { await controller.reconcile(); return controller.get('speech')!.status === 'ready'; });
+    const first = controller.get('speech')!.replicas[0].id;
+    booted = new Set([first]);
+    const tick = async (sessions: Record<string, number>, ms = 0) => {
+      now += ms;
+      for (const [id, active] of Object.entries(sessions)) reportExternalLoad('speech', id, active, 8, now);
+      controller.wake('speech');
+      await controller.reconcile();
+      return controller.get('speech')!;
+    };
+    return { controller, cloud, first, tick };
+  }
+
+  it('occupancy above 75 % of the realtime slots for the window creates the next replica; at 75 % it does not', async () => {
+    const x = await classroom(2);
+    await x.tick({ [x.first]: 6 });
+    expect((await x.tick({ [x.first]: 6 }, 20_000)).autoscale).toMatchObject({ load: 6, pressureWant: 0, desired: 1 });
+    expect(x.cloud.created).toHaveLength(1);
+    await x.tick({ [x.first]: 7 });
+    const v = await x.tick({ [x.first]: 7 }, 20_000);
+    expect(v.autoscale.reason).toMatch(/load 7 > 75% of 1×8/);
+    expect(x.cloud.created).toHaveLength(2);
+  });
+
+  it('a replica already booting counts as capacity: no second create while it boots', async () => {
+    const x = await classroom(3);
+    await x.tick({ [x.first]: 8 });
+    await x.tick({ [x.first]: 8 }, 20_000);
+    expect(x.cloud.created).toHaveLength(2);
+    await until(async () => (await x.tick({ [x.first]: 8 })).replicas.length === 2);
+    for (let i = 0; i < 5; i++) await x.tick({ [x.first]: 8 }, 20_000);
+    expect(x.cloud.created).toHaveLength(2);
+    expect(x.controller.get('speech')!.replicas.map(r => r.phase).sort()).toEqual(['booting', 'ready']);
+  });
+
+  it('maxReplicas holds: a full replica at the cap asks for nothing more and says why', async () => {
+    const x = await classroom(1);
+    await x.tick({ [x.first]: 8 });
+    const v = await x.tick({ [x.first]: 8 }, 20_000);
+    expect(x.cloud.created).toHaveLength(1);
+    expect(v.autoscale).toMatchObject({ desired: 1, blockedBy: 'maxReplicas 1' });
+  });
+
+  it('sessions ended: the extra replica is released by the scale-in rules', async () => {
+    const x = await classroom(2);
+    await x.tick({ [x.first]: 8 });
+    await x.tick({ [x.first]: 8 }, 20_000);
+    booted = null;
+    await until(async () => (await x.tick({ [x.first]: 8 })).replicas.length === 2);
+    const second = x.controller.get('speech')!.replicas.find(r => r.id !== x.first)!.id;
+    expect((await x.tick({ [x.first]: 8, [second]: 3 }, 1_000)).replicas.filter(r => r.phase === 'ready')).toHaveLength(2);
+    await x.tick({ [x.first]: 0, [second]: 0 }, 1_000);
+    await x.tick({ [x.first]: 0, [second]: 0 }, 1_000);
+    expect(x.cloud.machines.size).toBe(1);
+  });
+
+  it('load fits one replica fewer, but the surplus replica keeps its seated learner until the session ends', async () => {
+    const x = await classroom(2);
+    await x.tick({ [x.first]: 8 });
+    await x.tick({ [x.first]: 8 }, 20_000);
+    booted = null;
+    await until(async () => (await x.tick({ [x.first]: 8 })).replicas.length === 2);
+    const second = x.controller.get('speech')!.replicas.find(r => r.id !== x.first)!.id;
+    for (let i = 0; i < 6; i++) await x.tick({ [x.first]: 2, [second]: 1 }, 20_000);
+    expect(x.cloud.machines.has(second)).toBe(true);
+    expect(x.cloud.machines.size).toBe(2);
+    for (let i = 0; i < 3; i++) await x.tick({ [x.first]: 2, [second]: 0 }, 20_000);
+    expect(x.cloud.machines.size).toBe(1);
   });
 });

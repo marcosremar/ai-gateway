@@ -35,16 +35,30 @@ type PlayerFactory = (opts: { rate: number }) => Promise<PcmPlayer>;
 /** Maps one s2s event onto the realtime vocabulary (null = nothing to show). */
 export function mapS2SEvent(e: S2SEvent): RealtimeEvent[] {
   switch (e.type) {
+    case 'route': return [{ type: 'route', provider: String(e.provider ?? ''), ...(e.fallback ? { fallback: String(e.fallback) } : {}) }];
     case 'transcript': return [{ type: 'transcript', text: String(e.text ?? ''), final: true }];
     case 'filtered': return [{ type: 'filtered', reasons: Array.isArray(e.reasons) ? e.reasons.map(String) : [] }];
     case 'sentence': return [{ type: 'reply_delta', text: String(e.text ?? '') }];
     case 'first_audio': return [{ type: 'audio_start' }];
-    case 'error': return [{ type: 'error', code: String(e.stage ?? e.code ?? 's2s'), message: String(e.message ?? 'error') }];
+    case 'opener': return [{
+      type: 'opener', state: e.state === 'end' ? 'end' : 'start', ...(typeof e.text === 'string' ? { text: e.text } : {}),
+      ...(typeof e.index === 'number' ? { index: e.index } : {}), ...(typeof e.audio_ms === 'number' ? { audio_ms: e.audio_ms } : {}),
+    }];
+    case 'deadline_missed': return [{ type: 'deadline_missed', deadline_ms: Number(e.deadline_ms) }];
+    case 'error': return [{
+      type: 'error', code: String(e.stage ?? e.code ?? 's2s'), message: String(e.message ?? 'error'),
+      ...(typeof e.unspoken === 'string' && e.unspoken ? { unspoken: e.unspoken } : {}),
+    }];
     case 'done': {
       const out: RealtimeEvent[] = [];
       if (typeof e.reply === 'string' && e.reply) out.push({ type: 'reply', text: e.reply });
-      out.push({ type: 'metrics', ttfa_ms: typeof e.first_audio_ms === 'number' ? e.first_audio_ms : null });
-      out.push({ type: 'done', ...(e.empty ? { empty: true } : {}), ...(e.filtered ? { filtered: true } : {}) });
+      out.push({
+        type: 'metrics', ttfa_ms: typeof e.first_audio_ms === 'number' ? e.first_audio_ms : null,
+        ...(typeof e.first_sound_ms === 'number' ? { first_sound_ms: e.first_sound_ms } : {}),
+        ...(typeof e.opener === 'string' ? { opener: e.opener } : {}),
+        ...(typeof e.deadline_missed === 'boolean' ? { deadline_missed: e.deadline_missed } : {}),
+      });
+      out.push({ type: 'done', ...(e.empty ? { empty: true } : {}), ...(e.filtered ? { filtered: true } : {}), ...(e.partial ? { error: true } : {}) });
       return out;
     }
     default: return [];
@@ -56,6 +70,8 @@ abstract class ClipTransport implements RealtimeTransport {
   readonly clipBased = true;
   protected player: PcmPlayer | null = null;
   protected turn: AbortController | null = null;
+  protected localOpener = false;
+  private opening: Promise<PcmPlayer> | null = null;
 
   constructor(protected readonly ctx: TransportContext, private readonly makePlayer: PlayerFactory) {}
 
@@ -63,9 +79,13 @@ abstract class ClipTransport implements RealtimeTransport {
     // Nothing to open: the first turn proves the rung (a failing turn fails over and is re-sent below).
   }
 
-  protected async getPlayer(rate: number): Promise<PcmPlayer> {
-    if (!this.player) this.player = await this.makePlayer({ rate });
-    return this.player;
+  protected getPlayer(rate: number): Promise<PcmPlayer> {
+    return (this.opening ??= this.makePlayer({ rate }).then(p => (this.player = p), (err) => { this.opening = null; throw err; }));
+  }
+
+  playOpener(samples: Float32Array, rate: number): void {
+    this.localOpener = true;
+    void this.getPlayer(rate).then(p => p.pushFloat(samples, rate));
   }
 
   send(message: ClientMessage): void {
@@ -80,6 +100,7 @@ abstract class ClipTransport implements RealtimeTransport {
   protected begin(): AbortSignal {
     this.turn?.abort(new Error('superseded'));
     this.turn = new AbortController();
+    this.localOpener = false;
     return AbortSignal.any ? AbortSignal.any([this.turn.signal, AbortSignal.timeout(this.ctx.timeouts.turnMs)]) : this.turn.signal;
   }
 
@@ -96,6 +117,7 @@ abstract class ClipTransport implements RealtimeTransport {
     this.turn = null;
     this.player?.close();
     this.player = null;
+    this.opening = null;
   }
 }
 
@@ -119,6 +141,9 @@ class S2SStreamTransport extends ClipTransport {
     let encoded: string | null = null; // a non-PCM audio_format: chunks are a container, decoded per sentence
     let pending: Uint8Array[] = [];
     let sawAudio = false;
+    let inOpener = false;
+    let played = false;
+    const end = { done: false, error: false, sentence: '', skipped: [] as string[] };
     const flushEncoded = async () => {
       if (!pending.length) return;
       const size = pending.reduce((n, c) => n + c.length, 0);
@@ -135,7 +160,29 @@ class S2SStreamTransport extends ClipTransport {
         if (typeof e.sample_rate === 'number') rate = e.sample_rate;
         return;
       }
-      if (e.type === 'done') await flushEncoded();
+      if (e.type === 'sentence') end.sentence = String(e.text ?? '');
+      if (e.type === 'sentence_failed') end.skipped.push(String(e.text ?? ''));
+      if (e.type === 'error') end.error = true;
+      if (e.type === 'done') {
+        await flushEncoded();
+        end.done = true;
+        const unspoken = end.skipped.join(' ').trim();
+        const incomplete = !e.partial && !end.error && (unspoken || Number(e.skipped) > 0 || Number(e.spoken) < Number(e.sentences));
+        if (incomplete) {
+          this.ctx.emit({ type: 'error', code: 'truncated', message: 'the reply ended with sentences not voiced', ...(unspoken ? { unspoken } : {}) });
+        }
+        if (incomplete || e.partial || end.error) {
+          await this.player?.idle();
+          for (const out of mapS2SEvent({ ...e, partial: true })) this.ctx.emit(out);
+          return;
+        }
+      }
+      if (e.type === 'sentence_end') await flushEncoded();
+      if (e.type === 'opener') {
+        inOpener = e.state === 'start';
+        if (!inOpener) await flushEncoded();
+        if (this.localOpener) return;
+      }
       if (e.type === 'first_audio') {
         if (sawAudio) return; // the audio itself came first and already announced it
         sawAudio = true;
@@ -143,7 +190,10 @@ class S2SStreamTransport extends ClipTransport {
       for (const out of mapS2SEvent(e)) this.ctx.emit(out);
     };
     const onAudio = async (pcm: Uint8Array) => {
-      if (!sawAudio) { sawAudio = true; this.ctx.emit({ type: 'audio_start' }); }
+      if (inOpener && this.localOpener) return;
+      played = true;
+      if (!sawAudio && !inOpener) { sawAudio = true; this.ctx.emit({ type: 'audio_start' }); }
+      end.sentence = '';
       if (encoded) { pending.push(pcm.slice()); return; }
       const even = pcm.length - (pcm.length % 2);
       const view = new DataView(pcm.buffer, pcm.byteOffset, even);
@@ -177,8 +227,15 @@ class S2SStreamTransport extends ClipTransport {
         }
       }
     }
+    if (!end.done && !signal.aborted) {
+      if (!end.error) {
+        this.ctx.emit({ type: 'error', code: 'truncated', message: 's2s stream ended without done', ...(end.sentence ? { unspoken: end.sentence } : {}) });
+      }
+      await this.player?.idle();
+      this.ctx.emit({ type: 'done', error: true });
+    }
     this.turn = null;
-    await this.endAudio(sawAudio);
+    await this.endAudio(played);
   }
 }
 

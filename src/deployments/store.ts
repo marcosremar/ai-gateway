@@ -1,34 +1,44 @@
 /**
- * Deployment specs and profiles persist as one JSON file (atomic tmp + rename, writes serialized). On Railway
- * point `DEPLOYMENTS_STATE_DIR` at a mounted volume: the container filesystem is wiped on every deploy.
+ * Deployment specs, profiles and the network releases still owed after a delete persist as one JSON file (atomic
+ * tmp + rename, writes serialized). On Railway point `DEPLOYMENTS_STATE_DIR` at a mounted volume: the container
+ * filesystem is wiped on every deploy.
  *
  * Replicas are NOT stored here — the provider is their source of truth (found by tag).
  */
 
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
-import type { DeploymentRecord, DeploymentStore, Profile } from './types';
+import type { DeploymentRecord, DeploymentStore, PendingNetworkRelease, Profile } from './types';
 
 interface StateFile {
   version: 1;
   deployments: Record<string, DeploymentRecord>;
   profiles: Record<string, Profile>;
+  networkReleases: Record<string, PendingNetworkRelease>;
 }
 
-const empty = (): StateFile => ({ version: 1, deployments: {}, profiles: {} });
+const empty = (): StateFile => ({ version: 1, deployments: {}, profiles: {}, networkReleases: {} });
 
 export class MemoryDeploymentStore implements DeploymentStore {
   protected state: StateFile = empty();
 
   async load() {
-    return { deployments: Object.values(this.state.deployments), profiles: Object.values(this.state.profiles) };
+    return {
+      deployments: Object.values(this.state.deployments), profiles: Object.values(this.state.profiles),
+      networkReleases: Object.values(this.state.networkReleases),
+    };
   }
   async saveDeployment(record: DeploymentRecord) {
     this.state.deployments[record.spec.name] = structuredClone(record);
     await this.flush();
   }
-  async deleteDeployment(name: string) {
+  async deleteDeployment(name: string, release?: PendingNetworkRelease) {
     delete this.state.deployments[name];
+    if (release) this.state.networkReleases[release.network.ipId] = structuredClone(release);
+    await this.flush();
+  }
+  async deleteNetworkRelease(ipId: string) {
+    delete this.state.networkReleases[ipId];
     await this.flush();
   }
   async saveProfile(profile: Profile) {
@@ -58,7 +68,9 @@ export class FileDeploymentStore extends MemoryDeploymentStore {
     if (!this.loaded) {
       try {
         const parsed = JSON.parse(await readFile(this.path, 'utf8')) as Partial<StateFile>;
-        this.state = { version: 1, deployments: parsed.deployments ?? {}, profiles: parsed.profiles ?? {} };
+        this.state = {
+          version: 1, deployments: parsed.deployments ?? {}, profiles: parsed.profiles ?? {}, networkReleases: parsed.networkReleases ?? {},
+        };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
         this.state = empty();

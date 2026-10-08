@@ -1,17 +1,20 @@
 /**
  * Placement: where a replica may run. Two spec fields, one walk (`placement-walk.ts`):
  *
- *   - `placements` (Scaleway): the spec's own zone/type first, then each entry IN ORDER (`placementsOf`), at the spec's
- *     `maxEurPerHour`; the walk moves on only when the type is not sold, over the cap, or out of stock (`isOutOfStock`).
+ *   - `placements`: the spec's own zone/type first, then each entry IN ORDER (`placementsOf`), at the spec's
+ *     `maxEurPerHour` (an entry on another provider carries its own cap); the walk moves on only when the type is not
+ *     sold, over the cap, out of stock (`isOutOfStock`) or over the account's quota (`quotaMachineType`: that machine
+ *     type is then skipped in every zone).
  *   - `candidates` (Scaleway and Vast): a ladder ranked here (`rankCandidates`), each entry with its own cap.
  *
  * The ranking is pure, no I/O — the Vast backend ranks market offers with `rankOffers`. The owner's three goals:
  * reliable, cheap, low latency for users in France. Distance decides first (`geo.ts`: great-circle km from the `near`
- * country, in 500-km bands — latency is physics, EU membership is not); inside a band, the cheapest *effective* price
- * wins, where an unreliable host is priced as if it cost more. Vast hosts are then measured (`maxRttMs`, controller).
+ * country, in 500-km bands — latency is physics, EU membership is not); inside a band, a host in the users' own country
+ * goes before one across a border, then the cheapest *effective* price wins, where an unreliable host is priced as if
+ * it cost more. Vast hosts are then measured (`rtt-gate.ts`), and one that passed sorts first on later creates.
  */
 import { countryDistanceKm } from './geo';
-import type { CatalogEntry, DeploymentProvider, DeploymentSpec, PlacementCandidate } from './types';
+import type { CatalogEntry, DeploymentProvider, DeploymentSpec, Placement, PlacementCandidate } from './types';
 
 export type { CatalogEntry };
 
@@ -21,29 +24,38 @@ export type { CatalogEntry };
 export function placementsOf(spec: DeploymentSpec): DeploymentSpec[] {
   const seen = new Set<string>();
   const out: DeploymentSpec[] = [];
-  for (const p of [{}, ...(spec.placements ?? [])]) {
+  for (const p of [{} as Placement, ...(spec.placements ?? [])]) {
     const zone = p.zone ?? spec.zone;
     const machineType = p.machineType ?? spec.machineType;
-    const key = `${zone}/${machineType}`;
+    const provider = p.provider ?? spec.provider;
+    const key = `${provider}/${zone}/${machineType}`;
     if (seen.has(key)) continue;
     seen.add(key);
     // Scaleway image ids are per zone: a pinned image only holds in its own zone (elsewhere the backend looks up the
     // same image there).
     const { osImageId, ...rest } = spec;
-    out.push({ ...rest, ...(zone === spec.zone && osImageId ? { osImageId } : {}), zone, machineType });
+    out.push({ ...rest, ...(zone === spec.zone && osImageId ? { osImageId } : {}), provider, zone, machineType, maxEurPerHour: p.maxEurPerHour ?? spec.maxEurPerHour, ...(p.image ? { image: p.image } : {}) });
   }
   return out;
 }
 
 /**
  * The provider has no machine of this type in this zone right now. Scaleway answers a server create with
- * `412 {"type":"out_of_stock"}` (seen 2026-10-06 for L40S and L4 in fr-par-2); quota and capacity wordings count too.
+ * `412 {"type":"out_of_stock"}` (seen 2026-10-06 for L40S and L4 in fr-par-2); capacity wordings count too. A quota refusal is not one: it holds
+ * for the machine type in every zone (`quotaMachineType`).
  */
 export function isOutOfStock(err: unknown): boolean {
   const e = err as { status?: unknown; body?: unknown; message?: unknown } | null;
   const text = `${typeof e?.message === 'string' ? e.message : ''} ${typeof e?.body === 'string' ? e.body : ''}`;
   if (/out_of_stock|out of stock|shortage|insufficient capacity|no (?:more )?capacity|not enough (?:stock|capacity)/i.test(text)) return true;
   return e?.status === 412 && /stock|capacity|available/i.test(text);
+}
+
+export function quotaMachineType(err: unknown, fallback: string): string | null {
+  const e = err as { body?: unknown; message?: unknown } | null;
+  const text = `${typeof e?.message === 'string' ? e.message : ''} ${typeof e?.body === 'string' ? e.body : ''}`;
+  if (!/quota/i.test(text)) return null;
+  return /cp_servers_type_(\w+)/.exec(text)?.[1].replace(/_/g, '-') ?? fallback;
 }
 
 // ── Geography and ranking (`candidates`, Vast offers) ───────────────────────
@@ -90,6 +102,8 @@ export interface VastOffer {
   dph_total: number;
   reliability2: number;
   inet_down: number;
+  inet_up?: number;
+  direct_port_count?: number;
   geolocation?: string | null;
   gpu_name?: string;
   /** Highest CUDA version the host driver supports. */
@@ -117,20 +131,32 @@ export interface RankOffersOptions {
   allowFar?: boolean;
   /** Host machine ids to leave out (recent boot failures). */
   avoidMachines?: ReadonlySet<number>;
+  /** Host machine id → RTT (ms) it measured when it last passed the RTT gate. */
+  knownRtt?: ReadonlyMap<number, number>;
 }
 
-/** Offers ordered best first: distance band, then effective price, then download bandwidth (faster image pull). */
+export const KNOWN_RTT_BAND_MS = 5;
+
+/**
+ * Offers ordered best first: hosts that already passed the RTT gate (by measured RTT, in 5-ms bands), then distance
+ * band, then the users' own country before a neighbour, then effective price, then download bandwidth (faster pull).
+ */
 export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: RankOffersOptions): T[] {
   const usable = offers.filter(o => o.machine_id === undefined || !opts.avoidMachines?.has(o.machine_id));
   const scored = usable.map((o) => {
     const cc = countryOf(o.geolocation);
-    return { o, near: isNear(cc, opts.near), bucket: distanceBucket(cc, opts.near), eff: effectivePrice(o) };
+    const rtt = o.machine_id === undefined ? undefined : opts.knownRtt?.get(o.machine_id);
+    return {
+      o, near: isNear(cc, opts.near), bucket: distanceBucket(cc, opts.near), eff: effectivePrice(o),
+      known: rtt === undefined ? Infinity : Math.floor(rtt / KNOWN_RTT_BAND_MS), abroad: cc === opts.near.toUpperCase() ? 0 : 1,
+    };
   });
   const near = scored.filter(t => t.near);
   const pool = near.length ? near : opts.allowFar ? scored : [];
   const byBucket = (a: number, b: number) => (a === b ? 0 : a < b ? -1 : 1); // Infinity-safe
   return pool
-    .sort((a, b) => byBucket(a.bucket, b.bucket) || a.eff - b.eff || (b.o.inet_down || 0) - (a.o.inet_down || 0))
+    .sort((a, b) => byBucket(a.known, b.known) || byBucket(a.bucket, b.bucket) || a.abroad - b.abroad || a.eff - b.eff
+      || (b.o.inet_down || 0) - (a.o.inet_down || 0))
     .map(t => t.o);
 }
 

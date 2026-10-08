@@ -159,7 +159,7 @@ describe('deep health report', () => {
     expect(b.providers.find(x => x.provider === 'openrouter')).toMatchObject({ configured: true, ok: false, error: 'HTTP 401' });
     expect(b.providers.find(x => x.provider === 'groq')).toMatchObject({ ok: true });
     expect(b.providers.find(x => x.provider === 'openai')).toMatchObject({ configured: false, error: 'OPENAI_API_KEY is not set' });
-    expect(b.deployments.items).toEqual([{ name: 'parle-speech', status: 'scaled-to-zero', replicas: 0, ready: 0, lastError: null }]);
+    expect(b.deployments.items).toEqual([{ name: 'parle-speech', status: 'scaled-to-zero', replicas: 0, ready: 0, lastError: null, stagesOut: [] }]);
     expect(b.circuits['chat:deployment:parle-speech']).toBeDefined();
   });
 });

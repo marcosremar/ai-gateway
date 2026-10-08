@@ -3,10 +3,16 @@
  * same name as a built-in one overrides it.
  */
 
-import type { Profile } from './types';
+import type { Profile, ScalingSpec } from './types';
 
 /** vLLM-Omni serves Qwen3-TTS with an OpenAI-shaped `POST /v1/audio/speech` (same image the parle L4 runs). */
 const VLLM_OMNI_IMAGE = 'vllm/vllm-omni:v0.28.0';
+
+const VAST_GPU = { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85 } as const;
+const VAST_HOST = { minCuda: 13, maxRttExcessMs: 20 };
+const SPEECH_STACK_TAG = '20261008-1317';
+const SPEECH_STACK_IMAGE_ENV = { TTS_MODEL: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base', LLM_FILE: 'Qwen3.5-9B-Q4_K_M.gguf' };
+const CLASS_VOICE: ScalingSpec = { mode: 'fast' };
 
 function qwenTts(model: string) {
   return {
@@ -17,6 +23,9 @@ function qwenTts(model: string) {
     healthPath: '/health',
     machineType: 'L4-1-24G',
     zone: 'fr-par-2',
+    placements: [{ zone: 'fr-par-1' }, { ...VAST_GPU, maxReplicas: 2 }],
+    ...VAST_HOST,
+    scaling: CLASS_VOICE,
     gpu: true,
     volumeGb: 80,
     minReplicas: 0,
@@ -81,18 +90,19 @@ export const BUILTIN_PROFILES: Profile[] = [
     builtin: true,
     spec: {
       // docker/speech-stack: Whisper large-v3 + Qwen3.5-9B (llama.cpp) + Qwen3-TTS (vLLM-Omni) in one image.
-      image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261004-2240',
+      image: `rg.fr-par.scw.cloud/aigw/speech-stack:${SPEECH_STACK_TAG}`,
       port: 8000,
       healthPath: '/health',
       // The L40S the parle class runs on (live QA 2026-10-07), and when it is out of stock (17 min in fr-par-2 that day, the
-      // 2nd replica never came): the same type in fr-par-1 (skipped at no cost when not sold there), then an L4 in
-      // fr-par-2, Warsaw (the zones with GPU stock on 2026-10-06) and fr-par-1 — `envByMachineType` tunes each GPU.
+      // 2nd replica never came): the same type in fr-par-1 (skipped at no cost when not sold there), then one RTX 5090 on
+      // Vast. No L4: the account's L4 quota (2) belongs to the TTS deployment. `envByMachineType` tunes each GPU.
       machineType: 'L40S-1-48G',
       zone: 'fr-par-2',
-      placements: [
-        { zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }, { zone: 'pl-waw-2', machineType: 'L4-1-24G' },
-        { zone: 'fr-par-1', machineType: 'L4-1-24G' },
-      ],
+      placements: [{ zone: 'fr-par-1' }, { ...VAST_GPU, maxReplicas: 1, image: `ghcr.io/marcosremar/speech-stack:${SPEECH_STACK_TAG}` }],
+      ...VAST_HOST,
+      entrypoint: 'bash',
+      args: ['/opt/s2s/start.sh'],
+      scaling: CLASS_VOICE,
       gpu: true,
       // ~57 GB image: the boot disk must hold it plus the Docker layers.
       volumeGb: 80,
@@ -110,10 +120,18 @@ export const BUILTIN_PROFILES: Profile[] = [
       maxEurPerHour: 2,
       // Measured 2026-10-04 (docker/speech-stack/README.md): L4 24 GB fits STT_BATCH 4 / LLM 8 slots beside the TTS
       // (more OOMs); the L40S 48 GB takes STT_BATCH 8 / LLM 16 / a 12 GB TTS stage. RT_MAX_SESSIONS is the realtime
-      // edge's per-replica cap when `realtime` is set (docs/realtime-edge.md): one session per LLM slot.
+      // edge's per-replica cap when `realtime` is set (docs/realtime-edge.md): what one replica serves with the
+      // MAXIMUM first audio under the 2.5 s ceiling. Measured live 2026-10-08 on one L40S
+      // (docs/reports/2026-10-07-realtime-handoff.md § New image and class capacity): max 1.49–2.12 s at 4 learners
+      // (2.44 s in a burst of 4), 2.16–2.39 s at 6, 2.64–2.83 s at 8, 3.87–4.44 s at 16 — so 4 (was 8, chosen on the
+      // p95). The L4's 2 is an estimate from its /v1/s2s first audio (1.5 s with 1 turn, 4.2 s with 4), not a
+      // realtime measurement. The RTX 5090 (Vast, 32 GB) takes the values of the live /v1/s2s run of 2026-10-08, where it
+      // matched the L40S at 1 and 4 at once; its RT_MAX_SESSIONS 4 is the L40S's measured-safe value, to be re-measured
+      // as realtime on the 5090 itself.
       envByMachineType: {
-        'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '8' },
-        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '16' },
+        'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '2' },
+        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '4', LLM_SLOT_CTX: '4096' },
+        'RTX 5090': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4', ...SPEECH_STACK_IMAGE_ENV },
       },
       description: 'Whisper + Qwen LLM + Qwen3-TTS in one container (STT, S2S, /ws/audio-stream). POST /v1/s2s.',
     },
@@ -178,6 +196,7 @@ export const BUILTIN_PROFILES: Profile[] = [
       bootTimeoutMinutes: 20,
       idleAction: 'stop',
       maxEurPerHour: 0.5,
+      scaling: { mode: 'balanced' },
       description: 'Whisper large-v3 STT + Qwen3.5-9B Q4 LLM (translation) in one container. POST /v1/audio/transcriptions, /v1/chat/completions, /ws/audio-stream.',
     },
   },

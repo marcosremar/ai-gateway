@@ -22,8 +22,12 @@
  *     is released as `expiring` as soon as it has no request in flight (the router already sends new ones elsewhere).
  *   - Scale-down above the idle base waits `scaleDownDelaySeconds` of low load (no flapping on bursts) and never
  *     releases a replica with requests in flight: with `drainBusy` such surplus is returned in `drain` (no new request,
- *     released once empty). Going idle scales down at once.
+ *     released once empty). Going idle scales down at once. A ready replica is never surplus while that would leave
+ *     fewer ready replicas than `desired`: with one ready and one still booting for `desired` 1, nothing goes until
+ *     the boot finishes (simulator 2026-10-07: the only ready replica was released the tick it turned ready).
  *   - `floor` (warm-up schedule / client warm window) and `autoscaleWant` (pressure, `autoscale.ts`) raise `desired`.
+ *   - `autoscaleOnly` (a spec with a `scaling` block): load no longer sizes the count, `autoscaleWant` alone does;
+ *     `hold` (`scaling.hold`) fixes `desired` at that count, whatever the load, floors and activity.
  *   - A replica still booting is never released for idleness or surplus: the boot finishes and the idle rules apply
  *     from its ready time (live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of its ~9 min boot, and each
  *     sparse request paid a new boot). Only a delete, pause, park (`lastRequestAt` null), the pinned-idle guard or the
@@ -84,6 +88,8 @@ export interface PlanInput {
   autoscaleWant?: number;
   /** Replicas a warm-up schedule or a client warm window keeps up now, whatever the load (`warmFloor`). */
   floor?: number;
+  autoscaleOnly?: boolean;
+  hold?: number;
 }
 
 export interface PlanRelease {
@@ -109,7 +115,7 @@ export function replicaPhase(r: ObservedReplica): ReplicaPhase {
 }
 
 type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now' | 'pinnedIdleMaxMs' | 'specUpdatedAt' | 'demand'
-  | 'autoscaleWant' | 'floor'>
+  | 'autoscaleWant' | 'floor' | 'autoscaleOnly' | 'hold'>
   & { replicas?: ObservedReplica[] };
 
 /** A `minReplicas` pin nobody used (no request, no spec change) for `pinnedIdleMaxMs`. */
@@ -138,12 +144,13 @@ export function isActive(input: ActivityInput): boolean {
 export function desiredReplicas(input: ActivityInput): number {
   const { spec } = input;
   if (spec.paused) return 0;
+  if (input.hold !== undefined) return Math.min(spec.maxReplicas, input.hold);
   const floor = input.floor ?? 0;
   if (pinnedIdleOver(input)) return Math.min(spec.maxReplicas, floor);
   const active = isActive(input);
   const base = active ? Math.max(spec.minReplicas, spec.minActiveReplicas ?? 1, 1) : spec.minReplicas;
   const load = Math.max(input.inflight + input.waiting, active ? input.demand ?? 0 : 0);
-  const byLoad = Math.ceil(load / spec.targetInflightPerReplica);
+  const byLoad = input.autoscaleOnly ? 0 : Math.ceil(load / spec.targetInflightPerReplica);
   const pressure = active ? input.autoscaleWant ?? 0 : 0;
   return Math.min(spec.maxReplicas, Math.max(spec.minReplicas, base, byLoad, floor, pressure));
 }
@@ -200,8 +207,9 @@ export function planReplicas(input: PlanInput): Plan {
   const keepBooting = input.lastRequestAt != null && !spec.paused && !pinnedIdleOver(input);
   // Idle surplus goes at once; surplus with requests in flight is drained (only when `drainBusy`: the controller then
   // stops routing to it and releases it once empty), so a steady trickle can no longer pin a scaled-out replica.
+  let readySpare = readyLive - desired;
   const surplus = [...live].filter(r => (input.drainBusy || r.inflight === 0) && !(keepBooting && replicaPhase(r) === 'booting'))
-    .sort(removalOrder).slice(0, live.length - desired);
+    .sort(removalOrder).slice(0, live.length - desired).filter(r => replicaPhase(r) !== 'ready' || readySpare-- > 0);
   const drain: string[] = [];
   for (const r of surplus) {
     if (r.inflight === 0) release.push({ id: r.machine.id, reason: 'scale-down' });

@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
-import { isOutOfStock, placementsOf } from '../../../src/deployments/placements';
+import { isOutOfStock, placementsOf, quotaMachineType } from '../../../src/deployments/placements';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { buildSpec, SpecError } from '../../../src/deployments/spec';
 import { MemoryDeploymentStore } from '../../../src/deployments/store';
@@ -14,17 +14,21 @@ import type { CreateReplicaInput, ReplicaMachine } from '../../../src/deployment
 import { FakeCloud, until } from './_fake-cloud';
 
 const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
+const QUOTA_BODY = '{"type":"quotas_exceeded","message":"Quota exceeded for this resource.","resource":"cp_servers_type_L40S_1_48G","quota":2,"current":2}';
+const overQuota = () => Object.assign(new Error(`scaleway HTTP 403: ${QUOTA_BODY}`), { status: 403, body: QUOTA_BODY });
 const outOfStock = () => Object.assign(new Error('scaleway HTTP 412: {"type":"out_of_stock","message":"out of stock"}'), { status: 412 });
 
 /** A cloud whose zone/type pairs in `empty` answer 412 out_of_stock; `prices` overrides the catalog per pair. */
 class StockCloud extends FakeCloud {
   empty = new Set<string>();
+  quotaTypes = new Set<string>();
   prices = new Map<string, number | null>();
   attempts: string[] = [];
   override async createReplica(input: CreateReplicaInput): Promise<ReplicaMachine> {
     const where = `${input.spec.zone}/${input.spec.machineType}`;
     this.attempts.push(where);
     if (this.empty.has(where)) throw outOfStock();
+    if (this.quotaTypes.has(input.spec.machineType)) throw overQuota();
     return super.createReplica(input);
   }
   override async hourlyPrice(zone?: string, machineType?: string): Promise<number | null> {
@@ -80,10 +84,10 @@ describe('placements: spec', () => {
     expect(otherZone.osImageId).toBeUndefined();
   });
 
-  it('the speech-stack profile: L40S fr-par-2, then the L40S elsewhere, then L4s (fr-par-2, pl-waw-2, fr-par-1)', () => {
+  it('the speech-stack profile: L40S fr-par-2, then the L40S in fr-par-1, never an L4', () => {
     const spec = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
-    expect(placementsOf(spec).map(p => `${p.zone}/${p.machineType}`)).toEqual([
-      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G', 'fr-par-2/L4-1-24G', 'pl-waw-2/L4-1-24G', 'fr-par-1/L4-1-24G',
+    expect(placementsOf(spec).filter(p => p.provider === 'scaleway').map(p => `${p.zone}/${p.machineType}`)).toEqual([
+      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G',
     ]);
   });
 
@@ -92,6 +96,13 @@ describe('placements: spec', () => {
     expect(isOutOfStock(new Error('GPU shortage in zone'))).toBe(true);
     expect(isOutOfStock(Object.assign(new Error('scaleway HTTP 403: quota'), { status: 403 }))).toBe(false);
     expect(isOutOfStock(new Error('image not found'))).toBe(false);
+  });
+
+  it('reads the machine type of a quota refusal from the provider body, else the type being created', () => {
+    expect(quotaMachineType(overQuota(), 'L4-1-24G')).toBe('L40S-1-48G');
+    expect(quotaMachineType(new Error('scaleway HTTP 403: quota exceeded'), 'L4-1-24G')).toBe('L4-1-24G');
+    expect(quotaMachineType(outOfStock(), 'L4-1-24G')).toBeNull();
+    expect(quotaMachineType(new Error('image not found'), 'L4-1-24G')).toBeNull();
   });
 });
 
@@ -117,13 +128,62 @@ describe('placements: controller', () => {
     expect(cloud.attempts).toEqual(['fr-par-2/L4-1-24G', 'pl-waw-2/L4-1-24G']);
   });
 
-  it('a non-stock error stops at the primary (it would fail everywhere) and reports it', async () => {
+  it('a quota refusal skips the other zones of that machine type and tries the next type in the same walk', async () => {
+    const cloud = new StockCloud();
+    cloud.quotaTypes.add('L40S-1-48G');
+    const controller = await controllerOn(cloud);
+    await controller.put('s', { ...SPEC, machineType: 'L40S-1-48G', placements: [{ zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }] });
+    await until(() => cloud.machines.size === 1);
+    expect(cloud.attempts).toEqual(['fr-par-2/L40S-1-48G', 'fr-par-2/L4-1-24G']);
+    expect(controller.get('s')?.lastPlacement).toMatch(/L4-1-24G@fr-par-2.*skipped: quota reached for L40S-1-48G on scaleway/);
+  });
+
+  it('a quota refusal with no other machine type listed backs off and says which type is over quota', async () => {
+    const cloud = new StockCloud();
+    cloud.quotaTypes.add('L40S-1-48G');
+    const controller = await controllerOn(cloud);
+    await controller.put('s', { ...SPEC, machineType: 'L40S-1-48G', placements: [{ zone: 'fr-par-1' }] });
+    await until(() => (controller.get('s')?.autoscale.blockedBy ?? '').includes('quota'));
+    expect(controller.get('s')?.lastError).toContain('quota reached for L40S-1-48G on scaleway');
+    expect(controller.get('s')?.autoscale.blockedBy).toMatch(/create back-off \(create: quota reached for L40S-1-48G on scaleway/);
+    expect(cloud.attempts).toEqual(['fr-par-2/L40S-1-48G']);
+    await new Promise(r => setTimeout(r, 120));
+    expect(cloud.attempts.length).toBe(1);
+  });
+
+  it('a quota refusal on every listed type is tried once per type, then reported (not a create per zone)', async () => {
     const cloud = new StockCloud();
     cloud.failCreate = 'scaleway HTTP 403: quota exceeded';
     const controller = await controllerOn(cloud);
     await controller.put('s', SPEC);
     await until(() => (controller.get('s')?.lastError ?? '').includes('quota'));
     expect(cloud.machines.size).toBe(0);
+    expect(cloud.attempts).toEqual(['fr-par-2/L4-1-24G', 'fr-par-2/L40S-1-48G']);
+  });
+
+  it('an error that is neither stock nor quota stops at the primary (it would fail everywhere) and reports it', async () => {
+    const cloud = new StockCloud();
+    cloud.failCreate = 'scaleway HTTP 401: denied';
+    const controller = await controllerOn(cloud);
+    await controller.put('s', SPEC);
+    await until(() => (controller.get('s')?.lastError ?? '').includes('401'));
+    expect(cloud.attempts).toEqual(['fr-par-2/L4-1-24G']);
+    expect(cloud.machines.size).toBe(0);
+  });
+
+  it('a PUT that changes the spec clears the create back-off; an identical PUT does not', async () => {
+    const cloud = new StockCloud();
+    cloud.quotaTypes.add('L40S-1-48G');
+    const controller = await controllerOn(cloud);
+    const stuck = { ...SPEC, machineType: 'L40S-1-48G', placements: [] };
+    await controller.put('s', stuck);
+    await until(() => (controller.get('s')?.lastError ?? '').includes('quota'));
+    await controller.put('s', stuck);
+    await new Promise(r => setTimeout(r, 120));
+    expect(cloud.attempts).toEqual(['fr-par-2/L40S-1-48G']);
+    await controller.put('s', { machineType: 'L4-1-24G' });
+    await until(() => cloud.machines.size === 1);
+    expect(cloud.attempts).toEqual(['fr-par-2/L40S-1-48G', 'fr-par-2/L4-1-24G']);
   });
 
   it('everything out of stock: one error naming every placement, then backoff', async () => {

@@ -1,11 +1,20 @@
 """Unit test of the sentence cutter (no GPU): python3 docker/speech-stack/test_cut.py"""
+import os
 import re
 from pathlib import Path
 
 src = Path(__file__).with_name("server.py").read_text()
-ns: dict = {}
-exec("import re\nFIRST_MIN_WORDS=3\nMAX_CHUNK_CHARS=160\n" + src[src.index("SENTENCE_END ="):src.index("async def llm_stream")], ns)
-cut = ns["cut"]
+
+
+def load(eager: str):
+    os.environ["CUT_EAGER"] = eager
+    ns: dict = {}
+    exec("import os\nimport re\nFIRST_MIN_WORDS=3\nMAX_CHUNK_CHARS=160\n"
+         + src[src.index("SENTENCE_END ="):src.index("LLM_TIMINGS =")], ns)
+    return ns["cut"]
+
+
+cut = load("0")
 
 
 def run(text: str, step: int = 1) -> list[str]:
@@ -40,4 +49,19 @@ for text, expected in CASES.items():
         assert all(len(c.split()) >= 2 for c in got[:-1]), (text, step, got)  # no one-word chunk before the last
         assert not any(c.endswith("Dr.") for c in got), (text, step, got)  # abbreviations never end a chunk
         assert len(got[0]) <= len(expected[0]) + 10, (text, step, got)  # the first chunk stays short
-print("cut: ok", len(CASES), "cases × 6 token sizes")
+assert cut("Bom dia!", True, False) == (None, "Bom dia!")
+cut = load("1")
+assert cut("Bom dia!", True, False) == ("Bom dia!", "")
+assert cut("Tudo bem?", False, False) == ("Tudo bem?", "")
+assert cut("Custa 3.", True, False) == (None, "Custa 3.")
+assert cut("Pode entrar.", True, False) == (None, "Pode entrar.")
+assert cut("Amiga?", True, False) == (None, "Amiga?")
+assert cut('Ela disse "oi!"', True, False) == (None, 'Ela disse "oi!"')
+for text, expected in CASES.items():
+    for step in (1, 2, 3, 5, 7, 11):
+        got = run(text, step)
+        assert " ".join(got) == " ".join(text.split()), (text, step, got)
+        assert all(len(c.split()) >= 2 for c in got[:-1]), (text, step, got)
+        assert not any(c.endswith("Dr.") for c in got), (text, step, got)
+assert run("Bom dia, querida! Qual você quer?", 1)[0] == "Bom dia, querida!"
+print("cut: ok", len(CASES), "cases × 6 token sizes, eager and not")

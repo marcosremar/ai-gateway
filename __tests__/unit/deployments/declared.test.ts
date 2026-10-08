@@ -66,13 +66,16 @@ async function controller(store: DeploymentStore = new MemoryDeploymentStore(), 
 describe('declared parle-speech spec', () => {
   it('is the speech-stack image in the gateway registry: no credential, no generated secret, no env or sizing of its own', () => {
     expect(speech.image).toEqual({
-      env: 'SPEECH_IMAGE', repository: 'rg.fr-par.scw.cloud/aigw/speech-stack', default: PRODUCTION.image,
+      env: 'SPEECH_IMAGE', repository: 'rg.fr-par.scw.cloud/aigw/speech-stack', default: profile.image,
     });
+    expect(profile.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317');
+    expect(speech.description).not.toMatch(/an L4 when/);
     expect(speech.profile).toBe('speech-stack');
     expect(speech.registryAuth).toBeUndefined();
     expect(speech.generatedSecrets).toBeUndefined();
     expect(speech.spec).toEqual({
-      realtime: {}, envByMachineType: { 'L4-1-24G': { RT_MAX_SESSIONS: '8' }, 'L40S-1-48G': { RT_MAX_SESSIONS: '16' } },
+      realtime: {}, placements: profile.placements, scaling: profile.scaling,
+      envByMachineType: { 'L4-1-24G': { RT_MAX_SESSIONS: '2' }, 'L40S-1-48G': { RT_MAX_SESSIONS: '4' }, 'RTX 5090': profile.envByMachineType!['RTX 5090'] },
     });
     expect(JSON.stringify(speech)).not.toMatch(/GHCR_READ_TOKEN|ghp_|password"\s*:/);
   });
@@ -91,25 +94,38 @@ describe('declared parle-speech spec', () => {
     expect(resolved.body).not.toHaveProperty('registryAuth');
   });
 
-  it('over the production spec: only realtime and RT_MAX_SESSIONS are added, then in sync without another PUT', async () => {
+  it('over the production spec: the image, the placements (no L4), the mode, realtime and the declared env are put, then in sync without another PUT', async () => {
     const { c, cloud } = await controller();
-    await c.put('parle-speech', PRODUCTION);
+    await c.put('parle-speech', { ...PRODUCTION, placements: [{ zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }] });
     const before = c.specOf('parle-speech')!;
     const put = vi.spyOn(c, 'put');
     const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
-    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null, image: PRODUCTION.image });
+    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null, image: profile.image });
     expect(c.specOf('parle-speech')).toEqual({
       ...before,
+      image: profile.image,
+      placements: profile.placements,
+      scaling: { mode: 'fast' },
       realtime: {},
       envByMachineType: {
-        'L4-1-24G': { ...PRODUCTION.envByMachineType['L4-1-24G'], RT_MAX_SESSIONS: '8' },
-        'L40S-1-48G': { ...PRODUCTION.envByMachineType['L40S-1-48G'], RT_MAX_SESSIONS: '16' },
+        'L4-1-24G': { ...PRODUCTION.envByMachineType['L4-1-24G'], RT_MAX_SESSIONS: '2' },
+        'L40S-1-48G': { ...PRODUCTION.envByMachineType['L40S-1-48G'], RT_MAX_SESSIONS: '4' },
+        'RTX 5090': profile.envByMachineType!['RTX 5090'],
       },
     });
     expect(c.specOf('parle-speech')!.registryAuth).toBeUndefined();
     expect((await r.reconcile())[0].state).toBe('in_sync');
     expect(put).toHaveBeenCalledTimes(1);
     expect(cloud.created).toHaveLength(0);
+  });
+
+  it('a scaling budget the operator set stays; the declared mode is put back', async () => {
+    const { c } = await controller();
+    await c.put('parle-speech', { ...PRODUCTION, scaling: { mode: 'economy', budget: { eurPerHour: 3 } } });
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
+    await r.reconcile();
+    expect(c.specOf('parle-speech')!.scaling).toEqual({ mode: 'fast', budget: { eurPerHour: 3 } });
+    expect((await r.reconcile())[0].state).toBe('in_sync');
   });
 
   it('SPEECH_IMAGE moves the image of the production spec and nothing else', async () => {
@@ -129,12 +145,12 @@ describe('declared parle-speech spec', () => {
     expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null });
     const spec = c.specOf('parle-speech')!;
     expect(spec).toMatchObject({
-      image: PRODUCTION.image, port: profile.port, healthPath: '/health', machineType: 'L40S-1-48G', zone: 'fr-par-2',
+      image: profile.image, port: profile.port, healthPath: '/health', machineType: 'L40S-1-48G', zone: 'fr-par-2',
       minReplicas: 0, volumeGb: profile.volumeGb, maxEurPerHour: profile.maxEurPerHour, realtime: {}, env: {},
       envByMachineType: profile.envByMachineType,
     });
-    expect(placementsOf(spec).map(p => `${p.zone}/${p.machineType}`).slice(0, 3)).toEqual([
-      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G', 'fr-par-2/L4-1-24G',
+    expect(placementsOf(spec).map(p => `${p.provider} ${p.zone}/${p.machineType}`)).toEqual([
+      'scaleway fr-par-2/L40S-1-48G', 'scaleway fr-par-1/L40S-1-48G', 'vast fr-par-2/RTX 5090',
     ]);
     expect(spec.registryAuth).toBeUndefined();
     expect(c.get('parle-speech')?.status).toBe('scaled-to-zero');
@@ -147,14 +163,14 @@ describe('declared parle-speech spec', () => {
   // D3, live QA 2026-10-07: one placement only, `L40S-1-48G out of stock in fr-par-2` for 17 min, no 2nd replica.
   it('out of stock in fr-par-2: the replica lands on the next placement', async () => {
     const cloud = new FakeCloud();
-    cloud.failCreateFor = (s) => (s.machineType === 'L40S-1-48G' ? `scaleway HTTP 412: {"type":"out_of_stock"} ${s.zone}` : null);
+    cloud.failCreateFor = (s) => (s.zone === 'fr-par-2' ? `scaleway HTTP 412: {"type":"out_of_stock"} ${s.zone}` : null);
     const { c } = await controller(new MemoryDeploymentStore(), cloud);
     await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     c.start();
     c.wake('parle-speech');
     await until(() => cloud.created.length === 1, 3000);
-    expect(cloud.created[0].spec).toMatchObject({ zone: 'fr-par-2', machineType: 'L4-1-24G' });
-    expect(c.get('parle-speech')!.lastPlacement).toMatch(/L40S-1-48G out of stock in fr-par-2; L40S-1-48G out of stock in fr-par-1/);
+    expect(cloud.created[0].spec).toMatchObject({ zone: 'fr-par-1', machineType: 'L40S-1-48G' });
+    expect(c.get('parle-speech')!.lastPlacement).toMatch(/L40S-1-48G out of stock in fr-par-2/);
   });
 });
 

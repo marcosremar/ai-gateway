@@ -6,6 +6,7 @@
  *   PATCH  /v1/deployments/:name               update an existing one (e.g. { minReplicas, maxReplicas })
  *   GET    /v1/deployments/:name               status + replicas
  *   DELETE /v1/deployments/:name               release every replica and forget the spec
+ *   GET    /v1/deployments/:name/capacity      session ceiling and measured boot / resume times per machine type
  *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic)
  *   POST   /v1/deployments/:name/park          done for now: scale to minReplicas at once (power off under idleAction stop)
  *   *      /v1/deployments/:name/invoke/<path> forwarded to a ready replica as /<path> (waits through cold start)
@@ -22,7 +23,6 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { Readable } from 'stream';
 import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
@@ -35,11 +35,13 @@ const log = createLogger('deployments-http');
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { requestIdOf } from '../gateway/proxy/http-conventions';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
+import { noteStreamCut, type StreamCut } from '../telemetry/stream-cuts';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
 const MAX_ADMIN_BODY = 16 * 1024 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
+export const INVOKE_IDLE_MS = 5 * 60_000;
 const HOP_BY_HOP = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding',
   'upgrade', 'authorization', 'content-length', 'x-aigw-token', 'x-aigw-wait', 'x-gateway-no-wake', 'x-forwarded-for', 'x-forwarded-host',
@@ -181,6 +183,7 @@ export interface DeploymentRoutesOptions {
   /** Mutations (PUT/PATCH/DELETE/wake, profiles) require this. Default: nobody (fail closed). */
   isAdmin?: (req: IncomingMessage) => boolean;
   fetchImpl?: typeof fetch;
+  invokeIdleMs?: number;
   /** Status of the declared deployments (`declared.ts`), listed as `declared` by `GET /v1/deployments`. */
   declaredStatus?: () => unknown;
   /** An app replaced its routes (`PUT /v1/apps/:app/routes`): re-mount the providers. */
@@ -195,6 +198,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
   const { controller } = opts;
   const isAdmin = opts.isAdmin ?? (() => false);
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const idleMs = opts.invokeIdleMs ?? (Number(process.env.INVOKE_IDLE_TIMEOUT_MS) || INVOKE_IDLE_MS);
 
   /**
    * The app this request acts for: `X-App` from an admin key, else the key's own user; null = admin acting globally.
@@ -327,7 +331,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         const timedOut = err instanceof Error && err.name === 'TimeoutError';
         lease.done(abort.signal.aborted ? 'cancelled' : timedOut ? 'timeout' : true);
         if (abort.signal.aborted) return;
-        exclude.add(lease.machine.id);
+        if ((controller.get(name)?.replicas.length ?? 0) > 1) exclude.add(lease.machine.id);
         if (attempt === 1) {
           log.warn({ deployment: name, error: err instanceof Error ? err.message : String(err) }, 'invoke: replica unreachable');
           throw new DeploymentError(502, 'replica unreachable');
@@ -341,20 +345,36 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           if (!HOP_BY_HOP.has(k) && k !== 'content-encoding') out[k] = v;
         });
         res.writeHead(upstream.status, out);
-        if (upstream.body && method !== 'HEAD') {
-          await new Promise<void>((resolve, reject) => {
-            const stream = Readable.fromWeb(upstream.body as unknown as import('stream/web').ReadableStream);
-            stream.on('error', reject);
-            res.on('close', resolve);
-            stream.pipe(res);
-          });
-        } else {
+        const cut = upstream.body && method !== 'HEAD' ? await relay(upstream.body, res) : null;
+        if (!cut || abort.signal.aborted) {
           res.end();
+        } else {
+          res.destroy();
+          lease.done(cut === 'stalled' ? 'timeout' : true);
+          noteStreamCut({ deployment: name, replica: lease.machine.id, stage: 'invoke' }, cut, rest);
+          log.warn({ deployment: name, replica: lease.machine.id, path: rest, cut }, 'invoke: replica stream cut after the response started');
         }
       } finally {
         lease.done(false);
       }
       return;
+    }
+  }
+
+  async function relay(body: ReadableStream<Uint8Array>, res: ServerResponse): Promise<StreamCut | null> {
+    const reader = body.getReader();
+    try {
+      for (;;) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const idle = new Promise<'stalled'>((resolve) => { timer = setTimeout(() => resolve('stalled'), idleMs); });
+        const next = await Promise.race([reader.read().catch(() => 'truncated' as const), idle]).finally(() => clearTimeout(timer));
+        if (typeof next === 'string') return next;
+        if (next.done) return null;
+        if (!res.write(next.value)) await new Promise<void>((resolve) => { res.once('drain', resolve); res.once('close', resolve); });
+        if (res.destroyed) return null;
+      }
+    } finally {
+      void reader.cancel().catch(() => {});
     }
   }
 
@@ -388,6 +408,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         return send(res, 200, {
           // An app key sees its own deployments' counts and bill, never the namespace's (QA 2026-10-07).
           namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(own ?? undefined), deployments,
+          ...(own ? {} : { pendingNetworkReleases: controller.pendingNetworkReleases() }),
           ...(opts.declaredStatus && !own ? { declared: opts.declaredStatus() } : {}),
         });
       }
@@ -400,7 +421,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         if (!own || controller.get(name)?.app !== own) return send(res, 403, { error: `this API key cannot invoke deployment '${name}'` });
       }
       // The proxy kills sockets idle for PROXY_TOTAL_TIMEOUT_MS (60 s). A request waiting through a cold start sends
-      // and receives nothing for minutes by design; its own bounds are coldStartWaitSeconds and INVOKE_TIMEOUT_MS.
+      // and receives nothing for minutes by design; its own bounds are coldStartWaitSeconds (capped by the gateway's
+      // maximum wait, DEPLOYMENTS_MAX_WAIT_SECONDS) and INVOKE_TIMEOUT_MS.
       req.socket?.setTimeout(0);
       const rest = parts.slice(4).join('/') + (path.endsWith('/') && parts.length > 4 ? '/' : '');
       return invoke(req, res, name, rest, query, method);
@@ -411,6 +433,16 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       admin();
       const body = await readJson(req);
       return send(res, 202, await controller.warm(name, body.replicas as number, body.untilMinutes as number));
+    }
+    if (action === 'capacity' && method === 'GET') {
+      const own = appOf(req);
+      const capacity = own && controller.get(name)?.app !== own ? null : controller.capacity(name);
+      return capacity ? send(res, 200, capacity) : send(res, 404, { error: `deployment '${name}' not found` });
+    }
+    if (action === 'offers' && method === 'GET') {
+      admin();
+      const preview = await controller.offers(name);
+      return preview ? send(res, 200, { deployment: name, ...preview }) : send(res, 404, { error: `deployment '${name}' has no vast placement` });
     }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 

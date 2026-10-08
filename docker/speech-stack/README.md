@@ -79,3 +79,138 @@ test) is decoded again alone with the temperature fallback, and clips over 30 s 
 of memory splits the batch in halves (a single clip retries 3×). `GET /health` reports `stt: {batches, clips, largest,
 oom_retries, fallbacks}`. Checked on CPU with Whisper tiny (`test_stt_batch.py`): four clips decoded together give the
 same text as one at a time, and silence comes back empty.
+
+## Tunables added 2026-10-07 (same models, same decoding)
+
+| Env | Default | Effect |
+|---|---|---|
+| `STT_BATCH_WINDOW_MS` | `25` (unchanged) | `0` now means: take what is already queued, never wait for more (before, `0` turned batching off). |
+| `CUT_EAGER` | `0` | `1`: a `!` or `?` at the end of the text so far cuts at once instead of waiting one more LLM token. A `.` still waits (`3.` may become `3.50`). |
+| `TTS_STAGE_OVERRIDES` | unset | JSON for `vllm serve --stage-overrides` (vLLM-Omni 0.28.0, `docs/serving/speech_api.md`); replaces `--gpu-memory-utilization`, so it must carry `gpu_memory_utilization` per stage. |
+| `TTS_DEPLOY_CONFIG` | `qwen3_tts.yaml` next to `start.sh` | Path of a deploy YAML for `vllm serve --deploy-config` (connector fields such as `ref_code_context_frames` are not reachable through stage overrides). A path that does not exist means the engine's bundled YAML. |
+| `TTS_MAX_LEAD_SECONDS` | `1` | A sentence whose audio is still silent after this long is asked again once (see § TTS runaway). |
+| `LLM_EXTRA_ARGS` | unset | Extra `llama-server` flags, e.g. `-b 4096 -ub 2048` (prompt-eval batch; b11382 defaults are 2048 / 512). |
+| `S2S_DIR` | `/opt/s2s` | Directory uvicorn loads `server.py` from. |
+
+`start.sh` starts llama.cpp with `--cache-ram 0` (b11382 default: 8192 MiB, with `--cache-idle-slots`). With the default,
+the server saves idle slots to a host-RAM prompt cache on every new task; once the cache is full (about 3 min at 16
+sessions, `llama-server` RSS 1.1 → 12.4 GB) every task first evicts an entry, 200 ms p50 / 800 ms max before prompt
+evaluation, until the process restarts. Measured 2026-10-07, `docs/reports/2026-10-07-realtime-handoff.md` § Live A/B.
+`LLM_EXTRA_ARGS="--cache-ram 8192"` restores the old behaviour.
+
+Always on: a WAV that is already PCM16 mono 16 kHz skips the ffmpeg subprocess; final transcriptions are taken before the
+partial decodes of `/ws/audio-stream`; closing that socket no longer decodes the buffer (a `flush` frame still does); the
+warm-up speaks one line with every catalog voice.
+
+llama.cpp b11382 already reuses the prompt prefix: `cache_prompt` defaults to `true` and an idle slot is chosen by
+prompt similarity (`--slot-prompt-similarity`, default 0.10), so the stack sends neither. What it reused is now visible.
+
+`/v1/s2s` metrics: `transcript.stt` = `{audio_ms, queue_ms, decode_ms, batch}`; `llm_first_token.llm` = llama.cpp
+`{cache_n, prompt_n, prompt_ms, …}`; `done.stages` = `stt_audio_ms`, `stt_queue_ms`, `stt_decode_ms`, `stt_batch`,
+`llm_first_token_ms` (from the transcript to the first token), `llm_cache_n`, `llm_prompt_n`, `llm_prompt_ms`,
+`llm_predicted_n`, `llm_predicted_ms`, `text_wait_ms` (first token → first sentence cut), `tts_first_chunk_ms` (cut → first
+PCM). Numbers only. `/v1/audio/transcriptions` returns the same four STT fields. `bench.py` prints p50/p95 of each stage.
+
+Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times tts_stream s2s_turn debug_logs; do python3 docker/speech-stack/test_$t.py; done`
+(numpy only; `git add -f` a new one, the repo's `TEST_*` ignore rule matches them on macOS).
+
+## Single-stage proxies never end a broken stream cleanly (2026-10-08)
+
+`/v1/chat/completions` and `/v1/audio/speech` are proxies to llama.cpp and vLLM-Omni; a healthy stream is forwarded
+byte for byte. `PROXY_MAX_GAP_S` (8, as `S2S_MAX_GAP_S`: the engines' first chunk comes in 55–300 ms and stalls inside a
+stream stay under 200 ms, `docs/reports/2026-10-07-realtime-handoff.md`) bounds the wait for each chunk — and for the
+response headers of a `stream: true` request; `PROXY_DEADLINE_S` (120, the gateway's own cap on a replica call) bounds
+the whole request. An engine that breaks the body, stalls or runs past the deadline:
+
+| When | Chat (SSE) | Speech (audio), non-SSE bodies |
+|---|---|---|
+| before the response started | `502` (broke) / `504` (stalled) with `{"error": {message, type: "upstream_error", code}}` | the same |
+| after | a last `data: {"error": {…, code: "stage_failed" \| "upstream_stalled"}}` event, then the stream ends | the connection is aborted (no chunked terminator): the client gets a transport error |
+
+One log line each (`proxy failed|stalled chat|speech <ms> <error>`), counted in `GET /health` →
+`proxy: {chat: {started, done, failed, stalled}, speech: {…}}` (`started` − the rest = in flight or left by the
+client). `test_stage_proxy.py` runs the real uvicorn + FastAPI + httpx stack against a fake engine (needs `fastapi`,
+`httpx`, `uvicorn`).
+## TTS runaway and silent leads (2026-10-08)
+
+Qwen3-TTS Base sometimes opens a sentence by repeating silence codes: 0.3–1.7 % of sentences started with more than
+1 s of silence (5.5 % with a 16 s reference clip), and about 1 in 1000 never left the loop. vLLM-Omni 0.28.0 then stops at
+its own budget of `max(192, 12 × text tokens)` codec frames (15.4 s for a short sentence) and ends the stream as an error
+(`Qwen3TTSCodecLimitError`, "did not emit codec EOS before its token budget (192/192 codec tokens)"). Three settings,
+measured in `docs/reports/2026-10-07-realtime-handoff.md` § TTS runaway:
+
+- `qwen3_tts.yaml` is vLLM-Omni 0.28.0's `vllm_omni/deploy/qwen3_tts.yaml` with one value changed: the talker's
+  `repetition_penalty` 1.05 → 1.15. `start.sh` passes it as `--deploy-config`. Keep the rest equal to the engine's file
+  when the base image changes.
+- `tts_stream` sends `max_new_tokens` = the sentence's limit (`TTS_MAX_SECONDS` 3 + `TTS_MAX_SECONDS_PER_CHAR` 0.2 per
+  character) in codec frames (12.5 per second), so the engine stops there instead of at 15.4 s.
+- After its first chunk, a sentence's silent chunks (RMS ≤ 300) are held until sound arrives. Still silent after
+  `TTS_MAX_LEAD_SECONDS`, or failed before any sound: the request is dropped and sent again once (new random seed),
+  about 0.5 s later at 8 in parallel; the held silence is not played. `done.tts_retries` counts them. A sentence that
+  fails after sound still ends the turn with `error` (stage `tts`).
+
+## Conversation history always fits the LLM slot (2026-10-08)
+
+Seen live (Vast and Scaleway, 2026-10-08): llama.cpp runs `LLM_PARALLEL` slots of `LLM_SLOT_CTX` (2048) tokens; a
+session sent the system prompt plus its whole history, and from about the 26th turn every turn came back `400 …
+exceeds the available context size`. Three places build the chat request of a turn and all three now cut the history
+with the same rule (`fit_history` in `server.py`, copied verbatim into `aigw_edge/text.py`; `fitHistory` in
+`src/s2s/history.ts`; shared vectors in `docs/s2s-history-vectors.json`):
+
+- **Budget** = context per slot − `max_tokens` (160) − 64 tokens of margin (chat template, generation prompt). The
+  context per slot is read once at warm-up from llama.cpp's `GET /props` (`default_generation_settings.n_ctx`),
+  published as `llm_ctx` in `/health`; the edge picks it up from the health poll it already makes (no call on the turn).
+  2048 is the default when `/props` or `llm_ctx` is missing. The composed fallback reads `S2S_CHAT_CONTEXT` (default 2048).
+- **Always kept**: `system`, every `system` message inside `messages`, the current user turn.
+- **Dropped**: the oldest whole turns (a user message with everything up to the next user message), 8 turns at a
+  time. Between two cuts the prompt keeps the same prefix, so llama.cpp's prompt cache keeps hitting; on the turn of a
+  cut it re-reads the history after the system prompt (at most the budget; the system prompt itself stays cached).
+- **Counting**: no tokenizer on the turn. 3 UTF-8 bytes per token plus 8 per message. llama.cpp counted 509 tokens for
+  a 332-word Portuguese prompt (about 4 bytes per token), so the estimate is some 25–30 % high for Portuguese and French.
+- **Still 400** (`context size`): the turn is asked once more with half the room for history, before any sound.
+
+`LLM_SLOT_CTX=4096` (env, no rebuild) doubles the room; the code follows by itself through `/props`.
+
+## Engine logs: `GET /debug/logs`
+
+`start.sh` writes each engine's stdout and stderr to `/var/log/{tts,llm,stt}.log` (`stt` is the orchestrator process:
+Whisper runs inside it, so its log is also where every `/v1/s2s` failure is printed). A file is renamed to `.1` when it
+passes `LOG_MAX_BYTES` (32 MB: vLLM-Omni writes about 6 KB per request), so the three logs hold at most 192 MB.
+
+`GET /debug/logs?engine=tts|llm|stt&tail=200&match=<text>` returns the last `tail` lines (at most 2000, each cut at
+2000 characters) that contain `match`, as plain text, read from the rotated file and the current one. Through the
+gateway: `GET /v1/deployments/<name>/invoke/debug/logs?engine=tts&match=status=error`. The replica's front proxy asks
+for the replica token on this route as on every other one, and the route itself answers 403 to a client that is not on
+a private address (a container port published by mistake). Values of environment variables named like a secret, bearer
+tokens, `token=`/`key=`/`password=` values and `hf_…`/`sk-…` keys come out as `[redacted]`.
+
+Following one sentence into the TTS engine: for every TTS request the orchestrator prints
+`tts <request_id> <UTC start> chars=… max_new_tokens=… audio_s=… ms=… outcome=ok|<error>` (in `stt`), and sends the id
+as `extra_params.request_id`. vLLM-Omni 0.28.0 logs `Applied extra_params: {'request_id': '<id>'}` on the line after
+`TTS speech request speech-<uuid>: model=Base`; that `speech-<uuid>` is the id of its `[SpeechE2E] … status=…` line.
+No text, transcript or audio is written by the orchestrator.
+
+## Shipping server code without rebuilding the image
+
+The image keeps the models; the five files of `/opt/s2s` can come from the deployment's `files` (mounted read-only at
+`/files`, next to `voices.json`). `PUT /v1/deployments/parle-speech`:
+
+```json
+{
+  "entrypoint": "bash",
+  "args": ["/files/start.sh"],
+  "env": { "S2S_DIR": "/files" },
+  "files": {
+    "start.sh": "<base64>", "server.py": "<base64>", "stt_batch.py": "<base64>", "stt_stream.py": "<base64>",
+    "qwen3_tts.yaml": "<base64>",
+    "voices.json": "<base64>", "<every voice clip>": "<base64>"
+  }
+}
+```
+
+- `files` and `env` replace the stored ones as a whole (`buildSpec`): send the voice catalog and the current env again.
+- Budget: all files together ≤ 1 680 000 bytes (`MAX_FILES_BYTES`, 14 user_data keys of 120 000); the four code files are
+  about 45 KB. The cloud-init itself must stay under 127 998 bytes and is 3.5 KB with this spec.
+- It reaches machines created after the PUT. A running or parked replica keeps the boot it was created with.
+- Back to the image's own code: `"entrypoint": ""` is not accepted; PUT `"entrypoint": "bash", "args": ["/opt/s2s/start.sh"]`
+  and drop `S2S_DIR`.

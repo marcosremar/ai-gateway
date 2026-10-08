@@ -1,7 +1,8 @@
 """
-Sentence cutter and streaming JSON-field extractor — a verbatim copy of `cut()` and `JsonField` from
-docker/speech-stack/server.py (same rules as the gateway's src/s2s/sentence-cutter.ts and json-field.ts), so the edge
-voices a reply in the same chunks as `/v1/s2s`. tests/test_units.py checks the copy against server.py.
+Sentence cutter, streaming JSON-field extractor and history budget — a verbatim copy of `cut()`, `JsonField` and
+`fit_history()` from docker/speech-stack/server.py (same rules as the gateway's src/s2s/sentence-cutter.ts,
+json-field.ts and history.ts), so the edge voices a reply in the same chunks as `/v1/s2s` and sends the LLM the same
+history. tests/test_units.py checks the copy against server.py.
 """
 
 import os
@@ -16,6 +17,7 @@ CLAUSE_END = re.compile(r"[,;:—–](?=\s)")  # needs the following space, so "
 
 ABBREVIATIONS = {"sr", "sra", "srta", "dr", "dra", "prof", "profa", "av", "etc", "ex", "nº", "n", "mr", "mrs", "st", "m", "mme"}
 MIN_SENTENCE_WORDS = 2
+CUT_EAGER = os.environ.get("CUT_EAGER", "0") == "1"
 
 
 def cut(buffer: str, first: bool, final: bool) -> tuple[str | None, str]:
@@ -25,7 +27,7 @@ def cut(buffer: str, first: bool, final: bool) -> tuple[str | None, str]:
     The FIRST chunk also cuts at a clause mark once it has FIRST_MIN_WORDS words, so the first audio does not wait for
     a long sentence. Anything longer than MAX_CHUNK_CHARS cuts at the last space."""
     for match in SENTENCE_END.finditer(buffer):
-        if match.end() == len(buffer) and not final:
+        if match.end() == len(buffer) and not final and not (CUT_EAGER and match.group()[-1] in "!?"):
             break  # "3." may still become "3.50": a mark at the end of the stream so far waits for the next token
         head = buffer[:match.end()]
         last_word = head[:match.start()].split()[-1:] or [""]
@@ -128,3 +130,32 @@ class JsonField:
             self.escape = True
             return None
         return ch
+
+
+DEFAULT_SLOT_CTX = 2048
+CONTEXT_MARGIN = 64
+BYTES_PER_TOKEN = 3
+MESSAGE_TOKENS = 8
+DROP_PAIRS = 8
+
+
+def estimate_tokens(text: str | None) -> int:
+    return MESSAGE_TOKENS + -(-len(str(text).encode()) // BYTES_PER_TOKEN) if text else 0
+
+
+def fit_history(system: str | None, history: list[dict], user: str, max_tokens: int, ctx: int, harder: bool = False) -> list[dict]:
+    pairs: list[list[dict]] = []
+    for message in history:
+        if message.get("role") == "system":
+            continue
+        if message.get("role") == "user" or not pairs:
+            pairs.append([])
+        pairs[-1].append(message)
+    pinned = sum(estimate_tokens(m.get("content")) for m in history if m.get("role") == "system")
+    room = (ctx - max_tokens - CONTEXT_MARGIN - estimate_tokens(system) - estimate_tokens(user) - pinned) // (2 if harder else 1)
+    sizes = [sum(estimate_tokens(m.get("content")) for m in pair) for pair in pairs]
+    drop = 0
+    while drop < len(pairs) and sum(sizes[drop:]) > room:
+        drop += DROP_PAIRS
+    kept = {id(m) for pair in pairs[drop:] for m in pair}
+    return [m for m in history if m.get("role") == "system" or id(m) in kept]

@@ -5,6 +5,7 @@
  * The controller is split by who owns what (pure move of the former `controller.ts`, 2026-10-07); each part extends the
  * previous one and `DeploymentController` (controller.ts) is the public class:
  *   controller-state.ts → controller-replicas.ts (create / release / probe) → controller-parking.ts (stop / park) →
+ *   controller-scaling.ts (the `scaling` block: load trace, budget ledger, measured boot times, capacity view) →
  *   controller-autoscale.ts (pressure, drains, reclaim) → controller-reconcile.ts (the planning tick) →
  *   controller-views.ts (views, health) → controller.ts (API, leases).
  */
@@ -13,13 +14,18 @@ import type { PressureState } from './autoscale';
 import { replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
+import { externalInflightOn } from '../realtime/external-load';
 import type {
-  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, Profile, ReplicaMachine, ReplicaProbe,
+  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
+  ReplicaProbe, ScalingMode,
 } from './types';
 
 export class DeploymentError extends Error {
-  /** `saturated`: replicas are ready but all at capacity (the caller should spill to its fallback, not wait). */
-  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated') {
+  /**
+   * `saturated`: replicas are ready but all at capacity (the caller should spill to its fallback, not wait).
+   * `stage_out`: the asked stage is out of rotation on every ready replica after repeated failures (same: fall back).
+   */
+  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated' | 'stage_out') {
     super(message);
   }
 }
@@ -46,8 +52,11 @@ export interface ProbeState {
  * reset); `'timeout'` = the replica took longer than the caller's limit (busy, not dead); `'cancelled'` = the caller
  * gave up for its own reasons (a hedged fallback won, the client went away) and says nothing about the replica;
  * `'overloaded'` = the replica answered 429 (its own queue is full): busy, and pressure for the autoscaler.
+ * Two more only matter to the lease's stage (`acquire` `stage`, `STAGE_STRIKES`): `'errored'` = the replica answered
+ * 5xx (alive, so `ok` for its health, a strike for the stage); `'abandoned'` = the caller gave up before the first byte
+ * (`cancelled` for its health; a strike for the stage once it had waited the route's hedge delay).
  */
-export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled' | 'overloaded';
+export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled' | 'overloaded' | 'errored' | 'abandoned';
 
 export interface Runtime {
   record: DeploymentRecord;
@@ -123,6 +132,7 @@ export interface ControllerOptions {
   /** Pause between retries of the release of a machine whose deployment was deleted while it was created. Default 2 s. */
   releaseRetryMs?: number;
   reconcileMs?: number;
+  maxColdStartWaitSeconds?: number;
   /** Replicas kept only by `minReplicas` go to zero after this long unused (planner `pinnedIdleOver`); 0 = off. */
   pinnedIdleMaxMs?: number;
   /**
@@ -134,6 +144,8 @@ export interface ControllerOptions {
   unhealthyStrikes?: number;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
+  sessions?: (deployment: string) => number | null;
+  defaultScalingMode?: ScalingMode;
 }
 
 export interface Lease {
@@ -152,6 +164,7 @@ export const DEFAULT_MAX_STOPPED = 8;
 export const DEFAULT_MAX_EUR_PER_HOUR = 6;
 export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
 export const DEFAULT_BUSY_GRACE_MS = 120_000;
+export const DEFAULT_MAX_COLD_START_WAIT_SECONDS = 240;
 /**
  * A request turned away for lack of a ready replica counts as load for this long (≈ the time the fallback takes to
  * answer it, Little's law with W ≈ 1.5 s — the cloud LLM's p50 measured live on 2026-10-07 was 1.0–1.9 s): 16 refused
@@ -189,11 +202,14 @@ export abstract class ControllerState {
   protected readonly parkedSince = new Map<string, number>();
   /** Last power-on of a parked replica, id → when: `maxHours` and the boot timeout count from here, not from creation. */
   protected readonly poweredOnAt = new Map<string, number>();
+  protected readonly startRefused = new Map<string, number>();
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
-  protected readonly pendingSpend = new Set<{ cost: number }>();
+  protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider }>();
   protected readonly probes = new Map<string, ProbeState>();
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
+  protected readonly networkReleases = new Map<string, PendingNetworkRelease>();
+  protected readonly stageStrikes = new Map<string, { failures: number; outUntil: number }>();
   protected reconciling: Promise<void> | null = null;
   protected rerun = false;
   protected timer: ReturnType<typeof setInterval> | null = null;
@@ -231,6 +247,10 @@ export abstract class ControllerState {
     return m.provider ?? this.defaultProvider;
   }
 
+  protected get maxColdStartWaitSeconds(): number {
+    return this.opts.maxColdStartWaitSeconds ?? DEFAULT_MAX_COLD_START_WAIT_SECONDS;
+  }
+
   protected runtime(record: DeploymentRecord): Runtime {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
@@ -250,6 +270,14 @@ export abstract class ControllerState {
   protected readyMachines(name: string): ReplicaMachine[] {
     return this.machines.filter(m => m.deployment === name && m.ip && this.probes.get(m.id)?.readyNow
       && replicaPhase(this.observed(m, 0)) === 'ready');
+  }
+
+  protected stageOut(id: string, stage: string | undefined): boolean {
+    return stage !== undefined && (this.stageStrikes.get(`${id}|${stage}`)?.outUntil ?? 0) > this.now();
+  }
+
+  protected stagesOut(id: string): string[] {
+    return [...this.stageStrikes.keys()].filter(k => k.startsWith(`${id}|`)).map(k => k.slice(id.length + 1)).filter(s => this.stageOut(id, s));
   }
 
   /** Answered a forwarded request within `busyGraceMs`. */
@@ -284,6 +312,11 @@ export abstract class ControllerState {
   /** Ready replicas still taking requests (not draining). */
   protected servingMachines(name: string): ReplicaMachine[] {
     return this.readyMachines(name).filter(m => !this.draining.has(m.id));
+  }
+
+  protected busyOn(rt: Runtime, replicaId: string): number {
+    const spec = rt.record.spec;
+    return (rt.perReplica.get(replicaId) ?? 0) + Math.ceil(externalInflightOn(spec.name, replicaId, spec.targetInflightPerReplica, this.now()));
   }
 
   protected observed(m: ReplicaMachine, inflight: number): ObservedReplica {

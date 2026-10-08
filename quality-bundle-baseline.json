@@ -55,9 +55,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "index": {
-    "raw": 1565557,
-    "gzip": 347104,
-    "reason": "realtime speech + telemetry (#54): new realtime entry (sdk/browser/realtime); client gains createServerTelemetry (sdk/node/telemetry -> sdk/browser/telemetry/emitter + src/telemetry/contract); index and proxy gain the W3C trace context (src/telemetry/trace-context) and the public-route + header-size changes in src/gateway/proxy/server"
+    "raw": 1570220,
+    "gzip": 348523,
+    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
   },
   "infra": {
     "raw": 4116,
@@ -80,14 +80,14 @@
     "reason": "API audit 2026-10-07: s2s access/app limits, /health views, error types, request ids, CORS lists (#47 routing hedge on top)"
   },
   "proxy": {
-    "raw": 177457,
-    "gzip": 46517,
-    "reason": "realtime speech + telemetry (#54): new realtime entry (sdk/browser/realtime); client gains createServerTelemetry (sdk/node/telemetry -> sdk/browser/telemetry/emitter + src/telemetry/contract); index and proxy gain the W3C trace context (src/telemetry/trace-context) and the public-route + header-size changes in src/gateway/proxy/server"
+    "raw": 178645,
+    "gzip": 46920,
+    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
   },
   "realtime": {
-    "raw": 65230,
-    "gzip": 17018,
-    "reason": "realtime speech + telemetry (#54): new realtime entry (sdk/browser/realtime); client gains createServerTelemetry (sdk/node/telemetry -> sdk/browser/telemetry/emitter + src/telemetry/contract); index and proxy gain the W3C trace context (src/telemetry/trace-context) and the public-route + header-size changes in src/gateway/proxy/server"
+    "raw": 90979,
+    "gzip": 22655,
+    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
   },
   "tracking": {
     "raw": 20369,
