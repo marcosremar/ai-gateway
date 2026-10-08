@@ -217,7 +217,7 @@ class S2SStreamTransport extends ClipTransport {
         }
       }
     }
-    if (!end.done) {
+    if (!end.done && !signal.aborted) {
       if (!end.error) {
         this.ctx.emit({ type: 'error', code: 'truncated', message: 's2s stream ended without done', ...(end.sentence ? { unspoken: end.sentence } : {}) });
       }
