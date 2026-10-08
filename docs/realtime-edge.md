@@ -31,7 +31,7 @@ model image:
 
 | Field | Default | Effect |
 |---|---|---|
-| `maxSessions` | the machine type's `RT_MAX_SESSIONS` env (speech-stack: L4 8, L40S 16), else 8 | `RT_MAX_SESSIONS`: admission refuses beyond it with code `capacity` |
+| `maxSessions` | the machine type's `RT_MAX_SESSIONS` env (speech-stack: L4 2, L40S 8), else 8 | `RT_MAX_SESSIONS`: admission refuses beyond it with code `capacity` |
 | `udpPorts` | `[50000, 50100]` | WebRTC media range, opened in the replica's firewall (≤ 1000 ports, ≥ 10000) |
 | `edgeImage` | `DEFAULT_EDGE_IMAGE` (`src/deployments/cloud-init.ts`) | the sidecar image |
 
@@ -208,8 +208,9 @@ cannot carry 16 WebRTC sessions: the loop falls behind real time — the reason 
 **Budget**: plan **~0.12 vCPU per WebRTC session** and **~0.03 per WS session**, at most ~6 WebRTC sessions per
 process. An 8-vCPU L40S host carrying 16 WebRTC learners therefore needs ~2 vCPU for the edge (3 workers) next to the
 model stack (llama.cpp, vLLM-Omni and the Whisper orchestrator, which also use CPU): **`RT_MAX_SESSIONS=16` on L40S and
-8 on L4 are safe on CPU** as long as ~2.5 vCPU stay free; the GPU (LLM slots: 16 / 8) is the tighter limit, which is why
-the defaults equal `LLM_PARALLEL`. To confirm on the real host: the edge's `edge.load` telemetry (CPU %, RSS, active
+8 on L4 are safe on CPU** as long as ~2.5 vCPU stay free; the GPU is the tighter limit: the live capacity runs of 2026-10-07
+(docs/reports/2026-10-07-realtime-handoff.md) kept first audio p95 ≤ 2 s up to 8 learners on the L40S, so the
+speech-stack profile admits 8 there and 2 on the L4 (an estimate), half and a quarter of `LLM_PARALLEL`. To confirm on the real host: the edge's `edge.load` telemetry (CPU %, RSS, active
 sessions per process, every 30 s) during the first live class.
 
 ## Telemetry

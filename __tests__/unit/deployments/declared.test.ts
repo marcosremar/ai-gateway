@@ -72,7 +72,7 @@ describe('declared parle-speech spec', () => {
     expect(speech.registryAuth).toBeUndefined();
     expect(speech.generatedSecrets).toBeUndefined();
     expect(speech.spec).toEqual({
-      realtime: {}, envByMachineType: { 'L4-1-24G': { RT_MAX_SESSIONS: '8' }, 'L40S-1-48G': { RT_MAX_SESSIONS: '16' } },
+      realtime: {}, envByMachineType: { 'L4-1-24G': { RT_MAX_SESSIONS: '2' }, 'L40S-1-48G': { RT_MAX_SESSIONS: '8' } },
     });
     expect(JSON.stringify(speech)).not.toMatch(/GHCR_READ_TOKEN|ghp_|password"\s*:/);
   });
@@ -102,8 +102,8 @@ describe('declared parle-speech spec', () => {
       ...before,
       realtime: {},
       envByMachineType: {
-        'L4-1-24G': { ...PRODUCTION.envByMachineType['L4-1-24G'], RT_MAX_SESSIONS: '8' },
-        'L40S-1-48G': { ...PRODUCTION.envByMachineType['L40S-1-48G'], RT_MAX_SESSIONS: '16' },
+        'L4-1-24G': { ...PRODUCTION.envByMachineType['L4-1-24G'], RT_MAX_SESSIONS: '2' },
+        'L40S-1-48G': { ...PRODUCTION.envByMachineType['L40S-1-48G'], RT_MAX_SESSIONS: '8' },
       },
     });
     expect(c.specOf('parle-speech')!.registryAuth).toBeUndefined();

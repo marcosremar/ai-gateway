@@ -110,10 +110,14 @@ export const BUILTIN_PROFILES: Profile[] = [
       maxEurPerHour: 2,
       // Measured 2026-10-04 (docker/speech-stack/README.md): L4 24 GB fits STT_BATCH 4 / LLM 8 slots beside the TTS
       // (more OOMs); the L40S 48 GB takes STT_BATCH 8 / LLM 16 / a 12 GB TTS stage. RT_MAX_SESSIONS is the realtime
-      // edge's per-replica cap when `realtime` is set (docs/realtime-edge.md): one session per LLM slot.
+      // edge's per-replica cap when `realtime` is set (docs/realtime-edge.md): what one replica serves within the
+      // target (first audio p50 ≤ 1.5 s, p95 ≤ 2 s). Measured live 2026-10-07 on one L40S
+      // (docs/reports/2026-10-07-realtime-handoff.md § Live capacity): p95 1.25–1.49 s at 4 learners, 1.94 s at 8,
+      // 2.65 s at 16 — so 8, not one per LLM slot. The L4's 2 is an estimate from its /v1/s2s first audio (1.5 s with
+      // 1 turn, 4.2 s with 4), not a realtime measurement.
       envByMachineType: {
-        'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '8' },
-        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '16' },
+        'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '2' },
+        'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '8' },
       },
       description: 'Whisper + Qwen LLM + Qwen3-TTS in one container (STT, S2S, /ws/audio-stream). POST /v1/s2s.',
     },

@@ -58,7 +58,9 @@ replica's HTTP; only WebRTC media/data go to it directly, and WS goes through th
 | `DELETE /__aigw/rt/session/:id` | ends a session (the `sessionId` the offer answered) |
 | `GET /__aigw/rt/ws?token=…` | WebSocket (relayed from the gateway's `/v1/realtime/ws`) |
 
-`max` comes from the spec env `RT_MAX_SESSIONS` (default L40S 16, L4 8 through `envByMachineType`). A replica whose
+`max` comes from the spec env `RT_MAX_SESSIONS` (default L40S 8, L4 2 through `envByMachineType`: what one replica
+serves within first audio p95 ≤ 2 s — measured on the L40S, docs/reports/2026-10-07-realtime-handoff.md § Live capacity;
+the L4 figure is an estimate from its `/v1/s2s` numbers). A replica whose
 `/__aigw/rt/status` answers 404 runs no edge and gets no realtime session.
 
 ### Events and control messages
