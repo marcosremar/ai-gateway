@@ -70,6 +70,8 @@ abstract class ClipTransport implements RealtimeTransport {
   readonly clipBased = true;
   protected player: PcmPlayer | null = null;
   protected turn: AbortController | null = null;
+  protected localOpener = false;
+  private opening: Promise<PcmPlayer> | null = null;
 
   constructor(protected readonly ctx: TransportContext, private readonly makePlayer: PlayerFactory) {}
 
@@ -77,9 +79,13 @@ abstract class ClipTransport implements RealtimeTransport {
     // Nothing to open: the first turn proves the rung (a failing turn fails over and is re-sent below).
   }
 
-  protected async getPlayer(rate: number): Promise<PcmPlayer> {
-    if (!this.player) this.player = await this.makePlayer({ rate });
-    return this.player;
+  protected getPlayer(rate: number): Promise<PcmPlayer> {
+    return (this.opening ??= this.makePlayer({ rate }).then(p => (this.player = p), (err) => { this.opening = null; throw err; }));
+  }
+
+  playOpener(samples: Float32Array, rate: number): void {
+    this.localOpener = true;
+    void this.getPlayer(rate).then(p => p.pushFloat(samples, rate));
   }
 
   send(message: ClientMessage): void {
@@ -94,6 +100,7 @@ abstract class ClipTransport implements RealtimeTransport {
   protected begin(): AbortSignal {
     this.turn?.abort(new Error('superseded'));
     this.turn = new AbortController();
+    this.localOpener = false;
     return AbortSignal.any ? AbortSignal.any([this.turn.signal, AbortSignal.timeout(this.ctx.timeouts.turnMs)]) : this.turn.signal;
   }
 
@@ -110,6 +117,7 @@ abstract class ClipTransport implements RealtimeTransport {
     this.turn = null;
     this.player?.close();
     this.player = null;
+    this.opening = null;
   }
 }
 
@@ -173,6 +181,7 @@ class S2SStreamTransport extends ClipTransport {
       if (e.type === 'opener') {
         inOpener = e.state === 'start';
         if (!inOpener) await flushEncoded();
+        if (this.localOpener) return;
       }
       if (e.type === 'first_audio') {
         if (sawAudio) return; // the audio itself came first and already announced it
@@ -181,6 +190,7 @@ class S2SStreamTransport extends ClipTransport {
       for (const out of mapS2SEvent(e)) this.ctx.emit(out);
     };
     const onAudio = async (pcm: Uint8Array) => {
+      if (inOpener && this.localOpener) return;
       played = true;
       if (!sawAudio && !inOpener) { sawAudio = true; this.ctx.emit({ type: 'audio_start' }); }
       end.sentence = '';

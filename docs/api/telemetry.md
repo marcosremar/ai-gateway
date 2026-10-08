@@ -111,8 +111,10 @@ Unknown names are still accepted; these are the names the components emit.
 | `rt.ice.state` / `rt.ice.failed` | ICE state changes / failure (`state`, `candidateType`) |
 | `rt.turn.used` | TURN relay in use |
 | `vad.segment` | the browser VAD closed a segment (`durMs`, `speechMs`) |
-| `turn.first_audio` | first reply audio of a turn (`durMs` from end of speech; `turnId`) |
-| `turn.done` | turn finished (`durMs`, outcome code) |
+| `turn.first_audio` | first reply audio of a turn (`durMs` from the end of the turn, `fromSpeechMs` from the learner's end of speech; `turnId`) |
+| `turn.first_sound` | first sound of a turn at the page, opener or reply (`durMs` from the learner's end of speech, `source`, `uplinkBufferedBytes`) |
+| `rt.opener.cached` | opener clips the SDK holds for its own deadline (`clips`, `lines`) |
+| `turn.done` | turn finished (`durMs`, outcome code, `firstSoundMs`, `networkDelayMs`, `clientOpener`) |
 | `ws.close` | WebSocket closed (`code`) |
 | `error` | client error (name/code only; the emitter's opt-in `captureErrors` reports window errors as `browser.error`) |
 

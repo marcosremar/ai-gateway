@@ -14,6 +14,10 @@
  *   --chrome 0        real Chrome sessions alongside        --rtc-procs      aiortc processes (default 1 per 8)
  *   --chrome-transports webrtc,ws,s2s-stream   rung forced on each Chrome session, round robin ('' = the SDK's ladder)
  *   --clip-end-silence 700   ms the Chrome clip rung waits after the speech before it posts the clip
+ *   --uplink-stall 0  Chrome on ws / s2s-stream: ms the learner's audio of every --uplink-stall-every (3) th utterance is held
+ *                     after the speech before it leaves the page (webrtc is not held)
+ *   --client-deadline Chrome: the page ends the turn itself and gives the SDK a `speak` (POST /v1/audio/speech, model
+ *                     --tts-model or RT_CONFIG.models.tts), so the SDK enforces the first-sound deadline on the learner clock
  *   --s2s 0           how many of them post each turn to /v1/s2s instead (no session; the clock starts at the request
  *                     minus --clip-end-silence, the endpointing a page adds)   --no-wake   they send X-Gateway-No-Wake: 1
  *   --ramp 30         seconds over which students arrive    --duration 180   seconds each student talks
@@ -154,12 +158,14 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
     }
   }
   const field = (js: typeof judged, name: 'audibleMs' | 'receivedMs' | 'heardAfterReceivedMs' | 'audibleFromVadEndMs' | 'meterErrorMs') => dist(js.map(j => j.t[name]).filter((x): x is number => typeof x === 'number'));
+  const sdk = (js: typeof judged, type: string, name: string) => dist(js.map(j => j.t.events.find(e => e.type === type)?.[name]).filter((x): x is number => typeof x === 'number'));
   const audible = Object.fromEntries(keys.filter(k => k.startsWith('chrome:')).map((k) => {
     const js = judged.filter(j => j.key === k);
     const heard = field(js, 'audibleMs');
     const light = dist(withLatency(judged.filter(j => j.key === k.slice(7))));
     return [k.slice(7), {
       turns: js.length, audibleMs: heard, receivedMs: field(js, 'receivedMs'), heardAfterReceivedMs: field(js, 'heardAfterReceivedMs'),
+      sdkFirstSoundMs: sdk(js, 'turn.first_sound', 'ms'), networkDelayMs: sdk(js, 'turn.done', 'networkDelayMs'),
       audibleFromVadEndMs: field(js, 'audibleFromVadEndMs'), meterErrorMs: field(js.filter(j => j.t.audibleMs != null), 'meterErrorMs'), noAudibleAudio: js.filter(j => j.t.audibleMs == null && !j.t.overlap).length,
       overlapped: js.filter(j => j.t.overlap).length, lightweightMs: light,
       offsetMs: heard.p50 !== null && light.p50 !== null ? heard.p50 - light.p50 : null,
@@ -253,7 +259,7 @@ function summary(r: ReturnType<typeof buildReport>): string {
     d('all', r.firstAudioMs.all),
     d('reply audio', r.firstReplyAudioMs),
     `ceiling ${r.ceiling.limitMs} ms: max ${r.ceiling.max} ms over ${r.ceiling.turnsWithSound} turns with sound; > 2.0 s ${r.ceiling.over2000Pct} %, > 2.5 s ${r.ceiling.over2500Pct} %, > 3.0 s ${r.ceiling.over3000Pct} %; `
-      + `${r.ceiling.overLimit} over the ceiling; opener played in ${r.ceiling.openers} turns, deadline missed with none in ${r.ceiling.deadlineMissed}; `
+      + `${r.ceiling.overLimit} over the ceiling; opener played in ${r.ceiling.openers} turns (${r.ceiling.clientOpeners} by the client), deadline missed with none in ${r.ceiling.deadlineMissed}; `
       + `edge's own first sound from the speech p50 ${r.edge.firstSoundFromSpeechMs.p50} max ${r.edge.firstSoundFromSpeechMs.max}, reply audio p50 ${r.edge.ttfaFromSpeechMs.p50} max ${r.edge.ttfaFromSpeechMs.max}`,
     ...Object.entries(r.firstAudioMs.byTransport).map(([k, x]) => d(k, x)),
     ...Object.entries(r.firstAudioMs.byReplica).map(([k, x]) => `${d(`rep ${k.slice(-8)}`, x)} (${x.students} students)`),
@@ -332,6 +338,8 @@ try {
     gw, key, deployment: DEP, config, students: N, rtc: RTC, s2s: S2S, noWake: argv.includes('--no-wake'), chrome: CHROME,
     chromeTransports: (opt('chrome-transports') ?? 'webrtc,ws,s2s-stream').split(','), clipEndSilenceMs: num('clip-end-silence', 700), rtcProcs: num('rtc-procs', Math.ceil(RTC / 8)),
     rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), burst: argv.includes('--burst'), clipS: num('clip-s', 1.4),
+    uplinkStallMs: num('uplink-stall', 0), uplinkStallEvery: num('uplink-stall-every', 3), clientDeadline: argv.includes('--client-deadline'),
+    ttsModel: opt('tts-model') ?? (config.models as { tts?: string } | undefined)?.tts,
     clip: opt('clip') ?? null, turnTimeoutS: num('turn-timeout', 30), turn: (opt('turn') ?? (PROFILE === 'udp-blocked' ? 'tcp' : 'udp')) as 'udp' | 'tcp',
     python: process.env.EDGE_PYTHON || 'python3', chromePath: process.env.CHROME_PATH || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
     work: WORK, out: join(WORK, 'client.json'),

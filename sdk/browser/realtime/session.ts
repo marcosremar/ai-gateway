@@ -24,8 +24,8 @@ import { createWebRtcTransport } from './transports/webrtc';
 import { createWsTransport } from './transports/ws';
 import { createPostTransport, createS2SStreamTransport, type PostTurn, type S2SEndpoint } from './transports/clip';
 import { createVoiceBridge, type VoiceBridge } from './voice-bridge';
-import { createPcmPlayer, type PcmPlayer } from './audio-io';
-import { DOWNSTREAM_RATE } from './pcm';
+import { createPcmPlayer, decodeClip, type DecodedClip, type PcmPlayer } from './audio-io';
+import { DOWNSTREAM_RATE, trimLeadingSilence } from './pcm';
 import {
   DEFAULT_TIMEOUTS, TRANSPORT_LADDER, type SessionRefusal, type AttemptRecord, type ChatMessage, type ClientMessage, type RealtimeEvent, type RealtimeMetrics,
   type RealtimeTimeouts, type RealtimeTransport, type SessionDescriptor, type StorageLike, type TransportContext,
@@ -63,6 +63,7 @@ export interface RealtimeSessionOptions {
   postTurn?: PostTurn;
   speak?: SpeakText;
   createPlayer?: (opts: { rate: number }) => Promise<PcmPlayer>;
+  decodeAudio?: (data: ArrayBuffer) => Promise<DecodedClip>;
   /** Client VAD: `end_turn`, barge-in `interrupt`, and the turn clips of the clip rungs. */
   voice?: RealtimeVoiceOptions;
   /** A shared emitter, options of the local one, or false (no telemetry sent). */
@@ -96,6 +97,29 @@ const isRealtime = (t: TransportType) => t === 'webrtc' || t === 'ws';
 const HEARD_WITHOUT_TURN_MS = 2_000;
 const UPGRADE_SETTLE_MS = 300;
 const UPGRADE_POLL_MS = 100;
+const DEFAULT_DEADLINE_MS = 2_000;
+const MAX_DEADLINE_MS = 2_500;
+const OPENER_MARGIN_MS = 100;
+const MAX_OPENER_CLIPS = 2;
+
+interface Turn {
+  id: string;
+  endAt: number;
+  speechEnd: number | null;
+  firstAudio: boolean;
+  soundMs?: number;
+  serverSoundMs?: number;
+  networkMs?: number | null;
+  sound?: boolean;
+  localOpener?: boolean;
+  provider?: string;
+  fallback?: string;
+}
+
+interface OpenerClip extends DecodedClip {
+  index: number;
+  text: string;
+}
 
 interface Standby {
   live: boolean;
@@ -140,12 +164,19 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   let closed = false;
   let switching: Promise<void> | null = null;
   let npcSpeaking = false;
-  let turn: { id: string; endAt: number; firstAudio: boolean; provider?: string; fallback?: string } | null = null;
+  let turn: Turn | null = null;
   let mic: Promise<MediaStream> | null = null;
   let bridge: VoiceBridge | null = null;
   let voiceStop: (() => void) | null = null;
   let recovery: Recovery | null = null;
-  let recoveryPlayer: PcmPlayer | null = null;
+  let localPlayer: PcmPlayer | null = null;
+  let localPlayerOpening: Promise<PcmPlayer> | null = null;
+  const clips: OpenerClip[] = [];
+  let lastOpener = -1;
+  let serverOpenerOff = false;
+  let cacheAbort: AbortController | null = null;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let playingOpener: { index: number; timer: ReturnType<typeof setTimeout> } | null = null;
   let upgrade: Upgrade | null = null;
   let readmitTimer: ReturnType<typeof setTimeout> | undefined;
   let startedAt = 0;
@@ -156,14 +187,99 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   const config = () => {
     const base = baseConfig();
     const prior = Array.isArray(base.messages) ? base.messages as ChatMessage[] : [];
-    return { ...base, messages: [...prior, ...appended] };
+    const endpoint = opts.voice && base.endpoint_ms === undefined ? { endpoint_ms: opts.voice.endSilenceMs } : {};
+    return { ...base, ...endpoint, messages: [...prior, ...appended] };
   };
 
-  const startTurn = () => { turn = { id: newTurnId(), endAt: performance.now(), firstAudio: false }; return turn; };
+  const endpointMs = () => opts.voice?.endSilenceMs ?? (Number(baseConfig().endpoint_ms) || 0);
+  const deadlineMs = () => {
+    const asked = Number(baseConfig().first_audio_deadline_ms);
+    return Math.min(MAX_DEADLINE_MS, asked > 0 ? asked : DEFAULT_DEADLINE_MS);
+  };
+
+  const openLocalPlayer = () => (localPlayerOpening ??= (opts.createPlayer ?? createPcmPlayer)({ rate: DOWNSTREAM_RATE }).then(
+    (p) => { if (closed) p.close(); return (localPlayer = p); },
+    (err) => { localPlayerOpening = null; throw err; },
+  ));
+
+  const restoreServerOpener = () => {
+    if (serverOpenerOff && current && !current.clipBased) current.send({ type: 'config_update', opener: baseConfig().opener ?? null });
+    serverOpenerOff = false;
+  };
+
+  const startTurn = (speechEnded = false) => {
+    clearTimeout(deadlineTimer);
+    restoreServerOpener();
+    const now = performance.now();
+    const started: Turn = { id: newTurnId(), endAt: now, speechEnd: speechEnded ? now - endpointMs() : null, firstAudio: false };
+    turn = started;
+    if (speechEnded && clips.length) {
+      const due = Math.min(deadlineMs(), MAX_DEADLINE_MS - OPENER_MARGIN_MS) - endpointMs();
+      deadlineTimer = setTimeout(() => { void playOpener(started); }, Math.max(0, due));
+    }
+    return started;
+  };
+
+  const firstSound = (source: 'reply' | 'opener' | 'client_opener') => {
+    if (!turn) return;
+    clearTimeout(deadlineTimer);
+    const ms = turn.speechEnd === null ? null : Math.round(performance.now() - turn.speechEnd);
+    if (source !== 'client_opener' && ms !== null) turn.serverSoundMs ??= ms;
+    if (turn.sound) return;
+    turn.sound = true;
+    if (ms === null) return;
+    turn.soundMs = ms;
+    telemetry.emit('turn.first_sound', { turnId: turn.id, durMs: turn.soundMs, attrs: { source, transport: current?.type ?? null, uplinkBufferedBytes: current?.uplinkBacklog?.() ?? null } });
+  };
+
+  const endOpener = (cut: boolean) => {
+    const opener = playingOpener;
+    if (!opener) return;
+    playingOpener = null;
+    clearTimeout(opener.timer);
+    if (cut) localPlayer?.flush();
+    emit({ type: 'opener', state: 'end', index: opener.index, local: true });
+    if (!turn?.firstAudio) emit({ type: 'audio_end' });
+  };
+
+  async function playOpener(t: Turn): Promise<void> {
+    const transport = current;
+    if (turn !== t || t.sound || closed || !transport) return;
+    const player = transport.playOpener ? null : await openLocalPlayer().catch(() => null);
+    if (turn !== t || t.sound || closed || current !== transport || (!player && !transport.playOpener)) return;
+    const clip = clips.find(c => c.index > lastOpener) ?? clips[0]!;
+    t.localOpener = true;
+    const audioMs = Math.round((clip.samples.length / clip.rate) * 1000);
+    if (player) player.pushFloat(clip.samples.slice(), clip.rate);
+    else transport.playOpener!(clip.samples.slice(), clip.rate);
+    if (!transport.clipBased) { transport.send({ type: 'config_update', opener: null }); serverOpenerOff = true; }
+    emit({ type: 'opener', state: 'start', text: clip.text, index: clip.index, audio_ms: audioMs, local: true });
+    playingOpener = { index: clip.index, timer: setTimeout(() => endOpener(false), audioMs) };
+  }
+
+  async function cacheOpeners(): Promise<void> {
+    const authored = (baseConfig().opener as { lines?: unknown } | null | undefined)?.lines;
+    if (!opts.speak || !Array.isArray(authored)) return;
+    const lines = authored.filter((l): l is string => typeof l === 'string' && !!l.trim()).map(l => l.trim()).slice(0, MAX_OPENER_CLIPS);
+    const abort = new AbortController();
+    cacheAbort = abort;
+    for (const [index, text] of lines.entries()) {
+      try {
+        const audio = await opts.speak(text, { config: config(), traceparent: telemetry.traceparent, signal: abort.signal });
+        const clip = await (opts.decodeAudio ?? decodeClip)(audio instanceof Blob ? await audio.arrayBuffer() : audio);
+        if (closed) return;
+        clips.push({ index, text, rate: clip.rate, samples: trimLeadingSilence(clip.samples, clip.rate) });
+      } catch { if (closed) return; }
+    }
+    telemetry.emit('rt.opener.cached', { level: clips.length < lines.length ? 'warn' : 'info', attrs: { clips: clips.length, lines: lines.length } });
+    if (clips.length && current && !current.playOpener) void openLocalPlayer().catch(() => {});
+  }
 
   /** Events of the transport → history, speaking state, turn telemetry → the page. */
   const emit = (e: RealtimeEvent) => {
     if (closed && e.type !== 'closed') return;
+    if (e.type === 'deadline_missed' && turn?.localOpener) return;
+    if (playingOpener && !current?.playOpener && (e.type === 'audio_start' || (e.type === 'opener' && e.state === 'start' && !e.local))) endOpener(true);
     if (e.type === 'transcript' && e.final) {
       if (!turn) startTurn();
       if (e.text) appended.push({ role: 'user', content: e.text });
@@ -172,30 +288,48 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     if (e.type === 'route' && turn) Object.assign(turn, { provider: e.provider, fallback: e.fallback });
     if (e.type === 'audio_start') {
       npcSpeaking = true;
+      firstSound('reply');
       if (turn && !turn.firstAudio) {
         turn.firstAudio = true;
-        telemetry.emit('turn.first_audio', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: { transport: current?.type ?? null } });
+        const fromSpeechMs = turn.speechEnd === null ? null : Math.round(performance.now() - turn.speechEnd);
+        telemetry.emit('turn.first_audio', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: { transport: current?.type ?? null, fromSpeechMs } });
       }
     }
     if (e.type === 'opener' && e.state === 'start') {
       npcSpeaking = true;
-      telemetry.emit('turn.opener', { turnId: turn?.id, durMs: turn ? performance.now() - turn.endAt : undefined, attrs: { index: e.index ?? null, transport: current?.type ?? null } });
+      lastOpener = e.index ?? lastOpener;
+      firstSound(e.local ? 'client_opener' : 'opener');
+      telemetry.emit('turn.opener', {
+        turnId: turn?.id, durMs: turn ? performance.now() - turn.endAt : undefined,
+        attrs: { index: e.index ?? null, transport: current?.type ?? null, source: e.local ? 'client' : 'server', fromSpeechMs: turn?.soundMs ?? null },
+      });
     }
     if (e.type === 'deadline_missed') telemetry.emit('turn.deadline_missed', { level: 'warn', turnId: turn?.id, attrs: { deadlineMs: e.deadline_ms, transport: current?.type ?? null } });
     if (e.type === 'vad') heardUntil = e.state === 'start' ? Infinity : performance.now() + HEARD_WITHOUT_TURN_MS;
     if (e.type === 'audio_end' || e.type === 'interrupted') { npcSpeaking = false; quietSince = performance.now(); }
     if (e.type === 'metrics') {
+      const network = typeof turn?.serverSoundMs === 'number' && typeof e.first_sound_from_speech_ms === 'number' ? turn.serverSoundMs - e.first_sound_from_speech_ms : null;
+      if (turn) turn.networkMs = network;
       metrics.lastTurn = {
         ttfa_ms: e.ttfa_ms, stt_ms: e.stt_ms, llm_ttft_ms: e.llm_ttft_ms, tts_ttfb_ms: e.tts_ttfb_ms,
         first_sound_ms: e.first_sound_ms, opener: e.opener, deadline_missed: e.deadline_missed,
+        learner_first_sound_ms: turn?.soundMs ?? null, network_delay_ms: network,
       };
     }
     if (e.type === 'done') {
-      if (turn) telemetry.emit('turn.done', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: { empty: !!e.empty, filtered: !!e.filtered, transport: current?.type ?? null, provider: turn.provider ?? null, fallback: turn.fallback ?? null } });
+      clearTimeout(deadlineTimer);
+      if (turn?.localOpener) restoreServerOpener();
+      if (turn) {
+        telemetry.emit('turn.done', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: {
+          empty: !!e.empty, filtered: !!e.filtered, transport: current?.type ?? null, provider: turn.provider ?? null, fallback: turn.fallback ?? null,
+          firstSoundMs: turn.soundMs ?? null, networkDelayMs: turn.networkMs ?? null, clientOpener: !!turn.localOpener,
+        } });
+      }
       turn = null;
       heardUntil = 0;
       quietSince = performance.now();
     }
+    if (e.type === 'transport' && clips.length && !current?.playOpener) void openLocalPlayer().catch(() => {});
     if (e.type === 'error') telemetry.emit('error', { level: 'error', turnId: turn?.id, attrs: { code: e.code, transport: current?.type ?? null } });
     try { opts.onEvent(e); } catch { /* the page's handler */ }
   };
@@ -204,7 +338,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const r = recovery;
     recovery = null;
     r?.abort.abort();
-    recoveryPlayer?.flush();
+    localPlayer?.flush();
     return r;
   };
 
@@ -215,14 +349,14 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     try {
       await Promise.race([aborted, (async () => {
         const audio = await r.audio;
-        recoveryPlayer ??= await (opts.createPlayer ?? createPcmPlayer)({ rate: DOWNSTREAM_RATE });
+        const player = await openLocalPlayer();
         if (recovery !== r) return;
-        await recoveryPlayer.pushEncoded(audio instanceof Blob ? await audio.arrayBuffer() : audio);
+        await player.pushEncoded(audio instanceof Blob ? await audio.arrayBuffer() : audio);
         if (recovery !== r) return;
         if (!npcSpeaking) emit({ type: 'audio_start' });
         telemetry.emit('turn.recovered', { turnId: turn?.id, attrs: { transport: current?.type ?? null } });
         emit({ type: 'recovered' });
-        await recoveryPlayer.idle();
+        await player.idle();
       })()]);
       if (recovery !== r) return;
       recovery = null;
@@ -446,6 +580,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       current?.close();
       current = null;
       cancelRecovery();
+      endOpener(true);
       npcSpeaking = false;
       if (turn && isRealtime(from)) {
         emit({ type: 'error', code: 'turn_lost', message: `transport ${from} failed during the turn: ${err.message}` });
@@ -496,7 +631,10 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       onClipEffect: (e) => turns?.onEffect(e),
       onSegment: (ms) => telemetry.emit('vad.segment', { durMs: ms }),
     });
-    const listener: SileroListener = await startSileroListener(await v.classifier(), (e) => bridge?.onEffect(e), v.tuning);
+    const listener: SileroListener = await startSileroListener(await v.classifier(), (e) => {
+      if (e.kind === 'vadStart') clearTimeout(deadlineTimer);
+      bridge?.onEffect(e);
+    }, v.tuning);
     listener.connect(stream);
     voiceStop = () => { listener.stop(); turns?.drop(); void audio.close().catch(() => {}); };
   }
@@ -505,10 +643,14 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     if (closed) return;
     closed = true;
     clearTimeout(readmitTimer);
+    clearTimeout(deadlineTimer);
+    if (playingOpener) clearTimeout(playingOpener.timer);
+    playingOpener = null;
+    cacheAbort?.abort();
     bridge?.reset();
     voiceStop?.();
     cancelRecovery();
-    recoveryPlayer?.close();
+    localPlayer?.close();
     dropUpgrade('session closed');
     current?.close();
     current = null;
@@ -522,15 +664,18 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       const base = (opts.preferredTransports ?? [...TRANSPORT_LADDER]).filter((t, i, a) => a.indexOf(t) === i);
       order = orderWithWinner(base, memory.get(network()));
       await establish(order, 'connected');
+      void cacheOpeners();
       if (opts.voice && !closed) await startVoice(opts.voice);
       return current!.type;
     },
     sendEndTurn() {
       if (!current || current.clipBased) return;
-      startTurn();
+      startTurn(true);
       current.send({ type: 'end_turn' } satisfies ClientMessage);
     },
     interrupt() {
+      clearTimeout(deadlineTimer);
+      endOpener(true);
       const r = cancelRecovery();
       if (r?.playing) { emit({ type: 'interrupted' }); emit({ type: 'done', interrupted: true }); return; }
       if (r) emit(r.error);
@@ -542,7 +687,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     },
     async sendTurn(wav) {
       if (!current?.clipBased || closed) return;
-      startTurn();
+      startTurn(true);
       try {
         await current.sendTurn!(wav);
       } catch (err) {

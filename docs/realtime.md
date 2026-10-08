@@ -132,7 +132,38 @@ stay the first **reply** audio (on the edge it now includes the opener audio sti
 `session.metrics.lastTurn.{first_sound_ms, opener, deadline_missed}`, telemetry `turn.opener` (durMs from the end of
 the turn, `index`) and `turn.deadline_missed`; `audio_start` remains the first reply audio.
 
-**Limits — what can still exceed the ceiling.** The deadline is enforced where the audio leaves the server. Not covered:
+**The learner's clock (browser SDK).** The server's deadline starts at the speech the server heard, so it cannot see an
+uplink that stalls (2026-10-08, live: 7 of 702 turns over 2500 ms at the learner, the speech reaching the edge 2.0–4.4 s
+late, the edge answering in 100–490 ms). The SDK therefore keeps the same deadline on its own clock, from its own end
+of speech (`voice.endSilenceMs` before `end_turn` / the clip, or the config's `endpoint_ms` when the page ends turns
+itself with `sendEndTurn()` / `sendTurn()`):
+
+- At `connect()` the SDK asks the app's `speak` for the first two `opener.lines` (one after the other, the session's
+  config and voice — the same call that voices a cut reply), decodes them and trims the leading silence to 10 ms. No
+  `speak`, no lines or a failed synthesis: no client opener (`rt.opener.cached` says how many clips it has).
+- If neither a server opener nor reply audio has reached the page at the deadline (`first_audio_deadline_ms`, default
+  2000; never later than 2400 on this clock), it plays the next line itself: `opener{state:"start", local:true, text,
+  index, audio_ms}` … `opener{state:"end", local:true}`, telemetry `turn.opener` with `source: "client"`.
+- One opener per turn, whoever starts first. The server's opener or reply arrives first: the timer is dropped (the fast
+  path sends and plays nothing new). The client plays first: on webrtc / ws it sends `config_update {opener: null}`
+  behind the turn (the edge then plays none and reports `deadline_missed`, which the SDK does not pass on) and restores
+  the lines at `done`; a server opener already on its way is dropped — on ws the next `audio_ms` of PCM after its
+  `opener start`, on s2s-stream the audio between its `opener` events.
+- No overlap: on ws and the clip rungs the line goes into the transport's own player, so the reply queues behind it. On
+  webrtc the reply is a live track that cannot be queued: the line plays on the SDK's player and is cut when the
+  reply's `audio_start` (or a server opener) arrives.
+- Barge-in, `interrupt()`, speech that resumes (the SDK's VAD) and a transport that breaks drop the pending or playing
+  line; a turn lost with its transport still ends in one `done{error}` and is not sent again on a realtime rung.
+- Metering: `turn.first_sound` (`durMs` from the learner's end of speech to the first sound at the page, `source`
+  `reply` / `opener` / `client_opener`, `uplinkBufferedBytes` on ws), `fromSpeechMs` on `turn.first_audio` and
+  `turn.opener`, and on `turn.done` `firstSoundMs`, `clientOpener` and `networkDelayMs` = the page's time to the first
+  server sound minus the edge's `first_sound_from_speech_ms` (uplink + downlink of the turn, no clock compared; also
+  `session.metrics.lastTurn.{learner_first_sound_ms, network_delay_ms}`). With `voice` the SDK also sends `endpoint_ms`
+  in the clip rungs' config.
+
+**Limits — what can still exceed the ceiling.** The server's deadline is enforced where the audio leaves the server, the
+SDK's where the audio enters its player (a session with server VAD only and no `sendEndTurn()` has no client clock; a
+page without `speak` has no client opener; the times are of arrival at the page, not of the loudspeaker). Not covered:
 a network stall after that (the margin is 300 ms; a WS relay or TURN path that freezes longer delays the opener too), a
 device that is not playing (suspended `AudioContext`, autoplay blocked, a Bluetooth sink waking up), the upload of a
 clip on `/v1/s2s` (the server's clock starts when the request has arrived, `endpoint_ms` earlier), a WebRTC jitter
@@ -400,8 +431,8 @@ gateway keeps it, forwards it to the edge on each call (new span id, same trace)
 Event shape: `{ts, source:"browser"|"gateway", level, event, traceId, sessionId?, turnId?, durMs?, attrs?}`.
 
 - Browser: `rt.ladder.try|ok|fallback` (from, to, reason; `ok` = the session started: transport, durMs, `upgrading` when WebRTC is still connecting), `rt.ladder.upgrade` (from, to, durMs since the start), `rt.readmit.gave_up` (reason: `deadline`, `no_transport` or the refusal code), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
-  `rt.session.admitted|rejected|closed`, `vad.segment` (durMs), `turn.first_audio` (durMs from end of speech),
-  `turn.done`, `turn.recovered`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
+  `rt.session.admitted|rejected|closed`, `vad.segment` (durMs), `turn.first_audio` (durMs from the end of the turn, `fromSpeechMs`),
+  `turn.first_sound` (durMs on the learner's clock, source), `rt.opener.cached` (clips, lines), `turn.done` (firstSoundMs, networkDelayMs, clientOpener), `turn.recovered`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
 - Gateway: `rt.session.admitted|rejected|deleted`, `rt.signal.offer|refused`, `ws.open|close|refused`, `error` (sink
   pluggable, default the log).
 - **Never** audio, transcript, LLM text, SDP or tokens: codes, counts, durations (the SDK's `safeAttrs` drops content keys).
@@ -452,7 +483,11 @@ p95 ≤ 2000 ms, failures + truncations ≤ 1 %, and **no turn whose first sound
 has `ceiling` (`max`, the share of turns over 2000 / 2500 / 3000 ms, how many turns played an opener, how many missed
 the deadline with none) and `firstReplyAudioMs`: the reply alone, which behind an opener is heard when it arrived and
 the opener is over (`scripts/realtime-e2e/ceiling.ts`). To exercise the opener, put `opener.lines` in `RT_CONFIG`; the
-`/v1/s2s` client sends `endpoint_ms` = `--clip-end-silence`.
+`/v1/s2s` client sends `endpoint_ms` = `--clip-end-silence`. `--uplink-stall 3000` holds the audio of every third
+utterance of the Chrome sessions on ws / s2s-stream for 3 s after the speech (the 2026-10-08 failure), and
+`--client-deadline` turns on the SDK's own deadline in those pages (the page ends the turn, `speak` = the gateway's
+`/v1/audio/speech` with `--tts-model`); `audible.<transport>.sdkFirstSoundMs` / `networkDelayMs` put the SDK's numbers
+next to the meter's.
 
 ```bash
 # local fake stack (Linux + root; same needs as e2e.ts)

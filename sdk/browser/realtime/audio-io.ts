@@ -2,7 +2,7 @@
  * Browser audio of the WS and clip rungs: microphone → 16 kHz PCM16 20 ms frames (AudioWorklet), and a 24 kHz (or any
  * rate) PCM player on an AudioWorklet ring buffer. WebRTC needs neither: the browser's own Opus stack carries audio.
  */
-import { FrameChunker, LinearResampler, floatToInt16, int16ToFloat, samplesPerFrame } from './pcm';
+import { DOWNSTREAM_RATE, FrameChunker, LinearResampler, floatToInt16, int16ToFloat, samplesPerFrame } from './pcm';
 
 /** Posts each render quantum (mono, the context's rate) to the main thread. */
 export const CAPTURE_WORKLET = `class AigwRtCapture extends AudioWorkletProcessor {
@@ -65,6 +65,13 @@ export async function createPcmCapture(stream: MediaStream, opts: { rate: number
       void context.close().catch(() => {});
     },
   };
+}
+
+export interface DecodedClip { samples: Float32Array; rate: number }
+
+export async function decodeClip(data: ArrayBuffer): Promise<DecodedClip> {
+  const decoded = await new OfflineAudioContext(1, 1, DOWNSTREAM_RATE).decodeAudioData(data.slice(0));
+  return { samples: decoded.getChannelData(0).slice(), rate: decoded.sampleRate };
 }
 
 export interface PcmPlayer {

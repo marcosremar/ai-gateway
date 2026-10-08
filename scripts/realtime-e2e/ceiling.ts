@@ -26,7 +26,7 @@ export function ceilingReport(turns: CeilingTurn[], limitMs: number) {
   const max = sounds.length ? Math.round(Math.max(...sounds)) : null;
   return {
     limitMs, turnsWithSound: sounds.length, max, over2000Pct: pct(over(2000)), over2500Pct: pct(over(2500)), over3000Pct: pct(over(3000)),
-    overLimit: over(limitMs), openers: turns.filter(openerOf).length, deadlineMissed: turns.filter(t => t.events.some(e => e.type === 'deadline_missed')).length,
+    overLimit: over(limitMs), openers: turns.filter(openerOf).length, clientOpeners: turns.filter(t => openerOf(t)?.local === true).length, deadlineMissed: turns.filter(t => t.events.some(e => e.type === 'deadline_missed')).length,
     ok: max !== null && max <= limitMs,
   };
 }
