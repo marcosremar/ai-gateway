@@ -107,7 +107,10 @@ export interface DeploymentSpec {
   bootTimeoutMinutes: number;
   /** Extra replicas (above the idle base) are removed only after load stayed low this long. */
   scaleDownDelaySeconds: number;
-  /** How long an invoke waits for a replica during a cold start before answering 503 + Retry-After. */
+  /**
+   * How long an invoke waits for a replica during a cold start before answering 503 + Retry-After. The gateway caps the
+   * wait at DEPLOYMENTS_MAX_WAIT_SECONDS (default 240): the platform in front cuts a request with no bytes at 5 min.
+   */
   coldStartWaitSeconds: number;
   /** Refuse to create a replica whose catalog price is above this (EUR/h). */
   maxEurPerHour: number;
@@ -433,4 +436,5 @@ export interface DeploymentView {
   realtime: { active: number; capacity: number; refusedSessions: number; scalingOut: boolean } | null;
   sessions: number;
   hold: { replicas: number; until: string } | null;
+  warnings: string[];
 }

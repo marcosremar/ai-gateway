@@ -114,6 +114,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       lastRequestAt: rt.record.lastRequestAt, aboveSince: null, now, ...this.planExtras(rt),
     }).desired);
     const sessions = externalLoadOf(name, now);
+    const maxWait = this.maxColdStartWaitSeconds;
     const status: DeploymentView['status'] = rt.record.spec.paused ? 'paused'
       : replicas.length === 0 && rt.creating === 0 ? 'scaled-to-zero'
         : ready === 0 ? 'warming'
@@ -146,6 +147,9 @@ export abstract class ControllerViews extends ReconcileLoop {
       sessions: distinctSessions(name, 60_000, now),
       hold: rt.record.hold && rt.record.hold.until > now
         ? { replicas: rt.record.hold.replicas, until: new Date(rt.record.hold.until).toISOString() } : null,
+      warnings: rt.record.spec.coldStartWaitSeconds > maxWait
+        ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]
+        : [],
     };
   }
 }
