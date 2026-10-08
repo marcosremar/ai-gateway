@@ -200,10 +200,15 @@ describe('POST /v1/realtime/sessions', () => {
 
   it('budget denial, oversize config and bad bodies', async () => {
     const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
-    gw = await startGateway(controller, { deny: { status: 429, type: 'budget_exceeded', message: 'over', retryAfterSeconds: 99 } });
+    gw = await startGateway(controller, {
+      deny: { status: 429, type: 'budget_exceeded', message: 'over', retryAfterSeconds: 99, code: 'daily_budget_exhausted', budget: 'requests', resetAt: '2026-10-08T00:00:00.000Z' },
+    });
     const denied = await gw.create({ config: CONFIG });
     expect(denied.status).toBe(429);
     expect(denied.headers.get('retry-after')).toBe('99');
+    expect(await denied.json()).toMatchObject({
+      error: { code: 'budget_exceeded' }, reason: 'daily_budget_exhausted', budget: 'requests', reset_at: '2026-10-08T00:00:00.000Z',
+    });
     const big = await gw.create({ config: { ...CONFIG, system: 'x'.repeat(7000) } });
     expect(big.status).toBe(413);
     expect((await gw.create({ transports: ['webrtc'] })).status).toBe(400);

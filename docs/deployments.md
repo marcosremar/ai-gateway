@@ -109,6 +109,10 @@ registered, so it would stay the target).
 The gateway serves many apps; each has an **account** with the addresses of its Docker images, so a deploy names an
 image instead of carrying a registry address, and the app finds it again later (scale up for a class, roll back).
 
+An app's key is under the daily budget of every non-admin key (`APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS`: one value for
+all apps, no per-app override). Before an app serves a class, size both from students × turns (formula and a worked
+example in `docs/api/http.md` § App keys) and watch `appBudgets` in `GET /health?details=1` during the lesson.
+
 ```bash
 # Save (or move) an image address — build-image-on-scaleway.ts --app parle does this after a push
 curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
@@ -528,7 +532,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
-| `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000; `docs/api/http.md` § App keys) |
+| `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the same for every app: size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
 | `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 150) caps parallel requests per key user, `MAX_CONCURRENT_PER_USER_OVERRIDES` (`user:limit,…`) per user |
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |

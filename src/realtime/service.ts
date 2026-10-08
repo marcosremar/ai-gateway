@@ -332,7 +332,7 @@ export class RealtimeService {
     const denial = admin ? null : this.opts.charge?.(userId, charge) ?? null;
     if (denial) {
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: denial.type, status: denial.status, deployment: dep } });
-      return sendJson(res, denial.status, errorBody(denial.message, denial.type), denial.retryAfterSeconds ? { 'Retry-After': denial.retryAfterSeconds } : {});
+      return sendJson(res, denial.status, errorBody(denial.message, denial.type, denial.code ? { reason: denial.code, budget: denial.budget, reset_at: denial.resetAt } : {}), denial.retryAfterSeconds ? { 'Retry-After': denial.retryAfterSeconds } : {});
     }
 
     const sid = `rt_${randomUUID().replace(/-/g, '')}`;

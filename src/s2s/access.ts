@@ -22,7 +22,7 @@ import type { S2SConfig } from './composite';
 
 export type S2SAdmission =
   | { ok: true; deployment: string }
-  | { ok: false; status: number; type: string; message: string; retryAfterSeconds?: number };
+  | ({ ok: false } & AppLimitDenial);
 
 export interface S2SAccessOptions {
   /** The calling key's user (= app id); null when the gateway runs without keys (localhost-only open mode). */

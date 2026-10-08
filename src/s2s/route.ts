@@ -27,6 +27,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { DeploymentError, type DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
 import { applySttFilter, filterEnabled } from '../gateway/proxy/routes/stt-filter';
+import { denialError } from '../gateway/proxy/app-limits';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { runComposite, type S2SConfig, type StageClient } from './composite';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
@@ -196,7 +197,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       if (opts.admit) {
         const admission = opts.admit(req, config, { deployment, explicit });
         if (!admission.ok) {
-          return sendJson(res, admission.status, { error: { message: admission.message, type: admission.type } },
+          return sendJson(res, admission.status, { error: denialError(admission) },
             admission.retryAfterSeconds ? { 'Retry-After': admission.retryAfterSeconds } : {});
         }
         deployment = admission.deployment;

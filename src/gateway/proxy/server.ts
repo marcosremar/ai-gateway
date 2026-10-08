@@ -11,7 +11,7 @@ import { validateAuth } from './middleware/auth';
 import { RateLimiter } from './middleware/rate-limit';
 import { SECURITY_HEADERS, applySecurityHeaders } from '../../middleware/security-headers';
 import { handleChatCompletions } from './routes/chat-completions';
-import { inferenceKindOf } from './app-limits';
+import { denialError, inferenceKindOf } from './app-limits';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
 import { sttFilterStats } from './routes/stt-filter';
@@ -842,7 +842,7 @@ export function createProxyServer(config: ProxyConfig): Server {
         const denial = config.appLimits.check(userId, kind, fields, { charge });
         if (denial) {
           if (denial.retryAfterSeconds) res.setHeader('Retry-After', denial.retryAfterSeconds);
-          sendResponse(res, { status: denial.status, body: { error: { message: denial.message, type: denial.type } } }, requestId);
+          sendResponse(res, { status: denial.status, body: { error: denialError(denial) } }, requestId);
           return;
         }
       }
