@@ -11,7 +11,7 @@ import { placeReplica, PlacementError } from './placement-walk';
 import { isOutOfStock } from './placements';
 import { DEFAULT_NEAR } from './placements';
 import { gateDecision, gateNote } from './rtt-gate';
-import type { DeploymentBackend, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
+import type { DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
 const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
 const NETWORK_RELEASE_QUICK_ATTEMPTS = 10;
@@ -164,13 +164,18 @@ export abstract class ReplicaLifecycle extends ControllerState {
     rt.creating++;
     rt.spendNote = null;
     const created: { id?: string } = {};
-    const spend = { cost: 0 };
+    const spend: { cost: number; deployment: string; provider?: DeploymentProvider } = { cost: 0, deployment: spec.name };
     this.pendingSpend.add(spend);
     void (async () => {
       try {
         const { machine, price, placement } = await placeReplica({
           spec, log: this.log, backendFor: (p) => this.backends[p],
-          create: (backend, placed) => this.createOn(rt, backend, placed, created),
+          create: (backend, placed) => {
+            spend.provider = backend.provider;
+            return this.createOn(rt, backend, placed, created);
+          },
+          placed: (p) => this.machines.filter(m => m.deployment === spec.name && this.providerOf(m) === p).length
+            + [...this.pendingSpend].filter(s => s !== spend && s.deployment === spec.name && s.provider === p).length,
           // The place's price (the cap on a market-priced Vast offer) must fit under the € ceiling with what already runs.
           admit: (cost) => {
             spend.cost = 0;

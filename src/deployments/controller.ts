@@ -41,6 +41,10 @@ export class DeploymentController extends ControllerViews {
     for (const pending of networkReleases ?? []) this.networkReleases.set(pending.network.ipId, pending);
     for (const p of BUILTIN_PROFILES) this.profiles.set(p.name, p);
     for (const p of profiles) this.profiles.set(p.name, p);
+    const mode = this.opts.defaultScalingMode;
+    const defaulted = mode ? deployments.filter(r => !r.spec.scaling) : [];
+    for (const record of defaulted) record.spec = { ...record.spec, scaling: { mode: mode! } };
+    if (defaulted.length) this.log('deployments: no scaling block, running under the default mode', { mode, deployments: defaulted.map(r => r.spec.name) });
     for (const record of deployments) this.deployments.set(record.spec.name, this.runtime(record));
   }
 
@@ -76,6 +80,7 @@ export class DeploymentController extends ControllerViews {
       throw new SpecError(`maxReplicas ${body.maxReplicas} is above this gateway's replica cap of ${cap} across all deployments (DEPLOYMENTS_MAX_REPLICAS)`);
     }
     const spec = buildSpec(name, body, { profiles: this.profiles, previous: existing?.record.spec });
+    if (!spec.scaling && this.opts.defaultScalingMode) spec.scaling = { mode: this.opts.defaultScalingMode };
     const initBytes = usesScaleway(spec) ? Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32))) : 0;
     if (initBytes > USER_DATA_KEY_MAX_BYTES) {
       throw new SpecError(`generated cloud-init is ${initBytes} bytes; Scaleway takes at most ${USER_DATA_KEY_MAX_BYTES} (shrink bootScript/env)`);

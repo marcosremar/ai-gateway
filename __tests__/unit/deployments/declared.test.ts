@@ -133,8 +133,8 @@ describe('declared parle-speech spec', () => {
       minReplicas: 0, volumeGb: profile.volumeGb, maxEurPerHour: profile.maxEurPerHour, realtime: {}, env: {},
       envByMachineType: profile.envByMachineType,
     });
-    expect(placementsOf(spec).map(p => `${p.zone}/${p.machineType}`).slice(0, 3)).toEqual([
-      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G', 'fr-par-2/L4-1-24G',
+    expect(placementsOf(spec).map(p => `${p.provider} ${p.zone}/${p.machineType}`)).toEqual([
+      'scaleway fr-par-2/L40S-1-48G', 'scaleway fr-par-1/L40S-1-48G', 'vast fr-par-2/RTX 5090',
     ]);
     expect(spec.registryAuth).toBeUndefined();
     expect(c.get('parle-speech')?.status).toBe('scaled-to-zero');
@@ -147,14 +147,14 @@ describe('declared parle-speech spec', () => {
   // D3, live QA 2026-10-07: one placement only, `L40S-1-48G out of stock in fr-par-2` for 17 min, no 2nd replica.
   it('out of stock in fr-par-2: the replica lands on the next placement', async () => {
     const cloud = new FakeCloud();
-    cloud.failCreateFor = (s) => (s.machineType === 'L40S-1-48G' ? `scaleway HTTP 412: {"type":"out_of_stock"} ${s.zone}` : null);
+    cloud.failCreateFor = (s) => (s.zone === 'fr-par-2' ? `scaleway HTTP 412: {"type":"out_of_stock"} ${s.zone}` : null);
     const { c } = await controller(new MemoryDeploymentStore(), cloud);
     await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     c.start();
     c.wake('parle-speech');
     await until(() => cloud.created.length === 1, 3000);
-    expect(cloud.created[0].spec).toMatchObject({ zone: 'fr-par-2', machineType: 'L4-1-24G' });
-    expect(c.get('parle-speech')!.lastPlacement).toMatch(/L40S-1-48G out of stock in fr-par-2; L40S-1-48G out of stock in fr-par-1/);
+    expect(cloud.created[0].spec).toMatchObject({ zone: 'fr-par-1', machineType: 'L40S-1-48G' });
+    expect(c.get('parle-speech')!.lastPlacement).toMatch(/L40S-1-48G out of stock in fr-par-2/);
   });
 });
 

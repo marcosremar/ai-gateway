@@ -3,10 +3,14 @@
  * same name as a built-in one overrides it.
  */
 
-import type { Profile } from './types';
+import type { Profile, ScalingSpec } from './types';
 
 /** vLLM-Omni serves Qwen3-TTS with an OpenAI-shaped `POST /v1/audio/speech` (same image the parle L4 runs). */
 const VLLM_OMNI_IMAGE = 'vllm/vllm-omni:v0.28.0';
+
+const VAST_GPU = { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85 } as const;
+const VAST_HOST = { minCuda: 13, maxRttExcessMs: 20 };
+const CLASS_VOICE: ScalingSpec = { mode: 'fast' };
 
 function qwenTts(model: string) {
   return {
@@ -17,6 +21,9 @@ function qwenTts(model: string) {
     healthPath: '/health',
     machineType: 'L4-1-24G',
     zone: 'fr-par-2',
+    placements: [{ zone: 'fr-par-1' }, { ...VAST_GPU, maxReplicas: 2 }],
+    ...VAST_HOST,
+    scaling: CLASS_VOICE,
     gpu: true,
     volumeGb: 80,
     minReplicas: 0,
@@ -85,14 +92,15 @@ export const BUILTIN_PROFILES: Profile[] = [
       port: 8000,
       healthPath: '/health',
       // The L40S the parle class runs on (live QA 2026-10-07), and when it is out of stock (17 min in fr-par-2 that day, the
-      // 2nd replica never came): the same type in fr-par-1 (skipped at no cost when not sold there), then an L4 in
-      // fr-par-2, Warsaw (the zones with GPU stock on 2026-10-06) and fr-par-1 — `envByMachineType` tunes each GPU.
+      // 2nd replica never came): the same type in fr-par-1 (skipped at no cost when not sold there), then one RTX 5090 on
+      // Vast. No L4: the account's L4 quota (2) belongs to the TTS deployment. `envByMachineType` tunes each GPU.
       machineType: 'L40S-1-48G',
       zone: 'fr-par-2',
-      placements: [
-        { zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }, { zone: 'pl-waw-2', machineType: 'L4-1-24G' },
-        { zone: 'fr-par-1', machineType: 'L4-1-24G' },
-      ],
+      placements: [{ zone: 'fr-par-1' }, { ...VAST_GPU, maxReplicas: 1 }],
+      ...VAST_HOST,
+      entrypoint: 'bash',
+      args: ['/opt/s2s/start.sh'],
+      scaling: CLASS_VOICE,
       gpu: true,
       // ~57 GB image: the boot disk must hold it plus the Docker layers.
       volumeGb: 80,
@@ -186,6 +194,7 @@ export const BUILTIN_PROFILES: Profile[] = [
       bootTimeoutMinutes: 20,
       idleAction: 'stop',
       maxEurPerHour: 0.5,
+      scaling: { mode: 'balanced' },
       description: 'Whisper large-v3 STT + Qwen3.5-9B Q4 LLM (translation) in one container. POST /v1/audio/transcriptions, /v1/chat/completions, /ws/audio-stream.',
     },
   },

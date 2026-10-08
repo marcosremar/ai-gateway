@@ -7,6 +7,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import type { IncomingMessage } from 'http';
 import { DeploymentController } from './controller';
+import { DEFAULT_SCALING_MODE } from './scaling-spec';
 import { probeLimitsFromEnv, spendLimitsFromEnv } from './spend-limits';
 import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend } from './scaleway-backend';
@@ -148,6 +149,7 @@ export function deploymentsFromEnv(
   const controller = new DeploymentController({
     backends,
     sessions: sessionsWanting,
+    defaultScalingMode: DEFAULT_SCALING_MODE,
     store: FileDeploymentStore.inDir(stateDir),
     probe: new HttpReplicaProbe(probeTimeoutMs),
     busyGraceMs,

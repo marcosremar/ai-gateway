@@ -111,6 +111,7 @@ const KNOWN_FIELDS = new Set<string>([
   'scaling', 'fileUrls', 'maxRttExcessMs',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
+const PLACEMENT_FIELDS = new Set([...CANDIDATE_FIELDS, 'maxReplicas']);
 
 function providerOf(value: unknown, field: string): DeploymentProvider {
   if (!PROVIDERS.includes(value as DeploymentProvider)) throw new SpecError(`${field} must be 'scaleway' or 'vast'`);
@@ -282,15 +283,21 @@ function fileUrlsOf(raw: unknown): Record<string, FileUrl> {
 function placementsOf(raw: unknown): Placement[] {
   if (!Array.isArray(raw) || raw.length > MAX_PLACEMENTS) throw new SpecError(`placements must list at most ${MAX_PLACEMENTS} entries`);
   return raw.map((p, i) => {
-    const entry = p as { zone?: unknown; machineType?: unknown } | null;
+    const entry = p as Record<string, unknown> | null;
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new SpecError(`placements[${i}] must be an object`);
     for (const key of Object.keys(entry)) {
-      if (key !== 'zone' && key !== 'machineType') throw new SpecError(`placements[${i}]: unknown field '${key}'`);
+      if (!PLACEMENT_FIELDS.has(key)) throw new SpecError(`placements[${i}]: unknown field '${key}'`);
     }
     if (entry.zone === undefined && entry.machineType === undefined) throw new SpecError(`placements[${i}] needs zone or machineType`);
+    const provider = entry.provider === undefined ? undefined : providerOf(entry.provider, `placements[${i}].provider`);
     return {
+      ...(provider ? { provider } : {}),
       ...(entry.zone !== undefined ? { zone: str(entry.zone, `placements[${i}].zone`, ZONE_RE) } : {}),
-      ...(entry.machineType !== undefined ? { machineType: str(entry.machineType, `placements[${i}].machineType`, TYPE_RE) } : {}),
+      ...(entry.machineType !== undefined
+        ? { machineType: str(entry.machineType, `placements[${i}].machineType`, provider === 'vast' ? MACHINE_RE : TYPE_RE) } : {}),
+      ...(entry.maxEurPerHour !== undefined ? { maxEurPerHour: num(entry.maxEurPerHour, `placements[${i}].maxEurPerHour`, 0.001, 50) } : {}),
+      ...(entry.maxReplicas !== undefined
+        ? { maxReplicas: int(entry.maxReplicas, `placements[${i}].maxReplicas`, 1, MAX_REPLICAS_PER_DEPLOYMENT) } : {}),
     };
   });
 }
@@ -403,6 +410,16 @@ export function buildSpec(
   }
   if (spec.placements?.length && spec.provider !== 'scaleway') throw new SpecError('placements are Scaleway only (use candidates for vast)');
   for (const [i, p] of (spec.placements ?? []).entries()) {
+    if ((p.provider ?? spec.provider) !== spec.provider) {
+      if (!p.machineType || p.maxEurPerHour === undefined || p.maxReplicas === undefined) {
+        throw new SpecError(`placements[${i}]: a placement on ${p.provider} needs machineType, maxEurPerHour and maxReplicas`);
+      }
+      if (!spec.gpu || spec.exposure) throw new SpecError(`placements[${i}]: ${p.provider} takes GPU deployments without exposure only`);
+      continue;
+    }
+    if (p.maxEurPerHour !== undefined || p.maxReplicas !== undefined) {
+      throw new SpecError(`placements[${i}]: maxEurPerHour and maxReplicas belong to a placement on another provider`);
+    }
     if (p.machineType && isGpuMachineType(p.machineType) !== spec.gpu) {
       throw new SpecError(`placements[${i}].machineType ${p.machineType} must be a ${spec.gpu ? 'GPU' : 'CPU'} type like machineType`);
     }
@@ -419,13 +436,13 @@ export function buildSpec(
   if (spec.exposure && spec.candidates?.length) throw new SpecError('candidates cannot be combined with exposure (the reserved IP is zonal)');
   const twice = Object.keys(spec.fileUrls ?? {}).find(key => spec.files && key in spec.files);
   if (twice) throw new SpecError(`'${twice}' is in both files and fileUrls`);
-  if (usesVast(spec)) checkVastSpec(spec);
+  if (usesVast({ provider: spec.provider, candidates: spec.candidates })) checkVastSpec(spec);
   return spec;
 }
 
 /** The spec may land on Vast (its provider, or one of its candidates). */
-export function usesVast(spec: Pick<DeploymentSpec, 'provider' | 'candidates'>): boolean {
-  return spec.provider === 'vast' || (spec.candidates ?? []).some(c => (c.provider ?? spec.provider) === 'vast');
+export function usesVast(spec: Pick<DeploymentSpec, 'provider' | 'candidates' | 'placements'>): boolean {
+  return spec.provider === 'vast' || [...(spec.candidates ?? []), ...(spec.placements ?? [])].some(c => (c.provider ?? spec.provider) === 'vast');
 }
 
 /** The spec may land on Scaleway. */
@@ -462,20 +479,26 @@ export function vastEnvBytes(spec: Pick<DeploymentSpec, 'bootScript' | 'env' | '
     + (hi - lo + 1) * VAST_PORT_ENV_BYTES;
 }
 
-function checkVastSpec(spec: DeploymentSpec): void {
-  if (!spec.bootScript || !spec.image) {
-    throw new SpecError('vast replicas need bootScript and image (the base container image the script runs in)');
+export function vastRefusal(spec: DeploymentSpec, fallback = false): string | null {
+  if (!spec.image || (!spec.bootScript && !spec.entrypoint)) {
+    return 'vast replicas need bootScript and image (the one container of the host; entrypoint + args may stand in for bootScript)';
   }
-  if (spec.files && Object.keys(spec.files).length) throw new SpecError('files are not supported on vast (no user_data service)');
-  if (spec.exposure) throw new SpecError('exposure is not supported on vast');
+  if (spec.files && Object.keys(spec.files).length) return 'files are not supported on vast (no user_data service)';
+  if (spec.exposure) return 'exposure is not supported on vast';
   if (spec.realtime && vastPortCount(spec) > VAST_MAX_PORTS) {
-    throw new SpecError(`realtime on vast maps one port per UDP media port and this spec needs ${vastPortCount(spec)} `
-      + `(2 per session per worker + the probe port + 2 TCP); a host gives at most ${VAST_MAX_PORTS}: lower realtime.maxSessions or narrow realtime.udpPorts`);
+    return `realtime on vast maps one port per UDP media port and this spec needs ${vastPortCount(spec)} `
+      + `(2 per session per worker + the probe port + 2 TCP); a host gives at most ${VAST_MAX_PORTS}: lower realtime.maxSessions or narrow realtime.udpPorts`;
   }
-  if (spec.idleAction === 'stop') throw new SpecError("idleAction 'stop' is not supported on vast");
+  if (spec.idleAction === 'stop' && !fallback) return "idleAction 'stop' is not supported on vast";
   const bytes = vastEnvBytes(spec);
   if (bytes > VAST_ENV_MAX_BYTES) {
-    throw new SpecError(`vast accepts ${VAST_ENV_MAX_BYTES / 1000} KB of env per instance and this bootScript + env needs about ${Math.ceil(bytes / 1000)} KB `
-      + '(the script travels base64 twice): keep bootScript under ~14 KB and download large payloads at boot');
+    return `vast accepts ${VAST_ENV_MAX_BYTES / 1000} KB of env per instance and this bootScript + env needs about ${Math.ceil(bytes / 1000)} KB `
+      + '(the script travels base64 twice): keep bootScript under ~14 KB and download large payloads at boot';
   }
+  return null;
+}
+
+function checkVastSpec(spec: DeploymentSpec): void {
+  const refusal = vastRefusal(spec);
+  if (refusal) throw new SpecError(refusal);
 }

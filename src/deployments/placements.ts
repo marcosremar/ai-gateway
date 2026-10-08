@@ -1,9 +1,10 @@
 /**
  * Placement: where a replica may run. Two spec fields, one walk (`placement-walk.ts`):
  *
- *   - `placements` (Scaleway): the spec's own zone/type first, then each entry IN ORDER (`placementsOf`), at the spec's
- *     `maxEurPerHour`; the walk moves on only when the type is not sold, over the cap, out of stock (`isOutOfStock`)
- *     or over the account's quota (`quotaMachineType`: that machine type is then skipped in every zone).
+ *   - `placements`: the spec's own zone/type first, then each entry IN ORDER (`placementsOf`), at the spec's
+ *     `maxEurPerHour` (an entry on another provider carries its own cap); the walk moves on only when the type is not
+ *     sold, over the cap, out of stock (`isOutOfStock`) or over the account's quota (`quotaMachineType`: that machine
+ *     type is then skipped in every zone).
  *   - `candidates` (Scaleway and Vast): a ladder ranked here (`rankCandidates`), each entry with its own cap.
  *
  * The ranking is pure, no I/O — the Vast backend ranks market offers with `rankOffers`. The owner's three goals:
@@ -13,7 +14,7 @@
  * it cost more. Vast hosts are then measured (`rtt-gate.ts`), and one that passed sorts first on later creates.
  */
 import { countryDistanceKm } from './geo';
-import type { CatalogEntry, DeploymentProvider, DeploymentSpec, PlacementCandidate } from './types';
+import type { CatalogEntry, DeploymentProvider, DeploymentSpec, Placement, PlacementCandidate } from './types';
 
 export type { CatalogEntry };
 
@@ -23,16 +24,17 @@ export type { CatalogEntry };
 export function placementsOf(spec: DeploymentSpec): DeploymentSpec[] {
   const seen = new Set<string>();
   const out: DeploymentSpec[] = [];
-  for (const p of [{}, ...(spec.placements ?? [])]) {
+  for (const p of [{} as Placement, ...(spec.placements ?? [])]) {
     const zone = p.zone ?? spec.zone;
     const machineType = p.machineType ?? spec.machineType;
-    const key = `${zone}/${machineType}`;
+    const provider = p.provider ?? spec.provider;
+    const key = `${provider}/${zone}/${machineType}`;
     if (seen.has(key)) continue;
     seen.add(key);
     // Scaleway image ids are per zone: a pinned image only holds in its own zone (elsewhere the backend looks up the
     // same image there).
     const { osImageId, ...rest } = spec;
-    out.push({ ...rest, ...(zone === spec.zone && osImageId ? { osImageId } : {}), zone, machineType });
+    out.push({ ...rest, ...(zone === spec.zone && osImageId ? { osImageId } : {}), provider, zone, machineType, maxEurPerHour: p.maxEurPerHour ?? spec.maxEurPerHour });
   }
   return out;
 }
