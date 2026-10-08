@@ -24,6 +24,8 @@
  *     releases a replica with requests in flight: with `drainBusy` such surplus is returned in `drain` (no new request,
  *     released once empty). Going idle scales down at once.
  *   - `floor` (warm-up schedule / client warm window) and `autoscaleWant` (pressure, `autoscale.ts`) raise `desired`.
+ *   - `autoscaleOnly` (a spec with a `scaling` block): load no longer sizes the count, `autoscaleWant` alone does;
+ *     `hold` (`scaling.hold`) fixes `desired` at that count, whatever the load, floors and activity.
  *   - A replica still booting is never released for idleness or surplus: the boot finishes and the idle rules apply
  *     from its ready time (live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of its ~9 min boot, and each
  *     sparse request paid a new boot). Only a delete, pause, park (`lastRequestAt` null), the pinned-idle guard or the
@@ -84,6 +86,8 @@ export interface PlanInput {
   autoscaleWant?: number;
   /** Replicas a warm-up schedule or a client warm window keeps up now, whatever the load (`warmFloor`). */
   floor?: number;
+  autoscaleOnly?: boolean;
+  hold?: number;
 }
 
 export interface PlanRelease {
@@ -109,7 +113,7 @@ export function replicaPhase(r: ObservedReplica): ReplicaPhase {
 }
 
 type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now' | 'pinnedIdleMaxMs' | 'specUpdatedAt' | 'demand'
-  | 'autoscaleWant' | 'floor'>
+  | 'autoscaleWant' | 'floor' | 'autoscaleOnly' | 'hold'>
   & { replicas?: ObservedReplica[] };
 
 /** A `minReplicas` pin nobody used (no request, no spec change) for `pinnedIdleMaxMs`. */
@@ -138,12 +142,13 @@ export function isActive(input: ActivityInput): boolean {
 export function desiredReplicas(input: ActivityInput): number {
   const { spec } = input;
   if (spec.paused) return 0;
+  if (input.hold !== undefined) return Math.min(spec.maxReplicas, input.hold);
   const floor = input.floor ?? 0;
   if (pinnedIdleOver(input)) return Math.min(spec.maxReplicas, floor);
   const active = isActive(input);
   const base = active ? Math.max(spec.minReplicas, spec.minActiveReplicas ?? 1, 1) : spec.minReplicas;
   const load = Math.max(input.inflight + input.waiting, active ? input.demand ?? 0 : 0);
-  const byLoad = Math.ceil(load / spec.targetInflightPerReplica);
+  const byLoad = input.autoscaleOnly ? 0 : Math.ceil(load / spec.targetInflightPerReplica);
   const pressure = active ? input.autoscaleWant ?? 0 : 0;
   return Math.min(spec.maxReplicas, Math.max(spec.minReplicas, base, byLoad, floor, pressure));
 }

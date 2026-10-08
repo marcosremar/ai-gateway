@@ -5,11 +5,12 @@
  *   bun scripts/scaling-sim.ts                      every scenario, one summary row each
  *   bun scripts/scaling-sim.ts class-arrival burst  only these
  *   bun scripts/scaling-sim.ts class-arrival --timeline --events
+ *   bun scripts/scaling-sim.ts --mode balanced      today (default) | economy | balanced | fast | all
  *   flags: --boot 600 --resume 180 --ceiling 8 --price 1.47 --max-replicas 4 --idle-minutes 2 --idle-action delete|stop
- *          --wasted-below 20 --no-fallback --seed 1
+ *          --wasted-below 20 --no-fallback --seed 1 --no-session-signal --budget '{"eurPerMonth":2}'
  */
 
-import { simulateClass, summaryRow, table, type SimParams } from './scaling-sim/engine';
+import { SIM_MODES, simulateClass, summaryRow, table, type SimMode, type SimParams } from './scaling-sim/engine';
 import { CLASS_SCENARIOS } from './scaling-sim/scenarios';
 
 const NUMERIC: Record<string, keyof SimParams> = {
@@ -21,11 +22,15 @@ const args = process.argv.slice(2);
 const overrides: Partial<SimParams> = {};
 const wanted: string[] = [];
 const flags = new Set<string>();
+let modes: SimMode[] = ['today'];
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (NUMERIC[a]) Object.assign(overrides, { [NUMERIC[a]]: Number(args[++i]) });
   else if (a === '--idle-action') overrides.idleAction = args[++i] === 'stop' ? 'stop' : 'delete';
   else if (a === '--no-fallback') overrides.fallback = false;
+  else if (a === '--no-session-signal') overrides.sessionSignal = false;
+  else if (a === '--budget') overrides.budget = JSON.parse(args[++i]);
+  else if (a === '--mode') modes = args[++i] === 'all' ? [...SIM_MODES] : [args[i] as SimMode];
   else if (a.startsWith('--')) flags.add(a);
   else wanted.push(a);
 }
@@ -35,12 +40,20 @@ if (unknown.length) {
   process.exit(1);
 }
 
-const summary = [];
-for (const [key, scenario] of Object.entries(CLASS_SCENARIOS)) {
-  if (wanted.length && !wanted.includes(key)) continue;
-  const result = await simulateClass(scenario, overrides);
-  summary.push(summaryRow(key, result));
-  if (flags.has('--timeline')) console.log(`### ${key}: ${scenario.name}\n${table(result.rows as unknown as Array<Record<string, string | number>>)}\n`);
-  if (flags.has('--events')) console.log(`${key} events: ${result.events.map(e => `${e.s}s ${e.type}${e.reason ? ` (${e.reason})` : ''}`).join(', ')}\n`);
+if (modes.some(m => !SIM_MODES.includes(m))) {
+  console.error(`unknown mode (known: ${SIM_MODES.join(', ')}, all)`);
+  process.exit(1);
 }
-console.log(table(summary));
+
+for (const mode of modes) {
+  const summary = [];
+  for (const [key, scenario] of Object.entries(CLASS_SCENARIOS)) {
+    if (wanted.length && !wanted.includes(key)) continue;
+    const result = await simulateClass(scenario, { ...overrides, mode });
+    summary.push(summaryRow(key, result));
+    if (flags.has('--timeline')) console.log(`### ${key} (${mode}): ${scenario.name}\n${table(result.rows as unknown as Array<Record<string, string | number>>)}\n`);
+    if (flags.has('--events')) console.log(`${key} (${mode}) events: ${result.events.map(e => `${e.s}s ${e.type}${e.reason ? ` (${e.reason})` : ''}`).join(', ')}\n`);
+    for (const line of result.logs) console.log(`${key} (${mode}) log: ${line}`);
+  }
+  console.log(`## ${mode}\n${table(summary)}\n`);
+}

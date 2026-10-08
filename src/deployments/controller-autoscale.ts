@@ -5,8 +5,8 @@
  * ceiling blocks one under pressure, and the per-deployment `autoscale` explanation. See controller-state.ts.
  */
 
-import { autoscaleSettings, MIN_SIGNAL_SAMPLES, p95, pressureDecision, warmFloor, type PressureDecision } from './autoscale';
-import { ParkingControl } from './controller-parking';
+import { MIN_SIGNAL_SAMPLES, p95, pressureDecision, warmFloor, type PressureDecision } from './autoscale';
+import { ScalingControl } from './controller-scaling';
 import type { Runtime } from './controller-state';
 import { replicaPhase, type Plan } from './planner';
 import type { ReplicaMachine } from './types';
@@ -21,7 +21,7 @@ export const SIGNAL_WINDOW_MS = 60_000;
 export const RECLAIM_IDLE_MS = 3 * 60_000;
 const MAX_SAMPLES = 2_000;
 
-export abstract class AutoscaleControl extends ParkingControl {
+export abstract class AutoscaleControl extends ScalingControl {
   /** One finished request (`Lease.done`): its duration, and whether it timed out or got a 429. */
   protected recordSample(rt: Runtime, ms: number, bad: boolean, replica?: string): void {
     rt.samples.push({ at: this.now(), ms, bad, ...(replica ? { replica } : {}) });
@@ -48,7 +48,7 @@ export abstract class AutoscaleControl extends ParkingControl {
     const booting = live.filter(m => replicaPhase(this.observed(m, 0)) === 'booting').length;
     const sig = this.signals(rt);
     const load = this.demandOf(rt) + externalInflightEquivalent(rt.record.spec.name, rt.record.spec.targetInflightPerReplica, this.now());
-    const decision = pressureDecision({
+    const decision = rt.record.spec.scaling ? this.scalingDecide(rt, live.length, active) : pressureDecision({
       spec: rt.record.spec, load, live: live.length, booting, p95Ms: sig.p95Ms, errorRate: sig.errorRate, samples: sig.samples,
       active, now: this.now(), state: rt.pressure,
     });
@@ -74,7 +74,7 @@ export abstract class AutoscaleControl extends ParkingControl {
         : floor >= plan.desired && floor > 0 ? `warm floor ${floor}`
           : decision.reason !== 'steady' && decision.reason !== 'idle' ? decision.reason : 'base';
     const capped = decision.capped ? `maxReplicas ${spec.maxReplicas}` : null;
-    const next = { ...rt.autoscale, desired: plan.desired, reason, blockedBy: blockedBy ?? capped };
+    const next = { ...rt.autoscale, desired: plan.desired, reason, blockedBy: blockedBy ?? capped ?? this.budgetRefusal(rt) };
     if (next.desired !== rt.autoscale.desired || next.blockedBy !== rt.autoscale.blockedBy) {
       this.log('deployments: autoscale', { deployment: spec.name, desired: next.desired, reason: next.reason, blockedBy: next.blockedBy,
         load: next.load, p95Ms: next.p95Ms, errorRate: next.errorRate, floor });
@@ -113,7 +113,7 @@ export abstract class AutoscaleControl extends ParkingControl {
       this.draining.delete(m.id); // back in service: cheaper than a 9 min boot
       create--;
     }
-    const { drainMs } = autoscaleSettings(rt.record.spec);
+    const drainMs = this.drainMsOf(rt);
     for (const m of mine.filter(x => this.draining.has(x.id))) {
       const empty = (rt.perReplica.get(m.id) ?? 0) === 0;
       if (!empty && this.now() - this.draining.get(m.id)! < drainMs) continue;

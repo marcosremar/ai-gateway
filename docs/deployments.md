@@ -48,6 +48,7 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | GET | `/v1/deployments/:name` | status (`scaled-to-zero` · `warming` · `ready` · `degraded` · `paused`), replicas, `lastError` |
 | DELETE | `/v1/deployments/:name` | releases every machine, forgets the spec |
 | POST | `/v1/deployments/:name/wake` | start replicas now |
+| GET | `/v1/deployments/:name/capacity` | session ceiling in force and measured boot / resume time per machine type + image, mode, budget spent, hold (see Scaling policy) |
 | POST | `/v1/deployments/:name/warm` | `{ "replicas": N, "untilMinutes": M }`: keep N replicas up for M minutes (≤ 720) whatever the load — a class about to start; `park` ends it (admin) |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>` |
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |
@@ -231,6 +232,91 @@ fallback (`--no-fallback`). Scenarios (`scripts/scaling-sim/scenarios.ts`): `cla
 `sporadic-blip-repeated`, `blip-below-threshold`, `burst`, `slow-growth`, `drop-to-zero`, `quota-full`,
 `out-of-stock-then-back`, `two-classes-back-to-back`, `hundred-students`. `__tests__/unit/deployments/scaling-sim.test.ts`
 pins the table of today's rule in `fixtures/scaling-sim/today.txt`: a change of rule shows up as a diff of that file.
+
+## Scaling policy: the `scaling` block (`scaling-policy.ts`, `controller-scaling.ts`)
+
+Optional. A deployment without it scales exactly as described above (the study deployment has none). With it, the
+scale-out trigger is no longer "peak of the last 60 s over 75 % for 20 s" but how long the excess lasts and where it is
+going, and the excess that is not worth a replica is left to the fallback:
+
+```json
+"scaling": {
+  "target": { "p50Ms": 1500, "p95Ms": 2000 },
+  "budget": { "eurPerHour": 6, "eurPerMonth": 150, "maxReplicas": 6 },
+  "mode": "economy"
+}
+```
+
+`mode` is `economy`, `balanced` (default) or `fast`; `"scaling": null` removes the block. Load is counted in the unit of
+`targetInflightPerReplica`: requests in flight + waiting, a refused request for the 1.5 s the fallback takes to answer
+it, and, when the controller is given session counts (`ControllerOptions.sessions(deployment)`: distinct realtime
+sessions wanting a slot, seated or refused; `null` = not available, the default), `sessions × target / ceiling`. Booting
+replicas count as capacity. Each tick the policy asks four questions and takes the largest answer:
+
+| Rule | economy | balanced | fast | Asks for |
+|---|---|---|---|---|
+| **Cost**: the load-minutes the fallback served above capacity in the current episode (excess less than 2 min apart, at most boot + idle back), priced at the mode's rate, reach the price of one start (replica price × (boot + idle time)) | €0.02 per load-minute | €0.10 | any excess | `max(live + 1, ceil(load / target))` |
+| **Burst**: the peak of the last 60 s is a full replica or more above capacity | no | yes | yes | `ceil(peak / target)` |
+| **Trend**: sessions have been rising for at least half of the last boot/2 seconds, rose in its second half, and at that pace pass capacity before a replica started now is ready (needs session counts) | no | yes | yes | one replica ahead of the sessions seated now |
+| **Spare**: sessions fill half a replica or more | no | no | yes | `ceil(sessions / target) + 1` |
+
+With an L40S at €1.47/h, a 10 min boot and `idleAction: "delete"` one start is priced at €0.49: `balanced` starts a
+replica after 4.9 load-minutes on the fallback (2 students too many for 2.5 min, 16 for 20 s), `economy` after 24.5
+(2 students for 12 min, 16 for 1.5 min). Two extra requests for 5 s are 0.2 load-minutes: they go to the fallback in both.
+A burst of 16–40 requests beyond capacity starts replicas at the next tick in `balanced` and `fast`; in `economy` one
+burst is 0.5–1.3 load-minutes and is left to the fallback, and the same burst every 20 s pays for a replica after about
+15 min. `fast` keeps one replica more than the sessions need, so a late student or a blip lands on the GPU.
+
+The boot time is the median of the last 5 the controller measured for the machine type + image (creation → first ready;
+600 s until one was seen), or the resume time (180 s until measured) while a parked replica is available.
+
+**Scale-in.** A start is kept for boot + idle time; after that the count drops to what the peak of the last idle time
+needs. Idle time is the break-even between an idle replica and a new cold start: the boot time with `idleAction:
+"delete"`, the resume time with `"stop"`, never below `scaleDownDelaySeconds`; `idleMinutes` is raised to it as well.
+The surplus replica is drained: no new request, released when empty or after `autoscale.drainSeconds` when set, else
+30 min (a class block).
+
+**Budget.** `budget.maxReplicas` and `budget.eurPerHour` (replicas the amount pays for at the replica's price) cap the
+count together with `maxReplicas`: the strictest wins, and the gateway-wide guards below still apply.
+`budget.eurPerMonth` is a ledger in the deployment store (`spend: { month, eur, at }`, replica-hours × price, added every
+tick, saved every minute, reset on the first tick of a UTC month). Once it is spent the log says `deployments: monthly
+budget spent, new load goes to the fallback`, no replica starts, the running ones are drained (seated sessions finish)
+and released, `autoscale.blockedBy` reads `monthly budget spent: €… of €… in 2026-10, new load goes to the fallback`,
+and a request that finds no replica gets that sentence in its 503 at once instead of waiting for a cold start.
+
+**`target`** is stored and returned by the capacity route. Nothing acts on it yet: it is the pass mark of the learned
+session ceiling and of `POST …/calibrate`, which are not built.
+
+**Hold** (`PATCH /v1/deployments/:name` with `{ "scaling": { "hold": { "replicas": N, "untilMinutes": M } } }`, M ≤ 720;
+`"hold": null` ends it): the replica count is exactly N until the window ends, whatever the load, the floors and the
+activity; a paused deployment and a spent budget still win. It works on any deployment, with or without the rest of the
+block, and is shown as `hold` in the view. `POST …/warm` is a floor (the load can still add replicas); a hold is a freeze.
+
+**`GET /v1/deployments/:name/capacity`** (same access as `GET /v1/deployments/:name`):
+
+```json
+{
+  "deployment": "parle-speech", "mode": "balanced", "target": { "p50Ms": 1500, "p95Ms": 2000 },
+  "budget": { "eurPerMonth": 150, "month": "2026-10", "spentEur": 41.2, "exhausted": false },
+  "hold": null,
+  "capacity": [{
+    "machineType": "L40S-1-48G", "image": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107",
+    "ceiling": { "sessions": 16, "source": "configured", "samples": 0 },
+    "boot": { "seconds": 612, "source": "measured", "samples": 3 },
+    "resume": { "seconds": 180, "source": "default", "samples": 0 },
+    "confident": false, "missing": ["resume"]
+  }]
+}
+```
+
+One entry per machine type the spec may land on. `ceiling.source` is `configured` (`realtime.maxSessions` or the machine
+type's `RT_MAX_SESSIONS`) or `default` (8); `measured` is reserved for the learned ceiling, with `samples` its count.
+`missing` lists what is not known well enough: `ceiling` while it is the default, `boot` / `resume` below 3 samples.
+
+Simulated per mode: `bun scripts/scaling-sim.ts --mode economy|balanced|fast|all [--no-session-signal] [--budget
+'{"eurPerMonth":2}']`; the expected tables are `__tests__/unit/deployments/fixtures/scaling-sim/<mode>.txt`
+(`scaling-sim.test.ts`), the rules one by one in `scaling-policy.test.ts`. The two rates, the 2 min episode gap and the
+trend window are design choices to pilot, not published values.
 
 ## Cost guards (gateway-wide)
 

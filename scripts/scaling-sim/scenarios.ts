@@ -64,13 +64,13 @@ export const CLASS_SCENARIOS: Record<string, ClassScenario> = {
     name: 'class of 24, every create after the first refused by the account quota',
     durationMin: 60,
     students: classOf24(),
-    quotaFull: [[1, 60]],
+    quotaFull: [[0.1, 60]],
   },
   'out-of-stock-then-back': {
-    name: 'class of 24, out of stock from minute 1 to 15',
+    name: 'class of 24, out of stock from second 6 to minute 15',
     durationMin: 60,
     students: classOf24(),
-    outOfStock: [[1, 15]],
+    outOfStock: [[0.1, 15]],
   },
   'two-classes-back-to-back': {
     name: 'class of 24 (0–37 min), 5 min break, second class of 24 (42–79 min)',

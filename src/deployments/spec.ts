@@ -4,6 +4,7 @@
  */
 
 import { autoscaleOf, warmScheduleOf } from './autoscale-spec';
+import { scalingOf } from './scaling-spec';
 import { SpecError } from './spec-error';
 import type { DeploymentProvider, DeploymentSpec, ExposedPort, Placement, PlacementCandidate, Profile, ProfileSpec, RealtimeSpec } from './types';
 
@@ -106,6 +107,7 @@ const KNOWN_FIELDS = new Set<string>([
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
   'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'realtime',
+  'scaling',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 
@@ -247,6 +249,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   }
   if (input.autoscale !== undefined) out.autoscale = autoscaleOf(input.autoscale);
   if (input.warmSchedule !== undefined) out.warmSchedule = warmScheduleOf(input.warmSchedule, MAX_REPLICAS_PER_DEPLOYMENT);
+  if (input.scaling !== undefined) out.scaling = input.scaling === null ? undefined : scalingOf(input.scaling);
   return out;
 }
 

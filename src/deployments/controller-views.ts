@@ -101,8 +101,8 @@ export abstract class ControllerViews extends ReconcileLoop {
     const ready = replicas.filter(r => r.phase === 'ready').length;
     // The last tick's decision when there is one (pressure and floors included), else the base rules.
     const desired = Math.max(rt.autoscale.desired, planReplicas({
-      spec: rt.record.spec, replicas: [], inflight: rt.inflight, waiting: rt.waiting,
-      lastRequestAt: rt.record.lastRequestAt, aboveSince: null, now,
+      spec: this.planSpec(rt), replicas: [], inflight: rt.inflight, waiting: rt.waiting,
+      lastRequestAt: rt.record.lastRequestAt, aboveSince: null, now, ...this.planExtras(rt),
     }).desired);
     const sessions = externalLoadOf(name, now);
     const status: DeploymentView['status'] = rt.record.spec.paused ? 'paused'
@@ -135,6 +135,8 @@ export abstract class ControllerViews extends ReconcileLoop {
         scalingOut: sessions.active > 0 && desired > ready,
       } : null,
       sessions: distinctSessions(name, 60_000, now),
+      hold: rt.record.hold && rt.record.hold.until > now
+        ? { replicas: rt.record.hold.replicas, until: new Date(rt.record.hold.until).toISOString() } : null,
     };
   }
 }

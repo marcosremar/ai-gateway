@@ -100,6 +100,7 @@ export interface DeploymentSpec {
   autoscale?: AutoscaleSpec;
   /** Warm-up windows: keep N replicas up on a schedule (a class at 9:00), whatever the load. */
   warmSchedule?: WarmScheduleEntry[];
+  scaling?: ScalingSpec;
   /** With no request for this long the deployment scales down to `minReplicas` (0 = scale to zero). */
   idleMinutes: number;
   /** A replica not ready after this long is replaced. */
@@ -199,6 +200,9 @@ export interface DeploymentRecord {
   network?: DeploymentNetwork;
   /** Client warm window (`POST /v1/deployments/:name/warm`): keep `replicas` up until `until` (ms). */
   warm?: { replicas: number; until: number };
+  hold?: ScalingHold;
+  spend?: { month: string; eur: number; at: number };
+  measured?: Record<string, MeasuredTimes>;
 }
 
 /**
@@ -222,6 +226,39 @@ export interface AutoscaleSpec {
   errorRate?: number;
   maxInflightFactor?: number;
   drainSeconds?: number;
+}
+
+export type ScalingMode = 'economy' | 'balanced' | 'fast';
+
+export interface ScalingSpec {
+  target?: { p50Ms?: number; p95Ms?: number };
+  budget?: { eurPerHour?: number; eurPerMonth?: number; maxReplicas?: number };
+  mode: ScalingMode;
+}
+
+export interface ScalingHold { replicas: number; until: number }
+
+export interface MeasuredTimes { boot: number[]; resume: number[] }
+
+export interface CapacityTime { seconds: number; source: 'default' | 'measured'; samples: number }
+
+export interface CapacityEntry {
+  machineType: string;
+  image: string;
+  ceiling: { sessions: number; source: 'default' | 'configured' | 'measured'; samples: number };
+  boot: CapacityTime;
+  resume: CapacityTime;
+  confident: boolean;
+  missing: string[];
+}
+
+export interface CapacityView {
+  deployment: string;
+  mode: ScalingMode | null;
+  target: ScalingSpec['target'] | null;
+  budget: (NonNullable<ScalingSpec['budget']> & { month: string; spentEur: number; exhausted: boolean }) | null;
+  hold: { replicas: number; until: string } | null;
+  capacity: CapacityEntry[];
 }
 
 export type ReplicaPhase = 'booting' | 'ready' | 'unhealthy' | 'halted';
@@ -376,4 +413,5 @@ export interface DeploymentView {
   warm: { replicas: number; until: string } | null;
   realtime: { active: number; capacity: number; refusedSessions: number; scalingOut: boolean } | null;
   sessions: number;
+  hold: { replicas: number; until: string } | null;
 }
