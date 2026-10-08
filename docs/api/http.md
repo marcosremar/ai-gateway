@@ -42,7 +42,25 @@ other value → `403`. The same rule holds for every app-scoped route added late
 - **`max_tokens`** (chat): clamped to `APP_MAX_TOKENS` (default `1024`); a request without one gets the cap.
 - **Daily budget** per app (UTC day, in memory): `APP_DAILY_REQUESTS` (default `5000`) requests and
   `APP_DAILY_TOKENS` (default `2000000`) estimated tokens (prompt characters / 4 + `max_tokens` for chat, input
-  characters / 4 for TTS). Over → `429 budget_exceeded` with `Retry-After` until 00:00 UTC. `0` turns one off.
+  characters / 4 for TTS). Over → `429` with `Retry-After` until 00:00 UTC and
+  `{"error": {"type": "budget_exceeded", "code": "daily_budget_exhausted", "budget": "tokens" | "requests", "reset_at":
+  "<ISO time>"}}` (a realtime session: `error.code: "budget_exceeded"` plus top-level `reason`, `budget`, `reset_at`).
+  It is not the per-minute rate limit (`rate_limit_error`): retrying before `reset_at` cannot succeed, so a client
+  shows "limit reached" and stops. `0` turns one off.
+- **Sizing the budget for a class.** Both limits are gateway-wide settings applied to each app (there is no per-app
+  value): size them for the largest app. A `/v1/s2s` turn costs one request and `prompt characters / 4 + max_tokens`
+  tokens, where the prompt is `system` + `messages` + `user_template` and an omitted `max_tokens` counts as
+  `APP_MAX_TOKENS` (1024); a realtime session costs `4 × minutes of its token` requests at admission and no tokens.
+  `APP_DAILY_TOKENS ≥ students × turns per student per day × tokens per turn` and `APP_DAILY_REQUESTS ≥ students ×
+  (turns per day + 4 × realtime minutes per day)`, with a margin (× 1.5). Example: 25 students, 4 turns/min, 580
+  tokens/turn (420 of prompt + `max_tokens: 160`) is 58 000 tokens and 100 requests per minute: the defaults last
+  34 min (tokens) and 50 min (requests); a 90-minute lesson needs `APP_DAILY_TOKENS=8000000` and
+  `APP_DAILY_REQUESTS=14000`. A student whose realtime session falls back to `/v1/s2s` is charged the session's
+  requests and one request per turn: count both.
+- **Watching it.** `GET /health?details=1` lists `appBudgets` (an admin: every app used today; an app key: its own):
+  `used`, `limit`, `perMinute` (last 5–10 min) and `exhaustedAt` (projected at that rate, null when it would not run
+  out before the reset) for requests and tokens. The gateway logs and emits the telemetry events
+  `app.budget_warning` at 80 % and `app.budget_exhausted` at the first refusal, once per app, budget and UTC day.
 - **Routes**: `PUT /v1/apps/:app/routes` with the app's own key may reorder, drop or re-alias the targets its routes
   already have (set by an admin) and add the app's own deployments; any new target → `403`.
 - **Deployments**: `…/invoke` only on its own app's deployments (`403` otherwise).

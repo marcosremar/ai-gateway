@@ -145,6 +145,7 @@ Same sink, same scrubber (`emitGatewayEvent`, `src/telemetry/emit.ts`); inside a
 | `route.unavailable` (error) | no link could serve (`codes`) |
 | `breaker.open` (warn) | a link's circuit just opened |
 | `stt.filtered` | hallucination filter hit (`codes`, `rawLength`, `emptied`, `language` — never the text) |
+| `app.budget_warning` / `app.budget_exhausted` | an app's daily budget reached 80 % / refused its first request (`app`, `budget`, `used`, `limit`, `resetAt`); once per app, budget and UTC day |
 | `autoscale.decision` / `autoscale.warm` / `autoscale.reclaim` | the controller changed its plan (`desired`, `reason`, `blockedBy`, `load`, `p95Ms`) |
 | `replica.creating` / `.ready` (`durMs` = boot) / `.unhealthy` / `.draining` / `.released` / `.parked` / `.power_on` / `.too_far` / `.create_failed` | replica lifecycle |
 | `provider.list_failed` | the provider list call failed |

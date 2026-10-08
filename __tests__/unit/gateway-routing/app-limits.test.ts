@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Server } from 'http';
 import type { AddressInfo } from 'net';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
-import { AppLimits, inferenceKindOf } from '../../../src/gateway/proxy/app-limits';
+import { AppLimits, inferenceKindOf, type AppBudgetEvent } from '../../../src/gateway/proxy/app-limits';
 import type { ChatRequest, LLMProvider } from '../../../src/gateway/providers/cloud/types';
 
 const ADMIN = 'admin-key-0123456789';
@@ -68,6 +68,67 @@ describe('AppLimits', () => {
     expect(limits({ APP_DAILY_TOKENS: '0', APP_DAILY_REQUESTS: '0' }).check('parle', 'tts', { model: 'parle-tts', input: 'x'.repeat(10_000) })).toBeNull();
   });
 
+  const tts1000 = { model: 'parle-tts', input: 'x'.repeat(4000) };
+
+  it('an exhausted daily budget says which budget and when it resets, machine-readable', () => {
+    const l = limits({ APP_DAILY_TOKENS: '1500' });
+    expect(l.check('parle', 'tts', tts1000)).toBeNull();
+    expect(l.check('parle', 'tts', tts1000)).toEqual({
+      status: 429, type: 'budget_exceeded', code: 'daily_budget_exhausted', budget: 'tokens', resetAt: '2026-10-07T00:00:00.000Z',
+      retryAfterSeconds: 60, message: expect.stringContaining('1500 tokens'),
+    });
+    expect(limits({ APP_DAILY_REQUESTS: '0', APP_DAILY_TOKENS: '0' }).chargeRequests('parle', 10_000)).toBeNull();
+    expect(limits({ APP_DAILY_REQUESTS: '39' }).chargeRequests('parle', 40)).toMatchObject({ code: 'daily_budget_exhausted', budget: 'requests' });
+  });
+
+  it('budgets(): use against the limit and the projected exhaustion at the recent rate, per app', () => {
+    let t = Date.parse('2026-10-06T12:00:00Z');
+    const l = limits({ APP_DAILY_TOKENS: '100000' }, () => t);
+    expect(l.budgets()).toEqual([]);
+    for (let i = 0; i < 40; i++) { expect(l.check('parle', 'tts', tts1000)).toBeNull(); t += 6_000; }
+    expect(l.budgets()).toEqual([{
+      app: 'parle', resetAt: '2026-10-07T00:00:00.000Z',
+      requests: { used: 40, limit: 5000, perMinute: 10, exhaustedAt: '2026-10-06T20:20:00.000Z' },
+      tokens: { used: 40_000, limit: 100_000, perMinute: 10_000, exhaustedAt: '2026-10-06T12:10:00.000Z' },
+    }]);
+    expect(l.budgets('parle')).toHaveLength(1);
+    expect(l.budgets('other')).toEqual([]);
+    t += 3 * 3_600_000;
+    expect(l.budgets()[0].tokens).toMatchObject({ used: 40_000, exhaustedAt: null });
+    t = Date.parse('2026-10-07T00:00:01Z');
+    expect(l.budgets()).toEqual([]);
+  });
+
+  it('budgets(): the rate is the last 5-10 minutes, not the whole day', () => {
+    let t = Date.parse('2026-10-06T08:00:00Z');
+    const l = limits({ APP_DAILY_TOKENS: '2000000' }, () => t);
+    l.check('parle', 'tts', tts1000);
+    t = Date.parse('2026-10-06T12:00:00Z');
+    for (let i = 0; i < 120; i++) { l.check('parle', 'tts', tts1000); t += 6_000; }
+    const { tokens } = l.budgets()[0];
+    expect(tokens.perMinute).toBeGreaterThan(9_000);
+    expect(tokens.perMinute).toBeLessThanOrEqual(10_000);
+  });
+
+  it('one event at 80 % and one at exhaustion per UTC day and budget', () => {
+    let t = Date.parse('2026-10-06T12:00:00Z');
+    const events: AppBudgetEvent[] = [];
+    const l = new AppLimits({
+      env: { APP_DAILY_TOKENS: '10000' }, now: () => t, isAdmin: () => false, aliasesOf: () => new Set(['parle-tts']),
+      onBudgetEvent: e => events.push(e),
+    });
+    for (let i = 0; i < 7; i++) l.check('parle', 'tts', tts1000);
+    expect(events).toEqual([]);
+    for (let i = 0; i < 3; i++) expect(l.check('parle', 'tts', tts1000)).toBeNull();
+    expect(events).toEqual([{ event: 'app.budget_warning', app: 'parle', budget: 'tokens', used: 8000, limit: 10_000, resetAt: '2026-10-07T00:00:00.000Z' }]);
+    for (let i = 0; i < 3; i++) expect(l.check('parle', 'tts', tts1000)).toMatchObject({ status: 429 });
+    expect(events.map(e => e.event)).toEqual(['app.budget_warning', 'app.budget_exhausted']);
+    expect(events[1]).toMatchObject({ app: 'parle', budget: 'tokens', used: 10_000, limit: 10_000 });
+    t += 86_400_000;
+    for (let i = 0; i < 8; i++) l.check('parle', 'tts', tts1000);
+    expect(events.map(e => e.event)).toEqual(['app.budget_warning', 'app.budget_exhausted', 'app.budget_warning']);
+  });
+
   it('knows which paths are inference', () => {
     expect(inferenceKindOf('POST', '/v1/chat/completions')).toBe('chat');
     expect(inferenceKindOf('POST', '/v1/audio/transcriptions')).toBe('stt');
@@ -105,6 +166,31 @@ describe('proxy with app limits', () => {
   const chat = (key: string, body: Record<string, unknown>) => fetch(`${base}/v1/chat/completions`, {
     method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
     body: JSON.stringify({ messages: [{ role: 'user', content: 'oi' }], ...body }),
+  });
+
+  it('an exhausted daily budget answers 429 budget_exceeded with code, budget and reset_at (not the rate limit shape)', async () => {
+    const limited = createProxyServer({
+      apiKeys: [`${PARLE}:parle`],
+      providers: { chat: {}, stt: {}, tts: {}, chatRoutes: { 'parle-llm': [{ providerId: 'openrouter', provider: llm, model: 'qwen/qwen3.5-9b' }] } } as never,
+      appLimits: limits({ APP_DAILY_REQUESTS: '1' }),
+    });
+    await new Promise<void>(r => limited.listen(0, '127.0.0.1', () => r()));
+    try {
+      const post = () => fetch(`http://127.0.0.1:${(limited.address() as AddressInfo).port}/v1/chat/completions`, {
+        method: 'POST', headers: { authorization: `Bearer ${PARLE}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'parle-llm', messages: [{ role: 'user', content: 'oi' }] }),
+      });
+      expect((await post()).status).toBe(200);
+      const res = await post();
+      expect(res.status).toBe(429);
+      expect(res.headers.get('retry-after')).toBe('60');
+      expect(((await res.json()) as { error: unknown }).error).toEqual({
+        message: expect.stringContaining('1 requests'), type: 'budget_exceeded', code: 'daily_budget_exhausted', budget: 'requests',
+        reset_at: '2026-10-07T00:00:00.000Z',
+      });
+    } finally {
+      await new Promise<void>(r => limited.close(() => r()));
+    }
   });
 
   it('refuses passthrough for the app key before any provider is called, and clamps max_tokens on its alias', async () => {

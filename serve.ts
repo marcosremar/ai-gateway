@@ -38,7 +38,7 @@ import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
 import {
-  deploymentLogToTelemetry, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
@@ -224,6 +224,10 @@ const appLimits = API_KEYS.length ? new AppLimits({
   env: process.env,
   isAdmin: (userId) => adminUsers.has(userId),
   aliasesOf: appAliasesOf,
+  onBudgetEvent: ({ event, ...attrs }) => {
+    log.warn(attrs, `app limits: daily budget ${event === 'app.budget_exhausted' ? 'exhausted' : 'at 80 %'}`);
+    emitGatewayEvent(event, { level: event === 'app.budget_exhausted' ? 'error' : 'warn', attrs });
+  },
 }) : undefined;
 // POST /v1/s2s: a non-admin key uses only its own app's deployments, under its app limits (src/s2s/access.ts).
 const s2sAdmit = createS2SAccess({
@@ -327,7 +331,9 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
-  healthDetails: (viewer) => (viewer.admin ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts() } : appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage))),
+  healthDetails: (viewer) => (viewer.admin
+    ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
+    : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
     ...(telemetry?.adminRoutes ?? []),

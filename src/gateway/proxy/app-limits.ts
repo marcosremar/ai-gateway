@@ -10,8 +10,10 @@
  *   - **daily budget** per app, UTC day, in memory (a restart starts a new count): APP_DAILY_REQUESTS (default 5000)
  *     requests and APP_DAILY_TOKENS (default 2 000 000) estimated tokens — charged at admission as the prompt
  *     (characters / 4) plus the clamped max_tokens for chat, the input text (characters / 4) for TTS. Over budget →
- *     429 with Retry-After until 00:00 UTC. The gateway has no per-model price table for every route, so the budget
- *     is in requests and tokens, not currency. `0` turns a budget off.
+ *     429 with Retry-After until 00:00 UTC, `code: daily_budget_exhausted`, which `budget` and `reset_at`. The gateway
+ *     has no per-model price table for every route, so the budget is in requests and tokens, not currency. `0` turns
+ *     a budget off. Both limits are gateway-wide settings applied to each app (no per-app value). `budgets()` shows
+ *     each app's use, rate and projected exhaustion; `onBudgetEvent` fires once per UTC day at 80 % and at exhaustion.
  */
 
 export type InferenceKind = 'chat' | 'stt' | 'tts' | 'embeddings' | 'images';
@@ -23,13 +25,42 @@ export interface AppLimitsOptions {
   /** The app's own aliases for a stage; empty/null when the user is no app (then nothing is allowed). */
   aliasesOf: (userId: string, stage: Stage) => ReadonlySet<string> | null;
   now?: () => number;
+  onBudgetEvent?: (event: AppBudgetEvent) => void;
 }
+
+type Budget = 'requests' | 'tokens';
+const BUDGETS: readonly Budget[] = ['requests', 'tokens'];
 
 export interface AppLimitDenial {
   status: number;
   type: string;
   message: string;
   retryAfterSeconds?: number;
+  code?: 'daily_budget_exhausted';
+  budget?: Budget;
+  resetAt?: string;
+}
+
+export interface AppBudgetEvent {
+  event: 'app.budget_warning' | 'app.budget_exhausted';
+  app: string;
+  budget: Budget;
+  used: number;
+  limit: number;
+  resetAt: string;
+}
+
+interface BudgetUse { used: number; limit: number; perMinute: number; exhaustedAt: string | null }
+export interface AppBudgetView { app: string; resetAt: string; requests: BudgetUse; tokens: BudgetUse }
+
+type Counts = Record<Budget, number>;
+interface Usage extends Counts { day: number; chargedAt: number; marks: [Counts & { at: number }, Counts & { at: number }]; flagged: Set<string> }
+
+export const BUDGET_WARNING_RATIO = 0.8;
+const RATE_WINDOW_MS = 5 * 60_000;
+
+export function denialError(d: AppLimitDenial): Record<string, unknown> {
+  return { message: d.message, type: d.type, ...(d.code ? { code: d.code, budget: d.budget, reset_at: d.resetAt } : {}) };
 }
 
 export const APP_LIMIT_DEFAULTS = { maxTokens: 1024, dailyRequests: 5000, dailyTokens: 2_000_000 } as const;
@@ -46,7 +77,7 @@ const estimateTokens = (text: string) => Math.ceil(text.length / 4);
 
 export class AppLimits {
   private readonly now: () => number;
-  private readonly usage = new Map<string, { day: number; requests: number; tokens: number }>();
+  private readonly usage = new Map<string, Usage>();
 
   constructor(private readonly opts: AppLimitsOptions) {
     this.now = opts.now ?? Date.now;
@@ -124,28 +155,64 @@ export class AppLimits {
     return this.charge(userId, 0, Math.max(1, Math.floor(requests)));
   }
 
+  private get limits(): Counts { return { requests: this.dailyRequests, tokens: this.dailyTokens }; }
+
   private charge(userId: string, tokens: number, requests = 1): AppLimitDenial | null {
     const now = this.now();
     const day = Math.floor(now / DAY_MS);
     let u = this.usage.get(userId);
     if (!u || u.day !== day) {
-      u = { day, requests: 0, tokens: 0 };
+      const mark = { at: now, requests: 0, tokens: 0 };
+      u = { day, chargedAt: now, requests: 0, tokens: 0, marks: [mark, mark], flagged: new Set() };
       this.usage.set(userId, u);
     }
-    const maxRequests = this.dailyRequests;
-    const maxTokens = this.dailyTokens;
-    const over = (maxRequests > 0 && u.requests + requests > maxRequests) ? `${maxRequests} requests`
-      : (maxTokens > 0 && u.tokens + tokens > maxTokens) ? `${maxTokens} tokens` : null;
+    const limits = this.limits;
+    const add: Counts = { requests, tokens };
+    const resetAt = new Date((day + 1) * DAY_MS).toISOString();
+    const over = BUDGETS.find(b => limits[b] > 0 && u[b] + add[b] > limits[b]);
     if (over) {
+      this.flag(userId, u, 'app.budget_exhausted', over, limits[over], resetAt);
       return {
-        status: 429, type: 'budget_exceeded',
-        message: `daily budget of app '${userId}' exhausted (${over} per UTC day); it resets at 00:00 UTC`,
+        status: 429, type: 'budget_exceeded', code: 'daily_budget_exhausted', budget: over, resetAt,
+        message: `daily budget of app '${userId}' exhausted (${limits[over]} ${over} per UTC day); it resets at 00:00 UTC`,
         retryAfterSeconds: Math.max(1, Math.ceil(((day + 1) * DAY_MS - now) / 1000)),
       };
     }
+    if (now - u.marks[1].at >= RATE_WINDOW_MS) u.marks = [u.marks[1], { at: now, requests: u.requests, tokens: u.tokens }];
+    u.chargedAt = now;
     u.requests += requests;
     u.tokens += tokens;
+    for (const b of BUDGETS) {
+      if (limits[b] > 0 && u[b] >= limits[b] * BUDGET_WARNING_RATIO) this.flag(userId, u, 'app.budget_warning', b, limits[b], resetAt);
+    }
     return null;
+  }
+
+  private flag(app: string, u: Usage, event: AppBudgetEvent['event'], budget: Budget, limit: number, resetAt: string): void {
+    const key = `${event}:${budget}`;
+    if (u.flagged.has(key)) return;
+    u.flagged.add(key);
+    this.opts.onBudgetEvent?.({ event, app, budget, used: u[budget], limit, resetAt });
+  }
+
+  budgets(userId?: string): AppBudgetView[] {
+    const now = this.now();
+    const day = Math.floor(now / DAY_MS);
+    const reset = (day + 1) * DAY_MS;
+    const limits = this.limits;
+    return [...this.usage].filter(([app, u]) => u.day === day && (userId === undefined || app === userId)).map(([app, u]) => {
+      const [from] = u.marks;
+      const minutes = (now - from.at) / 60_000;
+      const use = (b: Budget): BudgetUse => {
+        const perMinute = minutes >= 1 && now - u.chargedAt < RATE_WINDOW_MS ? (u[b] - from[b]) / minutes : 0;
+        const at = perMinute > 0 ? now + ((limits[b] - u[b]) / perMinute) * 60_000 : Infinity;
+        return {
+          used: u[b], limit: limits[b], perMinute: Math.round(perMinute * 10) / 10,
+          exhaustedAt: limits[b] > 0 && at < reset ? new Date(at).toISOString() : null,
+        };
+      };
+      return { app, resetAt: new Date(reset).toISOString(), requests: use('requests'), tokens: use('tokens') };
+    });
   }
 
   /** Today's usage of an app (tests, diagnostics). */
