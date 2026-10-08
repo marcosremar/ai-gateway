@@ -4,7 +4,7 @@
 set -u
 export HF_HOME=/models/hf HF_HUB_OFFLINE=1
 log() { echo "[start] $(date +%T) $*"; }
-LOG_MAX_BYTES=${LOG_MAX_BYTES:-8000000}
+LOG_MAX_BYTES=${LOG_MAX_BYTES:-32000000}
 keep() {
   local n=0 line
   while IFS= read -r line; do
@@ -23,7 +23,8 @@ log "gpu ${TOTAL_MB} MiB, tts util ${TTS_UTIL}, llm ${LLM_PARALLEL}x${LLM_SLOT_C
 
 TTS_ARGS=(--gpu-memory-utilization "$TTS_UTIL")
 [ -n "${TTS_STAGE_OVERRIDES:-}" ] && TTS_ARGS=(--stage-overrides "$TTS_STAGE_OVERRIDES")
-[ -n "${TTS_DEPLOY_CONFIG:-}" ] && TTS_ARGS+=(--deploy-config "$TTS_DEPLOY_CONFIG")
+TTS_DEPLOY_CONFIG=${TTS_DEPLOY_CONFIG:-$(dirname "$0")/qwen3_tts.yaml}
+[ -f "$TTS_DEPLOY_CONFIG" ] && TTS_ARGS+=(--deploy-config "$TTS_DEPLOY_CONFIG")
 vllm serve "$TTS_MODEL" --omni --host 127.0.0.1 --port 8091 --trust-remote-code "${TTS_ARGS[@]}" 2>&1 | keep /var/log/tts.log &
 wait_http http://127.0.0.1:8091/health || { tail -50 /var/log/tts.log; exit 1; }
 log "tts up, gpu used $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1) MiB"

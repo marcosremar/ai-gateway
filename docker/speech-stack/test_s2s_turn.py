@@ -60,6 +60,7 @@ def tts(fail_on=None, hang_on=None):
                 await out.put(error)
                 raise error
             await out.put(b"\1\0" * 2400)
+            return int(text.startswith("Bom"))
         finally:
             await out.put(None)
     return stream
@@ -88,7 +89,7 @@ async def turn(llm_stream, tts_stream):
 async def main():
     events, audio = await turn(llm(REPLY), tts())
     done = events[-1]
-    assert done["type"] == "done" and (done["sentences"], done["spoken"], done["skipped"]) == (3, 3, 0), done
+    assert done["type"] == "done" and (done["sentences"], done["spoken"], done["skipped"], done["tts_retries"]) == (3, 3, 0, 1), done
     assert done["audio_ms"] == round(audio / 2 / 24000 * 1000) == 600, done
 
     events, _ = await turn(llm(REPLY, fail_after=2), tts())
