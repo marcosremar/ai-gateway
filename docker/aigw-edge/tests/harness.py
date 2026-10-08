@@ -243,6 +243,10 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
     check("webrtc: transcript, reply, audio_start/end, metrics, done", all(k in types for k in
           ("transcript", "reply_delta", "reply", "audio_start", "audio_end", "metrics", "done")), types)
     check("webrtc: Opus audio heard by the learner", learner.loud_frames >= 50, f"{learner.loud_frames} loud 20 ms frames")
+    vad_end = next(at for at, e in learner.events.items if e["type"] == "vad" and e["state"] == "end")
+    heard_ms = round((vad_end - learner.mic.speech_end_at) * 1000)
+    check("webrtc: the end of speech reaches the VAD with no jitter-buffer wait (700 ms of silence, then under 80 ms)",
+          heard_ms < 780, heard_ms)
     m = learner.events.of("metrics")[0]
     results["latency"][f"webrtc_turn_{base[-4:]}"] = {**{k: m[k] for k in ("ttfa_ms", "stt_ms", "llm_ttft_ms", "tts_ttfb_ms")},
                                         "client_ttfa_from_speech_end_ms": round((learner.first_audio_at - learner.mic.speech_end_at) * 1000)}

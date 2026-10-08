@@ -12,6 +12,9 @@ from aiortc.mediastreams import MediaStreamError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "docker/aigw-edge/tests"))
 from clients import MicTrack  # noqa: E402
+from aigw_edge import audio  # noqa: E402
+
+audio.install()
 
 CLIP = Path(sys.argv[1]).read_bytes()
 GATHER_S, OFFER_S, CONNECT_S = float(os.environ.get("RTC_GATHER_S", 2)), 3, float(os.environ.get("RTC_CONNECT_S", 3))

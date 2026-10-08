@@ -209,6 +209,8 @@ try:
             except UpstreamError as raised:
                 error = raised
             out[name] = (pcm, [r.request_id for r in retries], error, fake_upstream.calls["tts_log"][mark:])
+        fake_upstream.tts_faults.update({"Bom dia!": ["lead"]})
+        out["first"] = b"".join([chunk async for chunk in up.speak("Bom dia!", {}, {"voice": "x"}, trim_lead=True)])
         await asyncio.sleep(0.1)
         await up.close()
         await runner.cleanup()
@@ -233,6 +235,8 @@ try:
           and isinstance(guard["cut"][2], UpstreamError) and guard["cut"][2].stage == "tts")
     check("tts guard: a silent lead under the limit is kept and not retried",
           guard["lead"][0] == bytes(24000) + said and guard["lead"][1] == [] and len(guard["lead"][3]) == 1)
+    check("tts guard: the first sentence of a reply starts 10 ms before its first sound (0.5 s of lead dropped)",
+          guard["first"].endswith(said) and len(guard["first"]) - len(said) <= 480)
     check("tts guard: the retry drops its silent lead",
           guard["late"][0].endswith(said) and len(guard["late"][0]) < len(said) + 4800 and len(guard["late"][1]) == 1)
     check("tts guard: no upstream request left open", active == 0)
@@ -361,6 +365,32 @@ try:
         rms = float(np.sqrt(np.mean(y * y))) / (0.5 * 32767 / np.sqrt(2))
         check(f"downsampler 48→16 kHz: {freq} Hz {want} (gain {rms:.2f})", (rms > 0.95) if want == "kept" else (rms < 0.05))
     check("downsampler: 3:1 length", len(down.push(np.zeros(960, dtype=np.int16), 1)) == 320 * 2)
+
+    from aiortc import rtcrtpreceiver
+    from aiortc.jitterbuffer import JitterBuffer
+    from aiortc.rtp import RtpPacket
+    from aigw_edge import audio
+
+    def through(buffer, order) -> tuple[int, int]:
+        behind, frames = 0, 0
+        for n in order:
+            packet = RtpPacket(sequence_number=n % 65536, timestamp=n * 960)
+            packet._data = b"x"
+            frame = buffer.add(packet)[1]
+            if frame is not None:
+                behind, frames = n - frame.timestamp // 960, frames + 1
+        return behind, len(order) - frames
+
+    whole, one_lost = list(range(65500, 65700)), [n for n in range(65500, 65700) if n != 65550]
+    check("aiortc's audio jitter buffer: 4 frames (80 ms) behind; after one lost packet 14 (280 ms) for the rest of the call",
+          through(JitterBuffer(16, 4), whole)[0] == 4 and through(JitterBuffer(16, 4), one_lost)[0] == 14)
+    check("webrtc uplink: a packet is a frame as it arrives, before and after a lost packet",
+          through(audio.ArrivalOrder(), whole) == (0, 0) and through(audio.ArrivalOrder(), one_lost) == (0, 0))
+    check("webrtc uplink: a late or repeated packet is dropped", through(audio.ArrivalOrder(), [7, 9, 8, 9, 10]) == (0, 2))
+    audio.install()
+    check("webrtc uplink: installed for audio, aiortc's own buffer stays for video",
+          isinstance(rtcrtpreceiver.JitterBuffer(capacity=16, prefetch=4), audio.ArrivalOrder)
+          and isinstance(rtcrtpreceiver.JitterBuffer(capacity=128, is_video=True), JitterBuffer))
 except ImportError:
     print("SKIP vad (no numpy)")
 

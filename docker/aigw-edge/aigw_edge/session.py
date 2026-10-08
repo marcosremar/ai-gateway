@@ -495,12 +495,12 @@ class Session:
             metrics["tts_retries"] += 1
             tel("edge.tts.retry", level="warn", requestId=error.request_id, reason=str(error)[:160])
 
-        async def synth(sentence: str, queue: asyncio.Queue) -> None:
+        async def synth(sentence: str, queue: asyncio.Queue, first: bool) -> None:
             try:
                 async with gate:
                     t = time.monotonic()
                     rate = self.s.tts_rate
-                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id, retried):
+                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id, retried, first):
                         if isinstance(chunk, int):
                             rate = chunk
                             continue
@@ -516,7 +516,7 @@ class Session:
         def speak(sentence: str) -> None:
             spoken.append(sentence)
             queue: asyncio.Queue = asyncio.Queue()
-            synths.append(asyncio.create_task(synth(sentence, queue)))
+            synths.append(asyncio.create_task(synth(sentence, queue, not synths)))
             sentences.put_nowait(queue)
 
         async def think() -> None:

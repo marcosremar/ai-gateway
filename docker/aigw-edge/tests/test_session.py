@@ -116,7 +116,7 @@ class FakeUpstream:
     async def voice_fields(self, cfg):
         return {"voice": cfg["voice"]}
 
-    async def speak(self, text, cfg, fields, trace_id=None, on_retry=None):
+    async def speak(self, text, cfg, fields, trace_id=None, on_retry=None, trim_lead=False):
         self.calls["tts"] += 1
         self.spoken.append(text)
         await asyncio.sleep(TTS_TTFB_MS / 1000)
@@ -684,9 +684,9 @@ async def tts_guard() -> None:
     metrics = await learner.wait("metrics", 10)
     await learner.wait("done", 10)
     heard, audible = await finish(learner, up)
-    check("tts guard, a silent lead under the limit: played as it came, no retry",
+    check("tts guard, a silent lead under the limit before the first sentence: dropped to 10 ms, no retry",
           metrics["tts_retries"] == 0 and [r["input"] for r in log].count("Bom dia!") == 1
-          and abs(len(heard) - 3.25 * 48000) <= 3 * 960 and abs(len(audible) - 2.75 * 48000) <= 3 * 960,
+          and abs(len(heard) - 2.76 * 48000) <= 3 * 960 and abs(len(audible) - 2.75 * 48000) <= 3 * 960,
           (len(heard), len(audible)))
 
     learner, up = await turn(["runaway"], tts_max_lead_seconds=60, tts_max_seconds=60)

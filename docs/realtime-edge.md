@@ -203,7 +203,9 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   played: no `audio_start`, and the first-audio deadline still sees no reply audio, so an opener may play meanwhile.
   A sentence still silent after `EDGE_TTS_MAX_LEAD_SECONDS` (1), or whose stream fails before any sound, is dropped
   and requested again once, in its place in the order (`metrics.tts_retries`, `edge.tts.retry` with the request id,
-  `ttsRetries` on `edge.turn.done`). The second attempt drops its silent lead; when it stays silent or fails, or when
+  `ttsRetries` on `edge.turn.done`). The second attempt drops its silent lead, and so does the first sentence of every
+  reply (it starts 10 ms before its first sample over −40 dBFS: the 150–240 ms of silence Qwen3-TTS puts before a
+  sentence were played after `audio_start`, on both transports); when it stays silent or fails, or when
   any stream fails after sound, the turn ends with the `tts` error (no retry: it would repeat words already heard).
   The three settings are tunable through `realtime.env`.
 - **First-audio deadline** (`RT_FIRST_AUDIO_DEADLINE_MS` = 2000, at most 2500; `cfg.first_audio_deadline_ms` per
@@ -235,6 +237,12 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   counts the opener audio still queued ahead of the reply.
 
 ## Process model and CPU budget
+
+The learner's audio is decoded as it arrives (`audio.ArrivalOrder`, installed in place of aiortc's audio jitter buffer; a
+late or repeated packet is dropped). aiortc's buffer (`capacity=16, prefetch=4`) holds 4 packets before it gives a
+frame — 80 ms on every turn before the VAD sees the end of speech — and after one lost packet it stays 14 packets
+(280 ms) behind for the rest of the call (`tests/test_units.py`): it exists to smooth playout, and the VAD and Whisper
+need none. Measured on the loopback harness: end of speech → `vad end` 821 → 741 ms (700 of them are the endpointing).
 
 aiortc (BSD-3) does the whole RTP/SRTP/RTCP path in Python on one asyncio loop; Opus encode/decode run in threads
 (libopus via PyAV). Profiling showed two avoidable hot spots, both replaced by numpy (`aigw_edge/audio.py`): PyAV's

@@ -29,6 +29,7 @@ import wave
 import aiohttp
 import numpy as np
 
+from . import opener
 from .config import Settings
 from .telemetry import child_traceparent
 from .text import DEFAULT_SLOT_CTX
@@ -177,7 +178,8 @@ class Upstream:
             return {"voice": fallback}
         raise ValueError("voice must be a catalog id, {audio, text}, or come with fallback_voice")
 
-    async def speak(self, text: str, cfg: dict, fields: dict, trace_id: str | None = None, on_retry=None):
+    async def speak(self, text: str, cfg: dict, fields: dict, trace_id: str | None = None, on_retry=None,
+                    trim_lead: bool = False):
         """Yields raw PCM s16le mono at `tts_rate` (a WAV answer's header is parsed and its rate reported once as int).
         Silence before the first audible chunk is held: when it outlasts `tts_max_lead_seconds` or the stream fails
         before any sound, the sentence is requested again once (`on_retry(error)`); the second attempt drops its silent
@@ -221,7 +223,9 @@ class Upstream:
                                 raise UpstreamError("tts", None, "silent lead")
                             continue
                         spoke = True
-                        for item in (*([] if attempt else held), chunk):
+                        if trim_lead:
+                            chunk = opener.trim_lead(chunk[sum(map(len, held)) % 2:], rate)
+                        for item in (*([] if attempt or trim_lead else held), chunk):
                             yield item
                         held.clear()
                     if not parsed and head:
