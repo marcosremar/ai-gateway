@@ -957,3 +957,113 @@ rebuild) — that is how it ran here. The profile is untouched.
   continue the turn after the capped sentence, with a field in `done`.
 - Not tested: `repetition_penalty` above 1.15, sampling temperature / top-k, `decode_batch_max_size: 1`, an L4, real
   catalog voices (both references were `say` clips), a listening check.
+
+## Prova final ao vivo — Vast (2026-10-08)
+
+Through a local gateway only (`bun serve.ts` on :4111, namespace `marcos-proof-vast`, this branch), from a Mac in
+France on a mobile-carrier uplink (IPv4 behind carrier NAT). Two sessions: the first was cancelled 45 min in and left
+no notes; the second took over its gateway state (stopped the process, started a new one on the same state dir: the
+running replica was adopted, not replaced) and rebuilt what the first did from its gateway log. All times UTC.
+
+**Not the final image.** `rg.fr-par.scw.cloud/aigw/speech-stack:20261008-0953` still answers 401 to an anonymous pull
+and the gateway sends no registry credential to a Vast host unless the spec carries one (by design: the only
+credential is the Scaleway API secret). So the stack was assembled at boot on the public `vllm/vllm-omni:v0.28.0`, as
+in the section "Vast.ai RTX 5090" above: the stack's files from this repository at `d4a160e`, the same llama.cpp
+build, the same three models, and the edge copied out of the public `ghcr.io/marcosremar/aigw-edge:<tag>` into
+`/opt/aigw-edge` (same layout as the final image: edge as a process in the one container). Env `STT_BATCH=8`,
+`LLM_PARALLEL=16`, `TTS_STAGE0_MB=9600`, `realtime.maxSessions` 4. One `espeak-ng` reference voice.
+
+### 1. Selection — the relative RTT gate
+
+Spec: `RTX 5090`, `minCuda: 13`, `near: FR`, cap €0.57/h, `maxRttExcessMs` default 20 over `s3.fr-par.scw.cloud`.
+Ranking at 10:15 (`GET …/offers`): France $0.576 (2062 / 835 Mbps down / up, reliability 0.993, 256 ports), two UK
+hosts $0.509 (929 / 100 and 904 / 97), Slovakia $0.588 (899 / 495), Estonia $0.526.
+
+| Rented (instance, host) | Where, $/h | Gate RTT vs Paris anchor | Verdict |
+|---|---|---|---|
+| 54825208, host 145971 | Slovakia, 0.588 | no answer in 8 min (first spec had `maxRttMs: 35`) | released, too far |
+| 54826445, host 144664 | UK, 0.509 | 136 vs 71 ms, +65 | released, too far |
+| 54826885, host 149234 | **France, 0.576** | 70 vs 47 ms, **+23** (one burst of samples) | released, too far — **a false rejection** |
+| 54826952, host 144477 | Estonia, 0.526 | — | paused by hand after 79 s |
+| 54827739 … 54827869 (six), host 144664 | UK, 0.509 | — | each paused by hand within 2–10 s (see below) |
+| 54828002, host 136778 | Poland, 0.509 | 85 vs 59 ms, +26 | released, too far |
+| 54828609, host 144664 | UK, 0.509 | 86 vs 52 ms, +34 | released, too far |
+| 54828696, host 144163 | Poland, 0.562 | 67 vs 54 ms, +13 | would be kept; paused by hand |
+| **54829050, host 149234, offer 53664694** | **France, 0.576 (0.592 with disk)** | **53 vs 47 ms, +6** | **kept** |
+
+- The gate does what it was built for: it kept the French host and released UK (+34, +65), Poland (+26) and a host
+  that never answered; a Polish host at +13 passed.
+- The French host was first rejected at +23: one burst measured a noisy mobile uplink. Fixed in `9d5b828` (the lowest
+  of three rounds); with it the same host measured +6 and was kept.
+- Found, not fixed: (a) the "avoid this host for 24 h" memory is lost on a gateway restart (UK host 144664 was rented
+  again after two rejections); (b) within the cap the walk takes the cheapest in the distance band, so the UK host
+  kept winning the first try while France was on the market: the first session paused and resumed six times to get
+  past it. The gate decides only after renting; each wrong try costs 1–5 min of machine.
+
+### 2. Boot (instance 54829050)
+
+- Request 10:42:45 → rented 10:42:46 → running with an address 10:43:20 (34 s) → gate passed 10:43:25 → **ready
+  10:49:18: 6 min 33 s** (gateway `bootMs` 392562). Boot script marks: apt +2 s, edge installed +10 s, llama.cpp +76 s,
+  wheels +85 s, models +155 s; `start.sh` 10:45:50, TTS up 10:48:39, LLM up 10:48:43 (20.2 GB of 32.6 GB in use).
+- The edge starts in the container: `probe responder on udp/50008 (public udp/40234); public=82.65.197.236`,
+  `GET /__aigw/rt/status` through the mapped TCP port answers `max: 4`, `workers: 1`, `udpPorts: [50000, 50008]`.
+- Open point of `docs/realtime-edge.md` answered: the onstart shell **does** see `PUBLIC_IPADDR`, `VAST_TCP_PORT_80`
+  and the nine `VAST_UDP_PORT_500xx` (`/etc/environment` has none of them).
+- **The mapped UDP ports are not reachable on this host.** See item 3.
+
+### 3. Realtime, 4 simultaneous learners
+
+**WebRTC: did not connect on host 149234 — inbound UDP never arrives.** Evidence:
+
+- The gateway's echo probe to `82.65.197.236:40234`: blocked, every round. The edge chose `path=ws` by itself and
+  stopped listing `webrtc`; admission then offered only the `ws` rung (no doomed ICE attempt).
+- From the Mac, by hand: STUN to two public servers answers (outbound UDP works); 4 datagrams to each of four mapped
+  ports (40234, 40860, 40385, 40330): no reply; the edge's `probeHits` stayed **0** all along. TCP to 40007 (nginx)
+  and 40796 (ssh) opens in 78 ms; TCP 40234 is refused at once (the host is there, the port is UDP-only).
+- With the edge forced to `direct` (`POST /__aigw/rt/net`) and an aiortc client offering straight to it: the answer
+  advertises exactly one candidate, `82.65.197.236 40860 typ host` (public address, mapped port of container port
+  50000) — what it should. The client's pairs `host → 82.65.197.236:40860` stay `IN_PROGRESS` for 12 s; the edge's ICE
+  stays `checking`. The client's own candidates: host addresses and one `srflx` behind carrier NAT, so the edge's
+  outbound checks cannot open the path from its side either.
+- Reading: our code asks Vast for the ports the documented way (`-p 50000:50000/udp` …), Vast publishes them and says
+  which (`VAST_UDP_PORT_*`), the edge advertises them. The datagrams die between the host's public address and the
+  container. `82.65.x.x` is a residential fibre range: a host behind a home router that forwards the TCP range only
+  would look exactly like this. Second host: see below.
+
+**WS (the rung the edge fell back to), 4 learners, clean network, harness `scripts/realtime-e2e/load.ts --n 4
+--duration 360 --ramp 8 --turn-every 18 --jitter 3 --clip turn.wav`, audible first-audio meter** (ms from the last
+voiced sample sent to the first non-silent audio received at the Mac, through the gateway's ws relay):
+
+| Run | Turns | Failed / truncated | p50 | p90 | p95 | p99 | **max** | ≤ 1.0 s |
+|---|---|---|---|---|---|---|---|---|
+| ws4b (11:03) | 78 | 0 / 0 | 928 | 1309 | 1659 | 2358 | 2358 | 73 % |
+| ws4c (11:34) | 79 | 0 / 0 | 896 | 1236 | 1401 | 1552 | 1552 | 84 % |
+| ws4d (11:41) | 78 | 0 / 0 | 881 | 1017 | 1166 | 1593 | 1593 | 89 % |
+| **pooled** | **235** | **0 / 0** | **900** | **1134** | **1353** | **1823** | **2358** | **82 %** |
+
+- Target: p50 under 1 s — **met** (900 ms); never above 2500 ms — **met** (max 2358; 2 of 235 turns above 2 s).
+- Edge's own numbers (ws4d): time to first audio after its endpointing p50 93, p95 280 ms; stt 198, llm first token
+  77, tts first chunk 81 ms; first sound from the end of speech p50 797, max 1115 ms. The rest of the 900 ms is the
+  endpointing (~670 ms) and the path Mac → gateway on the Mac → replica and back. Session connect p50 127–186 ms,
+  admission 1–52 ms, no rejection, no reconnect.
+- Machine during the runs: GPU memory peak 24.97 of 32.6 GB, STT largest batch 8, `oom_retries` 0.
+- Run ws4b asked for 2 of the 4 learners on WebRTC (`--rtc 2`): both got the `ws` rung at admission (ICE pairs: none).
+
+### 4. Complete replies
+
+- 235 turns in the three runs: **0 failed, 0 truncated, 0 early endings**; audio length per reply character between
+  62 and 81 ms (median 69): no runaway, no short reply. Edge telemetry over the machine's life: 339 `edge.turn.done`
+  with `outcome: ok`, **`ttsRetries` 0 in all, no `edge.tts.retry`**; stack health: speech 1225 started / 1225 done,
+  0 failed, 0 stalled; chat 433 / 433.
+- **One real failure, in the first long run (ws4, 4 sessions of 940 s): 96 of 199 turns failed** (92 `interrupted`,
+  4 `timeout`). Cause, from the replica's LLM log: `request (2620 tokens) exceeds the available context size (2048
+  tokens)`. The edge sends the system prompt plus the whole history, the stack runs llama.cpp at 2048 tokens per
+  slot: with a 451-token system prompt a session dies at its ~26th turn (~7.5 min at this cadence). The edge
+  (`666c0327`) then hung the turn — `think()` raised before closing its sentence queue — and every later turn of that
+  session ended `interrupted`. Not a Vast matter: the Scaleway proof hit the same on the final image.
+- Fixed here, `04ce863`: the turn now ends with `error` + `done{error}` and `edge.upstream.error` (stage `llm`, status
+  400) — regression test `llm_failure` in `docker/aigw-edge/tests/test_session.py` (fails on the old code: hangs).
+  **Not fixed**: the cause. A session that outgrows the context now fails every turn loudly instead of silently; the
+  edge needs a history budget (or the stack a larger `LLM_SLOT_CTX`) before sessions longer than ~7 min.
+- To reach a machine the fix needs `EDGE_TAG=04ce8636` in `docker/speech-stack/Dockerfile` (today `666c0327`) and a
+  rebuild of the speech-stack image; `ghcr.io/marcosremar/aigw-edge:04ce8636` is already published.
