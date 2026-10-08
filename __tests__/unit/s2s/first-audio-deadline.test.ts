@@ -38,7 +38,8 @@ describe('runComposite: first-audio deadline and opener', () => {
   it('reply late: one opener at the deadline minus the margin, then the reply, in order and never twice', async () => {
     const { types, events, voiced, done } = await run({ voice: freshVoice(), opener: { lines: OPENERS } }, { sttMs: 250 });
     expect(types).toEqual([
-      'audio_format', 'opener:start', 'opener:end', 'transcript', 'llm_first_token', 'sentence', 'audio_format', 'first_audio', 'sentence', 'done',
+      'audio_format', 'opener:start', 'opener:end', 'transcript', 'llm_first_token', 'sentence', 'audio_format', 'first_audio', 'sentence_end',
+      'sentence', 'sentence_end', 'done',
     ]);
     expect(voiced).toBe(OPENERS[0] + REPLY);
     const start = events[1];

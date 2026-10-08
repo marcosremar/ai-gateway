@@ -18,7 +18,7 @@ describe('runComposite', () => {
   it('chains STT → streamed LLM → TTS per sentence, in speaking order, WAV header stripped', async () => {
     const { result, events, voiced, calls } = await run();
     expect(events.map(e => e.type)).toEqual([
-      'transcript', 'llm_first_token', 'sentence', 'audio_format', 'first_audio', 'sentence', 'done',
+      'transcript', 'llm_first_token', 'sentence', 'audio_format', 'first_audio', 'sentence_end', 'sentence', 'sentence_end', 'done',
     ]);
     expect(events.filter(e => e.type === 'sentence').map(e => e.text)).toEqual(['Bom dia, querida!', 'Aqui está o seu pão.']);
     expect(voiced).toBe('Bom dia, querida!Aqui está o seu pão.'); // PCM only, no RIFF header bytes

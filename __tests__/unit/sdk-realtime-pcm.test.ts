@@ -171,6 +171,25 @@ describe('s2s-stream rung', () => {
     expect(alone.map(e => e.type)).toEqual(['opener', 'opener', 'metrics', 'done', 'audio_end']);
   });
 
+  it('an MP3 sentence is played when its audio ends, not at the end of the turn', async () => {
+    const order: string[] = [];
+    const player: PcmPlayer = {
+      pushPcm16: () => {}, pushFloat: () => {}, flush: () => {}, playing: false, idle: async () => {},
+      pushEncoded: async (data) => { order.push(`mp3:${new TextDecoder().decode(data)}`); }, close: () => {},
+    };
+    const events: RealtimeEvent[] = [];
+    const seen = ctx(streamOf([
+      encodeEvent({ type: 'sentence', text: 'Um.' }, 'binary'), encodeEvent({ type: 'audio_format', encoding: 'audio/mpeg' }, 'binary'),
+      encodeAudio(new TextEncoder().encode('ID3um'), 'binary'), encodeEvent({ type: 'sentence_end' }, 'binary'),
+      encodeEvent({ type: 'sentence', text: 'Dois.' }, 'binary'), encodeAudio(new TextEncoder().encode('ID3dois'), 'binary'),
+      encodeEvent({ type: 'sentence_end' }, 'binary'), encodeEvent({ type: 'done', reply: 'Um. Dois.' }, 'binary'),
+    ]), events);
+    const emit = seen.emit;
+    seen.emit = (e: RealtimeEvent) => { if (e.type === 'reply_delta') order.push(`text:${e.text}`); emit(e); };
+    await createS2SStreamTransport(seen, { url: '/s' }, async () => player).sendTurn!(new Blob(['x']));
+    expect(order).toEqual(['text:Um.', 'mp3:ID3um', 'text:Dois.', 'mp3:ID3dois']);
+  });
+
   it('interrupt during an opener: the player is flushed and the turn is cut like any audio', async () => {
     let flushed = 0;
     let release = () => {};

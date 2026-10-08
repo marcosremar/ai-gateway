@@ -387,7 +387,7 @@ they go to the composed pipeline (`route.fallback: "unsupported"`).
 line with audio as `{"type":"audio","pcm":"<base64>"}` (debugging, browsers without a frame parser).
 
 Events, in order: `route` {provider, fallback?, from?} · `transcript` {text, stt_ms} · `llm_first_token` · per sentence
-`sentence` {text} then its audio · `audio_format` {encoding, sample_rate} when it changes · `first_audio` {at_ms} ·
+`sentence` {text}, its audio, then `sentence_end` · `audio_format` {encoding, sample_rate} when it changes · `first_audio` {at_ms} ·
 `opener` {state, text, index} around an opener's audio · `deadline_missed` {deadline_ms} ·
 `done` {reply, transcript, first_audio_ms, first_sound_ms, opener, deadline_ms, deadline_missed, total_ms, missing_audio?, partial?}. `sentence_failed` = that sentence has no
 audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`partial: true` → what was sent is valid).

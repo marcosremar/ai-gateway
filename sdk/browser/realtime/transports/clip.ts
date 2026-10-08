@@ -148,7 +148,7 @@ class S2SStreamTransport extends ClipTransport {
         if (typeof e.sample_rate === 'number') rate = e.sample_rate;
         return;
       }
-      if (e.type === 'done') await flushEncoded();
+      if (e.type === 'done' || e.type === 'sentence_end') await flushEncoded();
       if (e.type === 'opener') {
         inOpener = e.state === 'start';
         if (!inOpener) await flushEncoded();

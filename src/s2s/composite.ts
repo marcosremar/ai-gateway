@@ -360,6 +360,7 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
         }
         opts.emitAudio(pcm);
       }
+      opts.emitEvent({ type: 'sentence_end' });
     } catch (err) {
       missingAudio++;
       opts.emitEvent({ type: 'sentence_failed', text: item.text, message: (err instanceof Error ? err.message : String(err)).slice(0, 200) });
