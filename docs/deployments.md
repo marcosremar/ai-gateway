@@ -91,7 +91,7 @@ registry, which the gateway pulls from with the key it already has: **no registr
 to set** — it is never `pending` for a credential. The declaration owns three things and patches only them over the
 registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full reference; default
 `20261006-0107`, the one production runs), `realtime: {}` (the edge sidecar, [realtime-edge.md](realtime-edge.md))
-and the edge's `RT_MAX_SESSIONS` per machine type (L4 8, L40S 16, merged into the stored `envByMachineType`). Port,
+and the edge's `RT_MAX_SESSIONS` per machine type (L4 2, L40S 8, merged into the stored `envByMachineType`). Port,
 machine type, zone, replicas, idle and boot times, € and hour limits, volume, `env` and `files` (the voice catalog)
 stay exactly as registered. On a gateway where `parle-speech` does not exist it is created from the `speech-stack`
 profile with the declared image; that deployment has no `files`, so the voice catalog still has to be sent with a
