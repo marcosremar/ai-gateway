@@ -13,6 +13,8 @@
  * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
+import type { RttBaseline } from './rtt-gate';
+
 export type DeploymentProvider = 'scaleway' | 'vast';
 
 /**
@@ -147,9 +149,11 @@ export interface DeploymentSpec {
   allowFar?: boolean;
   /**
    * Vast: a freshly rented host whose measured RTT from the gateway (median, ms) is above this is released as
-   * `too-far` and avoided 24 h (`rtt-gate.ts`). Default `DEFAULT_MAX_RTT_MS` (35, measured from NL).
+   * `too-far` and avoided 24 h (`rtt-gate.ts`). With a baseline (see `maxRttExcessMs`) it is an optional upper bound;
+   * without one it is the whole rule, default `DEFAULT_MAX_RTT_MS` (35, measured from NL).
    */
   maxRttMs?: number;
+  maxRttExcessMs?: number;
   /**
    * Vast: lowest CUDA version the host driver must support (`cuda_max_good`), for the image's own CUDA. A driver older
    * than the image's runtime fails at the first CUDA call (error 804, "forward compatibility"): vllm/vllm-omni v0.28 is
@@ -285,6 +289,7 @@ export interface ReplicaMachine {
   provider?: DeploymentProvider;
   /** When the provider takes the host back (Vast rental end, ms); absent when it never does (`expiry.ts`). */
   expiresAt?: number | null;
+  placementNote?: string;
 }
 
 export interface CreateReplicaInput {
@@ -326,6 +331,8 @@ export interface DeploymentBackend {
   readonly marketPriced?: boolean;
   /** RTT (median ms) from the gateway to the replica's front, null when no sample came back (the RTT gate). */
   measureRtt?(machine: ReplicaMachine): Promise<number | null>;
+  measureBaselineRtt?(near: string): Promise<RttBaseline | null>;
+  recordRtt?(machine: ReplicaMachine, rttMs: number): void;
   /** Price + stock of types in zones, for ranking `candidates` (Scaleway). Absent: candidates are ranked without it. */
   catalog?(zones: string[]): Promise<CatalogEntry[]>;
   /**
@@ -353,6 +360,13 @@ export interface OfferPreview {
   cudaMax: number | null;
   directPorts: number | null;
   gpu: string | null;
+  knownRttMs: number | null;
+  gateVerdict?: 'pass' | 'too-far' | null;
+}
+
+export interface OffersPreview {
+  offers: OfferPreview[];
+  gate: { near: string; rule: 'relative' | 'absolute'; anchor: string | null; baselineMs: number | null; maxRttExcessMs: number; maxRttMs: number | null };
 }
 
 export interface CatalogEntry { zone: string; machineType: string; hourlyPrice: number | null; availability: string | null }
@@ -407,6 +421,7 @@ export interface ReplicaView {
   stagesOut: string[];
   /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
   rttMs: number | null;
+  rttBaselineMs: number | null;
   /** Minutes until the provider takes the host back (Vast); null when it never does. */
   expiresInMinutes: number | null;
 }

@@ -8,8 +8,9 @@
  *
  * The ranking is pure, no I/O — the Vast backend ranks market offers with `rankOffers`. The owner's three goals:
  * reliable, cheap, low latency for users in France. Distance decides first (`geo.ts`: great-circle km from the `near`
- * country, in 500-km bands — latency is physics, EU membership is not); inside a band, the cheapest *effective* price
- * wins, where an unreliable host is priced as if it cost more. Vast hosts are then measured (`maxRttMs`, controller).
+ * country, in 500-km bands — latency is physics, EU membership is not); inside a band, a host in the users' own country
+ * goes before one across a border, then the cheapest *effective* price wins, where an unreliable host is priced as if
+ * it cost more. Vast hosts are then measured (`rtt-gate.ts`), and one that passed sorts first on later creates.
  */
 import { countryDistanceKm } from './geo';
 import type { CatalogEntry, DeploymentProvider, DeploymentSpec, PlacementCandidate } from './types';
@@ -128,20 +129,32 @@ export interface RankOffersOptions {
   allowFar?: boolean;
   /** Host machine ids to leave out (recent boot failures). */
   avoidMachines?: ReadonlySet<number>;
+  /** Host machine id → RTT (ms) it measured when it last passed the RTT gate. */
+  knownRtt?: ReadonlyMap<number, number>;
 }
 
-/** Offers ordered best first: distance band, then effective price, then download bandwidth (faster image pull). */
+export const KNOWN_RTT_BAND_MS = 5;
+
+/**
+ * Offers ordered best first: hosts that already passed the RTT gate (by measured RTT, in 5-ms bands), then distance
+ * band, then the users' own country before a neighbour, then effective price, then download bandwidth (faster pull).
+ */
 export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: RankOffersOptions): T[] {
   const usable = offers.filter(o => o.machine_id === undefined || !opts.avoidMachines?.has(o.machine_id));
   const scored = usable.map((o) => {
     const cc = countryOf(o.geolocation);
-    return { o, near: isNear(cc, opts.near), bucket: distanceBucket(cc, opts.near), eff: effectivePrice(o) };
+    const rtt = o.machine_id === undefined ? undefined : opts.knownRtt?.get(o.machine_id);
+    return {
+      o, near: isNear(cc, opts.near), bucket: distanceBucket(cc, opts.near), eff: effectivePrice(o),
+      known: rtt === undefined ? Infinity : Math.floor(rtt / KNOWN_RTT_BAND_MS), abroad: cc === opts.near.toUpperCase() ? 0 : 1,
+    };
   });
   const near = scored.filter(t => t.near);
   const pool = near.length ? near : opts.allowFar ? scored : [];
   const byBucket = (a: number, b: number) => (a === b ? 0 : a < b ? -1 : 1); // Infinity-safe
   return pool
-    .sort((a, b) => byBucket(a.bucket, b.bucket) || a.eff - b.eff || (b.o.inet_down || 0) - (a.o.inet_down || 0))
+    .sort((a, b) => byBucket(a.known, b.known) || byBucket(a.bucket, b.bucket) || a.abroad - b.abroad || a.eff - b.eff
+      || (b.o.inet_down || 0) - (a.o.inet_down || 0))
     .map(t => t.o);
 }
 

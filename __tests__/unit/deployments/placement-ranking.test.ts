@@ -67,12 +67,25 @@ describe('rankOffers', () => {
     expect(effectivePrice({ dph_total: 1, reliability2: 1 })).toBe(1);
   });
 
-  it('inside the same 500-km band price decides (Brussels beats a pricier Paris); ties break on bandwidth', () => {
+  it('inside the same 500-km band the users\' country goes first, then price decides (Brussels beats a pricier Amsterdam); ties break on bandwidth', () => {
     const ranked = rankOffers([
       offer(1, 'Brussels, BE', 0.2), offer(2, 'Paris, FR', 0.5, 0.99, 600), offer(3, 'Paris, FR', 0.5, 0.99, 2000),
-      offer(4, 'Madrid, ES', 0.1),
+      offer(4, 'Madrid, ES', 0.1), offer(5, 'Amsterdam, NL', 0.3),
     ], { near: 'FR' });
-    expect(ranked.map(o => o.id)).toEqual([1, 3, 2, 4]);
+    expect(ranked.map(o => o.id)).toEqual([3, 2, 1, 5, 4]);
+    expect(rankOffers([offer(1, 'London, GB', 0.2), offer(2, 'Paris, FR', 0.5)], { near: 'GB' }).map(o => o.id)).toEqual([1, 2]);
+  });
+
+  it('a host that already passed the RTT gate sorts first, by measured RTT in 5-ms bands, then in the usual order', () => {
+    const market = [
+      offer(1, 'Paris, FR', 0.3), offer(2, 'London, GB', 0.6), offer(3, 'Warsaw, PL', 0.7), offer(4, 'Brussels, BE', 0.2), offer(5, 'Dallas, US', 0.1),
+    ];
+    const ids = (knownRtt: Map<number, number>) => rankOffers(market, { near: 'FR', knownRtt }).map(o => o.id);
+    expect(ids(new Map())).toEqual([1, 4, 2, 3]);
+    expect(ids(new Map([[20, 44]]))).toEqual([2, 1, 4, 3]);
+    expect(ids(new Map([[20, 44], [30, 41]]))).toEqual([2, 3, 1, 4]);
+    expect(ids(new Map([[20, 44], [30, 38]]))).toEqual([3, 2, 1, 4]);
+    expect(ids(new Map([[50, 10]]))).toEqual([1, 4, 2, 3]);
   });
 
   it('skips hosts that failed to boot recently', () => {

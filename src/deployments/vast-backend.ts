@@ -15,6 +15,7 @@ import { MIN_HOST_LEFT_MS, vastEndsAt } from './expiry';
 import { countryDistanceKm } from './geo';
 import { countryOf, DEFAULT_NEAR, effectivePrice, rankOffers, type VastOffer } from './placements';
 import { vastPortCount, vastUdpRange } from './realtime-ports';
+import { RTT_ANCHOR_PORT, RTT_ANCHORS, type RttBaseline } from './rtt-gate';
 import type { OfferPreview } from './types';
 import type { CreateReplicaInput, DeploymentBackend, DeploymentSpec, RegistryAuth, ReplicaMachine } from './types';
 
@@ -37,6 +38,8 @@ export const DEFAULT_DISK_GB = 50;
 export const BAD_HOST_MS = 3_600_000;
 /** A host too far by measured RTT (`rtt-gate.ts`) is skipped a day: distance does not change by the hour. */
 export const TOO_FAR_HOST_MS = 24 * 3_600_000;
+export const KNOWN_RTT_MS = 24 * 3_600_000;
+export const KNOWN_RTT_MAX_HOSTS = 200;
 /** RTT samples per measurement (median) and per-sample timeout: one gate check stays within a few seconds. */
 export const RTT_SAMPLES = 5;
 export const RTT_SAMPLE_TIMEOUT_MS = 2_000;
@@ -98,6 +101,10 @@ export function vastState(status: string | null | undefined): string {
   return 'starting';
 }
 
+function describeOffer(o: VastOffer): string {
+  return `${o.geolocation ?? 'unknown location'}, $${o.dph_total}/h`;
+}
+
 export class VastApiError extends Error {
   constructor(readonly status: number, message: string, readonly retryAfterMs?: number) { super(message); }
 }
@@ -119,6 +126,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
   private readonly rtt: RttMeasure;
   /** machine_id → skip until. */
   private readonly badHosts = new Map<number, number>();
+  private readonly goodHosts = new Map<number, { rttMs: number; until: number }>();
   /** instance id → host machine_id (from create and list). */
   private readonly hostOf = new Map<string, number>();
   /** Last good `/instances/` answer (briefly reused, and served while Vast rate-limits). */
@@ -171,6 +179,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
   async pickOffers(spec: DeploymentSpec): Promise<VastOffer[]> {
     const now = this.now();
     for (const [id, until] of this.badHosts) if (until <= now) this.badHosts.delete(id);
+    for (const [id, good] of this.goodHosts) if (good.until <= now) this.goodHosts.delete(id);
+    const knownRtt = new Map([...this.goodHosts].map(([id, good]) => [id, good.rttMs]));
     const usdCap = spec.maxEurPerHour * EUR_TO_USD;
     for (const reliability of [MIN_RELIABILITY, FALLBACK_RELIABILITY]) {
       const { offers = [] } = await this.call<{ offers?: VastOffer[] }>('POST', '/bundles/', this.searchBody(spec, reliability));
@@ -181,7 +191,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda) && this.lastsLongEnough(o, now)
         && (o.direct_port_count === undefined || o.direct_port_count >= vastPortCount(spec)));
       const ranked = rankOffers(valid, {
-        near: spec.near ?? DEFAULT_NEAR, ...(spec.allowFar ? { allowFar: true } : {}), avoidMachines: new Set(this.badHosts.keys()),
+        near: spec.near ?? DEFAULT_NEAR, ...(spec.allowFar ? { allowFar: true } : {}), avoidMachines: new Set(this.badHosts.keys()), knownRtt,
       });
       if (ranked.length) return ranked;
     }
@@ -223,11 +233,15 @@ export class VastDeploymentBackend implements DeploymentBackend {
         const id = String(res.new_contract);
         input.onCreated?.(id); // the cached list lacks it; the controller keeps a fresh create until a list shows it
         if (offer.machine_id !== undefined) this.hostOf.set(id, offer.machine_id);
+        const rank = offers.indexOf(offer) + 1;
         this.log('deployments: vast offer rented', {
           deployment: spec.name, id, offer: offer.id, host: offer.machine_id, location: offer.geolocation, usdPerHour: offer.dph_total,
-          rank: offers.indexOf(offer) + 1, of: offers.length, skipped: misses,
+          rank, of: offers.length, skipped: misses,
         });
+        const known = offer.machine_id === undefined ? undefined : this.goodHosts.get(offer.machine_id);
         return {
+          placementNote: `offer ${rank} of ${offers.length}: ${describeOffer(offer)}${known ? `, passed the RTT gate at ${known.rttMs} ms` : ''}`
+            + (misses.length ? `; better-ranked offers passed over: ${misses.join('; ')}` : ''),
           id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast',
           zone: offer.geolocation ?? '', machineType: offer.gpu_name ?? spec.machineType,
           pricePerHour: Math.round((offer.dph_total / EUR_TO_USD) * 1000) / 1000,
@@ -236,7 +250,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!/not available|already rented|no_such_ask|HTTP 404|HTTP 410/i.test(msg)) throw err;
-        misses.push(`offer ${offer.id}: ${msg.slice(0, 80)}`);
+        misses.push(`offer ${offer.id} (${describeOffer(offer)}): ${msg.slice(0, 80)}`);
       }
     }
     throw new Error(`out_of_stock: every vast offer tried was taken (${misses.join('; ')})`);
@@ -298,6 +312,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
     const avoidMs = reason === 'too-far' ? TOO_FAR_HOST_MS : reason === 'boot-timeout' ? BAD_HOST_MS : 0;
     const host = this.hostOf.get(machine.id);
     if (avoidMs && host !== undefined) this.badHosts.set(host, this.now() + avoidMs);
+    if (avoidMs && host !== undefined) this.goodHosts.delete(host);
     try {
       await this.call('DELETE', `/instances/${machine.id}/`);
     } catch (err) {
@@ -314,6 +329,23 @@ export class VastDeploymentBackend implements DeploymentBackend {
     return this.rtt(m[1], Number(m[2]));
   }
 
+  async measureBaselineRtt(near: string): Promise<RttBaseline | null> {
+    const anchor = RTT_ANCHORS[near.toUpperCase()];
+    const rttMs = anchor ? await this.rtt(anchor, RTT_ANCHOR_PORT).catch(() => null) : null;
+    return anchor && rttMs != null ? { anchor, rttMs: Math.round(rttMs) } : null;
+  }
+
+  recordRtt(machine: ReplicaMachine, rttMs: number): void {
+    const host = this.hostOf.get(machine.id);
+    if (host === undefined) return;
+    this.goodHosts.delete(host);
+    this.goodHosts.set(host, { rttMs, until: this.now() + KNOWN_RTT_MS });
+    for (const oldest of this.goodHosts.keys()) {
+      if (this.goodHosts.size <= KNOWN_RTT_MAX_HOSTS) break;
+      this.goodHosts.delete(oldest);
+    }
+  }
+
   async previewOffers(spec: DeploymentSpec): Promise<OfferPreview[]> {
     const near = spec.near ?? DEFAULT_NEAR;
     return (await this.pickOffers(spec)).map((o, i) => ({
@@ -321,6 +353,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       distanceKm: Math.round(countryDistanceKm(near, countryOf(o.geolocation))), usdPerHour: o.dph_total,
       effectiveUsdPerHour: Math.round(effectivePrice(o) * 1000) / 1000, reliability: o.reliability2, inetDownMbps: o.inet_down,
       inetUpMbps: o.inet_up ?? null, cudaMax: o.cuda_max_good ?? null, directPorts: o.direct_port_count ?? null, gpu: o.gpu_name ?? null,
+      knownRttMs: (o.machine_id === undefined ? undefined : this.goodHosts.get(o.machine_id)?.rttMs) ?? null,
     }));
   }
 

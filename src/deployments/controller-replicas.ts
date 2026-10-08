@@ -9,7 +9,8 @@ import { ControllerState, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
 import { placeReplica, PlacementError } from './placement-walk';
 import { isOutOfStock } from './placements';
-import { DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
+import { DEFAULT_NEAR } from './placements';
+import { gateDecision, gateNote } from './rtt-gate';
 import type { DeploymentBackend, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
 const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
@@ -54,8 +55,9 @@ export abstract class ReplicaLifecycle extends ControllerState {
 
   /**
    * RTT gate (`rtt-gate.ts`): true once the replica may serve. A fresh replica on a backend that measures RTT (Vast)
-   * is kept only if the median from the gateway is within `maxRttMs`; otherwise it is released as `too-far` (the
-   * backend avoids the host) and the next create picks another offer. Passed once = never measured again.
+   * is kept only if the median from the gateway is within the gate (relative to the baseline probed in the same tick,
+   * else `maxRttMs`); otherwise it is released as `too-far` (the backend avoids the host) and the next create picks
+   * another offer. Passed once = never measured again, and the backend remembers the host as known-good.
    */
   protected async rttGate(rt: Runtime, m: ReplicaMachine): Promise<boolean> {
     const backend = this.backends[this.providerOf(m)];
@@ -71,20 +73,29 @@ export abstract class ReplicaLifecycle extends ControllerState {
       if (rtt != null) gate.status = 'adopted';
       return true;
     }
-    const maxRttMs = rt.record.spec.maxRttMs ?? DEFAULT_MAX_RTT_MS;
-    const decision = gateDecision({ rttMs: rtt, maxRttMs, firstSeenAt: gate.firstSeenAt, now });
+    const { spec } = rt.record;
+    if (rtt != null) gate.baseline = await backend.measureBaselineRtt?.(spec.near ?? DEFAULT_NEAR).catch(() => null) ?? null;
+    const input = {
+      rttMs: rtt, baselineMs: gate.baseline?.rttMs, anchor: gate.baseline?.anchor, firstSeenAt: gate.firstSeenAt, now,
+      ...(spec.maxRttMs !== undefined ? { maxRttMs: spec.maxRttMs } : {}), ...(spec.maxRttExcessMs !== undefined ? { maxExcessMs: spec.maxRttExcessMs } : {}),
+    };
+    const decision = gateDecision(input);
     if (decision === 'wait') return false;
-    const measured = rtt != null ? `RTT ${rtt} ms` : 'no RTT answer';
+    const measured = gateNote(input);
     if (decision === 'pass') {
       gate.status = 'passed';
-      rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${measured} ≤ maxRttMs ${maxRttMs}: kept`;
+      rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${measured}: kept`;
       rt.rejected = [];
+      if (rtt != null) backend.recordRtt?.(m, rtt);
       return true;
     }
-    const note = `host ${m.zone || m.id}: ${measured} > maxRttMs ${maxRttMs}: released (too-far)`;
+    const note = `host ${m.zone || m.id}: ${measured}: released (too-far)`;
     rt.rejected = [...rt.rejected.slice(-4), note]; // the last few are enough to see a pattern
     rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${note}`;
-    this.log('deployments: replica too far', { deployment: m.deployment, id: m.id, rttMs: rtt, maxRttMs });
+    this.log('deployments: replica too far', {
+      deployment: m.deployment, id: m.id, rttMs: rtt, baselineMs: gate.baseline?.rttMs ?? null, anchor: gate.baseline?.anchor ?? null,
+      maxRttMs: spec.maxRttMs ?? null,
+    });
     await this.release(m, 'too-far');
     return false;
   }
@@ -173,7 +184,8 @@ export abstract class ReplicaLifecycle extends ControllerState {
           return;
         }
         this.machines = [...this.machines.filter(m => m.id !== machine.id), { ...machine, pricePerHour: machine.pricePerHour ?? price }];
-        rt.lastPlacement = rt.rejected.length ? `${placement}; earlier: ${rt.rejected.join('; ')}` : placement;
+        const placed = machine.placementNote ? `${placement}; ${machine.placementNote}` : placement;
+        rt.lastPlacement = rt.rejected.length ? `${placed}; earlier: ${rt.rejected.join('; ')}` : placed;
         rt.createFailures = 0;
         rt.stockOut = null;
         rt.lastError = rt.spendNote ? `create: ${rt.spendNote}` : null;

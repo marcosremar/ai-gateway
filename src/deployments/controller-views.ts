@@ -5,8 +5,10 @@
 
 import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './controller-state';
 import { ReconcileLoop } from './controller-reconcile';
+import { DEFAULT_NEAR } from './placements';
 import { planReplicas, replicaPhase } from './planner';
-import type { DeploymentSpec, DeploymentView, OfferPreview } from './types';
+import { DEFAULT_MAX_RTT_EXCESS_MS, DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
+import type { DeploymentSpec, DeploymentView, OffersPreview } from './types';
 import { distinctSessions, externalLoadOf, refusedSessions } from '../realtime/external-load';
 
 export abstract class ControllerViews extends ReconcileLoop {
@@ -19,13 +21,28 @@ export abstract class ControllerViews extends ReconcileLoop {
   }
 
   /** The stored spec, secrets included — for in-process callers only (declared reconcile); never sent over HTTP. */
-  async offers(name: string): Promise<OfferPreview[] | null> {
+  async offers(name: string): Promise<OffersPreview | null> {
     const spec = this.deployments.get(name)?.record.spec;
-    const preview = this.backends.vast?.previewOffers;
-    if (!spec || !preview) return null;
+    const backend = this.backends.vast;
+    if (!spec || !backend?.previewOffers) return null;
     const vast = spec.provider === 'vast' ? spec : (spec.candidates ?? []).find(c => c.provider === 'vast');
     if (!vast) return null;
-    return preview.call(this.backends.vast, { ...spec, provider: 'vast', machineType: vast.machineType, maxEurPerHour: vast.maxEurPerHour });
+    const near = spec.near ?? DEFAULT_NEAR;
+    const [offers, baseline] = await Promise.all([
+      backend.previewOffers({ ...spec, provider: 'vast', machineType: vast.machineType, maxEurPerHour: vast.maxEurPerHour }),
+      backend.measureBaselineRtt?.(near).catch(() => null) ?? null,
+    ]);
+    const limits = {
+      baselineMs: baseline?.rttMs, ...(spec.maxRttMs !== undefined ? { maxRttMs: spec.maxRttMs } : {}),
+      ...(spec.maxRttExcessMs !== undefined ? { maxExcessMs: spec.maxRttExcessMs } : {}), firstSeenAt: 0, now: 0,
+    };
+    return {
+      offers: offers.map(o => ({ ...o, gateVerdict: o.knownRttMs == null ? null : gateDecision({ ...limits, rttMs: o.knownRttMs }) as 'pass' | 'too-far' })),
+      gate: {
+        near, rule: baseline ? 'relative' : 'absolute', anchor: baseline?.anchor ?? null, baselineMs: baseline?.rttMs ?? null,
+        maxRttExcessMs: spec.maxRttExcessMs ?? DEFAULT_MAX_RTT_EXCESS_MS, maxRttMs: spec.maxRttMs ?? (baseline ? null : DEFAULT_MAX_RTT_MS),
+      },
+    };
   }
 
   specOf(name: string): DeploymentSpec | null {
@@ -105,6 +122,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       draining: this.draining.has(m.id),
       stagesOut: this.stagesOut(m.id),
       rttMs: this.gates.get(m.id)?.rttMs ?? null,
+      rttBaselineMs: this.gates.get(m.id)?.baseline?.rttMs ?? null,
       expiresInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
     }));
     const ready = replicas.filter(r => r.phase === 'ready').length;
