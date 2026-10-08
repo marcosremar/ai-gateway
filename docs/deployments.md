@@ -217,6 +217,21 @@ LLM slow-down past 8 parallel, health check timing out at 12, adaptive hedge fro
 `__tests__/unit/deployments/autoscale-sim.test.ts` asserts them (ramp, spike, flapping, drain, crash, contention,
 schedule, warm, out of stock rising/falling and recovering, adaptive vs fixed hedge at 16 and 25). The 75 % / 50 % / 20 s / 1.5× defaults are design choices to pilot, not published values.
 
+Class simulator: `bun scripts/scaling-sim.ts [scenario…] [--boot 600] [--resume 180] [--ceiling 8] [--price 1.47]
+[--max-replicas 4] [--idle-minutes 2] [--idle-action delete|stop] [--timeline] [--events]` runs the same controller on a
+virtual clock against a scripted class instead of a concurrency curve. A student holding a realtime slot is one lease
+held for the whole session on a replica that takes `ceiling` of them (the unit `externalInflightEquivalent` gives a full
+replica); a student with no free slot is refused by the admission layer as the realtime service does (`wake`, no
+request reaches `acquire`), asks again at each turn (every 15 ± 5 s) and that turn goes to the fallback; a student on
+HTTP turns and an anonymous request are short leases. It prints one row per scenario: when replicas started, how many
+served fewer than `--wasted-below` (20) turns, the replica count per minute, replica-minutes and €, turns on the GPU and
+on the fallback, student-minutes on the fallback, when the excess began, what started after it and how long until it was
+gone, how long after the last student the bill reached zero, sessions cut by a release, and turns refused with no
+fallback (`--no-fallback`). Scenarios (`scripts/scaling-sim/scenarios.ts`): `class-arrival`, `sporadic-blip`,
+`sporadic-blip-repeated`, `blip-below-threshold`, `burst`, `slow-growth`, `drop-to-zero`, `quota-full`,
+`out-of-stock-then-back`, `two-classes-back-to-back`, `hundred-students`. `__tests__/unit/deployments/scaling-sim.test.ts`
+pins the table of today's rule in `fixtures/scaling-sim/today.txt`: a change of rule shows up as a diff of that file.
+
 ## Cost guards (gateway-wide)
 
 | Variable | Default | What it limits |
