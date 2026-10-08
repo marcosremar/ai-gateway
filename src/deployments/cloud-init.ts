@@ -3,7 +3,8 @@
  *
  *   :80  nginx (requires `X-Aigw-Token`) ──► 127.0.0.1:8000 ──► container :<port>
  *        /__aigw/ready  → 200 once the container answered its health path (file written by this script)
- *        /__aigw/rt/*   → 127.0.0.1:RT_EDGE_PORT, the realtime edge sidecar (`spec.realtime`, docs/realtime-edge.md)
+ *        /__aigw/rt/*   → 127.0.0.1:RT_EDGE_PORT, the realtime edge (`spec.realtime`, docs/realtime-edge.md): a sidecar
+ *                         container on Scaleway, a process of the one container on Vast (`vastEdgeSection`)
  *
  * Port 80 because some caller networks only let 80/443 out. The token keeps the machine from being an open
  * model endpoint on the internet; the gateway is the only one that knows it.
@@ -22,6 +23,8 @@ import type { DeploymentSpec } from './types';
  * Built from docker/aigw-edge/Dockerfile; bump the tag when the edge changes.
  */
 export const DEFAULT_EDGE_IMAGE = 'ghcr.io/marcosremar/aigw-edge:8c774c6e';
+/** Where a Vast container holds the edge: `aigw_edge/`, `telemetry.py` and optionally `venv/` (docs/realtime-edge.md § Vast). */
+export const VAST_EDGE_DIR = '/opt/aigw-edge';
 /** The edge's HTTP/WS port on the replica's loopback (nginx proxies `/__aigw/rt/*` to it). */
 export const RT_EDGE_PORT = 8020;
 /** WebRTC media range when the spec does not set `realtime.udpPorts` (≈ 2 ports per session per worker slice). */
@@ -177,6 +180,23 @@ for i in 1 2 3 4 5; do docker pull ${image} && break; sleep 10; done
 docker rm -f aigw-edge 2>/dev/null; docker run -d --name aigw-edge --restart unless-stopped --network host --env-file /srv/aigw/edge.env ${image}`;
 }
 
+export function vastEdgeEnv(spec: DeploymentSpec, token: string, opts: ReplicaInitOptions = {}): Record<string, string> {
+  return edgeEnv(spec, token, opts);
+}
+
+function vastEdgeSection(spec: DeploymentSpec, token: string, opts: ReplicaInitOptions, bootChecks: number): string {
+  const env = Object.entries(vastEdgeEnv(spec, token, opts)).map(([k, v]) => `export ${k}=${shellQuote(v)}`).join('\n') + '\n';
+  return `[ -n "$PUBLIC_IPADDR" ] || eval "$(grep -E '^(PUBLIC_IPADDR|CONTAINER_ID|VAST_[A-Z0-9_]+)=' /etc/environment 2>/dev/null | sed 's/^/export /')"
+echo '${b64(env)}' | base64 -d > /srv/aigw/edge.env && chmod 600 /srv/aigw/edge.env
+echo "export AIGW_REPLICA_ID='\${CONTAINER_ID:-\${VAST_CONTAINERLABEL#C.}}'" >> /srv/aigw/edge.env
+(
+  for i in $(seq 1 ${bootChecks}); do [ -d ${VAST_EDGE_DIR}/aigw_edge ] && break; sleep 5; done
+  cd ${VAST_EDGE_DIR} && [ -d aigw_edge ] || { echo 'aigw: no realtime edge in ${VAST_EDGE_DIR} (the image or the boot script must provide it)'; exit 1; }
+  set -a; . /srv/aigw/edge.env; set +a
+  while true; do PY=${VAST_EDGE_DIR}/venv/bin/python; [ -x $PY ] || PY=python3; $PY -m aigw_edge; sleep 5; done
+) > /srv/aigw/edge.log 2>&1 &`;
+}
+
 /** Boot-script mode: the user script runs in the background (it may take long); readiness is still the health loop. */
 function bootScriptSection(script: string): string {
   return `echo '${b64(script)}' | base64 -d > /srv/aigw/boot.sh && chmod 700 /srv/aigw/boot.sh
@@ -231,11 +251,13 @@ done
  *
  * The app port is `spec.port` (default 8000), not a fixed 8000: everything shares one container, and a caller's stack
  * may already use 127.0.0.1:8000 for a model server, so its health responder lives on another port (e.g. 8010).
- * nginx is started as a plain daemon (`nginx`, reloaded if already up), never `systemctl`. Safety net: the container
+ * nginx is started as a plain daemon (`nginx`, reloaded if already up), never `systemctl`. With `spec.realtime` the edge
+ * runs as a process of this container, from `VAST_EDGE_DIR` (shipped by the image or put there by the boot script), with
+ * the same env the Scaleway sidecar gets. Safety net: the container
  * stops itself `maxHours + 30 min` after boot (an exited Vast instance bills only its disk; the controller or the reaper
  * deletes it).
  */
-export function vastReplicaInit(spec: DeploymentSpec, token: string): string {
+export function vastReplicaInit(spec: DeploymentSpec, token: string, opts: ReplicaInitOptions = {}): string {
   if (!/^[A-Za-z0-9_-]{24,}$/.test(token)) throw new Error('replica token must be 24+ chars of [A-Za-z0-9_-]');
   if (!spec.bootScript) throw new Error('vast replicas run in boot-script mode only');
   const env = { ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env };
@@ -248,7 +270,7 @@ mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
 set -x
 ( sleep ${stopAfterSeconds}; kill -TERM 1 ) >/dev/null 2>&1 &
-echo '${b64(nginxConfig(token, 80, appPort))}' | base64 -d > /srv/aigw/nginx.conf
+echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undefined))}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
 command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx curl; }
@@ -256,6 +278,7 @@ mkdir -p /etc/nginx/conf.d && rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf
 nginx -t && { nginx -s reload 2>/dev/null || nginx; }
 ${bootScriptSection(spec.bootScript)}
+${spec.realtime ? vastEdgeSection(spec, token, opts, bootChecks) : ''}
 for i in $(seq 1 ${bootChecks}); do
   curl -sf -o /dev/null http://127.0.0.1:${appPort}${spec.healthPath} && echo '{"ready":true}' > /srv/aigw/ready.json && break
   sleep 5

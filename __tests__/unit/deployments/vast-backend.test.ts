@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { vastReplicaInit } from '../../../src/deployments/cloud-init';
+import { spawnSync } from 'node:child_process';
+import { edgeEnv, nginxConfig, RT_EDGE_PORT, VAST_EDGE_DIR, vastEdgeEnv, vastReplicaInit } from '../../../src/deployments/cloud-init';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
-import { buildSpec } from '../../../src/deployments/spec';
+import { buildSpec, VAST_ENV_MAX_BYTES } from '../../../src/deployments/spec';
 import {
   BAD_HOST_MS, EUR_TO_USD, LIST_CACHE_MS, LIST_STALE_MAX_MS, MIN_RELIABILITY, TOO_FAR_HOST_MS, VastDeploymentBackend, vastState,
 } from '../../../src/deployments/vast-backend';
@@ -294,5 +295,57 @@ describe('vastReplicaInit', () => {
     const spec = buildSpec('speech', { provider: 'vast', image: 'ubuntu:24.04', bootScript: 'true', machineType: 'RTX 4090' }, { profiles });
     expect(spec.port).toBe(8000);
     expect(vastReplicaInit(spec, TOKEN)).toContain('http://127.0.0.1:8000/health');
+  });
+
+  const written = (script: string, path: string) =>
+    Buffer.from(new RegExp(`echo '([A-Za-z0-9+/=]+)' \\| base64 -d > ${path}`).exec(script)?.[1] ?? '', 'base64').toString();
+  const realtimeSpec = (extra: Partial<DeploymentSpec> = {}): DeploymentSpec => ({ ...vastSpec(), realtime: {}, ...extra });
+
+  it('without realtime: no edge, no /__aigw/rt/ route', () => {
+    const script = vastReplicaInit(vastSpec(), TOKEN);
+    expect(script).not.toContain('aigw_edge');
+    expect(script).not.toContain('edge.env');
+    expect(written(script, '/srv/aigw/nginx.conf')).not.toContain('/__aigw/rt/');
+  });
+
+  it('with realtime: the edge runs as a process of the container, behind the same nginx front as on Scaleway', () => {
+    const spec = realtimeSpec({ realtime: { maxSessions: 4, env: { EDGE_LLM_MODEL: "it's" } } });
+    const script = vastReplicaInit(spec, TOKEN, { gatewayUrl: 'https://gw.example/' });
+    expect(spawnSync('bash', ['-n'], { input: script }).status).toBe(0);
+    expect(script).not.toContain('docker');
+    expect(script).toContain(`[ -d ${VAST_EDGE_DIR}/aigw_edge ] && break`);
+    expect(script).toContain(`PY=${VAST_EDGE_DIR}/venv/bin/python; [ -x $PY ] || PY=python3; $PY -m aigw_edge`);
+    expect(script).toContain(`echo "export AIGW_REPLICA_ID='\${CONTAINER_ID:-\${VAST_CONTAINERLABEL#C.}}'" >> /srv/aigw/edge.env`);
+    expect(script).toMatch(/chmod 600 \/srv\/aigw\/edge\.env/);
+    expect(script.indexOf('nohup bash /srv/aigw/boot.sh')).toBeLessThan(script.indexOf('-m aigw_edge'));
+    expect(script.indexOf('-m aigw_edge')).toBeLessThan(script.indexOf('ready.json'));
+    expect(written(script, '/srv/aigw/nginx.conf')).toBe(nginxConfig(TOKEN, 80, 8010, RT_EDGE_PORT));
+    const env = written(script, '/srv/aigw/edge.env');
+    expect(env).toContain("export EDGE_LLM_MODEL='it'\"'\"'s'\n");
+    expect(env).toContain("export RT_MAX_SESSIONS='4'\n");
+    expect(env).toContain("export EDGE_UPSTREAM='http://127.0.0.1:8010'\n");
+    expect(env).toContain(`export AIGW_REPLICA_TOKEN='${TOKEN}'\n`);
+    expect(env).toContain("export GATEWAY_URL='https://gw.example'\n");
+    const sourced = spawnSync('bash', ['-c', 'set -a; . /dev/stdin; printf %s "$EDGE_LLM_MODEL"'], { input: env });
+    expect(sourced.stdout.toString()).toBe("it's");
+  });
+
+  it('the edge env on Vast names nothing the Scaleway sidecar is not given, and only the replica token is a secret', () => {
+    const spec = realtimeSpec();
+    const vast = vastEdgeEnv(spec, TOKEN, { gatewayUrl: 'https://gw.example' });
+    const scaleway = edgeEnv(spec, TOKEN, { gatewayUrl: 'https://gw.example' });
+    expect(Object.keys(vast).filter(k => !(k in scaleway))).toEqual([]);
+    expect(Object.entries(vast).filter(([, v]) => v.includes(TOKEN)).map(([k]) => k)).toEqual(['AIGW_REPLICA_TOKEN']);
+    expect(JSON.stringify(vast)).not.toContain('hf');
+  });
+
+  it('a realistic realtime spec stays under the 32 KB Vast accepts as env', () => {
+    const spec = realtimeSpec({
+      bootScript: '#!/bin/bash\n' + 'x'.repeat(3_400),
+      env: { HF_TOKEN: 'hf_' + 'a'.repeat(34), STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4' },
+    });
+    const init = Buffer.from(vastReplicaInit(spec, TOKEN, { gatewayUrl: 'https://gw.example' })).toString('base64');
+    const bytes = Object.entries({ ...spec.env, AIGW_INIT_B64: init, '-p 80:80': '1' }).reduce((n, [k, v]) => n + k.length + v.length + 2, 0);
+    expect(bytes).toBeLessThan(VAST_ENV_MAX_BYTES / 2);
   });
 });
