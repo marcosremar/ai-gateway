@@ -2,7 +2,9 @@
 # registry next to the GPU instead of downloading from Hugging Face at boot (a boot-time HF download failed on a real
 # L4 on 2026-10-04).
 ARG LLAMA_TAG=server-cuda-b11382
+ARG EDGE_TAG=666c0327
 FROM ghcr.io/ggml-org/llama.cpp:${LLAMA_TAG} AS llama
+FROM ghcr.io/marcosremar/aigw-edge:${EDGE_TAG} AS edge
 
 FROM vllm/vllm-omni:v0.28.0
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,7 +32,12 @@ RUN /opt/wenv/bin/hf download "$LLM_REPO" "$LLM_FILE" --local-dir /models/llm \
  && /opt/wenv/bin/hf download Systran/faster-whisper-large-v3 \
  && rm -rf /models/hf/xet
 
+COPY --from=edge /app /opt/aigw-edge
+RUN uv venv --python 3.12 /opt/aigw-edge/venv && uv pip install --python /opt/aigw-edge/venv/bin/python --no-cache \
+    --only-binary :all: aiortc==1.15.0 aiohttp==3.14.4 'numpy>=1.26,<3'
 COPY start.sh server.py stt_batch.py stt_stream.py qwen3_tts.yaml /opt/s2s/
+RUN cd /opt/aigw-edge && venv/bin/python -c 'import aigw_edge.server' && ls -l /opt/aigw-edge /opt/aigw-edge/aigw_edge \
+ && grep -n repetition_penalty /opt/s2s/qwen3_tts.yaml && sha256sum /opt/s2s/*
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=900s CMD curl -sf http://127.0.0.1:8000/health || exit 1
 CMD ["bash", "/opt/s2s/start.sh"]
