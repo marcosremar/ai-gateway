@@ -8,7 +8,7 @@ const counts = new Map<string, StreamCutCount>();
 export function noteStreamCut(at: { deployment: string; replica?: string | null; stage: string }, kind: StreamCut, detail = ''): void {
   const key = `${at.deployment}|${at.replica ?? ''}|${at.stage}`;
   const row = counts.get(key) ?? { deployment: at.deployment, replica: at.replica ?? null, stage: at.stage, truncated: 0, stalled: 0 };
-  row[kind]++;
+  if (kind === 'stalled') row.stalled++; else row.truncated++;
   counts.set(key, row);
   emitGatewayEvent('stream.cut', {
     level: 'warn', deployment: at.deployment, ...(at.replica ? { replicaId: at.replica } : {}),

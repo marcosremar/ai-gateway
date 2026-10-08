@@ -7,6 +7,7 @@ import { setGatewayTelemetrySink } from '../../../src/telemetry/emit';
 import { loopbackStages } from '../../../src/s2s/loopback-stages';
 import { encodeAudio, encodeEvent } from '../../../src/s2s/frames';
 import { decodeAll, fakeStages, replicaFrames, sleep, type FakeStagesOptions } from './_fakes';
+import { resetStreamCuts, streamCuts } from '../../../src/telemetry/stream-cuts';
 
 type ReplicaScript = (res: ServerResponse) => Promise<void>;
 
@@ -21,7 +22,7 @@ async function listen(handler: (req: IncomingMessage, res: ServerResponse) => vo
 }
 
 async function harness(opts: {
-  replica?: ReplicaScript; deployment?: 'ready' | 'cold' | 'paused' | 'absent' | 'stage_out'; stages?: FakeStagesOptions; hedgeMs?: number;
+  replica?: ReplicaScript; deployment?: 'ready' | 'cold' | 'paused' | 'absent' | 'stage_out'; stages?: FakeStagesOptions; hedgeMs?: number; maxGapMs?: number; budgetMs?: number;
 }) {
   const leases: Array<{ failed?: boolean | string }> = [];
   const woken: string[] = [];
@@ -40,12 +41,12 @@ async function harness(opts: {
       if (state === 'cold') throw new DeploymentError(503, "deployment 'parle-speech': replicas are starting", 30);
       if (state === 'paused') throw new DeploymentError(409, "deployment 'parle-speech' is paused");
       if (state === 'stage_out') throw new DeploymentError(503, "deployment 'parle-speech': s2s is out of rotation on every ready replica", 30, 'stage_out');
-      const lease = { machine: { ip: replicaHost } as never, token: 'tok', done: (failed?: boolean | string) => { leases.push({ failed }); } };
+      const lease = { machine: { ip: replicaHost, id: 'replica-1' } as never, token: 'tok', done: (failed?: boolean | string) => { leases.push({ failed }); } };
       return lease;
     },
   };
   const fake = fakeStages(opts.stages);
-  const route = createS2SRoute({ controller, deployment: 'parle-speech', stagesFor: () => fake.stages, hedgeMs: opts.hedgeMs ?? 2_000 });
+  const route = createS2SRoute({ controller, deployment: 'parle-speech', stagesFor: () => fake.stages, hedgeMs: opts.hedgeMs ?? 2_000, maxGapMs: opts.maxGapMs, budgetMs: opts.budgetMs });
   const host = await listen((req, res) => { void route(req, res); });
   async function call(query = '', custom?: FormData) {
     const form = custom ?? new FormData();
@@ -366,5 +367,103 @@ describe('POST /v1/s2s: STT hallucination filter on the primary transcript', () 
     expect(events.some(e => e.type === 'filtered')).toBe(true);
     expect(events.some(e => e.type === 'sentence')).toBe(false);
     expect(h.calls.filter(c => c.stage === 'llm' || c.stage === 'tts')).toEqual([]);
+  });
+});
+
+describe('POST /v1/s2s: a primary stream ends with done or with an explicit error, and is counted', () => {
+  const frames = replicaFrames('Oi!', ['Bom dia, querida!', 'Aqui está o seu pão.']);
+  const head = (res: ServerResponse) => { res.writeHead(200); for (const f of frames.slice(0, 4)) res.write(f); };
+  const turn = async (h: Awaited<ReturnType<typeof harness>>) => {
+    resetStreamCuts();
+    const telemetry: Array<{ event: string; attrs?: unknown; replicaId?: string }> = [];
+    setGatewayTelemetrySink(e => telemetry.push(e as never));
+    try {
+      const started = Date.now();
+      const { events, audio } = decodeAll((await h.call()).bytes);
+      return { events, audio, ms: Date.now() - started, cuts: telemetry.filter(e => e.event === 'stream.cut') };
+    } finally {
+      setGatewayTelemetrySink(null);
+    }
+  };
+
+  it('(a) aborts mid-stream: error upstream_truncated naming the sentence not voiced, failed lease, counted', async () => {
+    const h = await harness({ replica: async (res) => { head(res); await sleep(10); res.destroy(); } });
+    const { events, audio, cuts } = await turn(h);
+    expect(audio).toBe('Bom dia, querida!');
+    expect(events.slice(-2)).toMatchObject([
+      { type: 'error', code: 'upstream_truncated', stage: 'primary', partial: true, unspoken: 'Aqui está o seu pão.' }, { type: 'done', partial: true },
+    ]);
+    expect(h.leases).toEqual([{ failed: true }]);
+    expect(streamCuts()).toEqual([{ deployment: 'parle-speech', replica: 'replica-1', stage: 'primary', truncated: 1, stalled: 0 }]);
+    expect(cuts).toMatchObject([{ replicaId: 'replica-1', attrs: { kind: 'truncated', stage: 'primary' } }]);
+    expect(h.calls).toEqual([]);
+  });
+
+  it('(b) stalls forever mid-stream: error upstream_stalled at the gap limit, lease ends as busy, counted', async () => {
+    const h = await harness({ replica: async (res) => { head(res); }, maxGapMs: 120 });
+    const { events, audio, ms } = await turn(h);
+    expect(ms).toBeLessThan(2_000); // before: the 45 s budget
+    expect(audio).toBe('Bom dia, querida!');
+    expect(events.slice(-2)).toMatchObject([{ type: 'error', code: 'upstream_stalled', partial: true }, { type: 'done', partial: true }]);
+    expect(h.leases).toEqual([{ failed: 'timeout' }]);
+    expect(streamCuts()).toMatchObject([{ stage: 'primary', truncated: 0, stalled: 1 }]);
+  });
+
+  it('(b) never stops sending but never ends: the total deadline ends it the same way', async () => {
+    const h = await harness({
+      replica: async (res) => { head(res); const drip = setInterval(() => res.write(frames[2]), 20); res.on('close', () => clearInterval(drip)); },
+      maxGapMs: 500, budgetMs: 300,
+    });
+    const { events, ms } = await turn(h);
+    expect(ms).toBeLessThan(2_000);
+    expect(events.slice(-2)).toMatchObject([{ type: 'error', code: 'upstream_stalled' }, { type: 'done', partial: true }]);
+    expect(h.leases).toEqual([{ failed: 'timeout' }]);
+  });
+
+  it('(c) a long gap under the limit: the whole reply, ok lease, nothing counted', async () => {
+    const h = await harness({
+      replica: async (res) => { head(res); await sleep(250); for (const f of frames.slice(4)) res.write(f); res.end(); },
+      maxGapMs: 1_000,
+    });
+    const { events, audio } = await turn(h);
+    expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
+    expect(events.at(-1)).toMatchObject({ type: 'done' });
+    expect(events.some(e => e.type === 'error')).toBe(false);
+    expect(h.leases).toEqual([{ failed: false }]);
+    expect(streamCuts()).toEqual([]);
+  });
+
+  it('(d) closes cleanly without done: error upstream_truncated, never a normal end', async () => {
+    const h = await harness({ replica: async (res) => { head(res); res.end(); } });
+    const { events } = await turn(h);
+    expect(events.slice(-2)).toMatchObject([{ type: 'error', code: 'upstream_truncated', unspoken: 'Aqui está o seu pão.' }, { type: 'done', partial: true }]);
+    expect(h.leases).toEqual([{ failed: true }]);
+    expect(streamCuts()).toMatchObject([{ truncated: 1, stalled: 0 }]);
+  });
+
+  it('the replica names its failed stage in-band: the error keeps stage, code and unspoken text; the count is per stage', async () => {
+    const h = await harness({ replica: async (res) => {
+      head(res);
+      res.write(encodeEvent({ type: 'error', stage: 'tts', code: 'stage_failed', message: 'peer closed connection', unspoken: 'E o troco.' }, 'binary'));
+      res.end();
+    } });
+    const { events } = await turn(h);
+    expect(events.slice(-2)).toMatchObject([{ type: 'error', stage: 'tts', code: 'stage_failed', unspoken: 'E o troco.' }, { type: 'done', partial: true }]);
+    expect(streamCuts()).toMatchObject([{ stage: 'tts', truncated: 1 }]);
+  });
+
+  it('a client that leaves mid-stream is not a cut: cancelled lease, nothing counted', async () => {
+    const h = await harness({ replica: async (res) => { head(res); } });
+    resetStreamCuts();
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', '{}');
+    const abort = new AbortController();
+    const res = await h.post(form, abort.signal);
+    await res.body!.getReader().read();
+    abort.abort();
+    for (let i = 0; i < 100 && !h.leases.length; i++) await sleep(10);
+    expect(h.leases).toEqual([{ failed: 'cancelled' }]);
+    expect(streamCuts()).toEqual([]);
   });
 });

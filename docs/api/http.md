@@ -389,8 +389,18 @@ line with audio as `{"type":"audio","pcm":"<base64>"}` (debugging, browsers with
 Events, in order: `route` {provider, fallback?, from?} · `transcript` {text, stt_ms} · `llm_first_token` · per sentence
 `sentence` {text}, its audio, then `sentence_end` · `audio_format` {encoding, sample_rate} when it changes · `first_audio` {at_ms} ·
 `opener` {state, text, index} around an opener's audio · `deadline_missed` {deadline_ms} ·
-`done` {reply, transcript, first_audio_ms, first_sound_ms, opener, deadline_ms, deadline_missed, total_ms, missing_audio?, partial?}. `sentence_failed` = that sentence has no
-audio (the rest continues); `error` {stage?, partial?} = the turn stopped (`partial: true` → what was sent is valid).
+`done` {reply, transcript, first_audio_ms, first_sound_ms, opener, deadline_ms, deadline_missed, total_ms, sentences, spoken, skipped, audio_ms, missing_audio?, partial?}.
+`sentence_failed` = that sentence has no audio (the rest continues); `error` {stage?, code?, unspoken?, partial?} = the
+turn stopped (`partial: true` → what was sent is valid).
+
+**How a turn ends.** With `done`, or with an `error` (followed by `done {partial: true}` when audio had started);
+a stream that closes any other way was cut and is a failed turn. `done` is complete only when `spoken` = `sentences`
+and `skipped` = 0. `error.code`: `upstream_truncated` (the replica's stream broke or closed without `done`),
+`upstream_stalled` (nothing for `S2S_MAX_GAP_MS`, 10 s, or the whole-turn budget ran out), `stage_failed` (the
+speech stack named its failing `stage`: `stt`, `llm`, `tts`). `error.unspoken` = reply text known and not voiced:
+a client speaks it once (the SDK's `speak`) and never replays what was heard. Each cut is counted per deployment,
+replica and stage in `GET /health?details=1` → `streams` and sent as a `stream.cut` telemetry event; a cut or a stall
+is a failure of the replica's `s2s` stage (three in a row take it out for 30 s), a client that leaves is not.
 
 **Routing**
 

@@ -216,6 +216,44 @@ describe('s2s-stream rung', () => {
     await expect(t.sendTurn!(new Blob(['x']))).rejects.toThrow(/HTTP 503/);
   });
 
+  const streamed = async (frames: Uint8Array[]) => {
+    const fetchImpl = (async () => new Response(new ReadableStream({ start(c) { for (const f of frames) c.enqueue(f); c.close(); } }), { status: 200 })) as unknown as typeof fetch;
+    const events: RealtimeEvent[] = [];
+    await createS2SStreamTransport(ctx(fetchImpl, events), { url: '/s' }, fakePlayer().factory).sendTurn!(new Blob(['x']));
+    return events;
+  };
+  const E = (e: Record<string, unknown> & { type: string }) => encodeEvent(e, 'binary');
+  const A = encodeAudio(new Uint8Array(960), 'binary');
+
+  it('regression: a stream that ends without done is a failed turn naming the sentence not voiced, never a silent end', async () => {
+    const events = await streamed([E({ type: 'sentence', text: 'Bom dia!' }), A, E({ type: 'sentence', text: 'São dois reais.' })]);
+    expect(events.slice(-3)).toEqual([
+      { type: 'error', code: 'truncated', message: 's2s stream ended without done', unspoken: 'São dois reais.' }, { type: 'done', error: true }, { type: 'audio_end' },
+    ]); // before: reply_delta, audio_end — no done, no error
+    const heard = await streamed([E({ type: 'sentence', text: 'Bom dia!' }), A]);
+    expect(heard.slice(-3, -1)).toEqual([{ type: 'error', code: 'truncated', message: 's2s stream ended without done' }, { type: 'done', error: true }]);
+  });
+
+  it('an in-band error ends the turn as failed, with or without a done after it, and carries the unspoken text', async () => {
+    const error = E({ type: 'error', stage: 'tts', code: 'stage_failed', message: 'cut', unspoken: 'São dois reais.' });
+    for (const tail of [[], [E({ type: 'done', partial: true, total_ms: 9 })]]) {
+      const events = await streamed([E({ type: 'sentence', text: 'Bom dia!' }), A, error, ...tail]);
+      expect(events.filter(e => e.type === 'error')).toEqual([{ type: 'error', code: 'tts', message: 'cut', unspoken: 'São dois reais.' }]);
+      expect(events.filter(e => e.type === 'done')).toEqual([{ type: 'done', error: true }]);
+    }
+  });
+
+  it('a done that reports sentences not voiced is a failed turn with those sentences to recover; a complete one is not', async () => {
+    const events = await streamed([
+      E({ type: 'sentence', text: 'Bom dia!' }), A, E({ type: 'sentence_failed', text: 'São dois reais.' }),
+      E({ type: 'done', reply: 'Bom dia! São dois reais.', sentences: 2, spoken: 1, skipped: 1 }),
+    ]);
+    expect(events.filter(e => e.type === 'error')).toEqual([{ type: 'error', code: 'truncated', message: 'the reply ended with sentences not voiced', unspoken: 'São dois reais.' }]);
+    expect(events.filter(e => e.type === 'done')).toEqual([{ type: 'done', error: true }]);
+    const whole = await streamed([E({ type: 'sentence', text: 'Bom dia!' }), A, E({ type: 'done', reply: 'Bom dia!', sentences: 1, spoken: 1, skipped: 0 })]);
+    expect(whole.filter(e => e.type === 'error' || e.type === 'done')).toEqual([{ type: 'done' }]);
+  });
+
   it('maps filtered, error and empty done', () => {
     expect(mapS2SEvent({ type: 'filtered', reasons: ['blocklist'] })).toEqual([{ type: 'filtered', reasons: ['blocklist'] }]);
     expect(mapS2SEvent({ type: 'error', stage: 'llm', message: 'x' })).toEqual([{ type: 'error', code: 'llm', message: 'x' }]);

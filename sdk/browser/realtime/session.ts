@@ -239,7 +239,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   }
 
   const fromTransport = (e: RealtimeEvent) => {
-    if (e.type === 'error' && e.code === 'upstream' && e.unspoken && opts.speak && !recovery) {
+    if (e.type === 'error' && e.unspoken && opts.speak && !recovery) {
       const abort = new AbortController();
       const audio = Promise.resolve().then(() => opts.speak!(e.unspoken!, { config: config(), traceparent: telemetry.traceparent, signal: abort.signal }));
       audio.catch(() => {});

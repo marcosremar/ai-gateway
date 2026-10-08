@@ -44,6 +44,7 @@ describe('runComposite', () => {
     expect(voiced).toBe('Bom dia, querida!');
     expect(result.missingAudio).toBe(1);
     expect(events[events.length - 1]).toMatchObject({ type: 'done', missing_audio: 1 });
+    expect(events[events.length - 1]).toMatchObject({ sentences: 2, spoken: 1, skipped: 1 });
   });
 
   it('resumes from a known transcript without a second STT', async () => {

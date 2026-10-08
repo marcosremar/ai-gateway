@@ -79,6 +79,7 @@ function outcome(t: Turn): { result: 'ok' | 'failed' | 'truncated'; why: string 
   const error = ev('error');
   const heard = t.audioMs < 0 ? Boolean(ev('audio_start')) : t.firstLoud !== null;
   if (t.client === 's2s' && done && !heard && !done.empty && (error || ev('sentence_failed'))) return failed(`error:${String((error ?? ev('sentence_failed'))?.code ?? 'unknown')}`);
+  if (!done && t.client === 's2s' && t.events.length) return truncated(heard ? 'no_done_after_audio' : 'no_done_before_audio');
   if (!done) return heard ? truncated(t.lost ? 'lost_after_audio' : 'no_done_after_audio') : failed(t.lost ? 'session_lost' : 'timeout');
   if (error || done.error) return heard ? truncated(`error_after_audio:${String(error?.code ?? 'unknown')}`) : failed(`error:${String(error?.code ?? 'unknown')}`);
   if (done.interrupted) return heard ? truncated('interrupted') : failed('interrupted');

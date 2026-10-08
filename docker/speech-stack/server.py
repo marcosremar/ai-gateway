@@ -9,8 +9,11 @@ first audio:
 
 POST /v1/s2s       multipart: `file` (audio, any ffmpeg/PyAV format) + `config` (JSON, see S2SConfig below).
                    Response `application/x-aigw-s2s`: frames of [1 byte kind][4 bytes big-endian length][payload]
-                     kind "E" = JSON event (transcript, sentence, timing, opener, deadline_missed, done, error),
-                     kind "A" = raw PCM s16le mono 24 kHz. No base64 on the hot path. `?format=ndjson` gives JSON lines (audio as base64) for debugging.
+                     kind "E" = JSON event (transcript, sentence, timing, opener, deadline_missed, done, error), kind "A" = raw PCM s16le mono
+                     24 kHz. No base64 on the hot path. `?format=ndjson` gives JSON lines (audio as base64) for debugging.
+                   A turn ends with `done` {sentences, spoken, skipped, audio_ms, …} or with `error` {stage: stt|llm|tts,
+                     code: stage_failed|upstream_stalled, unspoken?}: a stage that raises, sends nothing for
+                     S2S_MAX_GAP_S (8) or keeps the turn past S2S_DEADLINE_S (40) ends it in-band, never silently.
 POST /v1/audio/transcriptions   OpenAI-shaped STT (multipart `file`, `language`, `prompt`).
 WS   /ws/audio-stream           real-time STT: binary Int16 PCM 16 kHz frames in, {"text": <full running text>}
                                 out per decode — the protocol the gateway's streaming STT router already speaks.
@@ -55,6 +58,8 @@ TTS_PARALLEL = int(os.environ.get("TTS_PARALLEL", "2"))
 FIRST_MIN_WORDS = int(os.environ.get("FIRST_MIN_WORDS", "3"))
 MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "160"))
 SAMPLE_RATE = 24000
+S2S_MAX_GAP_S = float(os.environ.get("S2S_MAX_GAP_S", "8"))
+S2S_DEADLINE_S = float(os.environ.get("S2S_DEADLINE_S", "40"))
 TTS_MAX_SECONDS = float(os.environ.get("TTS_MAX_SECONDS", "3"))
 TTS_MAX_SECONDS_PER_CHAR = float(os.environ.get("TTS_MAX_SECONDS_PER_CHAR", "0.2"))
 REFS = Path("/srv/refs")
@@ -69,6 +74,7 @@ stt_batcher = SttBatcher(stt, max_batch=STT_BATCH, window_ms=STT_BATCH_WINDOW_MS
 client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), limits=httpx.Limits(max_connections=64))
 voices: dict[str, dict] = {}
 ready = {"ok": False, "detail": "starting"}
+turns = {"started": 0, "done": 0, "failed": {}, "stalled": {}}
 app = FastAPI()
 
 
@@ -440,7 +446,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         raise HTTPException(400, "voice must be a known id or {audio, text}")
     ndjson = request.query_params.get("format") == "ndjson"
     ms = lambda: round((time.perf_counter() - t0) * 1000)  # noqa: E731
-    state: dict = {}
+    sound: dict = {}
 
     def event(payload: dict) -> bytes:
         return (json.dumps(payload) + "\n").encode() if ndjson else frame(b"E", json.dumps(payload).encode())
@@ -449,13 +455,43 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         return (json.dumps({"type": "audio", "pcm": base64.b64encode(chunk).decode()}) + "\n").encode() if ndjson \
             else frame(b"A", chunk)
 
+    state = {"stage": "stt", "voiced": 0, "partial": False, "audio_bytes": 0}
+    reply: list[str] = []
     tasks: list[asyncio.Task] = []
+    turns["started"] += 1
+
+    def failed(kind: str, code: str, error: BaseException) -> bytes:
+        stage = state["stage"]
+        turns[kind][stage] = turns[kind].get(stage, 0) + 1
+        unspoken = " ".join(reply[state["voiced"] + state["partial"]:])
+        print("s2s", kind, stage, f"{ms()}ms", f"voiced={state['voiced']}/{len(reply)}", repr(error)[:300], flush=True)
+        return event({"type": "error", "stage": stage, "code": code, "message": repr(error)[:300], "at_ms": ms(),
+                      **({"unspoken": unspoken} if unspoken else {})})
+
+    async def bounded():
+        source = run()
+        try:
+            while True:
+                left = min(S2S_MAX_GAP_S, S2S_DEADLINE_S - (time.perf_counter() - t0))
+                try:
+                    yield await asyncio.wait_for(source.__anext__(), max(left, 0))
+                except StopAsyncIteration:
+                    return
+                except asyncio.TimeoutError:
+                    why = f"no output for {S2S_MAX_GAP_S} s" if left >= S2S_MAX_GAP_S else f"turn longer than {S2S_DEADLINE_S} s"
+                    yield failed("stalled", "upstream_stalled", TimeoutError(why))
+                    return
+        finally:
+            await source.aclose()
+            for task in tasks:
+                task.cancel()
 
     async def run():
         try:
             heard = await asyncio.to_thread(transcribe_sync, audio, lang, cfg.get("stt_prompt"))
             meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio") if k in heard}
             heard_at = ms()
+            state["stage"] = "llm"
             yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": heard_at, **meta,
                          "stt": {k: heard[k] for k in STT_TIMINGS if k in heard}})
             template = cfg.get("user_template") or ""
@@ -464,7 +500,6 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                 + list(cfg.get("messages") or []) + [{"role": "user", "content": user}]
             gate = asyncio.Semaphore(TTS_PARALLEL)
             sentences: asyncio.Queue = asyncio.Queue()  # (text, audio queue) in speaking order, None at the end
-            reply = []
 
             field = JsonField(cfg["speak_field"]) if cfg.get("speak_field") else None
             raw: list[str] = []
@@ -526,27 +561,31 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                 text, queue, cut_at = item
                 marks.setdefault("first_cut", cut_at)
                 yield event({"type": "sentence", "text": text, "cut_at_ms": cut_at})
+                state["stage"] = "tts"
                 while (chunk := await queue.get()) is not None:
                     if isinstance(chunk, Exception):
                         raise chunk
+                    state["partial"] = True
+                    state["audio_bytes"] += len(chunk)
                     if first_audio is None:
                         first_audio = ms()
-                        if state["first_sound_ms"] is None:
-                            state["first_sound_ms"] = first_audio
+                        if sound["first_sound_ms"] is None:
+                            sound["first_sound_ms"] = first_audio
                         yield event({"type": "first_audio", "at_ms": first_audio})
                     yield pcm(chunk)
+                state.update(stage="llm", partial=False, voiced=state["voiced"] + 1)
             await thinker
+            turns["done"] += 1
             yield event({"type": "done", "reply": " ".join(reply), "transcript": heard["text"], "stt_ms": heard["ms"],
-                         "first_audio_ms": first_audio, "total_ms": ms(), **state,
+                         "first_audio_ms": first_audio, "total_ms": ms(), **sound,
+                         "sentences": len(reply), "spoken": state["voiced"], "skipped": len(reply) - state["voiced"],
+                         "audio_ms": round(state["audio_bytes"] / 2 / SAMPLE_RATE * 1000),
                          "stages": stage_times(heard, heard_at, marks.get("first_token"), marks.get("first_cut"), first_audio, timings),
                          **({"reply_raw": "".join(raw)} if field is not None else {})})
         except Exception as error:  # noqa: BLE001 — the stream already started: report in-band
-            yield event({"type": "error", "message": repr(error)[:300], "at_ms": ms()})
-        finally:
-            for task in tasks:
-                task.cancel()
+            yield failed("failed", "stage_failed", error)
 
-    return StreamingResponse(first_audio_deadline(run(), state, cfg, voice, lang, ms, event, pcm), media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
+    return StreamingResponse(first_audio_deadline(bounded(), sound, cfg, voice, lang, ms, event, pcm), media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
                              headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
 
 
@@ -648,7 +687,7 @@ async def list_voices():
 
 @app.get("/health")
 async def health():
-    return JSONResponse({**ready, "stt": stt_batcher.stats}, status_code=200 if ready["ok"] else 503)
+    return JSONResponse({**ready, "stt": stt_batcher.stats, "s2s": turns}, status_code=200 if ready["ok"] else 503)
 
 
 # ── Warm-up: the first real request must not pay kernel loads ───────────────
