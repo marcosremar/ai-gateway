@@ -165,6 +165,9 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   header is parsed and its rate resampled to 24 kHz). Voice semantics as the gateway's TTS: `voice` a catalog id (the
   replica's `/v1/voices`; a cloning TTS gets `ref_audio` = `EDGE_REF_BASE/refs/<id>.wav` + `ref_text`) or
   `{audio, text}`; an id the catalog does not know falls back to `fallback_voice` as a named voice.
+- **Stage failures**: an LLM or TTS stream that breaks mid-body, sends nothing for `EDGE_UPSTREAM_GAP_S` (10, just
+  above the stack's own 8 s so its in-band error arrives first) or, for the LLM, carries an SSE `{"error": …}` event
+  ends the turn with `error` and `stage: llm | tts` (`UpstreamError`, `tests/test_units.py`).
 - **First-audio deadline** (`RT_FIRST_AUDIO_DEADLINE_MS` = 2000, at most 2500; `cfg.first_audio_deadline_ms` per
   session; `RT_FIRST_AUDIO_MARGIN_MS` = 300): counted from the VAD's last speech frame (from the end of the turn when
   the VAD heard none). A turn — speculated ones only once confirmed — with no audio queued at deadline − margin plays

@@ -113,6 +113,24 @@ PCM). Numbers only. `/v1/audio/transcriptions` returns the same four STT fields.
 Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times; do python3 docker/speech-stack/test_$t.py; done`
 (numpy only; `git add -f` a new one, the repo's `TEST_*` ignore rule matches them on macOS).
 
+## Single-stage proxies never end a broken stream cleanly (2026-10-08)
+
+`/v1/chat/completions` and `/v1/audio/speech` are proxies to llama.cpp and vLLM-Omni; a healthy stream is forwarded
+byte for byte. `PROXY_MAX_GAP_S` (8, as `S2S_MAX_GAP_S`: the engines' first chunk comes in 55–300 ms and stalls inside a
+stream stay under 200 ms, `docs/reports/2026-10-07-realtime-handoff.md`) bounds the wait for each chunk — and for the
+response headers of a `stream: true` request; `PROXY_DEADLINE_S` (120, the gateway's own cap on a replica call) bounds
+the whole request. An engine that breaks the body, stalls or runs past the deadline:
+
+| When | Chat (SSE) | Speech (audio), non-SSE bodies |
+|---|---|---|
+| before the response started | `502` (broke) / `504` (stalled) with `{"error": {message, type: "upstream_error", code}}` | the same |
+| after | a last `data: {"error": {…, code: "stage_failed" \| "upstream_stalled"}}` event, then the stream ends | the connection is aborted (no chunked terminator): the client gets a transport error |
+
+One log line each (`proxy failed|stalled chat|speech <ms> <error>`), counted in `GET /health` →
+`proxy: {chat: {started, done, failed, stalled}, speech: {…}}` (`started` − the rest = in flight or left by the
+client). `test_stage_proxy.py` runs the real uvicorn + FastAPI + httpx stack against a fake engine (needs `fastapi`,
+`httpx`, `uvicorn`).
+
 ## Shipping server code without rebuilding the image
 
 The image keeps the models; the four files of `/opt/s2s` can come from the deployment's `files` (mounted read-only at

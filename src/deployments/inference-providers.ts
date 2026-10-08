@@ -135,7 +135,7 @@ function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSi
       }
     },
     cancel(reason) { release(reason instanceof DeploymentCallError ? 'errored' : 'cancelled'); return reader.cancel(reason); },
-  });
+  }, { highWaterMark: 0 });
   return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 

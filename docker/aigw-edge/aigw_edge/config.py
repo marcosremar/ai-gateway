@@ -39,6 +39,7 @@ def derive_key(replica_token: str) -> bytes:
 class Settings:
     upstream: str = "http://127.0.0.1:8000"
     upstream_health: str = "/health"
+    upstream_gap_s: float = 10.0
     # stages = STT → LLM → TTS over the three OpenAI routes; s2s = the replica's own /v1/s2s (one call per turn).
     upstream_mode: str = "stages"
     bind: str = "127.0.0.1"
@@ -88,6 +89,7 @@ class Settings:
         return cls(
             upstream=upstream,
             upstream_health=env.get("EDGE_UPSTREAM_HEALTH", "/health"),
+            upstream_gap_s=float(env.get("EDGE_UPSTREAM_GAP_S", "10")),
             upstream_mode=env.get("EDGE_UPSTREAM_MODE", "stages"),
             bind=env.get("RT_BIND", "127.0.0.1"),
             port=_int("RT_PORT", 8020),
