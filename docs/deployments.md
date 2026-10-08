@@ -399,6 +399,10 @@ With `candidates`, each create walks a **ranked ladder**:
 - **Boot-script mode only.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
   container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Both are required.
   `files`, `exposure` and `idleAction: "stop"` are refused for Vast (no user_data service, no reserved IP).
+  Vast accepts 32 KB of env per instance and the boot script travels there base64 twice: a `bootScript` above
+  ~14 KB is refused at PUT (download large payloads at boot). A private image needs `registryAuth` in the spec
+  (sent as Vast `image_login`; never filled from the provider's own key).
+- `GET /v1/deployments/:name/offers` (admin, read-only): the ranked offers a create would try.
 - **App port = `port`** (default 8000): nginx proxies to `127.0.0.1:<port>` and the health loop polls
   `http://127.0.0.1:<port><healthPath>`. Everything shares one container, so a stack that already runs a model server
   on 8000 serves its health responder on another port (e.g. `"port": 8010`).

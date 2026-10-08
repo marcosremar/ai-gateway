@@ -673,3 +673,159 @@ stack: it needs Linux + root and this run stayed on the Mac; the live runs above
 above); a second Portuguese clip or longer histories; a `--burst` above 25; Kokoro as the voice; repeats of N = 50 and
 100 (one run each — the p95 of N = 25 moved from 3.7 to 4.4 s between two runs, so read ± 0.7 s on every p95).
 
+
+## Vast.ai RTX 5090, 2026-10-08
+
+Through a local gateway only (`bun serve.ts` on :4105, namespace `marcos-vast`, worktree at `153fac3` + the fixes
+below), from a Mac in France. Three rentals, one at a time: a French host for 1 min (released by the RTT gate), a UK
+host for 3 min (released by a `park` sent by mistake), a UK host 05:08:05–05:45:36 UTC that ran everything below.
+About 42 machine-minutes, about US$0.55. Everything deleted: `GET /v1/deployments?scope=all` → 0 deployments, 0
+replicas; reaper dry run `seen: 0`; the instance's port no longer answers.
+
+### Selection
+
+- New read-only route `GET /v1/deployments/:name/offers` (admin): the ranked offers a create would walk. Before it
+  there was no way to see the ranking without renting.
+- "Good latency" today is two things. Before renting: great-circle distance between country hubs, in 500-km bands,
+  then effective price (`placements.ts` `rankOffers`; `geo.ts`). No measured signal: `inet_down` is only a tie-break
+  and `inet_up` is not read. After renting: the RTT gate (`rtt-gate.ts`, `gateDecision`; default `maxRttMs` 35),
+  measured once from the gateway to the replica's nginx front as soon as it has an address; above the threshold the
+  instance is deleted and the host avoided for 24 h. Nothing measures from the users' side.
+- Offers for `RTX 5090`, `minCuda: 13`, cap €0.85/h, near FR (first listing, 21 offers; then the market moved):
+
+| Rank | Location | km | $/h | Reliability | Down / up Mbps |
+|---|---|---|---|---|---|
+| 1 | United Kingdom | 343 | 0.735 | 0.989 | 2029 / 2151 |
+| 2 | United Kingdom | 343 | 0.776 | 0.982 | 1471 / 84 |
+| 3 | United Kingdom | 343 | 0.802 | 0.983 | 804 / 778 |
+| 4 | Italy | 640 | 0.592 | 0.988 | 728 / 735 |
+| 5 | Italy | 640 | 0.660 | 0.998 | 610 / 621 |
+| 6–9 | Czechia | 883 | 0.62–0.78 | 0.97–0.99 | 4201–7270 |
+| 10– | PL, DK, NO, HU, SK, ES, BG, RO | 1027–1870 | 0.54–0.87 | | |
+
+- What it rented, in order: (1) **France, €0.548/h** (appeared between the listing and the create), address after
+  49 s, gate RTT **42 ms > 35 → released as too-far**. At that minute the Mac's own TCP connect to
+  `s3.fr-par.scw.cloud` was 45 ms median (25 min): the host was as near as Paris itself. The threshold assumes the
+  gateway sits in a datacenter in NL; from any other vantage it rejects good hosts. (2) with `maxRttMs: 120`:
+  **UK, gate RTT 55 ms, kept**. (3) after a restart: listing at 05:07:50 ranked Switzerland $0.563 and the
+  Netherlands $0.597 first; the create 15 s later rented a **UK host at €0.758/h ($0.796), gate RTT 63 ms** and
+  nothing says why the two cheaper ones were passed over (misses were only reported when every offer failed; now
+  logged, see fixes — the running process predated that fix).
+- Measured from the Mac to the UK instance (TCP connect to the mapped port, median of 7) against Paris S3 in the same
+  run: 48.6 vs 33.8, 54.7 vs 40.8, 45.3 vs 33.4 ms. So about **+12–15 ms over a Paris datacenter**. Usable, not the
+  best on the market that hour: a French host (same RTT as Paris) and cheaper CH/NL hosts existed.
+- Verdict: the distance prior works (no far host was ever tried) and the gate does release-and-retry, but (a) its
+  absolute threshold is only right from the production vantage, (b) inside band 0 price alone decides, so FR, UK, CH
+  and NL are interchangeable, (c) the choice among them was not explainable after the fact. Smallest correct change,
+  not implemented: gate on `rtt − baseline`, the baseline being the same probe against a fixed anchor in the `near`
+  country taken in the same tick (default budget ~20 ms over the anchor), and show both numbers in `lastPlacement`.
+
+### Boot
+
+- **Image**: `rg.fr-par.scw.cloud/aigw/speech-stack` answers 401 to an anonymous pull, and the Vast path sent no
+  registry credentials (`withRegistryAuth` skips boot-script specs; `registryAuthFor` exists only on the Scaleway
+  backend). The backend now sends `image_login` when the spec carries `registryAuth` (unit-tested, **not run live**).
+  It is deliberately not filled from the Scaleway API secret: that key would travel to a marketplace host. A private
+  image on Vast needs a pull-only credential or a public copy.
+- So the stack was built at boot on the public `vllm/vllm-omni:v0.28.0` (9 GB compressed): llama.cpp and its CUDA 12
+  libraries extracted from `ghcr.io/ggml-org/llama.cpp:server-cuda-b11382` with `crane export`, the wheels of the
+  Dockerfile with `uv`, the three models from Hugging Face (all public), the four code files from this repository at
+  `153fac3` (so `--cache-ram 0` is in). 3.4 KB boot script.
+- **Voices**: no `files` on Vast. The boot script wrote `/files/voices.json` and a reference clip made on the
+  machine (`espeak-ng`). An inline `{audio, text}` voice per request also works, but the warm-up then skips the TTS.
+- **Vast refuses an env above 32 KB in total** (`invalid env arguments, total length > 32KB`): a 52 KB boot script
+  (code and a voice clip inline) failed every create while the spec accepted it (limit 90 KB). Now refused at PUT.
+- **Env**: `STT_BATCH=8`, `LLM_PARALLEL=16`, `TTS_STAGE0_MB=9600` (the L4 values plus the 8 GB the card has over an
+  L4: batch and slots as the L40S so 8 at once compares like for like, the TTS stage between the two). Health after
+  the runs: largest STT batch 8, `oom_retries` 0. GPU memory in use was not read.
+- **Card**: RTX 5090, driver 580.82.09, 32607 MiB. With `minCuda: 13` vLLM-Omni (CUDA 13), llama.cpp (CUDA 12.8,
+  `CUDA0` seen) and faster-whisper (CTranslate2, cu12 wheels) all started and served.
+- **Cold start 16 min 23 s** (gateway: 983 s): rent → running with an address 4 min 21 s (image pull); boot script
+  ~12 min, of which llama.cpp extraction ended at +147 s; wheels, 16 GB of models, TTS load and warm-up were not
+  split (the log view stops when the app takes the port). A public baked image would remove most of the 12 min.
+
+### `/v1/s2s` against the L40S
+
+Gateway invoke route, `bench.py --concurrency 1,4,8 --rounds 3`, a 5.7 s Portuguese utterance (`say`), a 307-word
+shop-clerk system prompt (451 cached tokens), one catalog voice. L40S row: arm B above (4.5 s clip). p50 / p95 ms.
+
+| | 1 | 4 at once | 8 at once |
+|---|---|---|---|
+| L40S fr-par-2, server first audio | 393 / 398 | 1134 / 1381 | 1609 / 2242 |
+| **RTX 5090 (UK), server first audio** | **414 / 415** | **1154 / 1463** | **1819 / 2160** |
+| RTX 5090, client first audio at the Mac | 588 / 717 | 1369 / 1878 | 2147 / 2679 |
+| RTX 5090 stt queue + decode | 25 + 213 | 188 + 503 | 199 + 733 |
+| RTX 5090 llm first token | 67 | 198 | 299 |
+| RTX 5090 text wait | 23 | 99 | 165 |
+| RTX 5090 tts first chunk | 85 | 195 | 298 |
+| L40S stages at 1 | 25 + 180 · 55 · 40 · 95 | | |
+
+- Same class of card for this stack: equal alone and at 4, ~200 ms slower at 8 (p95 equal). The STT decode carries
+  the difference at 1 (213 vs 180 ms, on a clip 1.2 s longer).
+- **No first-token drift**: 67 ms before, 69 ms after 222 s of 8 at once (320 turns; thirds 357 / 304 / 390 ms under
+  load). 3 of the 320 streams ended early (`peer closed connection`), status 200.
+- Cost at the largest level that keeps server first audio near 1.2 s (4 at once): 5090 at $0.796/h → **$0.20 per
+  simultaneous turn-hour** ($0.14–0.15 on the $0.56–0.60 hosts the market also had); L40S €1.4699/h → €0.37.
+- One run was lost to the Mac's network: DNS failed for a few seconds, the provider lists failed, 7 of 8 streams of
+  that round never ended and one answered 503 after 842 s. Not the replica (its health stayed 200).
+
+### What does not work on Vast (each answer observed)
+
+| Request | Answer |
+|---|---|
+| spec with `files` | 400 `files are not supported on vast (no user_data service)` |
+| spec with `exposure` | 400 `exposure is not supported on vast` |
+| spec with `idleAction: "stop"` | 400 `idleAction 'stop' is not supported on vast` |
+| spec with `realtime` | 400 `realtime is not supported on vast yet (the edge runs as a sidecar container)` |
+| `POST /v1/realtime/sessions` for the running Vast deployment | 503 `its replicas run no realtime edge`, fallback `s2s-stream` |
+| replica `/__aigw/rt/health` (with the token) | 404: the Vast nginx front has no `/__aigw/rt/` |
+| `POST …/park` | 202, and the instance is **deleted** (no power-off on Vast): the next call pays the full 16 min |
+| private Scaleway image | anonymous pull 401; no credential sent before this branch |
+| boot log | none through the gateway: a failed boot on Vast is blind unless the script serves its own log |
+| `DELETE` | 200; 20 s later 0 replicas, the mapped port closed, reaper dry run `seen: 0` |
+
+Works: `/__aigw/ready` and the health path through the mapped port (200 with the token, 401 without), invoke,
+capacity (`boot` measured 983 s).
+
+Also seen: `serve.ts` logs `Deployments enabled (scaleway)` with Vast on; the create log prints the spec's Scaleway
+zone for a Vast create; a create refused by Vast with a 400 is retried with the usual back-off, and a corrected PUT
+does not reset that back-off (2 min 20 s of waiting on a fixed spec).
+
+### Realtime on Vast — design (not implemented)
+
+Read for this: `spec.ts` `checkVastSpec`, `cloud-init.ts` (`realtimeSection`, `vastReplicaInit`, `nginxConfig`),
+`docker/aigw-edge/aigw_edge/config.py` (`port_map` from `VAST_UDP_PORT_<n>`, `RT_PUBLIC_IP` falling back to
+`PUBLIC_IPADDR`), `ice.py:33` (the map applied to candidates). The rest of the edge and `src/realtime/net-probe.ts`
+were not read: the points marked (?) need checking.
+
+1. **Edge as a process, not a sidecar.** `vastReplicaInit` writes `edge.env` (as `realtimeSection` does, without the
+   Scaleway metadata call), sets `AIGW_REPLICA_ID` to the Vast instance id (the id the gateway knows the replica by)
+   and starts the edge from the image or from a `pip install` in the boot script; nginx gets
+   `nginxConfig(token, 80, appPort, RT_EDGE_PORT)`. With only this, `ws` and TURN sessions work: they ride the
+   mapped TCP port that already carries the probe.
+2. **UDP media.** `vast-backend.ts` adds one `-p <port>:<port>/udp` env key per port of `RT_UDP_PORTS` (sessions + 1
+   for the probe), and searches `direct_port_count ≥` that count + 1 (hosts listed 49–256; a 16-session range fits
+   everywhere). Vast publishes each on a random host port; the edge already rewrites its candidates through
+   `port_map`. To change: the probe port the edge reports to the gateway must be the mapped one (?), and the range
+   must stay small — one mapping per port, no ranges.
+3. **Spec.** `checkVastSpec` accepts `realtime` when the range fits `direct_port_count`; `envByMachineType` gets an
+   `RTX 5090` entry with `RT_MAX_SESSIONS` (4 from the table above, to be measured as realtime).
+4. Files: `src/deployments/spec.ts`, `cloud-init.ts`, `vast-backend.ts`, `profiles.ts`;
+   `docker/aigw-edge/aigw_edge/config.py` and its reachability check; `src/realtime/net-probe.ts` (?);
+   `docker/speech-stack` (ship the edge in the image); tests `vast-backend.test.ts`, `realtime-edge.test.ts`.
+5. A live test has to show: a session admitted on a Vast replica; a `webrtc` session whose answer carries the
+   public IP and the mapped UDP port and whose media flows; the `ws` path when UDP is blocked; first audio p95 at 4
+   learners from France; seated sessions visible to the controller; a session surviving the replica's replacement
+   (RTT gate or host expiry) by reconnecting.
+
+### Fixes on `rt/vast-live`
+
+`521fa39`: `GET /v1/deployments/:name/offers` (`http.ts`, `controller-views.ts`, `vast-backend.ts` `previewOffers`);
+`image_login` from `registryAuth` (`vast-backend.ts`); 32 KB env refusal (`spec.ts` `vastEnvBytes`); rented-offer
+log (`vast-backend.ts`, wired in `index.ts`). Tests: `__tests__/unit/deployments/vast-backend.test.ts`, `spec.test.ts`.
+
+### Not run
+
+Realtime of any kind on Vast; `image_login` live; the real `speech-stack` image on the 5090 (same base and engine
+builds, assembled at boot instead); a second host side by side; GPU memory headroom; the cold-start split after
+llama.cpp; the rented-offer log in a live create; anything from a phone or a slow network.
