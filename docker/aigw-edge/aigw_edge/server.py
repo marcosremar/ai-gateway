@@ -72,6 +72,7 @@ def worker_main(settings: Settings, index: int, secret: str) -> None:
 
     async def offer(req):
         body = await req.json()
+        up.llm_ctx = body.get("llmCtx") or up.llm_ctx
         try:
             return web.json_response(await host.offer(body["sdp"], body["claims"], body["traceId"], body.get("iceServers"),
                                                       bool(body.get("resume"))))
@@ -240,7 +241,8 @@ class Edge:
             self.routes[sid] = {"worker": index, "at": time.monotonic()}  # counts against capacity while the worker answers
         try:
             status, answer = await self.worker_call(index, "POST", "/__edge/offer", {
-                "sdp": sdp, "claims": claims, "traceId": trace_id, "iceServers": ice_servers, "resume": resume})
+                "sdp": sdp, "claims": claims, "traceId": trace_id, "iceServers": ice_servers, "resume": resume,
+                "llmCtx": self.up.llm_ctx})
         except Exception as error:  # noqa: BLE001
             if not resume:
                 self.routes.pop(sid, None)

@@ -11,6 +11,7 @@
 
 import { createHash } from 'crypto';
 import type { S2SEvent } from './frames';
+import { DEFAULT_SLOT_CTX, fitHistory } from './history';
 import { createJsonFieldExtractor } from './json-field';
 import { SentenceCutter } from './sentence-cutter';
 
@@ -48,6 +49,7 @@ export interface S2SConfig {
 }
 
 export const TRANSCRIPT_SLOT = '{{transcript}}';
+const CONTEXT_OVERFLOW = /context (size|length|window)/i;
 
 export function userTurn(cfg: S2SConfig, transcript: string): string {
   return cfg.user_template?.includes(TRANSCRIPT_SLOT) ? cfg.user_template.split(TRANSCRIPT_SLOT).join(transcript) : transcript;
@@ -255,12 +257,20 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
     return { transcript: '', reply: '', replyRaw: '', firstAudioMs: null, missingAudio: 0 };
   }
 
-  const messages: ChatMessage[] = [
+  const user = userTurn(config, transcript);
+  const ctx = positive(Number(process.env.S2S_CHAT_CONTEXT)) ?? DEFAULT_SLOT_CTX;
+  const fitted = (harder: boolean) => fitHistory(config.system, config.messages ?? [], user, config.max_tokens ?? 160, ctx, harder);
+  const ask = (history: ChatMessage[]) => stages.chatStream([
     ...(config.system ? [{ role: 'system', content: config.system }] : []),
-    ...(config.messages ?? []),
-    { role: 'user', content: userTurn(config, transcript) },
-  ];
-  const chat = await stages.chatStream(messages, config, signal, hedgeMs());
+    ...history,
+    { role: 'user', content: user },
+  ], config, signal, hedgeMs());
+  const history = fitted(false);
+  const chat = await ask(history).catch((err: unknown) => {
+    const fewer = fitted(true);
+    if (!CONTEXT_OVERFLOW.test(String((err as Error)?.message)) || fewer.length === history.length) throw err;
+    return ask(fewer);
+  });
 
   // Sentences in speaking order; each one's audio is synthesized as soon as a slot is free (ttsParallel ahead).
   type Spoken = { text: string; cutAt: number; audio: Promise<SpokenAudio | Error> };

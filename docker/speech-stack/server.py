@@ -274,6 +274,35 @@ class JsonField:
         return ch
 
 
+DEFAULT_SLOT_CTX = 2048
+CONTEXT_MARGIN = 64
+BYTES_PER_TOKEN = 3
+MESSAGE_TOKENS = 8
+DROP_PAIRS = 8
+
+
+def estimate_tokens(text: str | None) -> int:
+    return MESSAGE_TOKENS + -(-len(str(text).encode()) // BYTES_PER_TOKEN) if text else 0
+
+
+def fit_history(system: str | None, history: list[dict], user: str, max_tokens: int, ctx: int, harder: bool = False) -> list[dict]:
+    pairs: list[list[dict]] = []
+    for message in history:
+        if message.get("role") == "system":
+            continue
+        if message.get("role") == "user" or not pairs:
+            pairs.append([])
+        pairs[-1].append(message)
+    pinned = sum(estimate_tokens(m.get("content")) for m in history if m.get("role") == "system")
+    room = (ctx - max_tokens - CONTEXT_MARGIN - estimate_tokens(system) - estimate_tokens(user) - pinned) // (2 if harder else 1)
+    sizes = [sum(estimate_tokens(m.get("content")) for m in pair) for pair in pairs]
+    drop = 0
+    while drop < len(pairs) and sum(sizes[drop:]) > room:
+        drop += DROP_PAIRS
+    kept = {id(m) for pair in pairs[drop:] for m in pair}
+    return [m for m in history if m.get("role") == "system" or id(m) in kept]
+
+
 LLM_TIMINGS = ("cache_n", "prompt_n", "prompt_ms", "predicted_n", "predicted_ms")
 STT_TIMINGS = ("audio_ms", "queue_ms", "decode_ms", "batch")
 
@@ -308,6 +337,32 @@ async def llm_stream(messages: list[dict], max_tokens: int, temperature: float, 
             delta = llm_chunk(line, timings)
             if delta:
                 yield delta
+
+
+async def llm_slot_ctx() -> int:
+    try:
+        return int((await client.get(f"{LLM_URL}/props")).json()["default_generation_settings"]["n_ctx"])
+    except Exception as error:  # noqa: BLE001
+        print("llm props", repr(error), flush=True)
+        return DEFAULT_SLOT_CTX
+
+
+async def llm_turn(cfg: dict, user: str, timings: dict):
+    system, history, max_tokens = cfg.get("system"), list(cfg.get("messages") or []), int(cfg.get("max_tokens", 160))
+    ctx = ready.get("llm_ctx", DEFAULT_SLOT_CTX)
+    kept = fit_history(system, history, user, max_tokens, ctx)
+    for harder in (False, True):
+        messages = ([{"role": "system", "content": system}] if system else []) + kept + [{"role": "user", "content": user}]
+        try:
+            async for delta in llm_stream(messages, max_tokens, float(cfg.get("temperature", 0.6)), cfg.get("response_format"), timings):
+                yield delta
+            return
+        except RuntimeError as error:
+            fewer = fit_history(system, history, user, max_tokens, ctx, True)
+            if harder or "context size" not in str(error) or len(fewer) == len(kept):
+                raise
+            print("s2s history trimmed again", len(kept), "->", len(fewer), flush=True)
+            kept = fewer
 
 
 # ── Speak ────────────────────────────────────────────────────────────────────
@@ -545,8 +600,6 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                          "stt": {k: heard[k] for k in STT_TIMINGS if k in heard}})
             template = cfg.get("user_template") or ""
             user = template.replace("{{transcript}}", heard["text"]) if "{{transcript}}" in template else heard["text"]
-            messages = ([{"role": "system", "content": cfg["system"]}] if cfg.get("system") else []) \
-                + list(cfg.get("messages") or []) + [{"role": "user", "content": user}]
             gate = asyncio.Semaphore(TTS_PARALLEL)
             sentences: asyncio.Queue = asyncio.Queue()  # (text, audio queue) in speaking order, None at the end
 
@@ -557,8 +610,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
 
             async def think():
                 buffer, first, first_token, field_closed = "", True, None, False
-                async for delta in llm_stream(messages, int(cfg.get("max_tokens", 160)), float(cfg.get("temperature", 0.6)),
-                                              cfg.get("response_format"), timings):
+                async for delta in llm_turn(cfg, user, timings):
                     if first_token is None:
                         first_token = marks["first_token"] = ms()
                         await sentences.put(("__event__", {"type": "llm_first_token", "at_ms": first_token, "llm": dict(timings)}))
@@ -833,6 +885,7 @@ async def warm() -> None:
         await asyncio.gather(*[asyncio.to_thread(stt_batcher.transcribe, silence, "pt") for _ in range(STT_BATCH)])
         async for _ in llm_stream([{"role": "user", "content": "Diga oi."}], 8, 0.0):
             pass
+        ready["llm_ctx"] = await llm_slot_ctx()
         voice = next(iter(voices.values()), None)
         if voice:
             for line in ("Olá, bom dia.", "Tudo bem? Então vamos lá."):
