@@ -94,8 +94,9 @@ registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full 
 `20261008-1317`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
 the same tag: `SPEECH_IMAGE` does not move that copy; no L4), `scaling.mode` `fast`, `realtime: {}` (the edge
 sidecar, [realtime-edge.md](realtime-edge.md)) and env per machine type (the edge's `RT_MAX_SESSIONS`: L4 2, L40S 4;
-the whole RTX 5090 set; merged into the stored `envByMachineType`). A registered spec with `files` skips the Vast
-place (reason in `warnings`) until the voice catalog moves to `fileUrls`. Port,
+the whole RTX 5090 set; merged into the stored `envByMachineType`). A registered spec with `files` reaches the Vast
+place through signed links on the gateway (§ `files` on a Vast placement; it needs the gateway's public URL, else the
+place is skipped with the reason in `warnings`). Port,
 machine type, zone, replicas, idle and boot times, € and hour limits, volume, `env` and `files` (the voice catalog)
 stay exactly as registered. On a gateway where `parle-speech` does not exist it is created from the `speech-stack`
 profile with the declared image; that deployment has no `files`, so the voice catalog still has to be sent with a
@@ -442,7 +443,8 @@ With `candidates`, each create walks a **ranked ladder**:
   container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Without a
   `bootScript` the spec's `entrypoint` + `args` are run there instead (after loading `/srv/aigw/app.env`), so an
   image-mode spec needs its start command declared; the image's own `CMD` is not run.
-  `files`, `exposure` and `idleAction: "stop"` are refused for Vast (no user_data service, no reserved IP).
+  `files`, `exposure` and `idleAction: "stop"` are refused for Vast (no user_data service, no reserved IP); on a Vast
+  *placement* `files` are served by the gateway through signed links (§ `files` on a Vast placement).
   Vast accepts 32 KB of env per instance and the boot script travels there base64 twice: a `bootScript` above
   ~14 KB is refused at PUT (download large payloads at boot). A private image needs `registryAuth` in the spec
   (sent as Vast `image_login`; never filled from the provider's own key).
@@ -469,7 +471,8 @@ With `candidates`, each create walks a **ranked ladder**:
   (`50000-50008`), 16 → 37. With the two TCP ports (80 and SSH) the total must stay within 64 per instance, so at most
   30 sessions per replica (refused at PUT above that, as is an explicit `realtime.udpPorts` wider than that), and only
   hosts with `direct_port_count` ≥ the total are searched and rented.
-- `GET /v1/deployments/:name/offers` (admin, read-only): the ranked offers a create would try.
+- `GET /v1/deployments/:name/offers` (admin, read-only): the ranked offers a create would try, the offers left out
+  and why, and what the gateway remembers of each host (§ Host reputation).
 - **App port = `port`** (default 8000): nginx proxies to `127.0.0.1:<port>` and the health loop polls
   `http://127.0.0.1:<port><healthPath>`. Everything shares one container, so a stack that already runs a model server
   on 8000 serves its health responder on another port (e.g. `"port": 8010`).
@@ -484,17 +487,18 @@ With `candidates`, each create walks a **ranked ladder**:
   `dph_total ≤ maxEurPerHour × 1.05` (`EUR_TO_USD`, deliberately below the market rate so the USD cap is never looser
   than the EUR one). Cap and floors are re-checked client side.
 - **Ranking** (`rankOffers`): first the hosts that already passed the RTT gate in the last 24 h (the backend remembers
-  up to 200 by `machine_id` with the RTT they measured; lowest first, in 5-ms bands), then the distance band of the
+  up to 200 by `machine_id`, on disk; lowest RTT over the anchor first, in 5-ms bands), then the distance band of the
   host's country (from `geolocation`, the country after the last comma) from `near`; hosts beyond 2500 km only when no
   nearer one exists and the spec has `allowFar`. From France, DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3)
   even when those are cheaper. Inside a band: a host in the `near` country itself before one across a border (a French
-  host before a cheaper British, Swiss or Dutch one), then effective price `dph_total × (1 + 4 × (1 − reliability2))`
+  host before a cheaper British, Swiss or Dutch one), then a host that booted our image before, then effective price
+  `dph_total × (1 + 4 × (1 − reliability2))`
   (an unreliable host costs more), then `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label
   `aigw:<namespace>:<deployment>`, env `-p 80:80`); one rented in between goes to the next. `lastPlacement` says which
   offer was rented and which better-ranked ones were passed over and why, e.g.
   `vast RTX 5090 (≤ €0.85/h); offer 3 of 21: London, GB, $0.796/h; better-ranked offers passed over: offer 811 (Zurich, CH, $0.563/h): … not available; offer 902 (Amsterdam, NL, $0.597/h): … not available`.
 - The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
-  whose replica hit `bootTimeoutMinutes` is skipped for 1 h (in memory). States: `running`; `loading`/`created` →
+  whose replica hit `bootTimeoutMinutes` is skipped for 1 h (§ Host reputation). States: `running`; `loading`/`created` →
   `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
   (its disk goes with it).
 
@@ -519,13 +523,13 @@ there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `
 Outside the gate the replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and
 the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
 far. Until it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never
-measured again and its host is remembered as known-good for the ranking; one adopted after a gateway restart is
+measured again and its host is remembered as known-good for the ranking (on disk, § Host reputation); one adopted after a gateway restart is
 measured for the view only, never released by the gate (it may be serving).
 `GET /v1/deployments/:name` shows `rttMs` and `rttBaselineMs` per replica, and `lastPlacement` both numbers and the
 verdict, e.g.
 `vast RTX 5090 (≤ €0.6/h); offer 1 of 12: Paris, FR, $0.548/h; RTT 42 ms, baseline 45 ms (s3.fr-par.scw.cloud): −3 ms ≤ maxRttExcessMs 20: kept`
 or `…; earlier: host Bratislava, SK: RTT 61 ms, baseline 14 ms (s3.fr-par.scw.cloud): +47 ms > maxRttExcessMs 20: released (too-far)`.
-`GET /v1/deployments/:name/offers` answers `{offers, gate}`: `gate` is the rule in force with the baseline measured
+`GET /v1/deployments/:name/offers` answers `{offers, skipped, hosts, gate}`: `gate` is the rule in force with the baseline measured
 at that moment (`{near, rule, anchor, baselineMs, maxRttExcessMs, maxRttMs}`), and each offer carries `knownRttMs`
 and `gateVerdict` when its host was measured before.
 
@@ -534,6 +538,165 @@ and `gateVerdict` when its host was measured before.
   datacenter of their country; from the Netherlands a host that is as far from the gateway as Paris is (a British
   one) reads ≈ 0 over. The distance ranking, the own-country preference and an explicit `maxRttMs` cover that side.
   Scaleway replicas are not gated.
+
+### Host reputation (Vast) — what each host did, kept across restarts
+
+`src/deployments/host-reputation.ts`. The backend keeps one record per Vast host (`machine_id`) and writes it to
+`vast-hosts.json` in `DEPLOYMENTS_STATE_DIR`, next to `deployments.json` (same atomic write; on Railway the mounted
+volume), so a gateway restart no longer forgets which hosts were bad (live 2026-10-08: a UK host was rented again
+after two `too-far` releases). Up to 200 hosts, the least recently used dropped first.
+
+| Field | Written when |
+|---|---|
+| `location`, `lastUsedAt` | an offer of the host is rented |
+| `rttMs`, `baselineMs`, `rttAt` | the RTT gate passed (`rttAt` set; a pass also clears `lastError` and `avoidUntil`), or released it as too far (`rttAt` untouched: the numbers are kept for the operator, the host is not "known good") |
+| `bootsOk`, `bootMs` | its replica answered ready for the first time (create → ready, ms); clears `lastError` |
+| `udp`, `udpAt` | the gateway's UDP probe of its replica answered `ok` or `blocked` (§ realtime-edge.md, Reachability) |
+| `bootsFailed`, `lastError`, `lastErrorAt`, `avoidUntil` | its replica was released as `too-far` (avoided 24 h), `boot-timeout` (1 h) or `udp-blocked` (see below) |
+
+How the selection uses it (`rankedOffers` in `vast-backend.ts`, `rankOffers` in `placements.ts`):
+
+- **Skipped**: a host whose `avoidUntil` is in the future. The period is bounded, so a host can recover: after it the
+  host is ranked like any other. With `realtime.requireWebrtc`, also a host whose last UDP probe was `blocked` less
+  than 24 h ago (`UDP_BLOCKED_HOST_MS`); a deployment that can use the WebSocket rung still rents it.
+- **First**: hosts that passed the RTT gate in the last 24 h, by **RTT over the anchor** (`rttMs − baselineMs`, in 5-ms
+  bands; the raw RTT when no baseline was measured) — not by price.
+- Then, as before, the distance band and the users' own country; inside those, a host that **booted our image
+  before** (`bootsOk` > 0, no later failure) goes before an unknown one, then the effective price.
+- The gate itself is unchanged (`maxRttExcessMs`, `maxRttMs`): reputation only decides which offer is tried first.
+
+What it does not do: measure a host before renting it. A host never rented is still ranked by distance, country and
+price, and the gate decides after the rental (1–5 min of machine per wrong try).
+
+`GET /v1/deployments/:name/offers` (admin, read-only) now answers `{offers, skipped, hosts, gate}`: each offer has
+`host` (its record, or null), `skipped` lists the market offers left out with the reason
+(`{offerId, machineId, location, usdPerHour, reason: "too-far until 2026-10-09T10:41:00.000Z"}` or
+`"inbound UDP blocked until … (realtime.requireWebrtc)"`), and `hosts` is every record the gateway holds.
+
+### `files` on a Vast placement — signed links on the gateway
+
+A Vast host has no user_data service, so `files` cannot travel with the create. When the gateway knows its own public
+URL (`AIGW_PUBLIC_URL`; on Railway the service's `RAILWAY_PUBLIC_DOMAIN` is used when it is unset), a spec with `files`
+is no longer skipped on a Vast **placement**: at the create the walk turns each file into a `fileUrls` entry
+(`filesByUrl`, `src/deployments/boot-files.ts`) that points at the gateway itself, with the sha256 of the stored
+bytes, and the replica downloads and checks it like any other `fileUrls` entry before the app starts.
+
+- Link: `GET <public URL>/v1/boot-files?d=<deployment>&k=<file key>&exp=<unix seconds>&sig=<HMAC-SHA256>`. The route
+  takes no API key (the booting replica has none) and is authenticated by the signature alone. The signing key is
+  derived from the deployment's replica token (`HMAC(replicaToken, "aigw-boot-files-v1")`), never an app or admin key;
+  the signature covers the deployment, the file key and the expiry, so a link opens one file of one deployment until
+  `exp`. `exp` = the create time + `bootTimeoutMinutes`.
+- Nothing is listed: a wrong or expired signature, an unknown deployment and an unknown file all answer the same
+  `404 {"error":"not found"}`. The links are not in any view (`fileKeys` only) nor in the logs of the gateway's own
+  code; they are in the instance's env on Vast (inside the init script) and in `/srv/aigw/boot.log` on the host, which
+  receives the files anyway. A reverse proxy in front of the gateway that logs query strings would log them: they
+  expire with the boot timeout.
+- The host that booted with the links holds the replica token and could sign a link for a file of **its own**
+  deployment after `exp`: it already has those files. It cannot sign for another deployment.
+- Without a public URL the placement is skipped as before, with `files are not supported on vast (no user_data
+  service)` in `warnings` and `lastPlacement`.
+- **What remains**: a spec whose *primary* provider is Vast, or with a Vast `candidate`, is still refused at PUT when
+  it has `files` (`checkVastSpec` knows nothing of the gateway's URL): use `fileUrls` there. The files are read from
+  the stored spec at each request (≤ 8 MB of base64 parsed per download, at boot only).
+
+### A class at a known time: warm capacity on Vast
+
+`warmSchedule` and `minActiveReplicas` are provider-agnostic: the floor is a number of replicas, and every create
+walks the placements (Scaleway zones first, then the Vast placement up to its own `maxReplicas`). So a window that
+opens before the class pre-warms Vast hosts too, under the same limits as any create — the placement's `maxReplicas`,
+the deployment's `maxReplicas`, `DEPLOYMENTS_MAX_REPLICAS` and the € ceiling (a Vast replica is admitted at its cap,
+then billed at the rented price) — and after the window the idle rule releases them; the external reaper lists Vast
+instances by label like any other. Proven with fakes in
+`__tests__/unit/deployments/provider-fallback.test.ts` (§ warm schedule over a vast placement): nothing before the
+window; inside it one Scaleway replica (quota) and the rest on Vast up to the ceiling; all released after it.
+
+**30 learners, 18:00–20:00 Europe/Paris, Monday–Thursday, 4 seats per replica** → 8 replicas (32 seats). Scaleway's
+L40S quota is 2 and it had no stock on 2026-10-08, so the Vast placement must be able to hold all 8:
+
+```bash
+curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' $GW/v1/deployments/parle-speech -d '{
+  "maxReplicas": 8,
+  "placements": [
+    { "zone": "fr-par-1" },
+    { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.62, "maxReplicas": 8,
+      "image": "ghcr.io/marcosremar/speech-stack:20261008-1317" }
+  ],
+  "warmSchedule": [
+    { "days": [1, 2, 3, 4], "start": "17:25", "end": "20:05", "timeZone": "Europe/Paris", "minReplicas": 8 }
+  ]
+}'
+```
+
+and on the gateway service `DEPLOYMENTS_MAX_REPLICAS=10` (8 + the two L4 of `parle-qwen-tts`; today 4) and
+`DEPLOYMENTS_MAX_EUR_PER_HOUR=10` (today 6: 2 × €1.47 + 6 Vast replicas + the two L4 at €0.79 is ≈ €8/h). `placements`
+is declared in `src/deployments/declared/parle-speech.json` and put back by the reconciler: change it there (the
+`PATCH` above is for a test gateway). The window opens 35 min before the class because a boot from scratch took
+6.5–19.5 min and the pull of the 22 GB image on a Vast host is not measured; shorten it once it is.
+
+| Replicas | Billed per class (window 2 h 40 min + ≈ 10 min idle tail ≈ 2.83 h each) | Per week (4 classes) |
+|---|---|---|
+| 8 × RTX 5090 on Vast (US$0.55–0.60/h) — Scaleway out of stock | **US$12.5–13.6** | US$50–54 |
+| 2 × L40S (€1.47/h) + 6 × RTX 5090 | **€8.3 + US$9.3–10.2** (≈ €17–18) | ≈ €69–72 |
+| 2 × L40S only | €8.3 — 8 seats, 22 learners on the cloud fallback | |
+
+About US$0.42–0.45 per learner per class on Vast alone. Each host the RTT gate releases adds 1–5 min of one machine
+(US$0.01–0.05). No `realtime.requireWebrtc` for this deployment: on a host without inbound UDP the WebSocket rung met
+the target (p50 900 ms, max 2358 ms at 4 learners), so such a host is kept.
+
+### Vast for a class: not proven live, and how to prove each
+
+Unit tests with a fake Vast API cover the code above. Not run against real hosts:
+
+| Unproven | Live test (a test gateway: `DEPLOYMENTS_NAMESPACE=<own>`, `VAST_API_KEY` from the dev API, never production) |
+|---|---|
+| Pull time of `ghcr.io/marcosremar/speech-stack:20261008-1317` (22 GB) on a Vast host, and the boot of the baked image | 1 below; read `bootMs` |
+| The reputation file surviving a real restart | 2 |
+| The UDP probe on real hosts feeding `udp` and `requireWebrtc` | 3 |
+| `files` through signed links on a real host | 4 |
+| More than one Vast replica; a pre-warmed window | 5 |
+| 8 learners on one RTX 5090 (measured at 4 only) | 6 |
+
+```bash
+export GW=https://<test gateway> KEY=<admin key of that gateway> DEP=vast-class
+
+# 1. One replica from the public image; time from the PUT to ready, and what the host did.
+curl -s -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' $GW/v1/deployments/$DEP -d '{
+  "profile": "speech-stack", "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.62,
+  "image": "ghcr.io/marcosremar/speech-stack:20261008-1317", "placements": [], "idleAction": "delete",
+  "minReplicas": 1, "maxReplicas": 1, "realtime": { "maxSessions": 4 },
+  "fileUrls": { "voices.json": { "url": "https://<public copy>/voices.json", "sha256": "<64 hex>" },
+                "voice-pt.wav": { "url": "https://<public copy>/voice-pt.wav", "sha256": "<64 hex>" } }
+}'
+watch -n 20 "curl -s -H 'Authorization: Bearer $KEY' $GW/v1/deployments/$DEP | jq '{status, lastPlacement, lastError, replicas: [.replicas[] | {id, phase, zone, ageSeconds, rttMs, rttBaselineMs, udp}]}'"
+curl -s -H "Authorization: Bearer $KEY" $GW/v1/deployments/$DEP/offers | jq '{skipped, hosts}'   # bootMs, rttMs, udp of the kept host
+
+# 2. Restart the gateway process, then: the same hosts and reasons are still listed.
+curl -s -H "Authorization: Bearer $KEY" $GW/v1/deployments/$DEP/offers | jq '.hosts | map({host, location, bootsOk, bootsFailed, lastError, avoidUntil, udp})'
+
+# 3. UDP: `udp` on the replica is ok or blocked within ~15 s of ready; a session on a blocked replica lists ws first.
+curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' $GW/v1/realtime/sessions \
+  -d "{\"config\":{\"deployment\":\"$DEP\",\"voice\":\"<voice id>\",\"messages\":[]}}" | jq '[.transports[].type]'
+#    Then PATCH {"realtime":{"maxSessions":4,"requireWebrtc":true}} and delete + recreate until a blocked host is hit:
+#    lastPlacement says "inbound UDP blocked and realtime.requireWebrtc: released (udp-blocked)" and /offers skips it.
+
+# 4. files through the gateway: the same deployment as a Scaleway spec with `files` and a vast placement
+#    (AIGW_PUBLIC_URL set on the test gateway; a quota or stock refusal on Scaleway, or "paused" zones, sends it to Vast).
+curl -s -H "Authorization: Bearer $KEY" $GW/v1/deployments/$DEP | jq '.warnings, .lastPlacement'   # no "files are not supported"
+curl -s -o /dev/null -w '%{http_code}\n' "$GW/v1/boot-files?d=$DEP&k=voices.json&exp=1&sig=x"      # 404
+
+# 5. Two replicas, then a window: minReplicas 2 / maxReplicas 2; later a warmSchedule 10 min ahead, 20 min long.
+curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' $GW/v1/deployments/$DEP \
+  -d '{"minReplicas": 2, "maxReplicas": 2}'
+curl -s -H "Authorization: Bearer $KEY" $GW/v1/deployments/$DEP | jq '.autoscale.warmFloor, [.replicas[] | {zone, phase, pricePerHour}]'
+
+# 6. Load: 4 then 8 learners on one replica (PATCH realtime.maxSessions and RT_MAX_SESSIONS to 8 first).
+GW=$GW KEY=$KEY DEP=$DEP RT_CONFIG='{"system":"…","messages":[],"voice":"<voice id>"}' \
+  bun scripts/realtime-e2e/load.ts --n 8 --duration 360 --ramp 8 --turn-every 18 --jitter 3 --clip turn.wav
+
+# Always: delete, then check nothing is left.
+curl -s -X DELETE -H "Authorization: Bearer $KEY" $GW/v1/deployments/$DEP
+curl -s -H "Authorization: Bearer $KEY" "$GW/v1/deployments" | jq '.health'
+```
 
 ### Host rental end (Vast) — handover before the host goes
 

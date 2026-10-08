@@ -13,6 +13,7 @@ import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend } from './scaleway-backend';
 import { VastDeploymentBackend } from './vast-backend';
 import type { DeploymentBackend, DeploymentProvider } from './types';
+import { FileHostStore } from './host-reputation';
 import { FileDeploymentStore } from './store';
 import { AppRegistry, FileAppStore } from './apps';
 import { AppFallbackService, OpenRouterKeyProvisioner } from './app-fallback';
@@ -25,6 +26,7 @@ export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
 export { planReplicas, desiredReplicas } from './planner';
 export { BUILTIN_PROFILES } from './profiles';
+export { bootFilesRoute, BOOT_FILES_PATH } from './boot-files';
 export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
@@ -143,7 +145,7 @@ export function deploymentsFromEnv(
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
     ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId }) } : {}),
-    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log }) } : {}),
+    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir) }) } : {}),
   };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
   const controller = new DeploymentController({
@@ -155,6 +157,7 @@ export function deploymentsFromEnv(
     busyGraceMs,
     unhealthyStrikes,
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
+    publicUrl: env.AIGW_PUBLIC_URL?.trim() || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : undefined),
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
     ...spendLimitsFromEnv(env),
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
