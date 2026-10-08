@@ -567,6 +567,7 @@ function buildSSEStream(
         // A provider that breaks mid-answer is a provider failure (the client leaving is not): it counts toward the
         // breaker like a failure before the first token does.
         if (!ended) health.recordFailure(err);
+        opened.abort?.();
         const msg = redactSecrets(err instanceof Error ? err.message : 'Streaming error');
         try {
           controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: msg, type: 'server_error' } })}\n\n`));

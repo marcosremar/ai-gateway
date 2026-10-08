@@ -163,6 +163,66 @@ try:
     got, error = asyncio.run(cut_tts_stream())
     check("upstream: a TTS stream cut mid-body raises UpstreamError with stage tts",
           got == 4800 and isinstance(error, UpstreamError) and error.stage == "tts" and error.status is None)
+
+    async def stage_failures():
+        delta = b'data: {"choices": [{"delta": {"content": "oi "}}]}\n\n'
+        error_event = b'\n\ndata: {"error": {"message": "chat upstream stalled", "code": "upstream_stalled"}}\n\n'
+
+        async def serve(request):
+            mode = (await request.json())["messages"][0]["content"] if "chat" in request.path else (await request.json())["input"]
+            res = web.StreamResponse(headers={"Content-Type": "text/event-stream" if "chat" in request.path else "audio/pcm"})
+            await res.prepare(request)
+            await res.write(delta if "chat" in request.path else b"\0" * 4800)
+            if mode == "stall":
+                await asyncio.sleep(5)
+            if mode == "break":
+                request.transport.close()
+            if mode == "error":
+                await res.write(b'data: {"choi' + error_event)
+            if mode == "clean" and "chat" in request.path:
+                await res.write(delta + b"data: [DONE]\n\n")
+            return res
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", serve)
+        app.router.add_post("/v1/audio/speech", serve)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        up = Upstream(Settings(upstream=f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}", upstream_gap_s=0.3))
+        await up.start()
+
+        async def run(stream):
+            got, error, started = [], None, time.monotonic()
+            try:
+                async for item in stream:
+                    got.append(item)
+            except Exception as raised:  # noqa: BLE001
+                error = raised
+            return got, error, time.monotonic() - started
+
+        results = {("llm", mode): await run(up.chat_stream([{"role": "user", "content": mode}], {}))
+                   for mode in ("clean", "break", "stall", "error")}
+        results.update({("tts", mode): await run(up.speak(mode, {}, {"voice": "x"})) for mode in ("clean", "stall")})
+        await up.close()
+        await runner.cleanup()
+        return results
+
+    stages = asyncio.run(stage_failures())
+    failed = lambda stage, mode: (isinstance(stages[stage, mode][1], UpstreamError) and stages[stage, mode][1].stage == stage  # noqa: E731
+                                  and stages[stage, mode][1].status is None)
+    check("upstream: a clean chat stream yields its deltas and ends", stages["llm", "clean"][:2] == (["oi ", "oi "], None))
+    check("upstream: a clean TTS stream yields its audio and ends",
+          stages["tts", "clean"][1] is None and sum(map(len, stages["tts", "clean"][0])) == 4800)
+    check("upstream: a chat stream cut mid-body raises UpstreamError with stage llm",
+          failed("llm", "break") and stages["llm", "break"][0] == ["oi "])
+    check("upstream: a chat stream silent for upstream_gap_s raises UpstreamError with stage llm",
+          failed("llm", "stall") and stages["llm", "stall"][2] < 2)
+    check("upstream: an SSE error event (after a torn line) raises UpstreamError with stage llm and its message",
+          failed("llm", "error") and "chat upstream stalled" in str(stages["llm", "error"][1]) and stages["llm", "error"][0] == ["oi "])
+    check("upstream: a TTS stream silent for upstream_gap_s raises UpstreamError with stage tts",
+          failed("tts", "stall") and stages["tts", "stall"][2] < 2)
     from aioice import Connection
 
     from aigw_edge import ice as edge_ice

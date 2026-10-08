@@ -19,6 +19,10 @@ WS   /ws/audio-stream           real-time STT: binary Int16 PCM 16 kHz frames in
                                 out per decode — the protocol the gateway's streaming STT router already speaks.
 POST /v1/chat/completions       proxied to the LLM (streaming passes through).
 POST /v1/audio/speech           proxied to the TTS (streaming passes through).
+                   Both: an engine that breaks the body, sends nothing for PROXY_MAX_GAP_S (8) or keeps the request past
+                     PROXY_DEADLINE_S (120) never ends as a clean answer. Before the response started: 502 / 504 with an
+                     OpenAI `error`. After: SSE gets a last `data: {"error": {code: stage_failed|upstream_stalled}}`
+                     event; any other body (audio, JSON) has its connection aborted. Counted in /health `proxy`.
 GET  /refs/<id>.wav             reference voices (from /files/voices.json, see load_voices).
 GET  /health                    200 only when the three models answered a warm-up.
 """
@@ -60,6 +64,8 @@ MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "160"))
 SAMPLE_RATE = 24000
 S2S_MAX_GAP_S = float(os.environ.get("S2S_MAX_GAP_S", "8"))
 S2S_DEADLINE_S = float(os.environ.get("S2S_DEADLINE_S", "40"))
+PROXY_MAX_GAP_S = float(os.environ.get("PROXY_MAX_GAP_S", "8"))
+PROXY_DEADLINE_S = float(os.environ.get("PROXY_DEADLINE_S", "120"))
 TTS_MAX_SECONDS = float(os.environ.get("TTS_MAX_SECONDS", "3"))
 TTS_MAX_SECONDS_PER_CHAR = float(os.environ.get("TTS_MAX_SECONDS_PER_CHAR", "0.2"))
 REFS = Path("/srv/refs")
@@ -75,6 +81,7 @@ client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), limits=htt
 voices: dict[str, dict] = {}
 ready = {"ok": False, "detail": "starting"}
 turns = {"started": 0, "done": 0, "failed": {}, "stalled": {}}
+proxied = {stage: {"started": 0, "done": 0, "failed": 0, "stalled": 0} for stage in ("chat", "speech")}
 app = FastAPI()
 
 
@@ -646,16 +653,59 @@ async def audio_stream(ws: WebSocket, language: str = "", chunk_size: float = 1.
         decoder.cancel()
 
 
-async def proxy(request: Request, url: str):
+def wants_stream(body: bytes) -> bool:
+    try:
+        return json.loads(body).get("stream") is True
+    except (ValueError, AttributeError):
+        return False
+
+
+async def proxy(request: Request, url: str, stage: str):
+    t0 = time.perf_counter()
     body = await request.body()
-    upstream = await client.send(client.build_request("POST", url, content=body,
-                                                      headers={"content-type": request.headers.get("content-type", "application/json")}),
-                                 stream=True)
+    proxied[stage]["started"] += 1
+
+    def cut(error: BaseException) -> dict:
+        kind = "stalled" if isinstance(error, asyncio.TimeoutError) else "failed"
+        proxied[stage][kind] += 1
+        print("proxy", kind, stage, f"{round((time.perf_counter() - t0) * 1000)}ms", repr(error)[:300], flush=True)
+        return {"error": {"message": f"{stage} upstream {kind}: {error!r}"[:300], "type": "upstream_error",
+                          "code": "upstream_stalled" if kind == "stalled" else "stage_failed"}}
+
+    async def within(step, gap: bool):
+        left = PROXY_DEADLINE_S - (time.perf_counter() - t0)
+        if gap and left >= PROXY_MAX_GAP_S:
+            left, why = PROXY_MAX_GAP_S, f"no data for {PROXY_MAX_GAP_S} s"
+        else:
+            why = f"request longer than {PROXY_DEADLINE_S} s"
+        try:
+            return await asyncio.wait_for(step, max(left, 0))
+        except asyncio.TimeoutError:
+            raise asyncio.TimeoutError(why) from None
+
+    try:
+        upstream = await within(client.send(client.build_request(
+            "POST", url, content=body, headers={"content-type": request.headers.get("content-type", "application/json")}),
+            stream=True), wants_stream(body))
+    except (asyncio.TimeoutError, httpx.HTTPError) as error:
+        return JSONResponse(cut(error), status_code=504 if isinstance(error, asyncio.TimeoutError) else 502)
+    sse = "text/event-stream" in upstream.headers.get("content-type", "")
 
     async def chunks():
+        source = upstream.aiter_raw()
         try:
-            async for chunk in upstream.aiter_raw():
-                yield chunk
+            while True:
+                try:
+                    yield await within(source.__anext__(), True)
+                except StopAsyncIteration:
+                    proxied[stage]["done"] += 1
+                    return
+                except (asyncio.TimeoutError, httpx.HTTPError) as error:
+                    event = cut(error)
+                    if not sse:
+                        raise
+                    yield b"\n\ndata: " + json.dumps(event).encode() + b"\n\n"
+                    return
         finally:
             await upstream.aclose()
     return StreamingResponse(chunks(), status_code=upstream.status_code,
@@ -664,12 +714,12 @@ async def proxy(request: Request, url: str):
 
 @app.post("/v1/chat/completions")
 async def chat(request: Request):
-    return await proxy(request, f"{LLM_URL}/v1/chat/completions")
+    return await proxy(request, f"{LLM_URL}/v1/chat/completions", "chat")
 
 
 @app.post("/v1/audio/speech")
 async def speech(request: Request):
-    return await proxy(request, f"{TTS_URL}/v1/audio/speech")
+    return await proxy(request, f"{TTS_URL}/v1/audio/speech", "speech")
 
 
 @app.get("/refs/{name}")
@@ -687,7 +737,7 @@ async def list_voices():
 
 @app.get("/health")
 async def health():
-    return JSONResponse({**ready, "stt": stt_batcher.stats, "s2s": turns}, status_code=200 if ready["ok"] else 503)
+    return JSONResponse({**ready, "stt": stt_batcher.stats, "s2s": turns, "proxy": proxied}, status_code=200 if ready["ok"] else 503)
 
 
 # ── Warm-up: the first real request must not pay kernel loads ───────────────

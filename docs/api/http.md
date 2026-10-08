@@ -233,6 +233,8 @@ else its own configured voice. The replica must expose the OpenAI shapes (`/v1/a
   `stream_format`, …) is forwarded intact. The OpenRouter fallback never receives these fields.
 - With `response_format` `wav` or `pcm` the audio is **streamed** from the replica to the client
   (`stream: true, stream_format: "audio"`; send `"stream": false` to turn it off). Other formats come whole.
+  A streamed body that breaks upstream reaches the client as a cut connection (a transport error), never as a
+  complete answer.
 
 ```json
 { "model": "parle-tts", "input": "Bom dia!", "voice": "br-f-01", "fallback_voice": "pf_dora", "response_format": "wav" }
@@ -332,6 +334,10 @@ Every successful response of the three routes carries (no secrets):
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
 A deployment target streams too: the gateway asks the replica for `stream: true` and relays each delta as it arrives
 (until 2026-10-08 it asked for the whole answer and sent it as one SSE chunk).
+An SSE `{"error": …}` event inside a deployment's chat stream (the speech stack sends one when its LLM breaks or
+stalls) is a failure of that target, never content: before the first token the next target answers
+(`X-Gateway-Fallback: error`); after it the stream ends with the gateway's own `data: {"error": …}` event and no
+`[DONE]`. Either way the replica's `chat` stage gets a strike and the breaker a failure.
 An STT answer served from the gateway's 5-minute cache (same audio, model, language and format) carries
 `X-Gateway-Provider: cache` and `X-Cache: HIT`; it still wakes a cold primary deployment for the next turn (not in
 no-wake mode).

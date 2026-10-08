@@ -180,6 +180,55 @@ describe('chat: deployment primary, OpenRouter fallback', () => {
     expect(or.chat).not.toHaveBeenCalled();
   });
 
+  const streamingOpenRouter = (): LLMProvider => ({
+    providerId: 'openrouter', isConfigured: () => true, chat: vi.fn(),
+    async *chatStream() { yield 'da nuvem'; },
+  });
+  const stalled = { error: { message: "chat upstream stalled: TimeoutError('no data for 8.0 s')", type: 'upstream_error', code: 'upstream_stalled' } };
+
+  it('streaming: an SSE error event before the first token fails the deployment, OpenRouter answers, the stage gets a strike', async () => {
+    const ctl = fakeController();
+    const fetchImpl = vi.fn<FetchImpl>(async () => sseReplica([stalled], 0, []));
+    const res = await chat(new DeploymentLLMProvider(ctl, 'parle-speech', { fetchImpl: fetchImpl as never }), streamingOpenRouter(), { stream: true });
+    expect(res.headers).toMatchObject({
+      'X-Gateway-Provider': 'openrouter:qwen/qwen3.5-9b', 'X-Gateway-Fallback': 'error', 'X-Gateway-Fallback-From': 'deployment:parle-speech',
+    });
+    const text = await new Response(res.stream).text();
+    expect(text).toContain('da nuvem');
+    expect(text).not.toContain('upstream stalled');
+    expect(ctl.acquire.mock.calls[0][1]).toMatchObject({ stage: 'chat' });
+    expect(ctl.lease.done).toHaveBeenCalledTimes(1);
+    expect(ctl.lease.done).toHaveBeenCalledWith('errored');
+  });
+
+  it('streaming: an SSE error event after the first token ends the answer as an error, never as content, and counts against the replica', async () => {
+    const ctl = fakeController();
+    const breakers = new CircuitBreakerRegistry({ failureThreshold: 1, resetTimeoutMs: 60_000 });
+    const fetchImpl = vi.fn<FetchImpl>(async () => sseReplica([delta('Bom '), stalled], 0, []));
+    const dep = new DeploymentLLMProvider(ctl, 'parle-speech', { fetchImpl: fetchImpl as never });
+    const res = await chat(dep, streamingOpenRouter(), { stream: true }, breakers);
+    expect(res.headers?.['X-Gateway-Provider']).toBe('deployment:parle-speech');
+    const events = (await new Response(res.stream).text()).trim().split('\n\n').map((e) => JSON.parse(e.slice(6)));
+    expect(events.map((e) => e.choices?.[0]?.delta?.content).filter(Boolean)).toEqual(['Bom ']);
+    expect(events[events.length - 1]).toEqual({ error: { message: expect.stringContaining('upstream stalled'), type: 'server_error' } });
+    expect(ctl.lease.done).toHaveBeenCalledTimes(1);
+    expect(ctl.lease.done).toHaveBeenCalledWith('errored');
+    const next = await chat(dep, streamingOpenRouter(), { stream: true }, breakers);
+    expect(next.headers?.['X-Gateway-Fallback']).toBe('circuit_open');
+  });
+
+  it('streaming: a replica body cut mid-answer ends with an error event and a failed lease', async () => {
+    const ctl = fakeController();
+    const fetchImpl = vi.fn<FetchImpl>(async () => sseReplica([delta('Bom ')], 0, 'cut'));
+    const res = await chat(new DeploymentLLMProvider(ctl, 'parle-speech', { fetchImpl: fetchImpl as never }), streamingOpenRouter(), { stream: true });
+    const text = await new Response(res.stream).text();
+    expect(text).toContain('"content":"Bom "');
+    expect(text).toContain('"error"');
+    expect(text).not.toContain('[DONE]');
+    expect(ctl.lease.done).toHaveBeenCalledTimes(1);
+    expect(ctl.lease.done).toHaveBeenCalledWith(true);
+  });
+
   it('deployment circuit opens after repeated failures and the next requests go straight to OpenRouter', async () => {
     const breakers = new CircuitBreakerRegistry({ failureThreshold: 2, resetTimeoutMs: 60_000 });
     const fetchImpl = vi.fn<FetchImpl>(async () => new Response('down', { status: 502 }));

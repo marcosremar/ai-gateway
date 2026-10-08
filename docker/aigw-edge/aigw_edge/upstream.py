@@ -6,6 +6,8 @@ servers behind one front).
     transcribe(pcm16k)            POST /v1/audio/transcriptions  (multipart WAV + language + prompt)
     chat_stream(messages, cfg)    POST /v1/chat/completions      (stream: true, SSE deltas)
     speak(text, cfg) → PCM        POST /v1/audio/speech          (stream: true, raw PCM s16le, or WAV whose header is read)
+                                  Both raise UpstreamError(stage llm | tts) when the body breaks, when nothing arrives for
+                                  EDGE_UPSTREAM_GAP_S (10), and chat_stream also on an SSE `{"error": …}` event.
     partials (optional)           WS   /ws/audio-stream          (the speech-stack's incremental STT)
     s2s (EDGE_UPSTREAM_MODE=s2s)  POST /v1/s2s                   (one call per turn, framed events + PCM)
 """
@@ -61,6 +63,9 @@ class Upstream:
         if self.http:
             await self.http.close()
 
+    def _gap(self) -> aiohttp.ClientTimeout:
+        return aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=self.s.upstream_gap_s)
+
     async def health_loop(self) -> None:
         while True:
             try:
@@ -95,17 +100,26 @@ class Upstream:
                 "chat_template_kwargs": {"enable_thinking": False}}
         if cfg.get("response_format"):
             body["response_format"] = cfg["response_format"]
-        async with self.http.post(self.s.upstream + "/v1/chat/completions", json=body, headers=_headers(trace_id)) as r:
-            if r.status != 200:
-                raise UpstreamError("llm", r.status, (await r.text())[:200])
-            async for raw in r.content:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data: ") or line == "data: [DONE]":
-                    continue
-                choice = (json.loads(line[6:]).get("choices") or [{}])[0]
-                delta = (choice.get("delta") or {}).get("content")
-                if delta:
-                    yield delta
+        try:
+            async with self.http.post(self.s.upstream + "/v1/chat/completions", json=body, headers=_headers(trace_id),
+                                      timeout=self._gap()) as r:
+                if r.status != 200:
+                    raise UpstreamError("llm", r.status, (await r.text())[:200])
+                async for raw in r.content:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    try:
+                        event = json.loads(line[6:])
+                    except ValueError:
+                        continue
+                    if event.get("error"):
+                        raise UpstreamError("llm", None, str(event["error"].get("message") or event["error"])[:200])
+                    delta = ((event.get("choices") or [{}])[0].get("delta") or {}).get("content")
+                    if delta:
+                        yield delta
+        except aiohttp.ClientError as error:
+            raise UpstreamError("llm", None, repr(error)[:200]) from error
 
     # ── TTS ──────────────────────────────────────────────────────────────────
 
@@ -143,7 +157,8 @@ class Upstream:
         body = {"model": self.s.tts_model, "input": text, "language": LANGUAGE_NAMES.get(lang, "Portuguese"),
                 "response_format": "pcm", "stream": True, "stream_format": "audio", **fields}
         try:
-            async with self.http.post(self.s.upstream + "/v1/audio/speech", json=body, headers=_headers(trace_id)) as r:
+            async with self.http.post(self.s.upstream + "/v1/audio/speech", json=body, headers=_headers(trace_id),
+                                      timeout=self._gap()) as r:
                 if r.status != 200:
                     raise UpstreamError("tts", r.status, (await r.text())[:200])
                 head = b""

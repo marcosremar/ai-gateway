@@ -164,7 +164,9 @@ function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: s
           }
         }
       } catch {
-        // Client disconnected mid-stream — not an error
+        // The upstream body broke mid-stream: the client must see a cut connection, never a clean end.
+        clientGone = true;
+        res.destroy();
       } finally {
         if (!clientGone) res.end();
       }
