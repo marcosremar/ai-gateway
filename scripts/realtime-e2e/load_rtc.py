@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -13,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "docker/aigw-edge/t
 from clients import MicTrack  # noqa: E402
 
 CLIP = Path(sys.argv[1]).read_bytes()
-GATHER_S, OFFER_S, CONNECT_S = 2, 3, 3
-KEEP = ("type", "state", "final", "code", "empty", "filtered", "interrupted", "error", "ttfa_ms", "stt_ms", "llm_ttft_ms", "tts_ttfb_ms")
+GATHER_S, OFFER_S, CONNECT_S = float(os.environ.get("RTC_GATHER_S", 2)), 3, float(os.environ.get("RTC_CONNECT_S", 3))
+KEEP = ("type", "state", "final", "code", "empty", "filtered", "interrupted", "error", "ttfa_ms", "stt_ms", "llm_ttft_ms", "tts_ttfb_ms", "tts_retries")
 SKIP = ("reply_delta", "pong")
 peers: dict = {}
 
