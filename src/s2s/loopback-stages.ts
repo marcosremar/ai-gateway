@@ -5,7 +5,7 @@
  * accounting stay per client.
  */
 
-import { SUBREQUEST_HEADER, SUBREQUEST_TOKEN } from '../gateway/proxy/internal-subrequest';
+import { HEDGE_CAP_HEADER, SUBREQUEST_HEADER, SUBREQUEST_TOKEN } from '../gateway/proxy/internal-subrequest';
 import { NO_WAKE_HEADER, noWakeActive } from '../gateway/proxy/no-wake';
 import type { ChatMessage, S2SConfig, SpokenAudio, StageAnswer, StageClient } from './composite';
 
@@ -107,8 +107,9 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
   const auth: Record<string, string> = {
     Authorization: opts.authorization, [SUBREQUEST_HEADER]: SUBREQUEST_TOKEN, ...(noWakeActive() ? { [NO_WAKE_HEADER]: '1' } : {}),
   };
+  const within = (hedgeMs?: number): Record<string, string> => (hedgeMs ? { ...auth, [HEDGE_CAP_HEADER]: String(Math.round(hedgeMs)) } : auth);
   return {
-    async transcribe(audio, contentType, cfg, signal) {
+    async transcribe(audio, contentType, cfg, signal, hedgeMs) {
       return retryStage(async () => {
         const form = new FormData();
         const ext = /wav/.test(contentType) ? 'wav' : /ogg/.test(contentType) ? 'ogg' : /mp4|m4a|aac/.test(contentType) ? 'm4a' : /mpeg|mp3/.test(contentType) ? 'mp3' : 'webm';
@@ -117,7 +118,7 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
         if (cfg.language) form.set('language', LANGUAGE_NAMES[cfg.language.slice(0, 2)] ?? cfg.language.slice(0, 2));
         if (cfg.stt_prompt) form.set('prompt', cfg.stt_prompt);
         if (cfg.filter_hallucinations === false) form.set('filter_hallucinations', 'false');
-        const res = await f(`${opts.baseUrl}/v1/audio/transcriptions`, { method: 'POST', headers: auth, body: form, signal });
+        const res = await f(`${opts.baseUrl}/v1/audio/transcriptions`, { method: 'POST', headers: within(hedgeMs), body: form, signal });
         if (!res.ok) throw await failure('stt', res);
         const payload = await res.json() as { text?: string };
         // `none` (kept) and `off` (not judged) are on every answer: only reason codes mean something was removed.
@@ -127,11 +128,11 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
       }, signal);
     },
 
-    async chatStream(messages: ChatMessage[], cfg: S2SConfig, signal) {
+    async chatStream(messages: ChatMessage[], cfg: S2SConfig, signal, hedgeMs) {
       return retryStage(async () => {
         const res = await f(`${opts.baseUrl}/v1/chat/completions`, {
           method: 'POST',
-          headers: { ...auth, 'Content-Type': 'application/json' },
+          headers: { ...within(hedgeMs), 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: models.chat, messages, stream: true,
             max_tokens: cfg.max_tokens ?? 160, temperature: cfg.temperature ?? 0.6,
@@ -144,11 +145,11 @@ export function loopbackStages(opts: LoopbackOptions): StageClient {
       }, signal);
     },
 
-    async speak(text: string, cfg: S2SConfig, signal): Promise<SpokenAudio> {
+    async speak(text: string, cfg: S2SConfig, signal, hedgeMs): Promise<SpokenAudio> {
       return retryStage(async () => {
         const res = await f(`${opts.baseUrl}/v1/audio/speech`, {
           method: 'POST',
-          headers: { ...auth, 'Content-Type': 'application/json' },
+          headers: { ...within(hedgeMs), 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: models.tts, input: text, response_format: 'wav',
             ...(cfg.voice ? { voice: cfg.voice } : {}),

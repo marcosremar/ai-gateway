@@ -325,6 +325,7 @@ export interface RunTargetsOptions {
    * answer (or the 503) arrives before the client's own deadline.
    */
   budgetMs?: number;
+  hedgeCapMs?: number;
   /**
    * Same-target retries on a 5xx. Only deployment targets are retried: a replica restarting answers 502/503 for a
    * moment and comes back, while a cloud target is an aggregator that already retried upstream and has a next target
@@ -538,10 +539,14 @@ export function runTargets<P, T>(
   // A cloud link gets at most half of what is LEFT before its successor starts, so the last link keeps a real share
   // (prod 2026-10-07: deployment 4 s → slow OpenRouter link ran to the 8 s budget → the 3rd link was never tried).
   // Deployment links: their adaptive delay (`hedgeDelay`, from the controller's latency) else `hedgeAfterMs`.
-  const hedgeOf = (t: RouteTarget<P>): number => {
+  const ownHedgeOf = (t: RouteTarget<P>): number => {
     if (t.hedgeDelay) return t.hedgeDelay() ?? 0; // null = no hedge for this request
     if (t.hedgeAfterMs !== undefined) return t.hedgeAfterMs;
     return t.providerId.startsWith('deployment:') || !cloudHedge ? 0 : Math.max(1, Math.min(cloudHedge, (deadline - Date.now()) / 2));
+  };
+  const hedgeOf = (t: RouteTarget<P>): number => {
+    const own = ownHedgeOf(t);
+    return opts.hedgeCapMs ? Math.min(own || opts.hedgeCapMs, opts.hedgeCapMs) : own;
   };
 
   const startedAt = Date.now();

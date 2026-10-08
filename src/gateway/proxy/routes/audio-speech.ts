@@ -2,6 +2,7 @@
  * POST /v1/audio/speech — TTS
  */
 
+import { hedgeCapOf } from '../internal-subrequest';
 import type { TTSProvider } from '../../providers/cloud/types';
 import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
@@ -80,7 +81,7 @@ export async function handleAudioSpeech(
         responseFormat: format as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm',
         speed: body.speed as number | undefined,
       }),
-      { stage: 'tts', signal: req.signal, timeoutMs: 15_000, budgetMs: stageBudgetMs('tts'), retriesPerProvider: 1, cooldownTracker: ttsCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
+      { stage: 'tts', signal: req.signal, timeoutMs: 15_000, budgetMs: stageBudgetMs('tts'), hedgeCapMs: hedgeCapOf(req.headers), retriesPerProvider: 1, cooldownTracker: ttsCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
     if (result.stream) {
