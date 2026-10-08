@@ -34,9 +34,11 @@ JWT HS256. Signing key per deployment, derived from the replica token (never lea
 
 ```
 key = HMAC-SHA256(key = <deployment replicaToken>, message = "aigw-rt-v1")      # 32 raw bytes
-claims = { sid, app, dep, rep, cfg, iat, exp }    # serialized in this order; base64url without padding
+claims = { sid, app, dep, rep, cfg, [dev], iat, exp }    # serialized in this order; base64url without padding
   sid  session id (rt_<32 hex>)      app  app account      dep  deployment      rep  replica id
   cfg  base64url(JSON(session config)), ≤ 6 KB (6144 characters)
+  dev  optional: the app's device id for this session (`device` at admission); absent when none was sent.
+       The edge ignores it; the gateway refuses the token of a blocked device (docs/api/http.md § App devices)
   iat/exp  unix seconds, exp − iat ≤ 900 (15 min); default TTL 600 s (REALTIME_SESSION_TTL_SECONDS)
 ```
 

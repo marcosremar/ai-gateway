@@ -26,6 +26,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
+import type { AppDevices } from './app-devices';
 import type { AppFallbackService } from './app-fallback';
 import type { ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
@@ -192,6 +193,7 @@ export interface DeploymentRoutesOptions {
   fallback?: AppFallbackService;
   /** SDK instability reports (`/v1/apps/:app/stability-report`). Without it those paths answer 404. */
   stability?: ClientStabilityLog;
+  devices?: AppDevices;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
@@ -234,11 +236,25 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       return send(res, 200, { apps: registry.list().filter(a => a.id === own) });
     }
     if (!mayUseApp(req, app)) return send(res, 403, { error: `this key cannot use app '${app}'` });
+    if (!sub && method === 'PATCH') {
+      const body = await readJson(req);
+      for (const key of Object.keys(body)) if (key !== 'requireDevice') throw new AppError(400, `unknown field '${key}'`);
+      return send(res, 200, { id: app, requireDevice: await registry.setRequireDevice(app, body.requireDevice) });
+    }
     if (!sub) {
       if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
       const account = registry.get(app);
       const deployments = controller.list().filter(d => d.app === app).map(d => ({ name: d.name, status: d.status, appImage: d.appImage }));
-      return send(res, 200, { id: app, createdAt: account?.createdAt ?? null, images: Object.values(account?.images ?? {}), deployments });
+      return send(res, 200, {
+        id: app, createdAt: account?.createdAt ?? null, requireDevice: account?.requireDevice ?? false,
+        images: Object.values(account?.images ?? {}), deployments,
+      });
+    }
+    if (sub === 'devices') {
+      if (!opts.devices) return send(res, 404, { error: 'app devices are not enabled on this gateway' });
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const out = await opts.devices.route(app, method, parts.slice(4), query, opts.userOf?.(req) ?? 'admin', () => readJson(req));
+      return send(res, out.status, out.body);
     }
     if (sub === 'routes' && !imageName) {
       if (method === 'GET') return send(res, 200, { app, routes: registry.get(app)?.routes ?? {} });
