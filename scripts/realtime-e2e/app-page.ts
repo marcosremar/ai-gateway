@@ -13,6 +13,7 @@ export interface AppBackendOptions {
   pageFile: string;
   config: (req: IncomingMessage) => Record<string, unknown>;
   files?: Record<string, { type: string; body: Buffer | string }>;
+  speech?: (text: string) => Record<string, unknown>;
 }
 
 export async function startAppBackend(o: AppBackendOptions): Promise<{ url: string; close: () => void }> {
@@ -25,10 +26,10 @@ export async function startAppBackend(o: AppBackendOptions): Promise<{ url: stri
     '/': { type: 'text/html', body: page }, '/sdk.js': { type: 'text/javascript', body: sdkJs }, '/page.js': { type: 'text/javascript', body: pageJs },
     '/meter.js': { type: 'text/javascript', body: await Bun.file(join(import.meta.dir, 'page-meter.js')).text() }, ...o.files,
   };
-  async function relay(req: IncomingMessage, res: ServerResponse, path: string, withConfig = false): Promise<void> {
+  async function relay(req: IncomingMessage, res: ServerResponse, path: string, map?: (sent: Record<string, unknown>) => unknown): Promise<void> {
     let body = await readAll(req);
-    if (withConfig) body = Buffer.from(JSON.stringify({ ...JSON.parse(body.toString() || '{}'), config: o.config(req) }));
-    const headers: Record<string, string> = { Authorization: `Bearer ${o.key}`, 'Content-Type': String(req.headers['content-type'] ?? 'application/json') };
+    if (map) body = Buffer.from(JSON.stringify(map(JSON.parse(body.toString() || '{}'))));
+    const headers: Record<string, string> = { Authorization: `Bearer ${o.key}`, 'Content-Type': map ? 'application/json' : String(req.headers['content-type'] ?? 'application/json') };
     if (req.headers.traceparent) headers.traceparent = String(req.headers.traceparent);
     const up = await fetch(`${o.gw}${path}`, { method: 'POST', headers, body });
     const out: Record<string, string> = {};
@@ -41,7 +42,8 @@ export async function startAppBackend(o: AppBackendOptions): Promise<{ url: stri
   const app = createServer((req, res) => {
     const path = (req.url ?? '/').split('?')[0];
     if (req.method === 'GET' && files[path]) { res.writeHead(200, { 'content-type': files[path].type }); res.end(files[path].body); return; }
-    if (req.method === 'POST' && path === '/api/rt-session') { void relay(req, res, '/v1/realtime/sessions', true); return; }
+    if (req.method === 'POST' && path === '/api/rt-session') { void relay(req, res, '/v1/realtime/sessions', sent => ({ ...sent, config: o.config(req) })); return; }
+    if (req.method === 'POST' && path === '/api/speak' && o.speech) { void relay(req, res, '/v1/audio/speech', sent => o.speech!(String(sent.text ?? ''))); return; }
     if (req.method === 'POST' && path === '/api/s2s') { void relay(req, res, '/v1/s2s'); return; }
     res.writeHead(404); res.end();
   });

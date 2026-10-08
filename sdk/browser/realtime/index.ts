@@ -21,10 +21,10 @@ export { configFromToken, requestSession, telemetryUrlOf } from './descriptor';
 export type { SessionSource } from './descriptor';
 export {
   DOWNSTREAM_RATE, FRAME_MS, FrameChunker, LinearResampler, UPSTREAM_RATE, WS_AUDIO_HEADER,
-  decodeAudioFrame, encodeAudioFrame, floatToInt16, int16ToFloat, samplesPerFrame,
+  decodeAudioFrame, encodeAudioFrame, floatToInt16, int16ToFloat, samplesPerFrame, trimLeadingSilence,
 } from './pcm';
-export { CAPTURE_WORKLET, PLAYER_WORKLET, createPcmCapture, createPcmPlayer } from './audio-io';
-export type { PcmCapture, PcmPlayer } from './audio-io';
+export { CAPTURE_WORKLET, PLAYER_WORKLET, createPcmCapture, createPcmPlayer, decodeClip } from './audio-io';
+export type { DecodedClip, PcmCapture, PcmPlayer } from './audio-io';
 export { createWebRtcTransport, setPlayoutDelay } from './transports/webrtc';
 export { createWsTransport } from './transports/ws';
 export { createPostTransport, createS2SStreamTransport, mapS2SEvent } from './transports/clip';

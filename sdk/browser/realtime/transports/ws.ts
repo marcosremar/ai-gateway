@@ -25,6 +25,8 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
   let player: PcmPlayer | null = null;
   let connected = false;
   let closing = false;
+  let localOpener = false;
+  let skip = 0;
 
   const startMic = async () => {
     capture = await startCapture(await ctx.mic(), {
@@ -67,12 +69,21 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
           try { event = JSON.parse(e.data); } catch { return; }
           if (!event || typeof event.type !== 'string') return;
           if (event.type === 'ready') readyResolve?.();
-          if (event.type === 'interrupted') player?.flush();
+          if (event.type === 'interrupted') { player?.flush(); skip = 0; }
+          if (event.type === 'done') { localOpener = false; skip = 0; }
+          if (event.type === 'opener' && localOpener) {
+            const opener = event as { state?: string; audio_ms?: number };
+            if (opener.state === 'start') skip = Math.round(((opener.audio_ms ?? 0) * DOWNSTREAM_RATE) / 1000);
+            return;
+          }
           ctx.emit(event as never);
           return;
         }
-        const pcm = decodeAudioFrame(e.data as ArrayBuffer);
-        if (pcm && player) player.pushPcm16(pcm, DOWNSTREAM_RATE);
+        const frame = decodeAudioFrame(e.data as ArrayBuffer);
+        if (!frame || !player) return;
+        const dropped = Math.min(skip, frame.length);
+        skip -= dropped;
+        if (dropped < frame.length) player.pushPcm16(frame.subarray(dropped), DOWNSTREAM_RATE);
       };
       socket.onclose = (e: CloseEvent) => {
         ctx.telemetry.emit('ws.close', { level: e.code === 1000 ? 'info' : 'warn', attrs: { code: e.code, connected, clientClosed: closing } });
@@ -94,8 +105,13 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
     goLive() {
       if (!capture) void startMic().catch((err: Error) => ctx.fail(err));
     },
+    playOpener(samples, rate) {
+      localOpener = true;
+      player?.pushFloat(samples, rate);
+    },
+    uplinkBacklog: () => ws?.bufferedAmount ?? 0,
     send(message: ClientMessage) {
-      if (message.type === 'interrupt') player?.flush();
+      if (message.type === 'interrupt') { player?.flush(); skip = 0; }
       if (ws?.readyState === 1) ws.send(JSON.stringify(message));
     },
     close() {

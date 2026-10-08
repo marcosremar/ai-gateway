@@ -10,6 +10,7 @@ import { FrameDecoder } from '../../src/s2s/frames';
 export interface ClientConfig {
   gw: string; key: string; deployment: string; config: Record<string, unknown>;
   students: number; rtc: number; s2s: number; noWake?: boolean; chrome: number; chromeTransports: string[]; clipEndSilenceMs: number; rtcProcs: number;
+  uplinkStallMs?: number; uplinkStallEvery?: number; clientDeadline?: boolean; ttsModel?: string;
   rampS: number; durationS: number; turnEveryS: number; jitterS: number; burst?: boolean; clipS: number; clip: string | null; turnTimeoutS: number;
   turn: 'udp' | 'tcp'; python: string; chromePath: string; work: string; out: string;
 }
@@ -396,9 +397,10 @@ async function student(id: number): Promise<void> {
 const browsers: Browser[] = [];
 async function chromeStudents(): Promise<void> {
   if (!cfg.chrome) return;
-  const config = { ...cfg.config, deployment: cfg.deployment };
+  const config = { ...cfg.config, deployment: cfg.deployment, ...(cfg.clientDeadline ? { endpoint_ms: cfg.clipEndSilenceMs } : {}) };
   const app = await startAppBackend({
     gw: cfg.gw, key: cfg.key, pageFile: 'page-load.js', config: () => config,
+    speech: text => ({ model: cfg.ttsModel, input: text, voice: cfg.config.voice, response_format: 'wav' }),
     files: { '/config.json': { type: 'application/json', body: JSON.stringify(config) }, '/clip.wav': { type: 'audio/wav', body: wav(clip, 16000) } },
   });
   const mic = join(cfg.work, 'chrome-mic.wav');
@@ -415,6 +417,7 @@ async function chromeStudents(): Promise<void> {
         {
           durationMs: (cfg.rampS + cfg.durationS) * 1000, turnTimeoutMs: cfg.turnTimeoutS * 1000, turnEveryMs: cfg.turnEveryS * 1000,
           clipEndSilenceMs: cfg.clipEndSilenceMs, transport: cfg.chromeTransports[i % cfg.chromeTransports.length] || null,
+          uplinkStallMs: cfg.uplinkStallMs ?? 0, uplinkStallEvery: cfg.uplinkStallEvery ?? 3, clientDeadline: !!cfg.clientDeadline,
         },
       );
       rec.transport = run.transport;

@@ -23,7 +23,7 @@ describe('load harness: the first-audio ceiling', () => {
       ...fine, turn('ws', 3_600, [{ type: 'deadline_missed', at: 3_000 }]), turn('ws', 2_750, [{ type: 'opener', state: 'start', at: 2_700, audio_ms: 900 }]), turn('ws', null),
     ], 2_500);
     expect(report).toEqual({
-      limitMs: 2_500, turnsWithSound: 21, max: 2_600, over2000Pct: 4.8, over2500Pct: 4.8, over3000Pct: 0, overLimit: 1, openers: 1, deadlineMissed: 1, ok: false,
+      limitMs: 2_500, turnsWithSound: 21, max: 2_600, over2000Pct: 4.8, over2500Pct: 4.8, over3000Pct: 0, overLimit: 1, openers: 1, clientOpeners: 0, deadlineMissed: 1, ok: false,
     });
     expect(ceilingReport(fine, 2_500)).toMatchObject({ max: 1_200, overLimit: 0, ok: true });
     expect(ceilingReport([turn('ws', null)], 2_500)).toMatchObject({ max: null, ok: false });

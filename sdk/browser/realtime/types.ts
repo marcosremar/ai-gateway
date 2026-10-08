@@ -29,14 +29,15 @@ export type RealtimeServerEvent =
   | { type: 'reply'; text: string }
   | { type: 'audio_start' }
   | { type: 'audio_end' }
-  | { type: 'opener'; state: 'start' | 'end'; text?: string; index?: number; audio_ms?: number | null }
+  | { type: 'opener'; state: 'start' | 'end'; text?: string; index?: number; audio_ms?: number | null; local?: boolean }
   | { type: 'deadline_missed'; deadline_ms: number }
   | { type: 'interrupted' }
   | { type: 'done'; empty?: boolean; filtered?: boolean; error?: boolean; interrupted?: boolean }
   | { type: 'error'; code: string; message: string; unspoken?: string }
   | {
     type: 'metrics'; ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
-    first_sound_ms?: number | null; opener?: string | null; deadline_ms?: number; deadline_missed?: boolean;
+    first_sound_ms?: number | null; first_sound_from_speech_ms?: number | null; opener?: string | null; deadline_ms?: number;
+    deadline_missed?: boolean;
   };
 
 /** Events the SDK adds: which transport carries the session, and its end. */
@@ -51,7 +52,7 @@ export type RealtimeEvent = RealtimeServerEvent | RealtimeLocalEvent;
 export type ClientMessage =
   | { type: 'interrupt' }
   | { type: 'end_turn' }
-  | { type: 'config_update'; messages?: ChatMessage[] }
+  | { type: 'config_update'; messages?: ChatMessage[]; opener?: unknown }
   | { type: 'ping' };
 
 export interface IceServerInit {
@@ -150,6 +151,7 @@ export interface RealtimeMetrics {
   lastTurn: {
     ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
     first_sound_ms?: number | null; opener?: string | null; deadline_missed?: boolean;
+    learner_first_sound_ms?: number | null; network_delay_ms?: number | null;
   } | null;
 }
 
@@ -170,6 +172,8 @@ export interface RealtimeTransport {
   /** Clip-based rungs: one learner turn (16 kHz WAV). */
   sendTurn?(wav: Blob): Promise<void>;
   goLive?(): void;
+  playOpener?(samples: Float32Array, rate: number): void;
+  uplinkBacklog?(): number;
   close(): void;
 }
 
