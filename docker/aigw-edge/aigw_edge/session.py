@@ -7,7 +7,9 @@ One learner's realtime session, independent of the transport (WebRTC or WebSocke
 
 Barge-in: learner speech (server VAD) or `interrupt` while a turn is thinking or speaking cancels the LLM/TTS calls,
 drops the queued audio and emits `interrupted`. History (`messages`) grows by one user + one assistant message per turn
-(the assistant part is what was generated before an interruption); `config_update{messages}` appends to it.
+(the assistant part is what was generated before an interruption); `config_update{messages}` appends to it. When the
+LLM refuses a turn because the conversation no longer fits its context (HTTP 400, "context size"), the oldest half of
+the history is dropped and the turn is asked once more.
 """
 
 import asyncio
@@ -417,7 +419,7 @@ class Session:
         async def think() -> None:
             t = time.monotonic()
             try:
-                async for delta in self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
+                async for delta in self._chat(text):
                     if metrics["llm_ttft_ms"] is None:
                         metrics["llm_ttft_ms"] = ms_between(t, time.monotonic())
                         tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])
@@ -458,6 +460,19 @@ class Session:
         user = template.replace("{{transcript}}", text) if "{{transcript}}" in template else text
         system = [{"role": "system", "content": self.cfg["system"]}] if self.cfg.get("system") else []
         return system + self.messages + [{"role": "user", "content": user}]
+
+    async def _chat(self, text: str):
+        for retry in (False, True):
+            try:
+                async for delta in self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
+                    yield delta
+                return
+            except UpstreamError as error:
+                if retry or error.status != 400 or "context size" not in str(error) or len(self.messages) < 2:
+                    raise
+                dropped = max(2, len(self.messages) // 4 * 2)
+                del self.messages[:dropped]
+                self.tel("edge.llm.history_trimmed", turn_id=self.turn_id, dropped=dropped, kept=len(self.messages))
 
     async def _answer(self, text: str, ended: float, metrics: dict, spoken: list[str], tel, deltas=None) -> None:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
@@ -500,7 +515,7 @@ class Session:
             try:
                 t = time.monotonic()
                 buffer, first, closed = "", True, False
-                async for delta in deltas or self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
+                async for delta in deltas or self._chat(text):
                     if metrics["llm_ttft_ms"] is None:
                         metrics["llm_ttft_ms"] = ms(t)
                         tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])

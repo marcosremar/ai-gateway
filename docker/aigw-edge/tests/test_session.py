@@ -71,6 +71,7 @@ class FakeUpstream:
         self.stt_fails = False
         self.llm_delay = 0.0
         self.llm_fails_after: int | None = None
+        self.llm_context_messages: int | None = None
         self.spoken: list[str] = []
 
     async def transcribe(self, pcm16, language, prompt, trace_id=None):
@@ -87,6 +88,8 @@ class FakeUpstream:
     async def chat_stream(self, messages, cfg, trace_id=None):
         self.calls["llm"] += 1
         self.llm_messages = messages
+        if self.llm_context_messages is not None and len(messages) > self.llm_context_messages:
+            raise UpstreamError("llm", 400, '{"error":{"code":400,"message":"request (2062 tokens) exceeds the available context size (2048 tokens)"}}')
         finished = False
         try:
             await asyncio.sleep(LLM_TTFT_MS / 1000 + self.llm_delay)
@@ -497,6 +500,28 @@ async def llm_failure() -> None:
         await learner.close()
 
 
+async def history_overflow() -> None:
+    for name, settings in (("speculated", {}), ("no speculation", {"speculate_ms": 0})):
+        up = FakeUpstream()
+        up.llm_context_messages = 6
+        learner = Learner(up=up, **settings)
+        learner.session.messages += [{"role": role, "content": f"{role} {i}"} for i in range(4) for role in ("user", "assistant")]
+        mark = len(telemetry_events)
+        learner.say(0.5)
+        try:
+            done = await learner.wait("done", 4)
+        except TimeoutError as error:
+            done = {"hung": str(error)}
+        check(f"history overflow, {name}: the turn is answered after the oldest half of the history is dropped",
+              not done.get("error") and not learner.of("error") and bool(learner.of("audio_start")), (done, learner.types()))
+        check(f"history overflow, {name}: the LLM got the newest messages, the dropped ones are gone for good",
+              [m["content"] for m in up.llm_messages[1:-1]] == ["user 2", "assistant 2", "user 3", "assistant 3"]
+              and len(learner.session.messages) == 6, (up.llm_messages, learner.session.messages))
+        check(f"history overflow, {name}: edge.llm.history_trimmed says what was dropped",
+              [(kw["dropped"], kw["kept"]) for event, kw in telemetry_events[mark:] if event == "edge.llm.history_trimmed"] == [(4, 4)])
+        await learner.close()
+
+
 async def admission_shedding() -> None:
     session_module.recent_first_audio.clear()
     edge = Edge(Settings(key=b"k" * 32, max_sessions=8, first_audio_deadline_ms=2000, shed_window_s=30))
@@ -626,7 +651,8 @@ async def tts_guard() -> None:
 
 async def main() -> None:
     for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials,
-                     first_audio_deadline, admission_shedding, tts_guard, llm_failure):
+                     first_audio_deadline, admission_shedding, tts_guard, llm_failure,
+                     history_overflow):
         await scenario()
     print(json.dumps(results))
 
