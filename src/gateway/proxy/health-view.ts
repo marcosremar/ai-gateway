@@ -7,7 +7,8 @@
  *                                      stamped by `bun run stamp:build` before the upload (`railway up` carries no git);
  *                                      an unstamped build says `null`.
  *                                      An admin's `?details=1` adds `images`: the edge sidecar, the built-in profiles
- *                                      and the declared deployments this build points at.
+ *                                      and the declared deployments this build points at (serve.ts hands them in
+ *                                      through `healthDetails`: the proxy library does not import the deployments).
  *   GET /health?details=1    app key   the stage chains of the app's own aliases; admin key: everything (stages of every
  *                                      alias, warnings, connections, STT filter and no-wake counters, realtime sessions
  *                                      per deployment)
@@ -15,9 +16,6 @@
  */
 
 import buildInfo from '../../build-info.json';
-import { DEFAULT_EDGE_IMAGE } from '../../deployments/cloud-init';
-import { DECLARED_DEPLOYMENTS, declaredImage } from '../../deployments/declared';
-import { BUILTIN_PROFILES } from '../../deployments/profiles';
 import type { DeploymentView } from '../../deployments/types';
 
 export interface HealthViewer {
@@ -41,12 +39,6 @@ export function minimalHealth(
   const version = env.GATEWAY_VERSION?.trim() || commit?.slice(0, 12) || null;
   return { status: 'ok', version, commit, builtAt: build.builtAt || null, uptimeSeconds: Math.round((Date.now() - startedAt) / 1000) };
 }
-
-export const buildImages = (env: Record<string, string | undefined> = process.env) => ({
-  edge: DEFAULT_EDGE_IMAGE,
-  profiles: Object.fromEntries(BUILTIN_PROFILES.filter(p => p.spec.image).map(p => [p.name, p.spec.image])),
-  declared: Object.fromEntries(DECLARED_DEPLOYMENTS.map(d => [d.name, declaredImage(d, env)])),
-});
 
 export function realtimeHealth(views: DeploymentView[]): Array<Record<string, unknown>> {
   return views.filter(v => v.realtime).map(v => ({

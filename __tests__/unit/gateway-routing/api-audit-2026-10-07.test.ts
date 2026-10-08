@@ -12,6 +12,7 @@ import { createProxyServer } from '../../../src/gateway/proxy/server';
 import { appStagesView } from '../../../src/gateway/proxy/health-view';
 import { errorTypeForStatus, requestIdOf } from '../../../src/gateway/proxy/http-conventions';
 import type { ProxyConfig } from '../../../src/gateway/proxy/types';
+import { buildImages } from '../../../src/deployments/build-images';
 
 const ADMIN = 'admin-key-0123456789';
 const APP = 'parle-key-0123456789';
@@ -42,7 +43,7 @@ async function start(extra: Partial<ProxyConfig> = {}): Promise<string> {
     apiKeys: [`${ADMIN}:owner`, `${APP}:parle`, `${OTHER}:other`],
     providers: { chat: {}, stt: {}, tts: {} } as never,
     deepHealth: { authorize: (t) => t === ADMIN, report: async () => ({ status: 200, body: { status: 'ok', deep: true } }) },
-    healthDetails: (viewer) => (viewer.admin ? STAGES
+    healthDetails: (viewer) => (viewer.admin ? { images: buildImages(), ...STAGES }
       : appStagesView(STAGES, (stage) => OWN_ALIASES[viewer.userId]?.[stage] ?? null)),
     ...extra,
   });

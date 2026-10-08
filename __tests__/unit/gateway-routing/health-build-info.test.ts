@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_EDGE_IMAGE } from '../../../src/deployments/cloud-init';
-import { buildImages, minimalHealth } from '../../../src/gateway/proxy/health-view';
+import { buildImages } from '../../../src/deployments/build-images';
+import { minimalHealth } from '../../../src/gateway/proxy/health-view';
 
 describe('GET /health says which code runs', () => {
   it('an unstamped build reports null, never a guess', () => {
