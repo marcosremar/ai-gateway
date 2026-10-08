@@ -156,6 +156,8 @@ replica after it ended (live QA 2026-10-07: under 16–40 concurrent the count s
 Surplus replicas go after `scaleDownDelaySeconds` of low load (at once when idle), never one with requests in flight,
 and never one still booting: the boot finishes and the idle clock runs from its ready time (only a delete, pause, park
 or `bootTimeoutMinutes` end a boot early; live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of a 9 min boot).
+A ready replica is never surplus while that would leave fewer ready replicas than desired: one ready and one booting
+for a desired count of 1 both stay until the boot finishes, then one of them goes.
 Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, `DEPLOYMENTS_UNHEALTHY_STRIKES`
 (3) failed health checks in a row with nothing in flight and no answered request in the last
 `DEPLOYMENTS_BUSY_GRACE_SECONDS` (120), older than `maxHours` (counted from the last power-on of a parked replica, not
