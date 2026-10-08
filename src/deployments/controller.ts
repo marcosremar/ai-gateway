@@ -18,7 +18,7 @@ import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './
 import { ControllerViews } from './controller-views';
 import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
-import { externalInflightOn } from '../realtime/external-load';
+import { externalInflightOn, noteSession } from '../realtime/external-load';
 import { BUILTIN_PROFILES } from './profiles';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
 import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
@@ -247,11 +247,13 @@ export class DeploymentController extends ControllerViews {
    * stays cold.
    */
   async acquire(
-    name: string, opts: { waitMs?: number; exclude?: Set<string>; signal?: AbortSignal; noWake?: boolean; stage?: string } = {},
+    name: string,
+    opts: { waitMs?: number; exclude?: Set<string>; signal?: AbortSignal; noWake?: boolean; stage?: string; session?: string } = {},
   ): Promise<Lease> {
     const rt = this.require(name);
     const { spec } = rt.record;
     if (spec.paused) throw new DeploymentError(409, `deployment '${name}' is paused`);
+    if (opts.session) noteSession(name, opts.session, this.now());
     const serving = this.servingMachines(name);
     if (serving.length && serving.every(m => this.stageOut(m.id, opts.stage))) {
       throw new DeploymentError(503, `deployment '${name}': ${opts.stage} is out of rotation on every ready replica after repeated failures`,

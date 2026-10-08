@@ -7,6 +7,13 @@
  * The controller reads it in two places, with the same number: the pressure decision (`controller-autoscale.ts`
  * `decide`) adds `externalInflightEquivalent` to the load, and `pick` (`controller.ts`) adds `externalInflightOn` to a
  * replica's in-flight count, so a replica full of sessions takes no `/v1/s2s` or stage request.
+ *
+ * Students, not requests: one learner sends many requests (speculative STT, retries, the WS + WebRTC start race, the
+ * SDK's background re-admission, one `/v1/s2s` per turn), all under one session id — the trace id of the SDK's
+ * `traceparent`. `noteSession` records one on a deployment (realtime admission, `acquire` with `session`) and
+ * `distinctSessions` counts the different ones of the last `windowMs` (at most `SESSION_MEMORY_MS`); `refusedSessions`
+ * does the same for realtime admissions refused as `saturated`. Neither feeds the scale-out rule: leases and refusals
+ * are still counted per request.
  */
 
 /** A report older than this is ignored (the replica vanished or stopped being polled). */
@@ -53,7 +60,41 @@ export function externalInflightEquivalent(deployment: string, targetInflightPer
   return load;
 }
 
+export const SESSION_MEMORY_MS = 10 * 60_000;
+
+const seen = new Map<string, Map<string, number>>();
+
+function mark(key: string, session: string, now: number): void {
+  let bySession = seen.get(key);
+  if (!bySession) { bySession = new Map(); seen.set(key, bySession); }
+  for (const [id, at] of bySession) if (now - at > SESSION_MEMORY_MS) bySession.delete(id);
+  bySession.set(session, now);
+}
+
+function count(key: string, windowMs: number, now: number): number {
+  let n = 0;
+  for (const at of seen.get(key)?.values() ?? []) if (now - at <= windowMs) n++;
+  return n;
+}
+
+export function noteSession(deployment: string, session: string, now = Date.now()): void {
+  mark(deployment, session, now);
+}
+
+export function distinctSessions(deployment: string, windowMs: number, now = Date.now()): number {
+  return count(deployment, windowMs, now);
+}
+
+export function noteRefusedSession(deployment: string, session: string, now = Date.now()): void {
+  mark(`${deployment}|saturated`, session, now);
+}
+
+export function refusedSessions(deployment: string, windowMs: number, now = Date.now()): number {
+  return count(`${deployment}|saturated`, windowMs, now);
+}
+
 /** Tests only. */
 export function _resetExternalLoad(): void {
   reports.clear();
+  seen.clear();
 }

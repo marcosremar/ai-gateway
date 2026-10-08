@@ -208,6 +208,8 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
 - **Explained**: every view carries `autoscale: { desired, pressureWant, reason, blockedBy, floor, warmFloor, load, p95Ms,
   errorRate }` (`floor` = replicas kept whatever the load: `minReplicas`, `minActiveReplicas` while active, warm windows;
   `warmFloor` = the warm part) (e.g. `reason: "load 16 > 75% of 2×8 (at maxReplicas 2)"`, `blockedBy: "maxReplicas 2"`), logged when it changes.
+  A deployment with `realtime` also carries `realtime: { active, capacity, refusedSessions, scalingOut }`, and every
+  view `sessions` (distinct learners of the last minute): docs/realtime.md § Load and the autoscaler.
 
 Simulation bench: `bun scripts/autoscale-sim/run.ts [scenario…]` runs the real controller on a virtual clock (9 min boots,
 LLM slow-down past 8 parallel, health check timing out at 12, adaptive hedge from 1.5 s → fallback 1.2 s, attempt timeout

@@ -28,7 +28,7 @@ import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { runComposite, type S2SConfig, type StageClient } from './composite';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
 import type { S2SAdmission } from './access';
-import { outgoingTraceHeaders } from '../telemetry/trace-context';
+import { outgoingTraceHeaders, parseTraceparent } from '../telemetry/trace-context';
 import { emitGatewayEvent } from '../telemetry/emit';
 
 type Controller = Pick<DeploymentController, 'acquire' | 'get' | 'wake'>;
@@ -223,7 +223,8 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         // No-wake mode (gateway/proxy/no-wake.ts): a ready replica still answers; a cold one is not woken (composed).
         const noWake = noWakeActive();
         try {
-          lease = await opts.controller.acquire(deployment, { waitMs: 0, stage: 's2s', ...(noWake ? { noWake: true } : {}) });
+          const session = parseTraceparent(req.headers.traceparent)?.traceId;
+          lease = await opts.controller.acquire(deployment, { waitMs: 0, stage: 's2s', ...(noWake ? { noWake: true } : {}), ...(session ? { session } : {}) });
         } catch (err) {
           if (!(err instanceof DeploymentError)) throw err;
           skip = err.status === 409 ? 'paused' : err.status === 404 ? 'not_found' : err.code === 'stage_out' ? 'circuit_open' : err.code ?? 'cold';

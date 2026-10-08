@@ -7,6 +7,7 @@ import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './control
 import { ReconcileLoop } from './controller-reconcile';
 import { planReplicas, replicaPhase } from './planner';
 import type { DeploymentSpec, DeploymentView } from './types';
+import { distinctSessions, externalLoadOf, refusedSessions } from '../realtime/external-load';
 
 export abstract class ControllerViews extends ReconcileLoop {
   list(): DeploymentView[] {
@@ -103,6 +104,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       spec: rt.record.spec, replicas: [], inflight: rt.inflight, waiting: rt.waiting,
       lastRequestAt: rt.record.lastRequestAt, aboveSince: null, now,
     }).desired);
+    const sessions = externalLoadOf(name, now);
     const status: DeploymentView['status'] = rt.record.spec.paused ? 'paused'
       : replicas.length === 0 && rt.creating === 0 ? 'scaled-to-zero'
         : ready === 0 ? 'warming'
@@ -128,6 +130,11 @@ export abstract class ControllerViews extends ReconcileLoop {
       autoscale: { ...rt.autoscale },
       warm: rt.record.warm && rt.record.warm.until > now
         ? { replicas: rt.record.warm.replicas, until: new Date(rt.record.warm.until).toISOString() } : null,
+      realtime: rt.record.spec.realtime ? {
+        active: sessions.active, capacity: sessions.max, refusedSessions: refusedSessions(name, 5 * 60_000, now),
+        scalingOut: sessions.active > 0 && desired > ready,
+      } : null,
+      sessions: distinctSessions(name, 60_000, now),
     };
   }
 }
