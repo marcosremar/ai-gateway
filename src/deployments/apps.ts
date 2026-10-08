@@ -24,6 +24,7 @@ export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
  * every lookup checks own properties only.
  */
 const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+export const isAppId = (value: string): boolean => APP_ID_RE.test(value) && !RESERVED_KEYS.has(value);
 const ownValue = <T>(rec: Record<string, T> | undefined, key: string): T | undefined =>
   rec && !RESERVED_KEYS.has(key) && Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined;
 
@@ -54,6 +55,18 @@ export interface AppImage {
   history: AppImageVersion[];
 }
 
+export interface AppDeviceBlock { reason: string | null; by: string; at: number }
+
+export interface AppDevice {
+  firstSeen: number;
+  lastSeen: number;
+  day: number;
+  requestsToday: number;
+  requests: number;
+  lastKind: string | null;
+  blocked?: AppDeviceBlock;
+}
+
 export interface AppAccount {
   id: string;
   createdAt: number;
@@ -66,6 +79,8 @@ export interface AppAccount {
   /** The app's provisioned OpenRouter key for the direct fallback (app-fallback.ts): its hash, never the key. */
   fallbackKey?: ProvisionedKeyRecord;
   limits?: { dailyRequests?: number; dailyTokens?: number };
+  devices?: Record<string, AppDevice>;
+  requireDevice?: boolean;
 }
 
 type RouteStage = keyof ModelRoutesSpec;
@@ -169,7 +184,16 @@ export class AppRegistry implements FallbackKeyStore {
     await this.store.save(this.apps);
   }
 
-  private account(app: string): AppAccount {
+  save(): Promise<void> { return this.store.save(this.apps); }
+
+  async setRequireDevice(app: string, value: unknown): Promise<boolean> {
+    if (typeof value !== 'boolean') throw new AppError(400, 'requireDevice must be a boolean');
+    this.account(app).requireDevice = value;
+    await this.save();
+    return value;
+  }
+
+  account(app: string): AppAccount {
     if (!APP_ID_RE.test(app) || RESERVED_KEYS.has(app)) throw new AppError(400, `app id must match ${APP_ID_RE} (not ${[...RESERVED_KEYS].join('/')})`);
     return ownValue(this.apps, app) ?? (this.apps[app] = { id: app, createdAt: this.now(), images: {} });
   }

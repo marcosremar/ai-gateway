@@ -44,7 +44,7 @@ export interface AppLimitDenial {
   type: string;
   message: string;
   retryAfterSeconds?: number;
-  code?: 'daily_budget_exhausted';
+  code?: 'daily_budget_exhausted' | 'device_blocked' | 'device_required' | 'invalid_device';
   budget?: Budget;
   resetAt?: string;
 }

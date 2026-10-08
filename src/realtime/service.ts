@@ -38,6 +38,7 @@ export interface RealtimeServiceOptions {
   isAdmin: (userId: string) => boolean;
   /** Daily budget (AppLimits.chargeRequests); absent = no budget. */
   charge?: (userId: string, requests: number) => AppLimitDenial | null;
+  devices?: { admit(app: string, device: unknown, kind: string): AppLimitDenial | null; isBlocked(app: string, device: string): boolean };
   ice?: IceConfig;
   /** Public base of this gateway (`REALTIME_PUBLIC_URL`, e.g. https://gw.example.com); else from the request. */
   publicUrl?: string;
@@ -76,7 +77,7 @@ export interface ResolvedSession {
   edgeSessionId: string;
 }
 
-interface SessionRecord { dep: string; rep: string; app: string; exp: number; edgeSessionId?: string; pendingUntil?: number }
+interface SessionRecord { dep: string; rep: string; app: string; dev?: string; exp: number; edgeSessionId?: string; pendingUntil?: number }
 
 export function readJsonBody(req: IncomingMessage, limit: number): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -320,6 +321,13 @@ export class RealtimeService {
     }
     const byReference = cfg.length > RT_MAX_CFG_CHARS;
 
+    const blocked = this.opts.devices?.admit(app, body.device, 'realtime') ?? null;
+    if (blocked) {
+      this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: blocked.code ?? blocked.type, status: blocked.status, deployment: dep } });
+      return sendJson(res, blocked.status, errorBody(blocked.message, blocked.code ?? blocked.type));
+    }
+    const dev = this.opts.devices && typeof body.device === 'string' && body.device ? body.device : undefined;
+
     noteSession(dep, trace.traceId, this.now());
     const placed = await this.place(dep, ordered.order);
     if ('refusal' in placed) {
@@ -343,9 +351,9 @@ export class RealtimeService {
     const iat = Math.floor(this.now() / 1000);
     const exp = iat + ttl;
     const token = signSessionToken({
-      sid, app, dep, rep: placed.replica.id, cfg: byReference ? '' : cfg, iat, exp, ...(byReference ? { cfd: configDigest(cfg) } : {}),
+      sid, app, dep, rep: placed.replica.id, cfg: byReference ? '' : cfg, ...(dev ? { dev } : {}), iat, exp, ...(byReference ? { cfd: configDigest(cfg) } : {}),
     }, deriveRealtimeKey(replicaToken));
-    this.sessions.set(sid, { dep, rep: placed.replica.id, app, exp: exp * 1000, pendingUntil: this.now() + this.reservationMs });
+    this.sessions.set(sid, { dep, rep: placed.replica.id, app, ...(dev ? { dev } : {}), exp: exp * 1000, pendingUntil: this.now() + this.reservationMs });
     this.ensurePolling();
 
     const base = this.publicBase(req);
@@ -453,13 +461,37 @@ export class RealtimeService {
     const verdict = verifySessionToken(token, deriveRealtimeKey(replicaToken), Math.floor(this.now() / 1000));
     if ('error' in verdict) return { status: 401, code: verdict.error === 'expired' ? 'token_expired' : 'invalid_token', message: `session token refused: ${verdict.error}` };
     const { claims } = verdict;
-    const exposed = !!this.opts.controller?.specOf(claims.dep)?.exposure;
-    const replica = this.opts.controller?.get(claims.dep)?.replicas.find(r => r.id === claims.rep && r.ip);
-    if (!replica) return { status: 410, code: 'replica_gone', message: 'the replica of this session is gone: open a new session' };
+    if (this.deviceBlocked(claims)) return { status: 403, code: 'device_blocked', message: 'this device is blocked' };
+    const base = this.replicaBaseOf(claims.dep, claims.rep);
+    if (!base) return { status: 410, code: 'replica_gone', message: 'the replica of this session is gone: open a new session' };
     return {
-      claims, replicaToken, replicaId: replica.id, base: replicaBase({ ip: replica.ip } as never, exposed),
+      claims, replicaToken, replicaId: claims.rep, base,
       edgeSessionId: this.sessions.get(claims.sid)?.edgeSessionId ?? claims.sid,
     };
+  }
+
+  private replicaBaseOf(dep: string, rep: string): string | null {
+    const replica = this.opts.controller?.get(dep)?.replicas.find(r => r.id === rep && r.ip);
+    return replica ? replicaBase({ ip: replica.ip } as never, !!this.opts.controller?.specOf(dep)?.exposure) : null;
+  }
+
+  deviceBlocked(claims: Pick<RealtimeClaims, 'app' | 'dev'>): boolean {
+    return !!claims.dev && !!this.opts.devices?.isBlocked(claims.app, claims.dev);
+  }
+
+  async endDeviceSessions(app: string, device: string): Promise<number> {
+    const open = [...this.sessions].filter(([, s]) => s.app === app && s.dev === device);
+    await Promise.all(open.map(async ([sid, s]) => {
+      const base = this.replicaBaseOf(s.dep, s.rep);
+      const token = this.opts.controller?.tokenOf(s.dep);
+      this.forget(sid);
+      if (!base || !token) return;
+      await (this.opts.fetchImpl ?? fetch)(`${base}/__aigw/rt/session/${encodeURIComponent(s.edgeSessionId ?? sid)}`, {
+        method: 'DELETE', headers: { 'X-Aigw-Token': token }, signal: AbortSignal.timeout(5_000),
+      }).catch(err => this.log('realtime: could not end a blocked device session', { sid, error: (err as Error).message }));
+      this.emit(newTrace(), 'rt.session.deleted', { level: 'warn', sessionId: sid, attrs: { reason: 'device_blocked' } });
+    }));
+    return open.length;
   }
 
   private ensurePolling(): void {

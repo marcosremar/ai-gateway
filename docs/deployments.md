@@ -136,6 +136,16 @@ curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # ima
   values and `registryAuth` are refused (an image in the gateway's own Scaleway registry needs none).
 - Stored in `DEPLOYMENTS_STATE_DIR/apps.json` (the Railway volume), next to `deployments.json`.
 
+### Devices of an app
+
+An app may tag each request with the end-user device it serves (`X-Gateway-Device`, or `device` when opening a
+realtime session). The account then keeps, per device: first and last seen, request counts, last kind of request and
+a block flag — no IP, no user agent. `GET /v1/apps/:app/devices` lists them, `POST …/devices/:device/block` and
+`DELETE …/block` block and unblock, `PATCH /v1/apps/:app` `{"requireDevice": true}` refuses requests without an id.
+Same callers as the other app paths (the app's key, or an admin). The id is whatever the app says it is: blocking
+stops an unmodified client, not a forged id — an app that needs more mints the ids in its backend and sets
+`requireDevice`. Routes, timings per transport and a worked example: [docs/api/http.md](api/http.md) § App devices.
+
 ## Cold start
 
 - A request that finds no ready replica **waits** (`coldStartWaitSeconds`, default 240 s; per request with header

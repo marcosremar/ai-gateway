@@ -139,6 +139,19 @@ describe('createRealtimeSession', () => {
     b.s.close();
   });
 
+  it('passes the device option to the session endpoint, and nothing when it is not set', async () => {
+    const asked: Array<Record<string, unknown>> = [];
+    const endpoint = async (req: Record<string, unknown>) => { asked.push(req); return DESCRIPTOR; };
+    const a = session(fakes({ webrtc: 'ok' }), { sessionEndpoint: endpoint as never, device: 'install-7f3a9c21' });
+    await a.s.connect();
+    a.s.close();
+    const b = session(fakes({ webrtc: 'ok' }), { sessionEndpoint: endpoint as never });
+    await b.s.connect();
+    b.s.close();
+    expect(asked[0]).toMatchObject({ device: 'install-7f3a9c21', prefer: 'webrtc' });
+    expect(asked[1]).not.toHaveProperty('device');
+  });
+
   it('a refused admission (cold) skips the realtime rungs at once and lands on s2s-stream', async () => {
     const f = fakes({ webrtc: 'ok', ws: 'ok', 's2s-stream': 'ok' });
     const { s, telemetry } = session(f, { sessionEndpoint: async () => ({ refused: true, status: 503, code: 'cold', message: 'waking', retryAfterSeconds: 30 }) });

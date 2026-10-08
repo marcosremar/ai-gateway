@@ -33,7 +33,7 @@ import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
-import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
+import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs, DEVICE_HEADER } from './src/deployments';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
@@ -322,10 +322,16 @@ const realtime = createRealtime({
   userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
   isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),
   ...(appLimits ? { charge: (userId: string, n: number) => appLimits.chargeRequests(userId, n) } : {}),
+  ...(deployments ? { devices: deployments.devices } : {}),
   ...(telemetry ? { telemetry: realtimeSinkToTelemetry(telemetry.ingest) } : {}),
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 realtimeSessionOf = sessionResolverFrom(realtime.service);
+if (deployments) deployments.devices.onBlock = (app, device) => { void realtime.service.endDeviceSessions(app, device); };
+const deviceGate = deployments && ((userId: string, headers: import('http').IncomingHttpHeaders, kind: string) => {
+  const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
+  return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
+});
 
 const server = await startProxy({
   port: PORT,
@@ -334,6 +340,7 @@ const server = await startProxy({
   providers,
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
+  ...(deviceGate ? { deviceGate } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
     ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
@@ -376,6 +383,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     deployments?.controller.stop();
+    void deployments?.devices.flush().catch(() => {});
     realtime.stop();
     declared?.stop();
     keyManager.stop();

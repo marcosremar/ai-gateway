@@ -29,6 +29,7 @@ export interface RealtimeClaims {
   dep: string;
   rep: string;
   cfg: string;
+  dev?: string;
   iat: number;
   exp: number;
   cfd?: string;
@@ -73,9 +74,9 @@ function sign(input: string, key: Uint8Array): Buffer {
   return createHmac('sha256', key).update(input).digest();
 }
 
-/** Claims serialized in a fixed order (sid, app, dep, rep, cfg, iat, exp) so the vectors are byte-exact. */
+/** Claims serialized in a fixed order (sid, app, dep, rep, cfg, [dev], iat, exp, [cfd]) so the vectors are byte-exact. */
 export function signSessionToken(claims: RealtimeClaims, key: Uint8Array): string {
-  const ordered = { sid: claims.sid, app: claims.app, dep: claims.dep, rep: claims.rep, cfg: claims.cfg, iat: claims.iat, exp: claims.exp, ...(claims.cfd ? { cfd: claims.cfd } : {}) };
+  const ordered = { sid: claims.sid, app: claims.app, dep: claims.dep, rep: claims.rep, cfg: claims.cfg, ...(claims.dev ? { dev: claims.dev } : {}), iat: claims.iat, exp: claims.exp, ...(claims.cfd ? { cfd: claims.cfd } : {}) };
   const input = `${b64url(JSON.stringify(HEADER))}.${b64url(JSON.stringify(ordered))}`;
   return `${input}.${sign(input, key).toString('base64url')}`;
 }
@@ -95,6 +96,7 @@ function claimsOf(value: unknown): RealtimeClaims | null {
   if (!str('sid') || !str('app') || !str('dep') || !str('rep') || typeof c.cfg !== 'string') return null;
   if (!Number.isInteger(c.iat) || !Number.isInteger(c.exp)) return null;
   if (c.cfd !== undefined && typeof c.cfd !== 'string') return null;
+  if (c.dev !== undefined && typeof c.dev !== 'string') return null;
   return c as unknown as RealtimeClaims;
 }
 
