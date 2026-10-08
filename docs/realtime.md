@@ -78,7 +78,15 @@ first_sound_from_speech_ms, opener, deadline_ms, deadline_missed}`, `{type:"open
 audio_ms}`, `{type:"deadline_missed", deadline_ms}` (next section).
 
 Client → edge: `{type:"interrupt"}`, `{type:"end_turn"}` (client VAD: the learner stopped), `{type:"config_update",
-messages?}` (append to the history), `{type:"ping"}`.
+messages?, opener?}`, `{type:"ping"}`.
+
+**The signed session config is authoritative.** A client `config_update` may carry only `messages` (appended to the
+history; `user` and `assistant` roles with string content — the SDK replays the turns of a broken session into the new
+one) and `opener` (`null` switches the signed opener off, anything else switches the signed one back on: the value is
+never used). Any other field, a `system` message or a malformed `messages` refuses the whole update: nothing changes,
+the client gets `{type:"error", code:"forbidden"}` and the edge emits `edge.config.refused {keys, count}` (field names
+only). `system`, `voice`, `fallback_voice`, `user_template`, `max_tokens`, `temperature`, `stt_prompt`, `language`,
+`vad` and `first_audio_deadline_ms` change only with a config signed by the gateway for the app.
 
 ### First-audio deadline and opener
 

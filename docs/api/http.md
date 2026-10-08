@@ -494,6 +494,11 @@ Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; `?to
 | `DELETE /v1/realtime/sessions/:id` | ends the session on the replica (frees its slot) → 204 |
 | `GET /v1/realtime/ws?token=…[&traceparent=…]` | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |
 
+Control messages from the browser (WS text frames, WebRTC data channel): `interrupt`, `end_turn`, `ping` and
+`config_update {messages?, opener?}`. The session config signed in the token is authoritative: a `config_update` with
+any other field (`system`, `voice`, `user_template`, …) or a `system` message is refused whole with
+`{type:"error", code:"forbidden"}` ([realtime.md](../realtime.md) § Events and control messages).
+
 ### Environment
 
 | Variable | Default | |

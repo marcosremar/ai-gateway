@@ -280,7 +280,7 @@ Correlated events (contract: the gateway's `src/telemetry/contract.ts`) through 
 lines on stdout. `traceparent` is read from the offer request header (or the offer body) and from the WS
 `?traceparent=` query, kept per session, and forwarded (same trace, new span) on every model call. Events:
 `edge.session.open` / `edge.session.close` (durMs, reason, turns), `edge.capacity.reject` (active, max; `reason:warming`
-when the model is not ready), `edge.token.reject` (reason), `edge.ice.state` (state), `edge.ws.close` (code),
+when the model is not ready), `edge.token.reject` (reason), `edge.config.refused` (keys, count), `edge.ice.state` (state), `edge.ws.close` (code),
 `edge.stt.done` (durMs, filtered, audioMs, chars), `edge.stt.filtered` (codes), `edge.llm.first_token`,
 `edge.tts.first_audio`, `edge.turn.opener` (index, chars, durMs from the speech), `edge.turn.deadline_missed`
 (deadlineMs), `edge.turn.done` (durMs from end of speech, outcome, stage times), `edge.upstream.error`
@@ -322,10 +322,14 @@ instead of the redirect. `REALTIME_TURN_URLS` example:
 
 - `vad.state` is `"start" | "end"` (as `docs/realtime.md`), not free text.
 - After `interrupted` the edge also sends `done{interrupted: true}` so a client waiting for `done` is released.
-- `config_update{messages}` **appends** to the history (as `docs/realtime.md`); it may also carry `system`, `voice`,
-  `fallback_voice`, `max_tokens`, `temperature`, `stt_prompt`, `user_template`.
+- `config_update{messages}` **appends** to the history (as `docs/realtime.md`). The client may send only `messages`
+  (`user` / `assistant`) and `opener` (off with `null`, back to the signed one with anything else); every other field
+  is refused with `error{code:"forbidden"}` and counted in `edge.config.refused` (`session.py` `_client_update`,
+  `tests/test_session.py` `signed_config_is_authoritative`). Until 2026-10-08 the edge also took `system`, `voice`,
+  `fallback_voice`, `max_tokens`, `temperature`, `stt_prompt`, `user_template`, `first_audio_deadline_ms` and a new
+  `opener` from the client, which let a browser rewrite what the token's signed `cfg` fixed.
 - Extra events: `pong{t}`; `filtered` is followed by `done{filtered:true}`; errors use codes `unauthorized`,
-  `capacity`, `warming`, `bad_request`, `bad_message`, `upstream`, `session_limit`, `idle`, `not_found`.
+  `capacity`, `warming`, `bad_request`, `bad_message`, `forbidden`, `upstream`, `session_limit`, `idle`, `not_found`.
 - Token size: the realtime doc says ~6.5 KB; a 6144-char `cfg` makes an ~8.3 KB token (it is base64url-encoded twice),
   so the gateway's WS relay must accept request lines of ≥ 9 KB too.
 - `rep` is the gateway's replica id (`fr-par-2:<uuid>` on Scaleway); the edge learns its own from the metadata service
