@@ -11,6 +11,7 @@
  */
 
 import { activeWindow, type PressureState } from './autoscale';
+import { filesByUrl } from './boot-files';
 import { replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
@@ -119,6 +120,7 @@ export interface ControllerOptions {
   /** Single-backend shorthand (kept for callers and tests from before `backends`). */
   backend?: DeploymentBackend;
   store: DeploymentStore;
+  publicUrl?: string;
   probe: ReplicaProbe;
   namespace?: string;
   /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
@@ -222,6 +224,7 @@ export abstract class ControllerState {
   protected readonly defaultProvider: DeploymentProvider;
   /** RTT gate per replica (backends with `measureRtt`, i.e. Vast), by machine id. */
   protected readonly gates = new Map<string, GateState>();
+  protected readonly udp = new Map<string, 'ok' | 'blocked'>();
   /** Machines created before this process started were adopted: measured for the view, never released by the gate. */
   protected readonly startedAt: number;
   readonly namespace: string;
@@ -244,6 +247,10 @@ export abstract class ControllerState {
     const backend = this.backends[provider ?? this.defaultProvider];
     if (!backend) throw new Error(`no backend configured for provider '${provider}'`);
     return backend;
+  }
+
+  protected forVast(rt: Runtime, spec: DeploymentSpec): DeploymentSpec {
+    return filesByUrl(spec, rt.record.replicaToken, this.opts.publicUrl, this.now());
   }
 
   protected providerOf(m: ReplicaMachine): DeploymentProvider {

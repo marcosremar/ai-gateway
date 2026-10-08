@@ -80,7 +80,10 @@ port. `realtime` works there as follows (`vastReplicaInit`, `realtime-ports.ts`,
   one port per session, mapped probe port, responder on the container port) and on two Vast hosts (2026-10-08,
   `docs/reports/2026-10-07-realtime-handoff.md` § Prova final ao vivo — Vast): the onstart shell sees
   `VAST_UDP_PORT_<n>` (`/etc/environment` has none); on one host WebRTC media flowed `host/host` over the mapped
-  ports, on the other no inbound UDP arrived at all and the edge fell back to `ws`. UDP reachability is per host.
+  ports, on the other no inbound UDP arrived at all and the edge fell back to `ws`. UDP reachability is per host:
+  the gateway records it per replica and per host and, with `realtime.requireWebrtc`, releases such a host
+  (§ Reachability). Not run live: that record and release on real hosts, WebRTC from a French Vast host, a browser
+  or a phone on Vast, TURN on Vast (docs/deployments.md § Vast for a class: not proven live).
 
 ## Firewall and public addresses of scaled replicas
 
@@ -119,6 +122,21 @@ and every step is logged:
 - Per session: `edge.ice.selected` and `rt.ice.selected` (browser) say which pair carries the media (`host`/`relay` on
   each side, protocol, RTT), in the session's trace.
 - `GET /__aigw/rt/status` → `net: {path, udpInbound, probePort, publicIp, probeHits, relay, reasons, checkedAt}`.
+- **The gateway does not offer WebRTC on an unproven path** (`webrtcProven`, `src/realtime/admission.ts`): for an edge
+  that reports `net` and a probe port, `webrtc` is in a session's `transports` only when `udpInbound` is `ok` or the
+  path is `relay`, whatever the edge itself lists (it lists `webrtc` while `unknown`, and between a `blocked` report
+  and the end of its TURN tries). A session admitted on a replica not probed yet waits for that probe, at most 2.5 s
+  (`NET_ADMIT_WAIT_MS`; one probe shared by every admission of the moment): UDP that answers costs one round trip
+  and WebRTC stays first; UDP that does not sends the learner straight to `ws` — the answer does not list `webrtc`,
+  so no client waits on an ICE timeout. An edge without `net` (before netcheck) is trusted as before.
+- **The result is kept**: `udp: "ok" | "blocked" | null` on each replica of `GET /v1/deployments/:name`
+  (`controller.noteUdp`), `udp` in the attributes of `rt.session.admitted`, and on the Vast host's record
+  (docs/deployments.md § Host reputation). A replica with blocked UDP keeps serving `ws` and `/v1/s2s`.
+- **`realtime.requireWebrtc: true`** (spec, default off): blocked UDP with no working relay is a failed boot of that
+  host — the replica is released with reason `udp-blocked` (shown in `lastPlacement`), replaced, and the host is not
+  rented again for that deployment for 24 h. Only a replica this gateway process created, never proven `ok`, with no
+  session seated: one that serves learners on `ws` is kept. The probe runs after the replica is ready (the edge is
+  up by then), so the release comes ≈ 15 s after ready; nothing is offered WebRTC in between.
 
 Proven locally with real coturn, iptables and Chromium (`scripts/realtime-e2e`, 2026-10-07): direct 2.2 s to connect;
 inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first audio ~240 ms on all three.

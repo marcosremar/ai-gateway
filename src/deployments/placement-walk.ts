@@ -28,6 +28,7 @@ export interface PlaceArgs {
    */
   admit?: (eurPerHour: number, place: DeploymentSpec) => string | null;
   placed?: (provider: DeploymentProvider) => number;
+  forVast?: (spec: DeploymentSpec) => DeploymentSpec;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
@@ -110,6 +111,7 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
       skipped.push(`${where(step)}: provider not configured`);
       continue;
     }
+    if (step.provider === 'vast' && args.forVast) step.spec = args.forVast(step.spec);
     const unfit = step.provider === 'vast' ? vastUnfit(step.spec, args.backendFor) : null;
     if (unfit) { skipped.push(`${where(step)}: ${unfit}`); continue; }
     const { price, skip } = await priceOf(backend, step.spec);

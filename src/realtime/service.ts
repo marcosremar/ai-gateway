@@ -13,7 +13,7 @@ import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import type { AppLimitDenial } from '../gateway/proxy/app-limits';
 import { EdgeStatusCache, type EdgeStatus, type EdgeStatusResult } from './edge-status';
 import {
-  isEdgeTransport, orderTransports, pickReplica, sessionCharge, REALTIME_REQUESTS_PER_MINUTE,
+  isEdgeTransport, orderTransports, pickReplica, sessionCharge, webrtcProven, REALTIME_REQUESTS_PER_MINUTE,
   type RealtimeTransportType, type ReplicaCandidate,
 } from './admission';
 import { iceServersFor, type IceConfig, DEFAULT_STUN_URLS } from './ice';
@@ -27,7 +27,7 @@ import {
   RT_MAX_CFG_CHARS, RT_MAX_CFG_REF_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
 } from './token';
 
-export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list'>>;
+export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list' | 'noteUdp'>>;
 
 export interface RealtimeServiceOptions {
   controller: RealtimeController | null;
@@ -66,6 +66,7 @@ export interface RealtimeServiceOptions {
 export const REALTIME_DEFAULT_TTL_SECONDS = 600;
 const MAX_SESSION_BODY = 256 * 1024;
 const NET_RETRY_MS = 60_000;
+const NET_ADMIT_WAIT_MS = 2_500;
 const FALLBACK = { transport: 's2s-stream', url: '/v1/s2s' } as const;
 
 export interface ResolvedSession {
@@ -116,6 +117,7 @@ export class RealtimeService {
   private poller: ReturnType<typeof setInterval> | null = null;
   private netLoop: ReturnType<typeof setInterval> | null = null;
   private readonly netProbed = new Map<string, number>();
+  private readonly netProbing = new Map<string, Promise<void>>();
   private readonly netNotDirect = new Map<string, number>();
   private readonly turn: TurnHealth;
   private turnLoop: ReturnType<typeof setInterval> | null = null;
@@ -172,7 +174,15 @@ export class RealtimeService {
    * UDP echo to the edge's probe port, then the result (and TURN credentials for the edge's own relay test) to the
    * edge, which decides direct / relay / ws and lists its transports accordingly. At most one probe a minute per replica.
    */
-  async probeNet(dep: string, r: { id: string; base: string }, status: EdgeStatus, token: string): Promise<void> {
+  probeNet(dep: string, r: { id: string; base: string }, status: EdgeStatus, token: string): Promise<void> {
+    const running = this.netProbing.get(r.id);
+    if (running) return running;
+    const probing = this.probeNetOnce(dep, r, status, token).finally(() => this.netProbing.delete(r.id));
+    this.netProbing.set(r.id, probing);
+    return probing;
+  }
+
+  private async probeNetOnce(dep: string, r: { id: string; base: string }, status: EdgeStatus, token: string): Promise<void> {
     const net = status.net;
     if (!status.probePort || !net) return;
     const now = this.now();
@@ -199,6 +209,8 @@ export class RealtimeService {
     if (decided.path === 'direct') this.netNotDirect.delete(r.id);
     else this.netNotDirect.set(r.id, (this.netNotDirect.get(r.id) ?? 0) + 1);
     this.status.invalidate(r.id);
+    await this.opts.controller?.noteUdp?.(dep, r.id, udp.result, { path: decided.path, active: status.active })
+      .catch(err => this.log('realtime: udp result not recorded', { replica: r.id, error: (err as Error).message }));
     this.log('realtime: media path', { deployment: dep, replica: r.id, udpInbound: udp.result, rttMs: udp.rttMs, path: decided.path ?? 'unknown', reasons: decided.reasons });
     this.emit(trace, 'rt.net.probe', {
       level: decided.path === 'ws' || !decided.path ? 'warn' : 'info', durMs: performance.now() - started,
@@ -371,7 +383,7 @@ export class RealtimeService {
     this.log('realtime: session admitted', { sid, app, deployment: dep, replica: placed.replica.id, charge, transports: transports.map(t => t.type), traceId: trace.traceId });
     this.emit(trace, 'rt.session.admitted', {
       sessionId: sid, durMs: this.now() - started,
-      attrs: { deployment: dep, replica: placed.replica.id, active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1, turn: iceServers.length > 1 },
+      attrs: { deployment: dep, replica: placed.replica.id, active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1, turn: iceServers.length > 1, udp: placed.replica.status.net?.udpInbound ?? null },
     });
     sendJson(res, 200, {
       sessionId: sid, token, ...(byReference ? { cfg } : {}), expiresAt: new Date(exp * 1000).toISOString(), deployment: dep, traceId: trace.traceId,
@@ -431,11 +443,10 @@ export class RealtimeService {
     }
     const token = controller.tokenOf(dep) ?? '';
     const results: Array<{ r: { id: string; base: string }; s: EdgeStatusResult }> = await Promise.all(
-      ready.map(async r => ({ r, s: await this.status.get(r.id, r.base, token) })));
+      ready.map(async r => ({ r, s: await this.provenStatus(dep, r, token) })));
     const candidates: ReplicaCandidate[] = [];
     for (const { r, s } of results) {
       if (!s.ok) continue;
-      void this.probeNet(dep, r, s.status, token).catch(() => {});
       reportExternalLoad(dep, r.id, s.status.active, s.status.max, this.now());
       candidates.push({ id: r.id, base: r.base, status: s.status, pending: this.pendingOn(r.id) });
     }
@@ -450,6 +461,20 @@ export class RealtimeService {
     // Ready but full: tell the autoscaler (wake keeps the idle clock fresh; the pressure comes from the load report).
     if (!noWakeActive()) { try { controller.wake(dep); } catch { /* vanished */ } }
     return { refusal: { status: 503, code: 'saturated', message: `deployment '${dep}': every replica's realtime slots are taken`, retryAfter: 2 } };
+  }
+
+  private async provenStatus(dep: string, r: { id: string; base: string }, token: string): Promise<EdgeStatusResult> {
+    let s = await this.status.get(r.id, r.base, token);
+    if (!s.ok) return s;
+    const probing = this.probeNet(dep, r, s.status, token).catch(() => {});
+    if (s.status.net?.udpInbound === 'unknown' && s.status.probePort) {
+      await Promise.race([probing, new Promise<void>((done) => { setTimeout(done, NET_ADMIT_WAIT_MS).unref?.(); })]);
+      if (!this.readyReplicas(dep).some(x => x.id === r.id)) return { ok: false, reason: 'unreachable' };
+      s = await this.status.get(r.id, r.base, token, { fresh: true });
+      if (!s.ok) return s;
+    }
+    const { status } = s;
+    return { ok: true, status: { ...status, transports: status.transports.filter(t => t !== 'webrtc' || webrtcProven(status)) } };
   }
 
   /** Verifies a session token against its deployment's key and finds its replica. */

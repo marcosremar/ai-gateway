@@ -333,10 +333,14 @@ function realtimeOf(raw: unknown): RealtimeSpec {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('realtime must be an object');
   const r = raw as Record<string, unknown>;
   for (const key of Object.keys(r)) {
-    if (!['maxSessions', 'edgeImage', 'udpPorts', 'env'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
+    if (!['maxSessions', 'edgeImage', 'udpPorts', 'env', 'requireWebrtc'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
   }
   const out: RealtimeSpec = {};
   if (r.maxSessions !== undefined) out.maxSessions = int(r.maxSessions, 'realtime.maxSessions', 1, 256);
+  if (r.requireWebrtc !== undefined) {
+    if (typeof r.requireWebrtc !== 'boolean') throw new SpecError('realtime.requireWebrtc must be a boolean');
+    if (r.requireWebrtc) out.requireWebrtc = true;
+  }
   if (r.edgeImage !== undefined) out.edgeImage = str(r.edgeImage, 'realtime.edgeImage', IMAGE_RE);
   if (r.udpPorts !== undefined) {
     if (!Array.isArray(r.udpPorts) || r.udpPorts.length !== 2) throw new SpecError('realtime.udpPorts must be [lo, hi]');

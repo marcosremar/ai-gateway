@@ -306,3 +306,50 @@ describe('POST /v1/realtime/sessions', () => {
     expect((await gw.create({ config: CONFIG })).status).toBe(200);
   });
 });
+
+describe('WebRTC is offered only where UDP was proven', () => {
+  let edge: FakeEdge;
+  let gw: TestGateway;
+  beforeEach(async () => { _resetExternalLoad(); edge = await startFakeEdge(); });
+  afterEach(async () => { await gw?.close(); await edge.close(); });
+
+  const withNet = (udpInbound: 'unknown' | 'ok' | 'blocked', path: 'unknown' | 'direct' | 'relay' | 'ws') => ({
+    active: 0, max: 4, transports: ['webrtc', 'ws'], probePort: 41008, net: { path, udpInbound, publicIp: '203.0.113.9', checkedAt: udpInbound === 'unknown' ? null : 1 },
+  }) as never;
+  const types = async (res: Response) => ((await res.json()) as { transports: Array<{ type: string }> }).transports.map(t => t.type);
+  const open = async (probe: 'ok' | 'blocked', after: Parameters<typeof withNet>) => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    const noted: unknown[] = [];
+    controller.noteUdp = async (...args) => { noted.push(args); };
+    let probes = 0;
+    gw = await startGateway(controller, {
+      netProbeMs: 0,
+      probeUdpImpl: async () => { probes++; edge.status = withNet(...after); return { result: probe, rttMs: probe === 'ok' ? 31 : null, tries: 3 }; },
+    });
+    return { noted, probes: () => probes };
+  };
+
+  it('a fresh replica is probed before the first answer; blocked UDP sends every learner of the class straight to ws and the controller is told once', async () => {
+    edge.status = withNet('unknown', 'unknown');
+    const { noted, probes } = await open('blocked', ['blocked', 'unknown']);
+    const answers = await Promise.all([1, 2, 3].map(() => gw.create({ config: CONFIG, prefer: 'webrtc' })));
+    for (const res of answers) expect(await types(res)).toEqual(['ws', 's2s-stream', 'post']);
+    expect(probes()).toBe(1);
+    expect(noted).toEqual([['speech', 'r1', 'blocked', { path: undefined, active: 0 }]]);
+    expect(gw.events.find(e => e.event === 'rt.session.admitted')?.attrs).toMatchObject({ udp: 'blocked' });
+  });
+
+  it('UDP that answers keeps WebRTC first; a relay keeps it too; an edge from before the probe is trusted as before', async () => {
+    edge.status = withNet('unknown', 'unknown');
+    const { noted } = await open('ok', ['ok', 'direct']);
+    expect(await types(await gw.create({ config: CONFIG }))).toEqual(['webrtc', 'ws', 's2s-stream', 'post']);
+    expect(noted).toEqual([['speech', 'r1', 'ok', { path: undefined, active: 0 }]]);
+    edge.status = withNet('blocked', 'relay');
+    gw.realtime.service.status.invalidate('r1');
+    expect(await types(await gw.create({ config: CONFIG }))).toEqual(['webrtc', 'ws', 's2s-stream', 'post']);
+    edge.status = { active: 0, max: 4, transports: ['webrtc', 'ws'] };
+    gw.realtime.service.status.invalidate('r1');
+    expect(await types(await gw.create({ config: CONFIG }))).toEqual(['webrtc', 'ws', 's2s-stream', 'post']);
+  });
+});
+
