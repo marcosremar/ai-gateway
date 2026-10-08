@@ -2,6 +2,7 @@ import { SpecError } from './spec-error';
 import type { ScalingHold, ScalingMode, ScalingSpec } from './types';
 
 const MODES: readonly ScalingMode[] = ['economy', 'balanced', 'fast'];
+export const DEFAULT_SCALING_MODE: ScalingMode = 'balanced';
 const TARGET_FIELDS: Record<string, [number, number]> = { p50Ms: [50, 120_000], p95Ms: [50, 120_000] };
 const BUDGET_FIELDS: Record<string, [number, number]> = { eurPerHour: [0.001, 1000], eurPerMonth: [0.01, 1_000_000], maxReplicas: [1, 10] };
 const HOLD_MAX_MINUTES = 12 * 60;
@@ -29,7 +30,7 @@ export function scalingOf(raw: unknown): ScalingSpec {
   for (const key of Object.keys(raw)) {
     if (!['target', 'budget', 'mode'].includes(key)) throw new SpecError(`scaling: unknown field '${key}'`);
   }
-  const mode = raw.mode ?? 'balanced';
+  const mode = raw.mode ?? DEFAULT_SCALING_MODE;
   if (!MODES.includes(mode as ScalingMode)) throw new SpecError(`scaling.mode must be one of ${MODES.join(', ')}`);
   const out: ScalingSpec = { mode: mode as ScalingMode };
   if (raw.target !== undefined) {

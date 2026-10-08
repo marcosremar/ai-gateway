@@ -246,9 +246,14 @@ pins the table of today's rule in `fixtures/scaling-sim/today.txt`: a change of 
 
 ## Scaling policy: the `scaling` block (`scaling-policy.ts`, `controller-scaling.ts`)
 
-Optional. A deployment without it scales exactly as described above (the study deployment has none). With it, the
-scale-out trigger is no longer "peak of the last 60 s over 75 % for 20 s" but how long the excess lasts and where it is
-going, and the excess that is not worth a replica is left to the fallback:
+Every deployment runs under one mode (owner, 2026-10-08). A spec sent without the block gets `"scaling": { "mode":
+"balanced" }` (`DEFAULT_SCALING_MODE`) at `PUT`/`PATCH`, and a deployment stored without it gets the same when the
+gateway starts (log `deployments: no scaling block, running under the default mode`, with the names); the mode is in
+`spec.scaling.mode` of `GET /v1/deployments/:name` and in `mode` of the capacity route. The pressure rule of the section
+above ("peak of the last 60 s over 75 % for 20 s") is what a deployment without the block did before that date; it
+remains in the code for a controller built without `defaultScalingMode` (the unit tests and the simulator's `today`
+column). Under a mode the scale-out trigger is how long the excess lasts and where it is going, and the excess that is
+not worth a replica is left to the fallback:
 
 ```json
 "scaling": {
@@ -258,7 +263,8 @@ going, and the excess that is not worth a replica is left to the fallback:
 }
 ```
 
-`mode` is `economy`, `balanced` (default) or `fast`; `"scaling": null` removes the block. Load is counted in the unit of
+`mode` is `economy`, `balanced` (default) or `fast`; `"scaling": null` goes back to the default mode. The built-in
+voice profiles (`speech-stack`, `qwen3-tts`, `qwen3-tts-clone`) declare `fast`, `whisper-stt` declares `balanced`. Load is counted in the unit of
 `targetInflightPerReplica`: requests in flight + waiting, a refused request for the 1.5 s the fallback takes to answer
 it, and, when the controller is given session counts (`ControllerOptions.sessions(deployment)`: distinct realtime
 sessions wanting a slot, seated or refused; `null` = not available, the default), `sessions × target / ceiling`. Booting
@@ -362,9 +368,23 @@ A `PUT`/`PATCH` that changes the spec clears the create back-off, so a corrected
 identical `PUT` does not). `lastPlacement` in `GET /v1/deployments/:name` says where it landed and why the
 earlier places were skipped.
 
-- **`placements`** (Scaleway only, ≤ 6 `{ zone?, machineType? }`): the spec's own zone/type first, then each entry
-  **in the given order** (never re-ranked), all at the spec's `maxEurPerHour`. A pinned `osImageId` only applies in
-  its own zone; an exposed deployment may change only `machineType`. The `speech-stack` profile carries some.
+- **`placements`** (a Scaleway spec, ≤ 6 entries): the spec's own zone/type first, then each entry **in the given
+  order** (never re-ranked). A Scaleway entry is `{ zone?, machineType? }` at the spec's `maxEurPerHour`; a pinned
+  `osImageId` only applies in its own zone; an exposed deployment may change only `machineType`.
+  An entry on **another provider** is `{ "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85,
+  "maxReplicas": 1 }`, all four required (400 otherwise; GPU deployments without `exposure` only): the price cap of
+  that place and the most replicas of this deployment that provider may hold at once (running or being created). The
+  walk reaches it when the Scaleway places before it are not sold, over the cap, out of stock or over quota. Every
+  create starts again from the top, so once Scaleway places a replica again the next one goes there; a replica already
+  on Vast keeps serving until the usual scale-in, nothing is migrated. A Vast place the spec cannot run on is skipped
+  with the reason in `lastPlacement` and in `warnings` of the view, never refused at `PUT`: `files` (use `fileUrls`),
+  an image without `bootScript` or `entrypoint`, an image in the gateway's own Scaleway registry without a
+  `registryAuth` (a pull-only credential: the gateway's key is never sent to a marketplace host), no `VAST_API_KEY`.
+  `idleAction: "stop"` is accepted: the Vast replica is deleted where a Scaleway one is parked. `minCuda`, `near`,
+  `maxRttMs` and `maxRttExcessMs` of the spec apply to it. The built-in profiles: `speech-stack` L40S fr-par-2 →
+  L40S fr-par-1 → one RTX 5090 on Vast (no L4: the account's L4 quota of 2 belongs to the TTS); `qwen3-tts` and
+  `qwen3-tts-clone` L4 fr-par-2 → L4 fr-par-1 → up to two RTX 5090 on Vast; `whisper-stt` is a CPU deployment and
+  stays on Scaleway (Vast rents GPU hosts only). Not run live under these profiles.
 - **`candidates`**: the ranked, multi-provider ladder below, a cap per entry.
 
 Without either, a spec has one place: `provider` + `zone` + `machineType`, refused above `maxEurPerHour` (as before).
@@ -411,8 +431,10 @@ With `candidates`, each create walks a **ranked ladder**:
 `provider: "vast"` (or a Vast candidate) needs `VAST_API_KEY` (from the dev API, like the Scaleway key). Code:
 `src/deployments/vast-backend.ts` (lean, separate from the GPU-pod client in `src/gateway/providers/gpu/`).
 
-- **Boot-script mode only.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
-  container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Both are required.
+- **One container per host.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
+  container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Without a
+  `bootScript` the spec's `entrypoint` + `args` are run there instead (after loading `/srv/aigw/app.env`), so an
+  image-mode spec needs its start command declared; the image's own `CMD` is not run.
   `files`, `exposure` and `idleAction: "stop"` are refused for Vast (no user_data service, no reserved IP).
   Vast accepts 32 KB of env per instance and the boot script travels there base64 twice: a `bootScript` above
   ~14 KB is refused at PUT (download large payloads at boot). A private image needs `registryAuth` in the spec

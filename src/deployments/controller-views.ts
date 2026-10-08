@@ -5,7 +5,8 @@
 
 import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './controller-state';
 import { ReconcileLoop } from './controller-reconcile';
-import { DEFAULT_NEAR } from './placements';
+import { vastUnfit } from './placement-walk';
+import { DEFAULT_NEAR, placementsOf } from './placements';
 import { planReplicas, replicaPhase } from './planner';
 import { DEFAULT_MAX_RTT_EXCESS_MS, DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
 import type { DeploymentSpec, DeploymentView, OffersPreview } from './types';
@@ -25,11 +26,11 @@ export abstract class ControllerViews extends ReconcileLoop {
     const spec = this.deployments.get(name)?.record.spec;
     const backend = this.backends.vast;
     if (!spec || !backend?.previewOffers) return null;
-    const vast = spec.provider === 'vast' ? spec : (spec.candidates ?? []).find(c => c.provider === 'vast');
+    const vast = spec.provider === 'vast' ? spec : [...(spec.candidates ?? []), ...(spec.placements ?? [])].find(c => c.provider === 'vast');
     if (!vast) return null;
     const near = spec.near ?? DEFAULT_NEAR;
     const [offers, baseline] = await Promise.all([
-      backend.previewOffers({ ...spec, provider: 'vast', machineType: vast.machineType, maxEurPerHour: vast.maxEurPerHour }),
+      backend.previewOffers({ ...spec, provider: 'vast', machineType: vast.machineType ?? spec.machineType, maxEurPerHour: vast.maxEurPerHour ?? spec.maxEurPerHour }),
       backend.measureBaselineRtt?.(near).catch(() => null) ?? null,
     ]);
     const limits = {
@@ -165,9 +166,15 @@ export abstract class ControllerViews extends ReconcileLoop {
       sessions: distinctSessions(name, 60_000, now),
       hold: rt.record.hold && rt.record.hold.until > now
         ? { replicas: rt.record.hold.replicas, until: new Date(rt.record.hold.until).toISOString() } : null,
-      warnings: rt.record.spec.coldStartWaitSeconds > maxWait
-        ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]
-        : [],
+      warnings: [
+        ...(rt.record.spec.coldStartWaitSeconds > maxWait
+          ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]
+          : []),
+        ...placementsOf(rt.record.spec).filter(s => s.provider === 'vast' && s.provider !== rt.record.spec.provider).flatMap((s) => {
+          const unfit = this.backends.vast ? vastUnfit(s, p => this.backends[p]) : 'VAST_API_KEY is not set';
+          return unfit ? [`the vast ${s.machineType} fallback placement is skipped: ${unfit}`] : [];
+        }),
+      ],
     };
   }
 }

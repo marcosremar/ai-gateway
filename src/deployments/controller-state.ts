@@ -17,7 +17,7 @@ import type { GateState } from './rtt-gate';
 import { externalInflightOn } from '../realtime/external-load';
 import type {
   DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
-  ReplicaProbe,
+  ReplicaProbe, ScalingMode,
 } from './types';
 
 export class DeploymentError extends Error {
@@ -145,6 +145,7 @@ export interface ControllerOptions {
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
   sessions?: (deployment: string) => number | null;
+  defaultScalingMode?: ScalingMode;
 }
 
 export interface Lease {
@@ -203,7 +204,7 @@ export abstract class ControllerState {
   protected readonly poweredOnAt = new Map<string, number>();
   protected readonly startRefused = new Map<string, number>();
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
-  protected readonly pendingSpend = new Set<{ cost: number }>();
+  protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider }>();
   protected readonly probes = new Map<string, ProbeState>();
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();

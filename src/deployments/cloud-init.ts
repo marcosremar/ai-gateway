@@ -274,7 +274,9 @@ done
  */
 export function vastReplicaInit(spec: DeploymentSpec, token: string, opts: ReplicaInitOptions = {}): string {
   if (!/^[A-Za-z0-9_-]{24,}$/.test(token)) throw new Error('replica token must be 24+ chars of [A-Za-z0-9_-]');
-  if (!spec.bootScript) throw new Error('vast replicas run in boot-script mode only');
+  const script = spec.bootScript
+    ?? (spec.entrypoint ? `set -a; . /srv/aigw/app.env; set +a\nexec ${[spec.entrypoint, ...spec.args].map(shellQuote).join(' ')}\n` : null);
+  if (!script) throw new Error('vast replicas need bootScript, or entrypoint + args');
   const env = { ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env };
   const envFile = Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
   const stopAfterSeconds = (Math.round(spec.maxHours * 60) + 30) * 60;
@@ -293,7 +295,7 @@ mkdir -p /etc/nginx/conf.d && rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf
 nginx -t && { nginx -s reload 2>/dev/null || nginx; }
 ${spec.fileUrls ? `${fetchFilesScript(spec.fileUrls)}\n[ -e /files ] || ln -s ${FILES_DIR} /files` : ''}
-${bootScriptSection(spec.bootScript)}
+${bootScriptSection(script)}
 ${spec.realtime ? vastEdgeSection(spec, token, opts, bootChecks) : ''}
 for i in $(seq 1 ${bootChecks}); do
   curl -sf -o /dev/null http://127.0.0.1:${appPort}${spec.healthPath} && echo '{"ready":true}' > /srv/aigw/ready.json && break
