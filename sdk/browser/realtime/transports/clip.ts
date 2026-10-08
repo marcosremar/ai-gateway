@@ -35,6 +35,7 @@ type PlayerFactory = (opts: { rate: number }) => Promise<PcmPlayer>;
 /** Maps one s2s event onto the realtime vocabulary (null = nothing to show). */
 export function mapS2SEvent(e: S2SEvent): RealtimeEvent[] {
   switch (e.type) {
+    case 'route': return [{ type: 'route', provider: String(e.provider ?? ''), ...(e.fallback ? { fallback: String(e.fallback) } : {}) }];
     case 'transcript': return [{ type: 'transcript', text: String(e.text ?? ''), final: true }];
     case 'filtered': return [{ type: 'filtered', reasons: Array.isArray(e.reasons) ? e.reasons.map(String) : [] }];
     case 'sentence': return [{ type: 'reply_delta', text: String(e.text ?? '') }];

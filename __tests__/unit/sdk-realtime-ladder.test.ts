@@ -205,6 +205,24 @@ describe('createRealtimeSession', () => {
     s.close();
   });
 
+  it('clip rung: the page and turn.done learn who served the turn and why not the GPU', async () => {
+    const f = fakes({});
+    f.transports['s2s-stream'] = (ctx) => ({
+      type: 's2s-stream', clipBased: true, connect: async () => {}, send: () => {}, close: () => {},
+      sendTurn: async () => {
+        ctx.emit({ type: 'route', provider: 'composite', fallback: 'saturated' });
+        ctx.emit({ type: 'transcript', text: 'oi', final: true });
+        ctx.emit({ type: 'done' });
+      },
+    });
+    const { s, events, telemetry } = session(f, { preferredTransports: ['s2s-stream'] });
+    await s.connect();
+    await s.sendTurn(new Blob(['wav']));
+    expect(events).toContainEqual({ type: 'route', provider: 'composite', fallback: 'saturated' });
+    expect(telemetry.find(e => e.event === 'turn.done')!.attrs).toMatchObject({ transport: 's2s-stream', provider: 'composite', fallback: 'saturated' });
+    s.close();
+  });
+
   it('nothing connects: error + closed', async () => {
     const f = fakes({});
     const { s, events } = session(f);

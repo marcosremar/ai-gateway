@@ -74,6 +74,8 @@ describe('POST /v1/s2s routing', () => {
     expect(res.headers.get('content-type')).toBe('application/x-aigw-s2s');
     const { events, audio } = decodeAll(bytes);
     expect(events[0]).toEqual({ type: 'route', provider: 'deployment:parle-speech' });
+    expect(res.headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
+    expect(res.headers.get('x-gateway-fallback')).toBeNull();
     expect(events.map(e => e.type)).toEqual(['route', 'transcript', 'sentence', 'sentence', 'done']);
     expect(audio).toBe('Bom dia, querida!Pão quentinho.');
     expect(h.calls).toEqual([]);
@@ -149,9 +151,12 @@ describe('POST /v1/s2s routing', () => {
       },
     });
     const t0 = performance.now();
-    const { events, audio } = decodeAll((await h.call()).bytes);
+    const { res, bytes } = await h.call();
+    const { events, audio } = decodeAll(bytes);
     expect(performance.now() - t0).toBeLessThan(900);
     expect(events[0]).toMatchObject({ type: 'route', provider: 'composite', fallback: 'slow' });
+    expect([res.headers.get('x-gateway-provider'), res.headers.get('x-gateway-fallback'), res.headers.get('x-gateway-fallback-from')])
+      .toEqual(['composite', 'slow', 'deployment:parle-speech']);
     expect(events.some(e => e.type === 'route' && e.provider === 'deployment:parle-speech')).toBe(false);
     expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
   });

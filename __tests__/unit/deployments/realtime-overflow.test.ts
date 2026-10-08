@@ -55,6 +55,8 @@ describe('a replica full of realtime sessions takes no overflow turn', () => {
     const { res, events, ms } = await turn(x.controller);
     expect(res.status).toBe(200);
     expect(events[0]).toMatchObject({ type: 'route', provider: 'composite', fallback: 'saturated', from: 'deployment:speech' });
+    expect([res.headers.get('x-gateway-provider'), res.headers.get('x-gateway-fallback'), res.headers.get('x-gateway-fallback-from')])
+      .toEqual(['composite', 'saturated', 'deployment:speech']);
     expect(events.at(-1)).toMatchObject({ type: 'done' });
     expect(ms).toBeLessThan(1_000);
     expect(x.cloud.machines.get(x.id)!.requests).toBe(0);

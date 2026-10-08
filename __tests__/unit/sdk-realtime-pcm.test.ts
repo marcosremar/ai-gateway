@@ -86,7 +86,7 @@ describe('s2s-stream rung', () => {
 
   it('posts the clip with config and traceparent, reads binary frames as they stream, plays PCM, maps events', async () => {
     const chunks = [
-      encodeEvent({ type: 'route', provider: 'deployment:speech' }, 'binary'),
+      encodeEvent({ type: 'route', provider: 'composite', fallback: 'saturated', from: 'deployment:speech' }, 'binary'),
       encodeEvent({ type: 'transcript', text: 'um pão' }, 'binary'),
       encodeEvent({ type: 'sentence', text: 'Claro.' }, 'binary'),
       encodeEvent({ type: 'audio_format', encoding: 'pcm_s16le', sample_rate: 24_000 }, 'binary'),
@@ -113,8 +113,9 @@ describe('s2s-stream rung', () => {
     expect(seen!.headers.get('traceparent')).toBe(c.traceparent);
     expect(JSON.parse(String(seen!.form.get('config')))).toEqual({ system: 'S', messages: [] });
     expect(p.pushed).toEqual([{ samples: 480, rate: 24_000 }, { samples: 240, rate: 24_000 }]);
-    expect(events.map(e => e.type)).toEqual(['transcript', 'reply_delta', 'audio_start', 'reply', 'metrics', 'done', 'audio_end']);
-    expect(events[0]).toEqual({ type: 'transcript', text: 'um pão', final: true });
+    expect(events.map(e => e.type)).toEqual(['route', 'transcript', 'reply_delta', 'audio_start', 'reply', 'metrics', 'done', 'audio_end']);
+    expect(events[0]).toEqual({ type: 'route', provider: 'composite', fallback: 'saturated' });
+    expect(events[1]).toEqual({ type: 'transcript', text: 'um pão', final: true });
   });
 
   it('a non-2xx answer rejects (the session fails over and re-sends the clip)', async () => {

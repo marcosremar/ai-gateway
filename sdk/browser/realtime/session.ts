@@ -137,7 +137,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   let closed = false;
   let switching: Promise<void> | null = null;
   let npcSpeaking = false;
-  let turn: { id: string; endAt: number; firstAudio: boolean } | null = null;
+  let turn: { id: string; endAt: number; firstAudio: boolean; provider?: string; fallback?: string } | null = null;
   let mic: Promise<MediaStream> | null = null;
   let bridge: VoiceBridge | null = null;
   let voiceStop: (() => void) | null = null;
@@ -165,6 +165,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       if (e.text) appended.push({ role: 'user', content: e.text });
     }
     if (e.type === 'reply' && e.text) appended.push({ role: 'assistant', content: e.text });
+    if (e.type === 'route' && turn) Object.assign(turn, { provider: e.provider, fallback: e.fallback });
     if (e.type === 'audio_start') {
       npcSpeaking = true;
       if (turn && !turn.firstAudio) {
@@ -176,7 +177,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     if (e.type === 'audio_end' || e.type === 'interrupted') { npcSpeaking = false; quietSince = performance.now(); }
     if (e.type === 'metrics') metrics.lastTurn = { ttfa_ms: e.ttfa_ms, stt_ms: e.stt_ms, llm_ttft_ms: e.llm_ttft_ms, tts_ttfb_ms: e.tts_ttfb_ms };
     if (e.type === 'done') {
-      if (turn) telemetry.emit('turn.done', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: { empty: !!e.empty, filtered: !!e.filtered, transport: current?.type ?? null } });
+      if (turn) telemetry.emit('turn.done', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: { empty: !!e.empty, filtered: !!e.filtered, transport: current?.type ?? null, provider: turn.provider ?? null, fallback: turn.fallback ?? null } });
       turn = null;
       heardUntil = 0;
       quietSince = performance.now();
