@@ -31,7 +31,7 @@ model image:
 
 | Field | Default | Effect |
 |---|---|---|
-| `maxSessions` | the machine type's `RT_MAX_SESSIONS` env (speech-stack: L4 2, L40S 8), else 8 | `RT_MAX_SESSIONS`: admission refuses beyond it with code `capacity` |
+| `maxSessions` | the machine type's `RT_MAX_SESSIONS` env (speech-stack: L4 2, L40S 4), else 8 | `RT_MAX_SESSIONS`: admission refuses beyond it with code `capacity` |
 | `udpPorts` | `[50000, 50100]` | WebRTC media range, opened in the replica's firewall (≤ 1000 ports, ≥ 10000) |
 | `edgeImage` | `DEFAULT_EDGE_IMAGE` (`src/deployments/cloud-init.ts`) | the sidecar image |
 
@@ -104,7 +104,7 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 |---|---|
 | `POST /__aigw/rt/offer` | `{sdp, type:"offer", token, traceparent?}` → `{sdp, type:"answer", sessionId}`; 401 `unauthorized`, 503 `capacity` / `warming`, 400 `bad_request`. Again with the same token while the session lives: a new peer connection for it (re-offer) |
 | `POST /__aigw/rt/ice` | `{sessionId, candidate}` (string or `{candidate, sdpMid, sdpMLineIndex}`; empty = end) — optional, the answer carries all candidates |
-| `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], probePort, net, ready, byTransport, workers}` (`transports` is `["ws"]` on path `ws`) |
+| `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], probePort, net, ready, byTransport, workers, firstAudioMaxMs, shedding}` (`transports` is `["ws"]` on path `ws`; `available` is 0 while `shedding`) |
 | `POST /__aigw/rt/net` | `{udpInbound:"ok"\|"blocked", rttMs, iceServers}` from the gateway's probe → the decision (see *Reachability*) |
 | `DELETE /__aigw/rt/session/:id` | ends the WebRTC session (`sessionId` of the offer, = the token's `sid`); a WS session of the same `sid` ends when its socket closes |
 | `GET /__aigw/rt/ws?token=…&traceparent=…` | WebSocket. A refusal still upgrades, sends `{type:"error", code}` and closes 4401 (`unauthorized`) or 1013 (`capacity`/`warming`), so the code survives the relay |
@@ -165,6 +165,22 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   header is parsed and its rate resampled to 24 kHz). Voice semantics as the gateway's TTS: `voice` a catalog id (the
   replica's `/v1/voices`; a cloning TTS gets `ref_audio` = `EDGE_REF_BASE/refs/<id>.wav` + `ref_text`) or
   `{audio, text}`; an id the catalog does not know falls back to `fallback_voice` as a named voice.
+- **First-audio deadline** (`RT_FIRST_AUDIO_DEADLINE_MS` = 2000, at most 2500; `cfg.first_audio_deadline_ms` per
+  session; `RT_FIRST_AUDIO_MARGIN_MS` = 300): counted from the VAD's last speech frame (from the end of the turn when
+  the VAD heard none). A turn — speculated ones only once confirmed — with no audio queued at deadline − margin plays
+  the next cached line of `cfg.opener.lines` (`opener` events, the PCM into the same output queue the reply uses), or,
+  with none ready, reports `deadline_missed` at the deadline. The lines are synthesized at session start through the
+  same `/v1/audio/speech` call and voice fields as a sentence (`aigw_edge/opener.py`: per process, per voice + language
+  + text, 256 entries). When the opener has played out before any reply audio the edge emits `audio_end`; the reply
+  then opens with `audio_start` as usual. In `s2s` mode the edge owns the deadline (the replica's `/v1/s2s` gets no
+  `opener`). Contract, events and limits: [realtime.md](realtime.md) § First-audio deadline and opener.
+- **Shedding** (`RT_SHED_WINDOW_S` = 30, `0` = off): each finished turn's first reply audio from the speech (a turn
+  that ended with an opener or a missed deadline and no reply audio counts as just over the deadline) is kept for the
+  window, in the front and in every
+  WebRTC worker (the front reads the workers' maximum every second). While a learner is seated and the maximum is over
+  `RT_FIRST_AUDIO_DEADLINE_MS`, new sessions are refused with `capacity` and the status reports `available: 0`,
+  `shedding: true`; a seated learner (re-offer, WS next to WebRTC) is never refused by it, and an empty replica never
+  sheds.
 - `EDGE_UPSTREAM_MODE=s2s` instead sends the turn to the replica's `/v1/s2s` and re-emits its frames as realtime events
   (guard applied on its transcript, the call abandoned when it trips).
 - **Metrics** per turn: `ttfa_ms` (end of the learner's speech → first NPC audio out of the edge), `stt_ms`,
@@ -172,7 +188,10 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   endpointing wait: `endpoint_ms` is that wait (the VAD's last speech frame → the end of the turn, ≈ `RT_VAD_SILENCE_MS`
   on a server-VAD turn) and `ttfa_from_speech_ms` = `endpoint_ms` + `ttfa_ms` is first audio counted from the moment
   the learner stopped (both `null` when the VAD never heard speech). `edge.turn.done` carries them as `endpointMs`
-  and `ttfaFromSpeechMs`.
+  and `ttfaFromSpeechMs`. `first_sound_ms` / `first_sound_from_speech_ms` are the same two clocks for the first sound
+  of any kind (the opener when one played), next to `opener` (the line or null), `deadline_ms` and `deadline_missed`
+  (`firstSoundMs`, `firstSoundFromSpeechMs`, `opener`, `deadlineMs`, `deadlineMissed` in `edge.turn.done`). `ttfa_ms`
+  counts the opener audio still queued ahead of the reply.
 
 ## Process model and CPU budget
 
@@ -222,7 +241,8 @@ lines on stdout. `traceparent` is read from the offer request header (or the off
 `edge.session.open` / `edge.session.close` (durMs, reason, turns), `edge.capacity.reject` (active, max; `reason:warming`
 when the model is not ready), `edge.token.reject` (reason), `edge.ice.state` (state), `edge.ws.close` (code),
 `edge.stt.done` (durMs, filtered, audioMs, chars), `edge.stt.filtered` (codes), `edge.llm.first_token`,
-`edge.tts.first_audio`, `edge.turn.done` (durMs from end of speech, outcome, stage times), `edge.upstream.error`
+`edge.tts.first_audio`, `edge.turn.opener` (index, chars, durMs from the speech), `edge.turn.deadline_missed`
+(deadlineMs), `edge.turn.done` (durMs from end of speech, outcome, stage times), `edge.upstream.error`
 (stage, status), `edge.worker.restart`, `edge.load` (every 30 s per process). Never audio, transcript, LLM text or
 tokens — lengths, codes and durations only (checked by the harness on every batch).
 
@@ -243,7 +263,8 @@ instead of the redirect. `REALTIME_TURN_URLS` example:
 
 - `docker/aigw-edge/tests/run.sh units` — token (and the gateway's vectors: key, every case, TURN credential), cutter
   copy, VAD, 48→16 kHz filter, telemetry emitter, and `tests/test_session.py`: a session on in-process fakes (endpoint
-  metrics, the speculative turn confirmed / discarded / interrupted / closed, partials on and off).
+  metrics, the speculative turn confirmed / discarded / interrupted / closed, partials on and off, the first-audio
+  deadline: reply in time, late, opener still playing, barge-in, rotation, cache reuse, no opener; admission shedding).
 - `docker/aigw-edge/tests/run.sh harness` — fake models + the real edge (one with workers, one single-process in s2s
   mode) + learners over WS and WebRTC (aiortc), and, when nginx and bun exist, the real nginx front generated by
   `nginxConfig`: offer/answer, candidate ports in range, audio in → transcript → reply_delta → audio out (Opus heard by
