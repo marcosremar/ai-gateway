@@ -2,7 +2,8 @@
  * Placement: where a replica may run. Two spec fields, one walk (`placement-walk.ts`):
  *
  *   - `placements` (Scaleway): the spec's own zone/type first, then each entry IN ORDER (`placementsOf`), at the spec's
- *     `maxEurPerHour`; the walk moves on only when the type is not sold, over the cap, or out of stock (`isOutOfStock`).
+ *     `maxEurPerHour`; the walk moves on only when the type is not sold, over the cap, out of stock (`isOutOfStock`)
+ *     or over the account's quota (`quotaMachineType`: that machine type is then skipped in every zone).
  *   - `candidates` (Scaleway and Vast): a ladder ranked here (`rankCandidates`), each entry with its own cap.
  *
  * The ranking is pure, no I/O — the Vast backend ranks market offers with `rankOffers`. The owner's three goals:
@@ -37,13 +38,21 @@ export function placementsOf(spec: DeploymentSpec): DeploymentSpec[] {
 
 /**
  * The provider has no machine of this type in this zone right now. Scaleway answers a server create with
- * `412 {"type":"out_of_stock"}` (seen 2026-10-06 for L40S and L4 in fr-par-2); quota and capacity wordings count too.
+ * `412 {"type":"out_of_stock"}` (seen 2026-10-06 for L40S and L4 in fr-par-2); capacity wordings count too. A quota refusal is not one: it holds
+ * for the machine type in every zone (`quotaMachineType`).
  */
 export function isOutOfStock(err: unknown): boolean {
   const e = err as { status?: unknown; body?: unknown; message?: unknown } | null;
   const text = `${typeof e?.message === 'string' ? e.message : ''} ${typeof e?.body === 'string' ? e.body : ''}`;
   if (/out_of_stock|out of stock|shortage|insufficient capacity|no (?:more )?capacity|not enough (?:stock|capacity)/i.test(text)) return true;
   return e?.status === 412 && /stock|capacity|available/i.test(text);
+}
+
+export function quotaMachineType(err: unknown, fallback: string): string | null {
+  const e = err as { body?: unknown; message?: unknown } | null;
+  const text = `${typeof e?.message === 'string' ? e.message : ''} ${typeof e?.body === 'string' ? e.body : ''}`;
+  if (!/quota/i.test(text)) return null;
+  return /cp_servers_type_(\w+)/.exec(text)?.[1].replace(/_/g, '-') ?? fallback;
 }
 
 // ── Geography and ranking (`candidates`, Vast offers) ───────────────────────

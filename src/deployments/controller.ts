@@ -13,6 +13,7 @@
  */
 
 import { randomBytes } from 'crypto';
+import { isDeepStrictEqual } from 'util';
 import { replicaCloudInit } from './cloud-init';
 import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './controller-state';
 import { ControllerViews } from './controller-views';
@@ -82,6 +83,7 @@ export class DeploymentController extends ControllerViews {
     const now = this.now();
     const hold = rawHold === undefined ? existing?.record.hold : holdOf(rawHold, spec.maxReplicas, now);
     if (existing) {
+      if (!isDeepStrictEqual(existing.record.spec, spec)) Object.assign(existing, { backoffUntil: 0, createFailures: 0, stockOut: null });
       existing.record = {
         ...existing.record, spec, updatedAt: now, hold,
         ...(existing.record.app || !meta.app ? {} : { app: meta.app }),
