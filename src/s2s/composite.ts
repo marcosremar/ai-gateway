@@ -70,7 +70,7 @@ export interface SpokenAudio extends StageAnswer {
 
 /** The three stages, behind the gateway's routing. Implemented over loopback HTTP in production, faked in tests. */
 export interface StageClient {
-  transcribe(audio: Uint8Array, contentType: string, cfg: S2SConfig, signal: AbortSignal, hedgeMs?: number): Promise<StageAnswer & { text: string }>;
+  transcribe(audio: Uint8Array, contentType: string, cfg: S2SConfig, signal: AbortSignal, hedgeMs?: number, budgetMs?: number): Promise<StageAnswer & { text: string }>;
   chatStream(messages: ChatMessage[], cfg: S2SConfig, signal: AbortSignal, hedgeMs?: number): Promise<StageAnswer & { deltas: AsyncIterable<string> }>;
   speak(text: string, cfg: S2SConfig, signal: AbortSignal, hedgeMs?: number): Promise<SpokenAudio>;
 }
@@ -134,6 +134,8 @@ const isWavOrPcm = (contentType: string) => /wav|pcm|x-raw|octet-stream/i.test(c
 
 export const MAX_FIRST_AUDIO_DEADLINE_MS = 2_500;
 export const STAGE_HEDGE_MIN_MS = 1_000;
+export const STT_HEDGE_MS = 900;
+export const STT_BUDGET_MS = 3_000;
 const MAX_OPENER_LINES = 8;
 const MAX_OPENERS = 256;
 const OPENER_SYNTH_MS = 15_000;
@@ -247,7 +249,9 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
 
   let transcript = opts.transcript?.text ?? '';
   if (!opts.transcript) {
-    const heard = await stages.transcribe(opts.audio, opts.contentType, config, signal, hedgeMs());
+    const sttHedgeMs = Math.min(hedgeMs() ?? Infinity, positive(Number(process.env.S2S_STT_HEDGE_MS)) ?? STT_HEDGE_MS);
+    const sttBudgetMs = positive(Number(process.env.S2S_STT_BUDGET_MS)) ?? STT_BUDGET_MS;
+    const heard = await stages.transcribe(opts.audio, opts.contentType, config, signal, sttHedgeMs, sttBudgetMs);
     transcript = heard.text.trim();
     opts.emitEvent({ type: 'transcript', text: transcript, stt_ms: ms(), at_ms: ms(), provider: heard.provider, fallback: heard.fallback });
     if (heard.filtered?.length) opts.emitEvent({ type: 'filtered', stage: 'stt', reasons: heard.filtered });

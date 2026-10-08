@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runComposite, type S2SConfig } from '../../../src/s2s/composite';
+import { runComposite, STT_HEDGE_MS, type S2SConfig } from '../../../src/s2s/composite';
 import type { S2SEvent } from '../../../src/s2s/frames';
 import { fakeStages, sleep, type FakeStagesOptions } from './_fakes';
 
@@ -130,15 +130,14 @@ describe('runComposite: first-audio deadline and opener', () => {
   it('stage budget: with a deadline or an opener each stage call carries the time left to the deadline, at least 1 s', async () => {
     const enforced = await run({ voice: freshVoice(), first_audio_deadline_ms: 2_000, endpoint_ms: 700 }, { sttMs: 30 });
     const stt = enforced.calls.find(c => c.stage === 'stt')!;
-    expect(stt.hedgeMs).toBeGreaterThan(1_250);
-    expect(stt.hedgeMs).toBeLessThanOrEqual(1_300);
+    expect(stt.hedgeMs).toBe(STT_HEDGE_MS);
     const llm = enforced.calls.find(c => c.stage === 'llm')!;
-    expect(llm.hedgeMs).toBeLessThan(stt.hedgeMs as number);
+    expect(llm.hedgeMs).toBeLessThanOrEqual(1_300);
     expect(llm.hedgeMs).toBeGreaterThanOrEqual(1_000);
     const late = await run({ voice: freshVoice(), first_audio_deadline_ms: 500 }, { sttMs: 30 });
-    expect(late.calls.map(c => c.hedgeMs)).toEqual(late.calls.map(() => 1_000));
+    expect(late.calls.map(c => c.hedgeMs)).toEqual(late.calls.map(c => (c.stage === 'stt' ? STT_HEDGE_MS : 1_000)));
     const plain = await run({ voice: freshVoice() });
-    expect(plain.calls.every(c => c.hedgeMs === undefined)).toBe(true);
+    expect(plain.calls.map(c => c.hedgeMs)).toEqual(plain.calls.map(c => (c.stage === 'stt' ? STT_HEDGE_MS : undefined)));
     await sleep(0);
   });
 });

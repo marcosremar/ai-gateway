@@ -1329,3 +1329,121 @@ Open before the merge: (a) no replica has run the edge that survives a long conv
 above is edge `d4a160e4`, which is the same code but for the two commits; (b) the two-replica behaviour (new learners
 seated on the second replica, upgrade of the fallback learners, scale-in with a seated learner) has only its unit and
 simulator coverage; (c) an overflow learner waits 5 s for the reply at this hour, on one STT link.
+
+## Fallback fast: second STT link, hedge and stage budget (2026-10-08, `rt/fallback-fast`)
+
+The overflow learners of the proof above waited 4.9 s p50 / 13.4 s p95 / 18.9 s max for the reply because the composed
+fallback had one STT link (`openrouter:openai/whisper-large-v3-turbo`, 2.7 s p50 and up to 15.5 s that afternoon). No
+machine, no GPU, production untouched; a local gateway of this branch (`DEPLOYMENTS_ENABLED=0`, `--no-wake`) against the
+real OpenRouter, about $0.40.
+
+### Where the time goes (composed path, stages are serial)
+
+| Stage | Morning, healthy (1,769 turns, § Fallback under load) p50 / p95 | Afternoon proof (53 turns) p50 / p95 / max | What it is |
+|---|---|---|---|
+| Endpointing (client) | 700 | 700 | the page waits 700 ms of silence before it posts the clip |
+| STT | 670–790 / 1190–2310 | 2662 / 11529 / 15515 | one upload + one whole-clip transcription; nothing can start before it ends |
+| LLM first token | 660–700 / 820–1720 | 479 / 1580 / 2656 | starts when the transcript exists (already immediate) |
+| first clause cut | 90–110 / 190–2000 | — | the eager cutter (clause mark after 3 words) is the one in use |
+| TTS first byte | 790–840 / 950–1080 | 699 / 1145 / 1397 | MAI voice answers each sentence whole (first byte = whole clause) |
+| **First audio of the reply, from end of speech** | **3.0–3.2 s / 3.7–5.5 s** | **4.9 s / 13.4 s / 18.9 s** | sum of the above |
+
+Why 15.5 s on a stage whose budget is 8 s: the stage answered `503` at its 8 s budget and the loopback client
+(`retryStage`, meant for a replica that answers 502/503 at once while it boots) ran the whole stage a second time.
+
+Serial by nature: LLM after STT, TTS after the first clause. Already overlapped: the opener at the deadline, TTS of the
+next sentences (`ttsParallel` 2). Checked and left alone: the OpenAI SDK clients are cached per base URL + key and the
+connection is reused (the gateway adds nothing measurable: the same model through the gateway 534 ms p50, direct
+601 ms); the clip is forwarded as received, with no re-encoding (a 4 s turn is 160 kB of 16 kHz PCM WAV).
+
+### What changed
+
+- **STT hedge at 900 ms** (`STT_HEDGE_MS`, `S2S_STT_HEDGE_MS`): the composed turn sends `x-gateway-hedge-ms: 900` on
+  its STT sub-request whether or not a first-audio deadline is set (before: `deadline − endpoint`, 1300 ms, and only
+  with a deadline or an opener). 900 ms ≈ 1.3 × the healthy p50 of the first cloud link (670–790 ms). It is the
+  existing `runTargets` hedge: the next link starts in parallel, the first good answer wins, the loser is aborted;
+  `route.hedge` and `route.served {raced: true}` are emitted, the answer says `X-Gateway-Fallback: slow`. A link that
+  errors still hands over at once.
+- **STT stage budget of 3 s** (`STT_BUDGET_MS`, `S2S_STT_BUDGET_MS`): new sub-request header `x-gateway-budget-ms`
+  (same trust rule as the hedge cap: only the gateway's own loopback sub-request), which caps the route's
+  `GATEWAY_STT_BUDGET_MS` (8 s). Both links slow → `503 … timed out` at 3 s.
+- **No second run of a stage that used its time**: `retryStage` retries only a failure that came within 1 s
+  (`STAGE_RETRY_WITHIN_MS`) and inside the stage budget. This is what turned 8 s into 16 s; it applies to the three
+  stages.
+- App budget: unchanged and counted once per turn (`checkS2S`); stage sub-requests were never charged to the app. A
+  hedged turn is two provider calls (both visible in telemetry) and one app request.
+
+### The second link exists today, with the key the gateway already has
+
+No new credential is needed. The dev API serves `OPENROUTER_API_KEY`, `MISTRAL_API_KEY` and `NVIDIA_API_KEY`; it has
+no `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `FIREWORKS_API_KEY` or `OPENAI_API_KEY` (so the `groq` entry of `parle-stt`
+is `no_key`, and the gateway has no Mistral or NVIDIA STT provider). OpenRouter itself serves other transcription
+models on `/audio/transcriptions`, each with its own upstream and its own breaker (`stt:openrouter:<model>`). Same
+4 s Portuguese clip, 20 sequential calls each, 2026-10-08 ≈ 15:35 CEST, direct:
+
+| OpenRouter model | p50 | min – max | Price per second of audio | Transcript |
+|---|---|---|---|---|
+| `openai/whisper-large-v3-turbo` (today's only link) | 2030 | 334 – 22015 | $0.0000033 | exact |
+| `openai/whisper-large-v3` | 760 | 591 – 1575 (1 of 20 failed) | $0.0000075 | exact |
+| `deepgram/nova-3` | 601 | 449 – 1097 | $0.0000717 | exact |
+| `qwen/qwen3-asr-0.6b` (3 calls) | 1255 | 1035 – 1307 | $0.0000033 | no punctuation |
+| `nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b` (3 calls) | 1321 | 1226 – 1865 | $0.0000033 | no commas |
+| `nvidia/parakeet-tdt-0.6b-v3` (3 calls) | 2328 | 1942 – 2518 | $0.000025 | exact |
+
+`openai/gpt-4o-mini-transcribe`, `mistralai/voxtral-mini-transcribe`, `x-ai/grok-stt-1.0` and
+`google/gemini-3.5-transcribe` answer `404 0 endpoints available` for this account. Minutes later the same nova-3 call
+measured 1371 ms p50: every number here is one noisy afternoon.
+
+**To do in parle** (`backend/speech/gateway-routes.ts`, `parle-stt`; this branch does not touch the app's routes): put
+`{ provider: "openrouter", model: "deepgram/nova-3" }` after the deployment and keep a Whisper behind it, e.g.
+deployment → `openrouter:deepgram/nova-3` → `openrouter:openai/whisper-large-v3`. **Order of rollout: the route first.**
+With one link and the 3 s budget a slow Whisper becomes a failed turn (first row below) instead of a late one;
+`S2S_STT_BUDGET_MS=8000` restores the old wait until the route is in.
+
+### Measured, three chains at the same time
+
+`load.ts --n 4 --s2s 4 --no-wake`, 110 s, a turn every 8 ± 2 s, the same 4 s clip, a 100-token system prompt, 3
+messages of history, opener on (deadline 2000 ms), LLM chain qwen3.5-9b → gemini-2.5-flash-lite (the first link's
+breaker was open all afternoon, as in the proof), TTS MAI flash. Clock: from the end of the speech (request − 700 ms).
+
+| STT chain | Turns | Failed (STT `503` at 3 s) | First sound (opener) p50 / max | Reply first audio p50 / p95 / max | ≤ 3 s / ≤ 5 s | STT stage p50 / p95 / max | Served by |
+|---|---|---|---|---|---|---|---|
+| Scaleway proof (before, old code, one link) | 53 | 0 | 1703 / 1708 | 4927 / 13420 / 18868 | 13 % / 51 % | 2662 / 11529 / 15515 | whisper turbo 53 |
+| whisper turbo alone, this branch | 54 | **28** | 1703 / 1724 | 3429 / 4614 / 4762 | — | 1239 / 2460 / 2680 (of the 26 answered) | whisper turbo 26 |
+| whisper turbo → nova-3, this branch | 52 | 1 | 1703 / 1722 | 3346 / 5351 / 7518 | 39 % / 90 % | 1114 / 2395 / 2693 | turbo 21, nova-3 30 (13 hedged, 17 with the first link's breaker open or cooling) |
+| nova-3 → whisper-large-v3, this branch | 51 | 1 | 1703 / 1712 | **3099 / 4300 / 5481** | 39 % / 96 % | 999 / 1658 / 2093 | nova-3 48, whisper 2 hedged |
+
+Other stages in the three runs: LLM first token 354–400 p50, 990–1603 p95, up to 2821; TTS first byte 853–906 p50,
+1027–1176 p95, up to 1776. In the 7.5 s turn the STT took under 2.7 s: what is left of the tail is the LLM first token
+and the voice. One run each, about 50 turns: read ± 0.5 s on every p95.
+
+### Verdict on 2500 ms as a maximum
+
+Not attainable on this path, and not as a median either. The first **sound** (the opener) is at 1.70 s in every turn.
+The first audio of the **reply** is three serial cloud calls after a 700 ms endpointing: with every link healthy
+0.7 + 0.6 + 0.4 + 0.1 + 0.85 ≈ 2.65 s from the end of the speech (reasoned from the per-stage p50s; measured 3.0–3.4 s),
+and each stage has a p95 near twice its p50. What this branch buys is the tail: a maximum of 5.5–7.5 s where it was
+18.9 s, and a turn that cannot be answered ends at about 3.7 s.
+
+What would meet it (not built, rough numbers):
+
+- **Seats on a GPU instead of the fallback.** The fallback is not cheap: $0.47 per learner-hour (97 % the voice), i.e.
+  ≈ $12/h for 26 overflow learners. Eight L40S (4 seats each) are €11.8/h when there is stock; a Vast RTX 5090 is
+  $0.55–0.80/h for 4 seats (server first audio 1154 ms p50 at 4, § Vast.ai RTX 5090), ≈ $4.4–6.4/h for the same 30
+  learners — blocked today by the image pull and the placement lottery (§ What blocks Vast for class overflow).
+- **Streaming STT while the learner speaks** (the clip rung posts a finished clip, so this needs the `ws` rung or a
+  streaming upload): the transcript exists at the end of the speech and the 0.6–1.0 s STT stage disappears into the
+  endpointing. `nvidia/nemotron-3.5-asr-streaming` and Deepgram's streaming API are candidates; a Deepgram key is not
+  in the dev API.
+- **A voice that streams**: MAI answers a clause whole in 0.85 s; a first chunk at 0.2–0.3 s (Kokoro or Qwen3-TTS on
+  one always-on L4, €0.79/h, shared by every overflow learner) takes 0.5 s off every turn.
+- With both, the reasoned budget is 0.7 (endpointing, transcript ready) + 0.4 + 0.1 + 0.3 ≈ 1.5 s p50; unmeasured.
+
+### Tests
+
+`__tests__/unit/s2s/stt-fallback-fast.test.ts` (fake providers through the real STT route and `runTargets`): slow first
+link → second link answers right after the hedge, each called once, `route.hedge` + `route.served raced`; first link
+answers in time → one call; first link errors → second at once; both slow → `503 … timed out` at the budget, each link
+called once, no second run; the budget header ignored from a client; a stage that failed late is not retried; the
+composed turn sends hedge 900 and budget 3000 with and without a deadline; a whole turn hedged and a whole turn failed
+fast. `first-audio-deadline.test.ts` updated (the STT hedge is now 900 ms, not the time left to the deadline).
