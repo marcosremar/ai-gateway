@@ -65,6 +65,7 @@ export interface AppAccount {
   routes?: ModelRoutesSpec;
   /** The app's provisioned OpenRouter key for the direct fallback (app-fallback.ts): its hash, never the key. */
   fallbackKey?: ProvisionedKeyRecord;
+  limits?: { dailyRequests?: number; dailyTokens?: number };
 }
 
 type RouteStage = keyof ModelRoutesSpec;
@@ -205,6 +206,20 @@ export class AppRegistry implements FallbackKeyStore {
     account.images[name] = image;
     await this.store.save(this.apps);
     return { image, created: !prev };
+  }
+
+  async putLimits(app: string, body: unknown): Promise<NonNullable<AppAccount['limits']>> {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'limits must be an object { dailyRequests?, dailyTokens? }');
+    const limits: NonNullable<AppAccount['limits']> = {};
+    for (const [key, value] of Object.entries(body)) {
+      if (key !== 'dailyRequests' && key !== 'dailyTokens') throw new AppError(400, `unknown field '${key}'`);
+      if (value === null) continue;
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) throw new AppError(400, `${key} must be an integer >= 0 (0 = no budget) or null (the gateway default)`);
+      limits[key] = value;
+    }
+    this.account(app).limits = limits;
+    await this.store.save(this.apps);
+    return limits;
   }
 
   /**

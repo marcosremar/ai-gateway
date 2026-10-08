@@ -103,6 +103,7 @@ export interface DeploymentSpec {
   autoscale?: AutoscaleSpec;
   /** Warm-up windows: keep N replicas up on a schedule (a class at 9:00), whatever the load. */
   warmSchedule?: WarmScheduleEntry[];
+  reserveQuota?: QuotaReservation;
   scaling?: ScalingSpec;
   /** With no request for this long the deployment scales down to `minReplicas` (0 = scale to zero). */
   idleMinutes: number;
@@ -229,6 +230,19 @@ export interface WarmScheduleEntry {
   minReplicas: number;
 }
 
+export interface QuotaReservation {
+  quota: number;
+  windows: WarmScheduleEntry[];
+}
+
+export interface ReservationView {
+  holder: string;
+  machineType: string;
+  quota: number;
+  windows: WarmScheduleEntry[];
+  active: { replicas: number; until: string } | null;
+}
+
 /** Pressure-based autoscaling knobs (`autoscale.ts`); every one optional, defaults in `AUTOSCALE_DEFAULTS`. */
 export interface AutoscaleSpec {
   scaleOutAt?: number;
@@ -271,6 +285,7 @@ export interface CapacityView {
   budget: (NonNullable<ScalingSpec['budget']> & { month: string; spentEur: number; exhausted: boolean }) | null;
   hold: { replicas: number; until: string } | null;
   capacity: CapacityEntry[];
+  reservations: ReservationView[];
 }
 
 export type ReplicaPhase = 'booting' | 'ready' | 'unhealthy' | 'halted';
@@ -315,6 +330,7 @@ export interface DeploymentBackend {
   createReplica(input: CreateReplicaInput): Promise<ReplicaMachine>;
   /** Every replica of every deployment of this namespace. Must throw (not return []) when the provider fails. */
   listReplicas(namespace: string): Promise<ReplicaMachine[]>;
+  listForeign?(namespace: string): Promise<Array<ReplicaMachine & { namespace: string }>>;
   /** `reason` is the planner's (`boot-timeout`, `scale-down`, …): a backend may learn from it (Vast avoids bad hosts). */
   releaseReplica(machine: ReplicaMachine, reason?: string): Promise<void>;
   /** Exposed deployments: reserve the IP and create the firewall (`known` is reused when it still exists). */

@@ -35,6 +35,7 @@ from .text import DEFAULT_SLOT_CTX
 
 TTS_SILENCE_RMS = 300
 TTS_FRAMES_PER_SECOND = 12.5
+TTS_OVERLONG_RATIO = 0.9
 LANGUAGE_NAMES = {"pt": "Portuguese", "fr": "French", "en": "English", "es": "Spanish", "it": "Italian", "de": "German"}
 
 
@@ -177,11 +178,14 @@ class Upstream:
             return {"voice": fallback}
         raise ValueError("voice must be a catalog id, {audio, text}, or come with fallback_voice")
 
-    async def speak(self, text: str, cfg: dict, fields: dict, trace_id: str | None = None, on_retry=None):
+    async def speak(self, text: str, cfg: dict, fields: dict, trace_id: str | None = None, on_retry=None, on_overlong=None):
         """Yields raw PCM s16le mono at `tts_rate` (a WAV answer's header is parsed and its rate reported once as int).
         Silence before the first audible chunk is held: when it outlasts `tts_max_lead_seconds` or the stream fails
         before any sound, the sentence is requested again once (`on_retry(error)`); the second attempt drops its silent
-        lead, and its failure, or any failure after sound, raises. `error.request_id` is the id the engine logged."""
+        lead, and its failure, or any failure after sound, raises. `error.request_id` is the id the engine logged.
+        A sentence that was heard and runs to its cap (the engine's `max_new_tokens` stop ends the stream as an error,
+        or more audio than the cap) is cut there, `on_overlong(request_id)` is called and the generator ends normally:
+        it is not asked again (part of it was heard) and nothing is held to detect it earlier."""
         lang = (cfg.get("language") or "pt")[:2]
         limit = self.s.tts_max_seconds + self.s.tts_max_seconds_per_char * len(text)
         body = {"model": self.s.tts_model, "input": text, "language": LANGUAGE_NAMES.get(lang, "Portuguese"),
@@ -213,7 +217,13 @@ class Upstream:
                         if not chunk:
                             continue
                         sent += len(chunk)
-                        if sent > limit * rate * 2:
+                        over = sent - int(limit * rate) * 2
+                        if over > 0 and spoke:
+                            yield chunk[:len(chunk) - over]
+                            if on_overlong:
+                                on_overlong(request_id)
+                            return
+                        if over > 0:
                             raise UpstreamError("tts", None, f"runaway: over {limit:.1f} s of audio for {len(text)} characters")
                         if not spoke and silent(chunk):
                             held.append(chunk)
@@ -230,6 +240,10 @@ class Upstream:
                     yield item
                 return
             except (aiohttp.ClientError, UpstreamError) as error:
+                if spoke and sent >= TTS_OVERLONG_RATIO * limit * rate * 2:
+                    if on_overlong:
+                        on_overlong(request_id)
+                    return
                 if not isinstance(error, UpstreamError):
                     error = UpstreamError("tts", None, repr(error)[:200])
                 error.request_id = request_id

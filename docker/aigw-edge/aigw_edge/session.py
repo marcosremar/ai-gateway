@@ -307,7 +307,7 @@ class Session:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
         metrics: dict = {"ttfa_ms": None, "stt_ms": None, "llm_ttft_ms": None, "tts_ttfb_ms": None,
                          "endpoint_ms": ms_between(last_speech_at, ended), "first_sound_ms": None, "opener": None,
-                         "deadline_ms": self.deadline_ms(), "deadline_missed": False, "tts_retries": 0}
+                         "deadline_ms": self.deadline_ms(), "deadline_missed": False, "tts_retries": 0, "tts_overlong": 0}
         user_text, spoken = None, []
         thinking = deltas = None
         self.outcome = "ok"
@@ -357,7 +357,7 @@ class Session:
                 ttfaFromSpeechMs=ttfa_from_speech(metrics), speculated=confirmed is not None,
                 firstSoundMs=metrics["first_sound_ms"], firstSoundFromSpeechMs=ttfa_from_speech(metrics, "first_sound_ms"),
                 opener=metrics["opener"], deadlineMs=metrics["deadline_ms"], deadlineMissed=metrics["deadline_missed"],
-                ttsRetries=metrics["tts_retries"])
+                ttsRetries=metrics["tts_retries"], ttsOverlong=metrics["tts_overlong"])
             if thinking is not None:
                 thinking.cancel()
             if user_text:
@@ -495,12 +495,16 @@ class Session:
             metrics["tts_retries"] += 1
             tel("edge.tts.retry", level="warn", requestId=error.request_id, reason=str(error)[:160])
 
+        def overlong(request_id: str) -> None:
+            metrics["tts_overlong"] += 1
+            tel("edge.tts.overlong", level="warn", requestId=request_id)
+
         async def synth(sentence: str, queue: asyncio.Queue) -> None:
             try:
                 async with gate:
                     t = time.monotonic()
                     rate = self.s.tts_rate
-                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id, retried):
+                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id, retried, overlong):
                         if isinstance(chunk, int):
                             rate = chunk
                             continue
@@ -605,6 +609,7 @@ class Session:
                 raise RuntimeError(item.get("message", "s2s error"))
             elif kind_e == "done":
                 metrics["tts_retries"] = item.get("tts_retries", 0)
+                metrics["tts_overlong"] = item.get("tts_overlong", 0)
                 self.emit({"type": "reply", "text": item.get("reply", " ".join(spoken))})
         if metrics["ttfa_ms"] is not None:
             await self.out.drained.wait()

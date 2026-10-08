@@ -291,6 +291,8 @@ function catalogOf(raw: unknown): ReplicaCatalog | null {
   return { model: typeof input.model === 'string' ? input.model : undefined, format: typeof input.format === 'string' ? input.format : undefined, voices };
 }
 
+export const qwenTokenCap = (text: string) => Math.ceil((3 + 0.2 * text.length) * 12.5);
+
 /**
  * TTS on a self-hosted replica.
  *
@@ -383,6 +385,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     // Explicit references from the client: same rule, `voice` would be read as a speaker name.
     if (extra.ref_audio !== undefined) delete body.voice;
     Object.assign(body, extra);
+    if (body.ref_audio !== undefined && body.max_new_tokens === undefined) body.max_new_tokens = qwenTokenCap(request.input);
     if (extra.language !== undefined) body.language = languageName(extra.language);
     if (request.stream && (format === 'wav' || format === 'pcm') && extra.stream === undefined) {
       Object.assign(body, { stream: true, stream_format: 'audio' });

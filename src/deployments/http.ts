@@ -13,6 +13,8 @@
  *   GET    /v1/profiles                        list profiles (built-in + stored)
  *   PUT    /v1/profiles/:name                  create or replace a profile
  *   DELETE /v1/profiles/:name                  delete a stored profile
+ *   GET|PUT /v1/apps/:app/limits               the app's own daily budgets `{ dailyRequests?, dailyTokens? }` over the
+ *                                              gateway defaults (APP_DAILY_*); PUT is admin only, null = default
  *   GET    /v1/apps/:app/fallback              direct-fallback plan with provider keys (app-fallback.ts); the app's
  *                                              own key, or an admin key with `X-App: <app>`
  *   POST   /v1/apps/:app/stability-report      instability events buffered by the SDK while the gateway was down
@@ -248,6 +250,12 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         : { restrictedTo: (deployment) => controller.get(deployment)?.app === app });
       opts.onRoutesChange?.();
       return send(res, 200, { app, routes });
+    }
+    if (sub === 'limits' && !imageName) {
+      if (method === 'GET') return send(res, 200, { app, limits: registry.get(app)?.limits ?? {} });
+      if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
+      if (!isAdmin(req)) return send(res, 403, { error: 'only an admin key may set an app\'s limits' });
+      return send(res, 200, { app, limits: await registry.putLimits(app, await readJson(req)) });
     }
     if (sub === 'fallback' && !imageName) {
       if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });

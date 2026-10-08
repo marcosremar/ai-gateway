@@ -2,7 +2,8 @@ import type { PressureDecision } from './autoscale';
 import { autoscaleSettings } from './autoscale';
 import { DEFAULT_RT_MAX_SESSIONS } from './cloud-init';
 import { ParkingControl } from './controller-parking';
-import { REFUSED_HOLD_MS, round3, type Runtime } from './controller-state';
+import { activeWindow } from './autoscale';
+import { machineTypesOf, REFUSED_HOLD_MS, round3, type Runtime } from './controller-state';
 import {
   DEFAULT_BOOT_SECONDS, DEFAULT_RESUME_SECONDS, median, noteLoad, scalingDecision, type LoadSample,
 } from './scaling-policy';
@@ -176,7 +177,13 @@ export abstract class ScalingControl extends ParkingControl {
     if (!rt) return null;
     const { spec, spend, hold, measured } = rt.record;
     const now = this.now();
-    const types = new Set([spec.machineType, ...(spec.placements ?? []).flatMap(p => p.machineType ?? []), ...(spec.candidates ?? []).map(c => c.machineType)]);
+    const types = machineTypesOf(spec);
+    const reservations = [...this.deployments].flatMap(([holder, other]) => {
+      const { reserveQuota, machineType } = other.record.spec;
+      if (!reserveQuota || !types.has(machineType)) return [];
+      const window = other.record.spec.paused ? null : activeWindow(reserveQuota.windows, now);
+      return [{ holder, machineType, ...reserveQuota, active: window ? { replicas: window.replicas, until: new Date(window.endsAt).toISOString() } : null }];
+    });
     const time = (samples: number[] | undefined, fallback: number): CapacityTime => (
       { seconds: median(samples) ?? fallback, source: samples?.length ? 'measured' : 'default', samples: samples?.length ?? 0 });
     const capacity = [...types].map((machineType): CapacityEntry => {
@@ -199,6 +206,7 @@ export abstract class ScalingControl extends ParkingControl {
       budget: spec.scaling?.budget ? { ...spec.scaling.budget, month, spentEur, exhausted: this.monthSpent(rt) } : null,
       hold: hold && now < hold.until ? { replicas: hold.replicas, until: new Date(hold.until).toISOString() } : null,
       capacity,
+      reservations,
     };
   }
 }

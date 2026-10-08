@@ -3,7 +3,7 @@
  * caller-facing message on bad input; the HTTP layer maps it to 400.
  */
 
-import { autoscaleOf, warmScheduleOf } from './autoscale-spec';
+import { autoscaleOf, reserveQuotaOf, warmScheduleOf } from './autoscale-spec';
 import { VAST_MAX_PORTS, vastPortCount, vastUdpRange } from './realtime-ports';
 import { scalingOf } from './scaling-spec';
 import { SpecError } from './spec-error';
@@ -107,7 +107,7 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'realtime',
+  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
   'scaling', 'fileUrls', 'maxRttExcessMs',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
@@ -253,6 +253,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   }
   if (input.autoscale !== undefined) out.autoscale = autoscaleOf(input.autoscale);
   if (input.warmSchedule !== undefined) out.warmSchedule = warmScheduleOf(input.warmSchedule, MAX_REPLICAS_PER_DEPLOYMENT);
+  if (input.reserveQuota !== undefined) out.reserveQuota = input.reserveQuota === null ? undefined : reserveQuotaOf(input.reserveQuota, MAX_REPLICAS_PER_DEPLOYMENT);
   if (input.scaling !== undefined) out.scaling = input.scaling === null ? undefined : scalingOf(input.scaling);
   return out;
 }

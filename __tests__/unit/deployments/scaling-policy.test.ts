@@ -182,6 +182,7 @@ describe('scaling: hold, capacity and the monthly budget on the controller', () 
         boot: { seconds: 600, source: 'default', samples: 0 }, resume: { seconds: 180, source: 'default', samples: 0 },
         confident: false, missing: ['ceiling', 'boot'],
       }],
+      reservations: [],
     });
     await r.run(320);
     expect(r.controller.capacity('speech')!.capacity[0].boot).toEqual({ seconds: 300, source: 'measured', samples: 1 });
