@@ -134,9 +134,29 @@ describe('realtime spec validation', () => {
     for (const key of EDGE_TUNING_KEYS) expect(source, key).toContain(`"${key}"`);
   });
 
-  it('is refused on vast (one container per host: no sidecar)', () => {
-    expect(() => buildSpec('v', { provider: 'vast', image: 'vastai/base', bootScript: 'x', machineType: 'RTX 4090', realtime: {} }, { profiles }))
-      .toThrow(/realtime is not supported on vast/);
+  it('is accepted on vast while its ports fit one host; files, exposure and stop stay refused there', () => {
+    const vast = { provider: 'vast', image: 'vastai/base', bootScript: 'x', machineType: 'RTX 4090' };
+    expect(buildSpec('v', { ...vast, realtime: {} }, { profiles }).realtime).toEqual({});
+    expect(buildSpec('v', { ...vast, realtime: { maxSessions: 30 } }, { profiles }).realtime).toEqual({ maxSessions: 30 });
+    expect(() => buildSpec('v', { ...vast, realtime: { maxSessions: 32 } }, { profiles })).toThrow(/needs 75 .* at most 64/);
+    expect(() => buildSpec('v', { ...vast, realtime: { udpPorts: [50000, 50100] } }, { profiles })).toThrow(/needs 103 .* at most 64/);
+    expect(() => buildSpec('v', { ...vast, realtime: {}, files: { a: 'YQ==' } }, { profiles })).toThrow('files are not supported on vast (no user_data service)');
+    expect(() => buildSpec('v', { ...vast, realtime: {}, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles }))
+      .toThrow('exposure is not supported on vast');
+    expect(() => buildSpec('v', { ...vast, realtime: {}, idleAction: 'stop' }, { profiles })).toThrow("idleAction 'stop' is not supported on vast");
+    expect(() => buildSpec('v', { ...vast, realtime: {}, bootScript: 'x'.repeat(15_000) }, { profiles })).toThrow(/vast accepts 32 KB of env/);
+  });
+
+  it('speech-stack on an RTX 5090: the profile tunes the card and caps realtime at 4 sessions', () => {
+    const spec = buildSpec('v', {
+      profile: 'speech-stack', provider: 'vast', machineType: 'RTX 5090', bootScript: 'x', placements: [], idleAction: 'delete', realtime: {},
+    }, { profiles });
+    expect(spec.envByMachineType!['RTX 5090']).toEqual({ STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4' });
+    expect(edgeEnv(spec, TOKEN).RT_MAX_SESSIONS).toBe('4');
+    const own = buildSpec('w', {
+      provider: 'vast', image: 'vastai/base', bootScript: 'x', machineType: 'RTX 5090', envByMachineType: { 'RTX 5090': { RT_MAX_SESSIONS: '6' } },
+    }, { profiles });
+    expect(own.envByMachineType).toEqual({ 'RTX 5090': { RT_MAX_SESSIONS: '6' } });
   });
 });
 

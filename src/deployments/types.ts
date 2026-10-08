@@ -129,7 +129,8 @@ export interface DeploymentSpec {
    * Realtime voice on this replica (docs/realtime-edge.md): the generic `aigw-edge` sidecar runs next to the model
    * container (`docker run --network host`, same on any GPU and any model image), terminates WebRTC (UDP `udpPorts`)
    * and the gateway-relayed WebSocket behind the token-gated nginx (`/__aigw/rt/*`), and calls the model over
-   * 127.0.0.1. Scaleway only for now (Vast runs one container per host: no sidecar).
+   * 127.0.0.1. On Vast (one container per host: no sidecar) the edge runs as a process of that container and each UDP
+   * port is mapped on its own (`vastReplicaInit`, `realtime-ports.ts`).
    */
   realtime?: RealtimeSpec;
   /**

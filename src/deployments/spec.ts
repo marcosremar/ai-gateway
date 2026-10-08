@@ -4,6 +4,7 @@
  */
 
 import { autoscaleOf, warmScheduleOf } from './autoscale-spec';
+import { VAST_MAX_PORTS, vastPortCount, vastUdpRange } from './realtime-ports';
 import { scalingOf } from './scaling-spec';
 import { SpecError } from './spec-error';
 import type { DeploymentProvider, DeploymentSpec, ExposedPort, Placement, PlacementCandidate, Profile, ProfileSpec, RealtimeSpec } from './types';
@@ -172,7 +173,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('envByMachineType must be an object');
     const out2: Record<string, Record<string, string>> = {};
     for (const [type, env] of Object.entries(raw)) {
-      str(type, 'envByMachineType key', TYPE_RE);
+      str(type, 'envByMachineType key', MACHINE_RE);
       out2[type] = envMap(env);
     }
     out.envByMachineType = out2;
@@ -409,17 +410,23 @@ export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates
 /**
  * Vast runs ONE container per host (no systemd, no Docker-in-Docker): the replica is `image` as the container with
  * `bootScript` as its onstart, the app on `127.0.0.1:<port>`. No user_data metadata service (no `files`), no reserved
- * IP/firewall (no `exposure`), no power-off parking (no `idleAction: 'stop'`). Vast refuses a create whose env passes
+ * IP/firewall (no `exposure`), no power-off parking (no `idleAction: 'stop'`). `realtime` runs the edge inside that
+ * container, one mapped port per UDP media port (`realtime-ports.ts`). Vast refuses a create whose env passes
  * 32 KB in total (`invalid env arguments, total length > 32KB`, live 2026-10-08), and the init script travels there.
  */
 export const VAST_ENV_MAX_BYTES = 32_000;
 const VAST_INIT_OVERHEAD_BYTES = 3_000;
+const VAST_RT_INIT_OVERHEAD_BYTES = 2_000;
+const VAST_PORT_ENV_BYTES = 24;
 
-export function vastEnvBytes(spec: Pick<DeploymentSpec, 'bootScript' | 'env' | 'envByMachineType' | 'machineType'>): number {
+export function vastEnvBytes(spec: Pick<DeploymentSpec, 'bootScript' | 'env' | 'envByMachineType' | 'machineType' | 'realtime'>): number {
   const b64 = (n: number) => Math.ceil(n / 3) * 4;
-  const env = Object.entries({ ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env })
-    .reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(v) + 2, 0);
-  return b64(VAST_INIT_OVERHEAD_BYTES + b64(Buffer.byteLength(spec.bootScript ?? '')) + b64(env)) + env;
+  const sizeOf = (map: Record<string, string> = {}, perEntry = 2) =>
+    Object.entries(map).reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(v) + perEntry, 0);
+  const env = sizeOf({ ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env });
+  const edge = spec.realtime ? VAST_RT_INIT_OVERHEAD_BYTES + b64(sizeOf(spec.realtime.env, 16)) : 0;
+  const [lo, hi] = vastUdpRange(spec) ?? [1, 0];
+  return b64(VAST_INIT_OVERHEAD_BYTES + edge + b64(Buffer.byteLength(spec.bootScript ?? '')) + b64(env)) + env + (hi - lo + 1) * VAST_PORT_ENV_BYTES;
 }
 
 function checkVastSpec(spec: DeploymentSpec): void {
@@ -428,8 +435,10 @@ function checkVastSpec(spec: DeploymentSpec): void {
   }
   if (spec.files && Object.keys(spec.files).length) throw new SpecError('files are not supported on vast (no user_data service)');
   if (spec.exposure) throw new SpecError('exposure is not supported on vast');
-  // The edge is a sidecar container (`docker run --network host`) and a Vast replica IS one container: no sidecar.
-  if (spec.realtime) throw new SpecError('realtime is not supported on vast yet (the edge runs as a sidecar container)');
+  if (spec.realtime && vastPortCount(spec) > VAST_MAX_PORTS) {
+    throw new SpecError(`realtime on vast maps one port per UDP media port and this spec needs ${vastPortCount(spec)} `
+      + `(2 per session per worker + the probe port + 2 TCP); a host gives at most ${VAST_MAX_PORTS}: lower realtime.maxSessions or narrow realtime.udpPorts`);
+  }
   if (spec.idleAction === 'stop') throw new SpecError("idleAction 'stop' is not supported on vast");
   const bytes = vastEnvBytes(spec);
   if (bytes > VAST_ENV_MAX_BYTES) {
