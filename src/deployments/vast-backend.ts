@@ -296,9 +296,19 @@ export class VastDeploymentBackend implements DeploymentBackend {
     }
   }
 
-  private async fetchReplicas(namespace: string): Promise<ReplicaMachine[]> {
+  async listForeign(namespace: string): Promise<Array<ReplicaMachine & { namespace: string }>> {
+    return (await this.fetchLabelled('aigw:')).flatMap((m) => {
+      const [ns, ...rest] = m.deployment.split(':');
+      return ns && ns !== namespace && rest.length ? [{ ...m, namespace: ns, deployment: rest.join(':') }] : [];
+    });
+  }
+
+  private fetchReplicas(namespace: string): Promise<ReplicaMachine[]> {
+    return this.fetchLabelled(vastLabelPrefix(namespace));
+  }
+
+  private async fetchLabelled(prefix: string): Promise<ReplicaMachine[]> {
     const { instances = [] } = await this.call<{ instances?: VastInstance[] }>('GET', '/instances/');
-    const prefix = vastLabelPrefix(namespace);
     return instances.filter(i => i.label?.startsWith(prefix)).map((i) => {
       const id = String(i.id);
       if (i.machine_id !== undefined) this.hostOf.set(id, i.machine_id);

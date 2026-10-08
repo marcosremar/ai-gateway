@@ -36,6 +36,7 @@ import type { PrefixRoute } from './src/proxy/types';
 import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
+import { createWebhookDelivery } from './src/webhooks';
 import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
@@ -220,13 +221,16 @@ const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
   const routes = deployments?.apps.get(userId)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
+const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const appLimits = API_KEYS.length ? new AppLimits({
   env: process.env,
   isAdmin: (userId) => adminUsers.has(userId),
   aliasesOf: appAliasesOf,
+  limitsOf: (userId) => deployments?.apps.get(userId)?.limits,
   onBudgetEvent: ({ event, ...attrs }) => {
     log.warn(attrs, `app limits: daily budget ${event === 'app.budget_exhausted' ? 'exhausted' : 'at 80 %'}`);
     emitGatewayEvent(event, { level: event === 'app.budget_exhausted' ? 'error' : 'warn', attrs });
+    void alertWebhook?.send({ event, data: attrs });
   },
 }) : undefined;
 // POST /v1/s2s: a non-admin key uses only its own app's deployments, under its app limits (src/s2s/access.ts).

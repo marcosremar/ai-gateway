@@ -205,6 +205,11 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   and requested again once, in its place in the order (`metrics.tts_retries`, `edge.tts.retry` with the request id,
   `ttsRetries` on `edge.turn.done`). The second attempt drops its silent lead; when it stays silent or fails, or when
   any stream fails after sound, the turn ends with the `tts` error (no retry: it would repeat words already heard).
+  One exception: a sentence that was heard and runs to its cap — more audio than `3 s + 0.2 s per character`, or the
+  engine ending the stream at `max_new_tokens` (≥ 90 % of the cap received) — is cut at the cap and the turn goes on
+  (`metrics.tts_overlong`, `edge.tts.overlong` with the request id, `ttsOverlong` on `edge.turn.done`). It is not
+  asked again, and nothing is held to detect it earlier: a non-silent runaway only differs from speech once it has
+  outlasted the sentence, and holding audio for that would delay every first sound.
   The three settings are tunable through `realtime.env`.
 - **First-audio deadline** (`RT_FIRST_AUDIO_DEADLINE_MS` = 2000, at most 2500; `cfg.first_audio_deadline_ms` per
   session; `RT_FIRST_AUDIO_MARGIN_MS` = 300): counted from the VAD's last speech frame (from the end of the turn when

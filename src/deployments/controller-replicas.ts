@@ -164,7 +164,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     rt.creating++;
     rt.spendNote = null;
     const created: { id?: string } = {};
-    const spend: { cost: number; deployment: string; provider?: DeploymentProvider } = { cost: 0, deployment: spec.name };
+    const spend: { cost: number; deployment: string; provider?: DeploymentProvider; machineType?: string } = { cost: 0, deployment: spec.name };
     this.pendingSpend.add(spend);
     void (async () => {
       try {
@@ -177,10 +177,13 @@ export abstract class ReplicaLifecycle extends ControllerState {
           placed: (p) => this.machines.filter(m => m.deployment === spec.name && this.providerOf(m) === p).length
             + [...this.pendingSpend].filter(s => s !== spend && s.deployment === spec.name && s.provider === p).length,
           // The place's price (the cap on a market-priced Vast offer) must fit under the € ceiling with what already runs.
-          admit: (cost) => {
+          admit: (cost, place) => {
             spend.cost = 0;
+            delete spend.machineType;
+            const reserved = this.reservedAgainst(spec.name, place.machineType)?.reason ?? null;
+            if (reserved) return reserved;
             const why = this.spendRefusal(cost);
-            if (why) rt.spendNote = why; else spend.cost = cost;
+            if (why) rt.spendNote = why; else Object.assign(spend, { cost, machineType: place.machineType });
             return why;
           },
         });

@@ -217,6 +217,19 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
 - **Warm-up**: `warmSchedule: [{ "days": [1,2,3,4,5], "start": "08:50", "end": "12:00", "timeZone": "Europe/Paris",
   "minReplicas": 2 }]` keeps replicas up in those windows (days 0 = Sunday, overnight windows allowed), and `POST …/warm`
   does the same for one window on demand. Expired windows fall back to the normal rules.
+- **Reserved quota** (class window): `reserveQuota: { "quota": 2, "windows": [{ "days": [1,2,3,4], "start": "17:40",
+  "end": "20:15", "timeZone": "Europe/Paris", "minReplicas": 2 }] }` — "of the provider's `quota` machines of my
+  `machineType`, I need `minReplicas` during these windows" (the windows have the `warmSchedule` shape). Inside a
+  window any OTHER deployment of this gateway is refused a machine of that type once the others hold
+  `quota − minReplicas` of them (parked ones count: a stopped server holds quota): the placement is skipped with the
+  reason (the next placement, e.g. Vast, is tried), and a deployment with no replica and no other place answers
+  `wake` / invoke with **409** `<type> is reserved for deployment '<holder>' until <ISO time> …` + `Retry-After`
+  (model routes treat it like a paused deployment: straight to the fallback). `GET …/capacity` lists the reservations
+  that touch a deployment's machine types (`reservations[].active.until`). It reserves nothing by itself (pair it with
+  `warmSchedule` to have the machines up) and binds only deployments of the same gateway: a machine created by another
+  gateway or namespace is outside its reach — that is what the reaper's foreign-leftover alert is for. The match is by
+  machine type, not zone (Scaleway counts a GPU type's quota across zones).
+
 - **Caps without starvation**: when the replica cap or the € ceiling blocks a deployment under pressure, the controller
   takes a replica of another deployment that has been idle (no answered request and no request to its deployment) for
   3 min, above its own floor; that deployment then counts as idle until its next request (no ping-pong).
@@ -578,12 +591,24 @@ other's machines. It probes `GATEWAY_URL/health` 4 times over ~2 min, then:
 |---|---|
 | **down** (every probe failed) | every machine of the namespace older than 30 min. A redeploy or a short blip answers one probe and costs nothing. Worst case for a dead gateway: 15 min + 2 min + the machine's remaining minutes to reach 30 min of age. Network resources are left alone (it cannot know which deployments exist). |
 | **up**, with `AI_GATEWAY_ADMIN_KEY` | cross-check: `GET /v1/deployments` with that admin key says which deployments exist; a machine whose deployment is not among them and older than `REAPER_GRACE_MINUTES` (default 30) is released (Scaleway: server **and** its SBS volumes, awaited). Scaleway reserved IPs and security groups tagged for a deployment the gateway does not have, used by no server, go too; the namespace's shared `aigw-<ns>-gateway-only` firewall never does. |
-| **up**, no admin key | nothing (as before 2026-10-07). |
+| **up**, no admin key (or an answer it cannot trust) | nothing, and the run says so: the machines are still listed (`seen`), the summary line is `reaper: NOT CHECKED (…)` and the process exits **3**, so the cron run shows as failed until `AI_GATEWAY_ADMIN_KEY` is set. It never reads as "nothing found". |
+
+**Other namespaces (foreign leftovers).** A dev or test gateway (`aigw-ns-dev`, `aigw-ns-marcos-…`) shares the provider
+account and its quota: on 2026-10-07/08 a stopped test L4 of a dev namespace held production's L4 quota for 28 hours.
+Every run also lists the machines of every OTHER namespace (Scaleway tag `aigw-deploy`, Vast label `aigw:<ns>:…`) and
+reports those older than the grace in `foreign`. One whose machine type a deployment of this namespace uses (from the
+cross-check's `GET /v1/deployments`; unknown without the admin key, then every one counts) is logged as
+`ALERT reaper.foreign_quota_held {…}` and posted to `ALERT_WEBHOOK_URL` when set. `--apply` never releases them.
+`--apply-foreign` deletes the **stopped** ones (`stopped`, `stopped in place`, `exited`) older than
+`REAPER_FOREIGN_MIN_AGE_HOURS` (default 6, never under 1); a running machine of another namespace is never deleted (its
+gateway may be a laptop the reaper cannot see, and idleness is not measurable from outside). `REAPER_APPLY=1` is the
+same as `--apply`, for a service whose live start command lost the flag.
 
 The cross-check trusts only a full list of its own namespace (`"scope": "all"` and `"namespace"` in the answer): a
 non-admin key, another namespace, a non-2xx, or a gateway build from before `scope` skips it (`skipped` in the log)
 instead of reading "nothing exists". Run by hand it is a **dry run** (`bun scripts/reap-orphans.ts` lists what it would
-release); `--apply` releases. Exit 1 when a list or a release failed (the next run retries).
+release; the summary line starts `reaper: DRY RUN, nothing released`); `--apply` releases. Exit 1 when a list or a
+release failed (the next run retries), 3 when the gateway is up and nothing was compared.
 
 Env of the reaper service: `GATEWAY_URL`, `DEPLOYMENTS_NAMESPACE` (same as the gateway), `SANDBOX_TOKEN` (fetches
 `SCW_SECRET_KEY` / `VAST_API_KEY` from the dev API — or set those directly), `AI_GATEWAY_ADMIN_KEY` (a gateway key whose
@@ -609,7 +634,8 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
-| `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the same for every app: size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
+| `ALERT_WEBHOOK_URL` | optional: a JSON `POST` for `app.budget_warning` (80 %) / `app.budget_exhausted` (gateway) and `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service). Plain JSON (`{event, data}`), not Slack's `text` shape |
+| `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the default for every app; an admin sets one app's own daily budgets with `PUT /v1/apps/:app/limits {dailyRequests?, dailyTokens?}` (stored in `apps.json`, applied at once, `null` = default, `0` = no budget): size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
 | `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 150) caps parallel requests per key user, `MAX_CONCURRENT_PER_USER_OVERRIDES` (`user:limit,…`) per user |
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |

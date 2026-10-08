@@ -26,7 +26,7 @@ import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
 import {
   CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS, CORS_EXPOSE_HEADERS, errorTypeForStatus, requestIdOf,
 } from './http-conventions';
-import { minimalHealth, wantsDeepHealth, wantsHealthDetails } from './health-view';
+import { buildImages, minimalHealth, wantsDeepHealth, wantsHealthDetails } from './health-view';
 import { traceOfRequest } from '../../telemetry/trace-context';
 import { TRACE_ID_RESPONSE_HEADER } from '../../telemetry/contract';
 
@@ -616,7 +616,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       sendResponse(res, { status: 200, body: {
         ...minimalHealth(),
         // Gateway-wide counters: the operator's, not an app's.
-        ...(callerIsAdmin ? { connections: { active: activeConnections, peak: peakConnections }, sttFilter: sttFilterStats(), noWake: noWakeStats() } : {}),
+        ...(callerIsAdmin ? { images: buildImages(), connections: { active: activeConnections, peak: peakConnections }, sttFilter: sttFilterStats(), noWake: noWakeStats() } : {}),
         ...details,
       } }, requestId);
       return;

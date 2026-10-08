@@ -72,6 +72,7 @@ git fetch origin main
 git worktree add --detach /tmp/aigw-deploy origin/main
 cd /tmp/aigw-deploy && git rev-parse HEAD            # write this commit down: it is the only record of what runs
 
+bun run stamp:build                                 # writes commit + build time into src/build-info.json (→ /health)
 railway up --detach --service ai-gateway \
   --project 2213991a-748b-4576-8bd1-f45232f722e3 --environment production
 ```
@@ -91,7 +92,9 @@ down for a failed deploy.
 
 ## 5. Verify
 
-`/health` reports no version or commit. What does tell the new code is up:
+From the production-guard PR on, `curl -s $GW/health | jq '{commit, builtAt}'` answers which code runs (`null` = the
+upload was not stamped: § 4), and `GET /health?details=1` with an admin key adds `images` (edge sidecar, profiles,
+declared deployments). Before that build `/health` reports no version or commit. What also tells the new code is up:
 
 ```bash
 curl -s $GW/health | jq '.status, .stages.stt'                       # ok; chains unchanged
@@ -229,3 +232,64 @@ curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/j
 
 A replica already running the new image keeps serving until it idles out (there is no per-replica delete route);
 the next one boots the old image. Routes: `bun run deploy:gateway-routes` from the school's previous commit.
+
+## 11. Production guards (PR `rt/prod-guard`, 2026-10-08): what each needs at deploy time
+
+Code and unit tests only; nothing below was run against production.
+
+| Item | Takes effect with | Railway setting (names only) |
+|---|---|---|
+| Reaper applies, is loud, sees other namespaces | **redeploy of `ai-gateway-reaper`** (§ 4, the `cp railway.reaper.json railway.json` upload). Read on 2026-10-08: the service has no repository and no config path, its live start command is `./reap-compiled` (from the upload of 2026-10-05, before `--apply` entered `railway.reaper.json`), so only a new upload with that file changes it | `AI_GATEWAY_ADMIN_KEY` on the reaper (a key of a user in `DEPLOYMENTS_ADMIN_USERS`): without it every run now ends `NOT CHECKED` with exit 3 (the cron shows failed runs — intended). Optional: `ALERT_WEBHOOK_URL`, `REAPER_FOREIGN_MIN_AGE_HOURS`; `REAPER_APPLY=1` if the start command is ever edited by hand |
+| `/health` commit, build time, image tags | gateway redeploy, with `bun run stamp:build` in the throwaway worktree before `railway up` (§ 4) | none |
+| `reserveQuota` (class window) | gateway redeploy, then one PATCH per holder (below) | none |
+| Replica cap message names the holders | gateway redeploy | none (the value is a proposal below) |
+| Per-app daily budgets, budget webhook | gateway redeploy, then `PUT /v1/apps/parle/limits` | optional `ALERT_WEBHOOK_URL` on `ai-gateway` |
+| TTS over-long sentence cut (`tts_overlong`) | a **new `speech-stack` image** (or `server.py` in the deployment's `files`) and a **new `aigw-edge` image** + its tag in `DEFAULT_EDGE_IMAGE` / `realtime.edgeImage`; the `max_new_tokens` of the gateway's TTS proxy (cloning requests to `parle-qwen-tts`) with the gateway redeploy | none |
+
+**Reaper, first run after the redeploy.** With `--apply` and no admin key it still releases nothing while the gateway
+is up (exit 3); with the key it releases machines of deployments the gateway does not have (30 min grace). Foreign
+leftovers are only reported. To clear the stopped ones by hand, once, from the reaper's shell or a one-off run:
+`./reap-compiled --apply-foreign` (stopped machines of other namespaces older than 6 h; running ones are never touched).
+Do not put `--apply-foreign` in the cron start command while dev namespaces park replicas on purpose (`idleAction:
+"stop"` leaves them stopped for hours).
+
+**Class window** (binds only deployments of this gateway and namespace; a dev gateway is outside it — the reaper alert
+covers that case). Fields a PATCH does not send are kept:
+
+```bash
+curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' $GW/v1/deployments/parle-qwen-tts \
+  -d '{"reserveQuota":{"quota":2,"windows":[{"days":[1,2,3,4],"start":"17:40","end":"20:15","timeZone":"Europe/Paris","minReplicas":2}]}}'
+```
+
+`quota` is the provider's quota for the machine type (L4: 2 on 2026-10-08; check the Scaleway console) and
+`minReplicas` what the class needs of it. The same on `parle-speech` for the L40S if its quota is shared.
+`parle-qwen-tts` is re-PUT by the school's backend: a PUT that omits `reserveQuota` keeps it (it is cleared only by
+`"reserveQuota": null`). Check: `GET $GW/v1/deployments/parle-speech-s2s/capacity | jq .reservations`.
+
+**Replica cap (proposal, not applied).** `DEPLOYMENTS_MAX_REPLICAS=4` is full with 2 × L4 (`parle-qwen-tts`) + 2 × L40S
+(`parle-speech`): `parle-livekit` and `parle-speech-s2s` are refused (the refusal now says
+`held by parle-qwen-tts 2, parle-speech 2`). For a class of 30 with the Vast overflow: 2 L4 (voice) + 2 L40S + 2 RTX
+5090 on Vast (the declared placement allows 1 today: `placements[].maxReplicas`) + 1 `parle-livekit` + 1 spare for a
+replacement that overlaps the machine it replaces (boot timeout, Vast expiry handover) = **`DEPLOYMENTS_MAX_REPLICAS=8`**.
+The € ceiling has to follow or it becomes the limit: 2 × 0.79 + 2 × 1.47 + 2 × ≈ 0.6 (Vast cap) + the POP2-HC-48C of
+`parle-livekit` ≈ €7–8/h against `DEPLOYMENTS_MAX_EUR_PER_HOUR` 6 → **10**. Seats: 4 realtime sessions per L40S / 5090
+(`RT_MAX_SESSIONS`; 8 measured at 2.6–2.8 s worst first audio) gives 16 seats at 4 or 32 at 8 with four speech replicas;
+30 simultaneous learners at 4 per replica would need 8 speech replicas, which neither quota provides — the rest runs
+on the cloud fallback. Not measured: four speech replicas at once, and two Vast hosts in one class.
+
+**App budget for the class.** `APP_DAILY_REQUESTS=20000` / `APP_DAILY_TOKENS=12000000` stay the default for every key.
+A realtime session costs 4 requests per minute of its 10 min token (40) at admission; 30 learners × 3 sessions = 3600
+requests per class day plus the `/v1/s2s` and stage requests of the fallback. To take the class out of the default:
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -H 'X-App: parle' \
+  $GW/v1/apps/parle/limits -d '{"dailyRequests":60000,"dailyTokens":40000000}'
+curl -s -H "Authorization: Bearer $KEY" "$GW/health?details=1" | jq .appBudgets   # use, rate, projected exhaustion
+```
+
+The counters are in memory: a gateway restart during a class starts the day's count again. A budget that ends
+mid-class refuses the next turn or session with 429 `daily_budget_exhausted` and `reset_at`; replies in flight finish.
+
+**TTS.** Until the two images are rebuilt, production keeps today's behaviour (an audible sentence that reaches its cap
+ends the turn with the `tts` error). No retry was added for the non-silent runaway: it cannot be told from speech
+before the learner has heard it without holding back every first audio.

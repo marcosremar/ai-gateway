@@ -26,7 +26,7 @@ export interface PlaceArgs {
    * Gate before each create, given what the place bills per hour (the catalog price, or the cap on a market-priced
    * backend): a reason to skip the place (spend ceiling), or null. A cheaper place further down may still pass.
    */
-  admit?: (eurPerHour: number) => string | null;
+  admit?: (eurPerHour: number, place: DeploymentSpec) => string | null;
   placed?: (provider: DeploymentProvider) => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
@@ -118,7 +118,7 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
       skipped.push(`${where(step)}: its ${step.limit} fallback replica${step.limit > 1 ? 's are' : ' is'} in use (placement maxReplicas)`);
       continue;
     }
-    const refused = args.admit?.(price ?? step.spec.maxEurPerHour);
+    const refused = args.admit?.(price ?? step.spec.maxEurPerHour, step.spec);
     if (refused) { skipped.push(`${where(step)}: ${refused}`); continue; }
     let machine: ReplicaMachine;
     try {
