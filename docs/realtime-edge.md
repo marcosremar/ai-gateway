@@ -32,7 +32,7 @@ model image:
 | Field | Default | Effect |
 |---|---|---|
 | `maxSessions` | the machine type's `RT_MAX_SESSIONS` env (speech-stack: L4 2, L40S 4), else 8 | `RT_MAX_SESSIONS`: admission refuses beyond it with code `capacity` |
-| `udpPorts` | `[50000, 50100]` | WebRTC media range, opened in the replica's firewall (≤ 1000 ports, ≥ 10000) |
+| `udpPorts` | `[50000, 50100]` (Vast: sized from the session cap) | WebRTC media range, opened in the replica's firewall (≤ 1000 ports, ≥ 10000) |
 | `edgeImage` | `DEFAULT_EDGE_IMAGE` (`src/deployments/cloud-init.ts`) | the sidecar image |
 
 What the first-boot script (`replicaCloudInit`) then adds (`__tests__/unit/deployments/realtime-edge.test.ts`):
@@ -53,9 +53,32 @@ What the first-boot script (`replicaCloudInit`) then adds (`__tests__/unit/deplo
 The replica token never leaves root-only files on the machine; the edge derives from it the session key
 (HMAC-SHA256(key=replicaToken, msg="aigw-rt-v1"), 32 raw bytes) and the telemetry credential.
 
-**Vast**: refused for now (`realtime is not supported on vast yet`) — a Vast replica is one container (no Docker, no
-sidecar), and its ports are remapped. The edge already reads Vast's `PUBLIC_IPADDR` / `VAST_UDP_PORT_<n>` to announce the
-mapped ports; what is missing is running it (installing it inside the boot script) and mapping `-p <n>:<n>/udp`.
+### Vast: no sidecar, mapped ports
+
+A Vast replica is one container: no Docker inside, no host network, and every port is published on a random host
+port. `realtime` works there as follows (`vastReplicaInit`, `realtime-ports.ts`, `__tests__/unit/deployments/vast-backend.test.ts`):
+
+- **The edge is a process of the container.** The boot writes `/srv/aigw/edge.env` (the same settings as above, as
+  shell `export` lines, mode 600; `AIGW_REPLICA_ID` is the Vast instance id, from `CONTAINER_ID`), waits for
+  `/opt/aigw-edge/aigw_edge` to exist (up to the boot timeout) and runs `python -m aigw_edge` there in a restart
+  loop, with `/opt/aigw-edge/venv/bin/python` when that venv exists, else `python3`; its output is
+  `/srv/aigw/edge.log`. So the image, or the boot script, must provide **`/opt/aigw-edge/` = the content of
+  `docker/aigw-edge` (`aigw_edge/`, `telemetry.py`) plus a Python ≥ 3.11 with `requirements.txt` installed**. In an
+  image: `COPY --from=ghcr.io/marcosremar/aigw-edge:<tag> /app /opt/aigw-edge` and
+  `uv venv --python 3.12 /opt/aigw-edge/venv && uv pip install --python /opt/aigw-edge/venv/bin/python --only-binary :all: aiortc==1.15.0 aiohttp==3.14.4 'numpy>=1.26,<3'`.
+  From a boot script on a public base image: `crane export ghcr.io/marcosremar/aigw-edge:<tag> - | tar -x -C /opt/aigw-edge --strip-components=1 app/`
+  then the same `uv` lines. The tag must be one built from a commit that reports the mapped probe port (below).
+- **Signalling** rides the TCP port Vast already maps for the nginx front (`/__aigw/rt/*`, same location and token
+  gate): with this alone the `ws` path and TURN-relayed WebRTC work.
+- **Media**: one `-p <n>:<n>/udp` per port of `RT_UDP_PORTS`, which the gateway sizes from the session cap
+  (2 × workers × ceil(sessions / workers) + 1; docs/deployments.md § Vast replicas). `RT_UDP_BIND=0.0.0.0` makes a
+  session take exactly one port. The edge announces `PUBLIC_IPADDR` and, through `VAST_UDP_PORT_<n>`, the mapped
+  port of each candidate, and reports the **mapped** probe port in `/__aigw/rt/status` (`probePort`,
+  `net.probePort`) while its responder binds the container port — so the gateway's probe and the
+  `direct` / `relay` / `ws` decision work unchanged. `udpPorts` in the status stays the container range.
+- Proven on macOS only (`tests/run.sh harness`, scenario `vast`: candidates carry `PUBLIC_IPADDR` and mapped ports,
+  one port per session, mapped probe port, responder on the container port). Not yet run on a Vast host: whether the
+  onstart shell sees `VAST_UDP_PORT_<n>` (the boot falls back to `/etc/environment`), and media through the host's NAT.
 
 ## Firewall and public addresses of scaled replicas
 

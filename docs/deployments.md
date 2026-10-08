@@ -417,6 +417,29 @@ With `candidates`, each create walks a **ranked ladder**:
   Vast accepts 32 KB of env per instance and the boot script travels there base64 twice: a `bootScript` above
   ~14 KB is refused at PUT (download large payloads at boot). A private image needs `registryAuth` in the spec
   (sent as Vast `image_login`; never filled from the provider's own key).
+- **Supported on Vast**: invoke, capacity, `realtime` (below), `fileUrls` (below), `registryAuth`, `candidates`,
+  the RTT gate, host-end handover. **Not supported**: `files`, `exposure`, `idleAction: "stop"` (a `park` deletes the
+  instance and the next call pays a full boot), a boot log through the gateway, a reserved address (the replica's
+  address changes with every rental).
+- **`fileUrls`** — files the replica downloads at boot, for what `files` carries on Scaleway (the speech stack's voice
+  catalog): `{"voices.json": {"url": "https://…", "sha256": "<64 hex>"}, "br-f-01.mp3": {…}}`, same keys as `files`
+  (≤ 64 entries, `https` only, a key cannot be in both). Before the boot script or the container starts, each file is
+  fetched with `curl` (5 tries) into `/srv/aigw/files/<key>` and checked with `sha256sum`; a missing file or a
+  mismatch stops the boot with `aigw: BOOT FAILED: …` in `/srv/aigw/boot.log` (the replica never becomes ready and
+  is released at `bootTimeoutMinutes`). The directory is `/files` in the app: mounted read-only on Scaleway, a symlink
+  in the Vast container. It works on both providers, so one catalog (e.g. the app's content-addressed bucket, whose
+  object names are already the sha256) serves both. The view lists the keys in `fileKeys`, never the URLs. On Vast
+  every entry costs ~250 bytes of the 32 KB env: about 60 files fit beside a 3.4 KB boot script.
+- **`realtime` on Vast** (docs/realtime-edge.md § Vast): the edge runs as a process of the container, started by
+  `vastReplicaInit` from `/opt/aigw-edge` (shipped by the image or put there by the boot script), behind the same
+  `/__aigw/rt/` nginx location. Vast maps no port ranges, so the backend asks for one `-p <n>:<n>/udp` per UDP port:
+  **ports = 2 × workers × ceil(sessions / workers) + 1**, where sessions is `realtime.maxSessions` (else the machine
+  type's `RT_MAX_SESSIONS`, else 8) and workers is ceil(sessions / `RT_SESSIONS_PER_WORKER`) (6). The edge binds one
+  UDP port per peer connection; the factor 2 covers a re-offer, which binds the new connection before closing the old
+  one; the workers split the range evenly; the last port answers the reachability probe. 4 sessions → 9 UDP ports
+  (`50000-50008`), 16 → 37. With the two TCP ports (80 and SSH) the total must stay within 64 per instance, so at most
+  30 sessions per replica (refused at PUT above that, as is an explicit `realtime.udpPorts` wider than that), and only
+  hosts with `direct_port_count` ≥ the total are searched and rented.
 - `GET /v1/deployments/:name/offers` (admin, read-only): the ranked offers a create would try.
 - **App port = `port`** (default 8000): nginx proxies to `127.0.0.1:<port>` and the health loop polls
   `http://127.0.0.1:<port><healthPath>`. Everything shares one container, so a stack that already runs a model server
@@ -427,14 +450,20 @@ With `candidates`, each create walks a **ranked ladder**:
   script travels base64 in the env var `AIGW_INIT_B64` and the onstart decodes and runs it.
 - **Offer search** (`POST /bundles/`): on-demand, rentable, verified, 1 GPU, `gpu_name` = `machineType`
   (e.g. `RTX 5090`), `disk_space ≥ volumeGb` (default 50), `cuda_max_good ≥ 12.8` for Blackwell / 12.4 otherwise,
-  `reliability2 ≥ 0.97` (0.95 only when nothing passes), `inet_down ≥ 500`, `direct_port_count ≥ 1`,
+  `reliability2 ≥ 0.97` (0.95 only when nothing passes), `inet_down ≥ 500`, `direct_port_count ≥ 1` (with `realtime`:
+  its UDP ports + 2),
   `dph_total ≤ maxEurPerHour × 1.05` (`EUR_TO_USD`, deliberately below the market rate so the USD cap is never looser
   than the EUR one). Cap and floors are re-checked client side.
-- **Ranking** (`rankOffers`): distance band of the host's country (from `geolocation`, the country after the last
-  comma) from `near`; hosts beyond 2500 km only when no nearer one exists and the spec has `allowFar`. From France,
-  DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3) even when those are cheaper. Inside a band: effective price `dph_total × (1 + 4 × (1 − reliability2))` (an unreliable host costs more), then
-  `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label `aigw:<namespace>:<deployment>`, env `-p 80:80`);
-  one rented in between goes to the next.
+- **Ranking** (`rankOffers`): first the hosts that already passed the RTT gate in the last 24 h (the backend remembers
+  up to 200 by `machine_id` with the RTT they measured; lowest first, in 5-ms bands), then the distance band of the
+  host's country (from `geolocation`, the country after the last comma) from `near`; hosts beyond 2500 km only when no
+  nearer one exists and the spec has `allowFar`. From France, DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3)
+  even when those are cheaper. Inside a band: a host in the `near` country itself before one across a border (a French
+  host before a cheaper British, Swiss or Dutch one), then effective price `dph_total × (1 + 4 × (1 − reliability2))`
+  (an unreliable host costs more), then `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label
+  `aigw:<namespace>:<deployment>`, env `-p 80:80`); one rented in between goes to the next. `lastPlacement` says which
+  offer was rented and which better-ranked ones were passed over and why, e.g.
+  `vast RTX 5090 (≤ €0.85/h); offer 3 of 21: London, GB, $0.796/h; better-ranked offers passed over: offer 811 (Zurich, CH, $0.563/h): … not available; offer 902 (Amsterdam, NL, $0.597/h): … not available`.
 - The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
   whose replica hit `bootTimeoutMinutes` is skipped for 1 h (in memory). States: `running`; `loading`/`created` →
   `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
@@ -444,19 +473,37 @@ With `candidates`, each create walks a **ranked ladder**:
 
 Distance is only a prior; a fresh Vast replica is **measured**. Once it has an address (its nginx front answers
 before the app is ready), the controller asks the backend for the RTT (`measureRtt`: `src/gateway/providers/gpu/rtt-probe.ts`
-on the mapped port, 5 samples × 2 s, median, counting only real response bytes). Median above `maxRttMs` → the
-replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and the next create
-takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too far. Until
-it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never measured again;
-one adopted after a gateway restart is measured for the view only, never released by the gate (it may be serving).
-`GET /v1/deployments/:name` shows `rttMs` per replica, and `lastPlacement` the decisions, e.g.
-`vast RTX 5090 (≤ €0.6/h) near FR; earlier: host Bratislava, SK: RTT 52 ms > maxRttMs 35: released (too-far); RTT 18 ms ≤ maxRttMs 35: kept`.
+on the mapped port, 5 samples × 2 s, median, counting only real response bytes) and, in the same tick, for a
+**baseline**: the same probe against a fixed anchor in the `near` country (`RTT_ANCHORS`: Scaleway's S3 endpoint
+there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `s3.pl-waw.scw.cloud` for PL).
 
-- `maxRttMs`: integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`, `src/deployments/rtt-gate.ts`).
-- **Vantage-point caveat:** the gateway runs on Railway europe-west4 (Netherlands), so it measures **NL → host**, not
-  user → host. France → host is typically 10–20 ms more; 35 ms from NL keeps a French user near ~50 ms. A host east
-  of the Netherlands can pass from NL and still be slower for France than the number suggests — the distance ranking
-  (from `near`) is what keeps those behind closer hosts. Scaleway replicas are not gated.
+- **Relative rule** (a baseline came back): the replica passes when `rtt − baseline ≤ maxRttExcessMs` (integer 0–500,
+  default **20**, `DEFAULT_MAX_RTT_EXCESS_MS`) and, if the spec sets `maxRttMs`, `rtt ≤ maxRttMs` as well. Why 20: on
+  2026-10-08, from France, UK hosts measured 12–15 ms over Paris and served the speech stack as fast as an L40S, so
+  they stay in with ~5 ms of noise margin; the Slovak host of 2026-10-06 (~60 ms, ≥ 40 over) goes. That day's French
+  host (42 ms while Paris measured 45: −3) passes; the absolute 35 ms had released it.
+- **Absolute rule** (no anchor for the country, or the baseline probe failed — the gate never opens for lack of a
+  baseline): `rtt ≤ maxRttMs`, integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`), meant for the gateway's vantage
+  on Railway europe-west4 (NL), where France → host is typically 10–20 ms more.
+
+Outside the gate the replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and
+the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
+far. Until it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never
+measured again and its host is remembered as known-good for the ranking; one adopted after a gateway restart is
+measured for the view only, never released by the gate (it may be serving).
+`GET /v1/deployments/:name` shows `rttMs` and `rttBaselineMs` per replica, and `lastPlacement` both numbers and the
+verdict, e.g.
+`vast RTX 5090 (≤ €0.6/h); offer 1 of 12: Paris, FR, $0.548/h; RTT 42 ms, baseline 45 ms (s3.fr-par.scw.cloud): −3 ms ≤ maxRttExcessMs 20: kept`
+or `…; earlier: host Bratislava, SK: RTT 61 ms, baseline 14 ms (s3.fr-par.scw.cloud): +47 ms > maxRttExcessMs 20: released (too-far)`.
+`GET /v1/deployments/:name/offers` answers `{offers, gate}`: `gate` is the rule in force with the baseline measured
+at that moment (`{near, rule, anchor, baselineMs, maxRttExcessMs, maxRttMs}`), and each offer carries `knownRttMs`
+and `gateVerdict` when its host was measured before.
+
+- **What the difference means:** `rtt − baseline` is a lower bound of the anchor → host round trip, taken from where
+  the gateway runs, not the user's own latency. From a vantage near the users it is close to what they add over a
+  datacenter of their country; from the Netherlands a host that is as far from the gateway as Paris is (a British
+  one) reads ≈ 0 over. The distance ranking, the own-country preference and an explicit `maxRttMs` cover that side.
+  Scaleway replicas are not gated.
 
 ### Host rental end (Vast) — handover before the host goes
 
