@@ -764,10 +764,17 @@ shop-clerk system prompt (451 cached tokens), one catalog voice. L40S row: arm B
   the difference at 1 (213 vs 180 ms, on a clip 1.2 s longer).
 - **No first-token drift**: 67 ms before, 69 ms after 222 s of 8 at once (320 turns; thirds 357 / 304 / 390 ms under
   load). 3 of the 320 streams ended early (`peer closed connection`), status 200.
+  Read again from the saved records (branch `rt/stream-truncation`): the three were not cut on the way to the client.
+  Each ended with the stack's own in-band `error` event, whose message is the stack's httpx error towards the TTS
+  server (`/v1/audio/speech` closed mid-body), after a sentence that ran away: 15.3 s of audio for "Bom dia!", turns
+  of 20.3 and 21.9 s against a median of 8.1 s. Why vLLM-Omni ended those streams is not known (no replica log).
 - Cost at the largest level that keeps server first audio near 1.2 s (4 at once): 5090 at $0.796/h → **$0.20 per
   simultaneous turn-hour** ($0.14–0.15 on the $0.56–0.60 hosts the market also had); L40S €1.4699/h → €0.37.
 - One run was lost to the Mac's network: DNS failed for a few seconds, the provider lists failed, 7 of 8 streams of
   that round never ended and one answered 503 after 842 s. Not the replica (its health stayed 200).
+  Reproduced locally on that branch: a replica connection that breaks mid-body left the invoke route's client hanging
+  under Bun (fixed), and a failed connection to the only replica made the retry wait the bench's whole
+  `X-Aigw-Wait: 840` for a second replica (fixed).
 
 ### What does not work on Vast (each answer observed)
 
