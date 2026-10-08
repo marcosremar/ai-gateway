@@ -27,6 +27,9 @@ def _ports(raw: str) -> tuple[int, int]:
     return lo_n, hi_n
 
 
+MAX_FIRST_AUDIO_DEADLINE_MS = 2500
+
+
 def derive_key(replica_token: str) -> bytes:
     """The shared contract: signing key = HMAC-SHA256(key=replicaToken, msg="aigw-rt-v1")."""
     return hmac.new(replica_token.encode(), b"aigw-rt-v1", hashlib.sha256).digest()
@@ -62,6 +65,9 @@ class Settings:
     tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
     tts_rate: int = 24000
     tts_parallel: int = 2
+    first_audio_deadline_ms: int = 2000
+    first_audio_margin_ms: int = 300
+    shed_window_s: int = 30
     # Where the TTS server fetches a catalog voice's reference audio (speech-stack: its own /refs/<id>.wav).
     ref_base: str = ""
 
@@ -105,5 +111,8 @@ class Settings:
             tts_model=env.get("EDGE_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
             tts_rate=_int("EDGE_TTS_RATE", 24000),
             tts_parallel=max(1, _int("EDGE_TTS_PARALLEL", 2)),
+            first_audio_deadline_ms=min(MAX_FIRST_AUDIO_DEADLINE_MS, max(1, _int("RT_FIRST_AUDIO_DEADLINE_MS", 2000))),
+            first_audio_margin_ms=max(0, _int("RT_FIRST_AUDIO_MARGIN_MS", 300)),
+            shed_window_s=max(0, _int("RT_SHED_WINDOW_S", 30)),
             ref_base=env.get("EDGE_REF_BASE", upstream).rstrip("/"),
         )

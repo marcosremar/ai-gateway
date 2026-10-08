@@ -124,11 +124,17 @@ class Lane {
   private held: Array<{ e?: S2SEvent; a?: Uint8Array }> = [];
   aborted = false;
   sawAudio = false;
+  openerPlayed = false;
+  private inOpener = false;
   constructor(private readonly sink: Sink, public live: boolean, private readonly onFirstAudio?: () => void) {}
-  event(e: S2SEvent) { if (this.aborted) return; if (this.live) this.sink.event(e); else this.held.push({ e }); }
+  event(e: S2SEvent) {
+    if (this.aborted) return;
+    if (e.type === 'opener') { this.inOpener = e.state === 'start'; this.openerPlayed = true; }
+    if (this.live) this.sink.event(e); else this.held.push({ e });
+  }
   audio(a: Uint8Array) {
     if (this.aborted) return;
-    if (!this.sawAudio) { this.sawAudio = true; this.onFirstAudio?.(); }
+    if (!this.sawAudio && !this.inOpener) { this.sawAudio = true; this.onFirstAudio?.(); }
     if (this.live) this.sink.audio(a); else if (!this.aborted) this.held.push({ a });
   }
   goLive() {
@@ -214,8 +220,8 @@ export function createS2SRoute(opts: S2SRouteOptions) {
     const elapsed = () => Math.round(performance.now() - t0);
     const outcome: Record<string, unknown> = {};
 
-    const composite = (lane: Lane, signal: AbortSignal, transcript?: { text: string }) => runComposite({
-      stages: opts.stagesFor(req, config), audio, contentType, config, signal, transcript,
+    const composite = (lane: Lane, signal: AbortSignal, transcript?: { text: string }, skipDeadline = false) => runComposite({
+      stages: opts.stagesFor(req, config), audio, contentType, config, signal, transcript, skipDeadline,
       emitEvent: e => lane.event(e), emitAudio: a => lane.audio(a),
     });
 
@@ -270,7 +276,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         const signal = new AbortController();
         const lane = new Lane(sink, false, () => decide('hedge'));
         lane.event({ type: 'route', provider: 'composite', fallback: 'slow', from: `deployment:${deployment}` });
-        const run = composite(lane, AbortSignal.any([signal.signal, budget.signal])).catch((err) => {
+        const run = composite(lane, AbortSignal.any([signal.signal, budget.signal]), undefined, true).catch((err) => {
           if (!lane.aborted) log('s2s: hedge failed', { error: String(err) });
           if (winner === 'hedge') throw err;
         });
@@ -352,7 +358,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       const lane = new Lane(sink, true);
       lane.event({ type: 'route', provider: 'composite', fallback: heard !== null ? 'resumed' : 'error', from: `deployment:${deployment}` });
       Object.assign(outcome, { provider: 'composite', fallback: heard !== null ? 'resumed' : 'error' });
-      await composite(lane, budget.signal, heard !== null ? { text: heard } : undefined);
+      await composite(lane, budget.signal, heard !== null ? { text: heard } : undefined, primaryLane.openerPlayed);
     } catch (err) {
       const message = (err as Error).message ?? String(err);
       Object.assign(outcome, { error: message.slice(0, 200) });

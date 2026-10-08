@@ -5,7 +5,7 @@ import { DeploymentError } from '../../../src/deployments/controller';
 import { createS2SRoute } from '../../../src/s2s/route';
 import { setGatewayTelemetrySink } from '../../../src/telemetry/emit';
 import { loopbackStages } from '../../../src/s2s/loopback-stages';
-import { encodeEvent } from '../../../src/s2s/frames';
+import { encodeAudio, encodeEvent } from '../../../src/s2s/frames';
 import { decodeAll, fakeStages, replicaFrames, sleep, type FakeStagesOptions } from './_fakes';
 
 type ReplicaScript = (res: ServerResponse) => Promise<void>;
@@ -159,6 +159,50 @@ describe('POST /v1/s2s routing', () => {
       .toEqual(['composite', 'slow', 'deployment:parle-speech']);
     expect(events.some(e => e.type === 'route' && e.provider === 'deployment:parle-speech')).toBe(false);
     expect(audio).toBe('Bom dia, querida!Aqui está o seu pão.');
+  });
+
+  it('an opener of the primary is not its first audio: a primary that stalls after it is still hedged, and no second opener is played', async () => {
+    const opener = [
+      encodeEvent({ type: 'opener', state: 'start', text: 'Hum.', index: 0 }, 'binary'), encodeAudio(new TextEncoder().encode('Hum.'), 'binary'),
+      encodeEvent({ type: 'opener', state: 'end', index: 0 }, 'binary'),
+    ];
+    const h = await harness({
+      hedgeMs: 50, stages: { sttMs: 120 },
+      replica: async res => {
+        res.writeHead(200, { 'Content-Type': 'application/x-aigw-s2s' });
+        for (const f of opener) res.write(f);
+        await sleep(1_000);
+        if (!res.destroyed) res.end();
+      },
+    });
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', JSON.stringify({ voice: 'route-opener', language: 'pt', first_audio_deadline_ms: 60, opener: { lines: ['Hum.'] } }));
+    const { bytes } = await h.call('', form);
+    const { events, audio } = decodeAll(bytes);
+    expect(events.filter(e => e.type === 'opener' && e.state === 'start').length).toBe(1);
+    expect(events.some(e => e.type === 'deadline_missed')).toBe(false);
+    expect(events.find(e => e.type === 'route' && e.provider === 'composite')).toMatchObject({ fallback: 'slow' });
+    expect(audio).toBe('Hum.Bom dia, querida!Aqui está o seu pão.');
+  });
+
+  it('primary breaks after its opener and its transcript: the composed pipeline resumes, the opener is not played again', async () => {
+    const h = await harness({
+      stages: { tokenMs: 30 },
+      replica: res => writeFrames(res, [
+        encodeEvent({ type: 'opener', state: 'start', text: 'Hum.', index: 0 }, 'binary'), encodeAudio(new TextEncoder().encode('Hum.'), 'binary'),
+        encodeEvent({ type: 'opener', state: 'end', index: 0 }, 'binary'), encodeEvent({ type: 'transcript', text: 'Oi!', stt_ms: 10, at_ms: 10 }, 'binary'),
+      ])(),
+    });
+    const form = new FormData();
+    form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'a.webm');
+    form.set('config', JSON.stringify({ voice: 'route-opener-2', language: 'pt', first_audio_deadline_ms: 60, opener: { lines: ['Hum.'] } }));
+    const { bytes } = await h.call('', form);
+    const { events, audio } = decodeAll(bytes);
+    expect(events.filter(e => e.type === 'opener' && e.state === 'start').length).toBe(1);
+    expect(events.find(e => e.type === 'route' && e.provider === 'composite')).toMatchObject({ fallback: 'resumed' });
+    expect(h.calls.some(c => c.stage === 'stt')).toBe(false);
+    expect(audio).toBe('Hum.Bom dia, querida!Aqui está o seu pão.');
   });
 
   it('primary breaks after its transcript: the composed pipeline resumes at the LLM (no second STT)', async () => {

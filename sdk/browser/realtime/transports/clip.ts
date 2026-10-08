@@ -40,11 +40,21 @@ export function mapS2SEvent(e: S2SEvent): RealtimeEvent[] {
     case 'filtered': return [{ type: 'filtered', reasons: Array.isArray(e.reasons) ? e.reasons.map(String) : [] }];
     case 'sentence': return [{ type: 'reply_delta', text: String(e.text ?? '') }];
     case 'first_audio': return [{ type: 'audio_start' }];
+    case 'opener': return [{
+      type: 'opener', state: e.state === 'end' ? 'end' : 'start', ...(typeof e.text === 'string' ? { text: e.text } : {}),
+      ...(typeof e.index === 'number' ? { index: e.index } : {}), ...(typeof e.audio_ms === 'number' ? { audio_ms: e.audio_ms } : {}),
+    }];
+    case 'deadline_missed': return [{ type: 'deadline_missed', deadline_ms: Number(e.deadline_ms) }];
     case 'error': return [{ type: 'error', code: String(e.stage ?? e.code ?? 's2s'), message: String(e.message ?? 'error') }];
     case 'done': {
       const out: RealtimeEvent[] = [];
       if (typeof e.reply === 'string' && e.reply) out.push({ type: 'reply', text: e.reply });
-      out.push({ type: 'metrics', ttfa_ms: typeof e.first_audio_ms === 'number' ? e.first_audio_ms : null });
+      out.push({
+        type: 'metrics', ttfa_ms: typeof e.first_audio_ms === 'number' ? e.first_audio_ms : null,
+        ...(typeof e.first_sound_ms === 'number' ? { first_sound_ms: e.first_sound_ms } : {}),
+        ...(typeof e.opener === 'string' ? { opener: e.opener } : {}),
+        ...(typeof e.deadline_missed === 'boolean' ? { deadline_missed: e.deadline_missed } : {}),
+      });
       out.push({ type: 'done', ...(e.empty ? { empty: true } : {}), ...(e.filtered ? { filtered: true } : {}) });
       return out;
     }
@@ -120,6 +130,8 @@ class S2SStreamTransport extends ClipTransport {
     let encoded: string | null = null; // a non-PCM audio_format: chunks are a container, decoded per sentence
     let pending: Uint8Array[] = [];
     let sawAudio = false;
+    let inOpener = false;
+    let played = false;
     const flushEncoded = async () => {
       if (!pending.length) return;
       const size = pending.reduce((n, c) => n + c.length, 0);
@@ -137,6 +149,10 @@ class S2SStreamTransport extends ClipTransport {
         return;
       }
       if (e.type === 'done') await flushEncoded();
+      if (e.type === 'opener') {
+        inOpener = e.state === 'start';
+        if (!inOpener) await flushEncoded();
+      }
       if (e.type === 'first_audio') {
         if (sawAudio) return; // the audio itself came first and already announced it
         sawAudio = true;
@@ -144,7 +160,8 @@ class S2SStreamTransport extends ClipTransport {
       for (const out of mapS2SEvent(e)) this.ctx.emit(out);
     };
     const onAudio = async (pcm: Uint8Array) => {
-      if (!sawAudio) { sawAudio = true; this.ctx.emit({ type: 'audio_start' }); }
+      played = true;
+      if (!sawAudio && !inOpener) { sawAudio = true; this.ctx.emit({ type: 'audio_start' }); }
       if (encoded) { pending.push(pcm.slice()); return; }
       const even = pcm.length - (pcm.length % 2);
       const view = new DataView(pcm.buffer, pcm.byteOffset, even);
@@ -179,7 +196,7 @@ class S2SStreamTransport extends ClipTransport {
       }
     }
     this.turn = null;
-    await this.endAudio(sawAudio);
+    await this.endAudio(played);
   }
 }
 

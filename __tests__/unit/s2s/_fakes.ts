@@ -35,24 +35,25 @@ export interface FakeStagesOptions {
   ttsMs?: number;
   failTtsFor?: string;
   failSttWith?: string;
+  mp3For?: string;
   breakLlmAfter?: number;
 }
 
 /** Stage client with call log: STT returns `heard`, the LLM streams `reply` in 3-char tokens, TTS returns WAV whose
  *  PCM is the sentence's UTF-8 bytes (so the test can read back what was voiced). */
 export function fakeStages(o: FakeStagesOptions = {}) {
-  const calls: Array<{ stage: string; at: number; text?: string; cfg?: S2SConfig }> = [];
+  const calls: Array<{ stage: string; at: number; text?: string; cfg?: S2SConfig; hedgeMs?: number }> = [];
   const t0 = performance.now();
   const at = () => Math.round(performance.now() - t0);
   const stages: StageClient = {
-    async transcribe(_audio, _ct, cfg) {
-      calls.push({ stage: 'stt', at: at(), cfg });
+    async transcribe(_audio, _ct, cfg, _signal, hedgeMs) {
+      calls.push({ stage: 'stt', at: at(), cfg, hedgeMs });
       await sleep(o.sttMs ?? 5);
       if (o.failSttWith) throw new Error(o.failSttWith);
       return { text: o.heard ?? 'Bom dia, eu queria um pão.', provider: 'deployment:parle-speech', fallback: null };
     },
-    async chatStream(messages, cfg) {
-      calls.push({ stage: 'llm', at: at(), text: messages[messages.length - 1].content, cfg });
+    async chatStream(messages, cfg, _signal, hedgeMs) {
+      calls.push({ stage: 'llm', at: at(), text: messages[messages.length - 1].content, cfg, hedgeMs });
       const reply = o.reply ?? 'Bom dia, querida! Aqui está o seu pão.';
       async function* deltas() {
         for (let i = 0, n = 0; i < reply.length; i += 3, n++) {
@@ -63,10 +64,11 @@ export function fakeStages(o: FakeStagesOptions = {}) {
       }
       return { deltas: deltas(), provider: 'openrouter:qwen/qwen3.5-9b', fallback: 'cold' };
     },
-    async speak(text): Promise<SpokenAudio> {
-      calls.push({ stage: 'tts', at: at(), text });
+    async speak(text, _cfg, _signal, hedgeMs): Promise<SpokenAudio> {
+      calls.push({ stage: 'tts', at: at(), text, hedgeMs });
       await sleep(o.ttsMs ?? 5);
       if (o.failTtsFor && text.includes(o.failTtsFor)) throw new Error('tts 503');
+      if (o.mp3For && text.includes(o.mp3For)) return { body: chunked(new TextEncoder().encode(text), 64), contentType: 'audio/mpeg', provider: 'openrouter:mai-tts', fallback: null };
       return { body: chunked(wav(new TextEncoder().encode(text)), 7, 1), contentType: 'audio/wav', provider: 'deployment:parle-qwen-tts', fallback: null };
     },
   };

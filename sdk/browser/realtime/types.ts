@@ -29,10 +29,15 @@ export type RealtimeServerEvent =
   | { type: 'reply'; text: string }
   | { type: 'audio_start' }
   | { type: 'audio_end' }
+  | { type: 'opener'; state: 'start' | 'end'; text?: string; index?: number; audio_ms?: number | null }
+  | { type: 'deadline_missed'; deadline_ms: number }
   | { type: 'interrupted' }
   | { type: 'done'; empty?: boolean; filtered?: boolean; error?: boolean; interrupted?: boolean }
   | { type: 'error'; code: string; message: string; unspoken?: string }
-  | { type: 'metrics'; ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null };
+  | {
+    type: 'metrics'; ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
+    first_sound_ms?: number | null; opener?: string | null; deadline_ms?: number; deadline_missed?: boolean;
+  };
 
 /** Events the SDK adds: which transport carries the session, and its end. */
 export type RealtimeLocalEvent =
@@ -142,7 +147,10 @@ export interface RealtimeMetrics {
   /** Audio frames dropped because the uplink could not keep up (WS). */
   droppedFrames: number;
   /** Last `metrics` event of the edge. */
-  lastTurn: { ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null } | null;
+  lastTurn: {
+    ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
+    first_sound_ms?: number | null; opener?: string | null; deadline_missed?: boolean;
+  } | null;
 }
 
 export interface StorageLike {

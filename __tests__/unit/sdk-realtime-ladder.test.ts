@@ -223,6 +223,31 @@ describe('createRealtimeSession', () => {
     s.close();
   });
 
+  it('an opener and a missed deadline reach the page and the telemetry, with the turn they belong to', async () => {
+    const f = fakes({});
+    f.transports['s2s-stream'] = (ctx) => ({
+      type: 's2s-stream', clipBased: true, connect: async () => {}, send: () => {}, close: () => {},
+      sendTurn: async () => {
+        ctx.emit({ type: 'opener', state: 'start', text: 'Hum, deixa eu ver.', index: 1, audio_ms: 900 });
+        ctx.emit({ type: 'opener', state: 'end', index: 1 });
+        ctx.emit({ type: 'deadline_missed', deadline_ms: 2000 });
+        ctx.emit({ type: 'transcript', text: 'oi', final: true });
+        ctx.emit({ type: 'metrics', ttfa_ms: 2900, first_sound_ms: 1700, opener: 'Hum, deixa eu ver.', deadline_missed: false });
+        ctx.emit({ type: 'done' });
+      },
+    });
+    const { s, events, telemetry } = session(f, { preferredTransports: ['s2s-stream'] });
+    await s.connect();
+    await s.sendTurn(new Blob(['wav']));
+    expect(events).toContainEqual({ type: 'opener', state: 'start', text: 'Hum, deixa eu ver.', index: 1, audio_ms: 900 });
+    const opener = telemetry.find(e => e.event === 'turn.opener')!;
+    expect(opener.attrs).toMatchObject({ index: 1, transport: 's2s-stream' });
+    expect(opener.turnId).toBe(telemetry.find(e => e.event === 'turn.done')!.turnId);
+    expect(telemetry.find(e => e.event === 'turn.deadline_missed')!.attrs).toMatchObject({ deadlineMs: 2000 });
+    expect(s.metrics.lastTurn).toMatchObject({ ttfa_ms: 2900, first_sound_ms: 1700, opener: 'Hum, deixa eu ver.', deadline_missed: false });
+    s.close();
+  });
+
   it('nothing connects: error + closed', async () => {
     const f = fakes({});
     const { s, events } = session(f);
