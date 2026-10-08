@@ -35,6 +35,19 @@ class Downsampler48to16:
         return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
 
+MAX_FILL_SAMPLES = 48000
+
+
+class GapFill:
+    def __init__(self):
+        self.expected: int | None = None
+
+    def missing(self, pts: int, samples: int) -> int:
+        gap = 0 if self.expected is None else min(max(pts - self.expected, 0), MAX_FILL_SAMPLES)
+        self.expected = pts + samples
+        return gap
+
+
 class ArrivalOrder:
     def __init__(self):
         self.last: int | None = None

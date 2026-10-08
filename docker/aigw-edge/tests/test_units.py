@@ -391,6 +391,22 @@ try:
     check("webrtc uplink: installed for audio, aiortc's own buffer stays for video",
           isinstance(rtcrtpreceiver.JitterBuffer(capacity=16, prefetch=4), audio.ArrivalOrder)
           and isinstance(rtcrtpreceiver.JitterBuffer(capacity=128, is_video=True), JitterBuffer))
+    gaps = audio.GapFill()
+    check("webrtc uplink: a gap in the RTP timestamps is the lost audio, counted as elapsed time, at most 1 s of it",
+          [gaps.missing(pts, 960) for pts in (0, 960, 2880, 3840, 500000)] == [0, 0, 960, 0, 48000])
+    from aigw_edge.session import AudioOut
+    out = AudioOut()
+    idle = out.pacing()
+    out.push(bytes(1920))
+    out.mark()
+    out.sent(0.5)
+    out.pull(960)
+    out.sent(0.004)
+    out.sent(0.002)
+    paced = out.pacing()
+    check("webrtc downlink: per reply, when its first frame left and how late the packets after it were sent",
+          idle == {} and paced["rtp_late_max_ms"] == 4.0 and paced["rtp_late_p50_ms"] == 4.0
+          and paced["rtp_first_sent_ms"] == round(paced["out_first_pull_ms"] + 4.0, 1) and 0 <= paced["out_first_pull_ms"] < 50)
 except ImportError:
     print("SKIP vad (no numpy)")
 

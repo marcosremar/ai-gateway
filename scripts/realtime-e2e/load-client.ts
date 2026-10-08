@@ -21,6 +21,7 @@ export interface Turn {
   speechEnd: number | null; firstFrame: number | null; firstLoud: number | null; audioMs: number;
   events: TurnEvent[]; lost: string | null; skipped: string | null;
   overlap?: boolean; audibleMs?: number | null; receivedMs?: number | null; heardAfterReceivedMs?: number | null; audibleFromVadEndMs?: number | null; meterErrorMs?: number;
+  playoutMs?: number | null; playoutAfterReceivedMs?: number | null; renderAfterPlayoutMs?: number | null; jitterBufferMs?: number | null;
 }
 export interface StudentRecord {
   id: number; client: Turn['client']; startedAt: number; transport: string | null; connectMs: number | null; reconnects: number; replica?: string;
@@ -31,7 +32,7 @@ export interface ClientResult {
   startedAt: number; endedAt: number; students: StudentRecord[]; turns: Turn[];
   samples: Array<{ at: number; sessions: number; webrtc: number; ws: number }>;
   mic: { frames: number; late: number; maxLagMs: number; dropped: number };
-  meters: Array<{ student: number; transport: string | null; mic: unknown; output: unknown }>;
+  meters: Array<{ student: number; transport: string | null; mic: unknown; output: unknown; rtc?: unknown }>;
 }
 
 interface Descriptor {
@@ -59,7 +60,7 @@ const LOUD = 0.02;
 const KEEP = [
   'type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms',
   'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms', 'first_sound_from_speech_ms', 'ttfa_from_speech_ms',
-  'tts_retries',
+  'tts_retries', 'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms',
 ];
 const UPLINK_BACKLOG = 64 * 1024;
 
@@ -417,7 +418,7 @@ async function chromeStudents(): Promise<void> {
     try {
       const { page } = await openMicPage({ chrome: cfg.chromePath, mic, url: app.url, readyFlag: 'loadReady', log, browsers });
       const run = await page.evaluate(
-        (o) => (window as unknown as { loadRun: (o: unknown) => Promise<{ transport: string | null; connectMs: number | null; attempts: StudentRecord['attempts']; error?: string; turns: Turn[]; meter: { mic: unknown; output: unknown } }> }).loadRun(o),
+        (o) => (window as unknown as { loadRun: (o: unknown) => Promise<{ transport: string | null; connectMs: number | null; attempts: StudentRecord['attempts']; error?: string; turns: Turn[]; meter: { mic: unknown; output: unknown; rtc?: unknown } }> }).loadRun(o),
         {
           durationMs: (cfg.rampS + cfg.durationS) * 1000, turnTimeoutMs: cfg.turnTimeoutS * 1000, turnEveryMs: cfg.turnEveryS * 1000,
           clipEndSilenceMs: cfg.clipEndSilenceMs, transport: cfg.chromeTransports[i % cfg.chromeTransports.length] || null,

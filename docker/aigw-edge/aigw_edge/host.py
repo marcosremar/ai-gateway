@@ -15,7 +15,7 @@ from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSes
 from aiortc.mediastreams import MediaStreamError
 from aiortc.sdp import candidate_from_sdp
 
-from .audio import Downsampler48to16
+from .audio import Downsampler48to16, GapFill
 from .config import Settings
 from .session import OUT_FRAME_BYTES, OUT_RATE, Session
 from .telemetry import telemetry
@@ -46,9 +46,11 @@ class OutTrack(MediaStreamTrack):
     async def recv(self):
         if self.readyState != "live":
             raise MediaStreamError
+        entered = time.monotonic()
         if self.t0 is None:
-            self.t0 = time.monotonic()
+            self.t0 = entered
         else:
+            self.session.out.sent(entered - self.t0 - self.ts / OUT_RATE)
             self.ts += self.samples
             wait = self.t0 + self.ts / OUT_RATE - time.monotonic()
             if wait > 0:
@@ -199,12 +201,18 @@ class SessionHost:
 
     async def read_track(self, track, session: Session) -> None:
         down = Downsampler48to16()
+        gaps = GapFill()
         resampler = None
         try:
             while not session.closed:
                 frame = await track.recv()
                 if frame.sample_rate == 48000 and frame.format.name == "s16":
-                    session.feed(down.push(frame.to_ndarray(), len(frame.layout.channels)))
+                    channels = len(frame.layout.channels)
+                    missing = gaps.missing(frame.pts, frame.samples)
+                    if missing:
+                        session.lost_ms += missing // 48
+                        session.feed(down.push(np.zeros(missing * channels, dtype=np.int16), channels))
+                    session.feed(down.push(frame.to_ndarray(), channels))
                     continue
                 resampler = resampler or av.AudioResampler(format="s16", layout="mono", rate=16000)
                 for out in resampler.resample(frame):

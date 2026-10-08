@@ -160,7 +160,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
       eur += hours * (r.pricePerHour ?? 0);
     }
   }
-  const field = (js: typeof judged, name: 'audibleMs' | 'receivedMs' | 'heardAfterReceivedMs' | 'audibleFromVadEndMs' | 'meterErrorMs') => dist(js.map(j => j.t[name]).filter((x): x is number => typeof x === 'number'));
+  const field = (js: typeof judged, name: 'audibleMs' | 'receivedMs' | 'heardAfterReceivedMs' | 'audibleFromVadEndMs' | 'meterErrorMs' | 'playoutMs' | 'playoutAfterReceivedMs' | 'renderAfterPlayoutMs' | 'jitterBufferMs') => dist(js.map(j => j.t[name]).filter((x): x is number => typeof x === 'number'));
   const sdk = (js: typeof judged, type: string, name: string) => dist(js.map(j => j.t.events.find(e => e.type === type)?.[name]).filter((x): x is number => typeof x === 'number'));
   const audible = Object.fromEntries(keys.filter(k => k.startsWith('chrome:')).map((k) => {
     const js = judged.filter(j => j.key === k);
@@ -168,6 +168,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
     const light = dist(withLatency(judged.filter(j => j.key === k.slice(7))));
     return [k.slice(7), {
       turns: js.length, audibleMs: heard, receivedMs: field(js, 'receivedMs'), heardAfterReceivedMs: field(js, 'heardAfterReceivedMs'),
+      playoutMs: field(js, 'playoutMs'), playoutAfterReceivedMs: field(js, 'playoutAfterReceivedMs'), renderAfterPlayoutMs: field(js, 'renderAfterPlayoutMs'), jitterBufferMs: field(js, 'jitterBufferMs'),
       sdkFirstSoundMs: sdk(js, 'turn.first_sound', 'ms'), networkDelayMs: sdk(js, 'turn.done', 'networkDelayMs'),
       audibleFromVadEndMs: field(js, 'audibleFromVadEndMs'), meterErrorMs: field(js.filter(j => j.t.audibleMs != null), 'meterErrorMs'), noAudibleAudio: js.filter(j => j.t.audibleMs == null && !j.t.overlap).length,
       overlapped: js.filter(j => j.t.overlap).length, lightweightMs: light,
@@ -225,6 +226,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
     edge: {
       ttfaMs: dist(metric('ttfa_ms')), sttMs: dist(metric('stt_ms')), llmTtftMs: dist(metric('llm_ttft_ms')), ttsTtfbMs: dist(metric('tts_ttfb_ms')),
       firstSoundFromSpeechMs: dist(metric('first_sound_from_speech_ms')), ttfaFromSpeechMs: dist(metric('ttfa_from_speech_ms')),
+      rtpFirstSentMs: dist(metric('rtp_first_sent_ms')), rtpLateP95Ms: dist(metric('rtp_late_p95_ms')), rtpLateMaxMs: dist(metric('rtp_late_max_ms')), uplinkLostMs: dist(metric('uplink_lost_ms')),
     },
     connect: {
       sessionMs: Object.fromEntries(['webrtc', 'ws'].map(k => [k, dist(client.students.filter(s => s.transport === k && s.connectMs !== null).map(s => s.connectMs as number))])),
@@ -276,6 +278,9 @@ function summary(r: ReturnType<typeof buildReport>): string {
     ...(Object.keys(r.audible).length ? ['audible in Chrome, ms from the reference to the first loud 20 ms at the page output (received = audio_start event):'] : []),
     ...Object.entries(r.audible).map(([k, a]) => `  ${k.padEnd(11)} n=${a.audibleMs.n}/${a.turns} audible p50 ${a.audibleMs.p50} p95 ${a.audibleMs.p95} | received p50 ${a.receivedMs.p50} | heard − received p50 ${a.heardAfterReceivedMs.p50}`
       + ` | from vad end p50 ${a.audibleFromVadEndMs.p50} | lightweight p50 ${a.lightweightMs.p50} → offset ${a.offsetMs} ms (audible p10–p90 spread ${a.spreadMs} ms) | meter error ≤ p50 ${a.meterErrorMs.p50} max ${a.meterErrorMs.max} ms | no audible audio ${a.noAudibleAudio}, overlapped ${a.overlapped}`),
+    ...Object.entries(r.audible).filter(([, a]) => a.jitterBufferMs.n).map(([k, a]) => `  ${k.padEnd(11)} playout (RTP delivered to the track) p50 ${a.playoutMs.p50} p95 ${a.playoutMs.p95} max ${a.playoutMs.max} | audio_start → playout p50 ${a.playoutAfterReceivedMs.p50} p95 ${a.playoutAfterReceivedMs.p95} | playout → audible p50 ${a.renderAfterPlayoutMs.p50} | jitter buffer p50 ${a.jitterBufferMs.p50} p95 ${a.jitterBufferMs.p95} max ${a.jitterBufferMs.max} ms`),
+    ...r.meters.filter(m => m.rtc).map(m => `  chrome ${m.student} getStats ${JSON.stringify(m.rtc)}`),
+    `  edge webrtc: first reply PCM → first RTP packet sent p50 ${r.edge.rtpFirstSentMs.p50} p95 ${r.edge.rtpFirstSentMs.p95} ms; packets sent late (first 2 s of a reply) p95 ${r.edge.rtpLateP95Ms.p50}, worst ${r.edge.rtpLateMaxMs.max} ms; uplink audio lost per turn p50 ${r.edge.uplinkLostMs.p50} p95 ${r.edge.uplinkLostMs.p95} max ${r.edge.uplinkLostMs.max} ms`,
     `  ws first frame p50 ${r.wsFirstFrameMs.p50} p95 ${r.wsFirstFrameMs.p95}; edge's own ttfa (after its endpointing) p50 ${r.edge.ttfaMs.p50} p95 ${r.edge.ttfaMs.p95}; stt ${r.edge.sttMs.p50} llm ${r.edge.llmTtftMs.p50} tts ${r.edge.ttsTtfbMs.p50}`,
     `connect: webrtc n=${r.connect.sessionMs.webrtc.n} p50 ${r.connect.sessionMs.webrtc.p50} p95 ${r.connect.sessionMs.webrtc.p95} ms, ws n=${r.connect.sessionMs.ws.n} p50 ${r.connect.sessionMs.ws.p50} p95 ${r.connect.sessionMs.ws.p95} ms`
       + ` — attempts: ${kv(r.connect.attempts)}; ICE pairs: ${kv(r.connect.pairs)}; reconnects ${r.connect.reconnects}; never connected ${r.connect.neverConnected}`,
