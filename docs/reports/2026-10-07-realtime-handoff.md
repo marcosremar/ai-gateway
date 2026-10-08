@@ -560,3 +560,116 @@ replica it only confirms every session was on it.
 At 05:59–06:02 this Mac's disk filled (other sessions; 0.8 GB free of 460): the local gateway process died without a
 log line; one N = 8 run lost its output and the next two ran against the dead gateway (11 GPU minutes). The gateway was restarted on the same
 `DEPLOYMENTS_STATE_DIR` and took the running replica back; nothing was created twice.
+
+## Fallback under load, 2026-10-08
+
+Question: when a GPU replica is full, cold, out of stock or over budget, the excess students are answered by the composed
+pipeline of `POST /v1/s2s` (STT → LLM → TTS over OpenRouter). Does it hold a class, and what does it cost? No machine was
+created: the test gateway (this branch, port 4104, a Mac) ran with `DEPLOYMENTS_ENABLED=0` (boot log: `Deployments
+disabled`, declared `parle-speech` in state `disabled`), every request carried `X-Gateway-No-Wake: 1`, `/health` ended
+with `noWake.skips: 0` and the log has no line about a replica.
+
+**Chain** (parle's own routes, `backend/speech/gateway-routes.ts`, set here through `MODEL_ROUTES`; `/health` showed the
+same serving links as production with no GPU up): STT `openrouter:openai/whisper-large-v3-turbo` (third link
+`groq:whisper-large-v3-turbo` is `no_key`: the dev API serves no `GROQ_API_KEY`, so STT has **no** second cloud link) ·
+LLM `openrouter:qwen/qwen3.5-9b` (reasoning off) → `openrouter:google/gemini-2.5-flash-lite` · TTS
+`openrouter:microsoft/mai-voice-2.1-flash` (voice `pt-BR-Luana`) → `openrouter:hexgrad/kokoro-82m`.
+
+**Turn**: a 4.0 s Portuguese clip (macOS `say`, PCM16 16 kHz), a 460-token shop-clerk system prompt, 3 messages of
+history, `max_tokens` 160. Replies averaged 127 characters in 3 sentences, 10.5 s of audio. Harness: the new `s2s`
+lightweight client (`load.ts --s2s N --no-wake`, docs/realtime.md § Clients), default duty cycle (a turn every 15 ± 5 s,
+30 s ramp), 120 s per student. **Clock**: from the end of the speech = the request minus 700 ms (`--clip-end-silence`,
+the endpointing the page adds before it posts) to the first non-silent audio; "from request" is the same without the
+700 ms. Target for comparison (the GPU's): p50 ≤ 1500 ms, p95 ≤ 2000 ms.
+
+| Run | Turns | Failed | First audio from end of speech, ms: p50 / p90 / p95 / p99 / max | Share ≤ 1.0 / 1.5 / 2.0 / 3.0 / 5.0 s, % | From request p50 / p95 | Cost of the run |
+|---|---|---|---|---|---|---|
+| N = 1, 10 turns | 11 | 0 | 3003 / 4726 / 5472 / 5472 / 5472 | 0 / 0 / 0 / 45.5 / 90.9 | 2303 / 4772 | $0.02 |
+| N = 8 | 62 | 0 | 2978 / 3668 / 4005 / 4671 / 4671 | 0 / 0 / 0 / 53.2 / 100 | 2278 / 3305 | $0.12 |
+| N = 25 | 191 | 0 | 2989 / 3457 / 3725 / 4267 / 5052 | 0 / 0 / 0 / 52.4 / 99.5 | 2289 / 3025 | $0.38 |
+| N = 25, repeated after N = 100 | 194 | 0 | 2987 / 3616 / 4410 / 7597 / 7759 | 0 / 0 / 0 / 52.1 / 98.5 | 2287 / 3710 | $0.39 |
+| N = 25 `--burst` | 166 | 0 | 3220 / 4839 / 5496 / 6928 / 7369 | 0 / 0 / 0 / 34.9 / 92.2 | 2520 / 4796 | $0.33 |
+| N = 50 | 378 | 0 | 3181 / 4888 / 5485 / 6376 / 7163 | 0 / 0 / 0 / 35.2 / 90.5 | 2481 / 4785 | $0.75 |
+| N = 100 | 767 | 0 | 3145 / 4366 / 5193 / 6785 / 7505 | 0 / 0 / 0 / 35.3 / 94.3 | 2445 / 4493 | $1.50 |
+
+Every run is `FAIL` against the GPU target, as expected. 1,769 turns, **0 failed**: no 429, no 5xx, no timeout, no
+`sentence_failed`, no `missing_audio`, no stream without `done`. The harness also flagged 0 / 2 / 14 / 9 / 16 / 23 / 61
+turns as `truncated:short_audio` (audio per character under 0.75 × the run's p90): none of them has a hard sign of a
+cut, the shortest is 0.60 of the reference, and the MAI voice's own rate spreads from 72 to 94 ms per character (p10–p90),
+so the 0.75 ratio tuned on the GPU voice gives false positives here; a reply that lost one sentence of three would look
+the same, so this check cannot rule it out — the gateway's own signals do.
+
+**Per stage**, ms, p50 / p95 (from the events of the composed pipeline; stages run one after the other):
+
+| Run | STT | LLM first token | first sentence cut after it | TTS first byte | first audio at the gateway | client − gateway |
+|---|---|---|---|---|---|---|
+| N = 1 | 690 / 1186 | 697 / 1718 | 108 / 1593 | 844 / 1003 | 2279 / 4769 | 3 / 72 |
+| N = 8 | 701 / 1399 | 661 / 816 | 96 / 189 | 796 / 954 | 2285 / 3303 | 3 / 18 |
+| N = 25 | 670 / 1393 | 671 / 855 | 91 / 187 | 786 / 961 | 2287 / 3024 | 2 / 11 |
+| N = 25 burst | 746 / 1858 | 695 / 1236 | 104 / 1818 | 799 / 1075 | 2573 / 4795 | 1 / 8 |
+| N = 50 | 794 / 1991 | 675 / 1130 | 97 / 2003 | 791 / 945 | 2479 / 4784 | 1 / 9 |
+| N = 100 | 762 / 2310 | 687 / 1123 (p99 4337) | 105 / 246 | 791 / 1037 | 2444 / 4492 | 1 / 5 |
+
+- The median does not move with N (3.0–3.2 s from 1 to 100 students): it is the sum of three sequential cloud calls
+  (≈ 0.7 + 0.7 + 0.1 + 0.8 s) plus the 0.7 s endpointing. The fallback is ≈ 1.5 s over the p50 target at any load.
+- The tail is the providers': Whisper's p95 grows from 1.4 to 2.3 s, and the Qwen stream sometimes stalls ≈ 2 s between
+  its first token and the end of the first sentence (already once in 11 turns with one student). The load generator and
+  the gateway add 1–11 ms (last column), although the Mac was busy (load average 20–27 on 10 cores, other sessions).
+- **Serving links**: route `composite` 100 %; STT and TTS 100 % on the first cloud link at every N; LLM 100 % on Qwen up
+  to N = 50 and 755 / 767 at N = 100 — 12 turns (1.6 %) went to `gemini-2.5-flash-lite` with `fallback: timeout` (the
+  gateway log: `Streaming timeout after 4000ms → next provider`, 12 times). Kokoro never served.
+- **Limits**: no provider rate limit appeared. Of the gateway's own: `RATE_LIMIT_RPM` is off (unset);
+  `MAX_CONCURRENT_PER_USER` (150; the stage sub-requests are exempt) was never reached; the cloud first-byte limit
+  (`GATEWAY_CLOUD_HEDGE_MS`, 4000 ms = half the 8 s stage budget) is what moved those 12 LLM turns; `S2S_HEDGE_MS` does
+  not apply without a primary. **Not exercised**: the per-app daily budget — the test key is an admin, production's
+  `parle` key is not. `checkS2S` charges one request and ≈ 580 tokens (prompt characters / 4 + `max_tokens`) per turn
+  against `APP_DAILY_REQUESTS` (default 5000) and `APP_DAILY_TOKENS` (default 2,000,000): at the defaults ≈ 3,400
+  turns a day, which 25 students on the fallback use in ≈ 35 minutes and 100 in ≈ 9 — then `429` until 00:00 UTC. What
+  production sets was not read (the production gateway was not touched); it is the first limit to check.
+
+**"Usable"** (steady arrivals; failures were 0 % everywhere):
+
+| Definition | Largest N |
+|---|---|
+| within the GPU target, p95 ≤ 2 s | none — a single student already gets p50 3.0 s (no turn under 2 s in 1,769) |
+| p95 ≤ 3 s | none — the best p95 was 3.7 s (N = 25); from the request, without the endpointing, 3.0–3.7 s |
+| p95 ≤ 5 s and ≤ 2 % failures | 25 (p95 3.7 and 4.4 s in two runs; N = 8: 4.0 s). N = 50 and 100 miss by 0.2–0.5 s (5.5 and 5.2 s), and so does a class of 25 that speaks at the same instant (5.5 s) |
+
+Counted from the request, every level up to 100 stays under 5 s (p95 4.5–4.8 s). The first limit hit is latency, not a
+rate limit and not the gateway: the fallback keeps answering 100 students, about 1.5 s later than the GPU at the median
+and 2–3.5 s later at p95.
+
+**Cost.** The composed pipeline returns no usage, so two sources: (a) measured — the OpenRouter key's own counter
+(`GET https://openrouter.ai/api/v1/key`, read before and after; the key is shared, other use would be inside): **$3.45**
+for the whole session; (b) computed from the harness's counts and the prices of `GET
+https://openrouter.ai/api/v1/models?output_modalities=all` on 2026-10-08 — MAI-Voice-2.1-flash $15 per million
+characters, Qwen3.5-9B $0.10 / $0.15 per million tokens in / out (475 in, ≈ 35 out per turn, measured through the
+gateway), Whisper turbo `0.00000333` per unit (taken as per second of audio): **$3.49**. Per turn **$0.0020**, 97 % of
+it the TTS (127 characters); the LLM is $0.00005 and the STT ≈ $0.00001.
+
+| | per student-hour (240 turns) | 8 students (overflow of one class) | 24 students | 100 students |
+|---|---|---|---|---|
+| Fallback (MAI voice) | $0.47 (≈ €0.40–0.44) | $3.8 / h | $11.3 / h | $47 / h |
+| GPU slot (L40S €1.47 / h, 8 students) | €0.18 | €1.47 / h | €4.41 / h | — |
+
+The fallback costs ≈ 2.3 × a GPU slot at this duty cycle, and almost all of it is the voice: with Kokoro ($0.62 per
+million characters) in place of MAI the same turn would be ≈ $0.00015 ($0.04 per student-hour) — not measured here.
+
+**Surprises**
+- The cloud TTS does not stream and does not answer WAV: `microsoft/mai-voice-2.1-flash` returns each sentence whole
+  (time to first byte = total, 0.8–1.1 s) as **MP3** (24 kHz mono, 160 kbit/s) although the stage asks
+  `response_format: "wav"`; the `A` frames then carry MP3 and the `audio_format` event says `audio/mpeg`. A client that
+  assumes PCM plays noise. The voice is the stock `pt-BR-Luana`, not the cast voice the GPU clones.
+- STT has one cloud link only (Groq has no key in the dev API): an OpenRouter Whisper outage fails the turn.
+- The STT cache answers a repeated clip (same bytes) without calling the provider: a load test that posts one file
+  measures the cache. The `s2s` client changes 16 samples per turn.
+
+**Harness**: `scripts/realtime-e2e/load.ts` / `load-client.ts` — client type `s2s` (`--s2s N`, `--no-wake`), the `s2s`
+block of the report (from-request times, stage times, serving provider per stage, errors, refused turns, usage counts),
+shares ≤ 3.0 and ≤ 5.0 s in every distribution, `missing_audio` counted as a truncation. Not proven on the local fake
+stack: it needs Linux + root and this run stayed on the Mac; the live runs above are the proof.
+
+**Not run**: any GPU or realtime transport; bad-network profiles (Linux only); a non-admin app key (the daily budget
+above); a second Portuguese clip or longer histories; a `--burst` above 25; Kokoro as the voice; repeats of N = 50 and
+100 (one run each — the p95 of N = 25 moved from 3.7 to 4.4 s between two runs, so read ± 0.7 s on every p95).
+

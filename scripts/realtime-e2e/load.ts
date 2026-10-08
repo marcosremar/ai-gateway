@@ -14,6 +14,8 @@
  *   --chrome 0        real Chrome sessions alongside        --rtc-procs      aiortc processes (default 1 per 8)
  *   --chrome-transports webrtc,ws,s2s-stream   rung forced on each Chrome session, round robin ('' = the SDK's ladder)
  *   --clip-end-silence 700   ms the Chrome clip rung waits after the speech before it posts the clip
+ *   --s2s 0           how many of them post each turn to /v1/s2s instead (no session; the clock starts at the request
+ *                     minus --clip-end-silence, the endpointing a page adds)   --no-wake   they send X-Gateway-No-Wake: 1
  *   --ramp 30         seconds over which students arrive    --duration 180   seconds each student talks
  *   --turn-every 15   seconds between turns                 --jitter 5       ± seconds
  *   --clip-s 1.4      length of the tone clip               --clip file.wav  real speech instead (PCM16 mono WAV)
@@ -39,6 +41,7 @@ const num = (name: string, fallback: number) => Number(opt(name) ?? fallback);
 const REAL_GW = process.env.GW ?? '';
 const N = num('n', 20);
 const RTC = Math.min(N, num('rtc', 0));
+const S2S = Math.min(N - RTC, num('s2s', 0));
 const CHROME = num('chrome', 0);
 const PROFILE = opt('profile') ?? 'clean';
 const REPLICAS = num('replicas', 2);
@@ -72,11 +75,13 @@ function outcome(t: Turn): { result: 'ok' | 'failed' | 'truncated'; why: string 
   const done = ev('done');
   const error = ev('error');
   const heard = t.audioMs < 0 ? Boolean(ev('audio_start')) : t.firstLoud !== null;
+  if (t.client === 's2s' && done && !heard && !done.empty && (error || ev('sentence_failed'))) return failed(`error:${String((error ?? ev('sentence_failed'))?.code ?? 'unknown')}`);
   if (!done) return heard ? truncated(t.lost ? 'lost_after_audio' : 'no_done_after_audio') : failed(t.lost ? 'session_lost' : 'timeout');
   if (error || done.error) return heard ? truncated(`error_after_audio:${String(error?.code ?? 'unknown')}`) : failed(`error:${String(error?.code ?? 'unknown')}`);
   if (done.interrupted) return heard ? truncated('interrupted') : failed('interrupted');
   if (done.empty || done.filtered) return failed(done.filtered ? 'filtered' : 'empty');
   if (!heard || t.audioMs === 0) return failed('no_audio');
+  if (done.missing_audio) return truncated(`missing_audio:${String(ev('sentence_failed')?.code ?? 'unknown')}`);
   if (!ev('audio_end')) return truncated('no_audio_end');
   return { result: 'ok', why: '' };
 }
@@ -85,7 +90,7 @@ function dist(values: number[], attempted = values.length) {
   const xs = [...values].sort((a, b) => a - b);
   const pct = (p: number) => (xs.length ? Math.round(xs[Math.min(xs.length - 1, Math.ceil((p / 100) * xs.length) - 1)]) : null);
   const share = (ms: number) => (attempted ? round((100 * xs.filter(x => x <= ms).length) / attempted, 1) : null);
-  return { n: xs.length, p10: pct(10), p50: pct(50), p90: pct(90), p95: pct(95), p99: pct(99), max: pct(100), le1000: share(1000), le1500: share(1500), le2000: share(2000) };
+  return { n: xs.length, p10: pct(10), p50: pct(50), p90: pct(90), p95: pct(95), p99: pct(99), max: pct(100), le1000: share(1000), le1500: share(1500), le2000: share(2000), le3000: share(3000), le5000: share(5000) };
 }
 const count = (keys: string[]) => keys.reduce<Record<string, number>>((m, k) => ({ ...m, [k]: (m[k] ?? 0) + 1 }), {});
 
@@ -96,7 +101,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
     chars: Number(t.events.find(e => e.type === 'reply')?.chars ?? 0),
   }));
   const rates: Record<string, number> = {};
-  for (const kind of ['ws', 'rtc', 'chrome']) {
+  for (const kind of ['ws', 'rtc', 's2s', 'chrome']) {
     const clean = judged.filter(j => j.t.client === kind && j.result === 'ok' && j.chars > 0 && j.t.audioMs > 0);
     const sorted = clean.map(j => j.t.audioMs / j.chars).sort((a, b) => a - b);
     const reference = MS_PER_CHAR || (sorted.length >= 5 ? sorted[Math.floor(sorted.length * 0.9)] : 0);
@@ -155,6 +160,31 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
       spreadMs: heard.p90 !== null && heard.p10 !== null ? heard.p90 - heard.p10 : null,
     }];
   }));
+  const posted = judged.filter(j => j.t.client === 's2s');
+  const evs = (type: string) => posted.flatMap(j => j.t.events.filter(e => e.type === type));
+  const first = (j: typeof judged[number], type: string, name: string) => Number(j.t.events.find(e => e.type === type)?.[name]);
+  const finite = (xs: number[]) => dist(xs.filter(x => Number.isFinite(x)));
+  const served = (type: string) => count(evs(type).map(e => `${String(e.provider)}${e.fallback ? ` (fallback ${String(e.fallback)})` : ''}`));
+  const s2s = {
+    endpointingMs: cfg.clipEndSilenceMs,
+    fromRequestMs: {
+      firstFrame: dist(posted.filter(j => j.t.firstFrame !== null).map(j => (j.t.firstFrame as number) - (j.t.speechEnd as number) - cfg.clipEndSilenceMs), posted.length),
+      firstLoud: dist(posted.filter(j => j.latency !== null).map(j => (j.latency as number) - cfg.clipEndSilenceMs), posted.length),
+    },
+    stageMs: {
+      stt: finite(posted.map(j => first(j, 'transcript', 'stt_ms'))),
+      llmFirstToken: finite(posted.map(j => first(j, 'llm_first_token', 'at_ms') - first(j, 'transcript', 'stt_ms'))),
+      ttsFirstByte: finite(posted.map(j => first(j, 'first_audio', 'at_ms') - first(j, 'sentence', 'cut_at_ms'))),
+      total: finite(posted.map(j => first(j, 'done', 'total_ms'))),
+    },
+    servedBy: { route: served('route'), stt: served('transcript'), llm: served('llm_first_token'), ttsFirst: served('first_audio'), ttsAny: count(evs('audio_format').map(e => String(e.provider))) },
+    errors: count([...evs('error'), ...evs('sentence_failed')].map(e => `${e.type}:${String(e.code ?? 'unknown')}`)),
+    refused: count(posted.filter(j => j.t.skipped).map(j => String(j.t.skipped))),
+    usage: {
+      sttTurns: evs('transcript').length, llmTurns: evs('llm_first_token').length, sentences: evs('sentence').length,
+      replyChars: evs('reply').reduce((n, e) => n + Number(e.chars), 0), audioS: round(posted.reduce((n, j) => n + j.t.audioMs, 0) / 1000, 1),
+    },
+  };
   const checks = [
     { name: 'first audio p50 ms', value: all.p50, limit: TARGET.p50, ok: all.p50 !== null && all.p50 <= TARGET.p50 },
     { name: 'first audio p95 ms', value: all.p95, limit: TARGET.p95, ok: all.p95 !== null && all.p95 <= TARGET.p95 },
@@ -164,7 +194,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
     pass: checks.every(c => c.ok), checks, target: TARGET,
     run: {
       mode: REAL_GW ? 'real' : 'fake', gateway: REAL_GW || null, deployment: DEP, profile: PROFILE, shaping: LINUX_ROOT ? PROFILES[PROFILE] : null,
-      students: N, rtc: RTC, chrome: CHROME, chromeTransports: cfg.chromeTransports, clipEndSilenceMs: cfg.clipEndSilenceMs, rampS: cfg.rampS, durationS: cfg.durationS, turnEveryS: cfg.turnEveryS, jitterS: cfg.jitterS,
+      students: N, rtc: RTC, s2s: S2S, chrome: CHROME, chromeTransports: cfg.chromeTransports, clipEndSilenceMs: cfg.clipEndSilenceMs, rampS: cfg.rampS, durationS: cfg.durationS, turnEveryS: cfg.turnEveryS, jitterS: cfg.jitterS,
       clip: cfg.clip ?? `tone ${cfg.clipS} s`, ...(REAL_GW ? {} : { replicas: REPLICAS, capPerReplica: CAP }),
       fake: Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('FAKE_'))),
     },
@@ -173,7 +203,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
       why: count(judged.filter(j => j.why).map(j => `${j.result}:${j.why}`)), audioMsPerChar: rates,
     },
     firstAudioMs: { all, byReplica, byTransport: Object.fromEntries(keys.map(k => [k, dist(withLatency(judged.filter(j => j.key === k)), judged.filter(j => j.key === k).length)])) },
-    audible, meters: client.meters,
+    audible, meters: client.meters, ...(posted.length ? { s2s } : {}),
     wsFirstFrameMs: dist(judged.filter(j => j.t.firstFrame !== null && j.t.speechEnd !== null).map(j => (j.t.firstFrame as number) - (j.t.speechEnd as number))),
     edge: { ttfaMs: dist(metric('ttfa_ms')), sttMs: dist(metric('stt_ms')), llmTtftMs: dist(metric('llm_ttft_ms')), ttsTtfbMs: dist(metric('tts_ttfb_ms')) },
     connect: {
@@ -201,17 +231,24 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
 }
 
 function summary(r: ReturnType<typeof buildReport>): string {
-  const d = (name: string, x: ReturnType<typeof dist>) => `  ${name.padEnd(14)} n=${x.n} p50 ${x.p50} p90 ${x.p90} p95 ${x.p95} p99 ${x.p99} max ${x.max} | ≤1.0 s ${x.le1000} % ≤1.5 s ${x.le1500} % ≤2.0 s ${x.le2000} %`;
+  const d = (name: string, x: ReturnType<typeof dist>) => `  ${name.padEnd(14)} n=${x.n} p50 ${x.p50} p90 ${x.p90} p95 ${x.p95} p99 ${x.p99} max ${x.max} | ≤1.0 s ${x.le1000} % ≤1.5 s ${x.le1500} % ≤2.0 s ${x.le2000} % ≤3.0 s ${x.le3000} % ≤5.0 s ${x.le5000} %`;
   const kv = (m: Record<string, number>) => Object.entries(m).map(([k, v]) => `${k} ${v}`).join(', ') || 'none';
   const every = r.timeline.filter((_, i) => i % 3 === 0);
   return [
-    `load: ${r.run.students} students (${r.run.rtc} start at webrtc, ${r.run.students - r.run.rtc} ws only, ${r.run.chrome} chrome) profile=${r.run.profile} `
+    `load: ${r.run.students} students (${r.run.rtc} start at webrtc, ${r.run.s2s} post to /v1/s2s, ${r.run.students - r.run.rtc - r.run.s2s} ws only, ${r.run.chrome} chrome) profile=${r.run.profile} `
       + `${REAL_GW ? `gateway ${REAL_GW} deployment ${DEP}` : `fake stack ${REPLICAS} replicas × ${CAP} sessions`}, ${r.run.durationS} s each + ${r.run.rampS} s ramp, turn every ${r.run.turnEveryS}±${r.run.jitterS} s`,
     `turns: ${r.turns.attempted} attempted, ${r.turns.ok} ok, ${r.turns.failed} failed (${r.turns.failurePct} %), ${r.turns.truncated} truncated (${r.turns.truncationPct} %) — ${kv(r.turns.why)}`,
     'first audio, ms from the last voiced sample sent to the first non-silent audio received (shares over all attempted turns):',
     d('all', r.firstAudioMs.all),
     ...Object.entries(r.firstAudioMs.byTransport).map(([k, x]) => d(k, x)),
     ...Object.entries(r.firstAudioMs.byReplica).map(([k, x]) => `${d(`rep ${k.slice(-8)}`, x)} (${x.students} students)`),
+    ...(r.s2s ? [
+      `s2s, ms from the request (the numbers above start ${r.s2s.endpointingMs} ms earlier, at the end of the speech: the page's endpointing):`,
+      d('first frame', r.s2s.fromRequestMs.firstFrame), d('first loud', r.s2s.fromRequestMs.firstLoud),
+      ...Object.entries(r.s2s.stageMs).map(([k, x]) => `  ${k.padEnd(14)} n=${x.n} p50 ${x.p50} p90 ${x.p90} p95 ${x.p95} p99 ${x.p99} max ${x.max}`),
+      ...Object.entries(r.s2s.servedBy).map(([k, m]) => `  ${k.padEnd(14)} ${kv(m)}`),
+      `  errors: ${kv(r.s2s.errors)}; refused: ${kv(r.s2s.refused)}; usage: ${kv(r.s2s.usage)}`,
+    ] : []),
     ...(Object.keys(r.audible).length ? ['audible in Chrome, ms from the reference to the first loud 20 ms at the page output (received = audio_start event):'] : []),
     ...Object.entries(r.audible).map(([k, a]) => `  ${k.padEnd(11)} n=${a.audibleMs.n}/${a.turns} audible p50 ${a.audibleMs.p50} p95 ${a.audibleMs.p95} | received p50 ${a.receivedMs.p50} | heard − received p50 ${a.heardAfterReceivedMs.p50}`
       + ` | from vad end p50 ${a.audibleFromVadEndMs.p50} | lightweight p50 ${a.lightweightMs.p50} → offset ${a.offsetMs} ms (audible p10–p90 spread ${a.spreadMs} ms) | meter error ≤ p50 ${a.meterErrorMs.p50} max ${a.meterErrorMs.max} ms | no audible audio ${a.noAudibleAudio}, overlapped ${a.overlapped}`),
@@ -277,7 +314,7 @@ try {
     view = async () => local.controller.get(DEP);
   }
   const cfg: ClientConfig = {
-    gw, key, deployment: DEP, config, students: N, rtc: RTC, chrome: CHROME,
+    gw, key, deployment: DEP, config, students: N, rtc: RTC, s2s: S2S, noWake: argv.includes('--no-wake'), chrome: CHROME,
     chromeTransports: (opt('chrome-transports') ?? 'webrtc,ws,s2s-stream').split(','), clipEndSilenceMs: num('clip-end-silence', 700), rtcProcs: num('rtc-procs', Math.ceil(RTC / 8)),
     rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), burst: argv.includes('--burst'), clipS: num('clip-s', 1.4),
     clip: opt('clip') ?? null, turnTimeoutS: num('turn-timeout', 30), turn: (opt('turn') ?? (PROFILE === 'udp-blocked' ? 'tcp' : 'udp')) as 'udp' | 'tcp',

@@ -5,16 +5,17 @@ import { createInterface } from 'readline';
 import type { Browser } from 'playwright';
 import { openMicPage, startAppBackend } from './app-page';
 import { clip16k, concat, resample, rms, silence, tone, voiced, wav } from './clip';
+import { FrameDecoder } from '../../src/s2s/frames';
 
 export interface ClientConfig {
   gw: string; key: string; deployment: string; config: Record<string, unknown>;
-  students: number; rtc: number; chrome: number; chromeTransports: string[]; clipEndSilenceMs: number; rtcProcs: number;
+  students: number; rtc: number; s2s: number; noWake?: boolean; chrome: number; chromeTransports: string[]; clipEndSilenceMs: number; rtcProcs: number;
   rampS: number; durationS: number; turnEveryS: number; jitterS: number; burst?: boolean; clipS: number; clip: string | null; turnTimeoutS: number;
   turn: 'udp' | 'tcp'; python: string; chromePath: string; work: string; out: string;
 }
 export interface TurnEvent { type: string; at: number; [k: string]: unknown }
 export interface Turn {
-  student: number; client: 'ws' | 'rtc' | 'chrome'; transport: string | null; at: number;
+  student: number; client: 'ws' | 'rtc' | 's2s' | 'chrome'; transport: string | null; at: number;
   speechEnd: number | null; firstFrame: number | null; firstLoud: number | null; audioMs: number;
   events: TurnEvent[]; lost: string | null; skipped: string | null;
   overlap?: boolean; audibleMs?: number | null; receivedMs?: number | null; heardAfterReceivedMs?: number | null; audibleFromVadEndMs?: number | null; meterErrorMs?: number;
@@ -36,7 +37,7 @@ interface Descriptor {
   transports: Array<{ type: string; url?: string; offerUrl?: string; iceServers?: unknown[] }>;
 }
 interface Session {
-  transport: 'webrtc' | 'ws';
+  transport: 'webrtc' | 'ws' | 's2s';
   turn: Turn | null;
   lost: string | null;
   wake: (() => void) | null;
@@ -155,6 +156,87 @@ function openWs(url: string, desc: Descriptor): Promise<Session> {
   });
 }
 
+async function decodePackets(t: Turn, packets: Array<{ at: number; bytes: Uint8Array }>): Promise<void> {
+  const ffmpeg = Bun.spawn([process.env.FFMPEG || 'ffmpeg', '-loglevel', 'quiet', '-i', 'pipe:0', '-f', 's16le', '-ac', '1', '-ar', '16000', 'pipe:1'], { stdin: 'pipe', stdout: 'pipe' });
+  for (const p of packets) ffmpeg.stdin.write(p.bytes);
+  ffmpeg.stdin.end();
+  const raw = new Uint8Array(await new Response(ffmpeg.stdout).arrayBuffer());
+  const pcm = new Int16Array(raw.slice(0, raw.length & ~1).buffer);
+  t.audioMs += pcm.length / 16;
+  if (t.firstLoud !== null) return;
+  let loud = 0;
+  while (loud < pcm.length && rms(pcm.subarray(loud, loud + FRAME)) <= LOUD) loud += FRAME;
+  if (loud >= pcm.length) return;
+  const total = packets.reduce((n, p) => n + p.bytes.length, 0);
+  let seen = 0;
+  for (const p of packets) {
+    seen += p.bytes.length;
+    if (seen / total >= loud / pcm.length) { t.firstLoud = p.at; return; }
+  }
+}
+const HIDDEN = ['text', 'reply', 'reply_raw', 'transcript', 'message'];
+async function postTurn(s: Session): Promise<void> {
+  const t = s.turn!;
+  const pcm = clip.slice();
+  for (let i = 0; i < 16; i++) pcm[i] = Math.floor(Math.random() * 8);
+  const form = new FormData();
+  form.set('file', new Blob([new Uint8Array(wav(pcm, 16000))], { type: 'audio/wav' }), 'turn.wav');
+  form.set('config', JSON.stringify({ ...cfg.config, deployment: cfg.deployment }));
+  t.speechEnd = now() - cfg.clipEndSilenceMs;
+  let rate = 24000;
+  let done = false;
+  let encoded = false;
+  const packets: Array<{ at: number; bytes: Uint8Array }> = [];
+  try {
+    const r = await fetch(`${cfg.gw}/v1/s2s`, {
+      method: 'POST', headers: { Authorization: `Bearer ${cfg.key}`, ...(cfg.noWake ? { 'X-Gateway-No-Wake': '1' } : {}) },
+      body: form, signal: AbortSignal.timeout(cfg.turnTimeoutS * 1000),
+    });
+    if (!r.ok || !r.body) {
+      const stage = /(stt|llm|tts) HTTP (\d+)/.exec(await r.text().catch(() => ''));
+      t.skipped = `http_${r.status}:${stage ? `${stage[1]}_${stage[2]}` : 'gateway'}`;
+      return;
+    }
+    const decoder = new FrameDecoder();
+    for await (const chunk of r.body as unknown as AsyncIterable<Uint8Array>) {
+      const at = now();
+      for (const f of decoder.push(chunk)) {
+        if (f.kind === 'audio') {
+          t.firstFrame ??= at;
+          if (encoded) { packets.push({ at, bytes: f.pcm }); continue; }
+          t.audioMs += (f.pcm.length / 2 / rate) * 1000;
+          if (t.firstLoud === null && rms(new Int16Array(f.pcm.slice(0, f.pcm.length & ~1).buffer)) > LOUD) t.firstLoud = at;
+          continue;
+        }
+        const e = f.event;
+        if (typeof e.sample_rate === 'number') rate = e.sample_rate;
+        if (e.type === 'audio_format') encoded = e.encoding !== 'pcm_s16le';
+        const stage = /(stt|llm|tts) HTTP (\d+)/.exec(String(e.message ?? ''));
+        const code = stage ? `${stage[1]}_${stage[2]}` : e.stage ?? e.code;
+        const chars = String(e.reply ?? e.text ?? '').length;
+        t.events.push({ ...Object.fromEntries(Object.entries(e).filter(([k]) => !HIDDEN.includes(k))), ...(code ? { code } : {}), type: e.type, at, chars });
+        if (e.type === 'done') { done = true; t.events.push({ type: 'reply', at, chars }); }
+      }
+    }
+    const end = now();
+    if (packets.length) await decodePackets(t, packets);
+    if (done && !decoder.pending) t.events.push({ type: 'audio_end', at: end });
+  } catch (err) {
+    if (!t.events.length) t.skipped = `${(err as Error).name === 'TimeoutError' ? 'timeout' : 'network'}:s2s`;
+  } finally {
+    s.wake?.();
+  }
+}
+function openS2s(): Session {
+  const s: Session = {
+    transport: 's2s', turn: null, lost: null, wake: null,
+    say: () => void postTurn(s),
+    settle: async () => {},
+    close: () => { live.delete(s); },
+  };
+  return s;
+}
+
 type RtcMessage = { id: number; ev: string; t: number; [k: string]: unknown };
 const rtcProcs: ChildProcess[] = [];
 const rtcHandlers = new Map<number, (m: RtcMessage) => void>();
@@ -204,6 +286,13 @@ function openRtc(offer: Descriptor['transports'][number], desc: Descriptor, atte
 }
 
 async function connect(rec: StudentRecord): Promise<{ session: Session } | { why: string; retryMs: number }> {
+  if (rec.client === 's2s') {
+    const session = openS2s();
+    rec.transport = 's2s';
+    rec.connectMs ??= 0;
+    live.add(session);
+    return { session };
+  }
   const want = rec.client === 'rtc' ? ['webrtc', 'ws'] : ['ws'];
   const t0 = now();
   let status = 0;
@@ -265,7 +354,7 @@ async function speak(session: Session, turn: Turn): Promise<void> {
 }
 
 async function student(id: number): Promise<void> {
-  const rec: StudentRecord = { id, client: id < cfg.rtc ? 'rtc' : 'ws', startedAt: 0, transport: null, connectMs: null, reconnects: 0, admissions: [], attempts: [] };
+  const rec: StudentRecord = { id, client: id < cfg.rtc ? 'rtc' : id < cfg.rtc + cfg.s2s ? 's2s' : 'ws', startedAt: 0, transport: null, connectMs: null, reconnects: 0, admissions: [], attempts: [] };
   result.students.push(rec);
   await sleep((id / cfg.students) * cfg.rampS * 1000);
   rec.startedAt = now();
