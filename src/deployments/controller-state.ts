@@ -14,6 +14,7 @@ import type { PressureState } from './autoscale';
 import { replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
+import { externalInflightOn } from '../realtime/external-load';
 import type {
   DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
   ReplicaProbe,
@@ -304,6 +305,11 @@ export abstract class ControllerState {
   /** Ready replicas still taking requests (not draining). */
   protected servingMachines(name: string): ReplicaMachine[] {
     return this.readyMachines(name).filter(m => !this.draining.has(m.id));
+  }
+
+  protected busyOn(rt: Runtime, replicaId: string): number {
+    const spec = rt.record.spec;
+    return (rt.perReplica.get(replicaId) ?? 0) + Math.ceil(externalInflightOn(spec.name, replicaId, spec.targetInflightPerReplica, this.now()));
   }
 
   protected observed(m: ReplicaMachine, inflight: number): ObservedReplica {

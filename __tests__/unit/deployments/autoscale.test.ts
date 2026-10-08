@@ -293,4 +293,18 @@ describe('controller: realtime sessions are load', () => {
     await x.tick({ [x.first]: 0, [second]: 0 }, 1_000);
     expect(x.cloud.machines.size).toBe(1);
   });
+
+  it('load fits one replica fewer, but the surplus replica keeps its seated learner until the session ends', async () => {
+    const x = await classroom(2);
+    await x.tick({ [x.first]: 8 });
+    await x.tick({ [x.first]: 8 }, 20_000);
+    booted = null;
+    await until(async () => (await x.tick({ [x.first]: 8 })).replicas.length === 2);
+    const second = x.controller.get('speech')!.replicas.find(r => r.id !== x.first)!.id;
+    for (let i = 0; i < 6; i++) await x.tick({ [x.first]: 2, [second]: 1 }, 20_000);
+    expect(x.cloud.machines.has(second)).toBe(true);
+    expect(x.cloud.machines.size).toBe(2);
+    for (let i = 0; i < 3; i++) await x.tick({ [x.first]: 2, [second]: 0 }, 20_000);
+    expect(x.cloud.machines.size).toBe(1);
+  });
 });

@@ -115,7 +115,7 @@ export abstract class AutoscaleControl extends ScalingControl {
     }
     const drainMs = this.drainMsOf(rt);
     for (const m of mine.filter(x => this.draining.has(x.id))) {
-      const empty = (rt.perReplica.get(m.id) ?? 0) === 0;
+      const empty = this.busyOn(rt, m.id) === 0;
       if (!empty && this.now() - this.draining.get(m.id)! < drainMs) continue;
       this.draining.delete(m.id);
       if (rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
@@ -136,7 +136,7 @@ export abstract class AutoscaleControl extends ScalingControl {
       const donor = this.deployments.get(m.deployment);
       if (!donor || donor === rt || this.draining.has(m.id) || this.parkedNow(m) || this.stoppingNow(m)) return false;
       const p = this.probes.get(m.id);
-      if (!p?.readyNow || (donor.perReplica.get(m.id) ?? 0) > 0) return false;
+      if (!p?.readyNow || this.busyOn(donor, m.id) > 0) return false;
       if (now - Math.max(p.lastServedAt ?? 0, p.readyAt ?? 0) < RECLAIM_IDLE_MS) return false;
       if (donor.record.lastRequestAt != null && now - donor.record.lastRequestAt < RECLAIM_IDLE_MS) return false;
       const live = this.machines.filter(x => x.deployment === m.deployment && !this.parkedNow(x) && !this.draining.has(x.id)).length;

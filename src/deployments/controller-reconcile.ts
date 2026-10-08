@@ -115,7 +115,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     // A deployment whose idle replica was reclaimed counts as idle until its next request (no ping-pong).
     const reclaimed = rt.reclaimedAt != null && rt.reclaimedAt >= (rt.record.lastRequestAt ?? 0);
     const lastRequestAt = reclaimed ? null : rt.record.lastRequestAt;
-    const replicas = mine.map(m => this.observed(m, rt.perReplica.get(m.id) ?? 0));
+    const replicas = mine.map(m => this.observed(m, this.busyOn(rt, m.id)));
     const base = {
       spec: this.planSpec(rt), inflight: rt.inflight, waiting: rt.waiting, lastRequestAt, now: this.now(),
       // Recent peak, not the instant: a burst served by hedges or refused while cold still asks for capacity.

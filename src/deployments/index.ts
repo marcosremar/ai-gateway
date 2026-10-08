@@ -18,6 +18,7 @@ import { AppFallbackService, OpenRouterKeyProvisioner } from './app-fallback';
 import { ClientStabilityLog } from './stability';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
+import { sessionsWanting } from '../realtime/external-load';
 
 export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
@@ -145,6 +146,7 @@ export function deploymentsFromEnv(
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
   const controller = new DeploymentController({
     backends,
+    sessions: sessionsWanting,
     store: FileDeploymentStore.inDir(stateDir),
     probe: new HttpReplicaProbe(probeTimeoutMs),
     busyGraceMs,

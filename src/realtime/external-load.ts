@@ -93,6 +93,14 @@ export function refusedSessions(deployment: string, windowMs: number, now = Date
   return count(`${deployment}|saturated`, windowMs, now);
 }
 
+export const WANTING_WINDOW_MS = 40_000;
+
+export function sessionsWanting(deployment: string, now = Date.now()): number | null {
+  const seated = externalLoadOf(deployment, now);
+  const refused = refusedSessions(deployment, WANTING_WINDOW_MS, now);
+  return seated.replicas === 0 && refused === 0 ? null : seated.active + refused;
+}
+
 /** Tests only. */
 export function _resetExternalLoad(): void {
   reports.clear();
