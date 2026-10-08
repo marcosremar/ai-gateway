@@ -1143,3 +1143,189 @@ Vast's invoice.
 
 The final image itself; WebRTC from a French Vast host; WebRTC from a browser (Chrome) or a phone; TURN (none
 configured on this gateway); more than 4 learners; a session surviving the replica's replacement; `image_login`.
+
+## Prova final ao vivo — Scaleway (2026-10-08)
+
+**Side check, 13:28 Europe/Paris — who holds the second L4 of the quota (production `parle-qwen-tts` is `degraded`,
+`quotas_exceeded` on `cp_servers_type_L4_1_24G`, 2 of 2).** Read-only list of every server of the project in the nine
+zones (running and stopped). The two L4 are:
+
+| Server | Name | Type | State | Created (UTC) | Tags |
+|---|---|---|---|---|---|
+| `7057e331-d393-4e04-bc33-5373d5eb091a` fr-par-2 | `aigw-parle-qwen-tts-muzfcxpd` | L4-1-24G | running | 2026-10-08 10:59:54 | `aigw-ns-prod`, `aigw-dep-parle-qwen-tts` — production's own replica |
+| `54b19a13-36c0-48e9-b665-c81a17b659a8` fr-par-2 | `aigw-parle-speech-muy11qri` | L4-1-24G | **stopped** | 2026-10-07 11:31:31 | `aigw-ns-dev-mrt-e2e`, `aigw-dep-parle-speech` |
+
+The one holding the quota is **`54b19a13…`, stopped since 2026-10-07 11:31 UTC, namespace `dev-mrt-e2e`** (with its
+`aigw-turn-muy11qcw` DEV1-S `62ed6752…`, `stopped in place`, same namespace and minute). It is not of this proof
+(`marcos-proof-scw`) nor of any `marcos-*` namespace: **not touched**. Also in the project, not L4: two stopped
+`aigw-whisper-stt-*` POP2-HC-4C-8G (`aigw-ns-dev-marmos`, 2026-10-07) and this proof's one L40S (`926bec0d…`,
+`aigw-ns-marcos-proof-scw`). No L4 is or will be used by this proof.
+
+### What ran
+
+One replica, **L40S-1-48G fr-par-2, `fr-par-2:926bec0d-28d4-4554-8856-681fe1415def`, €1.4699/h**, created 12:47:45
+Europe/Paris, `ready` 12:56:07 (501 s), through a local gateway only (`bun serve.ts` on :4110 at this branch, namespace
+`marcos-proof-scw`, `DEPLOYMENTS_PROBE_PORT=8080`, `DEPLOYMENTS_MAX_REPLICAS=2`, `DEPLOYMENTS_MAX_EUR_PER_HOUR=3.2`,
+`S2S_DEPLOYMENT=proof-speech`, parle's `MODEL_ROUTES`). Spec: image `rg.fr-par.scw.cloud/aigw/speech-stack:20261008-0953`,
+edge `ghcr.io/marcosremar/aigw-edge:d4a160e4`, `placements: []`, `envByMachineType` of the profile (`RT_MAX_SESSIONS` 4,
+`STT_BATCH` 8, `LLM_PARALLEL` 16), `maxHours` 2.5, one catalog voice, a 509-token Portuguese shop-clerk system prompt,
+`opener.lines` (4 lines), a 4.5 s Portuguese clip. Models unchanged (Whisper large-v3, Qwen3.5-9B Q4_K_M, Qwen3-TTS).
+A first session was cancelled at 13:20 with the replica up; this one restarted the gateway on the same state dir at
+13:23 and took the replica back (nothing created twice). Production was checked read-only before every create: no L40S
+in use (one L4, `parle-qwen-tts`).
+
+Clock of every latency: last voiced sample sent → first non-silent audio received (the edge's 700 ms endpointing is
+inside). Clients: `ws` (Bun) from the Mac through the gateway's WS relay; `webrtc` = aiortc from a Linux container on
+the Mac (6 vCPU, `host/host` UDP straight to the replica; aiortc fails ICE gathering on macOS); Chrome = the real SDK
+with the audible meter. Default duty cycle (a turn every 15 ± 5 s) unless said. All numbers are this one replica.
+
+### 1 and 2 — four learners on one replica, first sound and the 2500 ms ceiling
+
+| Start | Client × 4 | Turns ok / attempted | First sound p50 / p95 / max ms | ≤ 1.0 / 1.5 / 2.0 s % | Over 2500 / 3000 ms | Openers, deadline missed | Edge after endpointing p50 / p95: ttfa · stt · llm · tts |
+|---|---|---|---|---|---|---|---|
+| 12:57 | ws, 210 s | 45 / 45 | 1021 / 1375 / 1632 | 35.6 / 95.6 / 100 | 0 / 0 | 0, 0 | 250/591 · 207/403 · 139/335 · 234/306 |
+| 13:44 | ws, 300 s | 69 / 69 | 1083 / 1474 / 1814 | 31.9 / 95.7 / 100 | 0 / 0 | 0, 0 | 280/641 · 207/416 · 170/294 · 241/349 |
+| 13:54 | ws, 300 s | 67 / 67 | 1074 / 1564 / 1802 | 22.4 / 86.6 / 100 | 0 / 0 | 0, 0 | 274/698 · 206/405 · 171/308 · 243/359 |
+| 14:18 | ws, 300 s | 73 / 73 | 1044 / 1694 / 1794 | 30.1 / 87.7 / 100 | 0 / 0 | 0, 0 | 251/716 · 207/411 · 153/360 · 236/332 |
+| 13:39 | webrtc, 300 s | 67 / 68 | 1475 / 1977 / 2185 | 0 / 54.4 / 95.6 | 0 / 0 | 0, 0 | 248/562 · 209/414 · 160/295 · 234/289 |
+| 13:49 | webrtc, 300 s | 67 / 67 | 1613 / 2096 / 2222 | 0 / 34.3 / 92.5 | 0 / 0 | 2, 0 | 265/903 · 209/425 · 145/399 · 239/339 |
+| 14:23 | webrtc, 300 s | 70 / 70 | 1461 / 2032 / 2351 | 0 / 55.7 / 94.3 | 0 / 0 | 1, 0 | 260/739 · 208/416 · 159/321 · 235/317 |
+| 14:00 | webrtc, 1000 s, a turn every 42 ± 8 s (the seated learners of item 3) | 94 / 96 | 1748 / 2216 / 3073 | 0 / 14.6 / 87.5 | 2 / 1 | 0, 0 | 246/456 · 209/386 · 153/207 · 232/292 |
+| 13:26 | ws, 630 s | 117 / 146 (see item 5) | 1230 / 2328 / 4423 | 16.4 / 54.8 / 72.6 | 5 / 4 | 7, 0 | 279/875 · 207/410 · 169/383 · 235/336 |
+| 14:28 | ws, `--burst --jitter 0 --turn-every 20`, 150 s (the four end their speech together) | 28 / 28 | 1747 / 1983 / **2013** | 0 / 3.6 / 96.4 | 0 / 0 | 6, 0 | 977/1934 · 397/732 · 465/559 · 402/426 |
+| 13:00 | Chrome forced on webrtc, audible, 210 s (first session; the four pages start together and speak almost in step) | 55 / 56 | 2125 / 2607 / 2815 | 0 / 0 / 26.8 | 4 / 0 | 13, 0 | 968/2407 · 400/772 · 465/570 · 379/435 |
+
+Pooled, lightweight clients at the default duty cycle:
+
+| | n | p50 | p95 | max | ≤ 1.0 / 1.5 / 2.0 s % | Failures |
+|---|---|---|---|---|---|---|
+| `ws` × 4, four runs | 254 | 1042 | 1630 | 1814 | 29.9 / 90.9 / 100 | 0 |
+| `webrtc` × 4, three runs | 204 | 1509 | 2032 | 2351 | 0 / 48.5 / 94.6 | 1 (a turn before admission: the slot of the previous run was still held) |
+
+- **WS meets the owner's target** (p50 1.0 s, p95 1.6 s, max 1.8 s, nothing above 2 s). **WebRTC is 0.45 s slower at the
+  same edge times** (edge `ttfa` after endpointing 248–265 ms p50 on both): the end of speech reaches the edge's VAD
+  855 ms after the last voiced sample on the aiortc path (p50; 700 ms of it is the endpointing), and aiortc has no
+  adaptive jitter buffer. p50 1.5 s, p95 2.03 s (30 ms over the 2 s line), max 2.35 s. A single learner: ws 832 ms,
+  webrtc 1416 ms.
+- **The ceiling as a MAX.** On the edge's own clock (speech heard → first sound queued) no turn of any run is late:
+  max 1875 ms over the `ws` runs (the aiortc client does not record it), `deadline_missed` 0 in 729 turns, and in the burst — where the reply audio alone would have come at up
+  to 3303 ms — the opener kept the first sound at **2013 ms max** (6 openers in 28 turns). On the learner's clock
+  **7 of 702 lightweight turns started after 2500 ms** (5 on ws in one run, 2 on webrtc; 5 of them after 3000 ms, max
+  4423), all in two windows of about 15 s (13:32:46–13:33:05, four sessions; 14:00:17–18, two sessions) and with
+  the same signature: the VAD's end-of-speech event came 2.0–4.4 s after the last voiced sample instead of 0.7–1.0 s,
+  and the edge then answered in 100–490 ms (one of the seven had its opener at the deadline and still reached the
+  client at 2512 ms). The audio arrived late at the edge (uplink of this Mac or its relay; the
+  cause was not isolated); the deadline counts from the speech the edge hears, so an opener cannot cover an uplink
+  stall. The four Chrome turns over 2500 ms (max 2815) are audible latency of four headless Chromes on a loaded Mac
+  speaking in step; `received` on the same turns is p95 2154, max 2176 ms.
+
+### 5 — complete replies
+
+729 turns of the lightweight clients on the GPU (the ten runs above; 697 `ok`): audio per reply character **63.5–94.4 ms (p1 64.8, p50 72.4, p99 87.9)** — no reply shorter than 0.6 × or
+longer than 1.6 × the median, so **0 early endings and 0 runaways** by length. `tts_retries`: 0 in the 171 turns
+measured after the harness stopped dropping the field (`36b11b2`; the 526 turns before it carry no count); replica
+`/health` at 13:37 after 736 TTS calls: `failed` 0, `stalled` 0. Failures, all explained:
+
+| Count | Outcome | Cause |
+|---|---|---|
+| 25 + 4 | `failed:interrupted`, `truncated:no_done_after_audio` | **found here**: from its 26th–28th turn every session of the 630 s run died. llama.cpp answers `400 exceed_context_size_error` (2048 tokens per slot, 509-token system prompt, the history grows by ~60 tokens a turn); edge `d4a160e4` then hangs the turn and every later turn ends `interrupted`. Reproduced by hand on the replica's `/v1/chat/completions`: 20 turns of history → 200 (1696 prompt tokens), 26 → 400 (2062). |
+| 1 + 1 | `failed:session_lost`, `truncated:lost_after_audio` | the edge's 15 min per session (`RT_MAX_SESSION_SECONDS`) closed the four seated sessions at 900 s; they were back in 2.1–2.5 s (one `503 saturated` each, then admitted). By design. |
+| 1 | `failed:admission:saturated` | a run started 7 s after the previous one, whose slot was still counted |
+
+The hang is fixed by `04ce863` (the Vast session saw the same thing) and the cause by **`db8c0f4`**: on that 400 the
+edge drops the oldest half of the history and asks once more (`edge.llm.history_trimmed`; regression scenario
+`history_overflow` in `docker/aigw-edge/tests/test_session.py`, fails on the parent commit, 82 checks green after).
+Edge image `ghcr.io/marcosremar/aigw-edge:db8c0f4d` built (Actions run 37772561492). An edge image reaches a replica only at creation and no second L40S
+could be created (item 3), so **no replica ran `db8c0f4d`**. What was run instead, 14:50: the edge's own `Session` and
+`Upstream` code on the Mac against this replica's models (through the gateway's `invoke`), one spoken turn on top of a
+30-turn history — parent commit: `transcript`, `error` (`llm http 400 … request (2317 tokens) exceeds the available
+context size`), `done{error}`; `db8c0f4`: `edge.llm.history_trimmed {dropped: 30, kept: 30}`, the LLM answered and the
+reply went to TTS (which fails off the replica: the catalog voice's reference file is local to it). The runs after
+13:36 were kept under 24 turns per session. With edge `d4a160e4` a conversation of more than about 25 turns with this
+prompt dies.
+
+### 6 — LLM streaming through the deployment
+
+13:25, 20 × `POST /v1/chat/completions` (`parle-llm`, `stream: true`, the 509-token system prompt, `max_tokens` 80), all
+served by `deployment:proof-speech`: **first token p50 231, p95 365, max 423 ms** from the request at the local gateway;
+18–32 content chunks per answer, spread over 150–285 ms (streamed, not one block).
+
+### 3 — overflow: learners 5..8 while one replica is up
+
+`PATCH {"maxReplicas": 2, "realtime": {"edgeImage": "…:db8c0f4d"}}` at 13:59:59, then four aiortc learners seated on
+the replica (1000 s) and the overflow in two forms: four Chrome learners on the SDK's own ladder (14:04:48, 635 s) and
+four clip-rung learners of the harness (`--s2s 4`, 14:41, 220 s, with four other aiortc learners seated).
+
+| Phase | Time | What happened |
+|---|---|---|
+| 4 learners seated | 13:59:59–14:00:10 | `realtime {active: 4, capacity: 4}` |
+| Second replica asked | 14:00:38 (28 s after the 4th seat; the rule is 20 s above 75 %) | `autoscale: desired 2, "load … > 75% of 1×6 (2 asked, waiting for 1)"`, `scalingOut: true` |
+| Second replica created | **never** | `L40S-1-48G out of stock in fr-par-2` on every create from 14:00:38 to 15:05 (and in pl-waw-2, added as a second placement at 14:11 and retried every 45 s with the back-off cleared): 81 creates failed, each half-created server deleted by the backend (provider list at 14:36 and after the teardown: nothing left). No L4 was substituted. |
+| Learners 5..8 refused | 14:04:49 | `POST /v1/realtime/sessions` → `503 saturated` (108 refusals over the run: the SDK asks again in the background, as designed) |
+| Learners 5..8 answered | 14:04:51–14:15:23 | **172 turns on `/v1/s2s`, all `provider: composite, fallback: saturated`**, 170 complete, 2 `client went away` (the pages closing); every chat and STT stage call logged `deployment:proof-speech failed (HTTP 503): every ready replica is at capacity → next provider` — the GPU answered none of them. Gateway `s2s.first_audio` 1701–1703 ms from the request in all 172 (the opener at the deadline). |
+| New learners on the second replica | not run | no second replica |
+
+The seated learners, same run, before and during the overflow:
+
+| | n | First sound p50 / p95 / max ms | Edge ttfa p50 / p95 · stt · llm first token |
+|---|---|---|---|
+| 14:00–14:04:48, alone | 28 | 1747 / 2785 / 3073 (the two late-uplink turns of item 2) | 236/456 · 210/386 · 142/190 |
+| 14:04:48–14:15, with 4 learners on the fallback | 67 | 1750 / 2166 / 2303 | 250/401 · 208/383 · 173/207 |
+| 14:40–14:45, with 4 clip-rung learners on the fallback | 68 | 1585 / 1957 / 2013 | 252/540 · 207/394 · 143/268 |
+
+The overflow turns with the harness's own meter (`--s2s 4`, 53 turns, clock from the request minus the 700 ms a page
+waits): route `composite (fallback saturated)` 53 of 53, STT `openrouter:openai/whisper-large-v3-turbo`, LLM
+`openrouter:google/gemini-2.5-flash-lite` 51 (qwen3.5-9b 1, llama-3.3-70b 1; the first link timed out), TTS
+`openrouter:microsoft/mai-voice-2.1-flash`; 0 failed, 0 refused.
+
+| | n | p50 | p95 | max |
+|---|---|---|---|---|
+| First sound = the opener, ms from end of speech | 53 | 1703 | 1707 | 1708 |
+| **First audio of the reply**, ms from end of speech | 53 | **4927** | **13420** | **18868** (13.2 % ≤ 3 s, 50.9 % ≤ 5 s) |
+| Stage: STT · LLM first token · TTS first byte, ms | 53 | 2662 · 479 · 699 | 11529 · 1580 · 1145 | 15515 · 2656 · 1397 |
+
+- **The seated learners are not hurt**: the edge's stage times are the same with and without the overflow, and no
+  overflow turn reached the GPU.
+- **The overflow learners hear an opener on time (1.7 s) and then wait**: the reply starts at 4.9 s p50 and 13.4 s
+  p95 because OpenRouter's Whisper took 2.7 s p50 and up to 15.5 s this afternoon (this morning's run of the same chain,
+  § Fallback under load, had the first audio at 3.0 s p50). The fallback has no second STT link (no `GROQ_API_KEY` in the dev API). 28 of the
+  53 are flagged `truncated:short_audio` by the harness; as this morning that ratio is tuned on the GPU voice (the
+  MAI voice plus a 1.1 s opener gives 160 ms per character) and none has a hard sign of a cut (`done` in all,
+  `spoken` = `sentences`).
+- The first try of the Chrome overflow (14:00:44) got `503 no stt model for the composed fallback` on `/v1/s2s`: this
+  test gateway had no `S2S_*_MODEL` and no app routes, and the harness config carried no `models`; fixed in the test
+  config (`models: {stt, chat, tts}` = parle's aliases), not a defect of the branch. The Chrome run's own report is
+  empty (`chrome:failed:evaluate` × 4 at collection, Mac load average 8.2), so its numbers above are the gateway's.
+
+### 4 — scale-in with a seated learner
+
+**Not run**: it needs a surplus replica and the second L40S never came.
+
+### Teardown and cost
+
+`DELETE /v1/deployments/proof-speech` at 15:09:26 → `[scaleway] Terminated server 926bec0d…` 15:09:27, its volume
+deleted 15:09:39. Provider list of the project (nine zones, running and stopped) at 15:10: no server tagged
+`aigw-ns-marcos-proof-scw`. Local gateway stopped; `GATEWAY_URL=http://localhost:4110
+DEPLOYMENTS_NAMESPACE=marcos-proof-scw bun scripts/reap-orphans.ts` (dry run, gateway down): `seen: 0` on Scaleway and
+on Vast, nothing planned. While the gateway was up the same dry run says nothing (`skipped: no admin key`: the
+cross-check needs an admin key that is not the `SANDBOX_TOKEN`), so the provider list is what was used during the run.
+
+One machine: L40S-1-48G, 12:47:45–15:09:27 = **142 machine-minutes, about €3.47**. Fallback turns on OpenRouter: 225,
+about $0.45 at this morning's $0.002 per turn. No L4, no second L40S (81 creates refused for stock, none billed past
+its cleanup), nothing written to production.
+
+### Verdict
+
+| # | Item | Result | Number |
+|---|---|---|---|
+| 1 | 4 learners on one replica | **passed on WS; WebRTC on the line** | ws n 254: p50 1042, p95 1630, max 1814 ms · webrtc (aiortc) n 204: p50 1509, p95 2032, max 2351 ms · Chrome audible, 4 in step: p50 2125, p95 2607, max 2815 ms |
+| 2 | First-audio deadline + opener | **passed on the edge's clock, not as an absolute maximum for the learner** | `deadline_missed` 0 of 729; burst: first sound max 2013 ms with 6 openers (reply alone up to 3303); 7 of 702 turns over 2500 ms at the client (max 4423), all with the speech arriving 2.0–4.4 s late at the edge |
+| 5 | Complete replies | **passed on length, one defect found and fixed** | 729 turns: 0 early endings, 0 runaways (63.5–94.4 ms of audio per character), `tts_retries` 0 of 171; 29 turns lost to the context overflow of edge `d4a160e4` (fixed: `04ce863` + `db8c0f4`, image `db8c0f4d`, not run on a replica) |
+| 3 | Overflow | **partly**: fallback and scale-out request proven, second replica **not run** (out of stock 14:00–15:09) | 225 overflow turns, 0 on the GPU, 0 failed; opener at 1.70 s, reply at 4.9 s p50 / 13.4 s p95 (OpenRouter STT); seated learners unchanged (edge ttfa 236–252 ms p50); second replica asked 28 s after the 4th seat |
+| 4 | Scale-in with a seated learner | **not run** | needs the second replica |
+| 6 | LLM streaming via deployment chat | **passed** | first token p50 231, p95 365, max 423 ms (n 20) |
+
+Open before the merge: (a) no replica has run the edge that survives a long conversation (`db8c0f4d`) — every number
+above is edge `d4a160e4`, which is the same code but for the two commits; (b) the two-replica behaviour (new learners
+seated on the second replica, upgrade of the fallback learners, scale-in with a seated learner) has only its unit and
+simulator coverage; (c) an overflow learner waits 5 s for the reply at this hour, on one STT link.
