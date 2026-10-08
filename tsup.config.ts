@@ -5,6 +5,7 @@ export default defineConfig({
     index: 'src/index.ts',
     browser: 'src/browser/index.ts',
     voice: 'sdk/browser/voice/index.ts',
+    realtime: 'sdk/browser/realtime/index.ts',
     providers: 'src/providers/index.ts',
     autoscaler: 'src/autoscaler/index.ts',
     'gpu-providers': 'src/gpu-providers/index.ts',

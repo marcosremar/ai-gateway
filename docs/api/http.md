@@ -5,7 +5,8 @@ deployed by `railway.json`, default port `4000`). The larger reference server in
 (`/v1/speech`, `/v1/gpu/*`, `/v1/request-log`, …); those are **not** available on `serve.ts`.
 
 ::: warning Blocked transports
-WebSocket (`/ws/stream`, `/api/stream-audio`) and WebRTC return `410 Gone`. A spoken turn is `POST /v1/s2s` (one
+WebSocket (`/ws/stream`, `/api/stream-audio`) and WebRTC return `410 Gone`, except the realtime voice routes
+(`/v1/realtime/*`, below). A spoken turn is `POST /v1/s2s` (one
 streamed request); text streaming is SSE on `POST /v1/chat/completions` with `stream: true`. `/v1/speech` and
 `/v1/workloads` are **not** mounted on `serve.ts` (`404`).
 :::
@@ -404,6 +405,58 @@ Clients must treat `done.empty` / empty `transcript.text` as "nothing heard"; `f
 Whole turn budget: `S2S_BUDGET_MS` (45 s). The composed pipeline calls this gateway's own routes over loopback with the
 caller's key (stage models: `config.models`, else `S2S_STT_MODEL` / `S2S_CHAT_MODEL` / `S2S_TTS_MODEL`, else the app's route aliases).
 
+## Realtime voice — `/v1/realtime/*`
+
+Architecture, the contract shared with the replica (token, edge routes, events, audio) and the browser SDK
+(`@parle/ai-gateway/realtime`): [`docs/realtime.md`](../realtime.md).
+
+### `POST /v1/realtime/sessions`
+
+Auth: app or admin API key. Called by the app's backend, never by the browser.
+
+| Field | Type | |
+|---|---|---|
+| `config` | object | the `/v1/s2s` session config (`system`, `messages`, `voice`, `language`, `models`, `max_tokens`, …, `deployment`; default `S2S_DEPLOYMENT`) |
+| `transports` | string[] | optional ordered preference among `webrtc`, `ws`, `s2s-stream`, `post` (must include `webrtc` or `ws`) |
+| `prefer` | string | optional: moved first |
+
+Headers: `traceparent` (optional, W3C), `X-Gateway-No-Wake: 1` (a cold deployment is not woken).
+
+| Status | Meaning |
+|---|---|
+| 200 | `{sessionId, token, expiresAt, deployment, traceId, telemetryUrl, transports[], iceServers[], limits}` |
+| 400 | bad body, unknown transport |
+| 401 | no / unknown key |
+| 403 | the key's app does not own the deployment (also when it does not exist) |
+| 404 | (admin) deployment not found — with `fallback` |
+| 413 | `config` over 6144 base64url characters — send the long history with `config_update` once connected |
+| 429 | app daily budget exhausted (`Retry-After`); a session costs `REALTIME_REQUESTS_PER_MINUTE` × ⌈TTL/60⌉ requests |
+| 503 | `cold` (woken unless no-wake) / `saturated` / `unsupported` / `unreachable` / `paused`, with `Retry-After` and `fallback: {transport:"s2s-stream", url:"/v1/s2s"}` |
+
+Every answer carries `X-Aigw-Trace-Id`.
+
+### Browser routes (session token, not an API key)
+
+Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; `?token=` on the WebSocket). CORS `*`.
+
+| Route | |
+|---|---|
+| `POST /v1/realtime/sessions/:id/offer` | `{sdp}` → `{sdp, type:"answer", sessionId}`. 401 bad / expired (`token_expired`), 403 token of another session, 410 `replica_gone`, 502 `edge_error` / `edge_unreachable`, 503 `saturated` |
+| `POST /v1/realtime/sessions/:id/ice` | `{candidate}` (trickle, optional) → 204 |
+| `DELETE /v1/realtime/sessions/:id` | ends the session on the replica (frees its slot) → 204 |
+| `GET /v1/realtime/ws?token=…[&traceparent=…]` | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |
+
+### Environment
+
+| Variable | Default | |
+|---|---|---|
+| `REALTIME_PUBLIC_URL` | from the request | public base of the gateway for the descriptor's URLs |
+| `REALTIME_SESSION_TTL_SECONDS` | 600 | 60–900 |
+| `REALTIME_REQUESTS_PER_MINUTE` | 4 | budget charge per minute of session |
+| `REALTIME_STUN_URLS` | `stun:stun.l.google.com:19302` | empty = none |
+| `REALTIME_TURN_URLS` | — | `turn:` / `turns:` URLs |
+| `REALTIME_TURN_SECRET` | — | coturn static-auth-secret (per-session TURN REST credentials) |
+
 ## OpenAI-compatible routes
 
 ### `POST /v1/audio/transcriptions`
@@ -576,7 +629,7 @@ every chain plus the gateway-wide counters (`connections`, `sttFilter`, `noWake`
   "connections": { "active": 1, "peak": 3 }, "noWake": { "skips": 0 },
   "stages": {
     "stt": { "parle-stt": { "serving": "openrouter:openai/whisper-large-v3-turbo", "onFallback": true, "links": [
-      { "target": "deployment:parle-speech", "state": "pending", "reason": "GHCR_READ_TOKEN is not set (registry credential for ghcr.io)" },
+      { "target": "deployment:parle-speech", "state": "pending", "reason": "SPEECH_IMAGE is not set and the declaration has no default image" },
       { "target": "openrouter:openai/whisper-large-v3-turbo", "state": "ready" },
       { "target": "groq:whisper-large-v3-turbo", "state": "no_key", "reason": "groq: GROQ_API_KEY is not set" } ] } },
     "tts": { "parle-tts": { "serving": "openrouter:hexgrad/kokoro-82m", "onFallback": true, "links": [
@@ -584,7 +637,7 @@ every chain plus the gateway-wide counters (`connections`, `sttFilter`, `noWake`
       { "target": "openrouter:qwen/qwen-audio-3.0-tts-flash", "state": "blocked", "reason": "openrouter:qwen/qwen-audio-3.0-tts-flash: refused by the provider account's data policy (ZDR) — skipped until …" },
       { "target": "openrouter:hexgrad/kokoro-82m", "state": "ready" } ] } }
   },
-  "warnings": ["stt parle-stt: primary deployment:parle-speech is pending (GHCR_READ_TOKEN is not set …) — serving from openrouter:openai/whisper-large-v3-turbo"]
+  "warnings": ["stt parle-stt: primary deployment:parle-speech is pending (SPEECH_IMAGE is not set …) — serving from openrouter:openai/whisper-large-v3-turbo"]
 }
 ```
 

@@ -27,6 +27,7 @@ import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { runComposite, type S2SConfig, type StageClient } from './composite';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
 import type { S2SAdmission } from './access';
+import { outgoingTraceHeaders } from '../telemetry/trace-context';
 
 type Controller = Pick<DeploymentController, 'acquire' | 'get' | 'wake'>;
 
@@ -268,7 +269,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         form.set('file', new Blob([new Uint8Array(audio)], { type: contentType }), 'turn');
         form.set('config', rawConfig);
         const upstream = await f(`${replicaBase(lease.machine, lease.exposed)}/v1/s2s`, {
-          method: 'POST', body: form, headers: { 'X-Aigw-Token': lease.token },
+          method: 'POST', body: form, headers: { ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
           signal: AbortSignal.any([primarySignal.signal, budget.signal]),
         });
         if (!upstream.ok || !upstream.body) throw new Error(`replica answered HTTP ${upstream.status}`);

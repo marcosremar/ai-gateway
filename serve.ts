@@ -35,7 +35,11 @@ import type { PrefixRoute } from './src/proxy/types';
 import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
-import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken } from './src/config/sandbox-env';
+import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
+import {
+  deploymentLogToTelemetry, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+} from './src/telemetry';
+import { createRealtime } from './src/realtime';
 
 const log = createLogger('serve');
 
@@ -82,7 +86,8 @@ let declared: DeclaredDeploymentReconciler | null = null;
 const deployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: EXTRA_ADMINS,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
-  log: (msg, data) => log.log(data ?? {}, msg),
+  // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
+  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); },
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
@@ -211,6 +216,31 @@ const s2sAdmit = createS2SAccess({
   ...(appLimits ? { limits: appLimits } : {}),
 });
 
+// Telemetry (docs/api/telemetry.md): POST /v1/telemetry/events from browsers (session token), edges (replica HMAC) and
+// server apps (app key); admin queries under /v1/telemetry/*. The gateway's own events go to the same store.
+// Telemetry auth resolves realtime session tokens through the realtime service, created further down (it needs the sink).
+let realtimeSessionOf: ((token: string) => { sid: string; app: string; dep: string; rep: string } | null) | null = null;
+const telemetry = telemetryFromEnv(process.env, {
+  auth: {
+    resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
+    resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
+    isMasterKey: (token) => TOKEN_ALIASES.some(k => process.env[k]?.trim() === token),
+    deployment: (name) => {
+      const replicaToken = controller?.tokenOf(name);
+      const app = controller?.get(name)?.app;
+      return replicaToken ? { replicaToken, ...(app ? { app } : {}) } : null;
+    },
+    replica: (id) => controller?.replicaAuth(id) ?? null,
+  },
+  isAdminToken,
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+if (telemetry) {
+  await telemetry.start();
+  setGatewayTelemetrySink((event) => telemetry.ingest.ingestOwn(event));
+  log.log({ rows: telemetry.store.size }, 'Telemetry enabled');
+}
+
 const deepHealth = {
   authorize: isAdminToken,
   report: () => deepHealthReport({
@@ -249,6 +279,25 @@ const s2sRoute = createS2SRoute({
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 
+// Realtime voice (src/realtime, docs/realtime.md): POST /v1/realtime/sessions with the app key; the browser routes
+// (signaling, WS relay) authenticate with the session token and are mounted in front of the proxy below.
+const realtime = createRealtime({
+  controller, defaultDeployment: process.env.S2S_DEPLOYMENT?.trim() || undefined,
+  // Test/e2e knobs: a shorter media-path recheck (default 30 min) and a fake "firewall dropped our UDP probe" for
+  // boxes where neither the security group nor iptables can be touched (REALTIME_PROBE_UDP=blocked).
+  netRecheckMs: optionalMs(process.env.REALTIME_NET_RECHECK_MS),
+  ...(process.env.REALTIME_PROBE_UDP === 'blocked'
+    ? { probeUdpImpl: async () => ({ result: 'blocked' as const, rttMs: null, tries: 0 }) }
+    : {}),
+  // No keys configured: the proxy only lets localhost in, as `localhost` (dev), which may use any deployment.
+  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
+  isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),
+  ...(appLimits ? { charge: (userId: string, n: number) => appLimits.chargeRequests(userId, n) } : {}),
+  ...(telemetry ? { telemetry: realtimeSinkToTelemetry(telemetry.ingest) } : {}),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+realtimeSessionOf = sessionResolverFrom(realtime.service);
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
@@ -258,10 +307,16 @@ const server = await startProxy({
   ...(appLimits ? { appLimits } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin ? chainHealth() : appStagesView(chainHealth(), (stage) => appAliasesOf(viewer.userId, stage))),
-  customRoutes: [...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }],
+  customRoutes: [
+    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
+    ...(telemetry?.adminRoutes ?? []),
+  ],
+  ...(telemetry ? { publicRoutes: telemetry.publicRoutes } : {}),
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
+
+realtime.mount(server);
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 
@@ -290,8 +345,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     deployments?.controller.stop();
+    realtime.stop();
     declared?.stop();
     keyManager.stop();
+    telemetry?.stop();
+    setGatewayTelemetrySink(null);
     console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
 
     // Stop accepting new connections

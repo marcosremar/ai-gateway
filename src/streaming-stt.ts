@@ -23,6 +23,7 @@
 import type { DeploymentController, Lease } from './deployments/controller';
 import { noWakeActive, recordNoWakeSkip } from './gateway/proxy/no-wake';
 import { replicaBase } from './deployments/http';
+import { outgoingTraceHeaders } from './telemetry/trace-context';
 
 const FIREWORKS_STREAMING_URL =
   'wss://audio-streaming.api.fireworks.ai/v1/audio/transcriptions/streaming';
@@ -492,7 +493,7 @@ export class StreamingSTTRouter {
     const qs = this._buildParams(language, params);
     const wsUrl = replicaBase(lease.machine, lease.exposed).replace(/^http/, 'ws')
       + `/ws/audio-stream?${qs}`;
-    const backend = new StreamingSTTBackend(wsUrl, { 'X-Aigw-Token': lease.token }, 'deployment', backendOptions);
+    const backend = new StreamingSTTBackend(wsUrl, { ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token }, 'deployment', backendOptions);
     // The lease spans the whole stream: released on close, failed on a connection-level drop.
     backend.onFinalize = (failed) => lease.done(failed);
     return backend;

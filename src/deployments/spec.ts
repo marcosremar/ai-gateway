@@ -5,7 +5,7 @@
 
 import { autoscaleOf, warmScheduleOf } from './autoscale-spec';
 import { SpecError } from './spec-error';
-import type { DeploymentProvider, DeploymentSpec, ExposedPort, Placement, PlacementCandidate, Profile, ProfileSpec } from './types';
+import type { DeploymentProvider, DeploymentSpec, ExposedPort, Placement, PlacementCandidate, Profile, ProfileSpec, RealtimeSpec } from './types';
 
 export { SpecError };
 
@@ -105,7 +105,7 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule',
+  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'realtime',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 
@@ -136,7 +136,7 @@ function candidatesOf(raw: unknown): PlacementCandidate[] {
 export const MAX_PLACEMENTS = 6;
 
 /** The gateway's own probe port on an exposed replica (80/443 stay with the app). */
-export const PROBE_PORT = 8089;
+export const PROBE_PORT = Number(process.env.DEPLOYMENTS_PROBE_PORT) || 8089;
 
 /**
  * Validates the fields present in `input` (all optional) — used for profiles and as the merge step for specs.
@@ -239,6 +239,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     out.description = input.description;
   }
   if (input.exposure !== undefined) out.exposure = exposureOf(input.exposure);
+  if (input.realtime !== undefined) out.realtime = realtimeOf(input.realtime);
   if (input.placements !== undefined) out.placements = placementsOf(input.placements);
   if (input.idleAction !== undefined) {
     if (input.idleAction !== 'delete' && input.idleAction !== 'stop') throw new SpecError("idleAction must be 'delete' or 'stop'");
@@ -273,10 +274,39 @@ function exposureOf(raw: unknown): { ports: ExposedPort[] } {
       const port = p as { protocol?: unknown; port?: unknown };
       if (port.protocol !== 'tcp' && port.protocol !== 'udp') throw new SpecError(`exposure.ports[${i}].protocol must be 'tcp' or 'udp'`);
       const n = int(port.port, `exposure.ports[${i}].port`, 1, 65535);
-      if (n === PROBE_PORT) throw new SpecError(`exposure.ports[${i}]: ${PROBE_PORT} is the gateway's probe port`);
-      return { protocol: port.protocol, port: n };
+      const to = (port as { to?: unknown }).to === undefined ? undefined
+        : int((port as { to?: unknown }).to, `exposure.ports[${i}].to`, n, Math.min(65535, n + MAX_PORT_RANGE - 1));
+      if (n === PROBE_PORT || (to !== undefined && n <= PROBE_PORT && PROBE_PORT <= to)) {
+        throw new SpecError(`exposure.ports[${i}]: ${PROBE_PORT} is the gateway's probe port`);
+      }
+      return { protocol: port.protocol, port: n, ...(to !== undefined && to !== n ? { to } : {}) };
     }),
   };
+}
+
+/** Widest port range one rule may open (a TURN relay range, a WebRTC media range). */
+export const MAX_PORT_RANGE = 1000;
+
+/**
+ * `realtime` (the edge sidecar, docs/realtime-edge.md). The UDP range stays above the well-known and ephemeral-free
+ * area (≥ 10000) and below 65535; its size bounds the firewall hole (≤ MAX_PORT_RANGE ports).
+ */
+function realtimeOf(raw: unknown): RealtimeSpec {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('realtime must be an object');
+  const r = raw as Record<string, unknown>;
+  for (const key of Object.keys(r)) {
+    if (!['maxSessions', 'edgeImage', 'udpPorts'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
+  }
+  const out: RealtimeSpec = {};
+  if (r.maxSessions !== undefined) out.maxSessions = int(r.maxSessions, 'realtime.maxSessions', 1, 256);
+  if (r.edgeImage !== undefined) out.edgeImage = str(r.edgeImage, 'realtime.edgeImage', IMAGE_RE);
+  if (r.udpPorts !== undefined) {
+    if (!Array.isArray(r.udpPorts) || r.udpPorts.length !== 2) throw new SpecError('realtime.udpPorts must be [lo, hi]');
+    const lo = int(r.udpPorts[0], 'realtime.udpPorts[0]', 10000, 65535);
+    const hi = int(r.udpPorts[1], 'realtime.udpPorts[1]', lo + 1, Math.min(65535, lo + MAX_PORT_RANGE - 1));
+    out.udpPorts = [lo, hi];
+  }
+  return out;
 }
 
 /**
@@ -364,5 +394,7 @@ function checkVastSpec(spec: DeploymentSpec): void {
   }
   if (spec.files && Object.keys(spec.files).length) throw new SpecError('files are not supported on vast (no user_data service)');
   if (spec.exposure) throw new SpecError('exposure is not supported on vast');
+  // The edge is a sidecar container (`docker run --network host`) and a Vast replica IS one container: no sidecar.
+  if (spec.realtime) throw new SpecError('realtime is not supported on vast yet (the edge runs as a sidecar container)');
   if (spec.idleAction === 'stop') throw new SpecError("idleAction 'stop' is not supported on vast");
 }

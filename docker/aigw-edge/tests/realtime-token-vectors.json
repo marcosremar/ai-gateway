@@ -1,0 +1,81 @@
+{
+  "description": "Realtime session token vectors (src/realtime/token.ts, docs/realtime.md). JWT HS256, key = HMAC-SHA256(key=replicaToken, msg=\"aigw-rt-v1\"). Claims serialized in the order sid, app, dep, rep, cfg, iat, exp; base64url without padding. A verifier must accept \"valid\" at nowSeconds and reject the others with the given reason.",
+  "keyInfo": "aigw-rt-v1",
+  "replicaToken": "test-replica-token-7f3a9c",
+  "derivedKeyHex": "f10efd2274d4d78803d5625e12e5dbf6d6cb649a3285a29af9854ae93bf48822",
+  "config": {
+    "system": "Tu es Lia, une boulangère à Copacabana.",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "Bom dia!"
+      }
+    ],
+    "voice": "lia",
+    "language": "pt",
+    "max_tokens": 120,
+    "deployment": "parle-speech"
+  },
+  "claims": {
+    "sid": "rt_0123456789abcdef0123456789abcdef",
+    "app": "parle",
+    "dep": "parle-speech",
+    "rep": "scw-fr-par-2-abc123",
+    "cfg": "eyJzeXN0ZW0iOiJUdSBlcyBMaWEsIHVuZSBib3VsYW5nw6hyZSDDoCBDb3BhY2FiYW5hLiIsIm1lc3NhZ2VzIjpbeyJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6IkJvbSBkaWEhIn1dLCJ2b2ljZSI6ImxpYSIsImxhbmd1YWdlIjoicHQiLCJtYXhfdG9rZW5zIjoxMjAsImRlcGxveW1lbnQiOiJwYXJsZS1zcGVlY2gifQ",
+    "iat": 1791360000,
+    "exp": 1791360600
+  },
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJydF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImFwcCI6InBhcmxlIiwiZGVwIjoicGFybGUtc3BlZWNoIiwicmVwIjoic2N3LWZyLXBhci0yLWFiYzEyMyIsImNmZyI6ImV5SnplWE4wWlcwaU9pSlVkU0JsY3lCTWFXRXNJSFZ1WlNCaWIzVnNZVzVudzZoeVpTRERvQ0JEYjNCaFkyRmlZVzVoTGlJc0ltMWxjM05oWjJWeklqcGJleUp5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2SWtKdmJTQmthV0VoSW4xZExDSjJiMmxqWlNJNklteHBZU0lzSW14aGJtZDFZV2RsSWpvaWNIUWlMQ0p0WVhoZmRHOXJaVzV6SWpveE1qQXNJbVJsY0d4dmVXMWxiblFpT2lKd1lYSnNaUzF6Y0dWbFkyZ2lmUSIsImlhdCI6MTc5MTM2MDAwMCwiZXhwIjoxNzkxMzYwNjAwfQ.qDgpEfGP1I1P2n4VQT12uVye0dKkZrpRpTTFfMKCvUQ",
+  "cases": [
+    {
+      "name": "valid",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJydF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImFwcCI6InBhcmxlIiwiZGVwIjoicGFybGUtc3BlZWNoIiwicmVwIjoic2N3LWZyLXBhci0yLWFiYzEyMyIsImNmZyI6ImV5SnplWE4wWlcwaU9pSlVkU0JsY3lCTWFXRXNJSFZ1WlNCaWIzVnNZVzVudzZoeVpTRERvQ0JEYjNCaFkyRmlZVzVoTGlJc0ltMWxjM05oWjJWeklqcGJleUp5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2SWtKdmJTQmthV0VoSW4xZExDSjJiMmxqWlNJNklteHBZU0lzSW14aGJtZDFZV2RsSWpvaWNIUWlMQ0p0WVhoZmRHOXJaVzV6SWpveE1qQXNJbVJsY0d4dmVXMWxiblFpT2lKd1lYSnNaUzF6Y0dWbFkyZ2lmUSIsImlhdCI6MTc5MTM2MDAwMCwiZXhwIjoxNzkxMzYwNjAwfQ.qDgpEfGP1I1P2n4VQT12uVye0dKkZrpRpTTFfMKCvUQ",
+      "nowSeconds": 1791360010,
+      "expect": "valid"
+    },
+    {
+      "name": "valid-at-last-second",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJydF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImFwcCI6InBhcmxlIiwiZGVwIjoicGFybGUtc3BlZWNoIiwicmVwIjoic2N3LWZyLXBhci0yLWFiYzEyMyIsImNmZyI6ImV5SnplWE4wWlcwaU9pSlVkU0JsY3lCTWFXRXNJSFZ1WlNCaWIzVnNZVzVudzZoeVpTRERvQ0JEYjNCaFkyRmlZVzVoTGlJc0ltMWxjM05oWjJWeklqcGJleUp5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2SWtKdmJTQmthV0VoSW4xZExDSjJiMmxqWlNJNklteHBZU0lzSW14aGJtZDFZV2RsSWpvaWNIUWlMQ0p0WVhoZmRHOXJaVzV6SWpveE1qQXNJbVJsY0d4dmVXMWxiblFpT2lKd1lYSnNaUzF6Y0dWbFkyZ2lmUSIsImlhdCI6MTc5MTM2MDAwMCwiZXhwIjoxNzkxMzYwNjAwfQ.qDgpEfGP1I1P2n4VQT12uVye0dKkZrpRpTTFfMKCvUQ",
+      "nowSeconds": 1791360599,
+      "expect": "valid"
+    },
+    {
+      "name": "expired",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJydF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImFwcCI6InBhcmxlIiwiZGVwIjoicGFybGUtc3BlZWNoIiwicmVwIjoic2N3LWZyLXBhci0yLWFiYzEyMyIsImNmZyI6ImV5SnplWE4wWlcwaU9pSlVkU0JsY3lCTWFXRXNJSFZ1WlNCaWIzVnNZVzVudzZoeVpTRERvQ0JEYjNCaFkyRmlZVzVoTGlJc0ltMWxjM05oWjJWeklqcGJleUp5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2SWtKdmJTQmthV0VoSW4xZExDSjJiMmxqWlNJNklteHBZU0lzSW14aGJtZDFZV2RsSWpvaWNIUWlMQ0p0WVhoZmRHOXJaVzV6SWpveE1qQXNJbVJsY0d4dmVXMWxiblFpT2lKd1lYSnNaUzF6Y0dWbFkyZ2lmUSIsImlhdCI6MTc5MTM2MDAwMCwiZXhwIjoxNzkxMzYwNjAwfQ.qDgpEfGP1I1P2n4VQT12uVye0dKkZrpRpTTFfMKCvUQ",
+      "nowSeconds": 1791360600,
+      "expect": "expired"
+    },
+    {
+      "name": "tampered-payload",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJydF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImFwcCI6InBhcmxlIiwiZGVwIjoicGFybGUtc3BlZWNoIiwicmVwIjoib3RoZXIiLCJjZmciOiJleUp6ZVhOMFpXMGlPaUpVZFNCbGN5Qk1hV0VzSUhWdVpTQmliM1ZzWVc1bnc2aHlaU0REb0NCRGIzQmhZMkZpWVc1aExpSXNJbTFsYzNOaFoyVnpJanBiZXlKeWIyeGxJam9pWVhOemFYTjBZVzUwSWl3aVkyOXVkR1Z1ZENJNklrSnZiU0JrYVdFaEluMWRMQ0oyYjJsalpTSTZJbXhwWVNJc0lteGhibWQxWVdkbElqb2ljSFFpTENKdFlYaGZkRzlyWlc1eklqb3hNakFzSW1SbGNHeHZlVzFsYm5RaU9pSndZWEpzWlMxemNHVmxZMmdpZlEiLCJpYXQiOjE3OTEzNjAwMDAsImV4cCI6MTc5MTM2MDYwMH0.qDgpEfGP1I1P2n4VQT12uVye0dKkZrpRpTTFfMKCvUQ",
+      "nowSeconds": 1791360010,
+      "expect": "bad_signature"
+    },
+    {
+      "name": "wrong-key",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJydF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImFwcCI6InBhcmxlIiwiZGVwIjoicGFybGUtc3BlZWNoIiwicmVwIjoic2N3LWZyLXBhci0yLWFiYzEyMyIsImNmZyI6ImV5SnplWE4wWlcwaU9pSlVkU0JsY3lCTWFXRXNJSFZ1WlNCaWIzVnNZVzVudzZoeVpTRERvQ0JEYjNCaFkyRmlZVzVoTGlJc0ltMWxjM05oWjJWeklqcGJleUp5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2SWtKdmJTQmthV0VoSW4xZExDSjJiMmxqWlNJNklteHBZU0lzSW14aGJtZDFZV2RsSWpvaWNIUWlMQ0p0WVhoZmRHOXJaVzV6SWpveE1qQXNJbVJsY0d4dmVXMWxiblFpT2lKd1lYSnNaUzF6Y0dWbFkyZ2lmUSIsImlhdCI6MTc5MTM2MDAwMCwiZXhwIjoxNzkxMzYwNjAwfQ.P3GE4xugWwK20v9d4RbVQ82T0dVpQ_qL2DmzHd775n0",
+      "nowSeconds": 1791360010,
+      "expect": "bad_signature"
+    },
+    {
+      "name": "ttl-over-15-min",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJydF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImFwcCI6InBhcmxlIiwiZGVwIjoicGFybGUtc3BlZWNoIiwicmVwIjoic2N3LWZyLXBhci0yLWFiYzEyMyIsImNmZyI6ImV5SnplWE4wWlcwaU9pSlVkU0JsY3lCTWFXRXNJSFZ1WlNCaWIzVnNZVzVudzZoeVpTRERvQ0JEYjNCaFkyRmlZVzVoTGlJc0ltMWxjM05oWjJWeklqcGJleUp5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2SWtKdmJTQmthV0VoSW4xZExDSjJiMmxqWlNJNklteHBZU0lzSW14aGJtZDFZV2RsSWpvaWNIUWlMQ0p0WVhoZmRHOXJaVzV6SWpveE1qQXNJbVJsY0d4dmVXMWxiblFpT2lKd1lYSnNaUzF6Y0dWbFkyZ2lmUSIsImlhdCI6MTc5MTM2MDAwMCwiZXhwIjoxNzkxMzYwOTAxfQ.Vhx3-tMVUA8o7iVEzkzt77pv397XR0RjroBKGRb14ec",
+      "nowSeconds": 1791360010,
+      "expect": "ttl_too_long"
+    },
+    {
+      "name": "issued-in-the-future",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJydF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImFwcCI6InBhcmxlIiwiZGVwIjoicGFybGUtc3BlZWNoIiwicmVwIjoic2N3LWZyLXBhci0yLWFiYzEyMyIsImNmZyI6ImV5SnplWE4wWlcwaU9pSlVkU0JsY3lCTWFXRXNJSFZ1WlNCaWIzVnNZVzVudzZoeVpTRERvQ0JEYjNCaFkyRmlZVzVoTGlJc0ltMWxjM05oWjJWeklqcGJleUp5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2SWtKdmJTQmthV0VoSW4xZExDSjJiMmxqWlNJNklteHBZU0lzSW14aGJtZDFZV2RsSWpvaWNIUWlMQ0p0WVhoZmRHOXJaVzV6SWpveE1qQXNJbVJsY0d4dmVXMWxiblFpT2lKd1lYSnNaUzF6Y0dWbFkyZ2lmUSIsImlhdCI6MTc5MTM2MDAwMCwiZXhwIjoxNzkxMzYwNjAwfQ.qDgpEfGP1I1P2n4VQT12uVye0dKkZrpRpTTFfMKCvUQ",
+      "nowSeconds": 1791359880,
+      "expect": "not_yet_valid"
+    }
+  ],
+  "turn": {
+    "secret": "coturn-static-secret",
+    "sessionId": "rt_0123456789abcdef0123456789abcdef",
+    "expiresAtSeconds": 1791360600,
+    "username": "1791360600:rt_0123456789abcdef0123456789abcdef",
+    "credential": "HZeX2QCR2krEiG+eURsEOy+9gV4=",
+    "algorithm": "username = \"<expiresAtSeconds>:<sessionId>\", credential = base64(HMAC-SHA1(secret, username))"
+  }
+}

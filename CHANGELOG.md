@@ -64,6 +64,9 @@ on release via `bunx changeset version`.
   5 min through the idempotent `controller.put`; secrets mounted from the environment (`GHCR_READ_TOKEN` →
   `registryAuth`, `SPEECH_IMAGE`), `SPEECH_TOKEN` generated once and persisted in the store; `pending` with the reason
   when the credential/image is missing; never starts a machine. First one: `parle-speech` (one L4 for STT+LLM+TTS).
+  `parle-speech` now declares the `rg.fr-par.scw.cloud/aigw/speech-stack` image (no registry token) and patches only
+  image, `realtime` and `RT_MAX_SESSIONS` over the registered spec; a declaration without `env`/`generatedSecrets`
+  leaves the stored env alone, and `envByMachineType` is merged per key.
 - **One-GPU mode** — a deployment route entry may name `oneGpuDeployment`: while its own `deployment` is not
   registered and that one is, the entry goes there (the parle sends `parle-qwen-tts` + `oneGpuDeployment: parle-speech`
   for `parle-tts` in its app routes).
