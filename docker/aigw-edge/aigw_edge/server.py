@@ -5,7 +5,8 @@ process through WebRTC media (UDP `RT_UDP_PORTS`) or through the gateway's WebSo
 
     POST   /__aigw/rt/offer          {sdp, type: "offer", token} → {sdp, type: "answer", sessionId}
     POST   /__aigw/rt/ice            {sessionId, candidate}       (trickle is optional: the answer carries all candidates)
-    GET    /__aigw/rt/status         {active, max, available, transports, udpPorts, ready, byTransport, workers}
+    GET    /__aigw/rt/status         {active, max, available, transports, udpPorts, ready, byTransport, workers,
+                                      firstAudioMaxMs, shedding}
     DELETE /__aigw/rt/session/{id}
     GET    /__aigw/rt/ws?token=…     WebSocket: JSON events/control as text, audio as binary [0x01][PCM16 LE mono]
                                      (16 kHz up, 24 kHz down, 20 ms frames)
@@ -31,7 +32,7 @@ from aiohttp import web
 from . import audio, ice
 from .config import Settings
 from .host import OfferError, SessionGone, SessionHost, load_loop
-from .session import OUT_FRAME_BYTES, Session
+from .session import OUT_FRAME_BYTES, Session, first_audio_max
 from .netcheck import NetState
 from .telemetry import new_trace_id, telemetry, trace_id_from
 from .token import TokenError, TokenVerifier
@@ -89,7 +90,7 @@ def worker_main(settings: Settings, index: int, secret: str) -> None:
         return web.json_response({"deleted": ok}, status=200 if ok else 404)
 
     async def sessions(_req):
-        return web.json_response({"sids": list(host.sessions)})
+        return web.json_response({"sids": list(host.sessions), "firstAudioMaxMs": first_audio_max(settings.shed_window_s)})
 
     async def startup(_app):
         await up.start()
@@ -124,6 +125,7 @@ class Edge:
         self.worker_settings = [replace(settings, udp_ports=r) for r in worker_ranges(*settings.udp_ports, n)] if n else []
         self.workers: list = [None] * n
         self.routes: dict[str, dict] = {}  # WebRTC sid → {worker, at}
+        self.worker_first_audio: dict[int, int | None] = {}
         self.http: aiohttp.ClientSession | None = None
         self.net = NetState(settings.probe_port, settings.public_ip)
 
@@ -144,9 +146,11 @@ class Edge:
         except TokenError as error:
             telemetry.emit("edge.token.reject", trace_id=trace_id, level="warn", reason=error.reason)
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
-        if self.active() - self.holds(claims["sid"]) >= self.s.max_sessions:
-            telemetry.emit("edge.capacity.reject", trace_id=trace_id, level="warn", active=self.active(), max=self.s.max_sessions)
-            return None, (503, "capacity", f"replica full ({self.active()}/{self.s.max_sessions} sessions)")
+        if self.full(claims["sid"]):
+            telemetry.emit("edge.capacity.reject", trace_id=trace_id, level="warn", active=self.active(), max=self.s.max_sessions,
+                           firstAudioMaxMs=self.first_audio_max())
+            return None, (503, "capacity", f"replica full ({self.active()}/{self.s.max_sessions} sessions"
+                                           f"{', shedding: first audio over the deadline' if self.shedding() else ''})")
         if not self.up.ready:
             telemetry.emit("edge.capacity.reject", trace_id=trace_id, level="warn", active=self.active(),
                            max=self.s.max_sessions, reason="warming")
@@ -155,6 +159,18 @@ class Edge:
             return self.verifier.verify(token, transport=transport, live=live), None
         except TokenError as error:
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
+
+    def first_audio_max(self) -> int | None:
+        seen = [first_audio_max(self.s.shed_window_s), *self.worker_first_audio.values()]
+        return max((ms for ms in seen if ms is not None), default=None)
+
+    def shedding(self) -> bool:
+        worst = self.first_audio_max()
+        return self.active() > 0 and worst is not None and worst > self.s.first_audio_deadline_ms
+
+    def full(self, sid: str) -> bool:
+        held = self.holds(sid)
+        return self.active() - held >= self.s.max_sessions or (not held and self.shedding())
 
     def rtc_live(self, sid: str) -> bool:
         return sid in self.routes or sid in self.host.sessions
@@ -167,8 +183,10 @@ class Edge:
     async def status(self, _req: web.Request) -> web.Response:
         active = self.active()
         by = {"webrtc": len(self.host.sessions) + len(self.routes), "ws": len(self.ws_host.sessions)}
+        shedding = self.shedding()
         return web.json_response({
-            "active": active, "max": self.s.max_sessions, "available": max(0, self.s.max_sessions - active),
+            "active": active, "max": self.s.max_sessions, "available": 0 if shedding else max(0, self.s.max_sessions - active),
+            "firstAudioMaxMs": self.first_audio_max(), "shedding": shedding,
             # Firewall range = media ports + the probe port; `transports` drops webrtc when no media path works.
             "transports": self.net.transports(), "udpPorts": [self.s.udp_ports[0], self.s.probe_port or self.s.udp_ports[1]],
             "probePort": self.s.probe_port or None, "net": self.net.view(), "ready": self.up.ready,
@@ -345,6 +363,7 @@ class Edge:
                     _, body = await self.worker_call(index, "GET", "/__edge/sessions")
                 except Exception:  # noqa: BLE001 — starting up
                     continue
+                self.worker_first_audio[index] = body.get("firstAudioMaxMs")
                 live = set(body.get("sids", []))
                 for sid, route in list(self.routes.items()):
                     if route["worker"] == index and sid not in live and time.monotonic() - route["at"] > 5:
