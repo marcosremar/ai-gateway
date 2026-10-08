@@ -15,6 +15,7 @@
  */
 
 import { packFiles, unpackScript } from './file-pack';
+import { DEFAULT_RT_MAX_SESSIONS, DEFAULT_RT_UDP_PORTS, rtMachineEnv, rtMaxSessions, vastUdpRange } from './realtime-ports';
 import { PROBE_PORT } from './spec';
 import type { DeploymentSpec } from './types';
 
@@ -27,10 +28,7 @@ export const DEFAULT_EDGE_IMAGE = 'ghcr.io/marcosremar/aigw-edge:8c774c6e';
 export const VAST_EDGE_DIR = '/opt/aigw-edge';
 /** The edge's HTTP/WS port on the replica's loopback (nginx proxies `/__aigw/rt/*` to it). */
 export const RT_EDGE_PORT = 8020;
-/** WebRTC media range when the spec does not set `realtime.udpPorts` (≈ 2 ports per session per worker slice). */
-export const DEFAULT_RT_UDP_PORTS: [number, number] = [50000, 50100];
-/** Sessions per replica when neither `realtime.maxSessions` nor the machine type's RT_MAX_SESSIONS says. */
-export const DEFAULT_RT_MAX_SESSIONS = 8;
+export { DEFAULT_RT_MAX_SESSIONS, DEFAULT_RT_UDP_PORTS };
 
 /** POSIX single-quote escaping for one shell word. */
 export function shellQuote(value: string): string {
@@ -134,8 +132,8 @@ export interface ReplicaInitOptions { gatewayUrl?: string }
 /** The edge's static environment (`/srv/aigw/edge.env`; the replica id and public IP are appended at boot). */
 export function edgeEnv(spec: DeploymentSpec, token: string, opts: ReplicaInitOptions = {}): Record<string, string> {
   const rt = spec.realtime ?? {};
-  const machineEnv = { ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env };
-  const maxSessions = rt.maxSessions ?? (Number(machineEnv.RT_MAX_SESSIONS) || DEFAULT_RT_MAX_SESSIONS);
+  const machineEnv = rtMachineEnv(spec);
+  const maxSessions = rtMaxSessions(spec);
   const [lo, hi] = rt.udpPorts ?? DEFAULT_RT_UDP_PORTS;
   const upstreamPort = spec.exposure || spec.bootScript ? spec.port : 8000;
   const gatewayUrl = opts.gatewayUrl ?? process.env.AIGW_PUBLIC_URL ?? '';
@@ -181,7 +179,8 @@ docker rm -f aigw-edge 2>/dev/null; docker run -d --name aigw-edge --restart unl
 }
 
 export function vastEdgeEnv(spec: DeploymentSpec, token: string, opts: ReplicaInitOptions = {}): Record<string, string> {
-  return edgeEnv(spec, token, opts);
+  const [lo, hi] = vastUdpRange(spec) ?? DEFAULT_RT_UDP_PORTS;
+  return { ...edgeEnv(spec, token, opts), RT_UDP_PORTS: `${lo}-${hi}`, RT_UDP_BIND: '0.0.0.0' };
 }
 
 function vastEdgeSection(spec: DeploymentSpec, token: string, opts: ReplicaInitOptions, bootChecks: number): string {
@@ -253,7 +252,8 @@ done
  * may already use 127.0.0.1:8000 for a model server, so its health responder lives on another port (e.g. 8010).
  * nginx is started as a plain daemon (`nginx`, reloaded if already up), never `systemctl`. With `spec.realtime` the edge
  * runs as a process of this container, from `VAST_EDGE_DIR` (shipped by the image or put there by the boot script), with
- * the same env the Scaleway sidecar gets. Safety net: the container
+ * the same env the Scaleway sidecar gets, but for the UDP range: one port per `-p` mapping (`vastUdpRange`), bound on
+ * every address so a session takes exactly one. Safety net: the container
  * stops itself `maxHours + 30 min` after boot (an exited Vast instance bills only its disk; the controller or the reaper
  * deletes it).
  */

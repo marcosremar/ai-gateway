@@ -30,7 +30,7 @@ def announced(host: str, port: int) -> tuple[str, int]:
     s = _settings
     if not s:
         return host, port
-    return (s.public_ip or host), s.port_map.get(port, port)
+    return (s.public_ip or host), s.public_port(port)
 
 
 async def _bind_in_range(loop, factory, address: str):

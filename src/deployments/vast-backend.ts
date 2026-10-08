@@ -5,7 +5,8 @@
  * Vast runs ONE container per host, so a Vast replica is boot-script mode only: the spec's `image` is the container
  * (a public base image) and `vastReplicaInit` runs as its onstart. The token-gated nginx listens on container :80,
  * published on a random host port; the replica's `ip` is `public_ipaddr:<that port>`, so `HttpReplicaProbe` works
- * unchanged. Machines are found by label `aigw:<namespace>:<deployment>` (Vast has no tags).
+ * unchanged. With `spec.realtime` each UDP port of `vastUdpRange` gets its own `-p <n>:<n>/udp` (Vast maps no ranges) and
+ * only hosts with that many direct ports are searched. Machines are found by label `aigw:<namespace>:<deployment>` (Vast has no tags).
  */
 
 import { probeRtt } from '../gateway/providers/gpu/rtt-probe';
@@ -13,6 +14,7 @@ import { vastReplicaInit } from './cloud-init';
 import { MIN_HOST_LEFT_MS, vastEndsAt } from './expiry';
 import { countryDistanceKm } from './geo';
 import { countryOf, DEFAULT_NEAR, effectivePrice, rankOffers, type VastOffer } from './placements';
+import { vastPortCount, vastUdpRange } from './realtime-ports';
 import type { OfferPreview } from './types';
 import type { CreateReplicaInput, DeploymentBackend, DeploymentSpec, RegistryAuth, ReplicaMachine } from './types';
 
@@ -158,7 +160,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       cuda_max_good: { gte: cudaFloorOf(spec) },
       reliability2: { gte: reliability },
       inet_down: { gte: MIN_INET_DOWN_MBPS },
-      direct_port_count: { gte: 1 },
+      direct_port_count: { gte: vastPortCount(spec) },
       dph_total: { lte: Math.round(spec.maxEurPerHour * EUR_TO_USD * 1000) / 1000 },
       order: [['dph_total', 'asc']],
       limit: 100,
@@ -176,7 +178,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
       const cuda = cudaFloorOf(spec);
       // A host whose rental ends within a day would be taken back mid-use: skipped (unknown end = kept).
       const valid = offers.filter(o => o.dph_total <= usdCap && o.reliability2 >= reliability && o.inet_down >= MIN_INET_DOWN_MBPS
-        && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda) && this.lastsLongEnough(o, now));
+        && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda) && this.lastsLongEnough(o, now)
+        && (o.direct_port_count === undefined || o.direct_port_count >= vastPortCount(spec)));
       const ranked = rankOffers(valid, {
         near: spec.near ?? DEFAULT_NEAR, ...(spec.allowFar ? { allowFar: true } : {}), avoidMachines: new Set(this.badHosts.keys()),
       });
@@ -198,6 +201,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
     }
     const init = vastReplicaInit(spec, input.replicaToken);
     const env = { ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env };
+    const [udpLo, udpHi] = vastUdpRange(spec) ?? [1, 0];
+    const udp = Object.fromEntries(Array.from({ length: udpHi - udpLo + 1 }, (_, i) => [`-p ${udpLo + i}:${udpLo + i}/udp`, '1']));
     const misses: string[] = [];
     for (const offer of offers.slice(0, MAX_RENT_TRIES)) {
       try {
@@ -211,7 +216,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
           // onstart shell does not see the container env.
           onstart: 'V="${AIGW_INIT_B64:-$(sed -n \'s/^AIGW_INIT_B64=//p\' /etc/environment | tr -d \'"\')}"; '
             + 'mkdir -p /srv/aigw && echo "$V" | base64 -d > /srv/aigw/init.sh && nohup bash /srv/aigw/init.sh > /srv/aigw/init.log 2>&1 &',
-          env: { ...env, AIGW_INIT_B64: Buffer.from(init, 'utf8').toString('base64'), '-p 80:80': '1' },
+          env: { ...env, AIGW_INIT_B64: Buffer.from(init, 'utf8').toString('base64'), '-p 80:80': '1', ...udp },
           ...(spec.registryAuth ? { image_login: imageLogin(spec.registryAuth) } : {}),
         });
         if (!res.success || res.new_contract == null) throw new Error(`not available: ${res.error ?? res.msg ?? 'success=false'}`);

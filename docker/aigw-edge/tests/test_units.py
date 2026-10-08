@@ -240,6 +240,29 @@ try:
     check(f"ice: a TURN server that does not answer costs RT_TURN_ALLOCATE_MS, host candidates still go out ({elapsed:.2f} s)",
           kinds and set(kinds) == {"host"} and elapsed < 1.0)
     check("ice: RT_TURN_ALLOCATE_MS defaults below the SDK's 3 s signalling budget", Settings().turn_allocate_ms == 1500)
+    import os
+
+    from aigw_edge.netcheck import NetState
+
+    vast_env = {"RT_UDP_PORTS": "50300-50302", "PUBLIC_IPADDR": "203.0.113.7", "VAST_UDP_PORT_50300": "41000",
+                "VAST_UDP_PORT_50301": "41001", "VAST_UDP_PORT_50302": "41002", "VAST_TCP_PORT_80": "41080"}
+    os.environ.update(vast_env)
+    mapped = Settings.from_env()
+    for name in vast_env:
+        del os.environ[name]
+    edge_ice.install(mapped)
+    check("vast: candidates announce PUBLIC_IPADDR and the mapped UDP port",
+          edge_ice.announced("172.17.0.2", 50300) == ("203.0.113.7", 41000) and mapped.port_map == {50300: 41000, 50301: 41001, 50302: 41002})
+    net = NetState(50302, mapped.public_ip, mapped.public_port(50302))
+    check("vast: the probe port reported to the gateway is the mapped one, the responder binds the container port",
+          net.view()["probePort"] == 41002 and net.probe_port == 50302 and net.view()["publicIp"] == "203.0.113.7")
+    from aigw_edge.server import worker_ranges
+
+    check("vast: the gateway's range (2 ports per session per worker + probe) gives every worker its sessions twice over",
+          worker_ranges(50000, 50007, 1) == [(50000, 50007)]
+          and [hi - lo + 1 for lo, hi in worker_ranges(50000, 50029, 3)] == [10, 10, 10])
+    check("no port map: the probe port is reported as bound", NetState(50100, "").view()["probePort"] == 50100
+          and Settings().public_port(50100) == 50100)
 except ImportError:
     print("SKIP upstream (no aiohttp)")
 

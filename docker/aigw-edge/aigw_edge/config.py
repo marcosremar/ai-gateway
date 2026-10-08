@@ -72,6 +72,9 @@ class Settings:
     # Where the TTS server fetches a catalog voice's reference audio (speech-stack: its own /refs/<id>.wav).
     ref_base: str = ""
 
+    def public_port(self, port: int) -> int:
+        return self.port_map.get(port, port)
+
     @classmethod
     def from_env(cls) -> "Settings":
         env = os.environ
