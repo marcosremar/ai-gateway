@@ -11,8 +11,10 @@
 import { probeRtt } from '../gateway/providers/gpu/rtt-probe';
 import { vastReplicaInit } from './cloud-init';
 import { MIN_HOST_LEFT_MS, vastEndsAt } from './expiry';
-import { DEFAULT_NEAR, rankOffers, type VastOffer } from './placements';
-import type { CreateReplicaInput, DeploymentBackend, DeploymentSpec, ReplicaMachine } from './types';
+import { countryDistanceKm } from './geo';
+import { countryOf, DEFAULT_NEAR, effectivePrice, rankOffers, type VastOffer } from './placements';
+import type { OfferPreview } from './types';
+import type { CreateReplicaInput, DeploymentBackend, DeploymentSpec, RegistryAuth, ReplicaMachine } from './types';
 
 export const VAST_API = 'https://console.vast.ai/api/v0';
 
@@ -83,6 +85,10 @@ export function cudaFloorOf(spec: Pick<DeploymentSpec, 'machineType' | 'minCuda'
   return Math.max(minCudaFor(spec.machineType), spec.minCuda ?? 0);
 }
 
+export function imageLogin(auth: RegistryAuth): string {
+  return `-u ${auth.username} -p ${auth.password} ${auth.server ?? 'docker.io'}`;
+}
+
 /** Vast `actual_status` → the controller's vocabulary: `running`, `starting` (loading/created), `exited` (halted). */
 export function vastState(status: string | null | undefined): string {
   if (status === 'running') return 'running';
@@ -118,7 +124,10 @@ export class VastDeploymentBackend implements DeploymentBackend {
   private listBackoffUntil = 0;
   private listFailures = 0;
 
-  constructor(private readonly apiKey: string, opts: { fetch?: FetchLike; now?: () => number; rtt?: RttMeasure } = {}) {
+  private readonly log: (msg: string, data?: Record<string, unknown>) => void;
+
+  constructor(private readonly apiKey: string, opts: { fetch?: FetchLike; now?: () => number; rtt?: RttMeasure; log?: (msg: string, data?: Record<string, unknown>) => void } = {}) {
+    this.log = opts.log ?? (() => {});
     this.fetchImpl = opts.fetch ?? ((url, init) => fetch(url, init));
     this.now = opts.now ?? Date.now;
     this.rtt = opts.rtt ?? defaultRtt;
@@ -203,11 +212,16 @@ export class VastDeploymentBackend implements DeploymentBackend {
           onstart: 'V="${AIGW_INIT_B64:-$(sed -n \'s/^AIGW_INIT_B64=//p\' /etc/environment | tr -d \'"\')}"; '
             + 'mkdir -p /srv/aigw && echo "$V" | base64 -d > /srv/aigw/init.sh && nohup bash /srv/aigw/init.sh > /srv/aigw/init.log 2>&1 &',
           env: { ...env, AIGW_INIT_B64: Buffer.from(init, 'utf8').toString('base64'), '-p 80:80': '1' },
+          ...(spec.registryAuth ? { image_login: imageLogin(spec.registryAuth) } : {}),
         });
         if (!res.success || res.new_contract == null) throw new Error(`not available: ${res.error ?? res.msg ?? 'success=false'}`);
         const id = String(res.new_contract);
         input.onCreated?.(id); // the cached list lacks it; the controller keeps a fresh create until a list shows it
         if (offer.machine_id !== undefined) this.hostOf.set(id, offer.machine_id);
+        this.log('deployments: vast offer rented', {
+          deployment: spec.name, id, offer: offer.id, host: offer.machine_id, location: offer.geolocation, usdPerHour: offer.dph_total,
+          rank: offers.indexOf(offer) + 1, of: offers.length, skipped: misses,
+        });
         return {
           id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast',
           zone: offer.geolocation ?? '', machineType: offer.gpu_name ?? spec.machineType,
@@ -293,6 +307,16 @@ export class VastDeploymentBackend implements DeploymentBackend {
     const m = /^(.+):(\d+)$/.exec(machine.ip ?? '');
     if (!m) return null;
     return this.rtt(m[1], Number(m[2]));
+  }
+
+  async previewOffers(spec: DeploymentSpec): Promise<OfferPreview[]> {
+    const near = spec.near ?? DEFAULT_NEAR;
+    return (await this.pickOffers(spec)).map((o, i) => ({
+      rank: i + 1, wouldTry: i < MAX_RENT_TRIES, offerId: o.id, machineId: o.machine_id ?? null, location: o.geolocation ?? null,
+      distanceKm: Math.round(countryDistanceKm(near, countryOf(o.geolocation))), usdPerHour: o.dph_total,
+      effectiveUsdPerHour: Math.round(effectivePrice(o) * 1000) / 1000, reliability: o.reliability2, inetDownMbps: o.inet_down,
+      inetUpMbps: o.inet_up ?? null, cudaMax: o.cuda_max_good ?? null, directPorts: o.direct_port_count ?? null, gpu: o.gpu_name ?? null,
+    }));
   }
 
   /** Not meaningful per zone on Vast: the backend picks a market offer under the cap at create (`marketPriced`). */

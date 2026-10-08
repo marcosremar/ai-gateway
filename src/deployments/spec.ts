@@ -409,8 +409,19 @@ export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates
 /**
  * Vast runs ONE container per host (no systemd, no Docker-in-Docker): the replica is `image` as the container with
  * `bootScript` as its onstart, the app on `127.0.0.1:<port>`. No user_data metadata service (no `files`), no reserved
- * IP/firewall (no `exposure`), no power-off parking (no `idleAction: 'stop'`).
+ * IP/firewall (no `exposure`), no power-off parking (no `idleAction: 'stop'`). Vast refuses a create whose env passes
+ * 32 KB in total (`invalid env arguments, total length > 32KB`, live 2026-10-08), and the init script travels there.
  */
+export const VAST_ENV_MAX_BYTES = 32_000;
+const VAST_INIT_OVERHEAD_BYTES = 3_000;
+
+export function vastEnvBytes(spec: Pick<DeploymentSpec, 'bootScript' | 'env' | 'envByMachineType' | 'machineType'>): number {
+  const b64 = (n: number) => Math.ceil(n / 3) * 4;
+  const env = Object.entries({ ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env })
+    .reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(v) + 2, 0);
+  return b64(VAST_INIT_OVERHEAD_BYTES + b64(Buffer.byteLength(spec.bootScript ?? '')) + b64(env)) + env;
+}
+
 function checkVastSpec(spec: DeploymentSpec): void {
   if (!spec.bootScript || !spec.image) {
     throw new SpecError('vast replicas need bootScript and image (the base container image the script runs in)');
@@ -420,4 +431,9 @@ function checkVastSpec(spec: DeploymentSpec): void {
   // The edge is a sidecar container (`docker run --network host`) and a Vast replica IS one container: no sidecar.
   if (spec.realtime) throw new SpecError('realtime is not supported on vast yet (the edge runs as a sidecar container)');
   if (spec.idleAction === 'stop') throw new SpecError("idleAction 'stop' is not supported on vast");
+  const bytes = vastEnvBytes(spec);
+  if (bytes > VAST_ENV_MAX_BYTES) {
+    throw new SpecError(`vast accepts ${VAST_ENV_MAX_BYTES / 1000} KB of env per instance and this bootScript + env needs about ${Math.ceil(bytes / 1000)} KB `
+      + '(the script travels base64 twice): keep bootScript under ~14 KB and download large payloads at boot');
+  }
 }

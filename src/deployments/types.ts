@@ -327,6 +327,25 @@ export interface DeploymentBackend {
    * any other registry.
    */
   registryAuthFor?(image: string): RegistryAuth | null;
+  /** Read-only: the market offers a create would try for this spec, best first (Vast). */
+  previewOffers?(spec: DeploymentSpec): Promise<OfferPreview[]>;
+}
+
+export interface OfferPreview {
+  rank: number;
+  wouldTry: boolean;
+  offerId: number;
+  machineId: number | null;
+  location: string | null;
+  distanceKm: number;
+  usdPerHour: number;
+  effectiveUsdPerHour: number;
+  reliability: number;
+  inetDownMbps: number;
+  inetUpMbps: number | null;
+  cudaMax: number | null;
+  directPorts: number | null;
+  gpu: string | null;
 }
 
 export interface CatalogEntry { zone: string; machineType: string; hourlyPrice: number | null; availability: string | null }

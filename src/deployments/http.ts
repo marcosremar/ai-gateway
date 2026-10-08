@@ -419,6 +419,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const capacity = own && controller.get(name)?.app !== own ? null : controller.capacity(name);
       return capacity ? send(res, 200, capacity) : send(res, 404, { error: `deployment '${name}' not found` });
     }
+    if (action === 'offers' && method === 'GET') {
+      admin();
+      const offers = await controller.offers(name);
+      return offers ? send(res, 200, { deployment: name, offers }) : send(res, 404, { error: `deployment '${name}' has no vast placement` });
+    }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 
     const existing = controller.get(name);

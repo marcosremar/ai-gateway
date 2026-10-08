@@ -67,6 +67,26 @@ describe('VastDeploymentBackend', () => {
     for (const c of calls) expect(c.url.startsWith('https://console.vast.ai/api/v0/')).toBe(true);
   });
 
+  it('a spec with registryAuth rents with image_login; without it the field is absent', async () => {
+    const run = async (extra: Record<string, unknown>) => {
+      const { calls, fetchImpl } = fakeVast(({ method }) => (method === 'POST' ? { body: { offers } } : { body: { success: true, new_contract: 1 } }));
+      await new VastDeploymentBackend('vast-key', { fetch: fetchImpl, now: () => 1_000 })
+        .createReplica({ spec: vastSpec(extra), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' });
+      return calls[1].body!;
+    };
+    expect((await run({ registryAuth: { server: 'rg.fr-par.scw.cloud', username: 'nologin', password: 'pull-only' } })).image_login)
+      .toBe('-u nologin -p pull-only rg.fr-par.scw.cloud');
+    expect(await run({})).not.toHaveProperty('image_login');
+  });
+
+  it('previewOffers lists the ranking a create would walk, without renting', async () => {
+    const { calls, fetchImpl } = fakeVast(() => ({ body: { offers: offers.map(o => ({ ...o, inet_up: 800, direct_port_count: 12 })) } }));
+    const preview = await new VastDeploymentBackend('vast-key', { fetch: fetchImpl, now: () => 1_000 }).previewOffers(vastSpec());
+    expect(preview.map(o => [o.rank, o.offerId, o.location, o.distanceKm])).toEqual([[1, 2, 'Paris, FR', 0], [2, 3, 'Frankfurt, DE', 478]]);
+    expect(preview[0]).toMatchObject({ wouldTry: true, usdPerHour: 0.45, inetUpMbps: 800, directPorts: 12, reliability: 0.99 });
+    expect(calls.every(c => c.method === 'POST' && c.url.endsWith('/bundles/'))).toBe(true);
+  });
+
   it('minCuda raises the CUDA floor to the image\'s and skips a host whose driver is older (error 804 on 2026-10-06)', async () => {
     const { calls, fetchImpl } = fakeVast(({ method, url }) => {
       if (method === 'POST' && url.endsWith('/bundles/')) {
@@ -106,9 +126,12 @@ describe('VastDeploymentBackend', () => {
       if (url.endsWith('/asks/3/')) return { body: { success: true, new_contract: 9 } };
       return { status: 500, body: '' };
     });
-    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    const logged: Array<Record<string, unknown> | undefined> = [];
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, log: (_msg, data) => logged.push(data) });
     const m = await backend.createReplica({ spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' });
     expect(m.id).toBe('9');
+    expect(logged[0]).toMatchObject({ offer: 3, host: 103, location: 'Frankfurt, DE', rank: 2, of: 2 });
+    expect(String((logged[0]!.skipped as string[])[0])).toMatch(/^offer 2: /);
     expect(calls.filter(c => c.method === 'PUT').map(c => c.url.split('/asks/')[1])).toEqual(['2/', '3/']);
 
     const denied = new VastDeploymentBackend('bad', { fetch: fakeVast(({ method }) => (method === 'POST'

@@ -6,7 +6,7 @@
 import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './controller-state';
 import { ReconcileLoop } from './controller-reconcile';
 import { planReplicas, replicaPhase } from './planner';
-import type { DeploymentSpec, DeploymentView } from './types';
+import type { DeploymentSpec, DeploymentView, OfferPreview } from './types';
 import { distinctSessions, externalLoadOf, refusedSessions } from '../realtime/external-load';
 
 export abstract class ControllerViews extends ReconcileLoop {
@@ -19,6 +19,15 @@ export abstract class ControllerViews extends ReconcileLoop {
   }
 
   /** The stored spec, secrets included — for in-process callers only (declared reconcile); never sent over HTTP. */
+  async offers(name: string): Promise<OfferPreview[] | null> {
+    const spec = this.deployments.get(name)?.record.spec;
+    const preview = this.backends.vast?.previewOffers;
+    if (!spec || !preview) return null;
+    const vast = spec.provider === 'vast' ? spec : (spec.candidates ?? []).find(c => c.provider === 'vast');
+    if (!vast) return null;
+    return preview.call(this.backends.vast, { ...spec, provider: 'vast', machineType: vast.machineType, maxEurPerHour: vast.maxEurPerHour });
+  }
+
   specOf(name: string): DeploymentSpec | null {
     const rt = this.deployments.get(name);
     return rt ? structuredClone(rt.record.spec) : null;
