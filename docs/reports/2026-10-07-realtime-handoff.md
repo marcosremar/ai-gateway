@@ -1486,3 +1486,37 @@ squashed into `rt/improvements`. On top of them, unit-tested only — nothing be
   of the same branch were running at once on 2026-10-08).
 - **Bundle baseline.** `realtime` grew 74.1 → 88.8 KB with #59 (the session imports the PCM player and the clip
   decoder to play the opener); accepted in `quality-bundle-baseline.json` with that reason.
+
+## Prova final ao vivo — imagem 1317, duas réplicas (2026-10-08 noite)
+
+**Em andamento — os resultados entram aqui à medida que saem.** Gateway local (`bun serve.ts` em :4150, namespace
+`marcos-proof-final`, estado próprio), máquinas só pela API dele. Início 21:48 Europe/Paris (aula encerrada; produção
+conferida por GET antes de criar: tudo em zero). Spec = perfil `speech-stack` desta branch (`realtime: {}`, modo `fast`,
+`LLM_SLOT_CTX=4096` no L40S), voz de referência sintética (espeak-ng) por `fileUrls`
+(`scripts/realtime-e2e/fixtures/`), prompt de sistema de 509 tokens, clipe sintético de 4,5 s. Relógio de toda latência:
+última amostra com voz enviada → primeiro áudio não silencioso recebido (os 700 ms de endpointing estão dentro).
+
+### Defeitos achados ao vivo (corrigidos nesta branch, com teste de regressão)
+
+1. **`9f8d49c` — no Scaleway o edge NÃO é o da imagem.** O sidecar sobe de `DEFAULT_EDGE_IMAGE`, que apontava para
+   `aigw-edge:8c774c6e` (sem ajuste de histórico, sem os consertos de `04ce863`/`db8c0f4`/#58). Só no Vast o edge sai de
+   `/opt/aigw-edge` da imagem. Com `realtime: {}` a produção subiria o edge antigo. Agora o padrão é `f66b6b80` e um teste
+   prende o padrão ao `EDGE_TAG` do Dockerfile da speech-stack. Tudo abaixo rodou com `f66b6b80`.
+2. **`91a5621` — réplica em dreno era liberada com alunos sentados.** Ao vivo, 22:32:42: `maxReplicas` 2 → 1 com 2 alunos
+   numa réplica e 3 na outra; a réplica em dreno (2 alunos) foi liberada 30 s depois como `scale-down` («vazia»). Causa:
+   o serviço realtime só consultava o `/__aigw/rt/status` de réplicas fora de dreno, o relatório de sessões vencia em 30 s
+   (`EXTERNAL_LOAD_MAX_AGE_MS`) e `busyOn` lia 0. Os alunos perderam a sessão (5 turnos `session_lost`/`lost_after_audio`,
+   depois 503 `saturated` até caber na outra). Conserto: réplica em dreno continua sendo consultada.
+
+### 1 — imagem nova num L40S do perfil, 4 alunos
+
+L40S-1-48G fr-par-2 (`4e63556c…`, €1,4699/h): criado 21:51:45, `ready` 22:00:21 — **516 s** (`bootMs` 516417); segundo
+L40S (`00f4e5c9…`): **500 s**. `/health`: `llm_ctx: 4096`, 1 voz (o `fileUrls` funciona no Scaleway).
+
+| Rodada | Turnos ok / tentados | Primeiro som p50 / p95 / max ms | ≤ 1,0 / 1,5 / 2,0 s % | > 2500 ms | Aberturas | Edge p50/p95: ttfa · stt · llm · tts |
+|---|---|---|---|---|---|---|
+| WS × 4, 840 s, mesma sessão (≈ 61 turnos por aluno) | 243 / 243 | 1051 / 1746 / **1915** | 38,7 / 86,8 / 100 | 0 | 14 | 278/1847 · 209/469 · 211/710 · 97/276 |
+| WebRTC × 4 (aiortc, contêiner Linux, par `host/host`), 840 s | 232 / 232 | 1331 / 1907 / **2209** | 0 / 70,7 / 97,4 | 0 | 6 | 280/830 · 210/464 · 224/571 · 95/345 |
+| WS × 4 na 2ª réplica (alunos 5..8), 230 s | 68 / 68 | 979 / 1498 / **1980** | 52,9 / 95,6 / 100 | 0 | 0 | 210/671 · 210/425 · 172/357 · 95/314 |
+
+0 falhas, 0 truncados, `tts_retries` 0 em 543 turnos, `deadline_missed` 0.
