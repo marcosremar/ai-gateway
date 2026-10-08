@@ -27,6 +27,11 @@ const bashOk = (script: string) => spawnSync('bash', ['-n'], { input: script }).
 const hasNginx = spawnSync('nginx', ['-v']).status === 0;
 
 describe('cloud-init with and without realtime', () => {
+  it('the sidecar is the edge the speech-stack image ships', () => {
+    const tag = /^ARG EDGE_TAG=(\S+)$/m.exec(readFileSync(join(__dirname, '../../../docker/speech-stack/Dockerfile'), 'utf8'))![1];
+    expect(DEFAULT_EDGE_IMAGE).toBe(`ghcr.io/marcosremar/aigw-edge:${tag}`);
+  });
+
   it('without realtime: no edge, no /__aigw/rt/ route', () => {
     const script = replicaCloudInit(speech(), TOKEN);
     expect(script).not.toContain('aigw-edge');
