@@ -11,11 +11,13 @@ drops the queued audio and emits `interrupted`. History (`messages`) grows by on
 """
 
 import asyncio
+import collections
 import time
 
 import numpy as np
 
-from .config import Settings
+from . import opener
+from .config import MAX_FIRST_AUDIO_DEADLINE_MS, Settings
 from .hallucination import filter_transcript
 from .text import JsonField, cut
 from .telemetry import new_trace_id, telemetry
@@ -26,6 +28,13 @@ OUT_RATE = 24000
 OUT_FRAME_BYTES = OUT_RATE // 50 * 2  # 20 ms of PCM16 mono at 24 kHz
 PRE_ROLL_FRAMES = 15  # 300 ms kept before the VAD opened a turn (its first syllable is quieter than the gate)
 MIN_TURN_BYTES = int(0.3 * 16000) * 2
+OUT_BYTES_PER_MS = OUT_RATE * 2 // 1000
+recent_first_audio: collections.deque = collections.deque(maxlen=512)
+
+
+def first_audio_max(window_s: float) -> int | None:
+    since = time.monotonic() - window_s
+    return max((ms for at, ms in recent_first_audio if at >= since), default=None)
 
 
 def resample_pcm16(pcm: bytes, src: int, dst: int) -> bytes:
@@ -41,10 +50,10 @@ def ms_between(start: float | None, end: float) -> int | None:
     return round((end - start) * 1000) if start else None
 
 
-def ttfa_from_speech(metrics: dict) -> int | None:
-    if metrics["endpoint_ms"] is None or metrics["ttfa_ms"] is None:
+def ttfa_from_speech(metrics: dict, key: str = "ttfa_ms") -> int | None:
+    if metrics["endpoint_ms"] is None or metrics[key] is None:
         return None
-    return metrics["endpoint_ms"] + metrics["ttfa_ms"]
+    return metrics["endpoint_ms"] + metrics[key]
 
 
 class AudioOut:
@@ -103,9 +112,31 @@ class Session:
         self.turns = 0
         self.turn_id: str | None = None
         self.outcome = "ok"
+        self.last_opener = -1
+        self._warm_openers()
 
     def tel(self, event: str, **kw) -> None:
         telemetry.emit(event, trace_id=self.trace_id, session_id=self.sid, **kw)
+
+    def deadline_ms(self) -> int:
+        asked = self.cfg.get("first_audio_deadline_ms")
+        asked = asked if isinstance(asked, int) and asked > 0 else self.s.first_audio_deadline_ms
+        return min(asked, MAX_FIRST_AUDIO_DEADLINE_MS)
+
+    def _warm_openers(self) -> None:
+        cfg = dict(self.cfg)
+
+        async def synth(line: str) -> bytes:
+            fields = await self.up.voice_fields(cfg)
+            rate, pcm = self.s.tts_rate, bytearray()
+            async for chunk in self.up.speak(line, cfg, fields, self.trace_id):
+                if isinstance(chunk, int):
+                    rate = chunk
+                else:
+                    pcm += chunk
+            return opener.trim_lead(resample_pcm16(bytes(pcm), rate, OUT_RATE), OUT_RATE)
+
+        opener.warm(cfg, synth)
 
     # ── input ────────────────────────────────────────────────────────────────
 
@@ -167,9 +198,11 @@ class Session:
             if isinstance(msg.get("messages"), list):
                 # Appended to the history (docs/realtime.md): the SDK replays a broken session's turns into the new one.
                 self.messages += [m for m in msg["messages"] if isinstance(m, dict) and "role" in m and "content" in m]
-            for key in ("system", "voice", "fallback_voice", "max_tokens", "temperature", "stt_prompt", "user_template"):
+            for key in ("system", "voice", "fallback_voice", "max_tokens", "temperature", "stt_prompt", "user_template",
+                        "opener", "first_audio_deadline_ms"):
                 if key in msg:
                     self.cfg[key] = msg[key]
+            self._warm_openers()
         elif kind == "ping":
             self.emit({"type": "pong", "t": msg.get("t")})
         else:
@@ -269,11 +302,13 @@ class Session:
                     confirmed: asyncio.Future | None = None) -> None:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
         metrics: dict = {"ttfa_ms": None, "stt_ms": None, "llm_ttft_ms": None, "tts_ttfb_ms": None,
-                         "endpoint_ms": ms_between(last_speech_at, ended)}
+                         "endpoint_ms": ms_between(last_speech_at, ended), "first_sound_ms": None, "opener": None,
+                         "deadline_ms": self.deadline_ms(), "deadline_missed": False}
         user_text, spoken = None, []
         thinking = deltas = None
         self.outcome = "ok"
         tel = lambda event, **kw: self.tel(event, turn_id=turn_id, **kw)  # noqa: E731
+        watch = asyncio.create_task(self._deadline(ended, last_speech_at, confirmed, metrics, turn_id, tel))
         try:
             if self.s.upstream_mode == "s2s":
                 user_text = await self._turn_s2s(audio, ended, metrics, spoken, tel)
@@ -306,10 +341,18 @@ class Session:
             self.emit({"type": "error", "code": "upstream", "message": repr(error)[:300]})
             self.emit({"type": "done", "error": True, "turnId": turn_id})
         finally:
+            if metrics["opener"] is None or self.outcome in ("interrupted", "discarded"):
+                watch.cancel()
+            late = metrics["opener"] is not None or metrics["deadline_missed"]
+            first_audio = ttfa_from_speech(metrics) or metrics["ttfa_ms"] or (metrics["deadline_ms"] + 1 if late else None)
+            if first_audio is not None and self.outcome in ("ok", "error"):
+                recent_first_audio.append((time.monotonic(), first_audio))
             tel("edge.turn.done", dur_ms=ms(ended), outcome=self.outcome, ttfaMs=metrics["ttfa_ms"],
                 sttMs=metrics["stt_ms"], llmTtftMs=metrics["llm_ttft_ms"], ttsTtfbMs=metrics["tts_ttfb_ms"],
                 sentences=len(spoken), replyChars=sum(len(x) for x in spoken), endpointMs=metrics["endpoint_ms"],
-                ttfaFromSpeechMs=ttfa_from_speech(metrics), speculated=confirmed is not None)
+                ttfaFromSpeechMs=ttfa_from_speech(metrics), speculated=confirmed is not None,
+                firstSoundMs=metrics["first_sound_ms"], firstSoundFromSpeechMs=ttfa_from_speech(metrics, "first_sound_ms"),
+                opener=metrics["opener"], deadlineMs=metrics["deadline_ms"], deadlineMissed=metrics["deadline_missed"])
             if thinking is not None:
                 thinking.cancel()
             if user_text:
@@ -318,6 +361,46 @@ class Session:
                 self.messages.append({"role": "user", "content": user})
                 if spoken:
                     self.messages.append({"role": "assistant", "content": " ".join(spoken)})
+
+    async def _deadline(self, ended: float, last_speech_at: float | None, confirmed: asyncio.Future | None,
+                        metrics: dict, turn_id: str, tel) -> None:
+        if confirmed is not None:
+            ended = await asyncio.shield(confirmed)
+        spoke = last_speech_at or ended
+        due = lambda ms: asyncio.sleep(max(0.0, spoke + ms / 1000 - time.monotonic()))  # noqa: E731
+        await due(metrics["deadline_ms"] - self.s.first_audio_margin_ms)
+        if metrics["first_sound_ms"] is not None:
+            return
+        picked = opener.pick(self.cfg, self.last_opener + 1)
+        if picked is None:
+            await due(metrics["deadline_ms"])
+            if metrics["first_sound_ms"] is None:
+                metrics["deadline_missed"] = True
+                tel("edge.turn.deadline_missed", level="warn", deadlineMs=metrics["deadline_ms"],
+                    opener=bool(opener.lines_of(self.cfg)))
+                self.emit({"type": "deadline_missed", "deadline_ms": metrics["deadline_ms"], "turnId": turn_id})
+            return
+        self.last_opener, line, pcm = picked
+        metrics["opener"] = line
+        metrics["first_sound_ms"] = round((time.monotonic() - ended) * 1000)
+        tel("edge.turn.opener", index=self.last_opener, chars=len(line), dur_ms=round((time.monotonic() - spoke) * 1000))
+        self.emit({"type": "opener", "state": "start", "text": line, "index": self.last_opener,
+                   "audio_ms": len(pcm) // OUT_BYTES_PER_MS, "turnId": turn_id})
+        self.out.push(pcm)
+        self.emit({"type": "opener", "state": "end", "index": self.last_opener, "turnId": turn_id})
+        await self.out.drained.wait()
+        if metrics["ttfa_ms"] is None:
+            self.emit({"type": "audio_end"})
+
+    def _first_reply_audio(self, ended: float, metrics: dict) -> None:
+        metrics["ttfa_ms"] = round((time.monotonic() - ended) * 1000) + len(self.out.buf) // OUT_BYTES_PER_MS
+        if metrics["first_sound_ms"] is None:
+            metrics["first_sound_ms"] = metrics["ttfa_ms"]
+        self.emit({"type": "audio_start"})
+
+    def _metrics_event(self, metrics: dict) -> dict:
+        return {"type": "metrics", **metrics, "ttfa_from_speech_ms": ttfa_from_speech(metrics),
+                "first_sound_from_speech_ms": ttfa_from_speech(metrics, "first_sound_ms"), "turnId": self.turn_id}
 
     async def _transcribe(self, audio: bytes, confirmed: asyncio.Future | None) -> dict:
         try:
@@ -448,15 +531,14 @@ class Session:
                     if isinstance(chunk, Exception):
                         raise chunk
                     if metrics["ttfa_ms"] is None:
-                        metrics["ttfa_ms"] = ms(ended)
-                        self.emit({"type": "audio_start"})
+                        self._first_reply_audio(ended, metrics)
                     self.out.push(chunk)
                     await asyncio.sleep(0)
             await thinker
             if metrics["ttfa_ms"] is not None:
                 await self.out.drained.wait()
                 self.emit({"type": "audio_end"})
-            self.emit({"type": "metrics", **metrics, "ttfa_from_speech_ms": ttfa_from_speech(metrics), "turnId": self.turn_id})
+            self.emit(self._metrics_event(metrics))
             self.emit({"type": "done", "turnId": self.turn_id})
         finally:
             thinker.cancel()
@@ -466,14 +548,12 @@ class Session:
     async def _turn_s2s(self, audio: bytes, ended: float, metrics: dict, spoken: list[str], tel) -> str | None:
         """EDGE_UPSTREAM_MODE=s2s: the replica's own /v1/s2s answers the turn; the edge re-emits it in the realtime
         events and still applies the hallucination guard on the transcript (abandoning the call when it trips)."""
-        ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
-        cfg = {**self.cfg, "messages": self.messages}
+        cfg = {**self.cfg, "messages": self.messages, "opener": None}
         heard_text = None
         async for kind, item in self.up.s2s(audio, cfg, self.trace_id):
             if kind == "A":
                 if metrics["ttfa_ms"] is None:
-                    metrics["ttfa_ms"] = ms(ended)
-                    self.emit({"type": "audio_start"})
+                    self._first_reply_audio(ended, metrics)
                 self.out.push(item)
                 continue
             kind_e = item.get("type")
@@ -498,7 +578,7 @@ class Session:
         if metrics["ttfa_ms"] is not None:
             await self.out.drained.wait()
             self.emit({"type": "audio_end"})
-        self.emit({"type": "metrics", **metrics, "ttfa_from_speech_ms": ttfa_from_speech(metrics), "turnId": self.turn_id})
+        self.emit(self._metrics_event(metrics))
         self.emit({"type": "done", "turnId": self.turn_id})
         return heard_text
 

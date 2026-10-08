@@ -177,9 +177,19 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
         telemetry.emit('turn.first_audio', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: { transport: current?.type ?? null } });
       }
     }
+    if (e.type === 'opener' && e.state === 'start') {
+      npcSpeaking = true;
+      telemetry.emit('turn.opener', { turnId: turn?.id, durMs: turn ? performance.now() - turn.endAt : undefined, attrs: { index: e.index ?? null, transport: current?.type ?? null } });
+    }
+    if (e.type === 'deadline_missed') telemetry.emit('turn.deadline_missed', { level: 'warn', turnId: turn?.id, attrs: { deadlineMs: e.deadline_ms, transport: current?.type ?? null } });
     if (e.type === 'vad') heardUntil = e.state === 'start' ? Infinity : performance.now() + HEARD_WITHOUT_TURN_MS;
     if (e.type === 'audio_end' || e.type === 'interrupted') { npcSpeaking = false; quietSince = performance.now(); }
-    if (e.type === 'metrics') metrics.lastTurn = { ttfa_ms: e.ttfa_ms, stt_ms: e.stt_ms, llm_ttft_ms: e.llm_ttft_ms, tts_ttfb_ms: e.tts_ttfb_ms };
+    if (e.type === 'metrics') {
+      metrics.lastTurn = {
+        ttfa_ms: e.ttfa_ms, stt_ms: e.stt_ms, llm_ttft_ms: e.llm_ttft_ms, tts_ttfb_ms: e.tts_ttfb_ms,
+        first_sound_ms: e.first_sound_ms, opener: e.opener, deadline_missed: e.deadline_missed,
+      };
+    }
     if (e.type === 'done') {
       if (turn) telemetry.emit('turn.done', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: { empty: !!e.empty, filtered: !!e.filtered, transport: current?.type ?? null, provider: turn.provider ?? null, fallback: turn.fallback ?? null } });
       turn = null;

@@ -9,8 +9,8 @@ first audio:
 
 POST /v1/s2s       multipart: `file` (audio, any ffmpeg/PyAV format) + `config` (JSON, see S2SConfig below).
                    Response `application/x-aigw-s2s`: frames of [1 byte kind][4 bytes big-endian length][payload]
-                     kind "E" = JSON event (transcript, sentence, timing, done, error), kind "A" = raw PCM s16le mono
-                     24 kHz. No base64 on the hot path. `?format=ndjson` gives JSON lines (audio as base64) for debugging.
+                     kind "E" = JSON event (transcript, sentence, timing, opener, deadline_missed, done, error),
+                     kind "A" = raw PCM s16le mono 24 kHz. No base64 on the hot path. `?format=ndjson` gives JSON lines (audio as base64) for debugging.
 POST /v1/audio/transcriptions   OpenAI-shaped STT (multipart `file`, `language`, `prompt`).
 WS   /ws/audio-stream           real-time STT: binary Int16 PCM 16 kHz frames in, {"text": <full running text>}
                                 out per decode — the protocol the gateway's streaming STT router already speaks.
@@ -22,6 +22,7 @@ GET  /health                    200 only when the three models answered a warm-u
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
@@ -314,10 +315,114 @@ def frame(kind: bytes, payload: bytes) -> bytes:
     return kind + struct.pack(">I", len(payload)) + payload
 
 
+MAX_FIRST_AUDIO_DEADLINE_MS = 2500
+FIRST_AUDIO_DEADLINE_MS = min(MAX_FIRST_AUDIO_DEADLINE_MS, int(os.environ.get("FIRST_AUDIO_DEADLINE_MS", "2000")))
+FIRST_AUDIO_MARGIN_MS = int(os.environ.get("FIRST_AUDIO_MARGIN_MS", "300"))
+MAX_OPENER_LINES = 8
+MAX_OPENERS = 256
+openers: dict[str, asyncio.Task] = {}
+
+
+def opener_lines(cfg: dict) -> list[str]:
+    opener = cfg.get("opener")
+    lines = opener.get("lines") if isinstance(opener, dict) else None
+    if not isinstance(lines, list):
+        return []
+    return [line.strip() for line in lines if isinstance(line, str) and line.strip()][:MAX_OPENER_LINES]
+
+
+def opener_key(voice: dict, lang: str, line: str) -> str:
+    return hashlib.sha256(json.dumps([voice["audio"], voice["text"], lang, line]).encode()).hexdigest()
+
+
+def trim_lead(pcm: bytes) -> bytes:
+    samples = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16)
+    loud = np.flatnonzero(np.abs(samples.astype(np.int32)) > 328)
+    return pcm if not len(loud) else samples[max(0, int(loud[0]) - 240):].tobytes()
+
+
+async def synth_opener(line: str, lang: str, voice: dict) -> bytes:
+    queue: asyncio.Queue = asyncio.Queue()
+    await tts_stream(line, LANGUAGE.get(lang, "Portuguese"), voice, queue)
+    chunks = [queue.get_nowait() for _ in range(queue.qsize())]
+    return trim_lead(b"".join(chunk for chunk in chunks if isinstance(chunk, bytes)))
+
+
+def forget_failed_opener(key: str, task: asyncio.Task) -> None:
+    if (task.cancelled() or task.exception() is not None) and openers.get(key) is task:
+        del openers[key]
+
+
+def warm_openers(cfg: dict, voice: dict, lang: str) -> None:
+    for line in opener_lines(cfg):
+        key = opener_key(voice, lang, line)
+        if key in openers:
+            continue
+        while len(openers) >= MAX_OPENERS:
+            openers.pop(next(iter(openers)))
+        task = openers[key] = asyncio.create_task(synth_opener(line, lang, voice))
+        task.add_done_callback(lambda done, key=key: forget_failed_opener(key, done))
+
+
+def pick_opener(cfg: dict, voice: dict, lang: str) -> tuple[int, str, bytes] | None:
+    lines = opener_lines(cfg)
+    start = len(cfg.get("messages") or []) // 2
+    for step in range(len(lines)):
+        index = (start + step) % len(lines)
+        task = openers.get(opener_key(voice, lang, lines[index]))
+        if task is not None and task.done() and not task.cancelled() and task.exception() is None and task.result():
+            return index, lines[index], task.result()
+    return None
+
+
+async def first_audio_deadline(frames, state: dict, cfg: dict, voice: dict, lang: str, ms, event, pcm):
+    asked = cfg.get("first_audio_deadline_ms")
+    deadline = min(asked if isinstance(asked, int) and asked > 0 else FIRST_AUDIO_DEADLINE_MS, MAX_FIRST_AUDIO_DEADLINE_MS)
+    endpoint = cfg.get("endpoint_ms")
+    endpoint = round(endpoint) if isinstance(endpoint, (int, float)) and endpoint > 0 else 0
+    state.update(deadline_ms=deadline, endpoint_ms=endpoint, opener=None, first_sound_ms=None, deadline_missed=False)
+    warm_openers(cfg, voice, lang)
+    due = lambda at: asyncio.ensure_future(asyncio.sleep(max(0.0, (at - endpoint - ms()) / 1000)))  # noqa: E731
+    timer, last = due(deadline - FIRST_AUDIO_MARGIN_MS), False
+    step = asyncio.ensure_future(frames.__anext__())
+    try:
+        while True:
+            await asyncio.wait({step, timer} if timer else {step}, return_when=asyncio.FIRST_COMPLETED)
+            if timer and timer.done():
+                timer = None
+                if state["first_sound_ms"] is not None:
+                    continue
+                picked = None if last else pick_opener(cfg, voice, lang)
+                if picked:
+                    index, line, audio = picked
+                    state.update(opener=line, first_sound_ms=ms())
+                    yield event({"type": "opener", "state": "start", "text": line, "index": index,
+                                 "audio_ms": len(audio) // 48, "at_ms": state["first_sound_ms"]})
+                    yield pcm(audio)
+                    yield event({"type": "opener", "state": "end", "index": index})
+                elif last:
+                    state["deadline_missed"] = True
+                    yield event({"type": "deadline_missed", "deadline_ms": deadline, "at_ms": ms()})
+                else:
+                    timer, last = due(deadline), True
+                continue
+            try:
+                item = step.result()
+            except StopAsyncIteration:
+                return
+            yield item
+            step = asyncio.ensure_future(frames.__anext__())
+    finally:
+        step.cancel()
+        if timer:
+            timer.cancel()
+
+
 @app.post("/v1/s2s")
 async def s2s(request: Request, file: UploadFile = File(...), config: str = Form("{}")):
     """config: {"messages": [...history, OpenAI shape], "system": str, "language": "pt", "voice": id |
-    {"audio": url-or-data-url, "text": transcript}, "max_tokens": 160, "temperature": 0.6, "stt_prompt": str}"""
+    {"audio": url-or-data-url, "text": transcript}, "max_tokens": 160, "temperature": 0.6, "stt_prompt": str,
+    "first_audio_deadline_ms": 2000, "endpoint_ms": silence the client waited before posting, "opener": {"lines": [str]}}"""
     t0 = time.perf_counter()
     cfg = json.loads(config or "{}")
     audio = await file.read()
@@ -328,6 +433,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         raise HTTPException(400, "voice must be a known id or {audio, text}")
     ndjson = request.query_params.get("format") == "ndjson"
     ms = lambda: round((time.perf_counter() - t0) * 1000)  # noqa: E731
+    state: dict = {}
 
     def event(payload: dict) -> bytes:
         return (json.dumps(payload) + "\n").encode() if ndjson else frame(b"E", json.dumps(payload).encode())
@@ -407,17 +513,19 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                         raise chunk
                     if first_audio is None:
                         first_audio = ms()
+                        if state["first_sound_ms"] is None:
+                            state["first_sound_ms"] = first_audio
                         yield event({"type": "first_audio", "at_ms": first_audio})
                     yield pcm(chunk)
             await thinker
             yield event({"type": "done", "reply": " ".join(reply), "transcript": heard["text"], "stt_ms": heard["ms"],
-                         "first_audio_ms": first_audio, "total_ms": ms(),
+                         "first_audio_ms": first_audio, "total_ms": ms(), **state,
                          "stages": stage_times(heard, heard_at, marks.get("first_token"), marks.get("first_cut"), first_audio, timings),
                          **({"reply_raw": "".join(raw)} if field is not None else {})})
         except Exception as error:  # noqa: BLE001 — the stream already started: report in-band
             yield event({"type": "error", "message": repr(error)[:300], "at_ms": ms()})
 
-    return StreamingResponse(run(), media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
+    return StreamingResponse(first_audio_deadline(run(), state, cfg, voice, lang, ms, event, pcm), media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
                              headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
 
 

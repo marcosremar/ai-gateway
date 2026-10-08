@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ["EDGE_TELEMETRY_STDOUT"] = "0"
 
+from aigw_edge import opener as opener_module  # noqa: E402
 from aigw_edge import session as session_module  # noqa: E402
 from aigw_edge.config import Settings  # noqa: E402
 from fake_upstream import HEARD, LLM_TOKEN_MS, LLM_TTFT_MS, REPLY, STT_MS, TTS_TTFB_MS  # noqa: E402
@@ -20,6 +21,10 @@ FRAME_S = 0.02
 TONE = (0.25 * np.sin(np.arange(320) / 16000 * 2 * np.pi * 200) * 32767).astype(np.int16).tobytes()
 SILENCE = bytes(640)
 CFG = {"system": "Você é o padeiro.", "voice": "v", "language": "pt"}
+OPENERS = ["Hum, deixa eu ver.", "Só um instante."]
+OPENER_SAMPLE = 1000
+OPENER_SAMPLES = 4800
+DEADLINE = {"first_audio_deadline_ms": 1300, "first_audio_margin_ms": 100, "stt_partials": False}
 failures = 0
 results: dict = {}
 telemetry_events: list[tuple[str, dict]] = []
@@ -61,6 +66,8 @@ class FakeUpstream:
         self.cancelled: collections.Counter = collections.Counter()
         self.llm_messages: list[dict] = []
         self.stt_fails = False
+        self.llm_delay = 0.0
+        self.spoken: list[str] = []
 
     async def transcribe(self, pcm16, language, prompt, trace_id=None):
         self.calls["stt"] += 1
@@ -78,7 +85,7 @@ class FakeUpstream:
         self.llm_messages = messages
         finished = False
         try:
-            await asyncio.sleep(LLM_TTFT_MS / 1000)
+            await asyncio.sleep(LLM_TTFT_MS / 1000 + self.llm_delay)
             for i, word in enumerate(REPLY.split(" ")):
                 if i:
                     await asyncio.sleep(LLM_TOKEN_MS / 1000)
@@ -93,8 +100,9 @@ class FakeUpstream:
 
     async def speak(self, text, cfg, fields, trace_id=None):
         self.calls["tts"] += 1
+        self.spoken.append(text)
         await asyncio.sleep(TTS_TTFB_MS / 1000)
-        yield bytes(960 * 10)
+        yield np.full(OPENER_SAMPLES, OPENER_SAMPLE, dtype=np.int16).tobytes() if text in OPENERS else bytes(960 * 10)
 
     async def open_partials(self, language, trace_id=None):
         self.calls["partials"] += 1
@@ -110,6 +118,7 @@ class Learner:
         self.frames: collections.deque = collections.deque()
         self.speech_end_at: float | None = None
         self.heard_frames = 0
+        self.heard: list[bytes] = []
         self.mic = asyncio.create_task(self._mic())
 
     def say(self, seconds: float) -> None:
@@ -120,7 +129,10 @@ class Learner:
         while True:
             speaking = bool(self.frames)
             self.session.feed(self.frames.popleft() if speaking else SILENCE)
-            self.heard_frames += self.session.out.pull() is not None
+            frame = self.session.out.pull()
+            self.heard_frames += frame is not None
+            if frame is not None:
+                self.heard.append(frame)
             if speaking and not self.frames:
                 self.speech_end_at = time.monotonic()
             sent += 1
@@ -356,8 +368,113 @@ async def partials() -> None:
         await learner.close()
 
 
+def opener_samples(learner: Learner) -> tuple[int, bool]:
+    samples = np.frombuffer(b"".join(learner.heard), dtype=np.int16)
+    at = np.flatnonzero(samples == OPENER_SAMPLE)
+    return len(at), bool(len(at)) and bool(np.all(np.diff(at) == 1))
+
+
+async def late_turn(cfg: dict, llm_delay: float, **settings) -> Learner:
+    learner = Learner(cfg, **{**DEADLINE, **settings})
+    learner.up.llm_delay = llm_delay
+    await asyncio.sleep(0.15)
+    learner.say(0.5)
+    return learner
+
+
+async def first_audio_deadline() -> None:
+    lead = np.concatenate([np.zeros(2400, dtype=np.int16), np.full(100, 5000, dtype=np.int16)]).tobytes()
+    check("opener cache: leading silence is trimmed to 10 ms", len(opener_module.trim_lead(lead, 24000)) == (240 + 100) * 2
+          and opener_module.trim_lead(bytes(960), 24000) == bytes(960))
+    check("deadline: 2000 ms by default, a session may ask for less, never more than 2500",
+          [Learner({**CFG, **extra}).session.deadline_ms() for extra in ({}, {"first_audio_deadline_ms": 1500}, {"first_audio_deadline_ms": 9000})]
+          == [2000, 1500, 2500])
+
+    cfg = {**CFG, "voice": "opener-a", "opener": {"lines": OPENERS}}
+    mark = len(telemetry_events)
+    learner = await late_turn(cfg, 0.0)
+    metrics = await learner.wait("metrics")
+    check("reply in time: no opener, no deadline_missed, first sound is the reply",
+          "opener" not in learner.types() and "deadline_missed" not in learner.types() and metrics["opener"] is None
+          and metrics["first_sound_ms"] == metrics["ttfa_ms"] and metrics["deadline_missed"] is False
+          and opener_samples(learner)[0] == 0, metrics)
+    check("session start: every opener line is synthesized once, before it is needed",
+          sorted(t for t in learner.up.spoken if t in OPENERS) == sorted(OPENERS), learner.up.spoken)
+    done = turn_done(mark)
+    check("telemetry: edge.turn.done carries firstSoundMs, opener, deadlineMs and deadlineMissed",
+          (done["firstSoundMs"], done["opener"], done["deadlineMs"], done["deadlineMissed"]) == (metrics["first_sound_ms"], None, 1300, False), done)
+    await learner.close()
+
+    learner = await late_turn(cfg, 0.4, speculate_ms=0)
+    metrics = await learner.wait("metrics")
+    check("second session, same voice and lines: the cache answers, nothing is synthesized again",
+          not [t for t in learner.up.spoken if t in OPENERS], learner.up.spoken)
+    started = round((learner.at("opener", state="start") - learner.speech_end_at) * 1000)
+    check("reply late: the opener starts at the deadline minus the margin", 1150 <= started <= 1290, started)
+    kinds = [t for t in learner.types() if t != "vad" and t != "reply_delta"]
+    check("reply late: opener start and end, then the reply's audio_start, one audio_end, metrics, done",
+          kinds == ["transcript", "opener", "opener", "audio_start", "reply", "audio_end", "metrics", "done"], kinds)
+    heard, contiguous = opener_samples(learner)
+    tail = np.frombuffer(b"".join(learner.heard), dtype=np.int16)
+    check("reply late: the opener is heard once, whole, and the reply follows it with no overlap",
+          heard == OPENER_SAMPLES and contiguous and not np.any(tail[np.flatnonzero(tail == OPENER_SAMPLE)[-1] + 1:]), heard)
+    start = learner.of("opener")[0]
+    check("reply late: the opener event says which line and how long", (start["text"], start["index"], start["audio_ms"],
+          start["turnId"]) == (OPENERS[0], 0, 200, "s:1") and learner.of("opener")[1]["state"] == "end", start)
+    queued = round((learner.at("audio_start") - learner.at("vad", state="end")) * 1000)
+    check("opener still playing when the reply arrives: ttfa_ms counts the audio queued ahead of it",
+          metrics["ttfa_ms"] - queued >= 40 and metrics["first_sound_ms"] < metrics["ttfa_ms"]
+          and metrics["opener"] == OPENERS[0] and metrics["deadline_missed"] is False
+          and abs(metrics["first_sound_from_speech_ms"] - started) <= 30 and metrics["ttfa_from_speech_ms"] > 1300, (metrics, queued))
+    await learner.close()
+
+    learner = await late_turn(cfg, 1.2)
+    await learner.wait("opener")
+    await asyncio.sleep(0.06)
+    learner.say(0.5)
+    await learner.wait("interrupted")
+    queued = bytes(learner.session.out.buf)
+    after = len(learner.events)
+    check("barge-in during an opener: the opener stops like any audio, the turn ends interrupted with no reply audio",
+          not queued and "audio_start" not in learner.types() and 0 < opener_samples(learner)[0] < OPENER_SAMPLES
+          and learner.of("done")[0].get("interrupted") is True, learner.types())
+    await learner.wait("done", after=after)
+    openers = [e for e in learner.of("opener") if e["state"] == "start"]
+    check("rotation: the next late turn plays the other line, one opener per turn",
+          [e["index"] for e in openers] == [0, 1] and [e["turnId"] for e in openers] == ["s:1", "s:2"], openers)
+    await learner.close()
+
+    learner = await late_turn(cfg, 1.0)
+    await learner.wait("done")
+    kinds = [t for t in learner.types() if t != "vad" and t != "reply_delta"]
+    check("opener over before the reply: audio_end closes it, the reply opens the audio again",
+          kinds == ["transcript", "opener", "opener", "audio_end", "audio_start", "reply", "audio_end", "metrics", "done"], kinds)
+    await learner.close()
+
+    mark = len(telemetry_events)
+    learner = await late_turn(CFG, 0.8)
+    metrics = await learner.wait("metrics")
+    missed = round((learner.at("deadline_missed") - learner.speech_end_at) * 1000)
+    check("no opener configured: none is played, deadline_missed is reported at the deadline",
+          "opener" not in learner.types() and 1280 <= missed <= 1400 and metrics["deadline_missed"] is True
+          and metrics["opener"] is None and learner.of("deadline_missed")[0]["deadline_ms"] == 1300
+          and [kw["deadlineMs"] for event, kw in telemetry_events[mark:] if event == "edge.turn.deadline_missed"] == [1300], (missed, metrics))
+    await learner.close()
+
+    learner = Learner({**cfg, "voice": "opener-b"}, **DEADLINE)
+    await asyncio.sleep(0.15)
+    check("another voice: its opener lines are synthesized for it", sorted(learner.up.spoken) == sorted(OPENERS), learner.up.spoken)
+    await learner.close()
+
+    learner = await late_turn({**cfg, "stt_prompt": "FAKE:Legendas pela comunidade Amara.org"}, 0.0)
+    await learner.wait("done")
+    check("a filtered turn that ends before the deadline plays no opener", "opener" not in learner.types(), learner.types())
+    await learner.close()
+
+
 async def main() -> None:
-    for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials):
+    for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials,
+                     first_audio_deadline):
         await scenario()
     print(json.dumps(results))
 
