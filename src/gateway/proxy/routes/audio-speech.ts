@@ -69,7 +69,8 @@ export async function handleAudioSpeech(
       targets,
       (t, signal) => t.provider.synthesize({
         signal,
-        ...(t.providerId.startsWith('deployment:') ? { extra, stream } : {}),
+        ...(t.providerId.startsWith('deployment:') ? { extra } : {}),
+        stream,
         model: t.model ?? model,
         input: body.input as string,
         // Voices are provider-specific. A target with `voiceFor` (stock voice by gender) picks its own; otherwise a

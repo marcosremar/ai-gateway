@@ -94,6 +94,13 @@ session (WebRTC / WS), the speech-stack's `/v1/s2s` and the gateway's composed f
 | `opener` | none | `{"lines": ["…", "…"]}`: up to 8 short lines the app authored for the character, in the session's language |
 | `endpoint_ms` | 0 | `/v1/s2s` only: the silence the client waited after the speech before posting the clip. The server only knows when the request arrived; with this the deadline starts at the end of the speech (the edge needs none: its VAD knows the last speech frame) |
 
+**Speculative turn** (`/v1/s2s`, composed fallback only): `config.speculation = {id, turn, action: "start"}` with the
+clip so far (WAV) starts the STT, then the LLM, on what was heard up to a pause and answers `202 {"speculative": true}`
+(or `false` with a `reason`: `short`, `format`, `turn_cap`, `busy`, `off`); `{id, action: "cancel"}` drops it when the
+speech resumes; the turn names `{id}` and starts from that transcript without a second STT. Nothing speculative is
+voiced, the app is charged once per turn. The SDK does it on the s2s-stream rung when `voice.speculatePauseMs` is set.
+Bounds and measurements: docs/reports/2026-10-07-realtime-handoff.md § Fallback em streaming.
+
 Deployment defaults: `RT_FIRST_AUDIO_DEADLINE_MS` / `RT_FIRST_AUDIO_MARGIN_MS` on the edge (`realtime.env`),
 `FIRST_AUDIO_DEADLINE_MS` / `FIRST_AUDIO_MARGIN_MS` on the speech-stack and the gateway: 2000 and 300 ms.
 
