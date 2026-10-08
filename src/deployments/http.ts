@@ -6,6 +6,7 @@
  *   PATCH  /v1/deployments/:name               update an existing one (e.g. { minReplicas, maxReplicas })
  *   GET    /v1/deployments/:name               status + replicas
  *   DELETE /v1/deployments/:name               release every replica and forget the spec
+ *   GET    /v1/deployments/:name/capacity      session ceiling and measured boot / resume times per machine type
  *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic)
  *   POST   /v1/deployments/:name/park          done for now: scale to minReplicas at once (power off under idleAction stop)
  *   *      /v1/deployments/:name/invoke/<path> forwarded to a ready replica as /<path> (waits through cold start)
@@ -412,6 +413,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       admin();
       const body = await readJson(req);
       return send(res, 202, await controller.warm(name, body.replicas as number, body.untilMinutes as number));
+    }
+    if (action === 'capacity' && method === 'GET') {
+      const own = appOf(req);
+      const capacity = own && controller.get(name)?.app !== own ? null : controller.capacity(name);
+      return capacity ? send(res, 200, capacity) : send(res, 404, { error: `deployment '${name}' not found` });
     }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 

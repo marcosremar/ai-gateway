@@ -19,6 +19,7 @@ import { ControllerViews } from './controller-views';
 import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
 import { BUILTIN_PROFILES } from './profiles';
+import { holdOf, splitHold } from './scaling-spec';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
 import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
 
@@ -64,8 +65,9 @@ export class DeploymentController extends ControllerViews {
   }
 
   async put(
-    name: string, body: Record<string, unknown>, meta: { app?: string; appImage?: string } = {},
+    name: string, input: Record<string, unknown>, meta: { app?: string; appImage?: string } = {},
   ): Promise<{ view: DeploymentView; created: boolean }> {
+    const { body, hold: rawHold } = splitHold(input);
     const existing = this.deployments.get(name);
     const cap = this.opts.maxTotalReplicas ?? 6;
     if (typeof body.maxReplicas === 'number' && body.maxReplicas > cap) {
@@ -77,9 +79,10 @@ export class DeploymentController extends ControllerViews {
       throw new SpecError(`generated cloud-init is ${initBytes} bytes; Scaleway takes at most ${USER_DATA_KEY_MAX_BYTES} (shrink bootScript/env)`);
     }
     const now = this.now();
+    const hold = rawHold === undefined ? existing?.record.hold : holdOf(rawHold, spec.maxReplicas, now);
     if (existing) {
       existing.record = {
-        ...existing.record, spec, updatedAt: now,
+        ...existing.record, spec, updatedAt: now, hold,
         ...(existing.record.app || !meta.app ? {} : { app: meta.app }),
         ...(meta.appImage ? { appImage: meta.appImage } : {}),
       };
@@ -95,6 +98,7 @@ export class DeploymentController extends ControllerViews {
         ...(meta.app ? { app: meta.app } : {}),
         ...(meta.appImage ? { appImage: meta.appImage } : {}),
         ...(owed ? { network: owed.network } : {}),
+        ...(hold ? { hold } : {}),
       };
       this.deployments.set(name, this.runtime(record));
       if (owed) this.networkReleases.delete(owed.network.ipId);
@@ -169,6 +173,7 @@ export class DeploymentController extends ControllerViews {
     rt.refusedAt = [];
     rt.demandPeak = { value: 0, at: 0 };
     rt.pressure = { highSince: null, desired: 0 };
+    this.forgetLoad(rt);
     if (rt.record.warm) rt.record = { ...rt.record, warm: undefined };
     await this.opts.store.saveDeployment(rt.record);
     this.kick();
@@ -264,6 +269,8 @@ export class DeploymentController extends ControllerViews {
     const exclude = opts.exclude ?? new Set<string>();
 
     let machine = this.pick(rt, exclude, opts.stage);
+    const spent = machine || serving.length ? null : this.budgetRefusal(rt);
+    if (spent) throw new DeploymentError(503, `deployment '${name}': ${spent}`, 3600);
     // Saturated and the caller has a fallback (waitMs 0): no wait — refused below as `saturated`.
     const spill = !machine && opts.waitMs === 0 && this.servingMachines(name).length > 0;
     if (!machine && !spill) {
@@ -315,6 +322,7 @@ export class DeploymentController extends ControllerViews {
         const n = (rt.perReplica.get(chosen.id) ?? 1) - 1;
         if (n <= 0) rt.perReplica.delete(chosen.id); else rt.perReplica.set(chosen.id, n);
         rt.record.lastRequestAt = this.now();
+        this.traceLoad(rt);
         const reported: LeaseOutcome = failed === true ? 'failed' : failed === false ? 'ok' : failed;
         this.noteStage(rt, chosen.id, opts.stage, reported, this.now() - startedAt);
         const outcome = reported === 'abandoned' ? 'cancelled' : reported === 'errored' ? 'ok' : reported;

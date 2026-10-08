@@ -115,6 +115,27 @@ describe('deployments API', () => {
     expect(view.autoscale).toMatchObject({ floor: 2, desired: 2 });
   });
 
+  it('PATCH scaling.hold freezes the replica count; GET …/capacity reports ceiling and boot time, to the owning app only', async () => {
+    await call(h, 'PUT', '/v1/deployments/class', { profile: 'cpu-echo', maxReplicas: 2 }, ADMIN, AS_SITE);
+    expect((await call(h, 'PATCH', '/v1/deployments/class', { scaling: { hold: { replicas: 2, untilMinutes: 30 } } }, SITE)).status).toBe(403);
+    expect((await call(h, 'PATCH', '/v1/deployments/class', { scaling: { hold: { replicas: 3, untilMinutes: 30 } } })).status).toBe(400);
+    const held = await call(h, 'PATCH', '/v1/deployments/class', { scaling: { hold: { replicas: 2, untilMinutes: 30 } } });
+    expect(held.status).toBe(200);
+    expect((await held.json()) as { hold: unknown; spec: { scaling?: unknown } }).toMatchObject({ hold: { replicas: 2 }, desiredReplicas: 2 });
+    await until(() => h.cloud.created.length === 2);
+    const capacity = await call(h, 'GET', '/v1/deployments/class/capacity', undefined, SITE);
+    expect(capacity.status).toBe(200);
+    expect(await capacity.json()).toMatchObject({
+      deployment: 'class', mode: null, hold: { replicas: 2 },
+      capacity: [{ ceiling: { sessions: 8, source: 'default' }, boot: { source: expect.stringMatching(/default|measured/) }, confident: false }],
+    });
+    await call(h, 'PUT', '/v1/deployments/other', { profile: 'cpu-echo' });
+    expect((await call(h, 'GET', '/v1/deployments/other/capacity', undefined, SITE)).status).toBe(404);
+    expect((await call(h, 'GET', '/v1/deployments/nope/capacity')).status).toBe(404);
+    const released = await call(h, 'PATCH', '/v1/deployments/class', { scaling: { hold: null } });
+    expect((await released.json()) as { hold: unknown }).toMatchObject({ hold: null });
+  });
+
   it('lists built-in profiles and stores new ones', async () => {
     const names = ((await (await call(h, 'GET', '/v1/profiles')).json()) as { profiles: { name: string }[] }).profiles.map(p => p.name);
     expect(names).toEqual(expect.arrayContaining(['qwen3-tts', 'qwen3-tts-clone', 'cpu-echo']));

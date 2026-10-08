@@ -1,5 +1,6 @@
 import { DeploymentController, type ControllerOptions, type Lease } from '../../src/deployments/controller';
 import { MemoryDeploymentStore } from '../../src/deployments/store';
+import type { ScalingMode, ScalingSpec } from '../../src/deployments/types';
 import { L40S_MODEL, SimClock, SimCloud, SimProbe, type ScaleEvent } from '../autoscale-sim/engine';
 
 export interface Student {
@@ -12,7 +13,13 @@ export interface Student {
   firstTurnAfter?: number;
 }
 
+export type SimMode = 'today' | ScalingMode;
+export const SIM_MODES: readonly SimMode[] = ['today', 'economy', 'balanced', 'fast'];
+
 export interface SimParams {
+  mode: SimMode;
+  sessionSignal: boolean;
+  budget?: ScalingSpec['budget'];
   bootSeconds: number;
   resumeSeconds: number;
   ceiling: number;
@@ -26,6 +33,7 @@ export interface SimParams {
 }
 
 export const DEFAULT_PARAMS: SimParams = {
+  mode: 'today', sessionSignal: true,
   bootSeconds: 600, resumeSeconds: 180, ceiling: 8, price: 1.47, maxReplicas: 4, idleMinutes: 2, idleAction: 'delete',
   wastedBelow: 20, fallback: true, seed: 1,
 };
@@ -70,6 +78,7 @@ export interface ClassResult {
   timeToCapacity: number | null;
   zeroAfterEnd: number | null;
   sessionsCut: number;
+  logs: string[];
 }
 
 export const SIM_START = Date.parse('2026-10-07T08:00:00Z');
@@ -95,7 +104,12 @@ export function specOf(p: SimParams, extra: Record<string, unknown> = {}): Recor
     image: 'ghcr.io/parle/speech-stack:1', port: 8000, machineType: 'L40S-1-48G', zone: 'fr-par-2', gpu: true,
     minReplicas: 0, maxReplicas: p.maxReplicas, targetInflightPerReplica: p.ceiling, autoscale: { maxInflightFactor: 1 },
     idleMinutes: p.idleMinutes, idleAction: p.idleAction, bootTimeoutMinutes: 30, maxEurPerHour: Math.max(2, p.price),
-    coldStartWaitSeconds: 0, ...extra,
+    coldStartWaitSeconds: 0,
+    ...(p.mode === 'today' ? {} : {
+      realtime: { maxSessions: p.ceiling },
+      scaling: { mode: p.mode, target: { p50Ms: 1500, p95Ms: 2000 }, ...(p.budget ? { budget: p.budget } : {}) },
+    }),
+    ...extra,
   };
 }
 
@@ -107,17 +121,20 @@ export async function simulateClass(scenario: ClassScenario, overrides: Partial<
   const window = ([a, b]: [number, number]): [number, number] => [SIM_START + a * 60_000, SIM_START + b * 60_000];
   cloud.stockOut = (scenario.outOfStock ?? []).map(window);
   cloud.quotaFull = (scenario.quotaFull ?? []).map(window);
+  const seats: Seat[] = scenario.students.map((student, i) => ({
+    student, rand: mulberry32(p.seed * 7919 + i), present: false, gone: false, slot: null, nextTurn: 0,
+  }));
+  const logs: string[] = [];
   const controller = new DeploymentController({
     backend: cloud, store: new MemoryDeploymentStore(), probe: new SimProbe(cloud, clock, model, () => 0), namespace: 'sim',
-    now: clock.now, ...scenario.controller,
+    now: clock.now,
+    sessions: () => (p.sessionSignal ? seats.filter(x => x.present && x.student.transport === 'realtime').length : null),
+    log: (msg, data) => { if (/budget/.test(msg)) logs.push(`${Math.round((clock.t - SIM_START) / 1000)}s ${msg} ${JSON.stringify(data)}`); },
+    ...scenario.controller,
   });
   await controller.init();
   await controller.put(NAME, specOf(p, scenario.spec));
   if (scenario.wakeAtStart) controller.wake(NAME);
-
-  const seats: Seat[] = scenario.students.map((student, i) => ({
-    student, rand: mulberry32(p.seed * 7919 + i), present: false, gone: false, slot: null, nextTurn: 0,
-  }));
   const shorts: Short[] = [];
   const starts: ReplicaStart[] = [];
   const turns = { gpu: 0, fallback: 0, refused: 0 };
@@ -253,7 +270,7 @@ export async function simulateClass(scenario: ClassScenario, overrides: Partial<
     firstExcessAt, triggerAt, excessEndsAt,
     timeToCapacity: triggerAt != null && excessEndsAt != null && excessEndsAt > triggerAt ? excessEndsAt - triggerAt : null,
     zeroAfterEnd: zeroAt == null ? null : zeroAt - loadEnds,
-    sessionsCut,
+    sessionsCut, logs,
   };
 }
 

@@ -5,6 +5,7 @@
  * The controller is split by who owns what (pure move of the former `controller.ts`, 2026-10-07); each part extends the
  * previous one and `DeploymentController` (controller.ts) is the public class:
  *   controller-state.ts → controller-replicas.ts (create / release / probe) → controller-parking.ts (stop / park) →
+ *   controller-scaling.ts (the `scaling` block: load trace, budget ledger, measured boot times, capacity view) →
  *   controller-autoscale.ts (pressure, drains, reclaim) → controller-reconcile.ts (the planning tick) →
  *   controller-views.ts (views, health) → controller.ts (API, leases).
  */
@@ -141,6 +142,7 @@ export interface ControllerOptions {
   unhealthyStrikes?: number;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
+  sessions?: (deployment: string) => number | null;
 }
 
 export interface Lease {

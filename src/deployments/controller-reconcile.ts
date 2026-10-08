@@ -117,14 +117,14 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     const lastRequestAt = reclaimed ? null : rt.record.lastRequestAt;
     const replicas = mine.map(m => this.observed(m, rt.perReplica.get(m.id) ?? 0));
     const base = {
-      spec: rt.record.spec, inflight: rt.inflight, waiting: rt.waiting, lastRequestAt, now: this.now(),
+      spec: this.planSpec(rt), inflight: rt.inflight, waiting: rt.waiting, lastRequestAt, now: this.now(),
       // Recent peak, not the instant: a burst served by hedges or refused while cold still asks for capacity.
       demand: this.demandOf(rt),
     };
     const live = mine.filter(m => replicaPhase(this.observed(m, 0)) !== 'halted');
     const { decision, floor } = this.decide(rt, live, isActive({ ...base, replicas }));
     const plan = planReplicas({
-      ...base, replicas, aboveSince: rt.aboveSince, drainBusy: true, autoscaleWant: decision.desired, floor,
+      ...base, replicas, aboveSince: rt.aboveSince, drainBusy: true, autoscaleWant: decision.desired, floor, ...this.planExtras(rt),
       ...(this.opts.unhealthyStrikes ? { unhealthyStrikes: this.opts.unhealthyStrikes } : {}),
       ...(this.opts.pinnedIdleMaxMs ? { pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt } : {}),
     });
