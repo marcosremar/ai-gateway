@@ -22,6 +22,8 @@
  *                     minus --clip-end-silence, the endpointing a page adds)   --no-wake   they send X-Gateway-No-Wake: 1
  *   --ramp 30         seconds over which students arrive    --duration 180   seconds each student talks
  *   --turn-every 15   seconds between turns                 --jitter 5       ± seconds
+ *   --think 2-6       ws / webrtc students: instead of --turn-every, listen to the reply in real time, then wait a
+ *                     seeded uniform think time (seconds) before the next utterance
  *   --clip-s 1.4      length of the tone clip               --clip file.wav  real speech instead (PCM16 mono WAV)
  *   --profile clean   clean | campus-slow | udp-blocked | lossy | flap
  *   --ceiling-ms 2500 any turn whose first sound (opener or reply) comes later fails the run
@@ -37,6 +39,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } f
 import { cpus, loadavg, tmpdir } from 'os';
 import { join } from 'path';
 import { ceilingReport, firstReplyAudioMs } from './ceiling';
+import { parseThink } from './think';
 import type { ClientConfig, ClientResult, Turn } from './load-client';
 import { HOST_IP, NS_EXEC, PROFILES, netDown, netState, netUp } from './net-shape';
 
@@ -337,7 +340,7 @@ try {
   const cfg: ClientConfig = {
     gw, key, deployment: DEP, config, students: N, rtc: RTC, s2s: S2S, noWake: argv.includes('--no-wake'), chrome: CHROME,
     chromeTransports: (opt('chrome-transports') ?? 'webrtc,ws,s2s-stream').split(','), clipEndSilenceMs: num('clip-end-silence', 700), rtcProcs: num('rtc-procs', Math.ceil(RTC / 8)),
-    rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), burst: argv.includes('--burst'), clipS: num('clip-s', 1.4),
+    rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), burst: argv.includes('--burst'), think: parseThink(opt('think')), clipS: num('clip-s', 1.4),
     uplinkStallMs: num('uplink-stall', 0), uplinkStallEvery: num('uplink-stall-every', 3), clientDeadline: argv.includes('--client-deadline'),
     ttsModel: opt('tts-model') ?? (config.models as { tts?: string } | undefined)?.tts,
     clip: opt('clip') ?? null, turnTimeoutS: num('turn-timeout', 30), turn: (opt('turn') ?? (PROFILE === 'udp-blocked' ? 'tcp' : 'udp')) as 'udp' | 'tcp',

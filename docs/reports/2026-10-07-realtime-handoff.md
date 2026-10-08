@@ -1486,3 +1486,258 @@ squashed into `rt/improvements`. On top of them, unit-tested only — nothing be
   of the same branch were running at once on 2026-10-08).
 - **Bundle baseline.** `realtime` grew 74.1 → 88.8 KB with #59 (the session imports the PCM player and the clip
   decoder to play the opener); accepted in `quality-bundle-baseline.json` with that reason.
+
+## Prova final ao vivo — imagem 1317, duas réplicas (2026-10-08 noite)
+
+Gateway local (`bun serve.ts` em :4150, namespace `marcos-proof-final`, estado próprio), máquinas só pela API dele;
+21:48 → 00:08 Europe/Paris (2 h 20 de relógio; aula encerrada; produção só lida por GET). Spec = perfil `speech-stack`
+desta branch (`realtime: {}`, modo `fast`, `LLM_SLOT_CTX=4096` no L40S; Vast com teto 0,57 no lugar de 0,85), voz de
+referência sintética (espeak-ng) por `fileUrls` (`scripts/realtime-e2e/fixtures/`), prompt de sistema de 509 tokens,
+clipe sintético de 4,5 s, 4 falas de abertura. Relógio de toda latência: última amostra com voz enviada → primeiro áudio
+não silencioso recebido (os 700 ms de endpointing estão dentro). Clientes: `ws` do Mac pelo relay do gateway; `webrtc` =
+aiortc num contêiner Linux no Mac (par `host/host`); Chrome = SDK real com medidor audível. A rede do Mac oscilou na
+noite (a âncora `s3.fr-par` mediu 46, 62 e 186 ms em três momentos).
+
+### Veredito
+
+| # | Item | Resultado | Números |
+|---|---|---|---|
+| 1 | Imagem nova num L40S do perfil, 4 alunos | **passou** | boot 516 / 500 / 508 s; WS n 311: p50 1036, p95 1744, **max 1980**; WebRTC n 321: p50 1415, p95 2165, max 3500 (2 turnos > 2500, ambos com a fala chegando 2,4–3,1 s atrasada ao edge); 0 falhas em 632 turnos |
+| 2 | Sessões longas, 4 × ≈ 61 turnos, `LLM_SLOT_CTX` 4096 | **passou no que dá para ver; VRAM não medida** | 243 / 243 turnos, 0 HTTP 400 do LLM (`chat` 243 iniciados / 243 concluídos, nenhum `exceed` no log), 0 sessão morta, 0 corte de histórico (o maior prompt foi 2768 tokens de 4096); `nvidia-smi` sem caminho de acesso no Scaleway |
+| 3 | Segunda réplica no Vast pela imagem pública | **passou em parte, com 3 defeitos de operação** | caminhada L40S (cota) → Vast provada; 3 aluguéis para 1 réplica; pull + boot 25 min 39 s; `start.sh` subiu; UDP ok; 4 alunos WS no Vast: n 93, p50 933, p95 1164–1354, max 1570; a conta Vast ficou sem crédito às 00:01 e a réplica caiu com 4 alunos |
+| 4 | Transbordo no fallback composto | **passou (a guarda funciona); 2500 ms não é atingível ali** | 1 elo: 43 turnos, 0 falha pelo orçamento de 3 s, 4 falhas `stt_503` aos 8 s (a paciência antiga), resposta p50 5813 / p95 14966 / max 16729 ms; 2 elos: 52 turnos, 0 falha, 42 hedges, resposta p50 3958 / p95 5160 / max 5747 ms; abertura aos 1702 ms nos 95 |
+| 5 | Teto no relógio do aluno (#59) | **o teto funciona; o modo tem um defeito aberto** | turnos travados 3 s: antes 3559 / 3699 ms; com `--client-deadline` 2016 / 2036 / 2037 ms, uma abertura só, resposta depois (3492–3994 ms); **3 dos 5 turnos normais da rodada terminaram `interrupted` sem resposta** (0 de 5 sem a opção) |
+| 6 | Scale-in | **falhou ao vivo, consertado (`91a5621`) e provado de novo** | antes: réplica em dreno com 2 alunos liberada em 30 s; depois: dreno segurou 138 s até a sessão acabar (11 / 11 turnos, max 1019 ms) e liberou em 5 s como `scale-down`; nada ficou ligado |
+| 7 | Modo `fast` e `/capacity` | **passou** | 2ª réplica pedida no 3º assento (`fast: one spare replica at load 4.5`, teto 4 de `/capacity`); `/capacity` em 7 momentos abaixo |
+
+**2500 ms como MÁXIMO:** valeu em 2178 de 2181 turnos realtime (WS e aiortc, todas as rodadas). Os 3 acima (2764, 3500,
+9102 ms) têm a mesma assinatura da tarde: o fim da fala chegou ao VAD do edge 2,4–8,7 s depois da última amostra com
+voz, e o edge respondeu em 225–447 ms. É atraso de subida do cliente, que só o teto no relógio do aluno (#59) cobre. No
+fallback composto o primeiro **som** (abertura) fica em 1,70 s; a **resposta** não cabe em 2500 ms (item 4).
+
+### Defeitos achados ao vivo
+
+| Commit | Defeito | Estado |
+|---|---|---|
+| `9f8d49c` | **No Scaleway o edge não é o da imagem.** O sidecar sobe de `DEFAULT_EDGE_IMAGE`, que apontava para `aigw-edge:8c774c6e` (sem ajuste de histórico nem os consertos `04ce863` / `db8c0f4` / #58). Só no Vast o edge sai de `/opt/aigw-edge`. Com `realtime: {}` a produção subiria o edge antigo. | consertado: padrão `f66b6b80`, teste prende o padrão ao `EDGE_TAG` do Dockerfile. Tudo abaixo rodou com ele |
+| `91a5621` | **Réplica em dreno era liberada com alunos sentados.** 22:32:42, `maxReplicas` 2 → 1 com 2 alunos numa réplica: liberada 30,06 s depois como `scale-down`. O serviço realtime só consultava `/__aigw/rt/status` de réplicas fora de dreno; o relatório vencia em 30 s (`EXTERNAL_LOAD_MAX_AGE_MS`) e `busyOn` lia 0. | consertado e provado de novo (item 6) |
+| — | **`bootTimeoutMinutes: 20` do perfil mata o Vast.** O pull da imagem pública levou > 20 min (Estônia, solta sem endereço), 11 min 16 s (Suécia) e 17 min 25 s (Itália); o boot inteiro na Itália, 25 min 39 s. | **aberto**: o lugar Vast precisa de um prazo próprio (≥ 35 min) ou de imagem menor |
+| — | **O portão de RTT só decide depois do pull.** A Suécia foi solta por +138 ms depois de 11 min pagos; com o padrão de 20 ms a Itália (+64) também seria. | aberto (já anotado de manhã) |
+| — | **Sem crédito no Vast a réplica cai sem aviso.** 00:01:18: `replica unreachable`, depois `insufficient_credit` no aluguel seguinte. Os 4 alunos dela perderam a sessão e levaram `503 saturated` até o fim (o L40S, com 13, recusava). | aberto: recarregar a conta; não há alerta de saldo |
+| — | **Modo `--client-deadline`: turno normal termina `interrupted` + `done{empty}`** logo no fim do VAD (o fim de turno da página e o do servidor se atropelam). | **aberto**, não investigado; só alcança alunos quando a escola subir o SDK |
+| — | `L40S-1-48G is not sold in fr-par-1`: o segundo lugar do perfil nunca serve. | aberto, inofensivo |
+| — | `/capacity` mostra a imagem do Scaleway na linha `RTX 5090` e `confident: false, missing: ["boot"]` com 3 boots medidos. | aberto, cosmético |
+| — | Harness: Chrome em `s2s-stream` com `--uplink-stall` não termina (2 rodadas presas na coleta); a configuração de sessão tem teto de 6 kB, então não dá para semear um histórico longo. | aberto |
+
+### 1 — imagem nova num L40S do perfil, 4 alunos
+
+L40S-1-48G fr-par-2, €1,4699/h, criado pelo perfil: `ready` em **516 s** (21:51:45 → 22:00:21), o segundo em **500 s**, o
+terceiro em **508 s**. `/health`: `llm_ctx: 4096`, 1 voz (o `fileUrls` funciona no Scaleway). Sonda de rede do edge:
+`inbound udp/50100: ok (48 ms)`, `path=direct`.
+
+| Rodada | Turnos ok / tentados | Primeiro som p50 / p95 / max ms | ≤ 1,0 / 1,5 / 2,0 s % | > 2500 ms | Aberturas | Edge p50/p95: ttfa · stt · llm · tts |
+|---|---|---|---|---|---|---|
+| WS × 4, 840 s, uma sessão por aluno (≈ 61 turnos) | 243 / 243 | 1051 / 1746 / **1915** | 38,7 / 86,8 / 100 | 0 | 14 | 278/1847 · 209/469 · 211/710 · 97/276 |
+| WS × 4 na 2ª réplica (alunos 5..8), 230 s | 68 / 68 | 979 / 1498 / **1980** | 52,9 / 95,6 / 100 | 0 | 0 | 210/671 · 210/425 · 172/357 · 95/314 |
+| WebRTC × 4, 840 s | 232 / 232 | 1331 / 1907 / **2209** | 0 / 70,7 / 97,4 | 0 | 6 | 280/830 · 210/464 · 224/571 · 95/345 |
+| WebRTC × 4 sentados durante o transbordo, 330 s (rede do Mac ruim: fim da fala → VAD 1186 ms p50 contra 848) | 89 / 89 | 1732 / 2363 / 3500 | — | 2 | 0 | — |
+
+0 falhas, 0 truncados, `tts_retries` 0, `deadline_missed` 0 em 632 turnos. Alvo do dono: p50 < 1 s **não** (1036 ms no WS;
+a janela de silêncio sozinha são 700 ms); máximo ≤ 2500 ms **sim no WS** (1980), no WebRTC salvo os 2 turnos de subida
+atrasada.
+
+### 2 — sessões longas e `LLM_SLOT_CTX` 4096
+
+- A rodada WS de 840 s: 62, 62, 61 e 58 turnos na MESMA sessão, 243 / 243 respondidos. Log do llama.cpp: `n_slots = 16,
+  n_ctx_slot = 4096`; nenhuma linha `exceed`; o maior pedido teve 2768 tokens. `/health` ao fim: `chat` 243 / 243,
+  `speech` 660 / 660, `stt.oom_retries` 0. Com o edge `d4a160e4` a 2048 a mesma sessão morria no 26º turno.
+- **Cortes de histórico: 0, porque a 4096 uma sessão de 15 min (o limite do edge) não chega ao teto.** O corte em si
+  não foi exercitado ao vivo: semear histórico esbarra nos 6 kB da configuração, a réplica Vast (2048) caiu aos 2 min da
+  rodada longa, e a telemetria do edge não chega a um gateway atrás de NAT. Fica com o teste de unidade de #58.
+- **Persona:** não conferida por texto (o harness guarda só a contagem de caracteres; `KEEP_TEXT=1` foi adicionado mas a
+  rodada que o usaria foi a recusada pelos 6 kB). Sinal indireto: áudio por caractere e tamanho de resposta estáveis do
+  1º ao 61º turno.
+- **Custo do histórico longo:** o primeiro token do LLM sobe com o turno — p50 137 ms (turnos 0–9), 236 (20–29), 386
+  (40–49) — e as 14 aberturas da rodada estão todas depois do 30º turno (resposta até 3441 ms, primeiro som ≤ 1915).
+- **VRAM a 4096: não medida.** Sem SSH (porta 22 fechada), `/health` não traz memória e as linhas `gpu used … MiB` do
+  `start.sh` vão para o stdout do contêiner, fora do `/debug/logs`. O que se viu: vLLM-Omni reservou 11,54 GiB (0,26 de
+  44,39), o llama.cpp subiu depois com 16 × 4096, o Whisper carregou, e 3160 sínteses + 1292 clipes de STT em lote de 8
+  rodaram com `oom_retries` 0 e 1 síntese falha. A conta fica como estava: 28,2 GB medidos a 2048 + ~4,7 GB estimados =
+  ~33 de 46 GB. **4096 funciona (3 boots, 2 h de carga, 16 slots usados); a margem em GB segue estimada** — para fechar,
+  o `/health` da stack precisa expor `nvidia-smi` (mudança de imagem).
+
+### 3 — segunda réplica no Vast pela imagem pública
+
+- **Caminhada.** Com um L40S meu e um da produção (cota 2), o pedido da 2ª réplica: `quota reached for L40S-1-48G on
+  scaleway … skipping the machine type` → `vast RTX 5090 (≤ €0.57/h) … offer 1 of 5: Estonia`. Mais tarde, com estoque e
+  cota livres, a mesma caminhada trouxe um 2º L40S (500 s), como previsto. Na terceira tentativa o Vast foi **forçado**:
+  `maxEurPerHour: 1` no spec (`L40S-1-48G costs €1.469916/h in fr-par-2, above maxEurPerHour €1; L40S-1-48G is not sold in
+  fr-par-1`) e `maxRttExcessMs: 200`, `bootTimeoutMinutes: 35`.
+
+| Aluguel | Onde, US$/h com disco | O que houve |
+|---|---|---|
+| 54909146, 22:39:50 | Estônia, 0,577 | 20 min em `starting` sem endereço (pull) → `boot-timeout`, solta |
+| 54911378, 23:00:04 | Suécia, ~0,53 | endereço aos 11 min 16 s; portão: 200 ms contra 62 da âncora, +138 → `too-far`, solta |
+| 54914223, 23:25:24 | Itália, 0,604 | endereço aos 17 min 25 s; portão 110 contra 46, +64 (aceito pelo limite relaxado); **`ready` aos 25 min 39 s** (`bootMs` 1539229) |
+
+- **`start.sh` recebeu `TTS_MODEL` / `LLM_FILE`:** a stack subiu e respondeu (o risco do `set -u` não se confirmou, com
+  as duas variáveis no env do tipo `RTX 5090`). Edge de `/opt/aigw-edge` da imagem. Sonda: `udpInbound ok`, 65 ms,
+  `path=direct` — este host encaminha UDP.
+- **Alunos no Vast** (admissão: 4 dos 13 alunos WS com tempo de pensar caíram nela): rodada 1, 58 turnos, p50 933, p95
+  1164, max 1215 ms, 0 falhas; rodada 2, 35 turnos, p50 929, p95 1354, max 1570 até a réplica cair. **WebRTC no Vast não
+  foi medido** (os alunos aiortc foram admitidos no L40S). O rótulo «por réplica» do harness é o que vale aqui; a
+  telemetria do gateway confirma 4 admissões em `54914223` em cada rodada.
+- **Volta ao Scaleway:** enquanto as duas estavam de pé a admissão pôs 13 no L40S e 4 no Vast nas duas rodadas (o L40S
+  tinha 16 assentos nesse momento, ver «Capacidade»). Com o teto de produção (4) isso não foi repetido.
+- **Fim:** 00:01:18 `replica unreachable`, `unhealthy`, liberada; novo aluguel recusado: `insufficient_credit`.
+
+### 4 — transbordo no fallback composto (enquanto a réplica Vast subia)
+
+4 alunos WebRTC sentados (réplica cheia), 4 alunos no degrau de clipe (`--s2s 4 --no-wake`, 110 s, um turno a cada 8 ± 2
+s). Relógio: do fim da fala (pedido − 700 ms).
+
+| Rota STT | Turnos | Falhas | Primeiro som (abertura) p50 / max | Resposta p50 / p95 / max | Estágio STT p50 / p95 / max | Quem serviu |
+|---|---|---|---|---|---|---|
+| 1 elo: `openrouter:openai/whisper-large-v3-turbo` | 43 | 4 `stt_503` aos 8,0 s do pedido (orçamento da rota, não o de 3 s) | 1702 / 1744 | 5813 / 14966 / 16729 | 2646 / 6894 / 6986 | whisper turbo 39 |
+| 2 elos: `deepgram/nova-3` → `openai/whisper-large-v3` | 52 | 0 | 1702 / 1727 | 3958 / 5160 / 5747 | 1385 / 2210 / 2624 | nova-3 50 (41 depois de hedge), whisper 2; 42 `route.hedge` |
+
+A guarda está certa: com um elo ninguém falhou aos 3 s (STT de até 6,9 s foi respondido); com dois, hedge e nenhuma
+falha. LLM: primeiro token p50 770–865 ms (p95 até 7004 com um elo); voz: 860–1053 ms.
+
+### 5 — teto no relógio do aluno (#59)
+
+Chrome, WS, um aluno, 110 s, a cada 3ª fala o áudio fica retido 3 s (`--uplink-stall 3000`). As rodadas com
+`ws,s2s-stream` do comando do PR não terminaram (harness preso na coleta, duas vezes); estas são só `ws`.
+
+| | Turnos travados, primeiro som audível | Outros turnos |
+|---|---|---|
+| sem `--client-deadline` | 3559 · 3699 ms | 1073–1407 ms, 5 de 5 respondidos |
+| com `--client-deadline` | **2016 · 2036 · 2037 ms** (`turn.first_sound` `client_opener` aos 2004–2014), abertura local até ~3,82 s, resposta recebida aos 3492–3994 ms, nenhuma abertura do servidor no turno | 926 · 1302 ms; **3 de 5 `interrupted`** |
+
+O teto cumpre o que promete. Os 3 turnos perdidos: `vad end` → `interrupted` → `done{interrupted}` → `done{empty}` no
+mesmo instante, sem transcrição. Não acontece sem a opção. Não investigado.
+
+### 6 — scale-in
+
+- **Antes do conserto:** ver a tabela de defeitos (30 s, 2 alunos derrubados, 5 turnos perdidos).
+- **Depois (`91a5621`), 23:20:56:** um aluno em cada L40S, `maxReplicas` 2 → 1. `draining replica` (d01fc5d1) às
+  21:20:57Z; `drain: true` em toda leitura por 138 s; a sessão do aluno acabou às ~21:23:10Z; `releasing replica …
+  scale-down` às 21:23:15Z. O aluno dela: 11 / 11 turnos, p50 930, max 1019 ms. A réplica vazia do primeiro caso também
+  foi liberada. O timeout de dreno (30 min) e a liberação por ociosidade (≥ tempo de boot) não foram esperados.
+
+### 7 — modo `fast` e `/capacity`
+
+| Momento | `/capacity` | Decisão do autoscaler |
+|---|---|---|
+| 22:16, 1 réplica ociosa, `maxReplicas` 1 | L40S teto 4 `configured`, boot 516 s `measured` (1) | `desired 1`; com 4 sentados: `fast: one spare replica at load 6 (maxReplicas 1)` — quer a folga, o teto do spec segura |
+| 22:18, 4 sentados, `maxReplicas` 2 | idem | pedida no 3º assento: `fast: one spare replica at load 4.5`; criada às 22:17:46, pronta em 500 s |
+| 22:26, 8 sentados em 2 | boot 500 s (2) | `desired 2`, `fast: one spare replica at load 12 (maxReplicas 2)` |
+| 22:41, 4 sentados + 4 no fallback, Vast subindo | + linha `RTX 5090` teto 4, boot 600 s `default` | `fallback took 0 load-minutes above capacity 12 (fast: any excess) ≥ €0.16 for one replica start`, `scalingOut: true` |
+| 23:59, 13 no L40S (16 assentos) + 4 no Vast | L40S teto 16, boot 508 s; RTX 5090 boot **1539 s `measured`** | `fast: one spare replica at load 24.8 (maxReplicas 2)` |
+
+As decisões seguem o teto de sessões que `/capacity` publica (folga pedida a 75 % de uma réplica). O teto continua
+`configured` com `samples: 0`: nada do que foi medido esta noite virou teto medido.
+
+### WS × WebRTC: onde fica a diferença
+
+Mesma réplica (L40S), mesmo clipe, mesma hora: 4 alunos WS (Mac) e 4 WebRTC (aiortc) **ao mesmo tempo**, 200 s. Tempos
+do harness e do edge já existentes; a única instrumentação nova foi deixar o cliente aiortc guardar
+`first_sound_from_speech_ms` do evento `metrics` (`load_rtc.py`). ms, p50 (p95):
+
+| Trecho | WS (n 56) | WebRTC aiortc (n 55) | Diferença p50 |
+|---|---|---|---|
+| (a) fim da fala do aluno → o edge decide o fim do turno, visto no cliente | 751 (799) | 853 (1059) | **+102** |
+| — janela de silêncio no edge (VAD do servidor nos dois, `RT_VAD_SILENCE_MS` 700) | 702 (726) | 700 (716) | 0 |
+| — o resto: subida + buffer / decodificação até o VAD ouvir o fim | 48 (114) | 156 (355) | **+108** |
+| (b) STT | 333 (478) | 349 (552) | +16 |
+| (c) primeiro token do LLM | 185 (500) | 186 (480) | 0 |
+| (d) primeiro PCM do TTS | 107 (351) | 119 (283) | +12 |
+| (b–d) `ttfa` do edge | 341 (1971) | 395 (948) | +54 |
+| (e + f) evento `audio_start` → primeiro áudio não silencioso no cliente | 0 (48) | 167 (410) | **+167** |
+| **Total, primeiro som** | **1107 (1742)** | **1462 (1945)** | **+355** |
+
+- A diferença está nas duas pontas do transporte, não na GPU: **~110 ms na subida** (o fim da fala chega mais tarde ao
+  VAD) e **~170 ms na descida** (do primeiro PCM no edge ao primeiro quadro audível). Os estágios são iguais.
+- (e) e (f) não se separam com o que existe: o edge não carimba «primeiro pacote RTP enviado». No Chrome real, 1 aluno:
+  `audio_start` → audível 268 ms p50 (p95 581) no WebRTC contra 24 ms (p95 226) no WS, isto é, o jitter buffer / playout
+  do navegador pesa mais que o do aiortc. `getStats` (`jitterBufferDelay`, `totalProcessingDelay`, RTT) não é coletado
+  pelo harness: não medido.
+- As rodadas de 840 s com 4 alunos, uma depois da outra: WS 1051, WebRTC 1331 (+280: (a) +96, `ttfa` +2, (e + f) +169).
+  Com 1 aluno (n 9 e 8, rede do Mac ruim naquele minuto): 1093 contra 1533; a subida somou 188 e 466 ms.
+
+### Capacidade com tempo de pensar
+
+**O que o harness fazia:** a resposta é entregue em tempo real (6,9 s de áudio em 6,9 s), mas o aluno voltava a falar
+**1,0 s depois do fim dela** (mediana, rodadas do item 1): 90 % do tempo de sessão com turno em curso. O «4 por L40S»
+veio daí. **Opção nova** (`a227dc8`, com teste): `--think 2-6` — ouve a resposta até o fim, espera um tempo uniforme
+semeado e então fala.
+
+Um L40S com `RT_MAX_SESSIONS=16` só no spec do teste (o perfil não mudou), WS, `--think 2-6`, 300 s por nível:
+
+| Alunos | Turnos ok / tentados | Primeiro som p50 / p95 / max | **Áudio da resposta** p50 / p95 / max | Turnos com abertura | `deadline_missed` | Respostas em curso ao mesmo tempo (pico) | Tempo com turno em curso | Edge `ttfa` p50 / p95 · stt · llm |
+|---|---|---|---|---|---|---|---|---|
+| 4, sem pensar (item 1) | 243 / 243 | 1051 / 1746 / 1915 | 1051 / 2794 / 3441 | 14 (6 %) | 0 | 4 | 90 % | 278 / 1847 · 209 · 211 |
+| **8** | 140 / 140 | 1131 / 1743 / 2008 | 1130 / **1726** / 3200 | 1 (1 %) | 0 | 7 | 74 % | 251 / 824 · 212 · 177 |
+| **12** | 214 / 215 (1 erro de upstream depois do áudio) | 1259 / 1763 / 1846 | 1259 / 2948 / 3495 | 21 (10 %) | 0 | 10 | 74 % | 455 / 1982 · 363 · 251 |
+| **16** | 245 / 276 (31 `short_audio`, todos sem abertura) | 1448 / 1774 / 1973 | 1443 / 3477 / 3527 | 85 (31 %) | 0 | 13 | 75 % | 676 / 2524 · 396 · 334 |
+
+- **Primeiro som** (abertura ou resposta): máximo ≤ 2500 ms e p95 ≤ 2000 ms nos três níveis — 16 é o maior N medido
+  que cumpre. **p50 < 1000 ms: em nenhum** (nem com 4). É a abertura que segura o teto: a 16, um turno em três começa
+  por «Só um instante» e a resposta vem aos 3,5 s; 11 % das respostas saíram curtas.
+- **Pela resposta de verdade** (p95 ≤ 2000 ms, quase sem abertura): **8 por L40S**. 12 é o limite defensável se uma
+  abertura em cada 10 turnos for aceita.
+- Tempo de pensar muda pouco a ocupação: de 90 % para 74 % do tempo com turno em curso (a resposta de ~7 s em tempo
+  real e a fala de 4,5 s são o grosso do ciclo de ~17 s). O ganho de 4 para 8–12 vem mais de aceitar que o teto é do
+  primeiro som com abertura do que do tempo de pensar.
+- GPU e VRAM: sem acesso (item 2). «Em curso ao mesmo tempo» sai dos intervalos fim da fala → fim do áudio no cliente,
+  não de métrica do edge.
+
+| | Alunos por máquina | Custo por aluno-hora |
+|---|---|---|
+| L40S €1,47/h, teto atual | 4 | €0,37 |
+| L40S, resposta p95 ≤ 2 s | 8 | **€0,18** |
+| L40S, abertura em 10 % dos turnos | 12 | €0,12 |
+| L40S, abertura em 31 % e 11 % de respostas curtas | 16 | €0,09 |
+| RTX 5090 Vast US$0,55–0,60/h (medido só com 4: p50 933, max 1570) | 4 | US$0,14–0,15 |
+| Fallback composto | — | ~US$0,48 |
+
+**Os tempos de pensar são simulados** (uniforme 2–6 s, semente fixa, um clipe só de 4,5 s, resposta sempre ouvida até
+o fim). Para calibrar: dos registros por turno da escola, a distribuição real de (fim do áudio da resposta → início da
+fala seguinte), a duração das falas e das respostas, e quantos alunos falam no mesmo minuto numa aula.
+
+**`endpoint_ms` 500 em vez de 700: não rodado.** A janela é `RT_VAD_SILENCE_MS` do edge, lida no boot (precisaria de
+outra réplica), e o único clipe não tem pausa interna: cortes precoces não poderiam ser julgados.
+
+### Estado das máquinas e custo
+
+`DELETE /v1/deployments/proof-speech` às 00:07:07 → `Terminated server 6c4028ff…`. Gateway local parado 00:07:48. Reaper
+em dry run com o gateway fora (`GATEWAY_URL=http://localhost:4150 DEPLOYMENTS_NAMESPACE=marcos-proof-final bun
+scripts/reap-orphans.ts`): `scaleway seen: 0`, `vast seen: 0`, `planned: []`. Lista direta do projeto Scaleway (nove
+zonas): nenhum servidor `aigw-ns-marcos-proof-final`. O que resta lá não é desta prova: um L40S `aigw-ns-prod`
+(`parle-speech`, criado 21:37Z — a produção acordou o `parle-speech` três vezes na noite, 20:35Z, 20:45Z, 21:37Z, e os
+dois L4 do `parle-qwen-tts` às 20:38Z) e dois `whisper-stt` parados de `dev-marmos`. Nunca mais de 2 L40S + 1 Vast meus;
+nenhum L4; nada escrito em produção. Enquanto a produção tinha um L40S, a cota (2) recusou o meu segundo: a prova e a
+produção disputam a mesma cota.
+
+| | Minutos | Preço | Total |
+|---|---|---|---|
+| 4 L40S (21:51–22:33, 22:17–23:24, 23:11–23:23, 23:24–00:07) | 162 | €1,4699/h | ~€3,98 |
+| Vast: Estônia 20 min, Suécia 11 min, Itália 36 min | 67 | US$0,53–0,60/h | ~US$0,66 |
+| OpenRouter (95 turnos de fallback, falas do `--client-deadline`) | | | ~US$0,25 |
+
+### GO / NO-GO
+
+**Merge do PR #56: GO**, com os dois consertos desta noite (`9f8d49c`, `91a5621`) já na branch. O caminho de produção —
+imagem 1317 no L40S, edge `f66b6b80`, 4 alunos, sessão longa, transbordo com a guarda do STT, scale-in — foi provado.
+
+**Deploy do gateway: GO condicionado**, nesta ordem:
+
+1. O deploy sai do `main` com `9f8d49c` (sem ele o L40S sobe o edge antigo e toda conversa morre no 26º turno) e
+   `91a5621`.
+2. **Contar só com o Scaleway.** O lugar Vast do `parle-speech` declarado já é pulado em produção (o registro tem
+   `files`); deixar assim até: crédito na conta Vast, `bootTimeoutMinutes` ≥ 35 para o lugar Vast (ou imagem menor) e
+   uma decisão sobre o portão de RTT depois do pull.
+3. **Não ligar o prazo do cliente (#59) na escola** antes de entender os turnos `interrupted` do item 5.
+4. `LLM_SLOT_CTX=4096` fica fora do `parle-speech` declarado até haver a leitura de VRAM (funcionou; a margem é
+   estimativa).
+5. Não mexer no teto de 4 sessões por L40S no deploy. 8 é a proposta para a próxima medição, com tempos reais da turma.

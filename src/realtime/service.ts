@@ -156,7 +156,7 @@ export class RealtimeService {
       if (!this.opts.controller?.specOf(d.name)?.realtime) continue;
       const token = this.opts.controller.tokenOf(d.name);
       if (!token) continue;
-      for (const r of this.readyReplicas(d.name)) {
+      for (const r of this.readyReplicas(d.name, true)) {
         const s = await this.status.get(r.id, r.base, token);
         if (!s.ok) continue;
         reportExternalLoad(d.name, r.id, s.status.active, s.status.max, this.now());
@@ -258,12 +258,12 @@ export class RealtimeService {
   }
 
   /** Ready replicas of a deployment with their base URL (secrets stay here). */
-  private readyReplicas(dep: string): Array<{ id: string; base: string; stagesOut: string[] }> {
+  private readyReplicas(dep: string, draining = false): Array<{ id: string; base: string; stagesOut: string[] }> {
     const view = this.opts.controller?.get(dep);
     if (!view) return [];
     const exposed = !!this.opts.controller?.specOf(dep)?.exposure;
     return view.replicas
-      .filter(r => r.phase === 'ready' && !r.draining && r.ip)
+      .filter(r => r.phase === 'ready' && (draining || !r.draining) && r.ip)
       .map(r => ({ id: r.id, base: replicaBase({ ip: r.ip } as never, exposed), stagesOut: r.stagesOut ?? [] }));
   }
 
@@ -449,7 +449,7 @@ export class RealtimeService {
       const token = this.opts.controller?.tokenOf(dep);
       if (!token) continue;
       let active = 0;
-      for (const r of this.readyReplicas(dep)) {
+      for (const r of this.readyReplicas(dep, true)) {
         const s = await this.status.get(r.id, r.base, token, { fresh: true });
         if (!s.ok) continue;
         reportExternalLoad(dep, r.id, s.status.active, s.status.max, this.now());
