@@ -398,7 +398,7 @@ describe('vastReplicaInit', () => {
     expect(env).toContain("export EDGE_UPSTREAM='http://127.0.0.1:8010'\n");
     expect(env).toContain(`export AIGW_REPLICA_TOKEN='${TOKEN}'\n`);
     expect(env).toContain("export GATEWAY_URL='https://gw.example'\n");
-    const sourced = spawnSync('bash', ['-c', 'set -a; . /dev/stdin; printf %s "$EDGE_LLM_MODEL"'], { input: env });
+    const sourced = spawnSync('bash', ['-c', 'set -a; eval "$(cat)"; printf %s "$EDGE_LLM_MODEL"'], { input: env });
     expect(sourced.stdout.toString()).toBe("it's");
   });
 
