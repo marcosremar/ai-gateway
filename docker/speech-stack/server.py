@@ -55,6 +55,8 @@ TTS_PARALLEL = int(os.environ.get("TTS_PARALLEL", "2"))
 FIRST_MIN_WORDS = int(os.environ.get("FIRST_MIN_WORDS", "3"))
 MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "160"))
 SAMPLE_RATE = 24000
+TTS_MAX_SECONDS = float(os.environ.get("TTS_MAX_SECONDS", "3"))
+TTS_MAX_SECONDS_PER_CHAR = float(os.environ.get("TTS_MAX_SECONDS_PER_CHAR", "0.2"))
 REFS = Path("/srv/refs")
 FILES = Path("/files")
 
@@ -294,12 +296,17 @@ async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) 
     as they decode with `stream: true` + `stream_format: "audio"` (pcm/wav only)."""
     body = {"model": TTS_MODEL, "input": text, "task_type": "Base", "language": language, "ref_audio": voice["audio"],
             "ref_text": voice["text"], "response_format": "pcm", "stream": True, "stream_format": "audio"}
+    limit = TTS_MAX_SECONDS + TTS_MAX_SECONDS_PER_CHAR * len(text)
+    sent = 0
     try:
         async with client.stream("POST", f"{TTS_URL}/v1/audio/speech", json=body) as res:
             if res.status_code != 200:
                 raise RuntimeError(f"tts http {res.status_code}: {(await res.aread())[:200]!r}")
             async for chunk in res.aiter_bytes():
                 if chunk:
+                    sent += len(chunk)
+                    if sent > limit * SAMPLE_RATE * 2:
+                        raise RuntimeError(f"tts runaway: over {limit:.1f} s of audio for {len(text)} characters")
                     await out.put(chunk)
     except Exception as error:
         await out.put(error)
@@ -442,6 +449,8 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         return (json.dumps({"type": "audio", "pcm": base64.b64encode(chunk).decode()}) + "\n").encode() if ndjson \
             else frame(b"A", chunk)
 
+    tasks: list[asyncio.Task] = []
+
     async def run():
         try:
             heard = await asyncio.to_thread(transcribe_sync, audio, lang, cfg.get("stt_prompt"))
@@ -493,15 +502,24 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                 async def synth():
                     async with gate:
                         await tts_stream(text, LANGUAGE.get(lang, "Portuguese"), voice, queue)
-                asyncio.create_task(synth())
+                tasks.append(asyncio.create_task(synth()))
                 await sentences.put((text, queue, ms()))
 
-            thinker = asyncio.create_task(think())
+            async def think_or_fail():
+                try:
+                    await think()
+                except Exception as error:  # noqa: BLE001
+                    await sentences.put(error)
+
+            thinker = asyncio.create_task(think_or_fail())
+            tasks.append(thinker)
             first_audio = None
             while True:
                 item = await sentences.get()
                 if item is None:
                     break
+                if isinstance(item, Exception):
+                    raise item
                 if item[0] == "__event__":
                     yield event(item[1])
                     continue
@@ -524,6 +542,9 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                          **({"reply_raw": "".join(raw)} if field is not None else {})})
         except Exception as error:  # noqa: BLE001 — the stream already started: report in-band
             yield event({"type": "error", "message": repr(error)[:300], "at_ms": ms()})
+        finally:
+            for task in tasks:
+                task.cancel()
 
     return StreamingResponse(first_audio_deadline(run(), state, cfg, voice, lang, ms, event, pcm), media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
                              headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
