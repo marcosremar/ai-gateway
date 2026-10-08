@@ -47,7 +47,18 @@ export const RTT_SAMPLE_TIMEOUT_MS = 2_000;
 /** Median RTT (ms) to host:port counting only real response bytes, or null. Injectable for tests. */
 export type RttMeasure = (host: string, port: number) => Promise<number | null>;
 
-const defaultRtt: RttMeasure = async (host, port) => (await probeRtt(host, [port], RTT_SAMPLES, RTT_SAMPLE_TIMEOUT_MS)).medianMs;
+export const RTT_ROUNDS = 3;
+
+export async function lowestRtt(sample: () => Promise<number | null>, rounds = RTT_ROUNDS): Promise<number | null> {
+  let lowest: number | null = null;
+  for (let i = 0; i < rounds; i++) {
+    const ms = await sample();
+    if (ms != null && (lowest == null || ms < lowest)) lowest = ms;
+  }
+  return lowest;
+}
+
+const defaultRtt: RttMeasure = (host, port) => lowestRtt(async () => (await probeRtt(host, [port], RTT_SAMPLES, RTT_SAMPLE_TIMEOUT_MS)).medianMs);
 
 /** Offers tried per create (a rented-in-between offer answers "not available"); more would only slow the walk. */
 export const MAX_RENT_TRIES = 5;

@@ -10,7 +10,7 @@ import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
 import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
 import {
-  BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, MIN_RELIABILITY, TOO_FAR_HOST_MS,
+  BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, lowestRtt, MIN_RELIABILITY, TOO_FAR_HOST_MS,
   VastDeploymentBackend, vastState,
 } from '../../../src/deployments/vast-backend';
 import type { DeploymentSpec } from '../../../src/deployments/types';
@@ -45,6 +45,20 @@ const offers = [
   // Over the cap (the API filter is not trusted): never rented.
   { id: 4, machine_id: 104, geolocation: 'Paris, FR', dph_total: 0.90, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 5090' },
 ];
+
+describe('lowestRtt', () => {
+  it('keeps the lowest round, so jitter on the gateway link does not release a near host', async () => {
+    const rounds = [70, 47, 52];
+    expect(await lowestRtt(async () => rounds.shift() ?? null)).toBe(47);
+    expect(rounds).toEqual([]);
+  });
+
+  it('ignores rounds without an answer and is null when none answered', async () => {
+    const rounds: Array<number | null> = [null, 61, null];
+    expect(await lowestRtt(async () => rounds.shift() ?? null)).toBe(61);
+    expect(await lowestRtt(async () => null)).toBeNull();
+  });
+});
 
 describe('VastDeploymentBackend', () => {
   it('searches with the cap in USD, reliability, direct port and GPU; rents the French offer with the namespace label', async () => {

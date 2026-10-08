@@ -473,7 +473,8 @@ With `candidates`, each create walks a **ranked ladder**:
 
 Distance is only a prior; a fresh Vast replica is **measured**. Once it has an address (its nginx front answers
 before the app is ready), the controller asks the backend for the RTT (`measureRtt`: `src/gateway/providers/gpu/rtt-probe.ts`
-on the mapped port, 5 samples × 2 s, median, counting only real response bytes) and, in the same tick, for a
+on the mapped port, 3 rounds of 5 samples × 2 s, the lowest round's median — the samples of a round leave together,
+so jitter on the gateway's own link lifts all of them and only the lowest round is the path — counting only real response bytes) and, in the same tick, for a
 **baseline**: the same probe against a fixed anchor in the `near` country (`RTT_ANCHORS`: Scaleway's S3 endpoint
 there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `s3.pl-waw.scw.cloud` for PL).
 
