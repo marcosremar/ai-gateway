@@ -11,7 +11,7 @@ POST /v1/s2s       multipart: `file` (audio, any ffmpeg/PyAV format) + `config` 
                    Response `application/x-aigw-s2s`: frames of [1 byte kind][4 bytes big-endian length][payload]
                      kind "E" = JSON event (transcript, sentence, timing, opener, deadline_missed, done, error), kind "A" = raw PCM s16le mono
                      24 kHz. No base64 on the hot path. `?format=ndjson` gives JSON lines (audio as base64) for debugging.
-                   A turn ends with `done` {sentences, spoken, skipped, audio_ms, tts_retries, …} or with `error` {stage: stt|llm|tts,
+                   A turn ends with `done` {sentences, spoken, skipped, audio_ms, tts_retries, tts_overlong, …} or with `error` {stage: stt|llm|tts,
                      code: stage_failed|upstream_stalled, unspoken?}: a stage that raises, sends nothing for
                      S2S_MAX_GAP_S (8) or keeps the turn past S2S_DEADLINE_S (40) ends it in-band, never silently.
 POST /v1/audio/transcriptions   OpenAI-shaped STT (multipart `file`, `language`, `prompt`).
@@ -76,6 +76,7 @@ TTS_MAX_SECONDS = float(os.environ.get("TTS_MAX_SECONDS", "3"))
 TTS_MAX_SECONDS_PER_CHAR = float(os.environ.get("TTS_MAX_SECONDS_PER_CHAR", "0.2"))
 TTS_MAX_LEAD_SECONDS = float(os.environ.get("TTS_MAX_LEAD_SECONDS", "1"))
 TTS_SILENCE_RMS = 300
+TTS_OVERLONG_RATIO = 0.9
 TTS_FRAMES_PER_SECOND = 12.5
 REFS = Path("/srv/refs")
 FILES = Path("/files")
@@ -373,11 +374,14 @@ def silent(chunk: bytes) -> bool:
     return not len(samples) or float(np.sqrt(np.mean(samples ** 2))) <= TTS_SILENCE_RMS
 
 
-async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) -> int:
+async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue, stats: dict | None = None) -> int:
     """Raw PCM s16le 24 kHz chunks of one sentence into `out`, then None; returns how many times it started over.
     vLLM-Omni streams the Code2Wav chunks as soon as they decode with `stream: true` + `stream_format: "audio"`
-    (pcm/wav only)."""
+    (pcm/wav only). A sentence that was heard and runs to its cap (the engine's `max_new_tokens` stop, which ends the
+    stream as an error, or more audio than the cap) is cut there and counted in `stats["tts_overlong"]`: the turn goes
+    on. It is not asked again (the learner already heard part of it) and nothing is held to detect it earlier."""
     limit = TTS_MAX_SECONDS + TTS_MAX_SECONDS_PER_CHAR * len(text)
+    limit_bytes = int(limit * SAMPLE_RATE) * 2
     body = {"model": TTS_MODEL, "input": text, "task_type": "Base", "language": language, "ref_audio": voice["audio"],
             "ref_text": voice["text"], "response_format": "pcm", "stream": True, "stream_format": "audio",
             "max_new_tokens": math.ceil(limit * TTS_FRAMES_PER_SECOND)}
@@ -386,7 +390,7 @@ async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) 
             request_id = uuid.uuid4().hex[:12]
             body["extra_params"] = {"request_id": request_id}
             held: list[bytes] = []
-            sent, spoke, started, outcome = 0, attempt == 1, time.time(), "ok"
+            sent, spoke, heard, started, outcome = 0, attempt == 1, False, time.time(), "ok"
             try:
                 async with client.stream("POST", f"{TTS_URL}/v1/audio/speech", json=body) as res:
                     if res.status_code != 200:
@@ -395,23 +399,32 @@ async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) 
                         if not chunk:
                             continue
                         sent += len(chunk)
-                        if sent > limit * SAMPLE_RATE * 2:
-                            raise RuntimeError(f"tts runaway: over {limit:.1f} s of audio for {len(text)} characters")
+                        if sent > limit_bytes:
+                            if not heard:
+                                raise RuntimeError(f"tts runaway: over {limit:.1f} s of audio for {len(text)} characters")
+                            await out.put(chunk[:len(chunk) - (sent - limit_bytes)])
+                            outcome = "overlong"
+                            break
                         if not spoke and sent > len(chunk) and silent(chunk):
                             held.append(chunk)
                             if sent > TTS_MAX_LEAD_SECONDS * SAMPLE_RATE * 2:
                                 outcome = "retry: silent lead"
                                 break
                             continue
-                        spoke = spoke or not silent(chunk)
+                        heard = heard or not silent(chunk)
+                        spoke = spoke or heard
                         for item in (*held, chunk):
                             await out.put(item)
                         held.clear()
                 if outcome == "ok":
                     for item in held:
                         await out.put(item)
+                if outcome in ("ok", "overlong"):
                     return attempt
             except Exception as error:
+                if heard and sent >= TTS_OVERLONG_RATIO * limit_bytes:
+                    outcome = "overlong"
+                    return attempt
                 outcome = ("retry: " if not spoke else "") + repr(error)[:160]
                 if spoke:
                     raise
@@ -419,6 +432,8 @@ async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) 
                 print("tts", request_id, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)), f"chars={len(text)}",
                       f"max_new_tokens={body['max_new_tokens']}", f"audio_s={sent / 2 / SAMPLE_RATE:.2f}",
                       f"ms={round((time.time() - started) * 1000)}", f"outcome={outcome}", flush=True)
+                if outcome == "overlong" and stats is not None:
+                    stats["tts_overlong"] = stats.get("tts_overlong", 0) + 1
     except Exception as error:
         await out.put(error)
         raise
@@ -560,7 +575,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         return (json.dumps({"type": "audio", "pcm": base64.b64encode(chunk).decode()}) + "\n").encode() if ndjson \
             else frame(b"A", chunk)
 
-    state = {"stage": "stt", "voiced": 0, "partial": False, "audio_bytes": 0, "tts_retries": 0}
+    state = {"stage": "stt", "voiced": 0, "partial": False, "audio_bytes": 0, "tts_retries": 0, "tts_overlong": 0}
     reply: list[str] = []
     tasks: list[asyncio.Task] = []
     turns["started"] += 1
@@ -638,7 +653,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
 
                 async def synth():
                     async with gate:
-                        state["tts_retries"] += await tts_stream(text, LANGUAGE.get(lang, "Portuguese"), voice, queue)
+                        state["tts_retries"] += await tts_stream(text, LANGUAGE.get(lang, "Portuguese"), voice, queue, state)
                 tasks.append(asyncio.create_task(synth()))
                 await sentences.put((text, queue, ms()))
 
@@ -682,6 +697,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
                          "first_audio_ms": first_audio, "total_ms": ms(), **sound,
                          "sentences": len(reply), "spoken": state["voiced"], "skipped": len(reply) - state["voiced"],
                          "audio_ms": round(state["audio_bytes"] / 2 / SAMPLE_RATE * 1000), "tts_retries": state["tts_retries"],
+                         "tts_overlong": state["tts_overlong"],
                          "stages": stage_times(heard, heard_at, marks.get("first_token"), marks.get("first_cut"), first_audio, timings),
                          **({"reply_raw": "".join(raw)} if field is not None else {})})
         except Exception as error:  # noqa: BLE001 — the stream already started: report in-band

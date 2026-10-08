@@ -47,8 +47,15 @@ other value → `403`. The same rule holds for every app-scoped route added late
   "<ISO time>"}}` (a realtime session: `error.code: "budget_exceeded"` plus top-level `reason`, `budget`, `reset_at`).
   It is not the per-minute rate limit (`rate_limit_error`): retrying before `reset_at` cannot succeed, so a client
   shows "limit reached" and stops. `0` turns one off.
-- **Sizing the budget for a class.** Both limits are gateway-wide settings applied to each app (there is no per-app
-  value): size them for the largest app. A `/v1/s2s` turn costs one request and `prompt characters / 4 + max_tokens`
+- **Sizing the budget for a class.** Both limits are gateway-wide defaults, meant for a leaked key; an admin gives an
+  app its own daily budgets with `PUT /v1/apps/:app/limits {"dailyRequests": n, "dailyTokens": n}` (`null` = the
+  default, `0` = no budget; `GET` shows them, also to the app's own key, which cannot change them). The budget is
+  charged at admission only — an HTTP request, a `/v1/s2s` turn, a realtime session for its whole token — so a reply
+  already admitted is never cut: the learner's NEXT turn (or session) gets the 429 above. Use and projected exhaustion
+  are in `GET /health?details=1` → `appBudgets`; the 80 % and exhaustion events go to the log, to telemetry
+  (`app.budget_warning`, `app.budget_exhausted`) and to `ALERT_WEBHOOK_URL` when set. A realtime session is charged
+  in requests only (its turns run on the app's own GPU replica, not on cloud credit); a session that drops to its
+  `s2s-stream` / `post` transport pays each `/v1/s2s` turn on top of the session charge. A `/v1/s2s` turn costs one request and `prompt characters / 4 + max_tokens`
   tokens, where the prompt is `system` + `messages` + `user_template` and an omitted `max_tokens` counts as
   `APP_MAX_TOKENS` (1024); a realtime session costs `4 × minutes of its token` requests at admission and no tokens.
   `APP_DAILY_TOKENS ≥ students × turns per student per day × tokens per turn` and `APP_DAILY_REQUESTS ≥ students ×

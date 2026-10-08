@@ -147,7 +147,9 @@ measured in `docs/reports/2026-10-07-realtime-handoff.md` § TTS runaway:
 - After its first chunk, a sentence's silent chunks (RMS ≤ 300) are held until sound arrives. Still silent after
   `TTS_MAX_LEAD_SECONDS`, or failed before any sound: the request is dropped and sent again once (new random seed),
   about 0.5 s later at 8 in parallel; the held silence is not played. `done.tts_retries` counts them. A sentence that
-  fails after sound still ends the turn with `error` (stage `tts`).
+  fails after sound still ends the turn with `error` (stage `tts`) — except one that runs to its cap (more audio than
+  `TTS_MAX_SECONDS + TTS_MAX_SECONDS_PER_CHAR × characters`, or the engine's stop at `max_new_tokens` with ≥ 90 % of
+  the cap received): it is cut there, counted in `done.tts_overlong`, logged `outcome=overlong`, and the turn goes on.
 
 ## Conversation history always fits the LLM slot (2026-10-08)
 

@@ -57,12 +57,12 @@ describe('S3: /health shows internals only to keys', () => {
     const res = await fetch(`${base}/health`);
     expect(res.status).toBe(200);
     const text = await res.text();
-    expect(Object.keys(JSON.parse(text)).sort()).toEqual(['status', 'uptimeSeconds', 'version']);
+    expect(Object.keys(JSON.parse(text)).sort()).toEqual(['builtAt', 'commit', 'status', 'uptimeSeconds', 'version']);
     expect(JSON.parse(text).status).toBe('ok');
     expect(text).not.toMatch(/GHCR_READ_TOKEN|parle-speech|stages|connections|noWake/);
     // A key does not change the plain answer (the SDK breaker sends its key on every call).
     expect(Object.keys(await (await fetch(`${base}/health`, { headers: auth(APP) })).json() as object).sort())
-      .toEqual(['status', 'uptimeSeconds', 'version']);
+      .toEqual(['builtAt', 'commit', 'status', 'uptimeSeconds', 'version']);
   });
 
   it('?details=1 needs a key: an app key sees its own aliases only, an admin everything', async () => {
@@ -86,6 +86,8 @@ describe('S3: /health shows internals only to keys', () => {
     expect(admin.warnings).toHaveLength(2);
     expect(admin.connections).toBeDefined();
     expect(admin.noWake).toBeDefined();
+    expect(admin.images.edge).toMatch(/aigw-edge:/);
+    expect(own.images).toBeUndefined();
   });
 
   it('?deep=1: no key 401 (authentication_error), a non-admin key 403 (permission_error), admin 200', async () => {

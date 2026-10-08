@@ -120,7 +120,7 @@ class FakeUpstream:
     async def voice_fields(self, cfg):
         return {"voice": cfg["voice"]}
 
-    async def speak(self, text, cfg, fields, trace_id=None, on_retry=None):
+    async def speak(self, text, cfg, fields, trace_id=None, on_retry=None, on_overlong=None):
         self.calls["tts"] += 1
         self.spoken.append(text)
         self.voices.append(fields)
