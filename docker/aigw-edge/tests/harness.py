@@ -20,7 +20,8 @@ import aiohttp
 from clients import REPLICA_TOKEN, DEFAULT_CFG, RtcLearner, WsLearner, mint
 
 ROOT = Path(__file__).resolve().parents[1]
-UP_PORT, EDGE_PORT, EDGE_S2S_PORT, GW_PORT = 8900, 8920, 8940, 8950
+UP_PORT, EDGE_PORT, EDGE_S2S_PORT, GW_PORT, EDGE_VAST_PORT = 8900, 8920, 8940, 8950, 8970
+VAST_IP, VAST_UDP, VAST_SHIFT = "203.0.113.7", (50061, 50067), -9000
 TRACE = "4bf92f3577b34da6a3ce929d0e0e4736"
 telemetry_batches: list[dict] = []
 results: dict = {"checks": [], "latency": {}}
@@ -225,6 +226,37 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
             check("DELETE session", r.status == 200)
         async with http.get(f"{base}/__aigw/rt/status") as r:
             check("status after delete: 0 active", (await r.json())["active"] == 0)
+    await learner.close()
+
+
+async def scenario_vast(base: str) -> None:
+    lo, hi = VAST_UDP
+    async with aiohttp.ClientSession() as http:
+        async with http.get(f"{base}/__aigw/rt/status") as r:
+            status = await r.json()
+    check("vast: status reports the mapped probe port and PUBLIC_IPADDR", status["probePort"] == hi + VAST_SHIFT
+          and status["net"]["probePort"] == hi + VAST_SHIFT and status["net"]["publicIp"] == VAST_IP, status["net"])
+    learner = await RtcLearner(base).connect(mint())
+    lines = [line.split() for line in learner.answer.get("sdp", "").splitlines() if line.startswith("a=candidate")]
+    media = {port + VAST_SHIFT for port in range(lo, hi)}
+    check("vast: every candidate carries PUBLIC_IPADDR and a mapped media port", learner.status == 200 and lines
+          and all(c[4] == VAST_IP and int(c[5]) in media for c in lines), [(c[4], c[5]) for c in lines] or learner.answer)
+    check("vast: one bind address → one UDP port per session", len({c[5] for c in lines}) == 1)
+    loop = asyncio.get_running_loop()
+    reply = loop.create_future()
+
+    class Probe(asyncio.DatagramProtocol):
+        def datagram_received(self, data, _addr):
+            reply.done() or reply.set_result(data)
+
+    transport, _ = await loop.create_datagram_endpoint(Probe, remote_addr=("127.0.0.1", hi))
+    transport.sendto(b"AIGWP1" + b"n" * 16)
+    echoed = await asyncio.wait_for(reply, 2)
+    transport.close()
+    check("vast: the probe responder answers on the container port behind the mapping", echoed == b"AIGWR1" + b"n" * 16)
+    async with aiohttp.ClientSession() as http:
+        async with http.delete(f"{base}/__aigw/rt/session/{learner.session_id}") as r:
+            check("vast: DELETE session", r.status == 200)
     await learner.close()
 
 
@@ -506,10 +538,13 @@ async def main() -> int:
     # The second edge runs everything in one process (RT_RTC_WORKERS=0) and answers turns through /v1/s2s.
     edge_s2s = start_edge(EDGE_S2S_PORT, EDGE_UPSTREAM_MODE="s2s", RT_UDP_PORTS="50041-50060", RT_RTC_WORKERS="0",
                           EDGE_STT_PARTIALS="1")
-    base, base_s2s = f"http://127.0.0.1:{EDGE_PORT}", f"http://127.0.0.1:{EDGE_S2S_PORT}"
+    edge_vast = start_edge(EDGE_VAST_PORT, RT_UDP_PORTS=f"{VAST_UDP[0]}-{VAST_UDP[1]}", PUBLIC_IPADDR=VAST_IP, RT_UDP_BIND="0.0.0.0",
+                           **{f"VAST_UDP_PORT_{p}": str(p + VAST_SHIFT) for p in range(VAST_UDP[0], VAST_UDP[1] + 1)})
+    base, base_s2s, base_vast = (f"http://127.0.0.1:{p}" for p in (EDGE_PORT, EDGE_S2S_PORT, EDGE_VAST_PORT))
     try:
         await wait_ready(base)
         await wait_ready(base_s2s)
+        await wait_ready(base_vast)
         for scenario in (scenario_tokens, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
                          scenario_capacity, scenario_webrtc):
             await scenario(base)
@@ -520,6 +555,7 @@ async def main() -> int:
         await scenario_reoffer(base_s2s)
         await scenario_race(base_s2s, stages=False)
         await scenario_telemetry(base)
+        await scenario_vast(base_vast)
         if nginx:
             await scenario_nginx()
         else:
@@ -530,7 +566,7 @@ async def main() -> int:
         print("ERROR", repr(error), flush=True)
         return 1
     finally:
-        for proc in (edge, edge_s2s, up, nginx):
+        for proc in (edge, edge_s2s, edge_vast, up, nginx):
             if proc:
                 proc.terminate()
         if nginx_dir:

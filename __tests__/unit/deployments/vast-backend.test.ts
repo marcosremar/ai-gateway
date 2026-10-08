@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { edgeEnv, nginxConfig, RT_EDGE_PORT, VAST_EDGE_DIR, vastEdgeEnv, vastReplicaInit } from '../../../src/deployments/cloud-init';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
+import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
 import { buildSpec, VAST_ENV_MAX_BYTES } from '../../../src/deployments/spec';
 import {
   BAD_HOST_MS, EUR_TO_USD, LIST_CACHE_MS, LIST_STALE_MAX_MS, MIN_RELIABILITY, TOO_FAR_HOST_MS, VastDeploymentBackend, vastState,
@@ -334,7 +335,8 @@ describe('vastReplicaInit', () => {
     const spec = realtimeSpec();
     const vast = vastEdgeEnv(spec, TOKEN, { gatewayUrl: 'https://gw.example' });
     const scaleway = edgeEnv(spec, TOKEN, { gatewayUrl: 'https://gw.example' });
-    expect(Object.keys(vast).filter(k => !(k in scaleway))).toEqual([]);
+    expect(Object.keys(vast).filter(k => !(k in scaleway))).toEqual(['RT_UDP_BIND']);
+    expect(vast).toMatchObject({ RT_UDP_BIND: '0.0.0.0', RT_UDP_PORTS: '50000-50016' });
     expect(Object.entries(vast).filter(([, v]) => v.includes(TOKEN)).map(([k]) => k)).toEqual(['AIGW_REPLICA_TOKEN']);
     expect(JSON.stringify(vast)).not.toContain('hf');
   });
@@ -345,7 +347,40 @@ describe('vastReplicaInit', () => {
       env: { HF_TOKEN: 'hf_' + 'a'.repeat(34), STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '9600', RT_MAX_SESSIONS: '4' },
     });
     const init = Buffer.from(vastReplicaInit(spec, TOKEN, { gatewayUrl: 'https://gw.example' })).toString('base64');
-    const bytes = Object.entries({ ...spec.env, AIGW_INIT_B64: init, '-p 80:80': '1' }).reduce((n, [k, v]) => n + k.length + v.length + 2, 0);
+    const udp = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`-p ${50000 + i}:${50000 + i}/udp`, '1']));
+    const bytes = Object.entries({ ...spec.env, AIGW_INIT_B64: init, '-p 80:80': '1', ...udp }).reduce((n, [k, v]) => n + k.length + v.length + 2, 0);
     expect(bytes).toBeLessThan(VAST_ENV_MAX_BYTES / 2);
+  });
+});
+
+describe('realtime UDP ports on Vast', () => {
+  const rt = (realtime: DeploymentSpec['realtime'], env: Record<string, string> = {}): DeploymentSpec => ({ ...vastSpec({ env }), realtime });
+
+  it('two ports per session in each worker slice plus the probe port; an explicit range is kept', () => {
+    expect(vastUdpRange(vastSpec())).toBeNull();
+    expect(vastPortCount(vastSpec())).toBe(1);
+    expect(vastUdpRange(rt({ maxSessions: 4 }))).toEqual([50000, 50008]);
+    expect(vastUdpRange(rt({}, { RT_MAX_SESSIONS: '4' }))).toEqual([50000, 50008]);
+    expect(vastUdpRange(rt({ maxSessions: 14 }))).toEqual([50000, 50030]);
+    expect(vastUdpRange(rt({ maxSessions: 14, env: { RT_SESSIONS_PER_WORKER: '14' } }))).toEqual([50000, 50028]);
+    expect(vastUdpRange(rt({ maxSessions: 6, env: { RT_RTC_WORKERS: '3' } }))).toEqual([50000, 50012]);
+    expect(vastUdpRange(rt({ maxSessions: 4, udpPorts: [51000, 51020] }))).toEqual([51000, 51020]);
+    expect(vastPortCount(rt({ maxSessions: 4 }))).toBe(11);
+  });
+
+  it('create: one -p mapping per UDP port, hosts searched and filtered by direct ports', async () => {
+    const few = { id: 9, machine_id: 109, geolocation: 'Paris, FR', dph_total: 0.2, reliability2: 0.99, inet_down: 900, direct_port_count: 10 };
+    const enough = { id: 2, machine_id: 102, geolocation: 'Paris, FR', dph_total: 0.45, reliability2: 0.99, inet_down: 900, direct_port_count: 49 };
+    const { calls, fetchImpl } = fakeVast(c => (c.url.endsWith('/bundles/') ? { body: { offers: [few, enough] } } : { body: { success: true, new_contract: 77 } }));
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    const spec = rt({ maxSessions: 4 });
+    await backend.createReplica({ spec, replicaToken: TOKEN, cloudInit: '', namespace: 'ns' });
+    expect((calls[0].body!.direct_port_count as { gte: number }).gte).toBe(11);
+    expect(calls[1].url).toContain('/asks/2/');
+    const env = calls[1].body!.env as Record<string, string>;
+    const mapped = Object.keys(env).filter(k => k.startsWith('-p '));
+    expect(mapped).toEqual(['-p 80:80', ...Array.from({ length: 9 }, (_, i) => `-p ${50000 + i}:${50000 + i}/udp`)]);
+    expect(Buffer.from(env.AIGW_INIT_B64, 'base64').toString()).toBe(vastReplicaInit(spec, TOKEN));
+    expect(backend.searchBody(vastSpec(), 0.97).direct_port_count).toEqual({ gte: 1 });
   });
 });

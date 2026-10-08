@@ -127,7 +127,7 @@ class Edge:
         self.routes: dict[str, dict] = {}  # WebRTC sid → {worker, at}
         self.worker_first_audio: dict[int, int | None] = {}
         self.http: aiohttp.ClientSession | None = None
-        self.net = NetState(settings.probe_port, settings.public_ip)
+        self.net = NetState(settings.probe_port, settings.public_ip, settings.public_port(settings.probe_port))
 
     # ── admission ────────────────────────────────────────────────────────────
 
@@ -189,7 +189,7 @@ class Edge:
             "firstAudioMaxMs": self.first_audio_max(), "shedding": shedding,
             # Firewall range = media ports + the probe port; `transports` drops webrtc when no media path works.
             "transports": self.net.transports(), "udpPorts": [self.s.udp_ports[0], self.s.probe_port or self.s.udp_ports[1]],
-            "probePort": self.s.probe_port or None, "net": self.net.view(), "ready": self.up.ready,
+            "probePort": self.s.public_port(self.s.probe_port) or None, "net": self.net.view(), "ready": self.up.ready,
             "byTransport": by, "workers": len(self.workers),
         })
 

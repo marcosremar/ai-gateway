@@ -80,8 +80,9 @@ async def try_relay(t: dict) -> tuple[bool, str, float]:
 
 
 class NetState:
-    def __init__(self, probe_port: int, public_ip: str) -> None:
+    def __init__(self, probe_port: int, public_ip: str, public_probe_port: int | None = None) -> None:
         self.probe_port, self.public_ip = probe_port, public_ip
+        self.public_probe_port = public_probe_port or probe_port
         self.udp_inbound = "unknown"
         self.path = "unknown"
         self.relay: dict | None = None
@@ -93,11 +94,11 @@ class NetState:
         loop = asyncio.get_running_loop()
         try:
             _, self.responder = await loop.create_datagram_endpoint(ProbeResponder, local_addr=("0.0.0.0", self.probe_port))
-            note = f"probe responder on udp/{self.probe_port}"
+            note = f"probe responder on udp/{self.probe_port} (public udp/{self.public_probe_port})"
         except OSError as error:
             note = f"probe responder could not bind udp/{self.probe_port}: {error}"
         print(f"[edge] net: {note}; public={self.public_ip or '-'}; path unknown until the gateway probes", flush=True)
-        telemetry.emit("edge.net.boot", probePort=self.probe_port, responder=self.responder is not None,
+        telemetry.emit("edge.net.boot", probePort=self.public_probe_port, responder=self.responder is not None,
                        publicIp=bool(self.public_ip))
 
     def transports(self) -> list[str]:
@@ -117,7 +118,7 @@ class NetState:
 
     def view(self) -> dict:
         return {
-            "path": self.path, "udpInbound": self.udp_inbound, "probePort": self.probe_port, "publicIp": self.public_ip or None,
+            "path": self.path, "udpInbound": self.udp_inbound, "probePort": self.public_probe_port, "publicIp": self.public_ip or None,
             "probeHits": self.responder.hits if self.responder else 0,
             "relay": {k: self.relay[k] for k in ("url", "transport", "ms")} if self.relay else None,
             "reasons": self.reasons, "checkedAt": self.checked_at,
@@ -125,7 +126,7 @@ class NetState:
 
     async def report(self, udp_inbound: str, turn_servers: list[dict], rtt_ms: float | None, trace_id: str) -> dict:
         """The gateway's probe result (and short-lived TURN credentials to test with): decides and logs the path."""
-        reasons = [f"inbound udp/{self.probe_port}: {udp_inbound}" + (f" ({rtt_ms:.0f} ms)" if rtt_ms is not None else "")]
+        reasons = [f"inbound udp/{self.public_probe_port}: {udp_inbound}" + (f" ({rtt_ms:.0f} ms)" if rtt_ms is not None else "")]
         self.udp_inbound = udp_inbound if udp_inbound in ("ok", "blocked") else "unknown"
         relay = None
         if self.udp_inbound == "ok":
