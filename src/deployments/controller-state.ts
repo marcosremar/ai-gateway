@@ -132,6 +132,7 @@ export interface ControllerOptions {
   /** Pause between retries of the release of a machine whose deployment was deleted while it was created. Default 2 s. */
   releaseRetryMs?: number;
   reconcileMs?: number;
+  maxColdStartWaitSeconds?: number;
   /** Replicas kept only by `minReplicas` go to zero after this long unused (planner `pinnedIdleOver`); 0 = off. */
   pinnedIdleMaxMs?: number;
   /**
@@ -162,6 +163,7 @@ export const DEFAULT_MAX_STOPPED = 8;
 export const DEFAULT_MAX_EUR_PER_HOUR = 6;
 export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
 export const DEFAULT_BUSY_GRACE_MS = 120_000;
+export const DEFAULT_MAX_COLD_START_WAIT_SECONDS = 240;
 /**
  * A request turned away for lack of a ready replica counts as load for this long (≈ the time the fallback takes to
  * answer it, Little's law with W ≈ 1.5 s — the cloud LLM's p50 measured live on 2026-10-07 was 1.0–1.9 s): 16 refused
@@ -242,6 +244,10 @@ export abstract class ControllerState {
 
   protected providerOf(m: ReplicaMachine): DeploymentProvider {
     return m.provider ?? this.defaultProvider;
+  }
+
+  protected get maxColdStartWaitSeconds(): number {
+    return this.opts.maxColdStartWaitSeconds ?? DEFAULT_MAX_COLD_START_WAIT_SECONDS;
   }
 
   protected runtime(record: DeploymentRecord): Runtime {

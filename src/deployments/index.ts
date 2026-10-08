@@ -42,7 +42,7 @@ export type * from './types';
  * Idle limit for the proxy socket when deployments are on. A request waiting through a cold start transfers nothing
  * for minutes; under Bun, `server.setTimeout` is a hard idle cut that a per-socket `setTimeout(0)` cannot lift
  * (measured 2026-10-04: the default 60 s killed a real Scaleway cold start). 15 min = Railway's own ceiling for a
- * request with data flowing and above `coldStartWaitSeconds` (≤ 840 s). An explicit PROXY_TOTAL_TIMEOUT_MS wins.
+ * request with data flowing and above `coldStartWaitSeconds` (≤ 840 s, waited at most DEPLOYMENTS_MAX_WAIT_SECONDS). An explicit PROXY_TOTAL_TIMEOUT_MS wins.
  */
 export const DEPLOYMENTS_PROXY_IDLE_MS = 15 * 60_000;
 
@@ -137,6 +137,7 @@ export function deploymentsFromEnv(
   }
   const projectId = env.SCW_DEFAULT_PROJECT_ID || env.SCW_PROJECT_ID || env.SCALEWAY_PROJECT_ID || undefined;
   const maxTotal = Number(env.DEPLOYMENTS_MAX_REPLICAS ?? 6);
+  const maxWait = Number(env.DEPLOYMENTS_MAX_WAIT_SECONDS);
   const stateDir = env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway');
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
@@ -155,6 +156,7 @@ export function deploymentsFromEnv(
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
     ...spendLimitsFromEnv(env),
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
+    ...(maxWait > 0 ? { maxColdStartWaitSeconds: maxWait } : {}),
     log: opts.log,
   });
   const admins = adminUsersFromEnv(env, opts.alwaysAdmin);

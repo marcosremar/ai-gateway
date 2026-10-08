@@ -31,7 +31,7 @@ export const STAGE_STRIKES = 3;
 export const STAGE_COOLDOWN_MS = 30_000;
 
 export {
-  DeploymentError, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
+  DeploymentError, DEFAULT_MAX_COLD_START_WAIT_SECONDS, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
   type LeaseOutcome,
 } from './controller-state';
 
@@ -273,7 +273,7 @@ export class DeploymentController extends ControllerViews {
     }
     rt.record.lastRequestAt = this.now();
     this.persistRequestTime(rt);
-    const deadline = this.now() + (opts.waitMs ?? spec.coldStartWaitSeconds * 1000);
+    const deadline = this.now() + Math.min(opts.waitMs ?? spec.coldStartWaitSeconds * 1000, this.maxColdStartWaitSeconds * 1000);
     const exclude = opts.exclude ?? new Set<string>();
 
     let machine = this.pick(rt, exclude, opts.stage);

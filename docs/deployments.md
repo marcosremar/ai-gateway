@@ -135,6 +135,11 @@ curl $GW/v1/apps/parle -H "Authorization: Bearer $KEY" -H 'X-App: parle'   # ima
   `X-Aigw-Wait: <seconds>`) and is served as soon as a replica is ready. If none is ready in time: **503**
   `{"status":"warming"}` + `Retry-After: 30`; the machine keeps booting. 240 s stays under Railway's 5-minute cut-off
   for a request with no bytes flowing.
+- The gateway never waits longer than `DEPLOYMENTS_MAX_WAIT_SECONDS` (default 240, at most 840), whatever the spec or
+  the header ask: a longer silent wait is cut by the platform in front (Railway: 5 min with no bytes) with an error the
+  caller cannot interpret, while the 503 above tells it to retry. 240 leaves a minute for the replica's first byte. A
+  spec above the maximum is still accepted (profiles and stored specs carry 600–840) and the view lists it under
+  `warnings`; raise the setting only where nothing in front cuts silent requests.
 - How long a boot takes is mostly the image + model: a small CPU image is ready in ~1–2 min; Qwen3-TTS on an L4 took
   ~7–8 min in the parle measurement (`babylon-cinema/docs/reports/2026-10-01-tts-l4-ai-gateway`). For those, use
   `minReplicas: 1` while there is traffic, or `POST …/wake` ahead of time, or accept the 503 + retry.
@@ -532,6 +537,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GHCR_READ_TOKEN` | registry credential of a declared deployment whose `registryAuth.passwordEnv` names it (none today: `parle-speech` needs no token) |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
+| `DEPLOYMENTS_MAX_WAIT_SECONDS` | longest wait of an invoke through a cold start (240; § Cold start) |
 
 Railway itself allows ~11k req/s per domain, 10k concurrent connections and requests up to 15 min while bytes flow
 (5 min with none) — not a constraint for model traffic. Machines are found by tag on Scaleway, so a gateway restart

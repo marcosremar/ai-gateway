@@ -24,11 +24,12 @@ const AS_SITE = { 'x-app': 'site-a' };
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; maxWaitSeconds?: number } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
     namespace: 'test', reconcileMs: 50, maxTotalReplicas: opts.maxTotal ?? 6,
+    ...(opts.maxWaitSeconds ? { maxColdStartWaitSeconds: opts.maxWaitSeconds } : {}),
   });
   await controller.init();
   controller.start();
@@ -226,6 +227,25 @@ describe('deployments API', () => {
     await call(h, 'PUT', '/v1/deployments/longboot', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
     const res = await call(h, 'GET', '/v1/deployments/longboot/invoke/x', undefined, SITE);
     expect(res.status).toBe(200);
+  });
+
+  it('caps the cold-start wait at the gateway maximum: a stored 840 s or X-Aigw-Wait: 840 answers 503 + Retry-After in time, with a warning in the view', async () => {
+    const capped = await harness({ maxWaitSeconds: 1 });
+    extra.push(capped);
+    capped.cloud.bootMs = 60_000;
+    const put = await call(capped, 'PUT', '/v1/deployments/slow', { profile: 'cpu-echo', coldStartWaitSeconds: 840 }, ADMIN, AS_SITE);
+    expect(put.status).toBe(201);
+    expect(((await put.json()) as { warnings: string[] }).warnings).toEqual([expect.stringMatching(/coldStartWaitSeconds 840 .* maximum wait of 1 s \(DEPLOYMENTS_MAX_WAIT_SECONDS\)/)]);
+    for (const headers of [{}, { 'x-aigw-wait': '840' }]) {
+      const started = Date.now();
+      const res = await call(capped, 'GET', '/v1/deployments/slow/invoke/', undefined, SITE, headers);
+      expect(res.status).toBe(503);
+      expect(res.headers.get('retry-after')).toBe('30');
+      expect(((await res.json()) as { status: string }).status).toBe('warming');
+      expect(Date.now() - started).toBeLessThan(4000);
+    }
+    const within = await call(h, 'PUT', '/v1/deployments/ok', { profile: 'cpu-echo', coldStartWaitSeconds: 240 }, ADMIN, AS_SITE);
+    expect(((await within.json()) as { warnings: string[] }).warnings).toEqual([]);
   });
 
   it('answers 503 + Retry-After when the replica is not ready within the wait', async () => {
