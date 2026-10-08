@@ -26,6 +26,17 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
   let connected = false;
   let closing = false;
 
+  const startMic = async () => {
+    capture = await startCapture(await ctx.mic(), {
+      rate: UPSTREAM_RATE,
+      onFrame: (frame) => {
+        if (!ws || ws.readyState !== 1) return;
+        if (ws.bufferedAmount > MAX_UPLINK_BUFFER) { ctx.dropped(1); return; }
+        ws.send(encodeAudioFrame(frame));
+      },
+    });
+  };
+
   const teardown = () => {
     capture?.stop();
     capture = null;
@@ -77,15 +88,11 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
       ]);
       if (signal.aborted) throw new Error('aborted');
       player = await startPlayer({ rate: DOWNSTREAM_RATE });
-      capture = await startCapture(await ctx.mic(), {
-        rate: UPSTREAM_RATE,
-        onFrame: (frame) => {
-          if (!ws || ws.readyState !== 1) return;
-          if (ws.bufferedAmount > MAX_UPLINK_BUFFER) { ctx.dropped(1); return; }
-          ws.send(encodeAudioFrame(frame));
-        },
-      });
+      if (!ctx.standby) await startMic();
       connected = true;
+    },
+    goLive() {
+      if (!capture) void startMic().catch((err: Error) => ctx.fail(err));
     },
     send(message: ClientMessage) {
       if (message.type === 'interrupt') player?.flush();

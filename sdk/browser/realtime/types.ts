@@ -106,6 +106,9 @@ export interface RealtimeTimeouts {
   disconnectGraceMs: number;
   iceRestartMs: number;
   upgradeMs: number;
+  readmitMs: number;
+  readmitMaxMs: number;
+  readmitForMs: number;
 }
 
 export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
@@ -119,6 +122,9 @@ export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
   disconnectGraceMs: 3_000,
   iceRestartMs: 5_000,
   upgradeMs: 5_000,
+  readmitMs: 2_000,
+  readmitMaxMs: 30_000,
+  readmitForMs: 20 * 60_000,
 };
 
 export interface AttemptRecord {

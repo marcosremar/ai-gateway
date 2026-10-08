@@ -6,6 +6,8 @@
  *
  * When a session offers both WebRTC and WS they are started together: the session is usable on whichever is up first
  * (WS, almost always) and moves to WebRTC between turns once it connects. The winner is remembered per network. A
+ * session that starts on a clip rung because admission answered `saturated` or `cold` keeps asking in the background
+ * and moves to the realtime rung between turns once it is admitted (the same move). A
  * transport that breaks mid-session is replaced by the next rung down, with the
  * conversation kept (the client holds the messages and replays them with `config_update`). The browser never holds the
  * gateway key: the session comes from the app's own backend (`sessionEndpoint`), the audio routes are authenticated by
@@ -25,7 +27,7 @@ import { createVoiceBridge, type VoiceBridge } from './voice-bridge';
 import { createPcmPlayer, type PcmPlayer } from './audio-io';
 import { DOWNSTREAM_RATE } from './pcm';
 import {
-  DEFAULT_TIMEOUTS, TRANSPORT_LADDER, type AttemptRecord, type ChatMessage, type ClientMessage, type RealtimeEvent, type RealtimeMetrics,
+  DEFAULT_TIMEOUTS, TRANSPORT_LADDER, type SessionRefusal, type AttemptRecord, type ChatMessage, type ClientMessage, type RealtimeEvent, type RealtimeMetrics,
   type RealtimeTimeouts, type RealtimeTransport, type SessionDescriptor, type StorageLike, type TransportContext,
   type TransportFactory, type TransportType,
 } from './types';
@@ -67,6 +69,7 @@ export interface RealtimeSessionOptions {
   telemetry?: RealtimeTelemetry | LocalTelemetryOptions | false;
   maxFailovers?: number;
   raceTransports?: boolean;
+  readmit?: boolean;
   fetchImpl?: typeof fetch;
   /** Replace a rung's transport (tests, custom transports). */
   transports?: Partial<Record<TransportType, TransportFactory>>;
@@ -144,6 +147,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   let recovery: Recovery | null = null;
   let recoveryPlayer: PcmPlayer | null = null;
   let upgrade: Upgrade | null = null;
+  let readmitTimer: ReturnType<typeof setTimeout> | undefined;
   let startedAt = 0;
   let quietSince = 0;
   let heardUntil = 0;
@@ -257,9 +261,9 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     ...opts.transports,
   };
 
-  async function admit(rungs: TransportType[]): Promise<void> {
+  async function admit(rungs: TransportType[]): Promise<SessionRefusal | null> {
     const wanted = rungs.filter(isRealtime);
-    if (!wanted.length) return;
+    if (!wanted.length) return null;
     const started = performance.now();
     const answer = await requestSession(opts.sessionEndpoint, { transports: rungs, prefer: wanted[0] }, {
       traceparent: telemetry.traceparent, timeoutMs: timeouts.sessionMs, fetchImpl, init: opts.sessionInit,
@@ -267,11 +271,12 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     if (isRefusal(answer)) {
       descriptor = null;
       telemetry.emit('rt.session.rejected', { level: 'warn', durMs: performance.now() - started, attrs: { reason: answer.code, status: answer.status, retryAfter: answer.retryAfterSeconds ?? null } });
-      return;
+      return answer;
     }
     descriptor = answer;
     telemetry.bind(answer.sessionId, answer.token, telemetryUrlOf(answer));
     telemetry.emit('rt.session.admitted', { durMs: performance.now() - started, attrs: { transports: answer.transports.length } });
+    return null;
   }
 
   const busy = () => !!turn || npcSpeaking || !!recovery || !!switching || !!bridge?.speaking() || performance.now() < heardUntil;
@@ -296,7 +301,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     remoteAudio: (stream: MediaStream | null) => { if (standby.live) ctx.remoteAudio(stream); else standby.audio = stream; },
   });
 
-  function promote(up: Upgrade, reason: 'upgrade' | 'failover'): void {
+  function promote(up: Upgrade, reason: 'upgrade' | 'failover', from: TransportType): void {
     const rtc = up.connected!;
     upgrade = null;
     current?.close();
@@ -304,15 +309,15 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     goLive(rtc, up.standby);
     metrics.transport = rtc.type;
     memory.set(network(), rtc.type);
-    telemetry.emit('rt.ladder.upgrade', { durMs: performance.now() - startedAt, attrs: { from: 'ws', to: rtc.type, reason } });
+    telemetry.emit('rt.ladder.upgrade', { durMs: performance.now() - startedAt, attrs: { from, to: rtc.type, reason } });
     if (appended.length) rtc.send({ type: 'config_update', messages: [...appended] });
-    emit({ type: 'transport', transport: rtc.type, reason, from: 'ws' });
+    emit({ type: 'transport', transport: rtc.type, reason, from });
   }
 
   const upgradeWhenQuiet = (up: Upgrade) => {
     if (upgrade !== up || closed) return;
     if (busy() || performance.now() - quietSince < UPGRADE_SETTLE_MS) { setTimeout(() => upgradeWhenQuiet(up), UPGRADE_POLL_MS); return; }
-    promote(up, 'upgrade');
+    promote(up, 'upgrade', current?.type ?? 'ws');
   };
 
   function watchUpgrade(up: Upgrade): void {
@@ -325,6 +330,38 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       up.connected = rtc;
       upgradeWhenQuiet(up);
     });
+  }
+
+  const canReadmit = (r: SessionRefusal) => opts.readmit !== false && (r.code === 'saturated' || r.code === 'cold');
+
+  async function readmit(rungs: TransportType[], first: SessionRefusal): Promise<void> {
+    const giveUp = (reason: string) => telemetry.emit('rt.readmit.gave_up', { level: 'warn', attrs: { reason } });
+    const deadline = performance.now() + timeouts.readmitForMs;
+    let wait = timeouts.readmitMs;
+    for (let refusal: SessionRefusal | null = first; refusal; refusal = await admit(rungs)) {
+      if (closed || !current?.clipBased) return;
+      if (!canReadmit(refusal)) return giveUp(refusal.code);
+      wait = Math.min(timeouts.readmitMaxMs, Math.max(wait, (refusal.retryAfterSeconds ?? 0) * 1000));
+      if (performance.now() + wait > deadline) return giveUp('deadline');
+      await new Promise<void>((resolve) => { readmitTimer = setTimeout(resolve, wait); });
+      wait *= 1.5;
+      if (closed || !current?.clipBased) return;
+    }
+    if (closed || !current?.clipBased) return;
+    const standby: Standby = { live: false, audio: null };
+    const abort = new AbortController();
+    const context = standbyContext(standby);
+    const offered = rungs.filter(t => descriptor?.transports.some(o => o.type === t));
+    const up: Upgrade = {
+      rtc: climbLadder(offered, t => factories[t](context), { timeouts, signal: abort.signal }).then(r => r.transport, () => null),
+      abort, standby, connected: null,
+    };
+    upgrade = up;
+    const transport = await up.rtc;
+    if (upgrade !== up) { transport?.close(); return; }
+    if (!transport) { upgrade = null; return giveUp('no_transport'); }
+    up.connected = transport;
+    upgradeWhenQuiet(up);
   }
 
   type Climb = Parameters<typeof climbLadder>[2];
@@ -347,7 +384,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
 
   async function establish(rungs: TransportType[], reason: 'connected' | 'failover', from?: TransportType): Promise<void> {
     const started = performance.now();
-    if (rungs.some(isRealtime)) await admit(rungs);
+    const refusal = await admit(rungs);
     if (closed) return;
     // Realtime rungs only with an admitted session that offers them (a refusal sends the client straight down).
     const offered = new Set(descriptor?.transports.map(t => t.type) ?? []);
@@ -377,11 +414,12 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       startedAt = performance.now();
       metrics.transport = transport.type;
       if (reason === 'connected') metrics.connectMs = Math.round(startedAt - started);
-      if (!pending) memory.set(network(), transport.type);
+      if (!pending && !refusal) memory.set(network(), transport.type);
       telemetry.emit('rt.ladder.ok', { durMs: startedAt - started, attrs: { transport: transport.type, reason, upgrading: !!pending } });
       if (!transport.clipBased && appended.length) transport.send({ type: 'config_update', messages: [...appended] });
       emit({ type: 'transport', transport: transport.type, reason, ...(from ? { from } : {}) });
       if (pending) watchUpgrade(pending);
+      else if (refusal && transport.clipBased && canReadmit(refusal)) void readmit(rungs.filter(isRealtime), refusal);
     } catch (err) {
       const message = err instanceof LadderExhausted ? err.message : (err as Error).message;
       telemetry.emit('error', { level: 'error', attrs: { code: 'no_transport', last } });
@@ -408,7 +446,15 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       const up = upgrade;
       const rtc = up ? await up.rtc : null;
       if (closed) return;
-      if (up && rtc && upgrade === up) { up.connected = rtc; promote(up, 'failover'); return; }
+      if (up && rtc && upgrade === up) {
+        if (turn) {
+          emit({ type: 'error', code: 'turn_lost', message: `transport ${from} failed during the turn: ${err.message}` });
+          emit({ type: 'done', error: true });
+        }
+        up.connected = rtc;
+        promote(up, 'failover', from);
+        return;
+      }
       const rest = order.slice(order.indexOf(from) + 1);
       telemetry.emit('rt.ladder.fallback', { level: 'warn', attrs: { from, to: rest[0] ?? null, reason: err.message.slice(0, 64), midSession: true } });
       if (metrics.failovers > (opts.maxFailovers ?? 4) || !rest.length) {
@@ -448,6 +494,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   function close(reason = 'closed'): void {
     if (closed) return;
     closed = true;
+    clearTimeout(readmitTimer);
     bridge?.reset();
     voiceStop?.();
     cancelRecovery();
