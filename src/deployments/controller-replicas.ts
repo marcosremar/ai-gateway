@@ -26,11 +26,14 @@ export abstract class ReplicaLifecycle extends ControllerState {
     const result = await this.checkReplica(rt, m);
     if (result === 'down') p.downSince ??= this.now(); else delete p.downSince;
     if (result === 'ready') {
+      // Replica lifecycle for telemetry (serve.ts maps these log lines to `replica.ready` / `replica.unhealthy`).
+      if (!p.readyNow) this.log('deployments: replica ready', { deployment: m.deployment, id: m.id, bootMs: p.everReady ? null : this.now() - m.createdAt });
       p.readyAt ??= this.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
     } else if (result === 'busy' && p.everReady && ((rt.perReplica.get(m.id) ?? 0) > 0 || this.servedRecently(p))) {
       // Alive (its front answers) and working: the health check queued behind the work. Keep it serving what it can.
       p.busy = true;
     } else {
+      if (p.readyNow) this.log('deployments: replica unhealthy', { deployment: m.deployment, id: m.id, probe: result });
       p.readyNow = false;
       if (p.everReady) p.failures++;
     }

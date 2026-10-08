@@ -128,10 +128,11 @@ function ipv4Of(server: ScwServer): string | null {
     ?? null;
 }
 
-/** Firewall rule for `createSecurityGroup` (inbound accept from anywhere on one port). */
+/** Firewall rule for `createSecurityGroup` (inbound accept from anywhere on one port, or `port`..`portTo`). */
 export interface ScalewayFirewallRule {
   protocol: 'TCP' | 'UDP';
   port: number;
+  portTo?: number;
 }
 
 export interface ScalewayIp {
@@ -773,7 +774,10 @@ export class ScalewayClient extends AbstractGpuProvider {
     for (const rule of opts.rules) {
       await this.fetchJson(`${this.zoneUrl(zone)}/security_groups/${id}/rules`, {
         method: 'POST', headers: this.scwHeaders(secretKey),
-        body: JSON.stringify({ protocol: rule.protocol, direction: 'inbound', action: 'accept', ip_range: '0.0.0.0/0', dest_port_from: rule.port }),
+        body: JSON.stringify({
+          protocol: rule.protocol, direction: 'inbound', action: 'accept', ip_range: '0.0.0.0/0', dest_port_from: rule.port,
+          ...(rule.portTo && rule.portTo > rule.port ? { dest_port_to: rule.portTo } : {}),
+        }),
       }, TIMEOUTS.write, 'scaleway');
     }
     return id;

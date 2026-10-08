@@ -1,7 +1,8 @@
 /**
  * Declared deployments: registered by the gateway itself (idempotent PUT through the controller), pending with the
  * reason while the registry credential / image is missing, generated SPEECH_TOKEN persisted in the store, and never a
- * machine created by the reconcile.
+ * machine created by the reconcile. `parle-speech` needs no credential and only patches what it declares over the
+ * stored spec; the credential and generated-secret cases run on a private-registry declaration.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -16,11 +17,37 @@ import { createDeploymentRoutes, HttpReplicaProbe } from '../../../src/deploymen
 import { FileDeploymentStore, MemoryDeploymentStore } from '../../../src/deployments/store';
 import type { DeploymentStore } from '../../../src/deployments/types';
 import { placementsOf } from '../../../src/deployments/placements';
-import { buildSpec } from '../../../src/deployments/spec';
+import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { FakeCloud, until } from './_fake-cloud';
 
 const GHCR = 'ghp_fake_read_token_0123456789';
 const speech = DECLARED_DEPLOYMENTS.find(d => d.name === 'parle-speech')!;
+const profile = BUILTIN_PROFILES.find(p => p.name === 'speech-stack')!.spec;
+
+const privateApp: DeclaredDeployment = {
+  name: 'parle-speech',
+  image: { env: 'SPEECH_IMAGE', repository: 'ghcr.io/marcosremar/parle-speech', default: 'ghcr.io/marcosremar/parle-speech:9a87056a' },
+  registryAuth: { server: 'ghcr.io', username: 'marcosremar', passwordEnv: 'GHCR_READ_TOKEN' },
+  generatedSecrets: ['SPEECH_TOKEN'],
+  spec: {
+    port: 80, healthPath: '/health', machineType: 'L40S-1-48G', zone: 'fr-par-2', gpu: true, volumeGb: 100, minReplicas: 0,
+    maxReplicas: 2, bootTimeoutMinutes: 45, maxEurPerHour: 1.5, env: { TRUST_UPSTREAM_AUTH: '1' },
+  },
+};
+const declarations = [privateApp];
+
+const PRODUCTION = {
+  image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107', port: 8000, healthPath: '/health', machineType: 'L40S-1-48G',
+  zone: 'fr-par-2', minReplicas: 0, maxReplicas: 2, minActiveReplicas: 1, targetInflightPerReplica: 8, idleMinutes: 1,
+  bootTimeoutMinutes: 45, scaleDownDelaySeconds: 0, coldStartWaitSeconds: 840, maxEurPerHour: 1.6, maxHours: 12, volumeGb: 120,
+  gpu: true,
+  env: { STT_BATCH: '6', LLM_PARALLEL: '12', TTS_STAGE0_MB: '9000', TTS_PARALLEL: '3' },
+  envByMachineType: {
+    'L4-1-24G': { STT_BATCH: '3', LLM_PARALLEL: '6', TTS_STAGE0_MB: '7000' },
+    'L40S-1-48G': { STT_BATCH: '7', LLM_PARALLEL: '14', TTS_STAGE0_MB: '11000' },
+  },
+  files: { 'voices.json': Buffer.from('{"rafa":"rafa.flac"}').toString('base64'), 'rafa.flac': Buffer.from('fLaC').toString('base64') },
+};
 
 const controllers: DeploymentController[] = [];
 const dirs: string[] = [];
@@ -37,47 +64,97 @@ async function controller(store: DeploymentStore = new MemoryDeploymentStore(), 
 }
 
 describe('declared parle-speech spec', () => {
-  it('is the one-GPU speech image: port 80, /health, L40S, minReplicas 0, 45 min boot, ≥ 100 GB, upstream auth trusted', () => {
-    expect(speech.spec).toMatchObject({
-      port: 80, healthPath: '/health', machineType: 'L40S-1-48G', zone: 'fr-par-2', minReplicas: 0, bootTimeoutMinutes: 45,
-      env: { TRUST_UPSTREAM_AUTH: '1' },
+  it('is the speech-stack image in the gateway registry: no credential, no generated secret, no env or sizing of its own', () => {
+    expect(speech.image).toEqual({
+      env: 'SPEECH_IMAGE', repository: 'rg.fr-par.scw.cloud/aigw/speech-stack', default: PRODUCTION.image,
     });
-    expect(speech.spec.volumeGb as number).toBeGreaterThanOrEqual(100);
-    expect(speech.registryAuth).toEqual({ server: 'ghcr.io', username: 'marcosremar', passwordEnv: 'GHCR_READ_TOKEN' });
-    expect(speech.generatedSecrets).toEqual(['SPEECH_TOKEN']);
-    expect(JSON.stringify(speech)).not.toMatch(/ghp_|password"\s*:/);
-    expect(speech.image?.default).toMatch(/^ghcr\.io\/marcosremar\/parle-speech:[0-9a-f]{40}$/);
+    expect(speech.profile).toBe('speech-stack');
+    expect(speech.registryAuth).toBeUndefined();
+    expect(speech.generatedSecrets).toBeUndefined();
+    expect(speech.spec).toEqual({
+      realtime: {}, envByMachineType: { 'L4-1-24G': { RT_MAX_SESSIONS: '8' }, 'L40S-1-48G': { RT_MAX_SESSIONS: '16' } },
+    });
+    expect(JSON.stringify(speech)).not.toMatch(/GHCR_READ_TOKEN|ghp_|password"\s*:/);
+  });
+
+  it('SPEECH_IMAGE takes a tag of the repository or a full reference', () => {
+    expect(declaredImage(speech, { SPEECH_IMAGE: '20261101-0900' })).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261101-0900');
+    expect(declaredImage(speech, { SPEECH_IMAGE: 'ghcr.io/other/img:1' })).toBe('ghcr.io/other/img:1');
+    expect(declaredImage(speech, {})).toBe(speech.image?.default);
+    const noDefault: DeclaredDeployment = { ...speech, image: { env: 'SPEECH_IMAGE' } };
+    expect(declaredBody(noDefault, {}, null)).toEqual({ pending: expect.stringMatching(/SPEECH_IMAGE is not set/) });
+  });
+
+  it('a declaration without env or generated secrets sends no env', () => {
+    const resolved = declaredBody(speech, {}, null) as { body: Record<string, unknown> };
+    expect(resolved.body).not.toHaveProperty('env');
+    expect(resolved.body).not.toHaveProperty('registryAuth');
+  });
+
+  it('over the production spec: only realtime and RT_MAX_SESSIONS are added, then in sync without another PUT', async () => {
+    const { c, cloud } = await controller();
+    await c.put('parle-speech', PRODUCTION);
+    const before = c.specOf('parle-speech')!;
+    const put = vi.spyOn(c, 'put');
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
+    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null, image: PRODUCTION.image });
+    expect(c.specOf('parle-speech')).toEqual({
+      ...before,
+      realtime: {},
+      envByMachineType: {
+        'L4-1-24G': { ...PRODUCTION.envByMachineType['L4-1-24G'], RT_MAX_SESSIONS: '8' },
+        'L40S-1-48G': { ...PRODUCTION.envByMachineType['L40S-1-48G'], RT_MAX_SESSIONS: '16' },
+      },
+    });
+    expect(c.specOf('parle-speech')!.registryAuth).toBeUndefined();
+    expect((await r.reconcile())[0].state).toBe('in_sync');
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(cloud.created).toHaveLength(0);
+  });
+
+  it('SPEECH_IMAGE moves the image of the production spec and nothing else', async () => {
+    const { c } = await controller();
+    await c.put('parle-speech', PRODUCTION);
+    const r = new DeclaredDeploymentReconciler({ target: c, env: { SPEECH_IMAGE: '20261101-0900' } });
+    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261101-0900' });
+    const spec = c.specOf('parle-speech')!;
+    expect(spec.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261101-0900');
+    expect(spec).toMatchObject({ env: PRODUCTION.env, files: PRODUCTION.files, volumeGb: 120, maxHours: 12, idleMinutes: 1 });
+  });
+
+  it('fresh gateway: created from the speech-stack profile with the declared image, realtime on, no machine; then in sync', async () => {
+    const { c, cloud } = await controller();
+    c.start();
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
+    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null });
+    const spec = c.specOf('parle-speech')!;
+    expect(spec).toMatchObject({
+      image: PRODUCTION.image, port: profile.port, healthPath: '/health', machineType: 'L40S-1-48G', zone: 'fr-par-2',
+      minReplicas: 0, volumeGb: profile.volumeGb, maxEurPerHour: profile.maxEurPerHour, realtime: {}, env: {},
+      envByMachineType: profile.envByMachineType,
+    });
+    expect(placementsOf(spec).map(p => `${p.zone}/${p.machineType}`).slice(0, 3)).toEqual([
+      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G', 'fr-par-2/L4-1-24G',
+    ]);
+    expect(spec.registryAuth).toBeUndefined();
+    expect(c.get('parle-speech')?.status).toBe('scaled-to-zero');
+    const put = vi.spyOn(c, 'put');
+    expect((await r.reconcile())[0].state).toBe('in_sync');
+    expect(put).not.toHaveBeenCalled();
+    expect(cloud.created).toHaveLength(0);
   });
 
   // D3, live QA 2026-10-07: one placement only, `L40S-1-48G out of stock in fr-par-2` for 17 min, no 2nd replica.
-  it('has a stock fallback: L40S fr-par-1, then L4 fr-par-2, then L4 pl-waw-2, every one under its € cap', () => {
-    const spec = buildSpec('parle-speech', { ...speech.spec, image: 'x/y:1' }, { profiles: new Map() });
-    expect(placementsOf(spec).map(p => `${p.zone}/${p.machineType}`)).toEqual([
-      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G', 'fr-par-2/L4-1-24G', 'pl-waw-2/L4-1-24G',
-    ]);
-    expect(spec.maxEurPerHour).toBeGreaterThanOrEqual(1.47); // the L40S's price: below it the primary is never created
-    expect(spec.maxEurPerHour).toBeLessThan(2);
-    for (const p of placementsOf(spec)) expect(spec.envByMachineType?.[p.machineType]?.LLM_PARALLEL).toMatch(/^\d+$/);
-  });
-
   it('out of stock in fr-par-2: the replica lands on the next placement', async () => {
     const cloud = new FakeCloud();
     cloud.failCreateFor = (s) => (s.machineType === 'L40S-1-48G' ? `scaleway HTTP 412: {"type":"out_of_stock"} ${s.zone}` : null);
     const { c } = await controller(new MemoryDeploymentStore(), cloud);
-    await new DeclaredDeploymentReconciler({ target: c, env: { GHCR_READ_TOKEN: GHCR } }).reconcile();
+    await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     c.start();
     c.wake('parle-speech');
     await until(() => cloud.created.length === 1, 3000);
     expect(cloud.created[0].spec).toMatchObject({ zone: 'fr-par-2', machineType: 'L4-1-24G' });
     expect(c.get('parle-speech')!.lastPlacement).toMatch(/L40S-1-48G out of stock in fr-par-2; L40S-1-48G out of stock in fr-par-1/);
-  });
-
-  it('SPEECH_IMAGE takes a tag of the repository or a full reference', () => {
-    expect(declaredImage(speech, { SPEECH_IMAGE: 'abc123' })).toBe('ghcr.io/marcosremar/parle-speech:abc123');
-    expect(declaredImage(speech, { SPEECH_IMAGE: 'ghcr.io/other/img:1' })).toBe('ghcr.io/other/img:1');
-    expect(declaredImage(speech, {})).toBe(speech.image?.default);
-    const noDefault: DeclaredDeployment = { ...speech, image: { env: 'SPEECH_IMAGE' } };
-    expect(declaredBody(noDefault, { GHCR_READ_TOKEN: GHCR }, null)).toEqual({ pending: expect.stringMatching(/SPEECH_IMAGE is not set/) });
   });
 });
 
@@ -85,7 +162,7 @@ describe('DeclaredDeploymentReconciler', () => {
   it('without the registry credential: pending with the reason, nothing registered, no machine', async () => {
     const { c, cloud } = await controller();
     const put = vi.spyOn(c, 'put');
-    const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations });
     const [status] = await r.reconcile();
     expect(status).toMatchObject({ name: 'parle-speech', state: 'pending' });
     expect(status.reason).toMatch(/GHCR_READ_TOKEN is not set/);
@@ -99,14 +176,14 @@ describe('DeclaredDeploymentReconciler', () => {
     c.start();
     const put = vi.spyOn(c, 'put');
     const onChange = vi.fn();
-    const r = new DeclaredDeploymentReconciler({ target: c, env: { GHCR_READ_TOKEN: GHCR }, onChange });
+    const r = new DeclaredDeploymentReconciler({ target: c, env: { GHCR_READ_TOKEN: GHCR }, onChange, declarations });
     expect((await r.reconcile())[0].state).toBe('applied');
     expect(onChange).toHaveBeenCalledWith(['parle-speech']);
     const spec = c.specOf('parle-speech')!;
     expect(spec.registryAuth).toEqual({ server: 'ghcr.io', username: 'marcosremar', password: GHCR });
     expect(spec.env.TRUST_UPSTREAM_AUTH).toBe('1');
     expect(spec.env.SPEECH_TOKEN).toMatch(/^[A-Za-z0-9_-]{16,}$/);
-    expect(spec.image).toBe(speech.image?.default);
+    expect(spec.image).toBe(privateApp.image?.default);
     expect(c.get('parle-speech')?.status).toBe('scaled-to-zero');
 
     const token = spec.env.SPEECH_TOKEN;
@@ -122,7 +199,7 @@ describe('DeclaredDeploymentReconciler', () => {
   it('a new image or a rotated credential updates the spec; the token stays', async () => {
     const { c } = await controller();
     const env: Record<string, string> = { GHCR_READ_TOKEN: GHCR };
-    const r = new DeclaredDeploymentReconciler({ target: c, env });
+    const r = new DeclaredDeploymentReconciler({ target: c, env, declarations });
     await r.reconcile();
     const token = c.specOf('parle-speech')!.env.SPEECH_TOKEN;
     env.SPEECH_IMAGE = 'deadbeef';
@@ -137,7 +214,7 @@ describe('DeclaredDeploymentReconciler', () => {
   it('a credential that disappears keeps the registered spec and reports pending', async () => {
     const { c } = await controller();
     const env: Record<string, string | undefined> = { GHCR_READ_TOKEN: GHCR };
-    const r = new DeclaredDeploymentReconciler({ target: c, env });
+    const r = new DeclaredDeploymentReconciler({ target: c, env, declarations });
     await r.reconcile();
     delete env.GHCR_READ_TOKEN;
     const [status] = await r.reconcile();
@@ -150,18 +227,18 @@ describe('DeclaredDeploymentReconciler', () => {
     const dir = await mkdtemp(join(tmpdir(), 'declared-'));
     dirs.push(dir);
     const first = await controller(FileDeploymentStore.inDir(dir));
-    await new DeclaredDeploymentReconciler({ target: first.c, env: { GHCR_READ_TOKEN: GHCR } }).reconcile();
+    await new DeclaredDeploymentReconciler({ target: first.c, env: { GHCR_READ_TOKEN: GHCR }, declarations }).reconcile();
     const token = first.c.specOf('parle-speech')!.env.SPEECH_TOKEN;
 
     const second = await controller(FileDeploymentStore.inDir(dir));
     const put = vi.spyOn(second.c, 'put');
-    expect((await new DeclaredDeploymentReconciler({ target: second.c, env: { GHCR_READ_TOKEN: GHCR } }).reconcile())[0].state).toBe('in_sync');
+    expect((await new DeclaredDeploymentReconciler({ target: second.c, env: { GHCR_READ_TOKEN: GHCR }, declarations }).reconcile())[0].state).toBe('in_sync');
     expect(put).not.toHaveBeenCalled();
     expect(second.c.specOf('parle-speech')!.env.SPEECH_TOKEN).toBe(token);
   });
 
   it('deployments off on this gateway: disabled, with the reason', async () => {
-    const r = new DeclaredDeploymentReconciler({ target: null, env: { GHCR_READ_TOKEN: GHCR } });
+    const r = new DeclaredDeploymentReconciler({ target: null, env: { GHCR_READ_TOKEN: GHCR }, declarations });
     const [status] = await r.reconcile();
     expect(status).toMatchObject({ state: 'disabled' });
     expect(status.reason).toMatch(/SCW_SECRET_KEY/);
@@ -169,7 +246,7 @@ describe('DeclaredDeploymentReconciler', () => {
 
   it('GET /v1/deployments lists the declared status and never the token or the registry password', async () => {
     const { c } = await controller();
-    const r = new DeclaredDeploymentReconciler({ target: c, env: { GHCR_READ_TOKEN: GHCR } });
+    const r = new DeclaredDeploymentReconciler({ target: c, env: { GHCR_READ_TOKEN: GHCR }, declarations });
     await r.reconcile();
     const token = c.specOf('parle-speech')!.env.SPEECH_TOKEN;
     const handler = createDeploymentRoutes({ controller: c, declaredStatus: () => r.status() });

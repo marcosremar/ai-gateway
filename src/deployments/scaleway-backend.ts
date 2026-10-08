@@ -6,6 +6,7 @@
 
 import { ScalewayClient } from '../cpu-providers/scaleway-client';
 import type { GpuInstance, ProviderCredentials } from '../gpu-providers/types';
+import { DEFAULT_RT_UDP_PORTS } from './cloud-init';
 import { PROBE_PORT } from './spec';
 import type { CatalogEntry, CreateReplicaInput, DeploymentBackend, DeploymentNetwork, DeploymentSpec, RegistryAuth, ReplicaMachine } from './types';
 
@@ -28,6 +29,20 @@ export const GATEWAY_ONLY_PORTS = [80] as const;
 
 /** Name of the shared firewall of a namespace's gateway-only replicas (one per zone; never deleted, it bills nothing). */
 export const gatewayOnlyGroupName = (namespace: string) => `aigw-${namespace}-gateway-only`;
+
+/**
+ * Realtime replicas (`spec.realtime`) also take WebRTC media straight from the browsers on a UDP range, on each
+ * replica's own public IP (no reserved IP: every scaled replica is its own media server, and the gateway's signaling
+ * hands the browser that replica's address in the SDP answer). They share one group per namespace, zone and range.
+ */
+export const realtimeGroupName = (namespace: string, [lo, hi]: [number, number]) => `aigw-${namespace}-gateway-only-rt-${lo}-${hi}`;
+
+/** The UDP rule a realtime spec adds to its firewall, or null. */
+export function realtimeRule(spec: Pick<DeploymentSpec, 'realtime'>): { protocol: 'UDP'; port: number; portTo: number } | null {
+  if (!spec.realtime) return null;
+  const [lo, hi] = spec.realtime.udpPorts ?? DEFAULT_RT_UDP_PORTS;
+  return { protocol: 'UDP', port: lo, portTo: hi };
+}
 
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
@@ -79,7 +94,7 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
     // Every replica gets a firewall: an exposed one its deployment's (declared ports + probe), any other the
     // namespace's gateway-only group. Without one Scaleway attaches the project's "Default security group", whose
     // inbound policy is ACCEPT (QA 06/10/2026: SSH 22 of a speech replica reachable from the internet).
-    const securityGroupId = input.network?.groupId ?? await this.gatewayOnlyGroup(spec.zone, input.namespace);
+    const securityGroupId = input.network?.groupId ?? await this.gatewayOnlyGroup(spec.zone, input.namespace, realtimeRule(spec));
     const inst = await this.client.createInstance({
       label: `aigw-${spec.name}-${Date.now().toString(36)}`,
       region: spec.zone,
@@ -148,27 +163,28 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
    * every gateway-only deployment of the namespace, so a deployment delete leaves it (no per-deployment leak to clean,
    * and the janitor never touches security groups). Fails closed: no group → no machine.
    */
-  private gatewayOnlyGroup(zone: string, namespace: string): Promise<string> {
-    const key = `${zone}|${namespace}`;
+  private gatewayOnlyGroup(zone: string, namespace: string, rt: ReturnType<typeof realtimeRule> = null): Promise<string> {
+    const key = `${zone}|${namespace}|${rt ? `${rt.port}-${rt.portTo}` : ''}`;
     let pending = this.gatewayOnlyGroups.get(key);
     if (!pending) {
-      pending = this.findOrCreateGatewayOnlyGroup(zone, namespace);
+      pending = this.findOrCreateGatewayOnlyGroup(zone, namespace, rt);
       pending.catch(() => this.gatewayOnlyGroups.delete(key)); // a failed lookup is retried by the next create
       this.gatewayOnlyGroups.set(key, pending);
     }
     return pending;
   }
 
-  private async findOrCreateGatewayOnlyGroup(zone: string, namespace: string): Promise<string> {
+  private async findOrCreateGatewayOnlyGroup(zone: string, namespace: string, rt: ReturnType<typeof realtimeRule>): Promise<string> {
     const projectId = this.opts.projectId ?? await this.need('defaultProjectId')(this.credentials);
-    const name = gatewayOnlyGroupName(namespace);
+    const name = rt ? realtimeGroupName(namespace, [rt.port, rt.portTo]) : gatewayOnlyGroupName(namespace);
     const groups = await this.need('listSecurityGroups')(zone, this.credentials, { projectId, name });
     const existing = groups.find(g => g.name === name);
     if (existing) return existing.id;
     return this.need('createSecurityGroup')(zone, this.credentials, {
       projectId, name, tags: [DEPLOY_TAG, nsTag(namespace)],
-      description: 'ai-gateway replicas reached only through the gateway (token-gated nginx :80)',
-      rules: GATEWAY_ONLY_PORTS.map(port => ({ protocol: 'TCP' as const, port })),
+      description: rt ? `ai-gateway realtime replicas: token-gated nginx :80 + WebRTC UDP ${rt.port}-${rt.portTo}`
+        : 'ai-gateway replicas reached only through the gateway (token-gated nginx :80)',
+      rules: [...GATEWAY_ONLY_PORTS.map(port => ({ protocol: 'TCP' as const, port })), ...(rt ? [rt] : [])],
     });
   }
 
@@ -190,8 +206,11 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
     const groupId = (known?.zone === zone ? groups.find(g => g.id === known.groupId)?.id : undefined) ?? groups[0]?.id
       ?? await this.need('createSecurityGroup')(zone, this.credentials, {
         projectId, name: groupName, tags, description: `ai-gateway exposed deployment ${spec.name}`,
-        rules: [...spec.exposure.ports, { protocol: 'tcp' as const, port: PROBE_PORT }]
-          .map(r => ({ protocol: r.protocol === 'udp' ? 'UDP' as const : 'TCP' as const, port: r.port })),
+        rules: [
+          ...[...spec.exposure.ports, { protocol: 'tcp' as const, port: PROBE_PORT, to: undefined }]
+            .map(r => ({ protocol: r.protocol === 'udp' ? 'UDP' as const : 'TCP' as const, port: r.port, ...(r.to ? { portTo: r.to } : {}) })),
+          ...(realtimeRule(spec) ? [realtimeRule(spec)!] : []),
+        ],
       });
     return { zone, ipId: ip.id, ip: ip.address, groupId };
   }

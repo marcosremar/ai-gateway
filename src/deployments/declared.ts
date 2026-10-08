@@ -4,6 +4,8 @@
  * `PUT /v1/deployments/:name` route uses.
  *
  * What a declaration holds besides the plain spec fields:
+ *   - `profile`: the profile a deployment that does not exist yet is created from (image from the declaration). An
+ *     existing deployment is never reset to it: only the declared fields are patched over the stored spec.
  *   - `image`: `{ env, repository, default }` — the image comes from env `<env>` (a full reference, or just a tag of
  *     `repository`), else `default`. No default and no env → pending.
  *   - `registryAuth`: `{ server, username, passwordEnv }` — the password is read from env `<passwordEnv>` at every
@@ -16,7 +18,8 @@
  * Replicas start only when a request needs them, as for any other deployment.
  *
  * A declared field the operator changed by hand (PUT/PATCH) is put back at the next reconcile; fields the declaration
- * does not hold (e.g. `paused`) are left as the operator set them.
+ * does not hold (e.g. `paused`, and `env` when it declares neither `env` nor `generatedSecrets`) are left as the
+ * operator set them. `envByMachineType` is merged per key: the declared keys are put back, the stored ones stay.
  */
 
 import { randomBytes } from 'crypto';
@@ -26,6 +29,7 @@ import type { DeploymentSpec } from './types';
 export interface DeclaredDeployment {
   name: string;
   description?: string;
+  profile?: string;
   image?: { env?: string; repository?: string; default?: string | null };
   registryAuth?: { server?: string; username: string; passwordEnv: string };
   generatedSecrets?: string[];
@@ -34,10 +38,9 @@ export interface DeclaredDeployment {
 }
 
 /**
- * `parle-speech`: the L40S it runs on in production, and when Scaleway has none (live QA 2026-10-07: `out of stock` in
- * fr-par-2 for 17 min, the 2nd replica never came) the walk tries the L40S in fr-par-1 (skipped at no cost when not
- * sold there), then an L4 in fr-par-2 and in pl-waw-2 — all under `maxEurPerHour` 1.5 (L40S €1.47/h, L4 below). The
- * image reads `LLM_PARALLEL` (deploy/speech/start.sh): 4 on the 24 GB L4 (its default), 8 on the 48 GB L40S (as run).
+ * `parle-speech`: the `speech-stack` image in the gateway's own Scaleway registry (pulled with the key the gateway
+ * already has, no registry secret). The declaration owns the image, `realtime` and the edge's `RT_MAX_SESSIONS` per
+ * machine type; sizing, limits, env and files stay as registered (a new gateway starts from the `speech-stack` profile).
  */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [parleSpeech as DeclaredDeployment];
 
@@ -94,7 +97,9 @@ export function declaredBody(
       username: decl.registryAuth.username, password, ...(decl.registryAuth.server ? { server: decl.registryAuth.server } : {}),
     };
   }
-  const declaredEnv = (decl.spec.env as Record<string, string> | undefined) ?? {};
+  const declaredEnv = decl.spec.env as Record<string, string> | undefined;
+  const declaredByType = decl.spec.envByMachineType as Record<string, Record<string, string>> | undefined;
+  const storedByType = previous?.envByMachineType ?? {};
   const secrets: Record<string, string> = {};
   for (const key of decl.generatedSecrets ?? []) {
     const kept = previous?.env?.[key];
@@ -104,7 +109,13 @@ export function declaredBody(
     body: {
       ...decl.spec,
       image,
-      env: { ...declaredEnv, ...secrets },
+      ...(declaredEnv || decl.generatedSecrets?.length ? { env: { ...declaredEnv, ...secrets } } : {}),
+      ...(declaredByType ? {
+        envByMachineType: {
+          ...storedByType,
+          ...Object.fromEntries(Object.entries(declaredByType).map(([type, vars]) => [type, { ...storedByType[type], ...vars }])),
+        },
+      } : {}),
       ...(registryAuth ? { registryAuth } : {}),
       ...(decl.description ? { description: decl.description } : {}),
     },
@@ -206,7 +217,13 @@ export class DeclaredDeploymentReconciler {
         continue;
       }
       try {
-        await target.put(decl.name, resolved.body);
+        let body = resolved.body;
+        if (!previous && decl.profile) {
+          await target.put(decl.name, { profile: decl.profile, image });
+          const patch = declaredBody(decl, this.opts.env, target.specOf(decl.name), this.opts.generateSecret);
+          if ('body' in patch) body = patch.body;
+        }
+        await target.put(decl.name, body);
         changed.push(decl.name);
         this.set(decl.name, { state: 'applied', reason: null, image, checkedAt });
         // Names of keys only — never their values.

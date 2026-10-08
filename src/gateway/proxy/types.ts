@@ -141,6 +141,11 @@ export interface ProxyConfig {
   hostname?: string;
   /** Custom exact-path route handlers */
   customRoutes?: CustomRoute[];
+  /**
+   * Exact-path routes that authenticate themselves, matched BEFORE the gateway's API-key check (e.g. telemetry ingest,
+   * which takes realtime session tokens and replica signatures). The handler owns auth and the response.
+   */
+  publicRoutes?: CustomRoute[];
   /** Custom prefix-based route handlers */
   prefixRoutes?: PrefixRoute[];
   /** Directory of static files to serve (e.g. Next.js `out/` export). Falls back for non-API paths. */

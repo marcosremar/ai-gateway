@@ -19,7 +19,7 @@
  */
 
 /** Aliases that carry the same secret on Railway / Cloud Agent (kept in sync with parle `principalSandboxToken`). */
-const TOKEN_ALIASES = ['SANDBOX_TOKEN', 'PALCO_PROXY_TOKEN', 'PALCO_PROXY', 'VMOS_PROXY_TOKEN', 'VMOS_PROXY', 'PROXY_TOKEN'] as const;
+export const TOKEN_ALIASES = ['SANDBOX_TOKEN', 'PALCO_PROXY_TOKEN', 'PALCO_PROXY', 'VMOS_PROXY_TOKEN', 'VMOS_PROXY', 'PROXY_TOKEN'] as const;
 
 /** Keys the palco never overrides (they configure the host itself, not a provider). */
 const ENV_PINNED = new Set<string>([...TOKEN_ALIASES, 'PORT', 'NODE_ENV', 'GATEWAY_API_KEYS', 'HOSTNAME', 'SANDBOX_ENV_URL']);

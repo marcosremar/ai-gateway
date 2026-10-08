@@ -12,6 +12,7 @@ paths = [
   '''^docs/''',
   '''^README\.md$''',
   '''^__tests__/''',
+  '''^scripts/realtime-e2e/''',
   '''^dist/''',
   '''^node_modules/'''
 ]
