@@ -1028,7 +1028,37 @@ hosts $0.509 (929 / 100 and 904 / 97), Slovakia $0.588 (899 / 495), Estonia $0.5
 - Reading: our code asks Vast for the ports the documented way (`-p 50000:50000/udp` …), Vast publishes them and says
   which (`VAST_UDP_PORT_*`), the edge advertises them. The datagrams die between the host's public address and the
   container. `82.65.x.x` is a residential fibre range: a host behind a home router that forwards the TCP range only
-  would look exactly like this. Second host: see below.
+  would look exactly like this. **A host limitation, not our code: on the second host the same spec connects** (below).
+
+**WebRTC on a second host (instance 54838104, host 142399, offer 43624378, Estonia, $0.539/h, 0.563 with disk; 675 /
+825 Mbps; rented only to answer the UDP question, with `maxRttExcessMs: 80`: gate RTT 80 vs 49 ms, +31, kept; edge
+`04ce8636`).** Rented 11:50:00, address 11:55:50 (image pull 5 min 47 s), ready 12:09:28: **19 min 29 s** (slower host:
+llama.cpp +163 s, models +320 s, TTS load 6 min 50 s against 2 min 49 s).
+
+- The same echo by hand, 30 s after the edge started: 6 of 6 answered (67–103 ms), `probeHits` 6. The gateway's probe
+  at ready: `inbound udp/17315: ok (68 ms)`, `path=direct`, admission lists `webrtc` and `ws`.
+- **4 learners on WebRTC, real ICE: 8 of 8 sessions connected, pair `host/host`, straight to
+  `89.221.67.180:<mapped port>`; the edge's ICE went `checking → completed` in 161–243 ms; `byTransport: {webrtc: 4}`.**
+  First live WebRTC media on Vast.
+- The harness needed a knob first: on this Mac (mobile uplink, a VPN interface, IPv6) aiortc's candidate gathering
+  takes ~5 s and every learner failed at `gather` after the fixed 2 s, then rode `ws` (`webrtc:failed:gather 4`).
+  `448068c`: `RTC_GATHER_S` / `RTC_CONNECT_S` (defaults unchanged); the runs below used 10 and 6. Connect p50 5.7–5.9 s
+  is that gathering, not the replica.
+
+| Run on the Estonian host | Transport | Turns | Failed | p50 | p95 | **max** | > 2.5 s |
+|---|---|---|---|---|---|---|---|
+| rtc4 (12:10; all four fell to ws at `gather`) | ws | 75 | 0 | 1130 | 1590 | 1841 | 0 |
+| rtcB (12:16) | webrtc | 73 | 2 `filtered` | 1762 | 2361 | 3041 | 2 |
+| rtcC (12:22) | webrtc | 78 | 15 `filtered` | 2037 | 2783 | 4001 | 9 |
+| **WebRTC pooled** | webrtc | **151** | **17 (11 %)** | **1894** | **2678** | **4001** | **11** |
+
+- **WebRTC connects but does not meet the target on this path**: p50 1.9 s, max 4.0 s, and in 17 turns the learner's
+  speech reached the STT damaged (the edge's hallucination guard dropped the transcript: `filtered`, no reply). Same
+  host, same hour, `ws`: 75 of 75, p50 1130, max 1841. The UDP path here is a mobile uplink to Estonia; the harness
+  has shown the same direction on Scaleway (aiortc WebRTC ~0.4 s slower than `ws` from this Mac). Not separated: how
+  much is the host's route and how much the Mac's uplink. A French host with open UDP was not on the market to try.
+- The Estonian host is also slower per turn than the French one at the same load (stt 311 vs 198 ms, llm first token
+  218 vs 77 ms): same card, different machine around it.
 
 **WS (the rung the edge fell back to), 4 learners, clean network, harness `scripts/realtime-e2e/load.ts --n 4
 --duration 360 --ramp 8 --turn-every 18 --jitter 3 --clip turn.wav`, audible first-audio meter** (ms from the last
@@ -1067,3 +1097,49 @@ voiced sample sent to the first non-silent audio received at the Mac, through th
   edge needs a history budget (or the stack a larger `LLM_SLOT_CTX`) before sessions longer than ~7 min.
 - To reach a machine the fix needs `EDGE_TAG=04ce8636` in `docker/speech-stack/Dockerfile` (today `666c0327`) and a
   rebuild of the speech-stack image; `ghcr.io/marcosremar/aigw-edge:04ce8636` is already published.
+- Second host, edge `04ce8636`: 226 turns ended at the edge, 209 `ok`, 17 `filtered` (the WebRTC uplink above),
+  `ttsRetries` 0, no `edge.tts.retry`, no `edge.upstream.error`; speech 738 / 738, chat 209 / 209; audio per reply
+  character 57–80 ms. Over both hosts: **461 turns answered, 0 early endings, 0 TTS runaways, 0 TTS retries.**
+
+### 5. Teardown
+
+- French host: `DELETE /v1/deployments/vast-rt` 11:49:10 → 25 s later 0 deployments, 0 replicas, TCP 40007 and 40796
+  refused. Estonian host: `DELETE` 12:29:06 → the same (TCP 16868, 16835 refused).
+- While the French host was up, the reaper's dry run in `gateway-down` mode (pointed at a dead port) listed exactly
+  one instance in the namespace, `vast-rt/54829050`: nothing left over from the 13 earlier rentals. The plain dry run
+  against the live gateway says `seen: 0` whatever exists (`skipped: no admin key: cross-check off`): not a proof.
+- After the last delete, with the local gateway stopped (12:31:40), the same `gateway-down` dry run:
+  `{"provider":"vast","seen":0}`, `{"provider":"scaleway","seen":0}`, `planned: []`. Nothing rented in
+  `marcos-proof-vast`. The first session's 15:10 dead-man loop and the watcher were stopped; port 4111 is free.
+
+### Cost
+
+| | Minutes | $/h with disk | $ |
+|---|---|---|---|
+| 13 rentals released by the gate or paused (10:15–10:41) | ~21 | 0.52–0.60 | ~0.19 |
+| France, 54829050 (10:42:46–11:49:10) | 66.4 | 0.592 | 0.66 |
+| Estonia, 54838104 (11:50:00–12:29:07) | 39.1 | 0.563 | 0.37 |
+| **Total** | **~127 (2 h 14 min of wall clock)** | | **~1.21** |
+
+One machine at a time; never above $0.60/h. Figures from the gateway's rental log and the offers' prices, not from
+Vast's invoice.
+
+### What blocks Vast for class overflow
+
+1. **The image.** The final speech-stack image cannot be pulled there (private registry, no pull-only credential).
+   Assembled at boot the stack took 6.5 min on one host and 19.5 min on another; a public or pull-only copy is the
+   first step, and it is also the only way the proof runs the exact image.
+2. **UDP is per host and unknown before renting.** One of two hosts dropped every inbound datagram. The gateway copes
+   (probe → `ws`), and `ws` met the target on that host, so this does not block a `ws` overflow; it blocks counting on
+   WebRTC. Nothing in the offer says which hosts forward UDP; the reachability result is not fed back into the
+   placement (a host could be released, or remembered, when `udpInbound` is blocked and WebRTC is wanted).
+3. **Placement is a lottery at this price.** 14 rentals for one kept French host; the gate's memory of bad hosts does
+   not survive a restart; under the cap the cheapest host in the band wins the first try even when a nearer one is
+   listed. Time from request to a kept host: 27 min in the first session (with a wrong first gate and a restart).
+4. **Sessions die at ~26 turns** (context per slot against an unbounded history) — every provider, see item 4.
+5. Capacity was measured at 4 learners only; nothing about 8, a degraded network, a phone, or a second replica.
+
+### Not run
+
+The final image itself; WebRTC from a French Vast host; WebRTC from a browser (Chrome) or a phone; TURN (none
+configured on this gateway); more than 4 learners; a session surviving the replica's replacement; `image_login`.
