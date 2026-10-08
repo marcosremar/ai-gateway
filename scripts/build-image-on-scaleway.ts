@@ -65,7 +65,7 @@ const ignoreFile = join(contextDir, '.dockerignore');
 const ignored = from || !existsSync(ignoreFile) ? [] : readFileSync(ignoreFile, 'utf8').split('\n').filter(Boolean).map(p => new Bun.Glob(p));
 const files = from ? [] : readdirSync(contextDir).filter(f => statSync(join(contextDir, f)).isFile() && !ignored.some(g => g.match(f)));
 const crane = 'docker run --rm -u 0 -e DOCKER_CONFIG=/root/.docker -v /root/.docker:/root/.docker:ro gcr.io/go-containerregistry/crane:v0.21.5';
-const build = from ? `${crane} copy ${from} ${image}` : `cd /srv/ctx && DOCKER_BUILDKIT=1 docker build --progress=plain -t ${image} . && push`;
+const build = from ? `retry ${crane} copy ${from} ${image}` : `cd /srv/ctx && DOCKER_BUILDKIT=1 docker build --progress=plain -t ${image} . && retry docker push ${image}`;
 const digest = from ? `echo ${image.split(':')[0]}@$(${crane} digest ${image})` : `docker image inspect --format '{{index .RepoDigests 0}}' ${image}`;
 const size = from ? 'echo 0' : `docker image inspect --format '{{.Size}}' ${image}`;
 const total = files.reduce((n, f) => n + statSync(join(contextDir, f)).size, 0);
@@ -87,7 +87,7 @@ echo '${secret}' | docker login ${registry}/${NAMESPACE} -u nologin --password-s
 set -x
 echo '{"state":"building"}' > /srv/status/done.json
 started=$(date +%s)
-push() { for i in 1 2 3 4 5; do docker push ${image} && return 0; sleep 20; done; return 1; }
+retry() { for i in 1 2 3 4 5; do "$@" && return 0; sleep 20; done; return 1; }
 if ${build}; then
   digest=$(${digest})
   size=$(${size})
