@@ -1,5 +1,6 @@
 """Unit tests of the edge's pure parts (no network): python tests/test_units.py (needs numpy for the VAD)."""
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -9,7 +10,9 @@ sys.path.insert(0, str(ROOT))
 
 from aigw_edge import text  # noqa: E402
 from aigw_edge.config import derive_key  # noqa: E402
-from aigw_edge.token import TokenError, TokenVerifier, b64url, sign  # noqa: E402
+from aigw_edge.intercept import match_rule  # noqa: E402
+from aigw_edge.token import verify_update  # noqa: E402
+from aigw_edge.token import MAX_CFG_CHARS, MAX_CFG_REF_CHARS, TokenError, TokenVerifier, b64url, config_digest, needs_config, sign  # noqa: E402
 
 failures = 0
 
@@ -104,6 +107,66 @@ check("token: a live WebRTC session does not let its token open a second WS",
       v.verify(reoffer, transport="ws")["sid"] == "s-reoffer" and rejects_on(reoffer, "ws"))
 alive.clear()
 check("token: once the session ended its token is replayed", replayed(reoffer, alive.__contains__))
+by_ref = b64url(json.dumps({"voice": "br-m-08", "system": "x" * 16000}).encode())
+ref = {**good, "cfg": "", "cfd": config_digest(by_ref)}
+
+
+def ref_verdict(sid, cfg_, signed=by_ref):
+    try:
+        return v.verify(sign({**ref, "sid": sid, "cfd": config_digest(signed)}, key), cfg=cfg_)["cfg"]
+    except TokenError as e:
+        return e.reason
+
+
+check("token: config by reference, 16 KB: verified against the signed digest", ref_verdict("r1", by_ref)["system"] == "x" * 16000)
+check("token: config by reference: missing, altered or not base64url JSON → cfg",
+      [ref_verdict("r2", None), ref_verdict("r3", by_ref[:-4] + "AAAA"), ref_verdict("r4", "")] == ["cfg"] * 3)
+check("token: config by reference: the digest is sha256 over the base64url text (the gateway's vector)",
+      config_digest("abc") == "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0" and needs_config(sign(ref, key)) and not needs_config(sign(good, key))
+      and not needs_config("x") and not needs_config(None))
+over = b64url(json.dumps({"system": "x" * MAX_CFG_REF_CHARS}).encode())
+check("token: config by reference over the bound → cfg; an inline cfg keeps its 6144 bound",
+      ref_verdict("r5", over, over) == "cfg" and rejects({**good, "sid": "r6", "cfg": "e30" + "A" * MAX_CFG_CHARS}, "cfg"))
+RULES = [
+    {"tag": "slower", "contains": ["mais devagar", "fala devagar", "devagar por favor"]},
+    {"tag": "repeat", "contains": ["pode repetir", "repete", "nao entendi", "como e que e"], "whole": ["desculpa", "o que", "como", "de novo"]},
+    {"tag": "hesitation", "whole": ["ha", "hum"], "question": True},
+    {"tag": "caption", "contains": ["transcricao", "legenda", "mostra o texto"]},
+    {"tag": "options", "contains": ["opcoes", "nao sei o que dizer"]},
+]
+tag = lambda text: (match_rule(RULES, text) or {}).get("tag")  # noqa: E731
+check("intercept: the school's four voice commands, as its own detector reads them (case, accents, punctuation)",
+      [tag(t) for t in ("Pode repetir?", "Mais devagar, por favor.", "Mostra a transcrição.", "Quais são as opções?")]
+      == ["repeat", "slower", "caption", "options"])
+check("intercept: a phrase matches whole words anywhere; a `whole` form only as the entire utterance; the first rule wins",
+      [tag(t) for t in ("NÃO ENTENDI!!", "Não entendi, pode falar mais devagar?", "«Desculpa»", "Desculpa, eu queria um pão.",
+                        "A repetição ajuda.", "O que?", "O que tem hoje?", "Como é que é?")]
+      == ["repeat", "slower", "repeat", None, None, "repeat", None, "repeat"])
+check("intercept: a `question` rule needs the question mark of the raw transcript; an ordinary turn matches nothing",
+      [tag(t) for t in ("Hã?", "Hã.", "Hum...", "Bom dia, eu queria um pão francês.", "", "?!")] == ["hesitation", None, None, None, None, None])
+check("intercept: malformed rules are skipped, never raised",
+      match_rule([None, "x", {"contains": "pode"}, {"contains": [None, 3, ""]}, {"tag": "ok", "whole": ["oi"]}], "Oi!") == {"tag": "ok", "whole": ["oi"]}
+      and match_rule("x", "Oi") is None and match_rule(None, "Oi") is None)
+now_s = int(now)
+update = lambda n, **over: sign({"sid": "s1", "upd": b64url(b'{"system":"Lia"}'), "n": n, "iat": now_s, "exp": now_s + 60, **over}, key)  # noqa: E731
+
+
+def update_verdict(token_, after=0, k=key):
+    try:
+        return verify_update(token_, k, "s1", after)
+    except TokenError as e:
+        return e.reason
+
+
+check("signed update: verified with the session key, bound to the session, ordered by n",
+      [update_verdict(update(7)), update_verdict(update(7), 7), update_verdict(update(7), k=b"x" * 32), update_verdict(update(7, sid="s2")),
+       update_verdict(update(7, exp=now_s - 1)), update_verdict(update("7")), update_verdict(update(7, upd="W10"))]
+      == [(7, {"system": "Lia"}), "replayed", "bad_signature", "session", "expired", "replayed", "cfg"])
+GATEWAY_UPDATE = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJzMSIsInVwZCI6ImV5SnplWE4wWlcwaU9pSk1hV0VpZlEiLCJuIjoxNzYwMDAwMDAwMDAwLCJpYXQiOjE3NjAwMDAwMDAsImV4cCI6MTc2MDAwMDYwMH0.mX9TEdabp9hga5PbxrjynCPCq2L6tQTKr-q-UXiTbNg")
+check("signed update: one signed by the gateway (src/realtime/token.ts signUpdateToken, same vector in its tests) verifies here",
+      verify_update(GATEWAY_UPDATE, key, "s1", 0, now=lambda: 1760000100) == (1760000000000, {"system": "Lia"}))
+check("signed update: is not a session token, and a session token is not an update",
+      rejects({**good, "sid": "u1", "upd": "e30"}, "claims") and update_verdict(sign({**good, "sid": "s1"}, key)) == "replayed")
 check("token: expired", rejects({**good, "sid": "s2", "iat": int(now) - 400, "exp": int(now) - 100}, "expired"))
 check("token: lifetime", rejects({**good, "sid": "s3", "exp": int(now) + 3600}, "ttl_too_long"))
 check("token: replica", rejects({**good, "sid": "s4", "rep": "fr-par-2:other"}, "replica"))
@@ -113,7 +176,6 @@ check("token: key derivation is HMAC-SHA256(key=token, msg='aigw-rt-v1')",
       derive_key("t" * 32).hex() == __import__("hmac").new(b"t" * 32, b"aigw-rt-v1", "sha256").hexdigest())
 
 # The gateway's contract vectors (docs/realtime-token-vectors.json in the gateway, copied here).
-import json  # noqa: E402
 
 from aigw_edge.token import turn_credential  # noqa: E402
 

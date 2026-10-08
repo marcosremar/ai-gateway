@@ -160,6 +160,8 @@ with the same rule (`fit_history` in `server.py`, copied verbatim into `aigw_edg
 - **Budget** = context per slot − `max_tokens` (160) − 64 tokens of margin (chat template, generation prompt). The
   context per slot is read once at warm-up from llama.cpp's `GET /props` (`default_generation_settings.n_ctx`),
   published as `llm_ctx` in `/health`; the edge picks it up from the health poll it already makes (no call on the turn).
+  `/health` also reports `models: {stt, llm, tts}` (`STT_MODEL`, `LLM_FILE`, `TTS_MODEL`): the edge puts them in each
+  turn's `done.served`.
   2048 is the default when `/props` or `llm_ctx` is missing. The composed fallback reads `S2S_CHAT_CONTEXT` (default 2048).
 - **Always kept**: `system`, every `system` message inside `messages`, the current user turn.
 - **Dropped**: the oldest whole turns (a user message with everything up to the next user message), 8 turns at a

@@ -20,10 +20,11 @@ import { iceServersFor, type IceConfig, DEFAULT_STUN_URLS } from './ice';
 import { noteRefusedSession, noteSession, reportExternalLoad } from './external-load';
 import { probeUdp } from './net-probe';
 import { TurnHealth, type TurnProbe, type TurnUrlHealth } from './turn-health';
+import { hooksProblem } from './app-hooks';
 import { echoTrace, makeEmitter, newTrace, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
 import {
-  deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, verifySessionToken,
-  RT_MAX_CFG_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
+  configDigest, deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, signUpdateToken, verifySessionToken,
+  RT_MAX_CFG_CHARS, RT_MAX_CFG_REF_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
 } from './token';
 
 export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list'>>;
@@ -308,13 +309,16 @@ export class RealtimeService {
       return sendJson(res, 404, errorBody(`deployment '${dep || '(none)'}' not found`, 'not_found', { fallback: FALLBACK }));
     }
     const app = view.app ?? userId;
+    const hooks = hooksProblem(cfgIn);
+    if (hooks) return sendJson(res, 400, errorBody(hooks, 'invalid_request'));
     const sessionConfig = { ...cfgIn, deployment: dep };
     const cfg = encodeSessionConfig(sessionConfig);
-    if (cfg.length > RT_MAX_CFG_CHARS) {
+    if (cfg.length > RT_MAX_CFG_REF_CHARS) {
       return sendJson(res, 413, errorBody(
-        `session config is ${cfg.length} base64url characters, over ${RT_MAX_CFG_CHARS}: send the long history with config_update once connected`,
+        `session config is ${cfg.length} base64url characters, over ${RT_MAX_CFG_REF_CHARS}: send the long history with config_update once connected`,
         'config_too_large'));
     }
+    const byReference = cfg.length > RT_MAX_CFG_CHARS;
 
     noteSession(dep, trace.traceId, this.now());
     const placed = await this.place(dep, ordered.order);
@@ -338,7 +342,9 @@ export class RealtimeService {
     const sid = `rt_${randomUUID().replace(/-/g, '')}`;
     const iat = Math.floor(this.now() / 1000);
     const exp = iat + ttl;
-    const token = signSessionToken({ sid, app, dep, rep: placed.replica.id, cfg, iat, exp }, deriveRealtimeKey(replicaToken));
+    const token = signSessionToken({
+      sid, app, dep, rep: placed.replica.id, cfg: byReference ? '' : cfg, iat, exp, ...(byReference ? { cfd: configDigest(cfg) } : {}),
+    }, deriveRealtimeKey(replicaToken));
     this.sessions.set(sid, { dep, rep: placed.replica.id, app, exp: exp * 1000, pendingUntil: this.now() + this.reservationMs });
     this.ensurePolling();
 
@@ -360,14 +366,43 @@ export class RealtimeService {
       attrs: { deployment: dep, replica: placed.replica.id, active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1, turn: iceServers.length > 1 },
     });
     sendJson(res, 200, {
-      sessionId: sid, token, expiresAt: new Date(exp * 1000).toISOString(), deployment: dep, traceId: trace.traceId,
+      sessionId: sid, token, ...(byReference ? { cfg } : {}), expiresAt: new Date(exp * 1000).toISOString(), deployment: dep, traceId: trace.traceId,
       telemetryUrl: `${base}/v1/telemetry/events`,
       transports, iceServers,
       limits: {
-        maxSessionSeconds: ttl, maxConfigChars: RT_MAX_CFG_CHARS, requestsCharged: admin ? 0 : charge,
+        maxSessionSeconds: ttl, maxConfigChars: RT_MAX_CFG_REF_CHARS, requestsCharged: admin ? 0 : charge,
         replica: { active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1 },
       },
     });
+  };
+
+  signUpdate = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const userId = this.opts.userOf(req);
+    if (!userId) return sendJson(res, 401, errorBody('a signed update needs an app API key', 'unauthorized'));
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(req, MAX_SESSION_BODY); } catch (err) {
+      return sendJson(res, (err as { status?: number }).status ?? 400, errorBody(`bad request: ${(err as Error).message}`, 'invalid_request'));
+    }
+    const update = body.update;
+    if (typeof body.token !== 'string' || !update || typeof update !== 'object' || Array.isArray(update)) {
+      return sendJson(res, 400, errorBody('"token" (the session token) and "update" (an object) are required', 'invalid_request'));
+    }
+    const session = this.resolveToken(body.token);
+    if ('status' in session) return sendJson(res, session.status, errorBody(session.message, session.code));
+    if (!this.opts.isAdmin(userId) && session.claims.app !== userId) {
+      return sendJson(res, 403, errorBody('this API key does not own the session', 'forbidden'));
+    }
+    const hooks = hooksProblem(update as Record<string, unknown>);
+    if (hooks) return sendJson(res, 400, errorBody(hooks, 'invalid_request'));
+    const upd = encodeSessionConfig(update as Record<string, unknown>);
+    if (upd.length > RT_MAX_CFG_REF_CHARS) {
+      return sendJson(res, 413, errorBody(`update is ${upd.length} base64url characters, over ${RT_MAX_CFG_REF_CHARS}`, 'config_too_large'));
+    }
+    const n = this.now();
+    const { sid, exp } = session.claims;
+    const signed = signUpdateToken({ sid, upd, n, iat: Math.floor(n / 1000), exp }, deriveRealtimeKey(session.replicaToken));
+    this.emit(traceOf(req), 'rt.session.update_signed', { sessionId: sid, attrs: { keys: Object.keys(update).sort().join(','), chars: upd.length } });
+    sendJson(res, 200, { sessionId: sid, signed, n });
   };
 
   /** A ready replica with a free slot, or why none (and the deployment woken when it was cold). */

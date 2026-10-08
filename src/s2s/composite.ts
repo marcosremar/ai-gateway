@@ -248,11 +248,14 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
   const { stages, config, signal } = opts;
 
   let transcript = opts.transcript?.text ?? '';
+  let sttProvider: string | null = null;
+  let voiced: SpokenAudio | null = null;
   if (!opts.transcript) {
     const sttHedgeMs = Math.min(hedgeMs() ?? Infinity, positive(Number(process.env.S2S_STT_HEDGE_MS)) ?? STT_HEDGE_MS);
     const sttBudgetMs = positive(Number(process.env.S2S_STT_BUDGET_MS)) ?? STT_BUDGET_MS;
     const heard = await stages.transcribe(opts.audio, opts.contentType, config, signal, sttHedgeMs, sttBudgetMs);
     transcript = heard.text.trim();
+    sttProvider = heard.provider;
     opts.emitEvent({ type: 'transcript', text: transcript, stt_ms: ms(), at_ms: ms(), provider: heard.provider, fallback: heard.fallback });
     if (heard.filtered?.length) opts.emitEvent({ type: 'filtered', stage: 'stt', reasons: heard.filtered });
   }
@@ -370,6 +373,7 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
         }
         if (firstAudio === null) {
           firstAudio = ms();
+          voiced = spoken;
           report.first_sound_ms ??= firstAudio;
           opts.emitEvent({ type: 'first_audio', at_ms: firstAudio, provider: spoken.provider, fallback: spoken.fallback });
         }
@@ -392,6 +396,10 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
     ...(config.speak_field ? { reply_raw: raw } : {}),
     ...(missingAudio ? { missing_audio: missingAudio } : {}),
     sentences: index, spoken: index - missingAudio, skipped: missingAudio, audio_ms: Math.round(audioMs),
+    served: {
+      stt: sttProvider, llm: chat.provider, tts: voiced?.provider ?? null, voice: voiced && !voiced.fallback ? config.voice ?? null : null,
+      opener: report.opener !== null, transport: 's2s',
+    },
   });
   return { transcript, reply: reply.join(' '), replyRaw: raw, firstAudioMs: firstAudio, missingAudio };
 }

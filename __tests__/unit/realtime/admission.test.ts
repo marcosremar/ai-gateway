@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  decodeSessionConfig, deriveRealtimeKey, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
+  configDigest, decodeSessionConfig, deriveRealtimeKey, RT_MAX_CFG_REF_CHARS, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
 } from '../../../src/realtime';
 import { _resetExternalLoad } from '../../../src/realtime/external-load';
 import { parseEdgeStatus } from '../../../src/realtime/edge-status';
@@ -92,6 +92,74 @@ describe('POST /v1/realtime/sessions', () => {
     expect(body.limits).toMatchObject({ maxSessionSeconds: 600, requestsCharged: 40, replica: { active: 0, max: 8, pending: 1 } });
     expect(gw.charged).toEqual([['parle', 40]]);
     expect(externalLoadOf('speech')).toMatchObject({ active: 0, max: 8, replicas: 1 });
+  });
+
+  it('config size: 3 KB rides in the token as before; 7 KB and 16 KB go by reference (digest in the token, config in the descriptor); 25 KB is refused', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const admit = async (kb: number) => {
+      const config = { ...CONFIG, system: 'é'.repeat(kb * 512) };
+      const res = await gw.create({ config });
+      const body = await res.json() as Record<string, any>;
+      const verdict = res.ok ? verifySessionToken(body.token, deriveRealtimeKey(REPLICA_TOKEN), Math.floor(Date.now() / 1000)) : null;
+      return { config, status: res.status, body, claims: verdict && 'claims' in verdict ? verdict.claims : null };
+    };
+    const small = await admit(3);
+    expect(small.body.cfg).toBeUndefined();
+    expect(small.claims!.cfd).toBeUndefined();
+    expect(decodeSessionConfig(small.claims!.cfg)).toEqual(small.config);
+    for (const kb of [7, 16]) {
+      const large = await admit(kb);
+      expect(large.status).toBe(200);
+      expect(large.claims).toMatchObject({ cfg: '', cfd: configDigest(large.body.cfg) });
+      expect(decodeSessionConfig(large.body.cfg)).toEqual(large.config);
+      expect(large.body.token.length).toBeLessThan(600);
+      expect(large.body.transports[1].url.length).toBeLessThan(700);
+    }
+    expect((await admit(25)).status).toBe(413);
+    expect(small.body.limits.maxConfigChars).toBe(RT_MAX_CFG_REF_CHARS);
+    expect(configDigest('abc')).toBe('ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0');
+  });
+
+  it('intercept rules are checked at admission: a bounded list of plain phrases, no patterns', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const rule = { tag: 'repeat', action: 'drop', contains: ['pode repetir'] };
+    const status = async (intercepts: unknown) => (await gw.create({ config: { ...CONFIG, intercepts } })).status;
+    expect(await status([rule, { tag: 'options', action: 'say', whole: ['ajuda'], question: false, text: 'Você pode pedir um pão.', voice: 'rafa' }])).toBe(200);
+    for (const bad of [
+      'x', [{ ...rule, tag: 'Repeat!' }], [{ ...rule, action: 'webhook' }], [{ ...rule, contains: [] }], [{ ...rule, contains: ['x'.repeat(81)] }],
+      [{ ...rule, contains: Array(65).fill('x') }], [{ ...rule, contains: [/repete/] }], [{ ...rule, action: 'say' }], [{ ...rule, question: 'yes' }],
+      Array(33).fill(rule),
+    ]) expect(await status(bad)).toBe(400);
+    const guard = async (reply_guard: unknown) => (await gw.create({ config: { ...CONFIG, reply_guard } })).status;
+    expect(await guard({ deny: ['sure', 'bien sûr'], note: 'Responda só em português.' })).toBe(200);
+    for (const bad of ['pt', {}, { deny: [] }, { deny: ['x'], note: '' }, { deny: Array(257).fill('x') }]) expect(await guard(bad)).toBe(400);
+  });
+
+  it('POST /v1/realtime/updates signs an update for a session of the caller\'s app: bound to the session, ordered, validated', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const session = await (await gw.create({ config: CONFIG })).json() as Record<string, any>;
+    const sign = (body: unknown, key = 'key-parle') => fetch(`${gw.url}/v1/realtime/updates`, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: JSON.stringify(body) });
+    const update = { system: 'Tu es Lia, à la boulangerie.', drop_turn: `${session.sessionId}:2`, say: { text: 'Bem-vinda!', history: true } };
+    const res = await sign({ token: session.token, update });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ sessionId: session.sessionId, n: expect.any(Number) });
+    const [, payload] = body.signed.split('.');
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    expect(Object.keys(claims)).toEqual(['sid', 'upd', 'n', 'iat', 'exp']);
+    expect(claims).toMatchObject({ sid: session.sessionId, n: body.n });
+    expect(claims.exp).toBe(JSON.parse(Buffer.from(session.token.split('.')[1], 'base64url').toString()).exp);
+    expect(decodeSessionConfig(claims.upd)).toEqual(update);
+    expect((await sign({ token: session.token, update }, 'key-other')).status).toBe(403);
+    expect((await sign({ token: session.token, update }, 'key-admin')).status).toBe(200);
+    expect((await sign({ token: `${session.token}x`, update })).status).toBe(401);
+    expect((await sign({ token: session.token })).status).toBe(400);
+    expect((await sign({ token: session.token, update: { say: { text: '' } } })).status).toBe(400);
+    expect((await sign({ token: session.token, update: { intercepts: [{ tag: 'x' }] } })).status).toBe(400);
+    expect((await sign({ token: session.token, update: { system: 'x'.repeat(25_000) } })).status).toBe(413);
   });
 
   it('only offers the edge transports the replica speaks', async () => {
@@ -218,8 +286,9 @@ describe('POST /v1/realtime/sessions', () => {
     expect(await denied.json()).toMatchObject({
       error: { code: 'budget_exceeded' }, reason: 'daily_budget_exhausted', budget: 'requests', reset_at: '2026-10-08T00:00:00.000Z',
     });
-    const big = await gw.create({ config: { ...CONFIG, system: 'x'.repeat(7000) } });
+    const big = await gw.create({ config: { ...CONFIG, system: 'x'.repeat(25_000) } });
     expect(big.status).toBe(413);
+    expect(await big.json()).toMatchObject({ error: { code: 'config_too_large' } });
     expect((await gw.create({ transports: ['webrtc'] })).status).toBe(400);
     expect((await gw.create({ config: CONFIG, transports: ['carrier-pigeon'] })).status).toBe(400);
   });
