@@ -9,7 +9,8 @@
  *     on its own `/v1/s2s` — STT, LLM and TTS on one GPU, the lowest latency (0.4–0.8 s to first audio measured);
  *  2. no ready replica (cold, paused, absent, refused): the deployment is woken for the next turns (never in no-wake
  *     mode, gateway/proxy/no-wake.ts) and this one is answered at once by the composed pipeline (composite.ts) over
- *     the stage chains, each with its own fallback;
+ *     the stage chains, each with its own fallback; the same when every ready replica is at capacity, its realtime
+ *     sessions included (`fallback: "saturated"`);
  *  3. hedge: the primary has not sent its transcript after `S2S_HEDGE_MS` (default 2.5 s) → the composed pipeline
  *     starts in parallel; the first one to produce audio wins, the other is aborted;
  *  4. the primary breaks after its transcript but before audio → the composed pipeline resumes at the LLM with that
@@ -225,7 +226,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
           lease = await opts.controller.acquire(deployment, { waitMs: 0, stage: 's2s', ...(noWake ? { noWake: true } : {}) });
         } catch (err) {
           if (!(err instanceof DeploymentError)) throw err;
-          skip = err.status === 409 ? 'paused' : err.status === 404 ? 'not_found' : err.code === 'stage_out' ? 'circuit_open' : 'cold';
+          skip = err.status === 409 ? 'paused' : err.status === 404 ? 'not_found' : err.code === 'stage_out' ? 'circuit_open' : err.code ?? 'cold';
           if (skip === 'cold' && noWake) recordNoWakeSkip();
           else if (skip === 'cold') { try { opts.controller.wake(deployment); } catch { /* vanished */ } }
         }
