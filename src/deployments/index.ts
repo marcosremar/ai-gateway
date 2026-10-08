@@ -141,7 +141,7 @@ export function deploymentsFromEnv(
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
     ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId }) } : {}),
-    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey) } : {}),
+    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log }) } : {}),
   };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
   const controller = new DeploymentController({

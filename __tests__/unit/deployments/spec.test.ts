@@ -198,6 +198,8 @@ describe('candidates, near and provider vast', () => {
     expect(buildSpec('x', { ...vast, port: 8010, minCuda: 12.9 }, { profiles }).minCuda).toBe(12.9);
     expect(() => buildSpec('x', { ...vast, port: 8000, bootScript: undefined }, { profiles })).toThrow(/need bootScript and image/);
     expect(() => buildSpec('x', { ...vast, files: { a: 'YQ==' } }, { profiles })).toThrow(/files are not supported on vast/);
+    expect(() => buildSpec('x', { ...vast, bootScript: 'x'.repeat(16_000) }, { profiles })).toThrow(/vast accepts 32 KB of env/);
+    expect(() => buildSpec('x', { ...vast, bootScript: 'x'.repeat(12_000) }, { profiles })).not.toThrow();
     expect(() => buildSpec('x', { ...vast, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles })).toThrow(/exposure/);
     expect(() => buildSpec('x', { ...vast, idleAction: 'stop' }, { profiles })).toThrow(/idleAction 'stop'/);
     // A Vast candidate on a Scaleway spec brings the same rules.
