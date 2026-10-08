@@ -171,13 +171,12 @@ polls `/__aigw/rt/status` of the replicas of every deployment with live sessions
   `externalInflightEquivalent()` converts it into the autoscaler's unit (a full replica = `targetInflightPerReplica`);
 - calls `wake(deployment)` while any session is active, so the idle clock does not scale it to zero under a class.
 
-**Wiring pending** (the autoscale files are being changed by another PR): in `src/deployments/controller-autoscale.ts`,
-where the pressure decision reads `const load = this.demandOf(rt);`:
-
-```ts
-// TODO(realtime): count realtime sessions as load (src/realtime/external-load.ts)
-const load = this.demandOf(rt) + externalInflightEquivalent(rt.record.spec.name, rt.record.spec.targetInflightPerReplica);
-```
+The pressure decision adds that figure to the load it already reads (`controller-autoscale.ts` `decide`), under the
+existing rule: occupancy above `scaleOutAt` (75 %) of the ready + booting replicas' slots for `windowSeconds` (20 s) asks
+for one more replica (7 of 8 sessions on one L40S; 6 of 8 is exactly 75 % and asks nothing), a replica that is booting
+counts as capacity, `maxReplicas`, the replica cap, the € ceiling and the create back-off apply as for any load, and
+when the sessions end the extra replica is released by the scale-in rules. A deployment with no realtime session
+reports nothing and is scaled exactly as before.
 
 ## The ladder (SDK)
 

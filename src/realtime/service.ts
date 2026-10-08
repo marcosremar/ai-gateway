@@ -159,6 +159,7 @@ export class RealtimeService {
       for (const r of this.readyReplicas(d.name)) {
         const s = await this.status.get(r.id, r.base, token);
         if (!s.ok) continue;
+        reportExternalLoad(d.name, r.id, s.status.active, s.status.max, this.now());
         if (s.status.active > 0) { try { this.opts.controller.wake(d.name); } catch { /* vanished */ } }
         await this.probeNet(d.name, r, s.status, token);
       }

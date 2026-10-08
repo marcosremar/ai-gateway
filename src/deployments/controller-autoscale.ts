@@ -10,6 +10,7 @@ import { ParkingControl } from './controller-parking';
 import type { Runtime } from './controller-state';
 import { replicaPhase, type Plan } from './planner';
 import type { ReplicaMachine } from './types';
+import { externalInflightEquivalent } from '../realtime/external-load';
 
 /** Window of the latency / error signals. */
 export const SIGNAL_WINDOW_MS = 60_000;
@@ -46,7 +47,7 @@ export abstract class AutoscaleControl extends ParkingControl {
   protected decide(rt: Runtime, live: ReplicaMachine[], active: boolean): { decision: PressureDecision; floor: number } {
     const booting = live.filter(m => replicaPhase(this.observed(m, 0)) === 'booting').length;
     const sig = this.signals(rt);
-    const load = this.demandOf(rt);
+    const load = this.demandOf(rt) + externalInflightEquivalent(rt.record.spec.name, rt.record.spec.targetInflightPerReplica, this.now());
     const decision = pressureDecision({
       spec: rt.record.spec, load, live: live.length, booting, p95Ms: sig.p95Ms, errorRate: sig.errorRate, samples: sig.samples,
       active, now: this.now(), state: rt.pressure,
