@@ -138,6 +138,8 @@ if (declared) {
   log.log({ declared: status.map(s => ({ name: s.name, state: s.state, reason: s.reason })) }, 'Declared deployments');
   declared.start();
 }
+const bootRegistryWarning = deployments?.registryWarning() ?? null;
+if (bootRegistryWarning) log.error({}, `ERROR: ${bootRegistryWarning}`);
 
 function mountProviders() {
   const built = buildServeProviders({
@@ -193,7 +195,11 @@ let latency: (() => LatencyReport) | null = null;
  */
 const chainHealth = () => {
   const report = chainsNow();
-  return { ...report, fallback: fallbackWatch(report.stages), latency: latency?.() ?? null };
+  const registryWarning = deployments?.registryWarning() ?? null;
+  return {
+    ...report, warnings: [...(report.warnings ?? []), ...(registryWarning ? [registryWarning] : [])],
+    fallback: fallbackWatch(report.stages), latency: latency?.() ?? null,
+  };
 };
 setInterval(() => fallbackWatch(chainsNow().stages), 15_000).unref();
 

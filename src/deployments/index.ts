@@ -10,9 +10,10 @@ import { DeploymentController } from './controller';
 import { DEFAULT_SCALING_MODE } from './scaling-spec';
 import { probeLimitsFromEnv, spendLimitsFromEnv } from './spend-limits';
 import { createDeploymentRoutes, HttpReplicaProbe } from './http';
-import { ScalewayDeploymentBackend } from './scaleway-backend';
+import { ScalewayDeploymentBackend, scalewayRegistryOf } from './scaleway-backend';
+import { usesScaleway } from './spec';
 import { VastDeploymentBackend } from './vast-backend';
-import type { DeploymentBackend, DeploymentProvider } from './types';
+import type { DeploymentBackend, DeploymentProvider, DeploymentSpec } from './types';
 import { FileHostStore } from './host-reputation';
 import { FileDeploymentStore } from './store';
 import { AppRegistry, FileAppStore } from './apps';
@@ -68,6 +69,15 @@ export interface DeploymentsFromEnv {
   apps: AppRegistry;
   devices: AppDevices;
   handler: ReturnType<typeof createDeploymentRoutes>;
+  registryWarning: () => string | null;
+}
+
+export function privateImageWarning(specs: DeploymentSpec[], scaleway: Pick<ScalewayDeploymentBackend, 'registryAuthFor'> | undefined): string | null {
+  if (!scaleway) return null;
+  const blocked = specs.filter(s => usesScaleway(s) && scalewayRegistryOf(s.image) && !s.registryAuth && !s.bootScript && !scaleway.registryAuthFor(s.image));
+  if (!blocked.length) return null;
+  return `SCW_REGISTRY_SECRET_KEY is missing (or equals SCW_SECRET_KEY): ${blocked.map(s => s.name).join(', ')} cannot create a Scaleway replica`
+    + ' because its image is on the private registry — set it to a ContainerRegistryReadOnly IAM key and restart the gateway';
 }
 
 /**
@@ -149,8 +159,9 @@ export function deploymentsFromEnv(
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
   const maxDevices = Number(env.APP_MAX_DEVICES);
   const devices = new AppDevices(apps, { log: opts.log, ...(maxDevices > 0 ? { maxPerApp: Math.floor(maxDevices) } : {}) });
+  const scaleway = secret ? new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY }) : undefined;
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
-    ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY }) } : {}),
+    ...(scaleway ? { scaleway } : {}),
     ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir) }) } : {}),
   };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
@@ -194,7 +205,8 @@ export function deploymentsFromEnv(
   // The janitor's leftovers (build servers, detached SBS volumes) exist only on Scaleway; a deleted Vast instance
   // takes its disk with it.
   const stopJanitor = janitorOn && secret ? startJanitor({ cloud: scalewayJanitorCloud(secret, projectId), log: opts.log }) : undefined;
-  return { controller, apps, devices, handler, ...(stopJanitor ? { stopJanitor } : {}) };
+  const registryWarning = () => privateImageWarning(controller.list().flatMap(v => controller.specOf(v.name) ?? []), scaleway);
+  return { controller, apps, devices, handler, registryWarning, ...(stopJanitor ? { stopJanitor } : {}) };
 }
 
 /** The janitor's view of Scaleway: build servers by tag and the project's SBS volumes, in every known zone. */
