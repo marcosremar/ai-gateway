@@ -78,10 +78,12 @@ describe('audit 2026-10-09: stored profiles are not readable with an app key', (
 });
 
 describe('audit 2026-10-09: a damaged state file', () => {
-  it.fails('an empty deployments.json does not stop the gateway from starting', async () => {
+  it('an empty deployments.json is recovered from the backup, or refused with a clear error (never a raw SyntaxError)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'aigw-audit-'));
     dirs.push(dir);
     writeFileSync(join(dir, 'deployments.json'), '');
+    await expect(FileDeploymentStore.inDir(dir).load()).rejects.toThrow(/state file .*unreadable/);
+    writeFileSync(join(dir, 'deployments.json.bak'), JSON.stringify({ version: 1, deployments: {}, profiles: {}, networkReleases: {} }));
     await expect(FileDeploymentStore.inDir(dir).load()).resolves.toBeDefined();
   });
 });
@@ -105,7 +107,7 @@ function observed(id: string, createdAt: number, over: Partial<ObservedReplica> 
 }
 
 describe('audit 2026-10-09: maxHours while a class is being served', () => {
-  it.fails('replicas with requests in flight are not all released at the same tick when they reach maxHours together', () => {
+  it('replicas with requests in flight are not all released at the same tick when they reach maxHours together', () => {
     const born = NOW - 4 * HOUR - 1000;
     const plan = planReplicas({
       spec: ttsSpec(), now: NOW, inflight: 6, waiting: 0, lastRequestAt: NOW - 1000, aboveSince: null,
@@ -116,7 +118,7 @@ describe('audit 2026-10-09: maxHours while a class is being served', () => {
 });
 
 describe('audit 2026-10-09: a replica that never becomes ready', () => {
-  it.fails('is not replaced again and again when no request arrived since the first one', () => {
+  it('is not replaced again and again when no request arrived since the first one', () => {
     const firstRequest = NOW - 46 * MIN;
     const plan = planReplicas({
       spec: ttsSpec({ maxReplicas: 1, minActiveReplicas: 1 }), now: NOW, inflight: 0, waiting: 0, lastRequestAt: firstRequest, aboveSince: null,
@@ -128,7 +130,7 @@ describe('audit 2026-10-09: a replica that never becomes ready', () => {
 });
 
 describe('audit 2026-10-09: gateway restart while old replicas are busy', () => {
-  it.fails('a replica older than bootTimeoutMinutes whose first health check after the restart is busy is kept', async () => {
+  it('a replica older than bootTimeoutMinutes whose first health check after the restart is busy is kept', async () => {
     const store = new MemoryDeploymentStore();
     const cloud = new FakeCloud();
     clouds.push(cloud);

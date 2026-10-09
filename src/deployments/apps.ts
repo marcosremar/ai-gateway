@@ -11,10 +11,11 @@
  * (the gateway logs in to its own Scaleway registry with its own key), env values are not stored.
  */
 
-import { mkdir, readFile, rename, writeFile } from 'fs/promises';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import { parseModelRoutes, type ModelRoutesSpec, type RouteEntrySpec } from '../config/serve-providers';
 import type { FallbackKeyStore, ProvisionedKeyRecord } from './app-fallback';
+import { readStateFile, writeStateFile } from './state-file';
+import type { StateLog } from './store';
 
 export const APP_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
 export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
@@ -24,6 +25,7 @@ export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
  * every lookup checks own properties only.
  */
 const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+export const isAppId = (value: string): boolean => APP_ID_RE.test(value) && !RESERVED_KEYS.has(value);
 const ownValue = <T>(rec: Record<string, T> | undefined, key: string): T | undefined =>
   rec && !RESERVED_KEYS.has(key) && Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined;
 
@@ -54,6 +56,18 @@ export interface AppImage {
   history: AppImageVersion[];
 }
 
+export interface AppDeviceBlock { reason: string | null; by: string; at: number }
+
+export interface AppDevice {
+  firstSeen: number;
+  lastSeen: number;
+  day: number;
+  requestsToday: number;
+  requests: number;
+  lastKind: string | null;
+  blocked?: AppDeviceBlock;
+}
+
 export interface AppAccount {
   id: string;
   createdAt: number;
@@ -65,6 +79,9 @@ export interface AppAccount {
   routes?: ModelRoutesSpec;
   /** The app's provisioned OpenRouter key for the direct fallback (app-fallback.ts): its hash, never the key. */
   fallbackKey?: ProvisionedKeyRecord;
+  limits?: { dailyRequests?: number; dailyTokens?: number };
+  devices?: Record<string, AppDevice>;
+  requireDevice?: boolean;
 }
 
 type RouteStage = keyof ModelRoutesSpec;
@@ -119,24 +136,19 @@ export class MemoryAppStore implements AppStore {
 
 export class FileAppStore implements AppStore {
   private chain: Promise<void> = Promise.resolve();
-  constructor(private readonly path: string) {}
-  static inDir(dir: string): FileAppStore { return new FileAppStore(join(dir, 'apps.json')); }
+  constructor(private readonly path: string, private readonly log: StateLog = (msg, data) => console.error(msg, data ?? {})) {}
+  static inDir(dir: string, log?: StateLog): FileAppStore { return new FileAppStore(join(dir, 'apps.json'), log); }
   async load(): Promise<Record<string, AppAccount>> {
-    try {
-      return (JSON.parse(await readFile(this.path, 'utf8')) as { apps?: Record<string, AppAccount> }).apps ?? {};
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
-      throw err;
-    }
+    const read = await readStateFile<{ apps?: Record<string, AppAccount> }>(this.path);
+    if (read.from === 'backup') this.log('apps: STATE FILE UNREADABLE, recovered from the last good backup', { path: this.path, problem: read.problem });
+    return read.data?.apps ?? {};
   }
   save(apps: Record<string, AppAccount>): Promise<void> {
     const snapshot = JSON.stringify({ version: 1, apps }, null, 2);
-    this.chain = this.chain.catch(() => {}).then(async () => {
-      await mkdir(dirname(this.path), { recursive: true });
-      const tmp = `${this.path}.${process.pid}.tmp`;
-      await writeFile(tmp, snapshot, { mode: 0o600 });
-      await rename(tmp, this.path);
-    });
+    this.chain = this.chain.catch(() => {}).then(() => writeStateFile(this.path, snapshot).catch((err: unknown) => {
+      this.log('apps: STATE WRITE FAILED', { path: this.path, error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }));
     return this.chain;
   }
 }
@@ -168,7 +180,16 @@ export class AppRegistry implements FallbackKeyStore {
     await this.store.save(this.apps);
   }
 
-  private account(app: string): AppAccount {
+  save(): Promise<void> { return this.store.save(this.apps); }
+
+  async setRequireDevice(app: string, value: unknown): Promise<boolean> {
+    if (typeof value !== 'boolean') throw new AppError(400, 'requireDevice must be a boolean');
+    this.account(app).requireDevice = value;
+    await this.save();
+    return value;
+  }
+
+  account(app: string): AppAccount {
     if (!APP_ID_RE.test(app) || RESERVED_KEYS.has(app)) throw new AppError(400, `app id must match ${APP_ID_RE} (not ${[...RESERVED_KEYS].join('/')})`);
     return ownValue(this.apps, app) ?? (this.apps[app] = { id: app, createdAt: this.now(), images: {} });
   }
@@ -205,6 +226,20 @@ export class AppRegistry implements FallbackKeyStore {
     account.images[name] = image;
     await this.store.save(this.apps);
     return { image, created: !prev };
+  }
+
+  async putLimits(app: string, body: unknown): Promise<NonNullable<AppAccount['limits']>> {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'limits must be an object { dailyRequests?, dailyTokens? }');
+    const limits: NonNullable<AppAccount['limits']> = {};
+    for (const [key, value] of Object.entries(body)) {
+      if (key !== 'dailyRequests' && key !== 'dailyTokens') throw new AppError(400, `unknown field '${key}'`);
+      if (value === null) continue;
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) throw new AppError(400, `${key} must be an integer >= 0 (0 = no budget) or null (the gateway default)`);
+      limits[key] = value;
+    }
+    this.account(app).limits = limits;
+    await this.store.save(this.apps);
+    return limits;
   }
 
   /**

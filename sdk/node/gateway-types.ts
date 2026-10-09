@@ -95,6 +95,7 @@ export interface CallOptions {
   signal?: AbortSignal;
   /** Overrides the group default. For streamed results it bounds the wait for the response headers only. */
   timeoutMs?: number;
+  device?: string;
 }
 
 /** Where an answer came from (`X-Gateway-Provider` / `-Fallback` / `-Fallback-From`), null when absent. */

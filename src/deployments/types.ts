@@ -13,6 +13,7 @@
  * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
+import type { HostRecord } from './host-reputation';
 import type { RttBaseline } from './rtt-gate';
 
 export type DeploymentProvider = 'scaleway' | 'vast';
@@ -103,6 +104,7 @@ export interface DeploymentSpec {
   autoscale?: AutoscaleSpec;
   /** Warm-up windows: keep N replicas up on a schedule (a class at 9:00), whatever the load. */
   warmSchedule?: WarmScheduleEntry[];
+  reserveQuota?: QuotaReservation;
   scaling?: ScalingSpec;
   /** With no request for this long the deployment scales down to `minReplicas` (0 = scale to zero). */
   idleMinutes: number;
@@ -179,6 +181,7 @@ export interface RealtimeSpec {
   udpPorts?: [number, number];
   /** Edge settings written to the sidecar's env (`EDGE_TUNING_KEYS` in spec.ts); the keys the gateway sets itself win. */
   env?: Record<string, string>;
+  requireWebrtc?: boolean;
 }
 
 /** An alternative placement of a replica (see `DeploymentSpec.placements`). */
@@ -218,7 +221,7 @@ export interface DeploymentRecord {
 }
 
 /**
- * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default UTC; an `end`
+ * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default Europe/Paris; an `end`
  * before `start` runs past midnight) on `days` (0 = Sunday; absent = every day), keep at least `minReplicas` up.
  */
 export interface WarmScheduleEntry {
@@ -227,6 +230,19 @@ export interface WarmScheduleEntry {
   end: string;
   timeZone?: string;
   minReplicas: number;
+}
+
+export interface QuotaReservation {
+  quota: number;
+  windows: WarmScheduleEntry[];
+}
+
+export interface ReservationView {
+  holder: string;
+  machineType: string;
+  quota: number;
+  windows: WarmScheduleEntry[];
+  active: { replicas: number; until: string } | null;
 }
 
 /** Pressure-based autoscaling knobs (`autoscale.ts`); every one optional, defaults in `AUTOSCALE_DEFAULTS`. */
@@ -271,6 +287,7 @@ export interface CapacityView {
   budget: (NonNullable<ScalingSpec['budget']> & { month: string; spentEur: number; exhausted: boolean }) | null;
   hold: { replicas: number; until: string } | null;
   capacity: CapacityEntry[];
+  reservations: ReservationView[];
 }
 
 export type ReplicaPhase = 'booting' | 'ready' | 'unhealthy' | 'halted';
@@ -292,6 +309,8 @@ export interface ReplicaMachine {
   expiresAt?: number | null;
   placementNote?: string;
   tokenKey?: string;
+  /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
+  bootError?: string;
 }
 
 export interface CreateReplicaInput {
@@ -317,6 +336,7 @@ export interface DeploymentBackend {
   createReplica(input: CreateReplicaInput): Promise<ReplicaMachine>;
   /** Every replica of every deployment of this namespace. Must throw (not return []) when the provider fails. */
   listReplicas(namespace: string): Promise<ReplicaMachine[]>;
+  listForeign?(namespace: string): Promise<Array<ReplicaMachine & { namespace: string }>>;
   /** `reason` is the planner's (`boot-timeout`, `scale-down`, …): a backend may learn from it (Vast avoids bad hosts). */
   releaseReplica(machine: ReplicaMachine, reason?: string): Promise<void>;
   /** Exposed deployments: reserve the IP and create the firewall (`known` is reused when it still exists). */
@@ -335,7 +355,8 @@ export interface DeploymentBackend {
   /** RTT (median ms) from the gateway to the replica's front, null when no sample came back (the RTT gate). */
   measureRtt?(machine: ReplicaMachine): Promise<number | null>;
   measureBaselineRtt?(near: string): Promise<RttBaseline | null>;
-  recordRtt?(machine: ReplicaMachine, rttMs: number): void;
+  recordRtt?(machine: ReplicaMachine, rttMs: number, baselineMs?: number | null): void;
+  noteHost?(machine: ReplicaMachine, note: HostNote): void;
   /** Price + stock of types in zones, for ranking `candidates` (Scaleway). Absent: candidates are ranked without it. */
   catalog?(zones: string[]): Promise<CatalogEntry[]>;
   /**
@@ -346,7 +367,14 @@ export interface DeploymentBackend {
   registryAuthFor?(image: string): RegistryAuth | null;
   /** Read-only: the market offers a create would try for this spec, best first (Vast). */
   previewOffers?(spec: DeploymentSpec): Promise<OfferPreview[]>;
+  offersReport?(spec: DeploymentSpec): Promise<OffersReport>;
 }
+
+export interface HostNote { rttMs?: number; baselineMs?: number | null; bootMs?: number; udp?: 'ok' | 'blocked' }
+
+export interface SkippedOffer { offerId: number; machineId: number | null; location: string | null; usdPerHour: number; reason: string }
+
+export interface OffersReport { offers: OfferPreview[]; skipped: SkippedOffer[]; hosts: HostRecord[] }
 
 export interface OfferPreview {
   rank: number;
@@ -364,11 +392,14 @@ export interface OfferPreview {
   directPorts: number | null;
   gpu: string | null;
   knownRttMs: number | null;
+  host?: HostRecord | null;
   gateVerdict?: 'pass' | 'too-far' | null;
 }
 
 export interface OffersPreview {
   offers: OfferPreview[];
+  skipped: SkippedOffer[];
+  hosts: HostRecord[];
   gate: { near: string; rule: 'relative' | 'absolute'; anchor: string | null; baselineMs: number | null; maxRttExcessMs: number; maxRttMs: number | null };
 }
 
@@ -405,6 +436,8 @@ export interface DeploymentStore {
   deleteNetworkRelease(ipId: string): Promise<void>;
   saveProfile(profile: Profile): Promise<void>;
   deleteProfile(name: string): Promise<void>;
+  readonly fresh?: boolean;
+  readonly writeError?: string | null;
 }
 
 export interface ReplicaView {
@@ -425,6 +458,7 @@ export interface ReplicaView {
   /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
   rttMs: number | null;
   rttBaselineMs: number | null;
+  udp: 'ok' | 'blocked' | null;
   /** Minutes until the provider takes the host back (Vast); null when it never does. */
   expiresInMinutes: number | null;
 }

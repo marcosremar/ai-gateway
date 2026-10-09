@@ -3,6 +3,7 @@
  */
 
 import { hedgeCapOf } from '../internal-subrequest';
+import { qwenTokenCap } from '../../../deployments/inference-providers';
 import type { TTSProvider } from '../../providers/cloud/types';
 import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
@@ -61,6 +62,8 @@ export async function handleAudioSpeech(
   }
 
   const extra = Object.fromEntries(FORWARDED_EXTRAS.filter(k => body[k] !== undefined).map(k => [k, body[k]]));
+  const tokenCap = body.max_new_tokens;
+  if (Number.isInteger(tokenCap) && (tokenCap as number) > 0 && (tokenCap as number) <= qwenTokenCap(body.input as string)) extra.max_new_tokens = tokenCap;
   const format = (body.response_format as string | undefined) || 'mp3';
   // wav/pcm can be streamed (first bytes before the whole sentence); `stream: false` turns it off.
   const stream = (format === 'wav' || format === 'pcm') && body.stream !== false;
@@ -70,7 +73,8 @@ export async function handleAudioSpeech(
       targets,
       (t, signal) => t.provider.synthesize({
         signal,
-        ...(t.providerId.startsWith('deployment:') ? { extra, stream } : {}),
+        ...(t.providerId.startsWith('deployment:') ? { extra } : {}),
+        stream,
         model: t.model ?? model,
         input: body.input as string,
         // Voices are provider-specific. A target with `voiceFor` (stock voice by gender) picks its own; otherwise a

@@ -30,7 +30,7 @@ export function requestIdOf(header: string | string[] | undefined): string {
 
 export const CORS_ALLOW_METHODS = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
 export const CORS_ALLOW_HEADERS = [
-  'Content-Type', 'Authorization', 'X-API-Key', 'X-App', 'X-Request-Id', 'X-Aigw-Wait', 'X-Gateway-No-Wake', 'traceparent',
+  'Content-Type', 'Authorization', 'X-API-Key', 'X-App', 'X-Request-Id', 'X-Aigw-Wait', 'X-Gateway-No-Wake', 'X-Gateway-Device', 'traceparent',
 ].join(', ');
 /** Response headers a browser client may read (CORS hides every non-safelisted one otherwise). */
 export const CORS_EXPOSE_HEADERS = [

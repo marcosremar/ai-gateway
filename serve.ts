@@ -8,6 +8,8 @@
  *   bun run serve.ts
  */
 
+import { homedir } from 'os';
+import { join } from 'path';
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/providers/cloud/openrouter';
@@ -33,10 +35,12 @@ import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
-import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
+import { adminListWarning, adminUsersFromEnv, bootFilesRoute, deploymentsFromEnv, proxyIdleTimeoutMs, DEVICE_HEADER } from './src/deployments';
+import { buildImages } from './src/deployments/build-images';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
-import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
+import { createWebhookDelivery } from './src/webhooks';
+import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, SANDBOX_USER, TOKEN_ALIASES } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, isMasterToken, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
@@ -85,7 +89,7 @@ const prefixRoutes: PrefixRoute[] = [];
 const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
-const deployments = deploymentsFromEnv(process.env, {
+const configuredDeployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: EXTRA_ADMINS,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
@@ -94,9 +98,15 @@ const deployments = deploymentsFromEnv(process.env, {
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
 });
+const deployments = configuredDeployments && await configuredDeployments.controller.init()
+  .then(() => configuredDeployments.apps.init())
+  .then(() => configuredDeployments, (err: unknown) => {
+    configuredDeployments.stopJanitor?.();
+    log.error({ error: err instanceof Error ? err.message : String(err) },
+      'DEPLOYMENTS DISABLED: the state file cannot be read — cloud routes stay up; fix or restore the file and restart');
+    return null;
+  });
 if (deployments) {
-  await deployments.controller.init();
-  await deployments.apps.init();
   deployments.controller.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
@@ -144,10 +154,10 @@ function mountProviders() {
     listOpenRouterModels,
     // One-GPU mode: an entry whose own deployment is not registered goes to its `oneGpuDeployment` when that one is.
     deploymentExists: (name) => Boolean(controller?.get(name)),
-    deploymentProvider: controller ? (stage, name) => (
-      stage === 'chat' ? new DeploymentLLMProvider(controller, name)
-        : stage === 'stt' ? new DeploymentSTTProvider(controller, name)
-          : new DeploymentTTSProvider(controller, name)
+    deploymentProvider: controller ? (stage, name, wait) => (
+      stage === 'chat' ? new DeploymentLLMProvider(controller, name, wait)
+        : stage === 'stt' ? new DeploymentSTTProvider(controller, name, wait)
+          : new DeploymentTTSProvider(controller, name, wait)
     ) : undefined,
     // Adaptive hedge (D4, live QA 2026-10-07): spill or wait for the replica instead of running each request twice.
     deploymentHedge: controller ? (name, baseMs, capMs) => controller.hedgeDelayMs(name, baseMs, capMs) : undefined,
@@ -221,13 +231,17 @@ const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
   const routes = deployments?.apps.get(app)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
+const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const appLimits = API_KEYS.length ? new AppLimits({
   env: process.env,
+  statePath: join(process.env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway'), 'app-budgets.json'),
   isAdmin: (userId) => adminUsers.has(userId),
   aliasesOf: appAliasesOf,
+  limitsOf: (userId) => deployments?.apps.get(userId)?.limits,
   onBudgetEvent: ({ event, ...attrs }) => {
     log.warn(attrs, `app limits: daily budget ${event === 'app.budget_exhausted' ? 'exhausted' : 'at 80 %'}`);
     emitGatewayEvent(event, { level: event === 'app.budget_exhausted' ? 'error' : 'warn', attrs });
+    void alertWebhook?.send({ event, data: attrs });
   },
 }) : undefined;
 // POST /v1/s2s: a non-admin key uses only its own app's deployments, under its app limits (src/s2s/access.ts).
@@ -314,10 +328,16 @@ const realtime = createRealtime({
   userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
   isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),
   ...(appLimits ? { charge: (userId: string, n: number) => appLimits.chargeRequests(userId, n) } : {}),
+  ...(deployments ? { devices: deployments.devices } : {}),
   ...(telemetry ? { telemetry: realtimeSinkToTelemetry(telemetry.ingest) } : {}),
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 realtimeSessionOf = sessionResolverFrom(realtime.service);
+if (deployments) deployments.devices.onBlock = (app, device) => { void realtime.service.endDeviceSessions(app, device); };
+const deviceGate = deployments && ((userId: string, headers: import('http').IncomingHttpHeaders, kind: string) => {
+  const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
+  return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
+});
 
 const server = await startProxy({
   port: PORT,
@@ -326,15 +346,16 @@ const server = await startProxy({
   providers,
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
+  ...(deviceGate ? { deviceGate } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
-    ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
+    ? { images: buildImages(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
-    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
+    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
     ...(telemetry?.adminRoutes ?? []),
   ],
-  ...(telemetry ? { publicRoutes: telemetry.publicRoutes } : {}),
+  publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
@@ -368,10 +389,12 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     deployments?.controller.stop();
+    void deployments?.devices.flush().catch(() => {});
     realtime.stop();
     declared?.stop();
     keyManager.stop();
     telemetry?.stop();
+    void appLimits?.flush();
     setGatewayTelemetrySink(null);
     console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
 

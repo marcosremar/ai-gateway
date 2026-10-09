@@ -133,13 +133,15 @@ export interface RankOffersOptions {
   avoidMachines?: ReadonlySet<number>;
   /** Host machine id → RTT (ms) it measured when it last passed the RTT gate. */
   knownRtt?: ReadonlyMap<number, number>;
+  proven?: ReadonlySet<number>;
 }
 
 export const KNOWN_RTT_BAND_MS = 5;
 
 /**
  * Offers ordered best first: hosts that already passed the RTT gate (by measured RTT, in 5-ms bands), then distance
- * band, then the users' own country before a neighbour, then effective price, then download bandwidth (faster pull).
+ * band, then the users' own country before a neighbour, then `proven` hosts (booted our image before), then effective
+ * price, then download bandwidth (faster pull).
  */
 export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: RankOffersOptions): T[] {
   const usable = offers.filter(o => o.machine_id === undefined || !opts.avoidMachines?.has(o.machine_id));
@@ -149,13 +151,15 @@ export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: Rank
     return {
       o, near: isNear(cc, opts.near), bucket: distanceBucket(cc, opts.near), eff: effectivePrice(o),
       known: rtt === undefined ? Infinity : Math.floor(rtt / KNOWN_RTT_BAND_MS), abroad: cc === opts.near.toUpperCase() ? 0 : 1,
+      unproven: o.machine_id !== undefined && opts.proven?.has(o.machine_id) ? 0 : 1,
     };
   });
   const near = scored.filter(t => t.near);
   const pool = near.length ? near : opts.allowFar ? scored : [];
   const byBucket = (a: number, b: number) => (a === b ? 0 : a < b ? -1 : 1); // Infinity-safe
   return pool
-    .sort((a, b) => byBucket(a.known, b.known) || byBucket(a.bucket, b.bucket) || a.abroad - b.abroad || a.eff - b.eff
+    .sort((a, b) => byBucket(a.known, b.known) || byBucket(a.bucket, b.bucket) || a.abroad - b.abroad
+      || a.unproven - b.unproven || a.eff - b.eff
       || (b.o.inet_down || 0) - (a.o.inet_down || 0))
     .map(t => t.o);
 }

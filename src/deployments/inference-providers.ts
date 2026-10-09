@@ -5,9 +5,10 @@
  * The replica must speak the OpenAI shapes (`POST /v1/chat/completions`, `/v1/audio/transcriptions`,
  * `/v1/audio/speech`) — vLLM, vLLM-Omni (Qwen3-TTS) and the parle-speech image do.
  *
- * Cold start: a request does NOT wait for a replica by default (`waitMs` 0). A deployment scaled to zero answers
- * 503 at once (and starts scaling up), so the chain moves to the fallback provider instead of making the user wait
- * minutes; once the replica is ready, traffic returns to it.
+ * Cold start: a deployment link with a live fallback after it does not wait (`waitMs` 0): it answers 503 `cold` at once
+ * (and starts scaling up) so the fallback serves. The LAST link of a chain (no live fallback) waits up to `coldWaitMs`
+ * (DEPLOYMENT_COLD_WAIT_MS, default 2 s) for a booting replica. Either way the 503 carries the controller's Retry-After
+ * (30 s). A ready but saturated deployment never waits: it spills at once.
  */
 
 import type {
@@ -24,8 +25,10 @@ import { FINISH_MARKER, USAGE_MARKER } from '../gateway/providers/cloud/openai-c
 type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
 
 export interface DeploymentProviderOptions {
-  /** How long a request may wait for a replica to become ready (ms). Default 0 — fall back right away. */
+  /** How long a request may wait for a replica (ms), whatever the state. Absent: `coldWaitMs` while none is ready, else 0. */
   waitMs?: number;
+  /** Wait for a booting replica when none is ready (ms); default 0. Set on a chain's last link (serve-providers.ts). */
+  coldWaitMs?: number;
   /** Per-request timeout once a replica was found (ms). Default 120 s (the route's own, shorter timeout applies too). */
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
@@ -38,11 +41,15 @@ export interface DeploymentProviderOptions {
 class DeploymentCallError extends Error {
   /** No point retrying the same deployment within one request: fall back at once. */
   readonly skipRetry: boolean;
-  constructor(readonly status: number, message: string, readonly gatewayCode: string) {
+  constructor(readonly status: number, message: string, readonly gatewayCode: string, readonly retryAfterSec?: number) {
     super(message);
     this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable', 'saturated', 'circuit_open']
       .includes(gatewayCode);
   }
+}
+
+function hasReadyReplica(controller: Leaser, name: string): boolean {
+  return Boolean(controller.get(name)?.replicas?.some(r => r.phase === 'ready'));
 }
 
 /** Calls `path` on a ready replica of `name`; throws an Error with `.status` the fallback chain understands. */
@@ -53,18 +60,20 @@ async function callReplica(
   // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves, a cold one is skipped as `cold` and never woken.
   const noWake = noWakeActive();
   try {
-    lease = await controller.acquire(name, { ...(noWake ? { waitMs: 0, noWake: true } : { waitMs: opts.waitMs ?? 0 }), ...(stage ? { stage } : {}) });
+    const waitMs = noWake ? 0 : opts.waitMs ?? (opts.coldWaitMs && !hasReadyReplica(controller, name) ? opts.coldWaitMs : 0);
+    lease = await controller.acquire(name, { waitMs, ...(noWake ? { noWake: true } : {}), ...(waitMs && signal ? { signal } : {}), ...(stage ? { stage } : {}) });
   } catch (err) {
     if (!(err instanceof DeploymentError)) throw err;
+    const after = err.retryAfterSeconds;
     if (err.status === 404) throw new DeploymentCallError(404, err.message, 'not_found');
-    if (err.status === 409) throw new DeploymentCallError(503, err.message, 'paused');
-    if (err.code === 'stage_out') throw new DeploymentCallError(503, err.message, 'circuit_open');
+    if (err.status === 409) throw new DeploymentCallError(503, err.message, 'paused', after);
+    if (err.code === 'stage_out') throw new DeploymentCallError(503, err.message, 'circuit_open', after);
     // Every ready replica at capacity: spill this request to the fallback now (the replicas keep what they serve).
-    if (err.code === 'saturated') throw new DeploymentCallError(503, err.message, 'saturated');
+    if (err.code === 'saturated') throw new DeploymentCallError(503, err.message, 'saturated', after);
     // No ready replica (scaled to zero / booting): make sure it is scaling up, and let the chain fall back now.
     if (noWake) recordNoWakeSkip();
     else try { controller.wake?.(name); } catch { /* deployment vanished meanwhile */ }
-    throw new DeploymentCallError(503, err.message, 'cold');
+    throw new DeploymentCallError(503, err.message, 'cold', after);
   }
   let res: Response;
   try {
@@ -291,6 +300,8 @@ function catalogOf(raw: unknown): ReplicaCatalog | null {
   return { model: typeof input.model === 'string' ? input.model : undefined, format: typeof input.format === 'string' ? input.format : undefined, voices };
 }
 
+export const qwenTokenCap = (text: string) => Math.ceil((3 + 0.2 * text.length) * 12.5);
+
 /**
  * TTS on a self-hosted replica.
  *
@@ -383,6 +394,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     // Explicit references from the client: same rule, `voice` would be read as a speaker name.
     if (extra.ref_audio !== undefined) delete body.voice;
     Object.assign(body, extra);
+    if (body.ref_audio !== undefined && body.max_new_tokens === undefined) body.max_new_tokens = qwenTokenCap(request.input);
     if (extra.language !== undefined) body.language = languageName(extra.language);
     if (request.stream && (format === 'wav' || format === 'pcm') && extra.stream === undefined) {
       Object.assign(body, { stream: true, stream_format: 'audio' });

@@ -29,6 +29,9 @@ describe('runComposite', () => {
     // Who served each stage is reported
     expect(events[0]).toMatchObject({ provider: 'deployment:parle-speech' });
     expect(events[1]).toMatchObject({ provider: 'openrouter:qwen/qwen3.5-9b', fallback: 'cold' });
+    expect(events.at(-1)).toMatchObject({
+      type: 'done', served: { stt: 'deployment:parle-speech', llm: 'openrouter:qwen/qwen3.5-9b', tts: 'deployment:parle-qwen-tts', opener: false, transport: 's2s' },
+    });
   });
 
   it('starts the next sentence\'s TTS while the first is still being voiced (2 ahead)', async () => {

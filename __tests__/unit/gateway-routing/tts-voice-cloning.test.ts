@@ -95,6 +95,16 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     expect(r.fetchImpl.mock.calls.some(([u]) => String(u).endsWith('/refs/voices.json'))).toBe(false);
   });
 
+  it('a cloning request carries the engine cap max_new_tokens = (3 s + 0.2 s per character) at 12.5 frames/s, unless the client set one', async () => {
+    const r = replica();
+    const dep = new DeploymentTTSProvider(controller(), 'parle-qwen-tts', { fetchImpl: r.fetchImpl as never });
+    await handleAudioSpeech(req({ model: 'parle-tts', input: 'Bom dia!', voice: 'br-f-01', response_format: 'wav' }), chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
+    await handleAudioSpeech(req({ model: 'parle-tts', input: 'a'.repeat(160), voice: 'x', ref_audio: 'data:audio/wav;base64,UklGRg==', ref_text: 'a' }),
+      chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
+    await handleAudioSpeech(req({ model: 'parle-tts', input: 'Bom dia!', voice: 'br-f-01', max_new_tokens: 20 }), chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
+    expect(r.speechBodies.map(b => b.max_new_tokens)).toEqual([58, 438, 20]);
+  });
+
   it('a CustomVoice replica without catalog gets the request as sent (OpenAI shape), mp3 not in stream mode', async () => {
     const r = replica({ catalog: false });
     const dep = new DeploymentTTSProvider(controller(), 'qwen3-tts', { fetchImpl: r.fetchImpl as never });

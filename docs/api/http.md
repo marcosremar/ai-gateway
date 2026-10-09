@@ -51,8 +51,15 @@ other value → `403`. The same rule holds for every app-scoped route added late
   "<ISO time>"}}` (a realtime session: `error.code: "budget_exceeded"` plus top-level `reason`, `budget`, `reset_at`).
   It is not the per-minute rate limit (`rate_limit_error`): retrying before `reset_at` cannot succeed, so a client
   shows "limit reached" and stops. `0` turns one off.
-- **Sizing the budget for a class.** Both limits are gateway-wide settings applied to each app (there is no per-app
-  value): size them for the largest app. A `/v1/s2s` turn costs one request and `prompt characters / 4 + max_tokens`
+- **Sizing the budget for a class.** Both limits are gateway-wide defaults, meant for a leaked key; an admin gives an
+  app its own daily budgets with `PUT /v1/apps/:app/limits {"dailyRequests": n, "dailyTokens": n}` (`null` = the
+  default, `0` = no budget; `GET` shows them, also to the app's own key, which cannot change them). The budget is
+  charged at admission only — an HTTP request, a `/v1/s2s` turn, a realtime session for its whole token — so a reply
+  already admitted is never cut: the learner's NEXT turn (or session) gets the 429 above. Use and projected exhaustion
+  are in `GET /health?details=1` → `appBudgets`; the 80 % and exhaustion events go to the log, to telemetry
+  (`app.budget_warning`, `app.budget_exhausted`) and to `ALERT_WEBHOOK_URL` when set. A realtime session is charged
+  in requests only (its turns run on the app's own GPU replica, not on cloud credit); a session that drops to its
+  `s2s-stream` / `post` transport pays each `/v1/s2s` turn on top of the session charge. A `/v1/s2s` turn costs one request and `prompt characters / 4 + max_tokens`
   tokens, where the prompt is `system` + `messages` + `user_template` and an omitted `max_tokens` counts as
   `APP_MAX_TOKENS` (1024); a realtime session costs `4 × minutes of its token` requests at admission and no tokens.
   `APP_DAILY_TOKENS ≥ students × turns per student per day × tokens per turn` and `APP_DAILY_REQUESTS ≥ students ×
@@ -81,7 +88,8 @@ other value → `403`. The same rule holds for every app-scoped route added late
 Errors of the proxy and of the OpenAI routes are `{"error": {"message", "type"}}`; `type` follows the status:
 `400` `invalid_request_error` · `401` `authentication_error` · `403` `permission_error` · `404` `not_found_error` ·
 `413` `request_too_large` · `429` `rate_limit_error` (or `budget_exceeded` for an app's daily budget) · `5xx`
-`server_error` / `provider_unavailable`. A malformed multipart body (truncated, oversized field name) is a `400`, an
+`server_error` / `provider_unavailable`. A device refusal adds `code`: `403` `device_blocked` or `device_required`, `400`
+`invalid_device` (see *App devices*). A malformed multipart body (truncated, oversized field name) is a `400`, an
 oversized file a `413`. A `429` always carries `Retry-After` (seconds).
 
 The **management routes** (`/v1/deployments*`, `/v1/profiles*`, `/v1/apps*`, `/v1/admin/keys*`) answer errors as
@@ -96,7 +104,7 @@ apps, profiles and admin keys alike.
 
 Origins: `CORS_ORIGINS` (comma separated, `*` = any; localhost always). Preflight allows `GET, POST, PUT, PATCH,
 DELETE, OPTIONS` and the headers `Content-Type, Authorization, X-API-Key, X-App, X-Request-Id, X-Aigw-Wait,
-X-Gateway-No-Wake`. Responses expose `X-Gateway-Provider, X-Gateway-Fallback, X-Gateway-Fallback-From,
+X-Gateway-No-Wake, X-Gateway-Device`. Responses expose `X-Gateway-Provider, X-Gateway-Fallback, X-Gateway-Fallback-From,
 X-Gateway-Model-Catalog-Warnings, X-STT-Filtered, X-STT-Raw-Length, Retry-After, X-Request-Id` to browser code.
 
 ## Rate Limiting
@@ -252,6 +260,85 @@ go Z.AI → OpenRouter `z-ai/<id>`, `whisper-large-v3(-turbo)` goes Groq → Ope
 Deepgram, Orpheus TTS is Groq only. Any other `org/model` id goes to OpenRouter as-is,
 followed by the generic chat fallback; without a usable OpenRouter key it answers `503 provider_unavailable`
 naming the key (not `404`). PlayAI TTS was retired by Groq and is no longer offered.
+
+### App devices — `/v1/apps/:app/devices`
+
+An app may name the end-user device behind each request with an opaque id, then list the devices it has seen and
+block one. Off unless the app sends ids: an app that sends none works exactly as before.
+
+**Sending the id**
+
+| Path | How |
+|---|---|
+| `POST /v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/embeddings`, `/v1/images/*`, `/v1/s2s` | header `X-Gateway-Device: <id>` |
+| `POST /v1/realtime/sessions` | body field `"device": "<id>"` — signed into the session token (claim `dev`), so the WebSocket, WebRTC signaling and telemetry of that session carry it without trusting the browser again |
+| Node SDK (`GatewayClient`) | `device` on any call: `gw.chat({ model, messages, device })` |
+| Browser SDK (`createRealtimeSession`) | option `device`: posted to the app's `sessionEndpoint` as `{transports, prefer, device}`; the app's backend passes it on (or, better, replaces it with an id it trusts) |
+
+The id is 8–64 characters of `[A-Za-z0-9_:-]`, starting with a letter or digit (a UUID fits). Anything else, and
+anything shaped like a key or token (`sk-…`, a JWT, `token_…`), is refused with `400 invalid_device` and never
+stored or logged. With an admin key the device is recorded for the app named by `X-App` (none: not recorded).
+
+**Routes** — the app's own key, or an admin key (same rule as every `/v1/apps/:app/*` path; another app's key: `403`).
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/apps/:app/devices` | `{ app, requireDevice, total, blocked, max, devices: [{ id, firstSeen, lastSeen, requestsToday, requests, lastKind, blocked?: { reason, by, at } }] }`. Query: `sort` = `lastSeen` (default) \| `firstSeen` \| `requestsToday` \| `requests`, `order` = `desc` (default) \| `asc`, `limit` (default 500), `blocked=1` (only blocked ones). Times are ms since the epoch; `requestsToday` is per UTC day; `lastKind` is `chat` / `stt` / `tts` / `s2s` / `realtime` / … |
+| `POST` | `/v1/apps/:app/devices/:device/block` | optional body `{ "reason": "…" }` (≤ 200 chars). Works for a device never seen (pre-block). Answers the device record |
+| `DELETE` | `/v1/apps/:app/devices/:device/block` | unblock; `404` for an unknown device |
+| `PATCH` | `/v1/apps/:app` | `{ "requireDevice": true \| false }` — refuse this app's requests that carry no device id |
+
+**What a blocked device gets**
+
+| Path | Effect | How fast |
+|---|---|---|
+| HTTP inference routes, `/v1/s2s` | `403` `{"error": {"type": "permission_error", "code": "device_blocked"}}`, before the daily budget is charged | the next request |
+| `POST /v1/realtime/sessions` | `403` `{"error": {"type": "realtime_error", "code": "device_blocked"}}`, nothing charged | the next admission |
+| open WebSocket session (relayed by the gateway) | closed with code `1008`, reason `device_blocked`; reconnecting answers `403` | the next frame the browser sends (audio frames flow continuously: milliseconds) |
+| open WebRTC session (audio goes browser ↔ replica, not through the gateway) | the gateway deletes the session on the replica (`DELETE /__aigw/rt/session/:id`); every later signaling call of its token answers `403 device_blocked` | at once while the gateway process that admitted it still knows the session (its token lifetime, default 10 min). Otherwise — gateway restarted, replica unreachable for the delete — the session ends at the edge's own session cap, 15 min after it started. It can never be re-opened |
+
+With `requireDevice`, a request without an id answers `403` `code: device_required`.
+
+**Storage and privacy.** The registry lives in the app account (`DEPLOYMENTS_STATE_DIR/apps.json`), written at most
+every 30 s and on every block/unblock, never on the request path (a map lookup per request). Per device: the id,
+first/last seen, request counts, last kind, and the block (reason, the key user who set it, when). **No IP address,
+no user agent, no content**: students share a university NAT, an IP is personal data and identifies nobody. At most
+`APP_MAX_DEVICES` (default 2000) devices per app: over it the least recently seen unblocked one is dropped; a
+blocked device is never dropped (when all 2000 are blocked ones, new devices are served but not listed, and a
+further block answers `409`). The app chooses the id: prefer a random per-install id over anything that names a
+person.
+
+**The limit.** The id is asserted by the app or its client. A block stops an unmodified client and everything the
+app's backend identifies; it does not stop someone who forges a new id. For that the app must mint the ids server
+side (e.g. a signed per-install id checked by its backend before it calls the gateway) and set `requireDevice`.
+The SDK's direct fallback (the app's backend calling providers while the gateway is unreachable) does not pass
+through the gateway, so the app must enforce its own blocks there.
+
+**Example — `babelcast`**
+
+```bash
+# who is using babelcast, most recent first
+curl "$GW/v1/apps/babelcast/devices?limit=50" -H "Authorization: Bearer $ADMIN_KEY"
+# block one, then check
+curl -X POST $GW/v1/apps/babelcast/devices/install-7f3a9c21/block -H "Authorization: Bearer $ADMIN_KEY" \
+  -H 'Content-Type: application/json' -d '{"reason": "account shared outside the class"}'
+curl "$GW/v1/apps/babelcast/devices?blocked=1" -H "Authorization: Bearer $ADMIN_KEY"
+# unblock
+curl -X DELETE $GW/v1/apps/babelcast/devices/install-7f3a9c21/block -H "Authorization: Bearer $ADMIN_KEY"
+# make ids mandatory for this app
+curl -X PATCH $GW/v1/apps/babelcast -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' -d '{"requireDevice": true}'
+```
+
+An app exists once a key names it: add `<new key>:babelcast` to `GATEWAY_API_KEYS` (a host setting of the gateway
+service, read at start) and give it its model aliases with an admin key:
+
+```bash
+curl -X PUT $GW/v1/apps/babelcast/routes -H "Authorization: Bearer $ADMIN_KEY" -H 'X-App: babelcast' \
+  -H 'Content-Type: application/json' -d '{ "chat": { "babelcast-llm": ["openrouter:<org/model>"] } }'
+```
+
+Devices show up in the list only when babelcast's backend sends `X-Gateway-Device` (or `device` for a realtime
+session).
 
 ### Direct-fallback plan — `GET /v1/apps/:app/fallback`
 
@@ -470,24 +557,45 @@ Auth: app or admin API key. Called by the app's backend, never by the browser.
 
 | Field | Type | |
 |---|---|---|
-| `config` | object | the `/v1/s2s` session config (`system`, `messages`, `voice`, `language`, `models`, `max_tokens`, …, `deployment`; default `S2S_DEPLOYMENT`) |
+| `config` | object | the `/v1/s2s` session config (`system`, `messages`, `voice`, `language`, `models`, `max_tokens`, …, `deployment`; default `S2S_DEPLOYMENT`), plus the realtime-only `intercepts` and `reply_guard` ([realtime.md](../realtime.md) § App hooks) |
 | `transports` | string[] | optional ordered preference among `webrtc`, `ws`, `s2s-stream`, `post` (must include `webrtc` or `ws`) |
 | `prefer` | string | optional: moved first |
+| `device` | string | optional: the end-user device this session is for (see *App devices*); signed into the token |
 
 Headers: `traceparent` (optional, W3C), `X-Gateway-No-Wake: 1` (a cold deployment is not woken).
 
 | Status | Meaning |
 |---|---|
-| 200 | `{sessionId, token, expiresAt, deployment, traceId, telemetryUrl, transports[], iceServers[], limits}` |
-| 400 | bad body, unknown transport |
+| 200 | `{sessionId, token, cfg?, expiresAt, deployment, traceId, telemetryUrl, transports[], iceServers[], limits}` |
+| 400 | bad body, unknown transport, malformed `intercepts` / `reply_guard` |
 | 401 | no / unknown key |
-| 403 | the key's app does not own the deployment (also when it does not exist) |
+| 403 | the key's app does not own the deployment (also when it does not exist); `device_blocked` / `device_required` (see *App devices*) |
 | 404 | (admin) deployment not found — with `fallback` |
-| 413 | `config` over 6144 base64url characters — send the long history with `config_update` once connected |
+| 413 | `config` over 32768 base64url characters (~24 KB of JSON) — send the long history with `config_update` once connected. Up to 6144 the config rides in the token; above, the answer also carries `cfg` (the config's base64url text, which the SDK hands to the edge) and the token only its digest: [realtime.md](../realtime.md) § Token, with the prompt sizes that fit each LLM context |
 | 429 | app daily budget exhausted (`Retry-After`); a session costs `REALTIME_REQUESTS_PER_MINUTE` × ⌈TTL/60⌉ requests |
 | 503 | `cold` (woken unless no-wake) / `saturated` / `unsupported` / `unreachable` / `paused`, with `Retry-After` and `fallback: {transport:"s2s-stream", url:"/v1/s2s"}` |
 
 Every answer carries `X-Aigw-Trace-Id`.
+
+### `POST /v1/realtime/updates`
+
+Auth: the app's API key (server side). Signs a change to a live session of the app for the page to hand to the edge.
+
+| Field | Type | |
+|---|---|---|
+| `token` | string | the session token of `POST /v1/realtime/sessions` |
+| `update` | object | `drop_turn`, `messages` (replaces the history), `system`, `voice`, `fallback_voice`, `user_template`, `max_tokens`, `temperature`, `stt_prompt`, `opener`, `first_audio_deadline_ms`, `intercepts`, `reply_guard`, `say {text, voice?, fallback_voice?, history?, tag?}` — [realtime.md](../realtime.md) § App hooks |
+
+| Status | Meaning |
+|---|---|
+| 200 | `{sessionId, signed, n}`: send `{type:"config_update", signed}` on the session (SDK `applyUpdate`); the edge answers `config_applied{n}` and refuses an older `n` |
+| 400 | bad body, malformed `intercepts` / `say` / `reply_guard` |
+| 401 | no / unknown key, or a token that does not verify (`token_expired` when expired) |
+| 403 | the session is another app's |
+| 410 | `replica_gone` |
+| 413 | `update` over 32768 base64url characters |
+
+No call to the replica and no gateway state: the answer is a signature.
 
 ### Browser routes (session token, not an API key)
 
@@ -495,10 +603,15 @@ Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; on t
 
 | Route | |
 |---|---|
-| `POST /v1/realtime/sessions/:id/offer` | `{sdp}` → `{sdp, type:"answer", sessionId}`. 401 bad / expired (`token_expired`), 403 token of another session, 410 `replica_gone`, 502 `edge_error` / `edge_unreachable`, 503 `saturated` |
+| `POST /v1/realtime/sessions/:id/offer` | `{sdp, cfg?}` (`cfg`: the descriptor's, for a config by reference) → `{sdp, type:"answer", sessionId}`. 401 bad / expired (`token_expired`), 403 token of another session, 410 `replica_gone`, 502 `edge_error` / `edge_unreachable`, 503 `saturated` |
 | `POST /v1/realtime/sessions/:id/ice` | `{candidate}` (trickle, optional) → 204 |
 | `DELETE /v1/realtime/sessions/:id` | ends the session on the replica (frees its slot) → 204 |
 | `GET /v1/realtime/ws[?traceparent=…]` (token as subprotocol, or `?token=`) | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |
+
+Control messages from the browser (WS text frames, WebRTC data channel): `interrupt`, `end_turn`, `ping` and
+`config_update {messages?, opener?}` or `config_update {signed}`. The session config signed in the token is authoritative: a `config_update` with
+any other field (`system`, `voice`, `user_template`, …) or a `system` message is refused whole with
+`{type:"error", code:"forbidden"}` ([realtime.md](../realtime.md) § Events and control messages).
 
 ### Environment
 
@@ -605,12 +718,14 @@ for a cold start.
 | Method | Path | |
 |---|---|---|
 | `GET` | `/v1/apps` | admin (no `X-App`): every app; an app key (or `X-App`): `{ "apps": [<its own>] }` |
-| `GET` | `/v1/apps/:app` | `{ id, createdAt, images, deployments: [{ name, status, appImage }] }` |
+| `GET` | `/v1/apps/:app` | `{ id, createdAt, requireDevice, images, deployments: [{ name, status, appImage }] }` |
 | `GET` / `PUT` | `/v1/apps/:app/routes` | the app's aliases (see *App aliases* above) |
 | `GET` | `/v1/apps/:app/images` | the app's saved images |
 | `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
 | `GET` | `/v1/apps/:app/fallback` | direct-fallback plan (below) |
 | `POST` / `GET` | `/v1/apps/:app/stability-report` | SDK instability reports (below) |
+| `PATCH` | `/v1/apps/:app` | `{ "requireDevice": boolean }` (see *App devices*) |
+| `GET` / `POST` / `DELETE` | `/v1/apps/:app/devices`, `…/devices/:device/block` | the app's end-user devices: list, block, unblock (see *App devices*) |
 
 Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
 

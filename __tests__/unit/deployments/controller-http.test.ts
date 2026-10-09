@@ -526,6 +526,15 @@ describe('app accounts: saved image addresses per app', () => {
     expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'speech-stack' }, ADMIN)).status).toBe(400);
   });
 
+  it('an app\'s daily budgets: an admin sets them, the app key reads and cannot raise them', async () => {
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: 60_000, dailyTokens: null }, ADMIN, AS_SITE)).status).toBe(200);
+    expect(await (await call(h, 'GET', '/v1/apps/site-a/limits', undefined, SITE)).json()).toEqual({ app: 'site-a', limits: { dailyRequests: 60_000 } });
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: 9_999_999 }, SITE)).status).toBe(403);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: -1 }, ADMIN, AS_SITE)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { perMinute: 1 }, ADMIN, AS_SITE)).status).toBe(400);
+    expect(await (await call(h, 'GET', '/v1/apps/site-a/limits', undefined, ADMIN, AS_SITE)).json()).toEqual({ app: 'site-a', limits: { dailyRequests: 60_000 } });
+  });
+
   it('an app owns its aliases: PUT routes validates, re-mounts the providers, and refuses another app\'s alias', async () => {
     let remounts = 0;
     const r = await harness({ onRoutesChange: () => { remounts++; } });

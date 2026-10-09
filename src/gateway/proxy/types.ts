@@ -169,9 +169,14 @@ export interface ProxyConfig {
    */
   appLimits?: {
     check(
-      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>, opts?: { charge?: boolean },
+      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>,
+      opts?: { charge?: boolean; receipt?: import('./app-limits').Charge },
     ): import('./app-limits').AppLimitDenial | null;
+    refund?(userId: string, charged: import('./app-limits').Charge): void;
   };
+  deviceGate?: (
+    userId: string, headers: import('http').IncomingHttpHeaders, kind: string,
+  ) => import('./app-limits').AppLimitDenial | null;
   /**
    * `GET /health?deep=1`: per-provider probes + deployments. Plain `GET /health` stays a cheap unauthenticated
    * liveness check (status only); the deep one needs a valid key that `authorize` accepts as admin (403 for another

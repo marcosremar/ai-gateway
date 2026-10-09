@@ -29,8 +29,9 @@ export abstract class ControllerViews extends ReconcileLoop {
     const vast = spec.provider === 'vast' ? spec : [...(spec.candidates ?? []), ...(spec.placements ?? [])].find(c => c.provider === 'vast');
     if (!vast) return null;
     const near = spec.near ?? DEFAULT_NEAR;
-    const [offers, baseline] = await Promise.all([
-      backend.previewOffers({ ...spec, provider: 'vast', machineType: vast.machineType ?? spec.machineType, maxEurPerHour: vast.maxEurPerHour ?? spec.maxEurPerHour }),
+    const vastSpec = { ...spec, provider: 'vast' as const, machineType: vast.machineType ?? spec.machineType, maxEurPerHour: vast.maxEurPerHour ?? spec.maxEurPerHour };
+    const [report, baseline] = await Promise.all([
+      backend.offersReport?.(vastSpec) ?? backend.previewOffers(vastSpec).then(offers => ({ offers, skipped: [], hosts: [] })),
       backend.measureBaselineRtt?.(near).catch(() => null) ?? null,
     ]);
     const limits = {
@@ -38,7 +39,8 @@ export abstract class ControllerViews extends ReconcileLoop {
       ...(spec.maxRttExcessMs !== undefined ? { maxExcessMs: spec.maxRttExcessMs } : {}), firstSeenAt: 0, now: 0,
     };
     return {
-      offers: offers.map(o => ({ ...o, gateVerdict: o.knownRttMs == null ? null : gateDecision({ ...limits, rttMs: o.knownRttMs }) as 'pass' | 'too-far' })),
+      skipped: report.skipped, hosts: report.hosts,
+      offers: report.offers.map(o => ({ ...o, gateVerdict: o.knownRttMs == null ? null : gateDecision({ ...limits, rttMs: o.knownRttMs }) as 'pass' | 'too-far' })),
       gate: {
         near, rule: baseline ? 'relative' : 'absolute', anchor: baseline?.anchor ?? null, baselineMs: baseline?.rttMs ?? null,
         maxRttExcessMs: spec.maxRttExcessMs ?? DEFAULT_MAX_RTT_EXCESS_MS, maxRttMs: spec.maxRttMs ?? (baseline ? null : DEFAULT_MAX_RTT_MS),
@@ -49,6 +51,10 @@ export abstract class ControllerViews extends ReconcileLoop {
   specOf(name: string): DeploymentSpec | null {
     const rt = this.deployments.get(name);
     return rt ? structuredClone(rt.record.spec) : null;
+  }
+
+  bootFilesKeyOf(name: string): string | null {
+    return this.deployments.get(name)?.record.replicaToken ?? null;
   }
 
   tokenOf(name: string, replicaId: string): string | null {
@@ -82,7 +88,7 @@ export abstract class ControllerViews extends ReconcileLoop {
    * namespace in `health`). The caps are the gateway's limits, the same for everyone, and stay.
    */
   health(app?: string): {
-    deployments: number; replicas: number; listError: string | null;
+    deployments: number; replicas: number; listError: string | null; stateWriteError: string | null;
     running: number; maxReplicas: number; stopped: number; maxStopped: number; eurPerHour: number; maxEurPerHour: number;
   } {
     const limits = {
@@ -92,6 +98,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     if (app === undefined) {
       return {
         deployments: this.deployments.size, replicas: this.machines.length, listError: this.lastListError,
+        stateWriteError: this.opts.store.writeError ?? null,
         running: this.runningMachines().length, stopped: this.stoppedCount(), eurPerHour: round3(this.burnEurPerHour()), ...limits,
       };
     }
@@ -99,7 +106,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     const mine = (m: { deployment: string }) => own.has(m.deployment);
     const running = this.runningMachines().filter(mine);
     return {
-      deployments: own.size, replicas: this.machines.filter(mine).length, listError: null,
+      deployments: own.size, replicas: this.machines.filter(mine).length, listError: null, stateWriteError: null,
       running: running.length,
       stopped: this.machines.filter(m => mine(m) && ((this.parkedNow(m) && !this.isStarting(m)) || this.stoppingNow(m))).length,
       eurPerHour: round3(running.reduce((sum, m) => sum + (m.pricePerHour ?? 0), 0)), ...limits,
@@ -126,6 +133,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       stagesOut: this.stagesOut(m.id),
       rttMs: this.gates.get(m.id)?.rttMs ?? null,
       rttBaselineMs: this.gates.get(m.id)?.baseline?.rttMs ?? null,
+      udp: this.udp.get(m.id) ?? null,
       expiresInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
     }));
     const ready = replicas.filter(r => r.phase === 'ready').length;
@@ -173,7 +181,7 @@ export abstract class ControllerViews extends ReconcileLoop {
           ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]
           : []),
         ...placementsOf(rt.record.spec).filter(s => s.provider === 'vast' && s.provider !== rt.record.spec.provider).flatMap((s) => {
-          const unfit = this.backends.vast ? vastUnfit(s) : 'VAST_API_KEY is not set';
+          const unfit = this.backends.vast ? vastUnfit(this.forVast(rt, s)) : 'VAST_API_KEY is not set';
           return unfit ? [`the vast ${s.machineType} fallback placement is skipped: ${unfit}`] : [];
         }),
       ],

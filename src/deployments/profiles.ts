@@ -10,7 +10,7 @@ const VLLM_OMNI_IMAGE = 'vllm/vllm-omni:v0.28.0';
 
 const VAST_GPU = { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85 } as const;
 const VAST_HOST = { minCuda: 13, maxRttExcessMs: 20 };
-const SPEECH_STACK_TAG = '20261008-1317';
+const SPEECH_STACK_TAG = '20261009-0213';
 const SPEECH_STACK_IMAGE_ENV = { TTS_MODEL: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base', LLM_FILE: 'Qwen3.5-9B-Q4_K_M.gguf' };
 const CLASS_VOICE: ScalingSpec = { mode: 'fast' };
 
