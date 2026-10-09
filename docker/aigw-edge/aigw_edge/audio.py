@@ -35,6 +35,13 @@ class Downsampler48to16:
         return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
 
+def upsample2(x: np.ndarray, previous: int) -> np.ndarray:
+    out = np.empty(len(x) * 2, dtype=np.int16)
+    out[1::2] = x
+    out[0::2] = (np.concatenate(([previous], x[:-1])).astype(np.int32) + x) // 2
+    return out
+
+
 MAX_FILL_SAMPLES = 48000
 
 

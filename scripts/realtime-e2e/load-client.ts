@@ -416,6 +416,7 @@ async function chromeStudents(): Promise<void> {
     const rec: StudentRecord = { id, client: 'chrome', startedAt: now(), transport: null, connectMs: null, reconnects: 0, admissions: [], attempts: [] };
     result.students.push(rec);
     try {
+      await sleep((i * cfg.turnEveryS * 1000) / cfg.chrome);
       const { page } = await openMicPage({ chrome: cfg.chromePath, mic, url: app.url, readyFlag: 'loadReady', log, browsers });
       const stuck = sleep((cfg.rampS + cfg.durationS + 2 * cfg.turnTimeoutS) * 1000).then(() => { throw new Error('the page never returned its run'); });
       const run = await Promise.race([stuck, page.evaluate(

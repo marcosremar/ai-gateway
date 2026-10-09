@@ -280,10 +280,11 @@ async def scenario_webrtc_network(base: str) -> None:
             await asyncio.sleep(0.4)
         results["latency"][f"webrtc {name}"] = {"end_of_turn_ms": ends, "first_frame_ms": firsts, "uplink_lost_ms": lost,
                                                 **{k: m.get(k) for k in ("rtp_first_sent_ms", "rtp_late_p95_ms")}}
-        slack = round(jitter_s * 1000) + 20
+        jitter_ms = round(jitter_s * 1000)
         check(f"webrtc, {name}: the turn ends 700 ms after the speech, lost packets counted as elapsed time",
-              max(ends) < 780 + slack, ends)
-        check(f"webrtc, {name}: the first reply frame is heard right after audio_start", max(firsts) < 80 + slack, firsts)
+              statistics.median(ends) < 770 + jitter_ms and max(ends) < 860 + jitter_ms, ends)
+        check(f"webrtc, {name}: the first reply frame is heard within one frame of audio_start",
+              statistics.median(firsts) < 20 + jitter_ms, firsts)
         check(f"webrtc, {name}: lost uplink audio is reported per turn (metrics.uplink_lost_ms)", (lost > 0) == (loss > 0), lost)
         async with aiohttp.ClientSession() as http:
             await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
@@ -642,7 +643,6 @@ async def main() -> int:
         results["summary"] = f"{passed}/{len(results['checks'])} checks passed"
         print(json.dumps(results["latency"], indent=1))
         print(results["summary"])
-        _ = statistics
 
 
 if __name__ == "__main__":

@@ -394,6 +394,10 @@ try:
     gaps = audio.GapFill()
     check("webrtc uplink: a gap in the RTP timestamps is the lost audio, counted as elapsed time, at most 1 s of it",
           [gaps.missing(pts, 960) for pts in (0, 960, 2880, 3840, 500000)] == [0, 0, 960, 0, 48000])
+    doubled = audio.upsample2(np.array([100, 200, -50], dtype=np.int16), 0)
+    check("webrtc downlink: 24 kHz PCM leaves at 48 kHz, each sample kept and the one between interpolated across frames",
+          doubled.tolist() == [50, 100, 150, 200, 75, -50] and doubled.dtype == np.int16
+          and audio.upsample2(np.array([10], dtype=np.int16), -50).tolist() == [-20, 10])
     from aigw_edge.session import AudioOut
     out = AudioOut()
     idle = out.pacing()
