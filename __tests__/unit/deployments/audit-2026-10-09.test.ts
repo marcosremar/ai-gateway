@@ -105,7 +105,7 @@ function observed(id: string, createdAt: number, over: Partial<ObservedReplica> 
 }
 
 describe('audit 2026-10-09: maxHours while a class is being served', () => {
-  it.fails('replicas with requests in flight are not all released at the same tick when they reach maxHours together', () => {
+  it('replicas with requests in flight are not all released at the same tick when they reach maxHours together', () => {
     const born = NOW - 4 * HOUR - 1000;
     const plan = planReplicas({
       spec: ttsSpec(), now: NOW, inflight: 6, waiting: 0, lastRequestAt: NOW - 1000, aboveSince: null,
@@ -116,7 +116,7 @@ describe('audit 2026-10-09: maxHours while a class is being served', () => {
 });
 
 describe('audit 2026-10-09: a replica that never becomes ready', () => {
-  it.fails('is not replaced again and again when no request arrived since the first one', () => {
+  it('is not replaced again and again when no request arrived since the first one', () => {
     const firstRequest = NOW - 46 * MIN;
     const plan = planReplicas({
       spec: ttsSpec({ maxReplicas: 1, minActiveReplicas: 1 }), now: NOW, inflight: 0, waiting: 0, lastRequestAt: firstRequest, aboveSince: null,
@@ -128,7 +128,7 @@ describe('audit 2026-10-09: a replica that never becomes ready', () => {
 });
 
 describe('audit 2026-10-09: gateway restart while old replicas are busy', () => {
-  it.fails('a replica older than bootTimeoutMinutes whose first health check after the restart is busy is kept', async () => {
+  it('a replica older than bootTimeoutMinutes whose first health check after the restart is busy is kept', async () => {
     const store = new MemoryDeploymentStore();
     const cloud = new FakeCloud();
     clouds.push(cloud);

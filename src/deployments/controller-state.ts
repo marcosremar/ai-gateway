@@ -95,6 +95,7 @@ export interface Runtime {
   hedgeBaseMs?: number;
   /** When another deployment under pressure took this one's idle replica (it then counts as idle until a new request). */
   reclaimedAt: number | null;
+  bootTimeouts: number;
 }
 
 /** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
@@ -211,6 +212,7 @@ export abstract class ControllerState {
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
   protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();
   protected readonly probes = new Map<string, ProbeState>();
+  protected readonly releasing = new Map<string, { machine: ReplicaMachine; at: number }>();
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
   protected readonly networkReleases = new Map<string, PendingNetworkRelease>();
@@ -266,7 +268,7 @@ export abstract class ControllerState {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
-      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null,
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0,
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
@@ -339,6 +341,7 @@ export abstract class ControllerState {
       machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight,
       ...(p.readyAt ? { readyAt: p.readyAt } : {}), ...(this.servedRecently(p) ? { servedRecently: true } : {}),
       ...(p.downSince !== undefined ? { downForMs: this.now() - p.downSince } : {}),
+      ...(machine.createdAt < this.startedAt ? { bootStartedAt: this.startedAt } : {}),
     };
   }
 
@@ -431,6 +434,6 @@ export abstract class ControllerState {
   protected totalReplicas(): number {
     let creating = 0;
     for (const rt of this.deployments.values()) creating += rt.creating;
-    return this.runningMachines().length + creating;
+    return this.runningMachines().length + this.releasing.size + creating;
   }
 }
