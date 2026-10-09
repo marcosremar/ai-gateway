@@ -95,6 +95,10 @@ export class ApiKeyRegistry {
   }
 }
 
+export function bearerToken(header: string | undefined): string {
+  return /^Bearer +(\S+)$/i.exec(header ?? '')?.[1] ?? '';
+}
+
 function safeEqual(a: string, b: string): boolean {
   const aBuf = Buffer.from(a);
   const bBuf = Buffer.from(b);

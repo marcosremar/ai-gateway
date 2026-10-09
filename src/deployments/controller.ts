@@ -359,7 +359,7 @@ export class DeploymentController extends ControllerViews {
     let released = false;
     return {
       machine: chosen,
-      token: rt.record.replicaToken,
+      token: this.replicaToken(rt, chosen),
       exposed: !!rt.record.spec.exposure,
       signal: this.goneSignal(chosen.id),
       done: (failed: boolean | LeaseOutcome = false) => {

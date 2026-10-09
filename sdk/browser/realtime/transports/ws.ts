@@ -1,5 +1,5 @@
 /**
- * WebSocket rung, relayed by the gateway (`wss://<gateway>/v1/realtime/ws?token=…`): microphone as 16 kHz PCM16 20 ms
+ * WebSocket rung, relayed by the gateway (`wss://<gateway>/v1/realtime/ws`, session token as the subprotocol `aigw.token.<token>`): microphone as 16 kHz PCM16 20 ms
  * frames up, 24 kHz PCM16 down into an AudioWorklet ring buffer, JSON events as text frames. Used when WebRTC cannot
  * connect (UDP and TURN blocked); TCP/443 only.
  */
@@ -52,7 +52,11 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
     async connect(signal) {
       if (!WS) throw new Error('WebSocket is not available');
       // A browser WebSocket cannot set headers: the trace context rides in the query (the gateway reads both).
-      const socket = new WS(`${url}${url.includes('?') ? '&' : '?'}traceparent=${encodeURIComponent(ctx.traceparent)}`);
+      const target = new URL(url);
+      const token = target.searchParams.get('token');
+      target.searchParams.delete('token');
+      target.searchParams.set('traceparent', ctx.traceparent);
+      const socket = token ? new WS(target.toString(), ['aigw.rt', `aigw.token.${token}`]) : new WS(target.toString());
       ws = socket;
       socket.binaryType = 'arraybuffer';
       let readyResolve: (() => void) | null = null;

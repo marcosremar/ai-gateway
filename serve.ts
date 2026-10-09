@@ -40,9 +40,9 @@ import { buildImages } from './src/deployments/build-images';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
-import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
+import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
 import {
-  deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  deploymentLogToTelemetry, emitGatewayEvent, isMasterToken, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
@@ -65,7 +65,7 @@ const PORT = parseInt(process.env.PORT || '4000');
 const clientKeys = gatewayClientKeys(process.env);
 for (const w of clientKeys.warnings) log.warn({}, `WARNING: ${w}`);
 const API_KEYS = clientKeys.keys;
-/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1. */
+/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1 + SANDBOX_TOKEN_ADMIN=1. */
 const EXTRA_ADMINS = clientKeys.sandboxAdmins;
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
@@ -138,6 +138,8 @@ if (declared) {
   log.log({ declared: status.map(s => ({ name: s.name, state: s.state, reason: s.reason })) }, 'Declared deployments');
   declared.start();
 }
+const bootRegistryWarning = deployments?.registryWarning() ?? null;
+if (bootRegistryWarning) log.error({}, `ERROR: ${bootRegistryWarning}`);
 
 function mountProviders() {
   const built = buildServeProviders({
@@ -193,7 +195,11 @@ let latency: (() => LatencyReport) | null = null;
  */
 const chainHealth = () => {
   const report = chainsNow();
-  return { ...report, fallback: fallbackWatch(report.stages), latency: latency?.() ?? null };
+  const registryWarning = deployments?.registryWarning() ?? null;
+  return {
+    ...report, warnings: [...(report.warnings ?? []), ...(registryWarning ? [registryWarning] : [])],
+    fallback: fallbackWatch(report.stages), latency: latency?.() ?? null,
+  };
 };
 setInterval(() => fallbackWatch(chainsNow().stages), 15_000).unref();
 
@@ -227,7 +233,8 @@ const isAdminToken = (token: string) => {
 // What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
 // clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
 const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
-  const routes = deployments?.apps.get(userId)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
+  const app = userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : userId;
+  const routes = deployments?.apps.get(app)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
@@ -260,12 +267,7 @@ const telemetry = telemetryFromEnv(process.env, {
   auth: {
     resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
     resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
-    isMasterKey: (token) => TOKEN_ALIASES.some(k => process.env[k]?.trim() === token),
-    deployment: (name) => {
-      const replicaToken = controller?.tokenOf(name);
-      const app = controller?.get(name)?.app;
-      return replicaToken ? { replicaToken, ...(app ? { app } : {}) } : null;
-    },
+    isMasterKey: (token) => isMasterToken(token, process.env),
     replica: (id) => controller?.replicaAuth(id) ?? null,
   },
   isAdminToken,

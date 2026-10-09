@@ -158,9 +158,9 @@ export class RealtimeService {
   async probeAll(): Promise<void> {
     for (const d of this.opts.controller?.list?.() ?? []) {
       if (!this.opts.controller?.specOf(d.name)?.realtime) continue;
-      const token = this.opts.controller.tokenOf(d.name);
-      if (!token) continue;
       for (const r of this.readyReplicas(d.name, true)) {
+        const token = this.opts.controller.tokenOf(d.name, r.id);
+        if (!token) continue;
         const s = await this.status.get(r.id, r.base, token);
         if (!s.ok) continue;
         reportExternalLoad(d.name, r.id, s.status.active, s.status.max, this.now());
@@ -348,7 +348,7 @@ export class RealtimeService {
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: code, status, deployment: dep } });
       return sendJson(res, status, errorBody(message, code, { fallback: FALLBACK }), { 'Retry-After': retryAfter });
     }
-    const replicaToken = controller.tokenOf(dep);
+    const replicaToken = controller.tokenOf(dep, placed.replica.id);
     if (!replicaToken) return sendJson(res, 503, errorBody('deployment has no replica token', 'cold', { fallback: FALLBACK }), { 'Retry-After': 5 });
 
     const ttl = this.ttlSeconds;
@@ -441,9 +441,8 @@ export class RealtimeService {
       const stages = [...new Set(every.flatMap(r => r.stagesOut))].join(', ');
       return { refusal: { status: 503, code: 'degraded', message: `deployment '${dep}': ${stages} failing on every ready replica`, retryAfter: 30 } };
     }
-    const token = controller.tokenOf(dep) ?? '';
     const results: Array<{ r: { id: string; base: string }; s: EdgeStatusResult }> = await Promise.all(
-      ready.map(async r => ({ r, s: await this.provenStatus(dep, r, token) })));
+      ready.map(async r => ({ r, s: await this.provenStatus(dep, r, controller.tokenOf(dep, r.id) ?? '') })));
     const candidates: ReplicaCandidate[] = [];
     for (const { r, s } of results) {
       if (!s.ok) continue;
@@ -481,8 +480,9 @@ export class RealtimeService {
   resolveToken(token: string): ResolvedSession | { status: number; code: string; message: string } {
     const peek = peekClaims(token);
     if (!peek) return { status: 401, code: 'invalid_token', message: 'malformed realtime session token' };
-    const replicaToken = this.opts.controller?.tokenOf(peek.dep) ?? null;
-    if (!replicaToken) return { status: 401, code: 'invalid_token', message: 'unknown deployment in session token' };
+    if (!this.opts.controller?.get(peek.dep)) return { status: 401, code: 'invalid_token', message: 'unknown deployment in session token' };
+    const replicaToken = this.opts.controller.tokenOf(peek.dep, peek.rep);
+    if (!replicaToken) return { status: 410, code: 'replica_gone', message: 'the replica of this session is gone: open a new session' };
     const verdict = verifySessionToken(token, deriveRealtimeKey(replicaToken), Math.floor(this.now() / 1000));
     if ('error' in verdict) return { status: 401, code: verdict.error === 'expired' ? 'token_expired' : 'invalid_token', message: `session token refused: ${verdict.error}` };
     const { claims } = verdict;
@@ -508,7 +508,7 @@ export class RealtimeService {
     const open = [...this.sessions].filter(([, s]) => s.app === app && s.dev === device);
     await Promise.all(open.map(async ([sid, s]) => {
       const base = this.replicaBaseOf(s.dep, s.rep);
-      const token = this.opts.controller?.tokenOf(s.dep);
+      const token = this.opts.controller?.tokenOf(s.dep, s.rep);
       this.forget(sid);
       if (!base || !token) return;
       await (this.opts.fetchImpl ?? fetch)(`${base}/__aigw/rt/session/${encodeURIComponent(s.edgeSessionId ?? sid)}`, {
@@ -538,10 +538,10 @@ export class RealtimeService {
     }
     if (!deps.size && this.poller) { clearInterval(this.poller); this.poller = null; return; }
     for (const dep of deps) {
-      const token = this.opts.controller?.tokenOf(dep);
-      if (!token) continue;
       let active = 0;
       for (const r of this.readyReplicas(dep, true)) {
+        const token = this.opts.controller?.tokenOf(dep, r.id);
+        if (!token) continue;
         const s = await this.status.get(r.id, r.base, token, { fresh: true });
         if (!s.ok) continue;
         reportExternalLoad(dep, r.id, s.status.active, s.status.max, this.now());

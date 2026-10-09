@@ -27,13 +27,13 @@ export function filesByUrl(spec: DeploymentSpec, replicaToken: string, publicUrl
 
 export interface BootFilesSource {
   specOf(name: string): DeploymentSpec | null;
-  tokenOf(name: string): string | null;
+  deploymentSecretOf(name: string): string | null;
 }
 
 export function bootFile(source: BootFilesSource, query: URLSearchParams, nowMs: number): Buffer | null {
   const deployment = query.get('d') ?? '', key = query.get('k') ?? '', sig = query.get('sig') ?? '';
   const exp = Number(query.get('exp'));
-  const token = source.tokenOf(deployment);
+  const token = source.deploymentSecretOf(deployment);
   if (!token || !Number.isInteger(exp) || exp * 1000 < nowMs) return null;
   const expected = Buffer.from(signature(token, deployment, key, exp));
   const given = Buffer.from(sig);

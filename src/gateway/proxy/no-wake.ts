@@ -6,7 +6,8 @@
  * (a test, a probe, a dev box, a batch job) can opt out:
  *
  *   - per request: header `X-Gateway-No-Wake: 1` (also `true`/`yes`);
- *   - per key user: `GATEWAY_NO_WAKE_USERS=user1,user2` (the user names of `API_KEYS="key:user"`), read per request.
+ *   - per key user: `GATEWAY_NO_WAKE_USERS=user1,user2` (the user names of `API_KEYS="key:user"`), read per request;
+ *   - always for the `sandbox` user (the dev token), unless `SANDBOX_TOKEN_ADMIN=1`.
  *
  * In that mode a deployment target with no ready replica (cold, stopped, booting, absent) is skipped with code `cold`
  * (neutral: no circuit, no cooldown) and the route falls to its cloud fallback; `/v1/s2s` goes composed; `invoke`
@@ -17,6 +18,7 @@
  * (deployment providers, the s2s route, the loopback stage client) reads it without threading a parameter.
  */
 import { AsyncLocalStorage } from 'async_hooks';
+import { SANDBOX_USER, sandboxIsAdmin } from '../../config/sandbox-env';
 
 export const NO_WAKE_HEADER = 'x-gateway-no-wake';
 
@@ -57,7 +59,7 @@ export function noWakeUsers(env: Record<string, string | undefined> = process.en
 
 /** Whether a request (its header and its resolved key user) runs in no-wake mode. */
 export function requestIsNoWake(header: string | string[] | undefined, userId: string, env: Record<string, string | undefined> = process.env): boolean {
-  return headerAsksNoWake(header) || noWakeUsers(env).has(userId);
+  return headerAsksNoWake(header) || noWakeUsers(env).has(userId) || (userId === SANDBOX_USER && !sandboxIsAdmin(env));
 }
 
 /** Counts one deployment target skipped (or one invoke refused) because of no-wake. */

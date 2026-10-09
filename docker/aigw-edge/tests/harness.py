@@ -615,12 +615,12 @@ def start_nginx():
     Path(d, "aigw.conf").write_text(conf)
     Path(d, "nginx.conf").write_text(
         f"pid {d}/nginx.pid; error_log {d}/error.log; daemon off; events {{}}\n"
-        f"http {{ access_log off; client_body_temp_path {d}; proxy_temp_path {d}; fastcgi_temp_path {d}; "
+        f"http {{ access_log {d}/access.log; client_body_temp_path {d}; proxy_temp_path {d}; fastcgi_temp_path {d}; "
         f"uwsgi_temp_path {d}; scgi_temp_path {d}; include {d}/aigw.conf; }}\n")
     return subprocess.Popen(["nginx", "-p", d, "-c", f"{d}/nginx.conf"]), d
 
 
-async def scenario_nginx() -> None:
+async def scenario_nginx(nginx_dir: str) -> None:
     front = f"http://127.0.0.1:{NGINX_PORT}"
     big_cfg = {**DEFAULT_CFG, "system": "x" * 4400}  # ~6 KB of base64url cfg in the URL, the contract's maximum
     token = mint(big_cfg)
@@ -645,6 +645,20 @@ async def scenario_nginx() -> None:
     await learner.events.wait("done", 15)
     check("nginx: WS upgrade through the token gate, 6 KB token, full turn", learner.audio_bytes > 0)
     await learner.close()
+    header_token = mint(big_cfg)
+    learner = WsLearner(front)
+    learner.http = aiohttp.ClientSession(headers={"X-Aigw-Token": GATE_TOKEN, "X-Aigw-Session-Token": header_token})
+    learner.ws = await learner.http.ws_connect(f"{front}/__aigw/rt/ws")
+    learner.tasks.append(asyncio.create_task(learner._read()))
+    learner.tasks.append(asyncio.create_task(learner._mic()))
+    await learner.events.wait("ready")
+    learner.say(1.2)
+    await learner.events.wait("done", 15)
+    check("nginx: WS with the session token in X-Aigw-Session-Token (no query), full turn", learner.audio_bytes > 0)
+    await learner.close()
+    logs = "".join(Path(nginx_dir, name).read_text() for name in ("access.log", "error.log") if Path(nginx_dir, name).exists())
+    check("nginx: neither session token is in the access or error log",
+          token.split(".")[1] not in logs and header_token.split(".")[1] not in logs and "/__aigw/rt/status" in logs)
     t = time.monotonic()
     rtc = RtcLearner(front)
     # The offer goes through nginx (the gateway's signaling path); media goes straight to the edge's UDP ports.
@@ -691,7 +705,7 @@ async def main() -> int:
         await scenario_telemetry(base)
         await scenario_vast(base_vast)
         if nginx:
-            await scenario_nginx()
+            await scenario_nginx(nginx_dir)
         else:
             print("SKIP nginx scenario (no nginx or bun)")
         await scenario_tts_guard(base)

@@ -40,6 +40,7 @@ export interface FakeEdge {
   status: EdgeStatusBody | null;
   offers: Array<{ body: Record<string, unknown>; token: string | undefined; traceparent?: string }>;
   wsTraceparents: Array<string | undefined>;
+  wsUrls: string[];
   ice: Array<Record<string, unknown>>;
   deleted: string[];
   sockets: WsSocket[];
@@ -60,7 +61,7 @@ function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
 export async function startFakeEdge(): Promise<FakeEdge> {
   const edge = {
     status: { active: 0, max: 8, transports: ['webrtc', 'ws'], udpPorts: [40000, 40100] } as EdgeStatusBody | null,
-    offers: [], wsTraceparents: [], ice: [], deleted: [], sockets: [], offerStatus: 200, wsRefuse: false,
+    offers: [], wsTraceparents: [], wsUrls: [], ice: [], deleted: [], sockets: [], offerStatus: 200, wsRefuse: false,
   } as unknown as FakeEdge;
   const server = createServer(async (req, res) => {
     const token = req.headers['x-aigw-token'] as string | undefined;
@@ -97,7 +98,8 @@ export async function startFakeEdge(): Promise<FakeEdge> {
   });
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', 'http://edge');
-    const token = url.searchParams.get('token') ?? '';
+    const token = (req.headers['x-aigw-session-token'] as string | undefined) ?? url.searchParams.get('token') ?? '';
+    edge.wsUrls.push(req.url ?? '');
     const ok = req.headers['x-aigw-token'] === REPLICA_TOKEN && url.pathname === '/__aigw/rt/ws'
       && 'claims' in verifySessionToken(token, deriveRealtimeKey(REPLICA_TOKEN), Math.floor(Date.now() / 1000));
     if (!ok || edge.wsRefuse) { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return; }

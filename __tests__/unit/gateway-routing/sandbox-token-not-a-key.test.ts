@@ -42,11 +42,12 @@ describe('SANDBOX_TOKEN is not a gateway key', () => {
     }
   });
 
-  it('ACCEPT_SANDBOX_TOKEN_AS_KEY=1 (transition) accepts it as admin user `sandbox`, with a warning', async () => {
+  it('ACCEPT_SANDBOX_TOKEN_AS_KEY=1 (transition) accepts it as user `sandbox` (admin only with SANDBOX_TOKEN_ADMIN=1), with a warning', async () => {
     const env = { SANDBOX_TOKEN: TOKEN, ACCEPT_SANDBOX_TOKEN_AS_KEY: '1' };
     const { keys, sandboxAdmins, warnings } = gatewayClientKeys(env);
     expect(keys).toEqual([`${TOKEN}:sandbox`]);
-    expect([...adminUsersFromEnv(env, sandboxAdmins)]).toEqual(['sandbox']);
+    expect(adminUsersFromEnv(env, sandboxAdmins).size).toBe(0);
+    expect([...adminUsersFromEnv({ ...env, SANDBOX_TOKEN_ADMIN: '1' }, gatewayClientKeys({ ...env, SANDBOX_TOKEN_ADMIN: '1' }).sandboxAdmins)]).toEqual(['sandbox']);
     expect(warnings.join('\n')).toMatch(/transition only/);
     expect((await models(await gateway(env), TOKEN)).status).toBe(200);
   });

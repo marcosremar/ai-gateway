@@ -10,6 +10,7 @@
  *   controller-views.ts (views, health) → controller.ts (API, leases).
  */
 
+import { createHmac } from 'crypto';
 import { activeWindow, type PressureState } from './autoscale';
 import { filesByUrl } from './boot-files';
 import { replicaPhase, type ObservedReplica } from './planner';
@@ -190,8 +191,13 @@ export function isParked(m: ReplicaMachine): boolean {
 
 export const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
+export function replicaTokenFor(deploymentSecret: string, tokenKey: string | undefined): string {
+  return tokenKey ? createHmac('sha256', deploymentSecret).update(`aigw-replica-v1:${tokenKey}`).digest('base64url') : deploymentSecret;
+}
+
 export abstract class ControllerState {
   protected readonly deployments = new Map<string, Runtime>();
+  protected readonly tokenKeys = new Map<string, string>();
   protected readonly profiles = new Map<string, Profile>();
   protected machines: ReplicaMachine[] = [];
   /**
@@ -457,5 +463,9 @@ export abstract class ControllerState {
     let creating = 0;
     for (const rt of this.deployments.values()) creating += rt.creating;
     return this.runningMachines().length + this.releasing.size + creating;
+  }
+
+  protected replicaToken(rt: Runtime, machine: ReplicaMachine): string {
+    return replicaTokenFor(rt.record.replicaToken, machine.tokenKey ?? this.tokenKeys.get(machine.id));
   }
 }

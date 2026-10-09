@@ -50,7 +50,7 @@ describe('audit 2026-10-09: one request at a time reaches every ready replica', 
 });
 
 describe('audit 2026-10-09: the provider API secret stays off the machine', () => {
-  it.fails('cloud-init for an image on the Scaleway registry does not carry the Scaleway API secret', () => {
+  it('cloud-init for an image on the Scaleway registry does not carry the Scaleway API secret', () => {
     const secret = 'scw-secret-0000-1111-2222-333344445555';
     const backend = new ScalewayDeploymentBackend(secret, {});
     const spec = buildSpec('speech', { image: 'rg.fr-par.scw.cloud/aigw/speech-stack:1', port: 8000 }, { profiles: new Map() });

@@ -58,6 +58,7 @@ export function nginxConfig(token: string, listen: number = 80, upstream = 8000,
   // `server_tokens off` drops the nginx version from headers and error pages.
   return `map $http_upgrade $aigw_conn { default "upgrade"; "" ""; }
 map $http_x_aigw_token $aigw_unauth { "${token}" ""; default $binary_remote_addr; }
+map $http_x_aigw_session_token $aigw_ws_args { "" $args; default "token=$http_x_aigw_session_token"; }
 limit_req_zone $aigw_unauth zone=aigw_unauth:1m rate=${UNAUTH_RATE_PER_SECOND}r/s;
 limit_conn_zone $aigw_unauth zone=aigw_unauth_conn:1m;
 server_tokens off;
@@ -81,7 +82,19 @@ server {
     default_type application/json;
     alias /srv/aigw/ready.json;
   }
-${rtPort ? `  location ^~ /__aigw/rt/ {
+${rtPort ? `  location = /__aigw/rt/ws {
+    access_log off;
+    error_log /dev/null crit;
+    proxy_set_header X-Aigw-Token "";
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $aigw_conn;
+    proxy_pass http://127.0.0.1:${rtPort}/__aigw/rt/ws?$aigw_ws_args;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 960;
+    proxy_send_timeout 960;
+  }
+  location ^~ /__aigw/rt/ {
     proxy_set_header X-Aigw-Token "";
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $aigw_conn;
@@ -227,10 +240,12 @@ export function replicaCloudInit(spec: DeploymentSpec, token: string, opts: Repl
   const appPort = spec.exposure ? spec.port : 8000;
   const rtPort = spec.realtime ? RT_EDGE_PORT : undefined;
   const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort) : nginxConfig(token, 80, 8000, rtPort);
+  const registry = spec.registryAuth?.server ? shellQuote(spec.registryAuth.server) : '';
   const login = spec.registryAuth
-    ? `echo ${shellQuote(spec.registryAuth.password)} | docker login ${spec.registryAuth.server ? shellQuote(spec.registryAuth.server) + ' ' : ''}`
-      + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin`
+    ? `set +x\necho ${shellQuote(spec.registryAuth.password)} | docker login ${registry ? registry + ' ' : ''}`
+      + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin\nset -x`
     : '';
+  const logout = spec.registryAuth ? `docker logout ${registry}`.trim() : '';
   return `#!/bin/bash
 mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
@@ -247,6 +262,7 @@ ${fetchFilesScript(spec.fileUrls)}
 ${spec.bootScript ? bootScriptSection(spec.bootScript) : `command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 ${login}
 for i in 1 2 3 4 5; do docker pull ${shellQuote(spec.image)} && break; sleep 15; done
+${logout}
 ${dockerRunCommand(spec)}`}
 ${spec.realtime ? realtimeSection(spec, token, opts) : ''}
 for i in $(seq 1 ${bootChecks}); do

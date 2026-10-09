@@ -202,7 +202,7 @@ export interface Profile {
 /** Durable per-deployment state besides the spec. */
 export interface DeploymentRecord {
   spec: DeploymentSpec;
-  /** Shared secret the replica's front proxy requires (`X-Aigw-Token`). */
+  /** Deployment secret, never sent to a machine: each replica's `X-Aigw-Token` is derived from it and the machine's `tokenKey`. */
   replicaToken: string;
   createdAt: number;
   updatedAt: number;
@@ -308,6 +308,7 @@ export interface ReplicaMachine {
   /** When the provider takes the host back (Vast rental end, ms); absent when it never does (`expiry.ts`). */
   expiresAt?: number | null;
   placementNote?: string;
+  tokenKey?: string;
   /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
   bootError?: string;
 }
@@ -315,6 +316,7 @@ export interface ReplicaMachine {
 export interface CreateReplicaInput {
   spec: DeploymentSpec;
   replicaToken: string;
+  tokenKey?: string;
   cloudInit: string;
   namespace: string;
   /** user_data keys → bytes (boot-script `files`). */

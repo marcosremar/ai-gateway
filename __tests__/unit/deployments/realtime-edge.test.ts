@@ -189,7 +189,7 @@ function fakeClient() {
 describe('firewall of realtime replicas (fake Scaleway)', () => {
   it('a realtime replica gets the shared realtime group: TCP 80 + its UDP range; a plain one keeps the gateway-only group', async () => {
     const client = fakeClient();
-    const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj', registrySecret: 'registry-read-only' });
     await backend.createReplica({ spec: speech({ realtime: {} }), replicaToken: TOKEN, cloudInit: 'x', namespace: 'prod' });
     await backend.createReplica({ spec: speech({ realtime: {} }), replicaToken: TOKEN, cloudInit: 'x', namespace: 'prod' });
     await backend.createReplica({ spec: speech(), replicaToken: TOKEN, cloudInit: 'x', namespace: 'prod' });
