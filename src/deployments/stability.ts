@@ -9,7 +9,7 @@
  * never fails the request; it is logged.
  */
 
-import { appendFile, mkdir, rename, stat } from 'fs/promises';
+import { mkdir, open, rename } from 'fs/promises';
 import { dirname } from 'path';
 
 /** One observation a client recorded (mirror of sdk/node `InstabilityEvent`). */
@@ -153,9 +153,17 @@ export class ClientStabilityLog {
     this.chain = this.chain.then(async () => {
       try {
         await mkdir(dirname(file), { recursive: true });
-        const size = await stat(file).then(st => st.size, () => 0);
-        if (size >= (this.opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES)) await rename(file, `${file}.1`);
-        await appendFile(file, `${JSON.stringify(fileRecord(batch))}\n`, 'utf8');
+        let handle = await open(file, 'a');
+        if ((await handle.stat()).size >= (this.opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES)) {
+          await handle.close();
+          await rename(file, `${file}.1`);
+          handle = await open(file, 'a');
+        }
+        try {
+          await handle.appendFile(`${JSON.stringify(fileRecord(batch))}\n`, 'utf8');
+        } finally {
+          await handle.close();
+        }
       } catch (err) {
         this.log('client stability report: could not persist', { error: String((err as Error).message ?? err).slice(0, 120) });
       }
