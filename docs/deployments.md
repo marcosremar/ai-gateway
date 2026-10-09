@@ -91,7 +91,7 @@ are put back. `envByMachineType` is merged per key: the declared keys are put ba
 registry, which the gateway pulls from with the key it already has: **no registry token, no `registryAuth`, nothing
 to set** — it is never `pending` for a credential. The declaration owns five things and patches only them over the
 registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full reference; default
-`20261009-0003`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
+`20261009-0213`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
 the same tag: `SPEECH_IMAGE` does not move that copy; no L4), `scaling.mode` `fast`, `realtime: {}` (the edge
 sidecar, [realtime-edge.md](realtime-edge.md)) and env per machine type (the edge's `RT_MAX_SESSIONS`: L4 2, L40S 4;
 the whole RTX 5090 set; merged into the stored `envByMachineType`). A registered spec with `files` reaches the Vast
@@ -642,7 +642,7 @@ curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/j
   "placements": [
     { "zone": "fr-par-1" },
     { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.62, "maxReplicas": 8,
-      "image": "ghcr.io/marcosremar/speech-stack:20261009-0003" }
+      "image": "ghcr.io/marcosremar/speech-stack:20261009-0213" }
   ],
   "warmSchedule": [
     { "days": [1, 2, 3, 4], "start": "17:25", "end": "20:05", "timeZone": "Europe/Paris", "minReplicas": 8 }
@@ -672,7 +672,7 @@ Unit tests with a fake Vast API cover the code above. Not run against real hosts
 
 | Unproven | Live test (a test gateway: `DEPLOYMENTS_NAMESPACE=<own>`, `VAST_API_KEY` from the dev API, never production) |
 |---|---|
-| Pull time of `ghcr.io/marcosremar/speech-stack:20261009-0003` (22 GB) on a Vast host, and the boot of the baked image | 1 below; read `bootMs` |
+| Pull time of `ghcr.io/marcosremar/speech-stack:20261009-0213` (22 GB) on a Vast host, and the boot of the baked image | 1 below; read `bootMs` |
 | The reputation file surviving a real restart | 2 |
 | The UDP probe on real hosts feeding `udp` and `requireWebrtc` | 3 |
 | `files` through signed links on a real host | 4 |
@@ -685,7 +685,7 @@ export GW=https://<test gateway> KEY=<admin key of that gateway> DEP=vast-class
 # 1. One replica from the public image; time from the PUT to ready, and what the host did.
 curl -s -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' $GW/v1/deployments/$DEP -d '{
   "profile": "speech-stack", "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.62,
-  "image": "ghcr.io/marcosremar/speech-stack:20261009-0003", "placements": [], "idleAction": "delete",
+  "image": "ghcr.io/marcosremar/speech-stack:20261009-0213", "placements": [], "idleAction": "delete",
   "minReplicas": 1, "maxReplicas": 1, "realtime": { "maxSessions": 4 },
   "fileUrls": { "voices.json": { "url": "https://<public copy>/voices.json", "sha256": "<64 hex>" },
                 "voice-pt.wav": { "url": "https://<public copy>/voice-pt.wav", "sha256": "<64 hex>" } }

@@ -294,11 +294,12 @@ mid-class refuses the next turn or session with 429 `daily_budget_exhausted` and
 ends the turn with the `tts` error). No retry was added for the non-silent runaway: it cannot be told from speech
 before the learner has heard it without holding back every first audio.
 
-## 12. Integration build (PR `rt/integration-2`, 2026-10-09): #67, #68, #63, #62, #64, #66 on `main`
+## 12. Integration build (PR `rt/integration-2`, 2026-10-09): #67, #68, #63, #62, #64, #66, #65 on `main`
 
-Code, unit tests and the edge's loopback harness only; nothing below was run against production or a GPU. § 11
-(production guards, #63) is part of this build and stays as written. #65 (WebRTC uplink and lead trim) is **not** in
-it: § 12.6.
+Nothing below was run against production. § 11 (production guards, #63) is part of this build and stays as written.
+#65 (WebRTC uplink as it arrives, loss as elapsed time, 48 kHz downlink, lead trim) joined on 2026-10-09 (merge
+`624bced`). The build was proven live on an L40S the same morning, from a local gateway: results, what stays
+unit-only and the GO / NO-GO are in `2026-10-07-realtime-handoff.md` § Prova ao vivo da integração (#70).
 
 ### 12.1 What it adds
 
@@ -392,34 +393,32 @@ Built by CI from this branch on 2026-10-09 (UTC); nothing in production points a
 
 | Image | Tag | Digest | Built from |
 |---|---|---|---|
-| `ghcr.io/marcosremar/aigw-edge` | `48db2e5f` | `sha256:fe41f2628176f7dd541191454cb4cde72f2883f8bc6f1d74d0db59c1fc7c1639` | commit `48db2e5f` (workflow `aigw-edge`): #67, #68, the TTS cut of #63 |
-| `ghcr.io/marcosremar/speech-stack` (public, Vast) | `20261009-0003` | `sha256:3420c5de56cb0cc18ec70a595aad9709a19262294e03223ef1adac8e48444bfe` | commit `a74718c1` (workflow `speech-stack`), `EDGE_TAG=48db2e5f` |
-| `rg.fr-par.scw.cloud/aigw/speech-stack` (Scaleway) | `20261009-0003` | the same digest | `bun scripts/build-image-on-scaleway.ts --from ghcr.io/marcosremar/speech-stack:20261009-0003 speech-stack` (507 s; the build machine and its volume answer 404 afterwards) |
+| `ghcr.io/marcosremar/aigw-edge` | `79722253` | `sha256:2b0ba945e5505b8ef6dd56dc439807917bf0e3956f514878bbdb93338103fb17` | commit `7972225` (workflow `aigw-edge`): #67, #68, the TTS cut of #63, #65, and the client `end_turn` fix. No file under `docker/aigw-edge/` changed after it |
+| `ghcr.io/marcosremar/speech-stack` (public, Vast) | `20261009-0213` | `sha256:210f98859fed816642c96a6554f032d9865025f870f859c21eb9a9b7a26f4d31` | commit `3275783` (workflow `speech-stack`), `EDGE_TAG=79722253`, with `GET /debug/gpu`. No file under `docker/speech-stack/` changed after it |
+| `rg.fr-par.scw.cloud/aigw/speech-stack` (Scaleway) | `20261009-0213` | the same digest | `bun scripts/build-image-on-scaleway.ts --from ghcr.io/marcosremar/speech-stack:20261009-0213 speech-stack` (994 s, one blob upload retried after `RANGE_INVALID`; the build machine and its volume were deleted by the script) |
 
-In the branch: `DEFAULT_EDGE_IMAGE` and the speech-stack `EDGE_TAG` are `48db2e5f`; `SPEECH_STACK_TAG` (the profile) and
-`src/deployments/declared/parle-speech.json` (Scaleway default and the Vast placement) are `20261009-0003`. Before the
-deploy, check both registries still answer that digest (as § 3.5, with this tag). The image was never booted: its first
-start on a GPU is item 2 of § 12.7. To go back, restore the two tags `f66b6b80` / `20261008-1317` in those four places.
+In the branch: `DEFAULT_EDGE_IMAGE` and the speech-stack `EDGE_TAG` are `79722253`; `SPEECH_STACK_TAG` (the profile) and
+`src/deployments/declared/parle-speech.json` (Scaleway default and the Vast placement) are `20261009-0213`. Before the
+deploy, check both registries still answer that digest (as § 3.5, with this tag). First boot on an L40S: 2026-10-09
+(handoff, item 1). To go back, restore the two tags `f66b6b80` / `20261008-1317` in those four places (what
+production ran before this build).
 
 Later pushes to the PR rebuild both images under other tags (the workflows run on every push that has `docker/` in
-the PR's diff); only the tags above are pinned.
+the PR's diff); only the tags above are pinned. The earlier pair of this branch (`48db2e5f` / `20261009-0003`, without
+#65 and the `end_turn` fix) is superseded and was never deployed.
 
 ### 12.6 Not in this build
 
-- **#65** (`rt/webrtc-latency`: WebRTC uplink decoded as it arrives, first reply sentence without its silent lead,
-  harness `getStats`): still being changed and tested live when this branch was cut. It touches
-  `docker/aigw-edge/aigw_edge/{audio,host,session,upstream}.py`, the edge tests, `docs/realtime-edge.md` and
-  `scripts/realtime-e2e/{load-client.ts,load.ts,load_rtc.py,page-load.js,page-meter.js}`; here `session.py`,
-  `upstream.py` (`speak` gained `on_overlong`), the edge tests and the two `load*.ts` files changed too, so its merge
-  after this one has conflicts there, and it needs one more edge and speech-stack image.
-- Open defects of the live proof of 2026-10-08/09 that this build does **not** address:
-  - turns ending `interrupted` with `--client-deadline` (the page-ended turn and the SDK's own opener);
-  - VRAM of an L40S with 16 slots at `LLM_SLOT_CTX` 4096 not measured (production stays at 2048);
-  - the `s2s-stream` harness run hangs (`e2e-live.ts turn s2s-stream`);
+- Open after the live proof of 2026-10-09 (handoff § Prova ao vivo da integração (#70) has the detail):
+  - the first-sound deadline on the learner's clock (#59) with the client's own opener was not re-measured (the
+    opener is voiced through the cloud TTS, whose key had expired); the turns ending `interrupted` in that mode are
+    fixed in the edge of this build and re-measured without the opener;
+  - everything on the composed fallback, speculation included (#66): the OpenRouter key served by the dev API is
+    expired;
+  - everything on Vast (#64 host reputation, `files` through signed links, `requireWebrtc`): the account has no credit;
   - L40S not sold in fr-par-1 (the second placement of `parle-speech` is skipped);
   - the Vast boot timeout (20 min) is shorter than the first pull of the 57 GB image on a slow host;
-  - the RTT gate decides after the paid pull (a far host is released only once it has booted);
-  - Vast account credit (overflow creates fail without it).
+  - the RTT gate decides after the paid pull (a far host is released only once it has booted).
 
 ### 12.7 Live proof checklist for this build
 
