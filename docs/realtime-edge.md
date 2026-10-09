@@ -252,11 +252,19 @@ through PyAV's libopus wrapper, which has no FEC flag and returns nothing for a 
 FEC would need libopus called directly. A packet that arrives after a later one is dropped, as before.
 
 Downlink: `OutTrack` sends one 20 ms frame per tick of a wall-clock grid, silence included, with continuous RTP
-timestamps, so the browser's jitter buffer stays at its floor between replies (Chromium: target and minimum 20 ms on a
-clean path). Per reply the edge measures its own part and puts it in `metrics`: `out_first_pull_ms` (first TTS PCM →
-the tick that takes it, 0–20 ms), `rtp_first_sent_ms` (→ that packet handed to the transport, encode included) and
-`rtp_late_p50_ms` / `rtp_late_p95_ms` / `rtp_late_max_ms` (how late after its tick each of the next 100 packets left).
-Loopback: first packet 2–19 ms after the first PCM, packets 2–5 ms late at p95.
+timestamps, so the browser's jitter buffer stays at its floor between replies (Chromium `getStats`: target and minimum
+20 ms on a clean local path, 100–160 ms from a home Wi-Fi to the replica — NetEq follows the path's jitter and the
+receiver's `jitterBufferTarget = 0` only removes the SDK's own floor). The frames leave at 48 kHz (`audio.upsample2`,
+the sample between two is interpolated): given 24 kHz frames, aiortc's Opus encoder resamples with a filter that holds
+the last samples back, so every 20 ms frame waited for the next one before it became a packet. Loopback harness,
+`audio_start` → first loud frame at the client: 26–28 ms → 8–9 ms. Per reply the edge measures its own part and puts
+it in `metrics`: `out_first_pull_ms` (first TTS PCM → the tick that takes it, 0–20 ms), `rtp_first_sent_ms` (→ that
+packet handed to the transport, encode included) and `rtp_late_p50_ms` / `rtp_late_p95_ms` / `rtp_late_max_ms` (how
+late after its tick each of the next 100 packets left).
+
+Not done on the downlink: stopping the silence between replies (a receiver that sees a gap may start the next
+talkspurt below its target delay). PyAV's libopus wrapper stamps the first packet after a gap as if there had been
+none, the browser would conceal instead of playing silence, and the effect on NetEq was not measured.
 
 aiortc (BSD-3) does the whole RTP/SRTP/RTCP path in Python on one asyncio loop; Opus encode/decode run in threads
 (libopus via PyAV). Profiling showed two avoidable hot spots, both replaced by numpy (`aigw_edge/audio.py`): PyAV's
