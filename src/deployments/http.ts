@@ -31,7 +31,7 @@ import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppDevices } from './app-devices';
 import type { AppFallbackService } from './app-fallback';
 import type { ClientStabilityLog } from './stability';
-import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
+import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import { createLogger } from '../logger';
 
 const log = createLogger('deployments-http');
@@ -145,6 +145,11 @@ export function replicaTarget(base: string, rest: string, query: string): URL | 
   try { url = new URL(path, base); } catch { return null; }
   const origin = new URL(base).origin;
   return url.origin === origin && url.pathname.startsWith('/') ? url : null;
+}
+
+function withoutSecrets(spec: ProfileSpec): ProfileSpec {
+  const { env, envByMachineType, registryAuth, bootScript, files, fileUrls, ...rest } = spec as Record<string, unknown>;
+  return rest as ProfileSpec;
 }
 
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string | number> = {}): void {
@@ -412,7 +417,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (kind === 'apps') return appRoutes(req, res, parts, method);
 
     if (kind === 'profiles') {
-      if (!name && method === 'GET') return send(res, 200, { profiles: controller.listProfiles() });
+      if (!name && method === 'GET') {
+        const profiles = controller.listProfiles();
+        return send(res, 200, { profiles: isAdmin(req) ? profiles : profiles.map(p => (p.builtin ? p : { ...p, spec: withoutSecrets(p.spec) })) });
+      }
       if (name && !action && method === 'PUT') { admin(); return send(res, 200, await controller.putProfile(name, await readJson(req))); }
       if (name && !action && method === 'DELETE') {
         admin();
