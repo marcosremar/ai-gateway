@@ -532,7 +532,10 @@ With `candidates`, each create walks a **ranked ladder**:
   `vast RTX 5090 (≤ €0.85/h); offer 3 of 21: London, GB, $0.796/h; better-ranked offers passed over: offer 811 (Zurich, CH, $0.563/h): … not available; offer 902 (Amsterdam, NL, $0.597/h): … not available`.
 - The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
   whose replica hit `bootTimeoutMinutes` is skipped for 1 h (§ Host reputation). States: `running`; `loading`/`created` →
-  `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
+  `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). A machine still loading whose Vast `status_msg` says the image cannot be
+  pulled (`manifest unknown`, `failed to resolve reference`, `pull access denied`, …) is released at once as `boot-failed`
+  (the host is not blamed), `lastError` reads `boot failed on the provider: <message>`, and creates back off 1 → 10 min
+  until the spec changes — before, it waited the whole `bootTimeoutMinutes` and rented the next host in a loop. `DELETE /instances/{id}/` releases it
   (its disk goes with it).
 
 ### RTT gate (Vast)
@@ -557,7 +560,8 @@ Outside the gate the replica is released with reason `too-far`, its host (`machi
 the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
 far. Until it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never
 measured again and its host is remembered as known-good for the ranking (on disk, § Host reputation); one adopted after a gateway restart is
-measured for the view only, never released by the gate (it may be serving).
+measured for the view only, never released by the gate, when its front already says ready (it may be serving); one still
+booting at the restart is gated like a fresh rental.
 `GET /v1/deployments/:name` shows `rttMs` and `rttBaselineMs` per replica, and `lastPlacement` both numbers and the
 verdict, e.g.
 `vast RTX 5090 (≤ €0.6/h); offer 1 of 12: Paris, FR, $0.548/h; RTT 42 ms, baseline 45 ms (s3.fr-par.scw.cloud): −3 ms ≤ maxRttExcessMs 20: kept`

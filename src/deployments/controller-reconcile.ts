@@ -5,6 +5,7 @@
 
 import { isParked, type Runtime } from './controller-state';
 import { AutoscaleControl } from './controller-autoscale';
+import { CREATE_BACKOFF_MS } from './controller-replicas';
 import { isActive, planReplicas, replicaPhase } from './planner';
 import { usesScaleway, usesVast } from './spec';
 import { placementsOf } from './placements';
@@ -96,6 +97,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
     }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
+    this.abortRequestsOfGoneReplicas();
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
     for (const id of [...this.udp.keys()]) if (!this.machines.some(m => m.id === id)) this.udp.delete(id);
     for (const id of [...this.poweredOnAt.keys()]) if (!this.machines.some(m => m.id === id)) this.poweredOnAt.delete(id);
@@ -120,6 +122,13 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     // The deployment may live on a provider whose list failed: its known machines are planned (stale, but a release only
     // needs the id) and only the releases run; no create, no power-on until a list answers.
     const releaseOnly = this.touchesFailed(rt.record.spec, failed);
+    for (const m of this.machines.filter(x => x.deployment === name && x.bootError && !this.probes.get(x.id)?.everReady)) {
+      rt.lastError = `boot failed on the provider: ${m.bootError}`;
+      rt.backoffUntil = this.now() + CREATE_BACKOFF_MS[Math.min(rt.bootFailures, CREATE_BACKOFF_MS.length - 1)];
+      rt.bootFailures++;
+      this.log('deployments: boot failed on the provider', { deployment: name, id: m.id, error: m.bootError });
+      await this.release(m, 'boot-failed');
+    }
     const all = this.machines.filter(m => m.deployment === name);
     // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
     // Ones still `stopping` are neither parked nor live: left alone until the list shows `stopped`. Draining ones are

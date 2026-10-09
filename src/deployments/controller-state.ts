@@ -69,6 +69,7 @@ export interface Runtime {
   creating: number;
   backoffUntil: number;
   createFailures: number;
+  bootFailures: number;
   /** Creates that failed for lack of stock in every placement, in a row, and since when (null after a success). */
   stockOut: { since: number; failures: number } | null;
   lastPersistedRequestAt: number | null;
@@ -156,6 +157,8 @@ export interface Lease {
   token: string;
   /** The deployment is exposed (`exposure`): its token-gated front is on `PROBE_PORT`, not :80. */
   exposed: boolean;
+  /** Aborted when the controller releases this replica or the provider stops listing it. */
+  signal?: AbortSignal;
   /**
    * Call once the forwarded request finished. `true`/`'failed'` = connection-level failure (marks the replica suspect),
    * `'timeout'` = it was too slow (busy), `'cancelled'` = the caller aborted it (hedge lost, client gone): neutral.
@@ -212,6 +215,19 @@ export abstract class ControllerState {
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
   protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();
   protected readonly probes = new Map<string, ProbeState>();
+  protected readonly replicaGone = new Map<string, AbortController>();
+  protected goneSignal(id: string): AbortSignal {
+    let gone = this.replicaGone.get(id);
+    if (!gone) this.replicaGone.set(id, gone = new AbortController());
+    return gone.signal;
+  }
+  protected abortRequestsOfGoneReplicas(): void {
+    for (const [id, gone] of this.replicaGone) {
+      if (this.machines.some(m => m.id === id)) continue;
+      gone.abort(new Error(`replica ${id} was released`));
+      this.replicaGone.delete(id);
+    }
+  }
   protected readonly releasing = new Map<string, { machine: ReplicaMachine; at: number }>();
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
@@ -272,7 +288,7 @@ export abstract class ControllerState {
   protected runtime(record: DeploymentRecord): Runtime {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
-      backoffUntil: 0, createFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
+      backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
       samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0,
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },

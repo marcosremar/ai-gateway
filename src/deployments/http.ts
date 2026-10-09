@@ -354,7 +354,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           method,
           headers: { ...headers, ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
           body: body && body.length ? new Uint8Array(body) : undefined,
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS)]),
+          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS), ...(lease.signal ? [lease.signal] : [])]),
         });
       } catch (err) {
         // The client going away says nothing about the replica, and running out of time means busy: neither is a strike
@@ -386,7 +386,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           log.warn({ deployment: name, replica: lease.machine.id, path: rest, cut }, 'invoke: replica stream cut after the response started');
         }
       } finally {
-        lease.done(false);
+        lease.done(upstream.status >= 500 ? 'errored' : false);
       }
       return;
     }

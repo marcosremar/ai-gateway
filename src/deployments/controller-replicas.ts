@@ -13,7 +13,7 @@ import { DEFAULT_NEAR } from './placements';
 import { gateDecision, gateNote } from './rtt-gate';
 import type { DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
-const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
+export const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
 const NETWORK_RELEASE_QUICK_ATTEMPTS = 10;
 const NETWORK_RELEASE_SLOW_RETRY_MS = 5 * 60_000;
 const ORPHAN_RELEASE_ATTEMPTS = 6;
@@ -71,7 +71,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     let rtt: number | null = null;
     try { rtt = await backend.measureRtt(m); } catch { rtt = null; }
     if (rtt != null) gate.rttMs = rtt;
-    if (m.createdAt < this.startedAt) { // adopted after a restart: it may be serving a class, never cut it here
+    if (m.createdAt < this.startedAt && (await this.checkReplica(rt, m)) !== 'down') { // adopted and serving: never cut it here
       if (rtt != null) gate.status = 'adopted';
       return true;
     }
@@ -110,6 +110,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       this.machines = this.machines.filter(x => x.id !== m.id);
       this.releasing.set(m.id, { machine: m, at: this.now() });
       this.probes.delete(m.id);
+      this.abortRequestsOfGoneReplicas();
     } catch (err) {
       const rt = this.deployments.get(m.deployment);
       if (rt) rt.lastError = `release ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
