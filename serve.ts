@@ -35,9 +35,11 @@ import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
-import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
+import { adminListWarning, adminUsersFromEnv, bootFilesRoute, deploymentsFromEnv, proxyIdleTimeoutMs, DEVICE_HEADER } from './src/deployments';
+import { buildImages } from './src/deployments/build-images';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
+import { createWebhookDelivery } from './src/webhooks';
 import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
@@ -228,14 +230,17 @@ const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
   const routes = deployments?.apps.get(userId)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
+const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const appLimits = API_KEYS.length ? new AppLimits({
   env: process.env,
   statePath: join(process.env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway'), 'app-budgets.json'),
   isAdmin: (userId) => adminUsers.has(userId),
   aliasesOf: appAliasesOf,
+  limitsOf: (userId) => deployments?.apps.get(userId)?.limits,
   onBudgetEvent: ({ event, ...attrs }) => {
     log.warn(attrs, `app limits: daily budget ${event === 'app.budget_exhausted' ? 'exhausted' : 'at 80 %'}`);
     emitGatewayEvent(event, { level: event === 'app.budget_exhausted' ? 'error' : 'warn', attrs });
+    void alertWebhook?.send({ event, data: attrs });
   },
 }) : undefined;
 // POST /v1/s2s: a non-admin key uses only its own app's deployments, under its app limits (src/s2s/access.ts).
@@ -327,10 +332,16 @@ const realtime = createRealtime({
   userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
   isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),
   ...(appLimits ? { charge: (userId: string, n: number) => appLimits.chargeRequests(userId, n) } : {}),
+  ...(deployments ? { devices: deployments.devices } : {}),
   ...(telemetry ? { telemetry: realtimeSinkToTelemetry(telemetry.ingest) } : {}),
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 realtimeSessionOf = sessionResolverFrom(realtime.service);
+if (deployments) deployments.devices.onBlock = (app, device) => { void realtime.service.endDeviceSessions(app, device); };
+const deviceGate = deployments && ((userId: string, headers: import('http').IncomingHttpHeaders, kind: string) => {
+  const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
+  return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
+});
 
 const server = await startProxy({
   port: PORT,
@@ -339,15 +350,16 @@ const server = await startProxy({
   providers,
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
+  ...(deviceGate ? { deviceGate } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
-    ? { ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
+    ? { images: buildImages(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
-    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route,
+    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
     ...(telemetry?.adminRoutes ?? []),
   ],
-  ...(telemetry ? { publicRoutes: telemetry.publicRoutes } : {}),
+  publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
@@ -381,6 +393,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     deployments?.controller.stop();
+    void deployments?.devices.flush().catch(() => {});
     realtime.stop();
     declared?.stop();
     keyManager.stop();

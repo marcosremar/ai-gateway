@@ -178,7 +178,12 @@ export const hhmm = (v: string) => Number(v.slice(0, 2)) * 60 + Number(v.slice(3
 
 /** Replicas the schedule asks for at `now` (the largest of the entries in their window), 0 outside every window. */
 export function scheduleFloor(schedule: WarmScheduleEntry[] | undefined, now: number): number {
+  return activeWindow(schedule, now)?.replicas ?? 0;
+}
+
+export function activeWindow(schedule: WarmScheduleEntry[] | undefined, now: number): { replicas: number; endsAt: number } | null {
   let floor = 0;
+  let endsAt = 0;
   for (const entry of schedule ?? []) {
     const { day, minutes } = localClock(now, entry.timeZone ?? DEFAULT_WARM_TIME_ZONE);
     const start = hhmm(entry.start);
@@ -186,9 +191,12 @@ export function scheduleFloor(schedule: WarmScheduleEntry[] | undefined, now: nu
     // An overnight window (22:00–02:00) belongs to the day it started.
     const inWindow = start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end;
     const startDay = start <= end || minutes >= start ? day : (day + 6) % 7;
-    if (inWindow && (!entry.days?.length || entry.days.includes(startDay))) floor = Math.max(floor, entry.minReplicas);
+    if (!inWindow || (entry.days?.length && !entry.days.includes(startDay))) continue;
+    floor = Math.max(floor, entry.minReplicas);
+    // ponytail: wall-clock minutes to the end; a DST switch inside the window moves `endsAt` by an hour, the window itself is exact.
+    endsAt = Math.max(endsAt, (Math.floor(now / 60_000) + ((end - minutes + 1440) % 1440)) * 60_000);
   }
-  return floor;
+  return floor ? { replicas: floor, endsAt } : null;
 }
 
 /** The floor of replicas at `now`: schedule and client warm window (`POST …/warm`), whichever asks more. */

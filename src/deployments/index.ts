@@ -13,8 +13,10 @@ import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend } from './scaleway-backend';
 import { VastDeploymentBackend } from './vast-backend';
 import type { DeploymentBackend, DeploymentProvider } from './types';
+import { FileHostStore } from './host-reputation';
 import { FileDeploymentStore } from './store';
 import { AppRegistry, FileAppStore } from './apps';
+import { AppDevices } from './app-devices';
 import { AppFallbackService, OpenRouterKeyProvisioner } from './app-fallback';
 import { ClientStabilityLog } from './stability';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
@@ -25,6 +27,7 @@ export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
 export { planReplicas, desiredReplicas } from './planner';
 export { BUILTIN_PROFILES } from './profiles';
+export { bootFilesRoute, BOOT_FILES_PATH } from './boot-files';
 export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
@@ -34,6 +37,7 @@ export { FileDeploymentStore, MemoryDeploymentStore } from './store';
 export { DeclaredDeploymentReconciler, DECLARED_DEPLOYMENTS, declaredBody, declaredImage } from './declared';
 export type { DeclaredDeployment, DeclaredStatus } from './declared';
 export { AppRegistry, FileAppStore, MemoryAppStore } from './apps';
+export { AppDevices, DEVICE_HEADER } from './app-devices';
 export { AppFallbackService, OpenRouterKeyProvisioner, fallbackRoutes } from './app-fallback';
 export { ClientStabilityLog, cleanEvent } from './stability';
 export type { ClientStabilityBatch, ClientInstabilityEvent } from './stability';
@@ -61,6 +65,7 @@ export interface DeploymentsFromEnv {
   /** Stops the in-process janitor (janitor.ts); absent when it is off. */
   stopJanitor?: () => void;
   apps: AppRegistry;
+  devices: AppDevices;
   handler: ReturnType<typeof createDeploymentRoutes>;
 }
 
@@ -141,9 +146,11 @@ export function deploymentsFromEnv(
   const maxWait = Number(env.DEPLOYMENTS_MAX_WAIT_SECONDS);
   const stateDir = env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway');
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
+  const maxDevices = Number(env.APP_MAX_DEVICES);
+  const devices = new AppDevices(apps, { log: opts.log, ...(maxDevices > 0 ? { maxPerApp: Math.floor(maxDevices) } : {}) });
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
     ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId }) } : {}),
-    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log }) } : {}),
+    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir) }) } : {}),
   };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
   const controller = new DeploymentController({
@@ -155,6 +162,7 @@ export function deploymentsFromEnv(
     busyGraceMs,
     unhealthyStrikes,
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
+    publicUrl: env.AIGW_PUBLIC_URL?.trim() || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : undefined),
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
     ...spendLimitsFromEnv(env),
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
@@ -167,6 +175,7 @@ export function deploymentsFromEnv(
   const handler = createDeploymentRoutes({
     controller,
     apps,
+    devices,
     userOf: opts.userOf,
     ...(opts.onRoutesChange ? { onRoutesChange: opts.onRoutesChange } : {}),
     fallback: new AppFallbackService({
@@ -184,7 +193,7 @@ export function deploymentsFromEnv(
   // The janitor's leftovers (build servers, detached SBS volumes) exist only on Scaleway; a deleted Vast instance
   // takes its disk with it.
   const stopJanitor = janitorOn && secret ? startJanitor({ cloud: scalewayJanitorCloud(secret, projectId), log: opts.log }) : undefined;
-  return { controller, apps, handler, ...(stopJanitor ? { stopJanitor } : {}) };
+  return { controller, apps, devices, handler, ...(stopJanitor ? { stopJanitor } : {}) };
 }
 
 /** The janitor's view of Scaleway: build servers by tag and the project's SBS volumes, in every known zone. */

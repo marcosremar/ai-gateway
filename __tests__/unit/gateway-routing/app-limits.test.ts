@@ -129,6 +129,48 @@ describe('AppLimits', () => {
     expect(events.map(e => e.event)).toEqual(['app.budget_warning', 'app.budget_exhausted', 'app.budget_warning']);
   });
 
+  it('an app with its own daily budgets is not capped by the gateway default; the others keep the default', () => {
+    const own: Record<string, { dailyRequests?: number; dailyTokens?: number }> = { parle: { dailyRequests: 5 } };
+    const l = new AppLimits({
+      env: { APP_DAILY_REQUESTS: '2', APP_DAILY_TOKENS: '10000' }, now: () => Date.parse('2026-10-06T12:00:00Z'), isAdmin: () => false,
+      aliasesOf: () => new Set(['parle-tts']), limitsOf: u => own[u],
+    });
+    for (let i = 0; i < 5; i++) expect(l.check('parle', 'tts', { model: 'parle-tts', input: 'oi' })).toBeNull();
+    expect(l.check('parle', 'tts', { model: 'parle-tts', input: 'oi' })).toMatchObject({ status: 429, budget: 'requests' });
+    expect(l.budgets('parle')[0]).toMatchObject({ requests: { used: 5, limit: 5 }, tokens: { limit: 10_000 } });
+    for (let i = 0; i < 2; i++) expect(l.check('other', 'tts', { model: 'parle-tts', input: 'oi' })).toBeNull();
+    expect(l.check('other', 'tts', { model: 'parle-tts', input: 'oi' })).toMatchObject({ status: 429 });
+    own.parle = { dailyRequests: 0 };
+    expect(l.check('parle', 'tts', { model: 'parle-tts', input: 'oi' })).toBeNull();
+  });
+
+  it('the budget ends between turns, never inside one: the last admitted turn is whole, the next is refused until 00:00 UTC', () => {
+    let t = Date.parse('2026-10-06T23:59:30Z');
+    const events: AppBudgetEvent[] = [];
+    const l = new AppLimits({
+      env: { APP_DAILY_REQUESTS: '3' }, now: () => t, isAdmin: () => false, aliasesOf: () => new Set(['parle-llm', 'parle-tts']),
+      onBudgetEvent: e => events.push(e),
+    });
+    const turn = () => l.checkS2S('parle', { models: { chat: 'parle-llm' }, messages: [] });
+    expect(l.chargeRequests('parle', 2)).toBeNull();
+    expect(turn()).toBeNull();
+    expect(l.usageOf('parle').requests).toBe(3);
+    expect(turn()).toMatchObject({
+      status: 429, code: 'daily_budget_exhausted', budget: 'requests', resetAt: '2026-10-07T00:00:00.000Z', retryAfterSeconds: 30,
+    });
+    expect(l.chargeRequests('parle', 40)).toMatchObject({ status: 429, retryAfterSeconds: 30 });
+    expect(l.usageOf('parle').requests).toBe(3);
+    t = Date.parse('2026-10-06T23:59:59.999Z');
+    expect(turn()).toMatchObject({ status: 429, retryAfterSeconds: 1 });
+    t = Date.parse('2026-10-07T00:00:00Z');
+    expect(turn()).toBeNull();
+    expect(l.usageOf('parle')).toMatchObject({ requests: 1 });
+    expect(l.budgets('parle')[0]!.resetAt).toBe('2026-10-08T00:00:00.000Z');
+    expect(events.map(e => `${e.event}@${e.resetAt}`)).toEqual([
+      'app.budget_warning@2026-10-07T00:00:00.000Z', 'app.budget_exhausted@2026-10-07T00:00:00.000Z',
+    ]);
+  });
+
   it('knows which paths are inference', () => {
     expect(inferenceKindOf('POST', '/v1/chat/completions')).toBe('chat');
     expect(inferenceKindOf('POST', '/v1/audio/transcriptions')).toBe('stt');

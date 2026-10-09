@@ -8,7 +8,7 @@ import { replicaCloudInit } from './cloud-init';
 import { ControllerState, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
 import { placeReplica, PlacementError } from './placement-walk';
-import { isOutOfStock } from './placements';
+import { isOutOfStock, quotaMachineType } from './placements';
 import { DEFAULT_NEAR } from './placements';
 import { gateDecision, gateNote } from './rtt-gate';
 import type { DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
@@ -30,6 +30,8 @@ export abstract class ReplicaLifecycle extends ControllerState {
     if (result === 'ready') {
       // Replica lifecycle for telemetry (serve.ts maps these log lines to `replica.ready` / `replica.unhealthy`).
       if (!p.readyNow) this.log('deployments: replica ready', { deployment: m.deployment, id: m.id, bootMs: p.everReady ? null : this.now() - m.createdAt });
+      rt.bootTimeouts = 0;
+      if (!p.everReady && m.createdAt >= this.startedAt) this.backends[this.providerOf(m)]?.noteHost?.(m, { bootMs: this.now() - m.createdAt });
       p.readyAt ??= this.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
     } else if (result === 'busy' && p.everReady && (this.busyOn(rt, m.id) > 0 || this.servedRecently(p))) {
       // Alive (its front answers) and working: the health check queued behind the work. Keep it serving what it can.
@@ -86,7 +88,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       gate.status = 'passed';
       rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${measured}: kept`;
       rt.rejected = [];
-      if (rtt != null) backend.recordRtt?.(m, rtt);
+      if (rtt != null) backend.recordRtt?.(m, rtt, gate.baseline?.rttMs ?? null);
       return true;
     }
     const note = `host ${m.zone || m.id}: ${measured}: released (too-far)`;
@@ -96,6 +98,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       deployment: m.deployment, id: m.id, rttMs: rtt, baselineMs: gate.baseline?.rttMs ?? null, anchor: gate.baseline?.anchor ?? null,
       maxRttMs: spec.maxRttMs ?? null,
     });
+    if (rtt != null) backend.noteHost?.(m, { rttMs: rtt, baselineMs: gate.baseline?.rttMs ?? null });
     await this.release(m, 'too-far');
     return false;
   }
@@ -105,11 +108,16 @@ export abstract class ReplicaLifecycle extends ControllerState {
     try {
       await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
       this.machines = this.machines.filter(x => x.id !== m.id);
+      this.releasing.set(m.id, { machine: m, at: this.now() });
       this.probes.delete(m.id);
     } catch (err) {
       const rt = this.deployments.get(m.deployment);
       if (rt) rt.lastError = `release ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
     }
+  }
+
+  protected freeing(deployment: string): boolean {
+    return [...this.releasing.values()].some(r => r.machine.deployment === deployment);
   }
 
   private settlingNetworks = false;
@@ -164,12 +172,12 @@ export abstract class ReplicaLifecycle extends ControllerState {
     rt.creating++;
     rt.spendNote = null;
     const created: { id?: string } = {};
-    const spend: { cost: number; deployment: string; provider?: DeploymentProvider } = { cost: 0, deployment: spec.name };
+    const spend: { cost: number; deployment: string; provider?: DeploymentProvider; machineType?: string } = { cost: 0, deployment: spec.name };
     this.pendingSpend.add(spend);
     void (async () => {
       try {
         const { machine, price, placement } = await placeReplica({
-          spec, log: this.log, backendFor: (p) => this.backends[p],
+          spec, log: this.log, backendFor: (p) => this.backends[p], forVast: (s) => this.forVast(rt, s),
           create: (backend, placed) => {
             spend.provider = backend.provider;
             return this.createOn(rt, backend, placed, created);
@@ -177,10 +185,13 @@ export abstract class ReplicaLifecycle extends ControllerState {
           placed: (p) => this.machines.filter(m => m.deployment === spec.name && this.providerOf(m) === p).length
             + [...this.pendingSpend].filter(s => s !== spend && s.deployment === spec.name && s.provider === p).length,
           // The place's price (the cap on a market-priced Vast offer) must fit under the € ceiling with what already runs.
-          admit: (cost) => {
+          admit: (cost, place) => {
             spend.cost = 0;
+            delete spend.machineType;
+            const reserved = this.reservedAgainst(spec.name, place.machineType)?.reason ?? null;
+            if (reserved) return reserved;
             const why = this.spendRefusal(cost);
-            if (why) rt.spendNote = why; else spend.cost = cost;
+            if (why) rt.spendNote = why; else Object.assign(spend, { cost, machineType: place.machineType });
             return why;
           },
         });
@@ -199,6 +210,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
         rt.lastError = `create: ${err instanceof Error ? err.message : String(err)}`;
         // The € ceiling frees up as soon as something idles: retry soon, without the escalating back-off of a broken create.
         if (rt.spendNote && err instanceof PlacementError) rt.backoffUntil = this.now() + SPEND_RETRY_MS;
+        else if (quotaMachineType(err, spec.machineType) && this.freeing(spec.name)) rt.backoffUntil = this.now() + SPEND_RETRY_MS;
         else {
           // Out of stock everywhere is the provider's capacity, not a broken spec: same escalating ladder (bounded retry
           // rate, ≤ 1 create per 10 min once it persists), counted apart so the view says what blocks and for how long.

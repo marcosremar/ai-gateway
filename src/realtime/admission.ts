@@ -32,6 +32,10 @@ export function orderTransports(requested: unknown, prefer: unknown): { order: R
   return { order };
 }
 
+export function webrtcProven(status: EdgeStatus): boolean {
+  return !status.net || !status.probePort || status.net.udpInbound === 'ok' || status.net.path === 'relay';
+}
+
 export interface ReplicaCandidate {
   id: string;
   base: string;

@@ -13,6 +13,8 @@
  *   GET    /v1/profiles                        list profiles (built-in + stored)
  *   PUT    /v1/profiles/:name                  create or replace a profile
  *   DELETE /v1/profiles/:name                  delete a stored profile
+ *   GET|PUT /v1/apps/:app/limits               the app's own daily budgets `{ dailyRequests?, dailyTokens? }` over the
+ *                                              gateway defaults (APP_DAILY_*); PUT is admin only, null = default
  *   GET    /v1/apps/:app/fallback              direct-fallback plan with provider keys (app-fallback.ts); the app's
  *                                              own key, or an admin key with `X-App: <app>`
  *   POST   /v1/apps/:app/stability-report      instability events buffered by the SDK while the gateway was down
@@ -26,6 +28,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
+import type { AppDevices } from './app-devices';
 import type { AppFallbackService } from './app-fallback';
 import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
@@ -198,6 +201,7 @@ export interface DeploymentRoutesOptions {
   fallback?: AppFallbackService;
   /** SDK instability reports (`/v1/apps/:app/stability-report`). Without it those paths answer 404. */
   stability?: ClientStabilityLog;
+  devices?: AppDevices;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
@@ -240,11 +244,25 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       return send(res, 200, { apps: registry.list().filter(a => a.id === own) });
     }
     if (!mayUseApp(req, app)) return send(res, 403, { error: `this key cannot use app '${app}'` });
+    if (!sub && method === 'PATCH') {
+      const body = await readJson(req);
+      for (const key of Object.keys(body)) if (key !== 'requireDevice') throw new AppError(400, `unknown field '${key}'`);
+      return send(res, 200, { id: app, requireDevice: await registry.setRequireDevice(app, body.requireDevice) });
+    }
     if (!sub) {
       if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
       const account = registry.get(app);
       const deployments = controller.list().filter(d => d.app === app).map(d => ({ name: d.name, status: d.status, appImage: d.appImage }));
-      return send(res, 200, { id: app, createdAt: account?.createdAt ?? null, images: Object.values(account?.images ?? {}), deployments });
+      return send(res, 200, {
+        id: app, createdAt: account?.createdAt ?? null, requireDevice: account?.requireDevice ?? false,
+        images: Object.values(account?.images ?? {}), deployments,
+      });
+    }
+    if (sub === 'devices') {
+      if (!opts.devices) return send(res, 404, { error: 'app devices are not enabled on this gateway' });
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const out = await opts.devices.route(app, method, parts.slice(4), query, opts.userOf?.(req) ?? 'admin', () => readJson(req));
+      return send(res, out.status, out.body);
     }
     if (sub === 'routes' && !imageName) {
       if (method === 'GET') return send(res, 200, { app, routes: registry.get(app)?.routes ?? {} });
@@ -254,6 +272,12 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         : { restrictedTo: (deployment) => controller.get(deployment)?.app === app });
       opts.onRoutesChange?.();
       return send(res, 200, { app, routes });
+    }
+    if (sub === 'limits' && !imageName) {
+      if (method === 'GET') return send(res, 200, { app, limits: registry.get(app)?.limits ?? {} });
+      if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
+      if (!isAdmin(req)) return send(res, 403, { error: 'only an admin key may set an app\'s limits' });
+      return send(res, 200, { app, limits: await registry.putLimits(app, await readJson(req)) });
     }
     if (sub === 'fallback' && !imageName) {
       if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });

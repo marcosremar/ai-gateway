@@ -5,7 +5,7 @@
 
 import { DEFAULT_WARM_TIME_ZONE } from './autoscale';
 import { SpecError } from './spec-error';
-import type { AutoscaleSpec, WarmScheduleEntry } from './types';
+import type { AutoscaleSpec, QuotaReservation, WarmScheduleEntry } from './types';
 
 const AUTOSCALE_FIELDS: Record<keyof AutoscaleSpec, [number, number]> = {
   scaleOutAt: [0.1, 1], scaleInAt: [0, 0.95], windowSeconds: [0, 600], latencyP95Ms: [50, 120_000], errorRate: [0, 1],
@@ -39,10 +39,20 @@ function validTimeZone(tz: string): boolean {
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
 }
 
-export function warmScheduleOf(raw: unknown, maxReplicasCap: number): WarmScheduleEntry[] {
-  if (!Array.isArray(raw) || raw.length > MAX_WINDOWS) throw new SpecError(`warmSchedule must list at most ${MAX_WINDOWS} windows`);
+export function reserveQuotaOf(raw: unknown, maxReplicasCap: number): QuotaReservation {
+  if (!isObject(raw) || Object.keys(raw).some(k => k !== 'quota' && k !== 'windows')) throw new SpecError('reserveQuota must be { quota, windows }');
+  const windows = warmScheduleOf(raw.windows, maxReplicasCap, 'reserveQuota.windows');
+  const most = Math.max(0, ...windows.map(w => w.minReplicas));
+  if (typeof raw.quota !== 'number' || !Number.isInteger(raw.quota) || raw.quota < most || raw.quota > 64) {
+    throw new SpecError(`reserveQuota.quota must be an integer from the largest window minReplicas (${most}) to 64`);
+  }
+  return { quota: raw.quota, windows };
+}
+
+export function warmScheduleOf(raw: unknown, maxReplicasCap: number, field = 'warmSchedule'): WarmScheduleEntry[] {
+  if (!Array.isArray(raw) || raw.length > MAX_WINDOWS) throw new SpecError(`${field} must list at most ${MAX_WINDOWS} windows`);
   return raw.map((entry, i) => {
-    const f = `warmSchedule[${i}]`;
+    const f = `${field}[${i}]`;
     if (!isObject(entry)) throw new SpecError(`${f} must be an object`);
     for (const key of Object.keys(entry)) {
       if (!['days', 'start', 'end', 'timeZone', 'minReplicas'].includes(key)) throw new SpecError(`${f}: unknown field '${key}'`);

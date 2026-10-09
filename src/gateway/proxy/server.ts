@@ -711,6 +711,15 @@ export function createProxyServer(config: ProxyConfig): Server {
       return;
     }
 
+    const deviceKind = method === 'POST' && path === '/v1/s2s' ? 's2s' : inferenceKindOf(method, path);
+    if (config.deviceGate && deviceKind && !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress)) {
+      const denial = config.deviceGate(userId, req.headers, deviceKind);
+      if (denial) {
+        sendResponse(res, { status: denial.status, body: { error: denialError(denial) } }, requestId);
+        return;
+      }
+    }
+
     // Custom routes (bypass body parsing — handler owns the request)
     if (config.customRoutes) {
       for (const route of config.customRoutes) {

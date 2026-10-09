@@ -13,8 +13,13 @@
  *     (characters / 4) plus the clamped max_tokens for chat, the input text (characters / 4) for TTS. Over budget →
  *     429 with Retry-After until 00:00 UTC, `code: daily_budget_exhausted`, which `budget` and `reset_at`. The gateway
  *     has no per-model price table for every route, so the budget is in requests and tokens, not currency. `0` turns
- *     a budget off. Both limits are gateway-wide settings applied to each app (no per-app value). `budgets()` shows
- *     each app's use, rate and projected exhaustion; `onBudgetEvent` fires once per UTC day at 80 % and at exhaustion.
+ *     a budget off. Both limits are gateway-wide defaults; an admin may set an app's own values
+ *     (`PUT /v1/apps/:app/limits`, `limitsOf`), which replace the default for that app at once. `budgets()` shows
+ *     each app's use, rate and projected exhaustion (`GET /health?details=1` → `appBudgets`); `onBudgetEvent` fires
+ *     once per UTC day at 80 % and at exhaustion (log, telemetry, and `ALERT_WEBHOOK_URL` when set).
+ *
+ * The budget is charged at ADMISSION only (an HTTP request, an `/v1/s2s` turn, a realtime session for its whole TTL):
+ * a reply already admitted is never cut; the refusal is the 429 of the next request, turn or session.
  */
 
 import { readFileSync } from 'fs';
@@ -31,9 +36,11 @@ export interface AppLimitsOptions {
   now?: () => number;
   onBudgetEvent?: (event: AppBudgetEvent) => void;
   statePath?: string;
+  limitsOf?: (userId: string) => AppDailyLimits | null | undefined;
 }
 
 export interface Charge { requests: number; tokens: number }
+export interface AppDailyLimits { dailyRequests?: number; dailyTokens?: number }
 
 type Budget = 'requests' | 'tokens';
 const BUDGETS: readonly Budget[] = ['requests', 'tokens'];
@@ -43,7 +50,7 @@ export interface AppLimitDenial {
   type: string;
   message: string;
   retryAfterSeconds?: number;
-  code?: 'daily_budget_exhausted';
+  code?: 'daily_budget_exhausted' | 'device_blocked' | 'device_required' | 'invalid_device';
   budget?: Budget;
   resetAt?: string;
 }
@@ -136,8 +143,13 @@ export class AppLimits {
   }
 
   get maxTokens(): number { return intEnv(this.opts.env.APP_MAX_TOKENS, APP_LIMIT_DEFAULTS.maxTokens) || APP_LIMIT_DEFAULTS.maxTokens; }
-  private get dailyRequests(): number { return intEnv(this.opts.env.APP_DAILY_REQUESTS, APP_LIMIT_DEFAULTS.dailyRequests); }
-  private get dailyTokens(): number { return intEnv(this.opts.env.APP_DAILY_TOKENS, APP_LIMIT_DEFAULTS.dailyTokens); }
+  private limitsFor(userId: string): Counts {
+    const own = this.opts.limitsOf?.(userId);
+    return {
+      requests: own?.dailyRequests ?? intEnv(this.opts.env.APP_DAILY_REQUESTS, APP_LIMIT_DEFAULTS.dailyRequests),
+      tokens: own?.dailyTokens ?? intEnv(this.opts.env.APP_DAILY_TOKENS, APP_LIMIT_DEFAULTS.dailyTokens),
+    };
+  }
 
   /**
    * Admission of one inference request. Returns a denial, or null after clamping `body.max_tokens` (chat) and charging
@@ -175,7 +187,7 @@ export class AppLimits {
    * and its composed-fallback stages are not charged again (`check(..., { charge: false })`).
    */
   checkS2S(userId: string, config: { max_tokens?: unknown; system?: unknown; messages?: unknown; user_template?: unknown;
-    models?: { stt?: unknown; chat?: unknown; tts?: unknown } }): AppLimitDenial | null {
+    models?: { stt?: unknown; chat?: unknown; tts?: unknown } }, charge = true): AppLimitDenial | null {
     if (this.opts.isAdmin(userId)) return null;
     for (const stage of ['stt', 'chat', 'tts'] as const) {
       const model = config.models?.[stage];
@@ -190,7 +202,7 @@ export class AppLimits {
     }
     config.max_tokens = this.clampMaxTokens(config.max_tokens);
     const prompt = JSON.stringify([config.system ?? '', config.messages ?? '', config.user_template ?? '']);
-    return this.charge(userId, estimateTokens(prompt) + (config.max_tokens as number));
+    return charge ? this.charge(userId, estimateTokens(prompt) + (config.max_tokens as number)) : null;
   }
 
   private clampMaxTokens(asked: unknown): number {
@@ -207,8 +219,6 @@ export class AppLimits {
     return this.charge(userId, 0, Math.max(1, Math.floor(requests)));
   }
 
-  private get limits(): Counts { return { requests: this.dailyRequests, tokens: this.dailyTokens }; }
-
   private charge(userId: string, tokens: number, requests = 1, receipt?: Charge): AppLimitDenial | null {
     const now = this.now();
     const day = Math.floor(now / DAY_MS);
@@ -218,7 +228,7 @@ export class AppLimits {
       u = { day, chargedAt: now, requests: 0, tokens: 0, marks: [mark, mark], flagged: new Set() };
       this.usage.set(userId, u);
     }
-    const limits = this.limits;
+    const limits = this.limitsFor(userId);
     const add: Counts = { requests, tokens };
     const resetAt = new Date((day + 1) * DAY_MS).toISOString();
     const over = BUDGETS.find(b => limits[b] > 0 && u[b] + add[b] > limits[b]);
@@ -253,8 +263,8 @@ export class AppLimits {
     const now = this.now();
     const day = Math.floor(now / DAY_MS);
     const reset = (day + 1) * DAY_MS;
-    const limits = this.limits;
     return [...this.usage].filter(([app, u]) => u.day === day && (userId === undefined || app === userId)).map(([app, u]) => {
+      const limits = this.limitsFor(app);
       const [from] = u.marks;
       const minutes = (now - from.at) / 60_000;
       const use = (b: Budget): BudgetUse => {

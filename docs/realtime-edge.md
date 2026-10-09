@@ -80,7 +80,10 @@ port. `realtime` works there as follows (`vastReplicaInit`, `realtime-ports.ts`,
   one port per session, mapped probe port, responder on the container port) and on two Vast hosts (2026-10-08,
   `docs/reports/2026-10-07-realtime-handoff.md` § Prova final ao vivo — Vast): the onstart shell sees
   `VAST_UDP_PORT_<n>` (`/etc/environment` has none); on one host WebRTC media flowed `host/host` over the mapped
-  ports, on the other no inbound UDP arrived at all and the edge fell back to `ws`. UDP reachability is per host.
+  ports, on the other no inbound UDP arrived at all and the edge fell back to `ws`. UDP reachability is per host:
+  the gateway records it per replica and per host and, with `realtime.requireWebrtc`, releases such a host
+  (§ Reachability). Not run live: that record and release on real hosts, WebRTC from a French Vast host, a browser
+  or a phone on Vast, TURN on Vast (docs/deployments.md § Vast for a class: not proven live).
 
 ## Firewall and public addresses of scaled replicas
 
@@ -119,6 +122,25 @@ and every step is logged:
 - Per session: `edge.ice.selected` and `rt.ice.selected` (browser) say which pair carries the media (`host`/`relay` on
   each side, protocol, RTT), in the session's trace.
 - `GET /__aigw/rt/status` → `net: {path, udpInbound, probePort, publicIp, probeHits, relay, reasons, checkedAt}`.
+- **The gateway does not offer WebRTC on an unproven path** (`webrtcProven`, `src/realtime/admission.ts`): for an edge
+  that reports `net` and a probe port, `webrtc` is in a session's `transports` only when `udpInbound` is `ok` or the
+  path is `relay`, whatever the edge itself lists (it lists `webrtc` while `unknown`, and between a `blocked` report
+  and the end of its TURN tries). A session admitted on a replica not probed yet waits for that probe, at most 2.5 s
+  (`NET_ADMIT_WAIT_MS`; one probe shared by every admission of the moment): UDP that answers costs one round trip
+  and WebRTC stays first; UDP that does not sends the learner straight to `ws` — the answer does not list `webrtc`,
+  so no client waits on an ICE timeout. An edge without `net` (before netcheck) is trusted as before. The wait is
+  spent inside `POST /v1/realtime/sessions`, before there is a session: it fits the SDK's 5 s session timeout
+  (`timeouts.sessionMs`) with half of it to spare and is no part of a turn, so the first-audio deadline of the
+  learner's first turn (counted from the end of their speech) is untouched. A blocked device (`device_blocked`) is
+  refused before the replica is asked anything.
+- **The result is kept**: `udp: "ok" | "blocked" | null` on each replica of `GET /v1/deployments/:name`
+  (`controller.noteUdp`), `udp` in the attributes of `rt.session.admitted`, and on the Vast host's record
+  (docs/deployments.md § Host reputation). A replica with blocked UDP keeps serving `ws` and `/v1/s2s`.
+- **`realtime.requireWebrtc: true`** (spec, default off): blocked UDP with no working relay is a failed boot of that
+  host — the replica is released with reason `udp-blocked` (shown in `lastPlacement`), replaced, and the host is not
+  rented again for that deployment for 24 h. Only a replica this gateway process created, never proven `ok`, with no
+  session seated: one that serves learners on `ws` is kept. The probe runs after the replica is ready (the edge is
+  up by then), so the release comes ≈ 15 s after ready; nothing is offered WebRTC in between.
 
 Proven locally with real coturn, iptables and Chromium (`scripts/realtime-e2e`, 2026-10-07): direct 2.2 s to connect;
 inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first audio ~240 ms on all three.
@@ -127,7 +149,7 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 
 | Route | Body → answer |
 |---|---|
-| `POST /__aigw/rt/offer` | `{sdp, type:"offer", token, traceparent?}` → `{sdp, type:"answer", sessionId}`; 401 `unauthorized`, 503 `capacity` / `warming`, 400 `bad_request`. Again with the same token while the session lives: a new peer connection for it (re-offer) |
+| `POST /__aigw/rt/offer` | `{sdp, type:"offer", token, cfg?, traceparent?}` → `{sdp, type:"answer", sessionId}`; 401 `unauthorized`, 503 `capacity` / `warming`, 400 `bad_request`. Again with the same token while the session lives: a new peer connection for it (re-offer) |
 | `POST /__aigw/rt/ice` | `{sessionId, candidate}` (string or `{candidate, sdpMid, sdpMLineIndex}`; empty = end) — optional, the answer carries all candidates |
 | `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], probePort, net, ready, byTransport, workers, firstAudioMaxMs, shedding}` (`transports` is `["ws"]` on path `ws`; `available` is 0 while `shedding`) |
 | `POST /__aigw/rt/net` | `{udpInbound:"ok"\|"blocked", rttMs, iceServers}` from the gateway's probe → the decision (see *Reachability*) |
@@ -135,7 +157,9 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 | `GET /__aigw/rt/ws?token=…&traceparent=…` | WebSocket. A refusal still upgrades, sends `{type:"error", code}` and closes 4401 (`unauthorized`) or 1013 (`capacity`/`warming`), so the code survives the relay |
 
 Token checks (the gateway's vectors, `tests/test_units.py`): HS256 only, constant-time signature, `exp > now`,
-`iat ≤ now + 60`, `exp − iat ≤ 900`, `cfg` ≤ 6144 chars and a JSON object, `rep` = this replica (`zone:uuid` also
+`iat ≤ now + 60`, `exp − iat ≤ 900`, `cfg` ≤ 6144 chars and a JSON object (or, with a `cfd` claim, the config handed
+over at session start — offer body `cfg`, first WS frame `{type:"session_config", cfg}` within 5 s — ≤ 32768 chars and
+hashing to `cfd`: `docs/realtime.md` § Token, config by reference), `rep` = this replica (`zone:uuid` also
 matches a bare `uuid`), `dep` = this deployment, `sid` single use **per transport** (remembered until `exp`): the SDK's ladder tries WebRTC
 and WS with the one token of its admission — raced at the start, or one after the other — so a `sid` may have one session of each
 transport at the same time, until the SDK closes one (the WS once WebRTC took over; the WebRTC attempt it gave up, by `DELETE`). The
@@ -164,6 +188,9 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   to close, 300 ms pre-roll; optional Silero ONNX gate with `RT_SILERO_ONNX` + onnxruntime) **and** the client's
   `end_turn` always works. `cfg.vad = "client"` leaves turn-taking to the client (parle's Silero in the browser):
   the edge then answers only `end_turn`, and barge-in is the client's `interrupt`.
+  With the server VAD, an `end_turn` that arrives after the VAD already ended the turn (the page and the edge count the
+  same silence) is that same end: the running reply is kept. Before 2026-10-09 it cancelled the reply
+  (`interrupted`, `done{interrupted}`, `done{empty}`).
 - **History**: before each LLM call the session cuts its history to the LLM's context per slot (the upstream's
   `/health` → `llm_ctx`, default 2048): system prompt, system messages and the newest turns stay, the oldest whole
   user/assistant turns go, 8 at a time (`edge.llm.history_trimmed {dropped, kept, harder}`). A `400 … context size`
@@ -186,6 +213,15 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   (same thresholds, same core blocklist, same reason codes). Verdict parity is enforced on > 1000 cases by
   `__tests__/unit/stt-filter/edge-parity.test.ts`. A drop emits `filtered{reasons}` then `done{filtered:true}`;
   `cfg.filter_hallucinations: false` skips it.
+- **App hooks** (`docs/realtime.md` § App hooks; all off unless the signed config names them): `cfg.intercepts`
+  (`aigw_edge/intercept.py`: a normalised-phrase matcher run on the final transcript after the guard — a match skips
+  the LLM, optionally voices the rule's line, emits `intercept` and `done{intercepted}`, and leaves the history
+  untouched; `edge.turn.intercepted {tag, action}`, `edge.turn.done` `outcome: "intercepted"`); a signed
+  `config_update{signed}` (`token.py` `verify_update`: same key, this `sid`, `n` increasing — drops a turn, replaces
+  history or config fields, voices a `say` line; `edge.config.signed {seq, keys}`); `cfg.reply_guard` (first sentence
+  against the app's deny phrases before its TTS, one regeneration; `edge.llm.reply_guard`); `done.served`
+  (`{stt, llm, tts, voice, opener, transport}`, the ids from the upstream's `/health` → `models`, handed to the
+  WebRTC workers with each offer as `llm_ctx` is).
 - **LLM**: `/v1/chat/completions`, `stream: true`, model `EDGE_LLM_MODEL` (`llm`), `system` + history + the user turn
   (`user_template` with `{{transcript}}`), `max_tokens`, `temperature`, `response_format`, `speak_field` (only that JSON
   field is voiced; same extractor as `/v1/s2s`).
@@ -203,8 +239,18 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   played: no `audio_start`, and the first-audio deadline still sees no reply audio, so an opener may play meanwhile.
   A sentence still silent after `EDGE_TTS_MAX_LEAD_SECONDS` (1), or whose stream fails before any sound, is dropped
   and requested again once, in its place in the order (`metrics.tts_retries`, `edge.tts.retry` with the request id,
-  `ttsRetries` on `edge.turn.done`). The second attempt drops its silent lead; when it stays silent or fails, or when
+  `ttsRetries` on `edge.turn.done`). The second attempt drops its silent lead, and so does the first sentence of every
+  reply (it starts 10 ms before its first sample over −40 dBFS: the 150–240 ms of silence Qwen3-TTS puts before a
+  sentence were played after `audio_start`, on both transports); when it stays silent or fails, or when
   any stream fails after sound, the turn ends with the `tts` error (no retry: it would repeat words already heard).
+  One exception: a sentence that was heard and runs to its cap — more audio than `3 s + 0.2 s per character`, or the
+  engine ending the stream at `max_new_tokens` (≥ 90 % of the cap received) — is cut at the cap and the turn goes on
+  (`metrics.tts_overlong`, `edge.tts.overlong` with the request id, `ttsOverlong` on `edge.turn.done`). It is not
+  asked again, and nothing is held to detect it earlier: a non-silent runaway only differs from speech once it has
+  outlasted the sentence, and holding audio for that would delay every first sound. The same cap bounds an app line
+  (`say`, an intercept's `text`) and an opener being warmed, since they go through the same request: the cap is by
+  text length (a 400-character line may run 83 s, over twice a slow reading), so a line read normally is never cut;
+  an app line cut at its cap is counted the same way (`edge.tts.overlong`), an opener is cached as cut.
   The three settings are tunable through `realtime.env`.
 - **First-audio deadline** (`RT_FIRST_AUDIO_DEADLINE_MS` = 2000, at most 2500; `cfg.first_audio_deadline_ms` per
   session; `RT_FIRST_AUDIO_MARGIN_MS` = 300): counted from the VAD's last speech frame (from the end of the turn when
@@ -235,6 +281,34 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   counts the opener audio still queued ahead of the reply.
 
 ## Process model and CPU budget
+
+The learner's audio is decoded as it arrives (`audio.ArrivalOrder`, installed in place of aiortc's audio jitter buffer; a
+late or repeated packet is dropped). aiortc's buffer (`capacity=16, prefetch=4`) holds 4 packets before it gives a
+frame — 80 ms on every turn before the VAD sees the end of speech — and after one lost packet it stays 14 packets
+(280 ms) behind for the rest of the call (`tests/test_units.py`): it exists to smooth playout, and the VAD and Whisper
+need none. Measured on the loopback harness: end of speech → `vad end` 821 → 741 ms (700 of them are the endpointing).
+
+A lost packet is elapsed time: `read_track` compares each decoded frame's RTP timestamp with the one expected
+(`audio.GapFill`) and feeds the missing span as silence (at most 1 s per gap), so the VAD's 700 ms window is 700 ms of
+the learner's clock under loss (harness, 10 % loss: `vad end` 781–821 ms without it, 741–762 with) and the clip the STT
+gets keeps its length. The turn's `metrics` carries `uplink_lost_ms`. No Opus FEC or concealment: aiortc 1.15 decodes
+through PyAV's libopus wrapper, which has no FEC flag and returns nothing for a missing packet; decoding the in-band
+FEC would need libopus called directly. A packet that arrives after a later one is dropped, as before.
+
+Downlink: `OutTrack` sends one 20 ms frame per tick of a wall-clock grid, silence included, with continuous RTP
+timestamps, so the browser's jitter buffer stays at its floor between replies (Chromium `getStats`: target and minimum
+20 ms on a clean local path, 100–160 ms from a home Wi-Fi to the replica — NetEq follows the path's jitter and the
+receiver's `jitterBufferTarget = 0` only removes the SDK's own floor). The frames leave at 48 kHz (`audio.upsample2`,
+the sample between two is interpolated): given 24 kHz frames, aiortc's Opus encoder resamples with a filter that holds
+the last samples back, so every 20 ms frame waited for the next one before it became a packet. Loopback harness,
+`audio_start` → first loud frame at the client: 26–28 ms → 8–9 ms. Per reply the edge measures its own part and puts
+it in `metrics`: `out_first_pull_ms` (first TTS PCM → the tick that takes it, 0–20 ms), `rtp_first_sent_ms` (→ that
+packet handed to the transport, encode included) and `rtp_late_p50_ms` / `rtp_late_p95_ms` / `rtp_late_max_ms` (how
+late after its tick each of the next 100 packets left).
+
+Not done on the downlink: stopping the silence between replies (a receiver that sees a gap may start the next
+talkspurt below its target delay). PyAV's libopus wrapper stamps the first packet after a gap as if there had been
+none, the browser would conceal instead of playing silence, and the effect on NetEq was not measured.
 
 aiortc (BSD-3) does the whole RTP/SRTP/RTCP path in Python on one asyncio loop; Opus encode/decode run in threads
 (libopus via PyAV). Profiling showed two avoidable hot spots, both replaced by numpy (`aigw_edge/audio.py`): PyAV's
@@ -280,7 +354,7 @@ Correlated events (contract: the gateway's `src/telemetry/contract.ts`) through 
 lines on stdout. `traceparent` is read from the offer request header (or the offer body) and from the WS
 `?traceparent=` query, kept per session, and forwarded (same trace, new span) on every model call. Events:
 `edge.session.open` / `edge.session.close` (durMs, reason, turns), `edge.capacity.reject` (active, max; `reason:warming`
-when the model is not ready), `edge.token.reject` (reason), `edge.ice.state` (state), `edge.ws.close` (code),
+when the model is not ready), `edge.token.reject` (reason), `edge.config.refused` (keys, count), `edge.ice.state` (state), `edge.ws.close` (code),
 `edge.stt.done` (durMs, filtered, audioMs, chars), `edge.stt.filtered` (codes), `edge.llm.first_token`,
 `edge.tts.first_audio`, `edge.turn.opener` (index, chars, durMs from the speech), `edge.turn.deadline_missed`
 (deadlineMs), `edge.turn.done` (durMs from end of speech, outcome, stage times), `edge.upstream.error`
@@ -302,7 +376,9 @@ instead of the redirect. `REALTIME_TURN_URLS` example:
 
 ## Tests
 
-- `docker/aigw-edge/tests/run.sh units` — token (and the gateway's vectors: key, every case, TURN credential), cutter
+- `docker/aigw-edge/tests/run.sh units` — the signed-config rule, config by reference, the phrase matcher against the
+  school's four voice commands, signed updates (and the gateway's vector), `tests/test_session.py` `app_turn_hook`
+  (intercept drop / say, speculated or not, no first-audio cost, reply guard, served ids), token (and the gateway's vectors: key, every case, TURN credential), cutter
   copy, VAD, 48→16 kHz filter, telemetry emitter, and `tests/test_session.py`: a session on in-process fakes (endpoint
   metrics, the speculative turn confirmed / discarded / interrupted / closed, partials on and off, the first-audio
   deadline: reply in time, late, opener still playing, barge-in, rotation, cache reuse, no opener; admission shedding).
@@ -322,10 +398,14 @@ instead of the redirect. `REALTIME_TURN_URLS` example:
 
 - `vad.state` is `"start" | "end"` (as `docs/realtime.md`), not free text.
 - After `interrupted` the edge also sends `done{interrupted: true}` so a client waiting for `done` is released.
-- `config_update{messages}` **appends** to the history (as `docs/realtime.md`); it may also carry `system`, `voice`,
-  `fallback_voice`, `max_tokens`, `temperature`, `stt_prompt`, `user_template`.
+- `config_update{messages}` **appends** to the history (as `docs/realtime.md`). The client may send only `messages`
+  (`user` / `assistant`) and `opener` (off with `null`, back to the signed one with anything else); every other field
+  is refused with `error{code:"forbidden"}` and counted in `edge.config.refused` (`session.py` `_client_update`,
+  `tests/test_session.py` `signed_config_is_authoritative`). Until 2026-10-08 the edge also took `system`, `voice`,
+  `fallback_voice`, `max_tokens`, `temperature`, `stt_prompt`, `user_template`, `first_audio_deadline_ms` and a new
+  `opener` from the client, which let a browser rewrite what the token's signed `cfg` fixed.
 - Extra events: `pong{t}`; `filtered` is followed by `done{filtered:true}`; errors use codes `unauthorized`,
-  `capacity`, `warming`, `bad_request`, `bad_message`, `upstream`, `session_limit`, `idle`, `not_found`.
+  `capacity`, `warming`, `bad_request`, `bad_message`, `forbidden`, `upstream`, `session_limit`, `idle`, `not_found`.
 - Token size: the realtime doc says ~6.5 KB; a 6144-char `cfg` makes an ~8.3 KB token (it is base64url-encoded twice),
   so the gateway's WS relay must accept request lines of ≥ 9 KB too.
 - `rep` is the gateway's replica id (`fr-par-2:<uuid>` on Scaleway); the edge learns its own from the metadata service

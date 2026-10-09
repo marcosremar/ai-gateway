@@ -14,7 +14,7 @@ OPENER = np.full(4800, 1000, dtype=np.int16).tobytes()
 REPLY = bytes(960)
 
 
-async def tts_stream(text, language, voice, out):
+async def tts_stream(text, language, voice, out, _stats=None):
     synthesized.append(text)
     await asyncio.sleep(0.02)
     if voice.get("fails"):

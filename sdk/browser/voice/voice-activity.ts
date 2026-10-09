@@ -28,6 +28,7 @@ export interface VoiceActivityTuning {
   armedTimeoutFrames: number;
   /** Loud frames ignored after a rejected arming (noisy room: do not re-arm on every frame). */
   rejectCooldownFrames: number;
+  pauseFrames?: number;
 }
 
 /** One Silero v5 frame: 512 samples at 16 kHz. */
@@ -72,6 +73,8 @@ export type VoiceActivityEffect =
   | { kind: 'rmsOnset'; frame: number; rms: number }
   | { kind: 'vadStart'; frame: number; probability: number; afterRmsFrames: number }
   | { kind: 'vadEnd'; frame: number; speechFrames: number; peakProbability: number }
+  | { kind: 'vadPause'; frame: number }
+  | { kind: 'vadResume'; frame: number }
   | { kind: 'rmsRejected'; frame: number; armedFrames: number; peakProbability: number };
 
 /** Every effect but the internal classifier reset: what a listener reports to its caller. */
@@ -144,7 +147,11 @@ function stepArmed(state: VoiceActivityState, probability: number, tuning: Voice
 function stepSpeech(state: VoiceActivityState, probability: number, tuning: VoiceActivityTuning) {
   const peakProbability = Math.max(state.peakProbability, probability);
   const lowFrames = probability < tuning.vadEnd ? state.lowFrames + 1 : 0;
-  if (lowFrames < tuning.vadEndFrames) return { state: { ...state, lowFrames, peakProbability }, effects: [] };
+  if (lowFrames < tuning.vadEndFrames) {
+    const pause = tuning.pauseFrames;
+    const kind = !pause ? null : lowFrames === pause ? 'vadPause' as const : lowFrames === 0 && state.lowFrames >= pause ? 'vadResume' as const : null;
+    return { state: { ...state, lowFrames, peakProbability }, effects: kind ? [{ kind, frame: state.frame }] : [] };
+  }
   return {
     state: { ...state, stage: 'armed' as const, lowFrames: 0, armedFrames: 0, peakProbability: 0 },
     effects: [{
