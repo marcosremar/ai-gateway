@@ -72,6 +72,8 @@ export const DEPLOYMENT_FIRST_BYTE_MS: Record<Stage, number> = { stt: 4_000, cha
 
 /** After this long without an answer from a deployment, the fallback starts in parallel (DEPLOYMENT_HEDGE_MS; 0 = off). */
 export const DEPLOYMENT_HEDGE_MS = 1_500;
+/** A chain's last link, a deployment with no live fallback after it, waits this long for a booting replica (DEPLOYMENT_COLD_WAIT_MS). */
+export const DEPLOYMENT_COLD_WAIT_MS = 2_000;
 /** Adaptive hedge (`deploymentHedge`): the longest wait before the fallback starts, as a share of the target's timeout. */
 export const HEDGE_CAP_OF_TIMEOUT = 0.75;
 
@@ -188,7 +190,7 @@ export interface BuildServeProvidersOptions {
   env?: Record<string, string | undefined>;
   openrouter: OpenRouterKeyState;
   /** Returns a provider backed by deployment `name`, or null when the deployments service is off. */
-  deploymentProvider?: (stage: Stage, name: string) => StageProvider<Stage> | null;
+  deploymentProvider?: (stage: Stage, name: string, opts?: { coldWaitMs?: number }) => StageProvider<Stage> | null;
   /**
    * Adaptive hedge of a deployment target (`DeploymentController.hedgeDelayMs`): the delay before the fallback starts in
    * parallel, from the replica's state and recent p95, between `baseMs` (DEPLOYMENT_HEDGE_MS) and `capMs`; null = none.
@@ -231,6 +233,7 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   const deploymentTimeoutMs = (stage: Stage) =>
     positiveMs(env[`DEPLOYMENT_${stage.toUpperCase()}_TIMEOUT_MS`]) || positiveMs(env.DEPLOYMENT_TIMEOUT_MS) || DEPLOYMENT_FIRST_BYTE_MS[stage];
   const hedgeMs = positiveMs(env.DEPLOYMENT_HEDGE_MS) ?? DEPLOYMENT_HEDGE_MS;
+  const coldWaitMs = positiveMs(env.DEPLOYMENT_COLD_WAIT_MS) ?? DEPLOYMENT_COLD_WAIT_MS;
   const guards = opts.policyGuards ?? accountPolicyGuards;
   const extras = (e: RouteEntrySpec) => ({
     ...(e.voice ? { voice: e.voice } : {}), ...(e.fixedVoice ? { fixedVoice: true } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}),
@@ -298,6 +301,11 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
     if (described[stage as Stage].has(model)) chains[stage as Stage][model] = links;
     // Kept even when other entries were mounted: the 503 must also say that the fallback has no key.
     if (reasons.length) (unavailable[stage as Stage] as Record<string, string[]>)[model] = reasons;
+    const last = targets[targets.length - 1];
+    if (last?.providerId.startsWith('deployment:')) {
+      const waiting = opts.deploymentProvider?.(stage, last.providerId.slice('deployment:'.length), { coldWaitMs });
+      if (waiting) last.provider = waiting as StageProvider<S>;
+    }
     return targets;
   }
 

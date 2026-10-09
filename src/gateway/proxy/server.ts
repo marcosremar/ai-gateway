@@ -847,10 +847,11 @@ export function createProxyServer(config: ProxyConfig): Server {
       // An s2s turn's own stages (loopback, internal sub-request) were charged once when the turn was admitted
       // (src/s2s/access.ts): their aliases are still checked, the daily budget is not charged twice.
       const kind = config.appLimits ? inferenceKindOf(method, path) : null;
+      const charged = { requests: 0, tokens: 0 };
       if (kind && config.appLimits) {
         const fields = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
         const charge = !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress);
-        const denial = config.appLimits.check(userId, kind, fields, { charge });
+        const denial = config.appLimits.check(userId, kind, fields, { charge, receipt: charged });
         if (denial) {
           if (denial.retryAfterSeconds) res.setHeader('Retry-After', denial.retryAfterSeconds);
           sendResponse(res, { status: denial.status, body: { error: denialError(denial) } }, requestId);
@@ -906,6 +907,7 @@ export function createProxyServer(config: ProxyConfig): Server {
         proxyRes = { status: 404, body: { error: { message: `Route not found: ${method} ${url}`, type: 'invalid_request_error' } } };
       }
 
+      if (proxyRes.status >= 500) config.appLimits?.refund?.(userId, charged);
       sendResponse(res, proxyRes, requestId);
     } catch (err) {
       if (err instanceof BodyTimeoutError) {

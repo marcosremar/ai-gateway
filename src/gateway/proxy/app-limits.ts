@@ -7,8 +7,9 @@
  *   - **models**: only the aliases of its own app (`PUT /v1/apps/:app/routes`, the key's userId is the app id), per
  *     stage. No `org/model` passthrough, no gateway-wide model, no embeddings or images → 403.
  *   - **max_tokens** (chat): clamped to APP_MAX_TOKENS (default 1024); a request without one gets the cap.
- *   - **daily budget** per app, UTC day, in memory (a restart starts a new count): APP_DAILY_REQUESTS (default 5000)
- *     requests and APP_DAILY_TOKENS (default 2 000 000) estimated tokens — charged at admission as the prompt
+ *   - **daily budget** per app, UTC day (00:00 UTC whatever the clock change; kept in `statePath` across restarts):
+ *     APP_DAILY_REQUESTS (default 5000) requests and APP_DAILY_TOKENS (default 2 000 000) estimated tokens — charged at
+ *     admission (and refunded with `refund` when the request ends in a 5xx: only what was served counts) as the prompt
  *     (characters / 4) plus the clamped max_tokens for chat, the input text (characters / 4) for TTS. Over budget →
  *     429 with Retry-After until 00:00 UTC, `code: daily_budget_exhausted`, which `budget` and `reset_at`. The gateway
  *     has no per-model price table for every route, so the budget is in requests and tokens, not currency. `0` turns
@@ -21,6 +22,9 @@
  * a reply already admitted is never cut; the refusal is the 429 of the next request, turn or session.
  */
 
+import { readFileSync } from 'fs';
+import { writeStateFile } from '../../deployments/state-file';
+
 export type InferenceKind = 'chat' | 'stt' | 'tts' | 'embeddings' | 'images';
 type Stage = 'chat' | 'stt' | 'tts';
 
@@ -31,9 +35,11 @@ export interface AppLimitsOptions {
   aliasesOf: (userId: string, stage: Stage) => ReadonlySet<string> | null;
   now?: () => number;
   onBudgetEvent?: (event: AppBudgetEvent) => void;
+  statePath?: string;
   limitsOf?: (userId: string) => AppDailyLimits | null | undefined;
 }
 
+export interface Charge { requests: number; tokens: number }
 export interface AppDailyLimits { dailyRequests?: number; dailyTokens?: number }
 
 type Budget = 'requests' | 'tokens';
@@ -83,12 +89,57 @@ function intEnv(raw: string | undefined, dflt: number): number {
 
 const estimateTokens = (text: string) => Math.ceil(text.length / 4);
 
+type SavedUsage = Record<string, { day: number; requests: number; tokens: number; flagged?: string[] }>;
+
+function loadUsage(path: string, now: number): Map<string, Usage> {
+  let saved: SavedUsage;
+  try {
+    saved = (JSON.parse(readFileSync(path, 'utf8')) as { apps?: SavedUsage }).apps ?? {};
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') console.error('app limits: budget file unreadable, counting from 0', { path, error: String(err) });
+    return new Map();
+  }
+  return new Map(Object.entries(saved).map(([app, u]) => {
+    const mark = { at: now, requests: u.requests, tokens: u.tokens };
+    return [app, { day: u.day, chargedAt: now, requests: u.requests, tokens: u.tokens, marks: [mark, mark], flagged: new Set(u.flagged ?? []) }];
+  }));
+}
+
 export class AppLimits {
   private readonly now: () => number;
-  private readonly usage = new Map<string, Usage>();
+  private readonly usage: Map<string, Usage>;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saving: Promise<void> = Promise.resolve();
 
   constructor(private readonly opts: AppLimitsOptions) {
     this.now = opts.now ?? Date.now;
+    this.usage = opts.statePath ? loadUsage(opts.statePath, this.now()) : new Map();
+  }
+
+  refund(userId: string, charged: Charge): void {
+    const u = this.usage.get(userId);
+    if (!u || u.day !== Math.floor(this.now() / DAY_MS) || (!charged.requests && !charged.tokens)) return;
+    u.requests = Math.max(0, u.requests - charged.requests);
+    u.tokens = Math.max(0, u.tokens - charged.tokens);
+    this.scheduleSave();
+  }
+
+  flush(): Promise<void> {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    const path = this.opts.statePath;
+    if (!path) return Promise.resolve();
+    const apps: SavedUsage = Object.fromEntries([...this.usage].map(([app, u]) => [app, { day: u.day, requests: u.requests, tokens: u.tokens, flagged: [...u.flagged] }]));
+    this.saving = this.saving.catch(() => {}).then(() => writeStateFile(path, JSON.stringify({ version: 1, apps }))).catch((err: unknown) => {
+      console.error('app limits: BUDGET WRITE FAILED', { path, error: err instanceof Error ? err.message : String(err) });
+    });
+    return this.saving;
+  }
+
+  private scheduleSave(): void {
+    if (!this.opts.statePath || this.saveTimer) return;
+    this.saveTimer = setTimeout(() => { void this.flush(); }, 1000);
+    this.saveTimer.unref?.();
   }
 
   get maxTokens(): number { return intEnv(this.opts.env.APP_MAX_TOKENS, APP_LIMIT_DEFAULTS.maxTokens) || APP_LIMIT_DEFAULTS.maxTokens; }
@@ -104,7 +155,7 @@ export class AppLimits {
    * Admission of one inference request. Returns a denial, or null after clamping `body.max_tokens` (chat) and charging
    * the app's daily budget. `body` is the parsed JSON (or the multipart text fields).
    */
-  check(userId: string, kind: InferenceKind, body: Record<string, unknown>, opts: { charge?: boolean } = {}): AppLimitDenial | null {
+  check(userId: string, kind: InferenceKind, body: Record<string, unknown>, opts: { charge?: boolean; receipt?: Charge } = {}): AppLimitDenial | null {
     if (this.opts.isAdmin(userId)) return null;
     if (kind !== 'chat' && kind !== 'stt' && kind !== 'tts') {
       return { status: 403, type: 'permission_error', message: `this API key cannot use ${kind}: only its app's own model aliases` };
@@ -126,7 +177,7 @@ export class AppLimits {
       tokens = estimateTokens(typeof body.input === 'string' ? body.input : '');
     }
     // `charge: false` = a stage of a turn already charged as a whole (an s2s loopback stage): limits, no second charge.
-    return opts.charge === false ? null : this.charge(userId, tokens);
+    return opts.charge === false ? null : this.charge(userId, tokens, 1, opts.receipt);
   }
 
   /**
@@ -168,7 +219,7 @@ export class AppLimits {
     return this.charge(userId, 0, Math.max(1, Math.floor(requests)));
   }
 
-  private charge(userId: string, tokens: number, requests = 1): AppLimitDenial | null {
+  private charge(userId: string, tokens: number, requests = 1, receipt?: Charge): AppLimitDenial | null {
     const now = this.now();
     const day = Math.floor(now / DAY_MS);
     let u = this.usage.get(userId);
@@ -193,6 +244,8 @@ export class AppLimits {
     u.chargedAt = now;
     u.requests += requests;
     u.tokens += tokens;
+    if (receipt) Object.assign(receipt, { requests, tokens });
+    this.scheduleSave();
     for (const b of BUDGETS) {
       if (limits[b] > 0 && u[b] >= limits[b] * BUDGET_WARNING_RATIO) this.flag(userId, u, 'app.budget_warning', b, limits[b], resetAt);
     }

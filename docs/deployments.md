@@ -168,6 +168,12 @@ stops an unmodified client, not a forged id — an app that needs more mints the
   L40S through `parle-stt` → `deployment:parle-speech`). `GET /health` → `noWake.skips`. Details: `docs/api/http.md`.
 - While a request is being served, extra replicas boot when `inflight > targetInflightPerReplica × ready`; requests go
   to the ready replica with the fewest requests in flight; a connection failure retries once on another replica.
+- **Model aliases** (`parle-stt`, `parle-llm`, `parle-tts` → `deployment:<name>`) do not hold the request for minutes.
+  With a live cloud fallback after it, a cold deployment link answers `cold` at once and the fallback serves (no added
+  latency). When the deployment is the chain's last live link (fallback missing or its key rejected), a request with no
+  ready replica waits at most `DEPLOYMENT_COLD_WAIT_MS` (default 2000, below every stage's first-byte time) for one. If
+  nothing answers, the 503 `provider_unavailable` carries `Retry-After` (30 s while the replica boots): the caller
+  retries then instead of hammering. A class that must not see that 503 is warmed ahead (`warmSchedule` or `POST …/warm`).
 
 ## Scaling rules (`planner.ts`)
 
@@ -227,7 +233,9 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
   one replica fewer than the count *asked* for, so a replica that was never born is dropped once its pressure is gone.
 - **Warm-up**: `warmSchedule: [{ "days": [1,2,3,4,5], "start": "08:50", "end": "12:00", "timeZone": "Europe/Paris",
   "minReplicas": 2 }]` keeps replicas up in those windows (days 0 = Sunday, overnight windows allowed), and `POST …/warm`
-  does the same for one window on demand. Expired windows fall back to the normal rules.
+  does the same for one window on demand. Expired windows fall back to the normal rules. A window without `timeZone` is
+  Europe/Paris (stored explicitly): an 18:00 class stays at 18:00 local across the clock change (2026-10-25). App daily
+  budgets and the monthly spend stay on UTC days (reset at 00:00 UTC = 01:00/02:00 Paris, outside any class).
 - **Reserved quota** (class window): `reserveQuota: { "quota": 2, "windows": [{ "days": [1,2,3,4], "start": "17:40",
   "end": "20:15", "timeZone": "Europe/Paris", "minReplicas": 2 }] }` — "of the provider's `quota` machines of my
   `machineType`, I need `minReplicas` during these windows" (the windows have the `warmSchedule` shape). Inside a
@@ -240,7 +248,6 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
   `warmSchedule` to have the machines up) and binds only deployments of the same gateway: a machine created by another
   gateway or namespace is outside its reach — that is what the reaper's foreign-leftover alert is for. The match is by
   machine type, not zone (Scaleway counts a GPU type's quota across zones).
-
 - **Caps without starvation**: when the replica cap or the € ceiling blocks a deployment under pressure, the controller
   takes a replica of another deployment that has been idle (no answered request and no request to its deployment) for
   3 min, above its own floor; that deployment then counts as idle until its next request (no ping-pong).
@@ -379,7 +386,10 @@ A replica the provider lists as `stopping` (a stop takes ~1 min on Scaleway) is 
 alone until the list shows `stopped` (10 min at most), never deleted or counted for a plan. When a provider's list fails
 (Vast answers 429 under load) the controller still releases what the plan says to release from the last known machines,
 but creates and powers on nothing; the Vast backend reuses its last list for 5 s, waits `retry_after` after a 429/5xx and
-serves the last good list for up to 90 s meanwhile. A machine whose deployment was deleted while it was being created is
+serves the last good list for up to 90 s meanwhile. On Scaleway each zone lists on its own: one zone that fails (a 5xx in
+pl-waw-1) only freezes that zone — its known machines are kept and counted, never read as gone or released as orphans,
+and deployments that may land there (zone, `placements`, `candidates`) create nothing — while the other zones carry
+on. A machine whose deployment was deleted while it was being created is
 released as soon as the create ends (bounded retries; the orphan sweep stays as the net).
 
 ## Placement: `placements`, `candidates`, `near` (reliable, cheap, close to France)
@@ -809,7 +819,8 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
 | `ALERT_WEBHOOK_URL` | optional: a JSON `POST` for `app.budget_warning` (80 %) / `app.budget_exhausted` (gateway) and `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service). Plain JSON (`{event, data}`), not Slack's `text` shape |
 | `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the default for every app; an admin sets one app's own daily budgets with `PUT /v1/apps/:app/limits {dailyRequests?, dailyTokens?}` (stored in `apps.json`, applied at once, `null` = default, `0` = no budget): size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
-| `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
+| `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned). `deployments.json` and `apps.json` are written tmp + fsync + rename with the previous good copy in `.bak`; an unreadable file is restored from `.bak` (the bad one kept as `.corrupt-<ms>`, `STATE FILE UNREADABLE` on stderr); with no usable backup the gateway starts with deployments off (`DEPLOYMENTS DISABLED`) and the cloud routes up. A failed write is logged (`STATE WRITE FAILED`) and shown as `stateWriteError` in `/health?deep=1`. With no state file at all, machines of unknown deployments are kept 5 min before the orphan sweep (declared deployments register first). `app-budgets.json` keeps the app daily counts across restarts; `client-stability.jsonl` rotates to `.1` at 5 MB, 20 reports/min per app, 512 KB per report |
+| `DEPLOYMENT_COLD_WAIT_MS` | how long an alias request whose last live link is a deployment waits for a booting replica before the 503 + `Retry-After` (2000; § Cold start) |
 | `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 150) caps parallel requests per key user, `MAX_CONCURRENT_PER_USER_OVERRIDES` (`user:limit,…`) per user |
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |
 | `CORS_ORIGINS` | browser origins allowed to call directly |

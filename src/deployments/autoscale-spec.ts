@@ -3,6 +3,7 @@
  * Both optional: a spec without them scales as before plus the defaults of `autoscale.ts`.
  */
 
+import { DEFAULT_WARM_TIME_ZONE } from './autoscale';
 import { SpecError } from './spec-error';
 import type { AutoscaleSpec, QuotaReservation, WarmScheduleEntry } from './types';
 
@@ -60,7 +61,7 @@ export function warmScheduleOf(raw: unknown, maxReplicasCap: number, field = 'wa
     if (typeof entry.end !== 'string' || !HHMM.test(entry.end) || entry.end === entry.start) throw new SpecError(`${f}.end must be HH:MM, not start`);
     const n = entry.minReplicas;
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > maxReplicasCap) throw new SpecError(`${f}.minReplicas must be 1–${maxReplicasCap}`);
-    const out: WarmScheduleEntry = { start: entry.start, end: entry.end, minReplicas: n };
+    const out: WarmScheduleEntry = { start: entry.start, end: entry.end, timeZone: DEFAULT_WARM_TIME_ZONE, minReplicas: n };
     if (entry.days !== undefined) {
       if (!Array.isArray(entry.days) || !entry.days.every(d => Number.isInteger(d) && d >= 0 && d <= 6)) throw new SpecError(`${f}.days must list 0–6 (0 = Sunday)`);
       out.days = [...new Set(entry.days as number[])];
