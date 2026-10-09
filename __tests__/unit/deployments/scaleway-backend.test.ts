@@ -29,10 +29,10 @@ function fakeClient() {
 }
 
 describe('ScalewayDeploymentBackend', () => {
-  it('logs in to its own registry with the API secret, and to nothing else', () => {
-    const backend = new ScalewayDeploymentBackend('the-secret', { client: fakeClient() as never });
+  it('logs in to its own registry with the read-only registry key, and to nothing else', () => {
+    const backend = new ScalewayDeploymentBackend('the-secret', { client: fakeClient() as never, registrySecret: 'read-only' });
     expect(backend.registryAuthFor('rg.fr-par.scw.cloud/aigw/speech-stack:1'))
-      .toEqual({ server: 'rg.fr-par.scw.cloud', username: 'nologin', password: 'the-secret' });
+      .toEqual({ server: 'rg.fr-par.scw.cloud', username: 'nologin', password: 'read-only' });
     expect(backend.registryAuthFor('rg.nl-ams.scw.cloud/x/y')?.server).toBe('rg.nl-ams.scw.cloud');
     expect(backend.registryAuthFor('ghcr.io/rg.fr-par.scw.cloud/x')).toBeNull();
     expect(backend.registryAuthFor('vllm/vllm-omni:v0.28.0')).toBeNull();

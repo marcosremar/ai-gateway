@@ -45,6 +45,15 @@ export function realtimeRule(spec: Pick<DeploymentSpec, 'realtime'>): { protocol
   return { protocol: 'UDP', port: lo, portTo: hi };
 }
 
+function base64Forms(secret: string): string[] {
+  const bytes = Buffer.byteLength(secret);
+  return [0, 1, 2].map(k => Buffer.from('\0'.repeat(k) + secret).toString('base64').slice(Math.ceil((8 * k) / 6), Math.floor((8 * (k + bytes)) / 6)));
+}
+
+export function scalewayRegistryOf(image: string): string | null {
+  return /^(rg\.[a-z]{2}-[a-z]{3}\.scw\.cloud)\//.exec(image)?.[1] ?? null;
+}
+
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
   const tags = (meta.tags as string[] | undefined) ?? [];
@@ -74,7 +83,9 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
    * not wait minutes for a detach; its process lives on to finish them); the reaper, a cron process that exits right
    * after, must — or its volumes would keep billing (scripts/reap-orphans.ts).
    */
-  constructor(secretKey: string, private readonly opts: { projectId?: string; client?: ScalewayLike; awaitVolumes?: boolean } = {}) {
+  constructor(secretKey: string, private readonly opts: {
+    projectId?: string; client?: ScalewayLike; awaitVolumes?: boolean; registrySecret?: string;
+  } = {}) {
     this.credentials = { apiKey: secretKey } as ProviderCredentials;
     this.client = opts.client ?? new ScalewayClient();
   }
@@ -91,6 +102,15 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   async createReplica(input: CreateReplicaInput): Promise<ReplicaMachine> {
     const { spec } = input;
+    const secret = this.credentials.apiKey as string;
+    const files = Object.values(input.files ?? {}).map(bytes => Buffer.from(bytes).toString('utf8'));
+    const forms = secret ? [secret, ...base64Forms(secret)] : [];
+    if ([input.cloudInit, ...files].some(text => forms.some(form => text.includes(form)))) {
+      throw new Error('refusing to send the Scaleway API secret to a machine (user_data); use a read-only registry credential');
+    }
+    if (scalewayRegistryOf(spec.image) && !spec.registryAuth && !spec.bootScript && !this.registryAuthFor(spec.image)) {
+      throw new Error(`${spec.image} is on the private Scaleway registry: set SCW_REGISTRY_SECRET_KEY (a registry read-only IAM key)`);
+    }
     const imageId = await this.osImage(input);
     // Every replica gets a firewall: an exposed one its deployment's (declared ports + probe), any other the
     // namespace's gateway-only group. Without one Scaleway attaches the project's "Default security group", whose
@@ -266,9 +286,11 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
     return offers.map(o => ({ zone: o.zone, machineType: o.commercialType, hourlyPrice: o.hourlyPrice, availability: o.availability }));
   }
 
-  /** Scaleway Container Registry (`rg.<region>.scw.cloud/<namespace>/…`) logs in with user `nologin` and the API secret. */
+  /** Scaleway Container Registry (`rg.<region>.scw.cloud/<namespace>/…`) logs in with user `nologin` and SCW_REGISTRY_SECRET_KEY. */
   registryAuthFor(image: string): RegistryAuth | null {
-    const server = /^(rg\.[a-z]{2}-[a-z]{3}\.scw\.cloud)\//.exec(image)?.[1];
-    return server ? { server, username: 'nologin', password: this.credentials.apiKey as string } : null;
+    const server = scalewayRegistryOf(image);
+    const password = this.opts.registrySecret?.trim();
+    if (!server || !password || password === this.credentials.apiKey) return null;
+    return { server, username: 'nologin', password };
   }
 }

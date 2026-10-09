@@ -143,7 +143,7 @@ export function deploymentsFromEnv(
   const stateDir = env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway');
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
-    ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId }) } : {}),
+    ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY }) } : {}),
     ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log }) } : {}),
   };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);

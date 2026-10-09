@@ -227,10 +227,12 @@ export function replicaCloudInit(spec: DeploymentSpec, token: string, opts: Repl
   const appPort = spec.exposure ? spec.port : 8000;
   const rtPort = spec.realtime ? RT_EDGE_PORT : undefined;
   const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort) : nginxConfig(token, 80, 8000, rtPort);
+  const registry = spec.registryAuth?.server ? shellQuote(spec.registryAuth.server) : '';
   const login = spec.registryAuth
-    ? `echo ${shellQuote(spec.registryAuth.password)} | docker login ${spec.registryAuth.server ? shellQuote(spec.registryAuth.server) + ' ' : ''}`
-      + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin`
+    ? `set +x\necho ${shellQuote(spec.registryAuth.password)} | docker login ${registry ? registry + ' ' : ''}`
+      + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin\nset -x`
     : '';
+  const logout = spec.registryAuth ? `docker logout ${registry}`.trim() : '';
   return `#!/bin/bash
 mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
@@ -247,6 +249,7 @@ ${fetchFilesScript(spec.fileUrls)}
 ${spec.bootScript ? bootScriptSection(spec.bootScript) : `command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 ${login}
 for i in 1 2 3 4 5; do docker pull ${shellQuote(spec.image)} && break; sleep 15; done
+${logout}
 ${dockerRunCommand(spec)}`}
 ${spec.realtime ? realtimeSection(spec, token, opts) : ''}
 for i in $(seq 1 ${bootChecks}); do

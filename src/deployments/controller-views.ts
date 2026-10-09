@@ -171,7 +171,7 @@ export abstract class ControllerViews extends ReconcileLoop {
           ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]
           : []),
         ...placementsOf(rt.record.spec).filter(s => s.provider === 'vast' && s.provider !== rt.record.spec.provider).flatMap((s) => {
-          const unfit = this.backends.vast ? vastUnfit(s, p => this.backends[p]) : 'VAST_API_KEY is not set';
+          const unfit = this.backends.vast ? vastUnfit(s) : 'VAST_API_KEY is not set';
           return unfit ? [`the vast ${s.machineType} fallback placement is skipped: ${unfit}`] : [];
         }),
       ],
