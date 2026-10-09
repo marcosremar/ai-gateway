@@ -188,6 +188,9 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   to close, 300 ms pre-roll; optional Silero ONNX gate with `RT_SILERO_ONNX` + onnxruntime) **and** the client's
   `end_turn` always works. `cfg.vad = "client"` leaves turn-taking to the client (parle's Silero in the browser):
   the edge then answers only `end_turn`, and barge-in is the client's `interrupt`.
+  With the server VAD, an `end_turn` that arrives after the VAD already ended the turn (the page and the edge count the
+  same silence) is that same end: the running reply is kept. Before 2026-10-09 it cancelled the reply
+  (`interrupted`, `done{interrupted}`, `done{empty}`).
 - **History**: before each LLM call the session cuts its history to the LLM's context per slot (the upstream's
   `/health` → `llm_ctx`, default 2048): system prompt, system messages and the newest turns stay, the oldest whole
   user/assistant turns go, 8 at a time (`edge.llm.history_trimmed {dropped, kept, harder}`). A `400 … context size`

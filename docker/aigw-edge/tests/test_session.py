@@ -313,6 +313,27 @@ async def barge_in() -> None:
     await learner.close()
 
 
+async def client_end_after_server_vad() -> None:
+    for name, when in (("right after the server's VAD ended it", "transcript"), ("while the reply is playing", "audio_start")):
+        learner = Learner(stt_partials=False)
+        learner.say(0.5)
+        await learner.wait(when)
+        learner.session.control({"type": "end_turn"})
+        done = await learner.wait("done")
+        await asyncio.sleep(0.6)
+        check(f"client end_turn {name}: the same turn, not a new one (no interrupted, no empty done, answered once)",
+              "interrupted" not in learner.types() and len(learner.of("done")) == 1 and done.get("turnId") == "s:1"
+              and not done.get("empty") and not done.get("interrupted") and learner.up.calls["llm"] == 1 and learner.heard_frames > 0,
+              learner.types())
+        await learner.close()
+
+    learner = Learner(stt_partials=False)
+    learner.session.control({"type": "end_turn"})
+    check("client end_turn with nothing said and no turn running: done empty, as before", learner.of("done") == [{"type": "done", "empty": True}],
+          learner.types())
+    await learner.close()
+
+
 async def speculation_edges() -> None:
     learner = Learner(stt_partials=False)
     learner.up.stt_fails = True
@@ -988,7 +1009,7 @@ async def feature_interactions() -> None:
 async def main() -> None:
     await signed_config_is_authoritative()
     await app_turn_hook()
-    for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, speculation_edges, partials,
+    for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, client_end_after_server_vad, speculation_edges, partials,
                      first_audio_deadline, admission_shedding, tts_guard, llm_failure,
                      long_session, history_overflow, feature_interactions):
         await scenario()
