@@ -11,7 +11,7 @@ import time
 
 import av
 import numpy as np
-from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription, RTCIceServer
+from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription, RTCIceServer, rtcsctptransport
 from aiortc.mediastreams import MediaStreamError
 from aiortc.sdp import candidate_from_sdp
 
@@ -20,6 +20,9 @@ from .config import Settings
 from .session import OUT_FRAME_BYTES, OUT_RATE, Session
 from .telemetry import telemetry
 from .upstream import Upstream
+
+
+rtcsctptransport.SCTP_RTO_INITIAL, rtcsctptransport.SCTP_RTO_MIN = 0.5, 0.4
 
 
 class OfferError(Exception):

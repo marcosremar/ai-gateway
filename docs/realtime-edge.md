@@ -272,6 +272,12 @@ strategies on a speech clip without a network (`clips`, then `wer` with a local 
 the sender's timer late (150 ms or more on the `lossy` profile's 75 ms each way), which is delay on every turn's end
 for what RED already carries in the next packet 20 ms later.
 
+The data channel's SCTP retransmission timer starts at 0.5 s with a floor of 0.4 s (`host.py`; aiortc's RFC defaults
+are 3 s and 1 s, Chrome's own stack uses 0.5 and 0.4): on a lossy path one lost handshake chunk cost 3 s of connection
+time and a lost event (`transcript`, `audio_start`) arrived a second late. Harness, 30 connections with 75 ms each way:
+at 5 % loss 6 of 30 took over 3 s (max 5.9 s) before, none after (max 2.9 s); at 10 % 8 of 30 (max 7.4 s) before, 3
+of 30 (max 5.0 s) after.
+
 Downlink: `OutTrack` sends one 20 ms frame per tick of a wall-clock grid, silence included, with continuous RTP
 timestamps, so the browser's jitter buffer stays at its floor between replies (Chromium `getStats`: target and minimum
 20 ms on a clean local path, 100–160 ms from a home Wi-Fi to the replica — NetEq follows the path's jitter and the

@@ -112,6 +112,9 @@ export interface RealtimeTimeouts {
   disconnectGraceMs: number;
   iceRestartMs: number;
   upgradeMs: number;
+  upgradeConnectMs: number;
+  upgradeTries: number;
+  upgradeBackoffMs: number;
   readmitMs: number;
   readmitMaxMs: number;
   readmitForMs: number;
@@ -127,7 +130,10 @@ export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
   turnMs: 45_000,
   disconnectGraceMs: 3_000,
   iceRestartMs: 5_000,
-  upgradeMs: 5_000,
+  upgradeMs: 40_000,
+  upgradeConnectMs: 12_000,
+  upgradeTries: 2,
+  upgradeBackoffMs: 2_000,
   readmitMs: 2_000,
   readmitMaxMs: 30_000,
   readmitForMs: 20 * 60_000,
@@ -195,6 +201,7 @@ export interface TransportContext {
   traceparent: string;
   telemetry: RealtimeTelemetry;
   standby?: boolean;
+  patient?: boolean;
 }
 
 export type TransportFactory = (ctx: TransportContext) => RealtimeTransport | null;

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import aiohttp
 
-from clients import REPLICA_TOKEN, DEFAULT_CFG, RtcLearner, WsLearner, mint
+from clients import REPLICA_TOKEN, DEFAULT_CFG, RtcLearner, WsLearner, mint, shape_network
 from aigw_edge import audio
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -307,6 +307,33 @@ async def scenario_webrtc_network(base: str) -> None:
         await learner.close()
     check("webrtc: the edge reports when the first reply packet left and how late the next 2 s were sent",
           isinstance(m.get("rtp_first_sent_ms"), float) and m["rtp_late_p95_ms"] < 15, m)
+
+
+CONNECT_RUNS = int(os.environ.get("CONNECT_RUNS", "6"))
+SDK_FOREGROUND_MS, SDK_BACKGROUND_MS = 3000, 12000
+
+
+async def scenario_webrtc_connect_loss(base: str) -> None:
+    for loss in (0.0, 0.05, 0.10):
+        shape_network(loss, 0.075 if loss else 0.0)
+        times = []
+        try:
+            for _ in range(CONNECT_RUNS):
+                t = time.monotonic()
+                learner = await RtcLearner(base).connect(mint())
+                await learner.events.wait("ready", 30)
+                times.append(round((time.monotonic() - t) * 1000))
+                async with aiohttp.ClientSession() as http:
+                    await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
+                await learner.close()
+        finally:
+            shape_network()
+        late = sum(ms > SDK_FOREGROUND_MS for ms in times)
+        results["latency"][f"webrtc connect, {round(loss * 100)} % loss + 75 ms each way"] = {
+            "ms": sorted(times), "over_foreground_budget": late}
+        check(f"webrtc connect, {round(loss * 100)} % loss: every connection is up inside the SDK's background budget "
+              f"({SDK_BACKGROUND_MS} ms; its foreground one is {SDK_FOREGROUND_MS})", max(times) < SDK_BACKGROUND_MS,
+              {"max": max(times), "median": statistics.median(times), "over_foreground": f"{late}/{len(times)}"})
 
 
 async def scenario_vast(base: str) -> None:
@@ -626,8 +653,14 @@ async def main() -> int:
         await wait_ready(base)
         await wait_ready(base_s2s)
         await wait_ready(base_vast)
+        only = [globals()[name] for name in os.environ.get("ONLY", "").split(",") if name]
+        for scenario in only:
+            await asyncio.sleep(2)
+            await scenario(base)
+        if only:
+            return 0
         for scenario in (scenario_tokens, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
-                         scenario_capacity, scenario_webrtc, scenario_webrtc_network):
+                         scenario_capacity, scenario_webrtc, scenario_webrtc_network, scenario_webrtc_connect_loss):
             await scenario(base)
         await scenario_reoffer(base)
         await scenario_race(base, stages=True)

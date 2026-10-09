@@ -326,8 +326,9 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
 
 - **Offer timing** — the SDK does not wait out `iceGatherMs`: the offer leaves at the first server-reflexive or relay
   candidate, when gathering completes, or at the ceiling. A webrtc transport offer with `iceTransportPolicy: "relay"`
-  is passed to the peer connection and then only a relay candidate releases the offer. Candidates gathered later are
-  not signalled (non-trickle): the browser still checks from them, and the edge learns them as peer-reflexive.
+  is passed to the peer connection and then only a relay candidate releases the offer. A candidate gathered after the
+  offer left is posted to the session's `iceUrl` once the answer is in (HTTP, so loss on the media path does not eat
+  it); the edge would also learn it as peer-reflexive from the browser's own checks.
 - **Playout delay** — `playoutDelayMs` (session option, default 0) is written to the receiver's `jitterBufferTarget`
   (milliseconds, 0–4000 in the W3C spec), or to `playoutDelayHint` (seconds) where only that exists; a browser with
   neither is left alone. 0 is the lowest value the spec allows and asks for no added delay: the browser still buffers
@@ -339,8 +340,17 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   switches **between turns** — nobody speaking, no reply pending or playing, 300 ms after the last audio —: it closes
   the WS (capture and player stop), puts the microphone track on the peer connection (`replaceTrack`), replays the
   conversation with one `config_update`, and emits `transport {transport:"webrtc", reason:"upgrade", from:"ws"}`.
-  WebRTC not connected `upgradeMs` (5 s) after the start on WS is given up without any error and the session stays
-  on WS. WebRTC ready first: the WS attempt is cancelled. Both failing: the clip rungs, in order. A WS that breaks
+  **The two budgets are separate.** What serves the first turn is decided in the foreground budget of the table. The
+  WebRTC attempt behind a serving WS is patient, because waiting costs the learner nothing: `upgradeConnectMs` (12 s)
+  from the answer to a connected peer connection, `upgradeTries` (2) tries with `upgradeBackoffMs` (2 s, doubling)
+  between them — a retry is a new offer on the same edge session, which closes the previous peer connection —, all
+  inside `upgradeMs` (40 s). On the loopback harness with 75 ms each way a connection takes 0.9 s at the median and
+  up to 2.9 s at 5 % loss, 5.0 s at 10 % (DTLS and SCTP retransmission timers): the 3 s foreground budget cuts a
+  tenth of them at 10 %, the patient one none. An attempt that runs out is given up without any error (telemetry
+  `rt.ladder.fallback`, `rt.webrtc.retry`), its peer connections closed and its edge session deleted, and the session
+  stays on WS. With no WS to serve the learner (it failed) the WebRTC attempt is held to the foreground budget and the
+  clip rungs follow; with WebRTC as the only rung (`preferredTransports: ['webrtc']`) it gets the patient budget and
+  then `error{code:"no_transport"}` naming the time it waited. WebRTC ready first: the WS attempt is cancelled. Both failing: the clip rungs, in order. A WS that breaks
   while WebRTC is still connecting waits for it instead of dropping to a clip rung. The edge runs the two sessions of
   one `sid` side by side and counts the learner once (docs/realtime-edge.md); the standby one hears nothing, so a
   turn is never run twice.

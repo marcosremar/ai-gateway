@@ -11,10 +11,11 @@ import uuid
 
 import aiohttp
 import av
+from aioice.ice import StunProtocol
 import numpy as np
 from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError
-from aiortc import codecs, rtcrtpsender
+from aiortc import codecs, rtcrtpsender, rtcsctptransport
 from aiortc.codecs.opus import OpusEncoder
 from aiortc.rtp import is_rtcp
 
@@ -68,6 +69,37 @@ def browser_like_encoder(codec):
 
 
 rtcrtpsender.get_encoder = browser_like_encoder
+
+
+rtcsctptransport.SCTP_RTO_INITIAL, rtcsctptransport.SCTP_RTO_MIN = 0.5, 0.4
+NETWORK = {"loss": 0.0, "delay": 0.0, "rng": random.Random(11)}
+
+
+def shape_network(loss: float = 0.0, delay_s: float = 0.0) -> None:
+    NETWORK.update(loss=loss, delay=delay_s)
+
+
+def shaped(call):
+    def through(*args) -> None:
+        if NETWORK["rng"].random() < NETWORK["loss"]:
+            return
+        if NETWORK["delay"]:
+            asyncio.get_running_loop().call_later(NETWORK["delay"], call, *args)
+        else:
+            call(*args)
+    return through
+
+
+ice_made, ice_received = StunProtocol.connection_made, StunProtocol.datagram_received
+
+
+def ice_connection_made(self, transport) -> None:
+    ice_made(self, transport)
+    transport.sendto = shaped(transport.sendto)
+
+
+StunProtocol.connection_made = ice_connection_made
+StunProtocol.datagram_received = lambda self, data, addr: shaped(ice_received)(self, data, addr)
 
 
 def mint(cfg: dict | None = None, rep: str = "fr-par-2:replica-1", dep: str = "parle-speech", ttl: int = 600,

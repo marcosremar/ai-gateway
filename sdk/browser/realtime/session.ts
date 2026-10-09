@@ -18,7 +18,7 @@ import { startSileroListener, type SileroListener } from '../voice/silero-listen
 import { createTurnTaking } from '../voice/turn-taking';
 import { clipToWav, createTurnClip } from '../voice/turn-clip';
 import { configFromToken, isRefusal, requestSession, telemetryUrlOf, type SessionSource } from './descriptor';
-import { LadderExhausted, climbLadder, createWinnerMemory, defaultNetworkKey, defaultStorage, orderWithWinner } from './ladder';
+import { LadderExhausted, attemptTimeoutMs, climbLadder, createWinnerMemory, defaultNetworkKey, defaultStorage, orderWithWinner } from './ladder';
 import { createLocalTelemetry, newTurnId, type LocalTelemetryOptions, type RealtimeTelemetry } from './telemetry';
 import { createWebRtcTransport } from './transports/webrtc';
 import { createWsTransport } from './transports/ws';
@@ -438,8 +438,11 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     up?.connected?.close();
   };
 
+  const patientBudget = (t: TransportType) => (t === 'webrtc' ? Math.max(timeouts.upgradeMs, attemptTimeoutMs('webrtc', timeouts)) : undefined);
+  const patientContext = () => Object.assign(Object.create(ctx) as TransportContext, { patient: true });
+
   const standbyContext = (standby: Standby): TransportContext => Object.assign(Object.create(ctx) as TransportContext, {
-    standby: true,
+    standby: true, patient: true,
     emit: (e: RealtimeEvent) => { if (standby.live) ctx.emit(e); },
     fail: (err: Error) => { if (standby.live) ctx.fail(err); else if (upgrade?.standby === standby) dropUpgrade(err.message); },
     remoteAudio: (stream: MediaStream | null) => { if (standby.live) ctx.remoteAudio(stream); else standby.audio = stream; },
@@ -497,7 +500,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const context = standbyContext(standby);
     const offered = rungs.filter(t => descriptor?.transports.some(o => o.type === t));
     const up: Upgrade = {
-      rtc: climbLadder(offered, t => factories[t](context), { timeouts, signal: abort.signal }).then(r => r.transport, () => null),
+      rtc: climbLadder(offered, t => factories[t](context), { timeouts, signal: abort.signal, budgetMs: patientBudget }).then(r => r.transport, () => null),
       abort, standby, connected: null,
     };
     upgrade = up;
@@ -514,9 +517,15 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const standby: Standby = { live: false, audio: null };
     const aborts = { webrtc: new AbortController(), ws: new AbortController() };
     const attempt = (type: 'webrtc' | 'ws', c: TransportContext) =>
-      climbLadder([type], t => factories[t](c), { ...climb, signal: aborts[type].signal }).then(r => r.transport, () => null);
+      climbLadder([type], t => factories[t](c), { ...climb, budgetMs: patientBudget, signal: aborts[type].signal }).then(r => r.transport, () => null);
+    const foreground = performance.now() + attemptTimeoutMs('webrtc', timeouts);
     const rtc = attempt('webrtc', standbyContext(standby));
     const ws = attempt('ws', ctx);
+    void ws.then((t) => {
+      if (t) return;
+      const alone = setTimeout(() => aborts.webrtc.abort(new Error('webrtc not connected in time with no ws to serve the learner')), Math.max(0, foreground - performance.now()));
+      void rtc.then(() => clearTimeout(alone));
+    });
     const first = await Promise.race([rtc.then(t => t ?? ws), ws.then(t => t ?? rtc)]);
     if (!first) return { transport: (await climbLadder(usable.filter(t => !isRealtime(t)), t => factories[t](ctx), climb)).transport };
     if (first.type === 'ws') return { transport: first, pending: { rtc, abort: aborts.webrtc, standby, connected: null } };
@@ -534,6 +543,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const offered = new Set(descriptor?.transports.map(t => t.type) ?? []);
     const usable = rungs.filter(t => !isRealtime(t) || offered.has(t));
     const racing = reason === 'connected' && opts.raceTransports !== false && usable[0] === 'webrtc' && usable.includes('ws');
+    const onlyWebRtc = usable.length === 1 && usable[0] === 'webrtc';
     const attempts: AttemptRecord[] = [];
     let last: TransportType | null = from ?? null;
     try {
@@ -552,7 +562,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       };
       const { transport, pending } = racing
         ? await raceStart(usable, climb).catch((err) => { throw err instanceof LadderExhausted ? new LadderExhausted(attempts) : err; })
-        : { transport: (await climbLadder(usable, (t) => factories[t](ctx), climb)).transport, pending: undefined };
+        : { transport: (await climbLadder(usable, (t) => factories[t](onlyWebRtc ? patientContext() : ctx), onlyWebRtc ? { ...climb, budgetMs: patientBudget } : climb)).transport, pending: undefined };
       if (closed) { transport.close(); pending?.abort.abort(new Error('session closed')); void pending?.rtc.then(t => t?.close()); return; }
       current = transport;
       startedAt = performance.now();
