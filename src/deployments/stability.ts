@@ -110,6 +110,7 @@ export class ClientStabilityLog {
   private readonly ring: ClientStabilityBatch[] = [];
   private readonly recentPosts = new Map<string, number[]>();
   private chain: Promise<void> = Promise.resolve();
+  private fileFull = false;
   private readonly now: () => number;
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
 
@@ -153,14 +154,14 @@ export class ClientStabilityLog {
     this.chain = this.chain.then(async () => {
       try {
         await mkdir(dirname(file), { recursive: true });
-        let handle = await open(file, 'a');
-        if ((await handle.stat()).size >= (this.opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES)) {
-          await handle.close();
+        if (this.fileFull) {
+          this.fileFull = false;
           await rename(file, `${file}.1`);
-          handle = await open(file, 'a');
         }
+        const handle = await open(file, 'a');
         try {
           await handle.appendFile(`${JSON.stringify(fileRecord(batch))}\n`, 'utf8');
+          this.fileFull = (await handle.stat()).size >= (this.opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES);
         } finally {
           await handle.close();
         }
