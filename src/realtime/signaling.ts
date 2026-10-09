@@ -7,7 +7,7 @@
  *   DELETE /v1/realtime/sessions/:id                               → replica DELETE /__aigw/rt/session/:edgeId
  *
  * Token: `Authorization: Bearer <token>` (or `token` in the JSON body). Its `sid` must be the `:id` of the path. The
- * replica is called with the deployment's `X-Aigw-Token`, which never leaves the gateway. CORS is open (`*`, no
+ * replica is called with its own `X-Aigw-Token`, which never leaves the gateway. CORS is open (`*`, no
  * credentials): the bearer token is the only authority, cookies play no part.
  */
 import type { IncomingMessage, ServerResponse } from 'http';

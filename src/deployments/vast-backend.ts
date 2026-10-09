@@ -230,7 +230,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         const res = await this.call<{ success?: boolean; new_contract?: number; error?: string; msg?: string }>('PUT', `/asks/${offer.id}/`, {
           client_id: 'me',
           image: spec.image,
-          label: `${vastLabelPrefix(input.namespace)}${spec.name}`,
+          label: `${vastLabelPrefix(input.namespace)}${spec.name}${input.tokenKey ? `:${input.tokenKey}` : ''}`,
           disk: spec.volumeGb ?? DEFAULT_DISK_GB,
           runtype: 'ssh_direct',
           // The init script travels in an env var (the onstart field stays short); read from /etc/environment when the
@@ -303,8 +303,9 @@ export class VastDeploymentBackend implements DeploymentBackend {
       const id = String(i.id);
       if (i.machine_id !== undefined) this.hostOf.set(id, i.machine_id);
       const hostPort = i.ports?.['80/tcp']?.[0]?.HostPort;
+      const [deployment = '', tokenKey] = i.label!.slice(prefix.length).split(':');
       return {
-        id, deployment: i.label!.slice(prefix.length), provider: 'vast' as const,
+        id, deployment, ...(tokenKey ? { tokenKey } : {}), provider: 'vast' as const,
         ip: i.public_ipaddr && hostPort ? `${i.public_ipaddr.trim()}:${hostPort}` : null,
         state: vastState(i.actual_status),
         createdAt: typeof i.start_date === 'number' ? Math.round(i.start_date * 1000) : this.now(),

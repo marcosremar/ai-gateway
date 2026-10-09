@@ -6,7 +6,7 @@
  *                 when the request comes from a browser (`Origin` / `Sec-Fetch-*` present) and for the SANDBOX_TOKEN
  *                 family (same 401 as a wrong key: the answer must not tell the master token apart, audit #20).
  *   (b) session   `Authorization: Bearer <realtime session JWT>` (or `token` in the body, for `navigator.sendBeacon`
- *                 which cannot set headers). HS256 with key = HMAC-SHA256(deployment replicaToken, "aigw-rt-v1"), the
+ *                 which cannot set headers). HS256 with key = HMAC-SHA256(the `rep` replica's token, "aigw-rt-v1"), the
  *                 realtime contract (docs/realtime.md). `sid`/`app`/`dep`/`rep` come from the token, never the body.
  *                 Accepted up to `sessionGraceSeconds` (default 120) after `exp`, so the last batch of a session —
  *                 often flushed on `pagehide` — still lands.
@@ -31,7 +31,7 @@ export type TelemetryPrincipal =
 export interface AuthFailure {
   status: 401 | 403;
   code: 'missing_credentials' | 'invalid_key' | 'browser_app_key' | 'bad_session_token' | 'session_expired'
-    | 'unknown_deployment' | 'unknown_replica' | 'bad_edge_signature';
+    | 'unknown_replica' | 'bad_edge_signature';
   error: string;
 }
 
@@ -40,8 +40,6 @@ export interface TelemetryAuthDeps {
   resolveAppKey(token: string): string | null;
   /** SANDBOX_TOKEN and its aliases: never accepted here, even when they are also client keys. */
   isMasterKey?(token: string): boolean;
-  /** Deployment → its replica token (and owning app). */
-  deployment(name: string): { replicaToken: string; app?: string } | null;
   /** Replica id → its deployment, the deployment's replica token and owning app. */
   replica(replicaId: string): { deployment: string; replicaToken: string; app?: string } | null;
   /**
@@ -109,9 +107,9 @@ export function verifySessionPrincipal(token: string, deps: TelemetryAuthDeps): 
   const header = decodePart(h);
   const claims = claimsOf(decodePart(p));
   if (!header || header.alg !== 'HS256' || !claims) return fail(401, 'bad_session_token', 'Malformed realtime session token');
-  const dep = deps.deployment(claims.dep);
-  if (!dep) return fail(401, 'unknown_deployment', 'Session token names an unknown deployment');
-  const key = createHmac('sha256', dep.replicaToken).update(RT_SESSION_KEY_INFO).digest();
+  const replica = deps.replica(claims.rep);
+  if (!replica || replica.deployment !== claims.dep) return fail(401, 'unknown_replica', 'Session token names an unknown replica');
+  const key = createHmac('sha256', replica.replicaToken).update(RT_SESSION_KEY_INFO).digest();
   const expected = createHmac('sha256', key).update(`${h}.${p}`).digest();
   if (!sameBytes(Buffer.from(s, 'base64url'), expected)) return fail(401, 'bad_session_token', 'Invalid realtime session token');
   const nowS = Math.floor((deps.now ?? Date.now)() / 1000);

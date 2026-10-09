@@ -5,7 +5,8 @@
  */
 
 import { replicaCloudInit } from './cloud-init';
-import { ControllerState, type Runtime } from './controller-state';
+import { randomBytes } from 'crypto';
+import { ControllerState, replicaTokenFor, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
 import { placeReplica, PlacementError } from './placement-walk';
 import { isOutOfStock } from './placements';
@@ -46,8 +47,9 @@ export abstract class ReplicaLifecycle extends ControllerState {
   private async checkReplica(rt: Runtime, m: ReplicaMachine): Promise<ProbeResult> {
     const { probe } = this.opts;
     try {
-      if (probe.check) return await probe.check(m, rt.record.spec, rt.record.replicaToken);
-      return (await probe.ready(m, rt.record.spec, rt.record.replicaToken)) ? 'ready' : 'down';
+      const token = replicaTokenFor(rt.record.replicaToken, m.tokenKey);
+      if (probe.check) return await probe.check(m, rt.record.spec, token);
+      return (await probe.ready(m, rt.record.spec, token)) ? 'ready' : 'down';
     } catch {
       return 'down';
     }
@@ -241,14 +243,16 @@ export abstract class ReplicaLifecycle extends ControllerState {
   protected async createOn(rt: Runtime, backend: DeploymentBackend, spec: DeploymentSpec, created: { id?: string }): Promise<ReplicaMachine> {
     this.log('deployments: creating replica', { deployment: spec.name, provider: backend.provider, type: spec.machineType, zone: spec.zone });
     const network = spec.exposure ? await this.networkOf(rt, backend) : undefined;
+    const tokenKey = randomBytes(12).toString('hex');
+    const replicaToken = replicaTokenFor(rt.record.replicaToken, tokenKey);
     const machine = await backend.createReplica({
-      spec, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
+      spec, replicaToken, tokenKey, namespace: this.namespace, ...(network ? { network } : {}),
       // Vast builds its own init (`vastReplicaInit`) from spec + token; Scaleway takes this cloud-init as user_data.
-      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), rt.record.replicaToken) : '',
+      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), replicaToken) : '',
       ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
       onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
     });
-    return { ...machine, provider: backend.provider };
+    return { ...machine, provider: backend.provider, tokenKey };
   }
 
   /** Reserved IP + firewall of an exposed deployment, created once and kept in the record (it outlives replicas). */

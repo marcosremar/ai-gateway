@@ -248,11 +248,6 @@ const telemetry = telemetryFromEnv(process.env, {
     resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
     resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
     isMasterKey: (token) => isMasterToken(token, process.env),
-    deployment: (name) => {
-      const replicaToken = controller?.tokenOf(name);
-      const app = controller?.get(name)?.app;
-      return replicaToken ? { replicaToken, ...(app ? { app } : {}) } : null;
-    },
     replica: (id) => controller?.replicaAuth(id) ?? null,
   },
   isAdminToken,

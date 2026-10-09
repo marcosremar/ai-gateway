@@ -3,7 +3,7 @@
  * in-process callers, and the counts `/health` shows. See controller-state.ts.
  */
 
-import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './controller-state';
+import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, replicaTokenFor, round3 } from './controller-state';
 import { ReconcileLoop } from './controller-reconcile';
 import { vastUnfit } from './placement-walk';
 import { DEFAULT_NEAR, placementsOf } from './placements';
@@ -51,8 +51,10 @@ export abstract class ControllerViews extends ReconcileLoop {
     return rt ? structuredClone(rt.record.spec) : null;
   }
 
-  tokenOf(name: string): string | null {
-    return this.deployments.get(name)?.record.replicaToken ?? null;
+  tokenOf(name: string, replicaId: string): string | null {
+    const rt = this.deployments.get(name);
+    const machine = this.machines.find(m => m.id === replicaId && m.deployment === name);
+    return rt && machine ? replicaTokenFor(rt.record.replicaToken, machine.tokenKey) : null;
   }
 
   /**
@@ -63,7 +65,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     const machine = this.machines.find(m => m.id === id);
     const rt = machine ? this.deployments.get(machine.deployment) : undefined;
     if (!machine || !rt) return null;
-    return { deployment: machine.deployment, replicaToken: rt.record.replicaToken, ...(rt.record.app ? { app: rt.record.app } : {}) };
+    return { deployment: machine.deployment, replicaToken: replicaTokenFor(rt.record.replicaToken, machine.tokenKey), ...(rt.record.app ? { app: rt.record.app } : {}) };
   }
 
   pendingNetworkReleases(): Array<{ deployment: string; ip: string; zone: string; since: string; attempts: number; lastError: string | null }> {

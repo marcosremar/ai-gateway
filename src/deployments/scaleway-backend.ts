@@ -54,15 +54,19 @@ export function scalewayRegistryOf(image: string): string | null {
   return /^(rg\.[a-z]{2}-[a-z]{3}\.scw\.cloud)\//.exec(image)?.[1] ?? null;
 }
 
+const TOKEN_KEY_TAG = 'aigw-rk-';
+
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
   const tags = (meta.tags as string[] | undefined) ?? [];
   const deployment = tags.find(t => t.startsWith('aigw-dep-'))?.slice('aigw-dep-'.length) ?? fallbackDeployment;
   if (!deployment) return null;
   const created = typeof meta.createdAt === 'string' ? Date.parse(meta.createdAt) : NaN;
+  const tokenKey = tags.find(t => t.startsWith(TOKEN_KEY_TAG))?.slice(TOKEN_KEY_TAG.length);
   return {
     id: inst.instanceId,
     deployment,
+    ...(tokenKey ? { tokenKey } : {}),
     ip: inst.ipAddress ?? null,
     state: typeof meta.state === 'string' ? meta.state : String(inst.status ?? 'starting'),
     createdAt: Number.isFinite(created) ? created : Date.now(),
@@ -122,7 +126,7 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
       commercialType: spec.machineType,
       ...(imageId ? { imageId } : {}),
       ...(spec.volumeGb ? { volumeGb: spec.volumeGb } : {}),
-      tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name)],
+      tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name), ...(input.tokenKey ? [`${TOKEN_KEY_TAG}${input.tokenKey}`] : [])],
       cloudInit: input.cloudInit,
       securityGroupId,
       ...(input.network ? { publicIpIds: [input.network.ipId] } : {}),

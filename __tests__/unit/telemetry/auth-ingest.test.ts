@@ -37,13 +37,14 @@ describe('telemetry auth', () => {
     expect(p).toMatchObject({ kind: 'session', sessionId: 'sess-1' });
   });
 
-  it('refuses a session token signed with another deployment key, a tampered one and an unknown deployment', () => {
+  it('refuses a session token signed with another replica key, a tampered one and an unknown replica', () => {
     expect(authenticateTelemetry({ authorization: bearer(sessionToken({}, OTHER_TOKEN)) }, authDeps()))
       .toMatchObject({ status: 401, code: 'bad_session_token' });
     const [h, , s] = sessionToken({}).split('.');
-    const forged = `${h}.${Buffer.from(JSON.stringify({ sid: 'x', app: 'evil', dep: 'speech', rep: 'r', iat: 1, exp: 9e9 })).toString('base64url')}.${s}`;
+    const forged = `${h}.${Buffer.from(JSON.stringify({ sid: 'x', app: 'evil', dep: 'speech', rep: 'r-1', iat: 1, exp: 9e9 })).toString('base64url')}.${s}`;
     expect(authenticateTelemetry({ authorization: bearer(forged) }, authDeps())).toMatchObject({ code: 'bad_session_token' });
-    expect(authenticateTelemetry({ authorization: bearer(sessionToken({ dep: 'ghost' })) }, authDeps())).toMatchObject({ code: 'unknown_deployment' });
+    expect(authenticateTelemetry({ authorization: bearer(sessionToken({ dep: 'ghost' })) }, authDeps())).toMatchObject({ code: 'unknown_replica' });
+    expect(authenticateTelemetry({ authorization: bearer(sessionToken({ rep: 'r-9' })) }, authDeps())).toMatchObject({ code: 'unknown_replica' });
   });
 
   it('refuses an expired session token past the grace, accepts one within it', () => {

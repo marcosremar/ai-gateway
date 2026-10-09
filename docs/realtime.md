@@ -30,10 +30,10 @@ inside the token (`cfg`).
 
 ### Session token
 
-JWT HS256. Signing key per deployment, derived from the replica token (never leaves the gateway or the replica):
+JWT HS256. Signing key per replica, derived from that replica's token (never leaves the gateway or the replica):
 
 ```
-key = HMAC-SHA256(key = <deployment replicaToken>, message = "aigw-rt-v1")      # 32 raw bytes
+key = HMAC-SHA256(key = <the replica's token>, message = "aigw-rt-v1")      # 32 raw bytes
 claims = { sid, app, dep, rep, cfg, iat, exp }    # serialized in this order; base64url without padding
   sid  session id (rt_<32 hex>)      app  app account      dep  deployment      rep  replica id
   cfg  base64url(JSON(session config)), ≤ 6 KB (6144 characters)

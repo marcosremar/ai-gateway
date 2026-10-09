@@ -552,7 +552,7 @@ fallback); then the instance is taken away, whatever it is serving. `src/deploym
 
 ## Replica machine
 
-`cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-deployment secret only the gateway knows) and proxies to
+`cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-replica secret: HMAC of the deployment's secret, which stays in the gateway, and a random key in the machine's tag `aigw-rk-<key>` or Vast label `aigw:<ns>:<dep>:<key>`; a machine created before has the deployment secret) and proxies to
 the container on `127.0.0.1:8000`; `/__aigw/ready` appears once the container answered `healthPath`. GPU types use
 the Scaleway GPU OS image (Docker + NVIDIA toolkit) with `--gpus all`. The machine shuts itself down `maxHours + 30 min`
 after boot as a last resort — a shut-down Scaleway instance is still billed, so the gateway deletes halted replicas.
