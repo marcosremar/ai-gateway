@@ -70,7 +70,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     let rtt: number | null = null;
     try { rtt = await backend.measureRtt(m); } catch { rtt = null; }
     if (rtt != null) gate.rttMs = rtt;
-    if (m.createdAt < this.startedAt) { // adopted after a restart: it may be serving a class, never cut it here
+    if (m.createdAt < this.startedAt && (await this.checkReplica(rt, m)) !== 'down') { // adopted and serving: never cut it here
       if (rtt != null) gate.status = 'adopted';
       return true;
     }
