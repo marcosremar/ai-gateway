@@ -194,6 +194,9 @@ as `extra_params.request_id`. vLLM-Omni 0.28.0 logs `Applied extra_params: {'req
 `TTS speech request speech-<uuid>: model=Base`; that `speech-<uuid>` is the id of its `[SpeechE2E] … status=…` line.
 No text, transcript or audio is written by the orchestrator.
 
+`GET /debug/gpu` (same gate) returns `{gpu: [{used_mb, total_mb, free_mb}]}` from `nvidia-smi`, one entry per card:
+the memory the three engines hold right now, read through the gateway at `/v1/deployments/<name>/invoke/debug/gpu`.
+
 ## Shipping server code without rebuilding the image
 
 The image keeps the models; the five files of `/opt/s2s` can come from the deployment's `files` (mounted read-only at

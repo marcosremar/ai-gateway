@@ -25,6 +25,7 @@ POST /v1/audio/speech           proxied to the TTS (streaming passes through).
                      event; any other body (audio, JSON) has its connection aborted. Counted in /health `proxy`.
 GET  /refs/<id>.wav             reference voices (from /files/voices.json, see load_voices).
 GET  /health                    200 only when the three models answered a warm-up.
+GET  /debug/gpu                 GPU memory now, in MiB per card (nvidia-smi): used, total, free.
 GET  /debug/logs?engine=tts|llm|stt&tail=N&match=text   last lines of an engine's log (stt = this process), secrets
                                 scrubbed; every TTS request logs `tts <request_id> …` here and the same id in the TTS log.
 """
@@ -886,6 +887,20 @@ async def debug_logs(request: Request, engine: str = "tts", tail: int = 200, mat
     if engine not in LOG_ENGINES:
         raise HTTPException(400, f"engine must be one of {', '.join(LOG_ENGINES)}")
     return PlainTextResponse("\n".join(await asyncio.to_thread(log_tail, engine, tail, match)) + "\n")
+
+
+def gpu_memory() -> list[dict]:
+    out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                         capture_output=True, text=True, timeout=5, check=True).stdout
+    cards = [[int(value) for value in line.split(",")] for line in out.splitlines() if line.strip()]
+    return [{"used_mb": used, "total_mb": total, "free_mb": total - used} for used, total in cards]
+
+
+@app.get("/debug/gpu")
+async def debug_gpu(request: Request):
+    if not behind_front(request.client.host if request.client else None):
+        raise HTTPException(403, "only through the replica's token-gated front")
+    return {"gpu": await asyncio.to_thread(gpu_memory)}
 
 
 @app.get("/health")
