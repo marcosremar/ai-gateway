@@ -169,8 +169,10 @@ export interface ProxyConfig {
    */
   appLimits?: {
     check(
-      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>, opts?: { charge?: boolean },
+      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>,
+      opts?: { charge?: boolean; receipt?: import('./app-limits').Charge },
     ): import('./app-limits').AppLimitDenial | null;
+    refund?(userId: string, charged: import('./app-limits').Charge): void;
   };
   /**
    * `GET /health?deep=1`: per-provider probes + deployments. Plain `GET /health` stays a cheap unauthenticated

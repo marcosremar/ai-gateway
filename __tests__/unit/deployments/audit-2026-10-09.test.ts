@@ -78,10 +78,12 @@ describe('audit 2026-10-09: stored profiles are not readable with an app key', (
 });
 
 describe('audit 2026-10-09: a damaged state file', () => {
-  it.fails('an empty deployments.json does not stop the gateway from starting', async () => {
+  it('an empty deployments.json is recovered from the backup, or refused with a clear error (never a raw SyntaxError)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'aigw-audit-'));
     dirs.push(dir);
     writeFileSync(join(dir, 'deployments.json'), '');
+    await expect(FileDeploymentStore.inDir(dir).load()).rejects.toThrow(/state file .*unreadable/);
+    writeFileSync(join(dir, 'deployments.json.bak'), JSON.stringify({ version: 1, deployments: {}, profiles: {}, networkReleases: {} }));
     await expect(FileDeploymentStore.inDir(dir).load()).resolves.toBeDefined();
   });
 });

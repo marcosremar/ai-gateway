@@ -214,6 +214,7 @@ export abstract class ControllerState {
   protected rerun = false;
   protected timer: ReturnType<typeof setInterval> | null = null;
   protected lastListError: string | null = null;
+  protected failedZones = new Set<string>();
   protected readonly backends: Partial<Record<DeploymentProvider, DeploymentBackend>>;
   /** Provider of a machine that does not say (fakes, records from before `provider`). */
   protected readonly defaultProvider: DeploymentProvider;
@@ -245,6 +246,11 @@ export abstract class ControllerState {
 
   protected providerOf(m: ReplicaMachine): DeploymentProvider {
     return m.provider ?? this.defaultProvider;
+  }
+
+  protected listStale(m: ReplicaMachine, failed: Set<DeploymentProvider>): boolean {
+    const provider = this.providerOf(m);
+    return failed.has(provider) || this.failedZones.has(`${provider}/${m.zone}`);
   }
 
   protected get maxColdStartWaitSeconds(): number {

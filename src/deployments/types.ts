@@ -218,7 +218,7 @@ export interface DeploymentRecord {
 }
 
 /**
- * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default UTC; an `end`
+ * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default Europe/Paris; an `end`
  * before `start` runs past midnight) on `days` (0 = Sunday; absent = every day), keep at least `minReplicas` up.
  */
 export interface WarmScheduleEntry {
@@ -403,6 +403,8 @@ export interface DeploymentStore {
   deleteNetworkRelease(ipId: string): Promise<void>;
   saveProfile(profile: Profile): Promise<void>;
   deleteProfile(name: string): Promise<void>;
+  readonly fresh?: boolean;
+  readonly writeError?: string | null;
 }
 
 export interface ReplicaView {

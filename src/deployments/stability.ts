@@ -4,10 +4,12 @@
  * A server-side SDK client (sdk/node `GatewayClient`) buffers what it saw while the gateway was unreachable or slow
  * — route switches to the direct fallback, failures, recoveries — and posts the batch here once the gateway answers
  * again. Reports go to a small in-memory ring (for `GET`) and, best-effort, one JSONL line per report in
- * `<DEPLOYMENTS_STATE_DIR>/client-stability.jsonl`. A filesystem that rejects the write never fails the request.
+ * `<DEPLOYMENTS_STATE_DIR>/client-stability.jsonl`, rotated to `.1` past `maxFileBytes` (default 5 MB). Each app may
+ * post `MAX_REPORTS_PER_MINUTE` reports a minute (then `append` returns null: 429). A filesystem that rejects the write
+ * never fails the request; it is logged.
  */
 
-import { appendFile, mkdir } from 'fs/promises';
+import { appendFile, mkdir, rename, stat } from 'fs/promises';
 import { dirname } from 'path';
 
 /** One observation a client recorded (mirror of sdk/node `InstabilityEvent`). */
@@ -32,6 +34,8 @@ const MAX_EVENTS_PER_REPORT = 200;
 const MAX_BATCHES_KEPT = 200;
 const MAX_FIELD = { kind: 40, path: 120, code: 60, route: 20, detail: 300 };
 const SKEW_MS = 5 * 60_000;
+const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+export const MAX_REPORTS_PER_MINUTE = 20;
 
 const cleanString = (v: unknown, max: number): string | undefined =>
   typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined;
@@ -97,12 +101,14 @@ export function fileRecord(batch: ClientStabilityBatch): Record<string, unknown>
 export interface ClientStabilityOptions {
   /** JSONL file to append reports to (e.g. `<DEPLOYMENTS_STATE_DIR>/client-stability.jsonl`); absent = memory only. */
   file?: string;
+  maxFileBytes?: number;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
 export class ClientStabilityLog {
   private readonly ring: ClientStabilityBatch[] = [];
+  private readonly recentPosts = new Map<string, number[]>();
   private chain: Promise<void> = Promise.resolve();
   private readonly now: () => number;
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
@@ -112,9 +118,12 @@ export class ClientStabilityLog {
     this.log = opts.log ?? (() => {});
   }
 
-  /** Stores one report; returns how many events were accepted. Never throws on a bad body shape. */
-  append(app: string, body: Record<string, unknown>): number {
+  /** Stores one report; returns how many events were accepted, or null when the app posts too often. Never throws on a bad body shape. */
+  append(app: string, body: Record<string, unknown>): number | null {
     const now = this.now();
+    const posts = (this.recentPosts.get(app) ?? []).filter(at => now - at < 60_000);
+    if (posts.length >= MAX_REPORTS_PER_MINUTE) return null;
+    this.recentPosts.set(app, [...posts, now]);
     const rawEvents = Array.isArray(body.events) ? body.events.slice(0, MAX_EVENTS_PER_REPORT) : [];
     const events = rawEvents.map(e => cleanEvent(e, now)).filter((e): e is ClientInstabilityEvent => e !== null);
     const client = cleanString(body.client, 80) ?? 'unknown';
@@ -125,6 +134,10 @@ export class ClientStabilityLog {
     this.log('client stability report', { app, client, events: events.length });
     this.persist(batch);
     return events.length;
+  }
+
+  flush(): Promise<void> {
+    return this.chain;
   }
 
   /** Most recent batches for one app (`app` null = all), newest last. */
@@ -140,6 +153,8 @@ export class ClientStabilityLog {
     this.chain = this.chain.then(async () => {
       try {
         await mkdir(dirname(file), { recursive: true });
+        const size = await stat(file).then(st => st.size, () => 0);
+        if (size >= (this.opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES)) await rename(file, `${file}.1`);
         await appendFile(file, `${JSON.stringify(fileRecord(batch))}\n`, 'utf8');
       } catch (err) {
         this.log('client stability report: could not persist', { error: String((err as Error).message ?? err).slice(0, 120) });

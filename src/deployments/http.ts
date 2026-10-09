@@ -27,7 +27,7 @@ import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppFallbackService } from './app-fallback';
-import type { ClientStabilityLog } from './stability';
+import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import { createLogger } from '../logger';
 
@@ -40,6 +40,7 @@ import { noteStreamCut, type StreamCut } from '../telemetry/stream-cuts';
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
 const MAX_ADMIN_BODY = 16 * 1024 * 1024;
+const MAX_STABILITY_BODY = 512 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 export const INVOKE_IDLE_MS = 5 * 60_000;
 const HOP_BY_HOP = new Set([
@@ -166,8 +167,8 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const raw = await readBody(req, MAX_ADMIN_BODY);
+async function readJson(req: IncomingMessage, limit = MAX_ADMIN_BODY): Promise<Record<string, unknown>> {
+  const raw = await readBody(req, limit);
   if (!raw.length) return {};
   let parsed: unknown;
   try {
@@ -266,7 +267,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (sub === 'stability-report' && !imageName) {
       if (!opts.stability) return send(res, 404, { error: 'stability reports are not enabled on this gateway' });
       if (method === 'POST') {
-        const accepted = opts.stability.append(app, await readJson(req));
+        const accepted = opts.stability.append(app, await readJson(req, MAX_STABILITY_BODY));
+        if (accepted === null) return send(res, 429, { error: `at most ${MAX_REPORTS_PER_MINUTE} stability reports a minute per app` }, { 'Retry-After': '60' });
         return send(res, 200, { ok: true, accepted });
       }
       if (method === 'GET') {
