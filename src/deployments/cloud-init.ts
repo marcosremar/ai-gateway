@@ -46,7 +46,21 @@ const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
  * `listen` is :80 for a gateway-only replica and `PROBE_PORT` for an exposed one (80/443 belong to the app there);
  * `upstream` is the container mapped on 127.0.0.1:8000, or the exposed app's own port.
  */
-export function nginxConfig(token: string, listen: number = 80, upstream = 8000, rtPort?: number): string {
+export function nginxConfig(token: string, listen: number = 80, upstream = 8000, rtPort?: number, seats = 1): string {
+  const seatLocation = (index: number): string => `  location ^~ /c/${index}/ {
+    if ($http_x_aigw_token != "${token}") { return 401; }
+    rewrite ^/c/${index}/(.*)$ /$1 break;
+    proxy_set_header X-Aigw-Token "";
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $aigw_conn;
+    proxy_pass http://127.0.0.1:${upstream + index};
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 900;
+    proxy_send_timeout 900;
+  }
+`;
+  const seatsBlock = Array.from({ length: Math.max(0, seats - 1) }, (_, i) => seatLocation(i + 1)).join('\n');
   // The upgrade map lets streaming endpoints (e.g. the speech-stack's /ws/audio-stream) pass a WebSocket through
   // the token-gated front; on plain requests $aigw_conn is empty and proxying stays unchanged.
   //
@@ -101,7 +115,7 @@ ${rtPort ? `  location ^~ /__aigw/rt/ {
     proxy_read_timeout 900;
     proxy_send_timeout 900;
   }
-}
+${seatsBlock}}
 `;
 }
 
@@ -226,7 +240,7 @@ export function replicaCloudInit(spec: DeploymentSpec, token: string, opts: Repl
   // Exposed replica: the probe moves to PROBE_PORT and the app answers health on its own port (it owns 80/443).
   const appPort = spec.exposure ? spec.port : 8000;
   const rtPort = spec.realtime ? RT_EDGE_PORT : undefined;
-  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort) : nginxConfig(token, 80, 8000, rtPort);
+  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort, spec.seats) : nginxConfig(token, 80, 8000, rtPort, spec.seats);
   const login = spec.registryAuth
     ? `echo ${shellQuote(spec.registryAuth.password)} | docker login ${spec.registryAuth.server ? shellQuote(spec.registryAuth.server) + ' ' : ''}`
       + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin`
@@ -287,7 +301,7 @@ mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
 set -x
 ( sleep ${stopAfterSeconds}; kill -TERM 1 ) >/dev/null 2>&1 &
-echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undefined))}' | base64 -d > /srv/aigw/nginx.conf
+echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undefined, spec.seats))}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
 command -v nginx >/dev/null && command -v curl >/dev/null || { apt-get update -y && apt-get install -y nginx curl; }

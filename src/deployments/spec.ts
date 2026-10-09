@@ -44,6 +44,7 @@ export const SPEC_DEFAULTS = {
   idleMinutes: 15,
   bootTimeoutMinutes: 30,
   scaleDownDelaySeconds: 300,
+  seats: 1,
   // Under Railway's 5-minute "no data transferred" cut-off, so the caller gets a clean 503 + Retry-After.
   coldStartWaitSeconds: 240,
   maxEurPerHour: 1,
@@ -106,7 +107,7 @@ const KNOWN_FIELDS = new Set<string>([
   'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'envByMachineType', 'registryAuth',
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
-  'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
+  'maxEurPerHour', 'maxHours', 'seats', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
   'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'realtime',
   'scaling', 'fileUrls', 'maxRttExcessMs',
 ]);
@@ -236,6 +237,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   }
   if (input.maxEurPerHour !== undefined) out.maxEurPerHour = num(input.maxEurPerHour, 'maxEurPerHour', 0.001, 50);
   if (input.maxHours !== undefined) out.maxHours = num(input.maxHours, 'maxHours', 0.25, 24 * 7);
+  if (input.seats !== undefined) out.seats = int(input.seats, 'seats', 1, 8);
   if (input.paused !== undefined) {
     if (typeof input.paused !== 'boolean') throw new SpecError('paused must be a boolean');
     out.paused = input.paused;

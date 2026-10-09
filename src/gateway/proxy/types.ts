@@ -3,6 +3,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
+import type { Socket } from 'net';
 import type { GatewayHooks } from '../../hooks';
 import type { ResponseCache } from '../../caching/response-cache';
 import type { LLMProvider, STTProvider, TTSProvider, ImageProvider } from '../providers/cloud/types';
@@ -118,6 +119,12 @@ export interface PrefixRoute {
   handler: (req: IncomingMessage, res: ServerResponse, pathname: string, method: string) => boolean;
 }
 
+/** A WebSocket upgrade route: owns the socket for every path under `prefix` (e.g. `/v1/deployments`). */
+export interface UpgradeRoute {
+  prefix: string;
+  handler: (req: IncomingMessage, socket: Socket, head: Buffer) => boolean | Promise<boolean>;
+}
+
 /**
  * Configuration for the proxy HTTP server.
  *
@@ -148,6 +155,11 @@ export interface ProxyConfig {
   publicRoutes?: CustomRoute[];
   /** Custom prefix-based route handlers */
   prefixRoutes?: PrefixRoute[];
+  /**
+   * WebSocket upgrade handlers, matched by path prefix BEFORE the generic 410. The handler owns the socket:
+   * it must answer the upgrade (101) or a plain HTTP error and destroy the socket. `false` = not handled.
+   */
+  upgradeRoutes?: UpgradeRoute[];
   /** Directory of static files to serve (e.g. Next.js `out/` export). Falls back for non-API paths. */
   staticDir?: string;
   /** Next.js dev server URL for HMR proxy (e.g. "http://localhost:3000"). Overrides staticDir when set. */

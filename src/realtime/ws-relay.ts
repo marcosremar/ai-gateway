@@ -121,6 +121,16 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
       if (socket.writable) socket.write(encodeFrame(OP.close, closePayload(wireCode(code), reason)));
       socket.end();
       setTimeout(() => socket.destroy(), 1_000).unref?.();
+      // The client is gone (or the session ended): release the gateway slot NOW, not at TTL, and tell the
+      // replica's edge to end its session too (best-effort — the happy path's DELETE already did this, and the
+      // edge has its own session TTL as backstop). A dropped client must not hold a realtime slot until expiry.
+      if (opened) {
+        const edgeId = session.edgeSessionId ?? sid;
+        fetch(`${session.base}/__aigw/rt/session/${encodeURIComponent(edgeId)}`, {
+          method: 'DELETE', headers: { 'X-Aigw-Token': session.replicaToken }, signal: AbortSignal.timeout(5_000),
+        }).catch(() => {});
+      }
+      service.forget(sid);
       log('realtime: ws relay closed', { sid, code, reason: reason.slice(0, 80), from });
       service.emit(trace, 'ws.close', { level: code === 1000 ? 'info' : 'warn', sessionId: sid, durMs: Date.now() - startedAt, attrs: { code, from } });
     };

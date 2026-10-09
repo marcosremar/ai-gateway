@@ -933,7 +933,7 @@ export function createProxyServer(config: ProxyConfig): Server {
   server.headersTimeout = 10_000;   // 10s — blocks slowloris
   server.requestTimeout = 30_000;   // 30s — total request limit
 
-  // Handle all WebSocket upgrade requests — proxy HMR to Next.js dev server, block everything else with 410
+  // Handle all WebSocket upgrade requests — proxy HMR to Next.js dev server, relay deployments invoke, block the rest with 410
   server.on('upgrade', (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => {
     const path = req.url || '/';
     if (config.nextDevUrl && path.startsWith('/_next/')) {
@@ -959,6 +959,20 @@ export function createProxyServer(config: ProxyConfig): Server {
       });
       proxyReq.on('error', () => socket.destroy());
       proxyReq.end();
+      return;
+    }
+    // Registered upgrade routes (deployments invoke WS): the handler owns the socket.
+    const upgradeRoute = config.upgradeRoutes?.find((route) => path.startsWith(route.prefix));
+    if (upgradeRoute) {
+      void Promise.resolve(upgradeRoute.handler(req, socket, head)).then((handled) => {
+        if (!handled) {
+          socket.write('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+          socket.end();
+        }
+      }).catch((err) => {
+        log.error({ err, path }, 'upgrade route failed');
+        socket.destroy();
+      });
       return;
     }
     // All other WebSocket upgrades: return 410 Gone

@@ -163,6 +163,18 @@ describe('WebSocket relay', () => {
     expect(await upstreamClosed).toBe(4002);
   });
 
+  it('releases the session when the browser drops without DELETE: the edge session ends and the gateway forgets it (no slot held until TTL)', async () => {
+    const s = await session(gw);
+    const { ws, messages } = await connect(s.transports[1]!.url!);
+    await until(() => messages.length >= 1 && edge.sockets.length === 1);
+    expect((gw.realtime.service as unknown as { sessions: Map<string, unknown> }).sessions.size).toBe(1);
+    ws.close(4002, 'dropped'); // client gone WITHOUT the session DELETE (graceful close, deterministic in tests)
+    // The gateway must forget the session now (not at TTL); the edge DELETE is best-effort.
+    await until(() => (gw.realtime.service as unknown as { sessions: Map<string, unknown> }).sessions.size === 0, 3000);
+    await until(() => edge.deleted.length >= 1, 5000);
+    expect(edge.deleted[0]).toBe(s.sessionId); // no offer in this flow: the edge session id falls back to the sid
+  });
+
   it('refuses before the handshake: bad token 401, replica gone 410, replica refusing 502', async () => {
     const s = await session(gw);
     await expect(connect(`${gw.url.replace('http', 'ws')}/v1/realtime/ws?token=nope`)).rejects.toMatchObject({ status: 401 });

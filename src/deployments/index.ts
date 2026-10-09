@@ -62,6 +62,8 @@ export interface DeploymentsFromEnv {
   stopJanitor?: () => void;
   apps: AppRegistry;
   handler: ReturnType<typeof createDeploymentRoutes>;
+  /** WS upgrades under /v1/deployments/:name/invoke are relayed to the replica. */
+  upgrade: (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => Promise<boolean>;
 }
 
 /**
@@ -184,7 +186,7 @@ export function deploymentsFromEnv(
   // The janitor's leftovers (build servers, detached SBS volumes) exist only on Scaleway; a deleted Vast instance
   // takes its disk with it.
   const stopJanitor = janitorOn && secret ? startJanitor({ cloud: scalewayJanitorCloud(secret, projectId), log: opts.log }) : undefined;
-  return { controller, apps, handler, ...(stopJanitor ? { stopJanitor } : {}) };
+  return { controller, apps, handler, upgrade: handler.upgrade, ...(stopJanitor ? { stopJanitor } : {}) };
 }
 
 /** The janitor's view of Scaleway: build servers by tag and the project's SBS volumes, in every known zone. */

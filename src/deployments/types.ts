@@ -45,6 +45,8 @@ export interface DeploymentSpec {
   image: string;
   /** Port the container listens on (ignored in boot-script mode: the script serves 127.0.0.1:8000). */
   port: number;
+  /** App instances on one machine (boot-script mode): ports `port..port+seats-1`, served by nginx under `/c/<n>/`. */
+  seats: number;
   /**
    * Boot-script mode: instead of `docker run image`, the replica runs this bash script as root after the gateway's
    * token-gated nginx is up. The script must serve the app on `127.0.0.1:8000` and answer `healthPath` there once
