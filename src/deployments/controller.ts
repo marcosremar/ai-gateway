@@ -352,6 +352,7 @@ export class DeploymentController extends ControllerViews {
       machine: chosen,
       token: rt.record.replicaToken,
       exposed: !!rt.record.spec.exposure,
+      signal: this.goneSignal(chosen.id),
       done: (failed: boolean | LeaseOutcome = false) => {
         if (released) return;
         released = true;

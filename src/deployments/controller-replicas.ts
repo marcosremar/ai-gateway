@@ -108,6 +108,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
       this.machines = this.machines.filter(x => x.id !== m.id);
       this.probes.delete(m.id);
+      this.abortRequestsOfGoneReplicas();
     } catch (err) {
       const rt = this.deployments.get(m.deployment);
       if (rt) rt.lastError = `release ${m.id}: ${err instanceof Error ? err.message : String(err)}`;

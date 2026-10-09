@@ -155,6 +155,8 @@ export interface Lease {
   token: string;
   /** The deployment is exposed (`exposure`): its token-gated front is on `PROBE_PORT`, not :80. */
   exposed: boolean;
+  /** Aborted when the controller releases this replica or the provider stops listing it. */
+  signal?: AbortSignal;
   /**
    * Call once the forwarded request finished. `true`/`'failed'` = connection-level failure (marks the replica suspect),
    * `'timeout'` = it was too slow (busy), `'cancelled'` = the caller aborted it (hedge lost, client gone): neutral.
@@ -211,6 +213,19 @@ export abstract class ControllerState {
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
   protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();
   protected readonly probes = new Map<string, ProbeState>();
+  protected readonly replicaGone = new Map<string, AbortController>();
+  protected goneSignal(id: string): AbortSignal {
+    let gone = this.replicaGone.get(id);
+    if (!gone) this.replicaGone.set(id, gone = new AbortController());
+    return gone.signal;
+  }
+  protected abortRequestsOfGoneReplicas(): void {
+    for (const [id, gone] of this.replicaGone) {
+      if (this.machines.some(m => m.id === id)) continue;
+      gone.abort(new Error(`replica ${id} was released`));
+      this.replicaGone.delete(id);
+    }
+  }
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
   protected readonly networkReleases = new Map<string, PendingNetworkRelease>();

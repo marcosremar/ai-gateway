@@ -85,6 +85,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
     }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
+    this.abortRequestsOfGoneReplicas();
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
     for (const id of [...this.udp.keys()]) if (!this.machines.some(m => m.id === id)) this.udp.delete(id);
     for (const id of [...this.poweredOnAt.keys()]) if (!this.machines.some(m => m.id === id)) this.poweredOnAt.delete(id);
