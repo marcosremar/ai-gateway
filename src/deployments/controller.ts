@@ -88,7 +88,7 @@ export class DeploymentController extends ControllerViews {
     const now = this.now();
     const hold = rawHold === undefined ? existing?.record.hold : holdOf(rawHold, spec.maxReplicas, now);
     if (existing) {
-      if (!isDeepStrictEqual(existing.record.spec, spec)) Object.assign(existing, { backoffUntil: 0, createFailures: 0, stockOut: null });
+      if (!isDeepStrictEqual(existing.record.spec, spec)) Object.assign(existing, { backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null });
       existing.record = {
         ...existing.record, spec, updatedAt: now, hold,
         ...(existing.record.app || !meta.app ? {} : { app: meta.app }),

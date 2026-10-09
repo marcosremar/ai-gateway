@@ -308,6 +308,8 @@ export interface ReplicaMachine {
   /** When the provider takes the host back (Vast rental end, ms); absent when it never does (`expiry.ts`). */
   expiresAt?: number | null;
   placementNote?: string;
+  /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
+  bootError?: string;
 }
 
 export interface CreateReplicaInput {

@@ -69,6 +69,7 @@ export interface Runtime {
   creating: number;
   backoffUntil: number;
   createFailures: number;
+  bootFailures: number;
   /** Creates that failed for lack of stock in every placement, in a row, and since when (null after a success). */
   stockOut: { since: number; failures: number } | null;
   lastPersistedRequestAt: number | null;
@@ -279,7 +280,7 @@ export abstract class ControllerState {
   protected runtime(record: DeploymentRecord): Runtime {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
-      backoffUntil: 0, createFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
+      backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
       samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null,
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },

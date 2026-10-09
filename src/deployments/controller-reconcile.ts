@@ -5,6 +5,7 @@
 
 import { isParked, type Runtime } from './controller-state';
 import { AutoscaleControl } from './controller-autoscale';
+import { CREATE_BACKOFF_MS } from './controller-replicas';
 import { isActive, planReplicas, replicaPhase } from './planner';
 import { usesScaleway, usesVast } from './spec';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMachine } from './types';
@@ -108,6 +109,13 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     // The deployment may live on a provider whose list failed: its known machines are planned (stale, but a release only
     // needs the id) and only the releases run; no create, no power-on until a list answers.
     const releaseOnly = this.touchesFailed(rt.record.spec, failed);
+    for (const m of this.machines.filter(x => x.deployment === name && x.bootError && !this.probes.get(x.id)?.everReady)) {
+      rt.lastError = `boot failed on the provider: ${m.bootError}`;
+      rt.backoffUntil = this.now() + CREATE_BACKOFF_MS[Math.min(rt.bootFailures, CREATE_BACKOFF_MS.length - 1)];
+      rt.bootFailures++;
+      this.log('deployments: boot failed on the provider', { deployment: name, id: m.id, error: m.bootError });
+      await this.release(m, 'boot-failed');
+    }
     const all = this.machines.filter(m => m.deployment === name);
     // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
     // Ones still `stopping` are neither parked nor live: left alone until the list shows `stopped`. Draining ones are

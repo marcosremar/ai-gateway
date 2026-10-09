@@ -82,6 +82,7 @@ interface VastInstance {
   id: number;
   label?: string | null;
   actual_status?: string | null;
+  status_msg?: string | null;
   public_ipaddr?: string | null;
   ports?: Record<string, Array<{ HostPort?: string }> | undefined> | null;
   machine_id?: number;
@@ -109,6 +110,12 @@ export function imageLogin(auth: RegistryAuth): string {
 }
 
 /** Vast `actual_status` → the controller's vocabulary: `running`, `starting` (loading/created), `exited` (halted). */
+const IMAGE_PULL_FAILED = /manifest unknown|failed to resolve reference|pull access denied|repository does not exist|unauthorized: /i;
+
+export function vastBootError(i: { actual_status?: string | null; status_msg?: string | null }): string | null {
+  return i.actual_status !== 'running' && i.status_msg && IMAGE_PULL_FAILED.test(i.status_msg) ? i.status_msg.trim().slice(0, 300) : null;
+}
+
 export function vastState(status: string | null | undefined): string {
   if (status === 'running') return 'running';
   if (status === 'exited' || status === 'stopped' || status === 'offline') return 'exited';
@@ -352,6 +359,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         zone: i.geolocation ?? '', machineType: i.gpu_name ?? '',
         pricePerHour: typeof i.dph_total === 'number' ? Math.round((i.dph_total / EUR_TO_USD) * 1000) / 1000 : null,
         expiresAt: vastEndsAt(i.end_date, i.duration, this.now()),
+        ...(vastBootError(i) ? { bootError: vastBootError(i)! } : {}),
       };
     });
   }

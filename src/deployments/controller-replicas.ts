@@ -13,7 +13,7 @@ import { DEFAULT_NEAR } from './placements';
 import { gateDecision, gateNote } from './rtt-gate';
 import type { DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
-const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
+export const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
 const NETWORK_RELEASE_QUICK_ATTEMPTS = 10;
 const NETWORK_RELEASE_SLOW_RETRY_MS = 5 * 60_000;
 const ORPHAN_RELEASE_ATTEMPTS = 6;
