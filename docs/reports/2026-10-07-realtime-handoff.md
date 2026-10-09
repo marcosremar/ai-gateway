@@ -2203,7 +2203,9 @@ bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports '' --trans
 
 ### Imagem do edge
 
-O push desta branch dispara `aigw-edge.yml`; a tag é o sha curto do commit da PR. **Não foi fixada em lugar nenhum**
+**A imagem ainda não foi construída.** `aigw-edge.yml` só roda sozinho em PR ou push para o `main`, e a PR #71 aponta
+para a `rt/integration-2`. Para construir: `gh workflow run aigw-edge.yml --ref rt/webrtc-open` (a tag é o sha curto do
+commit), ou ela sai quando a integração chegar ao `main`. **Nenhuma tag foi fixada em lugar nenhum**
 (`DEFAULT_EDGE_IMAGE` e `EDGE_TAG` continuam como estão na `rt/integration-2`). Os itens 1, 2 (temporizador SCTP) e 3
 (`turn_ack`) só valem numa réplica com essa imagem; com um edge anterior o SDK novo funciona como antes (oferta com
 RED recusada vira Opus, sem `turn_ack` não há resgate).
