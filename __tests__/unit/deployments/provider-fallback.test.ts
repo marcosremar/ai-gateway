@@ -94,8 +94,8 @@ describe('placements on another provider: spec', () => {
     expect(() => buildSpec('s', { ...SPEC, placements: [{ ...VAST, image: 'not an image' }] }, { profiles })).toThrow(/placements\[0\]\.image/);
     const speech = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
     expect(placementsOf(speech).map(s => s.image)).toEqual([
-      'rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317', 'rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317',
-      'ghcr.io/marcosremar/speech-stack:20261008-1317',
+      'rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0003', 'rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0003',
+      'ghcr.io/marcosremar/speech-stack:20261009-0003',
     ]);
     const init = vastReplicaInit(placementsOf(speech).at(-1)!, 'x'.repeat(32));
     const appEnv = Buffer.from(/echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/app\.env/.exec(init)![1], 'base64').toString('utf8');

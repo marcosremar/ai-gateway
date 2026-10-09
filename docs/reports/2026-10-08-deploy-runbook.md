@@ -388,7 +388,21 @@ does not know `vast-hosts.json`; put the image tag of `parle-speech` back by han
 
 ### 12.5 Images of this build
 
-IMAGES_PLACEHOLDER
+Built by CI from this branch on 2026-10-09 (UTC); nothing in production points at them until the gateway deploy.
+
+| Image | Tag | Digest | Built from |
+|---|---|---|---|
+| `ghcr.io/marcosremar/aigw-edge` | `48db2e5f` | `sha256:fe41f2628176f7dd541191454cb4cde72f2883f8bc6f1d74d0db59c1fc7c1639` | commit `48db2e5f` (workflow `aigw-edge`): #67, #68, the TTS cut of #63 |
+| `ghcr.io/marcosremar/speech-stack` (public, Vast) | `20261009-0003` | `sha256:3420c5de56cb0cc18ec70a595aad9709a19262294e03223ef1adac8e48444bfe` | commit `a74718c1` (workflow `speech-stack`), `EDGE_TAG=48db2e5f` |
+| `rg.fr-par.scw.cloud/aigw/speech-stack` (Scaleway) | `20261009-0003` | the same digest | `bun scripts/build-image-on-scaleway.ts --from ghcr.io/marcosremar/speech-stack:20261009-0003 speech-stack` (507 s; the build machine and its volume answer 404 afterwards) |
+
+In the branch: `DEFAULT_EDGE_IMAGE` and the speech-stack `EDGE_TAG` are `48db2e5f`; `SPEECH_STACK_TAG` (the profile) and
+`src/deployments/declared/parle-speech.json` (Scaleway default and the Vast placement) are `20261009-0003`. Before the
+deploy, check both registries still answer that digest (as § 3.5, with this tag). The image was never booted: its first
+start on a GPU is item 2 of § 12.7. To go back, restore the two tags `f66b6b80` / `20261008-1317` in those four places.
+
+Later pushes to the PR rebuild both images under other tags (the workflows run on every push that has `docker/` in
+the PR's diff); only the tags above are pinned.
 
 ### 12.6 Not in this build
 
