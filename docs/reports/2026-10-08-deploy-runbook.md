@@ -418,7 +418,12 @@ the PR's diff); only the tags above are pinned. The earlier pair of this branch 
   - everything on Vast (#64 host reputation, `files` through signed links, `requireWebrtc`): the account has no credit;
   - L40S not sold in fr-par-1 (the second placement of `parle-speech` is skipped);
   - the Vast boot timeout (20 min) is shorter than the first pull of the 57 GB image on a slow host;
-  - the RTT gate decides after the paid pull (a far host is released only once it has booted).
+  - the RTT gate decides after the paid pull (a far host is released only once it has booted);
+  - a system prompt larger than the LLM slot (16 KB of Portuguese ≈ 4.7 k tokens against 4096) opens the session and
+    fails every turn with `error upstream`: keep the school's prompt well below the slot (≈ 5 KB with 2048);
+  - `LLM_SLOT_CTX` 4096 fits the L40S VRAM (29.2 of 46 GB with 12 learners) but the LLM slows as the history grows
+    (198 → 461 ms over 760 s with 8 learners): production stays on 2048;
+  - the up-to-2.5 s UDP-probe wait on the first admission of a fresh replica was not measured live.
 
 ### 12.7 Live proof checklist for this build
 
