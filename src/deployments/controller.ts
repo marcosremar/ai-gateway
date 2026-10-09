@@ -15,7 +15,7 @@
 import { randomBytes } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import { replicaCloudInit } from './cloud-init';
-import { DeploymentError, replicaTokenFor, type Lease, type LeaseOutcome, type Runtime } from './controller-state';
+import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './controller-state';
 import { ControllerViews } from './controller-views';
 import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
@@ -331,7 +331,7 @@ export class DeploymentController extends ControllerViews {
     let released = false;
     return {
       machine: chosen,
-      token: replicaTokenFor(rt.record.replicaToken, chosen.tokenKey),
+      token: this.replicaToken(rt, chosen),
       exposed: !!rt.record.spec.exposure,
       done: (failed: boolean | LeaseOutcome = false) => {
         if (released) return;

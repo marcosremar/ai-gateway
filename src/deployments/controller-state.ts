@@ -188,6 +188,7 @@ export function replicaTokenFor(deploymentSecret: string, tokenKey: string | und
 
 export abstract class ControllerState {
   protected readonly deployments = new Map<string, Runtime>();
+  protected readonly tokenKeys = new Map<string, string>();
   protected readonly profiles = new Map<string, Profile>();
   protected machines: ReplicaMachine[] = [];
   /**
@@ -391,5 +392,9 @@ export abstract class ControllerState {
     let creating = 0;
     for (const rt of this.deployments.values()) creating += rt.creating;
     return this.runningMachines().length + creating;
+  }
+
+  protected replicaToken(rt: Runtime, machine: ReplicaMachine): string {
+    return replicaTokenFor(rt.record.replicaToken, machine.tokenKey ?? this.tokenKeys.get(machine.id));
   }
 }

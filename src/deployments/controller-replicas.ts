@@ -47,7 +47,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
   private async checkReplica(rt: Runtime, m: ReplicaMachine): Promise<ProbeResult> {
     const { probe } = this.opts;
     try {
-      const token = replicaTokenFor(rt.record.replicaToken, m.tokenKey);
+      const token = this.replicaToken(rt, m);
       if (probe.check) return await probe.check(m, rt.record.spec, token);
       return (await probe.ready(m, rt.record.spec, token)) ? 'ready' : 'down';
     } catch {
@@ -252,6 +252,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
       onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
     });
+    this.tokenKeys.set(machine.id, tokenKey);
     return { ...machine, provider: backend.provider, tokenKey };
   }
 
