@@ -1,0 +1,12 @@
+{
+  "note": "Every config_update the browser SDK (sdk/browser/realtime) sends on its own. The SDK tests refuse a frame outside keys / roles; the edge tests feed frames to Session.control and expect no refusal.",
+  "keys": ["messages", "opener", "signed"],
+  "roles": ["user", "assistant"],
+  "frames": [
+    { "type": "config_update", "messages": [] },
+    { "type": "config_update", "messages": [{ "role": "user", "content": "Bom dia" }, { "role": "assistant", "content": "Olá!" }] },
+    { "type": "config_update", "messages": [{ "role": "user", "content": "(nota)" }] },
+    { "type": "config_update", "opener": null },
+    { "type": "config_update", "opener": { "lines": ["Hum, deixa eu ver.", "Um instante."] } }
+  ]
+}

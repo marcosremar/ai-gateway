@@ -9,8 +9,18 @@ import {
   decodeSessionConfig, deriveRealtimeKey, encodeSessionConfig, iceConfigFromEnv, iceServersFor, peekClaims,
   signSessionToken, turnCredentials, verifySessionToken,
 } from '../../../src/realtime';
+import { signUpdateToken } from '../../../src/realtime/token';
 
 const vectors = JSON.parse(readFileSync(join(__dirname, '../../../docs/realtime-token-vectors.json'), 'utf8'));
+
+describe('signed session update', () => {
+  it('signs byte-exactly what the edge verifies (the same vector is in docker/aigw-edge/tests/test_units.py)', () => {
+    const key = deriveRealtimeKey('replica-token-abcdefghijklmnopqrstuvwxyz');
+    const token = signUpdateToken({ sid: 's1', upd: encodeSessionConfig({ system: 'Lia' }), n: 1760000000000, iat: 1760000000, exp: 1760000600 }, key);
+    expect(token).toBe('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJzMSIsInVwZCI6ImV5SnplWE4wWlcwaU9pSk1hV0VpZlEiLCJuIjoxNzYwMDAwMDAwMDAwLCJpYXQiOjE3NjAwMDAwMDAsImV4cCI6MTc2MDAwMDYwMH0.mX9TEdabp9hga5PbxrjynCPCq2L6tQTKr-q-UXiTbNg');
+    expect(verifySessionToken(token, key, 1760000100)).toEqual({ error: 'malformed' });
+  });
+});
 
 describe('realtime session token', () => {
   it('derives the key and signs byte-exactly like the vectors', () => {

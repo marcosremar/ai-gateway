@@ -11,7 +11,7 @@ import { FrameDecoder } from '../../src/s2s/frames';
 export interface ClientConfig {
   gw: string; key: string; deployment: string; config: Record<string, unknown>;
   students: number; rtc: number; s2s: number; noWake?: boolean; chrome: number; chromeTransports: string[]; clipEndSilenceMs: number; rtcProcs: number;
-  uplinkStallMs?: number; uplinkStallEvery?: number; clientDeadline?: boolean; ttsModel?: string;
+  uplinkStallMs?: number; uplinkStallEvery?: number; clientDeadline?: boolean; ttsModel?: string; speculateLeadMs?: number; speculateResume?: number;
   rampS: number; durationS: number; turnEveryS: number; jitterS: number; burst?: boolean; think?: [number, number] | null; clipS: number; clip: string | null; turnTimeoutS: number;
   turn: 'udp' | 'tcp'; python: string; chromePath: string; work: string; out: string;
 }
@@ -21,6 +21,7 @@ export interface Turn {
   speechEnd: number | null; firstFrame: number | null; firstLoud: number | null; audioMs: number;
   events: TurnEvent[]; lost: string | null; skipped: string | null;
   overlap?: boolean; audibleMs?: number | null; receivedMs?: number | null; heardAfterReceivedMs?: number | null; audibleFromVadEndMs?: number | null; meterErrorMs?: number;
+  playoutMs?: number | null; playoutAfterReceivedMs?: number | null; renderAfterPlayoutMs?: number | null; jitterBufferMs?: number | null;
 }
 export interface StudentRecord {
   id: number; client: Turn['client']; startedAt: number; transport: string | null; connectMs: number | null; reconnects: number; replica?: string;
@@ -31,11 +32,11 @@ export interface ClientResult {
   startedAt: number; endedAt: number; students: StudentRecord[]; turns: Turn[];
   samples: Array<{ at: number; sessions: number; webrtc: number; ws: number }>;
   mic: { frames: number; late: number; maxLagMs: number; dropped: number };
-  meters: Array<{ student: number; transport: string | null; mic: unknown; output: unknown }>;
+  meters: Array<{ student: number; transport: string | null; mic: unknown; output: unknown; rtc?: unknown }>;
 }
 
 interface Descriptor {
-  sessionId: string; token: string; iceServers?: unknown[];
+  sessionId: string; token: string; cfg?: string; iceServers?: unknown[];
   transports: Array<{ type: string; url?: string; offerUrl?: string; iceServers?: unknown[] }>;
 }
 interface Session {
@@ -59,7 +60,7 @@ const LOUD = 0.02;
 const KEEP = [
   'type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms',
   'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms', 'first_sound_from_speech_ms', 'ttfa_from_speech_ms',
-  'tts_retries',
+  'tts_retries', 'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms',
 ];
 const UPLINK_BACKLOG = 64 * 1024;
 
@@ -138,6 +139,7 @@ function openWs(url: string, desc: Descriptor): Promise<Session> {
       reject(new Error(why));
     };
     const timer = setTimeout(() => fail('no ready within 6000 ms'), 6_000);
+    ws.onopen = () => { if (desc.cfg) ws.send(JSON.stringify({ type: 'session_config', cfg: desc.cfg })); };
     ws.onerror = () => fail('ws error');
     ws.onclose = (e) => { tickers.delete(tick); fail(`ws closed (${e.code})`); };
     ws.onmessage = (m) => {
@@ -186,19 +188,40 @@ async function postTurn(s: Session): Promise<void> {
   const t = s.turn!;
   const pcm = clip.slice();
   for (let i = 0; i < 16; i++) pcm[i] = Math.floor(Math.random() * 8);
-  const form = new FormData();
-  form.set('file', new Blob([new Uint8Array(wav(pcm, 16000))], { type: 'audio/wav' }), 'turn.wav');
-  form.set('config', JSON.stringify({ ...cfg.config, deployment: cfg.deployment, endpoint_ms: cfg.clipEndSilenceMs }));
+  const post = (audio: Int16Array | null, config: Record<string, unknown>, timeoutMs = cfg.turnTimeoutS * 1000) => {
+    const form = new FormData();
+    if (audio) form.set('file', new Blob([new Uint8Array(wav(audio, 16000))], { type: 'audio/wav' }), 'turn.wav');
+    form.set('config', JSON.stringify({ ...cfg.config, deployment: cfg.deployment, endpoint_ms: cfg.clipEndSilenceMs, ...config }));
+    return fetch(`${cfg.gw}/v1/s2s`, {
+      method: 'POST', headers: { Authorization: `Bearer ${cfg.key}`, ...(cfg.noWake ? { 'X-Gateway-No-Wake': '1' } : {}) },
+      body: form, signal: AbortSignal.timeout(timeoutMs),
+    });
+  };
+  let speculation: { id: string } | null = null;
+  if (cfg.speculateLeadMs) {
+    const turn = crypto.randomUUID();
+    const speculate = (audio: Int16Array, n: number) => {
+      t.events.push({ type: 'speculate', at: now() });
+      void post(audio, { speculation: { id: `${turn}.${n}`, turn, action: 'start' } }, 10_000).then(r => r.text()).catch(() => {});
+    };
+    if (Math.random() < (cfg.speculateResume ?? 0)) {
+      speculate(pcm.subarray(0, pcm.length >> 1), 0);
+      await sleep(cfg.speculateLeadMs / 2);
+      t.events.push({ type: 'speculate_cancel', at: now() });
+      void post(null, { speculation: { id: `${turn}.0`, action: 'cancel' } }, 10_000).then(r => r.text()).catch(() => {});
+      await sleep(500);
+    }
+    speculate(pcm, 1);
+    speculation = { id: `${turn}.1` };
+    await sleep(cfg.speculateLeadMs);
+  }
   t.speechEnd = now() - cfg.clipEndSilenceMs;
   let rate = 24000;
   let done = false;
   let encoded = false;
   const packets: Array<{ at: number; bytes: Uint8Array }> = [];
   try {
-    const r = await fetch(`${cfg.gw}/v1/s2s`, {
-      method: 'POST', headers: { Authorization: `Bearer ${cfg.key}`, ...(cfg.noWake ? { 'X-Gateway-No-Wake': '1' } : {}) },
-      body: form, signal: AbortSignal.timeout(cfg.turnTimeoutS * 1000),
-    });
+    const r = await post(pcm, speculation ? { speculation } : {});
     if (!r.ok || !r.body) {
       const stage = /(stt|llm|tts) HTTP (\d+)/.exec(await r.text().catch(() => ''));
       t.skipped = `http_${r.status}:${stage ? `${stage[1]}_${stage[2]}` : 'gateway'}`;
@@ -288,7 +311,7 @@ function openRtc(offer: Descriptor['transports'][number], desc: Descriptor, atte
       else if (m.ev === 'audio') audio?.(m);
       else if (m.ev === 'lost') onLost(s, String(m.reason));
     });
-    rtcSend(id, { op: 'open', offerUrl: offer.offerUrl, token: desc.token, iceServers: offer.iceServers ?? desc.iceServers ?? [], turn: cfg.turn });
+    rtcSend(id, { op: 'open', offerUrl: offer.offerUrl, token: desc.token, cfg: desc.cfg, iceServers: offer.iceServers ?? desc.iceServers ?? [], turn: cfg.turn });
   });
 }
 
@@ -415,15 +438,17 @@ async function chromeStudents(): Promise<void> {
     const rec: StudentRecord = { id, client: 'chrome', startedAt: now(), transport: null, connectMs: null, reconnects: 0, admissions: [], attempts: [] };
     result.students.push(rec);
     try {
+      await sleep((i * cfg.turnEveryS * 1000) / cfg.chrome);
       const { page } = await openMicPage({ chrome: cfg.chromePath, mic, url: app.url, readyFlag: 'loadReady', log, browsers });
-      const run = await page.evaluate(
-        (o) => (window as unknown as { loadRun: (o: unknown) => Promise<{ transport: string | null; connectMs: number | null; attempts: StudentRecord['attempts']; error?: string; turns: Turn[]; meter: { mic: unknown; output: unknown } }> }).loadRun(o),
+      const stuck = sleep((cfg.rampS + cfg.durationS + 2 * cfg.turnTimeoutS) * 1000).then(() => { throw new Error('the page never returned its run'); });
+      const run = await Promise.race([stuck, page.evaluate(
+        (o) => (window as unknown as { loadRun: (o: unknown) => Promise<{ transport: string | null; connectMs: number | null; attempts: StudentRecord['attempts']; error?: string; turns: Turn[]; meter: { mic: unknown; output: unknown; rtc?: unknown } }> }).loadRun(o),
         {
           durationMs: (cfg.rampS + cfg.durationS) * 1000, turnTimeoutMs: cfg.turnTimeoutS * 1000, turnEveryMs: cfg.turnEveryS * 1000,
           clipEndSilenceMs: cfg.clipEndSilenceMs, transport: cfg.chromeTransports[i % cfg.chromeTransports.length] || null,
           uplinkStallMs: cfg.uplinkStallMs ?? 0, uplinkStallEvery: cfg.uplinkStallEvery ?? 3, clientDeadline: !!cfg.clientDeadline,
         },
-      );
+      )]);
       rec.transport = run.transport;
       rec.connectMs = run.connectMs;
       rec.attempts = run.attempts;
@@ -448,9 +473,9 @@ try {
   await Promise.all([...Array.from({ length: cfg.students }, (_, i) => student(i)), chromeStudents()]);
 } finally {
   clearInterval(sampler);
-  for (const b of browsers) await b.close().catch(() => {});
-  for (const p of rtcProcs) { p.stdin!.end(); p.kill('SIGKILL'); }
   result.endedAt = now();
   writeFileSync(cfg.out, JSON.stringify(result));
+  await Promise.race([Promise.all(browsers.map(b => b.close().catch(() => {}))), sleep(5_000)]);
+  for (const p of rtcProcs) { p.stdin!.end(); p.kill('SIGKILL'); }
   process.exit(0);
 }

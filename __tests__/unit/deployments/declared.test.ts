@@ -68,7 +68,7 @@ describe('declared parle-speech spec', () => {
     expect(speech.image).toEqual({
       env: 'SPEECH_IMAGE', repository: 'rg.fr-par.scw.cloud/aigw/speech-stack', default: profile.image,
     });
-    expect(profile.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317');
+    expect(profile.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213');
     expect(speech.description).not.toMatch(/an L4 when/);
     expect(speech.profile).toBe('speech-stack');
     expect(speech.registryAuth).toBeUndefined();

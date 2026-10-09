@@ -98,7 +98,9 @@ export function createSignalingHandler(service: RealtimeService, opts: Signaling
         const token = bearer(req) ?? String(body.token);
         // The session's TURN credentials for the edge's own side: used only when the edge's media path is `relay`.
         const iceServers = service.edgeIceServers(session.claims.sid, session.claims.exp);
-        const upstream = await forward(session, trace, 'POST', '/__aigw/rt/offer', { sdp: body.sdp, type: 'offer', token, ...(iceServers.length ? { iceServers } : {}) });
+        const upstream = await forward(session, trace, 'POST', '/__aigw/rt/offer', {
+          sdp: body.sdp, type: 'offer', token, ...(iceServers.length ? { iceServers } : {}), ...(typeof body.cfg === 'string' ? { cfg: body.cfg } : {}),
+        });
         const answer = await upstream.json().catch(() => null) as { sdp?: unknown; type?: unknown; sessionId?: unknown } | null;
         if (!upstream.ok || !answer || typeof answer.sdp !== 'string') {
           const status = upstream.status === 409 || upstream.status === 429 || upstream.status === 503 ? 503 : 502;

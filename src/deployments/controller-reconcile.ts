@@ -89,6 +89,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
+    for (const id of [...this.udp.keys()]) if (!this.machines.some(m => m.id === id)) this.udp.delete(id);
     for (const id of [...this.poweredOnAt.keys()]) if (!this.machines.some(m => m.id === id)) this.poweredOnAt.delete(id);
     for (const id of [...this.startRefused.keys()]) if (!this.machines.some(m => m.id === id)) this.startRefused.delete(id);
     for (const key of [...this.stageStrikes.keys()]) if (!this.machines.some(m => key.startsWith(`${m.id}|`))) this.stageStrikes.delete(key);

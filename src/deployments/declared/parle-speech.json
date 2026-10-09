@@ -5,12 +5,12 @@
   "image": {
     "env": "SPEECH_IMAGE",
     "repository": "rg.fr-par.scw.cloud/aigw/speech-stack",
-    "default": "rg.fr-par.scw.cloud/aigw/speech-stack:20261008-1317"
+    "default": "rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213"
   },
   "spec": {
     "placements": [
       { "zone": "fr-par-1" },
-      { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85, "maxReplicas": 1, "image": "ghcr.io/marcosremar/speech-stack:20261008-1317" }
+      { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85, "maxReplicas": 1, "image": "ghcr.io/marcosremar/speech-stack:20261009-0213" }
     ],
     "scaling": { "mode": "fast" },
     "envByMachineType": {

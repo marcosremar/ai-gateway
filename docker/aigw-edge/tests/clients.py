@@ -5,6 +5,7 @@ import base64
 import fractions
 import json
 import math
+import random
 import time
 import uuid
 
@@ -13,13 +14,14 @@ import av
 import numpy as np
 from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError
+from aiortc.rtp import is_rtcp
 
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aigw_edge.config import derive_key  # noqa: E402
-from aigw_edge.token import sign  # noqa: E402
+from aigw_edge.token import b64url, config_digest, sign  # noqa: E402
 
 REPLICA_TOKEN = "test-replica-token-0123456789abcdef"
 KEY = derive_key(REPLICA_TOKEN)
@@ -33,6 +35,13 @@ def mint(cfg: dict | None = None, rep: str = "fr-par-2:replica-1", dep: str = "p
     cfg_b64 = base64.urlsafe_b64encode(json.dumps(cfg if cfg is not None else DEFAULT_CFG).encode()).rstrip(b"=").decode()
     return sign({"sid": sid or uuid.uuid4().hex, "app": "parle", "dep": dep, "rep": rep, "cfg": cfg_b64,
                  "iat": now, "exp": now + ttl}, key)
+
+
+def mint_by_reference(cfg: dict, **claims) -> tuple[str, str]:
+    cfg_b64 = b64url(json.dumps(cfg).encode())
+    now = int(time.time())
+    return sign({"sid": uuid.uuid4().hex, "app": "parle", "dep": "parle-speech", "rep": "fr-par-2:replica-1", "cfg": "",
+                 "iat": now, "exp": now + 600, "cfd": config_digest(cfg_b64), **claims}, KEY), cfg_b64
 
 
 def speech(seconds: float = 1.2, freq: float = 210.0) -> bytes:
@@ -95,9 +104,11 @@ class WsLearner:
         self.mic = asyncio.Queue()
         self.tasks: list[asyncio.Task] = []
 
-    async def connect(self, token: str) -> "WsLearner":
+    async def connect(self, token: str, cfg: str | None = None) -> "WsLearner":
         self.http = aiohttp.ClientSession()
         self.ws = await self.http.ws_connect(f"{self.base}/__aigw/rt/ws?token={token}")
+        if cfg is not None:
+            await self.ws.send_str(json.dumps({"type": "session_config", "cfg": cfg}))
         self.tasks.append(asyncio.create_task(self._read()))
         self.tasks.append(asyncio.create_task(self._mic()))
         return self
@@ -195,7 +206,7 @@ class RtcLearner:
         self.first_audio_at: float | None = None
         self.tasks: list[asyncio.Task] = []
 
-    async def connect(self, token: str, standby: bool = False) -> "RtcLearner":
+    async def connect(self, token: str, standby: bool = False, cfg: str | None = None) -> "RtcLearner":
         self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         self.dc = self.pc.createDataChannel("events")
         self.dc.on("message", lambda m: asyncio.ensure_future(self.events.add(json.loads(m))))
@@ -211,7 +222,7 @@ class RtcLearner:
         await self.pc.setLocalDescription(await self.pc.createOffer())
         async with aiohttp.ClientSession() as http:
             async with http.post(f"{self.base}/__aigw/rt/offer", json={"sdp": self.pc.localDescription.sdp, "type": "offer",
-                                                                       "token": token}) as r:
+                                                                       "token": token, **({"cfg": cfg} if cfg else {})}) as r:
                 self.status = r.status
                 self.answer = await r.json()
         if self.status != 200:
@@ -231,6 +242,28 @@ class RtcLearner:
                         self.first_audio_at = time.monotonic()
         except (MediaStreamError, asyncio.CancelledError):
             pass
+
+    def impair(self, loss: float, jitter_s: float, seed: int = 7) -> None:
+        rng, loop, dtls = random.Random(seed), asyncio.get_running_loop(), self.pc.getSenders()[0].transport
+        send, handle = dtls._send_rtp, dtls._handle_rtp_data
+        release = {"up": 0.0, "down": 0.0}
+
+        def through(way: str, call, *args) -> None:
+            if rng.random() < loss:
+                return
+            release[way] = max(release[way] + 1e-4, loop.time() + rng.random() * jitter_s)
+            loop.call_at(release[way], lambda: asyncio.ensure_future(call(*args)))
+
+        async def send_rtp(data: bytes) -> None:
+            if is_rtcp(data):
+                await send(data)
+            else:
+                through("up", send, data)
+
+        async def handle_rtp(data: bytes, arrival_time_ms: int) -> None:
+            through("down", handle, data, arrival_time_ms)
+
+        dtls._send_rtp, dtls._handle_rtp_data = send_rtp, handle_rtp
 
     def activate(self) -> None:
         self.sender.replaceTrack(self.mic)

@@ -39,11 +39,12 @@ const PROBE_TIMEOUT_MS = 3_000;
 const enc = encodeURIComponent;
 const toBlob = (file: Blob | Uint8Array) => (file instanceof Blob ? file : new Blob([new Uint8Array(file)]));
 /** The request body: the request without the client-side call options. */
-function bodyOf<T extends CallOptions>(req: T): Omit<T, 'signal' | 'timeoutMs'> {
+function bodyOf<T extends CallOptions>(req: T): Omit<T, 'signal' | 'timeoutMs' | 'device'> {
   const out = { ...req } as Record<string, unknown>;
   delete out.signal;
   delete out.timeoutMs;
-  return out as Omit<T, 'signal' | 'timeoutMs'>;
+  delete out.device;
+  return out as Omit<T, 'signal' | 'timeoutMs' | 'device'>;
 }
 
 const INSTABILITY_BUFFER_DEFAULT = 500;
@@ -137,8 +138,9 @@ export class GatewayClient {
 
   // ── transport ─────────────────────────────────────────────────────────────
 
-  private headers(json: boolean): Record<string, string> {
+  private headers(json: boolean, device?: string): Record<string, string> {
     return {
+      ...(device ? { 'X-Gateway-Device': device } : {}),
       ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
       ...(this.app ? { 'X-App': this.app } : {}),
       ...(json ? { 'Content-Type': 'application/json' } : {}),
@@ -149,7 +151,7 @@ export class GatewayClient {
     const json = spec.json !== undefined;
     return exchange({
       fetch: this.fetchImpl, url: `${this.baseUrl}${spec.path}`, path: spec.path, method: spec.method,
-      headers: this.headers(json), body: json ? JSON.stringify(spec.json) : spec.form,
+      headers: this.headers(json, spec.call?.device), body: json ? JSON.stringify(spec.json) : spec.form,
       signal: spec.call?.signal, timeoutMs: spec.call?.timeoutMs ?? this.timeouts[spec.group],
       retries: spec.idempotent ? IDEMPOTENT_RETRIES : 0,
     }, read);
