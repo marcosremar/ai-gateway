@@ -405,6 +405,7 @@ async function openStream(
   clientSignal?: AbortSignal, hedgeCapMs = 0,
 ): Promise<OpenedStream> {
   const failures: string[] = [];
+  let retryAfterSec: number | undefined;
   const codes: FailureCodes = new Map();
   const deadline = Date.now() + budgetMs;
   const cloudTtfb = cloudHedgeMs(budgetMs);
@@ -461,7 +462,9 @@ async function openStream(
       const status = (err as { status?: unknown })?.status;
       if (isClientErrorStatus(typeof status === 'number' ? status : null)) throw err;
       const code = failureCode(err);
-      if (status === 429) { markRateLimited(target, retryAfterOf(err), breakers); breaker.releaseProbe(); }
+      const after = retryAfterOf(err);
+      if (after) retryAfterSec = Math.min(after, retryAfterSec ?? after);
+      if (status === 429) { markRateLimited(target, after, breakers); breaker.releaseProbe(); }
       else if (isNeutralFailure(code)) breaker.releaseProbe();
       else breaker.recordFailure(err);
       failures.push(describeFailure(target.providerId, err));
@@ -469,7 +472,7 @@ async function openStream(
       log.warn(`stream: ${describeFailure(target.providerId, err)} → next provider`);
     }
   }
-  throw new ProviderUnavailableError(failures);
+  throw new ProviderUnavailableError(failures, retryAfterSec);
 }
 
 function clientGone(): Error {

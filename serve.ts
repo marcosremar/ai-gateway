@@ -8,6 +8,8 @@
  *   bun run serve.ts
  */
 
+import { homedir } from 'os';
+import { join } from 'path';
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/providers/cloud/openrouter';
@@ -87,7 +89,7 @@ const prefixRoutes: PrefixRoute[] = [];
 const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
-const deployments = deploymentsFromEnv(process.env, {
+const configuredDeployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: EXTRA_ADMINS,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
@@ -96,9 +98,15 @@ const deployments = deploymentsFromEnv(process.env, {
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
 });
+const deployments = configuredDeployments && await configuredDeployments.controller.init()
+  .then(() => configuredDeployments.apps.init())
+  .then(() => configuredDeployments, (err: unknown) => {
+    configuredDeployments.stopJanitor?.();
+    log.error({ error: err instanceof Error ? err.message : String(err) },
+      'DEPLOYMENTS DISABLED: the state file cannot be read — cloud routes stay up; fix or restore the file and restart');
+    return null;
+  });
 if (deployments) {
-  await deployments.controller.init();
-  await deployments.apps.init();
   deployments.controller.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
@@ -146,10 +154,10 @@ function mountProviders() {
     listOpenRouterModels,
     // One-GPU mode: an entry whose own deployment is not registered goes to its `oneGpuDeployment` when that one is.
     deploymentExists: (name) => Boolean(controller?.get(name)),
-    deploymentProvider: controller ? (stage, name) => (
-      stage === 'chat' ? new DeploymentLLMProvider(controller, name)
-        : stage === 'stt' ? new DeploymentSTTProvider(controller, name)
-          : new DeploymentTTSProvider(controller, name)
+    deploymentProvider: controller ? (stage, name, wait) => (
+      stage === 'chat' ? new DeploymentLLMProvider(controller, name, wait)
+        : stage === 'stt' ? new DeploymentSTTProvider(controller, name, wait)
+          : new DeploymentTTSProvider(controller, name, wait)
     ) : undefined,
     // Adaptive hedge (D4, live QA 2026-10-07): spill or wait for the replica instead of running each request twice.
     deploymentHedge: controller ? (name, baseMs, capMs) => controller.hedgeDelayMs(name, baseMs, capMs) : undefined,
@@ -225,6 +233,7 @@ const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const appLimits = API_KEYS.length ? new AppLimits({
   env: process.env,
+  statePath: join(process.env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway'), 'app-budgets.json'),
   isAdmin: (userId) => adminUsers.has(userId),
   aliasesOf: appAliasesOf,
   limitsOf: (userId) => deployments?.apps.get(userId)?.limits,
@@ -389,6 +398,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     declared?.stop();
     keyManager.stop();
     telemetry?.stop();
+    void appLimits?.flush();
     setGatewayTelemetrySink(null);
     console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
 

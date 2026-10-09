@@ -30,8 +30,8 @@ import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppDevices } from './app-devices';
 import type { AppFallbackService } from './app-fallback';
-import type { ClientStabilityLog } from './stability';
-import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
+import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
+import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import { createLogger } from '../logger';
 
 const log = createLogger('deployments-http');
@@ -43,6 +43,7 @@ import { noteStreamCut, type StreamCut } from '../telemetry/stream-cuts';
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
 const MAX_ADMIN_BODY = 16 * 1024 * 1024;
+const MAX_STABILITY_BODY = 512 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 export const INVOKE_IDLE_MS = 5 * 60_000;
 const HOP_BY_HOP = new Set([
@@ -147,6 +148,11 @@ export function replicaTarget(base: string, rest: string, query: string): URL | 
   return url.origin === origin && url.pathname.startsWith('/') ? url : null;
 }
 
+function withoutSecrets(spec: ProfileSpec): ProfileSpec {
+  const { env, envByMachineType, registryAuth, bootScript, files, fileUrls, ...rest } = spec as Record<string, unknown>;
+  return rest as ProfileSpec;
+}
+
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string | number> = {}): void {
   if (res.headersSent) { res.end(); return; }
   res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
@@ -164,8 +170,8 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const raw = await readBody(req, MAX_ADMIN_BODY);
+async function readJson(req: IncomingMessage, limit = MAX_ADMIN_BODY): Promise<Record<string, unknown>> {
+  const raw = await readBody(req, limit);
   if (!raw.length) return {};
   let parsed: unknown;
   try {
@@ -285,7 +291,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (sub === 'stability-report' && !imageName) {
       if (!opts.stability) return send(res, 404, { error: 'stability reports are not enabled on this gateway' });
       if (method === 'POST') {
-        const accepted = opts.stability.append(app, await readJson(req));
+        const accepted = opts.stability.append(app, await readJson(req, MAX_STABILITY_BODY));
+        if (accepted === null) return send(res, 429, { error: `at most ${MAX_REPORTS_PER_MINUTE} stability reports a minute per app` }, { 'Retry-After': '60' });
         return send(res, 200, { ok: true, accepted });
       }
       if (method === 'GET') {
@@ -412,7 +419,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (kind === 'apps') return appRoutes(req, res, parts, method);
 
     if (kind === 'profiles') {
-      if (!name && method === 'GET') return send(res, 200, { profiles: controller.listProfiles() });
+      if (!name && method === 'GET') {
+        const profiles = controller.listProfiles();
+        return send(res, 200, { profiles: isAdmin(req) ? profiles : profiles.map(p => (p.builtin ? p : { ...p, spec: withoutSecrets(p.spec) })) });
+      }
       if (name && !action && method === 'PUT') { admin(); return send(res, 200, await controller.putProfile(name, await readJson(req))); }
       if (name && !action && method === 'DELETE') {
         admin();

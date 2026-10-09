@@ -56,7 +56,8 @@ export class ApiKeyRegistry {
         }
         // Plain key without userId — backward compat
         return { key: entry, userId: 'default' };
-      });
+      })
+      .filter(e => e.key.length > 0);
   }
 
   /** Check if a Bearer token is valid. Timing-safe. */

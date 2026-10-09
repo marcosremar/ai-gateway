@@ -25,6 +25,13 @@ const SCW_IAM_API = process.env.SCALEWAY_IAM_API_BASE || 'https://api.scaleway.c
 const SCW_BLOCK_API = process.env.SCALEWAY_BLOCK_API_BASE || 'https://api.scaleway.com/block/v1alpha1';
 const SCW_MARKETPLACE_API = process.env.SCALEWAY_MARKETPLACE_API_BASE || 'https://api.scaleway.com/marketplace/v2';
 
+export class PartialListError<T> extends Error {
+  constructor(readonly items: T[], readonly failedZones: string[], message: string) {
+    super(message);
+    this.name = 'PartialListError';
+  }
+}
+
 /** All known Scaleway zones — queried in parallel for listInstances. */
 export const KNOWN_ZONES = ['fr-par-1', 'fr-par-2', 'fr-par-3', 'nl-ams-1', 'nl-ams-2', 'nl-ams-3', 'pl-waw-1', 'pl-waw-2', 'pl-waw-3'];
 
@@ -632,13 +639,20 @@ export class ScalewayClient extends AbstractGpuProvider {
     const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
     if (!secretKey) throw new Error('Scaleway secret key required');
     const project = opts.projectId ? `project=${encodeURIComponent(opts.projectId)}&` : '';
-    const lists = await Promise.all((opts.zones ?? KNOWN_ZONES).map(async (zone) => {
+    const zones = opts.zones ?? KNOWN_ZONES;
+    const lists = await Promise.allSettled(zones.map(async (zone) => {
       const res = await this.fetchJson<ScwListResponse>(
         `${this.zoneUrl(zone)}/servers?${project}tags=${encodeURIComponent(tag)}&per_page=50`,
         { headers: this.scwHeaders(secretKey) }, TIMEOUTS.read, 'scaleway');
       return res.servers.map(server => this.toGpuInstance(server, zone));
     }));
-    return lists.flat();
+    const instances = lists.flatMap(l => (l.status === 'fulfilled' ? l.value : []));
+    const failed = zones.flatMap((zone, i) => {
+      const l = lists[i];
+      return l.status === 'rejected' ? [`${zone}: ${l.reason instanceof Error ? l.reason.message : String(l.reason)}`] : [];
+    });
+    if (failed.length) throw new PartialListError(instances, failed.map(f => f.slice(0, f.indexOf(':'))), failed.join('; '));
+    return instances;
   }
 
   /** SBS volumes of a zone (block/v1alpha1), optionally scoped to a project: id, name, status, attachments, times. */

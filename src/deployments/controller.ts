@@ -19,6 +19,7 @@ import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './
 import { ControllerViews } from './controller-views';
 import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
+import { MAX_HOURS_GRACE_MS, outlived } from './planner';
 import { externalInflightOn, noteSession } from '../realtime/external-load';
 import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
@@ -211,12 +212,18 @@ export class DeploymentController extends ControllerViews {
     return this.view(name)!;
   }
 
+  private leaseSeq = 0;
+  private readonly leasedSeq = new Map<string, number>();
+
   private pick(rt: Runtime, exclude: Set<string>, stage?: string): ReplicaMachine | null {
     const ready = this.readyMachines(rt.record.spec.name).filter(m => !exclude.has(m.id) && !this.stageOut(m.id, stage));
     if (!ready.length) return null;
     // A host about to be taken back (`expiry.ts`) only serves while nothing else can: new requests drain it.
     const now = this.now();
-    const lasting = ready.filter(m => !isExpiring(m, now));
+    const aged = (m: ReplicaMachine, graceMs = 0) => outlived(this.observed(m, 0).machine, rt.record.spec, now, graceMs);
+    const lasting = ready.filter(m => !isExpiring(m, now) && !aged(m));
+    const overdue = ready.filter(m => aged(m, MAX_HOURS_GRACE_MS)).sort((a, b) => a.createdAt - b.createdAt)[0];
+    const pool = lasting.length ? lasting : ready.filter(m => ready.length < 2 || m !== overdue);
     // A replica takes at most `target × maxInflightFactor` (bounded queue: the overflow spills to the fallback at once and
     // its health check still answers); a busy one (health check timed out under load) nothing beyond its target, nor
     // one whose answers beyond its target would be slower than the route's hedge (`tooSlowBeyondTarget`). Its realtime
@@ -225,13 +232,14 @@ export class DeploymentController extends ControllerViews {
     const capacity = replicaCapacity(rt.record.spec);
     const sessions = (m: ReplicaMachine) => externalInflightOn(rt.record.spec.name, m.id, target, now);
     const load = (m: ReplicaMachine) => (rt.perReplica.get(m.id) ?? 0) + sessions(m);
-    const open = (lasting.length ? lasting : ready).filter((m) => {
+    const open = pool.filter((m) => {
       const n = load(m);
       return !this.draining.has(m.id) && sessions(m) < target && n < capacity && (!this.probes.get(m.id)?.busy || n < target)
         && !this.tooSlowBeyondTarget(rt, m.id, n, target);
     });
     if (!open.length) return null;
-    return open.reduce((best, m) => (load(m) < load(best) ? m : best));
+    const turn = (m: ReplicaMachine) => this.leasedSeq.get(m.id) ?? 0;
+    return open.reduce((best, m) => (load(m) < load(best) || (load(m) === load(best) && turn(m) < turn(best)) ? m : best));
   }
 
   /**
@@ -341,6 +349,7 @@ export class DeploymentController extends ControllerViews {
     }
 
     rt.inflight++;
+    this.leasedSeq.set(machine.id, ++this.leaseSeq);
     const startedAt = this.now();
     rt.perReplica.set(machine.id, (rt.perReplica.get(machine.id) ?? 0) + 1);
     rt.record.lastRequestAt = this.now();

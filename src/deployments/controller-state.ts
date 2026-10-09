@@ -96,6 +96,7 @@ export interface Runtime {
   hedgeBaseMs?: number;
   /** When another deployment under pressure took this one's idle replica (it then counts as idle until a new request). */
   reclaimedAt: number | null;
+  bootTimeouts: number;
 }
 
 /** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
@@ -227,6 +228,7 @@ export abstract class ControllerState {
       this.replicaGone.delete(id);
     }
   }
+  protected readonly releasing = new Map<string, { machine: ReplicaMachine; at: number }>();
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
   protected readonly networkReleases = new Map<string, PendingNetworkRelease>();
@@ -235,6 +237,7 @@ export abstract class ControllerState {
   protected rerun = false;
   protected timer: ReturnType<typeof setInterval> | null = null;
   protected lastListError: string | null = null;
+  protected failedZones = new Set<string>();
   protected readonly backends: Partial<Record<DeploymentProvider, DeploymentBackend>>;
   /** Provider of a machine that does not say (fakes, records from before `provider`). */
   protected readonly defaultProvider: DeploymentProvider;
@@ -273,6 +276,11 @@ export abstract class ControllerState {
     return m.provider ?? this.defaultProvider;
   }
 
+  protected listStale(m: ReplicaMachine, failed: Set<DeploymentProvider>): boolean {
+    const provider = this.providerOf(m);
+    return failed.has(provider) || this.failedZones.has(`${provider}/${m.zone}`);
+  }
+
   protected get maxColdStartWaitSeconds(): number {
     return this.opts.maxColdStartWaitSeconds ?? DEFAULT_MAX_COLD_START_WAIT_SECONDS;
   }
@@ -282,7 +290,7 @@ export abstract class ControllerState {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
-      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null,
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0,
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
@@ -355,6 +363,7 @@ export abstract class ControllerState {
       machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight,
       ...(p.readyAt ? { readyAt: p.readyAt } : {}), ...(this.servedRecently(p) ? { servedRecently: true } : {}),
       ...(p.downSince !== undefined ? { downForMs: this.now() - p.downSince } : {}),
+      ...(machine.createdAt < this.startedAt ? { bootStartedAt: this.startedAt } : {}),
     };
   }
 
@@ -447,6 +456,6 @@ export abstract class ControllerState {
   protected totalReplicas(): number {
     let creating = 0;
     for (const rt of this.deployments.values()) creating += rt.creating;
-    return this.runningMachines().length + creating;
+    return this.runningMachines().length + this.releasing.size + creating;
   }
 }

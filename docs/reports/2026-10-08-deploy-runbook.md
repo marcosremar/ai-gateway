@@ -418,7 +418,12 @@ the PR's diff); only the tags above are pinned. The earlier pair of this branch 
   - everything on Vast (#64 host reputation, `files` through signed links, `requireWebrtc`): the account has no credit;
   - L40S not sold in fr-par-1 (the second placement of `parle-speech` is skipped);
   - the Vast boot timeout (20 min) is shorter than the first pull of the 57 GB image on a slow host;
-  - the RTT gate decides after the paid pull (a far host is released only once it has booted).
+  - the RTT gate decides after the paid pull (a far host is released only once it has booted);
+  - a system prompt larger than the LLM slot (16 KB of Portuguese ≈ 4.7 k tokens against 4096) opens the session and
+    fails every turn with `error upstream`: keep the school's prompt well below the slot (≈ 5 KB with 2048);
+  - `LLM_SLOT_CTX` 4096 fits the L40S VRAM (29.2 of 46 GB with 12 learners) but the LLM slows as the history grows
+    (198 → 461 ms over 760 s with 8 learners): production stays on 2048;
+  - the up-to-2.5 s UDP-probe wait on the first admission of a fresh replica was not measured live.
 
 ### 12.7 Live proof checklist for this build
 
@@ -456,3 +461,26 @@ bun scripts/realtime-e2e/load.ts --n 8 --s2s 8 --no-wake --speculate-lead 400 --
 | 12 | Speculation on the fallback | the `--s2s --speculate-lead` run | `s2s.stt_speculative` events, `done.speculation` `hit` on most turns, first audio earlier than the same run with `--speculate-lead 0`; no turn voiced twice |
 | 13 | Reaper | dry run against the dev gateway, with the reaper's own variables: `bun scripts/reap-orphans.ts` (no `--apply`) | lists foreign leftovers, releases nothing |
 | 14 | History | 20 turns in one session (`load.ts --n 1 --duration 400 --think 2-4`) | no `upstream` context error; `edge.llm.history_trimmed` appears |
+
+### 12.8 Deploy conditions (live proof of #70, 2026-10-09; merged to `main` with the audit fixes #72, #73, #74)
+
+Merging changed nothing in production. The deploy of this `main` is GO under these conditions:
+
+1. Outside Mon–Thu 17:40–20:15 Europe/Paris (class time), and not in the hour before.
+2. `LLM_SLOT_CTX` stays **2048** on `parle-speech` (4096 fits the L40S VRAM but the LLM slows as the history grows,
+   and the history trim was not exercised at 4096).
+3. Speculation off (the school does not use `speculatePauseMs`) and the composed cloud fallback not relied on until the
+   OpenRouter key served by the dev API is rotated and item 12 of § 12.7 has passed (today it would not answer, with or
+   without this deploy).
+4. No Vast for the school (`requireWebrtc`, `files` through signed links, host reputation): not proven, the account has
+   no credit.
+5. The school removes every client-side change of signed fields (§ 12.2) before the new edge serves a class, and keeps
+   its system prompt well below the LLM slot (§ 12.6).
+6. Behaviour change from #74: a `warmSchedule` or `reserveQuota` window without `timeZone` now reads as Europe/Paris
+   (stored explicitly) instead of UTC. Production has no such window today; check `GET /v1/deployments` before the
+   deploy and give any window an explicit `timeZone` if one appeared.
+7. Order of § 12.4; check `/health` `commit` / `builtAt` afterwards.
+
+Not in this build: the audit's security fixes (PR #75: dev token, Bearer-only keys, per-replica tokens, Scaleway
+registry pull with a read-only key). #75 needs `SCW_REGISTRY_SECRET_KEY` (a read-only Scaleway registry key) in the
+gateway's variables before its own deploy, or `parle-speech` cannot pull its image.

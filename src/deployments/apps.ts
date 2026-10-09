@@ -11,10 +11,11 @@
  * (the gateway logs in to its own Scaleway registry with its own key), env values are not stored.
  */
 
-import { mkdir, readFile, rename, writeFile } from 'fs/promises';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import { parseModelRoutes, type ModelRoutesSpec, type RouteEntrySpec } from '../config/serve-providers';
 import type { FallbackKeyStore, ProvisionedKeyRecord } from './app-fallback';
+import { readStateFile, writeStateFile } from './state-file';
+import type { StateLog } from './store';
 
 export const APP_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
 export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
@@ -135,24 +136,19 @@ export class MemoryAppStore implements AppStore {
 
 export class FileAppStore implements AppStore {
   private chain: Promise<void> = Promise.resolve();
-  constructor(private readonly path: string) {}
-  static inDir(dir: string): FileAppStore { return new FileAppStore(join(dir, 'apps.json')); }
+  constructor(private readonly path: string, private readonly log: StateLog = (msg, data) => console.error(msg, data ?? {})) {}
+  static inDir(dir: string, log?: StateLog): FileAppStore { return new FileAppStore(join(dir, 'apps.json'), log); }
   async load(): Promise<Record<string, AppAccount>> {
-    try {
-      return (JSON.parse(await readFile(this.path, 'utf8')) as { apps?: Record<string, AppAccount> }).apps ?? {};
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
-      throw err;
-    }
+    const read = await readStateFile<{ apps?: Record<string, AppAccount> }>(this.path);
+    if (read.from === 'backup') this.log('apps: STATE FILE UNREADABLE, recovered from the last good backup', { path: this.path, problem: read.problem });
+    return read.data?.apps ?? {};
   }
   save(apps: Record<string, AppAccount>): Promise<void> {
     const snapshot = JSON.stringify({ version: 1, apps }, null, 2);
-    this.chain = this.chain.catch(() => {}).then(async () => {
-      await mkdir(dirname(this.path), { recursive: true });
-      const tmp = `${this.path}.${process.pid}.tmp`;
-      await writeFile(tmp, snapshot, { mode: 0o600 });
-      await rename(tmp, this.path);
-    });
+    this.chain = this.chain.catch(() => {}).then(() => writeStateFile(this.path, snapshot).catch((err: unknown) => {
+      this.log('apps: STATE WRITE FAILED', { path: this.path, error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }));
     return this.chain;
   }
 }

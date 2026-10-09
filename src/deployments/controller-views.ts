@@ -82,7 +82,7 @@ export abstract class ControllerViews extends ReconcileLoop {
    * namespace in `health`). The caps are the gateway's limits, the same for everyone, and stay.
    */
   health(app?: string): {
-    deployments: number; replicas: number; listError: string | null;
+    deployments: number; replicas: number; listError: string | null; stateWriteError: string | null;
     running: number; maxReplicas: number; stopped: number; maxStopped: number; eurPerHour: number; maxEurPerHour: number;
   } {
     const limits = {
@@ -92,6 +92,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     if (app === undefined) {
       return {
         deployments: this.deployments.size, replicas: this.machines.length, listError: this.lastListError,
+        stateWriteError: this.opts.store.writeError ?? null,
         running: this.runningMachines().length, stopped: this.stoppedCount(), eurPerHour: round3(this.burnEurPerHour()), ...limits,
       };
     }
@@ -99,7 +100,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     const mine = (m: { deployment: string }) => own.has(m.deployment);
     const running = this.runningMachines().filter(mine);
     return {
-      deployments: own.size, replicas: this.machines.filter(mine).length, listError: null,
+      deployments: own.size, replicas: this.machines.filter(mine).length, listError: null, stateWriteError: null,
       running: running.length,
       stopped: this.machines.filter(m => mine(m) && ((this.parkedNow(m) && !this.isStarting(m)) || this.stoppingNow(m))).length,
       eurPerHour: round3(running.reduce((sum, m) => sum + (m.pricePerHour ?? 0), 0)), ...limits,
