@@ -19,6 +19,7 @@ import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './
 import { ControllerViews } from './controller-views';
 import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
+import { MAX_HOURS_GRACE_MS, outlived } from './planner';
 import { externalInflightOn, noteSession } from '../realtime/external-load';
 import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
@@ -196,7 +197,10 @@ export class DeploymentController extends ControllerViews {
     if (!ready.length) return null;
     // A host about to be taken back (`expiry.ts`) only serves while nothing else can: new requests drain it.
     const now = this.now();
-    const lasting = ready.filter(m => !isExpiring(m, now));
+    const aged = (m: ReplicaMachine, graceMs = 0) => outlived(this.observed(m, 0).machine, rt.record.spec, now, graceMs);
+    const lasting = ready.filter(m => !isExpiring(m, now) && !aged(m));
+    const overdue = ready.filter(m => aged(m, MAX_HOURS_GRACE_MS)).sort((a, b) => a.createdAt - b.createdAt)[0];
+    const pool = lasting.length ? lasting : ready.filter(m => ready.length < 2 || m !== overdue);
     // A replica takes at most `target × maxInflightFactor` (bounded queue: the overflow spills to the fallback at once and
     // its health check still answers); a busy one (health check timed out under load) nothing beyond its target, nor
     // one whose answers beyond its target would be slower than the route's hedge (`tooSlowBeyondTarget`). Its realtime
@@ -205,7 +209,7 @@ export class DeploymentController extends ControllerViews {
     const capacity = replicaCapacity(rt.record.spec);
     const sessions = (m: ReplicaMachine) => externalInflightOn(rt.record.spec.name, m.id, target, now);
     const load = (m: ReplicaMachine) => (rt.perReplica.get(m.id) ?? 0) + sessions(m);
-    const open = (lasting.length ? lasting : ready).filter((m) => {
+    const open = pool.filter((m) => {
       const n = load(m);
       return !this.draining.has(m.id) && sessions(m) < target && n < capacity && (!this.probes.get(m.id)?.busy || n < target)
         && !this.tooSlowBeyondTarget(rt, m.id, n, target);

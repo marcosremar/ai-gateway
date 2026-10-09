@@ -14,6 +14,8 @@ import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMach
  * provider had no stock for is not tried again before this either, and meanwhile does not count as capacity.
  */
 const PARKED_START_GRACE_MS = 90_000;
+const RELEASE_SETTLE_MS = 10 * 60_000;
+const BOOT_TIMEOUT_BACKOFF_MS = [0, 10 * 60_000, 30 * 60_000, 60 * 60_000];
 
 export abstract class ReconcileLoop extends AutoscaleControl {
   start(): void {
@@ -66,6 +68,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
         errors.push(`${provider}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }));
+    this.settleReleases(listed, failed);
     this.lastListError = errors.length ? errors.sort().join('; ') : null;
     if (errors.length) this.log('deployments: list failed', { error: this.lastListError });
     // Even with every list failed the tick goes on in release-only mode (below): a failing list (Vast 429s) must never
@@ -74,13 +77,13 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     // Keep machines we just created that the provider list does not show yet.
     const recent = this.machines.filter(m => !failed.has(this.providerOf(m)) && !listed.some(l => l.id === m.id)
       && this.now() - m.createdAt < 120_000 && this.deployments.has(m.deployment));
-    for (const l of listed) {
+    for (const l of listed.filter(x => !this.releasing.has(x.id))) {
       const rt = this.deployments.get(l.deployment);
       if (rt && rt.record.lastRequestAt == null && rt.record.spec.minReplicas === 0 && l.createdAt < this.startedAt
         && !this.machines.some(m => m.id === l.id) && replicaPhase(this.observed(l, 0)) !== 'halted') rt.record.lastRequestAt = this.startedAt;
     }
     // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
-    this.machines = [...listed.map((l) => {
+    this.machines = [...listed.filter(l => !this.releasing.has(l.id)).map((l) => {
       const known = this.machines.find(m => m.id === l.id);
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
     }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
@@ -134,6 +137,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (!m) continue;
       if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
       else await this.release(m, r.reason);
+      if (r.reason === 'boot-timeout') this.backOffAfterBootTimeout(rt);
     }
     let toCreate = await this.settleDrains(rt, plan, plan.create - rt.creating);
     if (releaseOnly) { this.explain(rt, plan, decision, floor, 'provider list failed'); return; }
@@ -162,6 +166,24 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     for (let i = 0; i < toCreate; i++) this.createReplica(rt);
     this.explain(rt, plan, decision, floor, blockedBy);
     if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
+  }
+
+  private settleReleases(listed: ReplicaMachine[], failed: Set<DeploymentProvider>): void {
+    for (const [id, { machine, at }] of this.releasing) {
+      if (failed.has(this.providerOf(machine))) continue;
+      const gone = !listed.some(l => l.id === id);
+      if (!gone && this.now() - at < RELEASE_SETTLE_MS) continue;
+      this.releasing.delete(id);
+      const rt = this.deployments.get(machine.deployment);
+      if (gone && rt && /quota/i.test(rt.lastError ?? '')) rt.backoffUntil = 0;
+    }
+  }
+
+  private backOffAfterBootTimeout(rt: Runtime): void {
+    rt.bootTimeouts++;
+    const wait = BOOT_TIMEOUT_BACKOFF_MS[Math.min(rt.bootTimeouts - 1, BOOT_TIMEOUT_BACKOFF_MS.length - 1)];
+    rt.backoffUntil = Math.max(rt.backoffUntil, this.now() + wait);
+    if (wait) rt.lastError = `boot-timeout ${rt.bootTimeouts} times in a row: next create in ${Math.round(wait / 60_000)} min`;
   }
 
   /** The deployment may have (or create) machines on a provider whose list just failed. */
