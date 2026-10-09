@@ -162,7 +162,7 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
     sdp = conn.localDescription?.sdp ?? '';
     const res = await ctx.fetchImpl(offer.offerUrl, {
-      method: 'POST', headers, body: JSON.stringify({ sdp, type: 'offer' }),
+      method: 'POST', headers, body: JSON.stringify({ sdp, type: 'offer', ...(ctx.descriptor?.cfg ? { cfg: ctx.descriptor.cfg } : {}) }),
       signal: AbortSignal.any ? AbortSignal.any([signal, AbortSignal.timeout(ctx.timeouts.signalingMs)]) : signal,
     });
     const answer = await res.json().catch(() => null) as { sdp?: string; type?: string; error?: { code?: string } } | null;

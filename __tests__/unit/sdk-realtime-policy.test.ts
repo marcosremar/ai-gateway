@@ -197,10 +197,23 @@ describe('transport by network signal: the session (transportPolicy "auto")', ()
     await settled(r, 'ws');
     expect(r.log.slice(5)).toEqual(['standby:webrtc', 'live:ws']);
     const back = r.sent.filter(([t, m]) => t === 'ws' && m.type === 'config_update').flatMap(([, m]) => m.messages!.map(x => x.content));
-    expect(back.slice(1)).toEqual(['fala 4', 'resposta 4', 'fala 5', 'resposta 5', 'fala 6', 'resposta 6']);
+    expect(back.filter(content => content !== '(regra nova)')).toEqual(['fala 4', 'resposta 4', 'fala 5', 'resposta 5', 'fala 6', 'resposta 6']);
     expect(r.moves()).toEqual(['ws:connected', 'webrtc:policy', 'ws:policy']);
     expect(r.s.history.filter(m => m.role === 'user')).toHaveLength(7);
     expect(r.events.filter(e => e.type === 'error')).toEqual([]);
+    r.s.close();
+  });
+
+  it('a signed update reaches the standby transport too, so a later move finds the same session config', async () => {
+    const r = rig();
+    await r.start();
+    await r.turn(0);
+    r.s.applyUpdate('signed.update', [{ role: 'user', content: 'resumo' }]);
+    expect(r.sent.filter(([, m]) => m.type === 'config_update').map(([t, m]) => [t, (m as { signed?: string }).signed])).toEqual([['ws', 'signed.update'], ['webrtc', 'signed.update']]);
+    await r.turn(5);
+    await r.turn(5);
+    await settled(r, 'webrtc');
+    expect(r.sent.filter(([t, m]) => t === 'webrtc' && m.messages).flatMap(([, m]) => m.messages!.map(x => x.content))).toEqual(['fala 2', 'resposta 2', 'fala 3', 'resposta 3']);
     r.s.close();
   });
 

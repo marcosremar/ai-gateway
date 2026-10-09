@@ -17,7 +17,7 @@ import type { TurnClip } from './turn-clip';
 import { turnEndAfterVadEndMs, type VadEffect, type VoiceActivityTuning } from './voice-activity';
 
 export interface TurnTakingOptions {
-  clip: Pick<TurnClip, 'running' | 'start' | 'finish' | 'cancel'>;
+  clip: Pick<TurnClip, 'running' | 'start' | 'finish' | 'cancel'> & Partial<Pick<TurnClip, 'snapshot'>>;
   /** The microphone track the clip records from (it changes when the microphone is switched). */
   track: () => MediaStreamTrack;
   toWav: (clip: Blob) => Promise<Blob | null>;
@@ -27,6 +27,8 @@ export interface TurnTakingOptions {
   tuning?: VoiceActivityTuning;
   onVoice: () => void;
   onTurn: (wav: Blob) => void;
+  onSpeculate?: (wav: Blob) => void;
+  onSpeculateCancel?: () => void;
   now?: () => number;
 }
 
@@ -48,6 +50,15 @@ export function createTurnTaking(opts: TurnTakingOptions): TurnTaking {
   let turnEnd: ReturnType<typeof setTimeout> | null = null;
   let turnCap: ReturnType<typeof setTimeout> | null = null;
 
+  let pause = 0;
+  const resume = () => { pause++; opts.onSpeculateCancel?.(); };
+  const speculate = async () => {
+    const mine = ++pause;
+    const recorded = await clip.snapshot?.();
+    const wav = recorded && await opts.toWav(recorded);
+    if (wav && mine === pause && voiced) opts.onSpeculate?.(wav);
+  };
+
   const clearTurnEnd = () => { if (turnEnd) clearTimeout(turnEnd); turnEnd = null; };
   const clearTurnCap = () => { if (turnCap) clearTimeout(turnCap); turnCap = null; };
 
@@ -55,6 +66,7 @@ export function createTurnTaking(opts: TurnTakingOptions): TurnTaking {
     clearTurnEnd();
     clearTurnCap();
     clip.cancel();
+    if (voiced) resume();
     voiced = false;
   };
 
@@ -63,6 +75,7 @@ export function createTurnTaking(opts: TurnTakingOptions): TurnTaking {
     clearTurnCap();
     if (!voiced) return;
     voiced = false;
+    pause++;
     const recorded = await clip.finish();
     const wav = recorded && await opts.toWav(recorded);
     if (wav) opts.onTurn(wav);
@@ -74,7 +87,10 @@ export function createTurnTaking(opts: TurnTakingOptions): TurnTaking {
       const at = now();
       if (effect.kind === 'rmsOnset' && !clip.running()) clip.start(opts.track(), at);
       if (effect.kind === 'rmsRejected' && !voiced) clip.cancel();
+      if (effect.kind === 'vadPause' && voiced && opts.onSpeculate) void speculate();
+      if (effect.kind === 'vadResume' && voiced) resume();
       if (effect.kind === 'vadStart') {
+        if (voiced) resume();
         clearTurnEnd();
         if (!clip.running()) clip.start(opts.track(), at);
         if (!voiced) {

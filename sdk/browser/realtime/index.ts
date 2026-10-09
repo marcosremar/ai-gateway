@@ -12,7 +12,7 @@ export {
 export type {
   AttemptRecord, ChatMessage, ClientMessage, IceServerInit, LinkStats, RealtimeEvent, RealtimeLocalEvent, RealtimeMetrics,
   RealtimeServerEvent, RealtimeTimeouts, RealtimeTransport, SessionDescriptor, SessionRefusal, SessionRequest,
-  StorageLike, TransportContext, TransportFactory, TransportOffer, TransportType,
+  StorageLike, TransportContext, TransportFactory, TransportOffer, TransportType, TurnServed,
 } from './types';
 export {
   LadderExhausted, WINNER_TTL_MS, attemptTimeoutMs, climbLadder, createWinnerMemory, defaultNetworkKey, orderWithWinner,

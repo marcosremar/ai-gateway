@@ -72,6 +72,7 @@ git fetch origin main
 git worktree add --detach /tmp/aigw-deploy origin/main
 cd /tmp/aigw-deploy && git rev-parse HEAD            # write this commit down: it is the only record of what runs
 
+bun run stamp:build                                 # writes commit + build time into src/build-info.json (→ /health)
 railway up --detach --service ai-gateway \
   --project 2213991a-748b-4576-8bd1-f45232f722e3 --environment production
 ```
@@ -91,7 +92,9 @@ down for a failed deploy.
 
 ## 5. Verify
 
-`/health` reports no version or commit. What does tell the new code is up:
+From the production-guard PR on, `curl -s $GW/health | jq '{commit, builtAt}'` answers which code runs (`null` = the
+upload was not stamped: § 4), and `GET /health?details=1` with an admin key adds `images` (edge sidecar, profiles,
+declared deployments). Before that build `/health` reports no version or commit. What also tells the new code is up:
 
 ```bash
 curl -s $GW/health | jq '.status, .stages.stt'                       # ok; chains unchanged
@@ -229,3 +232,228 @@ curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/j
 
 A replica already running the new image keeps serving until it idles out (there is no per-replica delete route);
 the next one boots the old image. Routes: `bun run deploy:gateway-routes` from the school's previous commit.
+
+## 11. Production guards (PR `rt/prod-guard`, 2026-10-08): what each needs at deploy time
+
+Code and unit tests only; nothing below was run against production.
+
+| Item | Takes effect with | Railway setting (names only) |
+|---|---|---|
+| Reaper applies, is loud, sees other namespaces | **redeploy of `ai-gateway-reaper`** (§ 4, the `cp railway.reaper.json railway.json` upload). Read on 2026-10-08: the service has no repository and no config path, its live start command is `./reap-compiled` (from the upload of 2026-10-05, before `--apply` entered `railway.reaper.json`), so only a new upload with that file changes it | `AI_GATEWAY_ADMIN_KEY` on the reaper (a key of a user in `DEPLOYMENTS_ADMIN_USERS`): without it every run now ends `NOT CHECKED` with exit 3 (the cron shows failed runs — intended). Optional: `ALERT_WEBHOOK_URL`, `REAPER_FOREIGN_MIN_AGE_HOURS`; `REAPER_APPLY=1` if the start command is ever edited by hand |
+| `/health` commit, build time, image tags | gateway redeploy, with `bun run stamp:build` in the throwaway worktree before `railway up` (§ 4) | none |
+| `reserveQuota` (class window) | gateway redeploy, then one PATCH per holder (below) | none |
+| Replica cap message names the holders | gateway redeploy | none (the value is a proposal below) |
+| Per-app daily budgets, budget webhook | gateway redeploy, then `PUT /v1/apps/parle/limits` | optional `ALERT_WEBHOOK_URL` on `ai-gateway` |
+| TTS over-long sentence cut (`tts_overlong`) | a **new `speech-stack` image** (or `server.py` in the deployment's `files`) and a **new `aigw-edge` image** + its tag in `DEFAULT_EDGE_IMAGE` / `realtime.edgeImage`; the `max_new_tokens` of the gateway's TTS proxy (cloning requests to `parle-qwen-tts`) with the gateway redeploy | none |
+
+**Reaper, first run after the redeploy.** With `--apply` and no admin key it still releases nothing while the gateway
+is up (exit 3); with the key it releases machines of deployments the gateway does not have (30 min grace). Foreign
+leftovers are only reported. To clear the stopped ones by hand, once, from the reaper's shell or a one-off run:
+`./reap-compiled --apply-foreign` (stopped machines of other namespaces older than 6 h; running ones are never touched).
+Do not put `--apply-foreign` in the cron start command while dev namespaces park replicas on purpose (`idleAction:
+"stop"` leaves them stopped for hours).
+
+**Class window** (binds only deployments of this gateway and namespace; a dev gateway is outside it — the reaper alert
+covers that case). Fields a PATCH does not send are kept:
+
+```bash
+curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' $GW/v1/deployments/parle-qwen-tts \
+  -d '{"reserveQuota":{"quota":2,"windows":[{"days":[1,2,3,4],"start":"17:40","end":"20:15","timeZone":"Europe/Paris","minReplicas":2}]}}'
+```
+
+`quota` is the provider's quota for the machine type (L4: 2 on 2026-10-08; check the Scaleway console) and
+`minReplicas` what the class needs of it. The same on `parle-speech` for the L40S if its quota is shared.
+`parle-qwen-tts` is re-PUT by the school's backend: a PUT that omits `reserveQuota` keeps it (it is cleared only by
+`"reserveQuota": null`). Check: `GET $GW/v1/deployments/parle-speech-s2s/capacity | jq .reservations`.
+
+**Replica cap (proposal, not applied).** `DEPLOYMENTS_MAX_REPLICAS=4` is full with 2 × L4 (`parle-qwen-tts`) + 2 × L40S
+(`parle-speech`): `parle-livekit` and `parle-speech-s2s` are refused (the refusal now says
+`held by parle-qwen-tts 2, parle-speech 2`). For a class of 30 with the Vast overflow: 2 L4 (voice) + 2 L40S + 2 RTX
+5090 on Vast (the declared placement allows 1 today: `placements[].maxReplicas`) + 1 `parle-livekit` + 1 spare for a
+replacement that overlaps the machine it replaces (boot timeout, Vast expiry handover) = **`DEPLOYMENTS_MAX_REPLICAS=8`**.
+The € ceiling has to follow or it becomes the limit: 2 × 0.79 + 2 × 1.47 + 2 × ≈ 0.6 (Vast cap) + the POP2-HC-48C of
+`parle-livekit` ≈ €7–8/h against `DEPLOYMENTS_MAX_EUR_PER_HOUR` 6 → **10**. Seats: 4 realtime sessions per L40S / 5090
+(`RT_MAX_SESSIONS`; 8 measured at 2.6–2.8 s worst first audio) gives 16 seats at 4 or 32 at 8 with four speech replicas;
+30 simultaneous learners at 4 per replica would need 8 speech replicas, which neither quota provides — the rest runs
+on the cloud fallback. Not measured: four speech replicas at once, and two Vast hosts in one class.
+
+**App budget for the class.** `APP_DAILY_REQUESTS=20000` / `APP_DAILY_TOKENS=12000000` stay the default for every key.
+A realtime session costs 4 requests per minute of its 10 min token (40) at admission; 30 learners × 3 sessions = 3600
+requests per class day plus the `/v1/s2s` and stage requests of the fallback. To take the class out of the default:
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -H 'X-App: parle' \
+  $GW/v1/apps/parle/limits -d '{"dailyRequests":60000,"dailyTokens":40000000}'
+curl -s -H "Authorization: Bearer $KEY" "$GW/health?details=1" | jq .appBudgets   # use, rate, projected exhaustion
+```
+
+The counters are in memory: a gateway restart during a class starts the day's count again. A budget that ends
+mid-class refuses the next turn or session with 429 `daily_budget_exhausted` and `reset_at`; replies in flight finish.
+
+**TTS.** Until the two images are rebuilt, production keeps today's behaviour (an audible sentence that reaches its cap
+ends the turn with the `tts` error). No retry was added for the non-silent runaway: it cannot be told from speech
+before the learner has heard it without holding back every first audio.
+
+## 12. Integration build (PR `rt/integration-2`, 2026-10-09): #67, #68, #63, #62, #64, #66 on `main`
+
+Code, unit tests and the edge's loopback harness only; nothing below was run against production or a GPU. § 11
+(production guards, #63) is part of this build and stays as written. #65 (WebRTC uplink and lead trim) is **not** in
+it: § 12.6.
+
+### 12.1 What it adds
+
+| Area | New at deploy time | Needs |
+|---|---|---|
+| Routes (gateway) | `POST /v1/realtime/updates` (app key: signs a change to a live session, #68); `GET /v1/apps/:app/devices`, `POST` / `DELETE /v1/apps/:app/devices/:device/block`, `PATCH /v1/apps/:app {requireDevice}` (#62); `GET` / `PUT /v1/apps/:app/limits` (#63); `GET /v1/boot-files?d&k&exp&sig` (public, signed link a Vast replica downloads its `files` from, #64); `/health` → `commit`, `builtAt` (#63); `/v1/s2s` accepts `config.speculation` (#66) | gateway redeploy |
+| Request fields | `POST /v1/realtime/sessions`: `device`, `config.intercepts`, `config.reply_guard`, config up to 32768 base64url characters (answer carries `cfg` above 6144); header `X-Gateway-Device` on the inference routes and `/v1/s2s` | gateway redeploy; `intercepts`, `reply_guard`, config by reference, signed updates, `say`, `done.served` also need the **new edge image** |
+| Edge (replica) | signed config authoritative (#67), config by reference, intercepts, `say`, signed updates, reply guard, served ids (#68), over-long TTS cut (#63) | **new `aigw-edge` image** inside a **new `speech-stack` image** (§ 12.5) |
+| Speech stack | `/health` → `models` (ids for `done.served`), over-long TTS sentence cut, `max_new_tokens` | **new `speech-stack` image** |
+| Deployment spec | `reserveQuota` (#63), `realtime.requireWebrtc`, `files` on a Vast placement (#64) | gateway redeploy; PATCH per deployment |
+| Browser SDK | `applyUpdate`, events `intercept` / `say` / `config_applied`, `metrics.lastTurn.served`, option `device`, `voice.speculatePauseMs`, PCM voice streamed on the clip rung | the school moving its `vendor/ai-gateway` pointer and deploying |
+| State on the volume | `vast-hosts.json` (host reputation) next to `deployments.json`; `apps.json` gains `devices`, `requireDevice`, `limits` | none (written on first use; the old code ignores them) |
+
+Settings (names only; all optional, nothing is required for today's behaviour):
+
+| Setting | Where | Effect when unset |
+|---|---|---|
+| `AIGW_PUBLIC_URL` | `ai-gateway` | Railway's `RAILWAY_PUBLIC_DOMAIN` is used; without either, a spec with `files` is still skipped on a Vast placement |
+| `ALERT_WEBHOOK_URL` | `ai-gateway` | no webhook on `app.budget_warning` / `app.budget_exhausted` (telemetry only) |
+| `AI_GATEWAY_ADMIN_KEY` | `ai-gateway-reaper` | the reaper's cross-check while the gateway is up stays off (§ 11) |
+| `PUT /v1/apps/parle/limits` | API, after the deploy | the gateway-wide `APP_DAILY_REQUESTS` / `APP_DAILY_TOKENS` apply (§ 11) |
+| `PATCH … {"reserveQuota": …}` | API, per holder, after the deploy | no class-window reservation (§ 11 has the command) |
+| `PATCH /v1/apps/parle {"requireDevice": true}` | API | requests without a device id are accepted, as today. Do **not** set it before every caller of the app sends ids |
+| `S2S_SPECULATE=0`, `S2S_SPECULATE_MIN_MS`, `S2S_SPECULATE_PER_TURN`, `S2S_SPECULATE_TTL_MS` | `ai-gateway` | speculation on, 600 ms of audio at least, 2 per turn, kept 4 s. Only clients that ask for it (`voice.speculatePauseMs`) cause any |
+
+### 12.2 What tightens (#67): the browser can no longer change the session
+
+On a replica with the new edge image, a `config_update` from the client is refused whole (`error{code:"forbidden"}`,
+`edge.config.refused` with the field names) when it carries anything but:
+
+- `messages` of role `user` / `assistant` with string content (appended to the history);
+- `opener: null` (switches the signed opener off) or any other `opener` value (switches the **signed** one back on,
+  never a new one);
+- `signed` (an update the gateway signed: `POST /v1/realtime/updates`).
+
+No longer possible from the page: `system`, `voice`, `fallback_voice`, `max_tokens`, `temperature`, `stt_prompt`,
+`user_template`, `first_audio_deadline_ms`, a new `opener`, `language`, `vad`, a `system` message in `messages`. Who is
+affected:
+
+- **The SDK itself: nothing.** Every frame it sends on its own is on the list
+  (`docker/aigw-edge/tests/sdk-client-updates.json`, enforced in the SDK tests and in the edge tests). `updateHistory`
+  drops `system` messages before sending.
+- **The school's backend / page (babylon-cinema).** Anything it changed mid-session through the raw transport or a
+  patched `config_update` (prompt per scene, voice per character, opener lines) must move to the session config sent
+  at admission (`POST /v1/realtime/sessions`, now up to ~24 KB) or to a signed update from its backend
+  (`POST /v1/realtime/updates` → `session.applyUpdate(signed)`). Grep the school for `config_update` and for
+  `updateHistory` calls with a `system` role before this edge image reaches a class.
+- **The live harness.** `LIVE_VOICE_B64` / `LIVE_VOICE_TEXT` (`scripts/realtime-e2e/e2e-live.ts`) now put the cloned
+  voice in the signed session config; a sample over the 32768-character bound is refused up front (use a catalog
+  voice of the replica: `scripts/realtime-e2e/fixtures/voices.json` through the deployment's `fileUrls`).
+
+Old SDK × new edge: works, except a page that sent the fields above. New SDK × old edge (image `f66b6b80`): works for
+configs up to 6144 characters; a config by reference, `applyUpdate`, intercepts, `say` and `served` need the new edge
+(an old edge cannot open a by-reference session: it falls to the clip rungs).
+
+### 12.3 Where features meet (each has a unit test)
+
+| Meeting | Behaviour |
+|---|---|
+| Hooks (#68) on the clip rungs / composed fallback, with or without speculation (#66) | `intercepts` and `reply_guard` are carried and **not evaluated**: a command spoken there goes to the LLM and enters the history; a speculative start voices nothing. The app's backend matches the `transcript` event itself, as before |
+| Device (#62) and config digest (#68) | both optional claims in one token (`sid, app, dep, rep, cfg, [dev], iat, exp, [cfd]`); a token with neither is byte for byte the old one. A blocked device gets no session, no signaling, no signed update |
+| UDP probe (#64) | a session admitted on a replica not probed yet waits ≤ 2.5 s inside `POST /v1/realtime/sessions` (SDK timeout 5 s); it is not part of a turn and does not touch the first-audio deadline. A blocked device is refused before it |
+| `reserveQuota` (#63) and a Vast placement (#64) | inside the window another deployment's walk skips the reserved Scaleway type with the reason and continues to Vast; without a Vast placement it answers 409 `reserved` |
+| TTS cap (#63) and app lines (#68) | `say` lines, intercept `text` and openers share the cap of `3 s + 0.2 s per character`; a line read normally is never cut; one that runs away is cut and counted (`edge.tts.overlong`) |
+| History fit (#58) and signed `messages` / `drop_turn` (#68) | a replaced history is cut to the slot like any other; a dropped turn leaves whole pairs |
+
+### 12.4 Order of operations
+
+1. This PR merged into `main` after its live proof (§ 12.7); `main` green. Not during a class, not in the hour before.
+2. Volume backup and `before.json` (§ 3).
+3. **Images first, without touching production**: the `speech-stack` tag of § 12.5 exists on GHCR and on the Scaleway
+   registry with the same digest (check as § 3.5).
+4. **Gateway** (§ 4, with `bun run stamp:build`). Alone it is safe for learners on the old replica image: the routes
+   above appear, the declared `parle-speech` is patched to the new image tag, and the next cold start pulls it.
+   Verify § 5 plus `curl -s $GW/health | jq '{commit, builtAt}'`.
+5. **Reaper** redeploy (§ 4), then `AI_GATEWAY_ADMIN_KEY` on it (§ 11).
+6. One cold start of `parle-speech` outside a class (`POST /v1/deployments/parle-speech/wake`): first boot of the new
+   image; check `GET /v1/deployments/parle-speech` → replica `ready`, `udp`, and the replica's edge accepts a session
+   (`e2e-live.ts admit`, `turn ws`, `turn webrtc`).
+7. API settings: `reserveQuota` on the class-window holders, `PUT /v1/apps/parle/limits` (§ 11); optional
+   `ALERT_WEBHOOK_URL`, `AIGW_PUBLIC_URL`.
+8. **School**: move `vendor/ai-gateway`, remove any client-side change of signed fields (§ 12.2), deploy. Only then
+   may it use `intercepts`, `say`, signed updates, `device`, `speculatePauseMs`.
+
+Rollback: § 10. The old gateway ignores `devices`, `limits`, `reserveQuota`, `requireWebrtc` in the stored state and
+does not know `vast-hosts.json`; put the image tag of `parle-speech` back by hand as § 10 shows.
+
+### 12.5 Images of this build
+
+Built by CI from this branch on 2026-10-09 (UTC); nothing in production points at them until the gateway deploy.
+
+| Image | Tag | Digest | Built from |
+|---|---|---|---|
+| `ghcr.io/marcosremar/aigw-edge` | `48db2e5f` | `sha256:fe41f2628176f7dd541191454cb4cde72f2883f8bc6f1d74d0db59c1fc7c1639` | commit `48db2e5f` (workflow `aigw-edge`): #67, #68, the TTS cut of #63 |
+| `ghcr.io/marcosremar/speech-stack` (public, Vast) | `20261009-0003` | `sha256:3420c5de56cb0cc18ec70a595aad9709a19262294e03223ef1adac8e48444bfe` | commit `a74718c1` (workflow `speech-stack`), `EDGE_TAG=48db2e5f` |
+| `rg.fr-par.scw.cloud/aigw/speech-stack` (Scaleway) | `20261009-0003` | the same digest | `bun scripts/build-image-on-scaleway.ts --from ghcr.io/marcosremar/speech-stack:20261009-0003 speech-stack` (507 s; the build machine and its volume answer 404 afterwards) |
+
+In the branch: `DEFAULT_EDGE_IMAGE` and the speech-stack `EDGE_TAG` are `48db2e5f`; `SPEECH_STACK_TAG` (the profile) and
+`src/deployments/declared/parle-speech.json` (Scaleway default and the Vast placement) are `20261009-0003`. Before the
+deploy, check both registries still answer that digest (as § 3.5, with this tag). The image was never booted: its first
+start on a GPU is item 2 of § 12.7. To go back, restore the two tags `f66b6b80` / `20261008-1317` in those four places.
+
+Later pushes to the PR rebuild both images under other tags (the workflows run on every push that has `docker/` in
+the PR's diff); only the tags above are pinned.
+
+### 12.6 Not in this build
+
+- **#65** (`rt/webrtc-latency`: WebRTC uplink decoded as it arrives, first reply sentence without its silent lead,
+  harness `getStats`): still being changed and tested live when this branch was cut. It touches
+  `docker/aigw-edge/aigw_edge/{audio,host,session,upstream}.py`, the edge tests, `docs/realtime-edge.md` and
+  `scripts/realtime-e2e/{load-client.ts,load.ts,load_rtc.py,page-load.js,page-meter.js}`; here `session.py`,
+  `upstream.py` (`speak` gained `on_overlong`), the edge tests and the two `load*.ts` files changed too, so its merge
+  after this one has conflicts there, and it needs one more edge and speech-stack image.
+- Open defects of the live proof of 2026-10-08/09 that this build does **not** address:
+  - turns ending `interrupted` with `--client-deadline` (the page-ended turn and the SDK's own opener);
+  - VRAM of an L40S with 16 slots at `LLM_SLOT_CTX` 4096 not measured (production stays at 2048);
+  - the `s2s-stream` harness run hangs (`e2e-live.ts turn s2s-stream`);
+  - L40S not sold in fr-par-1 (the second placement of `parle-speech` is skipped);
+  - the Vast boot timeout (20 min) is shorter than the first pull of the 57 GB image on a slow host;
+  - the RTT gate decides after the paid pull (a far host is released only once it has booted);
+  - Vast account credit (overflow creates fail without it).
+
+### 12.7 Live proof checklist for this build
+
+On a dev gateway (`GW`, admin `KEY`, deployment `DEP` from the `speech-stack` profile with the tag of § 12.5), never
+production. `MIC` is a 16 kHz speech WAV; `RT_CONFIG` names a catalog voice.
+
+```bash
+export GW=… KEY=… DEP=parle-speech MIC=/tmp/aigw-rt-e2e/mic.wav
+export RT_CONFIG='{"system":"Você é a padeira da esquina. Responda curto, uma frase.","messages":[],"voice":"<catalog id>","fallback_voice":"default","language":"pt"}'
+curl -s $GW/health | jq '{commit, builtAt}'
+curl -s -H "Authorization: Bearer $KEY" "$GW/health?details=1" | jq .images
+bun scripts/realtime-e2e/e2e-live.ts admit
+bun scripts/realtime-e2e/e2e-live.ts turn ws
+bun scripts/realtime-e2e/e2e-live.ts turn webrtc
+LIVE_FORCE_RELAY=1 bun scripts/realtime-e2e/e2e-live.ts turn webrtc
+bun scripts/realtime-e2e/e2e-live.ts barge
+bun scripts/realtime-e2e/load.ts --n 4 --clip $MIC --profile clean --duration 300
+bun scripts/realtime-e2e/load.ts --n 4 --rtc 4 --clip $MIC --profile clean --duration 300
+bun scripts/realtime-e2e/load.ts --n 8 --s2s 8 --no-wake --speculate-lead 400 --speculate-resume 0.3 --clip $MIC --duration 180
+```
+
+| # | Item | How | Pass |
+|---|---|---|---|
+| 1 | The build is the one deployed | `/health` `commit` = the PR head; `images` shows the edge and speech-stack tags of § 12.5 | both match |
+| 2 | Turn on each rung with the new edge | `turn ws`, `turn webrtc`, relay | `done` not `interrupted`, `metrics.lastTurn.served` has `stt` / `llm` / `tts` ids and `transport` |
+| 3 | #67 | with any WebSocket client on the `ws` url of a `POST /v1/realtime/sessions` answer, send `{"type":"config_update","system":"x"}` after `ready` | `error forbidden`, next turn still the signed persona; `edge.config.refused` in telemetry |
+| 4 | Config by reference | `RT_CONFIG` with a 7 KB and a 16 KB `system` (on the L40S slot of 2048 the 7 KB one must fail every turn with `upstream` / context size: realtime.md § What fits the LLM) | session opens (`cfg` in the descriptor); 413 at 25 KB |
+| 5 | Intercepts, `say`, signed update | `RT_CONFIG` with `intercepts` (`drop` on "mais devagar", `say` on "opções"); `curl -X POST $GW/v1/realtime/updates -d '{"token":…,"update":{"say":{"text":"Bem-vinda!","history":true}}}'` and `session.applyUpdate(signed)` in the page | `intercept{tag}` then `done{intercepted}` with no LLM call; the line is heard, `config_applied{n}`, `done{said:true, served}` |
+| 6 | Reply guard | `reply_guard: {deny:["sure","of course"], note:"Responda em português."}` and an English prompt | `metrics.reply_retries: 1`, the denied sentence is not heard |
+| 7 | Devices | `POST /v1/realtime/sessions` with `device`; block it during a ws and a webrtc session | ws closes 1008 `device_blocked`; the webrtc session is deleted at the edge; new admission 403 |
+| 8 | UDP probe | first session on a fresh replica | admission ≤ ~3 s, `udp` on the replica view; on a UDP-blocked Vast host the descriptor has no `webrtc` |
+| 9 | Vast `files` | the spec with `files` and a Vast placement, `AIGW_PUBLIC_URL` set, Scaleway zones paused | `lastPlacement` on Vast, no "files are not supported" warning, the replica becomes `ready` |
+| 10 | `reserveQuota` | PATCH a window that is active now on one deployment, wake another of the same type | 409 `reserved` with the end time; with a Vast placement it lands on Vast |
+| 11 | Over-long TTS | a sentence the engine runs away with (rare: watch `edge.tts.overlong` / `tts_overlong` over the load runs) | the turn continues; no `tts` error for an audible sentence |
+| 12 | Speculation on the fallback | the `--s2s --speculate-lead` run | `s2s.stt_speculative` events, `done.speculation` `hit` on most turns, first audio earlier than the same run with `--speculate-lead 0`; no turn voiced twice |
+| 13 | Reaper | dry run against the dev gateway, with the reaper's own variables: `bun scripts/reap-orphans.ts` (no `--apply`) | lists foreign leftovers, releases nothing |
+| 14 | History | 20 turns in one session (`load.ts --n 1 --duration 400 --think 2-4`) | no `upstream` context error; `edge.llm.history_trimmed` appears |

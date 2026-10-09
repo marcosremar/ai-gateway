@@ -132,6 +132,7 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
     };
 
     const onClientData = (chunk: Buffer) => {
+      if (service.deviceBlocked(session.claims)) { shutdown(1008, 'device_blocked', 'relay'); return; }
       let messages;
       try { messages = parser.push(chunk); } catch (err) {
         const code = err instanceof WsProtocolError ? err.code : 1002;

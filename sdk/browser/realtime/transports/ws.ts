@@ -98,6 +98,7 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
         if (connected) ctx.fail(new Error(`ws closed (${e.code}${e.reason ? ` ${e.reason}` : ''})`));
       };
       await opened;
+      if (ctx.descriptor?.cfg) socket.send(JSON.stringify({ type: 'session_config', cfg: ctx.descriptor.cfg }));
       await Promise.race([
         ready,
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`no ready within ${ctx.timeouts.wsReadyMs} ms`)), ctx.timeouts.wsReadyMs)),
