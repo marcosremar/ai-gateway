@@ -132,7 +132,7 @@ inbound UDP dropped → relay, 2.3 s; no UDP and no TURN → ws in 0.13 s; first
 | `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi], probePort, net, ready, byTransport, workers, firstAudioMaxMs, shedding}` (`transports` is `["ws"]` on path `ws`; `available` is 0 while `shedding`) |
 | `POST /__aigw/rt/net` | `{udpInbound:"ok"\|"blocked", rttMs, iceServers}` from the gateway's probe → the decision (see *Reachability*) |
 | `DELETE /__aigw/rt/session/:id` | ends the WebRTC session (`sessionId` of the offer, = the token's `sid`); a WS session of the same `sid` ends when its socket closes |
-| `GET /__aigw/rt/ws?token=…&traceparent=…` | WebSocket. A refusal still upgrades, sends `{type:"error", code}` and closes 4401 (`unauthorized`) or 1013 (`capacity`/`warming`), so the code survives the relay |
+| `GET /__aigw/rt/ws` (token in `X-Aigw-Session-Token`, or `?token=…`; `traceparent` header or query) | WebSocket. A refusal still upgrades, sends `{type:"error", code}` and closes 4401 (`unauthorized`) or 1013 (`capacity`/`warming`), so the code survives the relay |
 
 Token checks (the gateway's vectors, `tests/test_units.py`): HS256 only, constant-time signature, `exp > now`,
 `iat ≤ now + 60`, `exp − iat ≤ 900`, `cfg` ≤ 6144 chars and a JSON object, `rep` = this replica (`zone:uuid` also

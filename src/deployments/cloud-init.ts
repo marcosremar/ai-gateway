@@ -58,6 +58,7 @@ export function nginxConfig(token: string, listen: number = 80, upstream = 8000,
   // `server_tokens off` drops the nginx version from headers and error pages.
   return `map $http_upgrade $aigw_conn { default "upgrade"; "" ""; }
 map $http_x_aigw_token $aigw_unauth { "${token}" ""; default $binary_remote_addr; }
+map $http_x_aigw_session_token $aigw_ws_args { "" $args; default "token=$http_x_aigw_session_token"; }
 limit_req_zone $aigw_unauth zone=aigw_unauth:1m rate=${UNAUTH_RATE_PER_SECOND}r/s;
 limit_conn_zone $aigw_unauth zone=aigw_unauth_conn:1m;
 server_tokens off;
@@ -81,7 +82,19 @@ server {
     default_type application/json;
     alias /srv/aigw/ready.json;
   }
-${rtPort ? `  location ^~ /__aigw/rt/ {
+${rtPort ? `  location = /__aigw/rt/ws {
+    access_log off;
+    error_log /dev/null crit;
+    proxy_set_header X-Aigw-Token "";
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $aigw_conn;
+    proxy_pass http://127.0.0.1:${rtPort}/__aigw/rt/ws?$aigw_ws_args;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 960;
+    proxy_send_timeout 960;
+  }
+  location ^~ /__aigw/rt/ {
     proxy_set_header X-Aigw-Token "";
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $aigw_conn;

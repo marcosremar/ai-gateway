@@ -491,14 +491,14 @@ Every answer carries `X-Aigw-Trace-Id`.
 
 ### Browser routes (session token, not an API key)
 
-Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; `?token=` on the WebSocket). CORS `*`.
+Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; on the WebSocket, the subprotocol `aigw.token.<token>` next to `aigw.rt`, or `?token=` for older clients). CORS `*`.
 
 | Route | |
 |---|---|
 | `POST /v1/realtime/sessions/:id/offer` | `{sdp}` → `{sdp, type:"answer", sessionId}`. 401 bad / expired (`token_expired`), 403 token of another session, 410 `replica_gone`, 502 `edge_error` / `edge_unreachable`, 503 `saturated` |
 | `POST /v1/realtime/sessions/:id/ice` | `{candidate}` (trickle, optional) → 204 |
 | `DELETE /v1/realtime/sessions/:id` | ends the session on the replica (frees its slot) → 204 |
-| `GET /v1/realtime/ws?token=…[&traceparent=…]` | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |
+| `GET /v1/realtime/ws[?traceparent=…]` (token as subprotocol, or `?token=`) | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |
 
 ### Environment
 
