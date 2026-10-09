@@ -188,6 +188,9 @@ export class DeploymentController extends ControllerViews {
     return this.view(name)!;
   }
 
+  private leaseSeq = 0;
+  private readonly leasedSeq = new Map<string, number>();
+
   private pick(rt: Runtime, exclude: Set<string>, stage?: string): ReplicaMachine | null {
     const ready = this.readyMachines(rt.record.spec.name).filter(m => !exclude.has(m.id) && !this.stageOut(m.id, stage));
     if (!ready.length) return null;
@@ -208,7 +211,8 @@ export class DeploymentController extends ControllerViews {
         && !this.tooSlowBeyondTarget(rt, m.id, n, target);
     });
     if (!open.length) return null;
-    return open.reduce((best, m) => (load(m) < load(best) ? m : best));
+    const turn = (m: ReplicaMachine) => this.leasedSeq.get(m.id) ?? 0;
+    return open.reduce((best, m) => (load(m) < load(best) || (load(m) === load(best) && turn(m) < turn(best)) ? m : best));
   }
 
   /**
@@ -317,6 +321,7 @@ export class DeploymentController extends ControllerViews {
     }
 
     rt.inflight++;
+    this.leasedSeq.set(machine.id, ++this.leaseSeq);
     const startedAt = this.now();
     rt.perReplica.set(machine.id, (rt.perReplica.get(machine.id) ?? 0) + 1);
     rt.record.lastRequestAt = this.now();
