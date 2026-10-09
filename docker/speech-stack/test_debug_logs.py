@@ -3,6 +3,7 @@ import asyncio
 import ipaddress
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ class App:
         return lambda fn: fn
 
 
-ns: dict = {"asyncio": asyncio, "ipaddress": ipaddress, "os": os, "re": re, "Path": Path, "app": App(), "Request": object,
+ns: dict = {"asyncio": asyncio, "subprocess": subprocess, "ipaddress": ipaddress, "os": os, "re": re, "Path": Path, "app": App(), "Request": object,
             "HTTPException": Refused, "PlainTextResponse": lambda text: text}
 exec(src[src.index("# ── Engine logs"):src.index('@app.get("/health")')], ns)
 
@@ -57,4 +58,23 @@ assert "Bearer [redacted]" in text and max(len(line) for line in out) == ns["LOG
 assert out[-1].endswith("(192/192 codec tokens) max_tokens=192"), out[-1]
 assert call("127.0.0.1", match="old").splitlines() == ["old 1", "old 2"]
 assert call("127.0.0.1", engine="llm") == "\n"
+
+asked: list = []
+
+
+def nvidia_smi(command, **_):
+    asked.append(command)
+    return SimpleNamespace(stdout="38211, 46068\n")
+
+
+ns["subprocess"] = SimpleNamespace(run=nvidia_smi)
+gpu = lambda host: asyncio.run(ns["debug_gpu"](SimpleNamespace(client=SimpleNamespace(host=host))))  # noqa: E731
+assert gpu("172.17.0.1") == {"gpu": [{"used_mb": 38211, "total_mb": 46068, "free_mb": 7857}]}, gpu("172.17.0.1")
+assert asked[0][0] == "nvidia-smi" and "--query-gpu=memory.used,memory.total" in asked[0]
+try:
+    gpu("51.15.20.7")
+    raise AssertionError("public client read /debug/gpu")
+except Refused as error:
+    assert error.status == 403
+print("ok: /debug/gpu reports used, total and free MiB per card and refuses a public client")
 print("ok: /debug/logs refuses a public client and an unknown engine, caps the tail and the line, scrubs secrets, reads the rotated file")

@@ -117,6 +117,22 @@ export class DeploymentController extends ControllerViews {
     return { view: this.view(name)!, created: !existing };
   }
 
+  async noteUdp(deployment: string, replicaId: string, udp: 'ok' | 'blocked', seen: { path?: string; active: number }): Promise<void> {
+    const rt = this.deployments.get(deployment);
+    const m = this.machines.find(x => x.id === replicaId && x.deployment === deployment);
+    if (!rt || !m) return;
+    const workedBefore = this.udp.get(m.id) === 'ok';
+    this.udp.set(m.id, udp);
+    this.backends[this.providerOf(m)]?.noteHost?.(m, { udp });
+    const unusable = udp === 'blocked' && seen.path !== 'relay' && rt.record.spec.realtime?.requireWebrtc;
+    if (!unusable || workedBefore || seen.active > 0 || m.createdAt < this.startedAt) return;
+    const note = `host ${m.zone || m.id}: inbound UDP blocked and realtime.requireWebrtc: released (udp-blocked)`;
+    rt.rejected = [...rt.rejected.slice(-4), note];
+    rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${note}`;
+    await this.release(m, 'udp-blocked');
+    this.kick();
+  }
+
   async remove(name: string): Promise<boolean> {
     const rt = this.deployments.get(name);
     if (!rt) return false;
@@ -137,8 +153,15 @@ export class DeploymentController extends ControllerViews {
    * Marks the deployment as in use (scales from zero) without sending a request. Persisted like a request's time: a
    * deployment used only through `wake` (realtime sessions) must not read as never used after a restart.
    */
+  private refuseReserved(rt: Runtime): void {
+    if (rt.creating || this.machines.some(m => m.deployment === rt.record.spec.name)) return;
+    const block = this.reservationBlock(rt);
+    if (block) throw new DeploymentError(409, block.reason, Math.max(1, Math.ceil((block.endsAt - this.now()) / 1000)), 'reserved');
+  }
+
   wake(name: string): DeploymentView {
     const rt = this.require(name);
+    this.refuseReserved(rt);
     rt.record.lastRequestAt = this.now();
     this.persistRequestTime(rt);
     this.kick();
@@ -288,6 +311,7 @@ export class DeploymentController extends ControllerViews {
     let machine = this.pick(rt, exclude, opts.stage);
     const spent = machine || serving.length ? null : this.budgetRefusal(rt);
     if (spent) throw new DeploymentError(503, `deployment '${name}': ${spent}`, 3600);
+    if (!machine && !serving.length) this.refuseReserved(rt);
     // Saturated and the caller has a fallback (waitMs 0): no wait — refused below as `saturated`.
     const spill = !machine && opts.waitMs === 0 && this.servingMachines(name).length > 0;
     if (!machine && !spill) {

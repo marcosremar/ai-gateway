@@ -11,9 +11,11 @@ import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-p
 import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
 import {
   BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, lowestRtt, MIN_RELIABILITY, TOO_FAR_HOST_MS,
-  VastDeploymentBackend, vastState,
+  UDP_BLOCKED_HOST_MS, VastDeploymentBackend, vastState,
 } from '../../../src/deployments/vast-backend';
+import { FileHostStore, type HostRecord, type HostStore } from '../../../src/deployments/host-reputation';
 import type { DeploymentSpec } from '../../../src/deployments/types';
+import { until } from './_fake-cloud';
 
 const TOKEN = 'abcdefghijklmnopqrstuvwxyz012345';
 const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
@@ -360,6 +362,110 @@ describe('VastDeploymentBackend known-good hosts and the baseline', () => {
     expect(await backend.measureBaselineRtt('FR')).toBeNull();
     expect(await backend.measureBaselineRtt('BR')).toBeNull();
     expect(seen).toEqual(['s3.fr-par.scw.cloud:80', 's3.fr-par.scw.cloud:80']);
+  });
+});
+
+describe('VastDeploymentBackend host reputation', () => {
+  const market = [
+    { id: 2, machine_id: 102, geolocation: 'Paris, FR', dph_total: 0.45, reliability2: 0.99, inet_down: 900 },
+    { id: 5, machine_id: 105, geolocation: 'London, GB', dph_total: 0.49, reliability2: 0.99, inet_down: 900 },
+    { id: 6, machine_id: 106, geolocation: 'Zurich, CH', dph_total: 0.30, reliability2: 0.99, inet_down: 900 },
+    { id: 7, machine_id: 107, geolocation: 'Lyon, FR', dph_total: 0.40, reliability2: 0.99, inet_down: 900 },
+  ];
+  const memoryStore = (): HostStore & { saved: HostRecord[] } => {
+    const store = { saved: [] as HostRecord[], load: async () => structuredClone(store.saved), save: async (hosts: HostRecord[]) => { store.saved = structuredClone(hosts); } };
+    return store;
+  };
+  const rig = (store?: HostStore) => {
+    const clock = { now: 1_000_000 };
+    const { fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers: market } };
+      if (method === 'PUT') return { body: { success: true, new_contract: Number(url.match(/asks\/(\d+)/)![1]) * 100 } };
+      if (method === 'GET') return { body: { instances: [{ id: 1, label: 'aigw:prod:speech', machine_id: 107 }, { id: 2, label: 'aigw:prod:speech', machine_id: 102 }] } };
+      return { body: { success: true } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => clock.now, ...(store ? { hosts: store } : {}) });
+    return { clock, backend, input: { spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' } };
+  };
+
+  it('what each host did survives a gateway restart: the bad host stays skipped with its reason, the good one is tried first', async () => {
+    const store = memoryStore();
+    const before = rig(store);
+    const lyon = await before.backend.createReplica(before.input);
+    expect(lyon.id).toBe('700');
+    before.backend.noteHost(lyon, { rttMs: 136, baselineMs: 71 });
+    await before.backend.releaseReplica(lyon, 'too-far');
+    const london = await before.backend.createReplica({ ...before.input, spec: vastSpec({ near: 'GB' }) });
+    before.backend.recordRtt(london, 53, 47);
+    before.backend.noteHost(london, { bootMs: 392_562 });
+    before.backend.noteHost(london, { udp: 'ok' });
+    await before.backend.releaseReplica(london, 'scale-down');
+
+    const after = rig(store);
+    const report = await after.backend.offersReport(after.input.spec);
+    expect(report.offers.map(o => [o.location, o.knownRttMs])).toEqual([['London, GB', 53], ['Paris, FR', null], ['Zurich, CH', null]]);
+    expect(report.offers[0].host).toMatchObject({
+      host: 105, location: 'London, GB', bootsOk: 1, bootsFailed: 0, bootMs: 392_562, rttMs: 53, baselineMs: 47, udp: 'ok', lastError: null,
+    });
+    expect(report.skipped).toEqual([{
+      offerId: 7, machineId: 107, location: 'Lyon, FR', usdPerHour: 0.4,
+      reason: `too-far until ${new Date(1_000_000 + TOO_FAR_HOST_MS).toISOString()}`,
+    }]);
+    expect(report.hosts.find(h => h.host === 107)).toMatchObject({ bootsFailed: 1, rttMs: 136, baselineMs: 71, lastError: 'too-far', lastErrorAt: 1_000_000 });
+    expect((await after.backend.createReplica(after.input)).placementNote).toBe('offer 1 of 3: London, GB, $0.49/h, passed the RTT gate at 53 ms');
+    after.clock.now += TOO_FAR_HOST_MS + 1;
+    expect((await after.backend.previewOffers(after.input.spec)).map(o => o.location)).toEqual(['Lyon, FR', 'Paris, FR', 'London, GB', 'Zurich, CH']);
+  });
+
+  it('known hosts are ranked by RTT over the anchor, not by raw RTT or price', async () => {
+    const { backend, input } = rig();
+    const [lyon, paris] = await backend.listReplicas('prod');
+    backend.recordRtt(lyon, 50, 20);
+    backend.recordRtt(paris, 60, 50);
+    expect((await backend.previewOffers(input.spec)).map(o => [o.location, o.knownRttMs]))
+      .toEqual([['Paris, FR', 60], ['Lyon, FR', 50], ['Zurich, CH', null], ['London, GB', null]]);
+  });
+
+  it('inside a band and a country, a host that booted the image before goes before a cheaper unknown one', async () => {
+    const { backend, input } = rig();
+    expect((await backend.previewOffers(input.spec)).map(o => o.location)).toEqual(['Lyon, FR', 'Paris, FR', 'Zurich, CH', 'London, GB']);
+    const [, paris] = await backend.listReplicas('prod');
+    backend.noteHost(paris, { bootMs: 400_000 });
+    expect((await backend.previewOffers(input.spec)).map(o => [o.location, o.host?.bootsOk ?? 0]))
+      .toEqual([['Paris, FR', 1], ['Lyon, FR', 0], ['Zurich, CH', 0], ['London, GB', 0]]);
+  });
+
+  it('a host whose inbound UDP was blocked is skipped only for a spec that requires WebRTC, and only for a day', async () => {
+    const { clock, backend, input } = rig();
+    const lyon = await backend.createReplica(input);
+    backend.noteHost(lyon, { udp: 'blocked' });
+    await backend.releaseReplica(lyon, 'udp-blocked');
+    const ws = vastSpec({ realtime: { maxSessions: 4 } });
+    const rtc = vastSpec({ realtime: { maxSessions: 4, requireWebrtc: true } });
+    expect((await backend.previewOffers(ws))[0].location).toBe('Lyon, FR');
+    const report = await backend.offersReport(rtc);
+    expect(report.offers.map(o => o.location)).toEqual(['Paris, FR', 'Zurich, CH', 'London, GB']);
+    expect(report.skipped[0].reason).toBe(`inbound UDP blocked until ${new Date(1_000_000 + UDP_BLOCKED_HOST_MS).toISOString()} (realtime.requireWebrtc)`);
+    expect(report.hosts[0]).toMatchObject({ host: 107, udp: 'blocked', bootsFailed: 1, lastError: 'udp-blocked', avoidUntil: 1_000_000 });
+    clock.now += UDP_BLOCKED_HOST_MS + 1;
+    expect((await backend.previewOffers(rtc))[0].location).toBe('Lyon, FR');
+  });
+
+  it('the file store writes vast-hosts.json next to the deployments state and reads it back; no file = no history', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aigw-hosts-'));
+    try {
+      expect(await FileHostStore.inDir(dir).load()).toEqual([]);
+      const { backend, input } = rig(FileHostStore.inDir(dir));
+      await backend.releaseReplica(await backend.createReplica(input), 'boot-timeout');
+      await until(() => existsSync(join(dir, 'vast-hosts.json')) && readFileSync(join(dir, 'vast-hosts.json'), 'utf8').includes('boot-timeout'));
+      expect(await FileHostStore.inDir(dir).load()).toEqual([expect.objectContaining({ host: 107, lastError: 'boot-timeout', bootsFailed: 1 })]);
+      expect(rig(FileHostStore.inDir(dir)).backend.avoidedHosts()).toEqual([]);
+      const restarted = rig(FileHostStore.inDir(dir));
+      await restarted.backend.previewOffers(input.spec);
+      expect(restarted.backend.avoidedHosts()).toEqual([107]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -5,6 +5,7 @@ import {
   type TransportContext,
 } from '../../sdk/browser/realtime/index';
 import { encodeAudio, encodeEvent } from '../../src/s2s/frames';
+import { edgeRefusal } from './_edge-client-updates';
 
 const LINES = ['Hum, deixa eu ver.', 'Um instante.'];
 const ENDPOINT_MS = 700;
@@ -59,7 +60,7 @@ class FakeWs {
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onclose: ((e: { code: number; reason: string }) => void) | null = null;
   constructor(readonly url: string) { FakeWs.last = this; setTimeout(() => { this.readyState = 1; this.onopen?.(); setTimeout(() => this.onmessage?.({ data: '{"type":"ready"}' }), 5); }, 5); }
-  send(d: unknown) { this.sent.push(d); }
+  send(d: unknown) { if (typeof d === 'string') expect(edgeRefusal(JSON.parse(d))).toBeNull(); this.sent.push(d); }
   close(code = 1000, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }); }
   edge(event: Record<string, unknown>) { this.onmessage?.({ data: JSON.stringify(event) }); }
   audio(ms: number) { for (let i = 0; i < ms / 20; i++) this.onmessage?.({ data: encodeAudioFrame(new Int16Array(480).fill(9000)).buffer }); }
@@ -90,7 +91,7 @@ function open(extra: Partial<RealtimeSessionOptions> = {}) {
       }),
       webrtc: (c): RealtimeTransport => {
         rtc.ctx = c;
-        return { type: 'webrtc', clipBased: false, connect: async () => {}, send: (m) => { rtc.sent.push(m); }, close: () => {} };
+        return { type: 'webrtc', clipBased: false, connect: async () => {}, send: (m) => { expect(edgeRefusal(m)).toBeNull(); rtc.sent.push(m); }, close: () => {} };
       },
       's2s-stream': (c): RealtimeTransport => ({
         type: 's2s-stream', clipBased: true, connect: async () => {}, send: () => {}, close: () => {},
