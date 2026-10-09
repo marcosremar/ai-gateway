@@ -7,7 +7,7 @@
  *   … --from ghcr.io/marcosremar/speech-stack:<tag> speech-stack   no build: copies that public image, same tag and
  *       digest, into the Scaleway registry (crane on the machine; the source is pulled anonymously)
  *   … --app parle [--gateway https://parle-ai-gateway.up.railway.app]   also saves the address in the app's account
- *       (PUT /v1/apps/parle/images/speech-stack, with SANDBOX_TOKEN), so deploys name it: {"appImage": "speech-stack"}
+ *       (PUT /v1/apps/parle/images/speech-stack: an admin key, AI_GATEWAY_ADMIN_KEY), so deploys name it: {"appImage": "speech-stack"}
  *
  * The machine serves only its build status on :80 (/done.json, /build.log — no secrets), the script polls it, prints
  * the log tail, and deletes the machine (and its volume) whatever happens.
@@ -134,7 +134,7 @@ try {
 log('result', JSON.stringify(result));
 if (result.ok && appId) {
   // Save the address in the app's account: later deploys name the image instead of carrying the registry address.
-  const token = process.env.SANDBOX_TOKEN || process.env.PALCO_PROXY_TOKEN || process.env.PALCO_PROXY;
+  const token = process.env.AI_GATEWAY_ADMIN_KEY || process.env.SANDBOX_TOKEN || process.env.PALCO_PROXY_TOKEN || process.env.PALCO_PROXY;
   const digest = typeof result.digest === 'string' ? result.digest.split('@')[1] ?? null : null;
   const res = await fetch(`${gatewayUrl}/v1/apps/${appId}/images/${imageName}`, {
     method: 'PUT',

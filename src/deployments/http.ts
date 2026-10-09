@@ -285,6 +285,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const image = registry.image(app, imageName);
       return image ? send(res, 200, image) : send(res, 404, { error: `app '${app}' has no image '${imageName}'` });
     }
+    if ((method === 'PUT' || method === 'DELETE') && !isAdmin(req)) {
+      return send(res, 403, { error: 'saved app images run with the deployment\'s secrets: only an admin key may change them' });
+    }
     if (method === 'PUT') {
       const { image, created } = await registry.putImage(app, imageName, await readJson(req));
       return send(res, created ? 201 : 200, image);
