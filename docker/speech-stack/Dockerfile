@@ -2,7 +2,7 @@
 # registry next to the GPU instead of downloading from Hugging Face at boot (a boot-time HF download failed on a real
 # L4 on 2026-10-04).
 ARG LLAMA_TAG=server-cuda-b11382
-ARG EDGE_TAG=f66b6b80
+ARG EDGE_TAG=48db2e5f
 FROM ghcr.io/ggml-org/llama.cpp:${LLAMA_TAG} AS llama
 FROM ghcr.io/marcosremar/aigw-edge:${EDGE_TAG} AS edge
 
