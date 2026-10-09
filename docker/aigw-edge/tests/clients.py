@@ -5,6 +5,7 @@ import base64
 import fractions
 import json
 import math
+import random
 import time
 import uuid
 
@@ -13,6 +14,7 @@ import av
 import numpy as np
 from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError
+from aiortc.rtp import is_rtcp
 
 import sys
 from pathlib import Path
@@ -240,6 +242,28 @@ class RtcLearner:
                         self.first_audio_at = time.monotonic()
         except (MediaStreamError, asyncio.CancelledError):
             pass
+
+    def impair(self, loss: float, jitter_s: float, seed: int = 7) -> None:
+        rng, loop, dtls = random.Random(seed), asyncio.get_running_loop(), self.pc.getSenders()[0].transport
+        send, handle = dtls._send_rtp, dtls._handle_rtp_data
+        release = {"up": 0.0, "down": 0.0}
+
+        def through(way: str, call, *args) -> None:
+            if rng.random() < loss:
+                return
+            release[way] = max(release[way] + 1e-4, loop.time() + rng.random() * jitter_s)
+            loop.call_at(release[way], lambda: asyncio.ensure_future(call(*args)))
+
+        async def send_rtp(data: bytes) -> None:
+            if is_rtcp(data):
+                await send(data)
+            else:
+                through("up", send, data)
+
+        async def handle_rtp(data: bytes, arrival_time_ms: int) -> None:
+            through("down", handle, data, arrival_time_ms)
+
+        dtls._send_rtp, dtls._handle_rtp_data = send_rtp, handle_rtp
 
     def activate(self) -> None:
         self.sender.replaceTrack(self.mic)

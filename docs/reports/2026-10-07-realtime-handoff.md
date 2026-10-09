@@ -1902,3 +1902,136 @@ asked again, only the second reply is voiced; same words → the speculative LLM
 charged once (`admit` called with `charge` false then true). `sdk-realtime-speculate.test.ts` (the rung and the VAD
 effects), `sdk-voice-turn.test.ts` (turn-taking), `gateway-routing/tts-pcm-as-wav.test.ts` (streamed WAV header, rate
 from the provider, MP3 untouched).
+
+## WebRTC: conserto da descida e prova ao vivo (2026-10-09)
+
+Branch `rt/webrtc-latency` (PR #65). Gateway local em :4170 (`bun serve.ts`, namespace `marcos-webrtc`, estado próprio,
+`DEPLOYMENTS_MAX_REPLICAS=1`), um L40S-1-48G fr-par-2 do perfil `speech-stack` por vez (imagem `20261008-1317`,
+€1,4699/h, `placements: []`, `realtime.maxSessions` 8 só no spec do teste). Sexta 09/10, 01:26 → 03:27 Europe/Paris;
+produção só lida. Mesmo clipe sintético de 4,5 s, prompt de 509 tokens, voz e aberturas da prova da noite anterior.
+Relógio: última amostra com voz enviada → primeiro áudio não silencioso recebido (os 700 ms de endpointing estão
+dentro). Clientes leves (`ws` em Bun, `webrtc` em aiortc) e Chromium 154 num contêiner Linux no Mac, atrás de um netns
+com `tc` (perfis `clean`, `campus-slow`, `lossy`); Chrome real do Mac nas rodadas «Chrome (Mac)».
+
+**Antes e depois não são a mesma máquina.** O sidecar sobe do cloud-init (`docker run` de `realtime.edgeImage`) e não
+há SSH: trocar o edge é outra máquina. Foram dois boots em sequência (530 s e 500 s), nunca dois L40S meus ao mesmo
+tempo, mesma zona, tipo e imagem de modelos, mesmo harness nas duas pontas. Antes = edge `f66b6b80`; depois = edge
+`a5dd777f` (esta branch). O WS, que não mudou, serve de controle: 1305 → 1273 ms entre as duas máquinas.
+
+### Veredito contra o alvo
+
+| Alvo | Resultado |
+|---|---|
+| Rede limpa: WebRTC a ~100 ms do WS no p50 | **sim nos clientes leves**: +25 ms (1298 contra 1273, n 197 / 199); +41 com tempo de pensar; −25 na rodada limpa do contêiner. **No Chrome real: +100 ms com 1 aluno, +180 com 4** no medidor da página (+32 / +128 no instante em que o áudio sai do jitter buffer) |
+| Rede limpa: máximo do WebRTC ≤ 2500 ms | **sim**: 1944 (leves, 197 turnos), 2042 (pensar), 1291 (Chrome, 40 turnos). Antes: 2265 |
+| `lossy`: p95 do WebRTC melhor que o do WS | **sim**: 2124 contra 2373 (p50 1270 contra 1487, max 2154 contra 2961) |
+| `campus-slow`: p95 do WebRTC melhor que o do WS | **sim**: 1570 contra 1857 (p50 1104 contra 1182); antes era pior (2229 contra 1824) |
+
+### Antes × depois, clientes leves, ms p50 / p95 / max
+
+| Rodada | | WS antes | WebRTC antes | WS depois | WebRTC depois |
+|---|---|---|---|---|---|
+| Limpa, 4 + 4, 760 s, um turno a cada 15 ± 2 s | primeiro som | 1305 / 1767 / 1888 (n 191) | 1705 / 2177 / 2265 (n 191) | 1273 / 1776 / 1943 (n 199) | **1298 / 1893 / 1944** (n 197) |
+| | subida: fim da fala → `vad end` | 747 / 806 / 833 | 944 / 1090 / 1171 | 748 / 819 / 985 | 768 / 845 / 932 |
+| | estágios: `ttfa` do edge (stt · llm · tts p50) | 533 / 2311 (344 · 357 · 107) | 624 / 2615 (378 · 364 · 121) | 517 / 2191 (357 · 321 · 116) | 448 / 2583 (313 · 308 · 114) |
+| | descida: `audio_start` → primeiro quadro audível | 0 / 154 | 79 / 308 | 0 / 104 | 40 / 233 |
+| | diferença WebRTC − WS no p50 | | **+400** | | **+25** |
+| `lossy` (75 ms, 5 %), 3 + 3, 180 s | primeiro som | 1827 / 3469 / 3593 (n 32) | 1945 / 2392 / 2397 (n 31) | 1487 / 2373 / 2961 (n 35) | **1270 / 2124 / 2154** (n 32) |
+| | subida | 1119 / 3199 | 1414 / 1854 | 985 / 1755 | 917 / 1125 |
+| | transcrição idêntica à do clipe | 32 / 32 | 3 / 31 | 35 / 35 | 17 / 32 |
+| `campus-slow` (2 Mbit ↓, 512 kbit ↑, 40 ± 10 ms, 1 %), 3 + 3 | primeiro som | 1190 / 1824 / 1837 (n 34) | 1590 / 2229 / 2229 (n 35) | 1182 / 1857 / 1872 (n 27, + 3 `timeout`) | **1104 / 1570 / 1756** (n 31) |
+| Limpa, 3 + 3 + 2 Chromium, 180 s | primeiro som | — | — | 1230 / 1746 / 1755 (n 34) | 1205 / 1792 / 1862 (n 33) |
+| Limpa, 4 + 4, `--think 2-6`, 300 s | primeiro som | — | — | 1146 / 1771 / 2055 (n 69) | 1187 / 1920 / 2042 (n 67) |
+
+0 falhas e 0 turnos filtrados nos clientes leves, antes e depois, salvo os 3 `timeout` do WS no `campus-slow`. Turnos
+`short_audio` na rodada limpa: antes 4 (WS) e 20 (WebRTC), depois 10 e 4. Com 8 sessões no L40S (o perfil serve 4)
+cerca de um turno em cinco começa por abertura (87 antes, 70 depois), igual nos dois transportes.
+
+### Chrome real (Mac, Google Chrome, SDK), rede limpa, ms p50 / p95 / max
+
+| | WS antes | WebRTC antes | WS depois | WebRTC depois |
+|---|---|---|---|---|
+| 4 + 4 alunos: audível no medidor da página | 917 / 1252 / 1285 (n 40) | 1352 / 1660 / 1852 (n 36) | 914 / 1080 / 1095 (n 40) | **1094 / 1279 / 1291** (n 40) |
+| subida: fim da fala → `vad end` | 765 / 846 | 1020 / 1054 | 769 / 834 | 754 / 829 |
+| estágios: `ttfa` (stt p50) | 100 / 260 (208) | 99 / 247 (208) | 102 / 276 (208) | 104 / 277 (207) |
+| descida: `audio_start` → medidor | 37 / 195 | 234 / 430 | 26 / 117 | 185 / 338 |
+| — `audio_start` → áudio entregue pelo jitter buffer | | 167 / 374 | | 143 / 286 |
+| — jitter buffer (`jitterBufferDelay` / `EmittedCount`) | | 116 / 211 | | 116 / 162 |
+| — entrega → medidor (nó WebAudio do harness) | | 56 | | 39 |
+| primeiro som no instante da entrega | | 1289 / 1604 / 1790 | | 1042 / 1219 / 1234 |
+| 1 + 1 aluno: audível no medidor | 1061 / 1791 (n 10) | 1457 / 1632 (n 9) | 976 / 1086 (n 10) | **1076 / 1241** (n 9) |
+
+`getStats` do WebRTC no Chrome, depois (4 alunos, 150 s cada): jitter buffer 111–123 ms p50, 157–168 p95; alvo e mínimo
+do NetEq 100 ms p50, 120–140 p95; jitter entre chegadas 3–4 ms p50, 12–15 p95; RTT 43–52 ms; 0 pacotes perdidos em
+~8100 por aluno; 0,1–0,2 % de amostras ocultadas; na subida 1–3 pacotes perdidos e jitter de 8–9 ms. No Chromium do
+contêiner: `campus-slow` 92 / 132 ms de buffer, alvo 120, 112 perdidos em 9510, 1 % ocultado; `lossy` (antes) 90 ms,
+alvo 120, 514 perdidos em 9083, 4,4 % ocultado. Na pilha local sem rede (modelos falsos) o mesmo Chromium fica em
+20–30 ms com alvo 20.
+
+Do lado do edge, por resposta (`metrics`, 197 turnos, 8 sessões): primeiro PCM do TTS → primeiro pacote RTP entregue ao
+transporte 12 ms p50 / 20 p95 / 24 max; pacotes dos 2 s seguintes saem 2–3 ms depois da grade de 20 ms no p95, 12 ms
+no pior caso (17 no `lossy`). O jitter que o NetEq vê é do caminho (Wi-Fi do Mac → Scaleway), não do edge.
+
+### Onde estava a diferença e o que mudou
+
+| Trecho | Antes | Causa | Conserto | Depois |
+|---|---|---|---|---|
+| Subida | +197 ms (leves), **+255 ms (Chrome)** | o jitter buffer de áudio do aiortc no edge: 80 ms em todo turno e 280 ms de atraso permanente depois de um pacote perdido | `audio.ArrivalOrder` (primeiro commit do PR): o pacote vira quadro ao chegar | +20 ms (leves, é o Opus do cliente aiortc); **−15 ms no Chrome** |
+| Subida com perda | fim de turno esticado, transcrição mutilada (3 de 31 intactas) | pacote perdido sumia do relógio do VAD e do clipe | `audio.GapFill`: o buraco no timestamp RTP entra como silêncio (até 1 s); `metrics.uplink_lost_ms` | `vad end` no harness a 10 % de perda 781–821 → 741–762 ms; 17 de 32 transcrições intactas |
+| Estágios | +54 (noite anterior), +91 (antes) | nenhuma no edge: com modelos falsos os estágios são iguais (54 contra 54 ms); a diferença vinha da ordem de chegada na GPU. No Chrome lado a lado os dois alunos falavam em uníssono e o segundo a chegar esperava o STT do primeiro (385 contra 206 ms) | harness: os Chrome entram escalonados | 448 contra 517 (leves), 104 contra 102 (Chrome): sem diferença |
+| Descida, edge | 20 ms em toda resposta | o encoder Opus do aiortc recebia 24 kHz e o reamostrador dele segurava cada quadro até o seguinte chegar | o `OutTrack` entrega 48 kHz (`audio.upsample2`) | harness: `audio_start` → primeiro quadro 26–28 → 8–9 ms |
+| Descida, primeira frase | até 150–240 ms no p95 | silêncio que o TTS põe antes da frase | corte do silêncio inicial da primeira frase (primeiro commit do PR) | p95 da descida 308 → 233 (leves), 430 → 338 (Chrome) |
+| Descida, navegador | 116 ms | jitter buffer do NetEq, alvo 100 ms neste caminho | nenhum: `jitterBufferTarget = 0` já é aplicado no receptor certo antes da mídia (o mínimo medido é o do próprio NetEq), o edge manda silêncio contínuo com timestamps contínuos e no ritmo | 116 ms: **é o que resta** |
+
+O que resta, por medida: nos clientes leves +25 ms no p50 (20 da subida, que é o cliente aiortc reamostrando o
+microfone de 16 kHz; a descida de 40 ms é o tique de 20 ms mais o Opus, contra um WS cujo medidor carimba a chegada de
+áudio enviado 200 ms adiantado). No Chrome +180 ms no medidor com 4 alunos: 116 do jitter buffer do navegador, ~40 do
+nó WebAudio por onde o harness mede o WebRTC, ~15 do tique e do Opus, menos 15 da subida que ficou mais rápida que a do
+WS. O jitter buffer depende da rede do aluno (20 ms numa rede sem jitter) e é o que segura o áudio inteiro sob perda.
+
+### Não feito, e por quê
+
+- **FEC / PLC do Opus na subida:** o aiortc 1.15 decodifica pelo wrapper libopus do PyAV, que não tem a flag de FEC e
+  não devolve nada para um pacote ausente. Precisaria chamar o libopus direto. Com 5 % de perda metade das
+  transcrições sai diferente do clipe (65–66 caracteres em vez de 68); no WS saem todas iguais.
+- **Parar o silêncio entre respostas** (para o NetEq começar a fala abaixo do alvo): não testado. O PyAV carimba o
+  primeiro pacote depois de um buraco como se não houvesse buraco e o navegador ocultaria em vez de tocar silêncio.
+- **Subida atrasada pelo cliente** (os 3500 ms da noite anterior): nesta madrugada o pior fim da fala → `vad end` no
+  WebRTC limpo foi 935 ms. Um atraso de segundos na rede do aluno continua sem defesa no edge; é o teto do relógio do
+  aluno (#59).
+- **Conexão WebRTC sob `lossy`:** o Chromium forçado em `webrtc` não conectou em 3000 ms (`webrtcConnectMs` do SDK) na
+  rodada «depois»; os clientes aiortc, com 8 s de prazo, levaram 2000 ms p50 e 3393 p95. Onde o WebRTC mais ajuda é
+  onde ele mais demora a subir: o prazo da tentativa em segundo plano merece ser maior. Não mexido.
+- **Rodadas perdidas:** a primeira «Chrome 4 + 4» do antes ficou presa ao fechar os navegadores (o harness agora grava
+  o resultado antes de fechar e desiste de uma página que não volta); uma «Chrome 1 + 1» do antes perdeu as duas
+  sessões aos 55 s (WS e WebRTC juntos, rede do Mac). A «1 + 1» do antes que ficou é a em uníssono.
+
+### Máquinas e custo
+
+| Máquina | De – até (Paris) | Minutos |
+|---|---|---|
+| `6af8d92e` (antes) | 01:26:12 – 02:19:44 | 53,5 |
+| `e9f63425` (depois) | 02:38:58 – 03:26:34 | 47,6 |
+
+101 minutos de L40S, **~€2,48**. Entre as duas a criação foi recusada por cota durante 19 min: a produção
+(`aigw-ns-prod`, `parle-speech`) subiu dois L40S às 00:18Z e 00:20Z, o segundo 71 s depois de eu soltar o meu. Nenhum
+L4, nenhum Vast, nenhuma outra máquina; nada escrito em produção. `DELETE /v1/deployments/wl-speech` às 03:26:34 →
+`Terminated server e9f63425…`, volumes apagados às 03:26:49; gateway local parado. Reaper em dry run com o gateway fora
+(`GATEWAY_URL=http://localhost:4170 DEPLOYMENTS_NAMESPACE=marcos-webrtc bun scripts/reap-orphans.ts`): `scaleway seen:
+0`, `vast seen: 0`, `planned: []`. Lista direta do projeto (nove zonas) às 01:29Z: nenhum servidor
+`aigw-ns-marcos-webrtc`; o que há é da produção (um L40S `parle-speech`, dois L4 `parle-qwen-tts`) e dois
+`whisper-stt` parados de `dev-marmos`.
+
+### Imagem do edge
+
+`ghcr.io/marcosremar/aigw-edge:a5dd777f` (workflow `aigw-edge.yml`, disparado pelo push no PR). `DEFAULT_EDGE_IMAGE`
+passa a apontar para ela neste PR: é o que o Scaleway sobe. O `EDGE_TAG` da imagem `speech-stack` (o edge que roda no
+Vast, de `/opt/aigw-edge`) continua `f66b6b80` até a próxima construção daquela imagem; o teste que prendia os dois ao
+mesmo valor agora prende cada um ao seu.
+
+### Transporte padrão
+
+Manter a escada como está (WS em 0,2–0,5 s, WebRTC em segundo plano e troca quando sobe), com o edge novo. Na rede
+limpa os dois empatam nos clientes leves e o Chrome paga 100–180 ms pelo jitter buffer; em `campus-slow` e `lossy` o
+WebRTC ganha 290 e 250 ms no p95 e 800 ms no máximo, e o WS teve os únicos turnos perdidos. Trocar o padrão para WS só
+compensa numa turma em rede boa e estável.

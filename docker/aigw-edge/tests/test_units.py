@@ -275,6 +275,12 @@ try:
             except UpstreamError as raised:
                 error = raised
             out[name] = (pcm, [r.request_id for r in retries], error, fake_upstream.calls["tts_log"][mark:], overlong)
+        fake_upstream.tts_faults.update({"Bom dia!": ["lead"]})
+        out["first"] = b"".join([chunk async for chunk in up.speak("Bom dia!", {}, {"voice": "x"}, trim_lead=True)])
+        fake_upstream.tts_faults.update({"Bom dia!": ["overlong"]})
+        cut_first: list[str] = []
+        out["first overlong"] = (b"".join([chunk async for chunk in up.speak("Bom dia!", {}, {"voice": "x"}, None, None, cut_first.append, True)]),
+                                 cut_first)
         await asyncio.sleep(0.1)
         await up.close()
         await runner.cleanup()
@@ -299,6 +305,10 @@ try:
           and isinstance(guard["cut"][2], UpstreamError) and guard["cut"][2].stage == "tts")
     check("tts guard: a silent lead under the limit is kept and not retried",
           guard["lead"][0] == bytes(24000) + said and guard["lead"][1] == [] and len(guard["lead"][3]) == 1)
+    check("tts guard: the first sentence of a reply starts 10 ms before its first sound (0.5 s of lead dropped)",
+          guard["first"].endswith(said) and len(guard["first"]) - len(said) <= 480)
+    check("lead trim × tts cap: a first sentence the engine runs away with is cut at the same cap and counted once",
+          len(guard["first overlong"][0]) == int(4.6 * 24000) * 2 and len(guard["first overlong"][1]) == 1)
     check("tts guard: the retry drops its silent lead",
           guard["late"][0].endswith(said) and len(guard["late"][0]) < len(said) + 4800 and len(guard["late"][1]) == 1)
     check("tts guard: audible audio past the cap is cut at the cap (4.6 s for 8 characters), counted once, no error, no retry",
@@ -439,6 +449,52 @@ try:
         rms = float(np.sqrt(np.mean(y * y))) / (0.5 * 32767 / np.sqrt(2))
         check(f"downsampler 48→16 kHz: {freq} Hz {want} (gain {rms:.2f})", (rms > 0.95) if want == "kept" else (rms < 0.05))
     check("downsampler: 3:1 length", len(down.push(np.zeros(960, dtype=np.int16), 1)) == 320 * 2)
+
+    from aiortc import rtcrtpreceiver
+    from aiortc.jitterbuffer import JitterBuffer
+    from aiortc.rtp import RtpPacket
+    from aigw_edge import audio
+
+    def through(buffer, order) -> tuple[int, int]:
+        behind, frames = 0, 0
+        for n in order:
+            packet = RtpPacket(sequence_number=n % 65536, timestamp=n * 960)
+            packet._data = b"x"
+            frame = buffer.add(packet)[1]
+            if frame is not None:
+                behind, frames = n - frame.timestamp // 960, frames + 1
+        return behind, len(order) - frames
+
+    whole, one_lost = list(range(65500, 65700)), [n for n in range(65500, 65700) if n != 65550]
+    check("aiortc's audio jitter buffer: 4 frames (80 ms) behind; after one lost packet 14 (280 ms) for the rest of the call",
+          through(JitterBuffer(16, 4), whole)[0] == 4 and through(JitterBuffer(16, 4), one_lost)[0] == 14)
+    check("webrtc uplink: a packet is a frame as it arrives, before and after a lost packet",
+          through(audio.ArrivalOrder(), whole) == (0, 0) and through(audio.ArrivalOrder(), one_lost) == (0, 0))
+    check("webrtc uplink: a late or repeated packet is dropped", through(audio.ArrivalOrder(), [7, 9, 8, 9, 10]) == (0, 2))
+    audio.install()
+    check("webrtc uplink: installed for audio, aiortc's own buffer stays for video",
+          isinstance(rtcrtpreceiver.JitterBuffer(capacity=16, prefetch=4), audio.ArrivalOrder)
+          and isinstance(rtcrtpreceiver.JitterBuffer(capacity=128, is_video=True), JitterBuffer))
+    gaps = audio.GapFill()
+    check("webrtc uplink: a gap in the RTP timestamps is the lost audio, counted as elapsed time, at most 1 s of it",
+          [gaps.missing(pts, 960) for pts in (0, 960, 2880, 3840, 500000)] == [0, 0, 960, 0, 48000])
+    doubled = audio.upsample2(np.array([100, 200, -50], dtype=np.int16), 0)
+    check("webrtc downlink: 24 kHz PCM leaves at 48 kHz, each sample kept and the one between interpolated across frames",
+          doubled.tolist() == [50, 100, 150, 200, 75, -50] and doubled.dtype == np.int16
+          and audio.upsample2(np.array([10], dtype=np.int16), -50).tolist() == [-20, 10])
+    from aigw_edge.session import AudioOut
+    out = AudioOut()
+    idle = out.pacing()
+    out.push(bytes(1920))
+    out.mark()
+    out.sent(0.5)
+    out.pull(960)
+    out.sent(0.004)
+    out.sent(0.002)
+    paced = out.pacing()
+    check("webrtc downlink: per reply, when its first frame left and how late the packets after it were sent",
+          idle == {} and paced["rtp_late_max_ms"] == 4.0 and paced["rtp_late_p50_ms"] == 4.0
+          and paced["rtp_first_sent_ms"] == round(paced["out_first_pull_ms"] + 4.0, 1) and 0 <= paced["out_first_pull_ms"] < 50)
 except ImportError:
     print("SKIP vad (no numpy)")
 

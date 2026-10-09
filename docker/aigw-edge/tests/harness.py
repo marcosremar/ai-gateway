@@ -19,6 +19,7 @@ import aiohttp
 
 from clients import REPLICA_TOKEN, DEFAULT_CFG, RtcLearner, WsLearner, mint
 from clients import mint_by_reference  # noqa: E402
+from aigw_edge import audio
 
 ROOT = Path(__file__).resolve().parents[1]
 UP_PORT, EDGE_PORT, EDGE_S2S_PORT, GW_PORT, EDGE_VAST_PORT = 8900, 8920, 8940, 8950, 8970
@@ -312,6 +313,10 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
     check("webrtc: transcript, reply, audio_start/end, metrics, done", all(k in types for k in
           ("transcript", "reply_delta", "reply", "audio_start", "audio_end", "metrics", "done")), types)
     check("webrtc: Opus audio heard by the learner", learner.loud_frames >= 50, f"{learner.loud_frames} loud 20 ms frames")
+    vad_end = next(at for at, e in learner.events.items if e["type"] == "vad" and e["state"] == "end")
+    heard_ms = round((vad_end - learner.mic.speech_end_at) * 1000)
+    check("webrtc: the end of speech reaches the VAD with no jitter-buffer wait (700 ms of silence, then under 80 ms)",
+          heard_ms < 780, heard_ms)
     m = learner.events.of("metrics")[0]
     results["latency"][f"webrtc_turn_{base[-4:]}"] = {**{k: m[k] for k in ("ttfa_ms", "stt_ms", "llm_ttft_ms", "tts_ttfb_ms")},
                                         "client_ttfa_from_speech_end_ms": round((learner.first_audio_at - learner.mic.speech_end_at) * 1000)}
@@ -321,6 +326,40 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
         async with http.get(f"{base}/__aigw/rt/status") as r:
             check("status after delete: 0 active", (await r.json())["active"] == 0)
     await learner.close()
+
+
+NETWORKS = (("clean", 0.0, 0.0), ("2 % loss", 0.02, 0.0), ("10 % loss", 0.10, 0.0), ("40 ms jitter", 0.0, 0.04))
+
+
+async def scenario_webrtc_network(base: str) -> None:
+    for name, loss, jitter_s in NETWORKS:
+        learner = await RtcLearner(base).connect(mint())
+        await learner.events.wait("ready", 10)
+        learner.impair(loss, jitter_s)
+        ends, firsts, lost = [], [], 0
+        for _ in range(3):
+            after, learner.first_audio_at = len(learner.events.items), None
+            learner.mic.say(1.2)
+            await learner.events.wait("done", 15, after)
+            at = {(e["type"], e.get("state")): t for t, e in learner.events.items[after:]}
+            ends.append(round((at[("vad", "end")] - learner.mic.speech_end_at) * 1000))
+            firsts.append(round((learner.first_audio_at - at[("audio_start", None)]) * 1000))
+            m = learner.events.of("metrics")[-1]
+            lost += m["uplink_lost_ms"]
+            await asyncio.sleep(0.4)
+        results["latency"][f"webrtc {name}"] = {"end_of_turn_ms": ends, "first_frame_ms": firsts, "uplink_lost_ms": lost,
+                                                **{k: m.get(k) for k in ("rtp_first_sent_ms", "rtp_late_p95_ms")}}
+        jitter_ms = round(jitter_s * 1000)
+        check(f"webrtc, {name}: the turn ends 700 ms after the speech, lost packets counted as elapsed time",
+              statistics.median(ends) < 770 + jitter_ms and max(ends) < 860 + jitter_ms, ends)
+        check(f"webrtc, {name}: the first reply frame is heard within one frame of audio_start",
+              statistics.median(firsts) < 20 + jitter_ms, firsts)
+        check(f"webrtc, {name}: lost uplink audio is reported per turn (metrics.uplink_lost_ms)", (lost > 0) == (loss > 0), lost)
+        async with aiohttp.ClientSession() as http:
+            await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
+        await learner.close()
+    check("webrtc: the edge reports when the first reply packet left and how late the next 2 s were sent",
+          isinstance(m.get("rtp_first_sent_ms"), float) and m["rtp_late_p95_ms"] < 15, m)
 
 
 async def scenario_vast(base: str) -> None:
@@ -625,6 +664,7 @@ async def scenario_nginx() -> None:
 
 
 async def main() -> int:
+    audio.install()
     gw = await fake_gateway()
     nginx, nginx_dir = start_nginx()
     up = subprocess.Popen([sys.executable, str(ROOT / "tests" / "fake_upstream.py"), "--port", str(UP_PORT)])
@@ -640,7 +680,7 @@ async def main() -> int:
         await wait_ready(base_s2s)
         await wait_ready(base_vast)
         for scenario in (scenario_tokens, scenario_config_by_reference, scenario_app_hooks, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
-                         scenario_capacity, scenario_webrtc):
+                         scenario_capacity, scenario_webrtc, scenario_webrtc_network):
             await scenario(base)
         await scenario_reoffer(base)
         await scenario_race(base, stages=True)
@@ -672,7 +712,6 @@ async def main() -> int:
         results["summary"] = f"{passed}/{len(results['checks'])} checks passed"
         print(json.dumps(results["latency"], indent=1))
         print(results["summary"])
-        _ = statistics
 
 
 if __name__ == "__main__":

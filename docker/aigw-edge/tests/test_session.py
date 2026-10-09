@@ -81,6 +81,7 @@ class FakeUpstream:
         self.llm_prompts: list[list[dict]] = []
         self.spoken: list[str] = []
         self.voices: list[dict] = []
+        self.trims: list[bool] = []
         self.models: dict = {}
 
     async def transcribe(self, pcm16, language, prompt, trace_id=None):
@@ -120,10 +121,11 @@ class FakeUpstream:
     async def voice_fields(self, cfg):
         return {"voice": cfg["voice"]}
 
-    async def speak(self, text, cfg, fields, trace_id=None, on_retry=None, on_overlong=None):
+    async def speak(self, text, cfg, fields, trace_id=None, on_retry=None, on_overlong=None, trim_lead=False):
         self.calls["tts"] += 1
         self.spoken.append(text)
         self.voices.append(fields)
+        self.trims.append(trim_lead)
         await asyncio.sleep(TTS_TTFB_MS / 1000)
         yield np.full(OPENER_SAMPLES, OPENER_SAMPLE, dtype=np.int16).tobytes() if text in OPENERS else bytes(960 * 10)
 
@@ -871,9 +873,9 @@ async def tts_guard() -> None:
     metrics = await learner.wait("metrics", 10)
     await learner.wait("done", 10)
     heard, audible = await finish(learner, up)
-    check("tts guard, a silent lead under the limit: played as it came, no retry",
+    check("tts guard, a silent lead under the limit before the first sentence: dropped to 10 ms, no retry",
           metrics["tts_retries"] == 0 and [r["input"] for r in log].count("Bom dia!") == 1
-          and abs(len(heard) - 3.25 * 48000) <= 3 * 960 and abs(len(audible) - 2.75 * 48000) <= 3 * 960,
+          and abs(len(heard) - 2.76 * 48000) <= 3 * 960 and abs(len(audible) - 2.75 * 48000) <= 3 * 960,
           (len(heard), len(audible)))
 
     learner, up = await turn(["runaway"], tts_max_lead_seconds=60, tts_max_seconds=60)
@@ -956,9 +958,31 @@ async def feature_interactions() -> None:
           done.get("said") is True and done.get("tag") == "opening" and not learner.of("error") and len(overlong) == 1
           and 0 < len(heard) <= int((cap + 0.1) * session_module.OUT_RATE) * 2, (done, len(heard), overlong))
     await learner.close()
+    line = "Bem-vinda de volta."
+    fake_upstream.tts_faults.update({line: ["lead"]})
+    learner = Learner(up=real, key=KEY, **settings)
+    learner.session.control(signed({"say": {"text": line, "tag": "opening"}}, 1))
+    await learner.wait("done", 6)
+    await asyncio.sleep(0.1)
+    check("lead trim × say: an app line is voiced whole, its 0.5 s of leading silence included (the trim is for a reply's first sentence)",
+          len(b"".join(learner.heard)) >= (12000 + int(0.75 * 24000)) * 2, len(b"".join(learner.heard)))
+    await learner.close()
     await real.close()
     fake_upstream.tts_faults.clear()
     await runner.cleanup()
+
+    learner = Learner(key=KEY, stt_partials=False)
+    learner.session.control(signed({"say": {"text": "Bem-vinda à padaria!", "tag": "opening"}}, 1))
+    await learner.wait("done", 4)
+    mark, spoken = len(learner.events), len(learner.up.spoken)
+    learner.say(0.5)
+    await learner.wait("done", 4, after=mark)
+    reply = learner.up.trims[spoken:]
+    check("lead trim × say: only the first sentence of a reply asks for the trim, an app line before it does not",
+          learner.up.spoken[:spoken] == ["Bem-vinda à padaria!"] and learner.up.trims[:spoken] == [False]
+          and reply[0] is True and not any(reply[1:]) and len(reply) > 1,
+          (learner.up.spoken, learner.up.trims))
+    await learner.close()
 
 
 async def main() -> None:

@@ -35,6 +35,7 @@ OUT_FRAME_BYTES = OUT_RATE // 50 * 2  # 20 ms of PCM16 mono at 24 kHz
 PRE_ROLL_FRAMES = 15  # 300 ms kept before the VAD opened a turn (its first syllable is quieter than the gate)
 MIN_TURN_BYTES = int(0.3 * 16000) * 2
 OUT_BYTES_PER_MS = OUT_RATE * 2 // 1000
+PACING_FRAMES = 100
 recent_first_audio: collections.deque = collections.deque(maxlen=512)
 CLIENT_CONFIG_KEYS = ("messages", "opener")
 SIGNED_CONFIG_KEYS = ("system", "voice", "fallback_voice", "max_tokens", "temperature", "stt_prompt", "user_template", "opener",
@@ -73,6 +74,27 @@ class AudioOut:
         self.buf = bytearray()
         self.drained = asyncio.Event()
         self.drained.set()
+        self.marked: float | None = None
+        self.pulled: float | None = None
+        self.lates: list[float] = []
+
+    def mark(self) -> None:
+        self.marked, self.pulled, self.lates = time.monotonic(), None, []
+
+    def sent(self, late_s: float) -> None:
+        if self.pulled is not None and len(self.lates) < PACING_FRAMES:
+            self.lates.append(late_s * 1000)
+
+    def pacing(self) -> dict:
+        if self.pulled is None:
+            return {}
+        pull = (self.pulled - self.marked) * 1000
+        if not self.lates:
+            return {"out_first_pull_ms": round(pull, 1)}
+        late = sorted(self.lates)
+        return {"out_first_pull_ms": round(pull, 1), "rtp_first_sent_ms": round(pull + self.lates[0], 1),
+                "rtp_late_p50_ms": round(late[len(late) // 2], 1), "rtp_late_p95_ms": round(late[int(len(late) * 0.95)], 1),
+                "rtp_late_max_ms": round(late[-1], 1)}
 
     def push(self, pcm: bytes) -> None:
         if pcm:
@@ -87,6 +109,8 @@ class AudioOut:
         if not self.buf:
             self.drained.set()
             return None
+        if self.marked is not None and self.pulled is None:
+            self.pulled = time.monotonic()
         chunk = bytes(self.buf[:size])
         del self.buf[:size]
         if not self.buf:
@@ -121,6 +145,7 @@ class Session:
         self.closed = False
         self.turns = 0
         self.turn_id: str | None = None
+        self.lost_ms = 0
         self.outcome = "ok"
         self.last_opener = -1
         self.signed_opener = self.cfg.get("opener")
@@ -521,10 +546,13 @@ class Session:
         metrics["ttfa_ms"] = round((time.monotonic() - ended) * 1000) + len(self.out.buf) // OUT_BYTES_PER_MS
         if metrics["first_sound_ms"] is None:
             metrics["first_sound_ms"] = metrics["ttfa_ms"]
+        self.out.mark()
         self.emit({"type": "audio_start"})
 
     def _metrics_event(self, metrics: dict) -> dict:
-        return {"type": "metrics", **metrics, "ttfa_from_speech_ms": ttfa_from_speech(metrics),
+        lost, self.lost_ms = self.lost_ms, 0
+        return {"type": "metrics", **metrics, **self.out.pacing(), "uplink_lost_ms": lost,
+                "ttfa_from_speech_ms": ttfa_from_speech(metrics),
                 "first_sound_from_speech_ms": ttfa_from_speech(metrics, "first_sound_ms"), "turnId": self.turn_id}
 
     async def _transcribe(self, audio: bytes, confirmed: asyncio.Future | None) -> dict:
@@ -644,12 +672,12 @@ class Session:
             metrics["tts_overlong"] += 1
             tel("edge.tts.overlong", level="warn", requestId=request_id)
 
-        async def synth(sentence: str, queue: asyncio.Queue) -> None:
+        async def synth(sentence: str, queue: asyncio.Queue, first: bool) -> None:
             try:
                 async with gate:
                     t = time.monotonic()
                     rate = self.s.tts_rate
-                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id, retried, overlong):
+                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id, retried, overlong, first):
                         if isinstance(chunk, int):
                             rate = chunk
                             continue
@@ -665,7 +693,7 @@ class Session:
         def speak(sentence: str) -> None:
             spoken.append(sentence)
             queue: asyncio.Queue = asyncio.Queue()
-            synths.append(asyncio.create_task(synth(sentence, queue)))
+            synths.append(asyncio.create_task(synth(sentence, queue, not synths)))
             sentences.put_nowait(queue)
 
         async def think() -> None:

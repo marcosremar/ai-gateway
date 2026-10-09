@@ -1,10 +1,11 @@
-import { audible, epoch, makeMeter, output, playRemote } from '/meter.js';
+import { audible, epoch, makeMeter, output, playRemote, rtcSummary } from '/meter.js';
 import { createRealtimeSession, createWsTransport } from '/sdk.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const KEEP = [
   'type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms',
   'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms', 'tts_retries', 'local',
+  'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms',
 ];
 const SDK_TURN_EVENTS = ['turn.first_sound', 'turn.done'];
 const MIN_CLIP_MS = 300;
@@ -105,7 +106,7 @@ window.loadRun = async ({ durationMs, turnTimeoutMs, transport, turnEveryMs, cli
   const summary = {
     transport: session.transport, connectMs: session.metrics.connectMs, error, turns,
     attempts: session.metrics.attempts.map((a) => ({ at: 0, type: a.type, ok: a.ok, ms: a.ms, reason: a.error })),
-    meter: { mic: mic.stats, output: output.stats },
+    meter: { mic: mic.stats, output: output.stats, rtc: rtcSummary() },
   };
   clearInterval(endTurns);
   session.close();

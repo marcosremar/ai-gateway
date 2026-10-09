@@ -236,7 +236,9 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   played: no `audio_start`, and the first-audio deadline still sees no reply audio, so an opener may play meanwhile.
   A sentence still silent after `EDGE_TTS_MAX_LEAD_SECONDS` (1), or whose stream fails before any sound, is dropped
   and requested again once, in its place in the order (`metrics.tts_retries`, `edge.tts.retry` with the request id,
-  `ttsRetries` on `edge.turn.done`). The second attempt drops its silent lead; when it stays silent or fails, or when
+  `ttsRetries` on `edge.turn.done`). The second attempt drops its silent lead, and so does the first sentence of every
+  reply (it starts 10 ms before its first sample over −40 dBFS: the 150–240 ms of silence Qwen3-TTS puts before a
+  sentence were played after `audio_start`, on both transports); when it stays silent or fails, or when
   any stream fails after sound, the turn ends with the `tts` error (no retry: it would repeat words already heard).
   One exception: a sentence that was heard and runs to its cap — more audio than `3 s + 0.2 s per character`, or the
   engine ending the stream at `max_new_tokens` (≥ 90 % of the cap received) — is cut at the cap and the turn goes on
@@ -276,6 +278,34 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   counts the opener audio still queued ahead of the reply.
 
 ## Process model and CPU budget
+
+The learner's audio is decoded as it arrives (`audio.ArrivalOrder`, installed in place of aiortc's audio jitter buffer; a
+late or repeated packet is dropped). aiortc's buffer (`capacity=16, prefetch=4`) holds 4 packets before it gives a
+frame — 80 ms on every turn before the VAD sees the end of speech — and after one lost packet it stays 14 packets
+(280 ms) behind for the rest of the call (`tests/test_units.py`): it exists to smooth playout, and the VAD and Whisper
+need none. Measured on the loopback harness: end of speech → `vad end` 821 → 741 ms (700 of them are the endpointing).
+
+A lost packet is elapsed time: `read_track` compares each decoded frame's RTP timestamp with the one expected
+(`audio.GapFill`) and feeds the missing span as silence (at most 1 s per gap), so the VAD's 700 ms window is 700 ms of
+the learner's clock under loss (harness, 10 % loss: `vad end` 781–821 ms without it, 741–762 with) and the clip the STT
+gets keeps its length. The turn's `metrics` carries `uplink_lost_ms`. No Opus FEC or concealment: aiortc 1.15 decodes
+through PyAV's libopus wrapper, which has no FEC flag and returns nothing for a missing packet; decoding the in-band
+FEC would need libopus called directly. A packet that arrives after a later one is dropped, as before.
+
+Downlink: `OutTrack` sends one 20 ms frame per tick of a wall-clock grid, silence included, with continuous RTP
+timestamps, so the browser's jitter buffer stays at its floor between replies (Chromium `getStats`: target and minimum
+20 ms on a clean local path, 100–160 ms from a home Wi-Fi to the replica — NetEq follows the path's jitter and the
+receiver's `jitterBufferTarget = 0` only removes the SDK's own floor). The frames leave at 48 kHz (`audio.upsample2`,
+the sample between two is interpolated): given 24 kHz frames, aiortc's Opus encoder resamples with a filter that holds
+the last samples back, so every 20 ms frame waited for the next one before it became a packet. Loopback harness,
+`audio_start` → first loud frame at the client: 26–28 ms → 8–9 ms. Per reply the edge measures its own part and puts
+it in `metrics`: `out_first_pull_ms` (first TTS PCM → the tick that takes it, 0–20 ms), `rtp_first_sent_ms` (→ that
+packet handed to the transport, encode included) and `rtp_late_p50_ms` / `rtp_late_p95_ms` / `rtp_late_max_ms` (how
+late after its tick each of the next 100 packets left).
+
+Not done on the downlink: stopping the silence between replies (a receiver that sees a gap may start the next
+talkspurt below its target delay). PyAV's libopus wrapper stamps the first packet after a gap as if there had been
+none, the browser would conceal instead of playing silence, and the effect on NetEq was not measured.
 
 aiortc (BSD-3) does the whole RTP/SRTP/RTCP path in Python on one asyncio loop; Opus encode/decode run in threads
 (libopus via PyAV). Profiling showed two avoidable hot spots, both replaced by numpy (`aigw_edge/audio.py`): PyAV's

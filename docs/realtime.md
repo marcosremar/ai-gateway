@@ -106,7 +106,8 @@ Edge → client (data channel "events", JSON, or WS text frames), the s2s vocabu
 `{type:"interrupted"}`, `{type:"done", empty?, filtered?, intercepted?, said?, tag?, served?}`, `{type:"intercept", tag, action}`,
 `{type:"say", text, tag}`, `{type:"config_applied", n}`, `{type:"error", code, message}`,
 `{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms, endpoint_ms, ttfa_from_speech_ms, first_sound_ms,
-first_sound_from_speech_ms, opener, deadline_ms, deadline_missed}`, `{type:"opener", state:"start"|"end", text, index,
+first_sound_from_speech_ms, opener, deadline_ms, deadline_missed, uplink_lost_ms, out_first_pull_ms, rtp_first_sent_ms,
+rtp_late_p50_ms, rtp_late_p95_ms, rtp_late_max_ms}` (the last five on WebRTC, docs/realtime-edge.md), `{type:"opener", state:"start"|"end", text, index,
 audio_ms}`, `{type:"deadline_missed", deadline_ms}` (next section).
 
 Client → edge: `{type:"interrupt"}`, `{type:"end_turn"}` (client VAD: the learner stopped), `{type:"config_update",

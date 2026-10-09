@@ -7,6 +7,7 @@ audio level ~0.16 ms per outgoing frame — together a third of the edge's main-
 import math
 
 import numpy as np
+from aiortc.jitterbuffer import JitterFrame
 
 # 31-tap windowed-sinc low-pass at 7 kHz for 48 → 16 kHz (Nyquist 8 kHz): speech energy for STT stays below 7 kHz.
 _TAPS = 31
@@ -34,6 +35,37 @@ class Downsampler48to16:
         return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
 
+def upsample2(x: np.ndarray, previous: int) -> np.ndarray:
+    out = np.empty(len(x) * 2, dtype=np.int16)
+    out[1::2] = x
+    out[0::2] = (np.concatenate(([previous], x[:-1])).astype(np.int32) + x) // 2
+    return out
+
+
+MAX_FILL_SAMPLES = 48000
+
+
+class GapFill:
+    def __init__(self):
+        self.expected: int | None = None
+
+    def missing(self, pts: int, samples: int) -> int:
+        gap = 0 if self.expected is None else min(max(pts - self.expected, 0), MAX_FILL_SAMPLES)
+        self.expected = pts + samples
+        return gap
+
+
+class ArrivalOrder:
+    def __init__(self):
+        self.last: int | None = None
+
+    def add(self, packet):
+        if self.last is not None and (packet.sequence_number - self.last - 1) % 65536 >= 32768:
+            return False, None
+        self.last = packet.sequence_number
+        return False, JitterFrame(data=packet._data, timestamp=packet.timestamp)
+
+
 def audio_level_dbov(frame) -> int:
     """RFC 6465 Appendix A level (what aiortc puts in the ssrc-audio-level extension), vectorized."""
     pcm = np.frombuffer(bytes(frame.planes[0]), dtype=np.int16).astype(np.float32)
@@ -46,6 +78,9 @@ def audio_level_dbov(frame) -> int:
 
 
 def install() -> None:
-    from aiortc import rtp  # noqa: PLC0415
+    from aiortc import rtcrtpreceiver, rtp  # noqa: PLC0415
 
     rtp.compute_audio_level_dbov = audio_level_dbov
+    aiortc_buffer = rtcrtpreceiver.JitterBuffer
+    rtcrtpreceiver.JitterBuffer = lambda capacity, prefetch=0, is_video=False: (
+        aiortc_buffer(capacity, prefetch, is_video) if is_video else ArrivalOrder())
