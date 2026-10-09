@@ -244,6 +244,20 @@ frame — 80 ms on every turn before the VAD sees the end of speech — and afte
 (280 ms) behind for the rest of the call (`tests/test_units.py`): it exists to smooth playout, and the VAD and Whisper
 need none. Measured on the loopback harness: end of speech → `vad end` 821 → 741 ms (700 of them are the endpointing).
 
+A lost packet is elapsed time: `read_track` compares each decoded frame's RTP timestamp with the one expected
+(`audio.GapFill`) and feeds the missing span as silence (at most 1 s per gap), so the VAD's 700 ms window is 700 ms of
+the learner's clock under loss (harness, 10 % loss: `vad end` 781–821 ms without it, 741–762 with) and the clip the STT
+gets keeps its length. The turn's `metrics` carries `uplink_lost_ms`. No Opus FEC or concealment: aiortc 1.15 decodes
+through PyAV's libopus wrapper, which has no FEC flag and returns nothing for a missing packet; decoding the in-band
+FEC would need libopus called directly. A packet that arrives after a later one is dropped, as before.
+
+Downlink: `OutTrack` sends one 20 ms frame per tick of a wall-clock grid, silence included, with continuous RTP
+timestamps, so the browser's jitter buffer stays at its floor between replies (Chromium: target and minimum 20 ms on a
+clean path). Per reply the edge measures its own part and puts it in `metrics`: `out_first_pull_ms` (first TTS PCM →
+the tick that takes it, 0–20 ms), `rtp_first_sent_ms` (→ that packet handed to the transport, encode included) and
+`rtp_late_p50_ms` / `rtp_late_p95_ms` / `rtp_late_max_ms` (how late after its tick each of the next 100 packets left).
+Loopback: first packet 2–19 ms after the first PCM, packets 2–5 ms late at p95.
+
 aiortc (BSD-3) does the whole RTP/SRTP/RTCP path in Python on one asyncio loop; Opus encode/decode run in threads
 (libopus via PyAV). Profiling showed two avoidable hot spots, both replaced by numpy (`aigw_edge/audio.py`): PyAV's
 resampler for 48 kHz → 16 kHz (~0.35 ms per 20 ms frame) and aiortc's pure-Python RFC 6465 audio level (~0.16 ms per

@@ -417,14 +417,15 @@ async function chromeStudents(): Promise<void> {
     result.students.push(rec);
     try {
       const { page } = await openMicPage({ chrome: cfg.chromePath, mic, url: app.url, readyFlag: 'loadReady', log, browsers });
-      const run = await page.evaluate(
+      const stuck = sleep((cfg.rampS + cfg.durationS + 2 * cfg.turnTimeoutS) * 1000).then(() => { throw new Error('the page never returned its run'); });
+      const run = await Promise.race([stuck, page.evaluate(
         (o) => (window as unknown as { loadRun: (o: unknown) => Promise<{ transport: string | null; connectMs: number | null; attempts: StudentRecord['attempts']; error?: string; turns: Turn[]; meter: { mic: unknown; output: unknown; rtc?: unknown } }> }).loadRun(o),
         {
           durationMs: (cfg.rampS + cfg.durationS) * 1000, turnTimeoutMs: cfg.turnTimeoutS * 1000, turnEveryMs: cfg.turnEveryS * 1000,
           clipEndSilenceMs: cfg.clipEndSilenceMs, transport: cfg.chromeTransports[i % cfg.chromeTransports.length] || null,
           uplinkStallMs: cfg.uplinkStallMs ?? 0, uplinkStallEvery: cfg.uplinkStallEvery ?? 3, clientDeadline: !!cfg.clientDeadline,
         },
-      );
+      )]);
       rec.transport = run.transport;
       rec.connectMs = run.connectMs;
       rec.attempts = run.attempts;
@@ -449,9 +450,9 @@ try {
   await Promise.all([...Array.from({ length: cfg.students }, (_, i) => student(i)), chromeStudents()]);
 } finally {
   clearInterval(sampler);
-  for (const b of browsers) await b.close().catch(() => {});
-  for (const p of rtcProcs) { p.stdin!.end(); p.kill('SIGKILL'); }
   result.endedAt = now();
   writeFileSync(cfg.out, JSON.stringify(result));
+  await Promise.race([Promise.all(browsers.map(b => b.close().catch(() => {}))), sleep(5_000)]);
+  for (const p of rtcProcs) { p.stdin!.end(); p.kill('SIGKILL'); }
   process.exit(0);
 }
