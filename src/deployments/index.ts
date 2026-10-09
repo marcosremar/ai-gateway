@@ -20,6 +20,7 @@ import { ClientStabilityLog } from './stability';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
 import { sessionsWanting } from '../realtime/external-load';
+import { SANDBOX_USER, sandboxIsAdmin } from '../config/sandbox-env';
 
 export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
@@ -93,7 +94,7 @@ export interface DeploymentsFromEnv {
  */
 export function adminUsersFromEnv(env: Record<string, string | undefined>, alwaysAdmin: readonly string[] = []): ReadonlySet<string> {
   const listed = (env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
-  return new Set([...listed, ...alwaysAdmin.filter(Boolean)]);
+  return new Set([...listed, ...alwaysAdmin.filter(Boolean)].filter(u => u !== SANDBOX_USER || sandboxIsAdmin(env)));
 }
 
 /** Boot warning when DEPLOYMENTS_ADMIN_USERS is empty (null when it is set). */

@@ -28,7 +28,11 @@ Set `GATEWAY_API_KEYS` on the server (comma-separated; `key:user` names the user
 localhost requests are allowed. The `SANDBOX_TOKEN` (and its aliases) is **not** a client key: it is the dev API's
 master key, which the gateway uses only to fetch its own provider keys from the palco, and it gets `401` here (owner
 decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only, default off, logs a `WARNING`) accepts it
-again as the admin user `sandbox`, until every client sends its own key.
+again as the user `sandbox`, until every client sends its own key. That user is **not an admin** (even if
+`DEPLOYMENTS_ADMIN_USERS` lists it) and runs in **no-wake** mode; it may call the aliases of the app named by
+`SANDBOX_TOKEN_APP` (e.g. `parle`), under the app-key limits. `SANDBOX_TOKEN_ADMIN=1` is the explicit opt-in back to
+admin and waking (audit 2026-10-09 #6). These three flags come from the host only, never from the dev API.
+Keys travel only as `Authorization: Bearer <key>`: a bare key without the scheme gets `401`.
 
 **Admin keys** — the users in `DEPLOYMENTS_ADMIN_USERS`. When that list is empty, no key is admin (fail closed since 06/10/2026; the boot logs a `WARNING`). Admin keys are required for deployment
 mutations, `X-App` naming **another** app, `GET /health?deep=1`, the full view of `GET /health?details=1` and
@@ -229,8 +233,10 @@ else its own configured voice. The replica must expose the OpenAI shapes (`/v1/a
   unavailable (404 while its refs server starts, error) is not sent `voice` either: the request falls back with
   `X-Gateway-Fallback: catalog_unavailable`. A missing catalog is trusted for 15 s only; a catalog for 5 min.
   A CustomVoice / OpenAI-shaped replica without catalog gets the request as sent.
-- Any other body field (`task_type`, `ref_audio`, `ref_text`, `language` — ISO codes become `Portuguese`/`French`/… —,
-  `stream_format`, …) is forwarded intact. The OpenRouter fallback never receives these fields.
+- Only these extra body fields are forwarded: `task_type`, `ref_audio`, `ref_text`, `language` (ISO codes become
+  `Portuguese`/`French`/…), `stream_format`, `instructions`; any other field is dropped. `ref_audio` must be inline
+  (`data:audio/...;base64,…`): a URL gets `400`, since the replica would fetch it. The OpenRouter fallback never
+  receives these fields.
 - With `response_format` `wav` or `pcm` the audio is **streamed** from the replica to the client
   (`stream: true, stream_format: "audio"`; send `"stream": false` to turn it off). Other formats come whole.
   A streamed body that breaks upstream reaches the client as a cut connection (a transport error), never as a
@@ -602,7 +608,7 @@ for a cold start.
 | `GET` | `/v1/apps/:app` | `{ id, createdAt, images, deployments: [{ name, status, appImage }] }` |
 | `GET` / `PUT` | `/v1/apps/:app/routes` | the app's aliases (see *App aliases* above) |
 | `GET` | `/v1/apps/:app/images` | the app's saved images |
-| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
 | `GET` | `/v1/apps/:app/fallback` | direct-fallback plan (below) |
 | `POST` / `GET` | `/v1/apps/:app/stability-report` | SDK instability reports (below) |
 

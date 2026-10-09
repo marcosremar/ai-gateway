@@ -36,9 +36,9 @@ import type { PrefixRoute } from './src/proxy/types';
 import { adminListWarning, adminUsersFromEnv, deploymentsFromEnv, proxyIdleTimeoutMs } from './src/deployments';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
-import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
+import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
 import {
-  deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  deploymentLogToTelemetry, emitGatewayEvent, isMasterToken, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
@@ -61,7 +61,7 @@ const PORT = parseInt(process.env.PORT || '4000');
 const clientKeys = gatewayClientKeys(process.env);
 for (const w of clientKeys.warnings) log.warn({}, `WARNING: ${w}`);
 const API_KEYS = clientKeys.keys;
-/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1. */
+/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1 + SANDBOX_TOKEN_ADMIN=1. */
 const EXTRA_ADMINS = clientKeys.sandboxAdmins;
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
@@ -217,7 +217,8 @@ const isAdminToken = (token: string) => {
 // What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
 // clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
 const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
-  const routes = deployments?.apps.get(userId)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
+  const app = userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : userId;
+  const routes = deployments?.apps.get(app)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
 const appLimits = API_KEYS.length ? new AppLimits({
@@ -246,7 +247,7 @@ const telemetry = telemetryFromEnv(process.env, {
   auth: {
     resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
     resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
-    isMasterKey: (token) => TOKEN_ALIASES.some(k => process.env[k]?.trim() === token),
+    isMasterKey: (token) => isMasterToken(token, process.env),
     deployment: (name) => {
       const replicaToken = controller?.tokenOf(name);
       const app = controller?.get(name)?.app;

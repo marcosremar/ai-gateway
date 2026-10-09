@@ -19,7 +19,7 @@ describe('telemetry auth', () => {
   });
 
   it('never accepts the master (SANDBOX_TOKEN-style) key, even when it is also a client key', () => {
-    expect(authenticateTelemetry({ authorization: bearer('sandbox-master') }, authDeps())).toMatchObject({ status: 403, code: 'master_key' });
+    expect(authenticateTelemetry({ authorization: bearer('sandbox-master') }, authDeps())).toMatchObject({ status: 401, code: 'invalid_key' });
   });
 
   it('refuses unknown keys and missing credentials', () => {

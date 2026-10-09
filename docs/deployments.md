@@ -118,7 +118,7 @@ example in `docs/api/http.md` § App keys) and watch `appBudgets` in `GET /healt
 
 ```bash
 # Save (or move) an image address — build-image-on-scaleway.ts --app parle does this after a push
-curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
+curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $ADMIN_KEY" -H 'X-App: parle' -d '{
   "image": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107", "port": 8000, "healthPath": "/health",
   "defaults": {"machineType": "L40S-1-48G", "volumeGb": 120, "maxReplicas": 2, "bootTimeoutMinutes": 45}
 }'
@@ -604,7 +604,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 
 | Variable | |
 |---|---|
-| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition |
+| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition as a non-admin, no-wake user (`SANDBOX_TOKEN_APP` names the app whose aliases it may call; `SANDBOX_TOKEN_ADMIN=1` makes it admin again) |
 | `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables Scaleway replicas (normally fetched with the token) |
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |

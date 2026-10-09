@@ -4,7 +4,7 @@
  *
  *   (a) app key   `Authorization: Bearer <GATEWAY_API_KEYS key>` — server to server (e.g. the parle backend). Refused
  *                 when the request comes from a browser (`Origin` / `Sec-Fetch-*` present) and for the SANDBOX_TOKEN
- *                 family: a master key must never sit in a page.
+ *                 family (same 401 as a wrong key: the answer must not tell the master token apart, audit #20).
  *   (b) session   `Authorization: Bearer <realtime session JWT>` (or `token` in the body, for `navigator.sendBeacon`
  *                 which cannot set headers). HS256 with key = HMAC-SHA256(deployment replicaToken, "aigw-rt-v1"), the
  *                 realtime contract (docs/realtime.md). `sid`/`app`/`dep`/`rep` come from the token, never the body.
@@ -16,6 +16,8 @@
  */
 
 import { createHmac, timingSafeEqual } from 'crypto';
+import { TOKEN_ALIASES } from '../config/sandbox-env';
+import { bearerToken } from '../gateway/proxy/middleware/api-keys';
 import { TELEMETRY_EDGE_HMAC_INFO } from './contract';
 
 /** Realtime session key info (must equal src/realtime/token.ts RT_KEY_INFO). */
@@ -28,7 +30,7 @@ export type TelemetryPrincipal =
 
 export interface AuthFailure {
   status: 401 | 403;
-  code: 'missing_credentials' | 'invalid_key' | 'browser_app_key' | 'master_key' | 'bad_session_token' | 'session_expired'
+  code: 'missing_credentials' | 'invalid_key' | 'browser_app_key' | 'bad_session_token' | 'session_expired'
     | 'unknown_deployment' | 'unknown_replica' | 'bad_edge_signature';
   error: string;
 }
@@ -69,6 +71,15 @@ export function edgeTelemetrySignature(replicaToken: string): string {
 
 function sameBytes(a: Buffer, b: Buffer): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+const digest = (text: string) => createHmac('sha256', 'aigw-compare').update(text).digest();
+
+export function isMasterToken(token: string, env: Record<string, string | undefined>): boolean {
+  if (!token) return false;
+  const given = digest(token);
+  return TOKEN_ALIASES.map(k => env[k]?.trim()).filter((v): v is string => Boolean(v))
+    .reduce((hit, value) => timingSafeEqual(given, digest(value)) || hit, false);
 }
 
 const isJwt = (t: string) => /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(t);
@@ -120,13 +131,13 @@ function verifyEdge(replicaId: string, signature: string, deps: TelemetryAuthDep
 }
 
 export function authenticateTelemetry(input: TelemetryAuthInput, deps: TelemetryAuthDeps): TelemetryPrincipal | AuthFailure {
-  const bearer = (input.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
+  const bearer = bearerToken(input.authorization);
   const replica = input.replica?.trim();
   if (replica) return verifyEdge(replica, bearer, deps);
   const sessionToken = bearer && isJwt(bearer) ? bearer : !bearer && input.bodyToken && isJwt(input.bodyToken) ? input.bodyToken : null;
   if (sessionToken) return verifySessionPrincipal(sessionToken, deps);
   if (!bearer) return fail(401, 'missing_credentials', 'Telemetry needs an app key, a realtime session token or an edge signature');
-  if (deps.isMasterKey?.(bearer)) return fail(403, 'master_key', 'The master token is not accepted for telemetry');
+  if (deps.isMasterKey?.(bearer)) return fail(401, 'invalid_key', 'Invalid API key');
   if (input.origin || input.secFetchSite) {
     return fail(403, 'browser_app_key', 'App keys are server-to-server only; a browser sends its realtime session token');
   }

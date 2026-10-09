@@ -20,7 +20,7 @@ import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
 import { createLogger, withLogContext } from '../../logger';
-import { ApiKeyRegistry } from './middleware/api-keys';
+import { ApiKeyRegistry, bearerToken } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
 import {
@@ -587,8 +587,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
       userId = 'localhost';
     } else {
-      const token = (authHeader || '').replace(/^Bearer\s+/i, '');
-      const resolved = keyRegistry.resolve(token);
+      const resolved = keyRegistry.resolve(bearerToken(authHeader));
       if (!resolved) {
         sendError(res, 401, 'Invalid or missing API key', requestId);
         return;
