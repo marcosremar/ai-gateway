@@ -36,7 +36,7 @@ export interface ClientResult {
 }
 
 interface Descriptor {
-  sessionId: string; token: string; iceServers?: unknown[];
+  sessionId: string; token: string; cfg?: string; iceServers?: unknown[];
   transports: Array<{ type: string; url?: string; offerUrl?: string; iceServers?: unknown[] }>;
 }
 interface Session {
@@ -139,6 +139,7 @@ function openWs(url: string, desc: Descriptor): Promise<Session> {
       reject(new Error(why));
     };
     const timer = setTimeout(() => fail('no ready within 6000 ms'), 6_000);
+    ws.onopen = () => { if (desc.cfg) ws.send(JSON.stringify({ type: 'session_config', cfg: desc.cfg })); };
     ws.onerror = () => fail('ws error');
     ws.onclose = (e) => { tickers.delete(tick); fail(`ws closed (${e.code})`); };
     ws.onmessage = (m) => {
@@ -310,7 +311,7 @@ function openRtc(offer: Descriptor['transports'][number], desc: Descriptor, atte
       else if (m.ev === 'audio') audio?.(m);
       else if (m.ev === 'lost') onLost(s, String(m.reason));
     });
-    rtcSend(id, { op: 'open', offerUrl: offer.offerUrl, token: desc.token, iceServers: offer.iceServers ?? desc.iceServers ?? [], turn: cfg.turn });
+    rtcSend(id, { op: 'open', offerUrl: offer.offerUrl, token: desc.token, cfg: desc.cfg, iceServers: offer.iceServers ?? desc.iceServers ?? [], turn: cfg.turn });
   });
 }
 
