@@ -242,9 +242,10 @@ else its own configured voice. The replica must expose the OpenAI shapes (`/v1/a
   `X-Gateway-Fallback: catalog_unavailable`. A missing catalog is trusted for 15 s only; a catalog for 5 min.
   A CustomVoice / OpenAI-shaped replica without catalog gets the request as sent.
 - Only these extra body fields are forwarded: `task_type`, `ref_audio`, `ref_text`, `language` (ISO codes become
-  `Portuguese`/`French`/…), `stream_format`, `instructions`; any other field is dropped. `ref_audio` must be inline
-  (`data:audio/...;base64,…`): a URL gets `400`, since the replica would fetch it. The OpenRouter fallback never
-  receives these fields.
+  `Portuguese`/`French`/…), `stream_format`, `instructions`, and `max_new_tokens` when it is a positive integer no
+  larger than the gateway's own cap for the input (it may lower the cap, never raise it); any other field is dropped.
+  `ref_audio` must be inline (`data:audio/...;base64,…`): a URL gets `400`, since the replica would fetch it. The
+  OpenRouter fallback never receives these fields.
 - With `response_format` `wav` or `pcm` the audio is **streamed** from the replica to the client
   (`stream: true, stream_format: "audio"`; send `"stream": false` to turn it off). Other formats come whole.
   A streamed body that breaks upstream reaches the client as a cut connection (a transport error), never as a

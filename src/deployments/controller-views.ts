@@ -53,7 +53,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     return rt ? structuredClone(rt.record.spec) : null;
   }
 
-  bootFilesKeyOf(name: string): string | null {
+  deploymentSecretOf(name: string): string | null {
     return this.deployments.get(name)?.record.replicaToken ?? null;
   }
 

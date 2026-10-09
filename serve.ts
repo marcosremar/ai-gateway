@@ -40,7 +40,7 @@ import { buildImages } from './src/deployments/build-images';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
-import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, SANDBOX_USER, TOKEN_ALIASES } from './src/config/sandbox-env';
+import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, isMasterToken, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
