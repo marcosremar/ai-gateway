@@ -365,7 +365,7 @@ export class DeploymentController extends ControllerViews {
         this.noteStage(rt, chosen.id, opts.stage, reported, this.now() - startedAt);
         const outcome = reported === 'abandoned' ? 'cancelled' : reported === 'errored' ? 'ok' : reported;
         if (outcome !== 'cancelled') this.recordSample(rt, this.now() - startedAt, outcome !== 'ok', chosen.id);
-        this.leaseEnded(chosen.id, outcome);
+        this.leaseEnded(chosen.id, reported === 'errored' ? 'errored' : outcome);
         const next = rt.waiters.values().next().value; // a slot freed: one waiting request may take it
         if (next) next();
       },
@@ -393,11 +393,12 @@ export class DeploymentController extends ControllerViews {
   /**
    * What one request says about its replica. `ok`: alive (the busy grace starts). `timeout`: slow, so busy — never a
    * strike (live QA 2026-10-07: hedged losers aborted under 16 concurrent chats counted as connection failures, 3 of
-   * them marked the L40S unhealthy in seconds). `cancelled`: nothing. `failed`: suspect, unless it just answered others.
+   * them marked the L40S unhealthy in seconds). `cancelled`: nothing. `errored` (a 5xx answer, e.g. the front's 502 over a dead app):
+   * nothing, it proves no app alive. `failed`: suspect, unless it just answered others.
    */
   private leaseEnded(id: string, outcome: LeaseOutcome): void {
     const p = this.probes.get(id);
-    if (!p || outcome === 'cancelled') return;
+    if (!p || outcome === 'cancelled' || outcome === 'errored') return;
     if (outcome === 'ok') { p.lastServedAt = this.now(); p.failures = 0; return; }
     if (outcome === 'timeout' || outcome === 'overloaded' || this.servedRecently(p)) { p.busy = true; return; }
     p.readyNow = false;

@@ -379,7 +379,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           log.warn({ deployment: name, replica: lease.machine.id, path: rest, cut }, 'invoke: replica stream cut after the response started');
         }
       } finally {
-        lease.done(false);
+        lease.done(upstream.status >= 500 ? 'errored' : false);
       }
       return;
     }
