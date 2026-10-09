@@ -92,6 +92,15 @@ export function netUp(name: string, nat: boolean, onFlap: (down: boolean) => voi
   flapTimer = setInterval(() => { set(100); setTimeout(() => set(undefined), p.flap!.downS * 1000); }, p.flap.everyS * 1000);
 }
 
+export function netChange(name: string): void {
+  const p = PROFILES[name];
+  if (!p || p.udpBlocked || p.flap) throw new Error(`cannot change to profile '${name}' during a run`);
+  for (const [prefix, dev, rate] of [[[], HOST_IF, p.down], [NS_EXEC, NS_IF, p.up]] as Array<[string[], string, string | undefined]>) {
+    run(...prefix, 'tc', 'qdisc', 'del', 'dev', dev, 'root');
+    if (name !== 'clean') shape(prefix, dev, p, rate);
+  }
+}
+
 export function netState(): string {
   return ['tc qdisc show', 'iptables -S', 'iptables -t nat -S', 'ip netns list', `ip -o link show ${HOST_IF}`]
     .map(c => `$ ${c}\n${run(...c.split(' ')).stdout.toString().trim()}`).join('\n');

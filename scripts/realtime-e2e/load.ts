@@ -26,6 +26,8 @@
  *                     seeded uniform think time (seconds) before the next utterance
  *   --clip-s 1.4      length of the tone clip               --clip file.wav  real speech instead (PCM16 mono WAV)
  *   --profile clean   clean | campus-slow | udp-blocked | lossy | flap
+ *   --profile-then lossy@90   the network becomes that profile (clean | campus-slow | lossy) 90 s into the run
+ *   --transport-policy auto   Chrome: the SDK's transportPolicy ('' = unset)      --fidelity   Chrome: the SDK's fidelity option
  *   --ceiling-ms 2500 any turn whose first sound (opener or reply) comes later fails the run
  *   --replicas 2 --cap 16   fake stack only: replicas and RT_MAX_SESSIONS of each
  *   --p50 1500 --p95 2000 --max-bad 1   the target: first-audio ms and failures + truncations in %
@@ -41,7 +43,7 @@ import { join } from 'path';
 import { ceilingReport, firstReplyAudioMs } from './ceiling';
 import { parseThink } from './think';
 import type { ClientConfig, ClientResult, Turn } from './load-client';
-import { HOST_IP, NS_EXEC, PROFILES, netDown, netState, netUp } from './net-shape';
+import { HOST_IP, NS_EXEC, PROFILES, netChange, netDown, netState, netUp } from './net-shape';
 
 const argv = process.argv.slice(2);
 const opt = (name: string) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
@@ -210,7 +212,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
   return {
     pass: checks.every(c => c.ok), checks, target: TARGET,
     run: {
-      mode: REAL_GW ? 'real' : 'fake', gateway: REAL_GW || null, deployment: DEP, profile: PROFILE, shaping: LINUX_ROOT ? PROFILES[PROFILE] : null,
+      mode: REAL_GW ? 'real' : 'fake', gateway: REAL_GW || null, deployment: DEP, profile: PROFILE, profileThen: opt('profile-then') ?? null, shaping: LINUX_ROOT ? PROFILES[PROFILE] : null,
       students: N, rtc: RTC, s2s: S2S, chrome: CHROME, chromeTransports: cfg.chromeTransports, clipEndSilenceMs: cfg.clipEndSilenceMs, rampS: cfg.rampS, durationS: cfg.durationS, turnEveryS: cfg.turnEveryS, jitterS: cfg.jitterS,
       clip: cfg.clip ?? `tone ${cfg.clipS} s`, ...(REAL_GW ? {} : { replicas: REPLICAS, capPerReplica: CAP }),
       fake: Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('FAKE_'))),
@@ -347,6 +349,7 @@ try {
     chromeTransports: (opt('chrome-transports') ?? 'webrtc,ws,s2s-stream').split(','), clipEndSilenceMs: num('clip-end-silence', 700), rtcProcs: num('rtc-procs', Math.ceil(RTC / 8)),
     rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), burst: argv.includes('--burst'), think: parseThink(opt('think')), clipS: num('clip-s', 1.4),
     uplinkStallMs: num('uplink-stall', 0), uplinkStallEvery: num('uplink-stall-every', 3), clientDeadline: argv.includes('--client-deadline'),
+    transportPolicy: opt('transport-policy') || undefined, fidelity: argv.includes('--fidelity'),
     ttsModel: opt('tts-model') ?? (config.models as { tts?: string } | undefined)?.tts,
     clip: opt('clip') ?? null, turnTimeoutS: num('turn-timeout', 30), turn: (opt('turn') ?? (PROFILE === 'udp-blocked' ? 'tcp' : 'udp')) as 'udp' | 'tcp',
     python: process.env.EDGE_PYTHON || 'python3', chromePath: process.env.CHROME_PATH || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -360,6 +363,10 @@ try {
   await sample();
   sampler = setInterval(() => void sample(), 2_000);
   console.log(`running ${N} students for ${cfg.rampS + cfg.durationS} s (profile ${PROFILE}); work dir ${WORK}`);
+  const [thenProfile, thenAt] = (opt('profile-then') ?? '').split('@');
+  if (thenProfile && LINUX_ROOT) {
+    setTimeout(() => { netChange(thenProfile); console.log(`network: ${PROFILE} → ${thenProfile} at ${thenAt} s`); }, Number(thenAt) * 1000);
+  }
   child = Bun.spawn([...(LINUX_ROOT ? NS_EXEC : []), process.execPath, join(import.meta.dir, 'load-client.ts'), join(WORK, 'client-config.json')], { stdout: 'inherit', stderr: 'inherit', env: { ...process.env, LOAD_KEY: key } });
   await child.exited;
   clearInterval(sampler);

@@ -55,9 +55,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "index": {
-    "raw": 1570220,
-    "gzip": 348523,
-    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
+    "raw": 1571232,
+    "gzip": 348564,
+    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "infra": {
     "raw": 4116,
@@ -85,9 +85,9 @@
     "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
   },
   "realtime": {
-    "raw": 90979,
-    "gzip": 22655,
-    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
+    "raw": 108420,
+    "gzip": 27107,
+    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "tracking": {
     "raw": 20369,

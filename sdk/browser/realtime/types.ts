@@ -38,12 +38,12 @@ export type RealtimeServerEvent =
   | {
     type: 'metrics'; ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
     first_sound_ms?: number | null; first_sound_from_speech_ms?: number | null; opener?: string | null; deadline_ms?: number;
-    deadline_missed?: boolean;
+    deadline_missed?: boolean; uplink_lost_ms?: number; uplink_recovered_ms?: number; uplink_fec_pct?: number | null; uplink_red_pct?: number | null;
   };
 
 /** Events the SDK adds: which transport carries the session, and its end. */
 export type RealtimeLocalEvent =
-  | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover' | 'upgrade' | 'rescue'; from?: TransportType; error?: string }
+  | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover' | 'upgrade' | 'rescue' | 'policy'; from?: TransportType; error?: string }
   | { type: 'recovered' }
   | { type: 'closed'; reason: string };
 
@@ -155,6 +155,7 @@ export interface RealtimeMetrics {
   attempts: AttemptRecord[];
   failovers: number;
   rescues: number;
+  switches: number;
   /** Audio frames dropped because the uplink could not keep up (WS). */
   droppedFrames: number;
   /** Last `metrics` event of the edge. */
@@ -163,6 +164,16 @@ export interface RealtimeMetrics {
     first_sound_ms?: number | null; opener?: string | null; deadline_missed?: boolean;
     learner_first_sound_ms?: number | null; network_delay_ms?: number | null;
   } | null;
+}
+
+export interface LinkStats {
+  packetsSent: number;
+  packetsLost: number;
+  jitterMs: number | null;
+  rttMs: number | null;
+  jitterBufferMs: number | null;
+  outgoingKbps: number | null;
+  recovery: boolean;
 }
 
 export interface StorageLike {
@@ -182,6 +193,8 @@ export interface RealtimeTransport {
   /** Clip-based rungs: one learner turn (16 kHz WAV). */
   sendTurn?(wav: Blob): Promise<void>;
   goLive?(): void;
+  goStandby?(): void;
+  stats?(): Promise<LinkStats | null>;
   playOpener?(samples: Float32Array, rate: number): void;
   uplinkBacklog?(): number;
   close(): void;

@@ -7,10 +7,10 @@ const KEEP = [
   'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms', 'tts_retries', 'local',
   'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms', 'uplink_recovered_ms', 'uplink_fec_pct', 'uplink_red_pct',
 ];
-const SDK_TURN_EVENTS = ['turn.first_sound', 'turn.done'];
+const SDK_TURN_EVENTS = ['turn.first_sound', 'turn.done', 'turn.rescued', 'turn.rescue_failed', 'transport.switch', 'rt.network.summary', 'rt.webrtc.retry'];
 const MIN_CLIP_MS = 300;
 
-window.loadRun = async ({ durationMs, turnTimeoutMs, transport, turnEveryMs, clipEndSilenceMs, uplinkStallMs = 0, uplinkStallEvery = 3, clientDeadline = false }) => {
+window.loadRun = async ({ durationMs, turnTimeoutMs, transport, turnEveryMs, clipEndSilenceMs, uplinkStallMs = 0, uplinkStallEvery = 3, clientDeadline = false, transportPolicy = null, fidelity = false }) => {
   const events = [];
   const clipTurns = [];
   const micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
@@ -53,6 +53,7 @@ window.loadRun = async ({ durationMs, turnTimeoutMs, transport, turnEveryMs, cli
     storage: null,
     telemetry: { onEvent: (t) => { if (SDK_TURN_EVENTS.includes(t.event)) events.push({ type: t.event, at: epoch(), ms: t.durMs ?? null, ...t.attrs }); } },
     ...(transport ? { preferredTransports: [transport] } : {}),
+    ...(transportPolicy ? { transportPolicy, fidelity } : {}),
     ...(clientDeadline ? { speak } : {}),
     ...(uplinkStallMs ? {
       fetchImpl: stalledFetch,
@@ -60,11 +61,12 @@ window.loadRun = async ({ durationMs, turnTimeoutMs, transport, turnEveryMs, cli
     } : {}),
   });
   let endedSpan = null;
+  const utterance = clientDeadline ? await (await fetch('/clip.wav')).blob() : undefined;
   const endTurns = clientDeadline ? setInterval(() => {
     const last = mic.spans[mic.spans.length - 1];
     if (!last || last === endedSpan || sinceVoice() < clipEndSilenceMs) return;
     endedSpan = last;
-    session.sendEndTurn();
+    session.sendEndTurn(utterance);
   }, 20) : null;
   let error = null;
   let connectedAt = Infinity;

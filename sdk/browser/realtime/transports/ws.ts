@@ -10,6 +10,8 @@ import type { ClientMessage, RealtimeTransport, TransportContext } from '../type
 /** Uplink frames are dropped (not queued) above this backlog: late learner audio is worse than a gap. */
 const MAX_UPLINK_BUFFER = 64 * 1024;
 
+const STANDBY_PING_MS = 30_000;
+
 export interface WsDeps {
   WebSocket: typeof WebSocket;
   capture: typeof createPcmCapture;
@@ -26,6 +28,7 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
   let connected = false;
   let closing = false;
   let localOpener = false;
+  let keepAlive: ReturnType<typeof setInterval> | undefined;
   let skip = 0;
 
   const startMic = async () => {
@@ -40,6 +43,7 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
   };
 
   const teardown = () => {
+    clearInterval(keepAlive);
     capture?.stop();
     capture = null;
     player?.close();
@@ -104,7 +108,14 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
       connected = true;
     },
     goLive() {
+      clearInterval(keepAlive);
       if (!capture) void startMic().catch((err: Error) => ctx.fail(err));
+    },
+    goStandby() {
+      capture?.stop();
+      capture = null;
+      clearInterval(keepAlive);
+      keepAlive = setInterval(() => { if (ws?.readyState === 1) ws.send('{"type":"ping"}'); }, STANDBY_PING_MS);
     },
     playOpener(samples, rate) {
       localOpener = true;

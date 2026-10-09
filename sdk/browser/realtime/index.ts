@@ -10,7 +10,7 @@ export {
   DEFAULT_TIMEOUTS, TRANSPORT_LADDER,
 } from './types';
 export type {
-  AttemptRecord, ChatMessage, ClientMessage, IceServerInit, RealtimeEvent, RealtimeLocalEvent, RealtimeMetrics,
+  AttemptRecord, ChatMessage, ClientMessage, IceServerInit, LinkStats, RealtimeEvent, RealtimeLocalEvent, RealtimeMetrics,
   RealtimeServerEvent, RealtimeTimeouts, RealtimeTransport, SessionDescriptor, SessionRefusal, SessionRequest,
   StorageLike, TransportContext, TransportFactory, TransportOffer, TransportType,
 } from './types';
@@ -29,6 +29,8 @@ export { createWebRtcTransport, preferRedundantAudio, setPlayoutDelay } from './
 export { createWsTransport } from './transports/ws';
 export { createPostTransport, createS2SStreamTransport, mapS2SEvent } from './transports/clip';
 export type { PostTurn, PostTurnResult, S2SEndpoint } from './transports/clip';
+export { DEFAULT_POLICY, decideTransport, initialPolicy } from './transport-policy';
+export type { NetworkSample, PolicyContext, PolicyEffect, PolicyState, TransportPolicyThresholds } from './transport-policy';
 export { createVoiceBridge } from './voice-bridge';
 export type { VoiceBridge, VoiceBridgeOptions } from './voice-bridge';
 export { TELEMETRY_MAX_BATCH, createLocalTelemetry, newTraceparent, newTurnId, safeAttrs } from './telemetry';
