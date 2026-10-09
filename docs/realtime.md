@@ -70,7 +70,8 @@ the status); admission then places new sessions on another replica or sends them
 ### Events and control messages
 
 Edge → client (data channel "events", JSON, or WS text frames), the s2s vocabulary:
-`{type:"ready"}`, `{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
+`{type:"ready"}`, `{type:"turn_ack"}` (a client `end_turn` was received: sent at once, before the turn's own events),
+`{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
 `{type:"reply_delta", text}`, `{type:"reply", text}`, `{type:"audio_start"}`, `{type:"audio_end"}`,
 `{type:"interrupted"}`, `{type:"done", empty?, filtered?}`, `{type:"error", code, message}`,
 `{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms, endpoint_ms, ttfa_from_speech_ms, first_sound_ms,
@@ -386,7 +387,26 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   the learner to repeat.
 - Voice (`@parle/ai-gateway/voice`): Silero `vadEnd` + the rest of `endSilenceMs` → `end_turn`; `vadStart` while the NPC
   speaks → `interrupt` (barge-in); on the clip rungs the voice SDK's turn-taking records the clip.
-- Without `voice`, the page calls `sendEndTurn()`, `interrupt()`, `sendTurn(wav)` itself.
+- Without `voice`, the page calls `sendEndTurn(clip?)`, `interrupt()`, `sendTurn(wav)` itself.
+- **Uplink stalled: the turn is rescued over HTTP** (`rescueMs`, 1200 ms; 0 = off). On a realtime rung the SDK keeps
+  the utterance it has just heard end (the voice SDK's recorder; a page without `voice` passes it to
+  `sendEndTurn(clip)`). The edge answers a client `end_turn` with `turn_ack` at once. No sign of the turn from the edge
+  `rescueMs` after `end_turn` (no `turn_ack`, transcript, reply or audio) means the learner's audio or the edge's
+  answer is stuck on that transport: the utterance goes as **one clip** to the clip rung (`s2s`, else `postTurn`),
+  the same turn for the page and for telemetry. Then whichever answers first serves the turn, and only that one:
+  - the realtime path shows a sign of the turn before the clip answers → the clip request is aborted;
+  - the clip's first event arrives first → the stalled transport is **closed** (its edge session ends and with it the
+    turn it may have started; nothing it sends later is delivered), the session is on the clip rung
+    (`transport {reason:"rescue", from}`), and a new realtime session is admitted in the background and takes over
+    between turns with the conversation replayed in one `config_update` (user and assistant messages only) — the move
+    of a readmitted session. Telemetry `turn.rescued {from, to, stallMs}`.
+  - the clip request fails before answering → nothing changes, the session goes on waiting for the realtime path.
+
+  Never more than one extra clip turn per rescued turn. A barge-in drops a clip that has not answered and cuts one
+  that is playing. Only armed once the edge has sent a `turn_ack` in the session (an older edge image never does, and
+  there the only early sign would be the transcript, a model's time rather than the network's). It does not help when
+  the whole network is down for those seconds (the clip waits with everything else) nor when the capture itself
+  stalls; it helps when one TCP stream is stuck behind a retransmission or a backlog while the path works again.
 
 ### A reply cut by an upstream error
 
@@ -443,7 +463,7 @@ Event shape: `{ts, source:"browser"|"gateway", level, event, traceId, sessionId?
 
 - Browser: `rt.ladder.try|ok|fallback` (from, to, reason; `ok` = the session started: transport, durMs, `upgrading` when WebRTC is still connecting), `rt.ladder.upgrade` (from, to, durMs since the start), `rt.readmit.gave_up` (reason: `deadline`, `no_transport` or the refusal code), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
   `rt.session.admitted|rejected|closed`, `vad.segment` (durMs), `turn.first_audio` (durMs from the end of the turn, `fromSpeechMs`),
-  `turn.first_sound` (durMs on the learner's clock, source), `rt.opener.cached` (clips, lines), `turn.done` (firstSoundMs, networkDelayMs, clientOpener), `turn.recovered`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
+  `turn.first_sound` (durMs on the learner's clock, source), `rt.opener.cached` (clips, lines), `turn.done` (firstSoundMs, networkDelayMs, clientOpener), `turn.recovered`, `turn.rescue_started` (transport, afterMs, uplinkBufferedBytes), `turn.rescued` (from, to, stallMs), `turn.rescue_failed`, `rt.webrtc.retry`, `ws.close` (code), `error`; `turn.done` also carries `ackMs` (end of turn → the edge's first sign of it) and `rescuedMs`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
 - Gateway: `rt.session.admitted|rejected|deleted`, `rt.signal.offer|refused`, `ws.open|close|refused`, `error` (sink
   pluggable, default the log).
 - **Never** audio, transcript, LLM text, SDP or tokens: codes, counts, durations (the SDK's `safeAttrs` drops content keys).

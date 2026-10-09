@@ -78,8 +78,8 @@ export interface RealtimeSessionOptions {
 
 export interface RealtimeSession {
   connect(): Promise<TransportType>;
-  /** Client VAD said the learner stopped (realtime rungs). */
-  sendEndTurn(): void;
+  /** Client VAD said the learner stopped (realtime rungs). `clip` = that utterance recorded, for the rescue of a stalled uplink. */
+  sendEndTurn(clip?: Blob): void;
   interrupt(): void;
   /** Appends messages to the conversation (and tells the edge). */
   updateHistory(messages: ChatMessage[]): void;
@@ -101,6 +101,8 @@ const DEFAULT_DEADLINE_MS = 2_000;
 const MAX_DEADLINE_MS = 2_500;
 const OPENER_MARGIN_MS = 100;
 const MAX_OPENER_CLIPS = 2;
+const TURN_ACKS = new Set<RealtimeEvent['type']>(['turn_ack', 'transcript', 'filtered', 'reply_delta', 'audio_start', 'deadline_missed']);
+const CLIP_RUNGS = ['s2s-stream', 'post'] as const;
 
 interface Turn {
   id: string;
@@ -112,6 +114,9 @@ interface Turn {
   networkMs?: number | null;
   sound?: boolean;
   localOpener?: boolean;
+  acked?: boolean;
+  ackMs?: number;
+  rescuedMs?: number;
   provider?: string;
   fallback?: string;
 }
@@ -131,6 +136,12 @@ interface Upgrade {
   abort: AbortController;
   standby: Standby;
   connected: RealtimeTransport | null;
+}
+
+interface Rescue {
+  turn: Turn;
+  transport: RealtimeTransport;
+  committed: boolean;
 }
 
 interface Recovery {
@@ -155,7 +166,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     : createLocalTelemetry({ fetchImpl, ...(opts.telemetry === false ? { send: false } : opts.telemetry ?? {}) });
   const memory = createWinnerMemory(opts.storage === undefined ? defaultStorage() : opts.storage);
   const network = () => { try { return opts.networkKey?.() ?? defaultNetworkKey(); } catch { return 'default'; } };
-  const metrics: RealtimeMetrics = { transport: null, connectMs: null, attempts: [], failovers: 0, droppedFrames: 0, lastTurn: null };
+  const metrics: RealtimeMetrics = { transport: null, connectMs: null, attempts: [], failovers: 0, rescues: 0, droppedFrames: 0, lastTurn: null };
   const appended: ChatMessage[] = [];
   const audioEl = { current: null as HTMLAudioElement | null };
   let descriptor: SessionDescriptor | null = null;
@@ -178,6 +189,11 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   let playingOpener: { index: number; timer: ReturnType<typeof setTimeout> } | null = null;
   let upgrade: Upgrade | null = null;
+  let rescue: Rescue | null = null;
+  let rescueTimer: ReturnType<typeof setTimeout> | undefined;
+  let rescueClip: Blob | null = null;
+  let clipWav: ((clip: Blob) => Promise<Blob | null>) | null = null;
+  let ackSeen = false;
   let readmitTimer: ReturnType<typeof setTimeout> | undefined;
   let startedAt = 0;
   let quietSince = 0;
@@ -207,12 +223,25 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     serverOpenerOff = false;
   };
 
-  const startTurn = (speechEnded = false) => {
+  const cancelRescue = () => {
+    clearTimeout(rescueTimer);
+    const r = rescue;
+    if (!r || r.committed) return;
+    rescue = null;
+    r.transport.close();
+  };
+
+  const startTurn = (speechEnded = false, clip: Blob | null = null) => {
     clearTimeout(deadlineTimer);
+    cancelRescue();
     restoreServerOpener();
     const now = performance.now();
     const started: Turn = { id: newTurnId(), endAt: now, speechEnd: speechEnded ? now - endpointMs() : null, firstAudio: false };
     turn = started;
+    rescueClip = clip;
+    if (speechEnded && ackSeen && timeouts.rescueMs > 0 && current && !current.clipBased) {
+      rescueTimer = setTimeout(() => { void runRescue(started); }, timeouts.rescueMs);
+    }
     if (speechEnded && clips.length) {
       const due = Math.min(deadlineMs(), MAX_DEADLINE_MS - OPENER_MARGIN_MS) - endpointMs();
       deadlineTimer = setTimeout(() => { void playOpener(started); }, Math.max(0, due));
@@ -318,11 +347,14 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     }
     if (e.type === 'done') {
       clearTimeout(deadlineTimer);
+      cancelRescue();
+      if (rescue?.turn === turn) rescue = null;
       if (turn?.localOpener) restoreServerOpener();
       if (turn) {
         telemetry.emit('turn.done', { turnId: turn.id, durMs: performance.now() - turn.endAt, attrs: {
           empty: !!e.empty, filtered: !!e.filtered, transport: current?.type ?? null, provider: turn.provider ?? null, fallback: turn.fallback ?? null,
           firstSoundMs: turn.soundMs ?? null, networkDelayMs: turn.networkMs ?? null, clientOpener: !!turn.localOpener,
+          ackMs: turn.ackMs ?? null, rescuedMs: turn.rescuedMs ?? null,
         } });
       }
       turn = null;
@@ -372,7 +404,17 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     }
   }
 
+  const acked = (e: RealtimeEvent) => {
+    if (e.type === 'turn_ack') ackSeen = true;
+    if (!turn || turn.acked || !TURN_ACKS.has(e.type)) return;
+    turn.acked = true;
+    turn.ackMs = Math.round(performance.now() - turn.endAt);
+    cancelRescue();
+  };
+
   const fromTransport = (e: RealtimeEvent) => {
+    if (rescue?.committed !== true) acked(e);
+    if (e.type === 'turn_ack') return;
     if (e.type === 'error' && e.unspoken && opts.speak && !recovery) {
       const abort = new AbortController();
       const audio = Promise.resolve().then(() => opts.speak!(e.unspoken!, { config: config(), traceparent: telemetry.traceparent, signal: abort.signal }));
@@ -421,6 +463,52 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     telemetry.bind(answer.sessionId, answer.token, telemetryUrlOf(answer));
     telemetry.emit('rt.session.admitted', { durMs: performance.now() - started, attrs: { transports: answer.transports.length } });
     return null;
+  }
+
+  function commitRescue(r: Rescue): void {
+    const stalled = current;
+    const from = stalled?.type ?? 'ws';
+    r.committed = true;
+    r.turn.rescuedMs = Math.round(performance.now() - r.turn.endAt);
+    clearTimeout(rescueTimer);
+    endOpener(true);
+    dropUpgrade('turn rescued');
+    current = r.transport;
+    stalled?.close();
+    metrics.transport = r.transport.type;
+    metrics.rescues++;
+    telemetry.emit('turn.rescued', { level: 'warn', turnId: r.turn.id, durMs: r.turn.rescuedMs, attrs: { from, to: r.transport.type, stallMs: r.turn.rescuedMs } });
+    emit({ type: 'transport', transport: r.transport.type, reason: 'rescue', from });
+    void readmit(order.filter(isRealtime), null);
+  }
+
+  async function runRescue(t: Turn): Promise<void> {
+    const stalled = current;
+    const clip = rescueClip;
+    if (turn !== t || t.acked || closed || switching || rescue || !stalled || stalled.clipBased || !clip) return;
+    const r: Rescue = { turn: t, transport: null as never, committed: false };
+    const live = () => rescue === r && turn === t && !closed;
+    const context = Object.assign(Object.create(ctx) as TransportContext, {
+      emit: (e: RealtimeEvent) => { if (!live()) return; if (!r.committed) commitRescue(r); ctx.emit(e); },
+      fail: () => {},
+    });
+    const transport = CLIP_RUNGS.map(k => factories[k](context)).find(c => c?.sendTurn);
+    if (!transport?.sendTurn) return;
+    r.transport = transport;
+    rescue = r;
+    telemetry.emit('turn.rescue_started', { level: 'warn', turnId: t.id, attrs: { transport: stalled.type, afterMs: Math.round(performance.now() - t.endAt), uplinkBufferedBytes: stalled.uplinkBacklog?.() ?? null } });
+    try {
+      const wav = (await clipWav?.(clip)) ?? clip;
+      if (!live()) return;
+      await transport.sendTurn(wav);
+    } catch (err) {
+      if (!live()) return;
+      const interrupted = (err as Error).message === 'interrupted';
+      telemetry.emit('turn.rescue_failed', { level: 'warn', turnId: t.id, attrs: { committed: r.committed, reason: (err as Error).message.slice(0, 64) } });
+      if (!r.committed) { rescue = null; transport.close(); return; }
+      if (!interrupted) emit({ type: 'error', code: 'turn_failed', message: (err as Error).message });
+      emit({ type: 'done', ...(interrupted ? { interrupted: true } : { error: true }) });
+    }
   }
 
   const busy = () => !!turn || npcSpeaking || !!recovery || !!switching || !!bridge?.speaking() || performance.now() < heardUntil;
@@ -481,11 +569,11 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
 
   const canReadmit = (r: SessionRefusal) => opts.readmit !== false && (r.code === 'saturated' || r.code === 'cold');
 
-  async function readmit(rungs: TransportType[], first: SessionRefusal): Promise<void> {
+  async function readmit(rungs: TransportType[], first: SessionRefusal | null): Promise<void> {
     const giveUp = (reason: string) => telemetry.emit('rt.readmit.gave_up', { level: 'warn', attrs: { reason } });
     const deadline = performance.now() + timeouts.readmitForMs;
     let wait = timeouts.readmitMs;
-    for (let refusal: SessionRefusal | null = first; refusal; refusal = await admit(rungs)) {
+    for (let refusal: SessionRefusal | null = first ?? await admit(rungs); refusal; refusal = await admit(rungs)) {
       if (closed || !current?.clipBased) return;
       if (!canReadmit(refusal)) return giveUp(refusal.code);
       wait = Math.min(timeouts.readmitMaxMs, Math.max(wait, (refusal.retryAfterSeconds ?? 0) * 1000));
@@ -497,10 +585,10 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     if (closed || !current?.clipBased) return;
     const standby: Standby = { live: false, audio: null };
     const abort = new AbortController();
-    const context = standbyContext(standby);
-    const offered = rungs.filter(t => descriptor?.transports.some(o => o.type === t));
+    const context = Object.assign(standbyContext(standby), { patient: false });
+    const offered = orderWithWinner(rungs, memory.get(network())).filter(t => descriptor?.transports.some(o => o.type === t));
     const up: Upgrade = {
-      rtc: climbLadder(offered, t => factories[t](context), { timeouts, signal: abort.signal, budgetMs: patientBudget }).then(r => r.transport, () => null),
+      rtc: climbLadder(offered, t => factories[t](context), { timeouts, signal: abort.signal }).then(r => r.transport, () => null),
       abort, standby, connected: null,
     };
     upgrade = up;
@@ -587,6 +675,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     if (closed) return;
     if (switching) return switching;
     switching = (async () => {
+      cancelRescue();
       current?.close();
       current = null;
       cancelRecovery();
@@ -627,15 +716,17 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const audio = new AudioContext();
     const track = stream.getAudioTracks()[0];
     const turns = track ? createTurnTaking({
-      clip: createTurnClip(), track: () => track, toWav: (clip) => clipToWav(clip, audio),
+      clip: createTurnClip(), track: () => track, toWav: (clip) => (current?.clipBased ? clipToWav(clip, audio) : Promise.resolve(clip)),
       endSilenceMs: v.endSilenceMs, maxSpeechMs: v.maxSpeechMs, echoTailMs: v.echoTailMs, tuning: v.tuning,
-      onVoice: () => {}, onTurn: (wav) => { void session.sendTurn(wav); },
+      onVoice: () => {}, onTurn: (wav) => { if (current?.clipBased) void session.sendTurn(wav); else rescueClip = wav; },
     }) : null;
     turns?.setListening(true);
+    clipWav = (clip) => clipToWav(clip, audio);
     bridge = createVoiceBridge({
       endAfterVadEndMs: turnEndAfterVadEndMs(v.endSilenceMs, v.tuning),
       npcSpeaking: () => npcSpeaking,
       clipMode: () => !!current?.clipBased,
+      recordAlways: () => ackSeen && timeouts.rescueMs > 0,
       onInterrupt: () => session.interrupt(),
       onEndTurn: () => session.sendEndTurn(),
       onClipEffect: (e) => turns?.onEffect(e),
@@ -654,6 +745,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     closed = true;
     clearTimeout(readmitTimer);
     clearTimeout(deadlineTimer);
+    cancelRescue();
     if (playingOpener) clearTimeout(playingOpener.timer);
     playingOpener = null;
     cacheAbort?.abort();
@@ -678,13 +770,14 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       if (opts.voice && !closed) await startVoice(opts.voice);
       return current!.type;
     },
-    sendEndTurn() {
+    sendEndTurn(clip) {
       if (!current || current.clipBased) return;
-      startTurn(true);
+      startTurn(true, clip ?? null);
       current.send({ type: 'end_turn' } satisfies ClientMessage);
     },
     interrupt() {
       clearTimeout(deadlineTimer);
+      cancelRescue();
       endOpener(true);
       const r = cancelRecovery();
       if (r?.playing) { emit({ type: 'interrupted' }); emit({ type: 'done', interrupted: true }); return; }

@@ -22,6 +22,7 @@ export interface ChatMessage {
 export type RealtimeServerEvent =
   | { type: 'ready' }
   | { type: 'route'; provider: string; fallback?: string }
+  | { type: 'turn_ack' }
   | { type: 'vad'; state: 'start' | 'end' }
   | { type: 'transcript'; text: string; final: boolean }
   | { type: 'filtered'; reasons: string[] }
@@ -42,7 +43,7 @@ export type RealtimeServerEvent =
 
 /** Events the SDK adds: which transport carries the session, and its end. */
 export type RealtimeLocalEvent =
-  | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover' | 'upgrade'; from?: TransportType; error?: string }
+  | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover' | 'upgrade' | 'rescue'; from?: TransportType; error?: string }
   | { type: 'recovered' }
   | { type: 'closed'; reason: string };
 
@@ -111,6 +112,7 @@ export interface RealtimeTimeouts {
   /** A WebRTC connection `disconnected` this long gets an ICE restart. */
   disconnectGraceMs: number;
   iceRestartMs: number;
+  rescueMs: number;
   upgradeMs: number;
   upgradeConnectMs: number;
   upgradeTries: number;
@@ -130,6 +132,7 @@ export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
   turnMs: 45_000,
   disconnectGraceMs: 3_000,
   iceRestartMs: 5_000,
+  rescueMs: 1_200,
   upgradeMs: 40_000,
   upgradeConnectMs: 12_000,
   upgradeTries: 2,
@@ -151,6 +154,7 @@ export interface RealtimeMetrics {
   connectMs: number | null;
   attempts: AttemptRecord[];
   failovers: number;
+  rescues: number;
   /** Audio frames dropped because the uplink could not keep up (WS). */
   droppedFrames: number;
   /** Last `metrics` event of the edge. */

@@ -207,7 +207,10 @@ async def endpoint_metrics() -> None:
     learner = Learner({**CFG, "vad": "client"})
     learner.say(0.5)
     await asyncio.sleep(0.7)
+    seen = len(learner.events)
     learner.session.control({"type": "end_turn"})
+    check("client end_turn: acknowledged at once (turn_ack), before the turn's own events",
+          [e["type"] for _, e in learner.events[seen:]] == ["turn_ack"], learner.events[seen:])
     metrics = await learner.wait("metrics")
     check("metrics: a client end_turn 200 ms after the speech reports that wait", 150 <= metrics["endpoint_ms"] <= 280, metrics)
     await learner.close()

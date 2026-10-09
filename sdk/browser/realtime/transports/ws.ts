@@ -64,6 +64,7 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
         signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); });
       });
       socket.onmessage = (e: MessageEvent) => {
+        if (closing) return;
         if (typeof e.data === 'string') {
           let event: { type?: string } | null = null;
           try { event = JSON.parse(e.data); } catch { return; }

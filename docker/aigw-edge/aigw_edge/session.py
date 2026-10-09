@@ -263,6 +263,8 @@ class Session:
             self.emit({"type": "done", "interrupted": True, "turnId": self.turn_id})
 
     def end_turn(self, reason: str) -> None:
+        if reason == "client":
+            self.emit({"type": "turn_ack"})
         start = self.turn_start if self.turn_start is not None else 0
         audio = bytes(self.turn_buf[start:])
         self.turn_buf.clear()
