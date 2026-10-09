@@ -15,7 +15,7 @@ from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSes
 from aiortc.mediastreams import MediaStreamError
 from aiortc.sdp import candidate_from_sdp
 
-from .audio import Downsampler48to16, GapFill, upsample2
+from .audio import Downsampler48to16, GapFill, send_opus, upsample2
 from .config import Settings
 from .session import OUT_FRAME_BYTES, OUT_RATE, Session
 from .telemetry import telemetry
@@ -186,7 +186,7 @@ class SessionHost:
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
             if not any(t.kind == "audio" for t in pc.getTransceivers()):
                 raise ValueError("the offer has no audio m-line")
-            pc.addTrack(OutTrack(session))
+            send_opus(pc.addTrack(OutTrack(session)))
             await pc.setLocalDescription(await pc.createAnswer())
         except Exception as error:  # noqa: BLE001
             await pc.close()
@@ -213,8 +213,10 @@ class SessionHost:
                     channels = len(frame.layout.channels)
                     missing = gaps.missing(frame.pts, frame.samples)
                     if missing:
-                        session.lost_ms += missing // 48
+                        session.uplink.count(missing // 48, 0, None)
                         session.feed(down.push(np.zeros(missing * channels, dtype=np.int16), channels))
+                    lost, recovered, redundancy = frame.opaque or (0, 0, None)
+                    session.uplink.count(lost // 48, recovered // 48, redundancy)
                     session.feed(down.push(frame.to_ndarray(), channels))
                     continue
                 resampler = resampler or av.AudioResampler(format="s16", layout="mono", rate=16000)

@@ -14,12 +14,15 @@ import av
 import numpy as np
 from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError
+from aiortc import codecs, rtcrtpsender
+from aiortc.codecs.opus import OpusEncoder
 from aiortc.rtp import is_rtcp
 
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from aigw_edge import audio  # noqa: E402
 from aigw_edge.config import derive_key  # noqa: E402
 from aigw_edge.token import sign  # noqa: E402
 
@@ -27,6 +30,44 @@ REPLICA_TOKEN = "test-replica-token-0123456789abcdef"
 KEY = derive_key(REPLICA_TOKEN)
 FRAME = 320  # 20 ms at 16 kHz
 DEFAULT_CFG = {"system": "Você é o padeiro.", "messages": [], "voice": "br-m-08", "language": "pt", "max_tokens": 80}
+
+
+audio.install()
+aiortc_encoder = rtcrtpsender.get_encoder
+
+
+def red_payload(primary: bytes, previous: bytes | None, offset: int, payload_type: int) -> bytes:
+    if not previous or len(previous) > 0x3FF or not 0 < offset < 1 << 14:
+        return bytes([payload_type]) + primary
+    return bytes([0x80 | payload_type]) + (offset << 10 | len(previous)).to_bytes(3, "big") + bytes([payload_type]) + previous + primary
+
+
+class RedEncoder:
+    def __init__(self, opus, payload_type: int):
+        self.opus, self.payload_type = opus, payload_type
+        self.previous: tuple[bytes, int] | None = None
+
+    def encode(self, frame, force_keyframe: bool = False):
+        payloads, timestamp = self.opus.encode(frame, force_keyframe)
+        if len(payloads) != 1:
+            return payloads, timestamp
+        before, at = self.previous or (None, 0)
+        self.previous = (payloads[0], timestamp)
+        return [red_payload(payloads[0], before, timestamp - at, self.payload_type)], timestamp
+
+
+def browser_like_encoder(codec):
+    if audio.is_red(codec):
+        opus = codecs.CODECS["audio"][0]
+        return RedEncoder(browser_like_encoder(opus), opus.payloadType)
+    encoder = aiortc_encoder(codec)
+    if isinstance(encoder, OpusEncoder):
+        encoder.codec.bit_rate = 32000
+        encoder.codec.options = {"application": "voip", "fec": "1", "packet_loss": "10"}
+    return encoder
+
+
+rtcrtpsender.get_encoder = browser_like_encoder
 
 
 def mint(cfg: dict | None = None, rep: str = "fr-par-2:replica-1", dep: str = "parle-speech", ttl: int = 600,
@@ -197,7 +238,7 @@ class RtcLearner:
         self.first_audio_at: float | None = None
         self.tasks: list[asyncio.Task] = []
 
-    async def connect(self, token: str, standby: bool = False) -> "RtcLearner":
+    async def connect(self, token: str, standby: bool = False, red: bool = False) -> "RtcLearner":
         self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         self.dc = self.pc.createDataChannel("events")
         self.dc.on("message", lambda m: asyncio.ensure_future(self.events.add(json.loads(m))))
@@ -205,6 +246,9 @@ class RtcLearner:
             self.sender = self.pc.addTransceiver("audio", direction="sendrecv").sender
         else:
             self.pc.addTrack(self.mic)
+        if red:
+            offered = codecs.get_capabilities("audio").codecs
+            self.pc.getTransceivers()[0].setCodecPreferences(sorted(offered, key=lambda codec: not audio.is_red(codec)))
 
         @self.pc.on("track")
         def on_track(track):

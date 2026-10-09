@@ -259,15 +259,16 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
     await learner.close()
 
 
-NETWORKS = (("clean", 0.0, 0.0), ("2 % loss", 0.02, 0.0), ("10 % loss", 0.10, 0.0), ("40 ms jitter", 0.0, 0.04))
+NETWORKS = (("clean", 0.0, 0.0), ("2 % loss", 0.02, 0.0), ("5 % loss", 0.05, 0.0), ("10 % loss", 0.10, 0.0), ("40 ms jitter", 0.0, 0.04))
 
 
 async def scenario_webrtc_network(base: str) -> None:
-    for name, loss, jitter_s in NETWORKS:
-        learner = await RtcLearner(base).connect(mint())
+    for red, (name, loss, jitter_s) in ((red, network) for red in (False, True) for network in NETWORKS):
+        name = f"RED, {name}" if red else name
+        learner = await RtcLearner(base).connect(mint(), red=red)
         await learner.events.wait("ready", 10)
         learner.impair(loss, jitter_s)
-        ends, firsts, lost = [], [], 0
+        ends, firsts, lost, fec, holes = [], [], 0, 0, 0
         for _ in range(3):
             after, learner.first_audio_at = len(learner.events.items), None
             learner.mic.say(1.2)
@@ -277,8 +278,14 @@ async def scenario_webrtc_network(base: str) -> None:
             firsts.append(round((learner.first_audio_at - at[("audio_start", None)]) * 1000))
             m = learner.events.of("metrics")[-1]
             lost += m["uplink_lost_ms"]
+            fec += m["uplink_recovered_ms"]
+            async with aiohttp.ClientSession() as http:
+                async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+                    holes += (await r.json())["last_stt_holes"]
             await asyncio.sleep(0.4)
         results["latency"][f"webrtc {name}"] = {"end_of_turn_ms": ends, "first_frame_ms": firsts, "uplink_lost_ms": lost,
+                                                "uplink_recovered_ms": fec, "uplink_fec_pct": m["uplink_fec_pct"],
+                                                "uplink_red_pct": m["uplink_red_pct"], "silent_holes": holes,
                                                 **{k: m.get(k) for k in ("rtp_first_sent_ms", "rtp_late_p95_ms")}}
         jitter_ms = round(jitter_s * 1000)
         check(f"webrtc, {name}: the turn ends 700 ms after the speech, lost packets counted as elapsed time",
@@ -286,6 +293,15 @@ async def scenario_webrtc_network(base: str) -> None:
         check(f"webrtc, {name}: the first reply frame is heard within one frame of audio_start",
               statistics.median(firsts) < 20 + jitter_ms, firsts)
         check(f"webrtc, {name}: lost uplink audio is reported per turn (metrics.uplink_lost_ms)", (lost > 0) == (loss > 0), lost)
+        check(f"webrtc, {name}: the speech the STT gets has no silent hole (lost packets rebuilt from FEC or concealed)",
+              holes == 0, holes)
+        seen = {"recovered_ms": fec, "lost_ms": lost, "fec_pct": m["uplink_fec_pct"], "red_pct": m["uplink_red_pct"]}
+        if red:
+            check(f"webrtc, {name}: the redundant copies are seen and nearly all the lost audio is rebuilt (metrics.uplink_red_pct)",
+                  m["uplink_red_pct"] > 90 and 0.8 * lost <= fec <= lost, seen)
+        else:
+            check(f"webrtc, {name}: FEC is seen on the uplink and what it rebuilt is reported (metrics.uplink_recovered_ms, uplink_fec_pct)",
+                  m["uplink_fec_pct"] > 0 and (fec > 0) == (loss > 0) and fec <= lost and "useinbandfec=1" in learner.answer["sdp"], seen)
         async with aiohttp.ClientSession() as http:
             await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
         await learner.close()

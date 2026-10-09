@@ -60,7 +60,7 @@ const LOUD = 0.02;
 const KEEP = [
   'type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms',
   'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms', 'first_sound_from_speech_ms', 'ttfa_from_speech_ms',
-  'tts_retries', 'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms',
+  'tts_retries', 'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms', 'uplink_recovered_ms', 'uplink_fec_pct', 'uplink_red_pct',
 ];
 const UPLINK_BACKLOG = 64 * 1024;
 

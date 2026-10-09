@@ -366,7 +366,7 @@ try:
         check(f"downsampler 48→16 kHz: {freq} Hz {want} (gain {rms:.2f})", (rms > 0.95) if want == "kept" else (rms < 0.05))
     check("downsampler: 3:1 length", len(down.push(np.zeros(960, dtype=np.int16), 1)) == 320 * 2)
 
-    from aiortc import rtcrtpreceiver
+    from aiortc import codecs, rtcrtpreceiver
     from aiortc.jitterbuffer import JitterBuffer
     from aiortc.rtp import RtpPacket
     from aigw_edge import audio
@@ -394,6 +394,63 @@ try:
     gaps = audio.GapFill()
     check("webrtc uplink: a gap in the RTP timestamps is the lost audio, counted as elapsed time, at most 1 s of it",
           [gaps.missing(pts, 960) for pts in (0, 960, 2880, 3840, 500000)] == [0, 0, 960, 0, 48000])
+    import av
+    from aiortc.jitterbuffer import JitterFrame
+    from clients import red_payload
+
+    def opus_packets(fec: bool) -> list[bytes]:
+        enc = av.CodecContext.create("libopus", "w")
+        enc.bit_rate, enc.format, enc.layout, enc.sample_rate = 32000, "s16", "mono", 48000
+        enc.options = {"application": "voip", **({"fec": "1", "packet_loss": "10"} if fec else {})}
+        voice = (0.3 * 32767 * np.sin(2 * np.pi * 210 * t48[:48000])).astype(np.int16)
+        out = []
+        for i in range(0, 48000, 960):
+            frame = av.AudioFrame.from_ndarray(voice[i:i + 960].reshape(1, -1), format="s16", layout="mono")
+            frame.sample_rate, frame.pts = 48000, i
+            out += [bytes(packet) for packet in enc.encode(frame)]
+        return out
+
+    def heard(packets: list[bytes], lost: set[int], red: bool = False) -> dict:
+        decoder = audio.LossDecoder(red)
+        frames = [f for n, data in enumerate(packets) if n not in lost for f in decoder.decode(JitterFrame(data=data, timestamp=n * 960))]
+        level = lambda f: float(np.sqrt(np.mean(f.to_ndarray().astype(np.float32) ** 2)))  # noqa: E731
+        concealed = [f for f in frames if f.opaque[0]]
+        return {"contiguous": all(a.pts + a.samples == b.pts for a, b in zip(frames, frames[1:])),
+                "samples": sum(f.samples for f in frames), "lost": sum(f.opaque[0] for f in frames),
+                "fec": sum(f.opaque[1] for f in frames), "lbrr": sum(f.opaque[2] == audio.FEC for f in frames),
+                "voiced": all(level(f) > 0.5 * level(frames[10]) for f in concealed)}
+
+    with_fec, plain = opus_packets(True), opus_packets(False)
+    whole, one, two, bare = heard(with_fec, set()), heard(with_fec, {20}), heard(with_fec, {20, 21}), heard(plain, {20})
+    check("webrtc uplink loss: nothing lost, nothing concealed; the sender's in-band FEC is seen on its packets",
+          whole["lost"] == 0 and whole["contiguous"] and whole["samples"] == len(with_fec) * 960 and whole["lbrr"] >= len(with_fec) // 4)
+    check("webrtc uplink loss: one lost packet is rebuilt from the next packet's FEC, in place and not as silence",
+          one["lost"] == 960 and one["fec"] == 960 and one["voiced"] and one["contiguous"] and one["samples"] == whole["samples"])
+    check("webrtc uplink loss: two lost in a row = the first concealed (PLC), the second from FEC, same elapsed time",
+          two["lost"] == 1920 and two["fec"] == 960 and two["voiced"] and two["contiguous"] and two["samples"] == whole["samples"])
+    check("webrtc uplink loss: a sender without FEC gets concealment (PLC) instead of silence",
+          bare["lost"] == 960 and bare["fec"] == 0 and bare["lbrr"] == 0 and bare["voiced"] and bare["samples"] == whole["samples"])
+    red = [red_payload(data, with_fec[n - 1] if n else None, 960, 111) for n, data in enumerate(with_fec)]
+    red_whole, red_one, red_two, red_three = (heard(red, lost, True) for lost in (set(), {20}, {20, 21}, {20, 21, 22}))
+    check("webrtc uplink RED (RFC 2198): the primary block is the packet, a redundant copy of one already heard is ignored",
+          red_whole == {**whole, "lbrr": 0} and audio.red_blocks(red[5]) == [(960, with_fec[4]), (0, with_fec[5])]
+          and audio.red_blocks(red[0]) == [(0, with_fec[0])] and audio.red_blocks(b"\x80") == [])
+    check("webrtc uplink RED: one lost packet is the copy in the next one; two in a row = FEC inside the copy, then the copy",
+          all(r["lost"] == r["fec"] == n * 960 and r["contiguous"] and r["samples"] == whole["samples"] and r["voiced"]
+              for n, r in ((1, red_one), (2, red_two))))
+    check("webrtc uplink RED: three lost in a row = the first concealed, the other two rebuilt",
+          red_three["lost"] == 2880 and red_three["fec"] == 1920 and red_three["contiguous"] and red_three["samples"] == whole["samples"])
+    check("webrtc uplink loss: the edge's answer asks the browser for in-band FEC and accepts audio/red",
+          codecs.CODECS["audio"][0].parameters.get("useinbandfec") == 1 and audio.is_red(codecs.CODECS["audio"][1])
+          and isinstance(rtcrtpreceiver.get_decoder(codecs.CODECS["audio"][0]), audio.LossDecoder)
+          and rtcrtpreceiver.get_decoder(codecs.CODECS["audio"][1]).red)
+    from aiortc import rtcpeerconnection
+    from aiortc.rtcrtpparameters import RTCRtpCodecParameters
+    chrome = [RTCRtpCodecParameters(mimeType="audio/red", clockRate=48000, channels=2, payloadType=63, parameters={"111/111": None}),
+              RTCRtpCodecParameters(mimeType="audio/opus", clockRate=48000, channels=2, payloadType=111)]
+    check("webrtc uplink RED: a browser that offers red first (payload type 63, below 96) is answered red first with its own number and fmtp",
+          [(c.mimeType, c.payloadType, c.parameters.get("111/111", 0)) for c in rtcpeerconnection.find_common_codecs(codecs.CODECS["audio"], chrome)]
+          == [("audio/red", 63, None), ("audio/opus", 111, 0)])
     doubled = audio.upsample2(np.array([100, 200, -50], dtype=np.int16), 0)
     check("webrtc downlink: 24 kHz PCM leaves at 48 kHz, each sample kept and the one between interpolated across frames",
           doubled.tolist() == [50, 100, 150, 200, 75, -50] and doubled.dtype == np.int16

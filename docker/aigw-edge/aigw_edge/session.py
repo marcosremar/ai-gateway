@@ -112,6 +112,24 @@ class AudioOut:
         return chunk + b"\0" * (size - len(chunk))
 
 
+class Uplink:
+    def __init__(self):
+        self.lost_ms = self.recovered_ms = self.packets = self.fec = self.red = 0
+
+    def count(self, lost_ms: int, recovered_ms: int, redundancy: int | None) -> None:
+        self.lost_ms += lost_ms
+        self.recovered_ms += recovered_ms
+        if redundancy is not None:
+            self.packets += 1
+            self.fec += redundancy == 1
+            self.red += redundancy == 2
+
+    def metrics(self) -> dict:
+        pct = lambda n: round(100 * n / self.packets) if self.packets else None  # noqa: E731
+        return {"uplink_lost_ms": self.lost_ms, "uplink_recovered_ms": self.recovered_ms, "uplink_fec_pct": pct(self.fec),
+                "uplink_red_pct": pct(self.red)}
+
+
 class Session:
     def __init__(self, sid: str, claims: dict, settings: Settings, upstream: Upstream, emit, transport: str,
                  trace_id: str | None = None):
@@ -139,7 +157,7 @@ class Session:
         self.closed = False
         self.turns = 0
         self.turn_id: str | None = None
-        self.lost_ms = 0
+        self.uplink = Uplink()
         self.outcome = "ok"
         self.last_opener = -1
         self._warm_openers()
@@ -430,8 +448,8 @@ class Session:
         self.emit({"type": "audio_start"})
 
     def _metrics_event(self, metrics: dict) -> dict:
-        lost, self.lost_ms = self.lost_ms, 0
-        return {"type": "metrics", **metrics, **self.out.pacing(), "uplink_lost_ms": lost,
+        uplink, self.uplink = self.uplink, Uplink()
+        return {"type": "metrics", **metrics, **self.out.pacing(), **uplink.metrics(),
                 "ttfa_from_speech_ms": ttfa_from_speech(metrics),
                 "first_sound_from_speech_ms": ttfa_from_speech(metrics, "first_sound_ms"), "turnId": self.turn_id}
 

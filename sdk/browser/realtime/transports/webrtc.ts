@@ -95,6 +95,16 @@ export function setPlayoutDelay(receiver: RTCRtpReceiver | undefined, ms: number
   return null;
 }
 
+const isRed = (c: { mimeType: string }) => c.mimeType.toLowerCase() === 'audio/red';
+
+export function preferRedundantAudio(pc: RTCPeerConnection): void {
+  try {
+    const codecs = (globalThis as { RTCRtpSender?: typeof RTCRtpSender }).RTCRtpSender?.getCapabilities?.('audio')?.codecs ?? [];
+    if (!codecs.some(isRed)) return;
+    for (const t of pc.getTransceivers?.() ?? []) t.setCodecPreferences?.([...codecs.filter(isRed), ...codecs.filter(c => !isRed(c))]);
+  } catch { /* the browser keeps its own order */ }
+}
+
 interface Link {
   pc: RTCPeerConnection;
   channel: RTCDataChannel;
@@ -160,6 +170,7 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
       if (!tracks.length) pc.addTransceiver('audio', { direction: 'recvonly' });
       else if (live) for (const track of tracks) pc.addTrack(track, mic);
       else l.heldMic = { sender: pc.addTransceiver('audio', { direction: 'sendrecv' }).sender, track: tracks[0]! };
+      preferRedundantAudio(pc);
       l.channel.onmessage = (e: MessageEvent) => {
         try { ctx.emit(JSON.parse(String(e.data))); } catch { /* not JSON: ignored */ }
       };

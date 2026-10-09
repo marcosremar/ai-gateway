@@ -226,7 +226,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
     edge: {
       ttfaMs: dist(metric('ttfa_ms')), sttMs: dist(metric('stt_ms')), llmTtftMs: dist(metric('llm_ttft_ms')), ttsTtfbMs: dist(metric('tts_ttfb_ms')),
       firstSoundFromSpeechMs: dist(metric('first_sound_from_speech_ms')), ttfaFromSpeechMs: dist(metric('ttfa_from_speech_ms')),
-      rtpFirstSentMs: dist(metric('rtp_first_sent_ms')), rtpLateP95Ms: dist(metric('rtp_late_p95_ms')), rtpLateMaxMs: dist(metric('rtp_late_max_ms')), uplinkLostMs: dist(metric('uplink_lost_ms')),
+      rtpFirstSentMs: dist(metric('rtp_first_sent_ms')), rtpLateP95Ms: dist(metric('rtp_late_p95_ms')), rtpLateMaxMs: dist(metric('rtp_late_max_ms')), uplinkLostMs: dist(metric('uplink_lost_ms')), uplinkRecoveredMs: dist(metric('uplink_recovered_ms')), uplinkFecPct: dist(metric('uplink_fec_pct')), uplinkRedPct: dist(metric('uplink_red_pct')),
     },
     connect: {
       sessionMs: Object.fromEntries(['webrtc', 'ws'].map(k => [k, dist(client.students.filter(s => s.transport === k && s.connectMs !== null).map(s => s.connectMs as number))])),
