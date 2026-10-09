@@ -123,6 +123,16 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
     return Promise.all(machines.map(async m => (m.pricePerHour == null ? { ...m, pricePerHour: await this.priceOrNull(m) } : m)));
   }
 
+  async listForeign(namespace: string): Promise<Array<ReplicaMachine & { namespace: string }>> {
+    const list = await this.client.listInstancesByTag(DEPLOY_TAG, this.credentials, this.opts.projectId ? { projectId: this.opts.projectId } : {});
+    return list.flatMap((inst) => {
+      const tags = ((inst.providerMeta ?? {}) as { tags?: string[] }).tags ?? [];
+      const ns = tags.find(t => t.startsWith('aigw-ns-'))?.slice('aigw-ns-'.length);
+      const machine = toMachine(inst);
+      return machine && ns && ns !== namespace ? [{ ...machine, namespace: ns }] : [];
+    });
+  }
+
   /** Catalog price of a listed machine, looked up once an hour per zone+type (the list runs every 20 s). */
   private readonly listedPrices = new Map<string, { at: number; price: number | null }>();
 

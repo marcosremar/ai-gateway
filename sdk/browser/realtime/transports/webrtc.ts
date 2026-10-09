@@ -127,7 +127,7 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     const res = await ctx.fetchImpl(offer.offerUrl, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', traceparent: ctx.traceparent },
-      body: JSON.stringify({ sdp: conn.localDescription?.sdp ?? '', type: 'offer' }),
+      body: JSON.stringify({ sdp: conn.localDescription?.sdp ?? '', type: 'offer', ...(ctx.descriptor?.cfg ? { cfg: ctx.descriptor.cfg } : {}) }),
       signal: AbortSignal.any ? AbortSignal.any([signal, AbortSignal.timeout(ctx.timeouts.signalingMs)]) : signal,
     });
     const answer = await res.json().catch(() => null) as { sdp?: string; type?: string; error?: { code?: string } } | null;

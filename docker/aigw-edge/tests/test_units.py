@@ -1,5 +1,6 @@
 """Unit tests of the edge's pure parts (no network): python tests/test_units.py (needs numpy for the VAD)."""
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -9,7 +10,9 @@ sys.path.insert(0, str(ROOT))
 
 from aigw_edge import text  # noqa: E402
 from aigw_edge.config import derive_key  # noqa: E402
-from aigw_edge.token import TokenError, TokenVerifier, b64url, sign  # noqa: E402
+from aigw_edge.intercept import match_rule  # noqa: E402
+from aigw_edge.token import verify_update  # noqa: E402
+from aigw_edge.token import MAX_CFG_CHARS, MAX_CFG_REF_CHARS, TokenError, TokenVerifier, b64url, config_digest, needs_config, sign  # noqa: E402
 
 failures = 0
 
@@ -104,6 +107,69 @@ check("token: a live WebRTC session does not let its token open a second WS",
       v.verify(reoffer, transport="ws")["sid"] == "s-reoffer" and rejects_on(reoffer, "ws"))
 alive.clear()
 check("token: once the session ended its token is replayed", replayed(reoffer, alive.__contains__))
+by_ref = b64url(json.dumps({"voice": "br-m-08", "system": "x" * 16000}).encode())
+ref = {**good, "cfg": "", "cfd": config_digest(by_ref)}
+
+
+def ref_verdict(sid, cfg_, signed=by_ref):
+    try:
+        return v.verify(sign({**ref, "sid": sid, "cfd": config_digest(signed)}, key), cfg=cfg_)["cfg"]
+    except TokenError as e:
+        return e.reason
+
+
+check("token: config by reference, 16 KB: verified against the signed digest", ref_verdict("r1", by_ref)["system"] == "x" * 16000)
+check("token: config by reference: missing, altered or not base64url JSON → cfg",
+      [ref_verdict("r2", None), ref_verdict("r3", by_ref[:-4] + "AAAA"), ref_verdict("r4", "")] == ["cfg"] * 3)
+check("token: config by reference: the digest is sha256 over the base64url text (the gateway's vector)",
+      config_digest("abc") == "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0" and needs_config(sign(ref, key)) and not needs_config(sign(good, key))
+      and not needs_config("x") and not needs_config(None))
+check("token: a device claim, which the edge ignores, next to an inline config or a config by reference",
+      v.verify(sign({**good, "sid": "s-dev", "dev": "install-7f3a9c21"}, key))["sid"] == "s-dev"
+      and v.verify(sign({**ref, "sid": "r-dev", "dev": "install-7f3a9c21"}, key), cfg=by_ref)["cfg"]["system"] == "x" * 16000)
+over = b64url(json.dumps({"system": "x" * MAX_CFG_REF_CHARS}).encode())
+check("token: config by reference over the bound → cfg; an inline cfg keeps its 6144 bound",
+      ref_verdict("r5", over, over) == "cfg" and rejects({**good, "sid": "r6", "cfg": "e30" + "A" * MAX_CFG_CHARS}, "cfg"))
+RULES = [
+    {"tag": "slower", "contains": ["mais devagar", "fala devagar", "devagar por favor"]},
+    {"tag": "repeat", "contains": ["pode repetir", "repete", "nao entendi", "como e que e"], "whole": ["desculpa", "o que", "como", "de novo"]},
+    {"tag": "hesitation", "whole": ["ha", "hum"], "question": True},
+    {"tag": "caption", "contains": ["transcricao", "legenda", "mostra o texto"]},
+    {"tag": "options", "contains": ["opcoes", "nao sei o que dizer"]},
+]
+tag = lambda text: (match_rule(RULES, text) or {}).get("tag")  # noqa: E731
+check("intercept: the school's four voice commands, as its own detector reads them (case, accents, punctuation)",
+      [tag(t) for t in ("Pode repetir?", "Mais devagar, por favor.", "Mostra a transcrição.", "Quais são as opções?")]
+      == ["repeat", "slower", "caption", "options"])
+check("intercept: a phrase matches whole words anywhere; a `whole` form only as the entire utterance; the first rule wins",
+      [tag(t) for t in ("NÃO ENTENDI!!", "Não entendi, pode falar mais devagar?", "«Desculpa»", "Desculpa, eu queria um pão.",
+                        "A repetição ajuda.", "O que?", "O que tem hoje?", "Como é que é?")]
+      == ["repeat", "slower", "repeat", None, None, "repeat", None, "repeat"])
+check("intercept: a `question` rule needs the question mark of the raw transcript; an ordinary turn matches nothing",
+      [tag(t) for t in ("Hã?", "Hã.", "Hum...", "Bom dia, eu queria um pão francês.", "", "?!")] == ["hesitation", None, None, None, None, None])
+check("intercept: malformed rules are skipped, never raised",
+      match_rule([None, "x", {"contains": "pode"}, {"contains": [None, 3, ""]}, {"tag": "ok", "whole": ["oi"]}], "Oi!") == {"tag": "ok", "whole": ["oi"]}
+      and match_rule("x", "Oi") is None and match_rule(None, "Oi") is None)
+now_s = int(now)
+update = lambda n, **over: sign({"sid": "s1", "upd": b64url(b'{"system":"Lia"}'), "n": n, "iat": now_s, "exp": now_s + 60, **over}, key)  # noqa: E731
+
+
+def update_verdict(token_, after=0, k=key):
+    try:
+        return verify_update(token_, k, "s1", after)
+    except TokenError as e:
+        return e.reason
+
+
+check("signed update: verified with the session key, bound to the session, ordered by n",
+      [update_verdict(update(7)), update_verdict(update(7), 7), update_verdict(update(7), k=b"x" * 32), update_verdict(update(7, sid="s2")),
+       update_verdict(update(7, exp=now_s - 1)), update_verdict(update("7")), update_verdict(update(7, upd="W10"))]
+      == [(7, {"system": "Lia"}), "replayed", "bad_signature", "session", "expired", "replayed", "cfg"])
+GATEWAY_UPDATE = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJzMSIsInVwZCI6ImV5SnplWE4wWlcwaU9pSk1hV0VpZlEiLCJuIjoxNzYwMDAwMDAwMDAwLCJpYXQiOjE3NjAwMDAwMDAsImV4cCI6MTc2MDAwMDYwMH0.mX9TEdabp9hga5PbxrjynCPCq2L6tQTKr-q-UXiTbNg")
+check("signed update: one signed by the gateway (src/realtime/token.ts signUpdateToken, same vector in its tests) verifies here",
+      verify_update(GATEWAY_UPDATE, key, "s1", 0, now=lambda: 1760000100) == (1760000000000, {"system": "Lia"}))
+check("signed update: is not a session token, and a session token is not an update",
+      rejects({**good, "sid": "u1", "upd": "e30"}, "claims") and update_verdict(sign({**good, "sid": "s1"}, key)) == "replayed")
 check("token: expired", rejects({**good, "sid": "s2", "iat": int(now) - 400, "exp": int(now) - 100}, "expired"))
 check("token: lifetime", rejects({**good, "sid": "s3", "exp": int(now) + 3600}, "ttl_too_long"))
 check("token: replica", rejects({**good, "sid": "s4", "rep": "fr-par-2:other"}, "replica"))
@@ -113,7 +179,6 @@ check("token: key derivation is HMAC-SHA256(key=token, msg='aigw-rt-v1')",
       derive_key("t" * 32).hex() == __import__("hmac").new(b"t" * 32, b"aigw-rt-v1", "sha256").hexdigest())
 
 # The gateway's contract vectors (docs/realtime-token-vectors.json in the gateway, copied here).
-import json  # noqa: E402
 
 from aigw_edge.token import turn_credential  # noqa: E402
 
@@ -200,15 +265,22 @@ try:
         for name, text, faults in (("runaway", "Bom dia!", ["runaway"]), ("twice", "Bom dia!", ["runaway", "runaway"]),
                                    ("break", "Bom dia!", ["break"]), ("cut", "Bom dia!", ["cut"]),
                                    ("lead", "Bom dia!", ["lead"]), ("late", "Bom dia!", ["break", "lead"]),
-                                   ("long", "a" * 160, [])):
+                                   ("overlong", "Bom dia!", ["overlong"]), ("capped", "Bom dia!", ["capped"]),
+                                   ("long", "a" * 160, []), ("bare overlong", "Bom dia!", ["overlong"]), ("bare line", "a" * 400, [])):
             fake_upstream.tts_faults.update({text: list(faults)})
-            mark, pcm, retries, error = len(fake_upstream.calls["tts_log"]), b"", [], None
+            mark, pcm, retries, error, overlong = len(fake_upstream.calls["tts_log"]), b"", [], None, []
             try:
-                async for chunk in up.speak(text, {}, {"voice": "x"}, None, retries.append):
+                async for chunk in up.speak(text, {}, {"voice": "x"}, None, *(() if name.startswith("bare") else (retries.append, overlong.append))):
                     pcm += chunk
             except UpstreamError as raised:
                 error = raised
-            out[name] = (pcm, [r.request_id for r in retries], error, fake_upstream.calls["tts_log"][mark:])
+            out[name] = (pcm, [r.request_id for r in retries], error, fake_upstream.calls["tts_log"][mark:], overlong)
+        fake_upstream.tts_faults.update({"Bom dia!": ["lead"]})
+        out["first"] = b"".join([chunk async for chunk in up.speak("Bom dia!", {}, {"voice": "x"}, trim_lead=True)])
+        fake_upstream.tts_faults.update({"Bom dia!": ["overlong"]})
+        cut_first: list[str] = []
+        out["first overlong"] = (b"".join([chunk async for chunk in up.speak("Bom dia!", {}, {"voice": "x"}, None, None, cut_first.append, True)]),
+                                 cut_first)
         await asyncio.sleep(0.1)
         await up.close()
         await runner.cleanup()
@@ -233,8 +305,24 @@ try:
           and isinstance(guard["cut"][2], UpstreamError) and guard["cut"][2].stage == "tts")
     check("tts guard: a silent lead under the limit is kept and not retried",
           guard["lead"][0] == bytes(24000) + said and guard["lead"][1] == [] and len(guard["lead"][3]) == 1)
+    check("tts guard: the first sentence of a reply starts 10 ms before its first sound (0.5 s of lead dropped)",
+          guard["first"].endswith(said) and len(guard["first"]) - len(said) <= 480)
+    check("lead trim × tts cap: a first sentence the engine runs away with is cut at the same cap and counted once",
+          len(guard["first overlong"][0]) == int(4.6 * 24000) * 2 and len(guard["first overlong"][1]) == 1)
     check("tts guard: the retry drops its silent lead",
           guard["late"][0].endswith(said) and len(guard["late"][0]) < len(said) + 4800 and len(guard["late"][1]) == 1)
+    check("tts guard: audible audio past the cap is cut at the cap (4.6 s for 8 characters), counted once, no error, no retry",
+          len(guard["overlong"][0]) == int(4.6 * 24000) * 2 and guard["overlong"][2] is None and guard["overlong"][1] == []
+          and guard["overlong"][4] == ids("overlong") and len(guard["overlong"][3]) == 1)
+    check("tts guard: the engine ending an audible sentence at its token cap is an overlong sentence, not a failed turn",
+          guard["capped"][2] is None and guard["capped"][1] == [] and guard["capped"][4] == ids("capped")
+          and 0.9 * 4.6 * 48000 <= len(guard["capped"][0]) <= 4.6 * 48000)
+    check("tts cap × say / opener: a line voiced without callbacks (an opener being warmed, an app line) is cut at the same cap and ends normally",
+          len(guard["bare overlong"][0]) == int(4.6 * 24000) * 2 and guard["bare overlong"][2] is None)
+    check("tts cap × say: the cap grows with the text, a 400-character app line may run 83 s, twice a slow reading at 10 characters a second",
+          guard["bare line"][3][0]["max_new_tokens"] == 1038 and 1038 / 12.5 >= 2 * 400 / 10 and guard["bare line"][2] is None)
+    check("tts guard: a clean sentence and a short cut are not counted as overlong",
+          guard["lead"][4] == [] and guard["cut"][4] == [] and guard["runaway"][4] == [])
     check("tts guard: no upstream request left open", active == 0)
 
     async def stage_failures():
@@ -361,6 +449,52 @@ try:
         rms = float(np.sqrt(np.mean(y * y))) / (0.5 * 32767 / np.sqrt(2))
         check(f"downsampler 48→16 kHz: {freq} Hz {want} (gain {rms:.2f})", (rms > 0.95) if want == "kept" else (rms < 0.05))
     check("downsampler: 3:1 length", len(down.push(np.zeros(960, dtype=np.int16), 1)) == 320 * 2)
+
+    from aiortc import rtcrtpreceiver
+    from aiortc.jitterbuffer import JitterBuffer
+    from aiortc.rtp import RtpPacket
+    from aigw_edge import audio
+
+    def through(buffer, order) -> tuple[int, int]:
+        behind, frames = 0, 0
+        for n in order:
+            packet = RtpPacket(sequence_number=n % 65536, timestamp=n * 960)
+            packet._data = b"x"
+            frame = buffer.add(packet)[1]
+            if frame is not None:
+                behind, frames = n - frame.timestamp // 960, frames + 1
+        return behind, len(order) - frames
+
+    whole, one_lost = list(range(65500, 65700)), [n for n in range(65500, 65700) if n != 65550]
+    check("aiortc's audio jitter buffer: 4 frames (80 ms) behind; after one lost packet 14 (280 ms) for the rest of the call",
+          through(JitterBuffer(16, 4), whole)[0] == 4 and through(JitterBuffer(16, 4), one_lost)[0] == 14)
+    check("webrtc uplink: a packet is a frame as it arrives, before and after a lost packet",
+          through(audio.ArrivalOrder(), whole) == (0, 0) and through(audio.ArrivalOrder(), one_lost) == (0, 0))
+    check("webrtc uplink: a late or repeated packet is dropped", through(audio.ArrivalOrder(), [7, 9, 8, 9, 10]) == (0, 2))
+    audio.install()
+    check("webrtc uplink: installed for audio, aiortc's own buffer stays for video",
+          isinstance(rtcrtpreceiver.JitterBuffer(capacity=16, prefetch=4), audio.ArrivalOrder)
+          and isinstance(rtcrtpreceiver.JitterBuffer(capacity=128, is_video=True), JitterBuffer))
+    gaps = audio.GapFill()
+    check("webrtc uplink: a gap in the RTP timestamps is the lost audio, counted as elapsed time, at most 1 s of it",
+          [gaps.missing(pts, 960) for pts in (0, 960, 2880, 3840, 500000)] == [0, 0, 960, 0, 48000])
+    doubled = audio.upsample2(np.array([100, 200, -50], dtype=np.int16), 0)
+    check("webrtc downlink: 24 kHz PCM leaves at 48 kHz, each sample kept and the one between interpolated across frames",
+          doubled.tolist() == [50, 100, 150, 200, 75, -50] and doubled.dtype == np.int16
+          and audio.upsample2(np.array([10], dtype=np.int16), -50).tolist() == [-20, 10])
+    from aigw_edge.session import AudioOut
+    out = AudioOut()
+    idle = out.pacing()
+    out.push(bytes(1920))
+    out.mark()
+    out.sent(0.5)
+    out.pull(960)
+    out.sent(0.004)
+    out.sent(0.002)
+    paced = out.pacing()
+    check("webrtc downlink: per reply, when its first frame left and how late the packets after it were sent",
+          idle == {} and paced["rtp_late_max_ms"] == 4.0 and paced["rtp_late_p50_ms"] == 4.0
+          and paced["rtp_first_sent_ms"] == round(paced["out_first_pull_ms"] + 4.0, 1) and 0 <= paced["out_first_pull_ms"] < 50)
 except ImportError:
     print("SKIP vad (no numpy)")
 

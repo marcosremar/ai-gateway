@@ -23,6 +23,7 @@ import time
 MAX_LIFETIME_S = 15 * 60
 CLOCK_SKEW_S = 60  # iat ≤ now + 60 (docs/realtime.md § Session token)
 MAX_CFG_CHARS = 6144
+MAX_CFG_REF_CHARS = 32768
 
 
 class TokenError(Exception):
@@ -54,12 +55,59 @@ def turn_credential(secret: str, session_id: str, expires_at: int) -> tuple[str,
     return username, base64.b64encode(hmac.new(secret.encode(), username.encode(), hashlib.sha1).digest()).decode()
 
 
+def needs_config(token: str | None) -> bool:
+    try:
+        return bool(json.loads(b64url_decode(token.split(".")[1])).get("cfd"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def config_digest(cfg: str) -> str:
+    return b64url(hashlib.sha256(cfg.encode()).digest())
+
+
 def rep_matches(rep: str, replica_id: str) -> bool:
     """The gateway's replica id is the provider's (Scaleway `zone:uuid`, Vast contract id); the edge may know only the
     bare server uuid (metadata), so `zone:uuid` matches `uuid` too."""
     if not replica_id:
         return True
     return rep == replica_id or rep.endswith(":" + replica_id) or replica_id.endswith(":" + rep)
+
+
+def open_token(token: str, key: bytes) -> dict:
+    try:
+        head_b, body_b, sig_b = token.split(".")
+        head = json.loads(b64url_decode(head_b))
+        claims = json.loads(b64url_decode(body_b))
+        sig = b64url_decode(sig_b)
+    except Exception as error:  # noqa: BLE001 — any malformed token is one answer
+        raise TokenError("malformed") from error
+    if head.get("alg") != "HS256":
+        raise TokenError("alg")
+    want = hmac.new(key, f"{head_b}.{body_b}".encode(), hashlib.sha256).digest()
+    if not hmac.compare_digest(want, sig):
+        raise TokenError("bad_signature")
+    return claims
+
+
+def verify_update(token: str, key: bytes, sid: str, after: int, now=time.time) -> tuple[int, dict]:
+    claims = open_token(token, key)
+    n, exp, raw = claims.get("n"), claims.get("exp"), claims.get("upd")
+    if claims.get("sid") != sid:
+        raise TokenError("session")
+    if not isinstance(exp, (int, float)) or exp <= now():
+        raise TokenError("expired")
+    if not isinstance(n, int) or n <= after:
+        raise TokenError("replayed")
+    try:
+        if not isinstance(raw, str) or len(raw) > MAX_CFG_REF_CHARS:
+            raise ValueError("update too long")
+        update = json.loads(b64url_decode(raw))
+        if not isinstance(update, dict):
+            raise ValueError("update is not an object")
+    except Exception as error:  # noqa: BLE001
+        raise TokenError("cfg") from error
+    return n, update
 
 
 class TokenVerifier:
@@ -70,24 +118,15 @@ class TokenVerifier:
         self._used: dict[str, float] = {}
         self._tokens: dict[str, str] = {}
 
-    def verify(self, token: str, consume: bool = True, transport: str = "", live=None) -> dict:
+    def verify(self, token: str, consume: bool = True, transport: str = "", live=None, cfg: str | None = None) -> dict:
         """Single use per transport: the SDK's ladder tries WebRTC then WS with the one token of its admission (a second
         admission would charge the app's budget again and hold a second slot), so `sid` may open one session of each
         transport, and the two may run side by side until the SDK closes one. Without `transport`, the sid is the key.
         `live(sid)` says the sid's session of this transport still runs here: the very token that opened it may then
         be presented again (a WebRTC re-offer after a network change). Anything else used twice is `replayed`."""
-        try:
-            head_b, body_b, sig_b = token.split(".")
-            head = json.loads(b64url_decode(head_b))
-            claims = json.loads(b64url_decode(body_b))
-            sig = b64url_decode(sig_b)
-        except Exception as error:  # noqa: BLE001 — any malformed token is one answer
-            raise TokenError("malformed") from error
-        if head.get("alg") != "HS256":
-            raise TokenError("alg")
-        want = hmac.new(self.key, f"{head_b}.{body_b}".encode(), hashlib.sha256).digest()
-        if not hmac.compare_digest(want, sig):
-            raise TokenError("bad_signature")
+        claims = open_token(token, self.key)
+        if not isinstance(claims, dict) or "upd" in claims:
+            raise TokenError("claims")
         now = self.now()
         exp, iat = claims.get("exp"), claims.get("iat")
         if not isinstance(exp, (int, float)) or not isinstance(iat, (int, float)):
@@ -106,8 +145,12 @@ class TokenVerifier:
         if self.deployment and claims.get("dep") != self.deployment:
             raise TokenError("deployment")
         try:
-            cfg_raw = claims.get("cfg")
-            if cfg_raw and (not isinstance(cfg_raw, str) or len(cfg_raw) > MAX_CFG_CHARS):
+            cfg_raw, digest = claims.get("cfg"), claims.get("cfd")
+            if digest:
+                if not isinstance(cfg, str) or len(cfg) > MAX_CFG_REF_CHARS or not hmac.compare_digest(config_digest(cfg), str(digest)):
+                    raise ValueError("config missing or not the signed one")
+                cfg_raw = cfg
+            elif cfg_raw and (not isinstance(cfg_raw, str) or len(cfg_raw) > MAX_CFG_CHARS):
                 raise ValueError("cfg too long")
             cfg = json.loads(b64url_decode(cfg_raw)) if cfg_raw else {}
             if not isinstance(cfg, dict):
