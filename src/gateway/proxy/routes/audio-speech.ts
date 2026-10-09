@@ -7,7 +7,7 @@ import type { TTSProvider } from '../../providers/cloud/types';
 import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
 import { createLogger } from '../../../logger';
-import { qwenTokenCap } from '../../../deployments/inference-providers';
+import { qwenTokenCap } from '../../../deployments/qwen-token-cap';
 import {
   errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
 } from '../provider-routing';
