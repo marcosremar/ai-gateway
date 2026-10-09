@@ -8,7 +8,9 @@
  *     where base = max(min, 1) while the deployment is active (a request in flight / waiting, or one in the last
  *     `idleMinutes`) and `min` otherwise — so `minReplicas: 0` scales to zero after the idle window.
  *   - Broken replicas are replaced: provider halted it, boot took longer than `bootTimeoutMinutes`, it stopped
- *     answering health for `unhealthyStrikes` checks in a row, or it reached `maxHours`. A replica with requests in
+ *     answering health for `unhealthyStrikes` checks in a row. One past `maxHours` is handed over: a replacement is
+ *     created (at most `maxReplicas` + 1 up), and it goes once empty, one per tick, when the others ready cover
+ *     `desired` — or, `MAX_HOURS_GRACE_MS` later, when at least one other is ready (never the last one serving). A replica with requests in
  *     flight, or that answered one recently (`servedRecently`), is busy, not dead: never released as unhealthy (live
  *     QA 2026-10-07: under 16 concurrent chats the L40S missed its health checks and was replaced twice, 9 min each).
  *   - The idle window counts from the later of the last request and the moment a replica became ready after it,
@@ -57,10 +59,17 @@ export interface ObservedReplica {
   servedRecently?: boolean;
   /** How long its liveness probe (the front, `/__aigw/ready`) has failed without a break (absent = it answers). */
   downForMs?: number;
+  bootStartedAt?: number;
 }
 
 /** A replica whose front stopped answering this long is dead (crashed host), whatever it served before. */
 export const DOWN_GRACE_MS = 30_000;
+
+export const MAX_HOURS_GRACE_MS = 20 * 60_000;
+
+export function outlived(machine: Pick<ReplicaMachine, 'createdAt'>, spec: Pick<DeploymentSpec, 'maxHours'>, now: number, graceMs = 0): boolean {
+  return now - machine.createdAt >= spec.maxHours * 3_600_000 + graceMs;
+}
 
 export interface PlanInput {
   spec: DeploymentSpec;
@@ -158,9 +167,7 @@ export function desiredReplicas(input: ActivityInput): number {
 function brokenReason(r: ObservedReplica, spec: DeploymentSpec, now: number, strikes: number): PlanRelease['reason'] | null {
   const phase = replicaPhase(r);
   if (phase === 'halted') return 'halted';
-  const age = now - r.machine.createdAt;
-  if (age >= spec.maxHours * 3_600_000) return 'max-hours';
-  if (phase === 'booting' && age >= spec.bootTimeoutMinutes * 60_000) return 'boot-timeout';
+  if (phase === 'booting' && now - (r.bootStartedAt ?? r.machine.createdAt) >= spec.bootTimeoutMinutes * 60_000) return 'boot-timeout';
   // Busy is not dead: work in flight or a recent answer keeps it (it gets no new request meanwhile, see `readyNow`).
   if (phase === 'unhealthy' && r.failures >= strikes && r.inflight === 0 && !r.servedRecently) return 'unhealthy';
   // …but a front that has not answered its liveness probe for DOWN_GRACE_MS is a dead machine (nginx answers even under load).
@@ -176,26 +183,35 @@ function removalOrder(a: ObservedReplica, b: ObservedReplica): number {
 
 export function planReplicas(input: PlanInput): Plan {
   const { spec, now } = input;
-  const active = isActive(input);
-  const desired = desiredReplicas(input);
   const release: PlanRelease[] = [];
 
   const live: ObservedReplica[] = [];
   const expiring: ObservedReplica[] = [];
+  const aged: ObservedReplica[] = [];
   for (const r of input.replicas) {
     const reason = spec.paused ? 'paused' : brokenReason(r, spec, now, input.unhealthyStrikes ?? UNHEALTHY_STRIKES);
     if (reason) release.push({ id: r.machine.id, reason });
+    else if (outlived(r.machine, spec, now)) aged.push(r);
     else if (isExpiring(r.machine, now)) expiring.push(r);
     else live.push(r);
   }
-  // Handover: the expiring host serves until the others cover the demand, then goes once drained.
+  const kept = input.replicas.filter(r => !release.some(x => x.id === r.machine.id));
+  const active = isActive({ ...input, replicas: kept });
+  const desired = desiredReplicas({ ...input, replicas: kept });
   const readyLive = live.filter(r => replicaPhase(r) === 'ready').length;
   for (const r of expiring) {
     if (r.inflight === 0 && readyLive >= desired) release.push({ id: r.machine.id, reason: 'expiring' });
   }
+  for (const r of aged) if (replicaPhase(r) !== 'ready' && r.inflight === 0) release.push({ id: r.machine.id, reason: 'max-hours' });
+  const agedReady = aged.filter(r => replicaPhase(r) === 'ready').sort((x, y) => x.machine.createdAt - y.machine.createdAt);
+  const othersReady = readyLive + agedReady.length - 1;
+  const retiring = agedReady.find(r => r.inflight === 0
+    && (othersReady >= desired || (othersReady > 0 && outlived(r.machine, spec, now, MAX_HOURS_GRACE_MS))));
+  if (retiring) release.push({ id: retiring.machine.id, reason: 'max-hours' });
 
   if (live.length < desired) {
-    return { desired, create: desired - live.length, release, drain: [], aboveSince: null, active };
+    const room = aged.length ? Math.max(0, spec.maxReplicas + 1 - live.length - aged.length - expiring.length) : Infinity;
+    return { desired, create: Math.min(desired - live.length, room), release, drain: [], aboveSince: null, active };
   }
   if (live.length === desired) return { desired, create: 0, release, drain: [], aboveSince: null, active };
 

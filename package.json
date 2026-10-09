@@ -31,6 +31,7 @@
     "sync:watch": "bash scripts/sync-pod.sh --watch",
     "build": "NODE_OPTIONS='--max-old-space-size=4096' tsup",
     "typecheck": "tsc --noEmit",
+    "stamp:build": "bun scripts/stamp-build.ts",
     "lint": "eslint 'src/**/*.ts' 'server/**/*.ts' --quiet",
     "lint:warnings": "eslint 'src/**/*.ts' 'server/**/*.ts'",
     "lint:fix": "eslint 'src/**/*.ts' 'server/**/*.ts' --fix",

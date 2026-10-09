@@ -33,6 +33,7 @@ export class FakeCloud implements DeploymentBackend {
   measureRtt?: (machine: ReplicaMachine) => Promise<number | null>;
   measureBaselineRtt?: DeploymentBackend['measureBaselineRtt'];
   recordRtt?: DeploymentBackend['recordRtt'];
+  noteHost?: DeploymentBackend['noteHost'];
   previewOffers?: DeploymentBackend['previewOffers'];
   placementNote?: string;
   releaseReasons: Array<string | undefined> = [];

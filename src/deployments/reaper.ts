@@ -22,7 +22,7 @@
 
 import type { DeploymentBackend, ReplicaMachine } from './types';
 
-type ReapBackend = Pick<DeploymentBackend, 'listReplicas' | 'releaseReplica'> & { provider?: string };
+type ReapBackend = Pick<DeploymentBackend, 'listReplicas' | 'releaseReplica' | 'listForeign'> & { provider?: string };
 type Log = (msg: string, data?: Record<string, unknown>) => void;
 
 /** A provider network resource tagged for the namespace (Scaleway: reserved IP or security group). */
@@ -47,7 +47,19 @@ export interface NetworkSweeper {
 }
 
 /** What the gateway says it owns, or the reason the cross-check cannot trust its answer. */
-export type OwnedDeployments = { names: ReadonlySet<string> } | { skip: string };
+export type OwnedDeployments = { names: ReadonlySet<string>; machineTypes?: ReadonlySet<string> } | { skip: string };
+
+export interface ForeignLeftover {
+  id: string;
+  provider: string;
+  namespace: string;
+  deployment: string;
+  machineType: string;
+  zone: string;
+  state: string;
+  ageHours: number;
+  holdsNeededQuota: boolean | null;
+}
 
 export interface ReaperOptions {
   /** Single backend (kept for callers from before `backends`). */
@@ -69,6 +81,9 @@ export interface ReaperOptions {
   graceMs?: number;
   /** Report only: nothing is released. */
   dryRun?: boolean;
+  foreignGraceMs?: number;
+  applyForeign?: boolean;
+  foreignMinAgeMs?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   log?: Log;
@@ -87,9 +102,13 @@ export interface ReapResult {
   failed: string[];
   /** Why the cross-check did not run (gateway up only). */
   skipped?: string;
+  foreign: ForeignLeftover[];
 }
 
 export const DEFAULT_REAPER_GRACE_MS = 30 * 60_000;
+export const DEFAULT_FOREIGN_MIN_AGE_MS = 6 * 3_600_000;
+export const MIN_FOREIGN_MIN_AGE_MS = 3_600_000;
+const STOPPED = /stopped|exited/;
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -106,28 +125,71 @@ async function probeGateway(opts: ReaperOptions): Promise<boolean> {
 export async function reapOrphans(opts: ReaperOptions): Promise<ReapResult> {
   const log = opts.log ?? (() => {});
   const dryRun = opts.dryRun === true;
-  const empty = { dryRun, seen: 0, released: [] as string[], planned: [] as string[], failed: [] as string[] };
+  const empty = { dryRun, seen: 0, released: [] as string[], planned: [] as string[], failed: [] as string[], foreign: [] as ForeignLeftover[] };
   const up = await probeGateway(opts);
   const now = (opts.now ?? Date.now)();
+  const backends = opts.backends ?? (opts.backend ? [opts.backend] : []);
 
   let owned: ReadonlySet<string> | null = null;
+  let neededTypes: ReadonlySet<string> | null = null;
+  let skipped: string | undefined;
   if (up) {
-    if (!opts.owned) return { gatewayUp: true, mode: 'none', ...empty, skipped: 'no admin key: cross-check off' };
-    const answer = await opts.owned().catch((err): OwnedDeployments => ({ skip: `deployments list failed: ${errText(err)}` }));
+    const answer: OwnedDeployments = opts.owned
+      ? await opts.owned().catch((err): OwnedDeployments => ({ skip: `deployments list failed: ${errText(err)}` }))
+      : { skip: 'no admin key: cross-check off' };
     if ('skip' in answer) {
-      log('reaper: gateway up, cross-check skipped', { namespace: opts.namespace, reason: answer.skip });
-      return { gatewayUp: true, mode: 'none', ...empty, skipped: answer.skip };
+      skipped = answer.skip;
+      log('reaper: gateway up, cross-check skipped', { namespace: opts.namespace, reason: skipped });
+    } else {
+      owned = answer.names;
+      neededTypes = answer.machineTypes ?? null;
     }
-    owned = answer.names;
   }
   const minAge = up ? opts.graceMs ?? DEFAULT_REAPER_GRACE_MS : opts.minAgeMs ?? 30 * 60_000;
-  const pick = (m: ReplicaMachine) => now - m.createdAt >= minAge && (owned === null || !owned.has(m.deployment));
-  const result: ReapResult = { gatewayUp: up, mode: up ? 'cross-check' : 'gateway-down', ...empty };
-  for (const backend of opts.backends ?? (opts.backend ? [opts.backend] : [])) {
-    await reapBackend(backend, opts.namespace, pick, result, log);
-  }
+  const pick = (m: ReplicaMachine) => !skipped && now - m.createdAt >= minAge && (owned === null || !owned.has(m.deployment));
+  const result: ReapResult = { gatewayUp: up, mode: skipped ? 'none' : up ? 'cross-check' : 'gateway-down', ...empty, ...(skipped ? { skipped } : {}) };
+  for (const backend of backends) await reapBackend(backend, opts.namespace, pick, result, log);
   if (owned) await sweepNetworks(opts, owned, now, result, log);
+  for (const backend of backends) await reportForeign(backend, opts, neededTypes, now, result, log);
   return result;
+}
+
+async function reportForeign(
+  backend: ReapBackend, opts: ReaperOptions, neededTypes: ReadonlySet<string> | null, now: number, result: ReapResult, log: Log,
+): Promise<void> {
+  if (!backend.listForeign) return;
+  const provider = backend.provider ?? 'backend';
+  let machines: Awaited<ReturnType<NonNullable<ReapBackend['listForeign']>>>;
+  try {
+    machines = await backend.listForeign(opts.namespace);
+  } catch (err) {
+    result.failed.push(`list-foreign:${provider}`);
+    log('reaper: foreign list failed', { provider, error: errText(err) });
+    return;
+  }
+  const grace = opts.foreignGraceMs ?? opts.graceMs ?? DEFAULT_REAPER_GRACE_MS;
+  const minAge = Math.max(MIN_FOREIGN_MIN_AGE_MS, opts.foreignMinAgeMs ?? DEFAULT_FOREIGN_MIN_AGE_MS);
+  for (const m of machines) {
+    const age = now - m.createdAt;
+    if (age < grace) continue;
+    const leftover: ForeignLeftover = {
+      id: m.id, provider, namespace: m.namespace, deployment: m.deployment, machineType: m.machineType, zone: m.zone, state: m.state,
+      ageHours: Math.round(age / 360_000) / 10, holdsNeededQuota: neededTypes ? neededTypes.has(m.machineType) : null,
+    };
+    result.foreign.push(leftover);
+    if (leftover.holdsNeededQuota !== false) log('ALERT reaper.foreign_quota_held', { ...leftover, protects: opts.namespace });
+    // ponytail: only stopped machines go; whether a running machine of another namespace is idle cannot be seen from here.
+    if (!opts.applyForeign || !STOPPED.test(m.state) || age < minAge) continue;
+    const id = `${provider}:foreign:${m.namespace}/${m.id}`;
+    result.planned.push(id);
+    try {
+      await backend.releaseReplica(m, 'reaper-foreign');
+      result.released.push(id);
+    } catch (err) {
+      result.failed.push(id);
+      log('reaper: foreign release failed', { id, error: errText(err) });
+    }
+  }
 }
 
 async function reapBackend(
@@ -192,6 +254,15 @@ async function sweepNetworks(opts: ReaperOptions, owned: ReadonlySet<string>, no
   }
 }
 
+export function reapSummary(r: ReapResult): string {
+  if (r.skipped) return `reaper: NOT CHECKED (${r.skipped}) — ${r.seen} machine(s) listed, none compared, nothing released:`;
+  return r.dryRun ? `reaper: DRY RUN, nothing released (pass --apply or REAPER_APPLY=1) — would release ${r.planned.length}:` : 'reaper:';
+}
+
+export function reapExitCode(r: ReapResult): number {
+  return r.failed.length ? 1 : r.skipped ? 3 : 0;
+}
+
 /** Kept for callers from before the cross-check: same function (without `owned` it only acts when the gateway is down). */
 export const reapIfGatewayDown = reapOrphans;
 
@@ -212,6 +283,13 @@ export async function ownedFromGateway(input: {
   if (body.namespace !== input.namespace) return { skip: `gateway namespace '${String(body.namespace)}' is not '${input.namespace}'` };
   if (body.scope !== 'all') return { skip: 'GET /v1/deployments is not the full admin list (admin key? gateway build with `scope`?)' };
   const names = new Set<string>();
-  for (const d of body.deployments as Array<{ name?: unknown }>) if (typeof d?.name === 'string') names.add(d.name);
-  return { names };
+  const machineTypes = new Set<string>();
+  type Listed = { name?: unknown; spec?: { machineType?: unknown; placements?: Array<{ machineType?: unknown }> } };
+  for (const d of body.deployments as Listed[]) {
+    if (typeof d?.name === 'string') names.add(d.name);
+    for (const t of [d?.spec?.machineType, ...(Array.isArray(d?.spec?.placements) ? d.spec.placements.map(p => p?.machineType) : [])]) {
+      if (typeof t === 'string' && t) machineTypes.add(t);
+    }
+  }
+  return { names, machineTypes };
 }

@@ -1,13 +1,13 @@
 /**
- * Deployment specs, profiles and the network releases still owed after a delete persist as one JSON file (atomic
- * tmp + rename, writes serialized). On Railway point `DEPLOYMENTS_STATE_DIR` at a mounted volume: the container
+ * Deployment specs, profiles and the network releases still owed after a delete persist as one JSON file (state-file.ts:
+ * tmp + fsync + rename, last good copy in `.bak`, writes serialized). On Railway point `DEPLOYMENTS_STATE_DIR` at a mounted volume: the container
  * filesystem is wiped on every deploy.
  *
  * Replicas are NOT stored here — the provider is their source of truth (found by tag).
  */
 
-import { mkdir, readFile, rename, writeFile } from 'fs/promises';
-import { dirname, join } from 'path';
+import { join } from 'path';
+import { readStateFile, writeStateFile } from './state-file';
 import type { DeploymentRecord, DeploymentStore, PendingNetworkRelease, Profile } from './types';
 
 interface StateFile {
@@ -52,29 +52,31 @@ export class MemoryDeploymentStore implements DeploymentStore {
   protected async flush(): Promise<void> {}
 }
 
+export type StateLog = (msg: string, data?: Record<string, unknown>) => void;
+
 export class FileDeploymentStore extends MemoryDeploymentStore {
   private loaded = false;
   private chain: Promise<void> = Promise.resolve();
+  fresh = false;
+  writeError: string | null = null;
 
-  constructor(private readonly path: string) {
+  constructor(private readonly path: string, private readonly log: StateLog = (msg, data) => console.error(msg, data ?? {})) {
     super();
   }
 
-  static inDir(dir: string): FileDeploymentStore {
-    return new FileDeploymentStore(join(dir, 'deployments.json'));
+  static inDir(dir: string, log?: StateLog): FileDeploymentStore {
+    return new FileDeploymentStore(join(dir, 'deployments.json'), log);
   }
 
   override async load() {
     if (!this.loaded) {
-      try {
-        const parsed = JSON.parse(await readFile(this.path, 'utf8')) as Partial<StateFile>;
-        this.state = {
-          version: 1, deployments: parsed.deployments ?? {}, profiles: parsed.profiles ?? {}, networkReleases: parsed.networkReleases ?? {},
-        };
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        this.state = empty();
-      }
+      const read = await readStateFile<Partial<StateFile>>(this.path);
+      if (read.from === 'backup') this.log('deployments: STATE FILE UNREADABLE, recovered from the last good backup', { path: this.path, problem: read.problem });
+      const parsed = read.data ?? {};
+      this.state = {
+        version: 1, deployments: parsed.deployments ?? {}, profiles: parsed.profiles ?? {}, networkReleases: parsed.networkReleases ?? {},
+      };
+      this.fresh = read.from === 'none';
       this.loaded = true;
     }
     return super.load();
@@ -82,12 +84,15 @@ export class FileDeploymentStore extends MemoryDeploymentStore {
 
   protected override flush(): Promise<void> {
     const snapshot = JSON.stringify(this.state, null, 2);
-    // A failed write must not poison every later one: chain on the settled previous write.
     this.chain = this.chain.catch(() => {}).then(async () => {
-      await mkdir(dirname(this.path), { recursive: true });
-      const tmp = `${this.path}.${process.pid}.tmp`;
-      await writeFile(tmp, snapshot, { mode: 0o600 });
-      await rename(tmp, this.path);
+      try {
+        await writeStateFile(this.path, snapshot);
+        this.writeError = null;
+      } catch (err) {
+        this.writeError = err instanceof Error ? err.message : String(err);
+        this.log('deployments: STATE WRITE FAILED', { path: this.path, error: this.writeError });
+        throw err;
+      }
     });
     return this.chain;
   }

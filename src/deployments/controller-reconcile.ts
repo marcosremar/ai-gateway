@@ -7,6 +7,8 @@ import { isParked, type Runtime } from './controller-state';
 import { AutoscaleControl } from './controller-autoscale';
 import { isActive, planReplicas, replicaPhase } from './planner';
 import { usesScaleway, usesVast } from './spec';
+import { placementsOf } from './placements';
+import { PartialListError } from '../cpu-providers/scaleway-client';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMachine } from './types';
 
 /**
@@ -14,6 +16,9 @@ import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMach
  * provider had no stock for is not tried again before this either, and meanwhile does not count as capacity.
  */
 const PARKED_START_GRACE_MS = 90_000;
+const FRESH_STATE_ORPHAN_GRACE_MS = 5 * 60_000;
+const RELEASE_SETTLE_MS = 10 * 60_000;
+const BOOT_TIMEOUT_BACKOFF_MS = [0, 10 * 60_000, 30 * 60_000, 60 * 60_000];
 
 export abstract class ReconcileLoop extends AutoscaleControl {
   start(): void {
@@ -57,42 +62,51 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     // neither create nor release this tick; the other providers' deployments carry on.
     const listed: ReplicaMachine[] = [];
     const failed = new Set<DeploymentProvider>();
+    const failedZones = new Set<string>();
     const errors: string[] = [];
     await Promise.all((Object.entries(this.backends) as Array<[DeploymentProvider, DeploymentBackend]>).map(async ([provider, backend]) => {
       try {
         listed.push(...(await backend.listReplicas(this.namespace)).map(m => ({ ...m, provider })));
       } catch (err) {
-        failed.add(provider);
+        if (err instanceof PartialListError) {
+          listed.push(...(err.items as ReplicaMachine[]).map(m => ({ ...m, provider })));
+          for (const zone of err.failedZones) failedZones.add(`${provider}/${zone}`);
+        } else failed.add(provider);
         errors.push(`${provider}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }));
+    this.failedZones = failedZones;
+    this.settleReleases(listed, failed);
     this.lastListError = errors.length ? errors.sort().join('; ') : null;
     if (errors.length) this.log('deployments: list failed', { error: this.lastListError });
     // Even with every list failed the tick goes on in release-only mode (below): a failing list (Vast 429s) must never
     // keep an idle, billing replica up.
-    const unlisted = this.machines.filter(m => failed.has(this.providerOf(m)));
+    const unlisted = this.machines.filter(m => this.listStale(m, failed) && !listed.some(l => l.id === m.id));
     // Keep machines we just created that the provider list does not show yet.
-    const recent = this.machines.filter(m => !failed.has(this.providerOf(m)) && !listed.some(l => l.id === m.id)
+    const recent = this.machines.filter(m => !this.listStale(m, failed) && !listed.some(l => l.id === m.id)
       && this.now() - m.createdAt < 120_000 && this.deployments.has(m.deployment));
-    for (const l of listed) {
+    for (const l of listed.filter(x => !this.releasing.has(x.id))) {
       const rt = this.deployments.get(l.deployment);
       if (rt && rt.record.lastRequestAt == null && rt.record.spec.minReplicas === 0 && l.createdAt < this.startedAt
         && !this.machines.some(m => m.id === l.id) && replicaPhase(this.observed(l, 0)) !== 'halted') rt.record.lastRequestAt = this.startedAt;
     }
     // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
-    this.machines = [...listed.map((l) => {
+    this.machines = [...listed.filter(l => !this.releasing.has(l.id)).map((l) => {
       const known = this.machines.find(m => m.id === l.id);
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
     }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
     for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
+    for (const id of [...this.udp.keys()]) if (!this.machines.some(m => m.id === id)) this.udp.delete(id);
     for (const id of [...this.poweredOnAt.keys()]) if (!this.machines.some(m => m.id === id)) this.poweredOnAt.delete(id);
     for (const id of [...this.startRefused.keys()]) if (!this.machines.some(m => m.id === id)) this.startRefused.delete(id);
     for (const key of [...this.stageStrikes.keys()]) if (!this.machines.some(m => key.startsWith(`${m.id}|`))) this.stageStrikes.delete(key);
     this.trackParking(failed);
 
-    const orphans = this.machines.filter(m => !this.deployments.has(m.deployment) && !failed.has(this.providerOf(m)));
-    for (const m of orphans) await this.release(m, 'orphan');
+    const orphans = this.machines.filter(m => !this.deployments.has(m.deployment) && !this.listStale(m, failed));
+    if (this.opts.store.fresh && this.now() - this.startedAt < FRESH_STATE_ORPHAN_GRACE_MS) {
+      if (orphans.length) this.log('deployments: no state file, orphans kept during the start grace', { ids: orphans.map(m => m.id) });
+    } else for (const m of orphans) await this.release(m, 'orphan');
 
     await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment) && !this.parkedNow(m) && !this.stoppingNow(m))
       .map(m => this.probeOne(m)));
@@ -134,6 +148,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (!m) continue;
       if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
       else await this.release(m, r.reason);
+      if (r.reason === 'boot-timeout') this.backOffAfterBootTimeout(rt);
     }
     let toCreate = await this.settleDrains(rt, plan, plan.create - rt.creating);
     if (releaseOnly) { this.explain(rt, plan, decision, floor, 'provider list failed'); return; }
@@ -164,10 +179,30 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
   }
 
+  private settleReleases(listed: ReplicaMachine[], failed: Set<DeploymentProvider>): void {
+    for (const [id, { machine, at }] of this.releasing) {
+      if (this.listStale(machine, failed)) continue;
+      const gone = !listed.some(l => l.id === id);
+      if (!gone && this.now() - at < RELEASE_SETTLE_MS) continue;
+      this.releasing.delete(id);
+      const rt = this.deployments.get(machine.deployment);
+      if (gone && rt && /quota/i.test(rt.lastError ?? '')) rt.backoffUntil = 0;
+    }
+  }
+
+  private backOffAfterBootTimeout(rt: Runtime): void {
+    rt.bootTimeouts++;
+    const wait = BOOT_TIMEOUT_BACKOFF_MS[Math.min(rt.bootTimeouts - 1, BOOT_TIMEOUT_BACKOFF_MS.length - 1)];
+    rt.backoffUntil = Math.max(rt.backoffUntil, this.now() + wait);
+    if (wait) rt.lastError = `boot-timeout ${rt.bootTimeouts} times in a row: next create in ${Math.round(wait / 60_000)} min`;
+  }
+
   /** The deployment may have (or create) machines on a provider whose list just failed. */
   protected touchesFailed(spec: DeploymentSpec, failed: Set<DeploymentProvider>): boolean {
-    if (!failed.size) return false;
+    if (!failed.size && !this.failedZones.size) return false;
+    const places = [...placementsOf(spec), ...(spec.candidates ?? []).map(c => ({ provider: c.provider ?? spec.provider, zone: c.zone ?? spec.zone }))];
     return (failed.has('scaleway') && usesScaleway(spec)) || (failed.has('vast') && usesVast(spec))
-      || this.machines.some(m => m.deployment === spec.name && failed.has(this.providerOf(m)));
+      || places.some(p => this.failedZones.has(`${p.provider}/${p.zone}`))
+      || this.machines.some(m => m.deployment === spec.name && this.listStale(m, failed));
   }
 }

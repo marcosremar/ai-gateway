@@ -19,6 +19,7 @@ import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './
 import { ControllerViews } from './controller-views';
 import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
+import { MAX_HOURS_GRACE_MS, outlived } from './planner';
 import { externalInflightOn, noteSession } from '../realtime/external-load';
 import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
@@ -117,6 +118,22 @@ export class DeploymentController extends ControllerViews {
     return { view: this.view(name)!, created: !existing };
   }
 
+  async noteUdp(deployment: string, replicaId: string, udp: 'ok' | 'blocked', seen: { path?: string; active: number }): Promise<void> {
+    const rt = this.deployments.get(deployment);
+    const m = this.machines.find(x => x.id === replicaId && x.deployment === deployment);
+    if (!rt || !m) return;
+    const workedBefore = this.udp.get(m.id) === 'ok';
+    this.udp.set(m.id, udp);
+    this.backends[this.providerOf(m)]?.noteHost?.(m, { udp });
+    const unusable = udp === 'blocked' && seen.path !== 'relay' && rt.record.spec.realtime?.requireWebrtc;
+    if (!unusable || workedBefore || seen.active > 0 || m.createdAt < this.startedAt) return;
+    const note = `host ${m.zone || m.id}: inbound UDP blocked and realtime.requireWebrtc: released (udp-blocked)`;
+    rt.rejected = [...rt.rejected.slice(-4), note];
+    rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${note}`;
+    await this.release(m, 'udp-blocked');
+    this.kick();
+  }
+
   async remove(name: string): Promise<boolean> {
     const rt = this.deployments.get(name);
     if (!rt) return false;
@@ -137,8 +154,15 @@ export class DeploymentController extends ControllerViews {
    * Marks the deployment as in use (scales from zero) without sending a request. Persisted like a request's time: a
    * deployment used only through `wake` (realtime sessions) must not read as never used after a restart.
    */
+  private refuseReserved(rt: Runtime): void {
+    if (rt.creating || this.machines.some(m => m.deployment === rt.record.spec.name)) return;
+    const block = this.reservationBlock(rt);
+    if (block) throw new DeploymentError(409, block.reason, Math.max(1, Math.ceil((block.endsAt - this.now()) / 1000)), 'reserved');
+  }
+
   wake(name: string): DeploymentView {
     const rt = this.require(name);
+    this.refuseReserved(rt);
     rt.record.lastRequestAt = this.now();
     this.persistRequestTime(rt);
     this.kick();
@@ -196,7 +220,10 @@ export class DeploymentController extends ControllerViews {
     if (!ready.length) return null;
     // A host about to be taken back (`expiry.ts`) only serves while nothing else can: new requests drain it.
     const now = this.now();
-    const lasting = ready.filter(m => !isExpiring(m, now));
+    const aged = (m: ReplicaMachine, graceMs = 0) => outlived(this.observed(m, 0).machine, rt.record.spec, now, graceMs);
+    const lasting = ready.filter(m => !isExpiring(m, now) && !aged(m));
+    const overdue = ready.filter(m => aged(m, MAX_HOURS_GRACE_MS)).sort((a, b) => a.createdAt - b.createdAt)[0];
+    const pool = lasting.length ? lasting : ready.filter(m => ready.length < 2 || m !== overdue);
     // A replica takes at most `target × maxInflightFactor` (bounded queue: the overflow spills to the fallback at once and
     // its health check still answers); a busy one (health check timed out under load) nothing beyond its target, nor
     // one whose answers beyond its target would be slower than the route's hedge (`tooSlowBeyondTarget`). Its realtime
@@ -205,7 +232,7 @@ export class DeploymentController extends ControllerViews {
     const capacity = replicaCapacity(rt.record.spec);
     const sessions = (m: ReplicaMachine) => externalInflightOn(rt.record.spec.name, m.id, target, now);
     const load = (m: ReplicaMachine) => (rt.perReplica.get(m.id) ?? 0) + sessions(m);
-    const open = (lasting.length ? lasting : ready).filter((m) => {
+    const open = pool.filter((m) => {
       const n = load(m);
       return !this.draining.has(m.id) && sessions(m) < target && n < capacity && (!this.probes.get(m.id)?.busy || n < target)
         && !this.tooSlowBeyondTarget(rt, m.id, n, target);
@@ -288,6 +315,7 @@ export class DeploymentController extends ControllerViews {
     let machine = this.pick(rt, exclude, opts.stage);
     const spent = machine || serving.length ? null : this.budgetRefusal(rt);
     if (spent) throw new DeploymentError(503, `deployment '${name}': ${spent}`, 3600);
+    if (!machine && !serving.length) this.refuseReserved(rt);
     // Saturated and the caller has a fallback (waitMs 0): no wait — refused below as `saturated`.
     const spill = !machine && opts.waitMs === 0 && this.servingMachines(name).length > 0;
     if (!machine && !spill) {

@@ -13,6 +13,7 @@ paths = [
   '''^README\.md$''',
   '''^__tests__/''',
   '''^scripts/realtime-e2e/''',
+  '''^docker/aigw-edge/tests/''',
   '''^dist/''',
   '''^node_modules/'''
 ]

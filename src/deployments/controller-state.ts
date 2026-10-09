@@ -11,13 +11,14 @@
  */
 
 import { createHmac } from 'crypto';
-import type { PressureState } from './autoscale';
+import { activeWindow, type PressureState } from './autoscale';
+import { filesByUrl } from './boot-files';
 import { replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
 import { externalInflightOn } from '../realtime/external-load';
 import type {
-  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
+  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
   ReplicaProbe, ScalingMode,
 } from './types';
 
@@ -26,7 +27,7 @@ export class DeploymentError extends Error {
    * `saturated`: replicas are ready but all at capacity (the caller should spill to its fallback, not wait).
    * `stage_out`: the asked stage is out of rotation on every ready replica after repeated failures (same: fall back).
    */
-  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated' | 'stage_out') {
+  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated' | 'stage_out' | 'reserved') {
     super(message);
   }
 }
@@ -95,6 +96,7 @@ export interface Runtime {
   hedgeBaseMs?: number;
   /** When another deployment under pressure took this one's idle replica (it then counts as idle until a new request). */
   reclaimedAt: number | null;
+  bootTimeouts: number;
 }
 
 /** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
@@ -120,6 +122,7 @@ export interface ControllerOptions {
   /** Single-backend shorthand (kept for callers and tests from before `backends`). */
   backend?: DeploymentBackend;
   store: DeploymentStore;
+  publicUrl?: string;
   probe: ReplicaProbe;
   namespace?: string;
   /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
@@ -163,6 +166,9 @@ export interface Lease {
 
 export const DEFAULT_MAX_STOPPED = 8;
 export const DEFAULT_MAX_EUR_PER_HOUR = 6;
+
+export const machineTypesOf = (spec: DeploymentSpec): Set<string> => new Set(
+  [spec.machineType, ...(spec.placements ?? []).flatMap(p => p.machineType ?? []), ...(spec.candidates ?? []).map(c => c.machineType)]);
 export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
 export const DEFAULT_BUSY_GRACE_MS = 120_000;
 export const DEFAULT_MAX_COLD_START_WAIT_SECONDS = 240;
@@ -210,8 +216,9 @@ export abstract class ControllerState {
   protected readonly poweredOnAt = new Map<string, number>();
   protected readonly startRefused = new Map<string, number>();
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
-  protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider }>();
+  protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();
   protected readonly probes = new Map<string, ProbeState>();
+  protected readonly releasing = new Map<string, { machine: ReplicaMachine; at: number }>();
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
   protected readonly networkReleases = new Map<string, PendingNetworkRelease>();
@@ -220,11 +227,13 @@ export abstract class ControllerState {
   protected rerun = false;
   protected timer: ReturnType<typeof setInterval> | null = null;
   protected lastListError: string | null = null;
+  protected failedZones = new Set<string>();
   protected readonly backends: Partial<Record<DeploymentProvider, DeploymentBackend>>;
   /** Provider of a machine that does not say (fakes, records from before `provider`). */
   protected readonly defaultProvider: DeploymentProvider;
   /** RTT gate per replica (backends with `measureRtt`, i.e. Vast), by machine id. */
   protected readonly gates = new Map<string, GateState>();
+  protected readonly udp = new Map<string, 'ok' | 'blocked'>();
   /** Machines created before this process started were adopted: measured for the view, never released by the gate. */
   protected readonly startedAt: number;
   readonly namespace: string;
@@ -249,8 +258,17 @@ export abstract class ControllerState {
     return backend;
   }
 
+  protected forVast(rt: Runtime, spec: DeploymentSpec): DeploymentSpec {
+    return filesByUrl(spec, rt.record.replicaToken, this.opts.publicUrl, this.now());
+  }
+
   protected providerOf(m: ReplicaMachine): DeploymentProvider {
     return m.provider ?? this.defaultProvider;
+  }
+
+  protected listStale(m: ReplicaMachine, failed: Set<DeploymentProvider>): boolean {
+    const provider = this.providerOf(m);
+    return failed.has(provider) || this.failedZones.has(`${provider}/${m.zone}`);
   }
 
   protected get maxColdStartWaitSeconds(): number {
@@ -262,7 +280,7 @@ export abstract class ControllerState {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
-      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null,
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0,
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
@@ -335,6 +353,7 @@ export abstract class ControllerState {
       machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight,
       ...(p.readyAt ? { readyAt: p.readyAt } : {}), ...(this.servedRecently(p) ? { servedRecently: true } : {}),
       ...(p.downSince !== undefined ? { downForMs: this.now() - p.downSince } : {}),
+      ...(machine.createdAt < this.startedAt ? { bootStartedAt: this.startedAt } : {}),
     };
   }
 
@@ -372,8 +391,44 @@ export abstract class ControllerState {
   /** Why one more running replica billing `price` EUR/h is refused (replica cap, € ceiling), or null. */
   protected capRefusal(price: number): string | null {
     const cap = this.opts.maxTotalReplicas ?? 6;
-    if (this.totalReplicas() >= cap) return `replica cap reached (${cap} across all deployments)`;
+    if (this.totalReplicas() >= cap) return `replica cap reached (${cap} across all deployments, DEPLOYMENTS_MAX_REPLICAS; held by ${this.slotHolders()})`;
     return this.spendRefusal(price);
+  }
+
+  protected slotHolders(): string {
+    const held = new Map<string, number>();
+    for (const m of this.runningMachines()) held.set(m.deployment, (held.get(m.deployment) ?? 0) + 1);
+    for (const [name, rt] of this.deployments) if (rt.creating) held.set(name, (held.get(name) ?? 0) + rt.creating);
+    return [...held].sort().map(([name, n]) => `${name} ${n}`).join(', ') || 'none';
+  }
+
+  protected reservedAgainst(name: string, machineType: string): { reason: string; endsAt: number } | null {
+    const now = this.now();
+    for (const [holder, rt] of this.deployments) {
+      const { reserveQuota, paused } = rt.record.spec;
+      if (!reserveQuota || holder === name || paused || rt.record.spec.machineType !== machineType) continue;
+      const window = activeWindow(reserveQuota.windows, now);
+      if (!window) continue;
+      const others = this.machines.filter(m => m.machineType === machineType && m.deployment !== holder).length
+        + [...this.pendingSpend].filter(s => s.machineType === machineType && s.deployment !== holder).length;
+      if (others < reserveQuota.quota - window.replicas) continue;
+      return {
+        endsAt: window.endsAt,
+        reason: `${machineType} is reserved for deployment '${holder}' until ${new Date(window.endsAt).toISOString()} `
+          + `(${window.replicas} of a quota of ${reserveQuota.quota}; other deployments hold ${others}): '${name}' may not take one now`,
+      };
+    }
+    return null;
+  }
+
+  protected reservationBlock(rt: Runtime): { reason: string; endsAt: number } | null {
+    let block: { reason: string; endsAt: number } | null = null;
+    for (const type of machineTypesOf(rt.record.spec)) {
+      const refused = this.reservedAgainst(rt.record.spec.name, type);
+      if (!refused) return null;
+      block ??= refused;
+    }
+    return block;
   }
 
   /** The € ceiling alone (a create in flight already holds its replica slot). */
@@ -391,7 +446,7 @@ export abstract class ControllerState {
   protected totalReplicas(): number {
     let creating = 0;
     for (const rt of this.deployments.values()) creating += rt.creating;
-    return this.runningMachines().length + creating;
+    return this.runningMachines().length + this.releasing.size + creating;
   }
 
   protected replicaToken(rt: Runtime, machine: ReplicaMachine): string {

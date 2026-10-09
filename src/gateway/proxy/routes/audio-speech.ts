@@ -7,6 +7,7 @@ import type { TTSProvider } from '../../providers/cloud/types';
 import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
 import { createLogger } from '../../../logger';
+import { qwenTokenCap } from '../../../deployments/inference-providers';
 import {
   errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
 } from '../provider-routing';
@@ -60,7 +61,9 @@ export async function handleAudioSpeech(
     return { status: 404, body: { error: { message: `TTS model "${model}" not found`, type: 'invalid_request_error' } } };
   }
 
-  const extra = Object.fromEntries(FORWARDED_EXTRAS.filter(k => body[k] !== undefined).map(k => [k, body[k]]));
+  const extra: Record<string, unknown> = Object.fromEntries(FORWARDED_EXTRAS.filter(k => body[k] !== undefined).map(k => [k, body[k]]));
+  const asked = body.max_new_tokens;
+  if (typeof asked === 'number' && Number.isInteger(asked) && asked > 0 && asked <= qwenTokenCap(String(body.input))) extra.max_new_tokens = asked;
   const format = (body.response_format as string | undefined) || 'mp3';
   // wav/pcm can be streamed (first bytes before the whole sentence); `stream: false` turns it off.
   const stream = (format === 'wav' || format === 'pcm') && body.stream !== false;
@@ -70,7 +73,8 @@ export async function handleAudioSpeech(
       targets,
       (t, signal) => t.provider.synthesize({
         signal,
-        ...(t.providerId.startsWith('deployment:') ? { extra, stream } : {}),
+        ...(t.providerId.startsWith('deployment:') ? { extra } : {}),
+        stream,
         model: t.model ?? model,
         input: body.input as string,
         // Voices are provider-specific. A target with `voiceFor` (stock voice by gender) picks its own; otherwise a

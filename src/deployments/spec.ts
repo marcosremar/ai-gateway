@@ -3,7 +3,7 @@
  * caller-facing message on bad input; the HTTP layer maps it to 400.
  */
 
-import { autoscaleOf, warmScheduleOf } from './autoscale-spec';
+import { autoscaleOf, reserveQuotaOf, warmScheduleOf } from './autoscale-spec';
 import { VAST_MAX_PORTS, vastPortCount, vastUdpRange } from './realtime-ports';
 import { scalingOf } from './scaling-spec';
 import { SpecError } from './spec-error';
@@ -107,7 +107,7 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'realtime',
+  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
   'scaling', 'fileUrls', 'maxRttExcessMs',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
@@ -253,6 +253,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   }
   if (input.autoscale !== undefined) out.autoscale = autoscaleOf(input.autoscale);
   if (input.warmSchedule !== undefined) out.warmSchedule = warmScheduleOf(input.warmSchedule, MAX_REPLICAS_PER_DEPLOYMENT);
+  if (input.reserveQuota !== undefined) out.reserveQuota = input.reserveQuota === null ? undefined : reserveQuotaOf(input.reserveQuota, MAX_REPLICAS_PER_DEPLOYMENT);
   if (input.scaling !== undefined) out.scaling = input.scaling === null ? undefined : scalingOf(input.scaling);
   return out;
 }
@@ -332,10 +333,14 @@ function realtimeOf(raw: unknown): RealtimeSpec {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('realtime must be an object');
   const r = raw as Record<string, unknown>;
   for (const key of Object.keys(r)) {
-    if (!['maxSessions', 'edgeImage', 'udpPorts', 'env'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
+    if (!['maxSessions', 'edgeImage', 'udpPorts', 'env', 'requireWebrtc'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
   }
   const out: RealtimeSpec = {};
   if (r.maxSessions !== undefined) out.maxSessions = int(r.maxSessions, 'realtime.maxSessions', 1, 256);
+  if (r.requireWebrtc !== undefined) {
+    if (typeof r.requireWebrtc !== 'boolean') throw new SpecError('realtime.requireWebrtc must be a boolean');
+    if (r.requireWebrtc) out.requireWebrtc = true;
+  }
   if (r.edgeImage !== undefined) out.edgeImage = str(r.edgeImage, 'realtime.edgeImage', IMAGE_RE);
   if (r.udpPorts !== undefined) {
     if (!Array.isArray(r.udpPorts) || r.udpPorts.length !== 2) throw new SpecError('realtime.udpPorts must be [lo, hi]');

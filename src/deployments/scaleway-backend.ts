@@ -4,7 +4,7 @@
  * The namespace keeps two gateways sharing one Scaleway project from adopting (or deleting) each other's machines.
  */
 
-import { ScalewayClient, type ScalewayFirewallRule } from '../cpu-providers/scaleway-client';
+import { PartialListError, ScalewayClient, type ScalewayFirewallRule } from '../cpu-providers/scaleway-client';
 import type { GpuInstance, ProviderCredentials } from '../gpu-providers/types';
 import { DEFAULT_RT_UDP_PORTS } from './cloud-init';
 import { PROBE_PORT } from './spec';
@@ -141,10 +141,27 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   async listReplicas(namespace: string): Promise<ReplicaMachine[]> {
     const list = await this.client.listInstancesByTag(nsTag(namespace), this.credentials,
-      this.opts.projectId ? { projectId: this.opts.projectId } : {});
+      this.opts.projectId ? { projectId: this.opts.projectId } : {}).catch(async (err: unknown) => {
+      if (!(err instanceof PartialListError)) throw err;
+      throw new PartialListError(await this.machinesOf(err.items as GpuInstance[]), err.failedZones, err.message);
+    });
+    return this.machinesOf(list);
+  }
+
+  private async machinesOf(list: GpuInstance[]): Promise<ReplicaMachine[]> {
     const machines = list.map(inst => toMachine(inst)).filter((m): m is ReplicaMachine => m !== null);
     // The list does not carry the price (a replica adopted after a restart showed `null`): the catalog has it.
     return Promise.all(machines.map(async m => (m.pricePerHour == null ? { ...m, pricePerHour: await this.priceOrNull(m) } : m)));
+  }
+
+  async listForeign(namespace: string): Promise<Array<ReplicaMachine & { namespace: string }>> {
+    const list = await this.client.listInstancesByTag(DEPLOY_TAG, this.credentials, this.opts.projectId ? { projectId: this.opts.projectId } : {});
+    return list.flatMap((inst) => {
+      const tags = ((inst.providerMeta ?? {}) as { tags?: string[] }).tags ?? [];
+      const ns = tags.find(t => t.startsWith('aigw-ns-'))?.slice('aigw-ns-'.length);
+      const machine = toMachine(inst);
+      return machine && ns && ns !== namespace ? [{ ...machine, namespace: ns }] : [];
+    });
   }
 
   /** Catalog price of a listed machine, looked up once an hour per zone+type (the list runs every 20 s). */

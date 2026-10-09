@@ -13,7 +13,7 @@
  * gateway key: the session comes from the app's own backend (`sessionEndpoint`), the audio routes are authenticated by
  * the session token.
  */
-import { turnEndAfterVadEndMs, type VoiceActivityTuning, type VoiceFrameClassifier } from '../voice/voice-activity';
+import { turnEndAfterVadEndMs, VOICE_ACTIVITY_TUNING, VOICE_FRAME_MS, type VoiceActivityTuning, type VoiceFrameClassifier } from '../voice/voice-activity';
 import { startSileroListener, type SileroListener } from '../voice/silero-listener';
 import { createTurnTaking } from '../voice/turn-taking';
 import { clipToWav, createTurnClip } from '../voice/turn-clip';
@@ -39,6 +39,7 @@ export interface RealtimeVoiceOptions {
   maxSpeechMs: number;
   echoTailMs: number;
   tuning?: VoiceActivityTuning;
+  speculatePauseMs?: number;
 }
 
 export type SpeakText = (text: string, ctx: { config: Record<string, unknown>; traceparent: string; signal: AbortSignal }) => Promise<Blob | ArrayBuffer>;
@@ -47,6 +48,7 @@ export interface RealtimeSessionOptions {
   /** The app's backend URL that calls `POST /v1/realtime/sessions` server side (POSTed `{transports, prefer}`), or a function. */
   sessionEndpoint: SessionSource;
   sessionInit?: RequestInit;
+  device?: string;
   getMicStream: () => Promise<MediaStream>;
   onEvent: (event: RealtimeEvent) => void;
   /** The NPC's audio on WebRTC (null when it ends). Absent: played by an `<audio>` element the SDK creates. */
@@ -81,8 +83,10 @@ export interface RealtimeSession {
   /** Client VAD said the learner stopped (realtime rungs). */
   sendEndTurn(): void;
   interrupt(): void;
-  /** Appends messages to the conversation (and tells the edge). */
+  /** Appends user / assistant messages to the conversation (and tells the edge); a `system` message is dropped: the signed session config owns the prompt. */
   updateHistory(messages: ChatMessage[]): void;
+  /** Hands the edge an update the gateway signed for the app (`POST /v1/realtime/updates`); `history` replaces the turns this session replays. */
+  applyUpdate(signed: string, history?: ChatMessage[]): void;
   /** Clip rungs: one recorded learner turn (16 kHz WAV). Realtime rungs ignore it (their audio is live). */
   sendTurn(wav: Blob): Promise<void>;
   close(): void;
@@ -174,6 +178,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   const clips: OpenerClip[] = [];
   let lastOpener = -1;
   let serverOpenerOff = false;
+  let heardAt: number | null = null;
   let cacheAbort: AbortController | null = null;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   let playingOpener: { index: number; timer: ReturnType<typeof setTimeout> } | null = null;
@@ -183,7 +188,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
   let quietSince = 0;
   let heardUntil = 0;
 
-  const baseConfig = () => (descriptor ? configFromToken(descriptor.token) : null) ?? opts.config ?? {};
+  const baseConfig = () => (descriptor ? configFromToken(descriptor.token, descriptor.cfg) : null) ?? opts.config ?? {};
   const config = () => {
     const base = baseConfig();
     const prior = Array.isArray(base.messages) ? base.messages as ChatMessage[] : [];
@@ -282,8 +287,9 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     if (playingOpener && !current?.playOpener && (e.type === 'audio_start' || (e.type === 'opener' && e.state === 'start' && !e.local))) endOpener(true);
     if (e.type === 'transcript' && e.final) {
       if (!turn) startTurn();
-      if (e.text) appended.push({ role: 'user', content: e.text });
+      if (e.text) heardAt = appended.push({ role: 'user', content: e.text }) - 1;
     }
+    if (e.type === 'intercept' && heardAt !== null) appended.splice(heardAt, 1);
     if (e.type === 'reply' && e.text) appended.push({ role: 'assistant', content: e.text });
     if (e.type === 'route' && turn) Object.assign(turn, { provider: e.provider, fallback: e.fallback });
     if (e.type === 'audio_start') {
@@ -317,6 +323,8 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       };
     }
     if (e.type === 'done') {
+      heardAt = null;
+      if (e.served && metrics.lastTurn) metrics.lastTurn.served = e.served;
       clearTimeout(deadlineTimer);
       if (turn?.localOpener) restoreServerOpener();
       if (turn) {
@@ -409,7 +417,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const wanted = rungs.filter(isRealtime);
     if (!wanted.length) return null;
     const started = performance.now();
-    const answer = await requestSession(opts.sessionEndpoint, { transports: rungs, prefer: wanted[0] }, {
+    const answer = await requestSession(opts.sessionEndpoint, { transports: rungs, prefer: wanted[0], ...(opts.device ? { device: opts.device } : {}) }, {
       traceparent: telemetry.traceparent, timeoutMs: timeouts.sessionMs, fetchImpl, init: opts.sessionInit,
     });
     if (isRefusal(answer)) {
@@ -616,10 +624,13 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const stream = await ctx.mic();
     const audio = new AudioContext();
     const track = stream.getAudioTracks()[0];
+    const pauseFrames = Math.round((v.speculatePauseMs ?? 0) / VOICE_FRAME_MS);
+    const tuning = pauseFrames ? { ...(v.tuning ?? VOICE_ACTIVITY_TUNING), pauseFrames } : v.tuning;
     const turns = track ? createTurnTaking({
       clip: createTurnClip(), track: () => track, toWav: (clip) => clipToWav(clip, audio),
       endSilenceMs: v.endSilenceMs, maxSpeechMs: v.maxSpeechMs, echoTailMs: v.echoTailMs, tuning: v.tuning,
       onVoice: () => {}, onTurn: (wav) => { void session.sendTurn(wav); },
+      ...(pauseFrames ? { onSpeculate: (wav: Blob) => current?.speculate?.(wav), onSpeculateCancel: () => current?.cancelSpeculation?.() } : {}),
     }) : null;
     turns?.setListening(true);
     bridge = createVoiceBridge({
@@ -634,7 +645,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const listener: SileroListener = await startSileroListener(await v.classifier(), (e) => {
       if (e.kind === 'vadStart') clearTimeout(deadlineTimer);
       bridge?.onEffect(e);
-    }, v.tuning);
+    }, tuning);
     listener.connect(stream);
     voiceStop = () => { listener.stop(); turns?.drop(); void audio.close().catch(() => {}); };
   }
@@ -682,8 +693,13 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       current?.send({ type: 'interrupt' });
     },
     updateHistory(messages) {
-      appended.push(...messages);
-      if (current && !current.clipBased) current.send({ type: 'config_update', messages });
+      const turns = messages.filter(m => m.role !== 'system');
+      appended.push(...turns);
+      if (current && !current.clipBased) current.send({ type: 'config_update', messages: turns });
+    },
+    applyUpdate(signed, history) {
+      if (history) appended.splice(0, appended.length, ...history.filter(m => m.role !== 'system'));
+      if (current && !current.clipBased) current.send({ type: 'config_update', signed });
     },
     async sendTurn(wav) {
       if (!current?.clipBased || closed) return;

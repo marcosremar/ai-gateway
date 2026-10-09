@@ -10,7 +10,7 @@ latencies so the harness can check what the edge adds.
     POST /v1/audio/speech           raw PCM16 24 kHz: first bytes after TTS_TTFB_MS, 0.25 s of tone per word, sent at
                                     4× real time in 40 ms chunks; the tone's pitch tells the sentences apart
                                     (120 Hz + 30 Hz per word)
-    POST /__tts_faults              {"<sentence>": ["runaway" | "lead" | "break" | "cut", …]}: one fault per request
+    POST /__tts_faults              {"<sentence>": ["runaway" | "lead" | "break" | "cut" | "overlong" | "capped", …]}: one fault per request
                                     for that sentence, in order — runaway = silence up to max_new_tokens then the
                                     connection dropped, lead = 0.5 s of silence then the sentence, break = dropped
                                     before any audio, cut = dropped after the sentence's audio
@@ -53,7 +53,7 @@ def tone(seconds: float, rate: int = 24000, freq: float = 180.0) -> bytes:
 
 
 async def health(_r):
-    return web.json_response({"ok": True})
+    return web.json_response({"ok": True, "models": {"stt": "fake-stt", "llm": "fake-llm", "tts": "fake-tts"}})
 
 
 async def voices(_r):
@@ -101,13 +101,14 @@ async def speech(request):
         await asyncio.sleep(TTS_TTFB_MS / 1000)
         words = max(1, len(body["input"].split()))
         pcm = tone(0.25 * words, freq=120.0 + 30 * words)
-        pcm = {"runaway": bytes(int(body.get("max_new_tokens", 192) / 12.5 * 24000) * 2), "lead": bytes(24000) + pcm,
-               "break": b""}.get(mode, pcm)
+        cap = body.get("max_new_tokens", 192) / 12.5
+        pcm = {"runaway": bytes(int(cap * 24000) * 2), "lead": bytes(24000) + pcm, "break": b"",
+               "overlong": tone(cap + 1), "capped": tone(cap * 0.95)}.get(mode, pcm)
         step = int(0.04 * 24000) * 2
         for at in range(0, len(pcm), step):
             await res.write(pcm[at:at + step])
             await asyncio.sleep(0.01)
-        if mode in ("runaway", "break", "cut"):
+        if mode in ("runaway", "break", "cut", "capped"):
             request.transport.close()
         return res
     finally:
