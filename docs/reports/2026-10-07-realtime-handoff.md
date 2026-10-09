@@ -1741,3 +1741,29 @@ imagem 1317 no L40S, edge `f66b6b80`, 4 alunos, sessão longa, transbordo com a 
 4. `LLM_SLOT_CTX=4096` fica fora do `parle-speech` declarado até haver a leitura de VRAM (funcionou; a margem é
    estimativa).
 5. Não mexer no teto de 4 sessões por L40S no deploy. 8 é a proposta para a próxima medição, com tempos reais da turma.
+
+## WebRTC: conserto da descida e prova ao vivo (2026-10-09)
+
+Branch `rt/webrtc-latency` (PR #65), gateway local em :4170 (namespace `marcos-webrtc`, estado próprio), um L40S-1-48G
+fr-par-2 do perfil `speech-stack` (imagem `20261008-1317`, €1,4699/h) por vez, `realtime.maxSessions` 8 só no spec do
+teste. Sexta 09/10, 01:26 → (em curso) Europe/Paris. Produção só lida. Mesmo clipe sintético de 4,5 s, mesmo prompt e voz
+da prova da noite anterior. Relógio: última amostra com voz enviada → primeiro áudio não silencioso recebido.
+
+**Parcial (em andamento): o «antes» (edge `f66b6b80`) já rodou; o «depois» (edge `a5dd777f`) está subindo.** O sidecar
+vem do cloud-init (`docker run` de `realtime.edgeImage`), sem SSH: trocar o edge exige outra máquina, então são dois
+boots em sequência (nunca dois L40S ao mesmo tempo), mesma zona, mesmo tipo, mesma imagem de modelos.
+
+### Antes — edge `f66b6b80` (L40S `6af8d92e`, pronto em ~530 s), ms p50 / p95 / max
+
+| Rodada | Cliente | WS | WebRTC | Diferença p50 |
+|---|---|---|---|---|
+| 4 + 4 leves, 760 s, um turno a cada 15 ± 2 s, limpa | primeiro som | 1305 / 1767 / 1888 (n 191) | 1705 / 2177 / 2265 (n 191) | +400 |
+| | fim da fala → `vad end` | 747 / 806 / 833 | 944 / 1090 / 1171 | +197 |
+| | estágios (`ttfa` do edge) | 533 / 2311 | 624 / 2615 | +91 |
+| | `audio_start` → primeiro quadro audível | 0 / 154 | 79 / 308 | +79 |
+| `lossy` (75 ms, 5 %), 3 + 3 leves | primeiro som | 1827 / 3469 / 3593 (n 32) | 1945 / 2392 / 2397 (n 31) | +118 |
+| `campus-slow`, 3 + 3 leves | primeiro som | 1190 / 1824 / 1837 (n 34) | 1590 / 2229 / 2229 (n 35) | +400 |
+| Chrome real (Mac), 1 + 1, limpa | audível no medidor | 1061 / 1791 (n 10) | 1457 / 1632 (n 9) | +396 |
+
+Chrome, `getStats` no WebRTC (1 aluno, rede do Mac): jitter buffer 103 ms p50 (alvo e mínimo do NetEq 100–120 ms),
+jitter entre chegadas 3 ms p50 / 13 p95, RTT 39 ms, 9 pacotes perdidos em 7505.
