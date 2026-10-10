@@ -19,7 +19,7 @@ import { DeploymentError, type DeploymentController, type Lease, type LeaseOutco
 import { replicaBase } from './http';
 import { replicaTls } from './replica-tls';
 import { qwenTokenCap } from './qwen-token-cap';
-import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
+import { applyWhisperMeta, applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
 import { FINISH_MARKER, USAGE_MARKER } from '../gateway/providers/cloud/openai-compat/stream-markers';
@@ -273,6 +273,8 @@ export class DeploymentSTTProvider extends DeploymentProviderBase implements STT
     const payload = await res.json() as { text?: string };
     const response: STTResponse = { text: payload.text ?? '', raw: payload, timing: { total_ms: Date.now() - t0 } };
     applyWhisperSegments(response, payload);
+    // Detected language + duration: the route hands them to a verbose_json client (language swap FR↔EN in ucast).
+    applyWhisperMeta(response, payload);
     return response;
   }
 }
