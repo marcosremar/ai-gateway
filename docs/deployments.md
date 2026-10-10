@@ -408,7 +408,7 @@ identical `PUT` does not). `lastPlacement` in `GET /v1/deployments/:name` says w
 earlier places were skipped.
 
 - **`placements`** (a Scaleway spec, ≤ 6 entries): the spec's own zone/type first, then each entry **in the given
-  order** (never re-ranked). A Scaleway entry is `{ zone?, machineType? }` at the spec's `maxEurPerHour`; a pinned
+  order** (never re-ranked). A Scaleway entry is `{ zone?, machineType?, maxEurPerHour? }` (its own price cap, else the spec's); a pinned
   `osImageId` only applies in its own zone; an exposed deployment may change only `machineType`.
   An entry on **another provider** is `{ "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85,
   "maxReplicas": 1 }`, all four required (400 otherwise; GPU deployments without `exposure` only): the price cap of

@@ -15,7 +15,10 @@
  *     the deployment store; never logged, never returned by the API (spec env is write-only).
  *
  * Registering never starts a machine: declared specs keep `minReplicas: 0` and the reconciler never calls `wake`.
- * Replicas start only when a request needs them, as for any other deployment.
+ * Replicas start when a request needs them, or inside a declared `warmSchedule` window, as for any other deployment.
+ *
+ * A declaration without `image` and `profile` belongs to another registrant (the school's backend PUTs
+ * `parle-qwen-tts`): it never creates the deployment (pending until it exists) and only puts its own fields back.
  *
  * A declared field the operator changed by hand (PUT/PATCH) is put back at the next reconcile; fields the declaration
  * does not hold (e.g. `paused`, and `env` when it declares neither `env` nor `generatedSecrets`) are left as the
@@ -23,8 +26,12 @@
  */
 
 import { randomBytes } from 'crypto';
+import parleLivekit from './declared/parle-livekit.json';
+import parleQwenTts from './declared/parle-qwen-tts.json';
 import parleSpeech from './declared/parle-speech.json';
-import type { DeploymentSpec } from './types';
+import parleSpeechS2s from './declared/parle-speech-s2s.json';
+import { DEFAULT_SCALING_MODE } from './scaling-spec';
+import type { DeploymentSpec, ScalingSpec } from './types';
 
 export interface DeclaredDeployment {
   name: string;
@@ -39,10 +46,11 @@ export interface DeclaredDeployment {
 
 /**
  * `parle-speech`: the `speech-stack` image in the gateway's own Scaleway registry (pulled with the key the gateway
- * already has, no registry secret). The declaration owns the image, `realtime` and the edge's `RT_MAX_SESSIONS` per
- * machine type; sizing, limits, env and files stay as registered (a new gateway starts from the `speech-stack` profile).
+ * already has, no registry secret). The declaration owns the image, the placements, the command, `realtime`, the class
+ * window and the edge's `RT_MAX_SESSIONS` per machine type; sizing, limits, env and files stay as registered (a new
+ * gateway starts from the `speech-stack` profile). The other three own only their class window and monthly ceiling.
  */
-export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [parleSpeech as DeclaredDeployment];
+export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [parleSpeech, parleQwenTts, parleSpeechS2s, parleLivekit] as DeclaredDeployment[];
 
 /** Reconcile period. The boot run happens before the providers are mounted (serve.ts). */
 export const DECLARED_RECONCILE_MS = 5 * 60_000;
@@ -84,8 +92,11 @@ export function declaredBody(
   decl: DeclaredDeployment, env: Env, previous: DeploymentSpec | null, gen: () => string = generateSecret,
 ): { body: Record<string, unknown> } | { pending: string } {
   const image = declaredImage(decl, env);
-  if (!image) {
-    return { pending: `${decl.image?.env ?? 'image'} is not set and the declaration has no default image` };
+  if (!image && decl.image) {
+    return { pending: `${decl.image.env ?? 'image'} is not set and the declaration has no default image` };
+  }
+  if (!decl.image && !previous) {
+    return { pending: `'${decl.name}' is registered by its owner, not here: the declared fields apply once it exists` };
   }
   let registryAuth: Record<string, string> | undefined;
   if (decl.registryAuth) {
@@ -108,7 +119,7 @@ export function declaredBody(
   return {
     body: {
       ...decl.spec,
-      image,
+      ...(image ? { image } : {}),
       ...(declaredEnv || decl.generatedSecrets?.length ? { env: { ...declaredEnv, ...secrets } } : {}),
       ...(declaredByType ? {
         envByMachineType: {
@@ -116,15 +127,26 @@ export function declaredBody(
           ...Object.fromEntries(Object.entries(declaredByType).map(([type, vars]) => [type, { ...storedByType[type], ...vars }])),
         },
       } : {}),
-      ...(decl.spec.scaling ? { scaling: { ...previous?.scaling, ...(decl.spec.scaling as object) } } : {}),
+      ...(decl.spec.scaling ? { scaling: mergedScaling(previous?.scaling, decl.spec.scaling as ScalingSpec) } : {}),
       ...(registryAuth ? { registryAuth } : {}),
       ...(decl.description ? { description: decl.description } : {}),
     },
   };
 }
 
+function mergedScaling(stored: ScalingSpec | undefined, declared: ScalingSpec): ScalingSpec {
+  const budget = stored?.budget || declared.budget ? { ...stored?.budget, ...declared.budget } : undefined;
+  return { mode: DEFAULT_SCALING_MODE, ...stored, ...declared, ...(budget ? { budget } : {}) };
+}
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical((value as Record<string, unknown>)[k])]));
+}
+
 function sameValue(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
 /** True when every field of `body` already has that value in `spec` (the PUT would change nothing). */

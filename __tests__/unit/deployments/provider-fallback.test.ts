@@ -74,7 +74,9 @@ describe('placements on another provider: spec', () => {
 
   it('the voice profiles: Scaleway first, vast last, no L4 under the speech stack, mode fast', () => {
     const speech = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
-    expect(ladder(speech)).toEqual(['L40S-1-48G@fr-par-2', 'L40S-1-48G@fr-par-1', 'vast RTX 5090 ≤ €0.85']);
+    expect(ladder(speech)).toEqual([
+      'L40S-1-48G@fr-par-2', 'L40S-1-48G@pl-waw-2', 'H100-1-80G@fr-par-2', 'H100-1-80G@pl-waw-2', 'vast RTX 5090 ≤ €0.85',
+    ]);
     expect(speech.placements?.at(-1)).toMatchObject({ maxReplicas: 1 });
     for (const name of ['qwen3-tts', 'qwen3-tts-clone']) {
       const tts = buildSpec('tts', { profile: name }, { profiles });
@@ -94,8 +96,7 @@ describe('placements on another provider: spec', () => {
     expect(() => buildSpec('s', { ...SPEC, placements: [{ ...VAST, image: 'not an image' }] }, { profiles })).toThrow(/placements\[0\]\.image/);
     const speech = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
     expect(placementsOf(speech).map(s => s.image)).toEqual([
-      'rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213', 'rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213',
-      'ghcr.io/marcosremar/speech-stack:20261009-0213',
+      ...Array(4).fill('rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213'), 'ghcr.io/marcosremar/speech-stack:20261009-0213',
     ]);
     const init = vastReplicaInit(placementsOf(speech).at(-1)!, 'x'.repeat(32));
     const appEnv = Buffer.from(/echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/app\.env/.exec(init)![1], 'base64').toString('utf8');
@@ -103,6 +104,7 @@ describe('placements on another provider: spec', () => {
     expect(appEnv).toContain('LLM_FILE=Qwen3.5-9B-Q4_K_M.gguf\n');
     expect(speech.envByMachineType!['L40S-1-48G'].LLM_SLOT_CTX).toBe('4096');
     expect(speech.envByMachineType!['L4-1-24G'].LLM_SLOT_CTX).toBeUndefined();
+    expect(speech.envByMachineType!['H100-1-80G'].LLM_SLOT_CTX).toBe('2048');
   });
 
   it('an image with a start command runs on vast without a boot script', () => {
