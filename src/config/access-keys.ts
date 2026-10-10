@@ -44,6 +44,7 @@ export interface KeyView {
   id: string;
   source: 'env' | 'issued';
   user: string;
+  role: 'admin' | 'client';
   admin: boolean;
   prefix: string;
   label: string | null;
@@ -87,7 +88,6 @@ export class AccessKeys {
   private state: AccessState = { version: 1, keys: [], env: {}, admins: null, sandbox: null };
   private envKeys: EnvKey[];
   private baseAdmins: string[] = [];
-  private alwaysAdmin: string[] = [];
   private dirty = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private chain: Promise<void> = Promise.resolve();
@@ -105,15 +105,14 @@ export class AccessKeys {
     if (read.data) this.state = { ...this.state, ...read.data, env: read.data.env ?? {}, keys: read.data.keys ?? [] };
   }
 
-  setBaseAdmins(base: Iterable<string>, alwaysAdmin: readonly string[] = []): void {
+  setBaseAdmins(base: Iterable<string>): void {
     this.baseAdmins = [...base];
-    this.alwaysAdmin = [...alwaysAdmin];
     this.applyAdmins();
   }
 
   private applyAdmins(): void {
     this.admins.clear();
-    for (const user of [...(this.state.admins ?? this.baseAdmins), ...this.alwaysAdmin]) this.admins.add(user);
+    for (const user of this.state.admins ?? this.baseAdmins) if (user !== SANDBOX_USER) this.admins.add(user);
   }
 
   private active(marks: KeyMarks | undefined, now: number): boolean {
@@ -154,7 +153,7 @@ export class AccessKeys {
   list(): KeyView[] {
     const now = this.now();
     const view = (source: KeyView['source'], k: EnvKey | IssuedKey, marks: KeyMarks | undefined): KeyView => ({
-      id: k.id, source, user: k.user, admin: this.admins.has(k.user), prefix: k.prefix, label: k.label ?? null,
+      id: k.id, source, user: k.user, role: this.admins.has(k.user) ? 'admin' : 'client', admin: this.admins.has(k.user), prefix: k.prefix, label: k.label ?? null,
       createdAt: iso('createdAt' in k ? k.createdAt : null), lastUsedAt: iso(marks?.lastUsedAt), expiresAt: iso(marks?.expiresAt),
       revokedAt: iso(marks?.revokedAt), active: this.active(marks, now),
     });
@@ -212,7 +211,7 @@ export class AccessKeys {
       throw new AccessError(400, `users must be an array of user ids matching ${USER_RE}`);
     }
     const list = [...new Set(users as string[])];
-    if (!list.includes(actor) && !this.alwaysAdmin.includes(actor)) throw new AccessError(400, `'${actor}' must stay in the list (you would lock yourself out)`);
+    if (!list.includes(actor)) throw new AccessError(400, `'${actor}' must stay in the list (you would lock yourself out)`);
     this.state.admins = list;
     this.applyAdmins();
     await this.save();

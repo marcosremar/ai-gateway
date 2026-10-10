@@ -87,9 +87,7 @@ const PORT = parseInt(process.env.PORT || '4000');
 const clientKeys = gatewayClientKeys(process.env);
 for (const w of clientKeys.warnings) log.warn({}, `WARNING: ${w}`);
 const API_KEYS = clientKeys.keys;
-/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1 + SANDBOX_TOKEN_ADMIN=1. */
-const EXTRA_ADMINS = clientKeys.sandboxAdmins;
-access.setBaseAdmins(adminUsersFromEnv(process.env, EXTRA_ADMINS), EXTRA_ADMINS);
+access.setBaseAdmins(adminUsersFromEnv(process.env));
 access.start();
 const adminUsers = access.admins;
 
@@ -147,7 +145,6 @@ const opsAlerts = createOpsAlerts((alert) => {
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
 const configuredDeployments = deploymentsFromEnv(process.env, {
-  alwaysAdmin: EXTRA_ADMINS,
   admins: adminUsers,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
@@ -334,7 +331,7 @@ if (SANDBOX_TOKEN) keyManager.start();
 
 // GET /health?deep=1 and /v1/admin/keys — same admins as deployments: DEPLOYMENTS_ADMIN_USERS only.
 // An empty list grants nobody (fail closed; it used to make every key an admin).
-const adminWarning = adminListWarning(process.env, EXTRA_ADMINS);
+const adminWarning = adminListWarning(process.env);
 if (adminWarning) log.warn({}, `WARNING: ${adminWarning}`);
 const isAdminToken = (token: string) => {
   const userId = keyRegistry.resolve(token)?.userId;

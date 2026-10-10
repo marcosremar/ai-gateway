@@ -31,13 +31,12 @@ function call(handler: ReturnType<typeof createDeploymentRoutes>, user: string, 
   });
 }
 
-function service(env: Record<string, string>, alwaysAdmin: string[] = []) {
+function service(env: Record<string, string>) {
   const dir = mkdtempSync(join(tmpdir(), 'aigw-admin-'));
   dirs.push(dir);
   const logs: string[] = [];
   const built = deploymentsFromEnv({ SCW_SECRET_KEY: 's', DEPLOYMENTS_NAMESPACE: 'test', DEPLOYMENTS_STATE_DIR: dir, ...env }, {
     userOf: (req) => String(req.headers.authorization ?? '').replace(/^Bearer\s+/, '') || null,
-    alwaysAdmin,
     log: (m) => logs.push(m),
   })!;
   return { ...built, logs };
@@ -57,17 +56,17 @@ describe('admin keys fail closed', () => {
     expect(logs.join('\n')).toMatch(/no GATEWAY_API_KEYS key is an admin — set/);
   });
 
-  it('a listed user is an admin; the list (plus the transition extra) are the only admins', async () => {
+  it('a listed user is an admin; the list is the only source of admins, never the dev token', async () => {
     const { handler, logs } = service({ DEPLOYMENTS_ADMIN_USERS: 'ops, ' });
     expect(logs.join('\n')).not.toMatch(/WARNING/);
     expect((await call(handler, 'ops', 'POST', '/v1/deployments/x/wake')).status).toBe(404);
     expect((await call(handler, 'parle', 'POST', '/v1/deployments/x/wake')).status).toBe(403);
-    expect([...adminUsersFromEnv({ DEPLOYMENTS_ADMIN_USERS: 'ops, ' }, ['sandbox'])]).toEqual(['ops']);
-    expect([...adminUsersFromEnv({ DEPLOYMENTS_ADMIN_USERS: 'ops, ', SANDBOX_TOKEN_ADMIN: '1' }, ['sandbox'])]).toEqual(['ops', 'sandbox']);
+    expect([...adminUsersFromEnv({ DEPLOYMENTS_ADMIN_USERS: 'ops, ' })]).toEqual(['ops']);
+    expect([...adminUsersFromEnv({ DEPLOYMENTS_ADMIN_USERS: 'ops, sandbox', SANDBOX_TOKEN_ADMIN: '1' })]).toEqual(['ops']);
     expect(adminUsersFromEnv({}).size).toBe(0);
-    expect(adminListWarning({ DEPLOYMENTS_ADMIN_USERS: ' , ' }, ['sandbox'])).toMatch(/only sandbox/);
-    const transition = service({ SANDBOX_TOKEN_ADMIN: '1' }, ['sandbox']);
-    expect((await call(transition.handler, 'sandbox', 'POST', '/v1/deployments/x/wake')).status).toBe(404);
+    expect(adminListWarning({ DEPLOYMENTS_ADMIN_USERS: ' , ' })).toMatch(/is empty/);
+    const formerOptIn = service({ SANDBOX_TOKEN_ADMIN: '1', DEPLOYMENTS_ADMIN_USERS: 'sandbox' });
+    expect((await call(formerOptIn.handler, 'sandbox', 'POST', '/v1/deployments/x/wake')).status).toBe(403);
   });
 
   it('createDeploymentRoutes without isAdmin lets nobody manage', async () => {

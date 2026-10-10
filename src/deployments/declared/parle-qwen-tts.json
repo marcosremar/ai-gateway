@@ -1,6 +1,6 @@
 {
   "name": "parle-qwen-tts",
-  "description": "parle: the cloned-voice Qwen3-TTS on two Scaleway L4, registered by the school's backend; declared here only the Mon-Thu class window (warm and reserved, 17:30-20:30 Paris) and the monthly ceiling",
+  "description": "parle: the cloned-voice Qwen3-TTS on two Scaleway L4, registered by the parle client's backend; declared here only the Mon-Thu class window (warm and reserved, 17:30-20:30 Paris) and the monthly ceiling",
   "spec": {
     "scaling": { "budget": { "eurPerMonth": 150 } },
     "warmSchedule": [

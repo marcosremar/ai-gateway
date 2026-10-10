@@ -31,16 +31,22 @@ master key, which the gateway uses only to fetch its own provider keys from the 
 decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only, default off, logs a `WARNING`) accepts it
 again as the user `sandbox`, until every client sends its own key. That user is **not an admin** (even if
 `DEPLOYMENTS_ADMIN_USERS` lists it) and runs in **no-wake** mode; it may call the aliases of the app named by
-`SANDBOX_TOKEN_APP` (e.g. `parle`), under the app-key limits. `SANDBOX_TOKEN_ADMIN=1` is the explicit opt-in back to
-admin and waking (audit 2026-10-09 #6). These three flags come from the host only, never from the dev API.
+`SANDBOX_TOKEN_APP` (e.g. `parle`), under the app-key limits. `SANDBOX_TOKEN_ADMIN` is no longer read (10/10/2026): the
+dev token is a client, never an admin; a boot `WARNING` asks to remove the variable. These flags come from the host
+only, never from the dev API.
 Keys travel only as `Authorization: Bearer <key>`: a bare key without the scheme gets `401`.
+
+**Two roles only** (owner, 10/10/2026): an **admin** manages the gateway (machines, keys, config); a **client** calls
+the APIs (STT, chat, TTS, realtime, s2s). A developer is a client — testing never needs an admin key. Every key is one
+or the other: `GET /v1/admin/access/keys` lists each with `role: "admin" | "client"`. The dev token (`sandbox`) is
+always a client, even if the admin list names it.
 
 **Admin keys** — the users in `DEPLOYMENTS_ADMIN_USERS`. When that list is empty, no key is admin (fail closed since 06/10/2026; the boot logs a `WARNING`). Admin keys are required for deployment
 mutations, `X-App` naming **another** app, `GET /health?deep=1`, the full view of `GET /health?details=1` and
 `/v1/admin/keys*`. A non-admin key may send `X-App` equal to its own app (what `GatewayClient({ app })` sends); any
 other value → `403`. The same rule holds for every app-scoped route added later (e.g. a machines API).
 
-**App keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
+**Client keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
 
 - **Models**: only the aliases of its own app (`PUT /v1/apps/:app/routes`), per stage — no `org/model` passthrough,
   no embeddings or images. Anything else → `403 permission_error`, before any provider is called.

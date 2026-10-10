@@ -443,7 +443,7 @@ let peakConnections = 0;
 const userConcurrency = new Map<string, number>();
 const RESERVED_FIELD_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 /**
- * Requests in flight per API key user. One key usually serves a whole application (parle: every student of a school
+ * Requests in flight per API key user. One key usually serves a whole application (parle: every student of a class
  * on the same key), so the old default of 20 turned a class of 25 speaking at once into 429s (prod stress 2026-10-06:
  * 21/50 served at 50 concurrent, the rest "Too many concurrent requests (limit: 20)"). The limit guards the gateway
  * against one runaway caller, not against an app's normal load; upstream capacity is governed by the providers.
