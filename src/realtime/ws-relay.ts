@@ -15,6 +15,7 @@
 import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import NodeWebSocket from 'ws';
+import { replicaTls } from '../deployments/replica-tls';
 import type { RealtimeService } from './service';
 import { TRACE_ID_HEADER, childTraceparent, traceOf } from './trace';
 import {
@@ -44,14 +45,14 @@ interface Upstream {
   close(code?: number, reason?: string): void;
 }
 
-export type UpstreamFactory = (url: string, headers: Record<string, string>) => Upstream;
+export type UpstreamFactory = (url: string, headers: Record<string, string>, tls?: { ca: string }) => Upstream;
 
-/** Bun's global WebSocket takes `{ headers }`; under Node the `ws` package does. */
-export const defaultUpstream: UpstreamFactory = (url, headers) => {
+/** Bun's global WebSocket takes `{ headers, tls }`; under Node the `ws` package takes `{ headers, ca }`. */
+export const defaultUpstream: UpstreamFactory = (url, headers, tls) => {
   if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') {
-    return new (WebSocket as unknown as new (u: string, o: { headers: Record<string, string> }) => Upstream)(url, { headers });
+    return new (WebSocket as unknown as new (u: string, o: { headers: Record<string, string>; tls?: { ca: string } }) => Upstream)(url, { headers, ...(tls ? { tls } : {}) });
   }
-  return new NodeWebSocket(url, { headers, maxPayload: MAX_MESSAGE }) as unknown as Upstream;
+  return new NodeWebSocket(url, { headers, maxPayload: MAX_MESSAGE, ...(tls ? { ca: tls.ca } : {}) }) as unknown as Upstream;
 };
 
 export interface WsRelayOptions {
@@ -91,7 +92,8 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
     const target = `${session.base.replace(/^http/, 'ws')}/__aigw/rt/ws`;
     let upstream: Upstream;
     try {
-      upstream = open(target, { 'X-Aigw-Token': session.replicaToken, 'X-Aigw-Session-Token': token, traceparent: childTraceparent(trace) });
+      upstream = open(target, { 'X-Aigw-Token': session.replicaToken, 'X-Aigw-Session-Token': token, traceparent: childTraceparent(trace) },
+        replicaTls(target, session.replicaToken).tls);
     } catch (err) {
       refuse(socket, 502, `replica unreachable: ${(err as Error).message}`, traceHeader);
       return true;

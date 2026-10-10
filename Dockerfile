@@ -1,5 +1,5 @@
 # Bun pinned: see Dockerfile.production (>= 1.4.2, fault bench 2026-10-06 item 14).
-FROM oven/bun:1.4.2 AS base
+FROM oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS base
 WORKDIR /app
 
 # Install wget for healthcheck (curl not available in bun image)

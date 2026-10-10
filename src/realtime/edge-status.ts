@@ -10,6 +10,8 @@
  * down the ladder.
  */
 
+import { replicaTls } from '../deployments/replica-tls';
+
 export type EdgeTransport = 'webrtc' | 'ws';
 
 /** The edge's media path (netcheck.py): `unknown` until this gateway probed it. */
@@ -102,7 +104,7 @@ export class EdgeStatusCache {
   private async fetchStatus(base: string, token: string): Promise<EdgeStatusResult> {
     try {
       const res = await this.fetchImpl(`${base}/__aigw/rt/status`, {
-        headers: { 'X-Aigw-Token': token }, signal: AbortSignal.timeout(this.timeoutMs),
+        headers: { 'X-Aigw-Token': token }, signal: AbortSignal.timeout(this.timeoutMs), ...replicaTls(base, token),
       });
       if (res.status === 404) return { ok: false, reason: 'unsupported' };
       if (!res.ok) return { ok: false, reason: 'unreachable' };

@@ -9,6 +9,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { randomUUID } from 'crypto';
 import type { DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
+import { replicaTls } from '../deployments/replica-tls';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import type { AppLimitDenial } from '../gateway/proxy/app-limits';
 import { EdgeStatusCache, type EdgeStatus, type EdgeStatusResult } from './edge-status';
@@ -201,6 +202,7 @@ export class RealtimeService {
       const res = await (this.opts.fetchImpl ?? fetch)(`${r.base}/__aigw/rt/net`, {
         method: 'POST', headers: { 'X-Aigw-Token': token, 'Content-Type': 'application/json', traceparent: trace.traceparent },
         body: JSON.stringify({ udpInbound: udp.result, rttMs: udp.rttMs, iceServers: turn }), signal: AbortSignal.timeout(20_000),
+        ...replicaTls(r.base, token),
       });
       if (res.ok) decided = await res.json() as typeof decided;
     } catch (err) {
@@ -278,7 +280,7 @@ export class RealtimeService {
     const exposed = !!this.opts.controller?.specOf(dep)?.exposure;
     return view.replicas
       .filter(r => r.phase === 'ready' && (draining || !r.draining) && r.ip)
-      .map(r => ({ id: r.id, base: replicaBase({ ip: r.ip } as never, exposed), stagesOut: r.stagesOut ?? [] }));
+      .map(r => ({ id: r.id, base: replicaBase(r, exposed), stagesOut: r.stagesOut ?? [] }));
   }
 
   /** `POST /v1/realtime/sessions` (behind the proxy's API-key auth). */
@@ -497,7 +499,7 @@ export class RealtimeService {
 
   private replicaBaseOf(dep: string, rep: string): string | null {
     const replica = this.opts.controller?.get(dep)?.replicas.find(r => r.id === rep && r.ip);
-    return replica ? replicaBase({ ip: replica.ip } as never, !!this.opts.controller?.specOf(dep)?.exposure) : null;
+    return replica ? replicaBase(replica, !!this.opts.controller?.specOf(dep)?.exposure) : null;
   }
 
   deviceBlocked(claims: Pick<RealtimeClaims, 'app' | 'dev'>): boolean {
@@ -512,7 +514,7 @@ export class RealtimeService {
       this.forget(sid);
       if (!base || !token) return;
       await (this.opts.fetchImpl ?? fetch)(`${base}/__aigw/rt/session/${encodeURIComponent(s.edgeSessionId ?? sid)}`, {
-        method: 'DELETE', headers: { 'X-Aigw-Token': token }, signal: AbortSignal.timeout(5_000),
+        method: 'DELETE', headers: { 'X-Aigw-Token': token }, signal: AbortSignal.timeout(5_000), ...replicaTls(base, token),
       }).catch(err => this.log('realtime: could not end a blocked device session', { sid, error: (err as Error).message }));
       this.emit(newTrace(), 'rt.session.deleted', { level: 'warn', sessionId: sid, attrs: { reason: 'device_blocked' } });
     }));
