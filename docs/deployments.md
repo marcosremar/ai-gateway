@@ -795,6 +795,12 @@ so a host without the token cannot answer and the token never crosses the wire i
 by the Vast backend (`replicaBase` → `https://`). The boot script also deletes `/root/.ssh/authorized_keys` and kills
 `sshd` (Vast's `ssh_direct` runtype starts it; the runtype stays because it is what runs the onstart).
 
+Scaleway replicas (10/10/2026): the same scheme. The cloud-init makes the certificate before nginx starts, for every
+public IPv4 the metadata service (`169.254.42.42/conf`) lists (routed interface address as fallback), and nginx serves
+TLS on :80 (`PROBE_PORT` for an exposed replica). A new server carries the tag `aigw-tls`, which marks it `tls`;
+servers created before the deploy have no tag and stay on plain HTTP until they are replaced, so a running class is
+not cut. No new server is ever created without the tag.
+
 Hardening (06/10/2026): the token check runs in nginx's access phase (`auth_request`), so requests **without** the
 token are rate-limited per IP (5 r/s, burst 10, 5 connections → `429`) while the gateway's own traffic is never
 limited; `server_tokens off`. Every Scaleway replica gets a firewall: a gateway-only one joins the namespace's

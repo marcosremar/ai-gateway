@@ -47,7 +47,7 @@ describe('ScalewayDeploymentBackend', () => {
     const [instanceSpec, creds] = client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>, { apiKey: string }];
     expect(instanceSpec).toMatchObject({
       region: 'fr-par-2', commercialType: 'L4-1-24G', imageId: '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa', volumeGb: 80,
-      tags: ['aigw-deploy', 'aigw-ns-prod', 'aigw-dep-tts'], cloudInit: '#!/bin/bash\necho hi', projectId: 'proj',
+      tags: ['aigw-deploy', 'aigw-ns-prod', 'aigw-dep-tts', 'aigw-tls'], cloudInit: '#!/bin/bash\necho hi', projectId: 'proj',
     });
     expect(creds.apiKey).toBe('secret');
     expect(machine).toMatchObject({ id: 'fr-par-2:srv-1', deployment: 'tts', ip: '51.0.0.1', pricePerHour: 0.7875 });

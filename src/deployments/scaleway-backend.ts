@@ -55,6 +55,7 @@ export function scalewayRegistryOf(image: string): string | null {
 }
 
 const TOKEN_KEY_TAG = 'aigw-rk-';
+export const TLS_TAG = 'aigw-tls';
 
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
@@ -67,6 +68,7 @@ function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachi
     id: inst.instanceId,
     deployment,
     ...(tokenKey ? { tokenKey } : {}),
+    ...(tags.includes(TLS_TAG) ? { tls: true } : {}),
     ip: inst.ipAddress ?? null,
     state: typeof meta.state === 'string' ? meta.state : String(inst.status ?? 'starting'),
     createdAt: Number.isFinite(created) ? created : Date.now(),
@@ -146,7 +148,7 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
       commercialType: spec.machineType,
       ...(imageId ? { imageId } : {}),
       ...(spec.volumeGb ? { volumeGb: spec.volumeGb } : {}),
-      tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name), ...(input.tokenKey ? [`${TOKEN_KEY_TAG}${input.tokenKey}`] : [])],
+      tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name), TLS_TAG, ...(input.tokenKey ? [`${TOKEN_KEY_TAG}${input.tokenKey}`] : [])],
       cloudInit: input.cloudInit,
       securityGroupId,
       ...(input.network ? { publicIpIds: [input.network.ipId] } : {}),
