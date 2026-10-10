@@ -25,6 +25,7 @@ function fakeController(opts: { price?: number; maxEurPerHour?: number; warmSche
   } as unknown as DeploymentView);
   const controller: GpuStarter = {
     get: name => (name === 'speech-test' ? view() : null),
+    list: () => [view()],
     warm: async (_name, replicas, untilMinutes) => {
       calls.push(`warm ${replicas} ${Math.round(untilMinutes)}`);
       state.replicas = Math.max(state.replicas, replicas);
@@ -153,5 +154,31 @@ describe('client GPU start (owner, 10/10/2026): a client turns a GPU on on purpo
     const gpu = new ClientGpu(f.controller, { now: f.now });
     for (const bad of [0, 241, 1.5, '30', undefined]) await expect(gpu.start(KEY, DEV, 'speech-test', bad)).rejects.toMatchObject({ status: 400 });
     await expect(gpu.start(KEY, DEV, 'nope', 10)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('start lands on the test copy for a capped key', () => {
+  function twoDeployments() {
+    const calls: string[] = [];
+    const view = (name: string, extra: Record<string, unknown> = {}) => ({
+      name, app: 'parle', status: 'scaled-to-zero', warm: null, sessions: 0, realtime: null, lastRequestAt: null, replicas: [],
+      spec: { maxEurPerHour: name === 'parle-speech' ? 2 : 0.9, ...extra },
+    } as unknown as DeploymentView);
+    const all = [view('parle-speech'), view('parle-speech-test', { testFor: 'parle-speech' })];
+    const controller: GpuStarter = {
+      get: name => all.find(d => d.name === name) ?? null,
+      list: () => all,
+      warm: async (name, replicas, minutes) => { calls.push(`warm ${name} ${replicas} ${Math.round(minutes)}`); return all.find(d => d.name === name)!; },
+      park: async name => all.find(d => d.name === name)!,
+    };
+    return { controller, calls };
+  }
+
+  it('a capped (dev) key asking for the production GPU gets the test copy; the class client (no cap) gets production', async () => {
+    const { controller, calls } = twoDeployments();
+    const gpu = new ClientGpu(controller);
+    expect((await gpu.start(KEY, DEV, 'parle-speech', 30)).deployment).toBe('parle-speech-test');
+    expect((await gpu.start({ keyId: 'env-parle', user: 'parle' }, { ...DEV, gpuDailyEur: null }, 'parle-speech', 30)).deployment).toBe('parle-speech');
+    expect(calls).toEqual(['warm parle-speech-test 1 30', 'warm parle-speech 1 30']);
   });
 });

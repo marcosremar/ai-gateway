@@ -24,7 +24,7 @@ import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
 import { FINISH_MARKER, USAGE_MARKER } from '../gateway/providers/cloud/openai-compat/stream-markers';
 
-type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
+type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake' | 'list'>>;
 
 export interface DeploymentProviderOptions {
   /** How long a request may wait for a replica (ms), whatever the state. Absent: `coldWaitMs` while none is ready, else 0. */
@@ -55,9 +55,18 @@ function hasReadyReplica(controller: Leaser, name: string): boolean {
 }
 
 /** Calls `path` on a ready replica of `name`; throws an Error with `.status` the fallback chain understands. */
+function readyTestCopy(controller: Leaser, name: string): string | null {
+  if (hasReadyReplica(controller, name)) return null;
+  const app = controller.get(name)?.app;
+  return controller.list?.().find(d => d.spec.testFor === name && d.app === app && d.replicas.some(r => r.phase === 'ready'))?.name ?? null;
+}
+
 async function callReplica(
-  controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal, stage?: string,
+  controller: Leaser, asked: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal, stage?: string,
 ): Promise<Response> {
+  const testCopy = readyTestCopy(controller, asked);
+  if (testCopy && !noWakeActive()) try { controller.wake?.(asked); } catch { /* deployment vanished meanwhile */ }
+  const name = testCopy ?? asked;
   let lease;
   // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves, a cold one is skipped as `cold` and never woken.
   const noWake = noWakeActive();

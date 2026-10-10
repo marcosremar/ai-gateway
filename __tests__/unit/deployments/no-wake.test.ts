@@ -221,3 +221,38 @@ describe('autoWake per client key (owner, 10/10/2026): a client call never turns
     expect(gpu.report().running).toEqual([]);
   });
 });
+
+describe('test GPU (owner, 10/10/2026): a test reuses what is already up, else the cheap test copy', () => {
+  async function restart(autoWake: (bearer: string) => boolean) {
+    h.controller.stop();
+    h.server.closeAllConnections();
+    await new Promise<void>(r => h.server.close(() => r()));
+    h = await harness(autoWake);
+  }
+
+  it('a key without autoWake uses the production replica when it is already ready, and starts nothing else', async () => {
+    await restart(bearer => bearer === BATCH);
+    h.controller.wake('parle-speech');
+    await until(() => h.controller.get('parle-speech')!.status === 'ready', 3000);
+    const res = await stt(h, {}, KEY);
+    expect(res.headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
+    await wait(200);
+    expect(h.cloud.created).toHaveLength(1);
+  });
+
+  it('production cold, its test copy ready: the request is served by the test copy; production is woken only for an autoWake key', async () => {
+    await restart(bearer => bearer === BATCH);
+    await h.controller.put('parle-speech-test', { profile: 'cpu-echo', minReplicas: 0, maxReplicas: 1, testFor: 'parle-speech' });
+    h.controller.wake('parle-speech-test');
+    await until(() => h.controller.get('parle-speech-test')!.status === 'ready', 3000);
+    const dev = await stt(h, {}, KEY);
+    expect(dev.status).toBe(200);
+    expect(dev.headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
+    expect(h.cloudStt.transcribe).not.toHaveBeenCalled();
+    await wait(200);
+    expect(h.woken).toEqual(['parle-speech-test']);
+    expect(h.cloud.created).toHaveLength(1);
+    expect((await stt(h, {}, BATCH, 'other-audio')).status).toBe(200);
+    expect(h.woken).toEqual(['parle-speech-test', 'parle-speech']);
+  });
+});

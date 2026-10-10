@@ -135,7 +135,7 @@ describe('declared parle-speech spec', () => {
     });
     expect(c.specOf('parle-speech')!.registryAuth).toBeUndefined();
     expect((await r.reconcile())[0].state).toBe('in_sync');
-    expect(put).toHaveBeenCalledTimes(1);
+    expect(put.mock.calls.filter(([name]) => name === 'parle-speech')).toHaveLength(1);
     expect(cloud.created).toHaveLength(0);
   });
 
@@ -384,5 +384,28 @@ describe('DeclaredDeploymentReconciler', () => {
     expect(parsed.deployments[0].spec).toMatchObject({ envKeys: ['TRUST_UPSTREAM_AUTH', 'SPEECH_TOKEN'], privateRegistry: true });
     expect(body).not.toContain(token);
     expect(body).not.toContain(GHCR);
+  });
+});
+
+describe('declared parle-speech-test (owner, 10/10/2026): the cheap test copy of parle-speech', () => {
+  it('registers on one L4 24 GB (then one Vast RTX 5090), never an L40S/H100, no warm schedule, deleted after 10 min idle, owned by parle; both owned by parle; nothing created', async () => {
+    const { c, cloud } = await controller();
+    await c.put('parle-speech', PRODUCTION);
+    const status = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
+    expect(status.find(s => s.name === 'parle-speech-test')).toMatchObject({ state: 'applied' });
+    const spec = c.specOf('parle-speech-test')!;
+    expect(spec).toMatchObject({ testFor: 'parle-speech', machineType: 'L4-1-24G', zone: 'fr-par-2', maxReplicas: 1, minReplicas: 0, idleMinutes: 10, idleAction: 'delete' });
+    expect(spec.image).toBe(c.specOf('parle-speech')!.image);
+    expect(placementsOf(spec).map(p => p.machineType)).toEqual(['L4-1-24G', 'RTX 5090']);
+    expect(spec.warmSchedule).toBeUndefined();
+    expect(spec.envByMachineType?.['L4-1-24G']?.LLM_SLOT_CTX).toBeUndefined();
+    expect(c.get('parle-speech-test')!.app).toBe('parle');
+    expect(c.get('parle-speech')!.app).toBe('parle');
+    expect(Object.keys(spec.files ?? {})).toEqual(Object.keys(PRODUCTION.files));
+    expect(cloud.created).toHaveLength(0);
+    const put = vi.spyOn(c, 'put');
+    const again = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
+    expect(again.filter(s => s.name === 'parle-speech' || s.name === 'parle-speech-test').map(s => s.state)).toEqual(['in_sync', 'in_sync']);
+    expect(put.mock.calls.filter(([name]) => name === 'parle-speech-test')).toHaveLength(0);
   });
 });
