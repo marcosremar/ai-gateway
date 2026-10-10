@@ -30,9 +30,16 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     void this.reconcile();
   }
 
-  stop(): void {
+  async stop(timeoutMs = 5_000): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const writes = (async () => {
+      await this.reconciling?.catch(() => {});
+      await this.opts.store.settled?.();
+    })();
+    await Promise.race([writes, new Promise<void>(r => { deadline = setTimeout(r, timeoutMs); })]);
+    clearTimeout(deadline);
   }
 
   /** Schedules a reconcile now (coalesced with one in progress). */

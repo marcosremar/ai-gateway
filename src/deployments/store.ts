@@ -50,6 +50,7 @@ export class MemoryDeploymentStore implements DeploymentStore {
     await this.flush();
   }
   protected async flush(): Promise<void> {}
+  async settled(): Promise<void> {}
 }
 
 export type StateLog = (msg: string, data?: Record<string, unknown>) => void;
@@ -95,5 +96,9 @@ export class FileDeploymentStore extends MemoryDeploymentStore {
       }
     });
     return this.chain;
+  }
+
+  override settled(): Promise<void> {
+    return this.chain.catch(() => {});
   }
 }

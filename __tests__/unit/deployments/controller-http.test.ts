@@ -65,7 +65,7 @@ let h: Harness;
 const extra: Harness[] = [];
 
 async function close(x: Harness) {
-  x.controller.stop();
+  await x.controller.stop();
   x.server.closeAllConnections();
   await new Promise<void>(r => x.server.close(() => r()));
 }
