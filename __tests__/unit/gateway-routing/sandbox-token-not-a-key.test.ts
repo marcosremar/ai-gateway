@@ -30,10 +30,9 @@ describe('SANDBOX_TOKEN is not a gateway key', () => {
   it('by default the SANDBOX_TOKEN (and each alias) gets 401; the gateway\'s own key works', async () => {
     for (const alias of ['SANDBOX_TOKEN', 'PALCO_PROXY', 'PALCO_PROXY_TOKEN', 'PROXY_TOKEN']) {
       const env = { [alias]: TOKEN, GATEWAY_API_KEYS: `${APP_KEY}:parle` };
-      const { keys, sandboxAdmins } = gatewayClientKeys(env);
+      const { keys } = gatewayClientKeys(env);
       expect(keys).toEqual([`${APP_KEY}:parle`]);
-      expect(sandboxAdmins).toEqual([]);
-      expect(adminUsersFromEnv(env, sandboxAdmins).size).toBe(0);
+      expect(adminUsersFromEnv(env).size).toBe(0);
       const base = await gateway(env);
       expect((await models(base, TOKEN)).status).toBe(401);
       expect((await models(base, APP_KEY)).status).toBe(200);
@@ -42,12 +41,12 @@ describe('SANDBOX_TOKEN is not a gateway key', () => {
     }
   });
 
-  it('ACCEPT_SANDBOX_TOKEN_AS_KEY=1 (transition) accepts it as user `sandbox` (admin only with SANDBOX_TOKEN_ADMIN=1), with a warning', async () => {
+  it('ACCEPT_SANDBOX_TOKEN_AS_KEY=1 (transition) accepts it as the client `sandbox`, never an admin, with a warning', async () => {
     const env = { SANDBOX_TOKEN: TOKEN, ACCEPT_SANDBOX_TOKEN_AS_KEY: '1' };
-    const { keys, sandboxAdmins, warnings } = gatewayClientKeys(env);
+    const { keys, warnings } = gatewayClientKeys(env);
     expect(keys).toEqual([`${TOKEN}:sandbox`]);
-    expect(adminUsersFromEnv(env, sandboxAdmins).size).toBe(0);
-    expect([...adminUsersFromEnv({ ...env, SANDBOX_TOKEN_ADMIN: '1' }, gatewayClientKeys({ ...env, SANDBOX_TOKEN_ADMIN: '1' }).sandboxAdmins)]).toEqual(['sandbox']);
+    expect(adminUsersFromEnv(env).size).toBe(0);
+    expect(adminUsersFromEnv({ ...env, SANDBOX_TOKEN_ADMIN: '1', DEPLOYMENTS_ADMIN_USERS: 'sandbox' }).size).toBe(0);
     expect(warnings.join('\n')).toMatch(/transition only/);
     expect((await models(await gateway(env), TOKEN)).status).toBe(200);
   });
@@ -56,6 +55,5 @@ describe('SANDBOX_TOKEN is not a gateway key', () => {
     expect(gatewayClientKeys({ SANDBOX_TOKEN: TOKEN, ACCEPT_SANDBOX_TOKEN_AS_KEY: 'true' }).keys).toEqual([]);
     const bad = gatewayClientKeys({ SANDBOX_TOKEN: 'a:b', ACCEPT_SANDBOX_TOKEN_AS_KEY: '1' });
     expect(bad.keys).toEqual([]);
-    expect(bad.sandboxAdmins).toEqual([]);
   });
 });

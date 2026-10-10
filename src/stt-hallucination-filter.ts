@@ -126,7 +126,7 @@ function buildState(data: Record<string, string[]>): BlocklistState {
 
 /**
  * The dataset has 100 languages (316 KB), too big for the proxy/index bundles (bundle ratchet), so only the languages
- * the school teaches are compiled in (whisper-hallucinations.core.json: pt, fr, en, es, it, de). STT_FILTER_LANGUAGES
+ * the parle client teaches are compiled in (whisper-hallucinations.core.json: pt, fr, en, es, it, de). STT_FILTER_LANGUAGES
  * (comma list, or `all`) selects languages beyond those: the full file is then read once, lazily, on first use, from
  * STT_FILTER_FULL_BLOCKLIST or src/data/whisper-hallucinations.json under the working directory. The production image
  * (Dockerfile.production, `bun build --compile serve.ts`) does not copy src/, so there the core languages are the

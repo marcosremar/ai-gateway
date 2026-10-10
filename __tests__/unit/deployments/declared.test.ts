@@ -255,7 +255,7 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     }
   });
 
-  it('not registered yet: pending, nothing created; registered by the school: only the declared fields are put, then in sync', async () => {
+  it('not registered yet: pending, nothing created; registered by the parle client: only the declared fields are put, then in sync', async () => {
     const { c, cloud } = await controller();
     const owned = DECLARED_DEPLOYMENTS.filter(d => !d.image);
     const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: owned });

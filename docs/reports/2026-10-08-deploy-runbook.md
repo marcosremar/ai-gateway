@@ -42,7 +42,7 @@ Stored deployments (`GET /v1/deployments`, namespace `prod`, gateway cap 4 repli
 
 | Deployment | Machine | Replicas min / active / max | Idle | Mode, placements | Notes |
 |---|---|---|---|---|---|
-| `parle-qwen-tts` | L4-1-24G fr-par-2, boot script, 20 files | 0 / 2 / 2 | 15 min, delete | none, none | 1 replica running, status `degraded`, €0.788/h; created by the school's backend |
+| `parle-qwen-tts` | L4-1-24G fr-par-2, boot script, 20 files | 0 / 2 / 2 | 15 min, delete | none, none | 1 replica running, status `degraded`, €0.788/h; created by the parle client's backend |
 | `parle-speech` | L40S-1-48G fr-par-2, image `…/speech-stack:20261006-0107`, 9 files | 0 / 1 / 2 | 1 min, delete | none, none | target 8 in flight, cap €1.6/h, explicit `env` (`STT_BATCH`, `LLM_PARALLEL`, `TTS_STAGE0_MB`, `TTS_PARALLEL`), no `realtime` |
 | `parle-speech-s2s` | L4-1-24G fr-par-2, boot script, 1 file | 0 / 1 / 1 | 20 min, delete | none, none | scaled to zero |
 | `parle-livekit` | POP2-HC-48C-96G fr-par-1, boot script, exposed | 0 / 1 / 1 | 20 min, stop | none, none | scaled to zero |
@@ -128,7 +128,7 @@ Gateway-wide:
   apply to the non-admin app keys from this restart (counters reset at 00:00 UTC).
 - The declared-deployments reconciler runs at boot and every 5 min and stops being `pending`.
 - The restart drops requests in flight and, because the service has a volume (one container at a time), the gateway
-  is down between the stop of the old container and the first `/health` of the new one. The school's SDK falls back
+  is down between the stop of the old container and the first `/health` of the new one. The parle client's SDK falls back
   directly for those turns. The reaper tolerates it (one answered probe in four is enough).
 
 Per deployment:
@@ -158,7 +158,7 @@ more than 1 s is no longer run a second time (a slow failure costs 8 s, not 16 s
   the gateway is up stays off until `AI_GATEWAY_ADMIN_KEY` (a key of a user in `DEPLOYMENTS_ADMIN_USERS`, never the
   `SANDBOX_TOKEN`) is set on that service.
 - **`LLM_SLOT_CTX=4096`** is in the `speech-stack` profile for the L40S, not in the declared `parle-speech`: production
-  keeps 2048 (the history is trimmed after ≈ 16 pairs with the school's prompt). Do not add it before the VRAM of an
+  keeps 2048 (the history is trimmed after ≈ 16 pairs with the parle client's prompt). Do not add it before the VRAM of an
   L40S with 16 slots × 4096 is measured (§ 8).
 - **`SPEECH_IMAGE`**, if someone sets it, moves the Scaleway image only; the Vast placement stays on the GHCR tag of
   the declaration.
@@ -185,9 +185,9 @@ more than 1 s is no longer run a second time (a slow failure costs 8 s, not 16 s
                     "TTS_MODEL":"Qwen/Qwen3-TTS-12Hz-0.6B-Base","LLM_FILE":"Qwen3.5-9B-Q4_K_M.gguf"}}}'
     ```
 
-- `parle-qwen-tts`: **no PUT needed** to keep today's behaviour. It is owned by the school's backend
+- `parle-qwen-tts`: **no PUT needed** to keep today's behaviour. It is owned by the parle client's backend
   (`backend/speech/qwen-gateway-host.ts` re-PUTs it, with `candidates` when the gateway accepts them), so do not add
-  `placements` by hand: `placements` and `candidates` cannot be combined and the school's next PUT would be refused.
+  `placements` by hand: `placements` and `candidates` cannot be combined and the parle client's next PUT would be refused.
   Only the mode may be set here, if the voice should scale like the profile's (`fast`); fields a PUT does not send are
   kept:
 
@@ -198,14 +198,14 @@ more than 1 s is no longer run a second time (a slow failure costs 8 s, not 16 s
 
 - `parle-speech-s2s`, `parle-livekit`: nothing.
 
-## 9. Order with the school's backend (babylon-cinema)
+## 9. Order with the parle client's backend (babylon-cinema)
 
 1. **Gateway first.** It is safe alone: with the one-link `parle-stt` route the fallback keeps the old 8 s patience.
 2. **Routes** (`backend/speech/gateway-routes.ts`, `bun run deploy:gateway-routes` → `PUT /v1/apps/parle/routes`,
    applied at once, no restart): add the second cloud STT link (handoff § Fallback fast:
    deployment → `openrouter:deepgram/nova-3` → `openrouter:openai/whisper-large-v3`). From that moment the 3 s STT
    budget is active. Reverting the route reverts the budget.
-3. **School backend / SDK.** The client first-sound deadline (#59) is in the browser SDK: it reaches learners only
+3. **Parle client backend / SDK.** The client first-sound deadline (#59) is in the browser SDK: it reaches learners only
    when babylon-cinema moves its `vendor/ai-gateway` pointer and deploys. The backend's PUT of `parle-qwen-tts` keeps
    working unchanged (it gets `balanced` when it sends no `scaling`).
 
@@ -231,7 +231,7 @@ curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/j
 ```
 
 A replica already running the new image keeps serving until it idles out (there is no per-replica delete route);
-the next one boots the old image. Routes: `bun run deploy:gateway-routes` from the school's previous commit.
+the next one boots the old image. Routes: `bun run deploy:gateway-routes` from the parle client's previous commit.
 
 ## 11. Production guards (PR `rt/prod-guard`, 2026-10-08): what each needs at deploy time
 
@@ -263,7 +263,7 @@ curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/j
 
 `quota` is the provider's quota for the machine type (L4: 2 on 2026-10-08; check the Scaleway console) and
 `minReplicas` what the class needs of it. The same on `parle-speech` for the L40S if its quota is shared.
-`parle-qwen-tts` is re-PUT by the school's backend: a PUT that omits `reserveQuota` keeps it (it is cleared only by
+`parle-qwen-tts` is re-PUT by the parle client's backend: a PUT that omits `reserveQuota` keeps it (it is cleared only by
 `"reserveQuota": null`). Check: `GET $GW/v1/deployments/parle-speech-s2s/capacity | jq .reservations`.
 
 **Replica cap (proposal, not applied).** `DEPLOYMENTS_MAX_REPLICAS=4` is full with 2 × L4 (`parle-qwen-tts`) + 2 × L40S
@@ -310,7 +310,7 @@ unit-only and the GO / NO-GO are in `2026-10-07-realtime-handoff.md` § Prova ao
 | Edge (replica) | signed config authoritative (#67), config by reference, intercepts, `say`, signed updates, reply guard, served ids (#68), over-long TTS cut (#63) | **new `aigw-edge` image** inside a **new `speech-stack` image** (§ 12.5) |
 | Speech stack | `/health` → `models` (ids for `done.served`), over-long TTS sentence cut, `max_new_tokens` | **new `speech-stack` image** |
 | Deployment spec | `reserveQuota` (#63), `realtime.requireWebrtc`, `files` on a Vast placement (#64) | gateway redeploy; PATCH per deployment |
-| Browser SDK | `applyUpdate`, events `intercept` / `say` / `config_applied`, `metrics.lastTurn.served`, option `device`, `voice.speculatePauseMs`, PCM voice streamed on the clip rung | the school moving its `vendor/ai-gateway` pointer and deploying |
+| Browser SDK | `applyUpdate`, events `intercept` / `say` / `config_applied`, `metrics.lastTurn.served`, option `device`, `voice.speculatePauseMs`, PCM voice streamed on the clip rung | the parle client moving its `vendor/ai-gateway` pointer and deploying |
 | State on the volume | `vast-hosts.json` (host reputation) next to `deployments.json`; `apps.json` gains `devices`, `requireDevice`, `limits` | none (written on first use; the old code ignores them) |
 
 Settings (names only; all optional, nothing is required for today's behaviour):
@@ -342,10 +342,10 @@ affected:
 - **The SDK itself: nothing.** Every frame it sends on its own is on the list
   (`docker/aigw-edge/tests/sdk-client-updates.json`, enforced in the SDK tests and in the edge tests). `updateHistory`
   drops `system` messages before sending.
-- **The school's backend / page (babylon-cinema).** Anything it changed mid-session through the raw transport or a
+- **The parle client's backend / page (babylon-cinema).** Anything it changed mid-session through the raw transport or a
   patched `config_update` (prompt per scene, voice per character, opener lines) must move to the session config sent
   at admission (`POST /v1/realtime/sessions`, now up to ~24 KB) or to a signed update from its backend
-  (`POST /v1/realtime/updates` → `session.applyUpdate(signed)`). Grep the school for `config_update` and for
+  (`POST /v1/realtime/updates` → `session.applyUpdate(signed)`). Grep the parle client for `config_update` and for
   `updateHistory` calls with a `system` role before this edge image reaches a class.
 - **The live harness.** `LIVE_VOICE_B64` / `LIVE_VOICE_TEXT` (`scripts/realtime-e2e/e2e-live.ts`) now put the cloned
   voice in the signed session config; a sample over the 32768-character bound is refused up front (use a catalog
@@ -381,7 +381,7 @@ configs up to 6144 characters; a config by reference, `applyUpdate`, intercepts,
    (`e2e-live.ts admit`, `turn ws`, `turn webrtc`).
 7. API settings: `reserveQuota` on the class-window holders, `PUT /v1/apps/parle/limits` (§ 11); optional
    `ALERT_WEBHOOK_URL`, `AIGW_PUBLIC_URL`.
-8. **School**: move `vendor/ai-gateway`, remove any client-side change of signed fields (§ 12.2), deploy. Only then
+8. **Parle client**: move `vendor/ai-gateway`, remove any client-side change of signed fields (§ 12.2), deploy. Only then
    may it use `intercepts`, `say`, signed updates, `device`, `speculatePauseMs`.
 
 Rollback: § 10. The old gateway ignores `devices`, `limits`, `reserveQuota`, `requireWebrtc` in the stored state and
@@ -432,7 +432,7 @@ live proof (with `5540dfa1`, the same edge minus #91) is in the handoff § Prova
   - the Vast boot timeout (20 min) is shorter than the first pull of the 57 GB image on a slow host;
   - the RTT gate decides after the paid pull (a far host is released only once it has booted);
   - a system prompt larger than the LLM slot (16 KB of Portuguese ≈ 4.7 k tokens against 4096) opens the session and
-    fails every turn with `error upstream`: keep the school's prompt well below the slot (≈ 5 KB with 2048);
+    fails every turn with `error upstream`: keep the parle client's prompt well below the slot (≈ 5 KB with 2048);
   - `LLM_SLOT_CTX` 4096 fits the L40S VRAM (29.2 of 46 GB with 12 learners) but the LLM slows as the history grows
     (198 → 461 ms over 760 s with 8 learners): production stays on 2048;
   - the up-to-2.5 s UDP-probe wait on the first admission of a fresh replica was not measured live.
@@ -481,12 +481,12 @@ Merging changed nothing in production. The deploy of this `main` is GO under the
 1. Outside Mon–Thu 17:40–20:15 Europe/Paris (class time), and not in the hour before.
 2. `LLM_SLOT_CTX` stays **2048** on `parle-speech` (4096 fits the L40S VRAM but the LLM slows as the history grows,
    and the history trim was not exercised at 4096).
-3. Speculation off (the school does not use `speculatePauseMs`) and the composed cloud fallback not relied on until the
+3. Speculation off (the parle client does not use `speculatePauseMs`) and the composed cloud fallback not relied on until the
    OpenRouter key served by the dev API is rotated and item 12 of § 12.7 has passed (today it would not answer, with or
    without this deploy).
-4. No Vast for the school (`requireWebrtc`, `files` through signed links, host reputation): not proven, the account has
+4. No Vast for the parle client (`requireWebrtc`, `files` through signed links, host reputation): not proven, the account has
    no credit.
-5. The school removes every client-side change of signed fields (§ 12.2) before the new edge serves a class, and keeps
+5. The parle client removes every client-side change of signed fields (§ 12.2) before the new edge serves a class, and keeps
    its system prompt well below the LLM slot (§ 12.6).
 6. Behaviour change from #74: a `warmSchedule` or `reserveQuota` window without `timeZone` now reads as Europe/Paris
    (stored explicitly) instead of UTC. Production has no such window today; check `GET /v1/deployments` before the
@@ -508,8 +508,8 @@ keys, per-replica tokens, Scaleway registry pull with a read-only key).
   steps in § 12.9.1. Either way, afterwards `/health?details=1` (admin key) must have no
   `SCW_REGISTRY_SECRET_KEY is missing` warning; with the warning, every create of an `rg.*.scw.cloud` image
   (`parle-speech`) fails at once with an error naming the variable, and the boot log has the same line as `ERROR:`.
-- [x] The school's `AI_GATEWAY_KEY` is an admin key (checked 2026-10-09: distinct from `SANDBOX_TOKEN`,
-  `/health?details=1` → 200 with admin fields), so the dev token losing admin does not touch the school.
+- [x] The parle client's `AI_GATEWAY_KEY` is an admin key (checked 2026-10-09: distinct from `SANDBOX_TOKEN`,
+  `/health?details=1` → 200 with admin fields), so the dev token losing admin does not touch the parle client.
 - [ ] Optional: `SANDBOX_TOKEN_APP=parle` on the gateway if dev sessions should keep calling the parle aliases with the
   dev token (no-wake, app-key limits); unset, they get 403 on those aliases.
 - [ ] Afterwards consider rotating `SCW_SECRET_KEY`: it sat in the user_data and `boot.log` of every past replica. With the
@@ -530,9 +530,9 @@ Only the first deploy of that build is needed; after it none of these steps rest
    `deployment-credentials.rotate` is `ok: true`. `ok: false` means the provider refused the new key: the gateway kept
    the old one, nothing stopped; fix the key and write it again. Once `ok: true`, delete the old key at the provider.
    A provider that had no key when the gateway booted still needs a restart.
-3. **A client key** (the school's `AI_GATEWAY_KEY`, a site's key): `GET $GW/v1/admin/access/keys` to find its id, then
+3. **A client key** (the parle client's `AI_GATEWAY_KEY`, a site's key): `GET $GW/v1/admin/access/keys` to find its id, then
    `POST $GW/v1/admin/access/keys` with `{"replaces": "<id>", "overlapMinutes": 60}` → the answer carries the new key
-   (only time it is shown). Put it in the client (palco `AI_GATEWAY_KEY` for the school), confirm the client works and
+   (only time it is shown). Put it in the client (palco `AI_GATEWAY_KEY` for the parle client), confirm the client works and
    that `lastUsedAt` of the new id moves; the old key stops by itself after 60 min (or revoke it at once:
    `POST $GW/v1/admin/access/keys/revoke {"id": "<old id>"}`). The `GATEWAY_API_KEYS` Railway variable may keep the old
    value: a revoked env key stays refused (state in `access.json` on the volume).
@@ -612,7 +612,7 @@ takes two, every holder breaks until it gets the new value — do it in one sitt
   replica token, the boot script issues the leaf for `IP:$PUBLIC_IPADDR`, and every gateway → replica call (probe,
   invoke, inference, s2s, streaming STT, realtime signaling/status/WS relay) trusts only that CA. The boot script also
   deletes `/root/.ssh/authorized_keys` and stops `sshd`. A Vast replica that booted before this build speaks plain HTTP:
-  after the deploy the gateway cannot reach it and replaces it — deploy with no Vast replica serving (the school does not
+  after the deploy the gateway cannot reach it and replaces it — deploy with no Vast replica serving (the parle client does not
   use Vast today, § 12.8 item 4). Scaleway replicas are unchanged (still HTTP to their public IP: not covered here).
 - Proven only with fakes and a local nginx/Bun: on a real Vast host it remains to see that `PUBLIC_IPADDR` inside the
   container equals the `public_ipaddr` the API reports (else the TLS check fails and the host is released as
@@ -627,7 +627,7 @@ takes two, every holder breaks until it gets the new value — do it in one sitt
 ### 12.10 Balance watch and email alerts (`feat/balance-watch-email`, 2026-10-10)
 
 Why: on 2026-10-10 the Vast account reached zero with no warning (two RTX 5090 of another project left running), the
-palco lost its GPU and the school deploy stopped on `402 insufficient credit`; the day before the OpenRouter key
+palco lost its GPU and the parle client deploy stopped on `402 insufficient credit`; the day before the OpenRouter key
 expired with no warning. The gateway now reads the provider balances every 15 min and emails the owner
 (`docs/api/http.md` § `balances`).
 

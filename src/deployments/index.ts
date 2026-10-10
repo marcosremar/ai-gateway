@@ -24,7 +24,7 @@ import { ClientStabilityLog } from './stability';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
 import { sessionsWanting } from '../realtime/external-load';
-import { SANDBOX_USER, sandboxIsAdmin } from '../config/sandbox-env';
+import { SANDBOX_USER } from '../config/sandbox-env';
 
 export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
@@ -153,22 +153,18 @@ export function privateImageWarning(specs: DeploymentSpec[], scaleway: Pick<Scal
  *   they buffered while the gateway was down; persisted to client-stability.jsonl in the state dir.
  */
 /**
- * Admin userIds: DEPLOYMENTS_ADMIN_USERS plus `alwaysAdmin` (empty in production; the `sandbox` user only under the
- * transition flag ACCEPT_SANDBOX_TOKEN_AS_KEY=1). An empty list grants admin to NOBODY — until
- * 06/10/2026 it made every GATEWAY_API_KEYS key an admin (deployments, keys, `X-App` for any app's fallback plan).
- * The one source of the rule for deployments, `PUT /v1/admin/keys` and `/health?deep=1` (serve.ts).
+ * Admin userIds: DEPLOYMENTS_ADMIN_USERS, never the `sandbox` user (the dev token is a client). An empty list grants
+ * admin to NOBODY — until 06/10/2026 it made every GATEWAY_API_KEYS key an admin. The one source of the rule for
+ * deployments, `PUT /v1/admin/keys` and `/health?deep=1` (serve.ts).
  */
-export function adminUsersFromEnv(env: Record<string, string | undefined>, alwaysAdmin: readonly string[] = []): ReadonlySet<string> {
-  const listed = (env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
-  return new Set([...listed, ...alwaysAdmin.filter(Boolean)].filter(u => u !== SANDBOX_USER || sandboxIsAdmin(env)));
+export function adminUsersFromEnv(env: Record<string, string | undefined>): ReadonlySet<string> {
+  return new Set((env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(u => u && u !== SANDBOX_USER));
 }
 
 /** Boot warning when DEPLOYMENTS_ADMIN_USERS is empty (null when it is set). */
-export function adminListWarning(env: Record<string, string | undefined>, alwaysAdmin: readonly string[] = []): string | null {
+export function adminListWarning(env: Record<string, string | undefined>): string | null {
   if ((env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').some(s => s.trim())) return null;
-  const only = alwaysAdmin.filter(Boolean);
-  return `DEPLOYMENTS_ADMIN_USERS is empty: no GATEWAY_API_KEYS key is an admin${only.length ? ` (only ${only.join(', ')})` : ''}`
-    + ' — set DEPLOYMENTS_ADMIN_USERS=<userId,…> to grant admin to a key';
+  return 'DEPLOYMENTS_ADMIN_USERS is empty: no GATEWAY_API_KEYS key is an admin — set DEPLOYMENTS_ADMIN_USERS=<userId,…> to grant admin to a key';
 }
 
 /** DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES (default 60, 0 = off): how long a `minReplicas` pin may sit unused. */
@@ -183,8 +179,6 @@ export function deploymentsFromEnv(
   env: Record<string, string | undefined>,
   opts: {
     userOf: (req: IncomingMessage) => string | null;
-    /** userIds that may always manage, on top of DEPLOYMENTS_ADMIN_USERS (serve.ts: none, or `sandbox` under ACCEPT_SANDBOX_TOKEN_AS_KEY=1). */
-    alwaysAdmin?: string[];
     /** Live admin set (serve.ts: the access store's, changed at runtime); default: from env. */
     admins?: ReadonlySet<string>;
     log?: (msg: string, data?: Record<string, unknown>) => void;
@@ -233,8 +227,8 @@ export function deploymentsFromEnv(
     log: opts.log,
     checkImage: (image, auth) => missingImage(image, auth ?? scaleway?.registryAuthFor(image) ?? null),
   });
-  const admins = opts.admins ?? adminUsersFromEnv(env, opts.alwaysAdmin);
-  const adminWarning = adminListWarning(env, opts.alwaysAdmin);
+  const admins = opts.admins ?? adminUsersFromEnv(env);
+  const adminWarning = adminListWarning(env);
   if (adminWarning) opts.log?.(`WARNING: ${adminWarning}`);
   const handler = createDeploymentRoutes({
     controller,

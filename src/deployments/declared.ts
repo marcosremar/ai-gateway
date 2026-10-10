@@ -17,7 +17,7 @@
  * Registering never starts a machine: declared specs keep `minReplicas: 0` and the reconciler never calls `wake`.
  * Replicas start when a request needs them, or inside a declared `warmSchedule` window, as for any other deployment.
  *
- * A declaration without `image` and `profile` belongs to another registrant (the school's backend PUTs
+ * A declaration without `image` and `profile` belongs to another registrant (the parle client's backend PUTs
  * `parle-qwen-tts`): it never creates the deployment (pending until it exists) and only puts its own fields back.
  *
  * A declared field the operator changed by hand (PUT/PATCH) is put back at the next reconcile; fields the declaration

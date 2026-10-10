@@ -406,7 +406,7 @@ instead of the redirect. `REALTIME_TURN_URLS` example:
 ## Tests
 
 - `docker/aigw-edge/tests/run.sh units` — the signed-config rule, config by reference, the phrase matcher against the
-  school's four voice commands, signed updates (and the gateway's vector), `tests/test_session.py` `app_turn_hook`
+  parle client's four voice commands, signed updates (and the gateway's vector), `tests/test_session.py` `app_turn_hook`
   (intercept drop / say, speculated or not, no first-audio cost, reply guard, served ids), token (and the gateway's vectors: key, every case, TURN credential), cutter
   copy, VAD, 48→16 kHz filter, telemetry emitter, and `tests/test_session.py`: a session on in-process fakes (endpoint
   metrics, the speculative turn confirmed / discarded / interrupted / closed, partials on and off, the first-audio
