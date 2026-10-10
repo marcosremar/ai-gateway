@@ -3,6 +3,7 @@
  * in-process callers, and the counts `/health` shows. See controller-state.ts.
  */
 
+import { randomBytes } from 'crypto';
 import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './controller-state';
 import { ReconcileLoop } from './controller-reconcile';
 import { vastUnfit } from './placement-walk';
@@ -53,8 +54,22 @@ export abstract class ControllerViews extends ReconcileLoop {
     return rt ? structuredClone(rt.record.spec) : null;
   }
 
-  deploymentSecretOf(name: string): string | null {
-    return this.deployments.get(name)?.record.replicaToken ?? null;
+  deploymentSecretsOf(name: string): string[] {
+    const record = this.deployments.get(name)?.record;
+    return record ? [...new Set([record.replicaToken, ...Object.values(record.secretPins ?? {})])] : [];
+  }
+
+  async rotateReplicaSecret(name: string): Promise<{ deployment: string; pinnedReplicas: number }> {
+    const rt = this.require(name);
+    const pins: Record<string, string> = {};
+    for (const m of [...this.machines, ...[...this.releasing.values()].map(r => r.machine)]) {
+      if (m.deployment !== name) continue;
+      const pin = m.tokenKey ?? this.tokenKeys.get(m.id) ?? `id:${m.id}`;
+      pins[pin] = rt.record.secretPins?.[pin] ?? rt.record.replicaToken;
+    }
+    rt.record = { ...rt.record, replicaToken: randomBytes(24).toString('base64url'), secretPins: pins, updatedAt: this.now() };
+    await this.opts.store.saveDeployment(rt.record);
+    return { deployment: name, pinnedReplicas: Object.keys(pins).length };
   }
 
   tokenOf(name: string, replicaId: string): string | null {

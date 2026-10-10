@@ -27,17 +27,19 @@ export function filesByUrl(spec: DeploymentSpec, replicaToken: string, publicUrl
 
 export interface BootFilesSource {
   specOf(name: string): DeploymentSpec | null;
-  deploymentSecretOf(name: string): string | null;
+  deploymentSecretsOf(name: string): string[];
 }
 
 export function bootFile(source: BootFilesSource, query: URLSearchParams, nowMs: number): Buffer | null {
   const deployment = query.get('d') ?? '', key = query.get('k') ?? '', sig = query.get('sig') ?? '';
   const exp = Number(query.get('exp'));
-  const token = source.deploymentSecretOf(deployment);
-  if (!token || !Number.isInteger(exp) || exp * 1000 < nowMs) return null;
-  const expected = Buffer.from(signature(token, deployment, key, exp));
+  if (!Number.isInteger(exp) || exp * 1000 < nowMs) return null;
   const given = Buffer.from(sig);
-  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  const signedBy = (secret: string) => {
+    const expected = Buffer.from(signature(secret, deployment, key, exp));
+    return given.length === expected.length && timingSafeEqual(given, expected);
+  };
+  if (!source.deploymentSecretsOf(deployment).some(signedBy)) return null;
   const files = source.specOf(deployment)?.files;
   const b64 = files && Object.hasOwn(files, key) ? files[key] : undefined;
   return b64 === undefined ? null : Buffer.from(b64, 'base64');

@@ -491,12 +491,48 @@ keys, per-replica tokens, Scaleway registry pull with a read-only key).
   `GET /api/sandbox-env`. Checked: the registry grants `pull` on `aigw/speech-stack` and nothing for `pull,push`; it
   lists no Instance server. Creation steps (for a rotation): IAM → Applications → Create (no group) → Policies →
   Create policy → scope: project → `ContainerRegistryReadOnly` → attach → API keys → Generate.
-- [ ] The gateway reads the key at boot only: the deploy (a restart) is what picks it up. Afterwards `/health?details=1`
-  (admin key) must have no `SCW_REGISTRY_SECRET_KEY is missing` warning; with the warning, every create of an
-  `rg.*.scw.cloud` image (`parle-speech`) fails at once with an error naming the variable, and the boot log has
-  the same line as `ERROR:`.
+- [ ] Until the hot key rotation build (PR `feat/hot-key-rotation`) is deployed, the gateway reads the key at boot only.
+  From that build on it is picked up by the palco reload (≤ 5 min, or `POST /v1/admin/keys/reload` at once) —
+  steps in § 12.9.1. Either way, afterwards `/health?details=1` (admin key) must have no
+  `SCW_REGISTRY_SECRET_KEY is missing` warning; with the warning, every create of an `rg.*.scw.cloud` image
+  (`parle-speech`) fails at once with an error naming the variable, and the boot log has the same line as `ERROR:`.
 - [x] The school's `AI_GATEWAY_KEY` is an admin key (checked 2026-10-09: distinct from `SANDBOX_TOKEN`,
   `/health?details=1` → 200 with admin fields), so the dev token losing admin does not touch the school.
 - [ ] Optional: `SANDBOX_TOKEN_APP=parle` on the gateway if dev sessions should keep calling the parle aliases with the
   dev token (no-wake, app-key limits); unset, they get 403 on those aliases.
-- [ ] Afterwards consider rotating `SCW_SECRET_KEY`: it sat in the user_data and `boot.log` of every past replica.
+- [ ] Afterwards consider rotating `SCW_SECRET_KEY`: it sat in the user_data and `boot.log` of every past replica. With the
+  hot key rotation build this is § 12.9.1 step 2, no deploy.
+
+#### 12.9.1 Change each key without a deploy (from the `feat/hot-key-rotation` build on)
+
+Only the first deploy of that build is needed; after it none of these steps restarts the gateway. Provider keys
+(OpenRouter, Groq, …) already rotate this way in production today (`PUT /v1/admin/keys`, live since 10/10/2026).
+`$GW` = `https://parle-ai-gateway.up.railway.app`, `$ADMIN` = an admin key. Every call below is audited: check with
+`curl -H "Authorization: Bearer $ADMIN" $GW/v1/admin/access/audit`.
+
+1. **Provider keys** (`OPENROUTER_API_KEY`, `GROQ_API_KEY`, …): `PUT $GW/v1/admin/keys` with `{"NAME": "value"}` — writes
+   the palco and reloads. Or change it on the palco (`bun run sandbox:set` in babylon-cinema) and
+   `POST $GW/v1/admin/keys/reload`.
+2. **Machine credentials** (`SCW_SECRET_KEY`, `SCW_PROJECT_ID`, `SCW_REGISTRY_SECRET_KEY`, `VAST_API_KEY`): create the new
+   key at the provider (keep the old one alive), write it as in step 1, then check the audit entry
+   `deployment-credentials.rotate` is `ok: true`. `ok: false` means the provider refused the new key: the gateway kept
+   the old one, nothing stopped; fix the key and write it again. Once `ok: true`, delete the old key at the provider.
+   A provider that had no key when the gateway booted still needs a restart.
+3. **A client key** (the school's `AI_GATEWAY_KEY`, a site's key): `GET $GW/v1/admin/access/keys` to find its id, then
+   `POST $GW/v1/admin/access/keys` with `{"replaces": "<id>", "overlapMinutes": 60}` → the answer carries the new key
+   (only time it is shown). Put it in the client (palco `AI_GATEWAY_KEY` for the school), confirm the client works and
+   that `lastUsedAt` of the new id moves; the old key stops by itself after 60 min (or revoke it at once:
+   `POST $GW/v1/admin/access/keys/revoke {"id": "<old id>"}`). The `GATEWAY_API_KEYS` Railway variable may keep the old
+   value: a revoked env key stays refused (state in `access.json` on the volume).
+4. **A leaked key**: `POST $GW/v1/admin/access/keys/revoke {"id": "<id>"}` — refused from the next request on.
+5. **Admins**: `PUT $GW/v1/admin/access/admins {"users": ["parle", "ops"]}` (you must stay in the list); a new admin
+   key: `POST $GW/v1/admin/access/keys {"user": "ops2", "admin": true}`.
+6. **`SANDBOX_TOKEN`**: first make the palco accept the new token next to the old one; then
+   `PUT $GW/v1/admin/access/sandbox-token {"token": "<new>", "overlapMinutes": 60}`. A `400` means the palco refused it and
+   nothing changed. After `200` the gateway uses the new token and accepts the old one for 60 min; then retire the old
+   token on the palco and update the Railway variable when convenient (the stored token wins at boot while the palco
+   accepts it).
+7. **Replica tokens / realtime signing key**: `POST $GW/v1/admin/access/replica-secrets/rotate` (`{"deployment": "<name>"}`
+   for one). New replicas get the new secret; live replicas and their open sessions keep theirs until replaced (the
+   edge cannot take a new token while running). To finish a rotation, let the old replicas be replaced (park/scale
+   down outside class hours).
