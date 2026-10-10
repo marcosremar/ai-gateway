@@ -27,6 +27,8 @@ export interface RoomMeta {
   tokenHash: string;
   /** Gateway key user that created the room (may publish with its key instead of the token). */
   ownerId: string;
+  /** Additive: the presenter's YouTube watch link (validated, https on a YouTube host); absent in older metas = none. */
+  youtubeUrl?: string | null;
 }
 
 /** `GET /v1/rooms/:code` and the WS `snapshot.room`. */
@@ -39,11 +41,15 @@ export interface PublicRoom {
   ended: boolean;
   /** Additive to the contract: when the transcript stops being served (last activity + retention). */
   expiresAt: string;
+  /** Additive: where the same session is live on YouTube (null = none). */
+  youtubeUrl: string | null;
   lines: RoomLine[];
 }
 
 export type RoomServerMessage =
   | { type: 'snapshot'; room: PublicRoom }
+  /** Room fields changed after creation (`PATCH /v1/rooms/:code`). */
+  | { type: 'update'; youtubeUrl: string | null }
   | { type: 'line'; line: RoomLine }
   | { type: 'audio'; lineId: number; lang: string; wav: string }
   | { type: 'ended' }

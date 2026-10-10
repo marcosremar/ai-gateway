@@ -32,7 +32,37 @@ export function parseLang(v: unknown, field: string): string {
   return v;
 }
 
-export interface CreateRoomInput { title: string; originalLang: string | null; languages: string[] }
+/** Longest accepted `youtubeUrl`. */
+export const MAX_YOUTUBE_URL_CHARS = 300;
+/** Hosts a room's YouTube link may point to (watch page, channel `/live`, youtu.be short link). */
+export const YOUTUBE_HOSTS: readonly string[] = ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'];
+
+/**
+ * Optional YouTube watch link of a room: absent / null / "" → null (none); else an https URL on one of
+ * `YOUTUBE_HOSTS`, no credentials, no explicit port, at most MAX_YOUTUBE_URL_CHARS — returned normalized, or a 400.
+ */
+export function parseYoutubeUrl(v: unknown): string | null {
+  if (v === undefined || v === null || v === '') return null;
+  const bad = () => new RoomError(400, `youtubeUrl must be an https link on ${YOUTUBE_HOSTS.join(', ')} (at most ${MAX_YOUTUBE_URL_CHARS} characters)`);
+  if (typeof v !== 'string' || v.length > MAX_YOUTUBE_URL_CHARS || !/^https:\/\/[\x21-\x7e]+$/i.test(v)) throw bad();
+  let url: URL;
+  try { url = new URL(v); } catch { throw bad(); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !YOUTUBE_HOSTS.includes(url.hostname)) throw bad();
+  const out = url.toString();
+  if (out.length > MAX_YOUTUBE_URL_CHARS) throw bad();
+  return out;
+}
+
+export interface CreateRoomInput { title: string; originalLang: string | null; languages: string[]; youtubeUrl: string | null }
+
+/** `PATCH /v1/rooms/:code`: the room fields a publisher may change after creation. */
+export interface UpdateRoomInput { youtubeUrl: string | null }
+
+export function parseUpdate(body: unknown): UpdateRoomInput {
+  if (!isObject(body)) throw new RoomError(400, 'body must be a JSON object');
+  if (!('youtubeUrl' in body)) throw new RoomError(400, 'nothing to update: send {"youtubeUrl": "<link>" | null}');
+  return { youtubeUrl: parseYoutubeUrl(body.youtubeUrl) };
+}
 
 export function parseCreate(body: unknown, cfg: RoomsConfig): CreateRoomInput {
   if (!isObject(body)) throw new RoomError(400, 'body must be a JSON object');
@@ -47,7 +77,7 @@ export function parseCreate(body: unknown, cfg: RoomsConfig): CreateRoomInput {
     const lang = parseLang(l, 'languages[]');
     if (!languages.includes(lang)) languages.push(lang);
   }
-  return { title: title.trim(), originalLang, languages };
+  return { title: title.trim(), originalLang, languages, youtubeUrl: parseYoutubeUrl(body.youtubeUrl) };
 }
 
 function text(v: unknown, field: string, max: number): string {

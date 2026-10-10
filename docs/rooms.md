@@ -9,11 +9,12 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 
 | Route | Auth | Body | Answer |
 |---|---|---|---|
-| `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"]}` | `201 {"code","publishToken","url","expiresAt"}` |
+| `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"], "youtubeUrl"?}` | `201 {"code","publishToken","url","expiresAt"}` |
+| `PATCH /v1/rooms/:code` | publish token (or the creating / an admin gateway key) | `{"youtubeUrl": "<link>" \| null}` | `200 {"code","youtubeUrl"}` |
 | `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?}` | `204` |
 | `POST /v1/rooms/:code/audio` | publish token | `{"lineId", "lang", "wav": "<base64>"}` (≤ 2 MB decoded) | `204` (broadcast only, never stored) |
 | `POST /v1/rooms/:code/end` | publish token | — | `204` |
-| `GET /v1/rooms/:code` | public, CORS `*` | — | `200 {"code","title","originalLang","languages","createdAt","ended","expiresAt","lines":[…]}` / `404` |
+| `GET /v1/rooms/:code` | public, CORS `*` | — | `200 {"code","title","originalLang","languages","createdAt","ended","expiresAt","youtubeUrl","lines":[…]}` / `404` |
 | `GET /v1/rooms/:code/ws` | public WebSocket | — | see below |
 
 - Code: 6 characters of `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (no 0/O/1/I/L); lower case is accepted in URLs.
@@ -21,13 +22,19 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 - `expiresAt` in the GET body is an addition to the original contract (the page shows it after the end).
 - `delayMs` (additive, optional): ms from the end of speech to the subtitle being ready, an integer 0–120000 (else 400).
   Stored and served back on the line (GET and WS); the page shows the median of the last 10 as "atraso 1,8 s".
+- `youtubeUrl` (additive, optional): where the same session is live on YouTube — the presenter's app sends the channel
+  link (`https://www.youtube.com/channel/<id>/live`) and, once the broadcast is found, `https://youtu.be/<id>`. Strictly
+  validated: an `https:` URL on `youtube.com`, `www.youtube.com`, `m.youtube.com` or `youtu.be`, no credentials, no port,
+  ASCII only, at most 300 characters (else 400); `null` / `""` = none. Settable at creation and with `PATCH` (also after
+  the end — the recording keeps the link); kept in the room meta, served in GET and the WS snapshot, and every change
+  is pushed to open pages as `{"type":"update","youtubeUrl"}`. Older metas without it serve `null`.
 - Errors: `{"error":{"message","type"}}` — 400 bad body, 401 no/invalid token, 403 a gateway key that did not create
   the room, 404 unknown or expired, 409 room ended / full, 413 too large, 429 too many rooms created (per key per hour).
 
 ## WebSocket
 
 Server → client: `{"type":"snapshot","room":<GET body>}` on connect, then `{"type":"line","line"}`,
-`{"type":"audio","lineId","lang","wav"}`, `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
+`{"type":"audio","lineId","lang","wav"}`, `{"type":"update","youtubeUrl"}` (room fields changed), `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
 and, optionally, `{"type":"listen","lang":"en"|null}`: once sent, audio clips arrive only for that language (`null` =
 none), so viewers who do not listen to the dubbing do not download it. The server pings every 25 s.
 
@@ -47,6 +54,9 @@ none), so viewers who do not listen to the dubbing do not download it. The serve
   (Tradução / Só transcrição / Bilíngue / Só texto completo), original under the translation, dubbing on/off + volume +
   "sincronizar legenda com a voz", text size A−/A+ (live line 20–56 px, transcript 14–24 px), theme (escuro / claro /
   automático), auto-scroll, timestamps, delay indicator. Only the languages the room publishes are offered.
+- When the room has a `youtubeUrl`, the header shows a compact "Assistir no YouTube" link (YouTube icon; icon only
+  under 480 px), opening in a new tab (`rel="noopener noreferrer"`); it appears, changes or disappears live with the
+  `update` message. The page re-checks the link (https + YouTube host) before using it as an `href`.
 - `https://<ROOMS_PUBLIC_HOST>/` and `/live`: "Digite o código da sessão". Unknown/expired code: a 404 page.
 - Other paths on the public host (e.g. `/health`, `/v1/…`) reach the gateway as usual.
 
@@ -72,7 +82,7 @@ events without `t` or without their key field are dropped; unknown or invalid fi
 | `audio` | `action` play/pause/mute/unmute/gap/drop/decode_error/unsupported · `ms` · `n` |
 | `sample` | every 30 s while lines or clips flow: `textDelayMs` (median presenter `delayMs`), `voiceDelayMs`, `driftMs` (subtitle ↔ voice: render lateness after the clip start with sync on, clip start − text arrival with sync off), `lagMs` (arrival − line `ts`, includes clock skew), `queueMs`, `gaps` `gapMs` (silences 20 ms–3 s between consecutive clips), `drops`, `clips`, `lines`, `visible` |
 | `visibility` | `state` hidden/visible |
-| `ui` | `action` copy/sheet_open/sheet_close/more/reconnect/ended |
+| `ui` | `action` copy/sheet_open/sheet_close/more/reconnect/ended/youtube (tapped "Assistir no YouTube") |
 | `leave` | `durationMs` `visibleMs` `reason` (sent with `sendBeacon` on `pagehide`) |
 
 The page sends batches every 15 s, at 100 queued events, when the tab is hidden and on `pagehide`.

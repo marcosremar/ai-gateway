@@ -126,6 +126,11 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
 .pill.live{background:var(--live-bg);color:var(--accent)}
 .pill.live::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;vertical-align:1px;animation:pulse 1.6s infinite}
 .pill.wait{color:var(--warn)}
+.yt{flex:none;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--text);text-decoration:none;white-space:nowrap;font-size:.78rem;font-weight:600}
+.yt[hidden]{display:none}
+.yt:hover{border-color:var(--muted)}
+.yt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.yt .ytic{width:20px;height:14px;flex:none}
 @keyframes pulse{50%{opacity:.3}}
 @media (prefers-reduced-motion:reduce){.pill.live::before{animation:none}}
 .now{margin-top:8px;background:var(--surface);border-radius:16px;padding:12px 16px;min-height:76px;display:flex;flex-direction:column;justify-content:center;min-width:0}
@@ -190,7 +195,7 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
 `;
 
 const ROOM_BODY = `<header><div class="wrap">
-<div class="top"><span class="brand">ucast</span><h1 id="title">Legendas ao vivo</h1><span id="delay" class="delay" hidden></span><span id="pill" class="pill wait">conectando…</span></div>
+<div class="top"><span class="brand">ucast</span><h1 id="title">Legendas ao vivo</h1><span id="delay" class="delay" hidden></span><a id="yt" class="yt" href="#" target="_blank" rel="noopener noreferrer" aria-label="Assistir no YouTube (abre em nova aba)" title="Assistir no YouTube" hidden><svg class="ytic" viewBox="0 0 20 14" aria-hidden="true" focusable="false"><rect width="20" height="14" rx="4" fill="#ff0000"/><path d="M8 4l5.2 3L8 10z" fill="#ffffff"/></svg><span class="lg">Assistir no YouTube</span></a><span id="pill" class="pill wait">conectando…</span></div>
 <section class="now" aria-live="polite"><div id="liveMain" class="fit empty">Aguardando a primeira fala…</div><div id="liveOrig" class="fit" hidden></div></section>
 <div class="bar" role="toolbar" aria-label="Opções">
 <select id="lang" aria-label="Idioma da legenda"></select>
@@ -252,6 +257,8 @@ const ROOM_BODY = `<header><div class="wrap">
  *     "ucast-settings"), every field validated, defaults for the rest; the older "ucast-orig" = "1" still turns the
  *     original on. textSizes(step, viewportWidth): {live, tx} px for an A−/A+ step (live 20–56, transcript 14–24).
  *   - lineView(mode, showOrig, lang, hasTranslation): what a line shows — {main: 'tr'|'orig', sub, miss}.
+ *   - safeYoutubeUrl(u): the room's YouTube link when it is an https URL on youtube.com / www. / m. / youtu.be (the
+ *     server already validates it; checked again before it becomes an href), else null (the link stays hidden).
  */
 export const ROOM_PAGE_LOGIC = String.raw`
 function pickLang(prefs,languages,saved){
@@ -343,6 +350,13 @@ function refOf(search,referrer){
   var m=/[?&](?:src|ref)=([^&#]*)/.exec(String(search||''));
   if(m&&decodeURIComponent(m[1]).toLowerCase()==='qr')return 'qr';
   return referrer?'link':'direct';
+}
+var YT_HOSTS=['youtube.com','www.youtube.com','m.youtube.com','youtu.be'];
+function safeYoutubeUrl(u){
+  if(typeof u!=='string'||!u||u.length>300)return null;
+  var m=/^https:\/\/([^\/?#@:]+)(?:[\/?#]|$)/i.exec(u);
+  if(!m||YT_HOSTS.indexOf(m[1].toLowerCase())<0||/[\s"'<>\\]/.test(u))return null;
+  return u;
 }
 function lineView(mode,showOrig,lang,hasTr){
   if(lang==='orig'||mode==='transcript')return {main:'orig',sub:false,miss:false};
@@ -707,9 +721,16 @@ function applyRoom(r){
   room=r;expiresAt=r.expiresAt||null;lines=[];byId={};
   (r.lines||[]).forEach(function(l){byId[l.id]=l;lines.push(l);M(l.id)});lines.sort(function(a,b){return a.id-b.id});
   var t=r.title||'Legendas ao vivo';$('title').textContent=t;document.title=t+' · ucast.me';
+  applyYoutube(r.youtubeUrl);
   buildSelect();renderAll();trackJoin();
   if(r.ended)showEnded();
 }
+// ── "Assistir no YouTube": the presenter's live on YouTube, when the app sent its link (snapshot or "update") ──
+function applyYoutube(u){
+  var a=$('yt'),ok=safeYoutubeUrl(u);
+  if(ok){a.href=ok;a.hidden=false}else{a.hidden=true;a.removeAttribute('href')}
+}
+$('yt').addEventListener('click',function(){track('ui',{action:'youtube'})});
 function notFound(){gone=true;setPill('','encerrada');updateDelay();$('notice').textContent='Esta sessão não existe mais (o texto fica disponível por '+DAYS+' dias após a última fala).';}
 
 // ── socket, reconnect with backoff ──
@@ -724,6 +745,7 @@ function connect(){
     if(m.type==='snapshot'){applyRoom(m.room);if(!m.room.ended){setPill('live','ao vivo');$('notice').textContent=''}}
     else if(m.type==='line'&&room)upsert(m.line);
     else if(m.type==='audio')onAudio(m);
+    else if(m.type==='update'){if(room)room.youtubeUrl=m.youtubeUrl;applyYoutube(m.youtubeUrl)}
     else if(m.type==='ended')showEnded();};
   s.onclose=function(){if(ping)clearInterval(ping);if(ws===s)ws=null;if(ended||gone)return;
     setPill('wait','reconectando…');if(joined)track('ui',{action:'reconnect'});
