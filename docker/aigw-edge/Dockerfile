@@ -4,7 +4,7 @@
 #   docker build -t ghcr.io/marcosremar/aigw-edge:<tag> docker/aigw-edge
 # Licenses: aiortc / aioice / pylibsrtp (BSD-3), PyAV (BSD-3; bundles FFmpeg LGPL + libopus BSD), aiohttp (Apache-2),
 # numpy (BSD-3), cryptography (Apache-2/BSD). ~330 MB image (python:3.12-slim + wheels), nothing next to the models.
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 COPY requirements.txt .

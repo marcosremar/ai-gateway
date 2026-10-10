@@ -4,7 +4,7 @@
 # ── Stage 1: Dependencies ───────────────────────────────────────────────────
 # Bun pinned (not the floating `1`): before 1.4.2 node:http never fired `close` on a client disconnect, so the
 # per-user slot leaked and the upstream call was never aborted (fault bench 2026-10-06, item 14). Bump on purpose.
-FROM oven/bun:1.4.2-alpine AS deps
+FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS deps
 WORKDIR /app
 
 # Install only production dependencies
@@ -13,7 +13,7 @@ RUN bun install --frozen-lockfile --production --ignore-scripts && \
     rm -rf /tmp/bun* /root/.bun/install/cache
 
 # ── Stage 2: Build ──────────────────────────────────────────────────────────
-FROM oven/bun:1.4.2-alpine AS builder
+FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS builder
 WORKDIR /app
 
 # Install all dependencies (including dev)
@@ -34,7 +34,7 @@ RUN bun build --compile --minify --target=bun --outfile serve-compiled serve.ts
 RUN bun build --compile --minify --target=bun --outfile reap-compiled scripts/reap-orphans.ts
 
 # ── Stage 3: Production ─────────────────────────────────────────────────────
-FROM oven/bun:1.4.2-alpine AS production
+FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS production
 WORKDIR /app
 
 # Install wget for healthcheck (curl not available in alpine)

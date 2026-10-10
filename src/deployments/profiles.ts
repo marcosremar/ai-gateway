@@ -38,7 +38,7 @@ function qwenTts(model: string) {
 }
 
 /** coturn image, pinned (Docker Hub `coturn/coturn`, the project's official image). */
-export const COTURN_IMAGE = 'coturn/coturn:4.6.3';
+export const COTURN_IMAGE = 'coturn/coturn:4.6.3@sha256:71c3c990283385567f11794ee692e3a47b66fd9b0bb39e42afbe776e331dd888';
 /** UDP relay range of the coturn deployment (opened in its firewall; ~1 port per relayed leg). */
 export const COTURN_RELAY_PORTS: [number, number] = [49152, 49351];
 
@@ -52,7 +52,7 @@ export const COTURN_RELAY_PORTS: [number, number] = [49152, 49351];
 const COTURN_BOOT_SCRIPT = `set -eu
 set -a; . /srv/aigw/app.env; set +a
 : "\${REALTIME_TURN_SECRET:?set REALTIME_TURN_SECRET in the deployment env}"
-command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+command -v docker >/dev/null || { apt-get update -y && apt-get install -y docker.io; }
 PUB=$(curl -sf --max-time 5 'http://169.254.42.42/conf?format=json' | python3 -c 'import json,sys; print((json.load(sys.stdin).get("public_ip") or {}).get("address",""))' || true)
 [ -n "$PUB" ] || PUB=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
 iptables -t nat -C PREROUTING -p tcp --dport 443 -j REDIRECT --to-ports 3478 2>/dev/null \
