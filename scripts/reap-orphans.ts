@@ -27,6 +27,8 @@ import { DEFAULT_REAPER_GRACE_MS, ownedFromGateway, reapExitCode, reapOrphans, r
 import { ScalewayDeploymentBackend } from '../src/deployments/scaleway-backend';
 import { ScalewayNetworkSweeper } from '../src/deployments/scaleway-leftovers';
 import { VastDeploymentBackend } from '../src/deployments/vast-backend';
+import { machineBackendsFromEnv, machineLimitsFromEnv } from '../src/machines';
+import { ownedMachinesFromGateway, reapMachines } from '../src/machines/reaper';
 
 const apply = process.argv.includes('--apply') || process.env.REAPER_APPLY === '1';
 const applyForeign = process.argv.includes('--apply-foreign');
@@ -69,6 +71,18 @@ const result = await reapOrphans({
   log: (msg, data) => console.log(msg, JSON.stringify(data ?? {})),
 });
 console.log(reapSummary(result), JSON.stringify(result));
+const machines = await reapMachines({
+  backends: Object.values(machineBackendsFromEnv(process.env, { awaitVolumes: true })),
+  namespace,
+  gatewayUp: async () => result.gatewayUp,
+  probes: 1,
+  maxLifetimeMs: (machineLimitsFromEnv(process.env).maxLifetimeHours + 1) * 3_600_000,
+  ...(adminKey ? { owned: () => ownedMachinesFromGateway({ gatewayUrl: gateway, adminKey, namespace }) } : {}),
+  graceMs,
+  dryRun: !apply,
+  log: (msg, data) => console.log(msg, JSON.stringify(data ?? {})),
+});
+console.log(`reaper machines (${machines.mode}${machines.dryRun ? ', DRY RUN' : ''}):`, JSON.stringify(machines));
 const held = result.foreign.filter(f => f.holdsNeededQuota !== false);
 if (alertUrl && (held.length || result.skipped)) {
   await fetch(alertUrl, {
@@ -76,4 +90,4 @@ if (alertUrl && (held.length || result.skipped)) {
     body: JSON.stringify({ event: held.length ? 'reaper.foreign_quota_held' : 'reaper.not_checked', namespace, skipped: result.skipped ?? null, foreign: held }),
   }).catch(err => console.error('reaper: alert webhook failed', String(err)));
 }
-process.exit(reapExitCode(result));
+process.exit(machines.failed.length && !result.failed.length ? 1 : reapExitCode(result));

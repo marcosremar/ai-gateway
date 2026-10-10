@@ -731,6 +731,68 @@ for a cold start.
 
 Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
 
+## Machines and jobs
+
+Single rented hosts with an owner and a lease, for work that is not an HTTP service behind `invoke` (a test desktop, a
+GPU job, a stream). Enabled when a provider key is set (`SCW_SECRET_KEY`, `VAST_API_KEY`, `RUNPOD_API_KEY`) and
+`MACHINES_ENABLED` is not `0`; same `DEPLOYMENTS_NAMESPACE` rule as deployments. Only an admin key or a user listed in
+`MACHINES_USERS` may call these routes (`403` otherwise). The **owner** is the key's user, or `X-App` (an admin may name
+any app, another key only its own). An admin without `X-App` sees every owner (`"scope": "all"`); anyone else sees only
+their own (`404` for the rest). Prices are in USD per hour (Scaleway's EUR price × 1.2, a conservative rate).
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/machines` | rent one machine (body below); `201` with the machine |
+| `GET` | `/v1/machines` | `{ namespace, scope, providers, machines: [...] }` |
+| `GET` | `/v1/machines/costs` | spend per owner (24 h, month, committed), per holder, per machine; global for an admin |
+| `GET` | `/v1/machines/:id` | one machine: `status` (`creating`, `running`, `released`, `failed`), `ip`, `ports` (`"22/tcp"` → public port), `usdPerHour`, `costUsd`, `deadlineAt`, `endReason` |
+| `DELETE` | `/v1/machines/:id` | release now (`endReason: "deleted"`) |
+| `POST` | `/v1/machines/:id/extend` | `{ "hours"?: n }`: keepalive (resets idle), and with `hours` pushes the deadline (checked against the caps) |
+| `POST` | `/v1/jobs` | machine body + `command`, `inputs`, `output`; `201` with the job |
+| `GET` | `/v1/jobs`, `/v1/jobs/:id` | job `status` (`starting`, `running`, `succeeded`, `failed`, `timeout`), `exitCode`, `result`, its machine |
+| `GET` | `/v1/jobs/:id/logs` | last 64 KB of the job's output (`text/plain`) |
+| `DELETE` | `/v1/jobs/:id` | cancel: the job fails and its machine is released |
+
+Machine body:
+
+| Field | |
+|---|---|
+| `provider` | `scaleway`, `vast`, `runpod` or `cheapest` (default): the configured backend with the lowest quote under the cap, then the next one on a failure |
+| `machineType` | Scaleway commercial type (`L4-1-24G`, `DEV1-S`), Vast GPU name (`RTX 4090`), RunPod GPU type id |
+| `maxUsdPerHour` | required, ≤ `MACHINES_MAX_USD_PER_HOUR` |
+| `maxHours` | **required**: the hard deadline, ≤ `MACHINES_MAX_HOURS` |
+| `idleMinutes` | released when no `extend` came for this long (default `MACHINES_IDLE_MINUTES`, ≥ 5); jobs have none |
+| `image` | Docker image (required on Vast/RunPod: the container itself; on Scaleway run with `--network host` after boot) |
+| `diskGb` | default 40 |
+| `ports` | `[{ "protocol": "tcp", "port": n, "to"?: m }]` (`tcp` or `udp`), at most 64 ports in all |
+| `sshPublicKey` | the caller's public key, written to `/root/.ssh/authorized_keys`; opens 22/tcp |
+| `onstart` | bash run as root once the host is up (machines only) |
+| `env` | container environment; values never come back (only `envKeys`) |
+| `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `holder` | the agent inside the owner (its own 24 h cap) |
+
+Job body adds `command` (bash), `inputs` (`[{ "url": "https://…signed", "path": "in/x" }]`, downloaded under `/job`)
+and `output` (`{ "url": "https://…signed PUT", "path": "out" }`: `out` is tarred and PUT there). The machine reports
+to `POST /v1/job-report` (public route, authenticated by a per-job token only the machine has) every 60 s and at the
+end; success, failure or the deadline release the machine. Jobs need `AIGW_PUBLIC_URL` (or Railway's domain).
+
+Limits, all refused before anything is rented:
+
+| Limit | Env (default) | Answer |
+|---|---|---|
+| lease | `MACHINES_MAX_HOURS` (24), `MACHINES_MAX_LIFETIME_HOURS` (72, extends included) | `400` |
+| price | `MACHINES_MAX_USD_PER_HOUR` (2) | `400` |
+| machines running | `MACHINES_MAX_RUNNING` (20) | `429` |
+| owner per 24 h / per month | `MACHINES_OWNER_USD_PER_DAY` (10) / `MACHINES_OWNER_USD_PER_MONTH` (150) | `402` |
+| holder per 24 h | `MACHINES_HOLDER_USD_PER_DAY` (6) | `402` |
+| gateway per 24 h | `MACHINES_USD_PER_DAY` (20) | `402` |
+
+A cap counts what was spent in the window, plus what running leases would cost until their deadline, plus the new
+request at its `maxUsdPerHour × maxHours`, so a cap cannot be passed later by machines already running. `0` turns a cap
+off. The `402` message says which cap, the numbers, and what to do (release, fewer hours, lower price, or which env to
+raise). Never in an answer: `env` values, `onstart`, the SSH key, signed input/output URLs (only the output host), the
+job token.
+
 ---
 
 ## Keys at runtime

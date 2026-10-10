@@ -849,6 +849,40 @@ at :07 and by hand (`workflow_dispatch`, `apply` unticked = dry run), with `--ap
 with a warning naming it and touches nothing. Two reapers on the same namespace are redundant
 (a second release of a gone machine may count as a failed run): once the workflow runs, the Railway cron may be stopped.
 
+## Machines: single hosts with a lease (`src/machines`)
+
+Deployments serve a model behind `invoke`. For anything else — a test desktop with SSH, a stream with its own ports, a
+batch GPU job — `/v1/machines` and `/v1/jobs` rent one host with an owner, a hard deadline and an idle limit, over the
+same provider keys (Scaleway, Vast, RunPod). Routes, body and limits: [HTTP API § Machines and jobs](api/http.md#machines-and-jobs).
+
+- **Marks.** Scaleway tags `aigw-machine` · `aigw-mns-<namespace>` · `aigw-mid-<id>`; Vast label and RunPod pod name
+  `aigw-m:<namespace>:<id>`. None carries `aigw-deploy`, `aigw-ns-` or `aigw:`, so the deployments controller, its
+  reaper and its foreign report never see a machine, and the machines code never sees a replica.
+- **State.** `machines.json` next to `deployments.json` (`DEPLOYMENTS_STATE_DIR`), written like it (tmp + fsync + rename,
+  last good copy in `.bak`). The record is written as `creating` **before** the provider is called: a gateway that dies
+  mid-create finds the machine by its mark on the next start and adopts it (deadline and idle still apply); if no machine
+  came up within `MACHINES_CREATE_TIMEOUT_MINUTES` (15) the record is failed. Released records are kept 40 days for the
+  monthly accounts.
+- **Loop (every 30 s).** Lists each provider (a provider that fails to list is left alone that round), adopts, refreshes IP
+  and ports, then releases at the deadline, past `MACHINES_MAX_LIFETIME_HOURS`, or idle (no `extend` for `idleMinutes`).
+  A machine gone from a successful list is `released` with `endReason: "lost"` (its job fails). A machine with our mark
+  and no live record is an orphan, released after 10 min.
+- **Firewall (Scaleway).** One shared security group per namespace and port set (`aigw-<ns>-machines-<hash>`): inbound
+  drop, only the requested ports (and 22 with an SSH key). Never per-machine, so nothing leaks with the machine.
+- **Jobs.** The machine's onstart downloads the inputs (signed links), runs the command, tars and PUTs `output.path` to
+  the signed `output.url`, and reports to `POST /v1/job-report` with a token only it has (the gateway keeps its sha256).
+  Success, failure, cancel or the deadline release the machine.
+- **Costs.** `GET /v1/machines/costs`: per owner (24 h, month, committed until the deadlines), per holder, per machine.
+  Caps answer `402` before a rent (see the HTTP page). Credentials are read from the environment on each call, so a key
+  rotated in the environment is used by the next call.
+
+The **orphan guard** (`scripts/reap-orphans.ts`) also reaps machines of the namespace, after the deployments, with the
+same gateway probe and `--apply`: gateway **down** — every machine older than 30 min; gateway **up** with
+`AI_GATEWAY_ADMIN_KEY` — `GET /v1/machines` (admin, `"scope": "all"`, same namespace) says which machines are live, and a
+machine it does not list, older than `REAPER_GRACE_MINUTES`, goes; **always** — a machine older than `MACHINES_MAX_LIFETIME_HOURS` + 1 h (73 h by
+default, past any possible lease) goes, even when the gateway still lists it or cannot be asked. It never touches deployments or other
+namespaces. `RUNPOD_API_KEY` on the reaper service adds RunPod.
+
 ## Running on Railway
 
 `railway.json` builds `Dockerfile.production` (`serve.ts`), health check `/health`, **1 replica** — the controller is
