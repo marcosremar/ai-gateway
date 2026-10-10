@@ -1085,8 +1085,7 @@ apt-get install -y -qq linux-headers-$(uname -r) v4l2loopback-dkms v4l-utils 2>/
 modprobe v4l2loopback exclusive_caps=1 video_nr=10 card_label="AvatarCam" 2>/dev/null || true
 ls -la /dev/video* 2>/dev/null || echo "No video devices"
 
-# Install Docker
-curl -fsSL https://get.docker.com | sh
+command -v docker >/dev/null || apt-get install -y -qq docker.io
 
 # Determine device flags
 V4L2_FLAGS=""

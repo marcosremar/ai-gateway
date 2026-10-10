@@ -167,7 +167,7 @@ describe('buildCloudInit — Git clone mode', () => {
   it('setup script uses uv for fast package management', () => {
     const config = buildCloudInit({ hfRepoUrl: 'user/repo' });
     const setup = decodeFile(config, '/opt/setup.sh');
-    expect(setup).toContain('astral.sh/uv/install.sh');
+    expect(setup).toContain('pip install -q uv==0.8.22');
     expect(setup).toContain('uv venv');
     expect(setup).toContain('uv pip install');
   });
