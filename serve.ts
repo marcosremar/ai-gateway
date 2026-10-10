@@ -55,7 +55,9 @@ import {
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
 import { createRooms } from './src/rooms';
+import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
+import { createAccounts } from './src/accounts';
 
 const log = createLogger('serve');
 
@@ -88,7 +90,30 @@ const EXTRA_ADMINS = clientKeys.sandboxAdmins;
 access.setBaseAdmins(adminUsersFromEnv(process.env, EXTRA_ADMINS), EXTRA_ADMINS);
 access.start();
 const adminUsers = access.admins;
-const keysConfigured = () => access.size > 0;
+
+// ucast.me accounts (src/accounts, docs/accounts.md): sign-up on ucast.me, per-user activation keys for the desktop
+// app. An activation key resolves as the accounts app (ACCOUNTS_APP, default `babelcast`) — that app's routes and
+// limits, never admin — and is metered per user/key with the user's quota. A state file that cannot be read disables
+// the accounts (nothing would be overwritten); the rest of the gateway keeps running.
+const configuredAccounts = createAccounts({
+  isAdmin: (userId) => adminUsers.has(userId),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+const accounts = await configuredAccounts.init().then(() => configuredAccounts, (err: unknown) => {
+  log.error({ error: err instanceof Error ? err.message : String(err) },
+    'ACCOUNTS DISABLED: accounts.json / account-usage.json cannot be read — restore them from the volume backup and restart');
+  return null;
+});
+if (accounts) {
+  log.log({ app: accounts.config.app, siteHosts: accounts.config.siteHosts, users: accounts.service.userCount, email: accounts.emailConfigured ? 'resend' : 'none' }, 'Accounts enabled');
+  if (adminUsers.has(accounts.config.app)) log.error({ app: accounts.config.app }, 'ACCOUNTS: the accounts app is an ADMIN user — activation keys are refused until it is removed from the admin list');
+}
+/** Every gateway key: the access keys (env, issued, sandbox) and the accounts' activation keys. */
+const keyRegistry = {
+  get size(): number { return access.size + (accounts?.activeKeyCount ?? 0); },
+  resolve: (token: string): { key: string; userId: string } | null => access.resolve(token) ?? accounts?.resolveAppKey(token) ?? null,
+};
+const keysConfigured = () => keyRegistry.size > 0;
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
 async function listOpenRouterModels(): Promise<string[]> {
@@ -108,7 +133,6 @@ log.log({ port: PORT, apiKeys: access.size, rateLimit: RATE_LIMIT_RPM || 'disabl
 const prefixRoutes: PrefixRoute[] = [];
 
 // Deployments: Docker image → autoscaled replicas on Scaleway and/or Vast (enabled when SCW_SECRET_KEY or VAST_API_KEY is set).
-const keyRegistry = access;
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const alertEmail = alertEmailFromEnv(process.env);
 const alertMailer = alertEmail && createAlertMailer({ ...alertEmail, secrets: () => secretValues(process.env), log: (msg, data) => log.warn(data ?? {}, msg) });
@@ -431,6 +455,17 @@ const rooms = createRooms({
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 log.log({ dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl }, 'Rooms enabled');
+// Desktop-app field telemetry (src/app-telemetry, docs/app-telemetry.md): opt-in batches from the ucast.me app with a
+// gateway key, admin summary/listing. Day files on the same volume as rooms.
+const appTelemetry = appTelemetryFromEnv(process.env, {
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
+  isAdminToken,
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+if (appTelemetry) {
+  await appTelemetry.start();
+  log.log({ dir: appTelemetry.store.dir, retentionDays: appTelemetry.store.retentionDays }, 'App telemetry enabled');
+}
 
 const deviceGate = deployments && ((userId: string, headers: import('http').IncomingHttpHeaders, kind: string) => {
   const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
@@ -446,13 +481,14 @@ const server = await startProxy({
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
+  ...(accounts ? { onInference: accounts.recordInference } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
     ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
-    rooms.route, ...(telemetry?.adminRoutes ?? []),
+    rooms.route, ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
   ],
   publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : []), ...(machines ? [machines.reportRoute] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
@@ -461,6 +497,8 @@ const server = await startProxy({
 
 realtime.mount(server);
 rooms.mount(server);
+// Outermost: the account API and pages answer themselves, and the quota gate sees every metered request first.
+accounts?.mount(server);
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 
@@ -488,11 +526,12 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop()]);
+    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop()]);
     const exit = (code: number) => void stateWritten.finally(() => process.exit(code));
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
     rooms.stop();
+    appTelemetry?.stop();
     declared?.stop();
     balanceWatch.stop();
     keyManager.stop();

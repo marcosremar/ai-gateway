@@ -176,6 +176,14 @@ export interface ProxyConfig {
     ): import('./app-limits').AppLimitDenial | null;
     refund?(userId: string, charged: import('./app-limits').Charge): void;
   };
+  /**
+   * Called after an inference request (chat / STT / TTS / embeddings / images) was answered by its route, before the
+   * response is sent — usage metering (src/accounts). Must be cheap and must not throw; errors are logged and ignored.
+   */
+  onInference?: (event: {
+    userId: string; kind: import('./app-limits').InferenceKind; headers: Record<string, unknown>;
+    body: unknown; rawBody: Buffer; status: number; response: unknown;
+  }) => void;
   deviceGate?: (
     userId: string, headers: import('http').IncomingHttpHeaders, kind: string,
   ) => import('./app-limits').AppLimitDenial | null;
