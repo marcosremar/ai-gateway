@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from 'crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { readStateFile, writeStateFile } from '../deployments/state-file';
 import { loadSandboxEnv, principalSandboxToken, SANDBOX_USER, TOKEN_ALIASES, type SandboxEnvResult } from './sandbox-env';
 
@@ -7,6 +7,12 @@ const SANDBOX_TOKEN_RE = /^[^\s,:]{16,512}$/;
 export const MAX_OVERLAP_MINUTES = 7 * 24 * 60;
 
 const hashOf = (token: string) => createHmac('sha256', 'aigw-access-key-v1').update(token).digest('hex');
+
+function sameSecret(given: string, expected: string): boolean {
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 export class AccessError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -32,7 +38,7 @@ interface AccessState {
   sandbox: { token: string; retired: { token: string; until: number } | null } | null;
 }
 
-interface EnvKey { id: string; hash: string; prefix: string; user: string; label?: string }
+interface EnvKey { id: string; key: string; prefix: string; user: string; label?: string }
 
 export interface KeyView {
   id: string;
@@ -66,10 +72,13 @@ function overlapMs(raw: unknown): number {
 }
 
 function parseEnvKeys(raw: string | undefined): EnvKey[] {
+  const seen = new Map<string, number>();
   return (raw ?? '').split(',').map(s => s.trim()).filter(Boolean).map((entry) => {
-    const [key, user, ...label] = entry.split(':');
-    const hash = hashOf(key!);
-    return { id: `env-${hash.slice(0, 12)}`, hash, prefix: key!.slice(0, 4), user: user || 'default', ...(label.length ? { label: label.join(':') } : {}) };
+    const [key, owner, ...label] = entry.split(':');
+    const user = owner || 'default';
+    const n = (seen.get(user) ?? 0) + 1;
+    seen.set(user, n);
+    return { id: `env-${user}${n > 1 ? `-${n}` : ''}`, key: key!, prefix: key!.slice(0, 4), user, ...(label.length ? { label: label.join(':') } : {}) };
   }).filter(k => k.prefix.length > 0);
 }
 
@@ -114,12 +123,12 @@ export class AccessKeys {
   resolve(token: string): { key: string; userId: string } | null {
     if (!token) return null;
     const now = this.now();
-    const hash = hashOf(token);
-    const envKey = this.envKeys.find(k => k.hash === hash);
+    const envKey = this.envKeys.find(k => sameSecret(token, k.key));
     if (envKey && this.active(this.state.env[envKey.id], now)) {
       this.touch((this.state.env[envKey.id] ??= {}), now);
       return { key: token, userId: envKey.user };
     }
+    const hash = hashOf(token);
     const issued = this.state.keys.find(k => k.hash === hash);
     if (issued && this.active(issued, now)) {
       this.touch(issued, now);
@@ -212,11 +221,10 @@ export class AccessKeys {
 
   isSandboxToken(token: string): boolean {
     if (!token) return false;
-    const hash = hashOf(token);
     const accepted = TOKEN_ALIASES.map(k => this.env[k]?.trim()).filter((v): v is string => Boolean(v));
     const retired = this.state.sandbox?.retired;
     if (retired && retired.until > this.now()) accepted.push(retired.token);
-    return accepted.some(value => hashOf(value) === hash);
+    return accepted.some(value => sameSecret(token, value));
   }
 
   private setSandboxToken(token: string): void {

@@ -793,14 +793,15 @@ The keys of `GATEWAY_API_KEYS` keep working until revoked through the API; an ad
 
 ```json
 { "keys": [
-  { "id": "env-3f2a…", "source": "env", "user": "parle", "admin": false, "prefix": "pk_1", "label": null,
+  { "id": "env-parle", "source": "env", "user": "parle", "admin": false, "prefix": "pk_1", "label": null,
     "createdAt": null, "lastUsedAt": "2026-10-10T09:00:00.000Z", "expiresAt": null, "revokedAt": null, "active": true },
   { "id": "key-9b1c…", "source": "issued", "user": "site", "admin": false, "prefix": "aigw_Xy3k", "label": "site prod",
     "createdAt": "2026-10-10T09:01:00.000Z", "lastUsedAt": null, "expiresAt": null, "revokedAt": null, "active": true }
 ] }
 ```
 
-Never the value: only the id (derived from the hash), a short prefix, owner and dates. `lastUsedAt` has minute
+Never the value: only the id (`env-<user>` for `GATEWAY_API_KEYS` entries, numbered `-2`, `-3`… when a user has
+several, in their order; `key-…` derived from the HMAC for issued keys), a short prefix, owner and dates. `lastUsedAt` has minute
 resolution.
 
 ### `POST /v1/admin/access/keys` (admin)
