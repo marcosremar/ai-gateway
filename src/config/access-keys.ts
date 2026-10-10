@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import { readStateFile, writeStateFile } from '../deployments/state-file';
 import { loadSandboxEnv, principalSandboxToken, SANDBOX_USER, TOKEN_ALIASES, type SandboxEnvResult } from './sandbox-env';
 
@@ -6,7 +6,7 @@ const USER_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const SANDBOX_TOKEN_RE = /^[^\s,:]{16,512}$/;
 export const MAX_OVERLAP_MINUTES = 7 * 24 * 60;
 
-const hashOf = (token: string) => createHash('sha256').update(token).digest('hex');
+const hashOf = (token: string) => createHmac('sha256', 'aigw-access-key-v1').update(token).digest('hex');
 
 export class AccessError extends Error {
   constructor(readonly status: number, message: string) { super(message); }

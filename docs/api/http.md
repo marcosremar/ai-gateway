@@ -784,7 +784,7 @@ Client keys, admin users, the `SANDBOX_TOKEN` and the replica secrets change wit
 (and `/v1/admin/keys*`) need an admin key, are rate-limited to 30 requests per minute per key (`429` with
 `Retry-After`), answer `Cache-Control: no-store`, errors as `{"error": {"message", "type"}}`, and every change goes to the audit (who, when, which names —
 never a value). State lives in `DEPLOYMENTS_STATE_DIR/access.json` (atomic write, last good copy in `.bak`, mode
-0600; keys stored as SHA-256 only) and `key-audit.jsonl`.
+0600; keys stored as HMAC-SHA256 only) and `key-audit.jsonl`.
 
 The keys of `GATEWAY_API_KEYS` keep working until revoked through the API; an admin is a user of
 `DEPLOYMENTS_ADMIN_USERS` until the list is replaced through the API.
@@ -807,7 +807,7 @@ resolution.
 
 Issues a key. Body `{ "user": "site", "label"?: "…", "admin"?: true, "replaces"?: "<id>", "overlapMinutes"?: 30 }`.
 `201` with `{ "key": "aigw_…", …the listing fields…, "replaced": {…} | null }` — **the only response that carries a
-secret**, once, at creation; it is never stored in clear. `admin: true` adds `user` to the admin list. `replaces`
+secret**, once, at creation; it is never stored in clear (HMAC-SHA256 only). `admin: true` adds `user` to the admin list. `replaces`
 rotates a key (env or issued): the new key takes that key's user unless `user` is given, and the old key stops
 working at once (`overlapMinutes` 0 or absent) or after the overlap (max 10080 min = 7 days).
 

@@ -13,6 +13,7 @@ import { createDeploymentRoutes, HttpReplicaProbe } from './http';
 import { ScalewayDeploymentBackend, scalewayRegistryOf } from './scaleway-backend';
 import { usesScaleway } from './spec';
 import { VastDeploymentBackend } from './vast-backend';
+import { missingImage } from './image-check';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec } from './types';
 import { FileHostStore } from './host-reputation';
 import { FileDeploymentStore } from './store';
@@ -212,7 +213,7 @@ export function deploymentsFromEnv(
   const maxDevices = Number(env.APP_MAX_DEVICES);
   const devices = new AppDevices(apps, { log: opts.log, ...(maxDevices > 0 ? { maxPerApp: Math.floor(maxDevices) } : {}) });
   const scaleway = secret ? new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY }) : undefined;
-  const vast = vastKey ? new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir) }) : undefined;
+  const vast = vastKey ? new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir), ...vastCreditFloor(env) }) : undefined;
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = { ...(scaleway ? { scaleway } : {}), ...(vast ? { vast } : {}) };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
   const controller = new DeploymentController({
@@ -230,6 +231,7 @@ export function deploymentsFromEnv(
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
     ...(maxWait > 0 ? { maxColdStartWaitSeconds: maxWait } : {}),
     log: opts.log,
+    checkImage: (image, auth) => missingImage(image, auth ?? scaleway?.registryAuthFor(image) ?? null),
   });
   const admins = opts.admins ?? adminUsersFromEnv(env, opts.alwaysAdmin);
   const adminWarning = adminListWarning(env, opts.alwaysAdmin);
@@ -259,6 +261,11 @@ export function deploymentsFromEnv(
   const registryWarning = () => privateImageWarning(controller.list().flatMap(v => controller.specOf(v.name) ?? []), scaleway);
   const rotateCredentials = (current: Record<string, string | undefined>) => rotateBackendCredentials({ scaleway, vast }, current);
   return { controller, apps, devices, handler, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
+}
+
+export function vastCreditFloor(env: Record<string, string | undefined>): { minCreditUsd?: number } {
+  const floor = Number(env.VAST_MIN_CREDIT_USD);
+  return env.VAST_MIN_CREDIT_USD?.trim() && Number.isFinite(floor) && floor >= 0 ? { minCreditUsd: floor } : {};
 }
 
 /** The janitor's view of Scaleway: build servers by tag and the project's SBS volumes, in every known zone. */

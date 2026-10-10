@@ -107,12 +107,17 @@ const prefixRoutes: PrefixRoute[] = [];
 const keyRegistry = access;
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
+const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const configuredDeployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: EXTRA_ADMINS,
   admins: adminUsers,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
-  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); },
+  log: (msg, data) => {
+    log.log(data ?? {}, msg);
+    deploymentLogToTelemetry(msg, data);
+    if (msg === 'deployments: provider credit exhausted') void alertWebhook?.send({ event: 'provider.credit_exhausted', data: data ?? {} });
+  },
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
@@ -272,7 +277,6 @@ const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
   const routes = deployments?.apps.get(app)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
-const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const appLimits = keysConfigured() ? new AppLimits({
   env: process.env,
   statePath: join(process.env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway'), 'app-budgets.json'),
@@ -403,7 +407,7 @@ const server = await startProxy({
   ...(deviceGate ? { deviceGate } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
-    ? { images: buildImages(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
+    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
