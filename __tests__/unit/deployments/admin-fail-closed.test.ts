@@ -62,11 +62,11 @@ describe('admin keys fail closed', () => {
     expect(logs.join('\n')).not.toMatch(/WARNING/);
     expect((await call(handler, 'ops', 'POST', '/v1/deployments/x/wake')).status).toBe(404);
     expect((await call(handler, 'parle', 'POST', '/v1/deployments/x/wake')).status).toBe(403);
-    expect([...adminUsersFromEnv({ DEPLOYMENTS_ADMIN_USERS: 'ops, ' }, ['sandbox'])]).toEqual(['ops', 'sandbox']);
+    expect([...adminUsersFromEnv({ DEPLOYMENTS_ADMIN_USERS: 'ops, ' }, ['sandbox'])]).toEqual(['ops']);
+    expect([...adminUsersFromEnv({ DEPLOYMENTS_ADMIN_USERS: 'ops, ', SANDBOX_TOKEN_ADMIN: '1' }, ['sandbox'])]).toEqual(['ops', 'sandbox']);
     expect(adminUsersFromEnv({}).size).toBe(0);
     expect(adminListWarning({ DEPLOYMENTS_ADMIN_USERS: ' , ' }, ['sandbox'])).toMatch(/only sandbox/);
-    // ACCEPT_SANDBOX_TOKEN_AS_KEY=1 (transition) passes the `sandbox` user as an extra admin.
-    const transition = service({}, ['sandbox']);
+    const transition = service({ SANDBOX_TOKEN_ADMIN: '1' }, ['sandbox']);
     expect((await call(transition.handler, 'sandbox', 'POST', '/v1/deployments/x/wake')).status).toBe(404);
   });
 

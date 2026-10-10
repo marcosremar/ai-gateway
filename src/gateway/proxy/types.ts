@@ -129,6 +129,8 @@ export interface ProxyConfig {
   port?: number;
   /** Valid Bearer tokens for API authentication. Empty or absent = open mode. */
   apiKeys?: string[];
+  /** Live key registry (keys issued and revoked at runtime); wins over `apiKeys`. */
+  keyRegistry?: { readonly size: number; resolve(token: string): { userId: string } | null };
   /** Provider instances for all modalities */
   providers: ProviderMapping;
   /** Response cache for caching LLM/STT responses */
@@ -169,8 +171,10 @@ export interface ProxyConfig {
    */
   appLimits?: {
     check(
-      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>, opts?: { charge?: boolean },
+      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>,
+      opts?: { charge?: boolean; receipt?: import('./app-limits').Charge },
     ): import('./app-limits').AppLimitDenial | null;
+    refund?(userId: string, charged: import('./app-limits').Charge): void;
   };
   deviceGate?: (
     userId: string, headers: import('http').IncomingHttpHeaders, kind: string,

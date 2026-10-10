@@ -35,7 +35,7 @@ class FakeWs {
   onerror: (() => void) | null = null;
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onclose: ((e: { code: number; reason: string }) => void) | null = null;
-  constructor(readonly url: string) { FakeWs.last = this; setTimeout(() => { this.readyState = 1; this.onopen?.(); setTimeout(() => this.onmessage?.({ data: '{"type":"ready"}' }), 5); }, 5); }
+  constructor(readonly url: string, readonly protocols?: string | string[]) { FakeWs.last = this; setTimeout(() => { this.readyState = 1; this.onopen?.(); setTimeout(() => this.onmessage?.({ data: '{"type":"ready"}' }), 5); }, 5); }
   send(d: unknown) { this.sent.push(d); }
   close(code = 1000, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }); }
 }
@@ -57,7 +57,8 @@ describe('WS rung', () => {
     });
     await t.connect(new AbortController().signal);
     const ws = FakeWs.last;
-    expect(ws.url).toBe(`wss://gw/v1/realtime/ws?token=tok&traceparent=${encodeURIComponent(c.traceparent)}`);
+    expect(ws.url).toBe(`wss://gw/v1/realtime/ws?traceparent=${encodeURIComponent(c.traceparent)}`);
+    expect(ws.protocols).toEqual(['aigw.rt', 'aigw.token.tok']);
     expect(ws.binaryType).toBe('arraybuffer');
     onFrame!(new Int16Array(320));
     expect(Array.from(decodeAudioFrame(ws.sent[0] as Uint8Array)!).length).toBe(320);

@@ -83,7 +83,7 @@ class Peer:
         try:
             await asyncio.wait_for(self.pc.setLocalDescription(await self.pc.createOffer()), GATHER_S)
             stage = "offer"
-            async with http.post(m["offerUrl"], json={"sdp": self.pc.localDescription.sdp, "type": "offer"},
+            async with http.post(m["offerUrl"], json={"sdp": self.pc.localDescription.sdp, "type": "offer", **({"cfg": m["cfg"]} if m.get("cfg") else {})},
                                  headers={"Authorization": f"Bearer {m['token']}"}, timeout=aiohttp.ClientTimeout(total=OFFER_S)) as r:
                 body = await r.json(content_type=None)
                 if r.status != 200 or not (body or {}).get("sdp"):

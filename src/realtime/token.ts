@@ -1,9 +1,9 @@
 /**
  * Realtime session tokens (docs/realtime.md § Token) — the one credential a browser holds for a realtime session.
  *
- * JWT HS256. The key is per deployment and never leaves the gateway or the replica:
+ * JWT HS256. The key is per replica and never leaves the gateway or that replica:
  *
- *     key = HMAC-SHA256(key = <deployment replicaToken>, message = "aigw-rt-v1")   (32 raw bytes)
+ *     key = HMAC-SHA256(key = <the replica's token>, message = "aigw-rt-v1")   (32 raw bytes)
  *
  * The replica derives the same key from its token file (the `X-Aigw-Token` its nginx gate checks), so it verifies a
  * token without calling the gateway. Claims: `sid` (session id), `app`, `dep` (deployment), `rep` (replica id), `cfg`
@@ -46,7 +46,7 @@ function fromB64url(text: string): Buffer | null {
   return Buffer.from(text, 'base64url');
 }
 
-/** The per-deployment signing key (32 bytes), derived from the replica token. */
+/** The per-replica signing key (32 bytes), derived from the replica token. */
 export function deriveRealtimeKey(replicaToken: string): Buffer {
   return createHmac('sha256', replicaToken).update(RT_KEY_INFO).digest();
 }

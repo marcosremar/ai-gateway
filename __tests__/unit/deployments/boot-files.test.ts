@@ -14,7 +14,7 @@ const spec = buildSpec('parle-speech', {
   image: 'ghcr.io/me/speech-stack:1', bootScript: 'serve', port: 8010, machineType: 'L40S-1-48G', maxEurPerHour: 2, bootTimeoutMinutes: 45,
   files: { 'voices.json': Buffer.from('{"lia":"lia.wav"}').toString('base64'), 'lia.wav': VOICE.toString('base64') },
 }, { profiles });
-const source = { specOf: (name: string) => (name === spec.name ? spec : null), tokenOf: (name: string) => (name === spec.name ? TOKEN : null) };
+const source = { specOf: (name: string) => (name === spec.name ? spec : null), deploymentSecretsOf: (name: string) => (name === spec.name ? [TOKEN] : []) };
 const NOW = 1_760_000_000_000;
 const EXP = NOW / 1000 + 600;
 const query = (url: string) => new URL(url).searchParams;
@@ -43,7 +43,7 @@ describe('signed boot files', () => {
     expect(bootFile(source, tamper(q => q.set('sig', '')), NOW)).toBeNull();
     expect(bootFile(source, tamper(q => q.delete('sig')), NOW)).toBeNull();
     expect(bootFile(source, tamper(q => q.set('sig', TOKEN)), NOW)).toBeNull();
-    expect(bootFile({ ...source, tokenOf: () => 'another-replica-token-0123456789' }, query(urls['lia.wav'].url), NOW)).toBeNull();
+    expect(bootFile({ ...source, deploymentSecretsOf: () => ['another-replica-token-0123456789'] }, query(urls['lia.wav'].url), NOW)).toBeNull();
     const gone = signedFileUrls({ ...spec, files: { ...spec.files, 'old.wav': 'YQ==' } }, TOKEN, 'https://gw.example', EXP)['old.wav'].url;
     expect(bootFile(source, query(gone), NOW)).toBeNull();
     expect(bootFile(source, new URLSearchParams(), NOW)).toBeNull();

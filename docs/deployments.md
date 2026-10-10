@@ -25,7 +25,8 @@ curl -X PUT $GW/v1/deployments/my-model -H "Authorization: Bearer $KEY" -H 'cont
   "env": {"HF_TOKEN": "..."}, "registryAuth": {"server": "ghcr.io", "username": "me", "password": "..."}
 }'
 # An image in the gateway's own Scaleway registry (rg.<region>.scw.cloud/…) needs no registryAuth: the machine logs in
-# with the gateway's Scaleway key, so no registry secret is ever sent or stored in a spec.
+# with SCW_REGISTRY_SECRET_KEY, a registry read-only IAM key. The gateway's own Scaleway API key never goes to a machine:
+# without SCW_REGISTRY_SECRET_KEY such an image is refused at create, and a user_data carrying the API key is refused.
 
 # 2. Call it — the path after /invoke/ goes to the container as-is
 curl $GW/v1/deployments/tts/invoke/v1/audio/speech -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
@@ -88,10 +89,11 @@ are put back. `envByMachineType` is merged per key: the declared keys are put ba
 
 `src/deployments/declared/parle-speech.json`: the `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` image
 (`docker/speech-stack`: Whisper + Qwen LLM + Qwen3-TTS in one container). It lives in the gateway's own Scaleway
-registry, which the gateway pulls from with the key it already has: **no registry token, no `registryAuth`, nothing
-to set** — it is never `pending` for a credential. The declaration owns five things and patches only them over the
+registry, which the machines pull from with `SCW_REGISTRY_SECRET_KEY` (a registry read-only IAM key; the gateway's
+Scaleway API key is never sent to a machine, audit 2026-10-09 #7): no `registryAuth` in the declaration, but without
+that variable every create fails with an error naming it. The declaration owns five things and patches only them over the
 registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full reference; default
-`20261009-0003`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
+`20261009-0213`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
 the same tag: `SPEECH_IMAGE` does not move that copy; no L4), `scaling.mode` `fast`, `realtime: {}` (the edge
 sidecar, [realtime-edge.md](realtime-edge.md)) and env per machine type (the edge's `RT_MAX_SESSIONS`: L4 2, L40S 4;
 the whole RTX 5090 set; merged into the stored `envByMachineType`). A registered spec with `files` reaches the Vast
@@ -119,7 +121,7 @@ example in `docs/api/http.md` § App keys) and watch `appBudgets` in `GET /healt
 
 ```bash
 # Save (or move) an image address — build-image-on-scaleway.ts --app parle does this after a push
-curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
+curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $ADMIN_KEY" -H 'X-App: parle' -d '{
   "image": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107", "port": 8000, "healthPath": "/health",
   "defaults": {"machineType": "L40S-1-48G", "volumeGb": 120, "maxReplicas": 2, "bootTimeoutMinutes": 45}
 }'
@@ -168,6 +170,12 @@ stops an unmodified client, not a forged id — an app that needs more mints the
   L40S through `parle-stt` → `deployment:parle-speech`). `GET /health` → `noWake.skips`. Details: `docs/api/http.md`.
 - While a request is being served, extra replicas boot when `inflight > targetInflightPerReplica × ready`; requests go
   to the ready replica with the fewest requests in flight; a connection failure retries once on another replica.
+- **Model aliases** (`parle-stt`, `parle-llm`, `parle-tts` → `deployment:<name>`) do not hold the request for minutes.
+  With a live cloud fallback after it, a cold deployment link answers `cold` at once and the fallback serves (no added
+  latency). When the deployment is the chain's last live link (fallback missing or its key rejected), a request with no
+  ready replica waits at most `DEPLOYMENT_COLD_WAIT_MS` (default 2000, below every stage's first-byte time) for one. If
+  nothing answers, the 503 `provider_unavailable` carries `Retry-After` (30 s while the replica boots): the caller
+  retries then instead of hammering. A class that must not see that 503 is warmed ahead (`warmSchedule` or `POST …/warm`).
 
 ## Scaling rules (`planner.ts`)
 
@@ -181,10 +189,23 @@ and never one still booting: the boot finishes and the idle clock runs from its 
 or `bootTimeoutMinutes` end a boot early; live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of a 9 min boot).
 A ready replica is never surplus while that would leave fewer ready replicas than desired: one ready and one booting
 for a desired count of 1 both stay until the boot finishes, then one of them goes.
-Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, `DEPLOYMENTS_UNHEALTHY_STRIKES`
+Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes` (at least 35 min on Vast,
+`VAST_MIN_BOOT_TIMEOUT_MINUTES`: a 22–57 GB image pulls in 11–25 min on a marketplace host; the Vast machine's own boot
+checks and signed file links get the same deadline), `DEPLOYMENTS_UNHEALTHY_STRIKES`
 (3) failed health checks in a row with nothing in flight and no answered request in the last
-`DEPLOYMENTS_BUSY_GRACE_SECONDS` (120), older than `maxHours` (counted from the last power-on of a parked replica, not
+`DEPLOYMENTS_BUSY_GRACE_SECONDS` (120; 20 s, `ERRORED_GRACE_MS`, when only 5xx answers came since the last good one), older than `maxHours` (counted from the last power-on of a parked replica, not
 from its creation).
+
+**Answering early instead of holding the caller.** A request with no ready replica gets `503` + `Retry-After` at once
+when waiting cannot help: the deployment's only ready replica was lost (gone from the provider list, or released as
+`unhealthy`/`halted`) and no other is ready (`Retry-After: 30`, the caller falls back while the replacement boots);
+no machine exists and creates are backing off past the call's wait (e.g. `insufficient_credit`); or the measured boot
+time (3+ samples of this machine type and image) ends after the call's wait. Otherwise it waits up to
+`coldStartWaitSeconds` as before. An adopted replica (gateway restart) logs `replica ready` with `adopted: true` and no
+`bootMs`, and one already past its boot window that never answers is released as `unhealthy` (its app died), not
+`boot-timeout` (which would blame the host). `PUT` checks that each image exists in its registry (a manifest `HEAD`,
+anonymous or with the spec's `registryAuth` / the Scaleway pull-only key) and answers 400 when the registry says it does
+not; an unreachable registry never blocks the `PUT`.
 
 **Busy is not dead.** The probe tells liveness (`/__aigw/ready`, answered by nginx even while the app is saturated) from
 readiness (the app's health path, `DEPLOYMENTS_PROBE_TIMEOUT_MS`, 4 s). A replica whose health check times out while it
@@ -227,7 +248,9 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
   one replica fewer than the count *asked* for, so a replica that was never born is dropped once its pressure is gone.
 - **Warm-up**: `warmSchedule: [{ "days": [1,2,3,4,5], "start": "08:50", "end": "12:00", "timeZone": "Europe/Paris",
   "minReplicas": 2 }]` keeps replicas up in those windows (days 0 = Sunday, overnight windows allowed), and `POST …/warm`
-  does the same for one window on demand. Expired windows fall back to the normal rules.
+  does the same for one window on demand. Expired windows fall back to the normal rules. A window without `timeZone` is
+  Europe/Paris (stored explicitly): an 18:00 class stays at 18:00 local across the clock change (2026-10-25). App daily
+  budgets and the monthly spend stay on UTC days (reset at 00:00 UTC = 01:00/02:00 Paris, outside any class).
 - **Reserved quota** (class window): `reserveQuota: { "quota": 2, "windows": [{ "days": [1,2,3,4], "start": "17:40",
   "end": "20:15", "timeZone": "Europe/Paris", "minReplicas": 2 }] }` — "of the provider's `quota` machines of my
   `machineType`, I need `minReplicas` during these windows" (the windows have the `warmSchedule` shape). Inside a
@@ -240,7 +263,6 @@ A GPU replica boots in 8–9 min, so the controller scales on pressure, early, a
   `warmSchedule` to have the machines up) and binds only deployments of the same gateway: a machine created by another
   gateway or namespace is outside its reach — that is what the reaper's foreign-leftover alert is for. The match is by
   machine type, not zone (Scaleway counts a GPU type's quota across zones).
-
 - **Caps without starvation**: when the replica cap or the € ceiling blocks a deployment under pressure, the controller
   takes a replica of another deployment that has been idle (no answered request and no request to its deployment) for
   3 min, above its own floor; that deployment then counts as idle until its next request (no ping-pong).
@@ -366,7 +388,7 @@ trend window are design choices to pilot, not published values.
 
 | Variable | Default | What it limits |
 |---|---|---|
-| `DEPLOYMENTS_MAX_REPLICAS` | 6 | RUNNING replicas across all deployments. Parked (stopped) replicas do not count: they bill no compute. A `PUT` with `maxReplicas` above it is refused (400) with the cap in the message. |
+| `DEPLOYMENTS_MAX_REPLICAS` | 6 | RUNNING replicas across all deployments. Parked (stopped) replicas do not count: they bill no compute. A `PUT` with `maxReplicas` above it is refused (400) with the cap in the message. The floor of every unpaused deployment (`minReplicas`, or its active warm window) is kept inside the cap: a deployment already at its own floor does not take the last slots another one still needs for its floor (`… kept for the minimum of <name> <n>`). |
 | `DEPLOYMENTS_MAX_STOPPED` | 8 | Parked replicas (`idleAction: "stop"`, they bill disk). Past it, an idle replica is deleted instead of parked. |
 | `DEPLOYMENTS_MAX_EUR_PER_HOUR` | 6 | Sum of `pricePerHour` of all running replicas (+ creates in flight). A create or power-on that would pass it is refused; `lastError` says `spend ceiling reached` (a market-priced Vast offer counts at its `maxEurPerHour` cap). `0` = off. |
 | `DEPLOYMENTS_PARKED_MAX_HOURS` | 72 | A parked replica unused this long is deleted (a forgotten park bills its disk forever). `0` = off. |
@@ -379,7 +401,10 @@ A replica the provider lists as `stopping` (a stop takes ~1 min on Scaleway) is 
 alone until the list shows `stopped` (10 min at most), never deleted or counted for a plan. When a provider's list fails
 (Vast answers 429 under load) the controller still releases what the plan says to release from the last known machines,
 but creates and powers on nothing; the Vast backend reuses its last list for 5 s, waits `retry_after` after a 429/5xx and
-serves the last good list for up to 90 s meanwhile. A machine whose deployment was deleted while it was being created is
+serves the last good list for up to 90 s meanwhile. On Scaleway each zone lists on its own: one zone that fails (a 5xx in
+pl-waw-1) only freezes that zone — its known machines are kept and counted, never read as gone or released as orphans,
+and deployments that may land there (zone, `placements`, `candidates`) create nothing — while the other zones carry
+on. A machine whose deployment was deleted while it was being created is
 released as soon as the create ends (bounded retries; the orphan sweep stays as the net).
 
 ## Placement: `placements`, `candidates`, `near` (reliable, cheap, close to France)
@@ -396,7 +421,7 @@ identical `PUT` does not). `lastPlacement` in `GET /v1/deployments/:name` says w
 earlier places were skipped.
 
 - **`placements`** (a Scaleway spec, ≤ 6 entries): the spec's own zone/type first, then each entry **in the given
-  order** (never re-ranked). A Scaleway entry is `{ zone?, machineType? }` at the spec's `maxEurPerHour`; a pinned
+  order** (never re-ranked). A Scaleway entry is `{ zone?, machineType?, maxEurPerHour? }` (its own price cap, else the spec's); a pinned
   `osImageId` only applies in its own zone; an exposed deployment may change only `machineType`.
   An entry on **another provider** is `{ "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85,
   "maxReplicas": 1 }`, all four required (400 otherwise; GPU deployments without `exposure` only): the price cap of
@@ -462,6 +487,13 @@ With `candidates`, each create walks a **ranked ladder**:
 `provider: "vast"` (or a Vast candidate) needs `VAST_API_KEY` (from the dev API, like the Scaleway key). Code:
 `src/deployments/vast-backend.ts` (lean, separate from the GPU-pod client in `src/gateway/providers/gpu/`).
 
+**Credit.** Before each rent the backend reads the Vast balance (`GET /users/current/`, at most once a minute while it is
+fine) and refuses below `VAST_MIN_CREDIT_USD` (default 1); a rent Vast refuses with `insufficient_credit` counts the same.
+Either way the create fails with `insufficient_credit: …` and backs off 10 min, callers get `503` at once (above), the log
+line `deployments: provider credit exhausted` is written once (telemetry `provider.credit_exhausted`, and
+`ALERT_WEBHOOK_URL` when set), and `GET /health?details=1` (admin) lists it under `providerCredit` until a balance read
+is above the floor again.
+
 - **One container per host.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
   container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Without a
   `bootScript` the spec's `entrypoint` + `args` are run there instead (after loading `/srv/aigw/app.env`), so an
@@ -522,7 +554,10 @@ With `candidates`, each create walks a **ranked ladder**:
   `vast RTX 5090 (≤ €0.85/h); offer 3 of 21: London, GB, $0.796/h; better-ranked offers passed over: offer 811 (Zurich, CH, $0.563/h): … not available; offer 902 (Amsterdam, NL, $0.597/h): … not available`.
 - The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
   whose replica hit `bootTimeoutMinutes` is skipped for 1 h (§ Host reputation). States: `running`; `loading`/`created` →
-  `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
+  `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). A machine still loading whose Vast `status_msg` says the image cannot be
+  pulled (`manifest unknown`, `failed to resolve reference`, `pull access denied`, …) is released at once as `boot-failed`
+  (the host is not blamed), `lastError` reads `boot failed on the provider: <message>`, and creates back off 1 → 10 min
+  until the spec changes — before, it waited the whole `bootTimeoutMinutes` and rented the next host in a loop. `DELETE /instances/{id}/` releases it
   (its disk goes with it).
 
 ### RTT gate (Vast)
@@ -543,11 +578,22 @@ there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `
   baseline): `rtt ≤ maxRttMs`, integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`), meant for the gateway's vantage
   on Railway europe-west4 (NL), where France → host is typically 10–20 ms more.
 
+- **Under load** (2026-10-09: with the gateway's own uplink saturated a Norwegian host read 144 ms against a Paris
+  baseline of 143 and passed): the backend keeps the lowest baseline of the last 6 h (`QUIET_BASELINE_MS`). When the
+  baseline of the tick is more than 15 ms over it (`LOADED_BASELINE_MARGIN_MS`) the verdict still applies, but a host
+  that passes is **not** remembered as known-good, and `lastPlacement` says `measured under load`.
+- **Before renting** (2026-10-09: 11 paid minutes of a 57 GB pull for a host the gate then released): when an offer
+  carries its host address (`public_ipaddr`, `direct_port_start`), the backend times a TCP connect to that port (a
+  refusal is an answer too; `probeConnectRtt`, skipped on a network that answers for an unroutable address) and applies
+  the same rule against the baseline. A host too far is skipped and avoided 24 h without being rented; a host that does
+  not answer is rented and gated after boot as before.
+
 Outside the gate the replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and
 the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
 far. Until it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never
 measured again and its host is remembered as known-good for the ranking (on disk, § Host reputation); one adopted after a gateway restart is
-measured for the view only, never released by the gate (it may be serving).
+measured for the view only, never released by the gate, when its front already says ready (it may be serving); one still
+booting at the restart is gated like a fresh rental.
 `GET /v1/deployments/:name` shows `rttMs` and `rttBaselineMs` per replica, and `lastPlacement` both numbers and the
 verdict, e.g.
 `vast RTX 5090 (≤ €0.6/h); offer 1 of 12: Paris, FR, $0.548/h; RTT 42 ms, baseline 45 ms (s3.fr-par.scw.cloud): −3 ms ≤ maxRttExcessMs 20: kept`
@@ -642,7 +688,7 @@ curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/j
   "placements": [
     { "zone": "fr-par-1" },
     { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.62, "maxReplicas": 8,
-      "image": "ghcr.io/marcosremar/speech-stack:20261009-0003" }
+      "image": "ghcr.io/marcosremar/speech-stack:20261009-0213" }
   ],
   "warmSchedule": [
     { "days": [1, 2, 3, 4], "start": "17:25", "end": "20:05", "timeZone": "Europe/Paris", "minReplicas": 8 }
@@ -672,7 +718,7 @@ Unit tests with a fake Vast API cover the code above. Not run against real hosts
 
 | Unproven | Live test (a test gateway: `DEPLOYMENTS_NAMESPACE=<own>`, `VAST_API_KEY` from the dev API, never production) |
 |---|---|
-| Pull time of `ghcr.io/marcosremar/speech-stack:20261009-0003` (22 GB) on a Vast host, and the boot of the baked image | 1 below; read `bootMs` |
+| Pull time of `ghcr.io/marcosremar/speech-stack:20261009-0213` (22 GB) on a Vast host, and the boot of the baked image | 1 below; read `bootMs` |
 | The reputation file surviving a real restart | 2 |
 | The UDP probe on real hosts feeding `udp` and `requireWebrtc` | 3 |
 | `files` through signed links on a real host | 4 |
@@ -685,7 +731,7 @@ export GW=https://<test gateway> KEY=<admin key of that gateway> DEP=vast-class
 # 1. One replica from the public image; time from the PUT to ready, and what the host did.
 curl -s -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' $GW/v1/deployments/$DEP -d '{
   "profile": "speech-stack", "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.62,
-  "image": "ghcr.io/marcosremar/speech-stack:20261009-0003", "placements": [], "idleAction": "delete",
+  "image": "ghcr.io/marcosremar/speech-stack:20261009-0213", "placements": [], "idleAction": "delete",
   "minReplicas": 1, "maxReplicas": 1, "realtime": { "maxSessions": 4 },
   "fileUrls": { "voices.json": { "url": "https://<public copy>/voices.json", "sha256": "<64 hex>" },
                 "voice-pt.wav": { "url": "https://<public copy>/voice-pt.wav", "sha256": "<64 hex>" } }
@@ -736,10 +782,18 @@ fallback); then the instance is taken away, whatever it is serving. `src/deploym
 
 ## Replica machine
 
-`cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-deployment secret only the gateway knows) and proxies to
+`cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-replica secret: HMAC of the deployment's secret, which stays in the gateway, and a random key in the machine's tag `aigw-rk-<key>` or Vast label `aigw:<ns>:<dep>:<key>`; a machine created before has the deployment secret) and proxies to
 the container on `127.0.0.1:8000`; `/__aigw/ready` appears once the container answered `healthPath`. GPU types use
 the Scaleway GPU OS image (Docker + NVIDIA toolkit) with `--gpus all`. The machine shuts itself down `maxHours + 30 min`
 after boot as a last resort — a shut-down Scaleway instance is still billed, so the gateway deletes halted replicas.
+
+Vast replicas (10/10/2026): the front is TLS on the same mapped port. `replica-tls.ts` derives a P-256 key from the
+replica token (HMAC), the boot script self-signs a CA `CN=aigw-replica-ca` with it, issues a leaf for
+`IP:$PUBLIC_IPADDR` and deletes the CA key; the gateway rebuilds a CA certificate from the same key (a chain verifies
+against the anchor's name and key, not its signature) and passes it as the only `tls.ca` of every call to that replica,
+so a host without the token cannot answer and the token never crosses the wire in clear. The machine is marked `tls`
+by the Vast backend (`replicaBase` → `https://`). The boot script also deletes `/root/.ssh/authorized_keys` and kills
+`sshd` (Vast's `ssh_direct` runtype starts it; the runtype stays because it is what runs the onstart).
 
 Hardening (06/10/2026): the token check runs in nginx's access phase (`auth_request`), so requests **without** the
 token are rate-limited per IP (5 r/s, burst 10, 5 connections → `429`) while the gateway's own traffic is never
@@ -788,6 +842,13 @@ Env of the reaper service: `GATEWAY_URL`, `DEPLOYMENTS_NAMESPACE` (same as the g
 user is in the gateway's `DEPLOYMENTS_ADMIN_USERS`; never the `SANDBOX_TOKEN`, which the script refuses), optional
 `SCW_DEFAULT_PROJECT_ID`, `REAPER_GRACE_MINUTES`.
 
+The same script also runs from the repository, always on the code of `main`: `.github/workflows/reaper.yml`, every hour
+at :07 and by hand (`workflow_dispatch`, `apply` unticked = dry run), with `--apply`. It needs the repository secrets
+`AI_GATEWAY_ADMIN_KEY` and `SANDBOX_TOKEN` (optional `ALERT_WEBHOOK_URL`) and the variable `DEPLOYMENTS_NAMESPACE`
+(optional `GATEWAY_URL`, default `https://parle-ai-gateway.up.railway.app`); while one is missing the run ends green
+with a warning naming it and touches nothing. Two reapers on the same namespace are redundant
+(a second release of a gone machine may count as a failed run): once the workflow runs, the Railway cron may be stopped.
+
 ## Running on Railway
 
 `railway.json` builds `Dockerfile.production` (`serve.ts`), health check `/health`, **1 replica** — the controller is
@@ -802,19 +863,22 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 
 | Variable | |
 |---|---|
-| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition |
+| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition as a non-admin, no-wake user (`SANDBOX_TOKEN_APP` names the app whose aliases it may call; `SANDBOX_TOKEN_ADMIN=1` makes it admin again) |
 | `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables Scaleway replicas (normally fetched with the token) |
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
-| `ALERT_WEBHOOK_URL` | optional: a JSON `POST` for `app.budget_warning` (80 %) / `app.budget_exhausted` (gateway) and `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service). Plain JSON (`{event, data}`), not Slack's `text` shape |
+| `ALERT_WEBHOOK_URL` | optional (the owner sets it on the `ai-gateway` and `ai-gateway-reaper` services): a JSON `POST` (`{event, data}`, not Slack's `text` shape; the same line is logged as `ALERT <event>`) for `app.budget_warning` (80 %) / `app.budget_exhausted`; `deployment.create_failed`, `deployment.out_of_stock` (a create that failed, per deployment, at most once per 30 min) and `provider.credit_exhausted` (the Vast credit under its floor, or a create refused as `insufficient_credit`; once per 30 min); `replica.lost_with_sessions` (a replica released or no longer listed by the provider while it carried requests or realtime sessions); `stage.reserve_down` (a fallback link of a stage chain went `no_key`, `missing`, `pending`, `disabled` or `blocked`) and `stage.no_link` (no link of a chain can serve), once when it happens and again only after it recovered; `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service) |
 | `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the default for every app; an admin sets one app's own daily budgets with `PUT /v1/apps/:app/limits {dailyRequests?, dailyTokens?}` (stored in `apps.json`, applied at once, `null` = default, `0` = no budget): size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
-| `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned) |
+| `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned). `deployments.json` and `apps.json` are written tmp + fsync + rename with the previous good copy in `.bak`; an unreadable file is restored from `.bak` (the bad one kept as `.corrupt-<ms>`, `STATE FILE UNREADABLE` on stderr); with no usable backup the gateway starts with deployments off (`DEPLOYMENTS DISABLED`) and the cloud routes up. A failed write is logged (`STATE WRITE FAILED`) and shown as `stateWriteError` in `/health?deep=1`. With no state file at all, machines of unknown deployments are kept 5 min before the orphan sweep (declared deployments register first). `app-budgets.json` keeps the app daily counts across restarts; `client-stability.jsonl` rotates to `.1` at 5 MB, 20 reports/min per app, 512 KB per report |
+| `DEPLOYMENT_COLD_WAIT_MS` | how long an alias request whose last live link is a deployment waits for a booting replica before the 503 + `Retry-After` (2000; § Cold start) |
 | `RATE_LIMIT_RPM` | per-key requests/min (0 = off); `MAX_CONCURRENT_PER_USER` (default 150) caps parallel requests per key user, `MAX_CONCURRENT_PER_USER_OVERRIDES` (`user:limit,…`) per user |
 | `TRUST_PROXY=1` | rate-limit unauthenticated callers by `X-Real-IP` instead of Railway's proxy address |
 | `CORS_ORIGINS` | browser origins allowed to call directly |
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
 | `GHCR_READ_TOKEN` | registry credential of a declared deployment whose `registryAuth.passwordEnv` names it (none today: `parle-speech` needs no token) |
+| `SCW_REGISTRY_SECRET_KEY` | secret key of a Scaleway IAM application whose only policy is `ContainerRegistryReadOnly`: what replicas log in to `rg.<region>.scw.cloud` with (never `SCW_SECRET_KEY`); read at boot |
+| `SCW_REGISTRY_PUSH_SECRET_KEY` | secret key of the IAM application `aigw-registry-push` (only `ContainerRegistryFullAccess` on the project): what the build machine of `scripts/build-image-on-scaleway.ts` logs in with to push; the script refuses to start without it |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
 | `DEPLOYMENTS_MAX_WAIT_SECONDS` | longest wait of an invoke through a cold start (240; § Cold start) |

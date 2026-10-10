@@ -294,11 +294,12 @@ mid-class refuses the next turn or session with 429 `daily_budget_exhausted` and
 ends the turn with the `tts` error). No retry was added for the non-silent runaway: it cannot be told from speech
 before the learner has heard it without holding back every first audio.
 
-## 12. Integration build (PR `rt/integration-2`, 2026-10-09): #67, #68, #63, #62, #64, #66 on `main`
+## 12. Integration build (PR `rt/integration-2`, 2026-10-09): #67, #68, #63, #62, #64, #66, #65 on `main`
 
-Code, unit tests and the edge's loopback harness only; nothing below was run against production or a GPU. § 11
-(production guards, #63) is part of this build and stays as written. #65 (WebRTC uplink and lead trim) is **not** in
-it: § 12.6.
+Nothing below was run against production. § 11 (production guards, #63) is part of this build and stays as written.
+#65 (WebRTC uplink as it arrives, loss as elapsed time, 48 kHz downlink, lead trim) joined on 2026-10-09 (merge
+`624bced`). The build was proven live on an L40S the same morning, from a local gateway: results, what stays
+unit-only and the GO / NO-GO are in `2026-10-07-realtime-handoff.md` § Prova ao vivo da integração (#70).
 
 ### 12.1 What it adds
 
@@ -392,34 +393,37 @@ Built by CI from this branch on 2026-10-09 (UTC); nothing in production points a
 
 | Image | Tag | Digest | Built from |
 |---|---|---|---|
-| `ghcr.io/marcosremar/aigw-edge` | `48db2e5f` | `sha256:fe41f2628176f7dd541191454cb4cde72f2883f8bc6f1d74d0db59c1fc7c1639` | commit `48db2e5f` (workflow `aigw-edge`): #67, #68, the TTS cut of #63 |
-| `ghcr.io/marcosremar/speech-stack` (public, Vast) | `20261009-0003` | `sha256:3420c5de56cb0cc18ec70a595aad9709a19262294e03223ef1adac8e48444bfe` | commit `a74718c1` (workflow `speech-stack`), `EDGE_TAG=48db2e5f` |
-| `rg.fr-par.scw.cloud/aigw/speech-stack` (Scaleway) | `20261009-0003` | the same digest | `bun scripts/build-image-on-scaleway.ts --from ghcr.io/marcosremar/speech-stack:20261009-0003 speech-stack` (507 s; the build machine and its volume answer 404 afterwards) |
+| `ghcr.io/marcosremar/aigw-edge` | `79722253` | `sha256:2b0ba945e5505b8ef6dd56dc439807917bf0e3956f514878bbdb93338103fb17` | commit `7972225` (workflow `aigw-edge`): #67, #68, the TTS cut of #63, #65, and the client `end_turn` fix. No file under `docker/aigw-edge/` changed after it |
+| `ghcr.io/marcosremar/speech-stack` (public, Vast) | `20261009-0213` | `sha256:210f98859fed816642c96a6554f032d9865025f870f859c21eb9a9b7a26f4d31` | commit `3275783` (workflow `speech-stack`), `EDGE_TAG=79722253`, with `GET /debug/gpu`. No file under `docker/speech-stack/` changed after it |
+| `rg.fr-par.scw.cloud/aigw/speech-stack` (Scaleway) | `20261009-0213` | the same digest | `bun scripts/build-image-on-scaleway.ts --from ghcr.io/marcosremar/speech-stack:20261009-0213 speech-stack` (994 s, one blob upload retried after `RANGE_INVALID`; the build machine and its volume were deleted by the script) |
 
-In the branch: `DEFAULT_EDGE_IMAGE` and the speech-stack `EDGE_TAG` are `48db2e5f`; `SPEECH_STACK_TAG` (the profile) and
-`src/deployments/declared/parle-speech.json` (Scaleway default and the Vast placement) are `20261009-0003`. Before the
-deploy, check both registries still answer that digest (as § 3.5, with this tag). The image was never booted: its first
-start on a GPU is item 2 of § 12.7. To go back, restore the two tags `f66b6b80` / `20261008-1317` in those four places.
+In the branch: `DEFAULT_EDGE_IMAGE` and the speech-stack `EDGE_TAG` are `79722253`; `SPEECH_STACK_TAG` (the profile) and
+`src/deployments/declared/parle-speech.json` (Scaleway default and the Vast placement) are `20261009-0213`. Before the
+deploy, check both registries still answer that digest (as § 3.5, with this tag). First boot on an L40S: 2026-10-09
+(handoff, item 1). To go back, restore the two tags `f66b6b80` / `20261008-1317` in those four places (what
+production ran before this build).
 
 Later pushes to the PR rebuild both images under other tags (the workflows run on every push that has `docker/` in
-the PR's diff); only the tags above are pinned.
+the PR's diff); only the tags above are pinned. The earlier pair of this branch (`48db2e5f` / `20261009-0003`, without
+#65 and the `end_turn` fix) is superseded and was never deployed.
 
 ### 12.6 Not in this build
 
-- **#65** (`rt/webrtc-latency`: WebRTC uplink decoded as it arrives, first reply sentence without its silent lead,
-  harness `getStats`): still being changed and tested live when this branch was cut. It touches
-  `docker/aigw-edge/aigw_edge/{audio,host,session,upstream}.py`, the edge tests, `docs/realtime-edge.md` and
-  `scripts/realtime-e2e/{load-client.ts,load.ts,load_rtc.py,page-load.js,page-meter.js}`; here `session.py`,
-  `upstream.py` (`speak` gained `on_overlong`), the edge tests and the two `load*.ts` files changed too, so its merge
-  after this one has conflicts there, and it needs one more edge and speech-stack image.
-- Open defects of the live proof of 2026-10-08/09 that this build does **not** address:
-  - turns ending `interrupted` with `--client-deadline` (the page-ended turn and the SDK's own opener);
-  - VRAM of an L40S with 16 slots at `LLM_SLOT_CTX` 4096 not measured (production stays at 2048);
-  - the `s2s-stream` harness run hangs (`e2e-live.ts turn s2s-stream`);
+- Open after the live proof of 2026-10-09 (handoff § Prova ao vivo da integração (#70) has the detail):
+  - the first-sound deadline on the learner's clock (#59) with the client's own opener was not re-measured (the
+    opener is voiced through the cloud TTS, whose key had expired); the turns ending `interrupted` in that mode are
+    fixed in the edge of this build and re-measured without the opener;
+  - everything on the composed fallback, speculation included (#66): the OpenRouter key served by the dev API is
+    expired;
+  - everything on Vast (#64 host reputation, `files` through signed links, `requireWebrtc`): the account has no credit;
   - L40S not sold in fr-par-1 (the second placement of `parle-speech` is skipped);
   - the Vast boot timeout (20 min) is shorter than the first pull of the 57 GB image on a slow host;
   - the RTT gate decides after the paid pull (a far host is released only once it has booted);
-  - Vast account credit (overflow creates fail without it).
+  - a system prompt larger than the LLM slot (16 KB of Portuguese ≈ 4.7 k tokens against 4096) opens the session and
+    fails every turn with `error upstream`: keep the school's prompt well below the slot (≈ 5 KB with 2048);
+  - `LLM_SLOT_CTX` 4096 fits the L40S VRAM (29.2 of 46 GB with 12 learners) but the LLM slows as the history grows
+    (198 → 461 ms over 760 s with 8 learners): production stays on 2048;
+  - the up-to-2.5 s UDP-probe wait on the first admission of a fresh replica was not measured live.
 
 ### 12.7 Live proof checklist for this build
 
@@ -457,3 +461,153 @@ bun scripts/realtime-e2e/load.ts --n 8 --s2s 8 --no-wake --speculate-lead 400 --
 | 12 | Speculation on the fallback | the `--s2s --speculate-lead` run | `s2s.stt_speculative` events, `done.speculation` `hit` on most turns, first audio earlier than the same run with `--speculate-lead 0`; no turn voiced twice |
 | 13 | Reaper | dry run against the dev gateway, with the reaper's own variables: `bun scripts/reap-orphans.ts` (no `--apply`) | lists foreign leftovers, releases nothing |
 | 14 | History | 20 turns in one session (`load.ts --n 1 --duration 400 --think 2-4`) | no `upstream` context error; `edge.llm.history_trimmed` appears |
+
+### 12.8 Deploy conditions (live proof of #70, 2026-10-09; merged to `main` with the audit fixes #72, #73, #74)
+
+Merging changed nothing in production. The deploy of this `main` is GO under these conditions:
+
+1. Outside Mon–Thu 17:40–20:15 Europe/Paris (class time), and not in the hour before.
+2. `LLM_SLOT_CTX` stays **2048** on `parle-speech` (4096 fits the L40S VRAM but the LLM slows as the history grows,
+   and the history trim was not exercised at 4096).
+3. Speculation off (the school does not use `speculatePauseMs`) and the composed cloud fallback not relied on until the
+   OpenRouter key served by the dev API is rotated and item 12 of § 12.7 has passed (today it would not answer, with or
+   without this deploy).
+4. No Vast for the school (`requireWebrtc`, `files` through signed links, host reputation): not proven, the account has
+   no credit.
+5. The school removes every client-side change of signed fields (§ 12.2) before the new edge serves a class, and keeps
+   its system prompt well below the LLM slot (§ 12.6).
+6. Behaviour change from #74: a `warmSchedule` or `reserveQuota` window without `timeZone` now reads as Europe/Paris
+   (stored explicitly) instead of UTC. Production has no such window today; check `GET /v1/deployments` before the
+   deploy and give any window an explicit `timeZone` if one appeared.
+7. Order of § 12.4; check `/health` `commit` / `builtAt` afterwards.
+
+Also in this build: #76 (Vast stress fixes) and #75 (the audit's security fixes: dev token not admin, Bearer-only
+keys, per-replica tokens, Scaleway registry pull with a read-only key).
+
+### 12.9 Pre-deploy checklist for #75
+
+- [x] `SCW_REGISTRY_SECRET_KEY` exists (created 2026-10-09): IAM application `aigw-registry-readonly`, its only policy
+  `ContainerRegistryReadOnly` on the project; secret and access key in the dev API (palco), served by
+  `GET /api/sandbox-env`. Checked: the registry grants `pull` on `aigw/speech-stack` and nothing for `pull,push`; it
+  lists no Instance server. Creation steps (for a rotation): IAM → Applications → Create (no group) → Policies →
+  Create policy → scope: project → `ContainerRegistryReadOnly` → attach → API keys → Generate.
+- [ ] Until the hot key rotation build (PR `feat/hot-key-rotation`) is deployed, the gateway reads the key at boot only.
+  From that build on it is picked up by the palco reload (≤ 5 min, or `POST /v1/admin/keys/reload` at once) —
+  steps in § 12.9.1. Either way, afterwards `/health?details=1` (admin key) must have no
+  `SCW_REGISTRY_SECRET_KEY is missing` warning; with the warning, every create of an `rg.*.scw.cloud` image
+  (`parle-speech`) fails at once with an error naming the variable, and the boot log has the same line as `ERROR:`.
+- [x] The school's `AI_GATEWAY_KEY` is an admin key (checked 2026-10-09: distinct from `SANDBOX_TOKEN`,
+  `/health?details=1` → 200 with admin fields), so the dev token losing admin does not touch the school.
+- [ ] Optional: `SANDBOX_TOKEN_APP=parle` on the gateway if dev sessions should keep calling the parle aliases with the
+  dev token (no-wake, app-key limits); unset, they get 403 on those aliases.
+- [ ] Afterwards consider rotating `SCW_SECRET_KEY`: it sat in the user_data and `boot.log` of every past replica. With the
+  hot key rotation build this is § 12.9.1 step 2, no deploy.
+
+#### 12.9.1 Change each key without a deploy (from the `feat/hot-key-rotation` build on)
+
+Only the first deploy of that build is needed; after it none of these steps restarts the gateway. Provider keys
+(OpenRouter, Groq, …) already rotate this way in production today (`PUT /v1/admin/keys`, live since 10/10/2026).
+`$GW` = `https://parle-ai-gateway.up.railway.app`, `$ADMIN` = an admin key. Every call below is audited: check with
+`curl -H "Authorization: Bearer $ADMIN" $GW/v1/admin/access/audit`.
+
+1. **Provider keys** (`OPENROUTER_API_KEY`, `GROQ_API_KEY`, …): `PUT $GW/v1/admin/keys` with `{"NAME": "value"}` — writes
+   the palco and reloads. Or change it on the palco (`bun run sandbox:set` in babylon-cinema) and
+   `POST $GW/v1/admin/keys/reload`.
+2. **Machine credentials** (`SCW_SECRET_KEY`, `SCW_PROJECT_ID`, `SCW_REGISTRY_SECRET_KEY`, `VAST_API_KEY`): create the new
+   key at the provider (keep the old one alive), write it as in step 1, then check the audit entry
+   `deployment-credentials.rotate` is `ok: true`. `ok: false` means the provider refused the new key: the gateway kept
+   the old one, nothing stopped; fix the key and write it again. Once `ok: true`, delete the old key at the provider.
+   A provider that had no key when the gateway booted still needs a restart.
+3. **A client key** (the school's `AI_GATEWAY_KEY`, a site's key): `GET $GW/v1/admin/access/keys` to find its id, then
+   `POST $GW/v1/admin/access/keys` with `{"replaces": "<id>", "overlapMinutes": 60}` → the answer carries the new key
+   (only time it is shown). Put it in the client (palco `AI_GATEWAY_KEY` for the school), confirm the client works and
+   that `lastUsedAt` of the new id moves; the old key stops by itself after 60 min (or revoke it at once:
+   `POST $GW/v1/admin/access/keys/revoke {"id": "<old id>"}`). The `GATEWAY_API_KEYS` Railway variable may keep the old
+   value: a revoked env key stays refused (state in `access.json` on the volume).
+4. **A leaked key**: `POST $GW/v1/admin/access/keys/revoke {"id": "<id>"}` — refused from the next request on.
+5. **Admins**: `PUT $GW/v1/admin/access/admins {"users": ["parle", "ops"]}` (you must stay in the list); a new admin
+   key: `POST $GW/v1/admin/access/keys {"user": "ops2", "admin": true}`.
+6. **`SANDBOX_TOKEN`**: first make the palco accept the new token next to the old one; then
+   `PUT $GW/v1/admin/access/sandbox-token {"token": "<new>", "overlapMinutes": 60}`. A `400` means the palco refused it and
+   nothing changed. After `200` the gateway uses the new token and accepts the old one for 60 min; then retire the old
+   token on the palco and update the Railway variable when convenient (the stored token wins at boot while the palco
+   accepts it).
+7. **Replica tokens / realtime signing key**: `POST $GW/v1/admin/access/replica-secrets/rotate` (`{"deployment": "<name>"}`
+   for one). New replicas get the new secret; live replicas and their open sessions keep theirs until replaced (the
+   edge cannot take a new token while running). To finish a rotation, let the old replicas be replaced (park/scale
+   down outside class hours).
+
+#### 12.9.2 Rotations after the deploy (D4, S15, D6) — not done yet
+
+Do them only once #75 and the hot key rotation build (#81, § 12.9.1) are live (`/health` `commit` at or after both
+merges), outside class hours (no class
+Mon–Thu 17:40–20:15 Paris), one at a time, and check each before the next. Every value goes through the dev API
+(`PUT https://parle-palco.up.railway.app/api/sandbox-env`, Bearer `SANDBOX_TOKEN`, body `{"NAME":"value"}`); never paste
+a value in a chat, a log, a commit or a shell history (load it into the process and send it from there).
+
+**`SCW_SECRET_KEY` (D4).** Today it is a *user* key of the organization owner (full access to everything), one of the
+three user keys listed by `GET /iam/v1alpha1/api-keys` (descriptions `teste` 2026-03-16, `testeste` 2026-09-25,
+`fdfdfdfd` 2026-10-02; the API does not say which one is the gateway's). It sat in the user_data and `boot.log` of every
+replica before #75. Replace it with an IAM application key that can only do what the gateway does:
+
+1. Scaleway IAM (API with the current key loaded in the process, or console): create the application
+   `aigw-gateway`; one policy, scope = the project `SCW_PROJECT_ID` only, permission sets `InstancesFullAccess` and
+   `BlockStorageFullAccess` (the gateway calls `instance/v1`, `block/v1alpha1` and the public `marketplace/v2`;
+   `SCW_PROJECT_ID` is set, so it never needs `iam/v1alpha1`). Generate its API key with `default_project_id` = the project.
+2. Before switching, prove it with the new key alone: `GET /instance/v1/zones/fr-par-2/servers` lists the same number
+   of servers as the old key (an under-privileged key gets 200 with an empty list, not 403); same for `fr-par-1`,
+   `nl-ams-1`, `pl-waw-2`.
+3. `PUT /api/sandbox-env {"SCW_SECRET_KEY": <new>, "SCW_ACCESS_KEY": <new access key>}`; check
+   `GET /api/sandbox-env` returns the new value (compare a hash, do not print it).
+4. Gateway: `POST $GW/v1/admin/keys/reload` (or `PUT $GW/v1/admin/keys` in step 3 instead of the palco `PUT`) and
+   check the audit entry `deployment-credentials.rotate` is `ok: true` (§ 12.9.1 step 2; `ok: false` = the gateway
+   kept the old key). Then trigger one `ai-gateway-reaper` run (it fetches at every run). `GET /v1/deployments` must
+   list the existing replicas (listing them proves the key sees the project). The first real create after the
+   switch: watch for `create failed` with `403`/`permission`; if it appears, write the old key back the same way.
+5. Other holders to refresh: the `parle` service (`ucast.me`, reserve copy of the dev API — update it there too, or
+   remove the variable), every `.env` written by `bun run sandbox:fetch` (babylon-cinema checkout and its worktrees:
+   run `sandbox:fetch` again), and the local backup `/Users/marcos/aigw-state-backup-20261009/` (does not hold it).
+6. Only after a day without `403`: delete the old user key(s) in IAM (all three if none is used elsewhere — they are
+   owner keys with no scope). Deleting is the step that actually ends the exposure.
+
+**`SANDBOX_TOKEN` and its aliases (S15/D6).** It appeared in orchestration transcripts. On the gateway side § 12.9.1
+step 6 swaps it with an overlap, but it starts with «make the palco accept the new token next to the old one», and the
+palco hub accepts exactly one token today (`hubConfig().token`, `palco/hub/http.ts` in babylon-cinema). Until the palco
+takes two, every holder breaks until it gets the new value — do it in one sitting:
+
+1. Generate a new value (`openssl rand -base64 48 | tr -d '/+=\n'`, ≥ 40 chars) in a shell variable.
+2. Palco (`palco` service on Railway, project of the hub): set `SANDBOX_TOKEN` and every alias that holds the same value
+   (`PALCO_PROXY`, `PALCO_PROXY_TOKEN`, `PROXY_TOKEN`, and the legacy `VMOS_PROXY*` / `GPU_POOL_TOKEN` if present) in
+   the Railway variables of the service (the dev API refuses to write these names: `SANDBOX_FETCH_DENY`), then restart
+   it. Check: `GET /api/sandbox-env` with the old token → 401, with the new → 200.
+3. Immediately, the services that fetch with it (each: Railway variable `SANDBOX_TOKEN` → new value, then restart):
+   `ai-gateway` (with the hot rotation build: `PUT $GW/v1/admin/access/sandbox-token {"token": "<new>"}` right after
+   the palco switch, then the Railway variable for the next boot; a running gateway keeps its keys when a reload
+   fails, but would boot without them on the old token), `ai-gateway-reaper` (fetches SCW/VAST keys
+   at each run; a run in between fails `NOT CHECKED`, harmless), `parle` prod (`parle-prod`) and `parle-stage`
+   (`backend/boot-env.ts`; a failed fetch does not stop the boot, but keys missing from the service are then absent).
+4. CI and runners: GitHub secret `SANDBOX_TOKEN` of `marcosremar/babylon-cinema` (workflows `ci`, `tests-full`,
+   `nightly`, `study-e2e`, `ci-contabo`), and the environment of the Contabo runners (`bun run ci:contabo status`).
+5. Agents and machines: `.env` of the babylon-cinema checkout (worktrees inherit it through `.worktreeinclude` — refresh
+   the existing ones), the ai-gateway checkouts that have one, Cursor / Kimi / Claude Code Web secrets, `PALCO_PROXY`
+   in the Cloud Agent, and any `.mcp.json` that carries it in `env`.
+6. Verify: `/health` of the gateway after its restart has its provider keys (`/health?details=1` with an admin key),
+   `bun run sandbox:check` passes from the Mac, the next nightly run of babylon-cinema passes the hub steps.
+
+#### 12.9.3 Replica TLS and SSH (S11) and the push key (S12) — `fix/security-remaining`
+
+- Vast replicas now serve their nginx front over TLS on the same mapped port: the gateway derives a private CA per
+  replica token, the boot script issues the leaf for `IP:$PUBLIC_IPADDR`, and every gateway → replica call (probe,
+  invoke, inference, s2s, streaming STT, realtime signaling/status/WS relay) trusts only that CA. The boot script also
+  deletes `/root/.ssh/authorized_keys` and stops `sshd`. A Vast replica that booted before this build speaks plain HTTP:
+  after the deploy the gateway cannot reach it and replaces it — deploy with no Vast replica serving (the school does not
+  use Vast today, § 12.8 item 4). Scaleway replicas are unchanged (still HTTP to their public IP: not covered here).
+- Proven only with fakes and a local nginx/Bun: on a real Vast host it remains to see that `PUBLIC_IPADDR` inside the
+  container equals the `public_ipaddr` the API reports (else the TLS check fails and the host is released as
+  `boot-timeout`), that `openssl` installs from the base image, that killing `sshd` sticks under `ssh_direct`, and
+  that the mapped SSH port then refuses connections.
+- `scripts/build-image-on-scaleway.ts` logs the build machine in with `SCW_REGISTRY_PUSH_SECRET_KEY` (IAM application
+  `aigw-registry-push`, created 2026-10-10, one policy `ContainerRegistryFullAccess` on the project only; key in the dev
+  API with `SCW_REGISTRY_PUSH_ACCESS_KEY`). Checked on 2026-10-10: the registry grants it `pull,push` and accepts a blob
+  upload; `GET /instance/v1/zones/fr-par-2/servers` returns 0 servers with it (4 with the master key). The master key
+  stays on the laptop side only (creates and deletes the machine). Rotation: same IAM steps, `PUT` the new secret.

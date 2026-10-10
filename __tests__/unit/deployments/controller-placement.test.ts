@@ -214,6 +214,31 @@ describe('RTT gate (Vast)', () => {
     await until(() => /earlier: .*RTT 60 ms > maxRttMs 50: released \(too-far\)/.test(controller.get('gpu')!.lastPlacement ?? ''));
   });
 
+  it('a replica still booting when the gateway restarts is gated like a fresh one; a serving one is adopted as is', async () => {
+    const vast = new FakeCloud(Date.now, 'vast');
+    vast.marketPriced = true;
+    vast.bootMs = 60_000;
+    vast.measureRtt = async () => { throw new Error('no answer yet'); };
+    const store = new MemoryDeploymentStore();
+    const first = new DeploymentController({ backends: { vast }, store, probe: new HttpReplicaProbe(1000), namespace: 'test' });
+    await first.init();
+    clouds.push(vast);
+    await first.put('booting', gpu);
+    await first.put('serving', gpu);
+    await until(() => vast.machines.size === 2);
+    const serving = [...vast.machines.values()].find(f => f.machine.deployment === 'serving')!;
+    serving.bootedAt = 0;
+    await new Promise(r => setTimeout(r, 5));
+    vast.measureRtt = async () => 90;
+    const second = new DeploymentController({ backends: { vast }, store, probe: new HttpReplicaProbe(1000), namespace: 'test' });
+    await second.init();
+    controllers.push(second);
+    await second.reconcile();
+    await second.reconcile();
+    expect(vast.releaseReasons).toEqual(['too-far']);
+    expect(vast.released).not.toContain(serving.machine.id);
+  });
+
   it('no RTT answer within the budget counts as too far; before it, the replica just waits (not served)', async () => {
     let offset = 0;
     const clock = () => Date.now() + offset;

@@ -26,6 +26,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { DeploymentError, type DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
+import { replicaTls } from '../deployments/replica-tls';
 import { applySttFilter, filterEnabled } from '../gateway/proxy/routes/stt-filter';
 import { denialError } from '../gateway/proxy/app-limits';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
@@ -316,9 +317,10 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         form.set('file', new Blob([new Uint8Array(audio)], { type: contentType }), 'turn');
         form.set('config', rawConfig);
         armGap();
-        const upstream = await f(`${replicaBase(lease.machine, lease.exposed)}/v1/s2s`, {
+        const base = replicaBase(lease.machine, lease.exposed);
+        const upstream = await f(`${base}/v1/s2s`, {
           method: 'POST', body: form, headers: { ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
-          signal: upstreamSignal,
+          signal: upstreamSignal, ...(replicaTls(base, lease.token)),
         });
         if (!upstream.ok || !upstream.body) throw new Error(`replica answered HTTP ${upstream.status}`);
         streaming = true;

@@ -9,6 +9,10 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { randomUUID } from 'crypto';
 import type { DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
+import { placementsOf } from '../deployments/placements';
+import { replicaTls } from '../deployments/replica-tls';
+import type { DeploymentSpec } from '../deployments/types';
+import { DEFAULT_SLOT_CTX, promptOverflow } from '../s2s/history';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import type { AppLimitDenial } from '../gateway/proxy/app-limits';
 import { EdgeStatusCache, type EdgeStatus, type EdgeStatusResult } from './edge-status';
@@ -26,6 +30,12 @@ import {
   configDigest, deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, signUpdateToken, verifySessionToken,
   RT_MAX_CFG_CHARS, RT_MAX_CFG_REF_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
 } from './token';
+
+function llmSlotContext(spec: DeploymentSpec | null): number {
+  if (!spec) return DEFAULT_SLOT_CTX;
+  const ctxOn = (place: DeploymentSpec) => Number(place.env?.LLM_SLOT_CTX ?? place.envByMachineType?.[place.machineType]?.LLM_SLOT_CTX) || DEFAULT_SLOT_CTX;
+  return Math.min(...placementsOf(spec).map(ctxOn));
+}
 
 export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list' | 'noteUdp'>>;
 
@@ -158,9 +168,9 @@ export class RealtimeService {
   async probeAll(): Promise<void> {
     for (const d of this.opts.controller?.list?.() ?? []) {
       if (!this.opts.controller?.specOf(d.name)?.realtime) continue;
-      const token = this.opts.controller.tokenOf(d.name);
-      if (!token) continue;
       for (const r of this.readyReplicas(d.name, true)) {
+        const token = this.opts.controller.tokenOf(d.name, r.id);
+        if (!token) continue;
         const s = await this.status.get(r.id, r.base, token);
         if (!s.ok) continue;
         reportExternalLoad(d.name, r.id, s.status.active, s.status.max, this.now());
@@ -201,6 +211,7 @@ export class RealtimeService {
       const res = await (this.opts.fetchImpl ?? fetch)(`${r.base}/__aigw/rt/net`, {
         method: 'POST', headers: { 'X-Aigw-Token': token, 'Content-Type': 'application/json', traceparent: trace.traceparent },
         body: JSON.stringify({ udpInbound: udp.result, rttMs: udp.rttMs, iceServers: turn }), signal: AbortSignal.timeout(20_000),
+        ...replicaTls(r.base, token),
       });
       if (res.ok) decided = await res.json() as typeof decided;
     } catch (err) {
@@ -278,7 +289,7 @@ export class RealtimeService {
     const exposed = !!this.opts.controller?.specOf(dep)?.exposure;
     return view.replicas
       .filter(r => r.phase === 'ready' && (draining || !r.draining) && r.ip)
-      .map(r => ({ id: r.id, base: replicaBase({ ip: r.ip } as never, exposed), stagesOut: r.stagesOut ?? [] }));
+      .map(r => ({ id: r.id, base: replicaBase(r, exposed), stagesOut: r.stagesOut ?? [] }));
   }
 
   /** `POST /v1/realtime/sessions` (behind the proxy's API-key auth). */
@@ -332,6 +343,11 @@ export class RealtimeService {
         'config_too_large'));
     }
     const byReference = cfg.length > RT_MAX_CFG_CHARS;
+    const tooLong = promptOverflow(cfgIn, llmSlotContext(controller.specOf(dep)));
+    if (tooLong) {
+      this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: 'prompt_too_large', status: 413, deployment: dep } });
+      return sendJson(res, 413, errorBody(tooLong, 'prompt_too_large'));
+    }
 
     const blocked = this.opts.devices?.admit(app, body.device, 'realtime') ?? null;
     if (blocked) {
@@ -348,7 +364,7 @@ export class RealtimeService {
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: code, status, deployment: dep } });
       return sendJson(res, status, errorBody(message, code, { fallback: FALLBACK }), { 'Retry-After': retryAfter });
     }
-    const replicaToken = controller.tokenOf(dep);
+    const replicaToken = controller.tokenOf(dep, placed.replica.id);
     if (!replicaToken) return sendJson(res, 503, errorBody('deployment has no replica token', 'cold', { fallback: FALLBACK }), { 'Retry-After': 5 });
 
     const ttl = this.ttlSeconds;
@@ -441,9 +457,8 @@ export class RealtimeService {
       const stages = [...new Set(every.flatMap(r => r.stagesOut))].join(', ');
       return { refusal: { status: 503, code: 'degraded', message: `deployment '${dep}': ${stages} failing on every ready replica`, retryAfter: 30 } };
     }
-    const token = controller.tokenOf(dep) ?? '';
     const results: Array<{ r: { id: string; base: string }; s: EdgeStatusResult }> = await Promise.all(
-      ready.map(async r => ({ r, s: await this.provenStatus(dep, r, token) })));
+      ready.map(async r => ({ r, s: await this.provenStatus(dep, r, controller.tokenOf(dep, r.id) ?? '') })));
     const candidates: ReplicaCandidate[] = [];
     for (const { r, s } of results) {
       if (!s.ok) continue;
@@ -481,8 +496,9 @@ export class RealtimeService {
   resolveToken(token: string): ResolvedSession | { status: number; code: string; message: string } {
     const peek = peekClaims(token);
     if (!peek) return { status: 401, code: 'invalid_token', message: 'malformed realtime session token' };
-    const replicaToken = this.opts.controller?.tokenOf(peek.dep) ?? null;
-    if (!replicaToken) return { status: 401, code: 'invalid_token', message: 'unknown deployment in session token' };
+    if (!this.opts.controller?.get(peek.dep)) return { status: 401, code: 'invalid_token', message: 'unknown deployment in session token' };
+    const replicaToken = this.opts.controller.tokenOf(peek.dep, peek.rep);
+    if (!replicaToken) return { status: 410, code: 'replica_gone', message: 'the replica of this session is gone: open a new session' };
     const verdict = verifySessionToken(token, deriveRealtimeKey(replicaToken), Math.floor(this.now() / 1000));
     if ('error' in verdict) return { status: 401, code: verdict.error === 'expired' ? 'token_expired' : 'invalid_token', message: `session token refused: ${verdict.error}` };
     const { claims } = verdict;
@@ -497,7 +513,7 @@ export class RealtimeService {
 
   private replicaBaseOf(dep: string, rep: string): string | null {
     const replica = this.opts.controller?.get(dep)?.replicas.find(r => r.id === rep && r.ip);
-    return replica ? replicaBase({ ip: replica.ip } as never, !!this.opts.controller?.specOf(dep)?.exposure) : null;
+    return replica ? replicaBase(replica, !!this.opts.controller?.specOf(dep)?.exposure) : null;
   }
 
   deviceBlocked(claims: Pick<RealtimeClaims, 'app' | 'dev'>): boolean {
@@ -508,11 +524,11 @@ export class RealtimeService {
     const open = [...this.sessions].filter(([, s]) => s.app === app && s.dev === device);
     await Promise.all(open.map(async ([sid, s]) => {
       const base = this.replicaBaseOf(s.dep, s.rep);
-      const token = this.opts.controller?.tokenOf(s.dep);
+      const token = this.opts.controller?.tokenOf(s.dep, s.rep);
       this.forget(sid);
       if (!base || !token) return;
       await (this.opts.fetchImpl ?? fetch)(`${base}/__aigw/rt/session/${encodeURIComponent(s.edgeSessionId ?? sid)}`, {
-        method: 'DELETE', headers: { 'X-Aigw-Token': token }, signal: AbortSignal.timeout(5_000),
+        method: 'DELETE', headers: { 'X-Aigw-Token': token }, signal: AbortSignal.timeout(5_000), ...replicaTls(base, token),
       }).catch(err => this.log('realtime: could not end a blocked device session', { sid, error: (err as Error).message }));
       this.emit(newTrace(), 'rt.session.deleted', { level: 'warn', sessionId: sid, attrs: { reason: 'device_blocked' } });
     }));
@@ -538,10 +554,10 @@ export class RealtimeService {
     }
     if (!deps.size && this.poller) { clearInterval(this.poller); this.poller = null; return; }
     for (const dep of deps) {
-      const token = this.opts.controller?.tokenOf(dep);
-      if (!token) continue;
       let active = 0;
       for (const r of this.readyReplicas(dep, true)) {
+        const token = this.opts.controller?.tokenOf(dep, r.id);
+        if (!token) continue;
         const s = await this.status.get(r.id, r.base, token, { fresh: true });
         if (!s.ok) continue;
         reportExternalLoad(dep, r.id, s.status.active, s.status.max, this.now());

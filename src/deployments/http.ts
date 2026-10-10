@@ -30,9 +30,10 @@ import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppDevices } from './app-devices';
 import type { AppFallbackService } from './app-fallback';
-import type { ClientStabilityLog } from './stability';
-import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
+import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
+import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import { createLogger } from '../logger';
+import { replicaTls } from './replica-tls';
 
 const log = createLogger('deployments-http');
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
@@ -43,6 +44,7 @@ import { noteStreamCut, type StreamCut } from '../telemetry/stream-cuts';
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
 const MAX_ADMIN_BODY = 16 * 1024 * 1024;
+const MAX_STABILITY_BODY = 512 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 export const INVOKE_IDLE_MS = 5 * 60_000;
 const HOP_BY_HOP = new Set([
@@ -96,7 +98,9 @@ export class HttpReplicaProbe implements ReplicaProbe {
   async check(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult> {
     if (!machine.ip) return 'down';
     const headers = { 'X-Aigw-Token': token };
-    const get = (path: string) => this.fetchImpl(`${replicaBase(machine, !!spec.exposure)}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
+    const base = replicaBase(machine, !!spec.exposure);
+    const tls = replicaTls(base, token);
+    const get = (path: string) => this.fetchImpl(`${base}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs), ...tls });
     const marker = await get('/__aigw/ready').catch(() => null);
     if (!marker?.ok) return 'down';
     const health = await get(spec.healthPath).catch(() => null);
@@ -105,9 +109,10 @@ export class HttpReplicaProbe implements ReplicaProbe {
   }
 }
 
-/** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`. */
-export function replicaBase(machine: ReplicaMachine, exposed = false): string {
-  return exposed && machine.ip && !machine.ip.includes(':') ? `http://${machine.ip}:${PROBE_PORT}` : `http://${machine.ip}`;
+/** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`; `tls` fronts (Vast) speak TLS. */
+export function replicaBase(machine: Pick<ReplicaMachine, 'ip' | 'tls'>, exposed = false): string {
+  const scheme = machine.tls ? 'https' : 'http';
+  return exposed && machine.ip && !machine.ip.includes(':') ? `${scheme}://${machine.ip}:${PROBE_PORT}` : `${scheme}://${machine.ip}`;
 }
 
 /**
@@ -147,6 +152,11 @@ export function replicaTarget(base: string, rest: string, query: string): URL | 
   return url.origin === origin && url.pathname.startsWith('/') ? url : null;
 }
 
+function withoutSecrets(spec: ProfileSpec): ProfileSpec {
+  const { env, envByMachineType, registryAuth, bootScript, files, fileUrls, ...rest } = spec as Record<string, unknown>;
+  return rest as ProfileSpec;
+}
+
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string | number> = {}): void {
   if (res.headersSent) { res.end(); return; }
   res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
@@ -164,8 +174,8 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const raw = await readBody(req, MAX_ADMIN_BODY);
+async function readJson(req: IncomingMessage, limit = MAX_ADMIN_BODY): Promise<Record<string, unknown>> {
+  const raw = await readBody(req, limit);
   if (!raw.length) return {};
   let parsed: unknown;
   try {
@@ -285,7 +295,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (sub === 'stability-report' && !imageName) {
       if (!opts.stability) return send(res, 404, { error: 'stability reports are not enabled on this gateway' });
       if (method === 'POST') {
-        const accepted = opts.stability.append(app, await readJson(req));
+        const accepted = opts.stability.append(app, await readJson(req, MAX_STABILITY_BODY));
+        if (accepted === null) return send(res, 429, { error: `at most ${MAX_REPORTS_PER_MINUTE} stability reports a minute per app` }, { 'Retry-After': '60' });
         return send(res, 200, { ok: true, accepted });
       }
       if (method === 'GET') {
@@ -303,6 +314,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (method === 'GET') {
       const image = registry.image(app, imageName);
       return image ? send(res, 200, image) : send(res, 404, { error: `app '${app}' has no image '${imageName}'` });
+    }
+    if ((method === 'PUT' || method === 'DELETE') && !isAdmin(req)) {
+      return send(res, 403, { error: 'saved app images run with the deployment\'s secrets: only an admin key may change them' });
     }
     if (method === 'PUT') {
       const { image, created } = await registry.putImage(app, imageName, await readJson(req));
@@ -347,7 +361,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           method,
           headers: { ...headers, ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
           body: body && body.length ? new Uint8Array(body) : undefined,
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS)]),
+          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS), ...(lease.signal ? [lease.signal] : [])]),
+          ...(replicaTls(target.href, lease.token)),
         });
       } catch (err) {
         // The client going away says nothing about the replica, and running out of time means busy: neither is a strike
@@ -379,7 +394,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           log.warn({ deployment: name, replica: lease.machine.id, path: rest, cut }, 'invoke: replica stream cut after the response started');
         }
       } finally {
-        lease.done(false);
+        lease.done(upstream.status >= 500 ? 'errored' : false);
       }
       return;
     }
@@ -412,7 +427,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (kind === 'apps') return appRoutes(req, res, parts, method);
 
     if (kind === 'profiles') {
-      if (!name && method === 'GET') return send(res, 200, { profiles: controller.listProfiles() });
+      if (!name && method === 'GET') {
+        const profiles = controller.listProfiles();
+        return send(res, 200, { profiles: isAdmin(req) ? profiles : profiles.map(p => (p.builtin ? p : { ...p, spec: withoutSecrets(p.spec) })) });
+      }
       if (name && !action && method === 'PUT') { admin(); return send(res, 200, await controller.putProfile(name, await readJson(req))); }
       if (name && !action && method === 'DELETE') {
         admin();

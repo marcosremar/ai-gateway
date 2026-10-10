@@ -88,7 +88,7 @@ decided per trace so a sampled trace is complete.
 2. **Beacon:** `navigator.sendBeacon` cannot set headers, so the session token may ride in the body
    (`{"token":"…","events":[…]}`), sent as `text/plain` (no CORS preflight).
 3. **App keys are server-to-server:** refused (403 `browser_app_key`) when the request has `Origin` or
-   `Sec-Fetch-Site` (Node and Bun `fetch` send neither); the SANDBOX_TOKEN family is always refused (403 `master_key`).
+   `Sec-Fetch-Site` (Node and Bun `fetch` send neither); the SANDBOX_TOKEN family is always refused, with the same `401 invalid_key` as a wrong key. An address with 20 failed credentials in a minute gets `429` for the rest of that minute.
 4. **Source per credential:** session token → always `browser`; edge → `edge` or `model`; app key → `app`, `browser`,
    `edge` or `model` as sent; `gateway` only from the gateway itself.
 5. **Clock sanity:** a source `ts` more than 24 h from the receive time is replaced by it and flagged

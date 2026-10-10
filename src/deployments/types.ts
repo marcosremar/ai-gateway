@@ -202,8 +202,10 @@ export interface Profile {
 /** Durable per-deployment state besides the spec. */
 export interface DeploymentRecord {
   spec: DeploymentSpec;
-  /** Shared secret the replica's front proxy requires (`X-Aigw-Token`). */
+  /** Deployment secret, never sent to a machine: each replica's `X-Aigw-Token` is derived from it and the machine's `tokenKey`. */
   replicaToken: string;
+  /** Replicas made before a secret rotation keep the secret their token came from: tokenKey (or `id:<machine>`) → secret. */
+  secretPins?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
   lastRequestAt: number | null;
@@ -221,7 +223,7 @@ export interface DeploymentRecord {
 }
 
 /**
- * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default UTC; an `end`
+ * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default Europe/Paris; an `end`
  * before `start` runs past midnight) on `days` (0 = Sunday; absent = every day), keep at least `minReplicas` up.
  */
 export interface WarmScheduleEntry {
@@ -308,11 +310,16 @@ export interface ReplicaMachine {
   /** When the provider takes the host back (Vast rental end, ms); absent when it never does (`expiry.ts`). */
   expiresAt?: number | null;
   placementNote?: string;
+  tokenKey?: string;
+  tls?: boolean;
+  /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
+  bootError?: string;
 }
 
 export interface CreateReplicaInput {
   spec: DeploymentSpec;
   replicaToken: string;
+  tokenKey?: string;
   cloudInit: string;
   namespace: string;
   /** user_data keys → bytes (boot-script `files`). */
@@ -364,7 +371,10 @@ export interface DeploymentBackend {
   /** Read-only: the market offers a create would try for this spec, best first (Vast). */
   previewOffers?(spec: DeploymentSpec): Promise<OfferPreview[]>;
   offersReport?(spec: DeploymentSpec): Promise<OffersReport>;
+  creditIssue?(): CreditIssue | null;
 }
+
+export interface CreditIssue { provider: DeploymentProvider; message: string; balanceUsd: number | null; floorUsd: number; since: number; at: number }
 
 export interface HostNote { rttMs?: number; baselineMs?: number | null; bootMs?: number; udp?: 'ok' | 'blocked' }
 
@@ -432,12 +442,16 @@ export interface DeploymentStore {
   deleteNetworkRelease(ipId: string): Promise<void>;
   saveProfile(profile: Profile): Promise<void>;
   deleteProfile(name: string): Promise<void>;
+  settled?(): Promise<void>;
+  readonly fresh?: boolean;
+  readonly writeError?: string | null;
 }
 
 export interface ReplicaView {
   id: string;
   phase: ReplicaPhase;
   ip: string | null;
+  tls?: boolean;
   providerState: string;
   zone: string;
   machineType: string;

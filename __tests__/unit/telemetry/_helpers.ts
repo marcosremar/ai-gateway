@@ -20,7 +20,6 @@ export function authDeps(overrides: Partial<TelemetryAuthDeps> = {}): TelemetryA
   return {
     resolveAppKey: (t) => (t === 'app-key' ? 'parle' : t === 'admin-key' ? 'ops' : t === 'sandbox-master' ? 'sandbox' : null),
     isMasterKey: (t) => t === 'sandbox-master',
-    deployment: (name) => (name === 'speech' ? { replicaToken: DEP_TOKEN, app: 'parle' } : name === 'other' ? { replicaToken: OTHER_TOKEN } : null),
     replica: (id) => (id === 'r-1' ? { deployment: 'speech', replicaToken: DEP_TOKEN, app: 'parle' }
       : id === 'r-9' ? { deployment: 'other', replicaToken: OTHER_TOKEN } : null),
     ...overrides,

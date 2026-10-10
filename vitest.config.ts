@@ -84,15 +84,6 @@ export default defineConfig({
     testTimeout: 60_000,
     hookTimeout: 30_000,
     sequence: { concurrent: false },
-    retry: 1,
-    // `EnvironmentTeardownError: Closing rpc while onUserConsoleLog was pending`
-    // surfaces as an "unhandled error" in vitest's final report even though
-    // every individual test passes. It's a worker-internal race between the
-    // rpc channel closing and async console.log flushes from module-level
-    // timers that outlive their test file. The tests themselves aren't
-    // failing — ignore these specific rejections so the exit code tracks
-    // actual assertion outcomes, not teardown choreography.
-    dangerouslyIgnoreUnhandledErrors: true,
     env: {
       SKIP_GPU_TESTS: process.env.SKIP_GPU_TESTS ?? '1',
       SKIP_LIVE_TESTS: process.env.SKIP_LIVE_TESTS ?? '1',

@@ -1,6 +1,8 @@
 /**
- * `GET /v1/realtime/ws?token=…` — the WebSocket rung of the ladder, relayed by the gateway to the session's replica
- * (`/__aigw/rt/ws?token=…`, ws:// or wss:// following `replicaBase`), frames passed through untouched both ways:
+ * `GET /v1/realtime/ws` with the session token as the subprotocol `aigw.token.<token>` (next to `aigw.rt`), or as
+ * `?token=` for older clients — the WebSocket rung of the ladder, relayed by the gateway to the session's replica
+ * (`/__aigw/rt/ws`, token in `X-Aigw-Session-Token`, never in a URL a log could keep; ws:// or wss:// following
+ * `replicaBase`), frames passed through untouched both ways:
  * text = JSON events / control messages, binary = audio (1-byte header 0x01 + PCM16 LE mono; 16 kHz up, 24 kHz down).
  *
  * The upstream connection opens first: a replica that refuses or is gone answers the browser with a plain HTTP error
@@ -13,6 +15,7 @@
 import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import NodeWebSocket from 'ws';
+import { replicaTls } from '../deployments/replica-tls';
 import type { RealtimeService } from './service';
 import { TRACE_ID_HEADER, childTraceparent, traceOf } from './trace';
 import {
@@ -20,6 +23,8 @@ import {
 } from './ws-frames';
 
 export const WS_PATH = '/v1/realtime/ws';
+export const WS_PROTOCOL = 'aigw.rt';
+export const TOKEN_PROTOCOL_PREFIX = 'aigw.token.';
 const HIGH_WATER = 1024 * 1024;
 const LOW_WATER = 256 * 1024;
 const MAX_BACKLOG = 1024 * 1024;
@@ -40,14 +45,14 @@ interface Upstream {
   close(code?: number, reason?: string): void;
 }
 
-export type UpstreamFactory = (url: string, headers: Record<string, string>) => Upstream;
+export type UpstreamFactory = (url: string, headers: Record<string, string>, tls?: { ca: string }) => Upstream;
 
-/** Bun's global WebSocket takes `{ headers }`; under Node the `ws` package does. */
-export const defaultUpstream: UpstreamFactory = (url, headers) => {
+/** Bun's global WebSocket takes `{ headers, tls }`; under Node the `ws` package takes `{ headers, ca }`. */
+export const defaultUpstream: UpstreamFactory = (url, headers, tls) => {
   if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') {
-    return new (WebSocket as unknown as new (u: string, o: { headers: Record<string, string> }) => Upstream)(url, { headers });
+    return new (WebSocket as unknown as new (u: string, o: { headers: Record<string, string>; tls?: { ca: string } }) => Upstream)(url, { headers, ...(tls ? { tls } : {}) });
   }
-  return new NodeWebSocket(url, { headers, maxPayload: MAX_MESSAGE }) as unknown as Upstream;
+  return new NodeWebSocket(url, { headers, maxPayload: MAX_MESSAGE, ...(tls ? { ca: tls.ca } : {}) }) as unknown as Upstream;
 };
 
 export interface WsRelayOptions {
@@ -72,7 +77,8 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
     if (url.pathname !== WS_PATH) return false;
     const key = req.headers['sec-websocket-key'];
     if (typeof key !== 'string' || req.headers['sec-websocket-version'] !== '13') { refuse(socket, 400, 'not a WebSocket 13 upgrade'); return true; }
-    const token = url.searchParams.get('token') ?? '';
+    const offered = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map(p => p.trim()).filter(Boolean);
+    const token = url.searchParams.get('token') ?? offered.find(p => p.startsWith(TOKEN_PROTOCOL_PREFIX))?.slice(TOKEN_PROTOCOL_PREFIX.length) ?? '';
     const trace = traceOf(req);
     const traceHeader = { [TRACE_ID_HEADER]: trace.traceId };
     const session = service.resolveToken(token);
@@ -83,9 +89,12 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
     }
     const startedAt = Date.now();
 
-    const target = `${session.base.replace(/^http/, 'ws')}/__aigw/rt/ws?token=${encodeURIComponent(token)}`;
+    const target = `${session.base.replace(/^http/, 'ws')}/__aigw/rt/ws`;
     let upstream: Upstream;
-    try { upstream = open(target, { 'X-Aigw-Token': session.replicaToken, traceparent: childTraceparent(trace) }); } catch (err) {
+    try {
+      upstream = open(target, { 'X-Aigw-Token': session.replicaToken, 'X-Aigw-Session-Token': token, traceparent: childTraceparent(trace) },
+        replicaTls(target, session.replicaToken).tls);
+    } catch (err) {
       refuse(socket, 502, `replica unreachable: ${(err as Error).message}`, traceHeader);
       return true;
     }
@@ -164,7 +173,7 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
       opened = true;
       active++;
       clearTimeout(connectTimer);
-      socket.write(handshakeResponse(key, traceHeader));
+      socket.write(handshakeResponse(key, offered.includes(WS_PROTOCOL) ? { ...traceHeader, 'Sec-WebSocket-Protocol': WS_PROTOCOL } : traceHeader));
       socket.off('data', collectEarly);
       socket.on('data', onClientData);
       service.settle(sid);

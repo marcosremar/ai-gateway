@@ -23,6 +23,7 @@
 import type { DeploymentController, Lease } from './deployments/controller';
 import { noWakeActive, recordNoWakeSkip } from './gateway/proxy/no-wake';
 import { replicaBase } from './deployments/http';
+import { replicaTls } from './deployments/replica-tls';
 import { outgoingTraceHeaders } from './telemetry/trace-context';
 
 const FIREWORKS_STREAMING_URL =
@@ -141,6 +142,7 @@ export class StreamingSTTBackend {
    */
   onFinalize?: (failed: boolean) => void;
   private _finalized = false;
+  private readonly _tls?: { ca: string };
   private _finalize(failed: boolean): void {
     if (this._finalized) return;
     this._finalized = true;
@@ -156,8 +158,10 @@ export class StreamingSTTBackend {
       connectTimeoutMs?: number;
       maxTextLength?: number;
       maxBufferBytes?: number;
+      tls?: { ca: string };
     },
   ) {
+    this._tls = options?.tls;
     this._logger = options?.logger;
     this._connectTimeoutMs = options?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this._maxTextLength = options?.maxTextLength ?? DEFAULT_MAX_TEXT_LENGTH;
@@ -224,7 +228,7 @@ export class StreamingSTTBackend {
 
     // Bun exposes WebSocket globally (same API as browser but runs server-side)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ws = new WebSocket(this.url, { headers: this.headers } as any);
+    const ws = new WebSocket(this.url, { headers: this.headers, ...(this._tls ? { tls: this._tls } : {}) } as any);
     this.ws = ws;
     this._aborted = false;
 
@@ -493,7 +497,8 @@ export class StreamingSTTRouter {
     const qs = this._buildParams(language, params);
     const wsUrl = replicaBase(lease.machine, lease.exposed).replace(/^http/, 'ws')
       + `/ws/audio-stream?${qs}`;
-    const backend = new StreamingSTTBackend(wsUrl, { ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token }, 'deployment', backendOptions);
+    const backend = new StreamingSTTBackend(wsUrl, { ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token }, 'deployment',
+      { ...backendOptions, ...(replicaTls(wsUrl, lease.token)) });
     // The lease spans the whole stream: released on close, failed on a connection-level drop.
     backend.onFinalize = (failed) => lease.done(failed);
     return backend;

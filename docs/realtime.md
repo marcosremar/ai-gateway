@@ -11,7 +11,7 @@ browser ◀──────────── session descriptor (token, trans
    │
    ├─ webrtc   : offer ──▶ gateway /v1/realtime/sessions/:id/offer ──▶ replica /__aigw/rt/offer ; media + "events"
    │             data channel browser ⇄ replica DIRECTLY (UDP, or TURN over TCP/443)
-   ├─ ws       : wss://gateway/v1/realtime/ws?token= ⇄ (relay) ⇄ ws://replica/__aigw/rt/ws?token=
+   ├─ ws       : wss://gateway/v1/realtime/ws (subprotocol aigw.token.<jwt>) ⇄ (relay) ⇄ ws://replica/__aigw/rt/ws (X-Aigw-Session-Token)
    ├─ s2s-stream: one HTTP request per turn via the app backend → gateway /v1/s2s (streamed frames)
    └─ post     : the app's own request/response endpoint (caller's `postTurn`)
 ```
@@ -30,10 +30,10 @@ inside the token (`cfg`).
 
 ### Session token
 
-JWT HS256. Signing key per deployment, derived from the replica token (never leaves the gateway or the replica):
+JWT HS256. Signing key per replica, derived from that replica's token (never leaves the gateway or the replica):
 
 ```
-key = HMAC-SHA256(key = <deployment replicaToken>, message = "aigw-rt-v1")      # 32 raw bytes
+key = HMAC-SHA256(key = <the replica's token>, message = "aigw-rt-v1")      # 32 raw bytes
 claims = { sid, app, dep, rep, cfg, [dev], iat, exp, [cfd] }    # serialized in this order; base64url without padding
   sid  session id (rt_<32 hex>)      app  app account      dep  deployment      rep  replica id
   cfg  base64url(JSON(session config)), ≤ 6 KB (6144 characters); "" with `cfd` when the config goes by reference (below)
@@ -74,8 +74,12 @@ by-reference session (it never sends the config); configs that fit keep riding i
 | 16 KB | ~5470 | cannot work | **cannot work** | ~2500 left |
 
 The estimate is deliberately high (llama.cpp counts ~3.6 bytes per token for Portuguese), so the real room is a
-little larger; the LLM's own count decides. A prompt over the slot is not refused at admission (the gateway does not
-know the replica's slot): every turn ends with `error{code:"upstream"}`, stage `llm`, HTTP 400 "context size".
+little larger; the LLM's own count decides. A config that leaves under 64 tokens for the learner's turn (system prompt +
+`system` messages + `user_template` + `max_tokens` + 64) is **refused at admission** with `413 prompt_too_large`: the
+gateway takes the smallest `LLM_SLOT_CTX` of the deployment's places (`env`, else `envByMachineType`, else 2048), and
+the edge checks again against the slot its replica reports (WS: `error{code:"prompt_too_large"}` then close 1008;
+WebRTC offer: 413). Before, such a session opened and every turn ended with `error{code:"upstream"}`, stage `llm`, HTTP
+400 "context size".
 
 ### Edge routes (on the replica, behind the nginx token gate)
 
@@ -88,7 +92,7 @@ replica's HTTP; only WebRTC media/data go to it directly, and WS goes through th
 | `POST /__aigw/rt/ice` | `{sessionId, candidate}` (trickle, optional — the SDK v1 sends a complete SDP) |
 | `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi]}` |
 | `DELETE /__aigw/rt/session/:id` | ends a session (the `sessionId` the offer answered) |
-| `GET /__aigw/rt/ws?token=…` | WebSocket (relayed from the gateway's `/v1/realtime/ws`) |
+| `GET /__aigw/rt/ws` | WebSocket (relayed from the gateway's `/v1/realtime/ws`); the session token in `X-Aigw-Session-Token` (`?token=` still read); nginx keeps no access/error log line for it |
 
 `max` comes from the spec env `RT_MAX_SESSIONS` (default L40S 4, L4 2 through `envByMachineType`: what one replica
 serves with the **maximum** first audio under 2.5 s — measured on the L40S, docs/reports/2026-10-07-realtime-handoff.md
@@ -350,8 +354,11 @@ is unchanged). CORS is open (`*`, no credentials): the bearer is the only author
 - `POST /v1/realtime/sessions/:id/offer` `{sdp}` → the replica's `/__aigw/rt/offer` → `{sdp, type:"answer", sessionId}`.
   The token's `sid` must equal `:id` (403). Edge 409/429/503 → 503 `saturated`; unreachable → 502.
 - `POST /v1/realtime/sessions/:id/ice` `{candidate}` (trickle, optional), `DELETE /v1/realtime/sessions/:id`.
-- `GET /v1/realtime/ws?token=…` upgrade: the gateway first opens the replica's `/__aigw/rt/ws` (`ws://`, or `wss://`
-  when `replicaBase` turns to https) with `X-Aigw-Token`, and only then answers 101 — a refusal is a plain HTTP error
+- `GET /v1/realtime/ws` upgrade, the token as the subprotocol `aigw.token.<jwt>` next to `aigw.rt` (answered with
+  `Sec-WebSocket-Protocol: aigw.rt`; what the browser SDK sends), or `?token=` for older clients — a URL ends up in
+  logs, a subprotocol does not (audit 2026-10-09 #19). The gateway first opens the replica's `/__aigw/rt/ws` (`ws://`,
+  or `wss://` when `replicaBase` turns to https) with `X-Aigw-Token` and the session token in `X-Aigw-Session-Token`
+  (never in the URL), and only then answers 101 — a refusal is a plain HTTP error
   (401 bad token, 410 replica gone, 502 replica refused, 504 timeout) the SDK reads as "next rung". Frames pass through
   untouched; close codes and reasons cross both ways; pings every 20 s. Backpressure: the browser socket is paused
   while the replica's buffer is over 1 MiB (resumed under 256 KiB); a browser that stops reading (> 1 MiB queued, ~20 s
@@ -733,10 +740,12 @@ shows in the failure rate; the latency a real learner would then get on `/v1/s2s
 - **failed**: no session at the turn's time (admission refused, connect failed, session lost), no `done` within
   `--turn-timeout`, `error` before any audio, `empty`/`filtered` transcript, no audio.
 - **truncated**: `error` (or a lost session, or no `done`) *after* audio started — the GPU round-2 case — or a clean
-  `done` whose audio is too short for its reply: audio ms per reply character under `--trunc-ratio` (0.75) of the run's
-  90th-percentile rate for that client (`--ms-per-char` fixes the reference instead; fewer than 5 clean turns: not judged). The realtime events do not
-  announce sentences, so a missing sentence can only be seen as missing duration: one that is under 25 % of the reply
-  passes at the default ratio (with the fake model's fixed-rate audio use `--trunc-ratio 0.9`).
+  `done` whose audio is too short for its reply: audio ms per reply character under `--trunc-ratio` (0.6) of the run's
+  median rate for that client (`--ms-per-char` fixes the reference instead; fewer than 5 clean turns: not judged). The realtime events do not
+  announce sentences, so a missing sentence can only be seen as missing duration: one that is under 40 % of the reply
+  passes at the default ratio (with the fake model's fixed-rate audio use `--trunc-ratio 0.9`). The 0.75 × p90 rule it
+  replaced flagged honest replies (MAI voice 72–94 ms per character, lowest clean reply at 0.60 of p90; GPU voice clean
+  replies at 59–62 ms per character), so the reference is the median and the ratio sits under the lowest clean reply seen.
 
 Latency shares (≤ 1.0 / 1.5 / 2.0 s) are over **all attempted turns**: a failed turn counts as over 2 s.
 

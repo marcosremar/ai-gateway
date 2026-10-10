@@ -176,7 +176,7 @@ export interface SpeechRequest extends CallOptions {
   speed?: number;
   language?: string;
   stream?: boolean;
-  /** Any other field goes to self-hosted targets as-is (ref_audio, ref_text, task_type, …). */
+  /** Self-hosted targets also get task_type, ref_audio (inline data: URI only), ref_text, language, stream_format and instructions; other fields are dropped. */
   [key: string]: unknown;
 }
 

@@ -29,7 +29,9 @@ const ENV_PINNED = new Set<string>([...TOKEN_ALIASES, 'PORT', 'NODE_ENV', 'GATEW
  * A local gateway that got the real SCW_SECRET_KEY from the palco plus the production namespace would release the
  * production replicas as orphans (controller reconcile) — the namespace must come from the host only.
  */
-const HOST_ONLY = new Set<string>(['DEPLOYMENTS_NAMESPACE', 'DEPLOYMENTS_STATE_DIR', 'DEPLOYMENTS_ENABLED']);
+const HOST_ONLY = new Set<string>([
+  'DEPLOYMENTS_NAMESPACE', 'DEPLOYMENTS_STATE_DIR', 'DEPLOYMENTS_ENABLED', 'ACCEPT_SANDBOX_TOKEN_AS_KEY', 'SANDBOX_TOKEN_ADMIN', 'SANDBOX_TOKEN_APP',
+]);
 
 /**
  * Names that point the gateway at a host: `OPENROUTER_API_BASE`, `GROQ_API_BASE`, `WHISPER_SERVER_BASE_URL`,
@@ -72,11 +74,15 @@ export function principalSandboxToken(env: Record<string, string | undefined>): 
 /** User id of the SANDBOX_TOKEN when `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only). */
 export const SANDBOX_USER = 'sandbox';
 
+export function sandboxIsAdmin(env: Record<string, string | undefined>): boolean {
+  return env.SANDBOX_TOKEN_ADMIN?.trim() === '1';
+}
+
 /**
  * The gateway's client keys: `GATEWAY_API_KEYS` ("key:user", comma-separated). The SANDBOX_TOKEN (and its aliases)
  * is the dev API's master key — the gateway uses it only to FETCH its own provider keys from the palco — and is NOT a
- * client key nor an admin (owner decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` restores the old behaviour
- * (accepted as user `sandbox`, admin) for the transition, until the parle build that sends its own AI_GATEWAY_KEY ships.
+ * client key nor an admin (owner decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` accepts it as user `sandbox`
+ * for the transition (non-admin and no-wake; admin only with `SANDBOX_TOKEN_ADMIN=1`).
  */
 export function gatewayClientKeys(env: Record<string, string | undefined>): { keys: string[]; sandboxAdmins: string[]; warnings: string[] } {
   const keys = (env.GATEWAY_API_KEYS ?? '').split(',').map(k => k.trim()).filter(Boolean);
@@ -87,9 +93,10 @@ export function gatewayClientKeys(env: Record<string, string | undefined>): { ke
     warnings.push('SANDBOX_TOKEN contains , or : — not accepted as an API key');
     return { keys, sandboxAdmins: [], warnings };
   }
-  warnings.push('ACCEPT_SANDBOX_TOKEN_AS_KEY=1: the SANDBOX_TOKEN is accepted as an admin client key (transition only — '
-    + 'give the client its own GATEWAY_API_KEYS entry and remove the flag)');
-  return { keys: [...keys, `${token}:${SANDBOX_USER}`], sandboxAdmins: [SANDBOX_USER], warnings };
+  const admin = sandboxIsAdmin(env);
+  warnings.push(`ACCEPT_SANDBOX_TOKEN_AS_KEY=1: the SANDBOX_TOKEN is accepted as ${admin ? 'an ADMIN (SANDBOX_TOKEN_ADMIN=1)' : 'a non-admin, no-wake'} `
+    + 'client key (transition only — give the client its own GATEWAY_API_KEYS entry and remove the flag)');
+  return { keys: [...keys, `${token}:${SANDBOX_USER}`], sandboxAdmins: admin ? [SANDBOX_USER] : [], warnings };
 }
 
 export function sandboxEnvUrls(env: Record<string, string | undefined>): string[] {

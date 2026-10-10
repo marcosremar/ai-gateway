@@ -65,7 +65,7 @@ let h: Harness;
 const extra: Harness[] = [];
 
 async function close(x: Harness) {
-  x.controller.stop();
+  await x.controller.stop();
   x.server.closeAllConnections();
   await new Promise<void>(r => x.server.close(() => r()));
 }
@@ -450,7 +450,8 @@ describe('deployments API', () => {
       const res = await call(again, 'GET', '/v1/deployments/keep/invoke/', undefined, SITE);
       expect(res.status).toBe(200);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      for (const x of extra.splice(0)) await close(x);
+      await rm(dir, { recursive: true, force: true, maxRetries: 20 });
     }
   });
 
@@ -503,8 +504,8 @@ describe('app accounts: saved image addresses per app', () => {
   it('apps are isolated: a key sees and edits only its own app, cannot act for another', async () => {
     await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000 }, ADMIN, asParle);
     await call(h, 'PUT', '/v1/deployments/parle-echo', { profile: 'cpu-echo' }, ADMIN, asParle);
-    // site-a (a normal key) manages its own account…
-    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE)).status).toBe(201);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE)).status).toBe(403);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, ADMIN, { 'x-app': 'site-a' })).status).toBe(201);
     // …but not parle's, and cannot impersonate it
     expect((await call(h, 'GET', '/v1/apps/parle', undefined, SITE)).status).toBe(403);
     expect((await call(h, 'GET', '/v1/apps/site-a', undefined, SITE, asParle)).status).toBe(403);

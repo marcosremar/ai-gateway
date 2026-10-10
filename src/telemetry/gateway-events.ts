@@ -24,9 +24,13 @@ const MAP: Record<string, { event: string; level?: TelemetryLevel }> = {
   'deployments: stage back in rotation': { event: 'replica.stage_back' },
   'deployments: draining replica': { event: 'replica.draining' },
   'deployments: releasing replica': { event: 'replica.released' },
+  'deployments: replica gone': { event: 'replica.gone', level: 'warn' },
   'deployments: parking replica (power off)': { event: 'replica.parked' },
   'deployments: powering parked replica on': { event: 'replica.power_on' },
   'deployments: list failed': { event: 'provider.list_failed', level: 'warn' },
+  'deployments: provider credit exhausted': { event: 'provider.credit_exhausted', level: 'error' },
+  'deployments: provider credit back': { event: 'provider.credit_back' },
+  'deployments: vast offer too far before renting': { event: 'replica.too_far_before_rent', level: 'warn' },
 };
 
 export function deploymentLogToTelemetry(msg: string, data?: Record<string, unknown>): void {

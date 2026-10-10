@@ -12,7 +12,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
-const shouldRun = GROQ_API_KEY || OPENROUTER_API_KEY;
+const shouldRun = (GROQ_API_KEY || OPENROUTER_API_KEY) && process.env.SKIP_LIVE_TESTS !== '1';
 
 (shouldRun ? describe : describe.skip)('LoadBalancer Integration Tests', () => {
   const GROQ_KEY = GROQ_API_KEY!;

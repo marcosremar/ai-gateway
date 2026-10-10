@@ -99,6 +99,21 @@ describe('AppLimits', () => {
     expect(l.budgets()).toEqual([]);
   });
 
+  it('budgets(): after a 429 the exhausted budget shows when it ran out, not null (T11)', () => {
+    let t = Date.parse('2026-10-06T12:00:00Z');
+    const l = limits({ APP_DAILY_REQUESTS: '2' }, () => t);
+    expect(l.check('parle', 'tts', tts1000)).toBeNull();
+    expect(l.check('parle', 'tts', tts1000)).toBeNull();
+    t += 60_000;
+    expect(l.check('parle', 'tts', tts1000)).toMatchObject({ status: 429, budget: 'requests' });
+    t += 30 * 60_000;
+    expect(l.check('parle', 'tts', tts1000)).toMatchObject({ status: 429 });
+    expect(l.budgets()[0].requests).toMatchObject({ used: 2, limit: 2, exhaustedAt: '2026-10-06T12:01:00.000Z' });
+    t = Date.parse('2026-10-07T00:00:01Z');
+    expect(l.check('parle', 'tts', tts1000)).toBeNull();
+    expect(l.budgets()[0].requests.exhaustedAt).toBeNull();
+  });
+
   it('budgets(): the rate is the last 5-10 minutes, not the whole day', () => {
     let t = Date.parse('2026-10-06T08:00:00Z');
     const l = limits({ APP_DAILY_TOKENS: '2000000' }, () => t);

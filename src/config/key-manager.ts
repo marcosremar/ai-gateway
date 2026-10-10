@@ -12,8 +12,8 @@
  * on the next request. Results and logs carry key NAMES only, never values.
  */
 
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { CustomRoute } from '../gateway/proxy/types';
+import { readJsonBody, type AdminGate } from './admin-gate';
 import { isEnvPinned, loadSandboxEnv, principalSandboxToken, sandboxEnvUrls } from './sandbox-env';
 
 export const RELOAD_INTERVAL_MS = 5 * 60_000;
@@ -133,68 +133,31 @@ export class KeyManager {
   }
 }
 
-const MAX_KEYS_BODY = 64 * 1024;
-
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > MAX_KEYS_BODY) throw new KeyManagerError(413, 'body too large');
-    chunks.push(chunk as Buffer);
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-  } catch {
-    throw new KeyManagerError(400, 'body must be JSON');
-  }
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(body));
-}
-
 /**
  * Admin routes (mounted as proxy custom routes, i.e. after the API-key check):
  *   POST /v1/admin/keys/reload   re-read the palco now          → { ok, changed, removed, errors }
  *   PUT  /v1/admin/keys          {NAME: value} → palco, reload   → { written, changed, removed }
- * `authorize(bearer)` restricts them to admin keys (DEPLOYMENTS_ADMIN_USERS).
+ * The gate restricts them to admin keys, rate-limits them and audits each change (names only).
  */
-export function createKeyAdminRoutes(manager: KeyManager, authorize: (bearerToken: string) => boolean): CustomRoute[] {
-  const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
-    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (token && authorize(token)) return true;
-    sendJson(res, 403, { error: { message: 'this API key cannot manage gateway keys', type: 'permission_error' } });
-    return false;
-  };
-  const fail = (res: ServerResponse, err: unknown) => {
-    const status = err instanceof KeyManagerError ? err.status : 500;
-    const message = err instanceof KeyManagerError ? err.message : 'key operation failed';
-    sendJson(res, status, { error: { message, type: status >= 500 ? 'server_error' : 'invalid_request_error' } });
-  };
+export function createKeyAdminRoutes(manager: KeyManager, gate: AdminGate): CustomRoute[] {
   return [
     {
       method: 'POST',
       path: '/v1/admin/keys/reload',
-      handler: async (req, res) => {
-        if (!guard(req, res)) return;
-        try {
-          const r = await manager.reload();
-          sendJson(res, r.ok ? 200 : 502, { ok: r.ok, changed: r.changed, removed: r.removed, errors: r.errors });
-        } catch (err) { fail(res, err); }
-      },
+      handler: (req, res) => gate.run(req, res, 'provider-keys.reload', async () => {
+        const r = await manager.reload();
+        return { status: r.ok ? 200 : 502, body: { ok: r.ok, changed: r.changed, removed: r.removed, errors: r.errors }, names: [...r.changed, ...r.removed], ok: r.ok };
+      }),
     },
     {
       method: 'PUT',
       path: '/v1/admin/keys',
-      handler: async (req, res) => {
-        if (!guard(req, res)) return;
-        try {
-          const { written, reload } = await manager.write(await readJsonBody(req));
-          sendJson(res, 200, { written, reloaded: reload.ok, changed: reload.changed, removed: reload.removed });
-        } catch (err) { fail(res, err); }
-      },
+      handler: (req, res) => gate.run(req, res, 'provider-keys.write', async (_actor, note) => {
+        const body = await readJsonBody(req);
+        note.names = Object.keys(body).filter(n => KEY_NAME.test(n));
+        const { written, reload } = await manager.write(body);
+        return { status: 200, body: { written, reloaded: reload.ok, changed: reload.changed, removed: reload.removed }, names: written };
+      }),
     },
   ];
 }

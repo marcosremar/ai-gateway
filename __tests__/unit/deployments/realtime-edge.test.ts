@@ -28,8 +28,10 @@ const hasNginx = spawnSync('nginx', ['-v']).status === 0;
 
 describe('cloud-init with and without realtime', () => {
   it('the sidecar is the edge the speech-stack image ships', () => {
-    const tag = /^ARG EDGE_TAG=(\S+)$/m.exec(readFileSync(join(__dirname, '../../../docker/speech-stack/Dockerfile'), 'utf8'))![1];
-    expect(DEFAULT_EDGE_IMAGE).toBe(`ghcr.io/marcosremar/aigw-edge:${tag}`);
+    const dockerfile = readFileSync(join(__dirname, '../../../docker/speech-stack/Dockerfile'), 'utf8');
+    const tag = /^ARG EDGE_TAG=(\S+)$/m.exec(dockerfile)![1];
+    const digest = /^ARG EDGE_DIGEST=(sha256:[0-9a-f]{64})$/m.exec(dockerfile)![1];
+    expect(DEFAULT_EDGE_IMAGE).toBe(`ghcr.io/marcosremar/aigw-edge:${tag}@${digest}`);
   });
 
   it('without realtime: no edge, no /__aigw/rt/ route', () => {
@@ -189,7 +191,7 @@ function fakeClient() {
 describe('firewall of realtime replicas (fake Scaleway)', () => {
   it('a realtime replica gets the shared realtime group: TCP 80 + its UDP range; a plain one keeps the gateway-only group', async () => {
     const client = fakeClient();
-    const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
+    const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj', registrySecret: 'registry-read-only' });
     await backend.createReplica({ spec: speech({ realtime: {} }), replicaToken: TOKEN, cloudInit: 'x', namespace: 'prod' });
     await backend.createReplica({ spec: speech({ realtime: {} }), replicaToken: TOKEN, cloudInit: 'x', namespace: 'prod' });
     await backend.createReplica({ spec: speech(), replicaToken: TOKEN, cloudInit: 'x', namespace: 'prod' });

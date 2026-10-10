@@ -2036,6 +2036,134 @@ limpa os dois empatam nos clientes leves e o Chrome paga 100–180 ms pelo jitte
 WebRTC ganha 290 e 250 ms no p95 e 800 ms no máximo, e o WS teve os únicos turnos perdidos. Trocar o padrão para WS só
 compensa numa turma em rede boa e estável.
 
+## Prova ao vivo da integração (#70) — 2026-10-09
+
+Branch `rt/integration-2` (PR #70: #67, #68, #63, #62, #64, #66 e agora #65). Gateway local em :4180 a partir do
+worktree da integração (`bun serve.ts`, namespace `marcos-proof-70`, estado próprio, `DEPLOYMENTS_MAX_EUR_PER_HOUR=4`),
+máquinas só pela API dele. Scaleway L40S-1-48G fr-par-2 do perfil `speech-stack` (€1,4699/h), um por vez. Sexta 09/10,
+04:13 → 06:49 Europe/Paris; produção só lida. Mesmo clipe sintético de 4,5 s e voz `abf` do catálogo da réplica.
+Relógio dos números de latência: última amostra com voz enviada → primeiro áudio não silencioso recebido (os 700 ms de
+endpointing estão dentro).
+
+**Duas máquinas, em sequência.**
+
+| | Imagem | Edge | `LLM_SLOT_CTX` | Quando |
+|---|---|---|---|---|
+| `p70-a` | `rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0003` | `realtime.edgeImage` = `ghcr.io/marcosremar/aigw-edge:79722253` (o fixado) | 2048 | 04:13 → 05:04 |
+| `p70-b` | `rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213` (a fixada, com `GET /debug/gpu`) | o do perfil, `79722253` | 4096 | 05:04 → 06:49 |
+
+Os itens 4, 5, 6, 7 (reserva, reaper), 10 (2048) e 12a/b rodaram em `p70-a`: o código do edge é o mesmo de `p70-b`
+(`79722253`), só a imagem dos modelos é a anterior (sem `/debug/gpu`). Os itens 1, 2, 3, 7 (limites por app,
+`tts_overlong`), 10 (4096) e 11 rodaram em `p70-b`, a combinação exata que o branch fixa.
+
+**Interrupção.** O gateway local recebeu SIGTERM às 05:11 (cota da sessão do agente, não falha do código) com `p70-b`
+recém-criado. Reiniciado às 05:19 no mesmo diretório de estado: a réplica foi **adotada** (`ready`, `udp: ok` em 15 s),
+nenhuma máquina órfã. Durante os 8 min sem gateway nada recolheria a máquina — o «deadman» (DELETE agendado) seguia vivo.
+
+### Veredito por item
+
+| # | Item | Resultado |
+|---|---|---|
+| 1 | Primeiro boot da imagem nova, um turno por degrau, `done.served` | **passou**: `20261009-0213` sobe no L40S, `/health` `warm`, `llm_ctx` 4096, modelos `large-v3` / `Qwen3.5-9B-Q4_K_M.gguf` / `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. `ws`: primeiro som 822 ms, `served` completo (`voice abf`, `opener false`, `transport ws`). `webrtc` (em `p70-a`, mesmo edge): 1386 ms audível no Chrome, `served` completo. `s2s-stream` (Chrome): 736 ms no relógio do aluno, sem `served`. POST `/v1/s2s`: 200, primeiro byte 690 ms, 5,7 s de áudio, `route` = `deployment:p70-b`, sem `served`. **`served` só existe nas sessões do edge e no caminho composto (fallback)**: no degrau de clipe servido pela GPU quem respondeu sai do `route` / `X-Gateway-Provider`, como a doc diz (`docs/realtime.md` § served) |
+| 2 | Regressão de base, 4 WS + 4 WebRTC, 760 s | **passou no teto, pior no p50 do WS**: WS 1278 / 1755 / 1936 (n 198), WebRTC 1319 / 1861 / 2015 (n 196). Ontem WS 1036 / 1744 / 1980 e WebRTC 1298 / 1893 / 1944. Máximo 2015 ≤ 2500. 0 falhas, 0 erros, 47 turnos com abertura (11,9 %). Ver «4096 por slot» abaixo: o LLM foi de 198 a 461 ms ao longo da rodada |
+| 3 | Capacidade com tempo de pensar (`--think 2-6`, 300 s, WS) | **passou**: 8 alunos 1013 / 1545 / 1743 (n 150, 0 % aberturas); 12 alunos 1279 / 1750 / 1932 (n 214, 12,1 % aberturas; áudio da resposta 1279 / 2920 / 3345). Ontem com 8: 1131 / 1743 / 2008, 1 %. 0 erros de upstream (ontem 1 a 12) |
+| 4 | #67 no edge real | **passou**: `config_update` com `system`/`voice`, com `messages` de papel `system` e com `max_tokens` → `error forbidden` cada um, o turno seguinte responde com a persona assinada; os frames que o SDK manda de verdade (`messages` user / assistant, a chave de abertura) aceitos sem erro e usados (a resposta seguinte chama o aluno pelo nome que veio no histórico) |
+| 5 | #68 config por referência, intercepts, say, update assinado, reply_guard | **passou até ~12 KB; 16 KB abre mas não responde (defeito, abaixo)**: 7 KB — admissão 200 em 38 ms (config de 9892 caracteres fora do token de 380), WS 2 turnos e WebRTC 3 turnos (922 / 1043 ms) respondidos; 12 KB (16 732 caracteres) — WS 1381 / 790 ms, WebRTC 3 turnos 915 / 1135 ms; 16 KB (22 204 caracteres) — admissão 200, sessão abre, **cada turno termina em `error upstream` + `done{error}`**: o prompt de sistema sozinho dá 4711 tokens, acima dos 4096 do slot (`exceed_context_size_error`), e o corte do histórico não encolhe o sistema; ~26 KB → 413 `config_too_large` (35 884 > 32 768), como a regra diz. `intercepts`: «mais devagar» → `intercept` + `done{intercepted, tag slower}` sem chamar o LLM (contador de chamadas igual antes/depois), «quais são as opções» → `say` falado em 65 ms sem LLM; turno normal depois sem custo (ttfa 66 ms). Update assinado: `say` (`done{said:true, tag opening}`), `drop_turn`, troca de `system` (a resposta seguinte segue o novo), adulterado → `forbidden bad_signature`. `reply_guard`: abertura negada regenerada uma vez (`reply_retries 1`) |
+| 6 | #62 dispositivos | **passou**: dispositivo listado; bloqueio com WS aberta → fechada 1008 `device_blocked` em 12 ms, reabrir 403; com WebRTC → sessão apagada na réplica em 45 ms, nova oferta e nova admissão 403; `requireDevice` → sem id 403 `device_required`, com outro id 200 |
+| 7 | #63 | **passou, com uma ressalva**: `reserveQuota` com janela ativa → `wake` de outro deployment do mesmo tipo 409 com o motivo e `Retry-After`, visível em `/capacity` dos dois; limite por app (`dailyRequests 2`) → 3.ª chamada 429 `daily_budget_exhausted`, `appBudgets` mostra 2/2, volta ao padrão com `null`; reaper sem chave de admin → «NOT CHECKED (no admin key: cross-check off) — 1 machine(s) listed, none compared, nothing released» + 4 máquinas alheias de cota listadas; `tts_overlong` 0 em 758 turnos de carga e nenhuma resposta cortada (ms de áudio por caractere p05 64 / p50 71 / p95 79, mín 59, sem cauda baixa). Ressalva: `/health` `commit`/`builtAt` só aparecem quando o processo recebe as variáveis do build (o gateway local de `bun serve.ts` mostrou `null` depois do reinício); conferir no deploy |
+| 8 | #66 fallback com especulação | **não rodado: chave da OpenRouter expirada** (`401 API key expired` às 05:28) |
+| 9 | #64 | **parcial**: a sonda UDP roda e decide o caminho (`inbound udp/50100: ok`, 46–67 ms, `path direct`) antes de o WebRTC ser oferecido. O resultado mora no edge (o gateway o grava lá), então depois de reiniciar o gateway a primeira admissão ofereceu `webrtc` em 44 ms, 0,16 s depois de a réplica voltar a `ready`, sem sondar de novo — o certo. **A espera de até 2,5 s na primeira admissão de uma réplica nova não foi medida**: `p70-b` ficou pronta com o gateway fora do ar, e uma terceira réplica (`p70-c`) pedida às 06:11 para isso ficou sem estoque de L40S em fr-par-2 por 30 min (4 tentativas do controlador, um servidor criado que não ligou e foi limpo) e foi apagada. Reputação de host, `files` por link assinado e `requireWebrtc`: **não rodado: conta Vast sem crédito** (`insufficient_credit` às 04:48) |
+| 10 | Sessão longa, 4 × 60 turnos, prompt da escola (~4,6 KB) | **2048: passou** — 228 turnos, 0 falhas, 949 / 1399 / 1758; o prompt do LLM estaciona em 1100–1324 tokens (corte do histórico agindo), 0 respostas 400, LLM 137 ms do início ao fim. **4096: passou** — 201 turnos (48–56 por aluno), 0 falhas, 0 erros, 983 / 1584 / 2076, 3 % com abertura; o prompt chegou a 2863 tokens em 50 turnos, então **o corte em 4096 não chegou a agir** (precisaria de ~70 turnos com esse prompt); LLM 158 → 259 ms ao longo da rodada |
+| 11 | VRAM com 4096 | **passou**: `GET /debug/gpu` (novo nesta imagem) — ociosa 28 891 MiB usados / 17 177 livres de 46 068; com 8 alunos até 29 249 / 16 819; com 12 até 29 217. 16 slots × 4096 cabem com folga |
+| 12a | `interrupted` com `--client-deadline` | **consertado e re-medido**: causa — com a página encerrando o turno, o VAD do servidor e o `end_turn` da página disparam com milissegundos de diferença; quando o VAD ganhava, o `end_turn` achava uma resposta em curso e nenhum áudio novo, cancelava a resposta como substituída e respondia `done{empty}`. Não era a abertura do cliente, nem o `config_update {opener:null}` × #67, nem eco no microfone. Conserto `7972225` (um `end_turn` do cliente depois do fim pelo VAD é o mesmo fim), com teste. Ao vivo: 8 / 8 turnos respondidos, 0 `interrupted`, 886 / 1055 / 1055 (Chrome, WS); no `p70-b`, `end_turn` logo depois do `vad end` → uma resposta, nenhum evento a mais. A abertura do próprio cliente não foi re-medida (vem da TTS de nuvem, cuja chave expirou) |
+| 12b | harness parado com `s2s-stream` | **não se repetiu**: Chrome em `s2s-stream` com `--uplink-stall 3000 --client-deadline`, 8 turnos, o processo terminou sozinho (os máximos de 3,8–4,4 s dessa rodada são o travamento de 3 s injetado de propósito) |
+| 12c | `error upstream` depois de `audio_start` | **não apareceu** em ~1370 turnos de carga desta noite (0 eventos `error` nos relatórios das rodadas de carga). Os únicos `error upstream` da noite são os do prompt de 16 KB (item 5), antes de qualquer áudio, com a causa no texto do erro |
+
+### Descida do WebRTC: a «regressão» de 17–21 ms não se confirma
+
+Suspeita: na integração o primeiro quadro de áudio sairia 17–21 ms depois do `audio_start`, contra 6–8 ms no branch do
+#71. O código da descida (`OutTrack`, `AudioOut`, `_first_reply_audio`, o consumidor de `_answer`) é idêntico entre #65 e
+a integração. O cenário `webrtc_network` do harness com só 3 turnos por rede é o que deu 21: o quadro às vezes perde uma
+volta do relógio de 20 ms, nos três branches. Repetido 8 × 3 turnos (rede limpa, aiortc real, mesmo Mac):
+
+| Branch | Primeiro quadro após `audio_start`, mediana (n) | Voltas perdidas (≥ 14 ms) |
+|---|---|---|
+| integração `557bed6` | **5 ms** (24) | 2 |
+| #65 `cb6466e` | 8 ms (24) | 1 |
+| #71 `ca0242a` | 5 ms (48) | 5 |
+
+O harness inteiro da integração passou 133 / 133 na segunda rodada (a primeira caiu nesse cheque com `[5, 21, 21]`; a do
+#65 já tinha `[22, 4, 8]`, a do #71 `[5, 21, 6]`). Ao vivo, edge da integração: PCM → primeiro RTP 11 ms p50 / 21 p95
+(394 turnos) contra 12 / 20 da prova do #65. **Nenhum conserto**: não há regressão no código; o cheque de 3 turnos é
+instável e pode cair em qualquer branch.
+
+### 4096 por slot
+
+VRAM sobra (item 11), mas sem corte de histórico o prompt cresce turno a turno e o LLM fica mais lento: na rodada de 760 s
+com 8 alunos o primeiro token foi de 198 ms (primeiros 150 s) a 461 ms (600–750 s) e as aberturas subiram de 4 para
+10–14 por janela de 150 s; com 2048 e 4 alunos durante 800 s o LLM ficou em 137 ms do começo ao fim, e com 4096 e 4
+alunos foi de 158 a 259 ms. Hipótese, não verificada: o prompt maior é reprocessado a cada turno (llama.cpp com
+`--cache-ram 0`, sem garantia de que o mesmo slot atende a mesma conversa).
+Produção segue em 2048 (o perfil `speech-stack` tem 4096; o `parle-speech` declarado não): **manter 2048 em produção**.
+
+### Defeitos achados
+
+| Defeito | Estado |
+|---|---|
+| `end_turn` da página logo depois do fim pelo VAD cancelava a resposta (12a) | **consertado** em `7972225`, com teste, re-medido ao vivo (8 / 8 respondidos) |
+| Um prompt de sistema maior que o slot do LLM (16 KB de português ≈ 4,7 mil tokens contra 4096) abre a sessão e falha **todo** turno com `error upstream` | **aberto, não consertado aqui** (mexe no edge: nova imagem, nova cópia, novo boot). Hoje o limite prático é ~12 KB de sistema com 4096 e ~5 KB com 2048; o prompt da escola tem 4,6 KB. Conserto sugerido: recusar na admissão (o gateway sabe o `llmCtx` da réplica) ou no `ready` do edge com um código próprio, em vez de falhar turno a turno |
+| `/health` sem `commit`/`builtAt` num gateway iniciado sem as variáveis do build | a conferir no deploy (§ 12.4 do runbook): não é defeito do código, mas a prova do que roda depende disso |
+| `short_audio` do harness marca como «truncadas» respostas de 59–62 ms por caractere (5 em 394 na rodada de base) | **falso positivo do harness**: nenhuma tinha `tts_overlong`, todas terminaram com `audio_end` e a distribuição de ms por caractere é contínua (p05 64). Não mexido |
+| `exhaustedAt` continua `null` em `appBudgets` depois de um 429 por orçamento | menor, só observação |
+
+### Teto de 2500 ms como máximo
+
+**Segurou** em todas as rodadas sem falha injetada: 2015 (base, 394 turnos), 1743 (8 com pensar), 1932 (12 com pensar),
+1758 (longa 2048), 2076 (longa 4096), 1845 (base em `p70-a`), 1055 (Chrome com prazo do cliente). Só passou na rodada com
+travamento de subida de 3 s injetado de propósito (4449), que é o caso que a abertura do cliente cobre — e essa abertura
+não pôde ser medida (TTS de nuvem sem chave).
+
+### GO / NO-GO
+
+- **Merge do #70: GO.** Tudo o que pôde rodar ao vivo passou; a suspeita de regressão na descida do WebRTC não se
+  confirma; nenhum turno perdido nem erro de upstream em ~1370 turnos de carga; CI verde no `557bed6`. O merge sozinho
+  não muda produção.
+- **Deploy: GO com condições**, fora de seg–qui 17:40–20:15:
+  1. `LLM_SLOT_CTX` fica em **2048** no `parle-speech` (não adicionar 4096: a VRAM cabe, mas o LLM fica mais lento com
+     o histórico longo e o corte não foi exercitado em 4096).
+  2. **Especulação desligada** (`speculatePauseMs` não usado pela escola) e o fallback composto tratado como **não
+     provado**: a chave da OpenRouter servida pela API dev está expirada — rotacionar e rodar o item 8 antes de contar
+     com o fallback numa aula (hoje ele já não responderia, com ou sem este deploy).
+  3. Nada de Vast para a escola (`requireWebrtc`, `files` por link assinado, reputação de host): não provado, conta sem
+     crédito.
+  4. A escola tira qualquer mudança de campo assinado do lado do cliente antes de o edge novo servir uma turma (§ 12.2),
+     e mantém o prompt de sistema bem abaixo do slot (defeito acima).
+  5. Ordem do runbook § 12.4 (gateway, reaper com chave de admin); conferir `/health` `commit`/`builtAt` depois.
+
+### O que mudou no código nesta prova
+
+- `7972225` edge: `end_turn` do cliente depois do fim pelo VAD do servidor é o mesmo fim (item 12a), com teste.
+- `65df869` speech-stack: `GET /debug/gpu` (item 11), com teste; embarcado em `20261009-0213`.
+- `6418318` harness: os clientes leves (`ws` e aiortc) mandam a config por referência (prompt da escola).
+- `3275783` / `557bed6`: imagens fixadas (runbook § 12.5).
+
+### Máquinas e custo
+
+| Máquina | Período (Paris) | Horas | € |
+|---|---|---|---|
+| `p70-a` L40S-1-48G | 04:13:38 → 05:04:23 | 0,85 | 1,24 |
+| `p70-b` L40S-1-48G | 05:04:44 → 06:49:00 | 1,74 | 2,55 |
+| cópia da imagem para o registro Scaleway, POP2-HC-8C-16G | 04:46 → 05:04 | 0,30 | ~0,09 |
+| `p70-c` (sem estoque; um servidor criado e apagado sem ligar) | 06:11 → 06:49 | 0 | ~0 |
+| Vast (`insufficient_credit`) | — | 0 | US$ 0 |
+| **Total** | | | **≈ €3,9** |
+
+Desmontagem: `p70-b` e `p70-c` apagados às 06:48 (servidor e volume apagados no log), gateway local parado, deadman e
+contêiner do gerador encerrados. **Listagem do lado do provedor** com o gateway parado (reaper em modo `gateway-down`,
+dry run, namespace `marcos-proof-70`): `scaleway seen 0`, `vast seen 0`, `planned []`. As máquinas alheias que ele
+lista são 4 POP2 parados de `dev-marmos/whisper-stt`, não desta prova. Nenhum arquivo com token literal deixado nos
+diretórios de rascunho. Produção não foi tocada (só GETs de leitura); a porta 4000 e `~/.ai-gateway` não foram usadas.
+
 ## WebRTC: perda na subida, conexão em rede ruim e resgate de subida travada (2026-10-09)
 
 Branch `rt/webrtc-open`, sobre `rt/webrtc-latency` (PR #65) e com `rt/integration-2` (PR #70) mesclada. **Só código e

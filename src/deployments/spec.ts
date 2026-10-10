@@ -423,8 +423,8 @@ export function buildSpec(
       if (!spec.gpu || spec.exposure) throw new SpecError(`placements[${i}]: ${p.provider} takes GPU deployments without exposure only`);
       continue;
     }
-    if (p.maxEurPerHour !== undefined || p.maxReplicas !== undefined) {
-      throw new SpecError(`placements[${i}]: maxEurPerHour and maxReplicas belong to a placement on another provider`);
+    if (p.maxReplicas !== undefined) {
+      throw new SpecError(`placements[${i}]: maxReplicas belongs to a placement on another provider`);
     }
     if (p.machineType && isGpuMachineType(p.machineType) !== spec.gpu) {
       throw new SpecError(`placements[${i}].machineType ${p.machineType} must be a ${spec.gpu ? 'GPU' : 'CPU'} type like machineType`);
@@ -467,7 +467,7 @@ export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates
  * 32 KB in total (`invalid env arguments, total length > 32KB`, live 2026-10-08), and the init script travels there.
  */
 export const VAST_ENV_MAX_BYTES = 32_000;
-const VAST_INIT_OVERHEAD_BYTES = 3_000;
+const VAST_INIT_OVERHEAD_BYTES = 4_700;
 const VAST_RT_INIT_OVERHEAD_BYTES = 2_000;
 const VAST_PORT_ENV_BYTES = 24;
 

@@ -7,6 +7,7 @@ import {
   configDigest, decodeSessionConfig, deriveRealtimeKey, RT_MAX_CFG_REF_CHARS, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
 } from '../../../src/realtime';
 import { _resetExternalLoad } from '../../../src/realtime/external-load';
+import { promptOverflow } from '../../../src/s2s/history';
 import { parseEdgeStatus } from '../../../src/realtime/edge-status';
 import { fakeController, REPLICA_TOKEN, startFakeEdge, type FakeEdge } from './_fakes';
 import { startGateway, type TestGateway } from './_gateway';
@@ -63,6 +64,37 @@ describe('orderTransports / pickReplica / sessionCharge', () => {
   });
 });
 
+describe('a system prompt larger than the LLM context per session (T3)', () => {
+  let edge: FakeEdge;
+  let gw: TestGateway;
+  beforeEach(async () => { _resetExternalLoad(); edge = await startFakeEdge(); });
+  afterEach(async () => { await gw?.close(); await edge.close(); });
+  const LONG = 'Você é a Lia, atendente da padaria em Copacabana. '.repeat(320);
+
+  it('promptOverflow: 16 KB of Portuguese does not fit 2048 tokens, fits 8192; a short prompt fits', () => {
+    expect(Buffer.byteLength(LONG)).toBeGreaterThan(16_000);
+    expect(promptOverflow({ system: LONG }, 2048)).toMatch(/about \d+ tokens before the learner speaks .* 2048-token context/);
+    expect(promptOverflow({ system: LONG }, 8192)).toBeNull();
+    expect(promptOverflow({ system: 'Tu es Lia.' }, 2048)).toBeNull();
+    expect(promptOverflow({ system: 'x'.repeat(5000), max_tokens: 160 }, 2048)).toBeNull();
+    expect(promptOverflow({ system: 'x'.repeat(5000), max_tokens: 300 }, 2048)).not.toBeNull();
+    expect(promptOverflow({ system: 'x', messages: [{ role: 'system', content: LONG }] }, 2048)).not.toBeNull();
+  });
+
+  it('refused at admission with prompt_too_large (413), nothing woken nor charged; a deployment with a larger context admits it', async () => {
+    const small = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(small.controller);
+    const res = await gw.create({ config: { ...CONFIG, system: LONG } });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: { code: 'prompt_too_large', message: expect.stringMatching(/every turn would fail/) } });
+    expect(small.state.woken).toBe(0);
+    await gw.close();
+    const large = fakeController({ replicas: [{ id: 'r1', ip: edge.host }], spec: { machineType: 'L40S-1-48G', envByMachineType: { 'L40S-1-48G': { LLM_SLOT_CTX: '8192' } } } });
+    gw = await startGateway(large.controller);
+    expect((await gw.create({ config: { ...CONFIG, system: LONG } })).status).toBe(200);
+  });
+});
+
 describe('POST /v1/realtime/sessions', () => {
   let edge: FakeEdge;
   let gw: TestGateway;
@@ -95,7 +127,7 @@ describe('POST /v1/realtime/sessions', () => {
   });
 
   it('config size: 3 KB rides in the token as before; 7 KB and 16 KB go by reference (digest in the token, config in the descriptor); 25 KB is refused', async () => {
-    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }], spec: { env: { LLM_SLOT_CTX: '16384' } } });
     gw = await startGateway(controller);
     const admit = async (kb: number) => {
       const config = { ...CONFIG, system: 'é'.repeat(kb * 512) };

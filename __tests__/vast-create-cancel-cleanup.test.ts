@@ -75,8 +75,7 @@ describe('VastClient.createInstance — cancel & cleanup', () => {
     ctrl.abort();
     await expect(p).rejects.toMatchObject({ name: 'AbortError' });
     expect(Date.now() - t0).toBeLessThan(5_000);
-    await new Promise(r => setTimeout(r, 50));
-    expect(new Set(deleted)).toEqual(new Set(['501', '502']));
+    await vi.waitFor(() => expect(new Set(deleted)).toEqual(new Set(['501', '502'])), { timeout: 10_000 });
   }, 20_000);
 
   it('does not create anything when already cancelled', async () => {

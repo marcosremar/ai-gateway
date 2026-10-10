@@ -5,8 +5,12 @@
 
 import { isParked, type Runtime } from './controller-state';
 import { AutoscaleControl } from './controller-autoscale';
+import { CREATE_BACKOFF_MS } from './controller-replicas';
 import { isActive, planReplicas, replicaPhase } from './planner';
 import { usesScaleway, usesVast } from './spec';
+import { placementsOf } from './placements';
+import { PartialListError } from '../cpu-providers/scaleway-client';
+import { withoutLogContext } from '../logger';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMachine } from './types';
 
 /**
@@ -14,6 +18,9 @@ import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMach
  * provider had no stock for is not tried again before this either, and meanwhile does not count as capacity.
  */
 const PARKED_START_GRACE_MS = 90_000;
+const FRESH_STATE_ORPHAN_GRACE_MS = 5 * 60_000;
+const RELEASE_SETTLE_MS = 10 * 60_000;
+const BOOT_TIMEOUT_BACKOFF_MS = [0, 10 * 60_000, 30 * 60_000, 60 * 60_000];
 
 export abstract class ReconcileLoop extends AutoscaleControl {
   start(): void {
@@ -23,9 +30,16 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     void this.reconcile();
   }
 
-  stop(): void {
+  async stop(timeoutMs = 5_000): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const writes = (async () => {
+      await this.reconciling?.catch(() => {});
+      await this.opts.store.settled?.();
+    })();
+    await Promise.race([writes, new Promise<void>(r => { deadline = setTimeout(r, timeoutMs); })]);
+    clearTimeout(deadline);
   }
 
   /** Schedules a reconcile now (coalesced with one in progress). */
@@ -38,7 +52,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       this.rerun = true;
       return this.reconciling;
     }
-    this.reconciling = (async () => {
+    this.reconciling = withoutLogContext(async () => {
       try {
         do {
           this.rerun = false;
@@ -47,7 +61,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       } finally {
         this.reconciling = null;
       }
-    })();
+    });
     return this.reconciling;
   }
 
@@ -57,34 +71,51 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     // neither create nor release this tick; the other providers' deployments carry on.
     const listed: ReplicaMachine[] = [];
     const failed = new Set<DeploymentProvider>();
+    const failedZones = new Set<string>();
     const errors: string[] = [];
     await Promise.all((Object.entries(this.backends) as Array<[DeploymentProvider, DeploymentBackend]>).map(async ([provider, backend]) => {
       try {
         listed.push(...(await backend.listReplicas(this.namespace)).map(m => ({ ...m, provider })));
       } catch (err) {
-        failed.add(provider);
+        if (err instanceof PartialListError) {
+          listed.push(...(err.items as ReplicaMachine[]).map(m => ({ ...m, provider })));
+          for (const zone of err.failedZones) failedZones.add(`${provider}/${zone}`);
+        } else failed.add(provider);
         errors.push(`${provider}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }));
+    this.failedZones = failedZones;
+    this.settleReleases(listed, failed);
     this.lastListError = errors.length ? errors.sort().join('; ') : null;
     if (errors.length) this.log('deployments: list failed', { error: this.lastListError });
     // Even with every list failed the tick goes on in release-only mode (below): a failing list (Vast 429s) must never
     // keep an idle, billing replica up.
-    const unlisted = this.machines.filter(m => failed.has(this.providerOf(m)));
+    const unlisted = this.machines.filter(m => this.listStale(m, failed) && !listed.some(l => l.id === m.id));
     // Keep machines we just created that the provider list does not show yet.
-    const recent = this.machines.filter(m => !failed.has(this.providerOf(m)) && !listed.some(l => l.id === m.id)
+    const recent = this.machines.filter(m => !this.listStale(m, failed) && !listed.some(l => l.id === m.id)
       && this.now() - m.createdAt < 120_000 && this.deployments.has(m.deployment));
-    for (const l of listed) {
+    for (const l of listed.filter(x => !this.releasing.has(x.id))) {
       const rt = this.deployments.get(l.deployment);
       if (rt && rt.record.lastRequestAt == null && rt.record.spec.minReplicas === 0 && l.createdAt < this.startedAt
         && !this.machines.some(m => m.id === l.id) && replicaPhase(this.observed(l, 0)) !== 'halted') rt.record.lastRequestAt = this.startedAt;
     }
+    for (const m of this.machines.filter(x => !this.listStale(x, failed) && !listed.some(l => l.id === x.id) && !recent.includes(x))) {
+      const rt = this.deployments.get(m.deployment);
+      const busy = rt ? this.busyOn(rt, m.id) : 0;
+      if (busy > 0) this.log('deployments: replica gone', { deployment: m.deployment, id: m.id, busy });
+    }
     // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
-    this.machines = [...listed.map((l) => {
+    const before = this.machines;
+    this.machines = [...listed.filter(l => !this.releasing.has(l.id)).map((l) => {
       const known = this.machines.find(m => m.id === l.id);
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
     }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
-    for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
+    for (const [id, p] of [...this.probes]) {
+      if (this.machines.some(m => m.id === id)) continue;
+      if (p.readyNow) this.noteLost(before.find(m => m.id === id)?.deployment);
+      this.probes.delete(id);
+    }
+    this.abortRequestsOfGoneReplicas();
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
     for (const id of [...this.udp.keys()]) if (!this.machines.some(m => m.id === id)) this.udp.delete(id);
     for (const id of [...this.poweredOnAt.keys()]) if (!this.machines.some(m => m.id === id)) this.poweredOnAt.delete(id);
@@ -92,8 +123,10 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     for (const key of [...this.stageStrikes.keys()]) if (!this.machines.some(m => key.startsWith(`${m.id}|`))) this.stageStrikes.delete(key);
     this.trackParking(failed);
 
-    const orphans = this.machines.filter(m => !this.deployments.has(m.deployment) && !failed.has(this.providerOf(m)));
-    for (const m of orphans) await this.release(m, 'orphan');
+    const orphans = this.machines.filter(m => !this.deployments.has(m.deployment) && !this.listStale(m, failed));
+    if (this.opts.store.fresh && this.now() - this.startedAt < FRESH_STATE_ORPHAN_GRACE_MS) {
+      if (orphans.length) this.log('deployments: no state file, orphans kept during the start grace', { ids: orphans.map(m => m.id) });
+    } else for (const m of orphans) await this.release(m, 'orphan');
 
     await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment) && !this.parkedNow(m) && !this.stoppingNow(m))
       .map(m => this.probeOne(m)));
@@ -107,6 +140,13 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     // The deployment may live on a provider whose list failed: its known machines are planned (stale, but a release only
     // needs the id) and only the releases run; no create, no power-on until a list answers.
     const releaseOnly = this.touchesFailed(rt.record.spec, failed);
+    for (const m of this.machines.filter(x => x.deployment === name && x.bootError && !this.probes.get(x.id)?.everReady)) {
+      rt.lastError = `boot failed on the provider: ${m.bootError}`;
+      rt.backoffUntil = this.now() + CREATE_BACKOFF_MS[Math.min(rt.bootFailures, CREATE_BACKOFF_MS.length - 1)];
+      rt.bootFailures++;
+      this.log('deployments: boot failed on the provider', { deployment: name, id: m.id, error: m.bootError });
+      await this.release(m, 'boot-failed');
+    }
     const all = this.machines.filter(m => m.deployment === name);
     // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
     // Ones still `stopping` are neither parked nor live: left alone until the list shows `stopped`. Draining ones are
@@ -135,6 +175,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (!m) continue;
       if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
       else await this.release(m, r.reason);
+      if (r.reason === 'boot-timeout') this.backOffAfterBootTimeout(rt);
     }
     let toCreate = await this.settleDrains(rt, plan, plan.create - rt.creating);
     if (releaseOnly) { this.explain(rt, plan, decision, floor, 'provider list failed'); return; }
@@ -146,17 +187,17 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (this.now() - (this.startRefused.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
       toCreate--;
       if (this.now() - (rt.starting.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
-      const refusal = this.capRefusal(m.pricePerHour ?? 0);
+      const refusal = this.capRefusal(m.pricePerHour ?? 0, name);
       if (refusal) { rt.lastError = refusal; blockedBy = refusal; break; }
       if (!(await this.unpark(rt, m))) toCreate++;
     }
     if (toCreate > 0) {
       const price = all.find(m => m.pricePerHour != null)?.pricePerHour ?? 0;
-      let refusal = this.capRefusal(price);
+      let refusal = this.capRefusal(price, name);
       // Under pressure and capped: take idle capacity from another deployment first (it frees on this tick).
       if (refusal && plan.active) {
         const note = await this.reclaimFor(rt);
-        if (note) { refusal = this.capRefusal(price); blockedBy = refusal ? `${refusal} (${note}, more needed)` : null; }
+        if (note) { refusal = this.capRefusal(price, name); blockedBy = refusal ? `${refusal} (${note}, more needed)` : null; }
         else blockedBy = refusal;
       } else blockedBy = refusal ?? (this.now() < rt.backoffUntil ? this.backoffNote(rt) : null);
     }
@@ -165,10 +206,30 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
   }
 
+  private settleReleases(listed: ReplicaMachine[], failed: Set<DeploymentProvider>): void {
+    for (const [id, { machine, at }] of this.releasing) {
+      if (this.listStale(machine, failed)) continue;
+      const gone = !listed.some(l => l.id === id);
+      if (!gone && this.now() - at < RELEASE_SETTLE_MS) continue;
+      this.releasing.delete(id);
+      const rt = this.deployments.get(machine.deployment);
+      if (gone && rt && /quota/i.test(rt.lastError ?? '')) rt.backoffUntil = 0;
+    }
+  }
+
+  private backOffAfterBootTimeout(rt: Runtime): void {
+    rt.bootTimeouts++;
+    const wait = BOOT_TIMEOUT_BACKOFF_MS[Math.min(rt.bootTimeouts - 1, BOOT_TIMEOUT_BACKOFF_MS.length - 1)];
+    rt.backoffUntil = Math.max(rt.backoffUntil, this.now() + wait);
+    if (wait) rt.lastError = `boot-timeout ${rt.bootTimeouts} times in a row: next create in ${Math.round(wait / 60_000)} min`;
+  }
+
   /** The deployment may have (or create) machines on a provider whose list just failed. */
   protected touchesFailed(spec: DeploymentSpec, failed: Set<DeploymentProvider>): boolean {
-    if (!failed.size) return false;
+    if (!failed.size && !this.failedZones.size) return false;
+    const places = [...placementsOf(spec), ...(spec.candidates ?? []).map(c => ({ provider: c.provider ?? spec.provider, zone: c.zone ?? spec.zone }))];
     return (failed.has('scaleway') && usesScaleway(spec)) || (failed.has('vast') && usesVast(spec))
-      || this.machines.some(m => m.deployment === spec.name && failed.has(this.providerOf(m)));
+      || places.some(p => this.failedZones.has(`${p.provider}/${p.zone}`))
+      || this.machines.some(m => m.deployment === spec.name && this.listStale(m, failed));
   }
 }

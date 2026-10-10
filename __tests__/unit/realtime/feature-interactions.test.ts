@@ -35,7 +35,7 @@ describe('features that meet in one session', () => {
     devices = new AppDevices(apps, { flushMs: 0 });
     probes = 0;
     probe = async () => ({ result: 'ok', rttMs: 31, tries: 1 });
-    gw = await startGateway(fakeController({ replicas: [{ id: 'r1', ip: edge.host }] }).controller, {
+    gw = await startGateway(fakeController({ replicas: [{ id: 'r1', ip: edge.host }], spec: { env: { LLM_SLOT_CTX: '8192' } } }).controller, {
       devices, netProbeMs: 0, probeUdpImpl: () => { probes++; return probe(); },
     });
   });

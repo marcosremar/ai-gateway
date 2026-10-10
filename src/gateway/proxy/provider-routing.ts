@@ -358,7 +358,7 @@ class AttemptError extends Error {
  * one OpenRouter model refused under ZDR must not open the breaker shared by every OpenRouter model). They never open the circuit nor start a cooldown, so
  * traffic goes back to the deployment as soon as its replica is ready.
  */
-const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation', 'saturated']);
+const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation', 'saturated', 'circuit_open']);
 
 /**
  * A cloud link that has not answered (first byte) after this long gets the next target started in parallel (runTargets
@@ -490,9 +490,9 @@ async function attempt<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: nu
 }
 
 export function retryAfterOf(err: unknown): number | undefined {
-  const headers = (err as { headers?: Record<string, string> } | null)?.headers;
+  const { headers, retryAfterSec } = (err ?? {}) as { headers?: Record<string, string>; retryAfterSec?: unknown };
   const raw = headers?.['retry-after'] ?? headers?.['Retry-After'];
-  const n = raw ? parseInt(raw, 10) : NaN;
+  const n = raw ? parseInt(raw, 10) : typeof retryAfterSec === 'number' ? retryAfterSec : NaN;
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
@@ -663,9 +663,9 @@ export function runTargets<P, T>(
           const status = statusOf(err);
           if (isClientErrorStatus(status)) { fail(err); return; }
           const code = failureCode(err);
+          const after = retryAfterOf(err);
+          if (after) retryAfterSec = Math.min(after, retryAfterSec ?? after);
           if (status === 429) {
-            const after = retryAfterOf(err);
-            retryAfterSec = after ?? retryAfterSec;
             // Per-model pause instead of the provider's breaker (see `rateLimitedUntil`).
             markRateLimited(t, after, breakers);
             breaker.releaseProbe();

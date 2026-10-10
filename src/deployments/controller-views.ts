@@ -3,6 +3,7 @@
  * in-process callers, and the counts `/health` shows. See controller-state.ts.
  */
 
+import { randomBytes } from 'crypto';
 import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './controller-state';
 import { ReconcileLoop } from './controller-reconcile';
 import { vastUnfit } from './placement-walk';
@@ -53,8 +54,28 @@ export abstract class ControllerViews extends ReconcileLoop {
     return rt ? structuredClone(rt.record.spec) : null;
   }
 
-  tokenOf(name: string): string | null {
-    return this.deployments.get(name)?.record.replicaToken ?? null;
+  deploymentSecretsOf(name: string): string[] {
+    const record = this.deployments.get(name)?.record;
+    return record ? [...new Set([record.replicaToken, ...Object.values(record.secretPins ?? {})])] : [];
+  }
+
+  async rotateReplicaSecret(name: string): Promise<{ deployment: string; pinnedReplicas: number }> {
+    const rt = this.require(name);
+    const pins: Record<string, string> = {};
+    for (const m of [...this.machines, ...[...this.releasing.values()].map(r => r.machine)]) {
+      if (m.deployment !== name) continue;
+      const pin = m.tokenKey ?? this.tokenKeys.get(m.id) ?? `id:${m.id}`;
+      pins[pin] = rt.record.secretPins?.[pin] ?? rt.record.replicaToken;
+    }
+    rt.record = { ...rt.record, replicaToken: randomBytes(24).toString('base64url'), secretPins: pins, updatedAt: this.now() };
+    await this.opts.store.saveDeployment(rt.record);
+    return { deployment: name, pinnedReplicas: Object.keys(pins).length };
+  }
+
+  tokenOf(name: string, replicaId: string): string | null {
+    const rt = this.deployments.get(name);
+    const machine = this.machines.find(m => m.id === replicaId && m.deployment === name);
+    return rt && machine ? this.replicaToken(rt, machine) : null;
   }
 
   /**
@@ -65,7 +86,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     const machine = this.machines.find(m => m.id === id);
     const rt = machine ? this.deployments.get(machine.deployment) : undefined;
     if (!machine || !rt) return null;
-    return { deployment: machine.deployment, replicaToken: rt.record.replicaToken, ...(rt.record.app ? { app: rt.record.app } : {}) };
+    return { deployment: machine.deployment, replicaToken: this.replicaToken(rt, machine), ...(rt.record.app ? { app: rt.record.app } : {}) };
   }
 
   pendingNetworkReleases(): Array<{ deployment: string; ip: string; zone: string; since: string; attempts: number; lastError: string | null }> {
@@ -82,7 +103,7 @@ export abstract class ControllerViews extends ReconcileLoop {
    * namespace in `health`). The caps are the gateway's limits, the same for everyone, and stay.
    */
   health(app?: string): {
-    deployments: number; replicas: number; listError: string | null;
+    deployments: number; replicas: number; listError: string | null; stateWriteError: string | null;
     running: number; maxReplicas: number; stopped: number; maxStopped: number; eurPerHour: number; maxEurPerHour: number;
   } {
     const limits = {
@@ -92,6 +113,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     if (app === undefined) {
       return {
         deployments: this.deployments.size, replicas: this.machines.length, listError: this.lastListError,
+        stateWriteError: this.opts.store.writeError ?? null,
         running: this.runningMachines().length, stopped: this.stoppedCount(), eurPerHour: round3(this.burnEurPerHour()), ...limits,
       };
     }
@@ -99,7 +121,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     const mine = (m: { deployment: string }) => own.has(m.deployment);
     const running = this.runningMachines().filter(mine);
     return {
-      deployments: own.size, replicas: this.machines.filter(mine).length, listError: null,
+      deployments: own.size, replicas: this.machines.filter(mine).length, listError: null, stateWriteError: null,
       running: running.length,
       stopped: this.machines.filter(m => mine(m) && ((this.parkedNow(m) && !this.isStarting(m)) || this.stoppingNow(m))).length,
       eurPerHour: round3(running.reduce((sum, m) => sum + (m.pricePerHour ?? 0), 0)), ...limits,
@@ -115,6 +137,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       id: m.id,
       phase: replicaPhase(this.observed(m, 0)),
       ip: m.ip,
+      ...(m.tls ? { tls: true } : {}),
       providerState: m.state,
       zone: m.zone,
       machineType: m.machineType,
@@ -174,7 +197,7 @@ export abstract class ControllerViews extends ReconcileLoop {
           ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]
           : []),
         ...placementsOf(rt.record.spec).filter(s => s.provider === 'vast' && s.provider !== rt.record.spec.provider).flatMap((s) => {
-          const unfit = this.backends.vast ? vastUnfit(this.forVast(rt, s), p => this.backends[p]) : 'VAST_API_KEY is not set';
+          const unfit = this.backends.vast ? vastUnfit(this.forVast(rt, s)) : 'VAST_API_KEY is not set';
           return unfit ? [`the vast ${s.machineType} fallback placement is skipped: ${unfit}`] : [];
         }),
       ],

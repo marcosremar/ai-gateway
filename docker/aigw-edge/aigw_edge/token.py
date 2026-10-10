@@ -10,7 +10,7 @@ docs/realtime-token-vectors.json): malformed, alg, bad_signature, expired (exp â
 ttl_too_long (exp âˆ’ iat > 900), cfg (> 6144 chars or not a JSON object), replica, deployment, replayed.
 
 Rejected: bad shape or signature, alg other than HS256, expired, lifetime above 15 min, a `rep` that is not this replica
-(the key is per DEPLOYMENT, so `rep` is what keeps a token from being replayed on a sibling replica), a `dep` that is not
+(the key is per replica; `rep` is checked too, for replicas created before per-replica tokens), a `dep` that is not
 this deployment, and a `sid` already used (single use, remembered until its expiry).
 """
 
