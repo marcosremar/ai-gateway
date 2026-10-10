@@ -2,7 +2,7 @@
 Deterministic stand-in for a speech replica's model container (no GPU, no model): the routes the edge calls, with fixed
 latencies so the harness can check what the edge adds.
 
-    GET  /health                    200
+    GET  /health                    200, llm_ctx LLM_CTX (a 16 KB system prompt fits)
     GET  /v1/voices                 one catalog voice (br-m-08)
     POST /v1/audio/transcriptions   STT_MS later: the turn's `prompt` after "FAKE:" if given, else a fixed sentence;
                                     Whisper-shaped metadata (no_speech_prob, avg_logprob, compression_ratio)
@@ -30,6 +30,7 @@ import numpy as np
 from aiohttp import web
 
 STT_MS, LLM_TTFT_MS, LLM_TOKEN_MS, TTS_TTFB_MS = 80, 60, 15, 50
+LLM_CTX = 16384
 REPLY = "Bom dia! Claro, um pão francês sai já. Mais alguma coisa?"
 HEARD = "Bom dia, eu queria um pão francês."
 calls = {"stt": 0, "llm": 0, "tts": 0, "s2s": 0, "partials": 0, "last_llm_messages": None, "last_tts": None, "traces": {},
@@ -53,7 +54,7 @@ def tone(seconds: float, rate: int = 24000, freq: float = 180.0) -> bytes:
 
 
 async def health(_r):
-    return web.json_response({"ok": True, "models": {"stt": "fake-stt", "llm": "fake-llm", "tts": "fake-tts"}})
+    return web.json_response({"ok": True, "llm_ctx": LLM_CTX, "models": {"stt": "fake-stt", "llm": "fake-llm", "tts": "fake-tts"}})
 
 
 async def voices(_r):
