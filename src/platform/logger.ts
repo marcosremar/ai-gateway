@@ -75,6 +75,10 @@ export function withLogContext<T>(ctx: LogContext, fn: () => T): T {
   return als.run({ ...parent, ...ctx }, fn);
 }
 
+export function withoutLogContext<T>(fn: () => T): T {
+  return als.exit(fn);
+}
+
 /**
  * Read the current AsyncLocalStorage context.
  *
