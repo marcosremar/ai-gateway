@@ -442,6 +442,7 @@ export interface DeploymentStore {
   deleteNetworkRelease(ipId: string): Promise<void>;
   saveProfile(profile: Profile): Promise<void>;
   deleteProfile(name: string): Promise<void>;
+  settled?(): Promise<void>;
   readonly fresh?: boolean;
   readonly writeError?: string | null;
 }

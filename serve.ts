@@ -452,7 +452,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    deployments?.controller.stop();
+    const stateWritten = deployments?.controller.stop() ?? Promise.resolve();
+    const exit = (code: number) => void stateWritten.finally(() => process.exit(code));
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
     rooms.stop();
@@ -468,7 +469,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     // Stop accepting new connections
     server.close(() => {
       console.log('[serve] All connections drained. Exiting.');
-      process.exit(0);
+      exit(0);
     });
 
     // Poll active requests — exit early if all drained
@@ -476,7 +477,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       if (activeRequests <= 0) {
         clearInterval(drainCheck);
         console.log('[serve] All requests completed. Exiting.');
-        process.exit(0);
+        exit(0);
       }
       console.log(`[serve] Waiting for ${activeRequests} request(s) to complete...`);
     }, 1000);
