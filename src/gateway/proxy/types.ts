@@ -202,6 +202,7 @@ export interface ProxyConfig {
    * upstream call). The unauthenticated `GET /health` never carries them.
    */
   healthDetails?: (viewer: import('./health-view').HealthViewer) => Record<string, unknown>;
+  autoWake?: (bearer: string) => boolean;
 }
 
 /**

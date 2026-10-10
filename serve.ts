@@ -76,7 +76,7 @@ const stateDir = process.env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gatew
 const keyAudit = new KeyAudit({ path: join(stateDir, 'key-audit.jsonl'), log: (msg, data) => log.log(data ?? {}, msg) });
 const access = new AccessKeys(process.env, { path: join(stateDir, 'access.json'), log: (msg, data) => log.warn(data ?? {}, msg) });
 await keyAudit.init();
-await access.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) },
+await access.load().then(() => access.migratePolicies()).catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) },
   'ACCESS STATE UNREADABLE: issued keys, revocations and the admin list from the API are not applied — restore access.json'));
 const sandboxEnv = await access.bootSandboxEnv();
 if (sandboxEnv.source) log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
@@ -147,6 +147,12 @@ let declared: DeclaredDeploymentReconciler | null = null;
 const configuredDeployments = deploymentsFromEnv(process.env, {
   admins: adminUsers,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
+  keyOf: (req) => {
+    const found = access.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+    if (!found) return null;
+    const app = found.userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : found.userId;
+    return { keyId: found.keyId, user: found.userId, app, policy: access.policyOf(found.keyId) };
+  },
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
   log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); },
   declaredStatus: () => declared?.status() ?? [],
@@ -155,6 +161,7 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
 });
 const deployments = configuredDeployments && await configuredDeployments.controller.init()
   .then(() => configuredDeployments.apps.init())
+  .then(() => configuredDeployments.clientGpu.load())
   .then(() => configuredDeployments, (err: unknown) => {
     configuredDeployments.stopJanitor?.();
     log.error({ error: err instanceof Error ? err.message : String(err) },
@@ -163,6 +170,7 @@ const deployments = configuredDeployments && await configuredDeployments.control
   });
 if (deployments) {
   deployments.controller.start();
+  deployments.clientGpu.run();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
@@ -485,13 +493,14 @@ const server = await startProxy({
   keyRegistry,
   providers,
   deepHealth,
+  autoWake: (bearer) => !keysConfigured() || access.policyOf(access.resolve(bearer)?.keyId).autoWake,
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
   ...(accounts ? { onInference: accounts.recordInference } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
-    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
-    : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
+    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [], clientGpu: deployments?.clientGpu.report() ?? null }
+    : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [], clientGpu: deployments?.clientGpu.report(viewer.userId) ?? null }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
     rooms.route, ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
@@ -540,6 +549,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     rooms.stop();
     appTelemetry?.stop();
     declared?.stop();
+    deployments?.clientGpu.stop();
     balanceWatch.stop();
     keyManager.stop();
     void access.stop();

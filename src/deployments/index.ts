@@ -9,7 +9,8 @@ import type { IncomingMessage } from 'http';
 import { DeploymentController } from './controller';
 import { DEFAULT_SCALING_MODE } from './scaling-spec';
 import { probeLimitsFromEnv, spendLimitsFromEnv } from './spend-limits';
-import { createDeploymentRoutes, HttpReplicaProbe } from './http';
+import { createDeploymentRoutes, HttpReplicaProbe, type DeploymentRoutesOptions } from './http';
+import { ClientGpu } from './client-gpu';
 import { ScalewayDeploymentBackend, scalewayRegistryOf } from './scaleway-backend';
 import { usesScaleway } from './spec';
 import { VastDeploymentBackend } from './vast-backend';
@@ -70,6 +71,7 @@ export interface DeploymentsFromEnv {
   apps: AppRegistry;
   devices: AppDevices;
   handler: ReturnType<typeof createDeploymentRoutes>;
+  clientGpu: ClientGpu;
   registryWarning: () => string | null;
   rotateCredentials: (env: Record<string, string | undefined>) => Promise<CredentialRotation>;
 }
@@ -186,6 +188,7 @@ export function deploymentsFromEnv(
     declaredStatus?: () => unknown;
     /** An app replaced its routes: the caller re-mounts the providers. */
     onRoutesChange?: () => void;
+    keyOf?: DeploymentRoutesOptions['keyOf'];
   },
 ): DeploymentsFromEnv | null {
   if (env.DEPLOYMENTS_ENABLED === '0') return null;
@@ -230,8 +233,11 @@ export function deploymentsFromEnv(
   const admins = opts.admins ?? adminUsersFromEnv(env);
   const adminWarning = adminListWarning(env);
   if (adminWarning) opts.log?.(`WARNING: ${adminWarning}`);
+  const clientGpu = new ClientGpu(controller, { path: join(stateDir, 'client-gpu.json'), log: opts.log });
   const handler = createDeploymentRoutes({
     controller,
+    clientGpu,
+    ...(opts.keyOf ? { keyOf: opts.keyOf } : {}),
     apps,
     devices,
     userOf: opts.userOf,
@@ -254,7 +260,7 @@ export function deploymentsFromEnv(
     ? startJanitor({ cloud: scalewayJanitorCloud(() => scaleway.secretKey, () => scaleway.projectId), log: opts.log }) : undefined;
   const registryWarning = () => privateImageWarning(controller.list().flatMap(v => controller.specOf(v.name) ?? []), scaleway);
   const rotateCredentials = (current: Record<string, string | undefined>) => rotateBackendCredentials({ scaleway, vast }, current);
-  return { controller, apps, devices, handler, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
+  return { controller, apps, devices, handler, clientGpu, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
 }
 
 export function vastCreditFloor(env: Record<string, string | undefined>): { minCreditUsd?: number } {

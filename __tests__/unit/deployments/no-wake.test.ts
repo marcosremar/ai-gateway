@@ -27,7 +27,7 @@ const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string; cloudStt: { transcribe: ReturnType<typeof vi.fn> }; woken: string[] }
 
-async function harness(): Promise<Harness> {
+async function harness(autoWake?: (bearer: string) => boolean): Promise<Harness> {
   const cloud = new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 30,
@@ -55,6 +55,7 @@ async function harness(): Promise<Harness> {
     customRoutes: [{ method: 'POST', path: '/v1/s2s', handler: s2s }],
     // The tester key is the admin of this gateway: it sees the gateway-wide counters of /health?details=1.
     deepHealth: { authorize: (token) => token === KEY, report: async () => ({ status: 200, body: {} }) },
+    ...(autoWake ? { autoWake } : {}),
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, cloudStt, woken };
@@ -185,5 +186,38 @@ describe('no-wake: DeploymentController.acquire', () => {
     await wait(150);
     expect(h.cloud.created).toHaveLength(0);
     expect(h.controller.get('parle-speech')!.lastRequestAt).toBeNull();
+  });
+});
+
+describe('autoWake per client key (owner, 10/10/2026): a client call never turns a GPU on unless its key says so', () => {
+  it('a key without autoWake gets the cloud answer and nothing is created; a key with autoWake wakes the cold GPU', async () => {
+    h.controller.stop();
+    h.server.closeAllConnections();
+    await new Promise<void>(r => h.server.close(() => r()));
+    h = await harness(bearer => bearer === BATCH);
+    const dev = await stt(h, {}, KEY);
+    expect(dev.status).toBe(200);
+    expect(dev.headers.get('x-gateway-provider')).toBe('groq:whisper-large-v3');
+    await wait(200);
+    expect(h.cloud.created).toHaveLength(0);
+    expect(h.woken).toEqual([]);
+    expect((await stt(h, {}, BATCH, 'other-audio')).status).toBe(200);
+    await until(() => h.cloud.created.length === 1, 2000);
+    expect(h.woken).toEqual(['parle-speech']);
+  });
+
+  it('an explicit start turns the GPU on, and it is parked on its own once the window is over and idle', async () => {
+    const { ClientGpu } = await import('../../../src/deployments/client-gpu');
+    let t = Date.now();
+    const gpu = new ClientGpu(h.controller, { now: () => t });
+    await gpu.start({ keyId: 'key-dev', user: 'tester' }, { autoWake: false, canStartGpu: true, gpuDailyEur: 5, startIdleMinutes: 10 }, 'parle-speech', 15);
+    await until(() => h.controller.get('parle-speech')!.replicas.some(r => r.phase === 'ready'), 3000);
+    t += 14 * 60_000;
+    await gpu.tick();
+    expect(h.controller.get('parle-speech')!.replicas.length).toBe(1);
+    t += 12 * 60_000;
+    await gpu.tick();
+    await until(() => h.controller.get('parle-speech')!.replicas.length === 0, 3000);
+    expect(gpu.report().running).toEqual([]);
   });
 });
