@@ -514,7 +514,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
     const clip = rescueClip;
     if (turn !== t || t.acked || closed || switching || rescue || !stalled || stalled.clipBased || !clip) return;
     const r: Rescue = { turn: t, transport: null as never, committed: false };
-    const live = () => rescue === r && turn === t && !closed;
+    const live = () => !closed && (r.committed ? current === r.transport : rescue === r && turn === t);
     const context = Object.assign(Object.create(ctx) as TransportContext, {
       emit: (e: RealtimeEvent) => { if (!live()) return; if (!r.committed) commitRescue(r); ctx.emit(e); },
       fail: () => {},

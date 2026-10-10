@@ -115,6 +115,10 @@ describe('uplink stalled: the finished utterance goes as one clip over HTTP', ()
     const third = clipOf('third');
     r.s.sendEndTurn(third);
     await vi.waitFor(() => expect(r.clips[0]!.wavs.at(-1)).toBe(third));
+    r.clips[0]!.say({ type: 'transcript', text: 'Obrigada', final: true }, { type: 'reply', text: 'De nada!' }, { type: 'done' });
+    r.clips[0]!.finish();
+    expect([r.count('transcript'), r.count('done')]).toEqual([3, 3]);
+    expect(r.s.history.at(-1)).toEqual({ role: 'assistant', content: 'De nada!' });
     r.s.close();
   });
 
