@@ -9,7 +9,9 @@
 
 import type { IncomingMessage, Server, ServerResponse } from 'http';
 import type { Duplex } from 'stream';
+import { join } from 'path';
 import { roomsConfigFromEnv, type RoomsConfig } from './config';
+import { FileEventStore, MemoryEventStore, RoomEvents, type EventStore } from './events';
 import { createRoomsHttp, type KeyUser } from './http';
 import { RoomService } from './service';
 import { FileRoomStore, MemoryRoomStore, type RoomStore } from './store';
@@ -20,6 +22,8 @@ export type { RoomsConfig } from './config';
 export { RoomService, hashToken } from './service';
 export { FileRoomStore, MemoryRoomStore, linesFromJsonl } from './store';
 export type { RoomStore } from './store';
+export { FileEventStore, MemoryEventStore, RoomEvents, aggregateEvents, parseEventBatch, EVENT_SCHEMA } from './events';
+export type { EventStore, ViewerEventRecord, RoomsAnalytics } from './events';
 export type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 export { CODE_ALPHABET, CODE_RE, normalizeCode } from './validate';
 
@@ -29,6 +33,8 @@ export interface CreateRoomsOptions {
   config?: Partial<RoomsConfig>;
   /** Default: files under the config dir; memory when the config dir is null. */
   store?: RoomStore;
+  /** Viewer analytics events. Default: <config dir>/events; memory when the config dir is null. */
+  eventStore?: EventStore;
   /** Resolves a bearer as a gateway key: its user and whether it is an admin (null = not a key). */
   keyUser: KeyUser;
   /** User of a request that passed the proxy's key auth. */
@@ -42,7 +48,9 @@ export function createRooms(opts: CreateRoomsOptions) {
   const config: RoomsConfig = { ...roomsConfigFromEnv(opts.env ?? process.env), ...opts.config };
   const store = opts.store ?? (config.dir ? new FileRoomStore(config.dir, opts.log) : new MemoryRoomStore());
   const service = new RoomService({ config, store, now: opts.now, log: opts.log, sweepIntervalMs: opts.sweepIntervalMs });
-  const http = createRoomsHttp({ service, keyUser: opts.keyUser, userOf: opts.userOf, log: opts.log });
+  const eventStore = opts.eventStore ?? (config.dir ? new FileEventStore(join(config.dir, 'events')) : new MemoryEventStore());
+  const events = new RoomEvents({ store: eventStore, retentionMs: config.eventsRetentionMs, now: opts.now, sweepIntervalMs: opts.sweepIntervalMs, log: opts.log });
+  const http = createRoomsHttp({ service, events, keyUser: opts.keyUser, userOf: opts.userOf, log: opts.log });
   const ws = createRoomWs(service, opts.log);
 
   /** Puts the rooms routes in front of the proxy's listeners. */
@@ -68,8 +76,9 @@ export function createRooms(opts: CreateRoomsOptions) {
   return {
     config,
     service,
+    events,
     route: { method: 'POST', path: '/v1/rooms', handler: http.create },
     mount,
-    stop: () => service.stop(),
+    stop: () => { service.stop(); events.stop(); },
   };
 }

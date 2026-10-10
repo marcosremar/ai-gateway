@@ -26,6 +26,8 @@ export interface RoomsConfig {
   maxViewers: number;
   /** Max decoded size of one dubbed audio clip. */
   maxAudioBytes: number;
+  /** Viewer analytics events are kept this long (longer than room content: product analysis). */
+  eventsRetentionMs: number;
 }
 
 export const ROOMS_DEFAULTS = {
@@ -40,6 +42,7 @@ export const ROOMS_DEFAULTS = {
   MAX_ROOMS_PER_HOUR: 60,
   MAX_VIEWERS: 500,
   MAX_AUDIO_BYTES: 2 * 1024 * 1024,
+  EVENTS_RETENTION_DAYS: 365,
 } as const;
 
 const DAY_MS = 86_400_000;
@@ -66,5 +69,6 @@ export function roomsConfigFromEnv(env: Record<string, string | undefined> = pro
     maxRoomsPerHour: Math.floor(positive(env.ROOMS_MAX_PER_HOUR, ROOMS_DEFAULTS.MAX_ROOMS_PER_HOUR)),
     maxViewers: Math.floor(positive(env.ROOMS_MAX_VIEWERS, ROOMS_DEFAULTS.MAX_VIEWERS)),
     maxAudioBytes: Math.floor(positive(env.ROOMS_MAX_AUDIO_BYTES, ROOMS_DEFAULTS.MAX_AUDIO_BYTES)),
+    eventsRetentionMs: positive(env.ROOM_EVENTS_RETENTION_DAYS, ROOMS_DEFAULTS.EVENTS_RETENTION_DAYS) * DAY_MS,
   };
 }

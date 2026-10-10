@@ -4,6 +4,9 @@
 //   POST /v1/rooms/:code/lines     publish token (or the creating / an admin gateway key)
 //   POST /v1/rooms/:code/audio     publish token; broadcast only
 //   POST /v1/rooms/:code/end       publish token
+//   POST /v1/rooms/:code/events    public: the viewer page's analytics batches (events.ts), rate-limited
+//   GET  /v1/rooms/:code/events    admin gateway key: raw events of a room (also after the room expired)
+//   GET  /v1/rooms-analytics       admin gateway key: aggregates (?days=30, ?code=)
 //   GET  /live[/:code], and `/` + `/:code` on ROOMS_PUBLIC_HOST → viewer pages (page.ts)
 // Everything but POST /v1/rooms is served in front of the proxy (index.ts `mount`), since a viewer or a publisher
 // holding only a room token never has the gateway key.
@@ -12,6 +15,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { bearerToken } from '../gateway/proxy/middleware/api-keys';
 import { errorTypeForStatus } from '../gateway/proxy/http-conventions';
 import { entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
+import { EVENTS_MAX_BYTES, parseEventBatch, type RoomEvents } from './events';
 import type { RoomService } from './service';
 import { RoomError, normalizeCode, parseAudio, parseCreate, parseLine } from './validate';
 
@@ -19,6 +23,7 @@ export type KeyUser = (token: string) => { userId: string; admin: boolean } | nu
 
 export interface RoomsHttpOptions {
   service: RoomService;
+  events: RoomEvents;
   /** Resolves a bearer as a gateway key (null when it is not one). */
   keyUser: KeyUser;
   /** User of a request that passed the proxy's key auth (POST /v1/rooms). */
@@ -26,7 +31,8 @@ export interface RoomsHttpOptions {
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
-const API_PATH = /^\/v1\/rooms\/([^/]{1,32})(?:\/(lines|audio|end|ws))?\/?$/;
+const API_PATH = /^\/v1\/rooms\/([^/]{1,32})(?:\/(lines|audio|end|ws|events))?\/?$/;
+const ANALYTICS_PATH = /^\/v1\/rooms-analytics\/?$/;
 const LIVE_PATH = /^\/live\/([^/]{1,32})\/?$/;
 const HOST_CODE_PATH = /^\/([A-Za-z0-9]{6})\/?$/;
 const CREATE_MAX_BYTES = 16 * 1024;
@@ -104,6 +110,22 @@ function hostOf(req: IncomingMessage): string {
   return String(req.headers.host ?? '').trim().toLowerCase().replace(/:\d+$/, '');
 }
 
+/** Client address for the events rate limit only (hashed in memory, never stored): first X-Forwarded-For hop. */
+function clientIp(req: IncomingMessage): string {
+  const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0]!.trim();
+  return fwd || req.socket.remoteAddress || 'unknown';
+}
+
+function queryOf(req: IncomingMessage): URLSearchParams {
+  const q = (req.url ?? '').indexOf('?');
+  return new URLSearchParams(q >= 0 ? (req.url ?? '').slice(q + 1) : '');
+}
+
+function intParam(v: string | null, min: number, max: number, fallback: number): number {
+  const n = Number(v);
+  return v !== null && v.trim() !== '' && Number.isFinite(n) ? Math.min(max, Math.max(min, Math.floor(n))) : fallback;
+}
+
 export function createRoomsHttp(opts: RoomsHttpOptions) {
   const { service } = opts;
   const cfg = service.config;
@@ -138,13 +160,19 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
       sendEmpty(res, 204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': 86_400 });
       return;
     }
-    const allowed = action === undefined ? ['GET', 'HEAD'] : action === 'ws' ? ['GET'] : ['POST'];
+    const allowed = action === undefined ? ['GET', 'HEAD'] : action === 'ws' ? ['GET'] : action === 'events' ? ['GET', 'POST'] : ['POST'];
     if (!allowed.includes(method)) { req.resume(); sendError(res, 405, `use ${allowed.join(' or ')}`, { Allow: allowed.join(', ') }); return; }
     if (action === 'ws') { sendError(res, 426, 'this path is a WebSocket', { Upgrade: 'websocket' }); return; }
+    if (action === 'events' && method === 'GET') { await listEvents(req, res, rawCode); return; }
     const code = normalizeCode(rawCode);
     const room = code ? await service.get(code) : null;
     if (!room) { req.resume(); sendError(res, 404, 'room not found or expired'); return; }
     if (action === undefined) { sendJson(res, 200, service.publicView(room)); return; }
+    if (action === 'events') {
+      const batch = parseEventBatch(await readJson(req, EVENTS_MAX_BYTES));
+      sendJson(res, 202, await opts.events.record(room.meta.code, batch, clientIp(req)));
+      return;
+    }
 
     service.authorizePublish(room, bearerToken(req.headers.authorization), opts.keyUser);
     if (action === 'lines') {
@@ -159,6 +187,38 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
     sendEmpty(res, 204);
   }
 
+  /** Admin gateway key or a RoomError (401 no/invalid key, 403 not an admin). */
+  function requireAdmin(req: IncomingMessage): void {
+    const bearer = bearerToken(req.headers.authorization);
+    if (!bearer) throw new RoomError(401, 'missing Authorization: Bearer <admin gateway key>');
+    const user = opts.keyUser(bearer);
+    if (!user) throw new RoomError(401, 'invalid gateway key');
+    if (!user.admin) throw new RoomError(403, 'admin key required');
+  }
+
+  /** GET /v1/rooms/:code/events?since=<ms>&limit=<n> (admin). Works after the room content expired. */
+  async function listEvents(req: IncomingMessage, res: ServerResponse, rawCode: string): Promise<void> {
+    requireAdmin(req);
+    const code = normalizeCode(rawCode);
+    if (!code) throw new RoomError(400, 'invalid room code');
+    const q = queryOf(req);
+    const since = q.get('since') === null ? null : intParam(q.get('since'), 0, Number.MAX_SAFE_INTEGER, 0);
+    const events = await opts.events.list(code, since, intParam(q.get('limit'), 1, 50_000, 10_000));
+    sendJson(res, 200, { code, count: events.length, events });
+  }
+
+  /** GET /v1/rooms-analytics?days=30&code=XXXXXX (admin). */
+  async function analytics(req: IncomingMessage, res: ServerResponse, method: string): Promise<void> {
+    if (method !== 'GET') { req.resume(); sendError(res, 405, 'use GET', { Allow: 'GET' }); return; }
+    requireAdmin(req);
+    const q = queryOf(req);
+    const rawCode = q.get('code');
+    const code = rawCode ? normalizeCode(rawCode) : null;
+    if (rawCode && !code) throw new RoomError(400, 'invalid room code');
+    const maxDays = Math.max(1, Math.round(opts.events.retentionMs / 86_400_000));
+    sendJson(res, 200, await opts.events.analytics(intParam(q.get('days'), 1, maxDays, Math.min(30, maxDays)), code));
+  }
+
   /** Serves the request when it is a rooms path (true); false = not ours, the proxy gets it. */
   function handle(req: IncomingMessage, res: ServerResponse): boolean {
     const method = (req.method ?? 'GET').toUpperCase();
@@ -168,6 +228,7 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
 
     const apiMatch = API_PATH.exec(path);
     if (apiMatch) return run(api(req, res, method, apiMatch[1]!, apiMatch[2]), 'api');
+    if (ANALYTICS_PATH.test(path)) return run(analytics(req, res, method), 'analytics');
     if (!isGet) return false;
     if (cfg.publicHost && hostOf(req) === cfg.publicHost) {
       if (path === '/') { sendPage(res, 200, entryPage({ basePath: '/', retentionDays })); return true; }
