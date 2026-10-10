@@ -104,16 +104,18 @@ ${form.body}</main>`;
 // ── Room page ───────────────────────────────────────────────────────────────
 
 const ROOM_CSS = `
+body{overflow-x:hidden}
 header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 16px calc(10px) 16px;padding-top:max(10px,env(safe-area-inset-top))}
 .top{display:flex;align-items:center;gap:10px;min-width:0}
+.top .brand{flex:none}
 .top h1{flex:1;min-width:0;margin:0;font-size:1rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pill{flex:none;font-size:.75rem;font-weight:700;border-radius:999px;padding:4px 10px;background:var(--surface);color:var(--muted);text-transform:lowercase}
+.pill{flex:none;white-space:nowrap;font-size:.75rem;font-weight:700;border-radius:999px;padding:4px 10px;background:var(--surface);color:var(--muted);text-transform:lowercase}
 .pill.live{background:rgba(25,194,180,.16);color:var(--accent)}
 .pill.live::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;vertical-align:1px;animation:pulse 1.6s infinite}
 .pill.wait{color:var(--warn)}
 @keyframes pulse{50%{opacity:.3}}
-.now{margin-top:10px;background:var(--surface);border-radius:14px;padding:12px 14px;min-height:72px;display:flex;flex-direction:column;justify-content:center}
-.fit{white-space:nowrap;overflow:hidden;line-height:1.3}
+.now{margin-top:10px;background:var(--surface);border-radius:14px;padding:12px 14px;min-height:72px;display:flex;flex-direction:column;justify-content:center;min-width:0}
+.fit{white-space:nowrap;overflow:hidden;line-height:1.3;max-width:100%}
 #liveMain{font-weight:700}
 #liveOrig{color:var(--muted);margin-top:4px}
 .empty{color:var(--muted);font-style:italic}
@@ -127,7 +129,7 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
 .notice{margin:12px 16px 0;padding:10px 12px;border-radius:10px;background:var(--surface);color:var(--muted);font-size:.9rem}
 .notice:empty{display:none}
 #tx{padding:8px 16px 96px;max-width:46rem;margin:0 auto}
-#tx p{margin:0;padding:10px 0;border-bottom:1px solid var(--line);line-height:1.55;font-size:1.05rem}
+#tx p{margin:0;padding:10px 0;overflow-wrap:anywhere;border-bottom:1px solid var(--line);line-height:1.55;font-size:1.05rem}
 #tx p .o{display:block;color:var(--muted);font-size:.88rem;margin-top:3px}
 #tx p.miss .t{color:var(--muted);font-style:italic}
 #more{position:fixed;left:50%;bottom:max(18px,env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--accent);color:var(--accent-ink);border:0;border-radius:999px;padding:10px 16px;font-weight:700;box-shadow:0 4px 18px rgba(0,0,0,.4);display:none;cursor:pointer}
@@ -147,9 +149,48 @@ const ROOM_BODY = `<header>
 <main id="tx"></main>
 <button id="more" type="button">Novas falas ↓</button>`;
 
+/**
+ * Pure page logic (plain ES5, no DOM), inlined at the top of the room page script and evaluated as-is by the unit tests.
+ *   - pickLang(prefs, languages, saved): the viewer's saved choice if still valid; else the first browser language the
+ *     room publishes (exact tag, then primary subtag: "en-US" → "en"); else the room's first target language; "orig"
+ *     only when the room has no translations.
+ *   - fitLine(text, maxWidth, basePx, measure): one line, never wrapped — shrink the font down to 70 % of basePx, then
+ *     keep the END of the sentence behind a leading "…" (words dropped from the start, never the end).
+ *     `measure(str, px)` returns the rendered width of `str` at font size `px`. Returns {px, text}.
+ */
+export const ROOM_PAGE_LOGIC = String.raw`
+function pickLang(prefs,languages,saved){
+  languages=languages||[];
+  if(saved&&(saved==='orig'||languages.indexOf(saved)>=0))return saved;
+  var low=languages.map(function(x){return String(x).toLowerCase()});
+  for(var i=0;i<(prefs||[]).length;i++){
+    var p=String(prefs[i]||'').toLowerCase();if(!p)continue;
+    var k=low.indexOf(p);if(k>=0)return languages[k];
+    var pre=p.split('-')[0];
+    for(var j=0;j<low.length;j++)if(low[j].split('-')[0]===pre)return languages[j];
+  }
+  return languages.length?languages[0]:'orig';
+}
+function fitLine(text,maxWidth,basePx,measure){
+  text=String(text==null?'':text).replace(/\s+/g,' ').trim();
+  if(!(maxWidth>0)||measure(text,basePx)<=maxWidth)return {px:basePx,text:text};
+  var min=Math.max(1,Math.round(basePx*0.7));
+  var px=Math.max(min,Math.floor(basePx*maxWidth/measure(text,basePx)));
+  while(px>min&&measure(text,px)>maxWidth)px--;
+  if(measure(text,px)<=maxWidth)return {px:px,text:text};
+  px=min;
+  var w=text.split(' ');
+  for(var i=1;i<w.length;i++){var c='…'+w.slice(i).join(' ');if(measure(c,px)<=maxWidth)return {px:px,text:c}}
+  var s=w[w.length-1];
+  while(s.length>1&&measure('…'+s,px)>maxWidth)s=s.slice(1);
+  return {px:px,text:'…'+s};
+}
+`;
+
 /** The page script (plain ES2017, no framework). Placeholders: __CODE__, __DAYS__. */
 const ROOM_SCRIPT = String.raw`(function(){
 'use strict';
+${ROOM_PAGE_LOGIC}
 var CODE=__CODE__,DAYS=__DAYS__;
 var $=function(id){return document.getElementById(id)};
 var store={get:function(k){try{return localStorage.getItem(k)}catch(e){return null}},set:function(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
@@ -162,20 +203,20 @@ function textOf(l){return lang==='orig'?l.original:(l.translations&&l.translatio
 function fmtDate(iso){try{return new Date(iso).toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'})}catch(e){return iso}}
 
 // ── live line: one line per language, shrink to 70 %, then keep the end with a leading "…" ──
+var ctx=null;try{ctx=document.createElement('canvas').getContext('2d')}catch(e){}
 function fit(el,text,px){
-  el.textContent=text;el.style.fontSize=px+'px';
-  var min=Math.round(px*0.7);
-  while(px>min&&el.scrollWidth>el.clientWidth){px--;el.style.fontSize=px+'px'}
-  if(el.scrollWidth<=el.clientWidth)return;
-  var w=text.split(/\s+/),i=0;
-  while(i<w.length-1&&el.scrollWidth>el.clientWidth){i++;el.textContent='…'+w.slice(i).join(' ')}
-  var s=el.textContent;
-  while(s.length>2&&el.scrollWidth>el.clientWidth){s='…'+s.slice(2);el.textContent=s}
+  var cs=getComputedStyle(el),fam=cs.fontFamily,wt=cs.fontWeight,st=cs.fontStyle;
+  var measure=function(s,p){
+    if(ctx){ctx.font=st+' '+wt+' '+p+'px '+fam;return ctx.measureText(s).width}
+    el.style.fontSize=p+'px';el.textContent=s;return el.scrollWidth;
+  };
+  var r=fitLine(text,el.clientWidth-1,px,measure);
+  el.style.fontSize=r.px+'px';el.textContent=r.text;el.title=r.text===text?'':text;
 }
 function renderLive(){
   var main=$('liveMain'),orig=$('liveOrig'),l=lines[lines.length-1];
   var base=Math.max(20,Math.min(32,Math.round(window.innerWidth/13)));
-  if(!l){main.className='fit empty';main.style.fontSize='';main.textContent=ended?'Nenhuma fala nesta sessão.':'Aguardando a primeira fala…';orig.hidden=true;return}
+  if(!l){main.className='fit empty';main.style.fontSize='';main.title='';main.textContent=ended?'Nenhuma fala nesta sessão.':'Aguardando a primeira fala…';orig.hidden=true;return}
   var t=textOf(l),miss=t==null||t==='';
   main.className='fit'+(miss?' empty':'');
   fit(main,miss?l.original:t,base);
@@ -210,16 +251,8 @@ function upsert(l){
 
 // ── languages ──
 function pickDefault(){
-  var saved=store.get('ucast-lang-'+CODE);
-  if(saved&&(saved==='orig'||room.languages.indexOf(saved)>=0))return saved;
   var prefs=(navigator.languages&&navigator.languages.length?navigator.languages:[navigator.language||'']);
-  var low=room.languages.map(function(x){return x.toLowerCase()});
-  for(var i=0;i<prefs.length;i++){var p=String(prefs[i]||'').toLowerCase();if(!p)continue;
-    var k=low.indexOf(p);if(k>=0)return room.languages[k];
-    var pre=p.split('-')[0];
-    for(var j=0;j<low.length;j++)if(low[j].split('-')[0]===pre)return room.languages[j];
-    if(room.originalLang&&room.originalLang.toLowerCase().split('-')[0]===pre)return 'orig';}
-  return room.languages[0]||'orig';
+  return pickLang(prefs,room.languages,store.get('ucast-lang-'+CODE));
 }
 function buildSelect(){
   var sel=$('lang');sel.textContent='';
@@ -232,7 +265,8 @@ function buildSelect(){
 $('lang').addEventListener('change',function(e){lang=e.target.value;store.set('ucast-lang-'+CODE,lang);queue=[];sendListen();updateDubButton();renderAll()});
 $('orig').checked=showOrig;
 $('orig').addEventListener('change',function(e){showOrig=e.target.checked;store.set('ucast-orig',showOrig?'1':'0');renderAll()});
-window.addEventListener('resize',renderLive);
+var relayout=null;function onResize(){if(relayout)cancelAnimationFrame(relayout);relayout=requestAnimationFrame(function(){relayout=null;renderLive()})}
+window.addEventListener('resize',onResize);window.addEventListener('orientationchange',onResize);
 
 // ── dubbing: one <audio>, clips queued in order, unlocked by the tap that turns it on ──
 var player=new Audio(),queue=[],playing=false,seq=0;
