@@ -9,7 +9,7 @@ import type { RoomsConfig } from './config';
 import type { RoomStore } from './store';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 import {
-  CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput,
+  CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput, type UpdateRoomInput,
 } from './validate';
 
 /** A connected viewer (the WS layer implements it). */
@@ -104,6 +104,7 @@ export class RoomService {
     const meta: RoomMeta = {
       version: 1, code, title: input.title, originalLang: input.originalLang, languages: input.languages,
       createdAt: now, lastActivityAt: now, ended: false, endedAt: null, tokenHash: hashToken(publishToken), ownerId,
+      youtubeUrl: input.youtubeUrl,
     };
     await this.opts.store.saveMeta(meta);
     this.rooms.set(code, { meta, lines: [], index: new Map(), chars: 0, viewers: new Set(), touchedAt: now, metaSavedAt: now });
@@ -167,7 +168,8 @@ export class RoomService {
     const m = room.meta;
     return {
       code: m.code, title: m.title, originalLang: m.originalLang, languages: m.languages,
-      createdAt: new Date(m.createdAt).toISOString(), ended: m.ended, expiresAt: this.expiresAt(m), lines: room.lines,
+      createdAt: new Date(m.createdAt).toISOString(), ended: m.ended, expiresAt: this.expiresAt(m),
+      youtubeUrl: typeof m.youtubeUrl === 'string' ? m.youtubeUrl : null, lines: room.lines,
     };
   }
 
@@ -237,6 +239,22 @@ export class RoomService {
     if (room.meta.ended) throw new RoomError(409, 'room has ended');
     room.touchedAt = this.now();
     this.broadcast(room, { type: 'audio', lineId: audio.lineId, lang: audio.lang, wav: audio.wav }, v => v.wantsAudio(audio.lang));
+  }
+
+  /**
+   * Changes the room's YouTube link (also after the end: the recording stays at the same link). Persisted, then
+   * broadcast to the open pages as `{"type":"update"}`; an unchanged value is a no-op.
+   */
+  async update(room: LiveRoom, input: UpdateRoomInput): Promise<void> {
+    const before = typeof room.meta.youtubeUrl === 'string' ? room.meta.youtubeUrl : null;
+    if (before === input.youtubeUrl) return;
+    room.meta.youtubeUrl = input.youtubeUrl;
+    room.meta.lastActivityAt = this.now();
+    room.touchedAt = this.now();
+    room.metaSavedAt = this.now();
+    await this.opts.store.saveMeta(room.meta);
+    this.log('rooms: updated', { code: room.meta.code, youtube: input.youtubeUrl !== null });
+    this.broadcast(room, { type: 'update', youtubeUrl: input.youtubeUrl });
   }
 
   async end(room: LiveRoom): Promise<void> {

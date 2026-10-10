@@ -25,7 +25,7 @@ export type { RoomStore } from './store';
 export { FileEventStore, MemoryEventStore, RoomEvents, aggregateEvents, parseEventBatch, EVENT_SCHEMA } from './events';
 export type { EventStore, ViewerEventRecord, RoomsAnalytics } from './events';
 export type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
-export { CODE_ALPHABET, CODE_RE, normalizeCode } from './validate';
+export { CODE_ALPHABET, CODE_RE, MAX_YOUTUBE_URL_CHARS, YOUTUBE_HOSTS, normalizeCode, parseYoutubeUrl } from './validate';
 
 export interface CreateRoomsOptions {
   env?: Record<string, string | undefined>;
