@@ -53,6 +53,13 @@ def tone(seconds: float, rate: int = 24000, freq: float = 180.0) -> bytes:
     return (wave * 32767).astype(np.int16).tobytes()
 
 
+def holes(pcm16: bytes) -> int:
+    x = np.frombuffer(pcm16[: len(pcm16) // 640 * 640], dtype=np.int16).astype(np.float32).reshape(-1, 320)
+    rms = np.sqrt((x * x).mean(axis=1))
+    loud = np.nonzero(rms > 0.5 * rms.max())[0]
+    return int((rms[loud[0]:loud[-1] + 1] < 0.2 * rms.max()).sum()) if len(loud) else 0
+
+
 async def health(_r):
     return web.json_response({"ok": True, "llm_ctx": LLM_CTX, "models": {"stt": "fake-stt", "llm": "fake-llm", "tts": "fake-tts"}})
 
@@ -64,6 +71,7 @@ async def voices(_r):
 async def transcriptions(request):
     form = await request.post()
     calls["stt"] += 1
+    calls["last_stt_holes"] = holes(form["file"].file.read()[44:])
     prompt = str(form.get("prompt") or "")
     await asyncio.sleep(STT_MS / 1000)
     text = prompt[5:] if prompt.startswith("FAKE:") else HEARD

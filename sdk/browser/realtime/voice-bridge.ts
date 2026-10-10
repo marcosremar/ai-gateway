@@ -16,6 +16,7 @@ export interface VoiceBridgeOptions {
   /** Realtime rungs: the learner finished speaking (`speechMs` = from the first `vadStart` of the turn). */
   onEndTurn(speechMs: number): void;
   onClipEffect?(effect: VadEffect): void;
+  recordAlways?(): boolean;
   /** One voiced segment (`vadStart` → `vadEnd`), for telemetry (`vad.segment`). */
   onSegment?(durMs: number): void;
   now?: () => number;
@@ -63,7 +64,7 @@ export function createVoiceBridge(opts: VoiceBridgeOptions): VoiceBridge {
           }, opts.endAfterVadEndMs);
         }
       }
-      if (opts.clipMode()) opts.onClipEffect?.(effect);
+      if (opts.clipMode() || opts.recordAlways?.()) opts.onClipEffect?.(effect);
     },
     reset() {
       cancel();

@@ -414,6 +414,11 @@ Scaleway replicas run the sidecar, so they get it at the next boot; the profile 
 used on Vast only, is still `79722253`) until a speech-stack built with the new `EDGE_TAG` is copied to the Scaleway
 registry and pinned.
 
+Update 2026-10-10, PR #71: the sidecar becomes `ghcr.io/marcosremar/aigw-edge:ed885ef5`
+(`sha256:5c67faa165a3fdb00d4d2157229a2b981bbcc6efe1e7b2f7f6349f96998da209`, workflow `aigw-edge` dispatched on
+`rt/webrtc-open` at `ed885ef`): the edge of `59e5d605` plus #71's uplink loss recovery, `turn_ack` and SCTP timer. Its
+live proof (with `5540dfa1`, the same edge minus #91) is in the handoff § Prova ao vivo da PR #71.
+
 ### 12.6 Not in this build
 
 - Open after the live proof of 2026-10-09 (handoff § Prova ao vivo da integração (#70) has the detail):

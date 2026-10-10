@@ -27,14 +27,17 @@
  *   --think 2-6       ws / webrtc students: instead of --turn-every, listen to the reply in real time, then wait a
  *                     seeded uniform think time (seconds) before the next utterance
  *   --clip-s 1.4      length of the tone clip               --clip file.wav  real speech instead (PCM16 mono WAV)
- *   --profile clean   clean | campus-slow | udp-blocked | lossy | flap
+ *   --profile clean   clean | campus-slow | udp-blocked | lossy | loss-2 | loss-5 | loss-10 | flap
+ *   --profile-then lossy@90   the network becomes that profile (clean | campus-slow | lossy) 90 s into the run
+ *   --transport-policy auto   Chrome: the SDK's transportPolicy ('' = unset)      --fidelity   Chrome: the SDK's fidelity option
  *   --ceiling-ms 2500 any turn whose first sound (opener or reply) comes later fails the run
  *   --replicas 2 --cap 16   fake stack only: replicas and RT_MAX_SESSIONS of each
  *   --p50 1500 --p95 2000 --max-bad 1   the target: first-audio ms and failures + truncations in %
  *   --turn-timeout 30 --trunc-ratio 0.6 --ms-per-char 0 --turn udp|tcp --out <dir>
  *
  * Fake model knobs (env): FAKE_STT_MS, FAKE_LLM_TTFT_MS, FAKE_LLM_TOKEN_MS, FAKE_TTS_TTFB_MS, FAKE_TTS_DROP_EVERY=N with
- * FAKE_TTS_DROP_MODE=empty|abort, FAKE_TTS_SILENT=1. Writes <out>/report.json, prints a summary and a PASS/FAIL line; exit 0 pass, 1 fail,
+ * FAKE_TTS_DROP_MODE=empty|abort, FAKE_TTS_SILENT=1. MODEL_SCRIPT=<script.py> runs in place of the fake model (`--port N`),
+ * RT_CONFIG replaces its session config. Writes <out>/report.json, prints a summary and a PASS/FAIL line; exit 0 pass, 1 fail,
  * 2 the harness itself failed.
  */
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
@@ -43,7 +46,7 @@ import { join } from 'path';
 import { ceilingReport, firstReplyAudioMs, shortAudioReference } from './ceiling';
 import { parseThink } from './think';
 import type { ClientConfig, ClientResult, Turn } from './load-client';
-import { HOST_IP, NS_EXEC, PROFILES, netDown, netState, netUp } from './net-shape';
+import { HOST_IP, NS_EXEC, PROFILES, netChange, netDown, netState, netUp } from './net-shape';
 
 const argv = process.argv.slice(2);
 const opt = (name: string) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
@@ -215,7 +218,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
   return {
     pass: checks.every(c => c.ok), checks, target: TARGET,
     run: {
-      mode: REAL_GW ? 'real' : 'fake', gateway: REAL_GW || null, deployment: DEP, profile: PROFILE, shaping: LINUX_ROOT ? PROFILES[PROFILE] : null,
+      mode: REAL_GW ? 'real' : 'fake', gateway: REAL_GW || null, deployment: DEP, profile: PROFILE, profileThen: opt('profile-then') ?? null, shaping: LINUX_ROOT ? PROFILES[PROFILE] : null,
       students: N, rtc: RTC, s2s: S2S, chrome: CHROME, chromeTransports: cfg.chromeTransports, clipEndSilenceMs: cfg.clipEndSilenceMs, rampS: cfg.rampS, durationS: cfg.durationS, turnEveryS: cfg.turnEveryS, jitterS: cfg.jitterS,
       clip: cfg.clip ?? `tone ${cfg.clipS} s`, ...(REAL_GW ? {} : { replicas: REPLICAS, capPerReplica: CAP }),
       fake: Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('FAKE_'))),
@@ -231,7 +234,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
     edge: {
       ttfaMs: dist(metric('ttfa_ms')), sttMs: dist(metric('stt_ms')), llmTtftMs: dist(metric('llm_ttft_ms')), ttsTtfbMs: dist(metric('tts_ttfb_ms')),
       firstSoundFromSpeechMs: dist(metric('first_sound_from_speech_ms')), ttfaFromSpeechMs: dist(metric('ttfa_from_speech_ms')),
-      rtpFirstSentMs: dist(metric('rtp_first_sent_ms')), rtpLateP95Ms: dist(metric('rtp_late_p95_ms')), rtpLateMaxMs: dist(metric('rtp_late_max_ms')), uplinkLostMs: dist(metric('uplink_lost_ms')),
+      rtpFirstSentMs: dist(metric('rtp_first_sent_ms')), rtpLateP95Ms: dist(metric('rtp_late_p95_ms')), rtpLateMaxMs: dist(metric('rtp_late_max_ms')), uplinkLostMs: dist(metric('uplink_lost_ms')), uplinkRecoveredMs: dist(metric('uplink_recovered_ms')), uplinkFecPct: dist(metric('uplink_fec_pct')), uplinkRedPct: dist(metric('uplink_red_pct')),
     },
     connect: {
       sessionMs: Object.fromEntries(['webrtc', 'ws'].map(k => [k, dist(client.students.filter(s => s.transport === k && s.connectMs !== null).map(s => s.connectMs as number))])),
@@ -332,7 +335,7 @@ try {
     const { startLocalStack } = await import('./local-stack');
     const local = await startLocalStack({
       python: process.env.EDGE_PYTHON || 'python3', work: WORK, keys: ['key-parle:parle', 'key-admin:admin'], deployment: DEP, maxSessions: CAP,
-      maxTotalReplicas: REPLICAS, hostname: '0.0.0.0', realtimeEnv: { REALTIME_STUN_URLS: '' }, modelScript: join(import.meta.dir, 'fake_model.py'), log,
+      maxTotalReplicas: REPLICAS, hostname: '0.0.0.0', realtimeEnv: { REALTIME_STUN_URLS: '' }, modelScript: process.env.MODEL_SCRIPT || join(import.meta.dir, 'fake_model.py'), log,
     });
     stack = local;
     local.startCoturn();
@@ -345,7 +348,7 @@ try {
     }
     gw = `http://${HOST_IP}:${local.gwPort}`;
     key = 'key-parle';
-    config = { system: 'Você é a padeira. Responda curto.', messages: [], voice: 'br-m-08' };
+    config = process.env.RT_CONFIG ? config : { system: 'Você é a padeira. Responda curto.', messages: [], voice: 'br-m-08' };
     view = async () => local.controller.get(DEP);
   }
   const cfg: ClientConfig = {
@@ -353,6 +356,7 @@ try {
     chromeTransports: (opt('chrome-transports') ?? 'webrtc,ws,s2s-stream').split(','), clipEndSilenceMs: num('clip-end-silence', 700), rtcProcs: num('rtc-procs', Math.ceil(RTC / 8)),
     rampS: num('ramp', 30), durationS: num('duration', 180), turnEveryS: num('turn-every', 15), jitterS: num('jitter', 5), burst: argv.includes('--burst'), think: parseThink(opt('think')), clipS: num('clip-s', 1.4),
     uplinkStallMs: num('uplink-stall', 0), uplinkStallEvery: num('uplink-stall-every', 3), clientDeadline: argv.includes('--client-deadline'), speculateLeadMs: num('speculate-lead', 0), speculateResume: num('speculate-resume', 0),
+    transportPolicy: opt('transport-policy') || undefined, fidelity: argv.includes('--fidelity'),
     ttsModel: opt('tts-model') ?? (config.models as { tts?: string } | undefined)?.tts,
     clip: opt('clip') ?? null, turnTimeoutS: num('turn-timeout', 30), turn: (opt('turn') ?? (PROFILE === 'udp-blocked' ? 'tcp' : 'udp')) as 'udp' | 'tcp',
     python: process.env.EDGE_PYTHON || 'python3', chromePath: process.env.CHROME_PATH || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -366,6 +370,10 @@ try {
   await sample();
   sampler = setInterval(() => void sample(), 2_000);
   console.log(`running ${N} students for ${cfg.rampS + cfg.durationS} s (profile ${PROFILE}); work dir ${WORK}`);
+  const [thenProfile, thenAt] = (opt('profile-then') ?? '').split('@');
+  if (thenProfile && LINUX_ROOT) {
+    setTimeout(() => { netChange(thenProfile); console.log(`network: ${PROFILE} → ${thenProfile} at ${thenAt} s`); }, Number(thenAt) * 1000);
+  }
   child = Bun.spawn([...(LINUX_ROOT ? NS_EXEC : []), process.execPath, join(import.meta.dir, 'load-client.ts'), join(WORK, 'client-config.json')], { stdout: 'inherit', stderr: 'inherit', env: { ...process.env, LOAD_KEY: key } });
   await child.exited;
   clearInterval(sampler);

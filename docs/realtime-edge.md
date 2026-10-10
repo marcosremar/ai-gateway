@@ -293,9 +293,36 @@ need none. Measured on the loopback harness: end of speech → `vad end` 821 →
 A lost packet is elapsed time: `read_track` compares each decoded frame's RTP timestamp with the one expected
 (`audio.GapFill`) and feeds the missing span as silence (at most 1 s per gap), so the VAD's 700 ms window is 700 ms of
 the learner's clock under loss (harness, 10 % loss: `vad end` 781–821 ms without it, 741–762 with) and the clip the STT
-gets keeps its length. The turn's `metrics` carries `uplink_lost_ms`. No Opus FEC or concealment: aiortc 1.15 decodes
-through PyAV's libopus wrapper, which has no FEC flag and returns nothing for a missing packet; decoding the in-band
-FEC would need libopus called directly. A packet that arrives after a later one is dropped, as before.
+gets keeps its length. A packet that arrives after a later one is dropped, as before.
+
+The missing span is rebuilt, not left silent (`audio.LossDecoder`, libopus called directly through `ctypes` on the
+library PyAV ships: aiortc's own Opus decoder has no FEC flag and returns nothing for a missing packet). Nothing waits:
+the gap is only known when the next packet arrives, and that packet is what rebuilds it. Three layers, in order:
+
+1. **RED** (`audio/red`, RFC 2198): the SDK puts `red` first in its offer (`setCodecPreferences`), the edge answers it
+   first with the browser's payload type and `fmtp` (Chrome's 63 is below aiortc's "dynamic" range, and Chrome only
+   sends RED when the answer carries `fmtp:63 111/111`), and each packet then brings a full copy of the one before it.
+   A lost packet is decoded from that copy: the same audio, not an approximation. The edge still sends plain Opus
+   (`audio.send_opus`).
+2. **Opus in-band FEC**: the answer carries `useinbandfec=1`, so the browser's encoder adds a low-bitrate copy of the
+   previous frame once the edge's RTCP receiver reports show loss. Used when the packet before the one that arrived is
+   still missing: without RED, one lost packet; with RED, the second of two lost in a row (the FEC inside the copy).
+3. **Opus concealment (PLC)** for what neither covers. It lasts exactly the missing span, so the VAD's clock is the
+   same as with silence.
+
+The turn's `metrics` carries `uplink_lost_ms` (audio that did not arrive in its own packet), `uplink_recovered_ms` (of
+it, rebuilt from RED or FEC; the rest was concealed), `uplink_fec_pct` and `uplink_red_pct` (share of the turn's packets
+that carried FEC / a redundant copy: whether the browser is sending them). `tests/loss_bench.py` measures the
+strategies on a speech clip without a network (`clips`, then `wer` with a local Whisper); numbers in
+`docs/reports/2026-10-07-realtime-handoff.md`. No NACK / RTX for audio: a retransmission arrives one round trip plus
+the sender's timer late (150 ms or more on the `lossy` profile's 75 ms each way), which is delay on every turn's end
+for what RED already carries in the next packet 20 ms later.
+
+The data channel's SCTP retransmission timer starts at 0.5 s with a floor of 0.4 s (`host.py`; aiortc's RFC defaults
+are 3 s and 1 s, Chrome's own stack uses 0.5 and 0.4): on a lossy path one lost handshake chunk cost 3 s of connection
+time and a lost event (`transcript`, `audio_start`) arrived a second late. Harness, 30 connections with 75 ms each way:
+at 5 % loss 6 of 30 took over 3 s (max 5.9 s) before, none after (max 2.9 s); at 10 % 8 of 30 (max 7.4 s) before, 3
+of 30 (max 5.0 s) after.
 
 Downlink: `OutTrack` sends one 20 ms frame per tick of a wall-clock grid, silence included, with continuous RTP
 timestamps, so the browser's jitter buffer stays at its floor between replies (Chromium `getStats`: target and minimum
