@@ -27,7 +27,7 @@
  *   --think 2-6       ws / webrtc students: instead of --turn-every, listen to the reply in real time, then wait a
  *                     seeded uniform think time (seconds) before the next utterance
  *   --clip-s 1.4      length of the tone clip               --clip file.wav  real speech instead (PCM16 mono WAV)
- *   --profile clean   clean | campus-slow | udp-blocked | lossy | flap
+ *   --profile clean   clean | campus-slow | udp-blocked | lossy | loss-2 | loss-5 | loss-10 | flap
  *   --profile-then lossy@90   the network becomes that profile (clean | campus-slow | lossy) 90 s into the run
  *   --transport-policy auto   Chrome: the SDK's transportPolicy ('' = unset)      --fidelity   Chrome: the SDK's fidelity option
  *   --ceiling-ms 2500 any turn whose first sound (opener or reply) comes later fails the run
@@ -36,7 +36,8 @@
  *   --turn-timeout 30 --trunc-ratio 0.6 --ms-per-char 0 --turn udp|tcp --out <dir>
  *
  * Fake model knobs (env): FAKE_STT_MS, FAKE_LLM_TTFT_MS, FAKE_LLM_TOKEN_MS, FAKE_TTS_TTFB_MS, FAKE_TTS_DROP_EVERY=N with
- * FAKE_TTS_DROP_MODE=empty|abort, FAKE_TTS_SILENT=1. Writes <out>/report.json, prints a summary and a PASS/FAIL line; exit 0 pass, 1 fail,
+ * FAKE_TTS_DROP_MODE=empty|abort, FAKE_TTS_SILENT=1. MODEL_SCRIPT=<script.py> runs in place of the fake model (`--port N`),
+ * RT_CONFIG replaces its session config. Writes <out>/report.json, prints a summary and a PASS/FAIL line; exit 0 pass, 1 fail,
  * 2 the harness itself failed.
  */
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
@@ -334,7 +335,7 @@ try {
     const { startLocalStack } = await import('./local-stack');
     const local = await startLocalStack({
       python: process.env.EDGE_PYTHON || 'python3', work: WORK, keys: ['key-parle:parle', 'key-admin:admin'], deployment: DEP, maxSessions: CAP,
-      maxTotalReplicas: REPLICAS, hostname: '0.0.0.0', realtimeEnv: { REALTIME_STUN_URLS: '' }, modelScript: join(import.meta.dir, 'fake_model.py'), log,
+      maxTotalReplicas: REPLICAS, hostname: '0.0.0.0', realtimeEnv: { REALTIME_STUN_URLS: '' }, modelScript: process.env.MODEL_SCRIPT || join(import.meta.dir, 'fake_model.py'), log,
     });
     stack = local;
     local.startCoturn();
@@ -347,7 +348,7 @@ try {
     }
     gw = `http://${HOST_IP}:${local.gwPort}`;
     key = 'key-parle';
-    config = { system: 'Você é a padeira. Responda curto.', messages: [], voice: 'br-m-08' };
+    config = process.env.RT_CONFIG ? config : { system: 'Você é a padeira. Responda curto.', messages: [], voice: 'br-m-08' };
     view = async () => local.controller.get(DEP);
   }
   const cfg: ClientConfig = {

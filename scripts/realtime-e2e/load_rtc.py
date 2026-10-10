@@ -30,7 +30,7 @@ def out(**msg) -> None:
 
 
 def slim(event: dict) -> dict:
-    return {**{k: event[k] for k in KEEP if k in event}, "chars": len(event.get("text") or "")}
+    return {**{k: event[k] for k in KEEP if k in event}, "chars": len(event.get("text") or ""), **({"text": event["text"]} if event.get("type") == "transcript" and event.get("final") else {})}
 
 
 def ice_servers(raw: list, turn: str) -> list:

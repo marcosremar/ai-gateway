@@ -9,6 +9,9 @@ export const PROFILES: Record<string, Profile> = {
   'campus-slow': { down: '2mbit', up: '512kbit', delayMs: 40, jitterMs: 10, lossPct: 1 },
   'udp-blocked': { udpBlocked: true },
   lossy: { delayMs: 75, lossPct: 5 },
+  'loss-2': { delayMs: 20, lossPct: 2 },
+  'loss-5': { delayMs: 20, lossPct: 5 },
+  'loss-10': { delayMs: 20, lossPct: 10 },
   flap: { flap: { everyS: 30, downS: 3 } },
 };
 
