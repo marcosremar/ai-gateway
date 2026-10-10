@@ -11,7 +11,7 @@ import { packFiles } from './file-pack';
 import { placeReplica, PlacementError } from './placement-walk';
 import { isOutOfStock, quotaMachineType } from './placements';
 import { DEFAULT_NEAR } from './placements';
-import { gateDecision, gateNote } from './rtt-gate';
+import { baselineLoaded, gateDecision, gateNote } from './rtt-gate';
 import type { DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
 export const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
@@ -19,6 +19,7 @@ const NETWORK_RELEASE_QUICK_ATTEMPTS = 10;
 const NETWORK_RELEASE_SLOW_RETRY_MS = 5 * 60_000;
 const ORPHAN_RELEASE_ATTEMPTS = 6;
 const SPEND_RETRY_MS = 30_000;
+export const CREDIT_BACKOFF_MS = 10 * 60_000;
 
 export abstract class ReplicaLifecycle extends ControllerState {
   protected async probeOne(m: ReplicaMachine): Promise<void> {
@@ -30,8 +31,14 @@ export abstract class ReplicaLifecycle extends ControllerState {
     if (result === 'down') p.downSince ??= this.now(); else delete p.downSince;
     if (result === 'ready') {
       // Replica lifecycle for telemetry (serve.ts maps these log lines to `replica.ready` / `replica.unhealthy`).
-      if (!p.readyNow) this.log('deployments: replica ready', { deployment: m.deployment, id: m.id, bootMs: p.everReady ? null : this.now() - m.createdAt });
+      const adopted = m.createdAt < this.startedAt;
+      if (!p.readyNow) {
+        this.log('deployments: replica ready', {
+          deployment: m.deployment, id: m.id, bootMs: p.everReady || adopted ? null : this.now() - m.createdAt, ...(adopted ? { adopted: true } : {}),
+        });
+      }
       rt.bootTimeouts = 0;
+      rt.lostAt = null;
       if (!p.everReady && m.createdAt >= this.startedAt) this.backends[this.providerOf(m)]?.noteHost?.(m, { bootMs: this.now() - m.createdAt });
       p.readyAt ??= this.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
     } else if (result === 'busy' && p.everReady && (this.busyOn(rt, m.id) > 0 || this.servedRecently(p))) {
@@ -88,9 +95,11 @@ export abstract class ReplicaLifecycle extends ControllerState {
     const measured = gateNote(input);
     if (decision === 'pass') {
       gate.status = 'passed';
-      rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${measured}: kept`;
+      const loaded = baselineLoaded(gate.baseline);
+      const quiet = loaded ? ` (baseline ${gate.baseline!.quietMs} ms when quiet: measured under load, not remembered as a good host)` : '';
+      rt.lastPlacement = `${rt.lastPlacement ?? m.zone}; ${measured}${quiet}: kept`;
       rt.rejected = [];
-      if (rtt != null) backend.recordRtt?.(m, rtt, gate.baseline?.rttMs ?? null);
+      if (rtt != null && !loaded) backend.recordRtt?.(m, rtt, gate.baseline?.rttMs ?? null);
       return true;
     }
     const note = `host ${m.zone || m.id}: ${measured}: released (too-far)`;
@@ -107,6 +116,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
 
   protected async release(m: ReplicaMachine, reason: string): Promise<void> {
     this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason });
+    if ((reason === 'unhealthy' || reason === 'halted') && this.probes.get(m.id)?.everReady) this.noteLost(m.deployment);
     try {
       await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
       this.machines = this.machines.filter(x => x.id !== m.id);
@@ -214,6 +224,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
         // The € ceiling frees up as soon as something idles: retry soon, without the escalating back-off of a broken create.
         if (rt.spendNote && err instanceof PlacementError) rt.backoffUntil = this.now() + SPEND_RETRY_MS;
         else if (quotaMachineType(err, spec.machineType) && this.freeing(spec.name)) rt.backoffUntil = this.now() + SPEND_RETRY_MS;
+        else if (/insufficient_credit/.test(rt.lastError)) rt.backoffUntil = this.now() + CREDIT_BACKOFF_MS;
         else {
           // Out of stock everywhere is the provider's capacity, not a broken spec: same escalating ladder (bounded retry
           // rate, ≤ 1 create per 10 min once it persists), counted apart so the view says what blocks and for how long.

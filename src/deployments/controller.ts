@@ -24,12 +24,14 @@ import { externalInflightOn, noteSession } from '../realtime/external-load';
 import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
-import type { DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
+import type { CreditIssue, DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
 
 /** Adaptive hedge: a request is hedged only once it is this much slower than its replica's recent p95. */
 export const HEDGE_P95_FACTOR = 1.2;
 export const STAGE_STRIKES = 3;
 export const STAGE_COOLDOWN_MS = 30_000;
+export const LOST_RETRY_AFTER_SECONDS = 30;
+export const LOST_FAST_FAIL_MS = 15 * 60_000;
 
 export {
   DeploymentError, DEFAULT_MAX_COLD_START_WAIT_SECONDS, DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type ControllerOptions, type Lease,
@@ -86,6 +88,7 @@ export class DeploymentController extends ControllerViews {
     if (initBytes > USER_DATA_KEY_MAX_BYTES) {
       throw new SpecError(`generated cloud-init is ${initBytes} bytes; Scaleway takes at most ${USER_DATA_KEY_MAX_BYTES} (shrink bootScript/env)`);
     }
+    await this.refuseMissingImages(spec, existing?.record.spec);
     const now = this.now();
     const hold = rawHold === undefined ? existing?.record.hold : holdOf(rawHold, spec.maxReplicas, now);
     if (existing) {
@@ -116,6 +119,21 @@ export class DeploymentController extends ControllerViews {
     }
     this.kick();
     return { view: this.view(name)!, created: !existing };
+  }
+
+  private async refuseMissingImages(spec: DeploymentSpec, previous: DeploymentSpec | undefined): Promise<void> {
+    const { checkImage } = this.opts;
+    if (!checkImage) return;
+    const imagesOf = (s: DeploymentSpec | undefined) => new Set([s?.image, ...(s?.placements ?? []).map(p => p.image)].filter((i): i is string => !!i));
+    const before = previous && isDeepStrictEqual(previous.registryAuth, spec.registryAuth) ? imagesOf(previous) : new Set<string>();
+    for (const image of [...imagesOf(spec)].filter(i => !before.has(i))) {
+      const missing = await checkImage(image, spec.registryAuth ?? null);
+      if (missing) throw new SpecError(missing);
+    }
+  }
+
+  creditIssues(): CreditIssue[] {
+    return Object.values(this.backends).flatMap(b => b?.creditIssue?.() ?? []);
   }
 
   async noteUdp(deployment: string, replicaId: string, udp: 'ok' | 'blocked', seen: { path?: string; active: number }): Promise<void> {
@@ -325,6 +343,12 @@ export class DeploymentController extends ControllerViews {
         while (!machine) {
           const left = deadline - this.now();
           if (left <= 0 || opts.signal?.aborted || !this.deployments.has(name)) break;
+          const pointless = this.pointlessWait(rt, name, deadline);
+          if (pointless) {
+            rt.refusedAt.push(this.now());
+            this.noteDemand(rt);
+            throw pointless;
+          }
           await new Promise<void>((resolve) => {
             const t = setTimeout(done, Math.min(left, 5_000));
             function done() { clearTimeout(t); rt.waiters.delete(done); resolve(); }
@@ -407,12 +431,32 @@ export class DeploymentController extends ControllerViews {
    */
   private leaseEnded(id: string, outcome: LeaseOutcome): void {
     const p = this.probes.get(id);
+    if (p && outcome === 'errored') p.erroredSinceServed = true;
     if (!p || outcome === 'cancelled' || outcome === 'errored') return;
-    if (outcome === 'ok') { p.lastServedAt = this.now(); p.failures = 0; return; }
+    if (outcome === 'ok') { p.lastServedAt = this.now(); p.failures = 0; p.erroredSinceServed = false; return; }
     if (outcome === 'timeout' || outcome === 'overloaded' || this.servedRecently(p)) { p.busy = true; return; }
     p.readyNow = false;
     p.failures++;
     this.kick();
+  }
+
+  private pointlessWait(rt: Runtime, name: string, deadline: number): DeploymentError | null {
+    if (this.servingMachines(name).length) return null;
+    const now = this.now();
+    const lastError = rt.lastError ? ` (last error: ${rt.lastError})` : '';
+    if (rt.lostAt != null && now - rt.lostAt < LOST_FAST_FAIL_MS) {
+      return new DeploymentError(503, `deployment '${name}': its ready replica was lost and no other is ready; a replacement is on its way${lastError}`,
+        LOST_RETRY_AFTER_SECONDS);
+    }
+    const mine = this.machines.filter(m => m.deployment === name);
+    if (!mine.length && !rt.creating && rt.backoffUntil >= deadline) {
+      return new DeploymentError(503, `deployment '${name}': no ready replica yet${lastError || ' (create backing off)'}`,
+        Math.max(1, Math.ceil((rt.backoffUntil - now) / 1000)));
+    }
+    const readyAt = this.expectedReadyAt(rt, mine);
+    if (readyAt == null || readyAt <= deadline) return null;
+    const seconds = Math.ceil((readyAt - now) / 1000);
+    return new DeploymentError(503, `deployment '${name}': replicas are starting, ready in about ${seconds} s by the measured boot time, after this call's wait`, seconds);
   }
 
   private persistRequestTime(rt: Runtime): void {

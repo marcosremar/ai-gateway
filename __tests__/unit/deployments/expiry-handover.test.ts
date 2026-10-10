@@ -92,6 +92,7 @@ describe('VastDeploymentBackend: never rents a host ending within a day', () => 
     const rented: string[] = [];
     const fetchImpl = async (url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return new Response(JSON.stringify({ offers }));
+      if (init?.method !== 'PUT') return new Response('{}');
       rented.push(url);
       return new Response(JSON.stringify({ success: true, new_contract: 9 }));
     };
