@@ -46,6 +46,7 @@ import {
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
+import { createRooms } from './src/rooms';
 
 const log = createLogger('serve');
 
@@ -340,6 +341,18 @@ const realtime = createRealtime({
 });
 realtimeSessionOf = sessionResolverFrom(realtime.service);
 if (deployments) deployments.devices.onBlock = (app, device) => { void realtime.service.endDeviceSessions(app, device); };
+// Live subtitle rooms (src/rooms, docs/rooms.md): POST /v1/rooms with a gateway key; publishing with the room's own
+// token, the transcript, the viewer WebSocket and the viewer pages (ROOMS_PUBLIC_HOST, /live/:code) mounted in front.
+const rooms = createRooms({
+  keyUser: (token) => {
+    const userId = keyRegistry.resolve(token)?.userId;
+    return userId ? { userId, admin: adminUsers.has(userId) } : null;
+  },
+  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+log.log({ dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl }, 'Rooms enabled');
+
 const deviceGate = deployments && ((userId: string, headers: import('http').IncomingHttpHeaders, kind: string) => {
   const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
   return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
@@ -359,7 +372,7 @@ const server = await startProxy({
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
-    ...(telemetry?.adminRoutes ?? []),
+    rooms.route, ...(telemetry?.adminRoutes ?? []),
   ],
   publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
@@ -367,6 +380,7 @@ const server = await startProxy({
 });
 
 realtime.mount(server);
+rooms.mount(server);
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 
@@ -397,6 +411,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     deployments?.controller.stop();
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
+    rooms.stop();
     declared?.stop();
     keyManager.stop();
     telemetry?.stop();
