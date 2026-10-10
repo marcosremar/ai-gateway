@@ -127,16 +127,16 @@ export function declaredBody(
           ...Object.fromEntries(Object.entries(declaredByType).map(([type, vars]) => [type, { ...storedByType[type], ...vars }])),
         },
       } : {}),
-      ...(decl.spec.scaling ? { scaling: mergedScaling(previous?.scaling, decl.spec.scaling as ScalingSpec) } : {}),
+      ...(decl.spec.scaling ? { scaling: mergedScaling(previous?.scaling, decl.spec.scaling as Partial<ScalingSpec>) } : {}),
       ...(registryAuth ? { registryAuth } : {}),
       ...(decl.description ? { description: decl.description } : {}),
     },
   };
 }
 
-function mergedScaling(stored: ScalingSpec | undefined, declared: ScalingSpec): ScalingSpec {
+function mergedScaling(stored: ScalingSpec | undefined, declared: Partial<ScalingSpec>): ScalingSpec {
   const budget = stored?.budget || declared.budget ? { ...stored?.budget, ...declared.budget } : undefined;
-  return { mode: DEFAULT_SCALING_MODE, ...stored, ...declared, ...(budget ? { budget } : {}) };
+  return { ...stored, ...declared, mode: declared.mode ?? stored?.mode ?? DEFAULT_SCALING_MODE, ...(budget ? { budget } : {}) };
 }
 
 function canonical(value: unknown): unknown {
