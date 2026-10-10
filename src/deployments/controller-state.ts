@@ -13,13 +13,13 @@
 import { createHmac } from 'crypto';
 import { activeWindow, type PressureState } from './autoscale';
 import { filesByUrl } from './boot-files';
-import { replicaPhase, type ObservedReplica } from './planner';
+import { bootTimeoutMinutesOn, replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
 import { externalInflightOn } from '../realtime/external-load';
 import type {
   DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
-  ReplicaProbe, ScalingMode,
+  RegistryAuth, ReplicaProbe, ScalingMode,
 } from './types';
 
 export class DeploymentError extends Error {
@@ -39,6 +39,7 @@ export interface ProbeState {
   readyAt?: number;
   /** Last time the replica answered a forwarded request (lease ended `ok`): a replica that just served is alive. */
   lastServedAt?: number;
+  erroredSinceServed?: boolean;
   /**
    * Alive but saturated: its health check timed out (or a request hit its time limit) while it had work. It keeps
    * serving what it has and gets no NEW request beyond `targetInflightPerReplica` until a probe answers again; it is
@@ -98,6 +99,7 @@ export interface Runtime {
   /** When another deployment under pressure took this one's idle replica (it then counts as idle until a new request). */
   reclaimedAt: number | null;
   bootTimeouts: number;
+  lostAt: number | null;
 }
 
 /** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
@@ -151,6 +153,7 @@ export interface ControllerOptions {
   log?: (msg: string, data?: Record<string, unknown>) => void;
   sessions?: (deployment: string) => number | null;
   defaultScalingMode?: ScalingMode;
+  checkImage?: (image: string, auth: RegistryAuth | null) => Promise<string | null>;
 }
 
 export interface Lease {
@@ -174,6 +177,7 @@ export const machineTypesOf = (spec: DeploymentSpec): Set<string> => new Set(
   [spec.machineType, ...(spec.placements ?? []).flatMap(p => p.machineType ?? []), ...(spec.candidates ?? []).map(c => c.machineType)]);
 export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
 export const DEFAULT_BUSY_GRACE_MS = 120_000;
+export const ERRORED_GRACE_MS = 20_000;
 export const DEFAULT_MAX_COLD_START_WAIT_SECONDS = 240;
 /**
  * A request turned away for lack of a ready replica counts as load for this long (≈ the time the fallback takes to
@@ -275,7 +279,8 @@ export abstract class ControllerState {
   }
 
   protected forVast(rt: Runtime, spec: DeploymentSpec): DeploymentSpec {
-    return filesByUrl(spec, rt.record.replicaToken, this.opts.publicUrl, this.now());
+    const bootTimeoutMinutes = bootTimeoutMinutesOn(spec, 'vast');
+    return filesByUrl({ ...spec, bootTimeoutMinutes }, rt.record.replicaToken, this.opts.publicUrl, this.now());
   }
 
   protected providerOf(m: ReplicaMachine): DeploymentProvider {
@@ -296,7 +301,7 @@ export abstract class ControllerState {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
-      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0,
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0, lostAt: null,
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
@@ -320,9 +325,16 @@ export abstract class ControllerState {
     return [...this.stageStrikes.keys()].filter(k => k.startsWith(`${id}|`)).map(k => k.slice(id.length + 1)).filter(s => this.stageOut(id, s));
   }
 
+  protected noteLost(deployment: string | undefined): void {
+    const rt = deployment ? this.deployments.get(deployment) : undefined;
+    if (rt) rt.lostAt = this.now();
+  }
+
   /** Answered a forwarded request within `busyGraceMs`. */
   protected servedRecently(p: ProbeState | undefined): boolean {
-    return p?.lastServedAt != null && this.now() - p.lastServedAt < (this.opts.busyGraceMs ?? DEFAULT_BUSY_GRACE_MS);
+    if (p?.lastServedAt == null) return false;
+    const grace = this.opts.busyGraceMs ?? DEFAULT_BUSY_GRACE_MS;
+    return this.now() - p.lastServedAt < (p.erroredSinceServed ? Math.min(grace, ERRORED_GRACE_MS) : grace);
   }
 
   /** Requests refused in the last `REFUSED_HOLD_MS` (older ones pruned). */
@@ -370,7 +382,13 @@ export abstract class ControllerState {
       ...(p.readyAt ? { readyAt: p.readyAt } : {}), ...(this.servedRecently(p) ? { servedRecently: true } : {}),
       ...(p.downSince !== undefined ? { downForMs: this.now() - p.downSince } : {}),
       ...(machine.createdAt < this.startedAt ? { bootStartedAt: this.startedAt } : {}),
+      ...(this.adoptedPastBoot(machine) ? { adoptedPastBoot: true } : {}),
     };
+  }
+
+  protected adoptedPastBoot(m: ReplicaMachine): boolean {
+    const spec = this.deployments.get(m.deployment)?.record.spec;
+    return !!spec && m.createdAt + bootTimeoutMinutesOn(spec, this.providerOf(m)) * 60_000 <= this.startedAt;
   }
 
   protected parkedNow(m: ReplicaMachine): boolean {
@@ -466,6 +484,7 @@ export abstract class ControllerState {
   }
 
   protected replicaToken(rt: Runtime, machine: ReplicaMachine): string {
-    return replicaTokenFor(rt.record.replicaToken, machine.tokenKey ?? this.tokenKeys.get(machine.id));
+    const tokenKey = machine.tokenKey ?? this.tokenKeys.get(machine.id);
+    return replicaTokenFor(rt.record.secretPins?.[tokenKey ?? `id:${machine.id}`] ?? rt.record.replicaToken, tokenKey);
   }
 }

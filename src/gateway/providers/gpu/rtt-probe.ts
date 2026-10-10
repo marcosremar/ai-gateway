@@ -116,3 +116,26 @@ export async function probeRtt(
     ...extra,
   };
 }
+
+export function connectRttOnce(ip: string, port: number, timeoutMs = 2_000): Promise<number | null> {
+  return new Promise((resolve) => {
+    const started = performance.now();
+    const socket = net.createConnection({ host: ip, port });
+    const finish = (value: number | null) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    socket.once('connect', () => finish(performance.now() - started));
+    socket.once('error', (err: NodeJS.ErrnoException) => finish(err.code === 'ECONNREFUSED' ? performance.now() - started : null));
+  });
+}
+
+export async function probeConnectRtt(
+  ip: string, port: number, count = 5, timeoutMs = 2_000, opts: RttProbeOptions = {},
+): Promise<number | null> {
+  if ((await connectRttOnce(opts.canaryIp ?? RTT_CANARY_IP, port, 1_500)) !== null) return null;
+  const ok = (await Promise.all(Array.from({ length: count }, () => connectRttOnce(ip, port, timeoutMs)))).filter((v): v is number => v !== null);
+  return ok.length ? Math.round(Math.min(...ok)) : null;
+}

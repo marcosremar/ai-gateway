@@ -25,7 +25,8 @@ curl -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" ...
 ```
 
 Set `GATEWAY_API_KEYS` on the server (comma-separated; `key:user` names the user). When no key is configured, only
-localhost requests are allowed. The `SANDBOX_TOKEN` (and its aliases) is **not** a client key: it is the dev API's
+localhost requests are allowed. Keys are also issued, rotated and revoked at runtime (§ Access at runtime), and the
+admin list replaced, without a deploy. The `SANDBOX_TOKEN` (and its aliases) is **not** a client key: it is the dev API's
 master key, which the gateway uses only to fetch its own provider keys from the palco, and it gets `401` here (owner
 decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only, default off, logs a `WARNING`) accepts it
 again as the user `sandbox`, until every client sends its own key. That user is **not an admin** (even if
@@ -92,7 +93,7 @@ Errors of the proxy and of the OpenAI routes are `{"error": {"message", "type"}}
 `invalid_device` (see *App devices*). A malformed multipart body (truncated, oversized field name) is a `400`, an
 oversized file a `413`. A `429` always carries `Retry-After` (seconds).
 
-The **management routes** (`/v1/deployments*`, `/v1/profiles*`, `/v1/apps*`, `/v1/admin/keys*`) answer errors as
+The **management routes** (`/v1/deployments*`, `/v1/profiles*`, `/v1/apps*`) answer errors as
 `{"error": "<message>"}` (a string, no `type`; a 503 while warming adds `"status": "warming"`), and a 500 carries
 `requestId` only.
 
@@ -769,6 +770,83 @@ contain names only.
 `400` for protected names (`SANDBOX_TOKEN` and aliases, `PORT`, `*_URL`, `*_BASE`, `*_HOST`, `*_ENDPOINT`, …) or
 malformed input; `502` when the
 palco refuses the write.
+
+Machine credentials (`SCW_SECRET_KEY`, `SCW_PROJECT_ID`, `SCW_REGISTRY_SECRET_KEY`, `VAST_API_KEY`) follow the same
+path: a reload that changes one validates it with a read-only call to the provider (Scaleway: list the deployment
+tags; Vast: `GET /users/current/`) and swaps it inside the running backend — replicas, host reputation and creates in
+flight are untouched. A refused key is put back to the previous value in the environment (the backend keeps working
+with it), logged as an error and in the audit (`deployment-credentials.rotate`, `ok: false`), and retried at the next
+reload. A provider that had no key at boot (no backend yet) still needs a restart to be enabled.
+
+## Access at runtime — `/v1/admin/access/*`
+
+Client keys, admin users, the `SANDBOX_TOKEN` and the replica secrets change without a deploy. All these routes
+(and `/v1/admin/keys*`) need an admin key, are rate-limited to 30 requests per minute per key (`429` with
+`Retry-After`), answer `Cache-Control: no-store`, errors as `{"error": {"message", "type"}}`, and every change goes to the audit (who, when, which names —
+never a value). State lives in `DEPLOYMENTS_STATE_DIR/access.json` (atomic write, last good copy in `.bak`, mode
+0600; keys stored as HMAC-SHA256 only) and `key-audit.jsonl`.
+
+The keys of `GATEWAY_API_KEYS` keep working until revoked through the API; an admin is a user of
+`DEPLOYMENTS_ADMIN_USERS` until the list is replaced through the API.
+
+### `GET /v1/admin/access/keys` (admin)
+
+```json
+{ "keys": [
+  { "id": "env-parle", "source": "env", "user": "parle", "admin": false, "prefix": "pk_1", "label": null,
+    "createdAt": null, "lastUsedAt": "2026-10-10T09:00:00.000Z", "expiresAt": null, "revokedAt": null, "active": true },
+  { "id": "key-9b1c…", "source": "issued", "user": "site", "admin": false, "prefix": "aigw_Xy3k", "label": "site prod",
+    "createdAt": "2026-10-10T09:01:00.000Z", "lastUsedAt": null, "expiresAt": null, "revokedAt": null, "active": true }
+] }
+```
+
+Never the value: only the id (`env-<user>` for `GATEWAY_API_KEYS` entries, numbered `-2`, `-3`… when a user has
+several, in their order; `key-…` derived from the HMAC for issued keys), a short prefix, owner and dates. `lastUsedAt` has minute
+resolution.
+
+### `POST /v1/admin/access/keys` (admin)
+
+Issues a key. Body `{ "user": "site", "label"?: "…", "admin"?: true, "replaces"?: "<id>", "overlapMinutes"?: 30 }`.
+`201` with `{ "key": "aigw_…", …the listing fields…, "replaced": {…} | null }` — **the only response that carries a
+secret**, once, at creation; it is never stored in clear (HMAC-SHA256 only). `admin: true` adds `user` to the admin list. `replaces`
+rotates a key (env or issued): the new key takes that key's user unless `user` is given, and the old key stops
+working at once (`overlapMinutes` 0 or absent) or after the overlap (max 10080 min = 7 days).
+
+### `POST /v1/admin/access/keys/revoke` (admin)
+
+Body `{ "id": "<id>" }`. Effective on the next request; persisted. `404` for an unknown id.
+
+### `GET` / `PUT /v1/admin/access/admins` (admin)
+
+`GET` → `{ "users": ["ops", …] }`. `PUT { "users": [...] }` replaces the admin list (it then wins over
+`DEPLOYMENTS_ADMIN_USERS`). The caller must stay in the list (`400` otherwise: no locking yourself out).
+
+### `PUT /v1/admin/access/sandbox-token` (admin)
+
+Body `{ "token": "<new SANDBOX_TOKEN>", "overlapMinutes"?: 60 }`. The gateway first fetches the palco with the new
+token; if the palco refuses it, `400` and nothing changes (the gateway never locks itself out). Then it uses the new
+token for every palco call, accepts the previous one as a master token during the overlap, and stores the new one in
+`access.json` so a restart keeps it (if the palco refuses the stored token at boot, the environment token is used).
+Response `{ "rotated": true, "overlapUntil": "…" | null }`.
+
+### `POST /v1/admin/access/replica-secrets/rotate` (admin)
+
+Body `{ "deployment"?: "<name>" }` (absent = every deployment). Issues a new deployment secret: replicas created from
+now on get tokens (`X-Aigw-Token`, realtime session signing key, boot-file signatures, edge telemetry HMAC) derived
+from it. Live replicas keep the secret their token came from until they are released, so open realtime sessions and
+boots in progress are not cut. Response `{ "rotated": [{ "deployment": "speech", "pinnedReplicas": 2 }] }`. The edge
+reads its token once at boot, so a live replica cannot take a new token: to move it, let it be replaced
+(scale-down / park).
+
+### `GET /v1/admin/access/audit?limit=100` (admin)
+
+Last changes, newest first (≤ 500 kept in memory, all in `key-audit.jsonl`):
+
+```json
+{ "entries": [{ "at": "2026-10-10T09:02:00.000Z", "actor": "ops", "action": "access.keys.revoke", "names": ["key-9b1c…"], "ok": true }] }
+```
+
+`actor` is the admin user, or `palco-reload` for keys applied by the periodic reload.
 
 ---
 

@@ -189,10 +189,23 @@ and never one still booting: the boot finishes and the idle clock runs from its 
 or `bootTimeoutMinutes` end a boot early; live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of a 9 min boot).
 A ready replica is never surplus while that would leave fewer ready replicas than desired: one ready and one booting
 for a desired count of 1 both stay until the boot finishes, then one of them goes.
-Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, `DEPLOYMENTS_UNHEALTHY_STRIKES`
+Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes` (at least 35 min on Vast,
+`VAST_MIN_BOOT_TIMEOUT_MINUTES`: a 22–57 GB image pulls in 11–25 min on a marketplace host; the Vast machine's own boot
+checks and signed file links get the same deadline), `DEPLOYMENTS_UNHEALTHY_STRIKES`
 (3) failed health checks in a row with nothing in flight and no answered request in the last
-`DEPLOYMENTS_BUSY_GRACE_SECONDS` (120), older than `maxHours` (counted from the last power-on of a parked replica, not
+`DEPLOYMENTS_BUSY_GRACE_SECONDS` (120; 20 s, `ERRORED_GRACE_MS`, when only 5xx answers came since the last good one), older than `maxHours` (counted from the last power-on of a parked replica, not
 from its creation).
+
+**Answering early instead of holding the caller.** A request with no ready replica gets `503` + `Retry-After` at once
+when waiting cannot help: the deployment's only ready replica was lost (gone from the provider list, or released as
+`unhealthy`/`halted`) and no other is ready (`Retry-After: 30`, the caller falls back while the replacement boots);
+no machine exists and creates are backing off past the call's wait (e.g. `insufficient_credit`); or the measured boot
+time (3+ samples of this machine type and image) ends after the call's wait. Otherwise it waits up to
+`coldStartWaitSeconds` as before. An adopted replica (gateway restart) logs `replica ready` with `adopted: true` and no
+`bootMs`, and one already past its boot window that never answers is released as `unhealthy` (its app died), not
+`boot-timeout` (which would blame the host). `PUT` checks that each image exists in its registry (a manifest `HEAD`,
+anonymous or with the spec's `registryAuth` / the Scaleway pull-only key) and answers 400 when the registry says it does
+not; an unreachable registry never blocks the `PUT`.
 
 **Busy is not dead.** The probe tells liveness (`/__aigw/ready`, answered by nginx even while the app is saturated) from
 readiness (the app's health path, `DEPLOYMENTS_PROBE_TIMEOUT_MS`, 4 s). A replica whose health check times out while it
@@ -474,6 +487,13 @@ With `candidates`, each create walks a **ranked ladder**:
 `provider: "vast"` (or a Vast candidate) needs `VAST_API_KEY` (from the dev API, like the Scaleway key). Code:
 `src/deployments/vast-backend.ts` (lean, separate from the GPU-pod client in `src/gateway/providers/gpu/`).
 
+**Credit.** Before each rent the backend reads the Vast balance (`GET /users/current/`, at most once a minute while it is
+fine) and refuses below `VAST_MIN_CREDIT_USD` (default 1); a rent Vast refuses with `insufficient_credit` counts the same.
+Either way the create fails with `insufficient_credit: …` and backs off 10 min, callers get `503` at once (above), the log
+line `deployments: provider credit exhausted` is written once (telemetry `provider.credit_exhausted`, and
+`ALERT_WEBHOOK_URL` when set), and `GET /health?details=1` (admin) lists it under `providerCredit` until a balance read
+is above the floor again.
+
 - **One container per host.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
   container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Without a
   `bootScript` the spec's `entrypoint` + `args` are run there instead (after loading `/srv/aigw/app.env`), so an
@@ -557,6 +577,16 @@ there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `
 - **Absolute rule** (no anchor for the country, or the baseline probe failed — the gate never opens for lack of a
   baseline): `rtt ≤ maxRttMs`, integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`), meant for the gateway's vantage
   on Railway europe-west4 (NL), where France → host is typically 10–20 ms more.
+
+- **Under load** (2026-10-09: with the gateway's own uplink saturated a Norwegian host read 144 ms against a Paris
+  baseline of 143 and passed): the backend keeps the lowest baseline of the last 6 h (`QUIET_BASELINE_MS`). When the
+  baseline of the tick is more than 15 ms over it (`LOADED_BASELINE_MARGIN_MS`) the verdict still applies, but a host
+  that passes is **not** remembered as known-good, and `lastPlacement` says `measured under load`.
+- **Before renting** (2026-10-09: 11 paid minutes of a 57 GB pull for a host the gate then released): when an offer
+  carries its host address (`public_ipaddr`, `direct_port_start`), the backend times a TCP connect to that port (a
+  refusal is an answer too; `probeConnectRtt`, skipped on a network that answers for an unroutable address) and applies
+  the same rule against the baseline. A host too far is skipped and avoided 24 h without being rented; a host that does
+  not answer is rented and gated after boot as before.
 
 Outside the gate the replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and
 the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too

@@ -204,6 +204,8 @@ export interface DeploymentRecord {
   spec: DeploymentSpec;
   /** Deployment secret, never sent to a machine: each replica's `X-Aigw-Token` is derived from it and the machine's `tokenKey`. */
   replicaToken: string;
+  /** Replicas made before a secret rotation keep the secret their token came from: tokenKey (or `id:<machine>`) → secret. */
+  secretPins?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
   lastRequestAt: number | null;
@@ -369,7 +371,10 @@ export interface DeploymentBackend {
   /** Read-only: the market offers a create would try for this spec, best first (Vast). */
   previewOffers?(spec: DeploymentSpec): Promise<OfferPreview[]>;
   offersReport?(spec: DeploymentSpec): Promise<OffersReport>;
+  creditIssue?(): CreditIssue | null;
 }
+
+export interface CreditIssue { provider: DeploymentProvider; message: string; balanceUsd: number | null; floorUsd: number; since: number; at: number }
 
 export interface HostNote { rttMs?: number; baselineMs?: number | null; bootMs?: number; udp?: 'ok' | 'blocked' }
 

@@ -491,19 +491,56 @@ keys, per-replica tokens, Scaleway registry pull with a read-only key).
   `GET /api/sandbox-env`. Checked: the registry grants `pull` on `aigw/speech-stack` and nothing for `pull,push`; it
   lists no Instance server. Creation steps (for a rotation): IAM → Applications → Create (no group) → Policies →
   Create policy → scope: project → `ContainerRegistryReadOnly` → attach → API keys → Generate.
-- [ ] The gateway reads the key at boot only: the deploy (a restart) is what picks it up. Afterwards `/health?details=1`
-  (admin key) must have no `SCW_REGISTRY_SECRET_KEY is missing` warning; with the warning, every create of an
-  `rg.*.scw.cloud` image (`parle-speech`) fails at once with an error naming the variable, and the boot log has
-  the same line as `ERROR:`.
+- [ ] Until the hot key rotation build (PR `feat/hot-key-rotation`) is deployed, the gateway reads the key at boot only.
+  From that build on it is picked up by the palco reload (≤ 5 min, or `POST /v1/admin/keys/reload` at once) —
+  steps in § 12.9.1. Either way, afterwards `/health?details=1` (admin key) must have no
+  `SCW_REGISTRY_SECRET_KEY is missing` warning; with the warning, every create of an `rg.*.scw.cloud` image
+  (`parle-speech`) fails at once with an error naming the variable, and the boot log has the same line as `ERROR:`.
 - [x] The school's `AI_GATEWAY_KEY` is an admin key (checked 2026-10-09: distinct from `SANDBOX_TOKEN`,
   `/health?details=1` → 200 with admin fields), so the dev token losing admin does not touch the school.
 - [ ] Optional: `SANDBOX_TOKEN_APP=parle` on the gateway if dev sessions should keep calling the parle aliases with the
   dev token (no-wake, app-key limits); unset, they get 403 on those aliases.
-- [ ] Afterwards consider rotating `SCW_SECRET_KEY`: it sat in the user_data and `boot.log` of every past replica.
+- [ ] Afterwards consider rotating `SCW_SECRET_KEY`: it sat in the user_data and `boot.log` of every past replica. With the
+  hot key rotation build this is § 12.9.1 step 2, no deploy.
 
-#### 12.9.1 Rotations after the #75 deploy (D4, S15, D6) — not done yet
+#### 12.9.1 Change each key without a deploy (from the `feat/hot-key-rotation` build on)
 
-Do them only once #75 is live (`/health` `commit` at or after the #75 merge), outside class hours (no class
+Only the first deploy of that build is needed; after it none of these steps restarts the gateway. Provider keys
+(OpenRouter, Groq, …) already rotate this way in production today (`PUT /v1/admin/keys`, live since 10/10/2026).
+`$GW` = `https://parle-ai-gateway.up.railway.app`, `$ADMIN` = an admin key. Every call below is audited: check with
+`curl -H "Authorization: Bearer $ADMIN" $GW/v1/admin/access/audit`.
+
+1. **Provider keys** (`OPENROUTER_API_KEY`, `GROQ_API_KEY`, …): `PUT $GW/v1/admin/keys` with `{"NAME": "value"}` — writes
+   the palco and reloads. Or change it on the palco (`bun run sandbox:set` in babylon-cinema) and
+   `POST $GW/v1/admin/keys/reload`.
+2. **Machine credentials** (`SCW_SECRET_KEY`, `SCW_PROJECT_ID`, `SCW_REGISTRY_SECRET_KEY`, `VAST_API_KEY`): create the new
+   key at the provider (keep the old one alive), write it as in step 1, then check the audit entry
+   `deployment-credentials.rotate` is `ok: true`. `ok: false` means the provider refused the new key: the gateway kept
+   the old one, nothing stopped; fix the key and write it again. Once `ok: true`, delete the old key at the provider.
+   A provider that had no key when the gateway booted still needs a restart.
+3. **A client key** (the school's `AI_GATEWAY_KEY`, a site's key): `GET $GW/v1/admin/access/keys` to find its id, then
+   `POST $GW/v1/admin/access/keys` with `{"replaces": "<id>", "overlapMinutes": 60}` → the answer carries the new key
+   (only time it is shown). Put it in the client (palco `AI_GATEWAY_KEY` for the school), confirm the client works and
+   that `lastUsedAt` of the new id moves; the old key stops by itself after 60 min (or revoke it at once:
+   `POST $GW/v1/admin/access/keys/revoke {"id": "<old id>"}`). The `GATEWAY_API_KEYS` Railway variable may keep the old
+   value: a revoked env key stays refused (state in `access.json` on the volume).
+4. **A leaked key**: `POST $GW/v1/admin/access/keys/revoke {"id": "<id>"}` — refused from the next request on.
+5. **Admins**: `PUT $GW/v1/admin/access/admins {"users": ["parle", "ops"]}` (you must stay in the list); a new admin
+   key: `POST $GW/v1/admin/access/keys {"user": "ops2", "admin": true}`.
+6. **`SANDBOX_TOKEN`**: first make the palco accept the new token next to the old one; then
+   `PUT $GW/v1/admin/access/sandbox-token {"token": "<new>", "overlapMinutes": 60}`. A `400` means the palco refused it and
+   nothing changed. After `200` the gateway uses the new token and accepts the old one for 60 min; then retire the old
+   token on the palco and update the Railway variable when convenient (the stored token wins at boot while the palco
+   accepts it).
+7. **Replica tokens / realtime signing key**: `POST $GW/v1/admin/access/replica-secrets/rotate` (`{"deployment": "<name>"}`
+   for one). New replicas get the new secret; live replicas and their open sessions keep theirs until replaced (the
+   edge cannot take a new token while running). To finish a rotation, let the old replicas be replaced (park/scale
+   down outside class hours).
+
+#### 12.9.2 Rotations after the deploy (D4, S15, D6) — not done yet
+
+Do them only once #75 and the hot key rotation build (#81, § 12.9.1) are live (`/health` `commit` at or after both
+merges), outside class hours (no class
 Mon–Thu 17:40–20:15 Paris), one at a time, and check each before the next. Every value goes through the dev API
 (`PUT https://parle-palco.up.railway.app/api/sandbox-env`, Bearer `SANDBOX_TOKEN`, body `{"NAME":"value"}`); never paste
 a value in a chat, a log, a commit or a shell history (load it into the process and send it from there).
@@ -522,19 +559,21 @@ replica before #75. Replace it with an IAM application key that can only do what
    `nl-ams-1`, `pl-waw-2`.
 3. `PUT /api/sandbox-env {"SCW_SECRET_KEY": <new>, "SCW_ACCESS_KEY": <new access key>}`; check
    `GET /api/sandbox-env` returns the new value (compare a hash, do not print it).
-4. Restart, in this order: `ai-gateway` (Railway; the deployments backend reads the key at boot — a running gateway
-   keeps the old key until then), then trigger one `ai-gateway-reaper` run (it fetches at every run). The gateway's
-   `/health?details=1` must have no Scaleway error and `GET /v1/deployments` must list the existing replicas
-   (listing them proves the key sees the project). The first real create after the switch: watch for
-   `create failed` with `403`/`permission`; if it appears, put the old key back with the same `PUT` and restart.
+4. Gateway: `POST $GW/v1/admin/keys/reload` (or `PUT $GW/v1/admin/keys` in step 3 instead of the palco `PUT`) and
+   check the audit entry `deployment-credentials.rotate` is `ok: true` (§ 12.9.1 step 2; `ok: false` = the gateway
+   kept the old key). Then trigger one `ai-gateway-reaper` run (it fetches at every run). `GET /v1/deployments` must
+   list the existing replicas (listing them proves the key sees the project). The first real create after the
+   switch: watch for `create failed` with `403`/`permission`; if it appears, write the old key back the same way.
 5. Other holders to refresh: the `parle` service (`ucast.me`, reserve copy of the dev API — update it there too, or
    remove the variable), every `.env` written by `bun run sandbox:fetch` (babylon-cinema checkout and its worktrees:
    run `sandbox:fetch` again), and the local backup `/Users/marcos/aigw-state-backup-20261009/` (does not hold it).
 6. Only after a day without `403`: delete the old user key(s) in IAM (all three if none is used elsewhere — they are
    owner keys with no scope). Deleting is the step that actually ends the exposure.
 
-**`SANDBOX_TOKEN` and its aliases (S15/D6).** It appeared in orchestration transcripts. There is one value; the palco
-accepts one token, so every holder breaks until it gets the new one — do it in one sitting:
+**`SANDBOX_TOKEN` and its aliases (S15/D6).** It appeared in orchestration transcripts. On the gateway side § 12.9.1
+step 6 swaps it with an overlap, but it starts with «make the palco accept the new token next to the old one», and the
+palco hub accepts exactly one token today (`hubConfig().token`, `palco/hub/http.ts` in babylon-cinema). Until the palco
+takes two, every holder breaks until it gets the new value — do it in one sitting:
 
 1. Generate a new value (`openssl rand -base64 48 | tr -d '/+=\n'`, ≥ 40 chars) in a shell variable.
 2. Palco (`palco` service on Railway, project of the hub): set `SANDBOX_TOKEN` and every alias that holds the same value
@@ -542,8 +581,9 @@ accepts one token, so every holder breaks until it gets the new one — do it in
    the Railway variables of the service (the dev API refuses to write these names: `SANDBOX_FETCH_DENY`), then restart
    it. Check: `GET /api/sandbox-env` with the old token → 401, with the new → 200.
 3. Immediately, the services that fetch with it (each: Railway variable `SANDBOX_TOKEN` → new value, then restart):
-   `ai-gateway` (it also accepts the token as a Bearer when `ACCEPT_SANDBOX_TOKEN_AS_KEY=1`; a running gateway keeps its
-   keys when a reload fails, but would boot without them on the old token), `ai-gateway-reaper` (fetches SCW/VAST keys
+   `ai-gateway` (with the hot rotation build: `PUT $GW/v1/admin/access/sandbox-token {"token": "<new>"}` right after
+   the palco switch, then the Railway variable for the next boot; a running gateway keeps its keys when a reload
+   fails, but would boot without them on the old token), `ai-gateway-reaper` (fetches SCW/VAST keys
    at each run; a run in between fails `NOT CHECKED`, harmless), `parle` prod (`parle-prod`) and `parle-stage`
    (`backend/boot-env.ts`; a failed fetch does not stop the boot, but keys missing from the service are then absent).
 4. CI and runners: GitHub secret `SANDBOX_TOKEN` of `marcosremar/babylon-cinema` (workflows `ci`, `tests-full`,
@@ -554,7 +594,7 @@ accepts one token, so every holder breaks until it gets the new one — do it in
 6. Verify: `/health` of the gateway after its restart has its provider keys (`/health?details=1` with an admin key),
    `bun run sandbox:check` passes from the Mac, the next nightly run of babylon-cinema passes the hub steps.
 
-#### 12.9.2 Replica TLS and SSH (S11) and the push key (S12) — `fix/security-remaining`
+#### 12.9.3 Replica TLS and SSH (S11) and the push key (S12) — `fix/security-remaining`
 
 - Vast replicas now serve their nginx front over TLS on the same mapped port: the gateway derives a private CA per
   replica token, the boot script issues the leaf for `IP:$PUBLIC_IPADDR`, and every gateway → replica call (probe,

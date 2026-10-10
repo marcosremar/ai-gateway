@@ -33,6 +33,7 @@ function fakeVast(routes: (call: Call) => { status?: number; body: unknown }) {
   const calls: Call[] = [];
   const fetchImpl = async (url: string, init?: RequestInit) => {
     const call = { method: init?.method ?? 'GET', url, body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null };
+    if (url.endsWith('/users/current/')) return new Response('{}');
     calls.push(call);
     const { status = 200, body } = routes(call);
     return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
@@ -358,7 +359,7 @@ describe('VastDeploymentBackend known-good hosts and the baseline', () => {
     const backend = new VastDeploymentBackend('k', {
       fetch: fakeVast(() => ({ body: {} })).fetchImpl, rtt: async (h, p) => { seen.push(`${h}:${p}`); return answers.shift() ?? null; },
     });
-    expect(await backend.measureBaselineRtt('fr')).toEqual({ anchor: 's3.fr-par.scw.cloud', rttMs: 45 });
+    expect(await backend.measureBaselineRtt('fr')).toEqual({ anchor: 's3.fr-par.scw.cloud', rttMs: 45, quietMs: 45 });
     expect(await backend.measureBaselineRtt('FR')).toBeNull();
     expect(await backend.measureBaselineRtt('BR')).toBeNull();
     expect(seen).toEqual(['s3.fr-par.scw.cloud:80', 's3.fr-par.scw.cloud:80']);

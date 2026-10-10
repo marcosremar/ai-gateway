@@ -60,6 +60,13 @@ export interface ObservedReplica {
   /** How long its liveness probe (the front, `/__aigw/ready`) has failed without a break (absent = it answers). */
   downForMs?: number;
   bootStartedAt?: number;
+  adoptedPastBoot?: boolean;
+}
+
+export const VAST_MIN_BOOT_TIMEOUT_MINUTES = 35;
+
+export function bootTimeoutMinutesOn(spec: Pick<DeploymentSpec, 'bootTimeoutMinutes'>, provider: string | undefined): number {
+  return provider === 'vast' ? Math.max(spec.bootTimeoutMinutes, VAST_MIN_BOOT_TIMEOUT_MINUTES) : spec.bootTimeoutMinutes;
 }
 
 /** A replica whose front stopped answering this long is dead (crashed host), whatever it served before. */
@@ -167,7 +174,9 @@ export function desiredReplicas(input: ActivityInput): number {
 function brokenReason(r: ObservedReplica, spec: DeploymentSpec, now: number, strikes: number): PlanRelease['reason'] | null {
   const phase = replicaPhase(r);
   if (phase === 'halted') return 'halted';
-  if (phase === 'booting' && now - (r.bootStartedAt ?? r.machine.createdAt) >= spec.bootTimeoutMinutes * 60_000) return 'boot-timeout';
+  if (phase === 'booting' && now - (r.bootStartedAt ?? r.machine.createdAt) >= bootTimeoutMinutesOn(spec, r.machine.provider) * 60_000) {
+    return r.adoptedPastBoot ? 'unhealthy' : 'boot-timeout';
+  }
   // Busy is not dead: work in flight or a recent answer keeps it (it gets no new request meanwhile, see `readyNow`).
   if (phase === 'unhealthy' && r.failures >= strikes && r.inflight === 0 && !r.servedRecently) return 'unhealthy';
   // …but a front that has not answered its liveness probe for DOWN_GRACE_MS is a dead machine (nginx answers even under load).
