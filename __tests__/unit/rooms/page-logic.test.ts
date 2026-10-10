@@ -3,11 +3,12 @@
  * of the live line. The same source string that ships inside the page is evaluated here.
  */
 import { describe, expect, it } from 'vitest';
+import { Script, createContext } from 'vm';
 import { ROOM_PAGE_LOGIC, roomPage } from '../../../src/rooms/page';
 
 interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
-const logic = new Function(`${ROOM_PAGE_LOGIC}; return { pickLang, fitLine };`)() as {
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine })`).runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
 };
