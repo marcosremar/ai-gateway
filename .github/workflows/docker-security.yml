@@ -6,13 +6,13 @@ on:
     paths:
       - 'Dockerfile*'
       - 'docker-compose*.yml'
-      - 'dockers/**/Dockerfile*'
+      - '.github/workflows/docker-security.yml'
   push:
     branches: [main]
     paths:
       - 'Dockerfile*'
       - 'docker-compose*.yml'
-      - 'dockers/**/Dockerfile*'
+      - '.github/workflows/docker-security.yml'
   schedule:
     - cron: '0 9 * * 1'
 
@@ -28,10 +28,15 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        dockerfile:
-          - Dockerfile
-          - Dockerfile.production
-          - Dockerfile.worker
+        include:
+          - dockerfile: Dockerfile.production
+            ignore-unfixed: false
+          # Dev-only images (docker-compose.dev.yml, the SnapGPU worker): no deploy builds them, so a HIGH with no
+          # fixed package yet cannot be acted on; fixable ones still fail.
+          - dockerfile: Dockerfile
+            ignore-unfixed: true
+          - dockerfile: Dockerfile.worker
+            ignore-unfixed: true
       fail-fast: false
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -49,6 +54,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
           # Without this, SARIF output scans (and fails on) every severity and ignores `severity` above.
           limit-severities-for-sarif: true
+          ignore-unfixed: ${{ matrix.ignore-unfixed }}
           exit-code: '1'
 
       - name: Upload Trivy scan results to GitHub Security tab
@@ -56,48 +62,4 @@ jobs:
         if: always()
         with:
           sarif_file: 'trivy-results-${{ matrix.dockerfile }}.sarif'
-
-  # Scan dockers/ subproject images (only on schedule or if changed)
-  trivy-subprojects:
-    name: Trivy Scan - Subprojects (${{ matrix.subproject }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    if: github.event_name == 'schedule' || github.event_name == 'push'
-    strategy:
-      matrix:
-        subproject:
-          - babelcast-subtitle
-          - dit360
-          - hamer
-          - hy-motion
-          - hybrik-x
-          - kokoro-tts
-          - lam
-          - parle-gateway
-          - snapgpu-runtime
-          - trellis2
-          - ultravox-s2s
-          - wilor
-      fail-fast: false
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Build Docker image (${{ matrix.subproject }})
-        run: docker build -t ai-gateway-${{ matrix.subproject }}:scan -f dockers/${{ matrix.subproject }}/Dockerfile dockers/${{ matrix.subproject }}/
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
-        with:
-          image-ref: 'ai-gateway-${{ matrix.subproject }}:scan'
-          format: 'sarif'
-          output: 'trivy-results-${{ matrix.subproject }}.sarif'
-          severity: 'CRITICAL,HIGH'
-          # Without this, SARIF output scans (and fails on) every severity and ignores `severity` above.
-          limit-severities-for-sarif: true
-          exit-code: '1'
-
-      - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@0daab03d71ff584ef619d027a3fd9146679c5d84
-        if: always()
-        with:
-          sarif_file: 'trivy-results-${{ matrix.subproject }}.sarif'
+          category: '.github/workflows/docker-security.yml:trivy-main/dockerfile:${{ matrix.dockerfile }}'

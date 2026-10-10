@@ -716,7 +716,7 @@ class Session:
             spoken.append(sentence)
             queue: asyncio.Queue = asyncio.Queue()
             synths.append(asyncio.create_task(synth(sentence, queue, not synths)))
-            sentences.put_nowait(queue)
+            sentences.put_nowait((sentence, queue))
 
         async def think() -> None:
             try:
@@ -753,14 +753,22 @@ class Session:
                 sentences.put_nowait(None)
 
         thinker = asyncio.create_task(think())
+        missing = 0
         try:
             while True:
-                queue = await sentences.get()
-                if queue is None:
+                item = await sentences.get()
+                if item is None:
                     break
+                sentence, queue = item
                 while (chunk := await queue.get()) is not None:
                     if isinstance(chunk, Exception):
-                        raise chunk
+                        if metrics["ttfa_ms"] is None:
+                            raise chunk
+                        missing += 1
+                        tel("edge.tts.sentence_failed", level="warn", chars=len(sentence), error=type(chunk).__name__,
+                            requestId=getattr(chunk, "request_id", None))
+                        self.emit({"type": "sentence_failed", "text": sentence, "message": repr(chunk)[:200]})
+                        continue
                     if metrics["ttfa_ms"] is None:
                         self._first_reply_audio(ended, metrics)
                     self.out.push(chunk)
@@ -770,7 +778,8 @@ class Session:
                 await self.out.drained.wait()
                 self.emit({"type": "audio_end"})
             self.emit(self._metrics_event(metrics))
-            self.emit({"type": "done", "turnId": self.turn_id, "served": self._served(metrics, self.cfg, fields)})
+            self.emit({"type": "done", "turnId": self.turn_id, "served": self._served(metrics, self.cfg, fields),
+                       **({"missing_audio": missing} if missing else {})})
         finally:
             thinker.cancel()
             for task in synths:

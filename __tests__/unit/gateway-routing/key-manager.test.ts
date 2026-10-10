@@ -111,6 +111,19 @@ describe('KeyManager — keys change at runtime', () => {
     expect(env.GATEWAY_HOST).toBe('0.0.0.0');
   });
 
+  it('endpoints and hosts on the palco never enter the env, and repeated reloads report nothing changed', async () => {
+    const store = {
+      TURSO_DATABASE_URL: 'libsql://db', GAME_PUBLIC_URL: 'https://game', GPU_POOL_URL: 'https://pool', LIVEKIT_URL: 'wss://lk',
+      ASSETS_BUCKET_ENDPOINT: 'https://s3', TEST_BOX_URL: 'https://box', CONTABO_CI_HOST: '1.2.3.4', GROQ_API_KEY: 'k',
+      NODE_ENV: 'production',
+    };
+    const env: Record<string, string | undefined> = { SANDBOX_TOKEN: 'tok' };
+    const manager = new KeyManager(env, { fetchImpl: fakePalco(store) as never });
+    expect((await manager.reload()).changed).toEqual(['GROQ_API_KEY', 'NODE_ENV']);
+    for (let i = 0; i < 3; i++) expect(await manager.reload()).toMatchObject({ changed: [], removed: [] });
+    expect(Object.keys(env).sort()).toEqual(['GROQ_API_KEY', 'NODE_ENV', 'SANDBOX_TOKEN']);
+  });
+
   it('palco refusing the write is a 502, not a silent success', async () => {
     const manager = new KeyManager({ SANDBOX_TOKEN: 'tok' }, { fetchImpl: vi.fn(async () => new Response('', { status: 403 })) as never });
     await expect(manager.write({ GROQ_API_KEY: 'v' })).rejects.toMatchObject({ status: 502, message: 'palco refused the write: HTTP 403' });

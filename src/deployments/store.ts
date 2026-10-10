@@ -98,7 +98,11 @@ export class FileDeploymentStore extends MemoryDeploymentStore {
     return this.chain;
   }
 
-  override settled(): Promise<void> {
-    return this.chain.catch(() => {});
+  override async settled(): Promise<void> {
+    let seen: Promise<void>;
+    do {
+      seen = this.chain;
+      await seen.catch(() => {});
+    } while (seen !== this.chain);
   }
 }

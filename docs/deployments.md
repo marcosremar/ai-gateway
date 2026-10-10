@@ -795,6 +795,12 @@ so a host without the token cannot answer and the token never crosses the wire i
 by the Vast backend (`replicaBase` → `https://`). The boot script also deletes `/root/.ssh/authorized_keys` and kills
 `sshd` (Vast's `ssh_direct` runtype starts it; the runtype stays because it is what runs the onstart).
 
+Scaleway replicas (10/10/2026): the same scheme. The cloud-init makes the certificate before nginx starts, for every
+public IPv4 the metadata service (`169.254.42.42/conf`) lists (routed interface address as fallback), and nginx serves
+TLS on :80 (`PROBE_PORT` for an exposed replica). A new server carries the tag `aigw-tls`, which marks it `tls`;
+servers created before the deploy have no tag and stay on plain HTTP until they are replaced, so a running class is
+not cut. No new server is ever created without the tag.
+
 Hardening (06/10/2026): the token check runs in nginx's access phase (`auth_request`), so requests **without** the
 token are rate-limited per IP (5 r/s, burst 10, 5 connections → `429`) while the gateway's own traffic is never
 limited; `server_tokens off`. Every Scaleway replica gets a firewall: a gateway-only one joins the namespace's
@@ -849,6 +855,40 @@ at :07 and by hand (`workflow_dispatch`, `apply` unticked = dry run), with `--ap
 with a warning naming it and touches nothing. Two reapers on the same namespace are redundant
 (a second release of a gone machine may count as a failed run): once the workflow runs, the Railway cron may be stopped.
 
+## Machines: single hosts with a lease (`src/machines`)
+
+Deployments serve a model behind `invoke`. For anything else — a test desktop with SSH, a stream with its own ports, a
+batch GPU job — `/v1/machines` and `/v1/jobs` rent one host with an owner, a hard deadline and an idle limit, over the
+same provider keys (Scaleway, Vast, RunPod). Routes, body and limits: [HTTP API § Machines and jobs](api/http.md#machines-and-jobs).
+
+- **Marks.** Scaleway tags `aigw-machine` · `aigw-mns-<namespace>` · `aigw-mid-<id>`; Vast label and RunPod pod name
+  `aigw-m:<namespace>:<id>`. None carries `aigw-deploy`, `aigw-ns-` or `aigw:`, so the deployments controller, its
+  reaper and its foreign report never see a machine, and the machines code never sees a replica.
+- **State.** `machines.json` next to `deployments.json` (`DEPLOYMENTS_STATE_DIR`), written like it (tmp + fsync + rename,
+  last good copy in `.bak`). The record is written as `creating` **before** the provider is called: a gateway that dies
+  mid-create finds the machine by its mark on the next start and adopts it (deadline and idle still apply); if no machine
+  came up within `MACHINES_CREATE_TIMEOUT_MINUTES` (15) the record is failed. Released records are kept 40 days for the
+  monthly accounts.
+- **Loop (every 30 s).** Lists each provider (a provider that fails to list is left alone that round), adopts, refreshes IP
+  and ports, then releases at the deadline, past `MACHINES_MAX_LIFETIME_HOURS`, or idle (no `extend` for `idleMinutes`).
+  A machine gone from a successful list is `released` with `endReason: "lost"` (its job fails). A machine with our mark
+  and no live record is an orphan, released after 10 min.
+- **Firewall (Scaleway).** One shared security group per namespace and port set (`aigw-<ns>-machines-<hash>`): inbound
+  drop, only the requested ports (and 22 with an SSH key). Never per-machine, so nothing leaks with the machine.
+- **Jobs.** The machine's onstart downloads the inputs (signed links), runs the command, tars and PUTs `output.path` to
+  the signed `output.url`, and reports to `POST /v1/job-report` with a token only it has (the gateway keeps its sha256).
+  Success, failure, cancel or the deadline release the machine.
+- **Costs.** `GET /v1/machines/costs`: per owner (24 h, month, committed until the deadlines), per holder, per machine.
+  Caps answer `402` before a rent (see the HTTP page). Credentials are read from the environment on each call, so a key
+  rotated in the environment is used by the next call.
+
+The **orphan guard** (`scripts/reap-orphans.ts`) also reaps machines of the namespace, after the deployments, with the
+same gateway probe and `--apply`: gateway **down** — every machine older than 30 min; gateway **up** with
+`AI_GATEWAY_ADMIN_KEY` — `GET /v1/machines` (admin, `"scope": "all"`, same namespace) says which machines are live, and a
+machine it does not list, older than `REAPER_GRACE_MINUTES`, goes; **always** — a machine older than `MACHINES_MAX_LIFETIME_HOURS` + 1 h (73 h by
+default, past any possible lease) goes, even when the gateway still lists it or cannot be asked. It never touches deployments or other
+namespaces. `RUNPOD_API_KEY` on the reaper service adds RunPod.
+
 ## Running on Railway
 
 `railway.json` builds `Dockerfile.production` (`serve.ts`), health check `/health`, **1 replica** — the controller is
@@ -869,6 +909,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
 | `ALERT_WEBHOOK_URL` | optional (the owner sets it on the `ai-gateway` and `ai-gateway-reaper` services): a JSON `POST` (`{event, data}`, not Slack's `text` shape; the same line is logged as `ALERT <event>`) for `app.budget_warning` (80 %) / `app.budget_exhausted`; `deployment.create_failed`, `deployment.out_of_stock` (a create that failed, per deployment, at most once per 30 min) and `provider.credit_exhausted` (the Vast credit under its floor, or a create refused as `insufficient_credit`; once per 30 min); `replica.lost_with_sessions` (a replica released or no longer listed by the provider while it carried requests or realtime sessions); `stage.reserve_down` (a fallback link of a stage chain went `no_key`, `missing`, `pending`, `disabled` or `blocked`) and `stage.no_link` (no link of a chain can serve), once when it happens and again only after it recovered; `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service) |
+| `ALERT_EMAIL_TO`, `RESEND_API_KEY`, `MAIL_FROM`, `ALERT_DAILY_DIGEST`, `BALANCE_*` | optional, from the dev API: email (Resend) for the same ops alerts and for low balances / expiring or refused keys read every `BALANCE_CHECK_MINUTES` (15); thresholds and dedup in `docs/api/http.md` § `balances` |
 | `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the default for every app; an admin sets one app's own daily budgets with `PUT /v1/apps/:app/limits {dailyRequests?, dailyTokens?}` (stored in `apps.json`, applied at once, `null` = default, `0` = no budget): size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned). `deployments.json` and `apps.json` are written tmp + fsync + rename with the previous good copy in `.bak`; an unreadable file is restored from `.bak` (the bad one kept as `.corrupt-<ms>`, `STATE FILE UNREADABLE` on stderr); with no usable backup the gateway starts with deployments off (`DEPLOYMENTS DISABLED`) and the cloud routes up. A failed write is logged (`STATE WRITE FAILED`) and shown as `stateWriteError` in `/health?deep=1`. With no state file at all, machines of unknown deployments are kept 5 min before the orphan sweep (declared deployments register first). `app-budgets.json` keeps the app daily counts across restarts; `client-stability.jsonl` rotates to `.1` at 5 MB, 20 reports/min per app, 512 KB per report |
 | `DEPLOYMENT_COLD_WAIT_MS` | how long an alias request whose last live link is a deployment waits for a booting replica before the 503 + `Retry-After` (2000; § Cold start) |

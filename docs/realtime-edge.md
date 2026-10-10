@@ -232,7 +232,9 @@ PCM16 16 kHz ─► VAD ─► turn audio ─► STT ─► hallucination guard 
   `{audio, text}`; an id the catalog does not know falls back to `fallback_voice` as a named voice.
 - **Stage failures**: an LLM or TTS stream that breaks mid-body, sends nothing for `EDGE_UPSTREAM_GAP_S` (10, just
   above the stack's own 8 s so its in-band error arrives first) or, for the LLM, carries an SSE `{"error": …}` event
-  ends the turn with `error` and `stage: llm | tts` (`UpstreamError`, `tests/test_units.py`).
+  ends the turn with `error` and `stage: llm | tts` (`UpstreamError`, `tests/test_units.py`), except a TTS sentence
+  that fails once reply audio was already heard: that sentence is skipped (`sentence_failed {text, message}`, telemetry
+  `edge.tts.sentence_failed`), the rest of the reply plays and `done` carries `missing_audio` (as `/v1/s2s` does).
 - **TTS runaway guard** (the speech-stack's `tts_stream` rules, `upstream.py` `speak`): every sentence carries
   `max_new_tokens` = (`EDGE_TTS_MAX_SECONDS` 3 + `EDGE_TTS_MAX_SECONDS_PER_CHAR` 0.2 × characters) × 12.5 codec
   frames/s and its own `extra_params.request_id`. Chunks with RMS ≤ 300 before the first audible one are held, not

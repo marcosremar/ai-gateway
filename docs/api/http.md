@@ -731,6 +731,68 @@ for a cold start.
 
 Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
 
+## Machines and jobs
+
+Single rented hosts with an owner and a lease, for work that is not an HTTP service behind `invoke` (a test desktop, a
+GPU job, a stream). Enabled when a provider key is set (`SCW_SECRET_KEY`, `VAST_API_KEY`, `RUNPOD_API_KEY`) and
+`MACHINES_ENABLED` is not `0`; same `DEPLOYMENTS_NAMESPACE` rule as deployments. Only an admin key or a user listed in
+`MACHINES_USERS` may call these routes (`403` otherwise). The **owner** is the key's user, or `X-App` (an admin may name
+any app, another key only its own). An admin without `X-App` sees every owner (`"scope": "all"`); anyone else sees only
+their own (`404` for the rest). Prices are in USD per hour (Scaleway's EUR price × 1.2, a conservative rate).
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/machines` | rent one machine (body below); `201` with the machine |
+| `GET` | `/v1/machines` | `{ namespace, scope, providers, machines: [...] }` |
+| `GET` | `/v1/machines/costs` | spend per owner (24 h, month, committed), per holder, per machine; global for an admin |
+| `GET` | `/v1/machines/:id` | one machine: `status` (`creating`, `running`, `released`, `failed`), `ip`, `ports` (`"22/tcp"` → public port), `usdPerHour`, `costUsd`, `deadlineAt`, `endReason` |
+| `DELETE` | `/v1/machines/:id` | release now (`endReason: "deleted"`) |
+| `POST` | `/v1/machines/:id/extend` | `{ "hours"?: n }`: keepalive (resets idle), and with `hours` pushes the deadline (checked against the caps) |
+| `POST` | `/v1/jobs` | machine body + `command`, `inputs`, `output`; `201` with the job |
+| `GET` | `/v1/jobs`, `/v1/jobs/:id` | job `status` (`starting`, `running`, `succeeded`, `failed`, `timeout`), `exitCode`, `result`, its machine |
+| `GET` | `/v1/jobs/:id/logs` | last 64 KB of the job's output (`text/plain`) |
+| `DELETE` | `/v1/jobs/:id` | cancel: the job fails and its machine is released |
+
+Machine body:
+
+| Field | |
+|---|---|
+| `provider` | `scaleway`, `vast`, `runpod` or `cheapest` (default): the configured backend with the lowest quote under the cap, then the next one on a failure |
+| `machineType` | Scaleway commercial type (`L4-1-24G`, `DEV1-S`), Vast GPU name (`RTX 4090`), RunPod GPU type id |
+| `maxUsdPerHour` | required, ≤ `MACHINES_MAX_USD_PER_HOUR` |
+| `maxHours` | **required**: the hard deadline, ≤ `MACHINES_MAX_HOURS` |
+| `idleMinutes` | released when no `extend` came for this long (default `MACHINES_IDLE_MINUTES`, ≥ 5); jobs have none |
+| `image` | Docker image (required on Vast/RunPod: the container itself; on Scaleway run with `--network host` after boot) |
+| `diskGb` | default 40 |
+| `ports` | `[{ "protocol": "tcp", "port": n, "to"?: m }]` (`tcp` or `udp`), at most 64 ports in all |
+| `sshPublicKey` | the caller's public key, written to `/root/.ssh/authorized_keys`; opens 22/tcp |
+| `onstart` | bash run as root once the host is up (machines only) |
+| `env` | container environment; values never come back (only `envKeys`) |
+| `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `holder` | the agent inside the owner (its own 24 h cap) |
+
+Job body adds `command` (bash), `inputs` (`[{ "url": "https://…signed", "path": "in/x" }]`, downloaded under `/job`)
+and `output` (`{ "url": "https://…signed PUT", "path": "out" }`: `out` is tarred and PUT there). The machine reports
+to `POST /v1/job-report` (public route, authenticated by a per-job token only the machine has) every 60 s and at the
+end; success, failure or the deadline release the machine. Jobs need `AIGW_PUBLIC_URL` (or Railway's domain).
+
+Limits, all refused before anything is rented:
+
+| Limit | Env (default) | Answer |
+|---|---|---|
+| lease | `MACHINES_MAX_HOURS` (24), `MACHINES_MAX_LIFETIME_HOURS` (72, extends included) | `400` |
+| price | `MACHINES_MAX_USD_PER_HOUR` (2) | `400` |
+| machines running | `MACHINES_MAX_RUNNING` (20) | `429` |
+| owner per 24 h / per month | `MACHINES_OWNER_USD_PER_DAY` (10) / `MACHINES_OWNER_USD_PER_MONTH` (150) | `402` |
+| holder per 24 h | `MACHINES_HOLDER_USD_PER_DAY` (6) | `402` |
+| gateway per 24 h | `MACHINES_USD_PER_DAY` (20) | `402` |
+
+A cap counts what was spent in the window, plus what running leases would cost until their deadline, plus the new
+request at its `maxUsdPerHour × maxHours`, so a cap cannot be passed later by machines already running. `0` turns a cap
+off. The `402` message says which cap, the numbers, and what to do (release, fewer hours, lower price, or which env to
+raise). Never in an answer: `env` values, `onstart`, the SSH key, signed input/output URLs (only the output host), the
+job token.
+
 ---
 
 ## Keys at runtime
@@ -895,6 +957,47 @@ exist: every request falls back with `not_configured`), `disabled` (no `SCW_SECR
 (account data policy), `circuit_open`. `warnings` has one line per chain whose first link is neither `ready` nor
 `cold`.
 `noWake.skips`: deployment targets skipped (and invokes refused) by no-wake requests since the process started.
+
+#### `balances` (admin only) — provider balances and email alerts
+
+An admin also gets `balances` (`src/telemetry/balance-watch.ts`): every `BALANCE_CHECK_MINUTES` (default 15; `0`
+turns it off) the gateway reads, with the keys it already has and only GET-style calls, the Vast credit
+(`/users/current/`) and the hourly price of **every running instance of the account** (`/instances/`, so machines
+started outside the gateway count too), the OpenRouter credit left (`/api/v1/credits`, else the key's
+`limit_remaining`) and the key's `expires_at` (`/api/v1/key`), the RunPod `clientBalance` and `currentSpendPerHr`,
+and for Scaleway the gateway's own estimate (EUR/h of its running Scaleway replicas, month spend against the summed
+`scaling.budget.eurPerMonth` of the deployments): the restricted key `aigw-machines` gets `403` from the billing API.
+No secret is in the block; a provider without a key is absent.
+
+```json
+"balances": { "intervalMinutes": 15, "thresholds": { "warnUsd": { "vast": 5, "openrouter": 5, "runpod": 0 }, "…": "…" },
+  "readings": [ { "provider": "vast", "level": "warn", "balanceUsd": 9.92, "burnPerHour": 1.1, "currency": "USD",
+    "hoursLeft": 9, "keyExpiresAt": null, "reasons": ["com o gasto atual de US$ 1.10/h o saldo acaba em ~9.0 h"],
+    "error": null, "checkedAt": "2026-10-10T13:00:00.000Z" } ] }
+```
+
+`level`: `ok`, `warn`, `urgent`, or `error` (provider unreachable: shown, no email). Thresholds (env, defaults):
+
+| Variable | Default | Level |
+|---|---|---|
+| `BALANCE_VAST_WARN_USD` / `BALANCE_VAST_URGENT_USD` | 5 / 2 | Vast credit below → warn / urgent |
+| `BALANCE_OPENROUTER_WARN_USD` / `BALANCE_OPENROUTER_URGENT_USD` | 5 / 1 | OpenRouter credit below |
+| `BALANCE_RUNPOD_WARN_USD` / `BALANCE_RUNPOD_URGENT_USD` | 0 / 0 (off: account unused) | RunPod balance below |
+| `BALANCE_HOURS_LEFT_WARN` / `BALANCE_HOURS_LEFT_URGENT` | 12 / 3 | balance ÷ current burn below N hours |
+| `BALANCE_KEY_EXPIRY_DAYS` | 7 | key expires within N days → warn (≤ 1 day or expired → urgent) |
+| `BALANCE_MONTH_WARN_RATIO` | 0.8 | Scaleway month spend ≥ 80 % of the ceiling → warn, ≥ 100 % → urgent |
+
+A `401`/`403` from a provider is **urgent** (“recusou a chave”).
+
+**Email.** With `RESEND_API_KEY` and `ALERT_EMAIL_TO` (comma-separated list; `MAIL_FROM` optional, all three from the
+dev API) the gateway emails, through Resend, in Portuguese with the number and what to do: every `warn`/`urgent`
+balance reading above, and the ops alerts also sent to `ALERT_WEBHOOK_URL` — `provider.credit_exhausted`,
+`replica.lost_with_sessions`, `stage.no_link` (urgent), `deployment.create_failed`, `deployment.out_of_stock`,
+`stage.reserve_down` (warn). Dedup per kind: a warn at most once per 6 h, an urgent once per hour, and a warn that
+becomes urgent goes out at once. `ALERT_DAILY_DIGEST=<UTC hour 0–23>` adds one summary of every reading per day, at
+the first check after that hour. Subject and body pass a redaction of every `*KEY*`/`*TOKEN*`/`*SECRET*` value of the
+environment; a failing email provider is logged (`alert email failed`) and changes nothing else. Balance alerts also
+go to `ALERT_WEBHOOK_URL` as `balance.warn` / `balance.urgent`. Test send: `bun scripts/alert-email-test.ts`.
 
 ### `GET /health?deep=1` (admin)
 

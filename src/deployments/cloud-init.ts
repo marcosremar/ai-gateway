@@ -228,10 +228,24 @@ echo "export AIGW_REPLICA_ID='\${CONTAINER_ID:-\${VAST_CONTAINERLABEL#C.}}'" >> 
 ) > /srv/aigw/edge.log 2>&1 &`;
 }
 
-function vastTlsSection(token: string, days: number): string {
-  const dir = REPLICA_TLS_DIR;
-  return `[ -n "$PUBLIC_IPADDR" ] || eval "$(grep -E '^PUBLIC_IPADDR=' /etc/environment 2>/dev/null | sed 's/^/export /')"
+const VAST_TLS_SAN = `[ -n "$PUBLIC_IPADDR" ] || eval "$(grep -E '^PUBLIC_IPADDR=' /etc/environment 2>/dev/null | sed 's/^/export /')"
 [ -n "$PUBLIC_IPADDR" ] || echo 'aigw: BOOT FAILED: no PUBLIC_IPADDR for the replica TLS certificate'
+AIGW_TLS_SAN="IP:$PUBLIC_IPADDR"`;
+
+const SCALEWAY_TLS_SAN_PY = `import json,sys
+try: d=json.load(sys.stdin)
+except Exception: d={}
+ips=[(d.get("public_ip") or {}).get("address")]+[p.get("address") for p in d.get("public_ips") or [] if p.get("family","inet")=="inet"]
+print(",".join("IP:"+a for a in dict.fromkeys(i for i in ips if i)))`;
+
+export const SCALEWAY_METADATA_URL = 'http://169.254.42.42/conf?format=json';
+
+const SCALEWAY_TLS_SAN = `[ -n "$AIGW_TLS_SAN" ] || AIGW_TLS_SAN=$(curl -sf --retry 3 --max-time 5 '${SCALEWAY_METADATA_URL}' | python3 -c '${SCALEWAY_TLS_SAN_PY.replace(/'/g, `'"'"'`)}' 2>/dev/null)
+[ -n "$AIGW_TLS_SAN" ] || AIGW_TLS_SAN="IP:$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')"`;
+
+function replicaTlsSection(token: string, days: number, san: string): string {
+  const dir = REPLICA_TLS_DIR;
+  return `${san}
 mkdir -p ${dir} && chmod 700 ${dir}
 set +x
 echo '${b64(replicaCaKeyPem(token))}' | base64 -d > ${dir}/ca.key
@@ -240,9 +254,11 @@ chmod 600 ${dir}/ca.key
 openssl req -x509 -key ${dir}/ca.key -subj '/CN=${REPLICA_CA_CN}' -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -days ${days} -out ${dir}/ca.pem
 openssl ecparam -name prime256v1 -genkey -noout -out ${dir}/key.pem && chmod 600 ${dir}/key.pem
 openssl req -new -key ${dir}/key.pem -subj /CN=aigw-replica | openssl x509 -req -CA ${dir}/ca.pem -CAkey ${dir}/ca.key -CAcreateserial -days ${days} -sha256 \\
-  -extfile <(printf 'subjectAltName=IP:%s\\nbasicConstraints=CA:FALSE\\nextendedKeyUsage=serverAuth\\n' "$PUBLIC_IPADDR") -out ${dir}/cert.pem
+  -extfile <(printf 'subjectAltName=%s\\nbasicConstraints=CA:FALSE\\nextendedKeyUsage=serverAuth\\n' "$AIGW_TLS_SAN") -out ${dir}/cert.pem
 rm -f ${dir}/ca.key`;
 }
+
+const certDaysOf = (spec: DeploymentSpec) => Math.ceil((spec.maxHours * 60 + 30) / 1440) + 1;
 
 export const CLOSE_SSH = `rm -f /root/.ssh/authorized_keys
 for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = sshd ] && kill "\${p#/proc/}"; done`;
@@ -264,7 +280,7 @@ export function replicaCloudInit(spec: DeploymentSpec, token: string, opts: Repl
   // Exposed replica: the probe moves to PROBE_PORT and the app answers health on its own port (it owns 80/443).
   const appPort = spec.exposure ? spec.port : 8000;
   const rtPort = spec.realtime ? RT_EDGE_PORT : undefined;
-  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort) : nginxConfig(token, 80, 8000, rtPort);
+  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort, true) : nginxConfig(token, 80, 8000, rtPort, true);
   const registry = spec.registryAuth?.server ? shellQuote(spec.registryAuth.server) : '';
   const login = spec.registryAuth
     ? `set +x\necho ${shellQuote(spec.registryAuth.password)} | docker login ${registry ? registry + ' ' : ''}`
@@ -279,7 +295,8 @@ shutdown -h +${shutdownMinutes}
 echo '${b64(nginx)}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
-command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx; }
+command -v nginx >/dev/null && command -v openssl >/dev/null || { apt-get update -y && apt-get install -y nginx openssl; }
+${replicaTlsSection(token, certDaysOf(spec), SCALEWAY_TLS_SAN)}
 rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf && systemctl restart nginx
 ${spec.files ? unpackScript(packIndexOf(spec.files)) : ''}
@@ -323,7 +340,6 @@ export function vastReplicaInit(spec: DeploymentSpec, token: string, opts: Repli
   const stopAfterSeconds = (Math.round(spec.maxHours * 60) + 30) * 60;
   const bootChecks = Math.max(12, Math.ceil((spec.bootTimeoutMinutes * 60) / 5));
   const appPort = spec.port;
-  const certDays = Math.ceil((spec.maxHours * 60 + 30) / 1440) + 1;
   return `#!/bin/bash
 mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
@@ -334,7 +350,7 @@ echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undef
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
 command -v nginx >/dev/null && command -v curl >/dev/null && command -v openssl >/dev/null || { apt-get update -y && apt-get install -y nginx curl openssl; }
-${vastTlsSection(token, certDays)}
+${replicaTlsSection(token, certDaysOf(spec), VAST_TLS_SAN)}
 mkdir -p /etc/nginx/conf.d && rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf
 nginx -t && { nginx -s reload 2>/dev/null || nginx; }

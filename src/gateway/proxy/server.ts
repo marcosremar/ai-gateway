@@ -907,6 +907,14 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
 
       if (proxyRes.status >= 500) config.appLimits?.refund?.(userId, charged);
+      const servedKind = config.onInference ? inferenceKindOf(method, path) : null;
+      if (servedKind) {
+        try {
+          config.onInference!({ userId, kind: servedKind, headers: req.headers, body, rawBody, status: proxyRes.status, response: proxyRes.body });
+        } catch (err) {
+          log.error({ err }, 'onInference hook failed');
+        }
+      }
       sendResponse(res, proxyRes, requestId);
     } catch (err) {
       if (err instanceof BodyTimeoutError) {

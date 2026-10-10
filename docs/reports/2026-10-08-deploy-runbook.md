@@ -458,7 +458,7 @@ bun scripts/realtime-e2e/load.ts --n 8 --s2s 8 --no-wake --speculate-lead 400 --
 | 9 | Vast `files` | the spec with `files` and a Vast placement, `AIGW_PUBLIC_URL` set, Scaleway zones paused | `lastPlacement` on Vast, no "files are not supported" warning, the replica becomes `ready` |
 | 10 | `reserveQuota` | PATCH a window that is active now on one deployment, wake another of the same type | 409 `reserved` with the end time; with a Vast placement it lands on Vast |
 | 11 | Over-long TTS | a sentence the engine runs away with (rare: watch `edge.tts.overlong` / `tts_overlong` over the load runs) | the turn continues; no `tts` error for an audible sentence |
-| 12 | Speculation on the fallback | the `--s2s --speculate-lead` run | `s2s.stt_speculative` events, `done.speculation` `hit` on most turns, first audio earlier than the same run with `--speculate-lead 0`; no turn voiced twice |
+| 12 | Speculation on the fallback | the `--s2s --speculate-lead` run | `s2s.stt_speculative` events, `done.speculation` `hit` on most turns, first audio earlier than the same run with `--speculate-lead 0`; no turn voiced twice **passed 2026-10-10** on a local gateway with the live cloud fallback: 100 % `hit`, −0.4 to −0.5 s p50 (handoff § Plano B ao vivo) |
 | 13 | Reaper | dry run against the dev gateway, with the reaper's own variables: `bun scripts/reap-orphans.ts` (no `--apply`) | lists foreign leftovers, releases nothing |
 | 14 | History | 20 turns in one session (`load.ts --n 1 --duration 400 --think 2-4`) | no `upstream` context error; `edge.llm.history_trimmed` appears |
 
@@ -611,3 +611,22 @@ takes two, every holder breaks until it gets the new value — do it in one sitt
   API with `SCW_REGISTRY_PUSH_ACCESS_KEY`). Checked on 2026-10-10: the registry grants it `pull,push` and accepts a blob
   upload; `GET /instance/v1/zones/fr-par-2/servers` returns 0 servers with it (4 with the master key). The master key
   stays on the laptop side only (creates and deletes the machine). Rotation: same IAM steps, `PUT` the new secret.
+
+### 12.10 Balance watch and email alerts (`feat/balance-watch-email`, 2026-10-10)
+
+Why: on 2026-10-10 the Vast account reached zero with no warning (two RTX 5090 of another project left running), the
+palco lost its GPU and the school deploy stopped on `402 insufficient credit`; the day before the OpenRouter key
+expired with no warning. The gateway now reads the provider balances every 15 min and emails the owner
+(`docs/api/http.md` § `balances`).
+
+- Nothing to set on Railway: `RESEND_API_KEY`, `MAIL_FROM` and `ALERT_EMAIL_TO` (`vovoafiliado@gmail.com`) were written
+  to the dev API on 2026-10-10 and reach the gateway at boot with the other keys. The next deploy (or restart) turns
+  the watch and the emails on; `BALANCE_CHECK_MINUTES=0` turns the watch off, an empty `ALERT_EMAIL_TO` the emails.
+- Verify after the deploy: `GET /health?details=1` (admin key) has `balances.readings` with `vast`, `openrouter`,
+  `runpod` and, with deployments, `scaleway`; the log has no `alert email failed`.
+- Test send from a checkout: `SANDBOX_TOKEN=… bun scripts/alert-email-test.ts` (prints the balances, sends
+  «[ai-gateway] teste de alerta», prints the Resend id). Sent on 2026-10-10, Resend id
+  `01a125ed-c1ce-7d30-9cce-177335a201bc`.
+- Scaleway: the restricted key `aigw-machines` gets `403` from the billing API, so the Scaleway reading is the
+  gateway's own estimate (its running replicas and the month spend against the summed `scaling.budget.eurPerMonth`).
+  A real invoice figure needs a key with `BillingReadOnly` on the organization.
