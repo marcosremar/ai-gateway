@@ -58,6 +58,8 @@ import { createRooms } from './src/rooms';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
+import { ModelBenchmarkStore } from './src/model-benchmarks/store';
+import { createModelBenchmarkRoutes } from './src/model-benchmarks/routes';
 
 const log = createLogger('serve');
 
@@ -212,6 +214,12 @@ let openrouterKey = await checkOpenRouterKey(process.env);
 let chains: Record<string, Record<string, ChainLinkSpec[]>> = {};
 // Assigned below; the reconciler's onChange (periodic runs) remounts the routes once they exist.
 let remount: (() => void) | null = null;
+const benchmarkStore = new ModelBenchmarkStore(process.env.MODEL_BENCHMARKS_PATH?.trim() || join(stateDir, 'model-benchmarks.json'));
+const benchmarks = await benchmarkStore.load().then(() => benchmarkStore, (err: unknown) => {
+  log.error({ error: err instanceof Error ? err.message : String(err) }, 'MODEL BENCHMARKS DISABLED: model-benchmarks.json cannot be read — restore it and restart');
+  return null;
+});
+if (benchmarks?.recovered) log.warn({ problem: benchmarks.recovered }, 'model-benchmarks.json was unreadable — recovered from the last good backup');
 declared = process.env.DECLARED_DEPLOYMENTS === '0' ? null : new DeclaredDeploymentReconciler({
   target: controller,
   env: process.env,
@@ -248,6 +256,7 @@ function mountProviders() {
     ) : undefined,
     // Adaptive hedge (D4, live QA 2026-10-07): spill or wait for the replica instead of running each request twice.
     deploymentHedge: controller ? (name, baseMs, capMs) => controller.hedgeDelayMs(name, baseMs, capMs) : undefined,
+    ...(benchmarks ? { benchmarkRank: (stage: 'chat' | 'stt' | 'tts', dataset: string) => benchmarks.rankOrder(stage === 'chat' ? 'llm' : stage, dataset) } : {}),
   });
   const { providers: routed, summary } = built;
   log.log(summary, 'Providers configured');
@@ -489,6 +498,7 @@ const server = await startProxy({
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
     rooms.route, ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
+    ...(benchmarks ? createModelBenchmarkRoutes({ store: benchmarks, gate: adminGate, onChange: () => remount?.() }) : []),
   ],
   publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : []), ...(machines ? [machines.reportRoute] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),

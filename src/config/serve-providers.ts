@@ -124,6 +124,8 @@ export interface RouteEntrySpec {
   preferFallbackVoice?: boolean;
   /** TTS only: a refusal by the account's data policy (ZDR) takes this target out for a while (`account-policy-guard.ts`). */
   accountPolicyGuard?: boolean;
+  order?: 'benchmark';
+  benchmarkDataset?: string;
 }
 export type ModelRoutesSpec = Partial<Record<Stage, Record<string, RouteEntrySpec[]>>>;
 
@@ -139,6 +141,8 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
   }
   if (raw && typeof raw === 'object' && typeof (raw as RouteEntrySpec).provider === 'string') {
     const e = raw as RouteEntrySpec;
+    const benchmarkOrder = e.order === 'benchmark' && typeof e.benchmarkDataset === 'string' && e.benchmarkDataset.trim();
+    if (e.order !== undefined && !benchmarkOrder) return null;
     return {
       provider: e.provider,
       ...(typeof e.model === 'string' ? { model: e.model } : {}),
@@ -152,6 +156,7 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
       ...(isVoiceGenders(e.voiceGenders) ? { voiceGenders: e.voiceGenders } : {}),
       ...(e.preferFallbackVoice === true ? { preferFallbackVoice: true } : {}),
       ...(e.accountPolicyGuard === true ? { accountPolicyGuard: true } : {}),
+      ...(benchmarkOrder ? { order: 'benchmark' as const, benchmarkDataset: benchmarkOrder } : {}),
     };
   }
   return null;
@@ -207,6 +212,14 @@ export interface BuildServeProvidersOptions {
   deploymentExists?: (name: string) => boolean;
   /** Account-policy guards (default: the process-wide registry, kept across remounts). */
   policyGuards?: AccountPolicyGuards;
+  benchmarkRank?: (stage: Stage, dataset: string) => ReadonlyMap<string, number>;
+}
+
+export function orderByBenchmark(entries: RouteEntrySpec[], gatewayModel: string, rank: ReadonlyMap<string, number>): RouteEntrySpec[] {
+  const [primary, ...rest] = entries;
+  const rankOf = (e: RouteEntrySpec) => rank.get(`${e.provider}:${e.model ?? gatewayModel}`);
+  const ranked = rest.filter(e => rankOf(e) !== undefined).sort((a, b) => (rankOf(a) ?? 0) - (rankOf(b) ?? 0));
+  return [primary, ...ranked, ...rest.filter(e => rankOf(e) === undefined)];
 }
 
 export interface ServeProvidersResult {
@@ -288,7 +301,9 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   const unavailable: Record<Stage, Record<string, string[]>> = { chat: {}, stt: {}, tts: {} };
   const chains: Record<Stage, Record<string, ChainLinkSpec[]>> = { chat: {}, stt: {}, tts: {} };
   let described: Record<Stage, Set<string>> = { chat: new Set(), stt: new Set(), tts: new Set() };
-  function chainFor<S extends Stage>(stage: S, model: string, entries: RouteEntrySpec[]): Array<RouteTarget<StageProvider<S>>> {
+  function chainFor<S extends Stage>(stage: S, model: string, declared: RouteEntrySpec[]): Array<RouteTarget<StageProvider<S>>> {
+    const dataset = declared[0]?.order === 'benchmark' ? declared[0].benchmarkDataset : undefined;
+    const entries = dataset && opts.benchmarkRank ? orderByBenchmark(declared, model, opts.benchmarkRank(stage, dataset)) : declared;
     const targets: Array<RouteTarget<StageProvider<S>>> = [];
     const reasons: string[] = [];
     const links: ChainLinkSpec[] = [];
