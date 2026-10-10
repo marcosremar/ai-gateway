@@ -42,6 +42,11 @@ none), so viewers who do not listen to the dubbing do not download it. The serve
   clicks), oldest pending clips dropped when more than 6 s is queued. While it is on, the live line switches to a line
   when its clip starts playing (a line without a clip within 4 s is shown anyway) and the delay indicator shows the
   voice delay ("voz 3,2 s" = delayMs + wait until the clip played). Indicator: neutral < 3 s, amber 3–6 s, red above.
+- Every display setting is the viewer's own (gear → "Ajustes de exibição": bottom sheet on phones, popover from 768 px),
+  kept in that browser's localStorage (`ucast-settings`; the language per room in `ucast-lang-<CODE>`): language, mode
+  (Tradução / Só transcrição / Bilíngue / Só texto completo), original under the translation, dubbing on/off + volume +
+  "sincronizar legenda com a voz", text size A−/A+ (live line 20–56 px, transcript 14–24 px), theme (escuro / claro /
+  automático), auto-scroll, timestamps, delay indicator. Only the languages the room publishes are offered.
 - `https://<ROOMS_PUBLIC_HOST>/` and `/live`: "Digite o código da sessão". Unknown/expired code: a 404 page.
 - Other paths on the public host (e.g. `/health`, `/v1/…`) reach the gateway as usual.
 
