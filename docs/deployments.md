@@ -787,6 +787,14 @@ the container on `127.0.0.1:8000`; `/__aigw/ready` appears once the container an
 the Scaleway GPU OS image (Docker + NVIDIA toolkit) with `--gpus all`. The machine shuts itself down `maxHours + 30 min`
 after boot as a last resort — a shut-down Scaleway instance is still billed, so the gateway deletes halted replicas.
 
+Vast replicas (10/10/2026): the front is TLS on the same mapped port. `replica-tls.ts` derives a P-256 key from the
+replica token (HMAC), the boot script self-signs a CA `CN=aigw-replica-ca` with it, issues a leaf for
+`IP:$PUBLIC_IPADDR` and deletes the CA key; the gateway rebuilds a CA certificate from the same key (a chain verifies
+against the anchor's name and key, not its signature) and passes it as the only `tls.ca` of every call to that replica,
+so a host without the token cannot answer and the token never crosses the wire in clear. The machine is marked `tls`
+by the Vast backend (`replicaBase` → `https://`). The boot script also deletes `/root/.ssh/authorized_keys` and kills
+`sshd` (Vast's `ssh_direct` runtype starts it; the runtype stays because it is what runs the onstart).
+
 Hardening (06/10/2026): the token check runs in nginx's access phase (`auth_request`), so requests **without** the
 token are rate-limited per IP (5 r/s, burst 10, 5 connections → `429`) while the gateway's own traffic is never
 limited; `server_tokens off`. Every Scaleway replica gets a firewall: a gateway-only one joins the namespace's
@@ -870,6 +878,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
 | `GHCR_READ_TOKEN` | registry credential of a declared deployment whose `registryAuth.passwordEnv` names it (none today: `parle-speech` needs no token) |
 | `SCW_REGISTRY_SECRET_KEY` | secret key of a Scaleway IAM application whose only policy is `ContainerRegistryReadOnly`: what replicas log in to `rg.<region>.scw.cloud` with (never `SCW_SECRET_KEY`); read at boot |
+| `SCW_REGISTRY_PUSH_SECRET_KEY` | secret key of the IAM application `aigw-registry-push` (only `ContainerRegistryFullAccess` on the project): what the build machine of `scripts/build-image-on-scaleway.ts` logs in with to push; the script refuses to start without it |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
 | `DEPLOYMENTS_MAX_WAIT_SECONDS` | longest wait of an invoke through a cold start (240; § Cold start) |

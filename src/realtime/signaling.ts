@@ -13,6 +13,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readJsonBody, sendJson, type RealtimeService, type ResolvedSession } from './service';
 import { TRACE_ID_HEADER, childTraceparent, echoTrace, traceOf, type Trace } from './trace';
+import { replicaTls } from '../deployments/replica-tls';
 
 const PATH = /^\/v1\/realtime\/sessions\/(rt_[A-Za-z0-9]{8,64})(?:\/(offer|ice))?$/;
 const MAX_SIGNAL_BODY = 64 * 1024;
@@ -63,6 +64,7 @@ export function createSignalingHandler(service: RealtimeService, opts: Signaling
       headers: { 'X-Aigw-Token': s.replicaToken, traceparent: childTraceparent(trace), ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
       ...(payload !== undefined ? { body: JSON.stringify(payload) } : {}),
       signal: AbortSignal.timeout(SIGNAL_TIMEOUT_MS),
+      ...replicaTls(s.base, s.replicaToken),
     });
   }
 

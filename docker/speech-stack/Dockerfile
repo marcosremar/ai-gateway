@@ -2,11 +2,13 @@
 # registry next to the GPU instead of downloading from Hugging Face at boot (a boot-time HF download failed on a real
 # L4 on 2026-10-04).
 ARG LLAMA_TAG=server-cuda-b11382
+ARG LLAMA_DIGEST=sha256:ef08b5a98b1170f2b62177be0a4027c88a84043c55afbf190dd18b9e7cdcfebf
 ARG EDGE_TAG=79722253
-FROM ghcr.io/ggml-org/llama.cpp:${LLAMA_TAG} AS llama
-FROM ghcr.io/marcosremar/aigw-edge:${EDGE_TAG} AS edge
+ARG EDGE_DIGEST=sha256:2b0ba945e5505b8ef6dd56dc439807917bf0e3956f514878bbdb93338103fb17
+FROM ghcr.io/ggml-org/llama.cpp:${LLAMA_TAG}@${LLAMA_DIGEST} AS llama
+FROM ghcr.io/marcosremar/aigw-edge:${EDGE_TAG}@${EDGE_DIGEST} AS edge
 
-FROM vllm/vllm-omni:v0.28.0
+FROM vllm/vllm-omni:v0.28.0@sha256:6f8be103eaf0055448cf7578cfd621405fd669079d4361bd58896326b2bf722a
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl libgomp1 && rm -rf /var/lib/apt/lists/*
 # llama.cpp is built on CUDA 12.8; this base is CUDA 13: llama-server runs with its own CUDA 12 libs (below)…
@@ -25,11 +27,18 @@ RUN uv venv --python 3.12 /opt/wenv && uv pip install --python /opt/wenv/bin/pyt
 
 ARG LLM_REPO=unsloth/Qwen3.5-9B-GGUF
 ARG LLM_FILE=Qwen3.5-9B-Q4_K_M.gguf
+ARG LLM_REVISION=3885219b6810b007914f3a7950a8d1b469d598a5
+ARG LLM_SHA256=03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8
 ARG TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-Base
+ARG TTS_REVISION=5d83992436eae1d760afd27aff78a71d676296fc
+ARG STT_REVISION=edaa852ec7e145841d8ffdb056a99866b5f0a478
 ENV HF_HOME=/models/hf LLM_FILE=${LLM_FILE} TTS_MODEL=${TTS_MODEL} STT_MODEL=large-v3 STT_COMPUTE=float16
-RUN /opt/wenv/bin/hf download "$LLM_REPO" "$LLM_FILE" --local-dir /models/llm \
+RUN /opt/wenv/bin/hf download "$LLM_REPO" "$LLM_FILE" --revision "$LLM_REVISION" --local-dir /models/llm \
+ && echo "$LLM_SHA256  /models/llm/$LLM_FILE" | sha256sum -c - \
  && /opt/wenv/bin/hf download "$TTS_MODEL" \
  && /opt/wenv/bin/hf download Systran/faster-whisper-large-v3 \
+ && test "$(cat /models/hf/hub/models--${TTS_MODEL%%/*}--${TTS_MODEL#*/}/refs/main)" = "$TTS_REVISION" \
+ && test "$(cat /models/hf/hub/models--Systran--faster-whisper-large-v3/refs/main)" = "$STT_REVISION" \
  && rm -rf /models/hf/xet
 
 COPY --from=edge /app /opt/aigw-edge

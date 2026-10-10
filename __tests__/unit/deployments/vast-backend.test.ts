@@ -477,7 +477,7 @@ describe('vastReplicaInit', () => {
     expect(script).toMatch(/nginx -t && \{ nginx -s reload 2>\/dev\/null \|\| nginx; \}/);
     const nginx = Buffer.from(/echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/nginx.conf/.exec(script)![1], 'base64').toString();
     expect(nginx).toContain(`if ($http_x_aigw_token != "${TOKEN}") { return 401; }`);
-    expect(nginx).toContain('listen 80 default_server;');
+    expect(nginx).toContain('listen 80 ssl default_server;');
     expect(nginx).toContain('proxy_pass http://127.0.0.1:8010;');
     expect(script).toContain('nohup bash /srv/aigw/boot.sh');
     expect(script).toContain(`curl -sf -o /dev/null http://127.0.0.1:8010/health && echo '{"ready":true}' > /srv/aigw/ready.json`);
@@ -512,7 +512,7 @@ describe('vastReplicaInit', () => {
     expect(script).toMatch(/chmod 600 \/srv\/aigw\/edge\.env/);
     expect(script.indexOf('nohup bash /srv/aigw/boot.sh')).toBeLessThan(script.indexOf('-m aigw_edge'));
     expect(script.indexOf('-m aigw_edge')).toBeLessThan(script.indexOf('ready.json'));
-    expect(written(script, '/srv/aigw/nginx.conf')).toBe(nginxConfig(TOKEN, 80, 8010, RT_EDGE_PORT));
+    expect(written(script, '/srv/aigw/nginx.conf')).toBe(nginxConfig(TOKEN, 80, 8010, RT_EDGE_PORT, true));
     const env = written(script, '/srv/aigw/edge.env');
     expect(env).toContain("export EDGE_LLM_MODEL='it'\"'\"'s'\n");
     expect(env).toContain("export RT_MAX_SESSIONS='4'\n");
@@ -626,7 +626,7 @@ describe('fileUrls: the voice catalog without user_data', () => {
     expect(script).toContain(`aigw_fetch 'https://parle-prod.up.railway.app/assets/blob/${'ab'.repeat(32)}' ${FILES_DIR}/voice-0.mp3 ${'ab'.repeat(32)}`);
     expect(script).toContain(`[ -e /files ] || ln -s ${FILES_DIR} /files`);
     expect(script.indexOf('aigw_fetch \'')).toBeLessThan(script.indexOf('nohup bash /srv/aigw/boot.sh'));
-    expect(script).toMatch(/command -v nginx >\/dev\/null && command -v curl >\/dev\/null \|\|/);
+    expect(script).toMatch(/command -v nginx >\/dev\/null && command -v curl >\/dev\/null && command -v openssl >\/dev\/null \|\|/);
     const sent = Buffer.from(script).toString('base64').length + 9 * 24 + 40;
     expect(sent).toBeLessThanOrEqual(vastEnvBytes(spec));
     expect(vastEnvBytes(spec)).toBeLessThan(VAST_ENV_MAX_BYTES);
