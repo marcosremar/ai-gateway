@@ -214,6 +214,9 @@ curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
   runs Whisper + Qwen3.5 + Qwen3-TTS). A registered `deployment` always wins. Resolved when the providers are mounted
   (boot, routes PUT, key reload, a declared deployment registered); `/health?details=1` shows the effective target and the
   boot log lists it under `oneGpu`.
+- `order: "benchmark"` + `benchmarkDataset` (first entry only): the entries after the first are ordered by the model
+  benchmark ranking of that dataset (`POST /v1/admin/benchmarks`, admin); unranked entries keep their order after the
+  ranked ones and the first entry never moves. Formula, weights and routes: [`docs/model-benchmarks.md`](../model-benchmarks.md).
 - `voices: {feminine, masculine}` (TTS; capability, not in the parle's chain, which is MAI-Voice → Kokoro): a fallback that cannot clone speaks a stock voice of the **gender** of the
   requested voice (`src/config/tts-fallback-voices.ts`). The gender comes from the entry's `voiceGenders`
   (`{"pt-PT-1baab6": "masculine", …}`, the app's cast), the `xx-f-`/`xx-m-` slug, or the gender letter of a Kokoro
