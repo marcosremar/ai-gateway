@@ -10,7 +10,7 @@ interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
 interface Settings { mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -23,8 +23,10 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   parseSettings(json: string | null, legacyOrig: string | null): Settings;
   textSizes(step: number, vw: number): { live: number; tx: number };
   lineView(mode: string, showOrig: boolean, lang: string, hasTr: boolean): { main: 'tr' | 'orig'; sub: boolean; miss: boolean };
+  uaInfo(ua: string, touch: number): { ua: string; os: string; device: string };
+  refOf(search: string, referrer: string): string;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -226,5 +228,34 @@ describe('room page: viewer settings', () => {
       expect(html).toContain(s);
     }
     expect(html).not.toMatch(/ style="/); // CSP: no inline style attributes
+  });
+});
+describe('room page: analytics helpers', () => {
+  it('reduces the user agent to browser family, OS and device class', () => {
+    const cases: Array<[string, number, { ua: string; os: string; device: string }]> = [
+      ['Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Mobile Safari/537.36', 5, { ua: 'chrome', os: 'android', device: 'mobile' }],
+      ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1', 5, { ua: 'safari', os: 'ios', device: 'mobile' }],
+      ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/129.0 Mobile/15E148 Safari/604.1', 5, { ua: 'chrome', os: 'ios', device: 'mobile' }],
+      ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15', 5, { ua: 'safari', os: 'ios', device: 'tablet' }],
+      ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36 Edg/129.0', 0, { ua: 'edge', os: 'windows', device: 'desktop' }],
+      ['Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0 Mobile Safari/537.36', 5, { ua: 'samsung', os: 'android', device: 'mobile' }],
+      ['Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0', 0, { ua: 'firefox', os: 'linux', device: 'desktop' }],
+      ['', 0, { ua: 'other', os: 'other', device: 'desktop' }],
+    ];
+    for (const [ua, touch, want] of cases) expect({ ...uaInfo(ua, touch) }).toEqual(want);
+  });
+
+  it('classifies how the viewer arrived', () => {
+    expect(refOf('?src=qr', '')).toBe('qr');
+    expect(refOf('?x=1&ref=QR', 'https://x')).toBe('qr');
+    expect(refOf('', 'https://wa.me/')).toBe('link');
+    expect(refOf('', '')).toBe('direct');
+  });
+
+  it('ships the batched, anonymous event reporting', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const s of ["navigator.sendBeacon", "'/v1/rooms/'+CODE+'/events'", "addEventListener('pagehide'", "store.get('ucast-viewer')", "track('join'", "track('setting'", "track('sample'", "track('leave'", "store.set('ucast-lang-last'"]) {
+      expect(html).toContain(s);
+    }
   });
 });
