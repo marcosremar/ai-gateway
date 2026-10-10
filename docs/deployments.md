@@ -25,7 +25,8 @@ curl -X PUT $GW/v1/deployments/my-model -H "Authorization: Bearer $KEY" -H 'cont
   "env": {"HF_TOKEN": "..."}, "registryAuth": {"server": "ghcr.io", "username": "me", "password": "..."}
 }'
 # An image in the gateway's own Scaleway registry (rg.<region>.scw.cloud/…) needs no registryAuth: the machine logs in
-# with the gateway's Scaleway key, so no registry secret is ever sent or stored in a spec.
+# with SCW_REGISTRY_SECRET_KEY, a registry read-only IAM key. The gateway's own Scaleway API key never goes to a machine:
+# without SCW_REGISTRY_SECRET_KEY such an image is refused at create, and a user_data carrying the API key is refused.
 
 # 2. Call it — the path after /invoke/ goes to the container as-is
 curl $GW/v1/deployments/tts/invoke/v1/audio/speech -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
@@ -88,8 +89,9 @@ are put back. `envByMachineType` is merged per key: the declared keys are put ba
 
 `src/deployments/declared/parle-speech.json`: the `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` image
 (`docker/speech-stack`: Whisper + Qwen LLM + Qwen3-TTS in one container). It lives in the gateway's own Scaleway
-registry, which the gateway pulls from with the key it already has: **no registry token, no `registryAuth`, nothing
-to set** — it is never `pending` for a credential. The declaration owns five things and patches only them over the
+registry, which the machines pull from with `SCW_REGISTRY_SECRET_KEY` (a registry read-only IAM key; the gateway's
+Scaleway API key is never sent to a machine, audit 2026-10-09 #7): no `registryAuth` in the declaration, but without
+that variable every create fails with an error naming it. The declaration owns five things and patches only them over the
 registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full reference; default
 `20261009-0213`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
 the same tag: `SPEECH_IMAGE` does not move that copy; no L4), `scaling.mode` `fast`, `realtime: {}` (the edge
@@ -119,7 +121,7 @@ example in `docs/api/http.md` § App keys) and watch `appBudgets` in `GET /healt
 
 ```bash
 # Save (or move) an image address — build-image-on-scaleway.ts --app parle does this after a push
-curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
+curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $ADMIN_KEY" -H 'X-App: parle' -d '{
   "image": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107", "port": 8000, "healthPath": "/health",
   "defaults": {"machineType": "L40S-1-48G", "volumeGb": 120, "maxReplicas": 2, "bootTimeoutMinutes": 45}
 }'
@@ -532,7 +534,10 @@ With `candidates`, each create walks a **ranked ladder**:
   `vast RTX 5090 (≤ €0.85/h); offer 3 of 21: London, GB, $0.796/h; better-ranked offers passed over: offer 811 (Zurich, CH, $0.563/h): … not available; offer 902 (Amsterdam, NL, $0.597/h): … not available`.
 - The replica's address is `public_ipaddr:<host port of 80/tcp>`, so the probe and the proxy work unchanged. A host
   whose replica hit `bootTimeoutMinutes` is skipped for 1 h (§ Host reputation). States: `running`; `loading`/`created` →
-  `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). `DELETE /instances/{id}/` releases it
+  `starting`; `exited`/`offline` → `exited` (halted: deleted and replaced). A machine still loading whose Vast `status_msg` says the image cannot be
+  pulled (`manifest unknown`, `failed to resolve reference`, `pull access denied`, …) is released at once as `boot-failed`
+  (the host is not blamed), `lastError` reads `boot failed on the provider: <message>`, and creates back off 1 → 10 min
+  until the spec changes — before, it waited the whole `bootTimeoutMinutes` and rented the next host in a loop. `DELETE /instances/{id}/` releases it
   (its disk goes with it).
 
 ### RTT gate (Vast)
@@ -557,7 +562,8 @@ Outside the gate the replica is released with reason `too-far`, its host (`machi
 the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
 far. Until it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never
 measured again and its host is remembered as known-good for the ranking (on disk, § Host reputation); one adopted after a gateway restart is
-measured for the view only, never released by the gate (it may be serving).
+measured for the view only, never released by the gate, when its front already says ready (it may be serving); one still
+booting at the restart is gated like a fresh rental.
 `GET /v1/deployments/:name` shows `rttMs` and `rttBaselineMs` per replica, and `lastPlacement` both numbers and the
 verdict, e.g.
 `vast RTX 5090 (≤ €0.6/h); offer 1 of 12: Paris, FR, $0.548/h; RTT 42 ms, baseline 45 ms (s3.fr-par.scw.cloud): −3 ms ≤ maxRttExcessMs 20: kept`
@@ -746,7 +752,7 @@ fallback); then the instance is taken away, whatever it is serving. `src/deploym
 
 ## Replica machine
 
-`cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-deployment secret only the gateway knows) and proxies to
+`cloud-init.ts`: nginx on :80 requires `X-Aigw-Token` (a per-replica secret: HMAC of the deployment's secret, which stays in the gateway, and a random key in the machine's tag `aigw-rk-<key>` or Vast label `aigw:<ns>:<dep>:<key>`; a machine created before has the deployment secret) and proxies to
 the container on `127.0.0.1:8000`; `/__aigw/ready` appears once the container answered `healthPath`. GPU types use
 the Scaleway GPU OS image (Docker + NVIDIA toolkit) with `--gpus all`. The machine shuts itself down `maxHours + 30 min`
 after boot as a last resort — a shut-down Scaleway instance is still billed, so the gateway deletes halted replicas.
@@ -812,7 +818,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 
 | Variable | |
 |---|---|
-| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition |
+| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition as a non-admin, no-wake user (`SANDBOX_TOKEN_APP` names the app whose aliases it may call; `SANDBOX_TOKEN_ADMIN=1` makes it admin again) |
 | `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables Scaleway replicas (normally fetched with the token) |
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
@@ -826,6 +832,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `CORS_ORIGINS` | browser origins allowed to call directly |
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
 | `GHCR_READ_TOKEN` | registry credential of a declared deployment whose `registryAuth.passwordEnv` names it (none today: `parle-speech` needs no token) |
+| `SCW_REGISTRY_SECRET_KEY` | secret key of a Scaleway IAM application whose only policy is `ContainerRegistryReadOnly`: what replicas log in to `rg.<region>.scw.cloud` with (never `SCW_SECRET_KEY`); read at boot |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
 | `DEPLOYMENTS_MAX_WAIT_SECONDS` | longest wait of an invoke through a cold start (240; § Cold start) |

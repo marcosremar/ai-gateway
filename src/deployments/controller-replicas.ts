@@ -5,7 +5,8 @@
  */
 
 import { replicaCloudInit } from './cloud-init';
-import { ControllerState, type Runtime } from './controller-state';
+import { randomBytes } from 'crypto';
+import { ControllerState, replicaTokenFor, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
 import { placeReplica, PlacementError } from './placement-walk';
 import { isOutOfStock, quotaMachineType } from './placements';
@@ -13,7 +14,7 @@ import { DEFAULT_NEAR } from './placements';
 import { gateDecision, gateNote } from './rtt-gate';
 import type { DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
-const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
+export const CREATE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000];
 const NETWORK_RELEASE_QUICK_ATTEMPTS = 10;
 const NETWORK_RELEASE_SLOW_RETRY_MS = 5 * 60_000;
 const ORPHAN_RELEASE_ATTEMPTS = 6;
@@ -48,8 +49,9 @@ export abstract class ReplicaLifecycle extends ControllerState {
   private async checkReplica(rt: Runtime, m: ReplicaMachine): Promise<ProbeResult> {
     const { probe } = this.opts;
     try {
-      if (probe.check) return await probe.check(m, rt.record.spec, rt.record.replicaToken);
-      return (await probe.ready(m, rt.record.spec, rt.record.replicaToken)) ? 'ready' : 'down';
+      const token = this.replicaToken(rt, m);
+      if (probe.check) return await probe.check(m, rt.record.spec, token);
+      return (await probe.ready(m, rt.record.spec, token)) ? 'ready' : 'down';
     } catch {
       return 'down';
     }
@@ -71,7 +73,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     let rtt: number | null = null;
     try { rtt = await backend.measureRtt(m); } catch { rtt = null; }
     if (rtt != null) gate.rttMs = rtt;
-    if (m.createdAt < this.startedAt) { // adopted after a restart: it may be serving a class, never cut it here
+    if (m.createdAt < this.startedAt && (await this.checkReplica(rt, m)) !== 'down') { // adopted and serving: never cut it here
       if (rtt != null) gate.status = 'adopted';
       return true;
     }
@@ -110,6 +112,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       this.machines = this.machines.filter(x => x.id !== m.id);
       this.releasing.set(m.id, { machine: m, at: this.now() });
       this.probes.delete(m.id);
+      this.abortRequestsOfGoneReplicas();
     } catch (err) {
       const rt = this.deployments.get(m.deployment);
       if (rt) rt.lastError = `release ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
@@ -253,14 +256,17 @@ export abstract class ReplicaLifecycle extends ControllerState {
   protected async createOn(rt: Runtime, backend: DeploymentBackend, spec: DeploymentSpec, created: { id?: string }): Promise<ReplicaMachine> {
     this.log('deployments: creating replica', { deployment: spec.name, provider: backend.provider, type: spec.machineType, zone: spec.zone });
     const network = spec.exposure ? await this.networkOf(rt, backend) : undefined;
+    const tokenKey = randomBytes(12).toString('hex');
+    const replicaToken = replicaTokenFor(rt.record.replicaToken, tokenKey);
     const machine = await backend.createReplica({
-      spec, replicaToken: rt.record.replicaToken, namespace: this.namespace, ...(network ? { network } : {}),
+      spec, replicaToken, tokenKey, namespace: this.namespace, ...(network ? { network } : {}),
       // Vast builds its own init (`vastReplicaInit`) from spec + token; Scaleway takes this cloud-init as user_data.
-      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), rt.record.replicaToken) : '',
+      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), replicaToken) : '',
       ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
       onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
     });
-    return { ...machine, provider: backend.provider };
+    this.tokenKeys.set(machine.id, tokenKey);
+    return { ...machine, provider: backend.provider, tokenKey };
   }
 
   /** Reserved IP + firewall of an exposed deployment, created once and kept in the record (it outlives replicas). */

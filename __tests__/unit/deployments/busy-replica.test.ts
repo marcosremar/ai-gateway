@@ -189,6 +189,24 @@ describe('controller: 16 concurrent chats on a ready replica', () => {
     await until(() => x.cloud.releaseReasons.includes('unhealthy'), 3000);
   });
 
+  it('a replica whose app died behind its front (every answer a 5xx) is replaced even while callers keep coming', async () => {
+    const x = await setup();
+    await x.controller.put('speech', { ...SPEECH, maxReplicas: 1 });
+    x.controller.wake('speech');
+    await until(() => x.controller.get('speech')!.status === 'ready');
+    x.probe.forced = 'busy';
+    let calling = true;
+    const caller = (async () => {
+      while (calling) {
+        const lease = await x.controller.acquire('speech', { waitMs: 0 }).catch(() => null);
+        lease?.done('errored');
+        await wait(10);
+      }
+    })();
+    await until(() => x.cloud.releaseReasons.includes('unhealthy'), 3000).finally(() => { calling = false; });
+    await caller;
+  });
+
   it('a burst of 16 above the target of 8 creates the second replica even after the burst ended', async () => {
     const x = await setup();
     await x.controller.put('speech', SPEECH);

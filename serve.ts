@@ -40,12 +40,13 @@ import { buildImages } from './src/deployments/build-images';
 import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
-import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, TOKEN_ALIASES } from './src/config/sandbox-env';
+import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
 import {
-  deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  deploymentLogToTelemetry, emitGatewayEvent, isMasterToken, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
+import { createRooms } from './src/rooms';
 
 const log = createLogger('serve');
 
@@ -65,7 +66,7 @@ const PORT = parseInt(process.env.PORT || '4000');
 const clientKeys = gatewayClientKeys(process.env);
 for (const w of clientKeys.warnings) log.warn({}, `WARNING: ${w}`);
 const API_KEYS = clientKeys.keys;
-/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1. */
+/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1 + SANDBOX_TOKEN_ADMIN=1. */
 const EXTRA_ADMINS = clientKeys.sandboxAdmins;
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
@@ -138,6 +139,8 @@ if (declared) {
   log.log({ declared: status.map(s => ({ name: s.name, state: s.state, reason: s.reason })) }, 'Declared deployments');
   declared.start();
 }
+const bootRegistryWarning = deployments?.registryWarning() ?? null;
+if (bootRegistryWarning) log.error({}, `ERROR: ${bootRegistryWarning}`);
 
 function mountProviders() {
   const built = buildServeProviders({
@@ -193,7 +196,11 @@ let latency: (() => LatencyReport) | null = null;
  */
 const chainHealth = () => {
   const report = chainsNow();
-  return { ...report, fallback: fallbackWatch(report.stages), latency: latency?.() ?? null };
+  const registryWarning = deployments?.registryWarning() ?? null;
+  return {
+    ...report, warnings: [...(report.warnings ?? []), ...(registryWarning ? [registryWarning] : [])],
+    fallback: fallbackWatch(report.stages), latency: latency?.() ?? null,
+  };
 };
 setInterval(() => fallbackWatch(chainsNow().stages), 15_000).unref();
 
@@ -227,7 +234,8 @@ const isAdminToken = (token: string) => {
 // What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
 // clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
 const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
-  const routes = deployments?.apps.get(userId)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
+  const app = userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : userId;
+  const routes = deployments?.apps.get(app)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
@@ -260,12 +268,7 @@ const telemetry = telemetryFromEnv(process.env, {
   auth: {
     resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
     resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
-    isMasterKey: (token) => TOKEN_ALIASES.some(k => process.env[k]?.trim() === token),
-    deployment: (name) => {
-      const replicaToken = controller?.tokenOf(name);
-      const app = controller?.get(name)?.app;
-      return replicaToken ? { replicaToken, ...(app ? { app } : {}) } : null;
-    },
+    isMasterKey: (token) => isMasterToken(token, process.env),
     replica: (id) => controller?.replicaAuth(id) ?? null,
   },
   isAdminToken,
@@ -338,6 +341,18 @@ const realtime = createRealtime({
 });
 realtimeSessionOf = sessionResolverFrom(realtime.service);
 if (deployments) deployments.devices.onBlock = (app, device) => { void realtime.service.endDeviceSessions(app, device); };
+// Live subtitle rooms (src/rooms, docs/rooms.md): POST /v1/rooms with a gateway key; publishing with the room's own
+// token, the transcript, the viewer WebSocket and the viewer pages (ROOMS_PUBLIC_HOST, /live/:code) mounted in front.
+const rooms = createRooms({
+  keyUser: (token) => {
+    const userId = keyRegistry.resolve(token)?.userId;
+    return userId ? { userId, admin: adminUsers.has(userId) } : null;
+  },
+  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+log.log({ dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl }, 'Rooms enabled');
+
 const deviceGate = deployments && ((userId: string, headers: import('http').IncomingHttpHeaders, kind: string) => {
   const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
   return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
@@ -357,7 +372,7 @@ const server = await startProxy({
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
-    ...(telemetry?.adminRoutes ?? []),
+    rooms.route, ...(telemetry?.adminRoutes ?? []),
   ],
   publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
@@ -365,6 +380,7 @@ const server = await startProxy({
 });
 
 realtime.mount(server);
+rooms.mount(server);
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 
@@ -395,6 +411,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     deployments?.controller.stop();
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
+    rooms.stop();
     declared?.stop();
     keyManager.stop();
     telemetry?.stop();

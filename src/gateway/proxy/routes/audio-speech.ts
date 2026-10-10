@@ -7,6 +7,7 @@ import type { TTSProvider } from '../../providers/cloud/types';
 import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
 import { createLogger } from '../../../logger';
+import { qwenTokenCap } from '../../../deployments/qwen-token-cap';
 import {
   errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
 } from '../provider-routing';
@@ -16,8 +17,7 @@ const ttsCooldownTracker = new CooldownTracker();
 
 const log = createLogger('audio-speech');
 
-/** Request fields the route itself interprets; the rest is forwarded to self-hosted targets as-is. */
-const KNOWN_FIELDS = new Set(['model', 'input', 'voice', 'response_format', 'speed', 'fallback_voice', 'stream']);
+const FORWARDED_EXTRAS = ['task_type', 'ref_audio', 'ref_text', 'language', 'stream_format', 'instructions'];
 
 export async function handleAudioSpeech(
   req: ProxyRequest,
@@ -50,6 +50,10 @@ export async function handleAudioSpeech(
     return { status: 400, body: { error: { message: `response_format must be one of: ${validFormats.join(', ')}`, type: 'invalid_request_error' } } };
   }
 
+  if (body.ref_audio !== undefined && (typeof body.ref_audio !== 'string' || !body.ref_audio.startsWith('data:'))) {
+    return { status: 400, body: { error: { message: 'ref_audio must be inline audio (a data: URI), never a URL', type: 'invalid_request_error' } } };
+  }
+
   const model = body.model;
   const targets = normalizeTargets(ttsProviders[model]);
   if (targets.length === 0) {
@@ -57,9 +61,9 @@ export async function handleAudioSpeech(
     return { status: 404, body: { error: { message: `TTS model "${model}" not found`, type: 'invalid_request_error' } } };
   }
 
-  // Everything the gateway does not interpret goes to providers that understand it (self-hosted Qwen3-TTS:
-  // ref_audio, ref_text, task_type, language, stream_format…); cloud providers ignore it.
-  const extra = Object.fromEntries(Object.entries(body).filter(([k]) => !KNOWN_FIELDS.has(k)));
+  const extra: Record<string, unknown> = Object.fromEntries(FORWARDED_EXTRAS.filter(k => body[k] !== undefined).map(k => [k, body[k]]));
+  const asked = body.max_new_tokens;
+  if (typeof asked === 'number' && Number.isInteger(asked) && asked > 0 && asked <= qwenTokenCap(String(body.input))) extra.max_new_tokens = asked;
   const format = (body.response_format as string | undefined) || 'mp3';
   // wav/pcm can be streamed (first bytes before the whole sentence); `stream: false` turns it off.
   const stream = (format === 'wav' || format === 'pcm') && body.stream !== false;

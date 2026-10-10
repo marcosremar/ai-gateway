@@ -17,6 +17,7 @@ import type {
 } from '../gateway/providers/cloud/types';
 import { DeploymentError, type DeploymentController, type Lease, type LeaseOutcome } from './controller';
 import { replicaBase } from './http';
+import { qwenTokenCap } from './qwen-token-cap';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
@@ -299,8 +300,6 @@ function catalogOf(raw: unknown): ReplicaCatalog | null {
     !!v && typeof v.id === 'string' && typeof v.audio === 'string' && typeof v.text === 'string');
   return { model: typeof input.model === 'string' ? input.model : undefined, format: typeof input.format === 'string' ? input.format : undefined, voices };
 }
-
-export const qwenTokenCap = (text: string) => Math.ceil((3 + 0.2 * text.length) * 12.5);
 
 /**
  * TTS on a self-hosted replica.

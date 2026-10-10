@@ -288,7 +288,7 @@ class Edge:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1 << 20)
         await ws.prepare(req)
         trace_id = trace_id_from(req.headers.get("traceparent") or req.query.get("traceparent")) or new_trace_id()
-        token = req.query.get("token")
+        token = req.headers.get("X-Aigw-Session-Token") or req.query.get("token")
         claims, refused = self.admit(token, trace_id, "ws", cfg=await self.ws_config(ws) if needs_config(token) else None)
         if refused:
             await ws.send_str(json.dumps({"type": "error", "code": refused[1], "message": refused[2]}))

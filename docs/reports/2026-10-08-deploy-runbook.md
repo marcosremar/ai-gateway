@@ -481,6 +481,22 @@ Merging changed nothing in production. The deploy of this `main` is GO under the
    deploy and give any window an explicit `timeZone` if one appeared.
 7. Order of § 12.4; check `/health` `commit` / `builtAt` afterwards.
 
-Not in this build: the audit's security fixes (PR #75: dev token, Bearer-only keys, per-replica tokens, Scaleway
-registry pull with a read-only key). #75 needs `SCW_REGISTRY_SECRET_KEY` (a read-only Scaleway registry key) in the
-gateway's variables before its own deploy, or `parle-speech` cannot pull its image.
+Also in this build: #76 (Vast stress fixes) and #75 (the audit's security fixes: dev token not admin, Bearer-only
+keys, per-replica tokens, Scaleway registry pull with a read-only key).
+
+### 12.9 Pre-deploy checklist for #75
+
+- [x] `SCW_REGISTRY_SECRET_KEY` exists (created 2026-10-09): IAM application `aigw-registry-readonly`, its only policy
+  `ContainerRegistryReadOnly` on the project; secret and access key in the dev API (palco), served by
+  `GET /api/sandbox-env`. Checked: the registry grants `pull` on `aigw/speech-stack` and nothing for `pull,push`; it
+  lists no Instance server. Creation steps (for a rotation): IAM → Applications → Create (no group) → Policies →
+  Create policy → scope: project → `ContainerRegistryReadOnly` → attach → API keys → Generate.
+- [ ] The gateway reads the key at boot only: the deploy (a restart) is what picks it up. Afterwards `/health?details=1`
+  (admin key) must have no `SCW_REGISTRY_SECRET_KEY is missing` warning; with the warning, every create of an
+  `rg.*.scw.cloud` image (`parle-speech`) fails at once with an error naming the variable, and the boot log has
+  the same line as `ERROR:`.
+- [x] The school's `AI_GATEWAY_KEY` is an admin key (checked 2026-10-09: distinct from `SANDBOX_TOKEN`,
+  `/health?details=1` → 200 with admin fields), so the dev token losing admin does not touch the school.
+- [ ] Optional: `SANDBOX_TOKEN_APP=parle` on the gateway if dev sessions should keep calling the parle aliases with the
+  dev token (no-wake, app-key limits); unset, they get 403 on those aliases.
+- [ ] Afterwards consider rotating `SCW_SECRET_KEY`: it sat in the user_data and `boot.log` of every past replica.

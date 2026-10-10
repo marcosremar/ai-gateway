@@ -311,6 +311,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const image = registry.image(app, imageName);
       return image ? send(res, 200, image) : send(res, 404, { error: `app '${app}' has no image '${imageName}'` });
     }
+    if ((method === 'PUT' || method === 'DELETE') && !isAdmin(req)) {
+      return send(res, 403, { error: 'saved app images run with the deployment\'s secrets: only an admin key may change them' });
+    }
     if (method === 'PUT') {
       const { image, created } = await registry.putImage(app, imageName, await readJson(req));
       return send(res, created ? 201 : 200, image);
@@ -354,7 +357,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           method,
           headers: { ...headers, ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
           body: body && body.length ? new Uint8Array(body) : undefined,
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS)]),
+          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS), ...(lease.signal ? [lease.signal] : [])]),
         });
       } catch (err) {
         // The client going away says nothing about the replica, and running out of time means busy: neither is a strike
@@ -386,7 +389,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           log.warn({ deployment: name, replica: lease.machine.id, path: rest, cut }, 'invoke: replica stream cut after the response started');
         }
       } finally {
-        lease.done(false);
+        lease.done(upstream.status >= 500 ? 'errored' : false);
       }
       return;
     }

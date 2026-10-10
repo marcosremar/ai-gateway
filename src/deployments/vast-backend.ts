@@ -82,6 +82,7 @@ interface VastInstance {
   id: number;
   label?: string | null;
   actual_status?: string | null;
+  status_msg?: string | null;
   public_ipaddr?: string | null;
   ports?: Record<string, Array<{ HostPort?: string }> | undefined> | null;
   machine_id?: number;
@@ -109,6 +110,12 @@ export function imageLogin(auth: RegistryAuth): string {
 }
 
 /** Vast `actual_status` → the controller's vocabulary: `running`, `starting` (loading/created), `exited` (halted). */
+const IMAGE_PULL_FAILED = /manifest unknown|failed to resolve reference|pull access denied|repository does not exist|unauthorized: /i;
+
+export function vastBootError(i: { actual_status?: string | null; status_msg?: string | null }): string | null {
+  return i.actual_status !== 'running' && i.status_msg && IMAGE_PULL_FAILED.test(i.status_msg) ? i.status_msg.trim().slice(0, 300) : null;
+}
+
 export function vastState(status: string | null | undefined): string {
   if (status === 'running') return 'running';
   if (status === 'exited' || status === 'stopped' || status === 'offline') return 'exited';
@@ -257,7 +264,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         const res = await this.call<{ success?: boolean; new_contract?: number; error?: string; msg?: string }>('PUT', `/asks/${offer.id}/`, {
           client_id: 'me',
           image: spec.image,
-          label: `${vastLabelPrefix(input.namespace)}${spec.name}`,
+          label: `${vastLabelPrefix(input.namespace)}${spec.name}${input.tokenKey ? `:${input.tokenKey}` : ''}`,
           disk: spec.volumeGb ?? DEFAULT_DISK_GB,
           runtype: 'ssh_direct',
           // The init script travels in an env var (the onstart field stays short); read from /etc/environment when the
@@ -327,17 +334,18 @@ export class VastDeploymentBackend implements DeploymentBackend {
   }
 
   async listForeign(namespace: string): Promise<Array<ReplicaMachine & { namespace: string }>> {
-    return (await this.fetchLabelled('aigw:')).flatMap((m) => {
-      const [ns, ...rest] = m.deployment.split(':');
-      return ns && ns !== namespace && rest.length ? [{ ...m, namespace: ns, deployment: rest.join(':') }] : [];
+    return (await this.fetchLabelled('aigw:')).flatMap(({ rest, ...m }) => {
+      const [ns, deployment, tokenKey] = rest;
+      return ns && ns !== namespace && deployment ? [{ ...m, namespace: ns, deployment, ...(tokenKey ? { tokenKey } : {}) }] : [];
     });
   }
 
-  private fetchReplicas(namespace: string): Promise<ReplicaMachine[]> {
-    return this.fetchLabelled(vastLabelPrefix(namespace));
+  private async fetchReplicas(namespace: string): Promise<ReplicaMachine[]> {
+    return (await this.fetchLabelled(vastLabelPrefix(namespace))).map(({ rest: [deployment = '', tokenKey], ...m }) =>
+      ({ ...m, deployment, ...(tokenKey ? { tokenKey } : {}) }));
   }
 
-  private async fetchLabelled(prefix: string): Promise<ReplicaMachine[]> {
+  private async fetchLabelled(prefix: string): Promise<Array<Omit<ReplicaMachine, 'deployment'> & { rest: string[] }>> {
     await this.hosts.load();
     const { instances = [] } = await this.call<{ instances?: VastInstance[] }>('GET', '/instances/');
     return instances.filter(i => i.label?.startsWith(prefix)).map((i) => {
@@ -345,13 +353,14 @@ export class VastDeploymentBackend implements DeploymentBackend {
       if (i.machine_id !== undefined) this.hostOf.set(id, i.machine_id);
       const hostPort = i.ports?.['80/tcp']?.[0]?.HostPort;
       return {
-        id, deployment: i.label!.slice(prefix.length), provider: 'vast' as const,
+        id, rest: i.label!.slice(prefix.length).split(':'), provider: 'vast' as const,
         ip: i.public_ipaddr && hostPort ? `${i.public_ipaddr.trim()}:${hostPort}` : null,
         state: vastState(i.actual_status),
         createdAt: typeof i.start_date === 'number' ? Math.round(i.start_date * 1000) : this.now(),
         zone: i.geolocation ?? '', machineType: i.gpu_name ?? '',
         pricePerHour: typeof i.dph_total === 'number' ? Math.round((i.dph_total / EUR_TO_USD) * 1000) / 1000 : null,
         expiresAt: vastEndsAt(i.end_date, i.duration, this.now()),
+        ...(vastBootError(i) ? { bootError: vastBootError(i)! } : {}),
       };
     });
   }

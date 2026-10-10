@@ -53,8 +53,14 @@ export abstract class ControllerViews extends ReconcileLoop {
     return rt ? structuredClone(rt.record.spec) : null;
   }
 
-  tokenOf(name: string): string | null {
+  deploymentSecretOf(name: string): string | null {
     return this.deployments.get(name)?.record.replicaToken ?? null;
+  }
+
+  tokenOf(name: string, replicaId: string): string | null {
+    const rt = this.deployments.get(name);
+    const machine = this.machines.find(m => m.id === replicaId && m.deployment === name);
+    return rt && machine ? this.replicaToken(rt, machine) : null;
   }
 
   /**
@@ -65,7 +71,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     const machine = this.machines.find(m => m.id === id);
     const rt = machine ? this.deployments.get(machine.deployment) : undefined;
     if (!machine || !rt) return null;
-    return { deployment: machine.deployment, replicaToken: rt.record.replicaToken, ...(rt.record.app ? { app: rt.record.app } : {}) };
+    return { deployment: machine.deployment, replicaToken: this.replicaToken(rt, machine), ...(rt.record.app ? { app: rt.record.app } : {}) };
   }
 
   pendingNetworkReleases(): Array<{ deployment: string; ip: string; zone: string; since: string; attempts: number; lastError: string | null }> {
@@ -175,7 +181,7 @@ export abstract class ControllerViews extends ReconcileLoop {
           ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]
           : []),
         ...placementsOf(rt.record.spec).filter(s => s.provider === 'vast' && s.provider !== rt.record.spec.provider).flatMap((s) => {
-          const unfit = this.backends.vast ? vastUnfit(this.forVast(rt, s), p => this.backends[p]) : 'VAST_API_KEY is not set';
+          const unfit = this.backends.vast ? vastUnfit(this.forVast(rt, s)) : 'VAST_API_KEY is not set';
           return unfit ? [`the vast ${s.machineType} fallback placement is skipped: ${unfit}`] : [];
         }),
       ],

@@ -128,9 +128,23 @@ describe('listForeign on the real backends', () => {
       { id: 11, label: 'aigw:prod:parle-speech', actual_status: 'running', start_date: (NOW - HOUR) / 1000, gpu_name: 'RTX 5090' },
       { id: 12, label: 'aigw:dev:old-speech', actual_status: 'exited', start_date: (NOW - 9 * HOUR) / 1000, gpu_name: 'RTX 5090' },
       { id: 13, label: 'someone-else', actual_status: 'running', start_date: NOW / 1000 },
+      { id: 14, label: 'aigw:dev:new-speech:a1b2c3', actual_status: 'running', start_date: NOW / 1000 },
+      { id: 15, label: 'aigw:prod:parle-tts:d4e5f6', actual_status: 'running', start_date: NOW / 1000 },
     ] }));
     const vast = new VastDeploymentBackend('k', { fetch: fetchImpl as never, now: () => NOW });
-    expect((await vast.listForeign('prod')).map(m => [m.id, m.namespace, m.deployment, m.state])).toEqual([['12', 'dev', 'old-speech', 'exited']]);
-    expect((await vast.listReplicas('prod')).map(m => [m.id, m.deployment])).toEqual([['11', 'parle-speech']]);
+    expect((await vast.listForeign('prod')).map(m => [m.id, m.namespace, m.deployment, m.state])).toEqual([
+      ['12', 'dev', 'old-speech', 'exited'], ['14', 'dev', 'new-speech', 'running'],
+    ]);
+    expect((await vast.listReplicas('prod')).map(m => [m.id, m.deployment, m.tokenKey])).toEqual([['11', 'parle-speech', undefined], ['15', 'parle-tts', 'd4e5f6']]);
+  });
+
+  it('Vast: a per-replica label aigw:<ns>:<deployment>:<tokenKey> keeps the deployment and the key apart', async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ instances: [
+      { id: 21, label: 'aigw:prod:parle-speech:k1', actual_status: 'running', start_date: NOW / 1000 },
+      { id: 22, label: 'aigw:dev:old-speech:k2', actual_status: 'exited', start_date: NOW / 1000 },
+    ] }));
+    const vast = new VastDeploymentBackend('k', { fetch: fetchImpl as never, now: () => NOW });
+    expect((await vast.listForeign('prod')).map(m => [m.id, m.namespace, m.deployment, m.tokenKey])).toEqual([['22', 'dev', 'old-speech', 'k2']]);
+    expect((await vast.listReplicas('prod')).map(m => [m.id, m.deployment, m.tokenKey])).toEqual([['21', 'parle-speech', 'k1']]);
   });
 });
