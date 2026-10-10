@@ -32,7 +32,10 @@ none), so viewers who do not listen to the dubbing do not download it. The serve
 ## Viewer pages
 
 - `https://<ROOMS_PUBLIC_HOST>/<CODE>` (Host header match) and `/live/<CODE>` on any host: the room page (pt-BR, one
-  self-contained HTML document, CSP with a per-response nonce, no CDN).
+  self-contained HTML document, CSP with a per-response nonce, no CDN). Default language: the viewer's saved choice
+  for that room, else the first browser language the room publishes (primary subtag: `en-US` → `en`), else the room's
+  first target language; the original only when the room has no translations. The live line and the original under it
+  are always one line each: the font shrinks down to 70 %, then only the end of the sentence is shown behind "…".
 - `https://<ROOMS_PUBLIC_HOST>/` and `/live`: "Digite o código da sessão". Unknown/expired code: a 404 page.
 - Other paths on the public host (e.g. `/health`, `/v1/…`) reach the gateway as usual.
 
