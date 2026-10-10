@@ -95,7 +95,8 @@ ice_made, ice_received = StunProtocol.connection_made, StunProtocol.datagram_rec
 
 def ice_connection_made(self, transport) -> None:
     ice_made(self, transport)
-    transport.sendto = shaped(transport.sendto)
+    sendto = transport.sendto
+    transport.sendto = shaped(lambda *args: transport.is_closing() or sendto(*args))
 
 
 StunProtocol.connection_made = ice_connection_made

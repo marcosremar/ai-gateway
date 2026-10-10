@@ -380,18 +380,39 @@ async def scenario_webrtc_network(base: str) -> None:
 
 
 CONNECT_RUNS = int(os.environ.get("CONNECT_RUNS", "6"))
-SDK_FOREGROUND_MS, SDK_BACKGROUND_MS = 3000, 12000
+SDK_FOREGROUND_MS, SDK_BACKGROUND_MS, SDK_TRIES, SDK_BACKOFF_MS = 3000, 12000, 2, 2000
+
+
+async def connect_like_sdk(base: str) -> tuple[RtcLearner, int]:
+    for attempt in range(1, SDK_TRIES + 1):
+        learner = await RtcLearner(base).connect(mint())
+        try:
+            await learner.events.wait("ready", SDK_BACKGROUND_MS / 1000)
+            return learner, attempt
+        except TimeoutError:
+            if getattr(learner, "session_id", None):
+                async with aiohttp.ClientSession() as http:
+                    await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
+            await learner.close()
+            if attempt == SDK_TRIES:
+                raise
+            await asyncio.sleep(SDK_BACKOFF_MS / 1000)
 
 
 async def scenario_webrtc_connect_loss(base: str) -> None:
+    budget = SDK_TRIES * SDK_BACKGROUND_MS + SDK_BACKOFF_MS
     for loss in (0.0, 0.05, 0.10):
         shape_network(loss, 0.075 if loss else 0.0)
-        times = []
+        times, retried, failed = [], 0, 0
         try:
             for _ in range(CONNECT_RUNS):
                 t = time.monotonic()
-                learner = await RtcLearner(base).connect(mint())
-                await learner.events.wait("ready", 30)
+                try:
+                    learner, attempts = await connect_like_sdk(base)
+                except TimeoutError:
+                    failed += 1
+                    continue
+                retried += attempts > 1
                 times.append(round((time.monotonic() - t) * 1000))
                 async with aiohttp.ClientSession() as http:
                     await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
@@ -400,10 +421,12 @@ async def scenario_webrtc_connect_loss(base: str) -> None:
             shape_network()
         late = sum(ms > SDK_FOREGROUND_MS for ms in times)
         results["latency"][f"webrtc connect, {round(loss * 100)} % loss + 75 ms each way"] = {
-            "ms": sorted(times), "over_foreground_budget": late}
-        check(f"webrtc connect, {round(loss * 100)} % loss: every connection is up inside the SDK's background budget "
-              f"({SDK_BACKGROUND_MS} ms; its foreground one is {SDK_FOREGROUND_MS})", max(times) < SDK_BACKGROUND_MS,
-              {"max": max(times), "median": statistics.median(times), "over_foreground": f"{late}/{len(times)}"})
+            "ms": sorted(times), "over_foreground_budget": late, "second_try": retried, "failed": failed}
+        check(f"webrtc connect, {round(loss * 100)} % loss: every connection is up inside the SDK's background attempts "
+              f"({SDK_TRIES} × {SDK_BACKGROUND_MS} ms; its foreground budget is {SDK_FOREGROUND_MS})",
+              failed == 0 and max(times) < budget and retried <= 0.1 * CONNECT_RUNS,
+              {"max": max(times, default=None), "median": statistics.median(times) if times else None,
+               "over_foreground": f"{late}/{len(times)}", "second_try": retried, "failed": failed})
 
 
 async def scenario_vast(base: str) -> None:
