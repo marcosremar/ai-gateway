@@ -9,9 +9,9 @@
  *
  * Priority: the palco value WINS over the process environment (Railway variables) for every key except the few
  * that must stay with the host — `isEnvPinned`: the token and its aliases, PORT, NODE_ENV, GATEWAY_API_KEYS,
- * HOSTNAME, RAILWAY_* and every endpoint override (`isEndpointOverride`: *_URL, *_BASE, *_HOST, *_ENDPOINT); none of
- * them can be written through `PUT /v1/admin/keys` either. DEPLOYMENTS_NAMESPACE / DEPLOYMENTS_STATE_DIR /
- * DEPLOYMENTS_ENABLED and the provider API bases (`*_BASE`, `*_BASE_URL`) are never taken from the palco at all. So rotating a key on the palco is enough; a stale Railway variable
+ * HOSTNAME and RAILWAY_*; none of them can be written through `PUT /v1/admin/keys` either. DEPLOYMENTS_NAMESPACE /
+ * DEPLOYMENTS_STATE_DIR / DEPLOYMENTS_ENABLED and every endpoint override (`isEndpointOverride`: *_URL, *_BASE,
+ * *_HOST, *_ENDPOINT) are never taken from the palco at all. So rotating a key on the palco is enough; a stale Railway variable
  * cannot shadow it. Keys are re-read periodically and on demand by `KeyManager` (src/config/key-manager.ts).
  *
  * The same token is also accepted as a Bearer by the gateway itself (see `serve.ts`), so agents call it with the
@@ -137,8 +137,8 @@ export async function loadSandboxEnv(
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) { result.errors.push(`${url}: not an object`); continue; }
       for (const [key, value] of Object.entries(payload)) {
         if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof value !== 'string' || !value.trim()) continue;
-        // Pinned keys stay with the host when it has them; everything else follows the palco.
-        if (isHostOnly(key) || (isEnvPinned(key) && env[key]?.trim())) continue;
+        if (isHostOnly(key) || isEndpointOverride(key)) continue;
+        if (isEnvPinned(key) && env[key]?.trim() && env[key] !== value.trim()) continue;
         result.received.push(key);
         if (env[key] === value.trim()) continue;
         env[key] = value.trim();
