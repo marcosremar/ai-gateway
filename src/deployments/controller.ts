@@ -136,6 +136,20 @@ export class DeploymentController extends ControllerViews {
     return Object.values(this.backends).flatMap(b => b?.creditIssue?.() ?? []);
   }
 
+  spendSummary(): { scalewayEurPerHour: number; monthEur: number; monthCapEur: number } {
+    const month = new Date(this.now()).toISOString().slice(0, 7);
+    let monthEur = 0;
+    let monthCapEur = 0;
+    for (const rt of this.deployments.values()) {
+      const cap = rt.record.spec.scaling?.budget?.eurPerMonth;
+      if (cap === undefined) continue;
+      monthCapEur += cap;
+      if (rt.record.spend?.month === month) monthEur += rt.record.spend.eur;
+    }
+    const scalewayEurPerHour = this.runningMachines().filter(m => (m.provider ?? 'scaleway') === 'scaleway').reduce((s, m) => s + (m.pricePerHour ?? 0), 0);
+    return { scalewayEurPerHour: Math.round(scalewayEurPerHour * 1000) / 1000, monthEur: Math.round(monthEur * 100) / 100, monthCapEur };
+  }
+
   async noteUdp(deployment: string, replicaId: string, udp: 'ok' | 'blocked', seen: { path?: string; active: number }): Promise<void> {
     const rt = this.deployments.get(deployment);
     const m = this.machines.find(x => x.id === replicaId && x.deployment === deployment);
