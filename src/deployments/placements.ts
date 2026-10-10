@@ -111,6 +111,8 @@ export interface VastOffer {
   /** Rental end (Unix seconds) and seconds left: `expiry.ts`. */
   end_date?: number | string | null;
   duration?: number | null;
+  public_ipaddr?: string | null;
+  direct_port_start?: number;
 }
 
 /**

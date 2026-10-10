@@ -3,7 +3,7 @@ import { autoscaleSettings } from './autoscale';
 import { DEFAULT_RT_MAX_SESSIONS } from './cloud-init';
 import { ParkingControl } from './controller-parking';
 import { activeWindow } from './autoscale';
-import { machineTypesOf, REFUSED_HOLD_MS, round3, type Runtime } from './controller-state';
+import { isParked, machineTypesOf, REFUSED_HOLD_MS, round3, type Runtime } from './controller-state';
 import {
   DEFAULT_BOOT_SECONDS, DEFAULT_RESUME_SECONDS, median, noteLoad, scalingDecision, type LoadSample,
 } from './scaling-policy';
@@ -170,6 +170,14 @@ export abstract class ScalingControl extends ParkingControl {
     const samples = [...entry[kind], Math.round((this.now() - from) / 1000)].slice(-MEASURED_KEEP);
     rt.record.measured = { ...rt.record.measured, [key]: { ...entry, [kind]: samples } };
     void this.opts.store.saveDeployment(rt.record).catch(() => {});
+  }
+
+  protected expectedReadyAt(rt: Runtime, mine: ReplicaMachine[]): number | null {
+    const { spec } = rt.record;
+    if (mine.some(m => isParked(m) || this.probes.get(m.id)?.everReady)) return null;
+    const samples = rt.record.measured?.[measuredKey(spec.machineType, spec.image)]?.boot;
+    if (!samples || samples.length < CONFIDENT_SAMPLES) return null;
+    return (mine.length ? Math.min(...mine.map(m => m.createdAt)) : this.now()) + median(samples)! * 1000;
   }
 
   capacity(name: string): CapacityView | null {
