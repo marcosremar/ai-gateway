@@ -53,6 +53,7 @@ import {
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
 import { createRooms } from './src/rooms';
+import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 
 const log = createLogger('serve');
@@ -414,6 +415,17 @@ const rooms = createRooms({
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 log.log({ dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl }, 'Rooms enabled');
+// Desktop-app field telemetry (src/app-telemetry, docs/app-telemetry.md): opt-in batches from the ucast.me app with a
+// gateway key, admin summary/listing. Day files on the same volume as rooms.
+const appTelemetry = appTelemetryFromEnv(process.env, {
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
+  isAdminToken,
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+if (appTelemetry) {
+  await appTelemetry.start();
+  log.log({ dir: appTelemetry.store.dir, retentionDays: appTelemetry.store.retentionDays }, 'App telemetry enabled');
+}
 
 const deviceGate = deployments && ((userId: string, headers: import('http').IncomingHttpHeaders, kind: string) => {
   const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
@@ -435,7 +447,7 @@ const server = await startProxy({
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
-    rooms.route, ...(telemetry?.adminRoutes ?? []),
+    rooms.route, ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
   ],
   publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : []), ...(machines ? [machines.reportRoute] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
@@ -476,6 +488,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
     rooms.stop();
+    appTelemetry?.stop();
     declared?.stop();
     keyManager.stop();
     void access.stop();
