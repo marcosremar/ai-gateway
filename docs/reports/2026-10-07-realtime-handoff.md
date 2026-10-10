@@ -2331,9 +2331,114 @@ bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports '' --trans
 
 ### Imagem do edge
 
-**A imagem ainda não foi construída.** `aigw-edge.yml` só roda sozinho em PR ou push para o `main`, e a PR #71 aponta
-para a `rt/integration-2`. Para construir: `gh workflow run aigw-edge.yml --ref rt/webrtc-open` (a tag é o sha curto do
-commit), ou ela sai quando a integração chegar ao `main`. **Nenhuma tag foi fixada em lugar nenhum**
-(`DEFAULT_EDGE_IMAGE` e `EDGE_TAG` continuam como estão na `rt/integration-2`). Os itens 1, 2 (temporizador SCTP) e 3
-(`turn_ack`) só valem numa réplica com essa imagem; com um edge anterior o SDK novo funciona como antes (oferta com
-RED recusada vira Opus, sem `turn_ack` não há resgate).
+Construída e fixada em 10/10: ver § Prova ao vivo da PR #71 abaixo.
+
+## Prova ao vivo da PR #71 — 2026-10-10
+
+Branch `rt/webrtc-open` com o `main` mesclado (#70, #72–#85). Gateway local do worktree em :4241 (`bun serve.ts`,
+namespace `marcos-proof-71`, estado próprio, sem `SANDBOX_TOKEN` nem chave Vast no processo, `DEPLOYMENTS_MAX_REPLICAS=1`).
+Uma máquina: Scaleway L40S-1-48G do perfil `speech-stack` (imagem `20261009-0213`), `pl-waw-2` (fr-par-2 sem estoque às
+14:04), €1,4699/h, sábado 10/10, ligada 14:05:18 → apagada 15:33:25 Paris. Clientes num contêiner Linux do colima
+(Chromium 154 com o SDK, `ws` em Bun, `webrtc` em aiortc) atrás do netns com `tc` do harness; perfis novos `loss-2`,
+`loss-5`, `loss-10` (20 ms de atraso e a perda em cada sentido) e os de sempre (`lossy` = 75 ms + 5 %). Clipe
+`voice-pt.wav` (7,4 s), voz de referência curta assinada na config (o catálogo da réplica estava vazio).
+
+**Três braços, mesma máquina, mesma sessão.** O edge da réplica é um contêiner que só troca com outra máquina, então o
+`main` contra a branch na mesma GPU foi feito assim:
+
+| Braço | Edge | SDK / harness | Caminho até a GPU |
+|---|---|---|---|
+| A | `main` (fonte, no contêiner) | `main` | edge local → proxy que põe o token da réplica → modelos da L40S |
+| B | branch (fonte, no contêiner) | branch | idem |
+| M | branch (`5540dfa1`, sidecar da réplica) | `main` | gateway → réplica (caminho real) |
+| R | branch (`5540dfa1`, sidecar da réplica) | branch | gateway → réplica (caminho real) |
+
+A e B rodaram em sequência, com o gateway, o edge e o Chrome no mesmo contêiner de 6 vCPU: várias rodadas saíram com o
+aviso «generator SATURATED» do harness, então a latência desses braços não vale; transcrição, recuperação e eventos
+valem. Cadência de 12 ± 2 s com um clipe de 7,4 s: a fala seguinte corta a resposta anterior (os «truncated:interrupted»
+dos relatórios), sem efeito nas medidas abaixo.
+
+### 1. Perda na subida
+
+STT real da L40S (Whisper large-v3) sobre os clipes do banco de perda (`loss_bench.py clips`, 10 sorteios por taxa);
+«silêncio» é o que o edge do `main` faz, «RED+FEC+PLC» o que a branch faz com o Chrome:
+
+| Perda | silêncio (`main`) | FEC | FEC+PLC | RED+FEC+PLC (branch) |
+|---|---|---|---|---|
+| 2 % | 8/10 intactas, WER 1,1 % | 10/10, 0 | 10/10, 0 | **10/10, 0** |
+| 5 % | 5/10, 5,8 % | 9/10, 0,5 | 8/10, 3,2 | **10/10, 0** |
+| 10 % | 3/10, 5,3 % | 8/10, 2,1 | 6/10, 2,1 | **10/10, 0** |
+
+Ao vivo, Chrome em WebRTC (intactas = transcrição igual à do clipe sem perda; WER contra ela):
+
+| Rede | A (`main`) | B (branch) | R (branch, sidecar) |
+|---|---|---|---|
+| `loss-2` | 12/15, WER 1,4 % | 7/12, 2,6 % (gerador saturado) | — |
+| `loss-5` | 8/15, 3,9 % | 9/14, 2,3 %; RED 100 %, 96 % do perdido reconstruído | 13/14, 0,4 % |
+| `loss-10` | **1/13, 13,0 %** | **10/12, 1,3 %**; RED 100 %, 94 % reconstruído | — |
+| `lossy` (75 ms, 5 %) | 14/26, 5,5 % | 17/23, 1,4 %; 97 % reconstruído | M: 9/21, 3,3 %, 0 reconstruído · **R: 15/26, 2,2 %, RED 100 %, 97 % reconstruído** |
+
+No WS (controle) todas as transcrições saíram intactas em todas as redes. O cliente leve aiortc (sem RED) recupera
+35–42 % pelo FEC. Primeiro som no caminho real com perda (R `loss-5`): Chrome 1870 / 3382 ms p50 / max, WS 1544 / 1908.
+
+### 2. Conexão em rede ruim (`lossy`)
+
+| | WebRTC forçado, 3 Chrome | escada com WS primeiro, 2 Chrome |
+|---|---|---|
+| M (SDK do `main`) | 3/3 conectaram, 3,2–4,4 s (todas acima de 3 s) | **1 de 2 tentativas de WebRTC desistiu** («not connected within 3000 ms»); esse aluno ficou no WS |
+| R (branch) | 3/3, 3,6–7,9 s (todas acima de 3 s) | 2/2 conectaram (2,5 e 5,6 s) |
+| A / B (local) | 3/3, 2,2–3,9 s (1 acima de 3 s) / 3/3, 2,0–3,0 s (0 acima de 3 s) | — |
+
+Leitura: com o SDK novo nenhuma tentativa desistiu; o tempo de conexão em si não melhorou nesta amostra (n pequeno, a
+rede do Mac até a Polônia com 75 ms de cada lado). O harness local de 30 conexões (§ 2 acima) segue sendo a medida do
+temporizador SCTP.
+
+### 3. Resgate da subida travada (WS, fala presa 3 s a cada três, `--client-deadline`)
+
+| | Turnos presos | Tempo até o primeiro som nos presos |
+|---|---|---|
+| M (`main`) | nenhum resgate (não existe) | 4,3–4,6 s (p90 4328, max 4588) |
+| R (branch) | `turn.rescued` com `stallMs` 1803–2137 ms; o primeiro resgate de cada aluno cai de propósito no POST de clipe também segurado e termina sem resgate, como previsto | **2,9–3,1 s** (`turn.done` 2855–3140 ms) |
+
+**Defeito achado ao vivo e consertado** (`7486e33`, teste em `sdk-realtime-rescue`): depois do resgate o SDK tenta
+uma sessão realtime nova; quando ela não abre (`rt.readmit.gave_up no_transport`, aqui porque o harness segura também
+o WS novo enquanto a fala dura), os eventos do degrau de clipe ficavam presos ao turno resgatado e **todo turno seguinte
+ficava sem resposta** (0 respostas em ~100 s por aluno, nas duas rodadas antes do conserto: B local e R). Depois do
+conserto, mesma máquina: os turnos seguintes são respondidos pelo degrau de clipe (`turn.done` 1,4–2,1 s; ~4,5 s nos
+turnos em que o harness segura o POST de clipe de propósito). Junto,
+`sendEndTurn(clip)` num degrau de clipe manda o clipe como turno (`148c190`).
+
+### 4. Troca de transporte pelo sinal de rede (`transportPolicy: "auto"`)
+
+| Rodada | Resultado |
+|---|---|
+| R `clean`, 120 s | ficou no WS a sessão inteira (21 turnos; 1302 / 1455 ms p50 / max) |
+| R `lossy`, 150 s | trocou WS → WebRTC aos 44 e 50 s, `reason loss`, `lossPct` 5,6 e 5,3, depois de 3 turnos com perda |
+| R `clean` → `lossy` aos 60 s, `--fidelity`, 210 s | trocou aos 106 e 112 s (46–52 s depois da mudança), `lossPct` 4,3, com o RED negociado; nenhuma volta (a rede não melhorou) |
+| M `lossy` (escada do `main`) | troca para WebRTC assim que conecta (um aluno); o outro ficou no WS por desistência |
+
+Freios: nenhuma sessão trocou mais de uma vez; a espera de 60 s e o teto de 4 trocas não chegaram a ser exercitados.
+
+### Imagens
+
+| Imagem | Tag | Digest | De onde |
+|---|---|---|---|
+| `ghcr.io/marcosremar/aigw-edge` | `5540dfa1` | `sha256:f3fb1f953dc88b9d4dcfe92688abbf66cdb8ad216d11a74cd6202bb51d65d975` | workflow `aigw-edge` por `workflow_dispatch` na branch, commit `5540dfa` (a mescla com o `main`) |
+| `ghcr.io/marcosremar/speech-stack` | `20261010-1135` | `sha256:fa088ee4bb0c61d19a9df2a1946835073f30c5774aa798c14bab93f728895fb0` | workflow `speech-stack` disparado pela PR no commit `d76e7b8` (`EDGE_TAG=5540dfa1`); **não fixada**: o perfil usa a cópia do registro Scaleway `20261009-0213`, e a cópia nova pede outra máquina |
+
+`DEFAULT_EDGE_IMAGE` e o `EDGE_TAG` do speech-stack apontam para `5540dfa1@sha256:f3fb1f95…`. A imagem do edge leva só
+`requirements.txt`, `telemetry.py` e `aigw_edge/`, e nada disso mudou depois de `5540dfa` (os commits seguintes mexem
+em testes, harness, SDK e docs). Observação: o `main` fixava `79722253`, anterior a #19, #16 e T3 no código do edge;
+a imagem nova é a primeira com esse código.
+
+### Máquinas e custo
+
+| Máquina | Período (Paris) | € |
+|---|---|---|
+| L40S-1-48G `74560f5a` pl-waw-2 | 14:05:18 → 15:33:25 (88 min) | ~2,16 |
+| duas criações em fr-par-2 sem estoque (servidor criado e limpo sem ligar) | 14:04 | ~0 |
+
+Desmontagem: `DELETE /v1/deployments/p71-speech` às 15:33:24; listagem direta das nove zonas da Scaleway depois: nenhum
+servidor nem volume desta prova (o que existe é da produção e de `dev-marmos`). Reaper em modo `gateway-down`, dry run,
+namespace `marcos-proof-71`, gateway parado: `scaleway seen 0`, `vast seen 0`, `planned []`. Arquivo do token da
+réplica apagado. Nenhum Vast, nenhum L4, nada escrito em produção.
