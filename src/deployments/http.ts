@@ -112,7 +112,9 @@ export class HttpReplicaProbe implements ReplicaProbe {
 /** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`; `tls` fronts (Vast) speak TLS. */
 export function replicaBase(machine: Pick<ReplicaMachine, 'ip' | 'tls'>, exposed = false): string {
   const scheme = machine.tls ? 'https' : 'http';
-  return exposed && machine.ip && !machine.ip.includes(':') ? `${scheme}://${machine.ip}:${PROBE_PORT}` : `${scheme}://${machine.ip}`;
+  if (!machine.ip || machine.ip.includes(':')) return `${scheme}://${machine.ip}`;
+  if (exposed) return `${scheme}://${machine.ip}:${PROBE_PORT}`;
+  return machine.tls ? `https://${machine.ip}:80` : `http://${machine.ip}`;
 }
 
 /**
