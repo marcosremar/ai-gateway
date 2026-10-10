@@ -7,7 +7,7 @@ const KEEP = [
   'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms', 'tts_retries', 'local',
   'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms', 'uplink_recovered_ms', 'uplink_fec_pct', 'uplink_red_pct',
 ];
-const SDK_TURN_EVENTS = ['turn.first_sound', 'turn.done', 'turn.rescued', 'turn.rescue_started', 'turn.rescue_failed', 'transport.switch', 'rt.network.summary', 'rt.webrtc.retry'];
+const SDK_TURN_EVENTS = ['turn.first_sound', 'turn.done', 'turn.rescued', 'turn.rescue_started', 'turn.rescue_failed', 'transport.switch', 'rt.network.summary', 'rt.webrtc.retry', 'rt.readmit.gave_up', 'rt.session.rejected'];
 const MIN_CLIP_MS = 300;
 
 window.loadRun = async ({ durationMs, turnTimeoutMs, transport, turnEveryMs, clipEndSilenceMs, uplinkStallMs = 0, uplinkStallEvery = 3, clientDeadline = false, transportPolicy = null, fidelity = false }) => {

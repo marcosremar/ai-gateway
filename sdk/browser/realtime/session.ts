@@ -87,7 +87,7 @@ export interface RealtimeSessionOptions {
 
 export interface RealtimeSession {
   connect(): Promise<TransportType>;
-  /** Client VAD said the learner stopped (realtime rungs). `clip` = that utterance recorded, for the rescue of a stalled uplink. */
+  /** Client VAD said the learner stopped. `clip` = that utterance recorded: the rescue of a stalled uplink, and the turn itself on a clip rung. */
   sendEndTurn(clip?: Blob): void;
   interrupt(): void;
   /** Appends user / assistant messages to the conversation (and tells the edge); a `system` message is dropped: the signed session config owns the prompt. */
@@ -878,6 +878,7 @@ export function createRealtimeSession(opts: RealtimeSessionOptions): RealtimeSes
       return current!.type;
     },
     sendEndTurn(clip) {
+      if (current?.clipBased && clip) { void session.sendTurn(clip); return; }
       if (!current || current.clipBased) return;
       startTurn(true, clip ?? null);
       current.send({ type: 'end_turn' } satisfies ClientMessage);

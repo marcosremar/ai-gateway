@@ -12,7 +12,7 @@ const clipOf = (name: string) => new Blob([name], { type: 'audio/wav' });
 interface FakeWs { ctx: TransportContext; sent: Array<{ type: string; messages?: unknown }>; closed: boolean; live: boolean; say(...events: RealtimeEvent[]): void }
 interface FakeClip { wavs: Blob[]; closed: boolean; interrupts: number; say(...events: RealtimeEvent[]): void; finish(): void; fail(message: string): void }
 
-function rig(extra: Partial<RealtimeSessionOptions> = {}) {
+function rig(extra: Partial<RealtimeSessionOptions> = {}, wsThatConnect = Infinity) {
   const wss: FakeWs[] = [];
   const clips: FakeClip[] = [];
   const events: RealtimeEvent[] = [];
@@ -26,7 +26,8 @@ function rig(extra: Partial<RealtimeSessionOptions> = {}) {
     const fake: FakeWs = { ctx, sent: [], closed: false, live: !ctx.standby, say: (...all) => { if (!fake.closed) all.forEach(e => ctx.emit(e)); } };
     wss.push(fake);
     return {
-      type: 'ws', clipBased: false, connect: async () => {}, send: (m) => { fake.sent.push(m as never); }, goLive: () => { fake.live = true; },
+      type: 'ws', clipBased: false, connect: async () => { if (wss.length > wsThatConnect) throw new Error('ws: not ready'); },
+      send: (m) => { fake.sent.push(m as never); }, goLive: () => { fake.live = true; },
       close: () => { fake.closed = true; },
     };
   };
@@ -98,6 +99,22 @@ describe('uplink stalled: the finished utterance goes as one clip over HTTP', ()
     await vi.waitFor(() => expect(r.s.transport).toBe('ws'), { timeout: 3000 });
     expect([r.counts.admissions, r.wss.length, r.wss[1]!.live, r.clips.length, r.clips[0]!.closed]).toEqual([2, 2, true, 1, true]);
     expect(r.wss[1]!.sent).toEqual([{ type: 'config_update', messages: [...FIRST, ...SECOND] }]);
+    r.s.close();
+  });
+
+  it('no fresh realtime transport after the rescue: the next sendEndTurn(clip) is answered by the clip rung, not dropped', async () => {
+    const r = rig({}, 1);
+    await r.s.connect();
+    await r.answered();
+    r.s.sendEndTurn(clipOf('second'));
+    await vi.waitFor(() => expect(r.clips).toHaveLength(1));
+    r.clips[0]!.say({ type: 'transcript', text: 'E um café', final: true }, { type: 'reply', text: 'Saindo!' }, { type: 'done' });
+    r.clips[0]!.finish();
+    await vi.waitFor(() => expect(r.of('rt.readmit.gave_up')).toHaveLength(1), { timeout: 3000 });
+    expect(r.s.transport).toBe('s2s-stream');
+    const third = clipOf('third');
+    r.s.sendEndTurn(third);
+    await vi.waitFor(() => expect(r.clips[0]!.wavs.at(-1)).toBe(third));
     r.s.close();
   });
 
