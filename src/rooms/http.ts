@@ -16,7 +16,7 @@ import { bearerToken } from '../gateway/proxy/middleware/api-keys';
 import { errorTypeForStatus } from '../gateway/proxy/http-conventions';
 import { entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
 import { EVENTS_MAX_BYTES, parseEventBatch, type RoomEvents } from './events';
-import type { RoomService } from './service';
+import { appIdOf, type RoomService } from './service';
 import { RoomError, normalizeCode, parseAudio, parseCreate, parseLine } from './validate';
 
 export type KeyUser = (token: string) => { userId: string; admin: boolean } | null;
@@ -152,7 +152,7 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
     const room = code ? await service.get(code) : null;
     const pageOpts = { basePath, retentionDays };
     if (!room || !code) { sendPage(res, 404, notFoundPage(pageOpts, code)); return; }
-    sendPage(res, 200, roomPage(code, pageOpts));
+    sendPage(res, 200, roomPage(code, pageOpts, appIdOf(room.meta.ownerId)));
   }
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, rawCode: string, action: string | undefined): Promise<void> {

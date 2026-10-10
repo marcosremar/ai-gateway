@@ -55,6 +55,9 @@ function newCode(): string {
   return code;
 }
 
+/** Public, opaque id of the app (gateway key user) that created a room: the room page keeps display settings per app. */
+export const appIdOf = (ownerId: string): string => createHash('sha256').update(ownerId).digest('hex').slice(0, 12);
+
 export class RoomService {
   private readonly rooms = new Map<string, LiveRoom>();
   private readonly loading = new Map<string, Promise<LiveRoom | null>>();

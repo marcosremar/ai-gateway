@@ -33,7 +33,7 @@ none), so viewers who do not listen to the dubbing do not download it. The serve
 
 ## Viewer pages
 
-- `https://<ROOMS_PUBLIC_HOST>/<CODE>` (Host header match) and `/live/<CODE>` on any host: the room page (pt-BR, one
+- `https://<ROOMS_PUBLIC_HOST>/<CODE>` (Host header match) and `/live/<CODE>` on any host: the room page (French by default, one
   self-contained HTML document, CSP with a per-response nonce, no CDN). Default language: the viewer's saved choice
   for that room, else the first browser language the room publishes (primary subtag: `en-US` → `en`), else the room's
   first target language; the original only when the room has no translations. The live line and the original under it
@@ -42,12 +42,20 @@ none), so viewers who do not listen to the dubbing do not download it. The serve
   clicks), oldest pending clips dropped when more than 6 s is queued. While it is on, the live line switches to a line
   when its clip starts playing (a line without a clip within 4 s is shown anyway) and the delay indicator shows the
   voice delay ("voz 3,2 s" = delayMs + wait until the clip played). Indicator: neutral < 3 s, amber 3–6 s, red above.
-- Every display setting is the viewer's own (gear → "Ajustes de exibição": bottom sheet on phones, popover from 768 px),
-  kept in that browser's localStorage (`ucast-settings`; the language per room in `ucast-lang-<CODE>`): language, mode
+- Every display setting is the viewer's own (gear → "Réglages d'affichage": bottom sheet on phones, popover from 768 px),
+  kept in that browser's localStorage per app — `ucast-settings-<app>`, where `<app>` is the first 12 hex of sha256 of the
+  gateway key user that created the room (all activation keys of the desktop app share one), read once from the older
+  `ucast-settings` as a fallback; the language per room in `ucast-lang-<CODE>`: interface language (Français by
+  default, Português, English), subtitle language, mode
   (Tradução / Só transcrição / Bilíngue / Só texto completo), original under the translation, dubbing on/off + volume +
   "sincronizar legenda com a voz", text size A−/A+ (live line 20–56 px, transcript 14–24 px), theme (escuro / claro /
   automático), auto-scroll, timestamps, delay indicator. Only the languages the room publishes are offered.
-- `https://<ROOMS_PUBLIC_HOST>/` and `/live`: "Digite o código da sessão". Unknown/expired code: a 404 page.
+- Quick modes on the toolbar (icons with a tooltip on hover/focus and on tap, the current one pressed): dubbed (translation
+  + voice), translated subtitles, dual subtitles (bilingual), transcript, full text.
+- Karaoke: the words already said are coloured one by one on the live line and the current transcript line. Lines carry
+  no word timestamps, so the times are an estimate spread by word length: over the real duration of the dubbed clip from
+  its start when the voice is on (sync), else over `speechMs` (15 characters/s of the original) from the line's arrival.
+- `https://<ROOMS_PUBLIC_HOST>/` and `/live`: "Saisissez le code de la session". Unknown/expired code: a 404 page.
 - Other paths on the public host (e.g. `/health`, `/v1/…`) reach the gateway as usual.
 
 ## Viewer analytics events
@@ -67,8 +75,8 @@ events without `t` or without their key field are dropped; unknown or invalid fi
 
 | type | fields |
 |---|---|
-| `join` | `ua` chrome/safari/firefox/edge/samsung/opera/other · `os` ios/android/windows/macos/linux/chromeos/other · `device` mobile/tablet/desktop · `vw` `vh` `dpr` · `lang` (navigator.language) · `langs` (≤ 5) · `ref` qr/direct/link (`?src=qr` in the link → qr) · `returning` · `settings` (snapshot: lang, mode, showOrig, dub, volume, sync, size, theme, autoScroll, showTimes, showDelay) |
-| `setting` | `key` (lang, mode, showOrig, dub, volume, sync, size, theme, autoScroll, showTimes, showDelay) · `value` (valid for the key) · `from` toolbar/sheet/auto |
+| `join` | `ua` chrome/safari/firefox/edge/samsung/opera/other · `os` ios/android/windows/macos/linux/chromeos/other · `device` mobile/tablet/desktop · `vw` `vh` `dpr` · `lang` (navigator.language) · `langs` (≤ 5) · `ref` qr/direct/link (`?src=qr` in the link → qr) · `returning` · `settings` (snapshot: ui, lang, mode, showOrig, dub, volume, sync, size, theme, autoScroll, showTimes, showDelay) |
+| `setting` | `key` (ui, lang, mode, showOrig, dub, volume, sync, size, theme, autoScroll, showTimes, showDelay) · `value` (valid for the key) · `from` toolbar/sheet/auto |
 | `audio` | `action` play/pause/mute/unmute/gap/drop/decode_error/unsupported · `ms` · `n` |
 | `sample` | every 30 s while lines or clips flow: `textDelayMs` (median presenter `delayMs`), `voiceDelayMs`, `driftMs` (subtitle ↔ voice: render lateness after the clip start with sync on, clip start − text arrival with sync off), `lagMs` (arrival − line `ts`, includes clock skew), `queueMs`, `gaps` `gapMs` (silences 20 ms–3 s between consecutive clips), `drops`, `clips`, `lines`, `visible` |
 | `visibility` | `state` hidden/visible |
