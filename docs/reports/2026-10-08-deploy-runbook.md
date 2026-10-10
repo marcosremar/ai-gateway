@@ -407,6 +407,13 @@ Later pushes to the PR rebuild both images under other tags (the workflows run o
 the PR's diff); only the tags above are pinned. The earlier pair of this branch (`48db2e5f` / `20261009-0003`, without
 #65 and the `end_turn` fix) is superseded and was never deployed.
 
+Update 2026-10-10: the edge sidecar is `ghcr.io/marcosremar/aigw-edge:59e5d605`
+(`sha256:89b17f14d70494723cae0b891d968c5d19afada4c4d478b2d8a46a664e012786`, workflow `aigw-edge` on the `main` push of
+#91; no file under `docker/aigw-edge/` changed after it) in `DEFAULT_EDGE_IMAGE` and the speech-stack `EDGE_TAG`.
+Scaleway replicas run the sidecar, so they get it at the next boot; the profile stays `20261009-0213` (its bundled edge,
+used on Vast only, is still `79722253`) until a speech-stack built with the new `EDGE_TAG` is copied to the Scaleway
+registry and pinned.
+
 ### 12.6 Not in this build
 
 - Open after the live proof of 2026-10-09 (handoff § Prova ao vivo da integração (#70) has the detail):
