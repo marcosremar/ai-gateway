@@ -9,25 +9,28 @@
  * Fix: setDailyGpuSpendUsd now triggers a debounced persistDailySpend().
  */
 
-import { test, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, unlinkSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { test, expect, beforeAll, afterAll, vi } from 'vitest';
+import { existsSync, unlinkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { tmpdir } from 'os';
 
-const DAILY_SPEND_FILE = join(homedir(), '.babelcast', 'daily_spend.json');
+const realHome = process.env.HOME;
+const home = mkdtempSync(join(tmpdir(), 'aigw-daily-spend-'));
+const DAILY_SPEND_FILE = join(home, '.babelcast', 'daily_spend.json');
 
 beforeAll(() => {
-  try { mkdirSync(join(homedir(), '.babelcast'), { recursive: true }); } catch { /* exists */ }
-  if (existsSync(DAILY_SPEND_FILE)) unlinkSync(DAILY_SPEND_FILE);
+  process.env.HOME = home;
+  vi.resetModules();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 });
 
 afterAll(() => {
-  if (existsSync(DAILY_SPEND_FILE)) unlinkSync(DAILY_SPEND_FILE);
+  vi.useRealTimers();
+  process.env.HOME = realHome;
+  rmSync(home, { recursive: true, force: true });
 });
 
-// Helper: wait for the debounced persist (10s timer in cost-state.ts).
-// Padded to 11s so we don't race the timer flush.
-const waitForPersist = () => new Promise<void>(r => setTimeout(r, 11_000));
+const waitForPersist = async () => { vi.advanceTimersByTime(10_000); };
 
 test('setDailyGpuSpendUsd persists the value to daily_spend.json after debounce', async () => {
   const mod = await import('../../src/gateway/state/cost-state');
@@ -75,7 +78,7 @@ test('loadPersistedDailySpend ignores stale data from previous day', async () =>
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
 
-  try { mkdirSync(join(homedir(), '.babelcast'), { recursive: true }); } catch { /* exists */ }
+  mkdirSync(join(home, '.babelcast'), { recursive: true });
   writeFileSync(DAILY_SPEND_FILE, JSON.stringify({
     date: yesterdayStr,
     spendUsd: 99.99,

@@ -328,6 +328,7 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
     await learner.close()
 
 
+NETWORK_TURNS = 8
 NETWORKS = (("clean", 0.0, 0.0), ("2 % loss", 0.02, 0.0), ("10 % loss", 0.10, 0.0), ("40 ms jitter", 0.0, 0.04))
 
 
@@ -337,7 +338,7 @@ async def scenario_webrtc_network(base: str) -> None:
         await learner.events.wait("ready", 10)
         learner.impair(loss, jitter_s)
         ends, firsts, lost = [], [], 0
-        for _ in range(3):
+        for _ in range(NETWORK_TURNS):
             after, learner.first_audio_at = len(learner.events.items), None
             learner.mic.say(1.2)
             await learner.events.wait("done", 15, after)

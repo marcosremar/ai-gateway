@@ -30,3 +30,10 @@ export function ceilingReport(turns: CeilingTurn[], limitMs: number) {
     ok: max !== null && max <= limitMs,
   };
 }
+
+export function shortAudioReference(msPerChar: number[], fixed = 0): number {
+  if (fixed) return fixed;
+  if (msPerChar.length < 5) return 0;
+  const sorted = [...msPerChar].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}

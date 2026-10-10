@@ -450,7 +450,8 @@ describe('deployments API', () => {
       const res = await call(again, 'GET', '/v1/deployments/keep/invoke/', undefined, SITE);
       expect(res.status).toBe(200);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      for (const x of extra.splice(0)) await close(x);
+      await rm(dir, { recursive: true, force: true, maxRetries: 20 });
     }
   });
 
