@@ -1,0 +1,81 @@
+name: Python tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/aigw-edge/**'
+      - 'docker/speech-stack/**'
+      - 'src/deployments/cloud-init.ts'
+      - '.github/workflows/python-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docker/aigw-edge/**'
+      - 'docker/speech-stack/**'
+      - 'src/deployments/cloud-init.ts'
+      - '.github/workflows/python-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  aigw-edge:
+    name: aigw-edge units + harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EDGE_VENV: ${{ github.workspace }}/.edge-venv
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+
+      - name: nginx for the harness front
+        run: sudo apt-get update -q && sudo apt-get install -y -q nginx && sudo systemctl stop nginx
+
+      - run: bun install --frozen-lockfile
+
+      - name: Units
+        run: docker/aigw-edge/tests/run.sh units
+
+      - name: Harness (real nginx front required)
+        shell: bash
+        run: |
+          docker/aigw-edge/tests/run.sh harness | tee harness.log
+          if grep -q '^SKIP nginx' harness.log; then echo '::error::the nginx scenario was skipped'; exit 1; fi
+
+  speech-stack:
+    name: speech-stack unit scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - run: pip install -q --only-binary :all: numpy fastapi 'uvicorn[standard]' httpx python-multipart
+
+      - name: Every test_*.py but test_stt_batch.py (needs faster-whisper and multi-GB models)
+        working-directory: docker/speech-stack
+        run: |
+          set -e
+          for test in test_*.py; do
+            [ "$test" = test_stt_batch.py ] && continue
+            echo "::group::$test"
+            python "$test"
+            echo "::endgroup::"
+          done

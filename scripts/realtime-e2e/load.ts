@@ -31,7 +31,7 @@
  *   --ceiling-ms 2500 any turn whose first sound (opener or reply) comes later fails the run
  *   --replicas 2 --cap 16   fake stack only: replicas and RT_MAX_SESSIONS of each
  *   --p50 1500 --p95 2000 --max-bad 1   the target: first-audio ms and failures + truncations in %
- *   --turn-timeout 30 --trunc-ratio 0.75 --ms-per-char 0 --turn udp|tcp --out <dir>
+ *   --turn-timeout 30 --trunc-ratio 0.6 --ms-per-char 0 --turn udp|tcp --out <dir>
  *
  * Fake model knobs (env): FAKE_STT_MS, FAKE_LLM_TTFT_MS, FAKE_LLM_TOKEN_MS, FAKE_TTS_TTFB_MS, FAKE_TTS_DROP_EVERY=N with
  * FAKE_TTS_DROP_MODE=empty|abort, FAKE_TTS_SILENT=1. Writes <out>/report.json, prints a summary and a PASS/FAIL line; exit 0 pass, 1 fail,
@@ -40,7 +40,7 @@
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import { cpus, loadavg, tmpdir } from 'os';
 import { join } from 'path';
-import { ceilingReport, firstReplyAudioMs } from './ceiling';
+import { ceilingReport, firstReplyAudioMs, shortAudioReference } from './ceiling';
 import { parseThink } from './think';
 import type { ClientConfig, ClientResult, Turn } from './load-client';
 import { HOST_IP, NS_EXEC, PROFILES, netDown, netState, netUp } from './net-shape';
@@ -59,7 +59,7 @@ const REPLICAS = num('replicas', 2);
 const CAP = num('cap', 16);
 const TARGET = { p50: num('p50', 1500), p95: num('p95', 2000), maxBadPct: num('max-bad', 1) };
 const CEILING_MS = num('ceiling-ms', 2500);
-const TRUNC_RATIO = num('trunc-ratio', 0.75);
+const TRUNC_RATIO = num('trunc-ratio', 0.6);
 const MS_PER_CHAR = num('ms-per-char', 0);
 const DEP = process.env.DEP ?? (REAL_GW ? 'parle-speech' : 'speech-load');
 const WORK = opt('out') ?? mkdtempSync(join(tmpdir(), 'aigw-rt-load-'));
@@ -116,8 +116,7 @@ function buildReport(client: ClientResult, samples: ReplicaSample[], flaps: Arra
   const rates: Record<string, number> = {};
   for (const kind of ['ws', 'rtc', 's2s', 'chrome']) {
     const clean = judged.filter(j => j.t.client === kind && j.result === 'ok' && j.chars > 0 && j.t.audioMs > 0);
-    const sorted = clean.map(j => j.t.audioMs / j.chars).sort((a, b) => a - b);
-    const reference = MS_PER_CHAR || (sorted.length >= 5 ? sorted[Math.floor(sorted.length * 0.9)] : 0);
+    const reference = shortAudioReference(clean.map(j => j.t.audioMs / j.chars), MS_PER_CHAR);
     if (!reference) continue;
     rates[kind] = round(reference, 1);
     for (const j of clean) if (j.t.audioMs / j.chars < TRUNC_RATIO * reference) { j.result = 'truncated'; j.why = 'short_audio'; }

@@ -651,10 +651,12 @@ shows in the failure rate; the latency a real learner would then get on `/v1/s2s
 - **failed**: no session at the turn's time (admission refused, connect failed, session lost), no `done` within
   `--turn-timeout`, `error` before any audio, `empty`/`filtered` transcript, no audio.
 - **truncated**: `error` (or a lost session, or no `done`) *after* audio started — the GPU round-2 case — or a clean
-  `done` whose audio is too short for its reply: audio ms per reply character under `--trunc-ratio` (0.75) of the run's
-  90th-percentile rate for that client (`--ms-per-char` fixes the reference instead; fewer than 5 clean turns: not judged). The realtime events do not
-  announce sentences, so a missing sentence can only be seen as missing duration: one that is under 25 % of the reply
-  passes at the default ratio (with the fake model's fixed-rate audio use `--trunc-ratio 0.9`).
+  `done` whose audio is too short for its reply: audio ms per reply character under `--trunc-ratio` (0.6) of the run's
+  median rate for that client (`--ms-per-char` fixes the reference instead; fewer than 5 clean turns: not judged). The realtime events do not
+  announce sentences, so a missing sentence can only be seen as missing duration: one that is under 40 % of the reply
+  passes at the default ratio (with the fake model's fixed-rate audio use `--trunc-ratio 0.9`). The 0.75 × p90 rule it
+  replaced flagged honest replies (MAI voice 72–94 ms per character, lowest clean reply at 0.60 of p90; GPU voice clean
+  replies at 59–62 ms per character), so the reference is the median and the ratio sits under the lowest clean reply seen.
 
 Latency shares (≤ 1.0 / 1.5 / 2.0 s) are over **all attempted turns**: a failed turn counts as over 2 s.
 
