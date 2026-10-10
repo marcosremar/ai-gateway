@@ -17,9 +17,11 @@ const OLD_TOKEN = 'sandbox-old-token-0123456789';
 
 const dirs: string[] = [];
 const servers: Server[] = [];
+const audits: KeyAudit[] = [];
 afterEach(async () => {
   for (const s of servers.splice(0)) { s.closeAllConnections(); await new Promise<void>(r => s.close(() => r())); }
-  for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
+  for (const a of audits.splice(0)) await a.flush();
+  for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true, maxRetries: 3 });
 });
 
 async function tempDir() {
@@ -45,6 +47,7 @@ async function harness(opts: { dir?: string; env?: Record<string, string | undef
   access.setBaseAdmins(['ops']);
   const audit = new KeyAudit({ path: join(dir, 'key-audit.jsonl'), log });
   await audit.init();
+  audits.push(audit);
   const gate = new AdminGate({ actorOf: (t) => { const u = access.resolve(t)?.userId; return u && access.admins.has(u) ? u : null; }, audit, rpm: opts.rpm });
   const rotate = vi.fn(async (name: string) => ({ deployment: name, pinnedReplicas: 1 }));
   const server = createProxyServer({
