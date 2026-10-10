@@ -2,7 +2,7 @@
 // Self-contained HTML (inline CSS/JS under a per-response CSP nonce, no CDN, no build step), mobile first, pt-BR.
 //   - roomPage:  live line on top (one line per language, shrink then "…" — never wrapped), full transcript below,
 //                language selector, "mostrar original", "Ouvir dublagem" (Web Audio, gapless, live line in sync with
-//                the voice), delay indicator, "Copiar texto", reconnect.
+//                the voice), delay indicator, "Copiar texto", per-viewer display settings sheet, reconnect.
 //   - entryPage: "Digite o código da sessão".
 //   - notFoundPage: unknown / expired code.
 
@@ -105,9 +105,14 @@ ${form.body}</main>`;
 // ── Room page ───────────────────────────────────────────────────────────────
 // Layout (mobile first): a sticky top block — status bar (brand · title · delay · pill), the live card (the hero: one
 // line per language) and one compact toolbar — over a calm transcript column. Spacing scale 4/8/12/16/24 px.
+// Every display setting is the viewer's own (settings sheet behind the gear; localStorage, never sent anywhere).
+
+const LIGHT_VARS = '--bg:#f6f6f8;--surface:#ffffff;--line:#dcdce4;--text:#1b1b1f;--muted:#5b5b66;--accent:#0b7d74;--accent-ink:#ffffff;--warn:#8a5a00;--bad:#c4262e;--live-bg:rgba(11,125,116,.12);--shade:rgba(20,20,30,.18);color-scheme:light';
 
 const ROOM_CSS = `
-:root{--surface:#25252b;--muted:#a3a3ae;--bad:#ff7d7d;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right))}
+:root{--surface:#25252b;--muted:#a3a3ae;--bad:#ff7d7d;--live-bg:rgba(25,194,180,.16);--shade:rgba(0,0,0,.45);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right))}
+html[data-theme="light"]{${LIGHT_VARS}}
+@media (prefers-color-scheme:light){html[data-theme="auto"]{${LIGHT_VARS}}}
 body{overflow-x:hidden}
 .wrap{max-width:60rem;margin:0 auto}
 header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:max(8px,env(safe-area-inset-top)) var(--pad-r) 12px var(--pad)}
@@ -118,52 +123,113 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
 .delay.warn{color:var(--warn)}
 .delay.bad{color:var(--bad)}
 .pill{flex:none;white-space:nowrap;font-size:.75rem;font-weight:700;border-radius:999px;padding:4px 10px;background:var(--surface);color:var(--muted);text-transform:lowercase}
-.pill.live{background:rgba(25,194,180,.16);color:var(--accent)}
+.pill.live{background:var(--live-bg);color:var(--accent)}
 .pill.live::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;vertical-align:1px;animation:pulse 1.6s infinite}
 .pill.wait{color:var(--warn)}
 @keyframes pulse{50%{opacity:.3}}
 @media (prefers-reduced-motion:reduce){.pill.live::before{animation:none}}
 .now{margin-top:8px;background:var(--surface);border-radius:16px;padding:12px 16px;min-height:76px;display:flex;flex-direction:column;justify-content:center;min-width:0}
+.mode-full .now{display:none}
 .fit{white-space:nowrap;overflow:hidden;line-height:1.3;max-width:100%}
 #liveMain{font-weight:700;letter-spacing:-.005em}
 #liveOrig{color:var(--muted);margin-top:4px}
 .empty{color:var(--muted);font-style:italic;font-weight:400!important}
 .bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
-.bar select{flex:1 1 7.5rem;min-width:0;max-width:14rem;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0 10px;height:40px}
-.btn{display:inline-flex;align-items:center;gap:6px;height:40px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0 12px;cursor:pointer;white-space:nowrap;font-size:.92rem}
-.btn:focus-visible,.bar select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.bar select,.sheet select{flex:1 1 7.5rem;min-width:0;max-width:14rem;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0 10px;height:40px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:40px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0 12px;cursor:pointer;white-space:nowrap;font-size:.92rem}
+.btn:focus-visible,select:focus-visible,.sheet input:focus-visible,.sheet:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .btn[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
 .btn:disabled{opacity:.45;cursor:not-allowed}
+.btn[hidden]{display:none}
 .btn .ic{font-size:1rem;line-height:1}
 .end{margin-left:auto}
-@media (max-width:479px){.lg{display:none}.end{margin-left:0}}
+.sm{display:none}
+.ico{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+@media (max-width:479px){.lg{display:none}.sm{display:inline}.end{margin-left:0}.bar .btn{padding:0 10px}.bar select{flex-basis:5.5rem}}
+@media (max-width:379px){.bar select{flex-basis:100%;max-width:none}}
 .notice{max-width:46rem;margin:12px auto 0;padding:10px 12px;border-radius:10px;background:var(--surface);color:var(--muted);font-size:.9rem}
 .notice:empty{display:none}
 .notice-wrap{padding:0 var(--pad-r) 0 var(--pad)}
 #tx{max-width:46rem;margin:0 auto;padding:8px var(--pad-r) calc(96px + env(safe-area-inset-bottom)) var(--pad)}
-#tx p{margin:0;padding:14px 0;border-bottom:1px solid var(--line);line-height:1.6;font-size:1.05rem;overflow-wrap:anywhere}
+#tx p{margin:0;padding:14px 0;border-bottom:1px solid var(--line);line-height:1.6;font-size:var(--tx);overflow-wrap:anywhere}
 #tx p:last-child{border-bottom:0}
-#tx p .ts{float:right;margin:4px 0 0 12px;font-size:.72rem;color:var(--muted);font-variant-numeric:tabular-nums;opacity:.8}
-#tx p .o{display:block;color:var(--muted);font-size:.9rem;line-height:1.5;margin-top:4px}
+#tx p .ts{float:right;margin:4px 0 0 12px;font-size:.72rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.no-times #tx p .ts{display:none}
+#tx p .o{display:block;color:var(--muted);font-size:.86em;line-height:1.5;margin-top:4px}
 #tx p.miss .t{color:var(--muted);font-style:italic}
 #tx p.cur{box-shadow:inset 3px 0 0 var(--accent);padding-left:15px;margin-left:-15px}
+.mode-full #tx p.cur{box-shadow:none;padding-left:0;margin-left:0}
 #more{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--accent);color:var(--accent-ink);border:0;border-radius:999px;padding:10px 16px;font-weight:700;box-shadow:0 4px 18px rgba(0,0,0,.4);display:none;cursor:pointer}
-@media (min-width:768px){.top{height:36px}.top .brand,.top h1{font-size:1rem}.now{padding:16px 20px;min-height:96px}#tx p{font-size:1.1rem}}
+.backdrop{position:fixed;inset:0;z-index:20;background:var(--shade)}
+.sheet{position:fixed;z-index:21;left:0;right:0;bottom:0;max-height:85vh;max-height:85dvh;overflow-y:auto;overscroll-behavior:contain;background:var(--surface);color:var(--text);border-radius:18px 18px 0 0;border-top:1px solid var(--line);padding:4px var(--pad-r) calc(16px + env(safe-area-inset-bottom)) var(--pad);box-shadow:0 -8px 30px rgba(0,0,0,.35)}
+.backdrop[hidden],.sheet[hidden]{display:none}
+.sheet-head{display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;top:0;background:var(--surface);padding:8px 0;z-index:1}
+.sheet h2{margin:0;font-size:1.05rem}
+.sheet fieldset{border:0;margin:0;padding:0;min-width:0}
+.sheet fieldset.grp{padding:14px 0;border-top:1px solid var(--line)}
+.sheet legend{float:left;width:100%}
+.sheet legend+*{clear:both}
+.sheet legend,.sheet .lbl{display:block;padding:0;margin:0 0 8px;font-size:.78rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.grp{padding:14px 0;border-top:1px solid var(--line)}
+.grp select{max-width:none;width:100%}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:8px 0;cursor:pointer}
+.opt input{margin:3px 0 0;accent-color:var(--accent);width:18px;height:18px;flex:none}
+.opt small{display:block;color:var(--muted);font-size:.82rem;margin-top:2px;line-height:1.35}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;cursor:pointer}
+.row input[type=checkbox]{accent-color:var(--accent);width:20px;height:20px;flex:none}
+.row input[type=range]{flex:1 1 auto;max-width:12rem;accent-color:var(--accent)}
+.row.off{opacity:.5}
+.seg{display:flex;gap:8px;flex-wrap:wrap}
+.seg label{flex:1 1 0;min-width:5.5rem;display:flex;align-items:center;justify-content:center;gap:6px;height:40px;border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:.9rem}
+.seg input{accent-color:var(--accent);margin:0}
+.stepper{display:flex;align-items:center;gap:12px}
+.stepper output{min-width:3.5rem;text-align:center;font-variant-numeric:tabular-nums}
+@media (min-width:768px){.top{height:36px}.top .brand,.top h1{font-size:1rem}.now{padding:16px 20px;min-height:96px}
+.backdrop{background:transparent}
+.sheet{left:auto;bottom:auto;top:96px;right:16px;width:380px;border:1px solid var(--line);border-radius:16px;padding:4px 20px 16px;box-shadow:0 12px 40px rgba(0,0,0,.45)}}
 `;
 
 const ROOM_BODY = `<header><div class="wrap">
 <div class="top"><span class="brand">ucast</span><h1 id="title">Legendas ao vivo</h1><span id="delay" class="delay" hidden></span><span id="pill" class="pill wait">conectando…</span></div>
 <section class="now" aria-live="polite"><div id="liveMain" class="fit empty">Aguardando a primeira fala…</div><div id="liveOrig" class="fit" hidden></div></section>
 <div class="bar" role="toolbar" aria-label="Opções">
-<select id="lang" aria-label="Idioma"></select>
-<button id="orig" class="btn" type="button" aria-pressed="false" aria-label="Mostrar original"><span class="lg">Mostrar</span> original</button>
+<select id="lang" aria-label="Idioma da legenda"></select>
+<button id="orig" class="btn" type="button" aria-pressed="false" aria-label="Mostrar original"><span class="lg">Mostrar original</span><span class="sm">Original</span></button>
 <button id="dub" class="btn" type="button" aria-pressed="false" aria-label="Ouvir dublagem"><span class="ic" aria-hidden="true">🔈</span>Ouvir<span class="lg"> dublagem</span></button>
-<button id="copy" class="btn end" type="button">Copiar<span class="lg"> texto</span></button>
+<button id="copy" class="btn end" type="button" aria-label="Copiar texto"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><span class="lg" id="copyLbl">Copiar texto</span></button>
+<button id="gear" class="btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="sheet" aria-label="Ajustes de exibição"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span class="lg">Ajustes</span></button>
 </div>
 </div></header>
 <div class="notice-wrap"><div id="notice" class="notice" role="status"></div></div>
 <main id="tx"></main>
-<button id="more" type="button">Novas falas ↓</button>`;
+<button id="more" type="button">Novas falas ↓</button>
+<div id="backdrop" class="backdrop" hidden></div>
+<div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1" hidden>
+<div class="sheet-head"><h2 id="sheetTitle">Ajustes de exibição</h2><button id="sClose" class="btn" type="button" aria-label="Fechar ajustes">✕</button></div>
+<div class="grp"><label class="lbl" for="sLang">Idioma da legenda</label><select id="sLang"></select></div>
+<fieldset class="grp"><legend>Modo</legend>
+<label class="opt"><input type="radio" name="sMode" value="translation"><span>Tradução<small>Tradução em destaque; a fala original embaixo é opcional</small></span></label>
+<label class="opt"><input type="radio" name="sMode" value="transcript"><span>Só transcrição<small>Só a fala original, sem tradução</small></span></label>
+<label class="opt"><input type="radio" name="sMode" value="bilingual"><span>Bilíngue<small>Tradução e fala original, sempre</small></span></label>
+<label class="opt"><input type="radio" name="sMode" value="full"><span>Só texto completo<small>Sem a linha ao vivo, para ler o texto</small></span></label>
+<label class="row" id="sOrigRow"><span>Mostrar a fala original embaixo</span><input id="sOrig" type="checkbox" role="switch"></label>
+</fieldset>
+<fieldset class="grp"><legend>Dublagem</legend>
+<label class="row"><span>Ouvir dublagem</span><input id="sDub" type="checkbox" role="switch"></label>
+<label class="row"><span>Volume</span><input id="sVol" type="range" min="0" max="100" step="5" aria-label="Volume da dublagem"></label>
+<label class="row"><span>Sincronizar legenda com a voz</span><input id="sSync" type="checkbox" role="switch"></label>
+</fieldset>
+<div class="grp"><span class="lbl" id="sSizeLbl">Tamanho do texto</span><div class="stepper" role="group" aria-labelledby="sSizeLbl">
+<button id="sSmaller" class="btn" type="button" aria-label="Diminuir o texto">A−</button><output id="sSize" aria-live="polite">100%</output><button id="sBigger" class="btn" type="button" aria-label="Aumentar o texto">A+</button></div></div>
+<fieldset class="grp"><legend>Tema</legend><div class="seg">
+<label><input type="radio" name="sTheme" value="dark">Escuro</label><label><input type="radio" name="sTheme" value="light">Claro</label><label><input type="radio" name="sTheme" value="auto">Automático</label>
+</div></fieldset>
+<fieldset class="grp"><legend>Texto completo</legend>
+<label class="row"><span>Rolagem automática do texto completo</span><input id="sScroll" type="checkbox" role="switch"></label>
+<label class="row"><span>Mostrar horários</span><input id="sTimes" type="checkbox" role="switch"></label>
+<label class="row"><span>Mostrar atraso</span><input id="sDelay" type="checkbox" role="switch"></label>
+</fieldset>
+</div>`;
 
 /**
  * Pure page logic (plain ES5, no DOM), inlined at the top of the room page script and evaluated as-is by the unit tests.
@@ -173,15 +239,19 @@ const ROOM_BODY = `<header><div class="wrap">
  *   - fitLine(text, maxWidth, basePx, measure): one line, never wrapped — shrink the font down to 70 % of basePx, then
  *     keep the END of the sentence behind a leading "…" (words dropped from the start, never the end).
  *     `measure(str, px)` returns the rendered width of `str` at font size `px`. Returns {px, text}.
- *   - pickLive(entries, now, dubOn, waitMs): which line the live card shows. Dubbing off: the newest line. Dubbing on:
- *     the line of the most recent event among "its clip started playing" (startedAt ≤ now) and "no clip came within
- *     waitMs of its arrival" (arrivedAt + waitMs ≤ now); a line whose clip is queued/scheduled waits for it, a line
- *     whose clip was dropped (backlog) is skipped. null = nothing eligible (keep what is shown).
- *     entries: [{id, arrivedAt, startedAt|null, pending, skip}] (ms on one clock).
+ *   - pickLive(entries, now, syncOn, waitMs): which line the live card shows. Sync off: the newest line. Sync on
+ *     (dubbing on + "sincronizar legenda com a voz"): the line of the most recent event among "its clip started playing"
+ *     (startedAt ≤ now) and "no clip came within waitMs of its arrival" (arrivedAt + waitMs ≤ now); a line whose clip
+ *     is queued/scheduled waits for it, a line whose clip was dropped (backlog) is skipped. null = nothing eligible
+ *     (keep what is shown). entries: [{id, arrivedAt, startedAt|null, pending, skip}] (ms on one clock).
  *   - nextStart(now, prevEnd, lead): start of the next clip on the AudioContext timeline — back to back, never overlapping.
  *   - backlogDrop(ahead, durs, maxSec): how many of the OLDEST pending clips to drop so that the audio still to play
  *     (`ahead` already scheduled + pending durations) is ≤ maxSec; the newest clip is always kept.
  *   - median(values), delayLabel(ms, voice): the delay indicator ("atraso 1,8 s" / "voz 3,2 s"; ok < 3 s ≤ warn ≤ 6 s < bad).
+ *   - parseSettings(json, legacyOrig) / normalizeSettings(raw): the viewer's display settings (localStorage
+ *     "ucast-settings"), every field validated, defaults for the rest; the older "ucast-orig" = "1" still turns the
+ *     original on. textSizes(step, viewportWidth): {live, tx} px for an A−/A+ step (live 20–56, transcript 14–24).
+ *   - lineView(mode, showOrig, lang, hasTranslation): what a line shows — {main: 'tr'|'orig', sub, miss}.
  */
 export const ROOM_PAGE_LOGIC = String.raw`
 function pickLang(prefs,languages,saved){
@@ -210,11 +280,11 @@ function fitLine(text,maxWidth,basePx,measure){
   while(s.length>1&&measure('…'+s,px)>maxWidth)s=s.slice(1);
   return {px:px,text:'…'+s};
 }
-function pickLive(entries,now,dubOn,waitMs){
+function pickLive(entries,now,syncOn,waitMs){
   var best=null,bestAt=-Infinity;
   for(var i=0;i<entries.length;i++){
     var e=entries[i],at;
-    if(!dubOn)at=e.id;
+    if(!syncOn)at=e.id;
     else if(e.skip)continue;
     else if(e.startedAt!=null){if(e.startedAt>now)continue;at=e.startedAt}
     else if(e.pending)continue;
@@ -239,6 +309,33 @@ function delayLabel(ms,voice){
   var s=(Math.round(ms/100)/10).toFixed(1).replace('.',',');
   return {text:(voice?'voz ':'atraso ')+s+' s',level:ms<3000?'ok':ms<=6000?'warn':'bad'};
 }
+var SETTINGS_DEFAULTS={mode:'translation',showOrig:false,volume:0.9,sync:true,size:0,theme:'auto',autoScroll:true,showTimes:true,showDelay:true};
+var SIZE_MIN=-3,SIZE_MAX=7,MODES=['translation','transcript','bilingual','full'],THEMES=['dark','light','auto'];
+function normalizeSettings(raw){
+  var s={},k;for(k in SETTINGS_DEFAULTS)s[k]=SETTINGS_DEFAULTS[k];
+  if(!raw||typeof raw!=='object')return s;
+  if(MODES.indexOf(raw.mode)>=0)s.mode=raw.mode;
+  if(THEMES.indexOf(raw.theme)>=0)s.theme=raw.theme;
+  ['showOrig','sync','autoScroll','showTimes','showDelay'].forEach(function(b){if(typeof raw[b]==='boolean')s[b]=raw[b]});
+  if(typeof raw.volume==='number'&&raw.volume>=0&&raw.volume<=1)s.volume=raw.volume;
+  if(typeof raw.size==='number'&&isFinite(raw.size))s.size=Math.max(SIZE_MIN,Math.min(SIZE_MAX,Math.round(raw.size)));
+  return s;
+}
+function parseSettings(json,legacyOrig){
+  var raw=null;try{raw=json?JSON.parse(json):null}catch(e){raw=null}
+  var s=normalizeSettings(raw);
+  if(!(raw&&typeof raw==='object'&&typeof raw.showOrig==='boolean')&&legacyOrig==='1')s.showOrig=true;
+  return s;
+}
+function textSizes(step,vw){
+  var base=Math.max(20,Math.min(36,Math.round(vw/13)));
+  return {live:Math.max(20,Math.min(56,Math.round(base*(1+0.1*step)))),tx:Math.max(14,Math.min(24,17+step))};
+}
+function lineView(mode,showOrig,lang,hasTr){
+  if(lang==='orig'||mode==='transcript')return {main:'orig',sub:false,miss:false};
+  if(!hasTr)return {main:'orig',sub:false,miss:true};
+  return {main:'tr',sub:mode==='bilingual'||!!showOrig,miss:false};
+}
 `;
 
 /** The page script (plain ES2017, no framework). Placeholders: __CODE__, __DAYS__. */
@@ -251,16 +348,43 @@ var $=function(id){return document.getElementById(id)};
 var store={get:function(k){try{return localStorage.getItem(k)}catch(e){return null}},set:function(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
 var dn=null;try{dn=new Intl.DisplayNames(['pt-BR'],{type:'language'})}catch(e){}
 function langName(c){try{var n=dn&&dn.of(c);if(n)return n.charAt(0).toUpperCase()+n.slice(1)}catch(e){}return c}
-var room=null,lines=[],byId={},lang=null,showOrig=store.get('ucast-orig')==='1',dub=false,ended=false,expiresAt=null;
+var settings=parseSettings(store.get('ucast-settings'),store.get('ucast-orig'));
+var room=null,lines=[],byId={},lang=null,dub=false,ended=false,expiresAt=null;
 var ws=null,attempt=0,timer=null,gone=false;
 /** Per line, on the performance.now() clock: arrivedAt (-1e12 for lines of the snapshot), clip startedAt, pending/skip. */
 var meta={},liveId=null,voiceDelays=[];
 function now(){return performance.now()}
 function M(id){return meta[id]||(meta[id]={arrivedAt:-1e12,startedAt:null,pending:false,skip:false})}
 
-function textOf(l){return lang==='orig'?l.original:(l.translations&&l.translations[lang])}
+/** What line l shows with the current settings: {main, sub|null, miss}. */
+function view(l){
+  var tr=l.translations&&lang!=='orig'?l.translations[lang]:null,has=tr!=null&&tr!=='';
+  var v=lineView(settings.mode,settings.showOrig,lang,has);
+  return {main:v.main==='tr'?tr:l.original,sub:v.sub?l.original:null,miss:v.miss};
+}
 function fmtDate(iso){try{return new Date(iso).toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'})}catch(e){return iso}}
 function fmtTime(ts){if(!(ts>1e11))return '';try{return new Date(ts).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}catch(e){return ''}}
+
+// ── settings: the viewer's own, applied instantly, kept in this browser ──
+function saveSettings(){store.set('ucast-settings',JSON.stringify(settings))}
+var mql=null;try{mql=window.matchMedia('(prefers-color-scheme: light)')}catch(e){}
+function applyTheme(){
+  document.documentElement.setAttribute('data-theme',settings.theme);
+  var light=settings.theme==='light'||(settings.theme==='auto'&&mql&&mql.matches);
+  var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content',light?'#f6f6f8':'#1b1b1f');
+}
+if(mql&&mql.addEventListener)mql.addEventListener('change',applyTheme);
+function applySettings(rerender){
+  applyTheme();
+  var b=document.body.classList;b.toggle('mode-full',settings.mode==='full');b.toggle('no-times',!settings.showTimes);
+  document.documentElement.style.setProperty('--tx',textSizes(settings.size,window.innerWidth).tx+'px');
+  if(outGain)outGain.gain.value=settings.volume;
+  var origOk=settings.mode==='translation'||settings.mode==='full';
+  var ob=$('orig');ob.setAttribute('aria-pressed',origOk&&settings.showOrig?'true':'false');ob.hidden=!origOk||lang==='orig';
+  if(rerender!==false)renderAll();
+  if(!sheet.hidden)syncSheet();
+}
+function setSetting(k,v){settings[k]=v;settings=normalizeSettings(settings);saveSettings();applySettings()}
 
 // ── live line: one line per language, shrink to 70 %, then keep the end with a leading "…" ──
 var ctx2d=null;try{ctx2d=document.createElement('canvas').getContext('2d')}catch(e){}
@@ -273,22 +397,24 @@ function fit(el,text,px){
   var r=fitLine(text,el.clientWidth-1,px,measure);
   el.style.fontSize=r.px+'px';el.textContent=r.text;el.title=r.text===text?'':text;
 }
+function syncOn(){return dub&&settings.sync&&lang!=='orig'}
 function currentLine(){
   var from=Math.max(0,lines.length-60),entries=[];
   for(var i=from;i<lines.length;i++){var l=lines[i],m=M(l.id);entries.push({id:l.id,arrivedAt:m.arrivedAt,startedAt:m.startedAt,pending:m.pending,skip:m.skip})}
-  var id=pickLive(entries,now(),dub&&lang!=='orig',AUDIO_WAIT_MS);
+  var id=pickLive(entries,now(),syncOn(),AUDIO_WAIT_MS);
   if(id==null)id=liveId!=null&&byId[liveId]?liveId:(lines.length?lines[lines.length-1].id:null);
   return id==null?null:byId[id];
 }
 function renderLive(){
   var main=$('liveMain'),orig=$('liveOrig'),l=currentLine();
-  var base=Math.max(20,Math.min(36,Math.round(window.innerWidth/13)));
+  var base=textSizes(settings.size,window.innerWidth).live;
   markCurrent(l?l.id:null);
+  if(settings.mode==='full')return;
   if(!l){main.className='fit empty';main.style.fontSize='';main.title='';main.textContent=ended?'Nenhuma fala nesta sessão.':'Aguardando a primeira fala…';orig.hidden=true;return}
-  var t=textOf(l),miss=t==null||t==='';
-  main.className='fit'+(miss?' empty':'');
-  fit(main,miss?l.original:t,base);
-  if(showOrig&&lang!=='orig'&&!miss){orig.hidden=false;fit(orig,l.original,Math.round(base*0.62))}else orig.hidden=true;
+  var v=view(l);
+  main.className='fit'+(v.miss?' empty':'');
+  fit(main,v.main,base);
+  if(v.sub){orig.hidden=false;fit(orig,v.sub,Math.round(base*0.62))}else orig.hidden=true;
 }
 function markCurrent(id){
   if(id===liveId)return;
@@ -299,7 +425,7 @@ function markCurrent(id){
 // ── delay indicator: rolling median of the last 10 lines (text) or of the last 10 clips (voice) ──
 function updateDelay(){
   var el=$('delay');
-  if(ended||gone){el.hidden=true;return}
+  if(ended||gone||!settings.showDelay){el.hidden=true;return}
   var voice=dub&&lang!=='orig'&&voiceDelays.length>0,vals=[];
   if(voice)vals=voiceDelays.slice(-10);
   else for(var i=lines.length-1;i>=0&&vals.length<10;i--)if(typeof lines[i].delayMs==='number')vals.push(lines[i].delayMs);
@@ -311,21 +437,23 @@ function updateDelay(){
 // ── transcript ──
 function atBottom(){return window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-80}
 function para(l){
-  var p=document.createElement('p'),t=textOf(l),miss=t==null||t==='';
-  p.setAttribute('data-id',String(l.id));if(miss)p.className='miss';if(l.id===liveId)p.classList.add('cur');
+  var p=document.createElement('p'),v=view(l);
+  p.setAttribute('data-id',String(l.id));if(v.miss)p.className='miss';if(l.id===liveId)p.classList.add('cur');
   var tm=fmtTime(l.ts);if(tm){var e=document.createElement('time');e.className='ts';e.textContent=tm;e.dateTime=new Date(l.ts).toISOString();p.appendChild(e)}
-  var s=document.createElement('span');s.className='t';s.textContent=miss?l.original:t;p.appendChild(s);
-  if(showOrig&&lang!=='orig'&&!miss){var o=document.createElement('span');o.className='o';o.textContent=l.original;p.appendChild(o)}
+  var s=document.createElement('span');s.className='t';s.textContent=v.main;p.appendChild(s);
+  if(v.sub){var o=document.createElement('span');o.className='o';o.textContent=v.sub;p.appendChild(o)}
   return p;
 }
+var firstRender=true;
 function renderAll(){
-  var tx=$('tx'),stick=atBottom()||!tx.childNodes.length;tx.textContent='';
+  var tx=$('tx'),stick=firstRender||(settings.autoScroll&&atBottom());tx.textContent='';
   var frag=document.createDocumentFragment();for(var i=0;i<lines.length;i++)frag.appendChild(para(lines[i]));tx.appendChild(frag);
+  if(lines.length)firstRender=false;
   renderLive();updateDelay();if(stick)scrollEnd();
 }
 function scrollEnd(){window.scrollTo(0,document.documentElement.scrollHeight);$('more').style.display='none'}
 function upsert(l){
-  var stick=atBottom(),tx=$('tx'),old=byId[l.id];
+  var stick=settings.autoScroll&&atBottom(),tx=$('tx'),old=byId[l.id];
   if(old){lines[lines.indexOf(old)]=l;byId[l.id]=l;var el=tx.querySelector('p[data-id="'+l.id+'"]');if(el)tx.replaceChild(para(l),el)}
   else{
     byId[l.id]=l;M(l.id).arrivedAt=now();var i=lines.length;while(i>0&&lines[i-1].id>l.id)i--;lines.splice(i,0,l);
@@ -333,7 +461,7 @@ function upsert(l){
     if(dub)setTimeout(renderLive,AUDIO_WAIT_MS+20);
   }
   renderLive();updateDelay();
-  if(stick)scrollEnd();else $('more').style.display='block';
+  if(stick)scrollEnd();else if(!atBottom())$('more').style.display='block';
 }
 
 // ── languages ──
@@ -341,27 +469,34 @@ function pickDefault(){
   var prefs=(navigator.languages&&navigator.languages.length?navigator.languages:[navigator.language||'']);
   return pickLang(prefs,room.languages,store.get('ucast-lang-'+CODE));
 }
-function buildSelect(){
-  var sel=$('lang');sel.textContent='';
+function fillLangSelect(sel){
+  sel.textContent='';
   var o=document.createElement('option');o.value='orig';o.textContent=room.originalLang?'Original ('+langName(room.originalLang)+')':'Original';sel.appendChild(o);
   room.languages.forEach(function(c){var x=document.createElement('option');x.value=c;x.textContent=langName(c);sel.appendChild(x)});
-  if(!lang)lang=pickDefault();
   sel.value=lang;
-  updateDubButton();
 }
-$('lang').addEventListener('change',function(e){lang=e.target.value;store.set('ucast-lang-'+CODE,lang);stopAudio();voiceDelays=[];sendListen();updateDubButton();renderAll()});
-function setOrigButton(){$('orig').setAttribute('aria-pressed',showOrig?'true':'false')}
-setOrigButton();
-$('orig').addEventListener('click',function(){showOrig=!showOrig;store.set('ucast-orig',showOrig?'1':'0');setOrigButton();renderAll()});
-var relayout=null;function onResize(){if(relayout)cancelAnimationFrame(relayout);relayout=requestAnimationFrame(function(){relayout=null;renderLive()})}
+function buildSelect(){
+  if(!lang)lang=pickDefault();
+  fillLangSelect($('lang'));fillLangSelect($('sLang'));
+  updateDubButton();applySettings(false);
+}
+function setLang(v){
+  lang=v;store.set('ucast-lang-'+CODE,lang);$('lang').value=v;$('sLang').value=v;
+  stopAudio();voiceDelays=[];sendListen();updateDubButton();applySettings();
+}
+$('lang').addEventListener('change',function(e){setLang(e.target.value)});
+$('sLang').addEventListener('change',function(e){setLang(e.target.value)});
+$('orig').addEventListener('click',function(){if(settings.mode==='full'||settings.mode==='translation')setSetting('showOrig',!settings.showOrig)});
+var relayout=null;function onResize(){if(relayout)cancelAnimationFrame(relayout);relayout=requestAnimationFrame(function(){relayout=null;document.documentElement.style.setProperty('--tx',textSizes(settings.size,window.innerWidth).tx+'px');renderLive();if(!sheet.hidden)placeSheet()})}
 window.addEventListener('resize',onResize);window.addEventListener('orientationchange',onResize);
 
 // ── dubbing: Web Audio, one AudioContext (created by the tap), clips decoded and scheduled back to back on its
 //    timeline with a 10 ms fade in/out (no clicks); the live line switches when a clip STARTS playing ──
-var actx=null,qEnd=0,pending=[],playingSrc=[],pumpTimer=null;
+var actx=null,outGain=null,qEnd=0,pending=[],playingSrc=[],pumpTimer=null;
 function b64Buf(b64){var bin=atob(b64),n=bin.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=bin.charCodeAt(i);return u.buffer}
 function ensureContext(){
-  if(!actx){var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return false;try{actx=new AC()}catch(e){return false}}
+  if(!actx){var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return false;
+    try{actx=new AC();outGain=actx.createGain();outGain.gain.value=settings.volume;outGain.connect(actx.destination)}catch(e){actx=null;return false}}
   try{if(actx.state!=='running'&&actx.resume)actx.resume()}catch(e){}
   try{var b=actx.createBuffer(1,1,22050),s=actx.createBufferSource();s.buffer=b;s.connect(actx.destination);s.start(0)}catch(e){}
   return true;
@@ -385,7 +520,7 @@ function schedule(c){
   src.buffer=c.buf;
   g.gain.setValueAtTime(0,start);g.gain.linearRampToValueAtTime(1,start+f);
   g.gain.setValueAtTime(1,start+dur-f);g.gain.linearRampToValueAtTime(0,start+dur);
-  src.connect(g);g.connect(actx.destination);src.start(start);
+  src.connect(g);g.connect(outGain);src.start(start);
   src.onended=function(){var i=playingSrc.indexOf(src);if(i>=0)playingSrc.splice(i,1);try{g.disconnect()}catch(e){}};
   playingSrc.push(src);qEnd=start+dur;
   var m=M(c.lineId),at=now()+(start-actx.currentTime)*1000;
@@ -404,8 +539,9 @@ function onAudio(msg){
   var ab;try{ab=b64Buf(msg.wav)}catch(e){fail();return}
   try{var p=actx.decodeAudioData(ab,function(buf){c.buf=buf;pump()},fail);if(p&&p.catch)p.catch(function(){})}catch(e){fail()}
 }
+function canDub(){return lang!=='orig'&&!ended}
 function updateDubButton(){
-  var b=$('dub'),can=lang!=='orig'&&!ended;b.disabled=!can;
+  var b=$('dub'),can=canDub();b.disabled=!can;
   b.title=can?'':'Escolha um idioma de tradução para ouvir a dublagem';
   if(!can&&dub)setDub(false);
 }
@@ -413,15 +549,67 @@ function setDub(on){
   if(on&&!ensureContext()){$('notice').textContent='Este navegador não reproduz a dublagem.';on=false}
   dub=on;var b=$('dub');b.setAttribute('aria-pressed',on?'true':'false');b.querySelector('.ic').textContent=on?'🔊':'🔈';
   if(!on){stopAudio();voiceDelays=[]}
-  sendListen();renderLive();updateDelay();
+  sendListen();renderLive();updateDelay();if(!sheet.hidden)syncSheet();
 }
 $('dub').addEventListener('click',function(){setDub(!dub)});
 
+// ── settings sheet (bottom sheet on phones, popover from 768 px): focus trap, Esc / backdrop close ──
+var sheet=$('sheet'),backdrop=$('backdrop'),opener=null;
+function radios(name){return Array.prototype.slice.call(sheet.querySelectorAll('input[name="'+name+'"]'))}
+function syncSheet(){
+  $('sLang').value=lang||'orig';
+  radios('sMode').forEach(function(r){r.checked=r.value===settings.mode});
+  radios('sTheme').forEach(function(r){r.checked=r.value===settings.theme});
+  var origOk=settings.mode==='translation'||settings.mode==='full';
+  $('sOrig').checked=settings.mode==='bilingual'||settings.showOrig;$('sOrig').disabled=!origOk;$('sOrigRow').classList.toggle('off',!origOk);
+  $('sDub').checked=dub;$('sDub').disabled=!canDub();
+  $('sVol').value=String(Math.round(settings.volume*100));$('sVol').setAttribute('aria-valuetext',Math.round(settings.volume*100)+'%');
+  $('sSync').checked=settings.sync;
+  $('sSize').textContent=(100+settings.size*10)+'%';$('sSmaller').disabled=settings.size<=SIZE_MIN;$('sBigger').disabled=settings.size>=SIZE_MAX;
+  $('sScroll').checked=settings.autoScroll;$('sTimes').checked=settings.showTimes;$('sDelay').checked=settings.showDelay;
+}
+function placeSheet(){
+  if(window.innerWidth>=768){var r=$('gear').getBoundingClientRect(),top=Math.round(r.bottom+8);
+    sheet.style.top=top+'px';sheet.style.right=Math.max(16,Math.round(window.innerWidth-r.right))+'px';sheet.style.maxHeight=Math.max(240,window.innerHeight-top-16)+'px'}
+  else{sheet.style.top='';sheet.style.right='';sheet.style.maxHeight=''}
+}
+function focusables(){return Array.prototype.filter.call(sheet.querySelectorAll('button,select,input'),function(e){return !e.disabled&&e.getClientRects().length>0})}
+function openSheet(){
+  opener=document.activeElement;syncSheet();backdrop.hidden=false;sheet.hidden=false;placeSheet();
+  $('gear').setAttribute('aria-expanded','true');$('sLang').focus();
+}
+function closeSheet(){
+  if(sheet.hidden)return;sheet.hidden=true;backdrop.hidden=true;$('gear').setAttribute('aria-expanded','false');
+  var o=opener&&opener.focus?opener:$('gear');try{o.focus()}catch(e){}
+}
+$('gear').addEventListener('click',function(){if(sheet.hidden)openSheet();else closeSheet()});
+$('sClose').addEventListener('click',closeSheet);
+backdrop.addEventListener('click',closeSheet);
+sheet.addEventListener('keydown',function(e){
+  if(e.key==='Escape'||e.key==='Esc'){e.preventDefault();closeSheet();return}
+  if(e.key!=='Tab')return;
+  var f=focusables();if(!f.length){e.preventDefault();return}
+  var a=f[0],z=f[f.length-1];
+  if(e.shiftKey&&(document.activeElement===a||document.activeElement===sheet)){e.preventDefault();z.focus()}
+  else if(!e.shiftKey&&document.activeElement===z){e.preventDefault();a.focus()}
+});
+radios('sMode').forEach(function(r){r.addEventListener('change',function(){if(r.checked)setSetting('mode',r.value)})});
+radios('sTheme').forEach(function(r){r.addEventListener('change',function(){if(r.checked)setSetting('theme',r.value)})});
+$('sOrig').addEventListener('change',function(e){setSetting('showOrig',e.target.checked)});
+$('sDub').addEventListener('change',function(e){setDub(e.target.checked)});
+$('sVol').addEventListener('input',function(e){setSetting('volume',Number(e.target.value)/100)});
+$('sSync').addEventListener('change',function(e){setSetting('sync',e.target.checked)});
+$('sSmaller').addEventListener('click',function(){setSetting('size',settings.size-1)});
+$('sBigger').addEventListener('click',function(){setSetting('size',settings.size+1)});
+$('sScroll').addEventListener('change',function(e){setSetting('autoScroll',e.target.checked)});
+$('sTimes').addEventListener('change',function(e){setSetting('showTimes',e.target.checked)});
+$('sDelay').addEventListener('change',function(e){setSetting('showDelay',e.target.checked)});
+
 // ── copy ──
 $('copy').addEventListener('click',function(){
-  var t=lines.map(function(l){var x=textOf(l);return x==null||x===''?l.original:x}).join('\n\n');
-  var b=$('copy'),label=b.innerHTML;
-  var ok=function(){b.textContent='Copiado!';setTimeout(function(){b.innerHTML=label},1600)};
+  var t=lines.map(function(l){var v=view(l);return v.sub?v.main+'\n'+v.sub:v.main}).join('\n\n');
+  var b=$('copyLbl'),label=b.textContent;
+  var ok=function(){b.textContent='Copiado!';b.classList.remove('lg');setTimeout(function(){b.textContent=label;b.classList.add('lg')},1600)};
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(ok,fallback)}else fallback();
   function fallback(){var a=document.createElement('textarea');a.value=t;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{document.execCommand('copy');ok()}catch(e){}document.body.removeChild(a)}
 });
@@ -466,6 +654,7 @@ function retry(){if(ended||gone||timer)return;var d=Math.min(15000,1000*Math.pow
   timer=setTimeout(function(){timer=null;connect()},d)}
 document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&!ws&&!ended&&!gone){if(timer){clearTimeout(timer);timer=null}attempt=0;connect()}});
 
+applySettings(false);
 fetch('/v1/rooms/'+CODE,{cache:'no-store'}).then(function(r){if(r.status===404){notFound();return null}return r.ok?r.json():null})
   .then(function(r){if(r&&!room)applyRoom(r)},function(){}).then(function(){if(!gone)connect()});
 })();`;

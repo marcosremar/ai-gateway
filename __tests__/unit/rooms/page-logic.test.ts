@@ -8,8 +8,9 @@ import { ROOM_PAGE_LOGIC, roomPage } from '../../../src/rooms/page';
 
 interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
+interface Settings { mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -18,8 +19,12 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   backlogDrop(ahead: number, durs: number[], maxSec: number): number;
   median(values: number[]): number | null;
   delayLabel(ms: number, voice: boolean): { text: string; level: 'ok' | 'warn' | 'bad' };
+  normalizeSettings(raw: unknown): Settings;
+  parseSettings(json: string | null, legacyOrig: string | null): Settings;
+  textSizes(step: number, vw: number): { live: number; tx: number };
+  lineView(mode: string, showOrig: boolean, lang: string, hasTr: boolean): { main: 'tr' | 'orig'; sub: boolean; miss: boolean };
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -93,7 +98,7 @@ describe('room page: one-line fit of the live line', () => {
 
   it('ships the same logic inside the room page', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
-    expect(html).toContain('pickLive(entries,now(),dub');
+    expect(html).toContain('pickLive(entries,now(),syncOn()');
     expect(html).toContain('createGain');
     expect(html).not.toContain('new Audio(');
   });
@@ -171,5 +176,55 @@ describe('room page: delay indicator', () => {
     expect(delayLabel(2999, false).level).toBe('ok');
     expect(delayLabel(6000, false).level).toBe('warn');
     expect(delayLabel(6001, false).level).toBe('bad');
+  });
+});
+const DEFAULTS: Settings = { mode: 'translation', showOrig: false, volume: 0.9, sync: true, size: 0, theme: 'auto', autoScroll: true, showTimes: true, showDelay: true };
+
+describe('room page: viewer settings', () => {
+  it('defaults: translation, original hidden, voice sync on, automatic theme, auto-scroll, times and delay shown', () => {
+    expect({ ...parseSettings(null, null) }).toEqual(DEFAULTS);
+    expect({ ...parseSettings('not json', null) }).toEqual(DEFAULTS);
+    expect({ ...parseSettings('[1,2]', null) }).toEqual(DEFAULTS);
+  });
+
+  it('round-trips a saved choice and validates every field independently', () => {
+    const saved: Settings = { mode: 'bilingual', showOrig: true, volume: 0.35, sync: false, size: 4, theme: 'light', autoScroll: false, showTimes: false, showDelay: false };
+    expect({ ...parseSettings(JSON.stringify(saved), null) }).toEqual(saved);
+    const bad = { mode: 'karaoke', theme: 'pink', volume: 3, size: 99, sync: 'yes', showTimes: 0, autoScroll: false };
+    expect({ ...normalizeSettings(bad) }).toEqual({ ...DEFAULTS, size: 7, autoScroll: false });
+    expect(normalizeSettings({ size: -50 }).size).toBe(-3);
+    expect(normalizeSettings({ size: 1.6 }).size).toBe(2);
+  });
+
+  it('keeps honouring the older "ucast-orig" flag until the viewer chooses', () => {
+    expect(parseSettings(null, '1').showOrig).toBe(true);
+    expect(parseSettings('{"showOrig":false}', '1').showOrig).toBe(false);
+  });
+
+  it('bounds the text size: live line 20–56 px, transcript 14–24 px', () => {
+    expect(textSizes(0, 412)).toEqual({ live: 32, tx: 17 });
+    expect(textSizes(-3, 320)).toEqual({ live: 20, tx: 14 });
+    expect(textSizes(7, 1280)).toEqual({ live: 56, tx: 24 });
+    expect(textSizes(-99, 200).live).toBe(20);
+    expect(textSizes(99, 4000).tx).toBe(24);
+  });
+
+  it('decides what a line shows in each mode', () => {
+    expect({ ...lineView('translation', false, 'en', true) }).toEqual({ main: 'tr', sub: false, miss: false });
+    expect({ ...lineView('translation', true, 'en', true) }).toEqual({ main: 'tr', sub: true, miss: false });
+    expect({ ...lineView('bilingual', false, 'en', true) }).toEqual({ main: 'tr', sub: true, miss: false });
+    expect({ ...lineView('transcript', true, 'en', true) }).toEqual({ main: 'orig', sub: false, miss: false });
+    expect({ ...lineView('full', true, 'en', true) }).toEqual({ main: 'tr', sub: true, miss: false });
+    expect({ ...lineView('translation', true, 'orig', false) }).toEqual({ main: 'orig', sub: false, miss: false });
+    expect({ ...lineView('bilingual', false, 'en', false) }).toEqual({ main: 'orig', sub: false, miss: true });
+  });
+
+  it('ships an accessible settings sheet', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const s of ['role="dialog"', 'aria-modal="true"', 'aria-labelledby="sheetTitle"', 'aria-haspopup="dialog"', "e.key==='Escape'", "localStorage.setItem",
+      'Só transcrição', 'Bilíngue', 'Só texto completo', 'Sincronizar legenda com a voz', 'Rolagem automática do texto completo', 'Mostrar horários', 'Mostrar atraso', 'Automático']) {
+      expect(html).toContain(s);
+    }
+    expect(html).not.toMatch(/ style="/); // CSP: no inline style attributes
   });
 });
