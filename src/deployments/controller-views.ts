@@ -122,6 +122,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       id: m.id,
       phase: replicaPhase(this.observed(m, 0)),
       ip: m.ip,
+      ...(m.tls ? { tls: true } : {}),
       providerState: m.state,
       zone: m.zone,
       machineType: m.machineType,

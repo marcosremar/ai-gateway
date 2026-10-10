@@ -33,6 +33,7 @@ import type { AppFallbackService } from './app-fallback';
 import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import { createLogger } from '../logger';
+import { replicaTls } from './replica-tls';
 
 const log = createLogger('deployments-http');
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
@@ -97,7 +98,9 @@ export class HttpReplicaProbe implements ReplicaProbe {
   async check(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult> {
     if (!machine.ip) return 'down';
     const headers = { 'X-Aigw-Token': token };
-    const get = (path: string) => this.fetchImpl(`${replicaBase(machine, !!spec.exposure)}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
+    const base = replicaBase(machine, !!spec.exposure);
+    const tls = replicaTls(base, token);
+    const get = (path: string) => this.fetchImpl(`${base}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs), ...tls });
     const marker = await get('/__aigw/ready').catch(() => null);
     if (!marker?.ok) return 'down';
     const health = await get(spec.healthPath).catch(() => null);
@@ -106,9 +109,10 @@ export class HttpReplicaProbe implements ReplicaProbe {
   }
 }
 
-/** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`. */
-export function replicaBase(machine: ReplicaMachine, exposed = false): string {
-  return exposed && machine.ip && !machine.ip.includes(':') ? `http://${machine.ip}:${PROBE_PORT}` : `http://${machine.ip}`;
+/** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`; `tls` fronts (Vast) speak TLS. */
+export function replicaBase(machine: Pick<ReplicaMachine, 'ip' | 'tls'>, exposed = false): string {
+  const scheme = machine.tls ? 'https' : 'http';
+  return exposed && machine.ip && !machine.ip.includes(':') ? `${scheme}://${machine.ip}:${PROBE_PORT}` : `${scheme}://${machine.ip}`;
 }
 
 /**
@@ -358,6 +362,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           headers: { ...headers, ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
           body: body && body.length ? new Uint8Array(body) : undefined,
           signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS), ...(lease.signal ? [lease.signal] : [])]),
+          ...(replicaTls(target.href, lease.token)),
         });
       } catch (err) {
         // The client going away says nothing about the replica, and running out of time means busy: neither is a strike

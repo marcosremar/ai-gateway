@@ -290,7 +290,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         return {
           placementNote: `offer ${rank} of ${offers.length}: ${describeOffer(offer)}${this.knownGood(host, this.now()) ? `, passed the RTT gate at ${host.rttMs} ms` : ''}`
             + (misses.length ? `; better-ranked offers passed over: ${misses.join('; ')}` : ''),
-          id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast',
+          id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast', tls: true,
           zone: offer.geolocation ?? '', machineType: offer.gpu_name ?? spec.machineType,
           pricePerHour: Math.round((offer.dph_total / EUR_TO_USD) * 1000) / 1000,
           expiresAt: vastEndsAt(offer.end_date, offer.duration, this.now()),
@@ -353,7 +353,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       if (i.machine_id !== undefined) this.hostOf.set(id, i.machine_id);
       const hostPort = i.ports?.['80/tcp']?.[0]?.HostPort;
       return {
-        id, rest: i.label!.slice(prefix.length).split(':'), provider: 'vast' as const,
+        id, rest: i.label!.slice(prefix.length).split(':'), provider: 'vast' as const, tls: true,
         ip: i.public_ipaddr && hostPort ? `${i.public_ipaddr.trim()}:${hostPort}` : null,
         state: vastState(i.actual_status),
         createdAt: typeof i.start_date === 'number' ? Math.round(i.start_date * 1000) : this.now(),

@@ -68,7 +68,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -86,3 +86,6 @@ jobs:
           else
             echo "✅ No critical vulnerabilities found"
           fi
+
+      - name: No high advisory in production dependencies
+        run: bun audit --prod --audit-level=high --ignore GHSA-2p57-rm9w-gvfp

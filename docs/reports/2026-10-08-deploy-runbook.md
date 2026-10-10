@@ -500,3 +500,74 @@ keys, per-replica tokens, Scaleway registry pull with a read-only key).
 - [ ] Optional: `SANDBOX_TOKEN_APP=parle` on the gateway if dev sessions should keep calling the parle aliases with the
   dev token (no-wake, app-key limits); unset, they get 403 on those aliases.
 - [ ] Afterwards consider rotating `SCW_SECRET_KEY`: it sat in the user_data and `boot.log` of every past replica.
+
+#### 12.9.1 Rotations after the #75 deploy (D4, S15, D6) — not done yet
+
+Do them only once #75 is live (`/health` `commit` at or after the #75 merge), outside class hours (no class
+Mon–Thu 17:40–20:15 Paris), one at a time, and check each before the next. Every value goes through the dev API
+(`PUT https://parle-palco.up.railway.app/api/sandbox-env`, Bearer `SANDBOX_TOKEN`, body `{"NAME":"value"}`); never paste
+a value in a chat, a log, a commit or a shell history (load it into the process and send it from there).
+
+**`SCW_SECRET_KEY` (D4).** Today it is a *user* key of the organization owner (full access to everything), one of the
+three user keys listed by `GET /iam/v1alpha1/api-keys` (descriptions `teste` 2026-03-16, `testeste` 2026-09-25,
+`fdfdfdfd` 2026-10-02; the API does not say which one is the gateway's). It sat in the user_data and `boot.log` of every
+replica before #75. Replace it with an IAM application key that can only do what the gateway does:
+
+1. Scaleway IAM (API with the current key loaded in the process, or console): create the application
+   `aigw-gateway`; one policy, scope = the project `SCW_PROJECT_ID` only, permission sets `InstancesFullAccess` and
+   `BlockStorageFullAccess` (the gateway calls `instance/v1`, `block/v1alpha1` and the public `marketplace/v2`;
+   `SCW_PROJECT_ID` is set, so it never needs `iam/v1alpha1`). Generate its API key with `default_project_id` = the project.
+2. Before switching, prove it with the new key alone: `GET /instance/v1/zones/fr-par-2/servers` lists the same number
+   of servers as the old key (an under-privileged key gets 200 with an empty list, not 403); same for `fr-par-1`,
+   `nl-ams-1`, `pl-waw-2`.
+3. `PUT /api/sandbox-env {"SCW_SECRET_KEY": <new>, "SCW_ACCESS_KEY": <new access key>}`; check
+   `GET /api/sandbox-env` returns the new value (compare a hash, do not print it).
+4. Restart, in this order: `ai-gateway` (Railway; the deployments backend reads the key at boot — a running gateway
+   keeps the old key until then), then trigger one `ai-gateway-reaper` run (it fetches at every run). The gateway's
+   `/health?details=1` must have no Scaleway error and `GET /v1/deployments` must list the existing replicas
+   (listing them proves the key sees the project). The first real create after the switch: watch for
+   `create failed` with `403`/`permission`; if it appears, put the old key back with the same `PUT` and restart.
+5. Other holders to refresh: the `parle` service (`ucast.me`, reserve copy of the dev API — update it there too, or
+   remove the variable), every `.env` written by `bun run sandbox:fetch` (babylon-cinema checkout and its worktrees:
+   run `sandbox:fetch` again), and the local backup `/Users/marcos/aigw-state-backup-20261009/` (does not hold it).
+6. Only after a day without `403`: delete the old user key(s) in IAM (all three if none is used elsewhere — they are
+   owner keys with no scope). Deleting is the step that actually ends the exposure.
+
+**`SANDBOX_TOKEN` and its aliases (S15/D6).** It appeared in orchestration transcripts. There is one value; the palco
+accepts one token, so every holder breaks until it gets the new one — do it in one sitting:
+
+1. Generate a new value (`openssl rand -base64 48 | tr -d '/+=\n'`, ≥ 40 chars) in a shell variable.
+2. Palco (`palco` service on Railway, project of the hub): set `SANDBOX_TOKEN` and every alias that holds the same value
+   (`PALCO_PROXY`, `PALCO_PROXY_TOKEN`, `PROXY_TOKEN`, and the legacy `VMOS_PROXY*` / `GPU_POOL_TOKEN` if present) in
+   the Railway variables of the service (the dev API refuses to write these names: `SANDBOX_FETCH_DENY`), then restart
+   it. Check: `GET /api/sandbox-env` with the old token → 401, with the new → 200.
+3. Immediately, the services that fetch with it (each: Railway variable `SANDBOX_TOKEN` → new value, then restart):
+   `ai-gateway` (it also accepts the token as a Bearer when `ACCEPT_SANDBOX_TOKEN_AS_KEY=1`; a running gateway keeps its
+   keys when a reload fails, but would boot without them on the old token), `ai-gateway-reaper` (fetches SCW/VAST keys
+   at each run; a run in between fails `NOT CHECKED`, harmless), `parle` prod (`parle-prod`) and `parle-stage`
+   (`backend/boot-env.ts`; a failed fetch does not stop the boot, but keys missing from the service are then absent).
+4. CI and runners: GitHub secret `SANDBOX_TOKEN` of `marcosremar/babylon-cinema` (workflows `ci`, `tests-full`,
+   `nightly`, `study-e2e`, `ci-contabo`), and the environment of the Contabo runners (`bun run ci:contabo status`).
+5. Agents and machines: `.env` of the babylon-cinema checkout (worktrees inherit it through `.worktreeinclude` — refresh
+   the existing ones), the ai-gateway checkouts that have one, Cursor / Kimi / Claude Code Web secrets, `PALCO_PROXY`
+   in the Cloud Agent, and any `.mcp.json` that carries it in `env`.
+6. Verify: `/health` of the gateway after its restart has its provider keys (`/health?details=1` with an admin key),
+   `bun run sandbox:check` passes from the Mac, the next nightly run of babylon-cinema passes the hub steps.
+
+#### 12.9.2 Replica TLS and SSH (S11) and the push key (S12) — `fix/security-remaining`
+
+- Vast replicas now serve their nginx front over TLS on the same mapped port: the gateway derives a private CA per
+  replica token, the boot script issues the leaf for `IP:$PUBLIC_IPADDR`, and every gateway → replica call (probe,
+  invoke, inference, s2s, streaming STT, realtime signaling/status/WS relay) trusts only that CA. The boot script also
+  deletes `/root/.ssh/authorized_keys` and stops `sshd`. A Vast replica that booted before this build speaks plain HTTP:
+  after the deploy the gateway cannot reach it and replaces it — deploy with no Vast replica serving (the school does not
+  use Vast today, § 12.8 item 4). Scaleway replicas are unchanged (still HTTP to their public IP: not covered here).
+- Proven only with fakes and a local nginx/Bun: on a real Vast host it remains to see that `PUBLIC_IPADDR` inside the
+  container equals the `public_ipaddr` the API reports (else the TLS check fails and the host is released as
+  `boot-timeout`), that `openssl` installs from the base image, that killing `sshd` sticks under `ssh_direct`, and
+  that the mapped SSH port then refuses connections.
+- `scripts/build-image-on-scaleway.ts` logs the build machine in with `SCW_REGISTRY_PUSH_SECRET_KEY` (IAM application
+  `aigw-registry-push`, created 2026-10-10, one policy `ContainerRegistryFullAccess` on the project only; key in the dev
+  API with `SCW_REGISTRY_PUSH_ACCESS_KEY`). Checked on 2026-10-10: the registry grants it `pull,push` and accepts a blob
+  upload; `GET /instance/v1/zones/fr-par-2/servers` returns 0 servers with it (4 with the master key). The master key
+  stays on the laptop side only (creates and deletes the machine). Rotation: same IAM steps, `PUT` the new secret.

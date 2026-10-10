@@ -17,6 +17,7 @@ import type {
 } from '../gateway/providers/cloud/types';
 import { DeploymentError, type DeploymentController, type Lease, type LeaseOutcome } from './controller';
 import { replicaBase } from './http';
+import { replicaTls } from './replica-tls';
 import { qwenTokenCap } from './qwen-token-cap';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
@@ -78,8 +79,10 @@ async function callReplica(
   }
   let res: Response;
   try {
-    res = await (opts.fetchImpl ?? fetch)(`${replicaBase(lease.machine, lease.exposed)}${path}`, {
+    const base = replicaBase(lease.machine, lease.exposed);
+    res = await (opts.fetchImpl ?? fetch)(`${base}${path}`, {
       ...init,
+      ...(replicaTls(base, lease.token)),
       // Child `traceparent` of the request being served: the replica (and its edge) log under the same trace.
       headers: { ...(init.headers as Record<string, string> | undefined), ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
       // The gateway aborts through `signal` when it gives up on this replica (route/target timeout): the request is

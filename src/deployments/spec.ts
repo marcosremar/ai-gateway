@@ -467,7 +467,7 @@ export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates
  * 32 KB in total (`invalid env arguments, total length > 32KB`, live 2026-10-08), and the init script travels there.
  */
 export const VAST_ENV_MAX_BYTES = 32_000;
-const VAST_INIT_OVERHEAD_BYTES = 3_000;
+const VAST_INIT_OVERHEAD_BYTES = 4_700;
 const VAST_RT_INIT_OVERHEAD_BYTES = 2_000;
 const VAST_PORT_ENV_BYTES = 24;
 

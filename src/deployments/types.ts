@@ -309,6 +309,7 @@ export interface ReplicaMachine {
   expiresAt?: number | null;
   placementNote?: string;
   tokenKey?: string;
+  tls?: boolean;
   /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
   bootError?: string;
 }
@@ -444,6 +445,7 @@ export interface ReplicaView {
   id: string;
   phase: ReplicaPhase;
   ip: string | null;
+  tls?: boolean;
   providerState: string;
   zone: string;
   machineType: string;
