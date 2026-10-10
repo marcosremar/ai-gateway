@@ -67,7 +67,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      - run: pip install -q --only-binary :all: numpy fastapi 'uvicorn[standard]' httpx python-multipart
+      - name: Dependencies
+        run: |
+          pip install -q --only-binary :all: numpy fastapi 'uvicorn[standard]' httpx python-multipart
 
       - name: Every test_*.py but test_stt_batch.py (needs faster-whisper and multi-GB models)
         working-directory: docker/speech-stack
