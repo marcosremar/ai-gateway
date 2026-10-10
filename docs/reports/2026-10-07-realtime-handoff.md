@@ -2171,7 +2171,7 @@ Sem máquina, sem GPU, produção só lida (GET). Um gateway local deste worktre
 para os braços rodarem juntos. Turno: fala gTTS pt-BR de 5,4 s (16 kHz), prompt de padeira de ~90 tokens, 3 mensagens
 de histórico, `max_tokens` 160. `load.ts --n 4 --s2s 4 --no-wake --ramp 10 --duration 110 --turn-every 8 --jitter 2`,
 quatro braços de cada rodada ao mesmo tempo (16 alunos), 50–55 turnos por braço. Relógio: do fim da fala (pedido − 700 ms)
-ao primeiro áudio da resposta. Gasto na OpenRouter na sessão inteira: ≈ US$ 0,9.
+ao primeiro áudio da resposta. Gasto na OpenRouter na sessão inteira: US$ 1,20 no contador da chave (de 0,001 a 1,198).
 
 Braços (`main` = o que produção tem hoje, conferido por `GET /v1/apps/parle/routes`):
 
