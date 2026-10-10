@@ -458,7 +458,7 @@ bun scripts/realtime-e2e/load.ts --n 8 --s2s 8 --no-wake --speculate-lead 400 --
 | 9 | Vast `files` | the spec with `files` and a Vast placement, `AIGW_PUBLIC_URL` set, Scaleway zones paused | `lastPlacement` on Vast, no "files are not supported" warning, the replica becomes `ready` |
 | 10 | `reserveQuota` | PATCH a window that is active now on one deployment, wake another of the same type | 409 `reserved` with the end time; with a Vast placement it lands on Vast |
 | 11 | Over-long TTS | a sentence the engine runs away with (rare: watch `edge.tts.overlong` / `tts_overlong` over the load runs) | the turn continues; no `tts` error for an audible sentence |
-| 12 | Speculation on the fallback | the `--s2s --speculate-lead` run | `s2s.stt_speculative` events, `done.speculation` `hit` on most turns, first audio earlier than the same run with `--speculate-lead 0`; no turn voiced twice |
+| 12 | Speculation on the fallback | the `--s2s --speculate-lead` run | `s2s.stt_speculative` events, `done.speculation` `hit` on most turns, first audio earlier than the same run with `--speculate-lead 0`; no turn voiced twice **passed 2026-10-10** on a local gateway with the live cloud fallback: 100 % `hit`, −0.4 to −0.5 s p50 (handoff § Plano B ao vivo) |
 | 13 | Reaper | dry run against the dev gateway, with the reaper's own variables: `bun scripts/reap-orphans.ts` (no `--apply`) | lists foreign leftovers, releases nothing |
 | 14 | History | 20 turns in one session (`load.ts --n 1 --duration 400 --think 2-4`) | no `upstream` context error; `edge.llm.history_trimmed` appears |
 
