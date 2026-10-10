@@ -24,7 +24,7 @@ import type { DeploymentSpec, FileUrl } from './types';
  * The realtime edge (docker/aigw-edge): one generic image for every replica, whatever the GPU or the model image.
  * Built from docker/aigw-edge/Dockerfile; bump the tag when the edge changes.
  */
-export const DEFAULT_EDGE_IMAGE = 'ghcr.io/marcosremar/aigw-edge:5540dfa1@sha256:f3fb1f953dc88b9d4dcfe92688abbf66cdb8ad216d11a74cd6202bb51d65d975';
+export const DEFAULT_EDGE_IMAGE = 'ghcr.io/marcosremar/aigw-edge:ed885ef5@sha256:5c67faa165a3fdb00d4d2157229a2b981bbcc6efe1e7b2f7f6349f96998da209';
 /** Where a Vast container holds the edge: `aigw_edge/`, `telemetry.py` and optionally `venv/` (docs/realtime-edge.md § Vast). */
 export const VAST_EDGE_DIR = '/opt/aigw-edge';
 /** The edge's HTTP/WS port on the replica's loopback (nginx proxies `/__aigw/rt/*` to it). */

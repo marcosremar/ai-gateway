@@ -2547,11 +2547,14 @@ Freios: nenhuma sessão trocou mais de uma vez; a espera de 60 s e o teto de 4 t
 | Imagem | Tag | Digest | De onde |
 |---|---|---|---|
 | `ghcr.io/marcosremar/aigw-edge` | `5540dfa1` | `sha256:f3fb1f953dc88b9d4dcfe92688abbf66cdb8ad216d11a74cd6202bb51d65d975` | workflow `aigw-edge` por `workflow_dispatch` na branch, commit `5540dfa` (a mescla com o `main`) |
-| `ghcr.io/marcosremar/speech-stack` | `20261010-1135` | `sha256:fa088ee4bb0c61d19a9df2a1946835073f30c5774aa798c14bab93f728895fb0` | workflow `speech-stack` disparado pela PR no commit `d76e7b8` (`EDGE_TAG=5540dfa1`); **não fixada**: o perfil usa a cópia do registro Scaleway `20261009-0213`, e a cópia nova pede outra máquina |
+| `ghcr.io/marcosremar/speech-stack` | `20261010-1135` | `sha256:fa088ee4bb0c61d19a9df2a1946835073f30c5774aa798c14bab93f728895fb0` | workflow `speech-stack` disparado pela PR no commit `d76e7b8` (`EDGE_TAG=5540dfa1`, a fixação anterior); **não fixada nem reconstruída para `ed885ef5`**: o perfil usa a cópia do registro Scaleway `20261009-0213`, e a cópia nova pede outra máquina |
 
-`DEFAULT_EDGE_IMAGE` e o `EDGE_TAG` do speech-stack apontam para `5540dfa1@sha256:f3fb1f95…`. A imagem do edge leva só
-`requirements.txt`, `telemetry.py` e `aigw_edge/`, e nada disso mudou depois de `5540dfa` (os commits seguintes mexem
-em testes, harness, SDK e docs). Observação: o `main` fixava `79722253`, anterior a #19, #16 e T3 no código do edge;
+| `ghcr.io/marcosremar/aigw-edge` (fixada) | `ed885ef5` | `sha256:5c67faa165a3fdb00d4d2157229a2b981bbcc6efe1e7b2f7f6349f96998da209` | idem, commit `ed885ef` (a segunda mescla com o `main`, que trouxe o `session.py` do #91: frase de TTS que falha depois do primeiro som é pulada) |
+
+A prova rodou com `5540dfa1`; `ed885ef5` é o mesmo edge mais a mudança do #91, que não toca em nada destes quatro itens.
+`DEFAULT_EDGE_IMAGE` e o `EDGE_TAG` do speech-stack apontam para `ed885ef5@sha256:5c67faa1…`. A imagem do edge leva só
+`requirements.txt`, `telemetry.py` e `aigw_edge/`, e nada disso muda depois de `ed885ef` (o commit da fixação mexe só em
+`cloud-init.ts`, no Dockerfile do speech-stack e neste relatório). Observação: o `main` fixava `79722253`, anterior a #19, #16 e T3 no código do edge;
 a imagem nova é a primeira com esse código.
 
 ### Máquinas e custo

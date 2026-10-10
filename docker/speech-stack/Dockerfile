@@ -3,8 +3,8 @@
 # L4 on 2026-10-04).
 ARG LLAMA_TAG=server-cuda-b11382
 ARG LLAMA_DIGEST=sha256:ef08b5a98b1170f2b62177be0a4027c88a84043c55afbf190dd18b9e7cdcfebf
-ARG EDGE_TAG=5540dfa1
-ARG EDGE_DIGEST=sha256:f3fb1f953dc88b9d4dcfe92688abbf66cdb8ad216d11a74cd6202bb51d65d975
+ARG EDGE_TAG=ed885ef5
+ARG EDGE_DIGEST=sha256:5c67faa165a3fdb00d4d2157229a2b981bbcc6efe1e7b2f7f6349f96998da209
 FROM ghcr.io/ggml-org/llama.cpp:${LLAMA_TAG}@${LLAMA_DIGEST} AS llama
 FROM ghcr.io/marcosremar/aigw-edge:${EDGE_TAG}@${EDGE_DIGEST} AS edge
 
