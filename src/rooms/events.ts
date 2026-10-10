@@ -35,7 +35,7 @@ const DELAY = { kind: 'int', min: -600_000, max: 600_000 } as const;
 const COUNT = { kind: 'int', min: 0, max: 1_000_000 } as const;
 
 /** Setting keys a viewer can change (page settings + language + dubbing). */
-export const SETTING_KEYS = ['lang', 'mode', 'showOrig', 'dub', 'volume', 'sync', 'size', 'theme', 'autoScroll', 'showTimes', 'showDelay'] as const;
+export const SETTING_KEYS = ['ui', 'lang', 'mode', 'showOrig', 'dub', 'volume', 'sync', 'size', 'theme', 'autoScroll', 'showTimes', 'showDelay'] as const;
 
 /** Allowed fields per event type; anything else is dropped. */
 export const EVENT_SCHEMA: Record<ViewerEventType, Record<string, FieldSpec>> = {
@@ -75,6 +75,7 @@ export const EVENT_SCHEMA: Record<ViewerEventType, Record<string, FieldSpec>> = 
 const REQUIRED: Partial<Record<ViewerEventType, string>> = { audio: 'action', ui: 'action', visibility: 'state' };
 
 const SETTINGS_SNAPSHOT_KEYS: Record<string, FieldSpec> = {
+  ui: { kind: 'enum', values: ['fr', 'pt', 'en'] },
   lang: { kind: 'str', max: 35 },
   mode: { kind: 'enum', values: ['translation', 'transcript', 'bilingual', 'full'] },
   showOrig: { kind: 'bool' }, dub: { kind: 'bool' }, volume: { kind: 'num', min: 0, max: 1 }, sync: { kind: 'bool' },

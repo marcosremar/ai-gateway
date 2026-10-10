@@ -4,13 +4,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import { Script, createContext } from 'vm';
-import { ROOM_PAGE_LOGIC, roomPage } from '../../../src/rooms/page';
+import { ROOM_PAGE_LOGIC, UI_LANGS, UI_TEXT, roomPage } from '../../../src/rooms/page';
 
 interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
-interface Settings { mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
+interface Settings { ui: string; mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -18,15 +18,18 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   nextStart(now: number, prevEnd: number, lead: number): number;
   backlogDrop(ahead: number, durs: number[], maxSec: number): number;
   median(values: number[]): number | null;
-  delayLabel(ms: number, voice: boolean): { text: string; level: 'ok' | 'warn' | 'bad' };
+  delayLabel(ms: number, voice: boolean, L: Record<string, string>): { text: string; level: 'ok' | 'warn' | 'bad' };
   normalizeSettings(raw: unknown): Settings;
   parseSettings(json: string | null, legacyOrig: string | null): Settings;
   textSizes(step: number, vw: number): { live: number; tx: number };
   lineView(mode: string, showOrig: boolean, lang: string, hasTr: boolean): { main: 'tr' | 'orig'; sub: boolean; miss: boolean };
   uaInfo(ua: string, touch: number): { ua: string; os: string; device: string };
   refOf(search: string, referrer: string): string;
+  wordStarts(text: string, start: number, dur: number): number[];
+  spokenCount(starts: number[], t: number): number;
+  speechMs(text: string): number;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -172,15 +175,17 @@ describe('room page: delay indicator', () => {
     expect(median([1000, 2000, 3000, 9000])).toBe(2500);
   });
 
-  it('labels in pt-BR with one decimal and colors by threshold', () => {
-    expect(delayLabel(1849, false)).toEqual({ text: 'atraso 1,8 s', level: 'ok' });
-    expect(delayLabel(3200, true)).toEqual({ text: 'voz 3,2 s', level: 'warn' });
-    expect(delayLabel(2999, false).level).toBe('ok');
-    expect(delayLabel(6000, false).level).toBe('warn');
-    expect(delayLabel(6001, false).level).toBe('bad');
+  it('labels in the interface language with one decimal and colors by threshold', () => {
+    expect(delayLabel(1849, false, UI_TEXT.fr)).toEqual({ text: 'délai 1,8 s', level: 'ok' });
+    expect(delayLabel(1849, false, UI_TEXT.en)).toEqual({ text: 'delay 1.8 s', level: 'ok' });
+    expect(delayLabel(1849, false, UI_TEXT.pt)).toEqual({ text: 'atraso 1,8 s', level: 'ok' });
+    expect(delayLabel(3200, true, UI_TEXT.pt)).toEqual({ text: 'voz 3,2 s', level: 'warn' });
+    expect(delayLabel(2999, false, UI_TEXT.pt).level).toBe('ok');
+    expect(delayLabel(6000, false, UI_TEXT.pt).level).toBe('warn');
+    expect(delayLabel(6001, false, UI_TEXT.pt).level).toBe('bad');
   });
 });
-const DEFAULTS: Settings = { mode: 'translation', showOrig: false, volume: 0.9, sync: true, size: 0, theme: 'auto', autoScroll: true, showTimes: true, showDelay: true };
+const DEFAULTS: Settings = { ui: 'fr', mode: 'translation', showOrig: false, volume: 0.9, sync: true, size: 0, theme: 'auto', autoScroll: true, showTimes: true, showDelay: true };
 
 describe('room page: viewer settings', () => {
   it('defaults: translation, original hidden, voice sync on, automatic theme, auto-scroll, times and delay shown', () => {
@@ -190,7 +195,7 @@ describe('room page: viewer settings', () => {
   });
 
   it('round-trips a saved choice and validates every field independently', () => {
-    const saved: Settings = { mode: 'bilingual', showOrig: true, volume: 0.35, sync: false, size: 4, theme: 'light', autoScroll: false, showTimes: false, showDelay: false };
+    const saved: Settings = { ui: 'en', mode: 'bilingual', showOrig: true, volume: 0.35, sync: false, size: 4, theme: 'light', autoScroll: false, showTimes: false, showDelay: false };
     expect({ ...parseSettings(JSON.stringify(saved), null) }).toEqual(saved);
     const bad = { mode: 'karaoke', theme: 'pink', volume: 3, size: 99, sync: 'yes', showTimes: 0, autoScroll: false };
     expect({ ...normalizeSettings(bad) }).toEqual({ ...DEFAULTS, size: 7, autoScroll: false });
@@ -224,7 +229,7 @@ describe('room page: viewer settings', () => {
   it('ships an accessible settings sheet', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
     for (const s of ['role="dialog"', 'aria-modal="true"', 'aria-labelledby="sheetTitle"', 'aria-haspopup="dialog"', "e.key==='Escape'", "localStorage.setItem",
-      'Só transcrição', 'Bilíngue', 'Só texto completo', 'Sincronizar legenda com a voz', 'Rolagem automática do texto completo', 'Mostrar horários', 'Mostrar atraso', 'Automático']) {
+      'Transcription seule', 'Bilingue', 'Texte complet seul', 'Synchroniser les sous-titres avec la voix', 'Défilement automatique du texte complet', 'Afficher les heures', 'Afficher le délai', 'Automatique']) {
       expect(html).toContain(s);
     }
     expect(html).not.toMatch(/ style="/); // CSP: no inline style attributes
@@ -257,5 +262,66 @@ describe('room page: analytics helpers', () => {
     for (const s of ["navigator.sendBeacon", "'/v1/rooms/'+CODE+'/events'", "addEventListener('pagehide'", "store.get('ucast-viewer')", "track('join'", "track('setting'", "track('sample'", "track('leave'", "store.set('ucast-lang-last'"]) {
       expect(html).toContain(s);
     }
+  });
+});
+
+describe('room page: karaoke highlight', () => {
+  it('marks the words whose start time has passed, never skipping or going back', () => {
+    const starts = wordStarts('and I started to feel sick', 1000, 2600);
+    expect(starts).toHaveLength(6);
+    expect(starts[0]).toBe(1000);
+    for (let i = 1; i < starts.length; i++) expect(starts[i]).toBeGreaterThan(starts[i - 1]);
+    expect(starts[5]).toBeLessThan(3600);
+    expect(spokenCount(starts, 999)).toBe(0);
+    expect(spokenCount(starts, 1000)).toBe(1); // "and"
+    expect(spokenCount(starts, starts[3])).toBe(4); // "to" starts now
+    expect(spokenCount(starts, starts[3] - 1)).toBe(3);
+    expect(spokenCount(starts, 1e12)).toBe(6);
+    let last = 0;
+    for (let t = 900; t <= 3700; t += 37) { const k = spokenCount(starts, t); expect(k).toBeGreaterThanOrEqual(last); last = k; }
+  });
+
+  it('spreads words by length and estimates speech time from the text', () => {
+    const s = wordStarts('a bbbbbbbbb c', 0, 1400);
+    expect(s[1] - s[0]).toBeLessThan(s[2] - s[1]); // the long word takes longer
+    expect(wordStarts('', 0, 1000)).toEqual([]);
+    expect(speechMs('and I started to feel sick')).toBeCloseTo(26 * 1000 / 15);
+    expect(speechMs('ok')).toBe(800);
+  });
+
+  it('ships the karaoke painting in the page', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const s of ['function paintKaraoke', 'spokenCount(wordStarts(text,start,dur),now())', 'm.durMs=dur*1000', '.k{color:var(--accent)']) expect(html).toContain(s);
+  });
+});
+
+describe('room page: interface language and per-app settings', () => {
+  it('defaults the interface to French, accepts pt and en, rejects the rest', () => {
+    expect(parseSettings(null, null).ui).toBe('fr');
+    expect(normalizeSettings({ ui: 'en' }).ui).toBe('en');
+    expect(normalizeSettings({ ui: 'pt' }).ui).toBe('pt');
+    expect(normalizeSettings({ ui: 'de' }).ui).toBe('fr');
+  });
+
+  it('renders in French and keeps settings under the key of the app that opened the live', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 }, 'a1b2c3d4e5f6');
+    expect(html).toContain('<html lang="fr">');
+    expect(html).toContain('Réglages d&#39;affichage');
+    expect(html).toContain('APP="a1b2c3d4e5f6"');
+    expect(html).toContain("SETTINGS_KEY='ucast-settings-'+APP");
+    expect(html).toContain('store.set(SETTINGS_KEY,');
+  });
+
+  it('has every interface string in every language', () => {
+    const keys = Object.keys(UI_TEXT.fr).sort();
+    for (const l of UI_LANGS) expect(Object.keys(UI_TEXT[l]).sort()).toEqual(keys);
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const k of html.matchAll(/data-ia?="(\w+)"/g)) expect(UI_TEXT.fr[k[1]]).toBeTypeOf('string');
+  });
+
+  it('shows the quick mode buttons with accessible names and a gear', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const m of ['dub', 'translation', 'bilingual', 'transcript', 'full']) expect(html).toMatch(new RegExp(`data-m="${m}" aria-pressed="false" data-ia="\\w+" data-tip="[^"]+" aria-label="[^"]+"`));
+    expect(html).toContain('id="gear"');
   });
 });
