@@ -37,7 +37,7 @@ function getAvailableProviders(): Array<{ id: string; llm: OpenAICompatLLMProvid
   return providers;
 }
 
-describe('Provider Fallback Chain (Real APIs)', () => {
+describe.skipIf(process.env.SKIP_LIVE_TESTS === '1')('Provider Fallback Chain (Real APIs)', () => {
   it('succeeds on first provider', async () => {
     const providers = getAvailableProviders();
     if (providers.length === 0) return;

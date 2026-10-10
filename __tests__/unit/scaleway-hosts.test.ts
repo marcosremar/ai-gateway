@@ -123,12 +123,11 @@ describe('ScalewayClient for hosts', () => {
     route([
       [/\/servers\/srv-1$/, 'GET', () => json({ server: SERVER })],
       [/\/action$/, 'POST', () => json({})],
-      [/volumes\/vol-1$/, 'DELETE', () => { volumeDeletes++; return json({ message: 'in use' }, 412); }],
+      [/volumes\/vol-1$/, 'DELETE', () => (++volumeDeletes === 1 ? json({ message: 'in use' }, 412) : json({}, 204))],
     ]);
     await new ScalewayClient().releaseInstance('fr-par-2:srv-1', creds, { awaitVolumes: false });
     expect(calls().some(c => c.url.endsWith('/action') && String(c.body).includes('terminate'))).toBe(true);
-    await new Promise(r => setTimeout(r, 5));
-    expect(volumeDeletes).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(volumeDeletes).toBe(2));
   });
 
   it('regression: a transient 503 on the pre-release GET does not leak the volume (server found by list, not created here)', async () => {
