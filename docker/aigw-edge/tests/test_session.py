@@ -17,7 +17,7 @@ from aigw_edge import opener as opener_module  # noqa: E402
 from aigw_edge import session as session_module  # noqa: E402
 from aigw_edge.config import Settings  # noqa: E402
 from aigw_edge.intercept import match_rule  # noqa: E402
-from aigw_edge.token import b64url, sign  # noqa: E402
+from aigw_edge.token import b64url, config_digest, sign  # noqa: E402
 from aigw_edge.text import DROP_PAIRS  # noqa: E402
 from aigw_edge.server import Edge  # noqa: E402
 from aigw_edge.upstream import Upstream, UpstreamError, silent  # noqa: E402
@@ -786,6 +786,24 @@ async def history_overflow() -> None:
         await learner.close()
 
 
+async def admission_prompt_too_large() -> None:
+    edge = Edge(Settings(key=b"k" * 32, max_sessions=8))
+    edge.up.ready = True
+    now = int(time.time())
+
+    cfg = b64url(json.dumps({"system": "x" * 7000, "voice": "lia"}).encode())
+
+    def token(sid: str) -> str:
+        return sign({"sid": sid, "app": "parle", "dep": "", "rep": "", "cfg": "", "cfd": config_digest(cfg), "iat": now, "exp": now + 600}, b"k" * 32)
+
+    claims, refused = edge.admit(token("rt_long"), "trace", "ws", cfg=cfg)
+    check("admission: a system prompt over the LLM slot is refused (413 prompt_too_large) instead of failing every turn",
+          claims is None and refused is not None and refused[:2] == (413, "prompt_too_large") and "2048-token" in refused[2], refused)
+    edge.up.llm_ctx = 4096
+    claims, refused = edge.admit(token("rt_long2"), "trace", "ws", cfg=cfg)
+    check("admission: the same prompt fits a 4096-token slot", refused is None and claims["sid"] == "rt_long2", refused)
+
+
 async def admission_shedding() -> None:
     session_module.recent_first_audio.clear()
     edge = Edge(Settings(key=b"k" * 32, max_sessions=8, first_audio_deadline_ms=2000, shed_window_s=30))
@@ -1010,7 +1028,7 @@ async def main() -> None:
     await signed_config_is_authoritative()
     await app_turn_hook()
     for scenario in (endpoint_metrics, speculation_confirmed, speculation_discarded, barge_in, client_end_after_server_vad, speculation_edges, partials,
-                     first_audio_deadline, admission_shedding, tts_guard, llm_failure,
+                     first_audio_deadline, admission_prompt_too_large, admission_shedding, tts_guard, llm_failure,
                      long_session, history_overflow, feature_interactions):
         await scenario()
     print(json.dumps(results))

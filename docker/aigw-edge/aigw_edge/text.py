@@ -159,3 +159,24 @@ def fit_history(system: str | None, history: list[dict], user: str, max_tokens: 
         drop += DROP_PAIRS
     kept = {id(m) for pair in pairs[drop:] for m in pair}
     return [m for m in history if m.get("role") == "system" or id(m) in kept]
+
+
+MIN_TURN_TOKENS = 64
+DEFAULT_MAX_TOKENS = 160
+
+
+def _text(value) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def prompt_overflow(cfg: dict, ctx: int) -> str | None:
+    messages = cfg.get("messages") if isinstance(cfg.get("messages"), list) else []
+    pinned = sum(estimate_tokens(m.get("content")) for m in messages
+                 if isinstance(m, dict) and m.get("role") == "system" and isinstance(m.get("content"), str))
+    asked = cfg.get("max_tokens")
+    max_tokens = asked if isinstance(asked, (int, float)) and not isinstance(asked, bool) and asked > 0 else DEFAULT_MAX_TOKENS
+    before = int(max_tokens) + CONTEXT_MARGIN + estimate_tokens(_text(cfg.get("system"))) + pinned + estimate_tokens(_text(cfg.get("user_template")))
+    if before + MIN_TURN_TOKENS <= ctx:
+        return None
+    return (f"the session config takes about {before} tokens before the learner speaks, leaving under {MIN_TURN_TOKENS} "
+            f"of the LLM's {ctx}-token context per session: every turn would fail; shorten the system prompt or lower max_tokens")
