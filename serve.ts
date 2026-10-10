@@ -46,6 +46,8 @@ import { buildImages } from './src/deployments/build-images';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
 import { createOpsAlerts } from './src/telemetry/ops-alerts';
+import { alertEmailFromEnv, createAlertMailer, opsAlertMail, secretValues } from './src/telemetry/alert-email';
+import { createBalanceWatch } from './src/telemetry/balance-watch';
 import { gatewayClientKeys, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
@@ -108,8 +110,12 @@ const prefixRoutes: PrefixRoute[] = [];
 // Deployments: Docker image → autoscaled replicas on Scaleway and/or Vast (enabled when SCW_SECRET_KEY or VAST_API_KEY is set).
 const keyRegistry = access;
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
+const alertEmail = alertEmailFromEnv(process.env);
+const alertMailer = alertEmail && createAlertMailer({ ...alertEmail, secrets: () => secretValues(process.env), log: (msg, data) => log.warn(data ?? {}, msg) });
 const opsAlerts = createOpsAlerts((alert) => {
   log.warn(alert.data, `ALERT ${alert.event}`);
+  const mail = opsAlertMail(alert);
+  if (mail) void alertMailer?.send(mail);
   return alertWebhook?.send(alert);
 });
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
@@ -167,6 +173,17 @@ if (machines) {
 const modelRoutes = parseModelRoutes(process.env.MODEL_ROUTES);
 if (modelRoutes.errors.length) log.warn({ errors: modelRoutes.errors }, 'MODEL_ROUTES has invalid parts — skipped');
 const controller = deployments?.controller ?? null;
+const balanceWatch = createBalanceWatch({
+  env: process.env,
+  spend: () => controller?.spendSummary() ?? null,
+  onAlert: (mail, reading) => {
+    log.warn({ kind: mail.kind, level: mail.level }, `ALERT ${mail.subject}`);
+    void alertMailer?.deliver(mail);
+    return reading ? alertWebhook?.send({ event: `balance.${mail.level}`, data: { ...reading } }) : undefined;
+  },
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+if (process.env.BALANCE_CHECK_MINUTES?.trim() !== '0') balanceWatch.start();
 let openrouterKey = await checkOpenRouterKey(process.env);
 let chains: Record<string, Record<string, ChainLinkSpec[]>> = {};
 // Assigned below; the reconciler's onChange (periodic runs) remounts the routes once they exist.
@@ -431,7 +448,7 @@ const server = await startProxy({
   ...(deviceGate ? { deviceGate } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
-    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
+    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
@@ -477,6 +494,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     realtime.stop();
     rooms.stop();
     declared?.stop();
+    balanceWatch.stop();
     keyManager.stop();
     void access.stop();
     void keyAudit.flush();

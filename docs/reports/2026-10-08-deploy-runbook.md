@@ -611,3 +611,22 @@ takes two, every holder breaks until it gets the new value — do it in one sitt
   API with `SCW_REGISTRY_PUSH_ACCESS_KEY`). Checked on 2026-10-10: the registry grants it `pull,push` and accepts a blob
   upload; `GET /instance/v1/zones/fr-par-2/servers` returns 0 servers with it (4 with the master key). The master key
   stays on the laptop side only (creates and deletes the machine). Rotation: same IAM steps, `PUT` the new secret.
+
+### 12.10 Balance watch and email alerts (`feat/balance-watch-email`, 2026-10-10)
+
+Why: on 2026-10-10 the Vast account reached zero with no warning (two RTX 5090 of another project left running), the
+palco lost its GPU and the school deploy stopped on `402 insufficient credit`; the day before the OpenRouter key
+expired with no warning. The gateway now reads the provider balances every 15 min and emails the owner
+(`docs/api/http.md` § `balances`).
+
+- Nothing to set on Railway: `RESEND_API_KEY`, `MAIL_FROM` and `ALERT_EMAIL_TO` (`vovoafiliado@gmail.com`) were written
+  to the dev API on 2026-10-10 and reach the gateway at boot with the other keys. The next deploy (or restart) turns
+  the watch and the emails on; `BALANCE_CHECK_MINUTES=0` turns the watch off, an empty `ALERT_EMAIL_TO` the emails.
+- Verify after the deploy: `GET /health?details=1` (admin key) has `balances.readings` with `vast`, `openrouter`,
+  `runpod` and, with deployments, `scaleway`; the log has no `alert email failed`.
+- Test send from a checkout: `SANDBOX_TOKEN=… bun scripts/alert-email-test.ts` (prints the balances, sends
+  «[ai-gateway] teste de alerta», prints the Resend id). Sent on 2026-10-10, Resend id
+  `01a125ed-c1ce-7d30-9cce-177335a201bc`.
+- Scaleway: the restricted key `aigw-machines` gets `403` from the billing API, so the Scaleway reading is the
+  gateway's own estimate (its running replicas and the month spend against the summed `scaling.budget.eurPerMonth`).
+  A real invoice figure needs a key with `BillingReadOnly` on the organization.

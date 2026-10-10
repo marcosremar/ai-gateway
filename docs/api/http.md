@@ -958,6 +958,47 @@ exist: every request falls back with `not_configured`), `disabled` (no `SCW_SECR
 `cold`.
 `noWake.skips`: deployment targets skipped (and invokes refused) by no-wake requests since the process started.
 
+#### `balances` (admin only) — provider balances and email alerts
+
+An admin also gets `balances` (`src/telemetry/balance-watch.ts`): every `BALANCE_CHECK_MINUTES` (default 15; `0`
+turns it off) the gateway reads, with the keys it already has and only GET-style calls, the Vast credit
+(`/users/current/`) and the hourly price of **every running instance of the account** (`/instances/`, so machines
+started outside the gateway count too), the OpenRouter credit left (`/api/v1/credits`, else the key's
+`limit_remaining`) and the key's `expires_at` (`/api/v1/key`), the RunPod `clientBalance` and `currentSpendPerHr`,
+and for Scaleway the gateway's own estimate (EUR/h of its running Scaleway replicas, month spend against the summed
+`scaling.budget.eurPerMonth` of the deployments): the restricted key `aigw-machines` gets `403` from the billing API.
+No secret is in the block; a provider without a key is absent.
+
+```json
+"balances": { "intervalMinutes": 15, "thresholds": { "warnUsd": { "vast": 5, "openrouter": 5, "runpod": 0 }, "…": "…" },
+  "readings": [ { "provider": "vast", "level": "warn", "balanceUsd": 9.92, "burnPerHour": 1.1, "currency": "USD",
+    "hoursLeft": 9, "keyExpiresAt": null, "reasons": ["com o gasto atual de US$ 1.10/h o saldo acaba em ~9.0 h"],
+    "error": null, "checkedAt": "2026-10-10T13:00:00.000Z" } ] }
+```
+
+`level`: `ok`, `warn`, `urgent`, or `error` (provider unreachable: shown, no email). Thresholds (env, defaults):
+
+| Variable | Default | Level |
+|---|---|---|
+| `BALANCE_VAST_WARN_USD` / `BALANCE_VAST_URGENT_USD` | 5 / 2 | Vast credit below → warn / urgent |
+| `BALANCE_OPENROUTER_WARN_USD` / `BALANCE_OPENROUTER_URGENT_USD` | 5 / 1 | OpenRouter credit below |
+| `BALANCE_RUNPOD_WARN_USD` / `BALANCE_RUNPOD_URGENT_USD` | 0 / 0 (off: account unused) | RunPod balance below |
+| `BALANCE_HOURS_LEFT_WARN` / `BALANCE_HOURS_LEFT_URGENT` | 12 / 3 | balance ÷ current burn below N hours |
+| `BALANCE_KEY_EXPIRY_DAYS` | 7 | key expires within N days → warn (≤ 1 day or expired → urgent) |
+| `BALANCE_MONTH_WARN_RATIO` | 0.8 | Scaleway month spend ≥ 80 % of the ceiling → warn, ≥ 100 % → urgent |
+
+A `401`/`403` from a provider is **urgent** (“recusou a chave”).
+
+**Email.** With `RESEND_API_KEY` and `ALERT_EMAIL_TO` (comma-separated list; `MAIL_FROM` optional, all three from the
+dev API) the gateway emails, through Resend, in Portuguese with the number and what to do: every `warn`/`urgent`
+balance reading above, and the ops alerts also sent to `ALERT_WEBHOOK_URL` — `provider.credit_exhausted`,
+`replica.lost_with_sessions`, `stage.no_link` (urgent), `deployment.create_failed`, `deployment.out_of_stock`,
+`stage.reserve_down` (warn). Dedup per kind: a warn at most once per 6 h, an urgent once per hour, and a warn that
+becomes urgent goes out at once. `ALERT_DAILY_DIGEST=<UTC hour 0–23>` adds one summary of every reading per day, at
+the first check after that hour. Subject and body pass a redaction of every `*KEY*`/`*TOKEN*`/`*SECRET*` value of the
+environment; a failing email provider is logged (`alert email failed`) and changes nothing else. Balance alerts also
+go to `ALERT_WEBHOOK_URL` as `balance.warn` / `balance.urgent`. Test send: `bun scripts/alert-email-test.ts`.
+
 ### `GET /health?deep=1` (admin)
 
 Live probe of every provider key (no credits used: OpenRouter is checked through `/api/v1/key`, which rejects a
