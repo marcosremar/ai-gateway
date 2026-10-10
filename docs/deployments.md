@@ -375,7 +375,7 @@ trend window are design choices to pilot, not published values.
 
 | Variable | Default | What it limits |
 |---|---|---|
-| `DEPLOYMENTS_MAX_REPLICAS` | 6 | RUNNING replicas across all deployments. Parked (stopped) replicas do not count: they bill no compute. A `PUT` with `maxReplicas` above it is refused (400) with the cap in the message. |
+| `DEPLOYMENTS_MAX_REPLICAS` | 6 | RUNNING replicas across all deployments. Parked (stopped) replicas do not count: they bill no compute. A `PUT` with `maxReplicas` above it is refused (400) with the cap in the message. The floor of every unpaused deployment (`minReplicas`, or its active warm window) is kept inside the cap: a deployment already at its own floor does not take the last slots another one still needs for its floor (`… kept for the minimum of <name> <n>`). |
 | `DEPLOYMENTS_MAX_STOPPED` | 8 | Parked replicas (`idleAction: "stop"`, they bill disk). Past it, an idle replica is deleted instead of parked. |
 | `DEPLOYMENTS_MAX_EUR_PER_HOUR` | 6 | Sum of `pricePerHour` of all running replicas (+ creates in flight). A create or power-on that would pass it is refused; `lastError` says `spend ceiling reached` (a market-priced Vast offer counts at its `maxEurPerHour` cap). `0` = off. |
 | `DEPLOYMENTS_PARKED_MAX_HOURS` | 72 | A parked replica unused this long is deleted (a forgotten park bills its disk forever). `0` = off. |

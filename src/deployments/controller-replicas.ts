@@ -167,7 +167,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
   protected createReplica(rt: Runtime): void {
     const spec = rt.record.spec;
     if (this.now() < rt.backoffUntil) return;
-    const refusal = this.capRefusal(0);
+    const refusal = this.capRefusal(0, spec.name);
     if (refusal) {
       rt.lastError = refusal;
       return;
