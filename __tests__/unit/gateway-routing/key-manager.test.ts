@@ -1,6 +1,7 @@
 import type { Server } from 'http';
 import type { AddressInfo } from 'net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AdminGate } from '../../../src/config/admin-gate';
 import { createKeyAdminRoutes, KeyManager } from '../../../src/config/key-manager';
 import { OpenAICompatLLMProvider } from '../../../src/gateway/providers/cloud/openai-compat/openai-compat-llm';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
@@ -124,7 +125,7 @@ describe('admin routes through the proxy', () => {
     server = createProxyServer({
       apiKeys: ['admin-key:sandbox', 'user-key:alice'],
       providers: {},
-      customRoutes: createKeyAdminRoutes(manager, (t) => t === 'admin-key'),
+      customRoutes: createKeyAdminRoutes(manager, new AdminGate({ actorOf: (t) => (t === 'admin-key' ? 'sandbox' : null) })),
       deepHealth: { authorize: (t) => t === 'admin-key', report: async () => ({ status: 200, body: { status: 'ok' } }) },
     });
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', () => resolve()));
