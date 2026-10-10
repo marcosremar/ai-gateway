@@ -23,14 +23,18 @@ const RELEASE_SETTLE_MS = 10 * 60_000;
 const BOOT_TIMEOUT_BACKOFF_MS = [0, 10 * 60_000, 30 * 60_000, 60 * 60_000];
 
 export abstract class ReconcileLoop extends AutoscaleControl {
+  private stopped = false;
+
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     this.timer = setInterval(() => void this.reconcile(), this.opts.reconcileMs ?? 20_000);
     this.timer.unref?.();
     void this.reconcile();
   }
 
   async stop(timeoutMs = 5_000): Promise<void> {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -48,6 +52,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
   }
 
   reconcile(): Promise<void> {
+    if (this.stopped) return this.reconciling ?? Promise.resolve();
     if (this.reconciling) {
       this.rerun = true;
       return this.reconciling;

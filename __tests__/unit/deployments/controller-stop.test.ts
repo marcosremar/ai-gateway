@@ -35,6 +35,36 @@ describe('controller.stop() and the state file', () => {
     expect(saved.deployments.tts.updatedAt).toBe(20);
   });
 
+  it('a write queued while stop() is waiting is waited for too', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aigw-stop-'));
+    dirs.push(dir);
+    const store = FileDeploymentStore.inDir(dir);
+    const controller = await controllerWith(store);
+    void store.saveDeployment(record(1));
+    const stopped = controller.stop();
+    await Promise.resolve();
+    void store.saveDeployment(record(2));
+    await stopped;
+    expect(JSON.parse(readFileSync(join(dir, 'deployments.json'), 'utf8')).deployments.tts.updatedAt).toBe(2);
+  });
+
+  it('no reconcile starts once stopped, even when kicked', async () => {
+    const cloud = new FakeCloud();
+    let lists = 0;
+    const list = cloud.listReplicas.bind(cloud);
+    cloud.listReplicas = async () => { lists++; return list(); };
+    const controller = new DeploymentController({
+      backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 60_000, maxTotalReplicas: 2,
+    });
+    await controller.init();
+    controller.start();
+    await controller.stop();
+    const before = lists;
+    controller.kick();
+    await controller.reconcile();
+    expect(lists).toBe(before);
+  });
+
   it('gives up after its deadline when a write never lands', async () => {
     class StuckStore extends MemoryDeploymentStore {
       settled() { return new Promise<void>(() => {}); }

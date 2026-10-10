@@ -451,7 +451,7 @@ describe('deployments API', () => {
       expect(res.status).toBe(200);
     } finally {
       for (const x of extra.splice(0)) await close(x);
-      await rm(dir, { recursive: true, force: true, maxRetries: 20 });
+      await rm(dir, { recursive: true, force: true });
     }
   });
 
