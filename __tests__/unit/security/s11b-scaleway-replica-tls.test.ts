@@ -18,8 +18,10 @@ const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
 const spec = buildSpec('speech', { image: 'ghcr.io/x/speech:1', port: 8000, machineType: 'L4-1-24G', zone: 'fr-par-2' }, { profiles });
 const hasNginx = spawnSync('nginx', ['-v']).status === 0;
 
-const written = (script: string, path: string) =>
-  Buffer.from(new RegExp(`echo '([A-Za-z0-9+/=]+)' \\| base64 -d > ${path.replace(/\//g, '\\/')}`).exec(script)![1], 'base64').toString();
+function written(script: string, path: string): string {
+  const line = script.split('\n').find(l => l.endsWith(`| base64 -d > ${path}`))!;
+  return Buffer.from(line.split("'")[1], 'base64').toString();
+}
 
 function tlsSection(init: string): string {
   const lines = init.split('\n');
