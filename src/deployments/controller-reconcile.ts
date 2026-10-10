@@ -10,6 +10,7 @@ import { isActive, planReplicas, replicaPhase } from './planner';
 import { usesScaleway, usesVast } from './spec';
 import { placementsOf } from './placements';
 import { PartialListError } from '../cpu-providers/scaleway-client';
+import { withoutLogContext } from '../logger';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec, ReplicaMachine } from './types';
 
 /**
@@ -44,7 +45,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       this.rerun = true;
       return this.reconciling;
     }
-    this.reconciling = (async () => {
+    this.reconciling = withoutLogContext(async () => {
       try {
         do {
           this.rerun = false;
@@ -53,7 +54,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       } finally {
         this.reconciling = null;
       }
-    })();
+    });
     return this.reconciling;
   }
 
@@ -97,11 +98,16 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (busy > 0) this.log('deployments: replica gone', { deployment: m.deployment, id: m.id, busy });
     }
     // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
+    const before = this.machines;
     this.machines = [...listed.filter(l => !this.releasing.has(l.id)).map((l) => {
       const known = this.machines.find(m => m.id === l.id);
       return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
     }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
-    for (const id of [...this.probes.keys()]) if (!this.machines.some(m => m.id === id)) this.probes.delete(id);
+    for (const [id, p] of [...this.probes]) {
+      if (this.machines.some(m => m.id === id)) continue;
+      if (p.readyNow) this.noteLost(before.find(m => m.id === id)?.deployment);
+      this.probes.delete(id);
+    }
     this.abortRequestsOfGoneReplicas();
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
     for (const id of [...this.udp.keys()]) if (!this.machines.some(m => m.id === id)) this.udp.delete(id);

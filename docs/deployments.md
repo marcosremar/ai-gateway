@@ -189,10 +189,23 @@ and never one still booting: the boot finishes and the idle clock runs from its 
 or `bootTimeoutMinutes` end a boot early; live QA 2026-10-07: `idleMinutes: 1` released an L40S at 172 s of a 9 min boot).
 A ready replica is never surplus while that would leave fewer ready replicas than desired: one ready and one booting
 for a desired count of 1 both stay until the boot finishes, then one of them goes.
-Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes`, `DEPLOYMENTS_UNHEALTHY_STRIKES`
+Replaced automatically: halted by the provider, not ready after `bootTimeoutMinutes` (at least 35 min on Vast,
+`VAST_MIN_BOOT_TIMEOUT_MINUTES`: a 22–57 GB image pulls in 11–25 min on a marketplace host; the Vast machine's own boot
+checks and signed file links get the same deadline), `DEPLOYMENTS_UNHEALTHY_STRIKES`
 (3) failed health checks in a row with nothing in flight and no answered request in the last
-`DEPLOYMENTS_BUSY_GRACE_SECONDS` (120), older than `maxHours` (counted from the last power-on of a parked replica, not
+`DEPLOYMENTS_BUSY_GRACE_SECONDS` (120; 20 s, `ERRORED_GRACE_MS`, when only 5xx answers came since the last good one), older than `maxHours` (counted from the last power-on of a parked replica, not
 from its creation).
+
+**Answering early instead of holding the caller.** A request with no ready replica gets `503` + `Retry-After` at once
+when waiting cannot help: the deployment's only ready replica was lost (gone from the provider list, or released as
+`unhealthy`/`halted`) and no other is ready (`Retry-After: 30`, the caller falls back while the replacement boots);
+no machine exists and creates are backing off past the call's wait (e.g. `insufficient_credit`); or the measured boot
+time (3+ samples of this machine type and image) ends after the call's wait. Otherwise it waits up to
+`coldStartWaitSeconds` as before. An adopted replica (gateway restart) logs `replica ready` with `adopted: true` and no
+`bootMs`, and one already past its boot window that never answers is released as `unhealthy` (its app died), not
+`boot-timeout` (which would blame the host). `PUT` checks that each image exists in its registry (a manifest `HEAD`,
+anonymous or with the spec's `registryAuth` / the Scaleway pull-only key) and answers 400 when the registry says it does
+not; an unreachable registry never blocks the `PUT`.
 
 **Busy is not dead.** The probe tells liveness (`/__aigw/ready`, answered by nginx even while the app is saturated) from
 readiness (the app's health path, `DEPLOYMENTS_PROBE_TIMEOUT_MS`, 4 s). A replica whose health check times out while it
@@ -474,6 +487,13 @@ With `candidates`, each create walks a **ranked ladder**:
 `provider: "vast"` (or a Vast candidate) needs `VAST_API_KEY` (from the dev API, like the Scaleway key). Code:
 `src/deployments/vast-backend.ts` (lean, separate from the GPU-pod client in `src/gateway/providers/gpu/`).
 
+**Credit.** Before each rent the backend reads the Vast balance (`GET /users/current/`, at most once a minute while it is
+fine) and refuses below `VAST_MIN_CREDIT_USD` (default 1); a rent Vast refuses with `insufficient_credit` counts the same.
+Either way the create fails with `insufficient_credit: …` and backs off 10 min, callers get `503` at once (above), the log
+line `deployments: provider credit exhausted` is written once (telemetry `provider.credit_exhausted`, and
+`ALERT_WEBHOOK_URL` when set), and `GET /health?details=1` (admin) lists it under `providerCredit` until a balance read
+is above the floor again.
+
 - **One container per host.** Vast runs ONE container per host (no systemd, no Docker-in-Docker): `image` is the
   container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Without a
   `bootScript` the spec's `entrypoint` + `args` are run there instead (after loading `/srv/aigw/app.env`), so an
@@ -557,6 +577,16 @@ there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `
 - **Absolute rule** (no anchor for the country, or the baseline probe failed — the gate never opens for lack of a
   baseline): `rtt ≤ maxRttMs`, integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`), meant for the gateway's vantage
   on Railway europe-west4 (NL), where France → host is typically 10–20 ms more.
+
+- **Under load** (2026-10-09: with the gateway's own uplink saturated a Norwegian host read 144 ms against a Paris
+  baseline of 143 and passed): the backend keeps the lowest baseline of the last 6 h (`QUIET_BASELINE_MS`). When the
+  baseline of the tick is more than 15 ms over it (`LOADED_BASELINE_MARGIN_MS`) the verdict still applies, but a host
+  that passes is **not** remembered as known-good, and `lastPlacement` says `measured under load`.
+- **Before renting** (2026-10-09: 11 paid minutes of a 57 GB pull for a host the gate then released): when an offer
+  carries its host address (`public_ipaddr`, `direct_port_start`), the backend times a TCP connect to that port (a
+  refusal is an answer too; `probeConnectRtt`, skipped on a network that answers for an unroutable address) and applies
+  the same rule against the baseline. A host too far is skipped and avoided 24 h without being rented; a host that does
+  not answer is rented and gated after boot as before.
 
 Outside the gate the replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and
 the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
@@ -830,7 +860,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
-| `ALERT_WEBHOOK_URL` | optional (the owner sets it on the `ai-gateway` and `ai-gateway-reaper` services): a JSON `POST` (`{event, data}`, not Slack's `text` shape; the same line is logged as `ALERT <event>`) for `app.budget_warning` (80 %) / `app.budget_exhausted`; `deployment.create_failed`, `deployment.out_of_stock` and `provider.insufficient_credit` (a create that failed, per deployment, at most once per 30 min); `replica.lost_with_sessions` (a replica released or no longer listed by the provider while it carried requests or realtime sessions); `stage.reserve_down` (a fallback link of a stage chain went `no_key`, `missing`, `pending`, `disabled` or `blocked`) and `stage.no_link` (no link of a chain can serve), once when it happens and again only after it recovered; `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service) |
+| `ALERT_WEBHOOK_URL` | optional (the owner sets it on the `ai-gateway` and `ai-gateway-reaper` services): a JSON `POST` (`{event, data}`, not Slack's `text` shape; the same line is logged as `ALERT <event>`) for `app.budget_warning` (80 %) / `app.budget_exhausted`; `deployment.create_failed`, `deployment.out_of_stock` (a create that failed, per deployment, at most once per 30 min) and `provider.credit_exhausted` (the Vast credit under its floor, or a create refused as `insufficient_credit`; once per 30 min); `replica.lost_with_sessions` (a replica released or no longer listed by the provider while it carried requests or realtime sessions); `stage.reserve_down` (a fallback link of a stage chain went `no_key`, `missing`, `pending`, `disabled` or `blocked`) and `stage.no_link` (no link of a chain can serve), once when it happens and again only after it recovered; `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service) |
 | `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the default for every app; an admin sets one app's own daily budgets with `PUT /v1/apps/:app/limits {dailyRequests?, dailyTokens?}` (stored in `apps.json`, applied at once, `null` = default, `0` = no budget): size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned). `deployments.json` and `apps.json` are written tmp + fsync + rename with the previous good copy in `.bak`; an unreadable file is restored from `.bak` (the bad one kept as `.corrupt-<ms>`, `STATE FILE UNREADABLE` on stderr); with no usable backup the gateway starts with deployments off (`DEPLOYMENTS DISABLED`) and the cloud routes up. A failed write is logged (`STATE WRITE FAILED`) and shown as `stateWriteError` in `/health?deep=1`. With no state file at all, machines of unknown deployments are kept 5 min before the orphan sweep (declared deployments register first). `app-budgets.json` keeps the app daily counts across restarts; `client-stability.jsonl` rotates to `.1` at 5 MB, 20 reports/min per app, 512 KB per report |
 | `DEPLOYMENT_COLD_WAIT_MS` | how long an alias request whose last live link is a deployment waits for a booting replica before the 503 + `Retry-After` (2000; § Cold start) |

@@ -136,7 +136,7 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
         continue;
       }
       // Out of stock here: the next place may still have one. Any other error is the spec's or the account's.
-      if (!isOutOfStock(err)) throw new PlacementError(msg, withSkipped(`failed at ${where(step)}: ${msg}`));
+      if (!isOutOfStock(err) && !/insufficient_credit/.test(msg)) throw new PlacementError(msg, withSkipped(`failed at ${where(step)}: ${msg}`));
       skipped.push(step.provider === 'vast' ? `${where(step)}: ${msg.slice(0, 160)}` : `${step.spec.machineType} out of stock in ${step.spec.zone}`);
       args.log?.('deployments: out of stock, trying the next placement', { deployment: args.spec.name, place: where(step) });
       continue;

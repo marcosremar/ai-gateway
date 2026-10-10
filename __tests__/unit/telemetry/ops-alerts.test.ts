@@ -25,12 +25,16 @@ describe('ops alerts (O3): what reaches ALERT_WEBHOOK_URL', () => {
     alerts.fromDeploymentLog('deployments: create failed', { deployment: 'parle-speech', error: 'create: image not found' });
     alerts.fromDeploymentLog('deployments: replica ready', { deployment: 'parle-speech', id: 'r1' });
     await flush();
-    expect(sent.map(a => a.event)).toEqual(['deployment.out_of_stock', 'provider.insufficient_credit', 'deployment.create_failed']);
+    expect(sent.map(a => a.event)).toEqual(['deployment.out_of_stock', 'provider.credit_exhausted', 'deployment.create_failed']);
+    alerts.fromDeploymentLog('deployments: provider credit exhausted', { provider: 'vast', balanceUsd: 0.4, floorUsd: 1 });
+    await flush();
+    expect(sent).toHaveLength(3);
     expect(sent[2].data).toMatchObject({ deployment: 'parle-speech', error: 'create: image not found', at: '2026-10-12T16:00:00.000Z' });
     advance(OPS_ALERT_DEDUP_MS);
     alerts.fromDeploymentLog('deployments: create failed', { deployment: 'parle-speech', error: 'create: image not found' });
+    alerts.fromDeploymentLog('deployments: provider credit exhausted', { provider: 'vast', balanceUsd: 0.4, floorUsd: 1 });
     await flush();
-    expect(sent).toHaveLength(4);
+    expect(sent.slice(3).map(a => a.event)).toEqual(['deployment.create_failed', 'provider.credit_exhausted']);
   });
 
   it('a replica released or gone with sessions on it alerts; an empty scale-down does not', async () => {

@@ -20,9 +20,13 @@ export function createOpsAlerts(send: (alert: OpsAlert) => unknown, now: () => n
   return {
     fromDeploymentLog(msg: string, data: Record<string, unknown> = {}): void {
       const deployment = String(data.deployment ?? '');
+      if (msg === 'deployments: provider credit exhausted') {
+        fire('provider.credit_exhausted', String(data.provider ?? ''), data);
+        return;
+      }
       if (msg === 'deployments: create failed' || msg === 'deployments: boot failed on the provider') {
         const error = String(data.error ?? '');
-        if (/insufficient_credit|insufficient credit|not enough credit/i.test(error)) fire('provider.insufficient_credit', 'vast', { deployment, error });
+        if (/insufficient_credit|insufficient credit|not enough credit/i.test(error)) fire('provider.credit_exhausted', 'vast', { provider: 'vast', deployment, error });
         else if (/out_of_stock|out of stock/i.test(error)) fire('deployment.out_of_stock', deployment, { deployment, error });
         else fire('deployment.create_failed', deployment, { deployment, error });
         return;

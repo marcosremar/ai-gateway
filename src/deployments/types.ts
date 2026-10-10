@@ -368,7 +368,10 @@ export interface DeploymentBackend {
   /** Read-only: the market offers a create would try for this spec, best first (Vast). */
   previewOffers?(spec: DeploymentSpec): Promise<OfferPreview[]>;
   offersReport?(spec: DeploymentSpec): Promise<OffersReport>;
+  creditIssue?(): CreditIssue | null;
 }
+
+export interface CreditIssue { provider: DeploymentProvider; message: string; balanceUsd: number | null; floorUsd: number; since: number; at: number }
 
 export interface HostNote { rttMs?: number; baselineMs?: number | null; bootMs?: number; udp?: 'ok' | 'blocked' }
 
