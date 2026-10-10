@@ -70,7 +70,22 @@ export function parseLine(body: unknown, cfg: RoomsConfig, now: number): RoomLin
   for (const k of keys) translations[parseLang(k, 'translations key')] = text(rawTr[k], `translations.${k}`, cfg.maxFieldChars);
   const ts = body.ts === undefined || body.ts === null ? now : body.ts;
   if (typeof ts !== 'number' || !Number.isFinite(ts) || ts < 0) throw new RoomError(400, 'ts must be a timestamp in ms');
-  return { id, original, originalLang, translations, ts: Math.floor(ts) };
+  const line: RoomLine = { id, original, originalLang, translations, ts: Math.floor(ts) };
+  const delayMs = parseDelayMs(body.delayMs);
+  if (delayMs !== undefined) line.delayMs = delayMs;
+  return line;
+}
+
+/** Longest accepted `delayMs` (2 min). */
+export const MAX_DELAY_MS = 120_000;
+
+/** Optional `delayMs` of a line: absent/null → undefined; else an integer 0…MAX_DELAY_MS or a 400. */
+export function parseDelayMs(v: unknown): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0 || v > MAX_DELAY_MS) {
+    throw new RoomError(400, `delayMs must be an integer between 0 and ${MAX_DELAY_MS}`);
+  }
+  return v;
 }
 
 export interface AudioInput { lineId: number; lang: string; wav: string }

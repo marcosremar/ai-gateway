@@ -369,3 +369,38 @@ describe('rooms file store', () => {
     expect(linesFromJsonl(text).map(l => [l.id, l.translations.en])).toEqual([[1, 'hello 1'], [2, 'again']]);
   });
 });
+
+describe('rooms line delayMs', () => {
+  it('accepts an optional non-negative integer ≤ 120000, serves it in GET and WS lines, keeps it across a restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rooms-delay-'));
+    try {
+      let gw = await startGateway({}, new FileRoomStore(dir));
+      const room = await newRoom(gw);
+      const v = await viewer(gw, room.code);
+      await v.next('snapshot');
+      expect((await post(gw, room.code, 'lines', { ...line(1), delayMs: 1800 }, room.publishToken)).status).toBe(204);
+      expect(((await v.next('line')).line as Record<string, unknown>).delayMs).toBe(1800);
+      expect((await post(gw, room.code, 'lines', line(2), room.publishToken)).status).toBe(204); // still optional
+      expect((await post(gw, room.code, 'lines', { ...line(3), delayMs: null }, room.publishToken)).status).toBe(204);
+      for (const bad of [-1, 1.5, 120_001, '1800', true]) {
+        const res = await post(gw, room.code, 'lines', { ...line(4), delayMs: bad }, room.publishToken);
+        expect(res.status).toBe(400);
+        expect(JSON.stringify(await res.json())).toMatch(/delayMs/);
+      }
+      expect((await post(gw, room.code, 'lines', { ...line(4), delayMs: 120_000 }, room.publishToken)).status).toBe(204);
+      v.ws.close();
+      const get = async () => (await (await fetch(`${gw.url}/v1/rooms/${room.code}`)).json()) as { lines: Array<Record<string, unknown>> };
+      const check = (body: { lines: Array<Record<string, unknown>> }) => {
+        expect(body.lines.map(l => l.delayMs)).toEqual([1800, undefined, undefined, 120_000]);
+        expect('delayMs' in body.lines[1]!).toBe(false);
+      };
+      check(await get());
+      await gw.close();
+      gw = await startGateway({}, new FileRoomStore(dir));
+      check(await get());
+      await gw.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

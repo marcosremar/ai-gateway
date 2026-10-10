@@ -35,13 +35,15 @@ export function linesFromJsonl(text: string): RoomLine[] {
     let rec: Partial<RoomLine>;
     try { rec = JSON.parse(raw) as Partial<RoomLine>; } catch { continue; }
     if (!rec || typeof rec.id !== 'number' || typeof rec.original !== 'string') continue;
-    byId.set(rec.id, {
+    const line: RoomLine = {
       id: rec.id,
       original: rec.original,
       originalLang: typeof rec.originalLang === 'string' ? rec.originalLang : null,
       translations: rec.translations && typeof rec.translations === 'object' ? rec.translations : {},
       ts: typeof rec.ts === 'number' ? rec.ts : 0,
-    });
+    };
+    if (typeof rec.delayMs === 'number' && Number.isSafeInteger(rec.delayMs) && rec.delayMs >= 0) line.delayMs = rec.delayMs;
+    byId.set(rec.id, line);
   }
   return [...byId.values()].sort((a, b) => a.id - b.id);
 }
@@ -49,7 +51,9 @@ export function linesFromJsonl(text: string): RoomLine[] {
 /** The on-disk record of a line: its fields rebuilt one by one (never the raw request body). */
 function lineRecord(line: RoomLine): string {
   const translations = Object.fromEntries(Object.entries(line.translations).map(([k, v]) => [k, String(v)]));
-  return `${JSON.stringify({ id: line.id, original: line.original, originalLang: line.originalLang, translations, ts: line.ts })}\n`;
+  const rec: Record<string, unknown> = { id: line.id, original: line.original, originalLang: line.originalLang, translations, ts: line.ts };
+  if (typeof line.delayMs === 'number') rec.delayMs = line.delayMs;
+  return `${JSON.stringify(rec)}\n`;
 }
 
 export class MemoryRoomStore implements RoomStore {
