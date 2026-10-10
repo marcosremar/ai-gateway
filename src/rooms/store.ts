@@ -48,8 +48,7 @@ export function linesFromJsonl(text: string): RoomLine[] {
 
 /** The on-disk record of a line: its fields rebuilt one by one (never the raw request body). */
 function lineRecord(line: RoomLine): string {
-  const translations: Record<string, string> = {};
-  for (const [k, v] of Object.entries(line.translations)) translations[k] = v;
+  const translations = Object.fromEntries(Object.entries(line.translations).map(([k, v]) => [k, String(v)]));
   return `${JSON.stringify({ id: line.id, original: line.original, originalLang: line.originalLang, translations, ts: line.ts })}\n`;
 }
 
