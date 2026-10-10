@@ -903,10 +903,13 @@ async def tts_guard() -> None:
     learner, up = await turn(["cut"])
     done = await learner.wait("done", 10)
     heard, audible = await finish(learner, up)
-    check("tts guard, break after audible audio: the turn ends with the tts error, the sentence is not asked again",
-          done.get("error") is True and "tts" in learner.of("error")[0]["message"] and turn_done(mark)["ttsRetries"] == 0
-          and [r["input"] for r in log].count("Bom dia!") == 1 and 0 < len(audible) <= 0.5 * 48000,
-          ([r["input"] for r in log], len(audible)))
+    skipped = [kw for event, kw in telemetry_events[mark:] if event == "edge.tts.sentence_failed"]
+    check("tts guard, break after audible audio: that sentence is skipped (sentence_failed, not asked again), the rest of the reply plays, done without error",
+          not done.get("error") and not learner.of("error") and [e["text"] for e in learner.of("sentence_failed")] == ["Bom dia!"]
+          and done.get("missing_audio") == 1 and len(skipped) == 1 and turn_done(mark)["outcome"] == "ok" and turn_done(mark)["ttsRetries"] == 0
+          and [r["input"] for r in log].count("Bom dia!") == 1 and len(audible) >= 2.0 * 48000
+          and abs(pitches(audible, ((len(audible) / 48000 - 0.4, len(audible) / 48000 - 0.1),))[0] - 210) <= 12,
+          (learner.types(), done, [r["input"] for r in log], len(audible)))
 
     learner, up = await turn(["lead"])
     metrics = await learner.wait("metrics", 10)

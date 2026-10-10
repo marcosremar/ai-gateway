@@ -2163,3 +2163,126 @@ contêiner do gerador encerrados. **Listagem do lado do provedor** com o gateway
 dry run, namespace `marcos-proof-70`): `scaleway seen 0`, `vast seen 0`, `planned []`. As máquinas alheias que ele
 lista são 4 POP2 parados de `dev-marmos/whisper-stt`, não desta prova. Nenhum arquivo com token literal deixado nos
 diretórios de rascunho. Produção não foi tocada (só GETs de leitura); a porta 4000 e `~/.ai-gateway` não foram usadas.
+
+## Plano B ao vivo: especulação, cadeias mais rápidas, prazo do cliente (2026-10-10, `feat/faster-fallback`)
+
+Sem máquina, sem GPU, produção só lida (GET). Um gateway local deste worktree (porta 4250, `DEPLOYMENTS_ENABLED=0`,
+`--no-wake`, chave nova da OpenRouter vinda da API dev), cadeias postas por `MODEL_ROUTES` com um alias por braço,
+para os braços rodarem juntos. Turno: fala gTTS pt-BR de 5,4 s (16 kHz), prompt de padeira de ~90 tokens, 3 mensagens
+de histórico, `max_tokens` 160. `load.ts --n 4 --s2s 4 --no-wake --ramp 10 --duration 110 --turn-every 8 --jitter 2`,
+quatro braços de cada rodada ao mesmo tempo (16 alunos), 50–55 turnos por braço. Relógio: do fim da fala (pedido − 700 ms)
+ao primeiro áudio da resposta. Gasto na OpenRouter na sessão inteira: US$ 1,20 no contador da chave (de 0,001 a 1,198).
+
+Braços (`main` = o que produção tem hoje, conferido por `GET /v1/apps/parle/routes`):
+
+| Braço | STT | LLM | Voz |
+|---|---|---|---|
+| main | `openai/whisper-large-v3-turbo` (o `groq` seguinte é `no_key`) | `qwen/qwen3.5-9b` → `gemini-2.5-flash-lite` | `mai-voice-2.1-flash` → Kokoro |
+| llm | como main | `gemini-2.5-flash-lite` → `qwen3.5-9b` | como main |
+| mid | `deepgram/nova-3` → `whisper-large-v3` → turbo | como llm | como main |
+| fast | `deepgram/nova-3` → `whisper-large-v3` | como llm | `elevenlabs/eleven-flash-v2.5` → MAI → Kokoro |
+
+### 1. Especulação (#66) com a reserva viva — item 12 do § 12.7 do runbook: passa
+
+| Rodada (CEST) | Braço | lead 0: p50 / p95 / máx | lead 500: p50 / p95 / máx | Especulação |
+|---|---|---|---|---|
+| 13:26 | main | 3029 / 5478 / 6440 | 2799 / 4591 / 8947 | 51 enviadas, 51 `hit` |
+| 13:52 | main | 2853 / 3677 / 3921 | 2462 / 3257 / 3355 | 52 / 52 `hit` |
+| 13:52 | llm | 2657 / 3850 / 4897 | 2175 / 3094 / 3929 | 55 / 55 `hit` |
+| 13:30 | mid | 2710 / 3286 / 3901 | 2173 / 3603 / 3791 | 54 / 54 `hit` |
+| 13:26 | fast | 2431 / 3478 / 4034 | **1966 / 2730 / 2897** | 53 / 53 `hit` |
+| 13:30 | fast | — | **1799 / 2532 / 2800** | 52 / 52 `hit` |
+
+A especulação esconde o lead: a transcrição existe 250–420 ms depois do pedido (STT inteiro 750–920 ms p50). Com 30 %
+de pausas retomadas (`--speculate-resume 0.3`, braço fast): 67 enviadas, 15 canceladas, 52 `hit`, 104 frases em 52
+turnos (nenhum turno falado duas vezes), 1878 / 2578 / 3236 ms. O máximo de 8947 ms da rodada 13:26 é um STT de 5,9 s
+do Whisper turbo sozinho (um elo só: o orçamento de 3 s não vale).
+
+**A abertura do servidor esconde o ganho.** Com `first_audio_deadline_ms` 2000 e uma abertura ("Hum, deixa eu ver."),
+ela toca aos 1,7 s em quase todo turno e a resposta só começa quando ela acaba: rodada 13:23, fast com especulação
+2810 ms p50 (sem abertura, 1966), main 3519 com e sem especulação. Com a reserva rápida a resposta chega aos ~2 s, logo
+depois da abertura começar. O parle não manda abertura no `/v1/s2s` hoje (`config.opener` ausente no código dele); quem
+mandar perde 0,8 s de mediana nesse caso. Não mudado aqui.
+
+### 2. Cada estágio pela OpenRouter, direto (13:17–13:30, 4–6 chamadas cada)
+
+| Estágio | Modelo | p50 (mín–máx) ms | Nota |
+|---|---|---|---|
+| STT | `deepgram/nova-3` | 543 (426–960) | transcrição exata; US$ 0,0000717/s |
+| STT | `assemblyai/universal-3-5-pro` | 636 (493–821) | exata |
+| STT | `fish-audio/transcribe-1` | 706 (668–811) | exata |
+| STT | `elevenlabs/scribe-v2` | 877 (770–957) | exata |
+| STT | `openai/whisper-large-v3-turbo` (hoje) | 935 (389–1295) | pontuação solta |
+| STT | `openai/whisper-large-v3` | 1033 (790–2124) | exata |
+| STT | `microsoft/mai-transcribe-2` | 1026 (602–2306) | exata |
+| STT | `gpt-4o-mini-transcribe`, `gpt-transcribe`, `voxtral-mini-transcribe`, `gemini-3.5-transcribe`, `grok-stt-1.0` | — | 404 pela privacidade (ZDR) da conta |
+| LLM 1º token | `google/gemini-2.5-flash-lite` | 300 (265–498) | |
+| LLM 1º token | `mistral-small-3.2-24b` · `gemini-3.1-flash-lite` · `qwen3.5-9b` (hoje) · `gemma-3-27b` | 530 · 550 · 580 · 618 | `gemini-3.5-flash-lite` e `gpt-oss-20b`: raciocínio obrigatório (400) |
+| Voz 1º byte | `elevenlabs/eleven-flash-v2.5` / `turbo-v2.5` | 308 / 292 | pt multilíngue com vozes prontas inglesas; US$ 20/M caracteres (MAI: 15) |
+| Voz 1º byte | `hexgrad/kokoro-82m` | 508 (390–1285) | |
+| Voz 1º byte | `microsoft/mai-voice-2.1-flash` (hoje) / `mai-voice-2-flash` | 684 / 713 | |
+| Voz 1º byte | `eleven-v3-conversational`, `eleven-v4-turbo`, `gemini-3.8-flash-lite-tts` | 846, 900, 1799 | `minimax`, `qwen-audio`, `grok-voice`: 404 (ZDR) |
+
+Nenhum STT por streaming pela OpenRouter (§ Fallback em streaming continua valendo). No turno, por estágio (p50, braço
+fast com especulação): fim de fala 700 + resto do STT 340–420 + 1º token 345–370 + corte 70 + 1º byte da voz 305–310.
+
+### 3. Prazo no relógio do aluno (#59) com a abertura falada pelo cliente
+
+Chrome real (Mac), degrau `s2s-stream` (sem GPU não há `ws`), 1 aluno, 12 turnos, cada 3ª fala retida 3 s
+(`--uplink-stall 3000`), cadeia main, abertura do cliente pela voz de nuvem (`speak` → `/v1/audio/speech`, MAI):
+
+| | Turnos retidos: primeiro som audível | Outros turnos |
+|---|---|---|
+| sem `--client-deadline` | 4983 · 5236 · 5063 · 5430 ms | 1914–2334 ms |
+| com `--client-deadline` | **2020 · 2023 · 2020 · 2030 ms** (abertura local aos 2014–2016 ms, resposta aos 4811–6711 ms) | abertura do servidor aos 1710 ms, resposta 1828–2191 ms |
+
+O teto funciona com a voz de nuvem. Nenhum turno `interrupted` nos 12 (o defeito de 08/10 foi no `ws`, que aqui não
+roda). Limite: o Chrome manda o mesmo clipe a cada turno e o gateway devolve a transcrição do cache, então as respostas
+desta tabela não medem o STT; só o tempo da abertura é a medida.
+
+### 4. Veredito contra a meta do dono (1–1,5 s, teto 2 s)
+
+- Não alcançada. O melhor braço (fast + especulação) dá 1,8–2,0 s p50 e 2,8–2,9 s de máximo; 15–23 % dos turnos
+  ≤ 1,5 s.
+- O que está no parle hoje: 2,9–3,1 s p50, até 6,4 s.
+- Ordem dos ganhos, todos configuração do parle (`backend/speech/gateway-routes.ts` + `deploy:gateway-routes`) ou da
+  página dele:
+  1. especulação na página: −0,4 a −0,5 s;
+  2. voz ElevenLabs flash: −0,35 a −0,4 s, com a ressalva de sotaque e de duas vozes por gênero no lugar da voz por
+     personagem;
+  3. Gemini primeiro: −0,2 s e a cauda do Qwen;
+  4. nova-3 primeiro: −0,1 s e a cauda.
+
+**Feito nesta rodada:**
+- PR do parle com o Gemini primeiro (pedido do dono, 08/10/2026), sem deploy.
+- STT e voz ficam para o dono decidir. Mudam o que o estudo transcreve e o que o aluno ouve (regra 28 do parle).
+- Amostras das vozes foram guardadas fora do git.
+
+### 5. «error upstream» depois do início do áudio
+
+- Só o edge emite `code: upstream`.
+- **TTS de uma frase falhando depois de a resposta já soar:**
+  - **antes:** o turno inteiro morria (`audio_start, error, done{error}`), e as frases seguintes, já sintetizadas, eram
+    jogadas fora;
+  - **agora** (`aigw_edge/session.py` `_answer`): a frase é pulada (`sentence_failed`, telemetria
+    `edge.tts.sentence_failed`), o resto toca e o `done` traz `missing_audio`, como o `/v1/s2s` já fazia;
+  - antes do primeiro som continua sendo erro;
+  - teste: `tests/test_session.py` «break after audible audio», vermelho antes e verde depois.
+- Nos logs de produção do gateway de 09–10/10 não há `edge.upstream.error`: a telemetria do edge fica no stdout da
+  réplica. O turno do smoke não foi achado.
+- **LLM caindo no meio do stream depois do som:** não mudado. Continua `error`. É a outra causa possível.
+
+### 6. Cota de GPU da Scaleway (API IAM `quota`, leitura, 10/10 13:20)
+
+| Tipo | fr-par-2: cota · estoque · €/h | pl-waw-2: cota · estoque · €/h |
+|---|---|---|
+| H100-1-80G | 2 · available · 2,87 | 2 · shortage · 2,87 |
+| L40S-1-48G | 2 · shortage · 1,47 | 2 · scarce · 1,47 |
+| L4-1-24G | 2 · available · 0,79 | 2 · available · 0,79 |
+
+- A cota não é 0. O lugar H100 em fr-par-2 serve de fato: cabe no `maxEurPerHour` 3 do `parle-speech`, com só € 0,13
+  de folga.
+- Em pl-waw-2, o H100 é pulado enquanto houver falta de estoque.
+- Nenhum servidor GPU está ligado no projeto.
+- Não precisa pedir aumento de cota para 1–2 réplicas. Se a turma pedir 3 ou mais réplicas H100 na mesma zona, aí
+  precisa.
