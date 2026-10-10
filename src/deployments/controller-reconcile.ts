@@ -92,6 +92,11 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (rt && rt.record.lastRequestAt == null && rt.record.spec.minReplicas === 0 && l.createdAt < this.startedAt
         && !this.machines.some(m => m.id === l.id) && replicaPhase(this.observed(l, 0)) !== 'halted') rt.record.lastRequestAt = this.startedAt;
     }
+    for (const m of this.machines.filter(x => !this.listStale(x, failed) && !listed.some(l => l.id === x.id) && !recent.includes(x))) {
+      const rt = this.deployments.get(m.deployment);
+      const busy = rt ? this.busyOn(rt, m.id) : 0;
+      if (busy > 0) this.log('deployments: replica gone', { deployment: m.deployment, id: m.id, busy });
+    }
     // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
     const before = this.machines;
     this.machines = [...listed.filter(l => !this.releasing.has(l.id)).map((l) => {
@@ -175,17 +180,17 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (this.now() - (this.startRefused.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
       toCreate--;
       if (this.now() - (rt.starting.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
-      const refusal = this.capRefusal(m.pricePerHour ?? 0);
+      const refusal = this.capRefusal(m.pricePerHour ?? 0, name);
       if (refusal) { rt.lastError = refusal; blockedBy = refusal; break; }
       if (!(await this.unpark(rt, m))) toCreate++;
     }
     if (toCreate > 0) {
       const price = all.find(m => m.pricePerHour != null)?.pricePerHour ?? 0;
-      let refusal = this.capRefusal(price);
+      let refusal = this.capRefusal(price, name);
       // Under pressure and capped: take idle capacity from another deployment first (it frees on this tick).
       if (refusal && plan.active) {
         const note = await this.reclaimFor(rt);
-        if (note) { refusal = this.capRefusal(price); blockedBy = refusal ? `${refusal} (${note}, more needed)` : null; }
+        if (note) { refusal = this.capRefusal(price, name); blockedBy = refusal ? `${refusal} (${note}, more needed)` : null; }
         else blockedBy = refusal;
       } else blockedBy = refusal ?? (this.now() < rt.backoffUntil ? this.backoffNote(rt) : null);
     }

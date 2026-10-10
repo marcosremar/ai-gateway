@@ -206,6 +206,15 @@ check("history: the estimate is over the 509 tokens llama.cpp counted for a 332-
 check("history: an accented letter counts by its bytes, an empty text costs nothing",
       text.estimate_tokens("ééé") == text.MESSAGE_TOKENS + 2 and text.estimate_tokens("") == text.estimate_tokens(None) == 0)
 
+long_prompt = "Você é a Lia, atendente da padaria em Copacabana. " * 320
+check("prompt overflow: 16 KB of Portuguese does not fit a 2048-token slot, fits 8192; a short prompt fits",
+      len(long_prompt.encode()) > 16_000 and "2048-token context" in (text.prompt_overflow({"system": long_prompt}, 2048) or "")
+      and text.prompt_overflow({"system": long_prompt}, 8192) is None and text.prompt_overflow({"system": "Tu es Lia."}, 2048) is None)
+check("prompt overflow: the same bounds as the gateway (max_tokens, pinned system messages)",
+      text.prompt_overflow({"system": "x" * 5000, "max_tokens": 160}, 2048) is None
+      and text.prompt_overflow({"system": "x" * 5000, "max_tokens": 300}, 2048) is not None
+      and text.prompt_overflow({"system": "x", "messages": [{"role": "system", "content": long_prompt}]}, 2048) is not None)
+
 try:
     import asyncio
 

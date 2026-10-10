@@ -1,6 +1,7 @@
 import type { PressureDecision } from './autoscale';
 import { autoscaleSettings } from './autoscale';
 import { DEFAULT_RT_MAX_SESSIONS } from './cloud-init';
+import { placementsOf } from './placements';
 import { ParkingControl } from './controller-parking';
 import { activeWindow } from './autoscale';
 import { isParked, machineTypesOf, REFUSED_HOLD_MS, round3, type Runtime } from './controller-state';
@@ -18,6 +19,7 @@ interface ScalingState { trace: LoadSample[]; refusals: { at: number; n: number 
 
 const measuredKey = (machineType: string, image: string) => `${machineType}|${image || 'boot-script'}`;
 const monthOf = (now: number) => new Date(now).toISOString().slice(0, 7);
+const imageOn = (spec: DeploymentSpec, machineType: string) => placementsOf(spec).find(p => p.machineType === machineType)?.image ?? spec.image;
 
 function sessionCeiling(spec: DeploymentSpec, machineType = spec.machineType): CapacityEntry['ceiling'] {
   const configured = spec.realtime?.maxSessions ?? (Number(spec.envByMachineType?.[machineType]?.RT_MAX_SESSIONS) || null);
@@ -164,7 +166,7 @@ export abstract class ScalingControl extends ParkingControl {
     const resumedAt = this.poweredOnAt.get(m.id);
     const from = resumedAt ?? m.createdAt;
     if (from < this.startedAt) return;
-    const key = measuredKey(m.machineType, rt.record.spec.image);
+    const key = measuredKey(m.machineType, imageOn(rt.record.spec, m.machineType));
     const kind = resumedAt === undefined ? 'boot' : 'resume';
     const entry = rt.record.measured?.[key] ?? { boot: [], resume: [] };
     const samples = [...entry[kind], Math.round((this.now() - from) / 1000)].slice(-MEASURED_KEEP);
@@ -195,7 +197,8 @@ export abstract class ScalingControl extends ParkingControl {
     const time = (samples: number[] | undefined, fallback: number): CapacityTime => (
       { seconds: median(samples) ?? fallback, source: samples?.length ? 'measured' : 'default', samples: samples?.length ?? 0 });
     const capacity = [...types].map((machineType): CapacityEntry => {
-      const seen = measured?.[measuredKey(machineType, spec.image)];
+      const image = imageOn(spec, machineType);
+      const seen = measured?.[measuredKey(machineType, image)];
       const ceiling = sessionCeiling(spec, machineType);
       const boot = time(seen?.boot, DEFAULT_BOOT_SECONDS);
       const resume = time(seen?.resume, DEFAULT_RESUME_SECONDS);
@@ -203,7 +206,7 @@ export abstract class ScalingControl extends ParkingControl {
         ...(ceiling.source === 'default' ? ['ceiling'] : []), ...(boot.samples < CONFIDENT_SAMPLES ? ['boot'] : []),
         ...(spec.idleAction === 'stop' && resume.samples < CONFIDENT_SAMPLES ? ['resume'] : []),
       ];
-      return { machineType, image: spec.image, ceiling, boot, resume, confident: missing.length === 0, missing };
+      return { machineType, image, ceiling, boot, resume, confident: missing.length === 0, missing };
     });
     const month = monthOf(now);
     const spentEur = spend?.month === month ? round3(spend.eur) : 0;

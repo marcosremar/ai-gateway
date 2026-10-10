@@ -12,7 +12,7 @@ export const REPLICA_TOKEN = 'replica-token-for-tests';
 
 export interface FakeReplica { id: string; ip: string | null; phase?: string; draining?: boolean; stagesOut?: string[] }
 
-export function fakeController(opts: { app?: string | null; replicas?: FakeReplica[]; paused?: boolean; exposure?: boolean } = {}) {
+export function fakeController(opts: { app?: string | null; replicas?: FakeReplica[]; paused?: boolean; exposure?: boolean; spec?: Record<string, unknown> } = {}) {
   const state = {
     app: opts.app === undefined ? 'parle' : opts.app,
     replicas: opts.replicas ?? [],
@@ -25,7 +25,7 @@ export function fakeController(opts: { app?: string | null; replicas?: FakeRepli
       replicas: state.replicas.map(r => ({ id: r.id, ip: r.ip, phase: r.phase ?? 'ready', draining: !!r.draining, ...(r.stagesOut ? { stagesOut: r.stagesOut } : {}) })),
     } as never : null),
     tokenOf: (name: string) => (state.exists && name === 'speech' ? REPLICA_TOKEN : null),
-    specOf: (name: string) => (name === 'speech' ? { exposure: opts.exposure ? {} : undefined } as never : null),
+    specOf: (name: string) => (name === 'speech' ? { exposure: opts.exposure ? {} : undefined, ...opts.spec } as never : null),
     wake: (name: string) => { state.woken++; return { name } as never; },
   };
   return { controller, state };

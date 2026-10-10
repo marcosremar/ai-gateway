@@ -103,7 +103,11 @@ export function createSignalingHandler(service: RealtimeService, opts: Signaling
         const upstream = await forward(session, trace, 'POST', '/__aigw/rt/offer', {
           sdp: body.sdp, type: 'offer', token, ...(iceServers.length ? { iceServers } : {}), ...(typeof body.cfg === 'string' ? { cfg: body.cfg } : {}),
         });
-        const answer = await upstream.json().catch(() => null) as { sdp?: unknown; type?: unknown; sessionId?: unknown } | null;
+        const answer = await upstream.json().catch(() => null) as { sdp?: unknown; type?: unknown; sessionId?: unknown; error?: { message?: unknown } } | null;
+        if (upstream.status === 413) {
+          fail(res, 413, 'prompt_too_large', typeof answer?.error?.message === 'string' ? answer.error.message : 'the session config does not fit the LLM context');
+          return true;
+        }
         if (!upstream.ok || !answer || typeof answer.sdp !== 'string') {
           const status = upstream.status === 409 || upstream.status === 429 || upstream.status === 503 ? 503 : 502;
           log('realtime: offer refused by the replica', { sid: id, replica: session.replicaId, status: upstream.status });

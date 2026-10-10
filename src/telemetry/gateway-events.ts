@@ -24,6 +24,7 @@ const MAP: Record<string, { event: string; level?: TelemetryLevel }> = {
   'deployments: stage back in rotation': { event: 'replica.stage_back' },
   'deployments: draining replica': { event: 'replica.draining' },
   'deployments: releasing replica': { event: 'replica.released' },
+  'deployments: replica gone': { event: 'replica.gone', level: 'warn' },
   'deployments: parking replica (power off)': { event: 'replica.parked' },
   'deployments: powering parked replica on': { event: 'replica.power_on' },
   'deployments: list failed': { event: 'provider.list_failed', level: 'warn' },

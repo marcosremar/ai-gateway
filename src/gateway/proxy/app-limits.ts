@@ -68,7 +68,9 @@ interface BudgetUse { used: number; limit: number; perMinute: number; exhaustedA
 export interface AppBudgetView { app: string; resetAt: string; requests: BudgetUse; tokens: BudgetUse }
 
 type Counts = Record<Budget, number>;
-interface Usage extends Counts { day: number; chargedAt: number; marks: [Counts & { at: number }, Counts & { at: number }]; flagged: Set<string> }
+interface Usage extends Counts {
+  day: number; chargedAt: number; marks: [Counts & { at: number }, Counts & { at: number }]; flagged: Set<string>; exhausted: Partial<Counts>;
+}
 
 export const BUDGET_WARNING_RATIO = 0.8;
 const RATE_WINDOW_MS = 5 * 60_000;
@@ -89,7 +91,7 @@ function intEnv(raw: string | undefined, dflt: number): number {
 
 const estimateTokens = (text: string) => Math.ceil(text.length / 4);
 
-type SavedUsage = Record<string, { day: number; requests: number; tokens: number; flagged?: string[] }>;
+type SavedUsage = Record<string, { day: number; requests: number; tokens: number; flagged?: string[]; exhausted?: Partial<Counts> }>;
 
 function loadUsage(path: string, now: number): Map<string, Usage> {
   let saved: SavedUsage;
@@ -101,7 +103,7 @@ function loadUsage(path: string, now: number): Map<string, Usage> {
   }
   return new Map(Object.entries(saved).map(([app, u]) => {
     const mark = { at: now, requests: u.requests, tokens: u.tokens };
-    return [app, { day: u.day, chargedAt: now, requests: u.requests, tokens: u.tokens, marks: [mark, mark], flagged: new Set(u.flagged ?? []) }];
+    return [app, { day: u.day, chargedAt: now, requests: u.requests, tokens: u.tokens, marks: [mark, mark], flagged: new Set(u.flagged ?? []), exhausted: u.exhausted ?? {} }];
   }));
 }
 
@@ -129,7 +131,7 @@ export class AppLimits {
     this.saveTimer = null;
     const path = this.opts.statePath;
     if (!path) return Promise.resolve();
-    const apps: SavedUsage = Object.fromEntries([...this.usage].map(([app, u]) => [app, { day: u.day, requests: u.requests, tokens: u.tokens, flagged: [...u.flagged] }]));
+    const apps: SavedUsage = Object.fromEntries([...this.usage].map(([app, u]) => [app, { day: u.day, requests: u.requests, tokens: u.tokens, flagged: [...u.flagged], exhausted: u.exhausted }]));
     this.saving = this.saving.catch(() => {}).then(() => writeStateFile(path, JSON.stringify({ version: 1, apps }))).catch((err: unknown) => {
       console.error('app limits: BUDGET WRITE FAILED', { path, error: err instanceof Error ? err.message : String(err) });
     });
@@ -225,7 +227,7 @@ export class AppLimits {
     let u = this.usage.get(userId);
     if (!u || u.day !== day) {
       const mark = { at: now, requests: 0, tokens: 0 };
-      u = { day, chargedAt: now, requests: 0, tokens: 0, marks: [mark, mark], flagged: new Set() };
+      u = { day, chargedAt: now, requests: 0, tokens: 0, marks: [mark, mark], flagged: new Set(), exhausted: {} };
       this.usage.set(userId, u);
     }
     const limits = this.limitsFor(userId);
@@ -233,6 +235,8 @@ export class AppLimits {
     const resetAt = new Date((day + 1) * DAY_MS).toISOString();
     const over = BUDGETS.find(b => limits[b] > 0 && u[b] + add[b] > limits[b]);
     if (over) {
+      u.exhausted[over] ??= now;
+      this.scheduleSave();
       this.flag(userId, u, 'app.budget_exhausted', over, limits[over], resetAt);
       return {
         status: 429, type: 'budget_exceeded', code: 'daily_budget_exhausted', budget: over, resetAt,
@@ -269,7 +273,7 @@ export class AppLimits {
       const minutes = (now - from.at) / 60_000;
       const use = (b: Budget): BudgetUse => {
         const perMinute = minutes >= 1 && now - u.chargedAt < RATE_WINDOW_MS ? (u[b] - from[b]) / minutes : 0;
-        const at = perMinute > 0 ? now + ((limits[b] - u[b]) / perMinute) * 60_000 : Infinity;
+        const at = u.exhausted[b] ?? (perMinute > 0 ? now + ((limits[b] - u[b]) / perMinute) * 60_000 : Infinity);
         return {
           used: u[b], limit: limits[b], perMinute: Math.round(perMinute * 10) / 10,
           exhaustedAt: limits[b] > 0 && at < reset ? new Date(at).toISOString() : null,

@@ -9,7 +9,10 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { randomUUID } from 'crypto';
 import type { DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
+import { placementsOf } from '../deployments/placements';
 import { replicaTls } from '../deployments/replica-tls';
+import type { DeploymentSpec } from '../deployments/types';
+import { DEFAULT_SLOT_CTX, promptOverflow } from '../s2s/history';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import type { AppLimitDenial } from '../gateway/proxy/app-limits';
 import { EdgeStatusCache, type EdgeStatus, type EdgeStatusResult } from './edge-status';
@@ -27,6 +30,12 @@ import {
   configDigest, deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, signUpdateToken, verifySessionToken,
   RT_MAX_CFG_CHARS, RT_MAX_CFG_REF_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
 } from './token';
+
+function llmSlotContext(spec: DeploymentSpec | null): number {
+  if (!spec) return DEFAULT_SLOT_CTX;
+  const ctxOn = (place: DeploymentSpec) => Number(place.env?.LLM_SLOT_CTX ?? place.envByMachineType?.[place.machineType]?.LLM_SLOT_CTX) || DEFAULT_SLOT_CTX;
+  return Math.min(...placementsOf(spec).map(ctxOn));
+}
 
 export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list' | 'noteUdp'>>;
 
@@ -334,6 +343,11 @@ export class RealtimeService {
         'config_too_large'));
     }
     const byReference = cfg.length > RT_MAX_CFG_CHARS;
+    const tooLong = promptOverflow(cfgIn, llmSlotContext(controller.specOf(dep)));
+    if (tooLong) {
+      this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: 'prompt_too_large', status: 413, deployment: dep } });
+      return sendJson(res, 413, errorBody(tooLong, 'prompt_too_large'));
+    }
 
     const blocked = this.opts.devices?.admit(app, body.device, 'realtime') ?? null;
     if (blocked) {
