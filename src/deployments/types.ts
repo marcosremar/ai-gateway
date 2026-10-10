@@ -204,6 +204,8 @@ export interface DeploymentRecord {
   spec: DeploymentSpec;
   /** Deployment secret, never sent to a machine: each replica's `X-Aigw-Token` is derived from it and the machine's `tokenKey`. */
   replicaToken: string;
+  /** Replicas made before a secret rotation keep the secret their token came from: tokenKey (or `id:<machine>`) → secret. */
+  secretPins?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
   lastRequestAt: number | null;

@@ -466,6 +466,7 @@ export abstract class ControllerState {
   }
 
   protected replicaToken(rt: Runtime, machine: ReplicaMachine): string {
-    return replicaTokenFor(rt.record.replicaToken, machine.tokenKey ?? this.tokenKeys.get(machine.id));
+    const tokenKey = machine.tokenKey ?? this.tokenKeys.get(machine.id);
+    return replicaTokenFor(rt.record.secretPins?.[tokenKey ?? `id:${machine.id}`] ?? rt.record.replicaToken, tokenKey);
   }
 }

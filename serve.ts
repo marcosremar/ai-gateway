@@ -25,6 +25,10 @@ import { createFallbackWatch, stageChainsReport, type ChainLinkSpec } from './sr
 import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
 import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
+import { AccessKeys } from './src/config/access-keys';
+import { AdminGate } from './src/config/admin-gate';
+import { createAccessRoutes } from './src/config/access-routes';
+import { KeyAudit } from './src/config/key-audit';
 import { createS2SRoute } from './src/s2s/route';
 import { streamCuts } from './src/telemetry/stream-cuts';
 import { createS2SAccess } from './src/s2s/access';
@@ -35,14 +39,15 @@ import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
-import { adminListWarning, adminUsersFromEnv, bootFilesRoute, deploymentsFromEnv, proxyIdleTimeoutMs, DEVICE_HEADER } from './src/deployments';
+import {
+  adminListWarning, adminUsersFromEnv, bootFilesRoute, deploymentsFromEnv, proxyIdleTimeoutMs, DEPLOYMENT_CREDENTIAL_KEYS, DEVICE_HEADER,
+} from './src/deployments';
 import { buildImages } from './src/deployments/build-images';
-import { ApiKeyRegistry } from './src/gateway/proxy/middleware/api-keys';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
-import { gatewayClientKeys, loadSandboxEnv, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
+import { gatewayClientKeys, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
 import {
-  deploymentLogToTelemetry, emitGatewayEvent, isMasterToken, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
+  deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
@@ -57,7 +62,15 @@ const log = createLogger('serve');
 // OPENROUTER_API_KEY, … — whatever the palco catalog holds) comes from the dev API, whose values win over Railway
 // variables (see sandbox-env.ts). It is NOT a client key nor an admin (`gatewayClientKeys`; transition flag
 // ACCEPT_SANDBOX_TOKEN_AS_KEY=1 restores that).
-const sandboxEnv = await loadSandboxEnv(process.env);
+// Client/admin keys, the admin list and the SANDBOX_TOKEN also change at runtime (src/config/access-keys.ts): issued,
+// revoked and rotated through /v1/admin/access/*, persisted in the state dir, every change in key-audit.jsonl.
+const stateDir = process.env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway');
+const keyAudit = new KeyAudit({ path: join(stateDir, 'key-audit.jsonl'), log: (msg, data) => log.log(data ?? {}, msg) });
+const access = new AccessKeys(process.env, { path: join(stateDir, 'access.json'), log: (msg, data) => log.warn(data ?? {}, msg) });
+await keyAudit.init();
+await access.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) },
+  'ACCESS STATE UNREADABLE: issued keys, revocations and the admin list from the API are not applied — restore access.json'));
+const sandboxEnv = await access.bootSandboxEnv();
 if (sandboxEnv.source) log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
 else if (sandboxEnv.errors.length) log.warn({ errors: sandboxEnv.errors }, 'Dev API unreachable — using the environment only');
 const SANDBOX_TOKEN = principalSandboxToken(process.env);
@@ -68,6 +81,10 @@ for (const w of clientKeys.warnings) log.warn({}, `WARNING: ${w}`);
 const API_KEYS = clientKeys.keys;
 /** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1 + SANDBOX_TOKEN_ADMIN=1. */
 const EXTRA_ADMINS = clientKeys.sandboxAdmins;
+access.setBaseAdmins(adminUsersFromEnv(process.env, EXTRA_ADMINS), EXTRA_ADMINS);
+access.start();
+const adminUsers = access.admins;
+const keysConfigured = () => access.size > 0;
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '0');
 
 async function listOpenRouterModels(): Promise<string[]> {
@@ -82,16 +99,17 @@ async function listOpenRouterModels(): Promise<string[]> {
     .filter((id): id is string => typeof id === 'string' && id.length > 0);
 }
 
-log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
+log.log({ port: PORT, apiKeys: access.size, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
 
 const prefixRoutes: PrefixRoute[] = [];
 
 // Deployments: Docker image → autoscaled replicas on Scaleway and/or Vast (enabled when SCW_SECRET_KEY or VAST_API_KEY is set).
-const keyRegistry = new ApiKeyRegistry((API_KEYS ?? []).join(','));
+const keyRegistry = access;
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
 const configuredDeployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: EXTRA_ADMINS,
+  admins: adminUsers,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
   log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); },
@@ -206,9 +224,22 @@ setInterval(() => fallbackWatch(chainsNow().stages), 15_000).unref();
 
 // Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys
 // writes them to the palco. A key that appears or disappears re-mounts the providers in place.
+// A machine credential that changed is validated before its backend uses it; a refused one is put back in the
+// environment (the backend keeps the previous one, nothing in flight is touched) and retried on the next reload.
+async function rotateDeploymentCredentials(names: string[]) {
+  const changed = names.filter(n => (DEPLOYMENT_CREDENTIAL_KEYS as readonly string[]).includes(n));
+  if (!changed.length || !deployments) return;
+  const r = await deployments.rotateCredentials(process.env);
+  for (const { provider, error } of r.rejected) log.error({ provider, error }, 'New machine credentials refused — keeping the previous ones');
+  if (r.needsRestart.length) log.warn({ providers: r.needsRestart }, 'A machine provider got a key but has no backend yet: restart the gateway to enable it');
+  const detail = [...r.rejected.map(x => `${x.provider}: ${x.error}`), ...r.needsRestart.map(p => `${p}: needs restart`)].join('; ');
+  keyAudit.record({ actor: 'palco-reload', action: 'deployment-credentials.rotate', names: changed, ok: r.rejected.length === 0, ...(detail ? { detail } : {}) });
+}
 const keyManager = new KeyManager(process.env, {
   log: (msg, data) => log.log(data ?? {}, msg),
   onChange: async (names) => {
+    keyAudit.record({ actor: 'palco-reload', action: 'provider-keys.applied', names, ok: true });
+    await rotateDeploymentCredentials(names);
     if (names.includes('OPENROUTER_API_KEY')) openrouterKey = await checkOpenRouterKey(process.env);
     for (const id of providersOfKeys(names)) {
       resetProviderBreakers(id);
@@ -224,13 +255,16 @@ if (SANDBOX_TOKEN) keyManager.start();
 
 // GET /health?deep=1 and /v1/admin/keys — same admins as deployments: DEPLOYMENTS_ADMIN_USERS only.
 // An empty list grants nobody (fail closed; it used to make every key an admin).
-const adminUsers = adminUsersFromEnv(process.env, EXTRA_ADMINS);
 const adminWarning = adminListWarning(process.env, EXTRA_ADMINS);
 if (adminWarning) log.warn({}, `WARNING: ${adminWarning}`);
 const isAdminToken = (token: string) => {
   const userId = keyRegistry.resolve(token)?.userId;
   return Boolean(userId && adminUsers.has(userId));
 };
+const adminGate = new AdminGate({
+  actorOf: (token) => { const userId = keyRegistry.resolve(token)?.userId; return userId && adminUsers.has(userId) ? userId : null; },
+  audit: keyAudit,
+});
 // What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
 // clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
 const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
@@ -239,7 +273,7 @@ const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
   return routes ? new Set(Object.keys(routes)) : null;
 };
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
-const appLimits = API_KEYS.length ? new AppLimits({
+const appLimits = keysConfigured() ? new AppLimits({
   env: process.env,
   statePath: join(process.env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway'), 'app-budgets.json'),
   isAdmin: (userId) => adminUsers.has(userId),
@@ -253,7 +287,7 @@ const appLimits = API_KEYS.length ? new AppLimits({
 }) : undefined;
 // POST /v1/s2s: a non-admin key uses only its own app's deployments, under its app limits (src/s2s/access.ts).
 const s2sAdmit = createS2SAccess({
-  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? '' : null),
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? '' : null),
   isAdmin: (userId) => adminUsers.has(userId),
   deploymentApp: (name) => { const d = controller?.get(name); return d ? d.app ?? null : undefined; },
   appRoutes: (app) => deployments?.apps.get(app)?.routes,
@@ -268,7 +302,7 @@ const telemetry = telemetryFromEnv(process.env, {
   auth: {
     resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
     resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
-    isMasterKey: (token) => isMasterToken(token, process.env),
+    isMasterKey: (token) => access.isSandboxToken(token),
     replica: (id) => controller?.replicaAuth(id) ?? null,
   },
   isAdminToken,
@@ -332,8 +366,8 @@ const realtime = createRealtime({
     ? { probeUdpImpl: async () => ({ result: 'blocked' as const, rttMs: null, tries: 0 }) }
     : {}),
   // No keys configured: the proxy only lets localhost in, as `localhost` (dev), which may use any deployment.
-  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
-  isAdmin: (userId) => adminUsers.has(userId) || (!API_KEYS.length && userId === 'localhost'),
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? null : 'localhost'),
+  isAdmin: (userId) => adminUsers.has(userId) || (!keysConfigured() && userId === 'localhost'),
   ...(appLimits ? { charge: (userId: string, n: number) => appLimits.chargeRequests(userId, n) } : {}),
   ...(deployments ? { devices: deployments.devices } : {}),
   ...(telemetry ? { telemetry: realtimeSinkToTelemetry(telemetry.ingest) } : {}),
@@ -348,7 +382,7 @@ const rooms = createRooms({
     const userId = keyRegistry.resolve(token)?.userId;
     return userId ? { userId, admin: adminUsers.has(userId) } : null;
   },
-  userOf: (req) => (API_KEYS.length ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 log.log({ dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl }, 'Rooms enabled');
@@ -362,6 +396,7 @@ const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
   apiKeys: API_KEYS,
+  keyRegistry,
   providers,
   deepHealth,
   ...(appLimits ? { appLimits } : {}),
@@ -371,7 +406,7 @@ const server = await startProxy({
     ? { images: buildImages(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
   customRoutes: [
-    ...createKeyAdminRoutes(keyManager, isAdminToken), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
+    ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
     rooms.route, ...(telemetry?.adminRoutes ?? []),
   ],
   publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : [])],
@@ -414,6 +449,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     rooms.stop();
     declared?.stop();
     keyManager.stop();
+    void access.stop();
+    void keyAudit.flush();
     telemetry?.stop();
     void appLimits?.flush();
     setGatewayTelemetrySink(null);

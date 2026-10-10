@@ -155,7 +155,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
 
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
 
-  constructor(private readonly apiKey: string, opts: {
+  constructor(private apiKey: string, opts: {
     fetch?: FetchLike; now?: () => number; rtt?: RttMeasure; log?: (msg: string, data?: Record<string, unknown>) => void; hosts?: HostStore;
   } = {}) {
     this.log = opts.log ?? (() => {});
@@ -163,6 +163,16 @@ export class VastDeploymentBackend implements DeploymentBackend {
     this.now = opts.now ?? Date.now;
     this.rtt = opts.rtt ?? defaultRtt;
     this.hosts = new HostReputation({ store: opts.hosts, max: KNOWN_RTT_MAX_HOSTS, now: this.now, log: this.log });
+  }
+
+  get currentKey(): string { return this.apiKey; }
+
+  async rotateKey(next: string): Promise<void> {
+    const res = await this.fetchImpl(`${VAST_API}/users/current/`, {
+      method: 'GET', headers: { Authorization: `Bearer ${next}` }, signal: AbortSignal.timeout(30_000),
+    }).catch((err: unknown) => { throw new Error(`Vast unreachable: ${err instanceof Error ? err.name : 'error'}`); });
+    if (!res.ok) throw new Error(`the new Vast key was refused: HTTP ${res.status}`);
+    this.apiKey = next;
   }
 
   private knownGood(h: HostRecord | undefined, now: number): h is HostRecord & { rttMs: number } {
