@@ -105,13 +105,14 @@ the status); admission then places new sessions on another replica or sends them
 ### Events and control messages
 
 Edge → client (data channel "events", JSON, or WS text frames), the s2s vocabulary:
-`{type:"ready"}`, `{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
+`{type:"ready"}`, `{type:"turn_ack"}` (a client `end_turn` was received: sent at once, before the turn's own events),
+`{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
 `{type:"reply_delta", text}`, `{type:"reply", text}`, `{type:"audio_start"}`, `{type:"audio_end"}`,
 `{type:"interrupted"}`, `{type:"done", empty?, filtered?, intercepted?, said?, tag?, served?}`, `{type:"intercept", tag, action}`,
 `{type:"say", text, tag}`, `{type:"config_applied", n}`, `{type:"error", code, message}`,
 `{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms, endpoint_ms, ttfa_from_speech_ms, first_sound_ms,
-first_sound_from_speech_ms, opener, deadline_ms, deadline_missed, uplink_lost_ms, out_first_pull_ms, rtp_first_sent_ms,
-rtp_late_p50_ms, rtp_late_p95_ms, rtp_late_max_ms}` (the last five on WebRTC, docs/realtime-edge.md), `{type:"opener", state:"start"|"end", text, index,
+first_sound_from_speech_ms, opener, deadline_ms, deadline_missed, uplink_lost_ms, uplink_recovered_ms, uplink_fec_pct, uplink_red_pct,
+out_first_pull_ms, rtp_first_sent_ms, rtp_late_p50_ms, rtp_late_p95_ms, rtp_late_max_ms}` (the last five on WebRTC, docs/realtime-edge.md), `{type:"opener", state:"start"|"end", text, index,
 audio_ms}`, `{type:"deadline_missed", deadline_ms}` (next section).
 
 Client → edge: `{type:"interrupt"}`, `{type:"end_turn"}` (client VAD: the learner stopped), `{type:"config_update",
@@ -454,8 +455,9 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
 
 - **Offer timing** — the SDK does not wait out `iceGatherMs`: the offer leaves at the first server-reflexive or relay
   candidate, when gathering completes, or at the ceiling. A webrtc transport offer with `iceTransportPolicy: "relay"`
-  is passed to the peer connection and then only a relay candidate releases the offer. Candidates gathered later are
-  not signalled (non-trickle): the browser still checks from them, and the edge learns them as peer-reflexive.
+  is passed to the peer connection and then only a relay candidate releases the offer. A candidate gathered after the
+  offer left is posted to the session's `iceUrl` once the answer is in (HTTP, so loss on the media path does not eat
+  it); the edge would also learn it as peer-reflexive from the browser's own checks.
 - **Playout delay** — `playoutDelayMs` (session option, default 0) is written to the receiver's `jitterBufferTarget`
   (milliseconds, 0–4000 in the W3C spec), or to `playoutDelayHint` (seconds) where only that exists; a browser with
   neither is left alone. 0 is the lowest value the spec allows and asks for no added delay: the browser still buffers
@@ -467,8 +469,17 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   switches **between turns** — nobody speaking, no reply pending or playing, 300 ms after the last audio —: it closes
   the WS (capture and player stop), puts the microphone track on the peer connection (`replaceTrack`), replays the
   conversation with one `config_update`, and emits `transport {transport:"webrtc", reason:"upgrade", from:"ws"}`.
-  WebRTC not connected `upgradeMs` (5 s) after the start on WS is given up without any error and the session stays
-  on WS. WebRTC ready first: the WS attempt is cancelled. Both failing: the clip rungs, in order. A WS that breaks
+  **The two budgets are separate.** What serves the first turn is decided in the foreground budget of the table. The
+  WebRTC attempt behind a serving WS is patient, because waiting costs the learner nothing: `upgradeConnectMs` (12 s)
+  from the answer to a connected peer connection, `upgradeTries` (2) tries with `upgradeBackoffMs` (2 s, doubling)
+  between them — a retry is a new offer on the same edge session, which closes the previous peer connection —, all
+  inside `upgradeMs` (40 s). On the loopback harness with 75 ms each way a connection takes 0.9 s at the median and
+  up to 2.9 s at 5 % loss, 5.0 s at 10 % (DTLS and SCTP retransmission timers): the 3 s foreground budget cuts a
+  tenth of them at 10 %, the patient one none. An attempt that runs out is given up without any error (telemetry
+  `rt.ladder.fallback`, `rt.webrtc.retry`), its peer connections closed and its edge session deleted, and the session
+  stays on WS. With no WS to serve the learner (it failed) the WebRTC attempt is held to the foreground budget and the
+  clip rungs follow; with WebRTC as the only rung (`preferredTransports: ['webrtc']`) it gets the patient budget and
+  then `error{code:"no_transport"}` naming the time it waited. WebRTC ready first: the WS attempt is cancelled. Both failing: the clip rungs, in order. A WS that breaks
   while WebRTC is still connecting waits for it instead of dropping to a clip rung. The edge runs the two sessions of
   one `sid` side by side and counts the learner once (docs/realtime-edge.md); the standby one hears nothing, so a
   turn is never run twice.
@@ -504,7 +515,81 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   the learner to repeat.
 - Voice (`@parle/ai-gateway/voice`): Silero `vadEnd` + the rest of `endSilenceMs` → `end_turn`; `vadStart` while the NPC
   speaks → `interrupt` (barge-in); on the clip rungs the voice SDK's turn-taking records the clip.
-- Without `voice`, the page calls `sendEndTurn()`, `interrupt()`, `sendTurn(wav)` itself.
+- Without `voice`, the page calls `sendEndTurn(clip?)`, `interrupt()`, `sendTurn(wav)` itself.
+- **Uplink stalled: the turn is rescued over HTTP** (`rescueMs`, 1200 ms; 0 = off). On a realtime rung the SDK keeps
+  the utterance it has just heard end (the voice SDK's recorder; a page without `voice` passes it to
+  `sendEndTurn(clip)`). The edge answers a client `end_turn` with `turn_ack` at once. No sign of the turn from the edge
+  `rescueMs` after `end_turn` (no `turn_ack`, transcript, reply or audio) means the learner's audio or the edge's
+  answer is stuck on that transport: the utterance goes as **one clip** to the clip rung (`s2s`, else `postTurn`),
+  the same turn for the page and for telemetry. Then whichever answers first serves the turn, and only that one:
+  - the realtime path shows a sign of the turn before the clip answers → the clip request is aborted;
+  - the clip's first event arrives first → the stalled transport is **closed** (its edge session ends and with it the
+    turn it may have started; nothing it sends later is delivered), the session is on the clip rung
+    (`transport {reason:"rescue", from}`), and a new realtime session is admitted in the background and takes over
+    between turns with the conversation replayed in one `config_update` (user and assistant messages only) — the move
+    of a readmitted session. Telemetry `turn.rescued {from, to, stallMs}`.
+  - the clip request fails before answering → nothing changes, the session goes on waiting for the realtime path.
+
+  Never more than one extra clip turn per rescued turn. A barge-in drops a clip that has not answered and cuts one
+  that is playing. Only armed once the edge has sent a `turn_ack` in the session (an older edge image never does, and
+  there the only early sign would be the transcript, a model's time rather than the network's). It does not help when
+  the whole network is down for those seconds (the clip waits with everything else) nor when the capture itself
+  stalls; it helps when one TCP stream is stuck behind a retransmission or a backlog while the path works again.
+
+### Transport by network signal (`transportPolicy`)
+
+| `transportPolicy` | Behaviour |
+|---|---|
+| unset (default), `"webrtc"` | as above: WS serves the start, WebRTC takes over as soon as it is connected |
+| `"ws"` | WebRTC is not tried: the session is WS, then the clip rungs |
+| `"auto"` | starts on WS, keeps WebRTC connected on standby, measures the network in the session and moves by what it measures |
+
+`"auto"` is an SDK option (`createRealtimeSession({ transportPolicy: "auto", fidelity, transportThresholds })`); the app
+decides it per lesson. What it does:
+
+1. **Always starts on WebSocket** (it connects on any network and serves the first turn), even when WebRTC is ready first.
+2. **WebRTC comes up in the background** with the patient budget and stays on standby for the whole session: the
+   microphone is not on it — a disabled clone of the track is, so RTP flows (silence) and the edge's receiver reports
+   give the uplink loss and jitter of this very network; the edge session behind it hears silence and runs no turn. The
+   transport that is not serving stays open (the WS on standby pings every 30 s; the edge ends a session idle for 120 s).
+3. **One sample per turn**, at its `done`: uplink loss in the turn (`packetsLost` of the `remote-inbound-rtp` report
+   over the packets sent since the last sample), jitter and RTT from the same report, the jitter-buffer delay of the
+   downlink, and on WS the stall of the turn (the delay of the edge's `turn_ack`, the send backlog in ms of audio, a
+   rescued turn's wait). The decision is a pure function over the samples (`transport-policy.ts`, `{state, effects}`).
+4. **It moves by the network, not by response time.** Loss of `lossPct` or more, or a stall of `stallMs` or more, on
+   `windowTurns` turns in a row → WebRTC. `windowTurns` turns in a row at `clearLossPct` or less with no stall, on
+   WebRTC → back to WS. A clean network therefore stays on WS: the speech arrives intact and Chrome pays no jitter
+   buffer. WebRTC not connected (UDP blocked) → nothing to move to, the session stays on WS without trying.
+5. **Between turns only, with hysteresis**: the move waits for the same quiet moment as every other switch (no turn,
+   no reply playing, 300 ms after the last audio); after a move none before `dwellMs`; at most `maxSwitches` in a
+   session. A move swaps which transport carries the microphone (`replaceTrack` on WebRTC, capture on WS), sends the
+   side that takes over the user and assistant messages it missed in one `config_update`, and emits
+   `transport {transport, reason:"policy", from}`. A turn that stalls on WS is not moved: the rescue above answers
+   it, and the session then goes to the WebRTC it kept ready.
+6. **`fidelity: true`** (the transcripts are data: a study, an assessment): the session does not move to WebRTC under
+   loss unless the edge's answer negotiated loss recovery (`audio/red` or `useinbandfec=1`), and on WebRTC
+   `windowTurns` lossy turns whose `metrics` show nothing rebuilt (`uplink_recovered_ms` 0, `uplink_red_pct` and
+   `uplink_fec_pct` 0) send it back to WS (`reason:"unprotected"`).
+
+| Threshold (`transportThresholds`) | Default | Why |
+|---|---|---|
+| `lossPct` | 2 | at 2 % a tenth of the WS turns already wait on a TCP retransmission; the `lossy` profile is 5 % |
+| `clearLossPct` | 0.5 | below the noise of one turn's sample (~750 packets: 4 lost) |
+| `stallMs` | 800 | the edge's `turn_ack` normally comes back in one round trip (150 ms on `lossy`); 800 ms is a retransmission timer, not jitter |
+| `windowTurns` | 3 | one bad turn is an event, three in a row are the network (about 45 s of a lesson) |
+| `dwellMs` | 60 000 | a move costs a history replay and a cold jitter buffer; not twice a minute |
+| `maxSwitches` | 4 | a network that flaps more than that is served by staying where it is |
+
+Where the numbers come from (live, L40S, night of 2026-10-09, `docs/reports/2026-10-07-realtime-handoff.md`): on
+`lossy` (75 ms each way, 5 % loss) the first sound on WS was 1487 ms p50 / 2373 p95 / 2961 max, on WebRTC 1270 / 2124 /
+2154; on `campus-slow` WS 1182 / 1857 with the only 3 lost turns (`timeout`), WebRTC 1104 / 1570; on a clean network
+they tie in the lightweight clients (1273 against 1298 p50) and real Chrome pays 100–180 ms on WebRTC for its jitter
+buffer. So: clean → WS, lossy or stalling → WebRTC. The cost of `"auto"`: one more peer connection per learner kept
+alive (silence both ways, about 20 kbit/s up) and the edge decoding it (about 2 % of a core per learner).
+
+Telemetry: `rt.spare.ready`, `transport.switch {from, to, reason: loss|stall|clean|unprotected, lossPct, jitterMs,
+stallMs}`, and at the end of the session `rt.network.summary {turns, wsTurns, webrtcTurns, lossPctMax, lossPctAvg,
+jitterMsMax, stallMsMax, switches, rescues}`; every `turn.done` already carries the transport that served it.
 
 ### A reply cut by an upstream error
 
@@ -561,7 +646,7 @@ Event shape: `{ts, source:"browser"|"gateway", level, event, traceId, sessionId?
 
 - Browser: `rt.ladder.try|ok|fallback` (from, to, reason; `ok` = the session started: transport, durMs, `upgrading` when WebRTC is still connecting), `rt.ladder.upgrade` (from, to, durMs since the start), `rt.readmit.gave_up` (reason: `deadline`, `no_transport` or the refusal code), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
   `rt.session.admitted|rejected|closed`, `vad.segment` (durMs), `turn.first_audio` (durMs from the end of the turn, `fromSpeechMs`),
-  `turn.first_sound` (durMs on the learner's clock, source), `rt.opener.cached` (clips, lines), `turn.done` (firstSoundMs, networkDelayMs, clientOpener), `turn.recovered`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
+  `turn.first_sound` (durMs on the learner's clock, source), `rt.opener.cached` (clips, lines), `turn.done` (firstSoundMs, networkDelayMs, clientOpener), `turn.recovered`, `turn.rescue_started` (transport, afterMs, uplinkBufferedBytes), `turn.rescued` (from, to, stallMs), `turn.rescue_failed`, `rt.webrtc.retry`, `rt.spare.ready`, `transport.switch`, `rt.network.summary`, `ws.close` (code), `error`; `turn.done` also carries `ackMs` (end of turn → the edge's first sign of it) and `rescuedMs`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
 - Gateway: `rt.session.admitted|rejected|deleted`, `rt.signal.offer|refused`, `ws.open|close|refused`, `error` (sink
   pluggable, default the log).
 - **Never** audio, transcript, LLM text, SDP or tokens: codes, counts, durations (the SDK's `safeAttrs` drops content keys).
@@ -719,6 +804,9 @@ veth pair and its qdiscs go with it), the NAT rules and `/etc/netns/aigwload`; t
 | `udp-blocked` | `iptables` in the namespace: outbound UDP dropped except port 53 | the firewall case of `docs/realtime-edge.md`: TURN over TCP or the WS rung |
 | `lossy` | 75 ms delay (150 ms round trip), 5 % loss | assumption: the bad end of Wi-Fi |
 | `flap` | the link drops (100 % loss) for 3 s every 30 s | assumption: roaming between access points |
+
+`--profile-then lossy@90` changes the shaping to another profile (`clean`, `campus-slow`, `lossy`) that many seconds
+into the run; `--transport-policy auto` and `--fidelity` set the SDK options of the Chrome sessions.
 
 netem's jitter reorders packets (each packet draws its own delay), which a real Wi-Fi link does less: `campus-slow`
 is harsher on TCP than its numbers suggest.

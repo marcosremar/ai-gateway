@@ -24,6 +24,7 @@ export async function climbLadder(
   opts: {
     timeouts: RealtimeTimeouts; signal?: AbortSignal; now?: () => number;
     onTry?: (type: TransportType) => void; onAttempt?: (a: AttemptRecord) => void;
+    budgetMs?: (type: TransportType) => number | undefined;
   },
 ): Promise<{ transport: RealtimeTransport; attempts: AttemptRecord[] }> {
   const now = opts.now ?? (() => Date.now());
@@ -34,6 +35,7 @@ export async function climbLadder(
     if (!transport) continue;
     opts.onTry?.(type);
     const started = now();
+    const budget = opts.budgetMs?.(type) ?? attemptTimeoutMs(type, opts.timeouts);
     const abort = new AbortController();
     const onOuterAbort = () => abort.abort(opts.signal?.reason instanceof Error ? opts.signal.reason : new Error('session closed'));
     opts.signal?.addEventListener('abort', onOuterAbort);
@@ -43,10 +45,10 @@ export async function climbLadder(
         transport.connect(abort.signal),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            const err = new Error(`timeout after ${attemptTimeoutMs(type, opts.timeouts)} ms`);
+            const err = new Error(`timeout after ${budget} ms`);
             reject(err); // first: the race settles with the timeout, not with the abort it causes
             abort.abort(err);
-          }, attemptTimeoutMs(type, opts.timeouts));
+          }, budget);
         }),
         new Promise<never>((_, reject) => {
           if (abort.signal.aborted) reject(abort.signal.reason as Error);

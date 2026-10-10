@@ -4,7 +4,7 @@
  * candidate (relay only under `iceTransportPolicy: 'relay'`), when ICE gathering completes, or after `iceGatherMs` with
  * what was gathered. TURN servers come from the session (credentials minted per session by the gateway).
  */
-import type { ClientMessage, RealtimeTransport, TransportContext, TransportOffer } from '../types';
+import type { ClientMessage, LinkStats, RealtimeTransport, TransportContext, TransportOffer } from '../types';
 
 type WebRtcOffer = Extract<TransportOffer, { type: 'webrtc' }>;
 
@@ -95,6 +95,26 @@ export function setPlayoutDelay(receiver: RTCRtpReceiver | undefined, ms: number
   return null;
 }
 
+class OfferRefused extends Error {}
+
+function abortableWait(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal.addEventListener('abort', onAbort);
+  });
+}
+
+const isRed = (c: { mimeType: string }) => c.mimeType.toLowerCase() === 'audio/red';
+
+export function preferRedundantAudio(pc: RTCPeerConnection): void {
+  try {
+    const codecs = (globalThis as { RTCRtpSender?: typeof RTCRtpSender }).RTCRtpSender?.getCapabilities?.('audio')?.codecs ?? [];
+    if (!codecs.some(isRed)) return;
+    for (const t of pc.getTransceivers?.() ?? []) t.setCodecPreferences?.([...codecs.filter(isRed), ...codecs.filter(c => !isRed(c))]);
+  } catch { /* the browser keeps its own order */ }
+}
+
 interface Link {
   pc: RTCPeerConnection;
   channel: RTCDataChannel;
@@ -111,6 +131,8 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
   let closing = false;
   let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnecting = false;
+  let quiet: MediaStreamTrack | null = null;
+  let recovery = false;
   const token = ctx.descriptor?.token ?? '';
   const sessionUrl = offer.offerUrl.replace(/\/offer$/, '');
 
@@ -121,19 +143,35 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
   };
 
   const negotiate = async (conn: RTCPeerConnection, signal: AbortSignal) => {
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', traceparent: ctx.traceparent };
+    const late: RTCIceCandidateInit[] = [];
+    let sdp: string | null = null;
+    let known = false;
+    const trickle = (candidate: RTCIceCandidateInit) => {
+      void ctx.fetchImpl(offer.iceUrl!, { method: 'POST', headers, body: JSON.stringify({ candidate }) }).catch(() => {});
+    };
+    if (offer.iceUrl) {
+      conn.onicecandidate = (e: RTCPeerConnectionIceEvent) => {
+        if (!e.candidate || sdp === null || sdp.includes(e.candidate.candidate)) return;
+        const candidate = e.candidate.toJSON();
+        if (known) trickle(candidate); else late.push(candidate);
+      };
+    }
     await conn.setLocalDescription(await conn.createOffer());
     await waitIceGathering(conn, ctx.timeouts.iceGatherMs, signal, offer.iceTransportPolicy === 'relay');
     if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('aborted');
+    sdp = conn.localDescription?.sdp ?? '';
     const res = await ctx.fetchImpl(offer.offerUrl, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', traceparent: ctx.traceparent },
-      body: JSON.stringify({ sdp: conn.localDescription?.sdp ?? '', type: 'offer', ...(ctx.descriptor?.cfg ? { cfg: ctx.descriptor.cfg } : {}) }),
+      method: 'POST', headers, body: JSON.stringify({ sdp, type: 'offer', ...(ctx.descriptor?.cfg ? { cfg: ctx.descriptor.cfg } : {}) }),
       signal: AbortSignal.any ? AbortSignal.any([signal, AbortSignal.timeout(ctx.timeouts.signalingMs)]) : signal,
     });
     const answer = await res.json().catch(() => null) as { sdp?: string; type?: string; error?: { code?: string } } | null;
-    if (!res.ok || !answer?.sdp) throw new Error(`offer refused: HTTP ${res.status}${answer?.error?.code ? ` ${answer.error.code}` : ''}`);
+    if (!res.ok || !answer?.sdp) throw new OfferRefused(`offer refused: HTTP ${res.status}${answer?.error?.code ? ` ${answer.error.code}` : ''}`);
     answered = true;
+    recovery = /a=rtpmap:\d+ red\/|useinbandfec=1/i.test(answer.sdp);
     await conn.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+    known = true;
+    late.splice(0).forEach(trickle);
   };
 
   const release = (l: Link) => {
@@ -142,6 +180,7 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     l.channel.onclose = null;
     l.pc.ontrack = null;
     l.pc.oniceconnectionstatechange = null;
+    l.pc.onicecandidate = null;
     l.pc.onconnectionstatechange = null;
     try { l.channel.close(); } catch { /* closed */ }
     try { l.pc.close(); } catch { /* closed */ }
@@ -158,8 +197,9 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
       const mic = await ctx.mic();
       const tracks = mic.getAudioTracks();
       if (!tracks.length) pc.addTransceiver('audio', { direction: 'recvonly' });
-      else if (live) for (const track of tracks) pc.addTrack(track, mic);
+      else if (live) tracks.forEach((track, n) => { const sender = pc.addTrack(track, mic); if (!n && sender) l.heldMic = { sender, track }; });
       else l.heldMic = { sender: pc.addTransceiver('audio', { direction: 'sendrecv' }).sender, track: tracks[0]! };
+      preferRedundantAudio(pc);
       l.channel.onmessage = (e: MessageEvent) => {
         try { ctx.emit(JSON.parse(String(e.data))); } catch { /* not JSON: ignored */ }
       };
@@ -186,6 +226,7 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     if (disconnectTimer) clearTimeout(disconnectTimer);
     disconnectTimer = null;
     link = l;
+    if (!live && quiet) void l.heldMic?.sender.replaceTrack(quiet);
     l.channel.onclose = () => failOnce('data channel closed');
     l.pc.onconnectionstatechange = () => {
       const state = l.pc.connectionState;
@@ -223,9 +264,19 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
     clipBased: false,
     async connect(signal) {
       if (!PC) throw new Error('RTCPeerConnection is not available');
-      const l = await open(signal, ctx.timeouts.webrtcConnectMs);
-      connected = true;
-      adopt(l);
+      const tries = ctx.patient ? Math.max(1, ctx.timeouts.upgradeTries) : 1;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const l = await open(signal, ctx.patient ? ctx.timeouts.upgradeConnectMs : ctx.timeouts.webrtcConnectMs);
+          connected = true;
+          adopt(l);
+          return;
+        } catch (err) {
+          if (attempt >= tries || signal.aborted || closing || err instanceof OfferRefused) throw err;
+          ctx.telemetry.emit('rt.webrtc.retry', { level: 'warn', attrs: { attempt, reason: (err as Error).message.slice(0, 64) } });
+          await abortableWait(ctx.timeouts.upgradeBackoffMs * 2 ** (attempt - 1), signal);
+        }
+      }
     },
     send(message: ClientMessage) {
       if (link?.channel.readyState === 'open') link.channel.send(JSON.stringify(message));
@@ -235,9 +286,33 @@ export function createWebRtcTransport(ctx: TransportContext, offer: WebRtcOffer,
       const held = link?.heldMic;
       if (held) void held.sender.replaceTrack(held.track);
     },
+    goStandby() {
+      live = false;
+      const held = link?.heldMic;
+      if (!held) return;
+      quiet ??= Object.assign(held.track.clone(), { enabled: false });
+      void held.sender.replaceTrack(quiet);
+    },
+    async stats(): Promise<LinkStats | null> {
+      if (!link) return null;
+      type Stat = { type: string; kind?: string; nominated?: boolean; packetsSent?: number; packetsLost?: number; jitter?: number; roundTripTime?: number;
+        jitterBufferDelay?: number; jitterBufferEmittedCount?: number; availableOutgoingBitrate?: number };
+      const all: Stat[] = [];
+      (await link.pc.getStats()).forEach((s: Stat) => { all.push(s); });
+      const audio = (type: string) => all.find(s => s.type === type && (s.kind ?? 'audio') === 'audio');
+      const remote = audio('remote-inbound-rtp'), inbound = audio('inbound-rtp'), pair = all.find(s => s.type === 'candidate-pair' && s.nominated);
+      const ms = (seconds: number | undefined) => (typeof seconds === 'number' ? Math.round(seconds * 1000) : null);
+      return {
+        packetsSent: audio('outbound-rtp')?.packetsSent ?? 0, packetsLost: remote?.packetsLost ?? 0, jitterMs: ms(remote?.jitter), rttMs: ms(remote?.roundTripTime),
+        jitterBufferMs: inbound?.jitterBufferEmittedCount ? ms(inbound.jitterBufferDelay! / inbound.jitterBufferEmittedCount) : null,
+        outgoingKbps: typeof pair?.availableOutgoingBitrate === 'number' ? Math.round(pair.availableOutgoingBitrate / 1000) : null, recovery,
+      };
+    },
     close() {
       closing = true;
       connected = false;
+      quiet?.stop();
+      quiet = null;
       if (disconnectTimer) clearTimeout(disconnectTimer);
       for (const l of [...opened]) release(l);
       ctx.remoteAudio(null);

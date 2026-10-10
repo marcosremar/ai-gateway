@@ -51,7 +51,7 @@ describe('S11b: the gateway talks to a Scaleway replica over TLS pinned to the r
     expect(machine.tls).toBe(true);
     const listed = await backend.listReplicas('ns');
     const byId = Object.fromEntries(listed.map(m => [m.id, m]));
-    expect(replicaBase(byId['fr-par-2:new'])).toBe('https://51.15.0.1');
+    expect(replicaBase(byId['fr-par-2:new'])).toBe('https://51.15.0.1:80');
     expect(replicaBase(byId['fr-par-2:new'], true)).toBe(`https://51.15.0.1:${PROBE_PORT}`);
     expect(byId['fr-par-2:old'].tls).toBeUndefined();
     expect(replicaBase(byId['fr-par-2:old'])).toBe('http://51.15.0.1');
