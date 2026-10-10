@@ -71,6 +71,56 @@ export interface DeploymentsFromEnv {
   devices: AppDevices;
   handler: ReturnType<typeof createDeploymentRoutes>;
   registryWarning: () => string | null;
+  rotateCredentials: (env: Record<string, string | undefined>) => Promise<CredentialRotation>;
+}
+
+export const DEPLOYMENT_CREDENTIAL_KEYS = [
+  'SCW_SECRET_KEY', 'SCALEWAY_SECRET_KEY', 'SCW_DEFAULT_PROJECT_ID', 'SCW_PROJECT_ID', 'SCALEWAY_PROJECT_ID', 'SCW_REGISTRY_SECRET_KEY', 'VAST_API_KEY',
+] as const;
+
+export interface CredentialRotation {
+  rotated: DeploymentProvider[];
+  rejected: Array<{ provider: DeploymentProvider; error: string }>;
+  needsRestart: DeploymentProvider[];
+}
+
+const scalewayCredentialsOf = (env: Record<string, string | undefined>) => ({
+  secretKey: (env.SCW_SECRET_KEY || env.SCALEWAY_SECRET_KEY || '').trim(),
+  projectId: env.SCW_DEFAULT_PROJECT_ID || env.SCW_PROJECT_ID || env.SCALEWAY_PROJECT_ID || undefined,
+  registrySecret: env.SCW_REGISTRY_SECRET_KEY,
+});
+
+export async function rotateBackendCredentials(
+  backends: { scaleway?: ScalewayDeploymentBackend; vast?: VastDeploymentBackend }, env: Record<string, string | undefined>,
+): Promise<CredentialRotation> {
+  const result: CredentialRotation = { rotated: [], rejected: [], needsRestart: [] };
+  const restore = (names: readonly string[], value: string | undefined) => {
+    for (const name of names) {
+      if (!env[name]) continue;
+      if (value === undefined) delete env[name]; else env[name] = value;
+    }
+  };
+  const attempt = async (provider: DeploymentProvider, run: () => Promise<void>, putBack: () => void) => {
+    try { await run(); result.rotated.push(provider); } catch (err) {
+      putBack();
+      result.rejected.push({ provider, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  const scw = scalewayCredentialsOf(env);
+  const { scaleway, vast } = backends;
+  if (scaleway && scw.secretKey && (scw.secretKey !== scaleway.secretKey || scw.projectId !== scaleway.projectId
+    || scw.registrySecret !== scaleway.registrySecret)) {
+    await attempt('scaleway', () => scaleway.rotateCredentials(scw), () => {
+      restore(['SCW_SECRET_KEY', 'SCALEWAY_SECRET_KEY'], scaleway.secretKey);
+      restore(['SCW_DEFAULT_PROJECT_ID', 'SCW_PROJECT_ID', 'SCALEWAY_PROJECT_ID'], scaleway.projectId);
+      restore(['SCW_REGISTRY_SECRET_KEY'], scaleway.registrySecret);
+    });
+  }
+  else if (!scaleway && scw.secretKey) result.needsRestart.push('scaleway');
+  const vastKey = env.VAST_API_KEY?.trim();
+  if (vast && vastKey && vastKey !== vast.currentKey) await attempt('vast', () => vast.rotateKey(vastKey), () => restore(['VAST_API_KEY'], vast.currentKey));
+  else if (!vast && vastKey) result.needsRestart.push('vast');
+  return result;
 }
 
 export function privateImageWarning(specs: DeploymentSpec[], scaleway: Pick<ScalewayDeploymentBackend, 'registryAuthFor'> | undefined): string | null {
@@ -135,6 +185,8 @@ export function deploymentsFromEnv(
     userOf: (req: IncomingMessage) => string | null;
     /** userIds that may always manage, on top of DEPLOYMENTS_ADMIN_USERS (serve.ts: none, or `sandbox` under ACCEPT_SANDBOX_TOKEN_AS_KEY=1). */
     alwaysAdmin?: string[];
+    /** Live admin set (serve.ts: the access store's, changed at runtime); default: from env. */
+    admins?: ReadonlySet<string>;
     log?: (msg: string, data?: Record<string, unknown>) => void;
     /** Declared deployments' status, added to `GET /v1/deployments` as `declared`. */
     declaredStatus?: () => unknown;
@@ -161,10 +213,8 @@ export function deploymentsFromEnv(
   const maxDevices = Number(env.APP_MAX_DEVICES);
   const devices = new AppDevices(apps, { log: opts.log, ...(maxDevices > 0 ? { maxPerApp: Math.floor(maxDevices) } : {}) });
   const scaleway = secret ? new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY }) : undefined;
-  const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
-    ...(scaleway ? { scaleway } : {}),
-    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir), ...vastCreditFloor(env) }) } : {}),
-  };
+  const vast = vastKey ? new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir), ...vastCreditFloor(env) }) : undefined;
+  const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = { ...(scaleway ? { scaleway } : {}), ...(vast ? { vast } : {}) };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
   const controller = new DeploymentController({
     backends,
@@ -183,7 +233,7 @@ export function deploymentsFromEnv(
     log: opts.log,
     checkImage: (image, auth) => missingImage(image, auth ?? scaleway?.registryAuthFor(image) ?? null),
   });
-  const admins = adminUsersFromEnv(env, opts.alwaysAdmin);
+  const admins = opts.admins ?? adminUsersFromEnv(env, opts.alwaysAdmin);
   const adminWarning = adminListWarning(env, opts.alwaysAdmin);
   if (adminWarning) opts.log?.(`WARNING: ${adminWarning}`);
   const handler = createDeploymentRoutes({
@@ -206,9 +256,11 @@ export function deploymentsFromEnv(
   const janitorOn = env.DEPLOYMENTS_JANITOR === '1' || (env.DEPLOYMENTS_JANITOR !== '0' && onRailway(env));
   // The janitor's leftovers (build servers, detached SBS volumes) exist only on Scaleway; a deleted Vast instance
   // takes its disk with it.
-  const stopJanitor = janitorOn && secret ? startJanitor({ cloud: scalewayJanitorCloud(secret, projectId), log: opts.log }) : undefined;
+  const stopJanitor = janitorOn && scaleway
+    ? startJanitor({ cloud: scalewayJanitorCloud(() => scaleway.secretKey, () => scaleway.projectId), log: opts.log }) : undefined;
   const registryWarning = () => privateImageWarning(controller.list().flatMap(v => controller.specOf(v.name) ?? []), scaleway);
-  return { controller, apps, devices, handler, registryWarning, ...(stopJanitor ? { stopJanitor } : {}) };
+  const rotateCredentials = (current: Record<string, string | undefined>) => rotateBackendCredentials({ scaleway, vast }, current);
+  return { controller, apps, devices, handler, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
 }
 
 export function vastCreditFloor(env: Record<string, string | undefined>): { minCreditUsd?: number } {
@@ -217,12 +269,13 @@ export function vastCreditFloor(env: Record<string, string | undefined>): { minC
 }
 
 /** The janitor's view of Scaleway: build servers by tag and the project's SBS volumes, in every known zone. */
-export function scalewayJanitorCloud(secret: string, projectId: string | undefined): JanitorCloud {
+export function scalewayJanitorCloud(secretOf: () => string, projectOf: () => string | undefined): JanitorCloud {
   const client = new ScalewayClient();
-  const credentials = { apiKey: secret };
+  const credentials = () => ({ apiKey: secretOf() });
+  const scope = () => { const projectId = projectOf(); return projectId ? { projectId } : {}; };
   return {
     async listServersByTag(tag) {
-      const found = await client.listInstancesByTag(tag, credentials, projectId ? { projectId } : {});
+      const found = await client.listInstancesByTag(tag, credentials(), scope());
       return found.map(inst => {
         const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
         return {
@@ -232,10 +285,10 @@ export function scalewayJanitorCloud(secret: string, projectId: string | undefin
       });
     },
     async listVolumes() {
-      const lists = await Promise.all(KNOWN_ZONES.map(zone => client.listBlockVolumes(zone, credentials, projectId ? { projectId } : {})));
+      const lists = await Promise.all(KNOWN_ZONES.map(zone => client.listBlockVolumes(zone, credentials(), scope())));
       return lists.flat();
     },
-    deleteServer: (server) => client.releaseInstance(server.id, credentials, { awaitVolumes: false }),
-    deleteVolume: (volume) => client.deleteBlockVolume(volume.zone, volume.id, credentials),
+    deleteServer: (server) => client.releaseInstance(server.id, credentials(), { awaitVolumes: false }),
+    deleteVolume: (volume) => client.deleteBlockVolume(volume.zone, volume.id, credentials()),
   };
 }

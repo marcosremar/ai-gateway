@@ -486,7 +486,7 @@ export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   // Build the API key registry for user identity resolution.
   // Supports both legacy format ("key1,key2") and new format ("key1:user1,key2:user2").
-  const keyRegistry = new ApiKeyRegistry(apiKeys.join(','));
+  const keyRegistry = config.keyRegistry ?? new ApiKeyRegistry(apiKeys.join(','));
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
   const concurrency = concurrencyLimits();
 

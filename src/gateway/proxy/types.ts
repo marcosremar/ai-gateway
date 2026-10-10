@@ -129,6 +129,8 @@ export interface ProxyConfig {
   port?: number;
   /** Valid Bearer tokens for API authentication. Empty or absent = open mode. */
   apiKeys?: string[];
+  /** Live key registry (keys issued and revoked at runtime); wins over `apiKeys`. */
+  keyRegistry?: { readonly size: number; resolve(token: string): { userId: string } | null };
   /** Provider instances for all modalities */
   providers: ProviderMapping;
   /** Response cache for caching LLM/STT responses */

@@ -269,7 +269,8 @@ export abstract class ReplicaLifecycle extends ControllerState {
     this.log('deployments: creating replica', { deployment: spec.name, provider: backend.provider, type: spec.machineType, zone: spec.zone });
     const network = spec.exposure ? await this.networkOf(rt, backend) : undefined;
     const tokenKey = randomBytes(12).toString('hex');
-    const replicaToken = replicaTokenFor(rt.record.replicaToken, tokenKey);
+    const secret = rt.record.replicaToken;
+    const replicaToken = replicaTokenFor(secret, tokenKey);
     const machine = await backend.createReplica({
       spec, replicaToken, tokenKey, namespace: this.namespace, ...(network ? { network } : {}),
       // Vast builds its own init (`vastReplicaInit`) from spec + token; Scaleway takes this cloud-init as user_data.
@@ -278,6 +279,10 @@ export abstract class ReplicaLifecycle extends ControllerState {
       onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
     });
     this.tokenKeys.set(machine.id, tokenKey);
+    if (rt.record.replicaToken !== secret) {
+      rt.record = { ...rt.record, secretPins: { ...rt.record.secretPins, [tokenKey]: secret } };
+      void this.opts.store.saveDeployment(rt.record).catch(() => {});
+    }
     return { ...machine, provider: backend.provider, tokenKey };
   }
 

@@ -4,7 +4,7 @@
  * The namespace keeps two gateways sharing one Scaleway project from adopting (or deleting) each other's machines.
  */
 
-import { PartialListError, ScalewayClient, type ScalewayFirewallRule } from '../cpu-providers/scaleway-client';
+import { KNOWN_ZONES, PartialListError, ScalewayClient, type ScalewayFirewallRule } from '../cpu-providers/scaleway-client';
 import type { GpuInstance, ProviderCredentials } from '../gpu-providers/types';
 import { DEFAULT_RT_UDP_PORTS } from './cloud-init';
 import { PROBE_PORT } from './spec';
@@ -79,7 +79,7 @@ function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachi
 
 export class ScalewayDeploymentBackend implements DeploymentBackend {
   readonly provider = 'scaleway' as const;
-  private readonly credentials: ProviderCredentials;
+  private credentials: ProviderCredentials;
   private readonly client: ScalewayLike;
 
   /**
@@ -92,6 +92,26 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
   } = {}) {
     this.credentials = { apiKey: secretKey } as ProviderCredentials;
     this.client = opts.client ?? new ScalewayClient();
+  }
+
+  get secretKey(): string { return this.credentials.apiKey as string; }
+
+  get projectId(): string | undefined { return this.opts.projectId; }
+
+  get registrySecret(): string | undefined { return this.opts.registrySecret; }
+
+  async rotateCredentials(next: { secretKey: string; projectId?: string; registrySecret?: string }): Promise<void> {
+    const credentials = { apiKey: next.secretKey } as ProviderCredentials;
+    try {
+      await this.client.listInstancesByTag(DEPLOY_TAG, credentials, next.projectId ? { projectId: next.projectId } : {});
+    } catch (err) {
+      if (!(err instanceof PartialListError) || err.failedZones.length >= KNOWN_ZONES.length) {
+        throw new Error(`the new Scaleway credentials were refused: ${err instanceof Error ? err.message.slice(0, 200) : 'error'}`);
+      }
+    }
+    this.credentials = credentials;
+    this.opts.projectId = next.projectId;
+    this.opts.registrySecret = next.registrySecret;
   }
 
   private async osImage(input: CreateReplicaInput): Promise<string | undefined> {
