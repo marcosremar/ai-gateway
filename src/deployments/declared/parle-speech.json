@@ -1,5 +1,6 @@
 {
   "name": "parle-speech",
+  "app": "parle",
   "description": "parle: Whisper + Qwen LLM + Qwen3-TTS in one container (docker/speech-stack) with the realtime edge, on one Scaleway L40S (fr-par-2, then pl-waw-2), then an H100 80 GB (fr-par-2, then pl-waw-2), then one RTX 5090 on Vast from the public copy of the image; no L4 (its quota belongs to the TTS); warm and reserved for the Mon-Thu class (17:30-20:30 Paris)",
   "profile": "speech-stack",
   "image": {

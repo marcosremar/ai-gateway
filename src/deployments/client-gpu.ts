@@ -9,6 +9,7 @@ export const CLIENT_GPU_TICK_MS = 30_000;
 
 export interface GpuStarter {
   get(name: string): DeploymentView | null;
+  list(): DeploymentView[];
   warm(name: string, replicas: number, untilMinutes: number): Promise<DeploymentView>;
   park(name: string): Promise<DeploymentView>;
 }
@@ -56,7 +57,13 @@ export class ClientGpu {
     return this.state.spent[keyId]?.eur ?? 0;
   }
 
-  async start(key: GpuStarterKey, policy: GpuPolicy, name: string, minutes: unknown, extend = false) {
+  testCopyOf(name: string): DeploymentView | null {
+    const app = this.controller.get(name)?.app;
+    return this.controller.list().find(d => d.spec.testFor === name && d.app === app) ?? null;
+  }
+
+  async start(key: GpuStarterKey, policy: GpuPolicy, requested: string, minutes: unknown, extend = false) {
+    const name = policy.gpuDailyEur !== null ? this.testCopyOf(requested)?.name ?? requested : requested;
     if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 1 || minutes > MAX_START_MINUTES) {
       throw new DeploymentError(400, `minutes must be an integer 1–${MAX_START_MINUTES}`);
     }

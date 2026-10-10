@@ -104,6 +104,24 @@ stay exactly as registered. On a gateway where `parle-speech` does not exist it 
 profile with the declared image; that deployment has no `files`, so the voice catalog still has to be sent with a
 `PUT`.
 
+Both `parle-speech` and `parle-speech-test` belong to the app `parle` (`"app"` in the declaration; set on an existing
+deployment that has no app yet), so a `parle` client key may `start` them (docs/api/http.md § Deployments).
+
+### `parle-speech-test` (the cheap GPU for tests)
+
+`src/deployments/declared/parle-speech-test.json` (10/10/2026): the same image as `parle-speech` on the cheapest GPU
+that runs the speech stack — one Scaleway **L4-1-24G** in fr-par-2 (€0.79/h; the stack was measured there on
+2026-10-04 with `STT_BATCH 4` / `LLM_PARALLEL 8` beside the TTS, and `LLM_SLOT_CTX` stays at its 2048 default), then
+one **RTX 5090** on Vast (≤ €0.85/h). Never an L40S (€1.47/h) or an H100. `maxReplicas 1`, `minReplicas 0`, no warm
+schedule, `idleMinutes 10`, `idleAction: "delete"` (a parked L4 would keep holding one of the account's two L4 that
+the class TTS reserves Mon–Thu 17:30–20:30; during that window the L4 is refused and the copy goes to Vast),
+€40/month ceiling. `testFor: "parle-speech"` makes it the test copy: a request is **never** what starts it; a capped
+client key that calls `POST /v1/deployments/parle-speech/start` gets this copy instead; and while it is ready and
+`parle-speech` is not, the `parle-*` aliases are served by it (a key with `autoWake` also wakes `parle-speech`).
+When it is created it takes the voice catalog (`files`) of `parle-speech`. Cold start ≈ 8–9 min on the L4 (create,
+pull ~57 GB, load); on Vast it depends on the host's bandwidth (not measured with this image) — start it ~10 min
+before the test.
+
 One-GPU mode: the parle TTS entry names `parle-qwen-tts` with `"oneGpuDeployment": "parle-speech"` (the app's own
 routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` is not registered
 and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register

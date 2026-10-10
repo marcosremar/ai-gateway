@@ -105,6 +105,7 @@ export interface DeploymentSpec {
   /** Warm-up windows: keep N replicas up on a schedule (a class at 9:00), whatever the load. */
   warmSchedule?: WarmScheduleEntry[];
   reserveQuota?: QuotaReservation;
+  testFor?: string;
   scaling?: ScalingSpec;
   /** With no request for this long the deployment scales down to `minReplicas` (0 = scale to zero). */
   idleMinutes: number;

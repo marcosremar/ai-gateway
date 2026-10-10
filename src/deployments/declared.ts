@@ -30,11 +30,13 @@ import parleLivekit from './declared/parle-livekit.json';
 import parleQwenTts from './declared/parle-qwen-tts.json';
 import parleSpeech from './declared/parle-speech.json';
 import parleSpeechS2s from './declared/parle-speech-s2s.json';
+import parleSpeechTest from './declared/parle-speech-test.json';
 import { DEFAULT_SCALING_MODE } from './scaling-spec';
 import type { DeploymentSpec, ScalingSpec } from './types';
 
 export interface DeclaredDeployment {
   name: string;
+  app?: string;
   description?: string;
   profile?: string;
   image?: { env?: string; repository?: string; default?: string | null };
@@ -50,7 +52,7 @@ export interface DeclaredDeployment {
  * window and the edge's `RT_MAX_SESSIONS` per machine type; sizing, limits, env and files stay as registered (a new
  * gateway starts from the `speech-stack` profile). The other three own only their class window and monthly ceiling.
  */
-export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [parleSpeech, parleQwenTts, parleSpeechS2s, parleLivekit] as DeclaredDeployment[];
+export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit] as DeclaredDeployment[];
 
 /** Reconcile period. The boot run happens before the providers are mounted (serve.ts). */
 export const DECLARED_RECONCILE_MS = 5 * 60_000;
@@ -134,6 +136,18 @@ export function declaredBody(
   };
 }
 
+function testCopyFiles(target: DeclaredTarget, decl: DeclaredDeployment): Record<string, unknown> {
+  const sourceName = decl.spec.testFor;
+  if (typeof sourceName !== 'string') return {};
+  const source = target.specOf(sourceName);
+  const own = target.specOf(decl.name);
+  const out: Record<string, unknown> = {};
+  for (const key of ['files', 'fileUrls'] as const) {
+    if (source?.[key] && !own?.[key]) out[key] = source[key];
+  }
+  return out;
+}
+
 function mergedScaling(stored: ScalingSpec | undefined, declared: Partial<ScalingSpec>): ScalingSpec {
   const budget = stored?.budget || declared.budget ? { ...stored?.budget, ...declared.budget } : undefined;
   return { ...stored, ...declared, mode: declared.mode ?? stored?.mode ?? DEFAULT_SCALING_MODE, ...(budget ? { budget } : {}) };
@@ -161,7 +175,8 @@ export function specMatches(spec: DeploymentSpec, body: Record<string, unknown>)
 /** What the reconciler needs from the controller. */
 export interface DeclaredTarget {
   specOf(name: string): DeploymentSpec | null;
-  put(name: string, body: Record<string, unknown>): Promise<unknown>;
+  put(name: string, body: Record<string, unknown>, meta?: { app?: string }): Promise<unknown>;
+  get?(name: string): { app: string | null } | null;
 }
 
 export interface DeclaredReconcilerOptions {
@@ -235,18 +250,21 @@ export class DeclaredDeploymentReconciler {
         this.set(decl.name, { state: 'pending', reason, image, checkedAt });
         continue;
       }
-      if (previous && specMatches(previous, resolved.body)) {
+      const appMatches = !decl.app || target.get?.(decl.name)?.app === decl.app;
+      if (previous && specMatches(previous, resolved.body) && appMatches && !Object.keys(testCopyFiles(target, decl)).length) {
         this.set(decl.name, { state: 'in_sync', reason: null, image, checkedAt });
         continue;
       }
+      const meta = decl.app ? { app: decl.app } : {};
       try {
         let body = resolved.body;
         if (!previous && decl.profile) {
-          await target.put(decl.name, { profile: decl.profile, image });
+          await target.put(decl.name, { profile: decl.profile, image }, meta);
           const patch = declaredBody(decl, this.opts.env, target.specOf(decl.name), this.opts.generateSecret);
           if ('body' in patch) body = patch.body;
         }
-        await target.put(decl.name, body);
+        body = { ...body, ...testCopyFiles(target, decl) };
+        await target.put(decl.name, body, meta);
         changed.push(decl.name);
         this.set(decl.name, { state: 'applied', reason: null, image, checkedAt });
         // Names of keys only — never their values.

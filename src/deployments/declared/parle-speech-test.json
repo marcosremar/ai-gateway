@@ -1,0 +1,25 @@
+{
+  "name": "parle-speech-test",
+  "app": "parle",
+  "description": "parle: test copy of parle-speech (same image) on the cheapest GPU that runs the speech stack, one Scaleway L4 24 GB (fr-par-2, LLM_SLOT_CTX 2048), then one RTX 5090 on Vast; started only on purpose (POST /v1/deployments/parle-speech/start by a capped client key), never by a request, no warm schedule, deleted after 10 min idle",
+  "profile": "speech-stack",
+  "image": {
+    "env": "SPEECH_IMAGE",
+    "repository": "rg.fr-par.scw.cloud/aigw/speech-stack",
+    "default": "rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213"
+  },
+  "spec": {
+    "testFor": "parle-speech",
+    "machineType": "L4-1-24G",
+    "zone": "fr-par-2",
+    "placements": [
+      { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85, "maxReplicas": 1, "image": "ghcr.io/marcosremar/speech-stack:20261009-0213" }
+    ],
+    "minReplicas": 0,
+    "maxReplicas": 1,
+    "idleMinutes": 10,
+    "idleAction": "delete",
+    "maxEurPerHour": 0.9,
+    "scaling": { "mode": "fast", "budget": { "eurPerMonth": 40 } }
+  }
+}
