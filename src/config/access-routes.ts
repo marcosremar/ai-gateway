@@ -38,6 +38,14 @@ export function createAccessRoutes(opts: {
         return { status: 200, body: await access.revoke(body.id) };
       }),
     },
+    {
+      method: 'PUT', path: '/v1/admin/access/keys/policy',
+      handler: (req, res) => gate.run(req, res, 'access.keys.policy', async (_actor, note) => {
+        const body = await readJsonBody(req);
+        note.names = typeof body.id === 'string' ? [body.id] : [];
+        return { status: 200, body: await access.setPolicy(body) };
+      }),
+    },
     route('GET', '/v1/admin/access/admins', 'access.admins.list', async () => ({ status: 200, body: { users: [...access.admins] } })),
     {
       method: 'PUT', path: '/v1/admin/access/admins',

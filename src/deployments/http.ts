@@ -9,6 +9,8 @@
  *   GET    /v1/deployments/:name/capacity      session ceiling and measured boot / resume times per machine type
  *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic)
  *   POST   /v1/deployments/:name/park          done for now: scale to minReplicas at once (power off under idleAction stop)
+ *   POST   /v1/deployments/:name/start         a client key with canStartGpu: keep one GPU up for { minutes } (client-gpu.ts)
+ *   POST   /v1/deployments/:name/extend        the same key: { minutes } more on the GPU it started
  *   *      /v1/deployments/:name/invoke/<path> forwarded to a ready replica as /<path> (waits through cold start)
  *   GET    /v1/profiles                        list profiles (built-in + stored)
  *   PUT    /v1/profiles/:name                  create or replace a profile
@@ -32,6 +34,8 @@ import type { AppDevices } from './app-devices';
 import type { AppFallbackService } from './app-fallback';
 import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
+import type { ClientGpu } from './client-gpu';
+import type { GpuPolicy } from '../config/access-keys';
 import { createLogger } from '../logger';
 import { replicaTls } from './replica-tls';
 
@@ -208,6 +212,8 @@ export interface DeploymentRoutesOptions {
   /** SDK instability reports (`/v1/apps/:app/stability-report`). Without it those paths answer 404. */
   stability?: ClientStabilityLog;
   devices?: AppDevices;
+  clientGpu?: ClientGpu;
+  keyOf?: (req: IncomingMessage) => { keyId: string; user: string; app: string; policy: GpuPolicy } | null;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
@@ -419,6 +425,15 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
   }
 
+  function gpuClient(req: IncomingMessage, name: string) {
+    const key = opts.keyOf?.(req) ?? null;
+    if (!key?.policy.canStartGpu) {
+      throw new DeploymentError(403, 'this API key cannot manage deployments (a client key needs canStartGpu: ask an admin, PUT /v1/admin/access/keys/policy)');
+    }
+    if (controller.get(name)?.app !== key.app) throw new DeploymentError(403, `this API key cannot start or stop deployment '${name}' (not its app's)`);
+    return key;
+  }
+
   async function route(req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<void> {
     const query = (req.url ?? '').includes('?') ? (req.url ?? '').slice((req.url ?? '').indexOf('?')) : '';
     const parts = path.split('/').filter(Boolean); // ['v1', 'deployments' | 'profiles', name?, action?, ...]
@@ -471,8 +486,25 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const rest = parts.slice(4).join('/') + (path.endsWith('/') && parts.length > 4 ? '/' : '');
       return invoke(req, res, name, rest, query, method);
     }
-    if (action === 'wake' && method === 'POST') { admin(); return send(res, 202, controller.wake(name)); }
-    if (action === 'park' && method === 'POST') { admin(); return send(res, 202, await controller.park(name)); }
+    if ((action === 'start' || action === 'extend') && method === 'POST') {
+      if (!opts.clientGpu) return send(res, 404, { error: 'GPU start is not enabled on this gateway' });
+      const key = isAdmin(req) ? null : gpuClient(req, name);
+      const minutes = (await readJson(req)).minutes;
+      const starter = key ?? { keyId: `admin:${opts.userOf?.(req) ?? 'admin'}`, user: opts.userOf?.(req) ?? 'admin' };
+      const policy = key?.policy ?? { autoWake: true, canStartGpu: true, gpuDailyEur: null, startIdleMinutes: 10 };
+      return send(res, 202, await opts.clientGpu.start(starter, policy, name, minutes, action === 'extend'));
+    }
+    if (action === 'wake' && method === 'POST') {
+      if (!isAdmin(req) && gpuClient(req, name).policy.gpuDailyEur !== null) {
+        return send(res, 403, { error: `this key has a daily GPU cap: use POST /v1/deployments/${name}/start {"minutes": N}` });
+      }
+      return send(res, 202, controller.wake(name));
+    }
+    if (action === 'park' && method === 'POST') {
+      const key = isAdmin(req) ? null : gpuClient(req, name);
+      if (key) await opts.clientGpu?.forget(key.keyId, name);
+      return send(res, 202, await controller.park(name));
+    }
     if (action === 'warm' && method === 'POST') {
       admin();
       const body = await readJson(req);

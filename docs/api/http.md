@@ -176,7 +176,13 @@ with the fallback hedged in, so the probe never makes the client wait the full t
 for: the gateway starts scaling it up and answers from the fallback in the same call; once a replica is ready,
 traffic returns to it. A real client error (e.g. `400` invalid request) is returned as is.
 
-### No-wake mode — `X-Gateway-No-Wake: 1` / `GATEWAY_NO_WAKE_USERS`
+### No-wake mode — `X-Gateway-No-Wake: 1` / `GATEWAY_NO_WAKE_USERS` / key policy `autoWake`
+
+**Since 10/10/2026 every client key is no-wake unless its policy says `autoWake: true`** (`PUT
+/v1/admin/access/keys/policy`, below). A Saturday with no class still saw 27 GPU starts from test calls; a test now
+gets the cloud answer, and turns a GPU on on purpose with `POST /v1/deployments/:name/start` (§ Deployments). The
+class client keeps waking its GPUs: the first boot of this build gives every `parle` key `autoWake: true`,
+`canStartGpu: true` and no daily cap (`access.json`, once). Local open mode (no keys) keeps waking.
 
 A request that must never start a rented machine (a test, a probe, a batch job, a dev box) sends
 `X-Gateway-No-Wake: 1` (`true`/`yes` too); a key user listed in `GATEWAY_NO_WAKE_USERS` (comma list of the user names
@@ -714,9 +720,11 @@ production namespace (`default` on Railway).
 | `PATCH` | `/v1/deployments/:name` | update an existing one (e.g. `{ "minReplicas": 1 }`) |
 | `GET` | `/v1/deployments/:name` | status + replicas |
 | `DELETE` | `/v1/deployments/:name` | release every replica and forget the spec |
-| `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) |
+| `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) (admin, or a client key with `canStartGpu` and no daily cap — a capped key gets `403` pointing to `start`) |
 | `POST` | `/v1/deployments/:name/warm` | body `{ "replicas": n, "untilMinutes": m }`: keep `n` replicas up (0…`maxReplicas`) for `m` minutes (≤ 720) whatever the load; a later call replaces the window, `park` ends it; counts as a request (admin) |
-| `POST` | `/v1/deployments/:name/park` | done for now: forget the last use, scale to `minReplicas` at the next tick (powers off under `idleAction: "stop"`); in-flight requests are never cut (admin) |
+| `POST` | `/v1/deployments/:name/park` | done for now: forget the last use, scale to `minReplicas` at the next tick (powers off under `idleAction: "stop"`); in-flight requests are never cut (admin, or a client key with `canStartGpu` on its app's deployment) |
+| `POST` | `/v1/deployments/:name/start` | **client key with `canStartGpu`**, its app's deployment only: body `{ "minutes": 1–240 }` keeps one GPU up for that long (never fewer than a warm window already there). At the end it is parked once nobody used it for the key's `startIdleMinutes` (default 10) — unless a warm schedule, a realtime session, another warm window or another key's start needs it. `202 { deployment, until, idleMinutes, spentTodayEur, capEur }`. Over the key's daily cap → `402` saying what was spent and what to do |
+| `POST` | `/v1/deployments/:name/extend` | the same key: `{ "minutes": n }` more on the GPU it started (at most 240 min ahead); `404` without a start |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it; `X-Gateway-No-Wake: 1` → 503 `cold` at once instead). Raw passthrough: the STT hallucination filter does NOT apply here (use `/v1/audio/transcriptions` or `/v1/s2s`) |
 | `GET` | `/v1/profiles` | built-in + stored profiles (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`, …) |
 | `PUT` / `DELETE` | `/v1/profiles/:name` | store / delete a profile |
@@ -882,6 +890,16 @@ Issues a key. Body `{ "user": "site", "label"?: "…", "admin"?: true, "replaces
 secret**, once, at creation; it is never stored in clear (HMAC-SHA256 only). `admin: true` adds `user` to the admin list. `replaces`
 rotates a key (env or issued): the new key takes that key's user unless `user` is given, and the old key stops
 working at once (`overlapMinutes` 0 or absent) or after the overlap (max 10080 min = 7 days).
+
+### `PUT /v1/admin/access/keys/policy` (admin)
+
+GPU policy of one client key (two roles, 10/10/2026: only an admin changes it). Body `{ "id": "<key id>",
+"autoWake"?: bool, "canStartGpu"?: bool, "gpuDailyEur"?: number | null, "startIdleMinutes"?: 1–240 }`; omitted
+fields keep their value. Defaults: `autoWake: false` (a call never turns a GPU on), `canStartGpu: false`,
+`gpuDailyEur: 5` (EUR per UTC day spent by GPUs this key started; `null` = no cap), `startIdleMinutes: 10`. The
+dev token's id is `sandbox`. `GET /v1/admin/access/keys` shows each key's `policy`; a rotation (`replaces`) carries
+it to the new key. Spend and running starts: `clientGpu` in `GET /health?details=1` (admin: every key; a client
+key: its own).
 
 ### `POST /v1/admin/access/keys/revoke` (admin)
 
