@@ -17,6 +17,9 @@ import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { useTempHome } from '../temp-home';
+
+useTempHome();
 
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const ACTIVE_DEPLOY_FILE = join(BABELCAST_DIR, 'active_deploy.json');
