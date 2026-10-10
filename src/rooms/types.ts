@@ -8,6 +8,8 @@ export interface RoomLine {
   originalLang: string | null;
   translations: Record<string, string>;
   ts: number;
+  /** Additive: ms from the end of speech to the subtitle being ready (presenter-measured), 0–120000. */
+  delayMs?: number;
 }
 
 /** What the store keeps about a room (never sent as is: `tokenHash` and `ownerId` stay server-side). */

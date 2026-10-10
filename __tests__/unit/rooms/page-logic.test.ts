@@ -8,11 +8,18 @@ import { ROOM_PAGE_LOGIC, roomPage } from '../../../src/rooms/page';
 
 interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine })`).runInContext(createContext({})) as {
+interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel })`)
+  .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
+  pickLive(entries: LiveEntry[], now: number, dubOn: boolean, waitMs: number): number | null;
+  nextStart(now: number, prevEnd: number, lead: number): number;
+  backlogDrop(ahead: number, durs: number[], maxSec: number): number;
+  median(values: number[]): number | null;
+  delayLabel(ms: number, voice: boolean): { text: string; level: 'ok' | 'warn' | 'bad' };
 };
-const { pickLang, fitLine } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -86,9 +93,83 @@ describe('room page: one-line fit of the live line', () => {
 
   it('ships the same logic inside the room page', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    expect(html).toContain('pickLive(entries,now(),dub');
+    expect(html).toContain('createGain');
+    expect(html).not.toContain('new Audio(');
+  });
+
+  it('keeps the original single-line page features', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
     expect(html).toContain(ROOM_PAGE_LOGIC.trim());
     expect(html).toContain('pickLang(prefs,room.languages');
     expect(html).toContain("addEventListener('orientationchange'");
     expect(html).toContain('measureText');
+  });
+});
+
+const entry = (id: number, e: Partial<LiveEntry> = {}): LiveEntry => ({ id, arrivedAt: 0, startedAt: null, pending: false, skip: false, ...e });
+
+describe('room page: live line in sync with the dubbing', () => {
+  it('shows the newest line as it arrives when dubbing is off', () => {
+    expect(pickLive([entry(1), entry(3, { pending: true }), entry(2)], 0, false, 4000)).toBe(3);
+    expect(pickLive([], 0, false, 4000)).toBeNull();
+  });
+
+  it('switches to line N when the clip of line N starts playing, not when its text arrives', () => {
+    const lines = [entry(1, { arrivedAt: 0, startedAt: 500 }), entry(2, { arrivedAt: 1000, pending: true })];
+    expect(pickLive(lines, 1200, true, 4000)).toBe(1); // 2 arrived, its clip is still being decoded/queued
+    lines[1] = entry(2, { arrivedAt: 1000, startedAt: 2500 }); // scheduled to start at 2500
+    expect(pickLive(lines, 2499, true, 4000)).toBe(1);
+    expect(pickLive(lines, 2500, true, 4000)).toBe(2);
+    // A queued clip keeps waiting past the no-audio timeout: the voice decides.
+    expect(pickLive([entry(1, { startedAt: 500 }), entry(2, { arrivedAt: 1000, pending: true })], 9000, true, 4000)).toBe(1);
+  });
+
+  it('still shows lines that never get audio, after the wait, so the screen never freezes', () => {
+    const lines = [entry(1, { arrivedAt: 0, startedAt: 100 }), entry(2, { arrivedAt: 1000 })];
+    expect(pickLive(lines, 4999, true, 4000)).toBe(1);
+    expect(pickLive(lines, 5000, true, 4000)).toBe(2);
+  });
+
+  it('follows the most recent event: a later clip start wins over an earlier timeout, dropped clips are skipped', () => {
+    const lines = [entry(5, { arrivedAt: 0, startedAt: 6000 }), entry(6, { arrivedAt: 1000 })];
+    expect(pickLive(lines, 5500, true, 4000)).toBe(6); // 6 timed out at 5000, 5's voice not started yet
+    expect(pickLive(lines, 6000, true, 4000)).toBe(5); // 5's voice starts: the card follows the voice
+    expect(pickLive([entry(1, { startedAt: 100 }), entry(2, { arrivedAt: 0, skip: true })], 9e9, true, 4000)).toBe(1);
+  });
+
+  it('returns null when nothing is eligible yet (the page keeps what it shows)', () => {
+    expect(pickLive([entry(1, { arrivedAt: 1000, pending: true })], 2000, true, 4000)).toBeNull();
+  });
+});
+
+describe('room page: clip scheduling', () => {
+  it('schedules clips back to back, never overlapping, never in the past', () => {
+    expect(nextStart(10, 0, 0.05)).toBeCloseTo(10.05);
+    expect(nextStart(10, 12.3, 0.05)).toBe(12.3);
+    expect(nextStart(10, 10.01, 0.05)).toBeCloseTo(10.05);
+  });
+
+  it('drops the oldest pending clips when more than the limit is still to play, keeping the newest', () => {
+    expect(backlogDrop(1, [2, 2], 6)).toBe(0);
+    expect(backlogDrop(3, [2, 2, 2], 6)).toBe(2); // 9 s → drop two oldest → 5 s
+    expect(backlogDrop(0, [10], 6)).toBe(0); // never drops the newest
+    expect(backlogDrop(-5, [3, 3], 6)).toBe(0); // queue already drained: ahead counts as 0
+  });
+});
+
+describe('room page: delay indicator', () => {
+  it('uses the median of the values', () => {
+    expect(median([])).toBeNull();
+    expect(median([5000, 1000, 2000])).toBe(2000);
+    expect(median([1000, 2000, 3000, 9000])).toBe(2500);
+  });
+
+  it('labels in pt-BR with one decimal and colors by threshold', () => {
+    expect(delayLabel(1849, false)).toEqual({ text: 'atraso 1,8 s', level: 'ok' });
+    expect(delayLabel(3200, true)).toEqual({ text: 'voz 3,2 s', level: 'warn' });
+    expect(delayLabel(2999, false).level).toBe('ok');
+    expect(delayLabel(6000, false).level).toBe('warn');
+    expect(delayLabel(6001, false).level).toBe('bad');
   });
 });
