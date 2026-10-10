@@ -91,6 +91,11 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (rt && rt.record.lastRequestAt == null && rt.record.spec.minReplicas === 0 && l.createdAt < this.startedAt
         && !this.machines.some(m => m.id === l.id) && replicaPhase(this.observed(l, 0)) !== 'halted') rt.record.lastRequestAt = this.startedAt;
     }
+    for (const m of this.machines.filter(x => !this.listStale(x, failed) && !listed.some(l => l.id === x.id) && !recent.includes(x))) {
+      const rt = this.deployments.get(m.deployment);
+      const busy = rt ? this.busyOn(rt, m.id) : 0;
+      if (busy > 0) this.log('deployments: replica gone', { deployment: m.deployment, id: m.id, busy });
+    }
     // The list may lack what the create call returned (IP early on, the catalog price): keep the known values.
     this.machines = [...listed.filter(l => !this.releasing.has(l.id)).map((l) => {
       const known = this.machines.find(m => m.id === l.id);

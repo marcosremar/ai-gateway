@@ -106,7 +106,8 @@ export abstract class ReplicaLifecycle extends ControllerState {
   }
 
   protected async release(m: ReplicaMachine, reason: string): Promise<void> {
-    this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason });
+    const rt = this.deployments.get(m.deployment);
+    this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason, busy: rt ? this.busyOn(rt, m.id) : 0 });
     try {
       await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
       this.machines = this.machines.filter(x => x.id !== m.id);
