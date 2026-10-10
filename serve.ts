@@ -53,6 +53,7 @@ import {
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
 import { createRooms } from './src/rooms';
+import { machinesFromEnv } from './src/machines';
 
 const log = createLogger('serve');
 
@@ -141,6 +142,24 @@ if (deployments) {
   log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
 } else {
   log.log({}, 'Deployments disabled (no SCW_SECRET_KEY / VAST_API_KEY)');
+}
+
+const machineUserOf = (req: import('http').IncomingMessage) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null;
+const configuredMachines = machinesFromEnv(process.env, {
+  userOf: machineUserOf,
+  isAdmin: (req) => adminUsers.has(machineUserOf(req) ?? ''),
+  log: (msg, data) => log.log(data ?? {}, msg),
+  onRailway: Boolean(process.env.RAILWAY_ENVIRONMENT_ID || process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID),
+});
+const machines = configuredMachines && await configuredMachines.controller.init().then(() => configuredMachines, (err: unknown) => {
+  log.error({ error: err instanceof Error ? err.message : String(err) }, 'MACHINES DISABLED: machines.json cannot be read — fix or restore it and restart');
+  return null;
+});
+if (machines) {
+  machines.controller.start();
+  prefixRoutes.push({ prefix: '/v1/machines', handler: machines.handler });
+  prefixRoutes.push({ prefix: '/v1/jobs', handler: machines.handler });
+  log.log({ namespace: machines.controller.namespace, providers: machines.controller.providers }, 'Machines enabled');
 }
 
 // Providers: only the configured ones are mounted. Each app sends its own aliases (PUT /v1/apps/:app/routes: a
@@ -418,7 +437,7 @@ const server = await startProxy({
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
     rooms.route, ...(telemetry?.adminRoutes ?? []),
   ],
-  publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : [])],
+  publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : []), ...(machines ? [machines.reportRoute] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
@@ -452,7 +471,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    const stateWritten = deployments?.controller.stop() ?? Promise.resolve();
+    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop()]);
     const exit = (code: number) => void stateWritten.finally(() => process.exit(code));
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
