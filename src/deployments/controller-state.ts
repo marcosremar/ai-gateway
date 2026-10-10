@@ -11,7 +11,7 @@
  */
 
 import { createHmac } from 'crypto';
-import { activeWindow, type PressureState } from './autoscale';
+import { activeWindow, warmFloor, type PressureState } from './autoscale';
 import { filesByUrl } from './boot-files';
 import { bootTimeoutMinutesOn, replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
@@ -423,17 +423,37 @@ export abstract class ControllerState {
   }
 
   /** Why one more running replica billing `price` EUR/h is refused (replica cap, € ceiling), or null. */
-  protected capRefusal(price: number): string | null {
+  protected capRefusal(price: number, name: string): string | null {
     const cap = this.opts.maxTotalReplicas ?? 6;
-    if (this.totalReplicas() >= cap) return `replica cap reached (${cap} across all deployments, DEPLOYMENTS_MAX_REPLICAS; held by ${this.slotHolders()})`;
+    const total = this.totalReplicas();
+    const capped = `replica cap reached (${cap} across all deployments, DEPLOYMENTS_MAX_REPLICAS; held by ${this.slotHolders()}`;
+    if (total >= cap) return `${capped})`;
+    const kept = this.floorsKeptFor(name);
+    const keptSlots = kept.reduce((n, [, missing]) => n + missing, 0);
+    if (total + keptSlots >= cap) return `${capped}; ${keptSlots} kept for the minimum of ${kept.map(([d, n]) => `${d} ${n}`).join(', ')})`;
     return this.spendRefusal(price);
   }
 
-  protected slotHolders(): string {
+  private heldSlots(): Map<string, number> {
     const held = new Map<string, number>();
     for (const m of this.runningMachines()) held.set(m.deployment, (held.get(m.deployment) ?? 0) + 1);
     for (const [name, rt] of this.deployments) if (rt.creating) held.set(name, (held.get(name) ?? 0) + rt.creating);
-    return [...held].sort().map(([name, n]) => `${name} ${n}`).join(', ') || 'none';
+    return held;
+  }
+
+  private floorsKeptFor(name: string): Array<[string, number]> {
+    const held = this.heldSlots();
+    const floorOf = (rt: Runtime) => Math.max(rt.record.spec.minReplicas, warmFloor(rt.record.spec, rt.record.warm, this.now()));
+    const own = this.deployments.get(name);
+    if (!own || (held.get(name) ?? 0) < floorOf(own)) return [];
+    return [...this.deployments]
+      .filter(([other, rt]) => other !== name && !rt.record.spec.paused)
+      .map(([other, rt]): [string, number] => [other, floorOf(rt) - (held.get(other) ?? 0)])
+      .filter(([, missing]) => missing > 0);
+  }
+
+  protected slotHolders(): string {
+    return [...this.heldSlots()].sort().map(([name, n]) => `${name} ${n}`).join(', ') || 'none';
   }
 
   protected reservedAgainst(name: string, machineType: string): { reason: string; endsAt: number } | null {

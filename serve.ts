@@ -45,6 +45,7 @@ import {
 import { buildImages } from './src/deployments/build-images';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
+import { createOpsAlerts } from './src/telemetry/ops-alerts';
 import { gatewayClientKeys, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
@@ -105,19 +106,19 @@ const prefixRoutes: PrefixRoute[] = [];
 
 // Deployments: Docker image → autoscaled replicas on Scaleway and/or Vast (enabled when SCW_SECRET_KEY or VAST_API_KEY is set).
 const keyRegistry = access;
+const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
+const opsAlerts = createOpsAlerts((alert) => {
+  log.warn(alert.data, `ALERT ${alert.event}`);
+  return alertWebhook?.send(alert);
+});
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
-const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const configuredDeployments = deploymentsFromEnv(process.env, {
   alwaysAdmin: EXTRA_ADMINS,
   admins: adminUsers,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
-  log: (msg, data) => {
-    log.log(data ?? {}, msg);
-    deploymentLogToTelemetry(msg, data);
-    if (msg === 'deployments: provider credit exhausted') void alertWebhook?.send({ event: 'provider.credit_exhausted', data: data ?? {} });
-  },
+  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); },
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
@@ -225,7 +226,11 @@ const chainHealth = () => {
     fallback: fallbackWatch(report.stages), latency: latency?.() ?? null,
   };
 };
-setInterval(() => fallbackWatch(chainsNow().stages), 15_000).unref();
+setInterval(() => {
+  const { stages } = chainsNow();
+  fallbackWatch(stages);
+  opsAlerts.fromChains(stages);
+}, 15_000).unref();
 
 // Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys
 // writes them to the palco. A key that appears or disappears re-mounts the providers in place.

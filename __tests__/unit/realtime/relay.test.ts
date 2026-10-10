@@ -95,6 +95,14 @@ describe('signaling relay', () => {
     expect(await expired.json()).toMatchObject({ error: { code: 'token_expired' } });
   });
 
+  it('an edge that refuses the offer as prompt_too_large (413) is passed through, not read as saturated (T3)', async () => {
+    const s = await session(gw);
+    edge.offerStatus = 413;
+    const refused = await fetch(s.transports[0]!.offerUrl!, { method: 'POST', headers: { Authorization: `Bearer ${s.token}` }, body: JSON.stringify({ sdp: OFFER }) });
+    expect(refused.status).toBe(413);
+    expect(await refused.json()).toMatchObject({ error: { code: 'prompt_too_large' } });
+  });
+
   it('every other path still goes through the proxy auth', async () => {
     expect((await fetch(`${gw.url}/v1/realtime/sessions/rt_whatever12/other`, { method: 'POST' })).status).toBe(401);
     expect((await fetch(`${gw.url}/v1/chat/completions`, { method: 'POST' })).status).toBe(401);

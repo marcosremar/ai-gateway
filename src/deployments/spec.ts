@@ -423,8 +423,8 @@ export function buildSpec(
       if (!spec.gpu || spec.exposure) throw new SpecError(`placements[${i}]: ${p.provider} takes GPU deployments without exposure only`);
       continue;
     }
-    if (p.maxEurPerHour !== undefined || p.maxReplicas !== undefined) {
-      throw new SpecError(`placements[${i}]: maxEurPerHour and maxReplicas belong to a placement on another provider`);
+    if (p.maxReplicas !== undefined) {
+      throw new SpecError(`placements[${i}]: maxReplicas belongs to a placement on another provider`);
     }
     if (p.machineType && isGpuMachineType(p.machineType) !== spec.gpu) {
       throw new SpecError(`placements[${i}].machineType ${p.machineType} must be a ${spec.gpu ? 'GPU' : 'CPU'} type like machineType`);

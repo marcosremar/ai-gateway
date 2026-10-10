@@ -35,6 +35,7 @@ from .host import OfferError, SessionGone, SessionHost, load_loop
 from .session import OUT_FRAME_BYTES, Session, first_audio_max
 from .netcheck import NetState
 from .telemetry import new_trace_id, telemetry, trace_id_from
+from .text import prompt_overflow
 from .token import TokenError, TokenVerifier, needs_config
 from .upstream import Upstream
 
@@ -150,6 +151,10 @@ class Edge:
         except TokenError as error:
             telemetry.emit("edge.token.reject", trace_id=trace_id, level="warn", reason=error.reason)
             return None, (401, "unauthorized", f"token rejected: {error.reason}")
+        too_long = prompt_overflow(claims.get("cfg") or {}, self.up.llm_ctx)
+        if too_long:
+            telemetry.emit("edge.prompt.reject", trace_id=trace_id, level="warn", ctx=self.up.llm_ctx)
+            return None, (413, "prompt_too_large", too_long)
         if self.full(claims["sid"]):
             telemetry.emit("edge.capacity.reject", trace_id=trace_id, level="warn", active=self.active(), max=self.s.max_sessions,
                            firstAudioMaxMs=self.first_audio_max())
@@ -292,7 +297,7 @@ class Edge:
         claims, refused = self.admit(token, trace_id, "ws", cfg=await self.ws_config(ws) if needs_config(token) else None)
         if refused:
             await ws.send_str(json.dumps({"type": "error", "code": refused[1], "message": refused[2]}))
-            await ws.close(code=4401 if refused[0] == 401 else 1013, message=refused[1].encode())
+            await ws.close(code={401: 4401, 413: 1008}.get(refused[0], 1013), message=refused[1].encode())
             return ws
         sid = claims["sid"]
         outbox: asyncio.Queue = asyncio.Queue()

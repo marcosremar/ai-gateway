@@ -115,7 +115,8 @@ export abstract class ReplicaLifecycle extends ControllerState {
   }
 
   protected async release(m: ReplicaMachine, reason: string): Promise<void> {
-    this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason });
+    const rt = this.deployments.get(m.deployment);
+    this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason, busy: rt ? this.busyOn(rt, m.id) : 0 });
     if ((reason === 'unhealthy' || reason === 'halted') && this.probes.get(m.id)?.everReady) this.noteLost(m.deployment);
     try {
       await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
@@ -177,7 +178,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
   protected createReplica(rt: Runtime): void {
     const spec = rt.record.spec;
     if (this.now() < rt.backoffUntil) return;
-    const refusal = this.capRefusal(0);
+    const refusal = this.capRefusal(0, spec.name);
     if (refusal) {
       rt.lastError = refusal;
       return;

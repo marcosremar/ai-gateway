@@ -74,8 +74,12 @@ by-reference session (it never sends the config); configs that fit keep riding i
 | 16 KB | ~5470 | cannot work | **cannot work** | ~2500 left |
 
 The estimate is deliberately high (llama.cpp counts ~3.6 bytes per token for Portuguese), so the real room is a
-little larger; the LLM's own count decides. A prompt over the slot is not refused at admission (the gateway does not
-know the replica's slot): every turn ends with `error{code:"upstream"}`, stage `llm`, HTTP 400 "context size".
+little larger; the LLM's own count decides. A config that leaves under 64 tokens for the learner's turn (system prompt +
+`system` messages + `user_template` + `max_tokens` + 64) is **refused at admission** with `413 prompt_too_large`: the
+gateway takes the smallest `LLM_SLOT_CTX` of the deployment's places (`env`, else `envByMachineType`, else 2048), and
+the edge checks again against the slot its replica reports (WS: `error{code:"prompt_too_large"}` then close 1008;
+WebRTC offer: 413). Before, such a session opened and every turn ended with `error{code:"upstream"}`, stage `llm`, HTTP
+400 "context size".
 
 ### Edge routes (on the replica, behind the nginx token gate)
 
