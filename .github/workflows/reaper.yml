@@ -1,0 +1,60 @@
+name: Orphan reaper
+
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Release the orphans (unchecked = dry run)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orphan-reaper
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AI_GATEWAY_ADMIN_KEY: ${{ secrets.AI_GATEWAY_ADMIN_KEY }}
+      SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+      GATEWAY_URL: ${{ vars.GATEWAY_URL || 'https://parle-ai-gateway.up.railway.app' }}
+      DEPLOYMENTS_NAMESPACE: ${{ vars.DEPLOYMENTS_NAMESPACE }}
+      APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+    steps:
+      - name: Check the configuration
+        id: config
+        run: |
+          missing=""
+          [ -n "$AI_GATEWAY_ADMIN_KEY" ] || missing="$missing secret AI_GATEWAY_ADMIN_KEY"
+          [ -n "$SANDBOX_TOKEN" ] || missing="$missing secret SANDBOX_TOKEN"
+          [ -n "$DEPLOYMENTS_NAMESPACE" ] || missing="$missing variable DEPLOYMENTS_NAMESPACE"
+          if [ -n "$missing" ]; then
+            echo "::warning::orphan reaper not run, missing:$missing (Settings → Secrets and variables → Actions)"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: steps.config.outputs.ready == 'true'
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        if: steps.config.outputs.ready == 'true'
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        if: steps.config.outputs.ready == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Reap orphans
+        if: steps.config.outputs.ready == 'true'
+        run: bun scripts/reap-orphans.ts $([ "$APPLY" = "true" ] && echo --apply)

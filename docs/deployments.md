@@ -804,6 +804,13 @@ Env of the reaper service: `GATEWAY_URL`, `DEPLOYMENTS_NAMESPACE` (same as the g
 user is in the gateway's `DEPLOYMENTS_ADMIN_USERS`; never the `SANDBOX_TOKEN`, which the script refuses), optional
 `SCW_DEFAULT_PROJECT_ID`, `REAPER_GRACE_MINUTES`.
 
+The same script also runs from the repository, always on the code of `main`: `.github/workflows/reaper.yml`, every hour
+at :07 and by hand (`workflow_dispatch`, `apply` unticked = dry run), with `--apply`. It needs the repository secrets
+`AI_GATEWAY_ADMIN_KEY` and `SANDBOX_TOKEN` (optional `ALERT_WEBHOOK_URL`) and the variable `DEPLOYMENTS_NAMESPACE`
+(optional `GATEWAY_URL`, default `https://parle-ai-gateway.up.railway.app`); while one is missing the run ends green
+with a warning naming it and touches nothing. Two reapers on the same namespace are redundant
+(a second release of a gone machine may count as a failed run): once the workflow runs, the Railway cron may be stopped.
+
 ## Running on Railway
 
 `railway.json` builds `Dockerfile.production` (`serve.ts`), health check `/health`, **1 replica** — the controller is
@@ -823,7 +830,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
-| `ALERT_WEBHOOK_URL` | optional: a JSON `POST` for `app.budget_warning` (80 %) / `app.budget_exhausted` (gateway) and `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service). Plain JSON (`{event, data}`), not Slack's `text` shape |
+| `ALERT_WEBHOOK_URL` | optional (the owner sets it on the `ai-gateway` and `ai-gateway-reaper` services): a JSON `POST` (`{event, data}`, not Slack's `text` shape; the same line is logged as `ALERT <event>`) for `app.budget_warning` (80 %) / `app.budget_exhausted`; `deployment.create_failed`, `deployment.out_of_stock` and `provider.insufficient_credit` (a create that failed, per deployment, at most once per 30 min); `replica.lost_with_sessions` (a replica released or no longer listed by the provider while it carried requests or realtime sessions); `stage.reserve_down` (a fallback link of a stage chain went `no_key`, `missing`, `pending`, `disabled` or `blocked`) and `stage.no_link` (no link of a chain can serve), once when it happens and again only after it recovered; `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service) |
 | `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the default for every app; an admin sets one app's own daily budgets with `PUT /v1/apps/:app/limits {dailyRequests?, dailyTokens?}` (stored in `apps.json`, applied at once, `null` = default, `0` = no budget): size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned). `deployments.json` and `apps.json` are written tmp + fsync + rename with the previous good copy in `.bak`; an unreadable file is restored from `.bak` (the bad one kept as `.corrupt-<ms>`, `STATE FILE UNREADABLE` on stderr); with no usable backup the gateway starts with deployments off (`DEPLOYMENTS DISABLED`) and the cloud routes up. A failed write is logged (`STATE WRITE FAILED`) and shown as `stateWriteError` in `/health?deep=1`. With no state file at all, machines of unknown deployments are kept 5 min before the orphan sweep (declared deployments register first). `app-budgets.json` keeps the app daily counts across restarts; `client-stability.jsonl` rotates to `.1` at 5 MB, 20 reports/min per app, 512 KB per report |
 | `DEPLOYMENT_COLD_WAIT_MS` | how long an alias request whose last live link is a deployment waits for a booting replica before the 503 + `Retry-After` (2000; § Cold start) |
