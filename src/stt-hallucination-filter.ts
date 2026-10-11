@@ -224,6 +224,7 @@ export interface SegmentFilterResult {
 function filterSegmentsByMetadata(
   segments: STTSegment[],
   config: STTHallucinationFilterConfig,
+  voiced: boolean,
 ): SegmentFilterResult {
   const kept: STTSegment[] = [];
   const rejected: STTSegment[] = [];
@@ -233,6 +234,18 @@ function filterSegmentsByMetadata(
   const reasons = new Map<number, string>();
 
   segments.forEach((seg, i) => {
+    if (voiced) {
+      if (seg.compression_ratio > config.compressionRatioThreshold) {
+        rejected.push(seg);
+        reasons.set(i, `compression_ratio=${seg.compression_ratio.toFixed(2)} > ${config.compressionRatioThreshold}`);
+      } else if (seg.no_speech_prob > config.noSpeechProbThreshold && seg.avg_logprob < config.avgLogprobThreshold) {
+        rejected.push(seg);
+        reasons.set(i, `no_speech_prob=${seg.no_speech_prob.toFixed(3)} > ${config.noSpeechProbThreshold} with avg_logprob ${seg.avg_logprob.toFixed(3)}`);
+      } else {
+        kept.push(seg);
+      }
+      return;
+    }
     if (seg.no_speech_prob > config.noSpeechProbThreshold) {
       rejected.push(seg);
       reasons.set(i, `no_speech_prob=${seg.no_speech_prob.toFixed(3)} > ${config.noSpeechProbThreshold}`);
@@ -317,6 +330,7 @@ export function filterHallucinations(
   config: STTHallucinationFilterConfig = DEFAULT_HALLUCINATION_FILTER_CONFIG,
 ): HallucinationFilterResult {
   const language = normalizeLanguage(languageInput);
+  const voiced = (response.speech_ms ?? 0) > 0;
   const originalText = response.text;
   const reasons: string[] = [];
   const reasonCodes: string[] = [];
@@ -345,7 +359,7 @@ export function filterHallucinations(
       no_speech_prob: response.no_speech_prob ?? 0, compression_ratio: response.compression_ratio ?? 0, avg_logprob: response.avg_logprob ?? 0,
     }] : undefined;
   if (config.metadataFilterEnabled && judged && judged.length > 0) {
-    const result = filterSegmentsByMetadata(judged, config);
+    const result = filterSegmentsByMetadata(judged, config, voiced);
     metadataRejected = result.rejected.length;
     if (judged === response.segments) keptSegments = result.kept;
 
@@ -371,7 +385,7 @@ export function filterHallucinations(
   if (config.blocklistFilterEnabled && text) {
     const verdict = blocklistVerdict(text, language);
     // An ambiguous phrase needs the signal's word too: no metadata → kept (a learner may have said it).
-    const corroborated = verdict === 'ambiguous' && (response.no_speech_prob ?? 0) >= config.ambiguousNoSpeechProb;
+    const corroborated = verdict === 'ambiguous' && !voiced && (response.no_speech_prob ?? 0) >= config.ambiguousNoSpeechProb;
     if (verdict === 'high' || corroborated) {
       reasons.push(`blocklist match (${text.length} chars)`);
       reasonCodes.push(verdict === 'high' ? 'blocklist' : 'blocklist_corroborated');

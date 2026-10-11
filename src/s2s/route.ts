@@ -160,7 +160,7 @@ function filterPrimaryTranscript(e: S2SEvent, config: S2SConfig): { codes: strin
   if (!text.trim()) return null;
   const n = (k: string) => (typeof e[k] === 'number' ? e[k] as number : undefined);
   const out = applySttFilter({
-    text, no_speech_prob: n('no_speech_prob'), avg_logprob: n('avg_logprob'), compression_ratio: n('compression_ratio'),
+    text, no_speech_prob: n('no_speech_prob'), avg_logprob: n('avg_logprob'), compression_ratio: n('compression_ratio'), speech_ms: n('speech_ms'),
     ...(Array.isArray(e.segments) ? { segments: e.segments as never } : {}),
   }, config.language);
   return out.filtered?.emptied ? { codes: out.filtered.codes, rawLength: out.filtered.rawLength } : null;

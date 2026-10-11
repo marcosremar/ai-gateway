@@ -27,6 +27,7 @@ from faster_whisper import BatchedInferencePipeline, WhisperModel
 from faster_whisper.audio import pad_or_trim
 from faster_whisper.tokenizer import Tokenizer
 from faster_whisper.transcribe import TranscriptionOptions, get_compression_ratio, get_suppressed_tokens
+from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 SAMPLE_RATE = 16000
 WINDOW_SECONDS = 30
@@ -40,6 +41,11 @@ COMPRESSION_RATIO_THRESHOLD = 2.4
 # A student's turn is a few seconds; 30 s of fast speech is ~100 words ≈ 150 tokens. The cap bounds a looping decode, which
 # would otherwise hold every clip of its batch for up to 448 tokens.
 MAX_NEW_TOKENS = 180
+VAD = VadOptions(speech_pad_ms=0)
+
+
+def speech_ms(audio: np.ndarray) -> int:
+    return round(sum(s["end"] - s["start"] for s in get_speech_timestamps(audio, VAD)) * 1000 / SAMPLE_RATE)
 
 
 def is_oom(error: BaseException) -> bool:
@@ -56,6 +62,7 @@ class SttBatcher:
         self.jobs: queue.PriorityQueue = queue.PriorityQueue()
         self.order = itertools.count()
         self.stats = {"batches": 0, "clips": 0, "largest": 0, "oom_retries": 0, "fallbacks": 0}
+        speech_ms(np.zeros(SAMPLE_RATE, dtype=np.float32))
         threading.Thread(target=self._loop, name="stt-batcher", daemon=True).start()
 
     # ── public ──────────────────────────────────────────────────────────────
@@ -64,7 +71,8 @@ class SttBatcher:
         job = {"audio": audio, "language": (language or None) and language[:2], "prompt": prompt or None, "future": Future(),
                "queued": time.monotonic()}
         self.jobs.put((int(partial), next(self.order), job))
-        return job["future"].result()
+        voiced = speech_ms(audio)
+        return {**job["future"].result(), "speech_ms": voiced}
 
     # ── worker ──────────────────────────────────────────────────────────────
 

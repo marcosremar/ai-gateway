@@ -610,7 +610,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
     async def run():
         try:
             heard = await asyncio.to_thread(transcribe_sync, audio, lang, cfg.get("stt_prompt"))
-            meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio") if k in heard}
+            meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio", "speech_ms") if k in heard}
             heard_at = ms()
             state["stage"] = "llm"
             yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": heard_at, **meta,

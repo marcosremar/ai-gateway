@@ -38,4 +38,8 @@ assert [norm(t) for t in alone] == [norm(t) for t in together]
 own = [model.detect_language(c)[:2] for c in clips]
 assert [h["language"] for h in heard] == [lang for lang, _ in own], (heard, own)
 assert all(0 < h["language_probability"] <= 1 for h in heard), heard
+assert all(h["speech_ms"] > 0 for h in heard), heard
+assert batcher.transcribe(np.zeros(16000, dtype=np.float32), "pt")["speech_ms"] == 0
+noise = (np.random.default_rng(7).standard_normal(24000) * 0.025).astype(np.float32)
+assert batcher.transcribe(noise, "pt")["speech_ms"] == 0
 print("ok")
