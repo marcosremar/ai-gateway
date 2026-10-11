@@ -1,9 +1,16 @@
 import type { ChainReport } from '../config/stage-chains';
+import { activeWindow } from '../deployments/autoscale';
+import type { DeploymentView } from '../deployments/types';
+import type { LatencyReport } from './query';
 
 export interface OpsAlert { event: string; data: Record<string, unknown> }
 
 export const OPS_ALERT_DEDUP_MS = 30 * 60_000;
 export const OPS_ALERT_BOOT_QUIET_MS = 10 * 60_000;
+export const GPU_OUTSIDE_WINDOW_MS = 30 * 60_000;
+export const TURN_P95_LIMIT_MS = 3_000;
+export const TURN_P95_MIN_TURNS = 10;
+const TURN_EVENTS = ['turn.first_audio', 's2s.first_audio'];
 
 const RESERVE_DOWN = new Set(['no_key', 'missing', 'pending', 'disabled', 'blocked']);
 
@@ -13,6 +20,7 @@ export function createOpsAlerts(
   const bootedAt = now();
   const sentAt = new Map<string, number>();
   let chainsDown = new Set<string>();
+  const outsideSince = new Map<string, number>();
   const fire = (event: string, key: string, data: Record<string, unknown>) => {
     const id = `${event}|${key}`;
     const t = now();
@@ -37,6 +45,30 @@ export function createOpsAlerts(
       }
       if ((msg === 'deployments: releasing replica' || msg === 'deployments: replica gone') && Number(data.busy) > 0) {
         fire('replica.lost_with_sessions', String(data.id ?? ''), { deployment, id: data.id, reason: data.reason ?? 'gone', busy: data.busy });
+      }
+    },
+    fromDeployments(views: Array<Pick<DeploymentView, 'name' | 'replicas' | 'spec'>>): void {
+      const t = now();
+      const outside = new Set<string>();
+      for (const view of views) {
+        const up = view.replicas.filter(r => r.phase !== 'halted');
+        if (!view.spec.warmSchedule?.length || !up.length || activeWindow(view.spec.warmSchedule, t)) continue;
+        outside.add(view.name);
+        const since = outsideSince.get(view.name) ?? t;
+        outsideSince.set(view.name, since);
+        if (t - since < GPU_OUTSIDE_WINDOW_MS) continue;
+        fire('gpu.outside_window', view.name, {
+          deployment: view.name, replicas: up.length, minutes: Math.round((t - since) / 60_000),
+          eurPerHour: up.reduce((sum, r) => sum + (r.pricePerHour ?? 0), 0),
+        });
+      }
+      for (const name of outsideSince.keys()) if (!outside.has(name)) outsideSince.delete(name);
+    },
+    fromLatency(report: LatencyReport | null): void {
+      for (const event of TURN_EVENTS) {
+        const stat = report?.events[event];
+        if (!stat || stat.count < TURN_P95_MIN_TURNS || stat.p95Ms === null || stat.p95Ms <= TURN_P95_LIMIT_MS) continue;
+        fire('turn.slow', event, { stage: event, p95Ms: stat.p95Ms, p50Ms: stat.p50Ms, turns: stat.count, windowSeconds: report!.windowSeconds });
       }
     },
     fromChains(stages: Record<string, Record<string, ChainReport>>): void {

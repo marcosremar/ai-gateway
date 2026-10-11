@@ -576,6 +576,17 @@ describe('realtime UDP ports on Vast', () => {
     expect(backend.searchBody(vastSpec(), 0.97).direct_port_count).toEqual({ gte: 1 });
   });
 
+  it('minCpuCores/minRamGb go to the search and an offer the API let through without them is dropped', async () => {
+    const small = { id: 1, machine_id: 101, geolocation: 'Paris, FR', dph_total: 0.2, reliability2: 0.99, inet_down: 900, cpu_cores_effective: 8, cpu_ram: 32 * 1024 };
+    const big = { id: 2, machine_id: 102, geolocation: 'Paris, FR', dph_total: 0.3, reliability2: 0.99, inet_down: 900, cpu_cores_effective: 48, cpu_ram: 128 * 1024 };
+    const { calls, fetchImpl } = fakeVast(() => ({ body: { offers: [small, big] } }));
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    const spec = { ...vastSpec(), minCpuCores: 32, minRamGb: 64 };
+    expect((await backend.pickOffers(spec)).map(o => o.id)).toEqual([2]);
+    expect(calls[0].body).toMatchObject({ cpu_cores_effective: { gte: 32 }, cpu_ram: { gte: 64 * 1024 } });
+    expect(backend.searchBody(vastSpec(), 0.97)).not.toHaveProperty('cpu_cores_effective');
+  });
+
   it('the PUT-time env estimate covers what the create really sends, edge and port mappings included', async () => {
     for (const spec of [
       vastSpec({ realtime: {} }), vastSpec({ realtime: { maxSessions: 30 } }),

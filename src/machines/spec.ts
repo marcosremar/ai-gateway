@@ -83,6 +83,12 @@ export function parseMachineInput(body: Record<string, unknown>, limits: Machine
   if (zone) request.zone = zone;
   const near = str(body.near, 'near', /^[A-Z]{2}$/, false);
   if (near) request.near = near;
+  if (body.minCpuCores !== undefined) request.minCpuCores = num(body.minCpuCores, 'minCpuCores', 1, 512);
+  if (body.minRamGb !== undefined) request.minRamGb = num(body.minRamGb, 'minRamGb', 1, 4096);
+  if (request.minCpuCores || request.minRamGb) {
+    if (request.provider === 'scaleway' || request.provider === 'runpod') throw bad('minCpuCores/minRamGb choose a vast host; on scaleway and runpod name a machineType that has them');
+    request.provider = 'vast';
+  }
   if (request.provider !== 'scaleway' && !request.image) throw bad('image is required on vast and runpod (the container the machine runs)');
   return {
     request,
