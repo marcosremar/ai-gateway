@@ -14,6 +14,9 @@ const num = (v: unknown): number | undefined => (typeof v === 'number' && Number
 export function applyWhisperSegments(response: STTResponse, raw: unknown): void {
   const obj = raw as Record<string, unknown> | null;
   if (!obj || typeof obj !== 'object') return;
+  if (typeof obj.language === 'string' && obj.language) response.language ??= obj.language;
+  const languageProbability = num(obj.language_probability);
+  if (languageProbability !== undefined) response.language_probability = languageProbability;
   const segments: STTSegment[] = [];
   if (Array.isArray(obj.segments)) {
     for (const seg of obj.segments as Record<string, unknown>[]) {

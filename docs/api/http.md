@@ -651,8 +651,13 @@ curl -X POST https://<gateway>/v1/audio/transcriptions -H "Authorization: Bearer
 ```
 
 ```json
-{ "text": "Bom dia" }
+{ "text": "Bom dia", "language": "pt", "language_probability": 0.97 }
 ```
+
+`language` / `language_probability`: the language the provider detected in the audio and its probability, when it gives
+them. The text is still transcribed in the requested `language`; the speech-stack replica (image with this change) detects
+on the same encoder pass, at no extra decode, so a learner speaking French to a `language=pt` request shows up as
+`"language": "fr"`. Absent on a cache hit and on providers that report none. Not a verdict on its own: on 72 short pt-BR clips (0.4–4 s, gTTS, some with noise) large-v3 detected another language in 5 (noisy ones); read it with `language_probability`.
 
 **Hallucination filter (on by default, every provider, every client).** Whisper and other STT models invent text on
 silence and noise ("E aí", "Obrigado por assistir", "Legendas pela comunidade Amara.org"). The gateway asks the provider
