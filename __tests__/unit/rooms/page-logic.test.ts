@@ -10,7 +10,7 @@ interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
 interface Settings { mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -25,8 +25,9 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   lineView(mode: string, showOrig: boolean, lang: string, hasTr: boolean): { main: 'tr' | 'orig'; sub: boolean; miss: boolean };
   uaInfo(ua: string, touch: number): { ua: string; os: string; device: string };
   refOf(search: string, referrer: string): string;
+  dubbable(lang: string, dubLangs: string[] | undefined): boolean;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -219,6 +220,14 @@ describe('room page: viewer settings', () => {
     expect({ ...lineView('full', true, 'en', true) }).toEqual({ main: 'tr', sub: true, miss: false });
     expect({ ...lineView('translation', true, 'orig', false) }).toEqual({ main: 'orig', sub: false, miss: false });
     expect({ ...lineView('bilingual', false, 'en', false) }).toEqual({ main: 'orig', sub: false, miss: true });
+  });
+
+  it('offers dubbing only for languages the room can voice (any translation when the server does not say)', () => {
+    expect(dubbable('fr', ['en', 'fr'])).toBe(true);
+    expect(dubbable('de', ['en', 'fr'])).toBe(false);
+    expect(dubbable('de', undefined)).toBe(true);
+    expect(dubbable('orig', undefined)).toBe(false);
+    expect(dubbable('orig', ['en'])).toBe(false);
   });
 
   it('ships an accessible settings sheet', () => {

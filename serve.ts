@@ -55,7 +55,7 @@ import {
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
-import { createRooms } from './src/rooms';
+import { createRooms, kokoroSynthesize } from './src/rooms';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
@@ -479,8 +479,14 @@ const rooms = createRooms({
   },
   userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
   log: (msg, data) => log.log(data ?? {}, msg),
+  // Server dubbing (Kokoro 82M via OpenRouter) for listeners of rooms whose presenter sends text only.
+  synthesize: kokoroSynthesize(openrouterTTS),
+  synthesizeAvailable: () => openrouterTTS.isConfigured(),
 });
-log.log({ dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl }, 'Rooms enabled');
+log.log({
+  dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl,
+  serverDub: rooms.config.serverDub && openrouterTTS.isConfigured(),
+}, 'Rooms enabled');
 // Desktop-app field telemetry (src/app-telemetry, docs/app-telemetry.md): opt-in batches from the ucast.me app with a
 // gateway key, admin summary/listing. Day files on the same volume as rooms.
 const appTelemetry = appTelemetryFromEnv(process.env, {
