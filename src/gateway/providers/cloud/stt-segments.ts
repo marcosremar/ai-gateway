@@ -17,6 +17,8 @@ export function applyWhisperSegments(response: STTResponse, raw: unknown): void 
   if (typeof obj.language === 'string' && obj.language) response.language ??= obj.language;
   const languageProbability = num(obj.language_probability);
   if (languageProbability !== undefined) response.language_probability = languageProbability;
+  const speechMs = num(obj.speech_ms);
+  if (speechMs !== undefined) response.speech_ms = speechMs;
   const segments: STTSegment[] = [];
   if (Array.isArray(obj.segments)) {
     for (const seg of obj.segments as Record<string, unknown>[]) {

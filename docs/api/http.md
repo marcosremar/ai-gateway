@@ -670,6 +670,7 @@ blocklist marks as invented, and answers `{"text":""}` (still `200`; the client 
 | response header `X-STT-Raw-Length` | length in characters of what the provider returned (on every `200`) |
 | multipart field `filter_hallucinations=false` | per-request opt-out (QA); `0`/`off` also accepted. Such answers are cached apart from filtered ones |
 | `language` | `pt`, `pt-BR` or `Portuguese` (codes and English/native names). Without it only the high-confidence phrases apply |
+| `speech_ms` (speech-stack replica) | milliseconds of speech its VAD found; when > 0 the metadata layer only drops Whisper's own silence test (`no_speech_prob` > 0.6 and `avg_logprob` < -1.0) and repetition loops, so a short real answer is not emptied ([details](../stt-hallucination-filter.md#rules)) |
 | `response_format=verbose_json` | `language`, `duration` and the kept `segments` are returned next to `text` |
 | env `STT_HALLUCINATION_FILTER=0` | turns the filter off for the whole gateway |
 | env `STT_FILTER_NO_SPEECH_PROB` (0.6), `STT_FILTER_AVG_LOGPROB` (-1.0), `STT_FILTER_COMPRESSION_RATIO` (2.4), `STT_FILTER_AMBIGUOUS_NO_SPEECH_PROB` (0.4) | thresholds, no deploy of code needed (design choices to pilot) |
