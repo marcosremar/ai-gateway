@@ -8,7 +8,7 @@ about one encoder pass of the batch plus a decode as long as the longest transcr
 the line.
 
     batcher = SttBatcher(model, max_batch=8, window_ms=25, beam=1)
-    batcher.transcribe(audio_f32_16k, "pt", prompt=None)  # blocking, thread-safe → {"text", "language", "duration"}
+    batcher.transcribe(audio_f32_16k, "pt", prompt=None)  # blocking, thread-safe → {"text", "language" (detected), "language_probability", "duration"}
 
 Clips longer than 30 s, or without a language (detection), go through `model.transcribe` alone — the batched path
 assumes one 30 s window per clip and a known language. A batched transcript that looks like a repetition loop is decoded
@@ -131,7 +131,8 @@ class SttBatcher:
                                                without_timestamps=True, initial_prompt=job["prompt"])
         segments = list(segments)
         text = " ".join(s.text.strip() for s in segments).strip()
-        result = {"text": text, "language": info.language, "duration": round(info.duration, 3)}
+        result = {"text": text, "language": info.language, "language_probability": round(float(info.language_probability), 4),
+                  "duration": round(info.duration, 3)}
         if segments:  # metadata for the gateway's hallucination filter (worst case over the segments)
             result["no_speech_prob"] = round(max(s.no_speech_prob for s in segments), 4)
             result["avg_logprob"] = round(sum(s.avg_logprob for s in segments) / len(segments), 4)
@@ -152,12 +153,13 @@ class SttBatcher:
             prepend_punctuations="\"'“¿([{-", append_punctuations="\"'.。,，!！?？:：”)]}、", multilingual=False,
             max_new_tokens=MAX_NEW_TOKENS, clip_timestamps="0", hallucination_silence_threshold=None, hotwords=None,
         )
-        _, outputs = self.pipeline.generate_segment_batched(features, tokenizer, options)
+        encoded, outputs = self.pipeline.generate_segment_batched(features, tokenizer, options)
+        detected = [ranked[0] for ranked in self.model.model.detect_language(encoded)]
         self.stats["batches"] += 1
         self.stats["clips"] += len(jobs)
         self.stats["largest"] = max(self.stats["largest"], len(jobs))
         results = []
-        for job, out in zip(jobs, outputs):
+        for job, out, (token, probability) in zip(jobs, outputs, detected):
             silent = out["no_speech_prob"] > NO_SPEECH_THRESHOLD and out["avg_logprob"] < LOG_PROB_THRESHOLD
             text = "" if silent else tokenizer.decode(out["tokens"]).strip()
             if text and (get_compression_ratio(text) > COMPRESSION_RATIO_THRESHOLD or len(out["tokens"]) >= MAX_NEW_TOKENS):
@@ -166,7 +168,8 @@ class SttBatcher:
                 continue
             # no_speech_prob / avg_logprob / compression_ratio ride along: the gateway's hallucination filter reads them
             # (src/stt-hallucination-filter.ts). Radford et al. 2023, ICML, arXiv:2212.04356.
-            results.append({"text": text, "language": language, "duration": round(len(job["audio"]) / SAMPLE_RATE, 3),
+            results.append({"text": text, "language": token.strip("<|>"), "language_probability": round(float(probability), 4),
+                            "duration": round(len(job["audio"]) / SAMPLE_RATE, 3),
                             "no_speech_prob": round(float(out["no_speech_prob"]), 4), "avg_logprob": round(float(out["avg_logprob"]), 4),
                             "compression_ratio": round(float(get_compression_ratio(text)), 4) if text else 0.0})
         return results

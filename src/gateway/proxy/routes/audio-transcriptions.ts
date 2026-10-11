@@ -181,10 +181,16 @@ export async function handleAudioTranscriptions(
     const verbose = body.response_format === 'verbose_json'
       ? { language: applied.response.language, duration: applied.response.duration, segments: applied.response.segments }
       : {};
+    const { language: detected, language_probability: detectedProbability } = applied.response;
     return {
       status: 200,
       headers: { 'X-Cache': 'MISS', ...headers, ...filterHeaders },
-      body: { text: applied.text, ...verbose },
+      body: {
+        text: applied.text,
+        ...(detected ? { language: detected } : {}),
+        ...(detectedProbability !== undefined ? { language_probability: detectedProbability } : {}),
+        ...verbose,
+      },
     };
   } catch (err) {
     log.error(`STT error for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);

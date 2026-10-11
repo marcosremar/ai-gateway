@@ -70,6 +70,12 @@ describe('STT route: hallucination filter', () => {
     expect(res.headers?.['X-STT-Filtered']).toBeDefined();
   });
 
+  it('plain json carries the detected language and its probability when the provider gave them', async () => {
+    const { p } = provider({ text: 'Um real e cinquenta.', language: 'fr', language_probability: 0.62, segments: [seg('Um real e cinquenta.', 0.1)] });
+    const res = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'pt' }), p);
+    expect(res.body).toEqual({ text: 'Um real e cinquenta.', language: 'fr', language_probability: 0.62 });
+  });
+
   it('env STT_HALLUCINATION_FILTER=0 turns it off for everyone', async () => {
     process.env.STT_HALLUCINATION_FILTER = '0';
     const { p, transcribe } = provider({ text: 'E aí.' });

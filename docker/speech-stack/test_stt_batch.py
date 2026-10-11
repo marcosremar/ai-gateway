@@ -24,7 +24,8 @@ clips = [load(p) for p in sys.argv[1:]]
 batcher = SttBatcher(model, max_batch=8, window_ms=50)
 alone = [batcher._one({"audio": c, "language": "pt", "prompt": None})["text"] for c in clips]
 with ThreadPoolExecutor(len(clips)) as pool:
-    together = list(pool.map(lambda c: batcher.transcribe(c, "pt")["text"], clips))
+    heard = list(pool.map(lambda c: batcher.transcribe(c, "pt"), clips))
+together = [h["text"] for h in heard]
 silence = batcher.transcribe(np.zeros(16000, dtype=np.float32), "pt")["text"]
 silence_alone = batcher._one({"audio": np.zeros(16000, dtype=np.float32), "language": "pt", "prompt": None})["text"]
 print("alone   ", alone)
@@ -34,4 +35,7 @@ assert len(silence) < 80, "silence must not come back as a repetition loop"
 norm = lambda t: "".join(ch for ch in t.lower() if ch.isalnum())  # noqa: E731
 assert batcher.stats["largest"] == len(clips), batcher.stats
 assert [norm(t) for t in alone] == [norm(t) for t in together]
+own = [model.detect_language(c)[:2] for c in clips]
+assert [h["language"] for h in heard] == [lang for lang, _ in own], (heard, own)
+assert all(abs(h["language_probability"] - p) < 0.15 for h, (_, p) in zip(heard, own)), (heard, own)
 print("ok")
