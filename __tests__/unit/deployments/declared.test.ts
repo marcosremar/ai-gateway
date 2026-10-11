@@ -81,7 +81,7 @@ describe('declared parle-speech spec', () => {
     expect(speech.image).toEqual({
       env: 'SPEECH_IMAGE', repository: 'rg.fr-par.scw.cloud/aigw/speech-stack', default: profile.image,
     });
-    expect(profile.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213');
+    expect(profile.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261011-0200');
     expect(speech.description).not.toMatch(/an L4 when/);
     expect(speech.profile).toBe('speech-stack');
     expect(speech.registryAuth).toBeUndefined();
@@ -223,7 +223,7 @@ describe('parle-speech placements when the L40S is out of stock (K1, 2026-10-09 
       .toMatch(/vast replicas need bootScript and image/);
     await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     const vast = filesByUrl(vastOf(), 'replica-token', 'https://gw.example', OUTSIDE_CLASS);
-    expect(vast).toMatchObject({ entrypoint: 'bash', args: ['/opt/s2s/start.sh'], image: 'ghcr.io/marcosremar/speech-stack:20261009-0213' });
+    expect(vast).toMatchObject({ entrypoint: 'bash', args: ['/opt/s2s/start.sh'], image: 'ghcr.io/marcosremar/speech-stack:20261011-0200' });
     expect(vast.files).toBeUndefined();
     expect(Object.keys(vast.fileUrls ?? {})).toEqual(Object.keys(PRODUCTION.files));
     expect(vastUnfit(vast)).toBeNull();
