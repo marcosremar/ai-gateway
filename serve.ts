@@ -48,7 +48,7 @@ import { createWebhookDelivery } from './src/webhooks';
 import { createOpsAlerts } from './src/telemetry/ops-alerts';
 import { alertEmailFromEnv, createAlertMailer, opsAlertMail, secretValues } from './src/telemetry/alert-email';
 import { createBalanceWatch } from './src/telemetry/balance-watch';
-import { gatewayClientKeys, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
+import { applySandboxCache, gatewayClientKeys, principalSandboxToken, SANDBOX_USER, saveSandboxCache } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
@@ -79,8 +79,16 @@ await keyAudit.init();
 await access.load().then(() => access.migratePolicies()).catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) },
   'ACCESS STATE UNREADABLE: issued keys, revocations and the admin list from the API are not applied — restore access.json'));
 const sandboxEnv = await access.bootSandboxEnv();
-if (sandboxEnv.source) log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
-else if (sandboxEnv.errors.length) log.warn({ errors: sandboxEnv.errors }, 'Dev API unreachable — using the environment only');
+const sandboxCachePath = join(stateDir, 'sandbox-env.json');
+if (sandboxEnv.source) {
+  log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
+  await saveSandboxCache(sandboxCachePath, process.env, sandboxEnv.received)
+    .catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'Saving the key cache failed'));
+} else {
+  const cached = await applySandboxCache(sandboxCachePath, process.env);
+  sandboxEnv.received.push(...cached);
+  if (sandboxEnv.errors.length) log.warn({ errors: sandboxEnv.errors, cached }, 'Dev API unreachable — using the environment and the last keys it gave');
+}
 const SANDBOX_TOKEN = principalSandboxToken(process.env);
 
 const PORT = parseInt(process.env.PORT || '4000');
@@ -320,6 +328,7 @@ async function rotateDeploymentCredentials(names: string[]) {
   keyAudit.record({ actor: 'palco-reload', action: 'deployment-credentials.rotate', names: changed, ok: r.rejected.length === 0, ...(detail ? { detail } : {}) });
 }
 const keyManager = new KeyManager(process.env, {
+  cachePath: sandboxCachePath,
   log: (msg, data) => log.log(data ?? {}, msg),
   onChange: async (names) => {
     keyAudit.record({ actor: 'palco-reload', action: 'provider-keys.applied', names, ok: true });
