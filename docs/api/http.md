@@ -901,8 +901,10 @@ working at once (`overlapMinutes` 0 or absent) or after the overlap (max 10080 m
 ### `PUT /v1/admin/access/keys/policy` (admin)
 
 GPU policy of one client key (two roles, 10/10/2026: only an admin changes it). Body `{ "id": "<key id>",
-"autoWake"?: bool, "canStartGpu"?: bool, "gpuDailyEur"?: number | null, "startIdleMinutes"?: 1–240 }`; omitted
-fields keep their value. Defaults: `autoWake: false` (a call never turns a GPU on), `canStartGpu: false`,
+"autoWake"?: bool, "autoWakeOutsideClass"?: bool, "canStartGpu"?: bool, "gpuDailyEur"?: number | null, "startIdleMinutes"?: 1–240 }`; omitted
+fields keep their value. Defaults: `autoWake: false` (a call never turns a GPU on), `autoWakeOutsideClass: true` (with
+`false`, `autoWake` only applies while a deployment's `warmSchedule` window is open — the class; outside it the key
+is served by a ready replica or the cloud, never wakes one), `canStartGpu: false`,
 `gpuDailyEur: 5` (EUR per UTC day spent by GPUs this key started; `null` = no cap), `startIdleMinutes: 10`. The
 dev token's id is `sandbox`. `GET /v1/admin/access/keys` shows each key's `policy`; a rotation (`replaces`) carries
 it to the new key. Spend and running starts: `clientGpu` in `GET /health?details=1` (admin: every key; a client
