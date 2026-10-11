@@ -113,6 +113,8 @@ export interface VastOffer {
   duration?: number | null;
   public_ipaddr?: string | null;
   direct_port_start?: number;
+  cpu_cores_effective?: number;
+  cpu_ram?: number;
 }
 
 /**
