@@ -25,7 +25,8 @@ import { createFallbackWatch, stageChainsReport, type ChainLinkSpec } from './sr
 import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
 import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
-import { AccessKeys } from './src/config/access-keys';
+import { AccessKeys, autoWakesNow } from './src/config/access-keys';
+import { classWindowOpen } from './src/deployments/autoscale';
 import { AdminGate } from './src/config/admin-gate';
 import { createAccessRoutes } from './src/config/access-routes';
 import { KeyAudit } from './src/config/key-audit';
@@ -504,7 +505,8 @@ const server = await startProxy({
   keyRegistry,
   providers,
   deepHealth,
-  autoWake: (bearer) => !keysConfigured() || access.policyOf(access.resolve(bearer)?.keyId).autoWake,
+  autoWake: (bearer) => !keysConfigured()
+    || autoWakesNow(access.policyOf(access.resolve(bearer)?.keyId), classWindowOpen(deployments?.controller.list() ?? [], Date.now())),
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
   ...(accounts ? { onInference: accounts.recordInference } : {}),

@@ -6,8 +6,12 @@ const USER_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const SANDBOX_TOKEN_RE = /^[^\s,:]{16,512}$/;
 export const MAX_OVERLAP_MINUTES = 7 * 24 * 60;
 
-export interface GpuPolicy { autoWake: boolean; canStartGpu: boolean; gpuDailyEur: number | null; startIdleMinutes: number }
-export const DEFAULT_GPU_POLICY: GpuPolicy = { autoWake: false, canStartGpu: false, gpuDailyEur: 5, startIdleMinutes: 10 };
+export interface GpuPolicy { autoWake: boolean; autoWakeOutsideClass: boolean; canStartGpu: boolean; gpuDailyEur: number | null; startIdleMinutes: number }
+export const DEFAULT_GPU_POLICY: GpuPolicy = { autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, gpuDailyEur: 5, startIdleMinutes: 10 };
+
+export function autoWakesNow(policy: GpuPolicy, classWindowOpen: boolean): boolean {
+  return policy.autoWake && (policy.autoWakeOutsideClass || classWindowOpen);
+}
 const CLASS_CLIENT = 'parle';
 const CLASS_CLIENT_POLICY: Partial<GpuPolicy> = { autoWake: true, canStartGpu: true, gpuDailyEur: null };
 const MAX_START_IDLE_MINUTES = 240;
@@ -132,7 +136,7 @@ export class AccessKeys {
     const next: Partial<GpuPolicy> = { ...this.state.policies?.[id] };
     for (const [field, value] of Object.entries(body)) {
       if (field === 'id') continue;
-      if (field === 'autoWake' || field === 'canStartGpu') {
+      if (field === 'autoWake' || field === 'autoWakeOutsideClass' || field === 'canStartGpu') {
         if (typeof value !== 'boolean') throw new AccessError(400, `${field} must be a boolean`);
         next[field] = value;
       } else if (field === 'gpuDailyEur') {
@@ -144,7 +148,7 @@ export class AccessKeys {
         }
         next.startIdleMinutes = value;
       } else {
-        throw new AccessError(400, `unknown field '${field}' (allowed: autoWake, canStartGpu, gpuDailyEur, startIdleMinutes)`);
+        throw new AccessError(400, `unknown field '${field}' (allowed: autoWake, autoWakeOutsideClass, canStartGpu, gpuDailyEur, startIdleMinutes)`);
       }
     }
     this.state.policies = { ...this.state.policies, [id]: next };
