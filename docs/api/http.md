@@ -793,6 +793,7 @@ Machine body:
 | `onstart` | bash run as root once the host is up (machines only) |
 | `env` | container environment; values never come back (only `envKeys`) |
 | `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `minCpuCores` / `minRamGb` | Vast host with at least that many effective CPU cores / GB of RAM; sends a `cheapest` request to Vast, 400 on Scaleway/RunPod (name a `machineType` that has them) |
 | `holder` | the agent inside the owner (its own 24 h cap) |
 
 Job body adds `command` (bash), `inputs` (`[{ "url": "https://…signed", "path": "in/x" }]`, downloaded under `/job`)

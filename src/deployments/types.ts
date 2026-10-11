@@ -149,6 +149,8 @@ export interface DeploymentSpec {
   candidates?: PlacementCandidate[];
   /** ISO country the users are in (latency preference); default `DEFAULT_NEAR` (placements.ts). */
   near?: string;
+  minCpuCores?: number;
+  minRamGb?: number;
   /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
   allowFar?: boolean;
   /**

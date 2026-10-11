@@ -16,6 +16,8 @@ export interface MachineRequest {
     env: Record<string, string>;
     zone?: string;
     near?: string;
+  minCpuCores?: number;
+  minRamGb?: number;
 }
 
 export interface MachineRecord {

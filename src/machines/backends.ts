@@ -142,7 +142,7 @@ export class VastMachineBackend implements MachineBackend {
   private spec(request: MachineRequest): DeploymentSpec {
     return {
       name: 'machine', machineType: request.machineType, volumeGb: request.diskGb, maxEurPerHour: request.maxUsdPerHour / EUR_TO_USD,
-      near: request.near, allowFar: true,
+      near: request.near, allowFar: true, minCpuCores: request.minCpuCores, minRamGb: request.minRamGb,
     } as DeploymentSpec;
   }
 
