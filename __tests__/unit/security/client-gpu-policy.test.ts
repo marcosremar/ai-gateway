@@ -4,7 +4,8 @@ import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AccessKeys } from '../../../src/config/access-keys';
+import { AccessKeys, autoWakesNow } from '../../../src/config/access-keys';
+import { classWindowOpen } from '../../../src/deployments/autoscale';
 import { AdminGate } from '../../../src/config/admin-gate';
 import { createAccessRoutes } from '../../../src/config/access-routes';
 import { KeyAudit } from '../../../src/config/key-audit';
@@ -40,8 +41,8 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
   it('autoWake is off by default; the migration keeps the class client (parle) waking and able to start its GPUs', async () => {
     const { access } = await keys();
     const policy = (token: string) => access.policyOf(access.resolve(token)?.keyId);
-    expect(policy(PROD)).toEqual({ autoWake: true, canStartGpu: true, gpuDailyEur: null, startIdleMinutes: 10 });
-    expect(policy(DEV)).toEqual({ autoWake: false, canStartGpu: false, gpuDailyEur: 5, startIdleMinutes: 10 });
+    expect(policy(PROD)).toEqual({ autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, gpuDailyEur: null, startIdleMinutes: 10 });
+    expect(policy(DEV)).toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, gpuDailyEur: 5, startIdleMinutes: 10 });
     expect(policy(OTHER).autoWake).toBe(false);
   });
 
@@ -61,6 +62,20 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
     expect(access.policyOf(access.resolve(key)?.keyId)).toMatchObject({ autoWake: true, canStartGpu: true, gpuDailyEur: null });
   });
 
+  it('autoWakeOutsideClass off: the key wakes GPUs only while a class window (a warm schedule) is open', async () => {
+    const { access } = await keys();
+    await expect(access.setPolicy({ id: 'env-parle', autoWakeOutsideClass: 'no' })).rejects.toMatchObject({ status: 400 });
+    const { policy } = await access.setPolicy({ id: 'env-parle', autoWakeOutsideClass: false });
+    const views = [{ spec: { warmSchedule: [{ days: [1, 2, 3, 4], start: '17:30', end: '20:30', timeZone: 'Europe/Paris', minReplicas: 1 }] } }, { spec: {} }];
+    const monday = (utc: string) => classWindowOpen(views, Date.parse(`2026-10-12T${utc}:00Z`));
+    expect([monday('15:29'), monday('15:30'), monday('18:29'), monday('18:30')]).toEqual([false, true, true, false]);
+    expect(classWindowOpen(views, Date.parse('2026-10-16T16:00:00Z'))).toBe(false);
+    expect(autoWakesNow(policy, true)).toBe(true);
+    expect(autoWakesNow(policy, false)).toBe(false);
+    expect(autoWakesNow(access.policyOf('env-parle-dev'), true)).toBe(false);
+    expect(autoWakesNow({ ...policy, autoWakeOutsideClass: true }, false)).toBe(true);
+  });
+
   it('setPolicy validates every field and the key id', async () => {
     const { access } = await keys();
     await expect(access.setPolicy({ id: 'nope', autoWake: true })).rejects.toMatchObject({ status: 404 });
@@ -69,7 +84,7 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
     await expect(access.setPolicy({ id: 'env-parle-dev', startIdleMinutes: 0 })).rejects.toMatchObject({ status: 400 });
     await expect(access.setPolicy({ id: 'env-parle-dev', admin: true })).rejects.toMatchObject({ status: 400 });
     expect((await access.setPolicy({ id: 'env-parle-dev', canStartGpu: true, gpuDailyEur: 3 })).policy)
-      .toEqual({ autoWake: false, canStartGpu: true, gpuDailyEur: 3, startIdleMinutes: 10 });
+      .toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: true, gpuDailyEur: 3, startIdleMinutes: 10 });
     expect(access.list().find(k => k.id === 'env-parle-dev')?.policy.gpuDailyEur).toBe(3);
   });
 

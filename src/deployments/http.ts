@@ -491,7 +491,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const key = isAdmin(req) ? null : gpuClient(req, name);
       const minutes = (await readJson(req)).minutes;
       const starter = key ?? { keyId: `admin:${opts.userOf?.(req) ?? 'admin'}`, user: opts.userOf?.(req) ?? 'admin' };
-      const policy = key?.policy ?? { autoWake: true, canStartGpu: true, gpuDailyEur: null, startIdleMinutes: 10 };
+      const policy = key?.policy ?? { autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, gpuDailyEur: null, startIdleMinutes: 10 };
       return send(res, 202, await opts.clientGpu.start(starter, policy, name, minutes, action === 'extend'));
     }
     if (action === 'wake' && method === 'POST') {
