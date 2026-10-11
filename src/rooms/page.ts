@@ -349,6 +349,10 @@ function lineView(mode,showOrig,lang,hasTr){
   if(!hasTr)return {main:'orig',sub:false,miss:true};
   return {main:'tr',sub:mode==='bilingual'||!!showOrig,miss:false};
 }
+function dubbable(lang,dubLangs){
+  if(!lang||lang==='orig')return false;
+  return !Array.isArray(dubLangs)||dubLangs.indexOf(lang)>=0;
+}
 `;
 
 /** The page script (plain ES2017, no framework). Placeholders: __CODE__, __DAYS__. */
@@ -612,10 +616,10 @@ function onAudio(msg){
   var ab;try{ab=b64Buf(msg.wav)}catch(e){fail();return}
   try{var p=actx.decodeAudioData(ab,function(buf){c.buf=buf;pump()},fail);if(p&&p.catch)p.catch(function(){})}catch(e){fail()}
 }
-function canDub(){return lang!=='orig'&&!ended}
+function canDub(){return !ended&&dubbable(lang,room&&room.dubLangs)}
 function updateDubButton(){
   var b=$('dub'),can=canDub();b.disabled=!can;
-  b.title=can?'':'Escolha um idioma de tradução para ouvir a dublagem';
+  b.title=can?'':(lang==='orig'?'Escolha um idioma de tradução para ouvir a dublagem':'Dublagem indisponível neste idioma');
   if(!can&&dub)setDub(false,'auto');
 }
 function setDub(on,from){
@@ -707,7 +711,7 @@ function applyRoom(r){
   room=r;expiresAt=r.expiresAt||null;lines=[];byId={};
   (r.lines||[]).forEach(function(l){byId[l.id]=l;lines.push(l);M(l.id)});lines.sort(function(a,b){return a.id-b.id});
   var t=r.title||'Legendas ao vivo';$('title').textContent=t;document.title=t+' · ucast.me';
-  buildSelect();renderAll();trackJoin();
+  buildSelect();renderAll();trackJoin();updateDubButton();
   if(r.ended)showEnded();
 }
 function notFound(){gone=true;setPill('','encerrada');updateDelay();$('notice').textContent='Esta sessão não existe mais (o texto fica disponível por '+DAYS+' dias após a última fala).';}

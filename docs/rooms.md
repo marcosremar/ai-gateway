@@ -9,7 +9,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 
 | Route | Auth | Body | Answer |
 |---|---|---|---|
-| `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"]}` | `201 {"code","publishToken","url","expiresAt"}` |
+| `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"], "serverDub"?}` | `201 {"code","publishToken","url","expiresAt"}` |
 | `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?}` | `204` |
 | `POST /v1/rooms/:code/audio` | publish token | `{"lineId", "lang", "wav": "<base64>"}` (≤ 2 MB decoded) | `204` (broadcast only, never stored) |
 | `POST /v1/rooms/:code/end` | publish token | — | `204` |
@@ -30,6 +30,28 @@ Server → client: `{"type":"snapshot","room":<GET body>}` on connect, then `{"t
 `{"type":"audio","lineId","lang","wav"}`, `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
 and, optionally, `{"type":"listen","lang":"en"|null}`: once sent, audio clips arrive only for that language (`null` =
 none), so viewers who do not listen to the dubbing do not download it. The server pings every 25 s.
+
+## Server dubbing
+
+When the presenter sends text only, the gateway voices the lines itself with Kokoro 82M (`hexgrad/kokoro-82m`) through
+OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `src/rooms/dub.ts`, wired in `serve.ts`.
+
+- Voices (primary subtag): en `af_heart`, fr `ff_siwis`, es `ef_dora`, pt `pf_dora`, it `if_sara`, ja `jf_alpha`,
+  zh `zf_xiaobei`, hi `hf_alpha`. Other languages are not voiced.
+- Spend only on demand: a line+language is synthesized only while at least one viewer has sent `listen` for that
+  language (a viewer that never sent `listen` does not count) and the line has a non-empty translation for it.
+- The presenter wins: the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500) after a line, skips a line+language the
+  presenter sent a clip for (checked again before delivering), and leaves a room alone while its presenter sent any clip
+  in the last `ROOM_SERVER_DUB_PRESENTER_QUIET_MS` (60000).
+- Bounded: per room and language one call in flight and one pending line; a newer line replaces an older pending one
+  (stale lines are dropped), and each line+language is voiced once (later corrections of the same id are not re-voiced).
+  Failures are logged, never surface to the publisher.
+- Server clips go out as `{"type":"audio","lineId","lang","wav":"<base64 mp3>","format":"mp3"}` (`wav` keeps its name;
+  `format` is additive, absent = WAV) to the viewers listening to that language only.
+- Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
+- With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
+  (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers "Ouvir dublagem"
+  only for those; without `dubLangs` (server dubbing off) it offers every translation language as before.
 
 ## Viewer pages
 

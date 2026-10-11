@@ -32,7 +32,11 @@ export function parseLang(v: unknown, field: string): string {
   return v;
 }
 
-export interface CreateRoomInput { title: string; originalLang: string | null; languages: string[] }
+export interface CreateRoomInput {
+  title: string; originalLang: string | null; languages: string[];
+  /** Whether the gateway may voice lines itself when the presenter sends no clips (default true). */
+  serverDub: boolean;
+}
 
 export function parseCreate(body: unknown, cfg: RoomsConfig): CreateRoomInput {
   if (!isObject(body)) throw new RoomError(400, 'body must be a JSON object');
@@ -47,7 +51,9 @@ export function parseCreate(body: unknown, cfg: RoomsConfig): CreateRoomInput {
     const lang = parseLang(l, 'languages[]');
     if (!languages.includes(lang)) languages.push(lang);
   }
-  return { title: title.trim(), originalLang, languages };
+  const serverDub = body.serverDub === undefined || body.serverDub === null ? true : body.serverDub;
+  if (typeof serverDub !== 'boolean') throw new RoomError(400, 'serverDub must be a boolean');
+  return { title: title.trim(), originalLang, languages, serverDub };
 }
 
 function text(v: unknown, field: string, max: number): string {
