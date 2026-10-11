@@ -3,10 +3,14 @@ import type { ChainReport } from '../config/stage-chains';
 export interface OpsAlert { event: string; data: Record<string, unknown> }
 
 export const OPS_ALERT_DEDUP_MS = 30 * 60_000;
+export const OPS_ALERT_BOOT_QUIET_MS = 10 * 60_000;
 
 const RESERVE_DOWN = new Set(['no_key', 'missing', 'pending', 'disabled', 'blocked']);
 
-export function createOpsAlerts(send: (alert: OpsAlert) => unknown, now: () => number = Date.now, dedupMs = OPS_ALERT_DEDUP_MS) {
+export function createOpsAlerts(
+  send: (alert: OpsAlert) => unknown, now: () => number = Date.now, dedupMs = OPS_ALERT_DEDUP_MS, bootQuietMs = OPS_ALERT_BOOT_QUIET_MS,
+) {
+  const bootedAt = now();
   const sentAt = new Map<string, number>();
   let chainsDown = new Set<string>();
   const fire = (event: string, key: string, data: Record<string, unknown>) => {
@@ -36,6 +40,7 @@ export function createOpsAlerts(send: (alert: OpsAlert) => unknown, now: () => n
       }
     },
     fromChains(stages: Record<string, Record<string, ChainReport>>): void {
+      if (now() - bootedAt < bootQuietMs) return;
       const down = new Map<string, OpsAlert>();
       for (const [stage, byModel] of Object.entries(stages)) {
         for (const [model, report] of Object.entries(byModel)) {
@@ -48,8 +53,21 @@ export function createOpsAlerts(send: (alert: OpsAlert) => unknown, now: () => n
           }
         }
       }
-      for (const [key, alert] of down) if (!chainsDown.has(key)) fire(alert.event, key, alert.data);
+      const fresh = new Map<string, Array<[string, OpsAlert]>>();
+      for (const [key, alert] of down) if (!chainsDown.has(key)) fresh.set(alert.event, [...(fresh.get(alert.event) ?? []), [key, alert]]);
+      for (const [event, items] of fresh) {
+        if (items.length === 1) fire(event, items[0][0], items[0][1].data);
+        else fire(event, items.map(([key]) => key).sort().join(','), groupedData(items.map(([, alert]) => alert.data)));
+      }
       chainsDown = new Set(down.keys());
     },
+  };
+}
+
+function groupedData(items: Array<Record<string, unknown>>): Record<string, unknown> {
+  return {
+    stage: [...new Set(items.map(d => String(d.stage)))].join(', '),
+    count: items.length,
+    items: items.map(d => [d.stage, d.model, d.target, d.state].filter(Boolean).join(' ')).join('; '),
   };
 }

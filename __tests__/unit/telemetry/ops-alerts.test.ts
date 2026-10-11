@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createOpsAlerts, OPS_ALERT_DEDUP_MS, type OpsAlert } from '../../../src/telemetry/ops-alerts';
+import { createOpsAlerts, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS, type OpsAlert } from '../../../src/telemetry/ops-alerts';
 import type { ChainReport } from '../../../src/config/stage-chains';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
@@ -9,10 +9,10 @@ import { FakeCloud, until } from '../deployments/_fake-cloud';
 
 const flush = () => new Promise(r => setTimeout(r, 0));
 
-function rig() {
+function rig(bootQuietMs = 0) {
   let t = Date.parse('2026-10-12T16:00:00Z');
   const sent: OpsAlert[] = [];
-  const alerts = createOpsAlerts(a => { sent.push(a); }, () => t);
+  const alerts = createOpsAlerts(a => { sent.push(a); }, () => t, OPS_ALERT_DEDUP_MS, bootQuietMs);
   return { alerts, sent, advance: (ms: number) => { t += ms; } };
 }
 
@@ -63,6 +63,34 @@ describe('ops alerts (O3): what reaches ALERT_WEBHOOK_URL', () => {
     alerts.fromChains(chain('no_key', null));
     await flush();
     expect(sent).toHaveLength(2);
+  });
+
+  it('a boot is quiet for the chains, and the stages down together become one alert per event', async () => {
+    const { alerts, sent, advance } = rig(OPS_ALERT_BOOT_QUIET_MS);
+    const down = (serving: string | null): ChainReport => ({ serving, onFallback: false, links: [{ target: 'deployment:parle-speech', state: 'cold' }] });
+    const allDown = { stt: { 'parle-stt': down(null) }, llm: { 'parle-llm': down(null) }, tts: { 'parle-tts': down(null), 'parle-tts-clone': down(null) } };
+    alerts.fromChains(allDown);
+    advance(OPS_ALERT_BOOT_QUIET_MS - 1);
+    alerts.fromChains(allDown);
+    await flush();
+    expect(sent).toEqual([]);
+    advance(1);
+    alerts.fromChains(allDown);
+    alerts.fromChains(allDown);
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ event: 'stage.no_link', data: { stage: 'stt, llm, tts', count: 4 } });
+    expect(String(sent[0].data.items)).toContain('tts parle-tts-clone');
+  });
+
+  it('a chain that came back during the boot quiet is never told', async () => {
+    const { alerts, sent, advance } = rig(OPS_ALERT_BOOT_QUIET_MS);
+    const chain = (serving: string | null) => ({ stt: { 'parle-stt': { serving, onFallback: false, links: [{ target: 'groq:whisper', state: 'ready' as const }] } } });
+    alerts.fromChains(chain(null));
+    advance(OPS_ALERT_BOOT_QUIET_MS);
+    alerts.fromChains(chain('groq:whisper'));
+    await flush();
+    expect(sent).toEqual([]);
   });
 
   it('a webhook that throws does not break the caller', async () => {
