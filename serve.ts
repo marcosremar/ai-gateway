@@ -304,6 +304,8 @@ setInterval(() => {
   const { stages } = chainsNow();
   fallbackWatch(stages);
   opsAlerts.fromChains(stages);
+  opsAlerts.fromDeployments(deployments?.controller.list() ?? []);
+  opsAlerts.fromLatency(latency?.() ?? null);
 }, 15_000).unref();
 
 // Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys

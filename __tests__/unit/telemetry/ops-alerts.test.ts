@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createOpsAlerts, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS, type OpsAlert } from '../../../src/telemetry/ops-alerts';
+import { createOpsAlerts, GPU_OUTSIDE_WINDOW_MS, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS, type OpsAlert } from '../../../src/telemetry/ops-alerts';
 import type { ChainReport } from '../../../src/config/stage-chains';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
@@ -9,8 +9,8 @@ import { FakeCloud, until } from '../deployments/_fake-cloud';
 
 const flush = () => new Promise(r => setTimeout(r, 0));
 
-function rig(bootQuietMs = 0) {
-  let t = Date.parse('2026-10-12T16:00:00Z');
+function rig(bootQuietMs = 0, start = '2026-10-12T16:00:00Z') {
+  let t = Date.parse(start);
   const sent: OpsAlert[] = [];
   const alerts = createOpsAlerts(a => { sent.push(a); }, () => t, OPS_ALERT_DEDUP_MS, bootQuietMs);
   return { alerts, sent, advance: (ms: number) => { t += ms; } };
@@ -91,6 +91,58 @@ describe('ops alerts (O3): what reaches ALERT_WEBHOOK_URL', () => {
     alerts.fromChains(chain('groq:whisper'));
     await flush();
     expect(sent).toEqual([]);
+  });
+
+  it('a GPU with a class schedule that stays up 30 min outside its window alerts; inside the window it never does', async () => {
+    const { alerts, sent, advance } = rig(0, '2026-10-12T20:00:00Z');
+    const warmSchedule = [{ days: [1, 2, 3, 4], start: '17:30', end: '20:30', timeZone: 'Europe/Paris', minReplicas: 1 }];
+    const view = (name: string, phase: 'ready' | 'halted', schedule = warmSchedule) => ({
+      name, spec: { warmSchedule: schedule } as never, replicas: [{ phase, pricePerHour: 1.4 }] as never,
+    });
+    const views = () => [view('parle-speech', 'ready'), view('parle-qwen-tts', 'halted'), view('parle-speech-test', 'ready', [])];
+    alerts.fromDeployments(views());
+    advance(GPU_OUTSIDE_WINDOW_MS - 60_000);
+    alerts.fromDeployments(views());
+    await flush();
+    expect(sent).toEqual([]);
+    advance(60_000);
+    alerts.fromDeployments(views());
+    await flush();
+    expect(sent).toEqual([expect.objectContaining({ event: 'gpu.outside_window', data: expect.objectContaining({ deployment: 'parle-speech', minutes: 30, eurPerHour: 1.4 }) })]);
+
+    const inClass = rig(0, '2026-10-12T15:30:00Z');
+    for (let i = 0; i < 4; i++) { inClass.alerts.fromDeployments(views()); inClass.advance(30 * 60_000); }
+    await flush();
+    expect(inClass.sent).toEqual([]);
+  });
+
+  it('a GPU parked before 30 min outside its window restarts the count', async () => {
+    const { alerts, sent, advance } = rig(0, '2026-10-12T20:00:00Z');
+    const view = (phase: 'ready' | 'halted') => [{
+      name: 'parle-speech', spec: { warmSchedule: [{ days: [1, 2, 3, 4], start: '17:30', end: '20:30', minReplicas: 1 }] } as never,
+      replicas: [{ phase, pricePerHour: 1.4 }] as never,
+    }];
+    alerts.fromDeployments(view('ready'));
+    advance(20 * 60_000);
+    alerts.fromDeployments(view('halted'));
+    advance(20 * 60_000);
+    alerts.fromDeployments(view('ready'));
+    await flush();
+    expect(sent).toEqual([]);
+  });
+
+  it('turns slower than 3 s at p95 alert once there are enough of them', async () => {
+    const { alerts, sent } = rig();
+    const report = (count: number, p95Ms: number) => ({ windowSeconds: 900, stages: {}, events: { 'turn.first_audio': { count, p50Ms: 1200, p95Ms } } });
+    alerts.fromLatency(null);
+    alerts.fromLatency(report(5, 9000));
+    alerts.fromLatency(report(40, 2900));
+    await flush();
+    expect(sent).toEqual([]);
+    alerts.fromLatency(report(40, 3400));
+    alerts.fromLatency(report(41, 3500));
+    await flush();
+    expect(sent).toEqual([expect.objectContaining({ event: 'turn.slow', data: expect.objectContaining({ stage: 'turn.first_audio', p95Ms: 3400, turns: 40 }) })]);
   });
 
   it('a webhook that throws does not break the caller', async () => {
