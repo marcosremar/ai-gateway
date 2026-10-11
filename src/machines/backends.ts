@@ -137,7 +137,10 @@ interface VastInstanceRow {
 
 export class VastMachineBackend implements MachineBackend {
   readonly provider = 'vast' as const;
-  constructor(private readonly market: Pick<VastDeploymentBackend, 'pickOffers' | 'currentKey'>, private readonly fetchImpl: FetchLike = fetch) {}
+  constructor(
+    private readonly market: Pick<VastDeploymentBackend, 'pickOffers' | 'currentKey'>, private readonly fetchImpl: FetchLike = fetch,
+    private readonly wait: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)),
+  ) {}
 
   private spec(request: MachineRequest): DeploymentSpec {
     return {
@@ -183,10 +186,11 @@ export class VastMachineBackend implements MachineBackend {
         client_id: 'me', image: request.image, label: machineLabel(input.namespace, input.machineId), disk: request.diskGb,
         runtype: 'ssh_direct',
         onstart: 'V="${AIGW_INIT_B64:-$(sed -n \'s/^AIGW_INIT_B64=//p\' /etc/environment | tr -d \'"\')}"; '
-          + 'mkdir -p /srv/aigw && echo "$V" | base64 -d > /srv/aigw/init.sh && nohup bash /srv/aigw/init.sh > /srv/aigw/init.log 2>&1 &',
+          + 'mkdir -p /srv/aigw && echo "$V" | base64 -d > /srv/aigw/init.sh && (bash /srv/aigw/init.sh 2>&1 | tee /srv/aigw/init.log) &',
         env: { ...request.env, AIGW_INIT_B64: Buffer.from(machineInit(request)).toString('base64'), ...mapped },
       }).catch((err: unknown) => ({ success: false, error: err instanceof Error ? err.message : String(err) }));
       if (res.success && res.new_contract != null) {
+        if (request.sshPublicKey) await this.attachSshKey(String(res.new_contract), request.sshPublicKey);
         return {
           providerId: String(res.new_contract), provider: 'vast', machineId: input.machineId, state: 'starting', ip: null, ports: {},
           usdPerHour: offer.dph_total, createdAt: Date.now(),
@@ -195,6 +199,19 @@ export class VastMachineBackend implements MachineBackend {
       misses.push(`offer ${offer.id}: ${(res.error ?? res.msg ?? 'refused').slice(0, 80)}`);
     }
     throw new Error(`out_of_stock: every vast offer tried was taken (${misses.join('; ')})`);
+  }
+
+  private async attachSshKey(providerId: string, sshPublicKey: string): Promise<void> {
+    let lastError = '';
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await this.wait(attempt * 3_000);
+      const res = await this.call<{ success?: boolean; msg?: string }>('POST', `/instances/${encodeURIComponent(providerId)}/ssh/`, { ssh_key: sshPublicKey })
+        .catch((err: unknown) => ({ success: false, msg: err instanceof Error ? err.message : String(err) }));
+      if (res.success !== false) return;
+      lastError = res.msg ?? 'refused';
+    }
+    await this.release(providerId).catch(() => {});
+    throw new Error(`vast instance ${providerId}: ssh key not attached (${lastError.slice(0, 120)}); instance released`);
   }
 
   async list(namespace: string): Promise<ProviderMachine[]> {
