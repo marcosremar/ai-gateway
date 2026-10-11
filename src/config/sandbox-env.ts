@@ -17,6 +17,7 @@
  * The same token is also accepted as a Bearer by the gateway itself (see `serve.ts`), so agents call it with the
  * credential they already carry.
  */
+import { readStateFile, writeStateFile } from '../deployments/state-file';
 
 /** Aliases that carry the same secret on Railway / Cloud Agent (kept in sync with parle `principalSandboxToken`). */
 export const TOKEN_ALIASES = ['SANDBOX_TOKEN', 'PALCO_PROXY_TOKEN', 'PALCO_PROXY', 'VMOS_PROXY_TOKEN', 'VMOS_PROXY', 'PROXY_TOKEN'] as const;
@@ -149,4 +150,21 @@ export async function loadSandboxEnv(
     }
   }
   return result;
+}
+
+export async function saveSandboxCache(path: string, env: Record<string, string | undefined>, names: string[]): Promise<void> {
+  const values = Object.fromEntries(names.flatMap(name => (env[name]?.trim() ? [[name, env[name]!.trim()]] : [])));
+  await writeStateFile(path, JSON.stringify(values));
+}
+
+export async function applySandboxCache(path: string, env: Record<string, string | undefined>): Promise<string[]> {
+  const { data } = await readStateFile<Record<string, unknown>>(path).catch(() => ({ data: null }));
+  const applied: string[] = [];
+  for (const [key, value] of Object.entries(data ?? {})) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof value !== 'string' || !value.trim()) continue;
+    if (isHostOnly(key) || isEndpointOverride(key) || (isEnvPinned(key) && env[key]?.trim())) continue;
+    env[key] = value.trim();
+    applied.push(key);
+  }
+  return applied;
 }
