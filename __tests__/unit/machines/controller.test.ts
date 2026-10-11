@@ -37,6 +37,14 @@ describe('machines controller', () => {
     await expect(ctl.create('palco', input({ provider: 'cheapest' }))).rejects.toMatchObject({ status: 409 });
   });
 
+  it('a provider without credit answers 402 with the top-up message, not 409 out of stock', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    vast.failCreate = 'insufficient_credit: top up the Vast account (recarregue a Vast)';
+    const ctl = makeController({ backends: { vast }, now: c.now });
+    await expect(ctl.create('palco', input({}))).rejects.toMatchObject({ status: 402, message: expect.stringMatching(/recarregue a Vast/) });
+  });
+
   it('releases a machine at its deadline and refuses an extend past the lifetime', async () => {
     const c = clock();
     const vast = new FakeMachineCloud('vast', c.now);

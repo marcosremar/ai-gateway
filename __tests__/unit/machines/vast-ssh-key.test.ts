@@ -7,12 +7,12 @@ const KEY = `ssh-ed25519 ${'A'.repeat(68)} agent@test`;
 const body = { provider: 'vast', machineType: 'RTX 3060', maxUsdPerHour: 0.3, maxHours: 1, image: 'ubuntu:24.04', sshPublicKey: KEY };
 const market = { currentKey: 'k', pickOffers: async () => [{ id: 7, dph_total: 0.1 }] };
 
-function fakeVast(sshReplies: Array<{ status: number; body: unknown }>) {
+function fakeVast(sshReplies: Array<{ status: number; body: unknown }>, rent: { status: number; body: unknown } = { status: 200, body: { success: true, new_contract: 4242 } }) {
   const calls: Array<{ method: string; url: string; body: unknown }> = [];
   const fetchImpl = async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     calls.push({ method, url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
-    if (method === 'PUT') return new Response(JSON.stringify({ success: true, new_contract: 4242 }));
+    if (method === 'PUT') return new Response(JSON.stringify(rent.body), { status: rent.status });
     if (url.endsWith('/ssh/')) {
       const reply = sshReplies.shift() ?? { status: 200, body: { success: true } };
       return new Response(JSON.stringify(reply.body), { status: reply.status });
@@ -45,5 +45,19 @@ describe('vast machine ssh key', () => {
     const { calls, backend } = fakeVast([]);
     await create(backend);
     expect((calls.find(c => c.method === 'PUT')!.body as { onstart: string }).onstart).toMatch(/tee \/srv\/aigw\/init\.log/);
+  });
+
+  it('rents with the runtype the vast cli sends for --ssh --direct, so the image gets an sshd', async () => {
+    const { calls, backend } = fakeVast([]);
+    await create(backend);
+    expect((calls.find(c => c.method === 'PUT')!.body as { runtype: string }).runtype).toBe('ssh_direc ssh_proxy');
+  });
+
+  it('a 400 insufficient_credit says to top up the vast account, not out_of_stock', async () => {
+    const { calls, backend } = fakeVast([], { status: 400, body: { success: false, error: 'insufficient_credit', msg: 'Your account lacks credit' } });
+    const err = await create(backend).catch((e: unknown) => e as Error);
+    expect(err.message).toMatch(/^insufficient_credit: .*recarregue a Vast/);
+    expect(err.message).not.toMatch(/out_of_stock/);
+    expect(calls.filter(c => c.method === 'PUT')).toHaveLength(1);
   });
 });
