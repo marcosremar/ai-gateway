@@ -135,6 +135,9 @@ interface VastInstanceRow {
   start_date?: number | null;
 }
 
+/** What the Vast CLI sends for `--ssh --direct` (vast.py `get_runtype`, vastai 0.5.0): the `ssh_direc` spelling is the one Vast reads. */
+export const VAST_SSH_RUNTYPE = 'ssh_direc ssh_proxy';
+
 export class VastMachineBackend implements MachineBackend {
   readonly provider = 'vast' as const;
   constructor(
@@ -184,7 +187,7 @@ export class VastMachineBackend implements MachineBackend {
       type Rent = { success?: boolean; new_contract?: number; error?: string; msg?: string };
       const res: Rent = await this.call<Rent>('PUT', `/asks/${offer.id}/`, {
         client_id: 'me', image: request.image, label: machineLabel(input.namespace, input.machineId), disk: request.diskGb,
-        runtype: 'ssh_direct',
+        runtype: VAST_SSH_RUNTYPE,
         onstart: 'V="${AIGW_INIT_B64:-$(sed -n \'s/^AIGW_INIT_B64=//p\' /etc/environment | tr -d \'"\')}"; '
           + 'mkdir -p /srv/aigw && echo "$V" | base64 -d > /srv/aigw/init.sh && (bash /srv/aigw/init.sh 2>&1 | tee /srv/aigw/init.log) &',
         env: { ...request.env, AIGW_INIT_B64: Buffer.from(machineInit(request)).toString('base64'), ...mapped },
@@ -196,7 +199,11 @@ export class VastMachineBackend implements MachineBackend {
           usdPerHour: offer.dph_total, createdAt: Date.now(),
         };
       }
-      misses.push(`offer ${offer.id}: ${(res.error ?? res.msg ?? 'refused').slice(0, 80)}`);
+      const refusal = res.error ?? res.msg ?? 'refused';
+      if (/insufficient_credit/i.test(refusal)) {
+        throw new Error('insufficient_credit: Vast refused the rent for lack of credit; top up the Vast account (recarregue a Vast)');
+      }
+      misses.push(`offer ${offer.id}: ${refusal.slice(0, 80)}`);
     }
     throw new Error(`out_of_stock: every vast offer tried was taken (${misses.join('; ')})`);
   }
