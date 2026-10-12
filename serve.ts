@@ -107,6 +107,8 @@ const adminUsers = access.admins;
 const configuredAccounts = createAccounts({
   isAdmin: (userId) => adminUsers.has(userId),
   log: (msg, data) => log.log(data ?? {}, msg),
+  // Read at request time, once `realtime` (below) exists.
+  sessionRequests: () => realtime.service.sessionRequests,
 });
 const accounts = await configuredAccounts.init().then(() => configuredAccounts, (err: unknown) => {
   log.error({ error: err instanceof Error ? err.message : String(err) },
