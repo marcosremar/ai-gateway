@@ -2,6 +2,8 @@ import type { AdminSnapshot } from '../../src/admin-page';
 import type { DeploymentView, ReplicaView } from '../../src/deployments/types';
 import type { KeyView } from '../../src/config/access-keys';
 import { DEFAULT_GPU_POLICY } from '../../src/config/access-keys';
+import type { StoredTelemetryEvent } from '../../src/telemetry/contract';
+import { adminTraffic } from '../../src/admin-page/traffic';
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
 
@@ -15,6 +17,7 @@ const deployment = (name: string, replicas: ReplicaView[], schedule: Array<{ day
   name, status: replicas.length ? 'ready' : 'scaled-to-zero', desiredReplicas: replicas.length, replicas, inflight: 0, waiting: 0,
   lastRequestAt: null, lastError: null, invokeUrl: '', app: 'parle', appImage: null, publicIp: null, lastPlacement: null, warm: null,
   realtime: null, sessions: 0, hold: null, warnings: [],
+  autoscale: { desired: replicas.length, pressureWant: 0, reason: 'base', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
   spec: { warmSchedule: schedule.map(s => ({ ...s, minReplicas: 1, timeZone: 'Europe/Paris' })) },
   ...extra,
 }) as unknown as DeploymentView;
@@ -24,11 +27,49 @@ const key = (id: string, user: string, role: KeyView['role'], lastUsedAt: string
   expiresAt: null, revokedAt: null, active: true, policy: { ...DEFAULT_GPU_POLICY, ...policy },
 });
 
+const STAGE_MS: Record<string, number> = { stt: 380, chat: 520, tts: 640 };
+
+function trafficRows(now: number, state: DemoState): StoredTelemetryEvent[] {
+  let seed = 7;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const rows: StoredTelemetryEvent[] = [];
+  const push = (rxTs: number, event: string, level: StoredTelemetryEvent['level'], extra: Partial<StoredTelemetryEvent> = {}) =>
+    rows.push({ seq: rows.length, rxTs, ts: rxTs, source: 'gateway', level, event, traceId: '1'.repeat(32), ...extra });
+  for (let h = 23; h >= 0; h--) {
+    const start = now - h * 3_600_000 - 3_599_000;
+    const parisHour = (new Date(start).getUTCHours() + 2) % 24;
+    const inClass = parisHour >= 17 && parisHour <= 20;
+    const calls = inClass ? 140 + Math.round(rand() * 60) : parisHour >= 8 && parisHour < 23 ? 18 + Math.round(rand() * 22) : Math.round(rand() * 4);
+    for (let c = 0; c < calls; c++) {
+      const at = start + Math.round(rand() * 3_590_000);
+      const stage = ['stt', 'chat', 'tts'][c % 3]!;
+      const provider = inClass ? 'deployment:speech-stack' : 'openrouter';
+      const failing = state === 'bad' && stage === 'tts' && h === 0;
+      if (failing || (state === 'warn' && h === 5 && c === 3)) {
+        push(at, 'route.fallback', 'warn', { attrs: { stage, provider } });
+        push(at + 5, 'route.unavailable', 'error', { durMs: 30_000, attrs: { stage } });
+        continue;
+      }
+      if (state !== 'ok' && rand() < 0.03) push(at, 'route.fallback', 'warn', { attrs: { stage, provider } });
+      push(at + 10, 'route.served', 'info', { durMs: Math.round(STAGE_MS[stage]! * (0.6 + rand() * (rand() < 0.08 ? 3 : 0.9))), attrs: { stage, provider } });
+    }
+  }
+  if (state === 'bad') for (let i = 0; i < 14; i++) push(now - (2 + i * 3) * 60_000, 'route.unavailable', 'error', { durMs: 30_000, attrs: { stage: 'tts' } });
+  const lifecycle: Array<[number, string, StoredTelemetryEvent['level'], string]> = [
+    [520, 'autoscale.warm', 'info', 'speech-stack'], [519, 'replica.creating', 'info', 'speech-stack'], [512, 'replica.ready', 'info', 'speech-stack'],
+    [340, 'replica.parked', 'info', 'speech-stack'], [96, 'replica.power_on', 'info', 'speech-stack'], [95, 'replica.ready', 'info', 'speech-stack'],
+  ];
+  if (state !== 'ok') lifecycle.push([62, 'replica.creating', 'info', 'speech-stack-test'], [58, 'replica.create_failed', 'error', 'speech-stack-test']);
+  if (state === 'bad') lifecycle.push([3, 'stage.on_fallback', 'warn', 'speech-stack'], [2, 'app.degraded', 'warn', 'speech-stack']);
+  for (const [min, event, level, deployment] of lifecycle) push(now - min * 60_000, event, level, { deployment, replicaId: 'scw-1a2b' });
+  return rows.sort((a, b) => a.rxTs - b.rxTs).map((r, i) => ({ ...r, seq: i }));
+}
+
 export const demoStates = ['warn', 'ok', 'bad'] as const;
 export type DemoState = typeof demoStates[number];
 
 export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnapshot {
-  const snapshot = warnSnapshot(now);
+  const snapshot = { ...warnSnapshot(now), traffic: adminTraffic(trafficRows(now, state), now) };
   if (state === 'ok') return allGreen(snapshot, now);
   if (state === 'bad') return somethingDown(snapshot, now);
   return snapshot;
@@ -40,6 +81,7 @@ function allGreen(s: AdminSnapshot, now: number): AdminSnapshot {
     balances: s.balances.map(b => (b.provider === 'vast' ? { ...b, level: 'ok', balanceUsd: 38.5, hoursLeft: 128, reasons: [] } : b)),
     gpus: s.gpus!.map(d => (d.name === 'speech-stack' ? { ...d, spec: { warmSchedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', minReplicas: 1, timeZone: 'Europe/Paris' }] } } as DeploymentView : d)),
     alerts: s.alerts.map(a => ({ ...a, at: iso(now, 300) })),
+    audit: s.audit.filter(e => e.ok),
   };
 }
 
@@ -51,6 +93,8 @@ function somethingDown(s: AdminSnapshot, now: number): AdminSnapshot {
       links: s.reserves.links.map(r => (r.stage === 'tts' ? { ...r, ok: false, status: 502, code: 'upstream_error', latencyMs: 30000, error: 'provider timeout', checkedAt: iso(now, 2) } : r)),
     },
     apps: s.apps.map(a => (a.status ? { ...a, status: { ...a.status, mode: 'down' } } : a)),
+    alerts: [{ event: 'fallback.probe_failed', at: iso(now, 2), summary: 'stage: tts, target: openrouter:hexgrad/kokoro-82m, code: upstream_error' }, ...s.alerts],
+    audit: [{ at: iso(now, 1), actor: 'marcos', action: 'admin-page.probe', names: [], ok: true }, ...s.audit],
   };
 }
 
@@ -72,11 +116,14 @@ function warnSnapshot(now: number): AdminSnapshot {
     ],
     providerCredit: [],
     gpus: [
-      deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }]),
+      deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }], { lastRequestAt: iso(now, 3) }),
       deployment('parle-bridge-shadow', [], []),
       deployment('speech-stack-test', [], [], { warm: null }),
     ],
-    gpuSpend: { spentEur: { 'key-0f3a9c11d2e4': 1.2 } },
+    gpuSpend: {
+      spentEur: { 'key-0f3a9c11d2e4': 1.2, 'env-parle': 2.65 },
+      running: [{ key: 'env-parle', deployment: 'speech-stack', until: iso(now, -25), capEur: null }],
+    },
     alerts: [
       { event: 'gpu.outside_window', at: iso(now, 35), summary: 'deployment: speech-stack, replicas: 1, minutes: 35, eurPerHour: 0.79' },
       { event: 'balance.warn', at: iso(now, 300), summary: 'subject: Vast: saldo US$ 7,80 (~26 h)' },
@@ -104,6 +151,14 @@ function warnSnapshot(now: number): AdminSnapshot {
     ],
     appBudgets: [
       { app: 'parle', resetAt: iso(now, -600), requests: { used: 1840, limit: 20000, perMinute: 3.1, exhaustedAt: null }, tokens: { used: 412000, limit: 5000000, perMinute: 700, exhaustedAt: null } },
+      { app: 'babelcast', resetAt: iso(now, -600), requests: { used: 212, limit: 2000, perMinute: 0.2, exhaustedAt: null }, tokens: { used: 38500, limit: 500000, perMinute: 40, exhaustedAt: null } },
+    ],
+    traffic: null,
+    audit: [
+      { at: iso(now, 12), actor: 'marcos', action: 'admin-page.login', names: [], ok: true },
+      { at: iso(now, 58), actor: 'marcos', action: 'admin-page.park', names: ['speech-stack-test'], ok: false, detail: 'réplica ainda criando' },
+      { at: iso(now, 140), actor: 'palco-reload', action: 'provider-keys.applied', names: ['OPENROUTER_API_KEY'], ok: true },
+      { at: iso(now, 345), actor: 'marcos', action: 'admin-page.park', names: ['speech-stack'], ok: true },
     ],
   };
 }
