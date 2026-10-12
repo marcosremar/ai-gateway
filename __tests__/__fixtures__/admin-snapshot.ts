@@ -24,7 +24,37 @@ const key = (id: string, user: string, role: KeyView['role'], lastUsedAt: string
   expiresAt: null, revokedAt: null, active: true, policy: { ...DEFAULT_GPU_POLICY, ...policy },
 });
 
-export function demoSnapshot(now: number): AdminSnapshot {
+export const demoStates = ['warn', 'ok', 'bad'] as const;
+export type DemoState = typeof demoStates[number];
+
+export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnapshot {
+  const snapshot = warnSnapshot(now);
+  if (state === 'ok') return allGreen(snapshot, now);
+  if (state === 'bad') return somethingDown(snapshot, now);
+  return snapshot;
+}
+
+function allGreen(s: AdminSnapshot, now: number): AdminSnapshot {
+  return {
+    ...s,
+    balances: s.balances.map(b => (b.provider === 'vast' ? { ...b, level: 'ok', balanceUsd: 38.5, hoursLeft: 128, reasons: [] } : b)),
+    gpus: s.gpus!.map(d => (d.name === 'speech-stack' ? { ...d, spec: { warmSchedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', minReplicas: 1, timeZone: 'Europe/Paris' }] } } as DeploymentView : d)),
+    alerts: s.alerts.map(a => ({ ...a, at: iso(now, 300) })),
+  };
+}
+
+function somethingDown(s: AdminSnapshot, now: number): AdminSnapshot {
+  return {
+    ...s,
+    reserves: {
+      ...s.reserves,
+      links: s.reserves.links.map(r => (r.stage === 'tts' ? { ...r, ok: false, status: 502, code: 'upstream_error', latencyMs: 30000, error: 'provider timeout', checkedAt: iso(now, 2) } : r)),
+    },
+    apps: s.apps.map(a => (a.status ? { ...a, status: { ...a.status, mode: 'down' } } : a)),
+  };
+}
+
+function warnSnapshot(now: number): AdminSnapshot {
   const notToday = (new Date(now).getDay() + 3) % 7;
   return {
     reserves: {

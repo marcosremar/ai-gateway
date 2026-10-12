@@ -4,6 +4,7 @@ import type { AddressInfo } from 'net';
 import { AccessKeys } from '../../src/config/access-keys';
 import { ADMIN_ANCHORS, ADMIN_COOKIE, createAdminPage } from '../../src/admin-page';
 import { demoSnapshot } from '../__fixtures__/admin-snapshot';
+import { renderStatus } from '../../src/admin-page/render';
 
 const ADMIN_KEY = 'gw_admin_0123456789abcdef0123';
 const CLIENT_KEY = 'gw_client_0123456789abcdef012';
@@ -176,5 +177,20 @@ describe('admin page (/admin)', () => {
     const res = await gw.call('/v1/admin/keys');
     expect(res.status).toBe(401);
     expect(res.headers.get('content-type')).toBe('application/json');
+  });
+
+  it('puts the worst sections first and names every state in text, not only in color', () => {
+    const now = Date.parse('2026-10-13T10:00:00Z');
+    const render = (state: 'ok' | 'warn' | 'bad') => renderStatus('n', demoSnapshot(now, state), { now, csrf: 'c', actor: 'marcos', message: null, app: null });
+    const order = (html: string) => [...html.matchAll(/<section id="([a-z]+)">/g)].map(m => m[1]);
+    const bad = render('bad');
+    expect(order(bad).slice(0, 2).sort()).toEqual(['apps', 'reservas']);
+    expect(bad).toContain('Algo está fora do ar');
+    expect(bad).toMatch(/<section id="reservas">[^]*?<span class="badge">Problema<\/span>/);
+    expect(bad).toContain('<span class="sr">Problema:</span>');
+    const ok = render('ok');
+    expect(order(ok)).toEqual([...ADMIN_ANCHORS]);
+    expect(ok).toContain('Tudo funcionando');
+    expect(ok).not.toMatch(/badge">(Problema|Atenção)/);
   });
 });
