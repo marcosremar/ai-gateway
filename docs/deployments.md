@@ -75,6 +75,7 @@ Secrets are mounted from the environment (the dev API) at each reconcile:
 | `image.env` (`SPEECH_IMAGE`) | a full reference, or just a tag of `image.repository`; unset → `image.default` |
 | `registryAuth.passwordEnv` (e.g. `GHCR_READ_TOKEN`) | the password of a private registry (a GHCR token with `read:packages`, …); only for a declaration that has `registryAuth` — `parle-speech` has none |
 | `generatedSecrets` (e.g. `SPEECH_TOKEN`) | generated once (32 chars `[A-Za-z0-9_-]`), persisted with the spec in the deployment store, reused afterwards; never logged nor returned |
+| `secretEnv` (e.g. `{"HF_TOKEN": "HF_BRIDGE_READ_TOKEN"}`) | a credential the replica itself needs (a read-only token for private weights), copied from that gateway variable into the replica env at each reconcile; unset → `pending` |
 
 **Pending, never broken:** without the credential a declaration asks for, or an image, the deployment is not
 registered and its status is `pending` with the reason (`<passwordEnv> is not set …`) — a replica that cannot pull its private image would be a
@@ -127,6 +128,40 @@ routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` 
 and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register
 `parle-qwen-tts` (a registered `deployment` always wins); to go back to one GPU, delete it (pausing keeps it
 registered, so it would stay the target).
+
+### `parle-bridge-shadow` (the audio bridge in shadow mode, 12/10/2026)
+
+`src/deployments/declared/parle-bridge-shadow.json` (+ `-test`): the parle audio bridge `conv` — Qwen3.5-9B Q4_K_M
+reading the student's audio through the 1j `conv` projector (`marcosremar2/qwen35-audio-bridge-pt`, private,
+`stage6-1j-conv/`) — served by `llama-server` b11382 with the mel-trim patch the bridge was evaluated with. **Shadow
+mode:** parle sends it the same audio and context as the real turn, and its answer is only recorded next to that turn
+(parle `play_shadow_turns`); the student never sees or hears it.
+
+- **No image to build.** Vast, boot-script mode, on the public `nvidia/cuda:12.8.1-devel-ubuntu24.04`: the script
+  downloads the patch and the projector (sha256-checked, `HF_TOKEN`), the public base GGUF (pinned revision, sha256),
+  builds `llama-server` for the host's own GPU (`CMAKE_CUDA_ARCHITECTURES=native`) and serves the OpenAI API on 8000
+  (`input_audio` in `/v1/chat/completions`). Cold start ≈ 10–15 min (not measured on Vast yet).
+- **`GGML_CUDA_DISABLE_GRAPHS=1` is mandatory** (`env`): with CUDA graphs on, the audio encoder breaks after ~5 real
+  utterances of different lengths on A100/H100 (bridge repo, 12/10/2026); `MTMD_AUDIO_TRIM=1` is the trim the `conv`
+  projector was trained and evaluated with.
+- **GPU:** one RTX 3090 24 GB (≤ €0.30/h), then an RTX 4090 (≤ €0.50/h); the model needs ≈ 11 GB with 8 slots. Never
+  a Scaleway L4: the account's two L4 are the class TTS's (`parle-qwen-tts`) in the same window.
+- **Window:** `warmSchedule` Mon–Thu 17:30–20:30 Paris, the parle class window; `idleMinutes 10`, `idleAction:
+  "delete"`. Outside it nothing starts it: parle calls it with `X-Gateway-No-Wake: 1`, so a cold shadow answers 503 at
+  once instead of waking. `parle-bridge-shadow-test` (`testFor`, no schedule) is the copy a dev key with
+  `wakeDeployments: ["parle-bridge-shadow-test"]` may start outside class.
+- **Secret:** `secretEnv` mounts `HF_TOKEN` from the gateway's `HF_BRIDGE_READ_TOKEN` (a **read-only** Hugging Face
+  token: it lands on a marketplace host). Missing → `pending`, nothing registered.
+- **No cloud fallback, on purpose — the one exception to "every route answers" (hard rule 4).** The shadow is not a
+  route anyone waits on: it is a deployment invoked directly, and the turn the student hears has already been answered
+  by the real chain. A cloud model standing in for the bridge would record an answer the bridge did not give, i.e.
+  corrupt the comparison. A cold, failed or slow shadow is recorded as "no shadow answer" and the class goes on.
+- **Never slows the real turn:** parle fires the shadow request in parallel without awaiting it (a regression test in
+  parle proves it); in the gateway it goes through `invoke` to its own replica, so it shares no slot, queue or
+  circuit with the `parle-*` aliases.
+- **Cost:** EU RTX 3090 offers with CUDA ≥ 12.8 were US$0.15–0.29/h on 12/10/2026. One class ≈ 3 h window + ≈ 0.3 h
+  boot + 10 min idle tail ≈ 3.5 h → **≈ US$0.5–1.0 per class** (US$1.6 on a 4090), US$2–4 per week of 4 classes;
+  ceiling €25/month (`scaling.budget`).
 
 ## App accounts — saved image addresses
 

@@ -1,0 +1,61 @@
+{
+  "name": "parle-bridge-shadow",
+  "app": "parle",
+  "description": "parle: the audio bridge `conv` (Qwen3.5-9B Q4_K_M + the 1j conv mmproj, llama.cpp b11382 with the mel-trim patch) in SHADOW mode: it hears the same student audio as the real turn and its answer is only recorded, never heard or seen; one Vast RTX 3090 (then 4090), warm only Mon-Thu 17:30-20:30 Paris, deleted after 10 min idle; no cloud fallback on purpose (a missing shadow answer is recorded as such)",
+  "image": {
+    "default": "nvidia/cuda:12.8.1-devel-ubuntu24.04"
+  },
+  "secretEnv": {
+    "HF_TOKEN": "HF_BRIDGE_READ_TOKEN"
+  },
+  "spec": {
+    "provider": "vast",
+    "machineType": "RTX 3090",
+    "maxEurPerHour": 0.3,
+    "candidates": [
+      {
+        "provider": "vast",
+        "machineType": "RTX 3090",
+        "maxEurPerHour": 0.3
+      },
+      {
+        "provider": "vast",
+        "machineType": "RTX 4090",
+        "maxEurPerHour": 0.5
+      }
+    ],
+    "minCuda": 12.8,
+    "volumeGb": 40,
+    "port": 8000,
+    "healthPath": "/health",
+    "bootTimeoutMinutes": 40,
+    "env": {
+      "GGML_CUDA_DISABLE_GRAPHS": "1",
+      "MTMD_AUDIO_TRIM": "1"
+    },
+    "bootScript": "set -eu\nset -a; . /srv/aigw/app.env; set +a\napt-get update -y && apt-get install -y --no-install-recommends git cmake build-essential curl ca-certificates\nmkdir -p /srv/bridge && cd /srv/bridge\nget() { curl -fsSL --retry 5 ${4:+-H \"Authorization: Bearer $4\"} -o \"$2\" \"$1\" && echo \"$3  $2\" | sha256sum -c -; }\nCONV=https://huggingface.co/marcosremar2/qwen35-audio-bridge-pt/resolve/main/stage6-1j-conv\nget \"$CONV/mtmd-audio-trim-b11382.patch\" trim.patch f4ec73311d98c9fc1aa60a7e290f97c36aeb9e059093be981a1bf54ebbc6e575 \"$HF_TOKEN\"\n( get \"$CONV/mmproj-s6-1j-conv-stack10-trim-mel-f16.gguf\" conv.gguf 53116f4b41a68712a08fd7c10444b10e7c81b8449b7022630461514654c3f68d \"$HF_TOKEN\"\n  get https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/Qwen3.5-9B-Q4_K_M.gguf llm.gguf \\\n    03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8 ) &\nWEIGHTS=$!\ngit clone -q --depth 1 --branch b11382 https://github.com/ggml-org/llama.cpp src && patch -d src -p1 < trim.patch\ncmake -S src -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF\ncmake --build build --target llama-server -j \"$(nproc)\"\nwait $WEIGHTS\nexec build/bin/llama-server --host 127.0.0.1 --port 8000 -m llm.gguf --mmproj conv.gguf --alias parle-bridge-conv \\\n  -ngl 999 -fa on --jinja --reasoning-budget 0 --cache-ram 0 -c 32768 --parallel 8\n",
+    "minReplicas": 0,
+    "maxReplicas": 1,
+    "idleMinutes": 10,
+    "idleAction": "delete",
+    "warmSchedule": [
+      {
+        "days": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "start": "17:30",
+        "end": "20:30",
+        "timeZone": "Europe/Paris",
+        "minReplicas": 1
+      }
+    ],
+    "scaling": {
+      "budget": {
+        "eurPerMonth": 25
+      }
+    }
+  }
+}

@@ -13,6 +13,8 @@
  *     fail to pull a private image, i.e. a billed machine that never serves.
  *   - `generatedSecrets`: container env keys generated ONCE (32 chars of [A-Za-z0-9_-]) and persisted with the spec in
  *     the deployment store; never logged, never returned by the API (spec env is write-only).
+ *   - `secretEnv`: `{ <container key>: <gateway env var> }` — a credential the replica needs (a read-only Hugging Face
+ *     token for private weights), read from the gateway env at every reconcile like `passwordEnv`. Missing → pending.
  *
  * Registering never starts a machine: declared specs keep `minReplicas: 0` and the reconciler never calls `wake`.
  * Replicas start when a request needs them, or inside a declared `warmSchedule` window, as for any other deployment.
@@ -28,6 +30,8 @@
 import { randomBytes } from 'crypto';
 import babelcastSpeech from './declared/babelcast-speech.json';
 import babelcastTts from './declared/babelcast-tts.json';
+import parleBridgeShadow from './declared/parle-bridge-shadow.json';
+import parleBridgeShadowTest from './declared/parle-bridge-shadow-test.json';
 import parleLivekit from './declared/parle-livekit.json';
 import parleQwenTts from './declared/parle-qwen-tts.json';
 import parleSpeech from './declared/parle-speech.json';
@@ -44,6 +48,7 @@ export interface DeclaredDeployment {
   image?: { env?: string; repository?: string; default?: string | null };
   registryAuth?: { server?: string; username: string; passwordEnv: string };
   generatedSecrets?: string[];
+  secretEnv?: Record<string, string>;
   /** Plain spec fields (validated by `buildSpec` when applied). */
   spec: Record<string, unknown>;
 }
@@ -56,7 +61,8 @@ export interface DeclaredDeployment {
  * `babelcast-speech` and `babelcast-tts` own only their app (`babelcast`): no spec field, no machine.
  */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
-  parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit, babelcastSpeech, babelcastTts,
+  parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit, parleBridgeShadow, parleBridgeShadowTest,
+  babelcastSpeech, babelcastTts,
 ] as DeclaredDeployment[];
 
 /** Reconcile period. The boot run happens before the providers are mounted (serve.ts). */
@@ -115,6 +121,12 @@ export function declaredBody(
       username: decl.registryAuth.username, password, ...(decl.registryAuth.server ? { server: decl.registryAuth.server } : {}),
     };
   }
+  const mounted: Record<string, string> = {};
+  for (const [key, from] of Object.entries(decl.secretEnv ?? {})) {
+    const value = env[from]?.trim();
+    if (!value) return { pending: `${from} is not set (${key} of the replica)` };
+    mounted[key] = value;
+  }
   const declaredEnv = decl.spec.env as Record<string, string> | undefined;
   const declaredByType = decl.spec.envByMachineType as Record<string, Record<string, string>> | undefined;
   const storedByType = previous?.envByMachineType ?? {};
@@ -127,7 +139,7 @@ export function declaredBody(
     body: {
       ...decl.spec,
       ...(image ? { image } : {}),
-      ...(declaredEnv || decl.generatedSecrets?.length ? { env: { ...declaredEnv, ...secrets } } : {}),
+      ...(declaredEnv || decl.generatedSecrets?.length || decl.secretEnv ? { env: { ...declaredEnv, ...secrets, ...mounted } } : {}),
       ...(declaredByType ? {
         envByMachineType: {
           ...storedByType,
