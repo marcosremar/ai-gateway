@@ -26,6 +26,8 @@
  */
 
 import { randomBytes } from 'crypto';
+import babelcastSpeech from './declared/babelcast-speech.json';
+import babelcastTts from './declared/babelcast-tts.json';
 import parleLivekit from './declared/parle-livekit.json';
 import parleQwenTts from './declared/parle-qwen-tts.json';
 import parleSpeech from './declared/parle-speech.json';
@@ -51,8 +53,11 @@ export interface DeclaredDeployment {
  * already has, no registry secret). The declaration owns the image, the placements, the command, `realtime`, the class
  * window and the edge's `RT_MAX_SESSIONS` per machine type; sizing, limits, env and files stay as registered (a new
  * gateway starts from the `speech-stack` profile). The other three own only their class window and monthly ceiling.
+ * `babelcast-speech` and `babelcast-tts` own only their app (`babelcast`): no spec field, no machine.
  */
-export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit] as DeclaredDeployment[];
+export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
+  parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit, babelcastSpeech, babelcastTts,
+] as DeclaredDeployment[];
 
 /** Reconcile period. The boot run happens before the providers are mounted (serve.ts). */
 export const DECLARED_RECONCILE_MS = 5 * 60_000;
@@ -268,7 +273,7 @@ export class DeclaredDeploymentReconciler {
         changed.push(decl.name);
         this.set(decl.name, { state: 'applied', reason: null, image, checkedAt });
         // Names of keys only — never their values.
-        this.opts.log?.('declared deployment registered', { name: decl.name, image, created: !previous });
+        this.opts.log?.('declared deployment registered', { name: decl.name, image, created: !previous, ...meta });
       } catch (err) {
         this.set(decl.name, { state: 'error', reason: err instanceof Error ? err.message : String(err), image, checkedAt });
         this.opts.log?.('declared deployment failed', { name: decl.name, error: err instanceof Error ? err.message : String(err) });
