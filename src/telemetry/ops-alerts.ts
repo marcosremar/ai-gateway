@@ -1,6 +1,7 @@
 import type { ChainReport } from '../config/stage-chains';
 import { activeWindow } from '../deployments/autoscale';
 import type { DeploymentView } from '../deployments/types';
+import type { FallbackProbeResult } from './fallback-probe';
 import type { LatencyReport } from './query';
 
 export interface OpsAlert { event: string; data: Record<string, unknown> }
@@ -70,6 +71,19 @@ export function createOpsAlerts(
         if (!stat || stat.count < TURN_P95_MIN_TURNS || stat.p95Ms === null || stat.p95Ms <= TURN_P95_LIMIT_MS) continue;
         fire('turn.slow', event, { stage: event, p95Ms: stat.p95Ms, p50Ms: stat.p50Ms, turns: stat.count, windowSeconds: report!.windowSeconds });
       }
+    },
+    /** Cloud fallbacks that failed their probe (`fallback-probe.ts`): one grouped alert; a 402 is also a credit alert. */
+    fromFallbackProbes(results: FallbackProbeResult[]): void {
+      const failing = results.filter(r => !r.ok);
+      for (const r of failing) {
+        if (r.code === 'credit') fire('provider.credit_exhausted', r.providerId, { provider: r.providerId, target: r.target, error: r.error });
+      }
+      if (!failing.length) return;
+      fire('fallback.probe_failed', failing.map(r => `${r.stage}|${r.target}|${r.voice ?? ''}`).sort().join(','), {
+        stage: [...new Set(failing.map(r => r.stage))].join(', '),
+        count: failing.length,
+        items: failing.map(r => `${r.stage} ${r.target}${r.voice ? ` (${r.voice})` : ''} [${r.aliases.join(', ')}]: (${r.code}) ${r.error ?? ''}`.trim()).join('; '),
+      });
     },
     fromChains(stages: Record<string, Record<string, ChainReport>>): void {
       if (now() - bootedAt < bootQuietMs) return;
