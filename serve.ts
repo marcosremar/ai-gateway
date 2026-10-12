@@ -55,7 +55,7 @@ import {
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
-import { createRooms, kokoroSynthesize } from './src/rooms';
+import { createRooms, kokoroSynthesize, maiSynthesize, synthesizeWithFallback } from './src/rooms';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
@@ -479,8 +479,9 @@ const rooms = createRooms({
   },
   userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
   log: (msg, data) => log.log(data ?? {}, msg),
-  // Server dubbing (Kokoro 82M via OpenRouter) for listeners of rooms whose presenter sends text only.
-  synthesize: kokoroSynthesize(openrouterTTS),
+  // Server dubbing (Kokoro 82M via OpenRouter, MAI-Voice when Kokoro is stuck or fails) for listeners of rooms whose
+  // presenter sends text only. Each attempt is time-bounded: the OpenRouter SDK client has no timeout of its own.
+  synthesize: synthesizeWithFallback([kokoroSynthesize(openrouterTTS), maiSynthesize(openrouterTTS)]),
   synthesizeAvailable: () => openrouterTTS.isConfigured(),
 });
 log.log({
