@@ -383,6 +383,7 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
 
   let firstAudio: number | null = null;
   let missingAudio = 0;
+  let lastTtsError = '';
   let sentRate: number | null = null;
   let audioMs = 0;
   let index = 0;
@@ -397,6 +398,7 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
     const spoken = await item.audio;
     if (spoken instanceof Error) {
       missingAudio++;
+      lastTtsError = spoken.message;
       opts.emitEvent({ type: 'sentence_failed', text: item.text, message: spoken.message.slice(0, 200) });
       continue;
     }
@@ -426,13 +428,19 @@ async function compose(opts: CompositeOptions, ms: () => number, report: TurnRep
       opts.emitEvent({ type: 'sentence_end' });
     } catch (err) {
       missingAudio++;
-      opts.emitEvent({ type: 'sentence_failed', text: item.text, message: (err instanceof Error ? err.message : String(err)).slice(0, 200) });
+      lastTtsError = err instanceof Error ? err.message : String(err);
+      opts.emitEvent({ type: 'sentence_failed', text: item.text, message: lastTtsError.slice(0, 200) });
     } finally {
       release();
     }
   }
   await think;
   if (thinkError && reply.length === 0) throw thinkError;
+  // A turn with a reply and not one voiced sentence is a failure, never a `done` (babelcast audit 2026-10-12, M13: three
+  // mute turns ended `done` with first_audio_ms null). The route turns it into an in-band `error` (or a 503).
+  if (firstAudio === null && missingAudio > 0 && missingAudio === index) {
+    throw Object.assign(new Error(`tts: none of the ${index} sentence(s) could be voiced: ${lastTtsError.slice(0, 200)}`), { status: 503, stage: 'tts' });
+  }
   if (thinkError) opts.emitEvent({ type: 'error', stage: 'llm', message: (thinkError as Error).message.slice(0, 300), partial: true, at_ms: ms() });
   opts.emitEvent({
     type: 'done', reply: reply.join(' '), transcript, first_audio_ms: firstAudio, total_ms: ms(), ...report,
