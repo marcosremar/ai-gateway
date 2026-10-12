@@ -150,6 +150,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       rttMs: this.gates.get(m.id)?.rttMs ?? null,
       rttBaselineMs: this.gates.get(m.id)?.baseline?.rttMs ?? null,
       udp: this.udp.get(m.id) ?? null,
+      hostEndsInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
       expiresInMinutes: m.expiresAt != null ? Math.round((m.expiresAt - now) / 60_000) : null,
     }));
     const ready = replicas.filter(r => r.phase === 'ready').length;

@@ -7,7 +7,8 @@
  *   GET    /v1/deployments/:name               status + replicas
  *   DELETE /v1/deployments/:name               release every replica and forget the spec
  *   GET    /v1/deployments/:name/capacity      session ceiling and measured boot / resume times per machine type
- *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic)
+ *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic); a client key obeys its
+ *                                              policy: never with neverWake, not outside class without autoWakeOutsideClass
  *   POST   /v1/deployments/:name/park          done for now: scale to minReplicas at once (power off under idleAction stop)
  *   POST   /v1/deployments/:name/start         a client key with canStartGpu: keep one GPU up for { minutes } (client-gpu.ts)
  *   POST   /v1/deployments/:name/extend        the same key: { minutes } more on the GPU it started
@@ -35,7 +36,8 @@ import type { AppFallbackService } from './app-fallback';
 import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import type { ClientGpu } from './client-gpu';
-import type { GpuPolicy } from '../config/access-keys';
+import { mayWakeNow, type GpuPolicy } from '../config/access-keys';
+import { classWindowOpen } from './autoscale';
 import { createLogger } from '../logger';
 import { replicaTls } from './replica-tls';
 
@@ -436,6 +438,14 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     return key;
   }
 
+  /** A client key that may not start a GPU now (never, or outside the class window) is refused; the fallback answers. */
+  function refuseWake(policy: GpuPolicy, name: string): void {
+    if (policy.neverWake) throw new DeploymentError(403, `this API key never wakes a GPU: '${name}' answers from a ready replica or the cloud fallback`);
+    if (!mayWakeNow(policy, classWindowOpen(controller.list(), Date.now()))) {
+      throw new DeploymentError(403, `outside the class window this API key cannot wake '${name}': the cloud fallback answers`);
+    }
+  }
+
   async function route(req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<void> {
     const query = (req.url ?? '').includes('?') ? (req.url ?? '').slice((req.url ?? '').indexOf('?')) : '';
     const parts = path.split('/').filter(Boolean); // ['v1', 'deployments' | 'profiles', name?, action?, ...]
@@ -491,14 +501,17 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if ((action === 'start' || action === 'extend') && method === 'POST') {
       if (!opts.clientGpu) return send(res, 404, { error: 'GPU start is not enabled on this gateway' });
       const key = isAdmin(req) ? null : gpuClient(req, name);
+      if (key) refuseWake(key.policy, name);
       const minutes = (await readJson(req)).minutes;
       const starter = key ?? { keyId: `admin:${opts.userOf?.(req) ?? 'admin'}`, user: opts.userOf?.(req) ?? 'admin' };
-      const policy = key?.policy ?? { autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, gpuDailyEur: null, startIdleMinutes: 10 };
+      const policy = key?.policy ?? { autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: null, startIdleMinutes: 10 };
       return send(res, 202, await opts.clientGpu.start(starter, policy, name, minutes, action === 'extend'));
     }
     if (action === 'wake' && method === 'POST') {
-      if (!isAdmin(req) && gpuClient(req, name).policy.gpuDailyEur !== null) {
-        return send(res, 403, { error: `this key has a daily GPU cap: use POST /v1/deployments/${name}/start {"minutes": N}` });
+      if (!isAdmin(req)) {
+        const { policy } = gpuClient(req, name);
+        refuseWake(policy, name);
+        if (policy.gpuDailyEur !== null) return send(res, 403, { error: `this key has a daily GPU cap: use POST /v1/deployments/${name}/start {"minutes": N}` });
       }
       return send(res, 202, controller.wake(name));
     }

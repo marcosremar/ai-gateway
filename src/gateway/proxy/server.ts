@@ -15,7 +15,7 @@ import { denialError, inferenceKindOf } from './app-limits';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
 import { sttFilterStats } from './routes/stt-filter';
-import { markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, withNoWakeScope } from './no-wake';
+import { markNoUse, markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, withNoWakeScope } from './no-wake';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
@@ -596,6 +596,7 @@ export function createProxyServer(config: ProxyConfig): Server {
     }
     // No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken.
     if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId) || config.autoWake?.(bearerToken(authHeader)) === false) markNoWake();
+    if (config.countsAsUse?.(bearerToken(authHeader)) === false) markNoUse();
     if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
       config.onAuth(token).catch((err) => {

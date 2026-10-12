@@ -470,7 +470,9 @@ export interface ReplicaView {
   rttMs: number | null;
   rttBaselineMs: number | null;
   udp: 'ok' | 'blocked' | null;
-  /** Minutes until the provider takes the host back (Vast); null when it never does. */
+  /** Minutes until the provider takes the host back (Vast contract end, not a shutdown); null when it never does. */
+  hostEndsInMinutes: number | null;
+  /** @deprecated the old name of `hostEndsInMinutes`, kept for clients that still read it. */
   expiresInMinutes: number | null;
 }
 

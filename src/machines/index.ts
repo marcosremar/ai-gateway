@@ -3,6 +3,7 @@ import { join } from 'path';
 import type { IncomingMessage } from 'http';
 import { ScalewayClient } from '../cpu-providers/scaleway-client';
 import { VastDeploymentBackend } from '../deployments/vast-backend';
+import { realMachinesAllowed } from '../deployments/real-machines';
 import { RunpodMachineBackend, ScalewayMachineBackend, VastMachineBackend } from './backends';
 import { MachineController } from './controller';
 import { createMachineRoutes, jobReportRoute } from './http';
@@ -43,6 +44,7 @@ export function machineBackendsFromEnv(env: Env, opts: { awaitVolumes?: boolean 
   const scwSecret = () => (env.SCW_SECRET_KEY || env.SCALEWAY_SECRET_KEY || '').trim();
   const scwProject = () => env.SCW_DEFAULT_PROJECT_ID || env.SCW_PROJECT_ID || env.SCALEWAY_PROJECT_ID || undefined;
   const vastKey = env.VAST_API_KEY?.trim();
+  if (!realMachinesAllowed(env)) return {};
   return {
     ...(scwSecret() ? { scaleway: new ScalewayMachineBackend(new ScalewayClient(), scwSecret, scwProject, opts.awaitVolumes === true) } : {}),
     ...(vastKey ? { vast: new VastMachineBackend(new VastDeploymentBackend(vastKey)) } : {}),

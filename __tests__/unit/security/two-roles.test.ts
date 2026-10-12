@@ -36,7 +36,7 @@ async function gateway() {
   await audit.init();
   const userOf = (bearer: string) => access.resolve(bearer)?.userId ?? null;
   const gate = new AdminGate({ actorOf: (t) => { const u = userOf(t); return u && access.admins.has(u) ? u : null; }, audit, rpm: 10_000 });
-  const deployments = deploymentsFromEnv({ SCW_SECRET_KEY: 's', DEPLOYMENTS_NAMESPACE: 'test', DEPLOYMENTS_STATE_DIR: dir }, {
+  const deployments = deploymentsFromEnv({ SCW_SECRET_KEY: 's', AIGW_REAL_MACHINES: '1', DEPLOYMENTS_NAMESPACE: 'test', DEPLOYMENTS_STATE_DIR: dir }, {
     userOf: req => userOf(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')),
     admins: access.admins,
   })!;

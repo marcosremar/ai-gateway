@@ -192,7 +192,7 @@ if (deployments) {
   process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
   log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
 } else {
-  log.log({}, 'Deployments disabled (no SCW_SECRET_KEY / VAST_API_KEY)');
+  log.log({}, 'Deployments disabled (no SCW_SECRET_KEY / VAST_API_KEY, or off Railway without AIGW_REAL_MACHINES=1)');
 }
 
 const machineUserOf = (req: import('http').IncomingMessage) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null;
@@ -327,7 +327,15 @@ setInterval(() => {
   const { stages } = chainsNow();
   fallbackWatch(stages);
   opsAlerts.fromChains(stages);
-  opsAlerts.fromDeployments(deployments?.controller.list() ?? []);
+  for (const name of opsAlerts.fromDeployments(deployments?.controller.list() ?? [])) {
+    void deployments?.controller.park(name).then(
+      () => {
+        log.warn({ deployment: name }, 'deployments: parked — up 60 min outside its class window, no class open');
+        deploymentLogToTelemetry('deployments: parked outside the class window', { deployment: name });
+      },
+      (err: unknown) => log.error({ deployment: name, error: err instanceof Error ? err.message : String(err) }, 'deployments: park outside the class window failed'),
+    );
+  }
   opsAlerts.fromLatency(latency?.() ?? null);
 }, 15_000).unref();
 
@@ -528,6 +536,7 @@ const server = await startProxy({
   deepHealth,
   autoWake: (bearer) => !keysConfigured()
     || autoWakesNow(access.policyOf(access.resolve(bearer)?.keyId), classWindowOpen(deployments?.controller.list() ?? [], Date.now())),
+  countsAsUse: (bearer) => access.policyOf(access.resolve(bearer)?.keyId).countsAsUse,
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
   ...(accounts ? { onInference: accounts.recordInference } : {}),

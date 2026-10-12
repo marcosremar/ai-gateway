@@ -203,6 +203,8 @@ export interface ProxyConfig {
    */
   healthDetails?: (viewer: import('./health-view').HealthViewer) => Record<string, unknown>;
   autoWake?: (bearer: string) => boolean;
+  /** False = this key's requests never renew a deployment's idle clock (a dev key, access-keys.ts `countsAsUse`). */
+  countsAsUse?: (bearer: string) => boolean;
 }
 
 /**

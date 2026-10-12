@@ -35,7 +35,7 @@ function service(env: Record<string, string>) {
   const dir = mkdtempSync(join(tmpdir(), 'aigw-admin-'));
   dirs.push(dir);
   const logs: string[] = [];
-  const built = deploymentsFromEnv({ SCW_SECRET_KEY: 's', DEPLOYMENTS_NAMESPACE: 'test', DEPLOYMENTS_STATE_DIR: dir, ...env }, {
+  const built = deploymentsFromEnv({ SCW_SECRET_KEY: 's', AIGW_REAL_MACHINES: '1', DEPLOYMENTS_NAMESPACE: 'test', DEPLOYMENTS_STATE_DIR: dir, ...env }, {
     userOf: (req) => String(req.headers.authorization ?? '').replace(/^Bearer\s+/, '') || null,
     log: (m) => logs.push(m),
   })!;
