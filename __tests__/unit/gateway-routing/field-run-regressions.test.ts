@@ -218,7 +218,7 @@ describe('deployments namespace safety', () => {
     expect(log.mock.calls[0][0]).toContain('DEPLOYMENTS_NAMESPACE');
     const onRailway = deploymentsFromEnv({ SCW_SECRET_KEY: 's', RAILWAY_ENVIRONMENT_ID: 'e', DEPLOYMENTS_STATE_DIR: '/tmp/aigw-ns-test' }, opts);
     expect(onRailway?.controller.namespace).toBe('default');
-    const explicit = deploymentsFromEnv({ SCW_SECRET_KEY: 's', DEPLOYMENTS_NAMESPACE: 'dev-me', DEPLOYMENTS_STATE_DIR: '/tmp/aigw-ns-test' }, opts);
+    const explicit = deploymentsFromEnv({ SCW_SECRET_KEY: 's', AIGW_REAL_MACHINES: '1', DEPLOYMENTS_NAMESPACE: 'dev-me', DEPLOYMENTS_STATE_DIR: '/tmp/aigw-ns-test' }, opts);
     expect(explicit?.controller.namespace).toBe('dev-me');
   });
 });

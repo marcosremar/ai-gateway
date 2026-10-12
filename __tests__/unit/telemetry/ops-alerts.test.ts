@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createOpsAlerts, GPU_OUTSIDE_WINDOW_MS, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS, type OpsAlert } from '../../../src/telemetry/ops-alerts';
+import { createOpsAlerts, GPU_OUTSIDE_WINDOW_MS, GPU_OUTSIDE_WINDOW_PARK_MS, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS, type OpsAlert } from '../../../src/telemetry/ops-alerts';
 import type { ChainReport } from '../../../src/config/stage-chains';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
@@ -114,6 +114,35 @@ describe('ops alerts (O3): what reaches ALERT_WEBHOOK_URL', () => {
     for (let i = 0; i < 4; i++) { inClass.alerts.fromDeployments(views()); inClass.advance(30 * 60_000); }
     await flush();
     expect(inClass.sent).toEqual([]);
+  });
+
+  it('a GPU up 60 min outside its window, no class open, no explicit warm, is parked; again 60 min later if still up', () => {
+    const { alerts, advance } = rig(0, '2026-10-12T20:00:00Z');
+    const schedule = [{ days: [1, 2, 3, 4], start: '17:30', end: '20:30', timeZone: 'Europe/Paris', minReplicas: 1 }];
+    const view = (name: string, extra: Record<string, unknown> = {}) => ({
+      name, spec: { warmSchedule: schedule } as never, replicas: [{ phase: 'ready', pricePerHour: 0.79 }] as never, ...extra,
+    });
+    const views = () => [view('parle-qwen-tts'), view('parle-speech', { warm: { replicas: 1, until: '2026-10-12T23:00:00Z' } })];
+    expect(alerts.fromDeployments(views())).toEqual([]);
+    advance(GPU_OUTSIDE_WINDOW_PARK_MS - 60_000);
+    expect(alerts.fromDeployments(views())).toEqual([]);
+    advance(60_000);
+    expect(alerts.fromDeployments(views())).toEqual(['parle-qwen-tts']);
+    advance(60_000);
+    expect(alerts.fromDeployments(views())).toEqual([]);
+    advance(GPU_OUTSIDE_WINDOW_PARK_MS);
+    expect(alerts.fromDeployments(views())).toEqual(['parle-qwen-tts']);
+  });
+
+  it('never parks inside a class window, nor while another deployment\'s class is open', () => {
+    const inClass = rig(0, '2026-10-12T15:30:00Z');
+    const schedule = [{ days: [1, 2, 3, 4], start: '17:30', end: '20:30', timeZone: 'Europe/Paris', minReplicas: 1 }];
+    const v = [{ name: 'parle-qwen-tts', spec: { warmSchedule: schedule } as never, replicas: [{ phase: 'ready' }] as never }];
+    for (let i = 0; i < 4; i++) { expect(inClass.alerts.fromDeployments(v)).toEqual([]); inClass.advance(30 * 60_000); }
+    const other = rig(0, '2026-10-12T20:00:00Z');
+    const late = [{ start: '21:00', end: '23:59', timeZone: 'Europe/Paris', minReplicas: 1 }];
+    const both = [...v, { name: 'evening-class', spec: { warmSchedule: late } as never, replicas: [] as never }];
+    for (let i = 0; i < 4; i++) { expect(other.alerts.fromDeployments(both)).toEqual([]); other.advance(30 * 60_000); }
   });
 
   it('a GPU parked before 30 min outside its window restarts the count', async () => {

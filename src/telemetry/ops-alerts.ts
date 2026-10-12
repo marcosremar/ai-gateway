@@ -1,5 +1,5 @@
 import type { ChainReport } from '../config/stage-chains';
-import { activeWindow } from '../deployments/autoscale';
+import { activeWindow, classWindowOpen } from '../deployments/autoscale';
 import type { DeploymentView } from '../deployments/types';
 import type { FallbackProbeResult } from './fallback-probe';
 import type { LatencyReport } from './query';
@@ -9,6 +9,8 @@ export interface OpsAlert { event: string; data: Record<string, unknown> }
 export const OPS_ALERT_DEDUP_MS = 30 * 60_000;
 export const OPS_ALERT_BOOT_QUIET_MS = 10 * 60_000;
 export const GPU_OUTSIDE_WINDOW_MS = 30 * 60_000;
+/** Up this long outside its class window, with no class open anywhere and no explicit `warm`, a GPU is parked (12/10/2026). */
+export const GPU_OUTSIDE_WINDOW_PARK_MS = 60 * 60_000;
 export const TURN_P95_LIMIT_MS = 3_000;
 export const TURN_P95_MIN_TURNS = 10;
 const TURN_EVENTS = ['turn.first_audio', 's2s.first_audio'];
@@ -48,9 +50,12 @@ export function createOpsAlerts(
         fire('replica.lost_with_sessions', String(data.id ?? ''), { deployment, id: data.id, reason: data.reason ?? 'gone', busy: data.busy });
       }
     },
-    fromDeployments(views: Array<Pick<DeploymentView, 'name' | 'replicas' | 'spec'>>): void {
+    /** Alerts on GPUs up outside their class window; returns the ones to park now (the caller parks and logs them). */
+    fromDeployments(views: Array<Pick<DeploymentView, 'name' | 'replicas' | 'spec'> & { warm?: DeploymentView['warm'] }>): string[] {
       const t = now();
       const outside = new Set<string>();
+      const toPark: string[] = [];
+      const anyClass = classWindowOpen(views, t);
       for (const view of views) {
         const up = view.replicas.filter(r => r.phase !== 'halted');
         if (!view.spec.warmSchedule?.length || !up.length || activeWindow(view.spec.warmSchedule, t)) continue;
@@ -62,8 +67,12 @@ export function createOpsAlerts(
           deployment: view.name, replicas: up.length, minutes: Math.round((t - since) / 60_000),
           eurPerHour: up.reduce((sum, r) => sum + (r.pricePerHour ?? 0), 0),
         });
+        if (t - since < GPU_OUTSIDE_WINDOW_PARK_MS || anyClass || view.warm) continue;
+        toPark.push(view.name);
+        outsideSince.set(view.name, t);
       }
       for (const name of outsideSince.keys()) if (!outside.has(name)) outsideSince.delete(name);
+      return toPark;
     },
     fromLatency(report: LatencyReport | null): void {
       for (const event of TURN_EVENTS) {

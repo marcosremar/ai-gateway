@@ -796,7 +796,9 @@ fallback); then the instance is taken away, whatever it is serving. `src/deploym
   sends new requests to any other ready replica first; once the others cover `desired` and it has no request in
   flight, it is released with reason `expiring`. A caller of the deployment (SDK, `/v1/...` through the gateway) sees
   no error and no wait.
-- `GET /v1/deployments/:name` shows `expiresInMinutes` per replica (null when the provider never takes it back).
+- `GET /v1/deployments/:name` shows `hostEndsInMinutes` per replica: when the provider takes the host back (Vast contract
+  end), not when the gateway shuts it down (that is `idleMinutes` / `maxHours`); null when the provider never does. The
+  old name `expiresInMinutes` is still sent, deprecated.
 
 ## Replica machine
 

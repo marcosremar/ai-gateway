@@ -6,11 +6,27 @@ const USER_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const SANDBOX_TOKEN_RE = /^[^\s,:]{16,512}$/;
 export const MAX_OVERLAP_MINUTES = 7 * 24 * 60;
 
-export interface GpuPolicy { autoWake: boolean; autoWakeOutsideClass: boolean; canStartGpu: boolean; gpuDailyEur: number | null; startIdleMinutes: number }
-export const DEFAULT_GPU_POLICY: GpuPolicy = { autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, gpuDailyEur: 5, startIdleMinutes: 10 };
+/**
+ * `neverWake`: the key never starts a GPU, not even by `/wake` or `/start` (a dev key: tests, local servers, agents).
+ * `countsAsUse: false`: its requests use a replica that is already ready but do not renew the idle clock, so dev
+ * traffic never keeps a GPU up (12/10/2026: a local gate held two L4 for 3 h at night).
+ */
+export interface GpuPolicy {
+  autoWake: boolean; autoWakeOutsideClass: boolean; canStartGpu: boolean; neverWake: boolean; countsAsUse: boolean;
+  gpuDailyEur: number | null; startIdleMinutes: number;
+}
+export const DEFAULT_GPU_POLICY: GpuPolicy = {
+  autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, neverWake: false, countsAsUse: true, gpuDailyEur: 5, startIdleMinutes: 10,
+};
+const BOOLEAN_FIELDS = ['autoWake', 'autoWakeOutsideClass', 'canStartGpu', 'neverWake', 'countsAsUse'] as const;
+
+/** Whether this key may start a GPU now at all — automatically or by `/wake`, `/start` (admin keys skip this). */
+export function mayWakeNow(policy: GpuPolicy, classWindowOpen: boolean): boolean {
+  return !policy.neverWake && (policy.autoWakeOutsideClass || classWindowOpen);
+}
 
 export function autoWakesNow(policy: GpuPolicy, classWindowOpen: boolean): boolean {
-  return policy.autoWake && (policy.autoWakeOutsideClass || classWindowOpen);
+  return policy.autoWake && mayWakeNow(policy, classWindowOpen);
 }
 const CLASS_CLIENT = 'parle';
 const CLASS_CLIENT_POLICY: Partial<GpuPolicy> = { autoWake: true, canStartGpu: true, gpuDailyEur: null };
@@ -136,9 +152,9 @@ export class AccessKeys {
     const next: Partial<GpuPolicy> = { ...this.state.policies?.[id] };
     for (const [field, value] of Object.entries(body)) {
       if (field === 'id') continue;
-      if (field === 'autoWake' || field === 'autoWakeOutsideClass' || field === 'canStartGpu') {
+      if ((BOOLEAN_FIELDS as readonly string[]).includes(field)) {
         if (typeof value !== 'boolean') throw new AccessError(400, `${field} must be a boolean`);
-        next[field] = value;
+        next[field as typeof BOOLEAN_FIELDS[number]] = value;
       } else if (field === 'gpuDailyEur') {
         if (value !== null && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) throw new AccessError(400, 'gpuDailyEur must be a number >= 0 (EUR per day) or null (no cap)');
         next.gpuDailyEur = value as number | null;
@@ -148,7 +164,7 @@ export class AccessKeys {
         }
         next.startIdleMinutes = value;
       } else {
-        throw new AccessError(400, `unknown field '${field}' (allowed: autoWake, autoWakeOutsideClass, canStartGpu, gpuDailyEur, startIdleMinutes)`);
+        throw new AccessError(400, `unknown field '${field}' (allowed: ${BOOLEAN_FIELDS.join(', ')}, gpuDailyEur, startIdleMinutes)`);
       }
     }
     this.state.policies = { ...this.state.policies, [id]: next };

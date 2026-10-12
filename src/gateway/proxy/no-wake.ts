@@ -22,7 +22,7 @@ import { SANDBOX_USER } from '../../config/sandbox-env';
 
 export const NO_WAKE_HEADER = 'x-gateway-no-wake';
 
-interface NoWakeScope { noWake: boolean }
+interface NoWakeScope { noWake: boolean; noUse?: boolean }
 
 const als = new AsyncLocalStorage<NoWakeScope>();
 let skips = 0;
@@ -45,6 +45,21 @@ export function markNoWake(): void {
 
 export function noWakeActive(): boolean {
   return als.getStore()?.noWake === true;
+}
+
+/** The request's key does not count as use (`countsAsUse: false`): a lease leaves the idle clock alone. */
+export function markNoUse(): void {
+  const scope = als.getStore();
+  if (scope) scope.noUse = true;
+}
+
+export function noUseActive(): boolean {
+  return als.getStore()?.noUse === true;
+}
+
+/** Runs `fn` as a request that does not count as use (tests, in-process callers). */
+export function runNoUse<T>(fn: () => T): T {
+  return als.run({ noWake: true, noUse: true }, fn);
 }
 
 export function headerAsksNoWake(value: string | string[] | undefined): boolean {

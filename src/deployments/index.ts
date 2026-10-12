@@ -3,6 +3,7 @@
  * See `http.ts` for the API and `planner.ts` for the scaling rules.
  */
 
+import { onRailway, realMachinesAllowed, REAL_MACHINES_OFF } from './real-machines';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { IncomingMessage } from 'http';
@@ -60,9 +61,6 @@ export function proxyIdleTimeoutMs(env: Record<string, string | undefined>, depl
   return deploymentsEnabled ? String(DEPLOYMENTS_PROXY_IDLE_MS) : null;
 }
 
-function onRailway(env: Record<string, string | undefined>): boolean {
-  return Boolean(env.RAILWAY_ENVIRONMENT_ID || env.RAILWAY_ENVIRONMENT || env.RAILWAY_PROJECT_ID);
-}
 
 export interface DeploymentsFromEnv {
   controller: DeploymentController;
@@ -200,6 +198,10 @@ export function deploymentsFromEnv(
   // the production replicas — so outside Railway the namespace must be set explicitly.
   if (!env.DEPLOYMENTS_NAMESPACE?.trim() && !onRailway(env)) {
     opts.log?.('Deployments disabled: set DEPLOYMENTS_NAMESPACE (use your own, e.g. "dev-<name>") when running outside Railway');
+    return null;
+  }
+  if (!realMachinesAllowed(env)) {
+    opts.log?.(REAL_MACHINES_OFF);
     return null;
   }
   const projectId = env.SCW_DEFAULT_PROJECT_ID || env.SCW_PROJECT_ID || env.SCALEWAY_PROJECT_ID || undefined;

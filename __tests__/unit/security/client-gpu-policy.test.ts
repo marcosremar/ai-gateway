@@ -41,8 +41,8 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
   it('autoWake is off by default; the migration keeps the class client (parle) waking and able to start its GPUs', async () => {
     const { access } = await keys();
     const policy = (token: string) => access.policyOf(access.resolve(token)?.keyId);
-    expect(policy(PROD)).toEqual({ autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, gpuDailyEur: null, startIdleMinutes: 10 });
-    expect(policy(DEV)).toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, gpuDailyEur: 5, startIdleMinutes: 10 });
+    expect(policy(PROD)).toEqual({ autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: null, startIdleMinutes: 10 });
+    expect(policy(DEV)).toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, neverWake: false, countsAsUse: true, gpuDailyEur: 5, startIdleMinutes: 10 });
     expect(policy(OTHER).autoWake).toBe(false);
   });
 
@@ -84,7 +84,7 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
     await expect(access.setPolicy({ id: 'env-parle-dev', startIdleMinutes: 0 })).rejects.toMatchObject({ status: 400 });
     await expect(access.setPolicy({ id: 'env-parle-dev', admin: true })).rejects.toMatchObject({ status: 400 });
     expect((await access.setPolicy({ id: 'env-parle-dev', canStartGpu: true, gpuDailyEur: 3 })).policy)
-      .toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: true, gpuDailyEur: 3, startIdleMinutes: 10 });
+      .toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: 3, startIdleMinutes: 10 });
     expect(access.list().find(k => k.id === 'env-parle-dev')?.policy.gpuDailyEur).toBe(3);
   });
 
@@ -117,11 +117,13 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
   });
 });
 
-function stubController() {
+const ALL_DAY = [{ start: '00:00', end: '12:00', minReplicas: 1 }, { start: '12:00', end: '00:00', minReplicas: 1 }];
+
+function stubController(classOpen = { now: false }) {
   const deployments: Record<string, { app: string; warm: null }> = { 'parle-speech': { app: 'parle', warm: null }, 'site-gpu': { app: 'site', warm: null } };
   const calls: string[] = [];
   const view = (name: string) => (deployments[name]
-    ? { name, app: deployments[name].app, status: 'scaled-to-zero', warm: null, sessions: 0, realtime: null, lastRequestAt: null, replicas: [], spec: { maxEurPerHour: 1.5 } }
+    ? { name, app: deployments[name].app, status: 'scaled-to-zero', warm: null, sessions: 0, realtime: null, lastRequestAt: null, replicas: [], spec: { maxEurPerHour: 1.5, warmSchedule: classOpen.now ? ALL_DAY : [] } }
     : null);
   const controller = {
     get: (name: string) => view(name),
@@ -136,7 +138,8 @@ function stubController() {
 async function routes() {
   const { access } = await keys();
   await access.setPolicy({ id: 'env-parle-dev', canStartGpu: true });
-  const { controller, calls } = stubController();
+  const classOpen = { now: false };
+  const { controller, calls } = stubController(classOpen);
   const clientGpu = new ClientGpu(controller as never);
   const token = (req: IncomingMessage) => String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
   const handler = createDeploymentRoutes({
@@ -159,7 +162,7 @@ async function routes() {
     }) as unknown as IncomingMessage;
     handler(req, res, path, method);
   });
-  return { call, calls, access };
+  return { call, calls, access, classOpen };
 }
 
 describe('POST /v1/deployments/:name/start — a client turns its own GPU on without an admin key', () => {
@@ -202,5 +205,36 @@ describe('POST /v1/deployments/:name/start — a client turns its own GPU on wit
     expect(JSON.parse(devWake.body).error).toMatch(/use POST \/v1\/deployments\/parle-speech\/start/);
     expect((await r.call(DEV, 'POST', '/v1/deployments/parle-speech/park')).status).toBe(202);
     expect(r.calls).toEqual(['wake parle-speech', 'park parle-speech', 'park parle-speech']);
+  });
+});
+
+describe('wake outside class (owner, 12/10/2026): /wake and /start obey the key, only an admin passes', () => {
+  it('autoWakeOutsideClass off: wake and start are refused with no class open, allowed while one is; the admin always passes', async () => {
+    const r = await routes();
+    await r.access.setPolicy({ id: 'env-parle', autoWakeOutsideClass: false });
+    await r.access.setPolicy({ id: 'env-parle-dev', autoWakeOutsideClass: false });
+    const wake = await r.call(PROD, 'POST', '/v1/deployments/parle-speech/wake');
+    expect(wake.status).toBe(403);
+    expect(JSON.parse(wake.body).error).toMatch(/outside the class window/);
+    expect((await r.call(DEV, 'POST', '/v1/deployments/parle-speech/start', { minutes: 10 })).status).toBe(403);
+    expect(r.calls).toEqual([]);
+    expect((await r.call(ADMIN, 'POST', '/v1/deployments/parle-speech/wake')).status).toBe(202);
+    expect((await r.call(ADMIN, 'POST', '/v1/deployments/parle-speech/warm', { replicas: 1, untilMinutes: 5 })).status).toBe(202);
+    r.classOpen.now = true;
+    expect((await r.call(PROD, 'POST', '/v1/deployments/parle-speech/wake')).status).toBe(202);
+    expect(r.calls).toEqual(['wake parle-speech', 'warm parle-speech 1 5', 'wake parle-speech']);
+  });
+
+  it('a dev key (neverWake, countsAsUse false) never wakes, not even in class; it never auto-wakes either', async () => {
+    const r = await routes();
+    const { policy } = await r.access.setPolicy({ id: 'env-parle', neverWake: true, countsAsUse: false });
+    r.classOpen.now = true;
+    const wake = await r.call(PROD, 'POST', '/v1/deployments/parle-speech/wake');
+    expect(wake.status).toBe(403);
+    expect(JSON.parse(wake.body).error).toMatch(/never wakes a GPU/);
+    expect((await r.call(PROD, 'POST', '/v1/deployments/parle-speech/start', { minutes: 10 })).status).toBe(403);
+    expect(r.calls).toEqual([]);
+    expect(autoWakesNow(policy, true)).toBe(false);
+    await expect(r.access.setPolicy({ id: 'env-parle', countsAsUse: 'no' })).rejects.toMatchObject({ status: 400 });
   });
 });
