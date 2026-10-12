@@ -453,9 +453,9 @@ export class RealtimeService {
     if (controller.get(dep)?.spec.paused) return { refusal: { status: 503, code: 'paused', message: `deployment '${dep}' is paused`, retryAfter: 60 } };
     const every = this.readyReplicas(dep);
     if (!every.length) {
-      if (noWakeActive()) recordNoWakeSkip();
+      if (noWakeActive(dep)) recordNoWakeSkip();
       else { try { controller.wake(dep); } catch { /* vanished */ } }
-      return { refusal: { status: 503, code: 'cold', message: `deployment '${dep}': no ready replica${noWakeActive() ? ' (no-wake: not woken)' : ' (waking)'}`, retryAfter: 30 } };
+      return { refusal: { status: 503, code: 'cold', message: `deployment '${dep}': no ready replica${noWakeActive(dep) ? ' (no-wake: not woken)' : ' (waking)'}`, retryAfter: 30 } };
     }
     const ready = every.filter(r => !r.stagesOut.length);
     if (!ready.length) {
@@ -479,7 +479,7 @@ export class RealtimeService {
         : { status: 503, code: 'unreachable', message: `deployment '${dep}': realtime status unreachable`, retryAfter: 5 } };
     }
     // Ready but full: tell the autoscaler (wake keeps the idle clock fresh; the pressure comes from the load report).
-    if (!noWakeActive()) { try { controller.wake(dep); } catch { /* vanished */ } }
+    if (!noWakeActive(dep)) { try { controller.wake(dep); } catch { /* vanished */ } }
     return { refusal: { status: 503, code: 'saturated', message: `deployment '${dep}': every replica's realtime slots are taken`, retryAfter: 2 } };
   }
 

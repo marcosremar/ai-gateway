@@ -328,7 +328,7 @@ export class DeploymentController extends ControllerViews {
   ): Promise<Lease> {
     const rt = this.require(name);
     const { spec } = rt.record;
-    const countsAsUse = !noUseActive();
+    const countsAsUse = !noUseActive(name);
     if (spec.paused) throw new DeploymentError(409, `deployment '${name}' is paused`);
     if (opts.session) noteSession(name, opts.session, this.now());
     const serving = this.servingMachines(name);

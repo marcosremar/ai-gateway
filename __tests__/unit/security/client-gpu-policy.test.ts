@@ -41,8 +41,8 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
   it('autoWake is off by default; the migration keeps the class client (parle) waking and able to start its GPUs', async () => {
     const { access } = await keys();
     const policy = (token: string) => access.policyOf(access.resolve(token)?.keyId);
-    expect(policy(PROD)).toEqual({ autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: null, startIdleMinutes: 10 });
-    expect(policy(DEV)).toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, neverWake: false, countsAsUse: true, gpuDailyEur: 5, startIdleMinutes: 10 });
+    expect(policy(PROD)).toEqual({ autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: null, startIdleMinutes: 10, wakeDeployments: [] });
+    expect(policy(DEV)).toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, neverWake: false, countsAsUse: true, gpuDailyEur: 5, startIdleMinutes: 10, wakeDeployments: [] });
     expect(policy(OTHER).autoWake).toBe(false);
   });
 
@@ -84,7 +84,7 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
     await expect(access.setPolicy({ id: 'env-parle-dev', startIdleMinutes: 0 })).rejects.toMatchObject({ status: 400 });
     await expect(access.setPolicy({ id: 'env-parle-dev', admin: true })).rejects.toMatchObject({ status: 400 });
     expect((await access.setPolicy({ id: 'env-parle-dev', canStartGpu: true, gpuDailyEur: 3 })).policy)
-      .toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: 3, startIdleMinutes: 10 });
+      .toEqual({ autoWake: false, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: 3, startIdleMinutes: 10, wakeDeployments: [] });
     expect(access.list().find(k => k.id === 'env-parle-dev')?.policy.gpuDailyEur).toBe(3);
   });
 
@@ -119,11 +119,15 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
 
 const ALL_DAY = [{ start: '00:00', end: '12:00', minReplicas: 1 }, { start: '12:00', end: '00:00', minReplicas: 1 }];
 
-function stubController(classOpen = { now: false }) {
-  const deployments: Record<string, { app: string; warm: null }> = { 'parle-speech': { app: 'parle', warm: null }, 'site-gpu': { app: 'site', warm: null } };
+function stubController(classOpen = { now: false }, withTestCopy = false) {
+  const deployments: Record<string, { app: string; warm: null; testFor?: string }> = {
+    'parle-speech': { app: 'parle', warm: null }, 'site-gpu': { app: 'site', warm: null },
+    'parle-qwen-tts': { app: 'parle', warm: null },
+    ...(withTestCopy ? { 'parle-speech-test': { app: 'parle', warm: null, testFor: 'parle-speech' } } : {}),
+  };
   const calls: string[] = [];
   const view = (name: string) => (deployments[name]
-    ? { name, app: deployments[name].app, status: 'scaled-to-zero', warm: null, sessions: 0, realtime: null, lastRequestAt: null, replicas: [], spec: { maxEurPerHour: 1.5, warmSchedule: classOpen.now ? ALL_DAY : [] } }
+    ? { name, app: deployments[name].app, status: 'scaled-to-zero', warm: null, sessions: 0, realtime: null, lastRequestAt: null, replicas: [], spec: { maxEurPerHour: 1.5, warmSchedule: classOpen.now ? ALL_DAY : [], testFor: deployments[name].testFor } }
     : null);
   const controller = {
     get: (name: string) => view(name),
@@ -135,11 +139,11 @@ function stubController(classOpen = { now: false }) {
   return { controller, calls };
 }
 
-async function routes() {
+async function routes(withTestCopy = false) {
   const { access } = await keys();
   await access.setPolicy({ id: 'env-parle-dev', canStartGpu: true });
   const classOpen = { now: false };
-  const { controller, calls } = stubController(classOpen);
+  const { controller, calls } = stubController(classOpen, withTestCopy);
   const clientGpu = new ClientGpu(controller as never);
   const token = (req: IncomingMessage) => String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
   const handler = createDeploymentRoutes({
@@ -236,5 +240,68 @@ describe('wake outside class (owner, 12/10/2026): /wake and /start obey the key,
     expect(r.calls).toEqual([]);
     expect(autoWakesNow(policy, true)).toBe(false);
     await expect(r.access.setPolicy({ id: 'env-parle', countsAsUse: 'no' })).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('dev key wakes only its test deployments (owner, 12/10/2026): agents turn GPUs on through the gateway, never production', () => {
+  async function devRoutes(policy: Record<string, unknown> = {}) {
+    const r = await routes(true);
+    await r.access.setPolicy({ id: 'env-parle-dev', autoWake: true, neverWake: false, countsAsUse: false, wakeDeployments: ['parle-speech-test'], ...policy });
+    return r;
+  }
+
+  it('outside class the dev key wakes parle-speech-test (a start of startIdleMinutes, under its cap)', async () => {
+    const r = await devRoutes();
+    const woke = await r.call(DEV, 'POST', '/v1/deployments/parle-speech-test/wake');
+    expect(woke.status).toBe(202);
+    expect(JSON.parse(woke.body)).toMatchObject({ deployment: 'parle-speech-test', idleMinutes: 10, capEur: 5 });
+    expect((await r.call(DEV, 'POST', '/v1/deployments/parle-speech-test/start', { minutes: 20 })).status).toBe(202);
+    expect(r.calls).toEqual(['warm parle-speech-test 1 10', 'warm parle-speech-test 1 20']);
+  });
+
+  it('refused (403) on production: parle-qwen-tts and parle-speech, even if an admin lists one by mistake', async () => {
+    const r = await devRoutes({ wakeDeployments: ['parle-speech-test', 'parle-qwen-tts'] });
+    const tts = await r.call(DEV, 'POST', '/v1/deployments/parle-qwen-tts/wake');
+    expect(tts.status).toBe(403);
+    expect(JSON.parse(tts.body).error).toMatch(/wakes only its test deployments/);
+    expect((await r.call(DEV, 'POST', '/v1/deployments/parle-qwen-tts/start', { minutes: 10 })).status).toBe(403);
+    expect((await r.call(DEV, 'POST', '/v1/deployments/parle-speech/wake')).status).toBe(403);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('refused (403) on parle-speech-test during the class window', async () => {
+    const r = await devRoutes();
+    r.classOpen.now = true;
+    const wake = await r.call(DEV, 'POST', '/v1/deployments/parle-speech-test/wake');
+    expect(wake.status).toBe(403);
+    expect(JSON.parse(wake.body).error).toMatch(/during a class window/);
+    expect((await r.call(DEV, 'POST', '/v1/deployments/parle-speech-test/start', { minutes: 10 })).status).toBe(403);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('the daily cap refuses (402)', async () => {
+    const r = await devRoutes({ gpuDailyEur: 0.1 });
+    const wake = await r.call(DEV, 'POST', '/v1/deployments/parle-speech-test/wake');
+    expect(wake.status).toBe(402);
+    expect(JSON.parse(wake.body).error).toMatch(/daily GPU cap/);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('wakeDeployments is validated; without autoWake a request of the key never wakes anything', async () => {
+    const r = await devRoutes({ autoWake: false });
+    await expect(r.access.setPolicy({ id: 'env-parle-dev', wakeDeployments: 'parle-speech-test' })).rejects.toMatchObject({ status: 400 });
+    await expect(r.access.setPolicy({ id: 'env-parle-dev', wakeDeployments: ['Bad Name'] })).rejects.toMatchObject({ status: 400 });
+    const policy = r.access.policyOf('env-parle-dev');
+    expect(autoWakesNow({ ...policy, autoWake: true }, false)).toBe(false);
+    const dev = { keyId: 'env-parle-dev', user: 'parle-dev' };
+    const classOpen = { now: true };
+    const gpu = new ClientGpu(stubController(classOpen, true).controller as never);
+    expect(gpu.requestMayWake(dev, policy, 'parle-speech-test')).toBe(false);
+    const awake = { ...policy, autoWake: true };
+    expect(gpu.requestMayWake(dev, awake, 'parle-speech-test')).toBe(false);
+    classOpen.now = false;
+    expect(gpu.requestMayWake(dev, awake, 'parle-qwen-tts')).toBe(false);
+    expect(gpu.requestMayWake(dev, { ...awake, gpuDailyEur: 0.1 }, 'parle-speech-test')).toBe(false);
+    expect(gpu.requestMayWake(dev, awake, 'parle-speech-test')).toBe(true);
   });
 });

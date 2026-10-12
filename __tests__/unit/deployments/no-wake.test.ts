@@ -27,7 +27,9 @@ const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string; cloudStt: { transcribe: ReturnType<typeof vi.fn> }; woken: string[] }
 
-async function harness(autoWake?: (bearer: string) => boolean, countsAsUse?: (bearer: string) => boolean): Promise<Harness> {
+async function harness(
+  autoWake?: (bearer: string) => boolean, countsAsUse?: (bearer: string) => boolean, mayWake?: (c: DeploymentController, bearer: string, deployment: string) => boolean,
+): Promise<Harness> {
   const cloud = new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 30,
@@ -57,6 +59,7 @@ async function harness(autoWake?: (bearer: string) => boolean, countsAsUse?: (be
     deepHealth: { authorize: (token) => token === KEY, report: async () => ({ status: 200, body: {} }) },
     ...(autoWake ? { autoWake } : {}),
     ...(countsAsUse ? { countsAsUse } : {}),
+    ...(mayWake ? { mayWake: (bearer: string, deployment: string) => mayWake(controller, bearer, deployment) } : {}),
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, cloudStt, woken };
@@ -274,5 +277,32 @@ describe('dev key (owner, 12/10/2026): countsAsUse false uses a ready replica bu
     await wait(30);
     expect((await stt(h, {}, BATCH, 'other-audio')).headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
     expect(h.controller.get('parle-speech')!.lastRequestAt).not.toBe(before);
+  });
+});
+
+describe('dev key with wakeDeployments (owner, 12/10/2026): a plain request wakes the test copy, never production', () => {
+  it('production and its test copy cold: the cloud answers, the test copy is woken under a start, production is not', async () => {
+    const { ClientGpu } = await import('../../../src/deployments/client-gpu');
+    const { DEFAULT_GPU_POLICY } = await import('../../../src/config/access-keys');
+    const policy = { ...DEFAULT_GPU_POLICY, autoWake: true, canStartGpu: true, countsAsUse: false, wakeDeployments: ['parle-speech-test'] };
+    let gpu: InstanceType<typeof ClientGpu> | null = null;
+    h.controller.stop();
+    h.server.closeAllConnections();
+    await new Promise<void>(r => h.server.close(() => r()));
+    h = await harness(() => false, bearer => bearer !== KEY, (c, bearer, deployment) => {
+      gpu ??= new ClientGpu(c);
+      return bearer === KEY && gpu.requestMayWake({ keyId: 'key-dev', user: 'parle' }, policy, deployment);
+    });
+    await h.controller.put('parle-speech-test', { profile: 'cpu-echo', minReplicas: 0, maxReplicas: 1, testFor: 'parle-speech' });
+    const dev = await stt(h, {}, KEY);
+    expect(dev.status).toBe(200);
+    expect(dev.headers.get('x-gateway-provider')).toBe('groq:whisper-large-v3');
+    await until(() => h.cloud.created.length === 1, 2000);
+    expect(h.woken).toEqual(['parle-speech-test']);
+    expect(h.controller.get('parle-speech')!.replicas).toHaveLength(0);
+    expect(gpu!.report().running).toMatchObject([{ key: 'key-dev', deployment: 'parle-speech-test', capEur: 5 }]);
+    expect((await stt(h, {}, BATCH, 'other-audio')).headers.get('x-gateway-provider')).toBe('groq:whisper-large-v3');
+    await wait(200);
+    expect(h.controller.get('parle-speech')!.replicas).toHaveLength(0);
   });
 });

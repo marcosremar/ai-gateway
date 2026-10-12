@@ -595,7 +595,11 @@ export function createProxyServer(config: ProxyConfig): Server {
       userId = resolved.userId;
     }
     // No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken.
-    if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId) || config.autoWake?.(bearerToken(authHeader)) === false) markNoWake();
+    if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId)) markNoWake();
+    else if (config.autoWake?.(bearerToken(authHeader)) === false) {
+      const bearer = bearerToken(authHeader);
+      markNoWake(config.mayWake && ((deployment: string) => config.mayWake!(bearer, deployment)));
+    }
     if (config.countsAsUse?.(bearerToken(authHeader)) === false) markNoUse();
     if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');

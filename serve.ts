@@ -536,6 +536,10 @@ const server = await startProxy({
   deepHealth,
   autoWake: (bearer) => !keysConfigured()
     || autoWakesNow(access.policyOf(access.resolve(bearer)?.keyId), classWindowOpen(deployments?.controller.list() ?? [], Date.now())),
+  ...(deployments ? { mayWake: (bearer: string, deployment: string) => {
+    const key = access.resolve(bearer);
+    return deployments.clientGpu.requestMayWake(key && { keyId: key.keyId, user: key.userId }, access.policyOf(key?.keyId), deployment);
+  } } : {}),
   countsAsUse: (bearer) => access.policyOf(access.resolve(bearer)?.keyId).countsAsUse,
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
