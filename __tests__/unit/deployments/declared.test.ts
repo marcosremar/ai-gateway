@@ -257,7 +257,7 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
 
   it('not registered yet: pending, nothing created; registered by the parle client: only the declared fields are put, then in sync', async () => {
     const { c, cloud } = await controller();
-    const owned = DECLARED_DEPLOYMENTS.filter(d => !d.image);
+    const owned = DECLARED_DEPLOYMENTS.filter(d => !d.image && d.app !== 'babelcast');
     const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: owned });
     const first = await r.reconcile();
     expect(first.map(s => s.state)).toEqual(['pending', 'pending', 'pending']);
@@ -277,6 +277,39 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     expect((await r.reconcile())[0].state).toBe('applied');
     expect(c.specOf('parle-qwen-tts')!.scaling).toEqual({ mode: 'balanced', budget: { eurPerMonth: 150 } });
     expect((await r.reconcile())[0].state).toBe('in_sync');
+    expect(cloud.created).toHaveLength(0);
+  });
+});
+
+describe('declared babelcast-speech / babelcast-tts (report 2026-10-12, T5): only the owning app', () => {
+  const BABELCAST = {
+    image: 'rg.fr-par.scw.cloud/aigw/babelcast-speech:1', port: 8000, healthPath: '/health', machineType: 'L4-1-24G', zone: 'fr-par-2',
+    gpu: true, minReplicas: 0, maxReplicas: 1, scaling: { mode: 'fast' },
+  };
+  const babelcast = DECLARED_DEPLOYMENTS.filter(d => d.app === 'babelcast');
+
+  it('registered with no app: the app becomes babelcast, the spec is untouched, no machine; then in sync', async () => {
+    const { c, cloud } = await controller();
+    expect(babelcast.map(d => [d.name, d.spec])).toEqual([['babelcast-speech', {}], ['babelcast-tts', {}]]);
+    for (const d of babelcast) await c.put(d.name, BABELCAST);
+    const before = babelcast.map(d => c.specOf(d.name));
+    const log = vi.fn();
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: babelcast, log });
+    expect((await r.reconcile()).map(s => s.state)).toEqual(['applied', 'applied']);
+    expect(babelcast.map(d => c.get(d.name)!.app)).toEqual(['babelcast', 'babelcast']);
+    expect(babelcast.map(d => c.specOf(d.name))).toEqual(before);
+    expect(log).toHaveBeenCalledWith('declared deployment registered', { name: 'babelcast-speech', image: null, created: false, app: 'babelcast' });
+    expect((await r.reconcile()).map(s => s.state)).toEqual(['in_sync', 'in_sync']);
+    expect(cloud.created).toHaveLength(0);
+  });
+
+  it('never takes a deployment that belongs to another app, never creates one', async () => {
+    const { c, cloud } = await controller();
+    await c.put('babelcast-speech', BABELCAST, { app: 'other' });
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: babelcast });
+    expect((await r.reconcile()).map(s => s.state)).toEqual(['applied', 'pending']);
+    expect(c.get('babelcast-speech')!.app).toBe('other');
+    expect(c.specOf('babelcast-tts')).toBeNull();
     expect(cloud.created).toHaveLength(0);
   });
 });
