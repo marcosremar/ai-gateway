@@ -5,6 +5,7 @@ import { AccessKeys } from '../../src/config/access-keys';
 import { ADMIN_ANCHORS, ADMIN_COOKIE, createAdminPage } from '../../src/admin-page';
 import { demoSnapshot } from '../__fixtures__/admin-snapshot';
 import { renderStatus } from '../../src/admin-page/render';
+import { adminTraffic } from '../../src/admin-page/traffic';
 
 const ADMIN_KEY = 'gw_admin_0123456789abcdef0123';
 const CLIENT_KEY = 'gw_client_0123456789abcdef012';
@@ -90,7 +91,7 @@ describe('admin page (/admin)', () => {
     expect(res.headers.get('location')).toBe('/admin');
     expect(setCookie).toMatch(new RegExp(`^${ADMIN_COOKIE}=[a-f0-9]{64}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200$`));
     const { html } = await gw.signedIn();
-    for (const title of ['Reservas', 'Saldos', 'GPUs', 'Avisos e alertas', 'Máquinas avulsas', 'Chaves', 'Apps']) expect(html).toContain(title);
+    for (const title of ['Reservas', 'Saldos', 'GPUs', 'Avisos e alertas', 'Máquinas avulsas', 'Chaves', 'Apps', 'Tráfego', 'Atividade']) expect(html).toContain(title);
     expect(html).toContain('fora da janela de aula');
     expect(gw.audit.some(e => e.action === 'admin-page.login' && e.actor === 'marcos')).toBe(true);
     expect(JSON.stringify(gw.audit)).not.toContain(ADMIN_KEY);
@@ -100,7 +101,7 @@ describe('admin page (/admin)', () => {
     const gw = await gateway();
     const { html } = await gw.signedIn();
     for (const id of ADMIN_ANCHORS) {
-      expect(html).toContain(`<section id="${id}">`);
+      expect(html).toContain(`<section id="${id}" data-spy>`);
       expect(html).toContain(`href="#${id}"`);
     }
   });
@@ -109,10 +110,10 @@ describe('admin page (/admin)', () => {
     const gw = await gateway();
     const { cookie } = await gw.login();
     const html = await (await gw.call('/admin?app=parle', { cookie })).text();
-    const apps = html.slice(html.indexOf('<section id="apps">'));
+    const apps = html.slice(html.indexOf('<section id="apps"'), html.indexOf('<section id="gpus"'));
     expect(apps).toContain('precisa de GPU (speech-stack)');
     expect(apps).not.toContain('babelcast');
-    expect(await (await gw.call('/admin', { cookie })).text()).toMatch(/<section id="apps">[\s\S]*babelcast/);
+    expect(await (await gw.call('/admin', { cookie })).text()).toMatch(/<section id="apps"[^>]*>[\s\S]*babelcast/);
   });
 
   it('after login goes back to the URL and anchor it was opened with', async () => {
@@ -179,18 +180,61 @@ describe('admin page (/admin)', () => {
     expect(res.headers.get('content-type')).toBe('application/json');
   });
 
-  it('puts the worst sections first and names every state in text, not only in color', () => {
+  it('lists the worst areas first in the attention list and names every state in text, not only in color', () => {
     const now = Date.parse('2026-10-13T10:00:00Z');
     const render = (state: 'ok' | 'warn' | 'bad') => renderStatus('n', demoSnapshot(now, state), { now, csrf: 'c', actor: 'marcos', message: null, app: null });
-    const order = (html: string) => [...html.matchAll(/<section id="([a-z]+)">/g)].map(m => m[1]);
+    const attention = (html: string) => [...(/<ul class="attn"[^]*?<\/ul>/.exec(html)?.[0] ?? '').matchAll(/<a href="#([a-z]+)">/g)].map(m => m[1]);
     const bad = render('bad');
-    expect(order(bad).slice(0, 2).sort()).toEqual(['apps', 'reservas']);
+    expect(attention(bad).slice(0, 3).sort()).toEqual(['apps', 'reservas', 'trafego']);
     expect(bad).toContain('Algo está fora do ar');
-    expect(bad).toMatch(/<section id="reservas">[^]*?<span class="badge">Problema<\/span>/);
+    expect(bad).toMatch(/<section id="reservas" data-spy><header class="sh"><h2>Reservas<\/h2><span class="pill bad">/);
     expect(bad).toContain('<span class="sr">Problema:</span>');
+    expect(bad).toContain('Texto → fala sem resposta na nuvem');
     const ok = render('ok');
-    expect(order(ok)).toEqual([...ADMIN_ANCHORS]);
+    expect(attention(ok)).toEqual([]);
     expect(ok).toContain('Tudo funcionando');
-    expect(ok).not.toMatch(/badge">(Problema|Atenção)/);
+    expect(ok).not.toMatch(/<h2>[^<]+<\/h2><span class="pill (bad|warn)">/);
+  });
+
+  it('shows the overview figures, traffic per stage and provider, who woke a GPU and the activity log', () => {
+    const now = Date.parse('2026-10-13T10:00:00Z');
+    const snapshot = demoSnapshot(now, 'warn');
+    const html = renderStatus('n', snapshot, { now, csrf: 'c', actor: 'marcos', message: null, app: null });
+    for (const label of ['Chamadas 24 h', 'Sem resposta 24 h', 'Latência p95', 'GPUs ligadas', 'Gasto GPU hoje', 'Menor saldo']) expect(html).toContain(label);
+    const traffic = html.slice(html.indexOf('<section id="trafego"'), html.indexOf('<section id="apps"'));
+    expect(traffic).toContain('<code>deployment:speech-stack</code>');
+    expect(traffic).toContain('<code>openrouter</code>');
+    expect(traffic).toMatch(/aria-label="Chamadas por hora/);
+    const gpus = html.slice(html.indexOf('<section id="gpus"'), html.indexOf('<section id="reservas"'));
+    expect(gpus).toMatch(/parle até \d\d:\d\d/);
+    const activity = html.slice(html.indexOf('<section id="atividade"'));
+    expect(activity).toContain('estacionou a GPU');
+    expect(activity).toContain('falha ao criar réplica');
+    expect(activity).toContain('réplica ainda criando');
+  });
+});
+
+describe('adminTraffic', () => {
+  const now = Date.parse('2026-10-13T10:30:00Z');
+  const row = (minutesAgo: number, event: string, extra: Record<string, unknown> = {}) =>
+    ({ seq: 0, rxTs: now - minutesAgo * 60_000, ts: now - minutesAgo * 60_000, source: 'gateway', level: 'info', event, traceId: '1'.repeat(32), ...extra }) as never;
+
+  it('counts the last 24 h by hour, stage and provider, with p50/p95, and keeps GPU lifecycle events', () => {
+    const rows = [
+      row(25 * 60, 'route.served', { durMs: 9_999, attrs: { stage: 'stt', provider: 'openrouter' } }),
+      row(120, 'route.fallback', { attrs: { stage: 'tts', provider: 'deployment:speech-stack' } }),
+      row(119, 'route.unavailable', { level: 'error', durMs: 30_000, attrs: { stage: 'tts' } }),
+      ...[100, 200, 300, 400].map((ms, i) => row(10 + i, 'route.served', { durMs: ms, attrs: { stage: 'stt', provider: 'openrouter' } })),
+      row(5, 'replica.ready', { deployment: 'speech-stack', replicaId: 'r1' }),
+      row(4, 'edge.stt.done', { source: 'edge' }),
+    ].sort((a: { rxTs: number }, b: { rxTs: number }) => a.rxTs - b.rxTs);
+    const t = adminTraffic(rows, now);
+    expect(t.hours).toHaveLength(24);
+    expect(t.total).toMatchObject({ served: 4, failed: 1, fallbacks: 1, p50Ms: 200, p95Ms: 400 });
+    expect(t.hours.at(-1)).toMatchObject({ served: 4, failed: 0 });
+    expect(t.hours.reduce((n, h) => n + h.failed, 0)).toBe(1);
+    expect(t.stages.find(s => s.key === 'tts')).toMatchObject({ served: 0, failed: 1, fallbacks: 1 });
+    expect(t.providers.map(p => p.key)).toEqual(['openrouter', 'deployment:speech-stack']);
+    expect(t.activity).toEqual([{ at: new Date(now - 5 * 60_000).toISOString(), event: 'replica.ready', level: 'info', deployment: 'speech-stack', replicaId: 'r1' }]);
   });
 });

@@ -62,7 +62,7 @@ import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
 import { ModelBenchmarkStore } from './src/model-benchmarks/store';
 import { createModelBenchmarkRoutes } from './src/model-benchmarks/routes';
-import { createAdminPage, createAlertLog } from './src/admin-page';
+import { adminTraffic, createAdminPage, createAlertLog } from './src/admin-page';
 
 const log = createLogger('serve');
 
@@ -581,6 +581,7 @@ createAdminPage({
     gpus: controller?.list() ?? null, gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
     machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
     apps: deployments?.apps.list().map(({ id }) => ({ id, profile: deployments.apps.get(id)?.profile ?? null, status: deployments.gpuHealth.status(id) })) ?? [],
+    traffic: telemetry ? adminTraffic(telemetry.store.rows(), Date.now()) : null, audit: keyAudit.recent(30),
   }),
   park: async (name) => { if (!controller) throw new Error('deployments desligados'); await controller.park(name); },
   probe: () => fallbackProbe.check(),

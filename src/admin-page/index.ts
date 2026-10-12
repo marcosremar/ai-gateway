@@ -8,8 +8,9 @@ import { redact } from '../telemetry/alert-email';
 import { renderLogin, renderStatus, type AdminAlert, type AdminSnapshot } from './render';
 
 export type { AdminAlert, AdminApp, AdminSnapshot } from './render';
+export { adminTraffic, type AdminTraffic } from './traffic';
 
-export const ADMIN_ANCHORS = ['reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps'] as const;
+export const ADMIN_ANCHORS = ['reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps', 'trafego', 'atividade'] as const;
 
 const ADMIN_SESSION_MS = 12 * 3_600_000;
 export const ADMIN_COOKIE = '__Host-aigw_admin';
