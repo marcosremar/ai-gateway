@@ -6,7 +6,7 @@
 //   POST /v1/activate {key, deviceName, appVersion}
 //   Pages: on ACCOUNTS_SITE_HOSTS `/`, `/signup`, `/login`, `/forgot`, `/reset`, `/account`; on any host `/account[/…]`.
 // And the quota gate: a metered request carrying an activation key is refused (402/429) when the account is over its
-// quota, otherwise passed on to the proxy and counted when it succeeds.
+// quota or already has its limit of requests in flight, otherwise passed on to the proxy and counted when it succeeds.
 //
 // Cookie-authenticated writes need the session's CSRF token in `X-CSRF-Token` and a same-origin request (Origin /
 // Sec-Fetch-Site); the unauthenticated JSON forms (signup, login, reset) need the same-origin check and a JSON body,
@@ -126,6 +126,8 @@ export interface AccountsHttpOptions {
   usage: UsageMeter;
   limiter?: AttemptLimiter;
   log?: (msg: string, data?: Record<string, unknown>) => void;
+  /** Requests a realtime session is worth (the app budget's charge, `RealtimeService.sessionRequests`); default 1. */
+  sessionRequests?: () => number;
 }
 
 export function createAccountsHttp(opts: AccountsHttpOptions) {
@@ -307,6 +309,8 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
 
   // ── Quota gate + request counting ─────────────────────────────────────────
 
+  const inFlight = new Map<string, number>();
+
   function gate(req: IncomingMessage, res: ServerResponse, method: string, path: string): boolean {
     if (method !== 'POST') return false;
     const metered = METERED[path];
@@ -315,18 +319,35 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     const found = service.keyOf(bearer);
     if (!found) return false; // the proxy answers 401
     const internal = isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress);
+    const requests = path === '/v1/realtime/sessions' ? Math.max(1, opts.sessionRequests?.() ?? 1) : 1;
     if (!internal) {
-      const denial = service.checkQuota(found.user, metered.metrics);
+      const denial = service.checkQuota(found.user, metered.metrics, requests) ?? admitInFlight(found.user);
       if (denial) { req.resume(); sendError(res, denial); return true; }
+      res.on('close', () => {
+        const n = (inFlight.get(found.user.id) ?? 1) - 1;
+        if (n > 0) inFlight.set(found.user.id, n); else inFlight.delete(found.user.id);
+      });
     }
     res.on('finish', () => {
       if (internal || res.statusCode >= 400) return;
-      const delta: Partial<Counters> = { requests: 1 };
+      const delta: Partial<Counters> = { requests };
       if (metered.counter) delta[metered.counter] = 1;
       if (path === '/v1/rooms' && res.statusCode === 201) delta.rooms = 1;
       usage.record(found.user.id, found.key.id, delta);
     });
     return false;
+  }
+
+  /** Takes one of the account's in-flight slots (released when the response closes), or refuses with 429. */
+  function admitInFlight(user: User): AccountError | null {
+    const limit = service.limitsOf(user).concurrentRequests;
+    const n = inFlight.get(user.id) ?? 0;
+    if (limit > 0 && n >= limit) {
+      return new AccountError(429, `Sua conta já tem ${limit} pedidos em andamento. Aguarde um terminar e tente de novo.`,
+        'account_concurrency_exceeded', { scope: 'account', limit, retryAfterSeconds: 1 });
+    }
+    inFlight.set(user.id, n + 1);
+    return null;
   }
 
   /** Serves the request when it is an accounts route or a refused metered one (true); false = the proxy gets it. */

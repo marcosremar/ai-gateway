@@ -35,6 +35,8 @@ export interface CreateAccountsOptions {
   isAdmin?: (userId: string) => boolean;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
+  /** Requests a realtime session is worth against the account's daily budget (the app budget's charge). */
+  sessionRequests?: () => number;
 }
 
 export function createAccounts(opts: CreateAccountsOptions = {}) {
@@ -44,7 +46,7 @@ export function createAccounts(opts: CreateAccountsOptions = {}) {
   const usage = new UsageMeter({ path: config.usagePath, retentionDays: config.usageRetentionDays, now, log: opts.log });
   const service = new AccountService({ config, usage, email, isAdmin: opts.isAdmin, now, log: opts.log });
   const limiter = new AttemptLimiter(now);
-  const http = createAccountsHttp({ service, usage, limiter, log: opts.log });
+  const http = createAccountsHttp({ service, usage, limiter, log: opts.log, sessionRequests: opts.sessionRequests });
 
   /** Puts the account routes and the quota gate in front of the proxy's listeners (call after the rooms' mount). */
   function mount(server: Server): void {
