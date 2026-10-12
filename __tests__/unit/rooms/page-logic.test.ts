@@ -298,7 +298,9 @@ describe('room page: viewer settings', () => {
     for (const s of ['#00C7BE', '#0F1A2E', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html,body{overflow-x:hidden}', 'Ouvir dublagem']) {
       expect(html).toContain(s);
     }
-    expect(html).not.toMatch(/https?:\/\/(?!www\.w3\.org)/); // no CDN
+    // No CDN: every absolute URL in the page is an SVG/XML namespace on www.w3.org.
+    const urls = html.match(/https?:\/\/[^\s"'<>)]+/g) ?? [];
+    expect(urls.filter((u) => !u.startsWith('http://www.w3.org/'))).toEqual([]);
   });
 
   it('ships an accessible settings sheet', () => {
