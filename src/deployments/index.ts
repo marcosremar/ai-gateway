@@ -250,6 +250,7 @@ export function deploymentsFromEnv(
     stability: new ClientStabilityLog({ file: join(stateDir, 'client-stability.jsonl'), log: opts.log }),
     isAdmin: (req) => admins.has(opts.userOf(req) ?? ''),
     declaredStatus: opts.declaredStatus,
+    log: opts.log,
   });
   // In-process janitor (build machines and detached volumes that no deployment owns). On by default on Railway, where
   // the gateway is the one owner of the project's leftovers; elsewhere opt in with DEPLOYMENTS_JANITOR=1.

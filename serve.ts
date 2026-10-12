@@ -172,6 +172,8 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
 });
 const deployments = configuredDeployments && await configuredDeployments.controller.init()
   .then(() => configuredDeployments.apps.init())
+  .then(() => configuredDeployments.apps.ensureCloudFallback())
+  .then((added) => { if (added.length) log.warn({ added }, 'apps: cloud fallback appended to stored chains that had none (owner decision 2026-10-12)'); })
   .then(() => configuredDeployments.clientGpu.load())
   .then(() => configuredDeployments, (err: unknown) => {
     configuredDeployments.stopJanitor?.();

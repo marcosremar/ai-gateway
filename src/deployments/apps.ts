@@ -13,6 +13,7 @@
 
 import { join } from 'path';
 import { parseModelRoutes, type ModelRoutesSpec, type RouteEntrySpec } from '../config/serve-providers';
+import { defaultCloudTargets, withCloudFallback, type CloudFallbackAdded } from '../config/cloud-fallback';
 import type { FallbackKeyStore, ProvisionedKeyRecord } from './app-fallback';
 import { readStateFile, writeStateFile } from './state-file';
 import type { StateLog } from './store';
@@ -100,7 +101,7 @@ function routeTargets(stage: RouteStage, alias: string, e: RouteEntrySpec): stri
  * So an app key may reorder, drop or re-alias its routes, never reach something new.
  */
 export function routeTargetViolations(next: ModelRoutesSpec, current: ModelRoutesSpec | undefined, ownsDeployment: (name: string) => boolean): string[] {
-  const allowed = new Set<string>();
+  const allowed = defaultCloudTargets();
   for (const stage of ROUTE_STAGES) {
     for (const [alias, chain] of Object.entries(current?.[stage] ?? {})) for (const e of chain) for (const t of routeTargets(stage, alias, e)) allowed.add(t);
   }
@@ -244,25 +245,46 @@ export class AppRegistry implements FallbackKeyStore {
 
   /**
    * Replaces the app's routes. An alias belongs to one app: an alias another app already routes is refused (409), so
-   * no app can take over another app's model names. Validation is MODEL_ROUTES' (`parseModelRoutes`).
+   * no app can take over another app's model names. Validation is MODEL_ROUTES' (`parseModelRoutes`). A chain without
+   * a cloud link gets the stage's default fallback appended (`cloud-fallback.ts`, reported in `cloudFallbackAdded`);
+   * `"cloudFallback": false` is refused.
    */
-  async putRoutes(app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean } = {}): Promise<ModelRoutesSpec> {
+  async putRoutes(app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean } = {}): Promise<{ routes: ModelRoutesSpec; cloudFallbackAdded: CloudFallbackAdded[] }> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'routes must be an object { chat?, stt?, tts? }');
-    const { routes, errors } = parseModelRoutes(JSON.stringify(body));
+    if ((body as { cloudFallback?: unknown }).cloudFallback === false) {
+      throw new AppError(400, 'every STT, chat and TTS chain must end in a cloud fallback (owner decision 2026-10-12): drop "cloudFallback": false — the gateway appends the default (OpenRouter) to a chain that has none');
+    }
+    const { cloudFallback: _cf, ...declared } = body as Record<string, unknown>;
+    const { routes: parsed, errors } = parseModelRoutes(JSON.stringify(declared));
     if (errors.length) throw new AppError(400, errors.join('; '));
-    for (const [stage, byModel] of Object.entries(routes) as Array<[keyof ModelRoutesSpec, Record<string, unknown> | undefined]>) {
+    for (const [stage, byModel] of Object.entries(parsed) as Array<[keyof ModelRoutesSpec, Record<string, unknown> | undefined]>) {
       for (const model of Object.keys(byModel ?? {})) {
         const owner = Object.values(this.apps).find(a => a.id !== app && a.routes?.[stage]?.[model]);
         if (owner) throw new AppError(409, `${stage} alias '${model}' belongs to app '${owner.id}'`);
       }
     }
     if (opts.restrictedTo) {
-      const refused = routeTargetViolations(routes, ownValue(this.apps, app)?.routes, opts.restrictedTo);
+      const refused = routeTargetViolations(parsed, ownValue(this.apps, app)?.routes, opts.restrictedTo);
       if (refused.length) throw new AppError(403, `an app key may only route to its own deployments and to targets its routes already have: ${refused.join('; ')}`);
     }
+    const { routes, added } = withCloudFallback(parsed);
     this.account(app).routes = routes;
     await this.store.save(this.apps);
-    return routes;
+    return { routes, cloudFallbackAdded: added };
+  }
+
+  /** Boot migration: stored chains without a cloud link get the default appended (saved once, nothing else changes). */
+  async ensureCloudFallback(): Promise<Array<CloudFallbackAdded & { app: string }>> {
+    const added: Array<CloudFallbackAdded & { app: string }> = [];
+    for (const account of Object.values(this.apps)) {
+      if (!account.routes) continue;
+      const fixed = withCloudFallback(account.routes);
+      if (!fixed.added.length) continue;
+      account.routes = fixed.routes;
+      added.push(...fixed.added.map(a => ({ app: account.id, ...a })));
+    }
+    if (added.length) await this.store.save(this.apps);
+    return added;
   }
 
   /** Every app's routes, merged (aliases are unique across apps). */
