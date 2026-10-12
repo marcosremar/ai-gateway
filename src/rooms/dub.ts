@@ -1,6 +1,6 @@
 // ── AI Gateway — Live subtitle rooms: server-side dubbing ────────────────────
 // When the presenter's app publishes text only, the gateway voices each line itself (Kokoro 82M through OpenRouter,
-// injected by serve.ts as a `RoomSynthesize`) for the languages someone is actually listening to. Spending rules:
+// MAI-Voice as fallback, each attempt time-bounded; injected by serve.ts as a `RoomSynthesize`) for the languages someone is actually listening to. Spending rules:
 //   - a language is voiced only while at least one viewer explicitly listens to it (`listen` message), it has a
 //     non-empty translation in the line and Kokoro has a voice for it;
 //   - the presenter's own clips win: a room whose presenter sent a clip recently is left alone, and a line+language the
@@ -24,22 +24,69 @@ export function kokoroVoice(lang: string): string | null {
 /** One synthesized clip: audio bytes and their container (`mp3`, `wav`…). */
 export interface RoomClip { audio: Buffer; format: string }
 
-/** Speech synthesis for rooms: text + voice → clip. Throws on failure. */
-export type RoomSynthesize = (text: string, voice: string) => Promise<RoomClip>;
+/** Speech synthesis for rooms: text + room language → clip. Throws on failure; `signal` aborts the upstream call. */
+export type RoomSynthesize = (text: string, lang: string, signal?: AbortSignal) => Promise<RoomClip>;
 
-/** The structural slice of a TTS provider used by `kokoroSynthesize` (the OpenRouter provider fits). */
+/** The structural slice of a TTS provider used by the room synthesizers (the OpenRouter provider fits). */
 export interface TtsLike {
-  synthesize(req: { input: string; model: string; voice: string; responseFormat?: 'mp3' }): Promise<{ audio: Buffer }>;
+  synthesize(req: { input: string; model: string; voice: string; responseFormat?: 'mp3'; signal?: AbortSignal }): Promise<{ audio: Buffer }>;
 }
 
 export const KOKORO_MODEL = 'hexgrad/kokoro-82m';
+export const MAI_MODEL = 'microsoft/mai-voice-2.1-flash';
+
+/** MAI-Voice voice per language: the fallback when Kokoro is stuck or failing. Only voices already used in production. */
+export const MAI_ROOM_VOICES: Readonly<Record<string, string>> = {
+  en: 'en-US-Harper:MAI-Voice-2-Flash', fr: 'fr-FR-Soleil:MAI-Voice-2-Flash', pt: 'pt-BR-Luana:MAI-Voice-2-Flash',
+};
+
+/**
+ * Budget of one synthesis attempt. The OpenRouter SDK client has no timeout of its own (SDK default: 10 min) and a
+ * room language is voiced one call at a time, so a stuck call would mute that language; a line is a sentence, which
+ * Kokoro voices in about a second.
+ */
+export const ROOM_DUB_ATTEMPT_TIMEOUT_MS = 8_000;
+
+function openRouterSynthesize(provider: TtsLike, model: string, voices: Readonly<Record<string, string>>): RoomSynthesize {
+  return async (text, lang, signal) => {
+    const voice = voices[lang.split('-')[0]!.toLowerCase()];
+    if (!voice) throw new Error(`${model} has no voice for ${lang}`);
+    const res = await provider.synthesize({ input: text, model, voice, responseFormat: 'mp3', signal });
+    if (!res.audio.length) throw new Error(`${model}: empty audio`);
+    return { audio: res.audio, format: 'mp3' };
+  };
+}
 
 /** Kokoro 82M (mp3) through an OpenAI-compatible TTS provider — OpenRouter in production. */
-export function kokoroSynthesize(provider: TtsLike): RoomSynthesize {
-  return async (text, voice) => {
-    const res = await provider.synthesize({ input: text, model: KOKORO_MODEL, voice, responseFormat: 'mp3' });
-    if (!res.audio.length) throw new Error('empty audio');
-    return { audio: res.audio, format: 'mp3' };
+export const kokoroSynthesize = (provider: TtsLike): RoomSynthesize => openRouterSynthesize(provider, KOKORO_MODEL, KOKORO_ROOM_VOICES);
+
+/** MAI-Voice 2.1 Flash (mp3) through OpenRouter, for the languages in `MAI_ROOM_VOICES`. */
+export const maiSynthesize = (provider: TtsLike): RoomSynthesize => openRouterSynthesize(provider, MAI_MODEL, MAI_ROOM_VOICES);
+
+async function withTimeout<T>(call: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const ctl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { const err = new Error(`timed out after ${ms} ms`); ctl.abort(err); reject(err); }, ms);
+  });
+  try { return await Promise.race([call(ctl.signal), timedOut]); } finally { clearTimeout(timer); }
+}
+
+/**
+ * Tries each synthesizer in order, each bounded by `attemptTimeoutMs` (aborted, and abandoned even if it ignores the
+ * abort): a stuck or failing voice passes to the next one and holds the language for at most one budget per attempt.
+ */
+export function synthesizeWithFallback(chain: RoomSynthesize[], attemptTimeoutMs = ROOM_DUB_ATTEMPT_TIMEOUT_MS): RoomSynthesize {
+  return async (text, lang) => {
+    const errors: string[] = [];
+    for (const synth of chain) {
+      try {
+        return await withTimeout(signal => synth(text, lang, signal), attemptTimeoutMs);
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+    throw new Error(errors.join('; ') || 'no synthesizer');
   };
 }
 
@@ -134,13 +181,12 @@ export class RoomDubber {
     ls.pending = null;
     if (lineId === null || ls.busy || this.rooms.get(room.meta.code) !== s) return;
     const text = this.eligible(room, s, lineId, lang);
-    const voice = kokoroVoice(lang);
-    if (!text || !voice) return;
+    if (!text) return;
     ls.busy = true;
     ls.done.push(lineId);
     if (ls.done.length > DONE_KEEP) ls.done.shift();
     try {
-      const clip = await this.opts.synthesize(text, voice);
+      const clip = await this.opts.synthesize(text, lang);
       // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
       if (this.eligible(room, s, lineId, lang)) this.opts.deliver(room, lineId, lang, clip);
     } catch (err) {

@@ -18,7 +18,10 @@ import { RoomService } from './service';
 import { FileRoomStore, MemoryRoomStore, type RoomStore } from './store';
 import { createRoomWs } from './ws';
 
-export { KOKORO_MODEL, KOKORO_ROOM_VOICES, RoomDubber, kokoroSynthesize, kokoroVoice } from './dub';
+export {
+  KOKORO_MODEL, KOKORO_ROOM_VOICES, MAI_MODEL, MAI_ROOM_VOICES, ROOM_DUB_ATTEMPT_TIMEOUT_MS, RoomDubber, kokoroSynthesize, kokoroVoice,
+  maiSynthesize, synthesizeWithFallback,
+} from './dub';
 export type { RoomClip, RoomSynthesize } from './dub';
 export { roomsConfigFromEnv, ROOMS_DEFAULTS } from './config';
 export type { RoomsConfig } from './config';
@@ -45,7 +48,7 @@ export interface CreateRoomsOptions {
   now?: () => number;
   sweepIntervalMs?: number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
-  /** Server dubbing synthesizer (serve.ts: `kokoroSynthesize(openrouterTTS)`); none = no server dubbing. */
+  /** Server dubbing synthesizer (serve.ts: Kokoro then MAI-Voice, `synthesizeWithFallback`); none = no server dubbing. */
   synthesize?: RoomSynthesize;
   /** False while the synthesizer cannot work (e.g. its API key is not set). */
   synthesizeAvailable?: () => boolean;

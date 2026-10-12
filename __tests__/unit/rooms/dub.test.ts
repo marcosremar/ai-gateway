@@ -5,7 +5,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  MemoryRoomStore, RoomService, kokoroSynthesize, kokoroVoice, roomsConfigFromEnv, type RoomClip, type RoomsConfig,
+  MemoryRoomStore, RoomService, kokoroSynthesize, kokoroVoice, maiSynthesize, roomsConfigFromEnv,
+  synthesizeWithFallback, type RoomClip, type RoomsConfig,
 } from '../../../src/rooms';
 import type { LiveRoom, RoomViewer } from '../../../src/rooms/service';
 import type { RoomLine, RoomServerMessage } from '../../../src/rooms/types';
@@ -30,7 +31,7 @@ const audios = (v: FakeViewer) => v.msgs.filter((m): m is Extract<RoomServerMess
 const line = (id: number, translations: Record<string, string> = { en: `hello ${id}`, fr: `bonjour ${id}` }): RoomLine =>
   ({ id, original: `olá ${id}`, originalLang: 'pt', translations, ts: 1_000 + id });
 
-let synth: ReturnType<typeof vi.fn<(text: string, voice: string) => Promise<RoomClip>>>;
+let synth: ReturnType<typeof vi.fn<(text: string, lang: string, signal?: AbortSignal) => Promise<RoomClip>>>;
 let service: RoomService;
 
 function make(env: Record<string, string> = {}, extra: Partial<RoomsConfig> = {}): RoomService {
@@ -70,7 +71,7 @@ describe('rooms server dubbing', () => {
     expect(synth).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(WAIT + 1);
     expect(synth).toHaveBeenCalledTimes(1);
-    expect(synth).toHaveBeenCalledWith('bonjour 1', 'ff_siwis');
+    expect(synth).toHaveBeenCalledWith('bonjour 1', 'fr');
     expect(audios(fr)).toEqual([{ type: 'audio', lineId: 1, lang: 'fr', wav: Buffer.from('mp3:bonjour 1').toString('base64'), format: 'mp3' }]);
     expect(audios(silent)).toEqual([]);
     expect(audios(legacy)).toEqual([]);
@@ -100,7 +101,7 @@ describe('rooms server dubbing', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await service.publishLine(r, line(3));
     await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(synth).toHaveBeenCalledWith('bonjour 3', 'ff_siwis');
+    expect(synth).toHaveBeenCalledWith('bonjour 3', 'fr');
   });
 
   it('does not deliver a clip the presenter sent while the server was synthesizing', async () => {
@@ -145,7 +146,7 @@ describe('rooms server dubbing', () => {
     await service.publishLine(r, line(3, { fr: 'bonjour 3 (corrigé)' })); // same id replaced while pending
     await vi.advanceTimersByTimeAsync(WAIT + 1);
     expect(synth).toHaveBeenCalledTimes(1);
-    expect(synth).toHaveBeenCalledWith('bonjour 3 (corrigé)', 'ff_siwis');
+    expect(synth).toHaveBeenCalledWith('bonjour 3 (corrigé)', 'fr');
     await service.publishLine(r, line(3, { fr: 'encore' }));
     await vi.advanceTimersByTimeAsync(WAIT * 3);
     expect(synth).toHaveBeenCalledTimes(1);
@@ -202,9 +203,54 @@ describe('rooms server dubbing', () => {
     expect(service.publicView(r).dubLangs).toEqual(['en']);
   });
 
-  it('kokoroSynthesize asks the provider for Kokoro 82M in mp3', async () => {
+  it('kokoroSynthesize asks the provider for Kokoro 82M in mp3, with the voice of the room language', async () => {
     const provider = { synthesize: vi.fn(async () => ({ audio: Buffer.from([1, 2, 3]) })) };
-    await expect(kokoroSynthesize(provider)('Bonjour', 'ff_siwis')).resolves.toEqual({ audio: Buffer.from([1, 2, 3]), format: 'mp3' });
+    await expect(kokoroSynthesize(provider)('Bonjour', 'fr-FR')).resolves.toEqual({ audio: Buffer.from([1, 2, 3]), format: 'mp3' });
     expect(provider.synthesize).toHaveBeenCalledWith({ input: 'Bonjour', model: 'hexgrad/kokoro-82m', voice: 'ff_siwis', responseFormat: 'mp3' });
+    await expect(maiSynthesize(provider)('Hola', 'es')).rejects.toThrow(/no voice for es/);
+  });
+
+  it('a stuck Kokoro call times out into MAI-Voice and does not hold the next line of that language', async () => {
+    const TIMEOUT = 5_000;
+    let aborted: AbortSignal | undefined;
+    const kokoro = vi.fn((text: string, _lang: string, signal?: AbortSignal) => {
+      if (text === 'bonjour 1') { aborted = signal; return new Promise<RoomClip>(() => {}); }
+      return Promise.resolve({ audio: Buffer.from(`kokoro:${text}`), format: 'mp3' });
+    });
+    const mai = vi.fn(async (text: string) => ({ audio: Buffer.from(`mai:${text}`), format: 'mp3' }));
+    synth = vi.fn(synthesizeWithFallback([kokoro, mai], TIMEOUT));
+    service.stop();
+    service = make();
+    const r = await room(service);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(WAIT + 1);
+    expect(kokoro).toHaveBeenCalledTimes(1);
+    expect(mai).not.toHaveBeenCalled();
+    await service.publishLine(r, line(2));
+    await vi.advanceTimersByTimeAsync(TIMEOUT);
+    expect(aborted?.aborted).toBe(true);
+    expect(mai).toHaveBeenCalledWith('bonjour 1', 'fr', expect.any(AbortSignal));
+    await vi.advanceTimersByTimeAsync(WAIT + 1);
+    expect(audios(fr).map(a => Buffer.from(a.wav, 'base64').toString())).toEqual(['mai:bonjour 1', 'kokoro:bonjour 2']);
+  });
+
+  it('every voice stuck: the line fails after one budget per attempt and the next line is voiced', async () => {
+    const hang = vi.fn((text: string) => (text === 'bonjour 1' ? new Promise<RoomClip>(() => {}) : Promise.resolve({ audio: Buffer.from(text), format: 'mp3' })));
+    const log = vi.fn();
+    const config: RoomsConfig = { ...roomsConfigFromEnv({}), dir: null, serverDubWaitMs: WAIT, serverDubPresenterQuietMs: 60_000 };
+    service.stop();
+    service = new RoomService({ config, store: new MemoryRoomStore(), sweepIntervalMs: 0, log, synthesize: synthesizeWithFallback([hang, hang], 1_000) });
+    const r = await room(service);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(WAIT + 1);
+    await service.publishLine(r, line(2));
+    await vi.advanceTimersByTimeAsync(2_000 + WAIT + 1);
+    expect(log).toHaveBeenCalledWith('rooms: server dub failed', expect.objectContaining({ lineId: 1, error: 'timed out after 1000 ms; timed out after 1000 ms' }));
+    expect(audios(fr).map(a => a.lineId)).toEqual([2]);
   });
 });
