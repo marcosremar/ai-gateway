@@ -3,7 +3,8 @@
 // MAI-Voice as fallback, each attempt time-bounded; injected by serve.ts as a `RoomSynthesize`) for the languages someone is actually listening to. Spending rules:
 //   - a language is voiced only while at least one viewer explicitly listens to it (`listen` message), it has a
 //     non-empty translation in the line and Kokoro has a voice for it;
-//   - the presenter's own clips win: a room whose presenter sent a clip recently is left alone, and a line+language the
+//   - the presenter's own clips win: a language the presenter sent a clip for recently is left alone (other languages are
+//     still voiced — the desktop app dubs one language, viewers may listen to another), and a line+language the
 //     presenter voiced is never synthesized (checked before and after the call);
 //   - per room and language one call at a time and one pending line: a newer line replaces an older pending one
 //     (stale lines are dropped, a backlog cannot build up), and a line+language is voiced once.
@@ -105,7 +106,7 @@ export interface RoomDubberOptions {
 }
 
 interface LangState { pending: number | null; busy: boolean; timer: ReturnType<typeof setTimeout> | null; done: number[] }
-interface RoomState { presenterAt: number; presenterKeys: Set<string>; langs: Map<string, LangState> }
+interface RoomState { presenterAt: Map<string, number>; presenterKeys: Set<string>; langs: Map<string, LangState> }
 
 /** Line ids remembered per language / presenter clips remembered per room (dedup only; old entries roll off). */
 const DONE_KEEP = 64;
@@ -123,18 +124,19 @@ export class RoomDubber {
 
   private state(code: string): RoomState {
     let s = this.rooms.get(code);
-    if (!s) { s = { presenterAt: -Infinity, presenterKeys: new Set(), langs: new Map() }; this.rooms.set(code, s); }
+    if (!s) { s = { presenterAt: new Map(), presenterKeys: new Set(), langs: new Map() }; this.rooms.set(code, s); }
     return s;
   }
 
-  private presenterActive(s: RoomState): boolean {
-    return this.opts.now() - s.presenterAt < this.opts.presenterQuietMs;
+  /** Whether the presenter sent a clip in `lang` within the quiet window (its own voice wins for that language). */
+  private presenterActive(s: RoomState, lang: string): boolean {
+    return this.opts.now() - (s.presenterAt.get(lang) ?? -Infinity) < this.opts.presenterQuietMs;
   }
 
-  /** The presenter published a clip: it wins over the server for that line and, for a while, for the whole room. */
+  /** The presenter published a clip: it wins over the server for that line and, for a while, for that language. */
   onPresenterClip(room: LiveRoom, lineId: number, lang: string): void {
     const s = this.state(room.meta.code);
-    s.presenterAt = this.opts.now();
+    s.presenterAt.set(lang, this.opts.now());
     s.presenterKeys.add(`${lineId}:${lang}`);
     if (s.presenterKeys.size > PRESENTER_KEYS_KEEP) s.presenterKeys.delete(s.presenterKeys.values().next().value!);
   }
@@ -142,7 +144,7 @@ export class RoomDubber {
   /** Whether a line+language should be voiced right now (every spending condition). */
   private eligible(room: LiveRoom, s: RoomState, lineId: number, lang: string): string | null {
     if (room.meta.ended || room.meta.serverDub === false) return null;
-    if (this.presenterActive(s) || s.presenterKeys.has(`${lineId}:${lang}`)) return null;
+    if (this.presenterActive(s, lang) || s.presenterKeys.has(`${lineId}:${lang}`)) return null;
     const at = room.index.get(lineId);
     const text = at === undefined ? '' : (room.lines[at]?.translations[lang] ?? '').trim();
     if (!text || !kokoroVoice(lang)) return null;
@@ -154,7 +156,6 @@ export class RoomDubber {
   onLine(room: LiveRoom, lineId: number): void {
     if (room.meta.serverDub === false || (this.opts.available && !this.opts.available())) return;
     const s = this.state(room.meta.code);
-    if (this.presenterActive(s)) return;
     const at = room.index.get(lineId);
     const line = at === undefined ? undefined : room.lines[at];
     if (!line) return;

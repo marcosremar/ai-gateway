@@ -86,7 +86,21 @@ describe('rooms server dubbing', () => {
     expect(synth).not.toHaveBeenCalled();
   });
 
-  it('skips a line the presenter voiced, and the whole room while the presenter sends clips', async () => {
+  it('keeps voicing the other languages while the presenter dubs one (desktop dubs en, the phone listens to fr)', async () => {
+    const r = await room(service);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    await service.publishLine(r, line(1));
+    service.publishAudio(r, { lineId: 1, lang: 'en', wav: 'AAAA' });
+    await vi.advanceTimersByTimeAsync(WAIT + 1);
+    await service.publishLine(r, line(2));
+    service.publishAudio(r, { lineId: 2, lang: 'en', wav: 'AAAA' });
+    await vi.advanceTimersByTimeAsync(WAIT + 1);
+    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1', 'fr'], ['bonjour 2', 'fr']]);
+    expect(audios(fr).map(a => a.lineId)).toEqual([1, 2]);
+  });
+
+  it('skips a line the presenter voiced, and that language while the presenter sends clips in it', async () => {
     const r = await room(service);
     const fr = viewer('fr');
     service.addViewer(r, fr);

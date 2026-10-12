@@ -41,8 +41,9 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
 - Spend only on demand: a line+language is synthesized only while at least one viewer has sent `listen` for that
   language (a viewer that never sent `listen` does not count) and the line has a non-empty translation for it.
 - The presenter wins: the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500) after a line, skips a line+language the
-  presenter sent a clip for (checked again before delivering), and leaves a room alone while its presenter sent any clip
-  in the last `ROOM_SERVER_DUB_PRESENTER_QUIET_MS` (60000).
+  presenter sent a clip for (checked again before delivering), and leaves a language alone while its presenter sent a clip in that language
+  in the last `ROOM_SERVER_DUB_PRESENTER_QUIET_MS` (60000). Other languages are still voiced: the desktop app dubs one
+  language while viewers may listen to another.
 - Bounded: per room and language one call in flight and one pending line; a newer line replaces an older pending one
   (stale lines are dropped), and each line+language is voiced once (later corrections of the same id are not re-voiced).
   Each attempt has `ROOM_DUB_ATTEMPT_TIMEOUT_MS` (8 s; the OpenRouter SDK client has no timeout of its own): a stuck or
@@ -67,6 +68,10 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   clicks), oldest pending clips dropped when more than 6 s is queued. While it is on, the live line switches to a line
   when its clip starts playing (a line without a clip within 4 s is shown anyway) and the delay indicator shows the
   voice delay ("voz 3,2 s" = delayMs + wait until the clip played). Indicator: neutral < 3 s, amber 3–6 s, red above.
+  Mobile unlock, inside the tap: `navigator.audioSession.type = 'playback'` and a silent `<audio>` played (otherwise the
+  iPhone ringer switch mutes Web Audio), the AudioContext created/resumed and a 1-sample buffer started. A context the
+  OS suspends (screen lock, call) is resumed by the next tap. The toggle shows its state under the label: desligada ·
+  carregando voz… · tocando · "toque aqui para ativar o som" · decode errors. `listen` is re-sent on every reconnect.
 - Every display setting is the viewer's own (gear → "Ajustes de exibição": bottom sheet on phones, popover from 768 px),
   kept in that browser's localStorage (`ucast-settings`; the language per room in `ucast-lang-<CODE>`): language, mode
   (Tradução / Só transcrição / Bilíngue / Só texto completo), original under the translation, dubbing on/off + volume +
