@@ -237,4 +237,14 @@ describe('adminTraffic', () => {
     expect(t.providers.map(p => p.key)).toEqual(['openrouter', 'deployment:speech-stack']);
     expect(t.activity).toEqual([{ at: new Date(now - 5 * 60_000).toISOString(), event: 'replica.ready', level: 'info', deployment: 'speech-stack', replicaId: 'r1' }]);
   });
+  it('names each app and says what it is for', () => {
+    const now = Date.parse('2026-10-13T10:00:00Z');
+    const snapshot = demoSnapshot(now, 'ok');
+    snapshot.apps.push({ id: 'ucast', profile: { requiresGpu: false, gpuDeployments: [], name: 'uCast', description: 'Podcasts <b>ao vivo</b>' }, status: null });
+    const html = renderStatus('n', snapshot, { now, csrf: 'c', actor: 'marcos', message: null, app: null });
+    expect(html).toContain('>Parle</a>');
+    expect(html).toContain('Tradução simultânea');
+    expect(html).toContain('>uCast</a></b> <span class="mono">ucast</span>');
+    expect(html).toContain('Podcasts &#60;b&#62;ao vivo&#60;/b&#62;');
+  });
 });

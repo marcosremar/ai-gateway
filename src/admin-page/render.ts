@@ -280,6 +280,21 @@ const MODE: Record<string, { level: Level; text: string }> = {
 };
 const limitText = (v: number | null | undefined) => (v ? count(v) : '∞');
 
+const KNOWN_APPS: Record<string, { name: string; description: string }> = {
+  parle: { name: 'Parle', description: 'Jogo de português: o aluno conversa por voz com os personagens (fala → texto, conversa, texto → fala).' },
+  babelcast: { name: 'Babelcast', description: 'Tradução simultânea: transcreve a fala ao vivo e a traduz em texto e voz.' },
+};
+
+function appCell(id: string, profile: AppProfile | null, needs: string): string {
+  const known = KNOWN_APPS[id];
+  const name = profile?.name || known?.name || id;
+  const description = profile?.description || known?.description;
+  return `<b><a href="/admin?app=${encodeURIComponent(id)}#apps">${esc(name)}</a></b>`
+    + (name !== id ? ` <span class="mono">${esc(id)}</span>` : '')
+    + `<small>${description ? esc(description) : 'sem descrição · defina em PUT /v1/apps/' + esc(id) + '/profile'}</small>`
+    + `<small>${esc(needs)}</small>`;
+}
+
 function apps({ s, app: filter }: Ctx): Section {
   const ids = [...new Set([...s.apps.map(a => a.id), ...s.appBudgets.map(b => b.app)])].filter(id => !filter || id === filter).sort();
   const rows = ids.map((id) => {
@@ -292,7 +307,7 @@ function apps({ s, app: filter }: Ctx): Section {
     const profile = app?.profile ? `${app.profile.requiresGpu ? 'precisa de GPU' : 'GPU opcional'}${app.profile.gpuDeployments.length ? ` (${app.profile.gpuDeployments.join(', ')})` : ''}` : 'sem perfil';
     const deps = app?.status?.deployments.map(d => `<span class="mono">${esc(d.name)}</span> ${esc(GPU_STATUS[d.state] ?? d.state)} ${d.replicas.ready}/${d.replicas.total}`).join('<br>');
     return { id, level, mode, cells: [
-      `<b><a href="/admin?app=${encodeURIComponent(id)}#apps">${esc(id)}</a></b><small>${esc(profile)}</small>`,
+      appCell(id, app?.profile ?? null, profile),
       pill(level, mode ? `servindo ${mode.text}` : LEVEL_TEXT[level]),
       deps || '—',
       budget ? `${count(budget.requests.used)}<small>de ${limitText(budget.requests.limit)}</small>${meter(budget.requests.used, budget.requests.limit, reqLevel)}` : '0',
