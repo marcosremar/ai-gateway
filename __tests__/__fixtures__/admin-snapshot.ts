@@ -61,6 +61,17 @@ export function demoSnapshot(now: number): AdminSnapshot {
       key('key-0f3a9c11d2e4', 'parle-dev', 'client', iso(now, 50), { countsAsUse: false, wakeDeployments: ['speech-stack-test'], gpuDailyEur: 3 }, 'agentes'),
       key('key-88b0aa31c7f0', 'babelcast', 'client', null, { neverWake: true }),
     ],
+    apps: [
+      {
+        id: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech-stack'] },
+        status: {
+          app: 'parle', requiresGpu: true, mode: 'gpu', checkedAt: iso(now, 1),
+          deployments: [{ name: 'speech-stack', stages: ['stt', 'llm', 'tts'], state: 'ready', replicas: { ready: 1, total: 1 }, lastProbe: { at: iso(now, 1), ok: true, ms: 420, error: null } }],
+          fallback: { active: false, since: null, last: null },
+        },
+      },
+      { id: 'babelcast', profile: null, status: null },
+    ],
     appBudgets: [
       { app: 'parle', resetAt: iso(now, -600), requests: { used: 1840, limit: 20000, perMinute: 3.1, exhaustedAt: null }, tokens: { used: 412000, limit: 5000000, perMinute: 700, exhaustedAt: null } },
     ],

@@ -580,6 +580,7 @@ createAdminPage({
     reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
     gpus: controller?.list() ?? null, gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
     machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
+    apps: deployments?.apps.list().map(({ id }) => ({ id, profile: deployments.apps.get(id)?.profile ?? null, status: deployments.gpuHealth.status(id) })) ?? [],
   }),
   park: async (name) => { if (!controller) throw new Error('deployments desligados'); await controller.park(name); },
   probe: () => fallbackProbe.check(),

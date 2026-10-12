@@ -7,13 +7,17 @@ import { RateLimiter } from '../gateway/proxy/middleware/rate-limit';
 import { redact } from '../telemetry/alert-email';
 import { renderLogin, renderStatus, type AdminAlert, type AdminSnapshot } from './render';
 
-export type { AdminAlert, AdminSnapshot } from './render';
+export type { AdminAlert, AdminApp, AdminSnapshot } from './render';
+
+export const ADMIN_ANCHORS = ['reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps'] as const;
 
 const ADMIN_SESSION_MS = 12 * 3_600_000;
 export const ADMIN_COOKIE = '__Host-aigw_admin';
 const LOGIN_LIMIT = { limit: 10, windowMs: 15 * 60_000 };
 const BODY_MAX = 4096;
 const ALERTS_KEPT = 50;
+const APP_FILTER = /^[A-Za-z0-9._-]{1,64}$/;
+const NEXT = /^\/admin(\?app=[A-Za-z0-9._-]{1,64})?(#[a-z]{1,16})?$/;
 
 export interface AdminPageOptions {
   actorOf: (key: string) => string | null;
@@ -114,63 +118,81 @@ export function createAdminPage(opts: AdminPageOptions) {
       html(res, 429, n => renderLogin(n, 'Muitas tentativas. Aguarde 15 minutos.'));
       return;
     }
-    const key = (await readForm(req))?.get('key')?.trim() ?? '';
+    const form = await readForm(req);
+    const key = form?.get('key')?.trim() ?? '';
+    const next = form?.get('next') ?? '';
     const actor = key ? opts.actorOf(key) : null;
     if (!actor) {
-      html(res, 401, n => renderLogin(n, 'Chave recusada: só uma chave admin entra.'));
+      html(res, 401, n => renderLogin(n, 'Chave recusada: só uma chave admin entra.', NEXT.test(next) ? next.replace(/#.*/, '') : '/admin'));
       return;
     }
     const token = randomBytes(32).toString('hex');
     sessions.set(token, { actor, csrf: randomBytes(32).toString('hex'), expiresAt: now() + ADMIN_SESSION_MS });
     opts.audit?.({ actor, action: 'admin-page.login', names: [], ok: true });
-    redirect(res, '/admin', { 'Set-Cookie': cookie(token, ADMIN_SESSION_MS / 1000) });
+    redirect(res, NEXT.test(next) ? next : '/admin', { 'Set-Cookie': cookie(token, ADMIN_SESSION_MS / 1000) });
   }
 
-  async function action(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
-    const found = sessionOf(req);
-    const form = await readForm(req);
-    if (!found || isCrossSite(req) || !sameToken(form?.get('csrf'), found.session.csrf)) {
-      html(res, 403, n => renderLogin(n, 'Sessão expirada ou pedido sem o token desta página. Entre de novo.'));
-      return;
-    }
-    const { actor } = found.session;
-    if (path === '/admin/logout') {
-      sessions.delete(found.token);
-      redirect(res, '/admin', { 'Set-Cookie': cookie('', 0) });
-      return;
-    }
-    if (path === '/admin/probe') {
-      opts.audit?.({ actor, action: 'admin-page.probe', names: [], ok: true });
-      void opts.probe().catch(() => {});
-      redirect(res, `/admin?msg=${encodeURIComponent('Teste das reservas iniciado; recarregue em 30 s.')}`);
-      return;
-    }
-    const name = form?.get('name') ?? '';
+  type Signed = { token: string; actor: string; form: URLSearchParams };
+
+  function guarded(run: (res: ServerResponse, signed: Signed) => void | Promise<void>) {
+    return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      const found = sessionOf(req);
+      const form = await readForm(req);
+      if (!found || !form || isCrossSite(req) || !sameToken(form.get('csrf'), found.session.csrf)) {
+        html(res, 403, n => renderLogin(n, 'Sessão expirada ou pedido sem o token desta página. Entre de novo.'));
+        return;
+      }
+      await run(res, { token: found.token, actor: found.session.actor, form });
+    };
+  }
+
+  const logout = guarded((res, { token }) => {
+    sessions.delete(token);
+    redirect(res, '/admin', { 'Set-Cookie': cookie('', 0) });
+  });
+
+  const probe = guarded((res, { actor }) => {
+    opts.audit?.({ actor, action: 'admin-page.probe', names: [], ok: true });
+    void opts.probe().catch(() => {});
+    redirect(res, `/admin?msg=${encodeURIComponent('Teste das reservas iniciado; recarregue em 30 s.')}#reservas`);
+  });
+
+  const park = guarded(async (res, { actor, form }) => {
+    const name = form.get('name') ?? '';
     const parked = await opts.park(name).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
     opts.audit?.({ actor, action: 'admin-page.park', names: [name], ok: !parked, ...(parked ? { detail: parked } : {}) });
-    redirect(res, `/admin?msg=${encodeURIComponent(parked ? `Falhou ao estacionar ${name}: ${parked}` : `${name} estacionada.`)}`);
-  }
+    redirect(res, `/admin?msg=${encodeURIComponent(parked ? `Falhou ao estacionar ${name}: ${parked}` : `${name} estacionada.`)}#gpus`);
+  });
 
   function status(req: IncomingMessage, res: ServerResponse): void {
+    const query = new URL(req.url ?? '/', 'http://x').searchParams;
+    const app = query.get('app');
+    const appFilter = app && APP_FILTER.test(app) ? app : null;
     const found = sessionOf(req);
     if (!found) {
-      html(res, 200, n => renderLogin(n, null));
+      html(res, 200, n => renderLogin(n, null, appFilter ? `/admin?app=${appFilter}` : '/admin'));
       return;
     }
-    const message = new URL(req.url ?? '/', 'http://x').searchParams.get('msg');
+    const message = query.get('msg');
     const snapshot = opts.snapshot();
-    html(res, 200, n => renderStatus(n, snapshot, { now: now(), csrf: found.session.csrf, actor: found.session.actor, message }));
+    html(res, 200, n => renderStatus(n, snapshot, { now: now(), csrf: found.session.csrf, actor: found.session.actor, message, app: appFilter }));
   }
+
+  const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([
+    ['GET /admin', status], ['POST /admin/login', login],
+    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/probe', probe],
+  ]);
 
   function handle(req: IncomingMessage, res: ServerResponse): boolean {
     const path = (req.url ?? '/').split('?')[0].replace(/\/$/, '');
     if (path !== '/admin' && !path.startsWith('/admin/')) return false;
-    const route = `${req.method} ${path}`;
-    const done = (p: Promise<void>) => void p.catch(() => { if (!res.headersSent) html(res, 500, n => renderLogin(n, 'Erro interno.')); });
-    if (route === 'GET /admin') status(req, res);
-    else if (route === 'POST /admin/login') done(login(req, res));
-    else if (req.method === 'POST' && ['/admin/logout', '/admin/park', '/admin/probe'].includes(path)) done(action(req, res, path));
-    else redirect(res, '/admin');
+    const handler = routes.get(`${req.method} ${path}`);
+    if (!handler) {
+      req.resume();
+      redirect(res, '/admin');
+      return true;
+    }
+    void Promise.resolve(handler(req, res)).catch(() => { if (!res.headersSent) html(res, 500, n => renderLogin(n, 'Erro interno.')); });
     return true;
   }
 

@@ -3,11 +3,15 @@ import type { BalanceReading } from '../telemetry/balance-watch';
 import type { CreditIssue, DeploymentView } from '../deployments/types';
 import type { KeyView } from '../config/access-keys';
 import type { AppBudgetView } from '../gateway/proxy/app-limits';
+import type { AppProfile } from '../deployments/apps';
+import type { AppStatus } from '../deployments/app-gpu-health';
 import { activeWindow } from '../deployments/autoscale';
 
 type Level = 'ok' | 'warn' | 'bad';
 
 export interface AdminAlert { event: string; at: string; summary: string }
+
+export interface AdminApp { id: string; profile: AppProfile | null; status: AppStatus | null }
 
 interface MachineCosts {
   global?: { dayUsd: number; committedUsd: number; capDayUsd: number };
@@ -23,6 +27,7 @@ export interface AdminSnapshot {
   alerts: AdminAlert[];
   machines: MachineCosts | null;
   keys: KeyView[];
+  apps: AdminApp[];
   appBudgets: AppBudgetView[];
 }
 
@@ -66,7 +71,7 @@ function reserves(s: AdminSnapshot, now: number, csrf: string): Section {
   const empty = 'Nenhuma reserva testada ainda (o teste roda 30 s depois do boot e a cada '
     + `${s.reserves.intervalMinutes} min).`;
   return {
-    id: 'reserves', title: 'Reservas', level, checkedAt: latest(links.map(r => r.checkedAt)),
+    id: 'reservas', title: 'Reservas', level, checkedAt: latest(links.map(r => r.checkedAt)),
     body: list(items, empty) + form('/admin/probe', csrf, 'Testar as reservas agora', 'Testar todas as reservas agora? Cada uma recebe um pedido mínimo real.'),
   };
 }
@@ -81,7 +86,7 @@ function balances(s: AdminSnapshot, now: number): Section {
   ].filter(Boolean).join(' · ')));
   const credit = s.providerCredit.map(c => row('bad', `${c.provider}: crédito`, `${esc(c.message)} · saldo ${money(c.balanceUsd, 'US$')}, piso ${money(c.floorUsd, 'US$')}`));
   return {
-    id: 'balances', title: 'Saldos', checkedAt: latest(s.balances.map(r => r.checkedAt)),
+    id: 'saldos', title: 'Saldos', checkedAt: latest(s.balances.map(r => r.checkedAt)),
     level: worst([...s.balances.map(levelOf), ...(credit.length ? ['bad' as Level] : [])]),
     body: list([...items, ...credit], 'Nenhum saldo lido ainda.'),
   };
@@ -114,18 +119,18 @@ function gpus(s: AdminSnapshot, now: number, csrf: string): Section {
 function alerts(s: AdminSnapshot, now: number): Section {
   const fresh = s.alerts.filter(a => now - Date.parse(a.at) < ALERT_FRESH_MS);
   const items = s.alerts.slice(0, 15).map(a => row(now - Date.parse(a.at) < ALERT_FRESH_MS ? 'warn' : 'ok', a.event, `${esc(clock(a.at, now))} · ${esc(a.summary)}`));
-  return { id: 'alerts', title: 'Avisos e alertas', level: fresh.length ? 'warn' : 'ok', checkedAt: s.alerts[0]?.at ?? null, body: list(items, 'Nenhum alerta desde o boot.') };
+  return { id: 'alertas', title: 'Avisos e alertas', level: fresh.length ? 'warn' : 'ok', checkedAt: s.alerts[0]?.at ?? null, body: list(items, 'Nenhum alerta desde o boot.') };
 }
 
 function machines(s: AdminSnapshot): Section {
-  if (!s.machines) return { id: 'machines', title: 'Máquinas avulsas', level: 'ok', checkedAt: null, body: '<p class="muted">Máquinas desligadas neste gateway.</p>' };
+  if (!s.machines) return { id: 'maquinas', title: 'Máquinas avulsas', level: 'ok', checkedAt: null, body: '<p class="muted">Máquinas desligadas neste gateway.</p>' };
   const live = s.machines.machines.filter(m => m.status === 'creating' || m.status === 'running');
   const g = s.machines.global;
   const level = g ? ratioLevel(g.dayUsd, g.capDayUsd) : 'ok';
   const items = live.map(m => row('ok', `${m.id} · ${m.owner}${m.holder ? ` / ${m.holder}` : ''}`,
     esc(`${m.provider ?? '?'} · ${m.status} · ${money(m.usdPerHour, 'US$')}/h · gasto ${money(m.costUsd, 'US$')}`)));
   const day = g ? `<p>Gasto em 24 h: <b>${money(g.dayUsd, 'US$')}</b> de ${money(g.capDayUsd, 'US$')} (comprometido ${money(g.committedUsd, 'US$')})</p>` : '';
-  return { id: 'machines', title: 'Máquinas avulsas', level, checkedAt: null, body: day + list(items, 'Nenhuma máquina ligada.') };
+  return { id: 'maquinas', title: 'Máquinas avulsas', level, checkedAt: null, body: day + list(items, 'Nenhuma máquina ligada.') };
 }
 
 function keys(s: AdminSnapshot, now: number): Section {
@@ -141,30 +146,52 @@ function keys(s: AdminSnapshot, now: number): Section {
     return row('ok', `${k.user}${k.label ? ` (${k.label})` : ''}`,
       `<span class="tag">${esc(k.role)}</span> ${k.source === 'env' ? 'variável' : 'emitida'} · ${esc(policy)} · último uso ${esc(clock(k.lastUsedAt, now))}`);
   });
-  return { id: 'keys', title: 'Chaves', level: 'ok', checkedAt: null, body: list(items, 'Nenhuma chave ativa.') };
-}
-
-function budgets(s: AdminSnapshot): Section {
-  const levels: Level[] = [];
-  const apps = s.appBudgets.map((b) => {
-    const level = worst([ratioLevel(b.requests.used, b.requests.limit), ratioLevel(b.tokens.used, b.tokens.limit)]);
-    levels.push(level);
-    return row(level, `app ${b.app}`, esc(`pedidos ${b.requests.used}/${b.requests.limit || '∞'} · tokens ${b.tokens.used}/${b.tokens.limit || '∞'}${
-      b.requests.exhaustedAt || b.tokens.exhaustedAt ? ' · esgota hoje' : ''}`));
-  });
   const byId = new Map(s.keys.map(k => [k.id, k]));
+  const levels: Level[] = [];
   const gpu = Object.entries(s.gpuSpend?.spentEur ?? {}).map(([id, eur]) => {
     const k = byId.get(id);
     const cap = k?.policy.gpuDailyEur ?? null;
     const level = ratioLevel(eur, cap);
     levels.push(level);
-    return row(level, `GPU da chave ${k ? `${k.user}${k.label ? ` (${k.label})` : ''}` : 'removida'}`, esc(`${money(eur)} hoje de ${money(cap)}`));
+    return row(level, `GPU hoje: ${k ? `${k.user}${k.label ? ` (${k.label})` : ''}` : 'chave removida'}`, esc(`${money(eur)} de ${money(cap)}`));
   });
-  return { id: 'budgets', title: 'Orçamentos', level: worst(levels), checkedAt: null, body: list([...apps, ...gpu], 'Nenhum gasto de app ou chave hoje.') };
+  return { id: 'chaves', title: 'Chaves', level: worst(levels), checkedAt: null, body: list([...items, ...gpu], 'Nenhuma chave ativa.') };
 }
 
-function sections(s: AdminSnapshot, now: number, csrf: string): Section[] {
-  return [reserves(s, now, csrf), balances(s, now), gpus(s, now, csrf), alerts(s, now), machines(s), keys(s, now), budgets(s)];
+const MODE: Record<string, { level: Level; text: string }> = {
+  gpu: { level: 'ok', text: 'na GPU' }, degraded: { level: 'warn', text: 'na reserva de nuvem' }, down: { level: 'bad', text: 'fora do ar' },
+};
+
+function apps(s: AdminSnapshot, filter: string | null): Section {
+  const ids = [...new Set([...s.apps.map(a => a.id), ...s.appBudgets.map(b => b.app)])].filter(id => !filter || id === filter).sort();
+  const levels: Level[] = [];
+  const items = ids.map((id) => {
+    const app = s.apps.find(a => a.id === id);
+    const budget = s.appBudgets.find(b => b.app === id);
+    const mode = app?.status ? MODE[app.status.mode] : null;
+    const level = worst([
+      mode?.level ?? 'ok',
+      budget ? ratioLevel(budget.requests.used, budget.requests.limit) : 'ok',
+      budget ? ratioLevel(budget.tokens.used, budget.tokens.limit) : 'ok',
+    ]);
+    levels.push(level);
+    const profile = app?.profile
+      ? `${app.profile.requiresGpu ? 'precisa de GPU' : 'GPU opcional'}${app.profile.gpuDeployments.length ? ` (${app.profile.gpuDeployments.join(', ')})` : ''}`
+      : 'sem perfil';
+    const use = budget
+      ? `hoje: pedidos ${budget.requests.used}/${budget.requests.limit || '∞'} · tokens ${budget.tokens.used}/${budget.tokens.limit || '∞'}${
+        budget.requests.exhaustedAt || budget.tokens.exhaustedAt ? ' · esgota hoje' : ''}`
+      : 'nenhum pedido hoje';
+    const gpus = app?.status?.deployments.map(d => `${d.name} ${d.state} ${d.replicas.ready}/${d.replicas.total}`).join(', ');
+    return `<li>${dot(level)}<div><b><a href="/admin?app=${encodeURIComponent(id)}#apps">${esc(id)}</a></b><small>${esc(
+      [profile, mode ? `servindo ${mode.text}` : '', gpus ?? '', use].filter(Boolean).join(' · '))}</small></div></li>`;
+  });
+  const head = filter ? `<p class="muted">Só o app <b>${esc(filter)}</b> · <a href="/admin#apps">ver todos</a></p>` : '';
+  return { id: 'apps', title: 'Apps', level: worst(levels), checkedAt: null, body: head + list(items, filter ? 'Nenhum app com esse nome.' : 'Nenhum app registrado.') };
+}
+
+function sections(s: AdminSnapshot, now: number, csrf: string, app: string | null): Section[] {
+  return [reserves(s, now, csrf), balances(s, now), gpus(s, now, csrf), alerts(s, now), machines(s), keys(s, now), apps(s, app)];
 }
 
 const HEADLINE: Record<Level, string> = { ok: 'Tudo funcionando', warn: 'Funcionando, com avisos', bad: 'Algo está fora do ar' };
@@ -185,10 +212,10 @@ button{min-height:44px;margin-top:8px;padding:0 14px;border-radius:10px;border:1
 input[type=password]{width:100%;min-height:44px;padding:0 12px;border-radius:10px;border:1px solid var(--line);background:#2c2c33;color:var(--text);font:inherit}
 .bar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}.bar form button{margin:0}
 .msg{padding:10px 14px;border-radius:10px;background:#2c2c33;margin-bottom:12px}nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
-nav a{color:var(--text);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:13px;display:flex;gap:6px;align-items:center}
+a{color:var(--text)}nav a{color:var(--text);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:13px;display:flex;gap:6px;align-items:center}
 nav .dot{margin:0;width:9px;height:9px}`;
 
-const CONFIRM_JS = `document.querySelectorAll('form[data-confirm]').forEach(function(f){f.addEventListener('submit',function(e){if(!confirm(f.dataset.confirm))e.preventDefault()})})`;
+const CONFIRM_JS = `var l=document.getElementById('login');if(l)l.addEventListener('submit',function(){l.next.value+=location.hash});document.querySelectorAll('form[data-confirm]').forEach(function(f){f.addEventListener('submit',function(e){if(!confirm(f.dataset.confirm))e.preventDefault()})})`;
 
 function page(nonce: string, title: string, body: string, refresh = false): string {
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${
@@ -196,14 +223,14 @@ function page(nonce: string, title: string, body: string, refresh = false): stri
     + `<script nonce="${nonce}">${CONFIRM_JS}</script></body></html>`;
 }
 
-export function renderLogin(nonce: string, error: string | null): string {
+export function renderLogin(nonce: string, error: string | null, next = '/admin'): string {
   return page(nonce, 'ai-gateway · entrar', `<h1>ai-gateway · admin</h1><p class="muted">Cole a chave admin uma vez; a sessão dura 12 h neste aparelho.</p>${
-    error ? `<p class="msg">${esc(error)}</p>` : ''}<section><form method="post" action="/admin/login"><label for="key">Chave admin</label>`
+    error ? `<p class="msg">${esc(error)}</p>` : ''}<section><form method="post" action="/admin/login" id="login"><input type="hidden" name="next" value="${esc(next)}"><label for="key">Chave admin</label>`
     + '<input id="key" name="key" type="password" autocomplete="current-password" required autofocus><button>Entrar</button></form></section>');
 }
 
-export function renderStatus(nonce: string, s: AdminSnapshot, opts: { now: number; csrf: string; actor: string; message: string | null }): string {
-  const all = sections(s, opts.now, opts.csrf);
+export function renderStatus(nonce: string, s: AdminSnapshot, opts: { now: number; csrf: string; actor: string; message: string | null; app: string | null }): string {
+  const all = sections(s, opts.now, opts.csrf, opts.app);
   const overall = worst(all.map(x => x.level));
   const nav = all.map(x => `<a href="#${x.id}">${dot(x.level)}${esc(x.title)}</a>`).join('');
   const body = all.map(x => `<section id="${x.id}"><div class="head"><h2>${dot(x.level)}${esc(x.title)}</h2>${

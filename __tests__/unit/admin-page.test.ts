@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
 import { AccessKeys } from '../../src/config/access-keys';
-import { ADMIN_COOKIE, createAdminPage } from '../../src/admin-page';
+import { ADMIN_ANCHORS, ADMIN_COOKIE, createAdminPage } from '../../src/admin-page';
 import { demoSnapshot } from '../__fixtures__/admin-snapshot';
 
 const ADMIN_KEY = 'gw_admin_0123456789abcdef0123';
@@ -47,8 +47,8 @@ async function gateway() {
     method: 'POST', body: new URLSearchParams(fields).toString(), cookie,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Sec-Fetch-Site': 'same-origin', ...headers },
   });
-  async function login(key = ADMIN_KEY) {
-    const res = await post('/admin/login', { key });
+  async function login(key = ADMIN_KEY, next?: string) {
+    const res = await post('/admin/login', { key, ...(next ? { next } : {}) });
     const setCookie = res.headers.get('set-cookie') ?? '';
     return { res, setCookie, cookie: setCookie.split(';')[0] };
   }
@@ -89,10 +89,40 @@ describe('admin page (/admin)', () => {
     expect(res.headers.get('location')).toBe('/admin');
     expect(setCookie).toMatch(new RegExp(`^${ADMIN_COOKIE}=[a-f0-9]{64}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200$`));
     const { html } = await gw.signedIn();
-    for (const title of ['Reservas', 'Saldos', 'GPUs', 'Avisos e alertas', 'Máquinas avulsas', 'Chaves', 'Orçamentos']) expect(html).toContain(title);
+    for (const title of ['Reservas', 'Saldos', 'GPUs', 'Avisos e alertas', 'Máquinas avulsas', 'Chaves', 'Apps']) expect(html).toContain(title);
     expect(html).toContain('fora da janela de aula');
     expect(gw.audit.some(e => e.action === 'admin-page.login' && e.actor === 'marcos')).toBe(true);
     expect(JSON.stringify(gw.audit)).not.toContain(ADMIN_KEY);
+  });
+
+  it('gives every section its stable anchor', async () => {
+    const gw = await gateway();
+    const { html } = await gw.signedIn();
+    for (const id of ADMIN_ANCHORS) {
+      expect(html).toContain(`<section id="${id}">`);
+      expect(html).toContain(`href="#${id}"`);
+    }
+  });
+
+  it('filters the apps section by ?app=', async () => {
+    const gw = await gateway();
+    const { cookie } = await gw.login();
+    const html = await (await gw.call('/admin?app=parle', { cookie })).text();
+    const apps = html.slice(html.indexOf('<section id="apps">'));
+    expect(apps).toContain('precisa de GPU (speech-stack)');
+    expect(apps).not.toContain('babelcast');
+    expect(await (await gw.call('/admin', { cookie })).text()).toMatch(/<section id="apps">[\s\S]*babelcast/);
+  });
+
+  it('after login goes back to the URL and anchor it was opened with', async () => {
+    const gw = await gateway();
+    const form = await (await gw.call('/admin?app=parle')).text();
+    expect(form).toContain('name="next" value="/admin?app=parle"');
+    expect((await gw.login(ADMIN_KEY, '/admin?app=parle#apps')).res.headers.get('location')).toBe('/admin?app=parle#apps');
+    expect((await gw.login(ADMIN_KEY, '/admin#gpus')).res.headers.get('location')).toBe('/admin#gpus');
+    for (const evil of ['https://evil.example/admin', '//evil.example', '/admin/../v1', '/admin?app=x"><script>']) {
+      expect((await gw.login(ADMIN_KEY, evil)).res.headers.get('location')).toBe('/admin');
+    }
   });
 
   it('expires the session after 12 h', async () => {
@@ -126,6 +156,7 @@ describe('admin page (/admin)', () => {
     const { cookie, csrf } = await gw.signedIn();
     const res = await gw.post('/admin/park', { name: 'speech-stack', csrf }, cookie);
     expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toMatch(/#gpus$/);
     expect(gw.parked).toEqual(['speech-stack']);
     expect((await gw.post('/admin/probe', { csrf }, cookie)).status).toBe(303);
     expect(gw.probes()).toBe(1);
