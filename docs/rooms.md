@@ -45,7 +45,10 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   in the last `ROOM_SERVER_DUB_PRESENTER_QUIET_MS` (60000).
 - Bounded: per room and language one call in flight and one pending line; a newer line replaces an older pending one
   (stale lines are dropped), and each line+language is voiced once (later corrections of the same id are not re-voiced).
-  Failures are logged, never surface to the publisher.
+  Each attempt has `ROOM_DUB_ATTEMPT_TIMEOUT_MS` (8 s; the OpenRouter SDK client has no timeout of its own): a stuck or
+  failed Kokoro call is aborted and the line goes to MAI-Voice 2.1 Flash (`microsoft/mai-voice-2.1-flash`; en
+  `en-US-Harper`, fr `fr-FR-Soleil`, pt `pt-BR-Luana`; other languages have no fallback), so a language is held at most
+  ~16 s. Failures are logged, never surface to the publisher.
 - Server clips go out as `{"type":"audio","lineId","lang","wav":"<base64 mp3>","format":"mp3"}` (`wav` keeps its name;
   `format` is additive, absent = WAV) to the viewers listening to that language only.
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
