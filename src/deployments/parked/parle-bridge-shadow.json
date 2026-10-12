@@ -1,7 +1,7 @@
 {
   "name": "parle-bridge-shadow",
   "app": "parle",
-  "description": "parle: the audio bridge `conv` (Qwen3.5-9B Q4_K_M + the 1j conv mmproj, llama.cpp b11382 with the mel-trim patch) in SHADOW mode: it hears the same student audio as the real turn and its answer is only recorded, never heard or seen; one Vast RTX 3090 (then 4090), warm only Mon-Thu 17:30-20:30 Paris, deleted after 10 min idle; no cloud fallback on purpose (a missing shadow answer is recorded as such)",
+  "description": "parle: the audio bridge `conv` (Qwen3.5-9B Q4_K_M + the 1j conv mmproj, llama.cpp b11382 with the mel-trim patch) in SHADOW mode: it hears the same student audio as the real turn and its answer is only recorded, never heard or seen; one Vast RTX 3090 (then 4090), deleted after 10 min idle; PARKED (owner, 12/10/2026): not declared, no warm window; no cloud fallback on purpose (a missing shadow answer is recorded as such)",
   "image": {
     "default": "nvidia/cuda:12.8.1-devel-ubuntu24.04"
   },
@@ -38,20 +38,6 @@
     "maxReplicas": 1,
     "idleMinutes": 10,
     "idleAction": "delete",
-    "warmSchedule": [
-      {
-        "days": [
-          1,
-          2,
-          3,
-          4
-        ],
-        "start": "17:30",
-        "end": "20:30",
-        "timeZone": "Europe/Paris",
-        "minReplicas": 1
-      }
-    ],
     "scaling": {
       "budget": {
         "eurPerMonth": 25

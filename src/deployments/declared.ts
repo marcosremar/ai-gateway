@@ -30,8 +30,6 @@
 import { randomBytes } from 'crypto';
 import babelcastSpeech from './declared/babelcast-speech.json';
 import babelcastTts from './declared/babelcast-tts.json';
-import parleBridgeShadow from './declared/parle-bridge-shadow.json';
-import parleBridgeShadowTest from './declared/parle-bridge-shadow-test.json';
 import parleLivekit from './declared/parle-livekit.json';
 import parleQwenTts from './declared/parle-qwen-tts.json';
 import parleSpeech from './declared/parle-speech.json';
@@ -61,7 +59,7 @@ export interface DeclaredDeployment {
  * `babelcast-speech` and `babelcast-tts` own only their app (`babelcast`): no spec field, no machine.
  */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
-  parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit, parleBridgeShadow, parleBridgeShadowTest,
+  parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit,
   babelcastSpeech, babelcastTts,
 ] as DeclaredDeployment[];
 
