@@ -49,6 +49,7 @@ import { createWebhookDelivery } from './src/webhooks';
 import { createOpsAlerts } from './src/telemetry/ops-alerts';
 import { alertEmailFromEnv, createAlertMailer, opsAlertMail, secretValues } from './src/telemetry/alert-email';
 import { createBalanceWatch } from './src/telemetry/balance-watch';
+import { createFallbackProbe, fallbackLinks } from './src/telemetry/fallback-probe';
 import { applySandboxCache, gatewayClientKeys, principalSandboxToken, SANDBOX_USER, saveSandboxCache } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
@@ -172,6 +173,8 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
 });
 const deployments = configuredDeployments && await configuredDeployments.controller.init()
   .then(() => configuredDeployments.apps.init())
+  .then(() => configuredDeployments.apps.ensureCloudFallback())
+  .then((added) => { if (added.length) log.warn({ added }, 'apps: cloud fallback appended to stored chains that had none (owner decision 2026-10-12)'); })
   .then(() => configuredDeployments.clientGpu.load())
   .then(() => configuredDeployments, (err: unknown) => {
     configuredDeployments.stopJanitor?.();
@@ -282,6 +285,15 @@ function mountProviders() {
 }
 const providers = mountProviders();
 remount = () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>);
+
+// Every cloud link of the alias chains gets a minimal real request at boot and every 15 min (never a deployment).
+const fallbackProbe = createFallbackProbe({
+  env: process.env,
+  links: () => fallbackLinks(chains, providers),
+  onResults: (results) => opsAlerts.fromFallbackProbes(results),
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+fallbackProbe.start();
 
 const chainsNow = () => stageChainsReport(chains, {
   ...(controller ? {
@@ -521,7 +533,7 @@ const server = await startProxy({
   ...(accounts ? { onInference: accounts.recordInference } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
-    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [], clientGpu: deployments?.clientGpu.report() ?? null }
+    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), fallbackProbe: fallbackProbe.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [], clientGpu: deployments?.clientGpu.report() ?? null }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [], clientGpu: deployments?.clientGpu.report(viewer.userId) ?? null }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
@@ -573,6 +585,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     declared?.stop();
     deployments?.clientGpu.stop();
     balanceWatch.stop();
+    fallbackProbe.stop();
     keyManager.stop();
     void access.stop();
     void keyAudit.flush();

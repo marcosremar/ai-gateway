@@ -214,6 +214,7 @@ export interface DeploymentRoutesOptions {
   devices?: AppDevices;
   clientGpu?: ClientGpu;
   keyOf?: (req: IncomingMessage) => { keyId: string; user: string; app: string; policy: GpuPolicy } | null;
+  log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
@@ -280,10 +281,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       if (method === 'GET') return send(res, 200, { app, routes: registry.get(app)?.routes ?? {} });
       if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
       // An admin sets any route; the app's own key only reorders/re-aliases what it already has, plus its own deployments.
-      const routes = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? {}
+      const { routes, cloudFallbackAdded } = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? {}
         : { restrictedTo: (deployment) => controller.get(deployment)?.app === app });
+      if (cloudFallbackAdded.length) opts.log?.('apps: cloud fallback appended to chains that had none', { app, added: cloudFallbackAdded });
       opts.onRoutesChange?.();
-      return send(res, 200, { app, routes });
+      return send(res, 200, { app, routes, ...(cloudFallbackAdded.length ? { cloudFallbackAdded } : {}) });
     }
     if (sub === 'limits' && !imageName) {
       if (method === 'GET') return send(res, 200, { app, limits: registry.get(app)?.limits ?? {} });
