@@ -228,6 +228,8 @@ ai-gateway server start/stop/status      # Manage local dev server
 
 ### 8. Admin/Web UI (Next.js)
 
+- **`GET /admin` — «is everything working?»** (`src/admin-page/`, screenshots `docs/admin-status-iphone.jpg`, `docs/admin-apps-filter-iphone.jpg`): served by the gateway itself, server-rendered, no framework, mobile first. Login pastes the admin key once → in-memory session, cookie `__Host-aigw_admin` (`HttpOnly; Secure; SameSite=Strict`, 12 h); every POST (park, rerun the reserve probe, sign out) needs the page's CSRF token and a same-origin request. Stable section anchors (linked from the parle portal, `ADMIN_ANCHORS`): `#reservas`, `#saldos`, `#gpus` (outside the class window), `#alertas`, `#maquinas`, `#chaves` (role, policy, last use, GPU €/day — never the value), `#apps` (profile, mode, daily budget; `/admin?app=<app>#apps` filters one app). Signing in returns to the URL and anchor the page was opened with (`next`, only `/admin[?app=…][#…]`). API clients keep the `Authorization` header. Local demo with simulated state: `ADMIN_DEMO_KEY=… bun scripts/admin-page-demo.ts`.
+
 - **Overview Section**: System status, connections, uptime
 - **Pipeline Health Card**: STT/LLM/TTS component status
 - **GPU Live Status**: Real-time GPU deployment status with warmth indicators
