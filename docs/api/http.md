@@ -440,6 +440,7 @@ Every successful response of the three routes carries (no secrets):
 | `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
 | `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `policy`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
+| `X-Gateway-Status` | `degraded` | only for an app whose profile has `requiresGpu` (below, *App profile and GPU status*), when a cloud target answered: the answer is valid, but not what the app's GPU would have given |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
 A deployment target streams too: the gateway asks the replica for `stream: true` and relays each delta as it arrives
@@ -748,12 +749,59 @@ for a cold start.
 | `GET` / `PUT` | `/v1/apps/:app/routes` | the app's aliases (see *App aliases* above) |
 | `GET` | `/v1/apps/:app/images` | the app's saved images |
 | `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` / `PUT` | `/v1/apps/:app/profile` | `{ requiresGpu, gpuDeployments }` (below); `PUT` by an admin, or by the app's own key naming only its own deployments |
+| `GET` | `/v1/apps/:app/status` | GPU status of the app's profile (below); `404` without a profile |
 | `GET` | `/v1/apps/:app/fallback` | direct-fallback plan (below) |
 | `POST` / `GET` | `/v1/apps/:app/stability-report` | SDK instability reports (below) |
 | `PATCH` | `/v1/apps/:app` | `{ "requireDevice": boolean }` (see *App devices*) |
 | `GET` / `POST` / `DELETE` | `/v1/apps/:app/devices`, `…/devices/:device/block` | the app's end-user devices: list, block, unblock (see *App devices*) |
 
 Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
+
+### App profile and GPU status — `/v1/apps/:app/profile`, `/v1/apps/:app/status`
+
+An app whose answers depend on its own GPU (parle: the detected language and the cloned voices only come from
+`parle-speech` / `parle-qwen-tts`) says so in its profile; the gateway then probes those GPUs and reports, per app,
+whether it is served by them.
+
+```bash
+curl -X PUT $GW/v1/apps/parle/profile -H "Authorization: Bearer $PARLE_KEY" -H 'content-type: application/json' \
+  -d '{"requiresGpu": true, "gpuDeployments": ["parle-speech", "parle-qwen-tts"]}'
+# → { app, profile, warnings? }  warnings: a deployment not registered, or without a warmSchedule
+curl $GW/v1/apps/parle/status -H "Authorization: Bearer $PARLE_KEY"
+```
+
+```json
+{ "app": "parle", "requiresGpu": true, "mode": "gpu", "checkedAt": "2026-10-13T16:01:00.000Z",
+  "deployments": [
+    { "name": "parle-speech", "stages": ["stt", "llm"], "state": "ready", "replicas": { "ready": 1, "total": 1 },
+      "lastProbe": { "at": "2026-10-13T16:00:12.000Z", "ok": true, "ms": 840, "error": null } },
+    { "name": "parle-qwen-tts", "stages": ["tts"], "state": "ready", "replicas": { "ready": 2, "total": 2 },
+      "lastProbe": { "at": "2026-10-13T16:00:40.000Z", "ok": true, "ms": 610, "error": null } } ],
+  "fallback": { "active": false, "since": null, "last": null } }
+```
+
+| Field | |
+|---|---|
+| `mode` | `gpu`: every profile deployment has a ready replica whose last probe passed and no stage was answered by the cloud in the last 5 min · `degraded`: anything else that still answers (a stage on the cloud fallback, a GPU stopped, booting or failing — outside the class window this is the normal state) · `down`: the GPU is not serving and the cloud reserve fails too (a request of the app answered by nobody in the last 5 min, or every probed cloud link of one of its stages failing) |
+| `deployments[].stages` | what the app's routes send to it (`llm` = chat), one-GPU mode resolved |
+| `deployments[].state` | `ready` (a replica up and not failing) · `failing` (every ready replica failed 2 probes in a row, or the controller lost its health) · `booting` · `stopped` |
+| `deployments[].replicas` | `ready` = ready and not failing; `total` = machines powered on |
+| `deployments[].lastProbe` | the latest probe round (a failed one first), kept after the replicas are gone; `null` = never probed |
+| `fallback` | `active`: a stage was answered by the cloud in the last 5 min; `since`: start of that run; `last`: the latest cloud answer `{ at, stage, served }` (`served` = `X-Gateway-Provider`) |
+
+**Probe** (`src/deployments/gpu-probe.ts`): every ready replica of a profile deployment gets, every 2 min, one minimal
+real call per stage it serves, straight on the replica (STT a 0.6 s WAV, chat `max_tokens: 1`, TTS one word in the
+first voice of the replica's own catalog, as a real cloned-voice turn — a cloning TTS without catalog is never sent a
+bare `voice`, it would kill its engine). It never wakes, starts or keeps a machine up (no `acquire`, no
+`lastRequestAt`). Two failed rounds in a row make the replica `failing` and take the failed stages out of rotation
+(the same per-replica stage rotation repeated request failures use: those stages go to the other replicas, or to the
+cloud fallback) until a round passes.
+
+**A cloud answer still answers** (hard rule 4): it carries `X-Gateway-Status: degraded`, the app's `fallback` shows it,
+and the start of every cloud run of a stage is logged and emitted as the telemetry event `app.degraded`
+(`{ app, stage, served, from }`). Warm capacity stays the deployments' own `warmSchedule` (the profile `PUT` warns when a
+deployment has none); a client key's wake policy is unchanged.
 
 ## Machines and jobs
 

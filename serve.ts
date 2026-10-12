@@ -170,6 +170,11 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
+  // App GPU status (app-gpu-health.ts): the cloud links' last probe says whether the reserve still answers.
+  gpuHealth: {
+    cloudLinks: () => fallbackProbe.snapshot().links,
+    onDegraded: (event) => emitGatewayEvent('app.degraded', { level: 'warn', attrs: { ...event } }),
+  },
 });
 const deployments = configuredDeployments && await configuredDeployments.controller.init()
   .then(() => configuredDeployments.apps.init())
@@ -185,6 +190,7 @@ const deployments = configuredDeployments && await configuredDeployments.control
 if (deployments) {
   deployments.controller.start();
   deployments.clientGpu.run();
+  deployments.gpuHealth.probe.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
@@ -385,9 +391,9 @@ const adminGate = new AdminGate({
 });
 // What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
 // clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
+const appOfUser = (userId: string) => (userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : userId);
 const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
-  const app = userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : userId;
-  const routes = deployments?.apps.get(app)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
+  const routes = deployments?.apps.get(appOfUser(userId))?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
 const appLimits = keysConfigured() ? new AppLimits({
@@ -544,6 +550,7 @@ const server = await startProxy({
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
   ...(accounts ? { onInference: accounts.recordInference } : {}),
+  ...(deployments ? { onServed: ({ userId, kind, status, headers }) => deployments.gpuHealth.served(appOfUser(userId), kind, status, headers) } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
     ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), fallbackProbe: fallbackProbe.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [], clientGpu: deployments?.clientGpu.report() ?? null }
@@ -597,6 +604,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     appTelemetry?.stop();
     declared?.stop();
     deployments?.clientGpu.stop();
+    deployments?.gpuHealth.probe.stop();
     balanceWatch.stop();
     fallbackProbe.stop();
     keyManager.stop();

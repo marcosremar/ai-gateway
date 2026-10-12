@@ -425,6 +425,13 @@ export class DeploymentController extends ControllerViews {
     };
   }
 
+  /** Takes `stage` of replica `id` out of rotation until `untilMs` (≤ now: back in) — the GPU probe's verdict (gpu-probe.ts). */
+  holdStageOut(id: string, stage: string, untilMs: number): void {
+    const key = `${id}|${stage}`;
+    if (untilMs <= this.now()) { this.stageStrikes.delete(key); return; }
+    this.stageStrikes.set(key, { failures: STAGE_STRIKES, outUntil: untilMs });
+  }
+
   private noteStage(rt: Runtime, id: string, stage: string | undefined, outcome: LeaseOutcome, ms: number): void {
     if (!stage || outcome === 'cancelled' || outcome === 'overloaded') return;
     const key = `${id}|${stage}`;

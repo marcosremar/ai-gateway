@@ -34,6 +34,6 @@ export const CORS_ALLOW_HEADERS = [
 ].join(', ');
 /** Response headers a browser client may read (CORS hides every non-safelisted one otherwise). */
 export const CORS_EXPOSE_HEADERS = [
-  'X-Gateway-Provider', 'X-Gateway-Fallback', 'X-Gateway-Fallback-From', 'X-Gateway-Model-Catalog-Warnings',
+  'X-Gateway-Provider', 'X-Gateway-Fallback', 'X-Gateway-Fallback-From', 'X-Gateway-Status', 'X-Gateway-Model-Catalog-Warnings',
   'X-STT-Filtered', 'X-STT-Raw-Length', 'Retry-After', 'X-Request-Id', 'X-Aigw-Trace-Id',
 ].join(', ');

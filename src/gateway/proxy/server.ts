@@ -920,6 +920,15 @@ export function createProxyServer(config: ProxyConfig): Server {
           log.error({ err }, 'onInference hook failed');
         }
       }
+      const answeredKind = config.onServed ? inferenceKindOf(method, path) : null;
+      if (answeredKind) {
+        try {
+          const extra = config.onServed!({ userId, kind: answeredKind, status: proxyRes.status, headers: proxyRes.headers });
+          if (extra) proxyRes = { ...proxyRes, headers: { ...proxyRes.headers, ...extra } };
+        } catch (err) {
+          log.error({ err }, 'onServed hook failed');
+        }
+      }
       sendResponse(res, proxyRes, requestId);
     } catch (err) {
       if (err instanceof BodyTimeoutError) {

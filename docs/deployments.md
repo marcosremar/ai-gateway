@@ -52,6 +52,8 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | GET | `/v1/deployments/:name/capacity` | session ceiling in force and measured boot / resume time per machine type + image, mode, budget spent, hold (see Scaling policy) |
 | POST | `/v1/deployments/:name/warm` | `{ "replicas": N, "untilMinutes": M }`: keep N replicas up for M minutes (≤ 720) whatever the load — a class about to start; `park` ends it (admin) |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>` |
+| GET / PUT | `/v1/apps/:app/profile` | what the app needs from its GPUs (§ Profile of an app) |
+| GET | `/v1/apps/:app/status` | GPU status of the app: `mode` gpu · degraded · down, probes, fallback in use |
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |
 | PUT / DELETE | `/v1/profiles/:name` | store / delete your own profile (same fields as a spec) |
 
@@ -209,6 +211,21 @@ a block flag — no IP, no user agent. `GET /v1/apps/:app/devices` lists them, `
 Same callers as the other app paths (the app's key, or an admin). The id is whatever the app says it is: blocking
 stops an unmodified client, not a forged id — an app that needs more mints the ids in its backend and sets
 `requireDevice`. Routes, timings per transport and a worked example: [docs/api/http.md](api/http.md) § App devices.
+
+### Profile of an app: GPU required, probed, status
+
+`PUT /v1/apps/:app/profile` `{ "requiresGpu": true, "gpuDeployments": ["parle-speech", "parle-qwen-tts"] }` (an admin,
+or the app's own key naming only deployments of its app; stored in `apps.json`). For each listed deployment the gateway
+probes every **ready** replica every 2 min with one minimal real call per stage it serves (`src/deployments/gpu-probe.ts`:
+STT a short WAV, chat 1 token, TTS one word in a cloned voice of the replica's catalog), straight on the replica — it
+never wakes or keeps a machine up. Two failed rounds in a row → the replica is `failing` and its failed stages leave the
+rotation (`holdStageOut`, the per-replica stage rotation) until a round passes. A request of a `requiresGpu` app that
+the cloud fallback answers still answers, with `X-Gateway-Status: degraded`, and the start of each cloud run is the
+telemetry event `app.degraded`. `GET /v1/apps/:app/status` (the app's key or an admin) gives `mode` `gpu` · `degraded` ·
+`down`, each deployment's state, replicas and last probe, and the fallback in use — contract and fields in
+[docs/api/http.md](api/http.md) § App profile and GPU status. Warm hours stay each deployment's `warmSchedule` (the
+profile `PUT` warns when one has none); parle's two deployments are warm Mon–Thu 17:30–20:30 Paris by their
+declarations. Code: `src/deployments/app-gpu-health.ts`; tests: `__tests__/unit/deployments/app-gpu-health.test.ts`.
 
 ## Cold start
 
