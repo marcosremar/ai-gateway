@@ -187,7 +187,7 @@ export function createAdminPage(opts: AdminPageOptions) {
     const path = (req.url ?? '/').split('?')[0].replace(/\/$/, '');
     if (path !== '/admin' && !path.startsWith('/admin/')) return false;
     const handler = routes.get(`${req.method} ${path}`);
-    if (!handler) {
+    if (typeof handler !== 'function') {
       req.resume();
       redirect(res, '/admin');
       return true;
