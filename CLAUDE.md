@@ -21,6 +21,7 @@ Use the vocabulary from `domain-model.md` in all code and prompts. Respect the b
 
 **Pipeline:** `Audio → STT → LLM (translation) → TTS → Audio`
 **Transport hidden from callers** — callers don't know if GPU or cloud is used; gateway decides based on cost/latency/availability.
+**Core principle — always answers (owner, 2026-10-12):** every app profile and every service/route (STT, TTS, LLM, translation, s2s) must end in a working cloud fallback (OpenRouter first), so a cold or failed GPU never turns into a silent or 503 answer. The gateway adds the default fallback when one is missing, refuses an explicit config without one, probes every fallback periodically (no GPU wake) and alerts on failure or exhausted credit (402).
 **`src/`** is the publishable library (tree-shakeable); **`server/`** is the reference HTTP service.
 
 ## Features
@@ -390,7 +391,8 @@ bun run test:groq / test:openai / test:vast-lifecycle / test:runpod-lifecycle
 1. **`src/` never imports from `server/`** — CI enforces this. Break it and the build fails.
 2. **All GPU ops go through the gateway API** — never call RunPod/Vast.ai/TensorDock directly. Bypasses watchdog, cost tracking, ghost detection.
 3. **No Prisma/Redis/Next.js in `src/`** — use DI interfaces (`AutoscalerDeps`, `StateStore`, `SettingsStore`).
-4. **All new UI uses `web/src/components/ui/`** — `IconBox`, `StatusDot`, `KV`, `DropdownList`, `Button`, `Toggle`, `Card`, `SaveBar`, `ConfirmModal`, etc. Never inline equivalents.
+4. **Every route has a cloud fallback that answers** — a route, app or profile without one is a defect, never a config choice. A provider error (4xx it can't serve, 402, 429, 5xx, timeout) falls through to the next link; only the caller's own invalid request stops the chain. A turn with no audio or text is never reported as success.
+5. **All new UI uses `web/src/components/ui/`** — `IconBox`, `StatusDot`, `KV`, `DropdownList`, `Button`, `Toggle`, `Card`, `SaveBar`, `ConfirmModal`, etc. Never inline equivalents.
 
 ## Vibe Coding Guidelines
 
