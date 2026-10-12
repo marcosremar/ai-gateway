@@ -228,6 +228,8 @@ ai-gateway server start/stop/status      # Manage local dev server
 
 ### 8. Admin/Web UI (Next.js)
 
+- **`GET /admin` — «is everything working?»** (`src/admin-page/`, screenshot `docs/admin-status-iphone.jpg`): served by the gateway itself, server-rendered, no framework, mobile first. Login pastes the admin key once → in-memory session, cookie `__Host-aigw_admin` (`HttpOnly; Secure; SameSite=Strict`, 12 h); every POST (park, rerun the reserve probe, sign out) needs the page's CSRF token and a same-origin request. Shows reserves, balances, GPUs (outside the class window), recent alerts, machines, keys (never the value) and budgets. API clients keep the `Authorization` header. Local demo with simulated state: `ADMIN_DEMO_KEY=… bun scripts/admin-page-demo.ts`.
+
 - **Overview Section**: System status, connections, uptime
 - **Pipeline Health Card**: STT/LLM/TTS component status
 - **GPU Live Status**: Real-time GPU deployment status with warmth indicators

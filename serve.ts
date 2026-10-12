@@ -62,6 +62,7 @@ import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
 import { ModelBenchmarkStore } from './src/model-benchmarks/store';
 import { createModelBenchmarkRoutes } from './src/model-benchmarks/routes';
+import { createAdminPage, createAlertLog } from './src/admin-page';
 
 const log = createLogger('serve');
 
@@ -148,8 +149,10 @@ const prefixRoutes: PrefixRoute[] = [];
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const alertEmail = alertEmailFromEnv(process.env);
 const alertMailer = alertEmail && createAlertMailer({ ...alertEmail, secrets: () => secretValues(process.env), log: (msg, data) => log.warn(data ?? {}, msg) });
+const alertLog = createAlertLog();
 const opsAlerts = createOpsAlerts((alert) => {
   log.warn(alert.data, `ALERT ${alert.event}`);
+  alertLog.record(alert.event, alert.data);
   const mail = opsAlertMail(alert);
   if (mail) void alertMailer?.send(mail);
   return alertWebhook?.send(alert);
@@ -229,6 +232,7 @@ const balanceWatch = createBalanceWatch({
   spend: () => controller?.spendSummary() ?? null,
   onAlert: (mail, reading) => {
     log.warn({ kind: mail.kind, level: mail.level }, `ALERT ${mail.subject}`);
+    alertLog.record(`balance.${mail.level}`, { subject: mail.subject });
     void alertMailer?.deliver(mail);
     return reading ? alertWebhook?.send({ event: `balance.${mail.level}`, data: { ...reading } }) : undefined;
   },
@@ -569,6 +573,19 @@ realtime.mount(server);
 rooms.mount(server);
 // Outermost: the account API and pages answer themselves, and the quota gate sees every metered request first.
 accounts?.mount(server);
+// GET /admin: the status page for a browser, signed in once with the admin key (src/admin-page).
+createAdminPage({
+  actorOf: (key) => { const userId = keyRegistry.resolve(key)?.userId; return userId && adminUsers.has(userId) ? userId : null; },
+  snapshot: () => ({
+    reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
+    gpus: controller?.list() ?? null, gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
+    machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
+  }),
+  park: async (name) => { if (!controller) throw new Error('deployments desligados'); await controller.park(name); },
+  probe: () => fallbackProbe.check(),
+  secrets: () => secretValues(process.env),
+  audit: (entry) => keyAudit.record(entry),
+}).mount(server);
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 
