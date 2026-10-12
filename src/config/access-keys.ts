@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { NAME_RE } from '../deployments/spec';
 import { readStateFile, writeStateFile } from '../deployments/state-file';
 import { loadSandboxEnv, principalSandboxToken, SANDBOX_USER, TOKEN_ALIASES, type SandboxEnvResult } from './sandbox-env';
 
@@ -10,23 +11,32 @@ export const MAX_OVERLAP_MINUTES = 7 * 24 * 60;
  * `neverWake`: the key never starts a GPU, not even by `/wake` or `/start` (a dev key: tests, local servers, agents).
  * `countsAsUse: false`: its requests use a replica that is already ready but do not renew the idle clock, so dev
  * traffic never keeps a GPU up (12/10/2026: a local gate held two L4 for 3 h at night).
+ * `wakeDeployments`: when set, the key starts ONLY these deployments, each a test copy (`testFor`), never during a class
+ * window; every other deployment it uses only when already ready (owner, 12/10/2026: agents wake the test GPU, never production).
  */
 export interface GpuPolicy {
   autoWake: boolean; autoWakeOutsideClass: boolean; canStartGpu: boolean; neverWake: boolean; countsAsUse: boolean;
-  gpuDailyEur: number | null; startIdleMinutes: number;
+  gpuDailyEur: number | null; startIdleMinutes: number; wakeDeployments: string[];
 }
 export const DEFAULT_GPU_POLICY: GpuPolicy = {
-  autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, neverWake: false, countsAsUse: true, gpuDailyEur: 5, startIdleMinutes: 10,
+  autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, neverWake: false, countsAsUse: true, gpuDailyEur: 5, startIdleMinutes: 10, wakeDeployments: [],
 };
 const BOOLEAN_FIELDS = ['autoWake', 'autoWakeOutsideClass', 'canStartGpu', 'neverWake', 'countsAsUse'] as const;
 
-/** Whether this key may start a GPU now at all — automatically or by `/wake`, `/start` (admin keys skip this). */
-export function mayWakeNow(policy: GpuPolicy, classWindowOpen: boolean): boolean {
-  return !policy.neverWake && (policy.autoWakeOutsideClass || classWindowOpen);
+export interface WakeTarget { name: string; spec: { testFor?: string } }
+
+/** Whether this key may start a GPU now — automatically or by `/wake`, `/start` (admin keys skip this). */
+export function mayWakeNow(policy: GpuPolicy, classWindowOpen: boolean, target?: WakeTarget | null): boolean {
+  if (policy.neverWake) return false;
+  if (policy.wakeDeployments.length) {
+    return !classWindowOpen && Boolean(target?.spec.testFor) && policy.wakeDeployments.includes(target!.name);
+  }
+  return policy.autoWakeOutsideClass || classWindowOpen;
 }
 
+/** Whether every request of this key may wake any cold deployment (a key with `wakeDeployments` wakes only those). */
 export function autoWakesNow(policy: GpuPolicy, classWindowOpen: boolean): boolean {
-  return policy.autoWake && mayWakeNow(policy, classWindowOpen);
+  return policy.autoWake && !policy.wakeDeployments.length && mayWakeNow(policy, classWindowOpen);
 }
 const CLASS_CLIENT = 'parle';
 const CLASS_CLIENT_POLICY: Partial<GpuPolicy> = { autoWake: true, canStartGpu: true, gpuDailyEur: null };
@@ -163,8 +173,13 @@ export class AccessKeys {
           throw new AccessError(400, `startIdleMinutes must be an integer 1–${MAX_START_IDLE_MINUTES}`);
         }
         next.startIdleMinutes = value;
+      } else if (field === 'wakeDeployments') {
+        if (!Array.isArray(value) || value.some(v => typeof v !== 'string' || !NAME_RE.test(v))) {
+          throw new AccessError(400, 'wakeDeployments must be an array of deployment names (test copies only)');
+        }
+        next.wakeDeployments = [...new Set(value as string[])];
       } else {
-        throw new AccessError(400, `unknown field '${field}' (allowed: ${BOOLEAN_FIELDS.join(', ')}, gpuDailyEur, startIdleMinutes)`);
+        throw new AccessError(400, `unknown field '${field}' (allowed: ${BOOLEAN_FIELDS.join(', ')}, gpuDailyEur, startIdleMinutes, wakeDeployments)`);
       }
     }
     this.state.policies = { ...this.state.policies, [id]: next };

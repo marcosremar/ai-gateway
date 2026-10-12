@@ -22,7 +22,7 @@ import { SANDBOX_USER } from '../../config/sandbox-env';
 
 export const NO_WAKE_HEADER = 'x-gateway-no-wake';
 
-interface NoWakeScope { noWake: boolean; noUse?: boolean }
+interface NoWakeScope { noWake: boolean; noUse?: boolean; mayWake?: (deployment: string) => boolean }
 
 const als = new AsyncLocalStorage<NoWakeScope>();
 let skips = 0;
@@ -37,14 +37,25 @@ export function runNoWake<T>(fn: () => T): T {
   return als.run({ noWake: true }, fn);
 }
 
-/** Turns no-wake on for the rest of the current request. No-op outside a scope. */
-export function markNoWake(): void {
+/**
+ * Turns no-wake on for the rest of the current request. No-op outside a scope. `mayWake` names the deployments the
+ * key may still wake (and use as a normal request): its own test copies (access-keys.ts `wakeDeployments`).
+ */
+export function markNoWake(mayWake?: (deployment: string) => boolean): void {
   const scope = als.getStore();
-  if (scope) scope.noWake = true;
+  if (!scope) return;
+  scope.noWake = true;
+  if (mayWake) {
+    const seen = new Map<string, boolean>();
+    scope.mayWake = (d) => { if (!seen.has(d)) seen.set(d, mayWake(d)); return seen.get(d)!; };
+  }
 }
 
-export function noWakeActive(): boolean {
-  return als.getStore()?.noWake === true;
+const exempt = (scope: NoWakeScope | undefined, deployment?: string) => Boolean(deployment && scope?.mayWake?.(deployment));
+
+export function noWakeActive(deployment?: string): boolean {
+  const scope = als.getStore();
+  return scope?.noWake === true && !exempt(scope, deployment);
 }
 
 /** The request's key does not count as use (`countsAsUse: false`): a lease leaves the idle clock alone. */
@@ -53,8 +64,9 @@ export function markNoUse(): void {
   if (scope) scope.noUse = true;
 }
 
-export function noUseActive(): boolean {
-  return als.getStore()?.noUse === true;
+export function noUseActive(deployment?: string): boolean {
+  const scope = als.getStore();
+  return scope?.noUse === true && !exempt(scope, deployment);
 }
 
 /** Runs `fn` as a request that does not count as use (tests, in-process callers). */

@@ -8,7 +8,8 @@
  *   DELETE /v1/deployments/:name               release every replica and forget the spec
  *   GET    /v1/deployments/:name/capacity      session ceiling and measured boot / resume times per machine type
  *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic); a client key obeys its
- *                                              policy: never with neverWake, not outside class without autoWakeOutsideClass
+ *                                              policy: never with neverWake, not outside class without autoWakeOutsideClass;
+ *                                              a key with wakeDeployments: only those, outside class, as a start of startIdleMinutes
  *   POST   /v1/deployments/:name/park          done for now: scale to minReplicas at once (power off under idleAction stop)
  *   POST   /v1/deployments/:name/start         a client key with canStartGpu: keep one GPU up for { minutes } (client-gpu.ts)
  *   POST   /v1/deployments/:name/extend        the same key: { minutes } more on the GPU it started
@@ -355,7 +356,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (!replicaTarget('http://replica.invalid', rest, query)) return send(res, 400, { error: 'invoke path must be a plain relative path (no scheme, //, backslash or ./.. segments)' });
     const exclude = new Set<string>();
     // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves; none ready = 503 at once, nothing woken.
-    const noWake = noWakeActive();
+    const noWake = noWakeActive(name);
     for (let attempt = 0; attempt < 2; attempt++) {
       let lease;
       try {
@@ -438,12 +439,17 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     return key;
   }
 
-  /** A client key that may not start a GPU now (never, or outside the class window) is refused; the fallback answers. */
+  /** A client key that may not start a GPU now (never, not this one, or not at this time) is refused; the fallback answers. */
   function refuseWake(policy: GpuPolicy, name: string): void {
     if (policy.neverWake) throw new DeploymentError(403, `this API key never wakes a GPU: '${name}' answers from a ready replica or the cloud fallback`);
-    if (!mayWakeNow(policy, classWindowOpen(controller.list(), Date.now()))) {
-      throw new DeploymentError(403, `outside the class window this API key cannot wake '${name}': the cloud fallback answers`);
+    const classOpen = classWindowOpen(controller.list(), Date.now());
+    if (mayWakeNow(policy, classOpen, controller.get(name))) return;
+    const own = policy.wakeDeployments;
+    if (own.length && !classOpen) {
+      throw new DeploymentError(403, `this API key wakes only its test deployments (${own.join(', ')}), not '${name}': it answers from a ready replica or the cloud fallback`);
     }
+    if (own.length) throw new DeploymentError(403, `during a class window this API key cannot wake '${name}': the class GPUs are the students'`);
+    throw new DeploymentError(403, `outside the class window this API key cannot wake '${name}': the cloud fallback answers`);
   }
 
   async function route(req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<void> {
@@ -501,17 +507,20 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if ((action === 'start' || action === 'extend') && method === 'POST') {
       if (!opts.clientGpu) return send(res, 404, { error: 'GPU start is not enabled on this gateway' });
       const key = isAdmin(req) ? null : gpuClient(req, name);
-      if (key) refuseWake(key.policy, name);
+      if (key) refuseWake(key.policy, key.policy.gpuDailyEur !== null ? opts.clientGpu.testCopyOf(name)?.name ?? name : name);
       const minutes = (await readJson(req)).minutes;
       const starter = key ?? { keyId: `admin:${opts.userOf?.(req) ?? 'admin'}`, user: opts.userOf?.(req) ?? 'admin' };
-      const policy = key?.policy ?? { autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: null, startIdleMinutes: 10 };
+      const policy = key?.policy ?? { autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: null, startIdleMinutes: 10, wakeDeployments: [] };
       return send(res, 202, await opts.clientGpu.start(starter, policy, name, minutes, action === 'extend'));
     }
     if (action === 'wake' && method === 'POST') {
       if (!isAdmin(req)) {
-        const { policy } = gpuClient(req, name);
-        refuseWake(policy, name);
-        if (policy.gpuDailyEur !== null) return send(res, 403, { error: `this key has a daily GPU cap: use POST /v1/deployments/${name}/start {"minutes": N}` });
+        const key = gpuClient(req, name);
+        refuseWake(key.policy, name);
+        if (key.policy.wakeDeployments.length && opts.clientGpu) {
+          return send(res, 202, await opts.clientGpu.start(key, key.policy, name, key.policy.startIdleMinutes));
+        }
+        if (key.policy.gpuDailyEur !== null) return send(res, 403, { error: `this key has a daily GPU cap: use POST /v1/deployments/${name}/start {"minutes": N}` });
       }
       return send(res, 202, controller.wake(name));
     }

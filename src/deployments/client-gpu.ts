@@ -1,5 +1,5 @@
-import type { GpuPolicy } from '../config/access-keys';
-import { scheduleFloor } from './autoscale';
+import { mayWakeNow, type GpuPolicy } from '../config/access-keys';
+import { classWindowOpen, scheduleFloor } from './autoscale';
 import { DeploymentError } from './controller';
 import { readStateFile, writeStateFile } from './state-file';
 import type { DeploymentView } from './types';
@@ -63,6 +63,11 @@ export class ClientGpu {
   }
 
   async start(key: GpuStarterKey, policy: GpuPolicy, requested: string, minutes: unknown, extend = false) {
+    return this.book(this.reserve(key, policy, requested, minutes, extend));
+  }
+
+  /** Checks a start and books it at once (so two requests do not both start); throws when refused. */
+  private reserve(key: GpuStarterKey, policy: GpuPolicy, requested: string, minutes: unknown, extend: boolean) {
     const name = policy.gpuDailyEur !== null ? this.testCopyOf(requested)?.name ?? requested : requested;
     if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 1 || minutes > MAX_START_MINUTES) {
       throw new DeploymentError(400, `minutes must be an integer 1–${MAX_START_MINUTES}`);
@@ -82,18 +87,50 @@ export class ClientGpu {
     }
     const other = view.warm && Date.parse(view.warm.until) > now && !open ? view.warm : null;
     const warmUntil = Math.max(until, other ? Date.parse(other.until) : 0);
-    await this.controller.warm(name, Math.max(1, other?.replicas ?? 0), (warmUntil - now) / 60_000);
     const entry: Start = open ?? {
       keyId: key.keyId, user: key.user, deployment: name, until, idleMs: 0, capEur: null, sharedWarm: Boolean(other), chargedAt: now,
     };
     Object.assign(entry, { until, idleMs: policy.startIdleMinutes * 60_000, capEur: policy.gpuDailyEur });
     if (!open) this.state.starts.push(entry);
-    this.opts.log?.(`client-gpu: ${extend ? 'extended' : 'started'}`, { deployment: name, key: key.keyId, minutes });
-    await this.save();
     return {
-      deployment: name, until: new Date(until).toISOString(), idleMinutes: policy.startIdleMinutes,
-      spentTodayEur: cents(spent), capEur: policy.gpuDailyEur,
+      entry, fresh: !open, replicas: Math.max(1, other?.replicas ?? 0), warmMinutes: (warmUntil - now) / 60_000, log: { extend, minutes },
+      result: { deployment: name, until: new Date(until).toISOString(), idleMinutes: policy.startIdleMinutes, spentTodayEur: cents(spent), capEur: policy.gpuDailyEur },
     };
+  }
+
+  private async book(r: ReturnType<ClientGpu['reserve']>) {
+    try {
+      await this.controller.warm(r.entry.deployment, r.replicas, r.warmMinutes);
+    } catch (err) {
+      if (r.fresh) this.drop(r.entry);
+      throw err;
+    }
+    this.opts.log?.(`client-gpu: ${r.log.extend ? 'extended' : 'started'}`, { deployment: r.entry.deployment, key: r.entry.keyId, minutes: r.log.minutes });
+    await this.save();
+    return r.result;
+  }
+
+  /**
+   * A request of this key needs `name` (one of its `wakeDeployments`): true when it already runs a start there, or a
+   * start for `startIdleMinutes` is accepted now (daily cap, idle park and accounting as `/start`); false when refused.
+   */
+  admit(key: GpuStarterKey, policy: GpuPolicy, name: string): boolean {
+    if (this.state.starts.some(s => s.keyId === key.keyId && s.deployment === name)) return true;
+    let booked: ReturnType<ClientGpu['reserve']>;
+    try {
+      booked = this.reserve(key, policy, name, policy.startIdleMinutes, false);
+    } catch {
+      return false;
+    }
+    this.book(booked).catch(err => this.opts.log?.('client-gpu: auto start failed', { deployment: name, key: key.keyId, error: String(err) }));
+    return true;
+  }
+
+  /** serve.ts `mayWake`: a request of this key may wake `deployment` (its policy, the class window, its daily cap). */
+  requestMayWake(key: GpuStarterKey | null, policy: GpuPolicy, deployment: string): boolean {
+    const views = this.controller.list();
+    if (!key || !policy.autoWake || !mayWakeNow(policy, classWindowOpen(views, this.now()), views.find(d => d.name === deployment))) return false;
+    return this.admit(key, policy, deployment);
   }
 
   async forget(keyId: string, name: string): Promise<void> {
