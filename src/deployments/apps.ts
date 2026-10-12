@@ -15,6 +15,7 @@ import { join } from 'path';
 import { parseModelRoutes, type ModelRoutesSpec, type RouteEntrySpec } from '../config/serve-providers';
 import { defaultCloudTargets, withCloudFallback, type CloudFallbackAdded } from '../config/cloud-fallback';
 import type { FallbackKeyStore, ProvisionedKeyRecord } from './app-fallback';
+import { NAME_RE } from './spec';
 import { readStateFile, writeStateFile } from './state-file';
 import type { StateLog } from './store';
 
@@ -57,6 +58,28 @@ export interface AppImage {
   history: AppImageVersion[];
 }
 
+/**
+ * What the app needs from the gateway (`PUT /v1/apps/:app/profile`, app-gpu-health.ts). `requiresGpu`: the app's own
+ * GPU deployments are part of what it delivers (parle: the detected language and the cloned voices only come from them),
+ * so a turn the cloud fallback answers still answers, but is marked degraded and the app's status says so.
+ */
+export interface AppProfile { requiresGpu: boolean; gpuDeployments: string[] }
+
+const MAX_GPU_DEPLOYMENTS = 8;
+
+export function parseAppProfile(body: unknown): AppProfile {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'profile must be an object { requiresGpu, gpuDeployments }');
+  for (const key of Object.keys(body)) if (key !== 'requiresGpu' && key !== 'gpuDeployments') throw new AppError(400, `unknown field '${key}'`);
+  const { requiresGpu, gpuDeployments = [] } = body as { requiresGpu?: unknown; gpuDeployments?: unknown };
+  if (typeof requiresGpu !== 'boolean') throw new AppError(400, 'requiresGpu must be a boolean');
+  if (!Array.isArray(gpuDeployments) || gpuDeployments.length > MAX_GPU_DEPLOYMENTS
+    || gpuDeployments.some(d => typeof d !== 'string' || !NAME_RE.test(d))) {
+    throw new AppError(400, `gpuDeployments must be a list of up to ${MAX_GPU_DEPLOYMENTS} deployment names`);
+  }
+  if (requiresGpu && !gpuDeployments.length) throw new AppError(400, 'requiresGpu needs at least one deployment in gpuDeployments');
+  return { requiresGpu, gpuDeployments: [...new Set(gpuDeployments as string[])] };
+}
+
 export interface AppDeviceBlock { reason: string | null; by: string; at: number }
 
 export interface AppDevice {
@@ -81,6 +104,7 @@ export interface AppAccount {
   /** The app's provisioned OpenRouter key for the direct fallback (app-fallback.ts): its hash, never the key. */
   fallbackKey?: ProvisionedKeyRecord;
   limits?: { dailyRequests?: number; dailyTokens?: number };
+  profile?: AppProfile;
   devices?: Record<string, AppDevice>;
   requireDevice?: boolean;
 }
@@ -241,6 +265,16 @@ export class AppRegistry implements FallbackKeyStore {
     this.account(app).limits = limits;
     await this.store.save(this.apps);
     return limits;
+  }
+
+  /** An app key (`ownsDeployment` set) may only name deployments its app owns, like its routes. */
+  async putProfile(app: string, body: unknown, opts: { ownsDeployment?: (deployment: string) => boolean } = {}): Promise<AppProfile> {
+    const profile = parseAppProfile(body);
+    const foreign = opts.ownsDeployment ? profile.gpuDeployments.filter(d => !opts.ownsDeployment!(d)) : [];
+    if (foreign.length) throw new AppError(403, `an app key may only name its own app's deployments: ${foreign.join(', ')}`);
+    this.account(app).profile = profile;
+    await this.store.save(this.apps);
+    return profile;
   }
 
   /**

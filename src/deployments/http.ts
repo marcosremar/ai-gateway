@@ -19,6 +19,10 @@
  *   DELETE /v1/profiles/:name                  delete a stored profile
  *   GET|PUT /v1/apps/:app/limits               the app's own daily budgets `{ dailyRequests?, dailyTokens? }` over the
  *                                              gateway defaults (APP_DAILY_*); PUT is admin only, null = default
+ *   GET|PUT /v1/apps/:app/profile              what the app needs: `{ requiresGpu, gpuDeployments }` (apps.ts); PUT by an
+ *                                              admin, or by the app's own key naming only its own deployments
+ *   GET    /v1/apps/:app/status                GPU status of the app's profile: mode gpu | degraded | down, the probe of
+ *                                              each deployment, the cloud fallback in use (app-gpu-health.ts)
  *   GET    /v1/apps/:app/fallback              direct-fallback plan with provider keys (app-fallback.ts); the app's
  *                                              own key, or an admin key with `X-App: <app>`
  *   POST   /v1/apps/:app/stability-report      instability events buffered by the SDK while the gateway was down
@@ -34,6 +38,7 @@ import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
 import type { AppDevices } from './app-devices';
 import type { AppFallbackService } from './app-fallback';
+import type { AppGpuHealth } from './app-gpu-health';
 import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import type { ClientGpu } from './client-gpu';
@@ -212,6 +217,8 @@ export interface DeploymentRoutesOptions {
   onRoutesChange?: () => void;
   /** Direct-fallback plans (`GET /v1/apps/:app/fallback`). Without it that path answers 404. */
   fallback?: AppFallbackService;
+  /** App GPU status (`/v1/apps/:app/status`). Without it that path answers 404. */
+  gpuHealth?: AppGpuHealth;
   /** SDK instability reports (`/v1/apps/:app/stability-report`). Without it those paths answer 404. */
   stability?: ClientStabilityLog;
   devices?: AppDevices;
@@ -295,6 +302,25 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
       if (!isAdmin(req)) return send(res, 403, { error: 'only an admin key may set an app\'s limits' });
       return send(res, 200, { app, limits: await registry.putLimits(app, await readJson(req)) });
+    }
+    if (sub === 'profile' && !imageName) {
+      if (method === 'GET') return send(res, 200, { app, profile: registry.get(app)?.profile ?? null });
+      if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
+      const profile = await registry.putProfile(app, await readJson(req), isAdmin(req) ? {}
+        : { ownsDeployment: (deployment) => controller.get(deployment)?.app === app });
+      const warnings = profile.gpuDeployments.flatMap((name) => {
+        const view = controller.get(name);
+        if (!view) return [`'${name}' is not registered on this gateway`];
+        return view.spec.warmSchedule?.length ? [] : [`'${name}' has no warmSchedule: it is only up after a request wakes it`];
+      });
+      return send(res, 200, { app, profile, ...(warnings.length ? { warnings } : {}) });
+    }
+    if (sub === 'status' && !imageName) {
+      if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+      if (!opts.gpuHealth) return send(res, 404, { error: 'app status is not enabled on this gateway' });
+      const status = opts.gpuHealth.status(app);
+      return status ? send(res, 200, status, { 'Cache-Control': 'no-store' })
+        : send(res, 404, { error: `app '${app}' has no profile (PUT /v1/apps/${app}/profile)` });
     }
     if (sub === 'fallback' && !imageName) {
       if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });

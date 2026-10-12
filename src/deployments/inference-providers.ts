@@ -310,13 +310,18 @@ const LANGUAGE_NAMES: Record<string, string> = {
   ko: 'Korean', zh: 'Chinese', ru: 'Russian',
 };
 
-function languageName(value: unknown): string | undefined {
+export function languageName(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined;
   const code = value.trim().slice(0, 2).toLowerCase();
   return /^[a-z]{2}(-[a-z]{2})?$/i.test(value.trim()) ? LANGUAGE_NAMES[code] ?? value : value;
 }
 
-function catalogOf(raw: unknown): ReplicaCatalog | null {
+/** A Qwen3-TTS Base (cloning) model: it must never get `voice` without `ref_audio` (its engine dies on it). */
+export function isBaseTtsModel(model: string): boolean {
+  return /(^|[-_/])base($|[-_.])/i.test(model);
+}
+
+export function catalogOf(raw: unknown): ReplicaCatalog | null {
   const input = raw as { model?: unknown; format?: unknown; voices?: unknown } | null;
   if (!input || !Array.isArray(input.voices)) return null;
   const voices = input.voices.filter((v): v is ReplicaVoice =>
@@ -349,7 +354,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
 
   /** True when the target model is a Qwen3-TTS Base (cloning) model, or the replica already showed a catalog. */
   private isCloningModel(model: string): boolean {
-    return this.cloning || /(^|[-_/])base($|[-_.])/i.test(model);
+    return this.cloning || isBaseTtsModel(model);
   }
 
   /**
