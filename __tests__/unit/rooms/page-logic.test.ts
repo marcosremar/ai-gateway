@@ -10,7 +10,7 @@ interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
 interface Settings { mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable, listenMsg, dubStatus, silentWav })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -26,8 +26,11 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   uaInfo(ua: string, touch: number): { ua: string; os: string; device: string };
   refOf(search: string, referrer: string): string;
   dubbable(lang: string, dubLangs: string[] | undefined): boolean;
+  listenMsg(on: boolean, lang: string | null): string;
+  dubStatus(s: { can: boolean; lang: string; on: boolean; ctx: string | null; error: string | null; playing: boolean; loading: boolean }): { kind: string; text: string };
+  silentWav(rate: number, samples: number): string;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable, listenMsg, dubStatus, silentWav } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -103,7 +106,9 @@ describe('room page: one-line fit of the live line', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
     expect(html).toContain('pickLive(entries,now(),syncOn()');
     expect(html).toContain('createGain');
+    // Clips play through Web Audio; the only <audio> element is the silent iOS unlock, never one per clip.
     expect(html).not.toContain('new Audio(');
+    expect(html).toContain('actx.decodeAudioData(ab,ok,fail)');
   });
 
   it('keeps the original single-line page features', () => {
@@ -228,6 +233,72 @@ describe('room page: viewer settings', () => {
     expect(dubbable('de', undefined)).toBe(true);
     expect(dubbable('orig', undefined)).toBe(false);
     expect(dubbable('orig', ['en'])).toBe(false);
+  });
+
+  it('sends listen for the chosen translation only while dubbing is on', () => {
+    expect(JSON.parse(listenMsg(true, 'fr'))).toEqual({ type: 'listen', lang: 'fr' });
+    expect(JSON.parse(listenMsg(false, 'fr'))).toEqual({ type: 'listen', lang: null });
+    expect(JSON.parse(listenMsg(true, 'orig'))).toEqual({ type: 'listen', lang: null });
+    expect(JSON.parse(listenMsg(true, null))).toEqual({ type: 'listen', lang: null });
+  });
+
+  it('re-sends listen on every (re)connect, dub toggle and language change', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    expect(html).toContain('ws.send(listenMsg(dub,lang))');
+    expect(html).toContain('s.onopen=function(){opened=true;attempt=0;sendListen()');
+    expect(html).toMatch(/function setLang\([^)]*\)\{[\s\S]*?sendListen\(\)/);
+    expect(html).toMatch(/function setDub\([^)]*\)\{[\s\S]*?sendListen\(\)/);
+  });
+
+  it('shows the state of the dub toggle: off, locked, error, playing, loading, idle', () => {
+    const base = { can: true, lang: 'fr', on: true, ctx: 'running', error: null, playing: false, loading: false };
+    expect(dubStatus({ ...base, can: false, lang: 'orig' })).toEqual({ kind: 'na', text: 'escolha um idioma de tradução' });
+    expect(dubStatus({ ...base, can: false }).kind).toBe('na');
+    expect(dubStatus({ ...base, on: false }).kind).toBe('off');
+    // iOS/Android suspend the context (screen lock, call, no gesture yet): the next tap must resume it.
+    expect(dubStatus({ ...base, ctx: 'suspended', playing: true })).toEqual({ kind: 'locked', text: 'toque aqui para ativar o som' });
+    expect(dubStatus({ ...base, ctx: 'interrupted' }).kind).toBe('locked');
+    expect(dubStatus({ ...base, error: 'erro ao tocar a voz (mp3)', playing: true })).toEqual({ kind: 'error', text: 'erro ao tocar a voz (mp3)' });
+    expect(dubStatus({ ...base, playing: true, loading: true })).toEqual({ kind: 'playing', text: 'tocando' });
+    expect(dubStatus({ ...base, loading: true })).toEqual({ kind: 'loading', text: 'carregando voz…' });
+    expect(dubStatus(base).kind).toBe('idle');
+  });
+
+  it('unlocks mobile audio inside the tap: audio session, silent <audio>, context resume, 1-sample buffer', () => {
+    const wav = silentWav(8000, 1600);
+    const bytes = Buffer.from(wav, 'latin1');
+    expect(bytes.length).toBe(44 + 3200);
+    expect(bytes.subarray(0, 4).toString()).toBe('RIFF');
+    expect(bytes.readUInt32LE(4)).toBe(36 + 3200);
+    expect(bytes.subarray(8, 16).toString()).toBe('WAVEfmt ');
+    expect(bytes.readUInt16LE(20)).toBe(1); // PCM
+    expect(bytes.readUInt16LE(22)).toBe(1); // mono
+    expect(bytes.readUInt32LE(24)).toBe(8000);
+    expect(bytes.readUInt16LE(34)).toBe(16);
+    expect(bytes.subarray(36, 40).toString()).toBe('data');
+    expect(bytes.readUInt32LE(40)).toBe(3200);
+    expect(bytes.subarray(44).every(b => b === 0)).toBe(true);
+
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    const unlock = /function unlockAudio\(\)\{[\s\S]*?\n\}/.exec(html)?.[0] ?? '';
+    for (const s of ["as.type='playback'", "createElement('audio')", "'playsinline'", 'unlockEl.play()', 'actx.resume()', 'createBufferSource()', 's.start(0)']) {
+      expect(unlock).toContain(s);
+    }
+    // The tap handlers call it synchronously; a suspended context is resumed by any later tap or by the toggle.
+    expect(html).toMatch(/function setDub\(on,from\)\{\s*if\(on&&!unlockAudio\(\)\)/);
+    expect(html).toContain("['touchend','click','keydown'].forEach(function(t){document.addEventListener(t,wake,true)})");
+    expect(html).toContain("if(locked()){unlockAudio();");
+    // Decode failures are visible, not silent.
+    expect(html).toContain("dubErr='erro ao tocar a voz ('+fmt+')'");
+    expect(html).toContain('id="dubState"');
+  });
+
+  it('ships the mobile layout: brand colors, safe-area insets, no inline styles', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const s of ['#00C7BE', '#0F1A2E', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html,body{overflow-x:hidden}', 'Ouvir dublagem']) {
+      expect(html).toContain(s);
+    }
+    expect(html).not.toMatch(/https?:\/\/(?!www\.w3\.org)/); // no CDN
   });
 
   it('ships an accessible settings sheet', () => {
