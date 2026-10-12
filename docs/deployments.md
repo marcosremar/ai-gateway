@@ -129,9 +129,17 @@ and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate
 `parle-qwen-tts` (a registered `deployment` always wins); to go back to one GPU, delete it (pausing keeps it
 registered, so it would stay the target).
 
-### `parle-bridge-shadow` (the audio bridge in shadow mode, 12/10/2026)
+### `parle-bridge-shadow` (the audio bridge in shadow mode, 12/10/2026) — PARKED
 
-`src/deployments/declared/parle-bridge-shadow.json` (+ `-test`): the parle audio bridge `conv` — Qwen3.5-9B Q4_K_M
+**Parked (owner, 12/10/2026): no GPU for a new custom model for now.** Both specs live in
+`src/deployments/parked/` and are not in `DECLARED_DEPLOYMENTS`: the gateway never registers them, so nothing starts
+them — no schedule, no request, no `/wake`, no dev key. The parked spec has no `warmSchedule`. The class keeps its GPUs
+as before (`parle-speech`, `parle-qwen-tts`). To turn it back on: set `HF_BRIDGE_READ_TOKEN` (read-only), move both
+files back to `src/deployments/declared/`, import them in `declared.ts`, put the class-window `warmSchedule` back on
+`parle-bridge-shadow` (Mon–Thu 17:30–20:30 Europe/Paris, `minReplicas: 1`), replace the parked test in
+`__tests__/unit/deployments/declared.test.ts`, then publish the gateway. What follows describes it as it was declared.
+
+`src/deployments/parked/parle-bridge-shadow.json` (+ `-test`): the parle audio bridge `conv` — Qwen3.5-9B Q4_K_M
 reading the student's audio through the 1j `conv` projector (`marcosremar2/qwen35-audio-bridge-pt`, private,
 `stage6-1j-conv/`) — served by `llama-server` b11382 with the mel-trim patch the bridge was evaluated with. **Shadow
 mode:** parle sends it the same audio and context as the real turn, and its answer is only recorded next to that turn

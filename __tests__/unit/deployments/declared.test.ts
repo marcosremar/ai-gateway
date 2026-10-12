@@ -22,6 +22,8 @@ import { filesByUrl } from '../../../src/deployments/boot-files';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastRefusal } from '../../../src/deployments/spec';
 import { FakeCloud, until } from './_fake-cloud';
+import parkedShadow from '../../../src/deployments/parked/parle-bridge-shadow.json';
+import parkedShadowTest from '../../../src/deployments/parked/parle-bridge-shadow-test.json';
 
 const GHCR = 'ghp_fake_read_token_0123456789';
 const speech = DECLARED_DEPLOYMENTS.find(d => d.name === 'parle-speech')!;
@@ -444,35 +446,32 @@ describe('declared parle-speech-test (owner, 10/10/2026): the cheap test copy of
   });
 });
 
-describe('declared parle-bridge-shadow (owner, 12/10/2026): the audio bridge `conv` in shadow mode', () => {
+describe('parle-bridge-shadow parked (owner, 12/10/2026): no custom-model GPU until the owner turns it back on', () => {
   const HF = 'hf_fake_read_token_0123456789';
+  const IN_CLASS = Date.parse('2026-10-12T17:00:00Z');
+  const isShadow = (name: string) => name.startsWith('parle-bridge-shadow');
 
-  it('pending without the read-only HF token; nothing registered, no machine', async () => {
-    const { c, cloud } = await controller();
-    const status = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
-    expect(status.find(s => s.name === 'parle-bridge-shadow')).toMatchObject({ state: 'pending', reason: expect.stringContaining('HF_BRIDGE_READ_TOKEN') });
-    expect(c.specOf('parle-bridge-shadow')).toBeNull();
-    expect(cloud.created).toHaveLength(0);
+  it('is not declared, and its parked specs hold no warm window', () => {
+    expect(DECLARED_DEPLOYMENTS.filter(d => isShadow(d.name))).toEqual([]);
+    for (const parked of [parkedShadow, parkedShadowTest]) {
+      expect(parked.spec).not.toHaveProperty('warmSchedule');
+      expect(parked.spec.minReplicas).toBe(0);
+    }
   });
 
-  it('with the token: one Vast RTX 3090 (then 4090), CUDA graphs off, the trim on, warm only in the class window, deleted after 10 min idle, owned by parle; the test copy has no schedule', async () => {
-    const { c, cloud } = await controller();
-    await new DeclaredDeploymentReconciler({ target: c, env: { HF_BRIDGE_READ_TOKEN: HF } }).reconcile();
-    const spec = c.specOf('parle-bridge-shadow')!;
-    expect(spec).toMatchObject({
-      provider: 'vast', machineType: 'RTX 3090', minCuda: 12.8, minReplicas: 0, maxReplicas: 1, idleMinutes: 10, idleAction: 'delete',
-      env: { GGML_CUDA_DISABLE_GRAPHS: '1', MTMD_AUDIO_TRIM: '1', HF_TOKEN: HF },
-      warmSchedule: [{ days: [1, 2, 3, 4], start: '17:30', end: '20:30', timeZone: 'Europe/Paris', minReplicas: 1 }],
+  it('inside the class window, even with the HF token set, nothing of the shadow is registered, warmed or started', async () => {
+    const cloud = new FakeCloud();
+    const c = new DeploymentController({
+      backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(500), namespace: 'test', reconcileMs: 50,
+      now: () => IN_CLASS,
     });
-    expect(spec.candidates?.map(x => x.machineType)).toEqual(['RTX 3090', 'RTX 4090']);
-    expect(spec.bootScript).toContain('53116f4b41a68712a08fd7c10444b10e7c81b8449b7022630461514654c3f68d');
-    expect(spec.bootScript).not.toContain(HF);
-    expect(vastRefusal(spec)).toBeNull();
-    expect(c.get('parle-bridge-shadow')!.app).toBe('parle');
-    const test = c.specOf('parle-bridge-shadow-test')!;
-    expect(test).toMatchObject({ testFor: 'parle-bridge-shadow', provider: 'vast', env: { GGML_CUDA_DISABLE_GRAPHS: '1', HF_TOKEN: HF } });
-    expect(test.warmSchedule).toBeUndefined();
-    expect(cloud.created).toHaveLength(0);
+    await c.init();
+    controllers.push(c);
+    const status = await new DeclaredDeploymentReconciler({ target: c, env: { HF_BRIDGE_READ_TOKEN: HF } }).reconcile();
+    await new Promise(r => setTimeout(r, 300));
+    expect(status.filter(s => isShadow(s.name))).toEqual([]);
+    expect(c.specOf('parle-bridge-shadow')).toBeNull();
+    expect(c.specOf('parle-bridge-shadow-test')).toBeNull();
+    expect(cloud.created.filter(x => isShadow(x.spec.name))).toEqual([]);
   });
-
 });
