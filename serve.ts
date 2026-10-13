@@ -33,7 +33,9 @@ import { KeyAudit } from './src/config/key-audit';
 import { createS2SRoute } from './src/s2s/route';
 import { streamCuts } from './src/telemetry/stream-cuts';
 import { createS2SAccess } from './src/s2s/access';
-import { appStagesView, realtimeHealth } from './src/gateway/proxy/health-view';
+import { appStagesView, minimalHealth, realtimeHealth } from './src/gateway/proxy/health-view';
+import { SpendLedger } from './src/deployments/spend-ledger';
+import { llmTokensOf } from './src/accounts/usage';
 import { loopbackStages } from './src/s2s/loopback-stages';
 import { appForCall, appStageModels } from './src/s2s/app-stage-models';
 import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
@@ -227,6 +229,14 @@ if (machines) {
 const modelRoutes = parseModelRoutes(process.env.MODEL_ROUTES);
 if (modelRoutes.errors.length) log.warn({ errors: modelRoutes.errors }, 'MODEL_ROUTES has invalid parts — skipped');
 const controller = deployments?.controller ?? null;
+const spendLedger = new SpendLedger({
+  path: join(stateDir, 'spend-ledger.json'),
+  deployments: () => controller?.list() ?? [],
+  ownerOf: (d) => d.app ?? deployments?.apps.list().find(({ id }) => deployments.apps.get(id)?.profile?.gpuDeployments.includes(d.name))?.id ?? null,
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+await spendLedger.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'SPEND LEDGER UNREADABLE: daily spend starts empty'));
+spendLedger.start();
 const balanceWatch = createBalanceWatch({
   env: process.env,
   spend: () => controller?.spendSummary() ?? null,
@@ -553,7 +563,12 @@ const server = await startProxy({
   countsAsUse: (bearer) => access.policyOf(access.resolve(bearer)?.keyId).countsAsUse,
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
-  ...(accounts ? { onInference: accounts.recordInference } : {}),
+  onInference: (event) => {
+    accounts?.recordInference(event);
+    if (event.status >= 400) return;
+    const fields = event.body && typeof event.body === 'object' && !Array.isArray(event.body) ? event.body as Record<string, unknown> : {};
+    spendLedger.request(appOfUser(event.userId), event.kind === 'chat' ? llmTokensOf(fields, event.response) : 0);
+  },
   ...(deployments ? { onServed: ({ userId, kind, status, headers }) => deployments.gpuHealth.served(appOfUser(userId), kind, status, headers) } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
@@ -592,7 +607,14 @@ createAdminPage({
       return { id, profile: entry?.profile ?? null, status: deployments.gpuHealth.status(id), aliases: Object.values(entry?.routes ?? {}).flatMap(r => Object.keys(r ?? {})) };
     }) ?? [],
     traffic: telemetry ? adminTraffic(telemetry.store.rows(), Date.now()) : null, audit: keyAudit.recent(30),
+    spend: spendLedger.view(), dismissed: spendLedger.dismissed(),
+    about: {
+      commit: (minimalHealth().commit as string | null) ?? null, uptimeSeconds: Math.round(process.uptime()),
+      region: process.env.RAILWAY_REPLICA_REGION?.trim() || null,
+      telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
+    },
   }),
+  dismiss: (id) => spendLedger.dismiss(id),
   park: async (name, actor) => {
     if (!controller) throw new Error('deployments desligados');
     if (actor.keyId) await deployments?.clientGpu.forget(actor.keyId, name);
@@ -629,7 +651,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop()]);
+    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop(), spendLedger.stop()]);
     const exit = (code: number) => void stateWritten.finally(() => process.exit(code));
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();

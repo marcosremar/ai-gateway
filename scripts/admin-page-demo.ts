@@ -12,6 +12,7 @@ const state = (process.env.ADMIN_DEMO_STATE || 'warn') as DemoState;
 if (!demoStates.includes(state)) throw new Error(`ADMIN_DEMO_STATE must be one of ${demoStates.join(', ')}`);
 
 const DEMO_COOKIE = 'aigw_demo';
+const dismissed: Record<string, number> = {};
 
 const page = createAdminPage({
   actorOf: (given) => {
@@ -19,7 +20,8 @@ const page = createAdminPage({
     if (appKey && given === appKey) return { name: 'parle', app: 'parle', mayPark: () => true };
     return null;
   },
-  snapshot: () => demoSnapshot(Date.now(), state),
+  snapshot: () => ({ ...demoSnapshot(Date.now(), state), dismissed }),
+  dismiss: async (id) => { dismissed[id] = Date.now() + 7 * 86_400_000; },
   park: async () => {},
   probe: async () => {},
   secrets: () => (appKey ? [key, appKey] : [key]),
