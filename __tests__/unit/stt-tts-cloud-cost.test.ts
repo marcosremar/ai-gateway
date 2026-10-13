@@ -60,6 +60,7 @@ describe('measured units of an STT or TTS call', () => {
     await stt('groq', { text: 'bom dia', duration: 2.5 }).transcribe({ audio: wav(3), model: 'whisper-large-v3' });
     await stt('groq', { text: 'bom dia' }).transcribe({ audio: wav(4.2), model: 'whisper-large-v3' });
     await stt('groq', 'bom dia').transcribe({ audio: new Blob([new Uint8Array(wav(1.5))]), model: 'whisper-large-v3', responseFormat: 'text' });
+    await vi.waitFor(() => expect(costs()).toHaveLength(4));
     expect(costs()).toEqual([
       { stage: 'stt', provider: 'openrouter', model: 'openai/whisper-large-v3', costUsd: 0.0000225 },
       { stage: 'stt', provider: 'groq', model: 'whisper-large-v3', audioSeconds: 2.5 },
