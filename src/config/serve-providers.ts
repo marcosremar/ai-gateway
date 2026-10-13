@@ -127,6 +127,8 @@ export interface RouteEntrySpec {
   accountPolicyGuard?: boolean;
   order?: 'benchmark';
   benchmarkDataset?: string;
+  equivalent?: string;
+  language?: string;
 }
 export type ModelRoutesSpec = Partial<Record<Stage, Record<string, RouteEntrySpec[]>>>;
 
@@ -158,6 +160,8 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
       ...(e.preferFallbackVoice === true ? { preferFallbackVoice: true } : {}),
       ...(e.accountPolicyGuard === true ? { accountPolicyGuard: true } : {}),
       ...(benchmarkOrder ? { order: 'benchmark' as const, benchmarkDataset: benchmarkOrder } : {}),
+      ...(typeof e.equivalent === 'string' && e.equivalent.trim() ? { equivalent: e.equivalent.trim() } : {}),
+      ...(typeof e.language === 'string' && e.language.trim() ? { language: e.language.trim() } : {}),
     };
   }
   return null;
@@ -214,6 +218,7 @@ export interface BuildServeProvidersOptions {
   /** Account-policy guards (default: the process-wide registry, kept across remounts). */
   policyGuards?: AccountPolicyGuards;
   benchmarkRank?: (stage: Stage, dataset: string) => ReadonlyMap<string, number>;
+  reorderFor?: (stage: Stage, alias: string) => boolean;
 }
 
 export function orderByBenchmark(entries: RouteEntrySpec[], gatewayModel: string, rank: ReadonlyMap<string, number>): RouteEntrySpec[] {
@@ -231,6 +236,13 @@ export interface ServeProvidersResult {
 }
 
 const OPENROUTER_PASSTHROUGH = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i;
+
+export function equivalenceGroup(stage: Stage, e: RouteEntrySpec, model: string): string {
+  if (stage === 'stt') return e.equivalent ? `eq:${e.equivalent}` : `stt:${e.language ?? 'multi'}`;
+  if (stage === 'chat') return e.equivalent ? `eq:${e.equivalent}` : `model:${model}`;
+  const voice = e.voice ?? (e.voices ? `f=${e.voices.feminine},m=${e.voices.masculine}` : null);
+  return voice && e.equivalent ? `eq:${e.equivalent}|voice:${voice}` : `model:${model}|voice:${voice ?? 'pedida'}`;
+}
 
 export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProvidersResult {
   const { instances, openrouter } = opts;
@@ -308,10 +320,11 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
     const targets: Array<RouteTarget<StageProvider<S>>> = [];
     const reasons: string[] = [];
     const links: ChainLinkSpec[] = [];
+    const reorder = opts.reorderFor?.(stage, model) !== false;
     for (const e of entries) {
       const r = resolve(stage, model, e);
       links.push(linkOf(e.provider === 'deployment' ? { ...e, deployment: deploymentOf(e) } : e, model, r));
-      if (typeof r !== 'string') targets.push(r);
+      if (typeof r !== 'string') targets.push(reorder && e.provider !== 'deployment' ? { ...r, group: equivalenceGroup(stage, e, r.model ?? model), chainKey: `${stage}|${model}` } : r);
       else if (!reasons.includes(r)) reasons.push(r);
     }
     if (described[stage as Stage].has(model)) chains[stage as Stage][model] = links;

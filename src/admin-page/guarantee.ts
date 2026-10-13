@@ -1,6 +1,7 @@
 import type { ChainReport, LinkReport } from '../config/stage-chains';
 import type { DeploymentView } from '../deployments/types';
 import type { FallbackProbeResult } from '../telemetry/fallback-probe';
+import type { Promotion } from '../gateway/proxy/link-reorder';
 import type { AdminApp, AdminSnapshot } from './render';
 import { bootHeadline, bootOf, detailHref } from './boot';
 import { appTitle, esc, hhmm, inClass, mark, ms, pct, pill, providerLabel, stageName, upOf, worst, type Ctx, type Level, type Section } from './ui';
@@ -18,6 +19,7 @@ export interface ChainLink {
   probe: FallbackProbeResult | null;
   p50Ms: number | null;
   share: number | null;
+  reorder?: { role: 'promoted' | 'demoted'; reason: string };
 }
 
 export interface Service { app: string; stage: string; alias: string; links: ChainLink[]; verdict: Verdict; level: Level }
@@ -85,9 +87,20 @@ export function services(s: AdminSnapshot, filter: string | null = null, now = D
             p50Ms: t?.p50Ms ?? null, share: t && total ? t.served / total : null,
           };
         });
-        out.push({ app: app.id, stage, alias, links, ...verdictOf(links, app, classOpen) });
+        out.push({ app: app.id, stage, alias, links: reordered(links, (s.reorders ?? []).filter(p => p.chainKey === `${stage}|${alias}`)), ...verdictOf(links, app, classOpen) });
       }
     }
+  }
+  return out;
+}
+
+function reordered(links: ChainLink[], promotions: Promotion[]): ChainLink[] {
+  const out = [...links];
+  for (const p of promotions) {
+    const up = out.findIndex(l => l.target === p.leader);
+    const down = out.findIndex(l => l.target === p.declared);
+    if (up < 0 || down < 0) continue;
+    [out[up], out[down]] = [{ ...out[down]!, reorder: { role: 'demoted', reason: p.reason } }, { ...out[up]!, reorder: { role: 'promoted', reason: p.reason } }];
   }
   return out;
 }
@@ -118,8 +131,11 @@ const verdictText = (svc: Service) => (svc.verdict === 'so-nuvem' && svc.level =
 
 function serviceBlock(svc: Service, measured: Measured): string {
   const chain = svc.links.map((l, i) => `<li class="${l.serving ? 'now' : ''}"><span class="ix">${i + 1}</span><div class="lk"><div>${linkName(l)} ${pill(l.level, l.state)}${
-    l.serving ? ' <span class="pill info">atende agora</span>' : ''}</div>${linkFacts(l, measured)}</div></li>`).join('');
-  return `<div class="svc"><div class="svh"><b>${esc(stageName(svc.stage))}</b> <code>${esc(svc.alias)}</code>${pill(svc.level, verdictText(svc))}</div><ol class="chain">${chain}</ol></div>`;
+    l.serving ? ' <span class="pill info">atende agora</span>' : ''}${
+    l.reorder ? ` <span class="pill ${l.reorder.role === 'promoted' ? 'info' : 'warn'}">${esc(l.reorder.role === 'promoted' ? l.reorder.reason : 'rebaixada')}</span>` : ''}</div>${
+    linkFacts(l, measured)}</div></li>`).join('');
+  const note = svc.links.some(l => l.reorder) ? '<p class="foot-note">Ordem efetiva: o gateway trocou links equivalentes (mesmo modelo ou mesma voz) pela saúde e pela latência medidas.</p>' : '';
+  return `<div class="svc"><div class="svh"><b>${esc(stageName(svc.stage))}</b> <code>${esc(svc.alias)}</code>${pill(svc.level, verdictText(svc))}</div><ol class="chain">${chain}</ol>${note}</div>`;
 }
 
 export function guarantee(ctx: Ctx): Section {
