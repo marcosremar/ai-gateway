@@ -57,7 +57,7 @@ function trafficRows(now: number, state: DemoState): StoredTelemetryEvent[] {
   if (state === 'bad') for (let i = 0; i < 14; i++) push(now - (2 + i * 3) * 60_000, 'route.unavailable', 'error', { durMs: 30_000, attrs: { stage: 'tts' } });
   const lifecycle: Array<[number, string, StoredTelemetryEvent['level'], string]> = [
     [520, 'autoscale.warm', 'info', 'speech-stack'], [519, 'replica.creating', 'info', 'speech-stack'], [512, 'replica.ready', 'info', 'speech-stack'],
-    [340, 'replica.parked', 'info', 'speech-stack'], [96, 'replica.power_on', 'info', 'speech-stack'], [95, 'replica.ready', 'info', 'speech-stack'],
+    [340, 'replica.parked', 'info', 'speech-stack'], [40, 'replica.ready', 'info', 'babel-live'], [96, 'replica.power_on', 'info', 'speech-stack'], [95, 'replica.ready', 'info', 'speech-stack'],
   ];
   if (state !== 'ok') lifecycle.push([62, 'replica.creating', 'info', 'speech-stack-test'], [58, 'replica.create_failed', 'error', 'speech-stack-test']);
   if (state === 'bad') lifecycle.push([3, 'stage.on_fallback', 'warn', 'speech-stack'], [2, 'app.degraded', 'warn', 'speech-stack']);
@@ -107,6 +107,7 @@ function warnSnapshot(now: number): AdminSnapshot {
         { stage: 'stt', target: 'openrouter:openai/whisper-large-v3', providerId: 'openrouter', aliases: ['parle-stt'], ok: true, status: 200, code: null, latencyMs: 812, checkedAt: iso(now, 4), error: null },
         { stage: 'chat', target: 'openrouter:google/gemini-2.5-flash', providerId: 'openrouter', aliases: ['parle-chat'], ok: true, status: 200, code: null, latencyMs: 640, checkedAt: iso(now, 4), error: null },
         { stage: 'tts', target: 'openrouter:hexgrad/kokoro-82m', providerId: 'openrouter', voice: 'pm_alex', aliases: ['parle-tts'], ok: true, status: 200, code: null, latencyMs: 1290, checkedAt: iso(now, 4), error: null },
+        { stage: 'tts', target: 'openrouter:openai/gpt-4o-mini-tts', providerId: 'openrouter', voice: 'alloy', aliases: ['babel-tts'], ok: true, status: 200, code: null, latencyMs: 980, checkedAt: iso(now, 4), error: null },
       ],
     },
     balances: [
@@ -119,6 +120,7 @@ function warnSnapshot(now: number): AdminSnapshot {
       deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }], { lastRequestAt: iso(now, 3) }),
       deployment('parle-bridge-shadow', [], []),
       deployment('speech-stack-test', [], [], { warm: null }),
+      deployment('babel-live', [replica('scw-9z8y', 40, 0.79)], [], { app: 'babelcast', lastRequestAt: iso(now, 8) }),
     ],
     gpuSpend: {
       spentEur: { 'key-0f3a9c11d2e4': 1.2, 'env-parle': 2.65 },
@@ -127,6 +129,7 @@ function warnSnapshot(now: number): AdminSnapshot {
     alerts: [
       { event: 'gpu.outside_window', at: iso(now, 35), summary: 'deployment: speech-stack, replicas: 1, minutes: 35, eurPerHour: 0.79' },
       { event: 'balance.warn', at: iso(now, 300), summary: 'subject: Vast: saldo US$ 7,80 (~26 h)' },
+      { event: 'app.budget_warn', at: iso(now, 320), summary: 'app: babelcast, requests: 1600, limit: 2000' },
     ],
     machines: {
       global: { dayUsd: 0.42, committedUsd: 0.6, capDayUsd: 10 },
@@ -134,13 +137,13 @@ function warnSnapshot(now: number): AdminSnapshot {
     },
     keys: [
       key('env-marcos', 'marcos', 'admin', iso(now, 2), { autoWake: true, canStartGpu: true, gpuDailyEur: null }),
-      key('env-parle', 'parle', 'client', iso(now, 1), { autoWake: true, canStartGpu: true, gpuDailyEur: null }),
+      key('env-parle', 'parle', 'client', iso(now, 1), { autoWake: true, canStartGpu: true, gpuDailyEur: null }, 'producao'),
       key('key-0f3a9c11d2e4', 'parle-dev', 'client', iso(now, 50), { countsAsUse: false, wakeDeployments: ['speech-stack-test'], gpuDailyEur: 3 }, 'agentes'),
-      key('key-88b0aa31c7f0', 'babelcast', 'client', null, { neverWake: true }),
+      key('key-88b0aa31c7f0', 'babelcast', 'client', iso(now, 8), { neverWake: true }, 'legendas-ao-vivo'),
     ],
     apps: [
       {
-        id: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech-stack'] },
+        id: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech-stack'] }, aliases: ['parle-stt', 'parle-chat', 'parle-tts'],
         status: {
           app: 'parle', requiresGpu: true, mode: 'gpu', checkedAt: iso(now, 1),
           deployments: [{ name: 'speech-stack', stages: ['stt', 'llm', 'tts'], state: 'ready', replicas: { ready: 1, total: 1 }, lastProbe: { at: iso(now, 1), ok: true, ms: 420, error: null } }],

@@ -14,7 +14,9 @@ type Level = 'ok' | 'warn' | 'bad';
 
 export interface AdminAlert { event: string; at: string; summary: string }
 
-export interface AdminApp { id: string; profile: AppProfile | null; status: AppStatus | null }
+export interface AdminApp { id: string; profile: AppProfile | null; status: AppStatus | null; aliases?: string[] }
+
+export interface AppView { id: string; canPark: boolean }
 
 interface MachineCosts {
   global?: { dayUsd: number; committedUsd: number; capDayUsd: number };
@@ -38,7 +40,7 @@ export interface AdminSnapshot {
 
 interface Section { id: string; title: string; level: Level; note: string; count: number | null; meta: string; actions: string; body: string }
 
-interface Ctx { s: AdminSnapshot; now: number; csrf: string; app: string | null }
+interface Ctx { s: AdminSnapshot; now: number; csrf: string; app: string | null; view: AppView | null }
 
 const ALERT_FRESH_MS = 60 * 60_000;
 const NEAR_LIMIT = 0.8;
@@ -105,7 +107,7 @@ function table(cols: Col[], rows: string[][], empty: string): string {
 const STAGE: Record<string, string> = { stt: 'Fala → texto', chat: 'Conversa', llm: 'Conversa', tts: 'Texto → fala', s2s: 'Fala → fala', translate: 'Tradução' };
 const stageName = (stage: string) => STAGE[stage] ?? stage;
 
-function reserves({ s, now, csrf }: Ctx): Section {
+function reserves({ s, now, csrf, view }: Ctx): Section {
   const links = s.reserves.links;
   const failed = links.filter(r => !r.ok);
   const rows = [...links].sort((a, b) => Number(a.ok) - Number(b.ok)).map(r => [
@@ -121,7 +123,7 @@ function reserves({ s, now, csrf }: Ctx): Section {
     id: 'reservas', title: 'Reservas', level, count: links.length,
     note: !links.length ? 'nenhuma reserva testada ainda' : `${failed.map(r => stageName(r.stage)).join(', ')} sem resposta na nuvem`,
     meta: `teste a cada ${s.reserves.intervalMinutes} min${checked ? ` · último às ${hhmm(checked)}` : ''}`,
-    actions: form('/admin/probe', csrf, 'Testar as reservas agora', 'Testar todas as reservas agora? Cada uma recebe um pedido mínimo real.'),
+    actions: view ? '' : form('/admin/probe', csrf, 'Testar as reservas agora', 'Testar todas as reservas agora? Cada uma recebe um pedido mínimo real.'),
     body: table([{ label: 'Etapa' }, { label: 'Destino' }, { label: 'Resultado' }, { label: 'Latência', num: true }, { label: 'Verificado', num: true }], rows,
       `Nenhuma reserva testada ainda (o teste roda 30 s depois do boot e a cada ${s.reserves.intervalMinutes} min).`),
   };
@@ -163,7 +165,7 @@ const keyName = (k: KeyView | undefined) => (k ? `${k.user}${k.label ? ` (${k.la
 const upOf = (d: DeploymentView) => d.replicas.filter(r => r.phase !== 'halted');
 const outsideWindow = (d: DeploymentView, now: number) => Boolean(d.spec.warmSchedule?.length) && upOf(d).length > 0 && !activeWindow(d.spec.warmSchedule, now);
 
-function gpus({ s, now, csrf }: Ctx): Section {
+function gpus({ s, now, csrf, view }: Ctx): Section {
   const base = { id: 'gpus', title: 'GPUs', actions: '' };
   if (!s.gpus) return { ...base, level: 'ok', note: '', count: null, meta: '', body: '<p class="empty">As GPUs gerenciadas estão desligadas neste gateway.</p>' };
   const keys = new Map(s.keys.map(k => [k.id, k]));
@@ -190,7 +192,7 @@ function gpus({ s, now, csrf }: Ctx): Section {
       up.length ? duration(Math.max(...up.map(r => r.ageSeconds))) : '—',
       when(d.lastRequestAt, now),
       by.length ? by.join('<br>') : '—',
-      up.length ? form('/admin/park', csrf, 'Estacionar', `Estacionar ${d.name}? As réplicas sem uso desligam; pedidos em curso terminam.`, { name: d.name }, 'danger') : '',
+      up.length && (!view || (view.canPark && d.app === view.id)) ? form('/admin/park', csrf, 'Estacionar', `Estacionar ${d.name}? As réplicas sem uso desligam; pedidos em curso terminam.`, { name: d.name }, 'danger') : '',
     ] };
   }).sort(byLevel);
   const on = s.gpus.filter(d => upOf(d).length);
@@ -285,10 +287,12 @@ const KNOWN_APPS: Record<string, { name: string; description: string }> = {
   babelcast: { name: 'Babelcast', description: 'Tradução simultânea: transcreve a fala ao vivo e a traduz em texto e voz.' },
 };
 
+const appTitle = (id: string, profile: AppProfile | null | undefined) => ({
+  name: profile?.name || KNOWN_APPS[id]?.name || id, description: profile?.description || KNOWN_APPS[id]?.description || null,
+});
+
 function appCell(id: string, profile: AppProfile | null, needs: string): string {
-  const known = KNOWN_APPS[id];
-  const name = profile?.name || known?.name || id;
-  const description = profile?.description || known?.description;
+  const { name, description } = appTitle(id, profile);
   return `<b><a href="/admin?app=${encodeURIComponent(id)}#apps">${esc(name)}</a></b>`
     + (name !== id ? ` <span class="mono">${esc(id)}</span>` : '')
     + `<small>${description ? esc(description) : 'sem descrição · defina em PUT /v1/apps/' + esc(id) + '/profile'}</small>`
@@ -411,12 +415,13 @@ function activity({ s, now }: Ctx): Section {
 }
 
 function sections(ctx: Ctx): Section[] {
+  if (ctx.view) return [apps(ctx), gpus(ctx), reserves(ctx), keys(ctx), alerts(ctx), activity(ctx)];
   return [traffic(ctx), apps(ctx), gpus(ctx), reserves(ctx), balances(ctx), keys(ctx), machines(ctx), alerts(ctx), activity(ctx)];
 }
 
 interface Kpi { label: string; href: string; value: string; sub: string; level: Level | null }
 
-function kpis({ s }: Ctx, all: Section[]): Kpi[] {
+function kpis({ s, view }: Ctx, all: Section[]): Kpi[] {
   const t = s.traffic;
   const total = t ? t.total.served + t.total.failed : 0;
   const levelOf = (id: string) => all.find(x => x.id === id)?.level ?? null;
@@ -426,10 +431,13 @@ function kpis({ s }: Ctx, all: Section[]): Kpi[] {
   const g = s.machines?.global;
   const shortest = s.balances.filter(r => r.balanceUsd !== null).sort((a, b) => (a.hoursLeft ?? Infinity) - (b.hoursLeft ?? Infinity))[0];
   const reservesOk = s.reserves.links.filter(r => r.ok).length;
-  return [
+  const calls: Kpi[] = view ? [] : [
     { label: 'Chamadas 24 h', href: '#trafego', value: t ? count(total) : '—', sub: t ? `${count(t.hours.at(-1)!.served + t.hours.at(-1)!.failed)} na última hora` : 'telemetria desligada', level: null },
     { label: 'Sem resposta 24 h', href: '#trafego', value: t ? count(t.total.failed) : '—', sub: t ? `${pct(total ? t.total.failed / total : 0)} · ${plural(t.total.fallbacks, 'desvio', 'desvios')}` : 'telemetria desligada', level: levelOf('trafego') },
     { label: 'Latência p95', href: '#trafego', value: ms(t?.total.p95Ms), sub: t ? `p50 ${ms(t.total.p50Ms)} · 24 h` : 'telemetria desligada', level: null },
+  ];
+  return [
+    ...calls,
     { label: 'GPUs ligadas', href: '#gpus', value: s.gpus ? `${on.length} de ${s.gpus.length}` : '—', sub: s.gpus ? `${money(perHour)}/h agora` : 'GPUs desligadas aqui', level: levelOf('gpus') },
     { label: 'Gasto GPU hoje', href: '#chaves', value: money(keySpend), sub: g ? `máquinas ${money(g.dayUsd, 'US$')}/24 h` : 'pedida por chaves', level: null },
     shortest
@@ -455,19 +463,22 @@ function page(nonce: string, title: string, body: string, refresh = false): stri
 
 export function renderLogin(nonce: string, error: string | null, next = '/admin'): string {
   return page(nonce, 'ai-gateway · entrar', `<main class="login"><div class="brand">${LOGO}<span>ai-gateway <small>admin</small></span></div>`
-    + `<section><h1>Painel do gateway</h1><p>Cole a chave admin uma vez; a sessão dura 12 h neste aparelho.</p>${
-    error ? `<p class="msg" role="alert">${mark('bad')}${esc(error)}</p>` : ''}<form method="post" action="/admin/login" id="login"><input type="hidden" name="next" value="${esc(next)}"><label for="key">Chave admin</label>`
+    + `<section><h1>Painel do gateway</h1><p>Cole a chave admin, ou a chave do seu app para ver só os dados dele; a sessão dura 12 h neste aparelho.</p>${
+    error ? `<p class="msg" role="alert">${mark('bad')}${esc(error)}</p>` : ''}<form method="post" action="/admin/login" id="login"><input type="hidden" name="next" value="${esc(next)}"><label for="key">Chave admin ou do app</label>`
     + '<input id="key" name="key" type="password" autocomplete="current-password" required autofocus><button>Entrar</button></form></section></main>');
 }
 
-export function renderStatus(nonce: string, s: AdminSnapshot, opts: { now: number; csrf: string; actor: string; message: string | null; app: string | null }): string {
-  const ctx: Ctx = { s, now: opts.now, csrf: opts.csrf, app: opts.app };
+export function renderStatus(nonce: string, s: AdminSnapshot, opts: { now: number; csrf: string; actor: string; message: string | null; app: string | null; view?: AppView | null }): string {
+  const view = opts.view ?? null;
+  const ctx: Ctx = { s, now: opts.now, csrf: opts.csrf, app: view ? null : opts.app, view };
+  const own = view && appTitle(view.id, s.apps.find(a => a.id === view.id)?.profile);
+  const brand = `<div class="brand">${LOGO}<span>ai-gateway <small>${own ? 'app' : 'admin'}</small></span></div>`;
   const all = sections(ctx);
   const overall = worst(all.map(x => x.level));
   const time = new Intl.DateTimeFormat('pt-BR', { timeZone: ZONE, hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(opts.now);
   const nav = [`<li><a href="#visao" class="${overall}">${mark(overall)}Visão geral</a></li>`, ...all.map(x =>
     `<li><a href="#${x.id}" class="${x.level}">${mark(x.level)}${esc(x.title)}${x.count !== null ? `<span class="n">${x.count}</span>` : ''}</a></li>`)].join('');
-  const side = `<aside class="side"><div class="brand">${LOGO}<span>ai-gateway <small>admin</small></span></div><ul class="nav" aria-label="Seções">${nav}</ul>`
+  const side = `<aside class="side">${brand}<ul class="nav" aria-label="Seções">${nav}</ul>`
     + `<div class="foot"><div class="who"><b>${esc(opts.actor)}</b><br>atualizado às ${time}<br>recarrega a cada 1 min</div>${form('/admin/logout', opts.csrf, 'Sair', '')}</div></aside>`;
   const attention = all.filter(x => x.level !== 'ok').sort(byLevel);
   const attn = attention.length
@@ -476,9 +487,10 @@ export function renderStatus(nonce: string, s: AdminSnapshot, opts: { now: numbe
   const tiles = kpis(ctx, all).map(k => `<a class="kpi" href="${k.href}"><span class="kl">${k.level ? mark(k.level) : ''}${esc(k.label)}</span><b>${k.value}</b><small>${esc(k.sub)}</small></a>`).join('');
   const overview = `<div id="visao" data-spy><div class="top">${mark(overall)}<div><h1>${HEADLINE[overall]}</h1><p>${
     attention.length ? `${attention.length} ${attention.length > 1 ? 'áreas pedem' : 'área pede'} atenção` : `As ${all.length} áreas estão normais`} · ${time} (Paris)</p></div></div>`
-    + `${attn}<div class="kpis">${tiles}</div></div>`;
+    + (own ? `<p class="scope">Visão do app <b>${esc(own.name)}</b>${own.description ? ` · ${esc(own.description)}` : ''}<small>Só os dados deste app: as GPUs, as chaves, as reservas e os eventos dele.</small></p>` : '')
+    + `${attn}<div class="kpis${view ? ' few' : ''}">${tiles}</div></div>`;
   const body = all.map(x => `<section id="${x.id}" data-spy><header class="sh"><h2>${esc(x.title)}</h2>${pill(x.level, LEVEL_TEXT[x.level])}${
     x.meta ? `<span class="meta">${esc(x.meta)}</span>` : ''}${x.actions ? `<div class="acts">${x.actions}</div>` : ''}</header>${x.body}</section>`).join('');
-  return page(nonce, `ai-gateway · ${HEADLINE[overall]}`, `<div class="shell">${side}<main class="main">${
+  return page(nonce, `ai-gateway · ${own ? `${own.name} · ` : ''}${HEADLINE[overall]}`, `<div class="shell">${side}<main class="main">${
     opts.message ? `<p class="msg" role="status">${esc(opts.message)}</p>` : ''}${overview}${body}</main></div>`, true);
 }

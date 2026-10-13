@@ -573,17 +573,31 @@ realtime.mount(server);
 rooms.mount(server);
 // Outermost: the account API and pages answer themselves, and the quota gate sees every metered request first.
 accounts?.mount(server);
-// GET /admin: the status page for a browser, signed in once with the admin key (src/admin-page).
+// GET /admin: the status page for a browser, signed in once with the admin key or an app's own key (src/admin-page).
 createAdminPage({
-  actorOf: (key) => { const userId = keyRegistry.resolve(key)?.userId; return userId && adminUsers.has(userId) ? userId : null; },
+  actorOf: (key) => {
+    const userId = keyRegistry.resolve(key)?.userId;
+    if (!userId) return null;
+    if (adminUsers.has(userId)) return { name: userId, app: null };
+    if (!deployments?.apps.get(userId)) return null;
+    const keyId = access.resolve(key)?.keyId;
+    return { name: userId, app: userId, ...(keyId ? { keyId, mayPark: () => access.policyOf(keyId).canStartGpu } : {}) };
+  },
   snapshot: () => ({
     reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
     gpus: controller?.list() ?? null, gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
     machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
-    apps: deployments?.apps.list().map(({ id }) => ({ id, profile: deployments.apps.get(id)?.profile ?? null, status: deployments.gpuHealth.status(id) })) ?? [],
+    apps: deployments?.apps.list().map(({ id }) => {
+      const entry = deployments.apps.get(id);
+      return { id, profile: entry?.profile ?? null, status: deployments.gpuHealth.status(id), aliases: Object.values(entry?.routes ?? {}).flatMap(r => Object.keys(r ?? {})) };
+    }) ?? [],
     traffic: telemetry ? adminTraffic(telemetry.store.rows(), Date.now()) : null, audit: keyAudit.recent(30),
   }),
-  park: async (name) => { if (!controller) throw new Error('deployments desligados'); await controller.park(name); },
+  park: async (name, actor) => {
+    if (!controller) throw new Error('deployments desligados');
+    if (actor.keyId) await deployments?.clientGpu.forget(actor.keyId, name);
+    await controller.park(name);
+  },
   probe: () => fallbackProbe.check(),
   secrets: () => secretValues(process.env),
   audit: (entry) => keyAudit.record(entry),
