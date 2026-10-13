@@ -8,6 +8,7 @@ import type { AppProfile } from '../deployments/apps';
 import type { AppStatus } from '../deployments/app-gpu-health';
 import { activeWindow } from '../deployments/autoscale';
 import { idleGpu } from '../deployments/idle';
+import { SCALEWAY_GPU_OFF } from '../deployments/spec';
 import { answeredShare, gpuShare, sloLevel, type AdminTraffic, type TrafficLine, type TrafficView } from './traffic';
 import { SLO_TARGETS } from '../alerting/slo-targets';
 import type { SpendLedgerView } from '../deployments/spend-ledger';
@@ -208,7 +209,7 @@ function gpus(ctx: Ctx): Section {
       if (outsideWindow(d, now)) return `${d.name} ligada fora da janela de aula`;
       return d.status === 'degraded' || d.lastError ? `${d.name} ${GPU_STATUS[d.status] ?? d.status}` : '';
     }).filter(Boolean),
-    meta: `${on.length} de ${s.gpus.length} ligadas · ${money(perHour)}/h agora`,
+    meta: `${SCALEWAY_GPU_OFF}: GPUs só na Vast · ${on.length} de ${s.gpus.length} ligadas · ${money(perHour)}/h agora`,
     body: table([
       { label: 'Deployment' }, { label: 'Estado' }, { label: 'Réplicas', num: true }, { label: 'Máquina', wide: true }, { label: 'Custo', num: true },
       { label: 'Ligada há', num: true, wide: true }, { label: 'Último pedido', num: true }, { label: 'Ligada por', wide: true }, { label: 'Ação', act: true },

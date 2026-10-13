@@ -185,6 +185,7 @@ function sameValue(a: unknown, b: unknown): boolean {
 export function specMatches(spec: DeploymentSpec, body: Record<string, unknown>): boolean {
   for (const [key, value] of Object.entries(body)) {
     if (key === 'description') continue; // profile-only field, not stored on the spec
+    if (value === null && (spec as unknown as Record<string, unknown>)[key] === undefined) continue;
     if (!sameValue((spec as unknown as Record<string, unknown>)[key], value)) return false;
   }
   return true;

@@ -114,6 +114,7 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
       skipped.push(`${where(step)}: provider not configured`);
       continue;
     }
+    if (backend.gpuOff && isGpuMachineType(step.spec.machineType)) { skipped.push(`${where(step)}: ${backend.gpuOff}`); continue; }
     if (step.provider === 'vast' && args.forVast) step.spec = args.forVast(step.spec);
     const unfit = step.provider === 'vast' ? vastUnfit(step.spec) : null;
     if (unfit) { skipped.push(`${where(step)}: ${unfit}`); continue; }

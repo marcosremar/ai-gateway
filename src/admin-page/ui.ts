@@ -95,7 +95,7 @@ export const upOf = (d: DeploymentView) => d.replicas.filter(r => r.phase !== 'h
 export const outsideWindow = (d: DeploymentView, now: number) => Boolean(d.spec.warmSchedule?.length) && upOf(d).length > 0 && !activeWindow(d.spec.warmSchedule, now);
 
 export const providerOf = (d: DeploymentView) => upOf(d)[0]?.provider ?? d.spec.provider;
-export const providerLabel = (d: DeploymentView) => (providerOf(d) === 'vast' ? 'Vast · laboratório, barata' : 'Scaleway · produção');
+export const providerLabel = (d: DeploymentView) => (providerOf(d) === 'vast' ? 'Vast · produção' : 'Scaleway · desativada para GPU');
 export const pinBadge = (d: DeploymentView) => {
   if (!d.pinned) return '';
   const m = d.pinned.idleMinutes;

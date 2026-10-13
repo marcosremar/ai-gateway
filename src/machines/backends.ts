@@ -3,6 +3,7 @@ import type { ScalewayClient } from '../cpu-providers/scaleway-client';
 import type { ProviderCredentials } from '../gpu-providers/types';
 import { createRunpodRest, runpodTime, type RunpodFetch, type RunpodPod, type RunpodRest } from '../gateway/providers/gpu/runpod/rest';
 import { EUR_TO_USD, VAST_API, vastState, type VastDeploymentBackend } from '../deployments/vast-backend';
+import { isGpuMachineType } from '../deployments/spec';
 import type { DeploymentSpec, ExposedPort } from '../deployments/types';
 import type { CreateMachineInput, MachineBackend, MachineRequest, ProviderMachine } from './types';
 
@@ -47,7 +48,7 @@ export class ScalewayMachineBackend implements MachineBackend {
   readonly provider = 'scaleway' as const;
   constructor(
     private readonly client: ScalewayLike, private readonly secret: () => string, private readonly projectId: () => string | undefined,
-    private readonly awaitVolumes = false,
+    private readonly awaitVolumes = false, private readonly gpuOff: string | null = null,
   ) {}
 
   private credentials(): ProviderCredentials {
@@ -55,6 +56,7 @@ export class ScalewayMachineBackend implements MachineBackend {
   }
 
   async quote(request: MachineRequest): Promise<number | null> {
+    if (this.gpuOff && isGpuMachineType(request.machineType)) throw new Error(`${this.gpuOff}: GPU machines run on vast only`);
     const eur = await this.client.getHourlyPrice(request.zone ?? DEFAULT_ZONE, request.machineType, this.credentials());
     if (eur == null) return null;
     const usd = Math.round(eur * SCALEWAY_EUR_TO_USD * 1000) / 1000;

@@ -291,7 +291,7 @@ describe('admin page (/admin)', () => {
     const html = await gw.every(cookie);
     const at = html.indexOf('<b class="mono">babelcast-3090');
     const row = html.slice(at, html.indexOf('</tr>', at));
-    expect(row).toContain('Vast · laboratório, barata');
+    expect(row).toContain('Vast · produção');
     expect(row).toContain('fixada');
     expect(row).toContain('estaciona após 1 h sem uso');
     expect(row).toContain('RTX 3090');
@@ -300,8 +300,8 @@ describe('admin page (/admin)', () => {
     expect(row).toContain('hoje ≈');
     expect(row).toContain('action="/admin/pin"');
     const scw = html.indexOf('<b class="mono">speech-stack');
-    expect(html.slice(scw, html.indexOf('</tr>', scw))).toContain('Scaleway · produção');
-    expect(html).toMatch(/<code>babelcast-3090<\/code>.*Vast · laboratório, barata.*fixada/);
+    expect(html.slice(scw, html.indexOf('</tr>', scw))).toContain('Scaleway · desativada para GPU');
+    expect(html).toMatch(/<code>babelcast-3090<\/code>.*Vast · produção.*fixada/);
 
     expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0' }, cookie)).status).toBe(403);
     expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0', csrf }, cookie, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);

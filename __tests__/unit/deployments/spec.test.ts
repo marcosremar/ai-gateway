@@ -192,14 +192,14 @@ describe('candidates, near and provider vast', () => {
     expect(() => buildSpec('x', { image: 'a', port: 8000, ...body }, { profiles })).toThrow(message);
   });
 
-  it('vast: boot-script mode with the base image, GPU on, any port; no files, exposure or stop', () => {
+  it('vast: boot-script mode with the base image, GPU on, any port; files kept for the signed links, no exposure or stop', () => {
     const spec = buildSpec('x', { ...vast, port: 8010 }, { profiles });
     expect(spec).toMatchObject({ provider: 'vast', gpu: true, port: 8010, machineType: 'RTX 5090' });
     expect(buildSpec('x', { ...vast, port: 8010, maxRttMs: 40 }, { profiles }).maxRttMs).toBe(40);
     expect(buildSpec('x', { ...vast, port: 8010, maxRttExcessMs: 10 }, { profiles }).maxRttExcessMs).toBe(10);
     expect(buildSpec('x', { ...vast, port: 8010, minCuda: 12.9 }, { profiles }).minCuda).toBe(12.9);
     expect(() => buildSpec('x', { ...vast, port: 8000, bootScript: undefined }, { profiles })).toThrow(/need bootScript and image/);
-    expect(() => buildSpec('x', { ...vast, files: { a: 'YQ==' } }, { profiles })).toThrow(/files are not supported on vast/);
+    expect(buildSpec('x', { ...vast, files: { a: 'YQ==' } }, { profiles }).files).toEqual({ a: 'YQ==' });
     expect(() => buildSpec('x', { ...vast, bootScript: 'x'.repeat(16_000) }, { profiles })).toThrow(/vast accepts 32 KB of env/);
     expect(() => buildSpec('x', { ...vast, bootScript: 'x'.repeat(12_000) }, { profiles })).not.toThrow();
     expect(() => buildSpec('x', { ...vast, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles })).toThrow(/exposure/);

@@ -26,6 +26,8 @@ const PATH_RE = /^\/[A-Za-z0-9._~\-/]*$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** GPU commercial types on Scaleway start with the GPU family (L4, L40S, H100, GPU-3070, RENDER…). */
+export const SCALEWAY_GPU_OFF = 'Scaleway desativada (dono, 14/10/2026)';
+
 export function isGpuMachineType(type: string): boolean {
   return /^(L4|L40S|H100|H200|B300|GPU|RENDER)/i.test(type);
 }
@@ -107,7 +109,7 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
+  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'euOnly', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
   'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor', 'autoRetryStuckBoot',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
@@ -159,6 +161,10 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   if (input.allowFar !== undefined) {
     if (typeof input.allowFar !== 'boolean') throw new SpecError('allowFar must be a boolean');
     out.allowFar = input.allowFar;
+  }
+  if (input.euOnly !== undefined) {
+    if (typeof input.euOnly !== 'boolean') throw new SpecError('euOnly must be a boolean');
+    out.euOnly = input.euOnly;
   }
   if (input.image !== undefined) out.image = str(input.image, 'image', IMAGE_RE);
   if (input.port !== undefined) out.port = int(input.port, 'port', 1, 65535);
@@ -513,6 +519,6 @@ export function vastRefusal(spec: DeploymentSpec, fallback = false): string | nu
 }
 
 function checkVastSpec(spec: DeploymentSpec): void {
-  const refusal = vastRefusal(spec);
+  const refusal = vastRefusal({ ...spec, files: undefined });
   if (refusal) throw new SpecError(refusal);
 }

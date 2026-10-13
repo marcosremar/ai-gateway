@@ -92,6 +92,11 @@ are put back. `envByMachineType` is merged per key: the declared keys are put ba
 
 ### `parle-speech` (one GPU for STT + LLM + TTS)
 
+**Since 14/10/2026 (owner: GPUs on Vast only, Scaleway disabled for GPUs, `SCALEWAY_GPU_OFF`)** `parle-speech` and
+`parle-speech-test` are one RTX 5090 on Vast (≤ €0.85/h, `euOnly`, `placements: []`, `idleAction: delete`) from the
+public `ghcr.io/marcosremar/speech-stack:<tag>`; `SPEECH_IMAGE` no longer moves them; a stored `files` set reaches the
+host by signed link. The paragraph below is the Scaleway layout it replaced.
+
 `src/deployments/declared/parle-speech.json`: the `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` image
 (`docker/speech-stack`: Whisper + Qwen LLM + Qwen3-TTS in one container). It lives in the gateway's own Scaleway
 registry, which the machines pull from with `SCW_REGISTRY_SECRET_KEY` (a registry read-only IAM key; the gateway's
@@ -572,7 +577,8 @@ With `candidates`, each create walks a **ranked ladder**:
 - `candidates`: 1–20 entries `{ provider?, zone?, machineType, maxEurPerHour }` (`provider` defaults to the spec's,
   `zone` to the spec's; Vast ignores `zone`). `near`: ISO country of the users, default **`FR`** (`DEFAULT_NEAR`, the
   owner's region). `allowFar`: accept hosts/zones beyond 2500 km of `near` when nothing nearer exists (default
-  false). `maxRttMs` (Vast): see [RTT gate](#rtt-gate-vast). `minCuda` (Vast, 11–14): lowest CUDA the host driver
+  false). `euOnly` (Vast): rent only hosts whose country is in the EU (`EU_COUNTRIES`, `geo.ts`; the search then fetches
+  1000 offers, the filter is client-side); every parle GPU declares it (student audio stays in the EU, owner 05/10/2026). `maxRttMs` (Vast): see [RTT gate](#rtt-gate-vast). `minCuda` (Vast, 11–14): lowest CUDA the host driver
   must support, for the image's own CUDA (`cuda_max_good`); never below the GPU's floor (12.8 for Blackwell, else 12.4).
   A driver older than the image fails at the first CUDA call with error 804 ("forward compatibility"): `vllm/vllm-omni`
   v0.28 is CUDA 13.0 (torch 2.13+cu130, driver ≥ 580), and a 5090 host on driver 570 (CUDA 12.8) could not start it —

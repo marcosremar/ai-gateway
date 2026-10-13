@@ -416,3 +416,37 @@ describe('a refused provider account skips that provider, not the walk (incident
     expect(attempts).toEqual(['L40S-1-48G@fr-par-2']);
   });
 });
+
+describe('Scaleway GPUs off (owner, 14/10/2026): no Scaleway GPU is created or powered on', () => {
+  const OFF = 'Scaleway desativada (dono, 14/10/2026)';
+
+  it('a stored spec with Scaleway places skips them with the reason and lands on vast; a Scaleway-only one creates nothing and says why', async () => {
+    const { controller, scaleway, vast, attempts } = await make();
+    await controller.put('s', { ...SPEC, minReplicas: 0, maxReplicas: 1 });
+    await controller.put('only', { ...SPEC, minReplicas: 0, maxReplicas: 1, placements: [{ zone: 'fr-par-1' }] });
+    Object.assign(scaleway, { gpuOff: OFF });
+    controller.wake('s');
+    controller.wake('only');
+    await until(() => vast.created.length === 1 && /Scaleway desativada/.test(controller.get('only')!.lastError ?? ''));
+    expect(attempts).toEqual([]);
+    expect(scaleway.created).toHaveLength(0);
+    expect(controller.get('s')!.lastPlacement).toMatch(/^vast RTX 5090 \(≤ €0\.85\/h\); skipped: scaleway L40S-1-48G@fr-par-2: Scaleway desativada \(dono, 14\/10\/2026\)/);
+    expect(controller.get('only')!.lastError).toContain('scaleway L40S-1-48G@fr-par-1: Scaleway desativada (dono, 14/10/2026)');
+    await expect(controller.put('new', SPEC)).rejects.toThrow(`${OFF}: 'new' asks for scaleway L40S-1-48G`);
+  });
+
+  it('a parked Scaleway GPU is not powered on: the replica comes from vast', async () => {
+    const { controller, scaleway, vast } = await make();
+    await controller.put('p', { ...SPEC, minReplicas: 0, maxReplicas: 1, idleAction: 'stop' });
+    controller.wake('p');
+    await until(() => controller.get('p')!.replicas.some(r => r.phase === 'ready'));
+    await controller.park('p');
+    await until(() => controller.get('p')!.replicas.every(r => r.phase === 'halted'));
+    const started: string[] = [];
+    scaleway.startReplica = async (m) => { started.push(m.id); };
+    Object.assign(scaleway, { gpuOff: OFF });
+    controller.wake('p');
+    await until(() => vast.created.length === 1);
+    expect(started).toEqual([]);
+  });
+});

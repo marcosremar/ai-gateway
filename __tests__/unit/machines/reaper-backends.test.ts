@@ -86,6 +86,10 @@ describe('machine backends never see deployment replicas', () => {
     expect(m.usdPerHour).toBe(0.6);
     expect((await b.list('prod')).map(x => x.machineId)).toEqual(['m-1']);
     await expect(b.create({ machineId: 'm-9', namespace: 'prod', request: request({ provider: 'scaleway', maxUsdPerHour: 0.5 }) })).rejects.toThrow(/out_of_stock/);
+    const off = new ScalewayMachineBackend(client as never, () => 'scw-secret', () => undefined, false, 'Scaleway desativada (dono, 14/10/2026)');
+    await expect(off.create({ machineId: 'm-2', namespace: 'prod', request: request({ provider: 'scaleway', machineType: 'L4-1-24G', maxUsdPerHour: 1 }) }))
+      .rejects.toThrow('Scaleway desativada (dono, 14/10/2026): GPU machines run on vast only');
+    expect(created).toHaveLength(1);
   });
 
   it('vast: rents under the cap with label aigw-m:<ns>:<id>, maps each port, ignores deployment labels', async () => {

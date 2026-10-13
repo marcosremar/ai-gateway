@@ -27,6 +27,11 @@ export const COUNTRY_HUBS: Readonly<Record<string, readonly [number, number]>> =
   AU: [-33.87, 151.21], NZ: [-36.85, 174.76], ZA: [-26.2, 28.05], AE: [25.2, 55.27], SA: [24.71, 46.68],
 };
 
+export const EU_COUNTRIES: ReadonlySet<string> = new Set([
+  'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT',
+  'RO', 'SE', 'SI', 'SK',
+]);
+
 const EARTH_RADIUS_KM = 6371;
 const rad = (deg: number) => (deg * Math.PI) / 180;
 
