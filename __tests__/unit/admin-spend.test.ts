@@ -190,7 +190,7 @@ describe('recommendations', () => {
   const quiet = (): AdminSnapshot => {
     const s = demoSnapshot(NOW, 'ok');
     return {
-      ...s, traffic: null, spend: null, balances: s.balances.map(b => ({ ...b, hoursLeft: b.hoursLeft === null ? null : 500 })),
+      ...s, traffic: null, spend: null, ttsCache: null, balances: s.balances.map(b => ({ ...b, hoursLeft: b.hoursLeft === null ? null : 500 })),
       keys: s.keys.map(k => ({ ...k, policy: { ...k.policy, gpuDailyEur: k.policy.gpuDailyEur ?? 20 } })),
       apps: s.apps.map(a => ({ ...a, profile: { requiresGpu: false, gpuDeployments: [], ...a.profile, name: a.id, description: 'x' } })),
       appBudgets: [],

@@ -152,6 +152,11 @@ export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnaps
       since: now - 12 * 60_000, reason: 'promovida: p95 0,4 s vs 1,3 s',
     }] : [],
     digest: { enabled: true, lastSentAt: lastMonday8(now), lastKind: 'weekly' as const },
+    ttsCache: {
+      entries: 412, bytes: 21.4 * 1024 * 1024, maxBytes: 64 * 1024 * 1024, diskBytes: 88 * 1024 * 1024, diskMaxBytes: 200 * 1024 * 1024, ttlHours: 24,
+      hits: 1840, misses: 2310, bypassed: 12, evictions: state === 'bad' ? 96 : 0, savedMs: 1840 * 640,
+      byApp: { parle: { hits: 1700, misses: 1500, bypassed: 0, savedMs: 1700 * 650 }, babelcast: { hits: 140, misses: 810, bypassed: 12, savedMs: 140 * 520 } },
+    },
     about: { commit: '0a52749c1d2e3f4a5b6c7d8e9f00112233445566', uptimeSeconds: 4 * 3600 + 1260, region: 'europe-west4', telemetryAt: iso(now, 0) },
   };
   if (state === 'ok') return allGreen(snapshot, now);
