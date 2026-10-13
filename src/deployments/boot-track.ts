@@ -10,11 +10,29 @@ export const BOOTS_KEPT = 5;
 const FAILURE_REASONS = new Set(['boot-timeout', 'boot-stuck', 'boot-failed', 'unhealthy', 'halted', 'too-far', 'gone']);
 
 export interface PhaseMark { phase: BootPhase; at: number }
-export interface BootRecord { replicaId: string | null; startedAt: number; endedAt: number; result: 'ready' | 'failed' | 'interrupted'; reason: string | null; phases: PhaseMark[] }
+export interface BootRecord {
+  replicaId: string | null; startedAt: number; endedAt: number; result: 'ready' | 'failed' | 'interrupted'; reason: string | null; phases: PhaseMark[];
+  pulledBytes?: number;
+}
 export interface BootLogLine { at: number; replicaId: string | null; text: string }
-export interface ActiveBoot { replicaId: string | null; phases: PhaseMark[] }
+export interface ActiveBoot { replicaId: string | null; phases: PhaseMark[]; report?: BootReport }
 export interface BootHistory { past: Record<string, BootRecord[]>; lines: Record<string, BootLogLine[]> }
 export const BOOT_HISTORY_SAVE_MS = 60_000;
+
+export const REPORTED_PHASES = ['pulling-image', 'starting-container', 'loading-models', 'failed'] as const;
+export type ReportedPhase = typeof REPORTED_PHASES[number];
+export const REPORTED_AS: Record<Exclude<ReportedPhase, 'failed'>, ActivePhase> = { 'pulling-image': 'pulling', 'starting-container': 'starting', 'loading-models': 'loading' };
+export const REPORT_FRESH_MS = 2 * 60_000;
+export const REPORTED_LINES_KEPT = 60;
+export const REPLICA_LINE = 'replica: ';
+const PROGRESS_MIN_BYTES = 1_000_000;
+const SEEN_LINES_KEPT = 500;
+
+export interface BootEvent { phase: ReportedPhase; bytes: number | null; layers: [number, number] | null; exit: number | null; lines: string[] }
+export interface BootReport {
+  phase: ActivePhase | null; at: number; bytes: number | null; layers: [number, number] | null; progressAt: number;
+  failed: { exit: number | null; at: number } | null;
+}
 
 export interface BootState {
   phase: ActivePhase;
@@ -27,6 +45,9 @@ export interface BootState {
   timeoutMinutes: number;
   stuck: boolean;
   phases: PhaseMark[];
+  reported: boolean;
+  progress: { bytes: number | null; totalBytes: number | null; layers: [number, number] | null } | null;
+  failed: { exit: number | null } | null;
 }
 
 export function bootPhaseOf(
@@ -62,9 +83,16 @@ export function bootStates(active: ActiveBoot[], past: BootRecord[], now: number
     const phaseMinutes = (now - last.at) / 60_000;
     const totalMinutes = (now - b.phases[0]!.at) / 60_000;
     const expectedMinutes = expectedPhaseMinutes(phase, past);
+    const r = b.report;
+    const pulling = phase === 'pulling' && r?.phase === 'pulling';
+    const progressing = pulling && now - r.progressAt <= REPORT_FRESH_MS;
+    const failed = r?.failed ? { exit: r.failed.exit } : null;
     return [{
       phase, replicaId: b.replicaId, startedAt: b.phases[0]!.at, since: last.at, phaseMinutes, totalMinutes, expectedMinutes, timeoutMinutes,
-      stuck: phaseMinutes > expectedMinutes || totalMinutes > timeoutMinutes, phases: b.phases,
+      stuck: failed !== null || totalMinutes > timeoutMinutes || (phaseMinutes > expectedMinutes && !progressing), phases: b.phases,
+      reported: !!r && r.phase === phase && now - r.at <= REPORT_FRESH_MS,
+      progress: pulling ? { bytes: r.bytes, totalBytes: past.find(p => p.result === 'ready' && p.pulledBytes)?.pulledBytes ?? null, layers: r.layers } : null,
+      failed,
     }];
   });
 }
@@ -81,6 +109,7 @@ export class BootTracker {
   private readonly past = new Map<string, BootRecord[]>();
   private readonly lines = new Map<string, BootLogLine[]>();
   private readonly messages = new Map<string, string>();
+  private readonly reports = new Map<string, BootReport & { seen: Set<string> }>();
 
   line(deployment: string, replicaId: string | null, text: string, at: number): void {
     const list = this.lines.get(deployment) ?? [];
@@ -92,6 +121,39 @@ export class BootTracker {
     if (!message || this.messages.get(replicaId) === message) return;
     this.messages.set(replicaId, message);
     this.line(deployment, replicaId, `provider: ${message.trim().slice(0, 300)}`, at);
+  }
+
+  report(deployment: string, replicaId: string, ev: BootEvent, at: number): void {
+    const prev = this.reports.get(replicaId);
+    const phase = ev.phase === 'failed' ? prev?.phase ?? null : REPORTED_AS[ev.phase];
+    const bytes = ev.bytes ?? prev?.bytes ?? null;
+    const moved = !prev || phase !== prev.phase || (bytes ?? 0) - (prev.bytes ?? 0) >= PROGRESS_MIN_BYTES || (ev.layers?.[0] ?? 0) > (prev.layers?.[0] ?? 0);
+    const seen = prev?.seen ?? new Set<string>();
+    this.reports.set(replicaId, {
+      phase, at, bytes, layers: ev.layers ?? (phase === prev?.phase ? prev.layers : null), progressAt: moved ? at : prev?.progressAt ?? at,
+      failed: ev.phase === 'failed' ? { exit: ev.exit, at } : prev?.failed ?? null, seen,
+    });
+    for (const text of ev.lines) {
+      if (seen.has(text)) continue;
+      seen.add(text);
+      if (seen.size > SEEN_LINES_KEPT) seen.delete(seen.values().next().value!);
+      this.line(deployment, replicaId, `${REPLICA_LINE}${text}`, at);
+    }
+    if (ev.phase === 'failed') this.line(deployment, replicaId, `${REPLICA_LINE}boot failed${ev.exit === null ? '' : ` (exit ${ev.exit})`}`, at);
+    this.capReported(deployment, replicaId);
+    if (phase && ev.phase !== 'failed') this.phase(deployment, replicaId, phase, at, at);
+  }
+
+  reportedPhase(replicaId: string, now: number): ActivePhase | null {
+    const r = this.reports.get(replicaId);
+    return r && now - r.at <= REPORT_FRESH_MS ? r.phase : null;
+  }
+
+  private capReported(deployment: string, replicaId: string): void {
+    const list = this.lines.get(deployment) ?? [];
+    const mine = (l: BootLogLine) => l.replicaId === replicaId && l.text.startsWith(REPLICA_LINE);
+    let extra = list.filter(mine).length - REPORTED_LINES_KEPT;
+    if (extra > 0) this.lines.set(deployment, list.filter(l => !(mine(l) && extra-- > 0)));
   }
 
   placingStart(deployment: string, at: number): void {
@@ -127,8 +189,13 @@ export class BootTracker {
     if (!boot) return;
     this.active.delete(replicaId);
     this.messages.delete(replicaId);
+    const pulledBytes = this.reports.get(replicaId)?.bytes;
+    this.reports.delete(replicaId);
     const result = reason === 'ready' ? 'ready' : FAILURE_REASONS.has(reason) ? 'failed' : 'interrupted';
-    this.record(boot.deployment, { replicaId, startedAt: boot.phases[0]!.at, endedAt: at, result, reason: result === 'ready' ? null : reason, phases: boot.phases });
+    this.record(boot.deployment, {
+      replicaId, startedAt: boot.phases[0]!.at, endedAt: at, result, reason: result === 'ready' ? null : reason, phases: boot.phases,
+      ...(result === 'ready' && pulledBytes ? { pulledBytes } : {}),
+    });
   }
 
   activeIds(): string[] {
@@ -140,7 +207,10 @@ export class BootTracker {
     return {
       active: [
         ...(placing !== undefined ? [{ replicaId: null, phases: [{ phase: 'placing' as const, at: placing }] }] : []),
-        ...[...this.active].filter(([, b]) => b.deployment === deployment).map(([replicaId, b]) => ({ replicaId, phases: [...b.phases] })),
+        ...[...this.active].filter(([, b]) => b.deployment === deployment).map(([replicaId, b]) => {
+          const r = this.reports.get(replicaId);
+          return { replicaId, phases: [...b.phases], ...(r ? { report: { phase: r.phase, at: r.at, bytes: r.bytes, layers: r.layers, progressAt: r.progressAt, failed: r.failed } } : {}) };
+        }),
       ],
       past: [...(this.past.get(deployment) ?? [])].reverse(),
       log: [...(this.lines.get(deployment) ?? [])],

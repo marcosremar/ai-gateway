@@ -6,6 +6,7 @@
 
 import { replicaCloudInit } from './cloud-init';
 import { randomBytes } from 'crypto';
+import { bootEventAuth, bootReportFor, parseBootEvent, sameAuth } from './boot-events';
 import { ControllerState, replicaTokenFor, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
 import { placeReplica, PlacementError } from './placement-walk';
@@ -280,10 +281,11 @@ export abstract class ReplicaLifecycle extends ControllerState {
     const tokenKey = randomBytes(12).toString('hex');
     const secret = rt.record.replicaToken;
     const replicaToken = replicaTokenFor(secret, tokenKey);
+    const bootReport = this.reportsBoots() ? bootReportFor(this.opts.publicUrl!, tokenKey, replicaToken) : undefined;
     const machine = await backend.createReplica({
-      spec, replicaToken, tokenKey, namespace: this.namespace, ...(network ? { network } : {}),
+      spec, replicaToken, tokenKey, namespace: this.namespace, ...(network ? { network } : {}), ...(bootReport ? { bootReport } : {}),
       // Vast builds its own init (`vastReplicaInit`) from spec + token; Scaleway takes this cloud-init as user_data.
-      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), replicaToken) : '',
+      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), replicaToken, { bootReport }) : '',
       ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
       onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
     });
@@ -293,6 +295,20 @@ export abstract class ReplicaLifecycle extends ControllerState {
       void this.opts.store.saveDeployment(rt.record).catch(() => {});
     }
     return { ...machine, provider: backend.provider, tokenKey };
+  }
+
+  protected reportsBoots(): boolean {
+    return Boolean(this.opts.publicUrl) && this.opts.bootReporting !== false;
+  }
+
+  bootEvent(key: string, auth: string, query: URLSearchParams, text: string): boolean {
+    if (!key || !this.reportsBoots()) return false;
+    const m = this.machines.find(x => (x.tokenKey ?? this.tokenKeys.get(x.id)) === key);
+    const rt = m && this.deployments.get(m.deployment);
+    if (!m || !rt || !sameAuth(auth, bootEventAuth(this.replicaToken(rt, m))) || !this.boots.activeIds().includes(m.id)) return false;
+    const event = parseBootEvent(query, text, this.secretsOf(rt, m));
+    if (event) this.boots.report(m.deployment, m.id, event, this.now());
+    return event !== null;
   }
 
   /** Reserved IP + firewall of an exposed deployment, created once and kept in the record (it outlives replicas). */

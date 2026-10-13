@@ -12,6 +12,7 @@
 
 import { createHmac } from 'crypto';
 import { activeWindow, warmFloor, type PressureState } from './autoscale';
+import { bootEventAuth } from './boot-events';
 import { filesByUrl } from './boot-files';
 import { bootTimeoutMinutesOn, replicaPhase, type ObservedReplica } from './planner';
 import { NAME_RE } from './spec';
@@ -132,6 +133,7 @@ export interface ControllerOptions {
   backend?: DeploymentBackend;
   store: DeploymentStore;
   publicUrl?: string;
+  bootReporting?: boolean;
   probe: ReplicaProbe;
   namespace?: string;
   /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
@@ -520,15 +522,19 @@ export abstract class ControllerState {
     return replicaTokenFor(rt.record.secretPins?.[tokenKey ?? `id:${machine.id}`] ?? rt.record.replicaToken, tokenKey);
   }
 
+  protected secretsOf(rt: Runtime, m: ReplicaMachine): string[] {
+    const { env, envByMachineType, registryAuth } = rt.record.spec;
+    const replicaToken = this.replicaToken(rt, m);
+    return [
+      ...(this.opts.secrets?.() ?? []), ...secretValues(Object.assign({}, ...Object.values(envByMachineType ?? {}), env)),
+      registryAuth?.password ?? '', rt.record.replicaToken, replicaToken, bootEventAuth(replicaToken),
+    ].filter(s => s.length >= 8);
+  }
+
   protected containerLogOf(m: ReplicaMachine): Promise<ContainerLog> | null {
     const backend = this.backends[this.providerOf(m)];
     const rt = this.deployments.get(m.deployment);
     if (!backend?.containerLogs || !rt) return null;
-    const { env, envByMachineType, registryAuth } = rt.record.spec;
-    const secrets = [
-      ...(this.opts.secrets?.() ?? []), ...secretValues(Object.assign({}, ...Object.values(envByMachineType ?? {}), env)),
-      registryAuth?.password ?? '', rt.record.replicaToken, this.replicaToken(rt, m),
-    ].filter(s => s.length >= 8);
-    return this.containerLogs.read(m, () => backend.containerLogs!(m, CONTAINER_LOG_LINES), secrets);
+    return this.containerLogs.read(m, () => backend.containerLogs!(m, CONTAINER_LOG_LINES), this.secretsOf(rt, m));
   }
 }

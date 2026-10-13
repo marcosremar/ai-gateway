@@ -325,7 +325,7 @@ describe('admin page (/admin)', () => {
     expect(row).toContain('Iniciando');
     expect(row).toContain('puxando a imagem há 3 min · esperado 10 min');
     expect(row).toContain('href="/admin/gpus/babelcast-3090"');
-    expect(html).toMatch(/GPUs e máquinas[^]*?1 iniciando/);
+    expect(html).toMatch(/GPUs e máquinas[^]*?2 iniciando/);
     expect(html).toMatch(/<code>babelcast-3090<\/code>[^]*?Iniciando · puxando a imagem há 3 min/);
     const failed = html.slice(html.indexOf('<b class="mono">parle-bridge-shadow'));
     expect(failed.slice(0, failed.indexOf('</tr>'))).toContain('sem oferta disponível · nova tentativa às 12:07');
@@ -473,7 +473,7 @@ describe('admin page (/admin)', () => {
     const now = Date.parse('2026-10-13T10:00:00Z');
     const snapshot = demoSnapshot(now, 'warn');
     const html = PAGES.map(p => renderStatus('n', snapshot, { now, csrf: 'c', actor: 'marcos', message: null, app: null, page: p.id })).join('');
-    for (const label of ['chamadas em 24 h', 'sem resposta', 'p95', '3 de 5 ligadas', 'de GPU hoje', 'menor saldo vast']) expect(html).toContain(label);
+    for (const label of ['chamadas em 24 h', 'sem resposta', 'p95', '4 de 5 ligadas', 'de GPU hoje', 'menor saldo vast']) expect(html).toContain(label);
     const section = (id: string) => html.slice(html.indexOf(`<section id="${id}"`), html.indexOf('</section>', html.indexOf(`<section id="${id}"`)));
     const traffic = section('trafego');
     expect(traffic).toContain('<code>deployment:speech-stack</code>');

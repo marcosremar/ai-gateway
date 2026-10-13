@@ -13,6 +13,7 @@
  * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
+import type { BootReport } from './boot-events';
 import type { BootPhase, BootRecord, BootState } from './boot-track';
 import type { HostRecord } from './host-reputation';
 import type { StuckRetry } from './stuck-retry';
@@ -329,6 +330,7 @@ export interface CreateReplicaInput {
   replicaToken: string;
   tokenKey?: string;
   cloudInit: string;
+  bootReport?: BootReport;
   namespace: string;
   /** user_data keys → bytes (boot-script `files`). */
   files?: Record<string, Uint8Array>;

@@ -1,5 +1,5 @@
 import type { AdminSnapshot } from '../../src/admin-page';
-import { bootStates, phaseDurations, type BootLogLine, type BootPhase, type BootRecord, type PhaseMark } from '../../src/deployments/boot-track';
+import { bootStates, phaseDurations, type ActiveBoot, type BootLogLine, type BootPhase, type BootRecord, type PhaseMark } from '../../src/deployments/boot-track';
 import type { DeploymentView, ReplicaView } from '../../src/deployments/types';
 
 const MIN = 60_000;
@@ -18,7 +18,7 @@ function readyBoot(replicaId: string, now: number, startedMinAgo: number, minute
   return { replicaId, startedAt: phases[0]!.at, endedAt: at, result: 'ready', reason: null, phases: [...phases, { phase: 'ready', at }] };
 }
 
-function bootView(now: number, active: Array<{ replicaId: string | null; phases: PhaseMark[] }>, past: BootRecord[], timeout: number,
+function bootView(now: number, active: ActiveBoot[], past: BootRecord[], timeout: number,
   extra: Partial<DeploymentView['boot']> = {}): DeploymentView['boot'] {
   return {
     active: bootStates(active, past, now, timeout).map(b => ({ ...b, phases: phaseDurations(b.phases, now) })),
@@ -46,6 +46,7 @@ export function withBoots(s: AdminSnapshot, now: number, stuck: boolean): AdminS
     readyBoot('fr-par-2/9c41', now, 30 * 60, [['provisioning', 2], ['starting', 5], ['loading', 4]]),
     readyBoot('fr-par-2/a7d2', now, 6 * 60, [['provisioning', 2], ['starting', 6], ['loading', 4]]),
   ];
+  const scwReported = [{ ...readyBoot('fr-par-2/e81b', now, 3 * 60, [['provisioning', 2], ['pulling', 7], ['starting', 1], ['loading', 4]]), pulledBytes: 21e9 }, ...scwPast];
   const changes: Record<string, (d: DeploymentView) => DeploymentView> = {
     'babelcast-3090': d => ({
       ...d, status: 'warming', lastRequestAt: new Date(now - 7 * MIN).toISOString(),
@@ -73,7 +74,16 @@ export function withBoots(s: AdminSnapshot, now: number, stuck: boolean): AdminS
           ],
         }),
       }),
-    } : {}),
+    } : {
+      'speech-stack-test': (d: DeploymentView) => ({
+        ...d, status: 'warming' as const, spec: { ...d.spec, image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261011-0200', bootTimeoutMinutes: 45 },
+        replicas: [booting('fr-par-2/d5f0', { provider: 'scaleway', zone: 'fr-par-2', machineType: 'L4-1-24G', pricePerHour: 0.79, providerState: 'running', ip: '51.15.0.40', ageSeconds: 6 * 60 })],
+        boot: bootView(now, [{
+          replicaId: 'fr-par-2/d5f0', phases: boot(now, [['provisioning', 6], ['pulling', 4]]),
+          report: { phase: 'pulling', at: now - 10_000, bytes: 12.3e9, layers: [9, 23], progressAt: now - 10_000, failed: null },
+        }], scwReported, 45, { expectedBootSeconds: 14 * 60 }),
+      }),
+    }),
   };
   const gpuLogs: Record<string, BootLogLine[]> = {
     'babelcast-3090': [
@@ -92,11 +102,20 @@ export function withBoots(s: AdminSnapshot, now: number, stuck: boolean): AdminS
       line(now, 9, null, 'creating replica provider=vast type=RTX 3090 zone=fr-par-2'),
       line(now, 8, null, 'create failed error=create: out_of_stock: no vast offer for RTX 3090 under €0.30/h near FR'),
     ],
-    'speech-stack-test': [
+    'speech-stack-test': stuck ? [
       line(now, 26, null, 'creating replica provider=scaleway type=L4-1-24G zone=fr-par-2'),
       line(now, 26, 'fr-par-2/c3e9', 'phase provisioning'),
       line(now, 20, 'fr-par-2/c3e9', 'phase starting'),
       line(now, 14, 'fr-par-2/c3e9', 'phase loading'),
+    ] : [
+      line(now, 6.5, null, 'creating replica provider=scaleway type=L4-1-24G zone=fr-par-2'),
+      line(now, 6, 'fr-par-2/d5f0', 'phase provisioning'),
+      line(now, 4, 'fr-par-2/d5f0', 'phase pulling'),
+      line(now, 4, 'fr-par-2/d5f0', 'replica: Shutdown scheduled for Mon 2026-10-13 21:10:00 UTC, use \'shutdown -c\' to cancel.'),
+      line(now, 4, 'fr-par-2/d5f0', 'replica: 20261011-0200: Pulling from aigw/speech-stack'),
+      line(now, 4, 'fr-par-2/d5f0', 'replica: 7a1f2c3d4e5f: Pulling fs layer'),
+      line(now, 3, 'fr-par-2/d5f0', 'replica: 7a1f2c3d4e5f: Pull complete'),
+      line(now, 1, 'fr-par-2/d5f0', 'replica: b81c0e9d2f44: Pull complete'),
     ],
   };
   return { ...s, gpus: s.gpus!.map(d => changes[d.name]?.(d) ?? d), gpuLogs };
