@@ -27,6 +27,8 @@ import type { ModelRoutesSpec } from '../config/serve-providers';
 import type { ModelPrices } from './model-prices';
 import { voiceCache } from './voice-cache';
 import { classSection } from './class-card';
+import { incidentsSection } from './incidents';
+import type { Incident } from '../telemetry/incidents';
 import type { VoiceTurn } from '../app-telemetry/voice-turn';
 import {
   ACTIVITY_SHOWN, ALERT_FRESH_MS, LEVEL_TEXT, appTitle, inClass, byLevel, count, duration, esc, form, hhmm, hour, latest, meter, ms, money, outsideWindow, pct, pill,
@@ -71,6 +73,7 @@ export interface AdminSnapshot {
   ttsCache?: TtsCacheStats | null;
   modelPrices?: ModelPrices | null;
   voiceTurns?: VoiceTurn[] | null;
+  incidents?: Incident[] | null;
 }
 
 export interface AdminAbout { commit: string | null; uptimeSeconds: number; region: string | null; telemetryAt: string | null }
@@ -459,7 +462,7 @@ function activity({ s, now }: Ctx): Section {
 }
 
 export function sectionsOf(ctx: Ctx, recos: Recommendation[]): Map<string, Section> {
-  const list = [recoSection(ctx, recos, digestBlock(ctx)), apps(ctx), guarantee(ctx), reserves(ctx), traffic(ctx), spend(ctx), gpus(ctx), keys(ctx), alerts(ctx), activity(ctx)];
+  const list = [recoSection(ctx, recos, digestBlock(ctx)), apps(ctx), guarantee(ctx), reserves(ctx), traffic(ctx), spend(ctx), gpus(ctx), keys(ctx), incidentsSection(ctx), alerts(ctx), activity(ctx)];
   list.push(voiceCache(ctx));
   const aula = classSection(ctx);
   if (aula) list.push(aula);

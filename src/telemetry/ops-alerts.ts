@@ -6,7 +6,12 @@ import type { FallbackProbeResult } from './fallback-probe';
 import type { LatencyReport } from './query';
 import { alarming, turnStats, VOICE_TURN_ALERT, type VoiceTurn } from '../app-telemetry/voice-turn';
 
-export interface OpsAlert { event: string; data: Record<string, unknown> }
+export interface OpsAlert { event: string; key?: string; data: Record<string, unknown> }
+
+export interface IncidentTrack {
+  seen(alert: OpsAlert, sent: boolean): unknown;
+  clear(event: string, active: Set<string>): void;
+}
 
 export const OPS_ALERT_DEDUP_MS = 30 * 60_000;
 export const OPS_ALERT_BOOT_QUIET_MS = 10 * 60_000;
@@ -21,6 +26,7 @@ const RESERVE_DOWN = new Set(['no_key', 'missing', 'pending', 'disabled', 'block
 
 export function createOpsAlerts(
   send: (alert: OpsAlert) => unknown, now: () => number = Date.now, dedupMs = OPS_ALERT_DEDUP_MS, bootQuietMs = OPS_ALERT_BOOT_QUIET_MS,
+  track?: IncidentTrack,
 ) {
   const bootedAt = now();
   const sentAt = new Map<string, number>();
@@ -29,9 +35,12 @@ export function createOpsAlerts(
   const fire = (event: string, key: string, data: Record<string, unknown>) => {
     const id = `${event}|${key}`;
     const t = now();
-    if (t - (sentAt.get(id) ?? -Infinity) < dedupMs) return;
+    const alert = { event, key, data: { ...data, at: new Date(t).toISOString() } };
+    const due = t - (sentAt.get(id) ?? -Infinity) >= dedupMs;
+    track?.seen(alert, due);
+    if (!due) return;
     sentAt.set(id, t);
-    void Promise.resolve().then(() => send({ event, data: { ...data, at: new Date(t).toISOString() } })).catch(() => {});
+    void Promise.resolve().then(() => send(alert)).catch(() => {});
   };
 
   return {
@@ -60,13 +69,15 @@ export function createOpsAlerts(
     fromDeployments(views: Array<Pick<DeploymentView, 'name' | 'replicas' | 'spec'> & Partial<Pick<DeploymentView, 'lastRequestAt' | 'warm' | 'hold'>>>): string[] {
       const t = now();
       const outside = new Set<string>();
+      const idle = new Set<string>();
       const toPark: string[] = [];
       const anyClass = classWindowOpen(views, t);
       for (const view of views) {
-        const idle = idleGpu({ ...view, lastRequestAt: view.lastRequestAt ?? null }, t);
-        if (idle) {
+        const idleNow = idleGpu({ ...view, lastRequestAt: view.lastRequestAt ?? null }, t);
+        if (idleNow) {
+          idle.add(view.name);
           fire('gpu.idle', view.name, {
-            deployment: view.name, minutes: Math.round(idle.minutes), eurPerHour: idle.eurPerHour, wastedEur: Math.round(idle.wastedEur * 100) / 100,
+            deployment: view.name, minutes: Math.round(idleNow.minutes), eurPerHour: idleNow.eurPerHour, wastedEur: Math.round(idleNow.wastedEur * 100) / 100,
           });
         }
         const up = view.replicas.filter(r => r.phase !== 'halted');
@@ -84,18 +95,25 @@ export function createOpsAlerts(
         outsideSince.set(view.name, t);
       }
       for (const name of outsideSince.keys()) if (!outside.has(name)) outsideSince.delete(name);
+      track?.clear('gpu.idle', idle);
+      track?.clear('gpu.outside_window', outside);
       return toPark;
     },
     fromLatency(report: LatencyReport | null): void {
+      const slow = new Set<string>();
       for (const event of TURN_EVENTS) {
         const stat = report?.events[event];
         if (!stat || stat.count < TURN_P95_MIN_TURNS || stat.p95Ms === null || stat.p95Ms <= TURN_P95_LIMIT_MS) continue;
+        slow.add(event);
         fire('turn.slow', event, { stage: event, p95Ms: stat.p95Ms, p50Ms: stat.p50Ms, turns: stat.count, windowSeconds: report!.windowSeconds });
       }
+      track?.clear('turn.slow', slow);
     },
     fromVoiceTurns(turns: readonly VoiceTurn[]): void {
       const t = now();
       const byApp = new Map<string, VoiceTurn[]>();
+      const failingApps = new Set<string>();
+      const slowApps = new Set<string>();
       for (const turn of turns) {
         if (!turn.classWindow || turn.at <= t - VOICE_TURN_ALERT.windowMs || turn.at > t) continue;
         const list = byApp.get(turn.app) ?? [];
@@ -110,9 +128,13 @@ export function createOpsAlerts(
           app, turns: stats.turns, failed: stats.failed, failedPct: Math.round((stats.failed / stats.turns) * 1000) / 10, p50Ms: stats.p50Ms, p95Ms: stats.p95Ms,
           failures: stats.failures.slice(0, 3).map(f => `${f.stage}/${f.reason} x${f.count}`).join(', '), windowMinutes: VOICE_TURN_ALERT.windowMs / 60_000,
         };
+        if (failing) failingApps.add(app);
+        if (slow) slowApps.add(app);
         if (failing) fire('voice.turn_failing', app, data);
         if (slow) fire('voice.turn_slow', app, data);
       }
+      track?.clear('voice.turn_failing', failingApps);
+      track?.clear('voice.turn_slow', slowApps);
     },
     /** Cloud fallbacks that failed their probe (`fallback-probe.ts`): one grouped alert; a 402 is also a credit alert. */
     fromFallbackProbes(results: FallbackProbeResult[]): void {
@@ -120,6 +142,7 @@ export function createOpsAlerts(
       for (const r of failing) {
         if (r.code === 'credit') fire('provider.credit_exhausted', r.providerId, { provider: r.providerId, target: r.target, error: r.error });
       }
+      track?.clear('fallback.probe_failed', new Set(failing.map(r => `${r.stage}|${r.target}|${r.voice ?? ''}`)));
       if (!failing.length) return;
       fire('fallback.probe_failed', failing.map(r => `${r.stage}|${r.target}|${r.voice ?? ''}`).sort().join(','), {
         stage: [...new Set(failing.map(r => r.stage))].join(', '),
@@ -148,6 +171,7 @@ export function createOpsAlerts(
         else fire(event, items.map(([key]) => key).sort().join(','), groupedData(items.map(([, alert]) => alert.data)));
       }
       chainsDown = new Set(down.keys());
+      for (const event of ['stage.no_link', 'stage.reserve_down']) track?.clear(event, chainsDown);
     },
   };
 }

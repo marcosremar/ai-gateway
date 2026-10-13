@@ -1,6 +1,7 @@
 import type { ContainerLogView } from '../deployments/container-logs';
 import { bootOf, gpuDetailBody } from './boot';
 import { classStrip, trafficOf } from './class-card';
+import { openIncidents } from './incidents';
 import { services } from './guarantee';
 import { recommendations } from './recommendations';
 import { gpuActions, sectionsOf, unitOf, type AdminSnapshot, type AppView } from './render';
@@ -40,8 +41,8 @@ export const PAGES: PageDef[] = [
     lead: 'Quem acessa o gateway, o que cada chave pode ligar e quanto gastou hoje. O valor da chave nunca aparece.',
   },
   {
-    id: 'atividade', path: '/admin/atividade', title: 'Atividade', tab: 'Atividade', icon: ICON.atividade!, sections: ['alertas', 'atividade'],
-    lead: 'Alertas enviados e o registro de quem fez o quê no painel, nas chaves e nas GPUs.',
+    id: 'atividade', path: '/admin/atividade', title: 'Atividade', tab: 'Atividade', icon: ICON.atividade!, sections: ['incidentes', 'alertas', 'atividade'],
+    lead: 'Incidentes com o que foi feito em cada um, os alertas enviados e o registro de quem fez o quê no painel, nas chaves e nas GPUs.',
   },
 ];
 
@@ -166,6 +167,7 @@ function overview(f: Frame): string {
     attention ? `${attention} ${attention > 1 ? 'áreas pedem' : 'área pede'} atenção` : 'Nenhuma área pede atenção'} · ${f.time} (Paris)</p></div></header>`
     + (own ? `<p class="scope">Visão do app <b>${esc(own.name)}</b>${own.description ? ` · ${esc(own.description)}` : ''}<small>Só os dados deste app: as GPUs, as chaves, as reservas e os eventos dele.</small></p>` : '')
     + classStrip(ctx, all.get('aula'))
+    + openIncidents(ctx)
     + `<div class="cards">${cards(ctx, all).map(c => cardHtml(c, query)).join('')}</div>`
     + sectionHtml(all.get('recomendacoes')!);
 }

@@ -114,3 +114,32 @@ export function opsAlertMail(alert: { event: string; data: Record<string, unknow
   const subject = `${text.subject}${key ? ` (${key})` : ''}`;
   return { kind: `${alert.event}|${key}`, level: text.level, subject, body: `${subject}.\n\n${plainFields(alert.data)}\n\nO que fazer: ${text.todo}` };
 }
+
+export const alertTitle = (event: string) => OPS_TEXT[event]?.subject ?? event;
+export const alertLevel = (event: string): AlertLevel => OPS_TEXT[event]?.level ?? 'warn';
+
+const INCIDENT_NOTE = 'Incidente aberto: os próximos alertas da mesma causa e alvo não geram e-mail (um alerta urgente lembra no máximo 1 vez por hora) '
+  + 'e outro e-mail avisa quando ele for resolvido. Linha do tempo: /admin/atividade#incidentes';
+
+export function opsIncidentMail(alert: { event: string; data: Record<string, unknown> }, incident: { mailed: boolean } | null): { mail: AlertMail; opens: boolean } | null {
+  const mail = opsAlertMail(alert);
+  if (!mail) return null;
+  if (incident && !incident.mailed) return { mail: { ...mail, subject: `incidente aberto: ${mail.subject}`, body: `${mail.body}\n\n${INCIDENT_NOTE}` }, opens: true };
+  return !incident || mail.level === 'urgent' ? { mail, opens: false } : null;
+}
+
+const minutesText = (ms: number) => (ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${(ms / 3_600_000).toFixed(1).replace('.', ',')} h`);
+
+export function incidentResolvedMail(i: {
+  event: string; key: string; startedAt: string; endedAt: string | null; alertCount: number; resolution: string | null;
+  actions: Array<{ at: string; kind: string; target: string; detail: string }>;
+}, quietMinutes: number): AlertMail {
+  const took = minutesText(Date.parse(i.endedAt ?? i.startedAt) - Date.parse(i.startedAt));
+  const subject = `resolvido: ${alertTitle(i.event)}${i.key ? ` (${i.key.split(',')[0]})` : ''} após ${took}`;
+  const lines = [
+    `- início: ${i.startedAt}`, `- fim: ${i.endedAt ?? '—'}`, `- duração: ${took}`, `- alertas: ${i.alertCount}`,
+    `- ações: ${i.actions.length ? i.actions.map(a => `${a.kind} ${a.target}${a.detail ? ` (${a.detail})` : ''} em ${a.at}`).join('; ') : 'nenhuma'}`,
+    `- resolução: ${i.resolution === 'cleared' ? 'a condição normalizou' : `nenhum alerta novo em ${quietMinutes} min`}`,
+  ];
+  return { kind: `${i.event}|${i.key}|resolved`, level: 'warn', subject, body: `${subject}.\n\n${lines.join('\n')}\n\nLinha do tempo: /admin/atividade#incidentes` };
+}

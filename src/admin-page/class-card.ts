@@ -73,15 +73,15 @@ function failureTable(session: TurnStats, recent: TurnStats | null): string {
   const rows = session.failures.map(f => [
     failure(f.stage, f.reason), ...(recent ? [count(recent.failures.find(r => r.stage === f.stage && r.reason === f.reason)?.count ?? 0)] : []), count(f.count),
   ]);
-  return `<h3 class="sub">Falhas por etapa e motivo</h3>${table(cols, rows, 'Nenhuma falha.')}`;
+  return `<h3 class="sub">Falhas por etapa e motivo</h3><div class="cap">${table(cols, rows, 'Nenhuma falha.')}</div>`;
 }
 
 function lastFailures(turns: readonly VoiceTurn[]): string {
   const failed = turns.filter(t => !t.ok).sort((a, b) => b.at - a.at).slice(0, FAILURES_SHOWN);
   if (!failed.length) return '';
-  return `<h3 class="sub">Últimas falhas</h3>${table([{ label: 'Hora' }, { label: 'Falha' }, { label: 'Request id' }], failed.map(t => [
+  return `<h3 class="sub">Últimas falhas</h3><div class="cap">${table([{ label: 'Hora' }, { label: 'Falha' }, { label: 'Request id' }], failed.map(t => [
     `<span class="mono">${esc(clock.format(t.at))}</span>`, failure(t.failedStage, t.reason), `<code class="rid">${esc(t.requestId)}</code>`,
-  ]), '')}<p class="foot-note">O request id é o mesmo do log do gateway: procure-o lá para ver a chamada inteira.</p>`;
+  ]), '')}</div><p class="foot-note">O request id é o mesmo do log do gateway: procure-o lá para ver a chamada inteira.</p>`;
 }
 
 const notesOf = (s: TurnStats, where: string): string[] => [
