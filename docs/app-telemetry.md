@@ -27,8 +27,8 @@ This is separate from the unified, trace-correlated telemetry (`docs/api/telemet
 
 - `installId`: random UUID created by the app (no machine or user identity). `appVersion` `[0-9A-Za-z.+_-]{1,32}`,
   `os` `[A-Za-z0-9._-]{1,32}`.
-- `kind` ∈ `session_start, session_end, utterance, crash, app_start, app_exit, gpu_wait, stream, direction_changed, error`
-  — anything else → 400.
+- `kind` ∈ `session_start, session_end, utterance, crash, app_start, app_exit, gpu_wait, stream, direction_changed, error,
+  voice.turn` — anything else → 400.
 - `fields`: JSON object; scalars, arrays (≤ 64 items) and objects (≤ 64 keys, keys ≤ 64 chars) nested at most 4 deep;
   strings ≤ 256 chars, fields ≤ 16 KB serialized. A breach → 400 (the whole batch).
 - **No transcript text**: keys named `original`, `translated`, `translated_N`, `text`, `transcript`, `transcription`
@@ -36,6 +36,28 @@ This is separate from the unified, trace-correlated telemetry (`docs/api/telemet
 - ≤ 500 events and ≤ 256 KB per batch (413 above). Per install ≤ `APP_TELEMETRY_BATCHES_PER_MIN` (30) batches/min,
   then 429 + `Retry-After: 60`.
 - Response `200 {"accepted": n}`. 507 when the day file reached its cap, 503 on a storage error (both with `Retry-After`).
+
+## Voice turns (`voice.turn`, parle)
+
+One event per voice turn of a class, technical fields only:
+
+```json
+{ "ok": false, "failedStage": "tts", "reason": "upstream_502", "requestId": "9cc9818f3993",
+  "ms": { "stt": 310, "probe": 40, "llm": 420, "tts": 380, "total": 1150 }, "degraded": ["tts"], "stage": "360", "classWindow": true }
+```
+
+- Only these keys are accepted: any other key (a transcript, a text, a student field) refuses the whole batch with 400
+  instead of being dropped. `reason` and each `degraded` entry are short codes (`[A-Za-z0-9][A-Za-z0-9_.:-]{0,47}`),
+  `failedStage` ∈ `stt, llm, tts, probe`, `stage` ∈ `360, fast`, `ms` values are ms or `null`, `requestId` is the id
+  the gateway logs for the request.
+- Stored like every other kind (same day files and retention); the last 7 days also stay in memory for `/admin`.
+- `/admin` overview: during a class (a GPU class window open, or `classWindow: true` turns in the last 10 min) the
+  «Aula em curso» card shows turns in 10 min and since the first turn of the class, % ok, failures by stage and reason,
+  p50/p95 of `ms.total` against the 1.5 s target and the 2 s ceiling, degraded stages and the last failures with their
+  request id; after class, «Última aula» shows the same numbers. A class ends after 45 min without a turn. An app key
+  sees only its own app.
+- Urgent alert and e-mail (`voice.turn_failing` / `voice.turn_slow`, ops-alert path, 30 min dedup per app): over the
+  `classWindow` turns of the last 10 min, ≥ 20 turns and ≥ 10 % failed, or p95 above 4 s.
 
 ## Summary
 

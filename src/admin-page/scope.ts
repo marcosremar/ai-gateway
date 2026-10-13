@@ -36,6 +36,7 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
       ...(ownTraffic ?? { hours: [], total: { key: 'total', served: 0, failed: 0, fallbacks: 0, p50Ms: null, p95Ms: null }, stages: [], providers: [], links: [] }),
       activity: s.traffic.activity.filter(e => e.deployment !== null && deployments.has(e.deployment)),
       apps: [], byApp: ownTraffic ? { [app]: ownTraffic } : {}, daily: s.traffic.daily?.[app] ? { [app]: s.traffic.daily[app]! } : {},
+      costs: s.traffic.costs?.[app] ? { [app]: s.traffic.costs[app]! } : {},
     },
     gpuLogs: Object.fromEntries(Object.entries(s.gpuLogs ?? {}).filter(([name]) => deployments.has(name))),
     spend: s.spend ? { since: s.spend.since, days: s.spend.days.map(d => ({ day: d.day, apps: d.apps[app] ? { [app]: d.apps[app]! } : {} })) } : null,
@@ -44,6 +45,8 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
     digest: null,
     ttsCache: s.ttsCache ? { ...s.ttsCache, byApp: s.ttsCache.byApp[app] ? { [app]: s.ttsCache.byApp[app]! } : {} } : s.ttsCache ?? null,
     overspend: (s.overspend ?? []).filter(o => o.app === app),
+    modelPrices: s.modelPrices ?? null,
+    voiceTurns: s.voiceTurns?.filter(t => t.app === app) ?? null,
     chains: s.chains ? Object.fromEntries(Object.entries(own?.stages ?? {}).map(([stage, aliases]) => [stage,
       Object.fromEntries(aliases.filter(a => s.chains![stage]?.[a]).map(a => [a, s.chains![stage]![a]!]))])) : null,
     audit: s.audit

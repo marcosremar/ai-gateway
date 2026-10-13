@@ -9,6 +9,9 @@ import type { ChainReport, LinkState } from '../../src/config/stage-chains';
 import { parisDay, type SpendLedgerView } from '../../src/deployments/spend-ledger';
 import { withBoots } from './admin-boot';
 import { findOverspend } from '../../src/telemetry/overspend';
+import type { ModelPrice } from '../../src/admin-page/model-prices';
+import type { VoiceTurn } from '../../src/app-telemetry/voice-turn';
+import { localClock } from '../../src/deployments/autoscale';
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
 
@@ -62,6 +65,9 @@ function trafficRows(now: number, state: DemoState): StoredTelemetryEvent[] {
     }
   }
   if (state === 'bad') for (let i = 0; i < 14; i++) push(now - (2 + i * 3) * 60_000, 'route.unavailable', 'error', { app: 'parle', durMs: 30_000, attrs: { stage: 'tts' } });
+  for (let h = 7 * 24 - 1; h >= 0; h--) {
+    push(now - h * 3_600_000 - 1_800_000, 'usage.cost', 'info', { app: 'parle', attrs: { stage: 'chat', provider: 'openrouter', model: 'google/gemini-2.5-flash', costUsd: 0.017 } });
+  }
   const lifecycle: Array<[number, string, StoredTelemetryEvent['level'], string]> = [
     [520, 'autoscale.warm', 'info', 'speech-stack'], [519, 'replica.creating', 'info', 'speech-stack'], [512, 'replica.ready', 'info', 'speech-stack'],
     [340, 'replica.parked', 'info', 'speech-stack'], [40, 'replica.ready', 'info', 'babel-live'], [96, 'replica.power_on', 'info', 'speech-stack'], [95, 'replica.ready', 'info', 'speech-stack'],
@@ -88,13 +94,23 @@ function withGroq(c: ChainReport): ChainReport {
 }
 
 export function demoChains(state: DemoState): Record<string, Record<string, ChainReport>> {
-  const stt = chain('speech-stack', 'ready', CLOUD['parle-stt']!);
+  const parleGpu: LinkState = state === 'ok' ? 'cold' : 'ready';
+  const stt = chain('speech-stack', parleGpu, CLOUD['parle-stt']!);
+  const chat = chain('speech-stack', parleGpu, CLOUD['parle-chat']!);
   return {
     stt: { 'parle-stt': state === 'warn' ? withGroq(stt) : stt },
-    chat: { 'parle-chat': chain('speech-stack', 'ready', CLOUD['parle-chat']!), 'babel-chat': chain('babelcast-3090', state === 'ok' ? 'ready' : 'cold', CLOUD['babel-chat']!) },
-    tts: { 'parle-tts': chain('speech-stack', state === 'bad' ? 'circuit_open' : 'ready', CLOUD['parle-tts']!), 'babel-tts': chain('babel-live', 'ready', CLOUD['babel-tts']!) },
+    chat: {
+      'parle-chat': state === 'warn' ? { ...chat, links: [...chat.links, { target: 'openrouter:google/gemini-2.5-flash-lite', state: 'ready' }] } : chat,
+      'babel-chat': chain('babelcast-3090', state === 'ok' ? 'ready' : 'cold', CLOUD['babel-chat']!),
+    },
+    tts: { 'parle-tts': chain('speech-stack', state === 'bad' ? 'circuit_open' : parleGpu, CLOUD['parle-tts']!), 'babel-tts': chain('babel-live', 'ready', CLOUD['babel-tts']!) },
   };
 }
+
+export const DEMO_PRICES: Record<string, ModelPrice> = {
+  'google/gemini-2.5-flash': { prompt: 0.0000003, completion: 0.0000025 }, 'google/gemini-2.5-flash-lite': { prompt: 0.0000001, completion: 0.0000004 },
+  'openai/whisper-large-v3': { prompt: 0.0000075, completion: 0 }, 'hexgrad/kokoro-82m': { prompt: 0.00000062, completion: 0 },
+};
 
 export const demoStates = ['warn', 'ok', 'bad'] as const;
 export type DemoState = typeof demoStates[number];
@@ -144,6 +160,44 @@ function demoDaily(now: number): DayUse[] {
   return out;
 }
 
+interface TurnHealth { fail: number; scale: number; degraded: number; reasons: Array<[string, string]> }
+const CALM: TurnHealth = { fail: 0.003, scale: 1, degraded: 0, reasons: [['tts', 'timeout'], ['stt', 'empty_audio']] };
+const LIVE: Record<DemoState, TurnHealth> = {
+  ok: CALM,
+  warn: { fail: 0.045, scale: 1.6, degraded: 0.15, reasons: [['tts', 'timeout'], ['tts', 'timeout'], ['stt', 'empty_audio']] },
+  bad: { fail: 0.17, scale: 4.1, degraded: 0.6, reasons: [['tts', 'upstream_502'], ['tts', 'upstream_502'], ['tts', 'timeout'], ['llm', 'timeout']] },
+};
+
+export function demoTurns(now: number, state: DemoState): VoiceTurn[] {
+  let seed = 11;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const out: VoiceTurn[] = [];
+  const between = (from: number, to: number, health: (at: number) => TurnHealth) => {
+    for (let at = from; at <= to; at += 4_000 + Math.round(rand() * 6_000)) {
+      const h = health(at);
+      const failed = rand() < h.fail;
+      const [stage, reason] = h.reasons[Math.floor(rand() * h.reasons.length)]!;
+      out.push({
+        at, app: 'parle', ok: !failed, failedStage: failed ? stage : null, reason: failed ? reason : null,
+        requestId: Math.floor(rand() * 2 ** 48).toString(16).padStart(12, '0'),
+        totalMs: failed ? null : Math.round((650 + rand() * 400 + (rand() < 0.06 ? 450 : 0)) * h.scale),
+        degraded: rand() < h.degraded ? ['tts'] : [], stage: rand() < 0.8 ? '360' : 'fast', classWindow: true,
+      });
+    }
+  };
+  if (state === 'ok') between(now - 210 * 60_000, now - 60 * 60_000, () => CALM);
+  else {
+    between(now - 1464 * 60_000, now - 1315 * 60_000, () => CALM);
+    between(now - 48 * 60_000, now, at => (now - at <= 11 * 60_000 ? LIVE[state] : { ...CALM, fail: 0.012 }));
+  }
+  return out;
+}
+
+const parisHhmm = (at: number) => {
+  const m = localClock(at, 'Europe/Paris').minutes;
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+};
+
 export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnapshot {
   const traffic = adminTraffic(trafficRows(now, state), now);
   const snapshot = {
@@ -159,6 +213,8 @@ export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnaps
       byApp: { parle: { hits: 1700, misses: 1500, bypassed: 0, savedMs: 1700 * 650 }, babelcast: { hits: 140, misses: 810, bypassed: 12, savedMs: 140 * 520 } },
     },
     about: { commit: '0a52749c1d2e3f4a5b6c7d8e9f00112233445566', uptimeSeconds: 4 * 3600 + 1260, region: 'europe-west4', telemetryAt: iso(now, 0) },
+    modelPrices: state === 'warn' ? { at: iso(now, 300), models: DEMO_PRICES } : null,
+    voiceTurns: demoTurns(now, state),
   };
   if (state === 'ok') return allGreen(snapshot, now);
   if (state === 'bad') return withBoots(somethingDown(snapshot, now), now, true);
@@ -169,7 +225,12 @@ function allGreen(s: AdminSnapshot, now: number): AdminSnapshot {
   return {
     ...s,
     balances: s.balances.map(b => (b.provider === 'vast' ? { ...b, level: 'ok', balanceUsd: 38.5, hoursLeft: 128, reasons: [] } : b)),
-    gpus: s.gpus!.map(d => (d.name === 'babel-live' ? { ...d, lastRequestAt: iso(now, 2) } : d.name === 'speech-stack' ? { ...d, spec: { warmSchedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', minReplicas: 1, timeZone: 'Europe/Paris' }] } } as DeploymentView : d)),
+    gpus: s.gpus!.map(d => (d.name === 'babel-live' ? { ...d, lastRequestAt: iso(now, 2) } : d.name === 'speech-stack' ? {
+      ...d, status: 'scaled-to-zero', desiredReplicas: 0, replicas: [], lastRequestAt: iso(now, 62),
+      spec: { ...d.spec, warmSchedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: parisHhmm(now - 210 * 60_000), end: parisHhmm(now - 60 * 60_000), minReplicas: 1, timeZone: 'Europe/Paris' }] },
+    } as DeploymentView : d)),
+    apps: s.apps.map(a => (a.status ? { ...a, status: { ...a.status, mode: 'degraded' as const, deployments: a.status.deployments.map(x => ({ ...x, state: 'stopped' as const, replicas: { ready: 0, total: 0 } })) } } : a)),
+    gpuSpend: s.gpuSpend && { ...s.gpuSpend, running: [] },
     alerts: s.alerts.filter(a => a.event !== 'gpu.idle').map(a => ({ ...a, at: iso(now, 300) })),
     audit: s.audit.filter(e => e.ok),
     reserves: { ...s.reserves, links: s.reserves.links.map(r => ({ ...r, content: 'ok' as const, contentNote: null })) },
@@ -254,6 +315,12 @@ function warnSnapshot(now: number): AdminSnapshot {
       {
         id: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech-stack'] }, aliases: ['parle-stt', 'parle-chat', 'parle-tts'],
         stages: { stt: ['parle-stt'], chat: ['parle-chat'], tts: ['parle-tts'] },
+        routes: {
+          stt: { 'parle-stt': [{ provider: 'deployment', deployment: 'speech-stack' }, { provider: 'openrouter', model: 'openai/whisper-large-v3' }, { provider: 'groq', model: 'whisper-large-v3' }] },
+          chat: { 'parle-chat': [{ provider: 'deployment', deployment: 'speech-stack' }, { provider: 'openrouter', model: 'google/gemini-2.5-flash', equivalent: 'conversa' },
+            { provider: 'openrouter', model: 'google/gemini-2.5-flash-lite', equivalent: 'conversa' }] },
+          tts: { 'parle-tts': [{ provider: 'deployment', deployment: 'speech-stack' }, { provider: 'openrouter', model: 'hexgrad/kokoro-82m', voice: 'pm_alex' }] },
+        },
         status: {
           app: 'parle', requiresGpu: true, mode: 'gpu', checkedAt: iso(now, 1),
           deployments: [{ name: 'speech-stack', stages: ['stt', 'llm', 'tts'], state: 'ready', replicas: { ready: 1, total: 1 }, lastProbe: { at: iso(now, 1), ok: true, ms: 420, error: null } }],
