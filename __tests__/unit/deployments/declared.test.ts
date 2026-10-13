@@ -289,7 +289,7 @@ describe('declared babelcast-speech / babelcast-tts (report 2026-10-12, T5): onl
     image: 'rg.fr-par.scw.cloud/aigw/babelcast-speech:1', port: 8000, healthPath: '/health', machineType: 'L4-1-24G', zone: 'fr-par-2',
     gpu: true, minReplicas: 0, maxReplicas: 1, scaling: { mode: 'fast' },
   };
-  const babelcast = DECLARED_DEPLOYMENTS.filter(d => d.app === 'babelcast');
+  const babelcast = DECLARED_DEPLOYMENTS.filter(d => d.app === 'babelcast' && !d.profile);
 
   it('registered with no app: the app becomes babelcast, the spec is untouched, no machine; then in sync', async () => {
     const { c, cloud } = await controller();

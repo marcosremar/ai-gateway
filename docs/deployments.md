@@ -68,7 +68,9 @@ holds the spec **without secrets**; at boot (before the routes are mounted) and 
 body, compares it with the stored spec and calls the same idempotent `controller.put` only when something changed
 (new image, rotated credential). A deployment that does not exist yet is created from the declaration's `profile`
 when it names one; an existing one is never reset to the profile. Registering never starts a machine: declared specs keep `minReplicas: 0` and the
-reconciler never wakes them — a replica starts on the first request that needs it, as for any deployment.
+reconciler never wakes them — a replica starts on the first request that needs it, as for any deployment. The one
+exception is a declaration with `initial` (`babelcast-3090`): those spec fields are set only when the deployment is
+created and never put back afterwards, so `initial.minReplicas: 1` pins it once and the operator's pin toggle owns it.
 
 Secrets are mounted from the environment (the dev API) at each reconcile:
 
@@ -130,6 +132,38 @@ routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` 
 and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register
 `parle-qwen-tts` (a registered `deployment` always wins); to go back to one GPU, delete it (pausing keeps it
 registered, so it would stay the target).
+
+### `babelcast-3090` (the pinned Vast GPU of babelcast and of the agents' tests, 13/10/2026)
+
+`src/deployments/declared/babelcast-3090.json`, owner decision 13/10/2026: one **RTX 3090 24 GB on Vast**, at most
+US$0.20/h (`maxEurPerHour 0.19` × `EUR_TO_USD 1.05` = US$0.1995), Vast only (`placements: []`, never Scaleway), app
+`babelcast`. It serves **babelcast and the agents' tests only**: the parle class stays on its Scaleway GPUs, and a route
+may not name another app's deployment (`putRoutes` refuses it with 403, admin included), so no parle route can send
+student audio to it.
+
+- **Pinned, with the existing guard.** No new field: `minReplicas: 1` (set once through `initial`) keeps one replica;
+  the reconciler creates it with no request. The gateway-wide pinned-idle guard (`pinnedIdleOver`,
+  `DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES`, default 60) takes it to zero after 60 min with no request (a dev key with
+  `countsAsUse: false` does not count) and no spec change; the next request, `wake` or a PATCH brings it back.
+  `idleMinutes: 60` is what applies once it is unpinned. The view carries `pinned: { idleMinutes, parked }`.
+- **No respawn loop.** No offer under the cap (`out_of_stock`) → the create back-off (1, 2, 5, then 10 min) and the
+  `deployment.out_of_stock` alert; no credit (`insufficient_credit`) → one try per 10 min and
+  `provider.credit_exhausted`. The € ceilings (`DEPLOYMENTS_MAX_EUR_PER_HOUR`, `scaling.budget` €140/month, a key's
+  `gpuDailyEur`) and `AIGW_REAL_MACHINES` apply as to any deployment.
+- **Image and VRAM.** The public copy of the speech-stack image (`ghcr.io/marcosremar/speech-stack:20261011-0200`,
+  Vast cannot pull the Scaleway registry): Whisper large-v3 fp16 + Qwen3.5-9B Q4_K_M (llama.cpp) + Qwen3-TTS 0.6B Base,
+  with the L4 settings (`STT_BATCH 4`, `LLM_PARALLEL 8` × `LLM_SLOT_CTX 2048`, `TTS_STAGE0_MB 7400`), measured on the
+  L4's 24 GB on 2026-10-04 — the 3090 has the same 24 GB. It covers babelcast's STT and LLM (`babelcast-stt`,
+  `babelcast-llm`). Not its TTS: `babelcast-tts` is Qwen3-TTS **1.7B CustomVoice**, which the image does not carry
+  (offline, pre-baked) and which would not fit beside the other two in 24 GB; it stays on `babelcast-tts`, then the cloud.
+  The image is CUDA 13 (`minCuda 13`): only 3090 hosts with a driver ≥ 580 qualify, fewer than at CUDA 12.
+- **Test copy.** `testFor: "babelcast-speech"`: a dev key whose `wakeDeployments` lists `babelcast-3090` may start it
+  (outside a class window, as a start of `startIdleMinutes` under its `gpuDailyEur`), and while it is ready and
+  `babelcast-speech` is not, the babelcast aliases are served by it.
+- **babelcast's chain** (the app's own routes; the owner sets them): `babelcast-stt` → `deployment:babelcast-3090` →
+  `deployment:babelcast-speech` → OpenRouter whisper-large-v3-turbo → Groq; `babelcast-llm` → `deployment:babelcast-3090`
+  → `deployment:babelcast-speech` → OpenRouter gemini-2.5-flash-lite; `babelcast-tts` unchanged.
+- **Cost.** At most US$0.20 × 24 h = **US$4.80/day** (€4.56) when used all day; parked after 1 h with no request.
 
 ### `parle-bridge-shadow` (the audio bridge in shadow mode, 12/10/2026) — PARKED
 

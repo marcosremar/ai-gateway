@@ -16,7 +16,7 @@
  *   - `secretEnv`: `{ <container key>: <gateway env var> }` — a credential the replica needs (a read-only Hugging Face
  *     token for private weights), read from the gateway env at every reconcile like `passwordEnv`. Missing → pending.
  *
- * Registering never starts a machine: declared specs keep `minReplicas: 0` and the reconciler never calls `wake`.
+ * Registering never starts a machine save a declared `initial.minReplicas` (set at creation only), and the reconciler never calls `wake`.
  * Replicas start when a request needs them, or inside a declared `warmSchedule` window, as for any other deployment.
  *
  * A declaration without `image` and `profile` belongs to another registrant (the parle client's backend PUTs
@@ -28,6 +28,7 @@
  */
 
 import { randomBytes } from 'crypto';
+import babelcast3090 from './declared/babelcast-3090.json';
 import babelcastSpeech from './declared/babelcast-speech.json';
 import babelcastTts from './declared/babelcast-tts.json';
 import parleLivekit from './declared/parle-livekit.json';
@@ -47,6 +48,7 @@ export interface DeclaredDeployment {
   registryAuth?: { server?: string; username: string; passwordEnv: string };
   generatedSecrets?: string[];
   secretEnv?: Record<string, string>;
+  initial?: Record<string, unknown>;
   /** Plain spec fields (validated by `buildSpec` when applied). */
   spec: Record<string, unknown>;
 }
@@ -60,7 +62,7 @@ export interface DeclaredDeployment {
  */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
   parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit,
-  babelcastSpeech, babelcastTts,
+  babelcastSpeech, babelcastTts, babelcast3090,
 ] as DeclaredDeployment[];
 
 /** Reconcile period. The boot run happens before the providers are mounted (serve.ts). */
@@ -157,7 +159,8 @@ function testCopyFiles(target: DeclaredTarget, decl: DeclaredDeployment): Record
   const source = target.specOf(sourceName);
   const own = target.specOf(decl.name);
   const out: Record<string, unknown> = {};
-  for (const key of ['files', 'fileUrls'] as const) {
+  const keys = decl.spec.provider === 'vast' ? ['fileUrls'] as const : ['files', 'fileUrls'] as const;
+  for (const key of keys) {
     if (source?.[key] && !own?.[key]) out[key] = source[key];
   }
   return out;
@@ -278,6 +281,7 @@ export class DeclaredDeploymentReconciler {
           const patch = declaredBody(decl, this.opts.env, target.specOf(decl.name), this.opts.generateSecret);
           if ('body' in patch) body = patch.body;
         }
+        if (!previous) body = { ...decl.initial, ...body };
         body = { ...body, ...testCopyFiles(target, decl) };
         await target.put(decl.name, body, meta);
         changed.push(decl.name);

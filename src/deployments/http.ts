@@ -290,9 +290,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (sub === 'routes' && !imageName) {
       if (method === 'GET') return send(res, 200, { app, routes: registry.get(app)?.routes ?? {} });
       if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
-      // An admin sets any route; the app's own key only reorders/re-aliases what it already has, plus its own deployments.
-      const { routes, cloudFallbackAdded } = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? {}
-        : { restrictedTo: (deployment) => controller.get(deployment)?.app === app });
+      // An admin sets any route but to another app's deployment; the app's own key only reorders/re-aliases what it already has, plus its own deployments.
+      const appOf = (deployment: string) => controller.get(deployment)?.app ?? null;
+      const { routes, cloudFallbackAdded } = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? { appOf }
+        : { appOf, restrictedTo: (deployment) => appOf(deployment) === app });
       if (cloudFallbackAdded.length) opts.log?.('apps: cloud fallback appended to chains that had none', { app, added: cloudFallbackAdded });
       opts.onRoutesChange?.();
       return send(res, 200, { app, routes, ...(cloudFallbackAdded.length ? { cloudFallbackAdded } : {}) });

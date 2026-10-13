@@ -456,6 +456,7 @@ export interface ReplicaView {
   ip: string | null;
   tls?: boolean;
   providerState: string;
+  provider: DeploymentProvider;
   zone: string;
   machineType: string;
   pricePerHour: number | null;
@@ -505,5 +506,6 @@ export interface DeploymentView {
   realtime: { active: number; capacity: number; refusedSessions: number; scalingOut: boolean } | null;
   sessions: number;
   hold: { replicas: number; until: string } | null;
+  pinned: { idleMinutes: number | null; parked: boolean } | null;
   warnings: string[];
 }
