@@ -51,6 +51,7 @@ import { createWebhookDelivery } from './src/webhooks';
 import { createOpsAlerts } from './src/telemetry/ops-alerts';
 import { alertEmailFromEnv, createAlertMailer, opsAlertMail, secretValues } from './src/telemetry/alert-email';
 import { createBalanceWatch } from './src/telemetry/balance-watch';
+import { createOverspendWatch, overspendLimitsFromEnv } from './src/telemetry/overspend';
 import { createFallbackProbe, fallbackLinks } from './src/telemetry/fallback-probe';
 import { applySandboxCache, gatewayClientKeys, principalSandboxToken, SANDBOX_USER, saveSandboxCache } from './src/config/sandbox-env';
 import {
@@ -229,10 +230,13 @@ if (machines) {
 const modelRoutes = parseModelRoutes(process.env.MODEL_ROUTES);
 if (modelRoutes.errors.length) log.warn({ errors: modelRoutes.errors }, 'MODEL_ROUTES has invalid parts — skipped');
 const controller = deployments?.controller ?? null;
+const ownerOfDeployment = (d: { name: string; app: string | null }) =>
+  d.app ?? deployments?.apps.list().find(({ id }) => deployments.apps.get(id)?.profile?.gpuDeployments.includes(d.name))?.id ?? null;
+const panelBaseUrl = (process.env.AIGW_PUBLIC_URL?.trim() || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')).replace(/\/$/, '');
 const spendLedger = new SpendLedger({
   path: join(stateDir, 'spend-ledger.json'),
   deployments: () => controller?.list() ?? [],
-  ownerOf: (d) => d.app ?? deployments?.apps.list().find(({ id }) => deployments.apps.get(id)?.profile?.gpuDeployments.includes(d.name))?.id ?? null,
+  ownerOf: ownerOfDeployment,
   log: (msg, data) => log.warn(data ?? {}, msg),
 });
 await spendLedger.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'SPEND LEDGER UNREADABLE: daily spend starts empty'));
@@ -612,14 +616,32 @@ const adminSnapshot = (): AdminSnapshot => ({
     region: process.env.RAILWAY_REPLICA_REGION?.trim() || null,
     telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
   },
-  digest: suggestionDigest.status(),
+  digest: suggestionDigest.status(), overspend: overspendWatch.active(),
 });
+
+const overspendWatch = createOverspendWatch({
+  input: () => ({
+    spend: spendLedger.view(), gpus: controller?.list() ?? [], keys: access.list(), gpuSpend: deployments?.clientGpu.report() ?? null,
+    machines: machines?.controller.costs(null) ?? null, rows: telemetry?.store.rows() ?? [], appOf: ownerOfDeployment,
+  }),
+  notify: (o, mail) => {
+    log.warn({ id: o.id, value: o.value, normal: o.normal }, `ALERT spend.over ${o.who}`);
+    alertLog.record('spend.over', { quem: o.who, gasto: o.text, projecao: o.projection, causa: o.cause });
+    void alertMailer?.deliver(mail);
+    return alertWebhook?.send({ event: 'spend.over', data: { id: o.id, who: o.who, app: o.app, value: o.value, normal: o.normal, projection: o.projection, cause: o.cause } });
+  },
+  classOpen: () => classWindowOpen(controller?.list() ?? [], Date.now()),
+  baseUrl: panelBaseUrl,
+  limits: overspendLimitsFromEnv(process.env),
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+overspendWatch.start();
 
 const suggestionDigest = createSuggestionDigest({
   list: () => recommendations({ s: adminSnapshot(), now: Date.now(), csrf: '', app: null, view: null }),
   deliver: alertMailer && process.env.SUGGESTION_DIGEST?.trim() !== '0' ? (mail) => alertMailer.deliver(mail) : null,
   classOpen: () => classWindowOpen(controller?.list() ?? [], Date.now()),
-  baseUrl: (process.env.AIGW_PUBLIC_URL?.trim() || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')).replace(/\/$/, ''),
+  baseUrl: panelBaseUrl,
   path: join(stateDir, 'suggestion-digest.json'),
   log: (msg, data) => log.log(data ?? {}, msg),
 });
@@ -692,6 +714,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     deployments?.gpuHealth.probe.stop();
     balanceWatch.stop();
     suggestionDigest.stop();
+    overspendWatch.stop();
     fallbackProbe.stop();
     keyManager.stop();
     void access.stop();
