@@ -19,9 +19,19 @@ export interface ChatMessage {
  * who answers the turn (`deployment:<name>` = the GPU, `composite` = the fallback) and why not the GPU (`saturated`,
  * `cold`, `circuit_open`, `slow`, …); a turn on webrtc / ws is always served by the session's GPU replica.
  */
+export interface TurnServed {
+  stt: string | null;
+  llm: string | null;
+  tts: string | null;
+  voice: string | null;
+  opener: boolean;
+  transport: string;
+}
+
 export type RealtimeServerEvent =
   | { type: 'ready' }
   | { type: 'route'; provider: string; fallback?: string }
+  | { type: 'turn_ack' }
   | { type: 'vad'; state: 'start' | 'end' }
   | { type: 'transcript'; text: string; final: boolean }
   | { type: 'filtered'; reasons: string[] }
@@ -32,17 +42,23 @@ export type RealtimeServerEvent =
   | { type: 'opener'; state: 'start' | 'end'; text?: string; index?: number; audio_ms?: number | null; local?: boolean }
   | { type: 'deadline_missed'; deadline_ms: number }
   | { type: 'interrupted' }
-  | { type: 'done'; empty?: boolean; filtered?: boolean; error?: boolean; interrupted?: boolean }
+  | { type: 'intercept'; tag: string; action: 'drop' | 'say'; turnId?: string }
+  | { type: 'say'; text: string; tag?: string | null; turnId?: string }
+  | { type: 'config_applied'; n: number }
+  | {
+    type: 'done'; empty?: boolean; filtered?: boolean; error?: boolean; interrupted?: boolean; intercepted?: boolean; said?: boolean;
+    tag?: string | null; turnId?: string; served?: TurnServed;
+  }
   | { type: 'error'; code: string; message: string; unspoken?: string }
   | {
     type: 'metrics'; ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
     first_sound_ms?: number | null; first_sound_from_speech_ms?: number | null; opener?: string | null; deadline_ms?: number;
-    deadline_missed?: boolean;
+    deadline_missed?: boolean; uplink_lost_ms?: number; uplink_recovered_ms?: number; uplink_fec_pct?: number | null; uplink_red_pct?: number | null;
   };
 
 /** Events the SDK adds: which transport carries the session, and its end. */
 export type RealtimeLocalEvent =
-  | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover' | 'upgrade'; from?: TransportType; error?: string }
+  | { type: 'transport'; transport: TransportType; reason: 'connected' | 'failover' | 'upgrade' | 'rescue' | 'policy'; from?: TransportType; error?: string }
   | { type: 'recovered' }
   | { type: 'closed'; reason: string };
 
@@ -53,6 +69,7 @@ export type ClientMessage =
   | { type: 'interrupt' }
   | { type: 'end_turn' }
   | { type: 'config_update'; messages?: ChatMessage[]; opener?: unknown }
+  | { type: 'config_update'; signed: string }
   | { type: 'ping' };
 
 export interface IceServerInit {
@@ -71,6 +88,8 @@ export type TransportOffer =
 export interface SessionDescriptor {
   sessionId: string;
   token: string;
+  /** The session config (base64url JSON) when it is too large for the token, which then carries its digest: sent to the edge at session start. */
+  cfg?: string;
   expiresAt: string;
   transports: TransportOffer[];
   iceServers?: IceServerInit[];
@@ -92,6 +111,7 @@ export interface SessionRefusal {
 export interface SessionRequest {
   transports: TransportType[];
   prefer?: TransportType;
+  device?: string;
 }
 
 export interface RealtimeTimeouts {
@@ -111,7 +131,11 @@ export interface RealtimeTimeouts {
   /** A WebRTC connection `disconnected` this long gets an ICE restart. */
   disconnectGraceMs: number;
   iceRestartMs: number;
+  rescueMs: number;
   upgradeMs: number;
+  upgradeConnectMs: number;
+  upgradeTries: number;
+  upgradeBackoffMs: number;
   readmitMs: number;
   readmitMaxMs: number;
   readmitForMs: number;
@@ -127,7 +151,11 @@ export const DEFAULT_TIMEOUTS: RealtimeTimeouts = {
   turnMs: 45_000,
   disconnectGraceMs: 3_000,
   iceRestartMs: 5_000,
-  upgradeMs: 5_000,
+  rescueMs: 1_200,
+  upgradeMs: 40_000,
+  upgradeConnectMs: 12_000,
+  upgradeTries: 2,
+  upgradeBackoffMs: 2_000,
   readmitMs: 2_000,
   readmitMaxMs: 30_000,
   readmitForMs: 20 * 60_000,
@@ -145,14 +173,26 @@ export interface RealtimeMetrics {
   connectMs: number | null;
   attempts: AttemptRecord[];
   failovers: number;
+  rescues: number;
+  switches: number;
   /** Audio frames dropped because the uplink could not keep up (WS). */
   droppedFrames: number;
   /** Last `metrics` event of the edge. */
   lastTurn: {
     ttfa_ms?: number | null; stt_ms?: number | null; llm_ttft_ms?: number | null; tts_ttfb_ms?: number | null;
     first_sound_ms?: number | null; opener?: string | null; deadline_missed?: boolean;
-    learner_first_sound_ms?: number | null; network_delay_ms?: number | null;
+    learner_first_sound_ms?: number | null; network_delay_ms?: number | null; served?: TurnServed | null;
   } | null;
+}
+
+export interface LinkStats {
+  packetsSent: number;
+  packetsLost: number;
+  jitterMs: number | null;
+  rttMs: number | null;
+  jitterBufferMs: number | null;
+  outgoingKbps: number | null;
+  recovery: boolean;
 }
 
 export interface StorageLike {
@@ -171,7 +211,11 @@ export interface RealtimeTransport {
   send(message: ClientMessage): void;
   /** Clip-based rungs: one learner turn (16 kHz WAV). */
   sendTurn?(wav: Blob): Promise<void>;
+  speculate?(wav: Blob): void;
+  cancelSpeculation?(): void;
   goLive?(): void;
+  goStandby?(): void;
+  stats?(): Promise<LinkStats | null>;
   playOpener?(samples: Float32Array, rate: number): void;
   uplinkBacklog?(): number;
   close(): void;
@@ -195,6 +239,7 @@ export interface TransportContext {
   traceparent: string;
   telemetry: RealtimeTelemetry;
   standby?: boolean;
+  patient?: boolean;
 }
 
 export type TransportFactory = (ctx: TransportContext) => RealtimeTransport | null;

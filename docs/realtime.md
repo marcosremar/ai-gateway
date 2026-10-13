@@ -11,7 +11,7 @@ browser ◀──────────── session descriptor (token, trans
    │
    ├─ webrtc   : offer ──▶ gateway /v1/realtime/sessions/:id/offer ──▶ replica /__aigw/rt/offer ; media + "events"
    │             data channel browser ⇄ replica DIRECTLY (UDP, or TURN over TCP/443)
-   ├─ ws       : wss://gateway/v1/realtime/ws?token= ⇄ (relay) ⇄ ws://replica/__aigw/rt/ws?token=
+   ├─ ws       : wss://gateway/v1/realtime/ws (subprotocol aigw.token.<jwt>) ⇄ (relay) ⇄ ws://replica/__aigw/rt/ws (X-Aigw-Session-Token)
    ├─ s2s-stream: one HTTP request per turn via the app backend → gateway /v1/s2s (streamed frames)
    └─ post     : the app's own request/response endpoint (caller's `postTurn`)
 ```
@@ -30,13 +30,15 @@ inside the token (`cfg`).
 
 ### Session token
 
-JWT HS256. Signing key per deployment, derived from the replica token (never leaves the gateway or the replica):
+JWT HS256. Signing key per replica, derived from that replica's token (never leaves the gateway or the replica):
 
 ```
-key = HMAC-SHA256(key = <deployment replicaToken>, message = "aigw-rt-v1")      # 32 raw bytes
-claims = { sid, app, dep, rep, cfg, iat, exp }    # serialized in this order; base64url without padding
+key = HMAC-SHA256(key = <the replica's token>, message = "aigw-rt-v1")      # 32 raw bytes
+claims = { sid, app, dep, rep, cfg, [dev], iat, exp, [cfd] }    # serialized in this order; base64url without padding
   sid  session id (rt_<32 hex>)      app  app account      dep  deployment      rep  replica id
-  cfg  base64url(JSON(session config)), ≤ 6 KB (6144 characters)
+  cfg  base64url(JSON(session config)), ≤ 6 KB (6144 characters); "" with `cfd` when the config goes by reference (below)
+  dev  optional: the app's device id for this session (`device` at admission); absent when none was sent.
+       The edge ignores it; the gateway refuses the token of a blocked device (docs/api/http.md § App devices)
   iat/exp  unix seconds, exp − iat ≤ 900 (15 min); default TTL 600 s (REALTIME_SESSION_TTL_SECONDS)
 ```
 
@@ -45,6 +47,39 @@ Verification: header `alg` must be `HS256`; constant-time signature check; `exp 
 TURN credential): [`docs/realtime-token-vectors.json`](realtime-token-vectors.json) — cross-checked in Python too.
 
 The token is **signed, not encrypted**: the browser can read `cfg`. No secret belongs in the session config.
+
+**Config by reference** (configs over 6144 characters, up to `RT_MAX_CFG_REF_CHARS` = 32768 base64url characters,
+~24 KB of JSON; above that admission answers 413). The 6144 cap exists because the token rides in the WebSocket URL
+and is base64url-encoded twice (an 8.3 KB request line, at nginx's and aiohttp's limits). A larger config leaves the
+token: `cfg` is `""` and one more claim, `cfd` = base64url(SHA-256(the config's base64url text)), is appended after
+`exp` (tokens without it are byte-for-byte what they were; the vectors are unchanged). The descriptor then carries
+the text itself in `cfg`, and the client hands it to the edge at session start: the first WS text frame
+`{type:"session_config", cfg}`, or `cfg` next to `sdp` in the offer body (also on a re-offer). The edge accepts the
+session only when the text hashes to the signed `cfd` (reason `cfg` otherwise, before the token is consumed; a WS
+waits 5 s for the frame), so authenticity is still checked offline, with no call to the gateway and no state in it:
+a gateway restart between admission and connect changes nothing. An SDK older than this change cannot open a
+by-reference session (it never sends the config); configs that fit keep riding in the token, as before.
+
+**What fits the LLM.** The bound is on the whole config; what limits the *prompt* is the LLM's context per slot
+(`LLM_SLOT_CTX`, read by the edge from `/health` `llm_ctx`). The history fit keeps the system prompt and every
+`system` message whole and estimates 3 bytes per token + 8 per message, so of `ctx − max_tokens (160) − 64` tokens:
+
+| System prompt (UTF-8) | est. tokens | slot 2048 (L4): 1824 usable | slot 4096 (L40S): 3872 usable | slot 8192: 7968 usable |
+|---|---|---|---|---|
+| 3 KB | ~1030 | ~790 left: about 11 short exchanges of history | ~2840 left | fits |
+| 4.6 KB (the parle client's largest) | ~1580 | ~240 left: 3 exchanges, then the oldest go | ~2290 left: about 30 exchanges | fits |
+| 5.4 KB | ~1850 | nothing left: the turn itself does not fit | ~2020 left | fits |
+| 7 KB | ~2400 | **cannot work** (LLM answers 400 on every turn) | ~1470 left: about 20 exchanges | fits |
+| 11.5 KB | ~3930 | cannot work | nothing left | ~4000 left |
+| 16 KB | ~5470 | cannot work | **cannot work** | ~2500 left |
+
+The estimate is deliberately high (llama.cpp counts ~3.6 bytes per token for Portuguese), so the real room is a
+little larger; the LLM's own count decides. A config that leaves under 64 tokens for the learner's turn (system prompt +
+`system` messages + `user_template` + `max_tokens` + 64) is **refused at admission** with `413 prompt_too_large`: the
+gateway takes the smallest `LLM_SLOT_CTX` of the deployment's places (`env`, else `envByMachineType`, else 2048), and
+the edge checks again against the slot its replica reports (WS: `error{code:"prompt_too_large"}` then close 1008;
+WebRTC offer: 413). Before, such a session opened and every turn ended with `error{code:"upstream"}`, stage `llm`, HTTP
+400 "context size".
 
 ### Edge routes (on the replica, behind the nginx token gate)
 
@@ -57,7 +92,7 @@ replica's HTTP; only WebRTC media/data go to it directly, and WS goes through th
 | `POST /__aigw/rt/ice` | `{sessionId, candidate}` (trickle, optional — the SDK v1 sends a complete SDP) |
 | `GET /__aigw/rt/status` | `{active, max, available, transports:["webrtc","ws"], udpPorts:[lo,hi]}` |
 | `DELETE /__aigw/rt/session/:id` | ends a session (the `sessionId` the offer answered) |
-| `GET /__aigw/rt/ws?token=…` | WebSocket (relayed from the gateway's `/v1/realtime/ws`) |
+| `GET /__aigw/rt/ws` | WebSocket (relayed from the gateway's `/v1/realtime/ws`); the session token in `X-Aigw-Session-Token` (`?token=` still read); nginx keeps no access/error log line for it |
 
 `max` comes from the spec env `RT_MAX_SESSIONS` (default L40S 4, L4 2 through `envByMachineType`: what one replica
 serves with the **maximum** first audio under 2.5 s — measured on the L40S, docs/reports/2026-10-07-realtime-handoff.md
@@ -70,15 +105,98 @@ the status); admission then places new sessions on another replica or sends them
 ### Events and control messages
 
 Edge → client (data channel "events", JSON, or WS text frames), the s2s vocabulary:
-`{type:"ready"}`, `{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
+`{type:"ready"}`, `{type:"turn_ack"}` (a client `end_turn` was received: sent at once, before the turn's own events),
+`{type:"vad", state:"start"|"end"}`, `{type:"transcript", text, final}`, `{type:"filtered", reasons}`,
 `{type:"reply_delta", text}`, `{type:"reply", text}`, `{type:"audio_start"}`, `{type:"audio_end"}`,
-`{type:"interrupted"}`, `{type:"done", empty?, filtered?}`, `{type:"error", code, message}`,
+`{type:"interrupted"}`, `{type:"done", empty?, filtered?, intercepted?, said?, tag?, served?}`, `{type:"intercept", tag, action}`,
+`{type:"say", text, tag}`, `{type:"config_applied", n}`, `{type:"error", code, message}`,
 `{type:"metrics", ttfa_ms, stt_ms, llm_ttft_ms, tts_ttfb_ms, endpoint_ms, ttfa_from_speech_ms, first_sound_ms,
-first_sound_from_speech_ms, opener, deadline_ms, deadline_missed}`, `{type:"opener", state:"start"|"end", text, index,
+first_sound_from_speech_ms, opener, deadline_ms, deadline_missed, uplink_lost_ms, uplink_recovered_ms, uplink_fec_pct, uplink_red_pct,
+out_first_pull_ms, rtp_first_sent_ms, rtp_late_p50_ms, rtp_late_p95_ms, rtp_late_max_ms}` (the last five on WebRTC, docs/realtime-edge.md), `{type:"opener", state:"start"|"end", text, index,
 audio_ms}`, `{type:"deadline_missed", deadline_ms}` (next section).
 
 Client → edge: `{type:"interrupt"}`, `{type:"end_turn"}` (client VAD: the learner stopped), `{type:"config_update",
-messages?}` (append to the history), `{type:"ping"}`.
+messages?, opener?}`, `{type:"ping"}`.
+
+**The signed session config is authoritative.** A client `config_update` may carry only `signed` (an update the
+gateway signed for the app, § App hooks), or `messages` (appended to the
+history; `user` and `assistant` roles with string content — the SDK replays the turns of a broken session into the new
+one) and `opener` (`null` switches the signed opener off, anything else switches the signed one back on: the value is
+never used). Any other field, a `system` message or a malformed `messages` refuses the whole update: nothing changes,
+the client gets `{type:"error", code:"forbidden"}` and the edge emits `edge.config.refused {keys, count}` (field names
+only). `system`, `voice`, `fallback_voice`, `user_template`, `max_tokens`, `temperature`, `stt_prompt`, `language`,
+`vad` and `first_audio_deadline_ms` change only with a config signed by the gateway for the app.
+
+### App hooks: intercepts, say, signed updates, reply guard, served ids
+
+All optional; a session without these fields behaves exactly as before. They are part of the signed session config
+(checked at admission, 400 `invalid_request` when malformed), so the browser cannot change them.
+
+**`intercepts`** — the app sees the learner's final transcript before the reply is voiced, with no network hop: a rule
+set evaluated on the edge, between the hallucination guard and the LLM.
+
+```json
+"intercepts": [
+  { "tag": "slower",  "action": "drop", "contains": ["mais devagar", "fala devagar"] },
+  { "tag": "repeat",  "action": "drop", "contains": ["pode repetir", "não entendi"], "whole": ["desculpa", "como"] },
+  { "tag": "repeat",  "action": "drop", "whole": ["hã", "hum"], "question": true },
+  { "tag": "options", "action": "say",  "contains": ["opções"], "text": "Você pode pedir um pão.", "voice": "rafa" }
+]
+```
+
+- Matching is a plain normalised-phrase test, no patterns: transcript and phrases are lowercased, stripped of accents
+  (NFD) and of `- , ! ? . ; : ' " ( ) « »`, spaces collapsed — the parle client's own `normalizeSemanticText`
+  (`core/text/semantic-text.ts`, used by `learnerRequestOf` in `backend/fast-version-routes.ts`). `contains`: the
+  phrase appears as whole words anywhere; `whole`: the phrase is the entire utterance; `question: true`: only when the
+  raw transcript has a `?`. The first matching rule wins. Linear in the text: nothing to backtrack.
+- Bounds: 32 rules, 64 phrases per list, 80 characters per phrase, `tag` `[a-z][a-z0-9_.-]{0,39}`, `text` ≤ 400.
+- A matched turn is **not sent to the LLM** (a speculative turn does not start it either) and **never enters the
+  history**. Events: `transcript{final}` → `intercept{tag, action, turnId}` → (`action:"say"`: `say{text, tag}` →
+  `audio_start` → the line's audio, synthesized with the rule's `voice` / `fallback_voice` or the session's, in the
+  session's audio queue → `audio_end`) → `metrics` → `done{intercepted:true, tag, served?}`. No opener plays for it.
+  The page runs its own behaviour on `intercept` (repeat the last audio, slower, show the transcript).
+- Cost on a turn no rule matches: one in-process string test (0.3 ms for 32 × 64 phrases, measured in
+  `tests/test_session.py`), no await, no upstream call: first audio is unchanged.
+- Not evaluated on the clip rungs (`/v1/s2s`, the composed fallback): there the app's own backend sees the transcript.
+  The fields are carried in the config and ignored, so a session with rules still falls back; a command spoken on a
+  clip rung goes to the LLM like any other utterance and enters the history, speculated or not (a speculative start
+  voices nothing: the answer is only streamed for the final clip). `reply_guard` is not applied there either. An app
+  that needs the command on the fallback matches the `transcript` event in its own backend, as before these rules.
+
+**Signed update** — the app changes a live session through the gateway, never through the browser's own word:
+`POST /v1/realtime/updates {token, update}` (app API key; the session must be the app's) → `{sessionId, signed, n}`.
+`signed` is a JWT (HS256, the session's key, claims `sid, upd, n, iat, exp` with `exp` = the session token's) that
+the page forwards as `{type:"config_update", signed}` (SDK: `session.applyUpdate(signed, history?)`). The edge
+verifies it offline, for this `sid`, with `n` (the gateway's clock, ms) greater than the last applied one, then:
+
+| `update` field | Effect |
+|---|---|
+| `drop_turn: "<turnId>"` | removes that turn's user and assistant messages from the history (an interrupted turn) |
+| `messages: [...]` | **replaces** the history (the client's own `config_update{messages}` only appends) |
+| `system`, `voice`, `fallback_voice`, `user_template`, `max_tokens`, `temperature`, `stt_prompt`, `opener`, `first_audio_deadline_ms`, `intercepts`, `reply_guard` | replace that field of the session config |
+| `say: {text, voice?, fallback_voice?, history?, tag?}` | voices the line in the session's audio queue, after the turn in progress; `history: true` appends it as an assistant message; ends with `done{said:true, tag, served}` |
+
+It answers `config_applied{n}`; a bad signature, another session's update, an expired or replayed one is refused like
+any forbidden `config_update`. Withholding an update only leaves the page with its previous signed state. `language`
+and `vad` are fixed for the session.
+
+**`reply_guard: {deny: [phrases], note?}`** — the gateway never decides what language a reply is in; the app names
+phrases a reply of its character must not open with (function words of the wrong language: `sure`, `of course`,
+`bien sûr`…; same matcher, up to 256). The first sentence is checked when the cutter closes it, which is when its TTS
+would start anyway, so a passing reply costs no first audio (the first sentence's `reply_delta` arrives in one piece).
+A denied first sentence is never voiced: the LLM is asked once more with `note` appended to the user turn, and that
+second answer is voiced unchecked (`metrics.reply_retries: 1`, `edge.llm.reply_guard`). The retry costs one more LLM
+time-to-first-token plus the first sentence's generation on that turn only. Not applied with `speak_field`, in
+`s2s` upstream mode or on the clip rungs.
+
+**`served`** — `done` of a voiced turn carries what answered it:
+`{stt, llm, tts, voice, opener, transport}`. On the edge the three ids are the replica's own (`/health` → `models`;
+without it `stt` is `null`, `llm` / `tts` are `EDGE_LLM_MODEL` / `EDGE_TTS_MODEL`), `voice` the id sent to the TTS
+(the catalog voice, the `fallback_voice` when the catalog does not know it, `"custom"` for `{audio, text}`), `opener`
+whether an opener line played, `transport` `webrtc` / `ws`. On the composed path (`/v1/s2s` fallback) the ids are
+each stage's `X-Gateway-Provider` (`deployment:<name>` or `<provider>:<upstream model>`), `transport` is `s2s`, and
+`voice` is the cast voice when the first TTS target served, `null` when a fallback target chose its own. The SDK
+copies it to `metrics.lastTurn.served`.
 
 ### First-audio deadline and opener
 
@@ -93,6 +211,15 @@ session (WebRTC / WS), the speech-stack's `/v1/s2s` and the gateway's composed f
 | `first_audio_deadline_ms` | deployment's (2000) | deadline of the first sound, ms after the end of the speech; capped at 2500 |
 | `opener` | none | `{"lines": ["…", "…"]}`: up to 8 short lines the app authored for the character, in the session's language |
 | `endpoint_ms` | 0 | `/v1/s2s` only: the silence the client waited after the speech before posting the clip. The server only knows when the request arrived; with this the deadline starts at the end of the speech (the edge needs none: its VAD knows the last speech frame) |
+
+**Speculative turn** (`/v1/s2s`, composed fallback only): `config.speculation = {id, turn, action: "start"}` with the
+clip so far (WAV) starts the STT, then the LLM, on what was heard up to a pause and answers `202 {"speculative": true}`
+(or `false` with a `reason`: `short`, `format`, `turn_cap`, `busy`, `off`); `{id, action: "cancel"}` drops it when the
+speech resumes; the turn names `{id}` and starts from that transcript without a second STT. Nothing speculative is
+voiced, the app is charged once per turn. The SDK does it on the s2s-stream rung when `voice.speculatePauseMs` is set.
+It travels by HTTP to the gateway only: nothing about it is sent to the edge, whose `config_update` allow-list it does
+not touch (`docker/aigw-edge/tests/sdk-client-updates.json` lists every frame the SDK sends there on its own).
+Bounds and measurements: docs/reports/2026-10-07-realtime-handoff.md § Fallback em streaming.
 
 Deployment defaults: `RT_FIRST_AUDIO_DEADLINE_MS` / `RT_FIRST_AUDIO_MARGIN_MS` on the edge (`realtime.env`),
 `FIRST_AUDIO_DEADLINE_MS` / `FIRST_AUDIO_MARGIN_MS` on the speech-stack and the gateway: 2000 and 300 ms.
@@ -212,7 +339,7 @@ Called by the **app's backend** with its app key (the browser never holds a gate
     { "type": "s2s-stream", "url": "/v1/s2s" },
     { "type": "post" } ],
   "iceServers": [ … ],
-  "limits": { "maxSessionSeconds": 600, "maxConfigChars": 6144, "requestsCharged": 40, "replica": { "active": 3, "max": 16, "pending": 1 } } }
+  "limits": { "maxSessionSeconds": 600, "maxConfigChars": 32768, "requestsCharged": 40, "replica": { "active": 3, "max": 16, "pending": 1 } } }
 ```
 
 Edge transports the replica does not list are left out. URLs are absolute (`REALTIME_PUBLIC_URL`, else the request's
@@ -227,8 +354,11 @@ is unchanged). CORS is open (`*`, no credentials): the bearer is the only author
 - `POST /v1/realtime/sessions/:id/offer` `{sdp}` → the replica's `/__aigw/rt/offer` → `{sdp, type:"answer", sessionId}`.
   The token's `sid` must equal `:id` (403). Edge 409/429/503 → 503 `saturated`; unreachable → 502.
 - `POST /v1/realtime/sessions/:id/ice` `{candidate}` (trickle, optional), `DELETE /v1/realtime/sessions/:id`.
-- `GET /v1/realtime/ws?token=…` upgrade: the gateway first opens the replica's `/__aigw/rt/ws` (`ws://`, or `wss://`
-  when `replicaBase` turns to https) with `X-Aigw-Token`, and only then answers 101 — a refusal is a plain HTTP error
+- `GET /v1/realtime/ws` upgrade, the token as the subprotocol `aigw.token.<jwt>` next to `aigw.rt` (answered with
+  `Sec-WebSocket-Protocol: aigw.rt`; what the browser SDK sends), or `?token=` for older clients — a URL ends up in
+  logs, a subprotocol does not (audit 2026-10-09 #19). The gateway first opens the replica's `/__aigw/rt/ws` (`ws://`,
+  or `wss://` when `replicaBase` turns to https) with `X-Aigw-Token` and the session token in `X-Aigw-Session-Token`
+  (never in the URL), and only then answers 101 — a refusal is a plain HTTP error
   (401 bad token, 410 replica gone, 502 replica refused, 504 timeout) the SDK reads as "next rung". Frames pass through
   untouched; close codes and reasons cross both ways; pings every 20 s. Backpressure: the browser socket is paused
   while the replica's buffer is over 1 MiB (resumed under 256 KiB); a browser that stops reading (> 1 MiB queued, ~20 s
@@ -325,8 +455,9 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
 
 - **Offer timing** — the SDK does not wait out `iceGatherMs`: the offer leaves at the first server-reflexive or relay
   candidate, when gathering completes, or at the ceiling. A webrtc transport offer with `iceTransportPolicy: "relay"`
-  is passed to the peer connection and then only a relay candidate releases the offer. Candidates gathered later are
-  not signalled (non-trickle): the browser still checks from them, and the edge learns them as peer-reflexive.
+  is passed to the peer connection and then only a relay candidate releases the offer. A candidate gathered after the
+  offer left is posted to the session's `iceUrl` once the answer is in (HTTP, so loss on the media path does not eat
+  it); the edge would also learn it as peer-reflexive from the browser's own checks.
 - **Playout delay** — `playoutDelayMs` (session option, default 0) is written to the receiver's `jitterBufferTarget`
   (milliseconds, 0–4000 in the W3C spec), or to `playoutDelayHint` (seconds) where only that exists; a browser with
   neither is left alone. 0 is the lowest value the spec allows and asks for no added delay: the browser still buffers
@@ -338,8 +469,17 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   switches **between turns** — nobody speaking, no reply pending or playing, 300 ms after the last audio —: it closes
   the WS (capture and player stop), puts the microphone track on the peer connection (`replaceTrack`), replays the
   conversation with one `config_update`, and emits `transport {transport:"webrtc", reason:"upgrade", from:"ws"}`.
-  WebRTC not connected `upgradeMs` (5 s) after the start on WS is given up without any error and the session stays
-  on WS. WebRTC ready first: the WS attempt is cancelled. Both failing: the clip rungs, in order. A WS that breaks
+  **The two budgets are separate.** What serves the first turn is decided in the foreground budget of the table. The
+  WebRTC attempt behind a serving WS is patient, because waiting costs the learner nothing: `upgradeConnectMs` (12 s)
+  from the answer to a connected peer connection, `upgradeTries` (2) tries with `upgradeBackoffMs` (2 s, doubling)
+  between them — a retry is a new offer on the same edge session, which closes the previous peer connection —, all
+  inside `upgradeMs` (40 s). On the loopback harness with 75 ms each way a connection takes 0.9 s at the median and
+  up to 2.9 s at 5 % loss, 5.0 s at 10 % (DTLS and SCTP retransmission timers): the 3 s foreground budget cuts a
+  tenth of them at 10 %, the patient one none. An attempt that runs out is given up without any error (telemetry
+  `rt.ladder.fallback`, `rt.webrtc.retry`), its peer connections closed and its edge session deleted, and the session
+  stays on WS. With no WS to serve the learner (it failed) the WebRTC attempt is held to the foreground budget and the
+  clip rungs follow; with WebRTC as the only rung (`preferredTransports: ['webrtc']`) it gets the patient budget and
+  then `error{code:"no_transport"}` naming the time it waited. WebRTC ready first: the WS attempt is cancelled. Both failing: the clip rungs, in order. A WS that breaks
   while WebRTC is still connecting waits for it instead of dropping to a clip rung. The edge runs the two sessions of
   one `sid` side by side and counts the learner once (docs/realtime-edge.md); the standby one hears nothing, so a
   turn is never run twice.
@@ -375,7 +515,81 @@ await session.connect();   // → 'webrtc' | 'ws' | 's2s-stream' | 'post'
   the learner to repeat.
 - Voice (`@parle/ai-gateway/voice`): Silero `vadEnd` + the rest of `endSilenceMs` → `end_turn`; `vadStart` while the NPC
   speaks → `interrupt` (barge-in); on the clip rungs the voice SDK's turn-taking records the clip.
-- Without `voice`, the page calls `sendEndTurn()`, `interrupt()`, `sendTurn(wav)` itself.
+- Without `voice`, the page calls `sendEndTurn(clip?)`, `interrupt()`, `sendTurn(wav)` itself.
+- **Uplink stalled: the turn is rescued over HTTP** (`rescueMs`, 1200 ms; 0 = off). On a realtime rung the SDK keeps
+  the utterance it has just heard end (the voice SDK's recorder; a page without `voice` passes it to
+  `sendEndTurn(clip)`). The edge answers a client `end_turn` with `turn_ack` at once. No sign of the turn from the edge
+  `rescueMs` after `end_turn` (no `turn_ack`, transcript, reply or audio) means the learner's audio or the edge's
+  answer is stuck on that transport: the utterance goes as **one clip** to the clip rung (`s2s`, else `postTurn`),
+  the same turn for the page and for telemetry. Then whichever answers first serves the turn, and only that one:
+  - the realtime path shows a sign of the turn before the clip answers → the clip request is aborted;
+  - the clip's first event arrives first → the stalled transport is **closed** (its edge session ends and with it the
+    turn it may have started; nothing it sends later is delivered), the session is on the clip rung
+    (`transport {reason:"rescue", from}`), and a new realtime session is admitted in the background and takes over
+    between turns with the conversation replayed in one `config_update` (user and assistant messages only) — the move
+    of a readmitted session. Telemetry `turn.rescued {from, to, stallMs}`.
+  - the clip request fails before answering → nothing changes, the session goes on waiting for the realtime path.
+
+  Never more than one extra clip turn per rescued turn. A barge-in drops a clip that has not answered and cuts one
+  that is playing. Only armed once the edge has sent a `turn_ack` in the session (an older edge image never does, and
+  there the only early sign would be the transcript, a model's time rather than the network's). It does not help when
+  the whole network is down for those seconds (the clip waits with everything else) nor when the capture itself
+  stalls; it helps when one TCP stream is stuck behind a retransmission or a backlog while the path works again.
+
+### Transport by network signal (`transportPolicy`)
+
+| `transportPolicy` | Behaviour |
+|---|---|
+| unset (default), `"webrtc"` | as above: WS serves the start, WebRTC takes over as soon as it is connected |
+| `"ws"` | WebRTC is not tried: the session is WS, then the clip rungs |
+| `"auto"` | starts on WS, keeps WebRTC connected on standby, measures the network in the session and moves by what it measures |
+
+`"auto"` is an SDK option (`createRealtimeSession({ transportPolicy: "auto", fidelity, transportThresholds })`); the app
+decides it per lesson. What it does:
+
+1. **Always starts on WebSocket** (it connects on any network and serves the first turn), even when WebRTC is ready first.
+2. **WebRTC comes up in the background** with the patient budget and stays on standby for the whole session: the
+   microphone is not on it — a disabled clone of the track is, so RTP flows (silence) and the edge's receiver reports
+   give the uplink loss and jitter of this very network; the edge session behind it hears silence and runs no turn. The
+   transport that is not serving stays open (the WS on standby pings every 30 s; the edge ends a session idle for 120 s).
+3. **One sample per turn**, at its `done`: uplink loss in the turn (`packetsLost` of the `remote-inbound-rtp` report
+   over the packets sent since the last sample), jitter and RTT from the same report, the jitter-buffer delay of the
+   downlink, and on WS the stall of the turn (the delay of the edge's `turn_ack`, the send backlog in ms of audio, a
+   rescued turn's wait). The decision is a pure function over the samples (`transport-policy.ts`, `{state, effects}`).
+4. **It moves by the network, not by response time.** Loss of `lossPct` or more, or a stall of `stallMs` or more, on
+   `windowTurns` turns in a row → WebRTC. `windowTurns` turns in a row at `clearLossPct` or less with no stall, on
+   WebRTC → back to WS. A clean network therefore stays on WS: the speech arrives intact and Chrome pays no jitter
+   buffer. WebRTC not connected (UDP blocked) → nothing to move to, the session stays on WS without trying.
+5. **Between turns only, with hysteresis**: the move waits for the same quiet moment as every other switch (no turn,
+   no reply playing, 300 ms after the last audio); after a move none before `dwellMs`; at most `maxSwitches` in a
+   session. A move swaps which transport carries the microphone (`replaceTrack` on WebRTC, capture on WS), sends the
+   side that takes over the user and assistant messages it missed in one `config_update`, and emits
+   `transport {transport, reason:"policy", from}`. A turn that stalls on WS is not moved: the rescue above answers
+   it, and the session then goes to the WebRTC it kept ready.
+6. **`fidelity: true`** (the transcripts are data: a study, an assessment): the session does not move to WebRTC under
+   loss unless the edge's answer negotiated loss recovery (`audio/red` or `useinbandfec=1`), and on WebRTC
+   `windowTurns` lossy turns whose `metrics` show nothing rebuilt (`uplink_recovered_ms` 0, `uplink_red_pct` and
+   `uplink_fec_pct` 0) send it back to WS (`reason:"unprotected"`).
+
+| Threshold (`transportThresholds`) | Default | Why |
+|---|---|---|
+| `lossPct` | 2 | at 2 % a tenth of the WS turns already wait on a TCP retransmission; the `lossy` profile is 5 % |
+| `clearLossPct` | 0.5 | below the noise of one turn's sample (~750 packets: 4 lost) |
+| `stallMs` | 800 | the edge's `turn_ack` normally comes back in one round trip (150 ms on `lossy`); 800 ms is a retransmission timer, not jitter |
+| `windowTurns` | 3 | one bad turn is an event, three in a row are the network (about 45 s of a lesson) |
+| `dwellMs` | 60 000 | a move costs a history replay and a cold jitter buffer; not twice a minute |
+| `maxSwitches` | 4 | a network that flaps more than that is served by staying where it is |
+
+Where the numbers come from (live, L40S, night of 2026-10-09, `docs/reports/2026-10-07-realtime-handoff.md`): on
+`lossy` (75 ms each way, 5 % loss) the first sound on WS was 1487 ms p50 / 2373 p95 / 2961 max, on WebRTC 1270 / 2124 /
+2154; on `campus-slow` WS 1182 / 1857 with the only 3 lost turns (`timeout`), WebRTC 1104 / 1570; on a clean network
+they tie in the lightweight clients (1273 against 1298 p50) and real Chrome pays 100–180 ms on WebRTC for its jitter
+buffer. So: clean → WS, lossy or stalling → WebRTC. The cost of `"auto"`: one more peer connection per learner kept
+alive (silence both ways, about 20 kbit/s up) and the edge decoding it (about 2 % of a core per learner).
+
+Telemetry: `rt.spare.ready`, `transport.switch {from, to, reason: loss|stall|clean|unprotected, lossPct, jitterMs,
+stallMs}`, and at the end of the session `rt.network.summary {turns, wsTurns, webrtcTurns, lossPctMax, lossPctAvg,
+jitterMsMax, stallMsMax, switches, rescues}`; every `turn.done` already carries the transport that served it.
 
 ### A reply cut by an upstream error
 
@@ -432,7 +646,7 @@ Event shape: `{ts, source:"browser"|"gateway", level, event, traceId, sessionId?
 
 - Browser: `rt.ladder.try|ok|fallback` (from, to, reason; `ok` = the session started: transport, durMs, `upgrading` when WebRTC is still connecting), `rt.ladder.upgrade` (from, to, durMs since the start), `rt.readmit.gave_up` (reason: `deadline`, `no_transport` or the refusal code), `rt.ice.state`, `rt.ice.failed`, `rt.ice.restart` (ok), `rt.turn.used`,
   `rt.session.admitted|rejected|closed`, `vad.segment` (durMs), `turn.first_audio` (durMs from the end of the turn, `fromSpeechMs`),
-  `turn.first_sound` (durMs on the learner's clock, source), `rt.opener.cached` (clips, lines), `turn.done` (firstSoundMs, networkDelayMs, clientOpener), `turn.recovered`, `ws.close` (code), `error`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
+  `turn.first_sound` (durMs on the learner's clock, source), `rt.opener.cached` (clips, lines), `turn.done` (firstSoundMs, networkDelayMs, clientOpener), `turn.recovered`, `turn.rescue_started` (transport, afterMs, uplinkBufferedBytes), `turn.rescued` (from, to, stallMs), `turn.rescue_failed`, `rt.webrtc.retry`, `rt.spare.ready`, `transport.switch`, `rt.network.summary`, `ws.close` (code), `error`; `turn.done` also carries `ackMs` (end of turn → the edge's first sign of it) and `rescuedMs`. Batches of ≤ 100 to `POST /v1/telemetry/events` with the session token.
 - Gateway: `rt.session.admitted|rejected|deleted`, `rt.signal.offer|refused`, `ws.open|close|refused`, `error` (sink
   pluggable, default the log).
 - **Never** audio, transcript, LLM text, SDP or tokens: codes, counts, durations (the SDK's `safeAttrs` drops content keys).
@@ -526,10 +740,12 @@ shows in the failure rate; the latency a real learner would then get on `/v1/s2s
 - **failed**: no session at the turn's time (admission refused, connect failed, session lost), no `done` within
   `--turn-timeout`, `error` before any audio, `empty`/`filtered` transcript, no audio.
 - **truncated**: `error` (or a lost session, or no `done`) *after* audio started — the GPU round-2 case — or a clean
-  `done` whose audio is too short for its reply: audio ms per reply character under `--trunc-ratio` (0.75) of the run's
-  90th-percentile rate for that client (`--ms-per-char` fixes the reference instead; fewer than 5 clean turns: not judged). The realtime events do not
-  announce sentences, so a missing sentence can only be seen as missing duration: one that is under 25 % of the reply
-  passes at the default ratio (with the fake model's fixed-rate audio use `--trunc-ratio 0.9`).
+  `done` whose audio is too short for its reply: audio ms per reply character under `--trunc-ratio` (0.6) of the run's
+  median rate for that client (`--ms-per-char` fixes the reference instead; fewer than 5 clean turns: not judged). The realtime events do not
+  announce sentences, so a missing sentence can only be seen as missing duration: one that is under 40 % of the reply
+  passes at the default ratio (with the fake model's fixed-rate audio use `--trunc-ratio 0.9`). The 0.75 × p90 rule it
+  replaced flagged honest replies (MAI voice 72–94 ms per character, lowest clean reply at 0.60 of p90; GPU voice clean
+  replies at 59–62 ms per character), so the reference is the median and the ratio sits under the lowest clean reply seen.
 
 Latency shares (≤ 1.0 / 1.5 / 2.0 s) are over **all attempted turns**: a failed turn counts as over 2 s.
 
@@ -588,6 +804,9 @@ veth pair and its qdiscs go with it), the NAT rules and `/etc/netns/aigwload`; t
 | `udp-blocked` | `iptables` in the namespace: outbound UDP dropped except port 53 | the firewall case of `docs/realtime-edge.md`: TURN over TCP or the WS rung |
 | `lossy` | 75 ms delay (150 ms round trip), 5 % loss | assumption: the bad end of Wi-Fi |
 | `flap` | the link drops (100 % loss) for 3 s every 30 s | assumption: roaming between access points |
+
+`--profile-then lossy@90` changes the shaping to another profile (`clean`, `campus-slow`, `lossy`) that many seconds
+into the run; `--transport-policy auto` and `--fidelity` set the SDK options of the Chrome sessions.
 
 netem's jitter reorders packets (each packet draws its own delay), which a real Wi-Fi link does less: `campus-slow`
 is harsher on TCP than its numbers suggest.

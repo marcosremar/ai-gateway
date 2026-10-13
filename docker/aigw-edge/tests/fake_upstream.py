@@ -2,7 +2,7 @@
 Deterministic stand-in for a speech replica's model container (no GPU, no model): the routes the edge calls, with fixed
 latencies so the harness can check what the edge adds.
 
-    GET  /health                    200
+    GET  /health                    200, llm_ctx LLM_CTX (a 16 KB system prompt fits)
     GET  /v1/voices                 one catalog voice (br-m-08)
     POST /v1/audio/transcriptions   STT_MS later: the turn's `prompt` after "FAKE:" if given, else a fixed sentence;
                                     Whisper-shaped metadata (no_speech_prob, avg_logprob, compression_ratio)
@@ -10,7 +10,7 @@ latencies so the harness can check what the edge adds.
     POST /v1/audio/speech           raw PCM16 24 kHz: first bytes after TTS_TTFB_MS, 0.25 s of tone per word, sent at
                                     4× real time in 40 ms chunks; the tone's pitch tells the sentences apart
                                     (120 Hz + 30 Hz per word)
-    POST /__tts_faults              {"<sentence>": ["runaway" | "lead" | "break" | "cut", …]}: one fault per request
+    POST /__tts_faults              {"<sentence>": ["runaway" | "lead" | "break" | "cut" | "overlong" | "capped", …]}: one fault per request
                                     for that sentence, in order — runaway = silence up to max_new_tokens then the
                                     connection dropped, lead = 0.5 s of silence then the sentence, break = dropped
                                     before any audio, cut = dropped after the sentence's audio
@@ -30,6 +30,7 @@ import numpy as np
 from aiohttp import web
 
 STT_MS, LLM_TTFT_MS, LLM_TOKEN_MS, TTS_TTFB_MS = 80, 60, 15, 50
+LLM_CTX = 16384
 REPLY = "Bom dia! Claro, um pão francês sai já. Mais alguma coisa?"
 HEARD = "Bom dia, eu queria um pão francês."
 calls = {"stt": 0, "llm": 0, "tts": 0, "s2s": 0, "partials": 0, "last_llm_messages": None, "last_tts": None, "traces": {},
@@ -52,8 +53,15 @@ def tone(seconds: float, rate: int = 24000, freq: float = 180.0) -> bytes:
     return (wave * 32767).astype(np.int16).tobytes()
 
 
+def holes(pcm16: bytes) -> int:
+    x = np.frombuffer(pcm16[: len(pcm16) // 640 * 640], dtype=np.int16).astype(np.float32).reshape(-1, 320)
+    rms = np.sqrt((x * x).mean(axis=1))
+    loud = np.nonzero(rms > 0.5 * rms.max())[0]
+    return int((rms[loud[0]:loud[-1] + 1] < 0.2 * rms.max()).sum()) if len(loud) else 0
+
+
 async def health(_r):
-    return web.json_response({"ok": True})
+    return web.json_response({"ok": True, "llm_ctx": LLM_CTX, "models": {"stt": "fake-stt", "llm": "fake-llm", "tts": "fake-tts"}})
 
 
 async def voices(_r):
@@ -63,6 +71,7 @@ async def voices(_r):
 async def transcriptions(request):
     form = await request.post()
     calls["stt"] += 1
+    calls["last_stt_holes"] = holes(form["file"].file.read()[44:])
     prompt = str(form.get("prompt") or "")
     await asyncio.sleep(STT_MS / 1000)
     text = prompt[5:] if prompt.startswith("FAKE:") else HEARD
@@ -101,13 +110,14 @@ async def speech(request):
         await asyncio.sleep(TTS_TTFB_MS / 1000)
         words = max(1, len(body["input"].split()))
         pcm = tone(0.25 * words, freq=120.0 + 30 * words)
-        pcm = {"runaway": bytes(int(body.get("max_new_tokens", 192) / 12.5 * 24000) * 2), "lead": bytes(24000) + pcm,
-               "break": b""}.get(mode, pcm)
+        cap = body.get("max_new_tokens", 192) / 12.5
+        pcm = {"runaway": bytes(int(cap * 24000) * 2), "lead": bytes(24000) + pcm, "break": b"",
+               "overlong": tone(cap + 1), "capped": tone(cap * 0.95)}.get(mode, pcm)
         step = int(0.04 * 24000) * 2
         for at in range(0, len(pcm), step):
             await res.write(pcm[at:at + step])
             await asyncio.sleep(0.01)
-        if mode in ("runaway", "break", "cut"):
+        if mode in ("runaway", "break", "cut", "capped"):
             request.transport.close()
         return res
     finally:

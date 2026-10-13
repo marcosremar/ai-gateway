@@ -137,7 +137,8 @@ describe('reaper over the real Vast backend (labels aigw:<ns>:<deployment>)', ()
     const vast = new VastDeploymentBackend('k', { fetch: fetchImpl as never, now: () => NOW });
     const r = await reapOrphans({ ...up, backends: [vast], owned: async () => ({ names: new Set(['parle-speech']) }) });
     expect(r).toMatchObject({ seen: 2, released: ['11'], failed: [] });
-    expect(calls).toEqual(['GET /instances/', 'DELETE /instances/11/']);
+    expect(calls).toEqual(['GET /instances/', 'DELETE /instances/11/', 'GET /instances/']);
+    expect(r.foreign.map(f => `${f.namespace}/${f.id}`)).toEqual(['staging/13']);
   });
 });
 
@@ -213,7 +214,7 @@ describe('ownedFromGateway', () => {
 
   it('trusts only the full admin list of the same namespace', async () => {
     const url = await gateway();
-    expect(await ownedFromGateway({ gatewayUrl: url, adminKey: 'admin', namespace: 'prod' })).toEqual({ names: new Set(['tts']) });
+    expect(await ownedFromGateway({ gatewayUrl: url, adminKey: 'admin', namespace: 'prod' })).toMatchObject({ names: new Set(['tts']) });
     // An app key sees its own app's deployments only: never read as "the rest does not exist".
     expect(await ownedFromGateway({ gatewayUrl: url, adminKey: 'app', namespace: 'prod' })).toMatchObject({ skip: expect.stringContaining('full admin list') });
     expect(await ownedFromGateway({ gatewayUrl: url, adminKey: 'admin', namespace: 'staging' })).toMatchObject({ skip: expect.stringContaining("is not 'staging'") });

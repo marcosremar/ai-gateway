@@ -8,6 +8,7 @@ import {
   type SessionDescriptor, type TelemetryEvent, type TransportContext, type TransportOffer,
 } from '../../sdk/browser/realtime/index';
 import { createLocalTelemetry } from '../../sdk/browser/realtime/telemetry';
+import { edgeRefusal } from './_edge-client-updates';
 
 type Calls = Array<{ url: string; init: RequestInit; at: number }>;
 
@@ -47,7 +48,7 @@ class FakePc extends EventTarget {
   answers = 0;
   sent: unknown[] = [];
   channel = Object.assign(new EventTarget(), {
-    readyState: 'connecting', send: (d: string) => { this.sent.push(JSON.parse(d)); }, close: () => {},
+    readyState: 'connecting', send: (d: string) => { expect(edgeRefusal(JSON.parse(d))).toBeNull(); this.sent.push(JSON.parse(d)); }, close: () => {},
     onmessage: null as ((e: { data: string }) => void) | null, onclose: null as (() => void) | null,
   });
   ontrack: ((e: unknown) => void) | null = null;

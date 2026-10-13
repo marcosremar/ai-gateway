@@ -49,7 +49,7 @@ def llm(tokens, fail_after=None, hang=False):
 
 
 def tts(fail_on=None, hang_on=None):
-    async def stream(text, _language, _voice, out):
+    async def stream(text, _language, _voice, out, stats=None):
         running.append(asyncio.current_task())
         try:
             await out.put(b"\1\0" * 2400)
@@ -60,6 +60,8 @@ def tts(fail_on=None, hang_on=None):
                 await out.put(error)
                 raise error
             await out.put(b"\1\0" * 2400)
+            if stats is not None and "pão" in text:
+                stats["tts_overlong"] += 1
             return int(text.startswith("Bom"))
         finally:
             await out.put(None)
@@ -107,6 +109,7 @@ async def main():
     done = events[-1]
     assert done["type"] == "done" and (done["sentences"], done["spoken"], done["skipped"], done["tts_retries"]) == (3, 3, 0, 1), done
     assert done["audio_ms"] == round(audio / 2 / 24000 * 1000) == 600, done
+    assert done["tts_overlong"] == 1, "a sentence cut at its cap is counted in done and the turn goes on to the next sentence"
 
     events, _ = await turn(llm(REPLY, fail_after=2), tts())
     last = events[-1]

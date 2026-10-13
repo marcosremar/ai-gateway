@@ -1,5 +1,5 @@
 /**
- * WebSocket rung, relayed by the gateway (`wss://<gateway>/v1/realtime/ws?token=…`): microphone as 16 kHz PCM16 20 ms
+ * WebSocket rung, relayed by the gateway (`wss://<gateway>/v1/realtime/ws`, session token as the subprotocol `aigw.token.<token>`): microphone as 16 kHz PCM16 20 ms
  * frames up, 24 kHz PCM16 down into an AudioWorklet ring buffer, JSON events as text frames. Used when WebRTC cannot
  * connect (UDP and TURN blocked); TCP/443 only.
  */
@@ -9,6 +9,8 @@ import type { ClientMessage, RealtimeTransport, TransportContext } from '../type
 
 /** Uplink frames are dropped (not queued) above this backlog: late learner audio is worse than a gap. */
 const MAX_UPLINK_BUFFER = 64 * 1024;
+
+const STANDBY_PING_MS = 30_000;
 
 export interface WsDeps {
   WebSocket: typeof WebSocket;
@@ -26,6 +28,7 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
   let connected = false;
   let closing = false;
   let localOpener = false;
+  let keepAlive: ReturnType<typeof setInterval> | undefined;
   let skip = 0;
 
   const startMic = async () => {
@@ -40,6 +43,7 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
   };
 
   const teardown = () => {
+    clearInterval(keepAlive);
     capture?.stop();
     capture = null;
     player?.close();
@@ -52,7 +56,11 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
     async connect(signal) {
       if (!WS) throw new Error('WebSocket is not available');
       // A browser WebSocket cannot set headers: the trace context rides in the query (the gateway reads both).
-      const socket = new WS(`${url}${url.includes('?') ? '&' : '?'}traceparent=${encodeURIComponent(ctx.traceparent)}`);
+      const target = new URL(url);
+      const token = target.searchParams.get('token');
+      target.searchParams.delete('token');
+      target.searchParams.set('traceparent', ctx.traceparent);
+      const socket = token ? new WS(target.toString(), ['aigw.rt', `aigw.token.${token}`]) : new WS(target.toString());
       ws = socket;
       socket.binaryType = 'arraybuffer';
       let readyResolve: (() => void) | null = null;
@@ -64,6 +72,7 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
         signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); });
       });
       socket.onmessage = (e: MessageEvent) => {
+        if (closing) return;
         if (typeof e.data === 'string') {
           let event: { type?: string } | null = null;
           try { event = JSON.parse(e.data); } catch { return; }
@@ -93,6 +102,7 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
         if (connected) ctx.fail(new Error(`ws closed (${e.code}${e.reason ? ` ${e.reason}` : ''})`));
       };
       await opened;
+      if (ctx.descriptor?.cfg) socket.send(JSON.stringify({ type: 'session_config', cfg: ctx.descriptor.cfg }));
       await Promise.race([
         ready,
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`no ready within ${ctx.timeouts.wsReadyMs} ms`)), ctx.timeouts.wsReadyMs)),
@@ -103,7 +113,14 @@ export function createWsTransport(ctx: TransportContext, url: string, deps?: Par
       connected = true;
     },
     goLive() {
+      clearInterval(keepAlive);
       if (!capture) void startMic().catch((err: Error) => ctx.fail(err));
+    },
+    goStandby() {
+      capture?.stop();
+      capture = null;
+      clearInterval(keepAlive);
+      keepAlive = setInterval(() => { if (ws?.readyState === 1) ws.send('{"type":"ping"}'); }, STANDBY_PING_MS);
     },
     playOpener(samples, rate) {
       localOpener = true;

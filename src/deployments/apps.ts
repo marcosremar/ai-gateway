@@ -11,10 +11,13 @@
  * (the gateway logs in to its own Scaleway registry with its own key), env values are not stored.
  */
 
-import { mkdir, readFile, rename, writeFile } from 'fs/promises';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import { parseModelRoutes, type ModelRoutesSpec, type RouteEntrySpec } from '../config/serve-providers';
+import { defaultCloudTargets, withCloudFallback, type CloudFallbackAdded } from '../config/cloud-fallback';
 import type { FallbackKeyStore, ProvisionedKeyRecord } from './app-fallback';
+import { NAME_RE } from './spec';
+import { readStateFile, writeStateFile } from './state-file';
+import type { StateLog } from './store';
 
 export const APP_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
 export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
@@ -24,6 +27,7 @@ export const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
  * every lookup checks own properties only.
  */
 const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+export const isAppId = (value: string): boolean => APP_ID_RE.test(value) && !RESERVED_KEYS.has(value);
 const ownValue = <T>(rec: Record<string, T> | undefined, key: string): T | undefined =>
   rec && !RESERVED_KEYS.has(key) && Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined;
 
@@ -54,6 +58,40 @@ export interface AppImage {
   history: AppImageVersion[];
 }
 
+/**
+ * What the app needs from the gateway (`PUT /v1/apps/:app/profile`, app-gpu-health.ts). `requiresGpu`: the app's own
+ * GPU deployments are part of what it delivers (parle: the detected language and the cloned voices only come from them),
+ * so a turn the cloud fallback answers still answers, but is marked degraded and the app's status says so.
+ */
+export interface AppProfile { requiresGpu: boolean; gpuDeployments: string[] }
+
+const MAX_GPU_DEPLOYMENTS = 8;
+
+export function parseAppProfile(body: unknown): AppProfile {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'profile must be an object { requiresGpu, gpuDeployments }');
+  for (const key of Object.keys(body)) if (key !== 'requiresGpu' && key !== 'gpuDeployments') throw new AppError(400, `unknown field '${key}'`);
+  const { requiresGpu, gpuDeployments = [] } = body as { requiresGpu?: unknown; gpuDeployments?: unknown };
+  if (typeof requiresGpu !== 'boolean') throw new AppError(400, 'requiresGpu must be a boolean');
+  if (!Array.isArray(gpuDeployments) || gpuDeployments.length > MAX_GPU_DEPLOYMENTS
+    || gpuDeployments.some(d => typeof d !== 'string' || !NAME_RE.test(d))) {
+    throw new AppError(400, `gpuDeployments must be a list of up to ${MAX_GPU_DEPLOYMENTS} deployment names`);
+  }
+  if (requiresGpu && !gpuDeployments.length) throw new AppError(400, 'requiresGpu needs at least one deployment in gpuDeployments');
+  return { requiresGpu, gpuDeployments: [...new Set(gpuDeployments as string[])] };
+}
+
+export interface AppDeviceBlock { reason: string | null; by: string; at: number }
+
+export interface AppDevice {
+  firstSeen: number;
+  lastSeen: number;
+  day: number;
+  requestsToday: number;
+  requests: number;
+  lastKind: string | null;
+  blocked?: AppDeviceBlock;
+}
+
 export interface AppAccount {
   id: string;
   createdAt: number;
@@ -65,6 +103,10 @@ export interface AppAccount {
   routes?: ModelRoutesSpec;
   /** The app's provisioned OpenRouter key for the direct fallback (app-fallback.ts): its hash, never the key. */
   fallbackKey?: ProvisionedKeyRecord;
+  limits?: { dailyRequests?: number; dailyTokens?: number };
+  profile?: AppProfile;
+  devices?: Record<string, AppDevice>;
+  requireDevice?: boolean;
 }
 
 type RouteStage = keyof ModelRoutesSpec;
@@ -83,7 +125,7 @@ function routeTargets(stage: RouteStage, alias: string, e: RouteEntrySpec): stri
  * So an app key may reorder, drop or re-alias its routes, never reach something new.
  */
 export function routeTargetViolations(next: ModelRoutesSpec, current: ModelRoutesSpec | undefined, ownsDeployment: (name: string) => boolean): string[] {
-  const allowed = new Set<string>();
+  const allowed = defaultCloudTargets();
   for (const stage of ROUTE_STAGES) {
     for (const [alias, chain] of Object.entries(current?.[stage] ?? {})) for (const e of chain) for (const t of routeTargets(stage, alias, e)) allowed.add(t);
   }
@@ -119,24 +161,19 @@ export class MemoryAppStore implements AppStore {
 
 export class FileAppStore implements AppStore {
   private chain: Promise<void> = Promise.resolve();
-  constructor(private readonly path: string) {}
-  static inDir(dir: string): FileAppStore { return new FileAppStore(join(dir, 'apps.json')); }
+  constructor(private readonly path: string, private readonly log: StateLog = (msg, data) => console.error(msg, data ?? {})) {}
+  static inDir(dir: string, log?: StateLog): FileAppStore { return new FileAppStore(join(dir, 'apps.json'), log); }
   async load(): Promise<Record<string, AppAccount>> {
-    try {
-      return (JSON.parse(await readFile(this.path, 'utf8')) as { apps?: Record<string, AppAccount> }).apps ?? {};
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
-      throw err;
-    }
+    const read = await readStateFile<{ apps?: Record<string, AppAccount> }>(this.path);
+    if (read.from === 'backup') this.log('apps: STATE FILE UNREADABLE, recovered from the last good backup', { path: this.path, problem: read.problem });
+    return read.data?.apps ?? {};
   }
   save(apps: Record<string, AppAccount>): Promise<void> {
     const snapshot = JSON.stringify({ version: 1, apps }, null, 2);
-    this.chain = this.chain.catch(() => {}).then(async () => {
-      await mkdir(dirname(this.path), { recursive: true });
-      const tmp = `${this.path}.${process.pid}.tmp`;
-      await writeFile(tmp, snapshot, { mode: 0o600 });
-      await rename(tmp, this.path);
-    });
+    this.chain = this.chain.catch(() => {}).then(() => writeStateFile(this.path, snapshot).catch((err: unknown) => {
+      this.log('apps: STATE WRITE FAILED', { path: this.path, error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }));
     return this.chain;
   }
 }
@@ -168,7 +205,16 @@ export class AppRegistry implements FallbackKeyStore {
     await this.store.save(this.apps);
   }
 
-  private account(app: string): AppAccount {
+  save(): Promise<void> { return this.store.save(this.apps); }
+
+  async setRequireDevice(app: string, value: unknown): Promise<boolean> {
+    if (typeof value !== 'boolean') throw new AppError(400, 'requireDevice must be a boolean');
+    this.account(app).requireDevice = value;
+    await this.save();
+    return value;
+  }
+
+  account(app: string): AppAccount {
     if (!APP_ID_RE.test(app) || RESERVED_KEYS.has(app)) throw new AppError(400, `app id must match ${APP_ID_RE} (not ${[...RESERVED_KEYS].join('/')})`);
     return ownValue(this.apps, app) ?? (this.apps[app] = { id: app, createdAt: this.now(), images: {} });
   }
@@ -207,27 +253,72 @@ export class AppRegistry implements FallbackKeyStore {
     return { image, created: !prev };
   }
 
+  async putLimits(app: string, body: unknown): Promise<NonNullable<AppAccount['limits']>> {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'limits must be an object { dailyRequests?, dailyTokens? }');
+    const limits: NonNullable<AppAccount['limits']> = {};
+    for (const [key, value] of Object.entries(body)) {
+      if (key !== 'dailyRequests' && key !== 'dailyTokens') throw new AppError(400, `unknown field '${key}'`);
+      if (value === null) continue;
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) throw new AppError(400, `${key} must be an integer >= 0 (0 = no budget) or null (the gateway default)`);
+      limits[key] = value;
+    }
+    this.account(app).limits = limits;
+    await this.store.save(this.apps);
+    return limits;
+  }
+
+  /** An app key (`ownsDeployment` set) may only name deployments its app owns, like its routes. */
+  async putProfile(app: string, body: unknown, opts: { ownsDeployment?: (deployment: string) => boolean } = {}): Promise<AppProfile> {
+    const profile = parseAppProfile(body);
+    const foreign = opts.ownsDeployment ? profile.gpuDeployments.filter(d => !opts.ownsDeployment!(d)) : [];
+    if (foreign.length) throw new AppError(403, `an app key may only name its own app's deployments: ${foreign.join(', ')}`);
+    this.account(app).profile = profile;
+    await this.store.save(this.apps);
+    return profile;
+  }
+
   /**
    * Replaces the app's routes. An alias belongs to one app: an alias another app already routes is refused (409), so
-   * no app can take over another app's model names. Validation is MODEL_ROUTES' (`parseModelRoutes`).
+   * no app can take over another app's model names. Validation is MODEL_ROUTES' (`parseModelRoutes`). A chain without
+   * a cloud link gets the stage's default fallback appended (`cloud-fallback.ts`, reported in `cloudFallbackAdded`);
+   * `"cloudFallback": false` is refused.
    */
-  async putRoutes(app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean } = {}): Promise<ModelRoutesSpec> {
+  async putRoutes(app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean } = {}): Promise<{ routes: ModelRoutesSpec; cloudFallbackAdded: CloudFallbackAdded[] }> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'routes must be an object { chat?, stt?, tts? }');
-    const { routes, errors } = parseModelRoutes(JSON.stringify(body));
+    if ((body as { cloudFallback?: unknown }).cloudFallback === false) {
+      throw new AppError(400, 'every STT, chat and TTS chain must end in a cloud fallback (owner decision 2026-10-12): drop "cloudFallback": false — the gateway appends the default (OpenRouter) to a chain that has none');
+    }
+    const { cloudFallback: _cf, ...declared } = body as Record<string, unknown>;
+    const { routes: parsed, errors } = parseModelRoutes(JSON.stringify(declared));
     if (errors.length) throw new AppError(400, errors.join('; '));
-    for (const [stage, byModel] of Object.entries(routes) as Array<[keyof ModelRoutesSpec, Record<string, unknown> | undefined]>) {
+    for (const [stage, byModel] of Object.entries(parsed) as Array<[keyof ModelRoutesSpec, Record<string, unknown> | undefined]>) {
       for (const model of Object.keys(byModel ?? {})) {
         const owner = Object.values(this.apps).find(a => a.id !== app && a.routes?.[stage]?.[model]);
         if (owner) throw new AppError(409, `${stage} alias '${model}' belongs to app '${owner.id}'`);
       }
     }
     if (opts.restrictedTo) {
-      const refused = routeTargetViolations(routes, ownValue(this.apps, app)?.routes, opts.restrictedTo);
+      const refused = routeTargetViolations(parsed, ownValue(this.apps, app)?.routes, opts.restrictedTo);
       if (refused.length) throw new AppError(403, `an app key may only route to its own deployments and to targets its routes already have: ${refused.join('; ')}`);
     }
+    const { routes, added } = withCloudFallback(parsed);
     this.account(app).routes = routes;
     await this.store.save(this.apps);
-    return routes;
+    return { routes, cloudFallbackAdded: added };
+  }
+
+  /** Boot migration: stored chains without a cloud link get the default appended (saved once, nothing else changes). */
+  async ensureCloudFallback(): Promise<Array<CloudFallbackAdded & { app: string }>> {
+    const added: Array<CloudFallbackAdded & { app: string }> = [];
+    for (const account of Object.values(this.apps)) {
+      if (!account.routes) continue;
+      const fixed = withCloudFallback(account.routes);
+      if (!fixed.added.length) continue;
+      account.routes = fixed.routes;
+      added.push(...fixed.added.map(a => ({ app: account.id, ...a })));
+    }
+    if (added.length) await this.store.save(this.apps);
+    return added;
   }
 
   /** Every app's routes, merged (aliases are unique across apps). */

@@ -1,5 +1,5 @@
 // Live e2e page driver: the browser SDK against the real gateway + replica (e2e-live.ts).
-// window.liveRun({ transport, barge, forceRelay, voiceAfter }) — sanitized summary only (no transcript/audio/SDP).
+// window.liveRun({ transport, barge, forceRelay }) — sanitized summary only (no transcript/audio/SDP).
 import { audible, epoch, makeMeter, playRemote } from '/meter.js';
 import { createRealtimeSession, createWebRtcTransport, createWsTransport } from '/sdk.js';
 
@@ -24,19 +24,17 @@ function open(opts = {}, config = {}) {
     storage: null,
   };
   if (opts.transport) sopts.preferredTransports = [opts.transport];
-  // Capture the live transport so the page can send raw control frames (config_update with a clone voice).
-  const grab = (t) => { state.liveTransport = t; return t; };
   const webrtcFactory = (c) => {
     const o = c.descriptor?.transports.find((t) => t.type === 'webrtc');
     if (!o || o.type !== 'webrtc') return null;
     const deps = opts.forceRelay ? { RTCPeerConnection: RelayPC } : undefined;
-    return grab(createWebRtcTransport(c, o, deps));
+    return createWebRtcTransport(c, o, deps);
   };
   const wsFactory = (c) => {
     const o = c.descriptor?.transports.find((t) => t.type === 'ws');
-    return o ? grab(createWsTransport(c, o.url)) : null;
+    return o ? createWsTransport(c, o.url) : null;
   };
-  if (opts.forceRelay || opts.voiceAfter) sopts.transports = { webrtc: webrtcFactory, ws: wsFactory };
+  if (opts.forceRelay) sopts.transports = { webrtc: webrtcFactory, ws: wsFactory };
   state.session = createRealtimeSession(sopts);
   return state;
 }
@@ -88,10 +86,6 @@ window.liveRun = async (opts = {}) => {
       await state.session.sendTurn(clip);
       await sleep(500);
       return summary(state);
-    }
-    if (opts.voiceAfter && state.liveTransport) {
-      state.liveTransport.send({ type: 'config_update', voice: opts.voiceAfter.voice, ...(opts.voiceAfter.fallback_voice ? { fallback_voice: opts.voiceAfter.fallback_voice } : {}) });
-      state.voiceSent = true;
     }
     if (opts.barge) {
       // Speak until the NPC starts answering, then barge in and measure the 'interrupted' latency.

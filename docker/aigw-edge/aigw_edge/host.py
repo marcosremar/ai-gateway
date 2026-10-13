@@ -11,15 +11,18 @@ import time
 
 import av
 import numpy as np
-from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription, RTCIceServer
+from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription, RTCIceServer, rtcsctptransport
 from aiortc.mediastreams import MediaStreamError
 from aiortc.sdp import candidate_from_sdp
 
-from .audio import Downsampler48to16
+from .audio import Downsampler48to16, GapFill, send_opus, upsample2
 from .config import Settings
 from .session import OUT_FRAME_BYTES, OUT_RATE, Session
 from .telemetry import telemetry
 from .upstream import Upstream
+
+
+rtcsctptransport.SCTP_RTO_INITIAL, rtcsctptransport.SCTP_RTO_MIN = 0.5, 0.4
 
 
 class OfferError(Exception):
@@ -31,7 +34,8 @@ class SessionGone(OfferError):
 
 
 class OutTrack(MediaStreamTrack):
-    """The NPC's voice as a WebRTC track: 20 ms frames of the session's AudioOut, silence when nothing is queued."""
+    """The NPC's voice as a WebRTC track: 20 ms frames of the session's AudioOut, silence when nothing is queued. Frames
+    leave at 48 kHz, Opus's own rate: at 24 kHz aiortc's resampler keeps each frame until the next one comes (20 ms)."""
 
     kind = "audio"
 
@@ -41,22 +45,26 @@ class OutTrack(MediaStreamTrack):
         self.samples = OUT_FRAME_BYTES // 2
         self.ts = 0
         self.t0: float | None = None
-        self.time_base = fractions.Fraction(1, OUT_RATE)
+        self.previous = 0
+        self.time_base = fractions.Fraction(1, 2 * OUT_RATE)
 
     async def recv(self):
         if self.readyState != "live":
             raise MediaStreamError
+        entered = time.monotonic()
         if self.t0 is None:
-            self.t0 = time.monotonic()
+            self.t0 = entered
         else:
+            self.session.out.sent(entered - self.t0 - self.ts / OUT_RATE)
             self.ts += self.samples
             wait = self.t0 + self.ts / OUT_RATE - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
-        pcm = self.session.out.pull(OUT_FRAME_BYTES) or bytes(OUT_FRAME_BYTES)
-        frame = av.AudioFrame.from_ndarray(np.frombuffer(pcm, dtype=np.int16).reshape(1, -1), format="s16", layout="mono")
-        frame.sample_rate = OUT_RATE
-        frame.pts = self.ts
+        pcm = np.frombuffer(self.session.out.pull(OUT_FRAME_BYTES) or bytes(OUT_FRAME_BYTES), dtype=np.int16)
+        frame = av.AudioFrame.from_ndarray(upsample2(pcm, self.previous).reshape(1, -1), format="s16", layout="mono")
+        self.previous = int(pcm[-1])
+        frame.sample_rate = 2 * OUT_RATE
+        frame.pts = 2 * self.ts
         frame.time_base = self.time_base
         return frame
 
@@ -181,7 +189,7 @@ class SessionHost:
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
             if not any(t.kind == "audio" for t in pc.getTransceivers()):
                 raise ValueError("the offer has no audio m-line")
-            pc.addTrack(OutTrack(session))
+            send_opus(pc.addTrack(OutTrack(session)))
             await pc.setLocalDescription(await pc.createAnswer())
         except Exception as error:  # noqa: BLE001
             await pc.close()
@@ -199,12 +207,20 @@ class SessionHost:
 
     async def read_track(self, track, session: Session) -> None:
         down = Downsampler48to16()
+        gaps = GapFill()
         resampler = None
         try:
             while not session.closed:
                 frame = await track.recv()
                 if frame.sample_rate == 48000 and frame.format.name == "s16":
-                    session.feed(down.push(frame.to_ndarray(), len(frame.layout.channels)))
+                    channels = len(frame.layout.channels)
+                    missing = gaps.missing(frame.pts, frame.samples)
+                    if missing:
+                        session.uplink.count(missing // 48, 0, None)
+                        session.feed(down.push(np.zeros(missing * channels, dtype=np.int16), channels))
+                    lost, recovered, redundancy = frame.opaque or (0, 0, None)
+                    session.uplink.count(lost // 48, recovered // 48, redundancy)
+                    session.feed(down.push(frame.to_ndarray(), channels))
                     continue
                 resampler = resampler or av.AudioResampler(format="s16", layout="mono", rate=16000)
                 for out in resampler.resample(frame):

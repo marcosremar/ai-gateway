@@ -3,7 +3,7 @@
  * caller-facing message on bad input; the HTTP layer maps it to 400.
  */
 
-import { autoscaleOf, warmScheduleOf } from './autoscale-spec';
+import { autoscaleOf, reserveQuotaOf, warmScheduleOf } from './autoscale-spec';
 import { VAST_MAX_PORTS, vastPortCount, vastUdpRange } from './realtime-ports';
 import { scalingOf } from './scaling-spec';
 import { SpecError } from './spec-error';
@@ -108,8 +108,8 @@ const KNOWN_FIELDS = new Set<string>([
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'seats', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'realtime',
-  'scaling', 'fileUrls', 'maxRttExcessMs',
+  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
+  'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 const PLACEMENT_FIELDS = new Set([...CANDIDATE_FIELDS, 'maxReplicas', 'image']);
@@ -247,6 +247,10 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     out.description = input.description;
   }
   if (input.exposure !== undefined) out.exposure = exposureOf(input.exposure);
+  if (input.testFor !== undefined) {
+    if (typeof input.testFor !== 'string' || !NAME_RE.test(input.testFor)) throw new SpecError('testFor must name the deployment this one is the test copy of');
+    out.testFor = input.testFor;
+  }
   if (input.realtime !== undefined) out.realtime = realtimeOf(input.realtime);
   if (input.placements !== undefined) out.placements = placementsOf(input.placements);
   if (input.idleAction !== undefined) {
@@ -255,6 +259,7 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   }
   if (input.autoscale !== undefined) out.autoscale = autoscaleOf(input.autoscale);
   if (input.warmSchedule !== undefined) out.warmSchedule = warmScheduleOf(input.warmSchedule, MAX_REPLICAS_PER_DEPLOYMENT);
+  if (input.reserveQuota !== undefined) out.reserveQuota = input.reserveQuota === null ? undefined : reserveQuotaOf(input.reserveQuota, MAX_REPLICAS_PER_DEPLOYMENT);
   if (input.scaling !== undefined) out.scaling = input.scaling === null ? undefined : scalingOf(input.scaling);
   return out;
 }
@@ -334,10 +339,14 @@ function realtimeOf(raw: unknown): RealtimeSpec {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('realtime must be an object');
   const r = raw as Record<string, unknown>;
   for (const key of Object.keys(r)) {
-    if (!['maxSessions', 'edgeImage', 'udpPorts', 'env'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
+    if (!['maxSessions', 'edgeImage', 'udpPorts', 'env', 'requireWebrtc'].includes(key)) throw new SpecError(`realtime: unknown field '${key}'`);
   }
   const out: RealtimeSpec = {};
   if (r.maxSessions !== undefined) out.maxSessions = int(r.maxSessions, 'realtime.maxSessions', 1, 256);
+  if (r.requireWebrtc !== undefined) {
+    if (typeof r.requireWebrtc !== 'boolean') throw new SpecError('realtime.requireWebrtc must be a boolean');
+    if (r.requireWebrtc) out.requireWebrtc = true;
+  }
   if (r.edgeImage !== undefined) out.edgeImage = str(r.edgeImage, 'realtime.edgeImage', IMAGE_RE);
   if (r.udpPorts !== undefined) {
     if (!Array.isArray(r.udpPorts) || r.udpPorts.length !== 2) throw new SpecError('realtime.udpPorts must be [lo, hi]');
@@ -420,8 +429,8 @@ export function buildSpec(
       if (!spec.gpu || spec.exposure) throw new SpecError(`placements[${i}]: ${p.provider} takes GPU deployments without exposure only`);
       continue;
     }
-    if (p.maxEurPerHour !== undefined || p.maxReplicas !== undefined) {
-      throw new SpecError(`placements[${i}]: maxEurPerHour and maxReplicas belong to a placement on another provider`);
+    if (p.maxReplicas !== undefined) {
+      throw new SpecError(`placements[${i}]: maxReplicas belongs to a placement on another provider`);
     }
     if (p.machineType && isGpuMachineType(p.machineType) !== spec.gpu) {
       throw new SpecError(`placements[${i}].machineType ${p.machineType} must be a ${spec.gpu ? 'GPU' : 'CPU'} type like machineType`);
@@ -464,7 +473,7 @@ export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates
  * 32 KB in total (`invalid env arguments, total length > 32KB`, live 2026-10-08), and the init script travels there.
  */
 export const VAST_ENV_MAX_BYTES = 32_000;
-const VAST_INIT_OVERHEAD_BYTES = 3_000;
+const VAST_INIT_OVERHEAD_BYTES = 4_700;
 const VAST_RT_INIT_OVERHEAD_BYTES = 2_000;
 const VAST_PORT_ENV_BYTES = 24;
 

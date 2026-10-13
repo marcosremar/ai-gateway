@@ -21,6 +21,7 @@ Use the vocabulary from `domain-model.md` in all code and prompts. Respect the b
 
 **Pipeline:** `Audio → STT → LLM (translation) → TTS → Audio`
 **Transport hidden from callers** — callers don't know if GPU or cloud is used; gateway decides based on cost/latency/availability.
+**Core principle — always answers (owner, 2026-10-12):** every app profile and every service/route (STT, TTS, LLM, translation, s2s) must end in a working cloud fallback (OpenRouter first), so a cold or failed GPU never turns into a silent or 503 answer. The gateway adds the default fallback when one is missing, refuses an explicit config without one, probes every fallback periodically (no GPU wake) and alerts on failure or exhausted credit (402).
 **`src/`** is the publishable library (tree-shakeable); **`server/`** is the reference HTTP service.
 
 ## Features
@@ -227,6 +228,8 @@ ai-gateway server start/stop/status      # Manage local dev server
 
 ### 8. Admin/Web UI (Next.js)
 
+- **`GET /admin` — «is everything working?»** (`src/admin-page/`, screenshots `docs/admin-status-iphone.jpg`, `docs/admin-apps-filter-iphone.jpg`): served by the gateway itself, server-rendered, no framework, mobile first. Login pastes the admin key once → in-memory session, cookie `__Host-aigw_admin` (`HttpOnly; Secure; SameSite=Strict`, 12 h); every POST (park, rerun the reserve probe, sign out) needs the page's CSRF token and a same-origin request. Stable section anchors (linked from the parle portal, `ADMIN_ANCHORS`): `#reservas`, `#saldos`, `#gpus` (outside the class window), `#alertas`, `#maquinas`, `#chaves` (role, policy, last use, GPU €/day — never the value), `#apps` (profile, mode, daily budget; `/admin?app=<app>#apps` filters one app). Signing in returns to the URL and anchor the page was opened with (`next`, only `/admin[?app=…][#…]`). API clients keep the `Authorization` header. Local demo with simulated state: `ADMIN_DEMO_KEY=… bun scripts/admin-page-demo.ts`.
+
 - **Overview Section**: System status, connections, uptime
 - **Pipeline Health Card**: STT/LLM/TTS component status
 - **GPU Live Status**: Real-time GPU deployment status with warmth indicators
@@ -390,7 +393,10 @@ bun run test:groq / test:openai / test:vast-lifecycle / test:runpod-lifecycle
 1. **`src/` never imports from `server/`** — CI enforces this. Break it and the build fails.
 2. **All GPU ops go through the gateway API** — never call RunPod/Vast.ai/TensorDock directly. Bypasses watchdog, cost tracking, ghost detection.
 3. **No Prisma/Redis/Next.js in `src/`** — use DI interfaces (`AutoscalerDeps`, `StateStore`, `SettingsStore`).
-4. **All new UI uses `web/src/components/ui/`** — `IconBox`, `StatusDot`, `KV`, `DropdownList`, `Button`, `Toggle`, `Card`, `SaveBar`, `ConfirmModal`, etc. Never inline equivalents.
+4. **Every route has a cloud fallback that answers** — a route, app or profile without one is a defect, never a config choice. A provider error (4xx it can't serve, 402, 429, 5xx, timeout) falls through to the next link; only the caller's own invalid request stops the chain. A turn with no audio or text is never reported as success. The one declared exception: `parle-bridge-shadow` (parked since 12/10/2026, `src/deployments/parked/`), a shadow model whose answer is only recorded — a cloud stand-in would fake its answer, so a missing one is recorded as missing (docs/deployments.md).
+5. **All new UI uses `web/src/components/ui/`** — `IconBox`, `StatusDot`, `KV`, `DropdownList`, `Button`, `Toggle`, `Card`, `SaveBar`, `ConfirmModal`, etc. Never inline equivalents.
+6. **Only the production gateway creates, starts or rents a real machine** — off Railway (a dev's Mac, an agent's sandbox) the provider backends of deployments and machines stay off whatever keys the gateway got (`src/deployments/real-machines.ts`); only an explicit `AIGW_REAL_MACHINES=1` turns them on. Owner, 12/10/2026: a local `dev-marmos` gateway left two Scaleway servers behind on 07/10.
+7. **A client key never wakes a GPU its policy forbids** — `/wake` and `/start` obey `neverWake` and `autoWakeOutsideClass` like automatic waking does; only an admin key passes over. A dev key (`countsAsUse: false`) uses a production replica that is already ready without renewing its idle clock, else the cloud fallback; with `wakeDeployments` it wakes ONLY those test copies (`testFor`), never in a class window, each wake a start of `startIdleMinutes` under `gpuDailyEur`. A GPU up 60 min outside its class window with no class open and no explicit `warm` is parked by the gateway.
 
 ## Vibe Coding Guidelines
 

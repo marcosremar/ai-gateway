@@ -69,7 +69,7 @@ let h: Harness;
 const extra: Harness[] = [];
 
 async function close(x: Harness) {
-  x.controller.stop();
+  await x.controller.stop();
   x.server.closeAllConnections();
   await new Promise<void>(r => x.server.close(() => r()));
 }
@@ -425,7 +425,7 @@ describe('deployments API', () => {
     expect(view.publicIp).toBe('51.15.0.1');
     expect(h.cloud.created[0]!.network).toMatchObject({ ipId: 'ip-rtc', groupId: 'sg-rtc' });
     const nginx = /echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/nginx\.conf/.exec(h.cloud.created[0]!.cloudInit)![1]!;
-    expect(Buffer.from(nginx, 'base64').toString()).toContain('listen 8089 default_server');
+    expect(Buffer.from(nginx, 'base64').toString()).toContain('listen 8089 ssl default_server');
     const before = h.cloud.networkCalls;
     await call(h, 'PATCH', '/v1/deployments/rtc', { exposure: { ports: [{ protocol: 'tcp', port: 443 }, { protocol: 'udp', port: 7882 }, { protocol: 'tcp', port: 7881 }] } });
     await until(() => h.cloud.networkCalls > before);
@@ -561,6 +561,7 @@ describe('deployments API', () => {
       const res = await call(again, 'GET', '/v1/deployments/keep/invoke/', undefined, SITE);
       expect(res.status).toBe(200);
     } finally {
+      for (const x of extra.splice(0)) await close(x);
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -614,8 +615,8 @@ describe('app accounts: saved image addresses per app', () => {
   it('apps are isolated: a key sees and edits only its own app, cannot act for another', async () => {
     await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000 }, ADMIN, asParle);
     await call(h, 'PUT', '/v1/deployments/parle-echo', { profile: 'cpu-echo' }, ADMIN, asParle);
-    // site-a (a normal key) manages its own account…
-    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE)).status).toBe(201);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE)).status).toBe(403);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, ADMIN, { 'x-app': 'site-a' })).status).toBe(201);
     // …but not parle's, and cannot impersonate it
     expect((await call(h, 'GET', '/v1/apps/parle', undefined, SITE)).status).toBe(403);
     expect((await call(h, 'GET', '/v1/apps/site-a', undefined, SITE, asParle)).status).toBe(403);
@@ -635,6 +636,15 @@ describe('app accounts: saved image addresses per app', () => {
     expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: SPEECH, registryAuth: { password: 'p' } }, ADMIN, asParle)).status).toBe(400);
     expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'missing' }, ADMIN, asParle)).status).toBe(404);
     expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'speech-stack' }, ADMIN)).status).toBe(400);
+  });
+
+  it('an app\'s daily budgets: an admin sets them, the app key reads and cannot raise them', async () => {
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: 60_000, dailyTokens: null }, ADMIN, AS_SITE)).status).toBe(200);
+    expect(await (await call(h, 'GET', '/v1/apps/site-a/limits', undefined, SITE)).json()).toEqual({ app: 'site-a', limits: { dailyRequests: 60_000 } });
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: 9_999_999 }, SITE)).status).toBe(403);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: -1 }, ADMIN, AS_SITE)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { perMinute: 1 }, ADMIN, AS_SITE)).status).toBe(400);
+    expect(await (await call(h, 'GET', '/v1/apps/site-a/limits', undefined, ADMIN, AS_SITE)).json()).toEqual({ app: 'site-a', limits: { dailyRequests: 60_000 } });
   });
 
   it('an app owns its aliases: PUT routes validates, re-mounts the providers, and refuses another app\'s alias', async () => {

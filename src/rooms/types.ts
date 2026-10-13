@@ -1,0 +1,58 @@
+// ── AI Gateway — Live subtitle rooms: types ──────────────────────────────────
+// The wire shapes of docs/rooms.md (the presenter's desktop app is built against them — change only additively).
+
+/** One subtitle line as published and as served. */
+export interface RoomLine {
+  id: number;
+  original: string;
+  originalLang: string | null;
+  translations: Record<string, string>;
+  ts: number;
+  /** Additive: ms from the end of speech to the subtitle being ready (presenter-measured), 0–120000. */
+  delayMs?: number;
+}
+
+/** What the store keeps about a room (never sent as is: `tokenHash` and `ownerId` stay server-side). */
+export interface RoomMeta {
+  version: 1;
+  code: string;
+  title: string;
+  originalLang: string | null;
+  languages: string[];
+  createdAt: number;
+  lastActivityAt: number;
+  ended: boolean;
+  endedAt: number | null;
+  /** sha256 (hex) of the publish token. */
+  tokenHash: string;
+  /** Gateway key user that created the room (may publish with its key instead of the token). */
+  ownerId: string;
+  /** Additive: false = the gateway never voices this room's lines itself (absent = true). */
+  serverDub?: boolean;
+}
+
+/** `GET /v1/rooms/:code` and the WS `snapshot.room`. */
+export interface PublicRoom {
+  code: string;
+  title: string;
+  originalLang: string | null;
+  languages: string[];
+  createdAt: string;
+  ended: boolean;
+  /** Additive to the contract: when the transcript stops being served (last activity + retention). */
+  expiresAt: string;
+  /**
+   * Additive: languages a listener can hear dubbed (server-voiced + those the presenter sent clips for). Absent = unknown
+   * (server dubbing off): any translation language may have clips.
+   */
+  dubLangs?: string[];
+  lines: RoomLine[];
+}
+
+export type RoomServerMessage =
+  | { type: 'snapshot'; room: PublicRoom }
+  | { type: 'line'; line: RoomLine }
+  /** `wav` carries the base64 clip whatever its container; `format` (additive) names it when not WAV (`mp3`). */
+  | { type: 'audio'; lineId: number; lang: string; wav: string; format?: string }
+  | { type: 'ended' }
+  | { type: 'pong' };

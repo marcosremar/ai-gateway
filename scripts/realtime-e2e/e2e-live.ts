@@ -12,13 +12,19 @@
 import type { Browser } from 'playwright';
 import { openMicPage, startAppBackend } from './app-page';
 import { clip16k, wav } from './clip';
+import { withSignedVoice } from './live-config';
 
 const GW = process.env.GW ?? 'http://localhost:4100';
 const KEY = process.env.KEY ?? process.env.SANDBOX_TOKEN ?? '';
 const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const MIC = process.env.MIC ?? '/tmp/aigw-rt-e2e/mic.wav';
 const DEP = process.env.DEP ?? 'parle-speech';
-const CONFIG = JSON.parse(process.env.RT_CONFIG ?? '{"system":"Você é a padeira da esquina. Responda curto, uma frase.","messages":[],"voice":"default","fallback_voice":"default"}');
+const BASE_CONFIG = JSON.parse(process.env.RT_CONFIG ?? '{"system":"Você é a padeira da esquina. Responda curto, uma frase.","messages":[],"voice":"default","fallback_voice":"default"}');
+// LIVE_VOICE_B64/LIVE_VOICE_TEXT → voice {audio:'data:audio/wav;base64,<b64>', text} in the signed session config
+// (a clone TTS without a catalog; the edge refuses a voice sent by config_update after connect).
+const CONFIG = process.env.LIVE_VOICE_B64 && process.env.LIVE_VOICE_TEXT
+  ? withSignedVoice(BASE_CONFIG, await Bun.file(process.env.LIVE_VOICE_B64).text(), process.env.LIVE_VOICE_TEXT)
+  : BASE_CONFIG;
 
 const results: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -47,14 +53,9 @@ const openPage = () => openMicPage({
 
 const cmd = process.argv[2] ?? 'turn';
 const arg = process.argv[3];
-// Extra run options from env: LIVE_FORCE_RELAY=1 → browser ICE policy relay-only; LIVE_VOICE_B64/LIVE_VOICE_TEXT →
-// config_update{voice:{audio:'data:audio/wav;base64,<b64>',text}} after connect (a clone TTS without a catalog).
+// Extra run options from env: LIVE_FORCE_RELAY=1 → browser ICE policy relay-only.
 const extraOpts: Record<string, unknown> = {};
 if (process.env.LIVE_FORCE_RELAY === '1') extraOpts.forceRelay = true;
-if (process.env.LIVE_VOICE_B64 && process.env.LIVE_VOICE_TEXT) {
-  const b64 = (await Bun.file(process.env.LIVE_VOICE_B64).text()).trim();
-  extraOpts.voiceAfter = { voice: { audio: `data:audio/wav;base64,${b64}`, text: process.env.LIVE_VOICE_TEXT } };
-}
 
 try {
   if (cmd === 'admit') {

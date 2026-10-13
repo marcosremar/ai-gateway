@@ -84,11 +84,19 @@ describe('placements: spec', () => {
     expect(otherZone.osImageId).toBeUndefined();
   });
 
-  it('the speech-stack profile: L40S fr-par-2, then the L40S in fr-par-1, never an L4', () => {
+  it('the speech-stack profile: L40S fr-par-2 then pl-waw-2, then an H100 in both, never an L4 nor fr-par-1', () => {
     const spec = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
-    expect(placementsOf(spec).filter(p => p.provider === 'scaleway').map(p => `${p.zone}/${p.machineType}`)).toEqual([
-      'fr-par-2/L40S-1-48G', 'fr-par-1/L40S-1-48G',
+    expect(placementsOf(spec).filter(p => p.provider === 'scaleway').map(p => `${p.zone}/${p.machineType} ≤ €${p.maxEurPerHour}`)).toEqual([
+      'fr-par-2/L40S-1-48G ≤ €2', 'pl-waw-2/L40S-1-48G ≤ €2', 'fr-par-2/H100-1-80G ≤ €3', 'pl-waw-2/H100-1-80G ≤ €3',
     ]);
+  });
+
+  it('a Scaleway placement may carry its own price cap; maxReplicas stays for another provider', () => {
+    const base = { image: 'img:1', port: 8000, healthPath: '/health', machineType: 'L40S-1-48G', zone: 'fr-par-2', maxEurPerHour: 1.6 };
+    const spec = buildSpec('s', { ...base, placements: [{ machineType: 'H100-1-80G', maxEurPerHour: 3 }] }, { profiles });
+    expect(placementsOf(spec).map(p => p.maxEurPerHour)).toEqual([1.6, 3]);
+    expect(() => buildSpec('s', { ...base, placements: [{ zone: 'pl-waw-2', maxReplicas: 1 }] }, { profiles }))
+      .toThrow(/maxReplicas belongs to a placement on another provider/);
   });
 
   it('recognises out-of-stock answers and nothing else', () => {

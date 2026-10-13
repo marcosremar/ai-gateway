@@ -35,9 +35,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "client": {
-    "raw": 140698,
-    "gzip": 34781,
-    "reason": "realtime speech + telemetry (#54): new realtime entry (sdk/browser/realtime); client gains createServerTelemetry (sdk/node/telemetry -> sdk/browser/telemetry/emitter + src/telemetry/contract); index and proxy gain the W3C trace context (src/telemetry/trace-context) and the public-route + header-size changes in src/gateway/proxy/server"
+    "raw": 140840,
+    "gzip": 34825,
+    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "compute": {
     "raw": 4521,
@@ -55,9 +55,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "index": {
-    "raw": 1570220,
-    "gzip": 348523,
-    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
+    "raw": 1573738,
+    "gzip": 349257,
+    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "infra": {
     "raw": 4116,
@@ -75,19 +75,19 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "providers": {
-    "raw": 188396,
-    "gzip": 39538,
-    "reason": "API audit 2026-10-07: s2s access/app limits, /health views, error types, request ids, CORS lists (#47 routing hedge on top)"
+    "raw": 190141,
+    "gzip": 40072,
+    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "proxy": {
-    "raw": 178645,
-    "gzip": 46920,
-    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
+    "raw": 179393,
+    "gzip": 47080,
+    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "realtime": {
-    "raw": 90979,
-    "gzip": 22655,
-    "reason": "realtime SDK: first-sound deadline on the learner's clock (#59) plays the opener in the browser, so the session imports the PCM player and clip decoder"
+    "raw": 112896,
+    "gzip": 28142,
+    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "tracking": {
     "raw": 20369,
@@ -100,9 +100,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "voice": {
-    "raw": 24544,
-    "gzip": 6709,
-    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+    "raw": 25849,
+    "gzip": 6982,
+    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "workloads": {
     "raw": 36351,

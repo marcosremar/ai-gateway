@@ -1,0 +1,7 @@
+{
+  "name": "parle-speech-s2s",
+  "description": "parle: the one-L4 speech-to-speech deployment, registered by its owner; declared here only the monthly ceiling",
+  "spec": {
+    "scaling": { "budget": { "eurPerMonth": 50 } }
+  }
+}

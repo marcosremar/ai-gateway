@@ -27,7 +27,7 @@ class Client:
 
 ns: dict = {"asyncio": asyncio, "math": math, "time": time, "uuid": uuid, "np": np, "TTS_FRAMES_PER_SECOND": 12.5,
             "client": Client(), "TTS_URL": "", "TTS_MODEL": "tts", "SAMPLE_RATE": 24000, "TTS_MAX_SECONDS": 3.0,
-            "TTS_MAX_SECONDS_PER_CHAR": 0.2, "TTS_MAX_LEAD_SECONDS": 1.0, "TTS_SILENCE_RMS": 300}
+            "TTS_MAX_SECONDS_PER_CHAR": 0.2, "TTS_MAX_LEAD_SECONDS": 1.0, "TTS_SILENCE_RMS": 300, "TTS_OVERLONG_RATIO": 0.9}
 exec(src[src.index("def silent"):src.index("LANGUAGE =")], ns)
 QUIET, LOUD = b"\0" * 23000 + b"\0\x04" * 500, b"\0\x10" * 12000
 
@@ -92,5 +92,33 @@ serve([QUIET] * 8, [QUIET] * 8)
 items, raised, _ = asyncio.run(run())
 assert raised is not None and "runaway" in str(raised), raised
 assert sum(len(item) for item in items if isinstance(item, bytes)) == 8 * 24000 and items[-2] is raised, len(items)
+stats: dict = {}
+
+
+async def run_long() -> tuple[list, BaseException | None]:
+    out: asyncio.Queue = asyncio.Queue()
+    raised = None
+    try:
+        await ns["tts_stream"]("Oi.", "Portuguese", {"audio": "a", "text": "t"}, out, stats)
+    except RuntimeError as error:
+        raised = error
+    return [out.get_nowait() for _ in range(out.qsize())], raised
+
+
+CAP = int(3.6 * 24000) * 2
+serve([LOUD] * 8)
+items, raised = asyncio.run(run_long())
+assert raised is None and stats == {"tts_overlong": 1} and items[-1] is None, (raised, stats)
+assert sum(len(item) for item in items[:-1]) == CAP, sum(len(item) for item in items[:-1])
+
+serve([*[LOUD] * 7, RuntimeError("peer closed connection without sending complete message body")])
+items, raised = asyncio.run(run_long())
+assert raised is None and stats == {"tts_overlong": 2} and items == [*[LOUD] * 7, None], (raised, stats, len(items))
+
+serve([LOUD, QUIET])
+items, raised = asyncio.run(run_long())
+assert raised is None and stats == {"tts_overlong": 2}, "a clean sentence is not counted"
+print("ok: a heard sentence that runs to its cap (more audio than the cap, or the engine's stop at max_new_tokens) is cut "
+      "there and counted, the turn goes on")
 print("ok: a sentence silent for over a second or cut before any sound is asked again once and its silence is not played; "
       "a stream cut after sound, or a second runaway, reaches the speaker as an error before the end marker")

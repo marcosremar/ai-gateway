@@ -64,7 +64,7 @@ describe('planReplicas', () => {
     expect(plan.release).toEqual([]);
   });
 
-  it('replaces halted, boot-timeout, unhealthy and too-old replicas', () => {
+  it('replaces halted, boot-timeout and unhealthy replicas, and keeps a too-old one that is the only one serving', () => {
     const s = spec({ minReplicas: 4, maxReplicas: 4, bootTimeoutMinutes: 30, maxHours: 12 });
     const plan = planReplicas({
       ...base, spec: s, replicas: [
@@ -77,7 +77,7 @@ describe('planReplicas', () => {
       ],
     });
     expect(plan.release.map(r => [r.id, r.reason])).toEqual([
-      ['halted', 'halted'], ['stuck', 'boot-timeout'], ['sick', 'unhealthy'], ['old', 'max-hours'],
+      ['halted', 'halted'], ['stuck', 'boot-timeout'], ['sick', 'unhealthy'],
     ]);
     expect(plan.create).toBe(2); // 2 live (booting, blip) of 4 desired
   });

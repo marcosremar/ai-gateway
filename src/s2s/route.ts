@@ -26,10 +26,12 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { DeploymentError, type DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
+import { replicaTls } from '../deployments/replica-tls';
 import { applySttFilter, filterEnabled } from '../gateway/proxy/routes/stt-filter';
 import { denialError } from '../gateway/proxy/app-limits';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
-import { runComposite, type S2SConfig, type StageClient } from './composite';
+import { runComposite, type S2SConfig, type Speculated, type StageClient } from './composite';
+import { cancelSpeculation, speculationRef, startSpeculation, takeSpeculation } from './speculation';
 import { encodeAudio, encodeEvent, FrameDecoder, S2S_CONTENT_TYPE, type S2SEvent, type S2SFormat } from './frames';
 import type { S2SAdmission } from './access';
 import { outgoingTraceHeaders, parseTraceparent } from '../telemetry/trace-context';
@@ -48,7 +50,7 @@ export interface S2SRouteOptions {
    * Who may use which deployment, and the app's limits (access.ts), checked once the config is parsed and before the
    * audio is read or any deployment is acquired or woken. Absent = no check (tests, open mode).
    */
-  admit?: (req: IncomingMessage, config: S2SConfig, requested: { deployment: string; explicit: boolean }) => S2SAdmission;
+  admit?: (req: IncomingMessage, config: S2SConfig, requested: { deployment: string; explicit: boolean }, charge?: boolean) => S2SAdmission;
   hedgeMs?: number;
   budgetMs?: number;
   maxGapMs?: number;
@@ -158,7 +160,7 @@ function filterPrimaryTranscript(e: S2SEvent, config: S2SConfig): { codes: strin
   if (!text.trim()) return null;
   const n = (k: string) => (typeof e[k] === 'number' ? e[k] as number : undefined);
   const out = applySttFilter({
-    text, no_speech_prob: n('no_speech_prob'), avg_logprob: n('avg_logprob'), compression_ratio: n('compression_ratio'),
+    text, no_speech_prob: n('no_speech_prob'), avg_logprob: n('avg_logprob'), compression_ratio: n('compression_ratio'), speech_ms: n('speech_ms'),
     ...(Array.isArray(e.segments) ? { segments: e.segments as never } : {}),
   }, config.language);
   return out.filtered?.emptied ? { codes: out.filtered.codes, rawLength: out.filtered.rawLength } : null;
@@ -180,22 +182,26 @@ export function createS2SRoute(opts: S2SRouteOptions) {
     let config: S2SConfig;
     let rawConfig: string;
     let deployment: string;
+    let speculation: Speculated | null = null;
     try {
       const body = await readBody(req, opts.maxBodyBytes ?? MAX_BODY);
       const form = await new Request('http://local/', {
         method: 'POST', headers: { 'content-type': req.headers['content-type'] ?? '' }, body: new Uint8Array(body),
       }).formData();
       const file = form.get('file');
-      if (!(file instanceof Blob)) return sendJson(res, 400, { error: { message: 'multipart field "file" (audio) is required', type: 'invalid_request_error' } });
       rawConfig = String(form.get('config') ?? '{}');
       const parsed = JSON.parse(rawConfig) as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('config must be a JSON object');
       config = parsed as S2SConfig;
+      const owner = String(req.headers.authorization ?? '');
+      const ref = speculationRef(config);
+      if (ref?.action === 'cancel') return sendJson(res, 200, { cancelled: cancelSpeculation(owner, ref.id) });
+      if (!(file instanceof Blob)) return sendJson(res, 400, { error: { message: 'multipart field "file" (audio) is required', type: 'invalid_request_error' } });
       const explicit = typeof config.deployment === 'string' && config.deployment !== '';
       deployment = explicit ? config.deployment! : opts.deployment ?? '';
       // Ownership and app limits before the audio is read and before any deployment is acquired or woken.
       if (opts.admit) {
-        const admission = opts.admit(req, config, { deployment, explicit });
+        const admission = opts.admit(req, config, { deployment, explicit }, ref?.action !== 'start');
         if (!admission.ok) {
           return sendJson(res, admission.status, { error: denialError(admission) },
             admission.retryAfterSeconds ? { 'Retry-After': admission.retryAfterSeconds } : {});
@@ -205,6 +211,10 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       }
       audio = new Uint8Array(await file.arrayBuffer());
       contentType = file.type || 'application/octet-stream';
+      if (ref?.action === 'start') {
+        return sendJson(res, 202, startSpeculation({ owner, ref, stages: opts.stagesFor(req, config), audio, contentType, config }));
+      }
+      if (ref) speculation = takeSpeculation(owner, ref.id, audio, Number(config.endpoint_ms) || 0);
     } catch (err) {
       const status = (err as { status?: number }).status ?? 400;
       return sendJson(res, status, {
@@ -227,6 +237,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
 
     const composite = (lane: Lane, signal: AbortSignal, transcript?: { text: string }, skipDeadline = false) => runComposite({
       stages: opts.stagesFor(req, config), audio, contentType, config, signal, transcript, skipDeadline,
+      ...(speculation && !transcript ? { speculation } : {}),
       emitEvent: e => lane.event(e), emitAudio: a => lane.audio(a),
     });
 
@@ -238,7 +249,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       else if (config.speak_field && !opts.primarySpeaksJson) skip = 'unsupported';
       else {
         // No-wake mode (gateway/proxy/no-wake.ts): a ready replica still answers; a cold one is not woken (composed).
-        const noWake = noWakeActive();
+        const noWake = noWakeActive(deployment);
         try {
           const session = parseTraceparent(req.headers.traceparent)?.traceId;
           lease = await opts.controller.acquire(deployment, { waitMs: 0, stage: 's2s', ...(noWake ? { noWake: true } : {}), ...(session ? { session } : {}) });
@@ -250,6 +261,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         }
       }
 
+      if (lease) { speculation?.cancel('primary'); speculation = null; }
       if (!lease) {
         const lane = new Lane(sink, true);
         lane.event({ type: 'route', provider: 'composite', fallback: skip, from: `deployment:${deployment}` });
@@ -305,9 +317,10 @@ export function createS2SRoute(opts: S2SRouteOptions) {
         form.set('file', new Blob([new Uint8Array(audio)], { type: contentType }), 'turn');
         form.set('config', rawConfig);
         armGap();
-        const upstream = await f(`${replicaBase(lease.machine, lease.exposed)}/v1/s2s`, {
+        const base = replicaBase(lease.machine, lease.exposed);
+        const upstream = await f(`${base}/v1/s2s`, {
           method: 'POST', body: form, headers: { ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
-          signal: upstreamSignal,
+          signal: upstreamSignal, ...(replicaTls(base, lease.token)),
         });
         if (!upstream.ok || !upstream.body) throw new Error(`replica answered HTTP ${upstream.status}`);
         streaming = true;

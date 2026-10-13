@@ -103,8 +103,8 @@ describe('warm floors', () => {
     expect(localClock(NOW, 'Europe/Paris')).toEqual({ day: 3, minutes: 600 }); // 08:00Z = 10:00 Paris, Wednesday
     expect(scheduleFloor(sched, NOW)).toBe(2);
     expect(scheduleFloor(sched, NOW + 24 * 3_600_000)).toBe(0); // Thursday
-    expect(scheduleFloor([{ start: '22:00', end: '02:00', minReplicas: 1 }], Date.parse('2026-10-07T01:00:00Z'))).toBe(1);
-    expect(scheduleFloor([{ days: [2], start: '22:00', end: '02:00', minReplicas: 1 }], Date.parse('2026-10-07T01:00:00Z'))).toBe(1); // started Tuesday
+    expect(scheduleFloor([{ start: '22:00', end: '02:00', timeZone: 'UTC', minReplicas: 1 }], Date.parse('2026-10-07T01:00:00Z'))).toBe(1);
+    expect(scheduleFloor([{ days: [2], start: '22:00', end: '02:00', timeZone: 'UTC', minReplicas: 1 }], Date.parse('2026-10-07T01:00:00Z'))).toBe(1); // started Tuesday
   });
   it('the client window and the schedule: whichever asks more, never above maxReplicas, gone when expired', () => {
     const s = spec({ warmSchedule: sched });

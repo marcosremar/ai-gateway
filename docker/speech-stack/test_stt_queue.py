@@ -4,7 +4,7 @@ import threading
 import time
 import types
 
-for name in ("faster_whisper", "faster_whisper.audio", "faster_whisper.tokenizer", "faster_whisper.transcribe"):
+for name in ("faster_whisper", "faster_whisper.audio", "faster_whisper.tokenizer", "faster_whisper.transcribe", "faster_whisper.vad"):
     sys.modules[name] = types.ModuleType(name)
 sys.modules["faster_whisper"].BatchedInferencePipeline = lambda model: None
 sys.modules["faster_whisper"].WhisperModel = object
@@ -12,6 +12,8 @@ sys.modules["faster_whisper.audio"].pad_or_trim = None
 sys.modules["faster_whisper.tokenizer"].Tokenizer = None
 for attr in ("TranscriptionOptions", "get_compression_ratio", "get_suppressed_tokens"):
     setattr(sys.modules["faster_whisper.transcribe"], attr, None)
+sys.modules["faster_whisper.vad"].VadOptions = lambda **_: None
+sys.modules["faster_whisper.vad"].get_speech_timestamps = lambda audio, options: []
 
 import numpy as np  # noqa: E402
 

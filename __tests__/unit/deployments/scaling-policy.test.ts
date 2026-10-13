@@ -182,6 +182,7 @@ describe('scaling: hold, capacity and the monthly budget on the controller', () 
         boot: { seconds: 600, source: 'default', samples: 0 }, resume: { seconds: 180, source: 'default', samples: 0 },
         confident: false, missing: ['ceiling', 'boot'],
       }],
+      reservations: [],
     });
     await r.run(320);
     expect(r.controller.capacity('speech')!.capacity[0].boot).toEqual({ seconds: 300, source: 'measured', samples: 1 });
@@ -194,6 +195,23 @@ describe('scaling: hold, capacity and the monthly budget on the controller', () 
     expect(view).toMatchObject({ mode: 'economy', target: { p95Ms: 2000 }, budget: { eurPerMonth: 150, month: '2026-10', exhausted: false } });
     expect(view.capacity.map(c => [c.machineType, c.ceiling.source, c.ceiling.sessions, c.boot.source, c.missing]))
       .toEqual([['L40S-1-48G', 'configured', 12, 'measured', ['boot']], ['L4-1-24G', 'configured', 12, 'default', ['boot']]]);
+  });
+
+  it('capacity: a placement with its own image shows and measures that image (T12)', async () => {
+    const r = await rig({ minReplicas: 1 });
+    await r.run(320);
+    const vastImage = 'ghcr.io/parle/speech-stack-public:1';
+    await r.controller.put('speech', {
+      entrypoint: 'bash', placements: [{ provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85, maxReplicas: 1, image: vastImage }],
+    });
+    const rt = (r.controller as unknown as { deployments: Map<string, { record: { measured?: Record<string, { boot: number[]; resume: number[] }> } }> })
+      .deployments.get('speech')!;
+    rt.record.measured = { ...rt.record.measured, [`RTX 5090|${vastImage}`]: { boot: [120, 130, 140], resume: [] } };
+    const rows = r.controller.capacity('speech')!.capacity;
+    expect(rows.map(c => [c.machineType, c.image, c.boot.source, c.boot.samples, c.missing])).toEqual([
+      ['L40S-1-48G', BASE.image, 'measured', 1, ['ceiling', 'boot']],
+      ['RTX 5090', vastImage, 'measured', 3, ['ceiling']],
+    ]);
   });
 
   it('monthly budget: the ledger is kept in the store; once spent, replicas go and a request is refused with the reason', async () => {

@@ -13,6 +13,7 @@
 
 import { DEFAULT_NEAR, isOutOfStock, placementsOf, quotaMachineType, rankCandidates } from './placements';
 import { isGpuMachineType, vastRefusal } from './spec';
+import { scalewayRegistryOf } from './scaleway-backend';
 import type { CatalogEntry, DeploymentBackend, DeploymentProvider, DeploymentSpec, PlacementCandidate, ReplicaMachine } from './types';
 
 export interface PlaceResult { machine: ReplicaMachine; price: number | null; placement: string }
@@ -26,8 +27,9 @@ export interface PlaceArgs {
    * Gate before each create, given what the place bills per hour (the catalog price, or the cap on a market-priced
    * backend): a reason to skip the place (spend ceiling), or null. A cheaper place further down may still pass.
    */
-  admit?: (eurPerHour: number) => string | null;
+  admit?: (eurPerHour: number, place: DeploymentSpec) => string | null;
   placed?: (provider: DeploymentProvider) => number;
+  forVast?: (spec: DeploymentSpec) => DeploymentSpec;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
@@ -90,8 +92,8 @@ async function stepsOf(args: PlaceArgs): Promise<{ steps: Step[]; skipped: strin
   return { steps: ranked.map(c => ({ provider: c.provider, spec: candidateSpec(spec, c) })), skipped, ranked: true };
 }
 
-export function vastUnfit(spec: DeploymentSpec, backendFor: PlaceArgs['backendFor']): string | null {
-  if (!spec.registryAuth && backendFor('scaleway')?.registryAuthFor?.(spec.image)) {
+export function vastUnfit(spec: DeploymentSpec): string | null {
+  if (!spec.registryAuth && scalewayRegistryOf(spec.image)) {
     return `${spec.image} is private and the spec has no registryAuth (a pull-only credential) for a vast host`;
   }
   return vastRefusal(spec, true);
@@ -110,7 +112,8 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
       skipped.push(`${where(step)}: provider not configured`);
       continue;
     }
-    const unfit = step.provider === 'vast' ? vastUnfit(step.spec, args.backendFor) : null;
+    if (step.provider === 'vast' && args.forVast) step.spec = args.forVast(step.spec);
+    const unfit = step.provider === 'vast' ? vastUnfit(step.spec) : null;
     if (unfit) { skipped.push(`${where(step)}: ${unfit}`); continue; }
     const { price, skip } = await priceOf(backend, step.spec);
     if (skip) { skipped.push(skip); continue; }
@@ -118,7 +121,7 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
       skipped.push(`${where(step)}: its ${step.limit} fallback replica${step.limit > 1 ? 's are' : ' is'} in use (placement maxReplicas)`);
       continue;
     }
-    const refused = args.admit?.(price ?? step.spec.maxEurPerHour);
+    const refused = args.admit?.(price ?? step.spec.maxEurPerHour, step.spec);
     if (refused) { skipped.push(`${where(step)}: ${refused}`); continue; }
     let machine: ReplicaMachine;
     try {
@@ -133,7 +136,7 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
         continue;
       }
       // Out of stock here: the next place may still have one. Any other error is the spec's or the account's.
-      if (!isOutOfStock(err)) throw new PlacementError(msg, withSkipped(`failed at ${where(step)}: ${msg}`));
+      if (!isOutOfStock(err) && !/insufficient_credit/.test(msg)) throw new PlacementError(msg, withSkipped(`failed at ${where(step)}: ${msg}`));
       skipped.push(step.provider === 'vast' ? `${where(step)}: ${msg.slice(0, 160)}` : `${step.spec.machineType} out of stock in ${step.spec.zone}`);
       args.log?.('deployments: out of stock, trying the next placement', { deployment: args.spec.name, place: where(step) });
       continue;

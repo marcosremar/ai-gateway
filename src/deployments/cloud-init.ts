@@ -16,6 +16,7 @@
 
 import { packFiles, unpackScript } from './file-pack';
 import { DEFAULT_RT_MAX_SESSIONS, DEFAULT_RT_UDP_PORTS, rtMachineEnv, rtMaxSessions, vastUdpRange } from './realtime-ports';
+import { REPLICA_CA_CN, replicaCaKeyPem } from './replica-tls';
 import { PROBE_PORT } from './spec';
 import type { DeploymentSpec, FileUrl } from './types';
 
@@ -23,7 +24,7 @@ import type { DeploymentSpec, FileUrl } from './types';
  * The realtime edge (docker/aigw-edge): one generic image for every replica, whatever the GPU or the model image.
  * Built from docker/aigw-edge/Dockerfile; bump the tag when the edge changes.
  */
-export const DEFAULT_EDGE_IMAGE = 'ghcr.io/marcosremar/aigw-edge:f66b6b80';
+export const DEFAULT_EDGE_IMAGE = 'ghcr.io/marcosremar/aigw-edge:ed885ef5@sha256:5c67faa165a3fdb00d4d2157229a2b981bbcc6efe1e7b2f7f6349f96998da209';
 /** Where a Vast container holds the edge: `aigw_edge/`, `telemetry.py` and optionally `venv/` (docs/realtime-edge.md § Vast). */
 export const VAST_EDGE_DIR = '/opt/aigw-edge';
 /** The edge's HTTP/WS port on the replica's loopback (nginx proxies `/__aigw/rt/*` to it). */
@@ -46,7 +47,9 @@ const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
  * `listen` is :80 for a gateway-only replica and `PROBE_PORT` for an exposed one (80/443 belong to the app there);
  * `upstream` is the container mapped on 127.0.0.1:8000, or the exposed app's own port.
  */
-export function nginxConfig(token: string, listen: number = 80, upstream = 8000, rtPort?: number, seats = 1): string {
+export const REPLICA_TLS_DIR = '/srv/aigw/tls';
+
+export function nginxConfig(token: string, listen: number = 80, upstream = 8000, rtPort?: number, tls = false, seats = 1): string {
   const seatLocation = (index: number): string => `  location ^~ /c/${index}/ {
     if ($http_x_aigw_token != "${token}") { return 401; }
     rewrite ^/c/${index}/(.*)$ /$1 break;
@@ -72,12 +75,16 @@ export function nginxConfig(token: string, listen: number = 80, upstream = 8000,
   // `server_tokens off` drops the nginx version from headers and error pages.
   return `map $http_upgrade $aigw_conn { default "upgrade"; "" ""; }
 map $http_x_aigw_token $aigw_unauth { "${token}" ""; default $binary_remote_addr; }
+map $http_x_aigw_session_token $aigw_ws_args { "" $args; default "token=$http_x_aigw_session_token"; }
 limit_req_zone $aigw_unauth zone=aigw_unauth:1m rate=${UNAUTH_RATE_PER_SECOND}r/s;
 limit_conn_zone $aigw_unauth zone=aigw_unauth_conn:1m;
 server_tokens off;
 server {
-  listen ${listen} default_server;
-  client_max_body_size 100m;
+  listen ${listen}${tls ? ' ssl' : ''} default_server;
+${tls ? `  ssl_certificate ${REPLICA_TLS_DIR}/cert.pem;
+  ssl_certificate_key ${REPLICA_TLS_DIR}/key.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+` : ''}  client_max_body_size 100m;
   # The realtime WS carries its session token in the URL (up to ~6.5 KB with a 6 KB cfg): above nginx's 8k default line.
   large_client_header_buffers 4 16k;
   limit_req zone=aigw_unauth burst=${UNAUTH_BURST} nodelay;
@@ -95,7 +102,19 @@ server {
     default_type application/json;
     alias /srv/aigw/ready.json;
   }
-${rtPort ? `  location ^~ /__aigw/rt/ {
+${rtPort ? `  location = /__aigw/rt/ws {
+    access_log off;
+    error_log /dev/null crit;
+    proxy_set_header X-Aigw-Token "";
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $aigw_conn;
+    proxy_pass http://127.0.0.1:${rtPort}/__aigw/rt/ws?$aigw_ws_args;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 960;
+    proxy_send_timeout 960;
+  }
+  location ^~ /__aigw/rt/ {
     proxy_set_header X-Aigw-Token "";
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $aigw_conn;
@@ -200,7 +219,7 @@ read -r RID PUB <<< "$(printf '%s' "$META" | python3 -c '${meta.replace(/'/g, `'
 [ "$RID" = "-" ] && RID=""; [ "$PUB" = "-" ] && PUB=""
 [ -n "$PUB" ] || PUB=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
 echo "AIGW_REPLICA_ID=$RID" >> /srv/aigw/edge.env && echo "RT_PUBLIC_IP=$PUB" >> /srv/aigw/edge.env
-command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+command -v docker >/dev/null || { apt-get update -y && apt-get install -y docker.io; }
 for i in 1 2 3 4 5; do docker pull ${image} && break; sleep 10; done
 docker rm -f aigw-edge 2>/dev/null; docker run -d --name aigw-edge --restart unless-stopped --network host --env-file /srv/aigw/edge.env ${image}`;
 }
@@ -223,6 +242,41 @@ echo "export AIGW_REPLICA_ID='\${CONTAINER_ID:-\${VAST_CONTAINERLABEL#C.}}'" >> 
 ) > /srv/aigw/edge.log 2>&1 &`;
 }
 
+const VAST_TLS_SAN = `[ -n "$PUBLIC_IPADDR" ] || eval "$(grep -E '^PUBLIC_IPADDR=' /etc/environment 2>/dev/null | sed 's/^/export /')"
+[ -n "$PUBLIC_IPADDR" ] || echo 'aigw: BOOT FAILED: no PUBLIC_IPADDR for the replica TLS certificate'
+AIGW_TLS_SAN="IP:$PUBLIC_IPADDR"`;
+
+const SCALEWAY_TLS_SAN_PY = `import json,sys
+try: d=json.load(sys.stdin)
+except Exception: d={}
+ips=[(d.get("public_ip") or {}).get("address")]+[p.get("address") for p in d.get("public_ips") or [] if p.get("family","inet")=="inet"]
+print(",".join("IP:"+a for a in dict.fromkeys(i for i in ips if i)))`;
+
+export const SCALEWAY_METADATA_URL = 'http://169.254.42.42/conf?format=json';
+
+const SCALEWAY_TLS_SAN = `[ -n "$AIGW_TLS_SAN" ] || AIGW_TLS_SAN=$(curl -sf --retry 3 --max-time 5 '${SCALEWAY_METADATA_URL}' | python3 -c '${SCALEWAY_TLS_SAN_PY.replace(/'/g, `'"'"'`)}' 2>/dev/null)
+[ -n "$AIGW_TLS_SAN" ] || AIGW_TLS_SAN="IP:$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')"`;
+
+function replicaTlsSection(token: string, days: number, san: string): string {
+  const dir = REPLICA_TLS_DIR;
+  return `${san}
+mkdir -p ${dir} && chmod 700 ${dir}
+set +x
+echo '${b64(replicaCaKeyPem(token))}' | base64 -d > ${dir}/ca.key
+set -x
+chmod 600 ${dir}/ca.key
+openssl req -x509 -key ${dir}/ca.key -subj '/CN=${REPLICA_CA_CN}' -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -days ${days} -out ${dir}/ca.pem
+openssl ecparam -name prime256v1 -genkey -noout -out ${dir}/key.pem && chmod 600 ${dir}/key.pem
+openssl req -new -key ${dir}/key.pem -subj /CN=aigw-replica | openssl x509 -req -CA ${dir}/ca.pem -CAkey ${dir}/ca.key -CAcreateserial -days ${days} -sha256 \\
+  -extfile <(printf 'subjectAltName=%s\\nbasicConstraints=CA:FALSE\\nextendedKeyUsage=serverAuth\\n' "$AIGW_TLS_SAN") -out ${dir}/cert.pem
+rm -f ${dir}/ca.key`;
+}
+
+const certDaysOf = (spec: DeploymentSpec) => Math.ceil((spec.maxHours * 60 + 30) / 1440) + 1;
+
+export const CLOSE_SSH = `rm -f /root/.ssh/authorized_keys
+for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = sshd ] && kill "\${p#/proc/}"; done`;
+
 /** Boot-script mode: the user script runs in the background (it may take long); readiness is still the health loop. */
 function bootScriptSection(script: string): string {
   return `echo '${b64(script)}' | base64 -d > /srv/aigw/boot.sh && chmod 700 /srv/aigw/boot.sh
@@ -240,11 +294,13 @@ export function replicaCloudInit(spec: DeploymentSpec, token: string, opts: Repl
   // Exposed replica: the probe moves to PROBE_PORT and the app answers health on its own port (it owns 80/443).
   const appPort = spec.exposure ? spec.port : 8000;
   const rtPort = spec.realtime ? RT_EDGE_PORT : undefined;
-  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort, spec.seats) : nginxConfig(token, 80, 8000, rtPort, spec.seats);
+  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort, true, spec.seats) : nginxConfig(token, 80, 8000, rtPort, true, spec.seats);
+  const registry = spec.registryAuth?.server ? shellQuote(spec.registryAuth.server) : '';
   const login = spec.registryAuth
-    ? `echo ${shellQuote(spec.registryAuth.password)} | docker login ${spec.registryAuth.server ? shellQuote(spec.registryAuth.server) + ' ' : ''}`
-      + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin`
+    ? `set +x\necho ${shellQuote(spec.registryAuth.password)} | docker login ${registry ? registry + ' ' : ''}`
+      + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin\nset -x`
     : '';
+  const logout = spec.registryAuth ? `docker logout ${registry}`.trim() : '';
   return `#!/bin/bash
 mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
@@ -253,14 +309,16 @@ shutdown -h +${shutdownMinutes}
 echo '${b64(nginx)}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
-command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx; }
+command -v nginx >/dev/null && command -v openssl >/dev/null || { apt-get update -y && apt-get install -y nginx openssl; }
+${replicaTlsSection(token, certDaysOf(spec), SCALEWAY_TLS_SAN)}
 rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf && systemctl restart nginx
 ${spec.files ? unpackScript(packIndexOf(spec.files)) : ''}
 ${fetchFilesScript(spec.fileUrls)}
-${spec.bootScript ? bootScriptSection(spec.bootScript) : `command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+${spec.bootScript ? bootScriptSection(spec.bootScript) : `command -v docker >/dev/null || { apt-get update -y && apt-get install -y docker.io; }
 ${login}
 for i in 1 2 3 4 5; do docker pull ${shellQuote(spec.image)} && break; sleep 15; done
+${logout}
 ${dockerRunCommand(spec)}`}
 ${spec.realtime ? realtimeSection(spec, token, opts) : ''}
 for i in $(seq 1 ${bootChecks}); do
@@ -301,10 +359,12 @@ mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
 set -x
 ( sleep ${stopAfterSeconds}; kill -TERM 1 ) >/dev/null 2>&1 &
-echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undefined, spec.seats))}' | base64 -d > /srv/aigw/nginx.conf
+${CLOSE_SSH}
+echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undefined, true, spec.seats))}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
-command -v nginx >/dev/null && command -v curl >/dev/null || { apt-get update -y && apt-get install -y nginx curl; }
+command -v nginx >/dev/null && command -v curl >/dev/null && command -v openssl >/dev/null || { apt-get update -y && apt-get install -y nginx curl openssl; }
+${replicaTlsSection(token, certDaysOf(spec), VAST_TLS_SAN)}
 mkdir -p /etc/nginx/conf.d && rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf
 nginx -t && { nginx -s reload 2>/dev/null || nginx; }

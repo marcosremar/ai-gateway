@@ -9,24 +9,35 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { randomUUID } from 'crypto';
 import type { DeploymentController } from '../deployments/controller';
 import { replicaBase } from '../deployments/http';
+import { placementsOf } from '../deployments/placements';
+import { replicaTls } from '../deployments/replica-tls';
+import type { DeploymentSpec } from '../deployments/types';
+import { DEFAULT_SLOT_CTX, promptOverflow } from '../s2s/history';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import type { AppLimitDenial } from '../gateway/proxy/app-limits';
 import { EdgeStatusCache, type EdgeStatus, type EdgeStatusResult } from './edge-status';
 import {
-  isEdgeTransport, orderTransports, pickReplica, sessionCharge, REALTIME_REQUESTS_PER_MINUTE,
+  isEdgeTransport, orderTransports, pickReplica, sessionCharge, webrtcProven, REALTIME_REQUESTS_PER_MINUTE,
   type RealtimeTransportType, type ReplicaCandidate,
 } from './admission';
 import { iceServersFor, type IceConfig, DEFAULT_STUN_URLS } from './ice';
 import { noteRefusedSession, noteSession, reportExternalLoad } from './external-load';
 import { probeUdp } from './net-probe';
 import { TurnHealth, type TurnProbe, type TurnUrlHealth } from './turn-health';
+import { hooksProblem } from './app-hooks';
 import { echoTrace, makeEmitter, newTrace, traceOf, type GatewayEmit, type RealtimeTelemetrySink } from './trace';
 import {
-  deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, verifySessionToken,
-  RT_MAX_CFG_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
+  configDigest, deriveRealtimeKey, encodeSessionConfig, peekClaims, signSessionToken, signUpdateToken, verifySessionToken,
+  RT_MAX_CFG_CHARS, RT_MAX_CFG_REF_CHARS, RT_MAX_TTL_SECONDS, type RealtimeClaims,
 } from './token';
 
-export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list'>>;
+function llmSlotContext(spec: DeploymentSpec | null): number {
+  if (!spec) return DEFAULT_SLOT_CTX;
+  const ctxOn = (place: DeploymentSpec) => Number(place.env?.LLM_SLOT_CTX ?? place.envByMachineType?.[place.machineType]?.LLM_SLOT_CTX) || DEFAULT_SLOT_CTX;
+  return Math.min(...placementsOf(spec).map(ctxOn));
+}
+
+export type RealtimeController = Pick<DeploymentController, 'get' | 'tokenOf' | 'specOf' | 'wake'> & Partial<Pick<DeploymentController, 'list' | 'noteUdp'>>;
 
 export interface RealtimeServiceOptions {
   controller: RealtimeController | null;
@@ -37,6 +48,7 @@ export interface RealtimeServiceOptions {
   isAdmin: (userId: string) => boolean;
   /** Daily budget (AppLimits.chargeRequests); absent = no budget. */
   charge?: (userId: string, requests: number) => AppLimitDenial | null;
+  devices?: { admit(app: string, device: unknown, kind: string): AppLimitDenial | null; isBlocked(app: string, device: string): boolean };
   ice?: IceConfig;
   /** Public base of this gateway (`REALTIME_PUBLIC_URL`, e.g. https://gw.example.com); else from the request. */
   publicUrl?: string;
@@ -64,6 +76,7 @@ export interface RealtimeServiceOptions {
 export const REALTIME_DEFAULT_TTL_SECONDS = 600;
 const MAX_SESSION_BODY = 256 * 1024;
 const NET_RETRY_MS = 60_000;
+export const NET_ADMIT_WAIT_MS = 2_500;
 const FALLBACK = { transport: 's2s-stream', url: '/v1/s2s' } as const;
 
 export interface ResolvedSession {
@@ -75,7 +88,7 @@ export interface ResolvedSession {
   edgeSessionId: string;
 }
 
-interface SessionRecord { dep: string; rep: string; app: string; exp: number; edgeSessionId?: string; pendingUntil?: number }
+interface SessionRecord { dep: string; rep: string; app: string; dev?: string; exp: number; edgeSessionId?: string; pendingUntil?: number }
 
 export function readJsonBody(req: IncomingMessage, limit: number): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -114,6 +127,7 @@ export class RealtimeService {
   private poller: ReturnType<typeof setInterval> | null = null;
   private netLoop: ReturnType<typeof setInterval> | null = null;
   private readonly netProbed = new Map<string, number>();
+  private readonly netProbing = new Map<string, Promise<void>>();
   private readonly netNotDirect = new Map<string, number>();
   private readonly turn: TurnHealth;
   private turnLoop: ReturnType<typeof setInterval> | null = null;
@@ -154,9 +168,9 @@ export class RealtimeService {
   async probeAll(): Promise<void> {
     for (const d of this.opts.controller?.list?.() ?? []) {
       if (!this.opts.controller?.specOf(d.name)?.realtime) continue;
-      const token = this.opts.controller.tokenOf(d.name);
-      if (!token) continue;
       for (const r of this.readyReplicas(d.name, true)) {
+        const token = this.opts.controller.tokenOf(d.name, r.id);
+        if (!token) continue;
         const s = await this.status.get(r.id, r.base, token);
         if (!s.ok) continue;
         reportExternalLoad(d.name, r.id, s.status.active, s.status.max, this.now());
@@ -170,7 +184,15 @@ export class RealtimeService {
    * UDP echo to the edge's probe port, then the result (and TURN credentials for the edge's own relay test) to the
    * edge, which decides direct / relay / ws and lists its transports accordingly. At most one probe a minute per replica.
    */
-  async probeNet(dep: string, r: { id: string; base: string }, status: EdgeStatus, token: string): Promise<void> {
+  probeNet(dep: string, r: { id: string; base: string }, status: EdgeStatus, token: string): Promise<void> {
+    const running = this.netProbing.get(r.id);
+    if (running) return running;
+    const probing = this.probeNetOnce(dep, r, status, token).finally(() => this.netProbing.delete(r.id));
+    this.netProbing.set(r.id, probing);
+    return probing;
+  }
+
+  private async probeNetOnce(dep: string, r: { id: string; base: string }, status: EdgeStatus, token: string): Promise<void> {
     const net = status.net;
     if (!status.probePort || !net) return;
     const now = this.now();
@@ -189,6 +211,7 @@ export class RealtimeService {
       const res = await (this.opts.fetchImpl ?? fetch)(`${r.base}/__aigw/rt/net`, {
         method: 'POST', headers: { 'X-Aigw-Token': token, 'Content-Type': 'application/json', traceparent: trace.traceparent },
         body: JSON.stringify({ udpInbound: udp.result, rttMs: udp.rttMs, iceServers: turn }), signal: AbortSignal.timeout(20_000),
+        ...replicaTls(r.base, token),
       });
       if (res.ok) decided = await res.json() as typeof decided;
     } catch (err) {
@@ -197,6 +220,8 @@ export class RealtimeService {
     if (decided.path === 'direct') this.netNotDirect.delete(r.id);
     else this.netNotDirect.set(r.id, (this.netNotDirect.get(r.id) ?? 0) + 1);
     this.status.invalidate(r.id);
+    await this.opts.controller?.noteUdp?.(dep, r.id, udp.result, { path: decided.path, active: status.active })
+      .catch(err => this.log('realtime: udp result not recorded', { replica: r.id, error: (err as Error).message }));
     this.log('realtime: media path', { deployment: dep, replica: r.id, udpInbound: udp.result, rttMs: udp.rttMs, path: decided.path ?? 'unknown', reasons: decided.reasons });
     this.emit(trace, 'rt.net.probe', {
       level: decided.path === 'ws' || !decided.path ? 'warn' : 'info', durMs: performance.now() - started,
@@ -222,6 +247,11 @@ export class RealtimeService {
   get ttlSeconds(): number {
     const t = this.opts.ttlSeconds ?? REALTIME_DEFAULT_TTL_SECONDS;
     return Math.max(60, Math.min(RT_MAX_TTL_SECONDS, Math.floor(t)));
+  }
+
+  /** Requests one session charges to the app's daily budget (and to an account's, src/accounts). */
+  get sessionRequests(): number {
+    return sessionCharge(this.ttlSeconds, this.opts.requestsPerMinute ?? REALTIME_REQUESTS_PER_MINUTE);
   }
 
   private get reservationMs(): number { return this.opts.reservationMs ?? 20_000; }
@@ -264,7 +294,7 @@ export class RealtimeService {
     const exposed = !!this.opts.controller?.specOf(dep)?.exposure;
     return view.replicas
       .filter(r => r.phase === 'ready' && (draining || !r.draining) && r.ip)
-      .map(r => ({ id: r.id, base: replicaBase({ ip: r.ip } as never, exposed), stagesOut: r.stagesOut ?? [] }));
+      .map(r => ({ id: r.id, base: replicaBase(r, exposed), stagesOut: r.stagesOut ?? [] }));
   }
 
   /** `POST /v1/realtime/sessions` (behind the proxy's API-key auth). */
@@ -308,13 +338,28 @@ export class RealtimeService {
       return sendJson(res, 404, errorBody(`deployment '${dep || '(none)'}' not found`, 'not_found', { fallback: FALLBACK }));
     }
     const app = view.app ?? userId;
+    const hooks = hooksProblem(cfgIn);
+    if (hooks) return sendJson(res, 400, errorBody(hooks, 'invalid_request'));
     const sessionConfig = { ...cfgIn, deployment: dep };
     const cfg = encodeSessionConfig(sessionConfig);
-    if (cfg.length > RT_MAX_CFG_CHARS) {
+    if (cfg.length > RT_MAX_CFG_REF_CHARS) {
       return sendJson(res, 413, errorBody(
-        `session config is ${cfg.length} base64url characters, over ${RT_MAX_CFG_CHARS}: send the long history with config_update once connected`,
+        `session config is ${cfg.length} base64url characters, over ${RT_MAX_CFG_REF_CHARS}: send the long history with config_update once connected`,
         'config_too_large'));
     }
+    const byReference = cfg.length > RT_MAX_CFG_CHARS;
+    const tooLong = promptOverflow(cfgIn, llmSlotContext(controller.specOf(dep)));
+    if (tooLong) {
+      this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: 'prompt_too_large', status: 413, deployment: dep } });
+      return sendJson(res, 413, errorBody(tooLong, 'prompt_too_large'));
+    }
+
+    const blocked = this.opts.devices?.admit(app, body.device, 'realtime') ?? null;
+    if (blocked) {
+      this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: blocked.code ?? blocked.type, status: blocked.status, deployment: dep } });
+      return sendJson(res, blocked.status, errorBody(blocked.message, blocked.code ?? blocked.type));
+    }
+    const dev = this.opts.devices && typeof body.device === 'string' && body.device ? body.device : undefined;
 
     noteSession(dep, trace.traceId, this.now());
     const placed = await this.place(dep, ordered.order);
@@ -324,11 +369,11 @@ export class RealtimeService {
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: code, status, deployment: dep } });
       return sendJson(res, status, errorBody(message, code, { fallback: FALLBACK }), { 'Retry-After': retryAfter });
     }
-    const replicaToken = controller.tokenOf(dep);
+    const replicaToken = controller.tokenOf(dep, placed.replica.id);
     if (!replicaToken) return sendJson(res, 503, errorBody('deployment has no replica token', 'cold', { fallback: FALLBACK }), { 'Retry-After': 5 });
 
     const ttl = this.ttlSeconds;
-    const charge = sessionCharge(ttl, this.opts.requestsPerMinute ?? REALTIME_REQUESTS_PER_MINUTE);
+    const charge = this.sessionRequests;
     const denial = admin ? null : this.opts.charge?.(userId, charge) ?? null;
     if (denial) {
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: denial.type, status: denial.status, deployment: dep } });
@@ -338,8 +383,10 @@ export class RealtimeService {
     const sid = `rt_${randomUUID().replace(/-/g, '')}`;
     const iat = Math.floor(this.now() / 1000);
     const exp = iat + ttl;
-    const token = signSessionToken({ sid, app, dep, rep: placed.replica.id, cfg, iat, exp }, deriveRealtimeKey(replicaToken));
-    this.sessions.set(sid, { dep, rep: placed.replica.id, app, exp: exp * 1000, pendingUntil: this.now() + this.reservationMs });
+    const token = signSessionToken({
+      sid, app, dep, rep: placed.replica.id, cfg: byReference ? '' : cfg, ...(dev ? { dev } : {}), iat, exp, ...(byReference ? { cfd: configDigest(cfg) } : {}),
+    }, deriveRealtimeKey(replicaToken));
+    this.sessions.set(sid, { dep, rep: placed.replica.id, app, ...(dev ? { dev } : {}), exp: exp * 1000, pendingUntil: this.now() + this.reservationMs });
     this.ensurePolling();
 
     const base = this.publicBase(req);
@@ -357,17 +404,46 @@ export class RealtimeService {
     this.log('realtime: session admitted', { sid, app, deployment: dep, replica: placed.replica.id, charge, transports: transports.map(t => t.type), traceId: trace.traceId });
     this.emit(trace, 'rt.session.admitted', {
       sessionId: sid, durMs: this.now() - started,
-      attrs: { deployment: dep, replica: placed.replica.id, active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1, turn: iceServers.length > 1 },
+      attrs: { deployment: dep, replica: placed.replica.id, active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1, turn: iceServers.length > 1, udp: placed.replica.status.net?.udpInbound ?? null },
     });
     sendJson(res, 200, {
-      sessionId: sid, token, expiresAt: new Date(exp * 1000).toISOString(), deployment: dep, traceId: trace.traceId,
+      sessionId: sid, token, ...(byReference ? { cfg } : {}), expiresAt: new Date(exp * 1000).toISOString(), deployment: dep, traceId: trace.traceId,
       telemetryUrl: `${base}/v1/telemetry/events`,
       transports, iceServers,
       limits: {
-        maxSessionSeconds: ttl, maxConfigChars: RT_MAX_CFG_CHARS, requestsCharged: admin ? 0 : charge,
+        maxSessionSeconds: ttl, maxConfigChars: RT_MAX_CFG_REF_CHARS, requestsCharged: admin ? 0 : charge,
         replica: { active: placed.replica.status.active, max: placed.replica.status.max, pending: placed.replica.pending + 1 },
       },
     });
+  };
+
+  signUpdate = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const userId = this.opts.userOf(req);
+    if (!userId) return sendJson(res, 401, errorBody('a signed update needs an app API key', 'unauthorized'));
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(req, MAX_SESSION_BODY); } catch (err) {
+      return sendJson(res, (err as { status?: number }).status ?? 400, errorBody(`bad request: ${(err as Error).message}`, 'invalid_request'));
+    }
+    const update = body.update;
+    if (typeof body.token !== 'string' || !update || typeof update !== 'object' || Array.isArray(update)) {
+      return sendJson(res, 400, errorBody('"token" (the session token) and "update" (an object) are required', 'invalid_request'));
+    }
+    const session = this.resolveToken(body.token);
+    if ('status' in session) return sendJson(res, session.status, errorBody(session.message, session.code));
+    if (!this.opts.isAdmin(userId) && session.claims.app !== userId) {
+      return sendJson(res, 403, errorBody('this API key does not own the session', 'forbidden'));
+    }
+    const hooks = hooksProblem(update as Record<string, unknown>);
+    if (hooks) return sendJson(res, 400, errorBody(hooks, 'invalid_request'));
+    const upd = encodeSessionConfig(update as Record<string, unknown>);
+    if (upd.length > RT_MAX_CFG_REF_CHARS) {
+      return sendJson(res, 413, errorBody(`update is ${upd.length} base64url characters, over ${RT_MAX_CFG_REF_CHARS}`, 'config_too_large'));
+    }
+    const n = this.now();
+    const { sid, exp } = session.claims;
+    const signed = signUpdateToken({ sid, upd, n, iat: Math.floor(n / 1000), exp }, deriveRealtimeKey(session.replicaToken));
+    this.emit(traceOf(req), 'rt.session.update_signed', { sessionId: sid, attrs: { keys: Object.keys(update).sort().join(','), chars: upd.length } });
+    sendJson(res, 200, { sessionId: sid, signed, n });
   };
 
   /** A ready replica with a free slot, or why none (and the deployment woken when it was cold). */
@@ -377,22 +453,20 @@ export class RealtimeService {
     if (controller.get(dep)?.spec.paused) return { refusal: { status: 503, code: 'paused', message: `deployment '${dep}' is paused`, retryAfter: 60 } };
     const every = this.readyReplicas(dep);
     if (!every.length) {
-      if (noWakeActive()) recordNoWakeSkip();
+      if (noWakeActive(dep)) recordNoWakeSkip();
       else { try { controller.wake(dep); } catch { /* vanished */ } }
-      return { refusal: { status: 503, code: 'cold', message: `deployment '${dep}': no ready replica${noWakeActive() ? ' (no-wake: not woken)' : ' (waking)'}`, retryAfter: 30 } };
+      return { refusal: { status: 503, code: 'cold', message: `deployment '${dep}': no ready replica${noWakeActive(dep) ? ' (no-wake: not woken)' : ' (waking)'}`, retryAfter: 30 } };
     }
     const ready = every.filter(r => !r.stagesOut.length);
     if (!ready.length) {
       const stages = [...new Set(every.flatMap(r => r.stagesOut))].join(', ');
       return { refusal: { status: 503, code: 'degraded', message: `deployment '${dep}': ${stages} failing on every ready replica`, retryAfter: 30 } };
     }
-    const token = controller.tokenOf(dep) ?? '';
     const results: Array<{ r: { id: string; base: string }; s: EdgeStatusResult }> = await Promise.all(
-      ready.map(async r => ({ r, s: await this.status.get(r.id, r.base, token) })));
+      ready.map(async r => ({ r, s: await this.provenStatus(dep, r, controller.tokenOf(dep, r.id) ?? '') })));
     const candidates: ReplicaCandidate[] = [];
     for (const { r, s } of results) {
       if (!s.ok) continue;
-      void this.probeNet(dep, r, s.status, token).catch(() => {});
       reportExternalLoad(dep, r.id, s.status.active, s.status.max, this.now());
       candidates.push({ id: r.id, base: r.base, status: s.status, pending: this.pendingOn(r.id) });
     }
@@ -405,26 +479,65 @@ export class RealtimeService {
         : { status: 503, code: 'unreachable', message: `deployment '${dep}': realtime status unreachable`, retryAfter: 5 } };
     }
     // Ready but full: tell the autoscaler (wake keeps the idle clock fresh; the pressure comes from the load report).
-    if (!noWakeActive()) { try { controller.wake(dep); } catch { /* vanished */ } }
+    if (!noWakeActive(dep)) { try { controller.wake(dep); } catch { /* vanished */ } }
     return { refusal: { status: 503, code: 'saturated', message: `deployment '${dep}': every replica's realtime slots are taken`, retryAfter: 2 } };
+  }
+
+  private async provenStatus(dep: string, r: { id: string; base: string }, token: string): Promise<EdgeStatusResult> {
+    let s = await this.status.get(r.id, r.base, token);
+    if (!s.ok) return s;
+    const probing = this.probeNet(dep, r, s.status, token).catch(() => {});
+    if (s.status.net?.udpInbound === 'unknown' && s.status.probePort) {
+      await Promise.race([probing, new Promise<void>((done) => { setTimeout(done, NET_ADMIT_WAIT_MS).unref?.(); })]);
+      if (!this.readyReplicas(dep).some(x => x.id === r.id)) return { ok: false, reason: 'unreachable' };
+      s = await this.status.get(r.id, r.base, token, { fresh: true });
+      if (!s.ok) return s;
+    }
+    const { status } = s;
+    return { ok: true, status: { ...status, transports: status.transports.filter(t => t !== 'webrtc' || webrtcProven(status)) } };
   }
 
   /** Verifies a session token against its deployment's key and finds its replica. */
   resolveToken(token: string): ResolvedSession | { status: number; code: string; message: string } {
     const peek = peekClaims(token);
     if (!peek) return { status: 401, code: 'invalid_token', message: 'malformed realtime session token' };
-    const replicaToken = this.opts.controller?.tokenOf(peek.dep) ?? null;
-    if (!replicaToken) return { status: 401, code: 'invalid_token', message: 'unknown deployment in session token' };
+    if (!this.opts.controller?.get(peek.dep)) return { status: 401, code: 'invalid_token', message: 'unknown deployment in session token' };
+    const replicaToken = this.opts.controller.tokenOf(peek.dep, peek.rep);
+    if (!replicaToken) return { status: 410, code: 'replica_gone', message: 'the replica of this session is gone: open a new session' };
     const verdict = verifySessionToken(token, deriveRealtimeKey(replicaToken), Math.floor(this.now() / 1000));
     if ('error' in verdict) return { status: 401, code: verdict.error === 'expired' ? 'token_expired' : 'invalid_token', message: `session token refused: ${verdict.error}` };
     const { claims } = verdict;
-    const exposed = !!this.opts.controller?.specOf(claims.dep)?.exposure;
-    const replica = this.opts.controller?.get(claims.dep)?.replicas.find(r => r.id === claims.rep && r.ip);
-    if (!replica) return { status: 410, code: 'replica_gone', message: 'the replica of this session is gone: open a new session' };
+    if (this.deviceBlocked(claims)) return { status: 403, code: 'device_blocked', message: 'this device is blocked' };
+    const base = this.replicaBaseOf(claims.dep, claims.rep);
+    if (!base) return { status: 410, code: 'replica_gone', message: 'the replica of this session is gone: open a new session' };
     return {
-      claims, replicaToken, replicaId: replica.id, base: replicaBase({ ip: replica.ip } as never, exposed),
+      claims, replicaToken, replicaId: claims.rep, base,
       edgeSessionId: this.sessions.get(claims.sid)?.edgeSessionId ?? claims.sid,
     };
+  }
+
+  private replicaBaseOf(dep: string, rep: string): string | null {
+    const replica = this.opts.controller?.get(dep)?.replicas.find(r => r.id === rep && r.ip);
+    return replica ? replicaBase(replica, !!this.opts.controller?.specOf(dep)?.exposure) : null;
+  }
+
+  deviceBlocked(claims: Pick<RealtimeClaims, 'app' | 'dev'>): boolean {
+    return !!claims.dev && !!this.opts.devices?.isBlocked(claims.app, claims.dev);
+  }
+
+  async endDeviceSessions(app: string, device: string): Promise<number> {
+    const open = [...this.sessions].filter(([, s]) => s.app === app && s.dev === device);
+    await Promise.all(open.map(async ([sid, s]) => {
+      const base = this.replicaBaseOf(s.dep, s.rep);
+      const token = this.opts.controller?.tokenOf(s.dep, s.rep);
+      this.forget(sid);
+      if (!base || !token) return;
+      await (this.opts.fetchImpl ?? fetch)(`${base}/__aigw/rt/session/${encodeURIComponent(s.edgeSessionId ?? sid)}`, {
+        method: 'DELETE', headers: { 'X-Aigw-Token': token }, signal: AbortSignal.timeout(5_000), ...replicaTls(base, token),
+      }).catch(err => this.log('realtime: could not end a blocked device session', { sid, error: (err as Error).message }));
+      this.emit(newTrace(), 'rt.session.deleted', { level: 'warn', sessionId: sid, attrs: { reason: 'device_blocked' } });
+    }));
+    return open.length;
   }
 
   private ensurePolling(): void {
@@ -446,10 +559,10 @@ export class RealtimeService {
     }
     if (!deps.size && this.poller) { clearInterval(this.poller); this.poller = null; return; }
     for (const dep of deps) {
-      const token = this.opts.controller?.tokenOf(dep);
-      if (!token) continue;
       let active = 0;
       for (const r of this.readyReplicas(dep, true)) {
+        const token = this.opts.controller?.tokenOf(dep, r.id);
+        if (!token) continue;
         const s = await this.status.get(r.id, r.base, token, { fresh: true });
         if (!s.ok) continue;
         reportExternalLoad(dep, r.id, s.status.active, s.status.max, this.now());

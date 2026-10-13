@@ -265,7 +265,7 @@ describe('DataChannel message processing', () => {
 
   it('emits speaking-start on output_audio_buffer.started', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     const spy = vi.fn();
     client.on('speaking-start', spy);
@@ -276,7 +276,7 @@ describe('DataChannel message processing', () => {
 
   it('emits speaking-end on output_audio_buffer.stopped', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     const spy = vi.fn();
     client.on('speaking-end', spy);
@@ -287,7 +287,7 @@ describe('DataChannel message processing', () => {
 
   it('accumulates audio transcript deltas', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     mockDc.simulateMessage(JSON.stringify({ type: 'response.created' }));
     mockDc.simulateMessage(JSON.stringify({ type: 'response.output_audio_transcript.delta', delta: 'Hello ' }));
@@ -303,7 +303,7 @@ describe('DataChannel message processing', () => {
 
   it('includes userText from input_audio_transcription', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     mockDc.simulateMessage(JSON.stringify({
       type: 'conversation.item.input_audio_transcription.completed',
@@ -323,7 +323,7 @@ describe('DataChannel message processing', () => {
 
   it('emits transcript deltas', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     const transcriptSpy = vi.fn();
     client.on('transcript', transcriptSpy);
@@ -335,7 +335,7 @@ describe('DataChannel message processing', () => {
 
   it('emits error event for server errors', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     const errorSpy = vi.fn();
     client.on('error', errorSpy);
@@ -352,7 +352,7 @@ describe('DataChannel message processing', () => {
 
   it('ignores unknown event types silently', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     expect(() => {
       mockDc.simulateMessage(JSON.stringify({ type: 'some.unknown.event', data: 'x' }));
@@ -362,7 +362,7 @@ describe('DataChannel message processing', () => {
 
   it('handles malformed JSON gracefully', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     expect(() => {
       mockDc.simulateMessage('not valid json{{{{');
@@ -372,7 +372,7 @@ describe('DataChannel message processing', () => {
 
   it('clears accumulators after response.done', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     mockDc.simulateMessage(JSON.stringify({ type: 'response.created' }));
     mockDc.simulateMessage(JSON.stringify({ type: 'response.output_audio_transcript.delta', delta: 'First' }));
@@ -390,7 +390,7 @@ describe('DataChannel message processing', () => {
 
   it('resets error on session.updated', async () => {
     const client = await createConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     // Trigger an error first
     mockDc.simulateMessage(JSON.stringify({ type: 'error', error: { message: 'Oops' } }));
@@ -488,7 +488,7 @@ describe('response.done edge cases', () => {
 
   it('falls back to response.output from response data when transcripts are empty', async () => {
     const client = await getConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     const spy = vi.fn();
     client.on('response', spy);
@@ -513,7 +513,7 @@ describe('response.done edge cases', () => {
 
   it('emits speaking-end after response.done', async () => {
     const client = await getConnectedClient();
-    if (!mockDc || mockDc.readyState !== 'open') return;
+    expect(mockDc?.readyState).toBe('open');
 
     const spy = vi.fn();
     client.on('speaking-end', spy);

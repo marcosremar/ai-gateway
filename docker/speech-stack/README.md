@@ -147,7 +147,9 @@ measured in `docs/reports/2026-10-07-realtime-handoff.md` § TTS runaway:
 - After its first chunk, a sentence's silent chunks (RMS ≤ 300) are held until sound arrives. Still silent after
   `TTS_MAX_LEAD_SECONDS`, or failed before any sound: the request is dropped and sent again once (new random seed),
   about 0.5 s later at 8 in parallel; the held silence is not played. `done.tts_retries` counts them. A sentence that
-  fails after sound still ends the turn with `error` (stage `tts`).
+  fails after sound still ends the turn with `error` (stage `tts`) — except one that runs to its cap (more audio than
+  `TTS_MAX_SECONDS + TTS_MAX_SECONDS_PER_CHAR × characters`, or the engine's stop at `max_new_tokens` with ≥ 90 % of
+  the cap received): it is cut there, counted in `done.tts_overlong`, logged `outcome=overlong`, and the turn goes on.
 
 ## Conversation history always fits the LLM slot (2026-10-08)
 
@@ -160,6 +162,8 @@ with the same rule (`fit_history` in `server.py`, copied verbatim into `aigw_edg
 - **Budget** = context per slot − `max_tokens` (160) − 64 tokens of margin (chat template, generation prompt). The
   context per slot is read once at warm-up from llama.cpp's `GET /props` (`default_generation_settings.n_ctx`),
   published as `llm_ctx` in `/health`; the edge picks it up from the health poll it already makes (no call on the turn).
+  `/health` also reports `models: {stt, llm, tts}` (`STT_MODEL`, `LLM_FILE`, `TTS_MODEL`): the edge puts them in each
+  turn's `done.served`.
   2048 is the default when `/props` or `llm_ctx` is missing. The composed fallback reads `S2S_CHAT_CONTEXT` (default 2048).
 - **Always kept**: `system`, every `system` message inside `messages`, the current user turn.
 - **Dropped**: the oldest whole turns (a user message with everything up to the next user message), 8 turns at a
@@ -189,6 +193,9 @@ Following one sentence into the TTS engine: for every TTS request the orchestrat
 as `extra_params.request_id`. vLLM-Omni 0.28.0 logs `Applied extra_params: {'request_id': '<id>'}` on the line after
 `TTS speech request speech-<uuid>: model=Base`; that `speech-<uuid>` is the id of its `[SpeechE2E] … status=…` line.
 No text, transcript or audio is written by the orchestrator.
+
+`GET /debug/gpu` (same gate) returns `{gpu: [{used_mb, total_mb, free_mb}]}` from `nvidia-smi`, one entry per card:
+the memory the three engines hold right now, read through the gateway at `/v1/deployments/<name>/invoke/debug/gpu`.
 
 ## Shipping server code without rebuilding the image
 

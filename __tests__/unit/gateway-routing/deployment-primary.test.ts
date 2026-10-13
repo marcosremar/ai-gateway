@@ -275,7 +275,7 @@ describe('STT and TTS: deployment primary, OpenRouter fallback', () => {
     const dep = new DeploymentTTSProvider(fakeController(), 'parle-qwen-tts', { fetchImpl: fetchImpl as never });
     const res = await handleAudioSpeech(
       { method: 'POST', url: '/v1/audio/speech', headers: {}, rawBody: Buffer.alloc(0),
-        body: { model: 'parle-tts', input: 'oi', voice: 'x', response_format: 'pcm', ref_audio: 'a', ref_text: 't' } },
+        body: { model: 'parle-tts', input: 'oi', voice: 'x', response_format: 'pcm', ref_audio: 'data:audio/wav;base64,UklGRg==', ref_text: 't' } },
       { 'parle-tts': [{ providerId: 'deployment:parle-qwen-tts', provider: dep, model: 'Qwen/Qwen3-TTS' }] },
       undefined, new CircuitBreakerRegistry(),
     );

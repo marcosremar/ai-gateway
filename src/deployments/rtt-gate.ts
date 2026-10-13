@@ -24,7 +24,13 @@ export const RTT_ANCHORS: Readonly<Record<string, string>> = {
 };
 export const RTT_ANCHOR_PORT = 80;
 
-export interface RttBaseline { anchor: string; rttMs: number }
+export interface RttBaseline { anchor: string; rttMs: number; quietMs?: number }
+
+export const LOADED_BASELINE_MARGIN_MS = 15;
+
+export function baselineLoaded(baseline: RttBaseline | null | undefined): boolean {
+  return baseline?.quietMs != null && baseline.rttMs - baseline.quietMs > LOADED_BASELINE_MARGIN_MS;
+}
 /**
  * How long the gate waits for a first answer after the replica got its address: the front (nginx) is installed by
  * the boot script before anything else, ~1–2 min on a fresh container; no answer in 5 min reads as too far

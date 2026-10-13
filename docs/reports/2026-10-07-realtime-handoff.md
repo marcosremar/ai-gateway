@@ -1741,3 +1741,830 @@ imagem 1317 no L40S, edge `f66b6b80`, 4 alunos, sessão longa, transbordo com a 
 4. `LLM_SLOT_CTX=4096` fica fora do `parle-speech` declarado até haver a leitura de VRAM (funcionou; a margem é
    estimativa).
 5. Não mexer no teto de 4 sessões por L40S no deploy. 8 é a proposta para a próxima medição, com tempos reais da turma.
+
+## Fallback em streaming (2026-10-08 evening, `rt/fallback-streaming`)
+
+Goal: overlap the stages of the composed fallback (STT → LLM → TTS over OpenRouter) and say how close it gets to the
+2500 ms ceiling. No machine, no GPU, production untouched: two local gateways (base `72552d6` on 4161, this branch on
+4162, `DEPLOYMENTS_ENABLED=0`, `--no-wake`) against the real OpenRouter, stopped at the end; $0.83 on the key's counter
+for the whole session (the key is shared).
+
+### Research (web and live probes, 2026-10-08)
+
+| Question | Answer | Source |
+|---|---|---|
+| OpenRouter STT: streaming or partials? | No. `POST /api/v1/audio/transcriptions` answers one JSON; no `stream`, SSE or WebSocket is documented, for any model (`deepgram/nova-3`, the Whispers, `nvidia/nemotron-3.5-asr-streaming…` included: the model streams, the endpoint does not) | openrouter.ai/docs/guides/overview/multimodal/stt · openrouter.ai/blog/tutorials/transcription-on-openrouter (22 Jul 2026, updated 24 Sep 2026) |
+| Mistral streaming STT | Yes: `voxtral-mini-transcribe-realtime-2602` on `wss://api.mistral.ai/v1/audio/transcriptions/realtime`, `pcm_s16le` 16 kHz, Portuguese among its 13 languages, $0.006/min, delay configurable (480 ms recommended). Reachable with `MISTRAL_API_KEY`; not probed here | docs.mistral.ai/capabilities/audio/speech_to_text/realtime_transcription · mistral.ai/news/voxtral-transcribe-2 (4 Feb 2026) |
+| NVIDIA hosted streaming ASR | Streaming models with pt-BR exist in the NIM support matrix; the hosted protocol (gRPC with a function id), whether the pt-BR profile is hosted, limits and production terms could not be confirmed from a fetched page. The realtime WebSocket is documented for self-hosted NIM only | docs.nvidia.com/nim/speech/latest/reference/support-matrix/asr.html (updated 7 Oct 2026) |
+| OpenRouter TTS: formats, streaming | `response_format` is `mp3` or `pcm` only (a `wav` request is a 400); no `stream` parameter. Probed: `microsoft/mai-voice-2.1-flash` (`pt-BR-Luana:MAI-Voice-2-Flash`) sends the first PCM byte at 580–730 ms whatever the length (one clause or three sentences) and the rest within 120–470 ms; `hexgrad/kokoro-82m` (`pf_dora`) first byte 380–2860 ms, body in one burst | openrouter.ai/docs/guides/overview/multimodal/tts · openrouter.ai/docs/api/api-reference/tts/create-speech · probes |
+| Mistral TTS | `voxtral-mini-tts-2603` streams (SSE, PCM), first chunk 505–570 ms (one at 2.6 s) in the probe, but its 30 preset voices are `en_us`, `en_gb`, `fr_fr`: no Portuguese stock voice (`GET /v1/audio/voices`) | docs.mistral.ai/capabilities/audio/text_to_speech (model released 23 Mar 2026) · probe |
+
+So: no STT with partials through OpenRouter (speculation is the only way on this chain), and no stock Portuguese voice
+with a first chunk at 200–300 ms on any key we have. The MAI voice does stream; the gateway was not using it.
+
+### Which transport gives the gateway the audio before the end of the turn: none
+
+The brief assumed `ws` and `s2s-stream` do. They do not, for the fallback: the `ws` rung is a relay to the edge sidecar
+on a GPU replica (a learner without a seat has no `ws` session: admission answers `503` with
+`fallback: {transport: "s2s-stream"}`), and `s2s-stream` posts one finished clip after the client's endpointing. The
+composed pipeline only ever sees `POST /v1/s2s`. The speculation is therefore driven by the client on that rung.
+
+### What changed
+
+- **Speculative turn** (`src/s2s/speculation.ts`, `route.ts`, `composite.ts`). `POST /v1/s2s` takes
+  `config.speculation`: `{id, turn, action: "start"}` with the clip so far → `202 {"speculative": true}` at once, the
+  gateway transcribes it (same 900 ms hedge and 3 s budget as a turn) and, when the transcript exists, opens the LLM
+  stream on it; nothing is synthesized and the answer carries no audio. `{id, action: "cancel"}` (no file) aborts both.
+  The turn itself names `{id}`: when its clip is the same utterance (WAV, length within `endpoint_ms` + 400 ms of the
+  speculative one) the speculative transcript **is** the turn's transcript — no second STT — and the LLM stream already
+  running is the one voiced. Otherwise the turn is transcribed again and the speculative LLM is kept only if both
+  transcripts have the same words (case and punctuation ignored); else it is aborted and asked again. `transcript`
+  carries `speculative` and `lead_ms`, `done` carries `speculation: hit | stt | llm | miss`.
+- **Bounds**: WAV only (the length must be known), at least 600 ms of audio (`S2S_SPECULATE_MIN_MS`), at most 2 per
+  turn (`S2S_SPECULATE_PER_TURN`, the SDK also stops at 2), 256 alive, 4 s to live (`S2S_SPECULATE_TTL_MS`),
+  `S2S_SPECULATE=0` turns it off. A speculative STT that failed after more than 1 s is not run again by the turn.
+- **Budget**: the speculative request passes the ownership and alias checks without charging the app
+  (`checkS2S(..., charge = false)`); the turn is charged once, as before. Telemetry: `s2s.stt_speculative`,
+  `s2s.stt_speculative_discarded {reason: cancelled | expired | mismatch | primary | superseded}`,
+  `s2s.stt_speculative_refused {reason}`; counters in `speculationCounts`.
+- **A seat on the GPU**: the turn tries the primary first, as always; when it takes the turn the speculation is
+  discarded (`primary`). The SDK only speculates after a turn whose `route` was `composite`.
+- **SDK** (`sdk/browser`): `voice.speculatePauseMs` adds two VAD effects (`vadPause` after that many ms under
+  `vadEnd`, `vadResume` when the voice comes back; absent = no change), the clip recorder gets `snapshot()`
+  (`MediaRecorder.requestData`), turn-taking hands the WAV so far to the s2s-stream rung, which posts the speculation,
+  cancels it on `vadResume` / `vadStart`, and names it in the turn. PR #59's client deadline is untouched.
+- **TTS first chunk**: a WAV asked from OpenRouter used to come back as a whole MP3 (the provider has no WAV and the
+  client fell back to MP3, buffered). It is now asked as PCM and streamed behind a WAV header at the rate the provider
+  names, so the composed turn passes chunks through as they arrive and its `A` frames are `pcm_s16le` 24 kHz like the
+  GPU's. **Behaviour change for any caller of `/v1/audio/speech` that asks `wav` on an OpenRouter link: it now gets a
+  WAV (streamed, sizes `0xFFFFFFFF`, as the deployment already answers) instead of an MP3.** No faster voice was
+  wired: none exists on these keys.
+- Untouched: opener and deadline logic (no double opener: the tests of `first-audio-deadline` pass unchanged), barge-in
+  (the turn's abort also aborts the speculative LLM), history fit (#58: `askLlm` is the same code, moved), the STT
+  hedge and budget of #61 on the final path.
+
+### Measured (same clip, prompt, chains and harness as § Fallback fast; base and branch at the same time)
+
+`load.ts --n 4 --s2s 4 --no-wake --ramp 10 --duration 110 --turn-every 8 --jitter 2`, the 5.0 s Portuguese clip,
+opener on (deadline 2000 ms), STT `deepgram/nova-3` → `openai/whisper-large-v3`, LLM `qwen/qwen3.5-9b` →
+`gemini-2.5-flash-lite`, TTS MAI flash → Kokoro. New harness options: `--speculate-lead <ms>` posts the clip that long
+before the turn (what the page does `endSilenceMs − speculatePauseMs − snapshot time` before it closes the turn: 500
+≈ a 160 ms pause, 350 ≈ Silero's own `vadEnd` at 320 ms), `--speculate-resume <share>` adds an earlier pause whose
+speculation (half the clip) is cancelled. Clock: from the end of the speech (request − 700 ms). The three runs of a
+round ran together, 12 learners on the Mac (load average up to 18: other sessions).
+
+| Round (CEST) | Run | Turns | Failed | Opener p50 / max | Reply first audio p50 / p95 / max | ≤ 2.0 / 2.5 / 3.0 s | Speculation |
+|---|---|---|---|---|---|---|---|
+| 1 (22:36) | base | 53 | 0 | 1703 / 1746 | 3548 / 4723 / 6967 | 0 / 0 / 19 % | — |
+| 1 | branch, no speculation (PCM stream only) | 54 | 0 | 1702 / 1719 | 3345 / 4376 / 6066 | 0 / 6 / 22 % | — |
+| 1 | branch, lead 500 | 51 | 0 | 1703 / 1710 | **2689 / 5179 / 5456** | 2 / 29 / 73 % | 51 sent, 51 hit |
+| 2 (22:39) | base | 51 | 2 | 1702 / 1714 | 4488 / 6514 / 7409 | 0 / 0 / 0 % | — |
+| 2 | branch, lead 350 | 52 | 1 | 1702 / 1713 | 3789 / 4967 / 5833 | 0 / 4 / 18 % | 52 sent, 51 hit |
+| 2 | branch, lead 500, 25 % resumed | 54 | 1 | 1702 / 1705 | 3552 / 5083 / 6297 | 0 / 8 / 17 % | 68 sent, 14 cancelled (21 %), 53 hit |
+| 3 (22:42) | base | 52 | 1 | 1702 / 1731 | 4423 / 6548 / 7941 | 0 / 2 / 8 % | — |
+| 3 | branch, no speculation | 52 | 0 | 1702 / 1726 | 4127 / 5802 / 9206 | 0 / 0 / 8 % | — |
+| 3 | branch, lead 500 | 50 | 1 | 1702 / 1735 | **3304 / 5162 / 5362** | 0 / 6 / 33 % | 50 sent, 49 hit |
+
+Failures are provider `503`s (STT 4, LLM 1), on both sides. The providers were slower in rounds 2 and 3 than in round 1
+(base STT 1.08 → 1.54–1.60 s p50), so compare inside a round: speculation with a 500 ms lead took **0.86, 0.94 and
+1.12 s** off the median, 0.70 s with a 350 ms lead; the PCM stream alone 0.20–0.30 s. One evening, about 50 turns per
+run: read ± 0.5 s on every p95 and max.
+
+Per stage, ms, p50 / p95:
+
+| Run | STT (whole) | Transcript after the request | LLM first token after it | First clause | TTS first byte |
+|---|---|---|---|---|---|
+| 1 base | 1075 / 1496 | 1075 / 1496 | 710 / 1367 (max 1642) | 87 / 387 | 819 / 1116 (max 2088) |
+| 1 PCM only | 994 / 1541 | 994 / 1541 | 714 / 1483 (max 1820) | 89 / 349 | 672 / 854 (max 1023) |
+| 1 lead 500 | 936 / 1516 | **435 / 1015** | 695 / 1149 (max 2607) | 103 / 1286 | 677 / 1196 (max 1323) |
+| 3 base | 1598 / 2682 | 1598 / 2682 | 840 / 1907 (max 2760) | 70 / 275 | 1079 / 1566 (max 1919) |
+| 3 lead 500 | 1295 / 2271 | **794 / 1771** | 817 / 1474 (max 1775) | 102 / 495 | 898 / 1418 (max 1465) |
+
+The speculation hides exactly its lead: the transcript exists `STT − lead` after the request. The speculative LLM
+changes nothing while the STT is longer than the lead (the transcript arrives after the turn was committed anyway); it
+pays when the STT is shorter, and it is what the next step (a streaming STT) needs.
+
+### Cost
+
+Prices of § Fallback under load and § Fallback fast. A turn here is ≈ $0.0020: voice $0.0016 (108 characters at
+$15/M), STT $0.00036 with nova-3 first (5 s at $0.0000717/s; $0.00002 with Whisper turbo), LLM $0.00003; measured on
+the key's counter $0.0015–0.0020 per turn. At 240 turns per learner-hour: **$0.48**. A speculation that is committed
+costs nothing more (it replaces the turn's STT). A discarded one costs its STT call and, when the STT had finished,
+≈ 500 prompt tokens ($0.00005): at the share simulated here (0.26 discarded per turn, half the clip) **+$0.011 per
+learner-hour (+2 %)**; at the worst the caps allow (two discarded whole clips every turn) +$0.17 (+36 %) with nova-3,
++$0.01 with Whisper turbo first. The real share of resumed pauses was not measured: it needs learners.
+
+### Verdict against 2500 ms
+
+Not reached, neither as a maximum nor as a median. Reply first audio from the end of the speech: 2.7–3.3 s p50 where
+the same evening's base gave 3.5–4.4 s; maximum 5.4–5.5 s (base 7.0–7.9 s); 6–29 % of the turns under 2.5 s (base
+0–2 %). The first sound (opener) stays at 1.70 s in every turn.
+
+What holds it, in order (round 1, the healthy one): the **LLM first token**, 0.70 s p50 and up to 2.6 s; the **voice's
+first byte**, 0.68 s p50 and up to 1.3 s; the **part of the STT the lead does not hide**, 0.44 s p50 and 1.0 s p95.
+Their sum after a 700 ms endpointing is 0.7 + 0.44 + 0.70 + 0.10 + 0.68 ≈ 2.6 s, which is the median measured.
+
+What would remove each (not built):
+
+- STT remainder (−0.4 to −0.8 s, and its tail): a transcript that exists when the speech ends. Mistral's Voxtral
+  realtime is reachable with the key we have; it needs the learner's audio to reach the gateway while they speak, i.e.
+  a streaming uplink on the fallback (a gateway WebSocket that takes the 16 kHz frames of a learner without a seat),
+  and a `mistral` STT provider. The speculative LLM and the commit-by-id of this branch are the other half of it.
+- LLM first token (−0.3 to −0.4 s): `google/gemini-2.5-flash-lite` answered its first content token in 390 ms p50
+  (341–618, 8 calls, same prompt, same minute) against 800 ms (637–1256) for `qwen/qwen3.5-9b`. That is the order of
+  the school's `parle-llm` route, and a different model answering the turn: the school's decision, with the LLM label
+  it already records.
+- Voice first byte: nothing on these keys is under 0.5 s. A voice on a GPU (the 200–300 ms first chunk of the
+  speech-stack) is the only one seen.
+- With the first two: 0.7 + 0.2 + 0.4 + 0.1 + 0.68 ≈ 2.1 s p50 (reasoned, not measured). A **maximum** of 2.5 s needs
+  every stage's p99 under control, which three cloud calls in a row do not give: seats on a GPU do.
+
+### Limits of this change
+
+- The SDK path is unit-tested only: no browser ran it. `MediaRecorder.requestData` mid-recording, `decodeAudioData` of
+  the partial clip (Safari's mp4 fragments may not decode: then `clipToWav` gives nothing and no speculation is sent)
+  and the time both take (it comes off the lead) are unmeasured.
+- The school's page must turn it on (`voice.speculatePauseMs`, e.g. 160) and its backend relay must forward the
+  speculative `POST` (same route, a JSON answer, `config.speculation`) — **to do in parle**.
+- The gateway trusts the client's VAD, as it already does for the end of the turn: a turn that names a speculation
+  says "nothing was spoken after that clip". The length check is a safety net, not a proof.
+- The speculations live in the gateway process: with more than one gateway instance the turn must reach the instance
+  that got the speculation, otherwise it is a plain turn (safe, no gain).
+- The speculative request cannot know whether a GPU seat will take the turn (no capacity peek without a lease).
+
+### Tests
+
+`__tests__/unit/s2s/speculation.test.ts` (fake stages through the real route): pause → speculative STT → the turn
+answers with one STT call and one LLM call; the turn arrives while the STT still runs; pause → speech resumes →
+aborted, no LLM, no TTS, nothing but JSON was sent, counted `cancelled`; a longer final clip heard differently → LLM
+asked again, only the second reply is voiced; same words → the speculative LLM is kept; caps (`short`, `format`,
+`turn_cap`); the primary takes the turn → `primary`; expiry on a fake clock; a speculative STT that failed late is not run again, one that failed at once is; another key cannot commit; the app is
+charged once (`admit` called with `charge` false then true). `sdk-realtime-speculate.test.ts` (the rung and the VAD
+effects), `sdk-voice-turn.test.ts` (turn-taking), `gateway-routing/tts-pcm-as-wav.test.ts` (streamed WAV header, rate
+from the provider, MP3 untouched).
+
+## WebRTC: conserto da descida e prova ao vivo (2026-10-09)
+
+Branch `rt/webrtc-latency` (PR #65). Gateway local em :4170 (`bun serve.ts`, namespace `marcos-webrtc`, estado próprio,
+`DEPLOYMENTS_MAX_REPLICAS=1`), um L40S-1-48G fr-par-2 do perfil `speech-stack` por vez (imagem `20261008-1317`,
+€1,4699/h, `placements: []`, `realtime.maxSessions` 8 só no spec do teste). Sexta 09/10, 01:26 → 03:27 Europe/Paris;
+produção só lida. Mesmo clipe sintético de 4,5 s, prompt de 509 tokens, voz e aberturas da prova da noite anterior.
+Relógio: última amostra com voz enviada → primeiro áudio não silencioso recebido (os 700 ms de endpointing estão
+dentro). Clientes leves (`ws` em Bun, `webrtc` em aiortc) e Chromium 154 num contêiner Linux no Mac, atrás de um netns
+com `tc` (perfis `clean`, `campus-slow`, `lossy`); Chrome real do Mac nas rodadas «Chrome (Mac)».
+
+**Antes e depois não são a mesma máquina.** O sidecar sobe do cloud-init (`docker run` de `realtime.edgeImage`) e não
+há SSH: trocar o edge é outra máquina. Foram dois boots em sequência (530 s e 500 s), nunca dois L40S meus ao mesmo
+tempo, mesma zona, tipo e imagem de modelos, mesmo harness nas duas pontas. Antes = edge `f66b6b80`; depois = edge
+`a5dd777f` (esta branch). O WS, que não mudou, serve de controle: 1305 → 1273 ms entre as duas máquinas.
+
+### Veredito contra o alvo
+
+| Alvo | Resultado |
+|---|---|
+| Rede limpa: WebRTC a ~100 ms do WS no p50 | **sim nos clientes leves**: +25 ms (1298 contra 1273, n 197 / 199); +41 com tempo de pensar; −25 na rodada limpa do contêiner. **No Chrome real: +100 ms com 1 aluno, +180 com 4** no medidor da página (+32 / +128 no instante em que o áudio sai do jitter buffer) |
+| Rede limpa: máximo do WebRTC ≤ 2500 ms | **sim**: 1944 (leves, 197 turnos), 2042 (pensar), 1291 (Chrome, 40 turnos). Antes: 2265 |
+| `lossy`: p95 do WebRTC melhor que o do WS | **sim**: 2124 contra 2373 (p50 1270 contra 1487, max 2154 contra 2961) |
+| `campus-slow`: p95 do WebRTC melhor que o do WS | **sim**: 1570 contra 1857 (p50 1104 contra 1182); antes era pior (2229 contra 1824) |
+
+### Antes × depois, clientes leves, ms p50 / p95 / max
+
+| Rodada | | WS antes | WebRTC antes | WS depois | WebRTC depois |
+|---|---|---|---|---|---|
+| Limpa, 4 + 4, 760 s, um turno a cada 15 ± 2 s | primeiro som | 1305 / 1767 / 1888 (n 191) | 1705 / 2177 / 2265 (n 191) | 1273 / 1776 / 1943 (n 199) | **1298 / 1893 / 1944** (n 197) |
+| | subida: fim da fala → `vad end` | 747 / 806 / 833 | 944 / 1090 / 1171 | 748 / 819 / 985 | 768 / 845 / 932 |
+| | estágios: `ttfa` do edge (stt · llm · tts p50) | 533 / 2311 (344 · 357 · 107) | 624 / 2615 (378 · 364 · 121) | 517 / 2191 (357 · 321 · 116) | 448 / 2583 (313 · 308 · 114) |
+| | descida: `audio_start` → primeiro quadro audível | 0 / 154 | 79 / 308 | 0 / 104 | 40 / 233 |
+| | diferença WebRTC − WS no p50 | | **+400** | | **+25** |
+| `lossy` (75 ms, 5 %), 3 + 3, 180 s | primeiro som | 1827 / 3469 / 3593 (n 32) | 1945 / 2392 / 2397 (n 31) | 1487 / 2373 / 2961 (n 35) | **1270 / 2124 / 2154** (n 32) |
+| | subida | 1119 / 3199 | 1414 / 1854 | 985 / 1755 | 917 / 1125 |
+| | transcrição idêntica à do clipe | 32 / 32 | 3 / 31 | 35 / 35 | 17 / 32 |
+| `campus-slow` (2 Mbit ↓, 512 kbit ↑, 40 ± 10 ms, 1 %), 3 + 3 | primeiro som | 1190 / 1824 / 1837 (n 34) | 1590 / 2229 / 2229 (n 35) | 1182 / 1857 / 1872 (n 27, + 3 `timeout`) | **1104 / 1570 / 1756** (n 31) |
+| Limpa, 3 + 3 + 2 Chromium, 180 s | primeiro som | — | — | 1230 / 1746 / 1755 (n 34) | 1205 / 1792 / 1862 (n 33) |
+| Limpa, 4 + 4, `--think 2-6`, 300 s | primeiro som | — | — | 1146 / 1771 / 2055 (n 69) | 1187 / 1920 / 2042 (n 67) |
+
+0 falhas e 0 turnos filtrados nos clientes leves, antes e depois, salvo os 3 `timeout` do WS no `campus-slow`. Turnos
+`short_audio` na rodada limpa: antes 4 (WS) e 20 (WebRTC), depois 10 e 4. Com 8 sessões no L40S (o perfil serve 4)
+cerca de um turno em cinco começa por abertura (87 antes, 70 depois), igual nos dois transportes.
+
+### Chrome real (Mac, Google Chrome, SDK), rede limpa, ms p50 / p95 / max
+
+| | WS antes | WebRTC antes | WS depois | WebRTC depois |
+|---|---|---|---|---|
+| 4 + 4 alunos: audível no medidor da página | 917 / 1252 / 1285 (n 40) | 1352 / 1660 / 1852 (n 36) | 914 / 1080 / 1095 (n 40) | **1094 / 1279 / 1291** (n 40) |
+| subida: fim da fala → `vad end` | 765 / 846 | 1020 / 1054 | 769 / 834 | 754 / 829 |
+| estágios: `ttfa` (stt p50) | 100 / 260 (208) | 99 / 247 (208) | 102 / 276 (208) | 104 / 277 (207) |
+| descida: `audio_start` → medidor | 37 / 195 | 234 / 430 | 26 / 117 | 185 / 338 |
+| — `audio_start` → áudio entregue pelo jitter buffer | | 167 / 374 | | 143 / 286 |
+| — jitter buffer (`jitterBufferDelay` / `EmittedCount`) | | 116 / 211 | | 116 / 162 |
+| — entrega → medidor (nó WebAudio do harness) | | 56 | | 39 |
+| primeiro som no instante da entrega | | 1289 / 1604 / 1790 | | 1042 / 1219 / 1234 |
+| 1 + 1 aluno: audível no medidor | 1061 / 1791 (n 10) | 1457 / 1632 (n 9) | 976 / 1086 (n 10) | **1076 / 1241** (n 9) |
+
+`getStats` do WebRTC no Chrome, depois (4 alunos, 150 s cada): jitter buffer 111–123 ms p50, 157–168 p95; alvo e mínimo
+do NetEq 100 ms p50, 120–140 p95; jitter entre chegadas 3–4 ms p50, 12–15 p95; RTT 43–52 ms; 0 pacotes perdidos em
+~8100 por aluno; 0,1–0,2 % de amostras ocultadas; na subida 1–3 pacotes perdidos e jitter de 8–9 ms. No Chromium do
+contêiner: `campus-slow` 92 / 132 ms de buffer, alvo 120, 112 perdidos em 9510, 1 % ocultado; `lossy` (antes) 90 ms,
+alvo 120, 514 perdidos em 9083, 4,4 % ocultado. Na pilha local sem rede (modelos falsos) o mesmo Chromium fica em
+20–30 ms com alvo 20.
+
+Do lado do edge, por resposta (`metrics`, 197 turnos, 8 sessões): primeiro PCM do TTS → primeiro pacote RTP entregue ao
+transporte 12 ms p50 / 20 p95 / 24 max; pacotes dos 2 s seguintes saem 2–3 ms depois da grade de 20 ms no p95, 12 ms
+no pior caso (17 no `lossy`). O jitter que o NetEq vê é do caminho (Wi-Fi do Mac → Scaleway), não do edge.
+
+### Onde estava a diferença e o que mudou
+
+| Trecho | Antes | Causa | Conserto | Depois |
+|---|---|---|---|---|
+| Subida | +197 ms (leves), **+255 ms (Chrome)** | o jitter buffer de áudio do aiortc no edge: 80 ms em todo turno e 280 ms de atraso permanente depois de um pacote perdido | `audio.ArrivalOrder` (primeiro commit do PR): o pacote vira quadro ao chegar | +20 ms (leves, é o Opus do cliente aiortc); **−15 ms no Chrome** |
+| Subida com perda | fim de turno esticado, transcrição mutilada (3 de 31 intactas) | pacote perdido sumia do relógio do VAD e do clipe | `audio.GapFill`: o buraco no timestamp RTP entra como silêncio (até 1 s); `metrics.uplink_lost_ms` | `vad end` no harness a 10 % de perda 781–821 → 741–762 ms; 17 de 32 transcrições intactas |
+| Estágios | +54 (noite anterior), +91 (antes) | nenhuma no edge: com modelos falsos os estágios são iguais (54 contra 54 ms); a diferença vinha da ordem de chegada na GPU. No Chrome lado a lado os dois alunos falavam em uníssono e o segundo a chegar esperava o STT do primeiro (385 contra 206 ms) | harness: os Chrome entram escalonados | 448 contra 517 (leves), 104 contra 102 (Chrome): sem diferença |
+| Descida, edge | 20 ms em toda resposta | o encoder Opus do aiortc recebia 24 kHz e o reamostrador dele segurava cada quadro até o seguinte chegar | o `OutTrack` entrega 48 kHz (`audio.upsample2`) | harness: `audio_start` → primeiro quadro 26–28 → 8–9 ms |
+| Descida, primeira frase | até 150–240 ms no p95 | silêncio que o TTS põe antes da frase | corte do silêncio inicial da primeira frase (primeiro commit do PR) | p95 da descida 308 → 233 (leves), 430 → 338 (Chrome) |
+| Descida, navegador | 116 ms | jitter buffer do NetEq, alvo 100 ms neste caminho | nenhum: `jitterBufferTarget = 0` já é aplicado no receptor certo antes da mídia (o mínimo medido é o do próprio NetEq), o edge manda silêncio contínuo com timestamps contínuos e no ritmo | 116 ms: **é o que resta** |
+
+O que resta, por medida: nos clientes leves +25 ms no p50 (20 da subida, que é o cliente aiortc reamostrando o
+microfone de 16 kHz; a descida de 40 ms é o tique de 20 ms mais o Opus, contra um WS cujo medidor carimba a chegada de
+áudio enviado 200 ms adiantado). No Chrome +180 ms no medidor com 4 alunos: 116 do jitter buffer do navegador, ~40 do
+nó WebAudio por onde o harness mede o WebRTC, ~15 do tique e do Opus, menos 15 da subida que ficou mais rápida que a do
+WS. O jitter buffer depende da rede do aluno (20 ms numa rede sem jitter) e é o que segura o áudio inteiro sob perda.
+
+### Não feito, e por quê
+
+- **FEC / PLC do Opus na subida:** o aiortc 1.15 decodifica pelo wrapper libopus do PyAV, que não tem a flag de FEC e
+  não devolve nada para um pacote ausente. Precisaria chamar o libopus direto. Com 5 % de perda metade das
+  transcrições sai diferente do clipe (65–66 caracteres em vez de 68); no WS saem todas iguais.
+- **Parar o silêncio entre respostas** (para o NetEq começar a fala abaixo do alvo): não testado. O PyAV carimba o
+  primeiro pacote depois de um buraco como se não houvesse buraco e o navegador ocultaria em vez de tocar silêncio.
+- **Subida atrasada pelo cliente** (os 3500 ms da noite anterior): nesta madrugada o pior fim da fala → `vad end` no
+  WebRTC limpo foi 935 ms. Um atraso de segundos na rede do aluno continua sem defesa no edge; é o teto do relógio do
+  aluno (#59).
+- **Conexão WebRTC sob `lossy`:** o Chromium forçado em `webrtc` não conectou em 3000 ms (`webrtcConnectMs` do SDK) na
+  rodada «depois»; os clientes aiortc, com 8 s de prazo, levaram 2000 ms p50 e 3393 p95. Onde o WebRTC mais ajuda é
+  onde ele mais demora a subir: o prazo da tentativa em segundo plano merece ser maior. Não mexido.
+- **Rodadas perdidas:** a primeira «Chrome 4 + 4» do antes ficou presa ao fechar os navegadores (o harness agora grava
+  o resultado antes de fechar e desiste de uma página que não volta); uma «Chrome 1 + 1» do antes perdeu as duas
+  sessões aos 55 s (WS e WebRTC juntos, rede do Mac). A «1 + 1» do antes que ficou é a em uníssono.
+
+### Máquinas e custo
+
+| Máquina | De – até (Paris) | Minutos |
+|---|---|---|
+| `6af8d92e` (antes) | 01:26:12 – 02:19:44 | 53,5 |
+| `e9f63425` (depois) | 02:38:58 – 03:26:34 | 47,6 |
+
+101 minutos de L40S, **~€2,48**. Entre as duas a criação foi recusada por cota durante 19 min: a produção
+(`aigw-ns-prod`, `parle-speech`) subiu dois L40S às 00:18Z e 00:20Z, o segundo 71 s depois de eu soltar o meu. Nenhum
+L4, nenhum Vast, nenhuma outra máquina; nada escrito em produção. `DELETE /v1/deployments/wl-speech` às 03:26:34 →
+`Terminated server e9f63425…`, volumes apagados às 03:26:49; gateway local parado. Reaper em dry run com o gateway fora
+(`GATEWAY_URL=http://localhost:4170 DEPLOYMENTS_NAMESPACE=marcos-webrtc bun scripts/reap-orphans.ts`): `scaleway seen:
+0`, `vast seen: 0`, `planned: []`. Lista direta do projeto (nove zonas) às 01:29Z: nenhum servidor
+`aigw-ns-marcos-webrtc`; o que há é da produção (um L40S `parle-speech`, dois L4 `parle-qwen-tts`) e dois
+`whisper-stt` parados de `dev-marmos`.
+
+### Imagem do edge
+
+`ghcr.io/marcosremar/aigw-edge:a5dd777f` (workflow `aigw-edge.yml`, disparado pelo push no PR). `DEFAULT_EDGE_IMAGE`
+passa a apontar para ela neste PR: é o que o Scaleway sobe. O `EDGE_TAG` da imagem `speech-stack` (o edge que roda no
+Vast, de `/opt/aigw-edge`) continua `f66b6b80` até a próxima construção daquela imagem; o teste que prendia os dois ao
+mesmo valor agora prende cada um ao seu.
+
+### Transporte padrão
+
+Manter a escada como está (WS em 0,2–0,5 s, WebRTC em segundo plano e troca quando sobe), com o edge novo. Na rede
+limpa os dois empatam nos clientes leves e o Chrome paga 100–180 ms pelo jitter buffer; em `campus-slow` e `lossy` o
+WebRTC ganha 290 e 250 ms no p95 e 800 ms no máximo, e o WS teve os únicos turnos perdidos. Trocar o padrão para WS só
+compensa numa turma em rede boa e estável.
+
+## Prova ao vivo da integração (#70) — 2026-10-09
+
+Branch `rt/integration-2` (PR #70: #67, #68, #63, #62, #64, #66 e agora #65). Gateway local em :4180 a partir do
+worktree da integração (`bun serve.ts`, namespace `marcos-proof-70`, estado próprio, `DEPLOYMENTS_MAX_EUR_PER_HOUR=4`),
+máquinas só pela API dele. Scaleway L40S-1-48G fr-par-2 do perfil `speech-stack` (€1,4699/h), um por vez. Sexta 09/10,
+04:13 → 06:49 Europe/Paris; produção só lida. Mesmo clipe sintético de 4,5 s e voz `abf` do catálogo da réplica.
+Relógio dos números de latência: última amostra com voz enviada → primeiro áudio não silencioso recebido (os 700 ms de
+endpointing estão dentro).
+
+**Duas máquinas, em sequência.**
+
+| | Imagem | Edge | `LLM_SLOT_CTX` | Quando |
+|---|---|---|---|---|
+| `p70-a` | `rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0003` | `realtime.edgeImage` = `ghcr.io/marcosremar/aigw-edge:79722253` (o fixado) | 2048 | 04:13 → 05:04 |
+| `p70-b` | `rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213` (a fixada, com `GET /debug/gpu`) | o do perfil, `79722253` | 4096 | 05:04 → 06:49 |
+
+Os itens 4, 5, 6, 7 (reserva, reaper), 10 (2048) e 12a/b rodaram em `p70-a`: o código do edge é o mesmo de `p70-b`
+(`79722253`), só a imagem dos modelos é a anterior (sem `/debug/gpu`). Os itens 1, 2, 3, 7 (limites por app,
+`tts_overlong`), 10 (4096) e 11 rodaram em `p70-b`, a combinação exata que o branch fixa.
+
+**Interrupção.** O gateway local recebeu SIGTERM às 05:11 (cota da sessão do agente, não falha do código) com `p70-b`
+recém-criado. Reiniciado às 05:19 no mesmo diretório de estado: a réplica foi **adotada** (`ready`, `udp: ok` em 15 s),
+nenhuma máquina órfã. Durante os 8 min sem gateway nada recolheria a máquina — o «deadman» (DELETE agendado) seguia vivo.
+
+### Veredito por item
+
+| # | Item | Resultado |
+|---|---|---|
+| 1 | Primeiro boot da imagem nova, um turno por degrau, `done.served` | **passou**: `20261009-0213` sobe no L40S, `/health` `warm`, `llm_ctx` 4096, modelos `large-v3` / `Qwen3.5-9B-Q4_K_M.gguf` / `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. `ws`: primeiro som 822 ms, `served` completo (`voice abf`, `opener false`, `transport ws`). `webrtc` (em `p70-a`, mesmo edge): 1386 ms audível no Chrome, `served` completo. `s2s-stream` (Chrome): 736 ms no relógio do aluno, sem `served`. POST `/v1/s2s`: 200, primeiro byte 690 ms, 5,7 s de áudio, `route` = `deployment:p70-b`, sem `served`. **`served` só existe nas sessões do edge e no caminho composto (fallback)**: no degrau de clipe servido pela GPU quem respondeu sai do `route` / `X-Gateway-Provider`, como a doc diz (`docs/realtime.md` § served) |
+| 2 | Regressão de base, 4 WS + 4 WebRTC, 760 s | **passou no teto, pior no p50 do WS**: WS 1278 / 1755 / 1936 (n 198), WebRTC 1319 / 1861 / 2015 (n 196). Ontem WS 1036 / 1744 / 1980 e WebRTC 1298 / 1893 / 1944. Máximo 2015 ≤ 2500. 0 falhas, 0 erros, 47 turnos com abertura (11,9 %). Ver «4096 por slot» abaixo: o LLM foi de 198 a 461 ms ao longo da rodada |
+| 3 | Capacidade com tempo de pensar (`--think 2-6`, 300 s, WS) | **passou**: 8 alunos 1013 / 1545 / 1743 (n 150, 0 % aberturas); 12 alunos 1279 / 1750 / 1932 (n 214, 12,1 % aberturas; áudio da resposta 1279 / 2920 / 3345). Ontem com 8: 1131 / 1743 / 2008, 1 %. 0 erros de upstream (ontem 1 a 12) |
+| 4 | #67 no edge real | **passou**: `config_update` com `system`/`voice`, com `messages` de papel `system` e com `max_tokens` → `error forbidden` cada um, o turno seguinte responde com a persona assinada; os frames que o SDK manda de verdade (`messages` user / assistant, a chave de abertura) aceitos sem erro e usados (a resposta seguinte chama o aluno pelo nome que veio no histórico) |
+| 5 | #68 config por referência, intercepts, say, update assinado, reply_guard | **passou até ~12 KB; 16 KB abre mas não responde (defeito, abaixo)**: 7 KB — admissão 200 em 38 ms (config de 9892 caracteres fora do token de 380), WS 2 turnos e WebRTC 3 turnos (922 / 1043 ms) respondidos; 12 KB (16 732 caracteres) — WS 1381 / 790 ms, WebRTC 3 turnos 915 / 1135 ms; 16 KB (22 204 caracteres) — admissão 200, sessão abre, **cada turno termina em `error upstream` + `done{error}`**: o prompt de sistema sozinho dá 4711 tokens, acima dos 4096 do slot (`exceed_context_size_error`), e o corte do histórico não encolhe o sistema; ~26 KB → 413 `config_too_large` (35 884 > 32 768), como a regra diz. `intercepts`: «mais devagar» → `intercept` + `done{intercepted, tag slower}` sem chamar o LLM (contador de chamadas igual antes/depois), «quais são as opções» → `say` falado em 65 ms sem LLM; turno normal depois sem custo (ttfa 66 ms). Update assinado: `say` (`done{said:true, tag opening}`), `drop_turn`, troca de `system` (a resposta seguinte segue o novo), adulterado → `forbidden bad_signature`. `reply_guard`: abertura negada regenerada uma vez (`reply_retries 1`) |
+| 6 | #62 dispositivos | **passou**: dispositivo listado; bloqueio com WS aberta → fechada 1008 `device_blocked` em 12 ms, reabrir 403; com WebRTC → sessão apagada na réplica em 45 ms, nova oferta e nova admissão 403; `requireDevice` → sem id 403 `device_required`, com outro id 200 |
+| 7 | #63 | **passou, com uma ressalva**: `reserveQuota` com janela ativa → `wake` de outro deployment do mesmo tipo 409 com o motivo e `Retry-After`, visível em `/capacity` dos dois; limite por app (`dailyRequests 2`) → 3.ª chamada 429 `daily_budget_exhausted`, `appBudgets` mostra 2/2, volta ao padrão com `null`; reaper sem chave de admin → «NOT CHECKED (no admin key: cross-check off) — 1 machine(s) listed, none compared, nothing released» + 4 máquinas alheias de cota listadas; `tts_overlong` 0 em 758 turnos de carga e nenhuma resposta cortada (ms de áudio por caractere p05 64 / p50 71 / p95 79, mín 59, sem cauda baixa). Ressalva: `/health` `commit`/`builtAt` só aparecem quando o processo recebe as variáveis do build (o gateway local de `bun serve.ts` mostrou `null` depois do reinício); conferir no deploy |
+| 8 | #66 fallback com especulação | **não rodado: chave da OpenRouter expirada** (`401 API key expired` às 05:28) |
+| 9 | #64 | **parcial**: a sonda UDP roda e decide o caminho (`inbound udp/50100: ok`, 46–67 ms, `path direct`) antes de o WebRTC ser oferecido. O resultado mora no edge (o gateway o grava lá), então depois de reiniciar o gateway a primeira admissão ofereceu `webrtc` em 44 ms, 0,16 s depois de a réplica voltar a `ready`, sem sondar de novo — o certo. **A espera de até 2,5 s na primeira admissão de uma réplica nova não foi medida**: `p70-b` ficou pronta com o gateway fora do ar, e uma terceira réplica (`p70-c`) pedida às 06:11 para isso ficou sem estoque de L40S em fr-par-2 por 30 min (4 tentativas do controlador, um servidor criado que não ligou e foi limpo) e foi apagada. Reputação de host, `files` por link assinado e `requireWebrtc`: **não rodado: conta Vast sem crédito** (`insufficient_credit` às 04:48) |
+| 10 | Sessão longa, 4 × 60 turnos, prompt da escola (~4,6 KB) | **2048: passou** — 228 turnos, 0 falhas, 949 / 1399 / 1758; o prompt do LLM estaciona em 1100–1324 tokens (corte do histórico agindo), 0 respostas 400, LLM 137 ms do início ao fim. **4096: passou** — 201 turnos (48–56 por aluno), 0 falhas, 0 erros, 983 / 1584 / 2076, 3 % com abertura; o prompt chegou a 2863 tokens em 50 turnos, então **o corte em 4096 não chegou a agir** (precisaria de ~70 turnos com esse prompt); LLM 158 → 259 ms ao longo da rodada |
+| 11 | VRAM com 4096 | **passou**: `GET /debug/gpu` (novo nesta imagem) — ociosa 28 891 MiB usados / 17 177 livres de 46 068; com 8 alunos até 29 249 / 16 819; com 12 até 29 217. 16 slots × 4096 cabem com folga |
+| 12a | `interrupted` com `--client-deadline` | **consertado e re-medido**: causa — com a página encerrando o turno, o VAD do servidor e o `end_turn` da página disparam com milissegundos de diferença; quando o VAD ganhava, o `end_turn` achava uma resposta em curso e nenhum áudio novo, cancelava a resposta como substituída e respondia `done{empty}`. Não era a abertura do cliente, nem o `config_update {opener:null}` × #67, nem eco no microfone. Conserto `7972225` (um `end_turn` do cliente depois do fim pelo VAD é o mesmo fim), com teste. Ao vivo: 8 / 8 turnos respondidos, 0 `interrupted`, 886 / 1055 / 1055 (Chrome, WS); no `p70-b`, `end_turn` logo depois do `vad end` → uma resposta, nenhum evento a mais. A abertura do próprio cliente não foi re-medida (vem da TTS de nuvem, cuja chave expirou) |
+| 12b | harness parado com `s2s-stream` | **não se repetiu**: Chrome em `s2s-stream` com `--uplink-stall 3000 --client-deadline`, 8 turnos, o processo terminou sozinho (os máximos de 3,8–4,4 s dessa rodada são o travamento de 3 s injetado de propósito) |
+| 12c | `error upstream` depois de `audio_start` | **não apareceu** em ~1370 turnos de carga desta noite (0 eventos `error` nos relatórios das rodadas de carga). Os únicos `error upstream` da noite são os do prompt de 16 KB (item 5), antes de qualquer áudio, com a causa no texto do erro |
+
+### Descida do WebRTC: a «regressão» de 17–21 ms não se confirma
+
+Suspeita: na integração o primeiro quadro de áudio sairia 17–21 ms depois do `audio_start`, contra 6–8 ms no branch do
+#71. O código da descida (`OutTrack`, `AudioOut`, `_first_reply_audio`, o consumidor de `_answer`) é idêntico entre #65 e
+a integração. O cenário `webrtc_network` do harness com só 3 turnos por rede é o que deu 21: o quadro às vezes perde uma
+volta do relógio de 20 ms, nos três branches. Repetido 8 × 3 turnos (rede limpa, aiortc real, mesmo Mac):
+
+| Branch | Primeiro quadro após `audio_start`, mediana (n) | Voltas perdidas (≥ 14 ms) |
+|---|---|---|
+| integração `557bed6` | **5 ms** (24) | 2 |
+| #65 `cb6466e` | 8 ms (24) | 1 |
+| #71 `ca0242a` | 5 ms (48) | 5 |
+
+O harness inteiro da integração passou 133 / 133 na segunda rodada (a primeira caiu nesse cheque com `[5, 21, 21]`; a do
+#65 já tinha `[22, 4, 8]`, a do #71 `[5, 21, 6]`). Ao vivo, edge da integração: PCM → primeiro RTP 11 ms p50 / 21 p95
+(394 turnos) contra 12 / 20 da prova do #65. **Nenhum conserto**: não há regressão no código; o cheque de 3 turnos é
+instável e pode cair em qualquer branch.
+
+### 4096 por slot
+
+VRAM sobra (item 11), mas sem corte de histórico o prompt cresce turno a turno e o LLM fica mais lento: na rodada de 760 s
+com 8 alunos o primeiro token foi de 198 ms (primeiros 150 s) a 461 ms (600–750 s) e as aberturas subiram de 4 para
+10–14 por janela de 150 s; com 2048 e 4 alunos durante 800 s o LLM ficou em 137 ms do começo ao fim, e com 4096 e 4
+alunos foi de 158 a 259 ms. Hipótese, não verificada: o prompt maior é reprocessado a cada turno (llama.cpp com
+`--cache-ram 0`, sem garantia de que o mesmo slot atende a mesma conversa).
+Produção segue em 2048 (o perfil `speech-stack` tem 4096; o `parle-speech` declarado não): **manter 2048 em produção**.
+
+### Defeitos achados
+
+| Defeito | Estado |
+|---|---|
+| `end_turn` da página logo depois do fim pelo VAD cancelava a resposta (12a) | **consertado** em `7972225`, com teste, re-medido ao vivo (8 / 8 respondidos) |
+| Um prompt de sistema maior que o slot do LLM (16 KB de português ≈ 4,7 mil tokens contra 4096) abre a sessão e falha **todo** turno com `error upstream` | **aberto, não consertado aqui** (mexe no edge: nova imagem, nova cópia, novo boot). Hoje o limite prático é ~12 KB de sistema com 4096 e ~5 KB com 2048; o prompt da escola tem 4,6 KB. Conserto sugerido: recusar na admissão (o gateway sabe o `llmCtx` da réplica) ou no `ready` do edge com um código próprio, em vez de falhar turno a turno |
+| `/health` sem `commit`/`builtAt` num gateway iniciado sem as variáveis do build | a conferir no deploy (§ 12.4 do runbook): não é defeito do código, mas a prova do que roda depende disso |
+| `short_audio` do harness marca como «truncadas» respostas de 59–62 ms por caractere (5 em 394 na rodada de base) | **falso positivo do harness**: nenhuma tinha `tts_overlong`, todas terminaram com `audio_end` e a distribuição de ms por caractere é contínua (p05 64). Não mexido |
+| `exhaustedAt` continua `null` em `appBudgets` depois de um 429 por orçamento | menor, só observação |
+
+### Teto de 2500 ms como máximo
+
+**Segurou** em todas as rodadas sem falha injetada: 2015 (base, 394 turnos), 1743 (8 com pensar), 1932 (12 com pensar),
+1758 (longa 2048), 2076 (longa 4096), 1845 (base em `p70-a`), 1055 (Chrome com prazo do cliente). Só passou na rodada com
+travamento de subida de 3 s injetado de propósito (4449), que é o caso que a abertura do cliente cobre — e essa abertura
+não pôde ser medida (TTS de nuvem sem chave).
+
+### GO / NO-GO
+
+- **Merge do #70: GO.** Tudo o que pôde rodar ao vivo passou; a suspeita de regressão na descida do WebRTC não se
+  confirma; nenhum turno perdido nem erro de upstream em ~1370 turnos de carga; CI verde no `557bed6`. O merge sozinho
+  não muda produção.
+- **Deploy: GO com condições**, fora de seg–qui 17:40–20:15:
+  1. `LLM_SLOT_CTX` fica em **2048** no `parle-speech` (não adicionar 4096: a VRAM cabe, mas o LLM fica mais lento com
+     o histórico longo e o corte não foi exercitado em 4096).
+  2. **Especulação desligada** (`speculatePauseMs` não usado pela escola) e o fallback composto tratado como **não
+     provado**: a chave da OpenRouter servida pela API dev está expirada — rotacionar e rodar o item 8 antes de contar
+     com o fallback numa aula (hoje ele já não responderia, com ou sem este deploy).
+  3. Nada de Vast para a escola (`requireWebrtc`, `files` por link assinado, reputação de host): não provado, conta sem
+     crédito.
+  4. A escola tira qualquer mudança de campo assinado do lado do cliente antes de o edge novo servir uma turma (§ 12.2),
+     e mantém o prompt de sistema bem abaixo do slot (defeito acima).
+  5. Ordem do runbook § 12.4 (gateway, reaper com chave de admin); conferir `/health` `commit`/`builtAt` depois.
+
+### O que mudou no código nesta prova
+
+- `7972225` edge: `end_turn` do cliente depois do fim pelo VAD do servidor é o mesmo fim (item 12a), com teste.
+- `65df869` speech-stack: `GET /debug/gpu` (item 11), com teste; embarcado em `20261009-0213`.
+- `6418318` harness: os clientes leves (`ws` e aiortc) mandam a config por referência (prompt da escola).
+- `3275783` / `557bed6`: imagens fixadas (runbook § 12.5).
+
+### Máquinas e custo
+
+| Máquina | Período (Paris) | Horas | € |
+|---|---|---|---|
+| `p70-a` L40S-1-48G | 04:13:38 → 05:04:23 | 0,85 | 1,24 |
+| `p70-b` L40S-1-48G | 05:04:44 → 06:49:00 | 1,74 | 2,55 |
+| cópia da imagem para o registro Scaleway, POP2-HC-8C-16G | 04:46 → 05:04 | 0,30 | ~0,09 |
+| `p70-c` (sem estoque; um servidor criado e apagado sem ligar) | 06:11 → 06:49 | 0 | ~0 |
+| Vast (`insufficient_credit`) | — | 0 | US$ 0 |
+| **Total** | | | **≈ €3,9** |
+
+Desmontagem: `p70-b` e `p70-c` apagados às 06:48 (servidor e volume apagados no log), gateway local parado, deadman e
+contêiner do gerador encerrados. **Listagem do lado do provedor** com o gateway parado (reaper em modo `gateway-down`,
+dry run, namespace `marcos-proof-70`): `scaleway seen 0`, `vast seen 0`, `planned []`. As máquinas alheias que ele
+lista são 4 POP2 parados de `dev-marmos/whisper-stt`, não desta prova. Nenhum arquivo com token literal deixado nos
+diretórios de rascunho. Produção não foi tocada (só GETs de leitura); a porta 4000 e `~/.ai-gateway` não foram usadas.
+
+## Plano B ao vivo: especulação, cadeias mais rápidas, prazo do cliente (2026-10-10, `feat/faster-fallback`)
+
+Sem máquina, sem GPU, produção só lida (GET). Um gateway local deste worktree (porta 4250, `DEPLOYMENTS_ENABLED=0`,
+`--no-wake`, chave nova da OpenRouter vinda da API dev), cadeias postas por `MODEL_ROUTES` com um alias por braço,
+para os braços rodarem juntos. Turno: fala gTTS pt-BR de 5,4 s (16 kHz), prompt de padeira de ~90 tokens, 3 mensagens
+de histórico, `max_tokens` 160. `load.ts --n 4 --s2s 4 --no-wake --ramp 10 --duration 110 --turn-every 8 --jitter 2`,
+quatro braços de cada rodada ao mesmo tempo (16 alunos), 50–55 turnos por braço. Relógio: do fim da fala (pedido − 700 ms)
+ao primeiro áudio da resposta. Gasto na OpenRouter na sessão inteira: US$ 1,20 no contador da chave (de 0,001 a 1,198).
+
+Braços (`main` = o que produção tem hoje, conferido por `GET /v1/apps/parle/routes`):
+
+| Braço | STT | LLM | Voz |
+|---|---|---|---|
+| main | `openai/whisper-large-v3-turbo` (o `groq` seguinte é `no_key`) | `qwen/qwen3.5-9b` → `gemini-2.5-flash-lite` | `mai-voice-2.1-flash` → Kokoro |
+| llm | como main | `gemini-2.5-flash-lite` → `qwen3.5-9b` | como main |
+| mid | `deepgram/nova-3` → `whisper-large-v3` → turbo | como llm | como main |
+| fast | `deepgram/nova-3` → `whisper-large-v3` | como llm | `elevenlabs/eleven-flash-v2.5` → MAI → Kokoro |
+
+### 1. Especulação (#66) com a reserva viva — item 12 do § 12.7 do runbook: passa
+
+| Rodada (CEST) | Braço | lead 0: p50 / p95 / máx | lead 500: p50 / p95 / máx | Especulação |
+|---|---|---|---|---|
+| 13:26 | main | 3029 / 5478 / 6440 | 2799 / 4591 / 8947 | 51 enviadas, 51 `hit` |
+| 13:52 | main | 2853 / 3677 / 3921 | 2462 / 3257 / 3355 | 52 / 52 `hit` |
+| 13:52 | llm | 2657 / 3850 / 4897 | 2175 / 3094 / 3929 | 55 / 55 `hit` |
+| 13:30 | mid | 2710 / 3286 / 3901 | 2173 / 3603 / 3791 | 54 / 54 `hit` |
+| 13:26 | fast | 2431 / 3478 / 4034 | **1966 / 2730 / 2897** | 53 / 53 `hit` |
+| 13:30 | fast | — | **1799 / 2532 / 2800** | 52 / 52 `hit` |
+
+A especulação esconde o lead: a transcrição existe 250–420 ms depois do pedido (STT inteiro 750–920 ms p50). Com 30 %
+de pausas retomadas (`--speculate-resume 0.3`, braço fast): 67 enviadas, 15 canceladas, 52 `hit`, 104 frases em 52
+turnos (nenhum turno falado duas vezes), 1878 / 2578 / 3236 ms. O máximo de 8947 ms da rodada 13:26 é um STT de 5,9 s
+do Whisper turbo sozinho (um elo só: o orçamento de 3 s não vale).
+
+**A abertura do servidor esconde o ganho.** Com `first_audio_deadline_ms` 2000 e uma abertura ("Hum, deixa eu ver."),
+ela toca aos 1,7 s em quase todo turno e a resposta só começa quando ela acaba: rodada 13:23, fast com especulação
+2810 ms p50 (sem abertura, 1966), main 3519 com e sem especulação. Com a reserva rápida a resposta chega aos ~2 s, logo
+depois da abertura começar. O parle não manda abertura no `/v1/s2s` hoje (`config.opener` ausente no código dele); quem
+mandar perde 0,8 s de mediana nesse caso. Não mudado aqui.
+
+### 2. Cada estágio pela OpenRouter, direto (13:17–13:30, 4–6 chamadas cada)
+
+| Estágio | Modelo | p50 (mín–máx) ms | Nota |
+|---|---|---|---|
+| STT | `deepgram/nova-3` | 543 (426–960) | transcrição exata; US$ 0,0000717/s |
+| STT | `assemblyai/universal-3-5-pro` | 636 (493–821) | exata |
+| STT | `fish-audio/transcribe-1` | 706 (668–811) | exata |
+| STT | `elevenlabs/scribe-v2` | 877 (770–957) | exata |
+| STT | `openai/whisper-large-v3-turbo` (hoje) | 935 (389–1295) | pontuação solta |
+| STT | `openai/whisper-large-v3` | 1033 (790–2124) | exata |
+| STT | `microsoft/mai-transcribe-2` | 1026 (602–2306) | exata |
+| STT | `gpt-4o-mini-transcribe`, `gpt-transcribe`, `voxtral-mini-transcribe`, `gemini-3.5-transcribe`, `grok-stt-1.0` | — | 404 pela privacidade (ZDR) da conta |
+| LLM 1º token | `google/gemini-2.5-flash-lite` | 300 (265–498) | |
+| LLM 1º token | `mistral-small-3.2-24b` · `gemini-3.1-flash-lite` · `qwen3.5-9b` (hoje) · `gemma-3-27b` | 530 · 550 · 580 · 618 | `gemini-3.5-flash-lite` e `gpt-oss-20b`: raciocínio obrigatório (400) |
+| Voz 1º byte | `elevenlabs/eleven-flash-v2.5` / `turbo-v2.5` | 308 / 292 | pt multilíngue com vozes prontas inglesas; US$ 20/M caracteres (MAI: 15) |
+| Voz 1º byte | `hexgrad/kokoro-82m` | 508 (390–1285) | |
+| Voz 1º byte | `microsoft/mai-voice-2.1-flash` (hoje) / `mai-voice-2-flash` | 684 / 713 | |
+| Voz 1º byte | `eleven-v3-conversational`, `eleven-v4-turbo`, `gemini-3.8-flash-lite-tts` | 846, 900, 1799 | `minimax`, `qwen-audio`, `grok-voice`: 404 (ZDR) |
+
+Nenhum STT por streaming pela OpenRouter (§ Fallback em streaming continua valendo). No turno, por estágio (p50, braço
+fast com especulação): fim de fala 700 + resto do STT 340–420 + 1º token 345–370 + corte 70 + 1º byte da voz 305–310.
+
+### 3. Prazo no relógio do aluno (#59) com a abertura falada pelo cliente
+
+Chrome real (Mac), degrau `s2s-stream` (sem GPU não há `ws`), 1 aluno, 12 turnos, cada 3ª fala retida 3 s
+(`--uplink-stall 3000`), cadeia main, abertura do cliente pela voz de nuvem (`speak` → `/v1/audio/speech`, MAI):
+
+| | Turnos retidos: primeiro som audível | Outros turnos |
+|---|---|---|
+| sem `--client-deadline` | 4983 · 5236 · 5063 · 5430 ms | 1914–2334 ms |
+| com `--client-deadline` | **2020 · 2023 · 2020 · 2030 ms** (abertura local aos 2014–2016 ms, resposta aos 4811–6711 ms) | abertura do servidor aos 1710 ms, resposta 1828–2191 ms |
+
+O teto funciona com a voz de nuvem. Nenhum turno `interrupted` nos 12 (o defeito de 08/10 foi no `ws`, que aqui não
+roda). Limite: o Chrome manda o mesmo clipe a cada turno e o gateway devolve a transcrição do cache, então as respostas
+desta tabela não medem o STT; só o tempo da abertura é a medida.
+
+### 4. Veredito contra a meta do dono (1–1,5 s, teto 2 s)
+
+- Não alcançada. O melhor braço (fast + especulação) dá 1,8–2,0 s p50 e 2,8–2,9 s de máximo; 15–23 % dos turnos
+  ≤ 1,5 s.
+- O que está no parle hoje: 2,9–3,1 s p50, até 6,4 s.
+- Ordem dos ganhos, todos configuração do parle (`backend/speech/gateway-routes.ts` + `deploy:gateway-routes`) ou da
+  página dele:
+  1. especulação na página: −0,4 a −0,5 s;
+  2. voz ElevenLabs flash: −0,35 a −0,4 s, com a ressalva de sotaque e de duas vozes por gênero no lugar da voz por
+     personagem;
+  3. Gemini primeiro: −0,2 s e a cauda do Qwen;
+  4. nova-3 primeiro: −0,1 s e a cauda.
+
+**Feito nesta rodada:**
+- PR do parle com o Gemini primeiro (pedido do dono, 08/10/2026), sem deploy.
+- STT e voz ficam para o dono decidir. Mudam o que o estudo transcreve e o que o aluno ouve (regra 28 do parle).
+- Amostras das vozes foram guardadas fora do git.
+
+### 5. «error upstream» depois do início do áudio
+
+- Só o edge emite `code: upstream`.
+- **TTS de uma frase falhando depois de a resposta já soar:**
+  - **antes:** o turno inteiro morria (`audio_start, error, done{error}`), e as frases seguintes, já sintetizadas, eram
+    jogadas fora;
+  - **agora** (`aigw_edge/session.py` `_answer`): a frase é pulada (`sentence_failed`, telemetria
+    `edge.tts.sentence_failed`), o resto toca e o `done` traz `missing_audio`, como o `/v1/s2s` já fazia;
+  - antes do primeiro som continua sendo erro;
+  - teste: `tests/test_session.py` «break after audible audio», vermelho antes e verde depois.
+- Nos logs de produção do gateway de 09–10/10 não há `edge.upstream.error`: a telemetria do edge fica no stdout da
+  réplica. O turno do smoke não foi achado.
+- **LLM caindo no meio do stream depois do som:** não mudado. Continua `error`. É a outra causa possível.
+
+### 6. Cota de GPU da Scaleway (API IAM `quota`, leitura, 10/10 13:20)
+
+| Tipo | fr-par-2: cota · estoque · €/h | pl-waw-2: cota · estoque · €/h |
+|---|---|---|
+| H100-1-80G | 2 · available · 2,87 | 2 · shortage · 2,87 |
+| L40S-1-48G | 2 · shortage · 1,47 | 2 · scarce · 1,47 |
+| L4-1-24G | 2 · available · 0,79 | 2 · available · 0,79 |
+
+- A cota não é 0. O lugar H100 em fr-par-2 serve de fato: cabe no `maxEurPerHour` 3 do `parle-speech`, com só € 0,13
+  de folga.
+- Em pl-waw-2, o H100 é pulado enquanto houver falta de estoque.
+- Nenhum servidor GPU está ligado no projeto.
+- Não precisa pedir aumento de cota para 1–2 réplicas. Se a turma pedir 3 ou mais réplicas H100 na mesma zona, aí
+  precisa.
+
+## WebRTC: perda na subida, conexão em rede ruim e resgate de subida travada (2026-10-09)
+
+Branch `rt/webrtc-open`, sobre `rt/webrtc-latency` (PR #65) e com `rt/integration-2` (PR #70) mesclada. **Só código e
+testes locais**: nenhuma máquina, nenhuma GPU, nada em produção. O que está abaixo vem do harness de loopback do edge
+(aiortc real nas duas pontas, modelos falsos), de um banco de perda sem rede com Whisper `small` local, e de um
+Chromium real (o do app desktop) contra o edge local. Falta a prova ao vivo de cada item; os comandos estão no fim.
+
+### 1. Fala do aluno mutilada pela perda de pacotes na subida — consertado no edge e no SDK, falta medir ao vivo
+
+Um pacote perdido virava 20 ms de silêncio. Agora o edge reconstrói o trecho, em três camadas (`audio.LossDecoder`,
+libopus chamado direto por `ctypes` na biblioteca que o PyAV já traz; conferido na imagem Linux do edge):
+
+| Camada | O que é | Quem liga |
+|---|---|---|
+| RED (`audio/red`, RFC 2198) | cada pacote traz uma cópia inteira do anterior | o SDK põe `red` primeiro na oferta; o edge aceita com o número e o `fmtp` do navegador |
+| FEC do Opus | cópia de baixa taxa do quadro anterior dentro do pacote | a resposta do edge leva `useinbandfec=1`; o Chrome liga quando os relatórios RTCP mostram perda |
+| PLC do Opus | o decodificador inventa o trecho a partir do que veio antes | sempre, para o que as duas não cobrem |
+
+Nada espera: o buraco só é conhecido quando o pacote seguinte chega, e é ele que o preenche. O tempo decorrido é o
+mesmo de antes (fim de turno no harness 741–762 ms com 0, 2, 5 e 10 % de perda). O edge continua enviando Opus puro.
+
+**Banco de perda** (`tests/loss_bench.py`, `scripts/realtime-e2e/fixtures/voice-pt.wav` de 7,4 s, Opus 32 kbit/s mono
+em pacotes de 20 ms, perda independente por pacote, 10 sorteios por taxa, Whisper `small` local; «intacta» = transcrição
+idêntica à do clipe sem perda, 18 palavras):
+
+| Perda | Antes (silêncio) | FEC | FEC + PLC | RED + FEC + PLC |
+|---|---|---|---|---|
+| 0 % | 1 / 1, WER 0 | 1 / 1, 0 | 1 / 1, 0 | 1 / 1, 0 |
+| 2 % | 2 / 10, WER 11,7 % | 5 / 10, 6,7 % | 5 / 10, 6,7 % | **10 / 10, 0 %** |
+| 5 % | 0 / 10, 21,1 % | 1 / 10, 12,2 % | 2 / 10, 10,6 % | **7 / 10, 3,3 %** |
+| 10 % | 0 / 10, 29,4 % | 0 / 10, 17,2 % | 0 / 10, 18,3 % | 0 / 10, 12,8 % |
+| áudio perdido reconstruído (2 / 5 / 10 %) | 0 | 93 / 81 / 74 % | idem, o resto ocultado | 99 / 98 / 96 % |
+| SNR contra o clipe sem perda, dB (2 / 5 / 10 %) | 12,5 / 9,5 / 6,7 | 24,3 / 19,3 / 13,8 | 24,7 / 20,3 / 15,3 | 92 / 62 / 28 |
+
+Leitura: o FEC sozinho corta o erro pela metade; o PLC quase não muda a transcrição (muda o que se ouve); o RED é o que
+traz as transcrições de volta, porque devolve o áudio original e não uma aproximação. A 10 % nenhuma estratégia mantém
+a frase idêntica neste clipe (voz sintética, Whisper pequeno, que já erra o clipe limpo): o número serve para comparar
+as colunas, não como WER de aula. O WS continua sendo o único transporte em que a fala chega sempre inteira.
+
+**Harness de loopback** (tom sintético, 3 turnos por rede): 0 buracos de silêncio no áudio que o STT recebe em todas as
+redes (antes: um por pacote perdido); com RED 260 de 280 ms, 780 de 820 ms e 1360 de 1600 ms reconstruídos a 2, 5 e
+10 %; `metrics` novos `uplink_recovered_ms`, `uplink_fec_pct`, `uplink_red_pct`.
+
+**Chromium real contra o edge local, 10 % dos pacotes descartados na entrada do edge:** sem a preferência por RED o
+navegador mandou FEC em 56 % dos pacotes e 520 de 960 ms perdidos foram reconstruídos; com a preferência mandou RED em
+100 % dos pacotes e 900 de 960 ms foram reconstruídos, com o áudio da resposta tocando normalmente. Esse teste achou
+dois defeitos que o aiortc contra aiortc não mostra, ambos consertados: o aiortc respondia o RED com outro número de
+payload (o 63 do Chrome está abaixo da faixa que ele trata como dinâmica) e sem o `fmtp:63 111/111`, e nos dois casos
+o Chrome não enviava RED.
+
+**NACK / RTX para áudio: não feito, de propósito.** A retransmissão chega uma ida e volta mais o temporizador do
+emissor depois (150 ms ou mais no `lossy`); o RED já traz o pacote perdido 20 ms depois, sem pedir.
+
+### 2. WebRTC não conectava em rede ruim dentro dos 3 s do SDK — consertado, falta medir ao vivo
+
+Dois prazos separados. O que decide quem serve o **primeiro** turno não mudou. A tentativa de WebRTC atrás de um WS que
+já serve o aluno agora é paciente: 12 s por tentativa (`upgradeConnectMs`), 2 tentativas com espera de 2 s
+(`upgradeTries`, `upgradeBackoffMs`), dentro de 40 s (`upgradeMs`); a segunda tentativa é uma oferta nova na mesma
+sessão do edge. A troca continua só entre turnos. Uma tentativa que desiste é silenciosa (nenhum erro, nenhum áudio),
+fecha todas as conexões e apaga a sessão no edge. WebRTC forçado (sem WS na escada) recebe o mesmo prazo e depois um
+erro claro (`no_transport`, «webrtc: not connected within 12000 ms»). Candidatos ICE colhidos depois da oferta vão por
+HTTP para `iceUrl`. No edge, o temporizador de retransmissão do canal de dados (SCTP) começa em 0,5 s em vez dos 3 s
+do aiortc.
+
+Tempo de conexão no harness, 30 conexões por rede, 75 ms de atraso em cada sentido (cliente com o temporizador SCTP do
+Chrome):
+
+| Rede | Edge antes | Edge depois |
+|---|---|---|
+| sem perda | 31 ms | 31 ms |
+| 5 % | mediana 1368 ms, max 5869; **6 de 30 acima de 3 s** | mediana 892, max 2896; **0 de 30** |
+| 10 % | mediana 1883 ms, max 7449; **8 de 30 acima de 3 s** | mediana 1371, max 5029; **3 de 30**, todas dentro dos 12 s |
+
+### 3. Subida travada por segundos na rede do aluno — construído, com limite declarado; falta medir ao vivo
+
+O edge responde a todo `end_turn` do cliente com `turn_ack`, na hora. Se 1,2 s depois do fim do turno (`rescueMs`) o
+SDK não viu nenhum sinal do turno vindo do edge, manda a fala que acabou de gravar como **um clipe** por HTTP (`s2s`,
+o degrau de clipe que já existe). Daí em diante vale quem responder primeiro, e só ele: se o caminho travado dá sinal
+antes, o clipe é abortado; se o clipe responde antes, o transporte travado é **fechado** (a sessão dele no edge acaba,
+nada do que ele mandar depois é entregue), a resposta toca uma vez, e uma sessão realtime nova assume entre turnos com
+a conversa repetida. Se o clipe falha, nada muda e a sessão continua esperando. Nunca mais de um turno de clipe a mais
+por turno resgatado. Telemetria `turn.rescued {from, to, stallMs}` e `ackMs` em todo `turn.done`: as aulas reais vão
+mostrar quantas vezes a rede da sala faz isso.
+
+A deduplicação fica no cliente, não no servidor: o degrau de clipe pode cair em outra réplica, que não conhece o turno.
+
+Limites: só arma depois de o edge ter mandado um `turn_ack` na sessão (imagem nova do edge); precisa do VAD do cliente
+(`voice`) ou de a página passar o clipe em `sendEndTurn(clip)`; o clipe é o WAV de 16 kHz que o degrau de clipe já usa
+(um Opus seria uns 8× menor, mas o primeiro STT da cadeia já recusou webm). **Não ajuda** quando a rede inteira cai
+por aqueles segundos (o clipe espera junto) nem quando quem trava é a captura ou o processo do cliente: os 3500 e
+9102 ms da noite de 08/10 saíram de clientes leves do harness no Mac, e ali não dá para dizer qual foi o caso. Ajuda
+quando um fluxo TCP fica preso atrás de uma retransmissão ou de fila enquanto o caminho já voltou.
+
+### 4. Transporte pela rede medida na sessão (`transportPolicy: "auto"`) — construído, opcional, falta medir ao vivo
+
+Sem a opção nada muda (WS no início, WebRTC assim que conecta). Com `"auto"`: começa sempre no WS; o WebRTC sobe em
+segundo plano e fica de reserva a sessão inteira, medindo a própria rede (perda e jitter da subida pelos relatórios do
+edge, com uma cópia muda da faixa do microfone); uma amostra por turno; a decisão é uma função pura. Perda de 2 % ou
+mais, ou travada de 800 ms ou mais, em 3 turnos seguidos → WebRTC. 3 turnos limpos seguidos no WebRTC → volta ao WS.
+Só entre turnos, com espera mínima de 60 s depois de uma troca e no máximo 4 trocas por sessão. UDP bloqueado → fica
+no WS sem tentar. Turno travado no WS → o resgate do item 3 responde e a sessão vai depois para o WebRTC de reserva.
+`fidelity: true` (transcrição é dado): não vai para o WebRTC sob perda sem a recuperação do item 1 negociada, e volta
+ao WS se ela não aparecer nos `metrics` dos turnos com perda. `"ws"` nunca tenta WebRTC. Telemetria
+`transport.switch {from, to, reason, lossPct, jitterMs, stallMs}` e `rt.network.summary` no fim da sessão. Política,
+padrões e a razão de cada limiar: `docs/realtime.md` § Transport by network signal.
+
+Custo do `"auto"`: uma conexão a mais por aluno aberta a aula toda (silêncio nos dois sentidos, ~20 kbit/s de subida)
+e o edge decodificando esse silêncio (~2 % de um núcleo por aluno).
+
+### Testes
+
+| O quê | Onde | Resultado |
+|---|---|---|
+| Edge, unidades | `docker/aigw-edge/tests/run.sh units` | passam (decodificador com FEC, PLC e RED; resposta SDP; `turn_ack`) |
+| Edge, harness de loopback antes da mescla | `run.sh harness` | 174 / 174 |
+| Edge, harness depois da mescla com `rt/integration-2` | idem | tudo passa menos **uma checagem que já falha na `rt/integration-2` sozinha** (`3275783`): «the first reply frame is heard within one frame of audio_start», 17–21 ms em vez dos 6–8 ms da PR #65. Não é desta branch |
+| SDK | `sdk-realtime-*.test.ts`, `__tests__/unit/realtime` | 325 passam (novos: `-upgrade`, `-rescue`, `-policy`); os de regressão falham sem o conserto |
+| Typecheck, lint, fitness, bundle | | verdes; o pacote `realtime` cresceu 88,8 → 110,3 KB (4,4 KB são da integração), aceito no baseline com o motivo |
+
+Os scripts de carga (`--profile-then`, `--transport-policy`, `--fidelity`, o clipe em `sendEndTurn`) só rodam em Linux
+com root: **não foram executados aqui**.
+
+### Comandos para a prova ao vivo (numa réplica com a imagem nova do edge)
+
+Variáveis de sempre: `GW`, `KEY`, `DEP`, `RT_CONFIG`; Linux com root para os perfis de rede.
+
+```bash
+# 1. Perda na subida: WS de controle, WebRTC leve e Chrome, nos três perfis. No report.json: uplinkRecoveredMs,
+#    uplinkRedPct (100 no Chrome = RED chegando), uplinkFecPct, e as transcrições idênticas ao clipe por transporte.
+for p in clean campus-slow lossy; do
+  bun scripts/realtime-e2e/load.ts --n 6 --rtc 3 --chrome 2 --chrome-transports webrtc \
+    --clip scripts/realtime-e2e/fixtures/voice-pt.wav --profile $p --duration 180 --out out/loss-$p
+done
+#    uplink_red_pct e uplink_fec_pct nulos em todo turno WebRTC = o edge não carregou o libopus (imagem errada).
+#    No Chrome, com a página aberta (chrome://webrtc-internals ou o console):
+#      pc.remoteDescription.sdp.match(/a=(rtpmap|fmtp):\d+ .*(red|opus|useinbandfec).*/g)   → red primeiro, fmtp 111/111
+#      [...(await pc.getStats()).values()].filter(s => s.type === 'remote-inbound-rtp' || s.type === 'outbound-rtp')
+#        → packetsLost / fractionLost do que o edge recebeu; bytesSent dobra quando o RED está ligado
+# O mesmo banco sem rede, para comparar (venv do edge, depois um Python com openai-whisper):
+python docker/aigw-edge/tests/loss_bench.py clips scripts/realtime-e2e/fixtures/voice-pt.wav /tmp/loss 10
+python3 docker/aigw-edge/tests/loss_bench.py wer /tmp/loss small
+
+# 2. Conexão em rede ruim: Chrome forçado em WebRTC e Chrome na escada, perfil lossy. Esperado: 0 «no_transport»,
+#    connectMs até ~5 s no forçado; na escada transport final webrtc; rt.webrtc.retry na telemetria quando repetiu.
+bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports webrtc --profile lossy --duration 180 --out out/connect-forced
+bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports '' --profile lossy --duration 180 --out out/connect-ladder
+ONLY=scenario_webrtc_connect_loss CONNECT_RUNS=30 EDGE_VENV=<venv> docker/aigw-edge/tests/run.sh harness   # local
+
+# 3. Resgate: a fala de um turno em cada três fica presa 3 s no WS. Antes: 3559 / 3699 ms até a resposta.
+#    Esperado: turn.rescued com stallMs ~1200 nos turnos presos, resposta por volta de 1,2 s + um turno de clipe,
+#    uma resposta só por turno. O harness também segura um POST de clipe em cada três: o primeiro resgate cai no
+#    caso «o clipe demora, o caminho travado volta antes» e termina sem turn.rescued.
+bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports ws --client-deadline \
+  --uplink-stall 3000 --uplink-stall-every 3 --profile clean --duration 240 --out out/rescue
+
+# 4. Política: rede limpa fica no WS; lossy vai para o WebRTC depois de 3 turnos; a rede piora no meio e melhora.
+bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports '' --transport-policy auto --profile clean --duration 300 --out out/auto-clean
+bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports '' --transport-policy auto --profile lossy --duration 300 --out out/auto-lossy
+bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports '' --transport-policy auto --profile campus-slow --duration 300 --out out/auto-campus
+bun scripts/realtime-e2e/load.ts --n 4 --chrome 4 --chrome-transports '' --transport-policy auto --fidelity \
+  --profile clean --profile-then lossy@90 --duration 420 --out out/auto-change
+#    Nos eventos de cada sessão Chrome: transport.switch {from, to, reason, lossPct, jitterMs, stallMs} e
+#    rt.network.summary no fim; turn.done traz o transporte de cada turno.
+```
+
+### Imagem do edge
+
+Construída e fixada em 10/10: ver § Prova ao vivo da PR #71 abaixo.
+
+## Prova ao vivo da PR #71 — 2026-10-10
+
+Branch `rt/webrtc-open` com o `main` mesclado (#70, #72–#85). Gateway local do worktree em :4241 (`bun serve.ts`,
+namespace `marcos-proof-71`, estado próprio, sem `SANDBOX_TOKEN` nem chave Vast no processo, `DEPLOYMENTS_MAX_REPLICAS=1`).
+Uma máquina: Scaleway L40S-1-48G do perfil `speech-stack` (imagem `20261009-0213`), `pl-waw-2` (fr-par-2 sem estoque às
+14:04), €1,4699/h, sábado 10/10, ligada 14:05:18 → apagada 15:33:25 Paris. Clientes num contêiner Linux do colima
+(Chromium 154 com o SDK, `ws` em Bun, `webrtc` em aiortc) atrás do netns com `tc` do harness; perfis novos `loss-2`,
+`loss-5`, `loss-10` (20 ms de atraso e a perda em cada sentido) e os de sempre (`lossy` = 75 ms + 5 %). Clipe
+`voice-pt.wav` (7,4 s), voz de referência curta assinada na config (o catálogo da réplica estava vazio).
+
+**Três braços, mesma máquina, mesma sessão.** O edge da réplica é um contêiner que só troca com outra máquina, então o
+`main` contra a branch na mesma GPU foi feito assim:
+
+| Braço | Edge | SDK / harness | Caminho até a GPU |
+|---|---|---|---|
+| A | `main` (fonte, no contêiner) | `main` | edge local → proxy que põe o token da réplica → modelos da L40S |
+| B | branch (fonte, no contêiner) | branch | idem |
+| M | branch (`5540dfa1`, sidecar da réplica) | `main` | gateway → réplica (caminho real) |
+| R | branch (`5540dfa1`, sidecar da réplica) | branch | gateway → réplica (caminho real) |
+
+A e B rodaram em sequência, com o gateway, o edge e o Chrome no mesmo contêiner de 6 vCPU: várias rodadas saíram com o
+aviso «generator SATURATED» do harness, então a latência desses braços não vale; transcrição, recuperação e eventos
+valem. Cadência de 12 ± 2 s com um clipe de 7,4 s: a fala seguinte corta a resposta anterior (os «truncated:interrupted»
+dos relatórios), sem efeito nas medidas abaixo.
+
+### 1. Perda na subida
+
+STT real da L40S (Whisper large-v3) sobre os clipes do banco de perda (`loss_bench.py clips`, 10 sorteios por taxa);
+«silêncio» é o que o edge do `main` faz, «RED+FEC+PLC» o que a branch faz com o Chrome:
+
+| Perda | silêncio (`main`) | FEC | FEC+PLC | RED+FEC+PLC (branch) |
+|---|---|---|---|---|
+| 2 % | 8/10 intactas, WER 1,1 % | 10/10, 0 | 10/10, 0 | **10/10, 0** |
+| 5 % | 5/10, 5,8 % | 9/10, 0,5 | 8/10, 3,2 | **10/10, 0** |
+| 10 % | 3/10, 5,3 % | 8/10, 2,1 | 6/10, 2,1 | **10/10, 0** |
+
+Ao vivo, Chrome em WebRTC (intactas = transcrição igual à do clipe sem perda; WER contra ela):
+
+| Rede | A (`main`) | B (branch) | R (branch, sidecar) |
+|---|---|---|---|
+| `loss-2` | 12/15, WER 1,4 % | 7/12, 2,6 % (gerador saturado) | — |
+| `loss-5` | 8/15, 3,9 % | 9/14, 2,3 %; RED 100 %, 96 % do perdido reconstruído | 13/14, 0,4 % |
+| `loss-10` | **1/13, 13,0 %** | **10/12, 1,3 %**; RED 100 %, 94 % reconstruído | — |
+| `lossy` (75 ms, 5 %) | 14/26, 5,5 % | 17/23, 1,4 %; 97 % reconstruído | M: 9/21, 3,3 %, 0 reconstruído · **R: 15/26, 2,2 %, RED 100 %, 97 % reconstruído** |
+
+No WS (controle) todas as transcrições saíram intactas em todas as redes. O cliente leve aiortc (sem RED) recupera
+35–42 % pelo FEC. Primeiro som no caminho real com perda (R `loss-5`): Chrome 1870 / 3382 ms p50 / max, WS 1544 / 1908.
+
+### 2. Conexão em rede ruim (`lossy`)
+
+| | WebRTC forçado, 3 Chrome | escada com WS primeiro, 2 Chrome |
+|---|---|---|
+| M (SDK do `main`) | 3/3 conectaram, 3,2–4,4 s (todas acima de 3 s) | **1 de 2 tentativas de WebRTC desistiu** («not connected within 3000 ms»); esse aluno ficou no WS |
+| R (branch) | 3/3, 3,6–7,9 s (todas acima de 3 s) | 2/2 conectaram (2,5 e 5,6 s) |
+| A / B (local) | 3/3, 2,2–3,9 s (1 acima de 3 s) / 3/3, 2,0–3,0 s (0 acima de 3 s) | — |
+
+Leitura: com o SDK novo nenhuma tentativa desistiu; o tempo de conexão em si não melhorou nesta amostra (n pequeno, a
+rede do Mac até a Polônia com 75 ms de cada lado). O harness local de 30 conexões (§ 2 acima) segue sendo a medida do
+temporizador SCTP.
+
+### 3. Resgate da subida travada (WS, fala presa 3 s a cada três, `--client-deadline`)
+
+| | Turnos presos | Tempo até o primeiro som nos presos |
+|---|---|---|
+| M (`main`) | nenhum resgate (não existe) | 4,3–4,6 s (p90 4328, max 4588) |
+| R (branch) | `turn.rescued` com `stallMs` 1803–2137 ms; o primeiro resgate de cada aluno cai de propósito no POST de clipe também segurado e termina sem resgate, como previsto | **2,9–3,1 s** (`turn.done` 2855–3140 ms) |
+
+**Defeito achado ao vivo e consertado** (`7486e33`, teste em `sdk-realtime-rescue`): depois do resgate o SDK tenta
+uma sessão realtime nova; quando ela não abre (`rt.readmit.gave_up no_transport`, aqui porque o harness segura também
+o WS novo enquanto a fala dura), os eventos do degrau de clipe ficavam presos ao turno resgatado e **todo turno seguinte
+ficava sem resposta** (0 respostas em ~100 s por aluno, nas duas rodadas antes do conserto: B local e R). Depois do
+conserto, mesma máquina: os turnos seguintes são respondidos pelo degrau de clipe (`turn.done` 1,4–2,1 s; ~4,5 s nos
+turnos em que o harness segura o POST de clipe de propósito). Junto,
+`sendEndTurn(clip)` num degrau de clipe manda o clipe como turno (`148c190`).
+
+### 4. Troca de transporte pelo sinal de rede (`transportPolicy: "auto"`)
+
+| Rodada | Resultado |
+|---|---|
+| R `clean`, 120 s | ficou no WS a sessão inteira (21 turnos; 1302 / 1455 ms p50 / max) |
+| R `lossy`, 150 s | trocou WS → WebRTC aos 44 e 50 s, `reason loss`, `lossPct` 5,6 e 5,3, depois de 3 turnos com perda |
+| R `clean` → `lossy` aos 60 s, `--fidelity`, 210 s | trocou aos 106 e 112 s (46–52 s depois da mudança), `lossPct` 4,3, com o RED negociado; nenhuma volta (a rede não melhorou) |
+| M `lossy` (escada do `main`) | troca para WebRTC assim que conecta (um aluno); o outro ficou no WS por desistência |
+
+Freios: nenhuma sessão trocou mais de uma vez; a espera de 60 s e o teto de 4 trocas não chegaram a ser exercitados.
+
+### Imagens
+
+| Imagem | Tag | Digest | De onde |
+|---|---|---|---|
+| `ghcr.io/marcosremar/aigw-edge` | `5540dfa1` | `sha256:f3fb1f953dc88b9d4dcfe92688abbf66cdb8ad216d11a74cd6202bb51d65d975` | workflow `aigw-edge` por `workflow_dispatch` na branch, commit `5540dfa` (a mescla com o `main`) |
+| `ghcr.io/marcosremar/speech-stack` | `20261010-1135` | `sha256:fa088ee4bb0c61d19a9df2a1946835073f30c5774aa798c14bab93f728895fb0` | workflow `speech-stack` disparado pela PR no commit `d76e7b8` (`EDGE_TAG=5540dfa1`, a fixação anterior); **não fixada nem reconstruída para `ed885ef5`**: o perfil usa a cópia do registro Scaleway `20261009-0213`, e a cópia nova pede outra máquina |
+
+| `ghcr.io/marcosremar/aigw-edge` (fixada) | `ed885ef5` | `sha256:5c67faa165a3fdb00d4d2157229a2b981bbcc6efe1e7b2f7f6349f96998da209` | idem, commit `ed885ef` (a segunda mescla com o `main`, que trouxe o `session.py` do #91: frase de TTS que falha depois do primeiro som é pulada) |
+
+A prova rodou com `5540dfa1`; `ed885ef5` é o mesmo edge mais a mudança do #91, que não toca em nada destes quatro itens.
+`DEFAULT_EDGE_IMAGE` e o `EDGE_TAG` do speech-stack apontam para `ed885ef5@sha256:5c67faa1…`. A imagem do edge leva só
+`requirements.txt`, `telemetry.py` e `aigw_edge/`, e nada disso muda depois de `ed885ef` (o commit da fixação mexe só em
+`cloud-init.ts`, no Dockerfile do speech-stack e neste relatório). Observação: o `main` fixava `79722253`, anterior a #19, #16 e T3 no código do edge;
+a imagem nova é a primeira com esse código.
+
+### Máquinas e custo
+
+| Máquina | Período (Paris) | € |
+|---|---|---|
+| L40S-1-48G `74560f5a` pl-waw-2 | 14:05:18 → 15:33:25 (88 min) | ~2,16 |
+| duas criações em fr-par-2 sem estoque (servidor criado e limpo sem ligar) | 14:04 | ~0 |
+
+Desmontagem: `DELETE /v1/deployments/p71-speech` às 15:33:24; listagem direta das nove zonas da Scaleway depois: nenhum
+servidor nem volume desta prova (o que existe é da produção e de `dev-marmos`). Reaper em modo `gateway-down`, dry run,
+namespace `marcos-proof-71`, gateway parado: `scaleway seen 0`, `vast seen 0`, `planned []`. Arquivo do token da
+réplica apagado. Nenhum Vast, nenhum L4, nada escrito em produção.

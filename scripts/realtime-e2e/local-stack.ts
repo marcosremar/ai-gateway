@@ -54,11 +54,6 @@ export async function startLocalStack(o: LocalStackOptions) {
     auth: {
       resolveAppKey: (token) => keyRegistry.resolve(token)?.userId ?? null,
       isMasterKey: () => false,
-      deployment: (name) => {
-        const replicaToken = controller.tokenOf(name);
-        const app = controller.get(name)?.app;
-        return replicaToken ? { replicaToken, ...(app ? { app } : {}) } : null;
-      },
       replica: (id) => controller.replicaAuth(id) ?? null,
       resolveSessionToken: (token) => realtimeSessionOf?.(token) ?? null,
     },

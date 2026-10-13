@@ -2,17 +2,17 @@ import { describe, it, expect } from 'vitest';
 import { join } from 'path';
 import { homedir } from 'os';
 import { existsSync, readFileSync, unlinkSync, mkdirSync, rmSync } from 'fs';
+import { useTempHome } from './temp-home';
 
-/**
- * Test that persistDeployState includes deployId in the persisted JSON.
- *
- * Since the module computes BABELCAST_DIR at import time using homedir(),
- * we can't redirect it to a temp dir via env vars after import. Instead,
- * we test against the real ~/.babelcast path and clean up afterwards.
- */
+const TEMP_HOME = useTempHome();
+
 describe('deploy-state persistence includes deployId', () => {
   const babelcastDir = join(homedir(), '.babelcast');
   const activeDeployFile = join(babelcastDir, 'active_deploy.json');
+
+  it('writes under a temporary home, never the real ~/.babelcast', () => {
+    expect(babelcastDir).toBe(join(TEMP_HOME, '.babelcast'));
+  });
 
   it('should include deployId in the persisted active_deploy.json', async () => {
     const { deployState, persistDeployState } = await import('../src/gateway/state/deploy-state');

@@ -41,6 +41,7 @@ export async function startGateway(
   const server = createServer((req, res) => {
     const user = KEYS[String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')];
     if (!user) { res.writeHead(401); res.end('{"error":"proxy auth"}'); return; }
+    if (req.method === 'POST' && req.url === '/v1/realtime/updates') { void realtime.updateRoute.handler(req, res); return; }
     if (req.method === 'POST' && req.url === '/v1/realtime/sessions') {
       const run = () => realtime.route.handler(req, res);
       void (req.headers['x-gateway-no-wake'] ? runNoWake(run) : run());

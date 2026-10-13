@@ -7,6 +7,7 @@ import {
   DEFAULT_TIMEOUTS, createWebRtcTransport, createWsTransport, decodeAudioFrame, encodeAudioFrame, type PcmPlayer,
   type RealtimeEvent, type TransportContext,
 } from '../../sdk/browser/realtime/index';
+import { preferRedundantAudio } from '../../sdk/browser/realtime/index';
 import { createLocalTelemetry } from '../../sdk/browser/realtime/telemetry';
 
 function ctx(over: Partial<TransportContext> = {}): TransportContext & { events: RealtimeEvent[]; failures: Error[] } {
@@ -34,7 +35,7 @@ class FakeWs {
   onerror: (() => void) | null = null;
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onclose: ((e: { code: number; reason: string }) => void) | null = null;
-  constructor(readonly url: string) { FakeWs.last = this; setTimeout(() => { this.readyState = 1; this.onopen?.(); setTimeout(() => this.onmessage?.({ data: '{"type":"ready"}' }), 5); }, 5); }
+  constructor(readonly url: string, readonly protocols?: string | string[]) { FakeWs.last = this; setTimeout(() => { this.readyState = 1; this.onopen?.(); setTimeout(() => this.onmessage?.({ data: '{"type":"ready"}' }), 5); }, 5); }
   send(d: unknown) { this.sent.push(d); }
   close(code = 1000, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }); }
 }
@@ -56,7 +57,8 @@ describe('WS rung', () => {
     });
     await t.connect(new AbortController().signal);
     const ws = FakeWs.last;
-    expect(ws.url).toBe(`wss://gw/v1/realtime/ws?token=tok&traceparent=${encodeURIComponent(c.traceparent)}`);
+    expect(ws.url).toBe(`wss://gw/v1/realtime/ws?traceparent=${encodeURIComponent(c.traceparent)}`);
+    expect(ws.protocols).toEqual(['aigw.rt', 'aigw.token.tok']);
     expect(ws.binaryType).toBe('arraybuffer');
     onFrame!(new Int16Array(320));
     expect(Array.from(decodeAudioFrame(ws.sent[0] as Uint8Array)!).length).toBe(320);
@@ -72,6 +74,15 @@ describe('WS rung', () => {
     ws.close(1011, 'edge crashed');
     expect(c.failures[0]!.message).toMatch(/ws closed \(1011 edge crashed\)/);
     expect(c.events.map(e => e.type)).toEqual(['ready', 'interrupted']);
+  });
+
+  it('a config by reference is the first frame after the open; without one nothing is sent before ready', async () => {
+    const deps = { WebSocket: FakeWs as unknown as typeof WebSocket, player: async () => ({ close: () => {} }) as unknown as PcmPlayer, capture: async () => ({ stop: () => {} }) };
+    const c = ctx({ descriptor: { sessionId: 'rt_1', token: 'tok', cfg: 'e30', expiresAt: '', transports: [] } });
+    await createWsTransport(c, 'wss://gw/v1/realtime/ws?token=tok', deps).connect(new AbortController().signal);
+    expect(FakeWs.last.sent).toEqual(['{"type":"session_config","cfg":"e30"}']);
+    await createWsTransport(ctx(), 'wss://gw/v1/realtime/ws?token=tok', deps).connect(new AbortController().signal);
+    expect(FakeWs.last.sent).toEqual([]);
   });
 
   it('standby (connected behind a clip rung): the microphone is not sent until it goes live', async () => {
@@ -153,9 +164,33 @@ describe('WebRTC rung', () => {
     expect(headers.Authorization).toBe('Bearer tok');
     expect(headers.traceparent).toBe(c.traceparent);
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ sdp: 'v=0\r\noffer', type: 'offer' });
+    const byRef = ctx({ fetchImpl, descriptor: { sessionId: 'rt_1', token: 'tok', cfg: 'e30', expiresAt: '', transports: [] } });
+    const second = createWebRtcTransport(byRef, { type: 'webrtc', offerUrl: 'https://gw/v1/realtime/sessions/rt_1/offer' }, { RTCPeerConnection: FakePc as unknown as typeof RTCPeerConnection });
+    await second.connect(new AbortController().signal);
+    expect(JSON.parse(String(calls[1]!.init.body))).toEqual({ sdp: 'v=0\r\noffer', type: 'offer', cfg: 'e30' });
+    second.close();
+    calls.splice(1);
     expect(FakePc.last.remote).toEqual({ type: 'answer', sdp: 'v=0\r\nanswer' });
     t.close();
     expect(calls[1]).toMatchObject({ url: 'https://gw/v1/realtime/sessions/rt_1', init: { method: 'DELETE' } });
+  });
+
+  it('uplink loss: audio/red is offered first when the browser has it, the browser order stays when it does not or refuses', () => {
+    const opus = { mimeType: 'audio/opus', clockRate: 48000 }, red = { mimeType: 'audio/red', clockRate: 48000 }, pcmu = { mimeType: 'audio/PCMU', clockRate: 8000 };
+    const asked: unknown[][] = [];
+    const pc = (set: (codecs: unknown[]) => void) => ({ getTransceivers: () => [{ setCodecPreferences: set }] }) as unknown as RTCPeerConnection;
+    const withSender = (codecs: unknown[] | null, run: () => void) => {
+      const g = globalThis as { RTCRtpSender?: unknown };
+      const before = g.RTCRtpSender;
+      g.RTCRtpSender = codecs ? { getCapabilities: () => ({ codecs }) } : undefined;
+      try { run(); } finally { g.RTCRtpSender = before; }
+    };
+    withSender([opus, red, pcmu], () => preferRedundantAudio(pc(c => asked.push(c))));
+    withSender([opus, pcmu], () => preferRedundantAudio(pc(c => asked.push(c))));
+    withSender(null, () => preferRedundantAudio(pc(c => asked.push(c))));
+    withSender([opus, red], () => preferRedundantAudio(pc(() => { throw new Error('InvalidModificationError'); })));
+    withSender([opus, red], () => preferRedundantAudio({} as RTCPeerConnection));
+    expect(asked).toEqual([[red, opus, pcmu]]);
   });
 
   it('an offer refused by the gateway (replica full) rejects connect', async () => {

@@ -16,7 +16,7 @@ export abstract class ParkingControl extends ReplicaLifecycle {
   protected trackParking(failed: Set<DeploymentProvider>): void {
     const now = this.now();
     for (const m of this.machines) {
-      if (failed.has(this.providerOf(m))) continue;
+      if (this.listStale(m, failed)) continue;
       const stop = this.deployments.get(m.deployment)?.record.spec.idleAction === 'stop';
       if (stop && m.state === 'stopping' && !this.stopping.has(m.id)) this.stopping.set(m.id, now); // adopted mid-stop
       if (this.stopping.has(m.id) && (m.state === 'stopped' || now - this.stopping.get(m.id)! > STOPPING_MAX_MS)) this.stopping.delete(m.id);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ceilingReport, firstReplyAudioMs, firstSoundMs, type CeilingTurn } from '../../../scripts/realtime-e2e/ceiling';
+import { ceilingReport, firstReplyAudioMs, firstSoundMs, shortAudioReference, type CeilingTurn } from '../../../scripts/realtime-e2e/ceiling';
 
 const turn = (client: string, firstLoud: number | null, events: CeilingTurn['events'] = []): CeilingTurn => ({ client, speechEnd: 1_000, firstLoud, events });
 
@@ -27,5 +27,15 @@ describe('load harness: the first-audio ceiling', () => {
     });
     expect(ceilingReport(fine, 2_500)).toMatchObject({ max: 1_200, overLimit: 0, ok: true });
     expect(ceilingReport([turn('ws', null)], 2_500)).toMatchObject({ max: null, ok: false });
+  });
+
+  it('short audio: the honest spread of a voice is not a truncation, a reply missing half its audio is', () => {
+    const mai = [56, 72, 75, 78, 80, 82, 84, 86, 88, 90, 92, 94];
+    const flagged = (rates: number[]) => rates.filter(r => r < 0.6 * shortAudioReference(rates));
+    expect(flagged(mai)).toEqual([]);
+    expect(flagged([...mai, 41])).toEqual([41]);
+    expect(shortAudioReference([60, 61, 62, 64, 66, 70, 75])).toBe(64);
+    expect(shortAudioReference([80, 81, 82, 83])).toBe(0);
+    expect(shortAudioReference([80, 81], 70)).toBe(70);
   });
 });

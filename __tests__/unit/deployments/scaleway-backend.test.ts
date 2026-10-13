@@ -29,10 +29,10 @@ function fakeClient() {
 }
 
 describe('ScalewayDeploymentBackend', () => {
-  it('logs in to its own registry with the API secret, and to nothing else', () => {
-    const backend = new ScalewayDeploymentBackend('the-secret', { client: fakeClient() as never });
+  it('logs in to its own registry with the read-only registry key, and to nothing else', () => {
+    const backend = new ScalewayDeploymentBackend('the-secret', { client: fakeClient() as never, registrySecret: 'read-only' });
     expect(backend.registryAuthFor('rg.fr-par.scw.cloud/aigw/speech-stack:1'))
-      .toEqual({ server: 'rg.fr-par.scw.cloud', username: 'nologin', password: 'the-secret' });
+      .toEqual({ server: 'rg.fr-par.scw.cloud', username: 'nologin', password: 'read-only' });
     expect(backend.registryAuthFor('rg.nl-ams.scw.cloud/x/y')?.server).toBe('rg.nl-ams.scw.cloud');
     expect(backend.registryAuthFor('ghcr.io/rg.fr-par.scw.cloud/x')).toBeNull();
     expect(backend.registryAuthFor('vllm/vllm-omni:v0.28.0')).toBeNull();
@@ -47,7 +47,7 @@ describe('ScalewayDeploymentBackend', () => {
     const [instanceSpec, creds] = client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>, { apiKey: string }];
     expect(instanceSpec).toMatchObject({
       region: 'fr-par-2', commercialType: 'L4-1-24G', imageId: '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa', volumeGb: 80,
-      tags: ['aigw-deploy', 'aigw-ns-prod', 'aigw-dep-tts'], cloudInit: '#!/bin/bash\necho hi', projectId: 'proj',
+      tags: ['aigw-deploy', 'aigw-ns-prod', 'aigw-dep-tts', 'aigw-tls'], cloudInit: '#!/bin/bash\necho hi', projectId: 'proj',
     });
     expect(creds.apiKey).toBe('secret');
     expect(machine).toMatchObject({ id: 'fr-par-2:srv-1', deployment: 'tts', ip: '51.0.0.1', pricePerHour: 0.7875 });

@@ -32,7 +32,7 @@ export interface S2SAccessOptions {
   deploymentApp: (name: string) => string | null | undefined;
   /** The app's own routes (`PUT /v1/apps/:app/routes`). */
   appRoutes: (app: string) => ModelRoutesSpec | undefined;
-  limits?: { checkS2S: (userId: string, config: S2SConfig) => AppLimitDenial | null };
+  limits?: { checkS2S: (userId: string, config: S2SConfig, charge?: boolean) => AppLimitDenial | null };
 }
 
 /** True when one of the app's route entries targets the deployment. */
@@ -54,7 +54,7 @@ export function createS2SAccess(opts: S2SAccessOptions) {
   };
 
   /** Admission of one turn: the deployment it may use ('' = composed pipeline only), or the denial to answer. */
-  return function admit(req: IncomingMessage, config: S2SConfig, requested: { deployment: string; explicit: boolean }): S2SAdmission {
+  return function admit(req: IncomingMessage, config: S2SConfig, requested: { deployment: string; explicit: boolean }, charge = true): S2SAdmission {
     const userId = opts.userOf(req);
     if (userId === null) return { ok: true, deployment: requested.deployment };
     let deployment = requested.deployment;
@@ -64,7 +64,7 @@ export function createS2SAccess(opts: S2SAccessOptions) {
       }
       deployment = '';
     }
-    const denial = opts.limits?.checkS2S(userId, config) ?? null;
+    const denial = opts.limits?.checkS2S(userId, config, charge) ?? null;
     if (denial) return { ok: false, ...denial };
     return { ok: true, deployment };
   };

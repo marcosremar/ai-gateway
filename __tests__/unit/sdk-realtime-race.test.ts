@@ -3,6 +3,7 @@ import {
   DEFAULT_TIMEOUTS, createRealtimeSession, createWebRtcTransport, createWsTransport, type PcmPlayer, type RealtimeEvent, type RealtimeSessionOptions,
   type RealtimeTransport, type SessionDescriptor, type StorageLike, type TelemetryEvent, type TransportContext, type TransportType,
 } from '../../sdk/browser/realtime/index';
+import { edgeRefusal } from './_edge-client-updates';
 
 const DESCRIPTOR: SessionDescriptor = {
   sessionId: 'rt_race', expiresAt: '', token: 'tok',
@@ -40,7 +41,7 @@ function rig(extra: Partial<RealtimeSessionOptions> = {}, storage = memoryStorag
         signal.addEventListener('abort', () => reject(signal.reason as Error));
         if (type === 's2s-stream') resolve();
       }),
-      send: (m) => { sent.push([type, m]); },
+      send: (m) => { expect(edgeRefusal(m)).toBeNull(); sent.push([type, m]); },
       goLive: () => { log.push(`live:${type}`); },
       close: () => { log.push(`close:${type}`); },
     };

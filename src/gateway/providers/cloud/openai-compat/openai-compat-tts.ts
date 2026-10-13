@@ -32,6 +32,16 @@ export interface OpenAICompatTTSConfig {
   allowedFormats?: TTSAudioFormat[];
   /** Send the requested voice as-is (aggregators whose voices depend on the model, e.g. OpenRouter). */
   passthroughVoices?: boolean;
+  pcmAsWavRate?: number;
+}
+
+function wavHeader(rate: number, dataBytes: number): Buffer {
+  const head = Buffer.alloc(44);
+  head.write('RIFF', 0); head.writeUInt32LE(Math.min(0xffffffff, dataBytes + 36), 4); head.write('WAVEfmt ', 8);
+  head.writeUInt32LE(16, 16); head.writeUInt16LE(1, 20); head.writeUInt16LE(1, 22);
+  head.writeUInt32LE(rate, 24); head.writeUInt32LE(rate * 2, 28); head.writeUInt16LE(2, 32); head.writeUInt16LE(16, 34);
+  head.write('data', 36); head.writeUInt32LE(dataBytes, 40);
+  return head;
 }
 
 export class OpenAICompatTTSProvider implements TTSProvider {
@@ -86,7 +96,8 @@ export class OpenAICompatTTSProvider implements TTSProvider {
 
   async synthesize(request: TTSRequest): Promise<TTSResponse> {
     const client = this.getClient();
-    const format = this.resolveFormat(request.responseFormat);
+    const asWav = request.responseFormat === 'wav' && !!this.config.pcmAsWavRate && !this.config.allowedFormats?.includes('wav');
+    const format = asWav ? 'pcm' : this.resolveFormat(request.responseFormat);
 
     const params: OpenAI.Audio.SpeechCreateParams = {
       model: request.model || this.config.defaultModel || this.config.models[0]?.id,
@@ -98,6 +109,25 @@ export class OpenAICompatTTSProvider implements TTSProvider {
     };
 
     const response = await client.audio.speech.create(params, request.signal ? { signal: request.signal } : undefined);
+    if (asWav) {
+      const rate = Number(/rate=(\d+)/.exec(response.headers.get('content-type') ?? '')?.[1]) || this.config.pcmAsWavRate!;
+      if (request.stream && response.body) {
+        const body = response.body as unknown as ReadableStream<Uint8Array>;
+        const reader = body.getReader();
+        let sentHead = false;
+        const stream = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (!sentHead) { sentHead = true; controller.enqueue(wavHeader(rate, 0xffffffff)); return; }
+            const { value, done } = await reader.read();
+            if (done) controller.close(); else controller.enqueue(value);
+          },
+          cancel: (reason) => reader.cancel(reason),
+        });
+        return { audio: Buffer.alloc(0), contentType: 'audio/wav', stream };
+      }
+      const pcm = Buffer.from(await response.arrayBuffer());
+      return { audio: Buffer.concat([wavHeader(rate, pcm.length), pcm]), contentType: 'audio/wav' };
+    }
     const arrayBuffer = await response.arrayBuffer();
     return { audio: Buffer.from(arrayBuffer), contentType: FORMAT_TO_CONTENT_TYPE[format] || 'audio/mpeg' };
   }

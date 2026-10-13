@@ -216,31 +216,3 @@ describe('Fly.io Architecture (#905-#910)', () => {
     expect(toml).toContain('min_machines_running = 0');
   });
 });
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// FINAL COMPLETENESS CHECKS (#964-#1000 gaps)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-describe('Completeness: All modules have tests', () => {
-
-  it('#966 every provider has tests', () => {
-    expect(fs.existsSync('__tests__/providers-individual-unit.test.ts')).toBe(true);
-    expect(fs.existsSync('__tests__/provider-fallback-unit.test.ts')).toBe(true);
-  });
-
-  it('#967 every GPU provider has tests', () => {
-    expect(fs.existsSync('__tests__/gpu-providers-unit.test.ts')).toBe(true);
-  });
-
-  it('#981 resource lifecycle tests exist', () => {
-    expect(fs.existsSync('__tests__/resource-lifecycle.test.ts')).toBe(true);
-  });
-
-  it('#982 security regression tests exist', () => {
-    expect(fs.existsSync('__tests__/security-resilience-regression.test.ts')).toBe(true);
-  });
-
-  it('#1000 test plan document exists', () => {
-    expect(fs.existsSync('docs/TEST_PLAN_1000.md')).toBe(true);
-  });
-});

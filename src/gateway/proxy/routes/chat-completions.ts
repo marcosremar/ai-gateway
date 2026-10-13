@@ -405,6 +405,9 @@ async function openStream(
   clientSignal?: AbortSignal, hedgeCapMs = 0,
 ): Promise<OpenedStream> {
   const failures: string[] = [];
+  let retryAfterSec: number | undefined;
+  let refusal: unknown = null;
+  let onlyRefusals = true;
   const codes: FailureCodes = new Map();
   const deadline = Date.now() + budgetMs;
   const cloudTtfb = cloudHedgeMs(budgetMs);
@@ -412,11 +415,11 @@ async function openStream(
   const ignoreRateLimit = targets.every((t) => isRateLimited(t, breakers));
   for (const target of targets) {
     const breaker = new TargetHealth(breakers, 'chat', target);
-    if (Date.now() >= deadline) { failures.push(`${target.providerId}: not tried (stage time budget used up)`); codes.set(target, 'timeout'); continue; }
+    if (Date.now() >= deadline) { failures.push(`${target.providerId}: not tried (stage time budget used up)`); codes.set(target, 'timeout'); onlyRefusals = false; continue; }
     if (!ignoreRateLimit && isRateLimited(target, breakers)) {
-      failures.push(`${target.providerId}: rate limited, waiting for the upstream's Retry-After`); codes.set(target, 'rate_limited'); continue;
+      failures.push(`${target.providerId}: rate limited, waiting for the upstream's Retry-After`); codes.set(target, 'rate_limited'); onlyRefusals = false; continue;
     }
-    if (!breaker.allowRequest()) { failures.push(`${target.providerId}: circuit open after repeated failures`); codes.set(target, 'circuit_open'); continue; }
+    if (!breaker.allowRequest()) { failures.push(`${target.providerId}: circuit open after repeated failures`); codes.set(target, 'circuit_open'); onlyRefusals = false; continue; }
     if (clientSignal?.aborted) throw clientGone();
     const abort = new AbortController();
     const onClientGone = () => abort.abort();
@@ -459,9 +462,14 @@ async function openStream(
       clientSignal?.removeEventListener('abort', onClientGone);
       if (clientSignal?.aborted) { breaker.releaseProbe(); throw clientGone(); }
       const status = (err as { status?: unknown })?.status;
-      if (isClientErrorStatus(typeof status === 'number' ? status : null)) throw err;
-      const code = failureCode(err);
-      if (status === 429) { markRateLimited(target, retryAfterOf(err), breakers); breaker.releaseProbe(); }
+      // A provider's refusal (4xx) moves on to the next target like any failure (provider-routing.ts isClientErrorStatus).
+      const refused = isClientErrorStatus(typeof status === 'number' ? status : null);
+      if (refused) refusal = err; else onlyRefusals = false;
+      const code = refused ? 'refused' : failureCode(err);
+      const after = retryAfterOf(err);
+      if (after) retryAfterSec = Math.min(after, retryAfterSec ?? after);
+      if (refused) breaker.releaseProbe();
+      else if (status === 429) { markRateLimited(target, after, breakers); breaker.releaseProbe(); }
       else if (isNeutralFailure(code)) breaker.releaseProbe();
       else breaker.recordFailure(err);
       failures.push(describeFailure(target.providerId, err));
@@ -469,7 +477,8 @@ async function openStream(
       log.warn(`stream: ${describeFailure(target.providerId, err)} → next provider`);
     }
   }
-  throw new ProviderUnavailableError(failures);
+  if (refusal && onlyRefusals) throw refusal;
+  throw new ProviderUnavailableError(failures, retryAfterSec);
 }
 
 function clientGone(): Error {

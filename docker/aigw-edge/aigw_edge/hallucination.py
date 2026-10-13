@@ -126,7 +126,15 @@ def filter_transcript(text: str, language: str | None, meta: dict | None = None)
     original = text or ""
     out = original
     nsp, cr, lp = meta.get("no_speech_prob"), meta.get("compression_ratio"), meta.get("avg_logprob")
-    if out and any(v is not None for v in (nsp, cr, lp)):
+    voiced = (meta.get("speech_ms") or 0) > 0
+    if out and voiced and any(v is not None for v in (nsp, cr, lp)):
+        if (cr or 0) > COMPRESSION_RATIO:
+            codes.append("compression_ratio")
+        elif (nsp or 0) > NO_SPEECH_PROB and (lp if lp is not None else 0) < AVG_LOGPROB:
+            codes.append("no_speech_prob")
+        if codes:
+            out = ""
+    elif out and any(v is not None for v in (nsp, cr, lp)):
         # One flat set of metrics (the speech-stack's) is judged as a single segment, like the TS filter.
         if (nsp or 0) > NO_SPEECH_PROB:
             codes.append("no_speech_prob")
@@ -141,7 +149,7 @@ def filter_transcript(text: str, language: str | None, meta: dict | None = None)
         if n in HIGH:
             codes.append("blocklist")
             out = ""
-        elif lang and n not in LEARNER_SAFE and n in AMBIGUOUS.get(lang, set()) and (nsp or 0) >= AMBIGUOUS_NO_SPEECH_PROB:
+        elif lang and n not in LEARNER_SAFE and n in AMBIGUOUS.get(lang, set()) and not voiced and (nsp or 0) >= AMBIGUOUS_NO_SPEECH_PROB:
             codes.append("blocklist_corroborated")
             out = ""
     if out:

@@ -200,6 +200,15 @@ describe('GatewayClient — deployments, apps, health', () => {
     await expect(client(f).deployments.put('x', {})).rejects.toMatchObject({ status: 403, code: 'forbidden', message: expect.stringContaining('cannot manage') });
   });
 
+  it('sends X-Gateway-Device for a call that names a device, and keeps it out of the body', async () => {
+    const f = fakeFetch({ [`POST ${BASE}/v1/chat/completions`]: () => json({ choices: [] }) });
+    const gw = client(f);
+    await gw.chat({ model: 'm', messages: [{ role: 'user', content: 'x' }], device: 'install-7f3a9c21' });
+    await gw.chat({ model: 'm', messages: [{ role: 'user', content: 'x' }] });
+    expect(f.calls.map(c => c.headers['x-gateway-device'])).toEqual(['install-7f3a9c21', undefined]);
+    expect(JSON.parse(String(f.calls[0]!.body))).not.toHaveProperty('device');
+  });
+
   it('sends X-App on every call when `app` is set', async () => {
     const f = fakeFetch({
       [`GET ${BASE}/v1/apps/parle/routes`]: () => json({ app: 'parle', routes: { stt: { 'parle-stt': ['openrouter:x'] } } }),

@@ -1,0 +1,6 @@
+{
+  "name": "babelcast-speech",
+  "app": "babelcast",
+  "description": "babelcast: registered by its owner with no app, so its own keys (ucast.me activation keys resolve as user babelcast) got 403 on realtime sessions; declared here only the owning app. The reconciler sets the app when it is empty (never over another one) and changes no spec field and no replica",
+  "spec": {}
+}

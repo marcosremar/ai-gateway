@@ -55,7 +55,7 @@ describe('voice-catalog', () => {
   describe('getVoicesForProviderModel', () => {
     it('returns voices for known provider/model', () => {
       const catalog = getVoiceCatalog('openai');
-      if (!catalog || !catalog.models.length) return;
+      expect(catalog?.models.length).toBeGreaterThan(0);
 
       const modelId = catalog.models[0].id;
       const voices = getVoicesForProviderModel('openai', modelId);
@@ -78,7 +78,7 @@ describe('voice-catalog', () => {
   describe('getLanguagesFromCatalog', () => {
     it('returns unique sorted languages', () => {
       const catalog = getVoiceCatalog('kokoro');
-      if (!catalog) return;
+      expect(catalog).toBeTruthy();
 
       const langs = getLanguagesFromCatalog(catalog);
       expect(langs.length).toBeGreaterThan(0);
@@ -95,7 +95,7 @@ describe('voice-catalog', () => {
   describe('filterVoicesByLanguage', () => {
     it('filters by specific language', () => {
       const catalog = getVoiceCatalog('kokoro');
-      if (!catalog || !catalog.models.length) return;
+      expect(catalog?.models.length).toBeGreaterThan(0);
 
       const allVoices = catalog.models[0].voices;
       const ptVoices = filterVoicesByLanguage(allVoices, 'pt-BR');
@@ -105,7 +105,7 @@ describe('voice-catalog', () => {
 
     it('"all" returns all voices', () => {
       const catalog = getVoiceCatalog('kokoro');
-      if (!catalog || !catalog.models.length) return;
+      expect(catalog?.models.length).toBeGreaterThan(0);
 
       const allVoices = catalog.models[0].voices;
       const filtered = filterVoicesByLanguage(allVoices, 'all');
@@ -114,7 +114,7 @@ describe('voice-catalog', () => {
 
     it('empty language returns all voices', () => {
       const catalog = getVoiceCatalog('kokoro');
-      if (!catalog || !catalog.models.length) return;
+      expect(catalog?.models.length).toBeGreaterThan(0);
 
       const allVoices = catalog.models[0].voices;
       const filtered = filterVoicesByLanguage(allVoices, '');
@@ -157,7 +157,7 @@ describe('voice-catalog', () => {
     it('falls back by gender when no mapping', () => {
       const emptyConfig = { mappings: [], defaultSlot: 'female1' };
       const catalog = getVoiceCatalog('openai');
-      if (!catalog || !catalog.models.length) return;
+      expect(catalog?.models.length).toBeGreaterThan(0);
 
       const modelId = catalog.models[0].id;
       const voiceId = resolveVoiceSlot(emptyConfig, 'female1', 'openai', modelId);

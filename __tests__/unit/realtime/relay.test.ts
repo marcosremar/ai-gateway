@@ -40,6 +40,9 @@ describe('signaling relay', () => {
     expect(offer.headers.get('access-control-allow-origin')).toBe('*');
     expect(await offer.json()).toEqual({ sdp: 'v=0\r\no=edge answer\r\n', type: 'answer', sessionId: s.sessionId });
     expect(edge.offers[0]).toMatchObject({ body: { sdp: OFFER, type: 'offer', token: s.token }, token: 'replica-token-for-tests' });
+    expect(edge.offers[0]!.body).not.toHaveProperty('cfg');
+    await fetch(s.transports[0]!.offerUrl!, { method: 'POST', headers: { Authorization: `Bearer ${s.token}` }, body: JSON.stringify({ sdp: OFFER, cfg: 'e30' }) });
+    expect(edge.offers[1]!.body).toMatchObject({ cfg: 'e30' });
 
     const ice = await fetch(s.transports[0]!.iceUrl!, {
       method: 'POST', headers: { Authorization: `Bearer ${s.token}`, 'Content-Type': 'application/json' },
@@ -90,6 +93,14 @@ describe('signaling relay', () => {
     const expired = await fetch(s.transports[0]!.offerUrl!, { method: 'POST', headers: { Authorization: `Bearer ${old}` }, body: JSON.stringify({ sdp: OFFER }) });
     expect(expired.status).toBe(401);
     expect(await expired.json()).toMatchObject({ error: { code: 'token_expired' } });
+  });
+
+  it('an edge that refuses the offer as prompt_too_large (413) is passed through, not read as saturated (T3)', async () => {
+    const s = await session(gw);
+    edge.offerStatus = 413;
+    const refused = await fetch(s.transports[0]!.offerUrl!, { method: 'POST', headers: { Authorization: `Bearer ${s.token}` }, body: JSON.stringify({ sdp: OFFER }) });
+    expect(refused.status).toBe(413);
+    expect(await refused.json()).toMatchObject({ error: { code: 'prompt_too_large' } });
   });
 
   it('every other path still goes through the proxy auth', async () => {

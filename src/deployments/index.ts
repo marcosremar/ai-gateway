@@ -3,28 +3,37 @@
  * See `http.ts` for the API and `planner.ts` for the scaling rules.
  */
 
+import { onRailway, realMachinesAllowed, REAL_MACHINES_OFF } from './real-machines';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { IncomingMessage } from 'http';
 import { DeploymentController } from './controller';
 import { DEFAULT_SCALING_MODE } from './scaling-spec';
 import { probeLimitsFromEnv, spendLimitsFromEnv } from './spend-limits';
-import { createDeploymentRoutes, HttpReplicaProbe } from './http';
-import { ScalewayDeploymentBackend } from './scaleway-backend';
+import { createDeploymentRoutes, HttpReplicaProbe, type DeploymentRoutesOptions } from './http';
+import { ClientGpu } from './client-gpu';
+import { ScalewayDeploymentBackend, scalewayRegistryOf } from './scaleway-backend';
+import { usesScaleway } from './spec';
 import { VastDeploymentBackend } from './vast-backend';
-import type { DeploymentBackend, DeploymentProvider } from './types';
+import { missingImage } from './image-check';
+import type { DeploymentBackend, DeploymentProvider, DeploymentSpec } from './types';
+import { FileHostStore } from './host-reputation';
 import { FileDeploymentStore } from './store';
 import { AppRegistry, FileAppStore } from './apps';
+import { AppDevices } from './app-devices';
 import { AppFallbackService, OpenRouterKeyProvisioner } from './app-fallback';
+import { AppGpuHealth, type AppGpuHealthOptions } from './app-gpu-health';
 import { ClientStabilityLog } from './stability';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
 import { sessionsWanting } from '../realtime/external-load';
+import { SANDBOX_USER } from '../config/sandbox-env';
 
 export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
 export { planReplicas, desiredReplicas } from './planner';
 export { BUILTIN_PROFILES } from './profiles';
+export { bootFilesRoute, BOOT_FILES_PATH } from './boot-files';
 export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
@@ -34,6 +43,7 @@ export { FileDeploymentStore, MemoryDeploymentStore } from './store';
 export { DeclaredDeploymentReconciler, DECLARED_DEPLOYMENTS, declaredBody, declaredImage } from './declared';
 export type { DeclaredDeployment, DeclaredStatus } from './declared';
 export { AppRegistry, FileAppStore, MemoryAppStore } from './apps';
+export { AppDevices, DEVICE_HEADER } from './app-devices';
 export { AppFallbackService, OpenRouterKeyProvisioner, fallbackRoutes } from './app-fallback';
 export { ClientStabilityLog, cleanEvent } from './stability';
 export type { ClientStabilityBatch, ClientInstabilityEvent } from './stability';
@@ -52,18 +62,77 @@ export function proxyIdleTimeoutMs(env: Record<string, string | undefined>, depl
   return deploymentsEnabled ? String(DEPLOYMENTS_PROXY_IDLE_MS) : null;
 }
 
-function onRailway(env: Record<string, string | undefined>): boolean {
-  return Boolean(env.RAILWAY_ENVIRONMENT_ID || env.RAILWAY_ENVIRONMENT || env.RAILWAY_PROJECT_ID);
-}
 
 export interface DeploymentsFromEnv {
   controller: DeploymentController;
   /** Stops the in-process janitor (janitor.ts); absent when it is off. */
   stopJanitor?: () => void;
   apps: AppRegistry;
+  devices: AppDevices;
   handler: ReturnType<typeof createDeploymentRoutes>;
   /** WS upgrades under /v1/deployments/:name/invoke are relayed to the replica. */
   upgrade: (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => Promise<boolean>;
+  clientGpu: ClientGpu;
+  gpuHealth: AppGpuHealth;
+  registryWarning: () => string | null;
+  rotateCredentials: (env: Record<string, string | undefined>) => Promise<CredentialRotation>;
+}
+
+export const DEPLOYMENT_CREDENTIAL_KEYS = [
+  'SCW_SECRET_KEY', 'SCALEWAY_SECRET_KEY', 'SCW_DEFAULT_PROJECT_ID', 'SCW_PROJECT_ID', 'SCALEWAY_PROJECT_ID', 'SCW_REGISTRY_SECRET_KEY', 'VAST_API_KEY',
+] as const;
+
+export interface CredentialRotation {
+  rotated: DeploymentProvider[];
+  rejected: Array<{ provider: DeploymentProvider; error: string }>;
+  needsRestart: DeploymentProvider[];
+}
+
+const scalewayCredentialsOf = (env: Record<string, string | undefined>) => ({
+  secretKey: (env.SCW_SECRET_KEY || env.SCALEWAY_SECRET_KEY || '').trim(),
+  projectId: env.SCW_DEFAULT_PROJECT_ID || env.SCW_PROJECT_ID || env.SCALEWAY_PROJECT_ID || undefined,
+  registrySecret: env.SCW_REGISTRY_SECRET_KEY,
+});
+
+export async function rotateBackendCredentials(
+  backends: { scaleway?: ScalewayDeploymentBackend; vast?: VastDeploymentBackend }, env: Record<string, string | undefined>,
+): Promise<CredentialRotation> {
+  const result: CredentialRotation = { rotated: [], rejected: [], needsRestart: [] };
+  const restore = (names: readonly string[], value: string | undefined) => {
+    for (const name of names) {
+      if (!env[name]) continue;
+      if (value === undefined) delete env[name]; else env[name] = value;
+    }
+  };
+  const attempt = async (provider: DeploymentProvider, run: () => Promise<void>, putBack: () => void) => {
+    try { await run(); result.rotated.push(provider); } catch (err) {
+      putBack();
+      result.rejected.push({ provider, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  const scw = scalewayCredentialsOf(env);
+  const { scaleway, vast } = backends;
+  if (scaleway && scw.secretKey && (scw.secretKey !== scaleway.secretKey || scw.projectId !== scaleway.projectId
+    || scw.registrySecret !== scaleway.registrySecret)) {
+    await attempt('scaleway', () => scaleway.rotateCredentials(scw), () => {
+      restore(['SCW_SECRET_KEY', 'SCALEWAY_SECRET_KEY'], scaleway.secretKey);
+      restore(['SCW_DEFAULT_PROJECT_ID', 'SCW_PROJECT_ID', 'SCALEWAY_PROJECT_ID'], scaleway.projectId);
+      restore(['SCW_REGISTRY_SECRET_KEY'], scaleway.registrySecret);
+    });
+  }
+  else if (!scaleway && scw.secretKey) result.needsRestart.push('scaleway');
+  const vastKey = env.VAST_API_KEY?.trim();
+  if (vast && vastKey && vastKey !== vast.currentKey) await attempt('vast', () => vast.rotateKey(vastKey), () => restore(['VAST_API_KEY'], vast.currentKey));
+  else if (!vast && vastKey) result.needsRestart.push('vast');
+  return result;
+}
+
+export function privateImageWarning(specs: DeploymentSpec[], scaleway: Pick<ScalewayDeploymentBackend, 'registryAuthFor'> | undefined): string | null {
+  if (!scaleway) return null;
+  const blocked = specs.filter(s => usesScaleway(s) && scalewayRegistryOf(s.image) && !s.registryAuth && !s.bootScript && !scaleway.registryAuthFor(s.image));
+  if (!blocked.length) return null;
+  return `SCW_REGISTRY_SECRET_KEY is missing (or equals SCW_SECRET_KEY): ${blocked.map(s => s.name).join(', ')} cannot create a Scaleway replica`
+    + ' because its image is on the private registry — set it to a ContainerRegistryReadOnly IAM key and restart the gateway';
 }
 
 /**
@@ -88,22 +157,18 @@ export interface DeploymentsFromEnv {
  *   they buffered while the gateway was down; persisted to client-stability.jsonl in the state dir.
  */
 /**
- * Admin userIds: DEPLOYMENTS_ADMIN_USERS plus `alwaysAdmin` (empty in production; the `sandbox` user only under the
- * transition flag ACCEPT_SANDBOX_TOKEN_AS_KEY=1). An empty list grants admin to NOBODY — until
- * 06/10/2026 it made every GATEWAY_API_KEYS key an admin (deployments, keys, `X-App` for any app's fallback plan).
- * The one source of the rule for deployments, `PUT /v1/admin/keys` and `/health?deep=1` (serve.ts).
+ * Admin userIds: DEPLOYMENTS_ADMIN_USERS, never the `sandbox` user (the dev token is a client). An empty list grants
+ * admin to NOBODY — until 06/10/2026 it made every GATEWAY_API_KEYS key an admin. The one source of the rule for
+ * deployments, `PUT /v1/admin/keys` and `/health?deep=1` (serve.ts).
  */
-export function adminUsersFromEnv(env: Record<string, string | undefined>, alwaysAdmin: readonly string[] = []): ReadonlySet<string> {
-  const listed = (env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean);
-  return new Set([...listed, ...alwaysAdmin.filter(Boolean)]);
+export function adminUsersFromEnv(env: Record<string, string | undefined>): ReadonlySet<string> {
+  return new Set((env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').map(s => s.trim()).filter(u => u && u !== SANDBOX_USER));
 }
 
 /** Boot warning when DEPLOYMENTS_ADMIN_USERS is empty (null when it is set). */
-export function adminListWarning(env: Record<string, string | undefined>, alwaysAdmin: readonly string[] = []): string | null {
+export function adminListWarning(env: Record<string, string | undefined>): string | null {
   if ((env.DEPLOYMENTS_ADMIN_USERS ?? '').split(',').some(s => s.trim())) return null;
-  const only = alwaysAdmin.filter(Boolean);
-  return `DEPLOYMENTS_ADMIN_USERS is empty: no GATEWAY_API_KEYS key is an admin${only.length ? ` (only ${only.join(', ')})` : ''}`
-    + ' — set DEPLOYMENTS_ADMIN_USERS=<userId,…> to grant admin to a key';
+  return 'DEPLOYMENTS_ADMIN_USERS is empty: no GATEWAY_API_KEYS key is an admin — set DEPLOYMENTS_ADMIN_USERS=<userId,…> to grant admin to a key';
 }
 
 /** DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES (default 60, 0 = off): how long a `minReplicas` pin may sit unused. */
@@ -118,13 +183,15 @@ export function deploymentsFromEnv(
   env: Record<string, string | undefined>,
   opts: {
     userOf: (req: IncomingMessage) => string | null;
-    /** userIds that may always manage, on top of DEPLOYMENTS_ADMIN_USERS (serve.ts: none, or `sandbox` under ACCEPT_SANDBOX_TOKEN_AS_KEY=1). */
-    alwaysAdmin?: string[];
+    /** Live admin set (serve.ts: the access store's, changed at runtime); default: from env. */
+    admins?: ReadonlySet<string>;
     log?: (msg: string, data?: Record<string, unknown>) => void;
     /** Declared deployments' status, added to `GET /v1/deployments` as `declared`. */
     declaredStatus?: () => unknown;
     /** An app replaced its routes: the caller re-mounts the providers. */
     onRoutesChange?: () => void;
+    keyOf?: DeploymentRoutesOptions['keyOf'];
+    gpuHealth?: Pick<AppGpuHealthOptions, 'cloudLinks' | 'onDegraded'>;
   },
 ): DeploymentsFromEnv | null {
   if (env.DEPLOYMENTS_ENABLED === '0') return null;
@@ -138,15 +205,20 @@ export function deploymentsFromEnv(
     opts.log?.('Deployments disabled: set DEPLOYMENTS_NAMESPACE (use your own, e.g. "dev-<name>") when running outside Railway');
     return null;
   }
+  if (!realMachinesAllowed(env)) {
+    opts.log?.(REAL_MACHINES_OFF);
+    return null;
+  }
   const projectId = env.SCW_DEFAULT_PROJECT_ID || env.SCW_PROJECT_ID || env.SCALEWAY_PROJECT_ID || undefined;
   const maxTotal = Number(env.DEPLOYMENTS_MAX_REPLICAS ?? 6);
   const maxWait = Number(env.DEPLOYMENTS_MAX_WAIT_SECONDS);
   const stateDir = env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gateway');
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
-  const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = {
-    ...(secret ? { scaleway: new ScalewayDeploymentBackend(secret, { projectId }) } : {}),
-    ...(vastKey ? { vast: new VastDeploymentBackend(vastKey, { log: opts.log }) } : {}),
-  };
+  const maxDevices = Number(env.APP_MAX_DEVICES);
+  const devices = new AppDevices(apps, { log: opts.log, ...(maxDevices > 0 ? { maxPerApp: Math.floor(maxDevices) } : {}) });
+  const scaleway = secret ? new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY }) : undefined;
+  const vast = vastKey ? new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir), ...vastCreditFloor(env) }) : undefined;
+  const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = { ...(scaleway ? { scaleway } : {}), ...(vast ? { vast } : {}) };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
   const controller = new DeploymentController({
     backends,
@@ -157,18 +229,26 @@ export function deploymentsFromEnv(
     busyGraceMs,
     unhealthyStrikes,
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
+    publicUrl: env.AIGW_PUBLIC_URL?.trim() || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : undefined),
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
     ...spendLimitsFromEnv(env),
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
     ...(maxWait > 0 ? { maxColdStartWaitSeconds: maxWait } : {}),
     log: opts.log,
+    checkImage: (image, auth) => missingImage(image, auth ?? scaleway?.registryAuthFor(image) ?? null),
   });
-  const admins = adminUsersFromEnv(env, opts.alwaysAdmin);
-  const adminWarning = adminListWarning(env, opts.alwaysAdmin);
+  const admins = opts.admins ?? adminUsersFromEnv(env);
+  const adminWarning = adminListWarning(env);
   if (adminWarning) opts.log?.(`WARNING: ${adminWarning}`);
+  const clientGpu = new ClientGpu(controller, { path: join(stateDir, 'client-gpu.json'), log: opts.log });
+  const gpuHealth = new AppGpuHealth({ controller, apps, ...opts.gpuHealth, ...(opts.log ? { log: opts.log } : {}) });
   const handler = createDeploymentRoutes({
     controller,
+    clientGpu,
+    gpuHealth,
+    ...(opts.keyOf ? { keyOf: opts.keyOf } : {}),
     apps,
+    devices,
     userOf: opts.userOf,
     ...(opts.onRoutesChange ? { onRoutesChange: opts.onRoutesChange } : {}),
     fallback: new AppFallbackService({
@@ -179,23 +259,34 @@ export function deploymentsFromEnv(
     stability: new ClientStabilityLog({ file: join(stateDir, 'client-stability.jsonl'), log: opts.log }),
     isAdmin: (req) => admins.has(opts.userOf(req) ?? ''),
     declaredStatus: opts.declaredStatus,
+    log: opts.log,
   });
   // In-process janitor (build machines and detached volumes that no deployment owns). On by default on Railway, where
   // the gateway is the one owner of the project's leftovers; elsewhere opt in with DEPLOYMENTS_JANITOR=1.
   const janitorOn = env.DEPLOYMENTS_JANITOR === '1' || (env.DEPLOYMENTS_JANITOR !== '0' && onRailway(env));
   // The janitor's leftovers (build servers, detached SBS volumes) exist only on Scaleway; a deleted Vast instance
   // takes its disk with it.
-  const stopJanitor = janitorOn && secret ? startJanitor({ cloud: scalewayJanitorCloud(secret, projectId), log: opts.log }) : undefined;
-  return { controller, apps, handler, upgrade: handler.upgrade, ...(stopJanitor ? { stopJanitor } : {}) };
+  const stopJanitor = janitorOn && scaleway
+    ? startJanitor({ cloud: scalewayJanitorCloud(() => scaleway.secretKey, () => scaleway.projectId), log: opts.log }) : undefined;
+  const registryWarning = () => privateImageWarning(controller.list().flatMap(v => controller.specOf(v.name) ?? []), scaleway);
+  const rotateCredentials = (current: Record<string, string | undefined>) => rotateBackendCredentials({ scaleway, vast }, current);
+  return { controller, apps, devices, handler, upgrade: handler.upgrade, clientGpu, gpuHealth, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
+}
+
+export function vastCreditFloor(env: Record<string, string | undefined>): { minCreditUsd?: number } {
+  const floor = Number(env.VAST_MIN_CREDIT_USD);
+  return env.VAST_MIN_CREDIT_USD?.trim() && Number.isFinite(floor) && floor >= 0 ? { minCreditUsd: floor } : {};
+
 }
 
 /** The janitor's view of Scaleway: build servers by tag and the project's SBS volumes, in every known zone. */
-export function scalewayJanitorCloud(secret: string, projectId: string | undefined): JanitorCloud {
+export function scalewayJanitorCloud(secretOf: () => string, projectOf: () => string | undefined): JanitorCloud {
   const client = new ScalewayClient();
-  const credentials = { apiKey: secret };
+  const credentials = () => ({ apiKey: secretOf() });
+  const scope = () => { const projectId = projectOf(); return projectId ? { projectId } : {}; };
   return {
     async listServersByTag(tag) {
-      const found = await client.listInstancesByTag(tag, credentials, projectId ? { projectId } : {});
+      const found = await client.listInstancesByTag(tag, credentials(), scope());
       return found.map(inst => {
         const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
         return {
@@ -205,10 +296,10 @@ export function scalewayJanitorCloud(secret: string, projectId: string | undefin
       });
     },
     async listVolumes() {
-      const lists = await Promise.all(KNOWN_ZONES.map(zone => client.listBlockVolumes(zone, credentials, projectId ? { projectId } : {})));
+      const lists = await Promise.all(KNOWN_ZONES.map(zone => client.listBlockVolumes(zone, credentials(), scope())));
       return lists.flat();
     },
-    deleteServer: (server) => client.releaseInstance(server.id, credentials, { awaitVolumes: false }),
-    deleteVolume: (volume) => client.deleteBlockVolume(volume.zone, volume.id, credentials),
+    deleteServer: (server) => client.releaseInstance(server.id, credentials(), { awaitVolumes: false }),
+    deleteVolume: (volume) => client.deleteBlockVolume(volume.zone, volume.id, credentials()),
   };
 }

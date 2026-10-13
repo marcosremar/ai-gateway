@@ -104,6 +104,40 @@ describe('turn taking', () => {
     expect(onTurn).not.toHaveBeenCalled();
   });
 
+  it('an early pause hands over the clip so far; speech resuming cancels it; a pause that completes keeps it', async () => {
+    const { clip, log } = fakeClip();
+    const onSpeculate = vi.fn();
+    const onSpeculateCancel = vi.fn();
+    const onTurn = vi.fn();
+    const turns = createTurnTaking({
+      clip: { ...clip, snapshot: async () => { log.push('snapshot'); return new Blob(['so far']); } },
+      track: () => ({}) as MediaStreamTrack, toWav: async (blob) => new Blob([blob], { type: 'audio/wav' }),
+      endSilenceMs: END_SILENCE_MS, maxSpeechMs: MAX_SPEECH_MS, echoTailMs: 0, onVoice: () => {}, onTurn, onSpeculate, onSpeculateCancel,
+      now: () => Date.now(),
+    });
+    turns.setListening(true);
+    turns.onEffect({ kind: 'vadPause', frame: 3 });
+    expect(log).toEqual([]);
+    turns.onEffect(start);
+    turns.onEffect({ kind: 'vadPause', frame: 30 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSpeculate).toHaveBeenCalledTimes(1);
+    turns.onEffect({ kind: 'vadResume', frame: 33 });
+    expect(onSpeculateCancel).toHaveBeenCalledTimes(1);
+    turns.onEffect({ kind: 'vadPause', frame: 50 });
+    turns.onEffect({ kind: 'vadResume', frame: 51 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSpeculate).toHaveBeenCalledTimes(1);
+    turns.onEffect({ kind: 'vadPause', frame: 60 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSpeculate).toHaveBeenCalledTimes(2);
+    turns.onEffect(end);
+    await vi.advanceTimersByTimeAsync(END_SILENCE_MS);
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onSpeculateCancel).toHaveBeenCalledTimes(2);
+    expect(log).toEqual(['start', 'snapshot', 'snapshot', 'snapshot', 'finish']);
+  });
+
   it('a turn that never pauses closes at maxSpeechMs', async () => {
     const { turns, onTurn } = taking({ echoTailMs: 0 });
     turns.setListening(true);

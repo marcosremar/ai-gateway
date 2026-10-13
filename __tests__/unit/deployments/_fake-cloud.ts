@@ -33,6 +33,7 @@ export class FakeCloud implements DeploymentBackend {
   measureRtt?: (machine: ReplicaMachine) => Promise<number | null>;
   measureBaselineRtt?: DeploymentBackend['measureBaselineRtt'];
   recordRtt?: DeploymentBackend['recordRtt'];
+  noteHost?: DeploymentBackend['noteHost'];
   previewOffers?: DeploymentBackend['previewOffers'];
   placementNote?: string;
   releaseReasons: Array<string | undefined> = [];
@@ -56,6 +57,7 @@ export class FakeCloud implements DeploymentBackend {
       machine: {
         id, deployment: input.spec.name, ip: null, state: 'running', createdAt: this.now(),
         zone: input.spec.zone, machineType: input.spec.machineType, pricePerHour: this.price,
+        ...(input.tokenKey ? { tokenKey: input.tokenKey } : {}),
         ...(this.placementNote ? { placementNote: this.placementNote } : {}),
       },
       server: createServer(),

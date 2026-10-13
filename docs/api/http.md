@@ -25,17 +25,28 @@ curl -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" ...
 ```
 
 Set `GATEWAY_API_KEYS` on the server (comma-separated; `key:user` names the user). When no key is configured, only
-localhost requests are allowed. The `SANDBOX_TOKEN` (and its aliases) is **not** a client key: it is the dev API's
+localhost requests are allowed. Keys are also issued, rotated and revoked at runtime (§ Access at runtime), and the
+admin list replaced, without a deploy. The `SANDBOX_TOKEN` (and its aliases) is **not** a client key: it is the dev API's
 master key, which the gateway uses only to fetch its own provider keys from the palco, and it gets `401` here (owner
 decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only, default off, logs a `WARNING`) accepts it
-again as the admin user `sandbox`, until every client sends its own key.
+again as the user `sandbox`, until every client sends its own key. That user is **not an admin** (even if
+`DEPLOYMENTS_ADMIN_USERS` lists it) and runs in **no-wake** mode; it may call the aliases of the app named by
+`SANDBOX_TOKEN_APP` (e.g. `parle`), under the app-key limits. `SANDBOX_TOKEN_ADMIN` is no longer read (10/10/2026): the
+dev token is a client, never an admin; a boot `WARNING` asks to remove the variable. These flags come from the host
+only, never from the dev API.
+Keys travel only as `Authorization: Bearer <key>`: a bare key without the scheme gets `401`.
+
+**Two roles only** (owner, 10/10/2026): an **admin** manages the gateway (machines, keys, config); a **client** calls
+the APIs (STT, chat, TTS, realtime, s2s). A developer is a client — testing never needs an admin key. Every key is one
+or the other: `GET /v1/admin/access/keys` lists each with `role: "admin" | "client"`. The dev token (`sandbox`) is
+always a client, even if the admin list names it.
 
 **Admin keys** — the users in `DEPLOYMENTS_ADMIN_USERS`. When that list is empty, no key is admin (fail closed since 06/10/2026; the boot logs a `WARNING`). Admin keys are required for deployment
 mutations, `X-App` naming **another** app, `GET /health?deep=1`, the full view of `GET /health?details=1` and
 `/v1/admin/keys*`. A non-admin key may send `X-App` equal to its own app (what `GatewayClient({ app })` sends); any
 other value → `403`. The same rule holds for every app-scoped route added later (e.g. a machines API).
 
-**App keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
+**Client keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
 
 - **Models**: only the aliases of its own app (`PUT /v1/apps/:app/routes`), per stage — no `org/model` passthrough,
   no embeddings or images. Anything else → `403 permission_error`, before any provider is called.
@@ -47,8 +58,15 @@ other value → `403`. The same rule holds for every app-scoped route added late
   "<ISO time>"}}` (a realtime session: `error.code: "budget_exceeded"` plus top-level `reason`, `budget`, `reset_at`).
   It is not the per-minute rate limit (`rate_limit_error`): retrying before `reset_at` cannot succeed, so a client
   shows "limit reached" and stops. `0` turns one off.
-- **Sizing the budget for a class.** Both limits are gateway-wide settings applied to each app (there is no per-app
-  value): size them for the largest app. A `/v1/s2s` turn costs one request and `prompt characters / 4 + max_tokens`
+- **Sizing the budget for a class.** Both limits are gateway-wide defaults, meant for a leaked key; an admin gives an
+  app its own daily budgets with `PUT /v1/apps/:app/limits {"dailyRequests": n, "dailyTokens": n}` (`null` = the
+  default, `0` = no budget; `GET` shows them, also to the app's own key, which cannot change them). The budget is
+  charged at admission only — an HTTP request, a `/v1/s2s` turn, a realtime session for its whole token — so a reply
+  already admitted is never cut: the learner's NEXT turn (or session) gets the 429 above. Use and projected exhaustion
+  are in `GET /health?details=1` → `appBudgets`; the 80 % and exhaustion events go to the log, to telemetry
+  (`app.budget_warning`, `app.budget_exhausted`) and to `ALERT_WEBHOOK_URL` when set. A realtime session is charged
+  in requests only (its turns run on the app's own GPU replica, not on cloud credit); a session that drops to its
+  `s2s-stream` / `post` transport pays each `/v1/s2s` turn on top of the session charge. A `/v1/s2s` turn costs one request and `prompt characters / 4 + max_tokens`
   tokens, where the prompt is `system` + `messages` + `user_template` and an omitted `max_tokens` counts as
   `APP_MAX_TOKENS` (1024); a realtime session costs `4 × minutes of its token` requests at admission and no tokens.
   `APP_DAILY_TOKENS ≥ students × turns per student per day × tokens per turn` and `APP_DAILY_REQUESTS ≥ students ×
@@ -77,10 +95,11 @@ other value → `403`. The same rule holds for every app-scoped route added late
 Errors of the proxy and of the OpenAI routes are `{"error": {"message", "type"}}`; `type` follows the status:
 `400` `invalid_request_error` · `401` `authentication_error` · `403` `permission_error` · `404` `not_found_error` ·
 `413` `request_too_large` · `429` `rate_limit_error` (or `budget_exceeded` for an app's daily budget) · `5xx`
-`server_error` / `provider_unavailable`. A malformed multipart body (truncated, oversized field name) is a `400`, an
+`server_error` / `provider_unavailable`. A device refusal adds `code`: `403` `device_blocked` or `device_required`, `400`
+`invalid_device` (see *App devices*). A malformed multipart body (truncated, oversized field name) is a `400`, an
 oversized file a `413`. A `429` always carries `Retry-After` (seconds).
 
-The **management routes** (`/v1/deployments*`, `/v1/profiles*`, `/v1/apps*`, `/v1/admin/keys*`) answer errors as
+The **management routes** (`/v1/deployments*`, `/v1/profiles*`, `/v1/apps*`) answer errors as
 `{"error": "<message>"}` (a string, no `type`; a 503 while warming adds `"status": "warming"`), and a 500 carries
 `requestId` only.
 
@@ -92,7 +111,7 @@ apps, profiles and admin keys alike.
 
 Origins: `CORS_ORIGINS` (comma separated, `*` = any; localhost always). Preflight allows `GET, POST, PUT, PATCH,
 DELETE, OPTIONS` and the headers `Content-Type, Authorization, X-API-Key, X-App, X-Request-Id, X-Aigw-Wait,
-X-Gateway-No-Wake`. Responses expose `X-Gateway-Provider, X-Gateway-Fallback, X-Gateway-Fallback-From,
+X-Gateway-No-Wake, X-Gateway-Device`. Responses expose `X-Gateway-Provider, X-Gateway-Fallback, X-Gateway-Fallback-From,
 X-Gateway-Model-Catalog-Warnings, X-STT-Filtered, X-STT-Raw-Length, Retry-After, X-Request-Id` to browser code.
 
 ## Rate Limiting
@@ -157,7 +176,13 @@ with the fallback hedged in, so the probe never makes the client wait the full t
 for: the gateway starts scaling it up and answers from the fallback in the same call; once a replica is ready,
 traffic returns to it. A real client error (e.g. `400` invalid request) is returned as is.
 
-### No-wake mode — `X-Gateway-No-Wake: 1` / `GATEWAY_NO_WAKE_USERS`
+### No-wake mode — `X-Gateway-No-Wake: 1` / `GATEWAY_NO_WAKE_USERS` / key policy `autoWake`
+
+**Since 10/10/2026 every client key is no-wake unless its policy says `autoWake: true`** (`PUT
+/v1/admin/access/keys/policy`, below). A Saturday with no class still saw 27 GPU starts from test calls; a test now
+gets the cloud answer, and turns a GPU on on purpose with `POST /v1/deployments/:name/start` (§ Deployments). The
+class client keeps waking its GPUs: the first boot of this build gives every `parle` key `autoWake: true`,
+`canStartGpu: true` and no daily cap (`access.json`, once). Local open mode (no keys) keeps waking.
 
 A request that must never start a rented machine (a test, a probe, a batch job, a dev box) sends
 `X-Gateway-No-Wake: 1` (`true`/`yes` too); a key user listed in `GATEWAY_NO_WAKE_USERS` (comma list of the user names
@@ -201,6 +226,9 @@ curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
   runs Whisper + Qwen3.5 + Qwen3-TTS). A registered `deployment` always wins. Resolved when the providers are mounted
   (boot, routes PUT, key reload, a declared deployment registered); `/health?details=1` shows the effective target and the
   boot log lists it under `oneGpu`.
+- `order: "benchmark"` + `benchmarkDataset` (first entry only): the entries after the first are ordered by the model
+  benchmark ranking of that dataset (`POST /v1/admin/benchmarks`, admin); unranked entries keep their order after the
+  ranked ones and the first entry never moves. Formula, weights and routes: [`docs/model-benchmarks.md`](../model-benchmarks.md).
 - `voices: {feminine, masculine}` (TTS; capability, not in the parle's chain, which is MAI-Voice → Kokoro): a fallback that cannot clone speaks a stock voice of the **gender** of the
   requested voice (`src/config/tts-fallback-voices.ts`). The gender comes from the entry's `voiceGenders`
   (`{"pt-PT-1baab6": "masculine", …}`, the app's cast), the `xx-f-`/`xx-m-` slug, or the gender letter of a Kokoro
@@ -229,8 +257,11 @@ else its own configured voice. The replica must expose the OpenAI shapes (`/v1/a
   unavailable (404 while its refs server starts, error) is not sent `voice` either: the request falls back with
   `X-Gateway-Fallback: catalog_unavailable`. A missing catalog is trusted for 15 s only; a catalog for 5 min.
   A CustomVoice / OpenAI-shaped replica without catalog gets the request as sent.
-- Any other body field (`task_type`, `ref_audio`, `ref_text`, `language` — ISO codes become `Portuguese`/`French`/… —,
-  `stream_format`, …) is forwarded intact. The OpenRouter fallback never receives these fields.
+- Only these extra body fields are forwarded: `task_type`, `ref_audio`, `ref_text`, `language` (ISO codes become
+  `Portuguese`/`French`/…), `stream_format`, `instructions`, and `max_new_tokens` when it is a positive integer no
+  larger than the gateway's own cap for the input (it may lower the cap, never raise it); any other field is dropped.
+  `ref_audio` must be inline (`data:audio/...;base64,…`): a URL gets `400`, since the replica would fetch it. The
+  OpenRouter fallback never receives these fields.
 - With `response_format` `wav` or `pcm` the audio is **streamed** from the replica to the client
   (`stream: true, stream_format: "audio"`; send `"stream": false` to turn it off). Other formats come whole.
   A streamed body that breaks upstream reaches the client as a cut connection (a transport error), never as a
@@ -246,6 +277,85 @@ go Z.AI → OpenRouter `z-ai/<id>`, `whisper-large-v3(-turbo)` goes Groq → Ope
 Deepgram, Orpheus TTS is Groq only. Any other `org/model` id goes to OpenRouter as-is,
 followed by the generic chat fallback; without a usable OpenRouter key it answers `503 provider_unavailable`
 naming the key (not `404`). PlayAI TTS was retired by Groq and is no longer offered.
+
+### App devices — `/v1/apps/:app/devices`
+
+An app may name the end-user device behind each request with an opaque id, then list the devices it has seen and
+block one. Off unless the app sends ids: an app that sends none works exactly as before.
+
+**Sending the id**
+
+| Path | How |
+|---|---|
+| `POST /v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/embeddings`, `/v1/images/*`, `/v1/s2s` | header `X-Gateway-Device: <id>` |
+| `POST /v1/realtime/sessions` | body field `"device": "<id>"` — signed into the session token (claim `dev`), so the WebSocket, WebRTC signaling and telemetry of that session carry it without trusting the browser again |
+| Node SDK (`GatewayClient`) | `device` on any call: `gw.chat({ model, messages, device })` |
+| Browser SDK (`createRealtimeSession`) | option `device`: posted to the app's `sessionEndpoint` as `{transports, prefer, device}`; the app's backend passes it on (or, better, replaces it with an id it trusts) |
+
+The id is 8–64 characters of `[A-Za-z0-9_:-]`, starting with a letter or digit (a UUID fits). Anything else, and
+anything shaped like a key or token (`sk-…`, a JWT, `token_…`), is refused with `400 invalid_device` and never
+stored or logged. With an admin key the device is recorded for the app named by `X-App` (none: not recorded).
+
+**Routes** — the app's own key, or an admin key (same rule as every `/v1/apps/:app/*` path; another app's key: `403`).
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/apps/:app/devices` | `{ app, requireDevice, total, blocked, max, devices: [{ id, firstSeen, lastSeen, requestsToday, requests, lastKind, blocked?: { reason, by, at } }] }`. Query: `sort` = `lastSeen` (default) \| `firstSeen` \| `requestsToday` \| `requests`, `order` = `desc` (default) \| `asc`, `limit` (default 500), `blocked=1` (only blocked ones). Times are ms since the epoch; `requestsToday` is per UTC day; `lastKind` is `chat` / `stt` / `tts` / `s2s` / `realtime` / … |
+| `POST` | `/v1/apps/:app/devices/:device/block` | optional body `{ "reason": "…" }` (≤ 200 chars). Works for a device never seen (pre-block). Answers the device record |
+| `DELETE` | `/v1/apps/:app/devices/:device/block` | unblock; `404` for an unknown device |
+| `PATCH` | `/v1/apps/:app` | `{ "requireDevice": true \| false }` — refuse this app's requests that carry no device id |
+
+**What a blocked device gets**
+
+| Path | Effect | How fast |
+|---|---|---|
+| HTTP inference routes, `/v1/s2s` | `403` `{"error": {"type": "permission_error", "code": "device_blocked"}}`, before the daily budget is charged | the next request |
+| `POST /v1/realtime/sessions` | `403` `{"error": {"type": "realtime_error", "code": "device_blocked"}}`, nothing charged | the next admission |
+| open WebSocket session (relayed by the gateway) | closed with code `1008`, reason `device_blocked`; reconnecting answers `403` | the next frame the browser sends (audio frames flow continuously: milliseconds) |
+| open WebRTC session (audio goes browser ↔ replica, not through the gateway) | the gateway deletes the session on the replica (`DELETE /__aigw/rt/session/:id`); every later signaling call of its token answers `403 device_blocked` | at once while the gateway process that admitted it still knows the session (its token lifetime, default 10 min). Otherwise — gateway restarted, replica unreachable for the delete — the session ends at the edge's own session cap, 15 min after it started. It can never be re-opened |
+
+With `requireDevice`, a request without an id answers `403` `code: device_required`.
+
+**Storage and privacy.** The registry lives in the app account (`DEPLOYMENTS_STATE_DIR/apps.json`), written at most
+every 30 s and on every block/unblock, never on the request path (a map lookup per request). Per device: the id,
+first/last seen, request counts, last kind, and the block (reason, the key user who set it, when). **No IP address,
+no user agent, no content**: students share a university NAT, an IP is personal data and identifies nobody. At most
+`APP_MAX_DEVICES` (default 2000) devices per app: over it the least recently seen unblocked one is dropped; a
+blocked device is never dropped (when all 2000 are blocked ones, new devices are served but not listed, and a
+further block answers `409`). The app chooses the id: prefer a random per-install id over anything that names a
+person.
+
+**The limit.** The id is asserted by the app or its client. A block stops an unmodified client and everything the
+app's backend identifies; it does not stop someone who forges a new id. For that the app must mint the ids server
+side (e.g. a signed per-install id checked by its backend before it calls the gateway) and set `requireDevice`.
+The SDK's direct fallback (the app's backend calling providers while the gateway is unreachable) does not pass
+through the gateway, so the app must enforce its own blocks there.
+
+**Example — `babelcast`**
+
+```bash
+# who is using babelcast, most recent first
+curl "$GW/v1/apps/babelcast/devices?limit=50" -H "Authorization: Bearer $ADMIN_KEY"
+# block one, then check
+curl -X POST $GW/v1/apps/babelcast/devices/install-7f3a9c21/block -H "Authorization: Bearer $ADMIN_KEY" \
+  -H 'Content-Type: application/json' -d '{"reason": "account shared outside the class"}'
+curl "$GW/v1/apps/babelcast/devices?blocked=1" -H "Authorization: Bearer $ADMIN_KEY"
+# unblock
+curl -X DELETE $GW/v1/apps/babelcast/devices/install-7f3a9c21/block -H "Authorization: Bearer $ADMIN_KEY"
+# make ids mandatory for this app
+curl -X PATCH $GW/v1/apps/babelcast -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' -d '{"requireDevice": true}'
+```
+
+An app exists once a key names it: add `<new key>:babelcast` to `GATEWAY_API_KEYS` (a host setting of the gateway
+service, read at start) and give it its model aliases with an admin key:
+
+```bash
+curl -X PUT $GW/v1/apps/babelcast/routes -H "Authorization: Bearer $ADMIN_KEY" -H 'X-App: babelcast' \
+  -H 'Content-Type: application/json' -d '{ "chat": { "babelcast-llm": ["openrouter:<org/model>"] } }'
+```
+
+Devices show up in the list only when babelcast's backend sends `X-Gateway-Device` (or `device` for a realtime
+session).
 
 ### Direct-fallback plan — `GET /v1/apps/:app/fallback`
 
@@ -330,6 +440,7 @@ Every successful response of the three routes carries (no secrets):
 | `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
 | `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `policy`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
+| `X-Gateway-Status` | `degraded` | only for an app whose profile has `requiresGpu` (below, *App profile and GPU status*), when a cloud target answered: the answer is valid, but not what the app's GPU would have given |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
 A deployment target streams too: the gateway asks the replica for `stream: true` and relays each delta as it arrives
@@ -464,35 +575,61 @@ Auth: app or admin API key. Called by the app's backend, never by the browser.
 
 | Field | Type | |
 |---|---|---|
-| `config` | object | the `/v1/s2s` session config (`system`, `messages`, `voice`, `language`, `models`, `max_tokens`, …, `deployment`; default `S2S_DEPLOYMENT`) |
+| `config` | object | the `/v1/s2s` session config (`system`, `messages`, `voice`, `language`, `models`, `max_tokens`, …, `deployment`; default `S2S_DEPLOYMENT`), plus the realtime-only `intercepts` and `reply_guard` ([realtime.md](../realtime.md) § App hooks) |
 | `transports` | string[] | optional ordered preference among `webrtc`, `ws`, `s2s-stream`, `post` (must include `webrtc` or `ws`) |
 | `prefer` | string | optional: moved first |
+| `device` | string | optional: the end-user device this session is for (see *App devices*); signed into the token |
 
 Headers: `traceparent` (optional, W3C), `X-Gateway-No-Wake: 1` (a cold deployment is not woken).
 
 | Status | Meaning |
 |---|---|
-| 200 | `{sessionId, token, expiresAt, deployment, traceId, telemetryUrl, transports[], iceServers[], limits}` |
-| 400 | bad body, unknown transport |
+| 200 | `{sessionId, token, cfg?, expiresAt, deployment, traceId, telemetryUrl, transports[], iceServers[], limits}` |
+| 400 | bad body, unknown transport, malformed `intercepts` / `reply_guard` |
 | 401 | no / unknown key |
-| 403 | the key's app does not own the deployment (also when it does not exist) |
+| 403 | the key's app does not own the deployment (also when it does not exist); `device_blocked` / `device_required` (see *App devices*) |
 | 404 | (admin) deployment not found — with `fallback` |
-| 413 | `config` over 6144 base64url characters — send the long history with `config_update` once connected |
+| 413 | `config` over 32768 base64url characters (~24 KB of JSON) — send the long history with `config_update` once connected. Up to 6144 the config rides in the token; above, the answer also carries `cfg` (the config's base64url text, which the SDK hands to the edge) and the token only its digest: [realtime.md](../realtime.md) § Token, with the prompt sizes that fit each LLM context |
 | 429 | app daily budget exhausted (`Retry-After`); a session costs `REALTIME_REQUESTS_PER_MINUTE` × ⌈TTL/60⌉ requests |
 | 503 | `cold` (woken unless no-wake) / `saturated` / `unsupported` / `unreachable` / `paused`, with `Retry-After` and `fallback: {transport:"s2s-stream", url:"/v1/s2s"}` |
 
 Every answer carries `X-Aigw-Trace-Id`.
 
+### `POST /v1/realtime/updates`
+
+Auth: the app's API key (server side). Signs a change to a live session of the app for the page to hand to the edge.
+
+| Field | Type | |
+|---|---|---|
+| `token` | string | the session token of `POST /v1/realtime/sessions` |
+| `update` | object | `drop_turn`, `messages` (replaces the history), `system`, `voice`, `fallback_voice`, `user_template`, `max_tokens`, `temperature`, `stt_prompt`, `opener`, `first_audio_deadline_ms`, `intercepts`, `reply_guard`, `say {text, voice?, fallback_voice?, history?, tag?}` — [realtime.md](../realtime.md) § App hooks |
+
+| Status | Meaning |
+|---|---|
+| 200 | `{sessionId, signed, n}`: send `{type:"config_update", signed}` on the session (SDK `applyUpdate`); the edge answers `config_applied{n}` and refuses an older `n` |
+| 400 | bad body, malformed `intercepts` / `say` / `reply_guard` |
+| 401 | no / unknown key, or a token that does not verify (`token_expired` when expired) |
+| 403 | the session is another app's |
+| 410 | `replica_gone` |
+| 413 | `update` over 32768 base64url characters |
+
+No call to the replica and no gateway state: the answer is a signature.
+
 ### Browser routes (session token, not an API key)
 
-Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; `?token=` on the WebSocket). CORS `*`.
+Auth: `Authorization: Bearer <session token>` (or `token` in the JSON body; on the WebSocket, the subprotocol `aigw.token.<token>` next to `aigw.rt`, or `?token=` for older clients). CORS `*`.
 
 | Route | |
 |---|---|
-| `POST /v1/realtime/sessions/:id/offer` | `{sdp}` → `{sdp, type:"answer", sessionId}`. 401 bad / expired (`token_expired`), 403 token of another session, 410 `replica_gone`, 502 `edge_error` / `edge_unreachable`, 503 `saturated` |
+| `POST /v1/realtime/sessions/:id/offer` | `{sdp, cfg?}` (`cfg`: the descriptor's, for a config by reference) → `{sdp, type:"answer", sessionId}`. 401 bad / expired (`token_expired`), 403 token of another session, 410 `replica_gone`, 502 `edge_error` / `edge_unreachable`, 503 `saturated` |
 | `POST /v1/realtime/sessions/:id/ice` | `{candidate}` (trickle, optional) → 204 |
 | `DELETE /v1/realtime/sessions/:id` | ends the session on the replica (frees its slot) → 204 |
-| `GET /v1/realtime/ws?token=…[&traceparent=…]` | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |
+| `GET /v1/realtime/ws[?traceparent=…]` (token as subprotocol, or `?token=`) | WebSocket relayed to the replica. Text: JSON events / control; binary: `0x01` + PCM16 LE mono (16 kHz up, 24 kHz down, 20 ms). Refused before the handshake with 400 / 401 / 410 / 502 / 504; close codes cross both ways; 1013 when the browser stops reading; 1009 over 1 MiB |
+
+Control messages from the browser (WS text frames, WebRTC data channel): `interrupt`, `end_turn`, `ping` and
+`config_update {messages?, opener?}` or `config_update {signed}`. The session config signed in the token is authoritative: a `config_update` with
+any other field (`system`, `voice`, `user_template`, …) or a `system` message is refused whole with
+`{type:"error", code:"forbidden"}` ([realtime.md](../realtime.md) § Events and control messages).
 
 ### Environment
 
@@ -515,8 +652,13 @@ curl -X POST https://<gateway>/v1/audio/transcriptions -H "Authorization: Bearer
 ```
 
 ```json
-{ "text": "Bom dia" }
+{ "text": "Bom dia", "language": "pt", "language_probability": 0.97 }
 ```
+
+`language` / `language_probability`: the language the provider detected in the audio and its probability, when it gives
+them. The text is still transcribed in the requested `language`; the speech-stack replica (image with this change) detects
+on the same encoder pass, at no extra decode, so a learner speaking French to a `language=pt` request shows up as
+`"language": "fr"`. Absent on a cache hit and on providers that report none. Not a verdict on its own: on 72 short pt-BR clips (0.4–4 s, gTTS, some with noise) large-v3 detected another language in 5 (noisy ones); read it with `language_probability`.
 
 **Hallucination filter (on by default, every provider, every client).** Whisper and other STT models invent text on
 silence and noise ("E aí", "Obrigado por assistir", "Legendas pela comunidade Amara.org"). The gateway asks the provider
@@ -529,6 +671,7 @@ blocklist marks as invented, and answers `{"text":""}` (still `200`; the client 
 | response header `X-STT-Raw-Length` | length in characters of what the provider returned (on every `200`) |
 | multipart field `filter_hallucinations=false` | per-request opt-out (QA); `0`/`off` also accepted. Such answers are cached apart from filtered ones |
 | `language` | `pt`, `pt-BR` or `Portuguese` (codes and English/native names). Without it only the high-confidence phrases apply |
+| `speech_ms` (speech-stack replica) | milliseconds of speech its VAD found; when > 0 the metadata layer only drops Whisper's own silence test (`no_speech_prob` > 0.6 and `avg_logprob` < -1.0) and repetition loops, so a short real answer is not emptied ([details](../stt-hallucination-filter.md#rules)) |
 | `response_format=verbose_json` | `language`, `duration` and the kept `segments` are returned next to `text` |
 | env `STT_HALLUCINATION_FILTER=0` | turns the filter off for the whole gateway |
 | env `STT_FILTER_NO_SPEECH_PROB` (0.6), `STT_FILTER_AVG_LOGPROB` (-1.0), `STT_FILTER_COMPRESSION_RATIO` (2.4), `STT_FILTER_AMBIGUOUS_NO_SPEECH_PROB` (0.4) | thresholds, no deploy of code needed (design choices to pilot) |
@@ -584,9 +727,12 @@ production namespace (`default` on Railway).
 | `PATCH` | `/v1/deployments/:name` | update an existing one (e.g. `{ "minReplicas": 1 }`) |
 | `GET` | `/v1/deployments/:name` | status + replicas |
 | `DELETE` | `/v1/deployments/:name` | release every replica and forget the spec |
-| `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) |
+| `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) (admin, or a client key with `canStartGpu` and no daily cap — a capped key gets `403` pointing to `start`) |
 | `POST` | `/v1/deployments/:name/warm` | body `{ "replicas": n, "untilMinutes": m }`: keep `n` replicas up (0…`maxReplicas`) for `m` minutes (≤ 720) whatever the load; a later call replaces the window, `park` ends it; counts as a request (admin) |
-| `POST` | `/v1/deployments/:name/park` | done for now: forget the last use, scale to `minReplicas` at the next tick (powers off under `idleAction: "stop"`); in-flight requests are never cut (admin) |
+| `POST` | `/v1/deployments/:name/park` | done for now: forget the last use, scale to `minReplicas` at the next tick (powers off under `idleAction: "stop"`); in-flight requests are never cut (admin, or a client key with `canStartGpu` on its app's deployment) |
+| `POST` | `/v1/deployments/:name/start` | **client key with `canStartGpu`**, its app's deployment only: body `{ "minutes": 1–240 }` keeps one GPU up for that long (never fewer than a warm window already there). At the end it is parked once nobody used it for the key's `startIdleMinutes` (default 10) — unless a warm schedule, a realtime session, another warm window or another key's start needs it. `202 { deployment, until, idleMinutes, spentTodayEur, capEur }`. Over the key's daily cap → `402` saying what was spent and what to do |
+| | | A capped key that names a deployment with a **test copy** (another deployment whose spec has `testFor: "<name>"`, same app) starts the copy instead — `parle-speech` → `parle-speech-test`, one L4 (docs/deployments.md). While the copy is ready and the original is not, alias requests for the original are served by the copy |
+| `POST` | `/v1/deployments/:name/extend` | the same key: `{ "minutes": n }` more on the GPU it started (at most 240 min ahead); `404` without a start |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it; `X-Gateway-No-Wake: 1` → 503 `cold` at once instead). Raw passthrough: the STT hallucination filter does NOT apply here (use `/v1/audio/transcriptions` or `/v1/s2s`) |
 | `GET` | `/v1/profiles` | built-in + stored profiles (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`, …) |
 | `PUT` / `DELETE` | `/v1/profiles/:name` | store / delete a profile |
@@ -599,14 +745,126 @@ for a cold start.
 | Method | Path | |
 |---|---|---|
 | `GET` | `/v1/apps` | admin (no `X-App`): every app; an app key (or `X-App`): `{ "apps": [<its own>] }` |
-| `GET` | `/v1/apps/:app` | `{ id, createdAt, images, deployments: [{ name, status, appImage }] }` |
+| `GET` | `/v1/apps/:app` | `{ id, createdAt, requireDevice, images, deployments: [{ name, status, appImage }] }` |
 | `GET` / `PUT` | `/v1/apps/:app/routes` | the app's aliases (see *App aliases* above) |
 | `GET` | `/v1/apps/:app/images` | the app's saved images |
-| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` / `PUT` | `/v1/apps/:app/profile` | `{ requiresGpu, gpuDeployments }` (below); `PUT` by an admin, or by the app's own key naming only its own deployments |
+| `GET` | `/v1/apps/:app/status` | GPU status of the app's profile (below); `404` without a profile |
 | `GET` | `/v1/apps/:app/fallback` | direct-fallback plan (below) |
 | `POST` / `GET` | `/v1/apps/:app/stability-report` | SDK instability reports (below) |
+| `PATCH` | `/v1/apps/:app` | `{ "requireDevice": boolean }` (see *App devices*) |
+| `GET` / `POST` / `DELETE` | `/v1/apps/:app/devices`, `…/devices/:device/block` | the app's end-user devices: list, block, unblock (see *App devices*) |
 
 Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
+
+### App profile and GPU status — `/v1/apps/:app/profile`, `/v1/apps/:app/status`
+
+An app whose answers depend on its own GPU (parle: the detected language and the cloned voices only come from
+`parle-speech` / `parle-qwen-tts`) says so in its profile; the gateway then probes those GPUs and reports, per app,
+whether it is served by them.
+
+```bash
+curl -X PUT $GW/v1/apps/parle/profile -H "Authorization: Bearer $PARLE_KEY" -H 'content-type: application/json' \
+  -d '{"requiresGpu": true, "gpuDeployments": ["parle-speech", "parle-qwen-tts"]}'
+# → { app, profile, warnings? }  warnings: a deployment not registered, or without a warmSchedule
+curl $GW/v1/apps/parle/status -H "Authorization: Bearer $PARLE_KEY"
+```
+
+```json
+{ "app": "parle", "requiresGpu": true, "mode": "gpu", "checkedAt": "2026-10-13T16:01:00.000Z",
+  "deployments": [
+    { "name": "parle-speech", "stages": ["stt", "llm"], "state": "ready", "replicas": { "ready": 1, "total": 1 },
+      "lastProbe": { "at": "2026-10-13T16:00:12.000Z", "ok": true, "ms": 840, "error": null } },
+    { "name": "parle-qwen-tts", "stages": ["tts"], "state": "ready", "replicas": { "ready": 2, "total": 2 },
+      "lastProbe": { "at": "2026-10-13T16:00:40.000Z", "ok": true, "ms": 610, "error": null } } ],
+  "fallback": { "active": false, "since": null, "last": null } }
+```
+
+| Field | |
+|---|---|
+| `mode` | `gpu`: every profile deployment has a ready replica whose last probe passed and no stage was answered by the cloud in the last 5 min · `degraded`: anything else that still answers (a stage on the cloud fallback, a GPU stopped, booting or failing — outside the class window this is the normal state) · `down`: the GPU is not serving and the cloud reserve fails too (a request of the app answered by nobody in the last 5 min, or every probed cloud link of one of its stages failing) |
+| `deployments[].stages` | what the app's routes send to it (`llm` = chat), one-GPU mode resolved |
+| `deployments[].state` | `ready` (a replica up and not failing) · `failing` (every ready replica failed 2 probes in a row, or the controller lost its health) · `booting` · `stopped` |
+| `deployments[].replicas` | `ready` = ready and not failing; `total` = machines powered on |
+| `deployments[].lastProbe` | the latest probe round (a failed one first), kept after the replicas are gone; `null` = never probed |
+| `fallback` | `active`: a stage was answered by the cloud in the last 5 min; `since`: start of that run; `last`: the latest cloud answer `{ at, stage, served }` (`served` = `X-Gateway-Provider`) |
+
+**Probe** (`src/deployments/gpu-probe.ts`): every ready replica of a profile deployment gets, every 2 min, one minimal
+real call per stage it serves, straight on the replica (STT a 0.6 s WAV, chat `max_tokens: 1`, TTS one word in the
+first voice of the replica's own catalog, as a real cloned-voice turn — a cloning TTS without catalog is never sent a
+bare `voice`, it would kill its engine). It never wakes, starts or keeps a machine up (no `acquire`, no
+`lastRequestAt`). Two failed rounds in a row make the replica `failing` and take the failed stages out of rotation
+(the same per-replica stage rotation repeated request failures use: those stages go to the other replicas, or to the
+cloud fallback) until a round passes.
+
+**A cloud answer still answers** (hard rule 4): it carries `X-Gateway-Status: degraded`, the app's `fallback` shows it,
+and the start of every cloud run of a stage is logged and emitted as the telemetry event `app.degraded`
+(`{ app, stage, served, from }`). Warm capacity stays the deployments' own `warmSchedule` (the profile `PUT` warns when a
+deployment has none); a client key's wake policy is unchanged.
+
+## Machines and jobs
+
+Single rented hosts with an owner and a lease, for work that is not an HTTP service behind `invoke` (a test desktop, a
+GPU job, a stream). Enabled when a provider key is set (`SCW_SECRET_KEY`, `VAST_API_KEY`, `RUNPOD_API_KEY`) and
+`MACHINES_ENABLED` is not `0`; same `DEPLOYMENTS_NAMESPACE` rule as deployments. Only an admin key or a user listed in
+`MACHINES_USERS` may call these routes (`403` otherwise). The **owner** is the key's user, or `X-App` (an admin may name
+any app, another key only its own). An admin without `X-App` sees every owner (`"scope": "all"`); anyone else sees only
+their own (`404` for the rest). Prices are in USD per hour (Scaleway's EUR price × 1.2, a conservative rate).
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/machines` | rent one machine (body below); `201` with the machine |
+| `GET` | `/v1/machines` | `{ namespace, scope, providers, machines: [...] }` |
+| `GET` | `/v1/machines/costs` | spend per owner (24 h, month, committed), per holder, per machine; global for an admin |
+| `GET` | `/v1/machines/:id` | one machine: `status` (`creating`, `running`, `released`, `failed`), `ip`, `ports` (`"22/tcp"` → public port), `usdPerHour`, `costUsd`, `deadlineAt`, `endReason` |
+| `DELETE` | `/v1/machines/:id` | release now (`endReason: "deleted"`) |
+| `POST` | `/v1/machines/:id/extend` | `{ "hours"?: n }`: keepalive (resets idle), and with `hours` pushes the deadline (checked against the caps) |
+| `POST` | `/v1/jobs` | machine body + `command`, `inputs`, `output`; `201` with the job |
+| `GET` | `/v1/jobs`, `/v1/jobs/:id` | job `status` (`starting`, `running`, `succeeded`, `failed`, `timeout`), `exitCode`, `result`, its machine |
+| `GET` | `/v1/jobs/:id/logs` | last 64 KB of the job's output (`text/plain`) |
+| `DELETE` | `/v1/jobs/:id` | cancel: the job fails and its machine is released |
+
+Machine body:
+
+| Field | |
+|---|---|
+| `provider` | `scaleway`, `vast`, `runpod` or `cheapest` (default): the configured backend with the lowest quote under the cap, then the next one on a failure |
+| `machineType` | Scaleway commercial type (`L4-1-24G`, `DEV1-S`), Vast GPU name (`RTX 4090`), RunPod GPU type id |
+| `maxUsdPerHour` | required, ≤ `MACHINES_MAX_USD_PER_HOUR` |
+| `maxHours` | **required**: the hard deadline, ≤ `MACHINES_MAX_HOURS` |
+| `idleMinutes` | released when no `extend` came for this long (default `MACHINES_IDLE_MINUTES`, ≥ 5); jobs have none |
+| `image` | Docker image (required on Vast/RunPod: the container itself; on Scaleway run with `--network host` after boot) |
+| `diskGb` | default 40 |
+| `ports` | `[{ "protocol": "tcp", "port": n, "to"?: m }]` (`tcp` or `udp`), at most 64 ports in all |
+| `sshPublicKey` | the caller's public key, written to `/root/.ssh/authorized_keys`; opens 22/tcp |
+| `onstart` | bash run as root once the host is up (machines only) |
+| `env` | container environment; values never come back (only `envKeys`) |
+| `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `minCpuCores` / `minRamGb` | Vast host with at least that many effective CPU cores / GB of RAM; sends a `cheapest` request to Vast, 400 on Scaleway/RunPod (name a `machineType` that has them) |
+| `holder` | the agent inside the owner (its own 24 h cap) |
+
+Job body adds `command` (bash), `inputs` (`[{ "url": "https://…signed", "path": "in/x" }]`, downloaded under `/job`)
+and `output` (`{ "url": "https://…signed PUT", "path": "out" }`: `out` is tarred and PUT there). The machine reports
+to `POST /v1/job-report` (public route, authenticated by a per-job token only the machine has) every 60 s and at the
+end; success, failure or the deadline release the machine. Jobs need `AIGW_PUBLIC_URL` (or Railway's domain).
+
+Limits, all refused before anything is rented:
+
+| Limit | Env (default) | Answer |
+|---|---|---|
+| lease | `MACHINES_MAX_HOURS` (24), `MACHINES_MAX_LIFETIME_HOURS` (72, extends included) | `400` |
+| price | `MACHINES_MAX_USD_PER_HOUR` (2) | `400` |
+| machines running | `MACHINES_MAX_RUNNING` (20) | `429` |
+| owner per 24 h / per month | `MACHINES_OWNER_USD_PER_DAY` (10) / `MACHINES_OWNER_USD_PER_MONTH` (150) | `402` |
+| holder per 24 h | `MACHINES_HOLDER_USD_PER_DAY` (6) | `402` |
+| gateway per 24 h | `MACHINES_USD_PER_DAY` (20) | `402` |
+
+A cap counts what was spent in the window, plus what running leases would cost until their deadline, plus the new
+request at its `maxUsdPerHour × maxHours`, so a cap cannot be passed later by machines already running. `0` turns a cap
+off. The `402` message says which cap, the numbers, and what to do (release, fewer hours, lower price, or which env to
+raise). Never in an answer: `env` values, `onstart`, the SSH key, signed input/output URLs (only the output host), the
+job token.
 
 ---
 
@@ -647,6 +905,95 @@ contain names only.
 `400` for protected names (`SANDBOX_TOKEN` and aliases, `PORT`, `*_URL`, `*_BASE`, `*_HOST`, `*_ENDPOINT`, …) or
 malformed input; `502` when the
 palco refuses the write.
+
+Machine credentials (`SCW_SECRET_KEY`, `SCW_PROJECT_ID`, `SCW_REGISTRY_SECRET_KEY`, `VAST_API_KEY`) follow the same
+path: a reload that changes one validates it with a read-only call to the provider (Scaleway: list the deployment
+tags; Vast: `GET /users/current/`) and swaps it inside the running backend — replicas, host reputation and creates in
+flight are untouched. A refused key is put back to the previous value in the environment (the backend keeps working
+with it), logged as an error and in the audit (`deployment-credentials.rotate`, `ok: false`), and retried at the next
+reload. A provider that had no key at boot (no backend yet) still needs a restart to be enabled.
+
+## Access at runtime — `/v1/admin/access/*`
+
+Client keys, admin users, the `SANDBOX_TOKEN` and the replica secrets change without a deploy. All these routes
+(and `/v1/admin/keys*`) need an admin key, are rate-limited to 30 requests per minute per key (`429` with
+`Retry-After`), answer `Cache-Control: no-store`, errors as `{"error": {"message", "type"}}`, and every change goes to the audit (who, when, which names —
+never a value). State lives in `DEPLOYMENTS_STATE_DIR/access.json` (atomic write, last good copy in `.bak`, mode
+0600; keys stored as HMAC-SHA256 only) and `key-audit.jsonl`.
+
+The keys of `GATEWAY_API_KEYS` keep working until revoked through the API; an admin is a user of
+`DEPLOYMENTS_ADMIN_USERS` until the list is replaced through the API.
+
+### `GET /v1/admin/access/keys` (admin)
+
+```json
+{ "keys": [
+  { "id": "env-parle", "source": "env", "user": "parle", "admin": false, "prefix": "pk_1", "label": null,
+    "createdAt": null, "lastUsedAt": "2026-10-10T09:00:00.000Z", "expiresAt": null, "revokedAt": null, "active": true },
+  { "id": "key-9b1c…", "source": "issued", "user": "site", "admin": false, "prefix": "aigw_Xy3k", "label": "site prod",
+    "createdAt": "2026-10-10T09:01:00.000Z", "lastUsedAt": null, "expiresAt": null, "revokedAt": null, "active": true }
+] }
+```
+
+Never the value: only the id (`env-<user>` for `GATEWAY_API_KEYS` entries, numbered `-2`, `-3`… when a user has
+several, in their order; `key-…` derived from the HMAC for issued keys), a short prefix, owner and dates. `lastUsedAt` has minute
+resolution.
+
+### `POST /v1/admin/access/keys` (admin)
+
+Issues a key. Body `{ "user": "site", "label"?: "…", "admin"?: true, "replaces"?: "<id>", "overlapMinutes"?: 30 }`.
+`201` with `{ "key": "aigw_…", …the listing fields…, "replaced": {…} | null }` — **the only response that carries a
+secret**, once, at creation; it is never stored in clear (HMAC-SHA256 only). `admin: true` adds `user` to the admin list. `replaces`
+rotates a key (env or issued): the new key takes that key's user unless `user` is given, and the old key stops
+working at once (`overlapMinutes` 0 or absent) or after the overlap (max 10080 min = 7 days).
+
+### `PUT /v1/admin/access/keys/policy` (admin)
+
+GPU policy of one client key (two roles, 10/10/2026: only an admin changes it). Body `{ "id": "<key id>",
+"autoWake"?: bool, "autoWakeOutsideClass"?: bool, "canStartGpu"?: bool, "gpuDailyEur"?: number | null, "startIdleMinutes"?: 1–240 }`; omitted
+fields keep their value. Defaults: `autoWake: false` (a call never turns a GPU on), `autoWakeOutsideClass: true` (with
+`false`, `autoWake` only applies while a deployment's `warmSchedule` window is open — the class; outside it the key
+is served by a ready replica or the cloud, never wakes one), `canStartGpu: false`,
+`gpuDailyEur: 5` (EUR per UTC day spent by GPUs this key started; `null` = no cap), `startIdleMinutes: 10`. The
+dev token's id is `sandbox`. `GET /v1/admin/access/keys` shows each key's `policy`; a rotation (`replaces`) carries
+it to the new key. Spend and running starts: `clientGpu` in `GET /health?details=1` (admin: every key; a client
+key: its own).
+
+### `POST /v1/admin/access/keys/revoke` (admin)
+
+Body `{ "id": "<id>" }`. Effective on the next request; persisted. `404` for an unknown id.
+
+### `GET` / `PUT /v1/admin/access/admins` (admin)
+
+`GET` → `{ "users": ["ops", …] }`. `PUT { "users": [...] }` replaces the admin list (it then wins over
+`DEPLOYMENTS_ADMIN_USERS`). The caller must stay in the list (`400` otherwise: no locking yourself out).
+
+### `PUT /v1/admin/access/sandbox-token` (admin)
+
+Body `{ "token": "<new SANDBOX_TOKEN>", "overlapMinutes"?: 60 }`. The gateway first fetches the palco with the new
+token; if the palco refuses it, `400` and nothing changes (the gateway never locks itself out). Then it uses the new
+token for every palco call, accepts the previous one as a master token during the overlap, and stores the new one in
+`access.json` so a restart keeps it (if the palco refuses the stored token at boot, the environment token is used).
+Response `{ "rotated": true, "overlapUntil": "…" | null }`.
+
+### `POST /v1/admin/access/replica-secrets/rotate` (admin)
+
+Body `{ "deployment"?: "<name>" }` (absent = every deployment). Issues a new deployment secret: replicas created from
+now on get tokens (`X-Aigw-Token`, realtime session signing key, boot-file signatures, edge telemetry HMAC) derived
+from it. Live replicas keep the secret their token came from until they are released, so open realtime sessions and
+boots in progress are not cut. Response `{ "rotated": [{ "deployment": "speech", "pinnedReplicas": 2 }] }`. The edge
+reads its token once at boot, so a live replica cannot take a new token: to move it, let it be replaced
+(scale-down / park).
+
+### `GET /v1/admin/access/audit?limit=100` (admin)
+
+Last changes, newest first (≤ 500 kept in memory, all in `key-audit.jsonl`):
+
+```json
+{ "entries": [{ "at": "2026-10-10T09:02:00.000Z", "actor": "ops", "action": "access.keys.revoke", "names": ["key-9b1c…"], "ok": true }] }
+```
+
+`actor` is the admin user, or `palco-reload` for keys applied by the periodic reload.
 
 ---
 
@@ -695,6 +1042,47 @@ exist: every request falls back with `not_configured`), `disabled` (no `SCW_SECR
 (account data policy), `circuit_open`. `warnings` has one line per chain whose first link is neither `ready` nor
 `cold`.
 `noWake.skips`: deployment targets skipped (and invokes refused) by no-wake requests since the process started.
+
+#### `balances` (admin only) — provider balances and email alerts
+
+An admin also gets `balances` (`src/telemetry/balance-watch.ts`): every `BALANCE_CHECK_MINUTES` (default 15; `0`
+turns it off) the gateway reads, with the keys it already has and only GET-style calls, the Vast credit
+(`/users/current/`) and the hourly price of **every running instance of the account** (`/instances/`, so machines
+started outside the gateway count too), the OpenRouter credit left (`/api/v1/credits`, else the key's
+`limit_remaining`) and the key's `expires_at` (`/api/v1/key`), the RunPod `clientBalance` and `currentSpendPerHr`,
+and for Scaleway the gateway's own estimate (EUR/h of its running Scaleway replicas, month spend against the summed
+`scaling.budget.eurPerMonth` of the deployments): the restricted key `aigw-machines` gets `403` from the billing API.
+No secret is in the block; a provider without a key is absent.
+
+```json
+"balances": { "intervalMinutes": 15, "thresholds": { "warnUsd": { "vast": 5, "openrouter": 5, "runpod": 0 }, "…": "…" },
+  "readings": [ { "provider": "vast", "level": "warn", "balanceUsd": 9.92, "burnPerHour": 1.1, "currency": "USD",
+    "hoursLeft": 9, "keyExpiresAt": null, "reasons": ["com o gasto atual de US$ 1.10/h o saldo acaba em ~9.0 h"],
+    "error": null, "checkedAt": "2026-10-10T13:00:00.000Z" } ] }
+```
+
+`level`: `ok`, `warn`, `urgent`, or `error` (provider unreachable: shown, no email). Thresholds (env, defaults):
+
+| Variable | Default | Level |
+|---|---|---|
+| `BALANCE_VAST_WARN_USD` / `BALANCE_VAST_URGENT_USD` | 5 / 2 | Vast credit below → warn / urgent |
+| `BALANCE_OPENROUTER_WARN_USD` / `BALANCE_OPENROUTER_URGENT_USD` | 5 / 1 | OpenRouter credit below |
+| `BALANCE_RUNPOD_WARN_USD` / `BALANCE_RUNPOD_URGENT_USD` | 0 / 0 (off: account unused) | RunPod balance below |
+| `BALANCE_HOURS_LEFT_WARN` / `BALANCE_HOURS_LEFT_URGENT` | 12 / 3 | balance ÷ current burn below N hours |
+| `BALANCE_KEY_EXPIRY_DAYS` | 7 | key expires within N days → warn (≤ 1 day or expired → urgent) |
+| `BALANCE_MONTH_WARN_RATIO` | 0.8 | Scaleway month spend ≥ 80 % of the ceiling → warn, ≥ 100 % → urgent |
+
+A `401`/`403` from a provider is **urgent** (“recusou a chave”).
+
+**Email.** With `RESEND_API_KEY` and `ALERT_EMAIL_TO` (comma-separated list; `MAIL_FROM` optional, all three from the
+dev API) the gateway emails, through Resend, in Portuguese with the number and what to do: every `warn`/`urgent`
+balance reading above, and the ops alerts also sent to `ALERT_WEBHOOK_URL` — `provider.credit_exhausted`,
+`replica.lost_with_sessions`, `stage.no_link` (urgent), `deployment.create_failed`, `deployment.out_of_stock`,
+`stage.reserve_down` (warn). Dedup per kind: a warn at most once per 6 h, an urgent once per hour, and a warn that
+becomes urgent goes out at once. `ALERT_DAILY_DIGEST=<UTC hour 0–23>` adds one summary of every reading per day, at
+the first check after that hour. Subject and body pass a redaction of every `*KEY*`/`*TOKEN*`/`*SECRET*` value of the
+environment; a failing email provider is logged (`alert email failed`) and changes nothing else. Balance alerts also
+go to `ALERT_WEBHOOK_URL` as `balance.warn` / `balance.urgent`. Test send: `bun scripts/alert-email-test.ts`.
 
 ### `GET /health?deep=1` (admin)
 

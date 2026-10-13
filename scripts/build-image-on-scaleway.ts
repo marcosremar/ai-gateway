@@ -3,14 +3,16 @@
  * (rg.fr-par.scw.cloud/<namespace>), next to the GPUs that pull it. For images too big for a CI runner or a laptop
  * (docker/speech-stack: CUDA base + three models ≈ 25 GB).
  *
- *   SCW_SECRET_KEY=… [SCW_PROJECT_ID=…] bun scripts/build-image-on-scaleway.ts docker/speech-stack speech-stack
+ *   SCW_SECRET_KEY=… SCW_REGISTRY_PUSH_SECRET_KEY=… [SCW_PROJECT_ID=…] bun scripts/build-image-on-scaleway.ts docker/speech-stack speech-stack
  *   … --from ghcr.io/marcosremar/speech-stack:<tag> speech-stack   no build: copies that public image, same tag and
  *       digest, into the Scaleway registry (crane on the machine; the source is pulled anonymously)
  *   … --app parle [--gateway https://parle-ai-gateway.up.railway.app]   also saves the address in the app's account
- *       (PUT /v1/apps/parle/images/speech-stack, with SANDBOX_TOKEN), so deploys name it: {"appImage": "speech-stack"}
+ *       (PUT /v1/apps/parle/images/speech-stack: an admin key, AI_GATEWAY_ADMIN_KEY), so deploys name it: {"appImage": "speech-stack"}
  *
  * The machine serves only its build status on :80 (/done.json, /build.log — no secrets), the script polls it, prints
- * the log tail, and deletes the machine (and its volume) whatever happens.
+ * the log tail, and deletes the machine (and its volume) whatever happens. `SCW_SECRET_KEY` stays on this side (it
+ * creates and deletes the machine); the machine logs in to the registry with `SCW_REGISTRY_PUSH_SECRET_KEY`, the key of
+ * the IAM application `aigw-registry-push` whose only policy is `ContainerRegistryFullAccess` on the project.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
@@ -32,7 +34,9 @@ if ((!from && !contextDir) || !imageName || !/^[a-z0-9-]+$/.test(imageName)) {
 await loadSandboxEnv(process.env);
 const secret = process.env.SCW_SECRET_KEY || process.env.SCALEWAY_SECRET_KEY;
 const projectId = process.env.SCW_PROJECT_ID || process.env.SCW_DEFAULT_PROJECT_ID;
+const pushSecret = process.env.SCW_REGISTRY_PUSH_SECRET_KEY;
 if (!secret || !projectId) throw new Error('SCW_SECRET_KEY and SCW_PROJECT_ID are required (or SANDBOX_TOKEN)');
+if (!pushSecret || pushSecret === secret) throw new Error('SCW_REGISTRY_PUSH_SECRET_KEY (a ContainerRegistryFullAccess IAM key, not SCW_SECRET_KEY) is required');
 const ZONE = process.env.BUILD_ZONE || 'fr-par-2';
 const REGION = ZONE.slice(0, -2);
 const NAMESPACE = process.env.REGISTRY_NAMESPACE || 'aigw';
@@ -64,7 +68,7 @@ if (!list.namespaces.some(n => n.name === NAMESPACE)) {
 const ignoreFile = join(contextDir, '.dockerignore');
 const ignored = from || !existsSync(ignoreFile) ? [] : readFileSync(ignoreFile, 'utf8').split('\n').filter(Boolean).map(p => new Bun.Glob(p));
 const files = from ? [] : readdirSync(contextDir).filter(f => statSync(join(contextDir, f)).isFile() && !ignored.some(g => g.match(f)));
-const crane = 'docker run --rm -u 0 -e DOCKER_CONFIG=/root/.docker -v /root/.docker:/root/.docker:ro gcr.io/go-containerregistry/crane:v0.21.5';
+const crane = 'docker run --rm -u 0 -e DOCKER_CONFIG=/root/.docker -v /root/.docker:/root/.docker:ro gcr.io/go-containerregistry/crane:v0.21.5@sha256:d3a706262093746258f20107ab4e95536f9d6d45c8c3f3acf6b02b1801b440d6';
 const build = from ? `retry ${crane} copy ${from} ${image}` : `cd /srv/ctx && DOCKER_BUILDKIT=1 docker build --progress=plain -t ${image} . && retry docker push ${image}`;
 const digest = from ? `echo ${image.split(':')[0]}@$(${crane} digest ${image})` : `docker image inspect --format '{{index .RepoDigests 0}}' ${image}`;
 const size = from ? 'echo 0' : `docker image inspect --format '{{.Size}}' ${image}`;
@@ -80,10 +84,10 @@ shutdown -h +240
 echo '{"state":"booting"}' > /srv/status/done.json
 (cd /srv/status && nohup python3 -m http.server 80 >/dev/null 2>&1 &)
 ${writes}
-command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+command -v docker >/dev/null || { apt-get update -y && apt-get install -y docker.io docker-buildx; }
 set +x  # the build log is served on :80: the key must never be traced into it
 export DOCKER_CONFIG=/root/.docker
-echo '${secret}' | docker login ${registry}/${NAMESPACE} -u nologin --password-stdin
+echo '${pushSecret}' | docker login ${registry}/${NAMESPACE} -u nologin --password-stdin
 set -x
 echo '{"state":"building"}' > /srv/status/done.json
 started=$(date +%s)
@@ -96,6 +100,7 @@ else
   echo "{\\"state\\":\\"done\\",\\"ok\\":false,\\"seconds\\":$(( $(date +%s) - started ))}" > /srv/status/done.json
 fi
 `;
+if (script.includes(secret)) throw new Error('the build machine script carries SCW_SECRET_KEY: refused');
 
 // 3. Machine → poll → delete.
 const client = new ScalewayClient();
@@ -134,7 +139,7 @@ try {
 log('result', JSON.stringify(result));
 if (result.ok && appId) {
   // Save the address in the app's account: later deploys name the image instead of carrying the registry address.
-  const token = process.env.SANDBOX_TOKEN || process.env.PALCO_PROXY_TOKEN || process.env.PALCO_PROXY;
+  const token = process.env.AI_GATEWAY_ADMIN_KEY || process.env.SANDBOX_TOKEN || process.env.PALCO_PROXY_TOKEN || process.env.PALCO_PROXY;
   const digest = typeof result.digest === 'string' ? result.digest.split('@')[1] ?? null : null;
   const res = await fetch(`${gatewayUrl}/v1/apps/${appId}/images/${imageName}`, {
     method: 'PUT',
