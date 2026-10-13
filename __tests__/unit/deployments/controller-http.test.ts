@@ -26,10 +26,10 @@ const AS_SITE = { 'x-app': 'site-a' };
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; relayIdleMs?: number; maxWaitSeconds?: number } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; relayIdleMs?: number; maxWaitSeconds?: number; probe?: { check: (machine: unknown, spec: unknown, token: string) => Promise<unknown> } } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
-    backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
+    backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: opts.probe ?? new HttpReplicaProbe(1000),
     namespace: 'test', reconcileMs: 50, maxTotalReplicas: opts.maxTotal ?? 6,
     ...(opts.maxWaitSeconds ? { maxColdStartWaitSeconds: opts.maxWaitSeconds } : {}),
   });
@@ -297,6 +297,29 @@ describe('deployments API', () => {
     expect((await alive.json()) as { expiresInSeconds: number }).toMatchObject({ expiresInSeconds: expect.any(Number) });
     expect((await call(h, 'POST', '/v1/deployments/cdptest/cdp/keepalive', { sessionId: 'nope' }, SITE)).status).toBe(404);
     expect((await call(h, 'POST', '/v1/deployments/cdptest/cdp/keepalive', { sessionId: body.sessionId }, 'nope-key-0123456789')).status).toBe(401);
+  });
+
+  it('cdp bootstrap on a TLS-fronted replica (Vast): wss base + the replica CA for the direct connection', async () => {
+    await close(h);
+    await h.cloud.closeAll();
+    // A TLS-fronted machine against the plain-HTTP fake server: the health probe must not fetch (it would never
+    // complete a TLS handshake), so a stub marks the replica up and the machine stays ready.
+    const probe = { check: async () => 'ready' as const };
+    h = await harness({ probe } as never);
+    const originalCreate = h.cloud.createReplica.bind(h.cloud);
+    h.cloud.createReplica = async (input) => {
+      const machine = await originalCreate(input);
+      const stored = h.cloud.machines.get(machine.id);
+      if (stored) stored.machine.tls = true; // listReplicas spreads the stored machine: set it there
+      return machine;
+    };
+    await call(h, 'PUT', '/v1/deployments/cdptls', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
+    const res = await call(h, 'GET', '/v1/deployments/cdptls/cdp', undefined, SITE);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { base: string; wsBase: string; tls?: { ca: string } };
+    expect(body.base).toMatch(/^https:\/\/127\.0\.0\.1:\d+$/);
+    expect(body.wsBase).toMatch(/^wss:\/\/127\.0\.0\.1:\d+$/);
+    expect(body.tls?.ca).toMatch(/-----BEGIN CERTIFICATE-----/);
   });
 
   it('relay idle: a silent relayed socket is cut and the machine lease is released (no 15-min nginx wait)', async () => {

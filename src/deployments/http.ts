@@ -300,10 +300,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         err instanceof DeploymentError && err.retryAfterSeconds ? { 'Retry-After': err.retryAfterSeconds } : {});
     }
     const base = replicaBase(lease.machine, lease.exposed);
+    const replicaTlsOpts = replicaTls(base, lease.token);
     let wsPath: string | null = null;
     try {
       const version = await fetchImpl(`${base}/json/version`, {
-        headers: { 'X-Aigw-Token': lease.token }, signal: AbortSignal.timeout(10_000),
+        headers: { 'X-Aigw-Token': lease.token }, signal: AbortSignal.timeout(10_000), ...replicaTlsOpts,
       });
       if (version.ok) {
         const body = await version.json().catch(() => null) as { webSocketDebuggerUrl?: string } | null;
@@ -319,6 +320,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     return send(res, 200, {
       sessionId, base, wsBase: base.replace(/^http/, 'ws'), token: lease.token,
       ...(wsPath ? { wsPath } : {}),
+      ...(replicaTlsOpts.tls ? { tls: replicaTlsOpts.tls } : {}),
       expiresInSeconds: Math.floor(ttlMs / 1000),
     });
   }
@@ -575,7 +577,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     for (const [k, v] of Object.entries(req.headers)) {
       if (typeof v === 'string' && k !== 'host' && k !== 'x-aigw-token') headers[k] = v;
     }
-    const proxyReq = httpRequest(target, { method: 'GET', headers, signal: abort.signal });
+    // TLS-fronted replicas (Vast) speak TLS on :80; the CA derives from the replica token.
+    const { tls } = replicaTls(target.href, lease.token);
+    const proxyReq = httpRequest(target, { method: 'GET', headers, signal: abort.signal, ...(tls ? { ca: tls.ca } : {}) });
     proxyReq.on('upgrade', (upstreamRes: IncomingMessage, proxySocket: Socket, proxyHead: Buffer) => {
       upgraded = true;
       const out = ['HTTP/1.1 101 Switching Protocols'];
