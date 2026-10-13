@@ -18,7 +18,7 @@ export { adminTraffic, type AdminTraffic } from './traffic';
 export { scopeToApp } from './scope';
 export { ANCHOR_PAGE, PAGES } from './pages';
 
-export const ADMIN_ANCHORS = ['recomendacoes', 'garantia', 'gastos', 'cachevoz', 'reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps', 'trafego', 'atividade'] as const;
+export const ADMIN_ANCHORS = ['recomendacoes', 'garantia', 'gastos', 'cachevoz', 'reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps', 'trafego', 'incidentes', 'atividade'] as const;
 
 const ADMIN_SESSION_MS = 12 * 3_600_000;
 export const ADMIN_COOKIE = '__Host-aigw_admin';

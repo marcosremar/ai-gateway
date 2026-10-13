@@ -11,9 +11,9 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
   const ownNames = new Set([app, ...deployments, ...keyIds]);
   const foreign = new Set([...s.apps.map(a => a.id), ...s.appBudgets.map(b => b.app), ...(s.gpus ?? []).map(d => d.name), ...s.keys.flatMap(k => [k.id, k.user])]
     .filter(name => !ownNames.has(name)));
-  const aboutOwn = (text: string) => {
+  const aboutOwn = (text: string, alsoOwn: Set<string> = new Set()) => {
     const tokens = [...tokensOf(text)];
-    return tokens.some(t => ownNames.has(t)) && !tokens.some(t => foreign.has(t));
+    return tokens.some(t => ownNames.has(t) || alsoOwn.has(t)) && !tokens.some(t => foreign.has(t));
   };
   const admins = new Set(s.keys.filter(k => k.admin).map(k => k.user));
   const aliases = new Set(own?.aliases ?? []);
@@ -47,6 +47,7 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
     overspend: (s.overspend ?? []).filter(o => o.app === app),
     modelPrices: s.modelPrices ?? null,
     voiceTurns: s.voiceTurns?.filter(t => t.app === app) ?? null,
+    incidents: s.incidents?.filter(i => aboutOwn(`${i.event} ${i.key} ${i.alerts.map(a => a.summary).join(' ')}`, aliases)) ?? null,
     chains: s.chains ? Object.fromEntries(Object.entries(own?.stages ?? {}).map(([stage, aliases]) => [stage,
       Object.fromEntries(aliases.filter(a => s.chains![stage]?.[a]).map(a => [a, s.chains![stage]![a]!]))])) : null,
     audit: s.audit

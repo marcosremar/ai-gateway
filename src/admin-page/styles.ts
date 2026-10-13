@@ -98,6 +98,9 @@ td b{font-weight:600}td .err{color:var(--bad)}
 .ticks.d30{grid-template-columns:repeat(30,1fr)}
 .foot-note{margin:0;padding:10px 16px 12px;color:var(--muted);font-size:12px;border-top:1px solid var(--line2)}
 .recos{list-style:none;margin:0;padding:0}
+.incs{list-style:none;margin:0;padding:0}.incs li{display:flex;gap:10px;padding:10px 16px;border-top:1px solid var(--line2)}.incs li:first-child{border-top:0}
+.incs li>.mark{margin-top:2px}.incs li>div{min-width:0}.incs small{display:block;color:var(--muted);font-size:12.5px}.incs .mono{color:var(--muted);overflow-wrap:anywhere}
+td details summary{cursor:pointer;color:var(--muted);font-size:12.5px}
 .saving{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;margin:0;padding:12px 16px;border-bottom:1px solid var(--line2)}
 .saving span{color:var(--muted);font-size:12.5px;flex-basis:100%}.saving b{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--ok)}
 .saving small{color:var(--muted);font-size:12.5px}
@@ -155,6 +158,6 @@ td{display:flex;justify-content:space-between;gap:12px;padding:3px 0;border:0;te
 td::before{content:attr(data-l);color:var(--muted);font-size:12.5px;text-align:left;flex:none}td .v{text-align:right}
 td:first-child{display:block;padding-bottom:6px}td:first-child .v{text-align:left}td:first-child::before{content:none}
 td small{text-align:right}td:first-child small{text-align:left}td.n{white-space:normal}td:empty,td.wide{display:none}
-td.act{display:flex;gap:8px}td.act .v{display:flex;gap:8px;width:100%}td.act form{flex:1}.reco dl{grid-template-columns:1fr}.reco dt{padding-top:4px}.amt{margin-left:0;width:100%}
+.cap tbody tr:nth-child(n+4){display:none}td.act{display:flex;gap:8px}td.act .v{display:flex;gap:8px;width:100%}td.act form{flex:1}.reco dl{grid-template-columns:1fr}.reco dt{padding-top:4px}.amt{margin-left:0;width:100%}
 .ticks.d30 span{font-size:10px}td.act::before{content:none}td.act button{width:100%;margin-top:6px}tbody tr:hover td{background:none}.facts{grid-template-columns:1fr;gap:0 0}.facts dd{margin-bottom:6px}}
 @media (pointer:coarse){button,.btn{min-height:44px}.jump a{min-height:44px}.reco summary{min-height:44px;display:flex;align-items:center}}`;

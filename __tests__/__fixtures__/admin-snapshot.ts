@@ -11,6 +11,7 @@ import { withBoots } from './admin-boot';
 import { findOverspend } from '../../src/telemetry/overspend';
 import type { ModelPrice } from '../../src/admin-page/model-prices';
 import type { VoiceTurn } from '../../src/app-telemetry/voice-turn';
+import type { Incident, IncidentActionKind } from '../../src/telemetry/incidents';
 import { localClock } from '../../src/deployments/autoscale';
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
@@ -193,6 +194,42 @@ export function demoTurns(now: number, state: DemoState): VoiceTurn[] {
   return out;
 }
 
+function incident(now: number, event: string, key: string, startMin: number, endMin: number | null, summaries: string[],
+  actions: Array<[number, IncidentActionKind, string, string]> = [], resolution: Incident['resolution'] = 'cleared'): Incident {
+  return {
+    id: `${event}|${key}|${now - startMin * 60_000}`, event, key, startedAt: iso(now, startMin), lastSeenAt: iso(now, endMin ?? 0), endedAt: endMin === null ? null : iso(now, endMin),
+    alerts: summaries.map((summary, i) => ({ at: iso(now, startMin - i * 30), summary })).reverse(), alertCount: summaries.length,
+    actions: actions.map(([min, kind, target, detail]) => ({ at: iso(now, min), kind, target, detail })), resolution: endMin === null ? null : resolution, mailed: true,
+  };
+}
+
+export function demoIncidents(now: number, state: DemoState): Incident[] {
+  const past = [
+    incident(now, 'deployment.create_failed', 'speech-stack-test', 58, 28, ['deployment: speech-stack-test, error: create: L4-1-24G out of stock in fr-par-2'], [], 'quiet'),
+    incident(now, 'fallback.probe_failed', 'tts|openrouter:hexgrad/kokoro-82m|pm_alex', 1500, 1455,
+      ['stage: tts, count: 1, items: tts openrouter:hexgrad/kokoro-82m (pm_alex) [parle-tts]: (upstream_error) provider timeout'],
+      [[1490, 'reorder', 'parle-tts', 'deepinfra:hexgrad/Kokoro-82M antes de openrouter:hexgrad/kokoro-82m']]),
+    incident(now, 'gpu.outside_window', 'speech-stack', 1720, 1659, ['deployment: speech-stack, replicas: 1, minutes: 31, eurPerHour: 0.79', 'deployment: speech-stack, replicas: 1, minutes: 61, eurPerHour: 0.79'],
+      [[1660, 'park', 'speech-stack', 'gateway: 60 min fora da janela de aula']]),
+  ];
+  if (state === 'ok') return [incident(now, 'voice.turn_slow', 'parle', 2900, 2888, ['app: parle, turns: 64, failed: 0, p95Ms: 4310']), ...past.slice(1)];
+  const warn = [
+    incident(now, 'gpu.idle', 'babel-live', 22, null, ['deployment: babel-live, minutes: 18, eurPerHour: 0.79, wastedEur: 0.24']),
+    incident(now, 'gpu.outside_window', 'speech-stack', 35, null, ['deployment: speech-stack, replicas: 1, minutes: 35, eurPerHour: 0.79']),
+    ...past,
+  ];
+  if (state === 'warn') return warn;
+  return [
+    incident(now, 'voice.turn_failing', 'parle', 9, null, ['app: parle, turns: 88, failed: 12, failedPct: 13.6, p95Ms: 4180, failures: tts/upstream_502 x7, tts/timeout x3, llm/timeout x2'],
+      [[6, 'reorder', 'parle-tts', 'deepinfra:hexgrad/Kokoro-82M antes de openrouter:hexgrad/kokoro-82m']]),
+    incident(now, 'fallback.probe_failed', 'tts|openrouter:hexgrad/kokoro-82m|pm_alex', 2, null,
+      ['stage: tts, count: 1, items: tts openrouter:hexgrad/kokoro-82m (pm_alex) [parle-tts]: (upstream_error) provider timeout']),
+    incident(now, 'deployment.stuck_boot', 'speech-stack-test', 4, null, ['deployment: speech-stack-test, phase: loading, minutes: 14, attempts: 2'],
+      [[24, 'retry', 'speech-stack-test', 'réplica fr-par-2/b8f1']]),
+    ...warn,
+  ];
+}
+
 const parisHhmm = (at: number) => {
   const m = localClock(at, 'Europe/Paris').minutes;
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
@@ -215,6 +252,7 @@ export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnaps
     about: { commit: '0a52749c1d2e3f4a5b6c7d8e9f00112233445566', uptimeSeconds: 4 * 3600 + 1260, region: 'europe-west4', telemetryAt: iso(now, 0) },
     modelPrices: state === 'warn' ? { at: iso(now, 300), models: DEMO_PRICES } : null,
     voiceTurns: demoTurns(now, state),
+    incidents: demoIncidents(now, state),
   };
   if (state === 'ok') return allGreen(snapshot, now);
   if (state === 'bad') return withBoots(somethingDown(snapshot, now), now, true);

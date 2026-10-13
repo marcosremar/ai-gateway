@@ -51,8 +51,9 @@ import { buildImages } from './src/deployments/build-images';
 import { bootHistoryFile } from './src/deployments/boot-track';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
-import { createOpsAlerts } from './src/telemetry/ops-alerts';
-import { alertEmailFromEnv, createAlertMailer, opsAlertMail, secretValues } from './src/telemetry/alert-email';
+import { createOpsAlerts, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS } from './src/telemetry/ops-alerts';
+import { alertEmailFromEnv, createAlertMailer, incidentResolvedMail, opsIncidentMail, secretValues } from './src/telemetry/alert-email';
+import { createIncidents, incidentQuietMs } from './src/telemetry/incidents';
 import { createBalanceWatch } from './src/telemetry/balance-watch';
 import { createOverspendWatch, overspendLimitsFromEnv } from './src/telemetry/overspend';
 import { createFallbackProbe, fallbackLinks } from './src/telemetry/fallback-probe';
@@ -156,13 +157,24 @@ const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelive
 const alertEmail = alertEmailFromEnv(process.env);
 const alertMailer = alertEmail && createAlertMailer({ ...alertEmail, secrets: () => secretValues(process.env), log: (msg, data) => log.warn(data ?? {}, msg) });
 const alertLog = createAlertLog();
+const incidents = createIncidents({
+  path: join(stateDir, 'incidents.json'),
+  quietMs: incidentQuietMs(process.env),
+  onResolve: (i) => {
+    log.log({ incident: i.id, resolution: i.resolution, alerts: i.alertCount }, 'incident resolved');
+    if (i.mailed) void alertMailer?.deliver(incidentResolvedMail(i, incidents.quietMinutes));
+  },
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+await incidents.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'INCIDENTS STATE UNREADABLE: starts empty'));
 const opsAlerts = createOpsAlerts((alert) => {
   log.warn(alert.data, `ALERT ${alert.event}`);
   alertLog.record(alert.event, alert.data);
-  const mail = opsAlertMail(alert);
-  if (mail) void alertMailer?.send(mail);
+  const incident = incidents.openOf(alert.event, alert.key ?? '');
+  const out = opsIncidentMail(alert, incident);
+  if (out) void alertMailer?.send(out.mail).then((id) => { if (id && out.opens && incident) incidents.markMailed(incident.id); });
   return alertWebhook?.send(alert);
-});
+}, Date.now, OPS_ALERT_DEDUP_MS, OPS_ALERT_BOOT_QUIET_MS, incidents);
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
 const configuredDeployments = deploymentsFromEnv(process.env, {
@@ -175,7 +187,7 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
     return { keyId: found.keyId, user: found.userId, app, policy: access.policyOf(found.keyId) };
   },
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
-  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); },
+  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); incidents.fromDeploymentLog(msg, data); },
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
@@ -364,6 +376,7 @@ setInterval(() => {
   for (const name of opsAlerts.fromDeployments(deployments?.controller.list() ?? [])) {
     void deployments?.controller.park(name).then(
       () => {
+        incidents.action('park', name, 'gateway: 60 min fora da janela de aula');
         log.warn({ deployment: name }, 'deployments: parked — up 60 min outside its class window, no class open');
         deploymentLogToTelemetry('deployments: parked outside the class window', { deployment: name });
       },
@@ -371,6 +384,7 @@ setInterval(() => {
     );
   }
   opsAlerts.fromLatency(latency?.() ?? null);
+  incidents.tick(reorderSnapshot());
 }, 15_000).unref();
 
 // Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys
@@ -638,6 +652,7 @@ const adminSnapshot = (): AdminSnapshot => ({
   digest: suggestionDigest.status(), overspend: overspendWatch.active(), reorders: reorderSnapshot(), ttsCache: ttsCache?.stats() ?? null,
   modelPrices: modelPrices.snapshot(),
   voiceTurns: appTelemetry?.voiceTurns() ?? null,
+  incidents: incidents.list(),
 });
 
 const overspendWatch = createOverspendWatch({
@@ -686,6 +701,7 @@ createAdminPage({
     if (!controller) throw new Error('deployments desligados');
     if (actor.keyId) await deployments?.clientGpu.forget(actor.keyId, name);
     await controller.park(name);
+    incidents.action('park', name, `painel: ${actor.name}`);
   },
   pin: async (name, on) => {
     const spec = controller?.specOf(name);
