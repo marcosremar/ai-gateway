@@ -32,7 +32,9 @@ describe('GPU on but idle', () => {
   });
 
   it('turns the GPUs section to Atenção with the money wasted, lists it in the overview card and keeps Estacionar', () => {
-    const html = render(demoSnapshot(NOW, 'warn'));
+    const idleOnly = demoSnapshot(NOW, 'warn');
+    idleOnly.gpus = idleOnly.gpus!.map(d => (d.name === 'speech-stack-test' ? { ...d, replicas: [], boot: { ...d.boot, active: [] } } : d));
+    const html = render(idleOnly);
     const gpus = section(html, 'gpus');
     expect(gpus).toMatch(/<h2>GPUs<\/h2><span class="pill warn">/);
     expect(gpus).toMatch(/sem uso há 40 min · €\s0,53 gastos · €\s0,79\/h/);

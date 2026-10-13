@@ -287,7 +287,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
     }
     const { offers, far } = await this.withoutFarOffers(spec, ranked);
     if (!offers.length) throw new Error(`out_of_stock: every vast offer tried is too far before renting (${far.join('; ')})`);
-    const init = vastReplicaInit(spec, input.replicaToken);
+    const init = vastReplicaInit(spec, input.replicaToken, { bootReport: input.bootReport });
     const env = { ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env };
     const [udpLo, udpHi] = vastUdpRange(spec) ?? [1, 0];
     const udp = Object.fromEntries(Array.from({ length: udpHi - udpLo + 1 }, (_, i) => [`-p ${udpLo + i}:${udpLo + i}/udp`, '1']));

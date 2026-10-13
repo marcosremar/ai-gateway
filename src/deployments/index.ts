@@ -35,6 +35,7 @@ export { createDeploymentRoutes, HttpReplicaProbe } from './http';
 export { planReplicas, desiredReplicas } from './planner';
 export { BUILTIN_PROFILES } from './profiles';
 export { bootFilesRoute, BOOT_FILES_PATH } from './boot-files';
+export { bootEventsRoute, BOOT_EVENTS_PATH } from './boot-events';
 export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
@@ -229,6 +230,7 @@ export function deploymentsFromEnv(
     unhealthyStrikes,
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
     publicUrl: env.AIGW_PUBLIC_URL?.trim() || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : undefined),
+    bootReporting: env.BOOT_REPORTING !== '0',
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
     ...spendLimitsFromEnv(env),
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
