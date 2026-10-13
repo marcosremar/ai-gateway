@@ -71,7 +71,7 @@ async function gateway() {
     const html = await (await call('/admin', { cookie })).text();
     return { cookie, html, csrf: /name="csrf" value="([a-f0-9]+)"/.exec(html)![1] };
   }
-  return { clock, access, call, post, login, signedIn, parked, pins, dismissed, audit, probes: () => probes };
+  return { clock, access, call, post, login, signedIn, parked, pins, dismissed, audit, snapshot, probes: () => probes };
 }
 
 describe('admin page (/admin)', () => {
@@ -253,6 +253,59 @@ describe('admin page (/admin)', () => {
     ]);
   });
 
+  it('a booting GPU reads «Iniciando» with its phase and expected time in the GPUs, the overview and the guarantee', async () => {
+    const gw = await gateway();
+    const { html } = await gw.signedIn();
+    const at = html.indexOf('<b class="mono">babelcast-3090');
+    const row = html.slice(at, html.indexOf('</tr>', at));
+    expect(row).toContain('Iniciando');
+    expect(row).toContain('puxando a imagem há 3 min · esperado 10 min');
+    expect(row).toContain('href="/admin/gpus/babelcast-3090"');
+    expect(html).toMatch(/GPUs ligadas[^]*?1 iniciando/);
+    expect(html).toMatch(/<code>babelcast-3090<\/code>[^]*?Iniciando · puxando a imagem há 3 min/);
+    const failed = html.slice(html.indexOf('<b class="mono">parle-bridge-shadow'));
+    expect(failed.slice(0, failed.indexOf('</tr>'))).toContain('sem oferta disponível · nova tentativa às 12:07');
+  });
+
+  it('a stuck boot is a problem: «Travou em <fase> há N min»', () => {
+    const now = Date.parse('2026-10-13T10:00:00Z');
+    const html = renderStatus('n', demoSnapshot(now, 'bad'), { now, csrf: 'c', actor: 'marcos', message: null, app: null });
+    expect(html).toContain('Travou em carregando modelos');
+    expect(html).toContain('carregando modelos há 14 min · esperado 6 min');
+    expect(html).not.toContain('sem uso há 26 min');
+    expect(html).toMatch(/<section id="gpus" data-spy><header class="sh"><h2>GPUs<\/h2><span class="pill bad">/);
+    expect(html).toMatch(/<ul class="attn"[^]*speech-stack-test: Travou em carregando modelos há 14 min/);
+  });
+
+  it('the detail page shows the boot timeline, the offer, the past boots and the log extract, with secrets redacted', async () => {
+    const gw = await gateway();
+    gw.snapshot.gpuLogs!['babelcast-3090']!.push({ at: gw.clock.now, replicaId: '31544017', text: `create failed error=token ${PROVIDER_SECRET}` });
+    const { cookie } = await gw.signedIn();
+    const res = await gw.call('/admin/gpus/babelcast-3090', { cookie });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    for (const text of ['procurando oferta e alugando', 'máquina ligando no provedor', 'puxando a imagem', '(em curso)', '31544017', 'RTX 3090 · Lyon, FR',
+      'ghcr.io/marcosremar/speech-stack', 'Últimos boots', 'falhou · boot-timeout', 'Downloading', 'phase pulling']) expect(html).toContain(text);
+    expect(html).not.toContain(PROVIDER_SECRET);
+    expect(html).not.toMatch(LEAK);
+    expect((await gw.call('/admin/gpus/no-such-gpu', { cookie })).status).toBe(404);
+    expect((await gw.call('/admin/gpus/babelcast-3090')).status).toBe(303);
+  });
+
+  it('an app session opens only its own GPUs and reads only their logs', async () => {
+    const gw = await gateway();
+    const { cookie } = await gw.signedIn(CLIENT_KEY);
+    expect((await gw.call('/admin/gpus/babelcast-3090', { cookie })).status).toBe(404);
+    expect((await gw.call('/admin/gpus/parle-bridge-shadow', { cookie })).status).toBe(200);
+    const page = await (await gw.call('/admin/gpus/parle-bridge-shadow', { cookie })).text();
+    expect(page).toContain('create failed');
+    expect(page).not.toContain('31544017');
+    const babel = await gw.signedIn(BABEL_KEY);
+    const own = await (await gw.call('/admin/gpus/babelcast-3090', { cookie: babel.cookie })).text();
+    expect(own).toContain('Pulling image');
+    expect(own).not.toContain('parle-bridge-shadow');
+  });
+
   it('an app session never sees nor uses the pin toggle', async () => {
     const gw = await gateway();
     await gw.access.setPolicy({ id: 'env-babelcast', canStartGpu: true });
@@ -304,7 +357,7 @@ describe('admin page (/admin)', () => {
     const render = (state: 'ok' | 'warn' | 'bad') => renderStatus('n', demoSnapshot(now, state), { now, csrf: 'c', actor: 'marcos', message: null, app: null });
     const attention = (html: string) => [...(/<ul class="attn"[^]*?<\/ul>/.exec(html)?.[0] ?? '').matchAll(/<a href="#([a-z]+)">/g)].map(m => m[1]);
     const bad = render('bad');
-    expect(attention(bad).slice(0, 4).sort()).toEqual(['apps', 'garantia', 'reservas', 'trafego']);
+    expect(attention(bad).slice(0, 5).sort()).toEqual(['apps', 'garantia', 'gpus', 'reservas', 'trafego']);
     expect(bad).toContain('Algo está fora do ar');
     expect(bad).toMatch(/<section id="reservas" data-spy><header class="sh"><h2>Reservas<\/h2><span class="pill bad">/);
     expect(bad).toContain('<span class="sr">Problema:</span>');

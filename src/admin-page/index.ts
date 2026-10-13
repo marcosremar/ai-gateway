@@ -5,7 +5,7 @@ import { isCrossSite } from '../accounts/http';
 import { AttemptLimiter } from '../accounts/rate-limit';
 import { RateLimiter } from '../gateway/proxy/middleware/rate-limit';
 import { redact } from '../telemetry/alert-email';
-import { renderLogin, renderStatus, type AdminAlert, type AdminSnapshot } from './render';
+import { renderGpuDetail, renderLogin, renderStatus, type AdminAlert, type AdminSnapshot } from './render';
 import { scopeToApp } from './scope';
 
 export type { AdminAbout, AdminAlert, AdminApp, AdminSnapshot } from './render';
@@ -22,6 +22,7 @@ const BODY_MAX = 4096;
 const ALERTS_KEPT = 50;
 const APP_FILTER = /^[A-Za-z0-9._-]{1,64}$/;
 const NEXT = /^\/admin(\?app=[A-Za-z0-9._-]{1,64})?(#[a-z]{1,16})?$/;
+const GPU_NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const RECO_ID = /^[a-z-]{1,32}(:[A-Za-z0-9._:/@ -]{1,200})?$/;
 
 export interface AdminActor { name: string; app: string | null; keyId?: string; mayPark?: () => boolean }
@@ -222,6 +223,17 @@ export function createAdminPage(opts: AdminPageOptions) {
     html(res, 200, n => renderStatus(n, snapshot, { now: now(), csrf, actor: actor.name, message, app: appFilter, view }));
   }
 
+  function gpuDetail(req: IncomingMessage, res: ServerResponse): void {
+    const found = sessionOf(req);
+    if (!found) return redirect(res, '/admin');
+    let name = '';
+    try { name = decodeURIComponent((req.url ?? '').split('?')[0]!.slice('/admin/gpus/'.length).replace(/\/$/, '')); } catch { name = ''; }
+    const { actor } = found.session;
+    const snapshot = actor.app ? scopeToApp(opts.snapshot(), actor.app) : opts.snapshot();
+    if (!GPU_NAME.test(name) || !snapshot.gpus?.some(g => g.name === name)) return html(res, 404, n => renderLogin(n, 'GPU não encontrada para esta chave.'));
+    html(res, 200, n => renderGpuDetail(n, snapshot, name, now())!);
+  }
+
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([
     ['GET /admin', status], ['POST /admin/login', login],
     ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss],
@@ -230,7 +242,7 @@ export function createAdminPage(opts: AdminPageOptions) {
   function handle(req: IncomingMessage, res: ServerResponse): boolean {
     const path = (req.url ?? '/').split('?')[0].replace(/\/$/, '');
     if (path !== '/admin' && !path.startsWith('/admin/')) return false;
-    const handler = routes.get(`${req.method} ${path}`);
+    const handler = req.method === 'GET' && path.startsWith('/admin/gpus/') ? gpuDetail : routes.get(`${req.method} ${path}`);
     if (typeof handler !== 'function') {
       req.resume();
       redirect(res, '/admin');

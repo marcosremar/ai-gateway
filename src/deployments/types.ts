@@ -13,6 +13,7 @@
  * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
+import type { BootPhase, BootRecord, BootState } from './boot-track';
 import type { HostRecord } from './host-reputation';
 import type { RttBaseline } from './rtt-gate';
 
@@ -317,6 +318,8 @@ export interface ReplicaMachine {
   tls?: boolean;
   /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
   bootError?: string;
+  providerStatus?: string;
+  providerMessage?: string;
 }
 
 export interface CreateReplicaInput {
@@ -507,5 +510,11 @@ export interface DeploymentView {
   sessions: number;
   hold: { replicas: number; until: string } | null;
   pinned: { idleMinutes: number | null; parked: boolean } | null;
+  boot: {
+    active: Array<Omit<BootState, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
+    past: Array<Omit<BootRecord, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
+    retryAt: number | null;
+    expectedBootSeconds: number | null;
+  };
   warnings: string[];
 }

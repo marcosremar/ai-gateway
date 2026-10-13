@@ -358,7 +358,7 @@ export class MachineController {
       ...(owner === null ? { global: { dayUsd: round(global.spent), committedUsd: round(global.committed), capDayUsd: this.limits.globalUsdPerDay } } : {}),
       machines: mine.map(m => ({
         id: m.id, owner: m.owner, holder: m.holder, jobId: m.jobId, provider: m.provider, status: m.status, usdPerHour: m.usdPerHour,
-        costUsd: round(this.costUsd(m)),
+        costUsd: round(this.costUsd(m)), createdAt: m.createdAt, lastError: m.lastError,
       })),
     };
   }

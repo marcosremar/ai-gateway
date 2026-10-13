@@ -15,6 +15,8 @@ import { spend, spendWindow } from './spend';
 import { parisMidnightAfter } from '../deployments/spend-ledger';
 import { EUR_TO_USD } from '../deployments/vast-backend';
 import { guarantee } from './guarantee';
+import { bootHeadline, bootLevel, bootOf, bootState, detailHref, gpuDetailBody, nextStep } from './boot';
+import type { BootLogLine } from '../deployments/boot-track';
 import type { ChainReport } from '../config/stage-chains';
 import { recommendations, recoSection, type Recommendation } from './recommendations';
 import {
@@ -30,7 +32,10 @@ export interface AppView { id: string; canPark: boolean }
 
 interface MachineCosts {
   global?: { dayUsd: number; committedUsd: number; capDayUsd: number };
-  machines: Array<{ id: string; owner: string; holder: string | null; provider: string | null; status: string; usdPerHour: number | null; costUsd: number }>;
+  machines: Array<{
+    id: string; owner: string; holder: string | null; provider: string | null; status: string; usdPerHour: number | null; costUsd: number;
+    createdAt?: number; lastError?: string | null; jobId?: string | null;
+  }>;
 }
 
 export interface AdminSnapshot {
@@ -47,6 +52,7 @@ export interface AdminSnapshot {
   traffic: AdminTraffic | null;
   audit: KeyAuditEntry[];
   spend?: SpendLedgerView | null;
+  gpuLogs?: Record<string, BootLogLine[]>;
   dismissed?: Record<string, number>;
   about?: AdminAbout | null;
   chains?: Record<string, Record<string, ChainReport>> | null;
@@ -132,7 +138,7 @@ function gpus({ s, now, csrf, view }: Ctx): Section {
     const outside = outsideWindow(d, now);
     const idle = idleGpu(d, now);
     const classWindow = up.length ? activeWindow(d.spec.warmSchedule, now) : null;
-    const level: Level = d.status === 'degraded' || d.lastError || outside || idle ? 'warn' : 'ok';
+    const level: Level = worst([d.status === 'degraded' || d.lastError || outside || idle ? 'warn' : 'ok', bootLevel(d) ?? 'ok']);
     const perHour = up.reduce((sum, r) => sum + (r.pricePerHour ?? 0), 0);
     const ready = up.filter(r => r.phase === 'ready').length;
     const first = up[0];
@@ -141,12 +147,13 @@ function gpus({ s, now, csrf, view }: Ctx): Section {
       d.warm ? `aquecida até ${hhmm(d.warm.until)}` : '',
       classWindow ? `aquecida para a aula até ${hhmm(classWindow.endsAt)}` : '',
     ].filter(Boolean);
-    const state = pill(level === 'ok' ? 'ok' : level, GPU_STATUS[d.status] ?? d.status)
+    const state = (bootOf(d) ? bootState(d) : pill(level, GPU_STATUS[d.status] ?? d.status))
       + (d.pinned ? pinBadge(d) : typeof d.spec.idleMinutes === 'number' ? `<small>desliga após ${d.spec.idleMinutes} min sem uso</small>` : '')
       + (idle ? `<small class="err">sem uso há ${Math.round(idle.minutes)} min · ${money(idle.wastedEur)} gastos · ${money(idle.eurPerHour)}/h</small>` : '')
-      + (outside ? '<small>fora da janela de aula</small>' : '') + (d.lastError ? `<small class="err">${esc(d.lastError)}</small>` : '');
+      + (outside ? '<small>fora da janela de aula</small>' : '') + (d.lastError ? `<small class="err">${esc(d.lastError)}</small><small>${esc(nextStep(d))}</small>` : '');
     return { level, cells: [
-      `<b class="mono">${esc(d.name)}</b><small>${d.app ? `app ${esc(d.app)} · ` : ''}${esc(providerLabel(d))}</small>`,
+      `<a href="${detailHref(d)}"><b class="mono">${esc(d.name)}</b></a><small>${d.app ? `app ${esc(d.app)} · ` : ''}${esc(providerLabel(d))}</small>`
+        + `<small><a href="${detailHref(d)}">detalhes e log</a></small>`,
       state,
       up.length ? `${ready}/${up.length}` : '0',
       first ? `${esc(first.machineType)}<small>${esc(first.zone)}</small>` : esc(d.spec.machineType),
@@ -166,6 +173,8 @@ function gpus({ s, now, csrf, view }: Ctx): Section {
   return {
     ...base, level, count: s.gpus.length,
     note: s.gpus.map((d) => {
+      const boot = bootOf(d);
+      if (boot) return `${d.name}: ${bootHeadline(boot)}`;
       const idle = idleGpu(d, now);
       if (idle) return `${d.name} ligada sem uso há ${Math.round(idle.minutes)} min: ${money(idle.wastedEur)} gastos, ${money(idle.eurPerHour)}/h`;
       if (outsideWindow(d, now)) return `${d.name} ligada fora da janela de aula`;
@@ -193,7 +202,15 @@ function alerts({ s, now }: Ctx): Section {
   };
 }
 
-function machines({ s }: Ctx): Section {
+function machineDetail(m: MachineCosts['machines'][number], now: number): string {
+  const items = [
+    m.createdAt ? `criada às ${hhmm(m.createdAt)} (há ${duration((now - m.createdAt) / 1000)})` : '', m.jobId ? `tarefa ${m.jobId}` : '',
+    m.lastError ? `último erro: ${m.lastError}` : '', 'o log da tarefa fica em GET /v1/jobs/<id>/logs',
+  ].filter(Boolean);
+  return `<details><summary>detalhes</summary><small>${items.map(esc).join('<br>')}</small></details>`;
+}
+
+function machines({ s, now }: Ctx): Section {
   const base = { id: 'maquinas', title: 'Máquinas avulsas', actions: '' };
   if (!s.machines) return { ...base, level: 'ok', note: '', count: null, meta: '', body: '<p class="empty">As máquinas avulsas estão desligadas neste gateway.</p>' };
   const live = s.machines.machines.filter(m => m.status === 'creating' || m.status === 'running');
@@ -202,8 +219,9 @@ function machines({ s }: Ctx): Section {
   const stats = g ? `<div class="stats"><div><span>Gasto em 24 h</span><b>${money(g.dayUsd, 'US$')}</b></div><div><span>Teto de 24 h</span><b>${money(g.capDayUsd, 'US$')}</b></div>`
     + `<div><span>Reservado</span><b>${money(g.committedUsd, 'US$')}</b></div><div><span>Uso do teto</span><b>${pct(g.capDayUsd ? g.dayUsd / g.capDayUsd : 0)}</b>${meter(g.dayUsd, g.capDayUsd, level)}</div></div>` : '';
   const rows = live.map(m => [
-    `<b class="mono">${esc(m.id)}</b>`, `${esc(m.owner)}${m.holder ? `<small>${esc(m.holder)}</small>` : ''}`, esc(m.provider ?? '—'),
-    pill('ok', m.status === 'running' ? 'ligada' : 'ligando'), `${money(m.usdPerHour, 'US$')}/h`, money(m.costUsd, 'US$'),
+    `<b class="mono">${esc(m.id)}</b>${machineDetail(m, now)}`, `${esc(m.owner)}${m.holder ? `<small>${esc(m.holder)}</small>` : ''}`, esc(m.provider ?? '—'),
+    m.status === 'running' ? pill('ok', 'ligada')
+      : `${pill('warn', 'Iniciando')}${m.createdAt ? `<small>há ${esc(duration((now - m.createdAt) / 1000))}</small>` : ''}${m.lastError ? `<small class="err">${esc(m.lastError)}</small>` : ''}`, `${money(m.usdPerHour, 'US$')}/h`, money(m.costUsd, 'US$'),
   ]);
   return {
     ...base, level, count: live.length, note: g ? `gasto de 24 h em ${pct(g.dayUsd / g.capDayUsd)} do teto` : '',
@@ -398,6 +416,12 @@ function gpuToday(ctx: Ctx, keySpend: number, fallback: string): Kpi {
   return { label: 'Gasto GPU hoje', href: '#gastos', value: money(today), sub: `${arrow(today, yesterday)} ontem ${money(yesterday)} · 7 d ${money(week)}`, level: null };
 }
 
+function booting(gpus: DeploymentView[]): string {
+  const n = gpus.filter(d => bootOf(d)).length;
+  const stuck = gpus.filter(d => bootOf(d)?.stuck).length;
+  return (n ? ` · ${n} iniciando` : '') + (stuck ? ` · ${stuck} travada${stuck > 1 ? 's' : ''}` : '');
+}
+
 function kpis(ctx: Ctx, all: Section[]): Kpi[] {
   const { s, view } = ctx;
   const t = s.traffic;
@@ -416,7 +440,10 @@ function kpis(ctx: Ctx, all: Section[]): Kpi[] {
   ];
   return [
     ...calls,
-    { label: 'GPUs ligadas', href: '#gpus', value: s.gpus ? `${on.length} de ${s.gpus.length}` : '—', sub: s.gpus ? `${money(perHour)}/h agora` : 'GPUs desligadas aqui', level: levelOf('gpus') },
+    {
+      label: 'GPUs ligadas', href: '#gpus', value: s.gpus ? `${on.length} de ${s.gpus.length}` : '—', level: levelOf('gpus'),
+      sub: s.gpus ? `${money(perHour)}/h agora${booting(s.gpus)}` : 'GPUs desligadas aqui',
+    },
     gpuToday(ctx, keySpend, g ? `máquinas ${money(g.dayUsd, 'US$')}/24 h` : 'pedida por chaves'),
     shortest
       ? { label: 'Menor saldo', href: '#saldos', value: `${money(shortest.balanceUsd, unitOf(shortest))}`, sub: `${shortest.provider}${shortest.hoursLeft !== null ? ` · ~${count(Math.round(shortest.hoursLeft))} h` : ''}`, level: levelOf('saldos') }
@@ -457,6 +484,12 @@ function page(nonce: string, title: string, body: string, refresh = false): stri
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${
     refresh ? '<meta http-equiv="refresh" content="60">' : ''}<meta name="robots" content="noindex"><title>${esc(title)}</title><style nonce="${nonce}">${CSS}</style></head><body>${body}`
     + `<script nonce="${nonce}">${NAV_JS}</script></body></html>`;
+}
+
+export function renderGpuDetail(nonce: string, s: AdminSnapshot, name: string, now: number): string | null {
+  const d = s.gpus?.find(g => g.name === name);
+  if (!d) return null;
+  return page(nonce, `ai-gateway · ${d.name}`, `<main class="main detail">${gpuDetailBody(d, s.gpuLogs?.[name] ?? [], now)}</main>`, true);
 }
 
 export function renderLogin(nonce: string, error: string | null, next = '/admin'): string {

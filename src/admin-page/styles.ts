@@ -26,6 +26,10 @@ code,.mono{font-family:var(--mono);font-size:12.5px}
 .foot{margin-top:auto;padding:12px 8px 0;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
 .foot b{color:var(--text);font-weight:600}.foot form{margin-top:8px}
 .main{min-width:0;padding:24px 32px 64px;max-width:1480px}
+.detail{margin:0 auto;max-width:980px}.detail h1{font-size:20px;margin:8px 0 12px;overflow-wrap:anywhere}.detail .tw{margin-bottom:8px}
+.facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 16px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
+.facts dt{color:var(--muted)}.facts dd{margin:0;overflow-wrap:anywhere}
+pre.log{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;max-height:70vh;overflow:auto}
 .top{display:flex;align-items:flex-start;gap:14px;margin-bottom:20px}
 .top .mark svg{width:28px;height:28px}.top .mark .g{stroke-width:2.2}
 h1{font-size:22px;line-height:1.2;margin:0;letter-spacing:-.01em}
