@@ -89,6 +89,15 @@ button.quiet{border-color:transparent;background:none;color:var(--muted);font-we
 .rsum li a{font-weight:600;min-width:0}
 .bar{position:sticky;bottom:0;z-index:1;display:flex;flex-wrap:wrap;gap:4px 18px;margin:24px -32px -64px;padding:8px 32px;
 background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-top:1px solid var(--line);color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.gapp{padding:4px 0 8px;border-top:1px solid var(--line2)}.gapp:first-child{border-top:0}.gapp .sub{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--text)}
+.gapp .sub .t{color:var(--muted);font-weight:500;font-size:12px}.lost{margin:0 16px 8px;padding:8px 12px;border-radius:8px;font-size:12.5px;background:color-mix(in srgb,var(--warn) 10%,var(--panel));color:var(--text)}
+.svc{margin:0 16px 10px;border:1px solid var(--line2);border-radius:9px;overflow:hidden}
+.svh{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:8px 12px;background:color-mix(in srgb,var(--side) 45%,var(--panel));border-bottom:1px solid var(--line2)}.svh .pill{margin-left:auto}
+.chain{list-style:none;margin:0;padding:0}.chain li{display:flex;gap:10px;padding:8px 12px;border-top:1px solid var(--line2)}.chain li:first-child{border-top:0}
+.chain li.now{background:color-mix(in srgb,var(--accent) 8%,var(--panel));box-shadow:inset 3px 0 0 var(--accent)}
+.chain .ix{flex:none;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:11.5px;font-weight:650;background:var(--hover);border:1px solid var(--line);font-variant-numeric:tabular-nums}
+.lk{min-width:0;flex:1}.lk>div{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}.lk small{display:block;color:var(--muted);font-size:12px;margin-top:2px}.lk small.inl{display:inline;margin:0}
+.lk code{overflow-wrap:anywhere}
 .filter{padding:10px 16px;margin:0;border-bottom:1px solid var(--line2);color:var(--muted)}
 button{min-height:32px;padding:0 12px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--text);font:inherit;font-weight:600;font-size:13px;cursor:pointer}
 button:hover{background:var(--hover);border-color:color-mix(in srgb,var(--muted) 50%,var(--line))}button:active{transform:translateY(1px)}

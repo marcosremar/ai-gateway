@@ -82,6 +82,7 @@ const OPS_TEXT: Record<string, { level: AlertLevel; subject: string; todo: strin
   'replica.lost_with_sessions': { level: 'urgent', subject: 'réplica caiu com alunos conectados', todo: 'Confira se os alunos reconectaram (/health?details=1, realtime) e por que a máquina caiu.' },
   'stage.reserve_down': { level: 'warn', subject: 'reserva de um estágio sem chave ou fora do ar', todo: 'Grave a chave que falta na API dev (bun run sandbox:set) e reinicie o gateway.' },
   'gpu.outside_window': { level: 'warn', subject: 'GPU ligada fora da janela de aula há mais de 30 min', todo: 'Veja quem a acordou (/health?details=1, gasto por chave) e estacione-a (POST /v1/deployments/<nome>/park) se ninguém usa.' },
+  'gpu.idle': { level: 'warn', subject: 'GPU ligada e sem uso', todo: 'Ninguém a usa desde o último pedido: estacione-a no /admin (GPUs › Estacionar) ou em POST /v1/deployments/<nome>/park.' },
   'turn.slow': { level: 'warn', subject: 'turno lento: p95 acima de 3 s nos últimos 15 min', todo: 'Veja /health?details=1 (latency, fallback): a GPU pode estar fria ou saturada e a reserva servindo.' },
   'fallback.probe_failed': { level: 'warn', subject: 'reserva na nuvem falhou no teste automático', todo: 'Veja fallbackProbe em /health?details=1: recarregue o crédito, troque a chave (API dev) ou o modelo/voz da reserva no alias do app.' },
   'stage.no_link': { level: 'urgent', subject: 'um estágio ficou sem nenhum provedor servindo', todo: 'Veja a cadeia em /health?details=1 e grave a chave que falta na API dev.' },

@@ -10,6 +10,7 @@ export interface AdminTraffic {
   total: TrafficLine;
   stages: TrafficLine[];
   providers: TrafficLine[];
+  links: TrafficLine[];
   activity: GatewayActivity[];
 }
 
@@ -36,6 +37,7 @@ export function adminTraffic(rows: readonly StoredTelemetryEvent[], now: number)
   const total = tally();
   const stages = new Map<string, Tally>();
   const providers = new Map<string, Tally>();
+  const links = new Map<string, Tally>();
   const of = (map: Map<string, Tally>, key: string) => map.get(key) ?? map.set(key, tally()).get(key)!;
   const activity: GatewayActivity[] = [];
   for (let i = rows.length - 1; i >= 0 && rows[i]!.rxTs >= firstHour; i--) {
@@ -44,7 +46,7 @@ export function adminTraffic(rows: readonly StoredTelemetryEvent[], now: number)
     const stage = String(row.attrs?.stage ?? '(sem etapa)');
     if (row.event === 'route.served') {
       const provider = String(row.attrs?.provider ?? '(sem provedor)');
-      for (const t of [total, of(stages, stage), of(providers, provider)]) {
+      for (const t of [total, of(stages, stage), of(providers, provider), of(links, `${stage}|${provider}`)]) {
         t.served++;
         if (row.durMs !== undefined) t.durs.push(row.durMs);
       }
@@ -56,11 +58,13 @@ export function adminTraffic(rows: readonly StoredTelemetryEvent[], now: number)
     } else if (row.event === 'route.fallback') {
       total.fallbacks++;
       of(stages, stage).fallbacks++;
-      of(providers, String(row.attrs?.provider ?? '(sem provedor)')).fallbacks++;
+      const provider = String(row.attrs?.provider ?? '(sem provedor)');
+      of(providers, provider).fallbacks++;
+      of(links, `${stage}|${provider}`).fallbacks++;
     } else if (row.source === 'gateway' && ACTIVITY_EVENTS.has(row.event) && activity.length < ACTIVITY_KEPT) {
       activity.push({ at: new Date(row.rxTs).toISOString(), event: row.event, level: row.level, deployment: row.deployment ?? null, replicaId: row.replicaId ?? null });
     }
   }
   const lines = (map: Map<string, Tally>) => [...map].map(([key, t]) => line(key, t)).sort((a, b) => b.served + b.failed - a.served - a.failed);
-  return { hours, total: line('total', total), stages: lines(stages), providers: lines(providers), activity };
+  return { hours, total: line('total', total), stages: lines(stages), providers: lines(providers), links: lines(links), activity };
 }

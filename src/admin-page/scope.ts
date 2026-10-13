@@ -33,12 +33,14 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
     apps: own ? [own] : [],
     appBudgets: s.appBudgets.filter(b => b.app === app),
     traffic: s.traffic && {
-      hours: [], total: zero, stages: [], providers: [],
+      hours: [], total: zero, stages: [], providers: [], links: [],
       activity: s.traffic.activity.filter(e => e.deployment !== null && deployments.has(e.deployment)),
     },
     spend: s.spend ? { since: s.spend.since, days: s.spend.days.map(d => ({ day: d.day, apps: d.apps[app] ? { [app]: d.apps[app]! } : {} })) } : null,
     dismissed: Object.fromEntries(Object.entries(s.dismissed ?? {}).filter(([id]) => aboutOwn(id))),
     about: s.about ?? null,
+    chains: s.chains ? Object.fromEntries(Object.entries(own?.stages ?? {}).map(([stage, aliases]) => [stage,
+      Object.fromEntries(aliases.filter(a => s.chains![stage]?.[a]).map(a => [a, s.chains![stage]![a]!]))])) : null,
     audit: s.audit
       .filter(e => (e.actor === app || (admins.has(e.actor) && e.names.length > 0)) && e.names.every(n => ownNames.has(n)))
       .map(e => (e.actor === app ? e : { ...e, actor: 'admin' })),
