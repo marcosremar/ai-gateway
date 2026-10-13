@@ -32,6 +32,7 @@
     "build": "NODE_OPTIONS='--max-old-space-size=4096' tsup",
     "typecheck": "tsc --noEmit",
     "stamp:build": "bun scripts/stamp-build.ts",
+    "deploy:prod": "bun scripts/deploy-prod.ts",
     "lint": "eslint 'src/**/*.ts' 'server/**/*.ts' --quiet",
     "lint:warnings": "eslint 'src/**/*.ts' 'server/**/*.ts'",
     "lint:fix": "eslint 'src/**/*.ts' 'server/**/*.ts' --fix",
