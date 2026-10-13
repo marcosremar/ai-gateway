@@ -92,6 +92,10 @@ td b{font-weight:600}td .err{color:var(--bad)}
 .ticks.d30{grid-template-columns:repeat(30,1fr)}
 .foot-note{margin:0;padding:10px 16px 12px;color:var(--muted);font-size:12px;border-top:1px solid var(--line2)}
 .recos{list-style:none;margin:0;padding:0}
+.saving{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;margin:0;padding:12px 16px;border-bottom:1px solid var(--line2)}
+.saving span{color:var(--muted);font-size:12.5px;flex-basis:100%}.saving b{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--ok)}
+.saving small{color:var(--muted);font-size:12.5px}
+.digest{margin:0;padding:8px 16px;color:var(--muted);font-size:12.5px;border-bottom:1px solid var(--line2)}
 .reco{display:flex;gap:12px;padding:12px 16px;border-top:1px solid var(--line2)}.reco:first-child{border-top:0}.reco>.mark{margin-top:2px}
 .rb{flex:1;min-width:0}.rt{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
 .amt{margin-left:auto;font-weight:650;font-variant-numeric:tabular-nums;white-space:nowrap}

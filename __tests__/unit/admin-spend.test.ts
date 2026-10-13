@@ -7,6 +7,7 @@ import type { DeploymentView } from '../../src/deployments/types';
 import { recommendations, scopeToApp, type AdminSnapshot } from '../../src/admin-page';
 import { PAGES, renderStatus } from '../../src/admin-page/pages';
 import { monthForecast } from '../../src/admin-page/spend';
+import { eurPerHourNow, eurPerMonth } from '../../src/admin-page/recommendations';
 import { demoSnapshot } from '../__fixtures__/admin-snapshot';
 
 const dirs: string[] = [];
@@ -222,13 +223,14 @@ describe('recommendations', () => {
       'app-degraded-gpu:parle', 'stage-p95:tts', 'stage-fallback:tts', 'app-budget:babelcast:pedidos', 'month-pace:scaleway']));
   });
 
-  it('orders money first, by amount, then by risk', () => {
+  it('orders what burns money now first, then the monthly saving, then the rest', () => {
     const list = recommendations(ctx(demoSnapshot(NOW, 'warn')));
-    const units = list.map(r => r.impact?.unit ?? 'none');
-    expect(units).toEqual([...units].sort((a, b) => ['€', 'US$', 'none'].indexOf(a) - ['€', 'US$', 'none'].indexOf(b)));
-    const euros = list.filter(r => r.impact?.unit === '€').map(r => r.impact!.amount);
-    expect(euros.length).toBeGreaterThan(1);
-    expect(euros).toEqual([...euros].sort((a, b) => b - a));
+    const now = list.map(eurPerHourNow);
+    expect(now.filter(Boolean).length).toBeGreaterThan(1);
+    expect(now).toEqual([...now].sort((a, b) => b - a));
+    const monthly = list.filter(r => !eurPerHourNow(r)).map(eurPerMonth);
+    expect(monthly.filter(Boolean).length).toBeGreaterThan(1);
+    expect(monthly).toEqual([...monthly].sort((a, b) => b - a));
   });
 
   it('shows an app session only its own recommendations, with no admin-only action', () => {

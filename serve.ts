@@ -64,7 +64,7 @@ import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
 import { ModelBenchmarkStore } from './src/model-benchmarks/store';
 import { createModelBenchmarkRoutes } from './src/model-benchmarks/routes';
-import { adminTraffic, createAdminPage, createAlertLog } from './src/admin-page';
+import { adminTraffic, createAdminPage, createAlertLog, createSuggestionDigest, recommendations, type AdminSnapshot } from './src/admin-page';
 
 const log = createLogger('serve');
 
@@ -593,6 +593,39 @@ realtime.mount(server);
 rooms.mount(server);
 // Outermost: the account API and pages answer themselves, and the quota gate sees every metered request first.
 accounts?.mount(server);
+const adminSnapshot = (): AdminSnapshot => ({
+  reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
+  gpus: controller?.list() ?? null,
+  gpuLogs: Object.fromEntries((controller?.list() ?? []).map(d => [d.name, controller!.bootLog(d.name)])), gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
+  machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
+  apps: deployments?.apps.list().map(({ id }) => {
+    const entry = deployments.apps.get(id);
+    return {
+      id, profile: entry?.profile ?? null, status: deployments.gpuHealth.status(id), aliases: Object.values(entry?.routes ?? {}).flatMap(r => Object.keys(r ?? {})),
+      stages: Object.fromEntries(Object.entries(entry?.routes ?? {}).map(([stage, r]) => [stage, Object.keys(r ?? {})])),
+    };
+  }) ?? [],
+  traffic: telemetry ? adminTraffic(telemetry.store.rows(), Date.now()) : null, audit: keyAudit.recent(30),
+  spend: spendLedger.view(), dismissed: spendLedger.dismissed(), chains: chainsNow().stages,
+  about: {
+    commit: (minimalHealth().commit as string | null) ?? null, uptimeSeconds: Math.round(process.uptime()),
+    region: process.env.RAILWAY_REPLICA_REGION?.trim() || null,
+    telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
+  },
+  digest: suggestionDigest.status(),
+});
+
+const suggestionDigest = createSuggestionDigest({
+  list: () => recommendations({ s: adminSnapshot(), now: Date.now(), csrf: '', app: null, view: null }),
+  deliver: alertMailer && process.env.SUGGESTION_DIGEST?.trim() !== '0' ? (mail) => alertMailer.deliver(mail) : null,
+  classOpen: () => classWindowOpen(controller?.list() ?? [], Date.now()),
+  baseUrl: (process.env.AIGW_PUBLIC_URL?.trim() || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')).replace(/\/$/, ''),
+  path: join(stateDir, 'suggestion-digest.json'),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+await suggestionDigest.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'SUGGESTION DIGEST STATE UNREADABLE: starts empty'));
+suggestionDigest.start();
+
 // GET /admin: the status page for a browser, signed in once with the admin key or an app's own key (src/admin-page).
 createAdminPage({
   actorOf: (key) => {
@@ -603,27 +636,9 @@ createAdminPage({
     const keyId = access.resolve(key)?.keyId;
     return { name: userId, app: userId, ...(keyId ? { keyId, mayPark: () => access.policyOf(keyId).canStartGpu } : {}) };
   },
-  snapshot: () => ({
-    reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
-    gpus: controller?.list() ?? null,
-    gpuLogs: Object.fromEntries((controller?.list() ?? []).map(d => [d.name, controller!.bootLog(d.name)])), gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
-    machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
-    apps: deployments?.apps.list().map(({ id }) => {
-      const entry = deployments.apps.get(id);
-      return {
-        id, profile: entry?.profile ?? null, status: deployments.gpuHealth.status(id), aliases: Object.values(entry?.routes ?? {}).flatMap(r => Object.keys(r ?? {})),
-        stages: Object.fromEntries(Object.entries(entry?.routes ?? {}).map(([stage, r]) => [stage, Object.keys(r ?? {})])),
-      };
-    }) ?? [],
-    traffic: telemetry ? adminTraffic(telemetry.store.rows(), Date.now()) : null, audit: keyAudit.recent(30),
-    spend: spendLedger.view(), dismissed: spendLedger.dismissed(), chains: chainsNow().stages,
-    about: {
-      commit: (minimalHealth().commit as string | null) ?? null, uptimeSeconds: Math.round(process.uptime()),
-      region: process.env.RAILWAY_REPLICA_REGION?.trim() || null,
-      telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
-    },
-  }),
+  snapshot: adminSnapshot,
   dismiss: (id) => spendLedger.dismiss(id),
+  sendDigest: () => suggestionDigest.sendNow(),
   park: async (name, actor) => {
     if (!controller) throw new Error('deployments desligados');
     if (actor.keyId) await deployments?.clientGpu.forget(actor.keyId, name);
@@ -676,6 +691,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     deployments?.clientGpu.stop();
     deployments?.gpuHealth.probe.stop();
     balanceWatch.stop();
+    suggestionDigest.stop();
     fallbackProbe.stop();
     keyManager.stop();
     void access.stop();

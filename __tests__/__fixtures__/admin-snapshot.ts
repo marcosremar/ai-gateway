@@ -3,7 +3,7 @@ import type { DeploymentView, ReplicaView } from '../../src/deployments/types';
 import type { KeyView } from '../../src/config/access-keys';
 import { DEFAULT_GPU_POLICY } from '../../src/config/access-keys';
 import type { StoredTelemetryEvent } from '../../src/telemetry/contract';
-import { adminTraffic } from '../../src/admin-page/traffic';
+import { adminTraffic, type DayUse } from '../../src/admin-page/traffic';
 import type { ChainReport, LinkState } from '../../src/config/stage-chains';
 import { parisDay, type SpendLedgerView } from '../../src/deployments/spend-ledger';
 import { withBoots } from './admin-boot';
@@ -49,13 +49,14 @@ function trafficRows(now: number, state: DemoState): StoredTelemetryEvent[] {
       const failing = state === 'bad' && stage === 'tts' && h === 0;
       const app = !failing && c % (inClass ? 5 : 2) === 1 ? 'babelcast' : 'parle';
       const provider = app === 'babelcast' ? (stage === 'tts' ? 'deployment:babel-live' : 'openrouter') : inClass ? 'deployment:speech-stack' : 'openrouter';
+      const model = provider === 'openrouter' ? CLOUD[`parle-${stage}`]!.slice('openrouter:'.length) : null;
       if (failing || (state === 'warn' && h === 5 && c === 3)) {
-        push(at, 'route.fallback', 'warn', { app, attrs: { stage, provider } });
+        push(at, 'route.fallback', 'warn', { app, attrs: { stage, provider, model } });
         push(at + 5, 'route.unavailable', 'error', { app, durMs: 30_000, attrs: { stage } });
         continue;
       }
-      if (state !== 'ok' && rand() < 0.03) push(at, 'route.fallback', 'warn', { app, attrs: { stage, provider } });
-      push(at + 10, 'route.served', 'info', { app, durMs: Math.round(STAGE_MS[stage]! * (0.6 + rand() * (rand() < 0.08 ? 3 : 0.9))), attrs: { stage, provider } });
+      if (state !== 'ok' && rand() < 0.03) push(at, 'route.fallback', 'warn', { app, attrs: { stage, provider, model } });
+      push(at + 10, 'route.served', 'info', { app, durMs: Math.round(STAGE_MS[stage]! * (0.6 + rand() * (rand() < 0.08 ? 3 : 0.9))), attrs: { stage, provider, model } });
     }
   }
   if (state === 'bad') for (let i = 0; i < 14; i++) push(now - (2 + i * 3) * 60_000, 'route.unavailable', 'error', { app: 'parle', durMs: 30_000, attrs: { stage: 'tts' } });
@@ -116,9 +117,31 @@ export function demoSpend(now: number, state: DemoState = 'warn'): SpendLedgerVi
   return { since: days[0]!.day, days };
 }
 
+function lastMonday8(now: number): string {
+  const day = new Date(now);
+  day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7));
+  day.setUTCHours(6, 0, 0, 0);
+  return day.toISOString();
+}
+
+function demoDaily(now: number): DayUse[] {
+  const out: DayUse[] = [];
+  for (let i = 14; i >= 1; i--) {
+    const day = parisDay(now - i * 86_400_000);
+    const weekday = new Date(`${day}T12:00:00Z`).getUTCDay();
+    if (weekday < 1 || weekday > 4) continue;
+    const slots = new Array<number>(288).fill(0);
+    for (let m = 17 * 60 + 35; m <= 19 * 60 + 45; m += 5) slots[m / 5] = 20;
+    out.push({ day, slots });
+  }
+  return out;
+}
+
 export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnapshot {
+  const traffic = adminTraffic(trafficRows(now, state), now);
   const snapshot = {
-    ...warnSnapshot(now), traffic: adminTraffic(trafficRows(now, state), now), spend: demoSpend(now, state), dismissed: {}, chains: demoChains(state),
+    ...warnSnapshot(now), traffic: { ...traffic, daily: { ...traffic.daily, parle: demoDaily(now) } }, spend: demoSpend(now, state), dismissed: {}, chains: demoChains(state),
+    digest: { enabled: true, lastSentAt: lastMonday8(now), lastKind: 'weekly' as const },
     about: { commit: '0a52749c1d2e3f4a5b6c7d8e9f00112233445566', uptimeSeconds: 4 * 3600 + 1260, region: 'europe-west4', telemetryAt: iso(now, 0) },
   };
   if (state === 'ok') return allGreen(snapshot, now);
@@ -175,7 +198,8 @@ function warnSnapshot(now: number): AdminSnapshot {
     ],
     providerCredit: [],
     gpus: [
-      deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }], { lastRequestAt: iso(now, 3) }, { idleMinutes: 45 }),
+      deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }, { days: [1, 2, 3, 4], start: '17:30', end: '20:30' }],
+        { lastRequestAt: iso(now, 3) }, { idleMinutes: 45 }),
       deployment('parle-bridge-shadow', [], []),
       deployment('speech-stack-test', [], [], { warm: null }),
       deployment('babel-live', [replica('scw-9z8y', 40, 0.79)], [], { app: 'babelcast', lastRequestAt: iso(now, 50) }),

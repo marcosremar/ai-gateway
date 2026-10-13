@@ -19,6 +19,7 @@ import { bootHeadline, bootLevel, bootOf, bootState, detailHref, nextStep } from
 import type { BootLogLine } from '../deployments/boot-track';
 import type { ChainReport } from '../config/stage-chains';
 import { recommendations, recoSection, type Recommendation } from './recommendations';
+import { digestBlock, type DigestStatus } from './digest';
 import {
   ACTIVITY_SHOWN, ALERT_FRESH_MS, LEVEL_TEXT, appTitle, inClass, byLevel, count, duration, esc, form, hhmm, hour, latest, meter, ms, money, outsideWindow, pct, pill,
   pinBadge, plural, providerLabel, providerOf, ratioLevel, stageName, table, upOf, when, worst, type Ctx, type Level, type Section,
@@ -56,6 +57,7 @@ export interface AdminSnapshot {
   dismissed?: Record<string, number>;
   about?: AdminAbout | null;
   chains?: Record<string, Record<string, ChainReport>> | null;
+  digest?: DigestStatus | null;
 }
 
 export interface AdminAbout { commit: string | null; uptimeSeconds: number; region: string | null; telemetryAt: string | null }
@@ -399,7 +401,7 @@ function traffic(ctx: Ctx): Section {
 }
 
 const AUDIT_TEXT: Record<string, string> = {
-  'admin-page.login': 'entrou no painel', 'admin-page.park': 'estacionou a GPU', 'admin-page.probe': 'testou as reservas', 'admin-page.dismiss': 'ocultou recomendação',
+  'admin-page.login': 'entrou no painel', 'admin-page.digest': 'enviou o resumo de sugestões', 'admin-page.park': 'estacionou a GPU', 'admin-page.probe': 'testou as reservas', 'admin-page.dismiss': 'ocultou recomendação',
   'deployment-credentials.rotate': 'trocou credenciais de máquina', 'provider-keys.applied': 'aplicou chaves de provedor',
   created: 'criou', updated: 'alterou', deleted: 'apagou', delete: 'apagou', start: 'ligou', stop: 'desligou', reboot: 'reiniciou',
 };
@@ -437,7 +439,7 @@ function activity({ s, now }: Ctx): Section {
 }
 
 export function sectionsOf(ctx: Ctx, recos: Recommendation[]): Map<string, Section> {
-  const list = [recoSection(ctx, recos), apps(ctx), guarantee(ctx), reserves(ctx), traffic(ctx), spend(ctx), gpus(ctx), keys(ctx), alerts(ctx), activity(ctx)];
+  const list = [recoSection(ctx, recos, digestBlock(ctx)), apps(ctx), guarantee(ctx), reserves(ctx), traffic(ctx), spend(ctx), gpus(ctx), keys(ctx), alerts(ctx), activity(ctx)];
   if (!ctx.view) list.push(balances(ctx), machines(ctx));
   return new Map(list.map(x => [x.id, x]));
 }

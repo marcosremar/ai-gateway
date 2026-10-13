@@ -35,6 +35,8 @@ export const pct = (v: number) => new Intl.NumberFormat('pt-BR', { style: 'perce
 export const ms = (v: number | null | undefined) => (v === null || v === undefined ? '—' : v >= 1000 ? `${(v / 1000).toFixed(2).replace('.', ',')} s` : `${count(Math.round(v))} ms`);
 export const latest = (dates: Array<string | null | undefined>) => dates.filter((d): d is string => Boolean(d)).sort().at(-1) ?? null;
 export const hhmm = (iso: string | number) => new Intl.DateTimeFormat('pt-BR', { timeZone: ZONE, hour: '2-digit', minute: '2-digit' }).format(typeof iso === 'number' ? iso : Date.parse(iso));
+export const shortDate = (at: string | number) => new Intl.DateTimeFormat('pt-BR', { timeZone: ZONE, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  .format(typeof at === 'number' ? at : Date.parse(at)).replace(',', ' às');
 export const hour = (iso: string) => new Intl.DateTimeFormat('pt-BR', { timeZone: ZONE, hour: '2-digit' }).format(Date.parse(iso));
 
 export const ago = (iso: string | null, now: number) => {

@@ -27,6 +27,7 @@ async function gateway() {
   const dismissed: string[] = [];
   const audit: Array<Record<string, unknown>> = [];
   let probes = 0;
+  let digests = 0;
   const server = createServer((_req, res) => {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end('{"error":"unauthorized"}');
@@ -46,6 +47,7 @@ async function gateway() {
     park: async (name) => { parked.push(name); },
     pin: async (name, on) => { pins.push([name, on]); },
     probe: async () => { probes++; },
+    sendDigest: async () => { digests++; return 'mail-1'; },
     dismiss: async (id) => { dismissed.push(id); snapshot.dismissed = { ...snapshot.dismissed, [id]: clock.now + 7 * 86_400_000 }; },
     secrets: () => [ADMIN_KEY, CLIENT_KEY, DEV_KEY, BABEL_KEY, SITE_KEY, PROVIDER_SECRET],
     audit: (entry) => audit.push(entry),
@@ -72,7 +74,7 @@ async function gateway() {
     return { cookie, html, csrf: /name="csrf" value="([a-f0-9]+)"/.exec(html)![1] };
   }
   const every = async (cookie: string, query = '') => (await Promise.all(PAGES.map(async p => (await call(p.path + query, { cookie })).text()))).join('');
-  return { clock, access, call, post, login, signedIn, every, parked, pins, dismissed, audit, snapshot, probes: () => probes };
+  return { clock, access, call, post, login, signedIn, every, parked, pins, dismissed, audit, snapshot, probes: () => probes, digests: () => digests };
 }
 
 describe('admin page (/admin)', () => {
@@ -210,6 +212,26 @@ describe('admin page (/admin)', () => {
     expect(html).not.toContain('/admin/park');
     for (const secret of [ADMIN_KEY, CLIENT_KEY, DEV_KEY, BABEL_KEY, PROVIDER_SECRET]) expect(html).not.toContain(secret);
     expect(html).not.toMatch(LEAK);
+  });
+
+  it('shows the possible saving and the digest state, and only the admin sends the digest', async () => {
+    const gw = await gateway();
+    const admin = await gw.signedIn();
+    expect(admin.html).toContain('Economia possível este mês');
+    expect(admin.html).toContain('Último resumo enviado em');
+    expect(admin.html).toContain('action="/admin/digest"');
+    expect((await gw.post('/admin/digest', {}, admin.cookie)).status).toBe(403);
+    const res = await gw.post('/admin/digest', { csrf: admin.csrf }, admin.cookie);
+    expect(res.status).toBe(303);
+    expect(decodeURIComponent(res.headers.get('location') ?? '')).toContain('Resumo das sugestões enviado');
+    expect(gw.digests()).toBe(1);
+    expect(gw.audit.at(-1)).toMatchObject({ actor: 'marcos', action: 'admin-page.digest', ok: true });
+    const app = await gw.signedIn(CLIENT_KEY);
+    expect(app.html).not.toContain('/admin/digest');
+    expect(app.html).not.toContain('Último resumo');
+    expect((await gw.post('/admin/digest', { csrf: app.csrf }, app.cookie)).status).toBe(403);
+    expect(gw.digests()).toBe(1);
+    expect(gw.audit.at(-1)).toMatchObject({ actor: 'parle', action: 'admin-page.digest', ok: false });
   });
 
   it('ignores ?app= for an app session', async () => {

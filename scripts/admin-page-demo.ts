@@ -24,6 +24,7 @@ const page = createAdminPage({
   dismiss: async (id) => { dismissed[id] = Date.now() + 7 * 86_400_000; },
   park: async () => {},
   probe: async () => {},
+  sendDigest: async () => { console.log('demo: digest not mailed (no mailer in the demo)'); return 'demo'; },
   secrets: () => (appKey ? [key, appKey] : [key]),
 });
 

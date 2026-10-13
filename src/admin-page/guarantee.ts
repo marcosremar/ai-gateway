@@ -76,7 +76,7 @@ export function services(s: AdminSnapshot, filter: string | null = null, now = D
           const probes = s.reserves.links.filter(p => p.stage === stage && p.target === link.target);
           const probe = name ? null : probes.find(p => p.aliases.includes(alias)) ?? probes[0] ?? null;
           const live = name ? gpuState(link, d) : cloudState(link, probe);
-          const t = linkTraffic.get(`${stage}|${providerOf(link.target)}`);
+          const t = linkTraffic.get(`${stage}|${link.target}`) ?? linkTraffic.get(`${stage}|${providerOf(link.target)}`);
           const total = stageTotal.get(stage);
           return {
             target: link.target, kind: !name ? 'cloud' : d?.app === app.id || app.profile?.gpuDeployments.includes(name) ? 'own-gpu' : 'other-gpu',
