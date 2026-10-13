@@ -14,7 +14,7 @@ export const DIGEST_IMMEDIATE_GAP_MS = 60 * 60_000;
 export const DIGEST_FORGET_MS = 30 * 86_400_000;
 export type DigestKind = 'weekly' | 'immediate' | 'manual';
 export const DIGEST_KIND: Record<string, string> = { weekly: 'semanal', immediate: 'sugestão nova de alto impacto', manual: 'enviado pelo painel' };
-const ALERTED_ELSEWHERE = ['reserve-failed:', 'balance-low:', 'gpu-idle:', 'gpu-outside:'];
+const ALERTED_ELSEWHERE = ['reserve-failed:', 'balance-low:', 'gpu-idle:', 'gpu-outside:', 'overspend:'];
 
 export interface DigestStatus { enabled: boolean; lastSentAt: string | null; lastKind: DigestKind | null }
 interface DigestState { lastSentAt: string | null; lastKind: DigestKind | null; weeklyDay: string | null; immediateAt: number | null; sent: Record<string, number> }

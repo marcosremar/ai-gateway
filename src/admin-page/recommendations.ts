@@ -228,6 +228,16 @@ function monthPaceRules(s: AdminSnapshot, now: number): Recommendation[] {
   });
 }
 
+const OVERSPEND_LABEL: Array<[string, string]> = [['/admin/gpus', 'Ver as GPUs'], ['/admin/chaves', 'Ver as chaves'], ['/admin/gastos', 'Ver os gastos']];
+
+function overspendRules(s: AdminSnapshot): Recommendation[] {
+  return (s.overspend ?? []).map(o => ({
+    id: `overspend:${o.id}`, level: 'bad' as Level, title: `Gasto acima do normal: ${o.who}`,
+    saw: `${o.text} · ${o.projection}`, why: `Causa provável: ${o.cause}. O que fazer: ${o.action}.`,
+    impact: null, action: { go: o.page, label: OVERSPEND_LABEL.find(([p]) => o.page.startsWith(p))?.[1] ?? 'Ver o tráfego do app' },
+  }));
+}
+
 function appRules(s: AdminSnapshot): Recommendation[] {
   const out: Recommendation[] = [];
   for (const a of s.apps) {
@@ -262,7 +272,7 @@ function trendRules(ctx: Ctx): Recommendation[] {
   const out: Recommendation[] = [];
   for (const app of Object.keys(today)) {
     const prev = days.slice(0, 7).filter(d => d.apps[app]).map(d => d.apps[app]!.gpuEur);
-    if (prev.length < 3) continue;
+    if (prev.length < 3 || (ctx.s.overspend ?? []).some(o => o.kind === 'gpu-day' && o.app === app)) continue;
     const avg = prev.reduce((a, b) => a + b, 0) / prev.length;
     const now = today[app]!.gpuEur;
     if (avg <= 0 || now < avg * TREND_FACTOR) continue;
@@ -281,7 +291,7 @@ const IMPACT_RANK = { '€': 0, 'US$': 1, none: 2 };
 
 export function recommendations(ctx: Ctx): Recommendation[] {
   const dismissed = ctx.s.dismissed ?? {};
-  return [...gpuRules(ctx), ...keyRules(ctx.s), ...serviceRules(ctx.s, ctx.now), ...appRules(ctx.s), ...trendRules(ctx), ...warmWindowRules(ctx), ...linkReorderRules(ctx)]
+  return [...gpuRules(ctx), ...keyRules(ctx.s), ...serviceRules(ctx.s, ctx.now), ...appRules(ctx.s), ...overspendRules(ctx.s), ...trendRules(ctx), ...warmWindowRules(ctx), ...linkReorderRules(ctx)]
     .filter(r => !(dismissed[r.id] && dismissed[r.id]! > ctx.now))
     .sort((a, b) => eurPerHourNow(b) - eurPerHourNow(a) || eurPerMonth(b) - eurPerMonth(a)
       || IMPACT_RANK[a.impact?.unit ?? 'none'] - IMPACT_RANK[b.impact?.unit ?? 'none'] || (b.impact?.amount ?? 0) - (a.impact?.amount ?? 0) || RANK[a.level] - RANK[b.level]);

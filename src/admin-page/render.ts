@@ -20,6 +20,7 @@ import type { BootLogLine } from '../deployments/boot-track';
 import type { ChainReport } from '../config/stage-chains';
 import { recommendations, recoSection, type Recommendation } from './recommendations';
 import { digestBlock, type DigestStatus } from './digest';
+import type { Overspend } from '../telemetry/overspend';
 import {
   ACTIVITY_SHOWN, ALERT_FRESH_MS, LEVEL_TEXT, appTitle, inClass, byLevel, count, duration, esc, form, hhmm, hour, latest, meter, ms, money, outsideWindow, pct, pill,
   pinBadge, plural, providerLabel, providerOf, ratioLevel, stageName, table, upOf, when, worst, type Ctx, type Level, type Section,
@@ -58,6 +59,7 @@ export interface AdminSnapshot {
   about?: AdminAbout | null;
   chains?: Record<string, Record<string, ChainReport>> | null;
   digest?: DigestStatus | null;
+  overspend?: Overspend[];
 }
 
 export interface AdminAbout { commit: string | null; uptimeSeconds: number; region: string | null; telemetryAt: string | null }

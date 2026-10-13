@@ -7,6 +7,7 @@ import { adminTraffic, type DayUse } from '../../src/admin-page/traffic';
 import type { ChainReport, LinkState } from '../../src/config/stage-chains';
 import { parisDay, type SpendLedgerView } from '../../src/deployments/spend-ledger';
 import { withBoots } from './admin-boot';
+import { findOverspend } from '../../src/telemetry/overspend';
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
 
@@ -168,13 +169,18 @@ function monthElapsed(now: number): number {
 function somethingDown(s: AdminSnapshot, now: number): AdminSnapshot {
   return {
     ...s,
+    overspend: findOverspend({ now, spend: s.spend ?? null, gpus: s.gpus ?? [], keys: s.keys, gpuSpend: s.gpuSpend, machines: s.machines, rows: [], appOf: d => d.app }),
     reserves: {
       ...s.reserves,
       links: s.reserves.links.map(r => (r.stage === 'tts' ? { ...r, ok: false, status: 502, code: 'upstream_error', latencyMs: 30000, error: 'provider timeout', checkedAt: iso(now, 2) } : r)),
     },
     apps: s.apps.map(a => (a.status ? { ...a, status: { ...a.status, mode: 'down' } } : a)),
     balances: s.balances.map(b => (b.provider === 'scaleway' ? { ...b, monthEur: Math.round(260 * monthElapsed(now) * 100) / 100 } : b)),
-    alerts: [{ event: 'fallback.probe_failed', at: iso(now, 2), summary: 'stage: tts, target: openrouter:hexgrad/kokoro-82m, code: upstream_error' }, ...s.alerts],
+    alerts: [
+      { event: 'fallback.probe_failed', at: iso(now, 2), summary: 'stage: tts, target: openrouter:hexgrad/kokoro-82m, code: upstream_error' },
+      { event: 'spend.over', at: iso(now, 6), summary: 'quem: app parle, gasto: GPU de parle hoje acima do normal, causa: speech-stack ligada pela chave parle (producao)' },
+      ...s.alerts,
+    ],
     audit: [{ at: iso(now, 1), actor: 'marcos', action: 'admin-page.probe', names: [], ok: true }, ...s.audit],
   };
 }
