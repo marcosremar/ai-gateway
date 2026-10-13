@@ -54,10 +54,11 @@ export interface DeclaredDeployment {
 }
 
 /**
- * `parle-speech`: the `speech-stack` image in the gateway's own Scaleway registry (pulled with the key the gateway
- * already has, no registry secret). The declaration owns the image, the placements, the command, `realtime`, the class
- * window and the edge's `RT_MAX_SESSIONS` per machine type; sizing, limits, env and files stay as registered (a new
- * gateway starts from the `speech-stack` profile). The other three own only their class window and monthly ceiling.
+ * `parle-speech`: the `speech-stack` image (public ghcr copy) on Vast hosts in the EU only (owner, 14/10/2026). The
+ * declaration owns the image, provider, candidates, `euOnly`, the command, `realtime`, the class window, the `env`
+ * (cleared) and `envByMachineType` per card; sizing, limits and files (the voice catalog) stay as registered (a new
+ * gateway starts from the `speech-stack` profile). `parle-speech-test` is its copy for tests; `parle-qwen-tts` is
+ * paused; the others own only their class window and monthly ceiling.
  * `babelcast-speech` and `babelcast-tts` own only their app (`babelcast`): no spec field, no machine.
  */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
@@ -159,9 +160,9 @@ function testCopyFiles(target: DeclaredTarget, decl: DeclaredDeployment): Record
   const source = target.specOf(sourceName);
   const own = target.specOf(decl.name);
   const out: Record<string, unknown> = {};
-  const keys = decl.spec.provider === 'vast' ? ['fileUrls'] as const : ['files', 'fileUrls'] as const;
-  for (const key of keys) {
-    if (source?.[key] && !own?.[key]) out[key] = source[key];
+  // The copy follows the source's catalog (a voice re-registered there reaches the test copy at the next reconcile).
+  for (const key of ['files', 'fileUrls'] as const) {
+    if (source?.[key] && !sameValue(source[key], own?.[key])) out[key] = source[key];
   }
   return out;
 }

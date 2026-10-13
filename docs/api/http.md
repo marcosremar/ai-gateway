@@ -248,7 +248,9 @@ else its own configured voice. The replica must expose the OpenAI shapes (`/v1/a
 
 **Self-hosted TTS (Qwen3-TTS Base).** For a deployment target:
 
-- `voice` may be a **cast voice id** of the replica's catalog (`GET /refs/voices.json` on the replica, cached 5 min).
+- `voice` may be a **cast voice id** of the replica's catalog (`GET /refs/voices.json` on the replica, cached 5 min;
+  on the `speech-stack` image, which has no such file, its `GET /v1/voices` list, each reference at
+  `http://127.0.0.1:8000/refs/<id>.wav` inside the replica — `speechStackCatalogOf`, since 14/10/2026).
   When the client sends no `ref_audio`, the gateway turns it into `task_type: "Base"`, `ref_audio`, `ref_text`,
   `language` (from the voice) and the catalog's `model` — the request parle's `qwen-speech.ts` builds, without
   `voice` (vLLM-Omni would read it as a precomputed speaker). A voice that is not in the catalog is **never sent**

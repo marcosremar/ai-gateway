@@ -11,7 +11,7 @@ import { probeWav } from '../telemetry/fallback-probe';
 import { redactSecrets } from '../gateway/proxy/provider-routing';
 import type { DeploymentController } from './controller';
 import { replicaBase } from './http';
-import { catalogOf, isBaseTtsModel, languageName } from './inference-providers';
+import { catalogOf, isBaseTtsModel, languageName, VOICE_CATALOG_SOURCES } from './inference-providers';
 import { qwenTokenCap } from './qwen-token-cap';
 import { replicaTls } from './replica-tls';
 import type { DeploymentView } from './types';
@@ -58,9 +58,13 @@ async function expectJson(res: Response, check: (body: Record<string, unknown>) 
 }
 
 async function ttsBody(call: Call, t: StageTarget): Promise<Record<string, unknown>> {
-  const res = await call('/refs/voices.json');
-  const catalog = res.ok && (res.headers.get('content-type') ?? '').includes('json') ? catalogOf(await res.json().catch(() => null)) : null;
-  if (!catalog) await res.body?.cancel().catch(() => {});
+  let catalog: ReturnType<typeof catalogOf> = null;
+  for (const [path, parse] of VOICE_CATALOG_SOURCES) {
+    const res = await call(path);
+    catalog = res.ok && (res.headers.get('content-type') ?? '').includes('json') ? parse(await res.json().catch(() => null)) : null;
+    if (catalog) break;
+    await res.body?.cancel().catch(() => {});
+  }
   const voice = catalog?.voices[0];
   if (voice) {
     const language = languageName(voice.lang);
