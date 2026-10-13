@@ -20,7 +20,7 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
   const links = aliases.size ? s.reserves.links.filter(r => r.aliases.some(a => aliases.has(a))) : s.reserves.links;
   const spentEur = Object.fromEntries(Object.entries(s.gpuSpend?.spentEur ?? {}).filter(([id]) => keyIds.has(id)));
   const running = s.gpuSpend?.running?.filter(r => keyIds.has(r.key) && deployments.has(r.deployment));
-  const zero = { key: 'total', served: 0, failed: 0, fallbacks: 0, p50Ms: null, p95Ms: null };
+  const ownTraffic = s.traffic?.byApp?.[app];
   return {
     reserves: { intervalMinutes: s.reserves.intervalMinutes, links: links.map(r => ({ ...r, aliases: r.aliases.filter(a => aliases.has(a)) })) },
     balances: [],
@@ -33,8 +33,9 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
     apps: own ? [own] : [],
     appBudgets: s.appBudgets.filter(b => b.app === app),
     traffic: s.traffic && {
-      hours: [], total: zero, stages: [], providers: [], links: [],
+      ...(ownTraffic ?? { hours: [], total: { key: 'total', served: 0, failed: 0, fallbacks: 0, p50Ms: null, p95Ms: null }, stages: [], providers: [], links: [] }),
       activity: s.traffic.activity.filter(e => e.deployment !== null && deployments.has(e.deployment)),
+      apps: [], byApp: ownTraffic ? { [app]: ownTraffic } : {},
     },
     gpuLogs: Object.fromEntries(Object.entries(s.gpuLogs ?? {}).filter(([name]) => deployments.has(name))),
     spend: s.spend ? { since: s.spend.since, days: s.spend.days.map(d => ({ day: d.day, apps: d.apps[app] ? { [app]: d.apps[app]! } : {} })) } : null,

@@ -108,15 +108,17 @@ function gpuStateText(d: DeploymentView): string {
   return up.length ? (ready ? 'pronta' : 'ligando') : 'desligada';
 }
 
+const trafficOf = (ctx: Ctx) => (ctx.app ? ctx.s.traffic?.byApp?.[ctx.app] ?? null : ctx.s.traffic);
+
 function classStrip(ctx: Ctx): string {
   const gpus = ctx.s.gpus ?? [];
   const state = classState(gpus, ctx.now);
   const appName = (d: DeploymentView) => (d.app ? appTitle(d.app, ctx.s.apps.find(a => a.id === d.app)?.profile).name : null);
   if (state.open.length) {
-    const lastHour = ctx.s.traffic?.hours.at(-1);
+    const lastHour = trafficOf(ctx)?.hours.at(-1);
     const facts = [
       ...state.open.map(d => `${appName(d) ? `${appName(d)} · ` : ''}${d.name} ${gpuStateText(d)}`),
-      lastHour && !ctx.view ? `${plural(lastHour.served + lastHour.failed, 'chamada', 'chamadas')} na última hora${lastHour.failed ? `, ${count(lastHour.failed)} sem resposta` : ''}` : '',
+      lastHour ? `${plural(lastHour.served + lastHour.failed, 'chamada', 'chamadas')} na última hora${lastHour.failed ? `, ${count(lastHour.failed)} sem resposta` : ''}` : '',
     ].filter(Boolean);
     return `<div class="aula on" role="status"><span class="live" aria-hidden="true"></span><div><b>Aula em curso · até ${hhmm(state.endsAt!)}</b><span>${esc(facts.join(' · '))}</span></div></div>`;
   }
@@ -143,7 +145,7 @@ function cards(ctx: Ctx, all: Map<string, Section>): Card[] {
   const [, svcPage, gpuPage, spendPage, keyPage] = PAGES as [PageDef, PageDef, PageDef, PageDef, PageDef, PageDef];
   const list = services(s, ctx.app, now);
   const garantidos = list.filter(x => x.level === 'ok').length;
-  const t = s.traffic;
+  const t = trafficOf(ctx);
   const total = t ? t.total.served + t.total.failed : 0;
   const svcLevel = pageLevel(svcPage, all);
   const svcNotes = notesOf(svcPage);
@@ -160,7 +162,7 @@ function cards(ctx: Ctx, all: Map<string, Section>): Card[] {
     {
       page: svcPage, level: svcLevel,
       verdict: svcLevel === 'ok' ? (list.length ? 'Todos os serviços respondendo' : 'Respondendo') : svcNotes[0] ?? 'Pede atenção',
-      facts: [list.length ? `${garantidos} de ${list.length} serviços garantidos` : '', ...(t && !ctx.view ? [`${count(total)} chamadas em 24 h`,
+      facts: [list.length ? `${garantidos} de ${list.length} serviços garantidos` : '', ...(t ? [`${count(total)} chamadas em 24 h`,
         `${count(t.total.failed)} sem resposta`, `p95 ${ms(t.total.p95Ms)}`] : [])].filter(Boolean).join(' · '),
       notes: svcLevel === 'ok' ? [] : svcNotes.slice(1),
     },

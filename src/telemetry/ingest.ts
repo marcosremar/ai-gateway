@@ -98,14 +98,14 @@ export class TelemetryIngest {
   }
 
   /** Stores the gateway's own events (emit.ts sink): same validation and scrubber, no auth, no rate limit. */
-  ingestOwn(event: TelemetryEvent): void {
+  ingestOwn(event: TelemetryEvent, app?: string): void {
     const parsed = TelemetryEventSchema.safeParse(event);
     if (!parsed.success) { this.counters.invalid++; return; }
     if (parsed.data.level === 'debug' && !traceSampled(parsed.data.traceId, this.debugSample)) { this.counters.sampledOut++; return; }
     const { attrs, redacted } = scrubAttrs(parsed.data.attrs);
     this.counters.redactedAttrs += redacted;
     this.counters.accepted++;
-    this.store.insert([clean({ ...parsed.data, source: 'gateway', rxTs: this.now(), attrs })]);
+    this.store.insert([clean({ ...parsed.data, source: 'gateway', rxTs: this.now(), attrs, ...(app ? { app } : {}) })]);
   }
 
   ingest(principal: TelemetryPrincipal, body: unknown, bodyBytes: number): IngestResult {

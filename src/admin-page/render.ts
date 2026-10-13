@@ -8,7 +8,8 @@ import type { AppProfile } from '../deployments/apps';
 import type { AppStatus } from '../deployments/app-gpu-health';
 import { activeWindow } from '../deployments/autoscale';
 import { idleGpu } from '../deployments/idle';
-import type { AdminTraffic, TrafficLine } from './traffic';
+import { answeredShare, gpuShare, sloLevel, type AdminTraffic, type TrafficLine, type TrafficView } from './traffic';
+import { SLO_TARGETS } from '../alerting/slo-targets';
 import type { SpendLedgerView } from '../deployments/spend-ledger';
 import { spend, spendWindow } from './spend';
 import { parisMidnightAfter } from '../deployments/spend-ledger';
@@ -321,7 +322,7 @@ function apps(ctx: Ctx): Section {
   };
 }
 
-function chart(t: AdminTraffic): string {
+function chart(t: TrafficView): string {
   const H = 100;
   const max = Math.max(1, ...t.hours.map(h => h.served + h.failed));
   const bars = t.hours.map((h, i) => {
@@ -345,24 +346,55 @@ const lineCells = (l: TrafficLine, name: string, withFailed: boolean) => [
   count(l.fallbacks), ms(l.p50Ms), ms(l.p95Ms),
 ];
 
-function traffic({ s }: Ctx): Section {
+function appTrafficRows(ctx: Ctx, t: AdminTraffic): Array<{ level: Level; cells: string[] }> {
+  return (t.apps ?? []).map((l) => {
+    const view = t.byApp?.[l.key];
+    const calls = l.served + l.failed;
+    const level = sloLevel(l);
+    const gpu = view ? gpuShare(view) : null;
+    return { level, cells: [
+      `<b><a href="/admin/servicos?app=${encodeURIComponent(l.key)}#trafego">${esc(appTitle(l.key, ctx.s.apps.find(a => a.id === l.key)?.profile).name)}</a></b>`,
+      count(calls),
+      pill(level, pct(answeredShare(l) ?? 1)) + (l.failed ? `<small class="err">${count(l.failed)} sem resposta</small>` : ''),
+      `${count(l.fallbacks)}${calls ? `<small>${pct(l.fallbacks / calls)} das chamadas</small>` : ''}`,
+      gpu === null ? '—' : pct(gpu),
+      ms(l.p50Ms), ms(l.p95Ms),
+    ] };
+  }).sort(byLevel);
+}
+
+function traffic(ctx: Ctx): Section {
+  const { s } = ctx;
   const base = { id: 'trafego', title: 'Tráfego', actions: '' };
   const t = s.traffic;
   if (!t) return { ...base, level: 'ok', notes: [], count: null, meta: '', body: '<p class="empty">A telemetria está desligada neste gateway: sem contagem de chamadas nem latência.</p>' };
-  const lastHourFailed = t.hours.at(-1)?.failed ?? 0;
-  const level: Level = lastHourFailed ? 'bad' : t.total.failed ? 'warn' : 'ok';
+  const only = ctx.view?.id ?? ctx.app;
+  const v = only ? t.byApp?.[only] ?? null : t;
+  const scope = only && !ctx.view ? `<p class="filter">Só o app <b>${esc(only)}</b> · <a href="${esc(ctx.path ?? '/admin/servicos')}#trafego">ver todos</a></p>` : '';
+  if (!v) return { ...base, level: 'ok', notes: [], count: null, meta: 'últimas 24 h', body: `${scope}<p class="empty">Nenhuma chamada deste app nas últimas 24 h.</p>` };
+  const lastHourFailed = v.hours.at(-1)?.failed ?? 0;
+  const perApp = only ? [] : appTrafficRows(ctx, t);
+  const below = (t.apps ?? []).filter(l => !only && sloLevel(l) === 'bad');
+  const level: Level = worst([lastHourFailed ? 'bad' : v.total.failed ? 'warn' : 'ok', ...perApp.map(r => r.level)]);
   const num = (label: string) => ({ label, num: true });
+  const goal = pct(SLO_TARGETS.uptimeRatio);
   return {
     ...base, level, count: null,
-    notes: lastHourFailed ? [`${plural(lastHourFailed, 'chamada', 'chamadas')} sem resposta na última hora`] : t.total.failed ? [`${plural(t.total.failed, 'chamada', 'chamadas')} sem resposta em 24 h`] : [],
-    meta: 'últimas 24 h · telemetria do gateway',
-    body: chart(t)
+    notes: [
+      lastHourFailed ? `${plural(lastHourFailed, 'chamada', 'chamadas')} sem resposta na última hora` : v.total.failed ? `${plural(v.total.failed, 'chamada', 'chamadas')} sem resposta em 24 h` : '',
+      ...below.map(l => `${appTitle(l.key, s.apps.find(a => a.id === l.key)?.profile).name} respondeu ${pct(answeredShare(l) ?? 1)} (meta ${goal})`),
+    ].filter(Boolean),
+    meta: `últimas 24 h · telemetria do gateway · meta ${goal} respondidas`,
+    body: scope + chart(v)
+      + (perApp.length ? '<h3 class="sub">Por app</h3>'
+        + table([{ label: 'App' }, num('Chamadas'), num('Respondidas'), num('Desvios p/ reserva'), num('Na GPU'), num('p50'), num('p95')],
+          perApp.map(r => r.cells), '') : '')
       + '<h3 class="sub">Por etapa</h3>'
       + table([{ label: 'Etapa' }, num('Chamadas'), num('Sem resposta'), num('Desvios p/ reserva'), num('p50'), num('p95')],
-        t.stages.map(l => lineCells(l, `<b>${esc(stageName(l.key))}</b>`, true)), 'Nenhuma chamada nas últimas 24 h.')
+        v.stages.map(l => lineCells(l, `<b>${esc(stageName(l.key))}</b>`, true)), 'Nenhuma chamada nas últimas 24 h.')
       + '<h3 class="sub">Por provedor</h3>'
       + table([{ label: 'Provedor' }, num('Servidas'), num('Tentativas falhas'), num('p50'), num('p95')],
-        t.providers.map(l => lineCells(l, `<code>${esc(l.key)}</code>`, false)), 'Nenhuma chamada nas últimas 24 h.'),
+        v.providers.map(l => lineCells(l, `<code>${esc(l.key)}</code>`, false)), 'Nenhuma chamada nas últimas 24 h.'),
   };
 }
 
@@ -405,8 +437,8 @@ function activity({ s, now }: Ctx): Section {
 }
 
 export function sectionsOf(ctx: Ctx, recos: Recommendation[]): Map<string, Section> {
-  const list = [recoSection(ctx, recos), apps(ctx), guarantee(ctx), reserves(ctx), spend(ctx), gpus(ctx), keys(ctx), alerts(ctx), activity(ctx)];
-  if (!ctx.view) list.push(traffic(ctx), balances(ctx), machines(ctx));
+  const list = [recoSection(ctx, recos), apps(ctx), guarantee(ctx), reserves(ctx), traffic(ctx), spend(ctx), gpus(ctx), keys(ctx), alerts(ctx), activity(ctx)];
+  if (!ctx.view) list.push(balances(ctx), machines(ctx));
   return new Map(list.map(x => [x.id, x]));
 }
 

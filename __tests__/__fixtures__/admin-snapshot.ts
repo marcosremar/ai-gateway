@@ -46,18 +46,19 @@ function trafficRows(now: number, state: DemoState): StoredTelemetryEvent[] {
     for (let c = 0; c < calls; c++) {
       const at = start + Math.round(rand() * 3_590_000);
       const stage = ['stt', 'chat', 'tts'][c % 3]!;
-      const provider = inClass ? 'deployment:speech-stack' : 'openrouter';
       const failing = state === 'bad' && stage === 'tts' && h === 0;
+      const app = !failing && c % (inClass ? 5 : 2) === 1 ? 'babelcast' : 'parle';
+      const provider = app === 'babelcast' ? (stage === 'tts' ? 'deployment:babel-live' : 'openrouter') : inClass ? 'deployment:speech-stack' : 'openrouter';
       if (failing || (state === 'warn' && h === 5 && c === 3)) {
-        push(at, 'route.fallback', 'warn', { attrs: { stage, provider } });
-        push(at + 5, 'route.unavailable', 'error', { durMs: 30_000, attrs: { stage } });
+        push(at, 'route.fallback', 'warn', { app, attrs: { stage, provider } });
+        push(at + 5, 'route.unavailable', 'error', { app, durMs: 30_000, attrs: { stage } });
         continue;
       }
-      if (state !== 'ok' && rand() < 0.03) push(at, 'route.fallback', 'warn', { attrs: { stage, provider } });
-      push(at + 10, 'route.served', 'info', { durMs: Math.round(STAGE_MS[stage]! * (0.6 + rand() * (rand() < 0.08 ? 3 : 0.9))), attrs: { stage, provider } });
+      if (state !== 'ok' && rand() < 0.03) push(at, 'route.fallback', 'warn', { app, attrs: { stage, provider } });
+      push(at + 10, 'route.served', 'info', { app, durMs: Math.round(STAGE_MS[stage]! * (0.6 + rand() * (rand() < 0.08 ? 3 : 0.9))), attrs: { stage, provider } });
     }
   }
-  if (state === 'bad') for (let i = 0; i < 14; i++) push(now - (2 + i * 3) * 60_000, 'route.unavailable', 'error', { durMs: 30_000, attrs: { stage: 'tts' } });
+  if (state === 'bad') for (let i = 0; i < 14; i++) push(now - (2 + i * 3) * 60_000, 'route.unavailable', 'error', { app: 'parle', durMs: 30_000, attrs: { stage: 'tts' } });
   const lifecycle: Array<[number, string, StoredTelemetryEvent['level'], string]> = [
     [520, 'autoscale.warm', 'info', 'speech-stack'], [519, 'replica.creating', 'info', 'speech-stack'], [512, 'replica.ready', 'info', 'speech-stack'],
     [340, 'replica.parked', 'info', 'speech-stack'], [40, 'replica.ready', 'info', 'babel-live'], [96, 'replica.power_on', 'info', 'speech-stack'], [95, 'replica.ready', 'info', 'speech-stack'],

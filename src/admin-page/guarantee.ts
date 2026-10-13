@@ -61,10 +61,11 @@ function verdictOf(links: ChainLink[], app: AdminApp, classOpen: boolean): { ver
 export function services(s: AdminSnapshot, filter: string | null = null, now = Date.now()): Service[] {
   const out: Service[] = [];
   const gpus = new Map((s.gpus ?? []).map(d => [d.name, d]));
-  const stageTotal = new Map((s.traffic?.stages ?? []).map(l => [l.key, l.served]));
-  const linkTraffic = new Map((s.traffic?.links ?? []).map(l => [l.key, l]));
   for (const app of s.apps.filter(a => !filter || a.id === filter)) {
     const classOpen = inClass(s, app.id, now);
+    const t = s.traffic?.byApp?.[app.id] ?? (s.traffic?.byApp ? null : s.traffic);
+    const stageTotal = new Map((t?.stages ?? []).map(l => [l.key, l.served]));
+    const linkTraffic = new Map((t?.links ?? []).map(l => [l.key, l]));
     for (const [stage, aliases] of Object.entries(app.stages ?? {})) {
       for (const alias of aliases) {
         const report: ChainReport | undefined = s.chains?.[stage]?.[alias];
@@ -99,18 +100,21 @@ function linkName(l: ChainLink): string {
   return `${l.kind === 'own-gpu' ? 'GPU própria' : 'Outra máquina'} <a href="${detailHref({ name })}"><code>${esc(name)}</code></a>${where}${kind}${l.deployment?.pinned ? ' <span class="pill info">fixada</span>' : ''}`;
 }
 
-function linkFacts(l: ChainLink, measured: boolean): string {
+type Measured = 'app' | 'all' | null;
+
+function linkFacts(l: ChainLink, measured: Measured): string {
   const facts = [
     l.probe ? `teste ${l.probe.ok ? 'ok' : `falhou${l.probe.code ? ` (${l.probe.code})` : ''}`} às ${hhmm(l.probe.checkedAt)} · ${ms(l.probe.latencyMs)}` : '',
     measured ? (l.p50Ms !== null ? `p50 ${ms(l.p50Ms)}` : 'p50 sem dado') : '',
-    measured ? (l.share !== null ? `${pct(l.share)} da etapa em 24 h (todos os apps)` : 'sem tráfego em 24 h') : 'parcela de tráfego não medida por app',
+    measured ? (l.share !== null ? `${pct(l.share)} da etapa em 24 h (${measured === 'app' ? 'este app' : 'todos os apps'})` : 'sem tráfego em 24 h')
+      : 'sem telemetria de tráfego',
   ].filter(Boolean);
   return `<small>${esc(facts.join(' · '))}</small>`;
 }
 
 const verdictText = (svc: Service) => (svc.verdict === 'so-nuvem' && svc.level === 'ok' ? 'Só nuvem · esperado fora da aula' : VERDICT_TEXT[svc.verdict]);
 
-function serviceBlock(svc: Service, measured: boolean): string {
+function serviceBlock(svc: Service, measured: Measured): string {
   const chain = svc.links.map((l, i) => `<li class="${l.serving ? 'now' : ''}"><span class="ix">${i + 1}</span><div class="lk"><div>${linkName(l)} ${pill(l.level, l.state)}${
     l.serving ? ' <span class="pill info">atende agora</span>' : ''}</div>${linkFacts(l, measured)}</div></li>`).join('');
   return `<div class="svc"><div class="svh"><b>${esc(stageName(svc.stage))}</b> <code>${esc(svc.alias)}</code>${pill(svc.level, verdictText(svc))}</div><ol class="chain">${chain}</ol></div>`;
@@ -121,7 +125,7 @@ export function guarantee(ctx: Ctx): Section {
   const all = services(s, ctx.app, ctx.now);
   const base = { id: 'garantia', title: 'Garantia do serviço', actions: '' };
   if (!s.chains) return { ...base, level: 'ok', count: null, notes: [], meta: '', body: '<p class="empty">As cadeias de rotas não estão disponíveis neste gateway.</p>' };
-  const measured = Boolean(s.traffic?.links.length);
+  const measured: Measured = s.traffic?.byApp ? 'app' : s.traffic?.links.length ? 'all' : null;
   const apps = s.apps.filter(a => !ctx.app || a.id === ctx.app).map((app) => {
     const own = all.filter(x => x.app === app.id);
     const { name } = appTitle(app.id, app.profile);

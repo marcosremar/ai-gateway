@@ -109,7 +109,8 @@ describe('service guarantee', () => {
     expect(Object.values(scoped.chains!).flatMap(Object.keys).sort()).toEqual(['parle-chat', 'parle-stt', 'parle-tts']);
     const html = section(render(scoped, { id: 'parle', canPark: false }), 'garantia');
     expect(html).not.toMatch(/babel|gpt-4o-mini-tts/i);
-    expect(html).toContain('parcela de tráfego não medida por app');
+    expect(html).toContain('da etapa em 24 h (este app)');
+    expect(html).not.toContain('todos os apps');
     const filtered = section(render(demoSnapshot(NOW, 'warn'), null, 'babelcast'), 'garantia');
     expect(filtered).toContain('babel-tts');
     expect(filtered).not.toContain('parle-stt');

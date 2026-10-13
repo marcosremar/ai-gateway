@@ -2,6 +2,8 @@ import type { DeploymentView } from '../deployments/types';
 import { idleGpu } from '../deployments/idle';
 import type { AdminSnapshot } from './render';
 import { spendWindow } from './spend';
+import { answeredShare, sloLevel } from './traffic';
+import { SLO_TARGETS } from '../alerting/slo-targets';
 import {
   NEAR_LIMIT, appTitle, count, duration, esc, form, hhmm, mark, money, ms, pct, stageName, upOf, outsideWindow, type Ctx, type Level, type Section,
 } from './ui';
@@ -169,6 +171,16 @@ function serviceRules(s: AdminSnapshot): Recommendation[] {
           impact: null, action: { go: '/admin/gpus', label: 'Conferir as GPUs' },
         });
       }
+    }
+    for (const l of t.apps ?? []) {
+      const share = answeredShare(l);
+      if (share === null || sloLevel(l) !== 'bad') continue;
+      out.push({
+        id: `app-slo:${l.key}`, level: 'bad', title: `${appTitle(l.key, s.apps.find(a => a.id === l.key)?.profile).name} respondeu ${pct(share)} das chamadas`,
+        saw: `${count(l.failed)} sem resposta em ${count(l.served + l.failed)} chamadas nas últimas 24 h · meta ${pct(SLO_TARGETS.uptimeRatio)}`,
+        why: 'Cada chamada sem resposta é um turno sem voz ou texto para quem usa o app; a reserva na nuvem deveria cobrir as falhas da GPU.',
+        impact: null, action: { go: `/admin/servicos?app=${encodeURIComponent(l.key)}#trafego`, label: 'Ver o tráfego do app' },
+      });
     }
   }
   return out;

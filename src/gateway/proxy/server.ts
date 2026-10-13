@@ -19,7 +19,7 @@ import { markNoUse, markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, wi
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
-import { createLogger, withLogContext } from '../../logger';
+import { createLogger, getLogContext, withLogContext } from '../../logger';
 import { ApiKeyRegistry, bearerToken } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
@@ -594,6 +594,8 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
       userId = resolved.userId;
     }
+    const logContext = getLogContext();
+    if (logContext) logContext.userId = userId;
     // No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken.
     if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId)) markNoWake();
     else if (config.autoWake?.(bearerToken(authHeader)) === false) {
