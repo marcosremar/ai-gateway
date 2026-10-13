@@ -15,11 +15,11 @@ import { denialError, inferenceKindOf } from './app-limits';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
 import { sttFilterStats } from './routes/stt-filter';
-import { markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, withNoWakeScope } from './no-wake';
+import { markNoUse, markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, withNoWakeScope } from './no-wake';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
-import { createLogger, withLogContext } from '../../logger';
+import { createLogger, getLogContext, withLogContext } from '../../logger';
 import { ApiKeyRegistry, bearerToken } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
@@ -443,7 +443,7 @@ let peakConnections = 0;
 const userConcurrency = new Map<string, number>();
 const RESERVED_FIELD_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 /**
- * Requests in flight per API key user. One key usually serves a whole application (parle: every student of a school
+ * Requests in flight per API key user. One key usually serves a whole application (parle: every student of a class
  * on the same key), so the old default of 20 turned a class of 25 speaking at once into 429s (prod stress 2026-10-06:
  * 21/50 served at 50 concurrent, the rest "Too many concurrent requests (limit: 20)"). The limit guards the gateway
  * against one runaway caller, not against an app's normal load; upstream capacity is governed by the providers.
@@ -594,8 +594,15 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
       userId = resolved.userId;
     }
+    const logContext = getLogContext();
+    if (logContext) logContext.userId = userId;
     // No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken.
     if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId)) markNoWake();
+    else if (config.autoWake?.(bearerToken(authHeader)) === false) {
+      const bearer = bearerToken(authHeader);
+      markNoWake(config.mayWake && ((deployment: string) => config.mayWake!(bearer, deployment)));
+    }
+    if (config.countsAsUse?.(bearerToken(authHeader)) === false) markNoUse();
     if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
       config.onAuth(token).catch((err) => {
@@ -913,6 +920,15 @@ export function createProxyServer(config: ProxyConfig): Server {
           config.onInference!({ userId, kind: servedKind, headers: req.headers, body, rawBody, status: proxyRes.status, response: proxyRes.body });
         } catch (err) {
           log.error({ err }, 'onInference hook failed');
+        }
+      }
+      const answeredKind = config.onServed ? inferenceKindOf(method, path) : null;
+      if (answeredKind) {
+        try {
+          const extra = config.onServed!({ userId, kind: answeredKind, status: proxyRes.status, headers: proxyRes.headers });
+          if (extra) proxyRes = { ...proxyRes, headers: { ...proxyRes.headers, ...extra } };
+        } catch (err) {
+          log.error({ err }, 'onServed hook failed');
         }
       }
       sendResponse(res, proxyRes, requestId);

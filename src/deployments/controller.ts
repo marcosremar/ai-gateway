@@ -21,6 +21,7 @@ import { replicaCapacity } from './autoscale';
 import { isExpiring } from './expiry';
 import { MAX_HOURS_GRACE_MS, outlived } from './planner';
 import { externalInflightOn, noteSession } from '../realtime/external-load';
+import { noUseActive } from '../gateway/proxy/no-wake';
 import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
@@ -327,6 +328,7 @@ export class DeploymentController extends ControllerViews {
   ): Promise<Lease> {
     const rt = this.require(name);
     const { spec } = rt.record;
+    const countsAsUse = !noUseActive(name);
     if (spec.paused) throw new DeploymentError(409, `deployment '${name}' is paused`);
     if (opts.session) noteSession(name, opts.session, this.now());
     const serving = this.servingMachines(name);
@@ -336,11 +338,13 @@ export class DeploymentController extends ControllerViews {
     }
     if (opts.noWake && !this.pick(rt, opts.exclude ?? new Set<string>(), opts.stage)) {
       // A saturated (not cold) deployment still sees the demand, so it scales out; a cold one stays untouched.
-      if (this.readyMachines(name).length) { rt.refusedAt.push(this.now()); this.noteDemand(rt); }
+      if (countsAsUse && this.readyMachines(name).length) { rt.refusedAt.push(this.now()); this.noteDemand(rt); }
       throw new DeploymentError(503, `deployment '${name}': no ready replica (no-wake: not woken)`, 30);
     }
-    rt.record.lastRequestAt = this.now();
-    this.persistRequestTime(rt);
+    if (countsAsUse) {
+      rt.record.lastRequestAt = this.now();
+      this.persistRequestTime(rt);
+    }
     const deadline = this.now() + Math.min(opts.waitMs ?? spec.coldStartWaitSeconds * 1000, this.maxColdStartWaitSeconds * 1000);
     const exclude = opts.exclude ?? new Set<string>();
 
@@ -390,8 +394,10 @@ export class DeploymentController extends ControllerViews {
     this.leasedSeq.set(machine.id, ++this.leaseSeq);
     const startedAt = this.now();
     rt.perReplica.set(machine.id, (rt.perReplica.get(machine.id) ?? 0) + 1);
-    rt.record.lastRequestAt = this.now();
-    this.noteDemand(rt);
+    if (countsAsUse) {
+      rt.record.lastRequestAt = this.now();
+      this.noteDemand(rt);
+    }
     if (rt.inflight > spec.targetInflightPerReplica * this.readyMachines(name).length) this.kick();
     const chosen = machine;
     let released = false;
@@ -406,7 +412,7 @@ export class DeploymentController extends ControllerViews {
         rt.inflight--;
         const n = (rt.perReplica.get(chosen.id) ?? 1) - 1;
         if (n <= 0) rt.perReplica.delete(chosen.id); else rt.perReplica.set(chosen.id, n);
-        rt.record.lastRequestAt = this.now();
+        if (countsAsUse) rt.record.lastRequestAt = this.now();
         this.traceLoad(rt);
         const reported: LeaseOutcome = failed === true ? 'failed' : failed === false ? 'ok' : failed;
         this.noteStage(rt, chosen.id, opts.stage, reported, this.now() - startedAt);
@@ -417,6 +423,13 @@ export class DeploymentController extends ControllerViews {
         if (next) next();
       },
     };
+  }
+
+  /** Takes `stage` of replica `id` out of rotation until `untilMs` (≤ now: back in) — the GPU probe's verdict (gpu-probe.ts). */
+  holdStageOut(id: string, stage: string, untilMs: number): void {
+    const key = `${id}|${stage}`;
+    if (untilMs <= this.now()) { this.stageStrikes.delete(key); return; }
+    this.stageStrikes.set(key, { failures: STAGE_STRIKES, outUntil: untilMs });
   }
 
   private noteStage(rt: Runtime, id: string, stage: string | undefined, outcome: LeaseOutcome, ms: number): void {

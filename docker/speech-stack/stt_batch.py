@@ -8,7 +8,7 @@ about one encoder pass of the batch plus a decode as long as the longest transcr
 the line.
 
     batcher = SttBatcher(model, max_batch=8, window_ms=25, beam=1)
-    batcher.transcribe(audio_f32_16k, "pt", prompt=None)  # blocking, thread-safe → {"text", "language", "duration"}
+    batcher.transcribe(audio_f32_16k, "pt", prompt=None)  # blocking, thread-safe → {"text", "language" (detected), "language_probability", "duration"}
 
 Clips longer than 30 s, or without a language (detection), go through `model.transcribe` alone — the batched path
 assumes one 30 s window per clip and a known language. A batched transcript that looks like a repetition loop is decoded
@@ -27,6 +27,7 @@ from faster_whisper import BatchedInferencePipeline, WhisperModel
 from faster_whisper.audio import pad_or_trim
 from faster_whisper.tokenizer import Tokenizer
 from faster_whisper.transcribe import TranscriptionOptions, get_compression_ratio, get_suppressed_tokens
+from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 SAMPLE_RATE = 16000
 WINDOW_SECONDS = 30
@@ -40,6 +41,11 @@ COMPRESSION_RATIO_THRESHOLD = 2.4
 # A student's turn is a few seconds; 30 s of fast speech is ~100 words ≈ 150 tokens. The cap bounds a looping decode, which
 # would otherwise hold every clip of its batch for up to 448 tokens.
 MAX_NEW_TOKENS = 180
+VAD = VadOptions(speech_pad_ms=0)
+
+
+def speech_ms(audio: np.ndarray) -> int:
+    return round(sum(s["end"] - s["start"] for s in get_speech_timestamps(audio, VAD)) * 1000 / SAMPLE_RATE)
 
 
 def is_oom(error: BaseException) -> bool:
@@ -56,6 +62,7 @@ class SttBatcher:
         self.jobs: queue.PriorityQueue = queue.PriorityQueue()
         self.order = itertools.count()
         self.stats = {"batches": 0, "clips": 0, "largest": 0, "oom_retries": 0, "fallbacks": 0}
+        speech_ms(np.zeros(SAMPLE_RATE, dtype=np.float32))
         threading.Thread(target=self._loop, name="stt-batcher", daemon=True).start()
 
     # ── public ──────────────────────────────────────────────────────────────
@@ -64,7 +71,8 @@ class SttBatcher:
         job = {"audio": audio, "language": (language or None) and language[:2], "prompt": prompt or None, "future": Future(),
                "queued": time.monotonic()}
         self.jobs.put((int(partial), next(self.order), job))
-        return job["future"].result()
+        voiced = speech_ms(audio)
+        return {**job["future"].result(), "speech_ms": voiced}
 
     # ── worker ──────────────────────────────────────────────────────────────
 
@@ -131,7 +139,8 @@ class SttBatcher:
                                                without_timestamps=True, initial_prompt=job["prompt"])
         segments = list(segments)
         text = " ".join(s.text.strip() for s in segments).strip()
-        result = {"text": text, "language": info.language, "duration": round(info.duration, 3)}
+        result = {"text": text, "language": info.language, "language_probability": round(float(info.language_probability), 4),
+                  "duration": round(info.duration, 3)}
         if segments:  # metadata for the gateway's hallucination filter (worst case over the segments)
             result["no_speech_prob"] = round(max(s.no_speech_prob for s in segments), 4)
             result["avg_logprob"] = round(sum(s.avg_logprob for s in segments) / len(segments), 4)
@@ -152,12 +161,13 @@ class SttBatcher:
             prepend_punctuations="\"'“¿([{-", append_punctuations="\"'.。,，!！?？:：”)]}、", multilingual=False,
             max_new_tokens=MAX_NEW_TOKENS, clip_timestamps="0", hallucination_silence_threshold=None, hotwords=None,
         )
-        _, outputs = self.pipeline.generate_segment_batched(features, tokenizer, options)
+        encoded, outputs = self.pipeline.generate_segment_batched(features, tokenizer, options)
+        detected = [ranked[0] for ranked in self.model.model.detect_language(encoded)]
         self.stats["batches"] += 1
         self.stats["clips"] += len(jobs)
         self.stats["largest"] = max(self.stats["largest"], len(jobs))
         results = []
-        for job, out in zip(jobs, outputs):
+        for job, out, (token, probability) in zip(jobs, outputs, detected):
             silent = out["no_speech_prob"] > NO_SPEECH_THRESHOLD and out["avg_logprob"] < LOG_PROB_THRESHOLD
             text = "" if silent else tokenizer.decode(out["tokens"]).strip()
             if text and (get_compression_ratio(text) > COMPRESSION_RATIO_THRESHOLD or len(out["tokens"]) >= MAX_NEW_TOKENS):
@@ -166,7 +176,8 @@ class SttBatcher:
                 continue
             # no_speech_prob / avg_logprob / compression_ratio ride along: the gateway's hallucination filter reads them
             # (src/stt-hallucination-filter.ts). Radford et al. 2023, ICML, arXiv:2212.04356.
-            results.append({"text": text, "language": language, "duration": round(len(job["audio"]) / SAMPLE_RATE, 3),
+            results.append({"text": text, "language": token.strip("<|>"), "language_probability": round(float(probability), 4),
+                            "duration": round(len(job["audio"]) / SAMPLE_RATE, 3),
                             "no_speech_prob": round(float(out["no_speech_prob"]), 4), "avg_logprob": round(float(out["avg_logprob"]), 4),
                             "compression_ratio": round(float(get_compression_ratio(text)), 4) if text else 0.0})
         return results

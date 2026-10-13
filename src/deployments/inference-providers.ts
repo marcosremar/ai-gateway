@@ -24,7 +24,7 @@ import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
 import { FINISH_MARKER, USAGE_MARKER } from '../gateway/providers/cloud/openai-compat/stream-markers';
 
-type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
+type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake' | 'list'>>;
 
 export interface DeploymentProviderOptions {
   /** How long a request may wait for a replica (ms), whatever the state. Absent: `coldWaitMs` while none is ready, else 0. */
@@ -55,12 +55,32 @@ function hasReadyReplica(controller: Leaser, name: string): boolean {
 }
 
 /** Calls `path` on a ready replica of `name`; throws an Error with `.status` the fallback chain understands. */
+function testCopyOf(controller: Leaser, name: string) {
+  const app = controller.get(name)?.app;
+  return controller.list?.().find(d => d.spec.testFor === name && d.app === app) ?? null;
+}
+
+function readyTestCopy(controller: Leaser, name: string): string | null {
+  if (hasReadyReplica(controller, name)) return null;
+  const copy = testCopyOf(controller, name);
+  return copy?.replicas.some(r => r.phase === 'ready') ? copy.name : null;
+}
+
+/** A key that may not wake `asked` but may wake its test copy (access-keys.ts `wakeDeployments`) wakes the copy. */
+function wakeOwnTestCopy(controller: Leaser, asked: string): void {
+  const copy = testCopyOf(controller, asked)?.name;
+  if (copy && !noWakeActive(copy)) try { controller.wake?.(copy); } catch { /* deployment vanished meanwhile */ }
+}
+
 async function callReplica(
-  controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal, stage?: string,
+  controller: Leaser, asked: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal, stage?: string,
 ): Promise<Response> {
+  const testCopy = readyTestCopy(controller, asked);
+  if (testCopy && !noWakeActive(asked)) try { controller.wake?.(asked); } catch { /* deployment vanished meanwhile */ }
+  const name = testCopy ?? asked;
   let lease;
   // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves, a cold one is skipped as `cold` and never woken.
-  const noWake = noWakeActive();
+  const noWake = noWakeActive(name);
   try {
     const waitMs = noWake ? 0 : opts.waitMs ?? (opts.coldWaitMs && !hasReadyReplica(controller, name) ? opts.coldWaitMs : 0);
     lease = await controller.acquire(name, { waitMs, ...(noWake ? { noWake: true } : {}), ...(waitMs && signal ? { signal } : {}), ...(stage ? { stage } : {}) });
@@ -73,7 +93,7 @@ async function callReplica(
     // Every ready replica at capacity: spill this request to the fallback now (the replicas keep what they serve).
     if (err.code === 'saturated') throw new DeploymentCallError(503, err.message, 'saturated', after);
     // No ready replica (scaled to zero / booting): make sure it is scaling up, and let the chain fall back now.
-    if (noWake) recordNoWakeSkip();
+    if (noWake) { recordNoWakeSkip(); if (name === asked) wakeOwnTestCopy(controller, asked); }
     else try { controller.wake?.(name); } catch { /* deployment vanished meanwhile */ }
     throw new DeploymentCallError(503, err.message, 'cold', after);
   }
@@ -160,7 +180,7 @@ abstract class DeploymentProviderBase {
   getModels(): ModelInfo[] { return []; }
   /** Starts scaling up a cold deployment without sending a request (e.g. when an answer came from the cache). */
   prewarm(): void {
-    if (noWakeActive()) return;
+    if (noWakeActive(this.deployment)) return;
     const status = (this.controller.get(this.deployment) as { status?: string } | null)?.status;
     if (status === 'scaled-to-zero' || status === 'warming') this.controller.wake?.(this.deployment);
   }
@@ -290,13 +310,18 @@ const LANGUAGE_NAMES: Record<string, string> = {
   ko: 'Korean', zh: 'Chinese', ru: 'Russian',
 };
 
-function languageName(value: unknown): string | undefined {
+export function languageName(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined;
   const code = value.trim().slice(0, 2).toLowerCase();
   return /^[a-z]{2}(-[a-z]{2})?$/i.test(value.trim()) ? LANGUAGE_NAMES[code] ?? value : value;
 }
 
-function catalogOf(raw: unknown): ReplicaCatalog | null {
+/** A Qwen3-TTS Base (cloning) model: it must never get `voice` without `ref_audio` (its engine dies on it). */
+export function isBaseTtsModel(model: string): boolean {
+  return /(^|[-_/])base($|[-_.])/i.test(model);
+}
+
+export function catalogOf(raw: unknown): ReplicaCatalog | null {
   const input = raw as { model?: unknown; format?: unknown; voices?: unknown } | null;
   if (!input || !Array.isArray(input.voices)) return null;
   const voices = input.voices.filter((v): v is ReplicaVoice =>
@@ -329,7 +354,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
 
   /** True when the target model is a Qwen3-TTS Base (cloning) model, or the replica already showed a catalog. */
   private isCloningModel(model: string): boolean {
-    return this.cloning || /(^|[-_/])base($|[-_.])/i.test(model);
+    return this.cloning || isBaseTtsModel(model);
   }
 
   /**

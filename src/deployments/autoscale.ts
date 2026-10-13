@@ -199,6 +199,10 @@ export function activeWindow(schedule: WarmScheduleEntry[] | undefined, now: num
   return floor ? { replicas: floor, endsAt } : null;
 }
 
+export function classWindowOpen(views: Array<{ spec: { warmSchedule?: WarmScheduleEntry[] } }>, now: number): boolean {
+  return views.some(view => activeWindow(view.spec.warmSchedule, now) !== null);
+}
+
 /** The floor of replicas at `now`: schedule and client warm window (`POST …/warm`), whichever asks more. */
 export function warmFloor(spec: DeploymentSpec, warm: { replicas: number; until: number } | undefined, now: number): number {
   const fromWarm = warm && now < warm.until ? warm.replicas : 0;

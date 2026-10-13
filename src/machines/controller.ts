@@ -170,7 +170,8 @@ export class MachineController {
       record.lastError = errors.join('; ') || 'cancelled';
       await this.save();
       const stock = errors.length > 0 && errors.every(e => /out_of_stock/.test(e));
-      throw new MachineError(stock ? 409 : 502, `no machine created: ${record.lastError}`);
+      const noCredit = errors.length > 0 && errors.every(e => /insufficient_credit/.test(e));
+      throw new MachineError(stock ? 409 : noCredit ? 402 : 502, `no machine created: ${record.lastError}`);
     } finally {
       this.creating.delete(record.id);
     }
@@ -357,7 +358,7 @@ export class MachineController {
       ...(owner === null ? { global: { dayUsd: round(global.spent), committedUsd: round(global.committed), capDayUsd: this.limits.globalUsdPerDay } } : {}),
       machines: mine.map(m => ({
         id: m.id, owner: m.owner, holder: m.holder, jobId: m.jobId, provider: m.provider, status: m.status, usdPerHour: m.usdPerHour,
-        costUsd: round(this.costUsd(m)),
+        costUsd: round(this.costUsd(m)), createdAt: m.createdAt, lastError: m.lastError,
       })),
     };
   }

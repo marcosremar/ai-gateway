@@ -108,7 +108,7 @@ const KNOWN_FIELDS = new Set<string>([
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
   'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
-  'scaling', 'fileUrls', 'maxRttExcessMs',
+  'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 const PLACEMENT_FIELDS = new Set([...CANDIDATE_FIELDS, 'maxReplicas', 'image']);
@@ -245,6 +245,10 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     out.description = input.description;
   }
   if (input.exposure !== undefined) out.exposure = exposureOf(input.exposure);
+  if (input.testFor !== undefined) {
+    if (typeof input.testFor !== 'string' || !NAME_RE.test(input.testFor)) throw new SpecError('testFor must name the deployment this one is the test copy of');
+    out.testFor = input.testFor;
+  }
   if (input.realtime !== undefined) out.realtime = realtimeOf(input.realtime);
   if (input.placements !== undefined) out.placements = placementsOf(input.placements);
   if (input.idleAction !== undefined) {

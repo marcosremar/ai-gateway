@@ -37,6 +37,9 @@ function cases(): Case[] {
   for (const meta of [{ no_speech_prob: 0.9, avg_logprob: -0.5, compression_ratio: 1 }, { no_speech_prob: 0.1, avg_logprob: -0.3, compression_ratio: 3.1 },
     { no_speech_prob: 0.1, avg_logprob: -1.4, compression_ratio: 1 }, { no_speech_prob: 0.45, avg_logprob: -0.3, compression_ratio: 1 }]) {
     for (const text of ['Sim.', 'qualquer coisa', 'eu não sei', 'Eu não sei.']) out.push({ text, language: 'pt', meta });
+    for (const text of ['Dois.', 'R$ 3,00.', 'Obrigado.', 'eu não sei', 'Obrigado por assistir!']) {
+      out.push({ text, language: 'pt', meta: { ...meta, speech_ms: 480 } }, { text, language: 'pt', meta: { ...meta, speech_ms: 0 } });
+    }
   }
   return out;
 }

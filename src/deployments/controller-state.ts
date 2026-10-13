@@ -19,8 +19,9 @@ import type { GateState } from './rtt-gate';
 import { externalInflightOn } from '../realtime/external-load';
 import type {
   DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
-  RegistryAuth, ReplicaProbe, ScalingMode,
+  ProbeResult, RegistryAuth, ReplicaProbe, ScalingMode,
 } from './types';
+import { BootTracker, logText } from './boot-track';
 
 export class DeploymentError extends Error {
   /**
@@ -48,6 +49,7 @@ export interface ProbeState {
   busy?: boolean;
   /** Since when the liveness probe (the replica's front) has failed without a break: the machine is gone, not busy. */
   downSince?: number;
+  last?: ProbeResult;
 }
 
 /**
@@ -225,6 +227,7 @@ export abstract class ControllerState {
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
   protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();
   protected readonly probes = new Map<string, ProbeState>();
+  protected readonly boots = new BootTracker();
   protected readonly replicaGone = new Map<string, AbortController>();
   protected goneSignal(id: string): AbortSignal {
     let gone = this.replicaGone.get(id);
@@ -265,7 +268,10 @@ export abstract class ControllerState {
     if (!NAME_RE.test(this.namespace)) throw new Error(`invalid deployments namespace '${this.namespace}'`);
     this.now = opts.now ?? Date.now;
     this.startedAt = this.now();
-    this.log = opts.log ?? (() => {});
+    this.log = (msg, data) => {
+      if (typeof data?.deployment === 'string') this.boots.line(data.deployment, typeof data.id === 'string' ? data.id : null, logText(msg, data), this.now());
+      opts.log?.(msg, data);
+    };
     this.backends = opts.backends ?? (opts.backend ? { [opts.backend.provider]: opts.backend } : {});
     const providers = Object.keys(this.backends) as DeploymentProvider[];
     if (!providers.length) throw new Error('deployments controller needs at least one backend');

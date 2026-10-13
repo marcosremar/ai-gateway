@@ -28,6 +28,12 @@ export interface RoomsConfig {
   maxAudioBytes: number;
   /** Viewer analytics events are kept this long (longer than room content: product analysis). */
   eventsRetentionMs: number;
+  /** Server dubbing (Kokoro) of rooms whose presenter sends no clips; `ROOM_SERVER_DUB=0` turns it off everywhere. */
+  serverDub: boolean;
+  /** Wait after a line before the server voices it (the presenter's clip may arrive first). */
+  serverDubWaitMs: number;
+  /** A room whose presenter sent a clip within this window is not voiced by the server. */
+  serverDubPresenterQuietMs: number;
 }
 
 export const ROOMS_DEFAULTS = {
@@ -43,6 +49,8 @@ export const ROOMS_DEFAULTS = {
   MAX_VIEWERS: 500,
   MAX_AUDIO_BYTES: 2 * 1024 * 1024,
   EVENTS_RETENTION_DAYS: 365,
+  SERVER_DUB_WAIT_MS: 1_500,
+  SERVER_DUB_PRESENTER_QUIET_MS: 60_000,
 } as const;
 
 const DAY_MS = 86_400_000;
@@ -70,5 +78,8 @@ export function roomsConfigFromEnv(env: Record<string, string | undefined> = pro
     maxViewers: Math.floor(positive(env.ROOMS_MAX_VIEWERS, ROOMS_DEFAULTS.MAX_VIEWERS)),
     maxAudioBytes: Math.floor(positive(env.ROOMS_MAX_AUDIO_BYTES, ROOMS_DEFAULTS.MAX_AUDIO_BYTES)),
     eventsRetentionMs: positive(env.ROOM_EVENTS_RETENTION_DAYS, ROOMS_DEFAULTS.EVENTS_RETENTION_DAYS) * DAY_MS,
+    serverDub: !['0', 'false', 'off', 'no'].includes((env.ROOM_SERVER_DUB ?? '').trim().toLowerCase()),
+    serverDubWaitMs: Math.floor(positive(env.ROOM_SERVER_DUB_WAIT_MS, ROOMS_DEFAULTS.SERVER_DUB_WAIT_MS)),
+    serverDubPresenterQuietMs: Math.floor(positive(env.ROOM_SERVER_DUB_PRESENTER_QUIET_MS, ROOMS_DEFAULTS.SERVER_DUB_PRESENTER_QUIET_MS)),
   };
 }

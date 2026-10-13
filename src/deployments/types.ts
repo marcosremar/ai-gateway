@@ -13,6 +13,7 @@
  * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
+import type { BootPhase, BootRecord, BootState } from './boot-track';
 import type { HostRecord } from './host-reputation';
 import type { RttBaseline } from './rtt-gate';
 
@@ -105,6 +106,7 @@ export interface DeploymentSpec {
   /** Warm-up windows: keep N replicas up on a schedule (a class at 9:00), whatever the load. */
   warmSchedule?: WarmScheduleEntry[];
   reserveQuota?: QuotaReservation;
+  testFor?: string;
   scaling?: ScalingSpec;
   /** With no request for this long the deployment scales down to `minReplicas` (0 = scale to zero). */
   idleMinutes: number;
@@ -148,6 +150,8 @@ export interface DeploymentSpec {
   candidates?: PlacementCandidate[];
   /** ISO country the users are in (latency preference); default `DEFAULT_NEAR` (placements.ts). */
   near?: string;
+  minCpuCores?: number;
+  minRamGb?: number;
   /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
   allowFar?: boolean;
   /**
@@ -314,6 +318,8 @@ export interface ReplicaMachine {
   tls?: boolean;
   /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
   bootError?: string;
+  providerStatus?: string;
+  providerMessage?: string;
 }
 
 export interface CreateReplicaInput {
@@ -453,6 +459,7 @@ export interface ReplicaView {
   ip: string | null;
   tls?: boolean;
   providerState: string;
+  provider: DeploymentProvider;
   zone: string;
   machineType: string;
   pricePerHour: number | null;
@@ -467,7 +474,9 @@ export interface ReplicaView {
   rttMs: number | null;
   rttBaselineMs: number | null;
   udp: 'ok' | 'blocked' | null;
-  /** Minutes until the provider takes the host back (Vast); null when it never does. */
+  /** Minutes until the provider takes the host back (Vast contract end, not a shutdown); null when it never does. */
+  hostEndsInMinutes: number | null;
+  /** @deprecated the old name of `hostEndsInMinutes`, kept for clients that still read it. */
   expiresInMinutes: number | null;
 }
 
@@ -500,5 +509,12 @@ export interface DeploymentView {
   realtime: { active: number; capacity: number; refusedSessions: number; scalingOut: boolean } | null;
   sessions: number;
   hold: { replicas: number; until: string } | null;
+  pinned: { idleMinutes: number | null; parked: boolean } | null;
+  boot: {
+    active: Array<Omit<BootState, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
+    past: Array<Omit<BootRecord, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
+    retryAt: number | null;
+    expectedBootSeconds: number | null;
+  };
   warnings: string[];
 }

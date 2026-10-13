@@ -67,7 +67,7 @@ by-reference session (it never sends the config); configs that fit keep riding i
 | System prompt (UTF-8) | est. tokens | slot 2048 (L4): 1824 usable | slot 4096 (L40S): 3872 usable | slot 8192: 7968 usable |
 |---|---|---|---|---|
 | 3 KB | ~1030 | ~790 left: about 11 short exchanges of history | ~2840 left | fits |
-| 4.6 KB (the school's largest) | ~1580 | ~240 left: 3 exchanges, then the oldest go | ~2290 left: about 30 exchanges | fits |
+| 4.6 KB (the parle client's largest) | ~1580 | ~240 left: 3 exchanges, then the oldest go | ~2290 left: about 30 exchanges | fits |
 | 5.4 KB | ~1850 | nothing left: the turn itself does not fit | ~2020 left | fits |
 | 7 KB | ~2400 | **cannot work** (LLM answers 400 on every turn) | ~1470 left: about 20 exchanges | fits |
 | 11.5 KB | ~3930 | cannot work | nothing left | ~4000 left |
@@ -145,7 +145,7 @@ set evaluated on the edge, between the hallucination guard and the LLM.
 ```
 
 - Matching is a plain normalised-phrase test, no patterns: transcript and phrases are lowercased, stripped of accents
-  (NFD) and of `- , ! ? . ; : ' " ( ) « »`, spaces collapsed — the school's own `normalizeSemanticText`
+  (NFD) and of `- , ! ? . ; : ' " ( ) « »`, spaces collapsed — the parle client's own `normalizeSemanticText`
   (`core/text/semantic-text.ts`, used by `learnerRequestOf` in `backend/fast-version-routes.ts`). `contains`: the
   phrase appears as whole words anywhere; `whole`: the phrase is the entire utterance; `question: true`: only when the
   raw transcript has a `?`. The first matching rule wins. Linear in the text: nothing to backtrack.

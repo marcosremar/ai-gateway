@@ -249,6 +249,11 @@ export class RealtimeService {
     return Math.max(60, Math.min(RT_MAX_TTL_SECONDS, Math.floor(t)));
   }
 
+  /** Requests one session charges to the app's daily budget (and to an account's, src/accounts). */
+  get sessionRequests(): number {
+    return sessionCharge(this.ttlSeconds, this.opts.requestsPerMinute ?? REALTIME_REQUESTS_PER_MINUTE);
+  }
+
   private get reservationMs(): number { return this.opts.reservationMs ?? 20_000; }
 
   /** Admitted sessions not yet seen by the replica (pending) on one replica. */
@@ -368,7 +373,7 @@ export class RealtimeService {
     if (!replicaToken) return sendJson(res, 503, errorBody('deployment has no replica token', 'cold', { fallback: FALLBACK }), { 'Retry-After': 5 });
 
     const ttl = this.ttlSeconds;
-    const charge = sessionCharge(ttl, this.opts.requestsPerMinute ?? REALTIME_REQUESTS_PER_MINUTE);
+    const charge = this.sessionRequests;
     const denial = admin ? null : this.opts.charge?.(userId, charge) ?? null;
     if (denial) {
       this.emit(trace, 'rt.session.rejected', { level: 'warn', durMs: this.now() - started, attrs: { reason: denial.type, status: denial.status, deployment: dep } });
@@ -448,9 +453,9 @@ export class RealtimeService {
     if (controller.get(dep)?.spec.paused) return { refusal: { status: 503, code: 'paused', message: `deployment '${dep}' is paused`, retryAfter: 60 } };
     const every = this.readyReplicas(dep);
     if (!every.length) {
-      if (noWakeActive()) recordNoWakeSkip();
+      if (noWakeActive(dep)) recordNoWakeSkip();
       else { try { controller.wake(dep); } catch { /* vanished */ } }
-      return { refusal: { status: 503, code: 'cold', message: `deployment '${dep}': no ready replica${noWakeActive() ? ' (no-wake: not woken)' : ' (waking)'}`, retryAfter: 30 } };
+      return { refusal: { status: 503, code: 'cold', message: `deployment '${dep}': no ready replica${noWakeActive(dep) ? ' (no-wake: not woken)' : ' (waking)'}`, retryAfter: 30 } };
     }
     const ready = every.filter(r => !r.stagesOut.length);
     if (!ready.length) {
@@ -474,7 +479,7 @@ export class RealtimeService {
         : { status: 503, code: 'unreachable', message: `deployment '${dep}': realtime status unreachable`, retryAfter: 5 } };
     }
     // Ready but full: tell the autoscaler (wake keeps the idle clock fresh; the pressure comes from the load report).
-    if (!noWakeActive()) { try { controller.wake(dep); } catch { /* vanished */ } }
+    if (!noWakeActive(dep)) { try { controller.wake(dep); } catch { /* vanished */ } }
     return { refusal: { status: 503, code: 'saturated', message: `deployment '${dep}': every replica's realtime slots are taken`, retryAfter: 2 } };
   }
 

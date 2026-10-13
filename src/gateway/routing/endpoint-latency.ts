@@ -1,7 +1,7 @@
 /**
  * Endpoint latency probe: measures the round trip to each replica from where THIS process runs and orders them.
  *
- * The number that matters is the one seen by the caller (for the parle school server that is the server calling the
+ * The number that matters is the one seen by the caller (for the parle client's server that is the server calling the
  * TTS host, not the student's browser), so the probe lives in the gateway and is measured on the spot instead of being
  * guessed from a region name. Complements `PerformanceRanker`, which orders a chain by real traffic but has nothing to
  * go on before the first requests: probe once at boot (or when a replica is added), let the ranker take over.

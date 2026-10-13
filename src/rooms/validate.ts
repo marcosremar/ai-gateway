@@ -33,7 +33,7 @@ export function parseLang(v: unknown, field: string): string {
 }
 
 /** Longest accepted `youtubeUrl`. */
-export const MAX_YOUTUBE_URL_CHARS = 300;
+export const MAX_YOUTUBE_URL_CHARS = 200;
 /** Hosts a room's YouTube link may point to (watch page, channel `/live`, youtu.be short link). */
 export const YOUTUBE_HOSTS: readonly string[] = ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'];
 
@@ -53,7 +53,13 @@ export function parseYoutubeUrl(v: unknown): string | null {
   return out;
 }
 
-export interface CreateRoomInput { title: string; originalLang: string | null; languages: string[]; youtubeUrl: string | null }
+export interface CreateRoomInput {
+  title: string; originalLang: string | null; languages: string[];
+  /** Whether the gateway may voice lines itself when the presenter sends no clips (default true). */
+  serverDub: boolean;
+  /** The presenter's YouTube watch link (validated), or null. */
+  youtubeUrl: string | null;
+}
 
 /** `PATCH /v1/rooms/:code`: the room fields a publisher may change after creation. */
 export interface UpdateRoomInput { youtubeUrl: string | null }
@@ -77,7 +83,9 @@ export function parseCreate(body: unknown, cfg: RoomsConfig): CreateRoomInput {
     const lang = parseLang(l, 'languages[]');
     if (!languages.includes(lang)) languages.push(lang);
   }
-  return { title: title.trim(), originalLang, languages, youtubeUrl: parseYoutubeUrl(body.youtubeUrl) };
+  const serverDub = body.serverDub === undefined || body.serverDub === null ? true : body.serverDub;
+  if (typeof serverDub !== 'boolean') throw new RoomError(400, 'serverDub must be a boolean');
+  return { title: title.trim(), originalLang, languages, serverDub, youtubeUrl: parseYoutubeUrl(body.youtubeUrl) };
 }
 
 function text(v: unknown, field: string, max: number): string {

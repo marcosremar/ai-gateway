@@ -24,6 +24,7 @@ import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-
 import { accountPolicyGuards, type AccountPolicyGuards } from '../gateway/proxy/account-policy-guard';
 import { voiceForGender, type VoiceByGender, type VoiceGender } from './tts-fallback-voices';
 import type { ChainLinkSpec } from './stage-chains';
+import { withCloudFallback } from './cloud-fallback';
 
 type Stage = 'chat' | 'stt' | 'tts';
 type StageProvider<S extends Stage> = S extends 'chat' ? LLMProvider : S extends 'stt' ? STTProvider : TTSProvider;
@@ -334,9 +335,13 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   }
   for (const [model, chain] of Object.entries(STT_CHAINS)) specs.stt[model] = chain.map(([provider, m]) => ({ provider, model: m }));
   for (const [model, chain] of Object.entries(TTS_CHAINS)) specs.tts[model] = chain.map(([provider, m]) => ({ provider, model: m }));
-  // Each app's own aliases (PUT /v1/apps/:app/routes), then MODEL_ROUTES on top (same model = replaced).
-  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.appRoutes?.[stage] ?? {});
-  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.modelRoutes?.[stage] ?? {});
+  // Each app's own aliases (PUT /v1/apps/:app/routes), then MODEL_ROUTES on top (same model = replaced). Every declared
+  // chain ends in the cloud: one without a cloud link gets the stage default appended (cloud-fallback.ts).
+  const appRoutes = withCloudFallback(opts.appRoutes ?? {});
+  const modelRoutes = withCloudFallback(opts.modelRoutes ?? {});
+  const cloudFallbackAdded = [...appRoutes.added, ...modelRoutes.added].map(a => `${a.stage} ${a.alias} + ${a.added.join(', ')}`);
+  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], appRoutes.routes[stage] ?? {});
+  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], modelRoutes.routes[stage] ?? {});
   // Chains reported by /health: every app's aliases and whatever MODEL_ROUTES declares.
   const declaredModels = (stage: Stage) => [...Object.keys(opts.appRoutes?.[stage] ?? {}), ...Object.keys(opts.modelRoutes?.[stage] ?? {})];
   described = {
@@ -403,6 +408,8 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       chatFallback: chatFallbackChain.map(e => `${e.providerId}:${e.model}`),
       // Entries whose own deployment is not registered and that go to their `oneGpuDeployment` instead.
       ...(oneGpu.length ? { oneGpu } : {}),
+      // Chains that had no cloud link and got the default one at mount.
+      ...(cloudFallbackAdded.length ? { cloudFallbackAdded } : {}),
       // Models with no provider at all (the rest of `unavailable` are chains that lost some entries).
       unavailable: {
         chat: Object.keys(unavailable.chat).filter(m => !chatRoutes[m]),

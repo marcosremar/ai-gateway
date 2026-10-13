@@ -349,6 +349,21 @@ SKIP_GPU_TESTS=1 bun run test   # CI default — skips real API calls
 bun run test:groq / test:openai / test:vast-lifecycle / test:runpod-lifecycle
 ```
 
+## Publishing to production
+
+Production is one Railway instance (`railway.json` `numReplicas: 1`): every publish restarts it. Publish only with:
+
+```bash
+bun run deploy:prod
+```
+
+From a clean checkout of `origin/main`, it refuses inside the parle class window (the declared `warmSchedule` of
+`src/deployments/declared/*.json`, Mon–Thu 17:30–20:30 Europe/Paris), a dirty tree or a HEAD that is not `origin/main`;
+then runs `stamp:build`, `railway up` (service `ai-gateway`, environment `production`) without `RAILWAY_TOKEN`, and waits
+until the public `/health` reports the new commit (with `AI_GATEWAY_ADMIN_KEY` set it also prints `fallbackProbe`).
+`--during-class` overrides the window for an emergency only. Never call `railway up` by hand.
+Fly.io is gone (no `deploy.yml`; `fly.toml` is a leftover).
+
 ## Hard rules
 
 1. **`src/` never imports from `server/`** — CI enforces this. Break it and the build fails.

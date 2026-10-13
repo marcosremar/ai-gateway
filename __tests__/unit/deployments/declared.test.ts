@@ -20,7 +20,10 @@ import { placementsOf } from '../../../src/deployments/placements';
 import { vastUnfit } from '../../../src/deployments/placement-walk';
 import { filesByUrl } from '../../../src/deployments/boot-files';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
+import { vastRefusal } from '../../../src/deployments/spec';
 import { FakeCloud, until } from './_fake-cloud';
+import parkedShadow from '../../../src/deployments/parked/parle-bridge-shadow.json';
+import parkedShadowTest from '../../../src/deployments/parked/parle-bridge-shadow-test.json';
 
 const GHCR = 'ghp_fake_read_token_0123456789';
 const speech = DECLARED_DEPLOYMENTS.find(d => d.name === 'parle-speech')!;
@@ -81,7 +84,7 @@ describe('declared parle-speech spec', () => {
     expect(speech.image).toEqual({
       env: 'SPEECH_IMAGE', repository: 'rg.fr-par.scw.cloud/aigw/speech-stack', default: profile.image,
     });
-    expect(profile.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213');
+    expect(profile.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261011-0200');
     expect(speech.description).not.toMatch(/an L4 when/);
     expect(speech.profile).toBe('speech-stack');
     expect(speech.registryAuth).toBeUndefined();
@@ -135,7 +138,7 @@ describe('declared parle-speech spec', () => {
     });
     expect(c.specOf('parle-speech')!.registryAuth).toBeUndefined();
     expect((await r.reconcile())[0].state).toBe('in_sync');
-    expect(put).toHaveBeenCalledTimes(1);
+    expect(put.mock.calls.filter(([name]) => name === 'parle-speech')).toHaveLength(1);
     expect(cloud.created).toHaveLength(0);
   });
 
@@ -223,7 +226,7 @@ describe('parle-speech placements when the L40S is out of stock (K1, 2026-10-09 
       .toMatch(/vast replicas need bootScript and image/);
     await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     const vast = filesByUrl(vastOf(), 'replica-token', 'https://gw.example', OUTSIDE_CLASS);
-    expect(vast).toMatchObject({ entrypoint: 'bash', args: ['/opt/s2s/start.sh'], image: 'ghcr.io/marcosremar/speech-stack:20261009-0213' });
+    expect(vast).toMatchObject({ entrypoint: 'bash', args: ['/opt/s2s/start.sh'], image: 'ghcr.io/marcosremar/speech-stack:20261011-0200' });
     expect(vast.files).toBeUndefined();
     expect(Object.keys(vast.fileUrls ?? {})).toEqual(Object.keys(PRODUCTION.files));
     expect(vastUnfit(vast)).toBeNull();
@@ -255,9 +258,9 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     }
   });
 
-  it('not registered yet: pending, nothing created; registered by the school: only the declared fields are put, then in sync', async () => {
+  it('not registered yet: pending, nothing created; registered by the parle client: only the declared fields are put, then in sync', async () => {
     const { c, cloud } = await controller();
-    const owned = DECLARED_DEPLOYMENTS.filter(d => !d.image);
+    const owned = DECLARED_DEPLOYMENTS.filter(d => !d.image && d.app !== 'babelcast');
     const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: owned });
     const first = await r.reconcile();
     expect(first.map(s => s.state)).toEqual(['pending', 'pending', 'pending']);
@@ -277,6 +280,39 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     expect((await r.reconcile())[0].state).toBe('applied');
     expect(c.specOf('parle-qwen-tts')!.scaling).toEqual({ mode: 'balanced', budget: { eurPerMonth: 150 } });
     expect((await r.reconcile())[0].state).toBe('in_sync');
+    expect(cloud.created).toHaveLength(0);
+  });
+});
+
+describe('declared babelcast-speech / babelcast-tts (report 2026-10-12, T5): only the owning app', () => {
+  const BABELCAST = {
+    image: 'rg.fr-par.scw.cloud/aigw/babelcast-speech:1', port: 8000, healthPath: '/health', machineType: 'L4-1-24G', zone: 'fr-par-2',
+    gpu: true, minReplicas: 0, maxReplicas: 1, scaling: { mode: 'fast' },
+  };
+  const babelcast = DECLARED_DEPLOYMENTS.filter(d => d.app === 'babelcast' && !d.profile);
+
+  it('registered with no app: the app becomes babelcast, the spec is untouched, no machine; then in sync', async () => {
+    const { c, cloud } = await controller();
+    expect(babelcast.map(d => [d.name, d.spec])).toEqual([['babelcast-speech', {}], ['babelcast-tts', {}]]);
+    for (const d of babelcast) await c.put(d.name, BABELCAST);
+    const before = babelcast.map(d => c.specOf(d.name));
+    const log = vi.fn();
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: babelcast, log });
+    expect((await r.reconcile()).map(s => s.state)).toEqual(['applied', 'applied']);
+    expect(babelcast.map(d => c.get(d.name)!.app)).toEqual(['babelcast', 'babelcast']);
+    expect(babelcast.map(d => c.specOf(d.name))).toEqual(before);
+    expect(log).toHaveBeenCalledWith('declared deployment registered', { name: 'babelcast-speech', image: null, created: false, app: 'babelcast' });
+    expect((await r.reconcile()).map(s => s.state)).toEqual(['in_sync', 'in_sync']);
+    expect(cloud.created).toHaveLength(0);
+  });
+
+  it('never takes a deployment that belongs to another app, never creates one', async () => {
+    const { c, cloud } = await controller();
+    await c.put('babelcast-speech', BABELCAST, { app: 'other' });
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: babelcast });
+    expect((await r.reconcile()).map(s => s.state)).toEqual(['applied', 'pending']);
+    expect(c.get('babelcast-speech')!.app).toBe('other');
+    expect(c.specOf('babelcast-tts')).toBeNull();
     expect(cloud.created).toHaveLength(0);
   });
 });
@@ -384,5 +420,58 @@ describe('DeclaredDeploymentReconciler', () => {
     expect(parsed.deployments[0].spec).toMatchObject({ envKeys: ['TRUST_UPSTREAM_AUTH', 'SPEECH_TOKEN'], privateRegistry: true });
     expect(body).not.toContain(token);
     expect(body).not.toContain(GHCR);
+  });
+});
+
+describe('declared parle-speech-test (owner, 10/10/2026): the cheap test copy of parle-speech', () => {
+  it('registers on one L4 24 GB (then one Vast RTX 5090), never an L40S/H100, no warm schedule, deleted after 10 min idle, owned by parle; both owned by parle; nothing created', async () => {
+    const { c, cloud } = await controller();
+    await c.put('parle-speech', PRODUCTION);
+    const status = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
+    expect(status.find(s => s.name === 'parle-speech-test')).toMatchObject({ state: 'applied' });
+    const spec = c.specOf('parle-speech-test')!;
+    expect(spec).toMatchObject({ testFor: 'parle-speech', machineType: 'L4-1-24G', zone: 'fr-par-2', maxReplicas: 1, minReplicas: 0, idleMinutes: 10, idleAction: 'delete' });
+    expect(spec.image).toBe(c.specOf('parle-speech')!.image);
+    expect(placementsOf(spec).map(p => p.machineType)).toEqual(['L4-1-24G', 'RTX 5090']);
+    expect(spec.warmSchedule).toBeUndefined();
+    expect(spec.envByMachineType?.['L4-1-24G']?.LLM_SLOT_CTX).toBeUndefined();
+    expect(c.get('parle-speech-test')!.app).toBe('parle');
+    expect(c.get('parle-speech')!.app).toBe('parle');
+    expect(Object.keys(spec.files ?? {})).toEqual(Object.keys(PRODUCTION.files));
+    expect(cloud.created).toHaveLength(0);
+    const put = vi.spyOn(c, 'put');
+    const again = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
+    expect(again.filter(s => s.name === 'parle-speech' || s.name === 'parle-speech-test').map(s => s.state)).toEqual(['in_sync', 'in_sync']);
+    expect(put.mock.calls.filter(([name]) => name === 'parle-speech-test')).toHaveLength(0);
+  });
+});
+
+describe('parle-bridge-shadow parked (owner, 12/10/2026): no custom-model GPU until the owner turns it back on', () => {
+  const HF = 'hf_fake_read_token_0123456789';
+  const IN_CLASS = Date.parse('2026-10-12T17:00:00Z');
+  const isShadow = (name: string) => name.startsWith('parle-bridge-shadow');
+
+  it('is not declared, and its parked specs hold no warm window', () => {
+    expect(DECLARED_DEPLOYMENTS.filter(d => isShadow(d.name))).toEqual([]);
+    for (const parked of [parkedShadow, parkedShadowTest]) {
+      expect(parked.spec).not.toHaveProperty('warmSchedule');
+      expect(parked.spec.minReplicas).toBe(0);
+    }
+  });
+
+  it('inside the class window, even with the HF token set, nothing of the shadow is registered, warmed or started', async () => {
+    const cloud = new FakeCloud();
+    const c = new DeploymentController({
+      backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(500), namespace: 'test', reconcileMs: 50,
+      now: () => IN_CLASS,
+    });
+    await c.init();
+    controllers.push(c);
+    const status = await new DeclaredDeploymentReconciler({ target: c, env: { HF_BRIDGE_READ_TOKEN: HF } }).reconcile();
+    await new Promise(r => setTimeout(r, 300));
+    expect(status.filter(s => isShadow(s.name))).toEqual([]);
+    expect(c.specOf('parle-bridge-shadow')).toBeNull();
+    expect(c.specOf('parle-bridge-shadow-test')).toBeNull();
+    expect(cloud.created.filter(x => isShadow(x.spec.name))).toEqual([]);
   });
 });

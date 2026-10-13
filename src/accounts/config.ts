@@ -18,8 +18,10 @@ export interface Quota {
   ttsChars: number;
   /** Live rooms created per UTC month. */
   rooms: number;
-  /** Metered requests per UTC day (429 when over). */
+  /** Metered requests per UTC day (429 when over), in the app budget's unit: a realtime session counts its whole charge. */
   requestsPerDay: number;
+  /** Metered requests in flight at once (429 when over). */
+  concurrentRequests: number;
 }
 
 export interface AccountsConfig {
@@ -60,6 +62,8 @@ export const ACCOUNTS_DEFAULTS = {
   PLAN: 'free',
   USAGE_RETENTION_DAYS: 400,
   PEPPER: 'ucast-accounts-v1',
+  QUOTA_REQUESTS_DAY: 2000,
+  QUOTA_CONCURRENT: 20,
 } as const;
 
 function nonNegative(raw: string | undefined, fallback: number): number {
@@ -89,13 +93,17 @@ export function accountsConfigFromEnv(env: Record<string, string | undefined> = 
     resetTtlMs: positive(env.ACCOUNTS_RESET_MINUTES, ACCOUNTS_DEFAULTS.RESET_MINUTES) * 60_000,
     maxKeysPerUser: Math.floor(positive(env.ACCOUNTS_MAX_KEYS_PER_USER, ACCOUNTS_DEFAULTS.MAX_KEYS_PER_USER)),
     plan: env.ACCOUNT_DEFAULT_PLAN?.trim() || ACCOUNTS_DEFAULTS.PLAN,
-    // Default: unlimited (limits and plans come later) — the app's own daily budget (APP_DAILY_*) still applies.
+    // Every account of the app shares the app's own daily budget (APP_DAILY_*) and its in-flight limit
+    // (MAX_CONCURRENT_PER_USER): those stay the ceiling of the sum. On top, each account has its own daily request
+    // budget (default 2000 ≈ 50 realtime sessions of 40, or ~1 h of live subtitles) and in-flight limit (default 20),
+    // so one account cannot spend the others' share (report 2026-10-12, T5). The monthly limits default to unlimited.
     quota: {
       audioSeconds: Math.floor(nonNegative(env.ACCOUNT_QUOTA_AUDIO_MINUTES_MONTH, 0) * 60),
       llmTokens: Math.floor(nonNegative(env.ACCOUNT_QUOTA_LLM_TOKENS_MONTH, 0)),
       ttsChars: Math.floor(nonNegative(env.ACCOUNT_QUOTA_TTS_CHARS_MONTH, 0)),
       rooms: Math.floor(nonNegative(env.ACCOUNT_QUOTA_ROOMS_MONTH, 0)),
-      requestsPerDay: Math.floor(nonNegative(env.ACCOUNT_QUOTA_REQUESTS_DAY, 0)),
+      requestsPerDay: Math.floor(nonNegative(env.ACCOUNT_QUOTA_REQUESTS_DAY, ACCOUNTS_DEFAULTS.QUOTA_REQUESTS_DAY)),
+      concurrentRequests: Math.floor(nonNegative(env.ACCOUNT_QUOTA_CONCURRENT, ACCOUNTS_DEFAULTS.QUOTA_CONCURRENT)),
     },
     usageRetentionDays: Math.floor(positive(env.ACCOUNTS_USAGE_RETENTION_DAYS, ACCOUNTS_DEFAULTS.USAGE_RETENTION_DAYS)),
     email: {

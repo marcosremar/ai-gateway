@@ -228,6 +228,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
       inet_down: { gte: MIN_INET_DOWN_MBPS },
       direct_port_count: { gte: vastPortCount(spec) },
       dph_total: { lte: Math.round(spec.maxEurPerHour * EUR_TO_USD * 1000) / 1000 },
+      ...(spec.minCpuCores ? { cpu_cores_effective: { gte: spec.minCpuCores } } : {}),
+      ...(spec.minRamGb ? { cpu_ram: { gte: spec.minRamGb * 1024 } } : {}),
       order: [['dph_total', 'asc']],
       limit: 100,
     };
@@ -253,7 +255,9 @@ export class VastDeploymentBackend implements DeploymentBackend {
       // A host whose rental ends within a day would be taken back mid-use: skipped (unknown end = kept).
       const valid = offers.filter(o => o.dph_total <= usdCap && o.reliability2 >= reliability && o.inet_down >= MIN_INET_DOWN_MBPS
         && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda) && this.lastsLongEnough(o, now)
-        && (o.direct_port_count === undefined || o.direct_port_count >= vastPortCount(spec)));
+        && (o.direct_port_count === undefined || o.direct_port_count >= vastPortCount(spec))
+        && (!spec.minCpuCores || (o.cpu_cores_effective ?? 0) >= spec.minCpuCores)
+        && (!spec.minRamGb || (o.cpu_ram ?? 0) >= spec.minRamGb * 1024));
       const reasons = new Map(valid.map(o => [o, this.skipReason(this.hosts.get(o.machine_id), spec, now)]));
       skipped = valid.filter(o => reasons.get(o)).map(o => ({
         offerId: o.id, machineId: o.machine_id ?? null, location: o.geolocation ?? null, usdPerHour: o.dph_total, reason: reasons.get(o)!,
@@ -388,6 +392,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
         pricePerHour: typeof i.dph_total === 'number' ? Math.round((i.dph_total / EUR_TO_USD) * 1000) / 1000 : null,
         expiresAt: vastEndsAt(i.end_date, i.duration, this.now()),
         ...(vastBootError(i) ? { bootError: vastBootError(i)! } : {}),
+        ...(i.actual_status ? { providerStatus: i.actual_status } : {}),
+        ...(i.status_msg?.trim() ? { providerMessage: i.status_msg.trim().slice(0, 300) } : {}),
       };
     });
   }

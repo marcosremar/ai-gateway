@@ -55,6 +55,7 @@ export function createRoomWs(service: RoomService, log: (msg: string, data?: Rec
       send: (text) => write(OP.text, Buffer.from(text, 'utf8')),
       close: (c, reason) => shutdown(c, reason),
       wantsAudio: (lang) => listen === undefined || listen === lang,
+      listening: (lang) => listen === lang,
     };
     if (!service.addViewer(room, viewer)) { socket.end(httpRefusal(503, 'room is at its viewer limit', { 'Retry-After': 30 })); return; }
 

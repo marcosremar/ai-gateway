@@ -340,6 +340,12 @@ describe('POST /v1/s2s: STT hallucination filter on the primary transcript', () 
     expect(events.find(e => e.type === 'filtered')).toMatchObject({ reasons: expect.arrayContaining(['no_speech_prob']) });
   });
 
+  it('a short answer the replica VAD heard passes despite a high no_speech_prob', async () => {
+    const h = await harness({ replica: res => writeFrames(res, metaFrames('R$ 3,00.', { no_speech_prob: 0.7764, avg_logprob: -0.1745, compression_ratio: 0.5, speech_ms: 872 }))() });
+    const { events } = decodeAll((await h.call()).bytes);
+    expect(events.map(e => e.type)).toEqual(['route', 'transcript', 'sentence', 'done']);
+  });
+
   it('a real answer passes through untouched', async () => {
     const h = await harness({ replica: res => writeFrames(res, metaFrames('Bom dia', { no_speech_prob: 0.01, avg_logprob: -0.3, compression_ratio: 1 }))() });
     const { events, audio } = decodeAll((await h.call()).bytes);

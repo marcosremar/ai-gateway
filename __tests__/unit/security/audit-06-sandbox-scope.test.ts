@@ -8,9 +8,9 @@ const TOKEN = 'sandbox-master-token-0123456789';
 describe('audit 2026-10-09 #6: the SANDBOX_TOKEN is neither admin nor able to wake machines', () => {
   it('accepted as a key (ACCEPT_SANDBOX_TOKEN_AS_KEY=1) it is a plain, non-waking user', () => {
     const env = { SANDBOX_TOKEN: TOKEN, ACCEPT_SANDBOX_TOKEN_AS_KEY: '1', DEPLOYMENTS_ADMIN_USERS: 'ops' };
-    const { keys, sandboxAdmins } = gatewayClientKeys(env);
+    const { keys } = gatewayClientKeys(env);
     expect(keys).toEqual([`${TOKEN}:${SANDBOX_USER}`]);
-    expect([...adminUsersFromEnv(env, sandboxAdmins)]).toEqual(['ops']);
+    expect([...adminUsersFromEnv(env)]).toEqual(['ops']);
     expect(requestIsNoWake(undefined, SANDBOX_USER, env)).toBe(true);
     expect(requestIsNoWake(undefined, 'parle', env)).toBe(false);
   });
@@ -19,12 +19,12 @@ describe('audit 2026-10-09 #6: the SANDBOX_TOKEN is neither admin nor able to wa
     expect([...adminUsersFromEnv({ DEPLOYMENTS_ADMIN_USERS: 'ops,sandbox' })]).toEqual(['ops']);
   });
 
-  it('SANDBOX_TOKEN_ADMIN=1 is the explicit opt-in back to admin (and waking)', () => {
+  it('two roles only (owner, 10/10/2026): SANDBOX_TOKEN_ADMIN=1 no longer makes the dev token an admin, and says so', () => {
     const env = { SANDBOX_TOKEN: TOKEN, ACCEPT_SANDBOX_TOKEN_AS_KEY: '1', SANDBOX_TOKEN_ADMIN: '1' };
-    const { sandboxAdmins, warnings } = gatewayClientKeys(env);
-    expect([...adminUsersFromEnv(env, sandboxAdmins)]).toEqual([SANDBOX_USER]);
-    expect(requestIsNoWake(undefined, SANDBOX_USER, env)).toBe(false);
-    expect(warnings.join('\n')).toMatch(/SANDBOX_TOKEN_ADMIN/);
+    const { warnings } = gatewayClientKeys(env);
+    expect(adminUsersFromEnv(env).size).toBe(0);
+    expect(requestIsNoWake(undefined, SANDBOX_USER, env)).toBe(true);
+    expect(warnings.join('\n')).toMatch(/SANDBOX_TOKEN_ADMIN is no longer read/);
   });
 
   it('the flags that widen it come only from the host, never from the dev API catalog', () => {

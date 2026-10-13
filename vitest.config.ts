@@ -1,5 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import path from 'path';
+import { mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
 
 const root = __dirname;
 const src = (p: string) => path.resolve(root, 'src', p);
@@ -99,6 +101,8 @@ export default defineConfig({
       // tests so they exercise downstream branches; tests that specifically
       // verify label requirement override AIGW_LABEL_OPTIONAL=0 inline.
       AIGW_LABEL_OPTIONAL: process.env.AIGW_LABEL_OPTIONAL ?? '1',
+      // State files (gpu-lifecycle.jsonl, vast host reputation, deploy settings) go to a temp dir, never ~/.ai-gateway.
+      AI_GATEWAY_CONFIG_DIR: mkdtempSync(path.join(tmpdir(), 'aigw-test-config-')),
     },
     server: {
       deps: {

@@ -70,6 +70,34 @@ describe('STT route: hallucination filter', () => {
     expect(res.headers?.['X-STT-Filtered']).toBeDefined();
   });
 
+  it('plain json carries the detected language and its probability when the provider gave them', async () => {
+    const { p } = provider({ text: 'Um real e cinquenta.', language: 'fr', language_probability: 0.62, segments: [seg('Um real e cinquenta.', 0.1)] });
+    const res = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'pt' }), p);
+    expect(res.body).toEqual({ text: 'Um real e cinquenta.', language: 'fr', language_probability: 0.62 });
+  });
+
+  it('short real answers the VAD heard survive a high no_speech_prob (large-v3, 2026-10-11)', async () => {
+    for (const [text, no_speech_prob, avg_logprob, speech_ms] of [['2', 0.6179, -0.4838, 640], ['R$ 3,00.', 0.7764, -0.1745, 872],
+      ['Um real e cinquenta.', 0.65, -0.95, 1938], ['Um real e cinquenta.', 0.2, -1.3, 1938], ['Eu não sei.', 0.45, -0.3, 700]] as const) {
+      _resetSttCache();
+      const { p } = provider({ text, no_speech_prob, avg_logprob, compression_ratio: 0.5, speech_ms });
+      const res = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'pt' }), p);
+      expect(res.body).toEqual({ text });
+      expect(res.headers?.['X-STT-Filtered']).toBe('none');
+    }
+  });
+
+  it('silence and noise (no speech for the VAD) are still dropped, and so are voiced inventions', async () => {
+    for (const [text, no_speech_prob, avg_logprob, speech_ms] of [['Obrigado.', 0.8117, -0.5309, 0], ['Obrigado.', 0.8117, -0.5309, undefined],
+      ['E aí', 0.8966, -0.3213, 0], ['2', 0.6179, -0.4838, undefined], ['Obrigado.', 0.85, -1.3, 300],
+      ['Obrigado por assistir!', 0.1, -0.2, 900], [' Legenda por Sônia Ruberti', 0.1, -0.2, 900]] as const) {
+      _resetSttCache();
+      const { p } = provider({ text, no_speech_prob, avg_logprob, compression_ratio: 0.5, ...(speech_ms === undefined ? {} : { speech_ms }) });
+      const res = await handleAudioTranscriptions(req({ model: 'stt-m', language: 'pt' }), p);
+      expect(res.body).toEqual({ text: '' });
+    }
+  });
+
   it('env STT_HALLUCINATION_FILTER=0 turns it off for everyone', async () => {
     process.env.STT_HALLUCINATION_FILTER = '0';
     const { p, transcribe } = provider({ text: 'E aí.' });

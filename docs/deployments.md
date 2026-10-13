@@ -52,6 +52,8 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | GET | `/v1/deployments/:name/capacity` | session ceiling in force and measured boot / resume time per machine type + image, mode, budget spent, hold (see Scaling policy) |
 | POST | `/v1/deployments/:name/warm` | `{ "replicas": N, "untilMinutes": M }`: keep N replicas up for M minutes (≤ 720) whatever the load — a class about to start; `park` ends it (admin) |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>` |
+| GET / PUT | `/v1/apps/:app/profile` | what the app needs from its GPUs (§ Profile of an app) |
+| GET | `/v1/apps/:app/status` | GPU status of the app: `mode` gpu · degraded · down, probes, fallback in use |
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |
 | PUT / DELETE | `/v1/profiles/:name` | store / delete your own profile (same fields as a spec) |
 
@@ -66,7 +68,9 @@ holds the spec **without secrets**; at boot (before the routes are mounted) and 
 body, compares it with the stored spec and calls the same idempotent `controller.put` only when something changed
 (new image, rotated credential). A deployment that does not exist yet is created from the declaration's `profile`
 when it names one; an existing one is never reset to the profile. Registering never starts a machine: declared specs keep `minReplicas: 0` and the
-reconciler never wakes them — a replica starts on the first request that needs it, as for any deployment.
+reconciler never wakes them — a replica starts on the first request that needs it, as for any deployment. The one
+exception is a declaration with `initial` (`babelcast-3090`): those spec fields are set only when the deployment is
+created and never put back afterwards, so `initial.minReplicas: 1` pins it once and the operator's pin toggle owns it.
 
 Secrets are mounted from the environment (the dev API) at each reconcile:
 
@@ -75,6 +79,7 @@ Secrets are mounted from the environment (the dev API) at each reconcile:
 | `image.env` (`SPEECH_IMAGE`) | a full reference, or just a tag of `image.repository`; unset → `image.default` |
 | `registryAuth.passwordEnv` (e.g. `GHCR_READ_TOKEN`) | the password of a private registry (a GHCR token with `read:packages`, …); only for a declaration that has `registryAuth` — `parle-speech` has none |
 | `generatedSecrets` (e.g. `SPEECH_TOKEN`) | generated once (32 chars `[A-Za-z0-9_-]`), persisted with the spec in the deployment store, reused afterwards; never logged nor returned |
+| `secretEnv` (e.g. `{"HF_TOKEN": "HF_BRIDGE_READ_TOKEN"}`) | a credential the replica itself needs (a read-only token for private weights), copied from that gateway variable into the replica env at each reconcile; unset → `pending` |
 
 **Pending, never broken:** without the credential a declaration asks for, or an image, the deployment is not
 registered and its status is `pending` with the reason (`<passwordEnv> is not set …`) — a replica that cannot pull its private image would be a
@@ -104,11 +109,103 @@ stay exactly as registered. On a gateway where `parle-speech` does not exist it 
 profile with the declared image; that deployment has no `files`, so the voice catalog still has to be sent with a
 `PUT`.
 
+Both `parle-speech` and `parle-speech-test` belong to the app `parle` (`"app"` in the declaration; set on an existing
+deployment that has no app yet), so a `parle` client key may `start` them (docs/api/http.md § Deployments).
+
+### `parle-speech-test` (the cheap GPU for tests)
+
+`src/deployments/declared/parle-speech-test.json` (10/10/2026): the same image as `parle-speech` on the cheapest GPU
+that runs the speech stack — one Scaleway **L4-1-24G** in fr-par-2 (€0.79/h; the stack was measured there on
+2026-10-04 with `STT_BATCH 4` / `LLM_PARALLEL 8` beside the TTS, and `LLM_SLOT_CTX` stays at its 2048 default), then
+one **RTX 5090** on Vast (≤ €0.85/h). Never an L40S (€1.47/h) or an H100. `maxReplicas 1`, `minReplicas 0`, no warm
+schedule, `idleMinutes 10`, `idleAction: "delete"` (a parked L4 would keep holding one of the account's two L4 that
+the class TTS reserves Mon–Thu 17:30–20:30; during that window the L4 is refused and the copy goes to Vast),
+€40/month ceiling. `testFor: "parle-speech"` makes it the test copy: a request is **never** what starts it; a capped
+client key that calls `POST /v1/deployments/parle-speech/start` gets this copy instead; and while it is ready and
+`parle-speech` is not, the `parle-*` aliases are served by it (a key with `autoWake` also wakes `parle-speech`).
+When it is created it takes the voice catalog (`files`) of `parle-speech`. Cold start ≈ 8–9 min on the L4 (create,
+pull ~57 GB, load); on Vast it depends on the host's bandwidth (not measured with this image) — start it ~10 min
+before the test.
+
 One-GPU mode: the parle TTS entry names `parle-qwen-tts` with `"oneGpuDeployment": "parle-speech"` (the app's own
 routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` is not registered
 and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register
 `parle-qwen-tts` (a registered `deployment` always wins); to go back to one GPU, delete it (pausing keeps it
 registered, so it would stay the target).
+
+### `babelcast-3090` (the pinned Vast GPU of babelcast and of the agents' tests, 13/10/2026)
+
+`src/deployments/declared/babelcast-3090.json`, owner decision 13/10/2026: one **RTX 3090 24 GB on Vast**, at most
+US$0.20/h (`maxEurPerHour 0.19` × `EUR_TO_USD 1.05` = US$0.1995), Vast only (`placements: []`, never Scaleway), app
+`babelcast`. It serves **babelcast and the agents' tests only**: the parle class stays on its Scaleway GPUs, and a route
+may not name another app's deployment (`putRoutes` refuses it with 403, admin included), so no parle route can send
+student audio to it.
+
+- **Pinned, with the existing guard.** No new field: `minReplicas: 1` (set once through `initial`) keeps one replica;
+  the reconciler creates it with no request. The gateway-wide pinned-idle guard (`pinnedIdleOver`,
+  `DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES`, default 60) takes it to zero after 60 min with no request (a dev key with
+  `countsAsUse: false` does not count) and no spec change; the next request, `wake` or a PATCH brings it back.
+  `idleMinutes: 60` is what applies once it is unpinned. The view carries `pinned: { idleMinutes, parked }`.
+- **No respawn loop.** No offer under the cap (`out_of_stock`) → the create back-off (1, 2, 5, then 10 min) and the
+  `deployment.out_of_stock` alert; no credit (`insufficient_credit`) → one try per 10 min and
+  `provider.credit_exhausted`. The € ceilings (`DEPLOYMENTS_MAX_EUR_PER_HOUR`, `scaling.budget` €140/month, a key's
+  `gpuDailyEur`) and `AIGW_REAL_MACHINES` apply as to any deployment.
+- **Image and VRAM.** The public copy of the speech-stack image (`ghcr.io/marcosremar/speech-stack:20261011-0200`,
+  Vast cannot pull the Scaleway registry): Whisper large-v3 fp16 + Qwen3.5-9B Q4_K_M (llama.cpp) + Qwen3-TTS 0.6B Base,
+  with the L4 settings (`STT_BATCH 4`, `LLM_PARALLEL 8` × `LLM_SLOT_CTX 2048`, `TTS_STAGE0_MB 7400`), measured on the
+  L4's 24 GB on 2026-10-04 — the 3090 has the same 24 GB. It covers babelcast's STT and LLM (`babelcast-stt`,
+  `babelcast-llm`). Not its TTS: `babelcast-tts` is Qwen3-TTS **1.7B CustomVoice**, which the image does not carry
+  (offline, pre-baked) and which would not fit beside the other two in 24 GB; it stays on `babelcast-tts`, then the cloud.
+  The image is CUDA 13 (`minCuda 13`): only 3090 hosts with a driver ≥ 580 qualify, fewer than at CUDA 12.
+- **Test copy.** `testFor: "babelcast-speech"`: a dev key whose `wakeDeployments` lists `babelcast-3090` may start it
+  (outside a class window, as a start of `startIdleMinutes` under its `gpuDailyEur`), and while it is ready and
+  `babelcast-speech` is not, the babelcast aliases are served by it.
+- **babelcast's chain** (the app's own routes; the owner sets them): `babelcast-stt` → `deployment:babelcast-3090` →
+  `deployment:babelcast-speech` → OpenRouter whisper-large-v3-turbo → Groq; `babelcast-llm` → `deployment:babelcast-3090`
+  → `deployment:babelcast-speech` → OpenRouter gemini-2.5-flash-lite; `babelcast-tts` unchanged.
+- **Cost.** At most US$0.20 × 24 h = **US$4.80/day** (€4.56) when used all day; parked after 1 h with no request.
+
+### `parle-bridge-shadow` (the audio bridge in shadow mode, 12/10/2026) — PARKED
+
+**Parked (owner, 12/10/2026): no GPU for a new custom model for now.** Both specs live in
+`src/deployments/parked/` and are not in `DECLARED_DEPLOYMENTS`: the gateway never registers them, so nothing starts
+them — no schedule, no request, no `/wake`, no dev key. The parked spec has no `warmSchedule`. The class keeps its GPUs
+as before (`parle-speech`, `parle-qwen-tts`). To turn it back on: set `HF_BRIDGE_READ_TOKEN` (read-only), move both
+files back to `src/deployments/declared/`, import them in `declared.ts`, put the class-window `warmSchedule` back on
+`parle-bridge-shadow` (Mon–Thu 17:30–20:30 Europe/Paris, `minReplicas: 1`), replace the parked test in
+`__tests__/unit/deployments/declared.test.ts`, then publish the gateway. What follows describes it as it was declared.
+
+`src/deployments/parked/parle-bridge-shadow.json` (+ `-test`): the parle audio bridge `conv` — Qwen3.5-9B Q4_K_M
+reading the student's audio through the 1j `conv` projector (`marcosremar2/qwen35-audio-bridge-pt`, private,
+`stage6-1j-conv/`) — served by `llama-server` b11382 with the mel-trim patch the bridge was evaluated with. **Shadow
+mode:** parle sends it the same audio and context as the real turn, and its answer is only recorded next to that turn
+(parle `play_shadow_turns`); the student never sees or hears it.
+
+- **No image to build.** Vast, boot-script mode, on the public `nvidia/cuda:12.8.1-devel-ubuntu24.04`: the script
+  downloads the patch and the projector (sha256-checked, `HF_TOKEN`), the public base GGUF (pinned revision, sha256),
+  builds `llama-server` for the host's own GPU (`CMAKE_CUDA_ARCHITECTURES=native`) and serves the OpenAI API on 8000
+  (`input_audio` in `/v1/chat/completions`). Cold start ≈ 10–15 min (not measured on Vast yet).
+- **`GGML_CUDA_DISABLE_GRAPHS=1` is mandatory** (`env`): with CUDA graphs on, the audio encoder breaks after ~5 real
+  utterances of different lengths on A100/H100 (bridge repo, 12/10/2026); `MTMD_AUDIO_TRIM=1` is the trim the `conv`
+  projector was trained and evaluated with.
+- **GPU:** one RTX 3090 24 GB (≤ €0.30/h), then an RTX 4090 (≤ €0.50/h); the model needs ≈ 11 GB with 8 slots. Never
+  a Scaleway L4: the account's two L4 are the class TTS's (`parle-qwen-tts`) in the same window.
+- **Window:** `warmSchedule` Mon–Thu 17:30–20:30 Paris, the parle class window; `idleMinutes 10`, `idleAction:
+  "delete"`. Outside it nothing starts it: parle calls it with `X-Gateway-No-Wake: 1`, so a cold shadow answers 503 at
+  once instead of waking. `parle-bridge-shadow-test` (`testFor`, no schedule) is the copy a dev key with
+  `wakeDeployments: ["parle-bridge-shadow-test"]` may start outside class.
+- **Secret:** `secretEnv` mounts `HF_TOKEN` from the gateway's `HF_BRIDGE_READ_TOKEN` (a **read-only** Hugging Face
+  token: it lands on a marketplace host). Missing → `pending`, nothing registered.
+- **No cloud fallback, on purpose — the one exception to "every route answers" (hard rule 4).** The shadow is not a
+  route anyone waits on: it is a deployment invoked directly, and the turn the student hears has already been answered
+  by the real chain. A cloud model standing in for the bridge would record an answer the bridge did not give, i.e.
+  corrupt the comparison. A cold, failed or slow shadow is recorded as "no shadow answer" and the class goes on.
+- **Never slows the real turn:** parle fires the shadow request in parallel without awaiting it (a regression test in
+  parle proves it); in the gateway it goes through `invoke` to its own replica, so it shares no slot, queue or
+  circuit with the `parle-*` aliases.
+- **Cost:** EU RTX 3090 offers with CUDA ≥ 12.8 were US$0.15–0.29/h on 12/10/2026. One class ≈ 3 h window + ≈ 0.3 h
+  boot + 10 min idle tail ≈ 3.5 h → **≈ US$0.5–1.0 per class** (US$1.6 on a 4090), US$2–4 per week of 4 classes;
+  ceiling €25/month (`scaling.budget`).
 
 ## App accounts — saved image addresses
 
@@ -148,6 +245,21 @@ a block flag — no IP, no user agent. `GET /v1/apps/:app/devices` lists them, `
 Same callers as the other app paths (the app's key, or an admin). The id is whatever the app says it is: blocking
 stops an unmodified client, not a forged id — an app that needs more mints the ids in its backend and sets
 `requireDevice`. Routes, timings per transport and a worked example: [docs/api/http.md](api/http.md) § App devices.
+
+### Profile of an app: GPU required, probed, status
+
+`PUT /v1/apps/:app/profile` `{ "requiresGpu": true, "gpuDeployments": ["parle-speech", "parle-qwen-tts"] }` (an admin,
+or the app's own key naming only deployments of its app; stored in `apps.json`). For each listed deployment the gateway
+probes every **ready** replica every 2 min with one minimal real call per stage it serves (`src/deployments/gpu-probe.ts`:
+STT a short WAV, chat 1 token, TTS one word in a cloned voice of the replica's catalog), straight on the replica — it
+never wakes or keeps a machine up. Two failed rounds in a row → the replica is `failing` and its failed stages leave the
+rotation (`holdStageOut`, the per-replica stage rotation) until a round passes. A request of a `requiresGpu` app that
+the cloud fallback answers still answers, with `X-Gateway-Status: degraded`, and the start of each cloud run is the
+telemetry event `app.degraded`. `GET /v1/apps/:app/status` (the app's key or an admin) gives `mode` `gpu` · `degraded` ·
+`down`, each deployment's state, replicas and last probe, and the fallback in use — contract and fields in
+[docs/api/http.md](api/http.md) § App profile and GPU status. Warm hours stay each deployment's `warmSchedule` (the
+profile `PUT` warns when one has none); parle's two deployments are warm Mon–Thu 17:30–20:30 Paris by their
+declarations. Code: `src/deployments/app-gpu-health.ts`; tests: `__tests__/unit/deployments/app-gpu-health.test.ts`.
 
 ## Cold start
 
@@ -778,7 +890,9 @@ fallback); then the instance is taken away, whatever it is serving. `src/deploym
   sends new requests to any other ready replica first; once the others cover `desired` and it has no request in
   flight, it is released with reason `expiring`. A caller of the deployment (SDK, `/v1/...` through the gateway) sees
   no error and no wait.
-- `GET /v1/deployments/:name` shows `expiresInMinutes` per replica (null when the provider never takes it back).
+- `GET /v1/deployments/:name` shows `hostEndsInMinutes` per replica: when the provider takes the host back (Vast contract
+  end), not when the gateway shuts it down (that is `idleMinutes` / `maxHours`); null when the provider never does. The
+  old name `expiresInMinutes` is still sent, deprecated.
 
 ## Replica machine
 
@@ -903,7 +1017,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 
 | Variable | |
 |---|---|
-| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition as a non-admin, no-wake user (`SANDBOX_TOKEN_APP` names the app whose aliases it may call; `SANDBOX_TOKEN_ADMIN=1` makes it admin again) |
+| `SANDBOX_TOKEN` | the only secret to set; everything below that is a key comes from the dev API. Not a client key nor an admin (`401`); `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` re-accepts it during the transition as a no-wake client, never an admin (`SANDBOX_TOKEN_APP` names the app whose aliases it may call; `SANDBOX_TOKEN_ADMIN` is no longer read) |
 | `SCW_SECRET_KEY` (+ optional `SCW_PROJECT_ID`) | enables Scaleway replicas (normally fetched with the token) |
 | `VAST_API_KEY` | enables Vast replicas (normally fetched with the token); the controller only touches instances labeled `aigw:<namespace>:` |
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |

@@ -27,7 +27,9 @@ const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string; cloudStt: { transcribe: ReturnType<typeof vi.fn> }; woken: string[] }
 
-async function harness(): Promise<Harness> {
+async function harness(
+  autoWake?: (bearer: string) => boolean, countsAsUse?: (bearer: string) => boolean, mayWake?: (c: DeploymentController, bearer: string, deployment: string) => boolean,
+): Promise<Harness> {
   const cloud = new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 30,
@@ -55,6 +57,9 @@ async function harness(): Promise<Harness> {
     customRoutes: [{ method: 'POST', path: '/v1/s2s', handler: s2s }],
     // The tester key is the admin of this gateway: it sees the gateway-wide counters of /health?details=1.
     deepHealth: { authorize: (token) => token === KEY, report: async () => ({ status: 200, body: {} }) },
+    ...(autoWake ? { autoWake } : {}),
+    ...(countsAsUse ? { countsAsUse } : {}),
+    ...(mayWake ? { mayWake: (bearer: string, deployment: string) => mayWake(controller, bearer, deployment) } : {}),
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, cloudStt, woken };
@@ -185,5 +190,119 @@ describe('no-wake: DeploymentController.acquire', () => {
     await wait(150);
     expect(h.cloud.created).toHaveLength(0);
     expect(h.controller.get('parle-speech')!.lastRequestAt).toBeNull();
+  });
+});
+
+describe('autoWake per client key (owner, 10/10/2026): a client call never turns a GPU on unless its key says so', () => {
+  it('a key without autoWake gets the cloud answer and nothing is created; a key with autoWake wakes the cold GPU', async () => {
+    h.controller.stop();
+    h.server.closeAllConnections();
+    await new Promise<void>(r => h.server.close(() => r()));
+    h = await harness(bearer => bearer === BATCH);
+    const dev = await stt(h, {}, KEY);
+    expect(dev.status).toBe(200);
+    expect(dev.headers.get('x-gateway-provider')).toBe('groq:whisper-large-v3');
+    await wait(200);
+    expect(h.cloud.created).toHaveLength(0);
+    expect(h.woken).toEqual([]);
+    expect((await stt(h, {}, BATCH, 'other-audio')).status).toBe(200);
+    await until(() => h.cloud.created.length === 1, 2000);
+    expect(h.woken).toEqual(['parle-speech']);
+  });
+
+  it('an explicit start turns the GPU on, and it is parked on its own once the window is over and idle', async () => {
+    const { ClientGpu } = await import('../../../src/deployments/client-gpu');
+    let t = Date.now();
+    const gpu = new ClientGpu(h.controller, { now: () => t });
+    await gpu.start({ keyId: 'key-dev', user: 'tester' }, { autoWake: false, canStartGpu: true, gpuDailyEur: 5, startIdleMinutes: 10 }, 'parle-speech', 15);
+    await until(() => h.controller.get('parle-speech')!.replicas.some(r => r.phase === 'ready'), 3000);
+    t += 14 * 60_000;
+    await gpu.tick();
+    expect(h.controller.get('parle-speech')!.replicas.length).toBe(1);
+    t += 12 * 60_000;
+    await gpu.tick();
+    await until(() => h.controller.get('parle-speech')!.replicas.length === 0, 3000);
+    expect(gpu.report().running).toEqual([]);
+  });
+});
+
+describe('test GPU (owner, 10/10/2026): a test reuses what is already up, else the cheap test copy', () => {
+  async function restart(autoWake: (bearer: string) => boolean) {
+    h.controller.stop();
+    h.server.closeAllConnections();
+    await new Promise<void>(r => h.server.close(() => r()));
+    h = await harness(autoWake);
+  }
+
+  it('a key without autoWake uses the production replica when it is already ready, and starts nothing else', async () => {
+    await restart(bearer => bearer === BATCH);
+    h.controller.wake('parle-speech');
+    await until(() => h.controller.get('parle-speech')!.status === 'ready', 3000);
+    const res = await stt(h, {}, KEY);
+    expect(res.headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
+    await wait(200);
+    expect(h.cloud.created).toHaveLength(1);
+  });
+
+  it('production cold, its test copy ready: the request is served by the test copy; production is woken only for an autoWake key', async () => {
+    await restart(bearer => bearer === BATCH);
+    await h.controller.put('parle-speech-test', { profile: 'cpu-echo', minReplicas: 0, maxReplicas: 1, testFor: 'parle-speech' });
+    h.controller.wake('parle-speech-test');
+    await until(() => h.controller.get('parle-speech-test')!.status === 'ready', 3000);
+    const dev = await stt(h, {}, KEY);
+    expect(dev.status).toBe(200);
+    expect(dev.headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
+    expect(h.cloudStt.transcribe).not.toHaveBeenCalled();
+    await wait(200);
+    expect(h.woken).toEqual(['parle-speech-test']);
+    expect(h.cloud.created).toHaveLength(1);
+    expect((await stt(h, {}, BATCH, 'other-audio')).status).toBe(200);
+    expect(h.woken).toEqual(['parle-speech-test', 'parle-speech']);
+  });
+});
+
+describe('dev key (owner, 12/10/2026): countsAsUse false uses a ready replica but never keeps it up', () => {
+  it('a dev request is served by the ready replica and leaves the idle clock alone; a production request renews it', async () => {
+    h.controller.stop();
+    h.server.closeAllConnections();
+    await new Promise<void>(r => h.server.close(() => r()));
+    h = await harness(bearer => bearer === BATCH, bearer => bearer !== KEY);
+    h.controller.wake('parle-speech');
+    await until(() => h.controller.get('parle-speech')!.status === 'ready', 3000);
+    const before = h.controller.get('parle-speech')!.lastRequestAt;
+    await wait(30);
+    const dev = await stt(h, {}, KEY);
+    expect(dev.headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
+    expect(h.controller.get('parle-speech')!.lastRequestAt).toBe(before);
+    await wait(30);
+    expect((await stt(h, {}, BATCH, 'other-audio')).headers.get('x-gateway-provider')).toBe('deployment:parle-speech');
+    expect(h.controller.get('parle-speech')!.lastRequestAt).not.toBe(before);
+  });
+});
+
+describe('dev key with wakeDeployments (owner, 12/10/2026): a plain request wakes the test copy, never production', () => {
+  it('production and its test copy cold: the cloud answers, the test copy is woken under a start, production is not', async () => {
+    const { ClientGpu } = await import('../../../src/deployments/client-gpu');
+    const { DEFAULT_GPU_POLICY } = await import('../../../src/config/access-keys');
+    const policy = { ...DEFAULT_GPU_POLICY, autoWake: true, canStartGpu: true, countsAsUse: false, wakeDeployments: ['parle-speech-test'] };
+    let gpu: InstanceType<typeof ClientGpu> | null = null;
+    h.controller.stop();
+    h.server.closeAllConnections();
+    await new Promise<void>(r => h.server.close(() => r()));
+    h = await harness(() => false, bearer => bearer !== KEY, (c, bearer, deployment) => {
+      gpu ??= new ClientGpu(c);
+      return bearer === KEY && gpu.requestMayWake({ keyId: 'key-dev', user: 'parle' }, policy, deployment);
+    });
+    await h.controller.put('parle-speech-test', { profile: 'cpu-echo', minReplicas: 0, maxReplicas: 1, testFor: 'parle-speech' });
+    const dev = await stt(h, {}, KEY);
+    expect(dev.status).toBe(200);
+    expect(dev.headers.get('x-gateway-provider')).toBe('groq:whisper-large-v3');
+    await until(() => h.cloud.created.length === 1, 2000);
+    expect(h.woken).toEqual(['parle-speech-test']);
+    expect(h.controller.get('parle-speech')!.replicas).toHaveLength(0);
+    expect(gpu!.report().running).toMatchObject([{ key: 'key-dev', deployment: 'parle-speech-test', capEur: 5 }]);
+    expect((await stt(h, {}, BATCH, 'other-audio')).headers.get('x-gateway-provider')).toBe('groq:whisper-large-v3');
+    await wait(200);
+    expect(h.controller.get('parle-speech')!.replicas).toHaveLength(0);
   });
 });

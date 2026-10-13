@@ -78,6 +78,8 @@ export interface STTSegment {
 export interface STTResponse {
   text: string;
   language?: string;
+  language_probability?: number;
+  speech_ms?: number;
   duration?: number;
   words?: Array<{ word: string; start: number; end: number }>;
   /** Per-segment Whisper metadata (available when verbose_json is used). */

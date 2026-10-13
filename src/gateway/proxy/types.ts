@@ -184,6 +184,13 @@ export interface ProxyConfig {
     userId: string; kind: import('./app-limits').InferenceKind; headers: Record<string, unknown>;
     body: unknown; rawBody: Buffer; status: number; response: unknown;
   }) => void;
+  /**
+   * Called after a chat / STT / TTS request was answered by its route, with the origin headers (`X-Gateway-Provider`…);
+   * the headers it returns are added to the response (a GPU app's cloud answer: `X-Gateway-Status: degraded`). Must
+   * be cheap; errors are logged and ignored.
+   */
+  onServed?: (event: { userId: string; kind: import('./app-limits').InferenceKind; status: number; headers: Record<string, string> | undefined }) =>
+    Record<string, string> | undefined;
   deviceGate?: (
     userId: string, headers: import('http').IncomingHttpHeaders, kind: string,
   ) => import('./app-limits').AppLimitDenial | null;
@@ -202,6 +209,11 @@ export interface ProxyConfig {
    * upstream call). The unauthenticated `GET /health` never carries them.
    */
   healthDetails?: (viewer: import('./health-view').HealthViewer) => Record<string, unknown>;
+  autoWake?: (bearer: string) => boolean;
+  /** With autoWake false: the deployments this key may still wake (its test copies, access-keys.ts `wakeDeployments`). */
+  mayWake?: (bearer: string, deployment: string) => boolean;
+  /** False = this key's requests never renew a deployment's idle clock (a dev key, access-keys.ts `countsAsUse`). */
+  countsAsUse?: (bearer: string) => boolean;
 }
 
 /**
