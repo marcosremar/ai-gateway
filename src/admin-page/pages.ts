@@ -31,7 +31,7 @@ export const PAGES: PageDef[] = [
     lead: 'Qual GPU está ligada, por quê, quanto custa e se o boot travou.',
   },
   {
-    id: 'gastos', path: '/admin/gastos', title: 'Gastos', tab: 'Gastos', icon: ICON.gastos!, sections: ['gastos', 'saldos'],
+    id: 'gastos', path: '/admin/gastos', title: 'Gastos', tab: 'Gastos', icon: ICON.gastos!, sections: ['gastos', 'cachevoz', 'saldos'],
     lead: 'GPU por dia e por app, e quanto saldo resta em cada provedor.',
   },
   {

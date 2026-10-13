@@ -42,6 +42,7 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
     dismissed: Object.fromEntries(Object.entries(s.dismissed ?? {}).filter(([id]) => aboutOwn(id))),
     about: s.about ?? null,
     digest: null,
+    ttsCache: s.ttsCache ? { ...s.ttsCache, byApp: s.ttsCache.byApp[app] ? { [app]: s.ttsCache.byApp[app]! } : {} } : s.ttsCache ?? null,
     overspend: (s.overspend ?? []).filter(o => o.app === app),
     chains: s.chains ? Object.fromEntries(Object.entries(own?.stages ?? {}).map(([stage, aliases]) => [stage,
       Object.fromEntries(aliases.filter(a => s.chains![stage]?.[a]).map(a => [a, s.chains![stage]![a]!]))])) : null,

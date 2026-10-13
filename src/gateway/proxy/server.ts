@@ -894,7 +894,8 @@ export function createProxyServer(config: ProxyConfig): Server {
         if (!config.providers.tts && !config.providers.unavailable?.tts) {
           proxyRes = { status: 404, body: { error: { message: 'No TTS providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts);
+          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts, undefined,
+            config.ttsCache ? { cache: config.ttsCache.cache, scope: userId, gpuOnly: config.ttsCache.requiresGpu?.(userId) ?? false } : undefined);
         }
       } else if (method === 'POST' && path === '/v1/audio/transcriptions') {
         if (!config.providers.stt && !config.providers.unavailable?.stt) {

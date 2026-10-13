@@ -143,6 +143,7 @@ export interface ProxyConfig {
   hostname?: string;
   /** Custom exact-path route handlers */
   customRoutes?: CustomRoute[];
+  ttsCache?: ProxyTtsCache;
   /**
    * Exact-path routes that authenticate themselves, matched BEFORE the gateway's API-key check (e.g. telemetry ingest,
    * which takes realtime session tokens and replica signatures). The handler owns auth and the response.
@@ -237,6 +238,11 @@ export interface ProxyRoute {
  * The raw HTTP request is parsed into this shape so that route handlers
  * work with a consistent interface regardless of the underlying transport.
  */
+export interface ProxyTtsCache {
+  cache: import('./tts-cache').TtsCache;
+  requiresGpu?: (userId: string) => boolean;
+}
+
 export interface ProxyRequest {
   /** HTTP method (GET, POST, etc.) */
   method: string;

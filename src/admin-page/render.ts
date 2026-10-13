@@ -22,6 +22,8 @@ import { recommendations, recoSection, type Recommendation } from './recommendat
 import { digestBlock, type DigestStatus } from './digest';
 import type { Overspend } from '../telemetry/overspend';
 import type { Promotion } from '../gateway/proxy/link-reorder';
+import type { TtsCacheStats } from '../gateway/proxy/tts-cache';
+import { voiceCache } from './voice-cache';
 import {
   ACTIVITY_SHOWN, ALERT_FRESH_MS, LEVEL_TEXT, appTitle, inClass, byLevel, count, duration, esc, form, hhmm, hour, latest, meter, ms, money, outsideWindow, pct, pill,
   pinBadge, plural, providerLabel, providerOf, ratioLevel, stageName, table, upOf, when, worst, type Ctx, type Level, type Section,
@@ -62,6 +64,7 @@ export interface AdminSnapshot {
   digest?: DigestStatus | null;
   overspend?: Overspend[];
   reorders?: Promotion[];
+  ttsCache?: TtsCacheStats | null;
 }
 
 export interface AdminAbout { commit: string | null; uptimeSeconds: number; region: string | null; telemetryAt: string | null }
@@ -451,6 +454,7 @@ function activity({ s, now }: Ctx): Section {
 
 export function sectionsOf(ctx: Ctx, recos: Recommendation[]): Map<string, Section> {
   const list = [recoSection(ctx, recos, digestBlock(ctx)), apps(ctx), guarantee(ctx), reserves(ctx), traffic(ctx), spend(ctx), gpus(ctx), keys(ctx), alerts(ctx), activity(ctx)];
+  list.push(voiceCache(ctx));
   if (!ctx.view) list.push(balances(ctx), machines(ctx));
   return new Map(list.map(x => [x.id, x]));
 }

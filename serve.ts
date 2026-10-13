@@ -40,6 +40,7 @@ import { loopbackStages } from './src/s2s/loopback-stages';
 import { appForCall, appStageModels } from './src/s2s/app-stage-models';
 import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
 import { reorderSnapshot } from './src/gateway/proxy/link-reorder';
+import { ttsCacheFromEnv } from './src/gateway/proxy/tts-cache';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
@@ -565,6 +566,9 @@ const deviceGate = deployments && ((userId: string, headers: import('http').Inco
   return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
 });
 
+const ttsCache = ttsCacheFromEnv(process.env, stateDir);
+await ttsCache?.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'TTS cache: disk tier unreadable, memory only'));
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
@@ -579,6 +583,7 @@ const server = await startProxy({
     return deployments.clientGpu.requestMayWake(key && { keyId: key.keyId, user: key.userId }, access.policyOf(key?.keyId), deployment);
   } } : {}),
   countsAsUse: (bearer) => access.policyOf(access.resolve(bearer)?.keyId).countsAsUse,
+  ...(ttsCache ? { ttsCache: { cache: ttsCache, requiresGpu: (userId: string) => deployments?.apps.get(appOfUser(userId))?.profile?.requiresGpu === true } } : {}),
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
   onInference: (event) => {
@@ -625,7 +630,7 @@ const adminSnapshot = (): AdminSnapshot => ({
     region: process.env.RAILWAY_REPLICA_REGION?.trim() || null,
     telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
   },
-  digest: suggestionDigest.status(), overspend: overspendWatch.active(), reorders: reorderSnapshot(),
+  digest: suggestionDigest.status(), overspend: overspendWatch.active(), reorders: reorderSnapshot(), ttsCache: ttsCache?.stats() ?? null,
 });
 
 const overspendWatch = createOverspendWatch({
