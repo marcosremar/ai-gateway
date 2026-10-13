@@ -79,6 +79,7 @@ td b{font-weight:600}td .err{color:var(--bad)}
 .empty{padding:16px;color:var(--muted);margin:0}
 .stats{display:flex;flex-wrap:wrap;gap:8px 32px;padding:12px 16px;border-bottom:1px solid var(--line2)}
 .stats div{display:flex;flex-direction:column}.stats span{color:var(--muted);font-size:12.5px}.stats b{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums}
+.stats small{color:var(--muted);font-size:12.5px;max-width:28ch}
 .chart{padding:14px 16px 6px;border-bottom:1px solid var(--line2)}
 .chart svg{display:block;width:100%;height:120px}.chart .bs{fill:var(--bar)}.chart .bf{fill:var(--bad)}.chart .hit{fill:transparent}
 .chart g:hover .bs{fill:var(--muted)}.chart .gl{stroke:var(--line)}

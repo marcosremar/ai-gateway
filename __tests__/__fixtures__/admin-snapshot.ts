@@ -108,8 +108,8 @@ export function demoSpend(now: number, state: DemoState = 'warn'): SpendLedgerVi
     days.push({
       day: parisDay(at),
       apps: {
-        parle: { gpuEur: Math.round(parleEur * 100) / 100, requests: parleReq, tokens: parleReq * (180 + Math.round(rand() * 60)) },
-        babelcast: { gpuEur: Math.round(babelEur * 100) / 100, requests: babelReq, tokens: babelReq * (150 + Math.round(rand() * 50)) },
+        parle: { gpuEur: Math.round(parleEur * 100) / 100, requests: parleReq, tokens: parleReq * (180 + Math.round(rand() * 60)), cloudUsd: Math.round(parleReq * 0.018) / 100 },
+        babelcast: { gpuEur: Math.round(babelEur * 100) / 100, requests: babelReq, tokens: babelReq * (150 + Math.round(rand() * 50)), cloudUsd: Math.round(babelReq * 0.04) / 100 },
       },
     });
   }
@@ -136,6 +136,12 @@ function allGreen(s: AdminSnapshot, now: number): AdminSnapshot {
   };
 }
 
+function monthElapsed(now: number): number {
+  const at = new Date(now);
+  const start = Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1);
+  return (now - start) / (Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 1) - start);
+}
+
 function somethingDown(s: AdminSnapshot, now: number): AdminSnapshot {
   return {
     ...s,
@@ -144,6 +150,7 @@ function somethingDown(s: AdminSnapshot, now: number): AdminSnapshot {
       links: s.reserves.links.map(r => (r.stage === 'tts' ? { ...r, ok: false, status: 502, code: 'upstream_error', latencyMs: 30000, error: 'provider timeout', checkedAt: iso(now, 2) } : r)),
     },
     apps: s.apps.map(a => (a.status ? { ...a, status: { ...a.status, mode: 'down' } } : a)),
+    balances: s.balances.map(b => (b.provider === 'scaleway' ? { ...b, monthEur: Math.round(260 * monthElapsed(now) * 100) / 100 } : b)),
     alerts: [{ event: 'fallback.probe_failed', at: iso(now, 2), summary: 'stage: tts, target: openrouter:hexgrad/kokoro-82m, code: upstream_error' }, ...s.alerts],
     audit: [{ at: iso(now, 1), actor: 'marcos', action: 'admin-page.probe', names: [], ok: true }, ...s.audit],
   };

@@ -3,7 +3,7 @@ import { bootHeadline, bootOf, gpuDetailBody } from './boot';
 import { services } from './guarantee';
 import { recommendations } from './recommendations';
 import { gpuActions, sectionsOf, unitOf, type AdminSnapshot, type AppView } from './render';
-import { spendWindow } from './spend';
+import { monthForecast, spendWindow } from './spend';
 import { CSS } from './styles';
 import {
   ago, appTitle, classState, count, duration, esc, form, hhmm, latest, mark, money, ms, plural, upOf, worst, ZONE, type Ctx, type Level, type Section,
@@ -158,6 +158,7 @@ function cards(ctx: Ctx, all: Map<string, Section>): Card[] {
   const today = days ? dayTotal(days.at(-1)!) : keySpend;
   const shortest = s.balances.filter(r => r.balanceUsd !== null).sort((a, b) => (a.hoursLeft ?? Infinity) - (b.hoursLeft ?? Infinity))[0];
   const spendLevel = worst([pageLevel(spendPage, all), pageLevel(keyPage, all)]);
+  const forecast = monthForecast(ctx);
   return [
     {
       page: svcPage, level: svcLevel,
@@ -176,6 +177,7 @@ function cards(ctx: Ctx, all: Map<string, Section>): Card[] {
       page: spendPage, level: spendLevel,
       verdict: `${money(today)} de GPU hoje`,
       facts: [days ? `ontem ${money(dayTotal(days.at(-2)!))} · 7 dias ${money(days.slice(1).reduce((a, d) => a + dayTotal(d), 0))}` : '',
+        forecast ? `projeção do mês ${money(forecast.projected.gpuEur)} + nuvem ${money(forecast.projected.cloudUsd, 'US$')}` : '',
         shortest ? `menor saldo ${shortest.provider} ${money(shortest.balanceUsd, unitOf(shortest))}${shortest.hoursLeft !== null ? ` (~${count(Math.round(shortest.hoursLeft))} h)` : ''}` : ''].filter(Boolean).join(' · '),
       notes: [...notesOf(spendPage), ...notesOf(keyPage)],
     },

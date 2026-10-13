@@ -2,6 +2,7 @@ import type { AppProfile } from '../deployments/apps';
 import type { DeploymentView } from '../deployments/types';
 import { activeWindow, DEFAULT_WARM_TIME_ZONE, localClock } from '../deployments/autoscale';
 import type { AdminSnapshot, AppView } from './render';
+import { FALLBACK_PROBE_CALLER } from '../telemetry/fallback-probe';
 
 export type Level = 'ok' | 'warn' | 'bad';
 
@@ -81,6 +82,7 @@ export const stageName = (stage: string) => STAGE[stage] ?? stage;
 export const KNOWN_APPS: Record<string, { name: string; description: string }> = {
   parle: { name: 'Parle', description: 'Jogo de português: o aluno conversa por voz com os personagens (fala → texto, conversa, texto → fala).' },
   babelcast: { name: 'Babelcast', description: 'Tradução simultânea: transcreve a fala ao vivo e a traduz em texto e voz.' },
+  [FALLBACK_PROBE_CALLER]: { name: 'Teste das reservas', description: 'O pedido mínimo que o gateway faz a cada reserva na nuvem a cada 15 min.' },
 };
 
 export const appTitle = (id: string, profile: AppProfile | null | undefined) => ({

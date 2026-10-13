@@ -116,7 +116,7 @@ function keyRules(s: AdminSnapshot): Recommendation[] {
   return out;
 }
 
-function serviceRules(s: AdminSnapshot): Recommendation[] {
+function serviceRules(s: AdminSnapshot, now: number): Recommendation[] {
   const out: Recommendation[] = [];
   for (const r of s.reserves.links.filter(r => !r.ok)) {
     out.push({
@@ -138,6 +138,7 @@ function serviceRules(s: AdminSnapshot): Recommendation[] {
       action: { text: `recarregar no painel do ${b.provider}` },
     });
   }
+  out.push(...monthPaceRules(s, now));
   const t = s.traffic;
   if (t) {
     const p50 = (key: string) => t.stages.find(l => l.key === key)?.p50Ms ?? null;
@@ -184,6 +185,25 @@ function serviceRules(s: AdminSnapshot): Recommendation[] {
     }
   }
   return out;
+}
+
+const PACE_MIN_ELAPSED = 0.1;
+
+function monthPaceRules(s: AdminSnapshot, now: number): Recommendation[] {
+  const at = new Date(now);
+  const start = Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1);
+  const elapsed = (now - start) / (Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 1) - start);
+  if (elapsed < PACE_MIN_ELAPSED) return [];
+  return s.balances.filter(b => b.monthEur !== null && b.monthCapEur && b.monthEur / elapsed > b.monthCapEur).map((b) => {
+    const pace = b.monthEur! / elapsed;
+    return {
+      id: `month-pace:${b.provider}`, level: 'warn' as Level, title: `${b.provider}: no ritmo atual o mês fecha acima do teto`,
+      saw: `${money(b.monthEur)} gastos em ${pct(elapsed)} do mês · ritmo leva a ${money(pace)} · teto ${money(b.monthCapEur)}`,
+      why: 'Ao bater o teto mensal os deployments com orçamento param de criar réplicas e o serviço fica só na nuvem até o mês virar.',
+      impact: { amount: pace - b.monthCapEur!, unit: '€' as const, text: `~${money(pace - b.monthCapEur!)} acima do teto no fim do mês` },
+      action: { go: '/admin/gastos', label: 'Ver os gastos do mês' },
+    };
+  });
 }
 
 function appRules(s: AdminSnapshot): Recommendation[] {
@@ -239,7 +259,7 @@ const IMPACT_RANK = { '€': 0, 'US$': 1, none: 2 };
 
 export function recommendations(ctx: Ctx): Recommendation[] {
   const dismissed = ctx.s.dismissed ?? {};
-  return [...gpuRules(ctx.s, ctx.now), ...keyRules(ctx.s), ...serviceRules(ctx.s), ...appRules(ctx.s), ...trendRules(ctx)]
+  return [...gpuRules(ctx.s, ctx.now), ...keyRules(ctx.s), ...serviceRules(ctx.s, ctx.now), ...appRules(ctx.s), ...trendRules(ctx)]
     .filter(r => !(dismissed[r.id] && dismissed[r.id]! > ctx.now))
     .sort((a, b) => IMPACT_RANK[a.impact?.unit ?? 'none'] - IMPACT_RANK[b.impact?.unit ?? 'none'] || (b.impact?.amount ?? 0) - (a.impact?.amount ?? 0) || RANK[a.level] - RANK[b.level]);
 }

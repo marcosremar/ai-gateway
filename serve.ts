@@ -34,7 +34,7 @@ import { createS2SRoute } from './src/s2s/route';
 import { streamCuts } from './src/telemetry/stream-cuts';
 import { createS2SAccess } from './src/s2s/access';
 import { appStagesView, minimalHealth, realtimeHealth } from './src/gateway/proxy/health-view';
-import { SpendLedger } from './src/deployments/spend-ledger';
+import { NO_APP, SpendLedger } from './src/deployments/spend-ledger';
 import { llmTokensOf } from './src/accounts/usage';
 import { loopbackStages } from './src/s2s/loopback-stages';
 import { appForCall, appStageModels } from './src/s2s/app-stage-models';
@@ -447,10 +447,15 @@ const telemetry = telemetryFromEnv(process.env, {
 });
 if (telemetry) {
   await telemetry.start();
-  setGatewayTelemetrySink((event, caller) => telemetry.ingest.ingestOwn(event, caller && appOfUser(caller)));
   latency = () => latencyReport(telemetry.store.rows(), Date.now());
   log.log({ rows: telemetry.store.size }, 'Telemetry enabled');
 }
+
+setGatewayTelemetrySink((event, caller) => {
+  const app = caller && appOfUser(caller);
+  if (event.event === 'usage.cost') spendLedger.cloud(app || NO_APP, Number(event.attrs?.costUsd));
+  telemetry?.ingest.ingestOwn(event, app);
+});
 
 const deepHealth = {
   authorize: isAdminToken,
