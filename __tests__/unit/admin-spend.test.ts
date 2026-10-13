@@ -6,6 +6,7 @@ import { SpendLedger, parisDay, parisMidnightAfter } from '../../src/deployments
 import type { DeploymentView } from '../../src/deployments/types';
 import { recommendations, scopeToApp, type AdminSnapshot } from '../../src/admin-page';
 import { PAGES, renderStatus } from '../../src/admin-page/pages';
+import { monthForecast } from '../../src/admin-page/spend';
 import { demoSnapshot } from '../__fixtures__/admin-snapshot';
 
 const dirs: string[] = [];
@@ -94,6 +95,15 @@ describe('spend ledger', () => {
     expect(third.ledger.dismissed()).toEqual({});
   });
 
+  it('adds the cloud cost the upstream reported to the app of the key, and ignores nonsense', async () => {
+    const { ledger } = await ledgerAt('2026-10-13T10:00:00Z', []);
+    ledger.cloud('parle', 0.0012);
+    ledger.cloud('parle', 0.0008);
+    ledger.cloud('parle', Number.NaN);
+    ledger.cloud('parle', -1);
+    expect(at(ledger, '2026-10-13', 'parle')).toMatchObject({ cloudUsd: 0.002, requests: 0 });
+  });
+
   it('starts empty when the file is missing and refuses a corrupt one without backup', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'spend-'));
     dirs.push(dir);
@@ -113,13 +123,15 @@ describe('spend chart', () => {
   it('draws 30 days of stacked bars per app with names, a total per day and today / 7 / 30-day sums', () => {
     const html = render(demoSnapshot(NOW, 'warn'));
     const spend = section(html, 'gastos');
-    expect(spend).toContain('<h2>Gasto de GPU por dia</h2>');
+    expect(spend).toContain('<h2>Gasto por dia</h2>');
     expect(spend.match(/<g><title>/g)).toHaveLength(30);
     expect(spend).toMatch(/<title>13\/10: total GPU [^<]*— Parle [^<]*; Babelcast /);
     expect(spend).toContain('<i class="c0"></i>Parle');
     for (const col of ['Hoje', '7 dias', '30 dias']) expect(spend).toContain(`>${col}<`);
-    expect(spend).toContain('sem valor em US$');
-    expect(spend).not.toContain('US$ ');
+    expect(spend).toMatch(/€\s[\d,]+<small>nuvem US\$\s[\d,]+ · [\d.]+ pedidos<\/small>/);
+    expect(spend).toContain('usage.cost');
+    expect(spend).toContain('Mês até agora');
+    expect(spend).toContain('Projeção até 31/10');
     expect(html.indexOf('id="recomendacoes"')).toBeLessThan(html.indexOf('id="trafego"'));
     expect(html).toContain('href="#gastos"');
   });
@@ -138,6 +150,36 @@ describe('spend chart', () => {
     expect(spend).toContain('Parle');
     expect(spend).not.toMatch(/babel/i);
     expect(html).not.toMatch(/babel/i);
+  });
+});
+
+describe('month forecast', () => {
+  const day = (d: string, gpuEur: number, cloudUsd = 0) => ({ day: d, apps: { parle: { gpuEur, requests: 1, tokens: 0, cloudUsd } } });
+  const ctxAt = (now: string, days: ReturnType<typeof day>[], since = days[0]!.day) =>
+    ({ s: { ...demoSnapshot(NOW, 'ok'), spend: { since, days } }, now: Date.parse(now), csrf: 'c', app: null, view: null });
+
+  it('adds what was spent to what the same weekday cost in the last 4 weeks, for every day left in the month', () => {
+    const days = [];
+    for (let i = 1; i <= 30; i++) {
+      const d = `2026-09-${String(i).padStart(2, '0')}`;
+      const weekday = new Date(`${d}T12:00:00Z`).getUTCDay();
+      days.push(day(d, weekday >= 1 && weekday <= 4 ? 4 : 1, 0.5));
+    }
+    days.push(day('2026-10-01', 4, 0.5), day('2026-10-02', 0.5, 0.1));
+    const f = monthForecast(ctxAt('2026-10-02T09:00:00Z', days))!;
+    expect(f.month).toBe('2026-10');
+    expect(f.lastDay).toBe('2026-10-31');
+    expect(f.sofar).toEqual({ gpuEur: 4.5, cloudUsd: 0.6 });
+    const classDays = [...Array(31).keys()].map(i => new Date(Date.UTC(2026, 9, i + 1)).getUTCDay()).filter(w => w >= 1 && w <= 4).length;
+    expect(f.projected.gpuEur).toBeCloseTo(classDays * 4 + (31 - classDays) * 1, 6);
+    expect(f.projected.cloudUsd).toBeCloseTo(0.5 * 31, 6);
+    expect(f.basis).toBe('weekday');
+  });
+
+  it('projects only what was spent when there is no history, and nothing without a ledger', () => {
+    const f = monthForecast(ctxAt('2026-10-13T09:00:00Z', [day('2026-10-13', 2)]))!;
+    expect(f).toMatchObject({ sofar: { gpuEur: 2 }, projected: { gpuEur: 2 }, basis: 'none' });
+    expect(monthForecast({ ...ctxAt('2026-10-13T09:00:00Z', [day('2026-10-13', 2)]), s: { ...demoSnapshot(NOW, 'ok'), spend: null } })).toBeNull();
   });
 });
 
@@ -175,8 +217,9 @@ describe('recommendations', () => {
     s.gpus![0] = base.gpus![0]!;
     s.appBudgets = [{ ...base.appBudgets[1]!, requests: { ...base.appBudgets[1]!.requests, used: 1700 } }];
     s.traffic = { ...base.traffic!, stages: [{ key: 'tts', served: 40, failed: 0, fallbacks: 30, p50Ms: 600, p95Ms: 2400 }] };
+    s.balances = s.balances.map(b => (b.provider === 'scaleway' ? { ...b, monthEur: 150 } : b));
     expect(ids(s)).toEqual(expect.arrayContaining(['gpu-idle:babel-live', 'reserve-failed:stt:openrouter:openai/whisper-large-v3', 'keycap-near:parle-dev.agentes',
-      'app-degraded-gpu:parle', 'stage-p95:tts', 'stage-fallback:tts', 'app-budget:babelcast:pedidos']));
+      'app-degraded-gpu:parle', 'stage-p95:tts', 'stage-fallback:tts', 'app-budget:babelcast:pedidos', 'month-pace:scaleway']));
   });
 
   it('orders money first, by amount, then by risk', () => {

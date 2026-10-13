@@ -8,6 +8,13 @@ import OpenAI from 'openai';
 import type { ProviderId, LLMProvider, ChatRequest, ChatResponse } from '../types';
 import { GATEWAY_SDK_MAX_RETRIES, getOrCreateClient } from './client-cache';
 import { FINISH_MARKER, USAGE_MARKER } from './stream-markers';
+import { emitGatewayEvent } from '../../../../telemetry/emit';
+
+export function reportUpstreamCost(provider: string, model: string, usage: unknown): void {
+  const cost = (usage as { cost?: unknown } | null | undefined)?.cost;
+  if (typeof cost !== 'number' || !Number.isFinite(cost) || cost <= 0) return;
+  emitGatewayEvent('usage.cost', { attrs: { stage: 'chat', provider, model, costUsd: cost } });
+}
 
 export interface OpenAICompatLLMConfig {
   providerId: ProviderId;
@@ -86,6 +93,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       ...request.extraBody,
     }, { signal }) as OpenAI.ChatCompletion;
 
+    reportUpstreamCost(this.providerId, completion.model, completion.usage);
     return {
       content: completion.choices[0]?.message?.content || '',
       model: completion.model,
@@ -149,6 +157,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
         const reason = chunk.choices?.find((c) => c.finish_reason)?.finish_reason;
         if (reason) finishReason = reason;
         if (chunk.usage) {
+          reportUpstreamCost(this.providerId, chunk.model, chunk.usage);
           yield `${USAGE_MARKER}${JSON.stringify({
             prompt_tokens: chunk.usage.prompt_tokens,
             completion_tokens: chunk.usage.completion_tokens,

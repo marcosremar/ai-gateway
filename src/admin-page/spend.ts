@@ -4,6 +4,7 @@ import { appTitle, count, esc, money, table, type Ctx, type Section } from './ui
 const DAYS_SHOWN = 30;
 const COLORS = 6;
 const DAY_MS = 86_400_000;
+const WEEKS_FOR_FORECAST = 4;
 const shortDay = (day: string) => `${day.slice(8, 10)}/${day.slice(5, 7)}`;
 const sum = (days: Array<Record<string, SpendDay>>, app: string, field: keyof SpendDay) => days.reduce((a, d) => a + (d[app]?.[field] ?? 0), 0);
 
@@ -13,6 +14,42 @@ export function spendWindow(ctx: Ctx): Array<{ day: string; apps: Record<string,
     const day = parisDay(ctx.now - (DAYS_SHOWN - 1 - i) * DAY_MS);
     return { day, apps: byDay.get(day) ?? {} };
   });
+}
+
+interface Money { gpuEur: number; cloudUsd: number }
+export interface MonthForecast { month: string; lastDay: string; sofar: Money; projected: Money; basis: 'weekday' | 'recent' | 'none' }
+
+const zero = (): Money => ({ gpuEur: 0, cloudUsd: 0 });
+const totalOf = (apps: Record<string, SpendDay> | undefined): Money => Object.values(apps ?? {})
+  .reduce((a, e) => ({ gpuEur: a.gpuEur + e.gpuEur, cloudUsd: a.cloudUsd + (e.cloudUsd ?? 0) }), zero());
+const mean = (xs: Money[]): Money | null => (xs.length
+  ? { gpuEur: xs.reduce((a, x) => a + x.gpuEur, 0) / xs.length, cloudUsd: xs.reduce((a, x) => a + x.cloudUsd, 0) / xs.length } : null);
+const weekday = (day: string) => new Date(`${day}T12:00:00Z`).getUTCDay();
+const shift = (day: string, days: number) => new Date(Date.parse(`${day}T12:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+
+export function monthForecast(ctx: Ctx): MonthForecast | null {
+  const ledger = ctx.s.spend;
+  if (!ledger?.since) return null;
+  const byDay = new Map(ledger.days.map(d => [d.day, d.apps]));
+  const today = parisDay(ctx.now);
+  const month = today.slice(0, 7);
+  const [y, m] = month.split('-').map(Number) as [number, number];
+  const days = Array.from({ length: new Date(Date.UTC(y, m, 0)).getUTCDate() }, (_, i) => `${month}-${String(i + 1).padStart(2, '0')}`);
+  const known = (day: string) => day >= ledger.since! && day < today;
+  const recent = Array.from({ length: WEEKS_FOR_FORECAST * 7 }, (_, i) => shift(today, -1 - i)).filter(known);
+  const fallback = mean(recent.map(d => totalOf(byDay.get(d))));
+  const estimate = (day: string) => mean(recent.filter(d => weekday(d) === weekday(day)).map(d => totalOf(byDay.get(d)))) ?? fallback ?? zero();
+  const sofar = zero();
+  const projected = zero();
+  for (const day of days) {
+    const actual = day <= today && day >= ledger.since ? totalOf(byDay.get(day)) : null;
+    if (actual) { sofar.gpuEur += actual.gpuEur; sofar.cloudUsd += actual.cloudUsd; }
+    const guess = day < today && actual ? actual : estimate(day);
+    projected.gpuEur += day === today && actual ? Math.max(actual.gpuEur, guess.gpuEur) : guess.gpuEur;
+    projected.cloudUsd += day === today && actual ? Math.max(actual.cloudUsd, guess.cloudUsd) : guess.cloudUsd;
+  }
+  const basis = recent.some(d => weekday(d) === weekday(today)) ? 'weekday' : fallback ? 'recent' : 'none';
+  return { month, lastDay: days.at(-1)!, sofar, projected, basis };
 }
 
 function chart(days: ReturnType<typeof spendWindow>, apps: string[], names: Map<string, string>): string {
@@ -42,8 +79,18 @@ function chart(days: ReturnType<typeof spendWindow>, apps: string[], names: Map<
     + `<div class="legend">${legend}<span>€ de GPU · dia de Paris</span></div></div>`;
 }
 
+const BASIS_TEXT = { weekday: 'pela média do mesmo dia da semana nas últimas 4 semanas', recent: 'pela média dos últimos dias', none: 'sem histórico: só o que já foi gasto' };
+
+function forecastStats(f: MonthForecast): string {
+  const cell = (label: string, v: Money) => `<div><span>${esc(label)}</span><b>${money(v.gpuEur)}</b><small>GPU · nuvem ${money(v.cloudUsd, 'US$')}</small></div>`;
+  return `<div class="stats">${cell('Mês até agora', f.sofar)}${cell(`Projeção até ${shortDay(f.lastDay)}`, f.projected)}`
+    + `<div><span>Como projetamos</span><small>${esc(BASIS_TEXT[f.basis])}</small></div></div>`;
+}
+
+const cloudOf = (days: Array<Record<string, SpendDay>>, app: string) => sum(days, app, 'cloudUsd');
+
 export function spend(ctx: Ctx): Section {
-  const base = { id: 'gastos', title: 'Gasto de GPU por dia', actions: '', count: null };
+  const base = { id: 'gastos', title: 'Gasto por dia', actions: '', count: null };
   const ledger = ctx.s.spend;
   if (!ledger) return { ...base, level: 'ok', notes: [], meta: '', body: '<p class="empty">O registro diário de gastos está desligado neste gateway.</p>' };
   const days = spendWindow(ctx);
@@ -51,26 +98,28 @@ export function spend(ctx: Ctx): Section {
     .sort((a, b) => sum(days.map(d => d.apps), b, 'gpuEur') - sum(days.map(d => d.apps), a, 'gpuEur') || a.localeCompare(b));
   const names = new Map(ids.map(id => [id, appTitle(id, ctx.s.apps.find(a => a.id === id)?.profile).name]));
   const last = (n: number) => days.slice(-n).map(d => d.apps);
-  const rows = ids.map((id, c) => {
-    const today = last(1)[0]![id];
-    return [
-      `<b><i class="sw c${c % COLORS}"></i>${esc(names.get(id))}</b>${names.get(id) !== id ? `<small class="mono">${esc(id)}</small>` : ''}`,
-      `${money(today?.gpuEur ?? 0)}<small>${count(today?.requests ?? 0)} pedidos</small>`,
-      `${money(sum(last(7), id, 'gpuEur'))}<small>${count(sum(last(7), id, 'requests'))} pedidos</small>`,
-      `${money(sum(last(30), id, 'gpuEur'))}<small>${count(sum(last(30), id, 'requests'))} pedidos</small>`,
-      `${count(sum(last(30), id, 'tokens'))}<small>tokens em 30 d</small>`,
-    ];
-  });
+  const cell = (id: string, n: number) => {
+    const cloud = cloudOf(last(n), id);
+    return `${money(sum(last(n), id, 'gpuEur'))}<small>${cloud ? `nuvem ${money(cloud, 'US$')} · ` : ''}${count(sum(last(n), id, 'requests'))} pedidos</small>`;
+  };
+  const rows = ids.map((id, c) => [
+    `<b><i class="sw c${c % COLORS}"></i>${esc(names.get(id))}</b>${names.get(id) !== id ? `<small class="mono">${esc(id)}</small>` : ''}`,
+    cell(id, 1), cell(id, 7), cell(id, 30),
+    `${count(sum(last(30), id, 'tokens'))}<small>tokens em 30 d</small>`,
+  ]);
   const total = (n: number) => ids.reduce((a, id) => a + sum(last(n), id, 'gpuEur'), 0);
+  const cloudTotal = ids.reduce((a, id) => a + cloudOf(last(30), id), 0);
   const since = ledger.since ? `registro desde ${shortDay(ledger.since)}` : 'registro começa no próximo minuto';
+  const forecast = monthForecast(ctx);
   return {
     ...base, level: 'ok', badge: `<span class="pill info">${money(total(30))} em 30 dias</span>`,
     notes: [],
-    meta: `GPU hoje ${money(total(1))} · 7 d ${money(total(7))} · 30 d ${money(total(30))} · ${since}`,
-    body: chart(days, ids, names)
+    meta: `GPU hoje ${money(total(1))} · 7 d ${money(total(7))} · 30 d ${money(total(30))} · nuvem 30 d ${money(cloudTotal, 'US$')} · ${since}`,
+    body: (forecast ? forecastStats(forecast) : '') + chart(days, ids, names)
       + table([{ label: 'App' }, { label: 'Hoje', num: true }, { label: '7 dias', num: true }, { label: '30 dias', num: true }, { label: 'Tokens', num: true }], rows,
         'Nenhum gasto registrado ainda.')
-      + '<p class="foot-note">GPU em €: tempo ligado de cada réplica × preço/h, atribuído ao app dono do deployment. Nuvem (OpenRouter): o gateway não recebe o custo por pedido, '
-      + 'então contamos pedidos e tokens por app, sem valor em US$. Dias antes do registro ficam vazios.</p>',
+      + '<p class="foot-note">GPU em €: tempo ligado de cada réplica × preço/h, atribuído ao app dono do deployment. Nuvem em US$: o custo que a OpenRouter '
+      + 'informa em cada resposta de conversa (usage.cost), atribuído ao app da chave; fala → texto e texto → fala na nuvem ainda não trazem custo. '
+      + 'Dias antes do registro ficam vazios.</p>',
   };
 }

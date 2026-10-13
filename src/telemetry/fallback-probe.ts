@@ -9,6 +9,7 @@
 
 import type { LLMProvider, STTProvider, TTSProvider } from '../gateway/providers/cloud/types';
 import { failureCode, redactSecrets, type RouteTarget } from '../gateway/proxy/provider-routing';
+import { withLogContext } from '../logger';
 
 type Stage = 'chat' | 'stt' | 'tts';
 type Env = Record<string, string | undefined>;
@@ -16,6 +17,7 @@ type Env = Record<string, string | undefined>;
 export const DEFAULT_FALLBACK_PROBE_MINUTES = 15;
 export const DEFAULT_FALLBACK_PROBE_DELAY_MS = 30_000;
 export const FALLBACK_PROBE_TIMEOUT_MS = 20_000;
+export const FALLBACK_PROBE_CALLER = 'teste-das-reservas';
 
 export interface FallbackLink {
   stage: Stage;
@@ -140,7 +142,8 @@ export function createFallbackProbe(opts: {
 
   async function check(): Promise<FallbackProbeResult[]> {
     const before = new Map(results.map(r => [`${r.stage}|${r.target}|${r.voice ?? ''}`, r.ok]));
-    results = await Promise.all(opts.links().map(link => probeLink(link, { timeoutMs, env: opts.env, ...(opts.now ? { now: opts.now } : {}) })));
+    results = await withLogContext({ userId: FALLBACK_PROBE_CALLER }, () =>
+      Promise.all(opts.links().map(link => probeLink(link, { timeoutMs, env: opts.env, ...(opts.now ? { now: opts.now } : {}) }))));
     for (const r of results) {
       if (r.ok && before.get(`${r.stage}|${r.target}|${r.voice ?? ''}`) === false) opts.log?.('fallback probe recovered', { stage: r.stage, target: r.target });
     }

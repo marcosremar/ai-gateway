@@ -6,7 +6,7 @@ export const SPEND_DAYS_KEPT = 90;
 export const DISMISS_MS = 7 * 86_400_000;
 export const NO_APP = '(sem app)';
 
-export interface SpendDay { gpuEur: number; requests: number; tokens: number }
+export interface SpendDay { gpuEur: number; requests: number; tokens: number; cloudUsd?: number }
 
 export interface SpendLedgerView {
   since: string | null;
@@ -66,6 +66,12 @@ export class SpendLedger {
     e.tokens += Math.max(0, Math.round(tokens));
   }
 
+  cloud(app: string, usd: number): void {
+    if (!Number.isFinite(usd) || usd <= 0) return;
+    const e = this.entry(parisDay(this.now()), app);
+    e.cloudUsd = round((e.cloudUsd ?? 0) + usd);
+  }
+
   private addGpu(app: string, eurPerHour: number, from: number, to: number): void {
     for (let start = from; start < to;) {
       const end = Math.min(to, parisMidnightAfter(start));
@@ -112,7 +118,9 @@ export class SpendLedger {
 
   view(): SpendLedgerView {
     const days = Object.keys(this.state.days).sort().map(day => ({
-      day, apps: Object.fromEntries(Object.entries(this.state.days[day]!).map(([app, e]) => [app, { ...e, gpuEur: Math.round(e.gpuEur * 10_000) / 10_000 }])),
+      day, apps: Object.fromEntries(Object.entries(this.state.days[day]!).map(([app, e]) => [app, {
+        ...e, gpuEur: Math.round(e.gpuEur * 10_000) / 10_000, ...(e.cloudUsd ? { cloudUsd: Math.round(e.cloudUsd * 10_000) / 10_000 } : {}),
+      }])),
     }));
     return { since: this.state.since, days };
   }
