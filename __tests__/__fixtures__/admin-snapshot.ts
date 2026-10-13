@@ -9,16 +9,16 @@ import { parisDay, type SpendLedgerView } from '../../src/deployments/spend-ledg
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
 
-const replica = (id: string, ageMinutes: number, pricePerHour: number): ReplicaView => ({
-  id, phase: 'ready', ip: '10.0.0.1', providerState: 'running', zone: 'fr-par-2', machineType: 'L4-1-24G', pricePerHour,
+const replica = (id: string, ageMinutes: number, pricePerHour: number, extra: Partial<ReplicaView> = {}): ReplicaView => ({
+  id, phase: 'ready', ip: '10.0.0.1', providerState: 'running', provider: 'scaleway', zone: 'fr-par-2', machineType: 'L4-1-24G', pricePerHour,
   ageSeconds: ageMinutes * 60, inflight: 0, busy: false, draining: false, stagesOut: [], rttMs: 12, rttBaselineMs: 11, udp: 'ok',
-  hostEndsInMinutes: null, expiresInMinutes: null,
+  hostEndsInMinutes: null, expiresInMinutes: null, ...extra,
 });
 
 const deployment = (name: string, replicas: ReplicaView[], schedule: Array<{ days: number[]; start: string; end: string }>, extra: Partial<DeploymentView> = {}, spec: Record<string, unknown> = {}) => ({
   name, status: replicas.length ? 'ready' : 'scaled-to-zero', desiredReplicas: replicas.length, replicas, inflight: 0, waiting: 0,
   lastRequestAt: null, lastError: null, invokeUrl: '', app: 'parle', appImage: null, publicIp: null, lastPlacement: null, warm: null,
-  realtime: null, sessions: 0, hold: null, warnings: [],
+  realtime: null, sessions: 0, hold: null, pinned: null, warnings: [],
   autoscale: { desired: replicas.length, pressureWant: 0, reason: 'base', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
   spec: { minReplicas: 0, idleMinutes: 15, maxEurPerHour: 0.9, warmSchedule: schedule.map(s => ({ ...s, minReplicas: 1, timeZone: 'Europe/Paris' })), ...spec },
   ...extra,
@@ -81,7 +81,7 @@ function chain(gpu: string | null, gpuState: LinkState, cloud: string): ChainRep
 export function demoChains(state: DemoState): Record<string, Record<string, ChainReport>> {
   return {
     stt: { 'parle-stt': chain('speech-stack', 'ready', CLOUD['parle-stt']!) },
-    chat: { 'parle-chat': chain('speech-stack', 'ready', CLOUD['parle-chat']!), 'babel-chat': chain(null, 'ready', CLOUD['babel-chat']!) },
+    chat: { 'parle-chat': chain('speech-stack', 'ready', CLOUD['parle-chat']!), 'babel-chat': chain('babelcast-3090', 'ready', CLOUD['babel-chat']!) },
     tts: { 'parle-tts': chain('speech-stack', state === 'bad' ? 'circuit_open' : 'ready', CLOUD['parle-tts']!), 'babel-tts': chain('babel-live', 'ready', CLOUD['babel-tts']!) },
   };
 }
@@ -170,6 +170,9 @@ function warnSnapshot(now: number): AdminSnapshot {
       deployment('parle-bridge-shadow', [], []),
       deployment('speech-stack-test', [], [], { warm: null }),
       deployment('babel-live', [replica('scw-9z8y', 40, 0.79)], [], { app: 'babelcast', lastRequestAt: iso(now, 50) }),
+      deployment('babelcast-3090', [replica('31544017', 180, 0.181, { provider: 'vast', zone: 'Lyon, FR', machineType: 'RTX 3090', ip: null })], [], {
+        app: 'babelcast', lastRequestAt: iso(now, 4), pinned: { idleMinutes: 60, parked: false },
+      }, { provider: 'vast', machineType: 'RTX 3090', minReplicas: 1, idleMinutes: 60, maxEurPerHour: 0.19, testFor: 'babelcast-speech' }),
     ],
     gpuSpend: {
       spentEur: { 'key-0f3a9c11d2e4': 1.2, 'env-parle': 2.65 },
@@ -188,7 +191,7 @@ function warnSnapshot(now: number): AdminSnapshot {
     keys: [
       key('env-marcos', 'marcos', 'admin', iso(now, 2), { autoWake: true, canStartGpu: true, gpuDailyEur: null }),
       key('env-parle', 'parle', 'client', iso(now, 1), { autoWake: true, canStartGpu: true, gpuDailyEur: null }, 'producao'),
-      key('key-0f3a9c11d2e4', 'parle-dev', 'client', iso(now, 50), { countsAsUse: false, wakeDeployments: ['speech-stack-test'], gpuDailyEur: 3 }, 'agentes'),
+      key('key-0f3a9c11d2e4', 'parle-dev', 'client', iso(now, 50), { countsAsUse: false, wakeDeployments: ['speech-stack-test', 'babelcast-3090'], gpuDailyEur: 3 }, 'agentes'),
       key('key-88b0aa31c7f0', 'babelcast', 'client', iso(now, 8), { neverWake: true }, 'legendas-ao-vivo'),
     ],
     apps: [

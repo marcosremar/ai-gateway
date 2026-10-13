@@ -623,6 +623,12 @@ createAdminPage({
     if (actor.keyId) await deployments?.clientGpu.forget(actor.keyId, name);
     await controller.park(name);
   },
+  pin: async (name, on) => {
+    const spec = controller?.specOf(name);
+    if (!spec) throw new Error(`deployment '${name}' não existe`);
+    if (spec.provider !== 'vast') throw new Error('só uma GPU da Vast pode ser fixada pelo painel');
+    await controller!.put(name, { minReplicas: on ? 1 : 0 });
+  },
   probe: () => fallbackProbe.check(),
   secrets: () => secretValues(process.env),
   audit: (entry) => keyAudit.record(entry),
