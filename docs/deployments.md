@@ -90,53 +90,51 @@ reconciler off. Fields the declaration does not hold (`paused`, sizing and limit
 declares neither `env` nor `generatedSecrets`, …) are left as an operator set them; declared fields changed by hand
 are put back. `envByMachineType` is merged per key: the declared keys are put back, the stored ones stay.
 
-### `parle-speech` (one GPU for STT + LLM + TTS)
+### `parle-speech` (one GPU for STT + LLM + TTS, Vast in the EU only)
 
-**Since 14/10/2026 (owner: GPUs on Vast only, Scaleway disabled for GPUs, `SCALEWAY_GPU_OFF`)** `parle-speech` and
-`parle-speech-test` are one RTX 5090 on Vast (≤ €0.85/h, `euOnly`, `placements: []`, `idleAction: delete`) from the
-public `ghcr.io/marcosremar/speech-stack:<tag>`; `SPEECH_IMAGE` no longer moves them; a stored `files` set reaches the
-host by signed link. The paragraph below is the Scaleway layout it replaced.
-
-`src/deployments/declared/parle-speech.json`: the `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>` image
-(`docker/speech-stack`: Whisper + Qwen LLM + Qwen3-TTS in one container). It lives in the gateway's own Scaleway
-registry, which the machines pull from with `SCW_REGISTRY_SECRET_KEY` (a registry read-only IAM key; the gateway's
-Scaleway API key is never sent to a machine, audit 2026-10-09 #7): no `registryAuth` in the declaration, but without
-that variable every create fails with an error naming it. The declaration owns five things and patches only them over the
-registered spec: the image (`SPEECH_IMAGE` = a tag of that repository or a full reference; default
-`20261009-0213`), `placements` (L40S fr-par-1, then one RTX 5090 on Vast from `ghcr.io/marcosremar/speech-stack` at
-the same tag: `SPEECH_IMAGE` does not move that copy; no L4), `scaling.mode` `fast`, `realtime: {}` (the edge
-sidecar, [realtime-edge.md](realtime-edge.md)) and env per machine type (the edge's `RT_MAX_SESSIONS`: L4 2, L40S 4;
-the whole RTX 5090 set; merged into the stored `envByMachineType`). A registered spec with `files` reaches the Vast
-place through signed links on the gateway (§ `files` on a Vast placement; it needs the gateway's public URL, else the
-place is skipped with the reason in `warnings`). Port,
-machine type, zone, replicas, idle and boot times, € and hour limits, volume, `env` and `files` (the voice catalog)
-stay exactly as registered. On a gateway where `parle-speech` does not exist it is created from the `speech-stack`
-profile with the declared image; that deployment has no `files`, so the voice catalog still has to be sent with a
-`PUT`.
+`src/deployments/declared/parle-speech.json`. Owner, 14/10/2026: «usa máquinas do vast.ai» — the Scaleway key lost
+`compute_servers create` on 13/10 and Scaleway is disabled for GPUs (`SCALEWAY_GPU_OFF`) — and the students' audio
+never leaves the EU. So the deployment is **Vast only** (`provider: "vast"`, `placements: []`) with `euOnly: true` and a ladder of
+`candidates`, each at most €0.85/h: an **RTX 5090**, else an **L40S**, else an **RTX 4090** (equal caps, so the
+ranking keeps this order; the backend then rents the best-ranked EU host of that type). The image is the public copy
+`ghcr.io/marcosremar/speech-stack:<tag>` (no registry credential, no `SPEECH_IMAGE` override: a private registry
+would be refused on Vast), `minCuda: 13` (the image is CUDA 13), `idleAction: "delete"` (Vast cannot park).
+`envByMachineType` sizes each card (5090 and L40S: `STT_BATCH 8`, `LLM_PARALLEL 16`, `RT_MAX_SESSIONS 4`; the 24 GB
+4090: the L4 settings, `STT_BATCH 4`, `LLM_PARALLEL 8` × 2048, `TTS_STAGE0_MB 7400`, `RT_MAX_SESSIONS 2`), and the
+declaration sends `env: {}`: the explicit `env` set by hand on 08/10 (L40S sizes) won over `envByMachineType` on every
+card and would not fit a 24 GB one. Class window Mon–Thu 17:30–20:30 Paris: **3 replicas warm** (`maxReplicas 3`;
+`DEPLOYMENTS_MAX_REPLICAS` is 4 and `babelcast-3090` may hold one; `reserveQuota: null`, it was a Scaleway quota
+reservation), €450/month (the TTS's €150 moved here). Since 14/10 it also serves the cast's **cloned voices** for the `parle-tts` alias (the parle routes name
+it; `parle-qwen-tts` is paused): the gateway reads the image's voice list at `/v1/voices` (docs/api/http.md). The
+voice catalog is the registered `files` (`voices.json` + audio), served to the Vast host by signed links on the
+gateway (§ `files` on a Vast placement); to change a voice, `PUT` the `files` again (admin). Port, replicas, idle and
+boot times, hour limits and volume stay as registered. On a gateway where `parle-speech` does not exist it is created
+from the `speech-stack` profile and then patched; that deployment has no `files`, so the voice catalog still has to be
+sent with a `PUT`.
 
 Both `parle-speech` and `parle-speech-test` belong to the app `parle` (`"app"` in the declaration; set on an existing
 deployment that has no app yet), so a `parle` client key may `start` them (docs/api/http.md § Deployments).
 
-### `parle-speech-test` (the cheap GPU for tests)
+### `parle-speech-test` (the GPU for tests)
 
-`src/deployments/declared/parle-speech-test.json` (10/10/2026): the same image as `parle-speech` on the cheapest GPU
-that runs the speech stack — one Scaleway **L4-1-24G** in fr-par-2 (€0.79/h; the stack was measured there on
-2026-10-04 with `STT_BATCH 4` / `LLM_PARALLEL 8` beside the TTS, and `LLM_SLOT_CTX` stays at its 2048 default), then
-one **RTX 5090** on Vast (≤ €0.85/h). Never an L40S (€1.47/h) or an H100. `maxReplicas 1`, `minReplicas 0`, no warm
-schedule, `idleMinutes 10`, `idleAction: "delete"` (a parked L4 would keep holding one of the account's two L4 that
-the class TTS reserves Mon–Thu 17:30–20:30; during that window the L4 is refused and the copy goes to Vast),
-€40/month ceiling. `testFor: "parle-speech"` makes it the test copy: a request is **never** what starts it; a capped
-client key that calls `POST /v1/deployments/parle-speech/start` gets this copy instead; and while it is ready and
-`parle-speech` is not, the `parle-*` aliases are served by it (a key with `autoWake` also wakes `parle-speech`).
-When it is created it takes the voice catalog (`files`) of `parle-speech`. Cold start ≈ 8–9 min on the L4 (create,
-pull ~57 GB, load); on Vast it depends on the host's bandwidth (not measured with this image) — start it ~10 min
-before the test.
+`src/deployments/declared/parle-speech-test.json`: the same image, the same Vast ladder in the EU (`euOnly`, 5090 →
+L40S → 4090, ≤ €0.85/h) and the same `envByMachineType` as `parle-speech`, so a test measures the class
+configuration. `maxReplicas 1`, `minReplicas 0`, no warm schedule, `idleMinutes 10`, `idleAction: "delete"`, €40/month
+ceiling. `testFor: "parle-speech"` makes it the test copy: a request is **never** what starts it; a capped client key
+that calls `POST /v1/deployments/parle-speech/start` gets this copy instead; and while it is ready and `parle-speech`
+is not, the `parle-*` aliases are served by it (a key with `autoWake` also wakes `parle-speech`). It follows the voice
+catalog (`files`) of `parle-speech`: a catalog re-registered there reaches the copy at the next reconcile. Start it
+~15 min before a test (a Vast host pulls the ~57 GB image from ghcr).
+
+`parle-qwen-tts` (`declared/parle-qwen-tts.json`) is **paused** since 14/10/2026: its replicas were Scaleway L4s; the
+declaration puts `paused` back if the parle backend re-registers it.
 
 One-GPU mode: the parle TTS entry names `parle-qwen-tts` with `"oneGpuDeployment": "parle-speech"` (the app's own
 routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` is not registered
 and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register
 `parle-qwen-tts` (a registered `deployment` always wins); to go back to one GPU, delete it (pausing keeps it
-registered, so it would stay the target).
+registered, so it would stay the target). Since 14/10/2026 the parle routes name `parle-speech` for `parle-tts`
+directly.
 
 ### `babelcast-3090` (the pinned Vast GPU of babelcast and of the agents' tests, 13/10/2026)
 
@@ -616,13 +614,14 @@ is above the floor again.
   container (a public base image such as `vllm/vllm-omni:v0.28.0`) and `bootScript` runs in it. Without a
   `bootScript` the spec's `entrypoint` + `args` are run there instead (after loading `/srv/aigw/app.env`), so an
   image-mode spec needs its start command declared; the image's own `CMD` is not run.
-  `files`, `exposure` and `idleAction: "stop"` are refused for Vast (no user_data service, no reserved IP); on a Vast
-  *placement* `files` are served by the gateway through signed links (§ `files` on a Vast placement).
+  `exposure` and `idleAction: "stop"` are refused for Vast (no reserved IP, no power-off); `files` are served by the
+  gateway through signed links (§ `files` on a Vast placement), as Vast has no user_data service.
   Vast accepts 32 KB of env per instance and the boot script travels there base64 twice: a `bootScript` above
   ~14 KB is refused at PUT (download large payloads at boot). A private image needs `registryAuth` in the spec
   (sent as Vast `image_login`; never filled from the provider's own key).
-- **Supported on Vast**: invoke, capacity, `realtime` (below), `fileUrls` (below), `registryAuth`, `candidates`,
-  the RTT gate, host-end handover. **Not supported**: `files`, `exposure`, `idleAction: "stop"` (a `park` deletes the
+- **Supported on Vast**: invoke, capacity, `realtime` (below), `fileUrls` (below), `files` (by signed link),
+  `registryAuth`, `candidates`, `euOnly`, the RTT gate, host-end handover. **Not supported**: `exposure`,
+  `idleAction: "stop"` (a `park` deletes the
   instance and the next call pays a full boot), a boot log through the gateway, a reserved address (the replica's
   address changes with every rental).
 - **`fileUrls`** — files the replica downloads at boot, for what `files` carries on Scaleway (the speech stack's voice
@@ -782,9 +781,10 @@ bytes, and the replica downloads and checks it like any other `fileUrls` entry b
   deployment after `exp`: it already has those files. It cannot sign for another deployment.
 - Without a public URL the placement is skipped as before, with `files are not supported on vast (no user_data
   service)` in `warnings` and `lastPlacement`.
-- **What remains**: a spec whose *primary* provider is Vast, or with a Vast `candidate`, is still refused at PUT when
-  it has `files` (`checkVastSpec` knows nothing of the gateway's URL): use `fileUrls` there. The files are read from
-  the stored spec at each request (≤ 8 MB of base64 parsed per download, at boot only).
+- Since 14/10/2026 the same holds for a spec whose *primary* provider is Vast, or with a Vast `candidate`: `files`
+  are accepted at PUT and turned into signed links at each create; without a public URL that place is skipped with
+  the reason. The files are read from the stored spec at each request (≤ 8 MB of base64 parsed per download, at boot
+  only).
 
 ### A class at a known time: warm capacity on Vast
 

@@ -56,9 +56,13 @@ const PRODUCTION = {
 const OUTSIDE_CLASS = Date.parse('2026-10-11T12:00:00Z');
 const CLASS_WINDOW = { days: [1, 2, 3, 4], start: '17:30', end: '20:30', timeZone: 'Europe/Paris' };
 const DECLARED_EXTRA = {
-  entrypoint: 'bash', args: ['/opt/s2s/start.sh'], coldStartWaitSeconds: 240,
-  warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }],
+  entrypoint: 'bash', args: ['/opt/s2s/start.sh'], coldStartWaitSeconds: 240, minCuda: 13, maxRttExcessMs: 20, maxReplicas: 3, env: {},
+  warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 3 }],
 };
+/** The class ladder, all on Vast at ≤ €0.85/h on EU hosts (owner, 14/10/2026): equal caps keep this order. */
+const LADDER = ['RTX 5090', 'L40S', 'RTX 4090'];
+const CANDIDATES = LADDER.map(machineType => ({ provider: 'vast', machineType, maxEurPerHour: 0.85 }));
+const DECLARED_ENV = speech.spec.envByMachineType as Record<string, Record<string, string>>;
 const GHCR_IMAGE = 'ghcr.io/marcosremar/speech-stack:20261011-0200';
 const ON_VAST = { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85, euOnly: true, placements: [], idleAction: 'delete' };
 
@@ -85,10 +89,13 @@ describe('declared parle-speech spec', () => {
     expect(speech.registryAuth).toBeUndefined();
     expect(speech.generatedSecrets).toBeUndefined();
     expect(speech.spec).toEqual({
-      ...DECLARED_EXTRA, ...ON_VAST, reserveQuota: null,
-      realtime: {}, scaling: { ...profile.scaling, budget: { eurPerMonth: 300 } },
-      envByMachineType: { 'RTX 5090': profile.envByMachineType!['RTX 5090'] },
+      ...DECLARED_EXTRA, ...ON_VAST, reserveQuota: null, candidates: CANDIDATES,
+      realtime: {}, scaling: { ...profile.scaling, budget: { eurPerMonth: 450 } },
+      envByMachineType: DECLARED_ENV,
     });
+    expect(Object.keys(DECLARED_ENV)).toEqual(LADDER);
+    expect(DECLARED_ENV['RTX 5090']).toEqual(profile.envByMachineType!['RTX 5090']);
+    expect(DECLARED_ENV['RTX 4090']).toMatchObject({ STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '2' });
     expect(JSON.stringify(speech)).not.toMatch(/GHCR_READ_TOKEN|ghp_|password"\s*:/);
   });
 
@@ -100,9 +107,9 @@ describe('declared parle-speech spec', () => {
     expect(declaredBody(noDefault, {}, null)).toEqual({ pending: expect.stringMatching(/SPEECH_IMAGE is not set/) });
   });
 
-  it('a declaration without env or generated secrets sends no env', () => {
+  it('parle-speech sends an empty env: the per-card env decides (a stored explicit env won over it on every card)', () => {
     const resolved = declaredBody(speech, {}, null) as { body: Record<string, unknown> };
-    expect(resolved.body).not.toHaveProperty('env');
+    expect(resolved.body.env).toEqual({});
     expect(resolved.body).not.toHaveProperty('registryAuth');
   });
 
@@ -115,11 +122,11 @@ describe('declared parle-speech spec', () => {
     expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null, image: GHCR_IMAGE });
     const { reserveQuota: _dropped, ...kept } = before;
     expect(c.specOf('parle-speech')).toEqual({
-      ...kept, ...DECLARED_EXTRA, ...ON_VAST,
+      ...kept, ...DECLARED_EXTRA, ...ON_VAST, candidates: CANDIDATES,
       image: GHCR_IMAGE,
-      scaling: { mode: 'fast', budget: { eurPerMonth: 300 } },
+      scaling: { mode: 'fast', budget: { eurPerMonth: 450 } },
       realtime: {},
-      envByMachineType: { ...PRODUCTION.envByMachineType, 'RTX 5090': profile.envByMachineType!['RTX 5090'] },
+      envByMachineType: { ...PRODUCTION.envByMachineType, ...DECLARED_ENV },
     });
     expect(placementsOf(c.specOf('parle-speech')!).map(p => p.provider)).toEqual(['vast']);
     expect(c.specOf('parle-speech')!.registryAuth).toBeUndefined();
@@ -133,18 +140,18 @@ describe('declared parle-speech spec', () => {
     await c.put('parle-speech', { ...PRODUCTION, scaling: { mode: 'economy', budget: { eurPerHour: 3 } } });
     const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
     await r.reconcile();
-    expect(c.specOf('parle-speech')!.scaling).toEqual({ mode: 'fast', budget: { eurPerHour: 3, eurPerMonth: 300 } });
+    expect(c.specOf('parle-speech')!.scaling).toEqual({ mode: 'fast', budget: { eurPerHour: 3, eurPerMonth: 450 } });
     expect((await r.reconcile())[0].state).toBe('in_sync');
   });
 
-  it('SPEECH_IMAGE does not move it, and the stored env, files and sizing stay', async () => {
+  it('SPEECH_IMAGE does not move it; the stored files and sizing stay, the explicit env is cleared', async () => {
     const { c } = await controller();
     await c.put('parle-speech', PRODUCTION);
     const r = new DeclaredDeploymentReconciler({ target: c, env: { SPEECH_IMAGE: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261101-0900' } });
     expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', image: GHCR_IMAGE });
     const spec = c.specOf('parle-speech')!;
     expect(spec.image).toBe(GHCR_IMAGE);
-    expect(spec).toMatchObject({ env: PRODUCTION.env, files: PRODUCTION.files, volumeGb: 120, maxHours: 12, idleMinutes: 1 });
+    expect(spec).toMatchObject({ env: {}, files: PRODUCTION.files, volumeGb: 120, maxHours: 12, idleMinutes: 1 });
   });
 
   it('fresh gateway: created from the speech-stack profile on Vast with the ghcr image, realtime on, no machine; then in sync', async () => {
@@ -189,6 +196,27 @@ describe('declared parle-speech spec', () => {
     expect(vastUnfit(vast.created[0].spec)).toBeNull();
   });
 
+  it('no RTX 5090 in the EU under the cap: the class replica is the next rung, an L40S, never Scaleway', async () => {
+    const scaleway = new FakeCloud();
+    const vast = Object.assign(new FakeCloud(() => OUTSIDE_CLASS, 'vast'), { marketPriced: true });
+    vast.failCreateFor = (s) => (s.machineType === 'RTX 5090' ? 'out_of_stock: no vast offer for RTX 5090 under €0.85/h near FR' : null);
+    const c = new DeploymentController({
+      backends: { scaleway, vast }, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(500), namespace: 'test', reconcileMs: 50,
+      now: () => OUTSIDE_CLASS, publicUrl: 'https://gw.example',
+    });
+    await c.init();
+    controllers.push(c);
+    await c.put('parle-speech', PRODUCTION);
+    await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
+    c.start();
+    c.wake('parle-speech');
+    const ofSpeech = () => vast.created.filter(x => x.spec.name === 'parle-speech');
+    await until(() => ofSpeech().length >= 1, 3000);
+    expect(ofSpeech()[0].spec).toMatchObject({ provider: 'vast', machineType: 'L40S', euOnly: true, minCuda: 13, env: {} });
+    expect(scaleway.created).toHaveLength(0);
+    expect(c.get('parle-speech')!.lastPlacement).toMatch(/^vast L40S .*skipped: vast RTX 5090: out_of_stock/);
+  });
+
   it('coldStartWaitSeconds 840 is put back to the gateway maximum of 240: no warning', async () => {
     const { c } = await controller();
     await c.put('parle-speech', PRODUCTION);
@@ -205,13 +233,11 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     scaling: { mode: 'balanced' }, bootScript: 'echo tts',
   };
 
-  it('every parle deployment has a monthly ceiling; the two class GPUs are warm Mon-Thu 17:30-20:30 Paris', () => {
+  it('every parle deployment has a monthly ceiling; parle-speech is 3 warm Mon-Thu 17:30-20:30 Paris, parle-qwen-tts paused', () => {
     const budget = (name: string) => (DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.scaling as { budget: { eurPerMonth: number } }).budget.eurPerMonth;
-    expect(['parle-speech', 'parle-qwen-tts', 'parle-speech-s2s', 'parle-livekit'].map(budget)).toEqual([300, 150, 50, 60]);
-    for (const name of ['parle-speech', 'parle-qwen-tts']) {
-      const spec = DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec as { warmSchedule: unknown[] };
-      expect(spec.warmSchedule[0]).toMatchObject(CLASS_WINDOW);
-    }
+    expect(['parle-speech', 'parle-qwen-tts', 'parle-speech-s2s', 'parle-livekit'].map(budget)).toEqual([450, 150, 50, 60]);
+    expect((speech.spec.warmSchedule as unknown[])[0]).toMatchObject({ ...CLASS_WINDOW, minReplicas: 3 });
+    expect(DECLARED_DEPLOYMENTS.find(d => d.name === 'parle-qwen-tts')!.spec).toMatchObject({ paused: true });
   });
 
   it('no declared GPU names Scaleway, and every parle GPU rents only EU hosts (owner, 14/10/2026)', async () => {
@@ -220,7 +246,7 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     await new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: own }).reconcile();
     for (const d of own) {
       const spec = c.specOf(d.name)!;
-      expect([...placementsOf(spec), ...(spec.candidates ?? [])].map(p => p.provider ?? spec.provider), d.name).toEqual(['vast']);
+      expect([...new Set([...placementsOf(spec), ...(spec.candidates ?? [])].map(p => p.provider ?? spec.provider))], d.name).toEqual(['vast']);
       expect(spec.euOnly ?? false, d.name).toBe(d.app === 'parle');
     }
     for (const d of DECLARED_DEPLOYMENTS.filter(x => !x.profile)) {
@@ -241,7 +267,7 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     await expect(c.put('parle-qwen-tts', { paused: false })).rejects.toThrow(off);
   });
 
-  it('not registered yet: pending, nothing created; registered by the parle client: only the declared fields are put, then in sync', async () => {
+  it('not registered yet: pending, nothing created; registered by the parle client: paused by the declaration, then in sync', async () => {
     const { c, cloud } = await controller();
     const owned = DECLARED_DEPLOYMENTS.filter(d => !d.image && d.app !== 'babelcast');
     const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: owned });
@@ -251,17 +277,14 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     expect(c.specOf('parle-qwen-tts')).toBeNull();
     await c.put('parle-qwen-tts', QWEN_TTS, { app: 'parle' });
     expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', image: null });
-    const spec = c.specOf('parle-qwen-tts')!;
-    expect(spec).toMatchObject({
-      image: QWEN_TTS.image, bootScript: 'echo tts', minActiveReplicas: 2, scaling: { mode: 'balanced', budget: { eurPerMonth: 150 } },
-      warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 2 }], reserveQuota: { quota: 2, windows: [{ ...CLASS_WINDOW, minReplicas: 2 }] },
+    expect(c.specOf('parle-qwen-tts')).toMatchObject({
+      image: QWEN_TTS.image, bootScript: 'echo tts', paused: true, euOnly: true, scaling: { mode: 'balanced', budget: { eurPerMonth: 150 } },
     });
+    expect(c.get('parle-qwen-tts')!.status).toBe('paused');
     expect(c.get('parle-qwen-tts')!.app).toBe('parle');
-    await c.put('parle-qwen-tts', QWEN_TTS, { app: 'parle' });
-    expect(c.specOf('parle-qwen-tts')!.reserveQuota).toEqual(spec.reserveQuota);
-    expect(c.specOf('parle-qwen-tts')!.scaling).toEqual({ mode: 'balanced' });
+    await c.put('parle-qwen-tts', { ...QWEN_TTS, paused: false }, { app: 'parle' });
     expect((await r.reconcile())[0].state).toBe('applied');
-    expect(c.specOf('parle-qwen-tts')!.scaling).toEqual({ mode: 'balanced', budget: { eurPerMonth: 150 } });
+    expect(c.specOf('parle-qwen-tts')).toMatchObject({ paused: true, scaling: { mode: 'balanced', budget: { eurPerMonth: 150 } } });
     expect((await r.reconcile())[0].state).toBe('in_sync');
     expect(cloud.created).toHaveLength(0);
   });
@@ -413,7 +436,10 @@ describe('declared parle-speech-test: the test copy of parle-speech on the same 
     const status = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     expect(status.find(s => s.name === 'parle-speech-test')).toMatchObject({ state: 'applied' });
     const spec = c.specOf('parle-speech-test')!;
-    expect(spec).toMatchObject({ ...ON_VAST, testFor: 'parle-speech', maxReplicas: 1, minReplicas: 0, idleMinutes: 10, idleAction: 'delete' });
+    expect(spec).toMatchObject({
+      ...ON_VAST, testFor: 'parle-speech', maxReplicas: 1, minReplicas: 0, idleMinutes: 10, idleAction: 'delete', minCuda: 13, candidates: CANDIDATES,
+    });
+    expect(spec.envByMachineType).toMatchObject(DECLARED_ENV);
     expect(spec.image).toBe(c.specOf('parle-speech')!.image);
     expect(placementsOf(spec).map(p => `${p.provider} ${p.machineType}`)).toEqual(['vast RTX 5090']);
     expect(spec.warmSchedule).toBeUndefined();
@@ -424,6 +450,20 @@ describe('declared parle-speech-test: the test copy of parle-speech on the same 
     const again = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     expect(again.filter(s => s.name === 'parle-speech' || s.name === 'parle-speech-test').map(s => s.state)).toEqual(['in_sync', 'in_sync']);
     expect(put.mock.calls.filter(([name]) => name === 'parle-speech-test')).toHaveLength(0);
+  });
+});
+
+describe('parle-speech-test follows the voices of parle-speech', () => {
+  it('a catalog re-registered on parle-speech reaches the test copy at the next reconcile (it was copied once only)', async () => {
+    const { c } = await controller();
+    await c.put('parle-speech', PRODUCTION);
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
+    await r.reconcile();
+    expect(c.specOf('parle-speech-test')!.files).toEqual(PRODUCTION.files);
+    const files = { ...PRODUCTION.files, 'voices.json': Buffer.from('{"lia":"Entre as crianças e as flores."}').toString('base64') };
+    await c.put('parle-speech', { files });
+    await r.reconcile();
+    expect(c.specOf('parle-speech-test')!.files).toEqual(files);
   });
 });
 
