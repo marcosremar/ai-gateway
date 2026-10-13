@@ -89,6 +89,14 @@ const OPS_TEXT: Record<string, { level: AlertLevel; subject: string; todo: strin
   'gpu.idle': { level: 'warn', subject: 'GPU ligada e sem uso', todo: 'Ninguém a usa desde o último pedido: estacione-a no /admin (GPUs › Estacionar) ou em POST /v1/deployments/<nome>/park.' },
   'turn.slow': { level: 'warn', subject: 'turno lento: p95 acima de 3 s nos últimos 15 min', todo: 'Veja /health?details=1 (latency, fallback): a GPU pode estar fria ou saturada e a reserva servindo.' },
   'fallback.probe_failed': { level: 'warn', subject: 'reserva na nuvem falhou no teste automático', todo: 'Veja fallbackProbe em /health?details=1: recarregue o crédito, troque a chave (API dev) ou o modelo/voz da reserva no alias do app.' },
+  'voice.turn_failing': {
+    level: 'urgent', subject: 'aula: turnos de voz falhando (10 % ou mais em 10 min)',
+    todo: 'Abra o painel (/admin): o cartão «Aula em curso» mostra a etapa, o motivo e o request id de cada falha, que leva ao log do gateway.',
+  },
+  'voice.turn_slow': {
+    level: 'urgent', subject: 'aula: turnos de voz lentos (p95 acima de 4 s em 10 min)',
+    todo: 'Abra o painel (/admin): veja no cartão «Aula em curso» as etapas degradadas e, em Serviços, se a GPU caiu para a reserva na nuvem.',
+  },
   'stage.no_link': { level: 'urgent', subject: 'um estágio ficou sem nenhum provedor servindo', todo: 'Veja a cadeia em /health?details=1 e grave a chave que falta na API dev.' },
 };
 
@@ -102,7 +110,7 @@ function plainFields(data: Record<string, unknown>): string {
 export function opsAlertMail(alert: { event: string; data: Record<string, unknown> }): AlertMail | null {
   const text = OPS_TEXT[alert.event];
   if (!text) return null;
-  const key = String(alert.data.provider ?? alert.data.deployment ?? alert.data.stage ?? '');
+  const key = String(alert.data.provider ?? alert.data.deployment ?? alert.data.stage ?? alert.data.app ?? '');
   const subject = `${text.subject}${key ? ` (${key})` : ''}`;
   return { kind: `${alert.event}|${key}`, level: text.level, subject, body: `${subject}.\n\n${plainFields(alert.data)}\n\nO que fazer: ${text.todo}` };
 }

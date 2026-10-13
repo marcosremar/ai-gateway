@@ -443,19 +443,16 @@ describe('admin page (/admin)', () => {
   it('knows when a class runs: says so during it, and outside it a parked GPU or a cloud-only service is no alarm', () => {
     const now = Date.parse('2026-10-13T10:00:00Z');
     const opts = { now, csrf: 'c', actor: 'marcos', message: null, app: null };
-    const inClass = renderStatus('n', demoSnapshot(now, 'ok'), opts);
-    expect(inClass).toMatch(/Aula em curso · até 23:59<\/b><span>Parle · speech-stack pronta/);
-    const outside = demoSnapshot(now, 'ok');
-    outside.gpus = outside.gpus!.map(d => (d.name === 'speech-stack'
-      ? { ...d, replicas: d.replicas.map(r => ({ ...r, phase: 'halted' as const })), spec: { ...d.spec, warmSchedule: [{ days: [1, 2, 3, 4], start: '17:40', end: '20:15', minReplicas: 1, timeZone: 'Europe/Paris' }] } }
+    const live = demoSnapshot(now, 'warn');
+    live.gpus = live.gpus!.map(d => (d.name === 'speech-stack'
+      ? { ...d, spec: { ...d.spec, warmSchedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', minReplicas: 1, timeZone: 'Europe/Paris' }] } }
       : d));
-    for (const alias of ['parle-stt', 'parle-chat', 'parle-tts']) {
-      const stage = alias === 'parle-stt' ? 'stt' : alias === 'parle-chat' ? 'chat' : 'tts';
-      outside.chains![stage]![alias] = { serving: outside.chains![stage]![alias]!.links[1]!.target, onFallback: true, links: [{ target: 'deployment:speech-stack', state: 'cold' }, outside.chains![stage]![alias]!.links[1]!] };
-    }
-    outside.apps = outside.apps.map(a => (a.status ? { ...a, status: { ...a.status, mode: 'degraded' as const } } : a));
+    expect(renderStatus('n', live, opts)).toMatch(/<h2>Aula em curso · até 23:59<\/h2>[^]*?<span class="meta">Parle · speech-stack pronta/);
+    expect(renderStatus('n', { ...live, voiceTurns: null }, opts)).toMatch(/Aula em curso · até 23:59<\/b><span>Parle · speech-stack pronta/);
+    const outside = demoSnapshot(now, 'ok');
     const html = renderStatus('n', outside, opts);
-    expect(html).toContain('Sem aula agora</b><span>Próxima: hoje às 17:40 · Parle.');
+    expect(html).toContain('Sem aula agora</b><span>Próxima: amanhã às 08:30 · Parle.');
+    expect(html).toMatch(/<h2>Última aula<\/h2><span class="meta">hoje · 08:30–10:5\d<\/span>/);
     expect(html).toContain('Tudo funcionando');
     const services = renderStatus('n', outside, { ...opts, page: 'servicos' });
     expect(services).toContain('Só nuvem · esperado fora da aula');

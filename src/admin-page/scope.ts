@@ -46,6 +46,7 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
     ttsCache: s.ttsCache ? { ...s.ttsCache, byApp: s.ttsCache.byApp[app] ? { [app]: s.ttsCache.byApp[app]! } : {} } : s.ttsCache ?? null,
     overspend: (s.overspend ?? []).filter(o => o.app === app),
     modelPrices: s.modelPrices ?? null,
+    voiceTurns: s.voiceTurns?.filter(t => t.app === app) ?? null,
     chains: s.chains ? Object.fromEntries(Object.entries(own?.stages ?? {}).map(([stage, aliases]) => [stage,
       Object.fromEntries(aliases.filter(a => s.chains![stage]?.[a]).map(a => [a, s.chains![stage]![a]!]))])) : null,
     audit: s.audit
