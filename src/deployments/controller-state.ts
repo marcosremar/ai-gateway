@@ -22,6 +22,7 @@ import type {
   ProbeResult, RegistryAuth, ReplicaProbe, ScalingMode,
 } from './types';
 import { BootTracker, logText } from './boot-track';
+import { freshStuckRetry, type StuckRetryState } from './stuck-retry';
 
 export class DeploymentError extends Error {
   /**
@@ -102,6 +103,7 @@ export interface Runtime {
   reclaimedAt: number | null;
   bootTimeouts: number;
   lostAt: number | null;
+  stuckRetry: StuckRetryState;
 }
 
 /** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
@@ -307,7 +309,7 @@ export abstract class ControllerState {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
-      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0, lostAt: null,
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0, lostAt: null, stuckRetry: freshStuckRetry(),
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }

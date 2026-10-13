@@ -145,6 +145,8 @@ export abstract class ControllerViews extends ReconcileLoop {
       past: tracked.past.map(b => withMs(b, b.endedAt)),
       retryAt: rt.backoffUntil > now ? rt.backoffUntil : null,
       expectedBootSeconds: samples.length ? [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)]! : null,
+      retries: rt.stuckRetry.attempts.map(a => ({ ...a, next: a.next && { ...a.next } })),
+      retriesExhausted: rt.stuckRetry.exhausted,
     };
   }
 

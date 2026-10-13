@@ -219,6 +219,11 @@ export abstract class ReplicaLifecycle extends ControllerState {
         this.machines = [...this.machines.filter(m => m.id !== machine.id), { ...machine, pricePerHour: machine.pricePerHour ?? price }];
         const placed = machine.placementNote ? `${placement}; ${machine.placementNote}` : placement;
         rt.lastPlacement = rt.rejected.length ? `${placed}; earlier: ${rt.rejected.join('; ')}` : placed;
+        const retried = rt.stuckRetry.attempts.find(a => !a.next);
+        if (retried) {
+          retried.next = { replicaId: machine.id, where: machine.zone || machine.id };
+          this.log('deployments: stuck boot retried on another offer', { deployment: spec.name, id: machine.id, from: retried.replicaId, where: retried.next.where, attempt: retried.attempt });
+        }
         rt.createFailures = 0;
         rt.stockOut = null;
         rt.lastError = rt.spendNote ? `create: ${rt.spendNote}` : null;

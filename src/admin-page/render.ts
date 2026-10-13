@@ -417,6 +417,8 @@ const EVENT_TEXT: Record<string, string> = {
   'replica.released': 'réplica liberada', 'replica.gone': 'réplica sumiu no provedor', 'autoscale.warm': 'janela de aquecimento',
   'provider.credit_exhausted': 'provedor sem crédito', 'provider.credit_back': 'crédito de volta', 'stage.on_fallback': 'etapa foi para a reserva',
   'stage.on_primary': 'etapa voltou ao principal', 'app.degraded': 'app servindo pela reserva',
+  'replica.stuck_retry': 'boot travado: réplica liberada para nova tentativa', 'replica.stuck_retried': 'nova tentativa em outra oferta',
+  'replica.stuck_exhausted': 'boot travado: novas tentativas esgotadas',
 };
 const TELEMETRY_LEVEL: Record<string, Level> = { error: 'bad', warn: 'warn' };
 const TELEMETRY_TEXT: Record<string, string> = { error: 'erro', warn: 'aviso' };

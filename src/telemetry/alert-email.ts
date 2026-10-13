@@ -78,6 +78,10 @@ export type AlertMailer = ReturnType<typeof createAlertMailer>;
 const OPS_TEXT: Record<string, { level: AlertLevel; subject: string; todo: string }> = {
   'provider.credit_exhausted': { level: 'urgent', subject: 'crédito do provedor esgotado', todo: 'Recarregue a conta do provedor (Vast: https://cloud.vast.ai/billing/) e desligue máquinas que ninguém usa.' },
   'deployment.create_failed': { level: 'warn', subject: 'criação de máquina falhou', todo: 'Veja o erro abaixo e o /health?details=1; o gateway tenta de novo sozinho.' },
+  'deployment.stuck_boot': {
+    level: 'urgent', subject: 'GPU travou no boot e as novas tentativas automáticas também',
+    todo: 'Abra a GPU no painel (/admin/gpus/<nome>): o serviço segue na reserva na nuvem. O gateway volta ao limite de boot normal; troque a oferta ou desligue a nova tentativa com PATCH /v1/deployments/<nome> {"autoRetryStuckBoot": false}.',
+  },
   'deployment.out_of_stock': { level: 'warn', subject: 'sem estoque de GPU', todo: 'O gateway tenta o próximo lugar da escada; se repetir, amplie as zonas/placements do deployment.' },
   'replica.lost_with_sessions': { level: 'urgent', subject: 'réplica caiu com alunos conectados', todo: 'Confira se os alunos reconectaram (/health?details=1, realtime) e por que a máquina caiu.' },
   'stage.reserve_down': { level: 'warn', subject: 'reserva de um estágio sem chave ou fora do ar', todo: 'Grave a chave que falta na API dev (bun run sandbox:set) e reinicie o gateway.' },

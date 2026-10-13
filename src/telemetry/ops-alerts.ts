@@ -47,6 +47,10 @@ export function createOpsAlerts(
         else fire('deployment.create_failed', deployment, { deployment, error });
         return;
       }
+      if (msg === 'deployments: stuck boot retries exhausted') {
+        fire('deployment.stuck_boot', deployment, { deployment, id: data.id, phase: data.phase, minutes: data.minutes, attempts: data.attempts });
+        return;
+      }
       if ((msg === 'deployments: releasing replica' || msg === 'deployments: replica gone') && Number(data.busy) > 0) {
         fire('replica.lost_with_sessions', String(data.id ?? ''), { deployment, id: data.id, reason: data.reason ?? 'gone', busy: data.busy });
       }

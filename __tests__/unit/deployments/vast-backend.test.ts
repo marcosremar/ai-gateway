@@ -274,6 +274,26 @@ describe('VastDeploymentBackend', () => {
   });
 });
 
+describe('VastDeploymentBackend stuck boot', () => {
+  it('a host released for a stuck boot is skipped by the next rent, which lands on another host', async () => {
+    const { calls, fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers: offers.filter(o => o.id === 2 || o.id === 3) } };
+      if (method === 'PUT') return { body: { success: true, new_contract: Number(url.match(/asks\/(\d+)/)![1]) * 100 } };
+      return { body: { success: true } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => 0 });
+    const input = { spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' };
+    const stuck = await backend.createReplica(input);
+    await backend.releaseReplica(stuck, 'boot-stuck');
+    const order = calls.map(c => c.method).filter(m => m === 'PUT' || m === 'DELETE');
+    expect(order).toEqual(['PUT', 'DELETE']);
+    expect(backend.avoidedHosts()).toEqual([102]);
+    const retried = await backend.createReplica(input);
+    expect(retried.id).not.toBe(stuck.id);
+    expect(retried.id).toBe('300');
+  });
+});
+
 describe('VastDeploymentBackend RTT', () => {
   it('measures the mapped port of the nginx front through the injected probe', async () => {
     const seen: string[] = [];
