@@ -12,7 +12,7 @@
 import { probeConnectRtt, probeRtt } from '../gateway/providers/gpu/rtt-probe';
 import { vastReplicaInit } from './cloud-init';
 import { MIN_HOST_LEFT_MS, vastEndsAt } from './expiry';
-import { countryDistanceKm } from './geo';
+import { countryDistanceKm, EU_COUNTRIES } from './geo';
 import { HostReputation, type HostRecord, type HostStore } from './host-reputation';
 import { countryOf, DEFAULT_NEAR, effectivePrice, rankOffers, type VastOffer } from './placements';
 import { vastPortCount, vastUdpRange } from './realtime-ports';
@@ -234,7 +234,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       ...(spec.minCpuCores ? { cpu_cores_effective: { gte: spec.minCpuCores } } : {}),
       ...(spec.minRamGb ? { cpu_ram: { gte: spec.minRamGb * 1024 } } : {}),
       order: [['dph_total', 'asc']],
-      limit: 100,
+      limit: spec.euOnly ? 1000 : 100,
     };
   }
 
@@ -260,7 +260,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
         && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda) && this.lastsLongEnough(o, now)
         && (o.direct_port_count === undefined || o.direct_port_count >= vastPortCount(spec))
         && (!spec.minCpuCores || (o.cpu_cores_effective ?? 0) >= spec.minCpuCores)
-        && (!spec.minRamGb || (o.cpu_ram ?? 0) >= spec.minRamGb * 1024));
+        && (!spec.minRamGb || (o.cpu_ram ?? 0) >= spec.minRamGb * 1024)
+        && (!spec.euOnly || EU_COUNTRIES.has(countryOf(o.geolocation) ?? '')));
       const reasons = new Map(valid.map(o => [o, this.skipReason(this.hosts.get(o.machine_id), spec, now)]));
       skipped = valid.filter(o => reasons.get(o)).map(o => ({
         offerId: o.id, machineId: o.machine_id ?? null, location: o.geolocation ?? null, usdPerHour: o.dph_total, reason: reasons.get(o)!,

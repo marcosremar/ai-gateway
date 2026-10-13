@@ -90,11 +90,13 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
    * after, must — or its volumes would keep billing (scripts/reap-orphans.ts).
    */
   constructor(secretKey: string, private readonly opts: {
-    projectId?: string; client?: ScalewayLike; awaitVolumes?: boolean; registrySecret?: string;
+    projectId?: string; client?: ScalewayLike; awaitVolumes?: boolean; registrySecret?: string; gpuOff?: string;
   } = {}) {
     this.credentials = { apiKey: secretKey } as ProviderCredentials;
     this.client = opts.client ?? new ScalewayClient();
   }
+
+  get gpuOff(): string | null { return this.opts.gpuOff ?? null; }
 
   get secretKey(): string { return this.credentials.apiKey as string; }
 

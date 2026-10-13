@@ -25,7 +25,8 @@ import { externalInflightOn, noteSession } from '../realtime/external-load';
 import { noUseActive } from '../gateway/proxy/no-wake';
 import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
-import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
+import { placementsOf } from './placements';
+import { buildSpec, isGpuMachineType, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
 import type { CreditIssue, DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
 import type { BootHistory } from './boot-track';
 
@@ -94,6 +95,9 @@ export class DeploymentController extends ControllerViews {
       throw new SpecError(`maxReplicas ${body.maxReplicas} is above this gateway's replica cap of ${cap} across all deployments (DEPLOYMENTS_MAX_REPLICAS)`);
     }
     const spec = buildSpec(name, body, { profiles: this.profiles, previous: existing?.record.spec });
+    const off = spec.paused ? undefined : [...placementsOf(spec), ...(spec.candidates ?? []).map(c => ({ provider: c.provider ?? spec.provider, machineType: c.machineType }))]
+      .find(p => this.backends[p.provider]?.gpuOff && isGpuMachineType(p.machineType));
+    if (off) throw new SpecError(`${this.backends[off.provider]!.gpuOff}: '${name}' asks for ${off.provider} ${off.machineType}; GPUs run on vast only (provider "vast")`);
     if (!spec.scaling && this.opts.defaultScalingMode) spec.scaling = { mode: this.opts.defaultScalingMode };
     const bootReport = bootReportFor(this.opts.publicUrl ?? '', 'x'.repeat(24), 'x'.repeat(32));
     const initBytes = usesScaleway(spec) ? Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32), { bootReport })) : 0;

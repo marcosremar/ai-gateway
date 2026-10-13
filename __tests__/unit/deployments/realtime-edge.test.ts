@@ -141,13 +141,12 @@ describe('realtime spec validation', () => {
     for (const key of EDGE_TUNING_KEYS) expect(source, key).toContain(`"${key}"`);
   });
 
-  it('is accepted on vast while its ports fit one host; files, exposure and stop stay refused there', () => {
+  it('is accepted on vast while its ports fit one host; exposure and stop stay refused there', () => {
     const vast = { provider: 'vast', image: 'vastai/base', bootScript: 'x', machineType: 'RTX 4090' };
     expect(buildSpec('v', { ...vast, realtime: {} }, { profiles }).realtime).toEqual({});
     expect(buildSpec('v', { ...vast, realtime: { maxSessions: 30 } }, { profiles }).realtime).toEqual({ maxSessions: 30 });
     expect(() => buildSpec('v', { ...vast, realtime: { maxSessions: 32 } }, { profiles })).toThrow(/needs 75 .* at most 64/);
     expect(() => buildSpec('v', { ...vast, realtime: { udpPorts: [50000, 50100] } }, { profiles })).toThrow(/needs 103 .* at most 64/);
-    expect(() => buildSpec('v', { ...vast, realtime: {}, files: { a: 'YQ==' } }, { profiles })).toThrow('files are not supported on vast (no user_data service)');
     expect(() => buildSpec('v', { ...vast, realtime: {}, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles }))
       .toThrow('exposure is not supported on vast');
     expect(() => buildSpec('v', { ...vast, realtime: {}, idleAction: 'stop' }, { profiles })).toThrow("idleAction 'stop' is not supported on vast");

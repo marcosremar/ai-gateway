@@ -6,6 +6,7 @@
 import { DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS, type Runtime } from './controller-state';
 import { ReplicaLifecycle } from './controller-replicas';
 import { isOutOfStock } from './placements';
+import { isGpuMachineType } from './spec';
 import type { DeploymentProvider, ReplicaMachine } from './types';
 
 /** The provider lists `stopping` for a minute or two after a stop; past this the machine is planned like any other. */
@@ -59,6 +60,11 @@ export abstract class ParkingControl extends ReplicaLifecycle {
   }
 
   protected async unpark(rt: Runtime, m: ReplicaMachine): Promise<boolean> {
+    const off = this.backendOf(this.providerOf(m)).gpuOff;
+    if (off && isGpuMachineType(m.machineType)) {
+      rt.lastError = `start ${m.id}: ${off}`;
+      return false;
+    }
     rt.starting.set(m.id, this.now());
     this.poweredOnAt.set(m.id, this.now());
     this.log('deployments: powering parked replica on', { deployment: m.deployment, id: m.id });

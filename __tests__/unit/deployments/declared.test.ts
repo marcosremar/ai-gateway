@@ -18,7 +18,6 @@ import { FileDeploymentStore, MemoryDeploymentStore } from '../../../src/deploym
 import type { DeploymentStore } from '../../../src/deployments/types';
 import { placementsOf } from '../../../src/deployments/placements';
 import { vastUnfit } from '../../../src/deployments/placement-walk';
-import { filesByUrl } from '../../../src/deployments/boot-files';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastRefusal } from '../../../src/deployments/spec';
 import { FakeCloud, until } from './_fake-cloud';
@@ -59,9 +58,9 @@ const CLASS_WINDOW = { days: [1, 2, 3, 4], start: '17:30', end: '20:30', timeZon
 const DECLARED_EXTRA = {
   entrypoint: 'bash', args: ['/opt/s2s/start.sh'], coldStartWaitSeconds: 240,
   warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }],
-  reserveQuota: { quota: 2, windows: [{ ...CLASS_WINDOW, minReplicas: 2 }] },
 };
-const H100_ENV = { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '4', LLM_SLOT_CTX: '2048' };
+const GHCR_IMAGE = 'ghcr.io/marcosremar/speech-stack:20261011-0200';
+const ON_VAST = { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85, euOnly: true, placements: [], idleAction: 'delete' };
 
 const controllers: DeploymentController[] = [];
 const dirs: string[] = [];
@@ -80,31 +79,23 @@ async function controller(store: DeploymentStore = new MemoryDeploymentStore(), 
 }
 
 describe('declared parle-speech spec', () => {
-  it('is the speech-stack image in the gateway registry: no credential, no generated secret, no env or sizing of its own', () => {
-    expect(speech.image).toEqual({
-      env: 'SPEECH_IMAGE', repository: 'rg.fr-par.scw.cloud/aigw/speech-stack', default: profile.image,
-    });
-    expect(profile.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261011-0200');
-    expect(speech.description).not.toMatch(/an L4 when/);
+  it('is the public ghcr copy on one Vast RTX 5090 on an EU host, no Scaleway place (owner, 14/10/2026)', () => {
+    expect(speech.image).toEqual({ default: GHCR_IMAGE });
     expect(speech.profile).toBe('speech-stack');
     expect(speech.registryAuth).toBeUndefined();
     expect(speech.generatedSecrets).toBeUndefined();
     expect(speech.spec).toEqual({
-      ...DECLARED_EXTRA,
-      realtime: {}, placements: profile.placements, scaling: { ...profile.scaling, budget: { eurPerMonth: 300 } },
-      envByMachineType: {
-        'L4-1-24G': { RT_MAX_SESSIONS: '2' }, 'L40S-1-48G': { RT_MAX_SESSIONS: '4' }, 'H100-1-80G': H100_ENV,
-        'RTX 5090': profile.envByMachineType!['RTX 5090'],
-      },
+      ...DECLARED_EXTRA, ...ON_VAST, reserveQuota: null,
+      realtime: {}, scaling: { ...profile.scaling, budget: { eurPerMonth: 300 } },
+      envByMachineType: { 'RTX 5090': profile.envByMachineType!['RTX 5090'] },
     });
-    expect(profile.envByMachineType!['H100-1-80G']).toEqual(H100_ENV);
     expect(JSON.stringify(speech)).not.toMatch(/GHCR_READ_TOKEN|ghp_|password"\s*:/);
   });
 
-  it('SPEECH_IMAGE takes a tag of the repository or a full reference', () => {
-    expect(declaredImage(speech, { SPEECH_IMAGE: '20261101-0900' })).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261101-0900');
-    expect(declaredImage(speech, { SPEECH_IMAGE: 'ghcr.io/other/img:1' })).toBe('ghcr.io/other/img:1');
-    expect(declaredImage(speech, {})).toBe(speech.image?.default);
+  it('SPEECH_IMAGE takes a tag of the repository or a full reference; parle-speech has no env image any more', () => {
+    expect(declaredImage(privateApp, { SPEECH_IMAGE: '20261101-0900' })).toBe('ghcr.io/marcosremar/parle-speech:20261101-0900');
+    expect(declaredImage(privateApp, { SPEECH_IMAGE: 'ghcr.io/other/img:1' })).toBe('ghcr.io/other/img:1');
+    expect(declaredImage(speech, { SPEECH_IMAGE: 'rg.fr-par.scw.cloud/aigw/speech-stack:1' })).toBe(GHCR_IMAGE);
     const noDefault: DeclaredDeployment = { ...speech, image: { env: 'SPEECH_IMAGE' } };
     expect(declaredBody(noDefault, {}, null)).toEqual({ pending: expect.stringMatching(/SPEECH_IMAGE is not set/) });
   });
@@ -115,27 +106,22 @@ describe('declared parle-speech spec', () => {
     expect(resolved.body).not.toHaveProperty('registryAuth');
   });
 
-  it('over the production spec: the image, the placements (no L4), the mode, realtime and the declared env are put, then in sync without another PUT', async () => {
+  it('over the production spec: Vast RTX 5090 on an EU host, the ghcr image, no Scaleway place, the declared env; then in sync without another PUT', async () => {
     const { c, cloud } = await controller();
-    await c.put('parle-speech', { ...PRODUCTION, placements: [{ zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }] });
+    await c.put('parle-speech', { ...PRODUCTION, placements: [{ zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }], reserveQuota: { quota: 2, windows: [{ ...CLASS_WINDOW, minReplicas: 2 }] } });
     const before = c.specOf('parle-speech')!;
     const put = vi.spyOn(c, 'put');
     const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
-    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null, image: profile.image });
+    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null, image: GHCR_IMAGE });
+    const { reserveQuota: _dropped, ...kept } = before;
     expect(c.specOf('parle-speech')).toEqual({
-      ...before,
-      ...DECLARED_EXTRA,
-      image: profile.image,
-      placements: profile.placements,
+      ...kept, ...DECLARED_EXTRA, ...ON_VAST,
+      image: GHCR_IMAGE,
       scaling: { mode: 'fast', budget: { eurPerMonth: 300 } },
       realtime: {},
-      envByMachineType: {
-        'L4-1-24G': { ...PRODUCTION.envByMachineType['L4-1-24G'], RT_MAX_SESSIONS: '2' },
-        'L40S-1-48G': { ...PRODUCTION.envByMachineType['L40S-1-48G'], RT_MAX_SESSIONS: '4' },
-        'H100-1-80G': H100_ENV,
-        'RTX 5090': profile.envByMachineType!['RTX 5090'],
-      },
+      envByMachineType: { ...PRODUCTION.envByMachineType, 'RTX 5090': profile.envByMachineType!['RTX 5090'] },
     });
+    expect(placementsOf(c.specOf('parle-speech')!).map(p => p.provider)).toEqual(['vast']);
     expect(c.specOf('parle-speech')!.registryAuth).toBeUndefined();
     expect((await r.reconcile())[0].state).toBe('in_sync');
     expect(put.mock.calls.filter(([name]) => name === 'parle-speech')).toHaveLength(1);
@@ -151,33 +137,28 @@ describe('declared parle-speech spec', () => {
     expect((await r.reconcile())[0].state).toBe('in_sync');
   });
 
-  it('SPEECH_IMAGE moves the image of the production spec and nothing else', async () => {
+  it('SPEECH_IMAGE does not move it, and the stored env, files and sizing stay', async () => {
     const { c } = await controller();
     await c.put('parle-speech', PRODUCTION);
-    const r = new DeclaredDeploymentReconciler({ target: c, env: { SPEECH_IMAGE: '20261101-0900' } });
-    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261101-0900' });
+    const r = new DeclaredDeploymentReconciler({ target: c, env: { SPEECH_IMAGE: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261101-0900' } });
+    expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', image: GHCR_IMAGE });
     const spec = c.specOf('parle-speech')!;
-    expect(spec.image).toBe('rg.fr-par.scw.cloud/aigw/speech-stack:20261101-0900');
+    expect(spec.image).toBe(GHCR_IMAGE);
     expect(spec).toMatchObject({ env: PRODUCTION.env, files: PRODUCTION.files, volumeGb: 120, maxHours: 12, idleMinutes: 1 });
   });
 
-  it('fresh gateway: created from the speech-stack profile with the declared image, realtime on, no machine; then in sync', async () => {
+  it('fresh gateway: created from the speech-stack profile on Vast with the ghcr image, realtime on, no machine; then in sync', async () => {
     const { c, cloud } = await controller();
     c.start();
     const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
     expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', reason: null });
     const spec = c.specOf('parle-speech')!;
     expect(spec).toMatchObject({
-      image: profile.image, port: profile.port, healthPath: '/health', machineType: 'L40S-1-48G', zone: 'fr-par-2',
-      minReplicas: 0, volumeGb: profile.volumeGb, maxEurPerHour: profile.maxEurPerHour, realtime: {}, env: {},
+      ...ON_VAST, image: GHCR_IMAGE, port: profile.port, healthPath: '/health', minReplicas: 0, volumeGb: profile.volumeGb, realtime: {}, env: {},
       envByMachineType: profile.envByMachineType,
     });
-    expect(placementsOf(spec).map(p => `${p.provider} ${p.zone}/${p.machineType}`)).toEqual([
-      'scaleway fr-par-2/L40S-1-48G', 'scaleway pl-waw-2/L40S-1-48G', 'scaleway fr-par-2/H100-1-80G',
-      'scaleway pl-waw-2/H100-1-80G', 'vast fr-par-2/RTX 5090',
-    ]);
-    expect(placementsOf(spec).find(p => p.machineType === 'H100-1-80G')!.maxEurPerHour).toBe(3);
-    expect(placementsOf(spec).some(p => p.zone === 'fr-par-1')).toBe(false);
+    expect(placementsOf(spec).map(p => `${p.provider} ${p.machineType}`)).toEqual(['vast RTX 5090']);
+    expect(spec.reserveQuota).toBeUndefined();
     expect(spec.registryAuth).toBeUndefined();
     expect(c.get('parle-speech')?.status).toBe('scaled-to-zero');
     const put = vi.spyOn(c, 'put');
@@ -186,50 +167,26 @@ describe('declared parle-speech spec', () => {
     expect(cloud.created).toHaveLength(0);
   });
 
-  // D3, live QA 2026-10-07: one placement only, `L40S-1-48G out of stock in fr-par-2` for 17 min, no 2nd replica.
-  it('out of stock in fr-par-2: the replica lands on the next placement', async () => {
-    const cloud = new FakeCloud();
-    cloud.failCreateFor = (s) => (s.zone === 'fr-par-2' ? `scaleway HTTP 412: {"type":"out_of_stock"} ${s.zone}` : null);
-    const { c } = await controller(new MemoryDeploymentStore(), cloud);
-    await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
-    c.start();
-    c.wake('parle-speech');
-    await until(() => cloud.created.length === 1, 3000);
-    expect(cloud.created[0].spec).toMatchObject({ zone: 'pl-waw-2', machineType: 'L40S-1-48G' });
-    expect(c.get('parle-speech')!.lastPlacement).toMatch(/L40S-1-48G out of stock in fr-par-2/);
-  });
-});
-
-describe('parle-speech placements when the L40S is out of stock (K1, 2026-10-09 04:55 UTC)', () => {
-  it('no L40S in fr-par-2 nor pl-waw-2: the replica lands on an H100 in fr-par-2 under its own price cap', async () => {
-    const cloud = new FakeCloud();
-    cloud.priceFor = (_zone, type) => (type === 'H100-1-80G' ? 2.8665 : 1.469916);
-    cloud.failCreateFor = (s) => (s.machineType === 'L40S-1-48G' ? `scaleway HTTP 412: {"type":"out_of_stock"} ${s.zone}` : null);
-    const { c } = await controller(new MemoryDeploymentStore(), cloud);
-    await c.put('parle-speech', PRODUCTION);
-    await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
-    c.start();
-    c.wake('parle-speech');
-    await until(() => cloud.created.length === 1, 3000);
-    expect(cloud.created[0].spec).toMatchObject({ zone: 'fr-par-2', machineType: 'H100-1-80G', maxEurPerHour: 3 });
-    expect(c.get('parle-speech')!.lastPlacement).toMatch(/L40S-1-48G out of stock in fr-par-2; L40S-1-48G out of stock in pl-waw-2/);
-  });
-
-  it('the Vast place is no longer skipped over the production spec: bash start.sh as the command, files by signed link', async () => {
-    const { c } = await controller();
-    await c.put('parle-speech', {
-      ...PRODUCTION,
-      placements: [{ zone: 'fr-par-1' }, { provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85, maxReplicas: 1, image: 'ghcr.io/marcosremar/speech-stack:20261008-1317' }],
+  it('woken with Scaleway GPUs off: the replica is a Vast RTX 5090 under €0.85/h, with the stored files by signed link', async () => {
+    const scaleway = Object.assign(new FakeCloud(), { gpuOff: null as string | null });
+    const vast = Object.assign(new FakeCloud(() => OUTSIDE_CLASS, 'vast'), { marketPriced: true });
+    const c = new DeploymentController({
+      backends: { scaleway, vast }, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(500), namespace: 'test', reconcileMs: 50,
+      now: () => OUTSIDE_CLASS, publicUrl: 'https://gw.example',
     });
-    const vastOf = () => placementsOf(c.specOf('parle-speech')!).find(p => p.provider === 'vast')!;
-    expect(vastUnfit(filesByUrl(vastOf(), 'replica-token', 'https://gw.example', OUTSIDE_CLASS)))
-      .toMatch(/vast replicas need bootScript and image/);
+    await c.init();
+    controllers.push(c);
+    await c.put('parle-speech', PRODUCTION);
+    scaleway.gpuOff = 'Scaleway desativada (dono, 14/10/2026)';
     await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
-    const vast = filesByUrl(vastOf(), 'replica-token', 'https://gw.example', OUTSIDE_CLASS);
-    expect(vast).toMatchObject({ entrypoint: 'bash', args: ['/opt/s2s/start.sh'], image: 'ghcr.io/marcosremar/speech-stack:20261011-0200' });
-    expect(vast.files).toBeUndefined();
-    expect(Object.keys(vast.fileUrls ?? {})).toEqual(Object.keys(PRODUCTION.files));
-    expect(vastUnfit(vast)).toBeNull();
+    c.start();
+    c.wake('parle-speech');
+    await until(() => vast.created.length === 1, 3000);
+    expect(scaleway.created).toHaveLength(0);
+    expect(vast.created[0].spec).toMatchObject({ provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 0.85, euOnly: true, image: GHCR_IMAGE, entrypoint: 'bash' });
+    expect(vast.created[0].spec.files).toBeUndefined();
+    expect(Object.keys(vast.created[0].spec.fileUrls ?? {})).toEqual(Object.keys(PRODUCTION.files));
+    expect(vastUnfit(vast.created[0].spec)).toBeNull();
   });
 
   it('coldStartWaitSeconds 840 is put back to the gateway maximum of 240: no warning', async () => {
@@ -248,14 +205,40 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     scaling: { mode: 'balanced' }, bootScript: 'echo tts',
   };
 
-  it('every parle deployment has a monthly ceiling; the two class GPUs are warm and reserved Mon-Thu 17:30-20:30 Paris', () => {
+  it('every parle deployment has a monthly ceiling; the two class GPUs are warm Mon-Thu 17:30-20:30 Paris', () => {
     const budget = (name: string) => (DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.scaling as { budget: { eurPerMonth: number } }).budget.eurPerMonth;
     expect(['parle-speech', 'parle-qwen-tts', 'parle-speech-s2s', 'parle-livekit'].map(budget)).toEqual([300, 150, 50, 60]);
     for (const name of ['parle-speech', 'parle-qwen-tts']) {
-      const spec = DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec as { warmSchedule: unknown[]; reserveQuota: { windows: unknown[] } };
+      const spec = DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec as { warmSchedule: unknown[] };
       expect(spec.warmSchedule[0]).toMatchObject(CLASS_WINDOW);
-      expect(spec.reserveQuota.windows[0]).toMatchObject({ ...CLASS_WINDOW, minReplicas: 2 });
     }
+  });
+
+  it('no declared GPU names Scaleway, and every parle GPU rents only EU hosts (owner, 14/10/2026)', async () => {
+    const own = DECLARED_DEPLOYMENTS.filter(d => d.profile);
+    const { c } = await controller();
+    await new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: own }).reconcile();
+    for (const d of own) {
+      const spec = c.specOf(d.name)!;
+      expect([...placementsOf(spec), ...(spec.candidates ?? [])].map(p => p.provider ?? spec.provider), d.name).toEqual(['vast']);
+      expect(spec.euOnly ?? false, d.name).toBe(d.app === 'parle');
+    }
+    for (const d of DECLARED_DEPLOYMENTS.filter(x => !x.profile)) {
+      expect(Object.keys(d.spec).filter(k => ['provider', 'machineType', 'zone', 'placements', 'candidates'].includes(k)), d.name).toEqual([]);
+    }
+    for (const name of ['parle-qwen-tts', 'parle-speech-s2s']) expect(DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.euOnly).toBe(true);
+  });
+
+  it('with Scaleway GPUs off, the parle client\'s Scaleway registration is refused with the reason; a pause still goes through', async () => {
+    const off = 'Scaleway desativada (dono, 14/10/2026)';
+    const { c } = await controller(new MemoryDeploymentStore(), Object.assign(new FakeCloud(), { gpuOff: off }));
+    await expect(c.put('parle-qwen-tts', QWEN_TTS, { app: 'parle' })).rejects.toThrow(
+      "Scaleway desativada (dono, 14/10/2026): 'parle-qwen-tts' asks for scaleway L4-1-24G; GPUs run on vast only (provider \"vast\")",
+    );
+    await expect(c.put('parle-qwen-tts', { ...QWEN_TTS, candidates: [{ zone: 'nl-ams-1', machineType: 'L4-1-24G', maxEurPerHour: 1 }] })).rejects.toThrow(/^Scaleway desativada [^]*$/);
+    await expect(c.put('parle-livekit', { ...QWEN_TTS, machineType: 'POP2-HC-48C-96G', gpu: false, bootScript: 'echo lk' })).resolves.toBeTruthy();
+    await expect(c.put('parle-qwen-tts', { ...QWEN_TTS, paused: true })).resolves.toBeTruthy();
+    await expect(c.put('parle-qwen-tts', { paused: false })).rejects.toThrow(off);
   });
 
   it('not registered yet: pending, nothing created; registered by the parle client: only the declared fields are put, then in sync', async () => {
@@ -423,21 +406,19 @@ describe('DeclaredDeploymentReconciler', () => {
   });
 });
 
-describe('declared parle-speech-test (owner, 10/10/2026): the cheap test copy of parle-speech', () => {
-  it('registers on one L4 24 GB (then one Vast RTX 5090), never an L40S/H100, no warm schedule, deleted after 10 min idle, owned by parle; both owned by parle; nothing created', async () => {
+describe('declared parle-speech-test: the test copy of parle-speech on the same Vast GPU (owner, 14/10/2026)', () => {
+  it('registers on one Vast RTX 5090 on an EU host, the same image, no warm schedule, deleted after 10 min idle, owned by parle; nothing created', async () => {
     const { c, cloud } = await controller();
     await c.put('parle-speech', PRODUCTION);
     const status = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     expect(status.find(s => s.name === 'parle-speech-test')).toMatchObject({ state: 'applied' });
     const spec = c.specOf('parle-speech-test')!;
-    expect(spec).toMatchObject({ testFor: 'parle-speech', machineType: 'L4-1-24G', zone: 'fr-par-2', maxReplicas: 1, minReplicas: 0, idleMinutes: 10, idleAction: 'delete' });
+    expect(spec).toMatchObject({ ...ON_VAST, testFor: 'parle-speech', maxReplicas: 1, minReplicas: 0, idleMinutes: 10, idleAction: 'delete' });
     expect(spec.image).toBe(c.specOf('parle-speech')!.image);
-    expect(placementsOf(spec).map(p => p.machineType)).toEqual(['L4-1-24G', 'RTX 5090']);
+    expect(placementsOf(spec).map(p => `${p.provider} ${p.machineType}`)).toEqual(['vast RTX 5090']);
     expect(spec.warmSchedule).toBeUndefined();
-    expect(spec.envByMachineType?.['L4-1-24G']?.LLM_SLOT_CTX).toBeUndefined();
     expect(c.get('parle-speech-test')!.app).toBe('parle');
     expect(c.get('parle-speech')!.app).toBe('parle');
-    expect(Object.keys(spec.files ?? {})).toEqual(Object.keys(PRODUCTION.files));
     expect(cloud.created).toHaveLength(0);
     const put = vi.spyOn(c, 'put');
     const again = await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();

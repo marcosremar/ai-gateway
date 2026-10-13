@@ -13,7 +13,7 @@ import { probeLimitsFromEnv, spendLimitsFromEnv } from './spend-limits';
 import { createDeploymentRoutes, HttpReplicaProbe, type DeploymentRoutesOptions } from './http';
 import { ClientGpu } from './client-gpu';
 import { ScalewayDeploymentBackend, scalewayRegistryOf } from './scaleway-backend';
-import { usesScaleway } from './spec';
+import { SCALEWAY_GPU_OFF, usesScaleway } from './spec';
 import { VastDeploymentBackend } from './vast-backend';
 import { missingImage } from './image-check';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec } from './types';
@@ -216,7 +216,7 @@ export function deploymentsFromEnv(
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
   const maxDevices = Number(env.APP_MAX_DEVICES);
   const devices = new AppDevices(apps, { log: opts.log, ...(maxDevices > 0 ? { maxPerApp: Math.floor(maxDevices) } : {}) });
-  const scaleway = secret ? new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY }) : undefined;
+  const scaleway = secret ? new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY, gpuOff: SCALEWAY_GPU_OFF }) : undefined;
   const vast = vastKey ? new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir), ...vastCreditFloor(env) }) : undefined;
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = { ...(scaleway ? { scaleway } : {}), ...(vast ? { vast } : {}) };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);

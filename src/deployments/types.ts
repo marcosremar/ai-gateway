@@ -157,6 +157,7 @@ export interface DeploymentSpec {
   minRamGb?: number;
   /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
   allowFar?: boolean;
+  euOnly?: boolean;
   /**
    * Vast: a freshly rented host whose measured RTT from the gateway (median, ms) is above this is released as
    * `too-far` and avoided 24 h (`rtt-gate.ts`). With a baseline (see `maxRttExcessMs`) it is an optional upper bound;
@@ -365,6 +366,7 @@ export interface DeploymentBackend {
    * catalog price check (`hourlyPrice` means nothing per zone there).
    */
   readonly marketPriced?: boolean;
+  readonly gpuOff?: string | null;
   /** RTT (median ms) from the gateway to the replica's front, null when no sample came back (the RTT gate). */
   measureRtt?(machine: ReplicaMachine): Promise<number | null>;
   measureBaselineRtt?(near: string): Promise<RttBaseline | null>;

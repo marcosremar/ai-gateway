@@ -695,3 +695,17 @@ describe('fileUrls: the voice catalog without user_data', () => {
     }
   });
 });
+
+describe('euOnly: student audio does not leave the EU (owner, 05/10/2026 and 14/10/2026)', () => {
+  it('keeps only hosts in an EU country, searched wider; a near host outside the EU (GB, CH, NO) is dropped', async () => {
+    const at = (id: number, geolocation: string, dph: number) => ({ id, machine_id: 100 + id, geolocation, dph_total: dph, reliability2: 0.99, inet_down: 900 });
+    const offers = [at(1, 'London, GB', 0.2), at(2, 'Zurich, CH', 0.21), at(3, 'Oslo, NO', 0.22), at(4, 'Warsaw, PL', 0.4), at(5, 'Paris, FR', 0.45), at(6, 'Dallas, US', 0.1)];
+    const { calls, fetchImpl } = fakeVast(() => ({ body: { offers } }));
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    expect((await backend.pickOffers(vastSpec({ euOnly: true }))).map(o => o.geolocation)).toEqual(['Paris, FR', 'Warsaw, PL']);
+    expect(calls[0].body!.limit).toBe(1000);
+    expect((await backend.pickOffers(vastSpec())).map(o => o.geolocation)).toEqual(['Paris, FR', 'London, GB', 'Zurich, CH', 'Oslo, NO', 'Warsaw, PL']);
+    expect(backend.searchBody(vastSpec(), 0.97).limit).toBe(100);
+    expect(() => vastSpec({ euOnly: 'yes' })).toThrow('euOnly must be a boolean');
+  });
+});
