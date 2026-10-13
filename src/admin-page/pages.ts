@@ -1,12 +1,12 @@
-import type { DeploymentView } from '../deployments/types';
-import { bootHeadline, bootOf, gpuDetailBody } from './boot';
+import { bootOf, gpuDetailBody } from './boot';
+import { classStrip, trafficOf } from './class-card';
 import { services } from './guarantee';
 import { recommendations } from './recommendations';
 import { gpuActions, sectionsOf, unitOf, type AdminSnapshot, type AppView } from './render';
 import { monthForecast, spendWindow } from './spend';
 import { CSS } from './styles';
 import {
-  ago, appTitle, classState, count, duration, esc, form, hhmm, latest, mark, money, ms, plural, upOf, worst, ZONE, type Ctx, type Level, type Section,
+  ago, appTitle, count, duration, esc, form, latest, mark, money, ms, upOf, worst, ZONE, type Ctx, type Level, type Section,
 } from './ui';
 
 export interface PageDef { id: string; path: string; title: string; tab: string; icon: string; sections: string[]; lead: string }
@@ -21,7 +21,7 @@ const ICON: Record<string, string> = {
 };
 
 export const PAGES: PageDef[] = [
-  { id: 'geral', path: '/admin', title: 'Visão geral', tab: 'Geral', icon: ICON.geral!, sections: ['recomendacoes'], lead: '' },
+  { id: 'geral', path: '/admin', title: 'Visão geral', tab: 'Geral', icon: ICON.geral!, sections: ['aula', 'recomendacoes'], lead: '' },
   {
     id: 'servicos', path: '/admin/servicos', title: 'Serviços', tab: 'Serviços', icon: ICON.servicos!, sections: ['apps', 'garantia', 'reservas', 'trafego'],
     lead: 'Cada app, como cada etapa é garantida, as reservas na nuvem e o tráfego das últimas 24 h.',
@@ -100,34 +100,6 @@ const sectionHtml = (x: Section) => `<section id="${x.id}"><header class="sh"><h
 const LEVEL_WORD: Record<Level, string> = { ok: 'Normal', warn: 'Atenção', bad: 'Problema' };
 const pillOf = (level: Level) => `<span class="pill ${level}">${mark(level)}${LEVEL_WORD[level]}</span>`;
 
-function gpuStateText(d: DeploymentView): string {
-  const boot = bootOf(d);
-  if (boot) return bootHeadline(boot).toLowerCase();
-  const up = upOf(d);
-  const ready = up.filter(r => r.phase === 'ready').length;
-  return up.length ? (ready ? 'pronta' : 'ligando') : 'desligada';
-}
-
-const trafficOf = (ctx: Ctx) => (ctx.app ? ctx.s.traffic?.byApp?.[ctx.app] ?? null : ctx.s.traffic);
-
-function classStrip(ctx: Ctx): string {
-  const gpus = ctx.s.gpus ?? [];
-  const state = classState(gpus, ctx.now);
-  const appName = (d: DeploymentView) => (d.app ? appTitle(d.app, ctx.s.apps.find(a => a.id === d.app)?.profile).name : null);
-  if (state.open.length) {
-    const lastHour = trafficOf(ctx)?.hours.at(-1);
-    const facts = [
-      ...state.open.map(d => `${appName(d) ? `${appName(d)} · ` : ''}${d.name} ${gpuStateText(d)}`),
-      lastHour ? `${plural(lastHour.served + lastHour.failed, 'chamada', 'chamadas')} na última hora${lastHour.failed ? `, ${count(lastHour.failed)} sem resposta` : ''}` : '',
-    ].filter(Boolean);
-    return `<div class="aula on" role="status"><span class="live" aria-hidden="true"></span><div><b>Aula em curso · até ${hhmm(state.endsAt!)}</b><span>${esc(facts.join(' · '))}</span></div></div>`;
-  }
-  const next = state.next
-    ? `Próxima: ${state.next.text}${appName(state.next.deployment) ? ` · ${appName(state.next.deployment)}` : ''}. Fora da aula, GPU parada e serviço só na nuvem são o esperado.`
-    : 'Nenhuma janela de aula configurada nas GPUs.';
-  return `<div class="aula" role="status"><span class="idle" aria-hidden="true"></span><div><b>Sem aula agora</b><span>${esc(next)}</span></div></div>`;
-}
-
 interface Card { page: PageDef; level: Level; verdict: string; facts: string; notes: string[] }
 
 const NOTES_SHOWN = 3;
@@ -192,7 +164,7 @@ function overview(f: Frame): string {
   return `<header class="hero" id="visao">${mark(overall)}<div><h1>${HEADLINE[overall]}</h1><p>${
     attention ? `${attention} ${attention > 1 ? 'áreas pedem' : 'área pede'} atenção` : 'Nenhuma área pede atenção'} · ${f.time} (Paris)</p></div></header>`
     + (own ? `<p class="scope">Visão do app <b>${esc(own.name)}</b>${own.description ? ` · ${esc(own.description)}` : ''}<small>Só os dados deste app: as GPUs, as chaves, as reservas e os eventos dele.</small></p>` : '')
-    + classStrip(ctx)
+    + classStrip(ctx, all.get('aula'))
     + `<div class="cards">${cards(ctx, all).map(c => cardHtml(c, query)).join('')}</div>`
     + sectionHtml(all.get('recomendacoes')!);
 }
