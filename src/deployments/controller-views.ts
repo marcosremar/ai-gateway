@@ -8,7 +8,7 @@ import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './control
 import { ReconcileLoop } from './controller-reconcile';
 import { vastUnfit } from './placement-walk';
 import { DEFAULT_NEAR, placementsOf } from './placements';
-import { planReplicas, replicaPhase } from './planner';
+import { pinnedIdleOver, planReplicas, replicaPhase } from './planner';
 import { DEFAULT_MAX_RTT_EXCESS_MS, DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
 import type { DeploymentSpec, DeploymentView, OffersPreview } from './types';
 import { distinctSessions, externalLoadOf, refusedSessions } from '../realtime/external-load';
@@ -139,6 +139,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       ip: m.ip,
       ...(m.tls ? { tls: true } : {}),
       providerState: m.state,
+      provider: this.providerOf(m),
       zone: m.zone,
       machineType: m.machineType,
       pricePerHour: m.pricePerHour,
@@ -193,6 +194,13 @@ export abstract class ControllerViews extends ReconcileLoop {
       sessions: distinctSessions(name, 60_000, now),
       hold: rt.record.hold && rt.record.hold.until > now
         ? { replicas: rt.record.hold.replicas, until: new Date(rt.record.hold.until).toISOString() } : null,
+      pinned: rt.record.spec.minReplicas > 0 ? {
+        idleMinutes: this.opts.pinnedIdleMaxMs ? Math.round(this.opts.pinnedIdleMaxMs / 60_000) : null,
+        parked: pinnedIdleOver({
+          spec: rt.record.spec, inflight: rt.inflight, waiting: rt.waiting, lastRequestAt: rt.record.lastRequestAt, now,
+          pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt,
+        }),
+      } : null,
       warnings: [
         ...(rt.record.spec.coldStartWaitSeconds > maxWait
           ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]

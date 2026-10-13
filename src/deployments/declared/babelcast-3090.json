@@ -1,0 +1,27 @@
+{
+  "name": "babelcast-3090",
+  "app": "babelcast",
+  "description": "babelcast: one RTX 3090 24 GB on Vast at most US$0.20/h (owner, 13/10/2026), the speech-stack image (Whisper large-v3 + Qwen3.5-9B Q4; it fits 24 GB with the L4 settings), for babelcast and the agents' tests only; pinned at 1 replica, parked after 60 min with no request (DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES), woken by the next request; its app is babelcast, so no parle route may name it",
+  "profile": "speech-stack",
+  "image": {
+    "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
+  },
+  "initial": { "minReplicas": 1 },
+  "spec": {
+    "testFor": "babelcast-speech",
+    "provider": "vast",
+    "machineType": "RTX 3090",
+    "maxEurPerHour": 0.19,
+    "placements": [],
+    "maxReplicas": 1,
+    "idleMinutes": 60,
+    "idleAction": "delete",
+    "envByMachineType": {
+      "RTX 3090": {
+        "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      }
+    },
+    "scaling": { "budget": { "eurPerMonth": 140 } }
+  }
+}

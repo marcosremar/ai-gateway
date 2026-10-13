@@ -158,6 +158,11 @@ export function routeTargetViolations(next: ModelRoutesSpec, current: ModelRoute
   return [...refused];
 }
 
+function routedDeployments(routes: ModelRoutesSpec): string[] {
+  const names = ROUTE_STAGES.flatMap(stage => Object.entries(routes[stage] ?? {}).flatMap(([alias, chain]) => chain.flatMap(e => routeTargets(stage, alias, e))));
+  return [...new Set(names.filter(t => t.startsWith('deployment:')).map(t => t.slice('deployment:'.length)))];
+}
+
 export class AppError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
@@ -299,7 +304,9 @@ export class AppRegistry implements FallbackKeyStore {
    * a cloud link gets the stage's default fallback appended (`cloud-fallback.ts`, reported in `cloudFallbackAdded`);
    * `"cloudFallback": false` is refused.
    */
-  async putRoutes(app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean } = {}): Promise<{ routes: ModelRoutesSpec; cloudFallbackAdded: CloudFallbackAdded[] }> {
+  async putRoutes(
+    app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean; appOf?: (deployment: string) => string | null } = {},
+  ): Promise<{ routes: ModelRoutesSpec; cloudFallbackAdded: CloudFallbackAdded[] }> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'routes must be an object { chat?, stt?, tts? }');
     if ((body as { cloudFallback?: unknown }).cloudFallback === false) {
       throw new AppError(400, 'every STT, chat and TTS chain must end in a cloud fallback (owner decision 2026-10-12): drop "cloudFallback": false — the gateway appends the default (OpenRouter) to a chain that has none');
@@ -313,6 +320,8 @@ export class AppRegistry implements FallbackKeyStore {
         if (owner) throw new AppError(409, `${stage} alias '${model}' belongs to app '${owner.id}'`);
       }
     }
+    const foreign = routedDeployments(parsed).filter(d => ![null, app].includes(opts.appOf?.(d) ?? null));
+    if (foreign.length) throw new AppError(403, `a route may not name another app's deployment: ${foreign.join(', ')}`);
     if (opts.restrictedTo) {
       const refused = routeTargetViolations(parsed, ownValue(this.apps, app)?.routes, opts.restrictedTo);
       if (refused.length) throw new AppError(403, `an app key may only route to its own deployments and to targets its routes already have: ${refused.join('; ')}`);
