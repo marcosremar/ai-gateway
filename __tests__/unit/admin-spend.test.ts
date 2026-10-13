@@ -129,7 +129,7 @@ describe('spend chart', () => {
     expect(spend).toMatch(/<title>13\/10: total GPU [^<]*— Parle [^<]*; Babelcast /);
     expect(spend).toContain('<i class="c0"></i>Parle');
     for (const col of ['Hoje', '7 dias', '30 dias']) expect(spend).toContain(`>${col}<`);
-    expect(spend).toMatch(/€\s[\d,]+<small>nuvem US\$\s[\d,]+ \(US\$\s[\d,]+ estimado\) · [\d.]+ pedidos<\/small>/);
+    expect(spend).toMatch(/€\s[\d,]+<small>nuvem US\$\s[\d,]+ · [\d.]+ pedidos<\/small><small>US\$\s[\d,]+ estimado<\/small>/);
     expect(spend).toContain('usage.cost');
     expect(spend).toContain('Mês até agora');
     expect(spend).toContain('Projeção até 31/10');

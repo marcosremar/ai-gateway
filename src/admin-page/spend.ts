@@ -116,8 +116,8 @@ export function spend(ctx: Ctx): Section {
     const cloud = cloudOf(last(n), id);
     const estimated = stageSum(last(n), id, 'estimatedUsd');
     const unknown = stageSum(last(n), id, 'unknown');
-    return `${money(sum(last(n), id, 'gpuEur'))}<small>${cloud ? `nuvem ${money(cloud, 'US$')}${estimated ? ` (${money(estimated, 'US$')} estimado)` : ''} · ` : ''}`
-      + `${unknown ? `${count(unknown)} com custo desconhecido · ` : ''}${count(sum(last(n), id, 'requests'))} pedidos</small>`;
+    return `${money(sum(last(n), id, 'gpuEur'))}<small>${cloud ? `nuvem ${money(cloud, 'US$')} · ` : ''}${count(sum(last(n), id, 'requests'))} pedidos</small>`
+      + (estimated ? `<small>${money(estimated, 'US$')} estimado</small>` : '') + (unknown ? `<small>${count(unknown)} com custo desconhecido</small>` : '');
   };
   const rows = ids.map((id, c) => [
     `<b><i class="sw c${c % COLORS}"></i>${esc(names.get(id))}</b>${names.get(id) !== id ? `<small class="mono">${esc(id)}</small>` : ''}`,

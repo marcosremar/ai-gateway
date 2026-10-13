@@ -71,7 +71,7 @@ h2{font-size:15px;font-weight:650;margin:0}
 .sh .meta{color:var(--muted);font-size:12.5px}.sh .acts{margin-left:auto;display:flex;gap:8px}
 .pill{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;line-height:20px;padding:0 8px 0 6px;border-radius:999px;white-space:nowrap;
 color:var(--lvl);background:color-mix(in srgb,var(--lvl) 12%,transparent)}
-.pill .mark svg{width:13px;height:13px}.pill .mark .g{stroke:color-mix(in srgb,var(--lvl) 12%,var(--panel))}
+.msg .pill,.lk .pill{white-space:normal}.pill .mark svg{width:13px;height:13px}.pill .mark .g{stroke:color-mix(in srgb,var(--lvl) 12%,var(--panel))}
 .sub{padding:12px 16px 4px;margin:0;font-size:12.5px;font-weight:600;color:var(--muted)}
 .tw{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
