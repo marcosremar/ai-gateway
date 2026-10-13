@@ -206,3 +206,51 @@ describe('the controller says when a replica with sessions disappears', () => {
     expect(logs.find(([m]) => m === 'deployments: replica gone')![1]).toMatchObject({ deployment: 'speech', id, busy: expect.any(Number) });
   });
 });
+
+describe('a provider account refusal (incident 13/10/2026)', () => {
+  const REFUSED = {
+    deployment: 'speech-stack', provider: 'scaleway', place: 'scaleway L4-1-24G@fr-par-2', reason: 'permissão negada (IAM)', fix: 'corrija a chave', status: 403, next: 'vast',
+    error: 'scaleway HTTP 403: {"type":"permissions_denied"}',
+  };
+
+  it('is one urgent alert per episode, with what to fix and where the GPU went, and shows on the overview and the GPU page', async () => {
+    const { createIncidents } = await import('../../../src/telemetry/incidents');
+    const { opsAlertMail } = await import('../../../src/telemetry/alert-email');
+    const { demoSnapshot } = await import('../../__fixtures__/admin-snapshot');
+    const { renderGpuDetail, renderStatus } = await import('../../../src/admin-page/pages');
+    let t = Date.parse('2026-10-13T15:40:00Z');
+    const incidents = createIncidents({ now: () => t });
+    const sent: OpsAlert[] = [];
+    const alerts = createOpsAlerts(a => { sent.push(a); }, () => t, OPS_ALERT_DEDUP_MS, 0, incidents);
+    for (let minute = 0; minute <= 60; minute += 5) {
+      alerts.fromDeploymentLog('deployments: provider account refused', minute === 30 ? { ...REFUSED, deployment: 'parle-qwen-tts', next: null } : REFUSED);
+      t += 5 * 60_000;
+    }
+    await flush();
+    expect(sent.map(a => [a.event, a.key])).toEqual([['provider.account_refused', 'scaleway']]);
+    const mail = opsAlertMail(sent[0]!)!;
+    expect(mail).toMatchObject({ level: 'urgent', subject: 'a Scaleway recusou criar servidor: permissão negada (IAM) — corrija a chave; usando a Vast' });
+    expect(incidents.list().filter(i => !i.endedAt).map(i => i.event)).toEqual(['provider.account_refused']);
+
+    const s = { ...demoSnapshot(t), incidents: incidents.list() };
+    const opts = { now: t, csrf: 'c', actor: 'marcos', message: null, app: null };
+    expect(renderStatus('n', s, opts)).toContain('Provedor recusou criar máquina: conta sem permissão ou chave recusada');
+    expect(renderGpuDetail('n', s, 'speech-stack', opts)).toContain('Provedor recusou criar máquina');
+    expect(renderGpuDetail('n', s, 'babelcast-3090', opts)).not.toContain('Provedor recusou criar máquina');
+
+    t += OPS_ALERT_DEDUP_MS;
+    alerts.fromDeploymentLog('deployments: provider account refused', { ...REFUSED, deployment: 'parle-qwen-tts', next: null });
+    await flush();
+    expect(sent).toHaveLength(2);
+    expect(opsAlertMail(sent[1]!)!.subject).toBe('a Scaleway recusou criar servidor: permissão negada (IAM) — corrija a chave; nenhum outro provedor para parle-qwen-tts');
+  });
+
+  it('a refusal for lack of credit is the credit alert', async () => {
+    const { alerts, sent } = rig();
+    alerts.fromDeploymentLog('deployments: provider account refused', { ...REFUSED, provider: 'vast', reason: 'sem crédito', fix: 'recarregue a conta', status: null, next: 'scaleway' });
+    await flush();
+    expect(sent.map(a => [a.event, a.key, a.data.headline])).toEqual([
+      ['provider.credit_exhausted', 'vast', 'a Vast recusou criar servidor: sem crédito — recarregue a conta; usando a Scaleway'],
+    ]);
+  });
+});

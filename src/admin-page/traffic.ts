@@ -33,7 +33,7 @@ const ACTIVITY_KEPT = 40;
 export const ACTIVITY_EVENTS = new Set([
   'replica.creating', 'replica.ready', 'replica.create_failed', 'replica.unhealthy', 'replica.parked', 'replica.power_on',
   'replica.released', 'replica.gone', 'autoscale.warm', 'provider.credit_exhausted', 'provider.credit_back',
-  'stage.on_fallback', 'stage.on_primary', 'app.degraded', 'replica.stuck_retry', 'replica.stuck_retried', 'replica.stuck_exhausted',
+  'provider.account_refused', 'stage.on_fallback', 'stage.on_primary', 'app.degraded', 'replica.stuck_retry', 'replica.stuck_retried', 'replica.stuck_exhausted',
   'route.reorder', 'route.reorder_reverted',
 ]);
 

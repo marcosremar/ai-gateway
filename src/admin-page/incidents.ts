@@ -1,3 +1,4 @@
+import type { DeploymentView } from '../deployments/types';
 import type { Incident } from '../telemetry/incidents';
 import { alertLevel, alertTitle } from '../telemetry/alert-email';
 import { ago, count, duration, esc, hhmm, mark, pill, table, when, worst, type Ctx, type Level, type Section } from './ui';
@@ -44,8 +45,14 @@ export function incidentsSection(ctx: Ctx): Section {
   };
 }
 
-export function openIncidents(ctx: Ctx): string {
-  const open = (ctx.s.incidents ?? []).filter(i => !i.endedAt);
+function concerns(i: Incident, d: Pick<DeploymentView, 'name' | 'spec'>): boolean {
+  const providers = new Set<string>([d.spec.provider, ...[...(d.spec.placements ?? []), ...(d.spec.candidates ?? [])].map(p => p.provider ?? d.spec.provider)]);
+  const tokens = new Set(`${i.key} ${i.alerts.map(a => a.summary).join(' ')}`.split(/[^A-Za-z0-9._-]+/));
+  return tokens.has(d.name) || (i.event.startsWith('provider.') && providers.has(i.key));
+}
+
+export function openIncidents(ctx: Ctx, gpu?: Pick<DeploymentView, 'name' | 'spec'>): string {
+  const open = (ctx.s.incidents ?? []).filter(i => !i.endedAt && (!gpu || concerns(i, gpu)));
   if (!open.length) return '';
   const query = ctx.app ? `?app=${encodeURIComponent(ctx.app)}` : '';
   const items = open.map((i) => {

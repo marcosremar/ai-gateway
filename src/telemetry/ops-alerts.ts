@@ -30,13 +30,16 @@ export function createOpsAlerts(
 ) {
   const bootedAt = now();
   const sentAt = new Map<string, number>();
+  const seenAt = new Map<string, number>();
   let chainsDown = new Set<string>();
   const outsideSince = new Map<string, number>();
-  const fire = (event: string, key: string, data: Record<string, unknown>) => {
+  const fire = (event: string, key: string, data: Record<string, unknown>, oncePerEpisode = false) => {
     const id = `${event}|${key}`;
     const t = now();
     const alert = { event, key, data: { ...data, at: new Date(t).toISOString() } };
-    const due = t - (sentAt.get(id) ?? -Infinity) >= dedupMs;
+    const last = oncePerEpisode ? seenAt.get(id) : sentAt.get(id);
+    seenAt.set(id, t);
+    const due = t - (last ?? -Infinity) >= dedupMs;
     track?.seen(alert, due);
     if (!due) return;
     sentAt.set(id, t);
@@ -48,6 +51,15 @@ export function createOpsAlerts(
       const deployment = String(data.deployment ?? '');
       if (msg === 'deployments: provider credit exhausted') {
         fire('provider.credit_exhausted', String(data.provider ?? ''), data);
+        return;
+      }
+      if (msg === 'deployments: provider account refused') {
+        const provider = String(data.provider ?? '');
+        const next = typeof data.next === 'string' ? `usando a ${providerName(data.next)}` : `nenhum outro provedor para ${deployment}`;
+        const headline = `a ${providerName(provider)} recusou criar servidor: ${String(data.reason)} — ${String(data.fix)}; ${next}`;
+        const facts = { provider, deployment, headline, status: data.status ?? null, error: data.error };
+        if (/crédito/.test(String(data.reason))) fire('provider.credit_exhausted', provider, facts);
+        else fire('provider.account_refused', provider, facts, true);
         return;
       }
       if (msg === 'deployments: create failed' || msg === 'deployments: boot failed on the provider') {
@@ -175,6 +187,8 @@ export function createOpsAlerts(
     },
   };
 }
+
+const providerName = (provider: string) => provider.charAt(0).toUpperCase() + provider.slice(1);
 
 function groupedData(items: Array<Record<string, unknown>>): Record<string, unknown> {
   return {

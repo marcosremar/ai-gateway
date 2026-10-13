@@ -75,17 +75,19 @@ describe('placement ladder', () => {
     expect(scaleway.created).toHaveLength(0);
   });
 
-  it('a credential error stops the walk (no burning through the ladder) and is recorded', async () => {
+  it('a credential error skips the rest of that provider (no burning through the ladder) and is recorded', async () => {
     const scaleway = new FakeCloud();
-    scaleway.failCreateFor = () => 'HTTP 401 unauthorized';
+    const tried: string[] = [];
+    scaleway.failCreateFor = (spec) => { tried.push(spec.zone); return 'HTTP 401 unauthorized'; };
     const controller = await make({ scaleway });
     await controller.put('tts', {
       image: 'me/app:1', port: 8000, minReplicas: 1,
       candidates: [{ zone: 'fr-par-2', machineType: 'L4-1-24G', maxEurPerHour: 1 }, { zone: 'fr-par-1', machineType: 'L4-1-24G', maxEurPerHour: 1 }],
     });
     await until(() => controller.get('tts')!.lastPlacement !== null);
-    expect(controller.get('tts')!.lastPlacement).toMatch(/^failed at scaleway L4-1-24G@fr-par-2: HTTP 401/);
+    expect(controller.get('tts')!.lastPlacement).toMatch(/^no replica placed; skipped: scaleway: chave recusada, HTTP 401 → nenhum outro provedor/);
     expect(controller.get('tts')!.lastError).toMatch(/HTTP 401/);
+    expect(tried).toEqual(['fr-par-2']);
   });
 
   it('placements go through the same walk, in the given order, and record lastPlacement too', async () => {
