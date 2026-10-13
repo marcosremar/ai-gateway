@@ -7,11 +7,12 @@
  *
  * Each place gets the live price check (not sold / over cap → skip, no create), then the create; an out-of-stock
  * answer (`isOutOfStock`) moves to the next place, a quota refusal (`quotaMachineType`) to the next place of another
- * machine type, any other error stops the walk (it would fail everywhere).
+ * machine type, a refusal of the provider account (`accountRefusal`: key, IAM, credit) to the next place on another
+ * provider, any other error stops the walk (it would fail everywhere).
  * `placement` says where the replica landed and why earlier places were skipped (`lastPlacement` in the view).
  */
 
-import { DEFAULT_NEAR, isOutOfStock, placementsOf, quotaMachineType, rankCandidates } from './placements';
+import { accountRefusal, DEFAULT_NEAR, isOutOfStock, placementsOf, quotaMachineType, rankCandidates } from './placements';
 import { isGpuMachineType, vastRefusal } from './spec';
 import { scalewayRegistryOf } from './scaleway-backend';
 import type { CatalogEntry, DeploymentBackend, DeploymentProvider, DeploymentSpec, PlacementCandidate, ReplicaMachine } from './types';
@@ -104,8 +105,9 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
   const near = ranked ? ` near ${args.spec.near ?? DEFAULT_NEAR}` : '';
   const withSkipped = (text: string) => (skipped.length ? `${text}; skipped: ${skipped.join('; ')}` : text);
   const overQuota = new Set<string>();
-  for (const step of steps) {
-    if (overQuota.has(`${step.provider}/${step.spec.machineType}`)) continue;
+  const refusedAccounts = new Set<DeploymentProvider>();
+  for (const [index, step] of steps.entries()) {
+    if (overQuota.has(`${step.provider}/${step.spec.machineType}`) || refusedAccounts.has(step.provider)) continue;
     const backend = args.backendFor(step.provider);
     if (!backend) {
       if (!ranked && step.provider === args.spec.provider) throw new Error(`no backend configured for provider '${step.provider}'`);
@@ -135,10 +137,21 @@ export async function placeReplica(args: PlaceArgs): Promise<PlaceResult> {
         args.log?.('deployments: quota reached, skipping the machine type', { deployment: args.spec.name, place: where(step), machineType: quotaType });
         continue;
       }
-      // Out of stock here: the next place may still have one. Any other error is the spec's or the account's.
-      if (!isOutOfStock(err) && !/insufficient_credit/.test(msg)) throw new PlacementError(msg, withSkipped(`failed at ${where(step)}: ${msg}`));
-      skipped.push(step.provider === 'vast' ? `${where(step)}: ${msg.slice(0, 160)}` : `${step.spec.machineType} out of stock in ${step.spec.zone}`);
-      args.log?.('deployments: out of stock, trying the next placement', { deployment: args.spec.name, place: where(step) });
+      // Out of stock here: the next place may still have one; a refused account: another provider may. Any other error is the spec's.
+      if (isOutOfStock(err)) {
+        skipped.push(step.provider === 'vast' ? `${where(step)}: ${msg.slice(0, 160)}` : `${step.spec.machineType} out of stock in ${step.spec.zone}`);
+        args.log?.('deployments: out of stock, trying the next placement', { deployment: args.spec.name, place: where(step) });
+        continue;
+      }
+      const account = accountRefusal(err);
+      if (!account) throw new PlacementError(msg, withSkipped(`failed at ${where(step)}: ${msg}`));
+      refusedAccounts.add(step.provider);
+      const next = steps.slice(index + 1).find(s => !refusedAccounts.has(s.provider) && args.backendFor(s.provider))?.provider ?? null;
+      const status = account.status ? `, HTTP ${account.status}` : '';
+      skipped.push(`${step.provider}: ${account.reason}${status} → ${next ? `tentando ${next}` : 'nenhum outro provedor'} (${msg.slice(0, 160)})`);
+      args.log?.('deployments: provider account refused', {
+        deployment: args.spec.name, provider: step.provider, place: where(step), reason: account.reason, fix: account.fix, status: account.status, next, error: msg.slice(0, 300),
+      });
       continue;
     }
     const cost = price != null ? fmtEur(price) : `≤ ${fmtEur(step.spec.maxEurPerHour)}`;

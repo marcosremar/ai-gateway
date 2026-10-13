@@ -77,6 +77,10 @@ export type AlertMailer = ReturnType<typeof createAlertMailer>;
 
 const OPS_TEXT: Record<string, { level: AlertLevel; subject: string; todo: string }> = {
   'provider.credit_exhausted': { level: 'urgent', subject: 'crédito do provedor esgotado', todo: 'Recarregue a conta do provedor (Vast: https://cloud.vast.ai/billing/) e desligue máquinas que ninguém usa.' },
+  'provider.account_refused': {
+    level: 'urgent', subject: 'provedor recusou criar máquina: conta sem permissão ou chave recusada',
+    todo: 'Corrija a chave ou a permissão (IAM) da conta no provedor. Enquanto isso, cada criação pula esse provedor e tenta os outros da escada (placements); o painel mostra onde a GPU subiu.',
+  },
   'deployment.create_failed': { level: 'warn', subject: 'criação de máquina falhou', todo: 'Veja o erro abaixo e o /health?details=1; o gateway tenta de novo sozinho.' },
   'deployment.stuck_boot': {
     level: 'urgent', subject: 'GPU travou no boot e as novas tentativas automáticas também',
@@ -111,7 +115,7 @@ export function opsAlertMail(alert: { event: string; data: Record<string, unknow
   const text = OPS_TEXT[alert.event];
   if (!text) return null;
   const key = String(alert.data.provider ?? alert.data.deployment ?? alert.data.stage ?? alert.data.app ?? '');
-  const subject = `${text.subject}${key ? ` (${key})` : ''}`;
+  const subject = typeof alert.data.headline === 'string' ? alert.data.headline : `${text.subject}${key ? ` (${key})` : ''}`;
   return { kind: `${alert.event}|${key}`, level: text.level, subject, body: `${subject}.\n\n${plainFields(alert.data)}\n\nO que fazer: ${text.todo}` };
 }
 

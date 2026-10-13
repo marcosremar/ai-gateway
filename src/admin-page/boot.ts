@@ -51,8 +51,8 @@ export function bootState(d: DeploymentView): string {
 export function nextStep(d: DeploymentView): string {
   if (!d.lastError) return '';
   const e = d.lastError;
-  const why = /insufficient_credit|credit/i.test(e) ? 'sem crédito no provedor' : /out_of_stock|out of stock|no vast offer/i.test(e) ? 'sem oferta disponível'
-    : /boot-timeout/i.test(e) ? 'boot passou do limite' : 'falha ao criar';
+  const why = /insufficient_credit|credit/i.test(e) ? 'sem crédito no provedor' : /permissão negada|chave recusada/.test(e) ? 'conta do provedor recusou criar'
+    : /out_of_stock|out of stock|no vast offer/i.test(e) ? 'sem oferta disponível' : /boot-timeout/i.test(e) ? 'boot passou do limite' : 'falha ao criar';
   return d.boot?.retryAt ? `${why} · nova tentativa às ${hhmm(d.boot.retryAt)} (espera crescente)` : `${why} · tenta de novo no próximo ciclo`;
 }
 
@@ -102,7 +102,7 @@ function containerPanel(d: DeploymentView, c: ContainerLogView | null): string {
   return panel('Log do contêiner', meta.join(' · '), body);
 }
 
-export function gpuDetailBody(d: DeploymentView, log: BootLogLine[], now: number, actions = '', container: ContainerLogView | null = null): string {
+export function gpuDetailBody(d: DeploymentView, log: BootLogLine[], now: number, actions = '', container: ContainerLogView | null = null, incidents = ''): string {
   const boot = d.boot ?? { active: [], past: [], retryAt: null, expectedBootSeconds: null };
   const b = bootOf(d);
   const head = b ? `<p class="msg" role="status">${pill(b.stuck ? 'bad' : 'warn', bootHeadline(b))}</p>` : '';
@@ -122,7 +122,7 @@ export function gpuDetailBody(d: DeploymentView, log: BootLogLine[], now: number
   const lines = log.slice(-LOG_SHOWN).map(l => `${hhmm(l.at)} ${l.replicaId ? `[${l.replicaId}] ` : ''}${l.text}`).join('\n');
   const extract = lines ? `<pre class="log">${esc(lines)}</pre>` : '<p class="empty">Nenhuma linha registrada desde que o gateway subiu.</p>';
   return `<header class="ph"><p class="crumb"><a href="/admin/gpus">GPUs e máquinas</a> /</p><div class="pt"><h1 class="mono">${esc(d.name)}</h1>`
-    + `${actions ? `<div class="acts">${actions}</div>` : ''}</div></header>${head}${err}${panel('Máquina', '', facts(d))}${active}${retries}`
+    + `${actions ? `<div class="acts">${actions}</div>` : ''}</div></header>${incidents}${head}${err}${panel('Máquina', '', facts(d))}${active}${retries}`
     + panel('Últimos boots', '', past)
     + panel('Extrato do log', `gateway e provedor · ${hhmm(now)}`, extract) + containerPanel(d, container);
 }
