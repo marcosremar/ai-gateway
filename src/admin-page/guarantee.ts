@@ -42,7 +42,8 @@ function gpuState(link: LinkReport, d: DeploymentView | null): { state: string; 
 function cloudState(link: LinkReport, probe: FallbackProbeResult | null): { state: string; level: Level; working: boolean } {
   if (BROKEN.has(link.state)) return { state: 'falhou', level: 'bad', working: false };
   if (!probe) return { state: 'sem teste', level: 'warn', working: true };
-  return probe.ok ? { state: 'ok', level: 'ok', working: true } : { state: 'falhou no teste', level: 'bad', working: false };
+  if (!probe.ok) return { state: 'falhou no teste', level: 'bad', working: false };
+  return probe.content === 'mismatch' ? { state: 'conteúdo estranho', level: 'warn', working: true } : { state: 'ok', level: 'ok', working: true };
 }
 
 const providerOf = (target: string) => (target.startsWith('deployment:') ? target : target.split(':')[0]!);
@@ -104,7 +105,8 @@ type Measured = 'app' | 'all' | null;
 
 function linkFacts(l: ChainLink, measured: Measured): string {
   const facts = [
-    l.probe ? `teste ${l.probe.ok ? 'ok' : `falhou${l.probe.code ? ` (${l.probe.code})` : ''}`} às ${hhmm(l.probe.checkedAt)} · ${ms(l.probe.latencyMs)}` : '',
+    l.probe ? `teste ${l.probe.ok ? (l.probe.content === 'mismatch' ? `respondeu, ${l.probe.contentNote ?? 'conteúdo estranho'}` : l.probe.content === 'ok' ? 'ok, conteúdo conferido' : 'ok')
+      : `falhou${l.probe.code ? ` (${l.probe.code})` : ''}`} às ${hhmm(l.probe.checkedAt)} · ${ms(l.probe.latencyMs)}` : '',
     measured ? (l.p50Ms !== null ? `p50 ${ms(l.p50Ms)}` : 'p50 sem dado') : '',
     measured ? (l.share !== null ? `${pct(l.share)} da etapa em 24 h (${measured === 'app' ? 'este app' : 'todos os apps'})` : 'sem tráfego em 24 h')
       : 'sem telemetria de tráfego',

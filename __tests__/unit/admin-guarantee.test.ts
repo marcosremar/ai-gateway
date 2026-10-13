@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { scopeToApp, type AdminSnapshot } from '../../src/admin-page';
+import { recommendations, scopeToApp, type AdminSnapshot } from '../../src/admin-page';
 import { PAGES, renderStatus } from '../../src/admin-page/pages';
 import { services } from '../../src/admin-page/guarantee';
 import { idleGpu } from '../../src/deployments/idle';
@@ -114,5 +114,17 @@ describe('service guarantee', () => {
     const filtered = section(render(demoSnapshot(NOW, 'warn'), null, 'babelcast'), 'garantia');
     expect(filtered).toContain('babel-tts');
     expect(filtered).not.toContain('parle-stt');
+  });
+
+  it('shows a reserve that answers with the wrong content as a warning, with what came back, and suggests testing again', () => {
+    const snapshot = demoSnapshot(NOW, 'warn');
+    const html = renderStatus('n', snapshot, { now: NOW, csrf: 'c', actor: 'marcos', message: null, app: null, page: 'servicos' });
+    const reserves = html.slice(html.indexOf('<section id="reservas"'), html.indexOf('</section>', html.indexOf('<section id="reservas"')));
+    expect(reserves).toContain('respondeu, conteúdo estranho');
+    expect(reserves).toContain('áudio em silêncio (RMS 12)');
+    expect(reserves).toContain('conteúdo conferido');
+    expect(section(html, 'garantia')).toContain('respondeu, áudio em silêncio (RMS 12)');
+    const reco = recommendations({ s: snapshot, now: NOW, csrf: 'c', app: null, view: null }).find(r => r.id === 'reserve-content:tts:openrouter:openai/gpt-4o-mini-tts');
+    expect(reco).toMatchObject({ level: 'warn', action: { probe: true } });
   });
 });
