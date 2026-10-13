@@ -76,8 +76,18 @@ describe('app profile', () => {
     const apps = new AppRegistry(new MemoryAppStore());
     await apps.init();
     await expect(apps.putProfile('parle', PROFILE, { ownsDeployment: d => d !== 'speech' })).rejects.toMatchObject({ status: 403 });
-    expect(await apps.putProfile('parle', PROFILE, { ownsDeployment: () => true })).toEqual(PROFILE);
-    expect(apps.get('parle')!.profile).toEqual(PROFILE);
+    const stored = { ...PROFILE, name: null, description: null };
+    expect(await apps.putProfile('parle', PROFILE, { ownsDeployment: () => true })).toEqual(stored);
+    expect(apps.get('parle')!.profile).toEqual(stored);
+  });
+
+  it('keeps the app name and description when a profile update leaves them out', async () => {
+    const apps = new AppRegistry(new MemoryAppStore());
+    await apps.init();
+    await apps.putProfile('parle', { ...PROFILE, name: ' Parle ', description: 'Jogo de português' });
+    expect(await apps.putProfile('parle', PROFILE)).toMatchObject({ name: 'Parle', description: 'Jogo de português' });
+    expect(await apps.putProfile('parle', { ...PROFILE, description: null })).toMatchObject({ name: 'Parle', description: null });
+    await expect(apps.putProfile('parle', { ...PROFILE, name: 'x'.repeat(61) })).rejects.toMatchObject({ status: 400 });
   });
 
   it('a deployment serves the stages its app routes send it, one-GPU mode included', () => {
@@ -239,7 +249,7 @@ describe('over HTTP', () => {
     const byAdmin = await call('PUT', '/v1/apps/parle/profile', ADMIN, { requiresGpu: true, gpuDeployments: ['speech', 'later'] });
     expect(byAdmin.status).toBe(200);
     expect(await byAdmin.json()).toMatchObject({ profile: { gpuDeployments: ['speech', 'later'] }, warnings: [expect.stringMatching(/no warmSchedule/), expect.stringMatching(/'later' is not registered/)] });
-    expect(await (await call('GET', '/v1/apps/parle/profile', PARLE)).json()).toEqual({ app: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech', 'later'] } });
+    expect(await (await call('GET', '/v1/apps/parle/profile', PARLE)).json()).toEqual({ app: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech', 'later'], name: null, description: null } });
     expect((await call('PUT', '/v1/apps/parle/profile', ADMIN, { requiresGpu: 'yes' })).status).toBe(400);
   });
 

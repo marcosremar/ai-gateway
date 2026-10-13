@@ -63,21 +63,35 @@ export interface AppImage {
  * GPU deployments are part of what it delivers (parle: the detected language and the cloned voices only come from them),
  * so a turn the cloud fallback answers still answers, but is marked degraded and the app's status says so.
  */
-export interface AppProfile { requiresGpu: boolean; gpuDeployments: string[] }
+export interface AppProfile { requiresGpu: boolean; gpuDeployments: string[]; name?: string | null; description?: string | null }
+
+const PROFILE_FIELDS = new Set(['requiresGpu', 'gpuDeployments', 'name', 'description']);
+const MAX_NAME = 60;
+const MAX_DESCRIPTION = 240;
+
+function parseLabel(value: unknown, field: string, max: number): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  if (typeof value !== 'string' || value.trim().length > max) throw new AppError(400, `${field} must be a string of up to ${max} characters or null`);
+  return value.trim() || null;
+}
 
 const MAX_GPU_DEPLOYMENTS = 8;
 
 export function parseAppProfile(body: unknown): AppProfile {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'profile must be an object { requiresGpu, gpuDeployments }');
-  for (const key of Object.keys(body)) if (key !== 'requiresGpu' && key !== 'gpuDeployments') throw new AppError(400, `unknown field '${key}'`);
-  const { requiresGpu, gpuDeployments = [] } = body as { requiresGpu?: unknown; gpuDeployments?: unknown };
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'profile must be an object { requiresGpu, gpuDeployments, name?, description? }');
+  for (const key of Object.keys(body)) if (!PROFILE_FIELDS.has(key)) throw new AppError(400, `unknown field '${key}'`);
+  const { requiresGpu, gpuDeployments = [], name, description } = body as { requiresGpu?: unknown; gpuDeployments?: unknown; name?: unknown; description?: unknown };
   if (typeof requiresGpu !== 'boolean') throw new AppError(400, 'requiresGpu must be a boolean');
   if (!Array.isArray(gpuDeployments) || gpuDeployments.length > MAX_GPU_DEPLOYMENTS
     || gpuDeployments.some(d => typeof d !== 'string' || !NAME_RE.test(d))) {
     throw new AppError(400, `gpuDeployments must be a list of up to ${MAX_GPU_DEPLOYMENTS} deployment names`);
   }
   if (requiresGpu && !gpuDeployments.length) throw new AppError(400, 'requiresGpu needs at least one deployment in gpuDeployments');
-  return { requiresGpu, gpuDeployments: [...new Set(gpuDeployments as string[])] };
+  const labels = { name: parseLabel(name, 'name', MAX_NAME), description: parseLabel(description, 'description', MAX_DESCRIPTION) };
+  return {
+    requiresGpu, gpuDeployments: [...new Set(gpuDeployments as string[])],
+    ...Object.fromEntries(Object.entries(labels).filter(([, v]) => v !== undefined)),
+  };
 }
 
 export interface AppDeviceBlock { reason: string | null; by: string; at: number }
@@ -272,9 +286,11 @@ export class AppRegistry implements FallbackKeyStore {
     const profile = parseAppProfile(body);
     const foreign = opts.ownsDeployment ? profile.gpuDeployments.filter(d => !opts.ownsDeployment!(d)) : [];
     if (foreign.length) throw new AppError(403, `an app key may only name its own app's deployments: ${foreign.join(', ')}`);
-    this.account(app).profile = profile;
+    const stored = this.account(app).profile;
+    const merged = { name: stored?.name ?? null, description: stored?.description ?? null, ...profile };
+    this.account(app).profile = merged;
     await this.store.save(this.apps);
-    return profile;
+    return merged;
   }
 
   /**
