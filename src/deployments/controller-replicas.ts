@@ -28,6 +28,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     if (!(await this.rttGate(rt, m))) return; // still measuring, or released as too far
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
     const result = await this.checkReplica(rt, m);
+    p.last = result;
     if (result === 'down') p.downSince ??= this.now(); else delete p.downSince;
     if (result === 'ready') {
       // Replica lifecycle for telemetry (serve.ts maps these log lines to `replica.ready` / `replica.unhealthy`).
@@ -117,6 +118,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
   protected async release(m: ReplicaMachine, reason: string): Promise<void> {
     const rt = this.deployments.get(m.deployment);
     this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason, busy: rt ? this.busyOn(rt, m.id) : 0 });
+    this.boots.finish(m.id, reason, this.now());
     if ((reason === 'unhealthy' || reason === 'halted') && this.probes.get(m.id)?.everReady) this.noteLost(m.deployment);
     try {
       await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
@@ -185,6 +187,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     }
     rt.creating++;
     rt.spendNote = null;
+    this.boots.placingStart(spec.name, this.now());
     const created: { id?: string } = {};
     const spend: { cost: number; deployment: string; provider?: DeploymentProvider; machineType?: string } = { cost: 0, deployment: spec.name };
     this.pendingSpend.add(spend);
@@ -234,6 +237,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
           if (isOutOfStock(err)) rt.stockOut = { since: rt.stockOut?.since ?? this.now(), failures: (rt.stockOut?.failures ?? 0) + 1 };
         }
         this.log('deployments: create failed', { deployment: spec.name, error: rt.lastError });
+        this.boots.placingFailed(spec.name, rt.lastError, this.now());
       } finally {
         // A failed create cleans its own server up; anything left behind is listed again and planned as usual.
         if (created.id) this.creatingIds.delete(created.id);

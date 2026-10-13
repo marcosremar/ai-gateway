@@ -8,7 +8,9 @@ import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './control
 import { ReconcileLoop } from './controller-reconcile';
 import { vastUnfit } from './placement-walk';
 import { DEFAULT_NEAR, placementsOf } from './placements';
-import { pinnedIdleOver, planReplicas, replicaPhase } from './planner';
+import { bootTimeoutMinutesOn, pinnedIdleOver, planReplicas, replicaPhase } from './planner';
+import { bootStates, phaseDurations, type BootLogLine, type PhaseMark } from './boot-track';
+import type { Runtime } from './controller-state';
 import { DEFAULT_MAX_RTT_EXCESS_MS, DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
 import type { DeploymentSpec, DeploymentView, OffersPreview } from './types';
 import { distinctSessions, externalLoadOf, refusedSessions } from '../realtime/external-load';
@@ -128,6 +130,24 @@ export abstract class ControllerViews extends ReconcileLoop {
     };
   }
 
+  bootLog(name: string): BootLogLine[] {
+    return this.deployments.has(name) ? this.boots.view(name).log : [];
+  }
+
+  private bootView(rt: Runtime, now: number): DeploymentView['boot'] {
+    const { spec } = rt.record;
+    const tracked = this.boots.view(spec.name);
+    const timeout = bootTimeoutMinutesOn(spec, spec.provider);
+    const samples = Object.values(rt.record.measured ?? {}).flatMap(m => m.boot);
+    const withMs = <T extends { phases: PhaseMark[] }>(b: T, end: number) => ({ ...b, phases: phaseDurations(b.phases, end) });
+    return {
+      active: bootStates(tracked.active, tracked.past, now, timeout).map(b => withMs(b, now)),
+      past: tracked.past.map(b => withMs(b, b.endedAt)),
+      retryAt: rt.backoffUntil > now ? rt.backoffUntil : null,
+      expectedBootSeconds: samples.length ? [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)]! : null,
+    };
+  }
+
   protected view(name: string): DeploymentView | null {
     const rt = this.deployments.get(name);
     if (!rt) return null;
@@ -201,6 +221,7 @@ export abstract class ControllerViews extends ReconcileLoop {
           pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt,
         }),
       } : null,
+      boot: this.bootView(rt, now),
       warnings: [
         ...(rt.record.spec.coldStartWaitSeconds > maxWait
           ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]

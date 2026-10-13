@@ -392,6 +392,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
         pricePerHour: typeof i.dph_total === 'number' ? Math.round((i.dph_total / EUR_TO_USD) * 1000) / 1000 : null,
         expiresAt: vastEndsAt(i.end_date, i.duration, this.now()),
         ...(vastBootError(i) ? { bootError: vastBootError(i)! } : {}),
+        ...(i.actual_status ? { providerStatus: i.actual_status } : {}),
+        ...(i.status_msg?.trim() ? { providerMessage: i.status_msg.trim().slice(0, 300) } : {}),
       };
     });
   }

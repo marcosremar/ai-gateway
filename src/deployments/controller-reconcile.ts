@@ -7,6 +7,7 @@ import { isParked, type Runtime } from './controller-state';
 import { AutoscaleControl } from './controller-autoscale';
 import { CREATE_BACKOFF_MS } from './controller-replicas';
 import { isActive, planReplicas, replicaPhase } from './planner';
+import { bootPhaseOf } from './boot-track';
 import { usesScaleway, usesVast } from './spec';
 import { placementsOf } from './placements';
 import { PartialListError } from '../cpu-providers/scaleway-client';
@@ -136,6 +137,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment) && !this.parkedNow(m) && !this.stoppingNow(m))
       .map(m => this.probeOne(m)));
 
+    this.trackBoots();
     for (const [name, rt] of this.deployments) await this.reconcileDeployment(name, rt, failed);
     await this.settleNetworkReleases();
   }
@@ -209,6 +211,18 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     for (let i = 0; i < toCreate; i++) this.createReplica(rt);
     this.explain(rt, plan, decision, floor, blockedBy);
     if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
+  }
+
+  private trackBoots(): void {
+    const now = this.now();
+    for (const m of this.machines) {
+      if (!this.deployments.has(m.deployment) || this.parkedNow(m) || this.stoppingNow(m)) continue;
+      const probe = this.probes.get(m.id);
+      if (m.createdAt < this.startedAt && !this.poweredOnAt.has(m.id) && (!probe || probe.everReady)) continue;
+      this.boots.phase(m.deployment, m.id, bootPhaseOf(m, probe), now, this.poweredOnAt.get(m.id) ?? m.createdAt);
+      this.boots.providerMessage(m.deployment, m.id, m.providerMessage, now);
+    }
+    for (const id of this.boots.activeIds()) if (!this.machines.some(m => m.id === id) && !this.creatingIds.has(id)) this.boots.finish(id, 'gone', now);
   }
 
   private settleReleases(listed: ReplicaMachine[], failed: Set<DeploymentProvider>): void {

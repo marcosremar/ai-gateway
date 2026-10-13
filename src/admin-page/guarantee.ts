@@ -2,6 +2,7 @@ import type { ChainReport, LinkReport } from '../config/stage-chains';
 import type { DeploymentView } from '../deployments/types';
 import type { FallbackProbeResult } from '../telemetry/fallback-probe';
 import type { AdminApp, AdminSnapshot } from './render';
+import { bootHeadline, bootOf, detailHref } from './boot';
 import { appTitle, esc, hhmm, mark, ms, pct, pill, providerLabel, stageName, upOf, worst, type Ctx, type Level, type Section } from './ui';
 
 export type Verdict = 'garantido' | 'so-nuvem' | 'sem-reserva' | 'sem-garantia';
@@ -28,6 +29,8 @@ const BROKEN = new Set(['missing', 'pending', 'disabled', 'no_key', 'blocked', '
 
 function gpuState(link: LinkReport, d: DeploymentView | null): { state: string; level: Level; working: boolean } {
   if (link.state === 'ready') return { state: 'ligada', level: 'ok', working: true };
+  const boot = d && bootOf(d);
+  if (boot) return { state: bootHeadline(boot), level: boot.stuck ? 'bad' : 'warn', working: false };
   if (link.state === 'paused') return { state: 'pausada', level: 'warn', working: false };
   if (link.state === 'cold') {
     if (d?.status === 'warming') return { state: 'acordando', level: 'warn', working: false };
@@ -92,7 +95,7 @@ function linkName(l: ChainLink): string {
   const machine = l.deployment && upOf(l.deployment)[0];
   const where = machine ? ` <small class="inl">${esc(machine.machineType)} · ${esc(machine.zone)}</small>` : '';
   const kind = l.deployment ? ` <small class="inl">${esc(providerLabel(l.deployment))}</small>` : '';
-  return `${l.kind === 'own-gpu' ? 'GPU própria' : 'Outra máquina'} <code>${esc(name)}</code>${where}${kind}${l.deployment?.pinned ? ' <span class="pill info">fixada</span>' : ''}`;
+  return `${l.kind === 'own-gpu' ? 'GPU própria' : 'Outra máquina'} <a href="${detailHref({ name })}"><code>${esc(name)}</code></a>${where}${kind}${l.deployment?.pinned ? ' <span class="pill info">fixada</span>' : ''}`;
 }
 
 function linkFacts(l: ChainLink, measured: boolean): string {

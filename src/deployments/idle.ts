@@ -9,7 +9,7 @@ export interface IdleGpu { minutes: number; limitMinutes: number; eurPerHour: nu
 
 export function idleGpu(d: IdleView, now: number): IdleGpu | null {
   const up = d.replicas.filter(r => r.phase !== 'halted');
-  if (!up.length || d.warm || d.hold || activeWindow(d.spec.warmSchedule, now)) return null;
+  if (!up.some(r => r.phase === 'ready') || d.warm || d.hold || activeWindow(d.spec.warmSchedule, now)) return null;
   const startedAt = now - Math.max(...up.map(r => r.ageSeconds || 0)) * 1000;
   const last = Math.max(startedAt, d.lastRequestAt ? Date.parse(d.lastRequestAt) : -Infinity);
   const minutes = (now - last) / 60_000;

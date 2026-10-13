@@ -6,6 +6,7 @@ import type { StoredTelemetryEvent } from '../../src/telemetry/contract';
 import { adminTraffic } from '../../src/admin-page/traffic';
 import type { ChainReport, LinkState } from '../../src/config/stage-chains';
 import { parisDay, type SpendLedgerView } from '../../src/deployments/spend-ledger';
+import { withBoots } from './admin-boot';
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
 
@@ -81,7 +82,7 @@ function chain(gpu: string | null, gpuState: LinkState, cloud: string): ChainRep
 export function demoChains(state: DemoState): Record<string, Record<string, ChainReport>> {
   return {
     stt: { 'parle-stt': chain('speech-stack', 'ready', CLOUD['parle-stt']!) },
-    chat: { 'parle-chat': chain('speech-stack', 'ready', CLOUD['parle-chat']!), 'babel-chat': chain('babelcast-3090', 'ready', CLOUD['babel-chat']!) },
+    chat: { 'parle-chat': chain('speech-stack', 'ready', CLOUD['parle-chat']!), 'babel-chat': chain('babelcast-3090', state === 'ok' ? 'ready' : 'cold', CLOUD['babel-chat']!) },
     tts: { 'parle-tts': chain('speech-stack', state === 'bad' ? 'circuit_open' : 'ready', CLOUD['parle-tts']!), 'babel-tts': chain('babel-live', 'ready', CLOUD['babel-tts']!) },
   };
 }
@@ -120,8 +121,8 @@ export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnaps
     about: { commit: '0a52749c1d2e3f4a5b6c7d8e9f00112233445566', uptimeSeconds: 4 * 3600 + 1260, region: 'europe-west4', telemetryAt: iso(now, 0) },
   };
   if (state === 'ok') return allGreen(snapshot, now);
-  if (state === 'bad') return somethingDown(snapshot, now);
-  return snapshot;
+  if (state === 'bad') return withBoots(somethingDown(snapshot, now), now, true);
+  return withBoots(snapshot, now, false);
 }
 
 function allGreen(s: AdminSnapshot, now: number): AdminSnapshot {

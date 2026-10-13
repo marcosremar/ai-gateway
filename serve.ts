@@ -600,7 +600,8 @@ createAdminPage({
   },
   snapshot: () => ({
     reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
-    gpus: controller?.list() ?? null, gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
+    gpus: controller?.list() ?? null,
+    gpuLogs: Object.fromEntries((controller?.list() ?? []).map(d => [d.name, controller!.bootLog(d.name)])), gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
     machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
     apps: deployments?.apps.list().map(({ id }) => {
       const entry = deployments.apps.get(id);
