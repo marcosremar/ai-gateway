@@ -688,6 +688,7 @@ createAdminPage({
   },
   probe: () => fallbackProbe.check(),
   secrets: () => secretValues(process.env),
+  containerLog: async (name) => controller?.containerLog(name) ?? null,
   audit: (entry) => keyAudit.record(entry),
 }).mount(server);
 

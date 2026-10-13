@@ -8,6 +8,7 @@ import { AutoscaleControl } from './controller-autoscale';
 import { CREATE_BACKOFF_MS } from './controller-replicas';
 import { bootTimeoutMinutesOn, isActive, planReplicas, replicaPhase } from './planner';
 import { bootPhaseOf, bootStates } from './boot-track';
+import { STUCK_LOG_WAIT_MS, within } from './container-logs';
 import { closeEpisode, episodeAttempts, noteStuckRetry, stuckVerdict, STUCK_RETRY_MAX, wantedNow } from './stuck-retry';
 import { usesScaleway, usesVast } from './spec';
 import { placementsOf } from './placements';
@@ -237,6 +238,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     for (const stuck of bootStates(tracked.active, tracked.past, now, bootTimeoutMinutesOn(spec, spec.provider)).filter(b => b.stuck && b.replicaId)) {
       const m = this.machines.find(x => x.id === stuck.replicaId && x.deployment === spec.name);
       if (!m || (m.createdAt < this.startedAt && !this.poweredOnAt.has(m.id))) continue;
+      const captured = this.containerLogOf(m);
       const refusal = this.budgetRefusal(rt) ?? this.creditRefusal(m) ?? this.spendRefusal(0);
       const verdict = stuckVerdict({ enabled: spec.autoRetryStuckBoot !== false, wanted, state, refusal, now });
       if (verdict === 'exhausted' && !state.exhausted) {
@@ -249,6 +251,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       this.log('deployments: stuck boot, releasing to retry', {
         deployment: spec.name, id: m.id, phase: stuck.phase, minutes: entry.minutes, where: entry.where, attempt: entry.attempt, of: STUCK_RETRY_MAX,
       });
+      if (captured) await within(captured, STUCK_LOG_WAIT_MS);
       await this.release(m, 'boot-stuck');
     }
   }

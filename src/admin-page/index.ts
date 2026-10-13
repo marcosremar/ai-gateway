@@ -5,6 +5,7 @@ import { isCrossSite } from '../accounts/http';
 import { AttemptLimiter } from '../accounts/rate-limit';
 import { RateLimiter } from '../gateway/proxy/middleware/rate-limit';
 import { redact } from '../telemetry/alert-email';
+import type { ContainerLogView } from '../deployments/container-logs';
 import type { AdminAlert, AdminSnapshot } from './render';
 import { pageAt, renderGpuDetail, renderLogin, renderStatus } from './pages';
 import { scopeToApp } from './scope';
@@ -40,6 +41,7 @@ export interface AdminPageOptions {
   dismiss?: (id: string) => Promise<unknown>;
   sendDigest?: () => Promise<string | null>;
   secrets?: () => string[];
+  containerLog?: (deployment: string) => Promise<ContainerLogView | null>;
   audit?: (entry: { actor: string; action: string; names: string[]; ok: boolean; detail?: string }) => void;
   now?: () => number;
 }
@@ -249,14 +251,15 @@ export function createAdminPage(opts: AdminPageOptions) {
     html(res, 200, n => renderStatus(n, snapshot, { ...render, page: page?.id ?? 'geral' }));
   }
 
-  function gpuDetail(req: IncomingMessage, res: ServerResponse): void {
+  async function gpuDetail(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const found = sessionOf(req);
     if (!found) return loginFor(req, res);
     let name = '';
     try { name = decodeURIComponent((req.url ?? '').split('?')[0]!.slice('/admin/gpus/'.length).replace(/\/$/, '')); } catch { name = ''; }
     const { snapshot, render } = viewOf(req, found);
     if (!GPU_NAME.test(name) || !snapshot.gpus?.some(g => g.name === name)) return html(res, 404, n => renderLogin(n, 'GPU não encontrada para esta chave.'));
-    html(res, 200, n => renderGpuDetail(n, snapshot, name, render)!);
+    const container = await opts.containerLog?.(name).catch(() => null) ?? null;
+    html(res, 200, n => renderGpuDetail(n, snapshot, name, render, container)!);
   }
 
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([

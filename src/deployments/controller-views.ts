@@ -10,6 +10,8 @@ import { vastUnfit } from './placement-walk';
 import { DEFAULT_NEAR, placementsOf } from './placements';
 import { bootTimeoutMinutesOn, pinnedIdleOver, planReplicas, replicaPhase } from './planner';
 import { bootStates, phaseDurations, type BootLogLine, type PhaseMark } from './boot-track';
+import { PAGE_LOG_WAIT_MS, within, type ContainerLogView } from './container-logs';
+import { usesVast } from './spec';
 import type { Runtime } from './controller-state';
 import { DEFAULT_MAX_RTT_EXCESS_MS, DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
 import type { DeploymentSpec, DeploymentView, OffersPreview } from './types';
@@ -132,6 +134,17 @@ export abstract class ControllerViews extends ReconcileLoop {
 
   bootLog(name: string): BootLogLine[] {
     return this.deployments.has(name) ? this.boots.view(name).log : [];
+  }
+
+  async containerLog(name: string, waitMs = PAGE_LOG_WAIT_MS): Promise<ContainerLogView | null> {
+    const rt = this.deployments.get(name);
+    if (!rt) return null;
+    const cached = this.containerLogs.latest(name);
+    const readable = this.machines.filter(x => x.deployment === name && this.backends[this.providerOf(x)]?.containerLogs);
+    const m = readable.sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!m) return { reason: usesVast(rt.record.spec) && this.backends.vast?.containerLogs ? 'no-replica' : 'unsupported', pending: false, log: cached };
+    const log = await within(this.containerLogOf(m)!, waitMs);
+    return { reason: null, pending: !log, log: log ?? cached };
   }
 
   private bootView(rt: Runtime, now: number): DeploymentView['boot'] {

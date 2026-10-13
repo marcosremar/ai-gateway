@@ -79,6 +79,9 @@ export const LIST_STALE_MAX_MS = 90_000;
 export const LIST_BACKOFF_MS = 15_000;
 export const LIST_BACKOFF_MAX_MS = 120_000;
 
+const LOG_POLLS = 20;
+const LOG_POLL_MS = 500;
+
 export const vastLabelPrefix = (namespace: string) => `aigw:${namespace}:`;
 
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -417,6 +420,17 @@ export class VastDeploymentBackend implements DeploymentBackend {
     }
     this.hostOf.delete(machine.id);
     if (this.listCache) this.listCache.machines = this.listCache.machines.filter(m => m.id !== machine.id); // not listed again as alive
+  }
+
+  async containerLogs(machine: ReplicaMachine, tail: number): Promise<string> {
+    const { result_url: url } = await this.call<{ result_url?: unknown }>('PUT', `/instances/request_logs/${machine.id}/`, { tail: String(tail) });
+    if (typeof url !== 'string' || !url.startsWith('https://')) throw new Error('vast request_logs: no result_url');
+    for (let i = 0; i < LOG_POLLS; i++) {
+      if (i) await new Promise(r => setTimeout(r, LOG_POLL_MS));
+      const res = await this.fetchImpl(url, { signal: AbortSignal.timeout(5_000) }).catch(() => null);
+      if (res?.ok) return res.text();
+    }
+    throw new Error(`vast logs not uploaded after ${LOG_POLLS} tries`);
   }
 
   /** RTT from the gateway to the replica's nginx front (`ip` = public address:mapped port of :80). */

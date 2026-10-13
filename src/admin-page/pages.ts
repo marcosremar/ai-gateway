@@ -1,3 +1,4 @@
+import type { ContainerLogView } from '../deployments/container-logs';
 import type { DeploymentView } from '../deployments/types';
 import { bootHeadline, bootOf, gpuDetailBody } from './boot';
 import { services } from './guarantee';
@@ -225,11 +226,11 @@ export function renderStatus(nonce: string, s: AdminSnapshot, opts: RenderOption
   return page(nonce, `ai-gateway · ${own ? `${own.name} · ` : ''}${title}`, shell(f, content), true);
 }
 
-export function renderGpuDetail(nonce: string, s: AdminSnapshot, name: string, opts: RenderOptions): string | null {
+export function renderGpuDetail(nonce: string, s: AdminSnapshot, name: string, opts: RenderOptions, container: ContainerLogView | null = null): string | null {
   const d = s.gpus?.find(g => g.name === name);
   if (!d) return null;
   const f = frame(s, opts, 'gpus', `/admin/gpus/${encodeURIComponent(d.name)}`);
-  return page(nonce, `ai-gateway · ${d.name}`, shell(f, gpuDetailBody(d, s.gpuLogs?.[name] ?? [], opts.now, gpuActions(d, f.ctx))), true);
+  return page(nonce, `ai-gateway · ${d.name}`, shell(f, gpuDetailBody(d, s.gpuLogs?.[name] ?? [], opts.now, gpuActions(d, f.ctx), container)), true);
 }
 
 export function renderLogin(nonce: string, error: string | null, next = '/admin'): string {

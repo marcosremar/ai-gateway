@@ -2,7 +2,7 @@
 import { createServer, type OutgoingHttpHeaders, type ServerResponse } from 'http';
 import { networkInterfaces } from 'os';
 import { ADMIN_COOKIE, createAdminPage } from '../src/admin-page';
-import { demoSnapshot, demoStates, type DemoState } from '../__tests__/__fixtures__/admin-snapshot';
+import { demoContainerLog, demoSnapshot, demoStates, type DemoState } from '../__tests__/__fixtures__/admin-snapshot';
 
 const key = process.env.ADMIN_DEMO_KEY?.trim();
 if (!key) throw new Error('ADMIN_DEMO_KEY is required: the admin key the demo login accepts');
@@ -26,6 +26,7 @@ const page = createAdminPage({
   probe: async () => {},
   sendDigest: async () => { console.log('demo: digest not mailed (no mailer in the demo)'); return 'demo'; },
   secrets: () => (appKey ? [key, appKey] : [key]),
+  containerLog: async (name) => demoContainerLog(name, Date.now()),
 });
 
 function plainHttpCookie(headers: OutgoingHttpHeaders): OutgoingHttpHeaders {
