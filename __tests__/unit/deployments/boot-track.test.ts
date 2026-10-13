@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  BOOT_LOG_LINES, BootTracker, bootPhaseOf, bootStates, expectedPhaseMinutes, logText, PHASE_DEFAULT_MINUTES, type BootRecord,
+  BOOT_LOG_LINES, BootTracker, bootHistoryFile, bootPhaseOf, bootStates, expectedPhaseMinutes, logText, PHASE_DEFAULT_MINUTES, type BootHistory, type BootRecord,
 } from '../../../src/deployments/boot-track';
+import { mkdtemp, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
 import { MemoryDeploymentStore } from '../../../src/deployments/store';
@@ -72,6 +75,39 @@ describe('BootTracker', () => {
 
   it('log lines carry scalar fields only, never objects such as env', () => {
     expect(logText('deployments: create failed', { deployment: 'd', id: 'r', error: 'boom', env: { HF_TOKEN: 'x' }, n: 3 })).toBe('create failed error=boom n=3');
+  });
+});
+
+describe('boot history across a restart', () => {
+  const dirs: string[] = [];
+  afterEach(async () => { while (dirs.length) await rm(dirs.pop()!, { recursive: true, force: true }); });
+
+  function booted(t: BootTracker, replica: string, at: number) {
+    t.phase('d', replica, 'provisioning', at, at);
+    t.phase('d', replica, 'loading', at + 4 * MIN, at);
+    t.phase('d', replica, 'ready', at + 9 * MIN, at);
+  }
+
+  it('saves the past boots and the log to a file and a new tracker gets them back, newest kept last, capped', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'boots-'));
+    dirs.push(dir);
+    const path = join(dir, 'boot-history.json');
+    const before = new BootTracker();
+    for (let i = 0; i < 4; i++) booted(before, `r${i}`, T0 + i * 60 * MIN);
+    const source = (t: BootTracker) => ({ bootHistory: () => t.history(), restoreBootHistory: (h: Partial<BootHistory>) => t.restore(h) });
+    await bootHistoryFile(path, source(before)).save();
+    const after = new BootTracker();
+    booted(after, 'r-new-1', T0 + 10 * 60 * MIN);
+    booted(after, 'r-new-2', T0 + 11 * 60 * MIN);
+    await bootHistoryFile(path, source(after)).load();
+    const view = after.view('d');
+    expect(view.past.map(b => b.replicaId)).toEqual(['r-new-2', 'r-new-1', 'r3', 'r2', 'r1']);
+    expect(view.log.at(-1)!.text).toBe('phase ready');
+    expect(view.log.length).toBeLessThanOrEqual(BOOT_LOG_LINES);
+    expect(expectedPhaseMinutes('loading', view.past)).toBe(8);
+    after.restore({ past: { d: 'garbage' as never }, lines: undefined });
+    expect(after.view('d').past).toHaveLength(5);
+    await bootHistoryFile(join(dir, 'missing.json'), source(new BootTracker())).load();
   });
 });
 

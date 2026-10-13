@@ -1,4 +1,5 @@
 import type { ProbeResult, ReplicaMachine } from './types';
+import { readStateFile, writeStateFile } from './state-file';
 
 export type BootPhase = 'placing' | 'provisioning' | 'pulling' | 'starting' | 'loading' | 'ready';
 export type ActivePhase = Exclude<BootPhase, 'ready'>;
@@ -12,6 +13,8 @@ export interface PhaseMark { phase: BootPhase; at: number }
 export interface BootRecord { replicaId: string | null; startedAt: number; endedAt: number; result: 'ready' | 'failed' | 'interrupted'; reason: string | null; phases: PhaseMark[] }
 export interface BootLogLine { at: number; replicaId: string | null; text: string }
 export interface ActiveBoot { replicaId: string | null; phases: PhaseMark[] }
+export interface BootHistory { past: Record<string, BootRecord[]>; lines: Record<string, BootLogLine[]> }
+export const BOOT_HISTORY_SAVE_MS = 60_000;
 
 export interface BootState {
   phase: ActivePhase;
@@ -144,7 +147,44 @@ export class BootTracker {
     };
   }
 
+  history(): BootHistory {
+    return { past: Object.fromEntries(this.past), lines: Object.fromEntries(this.lines) };
+  }
+
+  restore(h: Partial<BootHistory>): void {
+    const merge = <T>(into: Map<string, T[]>, from: Record<string, T[]> | undefined, keep: number) => {
+      for (const [deployment, list] of Object.entries(from ?? {})) {
+        if (Array.isArray(list)) into.set(deployment, [...list.filter(x => x && typeof x === 'object'), ...(into.get(deployment) ?? [])].slice(-keep));
+      }
+    };
+    merge(this.past, h.past, BOOTS_KEPT);
+    merge(this.lines, h.lines, BOOT_LOG_LINES);
+  }
+
   private record(deployment: string, boot: BootRecord): void {
     this.past.set(deployment, [...(this.past.get(deployment) ?? []), boot].slice(-BOOTS_KEPT));
   }
+}
+
+export function bootHistoryFile(path: string, source: { bootHistory(): BootHistory; restoreBootHistory(h: Partial<BootHistory>): void },
+  log?: (msg: string, data?: Record<string, unknown>) => void) {
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const save = () => writeStateFile(path, JSON.stringify(source.bootHistory())).catch(err => log?.('boot history: write failed', { error: String(err) }));
+  return {
+    async load(): Promise<void> {
+      const read = await readStateFile<BootHistory>(path);
+      if (read.data) source.restoreBootHistory(read.data);
+    },
+    save,
+    start(intervalMs = BOOT_HISTORY_SAVE_MS): void {
+      if (timer) return;
+      timer = setInterval(() => void save(), intervalMs);
+      timer.unref?.();
+    },
+    async stop(): Promise<void> {
+      if (timer) clearInterval(timer);
+      timer = null;
+      await save();
+    },
+  };
 }

@@ -46,6 +46,7 @@ import {
   adminListWarning, adminUsersFromEnv, bootFilesRoute, deploymentsFromEnv, proxyIdleTimeoutMs, DEPLOYMENT_CREDENTIAL_KEYS, DEVICE_HEADER,
 } from './src/deployments';
 import { buildImages } from './src/deployments/build-images';
+import { bootHistoryFile } from './src/deployments/boot-track';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
 import { createOpsAlerts } from './src/telemetry/ops-alerts';
@@ -193,8 +194,11 @@ const deployments = configuredDeployments && await configuredDeployments.control
       'DEPLOYMENTS DISABLED: the state file cannot be read — cloud routes stay up; fix or restore the file and restart');
     return null;
   });
+const bootHistory = deployments && bootHistoryFile(join(stateDir, 'boot-history.json'), deployments.controller, (msg, data) => log.warn(data ?? {}, msg));
+await bootHistory?.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'BOOT HISTORY UNREADABLE: past boots start empty'));
 if (deployments) {
   deployments.controller.start();
+  bootHistory?.start();
   deployments.clientGpu.run();
   deployments.gpuHealth.probe.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
@@ -703,7 +707,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop(), spendLedger.stop()]);
+    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop(), spendLedger.stop(), bootHistory?.stop()]);
     const exit = (code: number) => void stateWritten.finally(() => process.exit(code));
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
