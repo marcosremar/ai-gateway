@@ -154,7 +154,7 @@ describe('spend ledger per stage', () => {
   it('shows the estimated part and the calls of unknown cost on the spend page, never as zero', () => {
     const html = renderStatus('n', demoSnapshot(NOW, 'warn'), { now: NOW, csrf: 'c', actor: 'marcos', message: null, app: null, page: 'gastos' });
     expect(html).toContain('Nuvem por etapa · 30 dias');
-    expect(html).toMatch(/nuvem US\$\s[\d,]+ \(US\$\s[\d,]+ estimado\)/);
+    expect(html).toMatch(/nuvem US\$\s[\d,]+ · [\d.]+ pedidos<\/small><small>US\$\s[\d,]+ estimado/);
     expect(html).toMatch(/[\d.]+ com custo desconhecido/);
     expect(html).toMatch(/Texto → fala<\/div><\/td><td class="n" data-l="Informado"><div class="v">—<\/div><\/td><td class="n" data-l="Estimado"><div class="v">—<\/div><\/td><td class="n" data-l="Chamadas sem preço"><div class="v">[\d.]+<small>custo desconhecido/);
   });
