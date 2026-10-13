@@ -5,13 +5,15 @@ import { isCrossSite } from '../accounts/http';
 import { AttemptLimiter } from '../accounts/rate-limit';
 import { RateLimiter } from '../gateway/proxy/middleware/rate-limit';
 import { redact } from '../telemetry/alert-email';
-import { renderGpuDetail, renderLogin, renderStatus, type AdminAlert, type AdminSnapshot } from './render';
+import type { AdminAlert, AdminSnapshot } from './render';
+import { pageAt, renderGpuDetail, renderLogin, renderStatus } from './pages';
 import { scopeToApp } from './scope';
 
 export type { AdminAbout, AdminAlert, AdminApp, AdminSnapshot } from './render';
 export { recommendations, type Recommendation } from './recommendations';
 export { adminTraffic, type AdminTraffic } from './traffic';
 export { scopeToApp } from './scope';
+export { ANCHOR_PAGE, PAGES } from './pages';
 
 export const ADMIN_ANCHORS = ['recomendacoes', 'garantia', 'gastos', 'reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps', 'trafego', 'atividade'] as const;
 
@@ -21,7 +23,8 @@ const LOGIN_LIMIT = { limit: 10, windowMs: 15 * 60_000 };
 const BODY_MAX = 4096;
 const ALERTS_KEPT = 50;
 const APP_FILTER = /^[A-Za-z0-9._-]{1,64}$/;
-const NEXT = /^\/admin(\?app=[A-Za-z0-9._-]{1,64})?(#[a-z]{1,16})?$/;
+const PAGE_PATH = /^\/admin(\/(servicos|gpus|gastos|chaves|atividade|gpus\/[a-z0-9][a-z0-9-]{0,39}))?$/;
+const NEXT = /^\/admin(\/(servicos|gpus|gastos|chaves|atividade|gpus\/[a-z0-9][a-z0-9-]{0,39}))?(\?app=[A-Za-z0-9._-]{1,64})?(#[a-z][a-z0-9-]{0,40})?$/;
 const GPU_NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const RECO_ID = /^[a-z-]{1,32}(:[A-Za-z0-9._:/@ -]{1,200})?$/;
 
@@ -157,6 +160,11 @@ export function createAdminPage(opts: AdminPageOptions) {
     };
   }
 
+  const backTo = (form: URLSearchParams, fallback: string, message: string, anchor = '') => {
+    const back = form.get('back') ?? '';
+    return `${PAGE_PATH.test(back) ? back : fallback}?msg=${encodeURIComponent(message)}${PAGE_PATH.test(back) ? '' : anchor}`;
+  };
+
   const logout = guarded((res, { token }) => {
     sessions.delete(token);
     redirect(res, '/admin', { 'Set-Cookie': cookie('', 0) });
@@ -173,11 +181,11 @@ export function createAdminPage(opts: AdminPageOptions) {
     return Boolean(session.actor.mayPark?.()) && opts.snapshot().gpus?.find(d => d.name === name)?.app === app;
   }
 
-  const probe = guarded((res, { session }) => {
+  const probe = guarded((res, { session, form }) => {
     if (session.role !== 'admin') return refuse(res, session, 'admin-page.probe', []);
     opts.audit?.({ actor: session.actor.name, action: 'admin-page.probe', names: [], ok: true });
     void opts.probe().catch(() => {});
-    redirect(res, `/admin?msg=${encodeURIComponent('Teste das reservas iniciado; recarregue em 30 s.')}#reservas`);
+    redirect(res, backTo(form, '/admin/servicos', 'Teste das reservas iniciado; recarregue em 30 s.', '#reservas'));
   });
 
   const park = guarded(async (res, { session, form }) => {
@@ -185,7 +193,7 @@ export function createAdminPage(opts: AdminPageOptions) {
     if (!mayPark(session, name)) return refuse(res, session, 'admin-page.park', [name]);
     const parked = await opts.park(name, session.actor).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
     opts.audit?.({ actor: session.actor.name, action: 'admin-page.park', names: [name], ok: !parked, ...(parked ? { detail: parked } : {}) });
-    redirect(res, `/admin?msg=${encodeURIComponent(parked ? `Falhou ao estacionar ${name}: ${parked}` : `${name} estacionada.`)}#gpus`);
+    redirect(res, backTo(form, '/admin/gpus', parked ? `Falhou ao estacionar ${name}: ${parked}` : `${name} estacionada.`, '#gpus'));
   });
 
   const pin = guarded(async (res, { session, form }) => {
@@ -195,7 +203,7 @@ export function createAdminPage(opts: AdminPageOptions) {
     const failed = await opts.pin(name, on).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
     opts.audit?.({ actor: session.actor.name, action: on ? 'admin-page.pin' : 'admin-page.unpin', names: [name], ok: !failed, ...(failed ? { detail: failed } : {}) });
     const done = on ? `${name} fixada: uma réplica fica ligada e estaciona após 1 h sem uso.` : `${name} solta: desliga quando ficar sem uso.`;
-    redirect(res, `/admin?msg=${encodeURIComponent(failed ? `Falhou ao ${on ? 'fixar' : 'soltar'} ${name}: ${failed}` : done)}#gpus`);
+    redirect(res, backTo(form, '/admin/gpus', failed ? `Falhou ao ${on ? 'fixar' : 'soltar'} ${name}: ${failed}` : done, '#gpus'));
   });
 
   const dismiss = guarded(async (res, { session, form }) => {
@@ -204,38 +212,47 @@ export function createAdminPage(opts: AdminPageOptions) {
     if (!RECO_ID.test(id)) return redirect(res, '/admin#recomendacoes');
     await opts.dismiss(id);
     opts.audit?.({ actor: session.actor.name, action: 'admin-page.dismiss', names: [id], ok: true });
-    redirect(res, `/admin?msg=${encodeURIComponent('Recomendação oculta por 7 dias.')}#recomendacoes`);
+    redirect(res, backTo(form, '/admin', 'Recomendação oculta por 7 dias.', '#recomendacoes'));
   });
 
-  function status(req: IncomingMessage, res: ServerResponse): void {
+  function viewOf(req: IncomingMessage, found: { session: Session }) {
     const query = new URL(req.url ?? '/', 'http://x').searchParams;
     const app = query.get('app');
-    const appFilter = app && APP_FILTER.test(app) ? app : null;
-    const found = sessionOf(req);
-    if (!found) {
-      html(res, 200, n => renderLogin(n, null, appFilter ? `/admin?app=${appFilter}` : '/admin'));
-      return;
-    }
-    const message = query.get('msg');
     const { actor, csrf } = found.session;
-    const snapshot = actor.app ? scopeToApp(opts.snapshot(), actor.app) : opts.snapshot();
-    const view = actor.app ? { id: actor.app, canPark: Boolean(actor.mayPark?.()) } : null;
-    html(res, 200, n => renderStatus(n, snapshot, { now: now(), csrf, actor: actor.name, message, app: appFilter, view }));
+    return {
+      snapshot: actor.app ? scopeToApp(opts.snapshot(), actor.app) : opts.snapshot(),
+      render: { now: now(), csrf, actor: actor.name, message: query.get('msg'), app: app && APP_FILTER.test(app) ? app : null, view: actor.app ? { id: actor.app, canPark: Boolean(actor.mayPark?.()) } : null },
+    };
+  }
+
+  function loginFor(req: IncomingMessage, res: ServerResponse): void {
+    const [path, search = ''] = (req.url ?? '/admin').split('?');
+    const app = new URLSearchParams(search).get('app');
+    const next = `${path!.replace(/\/$/, '') || '/admin'}${app && APP_FILTER.test(app) ? `?app=${app}` : ''}`;
+    html(res, 200, n => renderLogin(n, null, NEXT.test(next) ? next : '/admin'));
+  }
+
+  function status(req: IncomingMessage, res: ServerResponse): void {
+    const found = sessionOf(req);
+    if (!found) return loginFor(req, res);
+    const page = pageAt((req.url ?? '/').split('?')[0]!.replace(/\/$/, '') || '/admin');
+    const { snapshot, render } = viewOf(req, found);
+    html(res, 200, n => renderStatus(n, snapshot, { ...render, page: page?.id ?? 'geral' }));
   }
 
   function gpuDetail(req: IncomingMessage, res: ServerResponse): void {
     const found = sessionOf(req);
-    if (!found) return redirect(res, '/admin');
+    if (!found) return loginFor(req, res);
     let name = '';
     try { name = decodeURIComponent((req.url ?? '').split('?')[0]!.slice('/admin/gpus/'.length).replace(/\/$/, '')); } catch { name = ''; }
-    const { actor } = found.session;
-    const snapshot = actor.app ? scopeToApp(opts.snapshot(), actor.app) : opts.snapshot();
+    const { snapshot, render } = viewOf(req, found);
     if (!GPU_NAME.test(name) || !snapshot.gpus?.some(g => g.name === name)) return html(res, 404, n => renderLogin(n, 'GPU não encontrada para esta chave.'));
-    html(res, 200, n => renderGpuDetail(n, snapshot, name, now())!);
+    html(res, 200, n => renderGpuDetail(n, snapshot, name, render)!);
   }
 
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([
-    ['GET /admin', status], ['POST /admin/login', login],
+    ['GET /admin', status], ['GET /admin/servicos', status], ['GET /admin/gpus', status], ['GET /admin/gastos', status], ['GET /admin/chaves', status],
+    ['GET /admin/atividade', status], ['POST /admin/login', login],
     ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss],
   ]);
 

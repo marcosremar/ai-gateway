@@ -5,7 +5,7 @@ import { join } from 'path';
 import { SpendLedger, parisDay, parisMidnightAfter } from '../../src/deployments/spend-ledger';
 import type { DeploymentView } from '../../src/deployments/types';
 import { recommendations, scopeToApp, type AdminSnapshot } from '../../src/admin-page';
-import { renderStatus } from '../../src/admin-page/render';
+import { PAGES, renderStatus } from '../../src/admin-page/pages';
 import { demoSnapshot } from '../__fixtures__/admin-snapshot';
 
 const dirs: string[] = [];
@@ -106,14 +106,14 @@ describe('spend ledger', () => {
 
 const NOW = Date.parse('2026-10-13T10:00:00Z');
 const render = (s: AdminSnapshot, view: { id: string; canPark: boolean } | null = null) =>
-  renderStatus('n', s, { now: NOW, csrf: 'c', actor: view?.id ?? 'marcos', message: null, app: null, view });
+  PAGES.map(p => renderStatus('n', s, { now: NOW, csrf: 'c', actor: view?.id ?? 'marcos', message: null, app: null, view, page: p.id })).join('');
 const section = (html: string, id: string) => html.slice(html.indexOf(`<section id="${id}"`), html.indexOf('</section>', html.indexOf(`<section id="${id}"`)));
 
 describe('spend chart', () => {
   it('draws 30 days of stacked bars per app with names, a total per day and today / 7 / 30-day sums', () => {
     const html = render(demoSnapshot(NOW, 'warn'));
     const spend = section(html, 'gastos');
-    expect(spend).toContain('<h2>Gastos por dia</h2>');
+    expect(spend).toContain('<h2>Gasto de GPU por dia</h2>');
     expect(spend.match(/<g><title>/g)).toHaveLength(30);
     expect(spend).toMatch(/<title>13\/10: total GPU [^<]*— Parle [^<]*; Babelcast /);
     expect(spend).toContain('<i class="c0"></i>Parle');
@@ -157,7 +157,7 @@ describe('recommendations', () => {
 
   it('stays quiet without data that triggers a rule', () => {
     expect(ids(quiet())).toEqual([]);
-    expect(section(render(quiet()), 'recomendacoes')).toContain('Nada a otimizar agora');
+    expect(section(render(quiet()), 'recomendacoes')).toContain('Nada a fazer agora');
   });
 
   it('fires each rule on its own data', () => {
@@ -199,11 +199,13 @@ describe('recommendations', () => {
     expect(html).not.toContain('/admin/park');
   });
 
-  it('summarises the top recommendations in the overview', () => {
-    const html = render(demoSnapshot(NOW, 'warn'));
-    const overview = html.slice(html.indexOf('id="visao"'), html.indexOf('<section'));
-    expect(overview).toContain('class="rsum"');
-    expect(overview.match(/<li><span class="mark/g)?.length).toBeGreaterThan(0);
+  it('puts the recommendations that need action on the overview and folds the tidy-up ones', () => {
+    const html = renderStatus('n', demoSnapshot(NOW, 'warn'), { now: NOW, csrf: 'c', actor: 'marcos', message: null, app: null });
+    const list = section(html, 'recomendacoes');
+    expect(list).toContain('<h2>O que fazer</h2>');
+    expect(list.indexOf('speech-stack ligada fora da janela de aula')).toBeLessThan(list.indexOf('<details class="more"'));
+    expect(list.slice(list.indexOf('<details class="more"'))).toContain('parle-bridge-shadow sem uso');
+    expect(list).toContain('<a class="btn" href="/admin/gastos">Ver os gastos por dia</a>');
   });
 
   it('shows build, uptime, region and freshness in the status bar', () => {

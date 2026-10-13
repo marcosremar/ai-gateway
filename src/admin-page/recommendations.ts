@@ -13,7 +13,7 @@ export interface Recommendation {
   saw: string;
   why: string;
   impact: { amount: number; unit: '€' | 'US$'; text: string } | null;
-  action: { park: string } | { probe: true } | { text: string };
+  action: { park: string } | { probe: true } | { text: string } | { go: string; label: string };
 }
 
 const IDLE_TAIL_TARGET_MIN = 15;
@@ -147,7 +147,7 @@ function serviceRules(s: AdminSnapshot): Recommendation[] {
           id: 'turn-latency', level: 'warn', title: 'Turno de voz acima da meta',
           saw: `fala → texto ${ms(parts[0])} + conversa ${ms(parts[1])} + texto → fala ${ms(parts[2])} = ${ms(turn)} (p50, 24 h)`,
           why: `A meta do parle é 1–1,5 s por turno; acima disso a conversa parece travar.`,
-          impact: null, action: { text: 'ver a etapa mais lenta em Tráfego › Por etapa' },
+          impact: null, action: { go: '/admin/servicos#trafego', label: 'Ver o tráfego por etapa' },
         });
       }
     }
@@ -158,7 +158,7 @@ function serviceRules(s: AdminSnapshot): Recommendation[] {
           id: `stage-p95:${l.key}`, level: 'warn', title: `${stageName(l.key)} lenta no p95`,
           saw: `p95 ${ms(l.p95Ms)} · p50 ${ms(l.p50Ms)} · ${count(calls)} chamadas em 24 h`,
           why: 'Uma em cada vinte respostas sozinha já passa do turno inteiro.',
-          impact: null, action: { text: 'ver Tráfego › Por provedor' },
+          impact: null, action: { go: '/admin/servicos#trafego', label: 'Ver o tráfego por provedor' },
         });
       }
       if (calls >= FALLBACK_MIN_CALLS && l.fallbacks / calls >= FALLBACK_SHARE) {
@@ -166,7 +166,7 @@ function serviceRules(s: AdminSnapshot): Recommendation[] {
           id: `stage-fallback:${l.key}`, level: 'bad', title: `${stageName(l.key)} servida pela reserva na maior parte do tempo`,
           saw: `${count(l.fallbacks)} desvios em ${count(calls)} chamadas (${pct(l.fallbacks / calls)})`,
           why: 'A GPU desta etapa está paga mas não responde: a rota para ela pode estar quebrada.',
-          impact: null, action: { text: 'conferir o deployment da etapa em GPUs e o probe do app' },
+          impact: null, action: { go: '/admin/gpus', label: 'Conferir as GPUs' },
         });
       }
     }
@@ -216,7 +216,7 @@ function trendRules(ctx: Ctx): Recommendation[] {
       id: `spend-trend:${app}`, level: 'warn', title: `${appTitle(app, ctx.s.apps.find(a => a.id === app)?.profile).name} gastando acima do normal`,
       saw: `GPU hoje ${money(now)} · média de ${prev.length} dias ${money(avg)} (${pct(now / avg - 1)} acima)`,
       why: 'Um salto no gasto costuma ser uma GPU esquecida ou uma janela de aula mal configurada.',
-      impact: { amount: now - avg, unit: '€', text: `${money(now - avg)} acima da média hoje` }, action: { text: 'ver Gastos por dia e GPUs' },
+      impact: { amount: now - avg, unit: '€', text: `${money(now - avg)} acima da média hoje` }, action: { go: '/admin/gastos', label: 'Ver os gastos por dia' },
     });
   }
   return out;
@@ -236,23 +236,38 @@ function actionOf(r: Recommendation, ctx: Ctx): string {
   const { csrf, view } = ctx;
   if ('park' in r.action) {
     const own = !view || (view.canPark && ctx.s.gpus?.find(d => d.name === (r.action as { park: string }).park)?.app === view.id);
-    return own ? form('/admin/park', csrf, 'Estacionar', `Estacionar ${r.action.park}?`, { name: r.action.park }, 'danger') : `<code>${esc(`estacionar ${r.action.park}`)}</code>`;
+    return own ? form('/admin/park', csrf, 'Estacionar', `Estacionar ${r.action.park}?`, { name: r.action.park }, 'danger', ctx.path)
+      : `<code>${esc(`estacionar ${r.action.park}`)}</code>`;
   }
-  if ('probe' in r.action) return view ? '<span class="t">peça ao admin para testar as reservas</span>' : form('/admin/probe', csrf, 'Testar as reservas', '');
+  if ('go' in r.action) return `<a class="btn" href="${esc(r.action.go)}">${esc(r.action.label)}</a>`;
+  if ('probe' in r.action) return view ? '<span class="t">peça ao admin para testar as reservas</span>' : form('/admin/probe', csrf, 'Testar as reservas', '', {}, '', ctx.path);
   return `<code>${esc(r.action.text)}</code>`;
 }
 
+const recoItem = (r: Recommendation, ctx: Ctx) => `<li class="reco ${r.level}">${mark(r.level)}<div class="rb"><div class="rt"><b>${esc(r.title)}</b>${
+  r.impact ? `<span class="amt">${esc(r.impact.text)}</span>` : ''}</div>`
+  + `<details><summary>O que vimos e por quê</summary><dl><dt>Visto</dt><dd>${esc(r.saw)}</dd><dt>Por quê</dt><dd>${esc(r.why)}</dd></dl></details>`
+  + `<div class="ra">${actionOf(r, ctx)}${ctx.view ? '' : form('/admin/dismiss', ctx.csrf, 'Ocultar 7 dias', '', { id: r.id }, 'quiet', ctx.path)}</div></div></li>`;
+
+function badgeOf(urgent: Recommendation[]): string {
+  const bad = urgent.filter(r => r.level === 'bad').length;
+  if (bad) return `<span class="pill bad">${bad === 1 ? '1 urgente' : `${count(bad)} urgentes`}</span>`;
+  return `<span class="pill info">${!urgent.length ? 'nada urgente' : urgent.length === 1 ? '1 a revisar' : `${count(urgent.length)} a revisar`}</span>`;
+}
+
 export function recoSection(ctx: Ctx, list: Recommendation[]): Section {
-  const items = list.map(r => `<li class="reco ${r.level}">${mark(r.level)}<div class="rb"><div class="rt"><b>${esc(r.title)}</b>${
-    r.impact ? `<span class="amt">${esc(r.impact.text)}</span>` : ''}</div>`
-    + `<dl><dt>Visto</dt><dd>${esc(r.saw)}</dd><dt>Por quê</dt><dd>${esc(r.why)}</dd></dl>`
-    + `<div class="ra">${actionOf(r, ctx)}${ctx.view ? '' : form('/admin/dismiss', ctx.csrf, 'Ocultar por 7 dias', '', { id: r.id }, 'quiet')}</div></div></li>`).join('');
+  const urgent = list.filter(r => r.level !== 'ok').sort((a, b) => RANK[a.level] - RANK[b.level]);
+  const tidy = list.filter(r => r.level === 'ok');
   const idleWaste = list.filter(r => r.impact?.unit === '€' && r.id.startsWith('gpu-')).reduce((a, r) => a + r.impact!.amount, 0);
+  const more = tidy.length
+    ? `<details class="more"${urgent.length ? '' : ' open'}><summary>${tidy.length === 1 ? '1 sugestão de economia e arrumação' : `${count(tidy.length)} sugestões de economia e arrumação`}</summary>`
+      + `<ul class="recos">${tidy.map(r => recoItem(r, ctx)).join('')}</ul></details>` : '';
   return {
-    id: 'recomendacoes', title: 'Recomendações', count: list.length, actions: '', level: 'ok',
-    badge: `<span class="pill info">${list.length === 1 ? '1 sugestão' : `${count(list.length)} sugestões`}</span>`,
-    note: list.slice(0, 2).map(r => r.title).join(' · '),
-    meta: `${list.length} a partir dos dados de agora${idleWaste ? ` · ${money(idleWaste)}/h em GPU sem uso` : ''} · ordem: € primeiro, depois risco`,
-    body: list.length ? `<ul class="recos">${items}</ul>` : '<p class="empty">Nada a otimizar agora: nenhuma regra disparou com os dados atuais.</p>',
+    id: 'recomendacoes', title: 'O que fazer', count: urgent.length, actions: '', level: 'ok', info: true,
+    badge: badgeOf(urgent),
+    notes: urgent.map(r => r.title),
+    meta: `${idleWaste ? `${money(idleWaste)}/h em GPU sem uso · ` : ''}€ primeiro, depois risco`,
+    body: list.length ? `${urgent.length ? `<ul class="recos">${urgent.map(r => recoItem(r, ctx)).join('')}</ul>` : ''}${more}`
+      : '<p class="empty">Nada a fazer agora: nenhuma regra disparou com os dados atuais.</p>',
   };
 }
