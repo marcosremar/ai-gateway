@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
 import { AccessKeys } from '../../src/config/access-keys';
-import { ADMIN_ANCHORS, ADMIN_COOKIE, ANCHOR_PAGE, PAGES, createAdminPage } from '../../src/admin-page';
+import { ADMIN_ANCHORS, ADMIN_COOKIE, ANCHOR_PAGE, PAGES, createAdminPage, recommendations, scopeToApp } from '../../src/admin-page';
 import { demoSnapshot } from '../__fixtures__/admin-snapshot';
 import { renderStatus } from '../../src/admin-page/pages';
-import { adminTraffic } from '../../src/admin-page/traffic';
+import { adminTraffic, answeredShare, gpuShare, sloLevel } from '../../src/admin-page/traffic';
 
 const ADMIN_KEY = 'gw_admin_0123456789abcdef0123';
 const CLIENT_KEY = 'gw_client_0123456789abcdef012';
@@ -197,7 +197,9 @@ describe('admin page (/admin)', () => {
     for (const other of ['babelcast', 'Babelcast', 'babel-live', 'babel-tts', 'gpt-4o-mini-tts', 'legendas-ao-vivo', 'parle-dev', 'agentes', 'marcos', 'palco', 'm-7c1e', 'scaleway']) {
       expect(html).not.toContain(other);
     }
-    for (const hidden of ['saldos', 'maquinas', 'trafego']) {
+    expect(html).toContain('id="trafego"');
+    expect(html).not.toContain('Por app');
+    for (const hidden of ['saldos', 'maquinas']) {
       expect(html).not.toContain(`id="${hidden}"`);
       expect(html).not.toContain(`href="#${hidden}"`);
     }
@@ -490,6 +492,48 @@ describe('adminTraffic', () => {
     expect(t.providers.map(p => p.key)).toEqual(['openrouter', 'deployment:speech-stack']);
     expect(t.activity).toEqual([{ at: new Date(now - 5 * 60_000).toISOString(), event: 'replica.ready', level: 'info', deployment: 'speech-stack', replicaId: 'r1' }]);
   });
+  it('splits the calls by the app of the key, with its answered share, fallbacks and GPU share', () => {
+    const rows = [
+      ...[300, 400].map((ms, i) => row(10 + i, 'route.served', { app: 'parle', durMs: ms, attrs: { stage: 'tts', provider: 'deployment:speech-stack' } })),
+      row(9, 'route.served', { app: 'parle', durMs: 500, attrs: { stage: 'tts', provider: 'openrouter' } }),
+      row(8, 'route.fallback', { app: 'parle', attrs: { stage: 'tts', provider: 'deployment:speech-stack' } }),
+      row(7, 'route.unavailable', { app: 'babelcast', level: 'error', durMs: 30_000, attrs: { stage: 'chat' } }),
+      row(6, 'route.served', { durMs: 100, attrs: { stage: 'stt', provider: 'openrouter' } }),
+    ].sort((a: { rxTs: number }, b: { rxTs: number }) => a.rxTs - b.rxTs);
+    const t = adminTraffic(rows, now);
+    expect(t.total).toMatchObject({ served: 4, failed: 1, fallbacks: 1 });
+    expect(t.apps).toEqual([
+      expect.objectContaining({ key: 'parle', served: 3, failed: 0, fallbacks: 1 }),
+      expect.objectContaining({ key: 'babelcast', served: 0, failed: 1 }),
+    ]);
+    expect(t.byApp!.parle!.links.find(l => l.key === 'tts|deployment:speech-stack')).toMatchObject({ served: 2, fallbacks: 1, p50Ms: 300 });
+    expect(gpuShare(t.byApp!.parle!)).toBeCloseTo(2 / 3);
+    expect(answeredShare(t.apps![1]!)).toBe(0);
+    expect(sloLevel(t.apps![1]!)).toBe('warn');
+    expect(sloLevel({ served: 190, failed: 10 })).toBe('bad');
+    expect(sloLevel({ served: 1990, failed: 10 })).toBe('ok');
+  });
+
+  it('shows the calls per app to the admin, one app with ?app=, and the app key its own calls only', () => {
+    const now = Date.parse('2026-10-13T10:00:00Z');
+    const snapshot = demoSnapshot(now, 'bad');
+    const opts = { now, csrf: 'c', actor: 'marcos', message: null, page: 'servicos' };
+    const section = (html: string) => html.slice(html.indexOf('<section id="trafego"'), html.indexOf('</section>', html.indexOf('<section id="trafego"')));
+    const all = section(renderStatus('n', snapshot, { ...opts, app: null }));
+    expect(all).toContain('Por app');
+    expect(all).toContain('/admin/servicos?app=babelcast#trafego');
+    expect(all).toContain('Respondidas');
+    expect(renderStatus('n', snapshot, { ...opts, app: null, page: 'geral' })).toMatch(/Parle respondeu \d/);
+    const parle = section(renderStatus('n', snapshot, { ...opts, app: 'parle' }));
+    expect(parle).toContain('Só o app <b>parle</b>');
+    expect(parle).not.toContain('Por app');
+    expect(parle).not.toContain('deployment:babel-live');
+    const own = section(renderStatus('n', scopeToApp(snapshot, 'babelcast'), { ...opts, app: null, view: { id: 'babelcast', canPark: false } }));
+    expect(own).toContain('deployment:babel-live');
+    expect(own).not.toContain('speech-stack');
+    expect(recommendations({ s: snapshot, now, csrf: 'c', app: null, view: null }).map(r => r.id)).toContain('app-slo:parle');
+  });
+
   it('names each app and says what it is for', () => {
     const now = Date.parse('2026-10-13T10:00:00Z');
     const snapshot = demoSnapshot(now, 'ok');

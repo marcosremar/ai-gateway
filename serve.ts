@@ -447,7 +447,7 @@ const telemetry = telemetryFromEnv(process.env, {
 });
 if (telemetry) {
   await telemetry.start();
-  setGatewayTelemetrySink((event) => telemetry.ingest.ingestOwn(event));
+  setGatewayTelemetrySink((event, caller) => telemetry.ingest.ingestOwn(event, caller && appOfUser(caller)));
   latency = () => latencyReport(telemetry.store.rows(), Date.now());
   log.log({ rows: telemetry.store.size }, 'Telemetry enabled');
 }

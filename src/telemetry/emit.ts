@@ -9,9 +9,10 @@
  */
 
 import type { TelemetryAttrs, TelemetryEvent, TelemetryLevel } from './contract';
+import { getLogContext } from '../logger';
 import { currentTraceId, newTraceId } from './trace-context';
 
-export type TelemetrySink = (event: TelemetryEvent) => void;
+export type TelemetrySink = (event: TelemetryEvent, caller?: string) => void;
 
 let sink: TelemetrySink | null = null;
 
@@ -46,7 +47,8 @@ export function emitGatewayEvent(event: string, fields: GatewayEventFields = {})
       ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)),
       ...(Object.keys(clean).length ? { attrs: clean } : {}),
     };
-    sink(out);
+    const caller = getLogContext()?.userId;
+    sink(out, typeof caller === 'string' ? caller : undefined);
   } catch {
     // Telemetry must never break the request or loop that reports it.
   }
