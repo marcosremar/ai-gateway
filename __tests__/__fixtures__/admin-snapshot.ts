@@ -6,7 +6,7 @@ import { DEFAULT_GPU_POLICY } from '../../src/config/access-keys';
 import type { StoredTelemetryEvent } from '../../src/telemetry/contract';
 import { adminTraffic, type DayUse } from '../../src/admin-page/traffic';
 import type { ChainReport, LinkState } from '../../src/config/stage-chains';
-import { parisDay, type SpendLedgerView } from '../../src/deployments/spend-ledger';
+import { parisDay, type SpendDay, type SpendLedgerView } from '../../src/deployments/spend-ledger';
 import { withBoots } from './admin-boot';
 import { findOverspend } from '../../src/telemetry/overspend';
 import type { ModelPrice } from '../../src/admin-page/model-prices';
@@ -69,6 +69,7 @@ function trafficRows(now: number, state: DemoState): StoredTelemetryEvent[] {
   for (let h = 7 * 24 - 1; h >= 0; h--) {
     push(now - h * 3_600_000 - 1_800_000, 'usage.cost', 'info', { app: 'parle', attrs: { stage: 'chat', provider: 'openrouter', model: 'google/gemini-2.5-flash', costUsd: 0.017 } });
   }
+  for (let h = 7 * 24 - 1; h >= 0; h--) for (const [app, attrs] of STAGE_COSTS) push(now - h * 3_600_000 - 1_200_000, 'usage.cost', 'info', { app, attrs });
   const lifecycle: Array<[number, string, StoredTelemetryEvent['level'], string]> = [
     [520, 'autoscale.warm', 'info', 'speech-stack'], [519, 'replica.creating', 'info', 'speech-stack'], [512, 'replica.ready', 'info', 'speech-stack'],
     [340, 'replica.parked', 'info', 'speech-stack'], [40, 'replica.ready', 'info', 'babel-live'], [96, 'replica.power_on', 'info', 'speech-stack'], [95, 'replica.ready', 'info', 'speech-stack'],
@@ -113,6 +114,24 @@ export const DEMO_PRICES: Record<string, ModelPrice> = {
   'openai/whisper-large-v3': { prompt: 0.0000075, completion: 0 }, 'hexgrad/kokoro-82m': { prompt: 0.00000062, completion: 0 },
 };
 
+const STAGE_COSTS: Array<[string, StoredTelemetryEvent['attrs']]> = [
+  ['parle', { stage: 'stt', provider: 'openrouter', model: 'openai/whisper-large-v3', costUsd: 0.0021 }],
+  ['parle', { stage: 'tts', provider: 'openrouter', model: 'hexgrad/kokoro-82m', chars: 2600, costUsd: 0.0016, estimated: true }],
+  ['babelcast', { stage: 'stt', provider: 'groq', model: 'whisper-large-v3', audioSeconds: 640, costUsd: 0.0197, estimated: true }],
+  ['babelcast', { stage: 'tts', provider: 'openrouter', model: 'openai/gpt-4o-mini-tts', chars: 900, costUnknown: true }],
+];
+
+const BABEL_ROUTES = { stt: { 'babel-stt': [{ provider: 'deployment', deployment: 'babel-live' }, { provider: 'groq', model: 'whisper-large-v3' }, { provider: 'openrouter', model: 'openai/whisper-large-v3' }] } };
+
+function withStageCosts(apps: Record<string, SpendDay>): Record<string, SpendDay> {
+  const part = (usd: number | undefined, share: number) => Math.round((usd ?? 0) * share * 10_000) / 10_000;
+  const { parle, babelcast } = apps as { parle: SpendDay; babelcast: SpendDay };
+  return {
+    parle: { ...parle, stages: { chat: { usd: part(parle.cloudUsd, 0.8) }, stt: { usd: part(parle.cloudUsd, 0.08) }, tts: { estimatedUsd: part(parle.cloudUsd, 0.12) } } },
+    babelcast: { ...babelcast, stages: { chat: { usd: part(babelcast.cloudUsd, 0.7) }, stt: { estimatedUsd: part(babelcast.cloudUsd, 0.3) }, tts: { unknown: Math.round(babelcast.requests / 3) } } },
+  };
+}
+
 export const demoStates = ['warn', 'ok', 'bad'] as const;
 export type DemoState = typeof demoStates[number];
 
@@ -138,7 +157,7 @@ export function demoSpend(now: number, state: DemoState = 'warn'): SpendLedgerVi
       },
     });
   }
-  return { since: days[0]!.day, days };
+  return { since: days[0]!.day, days: days.map(d => ({ ...d, apps: withStageCosts(d.apps) })) };
 }
 
 function lastMonday8(now: number): string {
@@ -365,7 +384,7 @@ function warnSnapshot(now: number): AdminSnapshot {
           fallback: { active: false, since: null, last: null },
         },
       },
-      { id: 'babelcast', profile: null, status: null, aliases: ['babel-chat', 'babel-tts'], stages: { chat: ['babel-chat'], tts: ['babel-tts'] } },
+      { id: 'babelcast', profile: null, status: null, aliases: ['babel-chat', 'babel-tts'], stages: { chat: ['babel-chat'], tts: ['babel-tts'] }, routes: BABEL_ROUTES },
     ],
     appBudgets: [
       { app: 'parle', resetAt: iso(now, -600), requests: { used: 1840, limit: 20000, perMinute: 3.1, exhaustedAt: null }, tokens: { used: 412000, limit: 5000000, perMinute: 700, exhaustedAt: null } },

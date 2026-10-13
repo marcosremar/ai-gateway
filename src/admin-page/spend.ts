@@ -1,12 +1,16 @@
-import { parisDay, type SpendDay } from '../deployments/spend-ledger';
-import { appTitle, count, esc, money, table, type Ctx, type Section } from './ui';
+import { parisDay, type SpendDay, type StageCloud } from '../deployments/spend-ledger';
+import { CLOUD_PRICES_CHECKED } from './model-prices';
+import { appTitle, count, esc, money, stageName, table, type Ctx, type Section } from './ui';
 
 const DAYS_SHOWN = 30;
 const COLORS = 6;
 const DAY_MS = 86_400_000;
 const WEEKS_FOR_FORECAST = 4;
 const shortDay = (day: string) => `${day.slice(8, 10)}/${day.slice(5, 7)}`;
-const sum = (days: Array<Record<string, SpendDay>>, app: string, field: keyof SpendDay) => days.reduce((a, d) => a + (d[app]?.[field] ?? 0), 0);
+const sum = (days: Array<Record<string, SpendDay>>, app: string, field: Exclude<keyof SpendDay, 'stages'>) => days.reduce((a, d) => a + (d[app]?.[field] ?? 0), 0);
+const STAGES = ['stt', 'chat', 'tts'];
+const stageSum = (days: Array<Record<string, SpendDay>>, app: string, field: keyof StageCloud, stages = STAGES) =>
+  days.reduce((a, d) => a + stages.reduce((b, st) => b + (d[app]?.stages?.[st]?.[field] ?? 0), 0), 0);
 
 export function spendWindow(ctx: Ctx): Array<{ day: string; apps: Record<string, SpendDay> }> {
   const byDay = new Map((ctx.s.spend?.days ?? []).map(d => [d.day, d.apps]));
@@ -89,6 +93,16 @@ function forecastStats(f: MonthForecast): string {
 
 const cloudOf = (days: Array<Record<string, SpendDay>>, app: string) => sum(days, app, 'cloudUsd');
 
+function stageTable(days: Array<Record<string, SpendDay>>, ids: string[], names: Map<string, string>): string {
+  const usd = (v: number, label = '') => (v ? `${money(v, 'US$')}${label ? `<small>${label}</small>` : ''}` : '—');
+  const rows = ids.flatMap(id => STAGES.map(stage => [stage, stageSum(days, id, 'usd', [stage]), stageSum(days, id, 'estimatedUsd', [stage]), stageSum(days, id, 'unknown', [stage])] as const)
+    .filter(([, real, estimated, unknown]) => real || estimated || unknown)
+    .map(([stage, real, estimated, unknown]) => [`<b>${esc(names.get(id))}</b>`, esc(stageName(stage)), usd(real), usd(estimated, 'estimado'),
+      unknown ? `${count(unknown)}<small>custo desconhecido</small>` : '—']));
+  return rows.length ? '<h3 class="sub">Nuvem por etapa · 30 dias</h3>'
+    + table([{ label: 'App' }, { label: 'Etapa' }, { label: 'Informado', num: true }, { label: 'Estimado', num: true }, { label: 'Chamadas sem preço', num: true }], rows, '') : '';
+}
+
 export function spend(ctx: Ctx): Section {
   const base = { id: 'gastos', title: 'Gasto por dia', actions: '', count: null };
   const ledger = ctx.s.spend;
@@ -100,7 +114,10 @@ export function spend(ctx: Ctx): Section {
   const last = (n: number) => days.slice(-n).map(d => d.apps);
   const cell = (id: string, n: number) => {
     const cloud = cloudOf(last(n), id);
-    return `${money(sum(last(n), id, 'gpuEur'))}<small>${cloud ? `nuvem ${money(cloud, 'US$')} · ` : ''}${count(sum(last(n), id, 'requests'))} pedidos</small>`;
+    const estimated = stageSum(last(n), id, 'estimatedUsd');
+    const unknown = stageSum(last(n), id, 'unknown');
+    return `${money(sum(last(n), id, 'gpuEur'))}<small>${cloud ? `nuvem ${money(cloud, 'US$')}${estimated ? ` (${money(estimated, 'US$')} estimado)` : ''} · ` : ''}`
+      + `${unknown ? `${count(unknown)} com custo desconhecido · ` : ''}${count(sum(last(n), id, 'requests'))} pedidos</small>`;
   };
   const rows = ids.map((id, c) => [
     `<b><i class="sw c${c % COLORS}"></i>${esc(names.get(id))}</b>${names.get(id) !== id ? `<small class="mono">${esc(id)}</small>` : ''}`,
@@ -118,8 +135,10 @@ export function spend(ctx: Ctx): Section {
     body: (forecast ? forecastStats(forecast) : '') + chart(days, ids, names)
       + table([{ label: 'App' }, { label: 'Hoje', num: true }, { label: '7 dias', num: true }, { label: '30 dias', num: true }, { label: 'Tokens', num: true }], rows,
         'Nenhum gasto registrado ainda.')
-      + '<p class="foot-note">GPU em €: tempo ligado de cada réplica × preço/h, atribuído ao app dono do deployment. Nuvem em US$: o custo que a OpenRouter '
-      + 'informa em cada resposta de conversa (usage.cost), atribuído ao app da chave; fala → texto e texto → fala na nuvem ainda não trazem custo. '
+      + stageTable(last(30), ids, names)
+      + '<p class="foot-note">GPU em €: tempo ligado de cada réplica × preço/h, atribuído ao app dono do deployment. Nuvem em US$, atribuída ao app da chave: '
+      + 'o custo que a OpenRouter informa (usage.cost da conversa e da fala → texto, custo da geração do texto → fala); sem ele, estimado pelo preço público '
+      + `(lista da OpenRouter; Groq e OpenAI conferidos em ${shortDay(CLOUD_PRICES_CHECKED)}) × segundos de áudio ou caracteres. Sem preço conhecido: custo desconhecido, nunca zero. `
       + 'Dias antes do registro ficam vazios.</p>',
   };
 }

@@ -13,7 +13,7 @@ import { scopeToApp } from './scope';
 export type { AdminAbout, AdminAlert, AdminApp, AdminSnapshot } from './render';
 export { possibleSaving, recommendations, type Recommendation } from './recommendations';
 export { createSuggestionDigest, digestMail, type DigestStatus } from './digest';
-export { createModelPrices, type ModelPrices } from './model-prices';
+export { createModelPrices, usageCost, type ModelPrices } from './model-prices';
 export { adminTraffic, type AdminTraffic } from './traffic';
 export { scopeToApp } from './scope';
 export { ANCHOR_PAGE, PAGES } from './pages';

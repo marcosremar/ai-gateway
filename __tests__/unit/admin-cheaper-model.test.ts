@@ -214,8 +214,8 @@ describe('cheaper equivalent model suggestion', () => {
 
   it('shows one such suggestion with its saving on the overview of the warn demo, and none in the green demo', () => {
     const list = cheaper(demoSnapshot(NOW, 'warn'));
-    expect(list.map(r => r.id)).toEqual(['cheaper-model:parle:chat:parle-chat']);
-    expect(list[0]!.saving!.perMonth).toBeCloseTo((0.017 * 24 * COST_DAYS * (30 / COST_DAYS) * (1 - 1 / 3)) / EUR_TO_USD, 6);
+    expect(list.map(r => r.id).sort()).toEqual(['cheaper-model:babelcast:stt:babel-stt', 'cheaper-model:parle:chat:parle-chat']);
+    expect(list.find(r => r.id.includes(':chat:'))!.saving!.perMonth).toBeCloseTo((0.017 * 24 * COST_DAYS * (30 / COST_DAYS) * (1 - 1 / 3)) / EUR_TO_USD, 6);
     const html = renderStatus('n', demoSnapshot(NOW, 'warn'), { now: NOW, csrf: 'c', actor: 'marcos', message: null, app: null, page: 'geral' });
     expect(html).toContain('Modelo equivalente mais barato em parle-chat: google/gemini-2.5-flash-lite');
     expect(html).toContain('PUT /v1/apps/parle/routes: em parle-chat, openrouter:google/gemini-2.5-flash-lite antes de openrouter:google/gemini-2.5-flash');
