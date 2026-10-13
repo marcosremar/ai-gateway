@@ -26,6 +26,7 @@ import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
 import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
 import type { CreditIssue, DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
+import type { BootHistory } from './boot-track';
 
 /** Adaptive hedge: a request is hedged only once it is this much slower than its replica's recent p95. */
 export const HEDGE_P95_FACTOR = 1.2;
@@ -50,6 +51,14 @@ export class DeploymentController extends ControllerViews {
     for (const record of defaulted) record.spec = { ...record.spec, scaling: { mode: mode! } };
     if (defaulted.length) this.log('deployments: no scaling block, running under the default mode', { mode, deployments: defaulted.map(r => r.spec.name) });
     for (const record of deployments) this.deployments.set(record.spec.name, this.runtime(record));
+  }
+
+  bootHistory(): BootHistory {
+    return this.boots.history();
+  }
+
+  restoreBootHistory(h: Partial<BootHistory>): void {
+    this.boots.restore(h);
   }
 
   listProfiles(): Profile[] {
