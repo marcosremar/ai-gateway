@@ -8,11 +8,12 @@ import { redact } from '../telemetry/alert-email';
 import { renderLogin, renderStatus, type AdminAlert, type AdminSnapshot } from './render';
 import { scopeToApp } from './scope';
 
-export type { AdminAlert, AdminApp, AdminSnapshot } from './render';
+export type { AdminAbout, AdminAlert, AdminApp, AdminSnapshot } from './render';
+export { recommendations, type Recommendation } from './recommendations';
 export { adminTraffic, type AdminTraffic } from './traffic';
 export { scopeToApp } from './scope';
 
-export const ADMIN_ANCHORS = ['reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps', 'trafego', 'atividade'] as const;
+export const ADMIN_ANCHORS = ['recomendacoes', 'gastos', 'reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps', 'trafego', 'atividade'] as const;
 
 const ADMIN_SESSION_MS = 12 * 3_600_000;
 export const ADMIN_COOKIE = '__Host-aigw_admin';
@@ -21,6 +22,7 @@ const BODY_MAX = 4096;
 const ALERTS_KEPT = 50;
 const APP_FILTER = /^[A-Za-z0-9._-]{1,64}$/;
 const NEXT = /^\/admin(\?app=[A-Za-z0-9._-]{1,64})?(#[a-z]{1,16})?$/;
+const RECO_ID = /^[a-z-]{1,32}(:[A-Za-z0-9._:/@ -]{1,200})?$/;
 
 export interface AdminActor { name: string; app: string | null; keyId?: string; mayPark?: () => boolean }
 
@@ -29,6 +31,7 @@ export interface AdminPageOptions {
   snapshot: () => AdminSnapshot;
   park: (deployment: string, actor: AdminActor) => Promise<unknown>;
   probe: () => Promise<unknown>;
+  dismiss?: (id: string) => Promise<unknown>;
   secrets?: () => string[];
   audit?: (entry: { actor: string; action: string; names: string[]; ok: boolean; detail?: string }) => void;
   now?: () => number;
@@ -183,6 +186,15 @@ export function createAdminPage(opts: AdminPageOptions) {
     redirect(res, `/admin?msg=${encodeURIComponent(parked ? `Falhou ao estacionar ${name}: ${parked}` : `${name} estacionada.`)}#gpus`);
   });
 
+  const dismiss = guarded(async (res, { session, form }) => {
+    const id = form.get('id') ?? '';
+    if (session.role !== 'admin' || !opts.dismiss) return refuse(res, session, 'admin-page.dismiss', [id]);
+    if (!RECO_ID.test(id)) return redirect(res, '/admin#recomendacoes');
+    await opts.dismiss(id);
+    opts.audit?.({ actor: session.actor.name, action: 'admin-page.dismiss', names: [id], ok: true });
+    redirect(res, `/admin?msg=${encodeURIComponent('Recomendação oculta por 7 dias.')}#recomendacoes`);
+  });
+
   function status(req: IncomingMessage, res: ServerResponse): void {
     const query = new URL(req.url ?? '/', 'http://x').searchParams;
     const app = query.get('app');
@@ -201,7 +213,7 @@ export function createAdminPage(opts: AdminPageOptions) {
 
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([
     ['GET /admin', status], ['POST /admin/login', login],
-    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/probe', probe],
+    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss],
   ]);
 
   function handle(req: IncomingMessage, res: ServerResponse): boolean {

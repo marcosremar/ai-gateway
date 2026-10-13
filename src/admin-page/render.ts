@@ -9,8 +9,13 @@ import type { AppStatus } from '../deployments/app-gpu-health';
 import { activeWindow } from '../deployments/autoscale';
 import type { AdminTraffic, TrafficLine } from './traffic';
 import { CSS } from './styles';
-
-type Level = 'ok' | 'warn' | 'bad';
+import type { SpendLedgerView } from '../deployments/spend-ledger';
+import { spend, spendWindow } from './spend';
+import { recommendations, recoSection, type Recommendation } from './recommendations';
+import {
+  ACTIVITY_SHOWN, ALERT_FRESH_MS, LEVEL_TEXT, ZONE, ago, appTitle, byLevel, count, duration, esc, form, hhmm, hour, latest, mark, meter, ms, money, outsideWindow, pct, pill,
+  plural, ratioLevel, stageName, table, upOf, when, worst, type Ctx, type Level, type Section,
+} from './ui';
 
 export interface AdminAlert { event: string; at: string; summary: string }
 
@@ -36,76 +41,14 @@ export interface AdminSnapshot {
   appBudgets: AppBudgetView[];
   traffic: AdminTraffic | null;
   audit: KeyAuditEntry[];
+  spend?: SpendLedgerView | null;
+  dismissed?: Record<string, number>;
+  about?: AdminAbout | null;
 }
 
-interface Section { id: string; title: string; level: Level; note: string; count: number | null; meta: string; actions: string; body: string }
+export interface AdminAbout { commit: string | null; uptimeSeconds: number; region: string | null; telemetryAt: string | null }
 
-interface Ctx { s: AdminSnapshot; now: number; csrf: string; app: string | null; view: AppView | null }
 
-const ALERT_FRESH_MS = 60 * 60_000;
-const NEAR_LIMIT = 0.8;
-const ZONE = 'Europe/Paris';
-const ACTIVITY_SHOWN = 30;
-
-const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-const worst = (levels: Level[]): Level => (levels.includes('bad') ? 'bad' : levels.includes('warn') ? 'warn' : 'ok');
-const RANK: Record<Level, number> = { bad: 0, warn: 1, ok: 2 };
-const byLevel = <T extends { level: Level }>(a: T, b: T) => RANK[a.level] - RANK[b.level];
-const ratioLevel = (used: number, limit: number | null | undefined): Level => {
-  if (!limit || limit <= 0) return 'ok';
-  return used >= limit ? 'bad' : used >= limit * NEAR_LIMIT ? 'warn' : 'ok';
-};
-const CURRENCY: Record<string, Intl.NumberFormat> = {};
-const money = (v: number | null | undefined, unit = '€') => {
-  if (v === null || v === undefined) return '—';
-  const code = unit === '€' ? 'EUR' : 'USD';
-  CURRENCY[code] ??= new Intl.NumberFormat('pt-BR', { style: 'currency', currency: code });
-  return CURRENCY[code].format(v);
-};
-const count = (v: number) => new Intl.NumberFormat('pt-BR', { notation: v >= 100_000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(v);
-const pct = (v: number) => new Intl.NumberFormat('pt-BR', { style: 'percent', maximumFractionDigits: 1 }).format(v);
-const ms = (v: number | null | undefined) => (v === null || v === undefined ? '—' : v >= 1000 ? `${(v / 1000).toFixed(2).replace('.', ',')} s` : `${count(Math.round(v))} ms`);
-const latest = (dates: Array<string | null | undefined>) => dates.filter((d): d is string => Boolean(d)).sort().at(-1) ?? null;
-const hhmm = (iso: string | number) => new Intl.DateTimeFormat('pt-BR', { timeZone: ZONE, hour: '2-digit', minute: '2-digit' }).format(typeof iso === 'number' ? iso : Date.parse(iso));
-const hour = (iso: string) => new Intl.DateTimeFormat('pt-BR', { timeZone: ZONE, hour: '2-digit' }).format(Date.parse(iso));
-
-const ago = (iso: string | null, now: number) => {
-  if (!iso) return 'nunca';
-  const min = Math.round((now - Date.parse(iso)) / 60_000);
-  return min < 1 ? 'agora' : min < 120 ? `há ${min} min` : min < 2880 ? `há ${Math.round(min / 60)} h` : `há ${Math.round(min / 1440)} d`;
-};
-const when = (iso: string | null, now: number) => (iso ? `${hhmm(iso)}<small>${esc(ago(iso, now))}</small>` : 'nunca');
-const plural = (n: number, one: string, many: string) => `${count(n)} ${n === 1 ? one : many}`;
-const duration = (seconds: number) => (seconds < 3600 ? `${Math.round(seconds / 60)} min` : `${(seconds / 3600).toFixed(1).replace('.', ',')} h`);
-
-const LEVEL_TEXT: Record<Level, string> = { ok: 'Normal', warn: 'Atenção', bad: 'Problema' };
-const GLYPH: Record<Level, string> = {
-  ok: '<circle class="s" cx="10" cy="10" r="9"/><path class="g" d="m6 10.3 2.7 2.7L14 7.5"/>',
-  warn: '<path class="s" d="M10 1.6 19.2 18H.8z"/><path class="g" d="M10 7.5v4.6m0 2.7v.1"/>',
-  bad: '<path class="s" d="M6.3 1h7.4L19 6.3v7.4L13.7 19H6.3L1 13.7V6.3z"/><path class="g" d="m7 7 6 6m0-6-6 6"/>',
-};
-const mark = (level: Level) => `<span class="mark ${level}"><svg viewBox="0 0 20 20" aria-hidden="true">${GLYPH[level]}</svg><span class="sr">${LEVEL_TEXT[level]}:</span></span>`;
-const pill = (level: Level, text: string) => `<span class="pill ${level}">${mark(level)}${esc(text)}</span>`;
-const meter = (used: number, limit: number | null | undefined, level: Level) => (limit && limit > 0
-  ? `<svg class="use ${level}" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true"><rect class="t" width="100" height="4"/><rect class="f" width="${Math.min(100, Math.round((used / limit) * 100))}" height="4"/></svg>`
-  : '');
-const form = (action: string, csrf: string, label: string, confirmText: string, fields: Record<string, string> = {}, cls = '') =>
-  `<form method="post" action="${action}"${confirmText ? ` data-confirm="${esc(confirmText)}"` : ''}><input type="hidden" name="csrf" value="${csrf}">${
-    Object.entries(fields).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('')
-  }<button${cls ? ` class="${cls}"` : ''}>${esc(label)}</button></form>`;
-
-interface Col { label: string; num?: boolean; act?: boolean }
-
-function table(cols: Col[], rows: string[][], empty: string): string {
-  if (!rows.length) return `<p class="empty">${esc(empty)}</p>`;
-  const cls = (c: Col) => (c.num ? ' class="n"' : c.act ? ' class="act"' : '');
-  const head = cols.map(c => `<th${cls(c)}>${c.act ? `<span class="sr">${esc(c.label)}</span>` : esc(c.label)}</th>`).join('');
-  const body = rows.map(r => `<tr>${r.map((cell, i) => `<td${cls(cols[i]!)} data-l="${esc(cols[i]!.label)}"><div class="v">${cell}</div></td>`).join('')}</tr>`).join('');
-  return `<div class="tw"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
-}
-
-const STAGE: Record<string, string> = { stt: 'Fala → texto', chat: 'Conversa', llm: 'Conversa', tts: 'Texto → fala', s2s: 'Fala → fala', translate: 'Tradução' };
-const stageName = (stage: string) => STAGE[stage] ?? stage;
 
 function reserves({ s, now, csrf, view }: Ctx): Section {
   const links = s.reserves.links;
@@ -162,8 +105,6 @@ function balances({ s, now }: Ctx): Section {
 
 const GPU_STATUS: Record<string, string> = { ready: 'pronta', 'scaled-to-zero': 'desligada', warming: 'ligando', degraded: 'com falha', paused: 'pausada' };
 const keyName = (k: KeyView | undefined) => (k ? `${k.user}${k.label ? ` (${k.label})` : ''}` : 'chave removida');
-const upOf = (d: DeploymentView) => d.replicas.filter(r => r.phase !== 'halted');
-const outsideWindow = (d: DeploymentView, now: number) => Boolean(d.spec.warmSchedule?.length) && upOf(d).length > 0 && !activeWindow(d.spec.warmSchedule, now);
 
 function gpus({ s, now, csrf, view }: Ctx): Section {
   const base = { id: 'gpus', title: 'GPUs', actions: '' };
@@ -182,6 +123,7 @@ function gpus({ s, now, csrf, view }: Ctx): Section {
       up.length && activeWindow(d.spec.warmSchedule, now) ? 'horário de aula' : '',
     ].filter(Boolean);
     const state = pill(level === 'ok' ? 'ok' : level, GPU_STATUS[d.status] ?? d.status)
+      + (typeof d.spec.idleMinutes === 'number' ? `<small>desliga após ${d.spec.idleMinutes} min sem uso</small>` : '')
       + (outside ? '<small>fora da janela de aula</small>' : '') + (d.lastError ? `<small class="err">${esc(d.lastError)}</small>` : '');
     return { level, cells: [
       `<b class="mono">${esc(d.name)}</b>${d.app ? `<small>app ${esc(d.app)}</small>` : ''}`,
@@ -189,7 +131,7 @@ function gpus({ s, now, csrf, view }: Ctx): Section {
       up.length ? `${ready}/${up.length}` : '0',
       first ? `${esc(first.machineType)}<small>${esc(first.zone)}</small>` : '—',
       up.length ? `${money(perHour)}/h` : '—',
-      up.length ? duration(Math.max(...up.map(r => r.ageSeconds))) : '—',
+      up.length ? `${duration(Math.max(...up.map(r => r.ageSeconds)))}<small>desde ${hhmm(now - Math.max(...up.map(r => r.ageSeconds)) * 1000)}</small>` : '—',
       when(d.lastRequestAt, now),
       by.length ? by.join('<br>') : '—',
       up.length && (!view || (view.canPark && d.app === view.id)) ? form('/admin/park', csrf, 'Estacionar', `Estacionar ${d.name}? As réplicas sem uso desligam; pedidos em curso terminam.`, { name: d.name }, 'danger') : '',
@@ -258,7 +200,7 @@ function keys({ s, now }: Ctx): Section {
     const cap = k.policy.gpuDailyEur;
     const level = ratioLevel(eur, cap);
     return { level, cells: [
-      `<b>${esc(keyName(k))}</b>`, esc(k.role), k.source === 'env' ? 'variável' : 'emitida', gpuPolicy(k),
+      `<b>${esc(keyName(k))}</b>`, esc(k.role), `${k.source === 'env' ? 'variável' : 'emitida'}${k.createdAt ? `<small>desde ${esc(k.createdAt.slice(0, 10))}</small>` : ''}${k.expiresAt ? `<small>expira ${esc(k.expiresAt.slice(0, 10))}</small>` : ''}`, gpuPolicy(k),
       `${money(eur)}<small>${cap === null ? 'sem teto' : `de ${money(cap)}/dia`}</small>${meter(eur, cap, level)}`,
       when(k.lastUsedAt, now),
     ] };
@@ -282,15 +224,6 @@ const MODE: Record<string, { level: Level; text: string }> = {
 };
 const limitText = (v: number | null | undefined) => (v ? count(v) : '∞');
 
-const KNOWN_APPS: Record<string, { name: string; description: string }> = {
-  parle: { name: 'Parle', description: 'Jogo de português: o aluno conversa por voz com os personagens (fala → texto, conversa, texto → fala).' },
-  babelcast: { name: 'Babelcast', description: 'Tradução simultânea: transcreve a fala ao vivo e a traduz em texto e voz.' },
-};
-
-const appTitle = (id: string, profile: AppProfile | null | undefined) => ({
-  name: profile?.name || KNOWN_APPS[id]?.name || id, description: profile?.description || KNOWN_APPS[id]?.description || null,
-});
-
 function appCell(id: string, profile: AppProfile | null, needs: string): string {
   const { name, description } = appTitle(id, profile);
   return `<b><a href="/admin?app=${encodeURIComponent(id)}#apps">${esc(name)}</a></b>`
@@ -299,7 +232,9 @@ function appCell(id: string, profile: AppProfile | null, needs: string): string 
     + `<small>${esc(needs)}</small>`;
 }
 
-function apps({ s, app: filter }: Ctx): Section {
+function apps(ctx: Ctx): Section {
+  const { s, app: filter } = ctx;
+  const ledger = s.spend ? spendWindow(ctx).slice(-2) : null;
   const ids = [...new Set([...s.apps.map(a => a.id), ...s.appBudgets.map(b => b.app)])].filter(id => !filter || id === filter).sort();
   const rows = ids.map((id) => {
     const app = s.apps.find(a => a.id === id);
@@ -314,7 +249,9 @@ function apps({ s, app: filter }: Ctx): Section {
       appCell(id, app?.profile ?? null, profile),
       pill(level, mode ? `servindo ${mode.text}` : LEVEL_TEXT[level]),
       deps || '—',
-      budget ? `${count(budget.requests.used)}<small>de ${limitText(budget.requests.limit)}</small>${meter(budget.requests.used, budget.requests.limit, reqLevel)}` : '0',
+      (budget ? `${count(budget.requests.used)}<small>de ${limitText(budget.requests.limit)}</small>` : '0')
+        + (ledger ? `<small>${arrow(ledger[1]!.apps[id]?.requests ?? 0, ledger[0]!.apps[id]?.requests ?? 0)} ontem ${count(ledger[0]!.apps[id]?.requests ?? 0)}</small>` : '')
+        + (budget ? meter(budget.requests.used, budget.requests.limit, reqLevel) : ''),
       budget ? `${count(Math.round(budget.requests.perMinute * 10) / 10)}/min` : '—',
       budget ? `${count(budget.tokens.used)}<small>de ${limitText(budget.tokens.limit)}</small>${meter(budget.tokens.used, budget.tokens.limit, tokLevel)}` : '0',
       budget ? `${hhmm(budget.resetAt)}${budget.requests.exhaustedAt || budget.tokens.exhaustedAt ? '<small class="err">esgotou hoje</small>' : ''}` : '—',
@@ -377,7 +314,7 @@ function traffic({ s }: Ctx): Section {
 }
 
 const AUDIT_TEXT: Record<string, string> = {
-  'admin-page.login': 'entrou no painel', 'admin-page.park': 'estacionou a GPU', 'admin-page.probe': 'testou as reservas',
+  'admin-page.login': 'entrou no painel', 'admin-page.park': 'estacionou a GPU', 'admin-page.probe': 'testou as reservas', 'admin-page.dismiss': 'ocultou recomendação',
   'deployment-credentials.rotate': 'trocou credenciais de máquina', 'provider-keys.applied': 'aplicou chaves de provedor',
   created: 'criou', updated: 'alterou', deleted: 'apagou', delete: 'apagou', start: 'ligou', stop: 'desligou', reboot: 'reiniciou',
 };
@@ -414,14 +351,27 @@ function activity({ s, now }: Ctx): Section {
   };
 }
 
-function sections(ctx: Ctx): Section[] {
-  if (ctx.view) return [apps(ctx), gpus(ctx), reserves(ctx), keys(ctx), alerts(ctx), activity(ctx)];
-  return [traffic(ctx), apps(ctx), gpus(ctx), reserves(ctx), balances(ctx), keys(ctx), machines(ctx), alerts(ctx), activity(ctx)];
+function sections(ctx: Ctx, recos: Recommendation[]): Section[] {
+  if (ctx.view) return [recoSection(ctx, recos), apps(ctx), spend(ctx), gpus(ctx), reserves(ctx), keys(ctx), alerts(ctx), activity(ctx)];
+  return [recoSection(ctx, recos), traffic(ctx), spend(ctx), apps(ctx), gpus(ctx), reserves(ctx), balances(ctx), keys(ctx), machines(ctx), alerts(ctx), activity(ctx)];
 }
 
 interface Kpi { label: string; href: string; value: string; sub: string; level: Level | null }
 
-function kpis({ s, view }: Ctx, all: Section[]): Kpi[] {
+const arrow = (now: number, before: number) => (now > before * 1.05 ? '▲' : now < before * 0.95 ? '▼' : '=');
+
+function gpuToday(ctx: Ctx, keySpend: number, fallback: string): Kpi {
+  if (!ctx.s.spend) return { label: 'Gasto GPU hoje', href: '#chaves', value: money(keySpend), sub: fallback, level: null };
+  const days = spendWindow(ctx).slice(-8);
+  const total = (d: (typeof days)[number]) => Object.values(d.apps).reduce((a, e) => a + e.gpuEur, 0);
+  const today = total(days.at(-1)!);
+  const yesterday = total(days.at(-2)!);
+  const week = days.slice(1).reduce((a, d) => a + total(d), 0);
+  return { label: 'Gasto GPU hoje', href: '#gastos', value: money(today), sub: `${arrow(today, yesterday)} ontem ${money(yesterday)} · 7 d ${money(week)}`, level: null };
+}
+
+function kpis(ctx: Ctx, all: Section[]): Kpi[] {
+  const { s, view } = ctx;
   const t = s.traffic;
   const total = t ? t.total.served + t.total.failed : 0;
   const levelOf = (id: string) => all.find(x => x.id === id)?.level ?? null;
@@ -439,11 +389,31 @@ function kpis({ s, view }: Ctx, all: Section[]): Kpi[] {
   return [
     ...calls,
     { label: 'GPUs ligadas', href: '#gpus', value: s.gpus ? `${on.length} de ${s.gpus.length}` : '—', sub: s.gpus ? `${money(perHour)}/h agora` : 'GPUs desligadas aqui', level: levelOf('gpus') },
-    { label: 'Gasto GPU hoje', href: '#chaves', value: money(keySpend), sub: g ? `máquinas ${money(g.dayUsd, 'US$')}/24 h` : 'pedida por chaves', level: null },
+    gpuToday(ctx, keySpend, g ? `máquinas ${money(g.dayUsd, 'US$')}/24 h` : 'pedida por chaves'),
     shortest
       ? { label: 'Menor saldo', href: '#saldos', value: `${money(shortest.balanceUsd, unitOf(shortest))}`, sub: `${shortest.provider}${shortest.hoursLeft !== null ? ` · ~${count(Math.round(shortest.hoursLeft))} h` : ''}`, level: levelOf('saldos') }
       : { label: 'Reservas', href: '#reservas', value: `${reservesOk} de ${s.reserves.links.length}`, sub: 'respondendo', level: levelOf('reservas') },
   ];
+}
+
+const RECOS_IN_OVERVIEW = 3;
+
+function recoSummary(recos: Recommendation[]): string {
+  if (!recos.length) return '';
+  const top = recos.slice(0, RECOS_IN_OVERVIEW).map(r => `<li>${mark(r.level)}<a href="#recomendacoes">${esc(r.title)}</a>${
+    r.impact ? `<span class="amt">${esc(r.impact.text)}</span>` : ''}</li>`).join('');
+  return `<div class="rsum"><h3 class="sub">Recomendações <span class="t">${recos.length > RECOS_IN_OVERVIEW ? `${RECOS_IN_OVERVIEW} de ${recos.length} · ` : ''}`
+    + `<a href="#recomendacoes">ver todas</a></span></h3><ul>${top}</ul></div>`;
+}
+
+function statusBar(s: AdminSnapshot, now: number, time: string): string {
+  const a = s.about;
+  const fresh = (label: string, iso: string | null) => `<span>${label} ${iso ? esc(ago(iso, now)) : 'sem leitura'}</span>`;
+  const up = a ? duration(a.uptimeSeconds) : null;
+  return `<footer class="bar" aria-label="Estado do gateway">${a ? `<span>build <code>${esc(a.commit?.slice(0, 7) ?? '—')}</code></span><span>no ar há ${up}</span>` : ''}`
+    + `${a?.region ? `<span>região ${esc(a.region)}</span>` : ''}<span>atualizado ${time}</span>`
+    + `${s.traffic ? fresh('telemetria', a?.telemetryAt ?? null) : ''}${s.balances.length ? fresh('saldos', latest(s.balances.map(b => b.checkedAt))) : ''}`
+    + `${fresh('reservas', latest(s.reserves.links.map(r => r.checkedAt)))}</footer>`;
 }
 
 const HEADLINE: Record<Level, string> = { ok: 'Tudo funcionando', warn: 'Funcionando, com avisos', bad: 'Algo está fora do ar' };
@@ -473,7 +443,8 @@ export function renderStatus(nonce: string, s: AdminSnapshot, opts: { now: numbe
   const ctx: Ctx = { s, now: opts.now, csrf: opts.csrf, app: view ? null : opts.app, view };
   const own = view && appTitle(view.id, s.apps.find(a => a.id === view.id)?.profile);
   const brand = `<div class="brand">${LOGO}<span>ai-gateway <small>${own ? 'app' : 'admin'}</small></span></div>`;
-  const all = sections(ctx);
+  const recos = recommendations(ctx);
+  const all = sections(ctx, recos);
   const overall = worst(all.map(x => x.level));
   const time = new Intl.DateTimeFormat('pt-BR', { timeZone: ZONE, hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(opts.now);
   const nav = [`<li><a href="#visao" class="${overall}">${mark(overall)}Visão geral</a></li>`, ...all.map(x =>
@@ -488,9 +459,9 @@ export function renderStatus(nonce: string, s: AdminSnapshot, opts: { now: numbe
   const overview = `<div id="visao" data-spy><div class="top">${mark(overall)}<div><h1>${HEADLINE[overall]}</h1><p>${
     attention.length ? `${attention.length} ${attention.length > 1 ? 'áreas pedem' : 'área pede'} atenção` : `As ${all.length} áreas estão normais`} · ${time} (Paris)</p></div></div>`
     + (own ? `<p class="scope">Visão do app <b>${esc(own.name)}</b>${own.description ? ` · ${esc(own.description)}` : ''}<small>Só os dados deste app: as GPUs, as chaves, as reservas e os eventos dele.</small></p>` : '')
-    + `${attn}<div class="kpis${view ? ' few' : ''}">${tiles}</div></div>`;
-  const body = all.map(x => `<section id="${x.id}" data-spy><header class="sh"><h2>${esc(x.title)}</h2>${pill(x.level, LEVEL_TEXT[x.level])}${
+    + `${attn}<div class="kpis${view ? ' few' : ''}">${tiles}</div>${recoSummary(recos)}</div>`;
+  const body = all.map(x => `<section id="${x.id}" data-spy><header class="sh"><h2>${esc(x.title)}</h2>${x.badge ?? pill(x.level, LEVEL_TEXT[x.level])}${
     x.meta ? `<span class="meta">${esc(x.meta)}</span>` : ''}${x.actions ? `<div class="acts">${x.actions}</div>` : ''}</header>${x.body}</section>`).join('');
   return page(nonce, `ai-gateway · ${own ? `${own.name} · ` : ''}${HEADLINE[overall]}`, `<div class="shell">${side}<main class="main">${
-    opts.message ? `<p class="msg" role="status">${esc(opts.message)}</p>` : ''}${overview}${body}</main></div>`, true);
+    opts.message ? `<p class="msg" role="status">${esc(opts.message)}</p>` : ''}${overview}${body}${statusBar(s, opts.now, time)}</main></div>`, true);
 }

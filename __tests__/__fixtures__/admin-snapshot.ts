@@ -4,6 +4,7 @@ import type { KeyView } from '../../src/config/access-keys';
 import { DEFAULT_GPU_POLICY } from '../../src/config/access-keys';
 import type { StoredTelemetryEvent } from '../../src/telemetry/contract';
 import { adminTraffic } from '../../src/admin-page/traffic';
+import { parisDay, type SpendLedgerView } from '../../src/deployments/spend-ledger';
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
 
@@ -13,12 +14,12 @@ const replica = (id: string, ageMinutes: number, pricePerHour: number): ReplicaV
   hostEndsInMinutes: null, expiresInMinutes: null,
 });
 
-const deployment = (name: string, replicas: ReplicaView[], schedule: Array<{ days: number[]; start: string; end: string }>, extra: Partial<DeploymentView> = {}) => ({
+const deployment = (name: string, replicas: ReplicaView[], schedule: Array<{ days: number[]; start: string; end: string }>, extra: Partial<DeploymentView> = {}, spec: Record<string, unknown> = {}) => ({
   name, status: replicas.length ? 'ready' : 'scaled-to-zero', desiredReplicas: replicas.length, replicas, inflight: 0, waiting: 0,
   lastRequestAt: null, lastError: null, invokeUrl: '', app: 'parle', appImage: null, publicIp: null, lastPlacement: null, warm: null,
   realtime: null, sessions: 0, hold: null, warnings: [],
   autoscale: { desired: replicas.length, pressureWant: 0, reason: 'base', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
-  spec: { warmSchedule: schedule.map(s => ({ ...s, minReplicas: 1, timeZone: 'Europe/Paris' })) },
+  spec: { minReplicas: 0, idleMinutes: 15, maxEurPerHour: 0.9, warmSchedule: schedule.map(s => ({ ...s, minReplicas: 1, timeZone: 'Europe/Paris' })), ...spec },
   ...extra,
 }) as unknown as DeploymentView;
 
@@ -68,8 +69,36 @@ function trafficRows(now: number, state: DemoState): StoredTelemetryEvent[] {
 export const demoStates = ['warn', 'ok', 'bad'] as const;
 export type DemoState = typeof demoStates[number];
 
+export function demoSpend(now: number, state: DemoState = 'warn'): SpendLedgerView {
+  let seed = 11;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const days: SpendLedgerView['days'] = [];
+  for (let i = 29; i >= 0; i--) {
+    const at = now - i * 86_400_000;
+    const weekday = new Date(at).getUTCDay();
+    const classDay = weekday >= 1 && weekday <= 4;
+    const today = i === 0;
+    const spike = today && state !== 'ok' ? (state === 'bad' ? 2.6 : 2.1) : 1;
+    const parleEur = (classDay ? 1.9 + rand() * 1.1 : 0.15 + rand() * 0.3) * spike;
+    const babelEur = (0.45 + rand() * 0.6) * (today && state === 'bad' ? 2.4 : 1);
+    const parleReq = Math.round(classDay ? 1500 + rand() * 1400 : 120 + rand() * 200);
+    const babelReq = Math.round(150 + rand() * 250);
+    days.push({
+      day: parisDay(at),
+      apps: {
+        parle: { gpuEur: Math.round(parleEur * 100) / 100, requests: parleReq, tokens: parleReq * (180 + Math.round(rand() * 60)) },
+        babelcast: { gpuEur: Math.round(babelEur * 100) / 100, requests: babelReq, tokens: babelReq * (150 + Math.round(rand() * 50)) },
+      },
+    });
+  }
+  return { since: days[0]!.day, days };
+}
+
 export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnapshot {
-  const snapshot = { ...warnSnapshot(now), traffic: adminTraffic(trafficRows(now, state), now) };
+  const snapshot = {
+    ...warnSnapshot(now), traffic: adminTraffic(trafficRows(now, state), now), spend: demoSpend(now, state), dismissed: {},
+    about: { commit: '0a52749c1d2e3f4a5b6c7d8e9f00112233445566', uptimeSeconds: 4 * 3600 + 1260, region: 'europe-west4', telemetryAt: iso(now, 0) },
+  };
   if (state === 'ok') return allGreen(snapshot, now);
   if (state === 'bad') return somethingDown(snapshot, now);
   return snapshot;
@@ -117,7 +146,7 @@ function warnSnapshot(now: number): AdminSnapshot {
     ],
     providerCredit: [],
     gpus: [
-      deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }], { lastRequestAt: iso(now, 3) }),
+      deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }], { lastRequestAt: iso(now, 3) }, { idleMinutes: 45 }),
       deployment('parle-bridge-shadow', [], []),
       deployment('speech-stack-test', [], [], { warm: null }),
       deployment('babel-live', [replica('scw-9z8y', 40, 0.79)], [], { app: 'babelcast', lastRequestAt: iso(now, 8) }),

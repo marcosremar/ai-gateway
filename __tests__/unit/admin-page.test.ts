@@ -23,6 +23,7 @@ async function gateway() {
   const access = new AccessKeys({ GATEWAY_API_KEYS: `${ADMIN_KEY}:marcos,${CLIENT_KEY}:parle,${DEV_KEY}:parle-dev:agentes,${BABEL_KEY}:babelcast,${SITE_KEY}:site` });
   access.setBaseAdmins(['marcos']);
   const parked: string[] = [];
+  const dismissed: string[] = [];
   const audit: Array<Record<string, unknown>> = [];
   let probes = 0;
   const server = createServer((_req, res) => {
@@ -43,6 +44,7 @@ async function gateway() {
     snapshot: () => snapshot,
     park: async (name) => { parked.push(name); },
     probe: async () => { probes++; },
+    dismiss: async (id) => { dismissed.push(id); snapshot.dismissed = { ...snapshot.dismissed, [id]: clock.now + 7 * 86_400_000 }; },
     secrets: () => [ADMIN_KEY, CLIENT_KEY, DEV_KEY, BABEL_KEY, SITE_KEY, PROVIDER_SECRET],
     audit: (entry) => audit.push(entry),
     now: () => clock.now,
@@ -67,7 +69,7 @@ async function gateway() {
     const html = await (await call('/admin', { cookie })).text();
     return { cookie, html, csrf: /name="csrf" value="([a-f0-9]+)"/.exec(html)![1] };
   }
-  return { clock, access, call, post, login, signedIn, parked, audit, probes: () => probes };
+  return { clock, access, call, post, login, signedIn, parked, dismissed, audit, probes: () => probes };
 }
 
 describe('admin page (/admin)', () => {
@@ -217,6 +219,26 @@ describe('admin page (/admin)', () => {
     expect((await gw.post('/admin/probe', { csrf }, cookie)).status).toBe(303);
     expect(gw.probes()).toBe(1);
     expect(gw.audit.map(e => e.action)).toEqual(['admin-page.login', 'admin-page.park', 'admin-page.probe']);
+  });
+
+  it('hides a recommendation for 7 days only for the admin, with the CSRF token', async () => {
+    const gw = await gateway();
+    const { cookie, csrf, html } = await gw.signedIn();
+    const id = 'app-unnamed:babelcast';
+    expect(html).toContain(`value="${id}"`);
+    expect((await gw.post('/admin/dismiss', { id }, cookie)).status).toBe(403);
+    expect((await gw.post('/admin/dismiss', { id, csrf }, cookie, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    const app = await gw.signedIn(CLIENT_KEY);
+    expect(app.html).not.toContain('action="/admin/dismiss"');
+    expect((await gw.post('/admin/dismiss', { id, csrf: app.csrf }, app.cookie)).status).toBe(403);
+    expect(gw.dismissed).toEqual([]);
+    const res = await gw.post('/admin/dismiss', { id, csrf }, cookie);
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toMatch(/#recomendacoes$/);
+    expect(gw.dismissed).toEqual([id]);
+    expect(await (await gw.call('/admin', { cookie })).text()).not.toContain(`value="${id}"`);
+    gw.clock.now += 7 * 86_400_000 + 1;
+    expect((await gw.signedIn()).html).toContain(`value="${id}"`);
   });
 
   it('signs out', async () => {
