@@ -380,6 +380,7 @@ export interface DeploymentBackend {
   previewOffers?(spec: DeploymentSpec): Promise<OfferPreview[]>;
   offersReport?(spec: DeploymentSpec): Promise<OffersReport>;
   creditIssue?(): CreditIssue | null;
+  containerLogs?(machine: ReplicaMachine, tail: number): Promise<string>;
 }
 
 export interface CreditIssue { provider: DeploymentProvider; message: string; balanceUsd: number | null; floorUsd: number; since: number; at: number }

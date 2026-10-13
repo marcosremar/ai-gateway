@@ -22,6 +22,8 @@ import type {
   ProbeResult, RegistryAuth, ReplicaProbe, ScalingMode,
 } from './types';
 import { BootTracker, logText } from './boot-track';
+import { CONTAINER_LOG_LINES, ContainerLogCache, type ContainerLog } from './container-logs';
+import { secretValues } from '../telemetry/alert-email';
 import { freshStuckRetry, type StuckRetryState } from './stuck-retry';
 
 export class DeploymentError extends Error {
@@ -158,6 +160,7 @@ export interface ControllerOptions {
   sessions?: (deployment: string) => number | null;
   defaultScalingMode?: ScalingMode;
   checkImage?: (image: string, auth: RegistryAuth | null) => Promise<string | null>;
+  secrets?: () => string[];
 }
 
 export interface Lease {
@@ -230,6 +233,7 @@ export abstract class ControllerState {
   protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();
   protected readonly probes = new Map<string, ProbeState>();
   protected readonly boots = new BootTracker();
+  protected readonly containerLogs = new ContainerLogCache(() => this.now());
   protected readonly replicaGone = new Map<string, AbortController>();
   protected goneSignal(id: string): AbortSignal {
     let gone = this.replicaGone.get(id);
@@ -514,5 +518,17 @@ export abstract class ControllerState {
   protected replicaToken(rt: Runtime, machine: ReplicaMachine): string {
     const tokenKey = machine.tokenKey ?? this.tokenKeys.get(machine.id);
     return replicaTokenFor(rt.record.secretPins?.[tokenKey ?? `id:${machine.id}`] ?? rt.record.replicaToken, tokenKey);
+  }
+
+  protected containerLogOf(m: ReplicaMachine): Promise<ContainerLog> | null {
+    const backend = this.backends[this.providerOf(m)];
+    const rt = this.deployments.get(m.deployment);
+    if (!backend?.containerLogs || !rt) return null;
+    const { env, envByMachineType, registryAuth } = rt.record.spec;
+    const secrets = [
+      ...(this.opts.secrets?.() ?? []), ...secretValues(Object.assign({}, ...Object.values(envByMachineType ?? {}), env)),
+      registryAuth?.password ?? '', rt.record.replicaToken, this.replicaToken(rt, m),
+    ].filter(s => s.length >= 8);
+    return this.containerLogs.read(m, () => backend.containerLogs!(m, CONTAINER_LOG_LINES), secrets);
   }
 }

@@ -1,4 +1,5 @@
 import type { BootLogLine, BootPhase } from '../deployments/boot-track';
+import { CONTAINER_LOG_TTL_MS, type ContainerLogView } from '../deployments/container-logs';
 import type { DeploymentView } from '../deployments/types';
 import { EUR_TO_USD } from '../deployments/vast-backend';
 import { STUCK_RETRY_MAX } from '../deployments/stuck-retry';
@@ -68,7 +69,29 @@ function facts(d: DeploymentView): string {
 const panel = (title: string, meta: string, body: string) =>
   `<section><header class="sh"><h2>${esc(title)}</h2>${meta ? `<span class="meta">${esc(meta)}</span>` : ''}</header>${body}</section>`;
 
-export function gpuDetailBody(d: DeploymentView, log: BootLogLine[], now: number, actions = ''): string {
+function noContainerLog(d: DeploymentView, c: ContainerLogView | null): string {
+  if (!c) return 'Log do contêiner indisponível agora.';
+  if (c.pending) return 'Pedido à Vast: o log chega em alguns segundos. Recarregue a página.';
+  if (c.reason === 'no-replica') return 'Nenhuma réplica na Vast agora: não há contêiner para ler.';
+  if (c.reason === 'unsupported' && providerOf(d) === 'scaleway') {
+    return 'A Scaleway não entrega o log da máquina pela API: o gateway vê só o estado dela e o extrato acima.';
+  }
+  return 'Este provedor não entrega o log do contêiner.';
+}
+
+function containerPanel(d: DeploymentView, c: ContainerLogView | null): string {
+  if (!c?.log) return panel('Log do contêiner', '', `<p class="empty">${esc(noContainerLog(d, c))}</p>`);
+  const { log } = c;
+  const renews = hhmm(log.at + CONTAINER_LOG_TTL_MS);
+  const replica = `réplica ${log.replicaId}${c.reason === 'no-replica' ? ' (já liberada)' : ''}`;
+  const meta = [replica, `lido às ${hhmm(log.at)}`, c.pending ? 'atualizando' : `nova leitura após ${renews}`];
+  const failed = `${log.error} · nova busca ao abrir a página após ${renews}`;
+  const body = log.error ? `<p class="empty" role="alert">${pill('bad', 'Falhou ao buscar na Vast')} ${esc(failed)}</p>`
+    : log.lines.length ? `<pre class="log">${esc(log.lines.join('\n'))}</pre>` : '<p class="empty">O contêiner ainda não escreveu nada.</p>';
+  return panel('Log do contêiner', meta.join(' · '), body);
+}
+
+export function gpuDetailBody(d: DeploymentView, log: BootLogLine[], now: number, actions = '', container: ContainerLogView | null = null): string {
   const boot = d.boot ?? { active: [], past: [], retryAt: null, expectedBootSeconds: null };
   const b = bootOf(d);
   const head = b ? `<p class="msg" role="status">${pill(b.stuck ? 'bad' : 'warn', bootHeadline(b))}</p>` : '';
@@ -89,5 +112,5 @@ export function gpuDetailBody(d: DeploymentView, log: BootLogLine[], now: number
   return `<header class="ph"><p class="crumb"><a href="/admin/gpus">GPUs e máquinas</a> /</p><div class="pt"><h1 class="mono">${esc(d.name)}</h1>`
     + `${actions ? `<div class="acts">${actions}</div>` : ''}</div></header>${head}${err}${panel('Máquina', '', facts(d))}${active}${retries}`
     + panel('Últimos boots', '', past)
-    + panel('Extrato do log', `gateway e provedor · o log do contêiner não é buscado · ${hhmm(now)}`, extract);
+    + panel('Extrato do log', `gateway e provedor · ${hhmm(now)}`, extract) + containerPanel(d, container);
 }

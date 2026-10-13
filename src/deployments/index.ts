@@ -28,6 +28,7 @@ import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
 import { sessionsWanting } from '../realtime/external-load';
 import { SANDBOX_USER } from '../config/sandbox-env';
+import { secretValues } from '../telemetry/alert-email';
 
 export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
@@ -234,6 +235,7 @@ export function deploymentsFromEnv(
     ...(maxWait > 0 ? { maxColdStartWaitSeconds: maxWait } : {}),
     log: opts.log,
     checkImage: (image, auth) => missingImage(image, auth ?? scaleway?.registryAuthFor(image) ?? null),
+    secrets: () => secretValues(env),
   });
   const admins = opts.admins ?? adminUsersFromEnv(env);
   const adminWarning = adminListWarning(env);

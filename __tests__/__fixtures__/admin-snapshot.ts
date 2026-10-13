@@ -1,5 +1,6 @@
 import type { AdminSnapshot } from '../../src/admin-page';
 import type { DeploymentView, ReplicaView } from '../../src/deployments/types';
+import type { ContainerLogView } from '../../src/deployments/container-logs';
 import type { KeyView } from '../../src/config/access-keys';
 import { DEFAULT_GPU_POLICY } from '../../src/config/access-keys';
 import type { StoredTelemetryEvent } from '../../src/telemetry/contract';
@@ -340,4 +341,23 @@ function warnSnapshot(now: number): AdminSnapshot {
       { at: iso(now, 345), actor: 'marcos', action: 'admin-page.park', names: ['speech-stack'], ok: true },
     ],
   };
+}
+
+const DEMO_CONTAINER_LINES = [
+  'Welcome to vast.ai. If authentication fails, try again after a few seconds, and double check your ssh key.',
+  'Have fun!',
+  'Starting OpenBSD Secure Shell server: sshd.',
+  'HF_TOKEN=[segredo] python3 -m babelcast.serve --port 8010',
+  'INFO:     Started server process [412]',
+  'INFO:     Waiting for application startup.',
+  'Loading faster-whisper large-v3 (float16) ...',
+  'Loading Kokoro-82M voices: pf_dora, pm_alex',
+  'INFO:     Application startup complete.',
+  'INFO:     Uvicorn running on http://127.0.0.1:8010 (Press CTRL+C to quit)',
+  'INFO:     127.0.0.1:51822 - "GET /health HTTP/1.1" 200 OK',
+];
+
+export function demoContainerLog(name: string, now: number): ContainerLogView {
+  if (name !== 'babelcast-3090') return { reason: 'unsupported', pending: false, log: null };
+  return { reason: null, pending: false, log: { deployment: name, replicaId: '31544017', at: now - 90_000, lines: DEMO_CONTAINER_LINES, error: null } };
 }
