@@ -9,9 +9,11 @@
 // depth before the batch is stored; every remaining string must be short (codes, providers, modes) or the batch is
 // refused, so free text has no way in.
 
+import { voiceTurnProblem } from './voice-turn';
+
 export const APP_TELEMETRY_KINDS = [
   'session_start', 'session_end', 'utterance', 'crash', 'app_start', 'app_exit', 'gpu_wait', 'stream',
-  'direction_changed', 'error',
+  'direction_changed', 'error', 'voice.turn',
 ] as const;
 export type AppTelemetryKind = typeof APP_TELEMETRY_KINDS[number];
 
@@ -125,6 +127,8 @@ export function parseBatch(body: unknown, now: number): AppTelemetryBatch {
       throw new AppTelemetryError(`events[${i}].kind must be one of ${APP_TELEMETRY_KINDS.join(', ')}`);
     }
     if (fields !== undefined && fields !== null && !isPlainObject(fields)) throw new AppTelemetryError(`events[${i}].fields must be an object`);
+    const turnProblem = kind === 'voice.turn' ? voiceTurnProblem(isPlainObject(fields) ? fields : {}) : null;
+    if (turnProblem) throw new AppTelemetryError(`events[${i}].fields: ${turnProblem}`);
     const clean = (fields == null ? {} : sanitizeFields(fields, `events[${i}].fields`)) as Fields;
     if (Buffer.byteLength(JSON.stringify(clean)) > L.maxFieldsBytes) {
       throw new AppTelemetryError(`events[${i}].fields larger than ${L.maxFieldsBytes} bytes`);

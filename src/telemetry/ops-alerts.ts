@@ -4,6 +4,7 @@ import type { DeploymentView } from '../deployments/types';
 import { idleGpu } from '../deployments/idle';
 import type { FallbackProbeResult } from './fallback-probe';
 import type { LatencyReport } from './query';
+import { alarming, turnStats, VOICE_TURN_ALERT, type VoiceTurn } from '../app-telemetry/voice-turn';
 
 export interface OpsAlert { event: string; data: Record<string, unknown> }
 
@@ -90,6 +91,27 @@ export function createOpsAlerts(
         const stat = report?.events[event];
         if (!stat || stat.count < TURN_P95_MIN_TURNS || stat.p95Ms === null || stat.p95Ms <= TURN_P95_LIMIT_MS) continue;
         fire('turn.slow', event, { stage: event, p95Ms: stat.p95Ms, p50Ms: stat.p50Ms, turns: stat.count, windowSeconds: report!.windowSeconds });
+      }
+    },
+    fromVoiceTurns(turns: readonly VoiceTurn[]): void {
+      const t = now();
+      const byApp = new Map<string, VoiceTurn[]>();
+      for (const turn of turns) {
+        if (!turn.classWindow || turn.at <= t - VOICE_TURN_ALERT.windowMs || turn.at > t) continue;
+        const list = byApp.get(turn.app) ?? [];
+        list.push(turn);
+        byApp.set(turn.app, list);
+      }
+      for (const [app, list] of byApp) {
+        const stats = turnStats(list);
+        const { failing, slow } = alarming(stats);
+        if (!failing && !slow) continue;
+        const data = {
+          app, turns: stats.turns, failed: stats.failed, failedPct: Math.round((stats.failed / stats.turns) * 1000) / 10, p50Ms: stats.p50Ms, p95Ms: stats.p95Ms,
+          failures: stats.failures.slice(0, 3).map(f => `${f.stage}/${f.reason} x${f.count}`).join(', '), windowMinutes: VOICE_TURN_ALERT.windowMs / 60_000,
+        };
+        if (failing) fire('voice.turn_failing', app, data);
+        if (slow) fire('voice.turn_slow', app, data);
       }
     },
     /** Cloud fallbacks that failed their probe (`fallback-probe.ts`): one grouped alert; a 402 is also a credit alert. */

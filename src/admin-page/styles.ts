@@ -42,6 +42,12 @@ h1{font-size:24px;line-height:1.2;margin:0;letter-spacing:-.015em;font-weight:68
 .live,.idle{flex:none;width:10px;height:10px;border-radius:50%;background:var(--bar)}
 .live{background:var(--ok);box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 45%,transparent);animation:pulse 2s ease-out infinite}
 @keyframes pulse{to{box-shadow:0 0 0 8px transparent}}@media (prefers-reduced-motion:reduce){.live{animation:none}}
+section.turns.on{border-color:color-mix(in srgb,var(--lvl) 40%,var(--line))}section.turns.on>.sh{background:color-mix(in srgb,var(--lvl) 8%,var(--panel))}
+.stats.turn{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px 24px}.stats.turn b{display:flex;align-items:center;gap:6px}
+.stats b.warn,.stats b.bad{color:var(--lvl)}.stats b .mark svg{width:14px;height:14px}
+.lat{display:block;width:100%;max-width:240px;height:12px;margin:6px 0 4px}
+.lat .z0{fill:color-mix(in srgb,var(--ok) 30%,transparent)}.lat .z1{fill:color-mix(in srgb,var(--warn) 40%,transparent)}.lat .z2{fill:color-mix(in srgb,var(--bad) 30%,transparent)}
+.lat .p50{fill:var(--muted)}.lat .p95{fill:var(--text)}code.rid{overflow-wrap:anywhere;user-select:all}
 .cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 20px}
 .card{display:flex;flex-direction:column;gap:4px;padding:14px 16px;border-radius:12px;background:var(--panel);border:1px solid var(--line);text-decoration:none;min-width:0;
 transition:border-color .15s ease-out,box-shadow .15s ease-out}
@@ -141,7 +147,7 @@ input[type=password]{width:100%;min-height:44px;padding:0 12px;border-radius:8px
 .nav a .mark{position:absolute;top:3px;left:calc(50% + 7px);margin:0}.nav a .mark svg{width:13px;height:13px}
 .nav .lb{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .main{padding:16px 16px 0;min-height:0}.main>.bar{margin:16px -16px 0;padding:10px 16px calc(78px + env(safe-area-inset-bottom));position:static;flex-wrap:wrap}
-section,.hero{scroll-margin-top:72px}.cards{grid-template-columns:1fr}}
+section,.hero{scroll-margin-top:72px}.cards{grid-template-columns:1fr}.stats.turn{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){h1{font-size:21px}.sh .acts{margin-left:0;width:100%}.sh .acts button{width:100%}.pt .acts{margin-left:0;width:100%}.pt .acts form{flex:1}.pt .acts button{width:100%}
 thead{display:none}table,tbody,tr,td{display:block}
 tr{padding:10px 16px;border-bottom:1px solid var(--line2)}tbody tr:last-child{border-bottom:0}

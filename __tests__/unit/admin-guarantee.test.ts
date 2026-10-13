@@ -41,7 +41,9 @@ describe('GPU on but idle', () => {
     expect(section(html, 'alertas')).toContain('gpu.idle');
     const ok = section(render(demoSnapshot(NOW, 'ok')), 'gpus');
     expect(ok).toMatch(/<h2>GPUs<\/h2><span class="meta">/);
-    expect(ok).toMatch(/aquecida para a aula até \d\d:\d\d/);
+    const inClass = demoSnapshot(NOW, 'warn');
+    inClass.gpus = inClass.gpus!.map(d => (d.name === 'speech-stack' ? { ...d, spec: { ...d.spec, warmSchedule: ALWAYS } } : d));
+    expect(section(render(inClass), 'gpus')).toMatch(/aquecida para a aula até \d\d:\d\d/);
   });
 
   it('raises a gpu.idle ops alert from the controller views', () => {

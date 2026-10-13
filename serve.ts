@@ -558,6 +558,7 @@ const appTelemetry = appTelemetryFromEnv(process.env, {
 });
 if (appTelemetry) {
   await appTelemetry.start();
+  setInterval(() => opsAlerts.fromVoiceTurns(appTelemetry.voiceTurns()), 30_000).unref();
   log.log({ dir: appTelemetry.store.dir, retentionDays: appTelemetry.store.retentionDays }, 'App telemetry enabled');
 }
 
@@ -631,6 +632,7 @@ const adminSnapshot = (): AdminSnapshot => ({
     telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
   },
   digest: suggestionDigest.status(), overspend: overspendWatch.active(), reorders: reorderSnapshot(), ttsCache: ttsCache?.stats() ?? null,
+  voiceTurns: appTelemetry?.voiceTurns() ?? null,
 });
 
 const overspendWatch = createOverspendWatch({
