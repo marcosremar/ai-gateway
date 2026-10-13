@@ -76,10 +76,19 @@ export function createAlertMailer(opts: {
 export type AlertMailer = ReturnType<typeof createAlertMailer>;
 
 const OPS_TEXT: Record<string, { level: AlertLevel; subject: string; todo: string }> = {
-  'provider.credit_exhausted': { level: 'urgent', subject: 'crédito do provedor esgotado', todo: 'Recarregue a conta do provedor (Vast: https://cloud.vast.ai/billing/) e desligue máquinas que ninguém usa.' },
+  'provider.credit_exhausted': {
+    level: 'urgent', subject: 'crédito do provedor esgotado',
+    todo: 'Não se resolve sozinho: recarregue a conta do provedor (Vast: https://cloud.vast.ai/billing/; desde 14/10/2026 a Vast é o único provedor de GPU) e desligue máquinas que ninguém usa.',
+  },
   'provider.account_refused': {
-    level: 'urgent', subject: 'provedor recusou criar máquina: conta sem permissão ou chave recusada',
-    todo: 'Corrija a chave ou a permissão (IAM) da conta no provedor. Enquanto isso, cada criação pula esse provedor e tenta os outros da escada (placements); o painel mostra onde a GPU subiu.',
+    level: 'urgent', subject: 'provedor recusou a conta (permissão ou chave): não se resolve sozinho',
+    todo: 'Isto não se resolve sozinho: corrija a chave ou a permissão (IAM) da conta no provedor. Este alerta se repete a cada hora enquanto a recusa continuar. '
+      + 'Enquanto isso, cada criação pula esse provedor e tenta os outros da escada; o painel mostra onde a GPU subiu.',
+  },
+  'class.gpu_not_ready': {
+    level: 'urgent', subject: 'aula: GPU da aula sem réplica pronta 20 min depois de abrir a janela',
+    todo: 'A aula está na reserva na nuvem (voz degradada). Abra /admin/gpus/<nome>: o erro acima diz o que falhou e em qual provedor. '
+      + 'Recusa de conta, permissão ou crédito não se resolve sozinha.',
   },
   'deployment.create_failed': { level: 'warn', subject: 'criação de máquina falhou', todo: 'Veja o erro abaixo e o /health?details=1; o gateway tenta de novo sozinho.' },
   'deployment.stuck_boot': {
