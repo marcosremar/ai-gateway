@@ -126,7 +126,7 @@ describe('#8 a replica that never becomes ready', () => {
     controllers.push(controller);
     await controller.init();
     controller.start();
-    await controller.put('broken', { profile: 'cpu-echo', maxReplicas: 1, bootTimeoutMinutes: 45, idleMinutes: 15 });
+    await controller.put('broken', { profile: 'cpu-echo', maxReplicas: 1, bootTimeoutMinutes: 45, idleMinutes: 15, autoRetryStuckBoot: false });
     controller.wake('broken');
     await until(() => cloud.created.length === 1);
 

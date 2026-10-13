@@ -65,7 +65,13 @@ export function withBoots(s: AdminSnapshot, now: number, stuck: boolean): AdminS
       'speech-stack-test': (d: DeploymentView) => ({
         ...d, status: 'warming' as const, spec: { ...d.spec, image: 'rg.fr-par.scw.cloud/aigw/speech-stack:20261011-0200', bootTimeoutMinutes: 45 },
         replicas: [booting('fr-par-2/c3e9', { provider: 'scaleway', zone: 'fr-par-2', machineType: 'L4-1-24G', pricePerHour: 0.79, providerState: 'running', ip: '51.15.0.12', ageSeconds: 26 * 60 })],
-        boot: bootView(now, [{ replicaId: 'fr-par-2/c3e9', phases: boot(now, [['provisioning', 26], ['starting', 20], ['loading', 14]]) }], scwPast, 45, { expectedBootSeconds: 11 * 60 }),
+        boot: bootView(now, [{ replicaId: 'fr-par-2/c3e9', phases: boot(now, [['provisioning', 26], ['starting', 20], ['loading', 14]]) }], scwPast, 45, {
+          expectedBootSeconds: 11 * 60, retriesExhausted: true,
+          retries: [
+            { at: now - 50 * MIN, replicaId: 'fr-par-2/a01f', where: 'fr-par-2', phase: 'loading', minutes: 16, attempt: 1, next: { replicaId: 'nl-ams-1/b2c4', where: 'nl-ams-1' } },
+            { at: now - 27 * MIN, replicaId: 'nl-ams-1/b2c4', where: 'nl-ams-1', phase: 'starting', minutes: 17, attempt: 2, next: { replicaId: 'fr-par-2/c3e9', where: 'fr-par-2' } },
+          ],
+        }),
       }),
     } : {}),
   };

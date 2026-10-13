@@ -108,7 +108,7 @@ const KNOWN_FIELDS = new Set<string>([
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
   'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
-  'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor',
+  'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor', 'autoRetryStuckBoot',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 const PLACEMENT_FIELDS = new Set([...CANDIDATE_FIELDS, 'maxReplicas', 'image']);
@@ -239,6 +239,10 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   if (input.paused !== undefined) {
     if (typeof input.paused !== 'boolean') throw new SpecError('paused must be a boolean');
     out.paused = input.paused;
+  }
+  if (input.autoRetryStuckBoot !== undefined) {
+    if (typeof input.autoRetryStuckBoot !== 'boolean') throw new SpecError('autoRetryStuckBoot must be a boolean');
+    out.autoRetryStuckBoot = input.autoRetryStuckBoot;
   }
   if (input.description !== undefined) {
     if (typeof input.description !== 'string' || input.description.length > 500) throw new SpecError('description is invalid');

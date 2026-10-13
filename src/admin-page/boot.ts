@@ -1,6 +1,7 @@
 import type { BootLogLine, BootPhase } from '../deployments/boot-track';
 import type { DeploymentView } from '../deployments/types';
 import { EUR_TO_USD } from '../deployments/vast-backend';
+import { STUCK_RETRY_MAX } from '../deployments/stuck-retry';
 import { duration, esc, hhmm, money, pill, providerLabel, providerOf, table, upOf, type Level } from './ui';
 
 export const PHASE_TEXT: Record<BootPhase, string> = {
@@ -77,10 +78,16 @@ export function gpuDetailBody(d: DeploymentView, log: BootLogLine[], now: number
     hhmm(p.startedAt), p.replicaId ? `<code>${esc(p.replicaId)}</code>` : '—', duration((p.endedAt - p.startedAt) / 1000),
     p.result === 'ready' ? pill('ok', 'pronta') : pill(p.result === 'failed' ? 'bad' : 'warn', `${p.result === 'failed' ? 'falhou' : 'interrompida'}${p.reason ? ` · ${p.reason}` : ''}`),
   ]), 'Nenhum boot registrado desde que o gateway subiu.');
+  const retries = boot.retries?.length ? panel('Novas tentativas automáticas', boot.retriesExhausted ? 'tentativas esgotadas: segue o limite de boot normal' : `até ${STUCK_RETRY_MAX} por boot travado`,
+    table([{ label: 'O que aconteceu' }, { label: 'Quando', num: true }], [...boot.retries].reverse().map(r => [
+      esc(`travou em ${PHASE_TEXT[r.phase]} (${r.minutes} min) em ${r.where} → liberada → nova tentativa ${r.attempt}/${STUCK_RETRY_MAX} `
+        + (r.next ? `em ${r.next.where} (${r.next.replicaId})` : '· procurando outra oferta')),
+      hhmm(r.at),
+    ]), '')) : '';
   const lines = log.slice(-LOG_SHOWN).map(l => `${hhmm(l.at)} ${l.replicaId ? `[${l.replicaId}] ` : ''}${l.text}`).join('\n');
   const extract = lines ? `<pre class="log">${esc(lines)}</pre>` : '<p class="empty">Nenhuma linha registrada desde que o gateway subiu.</p>';
   return `<header class="ph"><p class="crumb"><a href="/admin/gpus">GPUs e máquinas</a> /</p><div class="pt"><h1 class="mono">${esc(d.name)}</h1>`
-    + `${actions ? `<div class="acts">${actions}</div>` : ''}</div></header>${head}${err}${panel('Máquina', '', facts(d))}${active}`
+    + `${actions ? `<div class="acts">${actions}</div>` : ''}</div></header>${head}${err}${panel('Máquina', '', facts(d))}${active}${retries}`
     + panel('Últimos boots', '', past)
     + panel('Extrato do log', `gateway e provedor · o log do contêiner não é buscado · ${hhmm(now)}`, extract);
 }

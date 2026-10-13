@@ -42,7 +42,7 @@ export const TOO_FAR_HOST_MS = 24 * 3_600_000;
 export const KNOWN_RTT_MS = 24 * 3_600_000;
 export const KNOWN_RTT_MAX_HOSTS = 200;
 export const UDP_BLOCKED_HOST_MS = 24 * 3_600_000;
-const FAILURE_AVOID_MS = new Map([['too-far', TOO_FAR_HOST_MS], ['boot-timeout', BAD_HOST_MS], ['udp-blocked', 0]]);
+const FAILURE_AVOID_MS = new Map([['too-far', TOO_FAR_HOST_MS], ['boot-timeout', BAD_HOST_MS], ['boot-stuck', BAD_HOST_MS], ['udp-blocked', 0]]);
 /** RTT samples per measurement (median) and per-sample timeout: one gate check stays within a few seconds. */
 export const RTT_SAMPLES = 5;
 export const RTT_SAMPLE_TIMEOUT_MS = 2_000;

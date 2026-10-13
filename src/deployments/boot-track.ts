@@ -7,7 +7,7 @@ export type ActivePhase = Exclude<BootPhase, 'ready'>;
 export const PHASE_DEFAULT_MINUTES: Record<ActivePhase, number> = { placing: 3, provisioning: 5, pulling: 15, starting: 15, loading: 10 };
 export const BOOT_LOG_LINES = 100;
 export const BOOTS_KEPT = 5;
-const FAILURE_REASONS = new Set(['boot-timeout', 'boot-failed', 'unhealthy', 'halted', 'too-far', 'gone']);
+const FAILURE_REASONS = new Set(['boot-timeout', 'boot-stuck', 'boot-failed', 'unhealthy', 'halted', 'too-far', 'gone']);
 
 export interface PhaseMark { phase: BootPhase; at: number }
 export interface BootRecord { replicaId: string | null; startedAt: number; endedAt: number; result: 'ready' | 'failed' | 'interrupted'; reason: string | null; phases: PhaseMark[] }

@@ -15,6 +15,7 @@
 
 import type { BootPhase, BootRecord, BootState } from './boot-track';
 import type { HostRecord } from './host-reputation';
+import type { StuckRetry } from './stuck-retry';
 import type { RttBaseline } from './rtt-gate';
 
 export type DeploymentProvider = 'scaleway' | 'vast';
@@ -125,6 +126,7 @@ export interface DeploymentSpec {
   maxHours: number;
   /** Paused deployments keep their spec but run no replicas and refuse invokes. */
   paused: boolean;
+  autoRetryStuckBoot?: boolean;
   /**
    * Reached from the internet on these ports, not only through the gateway (WebRTC, TLS with its own certificate):
    * a reserved IP that outlives the replicas (DNS keeps pointing at it), a firewall that opens only these ports plus
@@ -515,6 +517,8 @@ export interface DeploymentView {
     past: Array<Omit<BootRecord, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
     retryAt: number | null;
     expectedBootSeconds: number | null;
+    retries?: StuckRetry[];
+    retriesExhausted?: boolean;
   };
   warnings: string[];
 }

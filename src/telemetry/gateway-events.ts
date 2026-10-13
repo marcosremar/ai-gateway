@@ -31,6 +31,9 @@ const MAP: Record<string, { event: string; level?: TelemetryLevel }> = {
   'deployments: provider credit exhausted': { event: 'provider.credit_exhausted', level: 'error' },
   'deployments: provider credit back': { event: 'provider.credit_back' },
   'deployments: vast offer too far before renting': { event: 'replica.too_far_before_rent', level: 'warn' },
+  'deployments: stuck boot, releasing to retry': { event: 'replica.stuck_retry', level: 'warn' },
+  'deployments: stuck boot retried on another offer': { event: 'replica.stuck_retried' },
+  'deployments: stuck boot retries exhausted': { event: 'replica.stuck_exhausted', level: 'error' },
 };
 
 export function deploymentLogToTelemetry(msg: string, data?: Record<string, unknown>): void {
