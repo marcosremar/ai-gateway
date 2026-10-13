@@ -35,6 +35,9 @@ h1{font-size:22px;line-height:1.2;margin:0;letter-spacing:-.01em}
 .attn li{display:flex;gap:10px;align-items:center;padding:10px 14px;border-top:1px solid var(--line2)}.attn li:first-child{border-top:0}
 .attn a{font-weight:600}.attn span.t{color:var(--muted)}
 .kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:24px;overflow:hidden}
+.kpis.few{grid-template-columns:repeat(3,minmax(0,1fr))}
+.scope{margin:-8px 0 20px;padding:10px 14px;border-radius:8px;background:color-mix(in srgb,var(--accent) 9%,var(--panel));border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line))}
+.scope small{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
 .kpi{display:flex;flex-direction:column;gap:2px;padding:14px 16px;text-decoration:none;border-left:1px solid var(--line2);min-width:0}
 .kpi:first-child{border-left:0}.kpi:hover{background:var(--hover)}
 .kpi .kl{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px;font-weight:500}

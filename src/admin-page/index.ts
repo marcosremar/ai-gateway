@@ -6,9 +6,11 @@ import { AttemptLimiter } from '../accounts/rate-limit';
 import { RateLimiter } from '../gateway/proxy/middleware/rate-limit';
 import { redact } from '../telemetry/alert-email';
 import { renderLogin, renderStatus, type AdminAlert, type AdminSnapshot } from './render';
+import { scopeToApp } from './scope';
 
 export type { AdminAlert, AdminApp, AdminSnapshot } from './render';
 export { adminTraffic, type AdminTraffic } from './traffic';
+export { scopeToApp } from './scope';
 
 export const ADMIN_ANCHORS = ['reservas', 'saldos', 'gpus', 'alertas', 'maquinas', 'chaves', 'apps', 'trafego', 'atividade'] as const;
 
@@ -20,17 +22,19 @@ const ALERTS_KEPT = 50;
 const APP_FILTER = /^[A-Za-z0-9._-]{1,64}$/;
 const NEXT = /^\/admin(\?app=[A-Za-z0-9._-]{1,64})?(#[a-z]{1,16})?$/;
 
+export interface AdminActor { name: string; app: string | null; keyId?: string; mayPark?: () => boolean }
+
 export interface AdminPageOptions {
-  actorOf: (key: string) => string | null;
+  actorOf: (key: string) => AdminActor | null;
   snapshot: () => AdminSnapshot;
-  park: (deployment: string) => Promise<unknown>;
+  park: (deployment: string, actor: AdminActor) => Promise<unknown>;
   probe: () => Promise<unknown>;
   secrets?: () => string[];
   audit?: (entry: { actor: string; action: string; names: string[]; ok: boolean; detail?: string }) => void;
   now?: () => number;
 }
 
-interface Session { actor: string; csrf: string; expiresAt: number }
+interface Session { actor: AdminActor; role: 'admin' | `app:${string}`; csrf: string; expiresAt: number }
 
 export function createAlertLog() {
   const alerts: AdminAlert[] = [];
@@ -124,16 +128,17 @@ export function createAdminPage(opts: AdminPageOptions) {
     const next = form?.get('next') ?? '';
     const actor = key ? opts.actorOf(key) : null;
     if (!actor) {
-      html(res, 401, n => renderLogin(n, 'Chave recusada: só uma chave admin entra.', NEXT.test(next) ? next.replace(/#.*/, '') : '/admin'));
+      html(res, 401, n => renderLogin(n, 'Chave recusada: só a chave admin ou a chave de um app entra.', NEXT.test(next) ? next.replace(/#.*/, '') : '/admin'));
       return;
     }
     const token = randomBytes(32).toString('hex');
-    sessions.set(token, { actor, csrf: randomBytes(32).toString('hex'), expiresAt: now() + ADMIN_SESSION_MS });
-    opts.audit?.({ actor, action: 'admin-page.login', names: [], ok: true });
+    const role = actor.app ? `app:${actor.app}` as const : 'admin';
+    sessions.set(token, { actor, role, csrf: randomBytes(32).toString('hex'), expiresAt: now() + ADMIN_SESSION_MS });
+    opts.audit?.({ actor: actor.name, action: 'admin-page.login', names: [], ok: true });
     redirect(res, NEXT.test(next) ? next : '/admin', { 'Set-Cookie': cookie(token, ADMIN_SESSION_MS / 1000) });
   }
 
-  type Signed = { token: string; actor: string; form: URLSearchParams };
+  type Signed = { token: string; session: Session; form: URLSearchParams };
 
   function guarded(run: (res: ServerResponse, signed: Signed) => void | Promise<void>) {
     return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -143,7 +148,7 @@ export function createAdminPage(opts: AdminPageOptions) {
         html(res, 403, n => renderLogin(n, 'Sessão expirada ou pedido sem o token desta página. Entre de novo.'));
         return;
       }
-      await run(res, { token: found.token, actor: found.session.actor, form });
+      await run(res, { token: found.token, session: found.session, form });
     };
   }
 
@@ -152,16 +157,29 @@ export function createAdminPage(opts: AdminPageOptions) {
     redirect(res, '/admin', { 'Set-Cookie': cookie('', 0) });
   });
 
-  const probe = guarded((res, { actor }) => {
-    opts.audit?.({ actor, action: 'admin-page.probe', names: [], ok: true });
+  function refuse(res: ServerResponse, session: Session, action: string, names: string[]): void {
+    opts.audit?.({ actor: session.actor.name, action, names, ok: false, detail: `recusado para ${session.role}` });
+    html(res, 403, n => renderLogin(n, 'Esta ação não é permitida para esta chave.'));
+  }
+
+  function mayPark(session: Session, name: string): boolean {
+    const app = session.actor.app;
+    if (!app) return true;
+    return Boolean(session.actor.mayPark?.()) && opts.snapshot().gpus?.find(d => d.name === name)?.app === app;
+  }
+
+  const probe = guarded((res, { session }) => {
+    if (session.role !== 'admin') return refuse(res, session, 'admin-page.probe', []);
+    opts.audit?.({ actor: session.actor.name, action: 'admin-page.probe', names: [], ok: true });
     void opts.probe().catch(() => {});
     redirect(res, `/admin?msg=${encodeURIComponent('Teste das reservas iniciado; recarregue em 30 s.')}#reservas`);
   });
 
-  const park = guarded(async (res, { actor, form }) => {
+  const park = guarded(async (res, { session, form }) => {
     const name = form.get('name') ?? '';
-    const parked = await opts.park(name).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
-    opts.audit?.({ actor, action: 'admin-page.park', names: [name], ok: !parked, ...(parked ? { detail: parked } : {}) });
+    if (!mayPark(session, name)) return refuse(res, session, 'admin-page.park', [name]);
+    const parked = await opts.park(name, session.actor).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
+    opts.audit?.({ actor: session.actor.name, action: 'admin-page.park', names: [name], ok: !parked, ...(parked ? { detail: parked } : {}) });
     redirect(res, `/admin?msg=${encodeURIComponent(parked ? `Falhou ao estacionar ${name}: ${parked}` : `${name} estacionada.`)}#gpus`);
   });
 
@@ -175,8 +193,10 @@ export function createAdminPage(opts: AdminPageOptions) {
       return;
     }
     const message = query.get('msg');
-    const snapshot = opts.snapshot();
-    html(res, 200, n => renderStatus(n, snapshot, { now: now(), csrf: found.session.csrf, actor: found.session.actor, message, app: appFilter }));
+    const { actor, csrf } = found.session;
+    const snapshot = actor.app ? scopeToApp(opts.snapshot(), actor.app) : opts.snapshot();
+    const view = actor.app ? { id: actor.app, canPark: Boolean(actor.mayPark?.()) } : null;
+    html(res, 200, n => renderStatus(n, snapshot, { now: now(), csrf, actor: actor.name, message, app: appFilter, view }));
   }
 
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([

@@ -10,6 +10,8 @@ import { adminTraffic } from '../../src/admin-page/traffic';
 const ADMIN_KEY = 'gw_admin_0123456789abcdef0123';
 const CLIENT_KEY = 'gw_client_0123456789abcdef012';
 const DEV_KEY = 'gw_dev_0123456789abcdef012345';
+const BABEL_KEY = 'gw_babel_0123456789abcdef0123';
+const SITE_KEY = 'gw_site_0123456789abcdef01234';
 const PROVIDER_SECRET = 'scw-secret-value-9f8e7d6c5b4a';
 const LEAK = /(sk-|gw_|key-)[A-Za-z0-9_-]{4,}/;
 
@@ -18,7 +20,7 @@ afterEach(async () => { while (open.length) await new Promise(r => open.pop()!.c
 
 async function gateway() {
   const clock = { now: Date.parse('2026-10-13T10:00:00Z') };
-  const access = new AccessKeys({ GATEWAY_API_KEYS: `${ADMIN_KEY}:marcos,${CLIENT_KEY}:parle,${DEV_KEY}:parle-dev:agentes` });
+  const access = new AccessKeys({ GATEWAY_API_KEYS: `${ADMIN_KEY}:marcos,${CLIENT_KEY}:parle,${DEV_KEY}:parle-dev:agentes,${BABEL_KEY}:babelcast,${SITE_KEY}:site` });
   access.setBaseAdmins(['marcos']);
   const parked: string[] = [];
   const audit: Array<Record<string, unknown>> = [];
@@ -31,11 +33,17 @@ async function gateway() {
   snapshot.gpus![0] = { ...snapshot.gpus![0], lastError: `boot failed: token ${PROVIDER_SECRET}` };
   snapshot.alerts.unshift({ event: 'fallback.probe_failed', at: new Date(clock.now).toISOString(), summary: 'error: Bearer sk-or-v1-0123456789abcdef0123 refused' });
   createAdminPage({
-    actorOf: (key) => { const user = access.resolve(key)?.userId; return user && access.admins.has(user) ? user : null; },
+    actorOf: (key) => {
+      const found = access.resolve(key);
+      if (!found) return null;
+      if (access.admins.has(found.userId)) return { name: found.userId, app: null };
+      if (!snapshot.apps.some(a => a.id === found.userId)) return null;
+      return { name: found.userId, app: found.userId, keyId: found.keyId, mayPark: () => access.policyOf(found.keyId).canStartGpu };
+    },
     snapshot: () => snapshot,
     park: async (name) => { parked.push(name); },
     probe: async () => { probes++; },
-    secrets: () => [ADMIN_KEY, CLIENT_KEY, DEV_KEY, PROVIDER_SECRET],
+    secrets: () => [ADMIN_KEY, CLIENT_KEY, DEV_KEY, BABEL_KEY, SITE_KEY, PROVIDER_SECRET],
     audit: (entry) => audit.push(entry),
     now: () => clock.now,
   }).mount(server);
@@ -54,12 +62,12 @@ async function gateway() {
     const setCookie = res.headers.get('set-cookie') ?? '';
     return { res, setCookie, cookie: setCookie.split(';')[0] };
   }
-  async function signedIn() {
-    const { cookie } = await login();
+  async function signedIn(key = ADMIN_KEY) {
+    const { cookie } = await login(key);
     const html = await (await call('/admin', { cookie })).text();
     return { cookie, html, csrf: /name="csrf" value="([a-f0-9]+)"/.exec(html)![1] };
   }
-  return { clock, call, post, login, signedIn, parked, audit, probes: () => probes };
+  return { clock, access, call, post, login, signedIn, parked, audit, probes: () => probes };
 }
 
 describe('admin page (/admin)', () => {
@@ -75,9 +83,9 @@ describe('admin page (/admin)', () => {
     expect(html).not.toContain('speech-stack');
   });
 
-  it('refuses a client key and a dev key', async () => {
+  it('refuses a dev key and a client key that is no registered app', async () => {
     const gw = await gateway();
-    for (const key of [CLIENT_KEY, DEV_KEY, 'not-a-key']) {
+    for (const key of [DEV_KEY, SITE_KEY, 'not-a-key']) {
       const { res, setCookie } = await gw.login(key);
       expect(res.status).toBe(401);
       expect(setCookie).toBe('');
@@ -139,6 +147,52 @@ describe('admin page (/admin)', () => {
     const { html } = await gw.signedIn();
     for (const secret of [ADMIN_KEY, CLIENT_KEY, DEV_KEY, PROVIDER_SECRET]) expect(html).not.toContain(secret);
     expect(html).not.toMatch(LEAK);
+  });
+
+  it('lets an app key in and shows only that app', async () => {
+    const gw = await gateway();
+    const { res } = await gw.login(CLIENT_KEY);
+    expect(res.status).toBe(303);
+    const { html } = await gw.signedIn(CLIENT_KEY);
+    expect(html).toContain('Visão do app <b>Parle</b>');
+    expect(html).toContain('ai-gateway <small>app</small>');
+    expect(html).toContain('parle (producao)');
+    expect(html).toContain('speech-stack');
+    for (const other of ['babelcast', 'Babelcast', 'babel-live', 'babel-tts', 'gpt-4o-mini-tts', 'legendas-ao-vivo', 'parle-dev', 'agentes', 'marcos', 'palco', 'm-7c1e', 'scaleway']) {
+      expect(html).not.toContain(other);
+    }
+    for (const hidden of ['saldos', 'maquinas', 'trafego']) {
+      expect(html).not.toContain(`id="${hidden}"`);
+      expect(html).not.toContain(`href="#${hidden}"`);
+    }
+    expect(html).not.toContain('Saldos');
+    expect(html).not.toContain('Máquinas avulsas');
+    expect(html).not.toContain('/admin/probe');
+    expect(html).not.toContain('/admin/park');
+    for (const secret of [ADMIN_KEY, CLIENT_KEY, DEV_KEY, BABEL_KEY, PROVIDER_SECRET]) expect(html).not.toContain(secret);
+    expect(html).not.toMatch(LEAK);
+  });
+
+  it('ignores ?app= for an app session', async () => {
+    const gw = await gateway();
+    const { cookie } = await gw.login(CLIENT_KEY);
+    const html = await (await gw.call('/admin?app=babelcast', { cookie })).text();
+    expect(html).toContain('Visão do app <b>Parle</b>');
+    expect(html).not.toContain('babelcast');
+  });
+
+  it('refuses admin-only actions to an app session and parks only its own GPU when its policy allows', async () => {
+    const gw = await gateway();
+    const { cookie, csrf } = await gw.signedIn(CLIENT_KEY);
+    expect((await gw.post('/admin/probe', { csrf }, cookie)).status).toBe(403);
+    expect((await gw.post('/admin/park', { name: 'speech-stack', csrf }, cookie)).status).toBe(403);
+    await gw.access.setPolicy({ id: 'env-parle', canStartGpu: true });
+    expect((await gw.post('/admin/park', { name: 'babel-live', csrf }, cookie)).status).toBe(403);
+    expect((await gw.post('/admin/park', { name: 'speech-stack', csrf }, cookie)).status).toBe(303);
+    expect(gw.parked).toEqual(['speech-stack']);
+    expect(gw.probes()).toBe(0);
+    expect(await (await gw.call('/admin', { cookie })).text()).toContain('action="/admin/park"');
+    expect(gw.audit.filter(e => !e.ok).map(e => [e.action, e.names])).toEqual([['admin-page.probe', []], ['admin-page.park', ['speech-stack']], ['admin-page.park', ['babel-live']]]);
   });
 
   it('blocks a POST without the CSRF token or from another site', async () => {
@@ -206,7 +260,7 @@ describe('admin page (/admin)', () => {
     expect(traffic).toContain('<code>openrouter</code>');
     expect(traffic).toMatch(/aria-label="Chamadas por hora/);
     const gpus = html.slice(html.indexOf('<section id="gpus"'), html.indexOf('<section id="reservas"'));
-    expect(gpus).toMatch(/parle até \d\d:\d\d/);
+    expect(gpus).toMatch(/parle \(producao\) até \d\d:\d\d/);
     const activity = html.slice(html.indexOf('<section id="atividade"'));
     expect(activity).toContain('estacionou a GPU');
     expect(activity).toContain('falha ao criar réplica');
