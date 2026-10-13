@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
 import { AccessKeys } from '../../src/config/access-keys';
-import { ADMIN_ANCHORS, ADMIN_COOKIE, createAdminPage } from '../../src/admin-page';
+import { ADMIN_ANCHORS, ADMIN_COOKIE, ANCHOR_PAGE, PAGES, createAdminPage } from '../../src/admin-page';
 import { demoSnapshot } from '../__fixtures__/admin-snapshot';
-import { renderStatus } from '../../src/admin-page/render';
+import { renderStatus } from '../../src/admin-page/pages';
 import { adminTraffic } from '../../src/admin-page/traffic';
 
 const ADMIN_KEY = 'gw_admin_0123456789abcdef0123';
@@ -71,7 +71,8 @@ async function gateway() {
     const html = await (await call('/admin', { cookie })).text();
     return { cookie, html, csrf: /name="csrf" value="([a-f0-9]+)"/.exec(html)![1] };
   }
-  return { clock, access, call, post, login, signedIn, parked, pins, dismissed, audit, snapshot, probes: () => probes };
+  const every = async (cookie: string, query = '') => (await Promise.all(PAGES.map(async p => (await call(p.path + query, { cookie })).text()))).join('');
+  return { clock, access, call, post, login, signedIn, every, parked, pins, dismissed, audit, snapshot, probes: () => probes };
 }
 
 describe('admin page (/admin)', () => {
@@ -102,30 +103,52 @@ describe('admin page (/admin)', () => {
     expect(res.status).toBe(303);
     expect(res.headers.get('location')).toBe('/admin');
     expect(setCookie).toMatch(new RegExp(`^${ADMIN_COOKIE}=[a-f0-9]{64}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200$`));
-    const { html } = await gw.signedIn();
-    for (const title of ['Reservas', 'Saldos', 'GPUs', 'Avisos e alertas', 'Máquinas avulsas', 'Chaves', 'Apps', 'Tráfego', 'Atividade']) expect(html).toContain(title);
+    const { cookie } = await gw.signedIn();
+    const html = await gw.every(cookie);
+    for (const title of ['Reservas', 'Saldos', 'GPUs', 'Alertas enviados', 'Máquinas avulsas', 'Chaves', 'Apps', 'Tráfego', 'Quem fez o quê']) expect(html).toContain(title);
     expect(html).toContain('fora da janela de aula');
     expect(gw.audit.some(e => e.action === 'admin-page.login' && e.actor === 'marcos')).toBe(true);
     expect(JSON.stringify(gw.audit)).not.toContain(ADMIN_KEY);
   });
 
-  it('gives every section its stable anchor', async () => {
+  it('serves one page per area, each from the nav, and asks for the key on every one without a session', async () => {
     const gw = await gateway();
-    const { html } = await gw.signedIn();
-    for (const id of ADMIN_ANCHORS) {
-      expect(html).toContain(`<section id="${id}" data-spy>`);
-      expect(html).toContain(`href="#${id}"`);
+    const { cookie, html } = await gw.signedIn();
+    for (const p of PAGES) {
+      expect(html).toContain(`href="${p.path}"`);
+      const res = await gw.call(p.path, { cookie });
+      expect(res.status).toBe(200);
+      expect(await res.text()).toMatch(new RegExp(`href="${p.path}" class="[a-z]+ cur" aria-current="page"`));
+      const anonymous = await (await gw.call(p.path)).text();
+      expect(anonymous).toContain('name="key"');
+      expect(anonymous).toContain(`name="next" value="${p.path}"`);
     }
+    expect((await gw.call('/admin/nada', { cookie })).headers.get('location')).toBe('/admin');
+  });
+
+  it('keeps every old anchor: each one lives on a page and /admin#<anchor> moves there', async () => {
+    const gw = await gateway();
+    const { cookie, html } = await gw.signedIn();
+    expect(html).toContain(`location.replace(t+location.search+'#'+h)`);
+    expect(html).toContain(JSON.stringify(ANCHOR_PAGE));
+    for (const id of ADMIN_ANCHORS) {
+      const path = ANCHOR_PAGE[id]!;
+      expect(path, id).toBeTruthy();
+      expect(await (await gw.call(path, { cookie })).text()).toContain(`<section id="${id}">`);
+    }
+    expect(ANCHOR_PAGE).toMatchObject({ reservas: '/admin/servicos', saldos: '/admin/gastos', gpus: '/admin/gpus', alertas: '/admin/atividade', maquinas: '/admin/gpus', chaves: '/admin/chaves', apps: '/admin/servicos' });
+    expect(await (await gw.call('/admin/servicos', { cookie })).text()).toContain('id="garantia-parle"');
   });
 
   it('filters the apps section by ?app=', async () => {
     const gw = await gateway();
     const { cookie } = await gw.login();
-    const html = await (await gw.call('/admin?app=parle', { cookie })).text();
-    const apps = html.slice(html.indexOf('<section id="apps"'), html.indexOf('<section id="gpus"'));
+    const html = await (await gw.call('/admin/servicos?app=parle', { cookie })).text();
+    const apps = html.slice(html.indexOf('<section id="apps"'), html.indexOf('<section id="garantia"'));
     expect(apps).toContain('precisa de GPU (speech-stack)');
     expect(apps).not.toContain('babelcast');
-    expect(await (await gw.call('/admin', { cookie })).text()).toMatch(/<section id="apps"[^>]*>[\s\S]*babelcast/);
+    expect(html).toContain('href="/admin/gpus?app=parle"');
+    expect(await (await gw.call('/admin/servicos', { cookie })).text()).toMatch(/<section id="apps"[^>]*>[\s\S]*babelcast/);
   });
 
   it('after login goes back to the URL and anchor it was opened with', async () => {
@@ -134,7 +157,12 @@ describe('admin page (/admin)', () => {
     expect(form).toContain('name="next" value="/admin?app=parle"');
     expect((await gw.login(ADMIN_KEY, '/admin?app=parle#apps')).res.headers.get('location')).toBe('/admin?app=parle#apps');
     expect((await gw.login(ADMIN_KEY, '/admin#gpus')).res.headers.get('location')).toBe('/admin#gpus');
-    for (const evil of ['https://evil.example/admin', '//evil.example', '/admin/../v1', '/admin?app=x"><script>']) {
+    for (const next of ['/admin/gpus', '/admin/servicos?app=parle#garantia-parle', '/admin/gpus/babelcast-3090']) {
+      expect((await gw.login(ADMIN_KEY, next)).res.headers.get('location')).toBe(next);
+    }
+    expect(await (await gw.call('/admin/gpus/babelcast-3090')).text()).toContain('name="next" value="/admin/gpus/babelcast-3090"');
+    gw.clock.now += 16 * 60_000;
+    for (const evil of ['https://evil.example/admin', '//evil.example', '/admin/../v1', '/admin?app=x"><script>', '/admin/outra', '/admin/gpus/../v1']) {
       expect((await gw.login(ADMIN_KEY, evil)).res.headers.get('location')).toBe('/admin');
     }
   });
@@ -146,20 +174,24 @@ describe('admin page (/admin)', () => {
     expect(await (await gw.call('/admin', { cookie })).text()).toContain('name="key"');
   });
 
-  it('never shows a secret', async () => {
+  it('never shows a secret, on any page', async () => {
     const gw = await gateway();
-    const { html } = await gw.signedIn();
-    for (const secret of [ADMIN_KEY, CLIENT_KEY, DEV_KEY, PROVIDER_SECRET]) expect(html).not.toContain(secret);
-    expect(html).not.toMatch(LEAK);
+    const { cookie } = await gw.signedIn();
+    const pages = [await gw.every(cookie), ...await Promise.all(gw.snapshot.gpus!.map(async d => (await gw.call(`/admin/gpus/${d.name}`, { cookie })).text()))];
+    for (const html of pages) {
+      for (const secret of [ADMIN_KEY, CLIENT_KEY, DEV_KEY, BABEL_KEY, SITE_KEY, PROVIDER_SECRET]) expect(html).not.toContain(secret);
+      expect(html).not.toMatch(LEAK);
+    }
   });
 
   it('lets an app key in and shows only that app', async () => {
     const gw = await gateway();
     const { res } = await gw.login(CLIENT_KEY);
     expect(res.status).toBe(303);
-    const { html } = await gw.signedIn(CLIENT_KEY);
+    const { cookie } = await gw.signedIn(CLIENT_KEY);
+    const html = await gw.every(cookie);
     expect(html).toContain('Visão do app <b>Parle</b>');
-    expect(html).toContain('ai-gateway <small>app</small>');
+    expect(html).toContain('ai-gateway <small>Parle</small>');
     expect(html).toContain('parle (producao)');
     expect(html).toContain('speech-stack');
     for (const other of ['babelcast', 'Babelcast', 'babel-live', 'babel-tts', 'gpt-4o-mini-tts', 'legendas-ao-vivo', 'parle-dev', 'agentes', 'marcos', 'palco', 'm-7c1e', 'scaleway']) {
@@ -169,6 +201,7 @@ describe('admin page (/admin)', () => {
       expect(html).not.toContain(`id="${hidden}"`);
       expect(html).not.toContain(`href="#${hidden}"`);
     }
+    expect(await gw.every(cookie, '?app=babelcast')).not.toContain('babelcast');
     expect(html).not.toContain('Saldos');
     expect(html).not.toContain('Máquinas avulsas');
     expect(html).not.toContain('/admin/probe');
@@ -195,7 +228,7 @@ describe('admin page (/admin)', () => {
     expect((await gw.post('/admin/park', { name: 'speech-stack', csrf }, cookie)).status).toBe(303);
     expect(gw.parked).toEqual(['speech-stack']);
     expect(gw.probes()).toBe(0);
-    expect(await (await gw.call('/admin', { cookie })).text()).toContain('action="/admin/park"');
+    expect(await (await gw.call('/admin/gpus', { cookie })).text()).toContain('action="/admin/park"');
     expect(gw.audit.filter(e => !e.ok).map(e => [e.action, e.names])).toEqual([['admin-page.probe', []], ['admin-page.park', ['speech-stack']], ['admin-page.park', ['babel-live']]]);
   });
 
@@ -216,16 +249,22 @@ describe('admin page (/admin)', () => {
     const { cookie, csrf } = await gw.signedIn();
     const res = await gw.post('/admin/park', { name: 'speech-stack', csrf }, cookie);
     expect(res.status).toBe(303);
-    expect(res.headers.get('location')).toMatch(/#gpus$/);
+    expect(res.headers.get('location')).toMatch(/^\/admin\/gpus\?msg=.*#gpus$/);
     expect(gw.parked).toEqual(['speech-stack']);
-    expect((await gw.post('/admin/probe', { csrf }, cookie)).status).toBe(303);
+    expect((await gw.post('/admin/park', { name: 'speech-stack', csrf, back: '/admin' }, cookie)).headers.get('location')).toMatch(/^\/admin\?msg=[^#]*$/);
+    expect((await gw.post('/admin/park', { name: 'speech-stack', csrf, back: 'https://evil.example' }, cookie)).headers.get('location')).toMatch(/^\/admin\/gpus\?msg=/);
+    const probe = await gw.post('/admin/probe', { csrf }, cookie);
+    expect(probe.status).toBe(303);
+    expect(probe.headers.get('location')).toMatch(/^\/admin\/servicos\?msg=.*#reservas$/);
+    gw.parked.length = 0;
     expect(gw.probes()).toBe(1);
-    expect(gw.audit.map(e => e.action)).toEqual(['admin-page.login', 'admin-page.park', 'admin-page.probe']);
+    expect(gw.audit.map(e => e.action)).toEqual(['admin-page.login', 'admin-page.park', 'admin-page.park', 'admin-page.park', 'admin-page.probe']);
   });
 
   it('shows the pinned Vast GPU with its provider, price in US$, offer and park rule; the toggle is the admin\'s, signed and audited', async () => {
     const gw = await gateway();
-    const { cookie, csrf, html } = await gw.signedIn();
+    const { cookie, csrf } = await gw.signedIn();
+    const html = await gw.every(cookie);
     const at = html.indexOf('<b class="mono">babelcast-3090');
     const row = html.slice(at, html.indexOf('</tr>', at));
     expect(row).toContain('Vast · laboratório, barata');
@@ -255,13 +294,14 @@ describe('admin page (/admin)', () => {
 
   it('a booting GPU reads «Iniciando» with its phase and expected time in the GPUs, the overview and the guarantee', async () => {
     const gw = await gateway();
-    const { html } = await gw.signedIn();
+    const { cookie } = await gw.signedIn();
+    const html = await gw.every(cookie);
     const at = html.indexOf('<b class="mono">babelcast-3090');
     const row = html.slice(at, html.indexOf('</tr>', at));
     expect(row).toContain('Iniciando');
     expect(row).toContain('puxando a imagem há 3 min · esperado 10 min');
     expect(row).toContain('href="/admin/gpus/babelcast-3090"');
-    expect(html).toMatch(/GPUs ligadas[^]*?1 iniciando/);
+    expect(html).toMatch(/GPUs e máquinas[^]*?1 iniciando/);
     expect(html).toMatch(/<code>babelcast-3090<\/code>[^]*?Iniciando · puxando a imagem há 3 min/);
     const failed = html.slice(html.indexOf('<b class="mono">parle-bridge-shadow'));
     expect(failed.slice(0, failed.indexOf('</tr>'))).toContain('sem oferta disponível · nova tentativa às 12:07');
@@ -269,12 +309,13 @@ describe('admin page (/admin)', () => {
 
   it('a stuck boot is a problem: «Travou em <fase> há N min»', () => {
     const now = Date.parse('2026-10-13T10:00:00Z');
-    const html = renderStatus('n', demoSnapshot(now, 'bad'), { now, csrf: 'c', actor: 'marcos', message: null, app: null });
+    const opts = { now, csrf: 'c', actor: 'marcos', message: null, app: null };
+    const html = renderStatus('n', demoSnapshot(now, 'bad'), { ...opts, page: 'gpus' });
     expect(html).toContain('Travou em carregando modelos');
     expect(html).toContain('carregando modelos há 14 min · esperado 6 min');
     expect(html).not.toContain('sem uso há 26 min');
-    expect(html).toMatch(/<section id="gpus" data-spy><header class="sh"><h2>GPUs<\/h2><span class="pill bad">/);
-    expect(html).toMatch(/<ul class="attn"[^]*speech-stack-test: Travou em carregando modelos há 14 min/);
+    expect(html).toMatch(/<section id="gpus"><header class="sh"><h2>GPUs<\/h2><span class="pill bad">/);
+    expect(renderStatus('n', demoSnapshot(now, 'bad'), opts)).toMatch(/<a class="card bad" href="\/admin\/gpus"[^]*speech-stack-test: Travou em carregando modelos há 14 min/);
   });
 
   it('the detail page shows the boot timeline, the offer, the past boots and the log extract, with secrets redacted', async () => {
@@ -288,8 +329,12 @@ describe('admin page (/admin)', () => {
       'ghcr.io/marcosremar/speech-stack', 'Últimos boots', 'falhou · boot-timeout', 'Downloading', 'phase pulling']) expect(html).toContain(text);
     expect(html).not.toContain(PROVIDER_SECRET);
     expect(html).not.toMatch(LEAK);
+    expect(html).toContain('<a href="/admin/gpus">GPUs e máquinas</a>');
+    expect(html).toContain('action="/admin/pin"');
+    expect(html).toContain('name="back" value="/admin/gpus/babelcast-3090"');
+    expect(html).toMatch(/href="\/admin\/gpus" class="[a-z]+ cur"/);
     expect((await gw.call('/admin/gpus/no-such-gpu', { cookie })).status).toBe(404);
-    expect((await gw.call('/admin/gpus/babelcast-3090')).status).toBe(303);
+    expect(await (await gw.call('/admin/gpus/babelcast-3090')).text()).toContain('name="key"');
   });
 
   it('an app session opens only its own GPUs and reads only their logs', async () => {
@@ -309,9 +354,11 @@ describe('admin page (/admin)', () => {
   it('an app session never sees nor uses the pin toggle', async () => {
     const gw = await gateway();
     await gw.access.setPolicy({ id: 'env-babelcast', canStartGpu: true });
-    const { cookie, csrf, html } = await gw.signedIn(BABEL_KEY);
+    const { cookie, csrf } = await gw.signedIn(BABEL_KEY);
+    const html = await gw.every(cookie);
     expect(html).toContain('babelcast-3090');
     expect(html).not.toContain('/admin/pin');
+    expect(await (await gw.call('/admin/gpus/babelcast-3090', { cookie })).text()).not.toContain('/admin/pin');
     expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0', csrf }, cookie)).status).toBe(403);
     expect(gw.pins).toEqual([]);
     expect(gw.audit.at(-1)).toMatchObject({ action: 'admin-page.pin', names: ['babelcast-3090'], ok: false });
@@ -352,34 +399,68 @@ describe('admin page (/admin)', () => {
     expect(res.headers.get('content-type')).toBe('application/json');
   });
 
-  it('lists the worst areas first in the attention list and names every state in text, not only in color', () => {
+  it('answers on the overview which areas are wrong, and names every state in text, not only in color', () => {
     const now = Date.parse('2026-10-13T10:00:00Z');
-    const render = (state: 'ok' | 'warn' | 'bad') => renderStatus('n', demoSnapshot(now, state), { now, csrf: 'c', actor: 'marcos', message: null, app: null });
-    const attention = (html: string) => [...(/<ul class="attn"[^]*?<\/ul>/.exec(html)?.[0] ?? '').matchAll(/<a href="#([a-z]+)">/g)].map(m => m[1]);
+    const render = (state: 'ok' | 'warn' | 'bad', page = 'geral') => renderStatus('n', demoSnapshot(now, state), { now, csrf: 'c', actor: 'marcos', message: null, app: null, page });
+    const cardLevels = (html: string) => [...html.matchAll(/<a class="card ([a-z]+)" href="([^"]+)"/g)].map(m => `${m[2]}:${m[1]}`);
     const bad = render('bad');
-    expect(attention(bad).slice(0, 5).sort()).toEqual(['apps', 'garantia', 'gpus', 'reservas', 'trafego']);
+    expect(cardLevels(bad)).toEqual(['/admin/servicos:bad', '/admin/gpus:bad', '/admin/gastos:warn']);
     expect(bad).toContain('Algo está fora do ar');
-    expect(bad).toMatch(/<section id="reservas" data-spy><header class="sh"><h2>Reservas<\/h2><span class="pill bad">/);
+    expect(bad).toMatch(/href="\/admin\/servicos" class="bad"/);
     expect(bad).toContain('<span class="sr">Problema:</span>');
-    expect(bad).toContain('Texto → fala sem resposta na nuvem');
+    expect(bad).toContain('Texto → fala, Texto → fala sem resposta na nuvem');
+    expect(render('bad', 'servicos')).toMatch(/<section id="reservas"><header class="sh"><h2>Reservas<\/h2><span class="pill bad">/);
     const ok = render('ok');
-    expect(attention(ok)).toEqual([]);
+    expect(cardLevels(ok)).toEqual(['/admin/servicos:ok', '/admin/gpus:ok', '/admin/gastos:ok']);
     expect(ok).toContain('Tudo funcionando');
-    expect(ok).not.toMatch(/<h2>[^<]+<\/h2><span class="pill (bad|warn)">/);
+    for (const p of PAGES) expect(render('ok', p.id)).not.toMatch(/<h2>[^<]+<\/h2><span class="pill (bad|warn)">/);
+  });
+
+  it('knows when a class runs: says so during it, and outside it a parked GPU or a cloud-only service is no alarm', () => {
+    const now = Date.parse('2026-10-13T10:00:00Z');
+    const opts = { now, csrf: 'c', actor: 'marcos', message: null, app: null };
+    const inClass = renderStatus('n', demoSnapshot(now, 'ok'), opts);
+    expect(inClass).toMatch(/Aula em curso · até 23:59<\/b><span>Parle · speech-stack pronta/);
+    const outside = demoSnapshot(now, 'ok');
+    outside.gpus = outside.gpus!.map(d => (d.name === 'speech-stack'
+      ? { ...d, replicas: d.replicas.map(r => ({ ...r, phase: 'halted' as const })), spec: { ...d.spec, warmSchedule: [{ days: [1, 2, 3, 4], start: '17:40', end: '20:15', minReplicas: 1, timeZone: 'Europe/Paris' }] } }
+      : d));
+    for (const alias of ['parle-stt', 'parle-chat', 'parle-tts']) {
+      const stage = alias === 'parle-stt' ? 'stt' : alias === 'parle-chat' ? 'chat' : 'tts';
+      outside.chains![stage]![alias] = { serving: outside.chains![stage]![alias]!.links[1]!.target, onFallback: true, links: [{ target: 'deployment:speech-stack', state: 'cold' }, outside.chains![stage]![alias]!.links[1]!] };
+    }
+    outside.apps = outside.apps.map(a => (a.status ? { ...a, status: { ...a.status, mode: 'degraded' as const } } : a));
+    const html = renderStatus('n', outside, opts);
+    expect(html).toContain('Sem aula agora</b><span>Próxima: hoje às 17:40 · Parle.');
+    expect(html).toContain('Tudo funcionando');
+    const services = renderStatus('n', outside, { ...opts, page: 'servicos' });
+    expect(services).toContain('Só nuvem · esperado fora da aula');
+    expect(services).toContain('servindo na reserva de nuvem · fora da aula');
+  });
+
+  it('does not let sent alerts or the activity log turn the headline yellow', () => {
+    const now = Date.parse('2026-10-13T10:00:00Z');
+    const s = demoSnapshot(now, 'ok');
+    s.alerts.unshift({ event: 'gpu.idle', at: new Date(now).toISOString(), summary: 'deployment: babel-live' });
+    s.audit.unshift({ at: new Date(now).toISOString(), actor: 'marcos', action: 'admin-page.park', names: ['babel-live'], ok: false });
+    const html = renderStatus('n', s, { now, csrf: 'c', actor: 'marcos', message: null, app: null });
+    expect(html).toContain('Tudo funcionando');
+    expect(html).toMatch(/href="\/admin\/atividade" class="warn"/);
   });
 
   it('shows the overview figures, traffic per stage and provider, who woke a GPU and the activity log', () => {
     const now = Date.parse('2026-10-13T10:00:00Z');
     const snapshot = demoSnapshot(now, 'warn');
-    const html = renderStatus('n', snapshot, { now, csrf: 'c', actor: 'marcos', message: null, app: null });
-    for (const label of ['Chamadas 24 h', 'Sem resposta 24 h', 'Latência p95', 'GPUs ligadas', 'Gasto GPU hoje', 'Menor saldo']) expect(html).toContain(label);
-    const traffic = html.slice(html.indexOf('<section id="trafego"'), html.indexOf('<section id="apps"'));
+    const html = PAGES.map(p => renderStatus('n', snapshot, { now, csrf: 'c', actor: 'marcos', message: null, app: null, page: p.id })).join('');
+    for (const label of ['chamadas em 24 h', 'sem resposta', 'p95', '3 de 5 ligadas', 'de GPU hoje', 'menor saldo vast']) expect(html).toContain(label);
+    const section = (id: string) => html.slice(html.indexOf(`<section id="${id}"`), html.indexOf('</section>', html.indexOf(`<section id="${id}"`)));
+    const traffic = section('trafego');
     expect(traffic).toContain('<code>deployment:speech-stack</code>');
     expect(traffic).toContain('<code>openrouter</code>');
     expect(traffic).toMatch(/aria-label="Chamadas por hora/);
-    const gpus = html.slice(html.indexOf('<section id="gpus"'), html.indexOf('<section id="reservas"'));
+    const gpus = section('gpus');
     expect(gpus).toMatch(/parle \(producao\) até \d\d:\d\d/);
-    const activity = html.slice(html.indexOf('<section id="atividade"'));
+    const activity = section('atividade');
     expect(activity).toContain('estacionou a GPU');
     expect(activity).toContain('falha ao criar réplica');
     expect(activity).toContain('réplica ainda criando');
@@ -413,7 +494,7 @@ describe('adminTraffic', () => {
     const now = Date.parse('2026-10-13T10:00:00Z');
     const snapshot = demoSnapshot(now, 'ok');
     snapshot.apps.push({ id: 'ucast', profile: { requiresGpu: false, gpuDeployments: [], name: 'uCast', description: 'Podcasts <b>ao vivo</b>' }, status: null });
-    const html = renderStatus('n', snapshot, { now, csrf: 'c', actor: 'marcos', message: null, app: null });
+    const html = renderStatus('n', snapshot, { now, csrf: 'c', actor: 'marcos', message: null, app: null, page: 'servicos' });
     expect(html).toContain('>Parle</a>');
     expect(html).toContain('Tradução simultânea');
     expect(html).toContain('>uCast</a></b> <span class="mono">ucast</span>');

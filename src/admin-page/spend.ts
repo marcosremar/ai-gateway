@@ -43,9 +43,9 @@ function chart(days: ReturnType<typeof spendWindow>, apps: string[], names: Map<
 }
 
 export function spend(ctx: Ctx): Section {
-  const base = { id: 'gastos', title: 'Gastos por dia', actions: '', count: null };
+  const base = { id: 'gastos', title: 'Gasto de GPU por dia', actions: '', count: null };
   const ledger = ctx.s.spend;
-  if (!ledger) return { ...base, level: 'ok', note: '', meta: '', body: '<p class="empty">O registro diário de gastos está desligado neste gateway.</p>' };
+  if (!ledger) return { ...base, level: 'ok', notes: [], meta: '', body: '<p class="empty">O registro diário de gastos está desligado neste gateway.</p>' };
   const days = spendWindow(ctx);
   const ids = [...new Set(days.flatMap(d => Object.keys(d.apps)))]
     .sort((a, b) => sum(days.map(d => d.apps), b, 'gpuEur') - sum(days.map(d => d.apps), a, 'gpuEur') || a.localeCompare(b));
@@ -65,7 +65,7 @@ export function spend(ctx: Ctx): Section {
   const since = ledger.since ? `registro desde ${shortDay(ledger.since)}` : 'registro começa no próximo minuto';
   return {
     ...base, level: 'ok', badge: `<span class="pill info">${money(total(30))} em 30 dias</span>`,
-    note: '',
+    notes: [],
     meta: `GPU hoje ${money(total(1))} · 7 d ${money(total(7))} · 30 d ${money(total(30))} · ${since}`,
     body: chart(days, ids, names)
       + table([{ label: 'App' }, { label: 'Hoje', num: true }, { label: '7 dias', num: true }, { label: '30 dias', num: true }, { label: 'Tokens', num: true }], rows,

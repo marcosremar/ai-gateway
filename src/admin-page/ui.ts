@@ -1,13 +1,13 @@
 import type { AppProfile } from '../deployments/apps';
 import type { DeploymentView } from '../deployments/types';
-import { activeWindow } from '../deployments/autoscale';
+import { activeWindow, DEFAULT_WARM_TIME_ZONE, localClock } from '../deployments/autoscale';
 import type { AdminSnapshot, AppView } from './render';
 
 export type Level = 'ok' | 'warn' | 'bad';
 
-export interface Section { id: string; title: string; level: Level; note: string; count: number | null; meta: string; actions: string; body: string; badge?: string }
+export interface Section { id: string; title: string; level: Level; notes: string[]; count: number | null; meta: string; actions: string; body: string; badge?: string; info?: boolean }
 
-export interface Ctx { s: AdminSnapshot; now: number; csrf: string; app: string | null; view: AppView | null }
+export interface Ctx { s: AdminSnapshot; now: number; csrf: string; app: string | null; view: AppView | null; path?: string }
 
 export const ALERT_FRESH_MS = 60 * 60_000;
 export const NEAR_LIMIT = 0.8;
@@ -56,16 +56,20 @@ export const pill = (level: Level, text: string) => `<span class="pill ${level}"
 export const meter = (used: number, limit: number | null | undefined, level: Level) => (limit && limit > 0
   ? `<svg class="use ${level}" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true"><rect class="t" width="100" height="4"/><rect class="f" width="${Math.min(100, Math.round((used / limit) * 100))}" height="4"/></svg>`
   : '');
-export const form = (action: string, csrf: string, label: string, confirmText: string, fields: Record<string, string> = {}, cls = '') =>
+export const form = (action: string, csrf: string, label: string, confirmText: string, fields: Record<string, string> = {}, cls = '', back = '') =>
   `<form method="post" action="${action}"${confirmText ? ` data-confirm="${esc(confirmText)}"` : ''}><input type="hidden" name="csrf" value="${csrf}">${
+    back ? `<input type="hidden" name="back" value="${esc(back)}">` : ''}${
     Object.entries(fields).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('')
   }<button${cls ? ` class="${cls}"` : ''}>${esc(label)}</button></form>`;
 
-export interface Col { label: string; num?: boolean; act?: boolean }
+export interface Col { label: string; num?: boolean; act?: boolean; wide?: boolean }
 
 export function table(cols: Col[], rows: string[][], empty: string): string {
   if (!rows.length) return `<p class="empty">${esc(empty)}</p>`;
-  const cls = (c: Col) => (c.num ? ' class="n"' : c.act ? ' class="act"' : '');
+  const cls = (c: Col) => {
+    const names = [c.num ? 'n' : c.act ? 'act' : '', c.wide ? 'wide' : ''].filter(Boolean).join(' ');
+    return names ? ` class="${names}"` : '';
+  };
   const head = cols.map(c => `<th${cls(c)}>${c.act ? `<span class="sr">${esc(c.label)}</span>` : esc(c.label)}</th>`).join('');
   const body = rows.map(r => `<tr>${r.map((cell, i) => `<td${cls(cols[i]!)} data-l="${esc(cols[i]!.label)}"><div class="v">${cell}</div></td>`).join('')}</tr>`).join('');
   return `<div class="tw"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
@@ -94,3 +98,45 @@ export const pinBadge = (d: DeploymentView) => {
   const after = m ? `estaciona após ${m % 60 ? `${m} min` : `${m / 60} h`} sem uso` : 'nunca estaciona sozinha';
   return ` <span class="pill info">fixada</span><small>${esc(d.pinned.parked ? 'estacionada · acorda no próximo pedido' : after)}</small>`;
 };
+
+const DAY_MS = 86_400_000;
+const WEEKDAY = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+
+export interface ClassState { open: DeploymentView[]; endsAt: number | null; next: { at: number; text: string; deployment: DeploymentView } | null }
+
+function nextStart(d: DeploymentView, now: number): number | null {
+  let best: number | null = null;
+  for (const e of d.spec.warmSchedule ?? []) {
+    const zone = e.timeZone ?? DEFAULT_WARM_TIME_ZONE;
+    const [h, m] = e.start.split(':').map(Number);
+    const offset = (h! * 60 + m! - localClock(now, zone).minutes) * 60_000;
+    for (let i = 0; i <= 7; i++) {
+      const at = Math.floor((now + i * DAY_MS + offset) / 60_000) * 60_000;
+      if (at <= now || (e.days?.length && !e.days.includes(localClock(at, zone).day))) continue;
+      if (best === null || at < best) best = at;
+      break;
+    }
+  }
+  return best;
+}
+
+function dayText(at: number, now: number): string {
+  const { day } = localClock(at, ZONE);
+  const today = localClock(now, ZONE).day;
+  const name = day === today ? 'hoje' : day === (today + 1) % 7 ? 'amanhã' : WEEKDAY[day]!;
+  return `${name} às ${hhmm(at)}`;
+}
+
+export function classState(gpus: DeploymentView[], now: number): ClassState {
+  const open = gpus.map(d => ({ d, w: activeWindow(d.spec.warmSchedule, now) })).filter(x => x.w);
+  if (open.length) return { open: open.map(x => x.d), endsAt: Math.max(...open.map(x => x.w!.endsAt)), next: null };
+  const next = gpus.map(d => ({ d, at: nextStart(d, now) })).filter(x => x.at !== null).sort((a, b) => a.at! - b.at!)[0];
+  return { open: [], endsAt: null, next: next ? { at: next.at!, text: dayText(next.at!, now), deployment: next.d } : null };
+}
+
+export const appGpus = (s: AdminSnapshot, app: string) => {
+  const names = new Set(s.apps.find(a => a.id === app)?.profile?.gpuDeployments ?? []);
+  return (s.gpus ?? []).filter(d => d.app === app || names.has(d.name));
+};
+
+export const inClass = (s: AdminSnapshot, app: string, now: number) => appGpus(s, app).some(d => activeWindow(d.spec.warmSchedule, now));
