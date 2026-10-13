@@ -126,6 +126,11 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);box-shadow:0 1px 0 v
 .pill.live{background:var(--live-bg);color:var(--accent)}
 .pill.live::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;vertical-align:1px;animation:pulse 1.6s infinite}
 .pill.wait{color:var(--warn)}
+.btn.yt{flex:none;border:2px solid var(--brand);color:var(--text);text-decoration:none;font-weight:700}
+.btn.yt[hidden]{display:none}
+.btn.yt:hover{background:var(--live-bg)}
+.btn.yt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.yt .ytic{width:20px;height:14px;flex:none}
 @keyframes pulse{50%{opacity:.3}}
 .now{margin-top:8px;background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:16px;min-height:104px;display:flex;flex-direction:column;justify-content:center;min-width:0}
 .mode-full .now{display:none}
@@ -214,6 +219,7 @@ const ROOM_BODY = `<header><div class="wrap">
 </div>
 <div class="tools" role="toolbar" aria-label="Opções">
 <button id="orig" class="btn" type="button" aria-pressed="false" aria-label="Mostrar original"><span class="lg">Mostrar original</span><span class="sm">Original</span></button>
+<a id="yt" class="btn yt" target="_blank" rel="noopener noreferrer" aria-label="Assistir no YouTube" hidden><svg class="ytic" viewBox="0 0 20 14" aria-hidden="true" focusable="false"><rect width="20" height="14" rx="4" fill="#ff0000"/><path d="M8 4l5.2 3L8 10z" fill="#ffffff"/></svg><span class="lg" id="ytLbl">Assistir no YouTube</span><span class="sm">YouTube</span></a>
 <button id="copy" class="btn end" type="button" aria-label="Copiar texto"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><span class="lg" id="copyLbl">Copiar texto</span></button>
 <button id="gear" class="btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="sheet" aria-label="Ajustes de exibição"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span class="lg">Ajustes</span></button>
 </div>
@@ -271,6 +277,9 @@ const ROOM_BODY = `<header><div class="wrap">
  *     "ucast-settings"), every field validated, defaults for the rest; the older "ucast-orig" = "1" still turns the
  *     original on. textSizes(step, viewportWidth): {live, tx} px for an A−/A+ step (live 20–56, transcript 14–24).
  *   - lineView(mode, showOrig, lang, hasTranslation): what a line shows — {main: 'tr'|'orig', sub, miss}.
+ *   - safeYoutubeUrl(u): the room's YouTube link when it is an https URL on youtube.com / www. / m. / youtu.be (the
+ *     server already validates it; checked again before it becomes an href), else null (the link stays hidden).
+ *   - youtubeLabel(prefs): "Assistir no YouTube" in the viewer's browser language (pt / en / fr / es; default pt).
  *   - listenMsg(dubOn, lang): the `listen` message (sent on every (re)connect and on every dub/language change).
  *   - dubStatus({can, lang, on, ctx, error, playing, loading}): the dub toggle's visible state — {kind, text}:
  *     na | off | locked (AudioContext not running: the next tap resumes it) | error | playing | loading | idle.
@@ -367,6 +376,22 @@ function refOf(search,referrer){
   var m=/[?&](?:src|ref)=([^&#]*)/.exec(String(search||''));
   if(m&&decodeURIComponent(m[1]).toLowerCase()==='qr')return 'qr';
   return referrer?'link':'direct';
+}
+var YT_HOSTS=['youtube.com','www.youtube.com','m.youtube.com','youtu.be'];
+function safeYoutubeUrl(u){
+  if(typeof u!=='string'||!u||u.length>200)return null;
+  var m=/^https:\/\/([^\/?#@:]+)(?:[\/?#]|$)/i.exec(u);
+  if(!m||YT_HOSTS.indexOf(m[1].toLowerCase())<0||/[\s"'<>\\]/.test(u))return null;
+  return u;
+}
+var YT_LABELS={pt:'Assistir no YouTube',en:'Watch on YouTube',fr:'Regarder sur YouTube',es:'Ver en YouTube'};
+function youtubeLabel(prefs){
+  prefs=prefs||[];
+  for(var i=0;i<prefs.length;i++){
+    var p=String(prefs[i]||'').toLowerCase().split('-')[0];
+    if(Object.prototype.hasOwnProperty.call(YT_LABELS,p))return YT_LABELS[p];
+  }
+  return YT_LABELS.pt;
 }
 function lineView(mode,showOrig,lang,hasTr){
   if(lang==='orig'||mode==='transcript')return {main:'orig',sub:false,miss:false};
@@ -792,9 +817,20 @@ function applyRoom(r){
   room=r;expiresAt=r.expiresAt||null;lines=[];byId={};
   (r.lines||[]).forEach(function(l){byId[l.id]=l;lines.push(l);M(l.id)});lines.sort(function(a,b){return a.id-b.id});
   var t=r.title||'Legendas ao vivo';$('title').textContent=t;document.title=t+' · ucast.me';
+  applyYoutube(r.youtubeUrl);
   buildSelect();renderAll();trackJoin();updateDubButton();
   if(r.ended)showEnded();
 }
+// ── "Assistir no YouTube": the presenter's live on YouTube, when the app sent its link (snapshot or "update") ──
+(function(){
+  var lbl=youtubeLabel(navigator.languages&&navigator.languages.length?navigator.languages:[navigator.language||'']);
+  $('ytLbl').textContent=lbl;$('yt').setAttribute('aria-label',lbl);
+})();
+function applyYoutube(u){
+  var a=$('yt'),ok=safeYoutubeUrl(u);
+  if(ok){a.href=ok;a.hidden=false}else{a.hidden=true;a.removeAttribute('href')}
+}
+$('yt').addEventListener('click',function(){track('ui',{action:'youtube'})});
 function notFound(){gone=true;setPill('','encerrada');updateDelay();$('notice').textContent='Esta sessão não existe mais (o texto fica disponível por '+DAYS+' dias após a última fala).';}
 
 // ── socket, reconnect with backoff ──
@@ -810,6 +846,7 @@ function connect(){
     if(m.type==='snapshot'){applyRoom(m.room);if(!m.room.ended){setPill('live','ao vivo');$('notice').textContent=''}}
     else if(m.type==='line'&&room)upsert(m.line);
     else if(m.type==='audio')onAudio(m);
+    else if(m.type==='update'){if(room)room.youtubeUrl=m.youtubeUrl;applyYoutube(m.youtubeUrl)}
     else if(m.type==='ended')showEnded();};
   s.onclose=function(){if(ping)clearInterval(ping);if(ws===s)ws=null;if(ended||gone)return;
     setPill('wait','reconectando…');if(joined)track('ui',{action:'reconnect'});

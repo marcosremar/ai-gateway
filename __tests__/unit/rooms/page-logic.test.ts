@@ -10,7 +10,7 @@ interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
 interface Settings { mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable, listenMsg, dubStatus, silentWav })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -25,12 +25,14 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   lineView(mode: string, showOrig: boolean, lang: string, hasTr: boolean): { main: 'tr' | 'orig'; sub: boolean; miss: boolean };
   uaInfo(ua: string, touch: number): { ua: string; os: string; device: string };
   refOf(search: string, referrer: string): string;
+  safeYoutubeUrl(u: unknown): string | null;
+  youtubeLabel(prefs: string[]): string;
   dubbable(lang: string, dubLangs: string[] | undefined): boolean;
   listenMsg(on: boolean, lang: string | null): string;
   dubStatus(s: { can: boolean; lang: string; on: boolean; ctx: string | null; error: string | null; playing: boolean; loading: boolean }): { kind: string; text: string };
   silentWav(rate: number, samples: number): string;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable, listenMsg, dubStatus, silentWav } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -339,5 +341,45 @@ describe('room page: analytics helpers', () => {
     for (const s of ["navigator.sendBeacon", "'/v1/rooms/'+CODE+'/events'", "addEventListener('pagehide'", "store.get('ucast-viewer')", "track('join'", "track('setting'", "track('sample'", "track('leave'", "store.set('ucast-lang-last'"]) {
       expect(html).toContain(s);
     }
+  });
+});
+describe('room page: "Assistir no YouTube"', () => {
+  it('accepts only https links on the YouTube hosts', () => {
+    for (const ok of ['https://youtu.be/dQw4w9WgXcQ', 'https://www.youtube.com/channel/UC123/live', 'https://youtube.com/watch?v=abc', 'https://m.youtube.com/live/abc', 'https://WWW.YOUTUBE.COM/x']) {
+      expect(safeYoutubeUrl(ok)).toBe(ok);
+    }
+    for (const bad of [null, undefined, '', 42, 'http://youtu.be/x', 'javascript:alert(1)', 'https://youtu.be.evil.com/x', 'https://evil.com/?youtu.be',
+      'https://user@youtu.be/x', 'https://youtu.be:444/x', 'https://youtube.com.evil/x', 'https://youtu.be/"><script>', `https://youtu.be/${'a'.repeat(300)}`, '//youtu.be/x']) {
+      expect(safeYoutubeUrl(bad)).toBeNull();
+    }
+  });
+
+  it('labels the link in the viewer\'s browser language (pt by default)', () => {
+    expect(youtubeLabel(['pt-BR'])).toBe('Assistir no YouTube');
+    expect(youtubeLabel(['en-US', 'pt'])).toBe('Watch on YouTube');
+    expect(youtubeLabel(['FR-ca'])).toBe('Regarder sur YouTube');
+    expect(youtubeLabel(['de', 'es-MX'])).toBe('Ver en YouTube');
+    expect(youtubeLabel(['de'])).toBe('Assistir no YouTube');
+    expect(youtubeLabel([])).toBe('Assistir no YouTube');
+    expect(youtubeLabel(['constructor', '__proto__'])).toBe('Assistir no YouTube');
+  });
+
+  it('ships a hidden toolbar button that opens in a new tab, updates live and is tracked', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    const a = /<a id="yt"[^>]*>/.exec(html)?.[0] ?? '';
+    expect(a).toContain('class="btn yt"');
+    expect(a).toContain('target="_blank"');
+    expect(a).toContain('rel="noopener noreferrer"');
+    expect(a).not.toContain('href=');
+    expect(a).toMatch(/ hidden>$/);
+    expect(a).toContain('aria-label="Assistir no YouTube"');
+    expect(html).toContain('<span class="lg" id="ytLbl">Assistir no YouTube</span><span class="sm">YouTube</span>');
+    expect(html).toContain('applyYoutube(r.youtubeUrl)');
+    expect(html).toContain("m.type==='update'");
+    expect(html).toContain("track('ui',{action:'youtube'})");
+    expect(html).toContain('youtubeLabel(navigator.languages');
+    // In the toolbar, right after "Mostrar original" and before copy/settings: visible on a phone without the sheet.
+    expect(html.indexOf('id="yt"')).toBeGreaterThan(html.indexOf('id="orig"'));
+    expect(html.indexOf('id="yt"')).toBeLessThan(html.indexOf('id="copy"'));
   });
 });
