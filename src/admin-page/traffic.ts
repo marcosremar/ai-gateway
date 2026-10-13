@@ -2,6 +2,7 @@ import type { StoredTelemetryEvent } from '../telemetry/contract';
 import { percentile } from '../telemetry/query';
 import { SLO_TARGETS } from '../alerting/slo-targets';
 import type { Level } from './ui';
+import { parisDay, parisMidnightAfter } from '../deployments/spend-ledger';
 
 export interface TrafficLine { key: string; served: number; failed: number; fallbacks: number; p50Ms: number | null; p95Ms: number | null }
 
@@ -15,10 +16,14 @@ export interface TrafficView {
   links: TrafficLine[];
 }
 
+export const SLOT_MIN = 5;
+export interface DayUse { day: string; slots: number[] }
+
 export interface AdminTraffic extends TrafficView {
   activity: GatewayActivity[];
   apps?: TrafficLine[];
   byApp?: Record<string, TrafficView>;
+  daily?: Record<string, DayUse[]>;
 }
 
 const HOUR_MS = 3_600_000;
@@ -53,8 +58,10 @@ function bucket(firstHour: number) {
       const hour = hours[Math.floor((row.rxTs - firstHour) / HOUR_MS)];
       const stage = String(row.attrs?.stage ?? '(sem etapa)');
       const provider = String(row.attrs?.provider ?? '(sem provedor)');
+      const model = row.attrs?.model;
+      const link = `${stage}|${provider.startsWith('deployment:') || typeof model !== 'string' || !model ? provider : `${provider}:${model}`}`;
       if (row.event === 'route.served') {
-        for (const t of [total, of(stages, stage), of(providers, provider), of(links, `${stage}|${provider}`)]) {
+        for (const t of [total, of(stages, stage), of(providers, provider), of(links, link)]) {
           t.served++;
           if (row.durMs !== undefined) t.durs.push(row.durMs);
         }
@@ -67,7 +74,7 @@ function bucket(firstHour: number) {
         total.fallbacks++;
         of(stages, stage).fallbacks++;
         of(providers, provider).fallbacks++;
-        of(links, `${stage}|${provider}`).fallbacks++;
+        of(links, link).fallbacks++;
       }
     },
     view: (): TrafficView => ({ hours, total: line('total', total), stages: lines(stages), providers: lines(providers), links: lines(links) }),
@@ -94,7 +101,30 @@ export function adminTraffic(rows: readonly StoredTelemetryEvent[], now: number)
     ...all.view(), activity,
     apps: lines(new Map([...perApp].map(([app, b]) => [app, b.total]))),
     byApp: Object.fromEntries([...perApp].map(([app, b]) => [app, b.view()])),
+    daily: dailyUse(rows),
   };
+}
+
+export function dailyUse(rows: readonly StoredTelemetryEvent[]): Record<string, DayUse[]> {
+  const out: Record<string, DayUse[]> = {};
+  let dayStart = -Infinity;
+  let dayEnd = -Infinity;
+  let day = '';
+  for (const row of rows) {
+    if (row.event !== 'route.served' || !row.app) continue;
+    if (row.rxTs >= dayEnd || row.rxTs < dayStart) {
+      dayEnd = parisMidnightAfter(row.rxTs);
+      day = parisDay(row.rxTs);
+      dayStart = parisMidnightAfter(dayEnd - 30 * HOUR_MS);
+      if (parisDay(dayStart) !== day) dayStart = dayEnd - 24 * HOUR_MS;
+    }
+    const slot = Math.min(1440 / SLOT_MIN - 1, Math.floor((row.rxTs - dayStart) / 60_000 / SLOT_MIN));
+    const days = out[row.app] ??= [];
+    let use = days.at(-1);
+    if (use?.day !== day) days.push(use = { day, slots: new Array<number>(1440 / SLOT_MIN).fill(0) });
+    use!.slots[slot]!++;
+  }
+  return out;
 }
 
 export const answeredShare = (l: Pick<TrafficLine, 'served' | 'failed'>) => (l.served + l.failed ? l.served / (l.served + l.failed) : null);

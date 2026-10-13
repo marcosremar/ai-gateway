@@ -4,6 +4,8 @@ import type { AdminSnapshot } from './render';
 import { spendWindow } from './spend';
 import { answeredShare, sloLevel } from './traffic';
 import { SLO_TARGETS } from '../alerting/slo-targets';
+import { EUR_TO_USD } from '../deployments/vast-backend';
+import { linkReorderRules, warmWindowRules } from './savings-rules';
 import {
   NEAR_LIMIT, appTitle, count, duration, esc, form, hhmm, mark, money, ms, pct, stageName, upOf, outsideWindow, type Ctx, type Level, type Section,
 } from './ui';
@@ -15,8 +17,20 @@ export interface Recommendation {
   saw: string;
   why: string;
   impact: { amount: number; unit: '€' | 'US$'; text: string } | null;
+  saving?: { perMonth: number; unit: '€' | 'US$' };
+  gain?: string;
   action: { park: string } | { probe: true } | { text: string } | { go: string; label: string };
 }
+
+const PAGE_OF: Array<[string, string]> = [
+  ['gpu-', '/admin/gpus'], ['idle-tail', '/admin/gpus'], ['deployment-unused', '/admin/gpus'], ['app-degraded-gpu', '/admin/gpus'], ['warm-', '/admin/gpus'],
+  ['keycap-', '/admin/chaves'], ['app-budget', '/admin/servicos#apps'], ['app-unnamed', '/admin/servicos#apps'], ['reserve-failed', '/admin/servicos#reservas'],
+  ['balance-low', '/admin/gastos#saldos'], ['month-pace', '/admin/gastos'], ['spend-trend', '/admin/gastos'],
+  ['turn-latency', '/admin/servicos#trafego'], ['stage-', '/admin/servicos#trafego'], ['app-slo', '/admin/servicos#trafego'], ['link-reorder', '/admin/servicos#garantia'],
+];
+export const pageOf = (r: Pick<Recommendation, 'id' | 'action'>) => ('go' in r.action ? r.action.go : PAGE_OF.find(([p]) => r.id.startsWith(p))?.[1] ?? '/admin');
+export const eurPerMonth = (r: Pick<Recommendation, 'saving'>) => (r.saving ? (r.saving.unit === '€' ? r.saving.perMonth : r.saving.perMonth / EUR_TO_USD) : 0);
+export const eurPerHourNow = (r: Recommendation) => (r.impact?.unit === '€' && ['gpu-outside:', 'gpu-idle:', 'app-degraded-gpu:'].some(p => r.id.startsWith(p)) ? r.impact.amount : 0);
 
 const IDLE_TAIL_TARGET_MIN = 15;
 const BALANCE_DAYS = 7;
@@ -30,7 +44,13 @@ const perHourOf = (d: DeploymentView) => upOf(d).reduce((a, r) => a + (r.pricePe
 const minutesSince = (iso: string | null, now: number) => (iso ? (now - Date.parse(iso)) / 60_000 : Infinity);
 const windowText = (d: DeploymentView) => (d.spec.warmSchedule ?? []).map(w => `${w.start}–${w.end}`).filter((v, i, a) => a.indexOf(v) === i).join(', ');
 
-function gpuRules(s: AdminSnapshot, now: number): Recommendation[] {
+function usesPerMonth(ctx: Ctx, d: DeploymentView): number {
+  const app = d.app ?? ctx.s.apps.find(a => a.profile?.gpuDeployments.includes(d.name))?.id;
+  return app && ctx.s.spend ? spendWindow(ctx).filter(x => (x.apps[app]?.gpuEur ?? 0) > 0).length : 0;
+}
+
+function gpuRules(ctx: Ctx): Recommendation[] {
+  const { s, now } = ctx;
   const out: Recommendation[] = [];
   for (const d of s.gpus ?? []) {
     const up = upOf(d);
@@ -57,11 +77,13 @@ function gpuRules(s: AdminSnapshot, now: number): Recommendation[] {
     const price = perHour || (d.spec.maxEurPerHour ?? 0);
     if (typeof idleSpec === 'number' && idleSpec > IDLE_TAIL_TARGET_MIN && d.spec.minReplicas === 0 && price > 0) {
       const tail = ((idleSpec - IDLE_TAIL_TARGET_MIN) / 60) * price;
+      const uses = usesPerMonth(ctx, d);
       out.push({
         id: `idle-tail:${d.name}`, level: 'ok', title: `${d.name} espera ${idleSpec} min antes de desligar`,
         saw: `idleMinutes ${idleSpec} · ${perHour ? `${money(perHour)}/h agora` : `até ${money(price)}/h (maxEurPerHour)`}`,
         why: `Depois do último pedido a réplica fica ligada ${idleSpec} min; ${IDLE_TAIL_TARGET_MIN} min cobrem uma pausa de aula.`,
-        impact: { amount: tail, unit: '€', text: `~${money(tail)} a cada vez que o uso termina` },
+        impact: { amount: tail, unit: '€', text: uses ? `~${money(tail * uses)}/mês (${money(tail)} × ${uses} dias de uso)` : `~${money(tail)} a cada vez que o uso termina` },
+        ...(uses ? { saving: { perMonth: tail * uses, unit: '€' as const } } : {}),
         action: { text: `PATCH /v1/deployments/${d.name} {"idleMinutes": ${IDLE_TAIL_TARGET_MIN}}` },
       });
     }
@@ -259,9 +281,19 @@ const IMPACT_RANK = { '€': 0, 'US$': 1, none: 2 };
 
 export function recommendations(ctx: Ctx): Recommendation[] {
   const dismissed = ctx.s.dismissed ?? {};
-  return [...gpuRules(ctx.s, ctx.now), ...keyRules(ctx.s), ...serviceRules(ctx.s, ctx.now), ...appRules(ctx.s), ...trendRules(ctx)]
+  return [...gpuRules(ctx), ...keyRules(ctx.s), ...serviceRules(ctx.s, ctx.now), ...appRules(ctx.s), ...trendRules(ctx), ...warmWindowRules(ctx), ...linkReorderRules(ctx)]
     .filter(r => !(dismissed[r.id] && dismissed[r.id]! > ctx.now))
-    .sort((a, b) => IMPACT_RANK[a.impact?.unit ?? 'none'] - IMPACT_RANK[b.impact?.unit ?? 'none'] || (b.impact?.amount ?? 0) - (a.impact?.amount ?? 0) || RANK[a.level] - RANK[b.level]);
+    .sort((a, b) => eurPerHourNow(b) - eurPerHourNow(a) || eurPerMonth(b) - eurPerMonth(a)
+      || IMPACT_RANK[a.impact?.unit ?? 'none'] - IMPACT_RANK[b.impact?.unit ?? 'none'] || (b.impact?.amount ?? 0) - (a.impact?.amount ?? 0) || RANK[a.level] - RANK[b.level]);
+}
+
+export interface SavingTotal { monthEur: number; restOfMonthEur: number; nowEurPerHour: number }
+
+export function possibleSaving(list: Recommendation[], now: number): SavingTotal {
+  const at = new Date(now);
+  const days = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 0)).getUTCDate();
+  const monthEur = list.reduce((a, r) => a + eurPerMonth(r), 0);
+  return { monthEur, restOfMonthEur: (monthEur * (days - at.getUTCDate() + 1)) / days, nowEurPerHour: list.reduce((a, r) => a + eurPerHourNow(r), 0) };
 }
 
 function actionOf(r: Recommendation, ctx: Ctx): string {
@@ -277,7 +309,7 @@ function actionOf(r: Recommendation, ctx: Ctx): string {
 }
 
 const recoItem = (r: Recommendation, ctx: Ctx) => `<li class="reco ${r.level}">${mark(r.level)}<div class="rb"><div class="rt"><b>${esc(r.title)}</b>${
-  r.impact ? `<span class="amt">${esc(r.impact.text)}</span>` : ''}</div>`
+  r.impact ? `<span class="amt">${esc(r.impact.text)}</span>` : r.gain ? `<span class="amt gain">${esc(r.gain)}</span>` : ''}</div>`
   + `<details><summary>O que vimos e por quê</summary><dl><dt>Visto</dt><dd>${esc(r.saw)}</dd><dt>Por quê</dt><dd>${esc(r.why)}</dd></dl></details>`
   + `<div class="ra">${actionOf(r, ctx)}${ctx.view ? '' : form('/admin/dismiss', ctx.csrf, 'Ocultar 7 dias', '', { id: r.id }, 'quiet', ctx.path)}</div></div></li>`;
 
@@ -287,19 +319,27 @@ function badgeOf(urgent: Recommendation[]): string {
   return `<span class="pill info">${!urgent.length ? 'nada urgente' : urgent.length === 1 ? '1 a revisar' : `${count(urgent.length)} a revisar`}</span>`;
 }
 
-export function recoSection(ctx: Ctx, list: Recommendation[]): Section {
+export function recoSection(ctx: Ctx, list: Recommendation[], extra: { actions: string; body: string } = { actions: '', body: '' }): Section {
   const urgent = list.filter(r => r.level !== 'ok').sort((a, b) => RANK[a.level] - RANK[b.level]);
   const tidy = list.filter(r => r.level === 'ok');
-  const idleWaste = list.filter(r => r.impact?.unit === '€' && r.id.startsWith('gpu-')).reduce((a, r) => a + r.impact!.amount, 0);
+  const total = possibleSaving(list, ctx.now);
   const more = tidy.length
     ? `<details class="more"${urgent.length ? '' : ' open'}><summary>${tidy.length === 1 ? '1 sugestão de economia e arrumação' : `${count(tidy.length)} sugestões de economia e arrumação`}</summary>`
       + `<ul class="recos">${tidy.map(r => recoItem(r, ctx)).join('')}</ul></details>` : '';
   return {
-    id: 'recomendacoes', title: 'O que fazer', count: urgent.length, actions: '', level: 'ok', info: true,
+    id: 'recomendacoes', title: 'O que fazer', count: urgent.length, level: 'ok', info: true,
     badge: badgeOf(urgent),
     notes: urgent.map(r => r.title),
-    meta: `${idleWaste ? `${money(idleWaste)}/h em GPU sem uso · ` : ''}€ primeiro, depois risco`,
-    body: list.length ? `${urgent.length ? `<ul class="recos">${urgent.map(r => recoItem(r, ctx)).join('')}</ul>` : ''}${more}`
-      : '<p class="empty">Nada a fazer agora: nenhuma regra disparou com os dados atuais.</p>',
+    meta: `${total.nowEurPerHour ? `${money(total.nowEurPerHour)}/h em GPU sem uso · ` : ''}€ primeiro, depois risco`,
+    actions: extra.actions,
+    body: savingLine(total) + extra.body + (list.length ? `${urgent.length ? `<ul class="recos">${urgent.map(r => recoItem(r, ctx)).join('')}</ul>` : ''}${more}`
+      : '<p class="empty">Nada a fazer agora: nenhuma regra disparou com os dados atuais.</p>'),
   };
+}
+
+function savingLine(t: SavingTotal): string {
+  if (!t.monthEur && !t.nowEurPerHour) return '';
+  return `<p class="saving"><span>Economia possível este mês</span><b>${money(t.restOfMonthEur)}</b>`
+    + `<small>${t.monthEur ? `${money(t.monthEur)} por mês cheio` : ''}${t.monthEur && t.nowEurPerHour ? ' · ' : ''}${
+      t.nowEurPerHour ? `mais ${money(t.nowEurPerHour)}/h em GPU ligada sem uso agora` : ''}</small></p>`;
 }

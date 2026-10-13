@@ -10,7 +10,8 @@ import { pageAt, renderGpuDetail, renderLogin, renderStatus } from './pages';
 import { scopeToApp } from './scope';
 
 export type { AdminAbout, AdminAlert, AdminApp, AdminSnapshot } from './render';
-export { recommendations, type Recommendation } from './recommendations';
+export { possibleSaving, recommendations, type Recommendation } from './recommendations';
+export { createSuggestionDigest, digestMail, type DigestStatus } from './digest';
 export { adminTraffic, type AdminTraffic } from './traffic';
 export { scopeToApp } from './scope';
 export { ANCHOR_PAGE, PAGES } from './pages';
@@ -37,6 +38,7 @@ export interface AdminPageOptions {
   pin?: (deployment: string, on: boolean) => Promise<unknown>;
   probe: () => Promise<unknown>;
   dismiss?: (id: string) => Promise<unknown>;
+  sendDigest?: () => Promise<string | null>;
   secrets?: () => string[];
   audit?: (entry: { actor: string; action: string; names: string[]; ok: boolean; detail?: string }) => void;
   now?: () => number;
@@ -215,6 +217,13 @@ export function createAdminPage(opts: AdminPageOptions) {
     redirect(res, backTo(form, '/admin', 'Recomendação oculta por 7 dias.', '#recomendacoes'));
   });
 
+  const digest = guarded(async (res, { session, form }) => {
+    if (session.role !== 'admin' || !opts.sendDigest) return refuse(res, session, 'admin-page.digest', []);
+    const sent = await opts.sendDigest().then(id => (id ? null : 'o e-mail não saiu (veja o log do gateway)'), (err: unknown) => (err instanceof Error ? err.message : String(err)));
+    opts.audit?.({ actor: session.actor.name, action: 'admin-page.digest', names: [], ok: !sent, ...(sent ? { detail: sent } : {}) });
+    redirect(res, backTo(form, '/admin', sent ? `Resumo não enviado: ${sent}` : 'Resumo das sugestões enviado para o e-mail de alertas.', '#recomendacoes'));
+  });
+
   function viewOf(req: IncomingMessage, found: { session: Session }) {
     const query = new URL(req.url ?? '/', 'http://x').searchParams;
     const app = query.get('app');
@@ -253,7 +262,7 @@ export function createAdminPage(opts: AdminPageOptions) {
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([
     ['GET /admin', status], ['GET /admin/servicos', status], ['GET /admin/gpus', status], ['GET /admin/gastos', status], ['GET /admin/chaves', status],
     ['GET /admin/atividade', status], ['POST /admin/login', login],
-    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss],
+    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss], ['POST /admin/digest', digest],
   ]);
 
   function handle(req: IncomingMessage, res: ServerResponse): boolean {

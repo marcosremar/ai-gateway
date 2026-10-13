@@ -35,12 +35,13 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
     traffic: s.traffic && {
       ...(ownTraffic ?? { hours: [], total: { key: 'total', served: 0, failed: 0, fallbacks: 0, p50Ms: null, p95Ms: null }, stages: [], providers: [], links: [] }),
       activity: s.traffic.activity.filter(e => e.deployment !== null && deployments.has(e.deployment)),
-      apps: [], byApp: ownTraffic ? { [app]: ownTraffic } : {},
+      apps: [], byApp: ownTraffic ? { [app]: ownTraffic } : {}, daily: s.traffic.daily?.[app] ? { [app]: s.traffic.daily[app]! } : {},
     },
     gpuLogs: Object.fromEntries(Object.entries(s.gpuLogs ?? {}).filter(([name]) => deployments.has(name))),
     spend: s.spend ? { since: s.spend.since, days: s.spend.days.map(d => ({ day: d.day, apps: d.apps[app] ? { [app]: d.apps[app]! } : {} })) } : null,
     dismissed: Object.fromEntries(Object.entries(s.dismissed ?? {}).filter(([id]) => aboutOwn(id))),
     about: s.about ?? null,
+    digest: null,
     chains: s.chains ? Object.fromEntries(Object.entries(own?.stages ?? {}).map(([stage, aliases]) => [stage,
       Object.fromEntries(aliases.filter(a => s.chains![stage]?.[a]).map(a => [a, s.chains![stage]![a]!]))])) : null,
     audit: s.audit
