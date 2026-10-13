@@ -1,5 +1,6 @@
 import type { ChainReport } from '../config/stage-chains';
 import { activeWindow, classWindowOpen } from '../deployments/autoscale';
+import { accountRefusal } from '../deployments/placements';
 import type { DeploymentView } from '../deployments/types';
 import { idleGpu } from '../deployments/idle';
 import type { FallbackProbeResult } from './fallback-probe';
@@ -18,6 +19,8 @@ export const OPS_ALERT_BOOT_QUIET_MS = 10 * 60_000;
 export const GPU_OUTSIDE_WINDOW_MS = 30 * 60_000;
 /** Up this long outside its class window, with no class open anywhere and no explicit `warm`, a GPU is parked (12/10/2026). */
 export const GPU_OUTSIDE_WINDOW_PARK_MS = 60 * 60_000;
+export const ACCOUNT_REFUSED_REPEAT_MS = 60 * 60_000;
+export const CLASS_GPU_READY_MS = 20 * 60_000;
 export const TURN_P95_LIMIT_MS = 3_000;
 export const TURN_P95_MIN_TURNS = 10;
 const TURN_EVENTS = ['turn.first_audio', 's2s.first_audio'];
@@ -30,16 +33,13 @@ export function createOpsAlerts(
 ) {
   const bootedAt = now();
   const sentAt = new Map<string, number>();
-  const seenAt = new Map<string, number>();
   let chainsDown = new Set<string>();
   const outsideSince = new Map<string, number>();
-  const fire = (event: string, key: string, data: Record<string, unknown>, oncePerEpisode = false) => {
+  const fire = (event: string, key: string, data: Record<string, unknown>, repeatMs = dedupMs) => {
     const id = `${event}|${key}`;
     const t = now();
     const alert = { event, key, data: { ...data, at: new Date(t).toISOString() } };
-    const last = oncePerEpisode ? seenAt.get(id) : sentAt.get(id);
-    seenAt.set(id, t);
-    const due = t - (last ?? -Infinity) >= dedupMs;
+    const due = t - (sentAt.get(id) ?? -Infinity) >= repeatMs;
     track?.seen(alert, due);
     if (!due) return;
     sentAt.set(id, t);
@@ -56,16 +56,29 @@ export function createOpsAlerts(
       if (msg === 'deployments: provider account refused') {
         const provider = String(data.provider ?? '');
         const next = typeof data.next === 'string' ? `usando a ${providerName(data.next)}` : `nenhum outro provedor para ${deployment}`;
-        const headline = `a ${providerName(provider)} recusou criar servidor: ${String(data.reason)} — ${String(data.fix)}; ${next}`;
+        const headline = `a ${providerName(provider)} recusou criar servidor: ${String(data.reason)} — não se resolve sozinho: ${String(data.fix)}; ${next}`;
         const facts = { provider, deployment, headline, status: data.status ?? null, error: data.error };
         if (/crédito/.test(String(data.reason))) fire('provider.credit_exhausted', provider, facts);
-        else fire('provider.account_refused', provider, facts, true);
+        else fire('provider.account_refused', provider, facts, ACCOUNT_REFUSED_REPEAT_MS);
+        return;
+      }
+      if (msg === 'janitor: sweep failed' || msg === 'janitor: delete failed') {
+        const error = String(data.error ?? '');
+        const refused = accountRefusal(new Error(error));
+        if (!refused) return;
+        const headline = `a Scaleway recusou a limpeza do gateway (janitor): ${refused.reason} — não se resolve sozinho: ${refused.fix}`;
+        fire('provider.account_refused', 'scaleway', { provider: 'scaleway', job: 'janitor', headline, status: refused.status, error }, ACCOUNT_REFUSED_REPEAT_MS);
         return;
       }
       if (msg === 'deployments: create failed' || msg === 'deployments: boot failed on the provider') {
         const error = String(data.error ?? '');
+        const refused = accountRefusal(new Error(error));
         if (/insufficient_credit|insufficient credit|not enough credit/i.test(error)) fire('provider.credit_exhausted', 'vast', { provider: 'vast', deployment, error });
-        else if (/out_of_stock|out of stock/i.test(error)) fire('deployment.out_of_stock', deployment, { deployment, error });
+        else if (refused) {
+          const provider = /\b(scaleway|vast)\b/i.exec(error)?.[1].toLowerCase() ?? 'provedor';
+          const headline = `a ${providerName(provider)} recusou criar servidor para ${deployment}: ${refused.reason} — não se resolve sozinho: ${refused.fix}`;
+          fire('provider.account_refused', provider, { provider, deployment, headline, status: refused.status, error }, ACCOUNT_REFUSED_REPEAT_MS);
+        } else if (/out_of_stock|out of stock/i.test(error)) fire('deployment.out_of_stock', deployment, { deployment, error });
         else fire('deployment.create_failed', deployment, { deployment, error });
         return;
       }
@@ -78,13 +91,25 @@ export function createOpsAlerts(
       }
     },
     /** Alerts on GPUs up outside their class window; returns the ones to park now (the caller parks and logs them). */
-    fromDeployments(views: Array<Pick<DeploymentView, 'name' | 'replicas' | 'spec'> & Partial<Pick<DeploymentView, 'lastRequestAt' | 'warm' | 'hold'>>>): string[] {
+    fromDeployments(views: Array<Pick<DeploymentView, 'name' | 'replicas' | 'spec'>
+      & Partial<Pick<DeploymentView, 'lastRequestAt' | 'warm' | 'hold' | 'lastError' | 'lastPlacement'>>>): string[] {
       const t = now();
       const outside = new Set<string>();
       const idle = new Set<string>();
+      const notReady = new Set<string>();
       const toPark: string[] = [];
       const anyClass = classWindowOpen(views, t);
       for (const view of views) {
+        const classOpen = activeWindow(view.spec.warmSchedule, t) && activeWindow(view.spec.warmSchedule, t - CLASS_GPU_READY_MS);
+        if (classOpen && !view.spec.paused && !view.replicas.some(r => r.phase === 'ready')) {
+          notReady.add(view.name);
+          const provider = view.replicas[0]?.provider ?? view.spec.provider ?? 'provedor';
+          const error = view.lastError ?? 'nenhum erro registrado';
+          fire('class.gpu_not_ready', view.name, {
+            deployment: view.name, gpuProvider: provider, replicas: view.replicas.length, error, lastPlacement: view.lastPlacement ?? null,
+            headline: `aula: ${view.name} sem GPU pronta 20 min depois de abrir a janela (${providerName(provider)}): ${error.slice(0, 160)}`,
+          });
+        }
         const idleNow = idleGpu({ ...view, lastRequestAt: view.lastRequestAt ?? null }, t);
         if (idleNow) {
           idle.add(view.name);
@@ -108,6 +133,7 @@ export function createOpsAlerts(
       }
       for (const name of outsideSince.keys()) if (!outside.has(name)) outsideSince.delete(name);
       track?.clear('gpu.idle', idle);
+      track?.clear('class.gpu_not_ready', notReady);
       track?.clear('gpu.outside_window', outside);
       return toPark;
     },
