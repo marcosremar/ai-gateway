@@ -1,7 +1,10 @@
 import type { DeploymentView, WarmScheduleEntry } from '../deployments/types';
 import { hhmm as minutesOf } from '../deployments/autoscale';
+import { EUR_TO_USD } from '../deployments/vast-backend';
+import { equivalenceGroup } from '../config/serve-providers';
 import type { Recommendation } from './recommendations';
-import { SLOT_MIN, type DayUse, type TrafficLine } from './traffic';
+import type { ModelPrice } from './model-prices';
+import { COST_DAYS, SLOT_MIN, type DayUse, type TrafficLine } from './traffic';
 import { appTitle, count, money, ms, pct, stageName, upOf, type Ctx } from './ui';
 
 const WEEKS_PER_MONTH = 4.35;
@@ -123,6 +126,51 @@ export function linkReorderRules(ctx: Ctx): Recommendation[] {
           action: { text: `PUT /v1/apps/${app ?? '<app>'}/routes: em ${alias}, ${b.target} antes de ${a.target} (mesmo modelo/voz? confira antes)` },
         });
         break;
+      }
+    }
+  }
+  return out;
+}
+
+const DAYS_PER_MONTH = 30;
+const MIN_SAVING_EUR_MONTH = 1;
+const PRICED_STAGES = ['chat', 'stt', 'tts'] as const;
+
+export const priceRatio = (from: ModelPrice, to: ModelPrice) =>
+  Math.max(...(['prompt', 'completion'] as const).map(f => (to[f] === 0 ? 0 : from[f] === 0 ? Infinity : to[f] / from[f])));
+
+const perMillion = (p: ModelPrice) => `${money(p.prompt * 1e6, 'US$')} entrada, ${money(p.completion * 1e6, 'US$')} saída por milhão`;
+const groupText = (group: string) => group.replace(/^eq:/, 'grupo ').replace(/^model:/, 'modelo ').replace(/^stt:/, 'língua ').replace('|voice:', ', voz ');
+
+export function cheaperModelRules(ctx: Ctx): Recommendation[] {
+  const prices = ctx.s.modelPrices?.models;
+  if (!prices) return [];
+  const out: Recommendation[] = [];
+  for (const a of ctx.s.apps) {
+    const costs = ctx.s.traffic?.costs?.[a.id] ?? {};
+    for (const stage of PRICED_STAGES) {
+      for (const [alias, chain] of Object.entries(a.routes?.[stage] ?? {})) {
+        const cloud = chain.filter(e => e.provider === 'openrouter')
+          .map(e => ({ model: e.model ?? alias, group: equivalenceGroup(stage, e, e.model ?? alias) }));
+        for (const lead of cloud.filter((x, i) => cloud.findIndex(y => y.group === x.group) === i)) {
+          const price = prices[lead.model];
+          const week = costs[`${stage}|openrouter:${lead.model}`] ?? 0;
+          if (!price || !week) continue;
+          const best = cloud.filter(x => x.group === lead.group && x.model !== lead.model && prices[x.model])
+            .map(x => ({ ...x, ratio: priceRatio(price, prices[x.model]!) })).sort((p, q) => p.ratio - q.ratio)[0];
+          if (!best || best.ratio >= 1) continue;
+          const eur = (week * (DAYS_PER_MONTH / COST_DAYS) * (1 - best.ratio)) / EUR_TO_USD;
+          if (eur < MIN_SAVING_EUR_MONTH) continue;
+          out.push({
+            id: `cheaper-model:${a.id}:${stage}:${alias}`, level: 'ok', title: `Modelo equivalente mais barato em ${alias}: ${best.model}`,
+            saw: `${lead.model}: ${perMillion(price)} · ${best.model}: ${perMillion(prices[best.model]!)} · `
+              + `${lead.model} custou ${money(week, 'US$')} em ${COST_DAYS} dias para ${appTitle(a.id, a.profile).name}`,
+            why: `Os dois links estão no mesmo grupo equivalente da rota (${groupText(lead.group)}), que o gateway já trata como intercambiáveis; `
+              + `com ${best.model} primeiro, o mesmo volume custa no máximo ${pct(best.ratio)} do preço de hoje.`,
+            impact: { amount: eur, unit: '€', text: `~${money(eur)}/mês` }, saving: { perMonth: eur, unit: '€' },
+            action: { text: `PUT /v1/apps/${a.id}/routes: em ${alias}, openrouter:${best.model} antes de openrouter:${lead.model}` },
+          });
+        }
       }
     }
   }
