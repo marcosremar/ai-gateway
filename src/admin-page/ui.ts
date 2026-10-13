@@ -85,3 +85,12 @@ export const appTitle = (id: string, profile: AppProfile | null | undefined) => 
 
 export const upOf = (d: DeploymentView) => d.replicas.filter(r => r.phase !== 'halted');
 export const outsideWindow = (d: DeploymentView, now: number) => Boolean(d.spec.warmSchedule?.length) && upOf(d).length > 0 && !activeWindow(d.spec.warmSchedule, now);
+
+export const providerOf = (d: DeploymentView) => upOf(d)[0]?.provider ?? d.spec.provider;
+export const providerLabel = (d: DeploymentView) => (providerOf(d) === 'vast' ? 'Vast · laboratório, barata' : 'Scaleway · produção');
+export const pinBadge = (d: DeploymentView) => {
+  if (!d.pinned) return '';
+  const m = d.pinned.idleMinutes;
+  const after = m ? `estaciona após ${m % 60 ? `${m} min` : `${m / 60} h`} sem uso` : 'nunca estaciona sozinha';
+  return ` <span class="pill info">fixada</span><small>${esc(d.pinned.parked ? 'estacionada · acorda no próximo pedido' : after)}</small>`;
+};

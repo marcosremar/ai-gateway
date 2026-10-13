@@ -30,6 +30,7 @@ export interface AdminPageOptions {
   actorOf: (key: string) => AdminActor | null;
   snapshot: () => AdminSnapshot;
   park: (deployment: string, actor: AdminActor) => Promise<unknown>;
+  pin?: (deployment: string, on: boolean) => Promise<unknown>;
   probe: () => Promise<unknown>;
   dismiss?: (id: string) => Promise<unknown>;
   secrets?: () => string[];
@@ -186,6 +187,16 @@ export function createAdminPage(opts: AdminPageOptions) {
     redirect(res, `/admin?msg=${encodeURIComponent(parked ? `Falhou ao estacionar ${name}: ${parked}` : `${name} estacionada.`)}#gpus`);
   });
 
+  const pin = guarded(async (res, { session, form }) => {
+    const name = form.get('name') ?? '';
+    const on = form.get('on') === '1';
+    if (session.role !== 'admin' || !opts.pin) return refuse(res, session, 'admin-page.pin', [name]);
+    const failed = await opts.pin(name, on).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
+    opts.audit?.({ actor: session.actor.name, action: on ? 'admin-page.pin' : 'admin-page.unpin', names: [name], ok: !failed, ...(failed ? { detail: failed } : {}) });
+    const done = on ? `${name} fixada: uma réplica fica ligada e estaciona após 1 h sem uso.` : `${name} solta: desliga quando ficar sem uso.`;
+    redirect(res, `/admin?msg=${encodeURIComponent(failed ? `Falhou ao ${on ? 'fixar' : 'soltar'} ${name}: ${failed}` : done)}#gpus`);
+  });
+
   const dismiss = guarded(async (res, { session, form }) => {
     const id = form.get('id') ?? '';
     if (session.role !== 'admin' || !opts.dismiss) return refuse(res, session, 'admin-page.dismiss', [id]);
@@ -213,7 +224,7 @@ export function createAdminPage(opts: AdminPageOptions) {
 
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([
     ['GET /admin', status], ['POST /admin/login', login],
-    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss],
+    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss],
   ]);
 
   function handle(req: IncomingMessage, res: ServerResponse): boolean {

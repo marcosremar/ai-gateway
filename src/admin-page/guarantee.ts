@@ -2,7 +2,7 @@ import type { ChainReport, LinkReport } from '../config/stage-chains';
 import type { DeploymentView } from '../deployments/types';
 import type { FallbackProbeResult } from '../telemetry/fallback-probe';
 import type { AdminApp, AdminSnapshot } from './render';
-import { appTitle, esc, hhmm, mark, ms, pct, pill, stageName, upOf, worst, type Ctx, type Level, type Section } from './ui';
+import { appTitle, esc, hhmm, mark, ms, pct, pill, providerLabel, stageName, upOf, worst, type Ctx, type Level, type Section } from './ui';
 
 export type Verdict = 'garantido' | 'so-nuvem' | 'sem-reserva' | 'sem-garantia';
 
@@ -91,7 +91,8 @@ function linkName(l: ChainLink): string {
   const name = l.target.slice('deployment:'.length);
   const machine = l.deployment && upOf(l.deployment)[0];
   const where = machine ? ` <small class="inl">${esc(machine.machineType)} · ${esc(machine.zone)}</small>` : '';
-  return `${l.kind === 'own-gpu' ? 'GPU própria' : 'Outra máquina'} <code>${esc(name)}</code>${where}`;
+  const kind = l.deployment ? ` <small class="inl">${esc(providerLabel(l.deployment))}</small>` : '';
+  return `${l.kind === 'own-gpu' ? 'GPU própria' : 'Outra máquina'} <code>${esc(name)}</code>${where}${kind}${l.deployment?.pinned ? ' <span class="pill info">fixada</span>' : ''}`;
 }
 
 function linkFacts(l: ChainLink, measured: boolean): string {

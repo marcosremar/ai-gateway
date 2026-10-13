@@ -23,6 +23,7 @@ async function gateway() {
   const access = new AccessKeys({ GATEWAY_API_KEYS: `${ADMIN_KEY}:marcos,${CLIENT_KEY}:parle,${DEV_KEY}:parle-dev:agentes,${BABEL_KEY}:babelcast,${SITE_KEY}:site` });
   access.setBaseAdmins(['marcos']);
   const parked: string[] = [];
+  const pins: Array<[string, boolean]> = [];
   const dismissed: string[] = [];
   const audit: Array<Record<string, unknown>> = [];
   let probes = 0;
@@ -43,6 +44,7 @@ async function gateway() {
     },
     snapshot: () => snapshot,
     park: async (name) => { parked.push(name); },
+    pin: async (name, on) => { pins.push([name, on]); },
     probe: async () => { probes++; },
     dismiss: async (id) => { dismissed.push(id); snapshot.dismissed = { ...snapshot.dismissed, [id]: clock.now + 7 * 86_400_000 }; },
     secrets: () => [ADMIN_KEY, CLIENT_KEY, DEV_KEY, BABEL_KEY, SITE_KEY, PROVIDER_SECRET],
@@ -69,7 +71,7 @@ async function gateway() {
     const html = await (await call('/admin', { cookie })).text();
     return { cookie, html, csrf: /name="csrf" value="([a-f0-9]+)"/.exec(html)![1] };
   }
-  return { clock, access, call, post, login, signedIn, parked, dismissed, audit, probes: () => probes };
+  return { clock, access, call, post, login, signedIn, parked, pins, dismissed, audit, probes: () => probes };
 }
 
 describe('admin page (/admin)', () => {
@@ -219,6 +221,47 @@ describe('admin page (/admin)', () => {
     expect((await gw.post('/admin/probe', { csrf }, cookie)).status).toBe(303);
     expect(gw.probes()).toBe(1);
     expect(gw.audit.map(e => e.action)).toEqual(['admin-page.login', 'admin-page.park', 'admin-page.probe']);
+  });
+
+  it('shows the pinned Vast GPU with its provider, price in US$, offer and park rule; the toggle is the admin\'s, signed and audited', async () => {
+    const gw = await gateway();
+    const { cookie, csrf, html } = await gw.signedIn();
+    const at = html.indexOf('<b class="mono">babelcast-3090');
+    const row = html.slice(at, html.indexOf('</tr>', at));
+    expect(row).toContain('Vast · laboratório, barata');
+    expect(row).toContain('fixada');
+    expect(row).toContain('estaciona após 1 h sem uso');
+    expect(row).toContain('RTX 3090');
+    expect(row).toContain('Lyon, FR');
+    expect(row).toMatch(/US\$\s?0,19\/h/);
+    expect(row).toContain('hoje ≈');
+    expect(row).toContain('action="/admin/pin"');
+    const scw = html.indexOf('<b class="mono">speech-stack');
+    expect(html.slice(scw, html.indexOf('</tr>', scw))).toContain('Scaleway · produção');
+    expect(html).toMatch(/<code>babelcast-3090<\/code>.*Vast · laboratório, barata.*fixada/);
+
+    expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0' }, cookie)).status).toBe(403);
+    expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0', csrf }, cookie, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    const res = await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0', csrf }, cookie);
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toMatch(/#gpus$/);
+    expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '1', csrf }, cookie)).status).toBe(303);
+    expect(gw.pins).toEqual([['babelcast-3090', false], ['babelcast-3090', true]]);
+    expect(gw.audit.filter(e => String(e.action).includes('pin'))).toEqual([
+      { actor: 'marcos', action: 'admin-page.unpin', names: ['babelcast-3090'], ok: true },
+      { actor: 'marcos', action: 'admin-page.pin', names: ['babelcast-3090'], ok: true },
+    ]);
+  });
+
+  it('an app session never sees nor uses the pin toggle', async () => {
+    const gw = await gateway();
+    await gw.access.setPolicy({ id: 'env-babelcast', canStartGpu: true });
+    const { cookie, csrf, html } = await gw.signedIn(BABEL_KEY);
+    expect(html).toContain('babelcast-3090');
+    expect(html).not.toContain('/admin/pin');
+    expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0', csrf }, cookie)).status).toBe(403);
+    expect(gw.pins).toEqual([]);
+    expect(gw.audit.at(-1)).toMatchObject({ action: 'admin-page.pin', names: ['babelcast-3090'], ok: false });
   });
 
   it('hides a recommendation for 7 days only for the admin, with the CSRF token', async () => {

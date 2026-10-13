@@ -12,12 +12,14 @@ import type { AdminTraffic, TrafficLine } from './traffic';
 import { CSS } from './styles';
 import type { SpendLedgerView } from '../deployments/spend-ledger';
 import { spend, spendWindow } from './spend';
+import { parisMidnightAfter } from '../deployments/spend-ledger';
+import { EUR_TO_USD } from '../deployments/vast-backend';
 import { guarantee } from './guarantee';
 import type { ChainReport } from '../config/stage-chains';
 import { recommendations, recoSection, type Recommendation } from './recommendations';
 import {
   ACTIVITY_SHOWN, ALERT_FRESH_MS, LEVEL_TEXT, ZONE, ago, appTitle, byLevel, count, duration, esc, form, hhmm, hour, latest, mark, meter, ms, money, outsideWindow, pct, pill,
-  plural, ratioLevel, stageName, table, upOf, when, worst, type Ctx, type Level, type Section,
+  pinBadge, plural, providerLabel, providerOf, ratioLevel, stageName, table, upOf, when, worst, type Ctx, type Level, type Section,
 } from './ui';
 
 export interface AdminAlert { event: string; at: string; summary: string }
@@ -110,6 +112,17 @@ function balances({ s, now }: Ctx): Section {
 const GPU_STATUS: Record<string, string> = { ready: 'pronta', 'scaled-to-zero': 'desligada', warming: 'ligando', degraded: 'com falha', paused: 'pausada' };
 const keyName = (k: KeyView | undefined) => (k ? `${k.user}${k.label ? ` (${k.label})` : ''}` : 'chave removida');
 
+function gpuCost(d: DeploymentView, eurPerHour: number, now: number): string {
+  const today = (eurPerHour * Math.min(...upOf(d).map(r => r.ageSeconds), (now - (parisMidnightAfter(now) - 86_400_000)) / 1000)) / 3600;
+  return providerOf(d) === 'vast'
+    ? `${money(eurPerHour * EUR_TO_USD, 'US$')}/h<small>${money(eurPerHour)}/h · hoje ≈ ${money(today * EUR_TO_USD, 'US$')}</small>`
+    : `${money(eurPerHour)}/h<small>hoje ≈ ${money(today)}</small>`;
+}
+
+const pinForm = (d: DeploymentView, csrf: string) => (d.pinned
+  ? form('/admin/pin', csrf, 'Soltar', `Soltar ${d.name}? Ela volta a desligar após ${d.spec.idleMinutes} min sem uso.`, { name: d.name, on: '0' }, 'quiet')
+  : form('/admin/pin', csrf, 'Fixar', `Fixar ${d.name}? Uma réplica fica ligada e só estaciona após 1 h sem pedido.`, { name: d.name, on: '1' }, 'quiet'));
+
 function gpus({ s, now, csrf, view }: Ctx): Section {
   const base = { id: 'gpus', title: 'GPUs', actions: '' };
   if (!s.gpus) return { ...base, level: 'ok', note: '', count: null, meta: '', body: '<p class="empty">As GPUs gerenciadas estão desligadas neste gateway.</p>' };
@@ -129,19 +142,22 @@ function gpus({ s, now, csrf, view }: Ctx): Section {
       classWindow ? `aquecida para a aula até ${hhmm(classWindow.endsAt)}` : '',
     ].filter(Boolean);
     const state = pill(level === 'ok' ? 'ok' : level, GPU_STATUS[d.status] ?? d.status)
-      + (typeof d.spec.idleMinutes === 'number' ? `<small>desliga após ${d.spec.idleMinutes} min sem uso</small>` : '')
+      + (d.pinned ? pinBadge(d) : typeof d.spec.idleMinutes === 'number' ? `<small>desliga após ${d.spec.idleMinutes} min sem uso</small>` : '')
       + (idle ? `<small class="err">sem uso há ${Math.round(idle.minutes)} min · ${money(idle.wastedEur)} gastos · ${money(idle.eurPerHour)}/h</small>` : '')
       + (outside ? '<small>fora da janela de aula</small>' : '') + (d.lastError ? `<small class="err">${esc(d.lastError)}</small>` : '');
     return { level, cells: [
-      `<b class="mono">${esc(d.name)}</b>${d.app ? `<small>app ${esc(d.app)}</small>` : ''}`,
+      `<b class="mono">${esc(d.name)}</b><small>${d.app ? `app ${esc(d.app)} · ` : ''}${esc(providerLabel(d))}</small>`,
       state,
       up.length ? `${ready}/${up.length}` : '0',
-      first ? `${esc(first.machineType)}<small>${esc(first.zone)}</small>` : '—',
-      up.length ? `${money(perHour)}/h` : '—',
+      first ? `${esc(first.machineType)}<small>${esc(first.zone)}</small>` : esc(d.spec.machineType),
+      up.length ? gpuCost(d, perHour, now) : '—',
       up.length ? `${duration(Math.max(...up.map(r => r.ageSeconds)))}<small>desde ${hhmm(now - Math.max(...up.map(r => r.ageSeconds)) * 1000)}</small>` : '—',
       when(d.lastRequestAt, now),
       by.length ? by.join('<br>') : '—',
-      up.length && (!view || (view.canPark && d.app === view.id)) ? form('/admin/park', csrf, 'Estacionar', `Estacionar ${d.name}? As réplicas sem uso desligam; pedidos em curso terminam.`, { name: d.name }, 'danger') : '',
+      [
+        up.length && (!view || (view.canPark && d.app === view.id)) ? form('/admin/park', csrf, 'Estacionar', `Estacionar ${d.name}? As réplicas sem uso desligam; pedidos em curso terminam.`, { name: d.name }, 'danger') : '',
+        !view && providerOf(d) === 'vast' ? pinForm(d, csrf) : '',
+      ].join(''),
     ] };
   }).sort(byLevel);
   const on = s.gpus.filter(d => upOf(d).length);
