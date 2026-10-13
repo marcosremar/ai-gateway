@@ -37,6 +37,7 @@ export function scopeToApp(s: AdminSnapshot, app: string): AdminSnapshot {
       activity: s.traffic.activity.filter(e => e.deployment !== null && deployments.has(e.deployment)),
       apps: [], byApp: ownTraffic ? { [app]: ownTraffic } : {}, daily: s.traffic.daily?.[app] ? { [app]: s.traffic.daily[app]! } : {},
       costs: s.traffic.costs?.[app] ? { [app]: s.traffic.costs[app]! } : {},
+      estimatedCosts: s.traffic.estimatedCosts?.[app] ? { [app]: s.traffic.estimatedCosts[app]! } : {},
     },
     gpuLogs: Object.fromEntries(Object.entries(s.gpuLogs ?? {}).filter(([name]) => deployments.has(name))),
     spend: s.spend ? { since: s.spend.since, days: s.spend.days.map(d => ({ day: d.day, apps: d.apps[app] ? { [app]: d.apps[app]! } : {} })) } : null,

@@ -25,6 +25,7 @@ export interface AdminTraffic extends TrafficView {
   byApp?: Record<string, TrafficView>;
   daily?: Record<string, DayUse[]>;
   costs?: Record<string, Record<string, number>>;
+  estimatedCosts?: Record<string, Record<string, number>>;
 }
 
 const HOUR_MS = 3_600_000;
@@ -105,17 +106,18 @@ export function adminTraffic(rows: readonly StoredTelemetryEvent[], now: number)
     byApp: Object.fromEntries([...perApp].map(([app, b]) => [app, b.view()])),
     daily: dailyUse(rows),
     costs: linkCosts(rows, now),
+    estimatedCosts: linkCosts(rows, now, true),
   };
 }
 
 export const COST_DAYS = 7;
 
-export function linkCosts(rows: readonly StoredTelemetryEvent[], now: number): Record<string, Record<string, number>> {
+export function linkCosts(rows: readonly StoredTelemetryEvent[], now: number, estimatedOnly = false): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {};
   for (let i = rows.length - 1; i >= 0 && rows[i]!.rxTs >= now - COST_DAYS * 24 * HOUR_MS; i--) {
     const { event, app, attrs } = rows[i]!;
     const usd = Number(attrs?.costUsd);
-    if (event !== 'usage.cost' || !app || !(usd > 0)) continue;
+    if (event !== 'usage.cost' || !app || !(usd > 0) || (estimatedOnly && attrs?.estimated !== true)) continue;
     const own = (out[app] ??= {});
     const key = `${attrs?.stage}|${attrs?.provider}:${attrs?.model}`;
     own[key] = (own[key] ?? 0) + usd;

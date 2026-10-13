@@ -6,7 +6,8 @@ export const SPEND_DAYS_KEPT = 90;
 export const DISMISS_MS = 7 * 86_400_000;
 export const NO_APP = '(sem app)';
 
-export interface SpendDay { gpuEur: number; requests: number; tokens: number; cloudUsd?: number }
+export interface StageCloud { usd?: number; estimatedUsd?: number; unknown?: number }
+export interface SpendDay { gpuEur: number; requests: number; tokens: number; cloudUsd?: number; stages?: Record<string, StageCloud> }
 
 export interface SpendLedgerView {
   since: string | null;
@@ -66,9 +67,16 @@ export class SpendLedger {
     e.tokens += Math.max(0, Math.round(tokens));
   }
 
-  cloud(app: string, usd: number): void {
-    if (!Number.isFinite(usd) || usd <= 0) return;
+  cloud(app: string, usd: number | null, stage = 'chat', estimated = false): void {
+    if (usd !== null && (!Number.isFinite(usd) || usd <= 0)) return;
     const e = this.entry(parisDay(this.now()), app);
+    const s = ((e.stages ??= {})[stage] ??= {});
+    if (usd === null) {
+      s.unknown = (s.unknown ?? 0) + 1;
+      return;
+    }
+    const field = estimated ? 'estimatedUsd' : 'usd';
+    s[field] = round((s[field] ?? 0) + usd);
     e.cloudUsd = round((e.cloudUsd ?? 0) + usd);
   }
 

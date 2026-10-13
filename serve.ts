@@ -69,7 +69,7 @@ import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
 import { ModelBenchmarkStore } from './src/model-benchmarks/store';
 import { createModelBenchmarkRoutes } from './src/model-benchmarks/routes';
-import { adminTraffic, createAdminPage, createAlertLog, createModelPrices, createSuggestionDigest, recommendations, type AdminSnapshot } from './src/admin-page';
+import { adminTraffic, createAdminPage, createAlertLog, createModelPrices, createSuggestionDigest, recommendations, usageCost, type AdminSnapshot } from './src/admin-page';
 
 const log = createLogger('serve');
 
@@ -479,10 +479,18 @@ if (telemetry) {
   log.log({ rows: telemetry.store.size }, 'Telemetry enabled');
 }
 
+const modelPrices = createModelPrices({ path: join(stateDir, 'model-prices.json'), log: (msg, data) => log.warn(data ?? {}, msg) });
+await modelPrices.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'model prices: cache unreadable, starts empty'));
+modelPrices.start();
 setGatewayTelemetrySink((event, caller) => {
   const app = caller && appOfUser(caller);
-  if (event.event === 'usage.cost') spendLedger.cloud(app || NO_APP, Number(event.attrs?.costUsd));
-  telemetry?.ingest.ingestOwn(event, app);
+  if (event.event !== 'usage.cost') { telemetry?.ingest.ingestOwn(event, app); return; }
+  const cost = usageCost(event.attrs ?? {}, modelPrices.snapshot()?.models ?? {});
+  spendLedger.cloud(app || NO_APP, cost?.usd ?? null, String(event.attrs?.stage ?? 'chat'), cost?.estimated);
+  const attrs = { ...event.attrs };
+  if (cost) Object.assign(attrs, { costUsd: cost.usd, estimated: cost.estimated });
+  else attrs.costUnknown = true;
+  telemetry?.ingest.ingestOwn({ ...event, attrs }, app);
 });
 
 const deepHealth = {
@@ -626,9 +634,6 @@ realtime.mount(server);
 rooms.mount(server);
 // Outermost: the account API and pages answer themselves, and the quota gate sees every metered request first.
 accounts?.mount(server);
-const modelPrices = createModelPrices({ path: join(stateDir, 'model-prices.json'), log: (msg, data) => log.warn(data ?? {}, msg) });
-await modelPrices.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'model prices: cache unreadable, starts empty'));
-modelPrices.start();
 const adminSnapshot = (): AdminSnapshot => ({
   reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
   gpus: controller?.list() ?? null,

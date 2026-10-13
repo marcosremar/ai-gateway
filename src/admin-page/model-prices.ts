@@ -7,6 +7,28 @@ const FETCH_TIMEOUT_MS = 15_000;
 
 export interface ModelPrice { prompt: number; completion: number }
 export interface ModelPrices { at: string; models: Record<string, ModelPrice> }
+export interface ListedPrice extends ModelPrice { minUnits?: number; source?: string }
+
+export const CLOUD_PRICES_CHECKED = '2026-10-13';
+export const CLOUD_PRICES: Record<string, ListedPrice> = {
+  'groq:whisper-large-v3': { prompt: 0.111 / 3600, completion: 0, minUnits: 10, source: 'https://console.groq.com/docs/speech-to-text' },
+  'groq:whisper-large-v3-turbo': { prompt: 0.04 / 3600, completion: 0, minUnits: 10, source: 'https://console.groq.com/docs/speech-to-text' },
+  'groq:canopylabs/orpheus-v1-english': { prompt: 22e-6, completion: 0, source: 'https://console.groq.com/docs/model/canopylabs/orpheus-v1-english' },
+  'groq:canopylabs/orpheus-arabic-saudi': { prompt: 40e-6, completion: 0, source: 'https://console.groq.com/docs/model/canopylabs/orpheus-arabic-saudi' },
+  'openai:whisper-1': { prompt: 0.006 / 60, completion: 0, source: 'https://developers.openai.com/api/docs/pricing' },
+};
+
+export const linkPrice = (prices: Record<string, ModelPrice>, provider: string, model: string): ListedPrice | undefined =>
+  (provider === 'openrouter' ? prices[model] : CLOUD_PRICES[`${provider}:${model}`]);
+
+export function usageCost(attrs: Record<string, unknown>, prices: Record<string, ModelPrice>): { usd: number; estimated: boolean } | null {
+  const actual = Number(attrs.costUsd);
+  if (actual > 0) return { usd: actual, estimated: false };
+  const units = Number(attrs.audioSeconds ?? attrs.chars);
+  const price = linkPrice(prices, String(attrs.provider), String(attrs.model));
+  if (!price || price.completion > 0 || !Number.isFinite(units) || units < 0) return null;
+  return { usd: price.prompt * Math.max(units, price.minUnits ?? 0), estimated: true };
+}
 
 const usd = (v: unknown) => (typeof v === 'number' || (typeof v === 'string' && v.trim() !== '') ? Number(v) : NaN);
 const known = (v: number) => Number.isFinite(v) && v >= 0;
