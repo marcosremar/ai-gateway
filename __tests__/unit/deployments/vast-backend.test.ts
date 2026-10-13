@@ -9,6 +9,7 @@ import {
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
 import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
+import { bootReportFor } from '../../../src/deployments/boot-events';
 import {
   BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, lowestRtt, MIN_RELIABILITY, TOO_FAR_HOST_MS,
   UDP_BLOCKED_HOST_MS, VastDeploymentBackend, vastState,
@@ -613,7 +614,8 @@ describe('realtime UDP ports on Vast', () => {
       vastSpec({ bootScript: 'x'.repeat(9_000), realtime: { maxSessions: 4, env: { EDGE_LLM_MODEL: 'm'.repeat(200), EDGE_TTS_MODEL: 't'.repeat(200) } } }),
     ]) {
       const { calls, fetchImpl } = fakeVast(c => (c.url.endsWith('/bundles/') ? { body: { offers } } : { body: { success: true, new_contract: 1 } }));
-      await new VastDeploymentBackend('k', { fetch: fetchImpl }).createReplica({ spec, replicaToken: 'x'.repeat(43), cloudInit: '', namespace: 'ns' });
+      const bootReport = bootReportFor('https://ai-gateway-production.up.railway.app', 'f'.repeat(24), 'x'.repeat(43));
+      await new VastDeploymentBackend('k', { fetch: fetchImpl }).createReplica({ spec, replicaToken: 'x'.repeat(43), cloudInit: '', namespace: 'ns', bootReport });
       const sent = Object.entries(calls[1].body!.env as Record<string, string>).reduce((n, [k, v]) => n + k.length + v.length + 2, 0);
       expect(sent).toBeLessThanOrEqual(vastEnvBytes(spec));
       expect(sent).toBeLessThan(VAST_ENV_MAX_BYTES);

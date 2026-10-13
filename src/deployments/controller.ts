@@ -14,6 +14,7 @@
 
 import { randomBytes } from 'crypto';
 import { isDeepStrictEqual } from 'util';
+import { bootReportFor } from './boot-events';
 import { replicaCloudInit } from './cloud-init';
 import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './controller-state';
 import { ControllerViews } from './controller-views';
@@ -94,7 +95,8 @@ export class DeploymentController extends ControllerViews {
     }
     const spec = buildSpec(name, body, { profiles: this.profiles, previous: existing?.record.spec });
     if (!spec.scaling && this.opts.defaultScalingMode) spec.scaling = { mode: this.opts.defaultScalingMode };
-    const initBytes = usesScaleway(spec) ? Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32))) : 0;
+    const bootReport = bootReportFor(this.opts.publicUrl ?? '', 'x'.repeat(24), 'x'.repeat(32));
+    const initBytes = usesScaleway(spec) ? Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32), { bootReport })) : 0;
     if (initBytes > USER_DATA_KEY_MAX_BYTES) {
       throw new SpecError(`generated cloud-init is ${initBytes} bytes; Scaleway takes at most ${USER_DATA_KEY_MAX_BYTES} (shrink bootScript/env)`);
     }

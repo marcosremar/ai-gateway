@@ -222,7 +222,9 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (!this.deployments.has(m.deployment) || this.parkedNow(m) || this.stoppingNow(m)) continue;
       const probe = this.probes.get(m.id);
       if (m.createdAt < this.startedAt && !this.poweredOnAt.has(m.id) && (!probe || probe.everReady)) continue;
-      this.boots.phase(m.deployment, m.id, bootPhaseOf(m, probe), now, this.poweredOnAt.get(m.id) ?? m.createdAt);
+      const inferred = bootPhaseOf(m, probe);
+      const phase = inferred === 'ready' ? inferred : this.boots.reportedPhase(m.id, now) ?? inferred;
+      this.boots.phase(m.deployment, m.id, phase, now, this.poweredOnAt.get(m.id) ?? m.createdAt);
       this.boots.providerMessage(m.deployment, m.id, m.providerMessage, now);
     }
     for (const id of this.boots.activeIds()) if (!this.machines.some(m => m.id === id) && !this.creatingIds.has(id)) this.boots.finish(id, 'gone', now);
@@ -252,7 +254,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
         deployment: spec.name, id: m.id, phase: stuck.phase, minutes: entry.minutes, where: entry.where, attempt: entry.attempt, of: STUCK_RETRY_MAX,
       });
       if (captured) await within(captured, STUCK_LOG_WAIT_MS);
-      await this.release(m, 'boot-stuck');
+      await this.release(m, stuck.failed ? 'boot-failed' : 'boot-stuck');
     }
   }
 

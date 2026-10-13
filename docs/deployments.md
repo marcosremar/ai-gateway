@@ -923,6 +923,35 @@ and kept), never the project's default group (inbound ACCEPT, SSH open). A repli
 created. Machines created before keep the default group until they are replaced. Gateway → replica traffic is still
 plain HTTP (TLS with a pinned per-deployment certificate is a follow-up).
 
+### Boot events: the replica reports its own phases (13/10/2026)
+
+The Scaleway Instance API has no console output, so the boot script itself pushes what it does to the gateway
+(`src/deployments/boot-events.ts`, both the Scaleway cloud-init and the Vast init):
+
+- `POST <public URL>/v1/boot-events?r=<token key>&phase=<pulling-image|starting-container|loading-models|failed>`
+  `[&bytes=<pulled>&layers=<done>/<total>][&exit=<code>]`, body = the last lines (≤ 4 KB) of `/srv/aigw/boot.log` without
+  the `set -x` trace, plus the app's last lines (`docker logs` on Scaleway, `user-boot.log` in boot-script mode).
+  `Authorization: Bearer <hex HMAC(replicaToken, "aigw-boot-events-v1")>`: per replica (the token key is the random
+  key of that create), never a provider, app or admin key. Accepted only while the gateway tracks that replica's boot
+  as running; after ready, failed or released the same token gets `401`, like a wrong token or an unknown key.
+- Pull progress (Scaleway, docker mode) every 20 s: bytes received since the pull started (`/proc/net/dev`) and the
+  layers `docker pull` marked complete; then `starting-container`, then every ~30 s of the health loop
+  `loading-models` once the app port answers (`starting-container` while it does not). A `docker pull` that leaves no
+  image, a `docker run` that fails, or the script ending without `ready.json` (an `EXIT` trap) report `failed` with the
+  exit code.
+- Never blocks the boot: every call is `curl --max-time 3 … || true` in a background subshell with stdin/stdout/stderr
+  on `/dev/null`; the token is set with `set +x` and never traced. No new package (curl is in the Scaleway GPU OS image
+  and installed by the Vast init).
+- The gateway redacts each event (the deployment's secrets, the env values, the registry password, the tokens, any
+  120+ char base64 blob), keeps ≤ 40 lines of ≤ 300 chars per event, never repeats a line, and keeps the last 60 lines
+  per replica in the boot log (`boot-history.json`).
+- The reported phase wins over the inferred one while it is fresh (2 min); `ready` stays the probe's. A pull still
+  receiving bytes is not stuck by its phase time (only by the boot timeout); a reported failure makes the boot stuck at
+  once (release `boot-failed`, the stuck-retry rules). The GPU page shows «puxando a imagem 12,3/21 GB · camadas 7/23»
+  (the total is the previous ready boot's pulled bytes) and the lines prefixed `replica:`.
+- Off: `BOOT_REPORTING=0` on the gateway (default on, with a public URL). New replicas then get exactly the previous
+  script, and the route answers `401`.
+
 ## Orphan guard
 
 While the gateway runs it never leaves a machine behind (scale to zero, halted replicas deleted, unknown machines of its
