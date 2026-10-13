@@ -68,7 +68,7 @@ import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
 import { ModelBenchmarkStore } from './src/model-benchmarks/store';
 import { createModelBenchmarkRoutes } from './src/model-benchmarks/routes';
-import { adminTraffic, createAdminPage, createAlertLog, createSuggestionDigest, recommendations, type AdminSnapshot } from './src/admin-page';
+import { adminTraffic, createAdminPage, createAlertLog, createModelPrices, createSuggestionDigest, recommendations, type AdminSnapshot } from './src/admin-page';
 
 const log = createLogger('serve');
 
@@ -612,6 +612,9 @@ realtime.mount(server);
 rooms.mount(server);
 // Outermost: the account API and pages answer themselves, and the quota gate sees every metered request first.
 accounts?.mount(server);
+const modelPrices = createModelPrices({ path: join(stateDir, 'model-prices.json'), log: (msg, data) => log.warn(data ?? {}, msg) });
+await modelPrices.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'model prices: cache unreadable, starts empty'));
+modelPrices.start();
 const adminSnapshot = (): AdminSnapshot => ({
   reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
   gpus: controller?.list() ?? null,
@@ -622,6 +625,7 @@ const adminSnapshot = (): AdminSnapshot => ({
     return {
       id, profile: entry?.profile ?? null, status: deployments.gpuHealth.status(id), aliases: Object.values(entry?.routes ?? {}).flatMap(r => Object.keys(r ?? {})),
       stages: Object.fromEntries(Object.entries(entry?.routes ?? {}).map(([stage, r]) => [stage, Object.keys(r ?? {})])),
+      routes: entry?.routes,
     };
   }) ?? [],
   traffic: telemetry ? adminTraffic(telemetry.store.rows(), Date.now()) : null, audit: keyAudit.recent(30),
@@ -632,6 +636,7 @@ const adminSnapshot = (): AdminSnapshot => ({
     telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
   },
   digest: suggestionDigest.status(), overspend: overspendWatch.active(), reorders: reorderSnapshot(), ttsCache: ttsCache?.stats() ?? null,
+  modelPrices: modelPrices.snapshot(),
   voiceTurns: appTelemetry?.voiceTurns() ?? null,
 });
 

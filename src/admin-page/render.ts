@@ -23,6 +23,8 @@ import { digestBlock, type DigestStatus } from './digest';
 import type { Overspend } from '../telemetry/overspend';
 import type { Promotion } from '../gateway/proxy/link-reorder';
 import type { TtsCacheStats } from '../gateway/proxy/tts-cache';
+import type { ModelRoutesSpec } from '../config/serve-providers';
+import type { ModelPrices } from './model-prices';
 import { voiceCache } from './voice-cache';
 import { classSection } from './class-card';
 import type { VoiceTurn } from '../app-telemetry/voice-turn';
@@ -33,7 +35,7 @@ import {
 
 export interface AdminAlert { event: string; at: string; summary: string }
 
-export interface AdminApp { id: string; profile: AppProfile | null; status: AppStatus | null; aliases?: string[]; stages?: Record<string, string[]> }
+export interface AdminApp { id: string; profile: AppProfile | null; status: AppStatus | null; aliases?: string[]; stages?: Record<string, string[]>; routes?: ModelRoutesSpec }
 
 export interface AppView { id: string; canPark: boolean }
 
@@ -67,6 +69,7 @@ export interface AdminSnapshot {
   overspend?: Overspend[];
   reorders?: Promotion[];
   ttsCache?: TtsCacheStats | null;
+  modelPrices?: ModelPrices | null;
   voiceTurns?: VoiceTurn[] | null;
 }
 

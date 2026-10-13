@@ -5,7 +5,7 @@ import { spendWindow } from './spend';
 import { answeredShare, sloLevel } from './traffic';
 import { SLO_TARGETS } from '../alerting/slo-targets';
 import { EUR_TO_USD } from '../deployments/vast-backend';
-import { linkReorderRules, warmWindowRules } from './savings-rules';
+import { cheaperModelRules, linkReorderRules, warmWindowRules } from './savings-rules';
 import { voiceCacheRules } from './voice-cache';
 import {
   NEAR_LIMIT, appTitle, count, duration, esc, form, hhmm, mark, money, ms, pct, stageName, upOf, outsideWindow, type Ctx, type Level, type Section,
@@ -29,6 +29,7 @@ const PAGE_OF: Array<[string, string]> = [
   ['reserve-failed', '/admin/servicos#reservas'], ['reserve-content', '/admin/servicos#reservas'],
   ['balance-low', '/admin/gastos#saldos'], ['tts-cache', '/admin/gastos#cachevoz'], ['month-pace', '/admin/gastos'], ['spend-trend', '/admin/gastos'],
   ['turn-latency', '/admin/servicos#trafego'], ['stage-', '/admin/servicos#trafego'], ['app-slo', '/admin/servicos#trafego'], ['link-reorder', '/admin/servicos#garantia'],
+  ['cheaper-model', '/admin/servicos#garantia'],
 ];
 export const pageOf = (r: Pick<Recommendation, 'id' | 'action'>) => ('go' in r.action ? r.action.go : PAGE_OF.find(([p]) => r.id.startsWith(p))?.[1] ?? '/admin');
 export const eurPerMonth = (r: Pick<Recommendation, 'saving'>) => (r.saving ? (r.saving.unit === '€' ? r.saving.perMonth : r.saving.perMonth / EUR_TO_USD) : 0);
@@ -301,7 +302,7 @@ const IMPACT_RANK = { '€': 0, 'US$': 1, none: 2 };
 
 export function recommendations(ctx: Ctx): Recommendation[] {
   const dismissed = ctx.s.dismissed ?? {};
-  return [...gpuRules(ctx), ...keyRules(ctx.s), ...serviceRules(ctx.s, ctx.now), ...appRules(ctx.s), ...overspendRules(ctx.s), ...trendRules(ctx), ...warmWindowRules(ctx), ...linkReorderRules(ctx), ...voiceCacheRules(ctx)]
+  return [...gpuRules(ctx), ...keyRules(ctx.s), ...serviceRules(ctx.s, ctx.now), ...appRules(ctx.s), ...overspendRules(ctx.s), ...trendRules(ctx), ...warmWindowRules(ctx), ...linkReorderRules(ctx), ...cheaperModelRules(ctx), ...voiceCacheRules(ctx)]
     .filter(r => !(dismissed[r.id] && dismissed[r.id]! > ctx.now))
     .sort((a, b) => eurPerHourNow(b) - eurPerHourNow(a) || eurPerMonth(b) - eurPerMonth(a)
       || IMPACT_RANK[a.impact?.unit ?? 'none'] - IMPACT_RANK[b.impact?.unit ?? 'none'] || (b.impact?.amount ?? 0) - (a.impact?.amount ?? 0) || RANK[a.level] - RANK[b.level]);
