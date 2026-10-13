@@ -69,18 +69,22 @@ export interface AdminAbout { commit: string | null; uptimeSeconds: number; regi
 function reserves({ s, now, csrf, view, path }: Ctx): Section {
   const links = s.reserves.links;
   const failed = links.filter(r => !r.ok);
-  const rows = [...links].sort((a, b) => Number(a.ok) - Number(b.ok)).map(r => [
+  const rows = [...links].sort((a, b) => Number(a.ok) - Number(b.ok) || Number(b.content === 'mismatch') - Number(a.content === 'mismatch')).map(r => [
     `<b>${esc(stageName(r.stage))}</b>`,
     `<code>${esc(r.target)}</code>${r.voice ? `<small>voz ${esc(r.voice)}</small>` : ''}`,
-    r.ok ? pill('ok', 'respondeu') : `${pill('bad', `falhou${r.code ? ` · ${r.code}` : ''}`)}${r.error ? `<small class="err">${esc(r.error)}</small>` : ''}`,
+    !r.ok ? `${pill('bad', `falhou${r.code ? ` · ${r.code}` : ''}`)}${r.error ? `<small class="err">${esc(r.error)}</small>` : ''}`
+      : r.content === 'mismatch' ? `${pill('warn', 'respondeu, conteúdo estranho')}<small class="err">${esc(r.contentNote ?? '')}</small>`
+        : `${pill('ok', 'respondeu')}${r.content === 'ok' ? '<small>conteúdo conferido</small>' : ''}`,
     ms(r.latencyMs),
     when(r.checkedAt, now),
   ]);
-  const level: Level = !links.length ? 'warn' : failed.length ? 'bad' : 'ok';
+  const odd = links.filter(r => r.ok && r.content === 'mismatch');
+  const level: Level = !links.length ? 'warn' : failed.length ? 'bad' : odd.length ? 'warn' : 'ok';
   const checked = latest(links.map(r => r.checkedAt));
   return {
     id: 'reservas', title: 'Reservas', level, count: links.length,
-    notes: !links.length ? ['nenhuma reserva testada ainda'] : failed.length ? [`${failed.map(r => stageName(r.stage)).join(', ')} sem resposta na nuvem`] : [],
+    notes: !links.length ? ['nenhuma reserva testada ainda'] : failed.length ? [`${failed.map(r => stageName(r.stage)).join(', ')} sem resposta na nuvem`]
+      : odd.length ? [`${odd.map(r => stageName(r.stage)).join(', ')}: a reserva responde, mas o conteúdo não confere`] : [],
     meta: `teste a cada ${s.reserves.intervalMinutes} min${checked ? ` · último às ${hhmm(checked)}` : ''}`,
     actions: view ? '' : form('/admin/probe', csrf, 'Testar agora', 'Testar todas as reservas agora? Cada uma recebe um pedido mínimo real.', {}, '', path),
     body: table([{ label: 'Etapa' }, { label: 'Destino' }, { label: 'Resultado' }, { label: 'Latência', num: true }, { label: 'Verificado', num: true }], rows,

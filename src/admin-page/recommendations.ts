@@ -24,7 +24,8 @@ export interface Recommendation {
 
 const PAGE_OF: Array<[string, string]> = [
   ['gpu-', '/admin/gpus'], ['idle-tail', '/admin/gpus'], ['deployment-unused', '/admin/gpus'], ['app-degraded-gpu', '/admin/gpus'], ['warm-', '/admin/gpus'],
-  ['keycap-', '/admin/chaves'], ['app-budget', '/admin/servicos#apps'], ['app-unnamed', '/admin/servicos#apps'], ['reserve-failed', '/admin/servicos#reservas'],
+  ['keycap-', '/admin/chaves'], ['app-budget', '/admin/servicos#apps'], ['app-unnamed', '/admin/servicos#apps'],
+  ['reserve-failed', '/admin/servicos#reservas'], ['reserve-content', '/admin/servicos#reservas'],
   ['balance-low', '/admin/gastos#saldos'], ['month-pace', '/admin/gastos'], ['spend-trend', '/admin/gastos'],
   ['turn-latency', '/admin/servicos#trafego'], ['stage-', '/admin/servicos#trafego'], ['app-slo', '/admin/servicos#trafego'], ['link-reorder', '/admin/servicos#garantia'],
 ];
@@ -146,6 +147,14 @@ function serviceRules(s: AdminSnapshot, now: number): Recommendation[] {
       saw: `${r.target} · ${r.code ?? r.status ?? 'sem código'}${r.error ? ` · ${r.error}` : ''} · ${ms(r.latencyMs)}`,
       why: 'Se a GPU cair, esta etapa fica sem resposta: a reserva é a rede de segurança.',
       impact: null, action: { probe: true },
+    });
+  }
+  for (const r of s.reserves.links.filter(r => r.ok && r.content === 'mismatch')) {
+    out.push({
+      id: `reserve-content:${r.stage}:${r.target}`, level: 'warn', title: `Reserva de ${stageName(r.stage)} responde, mas o conteúdo não confere`,
+      saw: `${r.target}${r.voice ? ` · voz ${r.voice}` : ''} · ${r.contentNote ?? 'conteúdo estranho'}`,
+      why: 'O teste pediu uma resposta conhecida e recebeu outra coisa: se a GPU cair, esta etapa responde com áudio vazio, texto errado ou transcrição trocada.',
+      impact: null, gain: 'a reserva volta a responder o que o aluno precisa ouvir ou ler', action: { probe: true },
     });
   }
   for (const b of s.balances) {

@@ -157,6 +157,7 @@ function allGreen(s: AdminSnapshot, now: number): AdminSnapshot {
     gpus: s.gpus!.map(d => (d.name === 'babel-live' ? { ...d, lastRequestAt: iso(now, 2) } : d.name === 'speech-stack' ? { ...d, spec: { warmSchedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', minReplicas: 1, timeZone: 'Europe/Paris' }] } } as DeploymentView : d)),
     alerts: s.alerts.filter(a => a.event !== 'gpu.idle').map(a => ({ ...a, at: iso(now, 300) })),
     audit: s.audit.filter(e => e.ok),
+    reserves: { ...s.reserves, links: s.reserves.links.map(r => ({ ...r, content: 'ok' as const, contentNote: null })) },
   };
 }
 
@@ -191,10 +192,11 @@ function warnSnapshot(now: number): AdminSnapshot {
     reserves: {
       intervalMinutes: 15,
       links: [
-        { stage: 'stt', target: 'openrouter:openai/whisper-large-v3', providerId: 'openrouter', aliases: ['parle-stt'], ok: true, status: 200, code: null, latencyMs: 812, checkedAt: iso(now, 4), error: null },
-        { stage: 'chat', target: 'openrouter:google/gemini-2.5-flash', providerId: 'openrouter', aliases: ['parle-chat'], ok: true, status: 200, code: null, latencyMs: 640, checkedAt: iso(now, 4), error: null },
-        { stage: 'tts', target: 'openrouter:hexgrad/kokoro-82m', providerId: 'openrouter', voice: 'pm_alex', aliases: ['parle-tts'], ok: true, status: 200, code: null, latencyMs: 1290, checkedAt: iso(now, 4), error: null },
-        { stage: 'tts', target: 'openrouter:openai/gpt-4o-mini-tts', providerId: 'openrouter', voice: 'alloy', aliases: ['babel-tts'], ok: true, status: 200, code: null, latencyMs: 980, checkedAt: iso(now, 4), error: null },
+        { stage: 'stt', target: 'openrouter:openai/whisper-large-v3', providerId: 'openrouter', aliases: ['parle-stt'], ok: true, status: 200, code: null, latencyMs: 812, checkedAt: iso(now, 4), error: null, content: 'ok', contentNote: null },
+        { stage: 'chat', target: 'openrouter:google/gemini-2.5-flash', providerId: 'openrouter', aliases: ['parle-chat'], ok: true, status: 200, code: null, latencyMs: 640, checkedAt: iso(now, 4), error: null, content: 'ok', contentNote: null },
+        { stage: 'tts', target: 'openrouter:hexgrad/kokoro-82m', providerId: 'openrouter', voice: 'pm_alex', aliases: ['parle-tts'], ok: true, status: 200, code: null, latencyMs: 1290, checkedAt: iso(now, 4), error: null, content: 'ok', contentNote: null },
+        { stage: 'tts', target: 'openrouter:openai/gpt-4o-mini-tts', providerId: 'openrouter', voice: 'alloy', aliases: ['babel-tts'], ok: true, status: 200, code: null, latencyMs: 980, checkedAt: iso(now, 4), error: null,
+          content: 'mismatch', contentNote: 'áudio em silêncio (RMS 12)' },
       ],
     },
     balances: [
