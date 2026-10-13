@@ -7,10 +7,13 @@ import type { AppBudgetView } from '../gateway/proxy/app-limits';
 import type { AppProfile } from '../deployments/apps';
 import type { AppStatus } from '../deployments/app-gpu-health';
 import { activeWindow } from '../deployments/autoscale';
+import { idleGpu } from '../deployments/idle';
 import type { AdminTraffic, TrafficLine } from './traffic';
 import { CSS } from './styles';
 import type { SpendLedgerView } from '../deployments/spend-ledger';
 import { spend, spendWindow } from './spend';
+import { guarantee } from './guarantee';
+import type { ChainReport } from '../config/stage-chains';
 import { recommendations, recoSection, type Recommendation } from './recommendations';
 import {
   ACTIVITY_SHOWN, ALERT_FRESH_MS, LEVEL_TEXT, ZONE, ago, appTitle, byLevel, count, duration, esc, form, hhmm, hour, latest, mark, meter, ms, money, outsideWindow, pct, pill,
@@ -19,7 +22,7 @@ import {
 
 export interface AdminAlert { event: string; at: string; summary: string }
 
-export interface AdminApp { id: string; profile: AppProfile | null; status: AppStatus | null; aliases?: string[] }
+export interface AdminApp { id: string; profile: AppProfile | null; status: AppStatus | null; aliases?: string[]; stages?: Record<string, string[]> }
 
 export interface AppView { id: string; canPark: boolean }
 
@@ -44,6 +47,7 @@ export interface AdminSnapshot {
   spend?: SpendLedgerView | null;
   dismissed?: Record<string, number>;
   about?: AdminAbout | null;
+  chains?: Record<string, Record<string, ChainReport>> | null;
 }
 
 export interface AdminAbout { commit: string | null; uptimeSeconds: number; region: string | null; telemetryAt: string | null }
@@ -113,17 +117,20 @@ function gpus({ s, now, csrf, view }: Ctx): Section {
   const rows = s.gpus.map((d) => {
     const up = upOf(d);
     const outside = outsideWindow(d, now);
-    const level: Level = d.status === 'degraded' || d.lastError ? 'warn' : outside ? 'warn' : 'ok';
+    const idle = idleGpu(d, now);
+    const classWindow = up.length ? activeWindow(d.spec.warmSchedule, now) : null;
+    const level: Level = d.status === 'degraded' || d.lastError || outside || idle ? 'warn' : 'ok';
     const perHour = up.reduce((sum, r) => sum + (r.pricePerHour ?? 0), 0);
     const ready = up.filter(r => r.phase === 'ready').length;
     const first = up[0];
     const by = [
       ...(s.gpuSpend?.running ?? []).filter(r => r.deployment === d.name).map(r => `${esc(keyName(keys.get(r.key)))} até ${hhmm(r.until)}`),
       d.warm ? `aquecida até ${hhmm(d.warm.until)}` : '',
-      up.length && activeWindow(d.spec.warmSchedule, now) ? 'horário de aula' : '',
+      classWindow ? `aquecida para a aula até ${hhmm(classWindow.endsAt)}` : '',
     ].filter(Boolean);
     const state = pill(level === 'ok' ? 'ok' : level, GPU_STATUS[d.status] ?? d.status)
       + (typeof d.spec.idleMinutes === 'number' ? `<small>desliga após ${d.spec.idleMinutes} min sem uso</small>` : '')
+      + (idle ? `<small class="err">sem uso há ${Math.round(idle.minutes)} min · ${money(idle.wastedEur)} gastos · ${money(idle.eurPerHour)}/h</small>` : '')
       + (outside ? '<small>fora da janela de aula</small>' : '') + (d.lastError ? `<small class="err">${esc(d.lastError)}</small>` : '');
     return { level, cells: [
       `<b class="mono">${esc(d.name)}</b>${d.app ? `<small>app ${esc(d.app)}</small>` : ''}`,
@@ -142,7 +149,12 @@ function gpus({ s, now, csrf, view }: Ctx): Section {
   const level = worst(rows.map(r => r.level));
   return {
     ...base, level, count: s.gpus.length,
-    note: s.gpus.filter(d => outsideWindow(d, now) || d.status === 'degraded' || d.lastError).map(d => `${d.name} ${outsideWindow(d, now) ? 'ligada fora da janela de aula' : GPU_STATUS[d.status] ?? d.status}`).join(' · '),
+    note: s.gpus.map((d) => {
+      const idle = idleGpu(d, now);
+      if (idle) return `${d.name} ligada sem uso há ${Math.round(idle.minutes)} min: ${money(idle.wastedEur)} gastos, ${money(idle.eurPerHour)}/h`;
+      if (outsideWindow(d, now)) return `${d.name} ligada fora da janela de aula`;
+      return d.status === 'degraded' || d.lastError ? `${d.name} ${GPU_STATUS[d.status] ?? d.status}` : '';
+    }).filter(Boolean).join(' · '),
     meta: `${on.length} de ${s.gpus.length} ligadas · ${money(perHour)}/h agora`,
     body: table([
       { label: 'Deployment' }, { label: 'Estado' }, { label: 'Réplicas', num: true }, { label: 'Máquina' }, { label: 'Custo', num: true },
@@ -229,7 +241,7 @@ function appCell(id: string, profile: AppProfile | null, needs: string): string 
   return `<b><a href="/admin?app=${encodeURIComponent(id)}#apps">${esc(name)}</a></b>`
     + (name !== id ? ` <span class="mono">${esc(id)}</span>` : '')
     + `<small>${description ? esc(description) : 'sem descrição · defina em PUT /v1/apps/' + esc(id) + '/profile'}</small>`
-    + `<small>${esc(needs)}</small>`;
+    + `<small>${esc(needs)} · <a href="#garantia-${esc(id)}">como o serviço é garantido</a></small>`;
 }
 
 function apps(ctx: Ctx): Section {
@@ -352,8 +364,8 @@ function activity({ s, now }: Ctx): Section {
 }
 
 function sections(ctx: Ctx, recos: Recommendation[]): Section[] {
-  if (ctx.view) return [recoSection(ctx, recos), apps(ctx), spend(ctx), gpus(ctx), reserves(ctx), keys(ctx), alerts(ctx), activity(ctx)];
-  return [recoSection(ctx, recos), traffic(ctx), spend(ctx), apps(ctx), gpus(ctx), reserves(ctx), balances(ctx), keys(ctx), machines(ctx), alerts(ctx), activity(ctx)];
+  if (ctx.view) return [recoSection(ctx, recos), guarantee(ctx), apps(ctx), spend(ctx), gpus(ctx), reserves(ctx), keys(ctx), alerts(ctx), activity(ctx)];
+  return [recoSection(ctx, recos), guarantee(ctx), traffic(ctx), spend(ctx), apps(ctx), gpus(ctx), reserves(ctx), balances(ctx), keys(ctx), machines(ctx), alerts(ctx), activity(ctx)];
 }
 
 interface Kpi { label: string; href: string; value: string; sub: string; level: Level | null }

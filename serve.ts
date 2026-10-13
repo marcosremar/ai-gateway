@@ -604,10 +604,13 @@ createAdminPage({
     machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
     apps: deployments?.apps.list().map(({ id }) => {
       const entry = deployments.apps.get(id);
-      return { id, profile: entry?.profile ?? null, status: deployments.gpuHealth.status(id), aliases: Object.values(entry?.routes ?? {}).flatMap(r => Object.keys(r ?? {})) };
+      return {
+        id, profile: entry?.profile ?? null, status: deployments.gpuHealth.status(id), aliases: Object.values(entry?.routes ?? {}).flatMap(r => Object.keys(r ?? {})),
+        stages: Object.fromEntries(Object.entries(entry?.routes ?? {}).map(([stage, r]) => [stage, Object.keys(r ?? {})])),
+      };
     }) ?? [],
     traffic: telemetry ? adminTraffic(telemetry.store.rows(), Date.now()) : null, audit: keyAudit.recent(30),
-    spend: spendLedger.view(), dismissed: spendLedger.dismissed(),
+    spend: spendLedger.view(), dismissed: spendLedger.dismissed(), chains: chainsNow().stages,
     about: {
       commit: (minimalHealth().commit as string | null) ?? null, uptimeSeconds: Math.round(process.uptime()),
       region: process.env.RAILWAY_REPLICA_REGION?.trim() || null,

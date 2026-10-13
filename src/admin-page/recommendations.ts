@@ -1,5 +1,5 @@
 import type { DeploymentView } from '../deployments/types';
-import { activeWindow } from '../deployments/autoscale';
+import { idleGpu } from '../deployments/idle';
 import type { AdminSnapshot } from './render';
 import { spendWindow } from './spend';
 import {
@@ -16,7 +16,6 @@ export interface Recommendation {
   action: { park: string } | { probe: true } | { text: string };
 }
 
-const IDLE_MIN = 30;
 const IDLE_TAIL_TARGET_MIN = 15;
 const BALANCE_DAYS = 7;
 const TURN_TARGET_MS = 1500;
@@ -43,24 +42,23 @@ function gpuRules(s: AdminSnapshot, now: number): Recommendation[] {
         impact: { amount: perHour, unit: '€', text: `${money(perHour)}/h enquanto ficar ligada` }, action: { park: d.name },
       });
     }
-    const idleMin = minutesSince(d.lastRequestAt, now);
-    const inWindow = activeWindow(d.spec.warmSchedule, now);
-    if (up.length && !outsideWindow(d, now) && !inWindow && !d.warm && !d.hold && idleMin >= IDLE_MIN && age / 60 >= IDLE_MIN) {
+    const idle = idleGpu(d, now);
+    if (idle && !outsideWindow(d, now)) {
       out.push({
         id: `gpu-idle:${d.name}`, level: 'warn', title: `${d.name} ligada sem uso`,
-        saw: `${up.length} réplica(s) · último pedido ${d.lastRequestAt ? `há ${Math.round(idleMin)} min` : 'nenhum desde que ligou'} · ligada há ${duration(age)}`,
+        saw: `${up.length} réplica(s) · sem pedido há ${Math.round(idle.minutes)} min (limite ${idle.limitMinutes} min) · ${money(idle.wastedEur)} gastos · ligada há ${duration(age)}`,
         why: 'Sem pedidos e sem janela de aula, a GPU só gasta.',
         impact: { amount: perHour, unit: '€', text: `${money(perHour)}/h enquanto ficar ligada` }, action: { park: d.name },
       });
     }
-    const idle = d.spec.idleMinutes;
+    const idleSpec = d.spec.idleMinutes;
     const price = perHour || (d.spec.maxEurPerHour ?? 0);
-    if (typeof idle === 'number' && idle > IDLE_TAIL_TARGET_MIN && d.spec.minReplicas === 0 && price > 0) {
-      const tail = ((idle - IDLE_TAIL_TARGET_MIN) / 60) * price;
+    if (typeof idleSpec === 'number' && idleSpec > IDLE_TAIL_TARGET_MIN && d.spec.minReplicas === 0 && price > 0) {
+      const tail = ((idleSpec - IDLE_TAIL_TARGET_MIN) / 60) * price;
       out.push({
-        id: `idle-tail:${d.name}`, level: 'ok', title: `${d.name} espera ${idle} min antes de desligar`,
-        saw: `idleMinutes ${idle} · ${perHour ? `${money(perHour)}/h agora` : `até ${money(price)}/h (maxEurPerHour)`}`,
-        why: `Depois do último pedido a réplica fica ligada ${idle} min; ${IDLE_TAIL_TARGET_MIN} min cobrem uma pausa de aula.`,
+        id: `idle-tail:${d.name}`, level: 'ok', title: `${d.name} espera ${idleSpec} min antes de desligar`,
+        saw: `idleMinutes ${idleSpec} · ${perHour ? `${money(perHour)}/h agora` : `até ${money(price)}/h (maxEurPerHour)`}`,
+        why: `Depois do último pedido a réplica fica ligada ${idleSpec} min; ${IDLE_TAIL_TARGET_MIN} min cobrem uma pausa de aula.`,
         impact: { amount: tail, unit: '€', text: `~${money(tail)} a cada vez que o uso termina` },
         action: { text: `PATCH /v1/deployments/${d.name} {"idleMinutes": ${IDLE_TAIL_TARGET_MIN}}` },
       });

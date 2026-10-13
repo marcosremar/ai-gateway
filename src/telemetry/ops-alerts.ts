@@ -1,6 +1,7 @@
 import type { ChainReport } from '../config/stage-chains';
 import { activeWindow, classWindowOpen } from '../deployments/autoscale';
 import type { DeploymentView } from '../deployments/types';
+import { idleGpu } from '../deployments/idle';
 import type { FallbackProbeResult } from './fallback-probe';
 import type { LatencyReport } from './query';
 
@@ -51,12 +52,18 @@ export function createOpsAlerts(
       }
     },
     /** Alerts on GPUs up outside their class window; returns the ones to park now (the caller parks and logs them). */
-    fromDeployments(views: Array<Pick<DeploymentView, 'name' | 'replicas' | 'spec'> & { warm?: DeploymentView['warm'] }>): string[] {
+    fromDeployments(views: Array<Pick<DeploymentView, 'name' | 'replicas' | 'spec'> & Partial<Pick<DeploymentView, 'lastRequestAt' | 'warm' | 'hold'>>>): string[] {
       const t = now();
       const outside = new Set<string>();
       const toPark: string[] = [];
       const anyClass = classWindowOpen(views, t);
       for (const view of views) {
+        const idle = idleGpu({ ...view, lastRequestAt: view.lastRequestAt ?? null }, t);
+        if (idle) {
+          fire('gpu.idle', view.name, {
+            deployment: view.name, minutes: Math.round(idle.minutes), eurPerHour: idle.eurPerHour, wastedEur: Math.round(idle.wastedEur * 100) / 100,
+          });
+        }
         const up = view.replicas.filter(r => r.phase !== 'halted');
         if (!view.spec.warmSchedule?.length || !up.length || activeWindow(view.spec.warmSchedule, t)) continue;
         outside.add(view.name);

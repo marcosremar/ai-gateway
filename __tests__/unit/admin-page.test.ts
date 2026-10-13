@@ -261,7 +261,7 @@ describe('admin page (/admin)', () => {
     const render = (state: 'ok' | 'warn' | 'bad') => renderStatus('n', demoSnapshot(now, state), { now, csrf: 'c', actor: 'marcos', message: null, app: null });
     const attention = (html: string) => [...(/<ul class="attn"[^]*?<\/ul>/.exec(html)?.[0] ?? '').matchAll(/<a href="#([a-z]+)">/g)].map(m => m[1]);
     const bad = render('bad');
-    expect(attention(bad).slice(0, 3).sort()).toEqual(['apps', 'reservas', 'trafego']);
+    expect(attention(bad).slice(0, 4).sort()).toEqual(['apps', 'garantia', 'reservas', 'trafego']);
     expect(bad).toContain('Algo está fora do ar');
     expect(bad).toMatch(/<section id="reservas" data-spy><header class="sh"><h2>Reservas<\/h2><span class="pill bad">/);
     expect(bad).toContain('<span class="sr">Problema:</span>');

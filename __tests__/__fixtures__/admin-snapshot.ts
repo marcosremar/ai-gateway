@@ -4,6 +4,7 @@ import type { KeyView } from '../../src/config/access-keys';
 import { DEFAULT_GPU_POLICY } from '../../src/config/access-keys';
 import type { StoredTelemetryEvent } from '../../src/telemetry/contract';
 import { adminTraffic } from '../../src/admin-page/traffic';
+import type { ChainReport, LinkState } from '../../src/config/stage-chains';
 import { parisDay, type SpendLedgerView } from '../../src/deployments/spend-ledger';
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
@@ -66,6 +67,25 @@ function trafficRows(now: number, state: DemoState): StoredTelemetryEvent[] {
   return rows.sort((a, b) => a.rxTs - b.rxTs).map((r, i) => ({ ...r, seq: i }));
 }
 
+const CLOUD: Record<string, string> = {
+  'parle-stt': 'openrouter:openai/whisper-large-v3', 'parle-chat': 'openrouter:google/gemini-2.5-flash', 'parle-tts': 'openrouter:hexgrad/kokoro-82m',
+  'babel-tts': 'openrouter:openai/gpt-4o-mini-tts', 'babel-chat': 'openrouter:google/gemini-2.5-flash',
+};
+
+function chain(gpu: string | null, gpuState: LinkState, cloud: string): ChainReport {
+  const links = [...(gpu ? [{ target: `deployment:${gpu}`, state: gpuState }] : []), { target: cloud, state: 'ready' as LinkState }];
+  const serving = links.find(l => l.state === 'ready')?.target ?? null;
+  return { serving, onFallback: serving !== links[0]!.target, links };
+}
+
+export function demoChains(state: DemoState): Record<string, Record<string, ChainReport>> {
+  return {
+    stt: { 'parle-stt': chain('speech-stack', 'ready', CLOUD['parle-stt']!) },
+    chat: { 'parle-chat': chain('speech-stack', 'ready', CLOUD['parle-chat']!), 'babel-chat': chain(null, 'ready', CLOUD['babel-chat']!) },
+    tts: { 'parle-tts': chain('speech-stack', state === 'bad' ? 'circuit_open' : 'ready', CLOUD['parle-tts']!), 'babel-tts': chain('babel-live', 'ready', CLOUD['babel-tts']!) },
+  };
+}
+
 export const demoStates = ['warn', 'ok', 'bad'] as const;
 export type DemoState = typeof demoStates[number];
 
@@ -96,7 +116,7 @@ export function demoSpend(now: number, state: DemoState = 'warn'): SpendLedgerVi
 
 export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnapshot {
   const snapshot = {
-    ...warnSnapshot(now), traffic: adminTraffic(trafficRows(now, state), now), spend: demoSpend(now, state), dismissed: {},
+    ...warnSnapshot(now), traffic: adminTraffic(trafficRows(now, state), now), spend: demoSpend(now, state), dismissed: {}, chains: demoChains(state),
     about: { commit: '0a52749c1d2e3f4a5b6c7d8e9f00112233445566', uptimeSeconds: 4 * 3600 + 1260, region: 'europe-west4', telemetryAt: iso(now, 0) },
   };
   if (state === 'ok') return allGreen(snapshot, now);
@@ -108,8 +128,8 @@ function allGreen(s: AdminSnapshot, now: number): AdminSnapshot {
   return {
     ...s,
     balances: s.balances.map(b => (b.provider === 'vast' ? { ...b, level: 'ok', balanceUsd: 38.5, hoursLeft: 128, reasons: [] } : b)),
-    gpus: s.gpus!.map(d => (d.name === 'speech-stack' ? { ...d, spec: { warmSchedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', minReplicas: 1, timeZone: 'Europe/Paris' }] } } as DeploymentView : d)),
-    alerts: s.alerts.map(a => ({ ...a, at: iso(now, 300) })),
+    gpus: s.gpus!.map(d => (d.name === 'babel-live' ? { ...d, lastRequestAt: iso(now, 2) } : d.name === 'speech-stack' ? { ...d, spec: { warmSchedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', minReplicas: 1, timeZone: 'Europe/Paris' }] } } as DeploymentView : d)),
+    alerts: s.alerts.filter(a => a.event !== 'gpu.idle').map(a => ({ ...a, at: iso(now, 300) })),
     audit: s.audit.filter(e => e.ok),
   };
 }
@@ -149,13 +169,14 @@ function warnSnapshot(now: number): AdminSnapshot {
       deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }], { lastRequestAt: iso(now, 3) }, { idleMinutes: 45 }),
       deployment('parle-bridge-shadow', [], []),
       deployment('speech-stack-test', [], [], { warm: null }),
-      deployment('babel-live', [replica('scw-9z8y', 40, 0.79)], [], { app: 'babelcast', lastRequestAt: iso(now, 8) }),
+      deployment('babel-live', [replica('scw-9z8y', 40, 0.79)], [], { app: 'babelcast', lastRequestAt: iso(now, 50) }),
     ],
     gpuSpend: {
       spentEur: { 'key-0f3a9c11d2e4': 1.2, 'env-parle': 2.65 },
       running: [{ key: 'env-parle', deployment: 'speech-stack', until: iso(now, -25), capEur: null }],
     },
     alerts: [
+      { event: 'gpu.idle', at: iso(now, 22), summary: 'deployment: babel-live, minutes: 18, eurPerHour: 0.79, wastedEur: 0.24' },
       { event: 'gpu.outside_window', at: iso(now, 35), summary: 'deployment: speech-stack, replicas: 1, minutes: 35, eurPerHour: 0.79' },
       { event: 'balance.warn', at: iso(now, 300), summary: 'subject: Vast: saldo US$ 7,80 (~26 h)' },
       { event: 'app.budget_warn', at: iso(now, 320), summary: 'app: babelcast, requests: 1600, limit: 2000' },
@@ -173,13 +194,14 @@ function warnSnapshot(now: number): AdminSnapshot {
     apps: [
       {
         id: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech-stack'] }, aliases: ['parle-stt', 'parle-chat', 'parle-tts'],
+        stages: { stt: ['parle-stt'], chat: ['parle-chat'], tts: ['parle-tts'] },
         status: {
           app: 'parle', requiresGpu: true, mode: 'gpu', checkedAt: iso(now, 1),
           deployments: [{ name: 'speech-stack', stages: ['stt', 'llm', 'tts'], state: 'ready', replicas: { ready: 1, total: 1 }, lastProbe: { at: iso(now, 1), ok: true, ms: 420, error: null } }],
           fallback: { active: false, since: null, last: null },
         },
       },
-      { id: 'babelcast', profile: null, status: null },
+      { id: 'babelcast', profile: null, status: null, aliases: ['babel-chat', 'babel-tts'], stages: { chat: ['babel-chat'], tts: ['babel-tts'] } },
     ],
     appBudgets: [
       { app: 'parle', resetAt: iso(now, -600), requests: { used: 1840, limit: 20000, perMinute: 3.1, exhaustedAt: null }, tokens: { used: 412000, limit: 5000000, perMinute: 700, exhaustedAt: null } },
