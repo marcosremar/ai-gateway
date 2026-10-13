@@ -82,9 +82,14 @@ function chain(gpu: string | null, gpuState: LinkState, cloud: string): ChainRep
   return { serving, onFallback: serving !== links[0]!.target, links };
 }
 
+function withGroq(c: ChainReport): ChainReport {
+  return { ...c, links: [...c.links, { target: 'groq:whisper-large-v3', state: 'ready' }] };
+}
+
 export function demoChains(state: DemoState): Record<string, Record<string, ChainReport>> {
+  const stt = chain('speech-stack', 'ready', CLOUD['parle-stt']!);
   return {
-    stt: { 'parle-stt': chain('speech-stack', 'ready', CLOUD['parle-stt']!) },
+    stt: { 'parle-stt': state === 'warn' ? withGroq(stt) : stt },
     chat: { 'parle-chat': chain('speech-stack', 'ready', CLOUD['parle-chat']!), 'babel-chat': chain('babelcast-3090', state === 'ok' ? 'ready' : 'cold', CLOUD['babel-chat']!) },
     tts: { 'parle-tts': chain('speech-stack', state === 'bad' ? 'circuit_open' : 'ready', CLOUD['parle-tts']!), 'babel-tts': chain('babel-live', 'ready', CLOUD['babel-tts']!) },
   };
@@ -142,6 +147,10 @@ export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnaps
   const traffic = adminTraffic(trafficRows(now, state), now);
   const snapshot = {
     ...warnSnapshot(now), traffic: { ...traffic, daily: { ...traffic.daily, parle: demoDaily(now) } }, spend: demoSpend(now, state), dismissed: {}, chains: demoChains(state),
+    reorders: state === 'warn' ? [{
+      chainKey: 'stt|parle-stt', group: 'stt:multi', leader: 'groq:whisper-large-v3', declared: 'openrouter:openai/whisper-large-v3',
+      since: now - 12 * 60_000, reason: 'promovida: p95 0,4 s vs 1,3 s',
+    }] : [],
     digest: { enabled: true, lastSentAt: lastMonday8(now), lastKind: 'weekly' as const },
     about: { commit: '0a52749c1d2e3f4a5b6c7d8e9f00112233445566', uptimeSeconds: 4 * 3600 + 1260, region: 'europe-west4', telemetryAt: iso(now, 0) },
   };

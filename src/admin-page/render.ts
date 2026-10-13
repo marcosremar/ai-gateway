@@ -21,6 +21,7 @@ import type { ChainReport } from '../config/stage-chains';
 import { recommendations, recoSection, type Recommendation } from './recommendations';
 import { digestBlock, type DigestStatus } from './digest';
 import type { Overspend } from '../telemetry/overspend';
+import type { Promotion } from '../gateway/proxy/link-reorder';
 import {
   ACTIVITY_SHOWN, ALERT_FRESH_MS, LEVEL_TEXT, appTitle, inClass, byLevel, count, duration, esc, form, hhmm, hour, latest, meter, ms, money, outsideWindow, pct, pill,
   pinBadge, plural, providerLabel, providerOf, ratioLevel, stageName, table, upOf, when, worst, type Ctx, type Level, type Section,
@@ -60,6 +61,7 @@ export interface AdminSnapshot {
   chains?: Record<string, Record<string, ChainReport>> | null;
   digest?: DigestStatus | null;
   overspend?: Overspend[];
+  reorders?: Promotion[];
 }
 
 export interface AdminAbout { commit: string | null; uptimeSeconds: number; region: string | null; telemetryAt: string | null }
@@ -419,6 +421,7 @@ const EVENT_TEXT: Record<string, string> = {
   'stage.on_primary': 'etapa voltou ao principal', 'app.degraded': 'app servindo pela reserva',
   'replica.stuck_retry': 'boot travado: réplica liberada para nova tentativa', 'replica.stuck_retried': 'nova tentativa em outra oferta',
   'replica.stuck_exhausted': 'boot travado: novas tentativas esgotadas',
+  'route.reorder': 'reserva reordenada: link equivalente promovido', 'route.reorder_reverted': 'reserva de volta à ordem declarada',
 };
 const TELEMETRY_LEVEL: Record<string, Level> = { error: 'bad', warn: 'warn' };
 const TELEMETRY_TEXT: Record<string, string> = { error: 'erro', warn: 'aviso' };

@@ -39,6 +39,7 @@ import { llmTokensOf } from './src/accounts/usage';
 import { loopbackStages } from './src/s2s/loopback-stages';
 import { appForCall, appStageModels } from './src/s2s/app-stage-models';
 import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
+import { reorderSnapshot } from './src/gateway/proxy/link-reorder';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
@@ -304,6 +305,10 @@ function mountProviders() {
     // Adaptive hedge (D4, live QA 2026-10-07): spill or wait for the replica instead of running each request twice.
     deploymentHedge: controller ? (name, baseMs, capMs) => controller.hedgeDelayMs(name, baseMs, capMs) : undefined,
     ...(benchmarks ? { benchmarkRank: (stage: 'chat' | 'stt' | 'tts', dataset: string) => benchmarks.rankOrder(stage === 'chat' ? 'llm' : stage, dataset) } : {}),
+    reorderFor: (stage, alias) => {
+      const owner = deployments?.apps.list().find(({ id }) => Object.keys(deployments.apps.get(id)?.routes?.[stage] ?? {}).includes(alias));
+      return owner ? deployments!.apps.get(owner.id)?.profile?.reorderCloudLinks !== false : true;
+    },
   });
   const { providers: routed, summary } = built;
   log.log(summary, 'Providers configured');
@@ -620,7 +625,7 @@ const adminSnapshot = (): AdminSnapshot => ({
     region: process.env.RAILWAY_REPLICA_REGION?.trim() || null,
     telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
   },
-  digest: suggestionDigest.status(), overspend: overspendWatch.active(),
+  digest: suggestionDigest.status(), overspend: overspendWatch.active(), reorders: reorderSnapshot(),
 });
 
 const overspendWatch = createOverspendWatch({

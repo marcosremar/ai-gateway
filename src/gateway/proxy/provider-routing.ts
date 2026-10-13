@@ -13,6 +13,7 @@ import { CircuitBreakerRegistry, type CircuitBreaker } from '../providers/cloud/
 import { isTimeoutError, type CooldownTracker, type FallbackEntry } from '../providers/cloud/fallback';
 import { createLogger } from '../../logger';
 import { emitGatewayEvent } from '../../telemetry/emit';
+import { orderTargets, recordLinkOutcome } from './link-reorder';
 import type { ProxyResponse } from './types';
 
 const log = createLogger('provider-routing');
@@ -51,6 +52,8 @@ export interface RouteTarget<P> {
    * the request's `fallback_voice`.
    */
   voiceFor?: (request: { voice: string; fallbackVoice?: string }) => string;
+  group?: string;
+  chainKey?: string;
 }
 
 /** Codes (see `failureCode`) of targets left behind, keyed by the target object (two targets may share a provider). */
@@ -216,7 +219,7 @@ export function selectTargets<P extends Configurable>(
     }
     usable.push(target);
   }
-  return { usable, skipped, codes };
+  return { usable: orderTargets(stage, usable), skipped, codes };
 }
 
 /** Short, secret-free reason a provider was left behind (sent as `X-Gateway-Fallback`). */
@@ -621,6 +624,7 @@ export function runTargets<P, T>(
     };
 
     const run = (i: number, t: RouteTarget<P>, retry: number) => {
+      const attemptStart = Date.now();
       running++;
       const controller = new AbortController();
       controllers.add(controller);
@@ -655,6 +659,7 @@ export function runTargets<P, T>(
           // Targets still running lost a hedge race: they were slower than this one.
           for (const other of inFlight.values()) if (!codes.has(other)) codes.set(other, 'slow');
           breaker.recordSuccess();
+          recordLinkOutcome(opts.stage, t, Date.now() - attemptStart, true);
           cooldown?.recordSuccess(entryOf(t));
           emitRoute('route.served', opts.stage, t, { attempt: i, failedBefore: failures.size, raced: inFlight.size > 0 }, 'info', Date.now() - startedAt);
           // The other in-flight call lost the race: abort it (releases its replica lease / upstream request).
@@ -685,6 +690,7 @@ export function runTargets<P, T>(
             breaker.releaseProbe();
           } else if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
           else {
+            recordLinkOutcome(opts.stage, t, Date.now() - attemptStart, false);
             const wasOpen = breaker.isOpen();
             breaker.recordFailure(err);
             if (!wasOpen && breaker.isOpen()) emitRoute('breaker.open', opts.stage, t, { code }, 'warn');

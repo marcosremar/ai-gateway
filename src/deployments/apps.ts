@@ -63,9 +63,9 @@ export interface AppImage {
  * GPU deployments are part of what it delivers (parle: the detected language and the cloned voices only come from them),
  * so a turn the cloud fallback answers still answers, but is marked degraded and the app's status says so.
  */
-export interface AppProfile { requiresGpu: boolean; gpuDeployments: string[]; name?: string | null; description?: string | null }
+export interface AppProfile { requiresGpu: boolean; gpuDeployments: string[]; name?: string | null; description?: string | null; reorderCloudLinks?: boolean }
 
-const PROFILE_FIELDS = new Set(['requiresGpu', 'gpuDeployments', 'name', 'description']);
+const PROFILE_FIELDS = new Set(['requiresGpu', 'gpuDeployments', 'name', 'description', 'reorderCloudLinks']);
 const MAX_NAME = 60;
 const MAX_DESCRIPTION = 240;
 
@@ -80,8 +80,11 @@ const MAX_GPU_DEPLOYMENTS = 8;
 export function parseAppProfile(body: unknown): AppProfile {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'profile must be an object { requiresGpu, gpuDeployments, name?, description? }');
   for (const key of Object.keys(body)) if (!PROFILE_FIELDS.has(key)) throw new AppError(400, `unknown field '${key}'`);
-  const { requiresGpu, gpuDeployments = [], name, description } = body as { requiresGpu?: unknown; gpuDeployments?: unknown; name?: unknown; description?: unknown };
+  const { requiresGpu, gpuDeployments = [], name, description, reorderCloudLinks } = body as {
+    requiresGpu?: unknown; gpuDeployments?: unknown; name?: unknown; description?: unknown; reorderCloudLinks?: unknown;
+  };
   if (typeof requiresGpu !== 'boolean') throw new AppError(400, 'requiresGpu must be a boolean');
+  if (reorderCloudLinks !== undefined && typeof reorderCloudLinks !== 'boolean') throw new AppError(400, 'reorderCloudLinks must be a boolean');
   if (!Array.isArray(gpuDeployments) || gpuDeployments.length > MAX_GPU_DEPLOYMENTS
     || gpuDeployments.some(d => typeof d !== 'string' || !NAME_RE.test(d))) {
     throw new AppError(400, `gpuDeployments must be a list of up to ${MAX_GPU_DEPLOYMENTS} deployment names`);
@@ -91,6 +94,7 @@ export function parseAppProfile(body: unknown): AppProfile {
   return {
     requiresGpu, gpuDeployments: [...new Set(gpuDeployments as string[])],
     ...Object.fromEntries(Object.entries(labels).filter(([, v]) => v !== undefined)),
+    ...(reorderCloudLinks === false ? { reorderCloudLinks: false } : {}),
   };
 }
 
