@@ -167,7 +167,7 @@ export class VastMachineBackend implements MachineBackend {
     });
     const text = await res.text();
     if (res.status === 404 && method === 'DELETE') return {} as T;
-    if (!res.ok) throw new Error(`vast ${method} ${path}: HTTP ${res.status} ${text.slice(0, 160)}`);
+    if (!res.ok) throw new Error(`vast ${method} ${path}: HTTP ${res.status} ${text.slice(0, 500)}`);
     return (text ? JSON.parse(text) : {}) as T;
   }
 
@@ -206,7 +206,7 @@ export class VastMachineBackend implements MachineBackend {
       if (/insufficient_credit/i.test(refusal)) {
         throw new Error('insufficient_credit: Vast refused the rent for lack of credit; top up the Vast account (recarregue a Vast)');
       }
-      misses.push(`offer ${offer.id}: ${refusal.slice(0, 80)}`);
+      misses.push(`offer ${offer.id}: ${refusal.slice(0, 400)}`);
     }
     throw new Error(`out_of_stock: every vast offer tried was taken (${misses.join('; ')})`);
   }
@@ -223,7 +223,7 @@ export class VastMachineBackend implements MachineBackend {
       if (attempt) await this.wait(attempt * 3_000);
       const res = await this.call<{ success?: boolean; msg?: string }>('POST', `/instances/${encodeURIComponent(providerId)}/ssh/`, { ssh_key: sshPublicKey })
         .catch((err: unknown) => ({ success: false, msg: err instanceof Error ? err.message : String(err) }));
-      if (res.success !== false) return;
+      if (res.success !== false || /already associated/i.test(res.msg ?? '')) return;
       lastError = res.msg ?? 'refused';
     }
     await this.release(providerId).catch(() => {});

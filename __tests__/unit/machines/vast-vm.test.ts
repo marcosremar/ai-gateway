@@ -32,4 +32,18 @@ describe('vast KVM machines', () => {
     expect(calls.findIndex(c => c.startsWith('POST') && c.endsWith('/ssh/'))).toBeLessThan(calls.findIndex(c => c.startsWith('PUT')));
     expect(calls.some(c => c.includes('/instances/'))).toBe(false);
   });
+
+  it('a container whose ssh key Vast already attached from the account is kept', async () => {
+    const calls: string[] = [];
+    const fetchImpl = async (url: string, init: { method: string }) => {
+      calls.push(`${init.method} ${new URL(url).pathname}`);
+      const json = init.method === 'PUT' ? { success: true, new_contract: 7 } : { success: false, msg: 'SSH key already associated with instance.' };
+      return new Response(JSON.stringify(json));
+    };
+    const market = { currentKey: 'k', pickOffers: async () => [{ id: 1, dph_total: 0.2, reliability2: 1, inet_down: 1000 }] };
+    const backend = new VastMachineBackend(market as never, fetchImpl as never);
+    const made = await backend.create({ machineId: 'm-1', namespace: 'ns', request: parseMachineInput({ ...body, vm: false, image: 'ubuntu:24.04' }, LIMITS).request });
+    expect(made.providerId).toBe('7');
+    expect(calls.some(c => c.startsWith('DELETE'))).toBe(false);
+  });
 });
