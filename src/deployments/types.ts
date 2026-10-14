@@ -156,6 +156,7 @@ export interface DeploymentSpec {
   near?: string;
   minCpuCores?: number;
   minRamGb?: number;
+  vm?: boolean;
   /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
   allowFar?: boolean;
   euOnly?: boolean;

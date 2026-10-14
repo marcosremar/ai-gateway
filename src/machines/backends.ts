@@ -150,11 +150,11 @@ export class VastMachineBackend implements MachineBackend {
   private spec(request: MachineRequest): DeploymentSpec {
     return {
       name: 'machine', machineType: request.machineType, volumeGb: request.diskGb, maxEurPerHour: request.maxUsdPerHour / EUR_TO_USD,
-      near: request.near, allowFar: true, minCpuCores: request.minCpuCores, minRamGb: request.minRamGb,
+      near: request.near, allowFar: true, minCpuCores: request.minCpuCores, minRamGb: request.minRamGb, vm: request.vm,
     } as DeploymentSpec;
   }
 
-  private async offers(request: MachineRequest) {
+  async offers(request: MachineRequest) {
     const needed = portKeys(request).length;
     return (await this.market.pickOffers(this.spec(request)))
       .filter(o => o.dph_total <= request.maxUsdPerHour && (o.direct_port_count === undefined || o.direct_port_count >= needed));
@@ -184,6 +184,7 @@ export class VastMachineBackend implements MachineBackend {
       const [n, protocol] = k.split('/');
       return [`-p ${n}:${n}${protocol === 'udp' ? '/udp' : ''}`, '1'];
     }));
+    if (request.vm && request.sshPublicKey) await this.addAccountSshKey(request.sshPublicKey);
     const misses: string[] = [];
     for (const offer of offers) {
       type Rent = { success?: boolean; new_contract?: number; error?: string; msg?: string };
@@ -195,7 +196,7 @@ export class VastMachineBackend implements MachineBackend {
         env: { ...request.env, AIGW_INIT_B64: Buffer.from(machineInit(request)).toString('base64'), ...mapped },
       }).catch((err: unknown) => ({ success: false, error: err instanceof Error ? err.message : String(err) }));
       if (res.success && res.new_contract != null) {
-        if (request.sshPublicKey) await this.attachSshKey(String(res.new_contract), request.sshPublicKey);
+        if (request.sshPublicKey && !request.vm) await this.attachSshKey(String(res.new_contract), request.sshPublicKey);
         return {
           providerId: String(res.new_contract), provider: 'vast', machineId: input.machineId, state: 'starting', ip: null, ports: {},
           usdPerHour: offer.dph_total, createdAt: Date.now(),
@@ -208,6 +209,12 @@ export class VastMachineBackend implements MachineBackend {
       misses.push(`offer ${offer.id}: ${refusal.slice(0, 80)}`);
     }
     throw new Error(`out_of_stock: every vast offer tried was taken (${misses.join('; ')})`);
+  }
+
+  private async addAccountSshKey(sshPublicKey: string): Promise<void> {
+    const { keys = [] } = await this.call<{ keys?: Array<{ public_key?: string }> }>('GET', '/ssh/').catch(() => ({ keys: [] }));
+    if (keys.some(k => k.public_key?.trim() === sshPublicKey.trim())) return;
+    await this.call('POST', '/ssh/', { ssh_key: sshPublicKey });
   }
 
   private async attachSshKey(providerId: string, sshPublicKey: string): Promise<void> {
