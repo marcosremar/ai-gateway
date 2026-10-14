@@ -302,23 +302,23 @@ describe('declarations owned by another registrant (parle-livekit)', () => {
   });
 });
 
-describe('declared babelcast-speech / babelcast-tts (report 2026-10-12, T5): only the owning app', () => {
+describe('declared babelcast-speech / babelcast-tts (report 2026-10-12, T5): the owning app, paused (one GPU per app, 14/10/2026)', () => {
   const BABELCAST = {
     image: 'rg.fr-par.scw.cloud/aigw/babelcast-speech:1', port: 8000, healthPath: '/health', machineType: 'L4-1-24G', zone: 'fr-par-2',
     gpu: true, minReplicas: 0, maxReplicas: 1, scaling: { mode: 'fast' },
   };
   const babelcast = DECLARED_DEPLOYMENTS.filter(d => d.app === 'babelcast' && !d.profile);
 
-  it('registered with no app: the app becomes babelcast, the spec is untouched, no machine; then in sync', async () => {
+  it('registered with no app: the app becomes babelcast, paused, the rest of the spec untouched, no machine; then in sync', async () => {
     const { c, cloud } = await controller();
-    expect(babelcast.map(d => [d.name, d.spec])).toEqual([['babelcast-speech', {}], ['babelcast-tts', {}]]);
+    expect(babelcast.map(d => [d.name, d.spec])).toEqual([['babelcast-speech', { paused: true }], ['babelcast-tts', { paused: true }]]);
     for (const d of babelcast) await c.put(d.name, BABELCAST);
     const before = babelcast.map(d => c.specOf(d.name));
     const log = vi.fn();
     const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: babelcast, log });
     expect((await r.reconcile()).map(s => s.state)).toEqual(['applied', 'applied']);
     expect(babelcast.map(d => c.get(d.name)!.app)).toEqual(['babelcast', 'babelcast']);
-    expect(babelcast.map(d => c.specOf(d.name))).toEqual(before);
+    expect(babelcast.map(d => c.specOf(d.name))).toEqual(before.map(spec => ({ ...spec, paused: true })));
     expect(log).toHaveBeenCalledWith('declared deployment registered', { name: 'babelcast-speech', image: null, created: false, app: 'babelcast' });
     expect((await r.reconcile()).map(s => s.state)).toEqual(['in_sync', 'in_sync']);
     expect(cloud.created).toHaveLength(0);
