@@ -204,7 +204,7 @@ export function renderGpuDetail(nonce: string, s: AdminSnapshot, name: string, o
   const d = s.gpus?.find(g => g.name === name);
   if (!d) return null;
   const f = frame(s, opts, 'gpus', `/admin/gpus/${encodeURIComponent(d.name)}`);
-  return page(nonce, `ai-gateway · ${d.name}`, shell(f, gpuDetailBody(d, s.gpuLogs?.[name] ?? [], opts.now, gpuActions(d, f.ctx), container, openIncidents(f.ctx, d))), true);
+  return page(nonce, `ai-gateway · ${d.name}`, shell(f, gpuDetailBody(d, s.gpuLogs?.[name] ?? [], opts.now, gpuActions(d, f.ctx, true), container, openIncidents(f.ctx, d))), true);
 }
 
 export function renderLogin(nonce: string, error: string | null, next = '/admin'): string {

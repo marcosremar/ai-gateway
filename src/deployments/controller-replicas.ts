@@ -9,6 +9,7 @@ import { randomBytes } from 'crypto';
 import { bootEventAuth, bootReportFor, parseBootEvent, sameAuth } from './boot-events';
 import { ControllerState, replicaTokenFor, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
+import { withGpuType } from './gpu-type';
 import { placeReplica, PlacementError } from './placement-walk';
 import { isOutOfStock, quotaMachineType } from './placements';
 import { DEFAULT_NEAR } from './placements';
@@ -179,7 +180,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
   }
 
   protected createReplica(rt: Runtime): void {
-    const spec = rt.record.spec;
+    const spec = withGpuType(rt.record.spec, rt.record.gpuType?.machineType);
     if (this.now() < rt.backoffUntil) return;
     const refusal = this.capRefusal(0, spec.name);
     if (refusal) {

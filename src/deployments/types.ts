@@ -73,6 +73,7 @@ export interface DeploymentSpec {
    * L40S need different STT/TTS concurrency) while an explicit `env` value still wins. Never returned by the API.
    */
   envByMachineType?: Record<string, Record<string, string>>;
+  maxEurPerHourByMachineType?: Record<string, number>;
   /** Credentials for a private registry. Never returned by the API. */
   registryAuth?: RegistryAuth;
   /** Path the replica answers 2xx on once the model is loaded. */
@@ -225,6 +226,7 @@ export interface DeploymentRecord {
   network?: DeploymentNetwork;
   /** Client warm window (`POST /v1/deployments/:name/warm`): keep `replicas` up until `until` (ms). */
   warm?: { replicas: number; until: number };
+  gpuType?: { machineType: string; by: string; at: number };
   hold?: ScalingHold;
   spend?: { month: string; eur: number; at: number };
   measured?: Record<string, MeasuredTimes>;
@@ -487,6 +489,14 @@ export interface ReplicaView {
   expiresInMinutes: number | null;
 }
 
+export interface GpuTypeView {
+  current: string;
+  default: string;
+  choices: Array<{ machineType: string; maxEurPerHour: number }>;
+  setBy: string | null;
+  setAt: string | null;
+}
+
 export interface DeploymentView {
   name: string;
   spec: Omit<DeploymentSpec, 'env' | 'envByMachineType' | 'registryAuth' | 'bootScript' | 'files' | 'fileUrls'> & {
@@ -517,6 +527,7 @@ export interface DeploymentView {
   sessions: number;
   hold: { replicas: number; until: string } | null;
   pinned: { idleMinutes: number | null; parked: boolean } | null;
+  gpuType: GpuTypeView | null;
   boot: {
     active: Array<Omit<BootState, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
     past: Array<Omit<BootRecord, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;

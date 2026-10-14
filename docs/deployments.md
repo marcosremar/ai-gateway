@@ -100,8 +100,8 @@ Owner, 14/10/2026: **one GPU per app, an RTX 3090** (§ One GPU per app below): 
 fallback (`deployment.out_of_stock` and the class-GPU-not-ready alert fire). The image is the public copy
 `ghcr.io/marcosremar/speech-stack:<tag>` (no registry credential, no `SPEECH_IMAGE` override: a private registry
 would be refused on Vast), `minCuda: 13` (the image is CUDA 13), `idleAction: "delete"` (Vast cannot park).
-`envByMachineType` sizes each card and keeps the cards that are off the ladder, so a faster card is only a change of
-`candidates` (§ Moving parle to a faster GPU): the 24 GB RTX 3090 and RTX 4090 run the L4 settings (`STT_BATCH 4`,
+`envByMachineType` sizes each card and keeps the cards that are off the ladder, so a faster card is a choice in the panel
+(§ Moving parle to a faster GPU): the 24 GB RTX 3090 and RTX 4090 run the L4 settings (`STT_BATCH 4`,
 `LLM_PARALLEL 8` × 2048, `TTS_STAGE0_MB 7400`, `RT_MAX_SESSIONS 2`), the L40S and the RTX 5090 `STT_BATCH 8`,
 `LLM_PARALLEL 16`, `RT_MAX_SESSIONS 4`. The declaration sends `env: {}`: the explicit `env` set by hand on 08/10 (L40S
 sizes) won over `envByMachineType` on every card and would not fit a 24 GB one. Class window Mon–Thu 16:40–20:30 Paris
@@ -161,13 +161,35 @@ catalog (`files`) of `parle-speech`: a catalog re-registered there reaches the c
 
 ### Moving parle to a faster GPU
 
-Everything else is the same on every card: the image, the voices, the routes, and the sizes in `envByMachineType`
-(RTX 3090, RTX 4090, L40S, RTX 5090). To move production, edit **`spec.candidates`** of
-`src/deployments/declared/parle-speech.json` (and of `parle-speech-test.json`, so tests measure the class card), e.g.
+**Para mais velocidade: painel → GPUs → parle-speech → tipo de GPU → H100.** Owner, 14/10/2026: «se eu quiser velocidade,
+eu só troco essa máquina RTX 3090 por uma H100 … não precisa mudar nada no jogo».
+
+- **The menu** (`/admin/gpus` and `/admin/gpus/<name>`, admin only): every type that has both a size profile in
+  `envByMachineType` and a price cap in `maxEurPerHourByMachineType`, with its €/h cap and, for a deployment with a
+  class window, the €/class (cap × window hours × warm replicas). Today on `parle-speech`, `parle-speech-test` and
+  `babelcast-3090`: RTX 3090 (the declared default; parle ≤ €0.30/h, babelcast ≤ €0.19/h), RTX 4090, RTX 5090, L40S
+  (≤ €0.85/h), H100 SXM and H100 PCIE (≤ €2.50/h). Everything else is the same on every card: the image, the voices,
+  the routes. Parle stays on EU hosts and on one GPU per app, whatever the type.
+- **Kept across the declared reconcile:** the choice is stored on the deployment (`record.gpuType`, the controller's
+  `setGpuType`), not in the declared spec, so the reconciler never puts it back; «voltar ao padrão» clears it.
+- **When it applies:** at the next boot; the GPU that is up keeps serving (no restart mid-class). «trocar agora»
+  releases it at once: ~20 min cold on the new card, the cloud fallback answers meanwhile.
+- Audited as `admin-page.gpu-type` (who, which type, «agora»); `GET /v1/deployments/:name` shows `gpuType`
+  (`current`, `default`, `choices`, `setBy`, `setAt`); `GET /v1/deployments/:name/offers?machineType=H100%20SXM` (admin)
+  lists the EU offers a create would try for that type.
+- **H100 sizes** (80 GB): `STT_BATCH 16`, `LLM_PARALLEL 32` × `LLM_SLOT_CTX 4096`, `TTS_STAGE0_MB 20000`,
+  `RT_MAX_SESSIONS 8` — the L40S/RTX 5090 values (48/32 GB) doubled. Estimate: Whisper large-v3 fp16 with 16 clips
+  ~10 GB, Qwen3.5-9B Q4 + 32 × 4096 slots ~25 GB, the TTS stage 20 GB, CUDA contexts ~1.5 GB: ~57 of 80 GB. The 3090
+  profile (24 GB) measured 21.6 GB used with the 4090 sizes (14/10/2026). Not measured on an H100.
+- **The image on an H100 (sm_90):** llama.cpp `server-cuda-b11382` builds `90-virtual` (PTX, compiled by the driver at
+  the first start, then cached), `86-real` and `89-real`; vLLM and CTranslate2 ship sm_90 kernels; CUDA 13 hosts
+  (driver ≥ 580) run Hopper.
+
+To change the **default** for good instead, edit `spec.candidates` of `src/deployments/declared/parle-speech.json`
+(and `parle-speech-test.json`, so tests measure the class card), e.g.
 `[{ "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85 }]`, with `machineType` and `maxEurPerHour`
 repeating the first rung; update the one-RTX-3090 test in `declared.test.ts` with the owner's decision; land the PR;
-then `bun run deploy:prod`. The declaration reconciler puts it on the live deployment within 5 min; the next replica is
-the new card. A card with no `envByMachineType` entry runs the image defaults: add its sizes first.
+then `bun run deploy:prod`. A card with no `envByMachineType` entry runs the image defaults: add its sizes first.
 
 `parle-qwen-tts` (`declared/parle-qwen-tts.json`) is **paused** since 14/10/2026: its replicas were Scaleway L4s; the
 declaration puts `paused` back if the parle backend re-registers it.

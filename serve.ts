@@ -714,6 +714,10 @@ createAdminPage({
     if (spec.provider !== 'vast') throw new Error('só uma GPU da Vast pode ser fixada pelo painel');
     await controller!.put(name, { minReplicas: on ? 1 : 0 });
   },
+  gpuType: async (name, machineType, now, actor) => {
+    if (!controller) throw new Error('deployments desligados');
+    await controller.setGpuType(name, machineType, now, actor);
+  },
   probe: () => fallbackProbe.check(),
   secrets: () => secretValues(process.env),
   containerLog: async (name) => controller?.containerLog(name) ?? null,
