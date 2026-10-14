@@ -182,10 +182,9 @@ describe('student audio never reaches babelcast-3090', () => {
     expect(chain.slice(2)).toContain('openrouter');
   });
 
-  it('no parle declaration places a replica on it, and it is no test copy of a parle deployment', () => {
+  it('no parle declaration places a replica on it (parle rents its own RTX 3090 since 14/10/2026), and it is no test copy of a parle deployment', () => {
     for (const d of DECLARED_DEPLOYMENTS.filter(x => x.app === 'parle' || x.name.startsWith('parle-'))) {
       expect(JSON.stringify(d)).not.toContain(NAME);
-      expect(JSON.stringify(d)).not.toContain('RTX 3090');
     }
     expect(decl.app).toBe('babelcast');
     expect(String(decl.spec.testFor).startsWith('parle-')).toBe(false);
