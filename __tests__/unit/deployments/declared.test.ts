@@ -54,7 +54,7 @@ const PRODUCTION = {
 };
 
 const OUTSIDE_CLASS = Date.parse('2026-10-11T12:00:00Z');
-const CLASS_WINDOW = { days: [1, 2, 3, 4], start: '17:00', end: '20:30', timeZone: 'Europe/Paris' };
+const CLASS_WINDOW = { days: [1, 2, 3, 4], start: '16:40', end: '20:30', timeZone: 'Europe/Paris' };
 const DECLARED_EXTRA = {
   entrypoint: 'bash', args: ['/opt/s2s/start.sh'], coldStartWaitSeconds: 240, minCuda: 13, maxRttExcessMs: 20, maxReplicas: 3, env: {},
   warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 3 }],
@@ -235,7 +235,7 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     scaling: { mode: 'balanced' }, bootScript: 'echo tts',
   };
 
-  it('every parle deployment has a monthly ceiling; parle-speech is 3 warm Mon-Thu 17:00-20:30 Paris, parle-qwen-tts paused', () => {
+  it('every parle deployment has a monthly ceiling; parle-speech is 3 warm Mon-Thu 16:40-20:30 Paris, parle-qwen-tts paused', () => {
     const budget = (name: string) => (DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.scaling as { budget: { eurPerMonth: number } }).budget.eurPerMonth;
     expect(['parle-speech', 'parle-qwen-tts', 'parle-speech-s2s', 'parle-livekit'].map(budget)).toEqual([450, 150, 50, 60]);
     expect((speech.spec.warmSchedule as unknown[])[0]).toMatchObject({ ...CLASS_WINDOW, minReplicas: 3 });

@@ -287,7 +287,7 @@ bun run deploy:prod             # from a clean checkout of origin/main
 ```
 
 Production is a single Railway instance, so a publish restarts it. The script refuses during a parle class (the declared
-`warmSchedule`, Mon–Thu 17:30–20:30 Europe/Paris; `--during-class` overrides it for an emergency), a dirty tree or a
+`warmSchedule`, Mon–Thu 16:40–20:30 Europe/Paris (aquecimento da aula); `--during-class` overrides it for an emergency), a dirty tree or a
 HEAD that is not `origin/main`; then it stamps the build, runs `railway up` and waits until `/health` reports the new
 commit (plus `fallbackProbe` with `AI_GATEWAY_ADMIN_KEY` set). Never call `railway up` by hand.
 
