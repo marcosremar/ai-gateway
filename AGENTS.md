@@ -358,7 +358,7 @@ bun run deploy:prod
 ```
 
 From a clean checkout of `origin/main`, it refuses inside the parle class window (the declared `warmSchedule` of
-`src/deployments/declared/*.json`, Mon–Thu 17:30–20:30 Europe/Paris), a dirty tree or a HEAD that is not `origin/main`;
+`src/deployments/declared/*.json`, Mon–Thu 16:40–20:30 Europe/Paris (aquecimento da aula)), a dirty tree or a HEAD that is not `origin/main`;
 then runs `stamp:build`, `railway up` (service `ai-gateway`, environment `production`) without `RAILWAY_TOKEN`, and waits
 until the public `/health` reports the new commit (with `AI_GATEWAY_ADMIN_KEY` set it also prints `fallbackProbe`).
 `--during-class` overrides the window for an emergency only. Never call `railway up` by hand.

@@ -1,7 +1,7 @@
 {
   "name": "parle-speech",
   "app": "parle",
-  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS in one container (docker/speech-stack, public copy on ghcr) with the realtime edge; since 14/10/2026 also the cast's cloned voices (the parle-tts route names it). Vast only, hosts in an EU country only (owner, 14/10/2026: «usa máquinas do vast.ai», Scaleway no longer used; the students' audio never leaves the EU): an RTX 5090, else an L40S or an RTX 4090, each at most €0.85/h; three warm for the Mon-Thu class (17:30-20:30 Paris)",
+  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS in one container (docker/speech-stack, public copy on ghcr) with the realtime edge; since 14/10/2026 also the cast's cloned voices (the parle-tts route names it). Vast only, hosts in an EU country only (owner, 14/10/2026: «usa máquinas do vast.ai», Scaleway no longer used; the students' audio never leaves the EU): an RTX 5090, else an L40S or an RTX 4090, each at most €0.85/h; three warm for the Mon-Thu class (16:40-20:30 Paris; class at 17:40)",
   "profile": "speech-stack",
   "image": {
     "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
@@ -27,7 +27,7 @@
     "env": {},
     "scaling": { "mode": "fast", "budget": { "eurPerMonth": 450 } },
     "warmSchedule": [
-      { "days": [1, 2, 3, 4], "start": "17:30", "end": "20:30", "timeZone": "Europe/Paris", "minReplicas": 3 }
+      { "days": [1, 2, 3, 4], "start": "16:40", "end": "20:30", "timeZone": "Europe/Paris", "minReplicas": 3 }
     ],
     "reserveQuota": null,
     "envByMachineType": {

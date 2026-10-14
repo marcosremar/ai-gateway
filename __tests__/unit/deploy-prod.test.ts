@@ -3,24 +3,24 @@ import { classWindowEndsAt, deployBlockers } from '../../scripts/deploy-prod';
 
 const ready = { duringClass: false, dirty: '', head: 'a1b2c3', originMain: 'a1b2c3' };
 
-describe('deploy:prod class window (Mon–Thu 17:30–20:30 Europe/Paris)', () => {
+describe('deploy:prod class window (Mon–Thu 16:40–20:30 Europe/Paris)', () => {
   it.each([
-    ['Mon 17:29 CEST', '2026-10-12T15:29:00Z', false],
-    ['Mon 17:30 CEST', '2026-10-12T15:30:00Z', true],
+    ['Mon 16:39 CEST', '2026-10-12T14:39:00Z', false],
+    ['Mon 16:40 CEST', '2026-10-12T14:40:00Z', true],
     ['Mon 20:29 CEST', '2026-10-12T18:29:00Z', true],
     ['Mon 20:30 CEST', '2026-10-12T18:30:00Z', false],
     ['Thu 19:00 CEST', '2026-10-15T17:00:00Z', true],
     ['Fri 18:00 CEST', '2026-10-16T16:00:00Z', false],
     ['Sun 18:00 CEST', '2026-10-18T16:00:00Z', false],
-    ['Mon 17:29 CET, week before the spring change', '2026-03-23T16:29:00Z', false],
-    ['Mon 17:30 CET, week before the spring change', '2026-03-23T16:30:00Z', true],
+    ['Mon 16:39 CET, week before the spring change', '2026-03-23T15:39:00Z', false],
+    ['Mon 16:40 CET, week before the spring change', '2026-03-23T15:40:00Z', true],
     ['Sun 18:00 on the spring change day', '2026-03-29T16:00:00Z', false],
-    ['Mon 17:29 CEST, day after the spring change', '2026-03-30T15:29:00Z', false],
-    ['Mon 17:30 CEST, day after the spring change', '2026-03-30T15:30:00Z', true],
+    ['Mon 16:39 CEST, day after the spring change', '2026-03-30T14:39:00Z', false],
+    ['Mon 16:40 CEST, day after the spring change', '2026-03-30T14:40:00Z', true],
     ['Mon 20:30 CEST, day after the spring change', '2026-03-30T18:30:00Z', false],
     ['Sun 18:00 on the autumn change day', '2026-10-25T17:00:00Z', false],
-    ['Mon 16:30 CET, day after the autumn change (15:30 UTC was 17:30 the week before)', '2026-10-26T15:30:00Z', false],
-    ['Mon 17:30 CET, day after the autumn change', '2026-10-26T16:30:00Z', true],
+    ['Mon 15:40 CET, day after the autumn change (14:40 UTC was 16:40 the week before)', '2026-10-26T14:40:00Z', false],
+    ['Mon 16:40 CET, day after the autumn change', '2026-10-26T15:40:00Z', true],
     ['Mon 20:29 CET, day after the autumn change', '2026-10-26T19:29:00Z', true],
     ['Mon 20:30 CET, day after the autumn change', '2026-10-26T19:30:00Z', false],
   ])('%s → blocked %s', (_label, iso, blocked) => {
