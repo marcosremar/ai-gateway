@@ -256,6 +256,14 @@ describe('admin page (/admin)', () => {
     expect(gw.audit.filter(e => !e.ok).map(e => [e.action, e.names])).toEqual([['admin-page.probe', []], ['admin-page.park', ['speech-stack']], ['admin-page.park', ['babel-live']]]);
   });
 
+  it('the GPU page states the owner limit of one GPU per app and who holds each', async () => {
+    const gw = await gateway();
+    const { cookie } = await gw.signedIn();
+    const html = await (await gw.call('/admin/gpus', { cookie })).text();
+    expect(html).toContain('limite: 1 GPU (RTX 3090) por app — dono, 14/10/2026 · ');
+    expect(html).toContain('babelcast: babelcast-3090');
+  });
+
   it('blocks a POST without the CSRF token or from another site', async () => {
     const gw = await gateway();
     const { cookie, csrf } = await gw.signedIn();

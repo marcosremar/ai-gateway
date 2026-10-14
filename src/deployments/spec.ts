@@ -27,6 +27,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** GPU commercial types on Scaleway start with the GPU family (L4, L40S, H100, GPU-3070, RENDER…). */
 export const SCALEWAY_GPU_OFF = 'Scaleway desativada (dono, 14/10/2026)';
+export const MAX_GPU_PER_APP = 1;
+export const gpuCapRule = (machineTypes: string[] = []) =>
+  `limite: ${MAX_GPU_PER_APP} GPU${machineTypes.length ? ` (${machineTypes.join(', ')})` : ''} por app — dono, 14/10/2026`;
+export const GPU_CAP_RULE = gpuCapRule();
 
 export function isGpuMachineType(type: string): boolean {
   return /^(L4|L40S|H100|H200|B300|GPU|RENDER)/i.test(type);
