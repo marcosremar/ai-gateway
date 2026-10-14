@@ -28,6 +28,9 @@
       { "days": [1, 2, 3, 4], "start": "16:40", "end": "20:30", "timeZone": "Europe/Paris", "minReplicas": 1 }
     ],
     "reserveQuota": null,
+    "maxEurPerHourByMachineType": {
+      "RTX 3090": 0.3, "RTX 4090": 0.85, "RTX 5090": 0.85, "L40S": 0.85, "H100 SXM": 2.5, "H100 PCIE": 2.5
+    },
     "envByMachineType": {
       "RTX 3090": {
         "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400", "RT_MAX_SESSIONS": "2",
@@ -43,6 +46,14 @@
       },
       "RTX 5090": {
         "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "9600", "RT_MAX_SESSIONS": "4",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "H100 SXM": {
+        "STT_BATCH": "16", "LLM_PARALLEL": "32", "LLM_SLOT_CTX": "4096", "TTS_STAGE0_MB": "20000", "RT_MAX_SESSIONS": "8",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "H100 PCIE": {
+        "STT_BATCH": "16", "LLM_PARALLEL": "32", "LLM_SLOT_CTX": "4096", "TTS_STAGE0_MB": "20000", "RT_MAX_SESSIONS": "8",
         "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       }
     },

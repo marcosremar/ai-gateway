@@ -25,11 +25,18 @@ const replica = (id: string, ageMinutes: number, pricePerHour: number, extra: Pa
 const deployment = (name: string, replicas: ReplicaView[], schedule: Array<{ days: number[]; start: string; end: string }>, extra: Partial<DeploymentView> = {}, spec: Record<string, unknown> = {}) => ({
   name, status: replicas.length ? 'ready' : 'scaled-to-zero', desiredReplicas: replicas.length, replicas, inflight: 0, waiting: 0,
   lastRequestAt: null, lastError: null, invokeUrl: '', app: 'parle', appImage: null, publicIp: null, lastPlacement: null, warm: null,
-  realtime: null, sessions: 0, hold: null, pinned: null, warnings: [],
+  realtime: null, sessions: 0, hold: null, pinned: null, gpuType: null, warnings: [],
   autoscale: { desired: replicas.length, pressureWant: 0, reason: 'base', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
   spec: { minReplicas: 0, idleMinutes: 15, maxEurPerHour: 0.9, warmSchedule: schedule.map(s => ({ ...s, minReplicas: 1, timeZone: 'Europe/Paris' })), ...spec },
   ...extra,
 }) as unknown as DeploymentView;
+
+const GPU_CHOICES = [
+  { machineType: 'RTX 3090', maxEurPerHour: 0.3 }, { machineType: 'RTX 4090', maxEurPerHour: 0.85 }, { machineType: 'RTX 5090', maxEurPerHour: 0.85 },
+  { machineType: 'L40S', maxEurPerHour: 0.85 }, { machineType: 'H100 SXM', maxEurPerHour: 2.5 }, { machineType: 'H100 PCIE', maxEurPerHour: 2.5 },
+];
+const gpuType = (current = 'RTX 3090', setBy: string | null = null, setAt: string | null = null, standard = 0.3) =>
+  ({ current, default: 'RTX 3090', choices: [{ machineType: 'RTX 3090', maxEurPerHour: standard }, ...GPU_CHOICES.slice(1)], setBy, setAt });
 
 const key = (id: string, user: string, role: KeyView['role'], lastUsedAt: string | null, policy: Partial<KeyView['policy']> = {}, label: string | null = null): KeyView => ({
   id, source: id.startsWith('env-') ? 'env' : 'issued', user, role, admin: role === 'admin', prefix: '', label, createdAt: null, lastUsedAt,
@@ -340,12 +347,12 @@ function warnSnapshot(now: number): AdminSnapshot {
     providerCredit: [],
     gpus: [
       deployment('speech-stack', [replica('scw-1a2b', 95, 0.79)], [{ days: [notToday], start: '17:40', end: '20:15' }, { days: [1, 2, 3, 4], start: '17:30', end: '20:30' }],
-        { lastRequestAt: iso(now, 3) }, { idleMinutes: 45 }),
+        { lastRequestAt: iso(now, 3), gpuType: gpuType('H100 SXM', 'marcos', iso(now, 12)) }, { idleMinutes: 45 }),
       deployment('parle-bridge-shadow', [], []),
       deployment('speech-stack-test', [], [], { warm: null }),
       deployment('babel-live', [replica('scw-9z8y', 40, 0.79)], [], { app: 'babelcast', lastRequestAt: iso(now, 50) }),
       deployment('babelcast-3090', [replica('31544017', 180, 0.181, { provider: 'vast', zone: 'Lyon, FR', machineType: 'RTX 3090', ip: null })], [], {
-        app: 'babelcast', lastRequestAt: iso(now, 4), pinned: { idleMinutes: 60, parked: false },
+        app: 'babelcast', lastRequestAt: iso(now, 4), pinned: { idleMinutes: 60, parked: false }, gpuType: gpuType('RTX 3090', null, null, 0.19),
       }, { provider: 'vast', machineType: 'RTX 3090', minReplicas: 1, idleMinutes: 60, maxEurPerHour: 0.19, testFor: 'babelcast-speech' }),
     ],
     gpuSpend: {

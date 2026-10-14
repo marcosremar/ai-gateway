@@ -24,6 +24,7 @@ async function gateway() {
   access.setBaseAdmins(['marcos']);
   const parked: string[] = [];
   const pins: Array<[string, boolean]> = [];
+  const gpuTypes: Array<[string, string | null, boolean, string]> = [];
   const dismissed: string[] = [];
   const audit: Array<Record<string, unknown>> = [];
   let probes = 0;
@@ -46,6 +47,7 @@ async function gateway() {
     snapshot: () => snapshot,
     park: async (name) => { parked.push(name); },
     pin: async (name, on) => { pins.push([name, on]); },
+    gpuType: async (name, type, now, actor) => { gpuTypes.push([name, type, now, actor]); },
     probe: async () => { probes++; },
     sendDigest: async () => { digests++; return 'mail-1'; },
     dismiss: async (id) => { dismissed.push(id); snapshot.dismissed = { ...snapshot.dismissed, [id]: clock.now + 7 * 86_400_000 }; },
@@ -74,7 +76,7 @@ async function gateway() {
     return { cookie, html, csrf: /name="csrf" value="([a-f0-9]+)"/.exec(html)![1] };
   }
   const every = async (cookie: string, query = '') => (await Promise.all(PAGES.map(async p => (await call(p.path + query, { cookie })).text()))).join('');
-  return { clock, access, call, post, login, signedIn, every, parked, pins, dismissed, audit, snapshot, probes: () => probes, digests: () => digests };
+  return { clock, access, call, post, login, signedIn, every, parked, pins, gpuTypes, dismissed, audit, snapshot, probes: () => probes, digests: () => digests };
 }
 
 describe('admin page (/admin)', () => {
@@ -262,6 +264,34 @@ describe('admin page (/admin)', () => {
     const html = await (await gw.call('/admin/gpus', { cookie })).text();
     expect(html).toContain('limite: 1 GPU (RTX 3090) por app — dono, 14/10/2026 · ');
     expect(html).toContain('babelcast: babelcast-3090');
+  });
+
+  it('the GPU type: a select with each type, its €/h and €/class, admin only, with the CSRF token, audited', async () => {
+    const gw = await gateway();
+    const { cookie, csrf } = await gw.signedIn();
+    const page = await (await gw.call('/admin/gpus/speech-stack', { cookie })).text();
+    expect(page).toContain('action="/admin/gpu-type"');
+    expect(page).toMatch(/<option value="">voltar ao padrão \(RTX 3090\) · até €\s0,30\/h ≈ €\s0,78\/aula<\/option>/);
+    expect(page).toMatch(/<option value="H100 SXM" selected>H100 SXM · até €\s2,50\/h ≈ €\s6,46\/aula<\/option>/);
+    expect(page).toContain('H100 SXM escolhida por marcos');
+    expect(page).toContain('trocar agora (reinicia a GPU, ~20 min fria)');
+    const list = await (await gw.call('/admin/gpus', { cookie })).text();
+    expect(list).toContain('<a class="btn" href="/admin/gpus/babelcast-3090#tipo">GPU RTX 3090 · trocar</a>');
+    expect(list).toContain('<a class="btn" href="/admin/gpus/speech-stack#tipo">GPU H100 SXM · trocar</a>');
+    expect(await (await gw.call('/admin/gpus/babelcast-3090', { cookie })).text())
+      .toMatch(/<option value="" selected>RTX 3090 \(padrão\) · até €\s0,19\/h<\/option>/);
+    expect((await gw.post('/admin/gpu-type', { name: 'speech-stack', machineType: 'RTX 5090' }, cookie)).status).toBe(403);
+    const app = await gw.signedIn(CLIENT_KEY);
+    expect((await gw.post('/admin/gpu-type', { name: 'speech-stack', machineType: 'RTX 5090', csrf: app.csrf }, app.cookie)).status).toBe(403);
+    expect(await (await gw.call('/admin/gpus/speech-stack', { cookie: app.cookie })).text()).not.toContain('/admin/gpu-type');
+    const res = await gw.post('/admin/gpu-type', { name: 'speech-stack', machineType: 'H100 PCIE', now: '1', csrf, back: '/admin/gpus/speech-stack' }, cookie);
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toMatch(/^\/admin\/gpus\/speech-stack/);
+    await gw.post('/admin/gpu-type', { name: 'speech-stack', machineType: '', csrf }, cookie);
+    expect(gw.gpuTypes).toEqual([['speech-stack', 'H100 PCIE', true, 'marcos'], ['speech-stack', null, false, 'marcos']]);
+    expect(gw.audit.filter(e => e.action === 'admin-page.gpu-type').map(e => [e.actor, e.ok, e.detail])).toEqual([
+      ['parle', false, 'recusado para app:parle'], ['marcos', true, 'H100 PCIE, agora'], ['marcos', true, 'o tipo padrão'],
+    ]);
   });
 
   it('blocks a POST without the CSRF token or from another site', async () => {

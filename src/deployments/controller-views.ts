@@ -12,9 +12,10 @@ import { bootTimeoutMinutesOn, pinnedIdleOver, planReplicas, replicaPhase } from
 import { bootStates, phaseDurations, type BootLogLine, type PhaseMark } from './boot-track';
 import { PAGE_LOG_WAIT_MS, within, type ContainerLogView } from './container-logs';
 import { usesVast } from './spec';
+import { gpuTypeChoices, withGpuType } from './gpu-type';
 import type { Runtime } from './controller-state';
 import { DEFAULT_MAX_RTT_EXCESS_MS, DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
-import type { DeploymentSpec, DeploymentView, OffersPreview } from './types';
+import type { DeploymentSpec, DeploymentView, GpuTypeView, OffersPreview } from './types';
 import { distinctSessions, externalLoadOf, refusedSessions } from '../realtime/external-load';
 
 export abstract class ControllerViews extends ReconcileLoop {
@@ -27,8 +28,9 @@ export abstract class ControllerViews extends ReconcileLoop {
   }
 
   /** The stored spec, secrets included — for in-process callers only (declared reconcile); never sent over HTTP. */
-  async offers(name: string): Promise<OffersPreview | null> {
-    const spec = this.deployments.get(name)?.record.spec;
+  async offers(name: string, machineType?: string): Promise<OffersPreview | null> {
+    const rt = this.deployments.get(name);
+    const spec = rt && withGpuType(rt.record.spec, machineType ?? rt.record.gpuType?.machineType);
     const backend = this.backends.vast;
     if (!spec || !backend?.previewOffers) return null;
     const vast = spec.provider === 'vast' ? spec : [...(spec.candidates ?? []), ...(spec.placements ?? [])].find(c => c.provider === 'vast');
@@ -129,6 +131,16 @@ export abstract class ControllerViews extends ReconcileLoop {
       running: running.length,
       stopped: this.machines.filter(m => mine(m) && ((this.parkedNow(m) && !this.isStarting(m)) || this.stoppingNow(m))).length,
       eurPerHour: round3(running.reduce((sum, m) => sum + (m.pricePerHour ?? 0), 0)), ...limits,
+    };
+  }
+
+  private gpuTypeView(rt: Runtime): GpuTypeView | null {
+    const choices = gpuTypeChoices(rt.record.spec);
+    if (choices.length < 2) return null;
+    const set = rt.record.gpuType;
+    return {
+      current: withGpuType(rt.record.spec, set?.machineType).machineType, default: choices[0]!.machineType, choices,
+      setBy: set?.by ?? null, setAt: set ? new Date(set.at).toISOString() : null,
     };
   }
 
@@ -236,6 +248,7 @@ export abstract class ControllerViews extends ReconcileLoop {
           pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt,
         }),
       } : null,
+      gpuType: this.gpuTypeView(rt),
       boot: this.bootView(rt, now),
       warnings: [
         ...(rt.record.spec.coldStartWaitSeconds > maxWait

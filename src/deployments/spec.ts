@@ -109,7 +109,7 @@ function envMap(value: unknown): Record<string, string> {
 }
 
 const KNOWN_FIELDS = new Set<string>([
-  'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'envByMachineType', 'registryAuth',
+  'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'envByMachineType', 'maxEurPerHourByMachineType', 'registryAuth',
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
@@ -189,6 +189,12 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
       out2[type] = envMap(env);
     }
     out.envByMachineType = out2;
+  }
+  if (input.maxEurPerHourByMachineType !== undefined) {
+    const raw = input.maxEurPerHourByMachineType as Record<string, unknown> | null;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('maxEurPerHourByMachineType must be an object');
+    out.maxEurPerHourByMachineType = Object.fromEntries(Object.entries(raw).map(([type, cap]) =>
+      [str(type, 'maxEurPerHourByMachineType key', MACHINE_RE), num(cap, `maxEurPerHourByMachineType.${type}`, 0.001, 50)]));
   }
   if (input.registryAuth !== undefined) {
     const auth = input.registryAuth as Record<string, unknown> | null;

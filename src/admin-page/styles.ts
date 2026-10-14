@@ -113,6 +113,9 @@ td details summary{cursor:pointer;color:var(--muted);font-size:12.5px}
 .ra{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.ra code{padding:3px 7px;border-radius:6px;background:var(--hover);border:1px solid var(--line2);overflow-wrap:anywhere}
 .ra .t{color:var(--muted);font-size:12.5px}
 button.quiet{border-color:transparent;background:none;color:var(--muted);font-weight:500}button.quiet:hover{color:var(--text)}
+form.gpu-type{display:flex;flex-direction:column;gap:6px;min-width:220px}.gpu-type label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.gpu-type select{min-height:32px;padding:0 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--text);font:inherit;font-size:13px;max-width:100%}
+.gpu-type label.now{flex-direction:row;align-items:center;gap:6px}.gpu-type button.quiet{border-color:var(--line);color:var(--text)}
 .bar{position:sticky;bottom:0;z-index:1;display:flex;flex-wrap:wrap;gap:4px 18px;margin:8px -36px 0;padding:8px 36px;
 background:color-mix(in srgb,var(--bg) 92%,transparent);border-top:1px solid var(--line);color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
 .recos{list-style:none;margin:0;padding:0}
@@ -160,4 +163,4 @@ td:first-child{display:block;padding-bottom:6px}td:first-child .v{text-align:lef
 td small{text-align:right}td:first-child small{text-align:left}td.n{white-space:normal}td:empty,td.wide{display:none}
 .cap tbody tr:nth-child(n+4){display:none}td.act{display:flex;gap:8px}td.act .v{display:flex;gap:8px;width:100%}td.act form{flex:1}.reco dl{grid-template-columns:1fr}.reco dt{padding-top:4px}.amt{margin-left:0;width:100%}
 .ticks.d30 span{font-size:10px}td.act::before{content:none}td.act button{width:100%;margin-top:6px}tbody tr:hover td{background:none}.facts{grid-template-columns:1fr;gap:0 0}.facts dd{margin-bottom:6px}}
-@media (pointer:coarse){button,.btn{min-height:44px}.jump a{min-height:44px}.reco summary{min-height:44px;display:flex;align-items:center}}`;
+@media (pointer:coarse){button,.btn,.gpu-type select{min-height:44px}.gpu-type input[type=checkbox]{width:22px;height:22px}.jump a{min-height:44px}.reco summary{min-height:44px;display:flex;align-items:center}}`;
