@@ -94,35 +94,47 @@ are put back. `envByMachineType` is merged per key: the declared keys are put ba
 
 `src/deployments/declared/parle-speech.json`. Owner, 14/10/2026: «usa máquinas do vast.ai» — the Scaleway key lost
 `compute_servers create` on 13/10 and Scaleway is disabled for GPUs (`SCALEWAY_GPU_OFF`) — and the students' audio
-never leaves the EU. So the deployment is **Vast only** (`provider: "vast"`, `placements: []`) with `euOnly: true` and a ladder of
-`candidates`, each at most €0.85/h: an **RTX 5090**, else an **L40S**, else an **RTX 4090** (equal caps, so the
-ranking keeps this order; the backend then rents the best-ranked EU host of that type). The image is the public copy
+never leaves the EU. So the deployment is **Vast only** (`provider: "vast"`, `placements: []`) with `euOnly: true`.
+Owner, 14/10/2026: **one GPU per app, an RTX 3090** (§ One GPU per app below): the ladder (`candidates`) is one rung, an
+**RTX 3090 at most €0.30/h**, with nothing pricier behind it; with no EU 3090 under the cap the class runs on the cloud
+fallback (`deployment.out_of_stock` and the class-GPU-not-ready alert fire). The image is the public copy
 `ghcr.io/marcosremar/speech-stack:<tag>` (no registry credential, no `SPEECH_IMAGE` override: a private registry
 would be refused on Vast), `minCuda: 13` (the image is CUDA 13), `idleAction: "delete"` (Vast cannot park).
-`envByMachineType` sizes each card (5090 and L40S: `STT_BATCH 8`, `LLM_PARALLEL 16`, `RT_MAX_SESSIONS 4`; the 24 GB
-4090: the L4 settings, `STT_BATCH 4`, `LLM_PARALLEL 8` × 2048, `TTS_STAGE0_MB 7400`, `RT_MAX_SESSIONS 2`), and the
-declaration sends `env: {}`: the explicit `env` set by hand on 08/10 (L40S sizes) won over `envByMachineType` on every
-card and would not fit a 24 GB one. Class window Mon–Thu 16:40–20:30 Paris (aquecimento da aula: the class starts at 17:40 and a cold Vast boot took 20.5 min on 14/10/2026): **3 replicas warm** (`maxReplicas 3`;
-`DEPLOYMENTS_MAX_REPLICAS` is 4 and `babelcast-3090` may hold one; `reserveQuota: null`, it was a Scaleway quota
-reservation), €450/month (the TTS's €150 moved here). Since 14/10 it also serves the cast's **cloned voices** for the `parle-tts` alias (the parle routes name
+`envByMachineType` sizes each card and keeps the cards that are off the ladder, so a faster card is only a change of
+`candidates` (§ Moving parle to a faster GPU): the 24 GB RTX 3090 and RTX 4090 run the L4 settings (`STT_BATCH 4`,
+`LLM_PARALLEL 8` × 2048, `TTS_STAGE0_MB 7400`, `RT_MAX_SESSIONS 2`), the L40S and the RTX 5090 `STT_BATCH 8`,
+`LLM_PARALLEL 16`, `RT_MAX_SESSIONS 4`. The declaration sends `env: {}`: the explicit `env` set by hand on 08/10 (L40S
+sizes) won over `envByMachineType` on every card and would not fit a 24 GB one. Class window Mon–Thu 16:40–20:30 Paris
+(aquecimento da aula: the class starts at 17:40 and a cold Vast boot took 16–20 min on 14/10/2026): **1 replica warm**
+(`maxReplicas 1`; `reserveQuota: null`, it was a Scaleway quota reservation), €450/month ceiling. Since 14/10 it also
+serves the cast's **cloned voices** for the `parle-tts` alias (the parle routes name
 it; the separate `parle-qwen-tts` TTS deployment is gone): the gateway reads the image's voice list at `/v1/voices` (docs/api/http.md). The
 voice catalog is the registered `files` (`voices.json` + audio), served to the Vast host by signed links on the
-gateway (§ `files` on a Vast placement); to change a voice, `PUT` the `files` again (admin). Port, replicas, idle and
+gateway (§ `files` on a Vast placement); to change a voice, `PUT` the `files` again (admin). Port, idle and
 boot times, hour limits and volume stay as registered. On a gateway where `parle-speech` does not exist it is created
 from the `speech-stack` profile and then patched; that deployment has no `files`, so the voice catalog still has to be
 sent with a `PUT`.
+
+Measured on one RTX 3090 (Vast, Czechia, US$0.296/h offer, 14/10/2026, `parle-speech-test`, through the gateway's
+`parle-*` aliases with the dev key): cold boot 16.2 min (pull 10.0 min, start 5.6 min), 21.6 of 24 GB used; one turn
+(STT of a gTTS clip → LLM → Lia's cloned voice) p50 1.73 s, p95 2.63 s over 10 turns (STT 0.51, LLM 0.32, TTS 0.88 s
+p50); Rafa `br-m-02` F0 132 Hz, Lia `br-f-03` 225 Hz, −25 / −27 dBFS. Simultaneous turns: 2 → p50 2.2 s, 4 → 2.7 s,
+8 → 3.7 s with 13 of 24 turns spilled in part to the cloud. One 3090 holds **one** turn at a time under 2 s; the
+rest of a class is answered by the cloud fallback.
 
 Both `parle-speech` and `parle-speech-test` belong to the app `parle` (`"app"` in the declaration; set on an existing
 deployment that has no app yet), so a `parle` client key may `start` them (docs/api/http.md § Deployments).
 
 ### `parle-speech-test` (the GPU for tests)
 
-`src/deployments/declared/parle-speech-test.json`: the same image, the same Vast ladder in the EU (`euOnly`, 5090 →
-L40S → 4090, ≤ €0.85/h) and the same `envByMachineType` as `parle-speech`, so a test measures the class
+`src/deployments/declared/parle-speech-test.json`: the same image, the same ladder (one RTX 3090 ≤ €0.30/h, EU hosts)
+and the same `envByMachineType` as `parle-speech`, so a test measures the class
 configuration. `maxReplicas 1`, `minReplicas 0`, no warm schedule, `idleMinutes 10`, `idleAction: "delete"`, €40/month
 ceiling. `testFor: "parle-speech"` makes it the test copy: a request is **never** what starts it; a capped client key
 that calls `POST /v1/deployments/parle-speech/start` gets this copy instead; and while it is ready and `parle-speech`
-is not, the `parle-*` aliases are served by it (a key with `autoWake` also wakes `parle-speech`). It follows the voice
+is not, the `parle-*` aliases are served by it (a key with `autoWake` also wakes `parle-speech`). It shares the parle
+app's one GPU: a start while `parle-speech` runs is refused (409, the cloud answers), and in the class window
+`parle-speech` takes the GPU back (the test copy's replica is released, reason `class-priority`). It follows the voice
 catalog (`files`) of `parle-speech`: a catalog re-registered there reaches the copy at the next reconcile. Start it
 ~15 min before a test (a Vast host pulls the ~57 GB image from ghcr).
 
@@ -130,6 +142,44 @@ catalog (`files`) of `parle-speech`: a catalog re-registered there reaches the c
 their declarations are gone and the registered deployments were deleted. The parle routes name `parle-speech` for
 `parle-tts` (one GPU serves STT, LLM and the cast's cloned voices); a route that still names `parle-qwen-tts` is skipped
 as an unregistered deployment and goes to its `oneGpuDeployment` (docs/api/http.md § App aliases) or the cloud reserve.
+
+### One GPU per app (owner, 14/10/2026)
+
+«o ai gateway deve controlar para não passar de uma RTX 3090» — «uma GPU por app». `MAX_GPU_PER_APP = 1`
+(`src/deployments/spec.ts`), applied by the production controller (`maxGpuPerApp`, `src/deployments/index.ts`):
+
+- **Counted per app** (`record.app`, else the deployment's own name): every GPU machine of that app running, booting,
+  being created or being released. A create or power-on past it is refused (`limite: 1 GPU por app — dono, 14/10/2026:
+  app 'parle' already has 1 (…)` in `autoscale.blockedBy` and `lastError`); a request or `/wake` to a deployment that
+  cannot get the slot is refused at once with 409 `reserved` (the route's cloud fallback answers), `/warm` and a client
+  key's `/start` too. `maxReplicas` above 1 is never reached.
+- **A stuck boot never holds two:** the retry releases the stuck machine first; a released machine counts until the
+  provider list stops showing it, and only then is the next one rented.
+- **Class first:** while a deployment's `warmSchedule` window is open, another GPU deployment of the same app gets no
+  slot, and one it holds is released (`class-priority`). Today that is `parle-speech` over `parle-speech-test`.
+- **Apps are apart:** `parle` and `babelcast` (`babelcast-3090`, pinned) each run one at the same time.
+- **`/v1/machines`** counts per owner (the calling key's app, e.g. `parle-dev`): one active GPU machine (Vast, RunPod,
+  a Scaleway GPU type); a second is refused with 409 until the first is released. Machines and deployments are counted
+  apart (no deployment belongs to a machine owner today).
+- The type is not in the code: the ladder of each declared GPU is one RTX 3090 (`declared.test.ts`), and the panel
+  (`/admin/gpus`) prints `limite: 1 GPU (RTX 3090) por app — dono, 14/10/2026`, who holds each app's GPU and who waits.
+
+### Moving parle to a faster GPU
+
+Everything else is the same on every card: the image, the voices, the routes, and the sizes in `envByMachineType`
+(RTX 3090, RTX 4090, L40S, RTX 5090). To move production, edit **`spec.candidates`** of
+`src/deployments/declared/parle-speech.json` (and of `parle-speech-test.json`, so tests measure the class card), e.g.
+`[{ "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85 }]`, with `machineType` and `maxEurPerHour`
+repeating the first rung; update the one-RTX-3090 test in `declared.test.ts` with the owner's decision; land the PR;
+then `bun run deploy:prod`. The declaration reconciler puts it on the live deployment within 5 min; the next replica is
+the new card. A card with no `envByMachineType` entry runs the image defaults: add its sizes first.
+
+One-GPU mode: the parle TTS entry names `parle-qwen-tts` with `"oneGpuDeployment": "parle-speech"` (the app's own
+routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` is not registered
+and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register
+`parle-qwen-tts` (a registered `deployment` always wins); to go back to one GPU, delete it (pausing keeps it
+registered, so it would stay the target). Since 14/10/2026 the parle routes name `parle-speech` for `parle-tts`
+directly.
 
 ### `babelcast-3090` (the pinned Vast GPU of babelcast and of the agents' tests, 13/10/2026)
 
@@ -498,6 +548,7 @@ trend window are design choices to pilot, not published values.
 
 | Variable | Default | What it limits |
 |---|---|---|
+| `MAX_GPU_PER_APP` (constant, owner 14/10/2026) | 1 | GPU machines of one app (running, booting, created or released); § One GPU per app. |
 | `DEPLOYMENTS_MAX_REPLICAS` | 6 | RUNNING replicas across all deployments. Parked (stopped) replicas do not count: they bill no compute. A `PUT` with `maxReplicas` above it is refused (400) with the cap in the message. The floor of every unpaused deployment (`minReplicas`, or its active warm window) is kept inside the cap: a deployment already at its own floor does not take the last slots another one still needs for its floor (`… kept for the minimum of <name> <n>`). |
 | `DEPLOYMENTS_MAX_STOPPED` | 8 | Parked replicas (`idleAction: "stop"`, they bill disk). Past it, an idle replica is deleted instead of parked. |
 | `DEPLOYMENTS_MAX_EUR_PER_HOUR` | 6 | Sum of `pricePerHour` of all running replicas (+ creates in flight). A create or power-on that would pass it is refused; `lastError` says `spend ceiling reached` (a market-priced Vast offer counts at its `maxEurPerHour` cap). `0` = off. |

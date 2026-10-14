@@ -203,9 +203,12 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     }
     if (toCreate > 0) {
       const price = all.find(m => m.pricePerHour != null)?.pricePerHour ?? 0;
+      const slotTaken = this.gpuSlotRefusal(name) !== null;
+      const yielded = slotTaken ? await this.takeGpuSlotFor(rt) : null;
       let refusal = this.capRefusal(price, name);
+      if (refusal && yielded) refusal = `${refusal} (${yielded})`;
       // Under pressure and capped: take idle capacity from another deployment first (it frees on this tick).
-      if (refusal && plan.active) {
+      if (refusal && plan.active && !slotTaken) {
         const note = await this.reclaimFor(rt);
         if (note) { refusal = this.capRefusal(price, name); blockedBy = refusal ? `${refusal} (${note}, more needed)` : null; }
         else blockedBy = refusal;
@@ -214,6 +217,21 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     for (let i = 0; i < toCreate; i++) this.createReplica(rt);
     this.explain(rt, plan, decision, floor, blockedBy);
     if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
+  }
+
+  private async takeGpuSlotFor(rt: Runtime): Promise<string | null> {
+    const app = this.gpuAppOf(rt);
+    if (!app || !this.inClass(rt)) return null;
+    const yielding = this.machines.filter((m) => {
+      const holder = this.deployments.get(m.deployment);
+      return holder && holder !== rt && this.gpuAppOf(holder) === app && !this.inClass(holder) && !this.parkedNow(m) && !this.stoppingNow(m);
+    });
+    for (const m of yielding) {
+      this.log('deployments: GPU of the app released for the class', { from: m.deployment, id: m.id, to: rt.record.spec.name });
+      if (this.deployments.get(m.deployment)!.record.spec.idleAction === 'stop') await this.parkReplica(m);
+      else await this.release(m, 'class-priority');
+    }
+    return yielding.length ? `released ${yielding.map(m => `${m.deployment} ${m.id}`).join(', ')} for the class` : null;
   }
 
   private trackBoots(): void {
