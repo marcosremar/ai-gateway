@@ -8,6 +8,7 @@ sent to the TTS at once, so the student hears the first words before the reply i
 | STT | Whisper large-v3, **float16** (full precision) | faster-whisper 1.2.1, in the orchestrator process |
 | LLM | Qwen3.5-9B Q4_K_M (GGUF, 5.7 GB) | llama.cpp b11382, CUDA, 8 slots × 2048 tokens |
 | TTS | Qwen3-TTS 12Hz 0.6B Base (voice cloning) | vLLM-Omni 0.28.0, streaming PCM |
+| TTS (per request) | Kokoro-82M v1.0, ONNX fp32, 54 stock voices | kokoro-onnx 0.6.1 + espeak-ng, **CPU**, in the orchestrator |
 
 `/v1/s2s` config may carry `response_format` (passed to llama.cpp) and `speak_field`: then only that field of the JSON
 answer is voiced, as it streams, and `done.reply_raw` has the whole JSON (`JsonField`, tests in `test_json_field.py`).
@@ -111,7 +112,7 @@ prompt similarity (`--slot-prompt-similarity`, default 0.10), so the stack sends
 `llm_predicted_n`, `llm_predicted_ms`, `text_wait_ms` (first token → first sentence cut), `tts_first_chunk_ms` (cut → first
 PCM). Numbers only. `/v1/audio/transcriptions` returns the same four STT fields. `bench.py` prints p50/p95 of each stage.
 
-Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times tts_stream s2s_turn debug_logs; do python3 docker/speech-stack/test_$t.py; done`
+Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times tts_stream s2s_turn debug_logs kokoro; do python3 docker/speech-stack/test_$t.py; done`
 (numpy only; `git add -f` a new one, the repo's `TEST_*` ignore rule matches them on macOS).
 
 ## Single-stage proxies never end a broken stream cleanly (2026-10-08)
@@ -221,3 +222,33 @@ The image keeps the models; the five files of `/opt/s2s` can come from the deplo
 - It reaches machines created after the PUT. A running or parked replica keeps the boot it was created with.
 - Back to the image's own code: `"entrypoint": ""` is not accepted; PUT `"entrypoint": "bash", "args": ["/opt/s2s/start.sh"]`
   and drop `S2S_DIR`.
+
+## Two TTS engines: Qwen3-TTS or Kokoro, per request (2026-10-14)
+
+`POST /v1/audio/speech` picks the engine from `model`: one that contains `kokoro` (any case: `kokoro`,
+`hexgrad/Kokoro-82M`) is spoken by **Kokoro-82M**; any other model goes to Qwen3-TTS through the proxy exactly as before
+(`/v1/s2s` always speaks with Qwen3-TTS).
+
+```json
+{"model": "kokoro", "input": "Olá, bom dia.", "voice": "pf_dora", "language": "pt", "response_format": "pcm", "stream": true}
+```
+
+- `voice`: a Kokoro voice (`pf_dora`, `ff_siwis`, `bf_emma`, … all 54 of v1.0) is used as asked. Anything else (a cast
+  id, `alloy`) becomes the stock voice of the language, masculine for an `xx-m-…` id: pt `pf_dora`/`pm_alex`, en
+  `af_heart`/`am_michael`, fr `ff_siwis`, es `ef_dora`/`em_alex`, it `if_sara`/`im_nicola`.
+- `language`: ISO code (`pt`, `pt-BR`) or name (`Portuguese`, what the gateway sends a replica); it sets the
+  phonemizer (pt-br, en-us, fr-fr, es, it). Without it: the voice's own language (its first letter), else Portuguese.
+- `response_format`: `pcm` (s16le mono 24 kHz — the Qwen path's format), `wav` (default), `mp3`, `opus`, `aac`, `flac`
+  (ffmpeg). `stream: true` with pcm/wav sends each sentence as soon as it is made. `speed` 0.5–2.
+- Errors are OpenAI-shaped: 400 (empty input, unknown format), 503 `kokoro_loading` / `kokoro_failed`, 502 `stage_failed`.
+
+Kokoro runs on the **CPU** (onnxruntime) inside the orchestrator: no GPU memory is taken from vLLM-Omni, llama.cpp or
+Whisper. It loads in the background at startup and never holds `/health`'s 200: `GET /health` → `kokoro: {status:
+loading|loaded|failed, detail?}`. Image: `onnx-community/Kokoro-82M-v1.0-ONNX` at a pinned revision, `onnx/model.onnx`
+checked by sha256, the voice files packed into `/models/kokoro/voices.npz`; espeak-ng from apt. The build speaks one line
+with `pf_dora`, so a broken phonemizer fails the build. Measured on an M-series Mac CPU (2026-10-14, warm): 0.5 s for a 2.1 s pt
+sentence (about 4× real time). `test_kokoro.py` checks the engine
+choice, the voice mapping and the formats with a fake engine.
+
+Through the gateway: the replica's TTS provider sends a `kokoro` model's `voice` as is (no clone lookup in `/v1/voices`).
+babelcast's alias is `babelcast-tts-kokoro` (`docs/deployments.md`).

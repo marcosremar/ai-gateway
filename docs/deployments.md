@@ -236,6 +236,16 @@ student audio to it.
 - **babelcast's chain** (the app's own routes; the owner sets them): `babelcast-stt` → `deployment:babelcast-3090` →
   `deployment:babelcast-speech` → OpenRouter whisper-large-v3-turbo → Groq; `babelcast-llm` → `deployment:babelcast-3090`
   → `deployment:babelcast-speech` → OpenRouter gemini-2.5-flash-lite; `babelcast-tts` unchanged.
+- **`babelcast-tts-kokoro`** (14/10/2026): Kokoro-82M on the speech-stack image (CPU, next to Qwen3-TTS; see
+  `docker/speech-stack/README.md`), for an app that wants stock voices instead of the cloned ones. Chain:
+  `deployment:babelcast-3090:kokoro` → `deployment:babelcast-speech:kokoro` → `openrouter:hexgrad/kokoro-82m` (the same
+  model in the cloud, so the voice does not change; nothing else is appended). The app sends
+  `{"model": "babelcast-tts-kokoro", "input": …, "voice": "pf_dora", "language": "pt", "response_format": "pcm"|"wav", "stream": true}`
+  with a Kokoro voice (pt `pf_dora`/`pm_alex`, en `af_heart`/`am_michael`, fr `ff_siwis`, es `ef_dora`/`em_alex`, it
+  `if_sara`/`im_nicola`): the replica and the cloud both speak that voice. The gateway sends a `kokoro` model's voice to the
+  replica as is (`isKokoroModel`, no clone lookup). Like babelcast's other aliases it lives in the app's routes: the owner
+  adds it to the full `PUT /v1/apps/babelcast/routes` body (a PUT replaces every chain) — **only once the deployments run
+  an image built with Kokoro** (`babelcast-3090` still pins `speech-stack:20261011-0200`, which has none).
 - **Cost.** At most US$0.20 × 24 h = **US$4.80/day** (€4.56) when used all day; parked after 1 h with no request.
 
 ### `parle-bridge-shadow` (the audio bridge in shadow mode, 12/10/2026) — PARKED

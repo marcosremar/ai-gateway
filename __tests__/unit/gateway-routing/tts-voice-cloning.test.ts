@@ -131,6 +131,28 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     expect(r.speechBodies).toHaveLength(1);
   });
 
+  it('kokoro on a speech-stack replica (babelcast-tts-kokoro): the Kokoro voice is sent as is, no clone lookup; cold → cloud Kokoro, same voice', async () => {
+    const r = replica({ speechStack: true });
+    const dep = new DeploymentTTSProvider(controller(), 'babelcast-speech', { fetchImpl: r.fetchImpl as never });
+    const or = kokoro();
+    const kokoroChain = (d: TTSProvider) => ({ 'babelcast-tts-kokoro': [
+      { providerId: 'deployment:babelcast-speech', provider: d, model: 'kokoro' },
+      { providerId: 'openrouter', provider: or, model: 'hexgrad/kokoro-82m' },
+    ] });
+    const body = { model: 'babelcast-tts-kokoro', input: 'Bom dia!', voice: 'pf_dora', language: 'pt', response_format: 'pcm', stream: true };
+    const res = await handleAudioSpeech(req(body), kokoroChain(dep), undefined, new CircuitBreakerRegistry());
+    expect(res.headers).toMatchObject({ 'X-Gateway-Provider': 'deployment:babelcast-speech' });
+    expect(r.speechBodies[0]).toMatchObject({ model: 'kokoro', input: 'Bom dia!', voice: 'pf_dora', language: 'Portuguese', response_format: 'pcm', stream: true });
+    expect(r.speechBodies[0]).not.toHaveProperty('ref_audio');
+    expect(r.fetchImpl.mock.calls.some(([u]) => String(u).endsWith('/v1/voices'))).toBe(false);
+    expect(or.synthesize).not.toHaveBeenCalled();
+
+    const cold = await handleAudioSpeech(req(body), kokoroChain(new DeploymentTTSProvider(controller(true), 'babelcast-speech')),
+      undefined, new CircuitBreakerRegistry());
+    expect(cold.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:hexgrad/kokoro-82m', 'X-Gateway-Fallback': 'cold' });
+    expect(or.synthesize.mock.calls[0][0]).toMatchObject({ model: 'hexgrad/kokoro-82m', voice: 'pf_dora' });
+  });
+
   it('a CustomVoice replica without catalog gets the request as sent (OpenAI shape), mp3 not in stream mode', async () => {
     const r = replica({ catalog: false });
     const dep = new DeploymentTTSProvider(controller(), 'qwen3-tts', { fetchImpl: r.fetchImpl as never });

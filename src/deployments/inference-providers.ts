@@ -321,6 +321,11 @@ export function isBaseTtsModel(model: string): boolean {
   return /(^|[-_/])base($|[-_.])/i.test(model);
 }
 
+/** Kokoro on the speech-stack image speaks its own stock voices (`pf_dora`, …): never a clone from the catalog. */
+export function isKokoroModel(model: string): boolean {
+  return /kokoro/i.test(model);
+}
+
 export function catalogOf(raw: unknown): ReplicaCatalog | null {
   const input = raw as { model?: unknown; format?: unknown; voices?: unknown } | null;
   if (!input || !Array.isArray(input.voices)) return null;
@@ -419,7 +424,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
       ...(request.instructions ? { instructions: request.instructions } : {}),
     };
-    if (extra.ref_audio === undefined && request.voice) {
+    if (extra.ref_audio === undefined && request.voice && !isKokoroModel(request.model)) {
       const catalog = await this.voiceCatalog(request.signal);
       if (!catalog && this.isCloningModel(request.model)) {
         // A Base server must never get `voice` without `ref_audio` (its engine dies on it): no catalog → fall back.
