@@ -8,7 +8,7 @@ import type { AppProfile } from '../deployments/apps';
 import type { AppStatus } from '../deployments/app-gpu-health';
 import { activeWindow } from '../deployments/autoscale';
 import { idleGpu } from '../deployments/idle';
-import { SCALEWAY_GPU_OFF } from '../deployments/spec';
+import { GPU_CAP_RULE, gpuCapRule, SCALEWAY_GPU_OFF } from '../deployments/spec';
 import { answeredShare, gpuShare, sloLevel, type AdminTraffic, type TrafficLine, type TrafficView } from './traffic';
 import { SLO_TARGETS } from '../alerting/slo-targets';
 import type { SpendLedgerView } from '../deployments/spend-ledger';
@@ -160,6 +160,15 @@ export const gpuActions = (d: DeploymentView, { csrf, view, path }: Ctx) => [
   !view && providerOf(d) === 'vast' ? pinForm(d, csrf, path) : '',
 ].join('');
 
+function gpuSlots(gpus: DeploymentView[]): string {
+  const ladder = gpus.filter(d => !d.spec.paused && d.spec.provider === 'vast')
+    .flatMap(d => d.spec.candidates?.map(c => c.machineType) ?? [d.spec.machineType]);
+  const holders = gpus.filter(d => upOf(d).length).map(d => `${d.app ?? d.name}: ${d.name}`);
+  const waiting = gpus.filter(d => `${d.autoscale?.blockedBy ?? ''} ${d.lastError ?? ''}`.includes(GPU_CAP_RULE)).map(d => d.name);
+  return `<p class="filter">${esc(gpuCapRule([...new Set(ladder)]))} · ${esc(holders.join(' · ') || 'nenhuma GPU ligada')}`
+    + `${waiting.length ? ` · à espera: ${esc(waiting.join(', '))}` : ''}</p>`;
+}
+
 function gpus(ctx: Ctx): Section {
   const { s, now } = ctx;
   const base = { id: 'gpus', title: 'GPUs', actions: '' };
@@ -210,7 +219,7 @@ function gpus(ctx: Ctx): Section {
       return d.status === 'degraded' || d.lastError ? `${d.name} ${GPU_STATUS[d.status] ?? d.status}` : '';
     }).filter(Boolean),
     meta: `${SCALEWAY_GPU_OFF}: GPUs só na Vast · ${on.length} de ${s.gpus.length} ligadas · ${money(perHour)}/h agora`,
-    body: table([
+    body: gpuSlots(s.gpus) + table([
       { label: 'Deployment' }, { label: 'Estado' }, { label: 'Réplicas', num: true }, { label: 'Máquina', wide: true }, { label: 'Custo', num: true },
       { label: 'Ligada há', num: true, wide: true }, { label: 'Último pedido', num: true }, { label: 'Ligada por', wide: true }, { label: 'Ação', act: true },
     ], rows.map(r => r.cells), 'Nenhuma GPU registrada.'),

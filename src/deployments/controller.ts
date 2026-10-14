@@ -35,6 +35,7 @@ export const HEDGE_P95_FACTOR = 1.2;
 export const STAGE_STRIKES = 3;
 export const STAGE_COOLDOWN_MS = 30_000;
 export const LOST_RETRY_AFTER_SECONDS = 30;
+export const GPU_SLOT_RETRY_SECONDS = 60;
 export const LOST_FAST_FAIL_MS = 15 * 60_000;
 
 export {
@@ -206,6 +207,13 @@ export class DeploymentController extends ControllerViews {
     if (rt.creating || this.machines.some(m => m.deployment === rt.record.spec.name)) return;
     const block = this.reservationBlock(rt);
     if (block) throw new DeploymentError(409, block.reason, Math.max(1, Math.ceil((block.endsAt - this.now()) / 1000)), 'reserved');
+    this.refuseGpuSlot(rt);
+  }
+
+  private refuseGpuSlot(rt: Runtime): void {
+    if (rt.creating || this.machines.some(m => m.deployment === rt.record.spec.name)) return;
+    const slot = this.gpuSlotTaken(rt.record.spec.name);
+    if (slot) throw new DeploymentError(409, slot, GPU_SLOT_RETRY_SECONDS, 'reserved');
   }
 
   wake(name: string): DeploymentView {
@@ -231,6 +239,7 @@ export class DeploymentController extends ControllerViews {
     if (typeof untilMinutes !== 'number' || !Number.isFinite(untilMinutes) || untilMinutes <= 0 || untilMinutes > 12 * 60) {
       throw new SpecError('untilMinutes must be a number in (0, 720]');
     }
+    if (replicas > 0) this.refuseGpuSlot(rt);
     const now = this.now();
     rt.record = { ...rt.record, lastRequestAt: now, warm: { replicas, until: now + untilMinutes * 60_000 } };
     rt.reclaimedAt = null;

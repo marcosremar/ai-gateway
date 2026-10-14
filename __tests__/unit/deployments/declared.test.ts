@@ -56,13 +56,12 @@ const PRODUCTION = {
 const OUTSIDE_CLASS = Date.parse('2026-10-11T12:00:00Z');
 const CLASS_WINDOW = { days: [1, 2, 3, 4], start: '16:40', end: '20:30', timeZone: 'Europe/Paris' };
 const DECLARED_EXTRA = {
-  entrypoint: 'bash', args: ['/opt/s2s/start.sh'], coldStartWaitSeconds: 240, minCuda: 13, maxRttExcessMs: 20, maxReplicas: 3, env: {},
-  warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 3 }],
+  entrypoint: 'bash', args: ['/opt/s2s/start.sh'], coldStartWaitSeconds: 240, minCuda: 13, maxRttExcessMs: 20, maxReplicas: 1, env: {},
+  warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }],
 };
-/** The class ladder on Vast, EU hosts only: the RTX 3090 first because it is the cheapest (owner, 14/10/2026), then 4090 and 5090. */
-const LADDER = ['RTX 3090', 'RTX 4090', 'RTX 5090'];
-const CAP: Record<string, number> = { 'RTX 3090': 0.3, 'RTX 4090': 0.85, 'RTX 5090': 0.85 };
-const CANDIDATES = LADDER.map(machineType => ({ provider: 'vast', machineType, maxEurPerHour: CAP[machineType] }));
+/** The class ladder on Vast, EU hosts only: one RTX 3090, nothing pricier behind it (owner, 14/10/2026). */
+const CANDIDATES = [{ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3 }];
+const SIZED = ['RTX 3090', 'RTX 4090', 'L40S', 'RTX 5090'];
 const DECLARED_ENV = speech.spec.envByMachineType as Record<string, Record<string, string>>;
 const GHCR_IMAGE = 'ghcr.io/marcosremar/speech-stack:20261011-0200';
 const ON_VAST = { provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3, euOnly: true, placements: [], idleAction: 'delete' };
@@ -94,8 +93,9 @@ describe('declared parle-speech spec', () => {
       realtime: {}, scaling: { ...profile.scaling, budget: { eurPerMonth: 450 } },
       envByMachineType: DECLARED_ENV,
     });
-    expect(Object.keys(DECLARED_ENV)).toEqual(LADDER);
+    expect(Object.keys(DECLARED_ENV)).toEqual(SIZED);
     expect(DECLARED_ENV['RTX 5090']).toEqual(profile.envByMachineType!['RTX 5090']);
+    expect(DECLARED_ENV.L40S).toMatchObject({ STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '4', LLM_SLOT_CTX: '4096' });
     expect(DECLARED_ENV['RTX 4090']).toMatchObject({ STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '2' });
     expect(DECLARED_ENV['RTX 3090']).toEqual(DECLARED_ENV['RTX 4090']);
     expect(JSON.stringify(speech)).not.toMatch(/GHCR_READ_TOKEN|ghp_|password"\s*:/);
@@ -198,7 +198,7 @@ describe('declared parle-speech spec', () => {
     expect(vastUnfit(vast.created[0].spec)).toBeNull();
   });
 
-  it('no RTX 3090 in the EU under the cap: the class replica is the next rung, an RTX 4090, never Scaleway', async () => {
+  it('no RTX 3090 in the EU under the cap: no machine at all, never a 4090, a 5090 or Scaleway; the cloud fallback answers', async () => {
     const scaleway = new FakeCloud();
     const vast = Object.assign(new FakeCloud(() => OUTSIDE_CLASS, 'vast'), { marketPriced: true });
     vast.failCreateFor = (s) => (s.machineType === 'RTX 3090' ? 'out_of_stock: no vast offer for RTX 3090 under €0.30/h near FR' : null);
@@ -212,11 +212,11 @@ describe('declared parle-speech spec', () => {
     await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     c.start();
     c.wake('parle-speech');
-    const ofSpeech = () => vast.created.filter(x => x.spec.name === 'parle-speech');
-    await until(() => ofSpeech().length >= 1, 3000);
-    expect(ofSpeech()[0].spec).toMatchObject({ provider: 'vast', machineType: 'RTX 4090', euOnly: true, minCuda: 13, env: {} });
+    await until(() => /out_of_stock/.test(c.get('parle-speech')!.lastError ?? ''), 3000);
+    expect(vast.created).toHaveLength(0);
     expect(scaleway.created).toHaveLength(0);
-    expect(c.get('parle-speech')!.lastPlacement).toMatch(/^vast RTX 4090 .*skipped: vast RTX 3090: out_of_stock/);
+    expect(c.get('parle-speech')!.lastPlacement).toMatch(/^no replica placed; skipped: vast RTX 3090: out_of_stock/);
+    expect(c.get('parle-speech')!.lastPlacement).not.toMatch(/4090|5090|L40S/);
   });
 
   it('coldStartWaitSeconds 840 is put back to the gateway maximum of 240: no warning', async () => {
@@ -235,11 +235,19 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     scaling: { mode: 'balanced' }, bootScript: 'echo tts',
   };
 
-  it('every parle deployment has a monthly ceiling; parle-speech is 3 warm Mon-Thu 16:40-20:30 Paris, parle-qwen-tts paused', () => {
+  it('every parle deployment has a monthly ceiling; parle-speech is 1 warm Mon-Thu 16:40-20:30 Paris, parle-qwen-tts paused', () => {
     const budget = (name: string) => (DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.scaling as { budget: { eurPerMonth: number } }).budget.eurPerMonth;
     expect(['parle-speech', 'parle-qwen-tts', 'parle-speech-s2s', 'parle-livekit'].map(budget)).toEqual([450, 150, 50, 60]);
-    expect((speech.spec.warmSchedule as unknown[])[0]).toMatchObject({ ...CLASS_WINDOW, minReplicas: 3 });
-    expect(DECLARED_DEPLOYMENTS.find(d => d.name === 'parle-qwen-tts')!.spec).toMatchObject({ paused: true });
+    expect((speech.spec.warmSchedule as unknown[])[0]).toMatchObject({ ...CLASS_WINDOW, minReplicas: 1 });
+    for (const name of ['parle-qwen-tts', 'parle-speech-s2s']) expect(DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec).toMatchObject({ paused: true });
+  });
+
+  it('every declared GPU ladder is one RTX 3090, one replica at most (owner, 14/10/2026)', () => {
+    for (const d of DECLARED_DEPLOYMENTS.filter(x => x.spec.machineType)) {
+      const ladder = [d.spec.machineType, ...((d.spec.candidates ?? []) as Array<{ machineType: string }>).map(c => c.machineType)];
+      expect(new Set(ladder), d.name).toEqual(new Set(['RTX 3090']));
+      expect(d.spec.maxReplicas, d.name).toBe(1);
+    }
   });
 
   it('no declared GPU names Scaleway, and every parle GPU rents only EU hosts (owner, 14/10/2026)', async () => {

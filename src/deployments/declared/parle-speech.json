@@ -1,7 +1,7 @@
 {
   "name": "parle-speech",
   "app": "parle",
-  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS (cast's cloned voices, the parle-tts route names it) in one container (speech-stack, public ghcr copy) with the realtime edge. Vast only, EU hosts only (owner, 14/10/2026: no Scaleway; students' audio stays in the EU): an RTX 3090 at most €0.30/h, the cheapest (owner, 14/10/2026), else an RTX 4090 or 5090 at most €0.85/h; three warm Mon-Thu 16:40-20:30 Paris (a new host boots in ~20 min; class at 17:40)",
+  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS (cast's cloned voices) in one container (speech-stack, public ghcr copy) with the realtime edge. Vast, EU hosts only. One GPU per app, an RTX 3090 at most €0.30/h, nothing pricier behind it (owner, 14/10/2026): the cloud fallback answers what it cannot serve. One warm Mon-Thu 16:40-20:30 Paris (a new host boots in ~16-20 min; class at 17:40). envByMachineType keeps the 4090, L40S and 5090 sizes: a faster card is a change of candidates",
   "profile": "speech-stack",
   "image": {
     "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
@@ -12,22 +12,20 @@
     "maxEurPerHour": 0.3,
     "placements": [],
     "candidates": [
-      { "provider": "vast", "machineType": "RTX 3090", "maxEurPerHour": 0.3 },
-      { "provider": "vast", "machineType": "RTX 4090", "maxEurPerHour": 0.85 },
-      { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85 }
+      { "provider": "vast", "machineType": "RTX 3090", "maxEurPerHour": 0.3 }
     ],
     "euOnly": true,
     "minCuda": 13,
     "maxRttExcessMs": 20,
     "idleAction": "delete",
-    "maxReplicas": 3,
+    "maxReplicas": 1,
     "entrypoint": "bash",
     "args": ["/opt/s2s/start.sh"],
     "coldStartWaitSeconds": 240,
     "env": {},
     "scaling": { "mode": "fast", "budget": { "eurPerMonth": 450 } },
     "warmSchedule": [
-      { "days": [1, 2, 3, 4], "start": "16:40", "end": "20:30", "timeZone": "Europe/Paris", "minReplicas": 3 }
+      { "days": [1, 2, 3, 4], "start": "16:40", "end": "20:30", "timeZone": "Europe/Paris", "minReplicas": 1 }
     ],
     "reserveQuota": null,
     "envByMachineType": {
@@ -37,6 +35,10 @@
       },
       "RTX 4090": {
         "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400", "RT_MAX_SESSIONS": "2",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "L40S": {
+        "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "12000", "RT_MAX_SESSIONS": "4", "LLM_SLOT_CTX": "4096",
         "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       },
       "RTX 5090": {

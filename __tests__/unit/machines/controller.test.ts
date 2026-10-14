@@ -45,6 +45,21 @@ describe('machines controller', () => {
     await expect(ctl.create('palco', input({}))).rejects.toMatchObject({ status: 402, message: expect.stringMatching(/recarregue a Vast/) });
   });
 
+  it('one GPU machine per app (owner, 14/10/2026): a second is refused until the first is released; another app has its own', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    const ctl = makeController({ backends: { vast }, now: c.now });
+    const first = await ctl.create('parle-dev', input({ machineType: 'RTX 3090' }));
+    await expect(ctl.create('parle-dev', input({ machineType: 'RTX 3090' }))).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringMatching(new RegExp(`^limite: 1 GPU por app — dono, 14/10/2026: app 'parle-dev' already has GPU machine ${first.id}`)),
+    });
+    await ctl.create('babelcast', input({ machineType: 'RTX 3090' }));
+    await ctl.release(first.id, 'done');
+    await ctl.create('parle-dev', input({ machineType: 'RTX 3090' }));
+    expect(vast.machines.size).toBe(2);
+  });
+
   it('releases a machine at its deadline and refuses an extend past the lifetime', async () => {
     const c = clock();
     const vast = new FakeMachineCloud('vast', c.now);
@@ -66,7 +81,7 @@ describe('machines controller', () => {
     const vast = new FakeMachineCloud('vast', c.now);
     const ctl = makeController({ backends: { vast }, now: c.now });
     const idle = await ctl.create('palco', input({}, 4, { idleMinutes: 10 }));
-    const busy = await ctl.create('palco', input({}, 4, { idleMinutes: 10 }));
+    const busy = await ctl.create('babelcast', input({}, 4, { idleMinutes: 10 }));
     c.advance(6 * 60_000);
     await ctl.extend(busy.id, null);
     c.advance(6 * 60_000);
@@ -86,8 +101,8 @@ describe('machines controller', () => {
     expect((holder as Error).message).toMatch(/holder 'a'.*DELETE \/v1\/machines\/:id.*MACHINES_HOLDER_USD_PER_DAY/);
     const day = await ctl.create('palco', input({ maxUsdPerHour: 0.5 }, 4)).catch((e: unknown) => e);
     expect((day as Error).message).toMatch(/app 'palco' in 24 h.*MACHINES_OWNER_USD_PER_DAY/);
-    const m = await ctl.create('palco', input({ maxUsdPerHour: 0.5 }, 2));
-    await expect(ctl.extend(m.id, 3)).rejects.toMatchObject({ status: 402 });
+    const m = await ctl.create('babelcast', input({ maxUsdPerHour: 0.5 }, 2));
+    await expect(ctl.extend(m.id, 4)).rejects.toMatchObject({ status: 402 });
     await expect(ctl.create('other', input({ maxUsdPerHour: 0.5 }, 4))).rejects.toThrow(/the gateway in 24 h.*MACHINES_USD_PER_DAY/);
   });
 

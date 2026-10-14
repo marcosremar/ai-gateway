@@ -11,11 +11,11 @@
  */
 
 import { createHmac } from 'crypto';
-import { activeWindow, warmFloor, type PressureState } from './autoscale';
+import { activeWindow, scheduleFloor, warmFloor, type PressureState } from './autoscale';
 import { bootEventAuth } from './boot-events';
 import { filesByUrl } from './boot-files';
 import { bootTimeoutMinutesOn, replicaPhase, type ObservedReplica } from './planner';
-import { NAME_RE } from './spec';
+import { GPU_CAP_RULE, NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
 import { externalInflightOn } from '../realtime/external-load';
 import type {
@@ -138,6 +138,7 @@ export interface ControllerOptions {
   namespace?: string;
   /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
   maxTotalReplicas?: number;
+  maxGpuPerApp?: number;
   /** Cap on parked (stopped) replicas across all deployments: they bill disk only, but they must not pile up. Default 8. */
   maxStoppedReplicas?: number;
   /** Ceiling (EUR/h) on the summed price of the running replicas of all deployments. Default 6; 0 = off. */
@@ -436,8 +437,10 @@ export abstract class ControllerState {
     return sum;
   }
 
-  /** Why one more running replica billing `price` EUR/h is refused (replica cap, € ceiling), or null. */
+  /** Why one more running replica billing `price` EUR/h is refused (GPU per app, replica cap, € ceiling), or null. */
   protected capRefusal(price: number, name: string): string | null {
+    const slot = this.gpuSlotRefusal(name);
+    if (slot) return slot;
     const cap = this.opts.maxTotalReplicas ?? 6;
     const total = this.totalReplicas();
     const capped = `replica cap reached (${cap} across all deployments, DEPLOYMENTS_MAX_REPLICAS; held by ${this.slotHolders()}`;
@@ -464,6 +467,49 @@ export abstract class ControllerState {
       .filter(([other, rt]) => other !== name && !rt.record.spec.paused)
       .map(([other, rt]): [string, number] => [other, floorOf(rt) - (held.get(other) ?? 0)])
       .filter(([, missing]) => missing > 0);
+  }
+
+  protected inClass(rt: Runtime): boolean {
+    return scheduleFloor(rt.record.spec.warmSchedule, this.now()) > 0;
+  }
+
+  protected gpuAppOf(rt: Runtime | undefined): string | null {
+    return rt?.record.spec.gpu ? rt.record.app ?? rt.record.spec.name : null;
+  }
+
+  protected gpuHolders(app: string): string[] {
+    const ofApp = (m: ReplicaMachine) => this.gpuAppOf(this.deployments.get(m.deployment)) === app;
+    const machines = [...this.runningMachines(), ...[...this.releasing.values()].map(r => r.machine)].filter(ofApp).map(m => m.deployment);
+    const creating = [...this.deployments].flatMap(([name, rt]) => (this.gpuAppOf(rt) === app ? Array<string>(rt.creating).fill(name) : []));
+    return [...machines, ...creating];
+  }
+
+  protected classKeeper(rt: Runtime, app: string): string | null {
+    if (this.inClass(rt)) return null;
+    const keeper = [...this.deployments].find(([, o]) => o !== rt && !o.record.spec.paused && this.gpuAppOf(o) === app && this.inClass(o));
+    return keeper?.[0] ?? null;
+  }
+
+  private gpuSlot(name: string, counts: (holder: string) => boolean): string | null {
+    const rt = this.deployments.get(name);
+    const app = this.gpuAppOf(rt);
+    const cap = this.opts.maxGpuPerApp;
+    if (!rt || !app || cap === undefined) return null;
+    const keeper = this.classKeeper(rt, app);
+    if (keeper) return `${GPU_CAP_RULE}: app '${app}' keeps its GPU for '${keeper}' during the class window`;
+    const held = this.gpuHolders(app).filter(counts);
+    if (held.length < cap) return null;
+    return `${GPU_CAP_RULE}: app '${app}' already has ${held.length} (${[...new Set(held)].join(', ')}); the cloud fallback answers`;
+  }
+
+  protected gpuSlotRefusal(name: string): string | null {
+    return this.gpuSlot(name, () => true);
+  }
+
+  gpuSlotTaken(name: string): string | null {
+    const rt = this.deployments.get(name);
+    const evicts = (holder: string) => !!rt && this.inClass(rt) && !this.inClass(this.deployments.get(holder)!);
+    return this.gpuSlot(name, holder => holder !== name && !evicts(holder));
   }
 
   protected slotHolders(): string {
