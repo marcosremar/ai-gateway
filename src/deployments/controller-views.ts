@@ -28,9 +28,10 @@ export abstract class ControllerViews extends ReconcileLoop {
   }
 
   /** The stored spec, secrets included — for in-process callers only (declared reconcile); never sent over HTTP. */
-  async offers(name: string, machineType?: string): Promise<OffersPreview | null> {
+  async offers(name: string, machineType?: string, maxEurPerHour?: number): Promise<OffersPreview | null> {
     const rt = this.deployments.get(name);
-    const spec = rt && withGpuType(rt.record.spec, machineType ?? rt.record.gpuType?.machineType);
+    const typed = rt && withGpuType(rt.record.spec, machineType ?? rt.record.gpuType?.machineType);
+    const spec = typed && maxEurPerHour ? { ...typed, maxEurPerHour, candidates: typed.candidates?.map(c => ({ ...c, maxEurPerHour })) } : typed;
     const backend = this.backends.vast;
     if (!spec || !backend?.previewOffers) return null;
     const vast = spec.provider === 'vast' ? spec : [...(spec.candidates ?? []), ...(spec.placements ?? [])].find(c => c.provider === 'vast');

@@ -176,7 +176,7 @@ eu só troco essa máquina RTX 3090 por uma H100 … não precisa mudar nada no 
   releases it at once: ~20 min cold on the new card, the cloud fallback answers meanwhile.
 - Audited as `admin-page.gpu-type` (who, which type, «agora»); `GET /v1/deployments/:name` shows `gpuType`
   (`current`, `default`, `choices`, `setBy`, `setAt`); `GET /v1/deployments/:name/offers?machineType=H100%20SXM` (admin)
-  lists the EU offers a create would try for that type.
+  lists the EU offers a create would try for that type (`&maxEurPerHour=4` previews a higher cap, the spec is unchanged).
 - **H100 sizes** (80 GB): `STT_BATCH 16`, `LLM_PARALLEL 32` × `LLM_SLOT_CTX 4096`, `TTS_STAGE0_MB 20000`,
   `RT_MAX_SESSIONS 8` — the L40S/RTX 5090 values (48/32 GB) doubled. Estimate: Whisper large-v3 fp16 with 16 clips
   ~10 GB, Qwen3.5-9B Q4 + 32 × 4096 slots ~25 GB, the TTS stage 20 GB, CUDA contexts ~1.5 GB: ~57 of 80 GB. The 3090
