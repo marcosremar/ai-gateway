@@ -209,8 +209,7 @@ The gateway's code names no app model. An app that wants its own model names (`p
 ```bash
 curl -X PUT $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
   "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
-  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-qwen-tts", "oneGpuDeployment": "parle-speech",
-                            "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
+  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-speech", "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
                           { "provider": "openrouter", "model": "microsoft/mai-voice-2.1-flash", "voice": "pt-BR-Luana:MAI-Voice-2-Flash" },
                           { "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora", "fixedVoice": true }] }
 }'
@@ -428,7 +427,7 @@ replaces the generic chat fallback (default: Groq `llama-3.3-70b-versatile`, the
 {
   "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
   "chat": { "parle-llm": ["deployment:parle-speech", "openrouter:qwen/qwen3.5-9b"] },
-  "tts":  { "parle-tts": ["deployment:parle-qwen-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+  "tts":  { "parle-tts": ["deployment:parle-speech:Qwen/Qwen3-TTS-12Hz-0.6B-Base",
                           { "provider": "openrouter", "model": "fish-audio/s2-pro", "voice": "<voice id>" }] }
 }
 ```
@@ -439,7 +438,7 @@ Every successful response of the three routes carries (no secrets):
 
 | Header | Example | Meaning |
 |---|---|---|
-| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
+| `X-Gateway-Provider` | `deployment:parle-speech`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
 | `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `policy`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 | `X-Gateway-Status` | `degraded` | only for an app whose profile has `requiresGpu` (below, *App profile and GPU status*), when a cloud target answered: the answer is valid, but not what the app's GPU would have given |
@@ -763,12 +762,12 @@ Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` oth
 ### App profile and GPU status — `/v1/apps/:app/profile`, `/v1/apps/:app/status`
 
 An app whose answers depend on its own GPU (parle: the detected language and the cloned voices only come from
-`parle-speech` / `parle-qwen-tts`) says so in its profile; the gateway then probes those GPUs and reports, per app,
+`parle-speech`) says so in its profile; the gateway then probes those GPUs and reports, per app,
 whether it is served by them.
 
 ```bash
 curl -X PUT $GW/v1/apps/parle/profile -H "Authorization: Bearer $PARLE_KEY" -H 'content-type: application/json' \
-  -d '{"requiresGpu": true, "gpuDeployments": ["parle-speech", "parle-qwen-tts"]}'
+  -d '{"requiresGpu": true, "gpuDeployments": ["parle-speech"]}'
 # → { app, profile, warnings? }  warnings: a deployment not registered, or without a warmSchedule
 curl $GW/v1/apps/parle/status -H "Authorization: Bearer $PARLE_KEY"
 ```
@@ -776,10 +775,8 @@ curl $GW/v1/apps/parle/status -H "Authorization: Bearer $PARLE_KEY"
 ```json
 { "app": "parle", "requiresGpu": true, "mode": "gpu", "checkedAt": "2026-10-13T16:01:00.000Z",
   "deployments": [
-    { "name": "parle-speech", "stages": ["stt", "llm"], "state": "ready", "replicas": { "ready": 1, "total": 1 },
-      "lastProbe": { "at": "2026-10-13T16:00:12.000Z", "ok": true, "ms": 840, "error": null } },
-    { "name": "parle-qwen-tts", "stages": ["tts"], "state": "ready", "replicas": { "ready": 2, "total": 2 },
-      "lastProbe": { "at": "2026-10-13T16:00:40.000Z", "ok": true, "ms": 610, "error": null } } ],
+    { "name": "parle-speech", "stages": ["stt", "llm", "tts"], "state": "ready", "replicas": { "ready": 1, "total": 1 },
+      "lastProbe": { "at": "2026-10-13T16:00:12.000Z", "ok": true, "ms": 840, "error": null } } ],
   "fallback": { "active": false, "since": null, "last": null } }
 ```
 
@@ -1104,6 +1101,6 @@ key, `403` with a valid non-admin key.
   "stages": { "…": "same as GET /health?details=1" }, "warnings": [],
   "declared": [{ "name": "parle-speech", "state": "in_sync", "reason": null, "image": "ghcr.io/marcosremar/parle-speech:<sha>" }],
   "deployments": { "deployments": 2, "replicas": 1, "listError": null,
-    "items": [{ "name": "parle-qwen-tts", "status": "ready", "replicas": 1, "ready": 1, "lastError": null }] }
+    "items": [{ "name": "parle-speech", "status": "ready", "replicas": 1, "ready": 1, "lastError": null }] }
 }
 ```

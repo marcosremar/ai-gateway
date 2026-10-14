@@ -1,9 +1,0 @@
-{
-  "name": "parle-qwen-tts",
-  "description": "parle: retired on 14/10/2026 (owner: «usa máquinas do vast.ai», Scaleway no longer used): the cast's cloned voices are served by parle-speech on Vast in the EU (the parle-tts route names it); paused here, so neither its class window nor the parle backend's wake asks for its Scaleway L4s; the monthly ceiling stays",
-  "spec": {
-    "paused": true,
-    "euOnly": true,
-    "scaling": { "budget": { "eurPerMonth": 150 } }
-  }
-}

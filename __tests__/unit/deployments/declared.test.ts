@@ -190,12 +190,13 @@ describe('declared parle-speech spec', () => {
     await new DeclaredDeploymentReconciler({ target: c, env: {} }).reconcile();
     c.start();
     c.wake('parle-speech');
-    await until(() => vast.created.length === 1, 3000);
+    const speechReplicas = () => vast.created.filter(x => x.spec.name === 'parle-speech');
+    await until(() => speechReplicas().length === 1, 3000);
     expect(scaleway.created).toHaveLength(0);
-    expect(vast.created[0].spec).toMatchObject({ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3, euOnly: true, image: GHCR_IMAGE, entrypoint: 'bash' });
-    expect(vast.created[0].spec.files).toBeUndefined();
-    expect(Object.keys(vast.created[0].spec.fileUrls ?? {})).toEqual(Object.keys(PRODUCTION.files));
-    expect(vastUnfit(vast.created[0].spec)).toBeNull();
+    expect(speechReplicas()[0].spec).toMatchObject({ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3, euOnly: true, image: GHCR_IMAGE, entrypoint: 'bash' });
+    expect(speechReplicas()[0].spec.files).toBeUndefined();
+    expect(Object.keys(speechReplicas()[0].spec.fileUrls ?? {})).toEqual(Object.keys(PRODUCTION.files));
+    expect(vastUnfit(speechReplicas()[0].spec)).toBeNull();
   });
 
   it('no RTX 3090 in the EU under the cap: the class replica is the next rung, an RTX 4090, never Scaleway', async () => {
@@ -228,18 +229,17 @@ describe('declared parle-speech spec', () => {
   });
 });
 
-describe('declarations owned by another registrant (parle-qwen-tts, parle-speech-s2s, parle-livekit)', () => {
-  const QWEN_TTS = {
+describe('declarations owned by another registrant (parle-livekit)', () => {
+  const GPU = {
     image: 'vllm/vllm-omni:v0.28.0', port: 8091, healthPath: '/health', machineType: 'L4-1-24G', zone: 'fr-par-2', gpu: true,
     minReplicas: 0, maxReplicas: 2, minActiveReplicas: 2, idleMinutes: 15, bootTimeoutMinutes: 45, maxEurPerHour: 1,
     scaling: { mode: 'balanced' }, bootScript: 'echo tts',
   };
 
-  it('every parle deployment has a monthly ceiling; parle-speech is 3 warm Mon-Thu 16:40-20:30 Paris, parle-qwen-tts paused', () => {
+  it('every parle deployment has a monthly ceiling; parle-speech is 3 warm Mon-Thu 16:40-20:30 Paris', () => {
     const budget = (name: string) => (DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.scaling as { budget: { eurPerMonth: number } }).budget.eurPerMonth;
-    expect(['parle-speech', 'parle-qwen-tts', 'parle-speech-s2s', 'parle-livekit'].map(budget)).toEqual([450, 150, 50, 60]);
+    expect(['parle-speech', 'parle-livekit'].map(budget)).toEqual([450, 60]);
     expect((speech.spec.warmSchedule as unknown[])[0]).toMatchObject({ ...CLASS_WINDOW, minReplicas: 3 });
-    expect(DECLARED_DEPLOYMENTS.find(d => d.name === 'parle-qwen-tts')!.spec).toMatchObject({ paused: true });
   });
 
   it('no declared GPU names Scaleway, and every parle GPU rents only EU hosts (owner, 14/10/2026)', async () => {
@@ -254,39 +254,37 @@ describe('declarations owned by another registrant (parle-qwen-tts, parle-speech
     for (const d of DECLARED_DEPLOYMENTS.filter(x => !x.profile)) {
       expect(Object.keys(d.spec).filter(k => ['provider', 'machineType', 'zone', 'placements', 'candidates'].includes(k)), d.name).toEqual([]);
     }
-    for (const name of ['parle-qwen-tts', 'parle-speech-s2s']) expect(DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.euOnly).toBe(true);
   });
 
-  it('with Scaleway GPUs off, the parle client\'s Scaleway registration is refused with the reason; a pause still goes through', async () => {
+  it('with Scaleway GPUs off, a Scaleway GPU registration is refused with the reason; a pause still goes through', async () => {
     const off = 'Scaleway desativada (dono, 14/10/2026)';
     const { c } = await controller(new MemoryDeploymentStore(), Object.assign(new FakeCloud(), { gpuOff: off }));
-    await expect(c.put('parle-qwen-tts', QWEN_TTS, { app: 'parle' })).rejects.toThrow(
-      "Scaleway desativada (dono, 14/10/2026): 'parle-qwen-tts' asks for scaleway L4-1-24G; GPUs run on vast only (provider \"vast\")",
+    await expect(c.put('some-tts', GPU, { app: 'parle' })).rejects.toThrow(
+      "Scaleway desativada (dono, 14/10/2026): 'some-tts' asks for scaleway L4-1-24G; GPUs run on vast only (provider \"vast\")",
     );
-    await expect(c.put('parle-qwen-tts', { ...QWEN_TTS, candidates: [{ zone: 'nl-ams-1', machineType: 'L4-1-24G', maxEurPerHour: 1 }] })).rejects.toThrow(/^Scaleway desativada [^]*$/);
-    await expect(c.put('parle-livekit', { ...QWEN_TTS, machineType: 'POP2-HC-48C-96G', gpu: false, bootScript: 'echo lk' })).resolves.toBeTruthy();
-    await expect(c.put('parle-qwen-tts', { ...QWEN_TTS, paused: true })).resolves.toBeTruthy();
-    await expect(c.put('parle-qwen-tts', { paused: false })).rejects.toThrow(off);
+    await expect(c.put('some-tts', { ...GPU, candidates: [{ zone: 'nl-ams-1', machineType: 'L4-1-24G', maxEurPerHour: 1 }] })).rejects.toThrow(/^Scaleway desativada [^]*$/);
+    await expect(c.put('parle-livekit', { ...GPU, machineType: 'POP2-HC-48C-96G', gpu: false, bootScript: 'echo lk' })).resolves.toBeTruthy();
+    await expect(c.put('some-tts', { ...GPU, paused: true })).resolves.toBeTruthy();
+    await expect(c.put('some-tts', { paused: false })).rejects.toThrow(off);
   });
 
-  it('not registered yet: pending, nothing created; registered by the parle client: paused by the declaration, then in sync', async () => {
+  it('not registered yet: pending, nothing created; registered by its owner: the declared fields are put back, then in sync', async () => {
     const { c, cloud } = await controller();
-    const owned = DECLARED_DEPLOYMENTS.filter(d => !d.image && d.app !== 'babelcast');
-    const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: owned });
+    const owned: DeclaredDeployment = { name: 'owned-tts', app: 'parle', spec: { paused: true, euOnly: true, scaling: { budget: { eurPerMonth: 150 } } } };
+    const r = new DeclaredDeploymentReconciler({ target: c, env: {}, declarations: [owned] });
     const first = await r.reconcile();
-    expect(first.map(s => s.state)).toEqual(['pending', 'pending', 'pending']);
+    expect(first.map(s => s.state)).toEqual(['pending']);
     expect(first[0].reason).toMatch(/registered by its owner/);
-    expect(c.specOf('parle-qwen-tts')).toBeNull();
-    await c.put('parle-qwen-tts', QWEN_TTS, { app: 'parle' });
+    expect(c.specOf('owned-tts')).toBeNull();
+    await c.put('owned-tts', GPU, { app: 'parle' });
     expect((await r.reconcile())[0]).toMatchObject({ state: 'applied', image: null });
-    expect(c.specOf('parle-qwen-tts')).toMatchObject({
-      image: QWEN_TTS.image, bootScript: 'echo tts', paused: true, euOnly: true, scaling: { mode: 'balanced', budget: { eurPerMonth: 150 } },
+    expect(c.specOf('owned-tts')).toMatchObject({
+      image: GPU.image, bootScript: 'echo tts', paused: true, euOnly: true, scaling: { mode: 'balanced', budget: { eurPerMonth: 150 } },
     });
-    expect(c.get('parle-qwen-tts')!.status).toBe('paused');
-    expect(c.get('parle-qwen-tts')!.app).toBe('parle');
-    await c.put('parle-qwen-tts', { ...QWEN_TTS, paused: false }, { app: 'parle' });
+    expect(c.get('owned-tts')!.status).toBe('paused');
+    await c.put('owned-tts', { ...GPU, paused: false }, { app: 'parle' });
     expect((await r.reconcile())[0].state).toBe('applied');
-    expect(c.specOf('parle-qwen-tts')).toMatchObject({ paused: true, scaling: { mode: 'balanced', budget: { eurPerMonth: 150 } } });
+    expect(c.specOf('owned-tts')).toMatchObject({ paused: true, scaling: { mode: 'balanced', budget: { eurPerMonth: 150 } } });
     expect((await r.reconcile())[0].state).toBe('in_sync');
     expect(cloud.created).toHaveLength(0);
   });
