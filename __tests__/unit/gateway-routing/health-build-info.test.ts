@@ -18,7 +18,7 @@ describe('GET /health says which code runs', () => {
   it('the admin details carry the image tags the build points at: edge sidecar, profiles, declared deployments (parle-speech pinned to its ghcr copy)', () => {
     const images = (env: Record<string, string>) => buildImages(env) as { edge: string; profiles: Record<string, string>; declared: Record<string, string> };
     expect(images({}).edge).toBe(DEFAULT_EDGE_IMAGE);
-    expect(images({}).profiles['speech-stack']).toMatch(/^rg\.fr-par\.scw\.cloud\/aigw\/speech-stack:\d{8}-\d{4}$/);
+    expect(images({}).profiles['speech-stack']).toMatch(/^ghcr\.io\/marcosremar\/speech-stack:\d{8}-\d{4}$/);
     expect(images({}).declared['parle-speech']).toMatch(/speech-stack:/);
     expect(images({ SPEECH_IMAGE: '20991231-0000' }).declared['parle-speech']).toBe('ghcr.io/marcosremar/speech-stack:20261011-0200');
     expect(minimalHealth({})).not.toHaveProperty('images');

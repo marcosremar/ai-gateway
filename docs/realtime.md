@@ -378,7 +378,7 @@ REALTIME_TURN_SECRET  coturn static-auth-secret (use-auth-secret)
 
 Per session (TURN REST API, what coturn implements): `username = "<exp>:<sid>"`, `credential =
 base64(HMAC-SHA1(secret, username))`, valid until the token expires. No URLs or no secret → no TURN server offered.
-The coturn deployment itself is a builtin deployment profile on the edge side; the gateway only consumes URL + secret.
+The gateway only consumes URL + secret; it does not run coturn (the `coturn` profile was removed on 14/10/2026).
 
 **Health** (`src/realtime/turn-health.ts`). Every `REALTIME_TURN_CHECK_MS` (default 30 s; `0` turns the check off) the
 gateway sends each TURN URL the first message of any TURN client — an Allocate request without credentials, over the

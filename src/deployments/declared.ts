@@ -19,8 +19,8 @@
  * Registering never starts a machine save a declared `initial.minReplicas` (set at creation only), and the reconciler never calls `wake`.
  * Replicas start when a request needs them, or inside a declared `warmSchedule` window, as for any other deployment.
  *
- * A declaration without `image` and `profile` belongs to another registrant (the parle client's backend PUTs
- * `parle-qwen-tts`): it never creates the deployment (pending until it exists) and only puts its own fields back.
+ * A declaration without `image` and `profile` belongs to another registrant (it PUTs the deployment itself): the
+ * reconciler never creates it (pending until it exists) and only puts its own fields back.
  *
  * A declared field the operator changed by hand (PUT/PATCH) is put back at the next reconcile; fields the declaration
  * does not hold (e.g. `paused`, and `env` when it declares neither `env` nor `generatedSecrets`) are left as the
@@ -32,9 +32,7 @@ import babelcast3090 from './declared/babelcast-3090.json';
 import babelcastSpeech from './declared/babelcast-speech.json';
 import babelcastTts from './declared/babelcast-tts.json';
 import parleLivekit from './declared/parle-livekit.json';
-import parleQwenTts from './declared/parle-qwen-tts.json';
 import parleSpeech from './declared/parle-speech.json';
-import parleSpeechS2s from './declared/parle-speech-s2s.json';
 import parleSpeechTest from './declared/parle-speech-test.json';
 import { DEFAULT_SCALING_MODE } from './scaling-spec';
 import type { DeploymentSpec, ScalingSpec } from './types';
@@ -57,12 +55,12 @@ export interface DeclaredDeployment {
  * `parle-speech`: the `speech-stack` image (public ghcr copy) on Vast hosts in the EU only (owner, 14/10/2026). The
  * declaration owns the image, provider, candidates, `euOnly`, the command, `realtime`, the class window, the `env`
  * (cleared) and `envByMachineType` per card; sizing, limits and files (the voice catalog) stay as registered (a new
- * gateway starts from the `speech-stack` profile). `parle-speech-test` is its copy for tests; `parle-qwen-tts` is
- * paused; the others own only their class window and monthly ceiling.
+ * gateway starts from the `speech-stack` profile). `parle-speech-test` is its copy for tests; the others own only
+ * their class window and monthly ceiling.
  * `babelcast-speech` and `babelcast-tts` own only their app (`babelcast`): no spec field, no machine.
  */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
-  parleSpeech, parleSpeechTest, parleQwenTts, parleSpeechS2s, parleLivekit,
+  parleSpeech, parleSpeechTest, parleLivekit,
   babelcastSpeech, babelcastTts, babelcast3090,
 ] as DeclaredDeployment[];
 

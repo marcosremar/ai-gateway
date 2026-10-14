@@ -6,6 +6,7 @@ import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { RateLimiter } from '../../../src/gateway/proxy/middleware/rate-limit';
 
 const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
+const SCALEWAY_L4 = { provider: 'scaleway', machineType: 'L4-1-24G', zone: 'fr-par-2', candidates: undefined, maxEurPerHour: 1 };
 
 function fakeClient() {
   return {
@@ -42,7 +43,7 @@ describe('ScalewayDeploymentBackend', () => {
   it('creates a tagged machine with the GPU OS image, the volume and the cloud-init', async () => {
     const client = fakeClient();
     const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
-    const spec = buildSpec('tts', { profile: 'qwen3-tts' }, { profiles });
+    const spec = buildSpec('tts', { profile: 'qwen3-tts', ...SCALEWAY_L4 }, { profiles });
     const machine = await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: '#!/bin/bash\necho hi', namespace: 'prod' });
     const [instanceSpec, creds] = client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>, { apiKey: string }];
     expect(instanceSpec).toMatchObject({
@@ -56,7 +57,7 @@ describe('ScalewayDeploymentBackend', () => {
   it('finds the matching GPU OS image in another zone', async () => {
     const client = fakeClient();
     const backend = new ScalewayDeploymentBackend('secret', { client: client as never });
-    const spec = buildSpec('tts', { profile: 'qwen3-tts', zone: 'nl-ams-2' }, { profiles });
+    const spec = buildSpec('tts', { profile: 'qwen3-tts', ...SCALEWAY_L4, zone: 'nl-ams-2' }, { profiles });
     await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' });
     expect((client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>])[0].imageId).toBe('img-in-ams');
   });
@@ -75,7 +76,7 @@ describe('ScalewayDeploymentBackend', () => {
   it('puts every gateway-only replica behind a drop-by-default firewall that opens only nginx :80', async () => {
     const client = fakeClient();
     const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
-    const spec = buildSpec('tts', { profile: 'qwen3-tts' }, { profiles });
+    const spec = buildSpec('tts', { profile: 'qwen3-tts', ...SCALEWAY_L4 }, { profiles });
     await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' });
     await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' });
     const calls = client.createInstance.mock.calls as unknown as Array<[Record<string, unknown>]>;
@@ -102,7 +103,7 @@ describe('ScalewayDeploymentBackend', () => {
     const client = fakeClient();
     client.createSecurityGroup.mockRejectedValueOnce(new Error('scaleway HTTP 500'));
     const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
-    const spec = buildSpec('tts', { profile: 'qwen3-tts' }, { profiles });
+    const spec = buildSpec('tts', { profile: 'qwen3-tts', ...SCALEWAY_L4 }, { profiles });
     await expect(backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' })).rejects.toThrow('HTTP 500');
     expect(client.createInstance).not.toHaveBeenCalled();
     await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod' });
@@ -112,7 +113,7 @@ describe('ScalewayDeploymentBackend', () => {
   it('an exposed replica keeps its own deployment firewall and reserved IP', async () => {
     const client = fakeClient();
     const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
-    const spec = buildSpec('tts', { profile: 'qwen3-tts' }, { profiles });
+    const spec = buildSpec('tts', { profile: 'qwen3-tts', ...SCALEWAY_L4 }, { profiles });
     await backend.createReplica({ spec, replicaToken: 't'.repeat(32), cloudInit: 'x', namespace: 'prod',
       network: { zone: 'fr-par-2', ipId: 'ip-1', ip: '51.0.0.9', groupId: 'sg-exposed' } });
     const call = (client.createInstance.mock.calls[0] as unknown as [Record<string, unknown>])[0];

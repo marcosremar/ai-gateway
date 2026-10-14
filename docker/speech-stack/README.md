@@ -19,9 +19,9 @@ open buffer through the decoder. Until `/health` is warm the socket closes with 
 
 Files: `Dockerfile`, `start.sh` (start order TTS → LLM → STT; refuses to start if llama.cpp sees no `CUDA0`),
 `server.py` (orchestrator + API, see its docstring), `test_cut.py` (sentence cutter), `bench.py` (latency bench).
-Build: `bun scripts/build-image-on-scaleway.ts docker/speech-stack speech-stack` → `rg.fr-par.scw.cloud/aigw/speech-stack:<tag>`.
-Deploy: `PUT /v1/deployments/<name>` with that `image`, `port: 8000`, `healthPath: /health`, `machineType: L4-1-24G`,
-`registryAuth` for the Scaleway registry, and the reference voices as `files` (`voices.json` + audio; see `load_voices`).
+Build: `.github/workflows/speech-stack.yml` → `ghcr.io/marcosremar/speech-stack:<tag>` (public).
+Deploy: `PUT /v1/deployments/<name>` with that `image`, `port: 8000`, `healthPath: /health`, `provider: vast`, `machineType: RTX 3090`,
+and the reference voices as `files` (`voices.json` + audio; see `load_voices`).
 
 ## Measured (2026-10-04, L4-1-24G fr-par-2, image `speech-stack:20261004-2129`, `STT_WORKERS=2`)
 

@@ -84,11 +84,9 @@ describe('placements: spec', () => {
     expect(otherZone.osImageId).toBeUndefined();
   });
 
-  it('the speech-stack profile: L40S fr-par-2 then pl-waw-2, then an H100 in both, never an L4 nor fr-par-1', () => {
+  it('the speech-stack profile has no Scaleway place: an RTX 3090 on Vast (owner, 14/10/2026)', () => {
     const spec = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
-    expect(placementsOf(spec).filter(p => p.provider === 'scaleway').map(p => `${p.zone}/${p.machineType} ≤ €${p.maxEurPerHour}`)).toEqual([
-      'fr-par-2/L40S-1-48G ≤ €2', 'pl-waw-2/L40S-1-48G ≤ €2', 'fr-par-2/H100-1-80G ≤ €3', 'pl-waw-2/H100-1-80G ≤ €3',
-    ]);
+    expect(placementsOf(spec).map(p => `${p.provider} ${p.machineType} ≤ €${p.maxEurPerHour}`)).toEqual(['vast RTX 3090 ≤ €0.3']);
   });
 
   it('a Scaleway placement may carry its own price cap; maxReplicas stays for another provider', () => {

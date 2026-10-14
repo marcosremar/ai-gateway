@@ -1,9 +1,0 @@
-{
-  "name": "parle-speech-s2s",
-  "description": "parle: the speech-to-speech deployment, registered by its owner; declared here the monthly ceiling and euOnly (student audio does not leave the EU); since 14/10/2026 a Scaleway GPU spec is refused (owner: GPUs on Vast only) and it is paused: parle has one GPU, parle-speech (owner, 14/10/2026: one GPU per app)",
-  "spec": {
-    "paused": true,
-    "scaling": { "budget": { "eurPerMonth": 50 } },
-    "euOnly": true
-  }
-}

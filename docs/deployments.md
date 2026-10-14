@@ -108,7 +108,7 @@ sizes) won over `envByMachineType` on every card and would not fit a 24 GB one. 
 (aquecimento da aula: the class starts at 17:40 and a cold Vast boot took 16–20 min on 14/10/2026): **1 replica warm**
 (`maxReplicas 1`; `reserveQuota: null`, it was a Scaleway quota reservation), €450/month ceiling. Since 14/10 it also
 serves the cast's **cloned voices** for the `parle-tts` alias (the parle routes name
-it; `parle-qwen-tts` is paused): the gateway reads the image's voice list at `/v1/voices` (docs/api/http.md). The
+it; the separate `parle-qwen-tts` TTS deployment is gone): the gateway reads the image's voice list at `/v1/voices` (docs/api/http.md). The
 voice catalog is the registered `files` (`voices.json` + audio), served to the Vast host by signed links on the
 gateway (§ `files` on a Vast placement); to change a voice, `PUT` the `files` again (admin). Port, idle and
 boot times, hour limits and volume stay as registered. On a gateway where `parle-speech` does not exist it is created
@@ -137,6 +137,11 @@ app's one GPU: a start while `parle-speech` runs is refused (409, the cloud answ
 `parle-speech` takes the GPU back (the test copy's replica is released, reason `class-priority`). It follows the voice
 catalog (`files`) of `parle-speech`: a catalog re-registered there reaches the copy at the next reconcile. Start it
 ~15 min before a test (a Vast host pulls the ~57 GB image from ghcr).
+
+`parle-qwen-tts` and `parle-speech-s2s` (Scaleway L4 deployments, registered by the parle backend) were retired on 14/10/2026:
+their declarations are gone and the registered deployments were deleted. The parle routes name `parle-speech` for
+`parle-tts` (one GPU serves STT, LLM and the cast's cloned voices); a route that still names `parle-qwen-tts` is skipped
+as an unregistered deployment and goes to its `oneGpuDeployment` (docs/api/http.md § App aliases) or the cloud reserve.
 
 ### One GPU per app (owner, 14/10/2026)
 
@@ -191,9 +196,6 @@ To change the **default** for good instead, edit `spec.candidates` of `src/deplo
 repeating the first rung; update the one-RTX-3090 test in `declared.test.ts` with the owner's decision; land the PR;
 then `bun run deploy:prod`. A card with no `envByMachineType` entry runs the image defaults: add its sizes first.
 
-`parle-qwen-tts` (`declared/parle-qwen-tts.json`) is **paused** since 14/10/2026: its replicas were Scaleway L4s; the
-declaration puts `paused` back if the parle backend re-registers it.
-
 One-GPU mode: the parle TTS entry names `parle-qwen-tts` with `"oneGpuDeployment": "parle-speech"` (the app's own
 routes, [docs/api/http.md](api/http.md) § App aliases); while `parle-qwen-tts` is not registered
 and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate TTS machine, register
@@ -238,7 +240,7 @@ student audio to it.
 **Parked (owner, 12/10/2026): no GPU for a new custom model for now.** Both specs live in
 `src/deployments/parked/` and are not in `DECLARED_DEPLOYMENTS`: the gateway never registers them, so nothing starts
 them — no schedule, no request, no `/wake`, no dev key. The parked spec has no `warmSchedule`. The class keeps its GPUs
-as before (`parle-speech`, `parle-qwen-tts`). To turn it back on: set `HF_BRIDGE_READ_TOKEN` (read-only), move both
+as before (`parle-speech`). To turn it back on: set `HF_BRIDGE_READ_TOKEN` (read-only), move both
 files back to `src/deployments/declared/`, import them in `declared.ts`, put the class-window `warmSchedule` back on
 `parle-bridge-shadow` (Mon–Thu 17:30–20:30 Europe/Paris, `minReplicas: 1`), replace the parked test in
 `__tests__/unit/deployments/declared.test.ts`, then publish the gateway. What follows describes it as it was declared.
@@ -257,7 +259,7 @@ mode:** parle sends it the same audio and context as the real turn, and its answ
   utterances of different lengths on A100/H100 (bridge repo, 12/10/2026); `MTMD_AUDIO_TRIM=1` is the trim the `conv`
   projector was trained and evaluated with.
 - **GPU:** one RTX 3090 24 GB (≤ €0.30/h), then an RTX 4090 (≤ €0.50/h); the model needs ≈ 11 GB with 8 slots. Never
-  a Scaleway L4: the account's two L4 are the class TTS's (`parle-qwen-tts`) in the same window.
+  a Scaleway GPU (retired).
 - **Window:** `warmSchedule` Mon–Thu 17:30–20:30 Paris, the parle class window; `idleMinutes 10`, `idleAction:
   "delete"`. Outside it nothing starts it: parle calls it with `X-Gateway-No-Wake: 1`, so a cold shadow answers 503 at
   once instead of waking. `parle-bridge-shadow-test` (`testFor`, no schedule) is the copy a dev key with
@@ -285,7 +287,7 @@ all apps, no per-app override). Before an app serves a class, size both from stu
 example in `docs/api/http.md` § App keys) and watch `appBudgets` in `GET /health?details=1` during the lesson.
 
 ```bash
-# Save (or move) an image address — build-image-on-scaleway.ts --app parle does this after a push
+# Save (or move) an image address
 curl -X PUT $GW/v1/apps/parle/images/speech-stack -H "Authorization: Bearer $ADMIN_KEY" -H 'X-App: parle' -d '{
   "image": "rg.fr-par.scw.cloud/aigw/speech-stack:20261006-0107", "port": 8000, "healthPath": "/health",
   "defaults": {"machineType": "L40S-1-48G", "volumeGb": 120, "maxReplicas": 2, "bootTimeoutMinutes": 45}
@@ -316,7 +318,7 @@ stops an unmodified client, not a forged id — an app that needs more mints the
 
 ### Profile of an app: GPU required, probed, status
 
-`PUT /v1/apps/:app/profile` `{ "requiresGpu": true, "gpuDeployments": ["parle-speech", "parle-qwen-tts"] }` (an admin,
+`PUT /v1/apps/:app/profile` `{ "requiresGpu": true, "gpuDeployments": ["parle-speech"] }` (an admin,
 or the app's own key naming only deployments of its app; stored in `apps.json`). For each listed deployment the gateway
 probes every **ready** replica every 2 min with one minimal real call per stage it serves (`src/deployments/gpu-probe.ts`:
 STT a short WAV, chat 1 token, TTS one word in a cloned voice of the replica's catalog), straight on the replica — it
@@ -493,7 +495,7 @@ not worth a replica is left to the fallback:
 ```
 
 `mode` is `economy`, `balanced` (default) or `fast`; `"scaling": null` goes back to the default mode. The built-in
-voice profiles (`speech-stack`, `qwen3-tts`, `qwen3-tts-clone`) declare `fast`, `whisper-stt` declares `balanced`. Load is counted in the unit of
+voice profiles (`speech-stack`, `qwen3-tts`, `qwen3-tts-clone`) declare `fast`. Load is counted in the unit of
 `targetInflightPerReplica`: requests in flight + waiting, a refused request for the 1.5 s the fallback takes to answer
 it, and, when the controller is given session counts (`ControllerOptions.sessions(deployment)`: distinct realtime
 sessions wanting a slot, seated or refused; `null` = not available, the default), `sessions × target / ceiling`. Booting
@@ -618,10 +620,9 @@ earlier places were skipped.
   (same digest) on Vast, where its `RTX 5090` env also names `TTS_MODEL` and `LLM_FILE` (the image's own `ENV`, which
   `start.sh` reads under `set -u`).
   `idleAction: "stop"` is accepted: the Vast replica is deleted where a Scaleway one is parked. `minCuda`, `near`,
-  `maxRttMs` and `maxRttExcessMs` of the spec apply to it. The built-in profiles: `speech-stack` L40S fr-par-2 →
-  L40S fr-par-1 → one RTX 5090 on Vast (no L4: the account's L4 quota of 2 belongs to the TTS); `qwen3-tts` and
-  `qwen3-tts-clone` L4 fr-par-2 → L4 fr-par-1 → up to two RTX 5090 on Vast; `whisper-stt` is a CPU deployment and
-  stays on Scaleway (Vast rents GPU hosts only). Not run live under these profiles.
+  `maxRttMs` and `maxRttExcessMs` of the spec apply to it. Since 14/10/2026 the built-in GPU profiles are Vast only:
+  `speech-stack` an RTX 3090 (≤ €0.30/h; a declaration adds the 4090/5090 `candidates`), `qwen3-tts` and `qwen3-tts-clone` the
+  ladder RTX 3090 → 4090 → 5090. The `whisper-stt` and `coturn` profiles (Scaleway CPU machines) were removed.
 - **`candidates`**: the ranked, multi-provider ladder below, a cap per entry.
 
 Without either, a spec has one place: `provider` + `zone` + `machineType`, refused above `maxEurPerHour` (as before).
@@ -880,8 +881,8 @@ curl -s -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/j
 }'
 ```
 
-and on the gateway service `DEPLOYMENTS_MAX_REPLICAS=10` (8 + the two L4 of `parle-qwen-tts`; today 4) and
-`DEPLOYMENTS_MAX_EUR_PER_HOUR=10` (today 6: 2 × €1.47 + 6 Vast replicas + the two L4 at €0.79 is ≈ €8/h). `placements`
+and on the gateway service `DEPLOYMENTS_MAX_REPLICAS=10` (today 4) and
+`DEPLOYMENTS_MAX_EUR_PER_HOUR=10` (today 6). `placements`
 is declared in `src/deployments/declared/parle-speech.json` and put back by the reconciler: change it there (the
 `PATCH` above is for a test gateway). The window opens 35 min before the class because a boot from scratch took
 6.5–19.5 min and the pull of the 22 GB image on a Vast host is not measured; shorten it once it is.
@@ -1135,7 +1136,6 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GROQ_API_KEY` | optional now; only the Groq-backed cloud routes need it |
 | `GHCR_READ_TOKEN` | registry credential of a declared deployment whose `registryAuth.passwordEnv` names it (none today: `parle-speech` needs no token) |
 | `SCW_REGISTRY_SECRET_KEY` | secret key of a Scaleway IAM application whose only policy is `ContainerRegistryReadOnly`: what replicas log in to `rg.<region>.scw.cloud` with (never `SCW_SECRET_KEY`); read at boot |
-| `SCW_REGISTRY_PUSH_SECRET_KEY` | secret key of the IAM application `aigw-registry-push` (only `ContainerRegistryFullAccess` on the project): what the build machine of `scripts/build-image-on-scaleway.ts` logs in with to push; the script refuses to start without it |
 | `SPEECH_IMAGE` | image (tag or full ref) of the declared `parle-speech`; default in the declaration |
 | `DECLARED_DEPLOYMENTS=0` | turns off the declared-deployments reconciler |
 | `DEPLOYMENTS_MAX_WAIT_SECONDS` | longest wait of an invoke through a cold start (240; § Cold start) |
