@@ -13,6 +13,17 @@ if (!demoStates.includes(state)) throw new Error(`ADMIN_DEMO_STATE must be one o
 
 const DEMO_COOKIE = 'aigw_demo';
 const dismissed: Record<string, number> = {};
+const gpuTypes: Record<string, { machineType: string | null; at: number }> = {};
+
+function withGpuTypes(snapshot: ReturnType<typeof demoSnapshot>): ReturnType<typeof demoSnapshot> {
+  for (const d of snapshot.gpus ?? []) {
+    const set = gpuTypes[d.name];
+    if (!set || !d.gpuType) continue;
+    d.gpuType = { ...d.gpuType, current: set.machineType ?? d.gpuType.default, setBy: set.machineType ? 'marcos' : null,
+      setAt: set.machineType ? new Date(set.at).toISOString() : null };
+  }
+  return snapshot;
+}
 
 const page = createAdminPage({
   actorOf: (given) => {
@@ -20,7 +31,8 @@ const page = createAdminPage({
     if (appKey && given === appKey) return { name: 'parle', app: 'parle', mayPark: () => true };
     return null;
   },
-  snapshot: () => ({ ...demoSnapshot(Date.now(), state), dismissed }),
+  snapshot: () => ({ ...withGpuTypes(demoSnapshot(Date.now(), state)), dismissed }),
+  gpuType: async (name, machineType) => { gpuTypes[name] = { machineType, at: Date.now() }; },
   dismiss: async (id) => { dismissed[id] = Date.now() + 7 * 86_400_000; },
   park: async () => {},
   probe: async () => {},

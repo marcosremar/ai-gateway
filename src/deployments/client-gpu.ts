@@ -79,7 +79,7 @@ export class ClientGpu {
     if (extend && !open) throw new DeploymentError(404, `this key has no GPU running on '${name}' to extend — POST /v1/deployments/${name}/start first`);
     const until = (open && extend ? Math.max(open.until, now) : now) + minutes * 60_000;
     if (until - now > MAX_START_MINUTES * 60_000) throw new DeploymentError(400, `a GPU is started at most ${MAX_START_MINUTES} min ahead`);
-    const asked = view.spec.maxEurPerHour * minutes / 60;
+    const asked = (view.gpuType?.choices.find(c => c.machineType === view.gpuType!.current)?.maxEurPerHour ?? view.spec.maxEurPerHour) * minutes / 60;
     const spent = this.spentToday(key.keyId);
     if (policy.gpuDailyEur !== null && spent + asked > policy.gpuDailyEur) {
       throw new DeploymentError(402, `daily GPU cap of this key reached: €${cents(spent)} spent today (UTC), €${cents(asked)} more asked, cap €${policy.gpuDailyEur}. `

@@ -568,7 +568,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
     if (action === 'offers' && method === 'GET') {
       admin();
-      const preview = await controller.offers(name);
+      const preview = await controller.offers(name, new URLSearchParams(query.slice(1)).get('machineType') ?? undefined);
       return preview ? send(res, 200, { deployment: name, ...preview }) : send(res, 404, { error: `deployment '${name}' has no vast placement` });
     }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });

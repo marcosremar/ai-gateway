@@ -38,6 +38,7 @@ export interface AdminPageOptions {
   snapshot: () => AdminSnapshot;
   park: (deployment: string, actor: AdminActor) => Promise<unknown>;
   pin?: (deployment: string, on: boolean) => Promise<unknown>;
+  gpuType?: (deployment: string, machineType: string | null, now: boolean, actor: string) => Promise<unknown>;
   probe: () => Promise<unknown>;
   dismiss?: (id: string) => Promise<unknown>;
   sendDigest?: () => Promise<string | null>;
@@ -211,6 +212,19 @@ export function createAdminPage(opts: AdminPageOptions) {
     redirect(res, backTo(form, '/admin/gpus', failed ? `Falhou ao ${on ? 'fixar' : 'soltar'} ${name}: ${failed}` : done, '#gpus'));
   });
 
+  const gpuType = guarded(async (res, { session, form }) => {
+    const name = form.get('name') ?? '';
+    const type = form.get('machineType') || null;
+    const now = form.get('now') === '1';
+    if (session.role !== 'admin' || !opts.gpuType) return refuse(res, session, 'admin-page.gpu-type', [name]);
+    const failed = await opts.gpuType(name, type, now, session.actor.name).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
+    const chosen = type ?? 'o tipo padrão';
+    opts.audit?.({ actor: session.actor.name, action: 'admin-page.gpu-type', names: [name], ok: !failed, detail: failed ?? `${chosen}${now ? ', agora' : ''}` });
+    const done = now ? `${name}: ${chosen} agora; a GPU reinicia (~20 min fria) e a reserva da nuvem responde enquanto isso.`
+      : `${name}: ${chosen} na próxima partida da GPU; a que está ligada continua.`;
+    redirect(res, backTo(form, '/admin/gpus', failed ? `Falhou ao trocar a GPU de ${name}: ${failed}` : done, '#gpus'));
+  });
+
   const dismiss = guarded(async (res, { session, form }) => {
     const id = form.get('id') ?? '';
     if (session.role !== 'admin' || !opts.dismiss) return refuse(res, session, 'admin-page.dismiss', [id]);
@@ -266,7 +280,7 @@ export function createAdminPage(opts: AdminPageOptions) {
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([
     ['GET /admin', status], ['GET /admin/servicos', status], ['GET /admin/gpus', status], ['GET /admin/gastos', status], ['GET /admin/chaves', status],
     ['GET /admin/atividade', status], ['POST /admin/login', login],
-    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss], ['POST /admin/digest', digest],
+    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/gpu-type', gpuType], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss], ['POST /admin/digest', digest],
   ]);
 
   function handle(req: IncomingMessage, res: ServerResponse): boolean {

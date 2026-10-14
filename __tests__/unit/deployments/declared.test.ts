@@ -61,7 +61,8 @@ const DECLARED_EXTRA = {
 };
 /** The class ladder on Vast, EU hosts only: one RTX 3090, nothing pricier behind it (owner, 14/10/2026). */
 const CANDIDATES = [{ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3 }];
-const SIZED = ['RTX 3090', 'RTX 4090', 'L40S', 'RTX 5090'];
+const SIZED = ['RTX 3090', 'RTX 4090', 'L40S', 'RTX 5090', 'H100 SXM', 'H100 PCIE'];
+const CAPS = { 'RTX 3090': 0.3, 'RTX 4090': 0.85, 'RTX 5090': 0.85, L40S: 0.85, 'H100 SXM': 2.5, 'H100 PCIE': 2.5 };
 const DECLARED_ENV = speech.spec.envByMachineType as Record<string, Record<string, string>>;
 const GHCR_IMAGE = 'ghcr.io/marcosremar/speech-stack:20261011-0200';
 const ON_VAST = { provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3, euOnly: true, placements: [], idleAction: 'delete' };
@@ -91,11 +92,14 @@ describe('declared parle-speech spec', () => {
     expect(speech.spec).toEqual({
       ...DECLARED_EXTRA, ...ON_VAST, reserveQuota: null, candidates: CANDIDATES,
       realtime: {}, scaling: { ...profile.scaling, budget: { eurPerMonth: 450 } },
-      envByMachineType: DECLARED_ENV,
+      envByMachineType: DECLARED_ENV, maxEurPerHourByMachineType: CAPS,
     });
     expect(Object.keys(DECLARED_ENV)).toEqual(SIZED);
     expect(DECLARED_ENV['RTX 5090']).toEqual(profile.envByMachineType!['RTX 5090']);
     expect(DECLARED_ENV.L40S).toMatchObject({ STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '4', LLM_SLOT_CTX: '4096' });
+    for (const h100 of ['H100 SXM', 'H100 PCIE']) {
+      expect(DECLARED_ENV[h100]).toMatchObject({ STT_BATCH: '16', LLM_PARALLEL: '32', LLM_SLOT_CTX: '4096', TTS_STAGE0_MB: '20000', RT_MAX_SESSIONS: '8' });
+    }
     expect(DECLARED_ENV['RTX 4090']).toMatchObject({ STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '2' });
     expect(DECLARED_ENV['RTX 3090']).toEqual(DECLARED_ENV['RTX 4090']);
     expect(JSON.stringify(speech)).not.toMatch(/GHCR_READ_TOKEN|ghp_|password"\s*:/);
@@ -128,7 +132,7 @@ describe('declared parle-speech spec', () => {
       image: GHCR_IMAGE,
       scaling: { mode: 'fast', budget: { eurPerMonth: 450 } },
       realtime: {},
-      envByMachineType: { ...PRODUCTION.envByMachineType, ...DECLARED_ENV },
+      envByMachineType: { ...PRODUCTION.envByMachineType, ...DECLARED_ENV }, maxEurPerHourByMachineType: CAPS,
     });
     expect(placementsOf(c.specOf('parle-speech')!).map(p => p.provider)).toEqual(['vast']);
     expect(c.specOf('parle-speech')!.registryAuth).toBeUndefined();

@@ -26,6 +26,7 @@ import { noUseActive } from '../gateway/proxy/no-wake';
 import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
 import { placementsOf } from './placements';
+import { gpuTypeChoices, withGpuType } from './gpu-type';
 import { buildSpec, isGpuMachineType, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
 import type { CreditIssue, DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
 import type { BootHistory } from './boot-track';
@@ -254,6 +255,22 @@ export class DeploymentController extends ControllerViews {
    * forget the last use, and the next tick scales to `minReplicas` — powering off under `idleAction: 'stop'`. A
    * request or `wake` brings it back; in-flight requests are never cut (the planner keeps busy replicas).
    */
+  async setGpuType(name: string, machineType: string | null, now: boolean, by: string): Promise<DeploymentView> {
+    const rt = this.require(name);
+    const choices = gpuTypeChoices(rt.record.spec);
+    if (machineType !== null && !choices.some(c => c.machineType === machineType)) {
+      throw new SpecError(`${machineType} is not a GPU type of '${name}' (${choices.map(c => c.machineType).join(', ')})`);
+    }
+    const custom = machineType !== null && machineType !== choices[0]!.machineType;
+    rt.record = { ...rt.record, gpuType: custom ? { machineType, by, at: this.now() } : undefined };
+    await this.opts.store.saveDeployment(rt.record);
+    const target = withGpuType(rt.record.spec, rt.record.gpuType?.machineType).machineType;
+    this.log('deployments: GPU type set', { deployment: name, machineType: target, by, now });
+    if (now) for (const m of this.machines.filter(x => x.deployment === name && x.machineType !== target)) await this.release(m, 'gpu-type');
+    this.kick();
+    return this.view(name)!;
+  }
+
   async park(name: string): Promise<DeploymentView> {
     const rt = this.require(name);
     rt.record.lastRequestAt = null;
