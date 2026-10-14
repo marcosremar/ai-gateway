@@ -815,6 +815,7 @@ their own (`404` for the rest). Prices are in USD per hour (Scaleway's EUR price
 |---|---|---|
 | `POST` | `/v1/machines` | rent one machine (body below); `201` with the machine |
 | `GET` | `/v1/machines` | `{ namespace, scope, providers, machines: [...] }` |
+| `POST` | `/v1/machines/offers` | machine body: the 10 best Vast offers for it (nothing rented) |
 | `GET` | `/v1/machines/costs` | spend per owner (24 h, month, committed), per holder, per machine; global for an admin |
 | `GET` | `/v1/machines/:id` | one machine: `status` (`creating`, `running`, `released`, `failed`), `ip`, `ports` (`"22/tcp"` → public port), `usdPerHour`, `costUsd`, `deadlineAt`, `endReason` |
 | `DELETE` | `/v1/machines/:id` | release now (`endReason: "deleted"`) |
@@ -840,6 +841,7 @@ Machine body:
 | `onstart` | bash run as root once the host is up (machines only) |
 | `env` | container environment; values never come back (only `envKeys`) |
 | `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `vm` | `true`: a Vast KVM virtual machine (hosts with `vms_enabled`) instead of a container; `image` defaults to `docker.io/vastai/kvm:ubuntu_terminal` and must be a `docker.io/vastai/kvm` tag; `sshPublicKey` goes on the Vast account (a VM reads only those); `machineType: "any"` takes any GPU |
 | `minCpuCores` / `minRamGb` | Vast host with at least that many effective CPU cores / GB of RAM; sends a `cheapest` request to Vast, 400 on Scaleway/RunPod (name a `machineType` that has them) |
 | `holder` | the agent inside the owner (its own 24 h cap) |
 

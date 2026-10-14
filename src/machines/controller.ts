@@ -59,6 +59,12 @@ export class MachineController {
     this.log = opts.log ?? (() => {});
   }
 
+  async offers(request: MachineRequest): Promise<unknown[]> {
+    const backend = this.opts.backends.vast;
+    if (!backend?.offers) throw new MachineError(400, 'offers are listed for vast only');
+    return (await backend.offers(request)).slice(0, 10);
+  }
+
   get providers(): MachineProvider[] {
     return Object.keys(this.opts.backends) as MachineProvider[];
   }
