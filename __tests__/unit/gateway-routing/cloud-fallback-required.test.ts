@@ -49,6 +49,22 @@ describe('app routes: a chain without a cloud link is completed, an explicit opt
     expect(targets(routes.stt?.['babelcast-stt'])).toContain('openrouter:openai/whisper-large-v3-turbo');
   });
 
+  it('babelcast-tts-kokoro (docs/deployments.md): the speech-stack GPUs with model kokoro, then OpenRouter Kokoro; nothing appended', async () => {
+    const apps = new AppRegistry(new MemoryAppStore());
+    const kokoro = { tts: { 'babelcast-tts-kokoro': [
+      'deployment:babelcast-3090:kokoro', 'deployment:babelcast-speech:kokoro', 'openrouter:hexgrad/kokoro-82m',
+    ] } };
+    const { routes, cloudFallbackAdded } = await apps.putRoutes('babelcast', kokoro, {
+      restrictedTo: d => d.startsWith('babelcast-'), appOf: d => (d.startsWith('babelcast-') ? 'babelcast' : null),
+    });
+    expect(cloudFallbackAdded).toEqual([]);
+    expect(routes.tts?.['babelcast-tts-kokoro']).toEqual([
+      { provider: 'deployment', deployment: 'babelcast-3090', model: 'kokoro' },
+      { provider: 'deployment', deployment: 'babelcast-speech', model: 'kokoro' },
+      { provider: 'openrouter', model: 'hexgrad/kokoro-82m' },
+    ]);
+  });
+
   it('"cloudFallback": false is refused with a clear 400 and nothing is saved', async () => {
     const apps = new AppRegistry(new MemoryAppStore());
     const err = await apps.putRoutes('babelcast', { ...BABELCAST, cloudFallback: false }).catch(e => e as AppError);
