@@ -76,6 +76,19 @@ describe('GPU type of a deployment, chosen in the panel (owner, 14/10/2026)', ()
     expect(most()).toBe(1);
   });
 
+  it('the admin offer preview searches the chosen type at its own cap, or at a cap asked for the preview only', async () => {
+    const { c, vast } = await setup();
+    const seen: Array<{ machineType: string; maxEurPerHour: number }> = [];
+    vast.previewOffers = async (spec) => { seen.push({ machineType: spec.machineType, maxEurPerHour: spec.maxEurPerHour }); return []; };
+    await c.offers('parle-speech', 'H100 SXM');
+    await c.offers('parle-speech', 'H100 SXM', 4);
+    await c.offers('parle-speech');
+    expect(seen).toEqual([
+      { machineType: 'H100 SXM', maxEurPerHour: 2.5 }, { machineType: 'H100 SXM', maxEurPerHour: 4 }, { machineType: 'RTX 3090', maxEurPerHour: 0.3 },
+    ]);
+    expect(c.specOf('parle-speech')!.maxEurPerHour).toBe(0.3);
+  });
+
   it('«voltar ao padrão» clears the choice; a type the deployment does not size is refused', async () => {
     const { c } = await setup();
     await c.setGpuType('parle-speech', 'H100 PCIE', false, 'marcos');
