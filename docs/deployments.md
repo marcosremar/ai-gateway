@@ -152,7 +152,10 @@ catalog (`files`) of `parle-speech`: a catalog re-registered there reaches the c
   provider list stops showing it, and only then is the next one rented.
 - **Class first:** while a deployment's `warmSchedule` window is open, another GPU deployment of the same app gets no
   slot, and one it holds is released (`class-priority`). Today that is `parle-speech` over `parle-speech-test`.
-- **Apps are apart:** `parle` and `babelcast` (`babelcast-3090`, pinned) each run one at the same time.
+- **Apps are apart:** `parle` and `babelcast` (`babelcast-3090`, pinned) each run one at the same time. The other GPU
+  deployments of an app are paused by their declarations, so they never take the slot on another card:
+  `parle-speech-s2s` and `parle-qwen-tts` (Scaleway L4s), `babelcast-speech` and `babelcast-tts` (RTX 5090s, registered
+  by babelcast; their route falls through to the next link).
 - **`/v1/machines`** counts per owner (the calling key's app, e.g. `parle-dev`): one active GPU machine (Vast, RunPod,
   a Scaleway GPU type); a second is refused with 409 until the first is released. Machines and deployments are counted
   apart (no deployment belongs to a machine owner today).
