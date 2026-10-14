@@ -102,7 +102,7 @@ would be refused on Vast), `minCuda: 13` (the image is CUDA 13), `idleAction: "d
 `envByMachineType` sizes each card (5090 and L40S: `STT_BATCH 8`, `LLM_PARALLEL 16`, `RT_MAX_SESSIONS 4`; the 24 GB
 4090: the L4 settings, `STT_BATCH 4`, `LLM_PARALLEL 8` × 2048, `TTS_STAGE0_MB 7400`, `RT_MAX_SESSIONS 2`), and the
 declaration sends `env: {}`: the explicit `env` set by hand on 08/10 (L40S sizes) won over `envByMachineType` on every
-card and would not fit a 24 GB one. Class window Mon–Thu 17:30–20:30 Paris: **3 replicas warm** (`maxReplicas 3`;
+card and would not fit a 24 GB one. Class window Mon–Thu 16:40–20:30 Paris (aquecimento da aula: the class starts at 17:40 and a cold Vast boot took 20.5 min on 14/10/2026): **3 replicas warm** (`maxReplicas 3`;
 `DEPLOYMENTS_MAX_REPLICAS` is 4 and `babelcast-3090` may hold one; `reserveQuota: null`, it was a Scaleway quota
 reservation), €450/month (the TTS's €150 moved here). Since 14/10 it also serves the cast's **cloned voices** for the `parle-tts` alias (the parle routes name
 it; `parle-qwen-tts` is paused): the gateway reads the image's voice list at `/v1/voices` (docs/api/http.md). The
@@ -261,7 +261,7 @@ the cloud fallback answers still answers, with `X-Gateway-Status: degraded`, and
 telemetry event `app.degraded`. `GET /v1/apps/:app/status` (the app's key or an admin) gives `mode` `gpu` · `degraded` ·
 `down`, each deployment's state, replicas and last probe, and the fallback in use — contract and fields in
 [docs/api/http.md](api/http.md) § App profile and GPU status. Warm hours stay each deployment's `warmSchedule` (the
-profile `PUT` warns when one has none); parle's two deployments are warm Mon–Thu 17:30–20:30 Paris by their
+profile `PUT` warns when one has none); parle's two deployments are warm Mon–Thu 16:40–20:30 Paris by their
 declarations. Code: `src/deployments/app-gpu-health.ts`; tests: `__tests__/unit/deployments/app-gpu-health.test.ts`.
 
 ## Cold start
