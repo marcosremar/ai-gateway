@@ -31,8 +31,10 @@ export const openrouterSTT = new OpenAICompatSTTProvider({
   models: [
     { id: 'openai/whisper-large-v3', name: 'Whisper Large V3 (OpenRouter)', description: 'Whisper Large V3 via OpenRouter', capability: 'stt', isDefault: true },
     { id: 'openai/whisper-large-v3-turbo', name: 'Whisper Large V3 Turbo (OpenRouter)', description: 'Whisper Large V3 Turbo via OpenRouter', capability: 'stt' },
+    { id: 'elevenlabs/scribe-v2', name: 'ElevenLabs Scribe v2 (OpenRouter)', description: 'ElevenLabs Scribe v2 via OpenRouter', capability: 'stt' },
   ],
   defaultModel: 'openai/whisper-large-v3',
+  promptOptionUpstreams: ['deepinfra', 'groq', 'together'],
 });
 
 /** Voices are model-specific on OpenRouter, so the requested voice is passed through untouched. */

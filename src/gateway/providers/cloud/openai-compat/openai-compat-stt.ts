@@ -29,6 +29,11 @@ export interface OpenAICompatSTTConfig {
   defaultModel?: string;
   /** Override default response_format. Some models (gpt-4o-transcribe) only support 'json'. */
   defaultResponseFormat?: 'json' | 'verbose_json' | 'text';
+  promptOptionUpstreams?: string[];
+}
+
+function upstreamPromptOptions(upstreams: string[], prompt: string): string {
+  return JSON.stringify({ options: Object.fromEntries(upstreams.map(slug => [slug, { prompt }])) });
 }
 
 export class OpenAICompatSTTProvider implements STTProvider {
@@ -84,11 +89,13 @@ export class OpenAICompatSTTProvider implements STTProvider {
       request.responseFormat === 'text' ? 'text'
         : (model.includes('transcribe') ? 'json' : 'verbose_json');
 
-    const params: OpenAI.Audio.TranscriptionCreateParams = {
+    const upstreams = this.config.promptOptionUpstreams;
+    const params: OpenAI.Audio.TranscriptionCreateParams & { provider?: string } = {
       file,
       model,
       ...(request.language && { language: request.language }),
       ...(request.prompt && { prompt: request.prompt }),
+      ...(request.prompt && upstreams && { provider: upstreamPromptOptions(upstreams, request.prompt) }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       response_format: responseFormat,
       // `timestamp_granularities` is only accepted alongside response_format
