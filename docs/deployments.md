@@ -96,7 +96,7 @@ are put back. `envByMachineType` is merged per key: the declared keys are put ba
 `compute_servers create` on 13/10 and Scaleway is disabled for GPUs (`SCALEWAY_GPU_OFF`) — and the students' audio
 never leaves the EU. So the deployment is **Vast only** (`provider: "vast"`, `placements: []`) with `euOnly: true`.
 Owner, 14/10/2026: **one GPU per app, an RTX 3090** (§ One GPU per app below): the ladder (`candidates`) is one rung, an
-**RTX 3090 at most €0.30/h**, with nothing pricier behind it; with no EU 3090 under the cap the class runs on the cloud
+**RTX 3090 at most €0.22/h**, with nothing pricier behind it; with no EU 3090 under the cap the class runs on the cloud
 fallback (`deployment.out_of_stock` and the class-GPU-not-ready alert fire). The image is the public copy
 `ghcr.io/marcosremar/speech-stack:<tag>` (no registry credential, no `SPEECH_IMAGE` override: a private registry
 would be refused on Vast), `minCuda: 13` (the image is CUDA 13), `idleAction: "delete"` (Vast cannot park).
@@ -127,7 +127,7 @@ deployment that has no app yet), so a `parle` client key may `start` them (docs/
 
 ### `parle-speech-test` (the GPU for tests)
 
-`src/deployments/declared/parle-speech-test.json`: the same image, the same ladder (one RTX 3090 ≤ €0.30/h, EU hosts)
+`src/deployments/declared/parle-speech-test.json`: the same image, the same ladder (one RTX 3090 ≤ €0.22/h, EU hosts)
 and the same `envByMachineType` as `parle-speech`, so a test measures the class
 configuration. `maxReplicas 1`, `minReplicas 0`, no warm schedule, `idleMinutes 10`, `idleAction: "delete"`, €40/month
 ceiling. `testFor: "parle-speech"` makes it the test copy: a request is **never** what starts it; a capped client key
