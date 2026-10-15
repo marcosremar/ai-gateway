@@ -85,6 +85,15 @@ describe('handleAudioTranscriptions', () => {
     );
   });
 
+  it('does not serve a cached transcript to the same audio asked with another prompt (QA 2026-10-16)', async () => {
+    await handleAudioTranscriptions(makeReq({ model: 'test-model', language: 'pt', prompt: 'padaria' }), providers);
+    const res = await handleAudioTranscriptions(makeReq({ model: 'test-model', language: 'pt', prompt: 'farmácia' }), providers);
+    expect(res.headers?.['X-Cache']).not.toBe('HIT');
+    expect(mockSttProvider.transcribe).toHaveBeenCalledTimes(2);
+    const again = await handleAudioTranscriptions(makeReq({ model: 'test-model', language: 'pt', prompt: 'farmácia' }), providers);
+    expect(again.headers?.['X-Cache']).toBe('HIT');
+  });
+
   it('passes responseFormat to provider', async () => {
     await handleAudioTranscriptions(makeReq({ model: 'test-model', response_format: 'srt' }), providers);
     expect(mockSttProvider.transcribe).toHaveBeenCalledWith(

@@ -54,6 +54,21 @@ describe('handleAudioSpeech', () => {
     expect(res.status).toBe(400);
   });
 
+  it('returns 400 for input with nothing to speak, without walking the chain (QA 2026-10-16)', async () => {
+    for (const input of ['   ', '\n\t', '...', '😀☕🥐', '— !?']) {
+      const res = await handleAudioSpeech(makeReq({ ...validBody, input }), providers);
+      expect(res.status).toBe(400);
+    }
+    expect(mockTtsProvider.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('speaks input with a letter or digit in any script', async () => {
+    for (const input of ['Oi 😀', '42', 'こんにちは']) {
+      const res = await handleAudioSpeech(makeReq({ ...validBody, input }), providers);
+      expect(res.status).toBe(200);
+    }
+  });
+
   it('returns 400 when input exceeds 4096 characters', async () => {
     const res = await handleAudioSpeech(makeReq({ ...validBody, input: 'a'.repeat(4097) }), providers);
     expect(res.status).toBe(400);

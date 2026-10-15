@@ -58,6 +58,11 @@ export async function handleAudioSpeech(
   if (!body.voice || typeof body.voice !== 'string') {
     return { status: 400, body: { error: { message: 'voice is required', type: 'invalid_request_error' } } };
   }
+  // Nothing to say (whitespace, punctuation, emoji only): every link would answer silence or fail (Kokoro 502), and a
+  // 5xx feeds the breaker of the last-resort link. The caller's own invalid request stops here (QA 2026-10-16).
+  if (!/[\p{L}\p{N}]/u.test(body.input)) {
+    return { status: 400, body: { error: { message: 'input text has nothing to speak (no letter or digit)', type: 'invalid_request_error' } } };
+  }
   if (body.input.length > 4096) {
     return { status: 400, body: { error: { message: 'input text exceeds 4096 characters', type: 'invalid_request_error' } } };
   }
