@@ -5,9 +5,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Server } from 'http';
 import type { AddressInfo } from 'net';
+import { createHash } from 'crypto';
 import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import WebSocket from 'ws';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { createDeploymentRoutes, HttpReplicaProbe } from '../../../src/deployments/http';
@@ -24,7 +26,7 @@ const AS_SITE = { 'x-app': 'site-a' };
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; maxWaitSeconds?: number } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; relayIdleMs?: number; maxWaitSeconds?: number } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
@@ -42,12 +44,14 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
     userOf: (req) => (req.headers.authorization === `Bearer ${SITE}` ? 'site-a' : req.headers.authorization === `Bearer ${ADMIN}` ? 'owner' : null),
     onRoutesChange: opts.onRoutesChange,
     ...(opts.invokeIdleMs ? { invokeIdleMs: opts.invokeIdleMs } : {}),
+    ...(opts.relayIdleMs ? { relayIdleMs: opts.relayIdleMs } : {}),
     ...(opts.declaredStatus ? { declaredStatus: opts.declaredStatus } : {}),
   });
   const server = createProxyServer({
     apiKeys: [`${ADMIN}:owner`, `${SITE}:site-a`],
     providers: { stt: {}, chat: {}, tts: {} } as never,
     prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }, { prefix: '/v1/apps', handler }, { prefix: '/v1/images', handler }],
+    upgradeRoutes: [{ prefix: '/v1/deployments', handler: handler.upgrade }],
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
@@ -224,6 +228,88 @@ describe('deployments API', () => {
     expect(h.cloud.created).toHaveLength(1);
     expect(h.cloud.created[0].cloudInit).toContain('docker run');
     expect(h.cloud.created[0].namespace).toBe('test');
+  });
+
+  it('relays a websocket upgrade through invoke with the lease token (CDP-style raw frames)', async () => {
+    await call(h, 'PUT', '/v1/deployments/wsdemo', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
+    // The fake replica "nginx" gate: answer upgrades only with the lease token, then send one unmasked frame.
+    let replicaSawGatewayKey: unknown;
+    const originalCreate = h.cloud.createReplica.bind(h.cloud);
+    h.cloud.createReplica = async (input) => {
+      const machine = await originalCreate(input);
+      const fake = h.cloud.machines.get(machine.id)!;
+      fake.server.on('upgrade', (req, socket) => {
+        replicaSawGatewayKey = req.headers.authorization;
+        if (req.headers['x-aigw-token'] !== fake.token) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+        const accept = createHash('sha1')
+          .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        socket.write(Buffer.from([0x81, 0x02, 0x68, 0x69])); // ws text frame "hi"
+        // Reply to the client's close frame so the connection ends fully (mirror the realtime fake edge).
+        socket.on('data', () => { socket.write(Buffer.from([0x88, 0x00])); socket.end(); });
+      });
+      return machine;
+    };
+    const wsUrl = `${h.base.replace(/^http/, 'ws')}/v1/deployments/wsdemo/invoke/devtools/ws`;
+    const client = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${SITE}` } });
+    const received = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout waiting for the frame')), 5000);
+      client.on('message', (data) => { clearTimeout(timer); resolve(String(data)); });
+      client.on('error', (err) => { clearTimeout(timer); reject(err as Error); });
+    });
+    expect(received).toBe('hi');
+    expect(replicaSawGatewayKey).toBeUndefined();
+    client.close(1000, 'bye');
+    await new Promise<void>((r) => client.once('close', r));
+    // An unknown key is refused by the proxy's key check, another app's deployment by the scope check: neither
+    // touches the replica.
+    const refusal = (url: string, key: string) => new Promise<number>((resolve, reject) => {
+      const other = new WebSocket(url, { headers: { authorization: `Bearer ${key}` } });
+      other.on('unexpected-response', (_req, res) => { resolve(res.statusCode ?? 0); other.terminate(); });
+      other.on('error', (err) => reject(err as Error));
+      setTimeout(() => reject(new Error('timeout waiting for the refusal')), 5000);
+    });
+    expect(await refusal(wsUrl, 'nope-key-0123456789')).toBe(401);
+    await call(h, 'PUT', '/v1/deployments/adminonly', { profile: 'cpu-echo' });
+    expect(await refusal(wsUrl.replace('/wsdemo/', '/adminonly/'), SITE)).toBe(403);
+  });
+
+  it('relay idle: a silent relayed socket is cut and the machine lease is released (no 15-min nginx wait)', async () => {
+    await close(h);
+    await h.cloud.closeAll();
+    h = await harness({ relayIdleMs: 400 });
+    await call(h, 'PUT', '/v1/deployments/idlews', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
+    const originalCreate = h.cloud.createReplica.bind(h.cloud);
+    h.cloud.createReplica = async (input) => {
+      const machine = await originalCreate(input);
+      const fake = h.cloud.machines.get(machine.id)!;
+      fake.server.on('upgrade', (req, socket) => {
+        if (req.headers['x-aigw-token'] !== fake.token) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+        const accept = createHash('sha1')
+          .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        socket.write(Buffer.from([0x81, 0x02, 0x68, 0x69]));
+        // The relay ends the upstream with FIN when it cuts an idle client: close our side so the fake server
+        // can shut down (the graceful test replies to the client's close frame; here the cut is one-sided).
+        socket.on('end', () => socket.end());
+      });
+      return machine;
+    };
+    const wsUrl = `${h.base.replace(/^http/, 'ws')}/v1/deployments/idlews/invoke/devtools/ws`;
+    const client = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${SITE}` } });
+    await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout waiting for the frame')), 5000);
+      client.on('message', (data) => { clearTimeout(timer); resolve(String(data)); });
+      client.on('error', (err) => reject(err as Error));
+    });
+    // Stay silent: the relay must cut the socket and free the machine's busy slot well before nginx's 900 s.
+    const cut = await new Promise<'close' | 'timeout'>((resolve) => {
+      const timer = setTimeout(() => resolve('timeout'), 5000);
+      client.on('close', () => { clearTimeout(timer); resolve('close'); });
+    });
+    expect(cut).toBe('close');
+    client.terminate();
+    await until(() => h.controller.get('idlews')?.inflight === 0, 3000);
   });
 
   it('a cold start longer than the proxy idle timeout is still served (regression: socket killed at 60 s)', async () => {

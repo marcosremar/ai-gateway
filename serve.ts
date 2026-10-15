@@ -43,7 +43,7 @@ import { reorderSnapshot } from './src/gateway/proxy/link-reorder';
 import { ttsCacheFromEnv } from './src/gateway/proxy/tts-cache';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
-import type { PrefixRoute } from './src/proxy/types';
+import type { PrefixRoute, UpgradeRoute } from './src/proxy/types';
 import {
   adminListWarning, adminUsersFromEnv, bootEventsRoute, bootFilesRoute, deploymentsFromEnv, proxyIdleTimeoutMs, DEPLOYMENT_CREDENTIAL_KEYS, DEVICE_HEADER,
 } from './src/deployments';
@@ -151,6 +151,7 @@ async function listOpenRouterModels(): Promise<string[]> {
 log.log({ port: PORT, apiKeys: access.size, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
 
 const prefixRoutes: PrefixRoute[] = [];
+const upgradeRoutes: UpgradeRoute[] = [];
 
 // Deployments: Docker image → autoscaled replicas on Scaleway and/or Vast (enabled when SCW_SECRET_KEY or VAST_API_KEY is set).
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
@@ -219,6 +220,8 @@ if (deployments) {
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/images', handler: deployments.handler });
+  // WS upgrades under /v1/deployments/:name/invoke are relayed to the replica (CDP and other raw websockets).
+  upgradeRoutes.push({ prefix: '/v1/deployments', handler: deployments.upgrade });
   // Read by createProxyServer: a cold-start wait must outlive the default 60 s idle cut.
   process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
   log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
@@ -628,6 +631,7 @@ const server = await startProxy({
   ],
   publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller), bootEventsRoute(controller)] : []), ...(machines ? [machines.reportRoute] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
+  ...(upgradeRoutes.length > 0 ? { upgradeRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
 

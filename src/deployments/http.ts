@@ -33,7 +33,8 @@
  * Auth already happened in the proxy (Bearer from GATEWAY_API_KEYS). Mutations additionally need `isAdmin(req)`.
  */
 
-import type { IncomingMessage, ServerResponse } from 'http';
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'http';
+import type { Socket } from 'net';
 import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
@@ -43,6 +44,7 @@ import type { AppGpuHealth } from './app-gpu-health';
 import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import type { ClientGpu } from './client-gpu';
+import type { Lease } from './controller-state';
 import { mayWakeNow, type GpuPolicy } from '../config/access-keys';
 import { classWindowOpen } from './autoscale';
 import { createLogger } from '../logger';
@@ -60,6 +62,8 @@ const MAX_ADMIN_BODY = 16 * 1024 * 1024;
 const MAX_STABILITY_BODY = 512 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 export const INVOKE_IDLE_MS = 5 * 60_000;
+const HTTP_REASON: Record<number, string> = { 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 502: 'Bad Gateway', 503: 'Service Unavailable' };
+const statusText = (status: number) => HTTP_REASON[status] ?? 'Error';
 const HOP_BY_HOP = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding',
   'upgrade', 'authorization', 'content-length', 'x-aigw-token', 'x-aigw-wait', 'x-gateway-no-wake', 'x-forwarded-for', 'x-forwarded-host',
@@ -212,6 +216,8 @@ export interface DeploymentRoutesOptions {
   isAdmin?: (req: IncomingMessage) => boolean;
   fetchImpl?: typeof fetch;
   invokeIdleMs?: number;
+  /** Silence on a relayed WebSocket after which the lease is released (`RELAY_IDLE_TIMEOUT_MS`, default 5 min). */
+  relayIdleMs?: number;
   /** Status of the declared deployments (`declared.ts`), listed as `declared` by `GET /v1/deployments`. */
   declaredStatus?: () => unknown;
   /** An app replaced its routes (`PUT /v1/apps/:app/routes`): re-mount the providers. */
@@ -233,6 +239,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
   const isAdmin = opts.isAdmin ?? (() => false);
   const fetchImpl = opts.fetchImpl ?? fetch;
   const idleMs = opts.invokeIdleMs ?? (Number(process.env.INVOKE_IDLE_TIMEOUT_MS) || INVOKE_IDLE_MS);
+  const relayIdleMs = opts.relayIdleMs ?? (Number(process.env.RELAY_IDLE_TIMEOUT_MS) || INVOKE_IDLE_MS);
 
   /**
    * The app this request acts for: `X-App` from an admin key, else the key's own user; null = admin acting globally.
@@ -441,6 +448,98 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
   }
 
+  /**
+   * WebSocket rung of `invoke`: the client's upgrade goes to a ready replica with the lease token, and the raw
+   * sockets are piped both ways — frames pass untouched (CDP, the speech-stack's /ws/audio-stream). The replica's
+   * nginx does the handshake against the caller's own `Sec-WebSocket-Key`; an upstream refusal answers with a plain
+   * HTTP error. Same scope, no-wake and header rules as the HTTP invoke.
+   */
+  async function upgradeInvoke(
+    req: IncomingMessage, socket: Socket, head: Buffer, name: string, rest: string, query: string,
+  ): Promise<boolean> {
+    if (!isAdmin(req)) {
+      const own = appOf(req);
+      if (!own || controller.get(name)?.app !== own) { socketError(socket, 403, `this API key cannot invoke deployment '${name}'`); return true; }
+    }
+    if (!replicaTarget('http://replica.invalid', rest, query)) { socketError(socket, 400, 'invoke path must be a plain relative path'); return true; }
+    socket.setTimeout(0);
+    const waitHeader = req.headers['x-aigw-wait'];
+    const waitMs = typeof waitHeader === 'string' && /^\d+$/.test(waitHeader) ? Math.min(Number(waitHeader), 840) * 1000 : undefined;
+    const noWake = noWakeActive(name);
+    const abort = new AbortController();
+    let upgraded = false;
+    let lease: Lease | null = null;
+    const release = (outcome: Parameters<Lease['done']>[0] = false) => {
+      const held = lease;
+      lease = null;
+      held?.done(outcome);
+    };
+    socket.on('close', () => { abort.abort(); release(upgraded ? false : 'cancelled'); });
+    try {
+      lease = await controller.acquire(name, noWake ? { waitMs: 0, signal: abort.signal, noWake: true } : { waitMs, signal: abort.signal });
+    } catch (err) {
+      if (abort.signal.aborted) return true;
+      if (noWake && err instanceof DeploymentError && err.status === 503) recordNoWakeSkip();
+      const status = err instanceof DeploymentError ? err.status : 502;
+      socketError(socket, status, err instanceof Error ? err.message : String(err),
+        err instanceof DeploymentError && err.retryAfterSeconds ? { 'Retry-After': err.retryAfterSeconds } : {});
+      return true;
+    }
+    if (socket.destroyed) { release('cancelled'); return true; }
+    const target = replicaTarget(replicaBase(lease.machine, lease.exposed), rest, query);
+    if (!target) { release('cancelled'); socketError(socket, 400, 'invoke path does not resolve on the replica'); return true; }
+    lease.signal?.addEventListener('abort', () => socket.destroy(), { once: true });
+    const headers: Record<string, string> = { host: target.host, connection: 'Upgrade', upgrade: 'websocket', 'x-aigw-token': lease.token };
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (!HOP_BY_HOP.has(k) && typeof v === 'string') headers[k] = v;
+    }
+    const { tls } = replicaTls(target.href, lease.token);
+    const proxyReq = httpRequest(target, { method: 'GET', headers, signal: abort.signal, ...(tls ? { ca: tls.ca } : {}) });
+    proxyReq.on('response', (upstreamRes: IncomingMessage) => {
+      upstreamRes.resume();
+      const status = upstreamRes.statusCode ?? 502;
+      release(status >= 500 ? 'errored' : false);
+      socketError(socket, status, `the replica refused the WebSocket (HTTP ${status})`);
+    });
+    proxyReq.on('upgrade', (upstreamRes: IncomingMessage, proxySocket: Socket, proxyHead: Buffer) => {
+      upgraded = true;
+      const out = ['HTTP/1.1 101 Switching Protocols'];
+      for (const [k, v] of Object.entries(upstreamRes.headers)) {
+        if (typeof v === 'string') out.push(`${k}: ${v}`);
+        else if (Array.isArray(v)) for (const item of v) out.push(`${k}: ${item}`);
+      }
+      socket.write(out.join('\r\n') + '\r\n\r\n');
+      if (proxyHead.length) socket.write(proxyHead);
+      if (head.length) proxySocket.write(head);
+      proxySocket.on('error', () => socket.destroy());
+      socket.on('error', () => proxySocket.destroy());
+      proxySocket.pipe(socket);
+      socket.pipe(proxySocket);
+      // A client that stops talking would hold the machine's lease until nginx's 900 s read timeout: cut it at
+      // `relayIdleMs` of silence both ways and release.
+      let lastActivity = Date.now();
+      const touch = () => { lastActivity = Date.now(); };
+      socket.on('data', touch);
+      proxySocket.on('data', touch);
+      const idle = setInterval(() => {
+        if (Date.now() - lastActivity <= relayIdleMs) return;
+        clearInterval(idle);
+        proxySocket.end();
+        socket.destroy();
+      }, Math.min(30_000, Math.max(1_000, Math.floor(relayIdleMs / 2))));
+      idle.unref?.();
+      socket.on('close', () => { clearInterval(idle); proxySocket.destroy(); });
+      proxySocket.on('close', () => { clearInterval(idle); socket.destroy(); });
+    });
+    proxyReq.on('error', () => {
+      if (upgraded || abort.signal.aborted) return;
+      release(true);
+      socketError(socket, 502, 'replica unreachable');
+    });
+    proxyReq.end();
+    return true;
+  }
+
   async function relay(body: ReadableStream<Uint8Array>, res: ServerResponse): Promise<StreamCut | null> {
     const reader = body.getReader();
     try {
@@ -618,8 +717,36 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     return send(res, 405, { error: 'method not allowed' });
   }
 
-  /** `PrefixRoute` handler: owns every path under /v1/deployments and /v1/profiles. */
-  return function handle(req: IncomingMessage, res: ServerResponse, path: string, method: string): boolean {
+  /**
+   * `UpgradeRoute` handler for the proxy: owns any WebSocket upgrade under `/v1/deployments` whose path is
+   * `/:name/invoke/<rest>`; anything else returns `false` so the proxy keeps its generic 410.
+   */
+  async function upgrade(req: IncomingMessage, socket: Socket, head: Buffer): Promise<boolean> {
+    const url = req.url ?? '/';
+    const path = url.split('?')[0];
+    const query = url.includes('?') ? url.slice(url.indexOf('?')) : '';
+    const parts = path.split('/').filter(Boolean); // ['v1', 'deployments', name?, action?, ...]
+    const [, kind, name, action] = parts;
+    if (kind !== 'deployments' || !name || action !== 'invoke') return false;
+    const rest = parts.slice(4).join('/') + (path.endsWith('/') && parts.length > 4 ? '/' : '');
+    try {
+      return await upgradeInvoke(req, socket, head, name, rest, query);
+    } catch (err) {
+      if (err instanceof SpecError) { socketError(socket, 400, err.message); return true; }
+      if (err instanceof AppError) { socketError(socket, err.status, err.message); return true; }
+      if (err instanceof DeploymentError) {
+        socketError(socket, err.status, err.message);
+        return true;
+      }
+      const requestId = requestIdOf(req.headers['x-request-id']);
+      log.error({ requestId, path, error: err instanceof Error ? err.stack ?? err.message : String(err) }, 'deployments upgrade failed');
+      socketError(socket, 500, 'internal error');
+      return true;
+    }
+  }
+
+  /** `PrefixRoute` handler: owns every path under /v1/deployments and /v1/profiles. Callable with `.upgrade` attached. */
+  const handle = function handle(req: IncomingMessage, res: ServerResponse, path: string, method: string): boolean {
     const owns = path === '/v1/images' || ['/v1/deployments', '/v1/profiles', '/v1/apps'].some(p => path === p || path.startsWith(`${p}/`));
     if (!owns) return false;
     route(req, res, path, method).catch((err) => {
@@ -636,4 +763,15 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     });
     return true;
   };
+  return Object.assign(handle, { upgrade });
+}
+
+/** Error reply on a raw (pre-upgrade) socket: the client sees a plain HTTP error, not a dropped connection. */
+function socketError(socket: Socket, status: number, error: string, headers: Record<string, string | number> = {}): void {
+  if (socket.destroyed) return;
+  const body = JSON.stringify({ error: { message: error, type: status === 410 ? 'gone' : 'error' } });
+  const extra = Object.entries(headers).map(([k, v]) => `\r\n${k}: ${v}`).join('');
+  socket.write(`HTTP/1.1 ${status} ${statusText(status)}\r\nContent-Type: application/json${extra}`
+    + `\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+  socket.end();
 }
