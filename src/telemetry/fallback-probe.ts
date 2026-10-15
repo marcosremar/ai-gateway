@@ -51,13 +51,13 @@ export interface FallbackProbeResult {
 export type ProbeContent = 'ok' | 'mismatch' | null;
 type Checked = { content: ProbeContent; note: string | null; audio?: Buffer };
 
-const SAID = 'Bom dia.';
-const HEARD = /\bbo[mn] ?dia\b/;
-const ANSWERED = /\bok\b/i;
+export const SAID = 'Bom dia.';
+export const HEARD = /\bbo[mn] ?dia\b/;
+export const ANSWERED = /\bok\b/i;
 const MIN_COMPRESSED_BYTES = 1_500;
 const MIN_PCM_RMS = 200;
 const AUDIO_READ_MAX = 512 * 1024;
-const plain = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+export const plain = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const quote = (t: string) => `«${t.replace(/\s+/g, ' ').trim().slice(0, 60)}»`;
 
 async function audioOf(res: TTSResponse): Promise<Buffer> {

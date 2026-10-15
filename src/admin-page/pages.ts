@@ -5,6 +5,7 @@ import { openIncidents } from './incidents';
 import { services } from './guarantee';
 import { recommendations } from './recommendations';
 import { gpuActions, sectionsOf, unitOf, type AdminSnapshot, type AppView } from './render';
+import { gpuTypePanel } from './gpu-type';
 import { monthForecast, spendWindow } from './spend';
 import { CSS } from './styles';
 import {
@@ -204,7 +205,8 @@ export function renderGpuDetail(nonce: string, s: AdminSnapshot, name: string, o
   const d = s.gpus?.find(g => g.name === name);
   if (!d) return null;
   const f = frame(s, opts, 'gpus', `/admin/gpus/${encodeURIComponent(d.name)}`);
-  return page(nonce, `ai-gateway · ${d.name}`, shell(f, gpuDetailBody(d, s.gpuLogs?.[name] ?? [], opts.now, gpuActions(d, f.ctx, true), container, openIncidents(f.ctx, d))), true);
+  const body = gpuDetailBody(d, s.gpuLogs?.[name] ?? [], opts.now, gpuActions(d, f.ctx, true), container, openIncidents(f.ctx, d), gpuTypePanel(d, s.gpuValidation?.[name] ?? null, f.ctx));
+  return page(nonce, `ai-gateway · ${d.name}`, shell(f, body), true);
 }
 
 export function renderLogin(nonce: string, error: string | null, next = '/admin'): string {

@@ -1,6 +1,7 @@
 import type { FallbackProbeResult } from '../telemetry/fallback-probe';
 import type { BalanceReading } from '../telemetry/balance-watch';
 import type { CreditIssue, DeploymentView } from '../deployments/types';
+import type { GpuValidationView } from '../deployments/gpu-validation';
 import type { KeyView } from '../config/access-keys';
 import type { KeyAuditEntry } from '../config/key-audit';
 import type { AppBudgetView } from '../gateway/proxy/app-limits';
@@ -55,6 +56,7 @@ export interface AdminSnapshot {
   balances: BalanceReading[];
   providerCredit: CreditIssue[];
   gpus: DeploymentView[] | null;
+  gpuValidation?: Record<string, GpuValidationView>;
   gpuSpend: { spentEur: Record<string, number>; running?: Array<{ key: string; deployment: string; until: string; capEur: number | null }> } | null;
   alerts: AdminAlert[];
   machines: MachineCosts | null;
@@ -155,34 +157,10 @@ export const pinForm = (d: DeploymentView, csrf: string, back?: string) => (d.pi
 export const parkForm = (d: DeploymentView, csrf: string, back?: string) =>
   form('/admin/park', csrf, 'Estacionar', `Estacionar ${d.name}? As réplicas sem uso desligam; pedidos em curso terminam.`, { name: d.name }, 'danger', back);
 
-function classReplicaHours(d: DeploymentView): number | null {
-  const w = d.spec.warmSchedule?.[0];
-  if (!w) return null;
-  const minutes = (hm: string) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5));
-  return (((minutes(w.end) - minutes(w.start) + 1440) % 1440) / 60) * w.minReplicas;
-}
-
-export function gpuTypeForm(d: DeploymentView, csrf: string, back?: string): string {
-  const g = d.gpuType!;
-  const hours = classReplicaHours(d);
-  const cost = (cap: number) => `até ${money(cap)}/h${hours ? ` ≈ ${money(cap * hours)}/aula` : ''}`;
-  const label = (type: string, i: number) => (i ? type : g.current !== g.default ? `voltar ao padrão (${type})` : `${type} (padrão)`);
-  const options = g.choices.map((c, i) => `<option value="${i ? esc(c.machineType) : ''}"${c.machineType === g.current ? ' selected' : ''}>`
-    + `${esc(label(c.machineType, i))} · ${esc(cost(c.maxEurPerHour))}</option>`).join('');
-  const confirm = `Trocar o tipo de GPU de ${d.name}? Vale na próxima partida da GPU; com «trocar agora» a GPU reinicia (~20 min fria) `
-    + `e a reserva da nuvem responde enquanto isso. ${g.choices.map(c => `${c.machineType}: ${cost(c.maxEurPerHour)}`).join('; ')}.`;
-  const who = g.setBy && g.setAt ? `<small>${esc(g.current)} escolhida por ${esc(g.setBy)} às ${hhmm(g.setAt)}</small>` : '';
-  return `<form method="post" action="/admin/gpu-type" class="gpu-type" id="tipo" data-confirm="${esc(confirm)}">`
-    + `<input type="hidden" name="csrf" value="${csrf}">${back ? `<input type="hidden" name="back" value="${esc(back)}">` : ''}`
-    + `<input type="hidden" name="name" value="${esc(d.name)}"><label>Tipo de GPU<select name="machineType">${options}</select></label>`
-    + `<label class="now"><input type="checkbox" name="now" value="1"> trocar agora (reinicia a GPU, ~20 min fria)</label>`
-    + `<button class="quiet">Trocar GPU</button>${who}</form>`;
-}
-
 export const gpuActions = (d: DeploymentView, { csrf, view, path }: Ctx, detail = false) => [
   upOf(d).length && (!view || (view.canPark && d.app === view.id)) ? parkForm(d, csrf, path) : '',
   !view && providerOf(d) === 'vast' ? pinForm(d, csrf, path) : '',
-  !view && d.gpuType ? (detail ? gpuTypeForm(d, csrf, path) : `<a class="btn" href="${detailHref(d)}#tipo">GPU ${esc(d.gpuType.current)} · trocar</a>`) : '',
+  !view && d.gpuType && !detail ? `<a class="btn" href="${detailHref(d)}#tipo">GPU ${esc(d.gpuType.current)} · trocar</a>` : '',
 ].join('');
 
 function gpuSlots(gpus: DeploymentView[]): string {

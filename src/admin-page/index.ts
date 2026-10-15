@@ -39,6 +39,7 @@ export interface AdminPageOptions {
   park: (deployment: string, actor: AdminActor) => Promise<unknown>;
   pin?: (deployment: string, on: boolean) => Promise<unknown>;
   gpuType?: (deployment: string, machineType: string | null, now: boolean, actor: string) => Promise<unknown>;
+  gpuTest?: (deployment: string, machineType: string, actor: string) => Promise<unknown>;
   probe: () => Promise<unknown>;
   dismiss?: (id: string) => Promise<unknown>;
   sendDigest?: () => Promise<string | null>;
@@ -225,6 +226,16 @@ export function createAdminPage(opts: AdminPageOptions) {
     redirect(res, backTo(form, '/admin/gpus', failed ? `Falhou ao trocar a GPU de ${name}: ${failed}` : done, '#gpus'));
   });
 
+  const gpuTest = guarded(async (res, { session, form }) => {
+    const name = form.get('name') ?? '';
+    const type = form.get('machineType') ?? '';
+    if (session.role !== 'admin' || !opts.gpuTest || !type) return refuse(res, session, 'admin-page.gpu-test', [name]);
+    const failed = await opts.gpuTest(name, type, session.actor.name).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
+    opts.audit?.({ actor: session.actor.name, action: 'admin-page.gpu-test', names: [name], ok: !failed, detail: failed ?? type });
+    const done = `Testando ${type}: a cópia de teste liga, roda o teste de fala e estaciona sozinha; recarregue em alguns minutos.`;
+    redirect(res, backTo(form, '/admin/gpus', failed ? `Teste de ${type} recusado: ${failed}` : done, '#tipo'));
+  });
+
   const dismiss = guarded(async (res, { session, form }) => {
     const id = form.get('id') ?? '';
     if (session.role !== 'admin' || !opts.dismiss) return refuse(res, session, 'admin-page.dismiss', [id]);
@@ -280,7 +291,7 @@ export function createAdminPage(opts: AdminPageOptions) {
   const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>([
     ['GET /admin', status], ['GET /admin/servicos', status], ['GET /admin/gpus', status], ['GET /admin/gastos', status], ['GET /admin/chaves', status],
     ['GET /admin/atividade', status], ['POST /admin/login', login],
-    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/gpu-type', gpuType], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss], ['POST /admin/digest', digest],
+    ['POST /admin/logout', logout], ['POST /admin/park', park], ['POST /admin/pin', pin], ['POST /admin/gpu-type', gpuType], ['POST /admin/gpu-test', gpuTest], ['POST /admin/probe', probe], ['POST /admin/dismiss', dismiss], ['POST /admin/digest', digest],
   ]);
 
   function handle(req: IncomingMessage, res: ServerResponse): boolean {
