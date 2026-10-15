@@ -306,7 +306,7 @@ describe('room page: viewer settings', () => {
 
   it('ships the mobile layout: brand colors, safe-area insets, no inline styles', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
-    for (const s of ['#00C7BE', '#0F1A2E', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html,body{overflow-x:hidden}', 'Écouter le doublage']) {
+    for (const s of ['#2F6A80', '#252528', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html,body{overflow-x:hidden}', 'Écouter le doublage']) {
       expect(html).toContain(s);
     }
     // No CDN: every absolute URL in the page is an SVG/XML namespace on www.w3.org.
