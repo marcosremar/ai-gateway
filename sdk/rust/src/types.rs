@@ -10,8 +10,8 @@ use serde_json::Value;
 /// What `Debug` prints in place of a secret (API key, publish token, provider key).
 pub(crate) const REDACTED: &str = "<redacted>";
 
-/// Where an answer came from: `X-Gateway-Provider` / `X-Gateway-Fallback` / `X-Gateway-Fallback-From`, plus the
-/// echoed `X-Request-Id`. `None` when the header is absent.
+/// Where an answer came from: `X-Gateway-Provider` / `X-Gateway-Fallback` / `X-Gateway-Fallback-From` /
+/// `X-Gateway-Status`, plus the echoed `X-Request-Id`. `None` when the header is absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Served {
     /// Who answered: `deployment:<name>`, `openrouter:<model>`, `cache`…
@@ -22,6 +22,9 @@ pub struct Served {
     pub fallback_from: Option<String>,
     /// The effective request id the gateway logged.
     pub request_id: Option<String>,
+    /// `degraded` when an app whose profile requires its GPU was answered by the cloud reserve
+    /// (`src/deployments/app-gpu-health.ts`).
+    pub status: Option<String>,
 }
 
 impl Served {
@@ -40,7 +43,13 @@ impl Served {
             fallback: get("x-gateway-fallback"),
             fallback_from: get("x-gateway-fallback-from"),
             request_id: get("x-request-id"),
+            status: get("x-gateway-status"),
         }
+    }
+
+    /// `X-Gateway-Status: degraded`.
+    pub fn is_degraded(&self) -> bool {
+        self.status.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("degraded"))
     }
 }
 

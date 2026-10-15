@@ -3,7 +3,7 @@
 Typed async Rust client of the ai-gateway HTTP API (`serve.ts`, [docs/api/http.md](../../docs/api/http.md)). It is
 the Rust counterpart of the Node SDK's `GatewayClient` (`sdk/node/gateway-client.ts`, [docs/api/client.md](../../docs/api/client.md))
 and also covers what the babelcast desktop app's hand-written client (`bc-gateway-client`) uses: STT, chat, TTS
-with voice cloning, live rooms, deployments wake/status, activation and health.
+with voice cloning, live rooms, deployments wake/status, activation, desktop-app telemetry and health.
 
 - reqwest 0.12 + tokio, **rustls only** (no OpenSSL), so it builds with the Windows GNU toolchain.
 - Crate `ai-gateway-sdk`, lib `ai_gateway_sdk`, standalone (its own `[workspace]`), `publish = false`.
@@ -88,8 +88,10 @@ let mut pcm = gw.speech_stream(SpeechRequest::new("parle-tts", "Olá", "br-f-01"
 while let Some(chunk) = pcm.next().await { player.push(&chunk?); }
 ```
 
-`served` (`Served { provider, fallback, fallback_from, request_id }`) comes from `X-Gateway-Provider`,
-`X-Gateway-Fallback`, `X-Gateway-Fallback-From` and `X-Request-Id` on every answer (and on `Status` errors).
+`served` (`Served { provider, fallback, fallback_from, request_id, status }`) comes from `X-Gateway-Provider`,
+`X-Gateway-Fallback`, `X-Gateway-Fallback-From`, `X-Request-Id` and `X-Gateway-Status` on every answer (and on `Status`
+errors). `served.is_degraded()` is `X-Gateway-Status: degraded`: an app whose profile requires its GPU was answered by
+the cloud reserve.
 
 ## Speech-to-speech — `POST /v1/s2s`
 
@@ -141,6 +143,11 @@ let plan = gw.apps().fallback_plan("parle").await?;                  // carries 
 
 // Activation (key in the body, no Bearer)
 let account = gw.activate("ucast_live_…", "My PC", "1.2.3").await?;
+
+// Desktop-app telemetry (docs/app-telemetry.md): never retried; 429/503/507 carry Retry-After
+let batch = AppEventsBatch { install_id, app_version: "1.2.3".into(), os: "windows".into(),
+    events: vec![serde_json::json!({ "ts": now_ms, "kind": "app_start", "fields": {} })] };
+let stored = gw.upload_app_events(&batch, &CallOptions::timeout(Duration::from_secs(30))).await?;
 
 // Health
 let h = gw.health().await?;          // GET /health
@@ -217,7 +224,7 @@ of the current API).
 | Per-group timeouts + per-call override | yes | per stage | yes (+ `rooms` group) |
 | `X-Gateway-Device`, `X-Request-Id` per call | device | — | both (`CallOptions`) |
 | Typed error (status, code, body, Retry-After, served, unreachable) | `GatewayError` | `GatewayError` | `GatewayError` enum |
-| `served` from `X-Gateway-Provider` / `-Fallback` / `-Fallback-From` | yes | — | yes (+ `X-Request-Id`) |
+| `served` from `X-Gateway-Provider` / `-Fallback` / `-Fallback-From` | yes | — | yes (+ `X-Request-Id`, `X-Gateway-Status`) |
 | Retry idempotent calls on connection errors | yes (2×) | yes | yes (2×) |
 | Retry on 408/429/5xx with `Retry-After` within a budget | no | — | yes (idempotent; opt-in for paid calls) |
 | `transcribe` (multipart file, model, language, prompt, response_format) | yes | legacy `/v1/transcribe` | yes (+ container detection, `X-STT-Filtered`) |
@@ -234,6 +241,7 @@ of the current API).
 | Rooms `PATCH /v1/rooms/:code` `{youtubeUrl}` | — | — | yes (`update_youtube`; ai-gateway `main` ≥ 0f6ac49, older gateways 405) |
 | Swap the API key at runtime, sharing the pool | — | — | `with_api_key`, `with_app` |
 | `POST /v1/activate` | — | — | yes (babelcast parity) |
+| `POST /v1/telemetry/app/events` (desktop-app telemetry) | — | — | `upload_app_events` (babelcast parity) |
 | `fix_streaming_wav` | — | — | yes (from babelcast) |
 | Client breaker on the gateway (`gatewayState`) | with `directFallback` | — | opt-in, probe-before-call |
 | **Direct fallback** (call providers with the fallback plan when the gateway is down) | yes | own provider race | **not ported** |
