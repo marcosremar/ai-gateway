@@ -307,6 +307,7 @@ describe('local tier: engine adapters', () => {
     expect(espeakToKokoro('olˈa\ntˈudʊ bˈe\u200dɪŋ\n', 'Olá, tudo bem?')).toBe('olˈa, tˈudʊ bˈAŋ?');
     expect(espeakToKokoro('ũŋ pˈɐ̃\u200dʊ̃\n', 'Um pão')).toBe('u\u0303ŋ pˈɐ̃ʊ̃');
     expect(espeakToKokoro('ʒə- vˈa\nʃˈe\n', 'Sr. A, B!')).toBe('ʒə vˈa, ʃˈe!');
+    expect(espeakToKokoro('a\nb\nc\n', `${'!'.repeat(50_000)}x y?! `)).toBe('a, b, c?!');
   });
 
   it('espeakPhonemizer: runs espeak with the voice, text after --, and maps its output', async () => {

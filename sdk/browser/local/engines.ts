@@ -74,10 +74,17 @@ const E2M: ReadonlyArray<[RegExp, string]> = ([
   ['ə\u200dʊ', 'Q'], ['s\u200ds', 'S'], ['t\u200ds', 'ʦ'], ['t\u200dʃ', 'ʧ'], ['ɔ\u200dɪ', 'Y'],
 ] as const).map(([from, to]) => [new RegExp(from, 'g'), to]);
 
+function finalMarkOf(text: string): string {
+  const trimmed = text.trim();
+  let start = trimmed.length;
+  while (start > 0 && '.!?…'.includes(trimmed[start - 1]!)) start--;
+  return trimmed.slice(start);
+}
+
 export function espeakToKokoro(phonemes: string, text: string): string {
   const clauses = phonemes.split('\n').map(c => c.trim()).filter(Boolean);
   const marks = text.match(/[.,!?;:…]+/g) ?? [];
-  const finalMark = text.trim().match(/[.!?…]+$/)?.[0] ?? '';
+  const finalMark = finalMarkOf(text);
   const markAt = (i: number) => (marks.length === clauses.length ? marks[i]! : i === clauses.length - 1 ? finalMark : ',');
   const joined = clauses.map((c, i) => c + markAt(i)).join(' ');
   return E2M.reduce((s, [from, to]) => s.replace(from, to), joined)

@@ -65,8 +65,8 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "local": {
-    "raw": 22858,
-    "gzip": 7282,
+    "raw": 22975,
+    "gzip": 7337,
     "reason": "local tier: on-device STT/TTS/LLM with gateway fallback (sdk/browser/local), model libraries injected, not bundled"
   },
   "object-storage": {
