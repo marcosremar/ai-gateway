@@ -21,7 +21,8 @@ export interface Promotion { chainKey: string; group: string; leader: string; de
 const samples = new Map<string, Sample[]>();
 const promotions = new Map<string, Promotion>();
 
-export const linkKey = (t: Pick<Reorderable, 'providerId' | 'model'>) => (t.model ? `${t.providerId}:${t.model}` : t.providerId);
+export const namesItself = (providerId: string): boolean => providerId.startsWith('deployment:') || providerId.startsWith('local:');
+export const linkKey = (t: Pick<Reorderable, 'providerId' | 'model'>) => (t.model && !namesItself(t.providerId) ? `${t.providerId}:${t.model}` : t.providerId);
 
 const stageOf = (stage: string) => (stage === 'llm' ? 'chat' : stage);
 

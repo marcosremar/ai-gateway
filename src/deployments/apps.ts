@@ -352,6 +352,9 @@ export class AppRegistry implements FallbackKeyStore {
     const foreign = routedDeployments(parsed).filter(d => ![null, app].includes(opts.appOf?.(d) ?? null));
     if (foreign.length) throw new AppError(403, `a route may not name another app's deployment: ${foreign.join(', ')}`);
     if (opts.restrictedTo) {
+      if (ROUTE_STAGES.some(stage => Object.values(parsed[stage] ?? {}).some(chain => chain.some(e => e.baseUrl)))) {
+        throw new AppError(403, 'only an admin key may write a route with a baseUrl (openai-compatible link)');
+      }
       const refused = routeTargetViolations(parsed, ownValue(this.apps, app)?.routes, opts.restrictedTo);
       if (refused.length) throw new AppError(403, `an app key may only route to its own deployments and to targets its routes already have: ${refused.join('; ')}`);
     }

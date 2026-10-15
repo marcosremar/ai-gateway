@@ -1,4 +1,5 @@
 import { readStateFile, writeStateFile } from '../deployments/state-file';
+import { OPENAI_COMPATIBLE } from '../gateway/providers/cloud/openai-compat/local-link';
 
 export const MODEL_PRICES_URL = 'https://openrouter.ai/api/v1/models?output_modalities=all';
 export const MODEL_PRICES_MAX_AGE_MS = 86_400_000;
@@ -18,8 +19,11 @@ export const CLOUD_PRICES: Record<string, ListedPrice> = {
   'openai:whisper-1': { prompt: 0.006 / 60, completion: 0, source: 'https://developers.openai.com/api/docs/pricing' },
 };
 
+const LOCAL_PRICE: ListedPrice = { prompt: 0, completion: 0, source: 'local' };
+
 export const linkPrice = (prices: Record<string, ModelPrice>, provider: string, model: string): ListedPrice | undefined =>
-  (provider === 'openrouter' ? prices[model] : CLOUD_PRICES[`${provider}:${model}`]);
+  (provider === OPENAI_COMPATIBLE || provider.startsWith('local:') ? LOCAL_PRICE
+    : provider === 'openrouter' ? prices[model] : CLOUD_PRICES[`${provider}:${model}`]);
 
 export function usageCost(attrs: Record<string, unknown>, prices: Record<string, ModelPrice>): { usd: number; estimated: boolean } | null {
   const actual = Number(attrs.costUsd);

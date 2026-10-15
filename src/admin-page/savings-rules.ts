@@ -1,7 +1,7 @@
 import type { DeploymentView, WarmScheduleEntry } from '../deployments/types';
 import { hhmm as minutesOf } from '../deployments/autoscale';
 import { EUR_TO_USD } from '../deployments/vast-backend';
-import { equivalenceGroup } from '../config/serve-providers';
+import { equivalenceGroup, linkTarget } from '../config/serve-providers';
 import type { Recommendation } from './recommendations';
 import { linkPrice, type ModelPrice } from './model-prices';
 import { COST_DAYS, SLOT_MIN, type DayUse, type TrafficLine } from './traffic';
@@ -157,7 +157,7 @@ export function cheaperModelRules(ctx: Ctx): Recommendation[] {
       for (const [alias, chain] of Object.entries(a.routes?.[stage] ?? {})) {
         const cloud = chain.filter(e => e.provider !== 'deployment').map(e => {
           const model = e.model ?? alias;
-          return { model, link: `${e.provider}:${model}`, price: linkPrice(prices, e.provider, model), group: equivalenceGroup(stage, e, model) };
+          return { model, link: linkTarget(e, model), price: linkPrice(prices, e.provider, model), group: equivalenceGroup(stage, e, model) };
         });
         for (const lead of cloud.filter((x, i) => cloud.findIndex(y => y.group === x.group) === i)) {
           const price = lead.price;

@@ -86,7 +86,7 @@ function reserves({ s, now, csrf, view, path }: Ctx): Section {
   const failed = links.filter(r => !r.ok);
   const rows = [...links].sort((a, b) => Number(a.ok) - Number(b.ok) || Number(b.content === 'mismatch') - Number(a.content === 'mismatch')).map(r => [
     `<b>${esc(stageName(r.stage))}</b>`,
-    `<code>${esc(r.target)}</code>${r.voice ? `<small>voz ${esc(r.voice)}</small>` : ''}`,
+    `<code>${esc(r.target)}</code>${r.target.startsWith('local:') ? ' <span class="pill info">local</span>' : ''}${r.voice ? `<small>voz ${esc(r.voice)}</small>` : ''}`,
     !r.ok ? `${pill('bad', `falhou${r.code ? ` · ${r.code}` : ''}`)}${r.error ? `<small class="err">${esc(r.error)}</small>` : ''}`
       : r.content === 'mismatch' ? `${pill('warn', 'respondeu, conteúdo estranho')}<small class="err">${esc(r.contentNote ?? '')}</small>`
         : `${pill('ok', 'respondeu')}${r.content === 'ok' ? '<small>conteúdo conferido</small>' : ''}`,
