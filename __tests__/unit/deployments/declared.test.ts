@@ -60,12 +60,12 @@ const DECLARED_EXTRA = {
   warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }],
 };
 /** The class ladder on Vast, EU hosts only: one RTX 3090, nothing pricier behind it (owner, 14/10/2026). */
-const CANDIDATES = [{ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3 }];
+const CANDIDATES = [{ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.22 }];
 const SIZED = ['RTX 3090', 'RTX 4090', 'L40S', 'RTX 5090', 'H100 SXM', 'H100 PCIE'];
-const CAPS = { 'RTX 3090': 0.3, 'RTX 4090': 0.85, 'RTX 5090': 0.85, L40S: 0.85, 'H100 SXM': 2.5, 'H100 PCIE': 2.5 };
+const CAPS = { 'RTX 3090': 0.22, 'RTX 4090': 0.85, 'RTX 5090': 0.85, L40S: 0.85, 'H100 SXM': 2.5, 'H100 PCIE': 2.5 };
 const DECLARED_ENV = speech.spec.envByMachineType as Record<string, Record<string, string>>;
 const GHCR_IMAGE = 'ghcr.io/marcosremar/speech-stack:20261011-0200';
-const ON_VAST = { provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3, euOnly: true, placements: [], idleAction: 'delete' };
+const ON_VAST = { provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.22, euOnly: true, placements: [], idleAction: 'delete' };
 
 const controllers: DeploymentController[] = [];
 const dirs: string[] = [];
@@ -180,7 +180,7 @@ describe('declared parle-speech spec', () => {
     expect(cloud.created).toHaveLength(0);
   });
 
-  it('woken with Scaleway GPUs off: the replica is a Vast RTX 3090 under €0.30/h, with the stored files by signed link', async () => {
+  it('woken with Scaleway GPUs off: the replica is a Vast RTX 3090 under €0.22/h, with the stored files by signed link', async () => {
     const scaleway = Object.assign(new FakeCloud(), { gpuOff: null as string | null });
     const vast = Object.assign(new FakeCloud(() => OUTSIDE_CLASS, 'vast'), { marketPriced: true });
     const c = new DeploymentController({
@@ -197,7 +197,7 @@ describe('declared parle-speech spec', () => {
     const speechReplicas = () => vast.created.filter(x => x.spec.name === 'parle-speech');
     await until(() => speechReplicas().length === 1, 3000);
     expect(scaleway.created).toHaveLength(0);
-    expect(speechReplicas()[0].spec).toMatchObject({ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3, euOnly: true, image: GHCR_IMAGE, entrypoint: 'bash' });
+    expect(speechReplicas()[0].spec).toMatchObject({ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.22, euOnly: true, image: GHCR_IMAGE, entrypoint: 'bash' });
     expect(speechReplicas()[0].spec.files).toBeUndefined();
     expect(Object.keys(speechReplicas()[0].spec.fileUrls ?? {})).toEqual(Object.keys(PRODUCTION.files));
     expect(vastUnfit(speechReplicas()[0].spec)).toBeNull();
@@ -206,7 +206,7 @@ describe('declared parle-speech spec', () => {
   it('no RTX 3090 in the EU under the cap: no machine at all, never a 4090, a 5090 or Scaleway; the cloud fallback answers', async () => {
     const scaleway = new FakeCloud();
     const vast = Object.assign(new FakeCloud(() => OUTSIDE_CLASS, 'vast'), { marketPriced: true });
-    vast.failCreateFor = (s) => (s.machineType === 'RTX 3090' ? 'out_of_stock: no vast offer for RTX 3090 under €0.30/h near FR' : null);
+    vast.failCreateFor = (s) => (s.machineType === 'RTX 3090' ? 'out_of_stock: no vast offer for RTX 3090 under €0.22/h near FR' : null);
     const c = new DeploymentController({
       backends: { scaleway, vast }, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(500), namespace: 'test', reconcileMs: 50,
       now: () => OUTSIDE_CLASS, publicUrl: 'https://gw.example',

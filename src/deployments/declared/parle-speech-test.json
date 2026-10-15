@@ -1,7 +1,7 @@
 {
   "name": "parle-speech-test",
   "app": "parle",
-  "description": "parle: test copy of parle-speech (same image, same voices, same Vast ladder on hosts in an EU country only): one RTX 3090 at most €0.30/h (owner, 14/10/2026: one GPU per app, an RTX 3090), sharing the parle app's single GPU with parle-speech, which takes it back in the class window; started only on purpose (POST /v1/deployments/parle-speech/start by a capped client key), never by a request, no warm schedule, deleted after 10 min idle",
+  "description": "parle: test copy of parle-speech (same image, same voices, same Vast ladder on hosts in an EU country only): one RTX 3090 at most €0.22/h (owner, 14/10/2026: one GPU per app, an RTX 3090), sharing the parle app's single GPU with parle-speech, which takes it back in the class window; started only on purpose (POST /v1/deployments/parle-speech/start by a capped client key), never by a request, no warm schedule, deleted after 10 min idle",
   "profile": "speech-stack",
   "image": {
     "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
@@ -10,10 +10,10 @@
     "testFor": "parle-speech",
     "provider": "vast",
     "machineType": "RTX 3090",
-    "maxEurPerHour": 0.3,
+    "maxEurPerHour": 0.22,
     "placements": [],
     "candidates": [
-      { "provider": "vast", "machineType": "RTX 3090", "maxEurPerHour": 0.3 }
+      { "provider": "vast", "machineType": "RTX 3090", "maxEurPerHour": 0.22 }
     ],
     "euOnly": true,
     "minCuda": 13,
@@ -24,7 +24,7 @@
     "idleAction": "delete",
     "scaling": { "mode": "fast", "budget": { "eurPerMonth": 40 } },
     "maxEurPerHourByMachineType": {
-      "RTX 3090": 0.3, "RTX 4090": 0.85, "RTX 5090": 0.85, "L40S": 0.85, "H100 SXM": 2.5, "H100 PCIE": 2.5
+      "RTX 3090": 0.22, "RTX 4090": 0.85, "RTX 5090": 0.85, "L40S": 0.85, "H100 SXM": 2.5, "H100 PCIE": 2.5
     },
     "envByMachineType": {
       "RTX 3090": {
