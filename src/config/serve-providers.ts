@@ -59,6 +59,7 @@ const STT_CHAINS: Record<string, Array<[string, string]>> = {
     ['fireworks', 'whisper-v3'], ['deepgram', 'nova-3']],
   'whisper-large-v3-turbo': [['groq', 'whisper-large-v3-turbo'], ['openrouter', 'openai/whisper-large-v3-turbo'],
     ['openai', 'whisper-1'], ['fireworks', 'whisper-v3'], ['deepgram', 'nova-3']],
+  'scribe-v2': [['openrouter', 'elevenlabs/scribe-v2']],
 };
 
 /** Groq Orpheus voices exist only on Groq. PlayAI TTS was retired by Groq and is not offered any more. */
