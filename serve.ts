@@ -219,6 +219,7 @@ if (deployments) {
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
+  prefixRoutes.push({ prefix: '/v1/images', handler: deployments.handler });
   // WS upgrades under /v1/deployments/:name/invoke are relayed to the replica (CDP and other raw websockets).
   upgradeRoutes.push({ prefix: '/v1/deployments', handler: deployments.upgrade });
   // Read by createProxyServer: a cold-start wait must outlive the default 60 s idle cut.
