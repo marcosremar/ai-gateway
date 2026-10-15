@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local tier demo</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f7f7f5; --fg: #1d1d1f; --muted: #6b6b70; --card: #fff; --line: #ddd; --ok: #1a7f37; --warn: #b35900; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #ececf0; --muted: #9a9aa2; --card: #1f1f23; --line: #333; --ok: #4ac26b; --warn: #f0a050; } }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
+    main { max-width: 960px; margin: 0 auto; display: grid; gap: 12px; }
+    section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+    h1 { font-size: 18px; margin: 0; } h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    label { display: inline-flex; gap: 6px; align-items: center; }
+    input[type=text], input[type=password], select, textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+    textarea { width: 100%; box-sizing: border-box; min-height: 48px; }
+    button { font: inherit; padding: 7px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--fg); color: var(--bg); cursor: pointer; min-height: 36px; }
+    button:disabled { opacity: .5; cursor: default; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .local { color: var(--ok); font-weight: 600; } .gateway { color: var(--warn); font-weight: 600; }
+    progress { width: 160px; } pre { white-space: pre-wrap; margin: 0; }
+    .scroll { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>ai-gateway local tier</h1>
+
+  <section>
+    <h2>Gateway (fallback path)</h2>
+    <div class="row">
+      <label>Mode <select id="gw-mode">
+        <option value="stub">stub (answers canned, no network)</option>
+        <option value="down">down (every call fails)</option>
+        <option value="real">real gateway</option>
+      </select></label>
+      <input id="gw-url" type="text" placeholder="https://gateway.example" size="28">
+      <input id="gw-key" type="password" placeholder="key (kept in memory only)" size="22" autocomplete="off">
+    </div>
+  </section>
+
+  <section>
+    <h2>Policy and budget</h2>
+    <div class="row" id="policies"></div>
+    <div class="row" style="margin-top:8px">
+      <label>Budget <select id="budget">
+        <option value="auto">auto (device default)</option>
+        <option value="350">phone (350 MB)</option>
+        <option value="2048">desktop (2048 MB)</option>
+      </select></label>
+      <label>Language <input id="lang" type="text" value="pt" size="3"></label>
+      <label>Voice <input id="voice" type="text" value="pf_dora" size="9"></label>
+      <button id="apply">Apply and check device</button>
+      <button id="prefetch">Load models</button>
+    </div>
+    <div class="scroll" style="margin-top:8px"><table id="device"></table></div>
+  </section>
+
+  <section>
+    <h2>Try it</h2>
+    <textarea id="text">Olá! Eu queria um pão francês e um café, por favor.</textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="speak">Speak</button>
+      <button id="roundtrip">Speak, then transcribe it</button>
+      <button id="record">Record 4 s and transcribe</button>
+      <button id="chat">Chat (stream)</button>
+    </div>
+    <audio id="player" controls style="width:100%;margin-top:8px"></audio>
+    <pre id="reply" style="margin-top:8px"></pre>
+  </section>
+
+  <section>
+    <h2>Calls</h2>
+    <div class="scroll"><table id="calls"><thead><tr><th>#</th><th>stage</th><th>served by</th><th>reason</th><th>ms</th><th>provider</th><th>result</th></tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+<script type="module" src="./demo.ts"></script>
+</body>
+</html>

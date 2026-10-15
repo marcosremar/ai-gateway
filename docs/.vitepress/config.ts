@@ -43,6 +43,7 @@ export default defineConfig({
           { text: 'TypeScript SDK', link: '/api/sdk' },
           { text: 'HTTP API', link: '/api/http' },
           { text: 'Gateway client', link: '/api/client' },
+          { text: 'Local tier (browser)', link: '/api/local-tier' },
           { text: 'Configuration', link: '/api/config' },
         ],
       },
