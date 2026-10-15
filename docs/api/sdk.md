@@ -9,6 +9,9 @@ export never resolved (`src/sdk.ts` does not exist). They stay in the tree until
 Use instead:
 - **Server / Node:** `GatewayClient` from `@parle/ai-gateway/client` — see [Client](./client.md) and [HTTP API](./http.md).
 - **Browser voice (VAD, turn clips):** `@parle/ai-gateway/voice`.
+- **Rust:** crate `ai-gateway-sdk` in `sdk/rust` — the HTTP calls of `GatewayClient` (OpenAI-compatible STT / chat /
+  TTS, s2s frames, deployments, app routes and fallback plan, health) plus live rooms and `/v1/activate`. It does not
+  port the direct fallback to providers nor the instability reports; see its README for the parity table.
 :::
 
 Full method list for `GatewaySDK`, kept for existing callers.
