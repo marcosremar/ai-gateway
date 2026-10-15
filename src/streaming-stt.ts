@@ -477,7 +477,7 @@ export class StreamingSTTRouter {
     const name = this._deploymentName();
     if (!dep || !name) return null;
     let lease: Lease;
-    const noWake = noWakeActive(); // gateway/proxy/no-wake.ts: use a ready replica, never wake a cold one
+    const noWake = noWakeActive(name); // gateway/proxy/no-wake.ts: use a ready replica, never wake a cold one
     try {
       lease = await dep.controller.acquire(name, noWake ? { waitMs: 0, noWake: true } : { waitMs: dep.acquireWaitMs ?? DEFAULT_DEPLOYMENT_ACQUIRE_MS });
     } catch (err) {

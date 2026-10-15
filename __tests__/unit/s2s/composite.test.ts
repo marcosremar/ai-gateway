@@ -50,6 +50,14 @@ describe('runComposite', () => {
     expect(events[events.length - 1]).toMatchObject({ sentences: 2, spoken: 1, skipped: 1 });
   });
 
+  // Babelcast audit 2026-10-12, M13: every sentence's TTS failed and the turn still ended `done` (first_audio_ms null).
+  it('a turn where no sentence could be voiced fails (never `done`)', async () => {
+    const events: S2SEvent[] = [];
+    await expect(run({ reply: 'Bom dia, querida!', failTtsFor: 'Bom' }, { emitEvent: e => events.push(e) })).rejects.toThrow(/none of the 1 sentence/);
+    expect(events.some(e => e.type === 'sentence_failed')).toBe(true);
+    expect(events.some(e => e.type === 'done')).toBe(false);
+  });
+
   it('resumes from a known transcript without a second STT', async () => {
     const { calls, events } = await run({}, { transcript: { text: 'Oi, tudo bem?' } });
     expect(calls.some(c => c.stage === 'stt')).toBe(false);

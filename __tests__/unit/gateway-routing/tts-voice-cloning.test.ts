@@ -17,6 +17,12 @@ const CATALOG = {
   voices: [{ id: 'br-f-01', lang: 'pt-BR', gender: 'feminine', audio: 'http://replica/refs/br-f-01.wav', text: 'Olá, eu sou a Ana.' }],
 };
 
+/** `GET /v1/voices` of the speech-stack image (docker/speech-stack/server.py `list_voices`): no audio field. */
+const SPEECH_STACK_VOICES = [
+  { id: 'br-f-03', lang: 'pt-BR', gender: 'feminine', text: 'Porque há muitas semelhanças Entre as crianças e as flores.' },
+  { id: 'br-m-08', lang: 'pt-BR', gender: 'masculine', text: 'Pode pedir à vontade, que a casa é sua.' },
+];
+
 function controller(cold = false) {
   const lease = { machine: { id: 'm1', ip: '10.0.0.5' }, token: 'tok', done: vi.fn() };
   return {
@@ -30,11 +36,14 @@ function controller(cold = false) {
 }
 
 /** Fake Base replica: serves its catalog and streams wav for /v1/audio/speech. */
-function replica(opts: { catalog?: boolean } = {}) {
+function replica(opts: { catalog?: boolean; speechStack?: boolean } = {}) {
   const speechBodies: Array<Record<string, unknown>> = [];
   const fetchImpl = vi.fn<FetchImpl>(async (url, init) => {
     if (url.endsWith('/refs/voices.json')) {
-      return opts.catalog === false ? new Response('not found', { status: 404 }) : Response.json(CATALOG);
+      return opts.catalog === false || opts.speechStack ? new Response('not found', { status: 404 }) : Response.json(CATALOG);
+    }
+    if (url.endsWith('/v1/voices')) {
+      return opts.speechStack ? Response.json({ voices: SPEECH_STACK_VOICES }) : new Response('not found', { status: 404 });
     }
     speechBodies.push(JSON.parse(String(init?.body)));
     const stream = new ReadableStream<Uint8Array>({
@@ -103,6 +112,45 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
       chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
     await handleAudioSpeech(req({ model: 'parle-tts', input: 'Bom dia!', voice: 'br-f-01', max_new_tokens: 20 }), chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
     expect(r.speechBodies.map(b => b.max_new_tokens)).toEqual([58, 438, 20]);
+  });
+
+  it('a speech-stack replica (parle-speech) clones from its /v1/voices list, the reference on its own refs server', async () => {
+    const r = replica({ speechStack: true });
+    const dep = new DeploymentTTSProvider(controller(), 'parle-speech', { fetchImpl: r.fetchImpl as never });
+    const res = await handleAudioSpeech(req({ model: 'parle-tts', input: 'Bom dia!', voice: 'br-f-03', response_format: 'wav' }),
+      chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
+    expect(res.status).toBe(200);
+    expect(r.speechBodies[0]).toMatchObject({
+      model: 'Qwen/Qwen3-TTS-12Hz-0.6B-Base', task_type: 'Base', language: 'Portuguese',
+      ref_audio: 'http://127.0.0.1:8000/refs/br-f-03.wav', ref_text: 'Porque há muitas semelhanças Entre as crianças e as flores.',
+    });
+    expect(r.speechBodies[0]).not.toHaveProperty('voice');
+    const missing = await handleAudioSpeech(req({ model: 'parle-tts', input: 'Oi', voice: 'pt-PT-1baab6', fallback_voice: 'pf_dora' }),
+      chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
+    expect(missing.headers).toMatchObject({ 'X-Gateway-Fallback': 'voice_not_found' });
+    expect(r.speechBodies).toHaveLength(1);
+  });
+
+  it('kokoro on a speech-stack replica (babelcast-tts-kokoro): the Kokoro voice is sent as is, no clone lookup; cold → cloud Kokoro, same voice', async () => {
+    const r = replica({ speechStack: true });
+    const dep = new DeploymentTTSProvider(controller(), 'babelcast-speech', { fetchImpl: r.fetchImpl as never });
+    const or = kokoro();
+    const kokoroChain = (d: TTSProvider) => ({ 'babelcast-tts-kokoro': [
+      { providerId: 'deployment:babelcast-speech', provider: d, model: 'kokoro' },
+      { providerId: 'openrouter', provider: or, model: 'hexgrad/kokoro-82m' },
+    ] });
+    const body = { model: 'babelcast-tts-kokoro', input: 'Bom dia!', voice: 'pf_dora', language: 'pt', response_format: 'pcm', stream: true };
+    const res = await handleAudioSpeech(req(body), kokoroChain(dep), undefined, new CircuitBreakerRegistry());
+    expect(res.headers).toMatchObject({ 'X-Gateway-Provider': 'deployment:babelcast-speech' });
+    expect(r.speechBodies[0]).toMatchObject({ model: 'kokoro', input: 'Bom dia!', voice: 'pf_dora', language: 'Portuguese', response_format: 'pcm', stream: true });
+    expect(r.speechBodies[0]).not.toHaveProperty('ref_audio');
+    expect(r.fetchImpl.mock.calls.some(([u]) => String(u).endsWith('/v1/voices'))).toBe(false);
+    expect(or.synthesize).not.toHaveBeenCalled();
+
+    const cold = await handleAudioSpeech(req(body), kokoroChain(new DeploymentTTSProvider(controller(true), 'babelcast-speech')),
+      undefined, new CircuitBreakerRegistry());
+    expect(cold.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:hexgrad/kokoro-82m', 'X-Gateway-Fallback': 'cold' });
+    expect(or.synthesize.mock.calls[0][0]).toMatchObject({ model: 'hexgrad/kokoro-82m', voice: 'pf_dora' });
   });
 
   it('a CustomVoice replica without catalog gets the request as sent (OpenAI shape), mp3 not in stream mode', async () => {

@@ -13,10 +13,16 @@ import { join } from 'path';
 import { roomsConfigFromEnv, type RoomsConfig } from './config';
 import { FileEventStore, MemoryEventStore, RoomEvents, type EventStore } from './events';
 import { createRoomsHttp, type KeyUser } from './http';
+import type { RoomSynthesize } from './dub';
 import { RoomService } from './service';
 import { FileRoomStore, MemoryRoomStore, type RoomStore } from './store';
 import { createRoomWs } from './ws';
 
+export {
+  KOKORO_MODEL, KOKORO_ROOM_VOICES, MAI_MODEL, MAI_ROOM_VOICES, ROOM_DUB_ATTEMPT_TIMEOUT_MS, RoomDubber, kokoroSynthesize, kokoroVoice,
+  maiSynthesize, synthesizeWithFallback,
+} from './dub';
+export type { RoomClip, RoomSynthesize } from './dub';
 export { roomsConfigFromEnv, ROOMS_DEFAULTS } from './config';
 export type { RoomsConfig } from './config';
 export { RoomService, hashToken } from './service';
@@ -25,7 +31,7 @@ export type { RoomStore } from './store';
 export { FileEventStore, MemoryEventStore, RoomEvents, aggregateEvents, parseEventBatch, EVENT_SCHEMA } from './events';
 export type { EventStore, ViewerEventRecord, RoomsAnalytics } from './events';
 export type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
-export { CODE_ALPHABET, CODE_RE, normalizeCode } from './validate';
+export { CODE_ALPHABET, CODE_RE, MAX_YOUTUBE_URL_CHARS, YOUTUBE_HOSTS, normalizeCode, parseYoutubeUrl } from './validate';
 
 export interface CreateRoomsOptions {
   env?: Record<string, string | undefined>;
@@ -42,12 +48,19 @@ export interface CreateRoomsOptions {
   now?: () => number;
   sweepIntervalMs?: number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
+  /** Server dubbing synthesizer (serve.ts: Kokoro then MAI-Voice, `synthesizeWithFallback`); none = no server dubbing. */
+  synthesize?: RoomSynthesize;
+  /** False while the synthesizer cannot work (e.g. its API key is not set). */
+  synthesizeAvailable?: () => boolean;
 }
 
 export function createRooms(opts: CreateRoomsOptions) {
   const config: RoomsConfig = { ...roomsConfigFromEnv(opts.env ?? process.env), ...opts.config };
   const store = opts.store ?? (config.dir ? new FileRoomStore(config.dir, opts.log) : new MemoryRoomStore());
-  const service = new RoomService({ config, store, now: opts.now, log: opts.log, sweepIntervalMs: opts.sweepIntervalMs });
+  const service = new RoomService({
+    config, store, now: opts.now, log: opts.log, sweepIntervalMs: opts.sweepIntervalMs,
+    synthesize: opts.synthesize, synthesizeAvailable: opts.synthesizeAvailable,
+  });
   const eventStore = opts.eventStore ?? (config.dir ? new FileEventStore(join(config.dir, 'events')) : new MemoryEventStore());
   const events = new RoomEvents({ store: eventStore, retentionMs: config.eventsRetentionMs, now: opts.now, sweepIntervalMs: opts.sweepIntervalMs, log: opts.log });
   const http = createRoomsHttp({ service, events, keyUser: opts.keyUser, userOf: opts.userOf, log: opts.log });

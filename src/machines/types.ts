@@ -16,6 +16,9 @@ export interface MachineRequest {
     env: Record<string, string>;
     zone?: string;
     near?: string;
+  minCpuCores?: number;
+  minRamGb?: number;
+  vm?: boolean;
 }
 
 export interface MachineRecord {
@@ -86,6 +89,7 @@ export interface MachineBackend {
   create(input: CreateMachineInput): Promise<ProviderMachine>;
     list(namespace: string): Promise<ProviderMachine[]>;
     release(providerId: string): Promise<void>;
+  offers?(request: MachineRequest): Promise<unknown[]>;
 }
 
 export interface MachineLimits {

@@ -9,6 +9,17 @@ import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from
 import { applyWhisperSegments } from '../stt-segments';
 import { prepareAudioFile } from './audio-utils';
 import { GATEWAY_SDK_MAX_RETRIES, getOrCreateClient } from './client-cache';
+import { emitGatewayEvent, gatewayTelemetryEnabled } from '../../../../telemetry/emit';
+import { audioSecondsOf } from '../../../../accounts/usage';
+
+function reportSttCost(provider: string, model: string, audio: Buffer | Blob, answer: unknown): void {
+  if (!gatewayTelemetryEnabled()) return;
+  const cost = (answer as { usage?: { cost?: unknown } } | null)?.usage?.cost;
+  const emit = (attrs: Record<string, unknown>) => emitGatewayEvent('usage.cost', { attrs: { stage: 'stt', provider, model, ...attrs } });
+  if (typeof cost === 'number' && cost > 0) emit({ costUsd: cost });
+  else if (Buffer.isBuffer(audio)) emit({ audioSeconds: audioSecondsOf(audio, answer) });
+  else void audio.arrayBuffer().then(b => emit({ audioSeconds: audioSecondsOf(Buffer.from(b), answer) }), () => {});
+}
 
 export interface OpenAICompatSTTConfig {
   providerId: ProviderId;
@@ -90,6 +101,7 @@ export class OpenAICompatSTTProvider implements STTProvider {
     const t0 = Date.now();
     const transcription = await client.audio.transcriptions.create(params, request.signal ? { signal: request.signal } : undefined);
     const total_ms = Date.now() - t0;
+    reportSttCost(this.providerId, model, request.audio, transcription);
 
     if (typeof transcription === 'string') {
       return { text: transcription, timing: { total_ms } };

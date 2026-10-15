@@ -18,13 +18,15 @@ POST /v1/audio/transcriptions   OpenAI-shaped STT (multipart `file`, `language`,
 WS   /ws/audio-stream           real-time STT: binary Int16 PCM 16 kHz frames in, {"text": <full running text>}
                                 out per decode — the protocol the gateway's streaming STT router already speaks.
 POST /v1/chat/completions       proxied to the LLM (streaming passes through).
-POST /v1/audio/speech           proxied to the TTS (streaming passes through).
+POST /v1/audio/speech           proxied to the TTS (streaming passes through). A `model` containing "kokoro" is spoken
+                                by Kokoro-82M (ONNX, on the CPU, in this process) instead: see kokoro_speech.
                    Both: an engine that breaks the body, sends nothing for PROXY_MAX_GAP_S (8) or keeps the request past
                      PROXY_DEADLINE_S (120) never ends as a clean answer. Before the response started: 502 / 504 with an
                      OpenAI `error`. After: SSE gets a last `data: {"error": {code: stage_failed|upstream_stalled}}`
                      event; any other body (audio, JSON) has its connection aborted. Counted in /health `proxy`.
 GET  /refs/<id>.wav             reference voices (from /files/voices.json, see load_voices).
-GET  /health                    200 only when the three models answered a warm-up.
+GET  /health                    200 only when the three models answered a warm-up; `kokoro.status` = loading|loaded|failed
+                                (Kokoro loads in the background and never holds the 200).
 GET  /debug/gpu                 GPU memory now, in MiB per card (nvidia-smi): used, total, free.
 GET  /debug/logs?engine=tts|llm|stt&tail=N&match=text   last lines of an engine's log (stt = this process), secrets
                                 scrubbed; every TTS request logs `tts <request_id> …` here and the same id in the TTS log.
@@ -92,6 +94,8 @@ client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), limits=htt
 voices: dict[str, dict] = {}
 ready = {"ok": False, "detail": "starting"}
 turns = {"started": 0, "done": 0, "failed": {}, "stalled": {}}
+kokoro_state: dict = {"status": "loading"}
+kokoro_engine = None
 proxied = {stage: {"started": 0, "done": 0, "failed": 0, "stalled": 0} for stage in ("chat", "speech")}
 app = FastAPI()
 
@@ -610,7 +614,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
     async def run():
         try:
             heard = await asyncio.to_thread(transcribe_sync, audio, lang, cfg.get("stt_prompt"))
-            meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio") if k in heard}
+            meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio", "speech_ms") if k in heard}
             heard_at = ms()
             state["stage"] = "llm"
             yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": heard_at, **meta,
@@ -831,6 +835,13 @@ async def chat(request: Request):
 
 @app.post("/v1/audio/speech")
 async def speech(request: Request):
+    body = await request.body()
+    try:
+        asked = json.loads(body)
+    except ValueError:
+        asked = None
+    if isinstance(asked, dict) and "kokoro" in str(asked.get("model", "")).lower():
+        return await kokoro_speech(asked)
     return await proxy(request, f"{TTS_URL}/v1/audio/speech", "speech")
 
 
@@ -845,6 +856,106 @@ async def refs(name: str):
 @app.get("/v1/voices")
 async def list_voices():
     return {"voices": [{"id": k, **{f: v[f] for f in v if f != "audio"}} for k, v in voices.items()]}
+
+
+# ── Kokoro-82M: stock voices, CPU, next to Qwen3-TTS ─────────────────────────
+
+KOKORO_DIR = Path(os.environ.get("KOKORO_DIR", "/models/kokoro"))
+KOKORO_VOICES = {"pt": ("pf_dora", "pm_alex"), "en": ("af_heart", "am_michael"), "fr": ("ff_siwis", "ff_siwis"),
+                 "es": ("ef_dora", "em_alex"), "it": ("if_sara", "im_nicola")}
+KOKORO_ESPEAK = {"a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "h": "hi", "i": "it", "j": "ja", "p": "pt-br", "z": "cmn"}
+LANGUAGE_CODES = {"portuguese": "pt", "english": "en", "french": "fr", "spanish": "es", "italian": "it"}
+KOKORO_FORMATS = {"mp3": "audio/mpeg", "opus": "audio/ogg", "aac": "audio/aac", "flac": "audio/flac"}
+
+
+def language_code(value) -> str | None:
+    text = str(value or "").strip().lower()
+    return LANGUAGE_CODES.get(text) or (text[:2] if text[:2] in KOKORO_VOICES else None)
+
+
+def kokoro_voice(voice, language, known) -> tuple[str, str]:
+    """(Kokoro voice, espeak language). A Kokoro voice the client names is kept; anything else (a cast id, an OpenAI
+    name) becomes the language's stock voice, masculine for an `xx-m-…` id. The text's language wins over the voice's."""
+    code = language_code(language)
+    voice = str(voice or "")
+    if voice not in known:
+        masculine = bool(re.match(r"^[a-z]{2}-m-", voice, re.I))
+        voice = KOKORO_VOICES[code or "pt"][masculine]
+    lang = {"pt": "pt-br", "en": "en-us", "fr": "fr-fr", "es": "es", "it": "it"}.get(code) or KOKORO_ESPEAK.get(voice[0], "pt-br")
+    return voice, lang
+
+
+def pcm16(samples: np.ndarray) -> bytes:
+    return (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+
+
+def wav_header(data_bytes: int) -> bytes:
+    return (b"RIFF" + struct.pack("<I", min(36 + data_bytes, 0xFFFFFFFF)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE, SAMPLE_RATE * 2, 2, 16)
+            + b"data" + struct.pack("<I", data_bytes))
+
+
+def openai_error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse({"error": {"message": message, "type": "invalid_request_error" if status == 400 else "upstream_error", "code": code}},
+                        status_code=status)
+
+
+async def kokoro_speech(asked: dict):
+    """OpenAI `/v1/audio/speech` on Kokoro: `input`, `voice` (a Kokoro voice, or any id → the language's stock voice),
+    `language` (ISO code or name; default the voice's), `speed` (0.5–2), `response_format` pcm (s16le mono 24 kHz, as
+    the Qwen path) | wav (default) | mp3 | opus | aac | flac, `stream: true` (pcm/wav) sends each sentence as it is made."""
+    text = str(asked.get("input") or "").strip()
+    if not text:
+        return openai_error(400, "invalid_input", "input is empty")
+    if kokoro_engine is None:
+        return openai_error(503, f"kokoro_{kokoro_state['status']}", f"kokoro is {kokoro_state['status']}: {kokoro_state.get('detail', '')}".strip(": "))
+    voice, lang = kokoro_voice(asked.get("voice"), asked.get("language"), kokoro_state["voices"])
+    try:
+        speed = min(2.0, max(0.5, float(asked.get("speed") or 1.0)))
+    except (TypeError, ValueError):
+        return openai_error(400, "invalid_speed", "speed must be a number")
+    fmt = str(asked.get("response_format") or "wav")
+    if fmt not in ("pcm", "wav", *KOKORO_FORMATS):
+        return openai_error(400, "invalid_response_format", f"response_format must be pcm, wav or one of {', '.join(KOKORO_FORMATS)}")
+    if asked.get("stream") is True and fmt in ("pcm", "wav"):
+        async def chunks():
+            if fmt == "wav":
+                yield wav_header(0xFFFFFFFF - 36)
+            async for samples, _ in kokoro_engine.create_stream(text, voice=voice, speed=speed, lang=lang):
+                yield pcm16(samples)
+        return StreamingResponse(chunks(), media_type="audio/pcm" if fmt == "pcm" else "audio/wav", headers={"X-Accel-Buffering": "no"})
+    try:
+        samples, _ = await asyncio.to_thread(kokoro_engine.create, text, voice=voice, speed=speed, lang=lang)
+    except Exception as error:  # noqa: BLE001
+        print("kokoro", voice, lang, repr(error)[:300], flush=True)
+        return openai_error(502, "stage_failed", f"kokoro: {error!r}"[:300])
+    audio = pcm16(samples)
+    if fmt == "pcm":
+        return Response(audio, media_type="audio/pcm")
+    if fmt == "wav":
+        return Response(wav_header(len(audio)) + audio, media_type="audio/wav")
+    encoded = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-loglevel", "error", "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1",
+                                                      "-i", "pipe:0", "-f", {"aac": "adts"}.get(fmt, fmt), "pipe:1"],
+                                      input=audio, capture_output=True, check=True)
+    return Response(encoded.stdout, media_type=KOKORO_FORMATS[fmt])
+
+
+def load_kokoro_sync():
+    from kokoro_onnx import EspeakConfig, Kokoro
+    engine = Kokoro(str(KOKORO_DIR / "model.onnx"), str(KOKORO_DIR / "voices.npz"),
+                    espeak_config=EspeakConfig(data_path=os.environ.get("KOKORO_ESPEAK_DATA") or None))
+    engine.create("Olá, bom dia.", voice="pf_dora", lang="pt-br")
+    return engine
+
+
+async def load_kokoro() -> None:
+    global kokoro_engine
+    try:
+        engine = await asyncio.to_thread(load_kokoro_sync)
+        kokoro_state.update(status="loaded", voices=engine.get_voices())
+        kokoro_engine = engine
+    except Exception as error:  # noqa: BLE001 — Kokoro failing never takes the Qwen3-TTS path down
+        kokoro_state.update(status="failed", detail=repr(error)[:300])
+        print("kokoro", repr(error)[:300], flush=True)
 
 
 # ── Engine logs ──────────────────────────────────────────────────────────────
@@ -905,7 +1016,8 @@ async def debug_gpu(request: Request):
 
 @app.get("/health")
 async def health():
-    return JSONResponse({**ready, "models": MODELS, "stt": stt_batcher.stats, "s2s": turns, "proxy": proxied}, status_code=200 if ready["ok"] else 503)
+    return JSONResponse({**ready, "models": MODELS, "stt": stt_batcher.stats, "s2s": turns, "proxy": proxied,
+                         "kokoro": {k: v for k, v in kokoro_state.items() if k != "voices"}}, status_code=200 if ready["ok"] else 503)
 
 
 # ── Warm-up: the first real request must not pay kernel loads ───────────────
@@ -936,3 +1048,4 @@ async def warm() -> None:
 @app.on_event("startup")
 async def startup() -> None:
     asyncio.create_task(warm())
+    asyncio.create_task(load_kokoro())

@@ -49,9 +49,15 @@ else prompt chars/4), `/v1/audio/transcriptions` (audio seconds — WAV header, 
 Only successful requests count. Counters per UTC day × user × key in `account-usage.json` (debounced atomic writes,
 `ACCOUNTS_USAGE_RETENTION_DAYS`, default 400).
 
-Quota (`ACCOUNT_QUOTA_*`, 0 = unlimited — the default): monthly audio minutes, LLM tokens, TTS characters, rooms →
-**402** `quota_exceeded` (`metric`, `limit`, `used`, `reset_at`, message in Portuguese); daily request cap → **429**
-`daily_quota_exceeded` + `Retry-After`. Admission is on usage so far: the request that crosses a limit is served.
+Quota (`ACCOUNT_QUOTA_*`): monthly audio minutes, LLM tokens, TTS characters, rooms (0 = unlimited, the default) →
+**402** `quota_exceeded` (`metric`, `limit`, `used`, `reset_at`, message in Portuguese). Per account, so one account
+cannot spend the others' share of the app (all activation keys are the same app): a daily request budget
+(`ACCOUNT_QUOTA_REQUESTS_DAY`, default 2000; a realtime session counts its whole app charge, `perMinute × ⌈ttl/60⌉` = 40
+by default, a `/v1/s2s` turn 1) → **429** `daily_quota_exceeded` + `scope: "account"` + `Retry-After`; and requests in
+flight (`ACCOUNT_QUOTA_CONCURRENT`, default 20) → **429** `account_concurrency_exceeded` + `Retry-After: 1`. `0` turns
+either off. The app's own daily budget (`APP_DAILY_*`, 429 `daily_budget_exhausted`) and in-flight limit
+(`MAX_CONCURRENT_PER_USER`) still cap the sum of all accounts. Admission is on usage so far: the request that crosses a
+monthly limit is served.
 Per-user overrides live in `users[].quota` (plans, later).
 
 ## Pages

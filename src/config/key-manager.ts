@@ -14,7 +14,7 @@
 
 import type { CustomRoute } from '../gateway/proxy/types';
 import { readJsonBody, type AdminGate } from './admin-gate';
-import { isEnvPinned, loadSandboxEnv, principalSandboxToken, sandboxEnvUrls } from './sandbox-env';
+import { isEnvPinned, loadSandboxEnv, principalSandboxToken, sandboxEnvUrls, saveSandboxCache } from './sandbox-env';
 
 export const RELOAD_INTERVAL_MS = 5 * 60_000;
 
@@ -35,6 +35,7 @@ export interface KeyManagerOptions {
   timeoutMs?: number;
   /** Called after a reload that changed or removed at least one key (names only). */
   onChange?: (names: string[]) => void | Promise<void>;
+  cachePath?: string;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
@@ -76,6 +77,9 @@ export class KeyManager {
       removed.push(name);
     }
     for (const name of received) this.fromPalco.add(name);
+    if (this.opts.cachePath) await saveSandboxCache(this.opts.cachePath, this.env, r.received).catch((err: unknown) => {
+      this.opts.log?.('Saving the key cache failed', { error: err instanceof Error ? err.message : String(err) });
+    });
     const result: ReloadResult = { ok: true, source: r.source, changed: r.applied, removed, errors: r.errors };
     if (result.changed.length || removed.length) {
       this.opts.log?.('Keys reloaded from the palco', { changed: result.changed, removed });

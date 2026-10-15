@@ -7,7 +7,7 @@
  *
  *   - per request: header `X-Gateway-No-Wake: 1` (also `true`/`yes`);
  *   - per key user: `GATEWAY_NO_WAKE_USERS=user1,user2` (the user names of `API_KEYS="key:user"`), read per request;
- *   - always for the `sandbox` user (the dev token), unless `SANDBOX_TOKEN_ADMIN=1`.
+ *   - always for the `sandbox` user (the dev token).
  *
  * In that mode a deployment target with no ready replica (cold, stopped, booting, absent) is skipped with code `cold`
  * (neutral: no circuit, no cooldown) and the route falls to its cloud fallback; `/v1/s2s` goes composed; `invoke`
@@ -18,11 +18,11 @@
  * (deployment providers, the s2s route, the loopback stage client) reads it without threading a parameter.
  */
 import { AsyncLocalStorage } from 'async_hooks';
-import { SANDBOX_USER, sandboxIsAdmin } from '../../config/sandbox-env';
+import { SANDBOX_USER } from '../../config/sandbox-env';
 
 export const NO_WAKE_HEADER = 'x-gateway-no-wake';
 
-interface NoWakeScope { noWake: boolean }
+interface NoWakeScope { noWake: boolean; noUse?: boolean; mayWake?: (deployment: string) => boolean }
 
 const als = new AsyncLocalStorage<NoWakeScope>();
 let skips = 0;
@@ -37,14 +37,41 @@ export function runNoWake<T>(fn: () => T): T {
   return als.run({ noWake: true }, fn);
 }
 
-/** Turns no-wake on for the rest of the current request. No-op outside a scope. */
-export function markNoWake(): void {
+/**
+ * Turns no-wake on for the rest of the current request. No-op outside a scope. `mayWake` names the deployments the
+ * key may still wake (and use as a normal request): its own test copies (access-keys.ts `wakeDeployments`).
+ */
+export function markNoWake(mayWake?: (deployment: string) => boolean): void {
   const scope = als.getStore();
-  if (scope) scope.noWake = true;
+  if (!scope) return;
+  scope.noWake = true;
+  if (mayWake) {
+    const seen = new Map<string, boolean>();
+    scope.mayWake = (d) => { if (!seen.has(d)) seen.set(d, mayWake(d)); return seen.get(d)!; };
+  }
 }
 
-export function noWakeActive(): boolean {
-  return als.getStore()?.noWake === true;
+const exempt = (scope: NoWakeScope | undefined, deployment?: string) => Boolean(deployment && scope?.mayWake?.(deployment));
+
+export function noWakeActive(deployment?: string): boolean {
+  const scope = als.getStore();
+  return scope?.noWake === true && !exempt(scope, deployment);
+}
+
+/** The request's key does not count as use (`countsAsUse: false`): a lease leaves the idle clock alone. */
+export function markNoUse(): void {
+  const scope = als.getStore();
+  if (scope) scope.noUse = true;
+}
+
+export function noUseActive(deployment?: string): boolean {
+  const scope = als.getStore();
+  return scope?.noUse === true && !exempt(scope, deployment);
+}
+
+/** Runs `fn` as a request that does not count as use (tests, in-process callers). */
+export function runNoUse<T>(fn: () => T): T {
+  return als.run({ noWake: true, noUse: true }, fn);
 }
 
 export function headerAsksNoWake(value: string | string[] | undefined): boolean {
@@ -59,7 +86,7 @@ export function noWakeUsers(env: Record<string, string | undefined> = process.en
 
 /** Whether a request (its header and its resolved key user) runs in no-wake mode. */
 export function requestIsNoWake(header: string | string[] | undefined, userId: string, env: Record<string, string | undefined> = process.env): boolean {
-  return headerAsksNoWake(header) || noWakeUsers(env).has(userId) || (userId === SANDBOX_USER && !sandboxIsAdmin(env));
+  return headerAsksNoWake(header) || noWakeUsers(env).has(userId) || userId === SANDBOX_USER;
 }
 
 /** Counts one deployment target skipped (or one invoke refused) because of no-wake. */

@@ -8,6 +8,7 @@ export class MachineError extends Error {
 const bad = (message: string) => new MachineError(400, message);
 const PROVIDERS: ReadonlyArray<MachineProvider | 'cheapest'> = ['scaleway', 'vast', 'runpod', 'cheapest'];
 const SSH_KEY_RE = /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com) [A-Za-z0-9+/=]{40,4096}( [\w.@+-]{0,100})?$/;
+export const VAST_VM_IMAGE = 'docker.io/vastai/kvm:ubuntu_terminal';
 const IMAGE_RE = /^[a-z0-9][a-z0-9._\-/:@]{0,254}$/i;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 const HOLDER_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
@@ -83,6 +84,19 @@ export function parseMachineInput(body: Record<string, unknown>, limits: Machine
   if (zone) request.zone = zone;
   const near = str(body.near, 'near', /^[A-Z]{2}$/, false);
   if (near) request.near = near;
+  if (body.minCpuCores !== undefined) request.minCpuCores = num(body.minCpuCores, 'minCpuCores', 1, 512);
+  if (body.minRamGb !== undefined) request.minRamGb = num(body.minRamGb, 'minRamGb', 1, 4096);
+  if (request.minCpuCores || request.minRamGb) {
+    if (request.provider === 'scaleway' || request.provider === 'runpod') throw bad('minCpuCores/minRamGb choose a vast host; on scaleway and runpod name a machineType that has them');
+    request.provider = 'vast';
+  }
+  if (body.vm === true) {
+    if (request.provider === 'scaleway' || request.provider === 'runpod') throw bad('vm rents a vast KVM host');
+    request.provider = 'vast';
+    request.vm = true;
+    request.image ||= VAST_VM_IMAGE;
+    if (!request.image.startsWith('docker.io/vastai/kvm:')) throw bad('a vast vm image must be docker.io/vastai/kvm:<tag>');
+  }
   if (request.provider !== 'scaleway' && !request.image) throw bad('image is required on vast and runpod (the container the machine runs)');
   return {
     request,

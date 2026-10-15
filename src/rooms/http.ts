@@ -1,6 +1,7 @@
 // ── AI Gateway — Live subtitle rooms: HTTP routes ────────────────────────────
 //   POST /v1/rooms                 gateway key (mounted as a proxy customRoute: the proxy's auth runs first)
 //   GET  /v1/rooms/:code           public transcript, CORS open
+//   PATCH /v1/rooms/:code          publish token: change room fields after creation ({"youtubeUrl"})
 //   POST /v1/rooms/:code/lines     publish token (or the creating / an admin gateway key)
 //   POST /v1/rooms/:code/audio     publish token; broadcast only
 //   POST /v1/rooms/:code/end       publish token
@@ -17,7 +18,7 @@ import { errorTypeForStatus } from '../gateway/proxy/http-conventions';
 import { entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
 import { EVENTS_MAX_BYTES, parseEventBatch, type RoomEvents } from './events';
 import type { RoomService } from './service';
-import { RoomError, normalizeCode, parseAudio, parseCreate, parseLine } from './validate';
+import { RoomError, normalizeCode, parseAudio, parseCreate, parseLine, parseUpdate } from './validate';
 
 export type KeyUser = (token: string) => { userId: string; admin: boolean } | null;
 
@@ -37,6 +38,7 @@ const LIVE_PATH = /^\/live\/([^/]{1,32})\/?$/;
 const HOST_CODE_PATH = /^\/([A-Za-z0-9]{6})\/?$/;
 const CREATE_MAX_BYTES = 16 * 1024;
 const LINE_MAX_BYTES = 256 * 1024;
+const UPDATE_MAX_BYTES = 4 * 1024;
 const BODY_TIMEOUT_MS = 30_000;
 
 const API_HEADERS = {
@@ -157,17 +159,17 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, rawCode: string, action: string | undefined): Promise<void> {
     if (method === 'OPTIONS') {
-      sendEmpty(res, 204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': 86_400 });
+      sendEmpty(res, 204, { 'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': 86_400 });
       return;
     }
-    const allowed = action === undefined ? ['GET', 'HEAD'] : action === 'ws' ? ['GET'] : action === 'events' ? ['GET', 'POST'] : ['POST'];
+    const allowed = action === undefined ? ['GET', 'HEAD', 'PATCH'] : action === 'ws' ? ['GET'] : action === 'events' ? ['GET', 'POST'] : ['POST'];
     if (!allowed.includes(method)) { req.resume(); sendError(res, 405, `use ${allowed.join(' or ')}`, { Allow: allowed.join(', ') }); return; }
     if (action === 'ws') { sendError(res, 426, 'this path is a WebSocket', { Upgrade: 'websocket' }); return; }
     if (action === 'events' && method === 'GET') { await listEvents(req, res, rawCode); return; }
     const code = normalizeCode(rawCode);
     const room = code ? await service.get(code) : null;
     if (!room) { req.resume(); sendError(res, 404, 'room not found or expired'); return; }
-    if (action === undefined) { sendJson(res, 200, service.publicView(room)); return; }
+    if (action === undefined && method !== 'PATCH') { sendJson(res, 200, service.publicView(room)); return; }
     if (action === 'events') {
       const batch = parseEventBatch(await readJson(req, EVENTS_MAX_BYTES));
       sendJson(res, 202, await opts.events.record(room.meta.code, batch, clientIp(req)));
@@ -175,6 +177,12 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
     }
 
     service.authorizePublish(room, bearerToken(req.headers.authorization), opts.keyUser);
+    if (action === undefined) {
+      const input = parseUpdate(await readJson(req, UPDATE_MAX_BYTES));
+      await service.update(room, input);
+      sendJson(res, 200, { code: room.meta.code, youtubeUrl: input.youtubeUrl });
+      return;
+    }
     if (action === 'lines') {
       const line = parseLine(await readJson(req, LINE_MAX_BYTES), cfg, Date.now());
       await service.publishLine(room, line);

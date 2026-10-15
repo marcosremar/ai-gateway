@@ -31,16 +31,22 @@ master key, which the gateway uses only to fetch its own provider keys from the 
 decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only, default off, logs a `WARNING`) accepts it
 again as the user `sandbox`, until every client sends its own key. That user is **not an admin** (even if
 `DEPLOYMENTS_ADMIN_USERS` lists it) and runs in **no-wake** mode; it may call the aliases of the app named by
-`SANDBOX_TOKEN_APP` (e.g. `parle`), under the app-key limits. `SANDBOX_TOKEN_ADMIN=1` is the explicit opt-in back to
-admin and waking (audit 2026-10-09 #6). These three flags come from the host only, never from the dev API.
+`SANDBOX_TOKEN_APP` (e.g. `parle`), under the app-key limits. `SANDBOX_TOKEN_ADMIN` is no longer read (10/10/2026): the
+dev token is a client, never an admin; a boot `WARNING` asks to remove the variable. These flags come from the host
+only, never from the dev API.
 Keys travel only as `Authorization: Bearer <key>`: a bare key without the scheme gets `401`.
+
+**Two roles only** (owner, 10/10/2026): an **admin** manages the gateway (machines, keys, config); a **client** calls
+the APIs (STT, chat, TTS, realtime, s2s). A developer is a client — testing never needs an admin key. Every key is one
+or the other: `GET /v1/admin/access/keys` lists each with `role: "admin" | "client"`. The dev token (`sandbox`) is
+always a client, even if the admin list names it.
 
 **Admin keys** — the users in `DEPLOYMENTS_ADMIN_USERS`. When that list is empty, no key is admin (fail closed since 06/10/2026; the boot logs a `WARNING`). Admin keys are required for deployment
 mutations, `X-App` naming **another** app, `GET /health?deep=1`, the full view of `GET /health?details=1` and
 `/v1/admin/keys*`. A non-admin key may send `X-App` equal to its own app (what `GatewayClient({ app })` sends); any
 other value → `403`. The same rule holds for every app-scoped route added later (e.g. a machines API).
 
-**App keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
+**Client keys** (any non-admin key; its user id is its app) are limited so a leaked one costs little:
 
 - **Models**: only the aliases of its own app (`PUT /v1/apps/:app/routes`), per stage — no `org/model` passthrough,
   no embeddings or images. Anything else → `403 permission_error`, before any provider is called.
@@ -170,7 +176,13 @@ with the fallback hedged in, so the probe never makes the client wait the full t
 for: the gateway starts scaling it up and answers from the fallback in the same call; once a replica is ready,
 traffic returns to it. A real client error (e.g. `400` invalid request) is returned as is.
 
-### No-wake mode — `X-Gateway-No-Wake: 1` / `GATEWAY_NO_WAKE_USERS`
+### No-wake mode — `X-Gateway-No-Wake: 1` / `GATEWAY_NO_WAKE_USERS` / key policy `autoWake`
+
+**Since 10/10/2026 every client key is no-wake unless its policy says `autoWake: true`** (`PUT
+/v1/admin/access/keys/policy`, below). A Saturday with no class still saw 27 GPU starts from test calls; a test now
+gets the cloud answer, and turns a GPU on on purpose with `POST /v1/deployments/:name/start` (§ Deployments). The
+class client keeps waking its GPUs: the first boot of this build gives every `parle` key `autoWake: true`,
+`canStartGpu: true` and no daily cap (`access.json`, once). Local open mode (no keys) keeps waking.
 
 A request that must never start a rented machine (a test, a probe, a batch job, a dev box) sends
 `X-Gateway-No-Wake: 1` (`true`/`yes` too); a key user listed in `GATEWAY_NO_WAKE_USERS` (comma list of the user names
@@ -197,8 +209,7 @@ The gateway's code names no app model. An app that wants its own model names (`p
 ```bash
 curl -X PUT $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
   "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
-  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-qwen-tts", "oneGpuDeployment": "parle-speech",
-                            "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
+  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-speech", "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
                           { "provider": "openrouter", "model": "microsoft/mai-voice-2.1-flash", "voice": "pt-BR-Luana:MAI-Voice-2-Flash" },
                           { "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora", "fixedVoice": true }] }
 }'
@@ -214,6 +225,9 @@ curl $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle'
   runs Whisper + Qwen3.5 + Qwen3-TTS). A registered `deployment` always wins. Resolved when the providers are mounted
   (boot, routes PUT, key reload, a declared deployment registered); `/health?details=1` shows the effective target and the
   boot log lists it under `oneGpu`.
+- `order: "benchmark"` + `benchmarkDataset` (first entry only): the entries after the first are ordered by the model
+  benchmark ranking of that dataset (`POST /v1/admin/benchmarks`, admin); unranked entries keep their order after the
+  ranked ones and the first entry never moves. Formula, weights and routes: [`docs/model-benchmarks.md`](../model-benchmarks.md).
 - `voices: {feminine, masculine}` (TTS; capability, not in the parle's chain, which is MAI-Voice → Kokoro): a fallback that cannot clone speaks a stock voice of the **gender** of the
   requested voice (`src/config/tts-fallback-voices.ts`). The gender comes from the entry's `voiceGenders`
   (`{"pt-PT-1baab6": "masculine", …}`, the app's cast), the `xx-f-`/`xx-m-` slug, or the gender letter of a Kokoro
@@ -233,7 +247,9 @@ else its own configured voice. The replica must expose the OpenAI shapes (`/v1/a
 
 **Self-hosted TTS (Qwen3-TTS Base).** For a deployment target:
 
-- `voice` may be a **cast voice id** of the replica's catalog (`GET /refs/voices.json` on the replica, cached 5 min).
+- `voice` may be a **cast voice id** of the replica's catalog (`GET /refs/voices.json` on the replica, cached 5 min;
+  on the `speech-stack` image, which has no such file, its `GET /v1/voices` list, each reference at
+  `http://127.0.0.1:8000/refs/<id>.wav` inside the replica — `speechStackCatalogOf`, since 14/10/2026).
   When the client sends no `ref_audio`, the gateway turns it into `task_type: "Base"`, `ref_audio`, `ref_text`,
   `language` (from the voice) and the catalog's `model` — the request parle's `qwen-speech.ts` builds, without
   `voice` (vLLM-Omni would read it as a precomputed speaker). A voice that is not in the catalog is **never sent**
@@ -411,7 +427,7 @@ replaces the generic chat fallback (default: Groq `llama-3.3-70b-versatile`, the
 {
   "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
   "chat": { "parle-llm": ["deployment:parle-speech", "openrouter:qwen/qwen3.5-9b"] },
-  "tts":  { "parle-tts": ["deployment:parle-qwen-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+  "tts":  { "parle-tts": ["deployment:parle-speech:Qwen/Qwen3-TTS-12Hz-0.6B-Base",
                           { "provider": "openrouter", "model": "fish-audio/s2-pro", "voice": "<voice id>" }] }
 }
 ```
@@ -422,9 +438,10 @@ Every successful response of the three routes carries (no secrets):
 
 | Header | Example | Meaning |
 |---|---|---|
-| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
+| `X-Gateway-Provider` | `deployment:parle-speech`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
 | `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `policy`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
+| `X-Gateway-Status` | `degraded` | only for an app whose profile has `requiresGpu` (below, *App profile and GPU status*), when a cloud target answered: the answer is valid, but not what the app's GPU would have given |
 
 Streaming chat (`stream: true`) falls back only before the first token, so the headers are final.
 A deployment target streams too: the gateway asks the replica for `stream: true` and relays each delta as it arrives
@@ -636,8 +653,13 @@ curl -X POST https://<gateway>/v1/audio/transcriptions -H "Authorization: Bearer
 ```
 
 ```json
-{ "text": "Bom dia" }
+{ "text": "Bom dia", "language": "pt", "language_probability": 0.97 }
 ```
+
+`language` / `language_probability`: the language the provider detected in the audio and its probability, when it gives
+them. The text is still transcribed in the requested `language`; the speech-stack replica (image with this change) detects
+on the same encoder pass, at no extra decode, so a learner speaking French to a `language=pt` request shows up as
+`"language": "fr"`. Absent on providers that report none; a cache hit answers the same fields as the miss it stores. Not a verdict on its own: on 72 short pt-BR clips (0.4–4 s, gTTS, some with noise) large-v3 detected another language in 5 (noisy ones); read it with `language_probability`.
 
 **Hallucination filter (on by default, every provider, every client).** Whisper and other STT models invent text on
 silence and noise ("E aí", "Obrigado por assistir", "Legendas pela comunidade Amara.org"). The gateway asks the provider
@@ -650,7 +672,8 @@ blocklist marks as invented, and answers `{"text":""}` (still `200`; the client 
 | response header `X-STT-Raw-Length` | length in characters of what the provider returned (on every `200`) |
 | multipart field `filter_hallucinations=false` | per-request opt-out (QA); `0`/`off` also accepted. Such answers are cached apart from filtered ones |
 | `language` | `pt`, `pt-BR` or `Portuguese` (codes and English/native names). Without it only the high-confidence phrases apply |
-| `response_format=verbose_json` | `language`, `duration` and the kept `segments` are returned next to `text` |
+| `speech_ms` (speech-stack replica) | milliseconds of speech its VAD found; when > 0 the metadata layer only drops Whisper's own silence test (`no_speech_prob` > 0.6 and `avg_logprob` < -1.0) and repetition loops, so a short real answer is not emptied ([details](../stt-hallucination-filter.md#rules)) |
+| `response_format=verbose_json` | `language`, `duration` and the kept `segments` are returned next to `text` (fields the provider did not send stay absent) |
 | env `STT_HALLUCINATION_FILTER=0` | turns the filter off for the whole gateway |
 | env `STT_FILTER_NO_SPEECH_PROB` (0.6), `STT_FILTER_AVG_LOGPROB` (-1.0), `STT_FILTER_COMPRESSION_RATIO` (2.4), `STT_FILTER_AMBIGUOUS_NO_SPEECH_PROB` (0.4) | thresholds, no deploy of code needed (design choices to pilot) |
 
@@ -705,9 +728,12 @@ production namespace (`default` on Railway).
 | `PATCH` | `/v1/deployments/:name` | update an existing one (e.g. `{ "minReplicas": 1 }`) |
 | `GET` | `/v1/deployments/:name` | status + replicas |
 | `DELETE` | `/v1/deployments/:name` | release every replica and forget the spec |
-| `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) |
+| `POST` | `/v1/deployments/:name/wake` | start replicas now (pre-warm) (admin, or a client key with `canStartGpu` and no daily cap — a capped key gets `403` pointing to `start`) |
 | `POST` | `/v1/deployments/:name/warm` | body `{ "replicas": n, "untilMinutes": m }`: keep `n` replicas up (0…`maxReplicas`) for `m` minutes (≤ 720) whatever the load; a later call replaces the window, `park` ends it; counts as a request (admin) |
-| `POST` | `/v1/deployments/:name/park` | done for now: forget the last use, scale to `minReplicas` at the next tick (powers off under `idleAction: "stop"`); in-flight requests are never cut (admin) |
+| `POST` | `/v1/deployments/:name/park` | done for now: forget the last use, scale to `minReplicas` at the next tick (powers off under `idleAction: "stop"`); in-flight requests are never cut (admin, or a client key with `canStartGpu` on its app's deployment) |
+| `POST` | `/v1/deployments/:name/start` | **client key with `canStartGpu`**, its app's deployment only: body `{ "minutes": 1–240 }` keeps one GPU up for that long (never fewer than a warm window already there). At the end it is parked once nobody used it for the key's `startIdleMinutes` (default 10) — unless a warm schedule, a realtime session, another warm window or another key's start needs it. `202 { deployment, until, idleMinutes, spentTodayEur, capEur }`. Over the key's daily cap → `402` saying what was spent and what to do |
+| | | A capped key that names a deployment with a **test copy** (another deployment whose spec has `testFor: "<name>"`, same app) starts the copy instead — `parle-speech` → `parle-speech-test`, one L4 (docs/deployments.md). While the copy is ready and the original is not, alias requests for the original are served by the copy |
+| `POST` | `/v1/deployments/:name/extend` | the same key: `{ "minutes": n }` more on the GPU it started (at most 240 min ahead); `404` without a start |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it; `X-Gateway-No-Wake: 1` → 503 `cold` at once instead). Raw passthrough: the STT hallucination filter does NOT apply here (use `/v1/audio/transcriptions` or `/v1/s2s`) |
 | `GET` | `/v1/profiles` | built-in + stored profiles (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`, …) |
 | `PUT` / `DELETE` | `/v1/profiles/:name` | store / delete a profile |
@@ -724,12 +750,57 @@ for a cold start.
 | `GET` / `PUT` | `/v1/apps/:app/routes` | the app's aliases (see *App aliases* above) |
 | `GET` | `/v1/apps/:app/images` | the app's saved images |
 | `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` / `PUT` | `/v1/apps/:app/profile` | `{ requiresGpu, gpuDeployments }` (below); `PUT` by an admin, or by the app's own key naming only its own deployments |
+| `GET` | `/v1/apps/:app/status` | GPU status of the app's profile (below); `404` without a profile |
 | `GET` | `/v1/apps/:app/fallback` | direct-fallback plan (below) |
 | `POST` / `GET` | `/v1/apps/:app/stability-report` | SDK instability reports (below) |
 | `PATCH` | `/v1/apps/:app` | `{ "requireDevice": boolean }` (see *App devices*) |
 | `GET` / `POST` / `DELETE` | `/v1/apps/:app/devices`, `…/devices/:device/block` | the app's end-user devices: list, block, unblock (see *App devices*) |
 
 Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
+
+### App profile and GPU status — `/v1/apps/:app/profile`, `/v1/apps/:app/status`
+
+An app whose answers depend on its own GPU (parle: the detected language and the cloned voices only come from
+`parle-speech`) says so in its profile; the gateway then probes those GPUs and reports, per app,
+whether it is served by them.
+
+```bash
+curl -X PUT $GW/v1/apps/parle/profile -H "Authorization: Bearer $PARLE_KEY" -H 'content-type: application/json' \
+  -d '{"requiresGpu": true, "gpuDeployments": ["parle-speech"]}'
+# → { app, profile, warnings? }  warnings: a deployment not registered, or without a warmSchedule
+curl $GW/v1/apps/parle/status -H "Authorization: Bearer $PARLE_KEY"
+```
+
+```json
+{ "app": "parle", "requiresGpu": true, "mode": "gpu", "checkedAt": "2026-10-13T16:01:00.000Z",
+  "deployments": [
+    { "name": "parle-speech", "stages": ["stt", "llm", "tts"], "state": "ready", "replicas": { "ready": 1, "total": 1 },
+      "lastProbe": { "at": "2026-10-13T16:00:12.000Z", "ok": true, "ms": 840, "error": null } } ],
+  "fallback": { "active": false, "since": null, "last": null } }
+```
+
+| Field | |
+|---|---|
+| `mode` | `gpu`: every profile deployment has a ready replica whose last probe passed and no stage was answered by the cloud in the last 5 min · `degraded`: anything else that still answers (a stage on the cloud fallback, a GPU stopped, booting or failing — outside the class window this is the normal state) · `down`: the GPU is not serving and the cloud reserve fails too (a request of the app answered by nobody in the last 5 min, or every probed cloud link of one of its stages failing) |
+| `deployments[].stages` | what the app's routes send to it (`llm` = chat), one-GPU mode resolved |
+| `deployments[].state` | `ready` (a replica up and not failing) · `failing` (every ready replica failed 2 probes in a row, or the controller lost its health) · `booting` · `stopped` |
+| `deployments[].replicas` | `ready` = ready and not failing; `total` = machines powered on |
+| `deployments[].lastProbe` | the latest probe round (a failed one first), kept after the replicas are gone; `null` = never probed |
+| `fallback` | `active`: a stage was answered by the cloud in the last 5 min; `since`: start of that run; `last`: the latest cloud answer `{ at, stage, served }` (`served` = `X-Gateway-Provider`) |
+
+**Probe** (`src/deployments/gpu-probe.ts`): every ready replica of a profile deployment gets, every 2 min, one minimal
+real call per stage it serves, straight on the replica (STT a 0.6 s WAV, chat `max_tokens: 1`, TTS one word in the
+first voice of the replica's own catalog, as a real cloned-voice turn — a cloning TTS without catalog is never sent a
+bare `voice`, it would kill its engine). It never wakes, starts or keeps a machine up (no `acquire`, no
+`lastRequestAt`). Two failed rounds in a row make the replica `failing` and take the failed stages out of rotation
+(the same per-replica stage rotation repeated request failures use: those stages go to the other replicas, or to the
+cloud fallback) until a round passes.
+
+**A cloud answer still answers** (hard rule 4): it carries `X-Gateway-Status: degraded`, the app's `fallback` shows it,
+and the start of every cloud run of a stage is logged and emitted as the telemetry event `app.degraded`
+(`{ app, stage, served, from }`). Warm capacity stays the deployments' own `warmSchedule` (the profile `PUT` warns when a
+deployment has none); a client key's wake policy is unchanged.
 
 ## Machines and jobs
 
@@ -744,6 +815,7 @@ their own (`404` for the rest). Prices are in USD per hour (Scaleway's EUR price
 |---|---|---|
 | `POST` | `/v1/machines` | rent one machine (body below); `201` with the machine |
 | `GET` | `/v1/machines` | `{ namespace, scope, providers, machines: [...] }` |
+| `POST` | `/v1/machines/offers` | machine body: the 10 best Vast offers for it (nothing rented) |
 | `GET` | `/v1/machines/costs` | spend per owner (24 h, month, committed), per holder, per machine; global for an admin |
 | `GET` | `/v1/machines/:id` | one machine: `status` (`creating`, `running`, `released`, `failed`), `ip`, `ports` (`"22/tcp"` → public port), `usdPerHour`, `costUsd`, `deadlineAt`, `endReason` |
 | `DELETE` | `/v1/machines/:id` | release now (`endReason: "deleted"`) |
@@ -769,6 +841,8 @@ Machine body:
 | `onstart` | bash run as root once the host is up (machines only) |
 | `env` | container environment; values never come back (only `envKeys`) |
 | `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `vm` | `true`: a Vast KVM virtual machine (hosts with `vms_enabled`) instead of a container; `image` defaults to `docker.io/vastai/kvm:ubuntu_terminal` and must be a `docker.io/vastai/kvm` tag; `sshPublicKey` goes on the Vast account (a VM reads only those); `machineType: "any"` takes any GPU |
+| `minCpuCores` / `minRamGb` | Vast host with at least that many effective CPU cores / GB of RAM; sends a `cheapest` request to Vast, 400 on Scaleway/RunPod (name a `machineType` that has them) |
 | `holder` | the agent inside the owner (its own 24 h cap) |
 
 Job body adds `command` (bash), `inputs` (`[{ "url": "https://…signed", "path": "in/x" }]`, downloaded under `/job`)
@@ -873,6 +947,18 @@ Issues a key. Body `{ "user": "site", "label"?: "…", "admin"?: true, "replaces
 secret**, once, at creation; it is never stored in clear (HMAC-SHA256 only). `admin: true` adds `user` to the admin list. `replaces`
 rotates a key (env or issued): the new key takes that key's user unless `user` is given, and the old key stops
 working at once (`overlapMinutes` 0 or absent) or after the overlap (max 10080 min = 7 days).
+
+### `PUT /v1/admin/access/keys/policy` (admin)
+
+GPU policy of one client key (two roles, 10/10/2026: only an admin changes it). Body `{ "id": "<key id>",
+"autoWake"?: bool, "autoWakeOutsideClass"?: bool, "canStartGpu"?: bool, "gpuDailyEur"?: number | null, "startIdleMinutes"?: 1–240 }`; omitted
+fields keep their value. Defaults: `autoWake: false` (a call never turns a GPU on), `autoWakeOutsideClass: true` (with
+`false`, `autoWake` only applies while a deployment's `warmSchedule` window is open — the class; outside it the key
+is served by a ready replica or the cloud, never wakes one), `canStartGpu: false`,
+`gpuDailyEur: 5` (EUR per UTC day spent by GPUs this key started; `null` = no cap), `startIdleMinutes: 10`. The
+dev token's id is `sandbox`. `GET /v1/admin/access/keys` shows each key's `policy`; a rotation (`replaces`) carries
+it to the new key. Spend and running starts: `clientGpu` in `GET /health?details=1` (admin: every key; a client
+key: its own).
 
 ### `POST /v1/admin/access/keys/revoke` (admin)
 
@@ -1017,6 +1103,6 @@ key, `403` with a valid non-admin key.
   "stages": { "…": "same as GET /health?details=1" }, "warnings": [],
   "declared": [{ "name": "parle-speech", "state": "in_sync", "reason": null, "image": "ghcr.io/marcosremar/parle-speech:<sha>" }],
   "deployments": { "deployments": 2, "replicas": 1, "listError": null,
-    "items": [{ "name": "parle-qwen-tts", "status": "ready", "replicas": 1, "ready": 1, "lastError": null }] }
+    "items": [{ "name": "parle-speech", "status": "ready", "replicas": 1, "ready": 1, "lastError": null }] }
 }
 ```

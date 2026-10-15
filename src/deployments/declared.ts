@@ -13,12 +13,14 @@
  *     fail to pull a private image, i.e. a billed machine that never serves.
  *   - `generatedSecrets`: container env keys generated ONCE (32 chars of [A-Za-z0-9_-]) and persisted with the spec in
  *     the deployment store; never logged, never returned by the API (spec env is write-only).
+ *   - `secretEnv`: `{ <container key>: <gateway env var> }` — a credential the replica needs (a read-only Hugging Face
+ *     token for private weights), read from the gateway env at every reconcile like `passwordEnv`. Missing → pending.
  *
- * Registering never starts a machine: declared specs keep `minReplicas: 0` and the reconciler never calls `wake`.
+ * Registering never starts a machine save a declared `initial.minReplicas` (set at creation only), and the reconciler never calls `wake`.
  * Replicas start when a request needs them, or inside a declared `warmSchedule` window, as for any other deployment.
  *
- * A declaration without `image` and `profile` belongs to another registrant (the school's backend PUTs
- * `parle-qwen-tts`): it never creates the deployment (pending until it exists) and only puts its own fields back.
+ * A declaration without `image` and `profile` belongs to another registrant (it PUTs the deployment itself): the
+ * reconciler never creates it (pending until it exists) and only puts its own fields back.
  *
  * A declared field the operator changed by hand (PUT/PATCH) is put back at the next reconcile; fields the declaration
  * does not hold (e.g. `paused`, and `env` when it declares neither `env` nor `generatedSecrets`) are left as the
@@ -26,31 +28,41 @@
  */
 
 import { randomBytes } from 'crypto';
+import babelcast3090 from './declared/babelcast-3090.json';
+import babelcastSpeech from './declared/babelcast-speech.json';
+import babelcastTts from './declared/babelcast-tts.json';
 import parleLivekit from './declared/parle-livekit.json';
-import parleQwenTts from './declared/parle-qwen-tts.json';
 import parleSpeech from './declared/parle-speech.json';
-import parleSpeechS2s from './declared/parle-speech-s2s.json';
+import parleSpeechTest from './declared/parle-speech-test.json';
 import { DEFAULT_SCALING_MODE } from './scaling-spec';
 import type { DeploymentSpec, ScalingSpec } from './types';
 
 export interface DeclaredDeployment {
   name: string;
+  app?: string;
   description?: string;
   profile?: string;
   image?: { env?: string; repository?: string; default?: string | null };
   registryAuth?: { server?: string; username: string; passwordEnv: string };
   generatedSecrets?: string[];
+  secretEnv?: Record<string, string>;
+  initial?: Record<string, unknown>;
   /** Plain spec fields (validated by `buildSpec` when applied). */
   spec: Record<string, unknown>;
 }
 
 /**
- * `parle-speech`: the `speech-stack` image in the gateway's own Scaleway registry (pulled with the key the gateway
- * already has, no registry secret). The declaration owns the image, the placements, the command, `realtime`, the class
- * window and the edge's `RT_MAX_SESSIONS` per machine type; sizing, limits, env and files stay as registered (a new
- * gateway starts from the `speech-stack` profile). The other three own only their class window and monthly ceiling.
+ * `parle-speech`: the `speech-stack` image (public ghcr copy) on Vast hosts in the EU only (owner, 14/10/2026). The
+ * declaration owns the image, provider, candidates, `euOnly`, the command, `realtime`, the class window, the `env`
+ * (cleared) and `envByMachineType` per card; sizing, limits and files (the voice catalog) stay as registered (a new
+ * gateway starts from the `speech-stack` profile). `parle-speech-test` is its copy for tests; the others own only
+ * their class window and monthly ceiling.
+ * `babelcast-speech` and `babelcast-tts` own only their app (`babelcast`): no spec field, no machine.
  */
-export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [parleSpeech, parleQwenTts, parleSpeechS2s, parleLivekit] as DeclaredDeployment[];
+export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
+  parleSpeech, parleSpeechTest, parleLivekit,
+  babelcastSpeech, babelcastTts, babelcast3090,
+] as DeclaredDeployment[];
 
 /** Reconcile period. The boot run happens before the providers are mounted (serve.ts). */
 export const DECLARED_RECONCILE_MS = 5 * 60_000;
@@ -108,6 +120,12 @@ export function declaredBody(
       username: decl.registryAuth.username, password, ...(decl.registryAuth.server ? { server: decl.registryAuth.server } : {}),
     };
   }
+  const mounted: Record<string, string> = {};
+  for (const [key, from] of Object.entries(decl.secretEnv ?? {})) {
+    const value = env[from]?.trim();
+    if (!value) return { pending: `${from} is not set (${key} of the replica)` };
+    mounted[key] = value;
+  }
   const declaredEnv = decl.spec.env as Record<string, string> | undefined;
   const declaredByType = decl.spec.envByMachineType as Record<string, Record<string, string>> | undefined;
   const storedByType = previous?.envByMachineType ?? {};
@@ -120,7 +138,7 @@ export function declaredBody(
     body: {
       ...decl.spec,
       ...(image ? { image } : {}),
-      ...(declaredEnv || decl.generatedSecrets?.length ? { env: { ...declaredEnv, ...secrets } } : {}),
+      ...(declaredEnv || decl.generatedSecrets?.length || decl.secretEnv ? { env: { ...declaredEnv, ...secrets, ...mounted } } : {}),
       ...(declaredByType ? {
         envByMachineType: {
           ...storedByType,
@@ -132,6 +150,19 @@ export function declaredBody(
       ...(decl.description ? { description: decl.description } : {}),
     },
   };
+}
+
+function testCopyFiles(target: DeclaredTarget, decl: DeclaredDeployment): Record<string, unknown> {
+  const sourceName = decl.spec.testFor;
+  if (typeof sourceName !== 'string') return {};
+  const source = target.specOf(sourceName);
+  const own = target.specOf(decl.name);
+  const out: Record<string, unknown> = {};
+  // The copy follows the source's catalog (a voice re-registered there reaches the test copy at the next reconcile).
+  for (const key of ['files', 'fileUrls'] as const) {
+    if (source?.[key] && !sameValue(source[key], own?.[key])) out[key] = source[key];
+  }
+  return out;
 }
 
 function mergedScaling(stored: ScalingSpec | undefined, declared: Partial<ScalingSpec>): ScalingSpec {
@@ -153,6 +184,7 @@ function sameValue(a: unknown, b: unknown): boolean {
 export function specMatches(spec: DeploymentSpec, body: Record<string, unknown>): boolean {
   for (const [key, value] of Object.entries(body)) {
     if (key === 'description') continue; // profile-only field, not stored on the spec
+    if (value === null && (spec as unknown as Record<string, unknown>)[key] === undefined) continue;
     if (!sameValue((spec as unknown as Record<string, unknown>)[key], value)) return false;
   }
   return true;
@@ -161,7 +193,8 @@ export function specMatches(spec: DeploymentSpec, body: Record<string, unknown>)
 /** What the reconciler needs from the controller. */
 export interface DeclaredTarget {
   specOf(name: string): DeploymentSpec | null;
-  put(name: string, body: Record<string, unknown>): Promise<unknown>;
+  put(name: string, body: Record<string, unknown>, meta?: { app?: string }): Promise<unknown>;
+  get?(name: string): { app: string | null } | null;
 }
 
 export interface DeclaredReconcilerOptions {
@@ -235,22 +268,26 @@ export class DeclaredDeploymentReconciler {
         this.set(decl.name, { state: 'pending', reason, image, checkedAt });
         continue;
       }
-      if (previous && specMatches(previous, resolved.body)) {
+      const appMatches = !decl.app || target.get?.(decl.name)?.app === decl.app;
+      if (previous && specMatches(previous, resolved.body) && appMatches && !Object.keys(testCopyFiles(target, decl)).length) {
         this.set(decl.name, { state: 'in_sync', reason: null, image, checkedAt });
         continue;
       }
+      const meta = decl.app ? { app: decl.app } : {};
       try {
         let body = resolved.body;
         if (!previous && decl.profile) {
-          await target.put(decl.name, { profile: decl.profile, image });
+          await target.put(decl.name, { profile: decl.profile, image }, meta);
           const patch = declaredBody(decl, this.opts.env, target.specOf(decl.name), this.opts.generateSecret);
           if ('body' in patch) body = patch.body;
         }
-        await target.put(decl.name, body);
+        if (!previous) body = { ...decl.initial, ...body };
+        body = { ...body, ...testCopyFiles(target, decl) };
+        await target.put(decl.name, body, meta);
         changed.push(decl.name);
         this.set(decl.name, { state: 'applied', reason: null, image, checkedAt });
         // Names of keys only — never their values.
-        this.opts.log?.('declared deployment registered', { name: decl.name, image, created: !previous });
+        this.opts.log?.('declared deployment registered', { name: decl.name, image, created: !previous, ...meta });
       } catch (err) {
         this.set(decl.name, { state: 'error', reason: err instanceof Error ? err.message : String(err), image, checkedAt });
         this.opts.log?.('declared deployment failed', { name: decl.name, error: err instanceof Error ? err.message : String(err) });
