@@ -62,7 +62,7 @@ export const ACCOUNTS_DEFAULTS = {
   PLAN: 'free',
   USAGE_RETENTION_DAYS: 400,
   PEPPER: 'ucast-accounts-v1',
-  QUOTA_REQUESTS_DAY: 2000,
+  QUOTA_REQUESTS_DAY: 0,
   QUOTA_CONCURRENT: 20,
 } as const;
 
@@ -95,8 +95,11 @@ export function accountsConfigFromEnv(env: Record<string, string | undefined> = 
     plan: env.ACCOUNT_DEFAULT_PLAN?.trim() || ACCOUNTS_DEFAULTS.PLAN,
     // Every account of the app shares the app's own daily budget (APP_DAILY_*) and its in-flight limit
     // (MAX_CONCURRENT_PER_USER): those stay the ceiling of the sum. On top, each account has its own daily request
-    // budget (default 2000 ≈ 50 realtime sessions of 40, or ~1 h of live subtitles) and in-flight limit (default 20),
+    // budget (`ACCOUNT_QUOTA_REQUESTS_DAY`, default 0 = off) and in-flight limit (default 20),
     // so one account cannot spend the others' share (report 2026-10-12, T5). The monthly limits default to unlimited.
+    // The daily request cap is OFF by default (owner, 2026-10-15): live subtitles cost ~40 metered requests a minute
+    // (one STT per 2–3 s of speech + one LLM per line), so the old default of 2000 cut a talk after ~50 min with
+    // `daily_quota_exceeded` until 00:00 UTC. Set the env var to bring a cap back.
     quota: {
       audioSeconds: Math.floor(nonNegative(env.ACCOUNT_QUOTA_AUDIO_MINUTES_MONTH, 0) * 60),
       llmTokens: Math.floor(nonNegative(env.ACCOUNT_QUOTA_LLM_TOKENS_MONTH, 0)),

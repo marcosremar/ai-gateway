@@ -429,11 +429,11 @@ describe('metering and quota', () => {
 describe('per-account limits under one shared app', () => {
   const session = (gw: Gw, key: string) => call(gw, 'POST', '/v1/realtime/sessions', { headers: { Authorization: `Bearer ${key}` }, body: {} });
 
-  it('defaults: 2000 requests per day and 20 in flight per account', async () => {
+  it('defaults: no daily request cap and 20 in flight per account', async () => {
     const gw = await startGateway();
     const s = await signup(gw);
     const me = await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } });
-    expect(me.json.quota.limits).toMatchObject({ requestsPerDay: 2000, concurrentRequests: 20 });
+    expect(me.json.quota.limits).toMatchObject({ requestsPerDay: 0, concurrentRequests: 20 });
   });
 
   it('one account exhausting its daily budget does not stop another account of the same app', async () => {

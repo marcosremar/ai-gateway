@@ -52,7 +52,7 @@ Only successful requests count. Counters per UTC day × user × key in `account-
 Quota (`ACCOUNT_QUOTA_*`): monthly audio minutes, LLM tokens, TTS characters, rooms (0 = unlimited, the default) →
 **402** `quota_exceeded` (`metric`, `limit`, `used`, `reset_at`, message in Portuguese). Per account, so one account
 cannot spend the others' share of the app (all activation keys are the same app): a daily request budget
-(`ACCOUNT_QUOTA_REQUESTS_DAY`, default 2000; a realtime session counts its whole app charge, `perMinute × ⌈ttl/60⌉` = 40
+(`ACCOUNT_QUOTA_REQUESTS_DAY`, default **0 = off** since 2026-10-15 — live subtitles cost ~40 requests a minute, so the old 2000 stopped a talk after ~50 min; when set, a realtime session counts its whole app charge, `perMinute × ⌈ttl/60⌉` = 40
 by default, a `/v1/s2s` turn 1) → **429** `daily_quota_exceeded` + `scope: "account"` + `Retry-After`; and requests in
 flight (`ACCOUNT_QUOTA_CONCURRENT`, default 20) → **429** `account_concurrency_exceeded` + `Retry-After: 1`. `0` turns
 either off. The app's own daily budget (`APP_DAILY_*`, 429 `daily_budget_exhausted`) and in-flight limit
