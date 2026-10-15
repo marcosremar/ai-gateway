@@ -7,7 +7,7 @@
  */
 
 import type { ModelRoutesSpec } from '../config/serve-providers';
-import { probeWav } from '../telemetry/fallback-probe';
+import { ANSWERED, audioCheck, HEARD, plain, probeWav, SAID } from '../telemetry/fallback-probe';
 import { redactSecrets } from '../gateway/proxy/provider-routing';
 import type { DeploymentController } from './controller';
 import { replicaBase } from './http';
@@ -28,7 +28,7 @@ const PROBE_TEXT = 'Olá.';
 const PROBE_WAV = probeWav();
 
 export type GpuStage = 'stt' | 'llm' | 'tts';
-export interface StageTarget { stage: GpuStage; model: string; voice?: string }
+export interface StageTarget { stage: GpuStage; model: string; voice?: string; extraBody?: Record<string, unknown> }
 export interface ProbeRound { at: number; ok: boolean; ms: number; error: string | null; failed: GpuStage[] }
 
 const ROUTE_STAGE = { stt: 'stt', chat: 'llm', tts: 'tts' } as const;
@@ -42,14 +42,28 @@ export function servedStages(routes: ModelRoutesSpec | undefined, deployment: st
       for (const e of chain) {
         if (e.provider !== 'deployment' || !e.deployment) continue;
         const target = !exists(e.deployment) && e.oneGpuDeployment && exists(e.oneGpuDeployment) ? e.oneGpuDeployment : e.deployment;
-        if (target === deployment && !out.has(stage)) out.set(stage, { stage, model: e.model ?? alias, ...(e.voice ? { voice: e.voice } : {}) });
+        if (target === deployment && !out.has(stage)) {
+          out.set(stage, { stage, model: e.model ?? alias, ...(e.voice ? { voice: e.voice } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}) });
+        }
       }
     }
   }
   return [...out.values()];
 }
 
-type Call = (path: string, init?: RequestInit) => Promise<Response>;
+export type Call = (path: string, init?: RequestInit) => Promise<Response>;
+
+export function replicaCaller(
+  controller: Pick<DeploymentController, 'tokenOf'>, view: DeploymentView, r: DeploymentView['replicas'][number], timeoutMs: number, fetchImpl: typeof fetch = fetch,
+): Call {
+  const token = controller.tokenOf(view.name, r.id) ?? '';
+  const base = replicaBase(r, Boolean(view.spec.exposure));
+  return (path, init = {}) => fetchImpl(`${base}${path}`, {
+    ...init, ...replicaTls(base, token),
+    headers: { ...(init.headers as Record<string, string> | undefined), 'X-Aigw-Token': token },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
 
 async function expectJson(res: Response, check: (body: Record<string, unknown>) => boolean, what: string): Promise<void> {
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 160)}`);
@@ -57,7 +71,7 @@ async function expectJson(res: Response, check: (body: Record<string, unknown>) 
   if (!body || !check(body)) throw new Error(`answer without ${what}`);
 }
 
-async function ttsBody(call: Call, t: StageTarget): Promise<Record<string, unknown>> {
+async function ttsBody(call: Call, t: StageTarget, text = PROBE_TEXT): Promise<Record<string, unknown>> {
   let catalog: ReturnType<typeof catalogOf> = null;
   for (const [path, parse] of VOICE_CATALOG_SOURCES) {
     const res = await call(path);
@@ -69,12 +83,12 @@ async function ttsBody(call: Call, t: StageTarget): Promise<Record<string, unkno
   if (voice) {
     const language = languageName(voice.lang);
     return {
-      model: catalog!.model ?? t.model, input: PROBE_TEXT, task_type: 'Base', ref_audio: voice.audio, ref_text: voice.text,
-      response_format: 'wav', max_new_tokens: qwenTokenCap(PROBE_TEXT), ...(language ? { language } : {}),
+      model: catalog!.model ?? t.model, input: text, task_type: 'Base', ref_audio: voice.audio, ref_text: voice.text,
+      response_format: 'wav', max_new_tokens: qwenTokenCap(text), ...(language ? { language } : {}),
     };
   }
   if (isBaseTtsModel(t.model)) throw new Error('voice catalog unavailable (a cloning TTS is never sent a voice without ref_audio)');
-  return { model: t.model, input: PROBE_TEXT, response_format: 'wav', ...(t.voice ? { voice: t.voice } : {}) };
+  return { model: t.model, input: text, response_format: 'wav', ...(t.voice ? { voice: t.voice } : {}) };
 }
 
 async function probeStage(call: Call, t: StageTarget): Promise<void> {
@@ -94,6 +108,51 @@ async function probeStage(call: Call, t: StageTarget): Promise<void> {
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 160)}`);
   if ((res.headers.get('content-type') ?? '').includes('json')) throw new Error(`no audio: ${(await res.text().catch(() => '')).slice(0, 160)}`);
   if ((await res.arrayBuffer()).byteLength <= 44) throw new Error('empty audio');
+}
+
+const failure = async (res: Response) => `HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 160)}`;
+
+async function spoken(call: Call, t: StageTarget): Promise<Buffer> {
+  const res = await call('/v1/audio/speech', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(await ttsBody(call, t, SAID)) });
+  if (!res.ok) throw new Error(await failure(res));
+  const audio = Buffer.from(await res.arrayBuffer());
+  const checked = audioCheck(audio, res.headers.get('content-type') ?? '');
+  if (checked.content !== 'ok') throw new Error(checked.note ?? 'no audio');
+  return audio;
+}
+
+async function heard(call: Call, t: StageTarget, audio: Buffer | null): Promise<void> {
+  const form = new FormData();
+  form.append('file', new Blob([new Uint8Array(audio ?? PROBE_WAV)]), 'probe.wav');
+  form.append('model', t.model);
+  form.append('language', 'pt');
+  form.append('response_format', 'json');
+  const res = await call('/v1/audio/transcriptions', { method: 'POST', body: form });
+  if (!res.ok) throw new Error(await failure(res));
+  const text = ((await res.json().catch(() => null)) as { text?: unknown } | null)?.text;
+  if (typeof text !== 'string') throw new Error('answer without text');
+  if (audio && !HEARD.test(plain(text))) throw new Error(`heard «${text.slice(0, 60)}» instead of «${SAID}»`);
+}
+
+async function answered(call: Call, t: StageTarget): Promise<void> {
+  const body = JSON.stringify({ ...t.extraBody, model: t.model, messages: [{ role: 'user', content: 'Reply with: ok' }], max_tokens: 16 });
+  const res = await call('/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  if (!res.ok) throw new Error(await failure(res));
+  const content = ((await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: unknown } }> } | null)?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !ANSWERED.test(content)) throw new Error(`answered «${String(content ?? '').slice(0, 60)}» instead of «ok»`);
+}
+
+export async function contentCheck(call: Call, stages: StageTarget[]): Promise<string | null> {
+  const of = (stage: GpuStage) => stages.find(t => t.stage === stage);
+  const step = async (stage: GpuStage, run: (t: StageTarget) => Promise<unknown>) => {
+    const t = of(stage);
+    if (!t) return null;
+    try { await run(t); return null; } catch (err) { return `${stage}: ${redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 200)}`; }
+  };
+  let audio: Buffer | null = null;
+  return await step('tts', async t => { audio = await spoken(call, t); })
+    ?? await step('stt', t => heard(call, t, audio))
+    ?? await step('llm', t => answered(call, t));
 }
 
 interface ReplicaProbe { deployment: string; last: ProbeRound; fails: number; held: Set<GpuStage> }
@@ -147,13 +206,7 @@ export class GpuProbe {
   }
 
   private async probe(view: DeploymentView, r: DeploymentView['replicas'][number], stages: StageTarget[]): Promise<void> {
-    const token = this.opts.controller.tokenOf(view.name, r.id) ?? '';
-    const base = replicaBase(r, Boolean(view.spec.exposure));
-    const call: Call = (path, init = {}) => (this.opts.fetchImpl ?? fetch)(`${base}${path}`, {
-      ...init, ...replicaTls(base, token),
-      headers: { ...(init.headers as Record<string, string> | undefined), 'X-Aigw-Token': token },
-      signal: AbortSignal.timeout(GPU_PROBE_TIMEOUT_MS),
-    });
+    const call = replicaCaller(this.opts.controller, view, r, GPU_PROBE_TIMEOUT_MS, this.opts.fetchImpl);
     const started = this.now();
     const failed: GpuStage[] = [];
     let error: string | null = null;
