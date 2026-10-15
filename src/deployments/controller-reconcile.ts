@@ -176,7 +176,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     const live = mine.filter(m => replicaPhase(this.observed(m, 0)) !== 'halted');
     const { decision, floor } = this.decide(rt, live, isActive({ ...base, replicas }));
     // A type picked in the panel (H100…, or a validation trial) boots once: the race doubles cheap boots only.
-    const race = floor > 0 && !rt.record.gpuType ? (rt.record.spec.bootRace ?? 1) - 1 : 0;
+    const race = rt.record.gpuType ? 0 : (rt.record.spec.bootRace ?? 1) - 1;
     const plan = planReplicas({
       ...base, replicas, aboveSince: rt.aboveSince, drainBusy: true, autoscaleWant: decision.desired, floor, race, ...this.planExtras(rt),
       ...(this.opts.unhealthyStrikes ? { unhealthyStrikes: this.opts.unhealthyStrikes } : {}),
@@ -189,8 +189,9 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (!m) continue;
       if (r.reason === 'scale-down' && rt.record.spec.idleAction === 'stop') await this.parkReplica(m);
       else await this.release(m, r.reason);
-      if (r.reason === 'boot-timeout') this.backOffAfterBootTimeout(rt);
     }
+    // Racers boot side by side and time out together: one failed boot, one step of the back-off ladder.
+    if (plan.release.some(r => r.reason === 'boot-timeout')) this.backOffAfterBootTimeout(rt);
     let toCreate = await this.settleDrains(rt, plan, plan.create - rt.creating);
     if (releaseOnly) { this.explain(rt, plan, decision, floor, 'provider list failed'); return; }
     if (rt.record.spec.paused) for (const m of parked) await this.release(m, 'paused');
