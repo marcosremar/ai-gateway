@@ -107,8 +107,8 @@ export interface PlanInput {
   autoscaleOnly?: boolean;
   hold?: number;
   /**
-   * Extra boots while nothing is ready (`bootRace` − 1, passed only under a warm floor): the first replica ready wins
-   * and the others still booting are released at once as `race-lost`, whatever `keepBooting` or the scale-down delay.
+   * Extra boots while nothing is ready under a warm floor (`bootRace` − 1): the first replica ready wins and the others
+   * still booting are released at once as `race-lost`, whatever `keepBooting`, the scale-down delay or a floor that ended.
    */
   race?: number;
 }
@@ -233,7 +233,7 @@ export function planReplicas(input: PlanInput): Plan {
       live.splice(live.indexOf(r), 1);
     }
   }
-  const racing = race > 0 && desired > 0 && readyLive === 0;
+  const racing = race > 0 && (input.floor ?? 0) > 0 && desired > 0 && readyLive === 0;
   const target = racing ? desired + race : desired;
   if (live.length < target) {
     const room = aged.length ? Math.max(0, spec.maxReplicas + 1 - live.length - aged.length - expiring.length) : Infinity;

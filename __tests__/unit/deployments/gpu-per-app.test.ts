@@ -117,6 +117,63 @@ describe(`${GPU_CAP_RULE}`, () => {
     expect(() => c.wake('parle-speech-test')).toThrow(/app 'parle' already has 1/);
   });
 
+  it('regression: the warm floor ends mid-race (a /start shorter than the boot) and the race loser still goes when the first is ready', async () => {
+    const { c, vast, clock } = await setup();
+    vast.bootMs = 300;
+    const slow: string[] = [];
+    const create = vast.createReplica.bind(vast);
+    let n = 0;
+    vast.createReplica = async (input) => {
+      const first = ++n === 1;
+      const m = await create(input);
+      if (first) { vast.machines.get(m.id)!.bootedAt = Date.now() + 60_000; slow.push(m.id); }
+      return m;
+    };
+    await c.put('parle-speech', { ...GPU, maxReplicas: 1, bootRace: 2 }, { app: 'parle' });
+    c.start();
+    await c.warm('parle-speech', 1, 1);
+    await until(() => vast.created.length === 2);
+    clock.t += 2 * MIN;
+    await until(() => c.get('parle-speech')!.replicas.some(r => r.phase === 'ready'));
+    await until(() => vast.releaseReasons.includes('race-lost'), 1500);
+    expect(vast.released).toEqual(slow);
+    expect(vast.machines.size).toBe(1);
+  });
+
+  for (const order of ['after', 'before'] as const) {
+    it(`regression: a race with one offer boots it; the second's out_of_stock (${order} the first lands) is no failure`, async () => {
+      const { c, vast } = await setup();
+      const create = vast.createReplica.bind(vast);
+      let n = 0;
+      vast.createReplica = async (input) => {
+        if (++n === 1) {
+          if (order === 'before') await wait(100);
+          return create(input);
+        }
+        if (order === 'after') await wait(100);
+        throw new Error('out_of_stock: every vast offer tried was taken (offer 1: no_such_ask)');
+      };
+      await c.put('parle-speech', { ...GPU, maxReplicas: 1, bootRace: 2 }, { app: 'parle' });
+      c.start();
+      await c.warm('parle-speech', 1, 60);
+      await until(() => c.get('parle-speech')!.replicas.some(r => r.phase === 'ready'));
+      expect(vast.created).toHaveLength(1);
+      expect(c.get('parle-speech')!.boot.past.filter(b => b.result === 'failed')).toEqual([]);
+    });
+  }
+
+  it('regression: both racers timing out together is one boot-timeout, not two (no 10-min back-off after the first race)', async () => {
+    const { c, vast, clock } = await setup();
+    vast.bootMs = 60 * MIN;
+    await c.put('parle-speech', { ...GPU, maxReplicas: 1, bootRace: 2, autoRetryStuckBoot: false }, { app: 'parle' });
+    c.start();
+    await c.warm('parle-speech', 1, 120);
+    await until(() => vast.created.length === 2);
+    clock.t += 61 * MIN;
+    await until(() => vast.releaseReasons.filter(r => r === 'boot-timeout').length === 2);
+    await until(() => vast.created.length >= 3, 1500);
+  });
+
   it('CLASS_GPUS_PER_APP { parle: 2 } keeps two parle GPUs in the class window only (off by default)', async () => {
     const { c, clock } = await setup({ classGpusPerApp: { parle: 2 } });
     await c.put('parle-speech', { ...GPU, maxReplicas: 1, warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }] }, { app: 'parle' });
