@@ -13,6 +13,7 @@ import type { ModelPrice } from '../../src/admin-page/model-prices';
 import type { VoiceTurn } from '../../src/app-telemetry/voice-turn';
 import type { Incident, IncidentActionKind } from '../../src/telemetry/incidents';
 import { localClock } from '../../src/deployments/autoscale';
+import type { GpuTypeValidation, GpuValidationView } from '../../src/deployments/gpu-validation';
 
 const iso = (now: number, minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
 
@@ -37,6 +38,36 @@ const GPU_CHOICES = [
 ];
 const gpuType = (current = 'RTX 3090', setBy: string | null = null, setAt: string | null = null, standard = 0.3) =>
   ({ current, default: 'RTX 3090', choices: [{ machineType: 'RTX 3090', maxEurPerHour: standard }, ...GPU_CHOICES.slice(1)], setBy, setAt });
+
+const DEMO_IMAGE = 'ghcr.io/marcosremar/speech-stack:20261011-0200';
+
+export function demoGpuValidation(now: number, state: DemoState = 'warn'): Record<string, GpuValidationView> {
+  const none = { validated: null, failed: null };
+  const ok = (minutesAgo: number, country: string, checkMs: number, seed: string | null = null) =>
+    ({ validated: { at: iso(now, minutesAgo), deployment: 'speech-stack-test', country, checkMs, seed }, failed: null });
+  const speech: Record<string, Pick<GpuTypeValidation, 'validated' | 'failed'>> = {
+    'RTX 3090': ok(1950, 'CZ', 1730, 'docs/deployments.md (PR #164): 10 turnos STT → LLM → voz clonada, p50 1,73 s; 24 turnos simultâneos sem erro'),
+    'RTX 4090': {
+      validated: null,
+      failed: {
+        at: iso(now, 300), deployment: 'speech-stack-test', reason: 'stt: heard «» instead of «Bom dia.»',
+        lines: ['loading-models: whisper large-v3 (fp16)', 'stt: CUDA error: no kernel image is available for execution on the device', 'stt worker restarted (1/3)'],
+      },
+    },
+    'H100 SXM': ok(610, 'DE', 1210),
+  };
+  return {
+    'speech-stack': {
+      family: 'speech-stack', image: DEMO_IMAGE, gated: true, testCopy: 'speech-stack-test', trial: null, trialMinutes: 25,
+      trialRefusal: state === 'bad' ? 'janela de aula aberta: a GPU do app é dos alunos' : null,
+      types: GPU_CHOICES.map(c => ({ ...c, ...(speech[c.machineType] ?? none) })),
+    },
+    'babelcast-3090': {
+      family: 'babelcast-speech', image: DEMO_IMAGE, gated: false, testCopy: null, trial: null, trialMinutes: 25, trialRefusal: null,
+      types: [{ machineType: 'RTX 3090', maxEurPerHour: 0.19, ...ok(2880, 'FR', 1460) }, ...GPU_CHOICES.slice(1).map(c => ({ ...c, ...none }))],
+    },
+  };
+}
 
 const key = (id: string, user: string, role: KeyView['role'], lastUsedAt: string | null, policy: Partial<KeyView['policy']> = {}, label: string | null = null): KeyView => ({
   id, source: id.startsWith('env-') ? 'env' : 'issued', user, role, admin: role === 'admin', prefix: '', label, createdAt: null, lastUsedAt,
@@ -279,6 +310,7 @@ export function demoSnapshot(now: number, state: DemoState = 'warn'): AdminSnaps
     modelPrices: state === 'warn' ? { at: iso(now, 300), models: DEMO_PRICES } : null,
     voiceTurns: demoTurns(now, state),
     incidents: demoIncidents(now, state),
+    gpuValidation: demoGpuValidation(now, state),
   };
   if (state === 'ok') return allGreen(snapshot, now);
   if (state === 'bad') return withBoots(somethingDown(snapshot, now), now, true);

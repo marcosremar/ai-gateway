@@ -3,6 +3,7 @@ import { percentile } from '../telemetry/query';
 import { SLO_TARGETS } from '../alerting/slo-targets';
 import type { Level } from './ui';
 import { parisDay, parisMidnightAfter } from '../deployments/spend-ledger';
+import { namesItself } from '../gateway/proxy/link-reorder';
 
 export interface TrafficLine { key: string; served: number; failed: number; fallbacks: number; p50Ms: number | null; p95Ms: number | null }
 
@@ -62,7 +63,7 @@ function bucket(firstHour: number) {
       const stage = String(row.attrs?.stage ?? '(sem etapa)');
       const provider = String(row.attrs?.provider ?? '(sem provedor)');
       const model = row.attrs?.model;
-      const link = `${stage}|${provider.startsWith('deployment:') || typeof model !== 'string' || !model ? provider : `${provider}:${model}`}`;
+      const link = `${stage}|${namesItself(provider) || typeof model !== 'string' || !model ? provider : `${provider}:${model}`}`;
       if (row.event === 'route.served') {
         for (const t of [total, of(stages, stage), of(providers, provider), of(links, link)]) {
           t.served++;

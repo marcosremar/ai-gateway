@@ -14,6 +14,8 @@ if (!demoStates.includes(state)) throw new Error(`ADMIN_DEMO_STATE must be one o
 const DEMO_COOKIE = 'aigw_demo';
 const dismissed: Record<string, number> = {};
 const gpuTypes: Record<string, { machineType: string | null; at: number }> = {};
+const trials: Record<string, { machineType: string; at: number }> = {};
+const TRIAL_DEMO_MS = 45_000;
 
 function withGpuTypes(snapshot: ReturnType<typeof demoSnapshot>): ReturnType<typeof demoSnapshot> {
   for (const d of snapshot.gpus ?? []) {
@@ -21,6 +23,17 @@ function withGpuTypes(snapshot: ReturnType<typeof demoSnapshot>): ReturnType<typ
     if (!set || !d.gpuType) continue;
     d.gpuType = { ...d.gpuType, current: set.machineType ?? d.gpuType.default, setBy: set.machineType ? 'marcos' : null,
       setAt: set.machineType ? new Date(set.at).toISOString() : null };
+  }
+  for (const [name, t] of Object.entries(trials)) {
+    const v = snapshot.gpuValidation?.[name];
+    if (!v) continue;
+    const running = Date.now() - t.at < TRIAL_DEMO_MS;
+    const startedAt = new Date(t.at).toISOString();
+    v.trial = running ? { machineType: t.machineType, deployment: v.testCopy!, by: 'marcos', startedAt, deadline: new Date(t.at + 40 * 60_000).toISOString() } : null;
+    if (running) v.trialRefusal = `já há um teste em curso: ${t.machineType}`;
+    v.types = v.types.map(x => (x.machineType !== t.machineType || running ? x : {
+      ...x, failed: null, validated: { at: new Date(t.at + TRIAL_DEMO_MS).toISOString(), deployment: v.testCopy!, country: 'NL', checkMs: 1380, seed: null },
+    }));
   }
   return snapshot;
 }
@@ -33,6 +46,7 @@ const page = createAdminPage({
   },
   snapshot: () => ({ ...withGpuTypes(demoSnapshot(Date.now(), state)), dismissed }),
   gpuType: async (name, machineType) => { gpuTypes[name] = { machineType, at: Date.now() }; },
+  gpuTest: async (name, machineType) => { trials[name] = { machineType, at: Date.now() }; },
   dismiss: async (id) => { dismissed[id] = Date.now() + 7 * 86_400_000; },
   park: async () => {},
   probe: async () => {},

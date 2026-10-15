@@ -194,9 +194,10 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
   onRoutesChange: () => remount?.(),
   // App GPU status (app-gpu-health.ts): the cloud links' last probe says whether the reserve still answers.
   gpuHealth: {
-    cloudLinks: () => fallbackProbe.snapshot().links,
+    cloudLinks: () => fallbackProbe.snapshot().links.filter(l => !l.providerId.startsWith('local:')),
     onDegraded: (event) => emitGatewayEvent('app.degraded', { level: 'warn', attrs: { ...event } }),
   },
+  audit: (entry) => keyAudit.record(entry),
 });
 const deployments = configuredDeployments && await configuredDeployments.controller.init()
   .then(() => configuredDeployments.apps.init())
@@ -211,11 +212,13 @@ const deployments = configuredDeployments && await configuredDeployments.control
   });
 const bootHistory = deployments && bootHistoryFile(join(stateDir, 'boot-history.json'), deployments.controller, (msg, data) => log.warn(data ?? {}, msg));
 await bootHistory?.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'BOOT HISTORY UNREADABLE: past boots start empty'));
+await deployments?.gpuValidation.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'GPU VALIDATIONS UNREADABLE: only the seeded ones count'));
 if (deployments) {
   deployments.controller.start();
   bootHistory?.start();
   deployments.clientGpu.run();
   deployments.gpuHealth.probe.start();
+  deployments.gpuValidation.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
@@ -641,7 +644,7 @@ rooms.mount(server);
 accounts?.mount(server);
 const adminSnapshot = (): AdminSnapshot => ({
   reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
-  gpus: controller?.list() ?? null,
+  gpus: controller?.list() ?? null, gpuValidation: deployments?.gpuValidation.views() ?? {},
   gpuLogs: Object.fromEntries((controller?.list() ?? []).map(d => [d.name, controller!.bootLog(d.name)])), gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
   machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
   apps: deployments?.apps.list().map(({ id }) => {
@@ -720,8 +723,12 @@ createAdminPage({
     await controller!.put(name, { minReplicas: on ? 1 : 0 });
   },
   gpuType: async (name, machineType, now, actor) => {
-    if (!controller) throw new Error('deployments desligados');
-    await controller.setGpuType(name, machineType, now, actor);
+    if (!deployments) throw new Error('deployments desligados');
+    await deployments.gpuValidation.setGpuType(name, machineType, now, actor);
+  },
+  gpuTest: async (name, machineType, actor) => {
+    if (!deployments) throw new Error('deployments desligados');
+    await deployments.gpuValidation.startTrial(name, machineType, actor);
   },
   probe: () => fallbackProbe.check(),
   secrets: () => secretValues(process.env),
@@ -755,7 +762,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop(), spendLedger.stop(), bootHistory?.stop()]);
+    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop(), spendLedger.stop(), bootHistory?.stop(), deployments?.gpuValidation.stop()]);
     const exit = (code: number) => void stateWritten.finally(() => process.exit(code));
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();

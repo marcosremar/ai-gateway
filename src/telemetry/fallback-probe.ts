@@ -8,7 +8,7 @@
  */
 
 import type { LLMProvider, STTProvider, TTSProvider, TTSResponse } from '../gateway/providers/cloud/types';
-import { failureCode, redactSecrets, type RouteTarget } from '../gateway/proxy/provider-routing';
+import { errorText, failureCode, providerHeader, redactSecrets, type RouteTarget } from '../gateway/proxy/provider-routing';
 import { withLogContext } from '../logger';
 
 type Stage = 'chat' | 'stt' | 'tts';
@@ -51,13 +51,13 @@ export interface FallbackProbeResult {
 export type ProbeContent = 'ok' | 'mismatch' | null;
 type Checked = { content: ProbeContent; note: string | null; audio?: Buffer };
 
-const SAID = 'Bom dia.';
-const HEARD = /\bbo[mn] ?dia\b/;
-const ANSWERED = /\bok\b/i;
+export const SAID = 'Bom dia.';
+export const HEARD = /\bbo[mn] ?dia\b/;
+export const ANSWERED = /\bok\b/i;
 const MIN_COMPRESSED_BYTES = 1_500;
 const MIN_PCM_RMS = 200;
 const AUDIO_READ_MAX = 512 * 1024;
-const plain = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+export const plain = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const quote = (t: string) => `«${t.replace(/\s+/g, ' ').trim().slice(0, 60)}»`;
 
 async function audioOf(res: TTSResponse): Promise<Buffer> {
@@ -107,7 +107,7 @@ export function fallbackLinks(chains: Partial<Record<Stage, Record<string, unkno
         const known = links.get(key);
         if (known) { if (!known.aliases.includes(alias)) known.aliases.push(alias); continue; }
         links.set(key, {
-          stage, target: `${t.providerId}:${model}`, providerId: t.providerId, model, provider: t.provider, aliases: [alias],
+          stage, target: providerHeader({ providerId: t.providerId, model }), providerId: t.providerId, model, provider: t.provider, aliases: [alias],
           ...(voice ? { voice } : {}), ...(stage === 'chat' && t.extraBody ? { extraBody: t.extraBody } : {}),
         });
       }
@@ -171,7 +171,7 @@ export async function probeLink(
     };
   } catch (err) {
     const status = (err as { status?: unknown } | null)?.status;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorText(err);
     return {
       ...base, ok: false, status: typeof status === 'number' ? status : null, code: signal.aborted ? 'timeout' : failureCode(err), latencyMs: now() - started,
       checkedAt: new Date(now()).toISOString(), error: redactSecrets(message, opts.env).slice(0, 300),

@@ -25,6 +25,9 @@ import { accountPolicyGuards, type AccountPolicyGuards } from '../gateway/proxy/
 import { voiceForGender, type VoiceByGender, type VoiceGender } from './tts-fallback-voices';
 import type { ChainLinkSpec } from './stage-chains';
 import { withCloudFallback } from './cloud-fallback';
+import {
+  isLinkKeyEnv, localLinkId, localLinkProvider, localLinkRefusal, OPENAI_COMPATIBLE, parseLinkBaseUrl,
+} from '../gateway/providers/cloud/openai-compat/local-link';
 
 type Stage = 'chat' | 'stt' | 'tts';
 type StageProvider<S extends Stage> = S extends 'chat' ? LLMProvider : S extends 'stt' ? STTProvider : TTSProvider;
@@ -129,13 +132,15 @@ export interface RouteEntrySpec {
   benchmarkDataset?: string;
   equivalent?: string;
   language?: string;
+  baseUrl?: string;
+  apiKeyEnv?: string;
 }
 export type ModelRoutesSpec = Partial<Record<Stage, Record<string, RouteEntrySpec[]>>>;
 
 function parseEntry(raw: unknown): RouteEntrySpec | null {
   if (typeof raw === 'string') {
     const [provider, ...rest] = raw.split(':');
-    if (!provider) return null;
+    if (!provider || provider === OPENAI_COMPATIBLE) return null;
     if (provider === 'deployment') {
       const [deployment, ...model] = rest;
       return deployment ? { provider, deployment, ...(model.length ? { model: model.join(':') } : {}) } : null;
@@ -146,6 +151,9 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
     const e = raw as RouteEntrySpec;
     const benchmarkOrder = e.order === 'benchmark' && typeof e.benchmarkDataset === 'string' && e.benchmarkDataset.trim();
     if (e.order !== undefined && !benchmarkOrder) return null;
+    const local = e.provider === OPENAI_COMPATIBLE;
+    const baseUrl = local ? parseLinkBaseUrl(e.baseUrl) : null;
+    if (local && (!baseUrl || (e.apiKeyEnv !== undefined && !isLinkKeyEnv(e.apiKeyEnv)))) return null;
     return {
       provider: e.provider,
       ...(typeof e.model === 'string' ? { model: e.model } : {}),
@@ -162,6 +170,8 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
       ...(benchmarkOrder ? { order: 'benchmark' as const, benchmarkDataset: benchmarkOrder } : {}),
       ...(typeof e.equivalent === 'string' && e.equivalent.trim() ? { equivalent: e.equivalent.trim() } : {}),
       ...(typeof e.language === 'string' && e.language.trim() ? { language: e.language.trim() } : {}),
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(local && e.apiKeyEnv ? { apiKeyEnv: e.apiKeyEnv } : {}),
     };
   }
   return null;
@@ -238,6 +248,7 @@ export interface ServeProvidersResult {
 const OPENROUTER_PASSTHROUGH = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i;
 
 export function equivalenceGroup(stage: Stage, e: RouteEntrySpec, model: string): string {
+  if (e.provider === OPENAI_COMPATIBLE && !e.equivalent) return `link:${e.baseUrl}|${model}`;
   if (stage === 'stt') return e.equivalent ? `eq:${e.equivalent}` : `stt:${e.language ?? 'multi'}`;
   if (stage === 'chat') return e.equivalent ? `eq:${e.equivalent}` : `model:${model}`;
   const voice = e.voice ?? (e.voices ? `f=${e.voices.feminine},m=${e.voices.masculine}` : null);
@@ -295,6 +306,16 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
         ...extras(e), providerId: label, provider, model: e.model ?? gatewayModel,
         timeoutMs: deploymentTimeoutMs(stage), ...(hedgeMs > 0 ? { hedgeAfterMs: hedgeMs, ...adaptiveHedge(name, stage) } : {}),
       };
+    }
+    if (e.provider === OPENAI_COMPATIBLE) {
+      if (!e.baseUrl) return `${e.provider}: baseUrl is missing`;
+      const model = e.model ?? gatewayModel;
+      const id = localLinkId(e.baseUrl, model);
+      const refusal = localLinkRefusal(e.baseUrl, env);
+      if (refusal) return `${id}: ${refusal}`;
+      const provider = localLinkProvider(stage, { baseUrl: e.baseUrl, model, apiKeyEnv: e.apiKeyEnv }, env) as StageProvider<S>;
+      if (!provider.isConfigured()) return `${id}: ${e.apiKeyEnv} is not set`;
+      return { ...extras(e), providerId: id, provider, model };
     }
     const provider = (instances[stage] as Record<string, StageProvider<S>>)[e.provider];
     if (!provider) return `${e.provider}: no ${stage} provider with this id`;
@@ -434,12 +455,17 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   };
 }
 
+export function linkTarget(e: RouteEntrySpec, model: string): string {
+  if (e.provider === 'deployment') return `deployment:${e.deployment ?? ''}`;
+  return e.provider === OPENAI_COMPATIBLE && e.baseUrl ? localLinkId(e.baseUrl, model) : `${e.provider}:${model}`;
+}
+
 /** One link of a chain as `/health` reports it: mounted (maybe temporarily unusable) or not, and why. */
 function linkOf(e: RouteEntrySpec, gatewayModel: string, r: RouteTarget<unknown> | string): ChainLinkSpec {
   const isDeployment = e.provider === 'deployment';
-  const target = isDeployment ? `deployment:${e.deployment ?? ''}` : `${e.provider}:${e.model ?? gatewayModel}`;
+  const target = linkTarget(e, e.model ?? gatewayModel);
   const base = {
-    target, providerId: isDeployment ? target : e.provider,
+    target, providerId: isDeployment || target.startsWith('local:') ? target : e.provider,
     ...(isDeployment ? { deployment: e.deployment ?? '' } : { model: e.model ?? gatewayModel }),
   };
   if (typeof r === 'string') return { ...base, notMounted: r };

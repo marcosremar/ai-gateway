@@ -16,6 +16,7 @@
 
 import type { ModelRoutesSpec, RouteEntrySpec } from './serve-providers';
 import { KOKORO_TTS_MODEL } from './tts-fallback-voices';
+import { OPENAI_COMPATIBLE } from '../gateway/providers/cloud/openai-compat/local-link';
 
 type Stage = keyof ModelRoutesSpec;
 const STAGES: Stage[] = ['chat', 'stt', 'tts'];
@@ -34,7 +35,7 @@ export const DEFAULT_CLOUD_FALLBACK: Record<Stage, RouteEntrySpec[]> = {
   ],
 };
 
-export const isCloudLink = (e: RouteEntrySpec): boolean => e.provider !== 'deployment';
+export const isCloudLink = (e: RouteEntrySpec): boolean => e.provider !== 'deployment' && e.provider !== OPENAI_COMPATIBLE;
 
 export interface CloudFallbackAdded { stage: Stage; alias: string; added: string[] }
 

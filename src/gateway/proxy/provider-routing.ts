@@ -13,7 +13,7 @@ import { CircuitBreakerRegistry, type CircuitBreaker } from '../providers/cloud/
 import { isTimeoutError, type CooldownTracker, type FallbackEntry } from '../providers/cloud/fallback';
 import { createLogger } from '../../logger';
 import { emitGatewayEvent } from '../../telemetry/emit';
-import { orderTargets, recordLinkOutcome } from './link-reorder';
+import { linkKey, namesItself, orderTargets, recordLinkOutcome } from './link-reorder';
 import type { ProxyResponse } from './types';
 
 const log = createLogger('provider-routing');
@@ -105,7 +105,7 @@ export const proxyCircuitBreakers = new CircuitBreakerRegistry({ failureThreshol
  */
 export function breakerKey(stage: string, t: Pick<RouteTarget<unknown>, 'providerId' | 'model'>): string {
   const s = stage === 'llm' ? 'chat' : stage;
-  return t.providerId.startsWith('deployment:') || !t.model ? `${s}:${t.providerId}` : `${s}:${t.providerId}:${t.model}`;
+  return namesItself(t.providerId) || !t.model ? `${s}:${t.providerId}` : `${s}:${t.providerId}:${t.model}`;
 }
 
 /** Breaker of a provider account (401 / 402 on any of its targets). Deployments have none (no shared account). */
@@ -222,9 +222,20 @@ export function selectTargets<P extends Configurable>(
   return { usable: orderTargets(stage, usable), skipped, codes };
 }
 
+const codedCause = (err: unknown) => {
+  const cause = (err as { cause?: unknown } | null)?.cause as (Error & { gatewayCode?: unknown }) | undefined;
+  return cause instanceof Error && typeof cause.gatewayCode === 'string' ? cause : null;
+};
+
+export function errorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const cause = codedCause(err);
+  return cause ? `${message} (${cause.message})` : message;
+}
+
 /** Short, secret-free reason a provider was left behind (sent as `X-Gateway-Fallback`). */
 export function failureCode(err: unknown): string {
-  const code = (err as { gatewayCode?: unknown } | null)?.gatewayCode;
+  const code = (err as { gatewayCode?: unknown } | null)?.gatewayCode ?? codedCause(err)?.gatewayCode;
   if (typeof code === 'string') return code;
   if (isTimeoutError(err)) return 'timeout';
   const status = statusOf(err);
@@ -252,7 +263,7 @@ export function isModerationRefusal(err: unknown): boolean {
 
 /** `X-Gateway-Provider` value: `deployment:<name>` or `<provider>:<upstream model>`. */
 export function providerHeader(target: Pick<RouteTarget<unknown>, 'providerId' | 'model'>): string {
-  return target.providerId.startsWith('deployment:') || !target.model ? target.providerId : `${target.providerId}:${target.model}`;
+  return linkKey(target);
 }
 
 /**
@@ -310,8 +321,7 @@ function statusOf(err: unknown): number | null {
 
 export function describeFailure(providerId: string, err: unknown): string {
   const status = statusOf(err);
-  const message = err instanceof Error ? err.message : String(err);
-  return `${providerId} failed${status ? ` (HTTP ${status})` : ''}: ${redactSecrets(message).slice(0, 160)}`;
+  return `${providerId} failed${status ? ` (HTTP ${status})` : ''}: ${redactSecrets(errorText(err)).slice(0, 160)}`;
 }
 
 /**

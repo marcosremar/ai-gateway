@@ -44,6 +44,7 @@ import type { AppGpuHealth } from './app-gpu-health';
 import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import type { ClientGpu } from './client-gpu';
+import type { GpuValidation } from './gpu-validation';
 import type { Lease } from './controller-state';
 import { mayWakeNow, type GpuPolicy } from '../config/access-keys';
 import { classWindowOpen } from './autoscale';
@@ -230,6 +231,8 @@ export interface DeploymentRoutesOptions {
   stability?: ClientStabilityLog;
   devices?: AppDevices;
   clientGpu?: ClientGpu;
+  gpuValidation?: GpuValidation;
+  audit?: (entry: { actor: string; action: string; names: string[]; ok: boolean; detail?: string }) => void;
   keyOf?: (req: IncomingMessage) => { keyId: string; user: string; app: string; policy: GpuPolicy } | null;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
@@ -667,6 +670,23 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       admin();
       const body = await readJson(req);
       return send(res, 202, await controller.warm(name, body.replicas as number, body.untilMinutes as number));
+    }
+    if (action === 'gpu-type' && method === 'PUT') {
+      admin();
+      if (!opts.gpuValidation) return send(res, 404, { error: 'GPU types are not enabled on this gateway' });
+      const body = await readJson(req);
+      const machineType = typeof body.machineType === 'string' && body.machineType ? body.machineType : null;
+      const actor = opts.userOf?.(req) ?? 'admin';
+      const force = body.force === true;
+      const done = await opts.gpuValidation.setGpuType(name, machineType, body.now === true, actor, force).catch((err: unknown) => {
+        opts.audit?.({ actor, action: 'deployments.gpu-type', names: [name], ok: false, detail: err instanceof Error ? err.message : String(err) });
+        throw err;
+      });
+      opts.audit?.({
+        actor, action: done.forced ? 'deployments.gpu-type.force' : 'deployments.gpu-type', names: [name], ok: true,
+        detail: `${machineType ?? 'padrão'}${body.now === true ? ', agora' : ''}${done.forced ? ', sem validação (force)' : ''}`,
+      });
+      return send(res, 200, done.view);
     }
     if (action === 'capacity' && method === 'GET') {
       const own = appOf(req);

@@ -25,6 +25,7 @@ async function gateway() {
   const parked: string[] = [];
   const pins: Array<[string, boolean]> = [];
   const gpuTypes: Array<[string, string | null, boolean, string]> = [];
+  const gpuTests: Array<[string, string, string]> = [];
   const dismissed: string[] = [];
   const audit: Array<Record<string, unknown>> = [];
   let probes = 0;
@@ -48,6 +49,10 @@ async function gateway() {
     park: async (name) => { parked.push(name); },
     pin: async (name, on) => { pins.push([name, on]); },
     gpuType: async (name, type, now, actor) => { gpuTypes.push([name, type, now, actor]); },
+    gpuTest: async (name, type, actor) => {
+      if (type === 'L40S') throw new Error('a GPU do app está ocupada: parle-speech');
+      gpuTests.push([name, type, actor]);
+    },
     probe: async () => { probes++; },
     sendDigest: async () => { digests++; return 'mail-1'; },
     dismiss: async (id) => { dismissed.push(id); snapshot.dismissed = { ...snapshot.dismissed, [id]: clock.now + 7 * 86_400_000 }; },
@@ -76,7 +81,7 @@ async function gateway() {
     return { cookie, html, csrf: /name="csrf" value="([a-f0-9]+)"/.exec(html)![1] };
   }
   const every = async (cookie: string, query = '') => (await Promise.all(PAGES.map(async p => (await call(p.path + query, { cookie })).text()))).join('');
-  return { clock, access, call, post, login, signedIn, every, parked, pins, gpuTypes, dismissed, audit, snapshot, probes: () => probes, digests: () => digests };
+  return { clock, access, call, post, login, signedIn, every, parked, pins, gpuTypes, gpuTests, dismissed, audit, snapshot, probes: () => probes, digests: () => digests };
 }
 
 describe('admin page (/admin)', () => {
@@ -292,6 +297,42 @@ describe('admin page (/admin)', () => {
     expect(gw.audit.filter(e => e.action === 'admin-page.gpu-type').map(e => [e.actor, e.ok, e.detail])).toEqual([
       ['parle', false, 'recusado para app:parle'], ['marcos', true, 'H100 PCIE, agora'], ['marcos', true, 'o tipo padrão'],
     ]);
+  });
+
+  it('production GPU types: only validated ones are selectable, the others say so and offer «testar nesta GPU» (admin, CSRF, audited)', async () => {
+    const gw = await gateway();
+    const { cookie, csrf } = await gw.signedIn();
+    const page = await (await gw.call('/admin/gpus/speech-stack', { cookie })).text();
+    expect(page).toContain('<h2>GPU padrão de produção</h2>');
+    expect(page).toContain('<option value="RTX 5090" disabled>RTX 5090 · ainda não validada nesta imagem</option>');
+    expect(page).not.toMatch(/<option value="H100 SXM"[^>]*disabled/);
+    expect(page).toMatch(/CZ · teste 1,73 s/);
+    expect(page).toContain('stt: heard «» instead of «Bom dia.»');
+    expect(page.match(/action="\/admin\/gpu-test"/g)).toHaveLength(4);
+    expect(page).toMatch(/≈ €\s1,04 · €\s2,50\/h × 25 min/);
+    const babel = await (await gw.call('/admin/gpus/babelcast-3090', { cookie })).text();
+    expect(babel).toContain('<h2>Tipo de GPU</h2>');
+    expect(babel).not.toContain(' disabled>');
+    expect(babel).not.toContain('/admin/gpu-test');
+    expect((await gw.post('/admin/gpu-test', { name: 'speech-stack', machineType: 'H100 PCIE' }, cookie)).status).toBe(403);
+    const app = await gw.signedIn(CLIENT_KEY);
+    expect((await gw.post('/admin/gpu-test', { name: 'speech-stack', machineType: 'H100 PCIE', csrf: app.csrf }, app.cookie)).status).toBe(403);
+    const res = await gw.post('/admin/gpu-test', { name: 'speech-stack', machineType: 'H100 PCIE', csrf, back: '/admin/gpus/speech-stack' }, cookie);
+    expect(res.status).toBe(303);
+    expect(decodeURIComponent(res.headers.get('location') ?? '')).toContain('Testando H100 PCIE');
+    const busy = await gw.post('/admin/gpu-test', { name: 'speech-stack', machineType: 'L40S', csrf, back: '/admin/gpus/speech-stack' }, cookie);
+    expect(decodeURIComponent(busy.headers.get('location') ?? '')).toContain('Teste de L40S recusado: a GPU do app está ocupada');
+    expect(gw.gpuTests).toEqual([['speech-stack', 'H100 PCIE', 'marcos']]);
+    expect(gw.audit.filter(e => e.action === 'admin-page.gpu-test').map(e => [e.actor, e.ok])).toEqual([['parle', false], ['marcos', true], ['marcos', false]]);
+  });
+
+  it('a refused trial (class window) disables «testar nesta GPU» and says why', async () => {
+    const gw = await gateway();
+    gw.snapshot.gpuValidation!['speech-stack']!.trialRefusal = 'janela de aula aberta: a GPU do app é dos alunos';
+    const { cookie } = await gw.signedIn();
+    const page = await (await gw.call('/admin/gpus/speech-stack', { cookie })).text();
+    expect(page).toContain('Testar agora não é possível: janela de aula aberta: a GPU do app é dos alunos.');
+    expect(page.match(/<button disabled title="janela de aula aberta/g)).toHaveLength(4);
   });
 
   it('blocks a POST without the CSRF token or from another site', async () => {

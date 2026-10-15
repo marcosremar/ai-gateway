@@ -23,6 +23,7 @@ import { AppRegistry, FileAppStore } from './apps';
 import { AppDevices } from './app-devices';
 import { AppFallbackService, OpenRouterKeyProvisioner } from './app-fallback';
 import { AppGpuHealth, type AppGpuHealthOptions } from './app-gpu-health';
+import { GpuValidation } from './gpu-validation';
 import { ClientStabilityLog } from './stability';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
@@ -76,6 +77,7 @@ export interface DeploymentsFromEnv {
   upgrade: (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => Promise<boolean>;
   clientGpu: ClientGpu;
   gpuHealth: AppGpuHealth;
+  gpuValidation: GpuValidation;
   registryWarning: () => string | null;
   rotateCredentials: (env: Record<string, string | undefined>) => Promise<CredentialRotation>;
 }
@@ -194,6 +196,7 @@ export function deploymentsFromEnv(
     onRoutesChange?: () => void;
     keyOf?: DeploymentRoutesOptions['keyOf'];
     gpuHealth?: Pick<AppGpuHealthOptions, 'cloudLinks' | 'onDegraded'>;
+    audit?: DeploymentRoutesOptions['audit'];
   },
 ): DeploymentsFromEnv | null {
   if (env.DEPLOYMENTS_ENABLED === '0') return null;
@@ -247,10 +250,16 @@ export function deploymentsFromEnv(
   if (adminWarning) opts.log?.(`WARNING: ${adminWarning}`);
   const clientGpu = new ClientGpu(controller, { path: join(stateDir, 'client-gpu.json'), log: opts.log });
   const gpuHealth = new AppGpuHealth({ controller, apps, ...opts.gpuHealth, ...(opts.log ? { log: opts.log } : {}) });
+  const gpuValidation = new GpuValidation({
+    controller, path: join(stateDir, 'gpu-validations.json'), log: opts.log,
+    stages: name => gpuHealth.targets().find(t => t.deployment === name)?.stages ?? [],
+  });
   const handler = createDeploymentRoutes({
     controller,
     clientGpu,
     gpuHealth,
+    gpuValidation,
+    ...(opts.audit ? { audit: opts.audit } : {}),
     ...(opts.keyOf ? { keyOf: opts.keyOf } : {}),
     apps,
     devices,
@@ -275,7 +284,7 @@ export function deploymentsFromEnv(
     ? startJanitor({ cloud: scalewayJanitorCloud(() => scaleway.secretKey, () => scaleway.projectId), log: opts.log }) : undefined;
   const registryWarning = () => privateImageWarning(controller.list().flatMap(v => controller.specOf(v.name) ?? []), scaleway);
   const rotateCredentials = (current: Record<string, string | undefined>) => rotateBackendCredentials({ scaleway, vast }, current);
-  return { controller, apps, devices, handler, upgrade: handler.upgrade, clientGpu, gpuHealth, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
+  return { controller, apps, devices, handler, upgrade: handler.upgrade, clientGpu, gpuHealth, gpuValidation, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
 }
 
 export function vastCreditFloor(env: Record<string, string | undefined>): { minCreditUsd?: number } {
