@@ -16,7 +16,7 @@ import { countryDistanceKm, EU_COUNTRIES } from './geo';
 import { HostReputation, type HostRecord, type HostStore } from './host-reputation';
 import { bootMinutes, countryOf, DEFAULT_NEAR, effectivePrice, pullMinutes, rankOffers, type VastOffer } from './placements';
 import { vastPortCount, vastUdpRange } from './realtime-ports';
-import { gateDecision, gateNote, RTT_ANCHOR_PORT, RTT_ANCHORS, type RttBaseline } from './rtt-gate';
+import { gateDecision, gateNote, RTT_ANCHOR_PORT, type RttBaseline } from './rtt-gate';
 import type { CreditIssue, HostNote, OfferPreview, OffersReport, SkippedOffer } from './types';
 import type { CreateReplicaInput, DeploymentBackend, DeploymentSpec, RegistryAuth, ReplicaMachine } from './types';
 
@@ -37,12 +37,15 @@ export const MIN_INET_DOWN_MBPS = 500;
 export const DEFAULT_DISK_GB = 50;
 /** A host that failed to boot our image is skipped this long (it may be a bad driver, disk or network). */
 export const BAD_HOST_MS = 3_600_000;
-/** A host too far by measured RTT (`rtt-gate.ts`) is skipped a day: distance does not change by the hour. */
-export const TOO_FAR_HOST_MS = 24 * 3_600_000;
+/**
+ * A host's measured RTT decides before renting it for a week (distance does not change by the hour): too far for the
+ * spec in force = skipped without a pull, within it = rentable even if an older, stricter gate released it.
+ */
+export const MEASURED_RTT_MS = 7 * 24 * 3_600_000;
 export const KNOWN_RTT_MS = 24 * 3_600_000;
 export const KNOWN_RTT_MAX_HOSTS = 200;
 export const UDP_BLOCKED_HOST_MS = 24 * 3_600_000;
-const FAILURE_AVOID_MS = new Map([['too-far', TOO_FAR_HOST_MS], ['boot-timeout', BAD_HOST_MS], ['boot-stuck', BAD_HOST_MS], ['udp-blocked', 0]]);
+const FAILURE_AVOID_MS = new Map([['too-far', 0], ['boot-timeout', BAD_HOST_MS], ['boot-stuck', BAD_HOST_MS], ['udp-blocked', 0]]);
 /** RTT samples per measurement (median) and per-sample timeout: one gate check stays within a few seconds. */
 export const RTT_SAMPLES = 5;
 export const RTT_SAMPLE_TIMEOUT_MS = 2_000;
@@ -159,6 +162,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
   private readonly rtt: RttMeasure;
   private readonly preRentRtt: RttMeasure;
   private readonly minCreditUsd: number;
+  private readonly rttAnchor: string | null;
   private readonly quietBaseline = new Map<string, { ms: number; at: number }>();
   private credit: CreditIssue | null = null;
   private creditCheckedAt = -Infinity;
@@ -174,7 +178,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
 
   constructor(private apiKey: string, opts: {
     fetch?: FetchLike; now?: () => number; rtt?: RttMeasure; log?: (msg: string, data?: Record<string, unknown>) => void; hosts?: HostStore;
-    preRentRtt?: RttMeasure; minCreditUsd?: number;
+    preRentRtt?: RttMeasure; minCreditUsd?: number; rttAnchor?: string;
   } = {}) {
     this.log = opts.log ?? (() => {});
     this.fetchImpl = opts.fetch ?? ((url, init) => fetch(url, init));
@@ -182,6 +186,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
     this.rtt = opts.rtt ?? defaultRtt;
     this.preRentRtt = opts.preRentRtt ?? defaultPreRentRtt;
     this.minCreditUsd = opts.minCreditUsd ?? DEFAULT_MIN_CREDIT_USD;
+    this.rttAnchor = opts.rttAnchor?.trim() || null;
     this.hosts = new HostReputation({ store: opts.hosts, max: KNOWN_RTT_MAX_HOSTS, now: this.now, log: this.log });
   }
 
@@ -197,6 +202,11 @@ export class VastDeploymentBackend implements DeploymentBackend {
 
   private knownGood(h: HostRecord | undefined, now: number): h is HostRecord & { rttMs: number } {
     return !!h && h.rttMs != null && h.rttAt != null && now - h.rttAt < KNOWN_RTT_MS && h.lastError == null;
+  }
+
+  private measuredRtt(h: HostRecord | undefined, now: number): number | null {
+    if (h?.rttMs == null) return null;
+    return now - Math.max(h.rttAt ?? 0, h.lastError === 'too-far' ? h.lastErrorAt ?? 0 : 0) < MEASURED_RTT_MS ? h.rttMs : null;
   }
 
   private skipReason(h: HostRecord | undefined, spec: DeploymentSpec, now: number): string | null {
@@ -410,7 +420,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
 
   /**
    * Deletes the instance (its disk goes with it). A host that never booted our image is avoided for `BAD_HOST_MS`;
-   * one released by the RTT gate (`too-far`) for `TOO_FAR_HOST_MS`.
+   * one released by the RTT gate (`too-far`) keeps its RTT, judged before the next rent (`MEASURED_RTT_MS`).
    */
   async releaseReplica(machine: ReplicaMachine, reason?: string): Promise<void> {
     await this.hosts.load();
@@ -447,8 +457,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
     return this.rtt(m[1], Number(m[2]));
   }
 
-  async measureBaselineRtt(near: string): Promise<RttBaseline | null> {
-    const anchor = RTT_ANCHORS[near.toUpperCase()];
+  async measureBaselineRtt(): Promise<RttBaseline | null> {
+    const anchor = this.rttAnchor;
     const measured = anchor ? await this.rtt(anchor, RTT_ANCHOR_PORT).catch(() => null) : null;
     if (!anchor || measured == null) return null;
     const now = this.now();
@@ -461,31 +471,34 @@ export class VastDeploymentBackend implements DeploymentBackend {
 
   private async withoutFarOffers(spec: DeploymentSpec, ranked: VastOffer[]): Promise<{ offers: VastOffer[]; far: string[] }> {
     const now = this.now();
+    const hostOf = (o: VastOffer) => this.hosts.get(o.machine_id);
+    const measured = new Map(ranked.flatMap((o) => {
+      const rttMs = this.knownGood(hostOf(o), now) ? null : this.measuredRtt(hostOf(o), now);
+      return rttMs == null ? [] : [[o, rttMs] as const];
+    }));
     const probed = ranked.slice(0, MAX_RENT_TRIES)
-      .filter(o => o.public_ipaddr?.trim() && o.direct_port_start && !this.knownGood(this.hosts.get(o.machine_id), now));
-    if (!probed.length) return { offers: ranked, far: [] };
+      .filter(o => !measured.has(o) && !this.knownGood(hostOf(o), now) && o.public_ipaddr?.trim() && o.direct_port_start);
+    if (!probed.length && !measured.size) return { offers: ranked, far: [] };
     const [baseline, rtts] = await Promise.all([
-      this.measureBaselineRtt(spec.near ?? DEFAULT_NEAR).catch(() => null),
+      this.measureBaselineRtt().catch(() => null),
       Promise.all(probed.map(o => this.preRentRtt(o.public_ipaddr!.trim(), o.direct_port_start!).catch(() => null))),
     ]);
     const far = new Map<VastOffer, string>();
-    probed.forEach((offer, i) => {
-      const rttMs = rtts[i];
-      if (rttMs == null) return;
+    const judge = (offer: VastOffer, rttMs: number, baselineMs: number | null | undefined, before: string) => {
       const input = {
-        rttMs, baselineMs: baseline?.rttMs, anchor: baseline?.anchor, firstSeenAt: now, now,
+        rttMs, baselineMs, anchor: baseline?.anchor, firstSeenAt: now, now,
         ...(spec.maxRttMs !== undefined ? { maxRttMs: spec.maxRttMs } : {}), ...(spec.maxRttExcessMs !== undefined ? { maxExcessMs: spec.maxRttExcessMs } : {}),
       };
-      if (gateDecision(input) !== 'too-far') return;
-      const note = `offer ${offer.id} (${describeOffer(offer)}): ${gateNote(input)} before renting`;
-      far.set(offer, note);
-      if (offer.machine_id !== undefined) {
-        this.hosts.note(offer.machine_id, {
-          location: offer.geolocation ?? null, rttMs, baselineMs: baseline?.rttMs ?? null, rttAt: now,
-          lastError: 'too-far', lastErrorAt: now, avoidUntil: now + TOO_FAR_HOST_MS,
-        });
-      }
-      this.log('deployments: vast offer too far before renting', { deployment: spec.name, offer: offer.id, host: offer.machine_id, rttMs, baselineMs: baseline?.rttMs ?? null });
+      if (gateDecision(input) !== 'too-far') return false;
+      far.set(offer, `offer ${offer.id} (${describeOffer(offer)}): ${gateNote(input)} ${before}`);
+      this.log('deployments: vast offer too far before renting', { deployment: spec.name, offer: offer.id, host: offer.machine_id, rttMs, baselineMs: baselineMs ?? null, before });
+      return true;
+    };
+    for (const [offer, rttMs] of measured) judge(offer, rttMs, baseline?.rttMs ?? hostOf(offer)?.baselineMs, 'measured before, not rented');
+    probed.forEach((offer, i) => {
+      const rttMs = rtts[i];
+      if (rttMs == null || !judge(offer, rttMs, baseline?.rttMs, 'before renting') || offer.machine_id === undefined) return;
+      this.hosts.note(offer.machine_id, { location: offer.geolocation ?? null, rttMs, baselineMs: baseline?.rttMs ?? null, lastError: 'too-far', lastErrorAt: now });
     });
     return { offers: ranked.filter(o => !far.has(o)), far: [...far.values()] };
   }
@@ -550,7 +563,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         distanceKm: Math.round(countryDistanceKm(near, countryOf(o.geolocation))), usdPerHour: o.dph_total,
         effectiveUsdPerHour: Math.round(effectivePrice(o) * 1000) / 1000, reliability: o.reliability2, inetDownMbps: o.inet_down,
         inetUpMbps: o.inet_up ?? null, cudaMax: o.cuda_max_good ?? null, directPorts: o.direct_port_count ?? null, gpu: o.gpu_name ?? null,
-        knownRttMs: this.knownGood(host, now) ? host.rttMs : null, host: host ? { ...host } : null,
+        knownRttMs: this.measuredRtt(host, now), host: host ? { ...host } : null,
       };
     });
     return { offers, skipped, hosts: this.hosts.list() };
