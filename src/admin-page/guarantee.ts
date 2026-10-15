@@ -10,7 +10,7 @@ export type Verdict = 'garantido' | 'so-nuvem' | 'sem-reserva' | 'sem-garantia';
 
 export interface ChainLink {
   target: string;
-  kind: 'own-gpu' | 'other-gpu' | 'cloud';
+  kind: 'own-gpu' | 'other-gpu' | 'local' | 'cloud';
   state: string;
   level: Level;
   working: boolean;
@@ -82,7 +82,7 @@ export function services(s: AdminSnapshot, filter: string | null = null, now = D
           const t = linkTraffic.get(`${stage}|${link.target}`) ?? linkTraffic.get(`${stage}|${providerOf(link.target)}`);
           const total = stageTotal.get(stage);
           return {
-            target: link.target, kind: !name ? 'cloud' : d?.app === app.id || app.profile?.gpuDeployments.includes(name) ? 'own-gpu' : 'other-gpu',
+            target: link.target, kind: link.target.startsWith('local:') ? 'local' : !name ? 'cloud' : d?.app === app.id || app.profile?.gpuDeployments.includes(name) ? 'own-gpu' : 'other-gpu',
             ...live, serving: report.serving === link.target, deployment: d, probe,
             p50Ms: t?.p50Ms ?? null, share: t && total ? t.served / total : null,
           };
@@ -107,6 +107,7 @@ function reordered(links: ChainLink[], promotions: Promotion[]): ChainLink[] {
 
 function linkName(l: ChainLink): string {
   if (l.kind === 'cloud') return `API na nuvem <code>${esc(l.target)}</code>`;
+  if (l.kind === 'local') return `Servidor local <code>${esc(l.target)}</code> <span class="pill info">local</span>`;
   const name = l.target.slice('deployment:'.length);
   const machine = l.deployment && upOf(l.deployment)[0];
   const where = machine ? ` <small class="inl">${esc(machine.machineType)} · ${esc(machine.zone)}</small>` : '';

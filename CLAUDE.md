@@ -99,6 +99,7 @@ Use the vocabulary from `domain-model.md` in all code and prompts. Respect the b
   - Deepgram: STT
   - Modal: TTS (MOSS-TTS)
 - **GPU Providers** (self-hosted): RunPod, Vast.ai, TensorDock, Modal, SnapGPU
+- **Local links** (`openai-compatible`): a route entry `{provider: "openai-compatible", baseUrl, model, apiKeyEnv?}` reaches any OpenAI-compatible server (llama.cpp, LM Studio, vLLM, Ollama, MLX, the owner's Mac through a tunnel) for chat, STT and TTS. Named `local:<host>/<model>`, never counted as the cloud fallback (one is still appended), admin-only to write, SSRF-checked on Railway at mount and on every call (`LOCAL_LINK_ALLOW` for a tunnel host): [`docs/local-links.md`](docs/local-links.md)
 - **Provider Fallback Chains**: Declarative, config-driven fallback with cooldown and credit exhaustion tracking
 - **Request Coalescing**: Deduplicate identical concurrent requests (share single upstream call)
 - **Response Cache**: Cache responses for deterministic requests

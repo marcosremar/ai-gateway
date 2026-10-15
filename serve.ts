@@ -194,7 +194,7 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
   onRoutesChange: () => remount?.(),
   // App GPU status (app-gpu-health.ts): the cloud links' last probe says whether the reserve still answers.
   gpuHealth: {
-    cloudLinks: () => fallbackProbe.snapshot().links,
+    cloudLinks: () => fallbackProbe.snapshot().links.filter(l => !l.providerId.startsWith('local:')),
     onDegraded: (event) => emitGatewayEvent('app.degraded', { level: 'warn', attrs: { ...event } }),
   },
   audit: (entry) => keyAudit.record(entry),
