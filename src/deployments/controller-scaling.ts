@@ -85,7 +85,8 @@ export abstract class ScalingControl extends ParkingControl {
     const { spec } = rt.record;
     const budget = spec.scaling?.budget ?? {};
     const price = this.priceOf(rt);
-    const limits: Array<[number, string]> = [[spec.maxReplicas, `maxReplicas ${spec.maxReplicas}`]];
+    const ceiling = Math.max(spec.maxReplicas, this.classGpus(rt));
+    const limits: Array<[number, string]> = [[ceiling, ceiling > spec.maxReplicas ? `class GPUs ${ceiling}` : `maxReplicas ${spec.maxReplicas}`]];
     if (budget.maxReplicas !== undefined) limits.push([budget.maxReplicas, `budget.maxReplicas ${budget.maxReplicas}`]);
     if (budget.eurPerHour !== undefined && price > 0) {
       const n = Math.floor(budget.eurPerHour / price + 1e-9);
@@ -138,7 +139,7 @@ export abstract class ScalingControl extends ParkingControl {
 
   protected planSpec(rt: Runtime): DeploymentSpec {
     const { spec } = rt.record;
-    if (!spec.scaling) return spec;
+    if (!spec.scaling) return this.classGpus(rt) > spec.maxReplicas ? { ...spec, maxReplicas: this.classGpus(rt) } : spec;
     return {
       ...spec, maxReplicas: this.replicaCap(rt).max, idleMinutes: Math.max(spec.idleMinutes, this.timesOf(rt).idle / 60),
       scaleDownDelaySeconds: 0,

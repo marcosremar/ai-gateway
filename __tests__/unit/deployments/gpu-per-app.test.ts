@@ -6,7 +6,7 @@ import { deploymentsFromEnv } from '../../../src/deployments';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
 import { MemoryDeploymentStore } from '../../../src/deployments/store';
-import { GPU_CAP_RULE, MAX_GPU_PER_APP } from '../../../src/deployments/spec';
+import { CLASS_GPUS_PER_APP, GPU_CAP_RULE, MAX_GPU_PER_APP } from '../../../src/deployments/spec';
 import type { ReplicaMachine } from '../../../src/deployments/types';
 import { FakeCloud, until } from './_fake-cloud';
 
@@ -28,7 +28,7 @@ afterEach(async () => {
   for (const c of clouds.splice(0)) await c.closeAll();
 });
 
-async function setup() {
+async function setup(opts: { classGpusPerApp?: Record<string, number> } = {}) {
   const clock = { t: OUTSIDE_CLASS };
   const vast = Object.assign(new FakeCloud(() => clock.t, 'vast'), { marketPriced: true, price: 0.28 });
   const most = new Map<string, number>();
@@ -41,7 +41,7 @@ async function setup() {
   };
   const c = new DeploymentController({
     backends: { vast }, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 20, now: () => clock.t,
-    maxGpuPerApp: MAX_GPU_PER_APP,
+    maxGpuPerApp: MAX_GPU_PER_APP, ...opts,
   });
   await c.init();
   controllers.push(c);
@@ -90,6 +90,44 @@ describe(`${GPU_CAP_RULE}`, () => {
     expect(c.get('babelcast-3090')!.replicas).toHaveLength(1);
     await expect(c.warm('parle-speech-test', 1, 30)).rejects.toThrow(/keeps its GPU for 'parle-speech' during the class window/);
     expect(Object.fromEntries(most)).toEqual({ babelcast: 1, parle: 1 });
+  });
+
+  it('a warm floor with nothing ready races two offers as one GPU: the first ready stays, the other goes, never a third', async () => {
+    const { c, vast } = await setup();
+    const slow: string[] = [];
+    const create = vast.createReplica.bind(vast);
+    let n = 0;
+    vast.createReplica = async (input) => {
+      const first = ++n === 1;
+      const m = await create(input);
+      if (first) { vast.machines.get(m.id)!.bootedAt = Date.now() + 60_000; slow.push(m.id); }
+      return m;
+    };
+    await c.put('parle-speech', { ...GPU, maxReplicas: 1, bootRace: 2 }, { app: 'parle' });
+    await c.put('parle-speech-test', { ...GPU, maxReplicas: 1, testFor: 'parle-speech' }, { app: 'parle' });
+    c.start();
+    await c.warm('parle-speech', 1, 60);
+    await until(() => c.get('parle-speech')!.replicas.some(r => r.phase === 'ready'));
+    await until(() => vast.releaseReasons.includes('race-lost'));
+    expect(vast.created.map(x => x.spec.name)).toEqual(['parle-speech', 'parle-speech']);
+    expect(vast.released).toEqual(slow);
+    await wait(200);
+    expect(vast.created).toHaveLength(2);
+    expect(vast.machines.size).toBe(1);
+    expect(() => c.wake('parle-speech-test')).toThrow(/app 'parle' already has 1/);
+  });
+
+  it('CLASS_GPUS_PER_APP { parle: 2 } keeps two parle GPUs in the class window only (off by default)', async () => {
+    const { c, clock } = await setup({ classGpusPerApp: { parle: 2 } });
+    await c.put('parle-speech', { ...GPU, maxReplicas: 1, warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }] }, { app: 'parle' });
+    c.start();
+    await wait(200);
+    expect(c.get('parle-speech')!.replicas).toHaveLength(0);
+    clock.t = IN_CLASS;
+    await until(() => c.get('parle-speech')!.replicas.filter(r => r.phase === 'ready').length === 2);
+    await wait(200);
+    expect(c.get('parle-speech')!.replicas).toHaveLength(2);
+    expect(CLASS_GPUS_PER_APP).toEqual({});
   });
 
   it('a stuck boot is released first and rented again only once the old machine is gone: never two', async () => {

@@ -230,8 +230,15 @@ export abstract class ReplicaLifecycle extends ControllerState {
         rt.stockOut = null;
         rt.lastError = rt.spendNote ? `create: ${rt.spendNote}` : null;
       } catch (err) {
-        if (err instanceof PlacementError) rt.lastPlacement = err.placement;
         rt.lastError = `create: ${err instanceof Error ? err.message : String(err)}`;
+        // A race with no second offer is no failure: the boot already running goes on, the next tick looks again.
+        if (rt.raceExtra > 0 && isOutOfStock(err) && this.machines.some(m => m.deployment === spec.name)) {
+          rt.backoffUntil = this.now() + CREATE_BACKOFF_MS[0];
+          this.boots.placingDone(spec.name);
+          this.log('deployments: race found no other offer', { deployment: spec.name, error: rt.lastError });
+          return;
+        }
+        if (err instanceof PlacementError) rt.lastPlacement = err.placement;
         // The € ceiling frees up as soon as something idles: retry soon, without the escalating back-off of a broken create.
         if (rt.spendNote && err instanceof PlacementError) rt.backoffUntil = this.now() + SPEND_RETRY_MS;
         else if (quotaMachineType(err, spec.machineType) && this.freeing(spec.name)) rt.backoffUntil = this.now() + SPEND_RETRY_MS;

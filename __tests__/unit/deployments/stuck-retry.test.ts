@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
 import { MemoryDeploymentStore } from '../../../src/deployments/store';
-import { freshStuckRetry, noteStuckRetry, stuckVerdict, wantedNow, STUCK_RETRY_COOLDOWN_MS } from '../../../src/deployments/stuck-retry';
+import { freshStuckRetry, noteStuckRetry, stuckVerdict, wantedNow, STUCK_RETRY_COOLDOWN_MS, STUCK_RETRY_MAX } from '../../../src/deployments/stuck-retry';
 import { deploymentLogToTelemetry } from '../../../src/telemetry/gateway-events';
 import { setGatewayTelemetrySink } from '../../../src/telemetry/emit';
 import { createOpsAlerts, type OpsAlert } from '../../../src/telemetry/ops-alerts';
@@ -31,7 +31,7 @@ describe('stuck boot retry: the decision', () => {
     expect(wantedNow(record({}, { lastRequestAt: T0 - 20 * MIN }), idle, T0)).toBe(false);
   });
 
-  it('retries at most twice per stuck episode, with a cooldown, never when off, unwanted or refused', () => {
+  it('retries at most STUCK_RETRY_MAX times per stuck episode, with a cooldown, never when off, unwanted or refused', () => {
     const state = freshStuckRetry();
     const stuck = { replicaId: 'r1', phase: 'pulling', phaseMinutes: 18 } as never;
     const verdict = (over: Partial<Parameters<typeof stuckVerdict>[0]> = {}) => stuckVerdict({ enabled: true, wanted: true, state, refusal: null, now: T0, ...over });
@@ -42,8 +42,8 @@ describe('stuck boot retry: the decision', () => {
     noteStuckRetry(state, stuck, 'Lyon, FR', T0);
     expect(verdict({ now: T0 + STUCK_RETRY_COOLDOWN_MS - 1 })).toBe('cooldown');
     expect(verdict({ now: T0 + STUCK_RETRY_COOLDOWN_MS })).toBe('retry');
-    noteStuckRetry(state, stuck, 'Paris, FR', T0 + STUCK_RETRY_COOLDOWN_MS);
-    expect(state.attempts.map(a => a.attempt)).toEqual([1, 2]);
+    for (let i = 1; i < STUCK_RETRY_MAX; i++) noteStuckRetry(state, stuck, 'Paris, FR', T0 + i * STUCK_RETRY_COOLDOWN_MS);
+    expect(state.attempts.map(a => a.attempt)).toEqual(Array.from({ length: STUCK_RETRY_MAX }, (_, i) => i + 1));
     expect(verdict({ now: T0 + 60 * MIN })).toBe('exhausted');
   });
 });
@@ -80,7 +80,7 @@ describe('stuck boot retry: the controller', () => {
 
   const booting = (c: DeploymentController) => until(() => c.get('g')!.boot.active.some(b => b.replicaId && b.phase === 'starting'));
 
-  it('releases a stuck replica first, rents again on another offer, twice at most, then alerts once', async () => {
+  it('releases a stuck replica first, rents again on another offer, STUCK_RETRY_MAX times at most, then alerts once', async () => {
     const { c, cloud, clock, events, logs } = await make();
     await c.put('g', { image: 'me/app:1', port: 8000, minReplicas: 1 });
     c.start();
@@ -93,22 +93,24 @@ describe('stuck boot retry: the controller', () => {
     expect(retry).toMatchObject({ replicaId: first, phase: 'starting', attempt: 1, minutes: 16 });
     expect(retry!.next!.replicaId).not.toBe(first);
     expect(c.get('g')!.boot.past[0]).toMatchObject({ replicaId: first, result: 'failed', reason: 'boot-stuck' });
-    await booting(c);
-    clock.now += 16 * MIN;
-    await until(() => events.filter(e => e === 'create').length === 3);
+    for (let n = 3; n <= STUCK_RETRY_MAX + 1; n++) {
+      await booting(c);
+      clock.now += 16 * MIN;
+      await until(() => events.filter(e => e === 'create').length === n);
+    }
     await booting(c);
     clock.now += 16 * MIN;
     await until(() => logs.some(([m]) => m === 'deployments: stuck boot retries exhausted'));
     await new Promise(r => setTimeout(r, 150));
-    expect(events.filter(e => e === 'release:boot-stuck')).toHaveLength(2);
-    expect(events.filter(e => e === 'create')).toHaveLength(3);
+    expect(events.filter(e => e === 'release:boot-stuck')).toHaveLength(STUCK_RETRY_MAX);
+    expect(events.filter(e => e === 'create')).toHaveLength(STUCK_RETRY_MAX + 1);
     expect(logs.filter(([m]) => m === 'deployments: stuck boot retries exhausted')).toHaveLength(1);
     expect(c.get('g')!.boot.retriesExhausted).toBe(true);
-    expect(cloud.releaseReasons.filter(r => r === 'boot-stuck')).toHaveLength(2);
-    expect(logs.find(([m]) => m === 'deployments: stuck boot, releasing to retry')![1]).toMatchObject({ deployment: 'g', id: first, attempt: 1, of: 2 });
+    expect(cloud.releaseReasons.filter(r => r === 'boot-stuck')).toHaveLength(STUCK_RETRY_MAX);
+    expect(logs.find(([m]) => m === 'deployments: stuck boot, releasing to retry')![1]).toMatchObject({ deployment: 'g', id: first, attempt: 1, of: STUCK_RETRY_MAX });
     clock.now += 15 * MIN;
     await until(() => cloud.releaseReasons.includes('boot-timeout'));
-    expect(cloud.releaseReasons.filter(r => r === 'boot-stuck')).toHaveLength(2);
+    expect(cloud.releaseReasons.filter(r => r === 'boot-stuck')).toHaveLength(STUCK_RETRY_MAX);
   });
 
   it('does not retry when the provider is out of credit, nor when the deployment turned it off', async () => {
@@ -154,7 +156,7 @@ describe('stuck boot retry on the GPU detail page', () => {
     const s = demoSnapshot(T0, 'bad');
     const html = renderGpuDetail('n', s, 'speech-stack-test', { now: T0, csrf: 'c', actor: 'marcos', message: null, app: null })!;
     expect(html).toContain('Novas tentativas automáticas');
-    expect(html).toContain('travou em carregando modelos (16 min) em fr-par-2 → liberada → nova tentativa 1/2 em nl-ams-1 (nl-ams-1/b2c4)');
+    expect(html).toContain(`travou em carregando modelos (16 min) em fr-par-2 → liberada → nova tentativa 1/${STUCK_RETRY_MAX} em nl-ams-1 (nl-ams-1/b2c4)`);
     expect(html).toContain('tentativas esgotadas');
   });
 });

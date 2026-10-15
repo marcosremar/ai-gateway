@@ -13,7 +13,7 @@ import { probeLimitsFromEnv, spendLimitsFromEnv } from './spend-limits';
 import { createDeploymentRoutes, HttpReplicaProbe, type DeploymentRoutesOptions } from './http';
 import { ClientGpu } from './client-gpu';
 import { ScalewayDeploymentBackend, scalewayRegistryOf } from './scaleway-backend';
-import { MAX_GPU_PER_APP, SCALEWAY_GPU_OFF, usesScaleway } from './spec';
+import { CLASS_GPUS_PER_APP, MAX_GPU_PER_APP, SCALEWAY_GPU_OFF, usesScaleway } from './spec';
 import { VastDeploymentBackend } from './vast-backend';
 import { missingImage } from './image-check';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec } from './types';
@@ -238,6 +238,7 @@ export function deploymentsFromEnv(
     bootReporting: env.BOOT_REPORTING !== '0',
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
     maxGpuPerApp: MAX_GPU_PER_APP,
+    classGpusPerApp: CLASS_GPUS_PER_APP,
     ...spendLimitsFromEnv(env),
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
     ...(maxWait > 0 ? { maxColdStartWaitSeconds: maxWait } : {}),

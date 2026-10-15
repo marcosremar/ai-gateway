@@ -14,7 +14,7 @@ import { vastReplicaInit } from './cloud-init';
 import { MIN_HOST_LEFT_MS, vastEndsAt } from './expiry';
 import { countryDistanceKm, EU_COUNTRIES } from './geo';
 import { HostReputation, type HostRecord, type HostStore } from './host-reputation';
-import { countryOf, DEFAULT_NEAR, effectivePrice, rankOffers, type VastOffer } from './placements';
+import { bootMinutes, countryOf, DEFAULT_NEAR, effectivePrice, pullMinutes, rankOffers, type VastOffer } from './placements';
 import { vastPortCount, vastUdpRange } from './realtime-ports';
 import { gateDecision, gateNote, RTT_ANCHOR_PORT, RTT_ANCHORS, type RttBaseline } from './rtt-gate';
 import type { CreditIssue, HostNote, OfferPreview, OffersReport, SkippedOffer } from './types';
@@ -130,9 +130,13 @@ export function vastState(status: string | null | undefined): string {
   return 'starting';
 }
 
-function describeOffer(o: VastOffer): string {
-  return `${o.geolocation ?? 'unknown location'}, $${o.dph_total}/h`;
+function describeOffer(o: VastOffer, imageGb?: number): string {
+  const boot = imageGb ? `, ${Math.round(o.inet_down)} Mbps → boot ~${Math.round(bootMinutes(o, imageGb))} min` : '';
+  return `${o.geolocation ?? 'unknown location'}, $${o.dph_total}/h${boot}`;
 }
+
+const expectedPull = (spec: Pick<DeploymentSpec, 'imageGb'>, inetDown: number | undefined) =>
+  (spec.imageGb && inetDown ? { expectedPullMinutes: Math.round(pullMinutes(spec.imageGb, inetDown) * 10) / 10 } : {});
 
 export class VastApiError extends Error {
   constructor(readonly status: number, message: string, readonly retryAfterMs?: number) { super(message); }
@@ -269,6 +273,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       }));
       const ranked = rankOffers(valid.filter(o => !reasons.get(o)), {
         near: spec.near ?? DEFAULT_NEAR, ...(spec.allowFar ? { allowFar: true } : {}), knownRtt, proven,
+        ...(spec.imageGb ? { imageGb: spec.imageGb } : {}),
       });
       if (ranked.length) return { ranked, skipped };
     }
@@ -319,22 +324,22 @@ export class VastDeploymentBackend implements DeploymentBackend {
         const rank = offers.indexOf(offer) + 1;
         this.log('deployments: vast offer rented', {
           deployment: spec.name, id, offer: offer.id, host: offer.machine_id, location: offer.geolocation, usdPerHour: offer.dph_total,
-          rank, of: offers.length, skipped: misses,
+          inetDownMbps: offer.inet_down, reliability: offer.reliability2, rank, of: offers.length, skipped: misses,
         });
         const host = this.hosts.get(offer.machine_id);
         return {
-          placementNote: `offer ${rank} of ${offers.length}: ${describeOffer(offer)}${this.knownGood(host, this.now()) ? `, passed the RTT gate at ${host.rttMs} ms` : ''}`
+          placementNote: `offer ${rank} of ${offers.length}: ${describeOffer(offer, spec.imageGb)}${this.knownGood(host, this.now()) ? `, passed the RTT gate at ${host.rttMs} ms` : ''}`
             + (misses.length ? `; better-ranked offers passed over: ${misses.join('; ')}` : ''),
           id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast', tls: true,
           zone: offer.geolocation ?? '', machineType: offer.gpu_name ?? spec.machineType,
           pricePerHour: Math.round((offer.dph_total / EUR_TO_USD) * 1000) / 1000,
-          expiresAt: vastEndsAt(offer.end_date, offer.duration, this.now()),
+          expiresAt: vastEndsAt(offer.end_date, offer.duration, this.now()), ...expectedPull(spec, offer.inet_down),
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (/insufficient_credit/i.test(msg)) this.creditExhausted('Vast refused the rent: insufficient_credit', null);
         if (!/not available|already rented|no_such_ask|HTTP 404|HTTP 410/i.test(msg)) throw err;
-        misses.push(`offer ${offer.id} (${describeOffer(offer)}): ${msg.slice(0, 80)}`);
+        misses.push(`offer ${offer.id} (${describeOffer(offer, spec.imageGb)}): ${msg.slice(0, 80)}`);
       }
     }
     throw new Error(`out_of_stock: every vast offer tried was taken (${misses.join('; ')})`);

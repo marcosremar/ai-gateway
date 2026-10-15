@@ -167,7 +167,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     const samples = Object.values(rt.record.measured ?? {}).flatMap(m => m.boot);
     const withMs = <T extends { phases: PhaseMark[] }>(b: T, end: number) => ({ ...b, phases: phaseDurations(b.phases, end) });
     return {
-      active: bootStates(tracked.active, tracked.past, now, timeout).map(b => withMs(b, now)),
+      active: bootStates(tracked.active, tracked.past, now, timeout, this.expectedPullOf).map(b => withMs(b, now)),
       past: tracked.past.map(b => withMs(b, b.endedAt)),
       retryAt: rt.backoffUntil > now ? rt.backoffUntil : null,
       expectedBootSeconds: samples.length ? [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)]! : null,

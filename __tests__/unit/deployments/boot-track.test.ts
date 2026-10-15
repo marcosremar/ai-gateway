@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  BOOT_LOG_LINES, BootTracker, bootHistoryFile, bootPhaseOf, bootStates, expectedPhaseMinutes, logText, PHASE_DEFAULT_MINUTES, type BootHistory, type BootRecord,
+  BOOT_LOG_LINES, BootTracker, bootHistoryFile, bootPhaseOf, bootStates, expectedPhaseMinutes, logText, PHASE_DEFAULT_MINUTES, pullLimitMinutes,
+  SLOW_PULL_FLOOR_MINUTES, type BootHistory, type BootRecord,
 } from '../../../src/deployments/boot-track';
 import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -40,6 +41,21 @@ describe('boot phases', () => {
     expect(state([['starting', 12], ['loading', 11]])).toMatchObject({ stuck: true, phase: 'loading', expectedMinutes: 10 });
     expect(state([['provisioning', 31], ['loading', 1]]).stuck).toBe(true);
     expect(bootStates(at([['ready', 1]]), [], T0, 30)).toEqual([]);
+  });
+
+  it('a pull slower than the host bandwidth promises is stuck early: 4× its download, at least 8 min, never later than history', () => {
+    expect(pullLimitMinutes(15, undefined)).toBe(15);
+    expect(pullLimitMinutes(15, 1)).toBe(SLOW_PULL_FLOOR_MINUTES);
+    expect(pullLimitMinutes(15, 2.5)).toBe(10);
+    expect(pullLimitMinutes(15, 6)).toBe(15);
+    const pulling = (minutes: number, expectedPull?: number) => bootStates(
+      [{ replicaId: 'r', phases: [{ phase: 'pulling', at: T0 - minutes * MIN }] }], [], T0, 35, () => expectedPull,
+    )[0]!;
+    // 15/10/2026: two Bulgarian hosts sat 15 min in pulling; a 2000 Mbps host promises the 22.3 GB image in 1.5 min.
+    expect(pulling(9, 1.5)).toMatchObject({ stuck: true, expectedMinutes: SLOW_PULL_FLOOR_MINUTES });
+    expect(pulling(9).stuck).toBe(false);
+    // Poland, 894 Mbps (3.3 min promised), pulled in 10.4 min: kept.
+    expect(pulling(10.4, 3.3).stuck).toBe(false);
   });
 });
 

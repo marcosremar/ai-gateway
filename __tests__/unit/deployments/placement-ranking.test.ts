@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  countryOf, distanceBucket, effectivePrice, isOutOfStock, MAX_NEAR_KM, rankCandidates, rankOffers, zoneCountry, type VastOffer,
+  bootMinutes, countryOf, distanceBucket, effectivePrice, isOutOfStock, MAX_NEAR_KM, rankCandidates, rankOffers, zoneCountry, type VastOffer,
 } from '../../../src/deployments/placements';
 import { countryDistanceKm } from '../../../src/deployments/geo';
 import type { CatalogEntry } from '../../../src/deployments/types';
@@ -28,6 +28,32 @@ describe('geography', () => {
     expect(distanceBucket('FR', 'FR')).toBe(0);
     expect(distanceBucket('SK', 'FR')).toBe(2); // ~1090 km: the owner measured ~60 ms to a Slovak host
     expect(distanceBucket(null, 'FR')).toBe(Infinity);
+  });
+});
+
+describe('rankOffers: time to ready inside a distance band', () => {
+  const IMAGE_GB = 22.3;
+
+  it('estimates boot from the image size over the host bandwidth, capped, plus the cost of an unreliable host', () => {
+    expect(bootMinutes({ inet_down: 1000, reliability2: 1 }, IMAGE_GB)).toBeCloseTo(2.97, 1);
+    expect(bootMinutes({ inet_down: 8000, reliability2: 1 }, IMAGE_GB)).toBeCloseTo(bootMinutes({ inet_down: 2000, reliability2: 1 }, IMAGE_GB));
+    expect(bootMinutes({ inet_down: 1000, reliability2: 0.95 }, IMAGE_GB)).toBeCloseTo(2.97 + 1.5, 1);
+  });
+
+  it('a faster host goes before a cheaper slow one in the same band; a host that booted our image stays first', () => {
+    const slowCheap = offer(1, 'Warsaw, PL', 0.15, 0.99, 520);
+    const fastDear = offer(2, 'Krakow, PL', 0.21, 0.99, 1900);
+    expect(rankOffers([slowCheap, fastDear], { near: 'FR' }).map(o => o.id)).toEqual([1, 2]);
+    expect(rankOffers([slowCheap, fastDear], { near: 'FR', imageGb: IMAGE_GB }).map(o => o.id)).toEqual([2, 1]);
+    expect(rankOffers([slowCheap, fastDear], { near: 'FR', imageGb: IMAGE_GB, proven: new Set([10]) }).map(o => o.id)).toEqual([1, 2]);
+  });
+
+  it('close estimates tie and price decides; distance still comes first', () => {
+    const a = offer(1, 'Warsaw, PL', 0.20, 0.99, 1500);
+    const b = offer(2, 'Krakow, PL', 0.15, 0.99, 1200);
+    expect(rankOffers([a, b], { near: 'FR', imageGb: IMAGE_GB }).map(o => o.id)).toEqual([2, 1]);
+    const nearSlow = offer(3, 'Paris, FR', 0.21, 0.99, 520);
+    expect(rankOffers([a, nearSlow], { near: 'FR', imageGb: IMAGE_GB }).map(o => o.id)).toEqual([3, 1]);
   });
 });
 

@@ -155,6 +155,16 @@ as an unregistered deployment and goes to its `oneGpuDeployment` (docs/api/http.
   key's `/start` too. `maxReplicas` above 1 is never reached.
 - **A stuck boot never holds two:** the retry releases the stuck machine first; a released machine counts until the
   provider list stops showing it, and only then is the next one rented.
+- **The boot race is one GPU (15/10/2026):** a deployment with `bootRace: 2` (`parle-speech`, `parle-speech-test`)
+  whose warm floor (schedule, `/warm`, a key's `/start`) asks for a replica while none is ready rents 2 offers at once
+  (`planReplicas` `race`); the first ready stays and the other, still booting, is released at once (`race-lost`, the host
+  is not blamed). The race's extra boot does not count against the cap of its own deployment (`raceExtra`), so the
+  other deployments of the app still see the slot taken; the € ceiling, the monthly budget and the replica cap apply to
+  each boot as usual. No second offer under the cap: the boot that runs goes on, the next tick looks again (1 min, no
+  back-off, nothing in the boot history). A type picked in the panel (`gpuType`, a validation trial) boots once.
+- **A second GPU in class, off (owner decides):** `CLASS_GPUS_PER_APP` (`src/deployments/spec.ts`, `{}`) sets, per app,
+  the GPUs kept in its class window: the app's cap there and floor and ceiling of its class deployment. `{ parle: 2 }`
+  keeps two RTX 3090 for the class (slack for load and for a host that dies) and one outside it.
 - **Class first:** while a deployment's `warmSchedule` window is open, another GPU deployment of the same app gets no
   slot, and one it holds is released (`class-priority`). Today that is `parle-speech` over `parle-speech-test`.
 - **Apps are apart:** `parle` and `babelcast` (`babelcast-3090`, pinned) each run one at the same time. The other GPU
@@ -773,7 +783,9 @@ is above the floor again.
   host's country (from `geolocation`, the country after the last comma) from `near`; hosts beyond 2500 km only when no
   nearer one exists and the spec has `allowFar`. From France, DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3)
   even when those are cheaper. Inside a band: a host in the `near` country itself before one across a border (a French
-  host before a cheaper British, Swiss or Dutch one), then a host that booted our image before, then effective price
+  host before a cheaper British, Swiss or Dutch one), then a host that booted our image before, then, with `imageGb`
+  (the compressed image, what a host downloads; `parle-speech`: 22.3 GB), the estimated boot in 2-min bands
+  (`bootMinutes`: `imageGb ÷ min(inet_down, 2000 Mbps)` plus `30 min × (1 − reliability2)`), then effective price
   `dph_total × (1 + 4 × (1 − reliability2))`
   (an unreliable host costs more), then `inet_down` desc. The best 5 are tried (`PUT /asks/{id}/`, label
   `aigw:<namespace>:<deployment>`, env `-p 80:80`); one rented in between goes to the next. `lastPlacement` says which
@@ -1063,7 +1075,10 @@ The Scaleway Instance API has no console output, so the boot script itself pushe
   per replica in the boot log (`boot-history.json`).
 - The reported phase wins over the inferred one while it is fresh (2 min); `ready` stays the probe's. A pull still
   receiving bytes is not stuck by its phase time (only by the boot timeout); a reported failure makes the boot stuck at
-  once (release `boot-failed`, the stuck-retry rules). The GPU page shows «puxando a imagem 12,3/21 GB · camadas 7/23»
+  once (release `boot-failed`, the stuck-retry rules). A Vast pull reports nothing (the image is the container), so
+  with `imageGb` its limit comes from the rented host's measured `inet_down`: 4× the download it promises, at least
+  8 min, never later than the history rule (`pullLimitMinutes`; Poland, 894 Mbps, pulled 22.3 GB in 10.4 min against
+  3.3 promised). Retries per stuck episode: 4 (`STUCK_RETRY_MAX`). The GPU page shows «puxando a imagem 12,3/21 GB · camadas 7/23»
   (the total is the previous ready boot's pulled bytes) and the lines prefixed `replica:`.
 - Off: `BOOT_REPORTING=0` on the gateway (default on, with a public URL). New replicas then get exactly the previous
   script, and the route answers `401`.

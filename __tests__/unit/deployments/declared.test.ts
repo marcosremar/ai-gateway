@@ -57,6 +57,7 @@ const OUTSIDE_CLASS = Date.parse('2026-10-11T12:00:00Z');
 const CLASS_WINDOW = { days: [1, 2, 3, 4], start: '16:40', end: '20:30', timeZone: 'Europe/Paris' };
 const DECLARED_EXTRA = {
   entrypoint: 'bash', args: ['/opt/s2s/start.sh'], coldStartWaitSeconds: 240, minCuda: 13, maxRttExcessMs: 20, maxReplicas: 1, env: {},
+  imageGb: 22.3, bootRace: 2,
   warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }],
 };
 /** The class ladder on Vast, EU hosts only: one RTX 3090, nothing pricier behind it (owner, 14/10/2026). */

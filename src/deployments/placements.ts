@@ -10,8 +10,10 @@
  * The ranking is pure, no I/O — the Vast backend ranks market offers with `rankOffers`. The owner's three goals:
  * reliable, cheap, low latency for users in France. Distance decides first (`geo.ts`: great-circle km from the `near`
  * country, in 500-km bands — latency is physics, EU membership is not); inside a band, a host in the users' own country
- * goes before one across a border, then the cheapest *effective* price wins, where an unreliable host is priced as if
- * it cost more. Vast hosts are then measured (`rtt-gate.ts`), and one that passed sorts first on later creates.
+ * goes before one across a border, a host that already booted our image before one that never did, then the shortest
+ * estimated boot (`bootMinutes`, when the spec gives `imageGb`), then the cheapest *effective* price, where an
+ * unreliable host is priced as if it cost more. Vast hosts are then measured (`rtt-gate.ts`), and one that passed sorts
+ * first on later creates.
  */
 import { countryDistanceKm } from './geo';
 import type { CatalogEntry, DeploymentProvider, DeploymentSpec, Placement, PlacementCandidate } from './types';
@@ -145,8 +147,30 @@ export function effectivePrice(o: Pick<VastOffer, 'dph_total' | 'reliability2'>)
   return o.dph_total * (1 + UNRELIABILITY_WEIGHT * (1 - r));
 }
 
+/**
+ * Estimated minutes from rent to the image on disk: download (`imageGb` ÷ the host's `inet_down`, Vast's own speed
+ * test) plus the expected cost of a failed boot weighted by unreliability. `inet_down` is capped at
+ * `PULL_MBPS_CEILING`: a registry rarely serves one pull faster, so above it hosts tie and price decides.
+ */
+export const PULL_MBPS_CEILING = 2000;
+/** A failed boot costs a stuck pull (~15 min) plus the next boot (~15 min). */
+export const FAILED_BOOT_MINUTES = 30;
+/** Boot estimates closer than this tie (inet_down is a speed test, not a promise): price decides inside a band. */
+export const BOOT_BAND_MINUTES = 2;
+
+export function pullMinutes(imageGb: number, inetDownMbps: number): number {
+  return (imageGb * 8000) / Math.min(Math.max(inetDownMbps, 1), PULL_MBPS_CEILING) / 60;
+}
+
+export function bootMinutes(o: Pick<VastOffer, 'inet_down' | 'reliability2'>, imageGb: number): number {
+  const r = Math.min(1, Math.max(0, Number(o.reliability2) || 0));
+  return pullMinutes(imageGb, o.inet_down) + (1 - r) * FAILED_BOOT_MINUTES;
+}
+
 export interface RankOffersOptions {
   near: string;
+  /** Compressed image size (GB, what a host downloads): ranks by estimated boot inside a band. Absent = price only. */
+  imageGb?: number;
   /** Allow far (> `MAX_NEAR_KM`) offers when no near offer exists. */
   allowFar?: boolean;
   /** Host machine ids to leave out (recent boot failures). */
@@ -160,8 +184,8 @@ export const KNOWN_RTT_BAND_MS = 5;
 
 /**
  * Offers ordered best first: hosts that already passed the RTT gate (by measured RTT, in 5-ms bands), then distance
- * band, then the users' own country before a neighbour, then `proven` hosts (booted our image before), then effective
- * price, then download bandwidth (faster pull).
+ * band, then the users' own country before a neighbour, then `proven` hosts (booted our image before), then estimated
+ * boot in `BOOT_BAND_MINUTES` bands (with `imageGb`), then effective price, then download bandwidth (faster pull).
  */
 export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: RankOffersOptions): T[] {
   const usable = offers.filter(o => o.machine_id === undefined || !opts.avoidMachines?.has(o.machine_id));
@@ -172,6 +196,7 @@ export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: Rank
       o, near: isNear(cc, opts.near), bucket: distanceBucket(cc, opts.near), eff: effectivePrice(o),
       known: rtt === undefined ? Infinity : Math.floor(rtt / KNOWN_RTT_BAND_MS), abroad: cc === opts.near.toUpperCase() ? 0 : 1,
       unproven: o.machine_id !== undefined && opts.proven?.has(o.machine_id) ? 0 : 1,
+      boot: opts.imageGb ? Math.floor(bootMinutes(o, opts.imageGb) / BOOT_BAND_MINUTES) : 0,
     };
   });
   const near = scored.filter(t => t.near);
@@ -179,7 +204,7 @@ export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: Rank
   const byBucket = (a: number, b: number) => (a === b ? 0 : a < b ? -1 : 1); // Infinity-safe
   return pool
     .sort((a, b) => byBucket(a.known, b.known) || byBucket(a.bucket, b.bucket) || a.abroad - b.abroad
-      || a.unproven - b.unproven || a.eff - b.eff
+      || a.unproven - b.unproven || a.boot - b.boot || a.eff - b.eff
       || (b.o.inet_down || 0) - (a.o.inet_down || 0))
     .map(t => t.o);
 }

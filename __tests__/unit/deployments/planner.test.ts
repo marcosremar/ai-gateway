@@ -57,6 +57,24 @@ describe('desiredReplicas', () => {
   });
 });
 
+describe('planReplicas: boot race under a warm floor', () => {
+  const booting = (id: string, age = 5 * MIN) => replica(id, { everReady: false, readyNow: false, age });
+  const warm = { ...base, spec: spec({ maxReplicas: 1 }), floor: 1, lastRequestAt: NOW - MIN };
+
+  it('rents race extra replicas while none is ready, above maxReplicas, and keeps them all booting', () => {
+    expect(planReplicas({ ...warm, replicas: [], race: 1 })).toMatchObject({ desired: 1, create: 2, racing: true });
+    expect(planReplicas({ ...warm, replicas: [booting('a')], race: 1 })).toMatchObject({ create: 1, racing: true, release: [] });
+    expect(planReplicas({ ...warm, replicas: [booting('a'), booting('b')], race: 1 })).toMatchObject({ create: 0, release: [], racing: true });
+    expect(planReplicas({ ...warm, replicas: [], race: 0 })).toMatchObject({ create: 1, racing: false });
+  });
+
+  it('the first ready wins: the one still booting is released at once as race-lost, whatever keepBooting or the delay', () => {
+    const plan = planReplicas({ ...warm, spec: spec({ maxReplicas: 1, scaleDownDelaySeconds: 600 }), replicas: [replica('won'), booting('lost')], race: 1 });
+    expect(plan).toMatchObject({ create: 0, racing: false, release: [{ id: 'lost', reason: 'race-lost' }] });
+    expect(planReplicas({ ...warm, replicas: [replica('won'), booting('lost')], race: 0 }).release).toEqual([]);
+  });
+});
+
 describe('planReplicas', () => {
   it('creates the missing replicas', () => {
     const plan = planReplicas({ ...base, spec: spec({ minReplicas: 2, maxReplicas: 2 }), replicas: [replica('a')] });
