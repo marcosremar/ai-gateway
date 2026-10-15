@@ -41,10 +41,10 @@ async function setup() {
 describe('GPU type of a deployment, chosen in the panel (owner, 14/10/2026)', () => {
   it('lists every type with a size profile and its own price cap; the RTX 3090 is the default', async () => {
     const { c, vast } = await setup();
-    expect(vast.created[0]!.spec).toMatchObject({ machineType: 'RTX 3090', maxEurPerHour: 0.3 });
+    expect(vast.created[0]!.spec).toMatchObject({ machineType: 'RTX 3090', maxEurPerHour: 0.22 });
     expect(c.get('parle-speech')!.gpuType).toEqual({
       current: 'RTX 3090', default: 'RTX 3090', setBy: null, setAt: null,
-      choices: [['RTX 3090', 0.3], ['RTX 4090', 0.85], ['RTX 5090', 0.85], ['L40S', 0.85], ['H100 SXM', 2.5], ['H100 PCIE', 2.5]]
+      choices: [['RTX 3090', 0.22], ['RTX 4090', 0.85], ['RTX 5090', 0.85], ['L40S', 0.85], ['H100 SXM', 2.5], ['H100 PCIE', 2.5]]
         .map(([machineType, maxEurPerHour]) => ({ machineType, maxEurPerHour })),
     });
   });
@@ -57,7 +57,7 @@ describe('GPU type of a deployment, chosen in the panel (owner, 14/10/2026)', ()
     await new Promise(r => setTimeout(r, 200));
     expect(vast.released).toEqual([]);
     expect(c.get('parle-speech')!.gpuType).toMatchObject({ current: 'H100 SXM', setBy: 'marcos', setAt: new Date(OUTSIDE_CLASS).toISOString() });
-    expect(c.specOf('parle-speech')).toMatchObject({ machineType: 'RTX 3090', candidates: [{ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3 }] });
+    expect(c.specOf('parle-speech')).toMatchObject({ machineType: 'RTX 3090', candidates: [{ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.22 }] });
     await vast.releaseReplica(first, 'host gone');
     c.wake('parle-speech');
     await until(() => vast.created.length === 2);
@@ -84,9 +84,9 @@ describe('GPU type of a deployment, chosen in the panel (owner, 14/10/2026)', ()
     await c.offers('parle-speech', 'H100 SXM', 4);
     await c.offers('parle-speech');
     expect(seen).toEqual([
-      { machineType: 'H100 SXM', maxEurPerHour: 2.5 }, { machineType: 'H100 SXM', maxEurPerHour: 4 }, { machineType: 'RTX 3090', maxEurPerHour: 0.3 },
+      { machineType: 'H100 SXM', maxEurPerHour: 2.5 }, { machineType: 'H100 SXM', maxEurPerHour: 4 }, { machineType: 'RTX 3090', maxEurPerHour: 0.22 },
     ]);
-    expect(c.specOf('parle-speech')!.maxEurPerHour).toBe(0.3);
+    expect(c.specOf('parle-speech')!.maxEurPerHour).toBe(0.22);
   });
 
   it('«voltar ao padrão» clears the choice; a type the deployment does not size is refused', async () => {
