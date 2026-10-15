@@ -14,7 +14,7 @@ import { PAGE_LOG_WAIT_MS, within, type ContainerLogView } from './container-log
 import { usesVast } from './spec';
 import { gpuTypeChoices, withGpuType } from './gpu-type';
 import type { Runtime } from './controller-state';
-import { DEFAULT_MAX_RTT_EXCESS_MS, DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
+import { DEFAULT_MAX_RTT_EXCESS_MS, gateDecision } from './rtt-gate';
 import type { DeploymentSpec, DeploymentView, GpuTypeView, OffersPreview } from './types';
 import { distinctSessions, externalLoadOf, refusedSessions } from '../realtime/external-load';
 
@@ -40,7 +40,7 @@ export abstract class ControllerViews extends ReconcileLoop {
     const vastSpec = { ...spec, provider: 'vast' as const, machineType: vast.machineType ?? spec.machineType, maxEurPerHour: vast.maxEurPerHour ?? spec.maxEurPerHour };
     const [report, baseline] = await Promise.all([
       backend.offersReport?.(vastSpec) ?? backend.previewOffers(vastSpec).then(offers => ({ offers, skipped: [], hosts: [] })),
-      backend.measureBaselineRtt?.(near).catch(() => null) ?? null,
+      backend.measureBaselineRtt?.().catch(() => null) ?? null,
     ]);
     const limits = {
       baselineMs: baseline?.rttMs, ...(spec.maxRttMs !== undefined ? { maxRttMs: spec.maxRttMs } : {}),
@@ -51,7 +51,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       offers: report.offers.map(o => ({ ...o, gateVerdict: o.knownRttMs == null ? null : gateDecision({ ...limits, rttMs: o.knownRttMs }) as 'pass' | 'too-far' })),
       gate: {
         near, rule: baseline ? 'relative' : 'absolute', anchor: baseline?.anchor ?? null, baselineMs: baseline?.rttMs ?? null,
-        maxRttExcessMs: spec.maxRttExcessMs ?? DEFAULT_MAX_RTT_EXCESS_MS, maxRttMs: spec.maxRttMs ?? (baseline ? null : DEFAULT_MAX_RTT_MS),
+        maxRttExcessMs: spec.maxRttExcessMs ?? DEFAULT_MAX_RTT_EXCESS_MS, maxRttMs: spec.maxRttMs ?? null,
       },
     };
   }

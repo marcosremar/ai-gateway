@@ -12,7 +12,6 @@ import { packFiles } from './file-pack';
 import { withGpuType } from './gpu-type';
 import { placeReplica, PlacementError } from './placement-walk';
 import { isOutOfStock, quotaMachineType } from './placements';
-import { DEFAULT_NEAR } from './placements';
 import { baselineLoaded, gateDecision, gateNote } from './rtt-gate';
 import type { DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, ProbeResult, ReplicaMachine } from './types';
 
@@ -88,7 +87,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       return true;
     }
     const { spec } = rt.record;
-    if (rtt != null) gate.baseline = await backend.measureBaselineRtt?.(spec.near ?? DEFAULT_NEAR).catch(() => null) ?? null;
+    if (rtt != null) gate.baseline = await backend.measureBaselineRtt?.().catch(() => null) ?? null;
     const input = {
       rttMs: rtt, baselineMs: gate.baseline?.rttMs, anchor: gate.baseline?.anchor, firstSeenAt: gate.firstSeenAt, now,
       ...(spec.maxRttMs !== undefined ? { maxRttMs: spec.maxRttMs } : {}), ...(spec.maxRttExcessMs !== undefined ? { maxExcessMs: spec.maxRttExcessMs } : {}),

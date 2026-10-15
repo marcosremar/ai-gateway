@@ -1,7 +1,7 @@
 {
   "name": "parle-speech",
   "app": "parle",
-  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS (cast's cloned voices) in one container (speech-stack, public ghcr copy) with the realtime edge. Vast, EU hosts only. One GPU per app, an RTX 3090 at most €0.22/h, nothing pricier behind it (owner, 14/10/2026): the cloud fallback answers what it cannot serve. One warm Mon-Thu 16:40-20:30 Paris (a new host boots in ~16-20 min; class at 17:40). envByMachineType keeps the 4090, L40S and 5090 sizes: a faster card is a change of candidates",
+  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS (cast's cloned voices) in one container (speech-stack, public ghcr copy) with the realtime edge. Vast, EU hosts only. One GPU per app, an RTX 3090 at most €0.22/h, nothing pricier behind it (owner, 14/10/2026): the cloud fallback answers what it cannot serve. One warm Mon-Thu 16:40-20:30 Paris (a new host boots in ~16-20 min; class at 17:40). RTT gate: +50 ms. envByMachineType keeps the 4090, L40S and 5090 sizes: a faster card is a change of candidates",
   "profile": "speech-stack",
   "image": {
     "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
@@ -18,7 +18,7 @@
     "minCuda": 13,
     "imageGb": 22.3,
     "bootRace": 2,
-    "maxRttExcessMs": 20,
+    "maxRttExcessMs": 50,
     "idleAction": "delete",
     "maxReplicas": 1,
     "entrypoint": "bash",

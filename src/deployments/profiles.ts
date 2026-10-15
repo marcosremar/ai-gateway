@@ -8,7 +8,7 @@ import type { PlacementCandidate, Profile, ScalingSpec } from './types';
 /** vLLM-Omni serves Qwen3-TTS with an OpenAI-shaped `POST /v1/audio/speech` (the image the parle class used on its own TTS GPU). */
 const VLLM_OMNI_IMAGE = 'vllm/vllm-omni:v0.28.0';
 
-const VAST_HOST = { minCuda: 13, maxRttExcessMs: 20 };
+const VAST_HOST = { minCuda: 13, maxRttExcessMs: 30 };
 const vastLadder = (): PlacementCandidate[] => [
   { provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3 },
   { provider: 'vast', machineType: 'RTX 4090', maxEurPerHour: 0.85 },

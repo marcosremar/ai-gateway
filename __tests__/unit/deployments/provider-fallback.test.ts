@@ -78,9 +78,9 @@ describe('placements on another provider: spec', () => {
     for (const name of ['qwen3-tts', 'qwen3-tts-clone']) {
       const tts = buildSpec('tts', { profile: name }, { profiles });
       expect(tts.candidates!.map(c => `${c.provider} ${c.machineType} ≤ €${c.maxEurPerHour}`)).toEqual(['vast RTX 3090 ≤ €0.3', 'vast RTX 4090 ≤ €0.85', 'vast RTX 5090 ≤ €0.85']);
-      expect(tts).toMatchObject({ scaling: { mode: 'fast' }, minCuda: 13, maxRttExcessMs: 20 });
+      expect(tts).toMatchObject({ scaling: { mode: 'fast' }, minCuda: 13, maxRttExcessMs: 30 });
     }
-    expect(speech).toMatchObject({ scaling: { mode: 'fast' }, minCuda: 13, maxRttExcessMs: 20 });
+    expect(speech).toMatchObject({ scaling: { mode: 'fast' }, minCuda: 13, maxRttExcessMs: 30 });
     for (const profile of BUILTIN_PROFILES) {
       expect(placementsOf(buildSpec('p', { profile: profile.name }, { profiles })).some(p => p.provider === 'scaleway' && profile.spec.gpu), profile.name).toBe(false);
     }

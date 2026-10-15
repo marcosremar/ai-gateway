@@ -805,17 +805,23 @@ Distance is only a prior; a fresh Vast replica is **measured**. Once it has an a
 before the app is ready), the controller asks the backend for the RTT (`measureRtt`: `src/gateway/providers/gpu/rtt-probe.ts`
 on the mapped port, 3 rounds of 5 samples × 2 s, the lowest round's median — the samples of a round leave together,
 so jitter on the gateway's own link lifts all of them and only the lowest round is the path — counting only real response bytes) and, in the same tick, for a
-**baseline**: the same probe against a fixed anchor in the `near` country (`RTT_ANCHORS`: Scaleway's S3 endpoint
-there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `s3.pl-waw.scw.cloud` for PL).
+**baseline**: the same probe against the gateway's own public edge (`RAILWAY_PUBLIC_DOMAIN`, port 80). Until
+16/10/2026 the anchor was Scaleway's S3 endpoint in the `near` country (`s3.fr-par.scw.cloud`, 9–10 ms from the
+gateway); it went with Scaleway, and the gateway's own edge needs no third-party host. The excess is then the path
+from the gateway's region (Railway europe-west4, Amsterdam), with the gateway's own uplink jitter cancelled.
 
-- **Relative rule** (a baseline came back): the replica passes when `rtt − baseline ≤ maxRttExcessMs` (integer 0–500,
-  default **20**, `DEFAULT_MAX_RTT_EXCESS_MS`) and, if the spec sets `maxRttMs`, `rtt ≤ maxRttMs` as well. Why 20: on
-  2026-10-08, from France, UK hosts measured 12–15 ms over Paris and served the speech stack as fast as an L40S, so
-  they stay in with ~5 ms of noise margin; the Slovak host of 2026-10-06 (~60 ms, ≥ 40 over) goes. That day's French
-  host (42 ms while Paris measured 45: −3) passes; the absolute 35 ms had released it.
-- **Absolute rule** (no anchor for the country, or the baseline probe failed — the gate never opens for lack of a
-  baseline): `rtt ≤ maxRttMs`, integer 5–500, default **35** (`DEFAULT_MAX_RTT_MS`), meant for the gateway's vantage
-  on Railway europe-west4 (NL), where France → host is typically 10–20 ms more.
+- **Rule:** the replica passes when `rtt − baseline ≤ maxRttExcessMs` (integer 0–500, default **30**,
+  `DEFAULT_MAX_RTT_EXCESS_MS`) and, if the spec sets `maxRttMs`, `rtt ≤ maxRttMs` as well. Without a baseline (no
+  `RAILWAY_PUBLIC_DOMAIN`, or its probe failed) the baseline is 0: the raw RTT against the same limit, so the gate
+  never opens for lack of one. Why 30 by default: it keeps what the Paris anchor + 20 kept (UK and Swiss hosts at
+  15–18 ms raw in, the Slovak host of 2026-10-06 at ~60 ms out).
+- **parle: 50** (`parle-speech`, `parle-speech-test`; 16/10/2026). With €0.22/h and EU hosts only, the RTX 3090
+  offer is mostly Czechia, Poland and Bulgaria, measured 26–36 ms raw from the gateway (Hungary, Spain 31–32, Estonia
+  37, Slovenia 40). At the old +20 over Paris the QA of 16/10 rented 8 hosts and none got ready: four were released
+  as too far (Bulgaria +26/+25, Poland +21) after their 22 GB pull. 50 over the gateway's edge is about Paris + 40 ms:
+  a turn makes a few round trips to the host (audio up, reply streamed down), so +40 ms each is ~0.1 s of a ~2 s turn,
+  below what a learner notices, while a released host leaves the class on the cloud reserve (no cloned cast voices)
+  for another 16–20 min boot. A host ≥ ~60 ms is still released.
 
 - **Under load** (2026-10-09: with the gateway's own uplink saturated a Norwegian host read 144 ms against a Paris
   baseline of 143 and passed): the backend keeps the lowest baseline of the last 6 h (`QUIET_BASELINE_MS`). When the
@@ -824,27 +830,31 @@ there, port 80 — `s3.fr-par.scw.cloud` for FR, `s3.nl-ams.scw.cloud` for NL, `
 - **Before renting** (2026-10-09: 11 paid minutes of a 57 GB pull for a host the gate then released): when an offer
   carries its host address (`public_ipaddr`, `direct_port_start`), the backend times a TCP connect to that port (a
   refusal is an answer too; `probeConnectRtt`, skipped on a network that answers for an unroutable address) and applies
-  the same rule against the baseline. A host too far is skipped and avoided 24 h without being rented; a host that does
-  not answer is rented and gated after boot as before.
+  the same rule against the baseline. A host too far is skipped without being rented and its RTT kept; a host that
+  does not answer (most Vast hosts drop a SYN to a closed port: in the week to 16/10 this never caught one) is rented
+  and gated after boot as before.
+- **From an earlier measurement** (16/10/2026): a host the gateway measured in the last 7 days (`MEASURED_RTT_MS`; a
+  pass, a too-far release or a pre-rent probe) is judged before renting by that RTT against the baseline and the
+  limit **in force** — too far: skipped, no pull paid; within: rentable at once, even if an older, stricter gate
+  released it (raising `maxRttExcessMs` takes its hosts back without waiting). Distance does not change by the hour.
 
-Outside the gate the replica is released with reason `too-far`, its host (`machine_id`) is skipped for **24 h**, and
-the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
+Outside the gate the replica is released with reason `too-far`, its host's RTT is kept (it is not rented again while
+that RTT is over the limit in force, see above), and the next create takes the next offer. No answer within 5 min of getting an address (`RTT_GATE_BUDGET_MS`) counts as too
 far. Until it passes, a replica is not probed for readiness (it serves nothing). A replica that passed is never
 measured again and its host is remembered as known-good for the ranking (on disk, § Host reputation); one adopted after a gateway restart is
 measured for the view only, never released by the gate, when its front already says ready (it may be serving); one still
 booting at the restart is gated like a fresh rental.
 `GET /v1/deployments/:name` shows `rttMs` and `rttBaselineMs` per replica, and `lastPlacement` both numbers and the
 verdict, e.g.
-`vast RTX 5090 (≤ €0.6/h); offer 1 of 12: Paris, FR, $0.548/h; RTT 42 ms, baseline 45 ms (s3.fr-par.scw.cloud): −3 ms ≤ maxRttExcessMs 20: kept`
-or `…; earlier: host Bratislava, SK: RTT 61 ms, baseline 14 ms (s3.fr-par.scw.cloud): +47 ms > maxRttExcessMs 20: released (too-far)`.
+`vast RTX 3090 (≤ €0.22/h); offer 1 of 12: Prague, CZ, $0.21/h; RTT 29 ms, baseline 2 ms (live.ucast.me): +27 ms ≤ maxRttExcessMs 50: kept`
+or `…; earlier: host Bratislava, SK: RTT 61 ms, baseline 2 ms (live.ucast.me): +59 ms > maxRttExcessMs 50: released (too-far)`.
 `GET /v1/deployments/:name/offers` answers `{offers, skipped, hosts, gate}`: `gate` is the rule in force with the baseline measured
 at that moment (`{near, rule, anchor, baselineMs, maxRttExcessMs, maxRttMs}`), and each offer carries `knownRttMs`
-and `gateVerdict` when its host was measured before.
+and `gateVerdict` when its host was measured in the last 7 days.
 
-- **What the difference means:** `rtt − baseline` is a lower bound of the anchor → host round trip, taken from where
-  the gateway runs, not the user's own latency. From a vantage near the users it is close to what they add over a
-  datacenter of their country; from the Netherlands a host that is as far from the gateway as Paris is (a British
-  one) reads ≈ 0 over. The distance ranking, the own-country preference and an explicit `maxRttMs` cover that side.
+- **What the difference means:** `rtt − baseline` is the round trip from the gateway's region (Amsterdam) to the
+  host, not the user's own latency: a host as far from Amsterdam as Paris (a British one) reads like Paris. The
+  distance ranking, the own-country preference and an explicit `maxRttMs` cover the users' side.
   Scaleway replicas are not gated.
 
 ### Host reputation (Vast) — what each host did, kept across restarts
@@ -860,7 +870,7 @@ after two `too-far` releases). Up to 200 hosts, the least recently used dropped 
 | `rttMs`, `baselineMs`, `rttAt` | the RTT gate passed (`rttAt` set; a pass also clears `lastError` and `avoidUntil`), or released it as too far (`rttAt` untouched: the numbers are kept for the operator, the host is not "known good") |
 | `bootsOk`, `bootMs` | its replica answered ready for the first time (create → ready, ms); clears `lastError` |
 | `udp`, `udpAt` | the gateway's UDP probe of its replica answered `ok` or `blocked` (§ realtime-edge.md, Reachability) |
-| `bootsFailed`, `lastError`, `lastErrorAt`, `avoidUntil` | its replica was released as `too-far` (avoided 24 h), `boot-timeout` (1 h) or `udp-blocked` (see below) |
+| `bootsFailed`, `lastError`, `lastErrorAt`, `avoidUntil` | its replica was released as `too-far` (not avoided by time: its kept RTT decides, § RTT gate), `boot-timeout` (1 h) or `udp-blocked` (see below) |
 
 How the selection uses it (`rankedOffers` in `vast-backend.ts`, `rankOffers` in `placements.ts`):
 
@@ -873,12 +883,12 @@ How the selection uses it (`rankedOffers` in `vast-backend.ts`, `rankOffers` in 
   before** (`bootsOk` > 0, no later failure) goes before an unknown one, then the effective price.
 - The gate itself is unchanged (`maxRttExcessMs`, `maxRttMs`): reputation only decides which offer is tried first.
 
-What it does not do: measure a host before renting it. A host never rented is still ranked by distance, country and
-price, and the gate decides after the rental (1–5 min of machine per wrong try).
+A host never measured is still ranked by distance, country and price, and the gate decides after the rental (the
+whole image pull per wrong try); a measured one is judged before renting (§ RTT gate).
 
 `GET /v1/deployments/:name/offers` (admin, read-only) now answers `{offers, skipped, hosts, gate}`: each offer has
 `host` (its record, or null), `skipped` lists the market offers left out with the reason
-(`{offerId, machineId, location, usdPerHour, reason: "too-far until 2026-10-09T10:41:00.000Z"}` or
+(`{offerId, machineId, location, usdPerHour, reason: "boot-timeout until 2026-10-09T10:41:00.000Z"}` or
 `"inbound UDP blocked until … (realtime.requireWebrtc)"`), and `hosts` is every record the gateway holds.
 
 ### `files` on a Vast placement — signed links on the gateway

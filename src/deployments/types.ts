@@ -161,9 +161,8 @@ export interface DeploymentSpec {
   allowFar?: boolean;
   euOnly?: boolean;
   /**
-   * Vast: a freshly rented host whose measured RTT from the gateway (median, ms) is above this is released as
-   * `too-far` and avoided 24 h (`rtt-gate.ts`). With a baseline (see `maxRttExcessMs`) it is an optional upper bound;
-   * without one it is the whole rule, default `DEFAULT_MAX_RTT_MS` (35, measured from NL).
+   * Vast: absolute upper bound (ms) on a host's measured RTT from the gateway, on top of `maxRttExcessMs` (RTT over
+   * the gateway's own edge, default `DEFAULT_MAX_RTT_EXCESS_MS`). Outside either the host is `too-far` (`rtt-gate.ts`).
    */
   maxRttMs?: number;
   maxRttExcessMs?: number;
@@ -385,7 +384,7 @@ export interface DeploymentBackend {
   readonly gpuOff?: string | null;
   /** RTT (median ms) from the gateway to the replica's front, null when no sample came back (the RTT gate). */
   measureRtt?(machine: ReplicaMachine): Promise<number | null>;
-  measureBaselineRtt?(near: string): Promise<RttBaseline | null>;
+  measureBaselineRtt?(): Promise<RttBaseline | null>;
   recordRtt?(machine: ReplicaMachine, rttMs: number, baselineMs?: number | null): void;
   noteHost?(machine: ReplicaMachine, note: HostNote): void;
   /** Price + stock of types in zones, for ranking `candidates` (Scaleway). Absent: candidates are ranked without it. */

@@ -68,16 +68,16 @@ function rejectsWithin<T>(p: Promise<T>, ms: number): Promise<unknown> {
 describe('V5: the RTT gate under load', () => {
   it('the backend remembers the quietest baseline and reports it next to a loaded one', async () => {
     const samples = [31, 143];
-    const backend = new VastDeploymentBackend('k', { fetch: vastFetch({ offers: [] }).fetchImpl, rtt: async () => samples.shift() ?? null });
-    expect(await backend.measureBaselineRtt('FR')).toEqual({ anchor: 's3.fr-par.scw.cloud', rttMs: 31, quietMs: 31 });
-    expect(await backend.measureBaselineRtt('FR')).toEqual({ anchor: 's3.fr-par.scw.cloud', rttMs: 143, quietMs: 31 });
+    const backend = new VastDeploymentBackend('k', { fetch: vastFetch({ offers: [] }).fetchImpl, rtt: async () => samples.shift() ?? null, rttAnchor: 'edge' });
+    expect(await backend.measureBaselineRtt()).toEqual({ anchor: 'edge', rttMs: 31, quietMs: 31 });
+    expect(await backend.measureBaselineRtt()).toEqual({ anchor: 'edge', rttMs: 143, quietMs: 31 });
   });
 
   it('a host that passes only because the baseline was measured under load serves but is not remembered as good', async () => {
     const cloud = new FakeCloud(Date.now, 'vast');
     cloud.marketPriced = true;
     cloud.measureRtt = async () => 144;
-    cloud.measureBaselineRtt = async () => ({ anchor: 's3.fr-par.scw.cloud', rttMs: 143, quietMs: 31 });
+    cloud.measureBaselineRtt = async () => ({ anchor: 'edge', rttMs: 143, quietMs: 31 });
     const remembered: number[] = [];
     cloud.recordRtt = (_m, rtt) => { remembered.push(rtt); };
     const controller = await make(cloud);
@@ -91,7 +91,7 @@ describe('V5: the RTT gate under load', () => {
     const cloud = new FakeCloud(Date.now, 'vast');
     cloud.marketPriced = true;
     cloud.measureRtt = async () => 42;
-    cloud.measureBaselineRtt = async () => ({ anchor: 's3.fr-par.scw.cloud', rttMs: 45, quietMs: 40 });
+    cloud.measureBaselineRtt = async () => ({ anchor: 'edge', rttMs: 45, quietMs: 40 });
     const remembered: number[] = [];
     cloud.recordRtt = (_m, rtt) => { remembered.push(rtt); };
     const controller = await make(cloud);
@@ -104,23 +104,26 @@ describe('V5: the RTT gate under load', () => {
 describe('V6: probe the host before renting it', () => {
   const offers = [offer(1, { public_ipaddr: '5.5.5.1', direct_port_start: 40000 }), offer(2, { public_ipaddr: '5.5.5.2', direct_port_start: 40000 })];
 
-  it('an offer whose host answers far above the baseline is skipped and avoided; the near one is rented', async () => {
+  it('an offer whose host answers far above the baseline is skipped and its RTT kept: the next create skips it without a probe', async () => {
     const { puts, fetchImpl } = vastFetch({ offers });
     const probes: string[] = [];
     const backend = new VastDeploymentBackend('k', {
-      fetch: fetchImpl, rtt: async () => 31,
+      fetch: fetchImpl, rtt: async () => 31, rttAnchor: 'edge',
       preRentRtt: async (host, port) => { probes.push(`${host}:${port}`); return host === '5.5.5.1' ? 70 : 33; },
     });
     const m = await backend.createReplica(input);
     expect(probes.sort()).toEqual(['5.5.5.1:40000', '5.5.5.2:40000']);
     expect(puts).toEqual([expect.stringContaining('/asks/2/')]);
     expect(m.id).toBe('901');
-    expect(backend.avoidedHosts()).toEqual([101]);
+    probes.length = 0;
+    await backend.createReplica(input);
+    expect(probes).toEqual(['5.5.5.2:40000']);
+    expect(puts).toEqual([expect.stringContaining('/asks/2/'), expect.stringContaining('/asks/2/')]);
   });
 
   it('every offer far before renting: nothing rented, out_of_stock with the measures', async () => {
     const { puts, fetchImpl } = vastFetch({ offers });
-    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, rtt: async () => 31, preRentRtt: async () => 90 });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, rtt: async () => 31, rttAnchor: 'edge', preRentRtt: async () => 90 });
     await expect(backend.createReplica(input)).rejects.toThrow(/out_of_stock: every vast offer tried is too far before renting .*RTT 90 ms, baseline 31 ms/);
     expect(puts).toEqual([]);
   });

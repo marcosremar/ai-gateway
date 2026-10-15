@@ -1,7 +1,7 @@
 {
   "name": "parle-speech-test",
   "app": "parle",
-  "description": "parle: test copy of parle-speech (same image, same voices, same Vast ladder on hosts in an EU country only): one RTX 3090 at most €0.22/h (owner, 14/10/2026: one GPU per app, an RTX 3090), sharing the parle app's single GPU with parle-speech, which takes it back in the class window; started only on purpose (POST /v1/deployments/parle-speech/start by a capped client key), never by a request, no warm schedule, deleted after 10 min idle",
+  "description": "parle: test copy of parle-speech (same image, same voices, same Vast ladder on hosts in an EU country only): one RTX 3090 at most €0.22/h (owner, 14/10/2026: one GPU per app, an RTX 3090), same maxRttExcessMs 50 as parle-speech, sharing the parle app's single GPU with parle-speech, which takes it back in the class window; started only on purpose (POST /v1/deployments/parle-speech/start by a capped client key), never by a request, no warm schedule, deleted after 10 min idle",
   "profile": "speech-stack",
   "image": {
     "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
@@ -19,7 +19,7 @@
     "minCuda": 13,
     "imageGb": 22.3,
     "bootRace": 2,
-    "maxRttExcessMs": 20,
+    "maxRttExcessMs": 50,
     "minReplicas": 0,
     "maxReplicas": 1,
     "idleMinutes": 10,
