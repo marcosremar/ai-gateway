@@ -117,6 +117,8 @@ Unknown names are still accepted; these are the names the components emit.
 | `turn.done` | turn finished (`durMs`, outcome code, `firstSoundMs`, `networkDelayMs`, `clientOpener`) |
 | `ws.close` | WebSocket closed (`code`) |
 | `error` | client error (name/code only; the emitter's opt-in `captureErrors` reports window errors as `browser.error`) |
+| `local.call` | a call through the local tier ([Local tier](./local-tier.md)): `stage`, `policy`, `served_by` (`local`/`gateway`), `reason`, `device`; `durMs` |
+| `local.load` | a local model loaded or failed: `stage`, `model`, `device`, `ok`; `durMs` |
 
 **Edge** (source `edge`, aigw-edge sidecar in each replica):
 
