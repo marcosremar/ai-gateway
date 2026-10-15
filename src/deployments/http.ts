@@ -604,7 +604,11 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         body = opts.apps.resolveDeployBody(app, body);
       }
       const { view, created } = await controller.put(name, body, { ...(app ? { app } : {}), ...(appImage ? { appImage } : {}) });
-      if (app && opts.apps && typeof deployedImage === 'string') await opts.apps.registerDeployed(app, deployedImage, view.spec);
+      if (app && opts.apps && typeof deployedImage === 'string') {
+        await opts.apps.registerDeployed(app, deployedImage, view.spec).catch((err) => {
+          log.warn({ deployment: name, app, error: err instanceof Error ? err.message : String(err) }, 'deploy applied, image not registered');
+        });
+      }
       return send(res, created ? 201 : 200, view);
     }
     if (method === 'DELETE') {
