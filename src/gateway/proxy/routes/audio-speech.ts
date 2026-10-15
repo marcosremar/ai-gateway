@@ -8,6 +8,9 @@ import type { ProxyRequest, ProxyResponse, StageRoutes } from '../types';
 import { CooldownTracker } from '../../providers/cloud/fallback';
 import { createLogger } from '../../../logger';
 import { qwenTokenCap } from '../../../deployments/qwen-token-cap';
+import { createHash } from 'crypto';
+import { emitGatewayEvent } from '../../../telemetry/emit';
+import { normalizeText, ttsCacheKey, TTS_CACHE_DEFAULTS, type TtsCache } from '../tts-cache';
 import {
   errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
 } from '../provider-routing';
@@ -19,11 +22,27 @@ const log = createLogger('audio-speech');
 
 const FORWARDED_EXTRAS = ['task_type', 'ref_audio', 'ref_text', 'language', 'stream_format', 'instructions'];
 
+export interface SpeechCache { cache: TtsCache; scope: string; gpuOnly: boolean }
+
+function capture(stream: ReadableStream<Uint8Array>, maxBytes: number, done: (audio: Buffer) => void): ReadableStream<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      size += chunk.length;
+      if (size <= maxBytes) chunks.push(chunk);
+      controller.enqueue(chunk);
+    },
+    flush() { if (size <= maxBytes) done(Buffer.concat(chunks)); },
+  }));
+}
+
 export async function handleAudioSpeech(
   req: ProxyRequest,
   ttsProviders: StageRoutes<TTSProvider>,
   unavailable?: Record<string, string[]>,
   circuitBreakers?: CircuitBreakerRegistry,
+  speechCache?: SpeechCache,
 ): Promise<ProxyResponse> {
   if (!req.body || typeof req.body !== 'object') {
     return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
@@ -68,7 +87,27 @@ export async function handleAudioSpeech(
   // wav/pcm can be streamed (first bytes before the whole sentence); `stream: false` turns it off.
   const stream = (format === 'wav' || format === 'pcm') && body.stream !== false;
 
+  const bypass = /no-store/i.test(String(req.headers['cache-control'] ?? ''));
+  const cache = speechCache?.cache;
+  const key = speechCache && ttsCacheKey(speechCache.scope, model, targets.map(t => `${t.providerId}:${t.model ?? ''}:${t.voice ?? ''}`).join(','), {
+    input: normalizeText(body.input), voice: body.voice, fallback_voice: body.fallback_voice, format, stream, speed: body.speed, ...extra,
+    ref_audio: typeof extra.ref_audio === 'string' ? createHash('sha256').update(extra.ref_audio).digest('hex') : undefined,
+  });
+  if (speechCache && bypass) speechCache.cache.note(speechCache.scope, 'bypass');
+  if (speechCache && key && !bypass) {
+    const started = Date.now();
+    const hit = await speechCache.cache.get(key);
+    if (hit) {
+      speechCache.cache.note(speechCache.scope, 'hit', hit.synthMs);
+      emitGatewayEvent('route.served', { durMs: Date.now() - started, attrs: { stage: 'tts', provider: 'cache', model, cached: true } });
+      return { status: 200, headers: { 'Content-Type': hit.contentType, 'X-Gateway-Provider': hit.provider, 'X-Gateway-Cache': 'hit' }, body: hit.audio };
+    }
+    speechCache.cache.note(speechCache.scope, 'miss');
+  }
+  const cacheHeader: Record<string, string> = speechCache ? { 'X-Gateway-Cache': bypass ? 'bypass' : 'miss' } : {};
+
   try {
+    const synthStarted = Date.now();
     const { result, headers } = await routeRequest(
       targets,
       (t, signal) => t.provider.synthesize({
@@ -89,12 +128,19 @@ export async function handleAudioSpeech(
       { stage: 'tts', signal: req.signal, timeoutMs: 15_000, budgetMs: stageBudgetMs('tts'), hedgeCapMs: hedgeCapOf(req.headers), retriesPerProvider: 1, cooldownTracker: ttsCooldownTracker, breakers: circuitBreakers, notMounted: unavailable?.[model] },
     );
 
+    const served = headers['X-Gateway-Provider'] ?? '';
+    const degraded = Boolean(speechCache?.gpuOnly) && targets.some(t => t.providerId.startsWith('deployment:')) && !served.startsWith('deployment:');
+    const store = cache && key && !bypass && !degraded
+      ? (audio: Buffer) => { cache.put(key, { audio, contentType: result.contentType, provider: served, synthMs: Date.now() - synthStarted }); }
+      : null;
     if (result.stream) {
-      return { status: 200, headers: { 'Content-Type': result.contentType, ...headers }, body: null, stream: result.stream };
+      const stream = store ? capture(result.stream, TTS_CACHE_DEFAULTS.maxEntryBytes, store) : result.stream;
+      return { status: 200, headers: { 'Content-Type': result.contentType, ...headers, ...cacheHeader }, body: null, stream };
     }
+    store?.(result.audio);
     return {
       status: 200,
-      headers: { 'Content-Type': result.contentType, ...headers },
+      headers: { 'Content-Type': result.contentType, ...headers, ...cacheHeader },
       body: result.audio,
     };
   } catch (err) {

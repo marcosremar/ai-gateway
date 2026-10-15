@@ -297,7 +297,7 @@ export class DeploymentSTTProvider extends DeploymentProviderBase implements STT
   }
 }
 
-/** A voice of the replica's own catalog (`GET /refs/voices.json`, the parle Qwen3-TTS Base image). */
+/** A voice of the replica's own catalog (`VOICE_CATALOG_SOURCES`). */
 export interface ReplicaVoice { id: string; lang?: string; audio: string; text: string }
 interface ReplicaCatalog { model?: string; format?: string; voices: ReplicaVoice[] }
 
@@ -321,6 +321,11 @@ export function isBaseTtsModel(model: string): boolean {
   return /(^|[-_/])base($|[-_.])/i.test(model);
 }
 
+/** Kokoro on the speech-stack image speaks its own stock voices (`pf_dora`, …): never a clone from the catalog. */
+export function isKokoroModel(model: string): boolean {
+  return /kokoro/i.test(model);
+}
+
 export function catalogOf(raw: unknown): ReplicaCatalog | null {
   const input = raw as { model?: unknown; format?: unknown; voices?: unknown } | null;
   if (!input || !Array.isArray(input.voices)) return null;
@@ -328,6 +333,27 @@ export function catalogOf(raw: unknown): ReplicaCatalog | null {
     !!v && typeof v.id === 'string' && typeof v.audio === 'string' && typeof v.text === 'string');
   return { model: typeof input.model === 'string' ? input.model : undefined, format: typeof input.format === 'string' ? input.format : undefined, voices };
 }
+
+/**
+ * The speech-stack image (`docker/speech-stack`) has no `/refs/voices.json`: it lists its cast at `GET /v1/voices`
+ * (id, text, lang; no audio) and serves each reference at `/refs/<id>.wav` on its own server, the URL its TTS engine
+ * fetches in the container (`load_voices` in server.py).
+ */
+export const SPEECH_STACK_REFS = 'http://127.0.0.1:8000/refs';
+
+/** A list without one voice that has its reference text is no cloning catalog (a server's own speaker names, say). */
+export function speechStackCatalogOf(raw: unknown): ReplicaCatalog | null {
+  const voices = (raw as { voices?: unknown } | null)?.voices;
+  if (!Array.isArray(voices)) return null;
+  const catalog = catalogOf({
+    voices: voices.map(v => (v && typeof v === 'object' && typeof (v as { id?: unknown }).id === 'string'
+      ? { ...v, audio: `${SPEECH_STACK_REFS}/${(v as { id: string }).id}.wav` } : v)),
+  });
+  return catalog?.voices.length ? catalog : null;
+}
+
+/** Where a replica's voice catalog is read, in order: the parle Qwen3-TTS image's file, then the speech stack's list. */
+export const VOICE_CATALOG_SOURCES = [['/refs/voices.json', catalogOf], ['/v1/voices', speechStackCatalogOf]] as const;
 
 /**
  * TTS on a self-hosted replica.
@@ -366,14 +392,17 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     if (this.catalog && Date.now() - this.catalog.at < CATALOG_TTL_MS) return this.catalog.value;
     if (Date.now() < this.noCatalogUntil) return null;
     let value: ReplicaCatalog | null = null;
-    try {
-      const res = await this.call('/refs/voices.json', { method: 'GET' }, signal);
-      // A body left unread would hold the replica's lease until its safety timeout (leasedBody): read or cancel it.
-      if ((res.headers.get('content-type') ?? '').includes('json')) value = catalogOf(await res.json().catch(() => null));
-      else await res.body?.cancel().catch(() => {});
-    } catch (err) {
-      // The replica answered an HTTP error for the catalog (callReplica code 'error'): treated as "no catalog" below.
-      if (!(err instanceof DeploymentCallError) || err.gatewayCode !== 'error') throw err;
+    for (const [path, parse] of VOICE_CATALOG_SOURCES) {
+      try {
+        const res = await this.call(path, { method: 'GET' }, signal);
+        // A body left unread would hold the replica's lease until its safety timeout (leasedBody): read or cancel it.
+        if ((res.headers.get('content-type') ?? '').includes('json')) value = parse(await res.json().catch(() => null));
+        else await res.body?.cancel().catch(() => {});
+      } catch (err) {
+        // The replica answered an HTTP error for the catalog (callReplica code 'error'): treated as "no catalog" below.
+        if (!(err instanceof DeploymentCallError) || err.gatewayCode !== 'error') throw err;
+      }
+      if (value) break;
     }
     if (value) {
       this.catalog = { at: Date.now(), value };
@@ -395,7 +424,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
       ...(request.instructions ? { instructions: request.instructions } : {}),
     };
-    if (extra.ref_audio === undefined && request.voice) {
+    if (extra.ref_audio === undefined && request.voice && !isKokoroModel(request.model)) {
       const catalog = await this.voiceCatalog(request.signal);
       if (!catalog && this.isCloningModel(request.model)) {
         // A Base server must never get `voice` without `ref_audio` (its engine dies on it): no catalog → fall back.

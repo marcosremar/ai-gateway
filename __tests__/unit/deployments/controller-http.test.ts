@@ -26,10 +26,10 @@ const AS_SITE = { 'x-app': 'site-a' };
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; relayIdleMs?: number; maxWaitSeconds?: number; probe?: { check: (machine: unknown, spec: unknown, token: string) => Promise<unknown> } } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; relayIdleMs?: number; maxWaitSeconds?: number } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
-    backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: opts.probe ?? new HttpReplicaProbe(1000),
+    backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
     namespace: 'test', reconcileMs: 50, maxTotalReplicas: opts.maxTotal ?? 6,
     ...(opts.maxWaitSeconds ? { maxColdStartWaitSeconds: opts.maxWaitSeconds } : {}),
   });
@@ -233,11 +233,13 @@ describe('deployments API', () => {
   it('relays a websocket upgrade through invoke with the lease token (CDP-style raw frames)', async () => {
     await call(h, 'PUT', '/v1/deployments/wsdemo', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
     // The fake replica "nginx" gate: answer upgrades only with the lease token, then send one unmasked frame.
+    let replicaSawGatewayKey: unknown;
     const originalCreate = h.cloud.createReplica.bind(h.cloud);
     h.cloud.createReplica = async (input) => {
       const machine = await originalCreate(input);
       const fake = h.cloud.machines.get(machine.id)!;
       fake.server.on('upgrade', (req, socket) => {
+        replicaSawGatewayKey = req.headers.authorization;
         if (req.headers['x-aigw-token'] !== fake.token) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
         const accept = createHash('sha1')
           .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
@@ -256,70 +258,20 @@ describe('deployments API', () => {
       client.on('error', (err) => { clearTimeout(timer); reject(err as Error); });
     });
     expect(received).toBe('hi');
+    expect(replicaSawGatewayKey).toBeUndefined();
     client.close(1000, 'bye');
     await new Promise<void>((r) => client.once('close', r));
-    // A key that is not admin and not the app's is refused before the replica is touched.
-    const refused = await new Promise<number>((resolve, reject) => {
-      const other = new WebSocket(wsUrl, { headers: { authorization: `Bearer nope-key-0123456789` } });
+    // An unknown key is refused by the proxy's key check, another app's deployment by the scope check: neither
+    // touches the replica.
+    const refusal = (url: string, key: string) => new Promise<number>((resolve, reject) => {
+      const other = new WebSocket(url, { headers: { authorization: `Bearer ${key}` } });
       other.on('unexpected-response', (_req, res) => { resolve(res.statusCode ?? 0); other.terminate(); });
       other.on('error', (err) => reject(err as Error));
       setTimeout(() => reject(new Error('timeout waiting for the refusal')), 5000);
     });
-    expect(refused).toBe(403);
-  });
-
-  it('seats: /c/<n>/ routes to the seat on the same host, out-of-range is refused, and seats is validated', async () => {
-    const put = await call(h, 'PUT', '/v1/deployments/seated', { profile: 'cpu-echo', seats: 2 }, ADMIN, AS_SITE);
-    expect(put.status).toBe(201);
-    const hit = await call(h, 'GET', '/v1/deployments/seated/invoke/c/1/x', undefined, SITE);
-    expect(hit.status).toBe(200);
-    expect(((await hit.json()) as { url: string }).url).toBe('/c/1/x');
-    const root = await call(h, 'GET', '/v1/deployments/seated/invoke/x', undefined, SITE);
-    expect(((await root.json()) as { url: string }).url).toBe('/x');
-    expect((await call(h, 'GET', '/v1/deployments/seated/invoke/c/9/x', undefined, SITE)).status).toBe(400);
-    expect((await call(h, 'PUT', '/v1/deployments/badseats', { profile: 'cpu-echo', seats: 0 })).status).toBe(400);
-    expect((await call(h, 'PUT', '/v1/deployments/badseats2', { profile: 'cpu-echo', seats: 99 })).status).toBe(400);
-  });
-
-  it('cdp bootstrap: hands the direct replica URL + lease token with a TTL; keepalive renews, foreign keys and stale sessions are refused', async () => {
-    await call(h, 'PUT', '/v1/deployments/cdptest', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
-    const denied = await call(h, 'GET', '/v1/deployments/cdptest/cdp', undefined, 'nope-key-0123456789');
-    expect(denied.status).toBe(401); // an invalid Bearer is refused by the proxy's key check
-    const res = await call(h, 'GET', '/v1/deployments/cdptest/cdp', undefined, SITE);
-    expect(res.status).toBe(200);
-    const body = await res.json() as { sessionId: string; base: string; token: string; expiresInSeconds: number };
-    expect(body.sessionId).toBeTruthy();
-    expect(body.base).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-    expect(body.token).toBeTruthy();
-    expect(body.expiresInSeconds).toBeGreaterThanOrEqual(60);
-    const alive = await call(h, 'POST', '/v1/deployments/cdptest/cdp/keepalive', { sessionId: body.sessionId }, SITE);
-    expect(alive.status).toBe(200);
-    expect((await alive.json()) as { expiresInSeconds: number }).toMatchObject({ expiresInSeconds: expect.any(Number) });
-    expect((await call(h, 'POST', '/v1/deployments/cdptest/cdp/keepalive', { sessionId: 'nope' }, SITE)).status).toBe(404);
-    expect((await call(h, 'POST', '/v1/deployments/cdptest/cdp/keepalive', { sessionId: body.sessionId }, 'nope-key-0123456789')).status).toBe(401);
-  });
-
-  it('cdp bootstrap on a TLS-fronted replica (Vast): wss base + the replica CA for the direct connection', async () => {
-    await close(h);
-    await h.cloud.closeAll();
-    // A TLS-fronted machine against the plain-HTTP fake server: the health probe must not fetch (it would never
-    // complete a TLS handshake), so a stub marks the replica up and the machine stays ready.
-    const probe = { check: async () => 'ready' as const };
-    h = await harness({ probe } as never);
-    const originalCreate = h.cloud.createReplica.bind(h.cloud);
-    h.cloud.createReplica = async (input) => {
-      const machine = await originalCreate(input);
-      const stored = h.cloud.machines.get(machine.id);
-      if (stored) stored.machine.tls = true; // listReplicas spreads the stored machine: set it there
-      return machine;
-    };
-    await call(h, 'PUT', '/v1/deployments/cdptls', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
-    const res = await call(h, 'GET', '/v1/deployments/cdptls/cdp', undefined, SITE);
-    expect(res.status).toBe(200);
-    const body = await res.json() as { base: string; wsBase: string; tls?: { ca: string } };
-    expect(body.base).toMatch(/^https:\/\/127\.0\.0\.1:\d+$/);
-    expect(body.wsBase).toMatch(/^wss:\/\/127\.0\.0\.1:\d+$/);
-    expect(body.tls?.ca).toMatch(/-----BEGIN CERTIFICATE-----/);
+    expect(await refusal(wsUrl, 'nope-key-0123456789')).toBe(401);
+    await call(h, 'PUT', '/v1/deployments/adminonly', { profile: 'cpu-echo' });
+    expect(await refusal(wsUrl.replace('/wsdemo/', '/adminonly/'), SITE)).toBe(403);
   });
 
   it('relay idle: a silent relayed socket is cut and the machine lease is released (no 15-min nginx wait)', async () => {

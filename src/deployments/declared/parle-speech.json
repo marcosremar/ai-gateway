@@ -1,37 +1,59 @@
 {
   "name": "parle-speech",
   "app": "parle",
-  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS in one container (docker/speech-stack) with the realtime edge, on one Scaleway L40S (fr-par-2, then pl-waw-2), then an H100 80 GB (fr-par-2, then pl-waw-2), then one RTX 5090 on Vast from the public copy of the image; no L4 (its quota belongs to the TTS); warm and reserved for the Mon-Thu class (17:30-20:30 Paris)",
+  "description": "parle: Whisper + Qwen LLM + Qwen3-TTS (cast's cloned voices) in one container (speech-stack, public ghcr copy) with the realtime edge. Vast, EU hosts only. One GPU per app, an RTX 3090 at most €0.30/h, nothing pricier behind it (owner, 14/10/2026): the cloud fallback answers what it cannot serve. One warm Mon-Thu 16:40-20:30 Paris (a new host boots in ~16-20 min; class at 17:40). envByMachineType keeps the 4090, L40S and 5090 sizes: a faster card is a change of candidates",
   "profile": "speech-stack",
   "image": {
-    "env": "SPEECH_IMAGE",
-    "repository": "rg.fr-par.scw.cloud/aigw/speech-stack",
-    "default": "rg.fr-par.scw.cloud/aigw/speech-stack:20261011-0200"
+    "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
   },
   "spec": {
-    "placements": [
-      { "zone": "pl-waw-2" },
-      { "zone": "fr-par-2", "machineType": "H100-1-80G", "maxEurPerHour": 3 },
-      { "zone": "pl-waw-2", "machineType": "H100-1-80G", "maxEurPerHour": 3 },
-      { "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85, "maxReplicas": 1, "image": "ghcr.io/marcosremar/speech-stack:20261011-0200" }
+    "provider": "vast",
+    "machineType": "RTX 3090",
+    "maxEurPerHour": 0.3,
+    "placements": [],
+    "candidates": [
+      { "provider": "vast", "machineType": "RTX 3090", "maxEurPerHour": 0.3 }
     ],
+    "euOnly": true,
+    "minCuda": 13,
+    "maxRttExcessMs": 20,
+    "idleAction": "delete",
+    "maxReplicas": 1,
     "entrypoint": "bash",
     "args": ["/opt/s2s/start.sh"],
     "coldStartWaitSeconds": 240,
-    "scaling": { "mode": "fast", "budget": { "eurPerMonth": 300 } },
+    "env": {},
+    "scaling": { "mode": "fast", "budget": { "eurPerMonth": 450 } },
     "warmSchedule": [
-      { "days": [1, 2, 3, 4], "start": "17:30", "end": "20:30", "timeZone": "Europe/Paris", "minReplicas": 1 }
+      { "days": [1, 2, 3, 4], "start": "16:40", "end": "20:30", "timeZone": "Europe/Paris", "minReplicas": 1 }
     ],
-    "reserveQuota": {
-      "quota": 2,
-      "windows": [{ "days": [1, 2, 3, 4], "start": "17:30", "end": "20:30", "timeZone": "Europe/Paris", "minReplicas": 2 }]
+    "reserveQuota": null,
+    "maxEurPerHourByMachineType": {
+      "RTX 3090": 0.3, "RTX 4090": 0.85, "RTX 5090": 0.85, "L40S": 0.85, "H100 SXM": 2.5, "H100 PCIE": 2.5
     },
     "envByMachineType": {
-      "L4-1-24G": { "RT_MAX_SESSIONS": "2" },
-      "L40S-1-48G": { "RT_MAX_SESSIONS": "4" },
-      "H100-1-80G": { "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "12000", "RT_MAX_SESSIONS": "4", "LLM_SLOT_CTX": "2048" },
+      "RTX 3090": {
+        "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400", "RT_MAX_SESSIONS": "2",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "RTX 4090": {
+        "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400", "RT_MAX_SESSIONS": "2",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "L40S": {
+        "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "12000", "RT_MAX_SESSIONS": "4", "LLM_SLOT_CTX": "4096",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
       "RTX 5090": {
         "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "9600", "RT_MAX_SESSIONS": "4",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "H100 SXM": {
+        "STT_BATCH": "16", "LLM_PARALLEL": "32", "LLM_SLOT_CTX": "4096", "TTS_STAGE0_MB": "20000", "RT_MAX_SESSIONS": "8",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "H100 PCIE": {
+        "STT_BATCH": "16", "LLM_PARALLEL": "32", "LLM_SLOT_CTX": "4096", "TTS_STAGE0_MB": "20000", "RT_MAX_SESSIONS": "8",
         "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       }
     },

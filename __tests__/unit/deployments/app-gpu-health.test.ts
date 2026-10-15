@@ -30,7 +30,12 @@ function replica(broken: Set<string>) {
     const path = new URL(url).pathname;
     calls.push({ path, body: typeof init.body === 'string' ? JSON.parse(init.body) : init.body });
     const stage = path.includes('transcriptions') ? 'stt' : path.includes('chat') ? 'llm' : 'tts';
-    if (path === '/refs/voices.json') return broken.has('catalog') ? new Response('not found', { status: 404 }) : Response.json(CATALOG);
+    if (path === '/refs/voices.json') {
+      return broken.has('catalog') || broken.has('speech-stack') ? new Response('not found', { status: 404 }) : Response.json(CATALOG);
+    }
+    if (path === '/v1/voices') {
+      return broken.has('speech-stack') ? Response.json({ voices: [{ id: 'lia', lang: 'pt', text: 'Oi.' }] }) : new Response('not found', { status: 404 });
+    }
     if (broken.has(stage)) return new Response('engine dead', { status: 500 });
     if (stage === 'stt') return Response.json({ text: '' });
     if (stage === 'llm') return Response.json({ choices: [{ message: { content: 'o' } }] });
@@ -76,8 +81,18 @@ describe('app profile', () => {
     const apps = new AppRegistry(new MemoryAppStore());
     await apps.init();
     await expect(apps.putProfile('parle', PROFILE, { ownsDeployment: d => d !== 'speech' })).rejects.toMatchObject({ status: 403 });
-    expect(await apps.putProfile('parle', PROFILE, { ownsDeployment: () => true })).toEqual(PROFILE);
-    expect(apps.get('parle')!.profile).toEqual(PROFILE);
+    const stored = { ...PROFILE, name: null, description: null };
+    expect(await apps.putProfile('parle', PROFILE, { ownsDeployment: () => true })).toEqual(stored);
+    expect(apps.get('parle')!.profile).toEqual(stored);
+  });
+
+  it('keeps the app name and description when a profile update leaves them out', async () => {
+    const apps = new AppRegistry(new MemoryAppStore());
+    await apps.init();
+    await apps.putProfile('parle', { ...PROFILE, name: ' Parle ', description: 'Jogo de português' });
+    expect(await apps.putProfile('parle', PROFILE)).toMatchObject({ name: 'Parle', description: 'Jogo de português' });
+    expect(await apps.putProfile('parle', { ...PROFILE, description: null })).toMatchObject({ name: 'Parle', description: null });
+    await expect(apps.putProfile('parle', { ...PROFILE, name: 'x'.repeat(61) })).rejects.toMatchObject({ status: 400 });
   });
 
   it('a deployment serves the stages its app routes send it, one-GPU mode included', () => {
@@ -101,6 +116,14 @@ describe('mode', () => {
 });
 
 describe('GPU probe', () => {
+  it('on the speech-stack image (no /refs/voices.json) the TTS probe clones from its /v1/voices list', async () => {
+    const { health, calls } = await setup({ broken: new Set(['speech-stack']) });
+    await health.probe.tick();
+    expect(calls.map(c => c.path)).toEqual(['/v1/audio/transcriptions', '/v1/chat/completions', '/refs/voices.json', '/v1/voices', '/v1/audio/speech']);
+    expect(calls[4]!.body).toMatchObject({ task_type: 'Base', ref_audio: 'http://127.0.0.1:8000/refs/lia.wav', ref_text: 'Oi.', language: 'Portuguese' });
+    expect(health.status('parle')!.mode).toBe('gpu');
+  });
+
   it('probes every stage of a ready replica (cloned voice from its catalog), then not again before the interval', async () => {
     const { health, calls } = await setup();
     expect(health.status('parle')!.mode).toBe('degraded');
@@ -239,7 +262,7 @@ describe('over HTTP', () => {
     const byAdmin = await call('PUT', '/v1/apps/parle/profile', ADMIN, { requiresGpu: true, gpuDeployments: ['speech', 'later'] });
     expect(byAdmin.status).toBe(200);
     expect(await byAdmin.json()).toMatchObject({ profile: { gpuDeployments: ['speech', 'later'] }, warnings: [expect.stringMatching(/no warmSchedule/), expect.stringMatching(/'later' is not registered/)] });
-    expect(await (await call('GET', '/v1/apps/parle/profile', PARLE)).json()).toEqual({ app: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech', 'later'] } });
+    expect(await (await call('GET', '/v1/apps/parle/profile', PARLE)).json()).toEqual({ app: 'parle', profile: { requiresGpu: true, gpuDeployments: ['speech', 'later'], name: null, description: null } });
     expect((await call('PUT', '/v1/apps/parle/profile', ADMIN, { requiresGpu: 'yes' })).status).toBe(400);
   });
 

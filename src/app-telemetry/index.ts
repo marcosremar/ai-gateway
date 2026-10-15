@@ -19,6 +19,7 @@ import { summarize } from './summary';
 import {
   APP_TELEMETRY_KINDS, APP_TELEMETRY_LIMITS, AppTelemetryError, parseBatch, type StoredAppEvent,
 } from './validate';
+import { VOICE_TURN_KEEP_MS, VOICE_TURNS_KEPT, voiceTurnOf, type VoiceTurn } from './voice-turn';
 
 export { AppTelemetryStore, dayOf } from './store';
 export { summarize, percentile, type AppTelemetrySummary } from './summary';
@@ -26,6 +27,10 @@ export {
   APP_TELEMETRY_KINDS, APP_TELEMETRY_LIMITS, APP_TELEMETRY_TEXT_KEY, AppTelemetryError, parseBatch, sanitizeFields,
   type AppTelemetryBatch, type AppTelemetryEvent, type AppTelemetryKind, type StoredAppEvent,
 } from './validate';
+export {
+  VOICE_TURN_ALERT, VOICE_TURN_CEILING_MS, VOICE_TURN_TARGET_MS, alarming, classSessions, turnStats, voiceTurnOf, voiceTurnProblem,
+  type ClassSession, type TurnStats, type VoiceTurn,
+} from './voice-turn';
 
 export const APP_TELEMETRY_PATHS = {
   events: '/v1/telemetry/app/events',
@@ -105,6 +110,11 @@ export function createAppTelemetry(opts: CreateAppTelemetryOptions) {
   const batchesPerMin = positive(env.APP_TELEMETRY_BATCHES_PER_MIN, 30);
   const windows = new Map<string, { since: number; count: number }>();
   const counters = { batches: 0, events: 0, rejected: 0, tooLarge: 0, throttled: 0 };
+  const turns: VoiceTurn[] = [];
+  const keepTurns = (rows: readonly StoredAppEvent[]) => {
+    for (const r of rows) if (r.kind === 'voice.turn') turns.push(voiceTurnOf(r));
+    if (turns.length > VOICE_TURNS_KEPT) turns.splice(0, turns.length - VOICE_TURNS_KEPT);
+  };
 
   const throttled = (installId: string): boolean => {
     const t = now();
@@ -144,6 +154,7 @@ export function createAppTelemetry(opts: CreateAppTelemetryOptions) {
         opts.log?.('app telemetry: append failed', { error: err instanceof Error ? err.message : String(err) });
         return send(res, 503, { error: 'Telemetry storage unavailable' }, { 'Retry-After': '60' });
       }
+      keepTurns(rows);
       counters.batches++;
       counters.events += rows.length;
       send(res, 200, { accepted: rows.length });
@@ -195,8 +206,10 @@ export function createAppTelemetry(opts: CreateAppTelemetryOptions) {
     /** Behind the proxy's key auth (customRoutes); the reads check for an admin key themselves. */
     routes: [ingest, summary, list] as Route[],
     sweep,
+    voiceTurns: (): VoiceTurn[] => turns.filter(t => t.at >= now() - VOICE_TURN_KEEP_MS),
     start: async (): Promise<void> => {
       await sweep().catch(() => 0);
+      keepTurns(await store.read(now() - VOICE_TURN_KEEP_MS, now()).catch(() => []));
       if (interval > 0 && !timer) { timer = setInterval(() => { void sweep().catch(() => 0); }, interval); timer.unref?.(); }
     },
     stop: (): void => { if (timer) clearInterval(timer); timer = null; },

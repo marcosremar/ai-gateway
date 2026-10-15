@@ -12,7 +12,7 @@
 import { probeConnectRtt, probeRtt } from '../gateway/providers/gpu/rtt-probe';
 import { vastReplicaInit } from './cloud-init';
 import { MIN_HOST_LEFT_MS, vastEndsAt } from './expiry';
-import { countryDistanceKm } from './geo';
+import { countryDistanceKm, EU_COUNTRIES } from './geo';
 import { HostReputation, type HostRecord, type HostStore } from './host-reputation';
 import { countryOf, DEFAULT_NEAR, effectivePrice, rankOffers, type VastOffer } from './placements';
 import { vastPortCount, vastUdpRange } from './realtime-ports';
@@ -42,7 +42,7 @@ export const TOO_FAR_HOST_MS = 24 * 3_600_000;
 export const KNOWN_RTT_MS = 24 * 3_600_000;
 export const KNOWN_RTT_MAX_HOSTS = 200;
 export const UDP_BLOCKED_HOST_MS = 24 * 3_600_000;
-const FAILURE_AVOID_MS = new Map([['too-far', TOO_FAR_HOST_MS], ['boot-timeout', BAD_HOST_MS], ['udp-blocked', 0]]);
+const FAILURE_AVOID_MS = new Map([['too-far', TOO_FAR_HOST_MS], ['boot-timeout', BAD_HOST_MS], ['boot-stuck', BAD_HOST_MS], ['udp-blocked', 0]]);
 /** RTT samples per measurement (median) and per-sample timeout: one gate check stays within a few seconds. */
 export const RTT_SAMPLES = 5;
 export const RTT_SAMPLE_TIMEOUT_MS = 2_000;
@@ -78,6 +78,9 @@ export const LIST_STALE_MAX_MS = 90_000;
 /** Pause after a 429/5xx on the list when Vast gives no `retry_after`: doubles per consecutive failure, up to the max. */
 export const LIST_BACKOFF_MS = 15_000;
 export const LIST_BACKOFF_MAX_MS = 120_000;
+
+const LOG_POLLS = 20;
+const LOG_POLL_MS = 500;
 
 export const vastLabelPrefix = (namespace: string) => `aigw:${namespace}:`;
 
@@ -221,7 +224,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
       rented: { eq: false },
       verified: { eq: true },
       num_gpus: { eq: 1 },
-      gpu_name: { in: [spec.machineType] },
+      ...(spec.machineType === 'any' ? {} : { gpu_name: { in: [spec.machineType] } }),
+      ...(spec.vm ? { vms_enabled: { eq: true } } : {}),
       disk_space: { gte: spec.volumeGb ?? DEFAULT_DISK_GB },
       cuda_max_good: { gte: cudaFloorOf(spec) },
       reliability2: { gte: reliability },
@@ -231,7 +235,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       ...(spec.minCpuCores ? { cpu_cores_effective: { gte: spec.minCpuCores } } : {}),
       ...(spec.minRamGb ? { cpu_ram: { gte: spec.minRamGb * 1024 } } : {}),
       order: [['dph_total', 'asc']],
-      limit: 100,
+      limit: spec.euOnly ? 1000 : 100,
     };
   }
 
@@ -257,7 +261,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
         && (o.cuda_max_good === undefined || o.cuda_max_good >= cuda) && this.lastsLongEnough(o, now)
         && (o.direct_port_count === undefined || o.direct_port_count >= vastPortCount(spec))
         && (!spec.minCpuCores || (o.cpu_cores_effective ?? 0) >= spec.minCpuCores)
-        && (!spec.minRamGb || (o.cpu_ram ?? 0) >= spec.minRamGb * 1024));
+        && (!spec.minRamGb || (o.cpu_ram ?? 0) >= spec.minRamGb * 1024)
+        && (!spec.euOnly || EU_COUNTRIES.has(countryOf(o.geolocation) ?? '')));
       const reasons = new Map(valid.map(o => [o, this.skipReason(this.hosts.get(o.machine_id), spec, now)]));
       skipped = valid.filter(o => reasons.get(o)).map(o => ({
         offerId: o.id, machineId: o.machine_id ?? null, location: o.geolocation ?? null, usdPerHour: o.dph_total, reason: reasons.get(o)!,
@@ -284,7 +289,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
     }
     const { offers, far } = await this.withoutFarOffers(spec, ranked);
     if (!offers.length) throw new Error(`out_of_stock: every vast offer tried is too far before renting (${far.join('; ')})`);
-    const init = vastReplicaInit(spec, input.replicaToken);
+    const init = vastReplicaInit(spec, input.replicaToken, { bootReport: input.bootReport });
     const env = { ...(spec.envByMachineType?.[spec.machineType] ?? {}), ...spec.env };
     const [udpLo, udpHi] = vastUdpRange(spec) ?? [1, 0];
     const udp = Object.fromEntries(Array.from({ length: udpHi - udpLo + 1 }, (_, i) => [`-p ${udpLo + i}:${udpLo + i}/udp`, '1']));
@@ -392,6 +397,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
         pricePerHour: typeof i.dph_total === 'number' ? Math.round((i.dph_total / EUR_TO_USD) * 1000) / 1000 : null,
         expiresAt: vastEndsAt(i.end_date, i.duration, this.now()),
         ...(vastBootError(i) ? { bootError: vastBootError(i)! } : {}),
+        ...(i.actual_status ? { providerStatus: i.actual_status } : {}),
+        ...(i.status_msg?.trim() ? { providerMessage: i.status_msg.trim().slice(0, 300) } : {}),
       };
     });
   }
@@ -415,6 +422,17 @@ export class VastDeploymentBackend implements DeploymentBackend {
     }
     this.hostOf.delete(machine.id);
     if (this.listCache) this.listCache.machines = this.listCache.machines.filter(m => m.id !== machine.id); // not listed again as alive
+  }
+
+  async containerLogs(machine: ReplicaMachine, tail: number): Promise<string> {
+    const { result_url: url } = await this.call<{ result_url?: unknown }>('PUT', `/instances/request_logs/${machine.id}/`, { tail: String(tail) });
+    if (typeof url !== 'string' || !url.startsWith('https://')) throw new Error('vast request_logs: no result_url');
+    for (let i = 0; i < LOG_POLLS; i++) {
+      if (i) await new Promise(r => setTimeout(r, LOG_POLL_MS));
+      const res = await this.fetchImpl(url, { signal: AbortSignal.timeout(5_000) }).catch(() => null);
+      if (res?.ok) return res.text();
+    }
+    throw new Error(`vast logs not uploaded after ${LOG_POLLS} tries`);
   }
 
   /** RTT from the gateway to the replica's nginx front (`ip` = public address:mapped port of :80). */

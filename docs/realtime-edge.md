@@ -390,10 +390,12 @@ when the model is not ready), `edge.token.reject` (reason), `edge.config.refused
 (stage, status), `edge.worker.restart`, `edge.load` (every 30 s per process). Never audio, transcript, LLM text or
 tokens — lengths, codes and durations only (checked by the harness on every batch).
 
-## TURN — the `coturn` profile
+## TURN — coturn (the built-in profile was removed on 14/10/2026)
 
-`PUT /v1/deployments/turn {"profile": "coturn", "env": {"REALTIME_TURN_SECRET": "<same as the gateway's>"}}`: coturn
-(`coturn/coturn:4.6.3`, host network) on a DEV1-S with a reserved IP (`exposure`): 3478 UDP+TCP, 443 TCP, relay range
+The `coturn` profile ran on a Scaleway DEV1-S with a reserved IP and went away with Scaleway; production sets no
+`REALTIME_TURN_*`, so no TURN server is offered today. To offer one, run coturn anywhere with a public IP (reference
+settings below) and give the gateway `REALTIME_TURN_URLS` + the same `REALTIME_TURN_SECRET`. The profile was coturn
+(`coturn/coturn:4.6.3`, host network): 3478 UDP+TCP, 443 TCP, relay range
 49152–49351 UDP (one firewall rule), `use-auth-secret` (credentials = TURN REST: `"<exp>:<sid>"`,
 base64(HMAC-SHA1(secret, username)), minted by the gateway per session; the edge checks the gateway's TURN vector),
 peers on private ranges denied, Prometheus on 9641 as the gateway's health probe. **443 is plain TURN over TCP**
@@ -420,7 +422,7 @@ instead of the redirect. `REALTIME_TURN_URLS` example:
   token). 62 checks.
 - `bun x vitest run __tests__/unit/deployments/realtime-edge.test.ts __tests__/unit/stt-filter/edge-parity.test.ts` —
   cloud-init with and without `realtime` (+ `bash -n`, `nginx -t`), spec validation, firewall groups (fake Scaleway),
-  coturn profile, filter parity.
+  filter parity.
 - Bench: `tests/run.sh bench webrtc 1,4,8,16` / `bench ws …`.
 
 ## Deviations from the shared contract (to settle with the gateway side)

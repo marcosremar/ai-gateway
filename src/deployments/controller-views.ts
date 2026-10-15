@@ -8,9 +8,14 @@ import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, round3 } from './control
 import { ReconcileLoop } from './controller-reconcile';
 import { vastUnfit } from './placement-walk';
 import { DEFAULT_NEAR, placementsOf } from './placements';
-import { planReplicas, replicaPhase } from './planner';
+import { bootTimeoutMinutesOn, pinnedIdleOver, planReplicas, replicaPhase } from './planner';
+import { bootStates, phaseDurations, type BootLogLine, type PhaseMark } from './boot-track';
+import { PAGE_LOG_WAIT_MS, within, type ContainerLogView } from './container-logs';
+import { usesVast } from './spec';
+import { gpuTypeChoices, withGpuType } from './gpu-type';
+import type { Runtime } from './controller-state';
 import { DEFAULT_MAX_RTT_EXCESS_MS, DEFAULT_MAX_RTT_MS, gateDecision } from './rtt-gate';
-import type { DeploymentSpec, DeploymentView, OffersPreview } from './types';
+import type { DeploymentSpec, DeploymentView, GpuTypeView, OffersPreview } from './types';
 import { distinctSessions, externalLoadOf, refusedSessions } from '../realtime/external-load';
 
 export abstract class ControllerViews extends ReconcileLoop {
@@ -23,8 +28,10 @@ export abstract class ControllerViews extends ReconcileLoop {
   }
 
   /** The stored spec, secrets included — for in-process callers only (declared reconcile); never sent over HTTP. */
-  async offers(name: string): Promise<OffersPreview | null> {
-    const spec = this.deployments.get(name)?.record.spec;
+  async offers(name: string, machineType?: string, maxEurPerHour?: number): Promise<OffersPreview | null> {
+    const rt = this.deployments.get(name);
+    const typed = rt && withGpuType(rt.record.spec, machineType ?? rt.record.gpuType?.machineType);
+    const spec = typed && maxEurPerHour ? { ...typed, maxEurPerHour, candidates: typed.candidates?.map(c => ({ ...c, maxEurPerHour })) } : typed;
     const backend = this.backends.vast;
     if (!spec || !backend?.previewOffers) return null;
     const vast = spec.provider === 'vast' ? spec : [...(spec.candidates ?? []), ...(spec.placements ?? [])].find(c => c.provider === 'vast');
@@ -128,6 +135,47 @@ export abstract class ControllerViews extends ReconcileLoop {
     };
   }
 
+  private gpuTypeView(rt: Runtime): GpuTypeView | null {
+    const choices = gpuTypeChoices(rt.record.spec);
+    if (choices.length < 2) return null;
+    const set = rt.record.gpuType;
+    return {
+      current: withGpuType(rt.record.spec, set?.machineType).machineType, default: choices[0]!.machineType, choices,
+      setBy: set?.by ?? null, setAt: set ? new Date(set.at).toISOString() : null,
+    };
+  }
+
+  bootLog(name: string): BootLogLine[] {
+    return this.deployments.has(name) ? this.boots.view(name).log : [];
+  }
+
+  async containerLog(name: string, waitMs = PAGE_LOG_WAIT_MS): Promise<ContainerLogView | null> {
+    const rt = this.deployments.get(name);
+    if (!rt) return null;
+    const cached = this.containerLogs.latest(name);
+    const readable = this.machines.filter(x => x.deployment === name && this.backends[this.providerOf(x)]?.containerLogs);
+    const m = readable.sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!m) return { reason: usesVast(rt.record.spec) && this.backends.vast?.containerLogs ? 'no-replica' : 'unsupported', pending: false, log: cached };
+    const log = await within(this.containerLogOf(m)!, waitMs);
+    return { reason: null, pending: !log, log: log ?? cached };
+  }
+
+  private bootView(rt: Runtime, now: number): DeploymentView['boot'] {
+    const { spec } = rt.record;
+    const tracked = this.boots.view(spec.name);
+    const timeout = bootTimeoutMinutesOn(spec, spec.provider);
+    const samples = Object.values(rt.record.measured ?? {}).flatMap(m => m.boot);
+    const withMs = <T extends { phases: PhaseMark[] }>(b: T, end: number) => ({ ...b, phases: phaseDurations(b.phases, end) });
+    return {
+      active: bootStates(tracked.active, tracked.past, now, timeout).map(b => withMs(b, now)),
+      past: tracked.past.map(b => withMs(b, b.endedAt)),
+      retryAt: rt.backoffUntil > now ? rt.backoffUntil : null,
+      expectedBootSeconds: samples.length ? [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)]! : null,
+      retries: rt.stuckRetry.attempts.map(a => ({ ...a, next: a.next && { ...a.next } })),
+      retriesExhausted: rt.stuckRetry.exhausted,
+    };
+  }
+
   protected view(name: string): DeploymentView | null {
     const rt = this.deployments.get(name);
     if (!rt) return null;
@@ -139,6 +187,7 @@ export abstract class ControllerViews extends ReconcileLoop {
       ip: m.ip,
       ...(m.tls ? { tls: true } : {}),
       providerState: m.state,
+      provider: this.providerOf(m),
       zone: m.zone,
       machineType: m.machineType,
       pricePerHour: m.pricePerHour,
@@ -193,6 +242,15 @@ export abstract class ControllerViews extends ReconcileLoop {
       sessions: distinctSessions(name, 60_000, now),
       hold: rt.record.hold && rt.record.hold.until > now
         ? { replicas: rt.record.hold.replicas, until: new Date(rt.record.hold.until).toISOString() } : null,
+      pinned: rt.record.spec.minReplicas > 0 ? {
+        idleMinutes: this.opts.pinnedIdleMaxMs ? Math.round(this.opts.pinnedIdleMaxMs / 60_000) : null,
+        parked: pinnedIdleOver({
+          spec: rt.record.spec, inflight: rt.inflight, waiting: rt.waiting, lastRequestAt: rt.record.lastRequestAt, now,
+          pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt,
+        }),
+      } : null,
+      gpuType: this.gpuTypeView(rt),
+      boot: this.bootView(rt, now),
       warnings: [
         ...(rt.record.spec.coldStartWaitSeconds > maxWait
           ? [`coldStartWaitSeconds ${rt.record.spec.coldStartWaitSeconds} is above this gateway's maximum wait of ${maxWait} s (DEPLOYMENTS_MAX_WAIT_SECONDS): a request waits ${maxWait} s, then gets 503 + Retry-After`]

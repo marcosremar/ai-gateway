@@ -67,11 +67,12 @@ describe('fallback probe: every cloud link of the alias chains is called for rea
     const results = await probe.check();
     expect(results.every(r => r.ok)).toBe(true);
     expect(calls).toEqual([
-      { stage: 'stt', model: 'openai/whisper-large-v3-turbo', bytes: probeWav().length },
-      { stage: 'chat', model: 'google/gemini-2.5-flash-lite', maxTokens: 16, extraBody: { reasoning: { enabled: false } } },
       { stage: 'tts', model: 'microsoft/mai-voice-2.1-flash', voice: 'en-US-Harper' },
       { stage: 'tts', model: 'microsoft/mai-voice-2.1-flash', voice: 'pt-BR-Antonio' },
+      { stage: 'stt', model: 'openai/whisper-large-v3-turbo', bytes: probeWav().length },
+      { stage: 'chat', model: 'google/gemini-2.5-flash-lite', maxTokens: 16, extraBody: { reasoning: { enabled: false } } },
     ]);
+    expect(results.map(r => [r.stage, r.content])).toEqual([['stt', null], ['chat', 'ok'], ['tts', 'mismatch'], ['tts', 'mismatch']]);
     expect(probe.snapshot()).toMatchObject({ intervalMinutes: 15, ok: 4, failing: [] });
     expect(probeWav().subarray(0, 4).toString()).toBe('RIFF');
   });
@@ -111,5 +112,62 @@ describe('fallback probe: every cloud link of the alias chains is called for rea
     probe.start();
     probe.stop();
     expect(called).toBe(0);
+  });
+});
+
+describe('fallback probe: the answer itself is checked, not only the HTTP status', () => {
+  const wav = (amplitude: number) => {
+    const pcm = probeWav();
+    for (let i = 44; i + 1 < pcm.length; i += 2) pcm.writeInt16LE(Math.round(Math.sin(i / 7) * amplitude), i);
+    return pcm;
+  };
+
+  function chain(opts: { tts: () => { audio: Buffer; contentType: string; stream?: ReadableStream<Uint8Array> }; heard?: (bytes: number) => string; said?: string }) {
+    const seen: number[] = [];
+    const stt = { providerId: 'openrouter', isConfigured: () => true, getModels: () => [],
+      async transcribe(req) { seen.push((req.audio as Buffer).length); return { text: opts.heard?.((req.audio as Buffer).length) ?? '' }; } } as STTProvider;
+    const chat = { providerId: 'openrouter', isConfigured: () => true, async chat(req) { return { content: opts.said ?? 'ok', model: req.model }; } } as LLMProvider;
+    const tts = { providerId: 'openrouter', isConfigured: () => true, getModels: () => [], getVoices: () => [],
+      async synthesize() { return opts.tts(); }, synthesizeStream: () => Promise.reject(new Error('unused')) } as TTSProvider;
+    const links = () => fallbackLinks({ stt: { s: [] }, chat: { c: [] }, tts: { t: [] } }, {
+      stt: { s: [{ providerId: 'openrouter', provider: stt, model: 'whisper' }] },
+      chatRoutes: { c: [{ providerId: 'openrouter', provider: chat, model: 'gemini' }] },
+      tts: { t: [{ providerId: 'openrouter', provider: tts, model: 'kokoro', voice: 'pm_alex' }] },
+    });
+    return { seen, links };
+  }
+
+  it('feeds the speech of a good TTS link to the STT links and expects «bom dia» back', async () => {
+    const speech = wav(4_000);
+    const { seen, links } = chain({ tts: () => ({ audio: speech, contentType: 'audio/wav' }), heard: () => ' Bom dia.' });
+    const results = await createFallbackProbe({ env: {}, links, onResults: () => {} }).check();
+    expect(seen).toEqual([speech.length]);
+    expect(results.map(r => [r.stage, r.ok, r.content])).toEqual([['stt', true, 'ok'], ['chat', true, 'ok'], ['tts', true, 'ok']]);
+    expect(results.some(r => 'audio' in r)).toBe(false);
+  });
+
+  it('flags silence, a short clip, a wrong transcript and a chat that ignores the instruction, without failing the link', async () => {
+    const silent = chain({ tts: () => ({ audio: wav(20), contentType: 'audio/wav' }), said: 'Sure! Here you go.' });
+    const r1 = await createFallbackProbe({ env: {}, links: silent.links, onResults: () => {} }).check();
+    expect(silent.seen).toEqual([probeWav().length]);
+    expect(r1.find(r => r.stage === 'tts')).toMatchObject({ ok: true, content: 'mismatch', contentNote: expect.stringMatching(/silêncio/) });
+    expect(r1.find(r => r.stage === 'chat')).toMatchObject({ ok: true, content: 'mismatch', contentNote: 'respondeu «Sure! Here you go.» em vez de «ok»' });
+    expect(r1.find(r => r.stage === 'stt')).toMatchObject({ ok: true, content: null });
+    const mp3 = chain({ tts: () => ({ audio: Buffer.alloc(4_000, 7), contentType: 'audio/mpeg' }), heard: () => 'Obrigado.' });
+    const r2 = await createFallbackProbe({ env: {}, links: mp3.links, onResults: () => {} }).check();
+    expect(r2.find(r => r.stage === 'stt')).toMatchObject({ ok: true, content: 'mismatch', contentNote: 'ouviu «Obrigado.» em vez de «bom dia»' });
+    const short = chain({ tts: () => ({ audio: Buffer.alloc(300, 7), contentType: 'audio/mpeg' }) });
+    const r3 = await createFallbackProbe({ env: {}, links: short.links, onResults: () => {} }).check();
+    expect(r3.find(r => r.stage === 'tts')!.contentNote).toMatch(/curto demais/);
+  });
+
+  it('reads a streamed answer to check it, and FALLBACK_PROBE_CONTENT=enforce turns a mismatch into a failure', async () => {
+    const body = wav(4_000);
+    const stream = () => new ReadableStream<Uint8Array>({ start(c) { c.enqueue(body.subarray(0, 1000)); c.enqueue(body.subarray(1000)); c.close(); } });
+    const { links } = chain({ tts: () => ({ audio: Buffer.alloc(0), contentType: 'audio/wav', stream: stream() }), heard: () => 'bom dia', said: 'nope' });
+    const results = await createFallbackProbe({ env: { FALLBACK_PROBE_CONTENT: 'enforce' }, links, onResults: () => {} }).check();
+    expect(results.find(r => r.stage === 'tts')).toMatchObject({ ok: true, content: 'ok' });
+    expect(results.find(r => r.stage === 'stt')).toMatchObject({ ok: true, content: 'ok' });
+    expect(results.find(r => r.stage === 'chat')).toMatchObject({ ok: false, code: 'content', error: 'respondeu «nope» em vez de «ok»' });
   });
 });

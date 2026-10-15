@@ -14,6 +14,7 @@
 
 import { randomBytes } from 'crypto';
 import { isDeepStrictEqual } from 'util';
+import { bootReportFor } from './boot-events';
 import { replicaCloudInit } from './cloud-init';
 import { DeploymentError, type Lease, type LeaseOutcome, type Runtime } from './controller-state';
 import { ControllerViews } from './controller-views';
@@ -24,14 +25,18 @@ import { externalInflightOn, noteSession } from '../realtime/external-load';
 import { noUseActive } from '../gateway/proxy/no-wake';
 import { BUILTIN_PROFILES } from './profiles';
 import { holdOf, splitHold } from './scaling-spec';
-import { buildSpec, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
+import { placementsOf } from './placements';
+import { gpuTypeChoices, withGpuType } from './gpu-type';
+import { buildSpec, isGpuMachineType, parsePartialSpec, NAME_RE, SpecError, USER_DATA_KEY_MAX_BYTES, usesScaleway } from './spec';
 import type { CreditIssue, DeploymentRecord, DeploymentSpec, DeploymentView, Profile, ReplicaMachine } from './types';
+import type { BootHistory } from './boot-track';
 
 /** Adaptive hedge: a request is hedged only once it is this much slower than its replica's recent p95. */
 export const HEDGE_P95_FACTOR = 1.2;
 export const STAGE_STRIKES = 3;
 export const STAGE_COOLDOWN_MS = 30_000;
 export const LOST_RETRY_AFTER_SECONDS = 30;
+export const GPU_SLOT_RETRY_SECONDS = 60;
 export const LOST_FAST_FAIL_MS = 15 * 60_000;
 
 export {
@@ -50,6 +55,14 @@ export class DeploymentController extends ControllerViews {
     for (const record of defaulted) record.spec = { ...record.spec, scaling: { mode: mode! } };
     if (defaulted.length) this.log('deployments: no scaling block, running under the default mode', { mode, deployments: defaulted.map(r => r.spec.name) });
     for (const record of deployments) this.deployments.set(record.spec.name, this.runtime(record));
+  }
+
+  bootHistory(): BootHistory {
+    return this.boots.history();
+  }
+
+  restoreBootHistory(h: Partial<BootHistory>): void {
+    this.boots.restore(h);
   }
 
   listProfiles(): Profile[] {
@@ -84,8 +97,12 @@ export class DeploymentController extends ControllerViews {
       throw new SpecError(`maxReplicas ${body.maxReplicas} is above this gateway's replica cap of ${cap} across all deployments (DEPLOYMENTS_MAX_REPLICAS)`);
     }
     const spec = buildSpec(name, body, { profiles: this.profiles, previous: existing?.record.spec });
+    const off = spec.paused ? undefined : [...placementsOf(spec), ...(spec.candidates ?? []).map(c => ({ provider: c.provider ?? spec.provider, machineType: c.machineType }))]
+      .find(p => this.backends[p.provider]?.gpuOff && isGpuMachineType(p.machineType));
+    if (off) throw new SpecError(`${this.backends[off.provider]!.gpuOff}: '${name}' asks for ${off.provider} ${off.machineType}; GPUs run on vast only (provider "vast")`);
     if (!spec.scaling && this.opts.defaultScalingMode) spec.scaling = { mode: this.opts.defaultScalingMode };
-    const initBytes = usesScaleway(spec) ? Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32))) : 0;
+    const bootReport = bootReportFor(this.opts.publicUrl ?? '', 'x'.repeat(24), 'x'.repeat(32));
+    const initBytes = usesScaleway(spec) ? Buffer.byteLength(replicaCloudInit(spec, 'x'.repeat(32), { bootReport })) : 0;
     if (initBytes > USER_DATA_KEY_MAX_BYTES) {
       throw new SpecError(`generated cloud-init is ${initBytes} bytes; Scaleway takes at most ${USER_DATA_KEY_MAX_BYTES} (shrink bootScript/env)`);
     }
@@ -191,6 +208,13 @@ export class DeploymentController extends ControllerViews {
     if (rt.creating || this.machines.some(m => m.deployment === rt.record.spec.name)) return;
     const block = this.reservationBlock(rt);
     if (block) throw new DeploymentError(409, block.reason, Math.max(1, Math.ceil((block.endsAt - this.now()) / 1000)), 'reserved');
+    this.refuseGpuSlot(rt);
+  }
+
+  private refuseGpuSlot(rt: Runtime): void {
+    if (rt.creating || this.machines.some(m => m.deployment === rt.record.spec.name)) return;
+    const slot = this.gpuSlotTaken(rt.record.spec.name);
+    if (slot) throw new DeploymentError(409, slot, GPU_SLOT_RETRY_SECONDS, 'reserved');
   }
 
   wake(name: string): DeploymentView {
@@ -216,6 +240,7 @@ export class DeploymentController extends ControllerViews {
     if (typeof untilMinutes !== 'number' || !Number.isFinite(untilMinutes) || untilMinutes <= 0 || untilMinutes > 12 * 60) {
       throw new SpecError('untilMinutes must be a number in (0, 720]');
     }
+    if (replicas > 0) this.refuseGpuSlot(rt);
     const now = this.now();
     rt.record = { ...rt.record, lastRequestAt: now, warm: { replicas, until: now + untilMinutes * 60_000 } };
     rt.reclaimedAt = null;
@@ -230,6 +255,22 @@ export class DeploymentController extends ControllerViews {
    * forget the last use, and the next tick scales to `minReplicas` — powering off under `idleAction: 'stop'`. A
    * request or `wake` brings it back; in-flight requests are never cut (the planner keeps busy replicas).
    */
+  async setGpuType(name: string, machineType: string | null, now: boolean, by: string): Promise<DeploymentView> {
+    const rt = this.require(name);
+    const choices = gpuTypeChoices(rt.record.spec);
+    if (machineType !== null && !choices.some(c => c.machineType === machineType)) {
+      throw new SpecError(`${machineType} is not a GPU type of '${name}' (${choices.map(c => c.machineType).join(', ')})`);
+    }
+    const custom = machineType !== null && machineType !== choices[0]!.machineType;
+    rt.record = { ...rt.record, gpuType: custom ? { machineType, by, at: this.now() } : undefined };
+    await this.opts.store.saveDeployment(rt.record);
+    const target = withGpuType(rt.record.spec, rt.record.gpuType?.machineType).machineType;
+    this.log('deployments: GPU type set', { deployment: name, machineType: target, by, now });
+    if (now) for (const m of this.machines.filter(x => x.deployment === name && x.machineType !== target)) await this.release(m, 'gpu-type');
+    this.kick();
+    return this.view(name)!;
+  }
+
   async park(name: string): Promise<DeploymentView> {
     const rt = this.require(name);
     rt.record.lastRequestAt = null;

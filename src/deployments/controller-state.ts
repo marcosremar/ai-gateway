@@ -11,16 +11,21 @@
  */
 
 import { createHmac } from 'crypto';
-import { activeWindow, warmFloor, type PressureState } from './autoscale';
+import { activeWindow, scheduleFloor, warmFloor, type PressureState } from './autoscale';
+import { bootEventAuth } from './boot-events';
 import { filesByUrl } from './boot-files';
 import { bootTimeoutMinutesOn, replicaPhase, type ObservedReplica } from './planner';
-import { NAME_RE } from './spec';
+import { GPU_CAP_RULE, NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
 import { externalInflightOn } from '../realtime/external-load';
 import type {
   DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
-  RegistryAuth, ReplicaProbe, ScalingMode,
+  ProbeResult, RegistryAuth, ReplicaProbe, ScalingMode,
 } from './types';
+import { BootTracker, logText } from './boot-track';
+import { CONTAINER_LOG_LINES, ContainerLogCache, type ContainerLog } from './container-logs';
+import { secretValues } from '../telemetry/alert-email';
+import { freshStuckRetry, type StuckRetryState } from './stuck-retry';
 
 export class DeploymentError extends Error {
   /**
@@ -48,6 +53,7 @@ export interface ProbeState {
   busy?: boolean;
   /** Since when the liveness probe (the replica's front) has failed without a break: the machine is gone, not busy. */
   downSince?: number;
+  last?: ProbeResult;
 }
 
 /**
@@ -100,6 +106,7 @@ export interface Runtime {
   reclaimedAt: number | null;
   bootTimeouts: number;
   lostAt: number | null;
+  stuckRetry: StuckRetryState;
 }
 
 /** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
@@ -126,10 +133,12 @@ export interface ControllerOptions {
   backend?: DeploymentBackend;
   store: DeploymentStore;
   publicUrl?: string;
+  bootReporting?: boolean;
   probe: ReplicaProbe;
   namespace?: string;
   /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
   maxTotalReplicas?: number;
+  maxGpuPerApp?: number;
   /** Cap on parked (stopped) replicas across all deployments: they bill disk only, but they must not pile up. Default 8. */
   maxStoppedReplicas?: number;
   /** Ceiling (EUR/h) on the summed price of the running replicas of all deployments. Default 6; 0 = off. */
@@ -154,6 +163,7 @@ export interface ControllerOptions {
   sessions?: (deployment: string) => number | null;
   defaultScalingMode?: ScalingMode;
   checkImage?: (image: string, auth: RegistryAuth | null) => Promise<string | null>;
+  secrets?: () => string[];
 }
 
 export interface Lease {
@@ -225,6 +235,8 @@ export abstract class ControllerState {
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
   protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();
   protected readonly probes = new Map<string, ProbeState>();
+  protected readonly boots = new BootTracker();
+  protected readonly containerLogs = new ContainerLogCache(() => this.now());
   protected readonly replicaGone = new Map<string, AbortController>();
   protected goneSignal(id: string): AbortSignal {
     let gone = this.replicaGone.get(id);
@@ -265,7 +277,10 @@ export abstract class ControllerState {
     if (!NAME_RE.test(this.namespace)) throw new Error(`invalid deployments namespace '${this.namespace}'`);
     this.now = opts.now ?? Date.now;
     this.startedAt = this.now();
-    this.log = opts.log ?? (() => {});
+    this.log = (msg, data) => {
+      if (typeof data?.deployment === 'string') this.boots.line(data.deployment, typeof data.id === 'string' ? data.id : null, logText(msg, data), this.now());
+      opts.log?.(msg, data);
+    };
     this.backends = opts.backends ?? (opts.backend ? { [opts.backend.provider]: opts.backend } : {});
     const providers = Object.keys(this.backends) as DeploymentProvider[];
     if (!providers.length) throw new Error('deployments controller needs at least one backend');
@@ -301,7 +316,7 @@ export abstract class ControllerState {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
-      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0, lostAt: null,
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0, lostAt: null, stuckRetry: freshStuckRetry(),
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
@@ -422,8 +437,10 @@ export abstract class ControllerState {
     return sum;
   }
 
-  /** Why one more running replica billing `price` EUR/h is refused (replica cap, € ceiling), or null. */
+  /** Why one more running replica billing `price` EUR/h is refused (GPU per app, replica cap, € ceiling), or null. */
   protected capRefusal(price: number, name: string): string | null {
+    const slot = this.gpuSlotRefusal(name);
+    if (slot) return slot;
     const cap = this.opts.maxTotalReplicas ?? 6;
     const total = this.totalReplicas();
     const capped = `replica cap reached (${cap} across all deployments, DEPLOYMENTS_MAX_REPLICAS; held by ${this.slotHolders()}`;
@@ -450,6 +467,49 @@ export abstract class ControllerState {
       .filter(([other, rt]) => other !== name && !rt.record.spec.paused)
       .map(([other, rt]): [string, number] => [other, floorOf(rt) - (held.get(other) ?? 0)])
       .filter(([, missing]) => missing > 0);
+  }
+
+  protected inClass(rt: Runtime): boolean {
+    return scheduleFloor(rt.record.spec.warmSchedule, this.now()) > 0;
+  }
+
+  protected gpuAppOf(rt: Runtime | undefined): string | null {
+    return rt?.record.spec.gpu ? rt.record.app ?? rt.record.spec.name : null;
+  }
+
+  protected gpuHolders(app: string): string[] {
+    const ofApp = (m: ReplicaMachine) => this.gpuAppOf(this.deployments.get(m.deployment)) === app;
+    const machines = [...this.runningMachines(), ...[...this.releasing.values()].map(r => r.machine)].filter(ofApp).map(m => m.deployment);
+    const creating = [...this.deployments].flatMap(([name, rt]) => (this.gpuAppOf(rt) === app ? Array<string>(rt.creating).fill(name) : []));
+    return [...machines, ...creating];
+  }
+
+  protected classKeeper(rt: Runtime, app: string): string | null {
+    if (this.inClass(rt)) return null;
+    const keeper = [...this.deployments].find(([, o]) => o !== rt && !o.record.spec.paused && this.gpuAppOf(o) === app && this.inClass(o));
+    return keeper?.[0] ?? null;
+  }
+
+  private gpuSlot(name: string, counts: (holder: string) => boolean): string | null {
+    const rt = this.deployments.get(name);
+    const app = this.gpuAppOf(rt);
+    const cap = this.opts.maxGpuPerApp;
+    if (!rt || !app || cap === undefined) return null;
+    const keeper = this.classKeeper(rt, app);
+    if (keeper) return `${GPU_CAP_RULE}: app '${app}' keeps its GPU for '${keeper}' during the class window`;
+    const held = this.gpuHolders(app).filter(counts);
+    if (held.length < cap) return null;
+    return `${GPU_CAP_RULE}: app '${app}' already has ${held.length} (${[...new Set(held)].join(', ')}); the cloud fallback answers`;
+  }
+
+  protected gpuSlotRefusal(name: string): string | null {
+    return this.gpuSlot(name, () => true);
+  }
+
+  gpuSlotTaken(name: string): string | null {
+    const rt = this.deployments.get(name);
+    const evicts = (holder: string) => !!rt && this.inClass(rt) && !this.inClass(this.deployments.get(holder)!);
+    return this.gpuSlot(name, holder => holder !== name && !evicts(holder));
   }
 
   protected slotHolders(): string {
@@ -506,5 +566,21 @@ export abstract class ControllerState {
   protected replicaToken(rt: Runtime, machine: ReplicaMachine): string {
     const tokenKey = machine.tokenKey ?? this.tokenKeys.get(machine.id);
     return replicaTokenFor(rt.record.secretPins?.[tokenKey ?? `id:${machine.id}`] ?? rt.record.replicaToken, tokenKey);
+  }
+
+  protected secretsOf(rt: Runtime, m: ReplicaMachine): string[] {
+    const { env, envByMachineType, registryAuth } = rt.record.spec;
+    const replicaToken = this.replicaToken(rt, m);
+    return [
+      ...(this.opts.secrets?.() ?? []), ...secretValues(Object.assign({}, ...Object.values(envByMachineType ?? {}), env)),
+      registryAuth?.password ?? '', rt.record.replicaToken, replicaToken, bootEventAuth(replicaToken),
+    ].filter(s => s.length >= 8);
+  }
+
+  protected containerLogOf(m: ReplicaMachine): Promise<ContainerLog> | null {
+    const backend = this.backends[this.providerOf(m)];
+    const rt = this.deployments.get(m.deployment);
+    if (!backend?.containerLogs || !rt) return null;
+    return this.containerLogs.read(m, () => backend.containerLogs!(m, CONTAINER_LOG_LINES), this.secretsOf(rt, m));
   }
 }

@@ -19,7 +19,7 @@ import { markNoUse, markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, wi
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
-import { createLogger, withLogContext } from '../../logger';
+import { createLogger, getLogContext, withLogContext } from '../../logger';
 import { ApiKeyRegistry, bearerToken } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
@@ -513,6 +513,21 @@ export function createProxyServer(config: ProxyConfig): Server {
     },
   );
 
+  /** The key user of the request (`localhost` for a local call when no key is configured); null = refused. */
+  const userIdOf = (req: IncomingMessage): string | null => {
+    if (keyRegistry.size > 0) return keyRegistry.resolve(bearerToken(req.headers.authorization))?.userId ?? null;
+    const remoteAddr = req.socket?.remoteAddress || '';
+    return remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1' ? 'localhost' : null;
+  };
+
+  /** No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken. */
+  const applyWakePolicy = (req: IncomingMessage, userId: string): void => {
+    const bearer = bearerToken(req.headers.authorization);
+    if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId)) markNoWake();
+    else if (config.autoWake?.(bearer) === false) markNoWake(config.mayWake && ((deployment: string) => config.mayWake!(bearer, deployment)));
+    if (config.countsAsUse?.(bearer) === false) markNoUse();
+  };
+
   // The actual request handler runs inside the ALS frame established above.
   // Keeping it a named function rather than inlining keeps the stack trace
   // readable when errors are raised from deep inside a route handler.
@@ -577,30 +592,16 @@ export function createProxyServer(config: ProxyConfig): Server {
     // When no keys are configured, restrict to localhost. When keys are
     // configured, validate and resolve the userId for logging + rate limiting.
     const authHeader = req.headers.authorization;
-    let userId = 'anonymous';
-    if (keyRegistry.size === 0) {
-      const remoteAddr = req.socket?.remoteAddress || '';
-      const isLocal = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
-      if (!isLocal) {
-        sendError(res, 401, 'No GATEWAY_API_KEY configured — remote access denied. Set GATEWAY_API_KEY or connect from localhost.', requestId);
-        return;
-      }
-      userId = 'localhost';
-    } else {
-      const resolved = keyRegistry.resolve(bearerToken(authHeader));
-      if (!resolved) {
-        sendError(res, 401, 'Invalid or missing API key', requestId);
-        return;
-      }
-      userId = resolved.userId;
+    const userId = userIdOf(req);
+    if (userId === null) {
+      sendError(res, 401, keyRegistry.size === 0
+        ? 'No GATEWAY_API_KEY configured — remote access denied. Set GATEWAY_API_KEY or connect from localhost.'
+        : 'Invalid or missing API key', requestId);
+      return;
     }
-    // No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken.
-    if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId)) markNoWake();
-    else if (config.autoWake?.(bearerToken(authHeader)) === false) {
-      const bearer = bearerToken(authHeader);
-      markNoWake(config.mayWake && ((deployment: string) => config.mayWake!(bearer, deployment)));
-    }
-    if (config.countsAsUse?.(bearerToken(authHeader)) === false) markNoUse();
+    const logContext = getLogContext();
+    if (logContext) logContext.userId = userId;
+    applyWakePolicy(req, userId);
     if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
       config.onAuth(token).catch((err) => {
@@ -892,7 +893,8 @@ export function createProxyServer(config: ProxyConfig): Server {
         if (!config.providers.tts && !config.providers.unavailable?.tts) {
           proxyRes = { status: 404, body: { error: { message: 'No TTS providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts);
+          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts, undefined,
+            config.ttsCache ? { cache: config.ttsCache.cache, scope: userId, gpuOnly: config.ttsCache.requiresGpu?.(userId) ?? false } : undefined);
         }
       } else if (method === 'POST' && path === '/v1/audio/transcriptions') {
         if (!config.providers.stt && !config.providers.unavailable?.stt) {
@@ -993,14 +995,17 @@ export function createProxyServer(config: ProxyConfig): Server {
       proxyReq.end();
       return;
     }
-    // Registered upgrade routes (deployments invoke WS): the handler owns the socket.
+    // Registered upgrade routes (deployments invoke WS): same key check and no-wake scope as a request, then the
+    // handler owns the socket.
     const upgradeRoute = config.upgradeRoutes?.find((route) => path.startsWith(route.prefix));
     if (upgradeRoute) {
-      void Promise.resolve(upgradeRoute.handler(req, socket, head)).then((handled) => {
-        if (!handled) {
-          socket.write('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-          socket.end();
-        }
+      const userId = userIdOf(req);
+      if (userId === null) {
+        socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      void withNoWakeScope(() => { applyWakePolicy(req, userId); return Promise.resolve(upgradeRoute.handler(req, socket, head)); }).then((handled) => {
+        if (!handled) socket.end('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
       }).catch((err) => {
         log.error({ err, path }, 'upgrade route failed');
         socket.destroy();

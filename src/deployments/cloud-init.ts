@@ -14,6 +14,7 @@
  * damage if the gateway is gone.
  */
 
+import { bootReportSetup, pullWithProgress, type BootReport } from './boot-events';
 import { packFiles, unpackScript } from './file-pack';
 import { DEFAULT_RT_MAX_SESSIONS, DEFAULT_RT_UDP_PORTS, rtMachineEnv, rtMaxSessions, vastUdpRange } from './realtime-ports';
 import { REPLICA_CA_CN, replicaCaKeyPem } from './replica-tls';
@@ -49,21 +50,7 @@ const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
  */
 export const REPLICA_TLS_DIR = '/srv/aigw/tls';
 
-export function nginxConfig(token: string, listen: number = 80, upstream = 8000, rtPort?: number, tls = false, seats = 1): string {
-  const seatLocation = (index: number): string => `  location ^~ /c/${index}/ {
-    if ($http_x_aigw_token != "${token}") { return 401; }
-    rewrite ^/c/${index}/(.*)$ /$1 break;
-    proxy_set_header X-Aigw-Token "";
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection $aigw_conn;
-    proxy_pass http://127.0.0.1:${upstream + index};
-    proxy_http_version 1.1;
-    proxy_buffering off;
-    proxy_read_timeout 900;
-    proxy_send_timeout 900;
-  }
-`;
-  const seatsBlock = Array.from({ length: Math.max(0, seats - 1) }, (_, i) => seatLocation(i + 1)).join('\n');
+export function nginxConfig(token: string, listen: number = 80, upstream = 8000, rtPort?: number, tls = false): string {
   // The upgrade map lets streaming endpoints (e.g. the speech-stack's /ws/audio-stream) pass a WebSocket through
   // the token-gated front; on plain requests $aigw_conn is empty and proxying stays unchanged.
   //
@@ -134,7 +121,7 @@ ${rtPort ? `  location = /__aigw/rt/ws {
     proxy_read_timeout 900;
     proxy_send_timeout 900;
   }
-${seatsBlock}}
+}
 `;
 }
 
@@ -173,7 +160,7 @@ export function packIndexOf(files: Record<string, string>) {
 }
 
 /** Where the edge reports telemetry; the integrator may pass it, else env `AIGW_PUBLIC_URL` (the gateway's public URL). */
-export interface ReplicaInitOptions { gatewayUrl?: string }
+export interface ReplicaInitOptions { gatewayUrl?: string; bootReport?: BootReport }
 
 /** The edge's static environment (`/srv/aigw/edge.env`; the replica id and public IP are appended at boot). */
 export function edgeEnv(spec: DeploymentSpec, token: string, opts: ReplicaInitOptions = {}): Record<string, string> {
@@ -294,19 +281,22 @@ export function replicaCloudInit(spec: DeploymentSpec, token: string, opts: Repl
   // Exposed replica: the probe moves to PROBE_PORT and the app answers health on its own port (it owns 80/443).
   const appPort = spec.exposure ? spec.port : 8000;
   const rtPort = spec.realtime ? RT_EDGE_PORT : undefined;
-  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort, true, spec.seats) : nginxConfig(token, 80, 8000, rtPort, true, spec.seats);
+  const nginx = spec.exposure ? nginxConfig(token, PROBE_PORT, appPort, rtPort, true) : nginxConfig(token, 80, 8000, rtPort, true);
   const registry = spec.registryAuth?.server ? shellQuote(spec.registryAuth.server) : '';
   const login = spec.registryAuth
     ? `set +x\necho ${shellQuote(spec.registryAuth.password)} | docker login ${registry ? registry + ' ' : ''}`
       + `-u ${shellQuote(spec.registryAuth.username)} --password-stdin\nset -x`
     : '';
   const logout = spec.registryAuth ? `docker logout ${registry}`.trim() : '';
+  const report = opts.bootReport;
+  const image = shellQuote(spec.image);
+  const pull = `for i in 1 2 3 4 5; do docker pull ${image} && break; sleep 15; done`;
   return `#!/bin/bash
 mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
 set -x
 shutdown -h +${shutdownMinutes}
-echo '${b64(nginx)}' | base64 -d > /srv/aigw/nginx.conf
+${report ? `${bootReportSetup(report, spec.bootScript ? 'script' : 'docker')}\n` : ''}echo '${b64(nginx)}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
 command -v nginx >/dev/null && command -v openssl >/dev/null || { apt-get update -y && apt-get install -y nginx openssl; }
@@ -315,17 +305,21 @@ rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf && systemctl restart nginx
 ${spec.files ? unpackScript(packIndexOf(spec.files)) : ''}
 ${fetchFilesScript(spec.fileUrls)}
-${spec.bootScript ? bootScriptSection(spec.bootScript) : `command -v docker >/dev/null || { apt-get update -y && apt-get install -y docker.io; }
+${spec.bootScript ? `${report ? 'aigw_report phase=starting-container\n' : ''}${bootScriptSection(spec.bootScript)}` : `command -v docker >/dev/null || { apt-get update -y && apt-get install -y docker.io; }
 ${login}
-for i in 1 2 3 4 5; do docker pull ${shellQuote(spec.image)} && break; sleep 15; done
+${report ? pullWithProgress(pull, image) : pull}
 ${logout}
-${dockerRunCommand(spec)}`}
+${dockerRunCommand(spec)}${report ? ' || aigw_report "phase=failed&exit=$?"' : ''}`}
 ${spec.realtime ? realtimeSection(spec, token, opts) : ''}
-for i in $(seq 1 ${bootChecks}); do
-  curl -sf -o /dev/null http://127.0.0.1:${appPort}${spec.healthPath} && echo '{"ready":true}' > /srv/aigw/ready.json && break
-  sleep 5
-done
+${healthLoop(bootChecks, `http://127.0.0.1:${appPort}${spec.healthPath}`, !!report)}
 `;
+}
+
+function healthLoop(checks: number, url: string, report: boolean): string {
+  return `for i in $(seq 1 ${checks}); do
+  curl -sf -o /dev/null ${url} && echo '{"ready":true}' > /srv/aigw/ready.json && break
+${report ? `  [ $((i % 6)) -eq 1 ] && aigw_tick ${url}\n` : ''}  sleep 5
+done`;
 }
 
 /**
@@ -354,26 +348,24 @@ export function vastReplicaInit(spec: DeploymentSpec, token: string, opts: Repli
   const stopAfterSeconds = (Math.round(spec.maxHours * 60) + 30) * 60;
   const bootChecks = Math.max(12, Math.ceil((spec.bootTimeoutMinutes * 60) / 5));
   const appPort = spec.port;
+  const report = opts.bootReport;
   return `#!/bin/bash
 mkdir -p /srv/aigw/data /srv/aigw/hf
 exec > >(tee -a /srv/aigw/boot.log) 2>&1
 set -x
 ( sleep ${stopAfterSeconds}; kill -TERM 1 ) >/dev/null 2>&1 &
-${CLOSE_SSH}
-echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undefined, true, spec.seats))}' | base64 -d > /srv/aigw/nginx.conf
+${report ? `${bootReportSetup(report, 'script')}\n` : ''}${CLOSE_SSH}
+echo '${b64(nginxConfig(token, 80, appPort, spec.realtime ? RT_EDGE_PORT : undefined, true))}' | base64 -d > /srv/aigw/nginx.conf
 echo '${b64(envFile)}' | base64 -d > /srv/aigw/app.env && chmod 600 /srv/aigw/app.env
 export DEBIAN_FRONTEND=noninteractive
 command -v nginx >/dev/null && command -v curl >/dev/null && command -v openssl >/dev/null || { apt-get update -y && apt-get install -y nginx curl openssl; }
-${replicaTlsSection(token, certDaysOf(spec), VAST_TLS_SAN)}
+${report ? 'aigw_report phase=starting-container\n' : ''}${replicaTlsSection(token, certDaysOf(spec), VAST_TLS_SAN)}
 mkdir -p /etc/nginx/conf.d && rm -f /etc/nginx/sites-enabled/default
 cp /srv/aigw/nginx.conf /etc/nginx/conf.d/aigw.conf
 nginx -t && { nginx -s reload 2>/dev/null || nginx; }
 ${spec.fileUrls ? `${fetchFilesScript(spec.fileUrls)}\n[ -e /files ] || ln -s ${FILES_DIR} /files` : ''}
 ${bootScriptSection(script)}
 ${spec.realtime ? vastEdgeSection(spec, token, opts, bootChecks) : ''}
-for i in $(seq 1 ${bootChecks}); do
-  curl -sf -o /dev/null http://127.0.0.1:${appPort}${spec.healthPath} && echo '{"ready":true}' > /srv/aigw/ready.json && break
-  sleep 5
-done
+${healthLoop(bootChecks, `http://127.0.0.1:${appPort}${spec.healthPath}`, !!report)}
 `;
 }

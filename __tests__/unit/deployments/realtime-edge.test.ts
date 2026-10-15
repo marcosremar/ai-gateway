@@ -1,6 +1,6 @@
 /**
  * `spec.realtime` — the generic realtime edge sidecar (docker/aigw-edge, docs/realtime-edge.md): the replica's
- * first-boot script, its nginx front, its firewall, and the coturn TURN profile.
+ * first-boot script, its nginx front and its firewall.
  */
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -8,13 +8,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_EDGE_IMAGE, edgeEnv, nginxConfig, replicaCloudInit, RT_EDGE_PORT } from '../../../src/deployments/cloud-init';
-import { BUILTIN_PROFILES, COTURN_RELAY_PORTS } from '../../../src/deployments/profiles';
+import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { realtimeGroupName, ScalewayDeploymentBackend } from '../../../src/deployments/scaleway-backend';
 import { buildSpec, EDGE_TUNING_KEYS } from '../../../src/deployments/spec';
 
 const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
 const TOKEN = 'r'.repeat(32);
-const speech = (extra: Record<string, unknown> = {}) => buildSpec('speech', { profile: 'speech-stack', ...extra }, { profiles });
+const SCALEWAY_SPEECH = {
+  provider: 'scaleway', machineType: 'L40S-1-48G', maxEurPerHour: 2,
+  envByMachineType: {
+    'L4-1-24G': { STT_BATCH: '4', LLM_PARALLEL: '8', TTS_STAGE0_MB: '7400', RT_MAX_SESSIONS: '2' },
+    'L40S-1-48G': { STT_BATCH: '8', LLM_PARALLEL: '16', TTS_STAGE0_MB: '12000', RT_MAX_SESSIONS: '4', LLM_SLOT_CTX: '4096' },
+  },
+};
+const speech = (extra: Record<string, unknown> = {}) => buildSpec('speech', { profile: 'speech-stack', ...SCALEWAY_SPEECH, ...extra }, { profiles });
 
 /** The base64 file a cloud-init writes to `path`, decoded. */
 function written(script: string, path: string): string | null {
@@ -141,13 +148,12 @@ describe('realtime spec validation', () => {
     for (const key of EDGE_TUNING_KEYS) expect(source, key).toContain(`"${key}"`);
   });
 
-  it('is accepted on vast while its ports fit one host; files, exposure and stop stay refused there', () => {
+  it('is accepted on vast while its ports fit one host; exposure and stop stay refused there', () => {
     const vast = { provider: 'vast', image: 'vastai/base', bootScript: 'x', machineType: 'RTX 4090' };
     expect(buildSpec('v', { ...vast, realtime: {} }, { profiles }).realtime).toEqual({});
     expect(buildSpec('v', { ...vast, realtime: { maxSessions: 30 } }, { profiles }).realtime).toEqual({ maxSessions: 30 });
     expect(() => buildSpec('v', { ...vast, realtime: { maxSessions: 32 } }, { profiles })).toThrow(/needs 75 .* at most 64/);
     expect(() => buildSpec('v', { ...vast, realtime: { udpPorts: [50000, 50100] } }, { profiles })).toThrow(/needs 103 .* at most 64/);
-    expect(() => buildSpec('v', { ...vast, realtime: {}, files: { a: 'YQ==' } }, { profiles })).toThrow('files are not supported on vast (no user_data service)');
     expect(() => buildSpec('v', { ...vast, realtime: {}, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles }))
       .toThrow('exposure is not supported on vast');
     expect(() => buildSpec('v', { ...vast, realtime: {}, idleAction: 'stop' }, { profiles })).toThrow("idleAction 'stop' is not supported on vast");
@@ -201,18 +207,6 @@ describe('firewall of realtime replicas (fake Scaleway)', () => {
     expect(created[1].rules).toEqual([{ protocol: 'TCP', port: 80 }]);
     const groups = client.createInstance.mock.calls.map(c => (c[0] as { securityGroupId: string }).securityGroupId);
     expect(groups).toEqual([`sg-${realtimeGroupName('prod', [50000, 50100])}`, `sg-${realtimeGroupName('prod', [50000, 50100])}`, 'sg-aigw-prod-gateway-only']);
-  });
-
-  it('coturn: exposure with its relay range as one rule, plus the probe port', async () => {
-    const client = fakeClient();
-    const backend = new ScalewayDeploymentBackend('secret', { client: client as never, projectId: 'proj' });
-    const spec = buildSpec('turn', { profile: 'coturn', env: { REALTIME_TURN_SECRET: 's'.repeat(32) } }, { profiles });
-    await backend.ensureNetwork(spec, 'prod');
-    const rules = (client.createSecurityGroup.mock.calls[0][2] as { rules: unknown[] }).rules;
-    expect(rules).toEqual([
-      { protocol: 'UDP', port: 3478 }, { protocol: 'TCP', port: 3478 }, { protocol: 'TCP', port: 443 },
-      { protocol: 'UDP', port: COTURN_RELAY_PORTS[0], portTo: COTURN_RELAY_PORTS[1] }, { protocol: 'TCP', port: 8089 },
-    ]);
   });
 });
 
@@ -274,20 +268,9 @@ describe('firewall of an exposed deployment follows its spec (fake Scaleway)', (
   });
 });
 
-describe('coturn profile', () => {
-  it('builds, boots coturn with use-auth-secret on the host network, and its scripts parse', () => {
-    const spec = buildSpec('turn', { profile: 'coturn', env: { REALTIME_TURN_SECRET: 's'.repeat(32) } }, { profiles });
-    expect(spec).toMatchObject({ machineType: 'DEV1-S', gpu: false, port: 9641, healthPath: '/metrics' });
-    expect(spec.bootScript).toContain('--use-auth-secret --static-auth-secret="$REALTIME_TURN_SECRET"');
-    expect(spec.bootScript).toMatch(/coturn\/coturn:\d+\.\d+\.\d+/);
-    expect(spec.bootScript).toContain('--dport 443 -j REDIRECT --to-ports 3478');
-    expect(spec.bootScript).toContain('--denied-peer-ip=10.0.0.0-10.255.255.255');
-    expect(bashOk(spec.bootScript!)).toBe(true);
-    expect(bashOk(replicaCloudInit(spec, TOKEN))).toBe(true);
-  });
-
+describe('exposure', () => {
   it('refuses a relay range that would cover the probe port', () => {
-    expect(() => buildSpec('t', { profile: 'coturn', exposure: { ports: [{ protocol: 'tcp', port: 8000, to: 8100 }] } }, { profiles }))
+    expect(() => buildSpec('t', { profile: 'cpu-echo', exposure: { ports: [{ protocol: 'tcp', port: 8000, to: 8100 }] } }, { profiles }))
       .toThrow(/probe port/);
   });
 });

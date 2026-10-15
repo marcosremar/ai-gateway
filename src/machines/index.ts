@@ -2,6 +2,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import type { IncomingMessage } from 'http';
 import { ScalewayClient } from '../cpu-providers/scaleway-client';
+import { SCALEWAY_GPU_OFF } from '../deployments/spec';
 import { VastDeploymentBackend } from '../deployments/vast-backend';
 import { realMachinesAllowed } from '../deployments/real-machines';
 import { RunpodMachineBackend, ScalewayMachineBackend, VastMachineBackend } from './backends';
@@ -46,7 +47,7 @@ export function machineBackendsFromEnv(env: Env, opts: { awaitVolumes?: boolean 
   const vastKey = env.VAST_API_KEY?.trim();
   if (!realMachinesAllowed(env)) return {};
   return {
-    ...(scwSecret() ? { scaleway: new ScalewayMachineBackend(new ScalewayClient(), scwSecret, scwProject, opts.awaitVolumes === true) } : {}),
+    ...(scwSecret() ? { scaleway: new ScalewayMachineBackend(new ScalewayClient(), scwSecret, scwProject, opts.awaitVolumes === true, SCALEWAY_GPU_OFF) } : {}),
     ...(vastKey ? { vast: new VastMachineBackend(new VastDeploymentBackend(vastKey)) } : {}),
     ...(env.RUNPOD_API_KEY?.trim() ? { runpod: new RunpodMachineBackend(() => (env.RUNPOD_API_KEY ?? '').trim()) } : {}),
   };

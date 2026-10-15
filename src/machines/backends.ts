@@ -3,6 +3,7 @@ import type { ScalewayClient } from '../cpu-providers/scaleway-client';
 import type { ProviderCredentials } from '../gpu-providers/types';
 import { createRunpodRest, runpodTime, type RunpodFetch, type RunpodPod, type RunpodRest } from '../gateway/providers/gpu/runpod/rest';
 import { EUR_TO_USD, VAST_API, vastState, type VastDeploymentBackend } from '../deployments/vast-backend';
+import { isGpuMachineType } from '../deployments/spec';
 import type { DeploymentSpec, ExposedPort } from '../deployments/types';
 import type { CreateMachineInput, MachineBackend, MachineRequest, ProviderMachine } from './types';
 
@@ -47,7 +48,7 @@ export class ScalewayMachineBackend implements MachineBackend {
   readonly provider = 'scaleway' as const;
   constructor(
     private readonly client: ScalewayLike, private readonly secret: () => string, private readonly projectId: () => string | undefined,
-    private readonly awaitVolumes = false,
+    private readonly awaitVolumes = false, private readonly gpuOff: string | null = null,
   ) {}
 
   private credentials(): ProviderCredentials {
@@ -55,6 +56,7 @@ export class ScalewayMachineBackend implements MachineBackend {
   }
 
   async quote(request: MachineRequest): Promise<number | null> {
+    if (this.gpuOff && isGpuMachineType(request.machineType)) throw new Error(`${this.gpuOff}: GPU machines run on vast only`);
     const eur = await this.client.getHourlyPrice(request.zone ?? DEFAULT_ZONE, request.machineType, this.credentials());
     if (eur == null) return null;
     const usd = Math.round(eur * SCALEWAY_EUR_TO_USD * 1000) / 1000;
@@ -148,11 +150,11 @@ export class VastMachineBackend implements MachineBackend {
   private spec(request: MachineRequest): DeploymentSpec {
     return {
       name: 'machine', machineType: request.machineType, volumeGb: request.diskGb, maxEurPerHour: request.maxUsdPerHour / EUR_TO_USD,
-      near: request.near, allowFar: true, minCpuCores: request.minCpuCores, minRamGb: request.minRamGb,
+      near: request.near, allowFar: true, minCpuCores: request.minCpuCores, minRamGb: request.minRamGb, vm: request.vm,
     } as DeploymentSpec;
   }
 
-  private async offers(request: MachineRequest) {
+  async offers(request: MachineRequest) {
     const needed = portKeys(request).length;
     return (await this.market.pickOffers(this.spec(request)))
       .filter(o => o.dph_total <= request.maxUsdPerHour && (o.direct_port_count === undefined || o.direct_port_count >= needed));
@@ -165,7 +167,7 @@ export class VastMachineBackend implements MachineBackend {
     });
     const text = await res.text();
     if (res.status === 404 && method === 'DELETE') return {} as T;
-    if (!res.ok) throw new Error(`vast ${method} ${path}: HTTP ${res.status} ${text.slice(0, 160)}`);
+    if (!res.ok) throw new Error(`vast ${method} ${path}: HTTP ${res.status} ${text.slice(0, 500)}`);
     return (text ? JSON.parse(text) : {}) as T;
   }
 
@@ -182,6 +184,7 @@ export class VastMachineBackend implements MachineBackend {
       const [n, protocol] = k.split('/');
       return [`-p ${n}:${n}${protocol === 'udp' ? '/udp' : ''}`, '1'];
     }));
+    if (request.vm && request.sshPublicKey) await this.addAccountSshKey(request.sshPublicKey);
     const misses: string[] = [];
     for (const offer of offers) {
       type Rent = { success?: boolean; new_contract?: number; error?: string; msg?: string };
@@ -193,7 +196,7 @@ export class VastMachineBackend implements MachineBackend {
         env: { ...request.env, AIGW_INIT_B64: Buffer.from(machineInit(request)).toString('base64'), ...mapped },
       }).catch((err: unknown) => ({ success: false, error: err instanceof Error ? err.message : String(err) }));
       if (res.success && res.new_contract != null) {
-        if (request.sshPublicKey) await this.attachSshKey(String(res.new_contract), request.sshPublicKey);
+        if (request.sshPublicKey && !request.vm) await this.attachSshKey(String(res.new_contract), request.sshPublicKey);
         return {
           providerId: String(res.new_contract), provider: 'vast', machineId: input.machineId, state: 'starting', ip: null, ports: {},
           usdPerHour: offer.dph_total, createdAt: Date.now(),
@@ -203,9 +206,15 @@ export class VastMachineBackend implements MachineBackend {
       if (/insufficient_credit/i.test(refusal)) {
         throw new Error('insufficient_credit: Vast refused the rent for lack of credit; top up the Vast account (recarregue a Vast)');
       }
-      misses.push(`offer ${offer.id}: ${refusal.slice(0, 80)}`);
+      misses.push(`offer ${offer.id}: ${refusal.slice(0, 400)}`);
     }
     throw new Error(`out_of_stock: every vast offer tried was taken (${misses.join('; ')})`);
+  }
+
+  private async addAccountSshKey(sshPublicKey: string): Promise<void> {
+    const { keys = [] } = await this.call<{ keys?: Array<{ public_key?: string }> }>('GET', '/ssh/').catch(() => ({ keys: [] }));
+    if (keys.some(k => k.public_key?.trim() === sshPublicKey.trim())) return;
+    await this.call('POST', '/ssh/', { ssh_key: sshPublicKey });
   }
 
   private async attachSshKey(providerId: string, sshPublicKey: string): Promise<void> {
@@ -214,7 +223,7 @@ export class VastMachineBackend implements MachineBackend {
       if (attempt) await this.wait(attempt * 3_000);
       const res = await this.call<{ success?: boolean; msg?: string }>('POST', `/instances/${encodeURIComponent(providerId)}/ssh/`, { ssh_key: sshPublicKey })
         .catch((err: unknown) => ({ success: false, msg: err instanceof Error ? err.message : String(err) }));
-      if (res.success !== false) return;
+      if (res.success !== false || /already associated/i.test(res.msg ?? '')) return;
       lastError = res.msg ?? 'refused';
     }
     await this.release(providerId).catch(() => {});

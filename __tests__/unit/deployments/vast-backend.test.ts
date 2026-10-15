@@ -9,6 +9,7 @@ import {
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
 import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
+import { bootReportFor } from '../../../src/deployments/boot-events';
 import {
   BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, lowestRtt, MIN_RELIABILITY, TOO_FAR_HOST_MS,
   UDP_BLOCKED_HOST_MS, VastDeploymentBackend, vastState,
@@ -271,6 +272,26 @@ describe('VastDeploymentBackend', () => {
     now += BAD_HOST_MS + 1;
     expect((await backend.createReplica(input)).id).toBe('200'); // forgiven after an hour
     await expect(backend.releaseReplica({ ...first, id: '404' })).resolves.toBeUndefined();
+  });
+});
+
+describe('VastDeploymentBackend stuck boot', () => {
+  it('a host released for a stuck boot is skipped by the next rent, which lands on another host', async () => {
+    const { calls, fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers: offers.filter(o => o.id === 2 || o.id === 3) } };
+      if (method === 'PUT') return { body: { success: true, new_contract: Number(url.match(/asks\/(\d+)/)![1]) * 100 } };
+      return { body: { success: true } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => 0 });
+    const input = { spec: vastSpec(), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' };
+    const stuck = await backend.createReplica(input);
+    await backend.releaseReplica(stuck, 'boot-stuck');
+    const order = calls.map(c => c.method).filter(m => m === 'PUT' || m === 'DELETE');
+    expect(order).toEqual(['PUT', 'DELETE']);
+    expect(backend.avoidedHosts()).toEqual([102]);
+    const retried = await backend.createReplica(input);
+    expect(retried.id).not.toBe(stuck.id);
+    expect(retried.id).toBe('300');
   });
 });
 
@@ -593,7 +614,8 @@ describe('realtime UDP ports on Vast', () => {
       vastSpec({ bootScript: 'x'.repeat(9_000), realtime: { maxSessions: 4, env: { EDGE_LLM_MODEL: 'm'.repeat(200), EDGE_TTS_MODEL: 't'.repeat(200) } } }),
     ]) {
       const { calls, fetchImpl } = fakeVast(c => (c.url.endsWith('/bundles/') ? { body: { offers } } : { body: { success: true, new_contract: 1 } }));
-      await new VastDeploymentBackend('k', { fetch: fetchImpl }).createReplica({ spec, replicaToken: 'x'.repeat(43), cloudInit: '', namespace: 'ns' });
+      const bootReport = bootReportFor('https://ai-gateway-production.up.railway.app', 'f'.repeat(24), 'x'.repeat(43));
+      await new VastDeploymentBackend('k', { fetch: fetchImpl }).createReplica({ spec, replicaToken: 'x'.repeat(43), cloudInit: '', namespace: 'ns', bootReport });
       const sent = Object.entries(calls[1].body!.env as Record<string, string>).reduce((n, [k, v]) => n + k.length + v.length + 2, 0);
       expect(sent).toBeLessThanOrEqual(vastEnvBytes(spec));
       expect(sent).toBeLessThan(VAST_ENV_MAX_BYTES);
@@ -671,5 +693,19 @@ describe('fileUrls: the voice catalog without user_data', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('euOnly: student audio does not leave the EU (owner, 05/10/2026 and 14/10/2026)', () => {
+  it('keeps only hosts in an EU country, searched wider; a near host outside the EU (GB, CH, NO) is dropped', async () => {
+    const at = (id: number, geolocation: string, dph: number) => ({ id, machine_id: 100 + id, geolocation, dph_total: dph, reliability2: 0.99, inet_down: 900 });
+    const offers = [at(1, 'London, GB', 0.2), at(2, 'Zurich, CH', 0.21), at(3, 'Oslo, NO', 0.22), at(4, 'Warsaw, PL', 0.4), at(5, 'Paris, FR', 0.45), at(6, 'Dallas, US', 0.1)];
+    const { calls, fetchImpl } = fakeVast(() => ({ body: { offers } }));
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    expect((await backend.pickOffers(vastSpec({ euOnly: true }))).map(o => o.geolocation)).toEqual(['Paris, FR', 'Warsaw, PL']);
+    expect(calls[0].body!.limit).toBe(1000);
+    expect((await backend.pickOffers(vastSpec())).map(o => o.geolocation)).toEqual(['Paris, FR', 'London, GB', 'Zurich, CH', 'Oslo, NO', 'Warsaw, PL']);
+    expect(backend.searchBody(vastSpec(), 0.97).limit).toBe(100);
+    expect(() => vastSpec({ euOnly: 'yes' })).toThrow('euOnly must be a boolean');
   });
 });

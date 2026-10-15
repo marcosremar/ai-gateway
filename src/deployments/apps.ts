@@ -63,21 +63,39 @@ export interface AppImage {
  * GPU deployments are part of what it delivers (parle: the detected language and the cloned voices only come from them),
  * so a turn the cloud fallback answers still answers, but is marked degraded and the app's status says so.
  */
-export interface AppProfile { requiresGpu: boolean; gpuDeployments: string[] }
+export interface AppProfile { requiresGpu: boolean; gpuDeployments: string[]; name?: string | null; description?: string | null; reorderCloudLinks?: boolean }
+
+const PROFILE_FIELDS = new Set(['requiresGpu', 'gpuDeployments', 'name', 'description', 'reorderCloudLinks']);
+const MAX_NAME = 60;
+const MAX_DESCRIPTION = 240;
+
+function parseLabel(value: unknown, field: string, max: number): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  if (typeof value !== 'string' || value.trim().length > max) throw new AppError(400, `${field} must be a string of up to ${max} characters or null`);
+  return value.trim() || null;
+}
 
 const MAX_GPU_DEPLOYMENTS = 8;
 
 export function parseAppProfile(body: unknown): AppProfile {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'profile must be an object { requiresGpu, gpuDeployments }');
-  for (const key of Object.keys(body)) if (key !== 'requiresGpu' && key !== 'gpuDeployments') throw new AppError(400, `unknown field '${key}'`);
-  const { requiresGpu, gpuDeployments = [] } = body as { requiresGpu?: unknown; gpuDeployments?: unknown };
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'profile must be an object { requiresGpu, gpuDeployments, name?, description? }');
+  for (const key of Object.keys(body)) if (!PROFILE_FIELDS.has(key)) throw new AppError(400, `unknown field '${key}'`);
+  const { requiresGpu, gpuDeployments = [], name, description, reorderCloudLinks } = body as {
+    requiresGpu?: unknown; gpuDeployments?: unknown; name?: unknown; description?: unknown; reorderCloudLinks?: unknown;
+  };
   if (typeof requiresGpu !== 'boolean') throw new AppError(400, 'requiresGpu must be a boolean');
+  if (reorderCloudLinks !== undefined && typeof reorderCloudLinks !== 'boolean') throw new AppError(400, 'reorderCloudLinks must be a boolean');
   if (!Array.isArray(gpuDeployments) || gpuDeployments.length > MAX_GPU_DEPLOYMENTS
     || gpuDeployments.some(d => typeof d !== 'string' || !NAME_RE.test(d))) {
     throw new AppError(400, `gpuDeployments must be a list of up to ${MAX_GPU_DEPLOYMENTS} deployment names`);
   }
   if (requiresGpu && !gpuDeployments.length) throw new AppError(400, 'requiresGpu needs at least one deployment in gpuDeployments');
-  return { requiresGpu, gpuDeployments: [...new Set(gpuDeployments as string[])] };
+  const labels = { name: parseLabel(name, 'name', MAX_NAME), description: parseLabel(description, 'description', MAX_DESCRIPTION) };
+  return {
+    requiresGpu, gpuDeployments: [...new Set(gpuDeployments as string[])],
+    ...Object.fromEntries(Object.entries(labels).filter(([, v]) => v !== undefined)),
+    ...(reorderCloudLinks === false ? { reorderCloudLinks: false } : {}),
+  };
 }
 
 export interface AppDeviceBlock { reason: string | null; by: string; at: number }
@@ -142,6 +160,11 @@ export function routeTargetViolations(next: ModelRoutesSpec, current: ModelRoute
     }
   }
   return [...refused];
+}
+
+function routedDeployments(routes: ModelRoutesSpec): string[] {
+  const names = ROUTE_STAGES.flatMap(stage => Object.entries(routes[stage] ?? {}).flatMap(([alias, chain]) => chain.flatMap(e => routeTargets(stage, alias, e))));
+  return [...new Set(names.filter(t => t.startsWith('deployment:')).map(t => t.slice('deployment:'.length)))];
 }
 
 export class AppError extends Error {
@@ -272,9 +295,11 @@ export class AppRegistry implements FallbackKeyStore {
     const profile = parseAppProfile(body);
     const foreign = opts.ownsDeployment ? profile.gpuDeployments.filter(d => !opts.ownsDeployment!(d)) : [];
     if (foreign.length) throw new AppError(403, `an app key may only name its own app's deployments: ${foreign.join(', ')}`);
-    this.account(app).profile = profile;
+    const stored = this.account(app).profile;
+    const merged = { name: stored?.name ?? null, description: stored?.description ?? null, ...profile };
+    this.account(app).profile = merged;
     await this.store.save(this.apps);
-    return profile;
+    return merged;
   }
 
   /**
@@ -283,7 +308,9 @@ export class AppRegistry implements FallbackKeyStore {
    * a cloud link gets the stage's default fallback appended (`cloud-fallback.ts`, reported in `cloudFallbackAdded`);
    * `"cloudFallback": false` is refused.
    */
-  async putRoutes(app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean } = {}): Promise<{ routes: ModelRoutesSpec; cloudFallbackAdded: CloudFallbackAdded[] }> {
+  async putRoutes(
+    app: string, body: unknown, opts: { restrictedTo?: (deployment: string) => boolean; appOf?: (deployment: string) => string | null } = {},
+  ): Promise<{ routes: ModelRoutesSpec; cloudFallbackAdded: CloudFallbackAdded[] }> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'routes must be an object { chat?, stt?, tts? }');
     if ((body as { cloudFallback?: unknown }).cloudFallback === false) {
       throw new AppError(400, 'every STT, chat and TTS chain must end in a cloud fallback (owner decision 2026-10-12): drop "cloudFallback": false — the gateway appends the default (OpenRouter) to a chain that has none');
@@ -297,6 +324,8 @@ export class AppRegistry implements FallbackKeyStore {
         if (owner) throw new AppError(409, `${stage} alias '${model}' belongs to app '${owner.id}'`);
       }
     }
+    const foreign = routedDeployments(parsed).filter(d => ![null, app].includes(opts.appOf?.(d) ?? null));
+    if (foreign.length) throw new AppError(403, `a route may not name another app's deployment: ${foreign.join(', ')}`);
     if (opts.restrictedTo) {
       const refused = routeTargetViolations(parsed, ownValue(this.apps, app)?.routes, opts.restrictedTo);
       if (refused.length) throw new AppError(403, `an app key may only route to its own deployments and to targets its routes already have: ${refused.join('; ')}`);

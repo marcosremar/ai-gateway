@@ -105,7 +105,7 @@ describe('deployment TTS provider on a replica whose TTS answers 500', () => {
     let calls = 0;
     const provider = new DeploymentTTSProvider(controller, 'speech', {
       fetchImpl: (async (url: string) => {
-        if (url.endsWith('/refs/voices.json')) return new Response('', { status: 404 });
+        if (url.endsWith('/refs/voices.json') || url.endsWith('/v1/voices')) return new Response('', { status: 404 });
         calls++;
         return new Response('boom', { status: 500 });
       }) as typeof fetch,

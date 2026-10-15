@@ -26,6 +26,12 @@ const PATH_RE = /^\/[A-Za-z0-9._~\-/]*$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** GPU commercial types on Scaleway start with the GPU family (L4, L40S, H100, GPU-3070, RENDER…). */
+export const SCALEWAY_GPU_OFF = 'Scaleway desativada (dono, 14/10/2026)';
+export const MAX_GPU_PER_APP = 1;
+export const gpuCapRule = (machineTypes: string[] = []) =>
+  `limite: ${MAX_GPU_PER_APP} GPU${machineTypes.length ? ` (${machineTypes.join(', ')})` : ''} por app — dono, 14/10/2026`;
+export const GPU_CAP_RULE = gpuCapRule();
+
 export function isGpuMachineType(type: string): boolean {
   return /^(L4|L40S|H100|H200|B300|GPU|RENDER)/i.test(type);
 }
@@ -44,7 +50,6 @@ export const SPEC_DEFAULTS = {
   idleMinutes: 15,
   bootTimeoutMinutes: 30,
   scaleDownDelaySeconds: 300,
-  seats: 1,
   // Under Railway's 5-minute "no data transferred" cut-off, so the caller gets a clean 503 + Retry-After.
   coldStartWaitSeconds: 240,
   maxEurPerHour: 1,
@@ -104,12 +109,12 @@ function envMap(value: unknown): Record<string, string> {
 }
 
 const KNOWN_FIELDS = new Set<string>([
-  'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'envByMachineType', 'registryAuth',
+  'profile', 'provider', 'image', 'port', 'entrypoint', 'args', 'env', 'envByMachineType', 'maxEurPerHourByMachineType', 'registryAuth',
   'healthPath', 'machineType', 'zone', 'osImageId', 'volumeGb', 'gpu', 'minReplicas', 'maxReplicas',
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
-  'maxEurPerHour', 'maxHours', 'seats', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
-  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
-  'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor',
+  'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
+  'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'euOnly', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
+  'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor', 'autoRetryStuckBoot',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 const PLACEMENT_FIELDS = new Set([...CANDIDATE_FIELDS, 'maxReplicas', 'image']);
@@ -161,6 +166,10 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     if (typeof input.allowFar !== 'boolean') throw new SpecError('allowFar must be a boolean');
     out.allowFar = input.allowFar;
   }
+  if (input.euOnly !== undefined) {
+    if (typeof input.euOnly !== 'boolean') throw new SpecError('euOnly must be a boolean');
+    out.euOnly = input.euOnly;
+  }
   if (input.image !== undefined) out.image = str(input.image, 'image', IMAGE_RE);
   if (input.port !== undefined) out.port = int(input.port, 'port', 1, 65535);
   if (input.entrypoint !== undefined) {
@@ -180,6 +189,12 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
       out2[type] = envMap(env);
     }
     out.envByMachineType = out2;
+  }
+  if (input.maxEurPerHourByMachineType !== undefined) {
+    const raw = input.maxEurPerHourByMachineType as Record<string, unknown> | null;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SpecError('maxEurPerHourByMachineType must be an object');
+    out.maxEurPerHourByMachineType = Object.fromEntries(Object.entries(raw).map(([type, cap]) =>
+      [str(type, 'maxEurPerHourByMachineType key', MACHINE_RE), num(cap, `maxEurPerHourByMachineType.${type}`, 0.001, 50)]));
   }
   if (input.registryAuth !== undefined) {
     const auth = input.registryAuth as Record<string, unknown> | null;
@@ -237,10 +252,13 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   }
   if (input.maxEurPerHour !== undefined) out.maxEurPerHour = num(input.maxEurPerHour, 'maxEurPerHour', 0.001, 50);
   if (input.maxHours !== undefined) out.maxHours = num(input.maxHours, 'maxHours', 0.25, 24 * 7);
-  if (input.seats !== undefined) out.seats = int(input.seats, 'seats', 1, 8);
   if (input.paused !== undefined) {
     if (typeof input.paused !== 'boolean') throw new SpecError('paused must be a boolean');
     out.paused = input.paused;
+  }
+  if (input.autoRetryStuckBoot !== undefined) {
+    if (typeof input.autoRetryStuckBoot !== 'boolean') throw new SpecError('autoRetryStuckBoot must be a boolean');
+    out.autoRetryStuckBoot = input.autoRetryStuckBoot;
   }
   if (input.description !== undefined) {
     if (typeof input.description !== 'string' || input.description.length > 500) throw new SpecError('description is invalid');
@@ -473,7 +491,7 @@ export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates
  * 32 KB in total (`invalid env arguments, total length > 32KB`, live 2026-10-08), and the init script travels there.
  */
 export const VAST_ENV_MAX_BYTES = 32_000;
-const VAST_INIT_OVERHEAD_BYTES = 4_700;
+const VAST_INIT_OVERHEAD_BYTES = 5_900;
 const VAST_RT_INIT_OVERHEAD_BYTES = 2_000;
 const VAST_PORT_ENV_BYTES = 24;
 
@@ -511,6 +529,6 @@ export function vastRefusal(spec: DeploymentSpec, fallback = false): string | nu
 }
 
 function checkVastSpec(spec: DeploymentSpec): void {
-  const refusal = vastRefusal(spec);
+  const refusal = vastRefusal({ ...spec, files: undefined });
   if (refusal) throw new SpecError(refusal);
 }

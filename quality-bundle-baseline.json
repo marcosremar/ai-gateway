@@ -80,9 +80,9 @@
     "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
   },
   "proxy": {
-    "raw": 179393,
-    "gzip": 47080,
-    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
+    "raw": 188916,
+    "gzip": 49717,
+    "reason": "proxy routing: health/latency reorder of equivalent cloud links (link-reorder.ts)"
   },
   "realtime": {
     "raw": 112896,

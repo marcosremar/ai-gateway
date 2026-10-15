@@ -209,8 +209,7 @@ The gateway's code names no app model. An app that wants its own model names (`p
 ```bash
 curl -X PUT $GW/v1/apps/parle/routes -H "Authorization: Bearer $KEY" -H 'X-App: parle' -d '{
   "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
-  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-qwen-tts", "oneGpuDeployment": "parle-speech",
-                            "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
+  "tts":  { "parle-tts": [{ "provider": "deployment", "deployment": "parle-speech", "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base" },
                           { "provider": "openrouter", "model": "microsoft/mai-voice-2.1-flash", "voice": "pt-BR-Luana:MAI-Voice-2-Flash" },
                           { "provider": "openrouter", "model": "hexgrad/kokoro-82m", "voice": "pf_dora", "fixedVoice": true }] }
 }'
@@ -248,7 +247,9 @@ else its own configured voice. The replica must expose the OpenAI shapes (`/v1/a
 
 **Self-hosted TTS (Qwen3-TTS Base).** For a deployment target:
 
-- `voice` may be a **cast voice id** of the replica's catalog (`GET /refs/voices.json` on the replica, cached 5 min).
+- `voice` may be a **cast voice id** of the replica's catalog (`GET /refs/voices.json` on the replica, cached 5 min;
+  on the `speech-stack` image, which has no such file, its `GET /v1/voices` list, each reference at
+  `http://127.0.0.1:8000/refs/<id>.wav` inside the replica — `speechStackCatalogOf`, since 14/10/2026).
   When the client sends no `ref_audio`, the gateway turns it into `task_type: "Base"`, `ref_audio`, `ref_text`,
   `language` (from the voice) and the catalog's `model` — the request parle's `qwen-speech.ts` builds, without
   `voice` (vLLM-Omni would read it as a precomputed speaker). A voice that is not in the catalog is **never sent**
@@ -426,7 +427,7 @@ replaces the generic chat fallback (default: Groq `llama-3.3-70b-versatile`, the
 {
   "stt":  { "parle-stt": ["deployment:parle-speech:whisper-large-v3-turbo", "openrouter:openai/whisper-large-v3-turbo"] },
   "chat": { "parle-llm": ["deployment:parle-speech", "openrouter:qwen/qwen3.5-9b"] },
-  "tts":  { "parle-tts": ["deployment:parle-qwen-tts:Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+  "tts":  { "parle-tts": ["deployment:parle-speech:Qwen/Qwen3-TTS-12Hz-0.6B-Base",
                           { "provider": "openrouter", "model": "fish-audio/s2-pro", "voice": "<voice id>" }] }
 }
 ```
@@ -437,7 +438,7 @@ Every successful response of the three routes carries (no secrets):
 
 | Header | Example | Meaning |
 |---|---|---|
-| `X-Gateway-Provider` | `deployment:parle-qwen-tts`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
+| `X-Gateway-Provider` | `deployment:parle-speech`, `openrouter:microsoft/mai-voice-2.1-flash` | who answered (`deployment:<name>` or `<provider>:<upstream model>`) |
 | `X-Gateway-Fallback` | `cold` | only when the first target of the chain did not answer (two targets of the same provider count as different): `cold`, `paused`, `5xx`, `timeout`, `slow`, `unreachable`, `empty`, `voice_not_found`, `catalog_unavailable`, `auth`, `credit`, `rate_limited`, `not_found`, `not_configured`, `policy`, `circuit_open`, `cooldown`, `error` |
 | `X-Gateway-Fallback-From` | `deployment:parle-speech` | the provider that was left behind |
 | `X-Gateway-Status` | `degraded` | only for an app whose profile has `requiresGpu` (below, *App profile and GPU status*), when a cloud target answered: the answer is valid, but not what the app's GPU would have given |
@@ -761,12 +762,12 @@ Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` oth
 ### App profile and GPU status — `/v1/apps/:app/profile`, `/v1/apps/:app/status`
 
 An app whose answers depend on its own GPU (parle: the detected language and the cloned voices only come from
-`parle-speech` / `parle-qwen-tts`) says so in its profile; the gateway then probes those GPUs and reports, per app,
+`parle-speech`) says so in its profile; the gateway then probes those GPUs and reports, per app,
 whether it is served by them.
 
 ```bash
 curl -X PUT $GW/v1/apps/parle/profile -H "Authorization: Bearer $PARLE_KEY" -H 'content-type: application/json' \
-  -d '{"requiresGpu": true, "gpuDeployments": ["parle-speech", "parle-qwen-tts"]}'
+  -d '{"requiresGpu": true, "gpuDeployments": ["parle-speech"]}'
 # → { app, profile, warnings? }  warnings: a deployment not registered, or without a warmSchedule
 curl $GW/v1/apps/parle/status -H "Authorization: Bearer $PARLE_KEY"
 ```
@@ -774,10 +775,8 @@ curl $GW/v1/apps/parle/status -H "Authorization: Bearer $PARLE_KEY"
 ```json
 { "app": "parle", "requiresGpu": true, "mode": "gpu", "checkedAt": "2026-10-13T16:01:00.000Z",
   "deployments": [
-    { "name": "parle-speech", "stages": ["stt", "llm"], "state": "ready", "replicas": { "ready": 1, "total": 1 },
-      "lastProbe": { "at": "2026-10-13T16:00:12.000Z", "ok": true, "ms": 840, "error": null } },
-    { "name": "parle-qwen-tts", "stages": ["tts"], "state": "ready", "replicas": { "ready": 2, "total": 2 },
-      "lastProbe": { "at": "2026-10-13T16:00:40.000Z", "ok": true, "ms": 610, "error": null } } ],
+    { "name": "parle-speech", "stages": ["stt", "llm", "tts"], "state": "ready", "replicas": { "ready": 1, "total": 1 },
+      "lastProbe": { "at": "2026-10-13T16:00:12.000Z", "ok": true, "ms": 840, "error": null } } ],
   "fallback": { "active": false, "since": null, "last": null } }
 ```
 
@@ -816,6 +815,7 @@ their own (`404` for the rest). Prices are in USD per hour (Scaleway's EUR price
 |---|---|---|
 | `POST` | `/v1/machines` | rent one machine (body below); `201` with the machine |
 | `GET` | `/v1/machines` | `{ namespace, scope, providers, machines: [...] }` |
+| `POST` | `/v1/machines/offers` | machine body: the 10 best Vast offers for it (nothing rented) |
 | `GET` | `/v1/machines/costs` | spend per owner (24 h, month, committed), per holder, per machine; global for an admin |
 | `GET` | `/v1/machines/:id` | one machine: `status` (`creating`, `running`, `released`, `failed`), `ip`, `ports` (`"22/tcp"` → public port), `usdPerHour`, `costUsd`, `deadlineAt`, `endReason` |
 | `DELETE` | `/v1/machines/:id` | release now (`endReason: "deleted"`) |
@@ -841,6 +841,7 @@ Machine body:
 | `onstart` | bash run as root once the host is up (machines only) |
 | `env` | container environment; values never come back (only `envKeys`) |
 | `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `vm` | `true`: a Vast KVM virtual machine (hosts with `vms_enabled`) instead of a container; `image` defaults to `docker.io/vastai/kvm:ubuntu_terminal` and must be a `docker.io/vastai/kvm` tag; `sshPublicKey` goes on the Vast account (a VM reads only those); `machineType: "any"` takes any GPU |
 | `minCpuCores` / `minRamGb` | Vast host with at least that many effective CPU cores / GB of RAM; sends a `cheapest` request to Vast, 400 on Scaleway/RunPod (name a `machineType` that has them) |
 | `holder` | the agent inside the owner (its own 24 h cap) |
 
@@ -1102,6 +1103,6 @@ key, `403` with a valid non-admin key.
   "stages": { "…": "same as GET /health?details=1" }, "warnings": [],
   "declared": [{ "name": "parle-speech", "state": "in_sync", "reason": null, "image": "ghcr.io/marcosremar/parle-speech:<sha>" }],
   "deployments": { "deployments": 2, "replicas": 1, "listError": null,
-    "items": [{ "name": "parle-qwen-tts", "status": "ready", "replicas": 1, "ready": 1, "lastError": null }] }
+    "items": [{ "name": "parle-speech", "status": "ready", "replicas": 1, "ready": 1, "lastError": null }] }
 }
 ```

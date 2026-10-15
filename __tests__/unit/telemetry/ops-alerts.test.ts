@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createOpsAlerts, GPU_OUTSIDE_WINDOW_MS, GPU_OUTSIDE_WINDOW_PARK_MS, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS, type OpsAlert } from '../../../src/telemetry/ops-alerts';
+import {
+  ACCOUNT_REFUSED_REPEAT_MS, CLASS_GPU_READY_MS, createOpsAlerts, GPU_OUTSIDE_WINDOW_MS, GPU_OUTSIDE_WINDOW_PARK_MS, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS, type OpsAlert,
+} from '../../../src/telemetry/ops-alerts';
 import type { ChainReport } from '../../../src/config/stage-chains';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
@@ -113,7 +115,7 @@ describe('ops alerts (O3): what reaches ALERT_WEBHOOK_URL', () => {
     const inClass = rig(0, '2026-10-12T15:30:00Z');
     for (let i = 0; i < 4; i++) { inClass.alerts.fromDeployments(views()); inClass.advance(30 * 60_000); }
     await flush();
-    expect(inClass.sent).toEqual([]);
+    expect(inClass.sent.filter(a => a.event === 'gpu.outside_window')).toEqual([]);
   });
 
   it('a GPU up 60 min outside its window, no class open, no explicit warm, is parked; again 60 min later if still up', () => {
@@ -204,5 +206,124 @@ describe('the controller says when a replica with sessions disappears', () => {
     cloud.machines.delete(id);
     await until(() => logs.some(([m]) => m === 'deployments: replica gone'), 3000);
     expect(logs.find(([m]) => m === 'deployments: replica gone')![1]).toMatchObject({ deployment: 'speech', id, busy: expect.any(Number) });
+  });
+});
+
+describe('a provider account refusal (incident 13/10/2026)', () => {
+  const REFUSED = {
+    deployment: 'speech-stack', provider: 'scaleway', place: 'scaleway L4-1-24G@fr-par-2', reason: 'permissão negada (IAM)', fix: 'corrija a chave', status: 403, next: 'vast',
+    error: 'scaleway HTTP 403: {"type":"permissions_denied"}',
+  };
+
+  it('is urgent, says it will not fix itself, repeats every hour while it lasts, and shows on the overview and the GPU page', async () => {
+    const { createIncidents } = await import('../../../src/telemetry/incidents');
+    const { opsAlertMail } = await import('../../../src/telemetry/alert-email');
+    const { demoSnapshot } = await import('../../__fixtures__/admin-snapshot');
+    const { renderGpuDetail, renderStatus } = await import('../../../src/admin-page/pages');
+    let t = Date.parse('2026-10-13T15:40:00Z');
+    const incidents = createIncidents({ now: () => t });
+    const sent: OpsAlert[] = [];
+    const alerts = createOpsAlerts(a => { sent.push(a); }, () => t, OPS_ALERT_DEDUP_MS, 0, incidents);
+    for (let minute = 0; minute <= 125; minute += 5) {
+      alerts.fromDeploymentLog('deployments: provider account refused', minute === 30 ? { ...REFUSED, deployment: 'parle-qwen-tts', next: null } : REFUSED);
+      t += 5 * 60_000;
+    }
+    await flush();
+    expect(sent.map(a => [a.event, a.key])).toEqual(Array(3).fill(['provider.account_refused', 'scaleway']));
+    expect(ACCOUNT_REFUSED_REPEAT_MS).toBe(60 * 60_000);
+    const mail = opsAlertMail(sent[0]!)!;
+    expect(mail).toMatchObject({
+      level: 'urgent', subject: 'a Scaleway recusou criar servidor: permissão negada (IAM) — não se resolve sozinho: corrija a chave; usando a Vast',
+    });
+    expect(mail.body).toContain('Isto não se resolve sozinho');
+    expect(incidents.list().filter(i => !i.endedAt).map(i => i.event)).toEqual(['provider.account_refused']);
+
+    const s = { ...demoSnapshot(t), incidents: incidents.list() };
+    const opts = { now: t, csrf: 'c', actor: 'marcos', message: null, app: null };
+    expect(renderStatus('n', s, opts)).toContain('Provedor recusou a conta (permissão ou chave): não se resolve sozinho');
+    expect(renderGpuDetail('n', s, 'speech-stack', opts)).toContain('Provedor recusou a conta');
+    expect(renderGpuDetail('n', s, 'babelcast-3090', opts)).not.toContain('Provedor recusou a conta');
+  });
+
+  it('a 403 in the janitor sweep, every 5 min for 15 h, is one urgent alert per hour, never a silent log', async () => {
+    const { opsAlertMail } = await import('../../../src/telemetry/alert-email');
+    const { alerts, sent, advance } = rig();
+    for (let minute = 0; minute < 15 * 60; minute += 5) {
+      alerts.fromDeploymentLog('janitor: sweep failed', { error: 'scaleway GET https://api.scaleway.com/block/v1alpha1/zones/fr-par-2/volumes: HTTP 403' });
+      advance(5 * 60_000);
+    }
+    alerts.fromDeploymentLog('janitor: sweep failed', { error: 'scaleway GET https://api.scaleway.com/instance/v1/zones/fr-par-2/servers: HTTP 503' });
+    await flush();
+    expect(sent).toHaveLength(15);
+    expect(new Set(sent.map(a => `${a.event}|${a.key}`))).toEqual(new Set(['provider.account_refused|scaleway']));
+    expect(opsAlertMail(sent[0]!)).toMatchObject({
+      level: 'urgent', subject: 'a Scaleway recusou a limpeza do gateway (janitor): permissão negada (IAM) — não se resolve sozinho: corrija a chave',
+    });
+  });
+
+  it('a create that failed on a 401/403 is the urgent account alert, not «o gateway tenta de novo sozinho»', async () => {
+    const { alerts, sent } = rig();
+    alerts.fromDeploymentLog('deployments: create failed', {
+      deployment: 'parle-qwen-tts', error: 'create: scaleway HTTP 403: {"type":"permissions_denied","resource":"compute_servers","action":"create"}',
+    });
+    await flush();
+    expect(sent.map(a => [a.event, a.key, a.data.headline])).toEqual([[
+      'provider.account_refused', 'scaleway', 'a Scaleway recusou criar servidor para parle-qwen-tts: permissão negada (IAM) — não se resolve sozinho: corrija a chave',
+    ]]);
+  });
+
+  it('a refusal for lack of credit is the credit alert', async () => {
+    const { alerts, sent } = rig();
+    alerts.fromDeploymentLog('deployments: provider account refused', { ...REFUSED, provider: 'vast', reason: 'sem crédito', fix: 'recarregue a conta', status: null, next: 'scaleway' });
+    await flush();
+    expect(sent.map(a => [a.event, a.key, a.data.headline])).toEqual([
+      ['provider.credit_exhausted', 'vast', 'a Vast recusou criar servidor: sem crédito — não se resolve sozinho: recarregue a conta; usando a Scaleway'],
+    ]);
+  });
+});
+
+describe('class GPU not ready 20 min after the warm window opens (incident 13/10/2026, item D)', () => {
+  const CLASS = [{ days: [1, 2, 3, 4], start: '17:30', end: '20:30', timeZone: 'Europe/Paris', minReplicas: 1 }];
+  const gpu = (name: string, provider: 'vast' | 'scaleway', phase: string | null, lastError: string | null) => ({
+    name, spec: { provider, warmSchedule: CLASS } as never, lastError, lastPlacement: null,
+    replicas: phase ? [{ id: `${name}-1`, phase, provider, pricePerHour: 0.5, ageSeconds: 60 } as never] : [],
+  });
+
+  it('names the deployment, its provider and the last error; quiet before 20 min and once a replica is ready', async () => {
+    const { createIncidents } = await import('../../../src/telemetry/incidents');
+    const { opsAlertMail } = await import('../../../src/telemetry/alert-email');
+    let t = Date.parse('2026-10-14T15:30:00Z');
+    const incidents = createIncidents({ now: () => t });
+    const sent: OpsAlert[] = [];
+    const alerts = createOpsAlerts(a => { sent.push(a); }, () => t, OPS_ALERT_DEDUP_MS, 0, incidents);
+    const speechError = 'create: no replica placed; skipped: vast RTX 5090: out_of_stock: no vast offer for RTX 5090 under €0.85/h near FR';
+    const qwenError = 'create: no replica placed; skipped: scaleway L4-1-24G@fr-par-2: Scaleway desativada (dono, 14/10/2026)';
+    const views = [gpu('parle-speech', 'vast', 'booting', speechError), gpu('parle-qwen-tts', 'scaleway', null, qwenError)];
+
+    t += CLASS_GPU_READY_MS - 60_000;
+    alerts.fromDeployments(views);
+    await flush();
+    expect(sent).toEqual([]);
+
+    t += 60_000;
+    alerts.fromDeployments(views);
+    await flush();
+    expect(sent.map(a => [a.event, a.key])).toEqual([['class.gpu_not_ready', 'parle-speech'], ['class.gpu_not_ready', 'parle-qwen-tts']]);
+    expect(sent[0]!.data).toMatchObject({ gpuProvider: 'vast', error: speechError, replicas: 1 });
+    expect(opsAlertMail(sent[0]!)).toMatchObject({
+      level: 'urgent', subject: `aula: parle-speech sem GPU pronta 20 min depois de abrir a janela (Vast): ${speechError}`,
+    });
+    expect(opsAlertMail(sent[1]!)!.subject).toContain('(Scaleway): create: no replica placed; skipped: scaleway L4-1-24G@fr-par-2: Scaleway desativada');
+
+    t += 5 * 60_000;
+    alerts.fromDeployments([gpu('parle-speech', 'vast', 'ready', null), views[1]!]);
+    await flush();
+    expect(sent).toHaveLength(2);
+    expect(incidents.list().filter(i => !i.endedAt).map(i => i.key)).toEqual(['parle-qwen-tts']);
+
+    t = Date.parse('2026-10-16T15:55:00Z');
+    alerts.fromDeployments(views);
+    await flush();
+    expect(sent).toHaveLength(2);
   });
 });

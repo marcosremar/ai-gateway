@@ -95,6 +95,31 @@ describe('telemetry over HTTP (proxy public + admin routes)', () => {
   });
 });
 
+describe('gateway events of a request', () => {
+  afterEach(() => setGatewayTelemetrySink(null));
+
+  it('carry the user of the key that called, and the store keeps it as the app', async () => {
+    const seen: Array<[string, string | undefined]> = [];
+    setGatewayTelemetrySink((e, caller) => seen.push([e.event, caller]));
+    const server = createProxyServer({
+      apiKeys: ['app-key:parle'], providers: {},
+      customRoutes: [{ method: 'GET', path: '/x', handler: async (_req, res) => { emitGatewayEvent('route.served'); res.end('ok'); } }],
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    try {
+      const res = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/x`, { headers: { Authorization: 'Bearer app-key' } });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+    emitGatewayEvent('autoscale.decision');
+    expect(seen).toEqual([['route.served', 'parle'], ['autoscale.decision', undefined]]);
+    const store = new TelemetryStore();
+    new TelemetryIngest(store).ingestOwn(ev({ source: 'gateway' }) as TelemetryEvent, 'parle');
+    expect(store.rows()[0]).toMatchObject({ source: 'gateway', app: 'parle' });
+  });
+});
+
 describe('trace context', () => {
   it('parses W3C traceparent and rejects invalid ones', () => {
     expect(parseTraceparent(`00-${TRACE}-00f067aa0ba902b7-01`)).toEqual({ traceId: TRACE, parentSpanId: '00f067aa0ba902b7', sampled: true });

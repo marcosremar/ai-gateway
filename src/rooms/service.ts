@@ -10,7 +10,7 @@ import { RoomDubber, type RoomClip, type RoomSynthesize } from './dub';
 import type { RoomStore } from './store';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 import {
-  CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput,
+  CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput, type UpdateRoomInput,
 } from './validate';
 
 /** A connected viewer (the WS layer implements it). */
@@ -122,6 +122,7 @@ export class RoomService {
     const meta: RoomMeta = {
       version: 1, code, title: input.title, originalLang: input.originalLang, languages: input.languages,
       createdAt: now, lastActivityAt: now, ended: false, endedAt: null, tokenHash: hashToken(publishToken), ownerId,
+      youtubeUrl: input.youtubeUrl,
       ...(input.serverDub ? {} : { serverDub: false }),
     };
     await this.opts.store.saveMeta(meta);
@@ -189,6 +190,7 @@ export class RoomService {
     return {
       code: m.code, title: m.title, originalLang: m.originalLang, languages: m.languages,
       createdAt: new Date(m.createdAt).toISOString(), ended: m.ended, expiresAt: this.expiresAt(m),
+      youtubeUrl: typeof m.youtubeUrl === 'string' ? m.youtubeUrl : null,
       ...(this.dubber ? { dubLangs: this.dubLangs(room) } : {}), lines: room.lines,
     };
   }
@@ -268,6 +270,22 @@ export class RoomService {
     room.clipLangs.add(audio.lang);
     this.dubber?.onPresenterClip(room, audio.lineId, audio.lang);
     this.broadcast(room, { type: 'audio', lineId: audio.lineId, lang: audio.lang, wav: audio.wav }, v => v.wantsAudio(audio.lang));
+  }
+
+  /**
+   * Changes the room's YouTube link (also after the end: the recording stays at the same link). Persisted, then
+   * broadcast to the open pages as `{"type":"update"}`; an unchanged value is a no-op.
+   */
+  async update(room: LiveRoom, input: UpdateRoomInput): Promise<void> {
+    const before = typeof room.meta.youtubeUrl === 'string' ? room.meta.youtubeUrl : null;
+    if (before === input.youtubeUrl) return;
+    room.meta.youtubeUrl = input.youtubeUrl;
+    room.meta.lastActivityAt = this.now();
+    room.touchedAt = this.now();
+    room.metaSavedAt = this.now();
+    await this.opts.store.saveMeta(room.meta);
+    this.log('rooms: updated', { code: room.meta.code, youtube: input.youtubeUrl !== null });
+    this.broadcast(room, { type: 'update', youtubeUrl: input.youtubeUrl });
   }
 
   /** A clip the server synthesized: only to the viewers listening to that language. */

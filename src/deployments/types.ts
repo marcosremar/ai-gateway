@@ -13,7 +13,10 @@
  * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
+import type { BootReport } from './boot-events';
+import type { BootPhase, BootRecord, BootState } from './boot-track';
 import type { HostRecord } from './host-reputation';
+import type { StuckRetry } from './stuck-retry';
 import type { RttBaseline } from './rtt-gate';
 
 export type DeploymentProvider = 'scaleway' | 'vast';
@@ -46,8 +49,6 @@ export interface DeploymentSpec {
   image: string;
   /** Port the container listens on (ignored in boot-script mode: the script serves 127.0.0.1:8000). */
   port: number;
-  /** App instances on one machine (boot-script mode): ports `port..port+seats-1`, served by nginx under `/c/<n>/`. */
-  seats: number;
   /**
    * Boot-script mode: instead of `docker run image`, the replica runs this bash script as root after the gateway's
    * token-gated nginx is up. The script must serve the app on `127.0.0.1:8000` and answer `healthPath` there once
@@ -72,6 +73,7 @@ export interface DeploymentSpec {
    * L40S need different STT/TTS concurrency) while an explicit `env` value still wins. Never returned by the API.
    */
   envByMachineType?: Record<string, Record<string, string>>;
+  maxEurPerHourByMachineType?: Record<string, number>;
   /** Credentials for a private registry. Never returned by the API. */
   registryAuth?: RegistryAuth;
   /** Path the replica answers 2xx on once the model is loaded. */
@@ -126,6 +128,7 @@ export interface DeploymentSpec {
   maxHours: number;
   /** Paused deployments keep their spec but run no replicas and refuse invokes. */
   paused: boolean;
+  autoRetryStuckBoot?: boolean;
   /**
    * Reached from the internet on these ports, not only through the gateway (WebRTC, TLS with its own certificate):
    * a reserved IP that outlives the replicas (DNS keeps pointing at it), a firewall that opens only these ports plus
@@ -153,8 +156,10 @@ export interface DeploymentSpec {
   near?: string;
   minCpuCores?: number;
   minRamGb?: number;
+  vm?: boolean;
   /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
   allowFar?: boolean;
+  euOnly?: boolean;
   /**
    * Vast: a freshly rented host whose measured RTT from the gateway (median, ms) is above this is released as
    * `too-far` and avoided 24 h (`rtt-gate.ts`). With a baseline (see `maxRttExcessMs`) it is an optional upper bound;
@@ -222,6 +227,7 @@ export interface DeploymentRecord {
   network?: DeploymentNetwork;
   /** Client warm window (`POST /v1/deployments/:name/warm`): keep `replicas` up until `until` (ms). */
   warm?: { replicas: number; until: number };
+  gpuType?: { machineType: string; by: string; at: number };
   hold?: ScalingHold;
   spend?: { month: string; eur: number; at: number };
   measured?: Record<string, MeasuredTimes>;
@@ -319,6 +325,8 @@ export interface ReplicaMachine {
   tls?: boolean;
   /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
   bootError?: string;
+  providerStatus?: string;
+  providerMessage?: string;
 }
 
 export interface CreateReplicaInput {
@@ -326,6 +334,7 @@ export interface CreateReplicaInput {
   replicaToken: string;
   tokenKey?: string;
   cloudInit: string;
+  bootReport?: BootReport;
   namespace: string;
   /** user_data keys → bytes (boot-script `files`). */
   files?: Record<string, Uint8Array>;
@@ -360,6 +369,7 @@ export interface DeploymentBackend {
    * catalog price check (`hourlyPrice` means nothing per zone there).
    */
   readonly marketPriced?: boolean;
+  readonly gpuOff?: string | null;
   /** RTT (median ms) from the gateway to the replica's front, null when no sample came back (the RTT gate). */
   measureRtt?(machine: ReplicaMachine): Promise<number | null>;
   measureBaselineRtt?(near: string): Promise<RttBaseline | null>;
@@ -377,6 +387,7 @@ export interface DeploymentBackend {
   previewOffers?(spec: DeploymentSpec): Promise<OfferPreview[]>;
   offersReport?(spec: DeploymentSpec): Promise<OffersReport>;
   creditIssue?(): CreditIssue | null;
+  containerLogs?(machine: ReplicaMachine, tail: number): Promise<string>;
 }
 
 export interface CreditIssue { provider: DeploymentProvider; message: string; balanceUsd: number | null; floorUsd: number; since: number; at: number }
@@ -458,6 +469,7 @@ export interface ReplicaView {
   ip: string | null;
   tls?: boolean;
   providerState: string;
+  provider: DeploymentProvider;
   zone: string;
   machineType: string;
   pricePerHour: number | null;
@@ -476,6 +488,14 @@ export interface ReplicaView {
   hostEndsInMinutes: number | null;
   /** @deprecated the old name of `hostEndsInMinutes`, kept for clients that still read it. */
   expiresInMinutes: number | null;
+}
+
+export interface GpuTypeView {
+  current: string;
+  default: string;
+  choices: Array<{ machineType: string; maxEurPerHour: number }>;
+  setBy: string | null;
+  setAt: string | null;
 }
 
 export interface DeploymentView {
@@ -507,5 +527,15 @@ export interface DeploymentView {
   realtime: { active: number; capacity: number; refusedSessions: number; scalingOut: boolean } | null;
   sessions: number;
   hold: { replicas: number; until: string } | null;
+  pinned: { idleMinutes: number | null; parked: boolean } | null;
+  gpuType: GpuTypeView | null;
+  boot: {
+    active: Array<Omit<BootState, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
+    past: Array<Omit<BootRecord, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
+    retryAt: number | null;
+    expectedBootSeconds: number | null;
+    retries?: StuckRetry[];
+    retriesExhausted?: boolean;
+  };
   warnings: string[];
 }

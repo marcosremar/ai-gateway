@@ -137,6 +137,7 @@ export function createWsRelay(service: RealtimeService, opts: WsRelayOptions = {
         const edgeId = session.edgeSessionId ?? sid;
         fetch(`${session.base}/__aigw/rt/session/${encodeURIComponent(edgeId)}`, {
           method: 'DELETE', headers: { 'X-Aigw-Token': session.replicaToken }, signal: AbortSignal.timeout(5_000),
+          ...replicaTls(session.base, session.replicaToken),
         }).catch(() => {});
       }
       service.forget(sid);

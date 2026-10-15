@@ -33,7 +33,6 @@
  */
 
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'http';
-import { randomUUID } from 'crypto';
 import type { Socket } from 'net';
 import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
@@ -44,6 +43,7 @@ import type { AppGpuHealth } from './app-gpu-health';
 import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
 import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
 import type { ClientGpu } from './client-gpu';
+import type { Lease } from './controller-state';
 import { mayWakeNow, type GpuPolicy } from '../config/access-keys';
 import { classWindowOpen } from './autoscale';
 import { createLogger } from '../logger';
@@ -61,9 +61,6 @@ const MAX_ADMIN_BODY = 16 * 1024 * 1024;
 const MAX_STABILITY_BODY = 512 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
 export const INVOKE_IDLE_MS = 5 * 60_000;
-/** CDP bootstrap sessions default/max TTL (the gateway keeps the machine's lease while the session is alive). */
-const CDP_DEFAULT_TTL_MS = 5 * 60_000;
-const CDP_MAX_TTL_MS = 15 * 60_000;
 const HTTP_REASON: Record<number, string> = { 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 502: 'Bad Gateway', 503: 'Service Unavailable' };
 const statusText = (status: number) => HTTP_REASON[status] ?? 'Error';
 const HOP_BY_HOP = new Set([
@@ -173,22 +170,6 @@ export function replicaTarget(base: string, rest: string, query: string): URL | 
   return url.origin === origin && url.pathname.startsWith('/') ? url : null;
 }
 
-/**
- * Invoke path with an optional seat prefix `/c/<n>/…`: the nginx maps each seat to its own app port on the same
- * host (`nginxConfig`), so the target keeps the prefix and the seat count bounds it. Without the prefix, plain.
- */
-export function seatInvokeTarget(base: string, rest: string, query: string, seats: number): URL | null {
-  const match = /^c\/([0-9]+)(?:\/(.*))?$/.exec(rest);
-  if (!match) return replicaTarget(base, rest, query);
-  const index = Number(match[1]);
-  if (!Number.isInteger(index) || index < 0 || index >= seats) return null;
-  // replicaTarget builds the path with a leading slash (it cannot keep a base path), so validate the seat's own
-  // rest first and then place it under the /c/<n>/ prefix.
-  const plain = replicaTarget(base, match[2] ?? '', query);
-  if (!plain) return null;
-  return new URL(`${base}/c/${index}${plain.pathname}${plain.search}`);
-}
-
 function withoutSecrets(spec: ProfileSpec): ProfileSpec {
   const { env, envByMachineType, registryAuth, bootScript, files, fileUrls, ...rest } = spec as Record<string, unknown>;
   return rest as ProfileSpec;
@@ -257,82 +238,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
   const isAdmin = opts.isAdmin ?? (() => false);
   const fetchImpl = opts.fetchImpl ?? fetch;
   const idleMs = opts.invokeIdleMs ?? (Number(process.env.INVOKE_IDLE_TIMEOUT_MS) || INVOKE_IDLE_MS);
-  const relayIdleMs = opts.relayIdleMs ?? (Number(process.env.RELAY_IDLE_TIMEOUT_MS) || 5 * 60_000);
-
-  /** CDP bootstrap sessions (`/v1/deployments/:name/cdp`): the client talks to the replica DIRECTLY with the lease
-   * token, and the gateway keeps the lease alive only while the session is renewed (`POST …/cdp/keepalive`) or
-   * until the TTL. In-memory: a gateway restart leaves the lease to the controller's own recovery. */
-  const cdpSessions = new Map<string, { deadline: number; release: () => void }>();
-  const cdpTtlMs = (req: IncomingMessage) => Math.min(
-    Math.max(parseInt(String(req.headers['x-cdp-ttl'] ?? ''), 10) * 1000 || CDP_DEFAULT_TTL_MS, 60_000),
-    CDP_MAX_TTL_MS,
-  );
-  const cdpSweeper = (() => {
-    let timer: ReturnType<typeof setInterval> | null = null;
-    return () => {
-      if (timer) return;
-      timer = setInterval(() => {
-        const now = Date.now();
-        for (const [id, session] of cdpSessions) {
-          if (session.deadline < now) {
-            cdpSessions.delete(id);
-            try { session.release(); console.log(`[cdp] sessão ${id.slice(0, 8)} expirada, lease liberada`); }
-            catch (err) { console.error(`[cdp] release da sessão ${id.slice(0, 8)} FALHOU:`, String(err)); }
-          }
-        }
-      }, 30_000);
-      timer.unref?.();
-    };
-  })();
-
-  /** The client can talk to the replica DIRECTLY (`base` + token, no gateway hop for the frames). */
-  async function cdpBootstrap(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
-    const waitHeader = req.headers['x-aigw-wait'];
-    const waitMs = typeof waitHeader === 'string' && /^\d+$/.test(waitHeader) ? Math.min(Number(waitHeader), 840) * 1000 : undefined;
-    const abort = new AbortController();
-    req.on('close', () => abort.abort());
-    let lease: Awaited<ReturnType<DeploymentController['acquire']>>;
-    try {
-      lease = await controller.acquire(name, { waitMs, signal: abort.signal });
-    } catch (err) {
-      const status = err instanceof DeploymentError ? err.status : 502;
-      return send(res, status, { error: err instanceof Error ? err.message : String(err), ...(status === 503 ? { status: 'warming' } : {}) },
-        err instanceof DeploymentError && err.retryAfterSeconds ? { 'Retry-After': err.retryAfterSeconds } : {});
-    }
-    const base = replicaBase(lease.machine, lease.exposed);
-    const replicaTlsOpts = replicaTls(base, lease.token);
-    let wsPath: string | null = null;
-    try {
-      const version = await fetchImpl(`${base}/json/version`, {
-        headers: { 'X-Aigw-Token': lease.token }, signal: AbortSignal.timeout(10_000), ...replicaTlsOpts,
-      });
-      if (version.ok) {
-        const body = await version.json().catch(() => null) as { webSocketDebuggerUrl?: string } | null;
-        if (body?.webSocketDebuggerUrl) wsPath = new URL(body.webSocketDebuggerUrl).pathname;
-      }
-    } catch { /* the client discovers /json/version itself on `base` */ }
-    const sessionId = randomUUID();
-    const ttlMs = cdpTtlMs(req);
-    let released = false;
-    const release = () => { if (!released) { released = true; lease.done(false); } };
-    cdpSessions.set(sessionId, { deadline: Date.now() + ttlMs, release });
-    cdpSweeper();
-    return send(res, 200, {
-      sessionId, base, wsBase: base.replace(/^http/, 'ws'), token: lease.token,
-      ...(wsPath ? { wsPath } : {}),
-      ...(replicaTlsOpts.tls ? { tls: replicaTlsOpts.tls } : {}),
-      expiresInSeconds: Math.floor(ttlMs / 1000),
-    });
-  }
-
-  async function cdpKeepalive(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = await readJson(req).catch(() => null) as { sessionId?: string } | null;
-    const session = typeof body?.sessionId === 'string' ? cdpSessions.get(body.sessionId) : undefined;
-    if (!session) return send(res, 404, { error: 'cdp session not found or expired' });
-    const ttlMs = cdpTtlMs(req);
-    session.deadline = Date.now() + ttlMs;
-    return send(res, 200, { expiresInSeconds: Math.floor(ttlMs / 1000) });
-  }
+  const relayIdleMs = opts.relayIdleMs ?? (Number(process.env.RELAY_IDLE_TIMEOUT_MS) || INVOKE_IDLE_MS);
 
   /**
    * The app this request acts for: `X-App` from an admin key, else the key's own user; null = admin acting globally.
@@ -391,9 +297,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (sub === 'routes' && !imageName) {
       if (method === 'GET') return send(res, 200, { app, routes: registry.get(app)?.routes ?? {} });
       if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
-      // An admin sets any route; the app's own key only reorders/re-aliases what it already has, plus its own deployments.
-      const { routes, cloudFallbackAdded } = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? {}
-        : { restrictedTo: (deployment) => controller.get(deployment)?.app === app });
+      // An admin sets any route but to another app's deployment; the app's own key only reorders/re-aliases what it already has, plus its own deployments.
+      const appOf = (deployment: string) => controller.get(deployment)?.app ?? null;
+      const { routes, cloudFallbackAdded } = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? { appOf }
+        : { appOf, restrictedTo: (deployment) => appOf(deployment) === app });
       if (cloudFallbackAdded.length) opts.log?.('apps: cloud fallback appended to chains that had none', { app, added: cloudFallbackAdded });
       opts.onRoutesChange?.();
       return send(res, 200, { app, routes, ...(cloudFallbackAdded.length ? { cloudFallbackAdded } : {}) });
@@ -493,7 +400,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         recordNoWakeSkip();
         return send(res, 503, { error: err.message, status: 'cold', code: 'cold', noWake: true }, { 'Retry-After': err.retryAfterSeconds ?? 30 });
       }
-      const target = seatInvokeTarget(replicaBase(lease.machine, lease.exposed), rest, query, controller.get(name)?.spec?.seats ?? 1);
+      const target = replicaTarget(replicaBase(lease.machine, lease.exposed), rest, query);
       if (!target) { lease.done('cancelled'); return send(res, 400, { error: 'invoke path does not resolve on the replica' }); }
       let upstream: Response;
       try {
@@ -542,44 +449,57 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
 
   /**
    * WebSocket rung of `invoke`: the client's upgrade goes to a ready replica with the lease token, and the raw
-   * sockets are piped both ways — frames pass untouched (CDP, SSE-upgraded streams). The replica's nginx does the
-   * handshake against the caller's own `Sec-WebSocket-Key`; an upstream refusal answers with a plain HTTP error.
+   * sockets are piped both ways — frames pass untouched (CDP, the speech-stack's /ws/audio-stream). The replica's
+   * nginx does the handshake against the caller's own `Sec-WebSocket-Key`; an upstream refusal answers with a plain
+   * HTTP error. Same scope, no-wake and header rules as the HTTP invoke.
    */
   async function upgradeInvoke(
-    req: IncomingMessage, socket: Socket, _head: Buffer, name: string, rest: string, query: string,
+    req: IncomingMessage, socket: Socket, head: Buffer, name: string, rest: string, query: string,
   ): Promise<boolean> {
     if (!isAdmin(req)) {
       const own = appOf(req);
       if (!own || controller.get(name)?.app !== own) { socketError(socket, 403, `this API key cannot invoke deployment '${name}'`); return true; }
     }
     if (!replicaTarget('http://replica.invalid', rest, query)) { socketError(socket, 400, 'invoke path must be a plain relative path'); return true; }
-    req.socket?.setTimeout(0);
+    socket.setTimeout(0);
     const waitHeader = req.headers['x-aigw-wait'];
     const waitMs = typeof waitHeader === 'string' && /^\d+$/.test(waitHeader) ? Math.min(Number(waitHeader), 840) * 1000 : undefined;
+    const noWake = noWakeActive(name);
     const abort = new AbortController();
     let upgraded = false;
-    let released = false;
-    let lease: Awaited<ReturnType<DeploymentController['acquire']>> | null = null;
-    const release = (reason?: Parameters<NonNullable<Awaited<ReturnType<DeploymentController['acquire']>>['done']>>[0]) => {
-      if (lease && !released) { released = true; lease.done(reason ?? false); }
+    let lease: Lease | null = null;
+    const release = (outcome: Parameters<Lease['done']>[0] = false) => {
+      const held = lease;
+      lease = null;
+      held?.done(outcome);
     };
-    socket.on('close', () => release());
+    socket.on('close', () => { abort.abort(); release(upgraded ? false : 'cancelled'); });
     try {
-      lease = await controller.acquire(name, { waitMs, signal: abort.signal });
+      lease = await controller.acquire(name, noWake ? { waitMs: 0, signal: abort.signal, noWake: true } : { waitMs, signal: abort.signal });
     } catch (err) {
+      if (abort.signal.aborted) return true;
+      if (noWake && err instanceof DeploymentError && err.status === 503) recordNoWakeSkip();
       const status = err instanceof DeploymentError ? err.status : 502;
-      socketError(socket, status, err instanceof Error ? err.message : String(err));
+      socketError(socket, status, err instanceof Error ? err.message : String(err),
+        err instanceof DeploymentError && err.retryAfterSeconds ? { 'Retry-After': err.retryAfterSeconds } : {});
       return true;
     }
-    const target = seatInvokeTarget(replicaBase(lease.machine, lease.exposed), rest, query, controller.get(name)?.spec?.seats ?? 1);
+    if (socket.destroyed) { release('cancelled'); return true; }
+    const target = replicaTarget(replicaBase(lease.machine, lease.exposed), rest, query);
     if (!target) { release('cancelled'); socketError(socket, 400, 'invoke path does not resolve on the replica'); return true; }
-    const headers: Record<string, string> = { host: target.host, 'x-aigw-token': lease.token };
+    lease.signal?.addEventListener('abort', () => socket.destroy(), { once: true });
+    const headers: Record<string, string> = { host: target.host, connection: 'Upgrade', upgrade: 'websocket', 'x-aigw-token': lease.token };
     for (const [k, v] of Object.entries(req.headers)) {
-      if (typeof v === 'string' && k !== 'host' && k !== 'x-aigw-token') headers[k] = v;
+      if (!HOP_BY_HOP.has(k) && typeof v === 'string') headers[k] = v;
     }
-    // TLS-fronted replicas (Vast) speak TLS on :80; the CA derives from the replica token.
     const { tls } = replicaTls(target.href, lease.token);
     const proxyReq = httpRequest(target, { method: 'GET', headers, signal: abort.signal, ...(tls ? { ca: tls.ca } : {}) });
+    proxyReq.on('response', (upstreamRes: IncomingMessage) => {
+      upstreamRes.resume();
+      const status = upstreamRes.statusCode ?? 502;
+      release(status >= 500 ? 'errored' : false);
+      socketError(socket, status, `the replica refused the WebSocket (HTTP ${status})`);
+    });
     proxyReq.on('upgrade', (upstreamRes: IncomingMessage, proxySocket: Socket, proxyHead: Buffer) => {
       upgraded = true;
       const out = ['HTTP/1.1 101 Switching Protocols'];
@@ -589,32 +509,31 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       }
       socket.write(out.join('\r\n') + '\r\n\r\n');
       if (proxyHead.length) socket.write(proxyHead);
+      if (head.length) proxySocket.write(head);
       proxySocket.on('error', () => socket.destroy());
       socket.on('error', () => proxySocket.destroy());
       proxySocket.pipe(socket);
       socket.pipe(proxySocket);
-      // Backpressure is native to pipe(); the gap this closes is the LEAK: a client that stops talking holds the
-      // machine's lease until nginx's 900 s read timeout. Cut at `relayIdleMs` of silence and release.
+      // A client that stops talking would hold the machine's lease until nginx's 900 s read timeout: cut it at
+      // `relayIdleMs` of silence both ways and release.
       let lastActivity = Date.now();
       const touch = () => { lastActivity = Date.now(); };
       socket.on('data', touch);
       proxySocket.on('data', touch);
       const idle = setInterval(() => {
-        if (Date.now() - lastActivity > relayIdleMs) {
-          clearInterval(idle);
-          // Cut the CLIENT abruptly (it stopped talking); end the UPSTREAM gently so the replica's socket closes
-          // cleanly instead of hanging on a half-open RST.
-          socket.destroy();
-          proxySocket.end();
-          release();
-        }
+        if (Date.now() - lastActivity <= relayIdleMs) return;
+        clearInterval(idle);
+        proxySocket.end();
+        socket.destroy();
       }, Math.min(30_000, Math.max(1_000, Math.floor(relayIdleMs / 2))));
       idle.unref?.();
       socket.on('close', () => { clearInterval(idle); proxySocket.destroy(); });
       proxySocket.on('close', () => { clearInterval(idle); socket.destroy(); });
     });
     proxyReq.on('error', () => {
-      if (!upgraded) { release(true); socketError(socket, 502, 'replica unreachable'); }
+      if (upgraded || abort.signal.aborted) return;
+      release(true);
+      socketError(socket, 502, 'replica unreachable');
     });
     proxyReq.end();
     return true;
@@ -711,17 +630,6 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       const rest = parts.slice(4).join('/') + (path.endsWith('/') && parts.length > 4 ? '/' : '');
       return invoke(req, res, name, rest, query, method);
     }
-    if (action === 'cdp') {
-      // Same scope as invoke: admin, or the key of the app the deployment belongs to.
-      if (!isAdmin(req)) {
-        const own = appOf(req);
-        if (!own || controller.get(name)?.app !== own) return send(res, 403, { error: `this API key cannot open a CDP session on deployment '${name}'` });
-      }
-      req.socket?.setTimeout(0);
-      if (method === 'POST' && parts.slice(4).join('/') === 'keepalive') return cdpKeepalive(req, res);
-      if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
-      return cdpBootstrap(req, res, name);
-    }
     if ((action === 'start' || action === 'extend') && method === 'POST') {
       if (!opts.clientGpu) return send(res, 404, { error: 'GPU start is not enabled on this gateway' });
       const key = isAdmin(req) ? null : gpuClient(req, name);
@@ -759,7 +667,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
     if (action === 'offers' && method === 'GET') {
       admin();
-      const preview = await controller.offers(name);
+      const params = new URLSearchParams(query.slice(1));
+      const cap = Number(params.get('maxEurPerHour'));
+      const preview = await controller.offers(name, params.get('machineType') ?? undefined, cap > 0 && cap <= 50 ? cap : undefined);
       return preview ? send(res, 200, { deployment: name, ...preview }) : send(res, 404, { error: `deployment '${name}' has no vast placement` });
     }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
@@ -839,14 +749,15 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     });
     return true;
   };
-  (handle as unknown as { upgrade: typeof upgrade }).upgrade = upgrade;
-  return handle as unknown as typeof handle & { upgrade: typeof upgrade };
+  return Object.assign(handle, { upgrade });
 }
 
 /** Error reply on a raw (pre-upgrade) socket: the client sees a plain HTTP error, not a dropped connection. */
-function socketError(socket: Socket, status: number, error: string): void {
+function socketError(socket: Socket, status: number, error: string, headers: Record<string, string | number> = {}): void {
+  if (socket.destroyed) return;
   const body = JSON.stringify({ error: { message: error, type: status === 410 ? 'gone' : 'error' } });
-  socket.write(`HTTP/1.1 ${status} ${statusText(status)}\r\nContent-Type: application/json`
+  const extra = Object.entries(headers).map(([k, v]) => `\r\n${k}: ${v}`).join('');
+  socket.write(`HTTP/1.1 ${status} ${statusText(status)}\r\nContent-Type: application/json${extra}`
     + `\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
   socket.end();
 }

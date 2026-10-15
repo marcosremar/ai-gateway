@@ -13,7 +13,7 @@ import { probeLimitsFromEnv, spendLimitsFromEnv } from './spend-limits';
 import { createDeploymentRoutes, HttpReplicaProbe, type DeploymentRoutesOptions } from './http';
 import { ClientGpu } from './client-gpu';
 import { ScalewayDeploymentBackend, scalewayRegistryOf } from './scaleway-backend';
-import { usesScaleway } from './spec';
+import { MAX_GPU_PER_APP, SCALEWAY_GPU_OFF, usesScaleway } from './spec';
 import { VastDeploymentBackend } from './vast-backend';
 import { missingImage } from './image-check';
 import type { DeploymentBackend, DeploymentProvider, DeploymentSpec } from './types';
@@ -28,12 +28,14 @@ import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
 import { sessionsWanting } from '../realtime/external-load';
 import { SANDBOX_USER } from '../config/sandbox-env';
+import { secretValues } from '../telemetry/alert-email';
 
 export { DeploymentController, DeploymentError } from './controller';
 export { createDeploymentRoutes, HttpReplicaProbe } from './http';
 export { planReplicas, desiredReplicas } from './planner';
 export { BUILTIN_PROFILES } from './profiles';
 export { bootFilesRoute, BOOT_FILES_PATH } from './boot-files';
+export { bootEventsRoute, BOOT_EVENTS_PATH } from './boot-events';
 export { replicaCloudInit } from './cloud-init';
 export { buildSpec, SpecError } from './spec';
 export { ScalewayDeploymentBackend } from './scaleway-backend';
@@ -216,7 +218,7 @@ export function deploymentsFromEnv(
   const apps = new AppRegistry(FileAppStore.inDir(stateDir));
   const maxDevices = Number(env.APP_MAX_DEVICES);
   const devices = new AppDevices(apps, { log: opts.log, ...(maxDevices > 0 ? { maxPerApp: Math.floor(maxDevices) } : {}) });
-  const scaleway = secret ? new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY }) : undefined;
+  const scaleway = secret ? new ScalewayDeploymentBackend(secret, { projectId, registrySecret: env.SCW_REGISTRY_SECRET_KEY, gpuOff: SCALEWAY_GPU_OFF }) : undefined;
   const vast = vastKey ? new VastDeploymentBackend(vastKey, { log: opts.log, hosts: FileHostStore.inDir(stateDir), ...vastCreditFloor(env) }) : undefined;
   const backends: Partial<Record<DeploymentProvider, DeploymentBackend>> = { ...(scaleway ? { scaleway } : {}), ...(vast ? { vast } : {}) };
   const { probeTimeoutMs, busyGraceMs, unhealthyStrikes } = probeLimitsFromEnv(env);
@@ -230,12 +232,15 @@ export function deploymentsFromEnv(
     unhealthyStrikes,
     namespace: env.DEPLOYMENTS_NAMESPACE || 'default',
     publicUrl: env.AIGW_PUBLIC_URL?.trim() || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : undefined),
+    bootReporting: env.BOOT_REPORTING !== '0',
     maxTotalReplicas: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : 6,
+    maxGpuPerApp: MAX_GPU_PER_APP,
     ...spendLimitsFromEnv(env),
     pinnedIdleMaxMs: pinnedIdleMaxMs(env),
     ...(maxWait > 0 ? { maxColdStartWaitSeconds: maxWait } : {}),
     log: opts.log,
     checkImage: (image, auth) => missingImage(image, auth ?? scaleway?.registryAuthFor(image) ?? null),
+    secrets: () => secretValues(env),
   });
   const admins = opts.admins ?? adminUsersFromEnv(env);
   const adminWarning = adminListWarning(env);
@@ -276,7 +281,6 @@ export function deploymentsFromEnv(
 export function vastCreditFloor(env: Record<string, string | undefined>): { minCreditUsd?: number } {
   const floor = Number(env.VAST_MIN_CREDIT_USD);
   return env.VAST_MIN_CREDIT_USD?.trim() && Number.isFinite(floor) && floor >= 0 ? { minCreditUsd: floor } : {};
-
 }
 
 /** The janitor's view of Scaleway: build servers by tag and the project's SBS volumes, in every known zone. */

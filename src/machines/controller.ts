@@ -1,10 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { portKeys } from './backends';
+import { GPU_CAP_RULE, isGpuMachineType, MAX_GPU_PER_APP } from '../deployments/spec';
 import { JOB_LOG_LIMIT, JOB_REPORT_PATH, jobScript } from './job-script';
 import { MachineError, type JobInputSpec, type MachineInput } from './spec';
 import type { MachineStore, MachineState } from './store';
 import type {
-  JobRecord, JobStatus, JobView, MachineBackend, MachineLimits, MachineProvider, MachineRecord, MachineView, ProviderMachine,
+  JobRecord, JobStatus, JobView, MachineBackend, MachineLimits, MachineProvider, MachineRecord, MachineRequest, MachineView, ProviderMachine,
 } from './types';
 
 type Log = (msg: string, data?: Record<string, unknown>) => void;
@@ -13,6 +14,7 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const KEEP_ENDED_MS = 40 * DAY;
 const ACTIVE = new Set(['creating', 'running']);
+const isGpuRequest = (r: MachineRequest) => r.provider !== 'scaleway' || isGpuMachineType(r.machineType);
 
 export interface MachineControllerOptions {
   backends: Partial<Record<MachineProvider, MachineBackend>>;
@@ -55,6 +57,12 @@ export class MachineController {
     this.limits = opts.limits;
     this.now = opts.now ?? Date.now;
     this.log = opts.log ?? (() => {});
+  }
+
+  async offers(request: MachineRequest): Promise<unknown[]> {
+    const backend = this.opts.backends.vast;
+    if (!backend?.offers) throw new MachineError(400, 'offers are listed for vast only');
+    return (await backend.offers(request)).slice(0, 10);
   }
 
   get providers(): MachineProvider[] {
@@ -123,6 +131,14 @@ export class MachineController {
     }
   }
 
+  private checkGpuSlot(owner: string, request: MachineRequest): void {
+    if (!isGpuRequest(request)) return;
+    const held = this.records().filter(m => m.owner === owner && ACTIVE.has(m.status) && isGpuRequest(m.request));
+    if (held.length < MAX_GPU_PER_APP) return;
+    throw new MachineError(409, `${GPU_CAP_RULE}: app '${owner}' already has GPU machine ${held.map(m => m.id).join(', ')}; `
+      + 'release it first (DELETE /v1/machines/:id)');
+  }
+
   private newId(prefix: string): string {
     return `${prefix}-${randomBytes(6).toString('hex')}`;
   }
@@ -138,6 +154,7 @@ export class MachineController {
       throw new MachineError(429, `the gateway already runs ${this.limits.maxRunning} machines (MACHINES_MAX_RUNNING): release one first`);
     }
     this.checkBudget(owner, input.holder, request.maxUsdPerHour * input.maxHours);
+    this.checkGpuSlot(owner, request);
     const record: MachineRecord = {
       id: extra.id ?? this.newId('m'), owner, holder: input.holder, namespace: this.namespace, request, provider: null, providerId: null,
       status: 'creating', ip: null, ports: {}, usdPerHour: null, createdAt: now, startedAt: null, endedAt: null,
@@ -358,7 +375,7 @@ export class MachineController {
       ...(owner === null ? { global: { dayUsd: round(global.spent), committedUsd: round(global.committed), capDayUsd: this.limits.globalUsdPerDay } } : {}),
       machines: mine.map(m => ({
         id: m.id, owner: m.owner, holder: m.holder, jobId: m.jobId, provider: m.provider, status: m.status, usdPerHour: m.usdPerHour,
-        costUsd: round(this.costUsd(m)),
+        costUsd: round(this.costUsd(m)), createdAt: m.createdAt, lastError: m.lastError,
       })),
     };
   }
