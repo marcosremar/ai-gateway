@@ -274,6 +274,46 @@ describe('deployments API', () => {
     expect(await refusal(wsUrl.replace('/wsdemo/', '/adminonly/'), SITE)).toBe(403);
   });
 
+  it('an open websocket relay holds one of the key\'s in-flight slots until it closes', async () => {
+    await close(h);
+    await h.cloud.closeAll();
+    process.env.MAX_CONCURRENT_PER_USER_OVERRIDES = 'site-a:1';
+    try { h = await harness(); } finally { delete process.env.MAX_CONCURRENT_PER_USER_OVERRIDES; }
+    await call(h, 'PUT', '/v1/deployments/slotws', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
+    const originalCreate = h.cloud.createReplica.bind(h.cloud);
+    h.cloud.createReplica = async (input) => {
+      const machine = await originalCreate(input);
+      h.cloud.machines.get(machine.id)!.server.on('upgrade', (req, socket) => {
+        const accept = createHash('sha1')
+          .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        socket.write(Buffer.from([0x81, 0x02, 0x68, 0x69]));
+        socket.on('data', () => { socket.write(Buffer.from([0x88, 0x00])); socket.end(); });
+      });
+      return machine;
+    };
+    const wsUrl = `${h.base.replace(/^http/, 'ws')}/v1/deployments/slotws/invoke/devtools/ws`;
+    const open = () => new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${SITE}` } });
+      ws.on('message', () => resolve(ws));
+      ws.on('error', (err) => reject(err as Error));
+    });
+    const refused = () => new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${SITE}` } });
+      ws.on('unexpected-response', (_req, res) => { resolve(res.statusCode ?? 0); ws.terminate(); });
+      ws.on('message', () => { resolve(101); ws.close(); });
+      ws.on('error', (err) => reject(err as Error));
+    });
+    const first = await open();
+    expect(await refused()).toBe(429);
+    first.close(1000, 'bye');
+    await new Promise<void>((r) => first.once('close', r));
+    await new Promise((r) => setTimeout(r, 100));
+    const again = await open();
+    again.close(1000, 'bye');
+    await new Promise<void>((r) => again.once('close', r));
+  });
+
   it('relay idle: a silent relayed socket is cut and the machine lease is released (no 15-min nginx wait)', async () => {
     await close(h);
     await h.cloud.closeAll();

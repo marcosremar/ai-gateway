@@ -106,7 +106,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
 };
 const T = UI_TEXT.fr;
 
-const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2300C7BE'/%3E%3Crect x='7' y='12' width='18' height='3' rx='1.5' fill='%230F1A2E'/%3E%3Crect x='10' y='18' width='12' height='3' rx='1.5' fill='%230F1A2E'/%3E%3C/svg%3E";
+const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%232F6A80'/%3E%3Ccircle cx='16' cy='16' r='9.33' fill='none' stroke='%232D2D31' stroke-width='4'/%3E%3C/svg%3E";
 
 /** Content-Security-Policy of a page rendered with `nonce`. */
 export function pageCsp(nonce: string): string {
@@ -117,7 +117,7 @@ export function pageCsp(nonce: string): string {
 }
 
 const BASE_CSS = `
-:root{color-scheme:dark;--bg:#0F1A2E;--surface:#17253F;--line:#2A3D60;--text:#F2F6FB;--muted:#A9B7CD;--accent:#00C7BE;--accent-ink:#0F1A2E;--brand:#00C7BE;--brand-ink:#0F1A2E;--warn:#F2B84B}
+:root{color-scheme:dark;--bg:#252528;--surface:#2D2D31;--line:#3C3C43;--text:#F5F5F7;--muted:#9999A3;--accent:#7FB8CC;--brand:#2F6A80;--brand-ink:#F5F5F7;--warn:#FF9F0A}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-text-size-adjust:100%}
 a{color:var(--accent)}
@@ -131,7 +131,7 @@ function shell(title: string, css: string, body: string, script: string, nonce: 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0F1A2E">
+<meta name="theme-color" content="#252528">
 <meta name="robots" content="noindex">
 <title>${esc(title)}</title>
 <link rel="icon" href="${ICON}">
@@ -153,7 +153,7 @@ p{color:var(--muted);margin:0 0 20px;line-height:1.5;max-width:28rem}
 form{display:flex;gap:8px;width:100%;max-width:22rem}
 input{flex:1;min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px;font-size:1.4rem;letter-spacing:.3em;text-align:center;text-transform:uppercase}
 input:focus{outline:2px solid var(--accent);border-color:transparent}
-button{background:var(--accent);color:var(--accent-ink);border:0;border-radius:12px;padding:0 18px;font-weight:700;cursor:pointer}
+button{background:var(--brand);color:var(--brand-ink);border:0;border-radius:12px;padding:0 18px;font-weight:700;cursor:pointer}
 `;
 
 function entryForm(basePath: string): { body: string; script: string } {
@@ -192,10 +192,10 @@ ${form.body}</main>`;
 // line per language) and one compact toolbar — over a calm transcript column. Spacing scale 4/8/12/16/24 px.
 // Every display setting is the viewer's own (settings sheet behind the gear; localStorage, never sent anywhere).
 
-const LIGHT_VARS = '--bg:#F4F7FB;--surface:#ffffff;--line:#D3DCE8;--text:#0F1A2E;--muted:#4A5872;--accent:#00756F;--accent-ink:#ffffff;--brand:#00C7BE;--brand-ink:#0F1A2E;--warn:#8a5a00;--bad:#c4262e;--live-bg:rgba(0,199,190,.18);--shade:rgba(15,26,46,.25);color-scheme:light';
+const LIGHT_VARS = '--bg:#F5F5F7;--surface:#ffffff;--line:#D9D9DE;--text:#1E1E21;--muted:#5F5F68;--accent:#2F6A80;--brand:#2F6A80;--brand-ink:#ffffff;--warn:#8a5a00;--bad:#c4262e;--live-bg:rgba(47,106,128,.14);--shade:rgba(30,30,33,.25);color-scheme:light';
 
 const ROOM_CSS = `
-:root{--bad:#FF8A8A;--live-bg:rgba(0,199,190,.16);--shade:rgba(5,10,20,.55);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right))}
+:root{--bad:#FF7A70;--live-bg:rgba(47,106,128,.28);--shade:rgba(10,10,12,.55);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right))}
 html[data-theme="light"]{${LIGHT_VARS}}
 @media (prefers-color-scheme:light){html[data-theme="auto"]{${LIGHT_VARS}}}
 html,body{overflow-x:hidden}
@@ -232,7 +232,7 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);box-shadow:0 1px 0 v
 .dub .ic{font-size:1.25rem;line-height:1;flex:none}
 .dub .dl{display:flex;flex-direction:column;min-width:0;line-height:1.2}
 .dub .dt{font-weight:800;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dub .ds{font-size:.8rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dub .ds{font-size:.8rem;line-height:1.15;color:var(--muted);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
 .dub[aria-pressed="true"]{background:var(--brand);color:var(--brand-ink)}
 .dub[aria-pressed="true"] .ds{color:var(--brand-ink);font-weight:600}
 .dub[data-state="locked"],.dub[data-state="error"]{background:var(--surface);color:var(--text);border-color:var(--warn)}
@@ -245,7 +245,7 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);box-shadow:0 1px 0 v
 .sheet select{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:0 10px;height:44px}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0 12px;cursor:pointer;white-space:nowrap;font-size:.9rem}
 .btn:focus-visible,select:focus-visible,.sheet input:focus-visible,.sheet:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.btn[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
+.btn[aria-pressed="true"]{background:var(--brand);border-color:var(--brand);color:var(--brand-ink);font-weight:700}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn[hidden]{display:none}
 .end{margin-left:auto}
@@ -653,7 +653,7 @@ var mql=null;try{mql=window.matchMedia('(prefers-color-scheme: light)')}catch(e)
 function applyTheme(){
   document.documentElement.setAttribute('data-theme',settings.theme);
   var light=settings.theme==='light'||(settings.theme==='auto'&&mql&&mql.matches);
-  var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content',light?'#F4F7FB':'#0F1A2E');
+  var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content',light?'#F5F5F7':'#252528');
 }
 if(mql&&mql.addEventListener)mql.addEventListener('change',applyTheme);
 function applySettings(rerender){

@@ -51,7 +51,7 @@ curl -X POST $GW/v1/deployments/tts/wake -H "Authorization: Bearer $KEY"
 | POST | `/v1/deployments/:name/wake` | start replicas now |
 | GET | `/v1/deployments/:name/capacity` | session ceiling in force and measured boot / resume time per machine type + image, mode, budget spent, hold (see Scaling policy) |
 | POST | `/v1/deployments/:name/warm` | `{ "replicas": N, "untilMinutes": M }`: keep N replicas up for M minutes (≤ 720) whatever the load — a class about to start; `park` ends it (admin) |
-| any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>` |
+| any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; a WebSocket upgrade is relayed too (docs/api/http.md) |
 | GET / PUT | `/v1/apps/:app/profile` | what the app needs from its GPUs (§ Profile of an app) |
 | GET | `/v1/apps/:app/status` | GPU status of the app: `mode` gpu · degraded · down, probes, fallback in use |
 | GET | `/v1/profiles` | built-in (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`) + stored |

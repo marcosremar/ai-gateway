@@ -6,7 +6,7 @@ deployed by `railway.json`, default port `4000`). The larger reference server in
 
 ::: warning Blocked transports
 WebSocket (`/ws/stream`, `/api/stream-audio`) and WebRTC return `410 Gone`, except the realtime voice routes
-(`/v1/realtime/*`, below). A spoken turn is `POST /v1/s2s` (one
+(`/v1/realtime/*`, below) and a WebSocket upgrade on `/v1/deployments/:name/invoke/<path>` (relayed to the replica). A spoken turn is `POST /v1/s2s` (one
 streamed request); text streaming is SSE on `POST /v1/chat/completions` with `stream: true`. `/v1/speech` and
 `/v1/workloads` are **not** mounted on `serve.ts` (`404`).
 :::
@@ -735,6 +735,7 @@ production namespace (`default` on Railway).
 | | | A capped key that names a deployment with a **test copy** (another deployment whose spec has `testFor: "<name>"`, same app) starts the copy instead — `parle-speech` → `parle-speech-test`, one L4 (docs/deployments.md). While the copy is ready and the original is not, alias requests for the original are served by the copy |
 | `POST` | `/v1/deployments/:name/extend` | the same key: `{ "minutes": n }` more on the GPU it started (at most 240 min ahead); `404` without a start |
 | any | `/v1/deployments/:name/invoke/<path>` | forwarded to a ready replica as `/<path>`; waits through a cold start (`X-Aigw-Wait: <seconds>` caps it; `X-Gateway-No-Wake: 1` → 503 `cold` at once instead). Raw passthrough: the STT hallucination filter does NOT apply here (use `/v1/audio/transcriptions` or `/v1/s2s`) |
+| `GET` (WebSocket upgrade) | `/v1/deployments/:name/invoke/<path>` | relayed to a ready replica's `/<path>` (raw frames both ways). Same key check, app scope (`403`), no-wake rule and cold-start wait as the HTTP `invoke`; the open socket holds one of the key's in-flight slots (`MAX_CONCURRENT_PER_USER`) and a rate-limit token (`429` + `Retry-After: 1`). The gateway key and cookies are not forwarded; a replica that refuses the upgrade answers with its own status. Cut after `RELAY_IDLE_TIMEOUT_MS` (5 min) without traffic either way, which releases the replica |
 | `GET` | `/v1/profiles` | built-in + stored profiles (`qwen3-tts`, `qwen3-tts-clone`, `cpu-echo`, …) |
 | `PUT` / `DELETE` | `/v1/profiles/:name` | store / delete a profile |
 
