@@ -9,11 +9,12 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 
 | Route | Auth | Body | Answer |
 |---|---|---|---|
-| `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"]}` | `201 {"code","publishToken","url","expiresAt"}` |
+| `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"], "serverDub"?, "youtubeUrl"?}` | `201 {"code","publishToken","url","expiresAt"}` |
+| `PATCH /v1/rooms/:code` | publish token (or the creating / an admin gateway key) | `{"youtubeUrl": "<link>" \| null}` | `200 {"code","youtubeUrl"}` |
 | `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?}` | `204` |
 | `POST /v1/rooms/:code/audio` | publish token | `{"lineId", "lang", "wav": "<base64>"}` (≤ 2 MB decoded) | `204` (broadcast only, never stored) |
 | `POST /v1/rooms/:code/end` | publish token | — | `204` |
-| `GET /v1/rooms/:code` | public, CORS `*` | — | `200 {"code","title","originalLang","languages","createdAt","ended","expiresAt","lines":[…]}` / `404` |
+| `GET /v1/rooms/:code` | public, CORS `*` | — | `200 {"code","title","originalLang","languages","createdAt","ended","expiresAt","youtubeUrl","lines":[…]}` / `404` |
 | `GET /v1/rooms/:code/ws` | public WebSocket | — | see below |
 
 - Code: 6 characters of `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (no 0/O/1/I/L); lower case is accepted in URLs.
@@ -21,15 +22,47 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 - `expiresAt` in the GET body is an addition to the original contract (the page shows it after the end).
 - `delayMs` (additive, optional): ms from the end of speech to the subtitle being ready, an integer 0–120000 (else 400).
   Stored and served back on the line (GET and WS); the page shows the median of the last 10 as "atraso 1,8 s".
+- `youtubeUrl` (additive, optional): where the same session is live on YouTube — the presenter's app sends the channel
+  link (`https://www.youtube.com/channel/<id>/live`) and, once the broadcast is found, `https://youtu.be/<id>`. Strictly
+  validated: an `https:` URL on `youtube.com`, `www.youtube.com`, `m.youtube.com` or `youtu.be`, no credentials, no port,
+  ASCII only, at most 200 characters (else 400); `null` / `""` = none. Settable at creation and with `PATCH` (also after
+  the end — the recording keeps the link); kept in the room meta, served in GET and the WS snapshot, and every change
+  is pushed to open pages as `{"type":"update","youtubeUrl"}`. Older metas without it serve `null`.
 - Errors: `{"error":{"message","type"}}` — 400 bad body, 401 no/invalid token, 403 a gateway key that did not create
   the room, 404 unknown or expired, 409 room ended / full, 413 too large, 429 too many rooms created (per key per hour).
 
 ## WebSocket
 
 Server → client: `{"type":"snapshot","room":<GET body>}` on connect, then `{"type":"line","line"}`,
-`{"type":"audio","lineId","lang","wav"}`, `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
+`{"type":"audio","lineId","lang","wav"}`, `{"type":"update","youtubeUrl"}` (room fields changed), `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
 and, optionally, `{"type":"listen","lang":"en"|null}`: once sent, audio clips arrive only for that language (`null` =
 none), so viewers who do not listen to the dubbing do not download it. The server pings every 25 s.
+
+## Server dubbing
+
+When the presenter sends text only, the gateway voices the lines itself with Kokoro 82M (`hexgrad/kokoro-82m`) through
+OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `src/rooms/dub.ts`, wired in `serve.ts`.
+
+- Voices (primary subtag): en `af_heart`, fr `ff_siwis`, es `ef_dora`, pt `pf_dora`, it `if_sara`, ja `jf_alpha`,
+  zh `zf_xiaobei`, hi `hf_alpha`. Other languages are not voiced.
+- Spend only on demand: a line+language is synthesized only while at least one viewer has sent `listen` for that
+  language (a viewer that never sent `listen` does not count) and the line has a non-empty translation for it.
+- The presenter wins: the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500) after a line, skips a line+language the
+  presenter sent a clip for (checked again before delivering), and leaves a language alone while its presenter sent a clip in that language
+  in the last `ROOM_SERVER_DUB_PRESENTER_QUIET_MS` (60000). Other languages are still voiced: the desktop app dubs one
+  language while viewers may listen to another.
+- Bounded: per room and language one call in flight and one pending line; a newer line replaces an older pending one
+  (stale lines are dropped), and each line+language is voiced once (later corrections of the same id are not re-voiced).
+  Each attempt has `ROOM_DUB_ATTEMPT_TIMEOUT_MS` (8 s; the OpenRouter SDK client has no timeout of its own): a stuck or
+  failed Kokoro call is aborted and the line goes to MAI-Voice 2.1 Flash (`microsoft/mai-voice-2.1-flash`; en
+  `en-US-Harper`, fr `fr-FR-Soleil`, pt `pt-BR-Luana`; other languages have no fallback), so a language is held at most
+  ~16 s. Failures are logged, never surface to the publisher.
+- Server clips go out as `{"type":"audio","lineId","lang","wav":"<base64 mp3>","format":"mp3"}` (`wav` keeps its name;
+  `format` is additive, absent = WAV) to the viewers listening to that language only.
+- Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
+- With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
+  (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
+  only for those; without `dubLangs` (server dubbing off) it offers every translation language as before.
 
 ## Viewer pages
 
@@ -38,10 +71,15 @@ none), so viewers who do not listen to the dubbing do not download it. The serve
   for that room, else the first browser language the room publishes (primary subtag: `en-US` → `en`), else the room's
   first target language; the original only when the room has no translations. The live line and the original under it
   are always one line each: the font shrinks down to 70 %, then only the end of the sentence is shown behind "…".
-  Dubbing ("Ouvir dublagem") plays clips with Web Audio: one AudioContext, back-to-back scheduling with 10 ms fades (no
+  Dubbing ("Écouter le doublage") plays clips with Web Audio: one AudioContext, back-to-back scheduling with 10 ms fades (no
   clicks), oldest pending clips dropped when more than 6 s is queued. While it is on, the live line switches to a line
   when its clip starts playing (a line without a clip within 4 s is shown anyway) and the delay indicator shows the
   voice delay ("voz 3,2 s" = delayMs + wait until the clip played). Indicator: neutral < 3 s, amber 3–6 s, red above.
+  Mobile unlock, inside the tap: `navigator.audioSession.type = 'playback'` and a silent `<audio>` played (otherwise the
+  iPhone ringer switch mutes Web Audio), the AudioContext created/resumed and a 1-sample buffer started. A context the
+  OS suspends (screen lock, call) is resumed by the next tap. The toggle shows its state under the label, in the
+  interface language: off · loading the voice · playing · "tap here to turn the sound on" · decode errors. `listen` is
+  re-sent on every reconnect.
 - Every display setting is the viewer's own (gear → "Réglages d'affichage": bottom sheet on phones, popover from 768 px),
   kept in that browser's localStorage per app — `ucast-settings-<app>`, where `<app>` is the first 12 hex of sha256 of the
   gateway key user that created the room (all activation keys of the desktop app share one), read once from the older
@@ -50,11 +88,15 @@ none), so viewers who do not listen to the dubbing do not download it. The serve
   (Tradução / Só transcrição / Bilíngue / Só texto completo), original under the translation, dubbing on/off + volume +
   "sincronizar legenda com a voz", text size A−/A+ (live line 20–56 px, transcript 14–24 px), theme (escuro / claro /
   automático), auto-scroll, timestamps, delay indicator. Only the languages the room publishes are offered.
-- Quick modes on the toolbar (icons with a tooltip on hover/focus and on tap, the current one pressed): dubbed (translation
-  + voice), translated subtitles, dual subtitles (bilingual), transcript, full text.
+- Quick modes on the toolbar (icons with a tooltip on hover/focus and on tap, the current one pressed; their own row
+  under 768 px): translated subtitles, dual subtitles (bilingual), transcript, full text. The dubbed voice stays on the
+  dubbing toggle next to the language.
 - Karaoke: the words already said are coloured one by one on the live line and the current transcript line. Lines carry
   no word timestamps, so the times are an estimate spread by word length: over the real duration of the dubbed clip from
   its start when the voice is on (sync), else over `speechMs` (15 characters/s of the original) from the line's arrival.
+- When the room has a `youtubeUrl`, the toolbar shows a compact "Regarder sur YouTube" link in the interface language
+  (YouTube icon; "YouTube" under 480 px), opening in a new tab (`rel="noopener noreferrer"`); it appears, changes or
+  disappears live with the `update` message. The page re-checks the link (https + YouTube host) before using it as an `href`.
 - `https://<ROOMS_PUBLIC_HOST>/` and `/live`: "Saisissez le code de la session". Unknown/expired code: a 404 page.
 - Other paths on the public host (e.g. `/health`, `/v1/…`) reach the gateway as usual.
 
@@ -80,7 +122,7 @@ events without `t` or without their key field are dropped; unknown or invalid fi
 | `audio` | `action` play/pause/mute/unmute/gap/drop/decode_error/unsupported · `ms` · `n` |
 | `sample` | every 30 s while lines or clips flow: `textDelayMs` (median presenter `delayMs`), `voiceDelayMs`, `driftMs` (subtitle ↔ voice: render lateness after the clip start with sync on, clip start − text arrival with sync off), `lagMs` (arrival − line `ts`, includes clock skew), `queueMs`, `gaps` `gapMs` (silences 20 ms–3 s between consecutive clips), `drops`, `clips`, `lines`, `visible` |
 | `visibility` | `state` hidden/visible |
-| `ui` | `action` copy/sheet_open/sheet_close/more/reconnect/ended |
+| `ui` | `action` copy/sheet_open/sheet_close/more/reconnect/ended/youtube (tapped the YouTube link) |
 | `leave` | `durationMs` `visibleMs` `reason` (sent with `sendBeacon` on `pagehide`) |
 
 The page sends batches every 15 s, at 100 queued events, when the tab is hidden and on `pagehide`.

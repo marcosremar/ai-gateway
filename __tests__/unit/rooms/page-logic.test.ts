@@ -10,7 +10,7 @@ interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
 interface Settings { ui: string; mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -28,8 +28,14 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   wordStarts(text: string, start: number, dur: number): number[];
   spokenCount(starts: number[], t: number): number;
   speechMs(text: string): number;
+  safeYoutubeUrl(u: unknown): string | null;
+  youtubeLabel(prefs: string[]): string;
+  dubbable(lang: string, dubLangs: string[] | undefined): boolean;
+  listenMsg(on: boolean, lang: string | null): string;
+  dubStatus(s: { can: boolean; lang: string; on: boolean; ctx: string | null; error: string | null; playing: boolean; loading: boolean }, L: Record<string, string>): { kind: string; text: string };
+  silentWav(rate: number, samples: number): string;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -105,7 +111,9 @@ describe('room page: one-line fit of the live line', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
     expect(html).toContain('pickLive(entries,now(),syncOn()');
     expect(html).toContain('createGain');
+    // Clips play through Web Audio; the only <audio> element is the silent iOS unlock, never one per clip.
     expect(html).not.toContain('new Audio(');
+    expect(html).toContain('actx.decodeAudioData(ab,ok,fail)');
   });
 
   it('keeps the original single-line page features', () => {
@@ -226,6 +234,86 @@ describe('room page: viewer settings', () => {
     expect({ ...lineView('bilingual', false, 'en', false) }).toEqual({ main: 'orig', sub: false, miss: true });
   });
 
+  it('offers dubbing only for languages the room can voice (any translation when the server does not say)', () => {
+    expect(dubbable('fr', ['en', 'fr'])).toBe(true);
+    expect(dubbable('de', ['en', 'fr'])).toBe(false);
+    expect(dubbable('de', undefined)).toBe(true);
+    expect(dubbable('orig', undefined)).toBe(false);
+    expect(dubbable('orig', ['en'])).toBe(false);
+  });
+
+  it('sends listen for the chosen translation only while dubbing is on', () => {
+    expect(JSON.parse(listenMsg(true, 'fr'))).toEqual({ type: 'listen', lang: 'fr' });
+    expect(JSON.parse(listenMsg(false, 'fr'))).toEqual({ type: 'listen', lang: null });
+    expect(JSON.parse(listenMsg(true, 'orig'))).toEqual({ type: 'listen', lang: null });
+    expect(JSON.parse(listenMsg(true, null))).toEqual({ type: 'listen', lang: null });
+  });
+
+  it('re-sends listen on every (re)connect, dub toggle and language change', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    expect(html).toContain('ws.send(listenMsg(dub,lang))');
+    expect(html).toContain('s.onopen=function(){opened=true;attempt=0;sendListen()');
+    expect(html).toMatch(/function setLang\([^)]*\)\{[\s\S]*?sendListen\(\)/);
+    expect(html).toMatch(/function setDub\([^)]*\)\{[\s\S]*?sendListen\(\)/);
+  });
+
+  it('shows the state of the dub toggle: off, locked, error, playing, loading, idle', () => {
+    const base = { can: true, lang: 'fr', on: true, ctx: 'running', error: null, playing: false, loading: false };
+    const pt = UI_TEXT.pt;
+    expect(dubStatus({ ...base, can: false, lang: 'orig' }, pt)).toEqual({ kind: 'na', text: 'escolha um idioma de tradução' });
+    expect(dubStatus({ ...base, can: false }, pt).kind).toBe('na');
+    expect(dubStatus({ ...base, on: false }, pt).kind).toBe('off');
+    // iOS/Android suspend the context (screen lock, call, no gesture yet): the next tap must resume it.
+    expect(dubStatus({ ...base, ctx: 'suspended', playing: true }, pt)).toEqual({ kind: 'locked', text: 'toque aqui para ativar o som' });
+    expect(dubStatus({ ...base, ctx: 'interrupted' }, pt).kind).toBe('locked');
+    expect(dubStatus({ ...base, error: 'mp3', playing: true }, pt)).toEqual({ kind: 'error', text: 'erro ao tocar a voz (mp3)' });
+    expect(dubStatus({ ...base, playing: true, loading: true }, pt)).toEqual({ kind: 'playing', text: 'tocando' });
+    expect(dubStatus({ ...base, loading: true }, pt)).toEqual({ kind: 'loading', text: 'carregando voz…' });
+    expect(dubStatus(base, pt).kind).toBe('idle');
+    // In the interface language (French by default).
+    expect(dubStatus({ ...base, ctx: 'suspended' }, UI_TEXT.fr).text).toBe('touchez ici pour activer le son');
+    expect(dubStatus({ ...base, error: 'mp3' }, UI_TEXT.en).text).toBe('could not play the voice (mp3)');
+  });
+
+  it('unlocks mobile audio inside the tap: audio session, silent <audio>, context resume, 1-sample buffer', () => {
+    const wav = silentWav(8000, 1600);
+    const bytes = Buffer.from(wav, 'latin1');
+    expect(bytes.length).toBe(44 + 3200);
+    expect(bytes.subarray(0, 4).toString()).toBe('RIFF');
+    expect(bytes.readUInt32LE(4)).toBe(36 + 3200);
+    expect(bytes.subarray(8, 16).toString()).toBe('WAVEfmt ');
+    expect(bytes.readUInt16LE(20)).toBe(1); // PCM
+    expect(bytes.readUInt16LE(22)).toBe(1); // mono
+    expect(bytes.readUInt32LE(24)).toBe(8000);
+    expect(bytes.readUInt16LE(34)).toBe(16);
+    expect(bytes.subarray(36, 40).toString()).toBe('data');
+    expect(bytes.readUInt32LE(40)).toBe(3200);
+    expect(bytes.subarray(44).every(b => b === 0)).toBe(true);
+
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    const unlock = /function unlockAudio\(\)\{[\s\S]*?\n\}/.exec(html)?.[0] ?? '';
+    for (const s of ["as.type='playback'", "createElement('audio')", "'playsinline'", 'unlockEl.play()', 'actx.resume()', 'createBufferSource()', 's.start(0)']) {
+      expect(unlock).toContain(s);
+    }
+    // The tap handlers call it synchronously; a suspended context is resumed by any later tap or by the toggle.
+    expect(html).toMatch(/function setDub\(on,from\)\{\s*if\(on&&!unlockAudio\(\)\)/);
+    expect(html).toContain("['touchend','click','keydown'].forEach(function(t){document.addEventListener(t,wake,true)})");
+    expect(html).toContain("if(locked()){unlockAudio();");
+    // Decode failures are visible, not silent.
+    expect(html).toContain('dubErr=fmt;');
+    expect(html).toContain('id="dubState"');
+  });
+
+  it('ships the mobile layout: brand colors, safe-area insets, no inline styles', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const s of ['#00C7BE', '#0F1A2E', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html,body{overflow-x:hidden}', 'Écouter le doublage']) {
+      expect(html).toContain(s);
+    }
+    // No CDN: every absolute URL in the page is an SVG/XML namespace on www.w3.org.
+    const urls = html.match(/https?:\/\/[^\s"'<>)]+/g) ?? [];
+    expect(urls.filter((u) => !u.startsWith('http://www.w3.org/'))).toEqual([]);
+  });
+
   it('ships an accessible settings sheet', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
     for (const s of ['role="dialog"', 'aria-modal="true"', 'aria-labelledby="sheetTitle"', 'aria-haspopup="dialog"', "e.key==='Escape'", "localStorage.setItem",
@@ -312,6 +400,13 @@ describe('room page: interface language and per-app settings', () => {
     expect(html).toContain('store.set(SETTINGS_KEY,');
   });
 
+  it('ships a page script that parses', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 }, 'a1b2c3d4e5f6');
+    const src = /<script nonce="[^"]+">([\s\S]*)<\/script>/.exec(html)?.[1] ?? '';
+    expect(src).toContain('UI={"fr":');
+    expect(() => new Script(src)).not.toThrow();
+  });
+
   it('has every interface string in every language', () => {
     const keys = Object.keys(UI_TEXT.fr).sort();
     for (const l of UI_LANGS) expect(Object.keys(UI_TEXT[l]).sort()).toEqual(keys);
@@ -319,9 +414,52 @@ describe('room page: interface language and per-app settings', () => {
     for (const k of html.matchAll(/data-ia?="(\w+)"/g)) expect(UI_TEXT.fr[k[1]]).toBeTypeOf('string');
   });
 
-  it('shows the quick mode buttons with accessible names and a gear', () => {
+  it('shows the quick mode buttons with accessible names and a gear; the voice stays on its own toggle', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
-    for (const m of ['dub', 'translation', 'bilingual', 'transcript', 'full']) expect(html).toMatch(new RegExp(`data-m="${m}" aria-pressed="false" data-ia="\\w+" data-tip="[^"]+" aria-label="[^"]+"`));
+    for (const m of ['translation', 'bilingual', 'transcript', 'full']) expect(html).toMatch(new RegExp(`data-m="${m}" aria-pressed="false" data-ia="\\w+" data-tip="[^"]+" aria-label="[^"]+"`));
+    expect(html).not.toContain('data-m="dub"');
+    expect(html).toContain('<span class="dt" data-i="listenDub">Écouter le doublage</span>');
     expect(html).toContain('id="gear"');
+  });
+});
+describe('room page: "Assistir no YouTube"', () => {
+  it('accepts only https links on the YouTube hosts', () => {
+    for (const ok of ['https://youtu.be/dQw4w9WgXcQ', 'https://www.youtube.com/channel/UC123/live', 'https://youtube.com/watch?v=abc', 'https://m.youtube.com/live/abc', 'https://WWW.YOUTUBE.COM/x']) {
+      expect(safeYoutubeUrl(ok)).toBe(ok);
+    }
+    for (const bad of [null, undefined, '', 42, 'http://youtu.be/x', 'javascript:alert(1)', 'https://youtu.be.evil.com/x', 'https://evil.com/?youtu.be',
+      'https://user@youtu.be/x', 'https://youtu.be:444/x', 'https://youtube.com.evil/x', 'https://youtu.be/"><script>', `https://youtu.be/${'a'.repeat(300)}`, '//youtu.be/x']) {
+      expect(safeYoutubeUrl(bad)).toBeNull();
+    }
+  });
+
+  it('labels the link in the first language it knows (pt by default)', () => {
+    expect(youtubeLabel(['pt-BR'])).toBe('Assistir no YouTube');
+    expect(youtubeLabel(['en-US', 'pt'])).toBe('Watch on YouTube');
+    expect(youtubeLabel(['FR-ca'])).toBe('Regarder sur YouTube');
+    expect(youtubeLabel(['de', 'es-MX'])).toBe('Ver en YouTube');
+    expect(youtubeLabel(['de'])).toBe('Assistir no YouTube');
+    expect(youtubeLabel([])).toBe('Assistir no YouTube');
+    expect(youtubeLabel(['constructor', '__proto__'])).toBe('Assistir no YouTube');
+  });
+
+  it('ships a hidden toolbar button that opens in a new tab, updates live and is tracked', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    const a = /<a id="yt"[^>]*>/.exec(html)?.[0] ?? '';
+    expect(a).toContain('class="btn yt"');
+    expect(a).toContain('target="_blank"');
+    expect(a).toContain('rel="noopener noreferrer"');
+    expect(a).not.toContain('href=');
+    expect(a).toMatch(/ hidden>$/);
+    expect(a).toContain('aria-label="Regarder sur YouTube"');
+    expect(html).toContain('<span class="lg" id="ytLbl">Regarder sur YouTube</span><span class="sm">YouTube</span>');
+    expect(html).toContain('applyYoutube(r.youtubeUrl)');
+    expect(html).toContain("m.type==='update'");
+    expect(html).toContain("track('ui',{action:'youtube'})");
+    // The label follows the interface language (fr by default), like the rest of the page.
+    expect(html).toContain('youtubeLabel([settings.ui])');
+    // In the toolbar, right after the quick modes and before copy/settings: visible on a phone without the sheet.
+    expect(html.indexOf('id="yt"')).toBeGreaterThan(html.indexOf('class="modes"'));
+    expect(html.indexOf('id="yt"')).toBeLessThan(html.indexOf('id="copy"'));
   });
 });

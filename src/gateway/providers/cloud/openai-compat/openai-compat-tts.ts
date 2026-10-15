@@ -7,6 +7,28 @@
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, TTSAudioFormat, TTSProvider, TTSRequest, TTSResponse, VoiceInfo } from '../types';
 import { GATEWAY_SDK_MAX_RETRIES, getOrCreateClient } from './client-cache';
+import { emitGatewayEvent, gatewayTelemetryEnabled } from '../../../../telemetry/emit';
+
+export const GENERATION_LOOKUP_MS = [2_000, 10_000, 30_000];
+
+async function generationCost(client: OpenAI, id: string): Promise<number | null> {
+  const body = await client.get<unknown>('/generation', { query: { id }, timeout: 10_000, maxRetries: 0 });
+  const cost = (body as { data?: { total_cost?: unknown } } | null)?.data?.total_cost;
+  return typeof cost === 'number' && cost > 0 ? cost : null;
+}
+
+export function reportTtsCost(client: OpenAI, provider: string, model: string, input: string, generationId: string | null, waits = GENERATION_LOOKUP_MS): void {
+  if (!gatewayTelemetryEnabled()) return;
+  const [wait, ...rest] = generationId ? waits : [];
+  if (wait === undefined) {
+    emitGatewayEvent('usage.cost', { attrs: { stage: 'tts', provider, model, chars: input.length } });
+    return;
+  }
+  const retry = () => reportTtsCost(client, provider, model, input, generationId, rest);
+  setTimeout(() => {
+    generationCost(client, generationId!).then(costUsd => (costUsd ? emitGatewayEvent('usage.cost', { attrs: { stage: 'tts', provider, model, costUsd } }) : retry()), retry);
+  }, wait).unref?.();
+}
 
 const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   mp3: 'audio/mpeg',
@@ -109,6 +131,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
     };
 
     const response = await client.audio.speech.create(params, request.signal ? { signal: request.signal } : undefined);
+    reportTtsCost(client, this.providerId, params.model, request.input, response.headers.get('x-generation-id'));
     if (asWav) {
       const rate = Number(/rate=(\d+)/.exec(response.headers.get('content-type') ?? '')?.[1]) || this.config.pcmAsWavRate!;
       if (request.stream && response.body) {
@@ -146,6 +169,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
     };
 
     const response = await client.audio.speech.create(params, request.signal ? { signal: request.signal } : undefined);
+    reportTtsCost(client, this.providerId, params.model, request.input, response.headers.get('x-generation-id'));
 
     if (response.body) {
       return response.body as unknown as ReadableStream<Uint8Array>;

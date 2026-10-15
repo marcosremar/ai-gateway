@@ -18,6 +18,12 @@ describe('applyWhisperSegments', () => {
     applyWhisperSegments(r as never, { text: 'x', no_speech_prob: 0.7, avg_logprob: -1.2, compression_ratio: 1.1 });
     expect(r).toMatchObject({ no_speech_prob: 0.7, avg_logprob: -1.2 });
   });
+  it('reads the language the replica detected and its probability', () => {
+    const r = { text: 'x' } as { text: string; language?: string; language_probability?: number };
+    applyWhisperSegments(r as never, { text: 'x', language: 'fr', language_probability: 0.83, no_speech_prob: 0.1 });
+    expect(r).toMatchObject({ language: 'fr', language_probability: 0.83 });
+  });
+
   it('plain {text} adds nothing (blocklist only)', () => {
     const r = { text: 'x' } as Record<string, unknown>;
     applyWhisperSegments(r as never, { text: 'x' });

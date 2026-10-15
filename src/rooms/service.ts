@@ -6,10 +6,11 @@
 
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import type { RoomsConfig } from './config';
+import { RoomDubber, type RoomClip, type RoomSynthesize } from './dub';
 import type { RoomStore } from './store';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 import {
-  CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput,
+  CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput, type UpdateRoomInput,
 } from './validate';
 
 /** A connected viewer (the WS layer implements it). */
@@ -18,6 +19,8 @@ export interface RoomViewer {
   close(code: number, reason: string): void;
   /** Whether this viewer wants audio clips of `lang` (a viewer that never said = every language). */
   wantsAudio(lang: string): boolean;
+  /** Whether this viewer explicitly listens to `lang` (sent `listen`): only these make the server voice a line. */
+  listening?(lang: string): boolean;
 }
 
 export interface LiveRoom {
@@ -30,6 +33,8 @@ export interface LiveRoom {
   /** Last time the room was used in memory (for eviction). */
   touchedAt: number;
   metaSavedAt: number;
+  /** Languages the presenter sent clips for while the room was in memory. */
+  clipLangs: Set<string>;
 }
 
 export interface RoomServiceOptions {
@@ -39,6 +44,10 @@ export interface RoomServiceOptions {
   log?: (msg: string, data?: Record<string, unknown>) => void;
   /** Background sweep + eviction interval (0 = none, tests call `sweep()`). */
   sweepIntervalMs?: number;
+  /** Server dubbing synthesizer (Kokoro); none = the server never voices lines. Used only when `config.serverDub`. */
+  synthesize?: RoomSynthesize;
+  /** False while the synthesizer cannot work (e.g. no API key). */
+  synthesizeAvailable?: () => boolean;
 }
 
 const HOUR_MS = 3_600_000;
@@ -65,10 +74,18 @@ export class RoomService {
   private readonly now: () => number;
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly dubber: RoomDubber | null;
 
   constructor(private readonly opts: RoomServiceOptions) {
     this.now = opts.now ?? Date.now;
     this.log = opts.log ?? (() => {});
+    this.dubber = opts.synthesize && opts.config.serverDub
+      ? new RoomDubber({
+        synthesize: opts.synthesize, available: opts.synthesizeAvailable,
+        deliver: (room, lineId, lang, clip) => this.deliverServerClip(room, lineId, lang, clip),
+        waitMs: opts.config.serverDubWaitMs, presenterQuietMs: opts.config.serverDubPresenterQuietMs, now: this.now, log: this.log,
+      })
+      : null;
     const every = opts.sweepIntervalMs ?? HOUR_MS;
     if (every > 0) {
       this.timer = setInterval(() => { void this.sweep().catch(() => {}); }, every);
@@ -81,6 +98,7 @@ export class RoomService {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.dubber?.stop();
     for (const room of this.rooms.values()) for (const v of room.viewers) v.close(1001, 'gateway shutting down');
   }
 
@@ -107,9 +125,11 @@ export class RoomService {
     const meta: RoomMeta = {
       version: 1, code, title: input.title, originalLang: input.originalLang, languages: input.languages,
       createdAt: now, lastActivityAt: now, ended: false, endedAt: null, tokenHash: hashToken(publishToken), ownerId,
+      youtubeUrl: input.youtubeUrl,
+      ...(input.serverDub ? {} : { serverDub: false }),
     };
     await this.opts.store.saveMeta(meta);
-    this.rooms.set(code, { meta, lines: [], index: new Map(), chars: 0, viewers: new Set(), touchedAt: now, metaSavedAt: now });
+    this.rooms.set(code, { meta, lines: [], index: new Map(), chars: 0, viewers: new Set(), touchedAt: now, metaSavedAt: now, clipLangs: new Set() });
     this.log('rooms: created', { code, ownerId, languages: input.languages.length });
     return { code, publishToken, url: `${this.config.publicBaseUrl}/${code}`, expiresAt: this.expiresAt(meta) };
   }
@@ -154,6 +174,7 @@ export class RoomService {
     stored.lines.forEach((l, i) => { index.set(l.id, i); chars += lineChars(l); });
     const room: LiveRoom = {
       meta: stored.meta, lines: stored.lines, index, chars, viewers: new Set(), touchedAt: this.now(), metaSavedAt: this.now(),
+      clipLangs: new Set(),
     };
     this.rooms.set(code, room);
     return room;
@@ -162,6 +183,7 @@ export class RoomService {
   private async drop(room: LiveRoom, why: string): Promise<void> {
     for (const v of room.viewers) v.close(1001, 'room expired');
     this.rooms.delete(room.meta.code);
+    this.dubber?.forget(room.meta.code);
     await this.opts.store.remove(room.meta.code).catch(() => {});
     this.log('rooms: removed', { code: room.meta.code, why });
   }
@@ -170,8 +192,16 @@ export class RoomService {
     const m = room.meta;
     return {
       code: m.code, title: m.title, originalLang: m.originalLang, languages: m.languages,
-      createdAt: new Date(m.createdAt).toISOString(), ended: m.ended, expiresAt: this.expiresAt(m), lines: room.lines,
+      createdAt: new Date(m.createdAt).toISOString(), ended: m.ended, expiresAt: this.expiresAt(m),
+      youtubeUrl: typeof m.youtubeUrl === 'string' ? m.youtubeUrl : null,
+      ...(this.dubber ? { dubLangs: this.dubLangs(room) } : {}), lines: room.lines,
     };
+  }
+
+  /** Languages a listener can hear dubbed: server-voiced (unless the room opted out) + presenter clip languages. */
+  private dubLangs(room: LiveRoom): string[] {
+    const voiced = this.dubber && room.meta.serverDub !== false ? this.dubber.voicedLanguages(room) : [];
+    return room.meta.languages.filter(l => voiced.includes(l) || room.clipLangs.has(l));
   }
 
   // ── Publish auth ──────────────────────────────────────────────────────────
@@ -233,13 +263,39 @@ export class RoomService {
     }
     this.touchActivity(room);
     this.broadcast(room, { type: 'line', line });
+    this.dubber?.onLine(room, line.id);
     await this.opts.store.appendLine(room.meta.code, line);
   }
 
   publishAudio(room: LiveRoom, audio: AudioInput): void {
     if (room.meta.ended) throw new RoomError(409, 'room has ended');
     room.touchedAt = this.now();
+    room.clipLangs.add(audio.lang);
+    this.dubber?.onPresenterClip(room, audio.lineId, audio.lang);
     this.broadcast(room, { type: 'audio', lineId: audio.lineId, lang: audio.lang, wav: audio.wav }, v => v.wantsAudio(audio.lang));
+  }
+
+  /**
+   * Changes the room's YouTube link (also after the end: the recording stays at the same link). Persisted, then
+   * broadcast to the open pages as `{"type":"update"}`; an unchanged value is a no-op.
+   */
+  async update(room: LiveRoom, input: UpdateRoomInput): Promise<void> {
+    const before = typeof room.meta.youtubeUrl === 'string' ? room.meta.youtubeUrl : null;
+    if (before === input.youtubeUrl) return;
+    room.meta.youtubeUrl = input.youtubeUrl;
+    room.meta.lastActivityAt = this.now();
+    room.touchedAt = this.now();
+    room.metaSavedAt = this.now();
+    await this.opts.store.saveMeta(room.meta);
+    this.log('rooms: updated', { code: room.meta.code, youtube: input.youtubeUrl !== null });
+    this.broadcast(room, { type: 'update', youtubeUrl: input.youtubeUrl });
+  }
+
+  /** A clip the server synthesized: only to the viewers listening to that language. */
+  private deliverServerClip(room: LiveRoom, lineId: number, lang: string, clip: RoomClip): void {
+    if (room.meta.ended) return;
+    const wav = clip.audio.toString('base64');
+    this.broadcast(room, { type: 'audio', lineId, lang, wav, format: clip.format }, v => v.listening?.(lang) === true);
   }
 
   async end(room: LiveRoom): Promise<void> {
@@ -248,6 +304,7 @@ export class RoomService {
       room.meta.endedAt = this.now();
       this.log('rooms: ended', { code: room.meta.code, lines: room.lines.length });
     }
+    this.dubber?.forget(room.meta.code);
     room.meta.lastActivityAt = this.now();
     room.metaSavedAt = this.now();
     this.broadcast(room, { type: 'ended' });
@@ -287,6 +344,7 @@ export class RoomService {
       if (room.viewers.size === 0 && now - room.touchedAt > EVICT_IDLE_MS) {
         await this.opts.store.saveMeta(room.meta).catch(() => {});
         this.rooms.delete(room.meta.code);
+        this.dubber?.forget(room.meta.code);
         evicted.push(room.meta.code);
       }
     }

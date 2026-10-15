@@ -67,7 +67,7 @@ describe('handleAudioTranscriptions', () => {
   it('returns 200 with text on valid request', async () => {
     const res = await handleAudioTranscriptions(makeReq({ model: 'test-model' }), providers);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ text: 'hello world' });
+    expect(res.body).toEqual({ text: 'hello world', language: 'en' });
   });
 
   it('calls provider.transcribe with audio buffer', async () => {

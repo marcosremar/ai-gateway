@@ -9,6 +9,9 @@ export const PROFILES: Record<string, Profile> = {
   'campus-slow': { down: '2mbit', up: '512kbit', delayMs: 40, jitterMs: 10, lossPct: 1 },
   'udp-blocked': { udpBlocked: true },
   lossy: { delayMs: 75, lossPct: 5 },
+  'loss-2': { delayMs: 20, lossPct: 2 },
+  'loss-5': { delayMs: 20, lossPct: 5 },
+  'loss-10': { delayMs: 20, lossPct: 10 },
   flap: { flap: { everyS: 30, downS: 3 } },
 };
 
@@ -90,6 +93,15 @@ export function netUp(name: string, nat: boolean, onFlap: (down: boolean) => voi
     onFlap(lossPct === 100);
   };
   flapTimer = setInterval(() => { set(100); setTimeout(() => set(undefined), p.flap!.downS * 1000); }, p.flap.everyS * 1000);
+}
+
+export function netChange(name: string): void {
+  const p = PROFILES[name];
+  if (!p || p.udpBlocked || p.flap) throw new Error(`cannot change to profile '${name}' during a run`);
+  for (const [prefix, dev, rate] of [[[], HOST_IF, p.down], [NS_EXEC, NS_IF, p.up]] as Array<[string[], string, string | undefined]>) {
+    run(...prefix, 'tc', 'qdisc', 'del', 'dev', dev, 'root');
+    if (name !== 'clean') shape(prefix, dev, p, rate);
+  }
 }
 
 export function netState(): string {

@@ -55,7 +55,11 @@ const fakeLlm: LLMProvider = {
   chat: async (r) => ({ content: 'hello', model: r.model, usage: { promptTokens: 30, completionTokens: 12, totalTokens: 42 } }),
 };
 
-async function startGateway(config: Partial<AccountsConfig> = {}, opts: { adminApp?: boolean; dir?: string } = {}): Promise<Gw> {
+const NO_QUOTA = { audioSeconds: 0, llmTokens: 0, ttsChars: 0, rooms: 0, requestsPerDay: 0, concurrentRequests: 0 };
+
+interface GwOpts { adminApp?: boolean; dir?: string; appEnv?: Record<string, string>; sessionRequests?: number; hold?: Promise<void> }
+
+async function startGateway(config: Partial<AccountsConfig> = {}, opts: GwOpts = {}): Promise<Gw> {
   const clock = { now: Date.UTC(2026, 9, 10, 12) };
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), 'accounts-'));
   const mails: EmailMessage[] = [];
@@ -69,6 +73,7 @@ async function startGateway(config: Partial<AccountsConfig> = {}, opts: { adminA
       siteHosts: [SITE], publicBaseUrl: 'https://ucast.me', cookieSecure: true, ...config,
     },
     email, isAdmin: (u) => access.admins.has(u), now: () => clock.now,
+    ...(opts.sessionRequests ? { sessionRequests: () => opts.sessionRequests! } : {}),
   });
   await accounts.init();
   const keyRegistry = {
@@ -77,7 +82,7 @@ async function startGateway(config: Partial<AccountsConfig> = {}, opts: { adminA
   };
   const gate = new AdminGate({ actorOf: (t) => { const u = keyRegistry.resolve(t)?.userId; return u && access.admins.has(u) ? u : null; } });
   const appLimits = new AppLimits({
-    env: {}, now: () => clock.now, isAdmin: (u) => access.admins.has(u),
+    env: opts.appEnv ?? {}, now: () => clock.now, isAdmin: (u) => access.admins.has(u),
     aliasesOf: (u, stage) => (u === 'babelcast' ? new Set(stage === 'stt' ? ['whisper-large-v3'] : stage === 'chat' ? ['llm'] : ['tts']) : null),
   });
   const server = createProxyServer({
@@ -88,6 +93,11 @@ async function startGateway(config: Partial<AccountsConfig> = {}, opts: { adminA
     customRoutes: [
       ...createAccessRoutes({ access, gate, audit: new KeyAudit() }),
       { method: 'POST', path: '/v1/rooms', handler: async (_req, res) => { res.writeHead(201, { 'Content-Type': 'application/json' }); res.end('{"code":"K7Q2XM"}'); } },
+      { method: 'POST', path: '/v1/realtime/sessions', handler: async (req, res) => {
+        req.resume();
+        await opts.hold;
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"sessionId":"rt_x"}');
+      } },
     ],
     onInference: accounts.recordInference,
   });
@@ -389,7 +399,7 @@ describe('metering and quota', () => {
   });
 
   it('over the monthly quota → 402 quota_exceeded in Portuguese; it renews next month', async () => {
-    const gw = await startGateway({ quota: { audioSeconds: 3, llmTokens: 0, ttsChars: 0, rooms: 0, requestsPerDay: 0 } });
+    const gw = await startGateway({ quota: { ...NO_QUOTA, audioSeconds: 3 } });
     const k = await newKey(gw, await signup(gw));
     expect((await stt(gw, k.key, 4)).status).toBe(200);
     const over = await stt(gw, k.key, 1);
@@ -403,7 +413,7 @@ describe('metering and quota', () => {
   });
 
   it('over the daily request cap → 429 with Retry-After', async () => {
-    const gw = await startGateway({ quota: { audioSeconds: 0, llmTokens: 0, ttsChars: 0, rooms: 0, requestsPerDay: 2 } });
+    const gw = await startGateway({ quota: { ...NO_QUOTA, requestsPerDay: 2 } });
     const k = await newKey(gw, await signup(gw));
     expect((await stt(gw, k.key)).status).toBe(200);
     expect((await stt(gw, k.key)).status).toBe(200);
@@ -413,6 +423,75 @@ describe('metering and quota', () => {
     expect(Number(over.headers['retry-after'])).toBeGreaterThan(0);
     // Ordinary app keys are not affected by account quotas.
     expect((await stt(gw, APP_KEY)).status).toBe(200);
+  });
+});
+
+describe('per-account limits under one shared app', () => {
+  const session = (gw: Gw, key: string) => call(gw, 'POST', '/v1/realtime/sessions', { headers: { Authorization: `Bearer ${key}` }, body: {} });
+
+  it('defaults: 2000 requests per day and 20 in flight per account', async () => {
+    const gw = await startGateway();
+    const s = await signup(gw);
+    const me = await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } });
+    expect(me.json.quota.limits).toMatchObject({ requestsPerDay: 2000, concurrentRequests: 20 });
+  });
+
+  it('one account exhausting its daily budget does not stop another account of the same app', async () => {
+    const gw = await startGateway({ quota: { ...NO_QUOTA, requestsPerDay: 2 } });
+    const a = await newKey(gw, await signup(gw));
+    const b = await newKey(gw, await signup(gw, 'bob@example.com'));
+    expect((await stt(gw, a.key)).status).toBe(200);
+    expect((await stt(gw, a.key)).status).toBe(200);
+    const over = await stt(gw, a.key);
+    expect(over.status).toBe(429);
+    expect(over.json.error).toMatchObject({ code: 'daily_quota_exceeded', scope: 'account', limit: 2 });
+    expect(over.json.error.message).toMatch(/Sua conta atingiu o limite de 2 pedidos por dia/);
+    expect((await stt(gw, b.key)).status).toBe(200);
+  });
+
+  it('a realtime session costs its whole app charge against the account budget; /v1/s2s turns count too', async () => {
+    const gw = await startGateway({ quota: { ...NO_QUOTA, requestsPerDay: 100 } }, { sessionRequests: 40 });
+    const a = await newKey(gw, await signup(gw));
+    const b = await newKey(gw, await signup(gw, 'bob@example.com'));
+    expect((await session(gw, a.key)).status).toBe(200);
+    expect((await session(gw, a.key)).status).toBe(200);
+    expect((await session(gw, a.key)).status).toBe(429);
+    for (let i = 0; i < 20; i++) expect((await stt(gw, a.key)).status).toBe(200);
+    const turn = await call(gw, 'POST', '/v1/s2s', { headers: { Authorization: `Bearer ${a.key}` }, body: {} });
+    expect(turn.status).toBe(429);
+    expect(turn.json.error.code).toBe('daily_quota_exceeded');
+    expect((await session(gw, b.key)).status).toBe(200);
+  });
+
+  it('one account at its in-flight limit gets 429; another account of the same app still passes', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>(r => { release = r; });
+    const gw = await startGateway({ quota: { ...NO_QUOTA, concurrentRequests: 1 } }, { hold });
+    const a = await newKey(gw, await signup(gw));
+    const b = await newKey(gw, await signup(gw, 'bob@example.com'));
+    const first = session(gw, a.key);
+    await new Promise(r => setTimeout(r, 50));
+    const busy = await session(gw, a.key);
+    expect(busy.status).toBe(429);
+    expect(busy.json.error).toMatchObject({ code: 'account_concurrency_exceeded', scope: 'account', limit: 1 });
+    expect(busy.headers['retry-after']).toBe('1');
+    const other = session(gw, b.key);
+    release();
+    expect((await first).status).toBe(200);
+    expect((await other).status).toBe(200);
+    expect((await session(gw, a.key)).status).toBe(200);
+  });
+
+  it('the app-wide daily budget still caps the sum of the accounts', async () => {
+    const gw = await startGateway({ quota: { ...NO_QUOTA, requestsPerDay: 10 } }, { appEnv: { APP_DAILY_REQUESTS: '3' } });
+    const a = await newKey(gw, await signup(gw));
+    const b = await newKey(gw, await signup(gw, 'bob@example.com'));
+    expect((await stt(gw, a.key)).status).toBe(200);
+    expect((await stt(gw, a.key)).status).toBe(200);
+    expect((await stt(gw, b.key)).status).toBe(200);
+    const over = await stt(gw, b.key);
+    expect(over.status).toBe(429);
+    expect(over.json.error.code).toBe('daily_budget_exhausted');
   });
 });
 

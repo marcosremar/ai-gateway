@@ -28,6 +28,13 @@ answered as if the student had spoken. The filter lives in the gateway so that e
 
 1. Metadata layer: a segment is dropped when `no_speech_prob` > 0.6, or `compression_ratio` > 2.4, or `avg_logprob` < -1.0.
    A provider with one flat set of metrics is judged as a single segment.
+   **Voiced clip** (`speech_ms` > 0: the speech-stack replica's Silero VAD found speech): only Whisper's own silence test
+   (`no_speech_prob` > 0.6 **and** `avg_logprob` < -1.0, Radford et al. 2023) and `compression_ratio` > 2.4 drop it, and the
+   ambiguous blocklist is not corroborated by `no_speech_prob`. Reason: on a clip padded to 30 s, a real one-word answer scores
+   like silence — measured 2026-10-11 on large-v3 (72 gTTS pt-BR clips of 0.4–4 s, clean / padded / with noise, against
+   15 silence/noise/hum/click/breath clips): «Dois» 0.62, «Três reais» 0.78, while every silence and noise clip scored
+   0.80–0.90 and came back as «E aí» / «Obrigado.» with `avg_logprob` -0.3…-0.6. The VAD found 0 ms of speech in all 15
+   negatives and ≥ 277 ms in all 72 positives. Without `speech_ms` (cloud providers, older images) the rule above is unchanged.
 2. Blocklist layer (`src/data/whisper-hallucinations.json`, matched after normalizing case, punctuation and hyphens):
    - high-confidence phrases (boilerplate vocabulary such as amara/legendas/inscreva-se/merci d'avoir regardé, or 6+ words, or
      the explicit "e aí" listed by the owner) are dropped in any language, with or without metadata;

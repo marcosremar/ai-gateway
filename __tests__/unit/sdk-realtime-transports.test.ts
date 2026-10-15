@@ -7,6 +7,7 @@ import {
   DEFAULT_TIMEOUTS, createWebRtcTransport, createWsTransport, decodeAudioFrame, encodeAudioFrame, type PcmPlayer,
   type RealtimeEvent, type TransportContext,
 } from '../../sdk/browser/realtime/index';
+import { preferRedundantAudio } from '../../sdk/browser/realtime/index';
 import { createLocalTelemetry } from '../../sdk/browser/realtime/telemetry';
 
 function ctx(over: Partial<TransportContext> = {}): TransportContext & { events: RealtimeEvent[]; failures: Error[] } {
@@ -172,6 +173,24 @@ describe('WebRTC rung', () => {
     expect(FakePc.last.remote).toEqual({ type: 'answer', sdp: 'v=0\r\nanswer' });
     t.close();
     expect(calls[1]).toMatchObject({ url: 'https://gw/v1/realtime/sessions/rt_1', init: { method: 'DELETE' } });
+  });
+
+  it('uplink loss: audio/red is offered first when the browser has it, the browser order stays when it does not or refuses', () => {
+    const opus = { mimeType: 'audio/opus', clockRate: 48000 }, red = { mimeType: 'audio/red', clockRate: 48000 }, pcmu = { mimeType: 'audio/PCMU', clockRate: 8000 };
+    const asked: unknown[][] = [];
+    const pc = (set: (codecs: unknown[]) => void) => ({ getTransceivers: () => [{ setCodecPreferences: set }] }) as unknown as RTCPeerConnection;
+    const withSender = (codecs: unknown[] | null, run: () => void) => {
+      const g = globalThis as { RTCRtpSender?: unknown };
+      const before = g.RTCRtpSender;
+      g.RTCRtpSender = codecs ? { getCapabilities: () => ({ codecs }) } : undefined;
+      try { run(); } finally { g.RTCRtpSender = before; }
+    };
+    withSender([opus, red, pcmu], () => preferRedundantAudio(pc(c => asked.push(c))));
+    withSender([opus, pcmu], () => preferRedundantAudio(pc(c => asked.push(c))));
+    withSender(null, () => preferRedundantAudio(pc(c => asked.push(c))));
+    withSender([opus, red], () => preferRedundantAudio(pc(() => { throw new Error('InvalidModificationError'); })));
+    withSender([opus, red], () => preferRedundantAudio({} as RTCPeerConnection));
+    expect(asked).toEqual([[red, opus, pcmu]]);
   });
 
   it('an offer refused by the gateway (replica full) rejects connect', async () => {

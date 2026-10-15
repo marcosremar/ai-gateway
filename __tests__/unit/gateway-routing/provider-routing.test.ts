@@ -48,11 +48,27 @@ describe('routeRequest — fallback across different providers', () => {
     }
   });
 
-  it('passes a real client error (400) through instead of trying other providers', async () => {
-    const a = fake('groq', () => Promise.reject(httpError(400, 'invalid role')));
+  // Babelcast audit 2026-10-12, T4: MAI-Voice refused a Kokoro voice (400) and the turn ended mute instead of reaching Kokoro.
+  it('a provider\'s 4xx refusal moves on to the next provider, without opening its breaker', async () => {
+    const a = fake('groq', () => Promise.reject(httpError(400, 'voice not supported')));
     const b = fake('openrouter', () => Promise.resolve('ok'));
-    await expect(run([target(a), target(b)])).rejects.toMatchObject({ status: 400 });
-    expect(b.call).not.toHaveBeenCalled();
+    await expect(run([target(a), target(b)])).resolves.toMatchObject({ result: 'ok' });
+    expect(b.call).toHaveBeenCalledTimes(1);
+  });
+
+  it('when every provider refuses the request (4xx), the client gets that 4xx, not a 503', async () => {
+    const a = fake('groq', () => Promise.reject(httpError(400, 'invalid role')));
+    const b = fake('openrouter', () => Promise.reject(httpError(422, 'invalid role')));
+    await expect(run([target(a), target(b)])).rejects.toMatchObject({ status: 422 });
+    expect(b.call).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refusal followed by an outage is a 503 naming both', async () => {
+    const a = fake('groq', () => Promise.reject(httpError(400, 'bad voice')));
+    const b = fake('openrouter', () => Promise.reject(httpError(502, 'upstream down')));
+    const err = await run([target(a), target(b)]).catch(e => e);
+    expect(err).toBeInstanceOf(ProviderUnavailableError);
+    expect(err.reasons.join(' ')).toMatch(/400.*502/);
   });
 
   it('throws ProviderUnavailableError with one reason per provider when all fail', async () => {

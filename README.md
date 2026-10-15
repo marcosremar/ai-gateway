@@ -16,7 +16,7 @@ Built with TypeScript, providing a unified interface for AI providers and multi-
 ## Features
 
 - **Transparent Speech API** — Single `POST /v1/speech` endpoint handles STT → LLM → TTS. Transport (GPU vs cloud) is hidden from the caller. No SSE/WebSocket/WebRTC in client code.
-- **Deployments (Scaleway)** — `PUT /v1/deployments/:name` with any Docker image (or a profile like `qwen3-tts`) → autoscaled replicas, scale to zero, cold-start wait, per-deployment replica bounds via API. See [docs/deployments.md](docs/deployments.md)
+- **Deployments (Vast)** — `PUT /v1/deployments/:name` with any Docker image (or a profile like `qwen3-tts`) → autoscaled replicas, scale to zero, cold-start wait, per-deployment replica bounds via API. See [docs/deployments.md](docs/deployments.md)
 - **Multi-tier GPU Autoscaler** — Cascade through GPU providers (RunPod, TensorDock, Modal) with automatic failover, health checking, idle watchdog, and cost monitoring
 - **AI Provider Abstraction** — Unified interface for 8+ providers (OpenAI, Groq, Fireworks, OpenRouter, Modal, self-hosted) across STT, TTS, LLM, Image, and Realtime modalities
 - **Provider Fallback Chains** — Declarative, config-driven fallback with cooldown and credit exhaustion tracking
@@ -279,6 +279,17 @@ bun run test:properties         # property-based invariant tests
 ```bash
 bun run build   # tsup → dist/ (ESM + CJS + declarations + sourcemaps)
 ```
+
+## Publishing to production
+
+```bash
+bun run deploy:prod             # from a clean checkout of origin/main
+```
+
+Production is a single Railway instance, so a publish restarts it. The script refuses during a parle class (the declared
+`warmSchedule`, Mon–Thu 16:40–20:30 Europe/Paris (aquecimento da aula); `--during-class` overrides it for an emergency), a dirty tree or a
+HEAD that is not `origin/main`; then it stamps the build, runs `railway up` and waits until `/health` reports the new
+commit (plus `fallbackProbe` with `AI_GATEWAY_ADMIN_KEY` set). Never call `railway up` by hand.
 
 ## Tech Stack
 

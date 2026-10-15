@@ -11,7 +11,7 @@ import { FrameDecoder } from '../../src/s2s/frames';
 export interface ClientConfig {
   gw: string; key: string; deployment: string; config: Record<string, unknown>;
   students: number; rtc: number; s2s: number; noWake?: boolean; chrome: number; chromeTransports: string[]; clipEndSilenceMs: number; rtcProcs: number;
-  uplinkStallMs?: number; uplinkStallEvery?: number; clientDeadline?: boolean; ttsModel?: string; speculateLeadMs?: number; speculateResume?: number;
+  uplinkStallMs?: number; uplinkStallEvery?: number; clientDeadline?: boolean; ttsModel?: string; speculateLeadMs?: number; speculateResume?: number; transportPolicy?: string; fidelity?: boolean;
   rampS: number; durationS: number; turnEveryS: number; jitterS: number; burst?: boolean; think?: [number, number] | null; clipS: number; clip: string | null; turnTimeoutS: number;
   turn: 'udp' | 'tcp'; python: string; chromePath: string; work: string; out: string;
 }
@@ -60,7 +60,7 @@ const LOUD = 0.02;
 const KEEP = [
   'type', 'state', 'final', 'code', 'empty', 'filtered', 'interrupted', 'error', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms',
   'index', 'audio_ms', 'deadline_ms', 'deadline_missed', 'first_sound_ms', 'first_sound_from_speech_ms', 'ttfa_from_speech_ms',
-  'tts_retries', 'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms',
+  'tts_retries', 'out_first_pull_ms', 'rtp_first_sent_ms', 'rtp_late_p50_ms', 'rtp_late_p95_ms', 'rtp_late_max_ms', 'uplink_lost_ms', 'uplink_recovered_ms', 'uplink_fec_pct', 'uplink_red_pct',
 ];
 const UPLINK_BACKLOG = 64 * 1024;
 
@@ -447,6 +447,7 @@ async function chromeStudents(): Promise<void> {
           durationMs: (cfg.rampS + cfg.durationS) * 1000, turnTimeoutMs: cfg.turnTimeoutS * 1000, turnEveryMs: cfg.turnEveryS * 1000,
           clipEndSilenceMs: cfg.clipEndSilenceMs, transport: cfg.chromeTransports[i % cfg.chromeTransports.length] || null,
           uplinkStallMs: cfg.uplinkStallMs ?? 0, uplinkStallEvery: cfg.uplinkStallEvery ?? 3, clientDeadline: !!cfg.clientDeadline,
+          transportPolicy: cfg.transportPolicy ?? null, fidelity: !!cfg.fidelity,
         },
       )]);
       rec.transport = run.transport;

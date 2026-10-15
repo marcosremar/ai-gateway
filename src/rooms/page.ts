@@ -1,8 +1,8 @@
 // ── AI Gateway — Live subtitle rooms: viewer pages ───────────────────────────
 // Self-contained HTML (inline CSS/JS under a per-response CSP nonce, no CDN, no build step), mobile first, French by default (interface language per app).
 //   - roomPage:  live line on top (one line per language, shrink then "…" — never wrapped), full transcript below,
-//                language selector, "mostrar original", "Ouvir dublagem" (Web Audio, gapless, live line in sync with
-//                the voice), delay indicator, "Copiar texto", per-viewer display settings sheet, reconnect.
+//                language selector, dubbing toggle (Web Audio, gapless, live line in sync with the voice), quick display
+//                modes, karaoke highlight, delay indicator, copy text, per-viewer display settings sheet, reconnect.
 //   - entryPage: "Saisissez le code de la session".
 //   - notFoundPage: unknown / expired code.
 
@@ -25,13 +25,13 @@ const js = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
 export const UI_LANGS = ['fr', 'pt', 'en'] as const;
 type UiLang = typeof UI_LANGS[number];
 
-/** Every interface string of the room page, per interface language. `{d}` / `{n}` are filled by the script. */
+/** Every interface string of the room page, per interface language. `{d}` / `{n}` / `{f}` are filled by the script. */
 export const UI_TEXT: Record<UiLang, Record<string, string>> = {
   fr: {
     locale: 'fr-FR', dec: ',', name: 'Français', title: 'Sous-titres en direct', connecting: 'connexion…', live: 'en direct',
     reconnecting: 'reconnexion…', ended: 'terminée', waiting: 'En attente de la première prise de parole…',
     noLines: 'Aucune prise de parole dans cette session.', options: 'Options', langLabel: 'Langue des sous-titres', original: 'Original',
-    modesLabel: "Mode d'affichage", qDub: 'Doublage (voix traduite)', qTranslation: 'Sous-titres traduits',
+    modesLabel: "Mode d'affichage", qTranslation: 'Sous-titres traduits',
     qBilingual: 'Sous-titres doubles (original + traduction)', qTranscript: 'Transcription (langue originale)', qFull: 'Texte complet',
     copy: 'Copier le texte', copied: 'Copié !', settings: 'Réglages', settingsTitle: "Réglages d'affichage", close: 'Fermer les réglages',
     newLines: 'Nouvelles phrases ↓', uiLang: "Langue de l'interface", mode: 'Mode',
@@ -47,13 +47,17 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     delayTipVoice: 'Délai de la voix par rapport à la parole (médiane des dernières phrases)',
     endedNotice: 'Session terminée — texte disponible jusqu’au {d}.',
     gone: 'Cette session n’existe plus (le texte reste disponible {n} jours après la dernière prise de parole).',
-    noDub: 'Ce navigateur ne lit pas le doublage.',
+    noDub: 'Ce navigateur ne lit pas le doublage.', current: 'Sous-titre en cours', langCap: 'Langue',
+    dubPick: 'choisissez une langue de traduction', dubNa: 'indisponible dans cette langue', dubOff: 'désactivé · touchez pour écouter',
+    dubLocked: 'touchez ici pour activer le son', dubError: 'erreur de lecture de la voix ({f})', dubPlaying: 'lecture en cours',
+    dubLoading: 'chargement de la voix…', dubIdle: 'activé · en attente de la parole',
+    dubTipPick: 'Choisissez une langue de traduction pour écouter le doublage', dubTipNa: 'Doublage indisponible dans cette langue',
   },
   pt: {
     locale: 'pt-BR', dec: ',', name: 'Português', title: 'Legendas ao vivo', connecting: 'conectando…', live: 'ao vivo',
     reconnecting: 'reconectando…', ended: 'encerrada', waiting: 'Aguardando a primeira fala…', noLines: 'Nenhuma fala nesta sessão.',
     options: 'Opções', langLabel: 'Idioma da legenda', original: 'Original', modesLabel: 'Modo de exibição',
-    qDub: 'Dublado (voz traduzida)', qTranslation: 'Legenda traduzida', qBilingual: 'Legenda dupla (original + tradução)',
+    qTranslation: 'Legenda traduzida', qBilingual: 'Legenda dupla (original + tradução)',
     qTranscript: 'Transcrição (fala original)', qFull: 'Texto completo', copy: 'Copiar texto', copied: 'Copiado!', settings: 'Ajustes',
     settingsTitle: 'Ajustes de exibição', close: 'Fechar ajustes', newLines: 'Novas falas ↓', uiLang: 'Idioma da interface', mode: 'Modo',
     mTranslation: 'Tradução', mTranslationD: 'Tradução em destaque; a fala original embaixo é opcional',
@@ -68,13 +72,17 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     delayTipVoice: 'Atraso da voz em relação à fala (mediana das últimas falas)',
     endedNotice: 'Sessão encerrada — texto disponível até {d}.',
     gone: 'Esta sessão não existe mais (o texto fica disponível por {n} dias após a última fala).',
-    noDub: 'Este navegador não reproduz a dublagem.',
+    noDub: 'Este navegador não reproduz a dublagem.', current: 'Legenda atual', langCap: 'Idioma',
+    dubPick: 'escolha um idioma de tradução', dubNa: 'indisponível neste idioma', dubOff: 'desligada · toque para ouvir',
+    dubLocked: 'toque aqui para ativar o som', dubError: 'erro ao tocar a voz ({f})', dubPlaying: 'tocando',
+    dubLoading: 'carregando voz…', dubIdle: 'ligada · aguardando a fala',
+    dubTipPick: 'Escolha um idioma de tradução para ouvir a dublagem', dubTipNa: 'Dublagem indisponível neste idioma',
   },
   en: {
     locale: 'en', dec: '.', name: 'English', title: 'Live subtitles', connecting: 'connecting…', live: 'live',
     reconnecting: 'reconnecting…', ended: 'ended', waiting: 'Waiting for the first words…', noLines: 'No speech in this session.',
     options: 'Options', langLabel: 'Subtitle language', original: 'Original', modesLabel: 'Display mode',
-    qDub: 'Dubbed (translated voice)', qTranslation: 'Translated subtitles', qBilingual: 'Dual subtitles (original + translation)',
+    qTranslation: 'Translated subtitles', qBilingual: 'Dual subtitles (original + translation)',
     qTranscript: 'Transcript (original speech)', qFull: 'Full text', copy: 'Copy text', copied: 'Copied!', settings: 'Settings',
     settingsTitle: 'Display settings', close: 'Close settings', newLines: 'New lines ↓', uiLang: 'Interface language', mode: 'Mode',
     mTranslation: 'Translation', mTranslationD: 'Translation first; the original underneath is optional',
@@ -89,12 +97,16 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     delayTipVoice: 'Voice delay behind the speech (median of the last lines)',
     endedNotice: 'Session ended — text available until {d}.',
     gone: 'This session no longer exists (the text stays available {n} days after the last words).',
-    noDub: 'This browser cannot play the dubbing.',
+    noDub: 'This browser cannot play the dubbing.', current: 'Current subtitle', langCap: 'Language',
+    dubPick: 'choose a translation language', dubNa: 'not available in this language', dubOff: 'off · tap to listen',
+    dubLocked: 'tap here to turn the sound on', dubError: 'could not play the voice ({f})', dubPlaying: 'playing',
+    dubLoading: 'loading the voice…', dubIdle: 'on · waiting for speech',
+    dubTipPick: 'Choose a translation language to hear the dubbing', dubTipNa: 'Dubbing not available in this language',
   },
 };
 const T = UI_TEXT.fr;
 
-const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2319c2b4'/%3E%3Crect x='7' y='12' width='18' height='3' rx='1.5' fill='%231b1b1f'/%3E%3Crect x='10' y='18' width='12' height='3' rx='1.5' fill='%231b1b1f'/%3E%3C/svg%3E";
+const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2300C7BE'/%3E%3Crect x='7' y='12' width='18' height='3' rx='1.5' fill='%230F1A2E'/%3E%3Crect x='10' y='18' width='12' height='3' rx='1.5' fill='%230F1A2E'/%3E%3C/svg%3E";
 
 /** Content-Security-Policy of a page rendered with `nonce`. */
 export function pageCsp(nonce: string): string {
@@ -105,7 +117,7 @@ export function pageCsp(nonce: string): string {
 }
 
 const BASE_CSS = `
-:root{color-scheme:dark;--bg:#1b1b1f;--surface:#24242a;--line:#34343c;--text:#ececf1;--muted:#9a9aa6;--accent:#19c2b4;--accent-ink:#06211f;--warn:#e0a84a}
+:root{color-scheme:dark;--bg:#0F1A2E;--surface:#17253F;--line:#2A3D60;--text:#F2F6FB;--muted:#A9B7CD;--accent:#00C7BE;--accent-ink:#0F1A2E;--brand:#00C7BE;--brand-ink:#0F1A2E;--warn:#F2B84B}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-text-size-adjust:100%}
 a{color:var(--accent)}
@@ -119,7 +131,7 @@ function shell(title: string, css: string, body: string, script: string, nonce: 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#1b1b1f">
+<meta name="theme-color" content="#0F1A2E">
 <meta name="robots" content="noindex">
 <title>${esc(title)}</title>
 <link rel="icon" href="${ICON}">
@@ -180,18 +192,18 @@ ${form.body}</main>`;
 // line per language) and one compact toolbar — over a calm transcript column. Spacing scale 4/8/12/16/24 px.
 // Every display setting is the viewer's own (settings sheet behind the gear; localStorage, never sent anywhere).
 
-const LIGHT_VARS = '--bg:#f6f6f8;--surface:#ffffff;--line:#dcdce4;--text:#1b1b1f;--muted:#5b5b66;--accent:#0b7d74;--accent-ink:#ffffff;--warn:#8a5a00;--bad:#c4262e;--live-bg:rgba(11,125,116,.12);--shade:rgba(20,20,30,.18);color-scheme:light';
+const LIGHT_VARS = '--bg:#F4F7FB;--surface:#ffffff;--line:#D3DCE8;--text:#0F1A2E;--muted:#4A5872;--accent:#00756F;--accent-ink:#ffffff;--brand:#00C7BE;--brand-ink:#0F1A2E;--warn:#8a5a00;--bad:#c4262e;--live-bg:rgba(0,199,190,.18);--shade:rgba(15,26,46,.25);color-scheme:light';
 
 const ROOM_CSS = `
-:root{--surface:#25252b;--muted:#a3a3ae;--bad:#ff7d7d;--live-bg:rgba(25,194,180,.16);--shade:rgba(0,0,0,.45);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right))}
+:root{--bad:#FF8A8A;--live-bg:rgba(0,199,190,.16);--shade:rgba(5,10,20,.55);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right))}
 html[data-theme="light"]{${LIGHT_VARS}}
 @media (prefers-color-scheme:light){html[data-theme="auto"]{${LIGHT_VARS}}}
-body{overflow-x:hidden}
-.wrap{max-width:60rem;margin:0 auto}
-header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:max(8px,env(safe-area-inset-top)) var(--pad-r) 12px var(--pad)}
+html,body{overflow-x:hidden}
+.wrap{max-width:46rem;margin:0 auto;min-width:0}
+header{position:sticky;top:0;z-index:5;background:var(--bg);box-shadow:0 1px 0 var(--line);padding:max(8px,env(safe-area-inset-top)) var(--pad-r) 12px var(--pad)}
 .top{display:flex;align-items:center;gap:8px;min-width:0;height:32px}
-.top .brand{flex:none;font-size:.95rem}
-.top h1{flex:1;min-width:0;margin:0;font-size:.95rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.top .brand{flex:none;font-size:1rem;font-weight:800}
+.top h1{flex:1;min-width:0;margin:0;font-size:.9rem;font-weight:600;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .delay{flex:none;white-space:nowrap;font-size:.75rem;color:var(--muted);font-variant-numeric:tabular-nums}
 .delay.warn{color:var(--warn)}
 .delay.bad{color:var(--bad)}
@@ -199,22 +211,43 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
 .pill.live{background:var(--live-bg);color:var(--accent)}
 .pill.live::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;vertical-align:1px;animation:pulse 1.6s infinite}
 .pill.wait{color:var(--warn)}
+.btn.yt{flex:none;border:2px solid var(--brand);color:var(--text);text-decoration:none;font-weight:700}
+.btn.yt[hidden]{display:none}
+.btn.yt:hover{background:var(--live-bg)}
+.btn.yt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.yt .ytic{width:20px;height:14px;flex:none}
 @keyframes pulse{50%{opacity:.3}}
-@media (prefers-reduced-motion:reduce){.pill.live::before{animation:none}}
-.now{margin-top:8px;background:var(--surface);border-radius:16px;padding:12px 16px;min-height:76px;display:flex;flex-direction:column;justify-content:center;min-width:0}
+.now{margin-top:8px;background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:16px;min-height:104px;display:flex;flex-direction:column;justify-content:center;min-width:0}
 .mode-full .now{display:none}
-.fit{white-space:nowrap;overflow:hidden;line-height:1.3;max-width:100%}
-#liveMain{font-weight:700;letter-spacing:-.005em}
-#liveOrig{color:var(--muted);margin-top:4px}
+.fit{white-space:nowrap;overflow:hidden;line-height:1.25;max-width:100%}
+#liveMain{font-weight:800;letter-spacing:-.005em}
+#liveOrig{color:var(--muted);margin-top:6px}
 .empty{color:var(--muted);font-style:italic;font-weight:400!important}
-.bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
-.bar select,.sheet select{flex:1 1 7.5rem;min-width:0;max-width:14rem;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0 10px;height:40px}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:40px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0 12px;cursor:pointer;white-space:nowrap;font-size:.92rem}
+.ctl{display:flex;gap:8px;margin-top:12px;align-items:stretch;min-width:0}
+.lang{flex:0 0 7.25rem;min-width:0;position:relative;display:block}
+.lang select{display:block;width:100%;height:56px;-webkit-appearance:none;appearance:none;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px 28px 0 12px;font-size:1rem;font-weight:700;cursor:pointer}
+.lang .cap{position:absolute;left:12px;top:8px;font-size:.68rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);pointer-events:none}
+.lang::after{content:"";position:absolute;right:13px;top:50%;width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:translateY(-70%) rotate(45deg);pointer-events:none}
+.dub{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:8px;height:56px;padding:0 10px 0 12px;border-radius:14px;border:2px solid var(--brand);background:transparent;color:var(--text);cursor:pointer;text-align:left;-webkit-tap-highlight-color:transparent}
+.dub .ic{font-size:1.25rem;line-height:1;flex:none}
+.dub .dl{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+.dub .dt{font-weight:800;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dub .ds{font-size:.8rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dub[aria-pressed="true"]{background:var(--brand);color:var(--brand-ink)}
+.dub[aria-pressed="true"] .ds{color:var(--brand-ink);font-weight:600}
+.dub[data-state="locked"],.dub[data-state="error"]{background:var(--surface);color:var(--text);border-color:var(--warn)}
+.dub[data-state="locked"] .ds,.dub[data-state="error"] .ds{color:var(--warn);font-weight:700}
+.dub[data-state="playing"] .ic,.dub[data-state="loading"] .ic{animation:pulse 1.2s infinite}
+.dub:disabled{opacity:.55;cursor:not-allowed;border-color:var(--line)}
+.dub:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){.pill.live::before,.dub .ic{animation:none!important}}
+.tools{display:flex;gap:8px;margin-top:8px;align-items:center;min-width:0}
+.sheet select{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:0 10px;height:44px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0 12px;cursor:pointer;white-space:nowrap;font-size:.9rem}
 .btn:focus-visible,select:focus-visible,.sheet input:focus-visible,.sheet:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .btn[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn[hidden]{display:none}
-.btn .ic{font-size:1rem;line-height:1}
 .end{margin-left:auto}
 .sm{display:none}
 .ico{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
@@ -227,22 +260,23 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
 .modes .mb:last-child::after{left:auto;right:0;transform:none}
 .k{color:var(--accent);transition:color .12s linear}
 @media (prefers-reduced-motion:reduce){.k{transition:none}}
-@media (max-width:479px){.lg{display:none}.sm{display:inline}.end{margin-left:0}.bar .btn{padding:0 10px;height:44px;min-width:44px}.bar select{flex-basis:5.5rem;height:44px}
-.modes{order:5;flex-basis:100%;justify-content:space-between}.modes .mb{flex:1 1 0;padding:0}}
-@media (max-width:379px){.bar select{flex-basis:5rem}}
+@media (max-width:767px){.tools{flex-wrap:wrap}.modes{order:5;flex-basis:100%;justify-content:space-between}.modes .mb{flex:1 1 0;padding:0}}
+@media (max-width:479px){.lg{display:none}.sm{display:inline}.tools .btn{padding:0 10px;height:44px;min-width:44px}}
+@media (max-width:339px){.ctl{flex-wrap:wrap}.lang{flex-basis:100%}}
 .notice{max-width:46rem;margin:12px auto 0;padding:10px 12px;border-radius:10px;background:var(--surface);color:var(--muted);font-size:.9rem}
 .notice:empty{display:none}
 .notice-wrap{padding:0 var(--pad-r) 0 var(--pad)}
-#tx{max-width:46rem;margin:0 auto;padding:8px var(--pad-r) calc(96px + env(safe-area-inset-bottom)) var(--pad)}
-#tx p{margin:0;padding:14px 0;border-bottom:1px solid var(--line);line-height:1.6;font-size:var(--tx);overflow-wrap:anywhere}
+.txh{max-width:46rem;margin:16px auto 0;padding:0 var(--pad-r) 0 var(--pad);font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+#tx{max-width:46rem;margin:0 auto;padding:0 var(--pad-r) calc(96px + env(safe-area-inset-bottom)) var(--pad)}
+#tx p{margin:0;padding:12px 0;border-bottom:1px solid var(--line);line-height:1.55;font-size:var(--tx);overflow-wrap:anywhere}
 #tx p:last-child{border-bottom:0}
 #tx p .ts{float:right;margin:4px 0 0 12px;font-size:.72rem;color:var(--muted);font-variant-numeric:tabular-nums}
 .no-times #tx p .ts{display:none}
 #tx p .o{display:block;color:var(--muted);font-size:.86em;line-height:1.5;margin-top:4px}
 #tx p.miss .t{color:var(--muted);font-style:italic}
-#tx p.cur{box-shadow:inset 3px 0 0 var(--accent);padding-left:15px;margin-left:-15px}
+#tx p.cur{box-shadow:inset 3px 0 0 var(--brand);padding-left:13px;margin-left:-16px;padding-right:0}
 .mode-full #tx p.cur{box-shadow:none;padding-left:0;margin-left:0}
-#more{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--accent);color:var(--accent-ink);border:0;border-radius:999px;padding:10px 16px;font-weight:700;box-shadow:0 4px 18px rgba(0,0,0,.4);display:none;cursor:pointer}
+#more{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--brand);color:var(--brand-ink);border:0;border-radius:999px;padding:10px 16px;font-weight:700;box-shadow:0 4px 18px rgba(0,0,0,.4);display:none;cursor:pointer}
 .backdrop{position:fixed;inset:0;z-index:20;background:var(--shade)}
 .sheet{position:fixed;z-index:21;left:0;right:0;bottom:0;max-height:85vh;max-height:85dvh;overflow-y:auto;overscroll-behavior:contain;background:var(--surface);color:var(--text);border-radius:18px 18px 0 0;border-top:1px solid var(--line);padding:4px var(--pad-r) calc(16px + env(safe-area-inset-bottom)) var(--pad);box-shadow:0 -8px 30px rgba(0,0,0,.35)}
 .backdrop[hidden],.sheet[hidden]{display:none}
@@ -254,29 +288,27 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
 .sheet legend+*{clear:both}
 .sheet legend,.sheet .lbl{display:block;padding:0;margin:0 0 8px;font-size:.78rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .grp{padding:14px 0;border-top:1px solid var(--line)}
-.grp select{max-width:none;width:100%}
 .opt{display:flex;gap:10px;align-items:flex-start;padding:8px 0;cursor:pointer}
 .opt input{margin:3px 0 0;accent-color:var(--accent);width:18px;height:18px;flex:none}
 .opt small{display:block;color:var(--muted);font-size:.82rem;margin-top:2px;line-height:1.35}
 .row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;cursor:pointer}
 .row input[type=checkbox]{accent-color:var(--accent);width:20px;height:20px;flex:none}
-.row input[type=range]{flex:1 1 auto;max-width:12rem;accent-color:var(--accent)}
+.row input[type=range]{flex:1 1 auto;min-width:0;max-width:12rem;accent-color:var(--accent)}
 .row.off{opacity:.5}
 .seg{display:flex;gap:8px;flex-wrap:wrap}
 .seg label{flex:1 1 0;min-width:5.5rem;display:flex;align-items:center;justify-content:center;gap:6px;height:40px;border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:.9rem}
 .seg input{accent-color:var(--accent);margin:0}
 .stepper{display:flex;align-items:center;gap:12px}
 .stepper output{min-width:3.5rem;text-align:center;font-variant-numeric:tabular-nums}
-@media (min-width:768px){.top{height:36px}.top .brand,.top h1{font-size:1rem}.now{padding:16px 20px;min-height:96px}
+@media (min-width:768px){.top{height:36px}.now{padding:20px 24px;min-height:120px}.lang{flex-basis:12rem}
 .backdrop{background:transparent}
 .sheet{left:auto;bottom:auto;top:96px;right:16px;width:380px;border:1px solid var(--line);border-radius:16px;padding:4px 20px 16px;box-shadow:0 12px 40px rgba(0,0,0,.45)}}
 `;
 
 const ico = (paths: string) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths}</svg>`;
 const GEAR = '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>';
-/** Quick display modes on the toolbar: [mode, label key, icon]. `dub` = translation + dubbed voice. */
+/** Quick display modes on the toolbar: [mode, label key, icon]. The dubbed voice is the "Écouter le doublage" toggle. */
 const QUICK_MODES: Array<[string, string, string]> = [
-  ['dub', 'qDub', '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'],
   ['translation', 'qTranslation', '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h10"/>'],
   ['bilingual', 'qBilingual', '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 11.5h10M7 15h6"/>'],
   ['transcript', 'qTranscript', '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'],
@@ -289,18 +321,23 @@ const uiOptions = UI_LANGS.map(l => `<option value="${l}">${esc(UI_TEXT[l].name)
 
 const ROOM_BODY = `<header><div class="wrap">
 <div class="top"><span class="brand">ucast</span><h1 id="title" ${txt('title')}</h1><span id="delay" class="delay" hidden></span><span id="pill" class="pill wait" ${txt('connecting')}</span></div>
-<section class="now" aria-live="polite"><div id="liveMain" class="fit empty">${esc(T.waiting)}</div><div id="liveOrig" class="fit" hidden></div></section>
-<div class="bar" role="toolbar" data-ia="options" aria-label="${esc(T.options)}">
-<select id="lang" data-ia="langLabel" aria-label="${esc(T.langLabel)}"></select>
+<section class="now" aria-live="polite" data-ia="current" aria-label="${esc(T.current)}"><div id="liveMain" class="fit empty">${esc(T.waiting)}</div><div id="liveOrig" class="fit" hidden></div></section>
+<div class="ctl">
+<label class="lang"><span class="cap" ${txt('langCap')}</span><select id="lang" data-ia="langLabel" aria-label="${esc(T.langLabel)}"></select></label>
+<button id="dub" class="dub" type="button" aria-pressed="false" aria-describedby="dubState" data-state="off"><span class="ic" aria-hidden="true">🔈</span><span class="dl"><span class="dt" ${txt('listenDub')}</span><span id="dubState" class="ds" aria-live="polite" ${txt('dubOff')}</span></span></button>
+</div>
+<div class="tools" role="toolbar" data-ia="options" aria-label="${esc(T.options)}">
 <div class="modes" role="group" data-ia="modesLabel" aria-label="${esc(T.modesLabel)}">
 ${QUICK_MODES.map(([m, k, p]) => `<button class="btn mb" type="button" data-m="${m}" aria-pressed="false" data-ia="${k}" data-tip="${esc(T[k])}" aria-label="${esc(T[k])}">${ico(p)}</button>`).join('\n')}
 </div>
+<a id="yt" class="btn yt" target="_blank" rel="noopener noreferrer" aria-label="Regarder sur YouTube" hidden><svg class="ytic" viewBox="0 0 20 14" aria-hidden="true" focusable="false"><rect width="20" height="14" rx="4" fill="#ff0000"/><path d="M8 4l5.2 3L8 10z" fill="#ffffff"/></svg><span class="lg" id="ytLbl">Regarder sur YouTube</span><span class="sm">YouTube</span></a>
 <button id="copy" class="btn end" type="button" data-ia="copy" aria-label="${esc(T.copy)}">${ico('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>')}<span class="lg" id="copyLbl" ${txt('copy')}</span></button>
 <button id="gear" class="btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="sheet" data-ia="settingsTitle" aria-label="${esc(T.settingsTitle)}">${ico(GEAR)}<span class="lg" ${txt('settings')}</span></button>
 </div>
 </div></header>
 <div class="notice-wrap"><div id="notice" class="notice" role="status"></div></div>
-<main id="tx"></main>
+<div class="txh" aria-hidden="true" ${txt('fullText')}</div>
+<main id="tx" data-ia="fullText" aria-label="${esc(T.fullText)}"></main>
 <button id="more" type="button" ${txt('newLines')}</button>
 <div id="backdrop" class="backdrop" hidden></div>
 <div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1" hidden>
@@ -357,6 +394,16 @@ ${opt('full', 'mFull')}
  *     one per app that opened the live; interface language `ui` fr by default), every field validated, defaults for the rest; the older "ucast-orig" = "1" still turns the
  *     original on. textSizes(step, viewportWidth): {live, tx} px for an A−/A+ step (live 20–56, transcript 14–24).
  *   - lineView(mode, showOrig, lang, hasTranslation): what a line shows — {main: 'tr'|'orig', sub, miss}.
+ *   - safeYoutubeUrl(u): the room's YouTube link when it is an https URL on youtube.com / www. / m. / youtu.be (the
+ *     server already validates it; checked again before it becomes an href), else null (the link stays hidden).
+ *   - youtubeLabel(prefs): "Assistir no YouTube" in the first of `prefs` it knows (pt / en / fr / es; default pt); the page
+ *     passes the interface language.
+ *   - listenMsg(dubOn, lang): the `listen` message (sent on every (re)connect and on every dub/language change).
+ *   - dubStatus({can, lang, on, ctx, error, playing, loading}, L): the dub toggle's visible state in the interface language
+ *     L — {kind, text}: na | off | locked (AudioContext not running: the next tap resumes it) | error (`error` = the clip
+ *     format) | playing | loading | idle.
+ *   - silentWav(rate, samples): a silent 16-bit mono WAV as a binary string — played by an <audio> element inside the
+ *     tap so iOS puts the page's audio session in "playback" (otherwise the ringer switch mutes Web Audio).
  */
 export const ROOM_PAGE_LOGIC = String.raw`
 function pickLang(prefs,languages,saved){
@@ -460,10 +507,50 @@ function refOf(search,referrer){
   if(m&&decodeURIComponent(m[1]).toLowerCase()==='qr')return 'qr';
   return referrer?'link':'direct';
 }
+var YT_HOSTS=['youtube.com','www.youtube.com','m.youtube.com','youtu.be'];
+function safeYoutubeUrl(u){
+  if(typeof u!=='string'||!u||u.length>200)return null;
+  var m=/^https:\/\/([^\/?#@:]+)(?:[\/?#]|$)/i.exec(u);
+  if(!m||YT_HOSTS.indexOf(m[1].toLowerCase())<0||/[\s"'<>\\]/.test(u))return null;
+  return u;
+}
+var YT_LABELS={pt:'Assistir no YouTube',en:'Watch on YouTube',fr:'Regarder sur YouTube',es:'Ver en YouTube'};
+function youtubeLabel(prefs){
+  prefs=prefs||[];
+  for(var i=0;i<prefs.length;i++){
+    var p=String(prefs[i]||'').toLowerCase().split('-')[0];
+    if(Object.prototype.hasOwnProperty.call(YT_LABELS,p))return YT_LABELS[p];
+  }
+  return YT_LABELS.pt;
+}
 function lineView(mode,showOrig,lang,hasTr){
   if(lang==='orig'||mode==='transcript')return {main:'orig',sub:false,miss:false};
   if(!hasTr)return {main:'orig',sub:false,miss:true};
   return {main:'tr',sub:mode==='bilingual'||!!showOrig,miss:false};
+}
+function dubbable(lang,dubLangs){
+  if(!lang||lang==='orig')return false;
+  return !Array.isArray(dubLangs)||dubLangs.indexOf(lang)>=0;
+}
+function listenMsg(on,lang){return JSON.stringify({type:'listen',lang:on&&lang&&lang!=='orig'?lang:null})}
+function dubStatus(s,L){
+  if(!s.can)return {kind:'na',text:s.lang==='orig'?L.dubPick:L.dubNa};
+  if(!s.on)return {kind:'off',text:L.dubOff};
+  if(!s.ctx||s.ctx!=='running')return {kind:'locked',text:L.dubLocked};
+  if(s.error)return {kind:'error',text:L.dubError.replace('{f}',s.error)};
+  if(s.playing)return {kind:'playing',text:L.dubPlaying};
+  if(s.loading)return {kind:'loading',text:L.dubLoading};
+  return {kind:'idle',text:L.dubIdle};
+}
+function silentWav(rate,samples){
+  var n=samples*2,h=[];
+  function s(t){for(var i=0;i<t.length;i++)h.push(t.charCodeAt(i))}
+  function u32(v){h.push(v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255)}
+  function u16(v){h.push(v&255,(v>>8)&255)}
+  s('RIFF');u32(36+n);s('WAVE');s('fmt ');u32(16);u16(1);u16(1);u32(rate);u32(rate*2);u16(2);u16(16);s('data');u32(n);
+  for(var i=0;i<n;i++)h.push(0);
+  var o='';for(var j=0;j<h.length;j++)o+=String.fromCharCode(h[j]);
+  return o;
 }
 `;
 
@@ -487,7 +574,8 @@ function applyUi(){
   document.documentElement.lang=settings.ui;
   Array.prototype.forEach.call(document.querySelectorAll('[data-i]'),function(e){e.textContent=L[e.getAttribute('data-i')]});
   Array.prototype.forEach.call(document.querySelectorAll('[data-ia]'),function(e){var t=L[e.getAttribute('data-ia')];e.setAttribute('aria-label',t);if(e.hasAttribute('data-tip'))e.setAttribute('data-tip',t)});
-  if(room){$('title').textContent=room.title||L.title;document.title=(room.title||L.title)+' · ucast.me';fillLangSelect($('lang'));fillLangSelect($('sLang'))}
+  var yt=youtubeLabel([settings.ui]);$('ytLbl').textContent=yt;$('yt').setAttribute('aria-label',yt);
+  if(room){$('title').textContent=room.title||L.title;document.title=(room.title||L.title)+' · ucast.me';fillLangSelect($('lang'));fillLangSelect($('sLang'));updateDubButton()}
   setPill($('pill').className.replace('pill','').trim(),pillKey);
   if(notice)setNotice(notice.k,notice.v);
 }
@@ -565,7 +653,7 @@ var mql=null;try{mql=window.matchMedia('(prefers-color-scheme: light)')}catch(e)
 function applyTheme(){
   document.documentElement.setAttribute('data-theme',settings.theme);
   var light=settings.theme==='light'||(settings.theme==='auto'&&mql&&mql.matches);
-  var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content',light?'#f6f6f8':'#1b1b1f');
+  var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content',light?'#F4F7FB':'#0F1A2E');
 }
 if(mql&&mql.addEventListener)mql.addEventListener('change',applyTheme);
 function applySettings(rerender){
@@ -688,7 +776,7 @@ function upsert(l){
   else{
     byId[l.id]=l;M(l.id).arrivedAt=now();stat.lines++;if(l.ts>1e11)stat.lag.push(Date.now()-l.ts);var i=lines.length;while(i>0&&lines[i-1].id>l.id)i--;lines.splice(i,0,l);
     var next=lines[i+1]?tx.querySelector('p[data-id="'+lines[i+1].id+'"]'):null;tx.insertBefore(para(l),next);
-    if(dub)setTimeout(renderLive,AUDIO_WAIT_MS+20);
+    if(dub){setTimeout(renderLive,AUDIO_WAIT_MS+20);expectVoice(l)}
   }
   renderLive();updateDelay();
   if(stick)scrollEnd();else if(!atBottom())$('more').style.display='block';
@@ -723,20 +811,47 @@ $('sUi').addEventListener('change',function(e){setSetting('ui',e.target.value,'s
 var relayout=null;function onResize(){if(relayout)cancelAnimationFrame(relayout);relayout=requestAnimationFrame(function(){relayout=null;document.documentElement.style.setProperty('--tx',textSizes(settings.size,window.innerWidth).tx+'px');renderLive();if(!sheet.hidden)placeSheet()})}
 window.addEventListener('resize',onResize);window.addEventListener('orientationchange',onResize);
 
-// ── dubbing: Web Audio, one AudioContext (created by the tap), clips decoded and scheduled back to back on its
-//    timeline with a 10 ms fade in/out (no clicks); the live line switches when a clip STARTS playing ──
-var actx=null,outGain=null,qEnd=0,pending=[],playingSrc=[],pumpTimer=null;
+// ── dubbing: Web Audio, one AudioContext (created/resumed synchronously inside the tap), clips decoded and scheduled
+//    back to back on its timeline with a 10 ms fade in/out (no clicks); the live line switches when a clip STARTS
+//    playing. Mobile unlock (unlockAudio, always inside a user gesture): iOS audio session → "playback" (else the ringer
+//    switch mutes Web Audio), a silent <audio> element played (same effect on older iOS), the context resumed and a
+//    1-sample buffer started. A context the OS suspends (screen lock, call, app switch) is resumed by the next tap; the
+//    toggle says so ("toque aqui para ativar o som"), and shows carregando voz… / tocando / decode errors. ──
+var VOICE_WAIT_MS=20000;
+var actx=null,outGain=null,qEnd=0,pending=[],playingSrc=[],pumpTimer=null,unlockEl=null,dubErr=null,decoding=0,awaitId=null,awaitAt=0,dubTick=null,dubKind='';
 function b64Buf(b64){var bin=atob(b64),n=bin.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=bin.charCodeAt(i);return u.buffer}
-function ensureContext(){
+function unlockAudio(){
+  try{var as=navigator.audioSession;if(as&&as.type!=='playback')as.type='playback'}catch(e){}
+  try{
+    if(!unlockEl){unlockEl=document.createElement('audio');unlockEl.setAttribute('playsinline','');unlockEl.setAttribute('webkit-playsinline','');unlockEl.preload='auto';unlockEl.src='data:audio/wav;base64,'+btoa(silentWav(8000,1600))}
+    var pp=unlockEl.play();if(pp&&pp.catch)pp.catch(function(){});
+  }catch(e){}
   if(!actx){var AC=window.AudioContext||window.webkitAudioContext;if(!AC)return false;
-    try{actx=new AC();outGain=actx.createGain();outGain.gain.value=settings.volume;outGain.connect(actx.destination)}catch(e){actx=null;return false}}
-  try{if(actx.state!=='running'&&actx.resume)actx.resume()}catch(e){}
+    try{actx=new AC()}catch(e){actx=null;return false}
+    try{outGain=actx.createGain();outGain.gain.value=settings.volume;outGain.connect(actx.destination)}catch(e){actx=null;return false}
+    try{actx.onstatechange=function(){if(actx.state==='running'&&pending.length)pump();updateDubUi()}}catch(e){}
+  }
+  try{if(actx.state!=='running'&&actx.resume){var r=actx.resume();if(r&&r.then)r.then(function(){pump();updateDubUi()},function(){updateDubUi()})}}catch(e){}
   try{var b=actx.createBuffer(1,1,22050),s=actx.createBufferSource();s.buffer=b;s.connect(actx.destination);s.start(0)}catch(e){}
   return true;
 }
+function locked(){return !!(dub&&actx&&actx.state!=='running')}
+/** Any tap anywhere while the OS has suspended the context resumes it (it must happen inside a gesture on iOS). */
+function wake(){if(locked())unlockAudio()}
+['touchend','click','keydown'].forEach(function(t){document.addEventListener(t,wake,true)});
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&locked()){try{actx.resume().then(updateDubUi,updateDubUi)}catch(e){}updateDubUi()}});
+function updateDubUi(){
+  var b=$('dub');if(!b)return;
+  var playing=!!(actx&&playingSrc.length&&actx.currentTime<qEnd);
+  var awaiting=awaitId!=null&&now()-awaitAt<VOICE_WAIT_MS;
+  var st=dubStatus({can:canDub(),lang:lang,on:dub,ctx:actx?actx.state:null,error:dubErr,playing:playing,loading:decoding>0||pending.length>0||awaiting},L);
+  if(st.kind!==dubKind){dubKind=st.kind;b.setAttribute('data-state',st.kind)}
+  var ds=$('dubState');if(ds.textContent!==st.text)ds.textContent=st.text;
+  if(dub&&!dubTick)dubTick=setInterval(updateDubUi,400);else if(!dub&&dubTick){clearInterval(dubTick);dubTick=null}
+}
 function stopAudio(){
   pending=[];if(pumpTimer){clearTimeout(pumpTimer);pumpTimer=null}
-  playingSrc.forEach(function(s){try{s.stop()}catch(e){}});playingSrc=[];qEnd=0;
+  playingSrc.forEach(function(s){try{s.stop()}catch(e){}});playingSrc=[];qEnd=0;awaitId=null;dubErr=null;
   var t=now();for(var k in meta){var m=meta[k];m.pending=false;if(m.startedAt!=null&&m.startedAt>t)m.startedAt=null}
 }
 function pump(){
@@ -747,6 +862,7 @@ function pump(){
   for(var i=0;i<n;i++){var d=pending.shift(),m=M(d.lineId);if(m.startedAt==null){m.pending=false;m.skip=true}}
   while(pending.length&&pending[0].buf&&qEnd-actx.currentTime<0.5)schedule(pending.shift());
   if(pending.length)pumpTimer=setTimeout(pump,100);
+  updateDubUi();
 }
 function schedule(c){
   var start=nextStart(actx.currentTime,qEnd,LEAD_S),dur=c.buf.duration;
@@ -756,7 +872,7 @@ function schedule(c){
   g.gain.setValueAtTime(0,start);g.gain.linearRampToValueAtTime(1,start+f);
   g.gain.setValueAtTime(1,start+dur-f);g.gain.linearRampToValueAtTime(0,start+dur);
   src.connect(g);g.connect(outGain);src.start(start);
-  src.onended=function(){var i=playingSrc.indexOf(src);if(i>=0)playingSrc.splice(i,1);try{g.disconnect()}catch(e){}};
+  src.onended=function(){var i=playingSrc.indexOf(src);if(i>=0)playingSrc.splice(i,1);try{g.disconnect()}catch(e){}updateDubUi()};
   playingSrc.push(src);qEnd=start+dur;
   var m=M(c.lineId),at=now()+(start-actx.currentTime)*1000;
   if(m.startedAt==null){m.startedAt=at;m.durMs=dur*1000;m.pending=false;m.skip=false;setTimeout(function(){onClipStart(c.lineId)},Math.max(0,at-now()))}
@@ -765,38 +881,45 @@ function onClipStart(id){
   var m=meta[id],l=byId[id];stat.clips++;
   if(m&&m.arrivedAt>0&&m.startedAt!=null)stat.drift.push(syncOn()?now()-m.startedAt:m.startedAt-m.arrivedAt);
   if(m&&l&&m.arrivedAt>0&&m.startedAt!=null){voiceDelays.push((typeof l.delayMs==='number'?l.delayMs:0)+(m.startedAt-m.arrivedAt));if(voiceDelays.length>10)voiceDelays.shift()}
-  renderLive();updateDelay();
+  renderLive();updateDelay();updateDubUi();
 }
+/** A line arrived while listening: its voice is on the way (the toggle says "carregando voz…" for a while). */
+function expectVoice(l){if(dub&&lang!=='orig'&&l.translations&&l.translations[lang]){awaitId=l.id;awaitAt=now();updateDubUi()}}
 function onAudio(msg){
-  if(!dub||!actx||msg.lang!==lang)return;
+  if(!dub||!actx||msg.lang!==lang||typeof msg.wav!=='string')return;
+  if(awaitId!=null&&msg.lineId>=awaitId)awaitId=null;
   var m=M(msg.lineId);if(m.startedAt==null){m.pending=true;m.skip=false}
-  var c={lineId:msg.lineId,buf:null};pending.push(c);
-  var fail=function(){track('audio',{action:'decode_error'});var i=pending.indexOf(c);if(i>=0)pending.splice(i,1);if(m.startedAt==null)m.pending=false;renderLive();pump()};
+  var c={lineId:msg.lineId,buf:null},done=false,fmt=String(msg.format||'wav');pending.push(c);decoding++;
+  var fail=function(){if(done)return;done=true;decoding--;
+    track('audio',{action:'decode_error',format:fmt});dubErr=fmt;
+    var i=pending.indexOf(c);if(i>=0)pending.splice(i,1);if(m.startedAt==null)m.pending=false;renderLive();pump();updateDubUi()};
+  var ok=function(buf){if(done)return;if(!buf){fail();return}done=true;decoding--;dubErr=null;c.buf=buf;pump()};
   var ab;try{ab=b64Buf(msg.wav)}catch(e){fail();return}
-  try{var p=actx.decodeAudioData(ab,function(buf){c.buf=buf;pump()},fail);if(p&&p.catch)p.catch(function(){})}catch(e){fail()}
+  try{var p=actx.decodeAudioData(ab,ok,fail);if(p&&p.then)p.then(ok,fail)}catch(e){fail()}
+  updateDubUi();
 }
-function canDub(){return lang!=='orig'&&!ended}
-function updateDubButton(){if(!canDub()&&dub)setDub(false,'auto');updateModes()}
+function canDub(){return !ended&&dubbable(lang,room&&room.dubLangs)}
+function updateDubButton(){
+  var b=$('dub'),can=canDub();b.disabled=!can;
+  b.title=can?'':(lang==='orig'?L.dubTipPick:L.dubTipNa);
+  if(!can&&dub)setDub(false,'auto');
+  updateDubUi();
+}
 function setDub(on,from){
-  if(on&&!ensureContext()){setNotice('noDub');on=false;track('audio',{action:'unsupported'})}
+  if(on&&!unlockAudio()){setNotice('noDub');on=false;track('audio',{action:'unsupported'})}
   if(from&&on!==dub){track('setting',{key:'dub',value:on,from:from});track('audio',{action:on?'play':'pause'})}
-  dub=on;
-  if(!on){stopAudio();voiceDelays=[]}
-  updateModes();sendListen();renderLive();updateDelay();if(!sheet.hidden)syncSheet();
+  dub=on;var b=$('dub');b.setAttribute('aria-pressed',on?'true':'false');b.querySelector('.ic').textContent=on?'🔊':'🔈';
+  if(!on){stopAudio();voiceDelays=[];if(unlockEl){try{unlockEl.pause()}catch(e){}}}
+  sendListen();renderLive();updateDelay();updateDubUi();if(!sheet.hidden)syncSheet();
 }
+/** The toggle: while the OS holds the sound (context suspended), a tap re-activates it instead of switching it off. */
+$('dub').addEventListener('click',function(){if(locked()){unlockAudio();updateDubUi();track('audio',{action:'resume'});return}setDub(!dub,'toolbar')});
 
-// ── quick modes on the toolbar: one tap switches the style, the current one is pressed; tooltip on hover/focus/tap ──
+// ── quick modes on the toolbar: one tap switches the display mode, the current one is pressed; tooltip on hover/focus/tap ──
 var modeBtns=Array.prototype.slice.call(document.querySelectorAll('.mb'));
-function updateModes(){
-  var cur=dub?'dub':settings.mode,noTr=ended||!room||!room.languages.length;
-  modeBtns.forEach(function(b){var m=b.getAttribute('data-m');b.setAttribute('aria-pressed',m===cur?'true':'false');
-    b.disabled=m==='dub'&&noTr})
-}
+function updateModes(){modeBtns.forEach(function(b){b.setAttribute('aria-pressed',b.getAttribute('data-m')===settings.mode?'true':'false')})}
 function quickMode(m){
-  var needTr=m==='dub'||m==='translation'||m==='bilingual';
-  if(needTr&&lang==='orig'&&room&&room.languages.length)setLang(room.languages[0],'toolbar');
-  if(m==='dub'){if(settings.mode==='transcript'||settings.mode==='full')setSetting('mode','translation','toolbar');if(!dub)setDub(true,'toolbar');return}
-  if(dub)setDub(false,'toolbar');
+  if((m==='translation'||m==='bilingual')&&lang==='orig'&&room&&room.languages.length)setLang(room.languages[0],'toolbar');
   setSetting('mode',m,'toolbar');
 }
 modeBtns.forEach(function(b){b.addEventListener('click',function(){
@@ -884,13 +1007,21 @@ function applyRoom(r){
   room=r;expiresAt=r.expiresAt||null;lines=[];byId={};
   (r.lines||[]).forEach(function(l){byId[l.id]=l;lines.push(l);M(l.id)});lines.sort(function(a,b){return a.id-b.id});
   var t=r.title||L.title;$('title').textContent=t;document.title=t+' · ucast.me';
-  buildSelect();renderAll();trackJoin();
+  applyYoutube(r.youtubeUrl);
+  buildSelect();renderAll();trackJoin();updateDubButton();
   if(r.ended)showEnded();
 }
+// ── "Regarder sur YouTube": the presenter's live on YouTube, when the app sent its link (snapshot or "update") ──
+function applyYoutube(u){
+  var a=$('yt'),ok=safeYoutubeUrl(u);
+  if(ok){a.href=ok;a.hidden=false}else{a.hidden=true;a.removeAttribute('href')}
+}
+$('yt').addEventListener('click',function(){track('ui',{action:'youtube'})});
 function notFound(){gone=true;setPill('','ended');updateDelay();setNotice('gone',{n:DAYS})}
 
 // ── socket, reconnect with backoff ──
-function sendListen(){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'listen',lang:dub&&lang!=='orig'?lang:null}))}
+/** Tells the server which language this viewer listens to — on every (re)connect, dub toggle and language change. */
+function sendListen(){if(ws&&ws.readyState===1)ws.send(listenMsg(dub,lang))}
 function connect(){
   if(ended||gone)return;
   var proto=location.protocol==='https:'?'wss:':'ws:';
@@ -901,6 +1032,7 @@ function connect(){
     if(m.type==='snapshot'){applyRoom(m.room);if(!m.room.ended){setPill('live','live');setNotice(null)}}
     else if(m.type==='line'&&room)upsert(m.line);
     else if(m.type==='audio')onAudio(m);
+    else if(m.type==='update'){if(room)room.youtubeUrl=m.youtubeUrl;applyYoutube(m.youtubeUrl)}
     else if(m.type==='ended')showEnded();};
   s.onclose=function(){if(ping)clearInterval(ping);if(ws===s)ws=null;if(ended||gone)return;
     setPill('wait','reconnecting');if(joined)track('ui',{action:'reconnect'});

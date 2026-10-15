@@ -10,7 +10,7 @@ import { mkdtempSync, readdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import WebSocket from 'ws';
-import { CODE_RE, FileRoomStore, MemoryRoomStore, createRooms, linesFromJsonl, type RoomStore, type RoomsConfig } from '../../../src/rooms';
+import { CODE_RE, FileRoomStore, MAX_YOUTUBE_URL_CHARS, MemoryRoomStore, createRooms, linesFromJsonl, parseYoutubeUrl, type RoomStore, type RoomsConfig } from '../../../src/rooms';
 
 const KEYS: Record<string, string> = { 'key-ucast': 'ucast', 'key-other': 'other', 'key-admin': 'admin' };
 const DAY = 86_400_000;
@@ -399,6 +399,107 @@ describe('rooms line delayMs', () => {
       gw = await startGateway({}, new FileRoomStore(dir));
       check(await get());
       await gw.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+describe('rooms youtubeUrl', () => {
+  const patch = (gw: Gw, code: string, body: unknown, token?: string) => fetch(`${gw.url}/v1/rooms/${code}`, {
+    method: 'PATCH', headers: { ...json, ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body),
+  });
+  const getRoom = async (gw: Gw, code: string) => (await (await fetch(`${gw.url}/v1/rooms/${code}`)).json()) as Record<string, unknown>;
+
+  it('validates strictly: https on youtube.com / www. / m. / youtu.be only, no credentials or port, bounded length', () => {
+    expect(parseYoutubeUrl(undefined)).toBeNull();
+    expect(parseYoutubeUrl(null)).toBeNull();
+    expect(parseYoutubeUrl('')).toBeNull();
+    for (const ok of ['https://youtu.be/dQw4w9WgXcQ', 'https://www.youtube.com/channel/UCabc_-123/live', 'https://youtube.com/watch?v=abc&t=10', 'https://m.youtube.com/live/abc']) {
+      expect(parseYoutubeUrl(ok)).toBe(ok);
+    }
+    expect(parseYoutubeUrl('https://WWW.YouTube.com/live/x')).toBe('https://www.youtube.com/live/x');
+    for (const bad of ['http://youtu.be/x', 'javascript:alert(1)', 'https://evil.com/youtu.be', 'https://youtu.be.evil.com/x', 'https://music.youtube.com/x',
+      'https://user:pw@youtu.be/x', 'https://youtu.be:8443/x', 'https://youtu.be/a b', 'https://youtu.be/ação', ' https://youtu.be/x', 'youtu.be/x',
+      `https://youtu.be/${'a'.repeat(MAX_YOUTUBE_URL_CHARS)}`, 42, {}, ['https://youtu.be/x']]) {
+      expect(() => parseYoutubeUrl(bad), String(bad)).toThrow(/youtubeUrl/);
+    }
+  });
+
+  let gw: Gw;
+  beforeEach(async () => { gw = await startGateway(); });
+  afterEach(async () => { await gw.close(); });
+
+  it('is accepted at creation and served in GET (null when absent); a bad one refuses the room', async () => {
+    const plain = await newRoom(gw);
+    expect((await getRoom(gw, plain.code)).youtubeUrl).toBeNull();
+    const res = await createRoom(gw, { languages: ['en'], youtubeUrl: 'https://www.youtube.com/channel/UC1/live' });
+    expect(res.status).toBe(201);
+    const { code } = await res.json() as { code: string };
+    expect((await getRoom(gw, code)).youtubeUrl).toBe('https://www.youtube.com/channel/UC1/live');
+    const bad = await createRoom(gw, { languages: ['en'], youtubeUrl: 'https://evil.example/live' });
+    expect(bad.status).toBe(400);
+    expect(JSON.stringify(await bad.json())).toMatch(/youtubeUrl/);
+  });
+
+  it('PATCH needs the publish token (or the creating / an admin key), validates, and updates GET and open pages live', async () => {
+    const room = await newRoom(gw);
+    const v = await viewer(gw, room.code);
+    expect(((await v.next('snapshot')).room as Record<string, unknown>).youtubeUrl).toBeNull();
+
+    const link = 'https://www.youtube.com/channel/UC1/live';
+    expect((await patch(gw, room.code, { youtubeUrl: link })).status).toBe(401);
+    expect((await patch(gw, room.code, { youtubeUrl: link }, 'wrong')).status).toBe(401);
+    expect((await patch(gw, room.code, { youtubeUrl: link }, 'key-other')).status).toBe(403);
+    expect((await patch(gw, room.code, { youtubeUrl: 'http://youtu.be/x' }, room.publishToken)).status).toBe(400);
+    expect((await patch(gw, room.code, { title: 'nope' }, room.publishToken)).status).toBe(400);
+    expect((await patch(gw, 'ZZZZZZ', { youtubeUrl: link }, room.publishToken)).status).toBe(404);
+
+    const ok = await patch(gw, room.code, { youtubeUrl: link }, room.publishToken);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ code: room.code, youtubeUrl: link });
+    expect(await v.next('update')).toEqual({ type: 'update', youtubeUrl: link });
+    expect((await getRoom(gw, room.code)).youtubeUrl).toBe(link);
+
+    // The broadcast resolves later: the link changes; the same value again broadcasts nothing.
+    expect((await patch(gw, room.code, { youtubeUrl: 'https://youtu.be/abc123' }, 'key-ucast')).status).toBe(200);
+    expect(await v.next('update')).toEqual({ type: 'update', youtubeUrl: 'https://youtu.be/abc123' });
+    expect((await patch(gw, room.code, { youtubeUrl: 'https://youtu.be/abc123' }, room.publishToken)).status).toBe(200);
+    await new Promise(r => setTimeout(r, 80));
+    expect(v.messages.filter(m => m.type === 'update')).toHaveLength(0);
+
+    // Also after the end (the recording keeps the link), and null clears it.
+    expect((await post(gw, room.code, 'end', {}, room.publishToken)).status).toBe(204);
+    expect((await patch(gw, room.code, { youtubeUrl: null }, room.publishToken)).status).toBe(200);
+    expect((await getRoom(gw, room.code)).youtubeUrl).toBeNull();
+    v.ws.close();
+  });
+
+  it('answers CORS preflight with PATCH and still refuses other methods', async () => {
+    const room = await newRoom(gw);
+    const pre = await fetch(`${gw.url}/v1/rooms/${room.code}`, { method: 'OPTIONS' });
+    expect(pre.headers.get('access-control-allow-methods')).toContain('PATCH');
+    expect((await fetch(`${gw.url}/v1/rooms/${room.code}`, { method: 'DELETE' })).status).toBe(405);
+  });
+
+  it('keeps the link across a restart (file store) and serves null for metas written before the field existed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rooms-yt-'));
+    try {
+      let g = await startGateway({}, new FileRoomStore(dir));
+      const room = await newRoom(g);
+      expect((await patch(g, room.code, { youtubeUrl: 'https://youtu.be/xyz' }, room.publishToken)).status).toBe(200);
+      const now = g.clock.now;
+      await g.close();
+      g = await startGateway({}, new FileRoomStore(dir));
+      g.clock.now = now;
+      expect((await getRoom(g, room.code)).youtubeUrl).toBe('https://youtu.be/xyz');
+      await g.close();
+
+      const legacy = new MemoryRoomStore();
+      await legacy.saveMeta({ version: 1, code: 'ABCDEF', title: '', originalLang: null, languages: ['en'], createdAt: now, lastActivityAt: now, ended: false, endedAt: null, tokenHash: 'x', ownerId: 'ucast' });
+      g = await startGateway({}, legacy);
+      g.clock.now = now;
+      expect((await getRoom(g, 'ABCDEF')).youtubeUrl).toBeNull();
+      await g.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

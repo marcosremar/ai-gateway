@@ -17,6 +17,7 @@
  * The same token is also accepted as a Bearer by the gateway itself (see `serve.ts`), so agents call it with the
  * credential they already carry.
  */
+import { readStateFile, writeStateFile } from '../deployments/state-file';
 
 /** Aliases that carry the same secret on Railway / Cloud Agent (kept in sync with parle `principalSandboxToken`). */
 export const TOKEN_ALIASES = ['SANDBOX_TOKEN', 'PALCO_PROXY_TOKEN', 'PALCO_PROXY', 'VMOS_PROXY_TOKEN', 'VMOS_PROXY', 'PROXY_TOKEN'] as const;
@@ -74,29 +75,27 @@ export function principalSandboxToken(env: Record<string, string | undefined>): 
 /** User id of the SANDBOX_TOKEN when `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only). */
 export const SANDBOX_USER = 'sandbox';
 
-export function sandboxIsAdmin(env: Record<string, string | undefined>): boolean {
-  return env.SANDBOX_TOKEN_ADMIN?.trim() === '1';
-}
-
 /**
  * The gateway's client keys: `GATEWAY_API_KEYS` ("key:user", comma-separated). The SANDBOX_TOKEN (and its aliases)
  * is the dev API's master key — the gateway uses it only to FETCH its own provider keys from the palco — and is NOT a
  * client key nor an admin (owner decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` accepts it as user `sandbox`
- * for the transition (non-admin and no-wake; admin only with `SANDBOX_TOKEN_ADMIN=1`).
+ * for the transition: a client like any other (never an admin, no-wake). Only two roles exist (owner, 10/10/2026):
+ * admin manages, a client calls the APIs; a developer is a client.
  */
-export function gatewayClientKeys(env: Record<string, string | undefined>): { keys: string[]; sandboxAdmins: string[]; warnings: string[] } {
+export function gatewayClientKeys(env: Record<string, string | undefined>): { keys: string[]; warnings: string[] } {
   const keys = (env.GATEWAY_API_KEYS ?? '').split(',').map(k => k.trim()).filter(Boolean);
-  const warnings: string[] = [];
+  const warnings: string[] = env.SANDBOX_TOKEN_ADMIN?.trim()
+    ? ['SANDBOX_TOKEN_ADMIN is no longer read: the dev token is a client, never an admin — remove the variable']
+    : [];
   const token = principalSandboxToken(env);
-  if (env.ACCEPT_SANDBOX_TOKEN_AS_KEY?.trim() !== '1' || !token) return { keys, sandboxAdmins: [], warnings };
+  if (env.ACCEPT_SANDBOX_TOKEN_AS_KEY?.trim() !== '1' || !token) return { keys, warnings };
   if (/[,:]/.test(token)) {
     warnings.push('SANDBOX_TOKEN contains , or : — not accepted as an API key');
-    return { keys, sandboxAdmins: [], warnings };
+    return { keys, warnings };
   }
-  const admin = sandboxIsAdmin(env);
-  warnings.push(`ACCEPT_SANDBOX_TOKEN_AS_KEY=1: the SANDBOX_TOKEN is accepted as ${admin ? 'an ADMIN (SANDBOX_TOKEN_ADMIN=1)' : 'a non-admin, no-wake'} `
-    + 'client key (transition only — give the client its own GATEWAY_API_KEYS entry and remove the flag)');
-  return { keys: [...keys, `${token}:${SANDBOX_USER}`], sandboxAdmins: admin ? [SANDBOX_USER] : [], warnings };
+  warnings.push('ACCEPT_SANDBOX_TOKEN_AS_KEY=1: the SANDBOX_TOKEN is accepted as a no-wake client key '
+    + '(transition only — give the client its own GATEWAY_API_KEYS entry and remove the flag)');
+  return { keys: [...keys, `${token}:${SANDBOX_USER}`], warnings };
 }
 
 export function sandboxEnvUrls(env: Record<string, string | undefined>): string[] {
@@ -151,4 +150,21 @@ export async function loadSandboxEnv(
     }
   }
   return result;
+}
+
+export async function saveSandboxCache(path: string, env: Record<string, string | undefined>, names: string[]): Promise<void> {
+  const values = Object.fromEntries(names.flatMap(name => (env[name]?.trim() ? [[name, env[name]!.trim()]] : [])));
+  await writeStateFile(path, JSON.stringify(values));
+}
+
+export async function applySandboxCache(path: string, env: Record<string, string | undefined>): Promise<string[]> {
+  const { data } = await readStateFile<Record<string, unknown>>(path).catch(() => ({ data: null }));
+  const applied: string[] = [];
+  for (const [key, value] of Object.entries(data ?? {})) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof value !== 'string' || !value.trim()) continue;
+    if (isHostOnly(key) || isEndpointOverride(key) || (isEnvPinned(key) && env[key]?.trim())) continue;
+    env[key] = value.trim();
+    applied.push(key);
+  }
+  return applied;
 }

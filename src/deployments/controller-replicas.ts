@@ -6,8 +6,10 @@
 
 import { replicaCloudInit } from './cloud-init';
 import { randomBytes } from 'crypto';
+import { bootEventAuth, bootReportFor, parseBootEvent, sameAuth } from './boot-events';
 import { ControllerState, replicaTokenFor, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
+import { withGpuType } from './gpu-type';
 import { placeReplica, PlacementError } from './placement-walk';
 import { isOutOfStock, quotaMachineType } from './placements';
 import { DEFAULT_NEAR } from './placements';
@@ -28,6 +30,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     if (!(await this.rttGate(rt, m))) return; // still measuring, or released as too far
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
     const result = await this.checkReplica(rt, m);
+    p.last = result;
     if (result === 'down') p.downSince ??= this.now(); else delete p.downSince;
     if (result === 'ready') {
       // Replica lifecycle for telemetry (serve.ts maps these log lines to `replica.ready` / `replica.unhealthy`).
@@ -117,6 +120,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
   protected async release(m: ReplicaMachine, reason: string): Promise<void> {
     const rt = this.deployments.get(m.deployment);
     this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason, busy: rt ? this.busyOn(rt, m.id) : 0 });
+    this.boots.finish(m.id, reason, this.now());
     if ((reason === 'unhealthy' || reason === 'halted') && this.probes.get(m.id)?.everReady) this.noteLost(m.deployment);
     try {
       await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
@@ -176,7 +180,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
   }
 
   protected createReplica(rt: Runtime): void {
-    const spec = rt.record.spec;
+    const spec = withGpuType(rt.record.spec, rt.record.gpuType?.machineType);
     if (this.now() < rt.backoffUntil) return;
     const refusal = this.capRefusal(0, spec.name);
     if (refusal) {
@@ -185,6 +189,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     }
     rt.creating++;
     rt.spendNote = null;
+    this.boots.placingStart(spec.name, this.now());
     const created: { id?: string } = {};
     const spend: { cost: number; deployment: string; provider?: DeploymentProvider; machineType?: string } = { cost: 0, deployment: spec.name };
     this.pendingSpend.add(spend);
@@ -216,6 +221,11 @@ export abstract class ReplicaLifecycle extends ControllerState {
         this.machines = [...this.machines.filter(m => m.id !== machine.id), { ...machine, pricePerHour: machine.pricePerHour ?? price }];
         const placed = machine.placementNote ? `${placement}; ${machine.placementNote}` : placement;
         rt.lastPlacement = rt.rejected.length ? `${placed}; earlier: ${rt.rejected.join('; ')}` : placed;
+        const retried = rt.stuckRetry.attempts.find(a => !a.next);
+        if (retried) {
+          retried.next = { replicaId: machine.id, where: machine.zone || machine.id };
+          this.log('deployments: stuck boot retried on another offer', { deployment: spec.name, id: machine.id, from: retried.replicaId, where: retried.next.where, attempt: retried.attempt });
+        }
         rt.createFailures = 0;
         rt.stockOut = null;
         rt.lastError = rt.spendNote ? `create: ${rt.spendNote}` : null;
@@ -234,6 +244,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
           if (isOutOfStock(err)) rt.stockOut = { since: rt.stockOut?.since ?? this.now(), failures: (rt.stockOut?.failures ?? 0) + 1 };
         }
         this.log('deployments: create failed', { deployment: spec.name, error: rt.lastError });
+        this.boots.placingFailed(spec.name, rt.lastError, this.now());
       } finally {
         // A failed create cleans its own server up; anything left behind is listed again and planned as usual.
         if (created.id) this.creatingIds.delete(created.id);
@@ -271,10 +282,11 @@ export abstract class ReplicaLifecycle extends ControllerState {
     const tokenKey = randomBytes(12).toString('hex');
     const secret = rt.record.replicaToken;
     const replicaToken = replicaTokenFor(secret, tokenKey);
+    const bootReport = this.reportsBoots() ? bootReportFor(this.opts.publicUrl!, tokenKey, replicaToken) : undefined;
     const machine = await backend.createReplica({
-      spec, replicaToken, tokenKey, namespace: this.namespace, ...(network ? { network } : {}),
+      spec, replicaToken, tokenKey, namespace: this.namespace, ...(network ? { network } : {}), ...(bootReport ? { bootReport } : {}),
       // Vast builds its own init (`vastReplicaInit`) from spec + token; Scaleway takes this cloud-init as user_data.
-      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), replicaToken) : '',
+      cloudInit: backend.provider === 'scaleway' ? replicaCloudInit(this.withRegistryAuth(backend, spec), replicaToken, { bootReport }) : '',
       ...(spec.files ? { files: packFiles(Object.fromEntries(Object.entries(spec.files).map(([k, v]) => [k, new Uint8Array(Buffer.from(v, 'base64'))]))).chunks } : {}),
       onCreated: (id) => { created.id = id; this.creatingIds.add(id); },
     });
@@ -284,6 +296,20 @@ export abstract class ReplicaLifecycle extends ControllerState {
       void this.opts.store.saveDeployment(rt.record).catch(() => {});
     }
     return { ...machine, provider: backend.provider, tokenKey };
+  }
+
+  protected reportsBoots(): boolean {
+    return Boolean(this.opts.publicUrl) && this.opts.bootReporting !== false;
+  }
+
+  bootEvent(key: string, auth: string, query: URLSearchParams, text: string): boolean {
+    if (!key || !this.reportsBoots()) return false;
+    const m = this.machines.find(x => (x.tokenKey ?? this.tokenKeys.get(x.id)) === key);
+    const rt = m && this.deployments.get(m.deployment);
+    if (!m || !rt || !sameAuth(auth, bootEventAuth(this.replicaToken(rt, m))) || !this.boots.activeIds().includes(m.id)) return false;
+    const event = parseBootEvent(query, text, this.secretsOf(rt, m));
+    if (event) this.boots.report(m.deployment, m.id, event, this.now());
+    return event !== null;
   }
 
   /** Reserved IP + firewall of an exposed deployment, created once and kept in the record (it outlives replicas). */

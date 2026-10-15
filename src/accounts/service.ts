@@ -348,16 +348,17 @@ export class AccountService {
   }
 
   /**
-   * Admission of one metered request: the daily request cap (429) and the monthly limits of the metrics the request
-   * uses (402). Usage is counted after the fact, so the request that crosses a limit is still served; the next is not.
+   * Admission of one metered request worth `requests` (a realtime session: its whole charge): the daily request cap
+   * (429) and the monthly limits of the metrics the request uses (402). Usage is counted after the fact, so the request
+   * that crosses a monthly limit is still served; the next is not.
    */
-  checkQuota(user: User, metrics: QuotaMetric[]): AccountError | null {
+  checkQuota(user: User, metrics: QuotaMetric[], requests = 1): AccountError | null {
     const limits = this.limitsOf(user);
     const now = this.now();
-    if (limits.requestsPerDay > 0 && this.opts.usage.today(user.id).requests >= limits.requestsPerDay) {
+    if (limits.requestsPerDay > 0 && this.opts.usage.today(user.id).requests + requests > limits.requestsPerDay) {
       const resetAt = new Date(nextDayStart(now)).toISOString();
-      return new AccountError(429, `Você atingiu o limite de ${limits.requestsPerDay} pedidos por dia. Ele renova à meia-noite (UTC).`,
-        'daily_quota_exceeded', { metric: 'requests', limit: limits.requestsPerDay, reset_at: resetAt, retryAfterSeconds: Math.ceil((nextDayStart(now) - now) / 1000) });
+      return new AccountError(429, `Sua conta atingiu o limite de ${limits.requestsPerDay} pedidos por dia. Ele renova à meia-noite (UTC).`,
+        'daily_quota_exceeded', { scope: 'account', metric: 'requests', limit: limits.requestsPerDay, reset_at: resetAt, retryAfterSeconds: Math.ceil((nextDayStart(now) - now) / 1000) });
     }
     if (!metrics.length) return null;
     const month = this.opts.usage.month(user.id);

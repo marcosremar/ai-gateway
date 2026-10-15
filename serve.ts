@@ -25,39 +25,51 @@ import { createFallbackWatch, stageChainsReport, type ChainLinkSpec } from './sr
 import { accountPolicyGuards } from './src/gateway/proxy/account-policy-guard';
 import { DeclaredDeploymentReconciler } from './src/deployments/declared';
 import { createKeyAdminRoutes, KeyManager } from './src/config/key-manager';
-import { AccessKeys } from './src/config/access-keys';
+import { AccessKeys, autoWakesNow } from './src/config/access-keys';
+import { classWindowOpen } from './src/deployments/autoscale';
 import { AdminGate } from './src/config/admin-gate';
 import { createAccessRoutes } from './src/config/access-routes';
 import { KeyAudit } from './src/config/key-audit';
 import { createS2SRoute } from './src/s2s/route';
 import { streamCuts } from './src/telemetry/stream-cuts';
 import { createS2SAccess } from './src/s2s/access';
-import { appStagesView, realtimeHealth } from './src/gateway/proxy/health-view';
+import { appStagesView, minimalHealth, realtimeHealth } from './src/gateway/proxy/health-view';
+import { NO_APP, SpendLedger } from './src/deployments/spend-ledger';
+import { llmTokensOf } from './src/accounts/usage';
 import { loopbackStages } from './src/s2s/loopback-stages';
 import { appForCall, appStageModels } from './src/s2s/app-stage-models';
 import { proxyCircuitBreakers, resetProviderBreakers } from './src/gateway/proxy/provider-routing';
+import { reorderSnapshot } from './src/gateway/proxy/link-reorder';
+import { ttsCacheFromEnv } from './src/gateway/proxy/tts-cache';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { PrefixRoute } from './src/proxy/types';
 import {
-  adminListWarning, adminUsersFromEnv, bootFilesRoute, deploymentsFromEnv, proxyIdleTimeoutMs, DEPLOYMENT_CREDENTIAL_KEYS, DEVICE_HEADER,
+  adminListWarning, adminUsersFromEnv, bootEventsRoute, bootFilesRoute, deploymentsFromEnv, proxyIdleTimeoutMs, DEPLOYMENT_CREDENTIAL_KEYS, DEVICE_HEADER,
 } from './src/deployments';
 import { buildImages } from './src/deployments/build-images';
+import { bootHistoryFile } from './src/deployments/boot-track';
 import { AppLimits } from './src/gateway/proxy/app-limits';
 import { createWebhookDelivery } from './src/webhooks';
-import { createOpsAlerts } from './src/telemetry/ops-alerts';
-import { alertEmailFromEnv, createAlertMailer, opsAlertMail, secretValues } from './src/telemetry/alert-email';
+import { createOpsAlerts, OPS_ALERT_BOOT_QUIET_MS, OPS_ALERT_DEDUP_MS } from './src/telemetry/ops-alerts';
+import { alertEmailFromEnv, createAlertMailer, incidentResolvedMail, opsIncidentMail, secretValues } from './src/telemetry/alert-email';
+import { createIncidents, incidentQuietMs } from './src/telemetry/incidents';
 import { createBalanceWatch } from './src/telemetry/balance-watch';
-import { gatewayClientKeys, principalSandboxToken, SANDBOX_USER } from './src/config/sandbox-env';
+import { createOverspendWatch, overspendLimitsFromEnv } from './src/telemetry/overspend';
+import { createFallbackProbe, fallbackLinks } from './src/telemetry/fallback-probe';
+import { applySandboxCache, gatewayClientKeys, principalSandboxToken, SANDBOX_USER, saveSandboxCache } from './src/config/sandbox-env';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
-import { createRooms } from './src/rooms';
+import { createRooms, kokoroSynthesize, maiSynthesize, synthesizeWithFallback } from './src/rooms';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
+import { ModelBenchmarkStore } from './src/model-benchmarks/store';
+import { createModelBenchmarkRoutes } from './src/model-benchmarks/routes';
+import { adminTraffic, createAdminPage, createAlertLog, createModelPrices, createSuggestionDigest, recommendations, usageCost, type AdminSnapshot } from './src/admin-page';
 
 const log = createLogger('serve');
 
@@ -74,20 +86,26 @@ const stateDir = process.env.DEPLOYMENTS_STATE_DIR || join(homedir(), '.ai-gatew
 const keyAudit = new KeyAudit({ path: join(stateDir, 'key-audit.jsonl'), log: (msg, data) => log.log(data ?? {}, msg) });
 const access = new AccessKeys(process.env, { path: join(stateDir, 'access.json'), log: (msg, data) => log.warn(data ?? {}, msg) });
 await keyAudit.init();
-await access.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) },
+await access.load().then(() => access.migratePolicies()).catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) },
   'ACCESS STATE UNREADABLE: issued keys, revocations and the admin list from the API are not applied — restore access.json'));
 const sandboxEnv = await access.bootSandboxEnv();
-if (sandboxEnv.source) log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
-else if (sandboxEnv.errors.length) log.warn({ errors: sandboxEnv.errors }, 'Dev API unreachable — using the environment only');
+const sandboxCachePath = join(stateDir, 'sandbox-env.json');
+if (sandboxEnv.source) {
+  log.log({ source: sandboxEnv.source, applied: sandboxEnv.applied }, 'Loaded keys from the dev API');
+  await saveSandboxCache(sandboxCachePath, process.env, sandboxEnv.received)
+    .catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'Saving the key cache failed'));
+} else {
+  const cached = await applySandboxCache(sandboxCachePath, process.env);
+  sandboxEnv.received.push(...cached);
+  if (sandboxEnv.errors.length) log.warn({ errors: sandboxEnv.errors, cached }, 'Dev API unreachable — using the environment and the last keys it gave');
+}
 const SANDBOX_TOKEN = principalSandboxToken(process.env);
 
 const PORT = parseInt(process.env.PORT || '4000');
 const clientKeys = gatewayClientKeys(process.env);
 for (const w of clientKeys.warnings) log.warn({}, `WARNING: ${w}`);
 const API_KEYS = clientKeys.keys;
-/** Admins on top of DEPLOYMENTS_ADMIN_USERS: none, or the `sandbox` user under ACCEPT_SANDBOX_TOKEN_AS_KEY=1 + SANDBOX_TOKEN_ADMIN=1. */
-const EXTRA_ADMINS = clientKeys.sandboxAdmins;
-access.setBaseAdmins(adminUsersFromEnv(process.env, EXTRA_ADMINS), EXTRA_ADMINS);
+access.setBaseAdmins(adminUsersFromEnv(process.env));
 access.start();
 const adminUsers = access.admins;
 
@@ -98,6 +116,8 @@ const adminUsers = access.admins;
 const configuredAccounts = createAccounts({
   isAdmin: (userId) => adminUsers.has(userId),
   log: (msg, data) => log.log(data ?? {}, msg),
+  // Read at request time, once `realtime` (below) exists.
+  sessionRequests: () => realtime.service.sessionRequests,
 });
 const accounts = await configuredAccounts.init().then(() => configuredAccounts, (err: unknown) => {
   log.error({ error: err instanceof Error ? err.message : String(err) },
@@ -136,34 +156,65 @@ const prefixRoutes: PrefixRoute[] = [];
 const alertWebhook = process.env.ALERT_WEBHOOK_URL?.trim() ? createWebhookDelivery({ url: process.env.ALERT_WEBHOOK_URL.trim() }) : null;
 const alertEmail = alertEmailFromEnv(process.env);
 const alertMailer = alertEmail && createAlertMailer({ ...alertEmail, secrets: () => secretValues(process.env), log: (msg, data) => log.warn(data ?? {}, msg) });
+const alertLog = createAlertLog();
+const incidents = createIncidents({
+  path: join(stateDir, 'incidents.json'),
+  quietMs: incidentQuietMs(process.env),
+  onResolve: (i) => {
+    log.log({ incident: i.id, resolution: i.resolution, alerts: i.alertCount }, 'incident resolved');
+    if (i.mailed) void alertMailer?.deliver(incidentResolvedMail(i, incidents.quietMinutes));
+  },
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+await incidents.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'INCIDENTS STATE UNREADABLE: starts empty'));
 const opsAlerts = createOpsAlerts((alert) => {
   log.warn(alert.data, `ALERT ${alert.event}`);
-  const mail = opsAlertMail(alert);
-  if (mail) void alertMailer?.send(mail);
+  alertLog.record(alert.event, alert.data);
+  const incident = incidents.openOf(alert.event, alert.key ?? '');
+  const out = opsIncidentMail(alert, incident);
+  if (out) void alertMailer?.send(out.mail).then((id) => { if (id && out.opens && incident) incidents.markMailed(incident.id); });
   return alertWebhook?.send(alert);
-});
+}, Date.now, OPS_ALERT_DEDUP_MS, OPS_ALERT_BOOT_QUIET_MS, incidents);
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
 const configuredDeployments = deploymentsFromEnv(process.env, {
-  alwaysAdmin: EXTRA_ADMINS,
   admins: adminUsers,
   userOf: (req) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null,
+  keyOf: (req) => {
+    const found = access.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+    if (!found) return null;
+    const app = found.userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : found.userId;
+    return { keyId: found.keyId, user: found.userId, app, policy: access.policyOf(found.keyId) };
+  },
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
-  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); },
+  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); incidents.fromDeploymentLog(msg, data); },
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
+  // App GPU status (app-gpu-health.ts): the cloud links' last probe says whether the reserve still answers.
+  gpuHealth: {
+    cloudLinks: () => fallbackProbe.snapshot().links,
+    onDegraded: (event) => emitGatewayEvent('app.degraded', { level: 'warn', attrs: { ...event } }),
+  },
 });
 const deployments = configuredDeployments && await configuredDeployments.controller.init()
   .then(() => configuredDeployments.apps.init())
+  .then(() => configuredDeployments.apps.ensureCloudFallback())
+  .then((added) => { if (added.length) log.warn({ added }, 'apps: cloud fallback appended to stored chains that had none (owner decision 2026-10-12)'); })
+  .then(() => configuredDeployments.clientGpu.load())
   .then(() => configuredDeployments, (err: unknown) => {
     configuredDeployments.stopJanitor?.();
     log.error({ error: err instanceof Error ? err.message : String(err) },
       'DEPLOYMENTS DISABLED: the state file cannot be read — cloud routes stay up; fix or restore the file and restart');
     return null;
   });
+const bootHistory = deployments && bootHistoryFile(join(stateDir, 'boot-history.json'), deployments.controller, (msg, data) => log.warn(data ?? {}, msg));
+await bootHistory?.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'BOOT HISTORY UNREADABLE: past boots start empty'));
 if (deployments) {
   deployments.controller.start();
+  bootHistory?.start();
+  deployments.clientGpu.run();
+  deployments.gpuHealth.probe.start();
   prefixRoutes.push({ prefix: '/v1/deployments', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/profiles', handler: deployments.handler });
   prefixRoutes.push({ prefix: '/v1/apps', handler: deployments.handler });
@@ -171,7 +222,7 @@ if (deployments) {
   process.env.PROXY_TOTAL_TIMEOUT_MS = proxyIdleTimeoutMs(process.env, true)!;
   log.log({ namespace: deployments.controller.namespace, proxyIdleMs: process.env.PROXY_TOTAL_TIMEOUT_MS }, 'Deployments enabled (scaleway)');
 } else {
-  log.log({}, 'Deployments disabled (no SCW_SECRET_KEY / VAST_API_KEY)');
+  log.log({}, 'Deployments disabled (no SCW_SECRET_KEY / VAST_API_KEY, or off Railway without AIGW_REAL_MACHINES=1)');
 }
 
 const machineUserOf = (req: import('http').IncomingMessage) => keyRegistry.resolve((req.headers.authorization || '').replace(/^Bearer\s+/i, ''))?.userId ?? null;
@@ -197,11 +248,23 @@ if (machines) {
 const modelRoutes = parseModelRoutes(process.env.MODEL_ROUTES);
 if (modelRoutes.errors.length) log.warn({ errors: modelRoutes.errors }, 'MODEL_ROUTES has invalid parts — skipped');
 const controller = deployments?.controller ?? null;
+const ownerOfDeployment = (d: { name: string; app: string | null }) =>
+  d.app ?? deployments?.apps.list().find(({ id }) => deployments.apps.get(id)?.profile?.gpuDeployments.includes(d.name))?.id ?? null;
+const panelBaseUrl = (process.env.AIGW_PUBLIC_URL?.trim() || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')).replace(/\/$/, '');
+const spendLedger = new SpendLedger({
+  path: join(stateDir, 'spend-ledger.json'),
+  deployments: () => controller?.list() ?? [],
+  ownerOf: ownerOfDeployment,
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+await spendLedger.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'SPEND LEDGER UNREADABLE: daily spend starts empty'));
+spendLedger.start();
 const balanceWatch = createBalanceWatch({
   env: process.env,
   spend: () => controller?.spendSummary() ?? null,
   onAlert: (mail, reading) => {
     log.warn({ kind: mail.kind, level: mail.level }, `ALERT ${mail.subject}`);
+    alertLog.record(`balance.${mail.level}`, { subject: mail.subject });
     void alertMailer?.deliver(mail);
     return reading ? alertWebhook?.send({ event: `balance.${mail.level}`, data: { ...reading } }) : undefined;
   },
@@ -212,6 +275,12 @@ let openrouterKey = await checkOpenRouterKey(process.env);
 let chains: Record<string, Record<string, ChainLinkSpec[]>> = {};
 // Assigned below; the reconciler's onChange (periodic runs) remounts the routes once they exist.
 let remount: (() => void) | null = null;
+const benchmarkStore = new ModelBenchmarkStore(process.env.MODEL_BENCHMARKS_PATH?.trim() || join(stateDir, 'model-benchmarks.json'));
+const benchmarks = await benchmarkStore.load().then(() => benchmarkStore, (err: unknown) => {
+  log.error({ error: err instanceof Error ? err.message : String(err) }, 'MODEL BENCHMARKS DISABLED: model-benchmarks.json cannot be read — restore it and restart');
+  return null;
+});
+if (benchmarks?.recovered) log.warn({ problem: benchmarks.recovered }, 'model-benchmarks.json was unreadable — recovered from the last good backup');
 declared = process.env.DECLARED_DEPLOYMENTS === '0' ? null : new DeclaredDeploymentReconciler({
   target: controller,
   env: process.env,
@@ -248,6 +317,11 @@ function mountProviders() {
     ) : undefined,
     // Adaptive hedge (D4, live QA 2026-10-07): spill or wait for the replica instead of running each request twice.
     deploymentHedge: controller ? (name, baseMs, capMs) => controller.hedgeDelayMs(name, baseMs, capMs) : undefined,
+    ...(benchmarks ? { benchmarkRank: (stage: 'chat' | 'stt' | 'tts', dataset: string) => benchmarks.rankOrder(stage === 'chat' ? 'llm' : stage, dataset) } : {}),
+    reorderFor: (stage, alias) => {
+      const owner = deployments?.apps.list().find(({ id }) => Object.keys(deployments.apps.get(id)?.routes?.[stage] ?? {}).includes(alias));
+      return owner ? deployments!.apps.get(owner.id)?.profile?.reorderCloudLinks !== false : true;
+    },
   });
   const { providers: routed, summary } = built;
   log.log(summary, 'Providers configured');
@@ -257,6 +331,15 @@ function mountProviders() {
 }
 const providers = mountProviders();
 remount = () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>);
+
+// Every cloud link of the alias chains gets a minimal real request at boot and every 15 min (never a deployment).
+const fallbackProbe = createFallbackProbe({
+  env: process.env,
+  links: () => fallbackLinks(chains, providers),
+  onResults: (results) => opsAlerts.fromFallbackProbes(results),
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+fallbackProbe.start();
 
 const chainsNow = () => stageChainsReport(chains, {
   ...(controller ? {
@@ -290,6 +373,18 @@ setInterval(() => {
   const { stages } = chainsNow();
   fallbackWatch(stages);
   opsAlerts.fromChains(stages);
+  for (const name of opsAlerts.fromDeployments(deployments?.controller.list() ?? [])) {
+    void deployments?.controller.park(name).then(
+      () => {
+        incidents.action('park', name, 'gateway: 60 min fora da janela de aula');
+        log.warn({ deployment: name }, 'deployments: parked — up 60 min outside its class window, no class open');
+        deploymentLogToTelemetry('deployments: parked outside the class window', { deployment: name });
+      },
+      (err: unknown) => log.error({ deployment: name, error: err instanceof Error ? err.message : String(err) }, 'deployments: park outside the class window failed'),
+    );
+  }
+  opsAlerts.fromLatency(latency?.() ?? null);
+  incidents.tick(reorderSnapshot());
 }, 15_000).unref();
 
 // Keys change at runtime: re-read from the palco every 5 min and on POST /v1/admin/keys/reload; PUT /v1/admin/keys
@@ -306,6 +401,7 @@ async function rotateDeploymentCredentials(names: string[]) {
   keyAudit.record({ actor: 'palco-reload', action: 'deployment-credentials.rotate', names: changed, ok: r.rejected.length === 0, ...(detail ? { detail } : {}) });
 }
 const keyManager = new KeyManager(process.env, {
+  cachePath: sandboxCachePath,
   log: (msg, data) => log.log(data ?? {}, msg),
   onChange: async (names) => {
     keyAudit.record({ actor: 'palco-reload', action: 'provider-keys.applied', names, ok: true });
@@ -325,7 +421,7 @@ if (SANDBOX_TOKEN) keyManager.start();
 
 // GET /health?deep=1 and /v1/admin/keys — same admins as deployments: DEPLOYMENTS_ADMIN_USERS only.
 // An empty list grants nobody (fail closed; it used to make every key an admin).
-const adminWarning = adminListWarning(process.env, EXTRA_ADMINS);
+const adminWarning = adminListWarning(process.env);
 if (adminWarning) log.warn({}, `WARNING: ${adminWarning}`);
 const isAdminToken = (token: string) => {
   const userId = keyRegistry.resolve(token)?.userId;
@@ -337,9 +433,9 @@ const adminGate = new AdminGate({
 });
 // What a leaked non-admin app key can do (src/gateway/proxy/app-limits.ts): its app's own aliases only, max_tokens
 // clamped (APP_MAX_TOKENS), daily budget (APP_DAILY_REQUESTS / APP_DAILY_TOKENS). Admin keys are never limited.
+const appOfUser = (userId: string) => (userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : userId);
 const appAliasesOf = (userId: string, stage: string): Set<string> | null => {
-  const app = userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : userId;
-  const routes = deployments?.apps.get(app)?.routes?.[stage as 'chat' | 'stt' | 'tts'];
+  const routes = deployments?.apps.get(appOfUser(userId))?.routes?.[stage as 'chat' | 'stt' | 'tts'];
   return routes ? new Set(Object.keys(routes)) : null;
 };
 const appLimits = keysConfigured() ? new AppLimits({
@@ -379,10 +475,23 @@ const telemetry = telemetryFromEnv(process.env, {
 });
 if (telemetry) {
   await telemetry.start();
-  setGatewayTelemetrySink((event) => telemetry.ingest.ingestOwn(event));
   latency = () => latencyReport(telemetry.store.rows(), Date.now());
   log.log({ rows: telemetry.store.size }, 'Telemetry enabled');
 }
+
+const modelPrices = createModelPrices({ path: join(stateDir, 'model-prices.json'), log: (msg, data) => log.warn(data ?? {}, msg) });
+await modelPrices.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'model prices: cache unreadable, starts empty'));
+modelPrices.start();
+setGatewayTelemetrySink((event, caller) => {
+  const app = caller && appOfUser(caller);
+  if (event.event !== 'usage.cost') { telemetry?.ingest.ingestOwn(event, app); return; }
+  const cost = usageCost(event.attrs ?? {}, modelPrices.snapshot()?.models ?? {});
+  spendLedger.cloud(app || NO_APP, cost?.usd ?? null, String(event.attrs?.stage ?? 'chat'), cost?.estimated);
+  const attrs = { ...event.attrs };
+  if (cost) Object.assign(attrs, { costUsd: cost.usd, estimated: cost.estimated });
+  else attrs.costUnknown = true;
+  telemetry?.ingest.ingestOwn({ ...event, attrs }, app);
+});
 
 const deepHealth = {
   authorize: isAdminToken,
@@ -453,8 +562,15 @@ const rooms = createRooms({
   },
   userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
   log: (msg, data) => log.log(data ?? {}, msg),
+  // Server dubbing (Kokoro 82M via OpenRouter, MAI-Voice when Kokoro is stuck or fails) for listeners of rooms whose
+  // presenter sends text only. Each attempt is time-bounded: the OpenRouter SDK client has no timeout of its own.
+  synthesize: synthesizeWithFallback([kokoroSynthesize(openrouterTTS), maiSynthesize(openrouterTTS)]),
+  synthesizeAvailable: () => openrouterTTS.isConfigured(),
 });
-log.log({ dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl }, 'Rooms enabled');
+log.log({
+  dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl,
+  serverDub: rooms.config.serverDub && openrouterTTS.isConfigured(),
+}, 'Rooms enabled');
 // Desktop-app field telemetry (src/app-telemetry, docs/app-telemetry.md): opt-in batches from the ucast.me app with a
 // gateway key, admin summary/listing. Day files on the same volume as rooms.
 const appTelemetry = appTelemetryFromEnv(process.env, {
@@ -464,6 +580,7 @@ const appTelemetry = appTelemetryFromEnv(process.env, {
 });
 if (appTelemetry) {
   await appTelemetry.start();
+  setInterval(() => opsAlerts.fromVoiceTurns(appTelemetry.voiceTurns()), 30_000).unref();
   log.log({ dir: appTelemetry.store.dir, retentionDays: appTelemetry.store.retentionDays }, 'App telemetry enabled');
 }
 
@@ -472,6 +589,9 @@ const deviceGate = deployments && ((userId: string, headers: import('http').Inco
   return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
 });
 
+const ttsCache = ttsCacheFromEnv(process.env, stateDir);
+await ttsCache?.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'TTS cache: disk tier unreadable, memory only'));
+
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
@@ -479,18 +599,33 @@ const server = await startProxy({
   keyRegistry,
   providers,
   deepHealth,
+  autoWake: (bearer) => !keysConfigured()
+    || autoWakesNow(access.policyOf(access.resolve(bearer)?.keyId), classWindowOpen(deployments?.controller.list() ?? [], Date.now())),
+  ...(deployments ? { mayWake: (bearer: string, deployment: string) => {
+    const key = access.resolve(bearer);
+    return deployments.clientGpu.requestMayWake(key && { keyId: key.keyId, user: key.userId }, access.policyOf(key?.keyId), deployment);
+  } } : {}),
+  countsAsUse: (bearer) => access.policyOf(access.resolve(bearer)?.keyId).countsAsUse,
+  ...(ttsCache ? { ttsCache: { cache: ttsCache, requiresGpu: (userId: string) => deployments?.apps.get(appOfUser(userId))?.profile?.requiresGpu === true } } : {}),
   ...(appLimits ? { appLimits } : {}),
   ...(deviceGate ? { deviceGate } : {}),
-  ...(accounts ? { onInference: accounts.recordInference } : {}),
+  onInference: (event) => {
+    accounts?.recordInference(event);
+    if (event.status >= 400) return;
+    const fields = event.body && typeof event.body === 'object' && !Array.isArray(event.body) ? event.body as Record<string, unknown> : {};
+    spendLedger.request(appOfUser(event.userId), event.kind === 'chat' ? llmTokensOf(fields, event.response) : 0);
+  },
+  ...(deployments ? { onServed: ({ userId, kind, status, headers }) => deployments.gpuHealth.served(appOfUser(userId), kind, status, headers) } : {}),
   // GET /health?details=1: an admin sees every chain, an app key the chains of its own aliases (health-view.ts).
   healthDetails: (viewer) => (viewer.admin
-    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [] }
-    : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [] }),
+    ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), fallbackProbe: fallbackProbe.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [], clientGpu: deployments?.clientGpu.report() ?? null }
+    : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [], clientGpu: deployments?.clientGpu.report(viewer.userId) ?? null }),
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
     rooms.route, ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
+    ...(benchmarks ? createModelBenchmarkRoutes({ store: benchmarks, gate: adminGate, onChange: () => remount?.() }) : []),
   ],
-  publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller)] : []), ...(machines ? [machines.reportRoute] : [])],
+  publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller), bootEventsRoute(controller)] : []), ...(machines ? [machines.reportRoute] : [])],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
@@ -499,6 +634,95 @@ realtime.mount(server);
 rooms.mount(server);
 // Outermost: the account API and pages answer themselves, and the quota gate sees every metered request first.
 accounts?.mount(server);
+const adminSnapshot = (): AdminSnapshot => ({
+  reserves: fallbackProbe.snapshot(), balances: balanceWatch.snapshot().readings, providerCredit: controller?.creditIssues() ?? [],
+  gpus: controller?.list() ?? null,
+  gpuLogs: Object.fromEntries((controller?.list() ?? []).map(d => [d.name, controller!.bootLog(d.name)])), gpuSpend: deployments?.clientGpu.report() ?? null, alerts: alertLog.list(),
+  machines: machines?.controller.costs(null) ?? null, keys: access.list(), appBudgets: appLimits?.budgets() ?? [],
+  apps: deployments?.apps.list().map(({ id }) => {
+    const entry = deployments.apps.get(id);
+    return {
+      id, profile: entry?.profile ?? null, status: deployments.gpuHealth.status(id), aliases: Object.values(entry?.routes ?? {}).flatMap(r => Object.keys(r ?? {})),
+      stages: Object.fromEntries(Object.entries(entry?.routes ?? {}).map(([stage, r]) => [stage, Object.keys(r ?? {})])),
+      routes: entry?.routes,
+    };
+  }) ?? [],
+  traffic: telemetry ? adminTraffic(telemetry.store.rows(), Date.now()) : null, audit: keyAudit.recent(30),
+  spend: spendLedger.view(), dismissed: spendLedger.dismissed(), chains: chainsNow().stages,
+  about: {
+    commit: (minimalHealth().commit as string | null) ?? null, uptimeSeconds: Math.round(process.uptime()),
+    region: process.env.RAILWAY_REPLICA_REGION?.trim() || null,
+    telemetryAt: telemetry ? (() => { const rows = telemetry.store.rows(); return rows.length ? new Date(rows[rows.length - 1]!.rxTs).toISOString() : null; })() : null,
+  },
+  digest: suggestionDigest.status(), overspend: overspendWatch.active(), reorders: reorderSnapshot(), ttsCache: ttsCache?.stats() ?? null,
+  modelPrices: modelPrices.snapshot(),
+  voiceTurns: appTelemetry?.voiceTurns() ?? null,
+  incidents: incidents.list(),
+});
+
+const overspendWatch = createOverspendWatch({
+  input: () => ({
+    spend: spendLedger.view(), gpus: controller?.list() ?? [], keys: access.list(), gpuSpend: deployments?.clientGpu.report() ?? null,
+    machines: machines?.controller.costs(null) ?? null, rows: telemetry?.store.rows() ?? [], appOf: ownerOfDeployment,
+  }),
+  notify: (o, mail) => {
+    log.warn({ id: o.id, value: o.value, normal: o.normal }, `ALERT spend.over ${o.who}`);
+    alertLog.record('spend.over', { quem: o.who, gasto: o.text, projecao: o.projection, causa: o.cause });
+    void alertMailer?.deliver(mail);
+    return alertWebhook?.send({ event: 'spend.over', data: { id: o.id, who: o.who, app: o.app, value: o.value, normal: o.normal, projection: o.projection, cause: o.cause } });
+  },
+  classOpen: () => classWindowOpen(controller?.list() ?? [], Date.now()),
+  baseUrl: panelBaseUrl,
+  limits: overspendLimitsFromEnv(process.env),
+  log: (msg, data) => log.warn(data ?? {}, msg),
+});
+overspendWatch.start();
+
+const suggestionDigest = createSuggestionDigest({
+  list: () => recommendations({ s: adminSnapshot(), now: Date.now(), csrf: '', app: null, view: null }),
+  deliver: alertMailer && process.env.SUGGESTION_DIGEST?.trim() !== '0' ? (mail) => alertMailer.deliver(mail) : null,
+  classOpen: () => classWindowOpen(controller?.list() ?? [], Date.now()),
+  baseUrl: panelBaseUrl,
+  path: join(stateDir, 'suggestion-digest.json'),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+await suggestionDigest.load().catch((err: unknown) => log.error({ error: err instanceof Error ? err.message : String(err) }, 'SUGGESTION DIGEST STATE UNREADABLE: starts empty'));
+suggestionDigest.start();
+
+// GET /admin: the status page for a browser, signed in once with the admin key or an app's own key (src/admin-page).
+createAdminPage({
+  actorOf: (key) => {
+    const userId = keyRegistry.resolve(key)?.userId;
+    if (!userId) return null;
+    if (adminUsers.has(userId)) return { name: userId, app: null };
+    if (!deployments?.apps.get(userId)) return null;
+    const keyId = access.resolve(key)?.keyId;
+    return { name: userId, app: userId, ...(keyId ? { keyId, mayPark: () => access.policyOf(keyId).canStartGpu } : {}) };
+  },
+  snapshot: adminSnapshot,
+  dismiss: (id) => spendLedger.dismiss(id),
+  sendDigest: () => suggestionDigest.sendNow(),
+  park: async (name, actor) => {
+    if (!controller) throw new Error('deployments desligados');
+    if (actor.keyId) await deployments?.clientGpu.forget(actor.keyId, name);
+    await controller.park(name);
+    incidents.action('park', name, `painel: ${actor.name}`);
+  },
+  pin: async (name, on) => {
+    const spec = controller?.specOf(name);
+    if (!spec) throw new Error(`deployment '${name}' não existe`);
+    if (spec.provider !== 'vast') throw new Error('só uma GPU da Vast pode ser fixada pelo painel');
+    await controller!.put(name, { minReplicas: on ? 1 : 0 });
+  },
+  gpuType: async (name, machineType, now, actor) => {
+    if (!controller) throw new Error('deployments desligados');
+    await controller.setGpuType(name, machineType, now, actor);
+  },
+  probe: () => fallbackProbe.check(),
+  secrets: () => secretValues(process.env),
+  containerLog: async (name) => controller?.containerLog(name) ?? null,
+  audit: (entry) => keyAudit.record(entry),
+}).mount(server);
 
 // ── Process-level error handlers ─────────────────────────────────────────────
 
@@ -526,14 +750,19 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop()]);
+    const stateWritten = Promise.all([deployments?.controller.stop(), machines?.controller.stop(), accounts?.stop(), spendLedger.stop(), bootHistory?.stop()]);
     const exit = (code: number) => void stateWritten.finally(() => process.exit(code));
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
     rooms.stop();
     appTelemetry?.stop();
     declared?.stop();
+    deployments?.clientGpu.stop();
+    deployments?.gpuHealth.probe.stop();
     balanceWatch.stop();
+    suggestionDigest.stop();
+    overspendWatch.stop();
+    fallbackProbe.stop();
     keyManager.stop();
     void access.stop();
     void keyAudit.flush();

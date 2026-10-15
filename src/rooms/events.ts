@@ -67,7 +67,7 @@ export const EVENT_SCHEMA: Record<ViewerEventType, Record<string, FieldSpec>> = 
     queueMs: MS, gaps: COUNT, gapMs: MS, drops: COUNT, clips: COUNT, lines: COUNT, visible: { kind: 'bool' },
   },
   visibility: { state: { kind: 'enum', values: ['hidden', 'visible'] } },
-  ui: { action: { kind: 'enum', values: ['copy', 'sheet_open', 'sheet_close', 'more', 'reconnect', 'ended'] } },
+  ui: { action: { kind: 'enum', values: ['copy', 'sheet_open', 'sheet_close', 'more', 'reconnect', 'ended', 'youtube'] } },
   leave: { durationMs: MS, visibleMs: MS, reason: { kind: 'enum', values: ['pagehide', 'unload', 'ended'] } },
 };
 

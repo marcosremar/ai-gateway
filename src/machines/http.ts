@@ -82,6 +82,9 @@ export function createMachineRoutes(opts: MachineRoutesOptions) {
       }
       return send(res, 405, { error: 'method not allowed' });
     }
+    if (id === 'offers' && method === 'POST') {
+      return send(res, 200, { offers: await controller.offers(parseMachineInput(await readJson(req), controller.limits).request) });
+    }
     if (id === 'costs' && method === 'GET') return send(res, 200, controller.costs(who.all ? null : who.owner));
     if (!ID_RE.test(id)) return send(res, 404, { error: 'not found' });
     const m = owned(controller.get(id), who, 'machine', id);

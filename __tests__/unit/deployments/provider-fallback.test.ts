@@ -72,22 +72,18 @@ describe('placements on another provider: spec', () => {
     expect(spec.placements).toContainEqual(VAST);
   });
 
-  it('the voice profiles: Scaleway first, vast last, no L4 under the speech stack, mode fast', () => {
+  it('the voice profiles are Vast only (owner, 14/10/2026): an RTX 3090 for the speech stack, the 3090 -> 4090 -> 5090 ladder for the TTS, mode fast', () => {
     const speech = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
-    expect(ladder(speech)).toEqual([
-      'L40S-1-48G@fr-par-2', 'L40S-1-48G@pl-waw-2', 'H100-1-80G@fr-par-2', 'H100-1-80G@pl-waw-2', 'vast RTX 5090 ≤ €0.85',
-    ]);
-    expect(speech.placements?.at(-1)).toMatchObject({ maxReplicas: 1 });
+    expect(ladder(speech)).toEqual(['vast RTX 3090 ≤ €0.3']);
     for (const name of ['qwen3-tts', 'qwen3-tts-clone']) {
       const tts = buildSpec('tts', { profile: name }, { profiles });
-      expect(ladder(tts)).toEqual(['L4-1-24G@fr-par-2', 'L4-1-24G@fr-par-1', 'vast RTX 5090 ≤ €0.85']);
+      expect(tts.candidates!.map(c => `${c.provider} ${c.machineType} ≤ €${c.maxEurPerHour}`)).toEqual(['vast RTX 3090 ≤ €0.3', 'vast RTX 4090 ≤ €0.85', 'vast RTX 5090 ≤ €0.85']);
       expect(tts).toMatchObject({ scaling: { mode: 'fast' }, minCuda: 13, maxRttExcessMs: 20 });
-      expect(tts.placements?.at(-1)).toMatchObject({ maxReplicas: 2 });
     }
     expect(speech).toMatchObject({ scaling: { mode: 'fast' }, minCuda: 13, maxRttExcessMs: 20 });
-    const stt = buildSpec('stt', { profile: 'whisper-stt' }, { profiles });
-    expect(stt.scaling).toEqual({ mode: 'balanced' });
-    expect(placementsOf(stt).every(s => s.provider === 'scaleway')).toBe(true);
+    for (const profile of BUILTIN_PROFILES) {
+      expect(placementsOf(buildSpec('p', { profile: profile.name }, { profiles })).some(p => p.provider === 'scaleway' && profile.spec.gpu), profile.name).toBe(false);
+    }
   });
 
   it('a placement may pull its own image; the speech stack pulls the public copy on vast and passes the env start.sh needs', () => {
@@ -95,16 +91,13 @@ describe('placements on another provider: spec', () => {
     expect(placementsOf(own).map(s => s.image)).toEqual([SPEC.image, SPEC.image, 'ghcr.io/me/app:1']);
     expect(() => buildSpec('s', { ...SPEC, placements: [{ ...VAST, image: 'not an image' }] }, { profiles })).toThrow(/placements\[0\]\.image/);
     const speech = buildSpec('parle-speech', { profile: 'speech-stack' }, { profiles });
-    expect(placementsOf(speech).map(s => s.image)).toEqual([
-      ...Array(4).fill('rg.fr-par.scw.cloud/aigw/speech-stack:20261009-0213'), 'ghcr.io/marcosremar/speech-stack:20261009-0213',
-    ]);
+    expect(placementsOf(speech).map(s => s.image)).toEqual(['ghcr.io/marcosremar/speech-stack:20261011-0200']);
     const init = vastReplicaInit(placementsOf(speech).at(-1)!, 'x'.repeat(32));
     const appEnv = Buffer.from(/echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/app\.env/.exec(init)![1], 'base64').toString('utf8');
     expect(appEnv).toContain('TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-Base\n');
     expect(appEnv).toContain('LLM_FILE=Qwen3.5-9B-Q4_K_M.gguf\n');
-    expect(speech.envByMachineType!['L40S-1-48G'].LLM_SLOT_CTX).toBe('4096');
-    expect(speech.envByMachineType!['L4-1-24G'].LLM_SLOT_CTX).toBeUndefined();
-    expect(speech.envByMachineType!['H100-1-80G'].LLM_SLOT_CTX).toBe('2048');
+    expect(speech.envByMachineType!['RTX 3090'].LLM_SLOT_CTX).toBe('2048');
+    expect(speech.envByMachineType!['RTX 5090'].LLM_SLOT_CTX).toBeUndefined();
   });
 
   it('an image with a start command runs on vast without a boot script', () => {
@@ -349,5 +342,104 @@ describe('a class-window quota reservation (#63) and the walk to vast (#64)', ()
     await controller.put('bench', { ...SPEC, minReplicas: 0, placements: undefined });
     expect(() => controller.wake('bench')).toThrow(/is reserved for deployment 'tts'/);
     expect(scaleway.created.length + vast.created.length).toBe(0);
+  });
+});
+
+describe('a refused provider account skips that provider, not the walk (incident 13/10/2026)', () => {
+  const DENIED = 'scaleway HTTP 403: {"type":"permissions_denied","message":"insufficient permissions","details":[{"resource":"compute_servers","action":"create"}]}';
+
+  it('a Scaleway 403 skips every Scaleway place and the vast placement is created and boots', async () => {
+    const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+    const { controller, scaleway, vast, attempts } = await make({ log: (msg, data) => logs.push([msg, data]) });
+    scaleway.failCreateFor = (s) => { attempts.push(`${s.machineType}@${s.zone}`); return DENIED; };
+    await controller.put('s', { ...SPEC, maxReplicas: 1 });
+    await until(() => controller.get('s')!.replicas.some(r => r.phase === 'ready'));
+    expect(attempts).toEqual(['L40S-1-48G@fr-par-2']);
+    expect(vast.created).toHaveLength(1);
+    expect(controller.get('s')!.lastPlacement).toMatch(/^vast RTX 5090 \(≤ €0\.85\/h\); skipped: scaleway: permissão negada \(IAM\), HTTP 403 → tentando vast \(scaleway HTTP 403/);
+    expect(logs.find(([msg]) => msg === 'deployments: provider account refused')?.[1]).toMatchObject({
+      deployment: 's', provider: 'scaleway', reason: 'permissão negada (IAM)', fix: 'corrija a chave', status: 403, next: 'vast',
+    });
+  });
+
+  it('a spec error still stops the walk: no vast create', async () => {
+    const { controller, scaleway, vast, attempts } = await make();
+    scaleway.failCreateFor = (s) => { attempts.push(`${s.machineType}@${s.zone}`); return 'scaleway HTTP 400: {"type":"invalid_arguments","message":"image not found"}'; };
+    await controller.put('s', { ...SPEC, maxReplicas: 1 });
+    await until(() => /image not found/.test(controller.get('s')!.lastError ?? ''));
+    expect(attempts).toEqual(['L40S-1-48G@fr-par-2']);
+    expect(vast.created).toHaveLength(0);
+    expect(controller.get('s')!.lastPlacement).toMatch(/^failed at scaleway L40S-1-48G@fr-par-2/);
+  });
+
+  it('out of stock still moves to the next Scaleway place', async () => {
+    const { controller, scaleway, vast, attempts } = await make();
+    scaleway.failCreateFor = (s) => {
+      attempts.push(`${s.machineType}@${s.zone}`);
+      return s.zone === 'fr-par-2' && s.machineType === 'L40S-1-48G' ? 'scaleway HTTP 412: {"type":"out_of_stock"}' : null;
+    };
+    await controller.put('s', { ...SPEC, maxReplicas: 1 });
+    await until(() => scaleway.created.length === 1);
+    expect(attempts).toEqual(['L40S-1-48G@fr-par-2', 'L40S-1-48G@fr-par-1']);
+    expect(vast.created).toHaveLength(0);
+  });
+
+  it('after the account refusal and a failed vast create, the back-off retry walks both providers again', async () => {
+    let t = Date.parse('2026-10-13T15:00:00Z');
+    const { controller, scaleway, vast, attempts } = await make({ now: () => t });
+    scaleway.failCreateFor = (s) => { attempts.push(`${s.machineType}@${s.zone}`); return DENIED; };
+    let vastFails = true;
+    vast.failCreateFor = () => (vastFails ? 'out_of_stock: no vast offer for RTX 5090 under €0.85/h near FR' : null);
+    await controller.put('s', { ...SPEC, maxReplicas: 1 });
+    await until(() => /no vast offer/.test(controller.get('s')!.lastError ?? ''));
+    expect(controller.get('s')!.lastError).toContain('scaleway: permissão negada (IAM), HTTP 403 → tentando vast');
+    expect(attempts).toHaveLength(1);
+    vastFails = false;
+    t += 61_000;
+    await until(() => vast.created.length === 1);
+    expect(attempts).toHaveLength(2);
+  });
+
+  it('no other provider: the walk fails with the refusal, not with a stop at the first place', async () => {
+    const { controller, scaleway, attempts } = await make({ vast: false });
+    scaleway.failCreateFor = (s) => { attempts.push(`${s.machineType}@${s.zone}`); return DENIED; };
+    await controller.put('s', { ...SPEC, maxReplicas: 1, placements: [{ zone: 'fr-par-1' }] });
+    await until(() => /permissão negada/.test(controller.get('s')!.lastError ?? ''));
+    expect(controller.get('s')!.lastError).toContain('scaleway: permissão negada (IAM), HTTP 403 → nenhum outro provedor');
+    expect(attempts).toEqual(['L40S-1-48G@fr-par-2']);
+  });
+});
+
+describe('Scaleway GPUs off (owner, 14/10/2026): no Scaleway GPU is created or powered on', () => {
+  const OFF = 'Scaleway desativada (dono, 14/10/2026)';
+
+  it('a stored spec with Scaleway places skips them with the reason and lands on vast; a Scaleway-only one creates nothing and says why', async () => {
+    const { controller, scaleway, vast, attempts } = await make();
+    await controller.put('s', { ...SPEC, minReplicas: 0, maxReplicas: 1 });
+    await controller.put('only', { ...SPEC, minReplicas: 0, maxReplicas: 1, placements: [{ zone: 'fr-par-1' }] });
+    Object.assign(scaleway, { gpuOff: OFF });
+    controller.wake('s');
+    controller.wake('only');
+    await until(() => vast.created.length === 1 && /Scaleway desativada/.test(controller.get('only')!.lastError ?? ''));
+    expect(attempts).toEqual([]);
+    expect(scaleway.created).toHaveLength(0);
+    expect(controller.get('s')!.lastPlacement).toMatch(/^vast RTX 5090 \(≤ €0\.85\/h\); skipped: scaleway L40S-1-48G@fr-par-2: Scaleway desativada \(dono, 14\/10\/2026\)/);
+    expect(controller.get('only')!.lastError).toContain('scaleway L40S-1-48G@fr-par-1: Scaleway desativada (dono, 14/10/2026)');
+    await expect(controller.put('new', SPEC)).rejects.toThrow(`${OFF}: 'new' asks for scaleway L40S-1-48G`);
+  });
+
+  it('a parked Scaleway GPU is not powered on: the replica comes from vast', async () => {
+    const { controller, scaleway, vast } = await make();
+    await controller.put('p', { ...SPEC, minReplicas: 0, maxReplicas: 1, idleAction: 'stop' });
+    controller.wake('p');
+    await until(() => controller.get('p')!.replicas.some(r => r.phase === 'ready'));
+    await controller.park('p');
+    await until(() => controller.get('p')!.replicas.every(r => r.phase === 'halted'));
+    const started: string[] = [];
+    scaleway.startReplica = async (m) => { started.push(m.id); };
+    Object.assign(scaleway, { gpuOff: OFF });
+    controller.wake('p');
+    await until(() => vast.created.length === 1);
+    expect(started).toEqual([]);
   });
 });

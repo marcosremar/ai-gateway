@@ -211,7 +211,7 @@ Ao vivo: nenhum 429 da Vast em ~1 h de uso.
 - **Achado (médio):** o teto global não reserva o piso `minReplicas` de ninguém. Às 04:03:46 a réplica nova de
   `llm-crash` (`minReplicas 1`) foi liberada por `too-far`; 1 s depois o `economy`/`balanced` de llm-a pegou a vaga, e
   llm-crash ficou **sem réplica** ("replica cap reached … held by llm-a 2, llm-soak 1") com status `scaled-to-zero`,
-  apesar do `minReplicas 1`. Numa escola: o burst de uma turma pode tomar o piso de outra.
+  apesar do `minReplicas 1`. Num cliente: o burst de uma turma pode tomar o piso de outra.
 
 ### 5a (2º ciclo). Depois do conserto, ao vivo
 

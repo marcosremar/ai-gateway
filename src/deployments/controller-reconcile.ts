@@ -6,7 +6,10 @@
 import { isParked, type Runtime } from './controller-state';
 import { AutoscaleControl } from './controller-autoscale';
 import { CREATE_BACKOFF_MS } from './controller-replicas';
-import { isActive, planReplicas, replicaPhase } from './planner';
+import { bootTimeoutMinutesOn, isActive, planReplicas, replicaPhase } from './planner';
+import { bootPhaseOf, bootStates } from './boot-track';
+import { STUCK_LOG_WAIT_MS, within } from './container-logs';
+import { closeEpisode, episodeAttempts, noteStuckRetry, stuckVerdict, STUCK_RETRY_MAX, wantedNow } from './stuck-retry';
 import { usesScaleway, usesVast } from './spec';
 import { placementsOf } from './placements';
 import { PartialListError } from '../cpu-providers/scaleway-client';
@@ -136,6 +139,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     await Promise.all(this.machines.filter(m => this.deployments.has(m.deployment) && !this.parkedNow(m) && !this.stoppingNow(m))
       .map(m => this.probeOne(m)));
 
+    this.trackBoots();
     for (const [name, rt] of this.deployments) await this.reconcileDeployment(name, rt, failed);
     await this.settleNetworkReleases();
   }
@@ -152,6 +156,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       this.log('deployments: boot failed on the provider', { deployment: name, id: m.id, error: m.bootError });
       await this.release(m, 'boot-failed');
     }
+    await this.retryStuckBoots(rt);
     const all = this.machines.filter(m => m.deployment === name);
     // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
     // Ones still `stopping` are neither parked nor live: left alone until the list shows `stopped`. Draining ones are
@@ -198,9 +203,12 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     }
     if (toCreate > 0) {
       const price = all.find(m => m.pricePerHour != null)?.pricePerHour ?? 0;
+      const slotTaken = this.gpuSlotRefusal(name) !== null;
+      const yielded = slotTaken ? await this.takeGpuSlotFor(rt) : null;
       let refusal = this.capRefusal(price, name);
+      if (refusal && yielded) refusal = `${refusal} (${yielded})`;
       // Under pressure and capped: take idle capacity from another deployment first (it frees on this tick).
-      if (refusal && plan.active) {
+      if (refusal && plan.active && !slotTaken) {
         const note = await this.reclaimFor(rt);
         if (note) { refusal = this.capRefusal(price, name); blockedBy = refusal ? `${refusal} (${note}, more needed)` : null; }
         else blockedBy = refusal;
@@ -209,6 +217,68 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     for (let i = 0; i < toCreate; i++) this.createReplica(rt);
     this.explain(rt, plan, decision, floor, blockedBy);
     if (this.readyMachines(name).length) for (const w of [...rt.waiters]) w();
+  }
+
+  private async takeGpuSlotFor(rt: Runtime): Promise<string | null> {
+    const app = this.gpuAppOf(rt);
+    if (!app || !this.inClass(rt)) return null;
+    const yielding = this.machines.filter((m) => {
+      const holder = this.deployments.get(m.deployment);
+      return holder && holder !== rt && this.gpuAppOf(holder) === app && !this.inClass(holder) && !this.parkedNow(m) && !this.stoppingNow(m);
+    });
+    for (const m of yielding) {
+      this.log('deployments: GPU of the app released for the class', { from: m.deployment, id: m.id, to: rt.record.spec.name });
+      if (this.deployments.get(m.deployment)!.record.spec.idleAction === 'stop') await this.parkReplica(m);
+      else await this.release(m, 'class-priority');
+    }
+    return yielding.length ? `released ${yielding.map(m => `${m.deployment} ${m.id}`).join(', ')} for the class` : null;
+  }
+
+  private trackBoots(): void {
+    const now = this.now();
+    for (const m of this.machines) {
+      if (!this.deployments.has(m.deployment) || this.parkedNow(m) || this.stoppingNow(m)) continue;
+      const probe = this.probes.get(m.id);
+      if (m.createdAt < this.startedAt && !this.poweredOnAt.has(m.id) && (!probe || probe.everReady)) continue;
+      const inferred = bootPhaseOf(m, probe);
+      const phase = inferred === 'ready' ? inferred : this.boots.reportedPhase(m.id, now) ?? inferred;
+      this.boots.phase(m.deployment, m.id, phase, now, this.poweredOnAt.get(m.id) ?? m.createdAt);
+      this.boots.providerMessage(m.deployment, m.id, m.providerMessage, now);
+    }
+    for (const id of this.boots.activeIds()) if (!this.machines.some(m => m.id === id) && !this.creatingIds.has(id)) this.boots.finish(id, 'gone', now);
+  }
+
+  private async retryStuckBoots(rt: Runtime): Promise<void> {
+    const { spec } = rt.record;
+    const now = this.now();
+    const tracked = this.boots.view(spec.name);
+    const state = rt.stuckRetry;
+    const wanted = wantedNow(rt.record, rt, now);
+    if (episodeAttempts(state) && (!wanted || tracked.past.some(b => b.result === 'ready' && b.endedAt > state.lastAt))) closeEpisode(state, now);
+    for (const stuck of bootStates(tracked.active, tracked.past, now, bootTimeoutMinutesOn(spec, spec.provider)).filter(b => b.stuck && b.replicaId)) {
+      const m = this.machines.find(x => x.id === stuck.replicaId && x.deployment === spec.name);
+      if (!m || (m.createdAt < this.startedAt && !this.poweredOnAt.has(m.id))) continue;
+      const captured = this.containerLogOf(m);
+      const refusal = this.budgetRefusal(rt) ?? this.creditRefusal(m) ?? this.spendRefusal(0);
+      const verdict = stuckVerdict({ enabled: spec.autoRetryStuckBoot !== false, wanted, state, refusal, now });
+      if (verdict === 'exhausted' && !state.exhausted) {
+        state.exhausted = true;
+        this.log('deployments: stuck boot retries exhausted', { deployment: spec.name, id: m.id, phase: stuck.phase, minutes: Math.round(stuck.phaseMinutes), attempts: episodeAttempts(state) });
+      }
+      if (verdict === 'refused') rt.lastError = `boot stuck in ${stuck.phase}; automatic retry refused: ${refusal}`;
+      if (verdict !== 'retry') continue;
+      const entry = noteStuckRetry(state, stuck, m.zone || m.id, now);
+      this.log('deployments: stuck boot, releasing to retry', {
+        deployment: spec.name, id: m.id, phase: stuck.phase, minutes: entry.minutes, where: entry.where, attempt: entry.attempt, of: STUCK_RETRY_MAX,
+      });
+      if (captured) await within(captured, STUCK_LOG_WAIT_MS);
+      await this.release(m, stuck.failed ? 'boot-failed' : 'boot-stuck');
+    }
+  }
+
+  private creditRefusal(m: ReplicaMachine): string | null {
+    const issue = this.backendOf(this.providerOf(m)).creditIssue?.();
+    return issue ? `${issue.provider}: ${issue.message}` : null;
   }
 
   private settleReleases(listed: ReplicaMachine[], failed: Set<DeploymentProvider>): void {

@@ -58,6 +58,22 @@ export function quotaMachineType(err: unknown, fallback: string): string | null 
   return /cp_servers_type_(\w+)/.exec(text)?.[1].replace(/_/g, '-') ?? fallback;
 }
 
+export interface AccountRefusal { reason: string; fix: string; status: number | null }
+
+const ACCOUNT_REFUSALS = [
+  { status: 402, text: /insufficient_credit|insufficient credit|not enough credit/i, reason: 'sem crédito', fix: 'recarregue a conta' },
+  { status: 401, text: /unauthori[sz]ed/i, reason: 'chave recusada', fix: 'troque a chave' },
+  { status: 403, text: /permissions?_denied|forbidden/i, reason: 'permissão negada (IAM)', fix: 'corrija a chave' },
+];
+
+export function accountRefusal(err: unknown): AccountRefusal | null {
+  const e = err as { status?: unknown; body?: unknown; message?: unknown } | null;
+  const text = `${typeof e?.message === 'string' ? e.message : ''} ${typeof e?.body === 'string' ? e.body : ''}`;
+  const status = typeof e?.status === 'number' ? e.status : Number(/\bHTTP (\d{3})\b/.exec(text)?.[1]) || null;
+  const hit = ACCOUNT_REFUSALS.find(r => r.status === status || r.text.test(text));
+  return hit ? { reason: hit.reason, fix: hit.fix, status } : null;
+}
+
 // ── Geography and ranking (`candidates`, Vast offers) ───────────────────────
 
 /** The owner's region: users (students, teachers) are in France. Used when a spec sets no `near`. */
@@ -113,6 +129,8 @@ export interface VastOffer {
   duration?: number | null;
   public_ipaddr?: string | null;
   direct_port_start?: number;
+  cpu_cores_effective?: number;
+  cpu_ram?: number;
 }
 
 /**

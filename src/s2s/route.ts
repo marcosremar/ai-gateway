@@ -160,7 +160,7 @@ function filterPrimaryTranscript(e: S2SEvent, config: S2SConfig): { codes: strin
   if (!text.trim()) return null;
   const n = (k: string) => (typeof e[k] === 'number' ? e[k] as number : undefined);
   const out = applySttFilter({
-    text, no_speech_prob: n('no_speech_prob'), avg_logprob: n('avg_logprob'), compression_ratio: n('compression_ratio'),
+    text, no_speech_prob: n('no_speech_prob'), avg_logprob: n('avg_logprob'), compression_ratio: n('compression_ratio'), speech_ms: n('speech_ms'),
     ...(Array.isArray(e.segments) ? { segments: e.segments as never } : {}),
   }, config.language);
   return out.filtered?.emptied ? { codes: out.filtered.codes, rawLength: out.filtered.rawLength } : null;
@@ -249,7 +249,7 @@ export function createS2SRoute(opts: S2SRouteOptions) {
       else if (config.speak_field && !opts.primarySpeaksJson) skip = 'unsupported';
       else {
         // No-wake mode (gateway/proxy/no-wake.ts): a ready replica still answers; a cold one is not woken (composed).
-        const noWake = noWakeActive();
+        const noWake = noWakeActive(deployment);
         try {
           const session = parseTraceparent(req.headers.traceparent)?.traceId;
           lease = await opts.controller.acquire(deployment, { waitMs: 0, stage: 's2s', ...(noWake ? { noWake: true } : {}), ...(session ? { session } : {}) });

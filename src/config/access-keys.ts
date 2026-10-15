@@ -1,10 +1,46 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { NAME_RE } from '../deployments/spec';
 import { readStateFile, writeStateFile } from '../deployments/state-file';
 import { loadSandboxEnv, principalSandboxToken, SANDBOX_USER, TOKEN_ALIASES, type SandboxEnvResult } from './sandbox-env';
 
 const USER_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const SANDBOX_TOKEN_RE = /^[^\s,:]{16,512}$/;
 export const MAX_OVERLAP_MINUTES = 7 * 24 * 60;
+
+/**
+ * `neverWake`: the key never starts a GPU, not even by `/wake` or `/start` (a dev key: tests, local servers, agents).
+ * `countsAsUse: false`: its requests use a replica that is already ready but do not renew the idle clock, so dev
+ * traffic never keeps a GPU up (12/10/2026: a local gate held two L4 for 3 h at night).
+ * `wakeDeployments`: when set, the key starts ONLY these deployments, each a test copy (`testFor`), never during a class
+ * window; every other deployment it uses only when already ready (owner, 12/10/2026: agents wake the test GPU, never production).
+ */
+export interface GpuPolicy {
+  autoWake: boolean; autoWakeOutsideClass: boolean; canStartGpu: boolean; neverWake: boolean; countsAsUse: boolean;
+  gpuDailyEur: number | null; startIdleMinutes: number; wakeDeployments: string[];
+}
+export const DEFAULT_GPU_POLICY: GpuPolicy = {
+  autoWake: false, autoWakeOutsideClass: true, canStartGpu: false, neverWake: false, countsAsUse: true, gpuDailyEur: 5, startIdleMinutes: 10, wakeDeployments: [],
+};
+const BOOLEAN_FIELDS = ['autoWake', 'autoWakeOutsideClass', 'canStartGpu', 'neverWake', 'countsAsUse'] as const;
+
+export interface WakeTarget { name: string; spec: { testFor?: string } }
+
+/** Whether this key may start a GPU now — automatically or by `/wake`, `/start` (admin keys skip this). */
+export function mayWakeNow(policy: GpuPolicy, classWindowOpen: boolean, target?: WakeTarget | null): boolean {
+  if (policy.neverWake) return false;
+  if (policy.wakeDeployments.length) {
+    return !classWindowOpen && Boolean(target?.spec.testFor) && policy.wakeDeployments.includes(target!.name);
+  }
+  return policy.autoWakeOutsideClass || classWindowOpen;
+}
+
+/** Whether every request of this key may wake any cold deployment (a key with `wakeDeployments` wakes only those). */
+export function autoWakesNow(policy: GpuPolicy, classWindowOpen: boolean): boolean {
+  return policy.autoWake && !policy.wakeDeployments.length && mayWakeNow(policy, classWindowOpen);
+}
+const CLASS_CLIENT = 'parle';
+const CLASS_CLIENT_POLICY: Partial<GpuPolicy> = { autoWake: true, canStartGpu: true, gpuDailyEur: null };
+const MAX_START_IDLE_MINUTES = 240;
 
 const hashOf = (token: string) => createHmac('sha256', 'aigw-access-key-v1').update(token).digest('hex');
 
@@ -36,6 +72,7 @@ interface AccessState {
   env: Record<string, KeyMarks>;
   admins: string[] | null;
   sandbox: { token: string; retired: { token: string; until: number } | null } | null;
+  policies?: Record<string, Partial<GpuPolicy>>;
 }
 
 interface EnvKey { id: string; key: string; prefix: string; user: string; label?: string }
@@ -44,6 +81,7 @@ export interface KeyView {
   id: string;
   source: 'env' | 'issued';
   user: string;
+  role: 'admin' | 'client';
   admin: boolean;
   prefix: string;
   label: string | null;
@@ -52,6 +90,7 @@ export interface KeyView {
   expiresAt: string | null;
   revokedAt: string | null;
   active: boolean;
+  policy: GpuPolicy;
 }
 
 export interface AccessKeysOptions {
@@ -87,7 +126,6 @@ export class AccessKeys {
   private state: AccessState = { version: 1, keys: [], env: {}, admins: null, sandbox: null };
   private envKeys: EnvKey[];
   private baseAdmins: string[] = [];
-  private alwaysAdmin: string[] = [];
   private dirty = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private chain: Promise<void> = Promise.resolve();
@@ -105,36 +143,79 @@ export class AccessKeys {
     if (read.data) this.state = { ...this.state, ...read.data, env: read.data.env ?? {}, keys: read.data.keys ?? [] };
   }
 
-  setBaseAdmins(base: Iterable<string>, alwaysAdmin: readonly string[] = []): void {
+  migratePolicies(): void {
+    if (this.state.policies) return;
+    const classKeys = [...this.envKeys, ...this.state.keys].filter(k => k.user === CLASS_CLIENT);
+    this.state.policies = Object.fromEntries(classKeys.map(k => [k.id, { ...CLASS_CLIENT_POLICY }]));
+    this.dirty = true;
+    if (classKeys.length) this.opts.log?.('access: GPU policies created — the class client keeps waking GPUs on its own', { keys: classKeys.map(k => k.id) });
+  }
+
+  policyOf(keyId: string | undefined): GpuPolicy {
+    const own = keyId && Object.prototype.hasOwnProperty.call(this.state.policies ?? {}, keyId) ? this.state.policies![keyId] : {};
+    return { ...DEFAULT_GPU_POLICY, ...own };
+  }
+
+  async setPolicy(body: Record<string, unknown>): Promise<{ id: string; policy: GpuPolicy }> {
+    const id = body.id;
+    if (typeof id !== 'string' || (id !== SANDBOX_USER && !this.marksOf(id))) throw new AccessError(404, `key '${String(id)}' not found`);
+    const next: Partial<GpuPolicy> = { ...this.state.policies?.[id] };
+    for (const [field, value] of Object.entries(body)) {
+      if (field === 'id') continue;
+      if ((BOOLEAN_FIELDS as readonly string[]).includes(field)) {
+        if (typeof value !== 'boolean') throw new AccessError(400, `${field} must be a boolean`);
+        next[field as typeof BOOLEAN_FIELDS[number]] = value;
+      } else if (field === 'gpuDailyEur') {
+        if (value !== null && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) throw new AccessError(400, 'gpuDailyEur must be a number >= 0 (EUR per day) or null (no cap)');
+        next.gpuDailyEur = value as number | null;
+      } else if (field === 'startIdleMinutes') {
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > MAX_START_IDLE_MINUTES) {
+          throw new AccessError(400, `startIdleMinutes must be an integer 1–${MAX_START_IDLE_MINUTES}`);
+        }
+        next.startIdleMinutes = value;
+      } else if (field === 'wakeDeployments') {
+        if (!Array.isArray(value) || value.some(v => typeof v !== 'string' || !NAME_RE.test(v))) {
+          throw new AccessError(400, 'wakeDeployments must be an array of deployment names (test copies only)');
+        }
+        next.wakeDeployments = [...new Set(value as string[])];
+      } else {
+        throw new AccessError(400, `unknown field '${field}' (allowed: ${BOOLEAN_FIELDS.join(', ')}, gpuDailyEur, startIdleMinutes, wakeDeployments)`);
+      }
+    }
+    this.state.policies = { ...this.state.policies, [id]: next };
+    await this.save();
+    return { id, policy: this.policyOf(id) };
+  }
+
+  setBaseAdmins(base: Iterable<string>): void {
     this.baseAdmins = [...base];
-    this.alwaysAdmin = [...alwaysAdmin];
     this.applyAdmins();
   }
 
   private applyAdmins(): void {
     this.admins.clear();
-    for (const user of [...(this.state.admins ?? this.baseAdmins), ...this.alwaysAdmin]) this.admins.add(user);
+    for (const user of this.state.admins ?? this.baseAdmins) if (user !== SANDBOX_USER) this.admins.add(user);
   }
 
   private active(marks: KeyMarks | undefined, now: number): boolean {
     return !marks?.revokedAt && !(marks?.expiresAt && marks.expiresAt <= now);
   }
 
-  resolve(token: string): { key: string; userId: string } | null {
+  resolve(token: string): { key: string; userId: string; keyId: string } | null {
     if (!token) return null;
     const now = this.now();
     const envKey = this.envKeys.find(k => sameSecret(token, k.key));
     if (envKey && this.active(this.state.env[envKey.id], now)) {
       this.touch((this.state.env[envKey.id] ??= {}), now);
-      return { key: token, userId: envKey.user };
+      return { key: token, userId: envKey.user, keyId: envKey.id };
     }
     const hash = hashOf(token);
     const issued = this.state.keys.find(k => k.hash === hash);
     if (issued && this.active(issued, now)) {
       this.touch(issued, now);
-      return { key: token, userId: issued.user };
+      return { key: token, userId: issued.user, keyId: issued.id };
     }
-    if (this.env.ACCEPT_SANDBOX_TOKEN_AS_KEY?.trim() === '1' && this.isSandboxToken(token)) return { key: token, userId: SANDBOX_USER };
+    if (this.env.ACCEPT_SANDBOX_TOKEN_AS_KEY?.trim() === '1' && this.isSandboxToken(token)) return { key: token, userId: SANDBOX_USER, keyId: SANDBOX_USER };
     return null;
   }
 
@@ -154,9 +235,9 @@ export class AccessKeys {
   list(): KeyView[] {
     const now = this.now();
     const view = (source: KeyView['source'], k: EnvKey | IssuedKey, marks: KeyMarks | undefined): KeyView => ({
-      id: k.id, source, user: k.user, admin: this.admins.has(k.user), prefix: k.prefix, label: k.label ?? null,
+      id: k.id, source, user: k.user, role: this.admins.has(k.user) ? 'admin' : 'client', admin: this.admins.has(k.user), prefix: k.prefix, label: k.label ?? null,
       createdAt: iso('createdAt' in k ? k.createdAt : null), lastUsedAt: iso(marks?.lastUsedAt), expiresAt: iso(marks?.expiresAt),
-      revokedAt: iso(marks?.revokedAt), active: this.active(marks, now),
+      revokedAt: iso(marks?.revokedAt), active: this.active(marks, now), policy: this.policyOf(k.id),
     });
     return [...this.envKeys.map(k => view('env', k, this.state.env[k.id])), ...this.state.keys.map(k => view('issued', k, k))];
   }
@@ -187,6 +268,7 @@ export class AccessKeys {
       ...(typeof body.label === 'string' ? { label: body.label } : {}),
     };
     this.state.keys.push(issued);
+    if (old && this.state.policies?.[old.id]) this.state.policies = { ...this.state.policies, [issued.id]: { ...this.state.policies[old.id] } };
     if (old) {
       const marks = this.marksOf(old.id)!;
       if (overlap > 0) marks.expiresAt = Math.min(marks.expiresAt ?? Infinity, now + overlap);
@@ -212,7 +294,7 @@ export class AccessKeys {
       throw new AccessError(400, `users must be an array of user ids matching ${USER_RE}`);
     }
     const list = [...new Set(users as string[])];
-    if (!list.includes(actor) && !this.alwaysAdmin.includes(actor)) throw new AccessError(400, `'${actor}' must stay in the list (you would lock yourself out)`);
+    if (!list.includes(actor)) throw new AccessError(400, `'${actor}' must stay in the list (you would lock yourself out)`);
     this.state.admins = list;
     this.applyAdmins();
     await this.save();
