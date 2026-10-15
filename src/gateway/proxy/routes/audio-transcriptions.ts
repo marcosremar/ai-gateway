@@ -44,12 +44,14 @@ type SttAnswer = { text: string } & Record<string, unknown>;
 const sttCache = new Map<string, { answer: SttAnswer; expiresAt: number }>();
 let cacheWriteInProgress = false;
 
-function sttCacheKey(audioHash: string, model: string, language?: string, responseFormat?: string, filtered = true): string {
+function sttCacheKey(audioHash: string, model: string, language?: string, responseFormat?: string, filtered = true, prompt?: string): string {
   // Include response_format — verbose_json/srt/vtt produce structurally
   // different responses; without it, a hit from a `verbose_json` request
   // could be returned to a `srt`-format request as plain JSON.
   // `filtered`: an answer kept with the filter off (QA) must never be served to a request that has it on.
-  return `${audioHash}:${model}:${language ?? '*'}:${responseFormat ?? 'json'}:${filtered ? 'f1' : 'f0'}`;
+  // `prompt` steers the transcript (Whisper's initial prompt), so the same audio with another prompt is another answer.
+  const promptHash = prompt ? createHash('sha256').update(prompt).digest('hex').slice(0, 16) : '-';
+  return `${audioHash}:${model}:${language ?? '*'}:${responseFormat ?? 'json'}:${filtered ? 'f1' : 'f0'}:${promptHash}`;
 }
 
 function hashAudio(buf: Buffer): string {
@@ -130,6 +132,7 @@ export async function handleAudioTranscriptions(
     typeof body.language === 'string' ? body.language : undefined,
     typeof body.response_format === 'string' ? body.response_format : undefined,
     filterOn,
+    typeof body.prompt === 'string' ? body.prompt : undefined,
   );
   const cached = sttCacheGet(cacheKey);
   if (cached !== null) {
