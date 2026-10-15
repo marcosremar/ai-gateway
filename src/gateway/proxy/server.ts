@@ -520,6 +520,23 @@ export function createProxyServer(config: ProxyConfig): Server {
     return remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1' ? 'localhost' : null;
   };
 
+  const concurrencyLimitOf = (userId: string): number => concurrency.perUser.get(userId) ?? concurrency.fallback;
+
+  /** Takes one of the user's in-flight slots; null when all are taken. The returned release is idempotent. */
+  const holdSlot = (userId: string): (() => void) | null => {
+    const inFlight = userConcurrency.get(userId) || 0;
+    if (inFlight >= concurrencyLimitOf(userId)) return null;
+    userConcurrency.set(userId, inFlight + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const c = userConcurrency.get(userId) || 1;
+      if (c <= 1) userConcurrency.delete(userId);
+      else userConcurrency.set(userId, c - 1);
+    };
+  };
+
   /** No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken. */
   const applyWakePolicy = (req: IncomingMessage, userId: string): void => {
     const bearer = bearerToken(req.headers.authorization);
@@ -642,28 +659,17 @@ export function createProxyServer(config: ProxyConfig): Server {
 
     // Per-user concurrent request limit (a gateway sub-request of a turn already counted is not counted again)
     if (userId !== 'anonymous' && !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress)) {
-      const currentConcurrent = userConcurrency.get(userId) || 0;
-      const userLimit = concurrency.perUser.get(userId) ?? concurrency.fallback;
-      if (currentConcurrent >= userLimit) {
+      const release = holdSlot(userId);
+      if (!release) {
         res.setHeader('Retry-After', 1);
-        sendError(res, 429, `Too many concurrent requests (limit: ${userLimit})`, requestId);
+        sendError(res, 429, `Too many concurrent requests (limit: ${concurrencyLimitOf(userId)})`, requestId);
         return;
       }
-      userConcurrency.set(userId, currentConcurrent + 1);
       // Use 'close' (fires on both finish and abort) — 'finish' alone leaks the
       // counter on client disconnect / TCP reset, locking out the user after
-      // ~MAX_CONCURRENT_PER_USER aborts. Idempotency guard prevents double-dec
-      // on environments that fire both events.
-      let decremented = false;
-      const onComplete = () => {
-        if (decremented) return;
-        decremented = true;
-        const c = userConcurrency.get(userId) || 1;
-        if (c <= 1) userConcurrency.delete(userId);
-        else userConcurrency.set(userId, c - 1);
-      };
-      res.on('close', onComplete);
-      res.on('finish', onComplete);
+      // ~MAX_CONCURRENT_PER_USER aborts.
+      res.on('close', release);
+      res.on('finish', release);
     }
 
     // Rate limit — keyed by userId (resolved from API key above) so each
@@ -1004,6 +1010,16 @@ export function createProxyServer(config: ProxyConfig): Server {
         socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
         return;
       }
+      if (rateLimiter && !rateLimiter.check(`user:${userId}`).allowed) {
+        socket.end('HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      const release = holdSlot(userId);
+      if (!release) {
+        socket.end('HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      socket.once('close', release);
       void withNoWakeScope(() => { applyWakePolicy(req, userId); return Promise.resolve(upgradeRoute.handler(req, socket, head)); }).then((handled) => {
         if (!handled) socket.end('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
       }).catch((err) => {
