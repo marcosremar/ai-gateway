@@ -106,11 +106,16 @@ export interface PlanInput {
   floor?: number;
   autoscaleOnly?: boolean;
   hold?: number;
+  /**
+   * Extra boots while nothing is ready (`bootRace` − 1, passed only under a warm floor): the first replica ready wins
+   * and the others still booting are released at once as `race-lost`, whatever `keepBooting` or the scale-down delay.
+   */
+  race?: number;
 }
 
 export interface PlanRelease {
   id: string;
-  reason: 'halted' | 'boot-timeout' | 'unhealthy' | 'max-hours' | 'scale-down' | 'paused' | 'expiring';
+  reason: 'halted' | 'boot-timeout' | 'unhealthy' | 'max-hours' | 'scale-down' | 'paused' | 'expiring' | 'race-lost';
 }
 
 export interface Plan {
@@ -121,6 +126,8 @@ export interface Plan {
   drain: string[];
   aboveSince: number | null;
   active: boolean;
+  /** Booting `race` extra replicas because none is ready yet. */
+  racing?: boolean;
 }
 
 export function replicaPhase(r: ObservedReplica): ReplicaPhase {
@@ -218,11 +225,22 @@ export function planReplicas(input: PlanInput): Plan {
     && (othersReady >= desired || (othersReady > 0 && outlived(r.machine, spec, now, MAX_HOURS_GRACE_MS))));
   if (retiring) release.push({ id: retiring.machine.id, reason: 'max-hours' });
 
-  if (live.length < desired) {
-    const room = aged.length ? Math.max(0, spec.maxReplicas + 1 - live.length - aged.length - expiring.length) : Infinity;
-    return { desired, create: Math.min(desired - live.length, room), release, drain: [], aboveSince: null, active };
+  const race = input.race ?? 0;
+  if (race > 0 && desired > 0 && readyLive >= desired) {
+    const losers = live.filter(r => replicaPhase(r) === 'booting' && r.inflight === 0).sort(removalOrder).slice(0, live.length - desired);
+    for (const r of losers) {
+      release.push({ id: r.machine.id, reason: 'race-lost' });
+      live.splice(live.indexOf(r), 1);
+    }
   }
-  if (live.length === desired) return { desired, create: 0, release, drain: [], aboveSince: null, active };
+  const racing = race > 0 && desired > 0 && readyLive === 0;
+  const target = racing ? desired + race : desired;
+  if (live.length < target) {
+    const room = aged.length ? Math.max(0, spec.maxReplicas + 1 - live.length - aged.length - expiring.length) : Infinity;
+    return { desired, create: Math.min(target - live.length, room), release, drain: [], aboveSince: null, active, racing };
+  }
+  if (live.length === target) return { desired, create: 0, release, drain: [], aboveSince: null, active, racing };
+  if (racing) return { desired, create: 0, release, drain: [], aboveSince: null, active, racing };
 
   const aboveSince = input.aboveSince ?? now;
   const delayOver = now - aboveSince >= spec.scaleDownDelaySeconds * 1000;

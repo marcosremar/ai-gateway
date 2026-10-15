@@ -75,14 +75,30 @@ export function expectedPhaseMinutes(phase: ActivePhase, past: BootRecord[]): nu
   return typical === null ? PHASE_DEFAULT_MINUTES[phase] : Math.max(2, Math.ceil(typical * 1.5));
 }
 
-export function bootStates(active: ActiveBoot[], past: BootRecord[], now: number, timeoutMinutes: number): BootState[] {
+/**
+ * A pull slower than its host's measured bandwidth promises is retried on another offer before the clock-only rule:
+ * the limit is `SLOW_PULL_FACTOR` × the download the host's `inet_down` promises, at least `SLOW_PULL_FLOOR_MINUTES`,
+ * never later than the history rule. Calibration (15/10/2026): Poland, 894 Mbps, pulled the 22.3 GB speech-stack in
+ * 10.4 min against 3.3 min promised (3.1×); two Bulgarian hosts sat 15 min in `pulling` and never finished.
+ */
+export const SLOW_PULL_FACTOR = 4;
+export const SLOW_PULL_FLOOR_MINUTES = 8;
+
+export function pullLimitMinutes(history: number, expectedPullMinutes: number | undefined): number {
+  return expectedPullMinutes ? Math.min(history, Math.max(SLOW_PULL_FLOOR_MINUTES, Math.ceil(SLOW_PULL_FACTOR * expectedPullMinutes))) : history;
+}
+
+export function bootStates(
+  active: ActiveBoot[], past: BootRecord[], now: number, timeoutMinutes: number, expectedPullOf?: (replicaId: string) => number | undefined,
+): BootState[] {
   return active.flatMap((b) => {
     const last = b.phases.at(-1);
     if (!last || last.phase === 'ready') return [];
     const phase = last.phase as ActivePhase;
     const phaseMinutes = (now - last.at) / 60_000;
     const totalMinutes = (now - b.phases[0]!.at) / 60_000;
-    const expectedMinutes = expectedPhaseMinutes(phase, past);
+    const history = expectedPhaseMinutes(phase, past);
+    const expectedMinutes = phase === 'pulling' && b.replicaId ? pullLimitMinutes(history, expectedPullOf?.(b.replicaId)) : history;
     const r = b.report;
     const pulling = phase === 'pulling' && r?.phase === 'pulling';
     const progressing = pulling && now - r.progressAt <= REPORT_FRESH_MS;
@@ -158,6 +174,10 @@ export class BootTracker {
 
   placingStart(deployment: string, at: number): void {
     if (!this.placing.has(deployment)) this.placing.set(deployment, at);
+  }
+
+  placingDone(deployment: string): void {
+    this.placing.delete(deployment);
   }
 
   placingFailed(deployment: string, reason: string | null, at: number): void {

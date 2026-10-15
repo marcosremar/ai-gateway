@@ -16,6 +16,8 @@
     ],
     "euOnly": true,
     "minCuda": 13,
+    "imageGb": 22.3,
+    "bootRace": 2,
     "maxRttExcessMs": 20,
     "idleAction": "delete",
     "maxReplicas": 1,

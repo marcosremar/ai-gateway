@@ -116,7 +116,8 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     const before = this.machines;
     this.machines = [...listed.filter(l => !this.releasing.has(l.id)).map((l) => {
       const known = this.machines.find(m => m.id === l.id);
-      return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null };
+      const pull = l.expectedPullMinutes ?? known?.expectedPullMinutes;
+      return { ...l, ip: l.ip ?? known?.ip ?? null, pricePerHour: l.pricePerHour ?? known?.pricePerHour ?? null, ...(pull ? { expectedPullMinutes: pull } : {}) };
     }), ...recent, ...unlisted].filter(m => !this.creatingIds.has(m.id));
     for (const [id, p] of [...this.probes]) {
       if (this.machines.some(m => m.id === id)) continue;
@@ -174,12 +175,15 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     };
     const live = mine.filter(m => replicaPhase(this.observed(m, 0)) !== 'halted');
     const { decision, floor } = this.decide(rt, live, isActive({ ...base, replicas }));
+    // A type picked in the panel (H100…, or a validation trial) boots once: the race doubles cheap boots only.
+    const race = floor > 0 && !rt.record.gpuType ? (rt.record.spec.bootRace ?? 1) - 1 : 0;
     const plan = planReplicas({
-      ...base, replicas, aboveSince: rt.aboveSince, drainBusy: true, autoscaleWant: decision.desired, floor, ...this.planExtras(rt),
+      ...base, replicas, aboveSince: rt.aboveSince, drainBusy: true, autoscaleWant: decision.desired, floor, race, ...this.planExtras(rt),
       ...(this.opts.unhealthyStrikes ? { unhealthyStrikes: this.opts.unhealthyStrikes } : {}),
       ...(this.opts.pinnedIdleMaxMs ? { pinnedIdleMaxMs: this.opts.pinnedIdleMaxMs, specUpdatedAt: rt.record.updatedAt } : {}),
     });
     rt.aboveSince = plan.aboveSince;
+    rt.raceExtra = plan.racing ? race : 0;
     for (const r of plan.release) {
       const m = mine.find(x => x.id === r.id);
       if (!m) continue;
@@ -255,7 +259,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     const state = rt.stuckRetry;
     const wanted = wantedNow(rt.record, rt, now);
     if (episodeAttempts(state) && (!wanted || tracked.past.some(b => b.result === 'ready' && b.endedAt > state.lastAt))) closeEpisode(state, now);
-    for (const stuck of bootStates(tracked.active, tracked.past, now, bootTimeoutMinutesOn(spec, spec.provider)).filter(b => b.stuck && b.replicaId)) {
+    for (const stuck of bootStates(tracked.active, tracked.past, now, bootTimeoutMinutesOn(spec, spec.provider), this.expectedPullOf).filter(b => b.stuck && b.replicaId)) {
       const m = this.machines.find(x => x.id === stuck.replicaId && x.deployment === spec.name);
       if (!m || (m.createdAt < this.startedAt && !this.poweredOnAt.has(m.id))) continue;
       const captured = this.containerLogOf(m);

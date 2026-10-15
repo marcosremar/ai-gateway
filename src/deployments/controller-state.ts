@@ -107,6 +107,8 @@ export interface Runtime {
   bootTimeouts: number;
   lostAt: number | null;
   stuckRetry: StuckRetryState;
+  /** Extra boots of a race in progress (`bootRace` − 1, 0 when not racing): they do not count against the app's GPU cap. */
+  raceExtra: number;
 }
 
 /** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
@@ -139,6 +141,11 @@ export interface ControllerOptions {
   /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
   maxTotalReplicas?: number;
   maxGpuPerApp?: number;
+  /**
+   * GPUs an app keeps in its class window (`warmSchedule`): the app's cap there, and floor and ceiling of its class
+   * deployment. Absent or 0 = `maxGpuPerApp` holds in class too (`CLASS_GPUS_PER_APP`).
+   */
+  classGpusPerApp?: Readonly<Record<string, number>>;
   /** Cap on parked (stopped) replicas across all deployments: they bill disk only, but they must not pile up. Default 8. */
   maxStoppedReplicas?: number;
   /** Ceiling (EUR/h) on the summed price of the running replicas of all deployments. Default 6; 0 = off. */
@@ -316,7 +323,7 @@ export abstract class ControllerState {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
       backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
-      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0, lostAt: null, stuckRetry: freshStuckRetry(),
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0, lostAt: null, stuckRetry: freshStuckRetry(), raceExtra: 0,
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
@@ -469,8 +476,15 @@ export abstract class ControllerState {
       .filter(([, missing]) => missing > 0);
   }
 
+  protected readonly expectedPullOf = (id: string) => this.machines.find(m => m.id === id)?.expectedPullMinutes;
+
   protected inClass(rt: Runtime): boolean {
     return scheduleFloor(rt.record.spec.warmSchedule, this.now()) > 0;
+  }
+
+  protected classGpus(rt: Runtime): number {
+    const app = this.gpuAppOf(rt);
+    return app && this.inClass(rt) ? this.opts.classGpusPerApp?.[app] ?? 0 : 0;
   }
 
   protected gpuAppOf(rt: Runtime | undefined): string | null {
@@ -493,13 +507,14 @@ export abstract class ControllerState {
   private gpuSlot(name: string, counts: (holder: string) => boolean): string | null {
     const rt = this.deployments.get(name);
     const app = this.gpuAppOf(rt);
-    const cap = this.opts.maxGpuPerApp;
-    if (!rt || !app || cap === undefined) return null;
+    if (!rt || !app || this.opts.maxGpuPerApp === undefined) return null;
+    const cap = Math.max(this.opts.maxGpuPerApp, this.classGpus(rt));
     const keeper = this.classKeeper(rt, app);
     if (keeper) return `${GPU_CAP_RULE}: app '${app}' keeps its GPU for '${keeper}' during the class window`;
     const held = this.gpuHolders(app).filter(counts);
-    if (held.length < cap) return null;
-    return `${GPU_CAP_RULE}: app '${app}' already has ${held.length} (${[...new Set(held)].join(', ')}); the cloud fallback answers`;
+    const racing = Math.min(rt.raceExtra, held.filter(h => h === name).length);
+    if (held.length - racing < cap) return null;
+    return `${GPU_CAP_RULE}: app '${app}' already has ${held.length - racing} (${[...new Set(held)].join(', ')}); the cloud fallback answers`;
   }
 
   protected gpuSlotRefusal(name: string): string | null {

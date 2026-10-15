@@ -2,7 +2,7 @@ import { activeWindow } from './autoscale';
 import type { BootPhase, BootState } from './boot-track';
 import type { DeploymentRecord } from './types';
 
-export const STUCK_RETRY_MAX = 2;
+export const STUCK_RETRY_MAX = 4;
 export const STUCK_RETRY_COOLDOWN_MS = 3 * 60_000;
 const ATTEMPTS_KEPT = 10;
 

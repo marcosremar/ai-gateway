@@ -54,11 +54,11 @@ export abstract class AutoscaleControl extends ScalingControl {
     });
     rt.pressure = { highSince: decision.highSince, desired: decision.desired };
     const { spec } = rt.record;
-    const floor = warmFloor(spec, rt.record.warm, this.now());
+    const floor = Math.max(warmFloor(spec, rt.record.warm, this.now()), this.classGpus(rt));
     // The view shows the floor in force (live QA 2026-10-07: `floor: 0` while active with minActiveReplicas 1 read as
     // "nothing kept"): minReplicas, minActiveReplicas while active, and the warm floor; `warmFloor` keeps the warm part.
     const effective = spec.paused ? 0
-      : Math.min(spec.maxReplicas, Math.max(spec.minReplicas, active ? spec.minActiveReplicas ?? 1 : 0, floor));
+      : Math.min(Math.max(spec.maxReplicas, floor), Math.max(spec.minReplicas, active ? spec.minActiveReplicas ?? 1 : 0, floor));
     rt.autoscale = {
       ...rt.autoscale, pressureWant: decision.desired, floor: effective, warmFloor: floor, load, p95Ms: sig.p95Ms,
       errorRate: Math.round(sig.errorRate * 1000) / 1000,

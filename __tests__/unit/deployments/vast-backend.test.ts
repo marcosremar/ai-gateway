@@ -10,6 +10,7 @@ import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
 import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
 import { bootReportFor } from '../../../src/deployments/boot-events';
+import { pullMinutes } from '../../../src/deployments/placements';
 import {
   BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, lowestRtt, MIN_RELIABILITY, TOO_FAR_HOST_MS,
   UDP_BLOCKED_HOST_MS, VastDeploymentBackend, vastState,
@@ -160,6 +161,22 @@ describe('VastDeploymentBackend', () => {
     expect(String((logged[0]!.skipped as string[])[0])).toMatch(/^offer 2 \(Paris, FR, \$0\.45\/h\): /);
     expect(m.placementNote).toMatch(/^offer 2 of 2: Frankfurt, DE, \$0\.47\/h; better-ranked offers passed over: offer 2 \(Paris, FR, \$0\.45\/h\): .*not available/);
     expect(calls.filter(c => c.method === 'PUT').map(c => c.url.split('/asks/')[1])).toEqual(['2/', '3/']);
+    expect(m.expectedPullMinutes).toBeUndefined();
+  });
+
+  it('with imageGb: says the bandwidth and estimated boot of the offer, and the download its bandwidth promises', async () => {
+    const { fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers } };
+      if (url.endsWith('/asks/2/')) return { body: { success: true, new_contract: 5 } };
+      return { status: 500, body: '' };
+    });
+    const logged: Array<Record<string, unknown> | undefined> = [];
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, log: (_msg, data) => logged.push(data) });
+    const m = await backend.createReplica({ spec: vastSpec({ imageGb: 22.3 }), replicaToken: TOKEN, cloudInit: '', namespace: 'prod' });
+    const down = offers.find(o => o.id === 2)!.inet_down;
+    expect(m.expectedPullMinutes).toBeCloseTo(pullMinutes(22.3, down), 1);
+    expect(m.placementNote).toMatch(new RegExp(`^offer 1 of 2: Paris, FR, \\$0\\.45/h, ${Math.round(down)} Mbps → boot ~\\d+ min`));
+    expect(logged[0]).toMatchObject({ inetDownMbps: down });
 
     const denied = new VastDeploymentBackend('bad', { fetch: fakeVast(({ method }) => (method === 'POST'
       ? { body: { offers } } : { status: 401, body: 'unauthorized' })).fetchImpl });

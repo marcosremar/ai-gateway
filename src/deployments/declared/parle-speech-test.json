@@ -17,6 +17,8 @@
     ],
     "euOnly": true,
     "minCuda": 13,
+    "imageGb": 22.3,
+    "bootRace": 2,
     "maxRttExcessMs": 20,
     "minReplicas": 0,
     "maxReplicas": 1,

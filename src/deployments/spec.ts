@@ -28,6 +28,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** GPU commercial types on Scaleway start with the GPU family (L4, L40S, H100, GPU-3070, RENDER…). */
 export const SCALEWAY_GPU_OFF = 'Scaleway desativada (dono, 14/10/2026)';
 export const MAX_GPU_PER_APP = 1;
+/**
+ * GPUs an app keeps in its class window (floor and ceiling of its class deployment, and the app's cap there). Off: the
+ * owner set one GPU per app on 14/10/2026. A second machine in class for slack against load and host failure is this
+ * one line: `{ parle: 2 }`.
+ */
+export const CLASS_GPUS_PER_APP: Readonly<Record<string, number>> = {};
 export const gpuCapRule = (machineTypes: string[] = []) =>
   `limite: ${MAX_GPU_PER_APP} GPU${machineTypes.length ? ` (${machineTypes.join(', ')})` : ''} por app — dono, 14/10/2026`;
 export const GPU_CAP_RULE = gpuCapRule();
@@ -114,7 +120,7 @@ const KNOWN_FIELDS = new Set<string>([
   'targetInflightPerReplica', 'idleMinutes', 'bootTimeoutMinutes', 'scaleDownDelaySeconds', 'coldStartWaitSeconds',
   'maxEurPerHour', 'maxHours', 'paused', 'description', 'bootScript', 'files', 'minActiveReplicas', 'exposure',
   'idleAction', 'placements', 'candidates', 'near', 'allowFar', 'euOnly', 'maxRttMs', 'minCuda', 'autoscale', 'warmSchedule', 'reserveQuota', 'realtime',
-  'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor', 'autoRetryStuckBoot',
+  'scaling', 'fileUrls', 'maxRttExcessMs', 'testFor', 'autoRetryStuckBoot', 'imageGb', 'bootRace',
 ]);
 const CANDIDATE_FIELDS = new Set(['provider', 'zone', 'machineType', 'maxEurPerHour']);
 const PLACEMENT_FIELDS = new Set([...CANDIDATE_FIELDS, 'maxReplicas', 'image']);
@@ -162,6 +168,8 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
   if (input.maxRttMs !== undefined) out.maxRttMs = int(input.maxRttMs, 'maxRttMs', 5, 500);
   if (input.maxRttExcessMs !== undefined) out.maxRttExcessMs = int(input.maxRttExcessMs, 'maxRttExcessMs', 0, 500);
   if (input.minCuda !== undefined) out.minCuda = num(input.minCuda, 'minCuda', 11, 14);
+  if (input.imageGb !== undefined) out.imageGb = num(input.imageGb, 'imageGb', 0.1, 500);
+  if (input.bootRace !== undefined) out.bootRace = int(input.bootRace, 'bootRace', 1, 3);
   if (input.allowFar !== undefined) {
     if (typeof input.allowFar !== 'boolean') throw new SpecError('allowFar must be a boolean');
     out.allowFar = input.allowFar;

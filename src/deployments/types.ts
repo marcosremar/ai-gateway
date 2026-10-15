@@ -174,6 +174,17 @@ export interface DeploymentSpec {
    * (`minCudaFor`).
    */
   minCuda?: number;
+  /**
+   * Vast: compressed size (GB) of `image`, what a host downloads. Ranks offers by estimated boot (`bootMinutes`) and
+   * lets a slow pull be retried on another offer before the clock-only stuck rule (`boot-track.ts`). Absent = price only.
+   */
+  imageGb?: number;
+  /**
+   * Offers rented at once when a warm floor (schedule, `warm`, `/start`) asks for a replica and none is ready: the first
+   * ready wins, the others are released as `race-lost` (`planner.ts`). The race counts as one GPU of the app. Default 1.
+   * Only on the declared type: a type picked in the panel (`gpuType`) boots once.
+   */
+  bootRace?: number;
 }
 
 export interface FileUrl { url: string; sha256: string }
@@ -327,6 +338,8 @@ export interface ReplicaMachine {
   bootError?: string;
   providerStatus?: string;
   providerMessage?: string;
+  /** Vast: download time the host's measured `inet_down` promises for `imageGb` (`pullMinutes`). */
+  expectedPullMinutes?: number;
 }
 
 export interface CreateReplicaInput {
