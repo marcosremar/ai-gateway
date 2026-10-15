@@ -17,6 +17,7 @@
  *   GET    /v1/profiles                        list profiles (built-in + stored)
  *   PUT    /v1/profiles/:name                  create or replace a profile
  *   DELETE /v1/profiles/:name                  delete a stored profile
+ *   GET    /v1/images                          the caller's app images plus other apps' `shared` ones (admin: all)
  *   GET|PUT /v1/apps/:app/limits               the app's own daily budgets `{ dailyRequests?, dailyTokens? }` over the
  *                                              gateway defaults (APP_DAILY_*); PUT is admin only, null = default
  *   GET|PUT /v1/apps/:app/profile              what the app needs: `{ requiresGpu, gpuDeployments }` (apps.ts); PUT by an
@@ -487,6 +488,13 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       if (!isAdmin(req)) throw new DeploymentError(403, 'this API key cannot manage deployments');
     };
     if (kind === 'apps') return appRoutes(req, res, parts, method);
+    if (kind === 'images') {
+      if (!opts.apps) return send(res, 404, { error: 'app accounts are not enabled on this gateway' });
+      if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+      const own = appOf(req);
+      if (!own && !isAdmin(req)) return send(res, 403, { error: 'this API key belongs to no app' });
+      return send(res, 200, { images: opts.apps.visibleImages(own) });
+    }
 
     if (kind === 'profiles') {
       if (!name && method === 'GET') {
@@ -589,12 +597,18 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       let body = await readJson(req);
       const app = existing?.app ?? caller;
       const appImage = typeof body.appImage === 'string' ? body.appImage : undefined;
+      const deployedImage = body.image;
       if (body.appImage !== undefined) {
         if (!opts.apps) throw new DeploymentError(400, 'appImage needs app accounts, not enabled on this gateway');
         if (!app) throw new DeploymentError(400, 'appImage: say which app the deployment belongs to (X-App header)');
         body = opts.apps.resolveDeployBody(app, body);
       }
       const { view, created } = await controller.put(name, body, { ...(app ? { app } : {}), ...(appImage ? { appImage } : {}) });
+      if (app && opts.apps && typeof deployedImage === 'string') {
+        await opts.apps.registerDeployed(app, deployedImage, view.spec).catch((err) => {
+          log.warn({ deployment: name, app, error: err instanceof Error ? err.message : String(err) }, 'deploy applied, image not registered');
+        });
+      }
       return send(res, created ? 201 : 200, view);
     }
     if (method === 'DELETE') {
@@ -606,7 +620,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
 
   /** `PrefixRoute` handler: owns every path under /v1/deployments and /v1/profiles. */
   return function handle(req: IncomingMessage, res: ServerResponse, path: string, method: string): boolean {
-    const owns = ['/v1/deployments', '/v1/profiles', '/v1/apps'].some(p => path === p || path.startsWith(`${p}/`));
+    const owns = path === '/v1/images' || ['/v1/deployments', '/v1/profiles', '/v1/apps'].some(p => path === p || path.startsWith(`${p}/`));
     if (!owns) return false;
     route(req, res, path, method).catch((err) => {
       if (err instanceof SpecError) return send(res, 400, { error: err.message });

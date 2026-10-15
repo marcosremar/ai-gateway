@@ -749,7 +749,8 @@ for a cold start.
 | `GET` | `/v1/apps/:app` | `{ id, createdAt, requireDevice, images, deployments: [{ name, status, appImage }] }` |
 | `GET` / `PUT` | `/v1/apps/:app/routes` | the app's aliases (see *App aliases* above) |
 | `GET` | `/v1/apps/:app/images` | the app's saved images |
-| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults?, visibility? }` (`visibility`: `"private"` default, or `"shared"`); `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` | `/v1/images` | `{ images: [{ app, name, image, digest, port, healthPath, description, visibility, createdAt, updatedAt }] }`: the caller's app images plus other apps' `shared` ones; admin without `X-App`: all. No `defaults`, history, env or credentials |
 | `GET` / `PUT` | `/v1/apps/:app/profile` | `{ requiresGpu, gpuDeployments }` (below); `PUT` by an admin, or by the app's own key naming only its own deployments |
 | `GET` | `/v1/apps/:app/status` | GPU status of the app's profile (below); `404` without a profile |
 | `GET` | `/v1/apps/:app/fallback` | direct-fallback plan (below) |
@@ -758,6 +759,11 @@ for a cold start.
 | `GET` / `POST` / `DELETE` | `/v1/apps/:app/devices`, `…/devices/:device/block` | the app's end-user devices: list, block, unblock (see *App devices*) |
 
 Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
+
+A deployment with an explicit `image` made for an app (`X-App`) saves that address in the app's catalog under the
+repository's last path segment (`…/aigw/speech-stack:tag` → `speech-stack`), `private`, keeping the last 5 addresses.
+Another app's image is deployed with `{ "appImage": "<owner>/<name>" }` only while it is `shared`; a private one
+answers `404` like a missing one. The deployment and its cost belong to the deploying app.
 
 ### App profile and GPU status — `/v1/apps/:app/profile`, `/v1/apps/:app/status`
 
