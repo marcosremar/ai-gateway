@@ -42,7 +42,7 @@ async function setup(log?: (msg: string, data?: Record<string, unknown>) => void
 }
 
 describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for babelcast and the agents tests', () => {
-  it('is declared on Vast only, at most US$0.20/h, pinned by minReplicas at creation, owned by babelcast', async () => {
+  it('is declared on Vast only, at most €0.30/h (owner, 15/10/2026), pinned by minReplicas at creation, owned by babelcast', async () => {
     const x = await setup();
     expect((await x.reconciler.reconcile())[0].state).toBe('applied');
     const spec = x.controller.specOf(NAME)!;
@@ -50,7 +50,7 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
       provider: 'vast', machineType: 'RTX 3090', minReplicas: 1, maxReplicas: 1, idleMinutes: 60, idleAction: 'delete',
       testFor: 'babelcast-speech', image: 'ghcr.io/marcosremar/speech-stack:20261011-0200',
     });
-    expect(spec.maxEurPerHour * EUR_TO_USD).toBeLessThanOrEqual(0.2);
+    expect(spec.maxEurPerHour).toBeLessThanOrEqual(0.3);
     expect(placementsOf(spec).map(p => p.provider)).toEqual(['vast']);
     expect(spec.warmSchedule).toBeUndefined();
     expect(x.controller.get(NAME)!.app).toBe('babelcast');
@@ -87,7 +87,7 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
     await x.reconciler.reconcile();
     await x.controller.put(NAME, { minReplicas: 0, maxEurPerHour: 0.5 });
     expect((await x.reconciler.reconcile())[0].state).toBe('applied');
-    expect(x.controller.specOf(NAME)).toMatchObject({ minReplicas: 0, maxEurPerHour: 0.19 });
+    expect(x.controller.specOf(NAME)).toMatchObject({ minReplicas: 0, maxEurPerHour: 0.3 });
     expect(x.controller.get(NAME)!.pinned).toBeNull();
     expect((await x.reconciler.reconcile())[0].state).toBe('in_sync');
   });
@@ -135,10 +135,10 @@ describe('babelcast-3090 price cap', () => {
   const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
   const spec = buildSpec(NAME, { profile: 'speech-stack', image: decl.image!.default, ...decl.spec, minReplicas: 1 }, { profiles });
 
-  it('searches and rents only RTX 3090 offers at or under US$0.20/h', async () => {
+  it('searches and rents only RTX 3090 offers at or under €0.30/h', async () => {
     const offers = [
-      { id: 1, machine_id: 11, geolocation: 'Paris, FR', dph_total: 0.25, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 3090', cuda_max_good: 13 },
-      { id: 2, machine_id: 12, geolocation: 'Lyon, FR', dph_total: 0.19, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 3090', cuda_max_good: 13 },
+      { id: 1, machine_id: 11, geolocation: 'Paris, FR', dph_total: 0.4, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 3090', cuda_max_good: 13 },
+      { id: 2, machine_id: 12, geolocation: 'Lyon, FR', dph_total: 0.3, reliability2: 0.99, inet_down: 900, gpu_name: 'RTX 3090', cuda_max_good: 13 },
     ];
     const calls: Array<{ method: string; url: string; body: Record<string, unknown> | null }> = [];
     const fetchImpl = async (url: string, init?: RequestInit) => {
@@ -150,9 +150,9 @@ describe('babelcast-3090 price cap', () => {
     const backend = new VastDeploymentBackend('vast-key', { fetch: fetchImpl, now: () => 1_000 });
     const machine = await backend.createReplica({ spec, replicaToken: 'x'.repeat(32), cloudInit: '', namespace: 'prod' });
     expect(calls[0].body).toMatchObject({ gpu_name: { in: ['RTX 3090'] } });
-    expect((calls[0].body!.dph_total as { lte: number }).lte).toBeLessThanOrEqual(0.2);
+    expect((calls[0].body!.dph_total as { lte: number }).lte).toBeLessThanOrEqual(0.3 * EUR_TO_USD);
     expect(calls[1].url).toMatch(/\/asks\/2\/$/);
-    expect(machine.pricePerHour! * EUR_TO_USD).toBeLessThanOrEqual(0.2);
+    expect(machine.pricePerHour!).toBeLessThanOrEqual(0.3);
   });
 });
 
