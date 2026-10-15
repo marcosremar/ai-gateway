@@ -39,7 +39,9 @@ function sttFilterHeaders(filterOn: boolean, rawLength: number): Record<string, 
 // ── STT response cache ──────────────────────────────────────────────────
 const STT_CACHE_TTL_MS = 5 * 60_000;
 const STT_CACHE_MAX_ENTRIES = 200;
-const sttCache = new Map<string, { text: string; expiresAt: number }>();
+/** The whole answer, so a cache hit keeps the detected language and the verbose_json metadata of a miss. */
+type SttAnswer = { text: string } & Record<string, unknown>;
+const sttCache = new Map<string, { answer: SttAnswer; expiresAt: number }>();
 let cacheWriteInProgress = false;
 
 function sttCacheKey(audioHash: string, model: string, language?: string, responseFormat?: string, filtered = true): string {
@@ -54,17 +56,17 @@ function hashAudio(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex').slice(0, 16);
 }
 
-function sttCacheGet(key: string): string | null {
+function sttCacheGet(key: string): SttAnswer | null {
   const entry = sttCache.get(key);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) { sttCache.delete(key); return null; }
-  return entry.text;
+  return entry.answer;
 }
 
 /** Clear the STT cache. Exported for tests. */
 export function _resetSttCache(): void { sttCache.clear(); }
 
-function sttCacheSet(key: string, text: string): void {
+function sttCacheSet(key: string, answer: SttAnswer): void {
   while (sttCache.size >= STT_CACHE_MAX_ENTRIES) {
     const now = Date.now();
     let removedAny = false;
@@ -81,7 +83,7 @@ function sttCacheSet(key: string, text: string): void {
       else break;
     }
   }
-  sttCache.set(key, { text, expiresAt: Date.now() + STT_CACHE_TTL_MS });
+  sttCache.set(key, { answer, expiresAt: Date.now() + STT_CACHE_TTL_MS });
 }
 
 export async function handleAudioTranscriptions(
@@ -136,8 +138,8 @@ export async function handleAudioTranscriptions(
     try { primary?.prewarm?.(); } catch { /* best effort */ }
     return {
       status: 200,
-      headers: { 'X-Cache': 'HIT', 'X-Gateway-Provider': 'cache', ...sttFilterHeaders(filterOn, cached.length) },
-      body: { text: cached },
+      headers: { 'X-Cache': 'HIT', 'X-Gateway-Provider': 'cache', ...sttFilterHeaders(filterOn, cached.text.length) },
+      body: cached,
     };
   }
 
@@ -172,25 +174,25 @@ export async function handleAudioTranscriptions(
     // 2026-10-06, item 23). A primary that was only booting (`cold`) or is not configured did not fail: cached.
     const fallbackCode = headers['X-Gateway-Fallback'];
     const servedAfterFailure = !!fallbackCode && fallbackCode !== 'not_configured' && !isNeutralFailure(fallbackCode);
-    if (applied.text?.trim() && !applied.filtered && !servedAfterFailure) sttCacheSet(cacheKey, applied.text);
+    // Fields the provider did not send stay absent (a text-only replica answers `{text}`); verbose_json adds the
+    // duration and the segments the filter kept.
+    const r = applied.response;
+    const answer: SttAnswer = { text: applied.text };
+    if (r.language) answer.language = r.language;
+    if (r.language_probability !== undefined) answer.language_probability = r.language_probability;
+    if (body.response_format === 'verbose_json') {
+      if (r.duration !== undefined) answer.duration = r.duration;
+      if (r.segments !== undefined) answer.segments = r.segments;
+    }
+    if (applied.text?.trim() && !applied.filtered && !servedAfterFailure) sttCacheSet(cacheKey, answer);
 
     const filterHeaders: Record<string, string> = applied.filtered
       ? { 'X-STT-Filtered': applied.filtered.codes.join(',').slice(0, 120), 'X-STT-Raw-Length': String(applied.filtered.rawLength) }
       : sttFilterHeaders(filterOn, (result.text ?? '').length);
-    // verbose_json asked by the client: the metadata passes through (only the segments the filter kept).
-    const verbose = body.response_format === 'verbose_json'
-      ? { language: applied.response.language, duration: applied.response.duration, segments: applied.response.segments }
-      : {};
-    const { language: detected, language_probability: detectedProbability } = applied.response;
     return {
       status: 200,
       headers: { 'X-Cache': 'MISS', ...headers, ...filterHeaders },
-      body: {
-        text: applied.text,
-        ...(detected ? { language: detected } : {}),
-        ...(detectedProbability !== undefined ? { language_probability: detectedProbability } : {}),
-        ...verbose,
-      },
+      body: answer,
     };
   } catch (err) {
     log.error(`STT error for model ${model}: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
