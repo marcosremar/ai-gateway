@@ -2,7 +2,7 @@
 //!
 //! Rust counterpart of the Node SDK's `GatewayClient` (`sdk/node/gateway-client.ts`): OpenAI-compatible STT / chat
 //! (buffered and SSE) / TTS (buffered and streamed), speech-to-speech frames, live rooms, deployments, app accounts,
-//! activation and health. Built on reqwest + tokio with rustls (no OpenSSL).
+//! activation, desktop-app telemetry and health. Built on reqwest + tokio with rustls (no OpenSSL).
 //!
 //! ```no_run
 //! use ai_gateway_sdk::{GatewayClient, TranscribeRequest};
@@ -36,6 +36,7 @@ pub mod openai;
 pub mod rooms;
 pub mod s2s;
 mod stream;
+pub mod telemetry;
 pub mod types;
 
 pub use account::Activation;
@@ -58,4 +59,5 @@ pub use s2s::{
     S2SConfig, S2SEvent, S2SFrame, S2SFrameDecoder, S2SMessage, S2SModels, S2SRequest, S2SStream, S2S_MAX_FRAME_BYTES,
 };
 pub use stream::{ChatStream, SpeechStream};
+pub use telemetry::AppEventsBatch;
 pub use types::{CallOptions, HealthReport, Served, TimeoutGroup, Timeouts};

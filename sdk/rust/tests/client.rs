@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use ai_gateway_sdk::{
-    BreakerConfig, BreakerPosition, CallOptions, ChatMessage, ChatRequest, CreateRoom, GatewayClient, GatewayError,
+    AppEventsBatch, BreakerConfig, BreakerPosition, CallOptions, ChatMessage, ChatRequest, CreateRoom, GatewayClient, GatewayError,
     RetryPolicy, RoomLine, RouteTarget, S2SConfig, S2SEvent, S2SFrame, S2SRequest, SpeechRequest, TimeoutGroup,
     TranscribeRequest,
 };
@@ -97,6 +97,51 @@ async fn chat_request_shape_and_served_headers() {
         "messages": [{"role": "system", "content": "be brief"}, {"role": "user", "content": "Olá"}],
         "temperature": 0.2, "max_tokens": 160, "top_k": 20, "stream": false
     }));
+}
+
+#[tokio::test]
+async fn degraded_status_header_is_read() {
+    let mock = Mock::start().await;
+    mock.on("POST", "/v1/chat/completions", vec![
+        Reply::json(200, completion("a")).header("x-gateway-status", "degraded"),
+        Reply::json(200, completion("b")),
+    ]);
+    let gw = client(&mock);
+    let degraded = gw.chat(ChatRequest::new("m", vec![])).await.unwrap().served;
+    assert_eq!(degraded.status.as_deref(), Some("degraded"));
+    assert!(degraded.is_degraded());
+    assert!(!gw.chat(ChatRequest::new("m", vec![])).await.unwrap().served.is_degraded());
+}
+
+#[tokio::test]
+async fn app_events_upload_shape_and_accepted_count() {
+    let mock = Mock::start().await;
+    mock.on("POST", "/v1/telemetry/app/events", vec![Reply::json(200, json!({"accepted": 2}))]);
+    let batch = AppEventsBatch {
+        install_id: "0b7f5a52-2f0e-4c1a-9a43-6d3f4c1e9b10".into(),
+        app_version: "2.0.3".into(),
+        os: "windows".into(),
+        events: vec![json!({"ts": 1, "kind": "app_start", "fields": {}}), json!({"ts": 2, "kind": "app_exit", "fields": {}})],
+    };
+    assert_eq!(client(&mock).upload_app_events(&batch, &CallOptions::default()).await.unwrap(), 2);
+    let r = &mock.requests()[0];
+    assert_eq!(r.header("authorization"), Some("Bearer test-key"));
+    assert_eq!(r.json(), json!({
+        "installId": "0b7f5a52-2f0e-4c1a-9a43-6d3f4c1e9b10", "appVersion": "2.0.3", "os": "windows",
+        "events": [{"ts": 1, "kind": "app_start", "fields": {}}, {"ts": 2, "kind": "app_exit", "fields": {}}]
+    }));
+}
+
+#[tokio::test]
+async fn app_events_rate_limit_keeps_retry_after_and_is_not_retried() {
+    let mock = Mock::start().await;
+    mock.on("POST", "/v1/telemetry/app/events", vec![
+        Reply::json(429, json!({"error": "Too many telemetry batches from this install"})).header("retry-after", "60"),
+    ]);
+    let err = client(&mock).upload_app_events(&AppEventsBatch::default(), &CallOptions::default()).await.unwrap_err();
+    assert_eq!(err.status(), Some(429));
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(60)));
+    assert_eq!(mock.requests().len(), 1);
 }
 
 #[tokio::test]

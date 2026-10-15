@@ -115,6 +115,8 @@ pub fn gateway_methods(path: &str) -> Option<&'static [&'static str]> {
         ["v1", "apps", _, "routes" | "limits" | "profile"] => get_put,
         ["v1", "apps", _, "fallback" | "status"] => get,
         ["v1", "apps", _, "stability-report"] => &["GET", "POST"],
+        // src/app-telemetry/index.ts
+        ["v1", "telemetry", "app", "events"] => &["GET", "POST"],
         _ => return None,
     })
 }
