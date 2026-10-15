@@ -125,7 +125,7 @@ describe('handleAudioTranscriptions — STT cache', () => {
     const res2 = await handleAudioTranscriptions(makeReq({ model: 'test-model' }, audioBuf), providers);
     expect(mockSttProvider.transcribe).toHaveBeenCalledTimes(1);
     expect(res2.headers?.['X-Cache']).toBe('HIT');
-    expect(res2.body).toEqual({ text: 'hello world' });
+    expect(res2.body).toEqual({ text: 'hello world', language: 'en' });
     expect(res2.status).toBe(200);
   });
 

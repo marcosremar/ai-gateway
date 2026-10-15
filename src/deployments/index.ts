@@ -72,6 +72,8 @@ export interface DeploymentsFromEnv {
   apps: AppRegistry;
   devices: AppDevices;
   handler: ReturnType<typeof createDeploymentRoutes>;
+  /** WS upgrades under /v1/deployments/:name/invoke are relayed to the replica. */
+  upgrade: (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => Promise<boolean>;
   clientGpu: ClientGpu;
   gpuHealth: AppGpuHealth;
   registryWarning: () => string | null;
@@ -273,7 +275,7 @@ export function deploymentsFromEnv(
     ? startJanitor({ cloud: scalewayJanitorCloud(() => scaleway.secretKey, () => scaleway.projectId), log: opts.log }) : undefined;
   const registryWarning = () => privateImageWarning(controller.list().flatMap(v => controller.specOf(v.name) ?? []), scaleway);
   const rotateCredentials = (current: Record<string, string | undefined>) => rotateBackendCredentials({ scaleway, vast }, current);
-  return { controller, apps, devices, handler, clientGpu, gpuHealth, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
+  return { controller, apps, devices, handler, upgrade: handler.upgrade, clientGpu, gpuHealth, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
 }
 
 export function vastCreditFloor(env: Record<string, string | undefined>): { minCreditUsd?: number } {

@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'http';
 import type { AddressInfo } from 'net';
+import WebSocket from 'ws';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
 import { DeploymentController, DeploymentError } from '../../../src/deployments/controller';
 import { createDeploymentRoutes, HttpReplicaProbe } from '../../../src/deployments/http';
@@ -54,6 +55,7 @@ async function harness(
       ] },
     } as never,
     prefixRoutes: [{ prefix: '/v1/deployments', handler }],
+    upgradeRoutes: [{ prefix: '/v1/deployments', handler: handler.upgrade }],
     customRoutes: [{ method: 'POST', path: '/v1/s2s', handler: s2s }],
     // The tester key is the admin of this gateway: it sees the gateway-wide counters of /health?details=1.
     deepHealth: { authorize: (token) => token === KEY, report: async () => ({ status: 200, body: {} }) },
@@ -161,6 +163,20 @@ describe('no-wake: invoke and s2s', () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ code: 'cold', noWake: true });
     expect(res.headers.get('retry-after')).toBe('30');
+    await wait(200);
+    expect(h.cloud.created).toHaveLength(0);
+    expect(h.controller.get('parle-speech')!.lastRequestAt).toBeNull();
+  });
+
+  it('a WebSocket invoke answers 503 cold at once and does not wake the deployment', async () => {
+    const status = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(`${h.base.replace(/^http/, 'ws')}/v1/deployments/parle-speech/invoke/ws/audio-stream`, {
+        headers: { authorization: `Bearer ${KEY}`, 'X-Gateway-No-Wake': '1' },
+      });
+      ws.on('unexpected-response', (_req, res) => { resolve(res.statusCode ?? 0); ws.terminate(); });
+      ws.on('error', reject);
+    });
+    expect(status).toBe(503);
     await wait(200);
     expect(h.cloud.created).toHaveLength(0);
     expect(h.controller.get('parle-speech')!.lastRequestAt).toBeNull();

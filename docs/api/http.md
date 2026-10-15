@@ -659,7 +659,7 @@ curl -X POST https://<gateway>/v1/audio/transcriptions -H "Authorization: Bearer
 `language` / `language_probability`: the language the provider detected in the audio and its probability, when it gives
 them. The text is still transcribed in the requested `language`; the speech-stack replica (image with this change) detects
 on the same encoder pass, at no extra decode, so a learner speaking French to a `language=pt` request shows up as
-`"language": "fr"`. Absent on a cache hit and on providers that report none. Not a verdict on its own: on 72 short pt-BR clips (0.4–4 s, gTTS, some with noise) large-v3 detected another language in 5 (noisy ones); read it with `language_probability`.
+`"language": "fr"`. Absent on providers that report none; a cache hit answers the same fields as the miss it stores. Not a verdict on its own: on 72 short pt-BR clips (0.4–4 s, gTTS, some with noise) large-v3 detected another language in 5 (noisy ones); read it with `language_probability`.
 
 **Hallucination filter (on by default, every provider, every client).** Whisper and other STT models invent text on
 silence and noise ("E aí", "Obrigado por assistir", "Legendas pela comunidade Amara.org"). The gateway asks the provider
@@ -673,7 +673,7 @@ blocklist marks as invented, and answers `{"text":""}` (still `200`; the client 
 | multipart field `filter_hallucinations=false` | per-request opt-out (QA); `0`/`off` also accepted. Such answers are cached apart from filtered ones |
 | `language` | `pt`, `pt-BR` or `Portuguese` (codes and English/native names). Without it only the high-confidence phrases apply |
 | `speech_ms` (speech-stack replica) | milliseconds of speech its VAD found; when > 0 the metadata layer only drops Whisper's own silence test (`no_speech_prob` > 0.6 and `avg_logprob` < -1.0) and repetition loops, so a short real answer is not emptied ([details](../stt-hallucination-filter.md#rules)) |
-| `response_format=verbose_json` | `language`, `duration` and the kept `segments` are returned next to `text` |
+| `response_format=verbose_json` | `language`, `duration` and the kept `segments` are returned next to `text` (fields the provider did not send stay absent) |
 | env `STT_HALLUCINATION_FILTER=0` | turns the filter off for the whole gateway |
 | env `STT_FILTER_NO_SPEECH_PROB` (0.6), `STT_FILTER_AVG_LOGPROB` (-1.0), `STT_FILTER_COMPRESSION_RATIO` (2.4), `STT_FILTER_AMBIGUOUS_NO_SPEECH_PROB` (0.4) | thresholds, no deploy of code needed (design choices to pilot) |
 
@@ -749,7 +749,8 @@ for a cold start.
 | `GET` | `/v1/apps/:app` | `{ id, createdAt, requireDevice, images, deployments: [{ name, status, appImage }] }` |
 | `GET` / `PUT` | `/v1/apps/:app/routes` | the app's aliases (see *App aliases* above) |
 | `GET` | `/v1/apps/:app/images` | the app's saved images |
-| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults? }`; `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` / `PUT` / `DELETE` | `/v1/apps/:app/images/:name` | one image: `{ image, digest?, port?, healthPath?, description?, defaults?, visibility? }` (`visibility`: `"private"` default, or `"shared"`); `PUT` answers `201` when new. `PUT`/`DELETE` need an admin key (the image runs with the deployment's secrets); the app key only reads. A deployment then uses it with `PUT /v1/deployments/:name` `{ "appImage": "<name>" }` (admin, `X-App` naming the app) |
+| `GET` | `/v1/images` | `{ images: [{ app, name, image, digest, port, healthPath, description, visibility, createdAt, updatedAt }] }`: the caller's app images plus other apps' `shared` ones; admin without `X-App`: all. No `defaults`, history, env or credentials |
 | `GET` / `PUT` | `/v1/apps/:app/profile` | `{ requiresGpu, gpuDeployments }` (below); `PUT` by an admin, or by the app's own key naming only its own deployments |
 | `GET` | `/v1/apps/:app/status` | GPU status of the app's profile (below); `404` without a profile |
 | `GET` | `/v1/apps/:app/fallback` | direct-fallback plan (below) |
@@ -758,6 +759,11 @@ for a cold start.
 | `GET` / `POST` / `DELETE` | `/v1/apps/:app/devices`, `…/devices/:device/block` | the app's end-user devices: list, block, unblock (see *App devices*) |
 
 Every `/v1/apps/:app/*` path needs that app's own key or an admin key (`403` otherwise).
+
+A deployment with an explicit `image` made for an app (`X-App`) saves that address in the app's catalog under the
+repository's last path segment (`…/aigw/speech-stack:tag` → `speech-stack`), `private`, keeping the last 5 addresses.
+Another app's image is deployed with `{ "appImage": "<owner>/<name>" }` only while it is `shared`; a private one
+answers `404` like a missing one. The deployment and its cost belong to the deploying app.
 
 ### App profile and GPU status — `/v1/apps/:app/profile`, `/v1/apps/:app/status`
 

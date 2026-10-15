@@ -5,9 +5,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Server } from 'http';
 import type { AddressInfo } from 'net';
+import { createHash } from 'crypto';
 import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import WebSocket from 'ws';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
 import { DeploymentController } from '../../../src/deployments/controller';
 import { createDeploymentRoutes, HttpReplicaProbe } from '../../../src/deployments/http';
@@ -24,7 +26,7 @@ const AS_SITE = { 'x-app': 'site-a' };
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; maxWaitSeconds?: number } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; relayIdleMs?: number; maxWaitSeconds?: number } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
@@ -42,12 +44,14 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
     userOf: (req) => (req.headers.authorization === `Bearer ${SITE}` ? 'site-a' : req.headers.authorization === `Bearer ${ADMIN}` ? 'owner' : null),
     onRoutesChange: opts.onRoutesChange,
     ...(opts.invokeIdleMs ? { invokeIdleMs: opts.invokeIdleMs } : {}),
+    ...(opts.relayIdleMs ? { relayIdleMs: opts.relayIdleMs } : {}),
     ...(opts.declaredStatus ? { declaredStatus: opts.declaredStatus } : {}),
   });
   const server = createProxyServer({
     apiKeys: [`${ADMIN}:owner`, `${SITE}:site-a`],
     providers: { stt: {}, chat: {}, tts: {} } as never,
-    prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }, { prefix: '/v1/apps', handler }],
+    prefixRoutes: [{ prefix: '/v1/deployments', handler }, { prefix: '/v1/profiles', handler }, { prefix: '/v1/apps', handler }, { prefix: '/v1/images', handler }],
+    upgradeRoutes: [{ prefix: '/v1/deployments', handler: handler.upgrade }],
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()));
   return { cloud, controller, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
@@ -224,6 +228,88 @@ describe('deployments API', () => {
     expect(h.cloud.created).toHaveLength(1);
     expect(h.cloud.created[0].cloudInit).toContain('docker run');
     expect(h.cloud.created[0].namespace).toBe('test');
+  });
+
+  it('relays a websocket upgrade through invoke with the lease token (CDP-style raw frames)', async () => {
+    await call(h, 'PUT', '/v1/deployments/wsdemo', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
+    // The fake replica "nginx" gate: answer upgrades only with the lease token, then send one unmasked frame.
+    let replicaSawGatewayKey: unknown;
+    const originalCreate = h.cloud.createReplica.bind(h.cloud);
+    h.cloud.createReplica = async (input) => {
+      const machine = await originalCreate(input);
+      const fake = h.cloud.machines.get(machine.id)!;
+      fake.server.on('upgrade', (req, socket) => {
+        replicaSawGatewayKey = req.headers.authorization;
+        if (req.headers['x-aigw-token'] !== fake.token) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+        const accept = createHash('sha1')
+          .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        socket.write(Buffer.from([0x81, 0x02, 0x68, 0x69])); // ws text frame "hi"
+        // Reply to the client's close frame so the connection ends fully (mirror the realtime fake edge).
+        socket.on('data', () => { socket.write(Buffer.from([0x88, 0x00])); socket.end(); });
+      });
+      return machine;
+    };
+    const wsUrl = `${h.base.replace(/^http/, 'ws')}/v1/deployments/wsdemo/invoke/devtools/ws`;
+    const client = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${SITE}` } });
+    const received = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout waiting for the frame')), 5000);
+      client.on('message', (data) => { clearTimeout(timer); resolve(String(data)); });
+      client.on('error', (err) => { clearTimeout(timer); reject(err as Error); });
+    });
+    expect(received).toBe('hi');
+    expect(replicaSawGatewayKey).toBeUndefined();
+    client.close(1000, 'bye');
+    await new Promise<void>((r) => client.once('close', r));
+    // An unknown key is refused by the proxy's key check, another app's deployment by the scope check: neither
+    // touches the replica.
+    const refusal = (url: string, key: string) => new Promise<number>((resolve, reject) => {
+      const other = new WebSocket(url, { headers: { authorization: `Bearer ${key}` } });
+      other.on('unexpected-response', (_req, res) => { resolve(res.statusCode ?? 0); other.terminate(); });
+      other.on('error', (err) => reject(err as Error));
+      setTimeout(() => reject(new Error('timeout waiting for the refusal')), 5000);
+    });
+    expect(await refusal(wsUrl, 'nope-key-0123456789')).toBe(401);
+    await call(h, 'PUT', '/v1/deployments/adminonly', { profile: 'cpu-echo' });
+    expect(await refusal(wsUrl.replace('/wsdemo/', '/adminonly/'), SITE)).toBe(403);
+  });
+
+  it('relay idle: a silent relayed socket is cut and the machine lease is released (no 15-min nginx wait)', async () => {
+    await close(h);
+    await h.cloud.closeAll();
+    h = await harness({ relayIdleMs: 400 });
+    await call(h, 'PUT', '/v1/deployments/idlews', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
+    const originalCreate = h.cloud.createReplica.bind(h.cloud);
+    h.cloud.createReplica = async (input) => {
+      const machine = await originalCreate(input);
+      const fake = h.cloud.machines.get(machine.id)!;
+      fake.server.on('upgrade', (req, socket) => {
+        if (req.headers['x-aigw-token'] !== fake.token) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+        const accept = createHash('sha1')
+          .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        socket.write(Buffer.from([0x81, 0x02, 0x68, 0x69]));
+        // The relay ends the upstream with FIN when it cuts an idle client: close our side so the fake server
+        // can shut down (the graceful test replies to the client's close frame; here the cut is one-sided).
+        socket.on('end', () => socket.end());
+      });
+      return machine;
+    };
+    const wsUrl = `${h.base.replace(/^http/, 'ws')}/v1/deployments/idlews/invoke/devtools/ws`;
+    const client = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${SITE}` } });
+    await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout waiting for the frame')), 5000);
+      client.on('message', (data) => { clearTimeout(timer); resolve(String(data)); });
+      client.on('error', (err) => reject(err as Error));
+    });
+    // Stay silent: the relay must cut the socket and free the machine's busy slot well before nginx's 900 s.
+    const cut = await new Promise<'close' | 'timeout'>((resolve) => {
+      const timer = setTimeout(() => resolve('timeout'), 5000);
+      client.on('close', () => { clearTimeout(timer); resolve('close'); });
+    });
+    expect(cut).toBe('close');
+    client.terminate();
+    await until(() => h.controller.get('idlews')?.inflight === 0, 3000);
   });
 
   it('a cold start longer than the proxy idle timeout is still served (regression: socket killed at 60 s)', async () => {
@@ -598,6 +684,68 @@ describe('app accounts: saved image addresses per app', () => {
     expect((await call(h, 'GET', '/v1/deployments/other-gpu/invoke/', undefined, SITE)).status).toBe(403);
     expect((await call(h, 'GET', '/v1/deployments/nope/invoke/', undefined, SITE)).status).toBe(403);
     expect(h.cloud.created).toHaveLength(0); // the refused invoke woke nothing
+  });
+
+  type Listed = { app: string; name: string; image: string; visibility: string };
+  const listImages = async (key = ADMIN, headers: Record<string, string> = {}) =>
+    ((await (await call(h, 'GET', '/v1/images', undefined, key, headers)).json()) as { images: Listed[] }).images;
+
+  it('images are private by default: another app neither lists nor deploys them, and only an admin edits them', async () => {
+    const res = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000 }, ADMIN, asParle);
+    expect(((await res.json()) as Listed).visibility).toBe('private');
+    expect(await listImages(SITE)).toEqual([]);
+    expect((await listImages(ADMIN, asParle)).map(i => `${i.app}/${i.name}`)).toEqual(['parle/speech-stack']);
+
+    const hidden = await call(h, 'PUT', '/v1/deployments/site-speech', { appImage: 'parle/speech-stack' }, ADMIN, AS_SITE);
+    const missing = await call(h, 'PUT', '/v1/deployments/site-speech', { appImage: 'parle/nope' }, ADMIN, AS_SITE);
+    expect([hidden.status, missing.status]).toEqual([404, 404]);
+    expect(((await hidden.json()) as { error: string }).error.replace('speech-stack', 'nope')).toBe(((await missing.json()) as { error: string }).error);
+
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'shared' }, SITE)).status).toBe(403);
+    expect((await call(h, 'DELETE', '/v1/apps/parle/images/speech-stack', undefined, SITE)).status).toBe(403);
+    expect((await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'public' }, ADMIN, asParle)).status).toBe(400);
+    expect((await call(h, 'GET', '/v1/apps/parle/images/speech-stack', undefined, ADMIN, asParle).then(r => r.json()) as Listed).visibility).toBe('private');
+    expect((await call(h, 'POST', '/v1/images', {}, SITE)).status).toBe(405);
+  });
+
+  it('a shared image is listed for other apps and deployable by them as owner/name; the deployment stays with the deploying app', async () => {
+    await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000, defaults: { machineType: 'DEV1-S' } }, ADMIN, asParle);
+    await call(h, 'PUT', '/v1/apps/parle/images/internal', { image: SPEECH_OLD, port: 8000 }, ADMIN, asParle);
+    await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, ADMIN, AS_SITE);
+    const shared = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'shared' }, ADMIN, asParle);
+    expect(await shared.json()).toMatchObject({ image: SPEECH, port: 8000, visibility: 'shared' });
+
+    expect((await listImages(SITE)).map(i => `${i.app}/${i.name}:${i.visibility}`).sort()).toEqual(['parle/speech-stack:shared', 'site-a/web:private']);
+    expect(await listImages(ADMIN)).toHaveLength(3);
+
+    const res = await call(h, 'PUT', '/v1/deployments/site-speech', { appImage: 'parle/speech-stack', minReplicas: 0 }, ADMIN, AS_SITE);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ app: 'site-a', appImage: 'parle/speech-stack', spec: { image: SPEECH, port: 8000, machineType: 'DEV1-S' } });
+    expect((await call(h, 'PUT', '/v1/deployments/site-internal', { appImage: 'parle/internal' }, ADMIN, AS_SITE)).status).toBe(404);
+
+    await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'private' }, ADMIN, asParle);
+    expect((await call(h, 'PUT', '/v1/deployments/site-other', { appImage: 'parle/speech-stack' }, ADMIN, AS_SITE)).status).toBe(404);
+  });
+
+  it('a deploy with an explicit image registers it in the app catalog, private, idempotent, with the previous address kept', async () => {
+    const spec = { port: 8000, machineType: 'DEV1-S', minReplicas: 0, env: { HF_TOKEN: 'hf_secret' }, registryAuth: { username: 'u', password: 'p4ss' } };
+    expect((await call(h, 'PUT', '/v1/deployments/parle-speech', { ...spec, image: SPEECH_OLD }, ADMIN, asParle)).status).toBe(201);
+    await call(h, 'PUT', '/v1/deployments/parle-speech', { ...spec, image: SPEECH_OLD }, ADMIN, asParle);
+    let saved = await (await call(h, 'GET', '/v1/apps/parle/images/speech-stack', undefined, ADMIN, asParle)).json() as Listed & { port: number; history: unknown[] };
+    expect(saved).toMatchObject({ image: SPEECH_OLD, port: 8000, visibility: 'private', history: [] });
+
+    await call(h, 'PATCH', '/v1/deployments/parle-speech', { image: SPEECH }, ADMIN, asParle);
+    saved = await (await call(h, 'GET', '/v1/apps/parle/images/speech-stack', undefined, ADMIN, asParle)).json() as typeof saved;
+    expect(saved).toMatchObject({ image: SPEECH, history: [{ image: SPEECH_OLD }] });
+
+    await call(h, 'PUT', '/v1/deployments/no-app', { image: 'me/app:1', port: 80, machineType: 'DEV1-S' });
+    const all = await call(h, 'GET', '/v1/images');
+    const text = await all.text();
+    expect(text).not.toContain('hf_secret');
+    expect(text).not.toContain('p4ss');
+    const images = (JSON.parse(text) as { images: Array<Record<string, unknown>> }).images;
+    expect(images).toHaveLength(1);
+    expect(Object.keys(images[0]).sort()).toEqual(['app', 'createdAt', 'description', 'digest', 'healthPath', 'image', 'name', 'port', 'updatedAt', 'visibility']);
   });
 
   it('accounts persist across a gateway restart (file store)', async () => {
