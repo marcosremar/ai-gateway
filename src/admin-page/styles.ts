@@ -113,9 +113,17 @@ td details summary{cursor:pointer;color:var(--muted);font-size:12.5px}
 .ra{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.ra code{padding:3px 7px;border-radius:6px;background:var(--hover);border:1px solid var(--line2);overflow-wrap:anywhere}
 .ra .t{color:var(--muted);font-size:12.5px}
 button.quiet{border-color:transparent;background:none;color:var(--muted);font-weight:500}button.quiet:hover{color:var(--text)}
-form.gpu-type{display:flex;flex-direction:column;gap:6px;min-width:220px}.gpu-type label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
-.gpu-type select{min-height:32px;padding:0 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--text);font:inherit;font-size:13px;max-width:100%}
-.gpu-type label.now{flex-direction:row;align-items:center;gap:6px}.gpu-type button.quiet{border-color:var(--line);color:var(--text)}
+form.gpu-type{display:flex;flex-direction:column;gap:10px;padding:14px 16px 16px;border-top:1px solid var(--line);background:color-mix(in srgb,var(--side) 35%,var(--panel))}
+.gpu-type label{display:flex;flex-direction:column;gap:5px;font-size:12.5px;font-weight:600;color:var(--muted)}
+.gpu-type select{min-height:36px;width:min(100%,460px);padding:0 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--text);font:inherit;font-size:13.5px}
+.gpu-type label.now{flex-direction:row;align-items:center;gap:8px;font-weight:500;color:var(--text)}.gpu-type .row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+.gpu-type .row small,.gpu-type .hint{color:var(--muted);font-size:12.5px;font-weight:500}
+.gtype .lead{margin:0;padding:12px 16px;color:var(--muted);font-size:13px;border-bottom:1px solid var(--line2)}.gtype .lead span{display:block;max-width:78ch}
+.gtype .msg{margin:12px 16px 0}.gtype .note{margin:12px 16px 0;padding:8px 12px;border-radius:8px;font-size:12.5px;background:color-mix(in srgb,var(--warn) 9%,var(--panel));color:var(--text)}
+.gtype .tw{margin-top:4px}.gtype td small.cur{color:var(--accent);font-weight:600}.gtype td details{margin-top:4px}.gtype td pre.log{padding:8px 0 0;max-height:220px;font-size:11.5px}
+.gtype td.act form{display:flex;flex-direction:column;align-items:flex-end;gap:3px}.gtype td.act small{font-size:12px;color:var(--muted);white-space:nowrap}
+.pill.nv{color:var(--muted);background:color-mix(in srgb,var(--muted) 12%,transparent);padding:0 8px;white-space:normal}
+button:disabled{color:var(--muted);background:var(--hover);border-color:var(--line2);cursor:not-allowed;transform:none}
 .bar{position:sticky;bottom:0;z-index:1;display:flex;flex-wrap:wrap;gap:4px 18px;margin:8px -36px 0;padding:8px 36px;
 background:color-mix(in srgb,var(--bg) 92%,transparent);border-top:1px solid var(--line);color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
 .recos{list-style:none;margin:0;padding:0}
@@ -162,5 +170,6 @@ td::before{content:attr(data-l);color:var(--muted);font-size:12.5px;text-align:l
 td:first-child{display:block;padding-bottom:6px}td:first-child .v{text-align:left}td:first-child::before{content:none}
 td small{text-align:right}td:first-child small{text-align:left}td.n{white-space:normal}td:empty,td.wide{display:none}
 .cap tbody tr:nth-child(n+4){display:none}td.act{display:flex;gap:8px}td.act .v{display:flex;gap:8px;width:100%}td.act form{flex:1}.reco dl{grid-template-columns:1fr}.reco dt{padding-top:4px}.amt{margin-left:0;width:100%}
-.ticks.d30 span{font-size:10px}td.act::before{content:none}td.act button{width:100%;margin-top:6px}tbody tr:hover td{background:none}.facts{grid-template-columns:1fr;gap:0 0}.facts dd{margin-bottom:6px}}
+.ticks.d30 span{font-size:10px}td.act::before{content:none}td.act button{width:100%;margin-top:6px}.gtype td.act form{align-items:stretch}.gtype td.act small{text-align:center}.gpu-type select{width:100%}.gpu-type .row{flex-direction:column;align-items:stretch}
+.gtype .msg{flex-direction:column;align-items:flex-start;gap:6px}.gtype .msg .pill{white-space:nowrap}.gtype td:nth-child(2){display:block;text-align:left}.gtype td:nth-child(2)::before{display:block;margin-bottom:4px}.gtype td:nth-child(2) .v,.gtype td:nth-child(2) small{text-align:left}tbody tr:hover td{background:none}.facts{grid-template-columns:1fr;gap:0 0}.facts dd{margin-bottom:6px}}
 @media (pointer:coarse){button,.btn,.gpu-type select{min-height:44px}.gpu-type input[type=checkbox]{width:22px;height:22px}.jump a{min-height:44px}.reco summary{min-height:44px;display:flex;align-items:center}}`;

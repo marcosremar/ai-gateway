@@ -193,6 +193,31 @@ eu só troco essa máquina RTX 3090 por uma H100 … não precisa mudar nada no 
   the first start, then cached), `86-real` and `89-real`; vLLM and CTranslate2 ship sm_90 kernels; CUDA 13 hosts
   (driver ≥ 580) run Hopper.
 
+### Only a validated GPU type goes to production
+
+Owner, 15/10/2026: «Só deve habilitar se uma vez já rodou e funcionou nessa GPU; aí pode usar em produção.»
+(`src/deployments/gpu-validation.ts`, state in `<DEPLOYMENTS_STATE_DIR>/gpu-validations.json`.)
+
+- **What validates a type:** a replica of the family (the deployment, or the one its `testFor` names: a
+  `parle-speech-test` boot counts for `parle-speech`) on that machine type, with that exact image tag, that (1) is
+  ready (health check passed), (2) passes the content check of the fallback probe (#146) on the replica itself — the
+  TTS says «Bom dia.» and the audio is not silent, the STT hears «bom dia» in that audio, the LLM answers «ok» — and
+  (3) is still ready and passing it 3 min later (one check a minute). The record keeps the date, the host country, the
+  check latency and the deployment. Three failed checks in a row on a ready replica record a failure with its reason
+  and the last 20 boot-log lines. Any boot validates: a class, a test, a trial.
+- **A new image tag needs a new validation** (the key is family + image + type). The RTX 3090 of `parle-speech` with
+  `speech-stack:20261011-0200` is seeded from the measured run of 14/10/2026 above (Czechia, 10 + 24 turns);
+  nothing else had stored proof, so the first class or test boot validates the rest.
+- **The gate:** on a production deployment (no `testFor`) the panel's select («GPU padrão de produção») offers only
+  validated types; the others are disabled with «ainda não validada nesta imagem». `PUT /v1/deployments/:name/gpu-type`
+  answers `409` with the reason; `{"force": true}` passes and is audited (`deployments.gpu-type.force`). The declared
+  default and «voltar ao padrão» are always allowed. A test copy takes any type.
+- **«testar nesta GPU»** (`POST /admin/gpu-test`, admin, CSRF, audited `admin-page.gpu-test`): sets the test copy to
+  that type and keeps it warm for 40 min, shown as €/h × 25 min. Refused in a class window or when one opens within
+  the 40 min, while the app's one GPU is up (it never starts a second), during another trial, or when the copy runs
+  another image. The copy runs the check by itself, the result is recorded (validated, or failed with the reason and
+  log lines; not ready in 40 min is a failure), then it is parked and put back on its own type.
+
 To change the **default** for good instead, edit `spec.candidates` of `src/deployments/declared/parle-speech.json`
 (and `parle-speech-test.json`, so tests measure the class card), e.g.
 `[{ "provider": "vast", "machineType": "RTX 5090", "maxEurPerHour": 0.85 }]`, with `machineType` and `maxEurPerHour`
