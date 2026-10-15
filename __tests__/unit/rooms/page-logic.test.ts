@@ -4,13 +4,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import { Script, createContext } from 'vm';
-import { ROOM_PAGE_LOGIC, roomPage } from '../../../src/rooms/page';
+import { ROOM_PAGE_LOGIC, UI_LANGS, UI_TEXT, roomPage } from '../../../src/rooms/page';
 
 interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
-interface Settings { mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
+interface Settings { ui: string; mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -18,21 +18,24 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   nextStart(now: number, prevEnd: number, lead: number): number;
   backlogDrop(ahead: number, durs: number[], maxSec: number): number;
   median(values: number[]): number | null;
-  delayLabel(ms: number, voice: boolean): { text: string; level: 'ok' | 'warn' | 'bad' };
+  delayLabel(ms: number, voice: boolean, L: Record<string, string>): { text: string; level: 'ok' | 'warn' | 'bad' };
   normalizeSettings(raw: unknown): Settings;
   parseSettings(json: string | null, legacyOrig: string | null): Settings;
   textSizes(step: number, vw: number): { live: number; tx: number };
   lineView(mode: string, showOrig: boolean, lang: string, hasTr: boolean): { main: 'tr' | 'orig'; sub: boolean; miss: boolean };
   uaInfo(ua: string, touch: number): { ua: string; os: string; device: string };
   refOf(search: string, referrer: string): string;
+  wordStarts(text: string, start: number, dur: number): number[];
+  spokenCount(starts: number[], t: number): number;
+  speechMs(text: string): number;
   safeYoutubeUrl(u: unknown): string | null;
   youtubeLabel(prefs: string[]): string;
   dubbable(lang: string, dubLangs: string[] | undefined): boolean;
   listenMsg(on: boolean, lang: string | null): string;
-  dubStatus(s: { can: boolean; lang: string; on: boolean; ctx: string | null; error: string | null; playing: boolean; loading: boolean }): { kind: string; text: string };
+  dubStatus(s: { can: boolean; lang: string; on: boolean; ctx: string | null; error: string | null; playing: boolean; loading: boolean }, L: Record<string, string>): { kind: string; text: string };
   silentWav(rate: number, samples: number): string;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -180,15 +183,17 @@ describe('room page: delay indicator', () => {
     expect(median([1000, 2000, 3000, 9000])).toBe(2500);
   });
 
-  it('labels in pt-BR with one decimal and colors by threshold', () => {
-    expect(delayLabel(1849, false)).toEqual({ text: 'atraso 1,8 s', level: 'ok' });
-    expect(delayLabel(3200, true)).toEqual({ text: 'voz 3,2 s', level: 'warn' });
-    expect(delayLabel(2999, false).level).toBe('ok');
-    expect(delayLabel(6000, false).level).toBe('warn');
-    expect(delayLabel(6001, false).level).toBe('bad');
+  it('labels in the interface language with one decimal and colors by threshold', () => {
+    expect(delayLabel(1849, false, UI_TEXT.fr)).toEqual({ text: 'délai 1,8 s', level: 'ok' });
+    expect(delayLabel(1849, false, UI_TEXT.en)).toEqual({ text: 'delay 1.8 s', level: 'ok' });
+    expect(delayLabel(1849, false, UI_TEXT.pt)).toEqual({ text: 'atraso 1,8 s', level: 'ok' });
+    expect(delayLabel(3200, true, UI_TEXT.pt)).toEqual({ text: 'voz 3,2 s', level: 'warn' });
+    expect(delayLabel(2999, false, UI_TEXT.pt).level).toBe('ok');
+    expect(delayLabel(6000, false, UI_TEXT.pt).level).toBe('warn');
+    expect(delayLabel(6001, false, UI_TEXT.pt).level).toBe('bad');
   });
 });
-const DEFAULTS: Settings = { mode: 'translation', showOrig: false, volume: 0.9, sync: true, size: 0, theme: 'auto', autoScroll: true, showTimes: true, showDelay: true };
+const DEFAULTS: Settings = { ui: 'fr', mode: 'translation', showOrig: false, volume: 0.9, sync: true, size: 0, theme: 'auto', autoScroll: true, showTimes: true, showDelay: true };
 
 describe('room page: viewer settings', () => {
   it('defaults: translation, original hidden, voice sync on, automatic theme, auto-scroll, times and delay shown', () => {
@@ -198,7 +203,7 @@ describe('room page: viewer settings', () => {
   });
 
   it('round-trips a saved choice and validates every field independently', () => {
-    const saved: Settings = { mode: 'bilingual', showOrig: true, volume: 0.35, sync: false, size: 4, theme: 'light', autoScroll: false, showTimes: false, showDelay: false };
+    const saved: Settings = { ui: 'en', mode: 'bilingual', showOrig: true, volume: 0.35, sync: false, size: 4, theme: 'light', autoScroll: false, showTimes: false, showDelay: false };
     expect({ ...parseSettings(JSON.stringify(saved), null) }).toEqual(saved);
     const bad = { mode: 'karaoke', theme: 'pink', volume: 3, size: 99, sync: 'yes', showTimes: 0, autoScroll: false };
     expect({ ...normalizeSettings(bad) }).toEqual({ ...DEFAULTS, size: 7, autoScroll: false });
@@ -254,16 +259,20 @@ describe('room page: viewer settings', () => {
 
   it('shows the state of the dub toggle: off, locked, error, playing, loading, idle', () => {
     const base = { can: true, lang: 'fr', on: true, ctx: 'running', error: null, playing: false, loading: false };
-    expect(dubStatus({ ...base, can: false, lang: 'orig' })).toEqual({ kind: 'na', text: 'escolha um idioma de tradução' });
-    expect(dubStatus({ ...base, can: false }).kind).toBe('na');
-    expect(dubStatus({ ...base, on: false }).kind).toBe('off');
+    const pt = UI_TEXT.pt;
+    expect(dubStatus({ ...base, can: false, lang: 'orig' }, pt)).toEqual({ kind: 'na', text: 'escolha um idioma de tradução' });
+    expect(dubStatus({ ...base, can: false }, pt).kind).toBe('na');
+    expect(dubStatus({ ...base, on: false }, pt).kind).toBe('off');
     // iOS/Android suspend the context (screen lock, call, no gesture yet): the next tap must resume it.
-    expect(dubStatus({ ...base, ctx: 'suspended', playing: true })).toEqual({ kind: 'locked', text: 'toque aqui para ativar o som' });
-    expect(dubStatus({ ...base, ctx: 'interrupted' }).kind).toBe('locked');
-    expect(dubStatus({ ...base, error: 'erro ao tocar a voz (mp3)', playing: true })).toEqual({ kind: 'error', text: 'erro ao tocar a voz (mp3)' });
-    expect(dubStatus({ ...base, playing: true, loading: true })).toEqual({ kind: 'playing', text: 'tocando' });
-    expect(dubStatus({ ...base, loading: true })).toEqual({ kind: 'loading', text: 'carregando voz…' });
-    expect(dubStatus(base).kind).toBe('idle');
+    expect(dubStatus({ ...base, ctx: 'suspended', playing: true }, pt)).toEqual({ kind: 'locked', text: 'toque aqui para ativar o som' });
+    expect(dubStatus({ ...base, ctx: 'interrupted' }, pt).kind).toBe('locked');
+    expect(dubStatus({ ...base, error: 'mp3', playing: true }, pt)).toEqual({ kind: 'error', text: 'erro ao tocar a voz (mp3)' });
+    expect(dubStatus({ ...base, playing: true, loading: true }, pt)).toEqual({ kind: 'playing', text: 'tocando' });
+    expect(dubStatus({ ...base, loading: true }, pt)).toEqual({ kind: 'loading', text: 'carregando voz…' });
+    expect(dubStatus(base, pt).kind).toBe('idle');
+    // In the interface language (French by default).
+    expect(dubStatus({ ...base, ctx: 'suspended' }, UI_TEXT.fr).text).toBe('touchez ici pour activer le son');
+    expect(dubStatus({ ...base, error: 'mp3' }, UI_TEXT.en).text).toBe('could not play the voice (mp3)');
   });
 
   it('unlocks mobile audio inside the tap: audio session, silent <audio>, context resume, 1-sample buffer', () => {
@@ -291,13 +300,13 @@ describe('room page: viewer settings', () => {
     expect(html).toContain("['touchend','click','keydown'].forEach(function(t){document.addEventListener(t,wake,true)})");
     expect(html).toContain("if(locked()){unlockAudio();");
     // Decode failures are visible, not silent.
-    expect(html).toContain("dubErr='erro ao tocar a voz ('+fmt+')'");
+    expect(html).toContain('dubErr=fmt;');
     expect(html).toContain('id="dubState"');
   });
 
   it('ships the mobile layout: brand colors, safe-area insets, no inline styles', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
-    for (const s of ['#00C7BE', '#0F1A2E', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html,body{overflow-x:hidden}', 'Ouvir dublagem']) {
+    for (const s of ['#00C7BE', '#0F1A2E', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html,body{overflow-x:hidden}', 'Écouter le doublage']) {
       expect(html).toContain(s);
     }
     // No CDN: every absolute URL in the page is an SVG/XML namespace on www.w3.org.
@@ -308,7 +317,7 @@ describe('room page: viewer settings', () => {
   it('ships an accessible settings sheet', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
     for (const s of ['role="dialog"', 'aria-modal="true"', 'aria-labelledby="sheetTitle"', 'aria-haspopup="dialog"', "e.key==='Escape'", "localStorage.setItem",
-      'Só transcrição', 'Bilíngue', 'Só texto completo', 'Sincronizar legenda com a voz', 'Rolagem automática do texto completo', 'Mostrar horários', 'Mostrar atraso', 'Automático']) {
+      'Transcription seule', 'Bilingue', 'Texte complet seul', 'Synchroniser les sous-titres avec la voix', 'Défilement automatique du texte complet', 'Afficher les heures', 'Afficher le délai', 'Automatique']) {
       expect(html).toContain(s);
     }
     expect(html).not.toMatch(/ style="/); // CSP: no inline style attributes
@@ -343,6 +352,76 @@ describe('room page: analytics helpers', () => {
     }
   });
 });
+
+describe('room page: karaoke highlight', () => {
+  it('marks the words whose start time has passed, never skipping or going back', () => {
+    const starts = wordStarts('and I started to feel sick', 1000, 2600);
+    expect(starts).toHaveLength(6);
+    expect(starts[0]).toBe(1000);
+    for (let i = 1; i < starts.length; i++) expect(starts[i]).toBeGreaterThan(starts[i - 1]);
+    expect(starts[5]).toBeLessThan(3600);
+    expect(spokenCount(starts, 999)).toBe(0);
+    expect(spokenCount(starts, 1000)).toBe(1); // "and"
+    expect(spokenCount(starts, starts[3])).toBe(4); // "to" starts now
+    expect(spokenCount(starts, starts[3] - 1)).toBe(3);
+    expect(spokenCount(starts, 1e12)).toBe(6);
+    let last = 0;
+    for (let t = 900; t <= 3700; t += 37) { const k = spokenCount(starts, t); expect(k).toBeGreaterThanOrEqual(last); last = k; }
+  });
+
+  it('spreads words by length and estimates speech time from the text', () => {
+    const s = wordStarts('a bbbbbbbbb c', 0, 1400);
+    expect(s[1] - s[0]).toBeLessThan(s[2] - s[1]); // the long word takes longer
+    expect(wordStarts('', 0, 1000)).toEqual([]);
+    expect(speechMs('and I started to feel sick')).toBeCloseTo(26 * 1000 / 15);
+    expect(speechMs('ok')).toBe(800);
+  });
+
+  it('ships the karaoke painting in the page', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const s of ['function paintKaraoke', 'spokenCount(wordStarts(text,start,dur),now())', 'm.durMs=dur*1000', '.k{color:var(--accent)']) expect(html).toContain(s);
+  });
+});
+
+describe('room page: interface language and per-app settings', () => {
+  it('defaults the interface to French, accepts pt and en, rejects the rest', () => {
+    expect(parseSettings(null, null).ui).toBe('fr');
+    expect(normalizeSettings({ ui: 'en' }).ui).toBe('en');
+    expect(normalizeSettings({ ui: 'pt' }).ui).toBe('pt');
+    expect(normalizeSettings({ ui: 'de' }).ui).toBe('fr');
+  });
+
+  it('renders in French and keeps settings under the key of the app that opened the live', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 }, 'a1b2c3d4e5f6');
+    expect(html).toContain('<html lang="fr">');
+    expect(html).toContain('Réglages d&#39;affichage');
+    expect(html).toContain('APP="a1b2c3d4e5f6"');
+    expect(html).toContain("SETTINGS_KEY='ucast-settings-'+APP");
+    expect(html).toContain('store.set(SETTINGS_KEY,');
+  });
+
+  it('ships a page script that parses', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 }, 'a1b2c3d4e5f6');
+    const src = /<script nonce="[^"]+">([\s\S]*)<\/script>/.exec(html)?.[1] ?? '';
+    expect(src).toContain('UI={"fr":');
+    expect(() => new Script(src)).not.toThrow();
+  });
+
+  it('has every interface string in every language', () => {
+    const keys = Object.keys(UI_TEXT.fr).sort();
+    for (const l of UI_LANGS) expect(Object.keys(UI_TEXT[l]).sort()).toEqual(keys);
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const k of html.matchAll(/data-ia?="(\w+)"/g)) expect(UI_TEXT.fr[k[1]]).toBeTypeOf('string');
+  });
+
+  it('shows the quick mode buttons with accessible names and a gear; the voice stays on its own toggle', () => {
+    const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
+    for (const m of ['translation', 'bilingual', 'transcript', 'full']) expect(html).toMatch(new RegExp(`data-m="${m}" aria-pressed="false" data-ia="\\w+" data-tip="[^"]+" aria-label="[^"]+"`));
+    expect(html).not.toContain('data-m="dub"');
+    expect(html).toContain('<span class="dt" data-i="listenDub">Écouter le doublage</span>');
+    expect(html).toContain('id="gear"');
+  });
+});
 describe('room page: "Assistir no YouTube"', () => {
   it('accepts only https links on the YouTube hosts', () => {
     for (const ok of ['https://youtu.be/dQw4w9WgXcQ', 'https://www.youtube.com/channel/UC123/live', 'https://youtube.com/watch?v=abc', 'https://m.youtube.com/live/abc', 'https://WWW.YOUTUBE.COM/x']) {
@@ -354,7 +433,7 @@ describe('room page: "Assistir no YouTube"', () => {
     }
   });
 
-  it('labels the link in the viewer\'s browser language (pt by default)', () => {
+  it('labels the link in the first language it knows (pt by default)', () => {
     expect(youtubeLabel(['pt-BR'])).toBe('Assistir no YouTube');
     expect(youtubeLabel(['en-US', 'pt'])).toBe('Watch on YouTube');
     expect(youtubeLabel(['FR-ca'])).toBe('Regarder sur YouTube');
@@ -372,14 +451,15 @@ describe('room page: "Assistir no YouTube"', () => {
     expect(a).toContain('rel="noopener noreferrer"');
     expect(a).not.toContain('href=');
     expect(a).toMatch(/ hidden>$/);
-    expect(a).toContain('aria-label="Assistir no YouTube"');
-    expect(html).toContain('<span class="lg" id="ytLbl">Assistir no YouTube</span><span class="sm">YouTube</span>');
+    expect(a).toContain('aria-label="Regarder sur YouTube"');
+    expect(html).toContain('<span class="lg" id="ytLbl">Regarder sur YouTube</span><span class="sm">YouTube</span>');
     expect(html).toContain('applyYoutube(r.youtubeUrl)');
     expect(html).toContain("m.type==='update'");
     expect(html).toContain("track('ui',{action:'youtube'})");
-    expect(html).toContain('youtubeLabel(navigator.languages');
-    // In the toolbar, right after "Mostrar original" and before copy/settings: visible on a phone without the sheet.
-    expect(html.indexOf('id="yt"')).toBeGreaterThan(html.indexOf('id="orig"'));
+    // The label follows the interface language (fr by default), like the rest of the page.
+    expect(html).toContain('youtubeLabel([settings.ui])');
+    // In the toolbar, right after the quick modes and before copy/settings: visible on a phone without the sheet.
+    expect(html.indexOf('id="yt"')).toBeGreaterThan(html.indexOf('class="modes"'));
     expect(html.indexOf('id="yt"')).toBeLessThan(html.indexOf('id="copy"'));
   });
 });

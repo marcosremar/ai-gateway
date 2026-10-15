@@ -61,33 +61,43 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   `format` is additive, absent = WAV) to the viewers listening to that language only.
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
-  (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers "Ouvir dublagem"
+  (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
   only for those; without `dubLangs` (server dubbing off) it offers every translation language as before.
 
 ## Viewer pages
 
-- `https://<ROOMS_PUBLIC_HOST>/<CODE>` (Host header match) and `/live/<CODE>` on any host: the room page (pt-BR, one
+- `https://<ROOMS_PUBLIC_HOST>/<CODE>` (Host header match) and `/live/<CODE>` on any host: the room page (French by default, one
   self-contained HTML document, CSP with a per-response nonce, no CDN). Default language: the viewer's saved choice
   for that room, else the first browser language the room publishes (primary subtag: `en-US` → `en`), else the room's
   first target language; the original only when the room has no translations. The live line and the original under it
   are always one line each: the font shrinks down to 70 %, then only the end of the sentence is shown behind "…".
-  Dubbing ("Ouvir dublagem") plays clips with Web Audio: one AudioContext, back-to-back scheduling with 10 ms fades (no
+  Dubbing ("Écouter le doublage") plays clips with Web Audio: one AudioContext, back-to-back scheduling with 10 ms fades (no
   clicks), oldest pending clips dropped when more than 6 s is queued. While it is on, the live line switches to a line
   when its clip starts playing (a line without a clip within 4 s is shown anyway) and the delay indicator shows the
   voice delay ("voz 3,2 s" = delayMs + wait until the clip played). Indicator: neutral < 3 s, amber 3–6 s, red above.
   Mobile unlock, inside the tap: `navigator.audioSession.type = 'playback'` and a silent `<audio>` played (otherwise the
   iPhone ringer switch mutes Web Audio), the AudioContext created/resumed and a 1-sample buffer started. A context the
-  OS suspends (screen lock, call) is resumed by the next tap. The toggle shows its state under the label: desligada ·
-  carregando voz… · tocando · "toque aqui para ativar o som" · decode errors. `listen` is re-sent on every reconnect.
-- Every display setting is the viewer's own (gear → "Ajustes de exibição": bottom sheet on phones, popover from 768 px),
-  kept in that browser's localStorage (`ucast-settings`; the language per room in `ucast-lang-<CODE>`): language, mode
+  OS suspends (screen lock, call) is resumed by the next tap. The toggle shows its state under the label, in the
+  interface language: off · loading the voice · playing · "tap here to turn the sound on" · decode errors. `listen` is
+  re-sent on every reconnect.
+- Every display setting is the viewer's own (gear → "Réglages d'affichage": bottom sheet on phones, popover from 768 px),
+  kept in that browser's localStorage per app — `ucast-settings-<app>`, where `<app>` is the first 12 hex of sha256 of the
+  gateway key user that created the room (all activation keys of the desktop app share one), read once from the older
+  `ucast-settings` as a fallback; the language per room in `ucast-lang-<CODE>`: interface language (Français by
+  default, Português, English), subtitle language, mode
   (Tradução / Só transcrição / Bilíngue / Só texto completo), original under the translation, dubbing on/off + volume +
   "sincronizar legenda com a voz", text size A−/A+ (live line 20–56 px, transcript 14–24 px), theme (escuro / claro /
   automático), auto-scroll, timestamps, delay indicator. Only the languages the room publishes are offered.
-- When the room has a `youtubeUrl`, the header shows a compact "Assistir no YouTube" link (YouTube icon; icon only
-  under 480 px), opening in a new tab (`rel="noopener noreferrer"`); it appears, changes or disappears live with the
-  `update` message. The page re-checks the link (https + YouTube host) before using it as an `href`.
-- `https://<ROOMS_PUBLIC_HOST>/` and `/live`: "Digite o código da sessão". Unknown/expired code: a 404 page.
+- Quick modes on the toolbar (icons with a tooltip on hover/focus and on tap, the current one pressed; their own row
+  under 768 px): translated subtitles, dual subtitles (bilingual), transcript, full text. The dubbed voice stays on the
+  dubbing toggle next to the language.
+- Karaoke: the words already said are coloured one by one on the live line and the current transcript line. Lines carry
+  no word timestamps, so the times are an estimate spread by word length: over the real duration of the dubbed clip from
+  its start when the voice is on (sync), else over `speechMs` (15 characters/s of the original) from the line's arrival.
+- When the room has a `youtubeUrl`, the toolbar shows a compact "Regarder sur YouTube" link in the interface language
+  (YouTube icon; "YouTube" under 480 px), opening in a new tab (`rel="noopener noreferrer"`); it appears, changes or
+  disappears live with the `update` message. The page re-checks the link (https + YouTube host) before using it as an `href`.
+- `https://<ROOMS_PUBLIC_HOST>/` and `/live`: "Saisissez le code de la session". Unknown/expired code: a 404 page.
 - Other paths on the public host (e.g. `/health`, `/v1/…`) reach the gateway as usual.
 
 ## Viewer analytics events
@@ -107,12 +117,12 @@ events without `t` or without their key field are dropped; unknown or invalid fi
 
 | type | fields |
 |---|---|
-| `join` | `ua` chrome/safari/firefox/edge/samsung/opera/other · `os` ios/android/windows/macos/linux/chromeos/other · `device` mobile/tablet/desktop · `vw` `vh` `dpr` · `lang` (navigator.language) · `langs` (≤ 5) · `ref` qr/direct/link (`?src=qr` in the link → qr) · `returning` · `settings` (snapshot: lang, mode, showOrig, dub, volume, sync, size, theme, autoScroll, showTimes, showDelay) |
-| `setting` | `key` (lang, mode, showOrig, dub, volume, sync, size, theme, autoScroll, showTimes, showDelay) · `value` (valid for the key) · `from` toolbar/sheet/auto |
+| `join` | `ua` chrome/safari/firefox/edge/samsung/opera/other · `os` ios/android/windows/macos/linux/chromeos/other · `device` mobile/tablet/desktop · `vw` `vh` `dpr` · `lang` (navigator.language) · `langs` (≤ 5) · `ref` qr/direct/link (`?src=qr` in the link → qr) · `returning` · `settings` (snapshot: ui, lang, mode, showOrig, dub, volume, sync, size, theme, autoScroll, showTimes, showDelay) |
+| `setting` | `key` (ui, lang, mode, showOrig, dub, volume, sync, size, theme, autoScroll, showTimes, showDelay) · `value` (valid for the key) · `from` toolbar/sheet/auto |
 | `audio` | `action` play/pause/mute/unmute/gap/drop/decode_error/unsupported · `ms` · `n` |
 | `sample` | every 30 s while lines or clips flow: `textDelayMs` (median presenter `delayMs`), `voiceDelayMs`, `driftMs` (subtitle ↔ voice: render lateness after the clip start with sync on, clip start − text arrival with sync off), `lagMs` (arrival − line `ts`, includes clock skew), `queueMs`, `gaps` `gapMs` (silences 20 ms–3 s between consecutive clips), `drops`, `clips`, `lines`, `visible` |
 | `visibility` | `state` hidden/visible |
-| `ui` | `action` copy/sheet_open/sheet_close/more/reconnect/ended/youtube (tapped "Assistir no YouTube") |
+| `ui` | `action` copy/sheet_open/sheet_close/more/reconnect/ended/youtube (tapped the YouTube link) |
 | `leave` | `durationMs` `visibleMs` `reason` (sent with `sendBeacon` on `pagehide`) |
 
 The page sends batches every 15 s, at 100 queued events, when the tab is hidden and on `pagehide`.

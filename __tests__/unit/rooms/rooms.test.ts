@@ -311,21 +311,21 @@ describe('rooms viewer pages', () => {
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toMatch(/text\/html/);
       expect(res.headers['content-security-policy']).toMatch(/script-src 'nonce-/);
-      expect(res.body).toContain('lang="pt-BR"');
+      expect(res.body).toContain('lang="fr"');
       expect(res.body).toContain(`"${room.code}"`);
-      expect(res.body).toContain('Ouvir dublagem');
+      expect(res.body).toContain('Écouter le doublage');
       expect(res.body).not.toMatch(/<script[^>]+src=/);
     }
   });
 
-  it('serves the code entry page and a Portuguese 404; leaves other paths to the proxy', async () => {
+  it('serves the code entry page and a French 404; leaves other paths to the proxy', async () => {
     const root = await rawGet(gw, '/', 'live.ucast.me');
     expect(root.status).toBe(200);
-    expect(root.body).toContain('Digite o código da sessão');
-    expect((await rawGet(gw, '/live', 'example.com')).body).toContain('Digite o código da sessão');
+    expect(root.body).toContain('Saisissez le code de la session');
+    expect((await rawGet(gw, '/live', 'example.com')).body).toContain('Saisissez le code de la session');
     const missing = await rawGet(gw, '/ZZZZZZ', 'live.ucast.me');
     expect(missing.status).toBe(404);
-    expect(missing.body).toContain('Sessão não encontrada');
+    expect(missing.body).toContain('Session introuvable');
     expect((await rawGet(gw, '/live/nope', 'example.com')).status).toBe(404);
     // Not ours: the proxy answers.
     expect((await rawGet(gw, '/health', 'live.ucast.me')).body).toBe('{"status":"ok"}');
