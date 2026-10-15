@@ -35,8 +35,8 @@ class LocalDockerBackend implements DeploymentBackend {
     const createdAt = Date.now();
     const id = await docker('run', '-d', '--network', 'host', '-v', '/var/run/docker.sock:/var/run/docker.sock',
       '-v', `${script}:/init.sh:ro`, '--label', `aigw-ns=${input.namespace}`, '--label', `aigw-dep=${input.spec.name}`,
-      '--label', `aigw-created=${createdAt}`, 'aigw-machine', 'bash', '-c', 'bash /init.sh; sleep infinity');
-    return { id: id.slice(0, 12), deployment: input.spec.name, ip: '127.0.0.1', state: 'running', createdAt,
+      '--label', `aigw-created=${createdAt}`, 'aigw-machine', 'bash', '-c', 'AIGW_TLS_SAN=IP:127.0.0.1 bash /init.sh; sleep infinity');
+    return { id: id.slice(0, 12), deployment: input.spec.name, ip: '127.0.0.1', tls: true, state: 'running', createdAt,
       zone: input.spec.zone, machineType: input.spec.machineType, pricePerHour: 0 };
   }
 
@@ -45,7 +45,7 @@ class LocalDockerBackend implements DeploymentBackend {
     return out.split('\n').filter(Boolean).map((line) => {
       const row = JSON.parse(line) as { ID: string; State: string; Labels: string };
       const labels = Object.fromEntries(row.Labels.split(',').map(kv => kv.split('=') as [string, string]));
-      return { id: row.ID.slice(0, 12), deployment: labels['aigw-dep'], ip: '127.0.0.1',
+      return { id: row.ID.slice(0, 12), deployment: labels['aigw-dep'], ip: '127.0.0.1', tls: true,
         state: row.State === 'running' ? 'running' : 'stopped', createdAt: Number(labels['aigw-created']),
         zone: 'local', machineType: 'docker', pricePerHour: 0 };
     });
@@ -113,8 +113,9 @@ try {
   const warmText = await warm.text();
   check('warm POST with JSON body', warm.status === 200 && warmText.includes('POST /v1/audio/speech'), `HTTP ${warm.status} in ${warmMs} ms, replica ${warm.headers.get('x-aigw-replica')}`);
 
-  const noToken = await fetch('http://127.0.0.1:80/hello');
-  const badToken = await fetch('http://127.0.0.1:80/__aigw/ready', { headers: { 'X-Aigw-Token': 'guess' } });
+  const insecure = { tls: { rejectUnauthorized: false } } as RequestInit;
+  const noToken = await fetch('https://127.0.0.1:80/hello', insecure);
+  const badToken = await fetch('https://127.0.0.1:80/__aigw/ready', { ...insecure, headers: { 'X-Aigw-Token': 'guess' } });
   check('replica front refuses calls without the deployment token', noToken.status === 401 && badToken.status === 401,
     `no token ${noToken.status}, wrong token ${badToken.status}`);
 

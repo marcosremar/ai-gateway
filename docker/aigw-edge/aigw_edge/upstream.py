@@ -5,7 +5,14 @@ servers behind one front).
 
     transcribe(pcm16k)            POST /v1/audio/transcriptions  (multipart WAV + language + prompt)
     chat_stream(messages, cfg)    POST /v1/chat/completions      (stream: true, SSE deltas)
+    health_loop                   GET  /health                   (200 = ready; a JSON `llm_ctx` is the LLM's context per
+                                  slot, the budget of the session's history — text.fit_history)
     speak(text, cfg) → PCM        POST /v1/audio/speech          (stream: true, raw PCM s16le, or WAV whose header is read)
+                                  Both raise UpstreamError(stage llm | tts) when the body breaks, when nothing arrives for
+                                  EDGE_UPSTREAM_GAP_S (10), and chat_stream also on an SSE `{"error": …}` event.
+                                  speak applies the speech-stack's `tts_stream` protections: the engine-side cap
+                                  (`max_new_tokens`), a silent lead held and the sentence requested again once before
+                                  any sound, and a request id per attempt (`extra_params.request_id`).
     partials (optional)           WS   /ws/audio-stream          (the speech-stack's incremental STT)
     s2s (EDGE_UPSTREAM_MODE=s2s)  POST /v1/s2s                   (one call per turn, framed events + PCM)
 """
@@ -13,15 +20,23 @@ servers behind one front).
 import asyncio
 import io
 import json
+import math
 import struct
 import time
+import uuid
 import wave
 
 import aiohttp
+import numpy as np
 
+from . import opener
 from .config import Settings
 from .telemetry import child_traceparent
+from .text import DEFAULT_SLOT_CTX
 
+TTS_SILENCE_RMS = 300
+TTS_FRAMES_PER_SECOND = 12.5
+TTS_OVERLONG_RATIO = 0.9
 LANGUAGE_NAMES = {"pt": "Portuguese", "fr": "French", "en": "English", "es": "Spanish", "it": "Italian", "de": "German"}
 
 
@@ -35,10 +50,30 @@ def wav_bytes(pcm16: bytes, rate: int = 16000) -> bytes:
     return buf.getvalue()
 
 
+def silent(chunk: bytes) -> bool:
+    samples = np.frombuffer(chunk[: len(chunk) // 2 * 2], dtype=np.int16).astype(np.float64)
+    return not len(samples) or float(np.sqrt(np.mean(samples ** 2))) <= TTS_SILENCE_RMS
+
+
 class UpstreamError(RuntimeError):
     def __init__(self, stage: str, status: int | None, message: str):
         super().__init__(f"{stage} http {status}: {message}" if status else f"{stage}: {message}")
         self.stage, self.status = stage, status
+
+
+def health_llm_ctx(body: bytes) -> int | None:
+    try:
+        return int(json.loads(body)["llm_ctx"])
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def health_models(body: bytes) -> dict | None:
+    try:
+        models = json.loads(body)["models"]
+        return models if isinstance(models, dict) else None
+    except (ValueError, TypeError, KeyError):
+        return None
 
 
 def _headers(trace_id: str | None) -> dict:
@@ -50,6 +85,8 @@ class Upstream:
         self.s = settings
         self.http: aiohttp.ClientSession | None = None
         self.ready = False
+        self.llm_ctx = DEFAULT_SLOT_CTX
+        self.models: dict = {}
         self.voices: dict[str, dict] = {}
         self.voices_at = 0.0
 
@@ -61,11 +98,18 @@ class Upstream:
         if self.http:
             await self.http.close()
 
+    def _gap(self) -> aiohttp.ClientTimeout:
+        return aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=self.s.upstream_gap_s)
+
     async def health_loop(self) -> None:
         while True:
             try:
                 async with self.http.get(self.s.upstream + self.s.upstream_health, timeout=aiohttp.ClientTimeout(total=5)) as r:
                     self.ready = r.status == 200
+                    if self.ready:
+                        body = await r.read()
+                        self.llm_ctx = health_llm_ctx(body) or self.llm_ctx
+                        self.models = health_models(body) or self.models
             except Exception:  # noqa: BLE001 — not up yet
                 self.ready = False
             await asyncio.sleep(5 if self.ready else 2)
@@ -95,17 +139,26 @@ class Upstream:
                 "chat_template_kwargs": {"enable_thinking": False}}
         if cfg.get("response_format"):
             body["response_format"] = cfg["response_format"]
-        async with self.http.post(self.s.upstream + "/v1/chat/completions", json=body, headers=_headers(trace_id)) as r:
-            if r.status != 200:
-                raise UpstreamError("llm", r.status, (await r.text())[:200])
-            async for raw in r.content:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data: ") or line == "data: [DONE]":
-                    continue
-                choice = (json.loads(line[6:]).get("choices") or [{}])[0]
-                delta = (choice.get("delta") or {}).get("content")
-                if delta:
-                    yield delta
+        try:
+            async with self.http.post(self.s.upstream + "/v1/chat/completions", json=body, headers=_headers(trace_id),
+                                      timeout=self._gap()) as r:
+                if r.status != 200:
+                    raise UpstreamError("llm", r.status, (await r.text())[:200])
+                async for raw in r.content:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    try:
+                        event = json.loads(line[6:])
+                    except ValueError:
+                        continue
+                    if event.get("error"):
+                        raise UpstreamError("llm", None, str(event["error"].get("message") or event["error"])[:200])
+                    delta = ((event.get("choices") or [{}])[0].get("delta") or {}).get("content")
+                    if delta:
+                        yield delta
+        except aiohttp.ClientError as error:
+            raise UpstreamError("llm", None, repr(error)[:200]) from error
 
     # ── TTS ──────────────────────────────────────────────────────────────────
 
@@ -137,32 +190,82 @@ class Upstream:
             return {"voice": fallback}
         raise ValueError("voice must be a catalog id, {audio, text}, or come with fallback_voice")
 
-    async def speak(self, text: str, cfg: dict, fields: dict, trace_id: str | None = None):
-        """Yields raw PCM s16le mono at `tts_rate` (a WAV answer's header is parsed and its rate reported once as int)."""
+    async def speak(self, text: str, cfg: dict, fields: dict, trace_id: str | None = None, on_retry=None, on_overlong=None,
+                    trim_lead: bool = False):
+        """Yields raw PCM s16le mono at `tts_rate` (a WAV answer's header is parsed and its rate reported once as int).
+        Silence before the first audible chunk is held: when it outlasts `tts_max_lead_seconds` or the stream fails
+        before any sound, the sentence is requested again once (`on_retry(error)`); the second attempt drops its silent
+        lead, and its failure, or any failure after sound, raises. `error.request_id` is the id the engine logged.
+        A sentence that was heard and runs to its cap (the engine's `max_new_tokens` stop ends the stream as an error,
+        or more audio than the cap) is cut there, `on_overlong(request_id)` is called and the generator ends normally:
+        it is not asked again (part of it was heard) and nothing is held to detect it earlier."""
         lang = (cfg.get("language") or "pt")[:2]
+        limit = self.s.tts_max_seconds + self.s.tts_max_seconds_per_char * len(text)
         body = {"model": self.s.tts_model, "input": text, "language": LANGUAGE_NAMES.get(lang, "Portuguese"),
-                "response_format": "pcm", "stream": True, "stream_format": "audio", **fields}
-        async with self.http.post(self.s.upstream + "/v1/audio/speech", json=body, headers=_headers(trace_id)) as r:
-            if r.status != 200:
-                raise UpstreamError("tts", r.status, (await r.text())[:200])
-            head = b""
-            parsed = False
-            async for chunk in r.content.iter_any():
-                if not parsed:
-                    head += chunk
-                    if len(head) < 44:
-                        continue
-                    parsed = True
-                    if head[:4] == b"RIFF":
-                        yield struct.unpack("<I", head[24:28])[0]
-                        at = head.find(b"data")
-                        chunk = head[at + 8:] if at > 0 else head[44:]
-                    else:
-                        chunk = head
-                if chunk:
-                    yield chunk
-            if not parsed and head:
-                yield head
+                "response_format": "pcm", "stream": True, "stream_format": "audio",
+                "max_new_tokens": math.ceil(limit * TTS_FRAMES_PER_SECOND), **fields}
+        for attempt in (0, 1):
+            request_id = uuid.uuid4().hex[:12]
+            body["extra_params"] = {"request_id": request_id}
+            held: list[bytes] = []
+            sent, spoke, rate, head, parsed = 0, False, self.s.tts_rate, b"", False
+            try:
+                async with self.http.post(self.s.upstream + "/v1/audio/speech", json=body, headers=_headers(trace_id),
+                                          timeout=self._gap()) as r:
+                    if r.status != 200:
+                        raise UpstreamError("tts", r.status, (await r.text())[:200])
+                    async for chunk in r.content.iter_any():
+                        if not parsed:
+                            head += chunk
+                            if len(head) < 44:
+                                continue
+                            parsed = True
+                            if head[:4] == b"RIFF":
+                                rate = struct.unpack("<I", head[24:28])[0]
+                                yield rate
+                                at = head.find(b"data")
+                                chunk = head[at + 8:] if at > 0 else head[44:]
+                            else:
+                                chunk = head
+                        if not chunk:
+                            continue
+                        sent += len(chunk)
+                        over = sent - int(limit * rate) * 2
+                        if over > 0 and spoke:
+                            yield chunk[:len(chunk) - over]
+                            if on_overlong:
+                                on_overlong(request_id)
+                            return
+                        if over > 0:
+                            raise UpstreamError("tts", None, f"runaway: over {limit:.1f} s of audio for {len(text)} characters")
+                        if not spoke and silent(chunk):
+                            held.append(chunk)
+                            if not attempt and sent > self.s.tts_max_lead_seconds * rate * 2:
+                                raise UpstreamError("tts", None, "silent lead")
+                            continue
+                        spoke = True
+                        if trim_lead:
+                            chunk = opener.trim_lead(chunk[sum(map(len, held)) % 2:], rate)
+                        for item in (*([] if attempt or trim_lead else held), chunk):
+                            yield item
+                        held.clear()
+                    if not parsed and head:
+                        held.append(head)
+                for item in held:
+                    yield item
+                return
+            except (aiohttp.ClientError, UpstreamError) as error:
+                if spoke and sent >= TTS_OVERLONG_RATIO * limit * rate * 2:
+                    if on_overlong:
+                        on_overlong(request_id)
+                    return
+                if not isinstance(error, UpstreamError):
+                    error = UpstreamError("tts", None, repr(error)[:200])
+                error.request_id = request_id
+                if spoke or attempt:
+                    raise error
+                if on_retry:
+                    on_retry(error)
 
     # ── whole turn on the replica (/v1/s2s) ──────────────────────────────────
 

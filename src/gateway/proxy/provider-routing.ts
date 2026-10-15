@@ -13,6 +13,7 @@ import { CircuitBreakerRegistry, type CircuitBreaker } from '../providers/cloud/
 import { isTimeoutError, type CooldownTracker, type FallbackEntry } from '../providers/cloud/fallback';
 import { createLogger } from '../../logger';
 import { emitGatewayEvent } from '../../telemetry/emit';
+import { orderTargets, recordLinkOutcome } from './link-reorder';
 import type { ProxyResponse } from './types';
 
 const log = createLogger('provider-routing');
@@ -51,6 +52,8 @@ export interface RouteTarget<P> {
    * the request's `fallback_voice`.
    */
   voiceFor?: (request: { voice: string; fallbackVoice?: string }) => string;
+  group?: string;
+  chainKey?: string;
 }
 
 /** Codes (see `failureCode`) of targets left behind, keyed by the target object (two targets may share a provider). */
@@ -216,7 +219,7 @@ export function selectTargets<P extends Configurable>(
     }
     usable.push(target);
   }
-  return { usable, skipped, codes };
+  return { usable: orderTargets(stage, usable), skipped, codes };
 }
 
 /** Short, secret-free reason a provider was left behind (sent as `X-Gateway-Fallback`). */
@@ -311,7 +314,12 @@ export function describeFailure(providerId: string, err: unknown): string {
   return `${providerId} failed${status ? ` (HTTP ${status})` : ''}: ${redactSecrets(message).slice(0, 160)}`;
 }
 
-/** Statuses that mean "the request itself is wrong" — another provider would refuse it too, so pass them through. */
+/**
+ * Statuses that mean "this provider refuses this request" (400, 413, 415, 422…). The request was already validated by
+ * the gateway, so the refusal is the provider's — another one may take it (babelcast audit 2026-10-12, T4: MAI-Voice
+ * answered 400 to a Kokoro voice and the turn ended mute instead of going to Kokoro). The chain moves on without
+ * feeding any breaker; only when EVERY tried target refused it is the provider's 4xx returned to the client.
+ */
 export function isClientErrorStatus(status: number | null): boolean {
   return status !== null && status >= 400 && status < 500 && ![401, 402, 403, 404, 408, 429].includes(status);
 }
@@ -325,6 +333,7 @@ export interface RunTargetsOptions {
    * answer (or the 503) arrives before the client's own deadline.
    */
   budgetMs?: number;
+  hedgeCapMs?: number;
   /**
    * Same-target retries on a 5xx. Only deployment targets are retried: a replica restarting answers 502/503 for a
    * moment and comes back, while a cloud target is an aggregator that already retried upstream and has a next target
@@ -357,7 +366,7 @@ class AttemptError extends Error {
  * one OpenRouter model refused under ZDR must not open the breaker shared by every OpenRouter model). They never open the circuit nor start a cooldown, so
  * traffic goes back to the deployment as soon as its replica is ready.
  */
-const NEUTRAL_CODES = new Set(['cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation', 'saturated']);
+const NEUTRAL_CODES = new Set(['refused', 'cold', 'paused', 'voice_not_found', 'catalog_unavailable', 'policy', 'moderation', 'saturated', 'circuit_open']);
 
 /**
  * A cloud link that has not answered (first byte) after this long gets the next target started in parallel (runTargets
@@ -489,9 +498,9 @@ async function attempt<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: nu
 }
 
 export function retryAfterOf(err: unknown): number | undefined {
-  const headers = (err as { headers?: Record<string, string> } | null)?.headers;
+  const { headers, retryAfterSec } = (err ?? {}) as { headers?: Record<string, string>; retryAfterSec?: unknown };
   const raw = headers?.['retry-after'] ?? headers?.['Retry-After'];
-  const n = raw ? parseInt(raw, 10) : NaN;
+  const n = raw ? parseInt(raw, 10) : typeof retryAfterSec === 'number' ? retryAfterSec : NaN;
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
@@ -538,10 +547,14 @@ export function runTargets<P, T>(
   // A cloud link gets at most half of what is LEFT before its successor starts, so the last link keeps a real share
   // (prod 2026-10-07: deployment 4 s → slow OpenRouter link ran to the 8 s budget → the 3rd link was never tried).
   // Deployment links: their adaptive delay (`hedgeDelay`, from the controller's latency) else `hedgeAfterMs`.
-  const hedgeOf = (t: RouteTarget<P>): number => {
+  const ownHedgeOf = (t: RouteTarget<P>): number => {
     if (t.hedgeDelay) return t.hedgeDelay() ?? 0; // null = no hedge for this request
     if (t.hedgeAfterMs !== undefined) return t.hedgeAfterMs;
     return t.providerId.startsWith('deployment:') || !cloudHedge ? 0 : Math.max(1, Math.min(cloudHedge, (deadline - Date.now()) / 2));
+  };
+  const hedgeOf = (t: RouteTarget<P>): number => {
+    const own = ownHedgeOf(t);
+    return opts.hedgeCapMs ? Math.min(own || opts.hedgeCapMs, opts.hedgeCapMs) : own;
   };
 
   const startedAt = Date.now();
@@ -550,6 +563,9 @@ export function runTargets<P, T>(
     let running = 0;
     let done = false;
     let retryAfterSec: number | undefined;
+    // The last provider refusal (4xx) and whether every failure so far was one: then the client gets that 4xx, not a 503.
+    let refusal: unknown = null;
+    let onlyRefusals = true;
 
     const fail = (clientError?: unknown) => {
       if (done) return;
@@ -557,6 +573,7 @@ export function runTargets<P, T>(
       opts.signal?.removeEventListener('abort', onClientGone);
       for (const c of controllers) c.abort();
       if (clientError) { reject(clientError); return; }
+      if (refusal && onlyRefusals) { reject(refusal); return; }
       emitGatewayEvent('route.unavailable', {
         level: 'error', durMs: Date.now() - startedAt,
         attrs: { stage: opts.stage, targets: targets.length, codes: [...new Set(codes.values())].join(',').slice(0, 200) },
@@ -581,18 +598,21 @@ export function runTargets<P, T>(
       while (next < targets.length) {
         const i = next++;
         const t = targets[i];
-        if (Date.now() >= deadline) { failures.set(i, `${t.providerId}: not tried (stage time budget used up)`); codes.set(t, 'timeout'); continue; }
+        if (Date.now() >= deadline) { failures.set(i, `${t.providerId}: not tried (stage time budget used up)`); codes.set(t, 'timeout'); onlyRefusals = false; continue; }
         if (!ignoreRateLimit && isRateLimited(t, breakers)) {
+          onlyRefusals = false;
           failures.set(i, `${t.providerId}: rate limited, waiting for the upstream's Retry-After`);
           codes.set(t, 'rate_limited');
           continue;
         }
         if (cooldown && !ignoreCooldown && cooldown.isCoolingDown(entryOf(t))) {
+          onlyRefusals = false;
           failures.set(i, `${t.providerId}: cooling down after repeated failures`);
           codes.set(t, 'cooldown');
           continue;
         }
         if (!healthOf(t).allowRequest()) {
+          onlyRefusals = false;
           failures.set(i, `${t.providerId}: circuit open after repeated failures (retrying in <30 s)`);
           codes.set(t, 'circuit_open');
           continue;
@@ -604,6 +624,7 @@ export function runTargets<P, T>(
     };
 
     const run = (i: number, t: RouteTarget<P>, retry: number) => {
+      const attemptStart = Date.now();
       running++;
       const controller = new AbortController();
       controllers.add(controller);
@@ -638,6 +659,7 @@ export function runTargets<P, T>(
           // Targets still running lost a hedge race: they were slower than this one.
           for (const other of inFlight.values()) if (!codes.has(other)) codes.set(other, 'slow');
           breaker.recordSuccess();
+          recordLinkOutcome(opts.stage, t, Date.now() - attemptStart, true);
           cooldown?.recordSuccess(entryOf(t));
           emitRoute('route.served', opts.stage, t, { attempt: i, failedBefore: failures.size, raced: inFlight.size > 0 }, 'info', Date.now() - startedAt);
           // The other in-flight call lost the race: abort it (releases its replica lease / upstream request).
@@ -656,16 +678,19 @@ export function runTargets<P, T>(
             return;
           }
           const status = statusOf(err);
-          if (isClientErrorStatus(status)) { fail(err); return; }
-          const code = failureCode(err);
-          if (status === 429) {
-            const after = retryAfterOf(err);
-            retryAfterSec = after ?? retryAfterSec;
+          const refused = isClientErrorStatus(status);
+          if (refused) refusal = err; else onlyRefusals = false;
+          const code = refused ? 'refused' : failureCode(err);
+          const after = retryAfterOf(err);
+          if (after) retryAfterSec = Math.min(after, retryAfterSec ?? after);
+          if (refused) breaker.releaseProbe();
+          else if (status === 429) {
             // Per-model pause instead of the provider's breaker (see `rateLimitedUntil`).
             markRateLimited(t, after, breakers);
             breaker.releaseProbe();
           } else if (NEUTRAL_CODES.has(code)) breaker.releaseProbe();
           else {
+            recordLinkOutcome(opts.stage, t, Date.now() - attemptStart, false);
             const wasOpen = breaker.isOpen();
             breaker.recordFailure(err);
             if (!wasOpen && breaker.isOpen()) emitRoute('breaker.open', opts.stage, t, { code }, 'warn');

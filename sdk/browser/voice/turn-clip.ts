@@ -11,6 +11,7 @@ export interface TurnClip {
   start(track: MediaStreamTrack, now: number): void;
   /** Closes the clip and hands over the audio (or `null` if nothing was recorded). */
   finish(): Promise<Blob | null>;
+  snapshot(): Promise<Blob | null>;
   cancel(): void;
 }
 
@@ -39,6 +40,14 @@ export function createTurnClip(): TurnClip {
       return new Promise((resolve) => {
         current.onstop = () => resolve(mine.length ? new Blob(mine, { type: current.mimeType || mine[0]!.type }) : null);
         stopRecorder(current);
+      });
+    },
+    snapshot() {
+      const current = recorder, mine = chunks;
+      if (!current || current.state !== 'recording') return Promise.resolve(null);
+      return new Promise((resolve) => {
+        current.addEventListener('dataavailable', () => resolve(mine.length ? new Blob(mine, { type: current.mimeType || mine[0]!.type }) : null), { once: true });
+        current.requestData();
       });
     },
     cancel() {

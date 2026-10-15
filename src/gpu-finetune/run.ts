@@ -482,7 +482,7 @@ export class FinetuneGateway {
 
   /** Garante rclone instalado no pod (base image pode não ter). */
   private rcloneEnsure(): string {
-    return `{ command -v rclone >/dev/null 2>&1 || { apt-get update -q && apt-get install -y -q rclone || curl -fsSL https://rclone.org/install.sh | bash; }; }`;
+    return `{ command -v rclone >/dev/null 2>&1 || { apt-get update -q && apt-get install -y -q rclone; }; }`;
   }
 
   private buildR2RestoreStage(opts: ResolvedFinetune, r2: ReturnType<FinetuneGateway['buildR2Config']>): string {

@@ -27,6 +27,9 @@ def _ports(raw: str) -> tuple[int, int]:
     return lo_n, hi_n
 
 
+MAX_FIRST_AUDIO_DEADLINE_MS = 2500
+
+
 def derive_key(replica_token: str) -> bytes:
     """The shared contract: signing key = HMAC-SHA256(key=replicaToken, msg="aigw-rt-v1")."""
     return hmac.new(replica_token.encode(), b"aigw-rt-v1", hashlib.sha256).digest()
@@ -36,6 +39,7 @@ def derive_key(replica_token: str) -> bytes:
 class Settings:
     upstream: str = "http://127.0.0.1:8000"
     upstream_health: str = "/health"
+    upstream_gap_s: float = 10.0
     # stages = STT → LLM → TTS over the three OpenAI routes; s2s = the replica's own /v1/s2s (one call per turn).
     upstream_mode: str = "stages"
     bind: str = "127.0.0.1"
@@ -48,6 +52,7 @@ class Settings:
     udp_bind: str = ""
     public_ip: str = ""
     port_map: dict[int, int] = field(default_factory=dict)
+    turn_allocate_ms: int = 1500
     replica_id: str = ""
     deployment: str = ""
     key: bytes = b""
@@ -55,13 +60,23 @@ class Settings:
     max_turn_seconds: int = 60
     idle_seconds: int = 120
     vad_silence_ms: int = 700
-    stt_partials: bool = True
+    speculate_ms: int = 300
+    stt_partials: bool = False
     llm_model: str = "llm"
     tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
     tts_rate: int = 24000
     tts_parallel: int = 2
+    tts_max_seconds: float = 3.0
+    tts_max_seconds_per_char: float = 0.2
+    tts_max_lead_seconds: float = 1.0
+    first_audio_deadline_ms: int = 2000
+    first_audio_margin_ms: int = 300
+    shed_window_s: int = 30
     # Where the TTS server fetches a catalog voice's reference audio (speech-stack: its own /refs/<id>.wav).
     ref_base: str = ""
+
+    def public_port(self, port: int) -> int:
+        return self.port_map.get(port, port)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -80,6 +95,7 @@ class Settings:
         return cls(
             upstream=upstream,
             upstream_health=env.get("EDGE_UPSTREAM_HEALTH", "/health"),
+            upstream_gap_s=float(env.get("EDGE_UPSTREAM_GAP_S", "10")),
             upstream_mode=env.get("EDGE_UPSTREAM_MODE", "stages"),
             bind=env.get("RT_BIND", "127.0.0.1"),
             port=_int("RT_PORT", 8020),
@@ -89,6 +105,7 @@ class Settings:
             udp_bind=env.get("RT_UDP_BIND", ""),
             public_ip=env.get("RT_PUBLIC_IP") or env.get("PUBLIC_IPADDR", ""),
             port_map=port_map,
+            turn_allocate_ms=max(100, _int("RT_TURN_ALLOCATE_MS", 1500)),
             replica_id=env.get("AIGW_REPLICA_ID") or env.get("CONTAINER_ID", ""),
             deployment=env.get("AIGW_DEPLOYMENT", ""),
             key=key,
@@ -96,10 +113,17 @@ class Settings:
             max_turn_seconds=_int("RT_MAX_TURN_SECONDS", 60),
             idle_seconds=_int("RT_IDLE_SECONDS", 120),
             vad_silence_ms=_int("RT_VAD_SILENCE_MS", 700),
-            stt_partials=env.get("EDGE_STT_PARTIALS", "1") != "0",
+            speculate_ms=max(0, _int("EDGE_SPECULATE_MS", 300)),
+            stt_partials=env.get("EDGE_STT_PARTIALS") == "1",
             llm_model=env.get("EDGE_LLM_MODEL", "llm"),
             tts_model=env.get("EDGE_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
             tts_rate=_int("EDGE_TTS_RATE", 24000),
             tts_parallel=max(1, _int("EDGE_TTS_PARALLEL", 2)),
+            tts_max_seconds=float(env.get("EDGE_TTS_MAX_SECONDS", "3")),
+            tts_max_seconds_per_char=float(env.get("EDGE_TTS_MAX_SECONDS_PER_CHAR", "0.2")),
+            tts_max_lead_seconds=float(env.get("EDGE_TTS_MAX_LEAD_SECONDS", "1")),
+            first_audio_deadline_ms=min(MAX_FIRST_AUDIO_DEADLINE_MS, max(1, _int("RT_FIRST_AUDIO_DEADLINE_MS", 2000))),
+            first_audio_margin_ms=max(0, _int("RT_FIRST_AUDIO_MARGIN_MS", 300)),
+            shed_window_s=max(0, _int("RT_SHED_WINDOW_S", 30)),
             ref_base=env.get("EDGE_REF_BASE", upstream).rstrip("/"),
         )

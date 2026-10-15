@@ -17,6 +17,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { CustomRoute } from '../gateway/proxy/types';
+import { RateLimiter } from '../gateway/proxy/middleware/rate-limit';
 import { initOtlpFromEnv } from '../platform/observability/otlp-exporter';
 import { TELEMETRY_INGEST_PATH, TELEMETRY_LIMITS, TELEMETRY_LEVELS, TELEMETRY_REPLICA_HEADER, TELEMETRY_SOURCES } from './contract';
 import type { StoredTelemetryEvent, TelemetryLevel, TelemetrySource } from './contract';
@@ -92,13 +93,29 @@ export interface TelemetryRoutesOptions {
   now?: () => number;
 }
 
+export const AUTH_FAILURES_PER_IP_PER_MINUTE = 20;
+
 export function createTelemetryRoutes(opts: TelemetryRoutesOptions): { publicRoutes: CustomRoute[]; adminRoutes: CustomRoute[] } {
   const now = opts.now ?? Date.now;
+  const failures = new Map<string, { since: number; count: number }>();
+  const failedRecently = (ip: string): boolean => {
+    const f = failures.get(ip);
+    if (f && now() - f.since >= 60_000) failures.delete(ip);
+    return (failures.get(ip)?.count ?? 0) >= AUTH_FAILURES_PER_IP_PER_MINUTE;
+  };
+  const noteFailure = (ip: string): void => {
+    if (failures.size > 10_000) failures.clear();
+    const f = failures.get(ip) ?? { since: now(), count: 0 };
+    f.count++;
+    failures.set(ip, f);
+  };
 
   const ingestRoute: CustomRoute = {
     method: 'POST',
     path: TELEMETRY_INGEST_PATH,
     handler: async (req, res) => {
+      const ip = RateLimiter.clientIp(req);
+      if (failedRecently(ip)) return send(res, 429, { error: 'Too many failed telemetry credentials from this address' }, { 'Retry-After': '60' });
       const body = await readLimited(req, TELEMETRY_LIMITS.maxBatchBytes);
       if (!body) {
         opts.ingest.counters.tooLarge++;
@@ -117,6 +134,7 @@ export function createTelemetryRoutes(opts: TelemetryRoutesOptions): { publicRou
       }, opts.auth);
       if (isAuthFailure(principal)) {
         opts.ingest.counters.unauthorized++;
+        noteFailure(ip);
         return send(res, principal.status, { error: principal.error, code: principal.code });
       }
       const result = opts.ingest.ingest(principal, parsed, body.bytes);

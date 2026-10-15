@@ -1,0 +1,56 @@
+{
+  "name": "parle-speech-test",
+  "app": "parle",
+  "description": "parle: test copy of parle-speech (same image, same voices, same Vast ladder on hosts in an EU country only): one RTX 3090 at most €0.30/h (owner, 14/10/2026: one GPU per app, an RTX 3090), sharing the parle app's single GPU with parle-speech, which takes it back in the class window; started only on purpose (POST /v1/deployments/parle-speech/start by a capped client key), never by a request, no warm schedule, deleted after 10 min idle",
+  "profile": "speech-stack",
+  "image": {
+    "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
+  },
+  "spec": {
+    "testFor": "parle-speech",
+    "provider": "vast",
+    "machineType": "RTX 3090",
+    "maxEurPerHour": 0.3,
+    "placements": [],
+    "candidates": [
+      { "provider": "vast", "machineType": "RTX 3090", "maxEurPerHour": 0.3 }
+    ],
+    "euOnly": true,
+    "minCuda": 13,
+    "maxRttExcessMs": 20,
+    "minReplicas": 0,
+    "maxReplicas": 1,
+    "idleMinutes": 10,
+    "idleAction": "delete",
+    "scaling": { "mode": "fast", "budget": { "eurPerMonth": 40 } },
+    "maxEurPerHourByMachineType": {
+      "RTX 3090": 0.3, "RTX 4090": 0.85, "RTX 5090": 0.85, "L40S": 0.85, "H100 SXM": 2.5, "H100 PCIE": 2.5
+    },
+    "envByMachineType": {
+      "RTX 3090": {
+        "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400", "RT_MAX_SESSIONS": "2",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "RTX 4090": {
+        "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400", "RT_MAX_SESSIONS": "2",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "L40S": {
+        "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "12000", "RT_MAX_SESSIONS": "4", "LLM_SLOT_CTX": "4096",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "RTX 5090": {
+        "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "9600", "RT_MAX_SESSIONS": "4",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "H100 SXM": {
+        "STT_BATCH": "16", "LLM_PARALLEL": "32", "LLM_SLOT_CTX": "4096", "TTS_STAGE0_MB": "20000", "RT_MAX_SESSIONS": "8",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "H100 PCIE": {
+        "STT_BATCH": "16", "LLM_PARALLEL": "32", "LLM_SLOT_CTX": "4096", "TTS_STAGE0_MB": "20000", "RT_MAX_SESSIONS": "8",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+      }
+    }
+  }
+}

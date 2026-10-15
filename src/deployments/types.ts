@@ -13,6 +13,12 @@
  * GPU hosts, boot-script mode only). A spec may list `candidates` across both (placement ladder, `placements.ts`).
  */
 
+import type { BootReport } from './boot-events';
+import type { BootPhase, BootRecord, BootState } from './boot-track';
+import type { HostRecord } from './host-reputation';
+import type { StuckRetry } from './stuck-retry';
+import type { RttBaseline } from './rtt-gate';
+
 export type DeploymentProvider = 'scaleway' | 'vast';
 
 /**
@@ -67,6 +73,7 @@ export interface DeploymentSpec {
    * L40S need different STT/TTS concurrency) while an explicit `env` value still wins. Never returned by the API.
    */
   envByMachineType?: Record<string, Record<string, string>>;
+  maxEurPerHourByMachineType?: Record<string, number>;
   /** Credentials for a private registry. Never returned by the API. */
   registryAuth?: RegistryAuth;
   /** Path the replica answers 2xx on once the model is loaded. */
@@ -79,7 +86,8 @@ export interface DeploymentSpec {
    * zone, the type or both). Scaleway GPUs run out per zone and per type (2026-10-06: L4 and L40S in shortage in
    * fr-par-1, fr-par-2 and pl-waw-2, only L4 "scarce" in pl-waw-2), so one fixed placement leaves the deployment
    * without a replica while another zone still has one. Every entry still obeys `maxEurPerHour`. An exposed
-   * deployment keeps its zone (its reserved IP lives there): only `machineType` may change.
+   * deployment keeps its zone (its reserved IP lives there): only `machineType` may change. An entry with `provider`
+   * runs there, with its own `machineType`, `maxEurPerHour` and `maxReplicas` (the most that provider may hold).
    */
   placements?: Placement[];
   /** Scaleway OS image id; default: GPU OS image for GPU types, Ubuntu for CPU types. */
@@ -100,13 +108,19 @@ export interface DeploymentSpec {
   autoscale?: AutoscaleSpec;
   /** Warm-up windows: keep N replicas up on a schedule (a class at 9:00), whatever the load. */
   warmSchedule?: WarmScheduleEntry[];
+  reserveQuota?: QuotaReservation;
+  testFor?: string;
+  scaling?: ScalingSpec;
   /** With no request for this long the deployment scales down to `minReplicas` (0 = scale to zero). */
   idleMinutes: number;
   /** A replica not ready after this long is replaced. */
   bootTimeoutMinutes: number;
   /** Extra replicas (above the idle base) are removed only after load stayed low this long. */
   scaleDownDelaySeconds: number;
-  /** How long an invoke waits for a replica during a cold start before answering 503 + Retry-After. */
+  /**
+   * How long an invoke waits for a replica during a cold start before answering 503 + Retry-After. The gateway caps the
+   * wait at DEPLOYMENTS_MAX_WAIT_SECONDS (default 240): the platform in front cuts a request with no bytes at 5 min.
+   */
   coldStartWaitSeconds: number;
   /** Refuse to create a replica whose catalog price is above this (EUR/h). */
   maxEurPerHour: number;
@@ -114,6 +128,7 @@ export interface DeploymentSpec {
   maxHours: number;
   /** Paused deployments keep their spec but run no replicas and refuse invokes. */
   paused: boolean;
+  autoRetryStuckBoot?: boolean;
   /**
    * Reached from the internet on these ports, not only through the gateway (WebRTC, TLS with its own certificate):
    * a reserved IP that outlives the replicas (DNS keeps pointing at it), a firewall that opens only these ports plus
@@ -121,11 +136,13 @@ export interface DeploymentSpec {
    * (boot-script mode) serves its health on `127.0.0.1:<port>`.
    */
   exposure?: { ports: ExposedPort[] };
+  fileUrls?: Record<string, FileUrl>;
   /**
    * Realtime voice on this replica (docs/realtime-edge.md): the generic `aigw-edge` sidecar runs next to the model
    * container (`docker run --network host`, same on any GPU and any model image), terminates WebRTC (UDP `udpPorts`)
    * and the gateway-relayed WebSocket behind the token-gated nginx (`/__aigw/rt/*`), and calls the model over
-   * 127.0.0.1. Scaleway only for now (Vast runs one container per host: no sidecar).
+   * 127.0.0.1. On Vast (one container per host: no sidecar) the edge runs as a process of that container and each UDP
+   * port is mapped on its own (`vastReplicaInit`, `realtime-ports.ts`).
    */
   realtime?: RealtimeSpec;
   /**
@@ -137,13 +154,19 @@ export interface DeploymentSpec {
   candidates?: PlacementCandidate[];
   /** ISO country the users are in (latency preference); default `DEFAULT_NEAR` (placements.ts). */
   near?: string;
+  minCpuCores?: number;
+  minRamGb?: number;
+  vm?: boolean;
   /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
   allowFar?: boolean;
+  euOnly?: boolean;
   /**
    * Vast: a freshly rented host whose measured RTT from the gateway (median, ms) is above this is released as
-   * `too-far` and avoided 24 h (`rtt-gate.ts`). Default `DEFAULT_MAX_RTT_MS` (35, measured from NL).
+   * `too-far` and avoided 24 h (`rtt-gate.ts`). With a baseline (see `maxRttExcessMs`) it is an optional upper bound;
+   * without one it is the whole rule, default `DEFAULT_MAX_RTT_MS` (35, measured from NL).
    */
   maxRttMs?: number;
+  maxRttExcessMs?: number;
   /**
    * Vast: lowest CUDA version the host driver must support (`cuda_max_good`), for the image's own CUDA. A driver older
    * than the image's runtime fails at the first CUDA call (error 804, "forward compatibility"): vllm/vllm-omni v0.28 is
@@ -152,6 +175,8 @@ export interface DeploymentSpec {
    */
   minCuda?: number;
 }
+
+export interface FileUrl { url: string; sha256: string }
 
 /** One exposed port, or the range `port`..`to` (e.g. a TURN relay range). */
 export interface ExposedPort { protocol: 'tcp' | 'udp'; port: number; to?: number }
@@ -164,10 +189,13 @@ export interface RealtimeSpec {
   edgeImage?: string;
   /** UDP range for WebRTC media, opened in the replica's firewall. Default `DEFAULT_RT_UDP_PORTS`. */
   udpPorts?: [number, number];
+  /** Edge settings written to the sidecar's env (`EDGE_TUNING_KEYS` in spec.ts); the keys the gateway sets itself win. */
+  env?: Record<string, string>;
+  requireWebrtc?: boolean;
 }
 
 /** An alternative placement of a replica (see `DeploymentSpec.placements`). */
-export interface Placement { zone?: string; machineType?: string }
+export interface Placement { provider?: DeploymentProvider; zone?: string; machineType?: string; maxEurPerHour?: number; maxReplicas?: number; image?: string }
 
 /** Reserved IP and firewall of an exposed deployment (`exposure`), kept across replicas. */
 export interface DeploymentNetwork { zone: string; ipId: string; ip: string; groupId: string }
@@ -184,8 +212,10 @@ export interface Profile {
 /** Durable per-deployment state besides the spec. */
 export interface DeploymentRecord {
   spec: DeploymentSpec;
-  /** Shared secret the replica's front proxy requires (`X-Aigw-Token`). */
+  /** Deployment secret, never sent to a machine: each replica's `X-Aigw-Token` is derived from it and the machine's `tokenKey`. */
   replicaToken: string;
+  /** Replicas made before a secret rotation keep the secret their token came from: tokenKey (or `id:<machine>`) → secret. */
+  secretPins?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
   lastRequestAt: number | null;
@@ -197,10 +227,14 @@ export interface DeploymentRecord {
   network?: DeploymentNetwork;
   /** Client warm window (`POST /v1/deployments/:name/warm`): keep `replicas` up until `until` (ms). */
   warm?: { replicas: number; until: number };
+  gpuType?: { machineType: string; by: string; at: number };
+  hold?: ScalingHold;
+  spend?: { month: string; eur: number; at: number };
+  measured?: Record<string, MeasuredTimes>;
 }
 
 /**
- * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default UTC; an `end`
+ * One window of the warm-up schedule: from `start` to `end` (`HH:MM`, local to `timeZone`, default Europe/Paris; an `end`
  * before `start` runs past midnight) on `days` (0 = Sunday; absent = every day), keep at least `minReplicas` up.
  */
 export interface WarmScheduleEntry {
@@ -209,6 +243,19 @@ export interface WarmScheduleEntry {
   end: string;
   timeZone?: string;
   minReplicas: number;
+}
+
+export interface QuotaReservation {
+  quota: number;
+  windows: WarmScheduleEntry[];
+}
+
+export interface ReservationView {
+  holder: string;
+  machineType: string;
+  quota: number;
+  windows: WarmScheduleEntry[];
+  active: { replicas: number; until: string } | null;
 }
 
 /** Pressure-based autoscaling knobs (`autoscale.ts`); every one optional, defaults in `AUTOSCALE_DEFAULTS`. */
@@ -220,6 +267,40 @@ export interface AutoscaleSpec {
   errorRate?: number;
   maxInflightFactor?: number;
   drainSeconds?: number;
+}
+
+export type ScalingMode = 'economy' | 'balanced' | 'fast';
+
+export interface ScalingSpec {
+  target?: { p50Ms?: number; p95Ms?: number };
+  budget?: { eurPerHour?: number; eurPerMonth?: number; maxReplicas?: number };
+  mode: ScalingMode;
+}
+
+export interface ScalingHold { replicas: number; until: number }
+
+export interface MeasuredTimes { boot: number[]; resume: number[] }
+
+export interface CapacityTime { seconds: number; source: 'default' | 'measured'; samples: number }
+
+export interface CapacityEntry {
+  machineType: string;
+  image: string;
+  ceiling: { sessions: number; source: 'default' | 'configured' | 'measured'; samples: number };
+  boot: CapacityTime;
+  resume: CapacityTime;
+  confident: boolean;
+  missing: string[];
+}
+
+export interface CapacityView {
+  deployment: string;
+  mode: ScalingMode | null;
+  target: ScalingSpec['target'] | null;
+  budget: (NonNullable<ScalingSpec['budget']> & { month: string; spentEur: number; exhausted: boolean }) | null;
+  hold: { replicas: number; until: string } | null;
+  capacity: CapacityEntry[];
+  reservations: ReservationView[];
 }
 
 export type ReplicaPhase = 'booting' | 'ready' | 'unhealthy' | 'halted';
@@ -239,12 +320,21 @@ export interface ReplicaMachine {
   provider?: DeploymentProvider;
   /** When the provider takes the host back (Vast rental end, ms); absent when it never does (`expiry.ts`). */
   expiresAt?: number | null;
+  placementNote?: string;
+  tokenKey?: string;
+  tls?: boolean;
+  /** The provider reports that this machine's boot cannot succeed (e.g. the image does not exist). */
+  bootError?: string;
+  providerStatus?: string;
+  providerMessage?: string;
 }
 
 export interface CreateReplicaInput {
   spec: DeploymentSpec;
   replicaToken: string;
+  tokenKey?: string;
   cloudInit: string;
+  bootReport?: BootReport;
   namespace: string;
   /** user_data keys → bytes (boot-script `files`). */
   files?: Record<string, Uint8Array>;
@@ -263,6 +353,7 @@ export interface DeploymentBackend {
   createReplica(input: CreateReplicaInput): Promise<ReplicaMachine>;
   /** Every replica of every deployment of this namespace. Must throw (not return []) when the provider fails. */
   listReplicas(namespace: string): Promise<ReplicaMachine[]>;
+  listForeign?(namespace: string): Promise<Array<ReplicaMachine & { namespace: string }>>;
   /** `reason` is the planner's (`boot-timeout`, `scale-down`, …): a backend may learn from it (Vast avoids bad hosts). */
   releaseReplica(machine: ReplicaMachine, reason?: string): Promise<void>;
   /** Exposed deployments: reserve the IP and create the firewall (`known` is reused when it still exists). */
@@ -278,8 +369,12 @@ export interface DeploymentBackend {
    * catalog price check (`hourlyPrice` means nothing per zone there).
    */
   readonly marketPriced?: boolean;
+  readonly gpuOff?: string | null;
   /** RTT (median ms) from the gateway to the replica's front, null when no sample came back (the RTT gate). */
   measureRtt?(machine: ReplicaMachine): Promise<number | null>;
+  measureBaselineRtt?(near: string): Promise<RttBaseline | null>;
+  recordRtt?(machine: ReplicaMachine, rttMs: number, baselineMs?: number | null): void;
+  noteHost?(machine: ReplicaMachine, note: HostNote): void;
   /** Price + stock of types in zones, for ranking `candidates` (Scaleway). Absent: candidates are ranked without it. */
   catalog?(zones: string[]): Promise<CatalogEntry[]>;
   /**
@@ -288,6 +383,46 @@ export interface DeploymentBackend {
    * any other registry.
    */
   registryAuthFor?(image: string): RegistryAuth | null;
+  /** Read-only: the market offers a create would try for this spec, best first (Vast). */
+  previewOffers?(spec: DeploymentSpec): Promise<OfferPreview[]>;
+  offersReport?(spec: DeploymentSpec): Promise<OffersReport>;
+  creditIssue?(): CreditIssue | null;
+  containerLogs?(machine: ReplicaMachine, tail: number): Promise<string>;
+}
+
+export interface CreditIssue { provider: DeploymentProvider; message: string; balanceUsd: number | null; floorUsd: number; since: number; at: number }
+
+export interface HostNote { rttMs?: number; baselineMs?: number | null; bootMs?: number; udp?: 'ok' | 'blocked' }
+
+export interface SkippedOffer { offerId: number; machineId: number | null; location: string | null; usdPerHour: number; reason: string }
+
+export interface OffersReport { offers: OfferPreview[]; skipped: SkippedOffer[]; hosts: HostRecord[] }
+
+export interface OfferPreview {
+  rank: number;
+  wouldTry: boolean;
+  offerId: number;
+  machineId: number | null;
+  location: string | null;
+  distanceKm: number;
+  usdPerHour: number;
+  effectiveUsdPerHour: number;
+  reliability: number;
+  inetDownMbps: number;
+  inetUpMbps: number | null;
+  cudaMax: number | null;
+  directPorts: number | null;
+  gpu: string | null;
+  knownRttMs: number | null;
+  host?: HostRecord | null;
+  gateVerdict?: 'pass' | 'too-far' | null;
+}
+
+export interface OffersPreview {
+  offers: OfferPreview[];
+  skipped: SkippedOffer[];
+  hosts: HostRecord[];
+  gate: { near: string; rule: 'relative' | 'absolute'; anchor: string | null; baselineMs: number | null; maxRttExcessMs: number; maxRttMs: number | null };
 }
 
 export interface CatalogEntry { zone: string; machineType: string; hourlyPrice: number | null; availability: string | null }
@@ -307,19 +442,34 @@ export interface ReplicaProbe {
   check?(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult>;
 }
 
+export interface PendingNetworkRelease {
+  deployment: string;
+  network: DeploymentNetwork;
+  since: number;
+  attempts: number;
+  lastAttemptAt: number | null;
+  lastError: string | null;
+}
+
 export interface DeploymentStore {
-  load(): Promise<{ deployments: DeploymentRecord[]; profiles: Profile[] }>;
+  load(): Promise<{ deployments: DeploymentRecord[]; profiles: Profile[]; networkReleases?: PendingNetworkRelease[] }>;
   saveDeployment(record: DeploymentRecord): Promise<void>;
-  deleteDeployment(name: string): Promise<void>;
+  deleteDeployment(name: string, release?: PendingNetworkRelease): Promise<void>;
+  deleteNetworkRelease(ipId: string): Promise<void>;
   saveProfile(profile: Profile): Promise<void>;
   deleteProfile(name: string): Promise<void>;
+  settled?(): Promise<void>;
+  readonly fresh?: boolean;
+  readonly writeError?: string | null;
 }
 
 export interface ReplicaView {
   id: string;
   phase: ReplicaPhase;
   ip: string | null;
+  tls?: boolean;
   providerState: string;
+  provider: DeploymentProvider;
   zone: string;
   machineType: string;
   pricePerHour: number | null;
@@ -329,15 +479,28 @@ export interface ReplicaView {
   busy: boolean;
   /** Being drained before a scale-in: no new request; released once empty or after `autoscale.drainSeconds`. */
   draining: boolean;
+  stagesOut: string[];
   /** Measured RTT from the gateway (RTT gate, Vast); null when not measured. */
   rttMs: number | null;
-  /** Minutes until the provider takes the host back (Vast); null when it never does. */
+  rttBaselineMs: number | null;
+  udp: 'ok' | 'blocked' | null;
+  /** Minutes until the provider takes the host back (Vast contract end, not a shutdown); null when it never does. */
+  hostEndsInMinutes: number | null;
+  /** @deprecated the old name of `hostEndsInMinutes`, kept for clients that still read it. */
   expiresInMinutes: number | null;
+}
+
+export interface GpuTypeView {
+  current: string;
+  default: string;
+  choices: Array<{ machineType: string; maxEurPerHour: number }>;
+  setBy: string | null;
+  setAt: string | null;
 }
 
 export interface DeploymentView {
   name: string;
-  spec: Omit<DeploymentSpec, 'env' | 'envByMachineType' | 'registryAuth' | 'bootScript' | 'files'> & {
+  spec: Omit<DeploymentSpec, 'env' | 'envByMachineType' | 'registryAuth' | 'bootScript' | 'files' | 'fileUrls'> & {
     envKeys: string[]; privateRegistry: boolean; bootScript: boolean; fileKeys: string[];
   };
   status: 'paused' | 'scaled-to-zero' | 'warming' | 'ready' | 'degraded';
@@ -361,4 +524,18 @@ export interface DeploymentView {
   };
   /** Client warm window in force (`POST …/warm`), or null. */
   warm: { replicas: number; until: string } | null;
+  realtime: { active: number; capacity: number; refusedSessions: number; scalingOut: boolean } | null;
+  sessions: number;
+  hold: { replicas: number; until: string } | null;
+  pinned: { idleMinutes: number | null; parked: boolean } | null;
+  gpuType: GpuTypeView | null;
+  boot: {
+    active: Array<Omit<BootState, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
+    past: Array<Omit<BootRecord, 'phases'> & { phases: Array<{ phase: BootPhase; at: number; ms: number }> }>;
+    retryAt: number | null;
+    expectedBootSeconds: number | null;
+    retries?: StuckRetry[];
+    retriesExhausted?: boolean;
+  };
+  warnings: string[];
 }

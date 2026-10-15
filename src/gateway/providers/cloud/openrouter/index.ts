@@ -45,6 +45,7 @@ export const openrouterTTS = new OpenAICompatTTSProvider({
   defaultFormat: 'mp3',
   allowedFormats: ['mp3', 'pcm'],
   passthroughVoices: true,
+  pcmAsWavRate: 24_000,
 });
 
 export { openrouterImage, OpenRouterImageProvider } from './openrouter-image';

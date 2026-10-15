@@ -7,18 +7,26 @@ One learner's realtime session, independent of the transport (WebRTC or WebSocke
 
 Barge-in: learner speech (server VAD) or `interrupt` while a turn is thinking or speaking cancels the LLM/TTS calls,
 drops the queued audio and emits `interrupted`. History (`messages`) grows by one user + one assistant message per turn
-(the assistant part is what was generated before an interruption); `config_update{messages}` appends to it.
+(the assistant part is what was generated before an interruption); `config_update{messages}` appends to it. Before
+each LLM call the history is cut to the LLM's context per slot (`text.fit_history`: the system prompt, system messages
+and the newest turns stay; the oldest whole user/assistant turns go, DROP_PAIRS at a time so the prompt prefix the LLM
+has cached stays the same between cuts). When the LLM still refuses the turn (HTTP 400, "context size") it is asked
+once more with half the room, before any sound.
 """
 
 import asyncio
+import collections
 import time
 
 import numpy as np
 
-from .config import Settings
+from . import opener
+from .config import MAX_FIRST_AUDIO_DEADLINE_MS, Settings
 from .hallucination import filter_transcript
-from .text import JsonField, cut
+from .intercept import match_rule
+from .text import JsonField, cut, fit_history
 from .telemetry import new_trace_id, telemetry
+from .token import TokenError, verify_update
 from .upstream import Upstream, UpstreamError
 from .vad import FRAME_SAMPLES, EnergyVad, load_silero
 
@@ -26,6 +34,18 @@ OUT_RATE = 24000
 OUT_FRAME_BYTES = OUT_RATE // 50 * 2  # 20 ms of PCM16 mono at 24 kHz
 PRE_ROLL_FRAMES = 15  # 300 ms kept before the VAD opened a turn (its first syllable is quieter than the gate)
 MIN_TURN_BYTES = int(0.3 * 16000) * 2
+OUT_BYTES_PER_MS = OUT_RATE * 2 // 1000
+PACING_FRAMES = 100
+recent_first_audio: collections.deque = collections.deque(maxlen=512)
+CLIENT_CONFIG_KEYS = ("messages", "opener")
+SIGNED_CONFIG_KEYS = ("system", "voice", "fallback_voice", "max_tokens", "temperature", "stt_prompt", "user_template", "opener",
+                      "first_audio_deadline_ms", "intercepts", "reply_guard")
+CLIENT_ROLES = ("user", "assistant")
+
+
+def first_audio_max(window_s: float) -> int | None:
+    since = time.monotonic() - window_s
+    return max((ms for at, ms in recent_first_audio if at >= since), default=None)
 
 
 def resample_pcm16(pcm: bytes, src: int, dst: int) -> bytes:
@@ -37,6 +57,16 @@ def resample_pcm16(pcm: bytes, src: int, dst: int) -> bytes:
     return np.clip(y, -32768, 32767).astype(np.int16).tobytes()
 
 
+def ms_between(start: float | None, end: float) -> int | None:
+    return round((end - start) * 1000) if start else None
+
+
+def ttfa_from_speech(metrics: dict, key: str = "ttfa_ms") -> int | None:
+    if metrics["endpoint_ms"] is None or metrics[key] is None:
+        return None
+    return metrics["endpoint_ms"] + metrics[key]
+
+
 class AudioOut:
     """PCM16 24 kHz waiting to be played; the transport pulls 20 ms frames at real time."""
 
@@ -44,6 +74,27 @@ class AudioOut:
         self.buf = bytearray()
         self.drained = asyncio.Event()
         self.drained.set()
+        self.marked: float | None = None
+        self.pulled: float | None = None
+        self.lates: list[float] = []
+
+    def mark(self) -> None:
+        self.marked, self.pulled, self.lates = time.monotonic(), None, []
+
+    def sent(self, late_s: float) -> None:
+        if self.pulled is not None and len(self.lates) < PACING_FRAMES:
+            self.lates.append(late_s * 1000)
+
+    def pacing(self) -> dict:
+        if self.pulled is None:
+            return {}
+        pull = (self.pulled - self.marked) * 1000
+        if not self.lates:
+            return {"out_first_pull_ms": round(pull, 1)}
+        late = sorted(self.lates)
+        return {"out_first_pull_ms": round(pull, 1), "rtp_first_sent_ms": round(pull + self.lates[0], 1),
+                "rtp_late_p50_ms": round(late[len(late) // 2], 1), "rtp_late_p95_ms": round(late[int(len(late) * 0.95)], 1),
+                "rtp_late_max_ms": round(late[-1], 1)}
 
     def push(self, pcm: bytes) -> None:
         if pcm:
@@ -58,11 +109,31 @@ class AudioOut:
         if not self.buf:
             self.drained.set()
             return None
+        if self.marked is not None and self.pulled is None:
+            self.pulled = time.monotonic()
         chunk = bytes(self.buf[:size])
         del self.buf[:size]
         if not self.buf:
             self.drained.set()
         return chunk + b"\0" * (size - len(chunk))
+
+
+class Uplink:
+    def __init__(self):
+        self.lost_ms = self.recovered_ms = self.packets = self.fec = self.red = 0
+
+    def count(self, lost_ms: int, recovered_ms: int, redundancy: int | None) -> None:
+        self.lost_ms += lost_ms
+        self.recovered_ms += recovered_ms
+        if redundancy is not None:
+            self.packets += 1
+            self.fec += redundancy == 1
+            self.red += redundancy == 2
+
+    def metrics(self) -> dict:
+        pct = lambda n: round(100 * n / self.packets) if self.packets else None  # noqa: E731
+        return {"uplink_lost_ms": self.lost_ms, "uplink_recovered_ms": self.recovered_ms, "uplink_fec_pct": pct(self.fec),
+                "uplink_red_pct": pct(self.red)}
 
 
 class Session:
@@ -80,6 +151,10 @@ class Session:
         self.last_input = time.monotonic()
         self.turn_buf = bytearray()
         self.turn_start: int | None = None  # byte offset in turn_buf where speech began (server VAD)
+        self.last_speech_at: float | None = None
+        speculate_frames = settings.speculate_ms // 20
+        self.speculate_frames = speculate_frames if speculate_frames < self.vad.silence_frames else 0
+        self.confirmed: asyncio.Future | None = None
         self.pending = np.zeros(0, dtype=np.float32)
         self.turn_task: asyncio.Task | None = None
         self.partials = None
@@ -88,10 +163,37 @@ class Session:
         self.closed = False
         self.turns = 0
         self.turn_id: str | None = None
+        self.uplink = Uplink()
         self.outcome = "ok"
+        self.last_opener = -1
+        self.signed_opener = self.cfg.get("opener")
+        self.refused_updates = 0
+        self.update_seq = 0
+        self.turn_messages: dict[str, list[dict]] = {}
+        self._warm_openers()
 
     def tel(self, event: str, **kw) -> None:
         telemetry.emit(event, trace_id=self.trace_id, session_id=self.sid, **kw)
+
+    def deadline_ms(self) -> int:
+        asked = self.cfg.get("first_audio_deadline_ms")
+        asked = asked if isinstance(asked, int) and asked > 0 else self.s.first_audio_deadline_ms
+        return min(asked, MAX_FIRST_AUDIO_DEADLINE_MS)
+
+    def _warm_openers(self) -> None:
+        cfg = dict(self.cfg)
+
+        async def synth(line: str) -> bytes:
+            fields = await self.up.voice_fields(cfg)
+            rate, pcm = self.s.tts_rate, bytearray()
+            async for chunk in self.up.speak(line, cfg, fields, self.trace_id):
+                if isinstance(chunk, int):
+                    rate = chunk
+                else:
+                    pcm += chunk
+            return opener.trim_lead(resample_pcm16(bytes(pcm), rate, OUT_RATE), OUT_RATE)
+
+        opener.warm(cfg, synth)
 
     # ── input ────────────────────────────────────────────────────────────────
 
@@ -106,7 +208,13 @@ class Session:
         self.pending = np.concatenate([self.pending, samples])
         while len(self.pending) >= FRAME_SAMPLES:
             frame, self.pending = self.pending[:FRAME_SAMPLES], self.pending[FRAME_SAMPLES:]
-            self._on_vad(self.vad.push(frame))
+            change = self.vad.push(frame)
+            if self.vad.speaking and not self.vad.quiet_run:
+                self.last_speech_at = time.monotonic()
+                self._discard_speculation()
+            elif self.vad.speaking and self.vad.quiet_run == self.speculate_frames:
+                self._speculate()
+            self._on_vad(change)
         max_bytes = self.s.max_turn_seconds * 16000 * 2
         if self.turn_start is not None and len(self.turn_buf) - self.turn_start >= max_bytes:
             self.end_turn(reason="max_turn")
@@ -143,30 +251,149 @@ class Session:
         elif kind == "end_turn":
             self.end_turn(reason="client")
         elif kind == "config_update":
-            if isinstance(msg.get("messages"), list):
-                # Appended to the history (docs/realtime.md): the SDK replays a broken session's turns into the new one.
-                self.messages += [m for m in msg["messages"] if isinstance(m, dict) and "role" in m and "content" in m]
-            for key in ("system", "voice", "fallback_voice", "max_tokens", "temperature", "stt_prompt", "user_template"):
-                if key in msg:
-                    self.cfg[key] = msg[key]
+            self._client_update(msg)
         elif kind == "ping":
             self.emit({"type": "pong", "t": msg.get("t")})
         else:
             self.emit({"type": "error", "code": "bad_message", "message": f"unknown type {kind!r}"})
 
+    def _refuse_update(self, why: str) -> None:
+        self.refused_updates += 1
+        self.tel("edge.config.refused", level="warn", keys=why[:120], count=self.refused_updates)
+        self.emit({"type": "error", "code": "forbidden",
+                   "message": f"config_update refused ({why[:120]}): the signed session config is authoritative"})
+
+    def _signed_update(self, signed: str) -> None:
+        try:
+            self.update_seq, update = verify_update(signed, self.s.key, self.sid, self.update_seq)
+        except TokenError as error:
+            self._refuse_update(f"signed: {error.reason}")
+            return
+        self._discard_speculation()
+        dropped = self.turn_messages.pop(str(update.get("drop_turn")), [])
+        self.messages = [m for m in self.messages if not any(m is gone for gone in dropped)]
+        if isinstance(update.get("messages"), list):
+            self.messages = [m for m in update["messages"] if isinstance(m, dict) and isinstance(m.get("content"), str)
+                             and m.get("role") in (*CLIENT_ROLES, "system")]
+            self.turn_messages.clear()
+        self.cfg.update({key: update[key] for key in SIGNED_CONFIG_KEYS if key in update})
+        self.signed_opener = update.get("opener", self.signed_opener)
+        self._warm_openers()
+        self.tel("edge.config.signed", seq=self.update_seq, keys=",".join(sorted(update))[:120])
+        self.emit({"type": "config_applied", "n": self.update_seq})
+        if isinstance(update.get("say"), dict) and isinstance(update["say"].get("text"), str):
+            self.say(update["say"])
+
+    def say(self, line: dict) -> None:
+        before = self.turn_task if self.busy else None
+
+        async def run() -> None:
+            try:
+                if before is not None:
+                    await asyncio.wait([before])
+            except asyncio.CancelledError:
+                before.cancel()
+                raise
+            self.turns += 1
+            self.turn_id = turn_id = f"{self.sid}:{self.turns}"
+            metrics = self._new_metrics(None, time.monotonic())
+            try:
+                served = await self._say(line, time.monotonic(), metrics)
+                if line.get("history"):
+                    self.messages.append({"role": "assistant", "content": line["text"]})
+                self.emit({"type": "done", "said": True, "tag": line.get("tag"), "turnId": turn_id, "served": served})
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001
+                self.tel("edge.upstream.error", level="error", turn_id=turn_id, stage=getattr(error, "stage", "edge"),
+                         error=type(error).__name__)
+                self.emit({"type": "error", "code": "upstream", "message": repr(error)[:300]})
+                self.emit({"type": "done", "error": True, "turnId": turn_id})
+
+        self.turn_task = asyncio.create_task(run())
+
+    async def _say(self, line: dict, ended: float, metrics: dict) -> dict:
+        cfg = {**self.cfg, **{key: line[key] for key in ("voice", "fallback_voice") if line.get(key)}}
+        fields = await self.up.voice_fields(cfg)
+        rate = self.s.tts_rate
+        self.emit({"type": "say", "text": line["text"], "tag": line.get("tag"), "turnId": self.turn_id})
+
+        def overlong(request_id: str) -> None:
+            metrics["tts_overlong"] += 1
+            self.tel("edge.tts.overlong", level="warn", turn_id=self.turn_id, requestId=request_id)
+
+        async for chunk in self.up.speak(line["text"], cfg, fields, self.trace_id, None, overlong):
+            if isinstance(chunk, int):
+                rate = chunk
+                continue
+            if metrics["ttfa_ms"] is None:
+                self._first_reply_audio(ended, metrics)
+            self.out.push(resample_pcm16(chunk, rate, OUT_RATE))
+            await asyncio.sleep(0)
+        if metrics["ttfa_ms"] is not None:
+            await self.out.drained.wait()
+            self.emit({"type": "audio_end"})
+        return self._served(metrics, cfg, fields)
+
+    def _served(self, metrics: dict, cfg: dict, fields: dict) -> dict:
+        models = getattr(self.up, "models", None) or {}
+        voice = fields.get("voice") or (cfg["voice"] if isinstance(cfg.get("voice"), str) else "custom")
+        return {"stt": models.get("stt"), "llm": models.get("llm") or self.s.llm_model, "tts": models.get("tts") or self.s.tts_model,
+                "voice": voice, "opener": metrics["opener"] is not None, "transport": self.transport}
+
+    def _new_metrics(self, last_speech_at: float | None, ended: float) -> dict:
+        return {"ttfa_ms": None, "stt_ms": None, "llm_ttft_ms": None, "tts_ttfb_ms": None,
+                "endpoint_ms": ms_between(last_speech_at, ended), "first_sound_ms": None, "opener": None,
+                "deadline_ms": self.deadline_ms(), "deadline_missed": False, "tts_retries": 0, "tts_overlong": 0}
+
+    async def _intercept(self, rule: dict, ended: float, metrics: dict, tel) -> None:
+        self.outcome = "intercepted"
+        tag, action = str(rule.get("tag", ""))[:40], "say" if rule.get("action") == "say" else "drop"
+        tel("edge.turn.intercepted", tag=tag, action=action)
+        self.emit({"type": "intercept", "tag": tag, "action": action, "turnId": self.turn_id})
+        served = await self._say({**rule, "tag": tag}, ended, metrics) if action == "say" and isinstance(rule.get("text"), str) else None
+        self.emit(self._metrics_event(metrics))
+        self.emit({"type": "done", "intercepted": True, "tag": tag, "turnId": self.turn_id, **({"served": served} if served else {})})
+
+    def _client_update(self, msg: dict) -> None:
+        if isinstance(msg.get("signed"), str):
+            self._signed_update(msg["signed"])
+            return
+        messages = msg.get("messages", [])
+        refused = sorted(set(msg) - {"type", *CLIENT_CONFIG_KEYS})
+        if not isinstance(messages, list) or any(not isinstance(m, dict) or m.get("role") not in CLIENT_ROLES
+                                                  or not isinstance(m.get("content"), str) for m in messages):
+            refused.append("messages")
+        if refused:
+            self._refuse_update(", ".join(refused))
+            return
+        self._discard_speculation()
+        self.messages += messages
+        if "opener" in msg:
+            self.cfg["opener"] = None if msg["opener"] is None else self.signed_opener
+        self._warm_openers()
+
     def interrupt(self) -> None:
-        if self.busy:
+        if self.busy and self.confirmed is None:
             self.turn_task.cancel()
             self.out.clear()
             self.emit({"type": "interrupted"})
             self.emit({"type": "done", "interrupted": True, "turnId": self.turn_id})
 
     def end_turn(self, reason: str) -> None:
+        if reason == "client":
+            self.emit({"type": "turn_ack"})
+        if reason == "client" and self.server_vad and self.busy and self.confirmed is None and self.turn_start is None:
+            return
         start = self.turn_start if self.turn_start is not None else 0
         audio = bytes(self.turn_buf[start:])
         self.turn_buf.clear()
         self.turn_start = None
         self._partials_close()
+        if self.confirmed is not None:
+            self.confirmed.set_result(time.monotonic())
+            self.confirmed = None
+            return
         if self.busy:
             if reason == "client":
                 self.interrupt()  # a new client turn supersedes the old one
@@ -176,9 +403,26 @@ class Session:
             if reason == "client":
                 self.emit({"type": "done", "empty": True})
             return
+        self._start_turn(audio)
+
+    def _start_turn(self, audio: bytes, confirmed: asyncio.Future | None = None) -> None:
         self.turns += 1
         self.turn_id = f"{self.sid}:{self.turns}"
-        self.turn_task = asyncio.create_task(self._turn(audio, time.monotonic(), self.turn_id))
+        self.turn_task = asyncio.create_task(self._turn(audio, time.monotonic(), self.turn_id, self.last_speech_at, confirmed))
+
+    def _speculate(self) -> None:
+        if not self.server_vad or self.turn_start is None or self.busy or self.s.upstream_mode == "s2s":
+            return
+        self.confirmed = asyncio.get_running_loop().create_future()
+        self._start_turn(bytes(self.turn_buf[self.turn_start:]), self.confirmed)
+
+    def _discard_speculation(self) -> None:
+        if self.confirmed is None:
+            return
+        self.confirmed = None
+        self.turn_task.cancel()
+        self.turn_task = None
+        self.turns -= 1
 
     # ── partial transcripts (the replica's /ws/audio-stream, best effort) ─────
 
@@ -223,51 +467,153 @@ class Session:
 
     # ── one turn ─────────────────────────────────────────────────────────────
 
-    async def _turn(self, audio: bytes, ended: float, turn_id: str) -> None:
+    async def _turn(self, audio: bytes, ended: float, turn_id: str, last_speech_at: float | None = None,
+                    confirmed: asyncio.Future | None = None) -> None:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
-        metrics: dict = {"ttfa_ms": None, "stt_ms": None, "llm_ttft_ms": None, "tts_ttfb_ms": None}
+        metrics = self._new_metrics(last_speech_at, ended)
         user_text, spoken = None, []
+        thinking = deltas = None
         self.outcome = "ok"
         tel = lambda event, **kw: self.tel(event, turn_id=turn_id, **kw)  # noqa: E731
+        watch = asyncio.create_task(self._deadline(ended, last_speech_at, confirmed, metrics, turn_id, tel))
         try:
             if self.s.upstream_mode == "s2s":
                 user_text = await self._turn_s2s(audio, ended, metrics, spoken, tel)
                 return
             t = time.monotonic()
-            heard = await asyncio.wait_for(self.up.transcribe(audio, self.lang, self.cfg.get("stt_prompt"), self.trace_id), 60)
+            heard = await asyncio.wait_for(self._transcribe(audio, confirmed), 60)
             metrics["stt_ms"] = ms(t)
             text = (heard.get("text") or "").strip()
+            if confirmed is not None:
+                kept, codes = self._verdict(text, heard)
+                if kept and not codes and not match_rule(self.cfg.get("intercepts"), text):
+                    thinking, deltas = self._llm_ahead(text, metrics, tel)
+                ended = await asyncio.shield(confirmed)
+                metrics["endpoint_ms"] = ms_between(last_speech_at, ended)
             passed = self._guard(text, heard)
             tel("edge.stt.done", dur_ms=metrics["stt_ms"], filtered=self.outcome == "filtered", audioMs=len(audio) // 32,
                 chars=len(text))
             if not passed:
                 return
+            rule = match_rule(self.cfg.get("intercepts"), text)
+            if rule:
+                await self._intercept(rule, ended, metrics, tel)
+                return
             user_text = text
-            await self._answer(text, ended, metrics, spoken, tel)
+            await self._answer(text, ended, metrics, spoken, tel, deltas)
         except asyncio.CancelledError:
-            self.outcome = "interrupted"
+            self.outcome = "interrupted" if confirmed is None or confirmed.done() else "discarded"
             raise
         except Exception as error:  # noqa: BLE001 — the turn fails, the session stays
             self.outcome = "error"
             stage = error.stage if isinstance(error, UpstreamError) else ("timeout" if isinstance(error, asyncio.TimeoutError) else "edge")
             tel("edge.upstream.error", level="error", stage=stage, status=getattr(error, "status", None),
-                error=type(error).__name__)
+                error=type(error).__name__, requestId=getattr(error, "request_id", None))
             self.emit({"type": "error", "code": "upstream", "message": repr(error)[:300]})
             self.emit({"type": "done", "error": True, "turnId": turn_id})
         finally:
+            if metrics["opener"] is None or self.outcome in ("interrupted", "discarded"):
+                watch.cancel()
+            late = metrics["opener"] is not None or metrics["deadline_missed"]
+            first_audio = ttfa_from_speech(metrics) or metrics["ttfa_ms"] or (metrics["deadline_ms"] + 1 if late else None)
+            if first_audio is not None and self.outcome in ("ok", "error"):
+                recent_first_audio.append((time.monotonic(), first_audio))
             tel("edge.turn.done", dur_ms=ms(ended), outcome=self.outcome, ttfaMs=metrics["ttfa_ms"],
                 sttMs=metrics["stt_ms"], llmTtftMs=metrics["llm_ttft_ms"], ttsTtfbMs=metrics["tts_ttfb_ms"],
-                sentences=len(spoken), replyChars=sum(len(x) for x in spoken))
+                sentences=len(spoken), replyChars=sum(len(x) for x in spoken), endpointMs=metrics["endpoint_ms"],
+                ttfaFromSpeechMs=ttfa_from_speech(metrics), speculated=confirmed is not None,
+                firstSoundMs=metrics["first_sound_ms"], firstSoundFromSpeechMs=ttfa_from_speech(metrics, "first_sound_ms"),
+                opener=metrics["opener"], deadlineMs=metrics["deadline_ms"], deadlineMissed=metrics["deadline_missed"],
+                ttsRetries=metrics["tts_retries"], ttsOverlong=metrics["tts_overlong"])
+            if thinking is not None:
+                thinking.cancel()
             if user_text:
                 template = self.cfg.get("user_template") or ""
                 user = template.replace("{{transcript}}", user_text) if "{{transcript}}" in template else user_text
-                self.messages.append({"role": "user", "content": user})
-                if spoken:
-                    self.messages.append({"role": "assistant", "content": " ".join(spoken)})
+                added = [{"role": "user", "content": user}, *([{"role": "assistant", "content": " ".join(spoken)}] if spoken else [])]
+                self.messages += added
+                self.turn_messages[turn_id] = added
+
+    async def _deadline(self, ended: float, last_speech_at: float | None, confirmed: asyncio.Future | None,
+                        metrics: dict, turn_id: str, tel) -> None:
+        if confirmed is not None:
+            ended = await asyncio.shield(confirmed)
+        spoke = last_speech_at or ended
+        due = lambda ms: asyncio.sleep(max(0.0, spoke + ms / 1000 - time.monotonic()))  # noqa: E731
+        await due(metrics["deadline_ms"] - self.s.first_audio_margin_ms)
+        if metrics["first_sound_ms"] is not None or self.outcome == "intercepted":
+            return
+        picked = opener.pick(self.cfg, self.last_opener + 1)
+        if picked is None:
+            await due(metrics["deadline_ms"])
+            if metrics["first_sound_ms"] is None:
+                metrics["deadline_missed"] = True
+                tel("edge.turn.deadline_missed", level="warn", deadlineMs=metrics["deadline_ms"],
+                    opener=bool(opener.lines_of(self.cfg)))
+                self.emit({"type": "deadline_missed", "deadline_ms": metrics["deadline_ms"], "turnId": turn_id})
+            return
+        self.last_opener, line, pcm = picked
+        metrics["opener"] = line
+        metrics["first_sound_ms"] = round((time.monotonic() - ended) * 1000)
+        tel("edge.turn.opener", index=self.last_opener, chars=len(line), dur_ms=round((time.monotonic() - spoke) * 1000))
+        self.emit({"type": "opener", "state": "start", "text": line, "index": self.last_opener,
+                   "audio_ms": len(pcm) // OUT_BYTES_PER_MS, "turnId": turn_id})
+        self.out.push(pcm)
+        self.emit({"type": "opener", "state": "end", "index": self.last_opener, "turnId": turn_id})
+        await self.out.drained.wait()
+        if metrics["ttfa_ms"] is None:
+            self.emit({"type": "audio_end"})
+
+    def _first_reply_audio(self, ended: float, metrics: dict) -> None:
+        metrics["ttfa_ms"] = round((time.monotonic() - ended) * 1000) + len(self.out.buf) // OUT_BYTES_PER_MS
+        if metrics["first_sound_ms"] is None:
+            metrics["first_sound_ms"] = metrics["ttfa_ms"]
+        self.out.mark()
+        self.emit({"type": "audio_start"})
+
+    def _metrics_event(self, metrics: dict) -> dict:
+        uplink, self.uplink = self.uplink, Uplink()
+        return {"type": "metrics", **metrics, **self.out.pacing(), **uplink.metrics(),
+                "ttfa_from_speech_ms": ttfa_from_speech(metrics),
+                "first_sound_from_speech_ms": ttfa_from_speech(metrics, "first_sound_ms"), "turnId": self.turn_id}
+
+    async def _transcribe(self, audio: bytes, confirmed: asyncio.Future | None) -> dict:
+        try:
+            return await self.up.transcribe(audio, self.lang, self.cfg.get("stt_prompt"), self.trace_id)
+        except Exception:
+            if confirmed is not None:
+                await asyncio.shield(confirmed)
+            raise
+
+    def _llm_ahead(self, text: str, metrics: dict, tel) -> tuple:
+        read: asyncio.Queue = asyncio.Queue()
+
+        async def think() -> None:
+            t = time.monotonic()
+            try:
+                async for delta in self._chat(text):
+                    if metrics["llm_ttft_ms"] is None:
+                        metrics["llm_ttft_ms"] = ms_between(t, time.monotonic())
+                        tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])
+                    read.put_nowait(delta)
+                read.put_nowait(None)
+            except Exception as error:  # noqa: BLE001
+                read.put_nowait(error)
+
+        async def deltas():
+            while (delta := await read.get()) is not None:
+                if isinstance(delta, Exception):
+                    raise delta
+                yield delta
+
+        return asyncio.create_task(think()), deltas()
+
+    def _verdict(self, text: str, heard: dict) -> tuple[str, list[str]]:
+        return (text, []) if self.cfg.get("filter_hallucinations") is False else filter_transcript(text, self.lang, heard)
 
     def _guard(self, text: str, heard: dict) -> bool:
         """transcript / filtered / done{empty} — False when the turn stops here."""
-        kept, codes = (text, []) if self.cfg.get("filter_hallucinations") is False else filter_transcript(text, self.lang, heard)
+        kept, codes = self._verdict(text, heard)
         if codes:
             self.outcome = "filtered"
             self.tel("edge.stt.filtered", turn_id=self.turn_id, codes=",".join(codes), chars=len(text))
@@ -281,13 +627,57 @@ class Session:
             return False
         return True
 
-    def _messages_for(self, text: str) -> list[dict]:
+    def _messages_for(self, text: str, harder: bool = False, note: str | None = None) -> list[dict]:
         template = self.cfg.get("user_template") or ""
         user = template.replace("{{transcript}}", text) if "{{transcript}}" in template else text
-        system = [{"role": "system", "content": self.cfg["system"]}] if self.cfg.get("system") else []
-        return system + self.messages + [{"role": "user", "content": user}]
+        system = self.cfg.get("system")
+        kept = fit_history(system, self.messages, user, int(self.cfg.get("max_tokens", 160)), self.up.llm_ctx, harder)
+        if len(kept) < len(self.messages):
+            self.tel("edge.llm.history_trimmed", turn_id=self.turn_id, dropped=len(self.messages) - len(kept), kept=len(kept),
+                     harder=harder)
+            self.messages = kept
+        asked = f"{user}\n\n{note}" if note else user
+        return ([{"role": "system", "content": system}] if system else []) + kept + [{"role": "user", "content": asked}]
 
-    async def _answer(self, text: str, ended: float, metrics: dict, spoken: list[str], tel) -> None:
+    async def _guarded(self, text: str, source, metrics: dict, tel):
+        guard = self.cfg["reply_guard"]
+        deny = [{"contains": guard.get("deny")}]
+        held, passed = "", False
+        async for delta in source:
+            if passed:
+                yield delta
+                continue
+            held += delta
+            if cut(held, True, False)[0]:
+                if match_rule(deny, held):
+                    break
+                passed = True
+                yield held
+        if passed or not match_rule(deny, held):
+            if not passed and held:
+                yield held
+            return
+        await source.aclose()
+        metrics["reply_retries"] = 1
+        tel("edge.llm.reply_guard", level="warn", chars=len(held))
+        async for delta in self._chat(text, guard.get("note") if isinstance(guard.get("note"), str) else None):
+            yield delta
+
+    async def _chat(self, text: str, note: str | None = None):
+        try:
+            async for delta in self.up.chat_stream(self._messages_for(text, note=note), self.cfg, self.trace_id):
+                yield delta
+        except UpstreamError as error:
+            size = len(self.messages)
+            if error.status != 400 or "context size" not in str(error):
+                raise
+            messages = self._messages_for(text, harder=True, note=note)
+            if len(self.messages) == size:
+                raise
+            async for delta in self.up.chat_stream(messages, self.cfg, self.trace_id):
+                yield delta
+
+    async def _answer(self, text: str, ended: float, metrics: dict, spoken: list[str], tel, deltas=None) -> None:
         ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
         fields = await self.up.voice_fields(self.cfg)
         gate = asyncio.Semaphore(self.s.tts_parallel)
@@ -296,12 +686,20 @@ class Session:
         raw: list[str] = []
         synths: list[asyncio.Task] = []
 
-        async def synth(sentence: str, queue: asyncio.Queue) -> None:
+        def retried(error: UpstreamError) -> None:
+            metrics["tts_retries"] += 1
+            tel("edge.tts.retry", level="warn", requestId=error.request_id, reason=str(error)[:160])
+
+        def overlong(request_id: str) -> None:
+            metrics["tts_overlong"] += 1
+            tel("edge.tts.overlong", level="warn", requestId=request_id)
+
+        async def synth(sentence: str, queue: asyncio.Queue, first: bool) -> None:
             try:
                 async with gate:
                     t = time.monotonic()
                     rate = self.s.tts_rate
-                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id):
+                    async for chunk in self.up.speak(sentence, self.cfg, fields, self.trace_id, retried, overlong, first):
                         if isinstance(chunk, int):
                             rate = chunk
                             continue
@@ -317,59 +715,71 @@ class Session:
         def speak(sentence: str) -> None:
             spoken.append(sentence)
             queue: asyncio.Queue = asyncio.Queue()
-            synths.append(asyncio.create_task(synth(sentence, queue)))
-            sentences.put_nowait(queue)
+            synths.append(asyncio.create_task(synth(sentence, queue, not synths)))
+            sentences.put_nowait((sentence, queue))
 
         async def think() -> None:
-            t = time.monotonic()
-            buffer, first, closed = "", True, False
-            async for delta in self.up.chat_stream(self._messages_for(text), self.cfg, self.trace_id):
-                if metrics["llm_ttft_ms"] is None:
-                    metrics["llm_ttft_ms"] = ms(t)
-                    tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])
-                raw.append(delta)
-                if field is not None:
-                    if closed:
-                        continue
-                    delta, closed = field.push(delta)
-                if delta:
-                    self.emit({"type": "reply_delta", "text": delta})
-                buffer += delta
-                while True:
-                    chunk, buffer = cut(buffer, first, False)
-                    if not chunk:
-                        break
-                    first = False
+            try:
+                t = time.monotonic()
+                buffer, first, closed = "", True, False
+                source = deltas or self._chat(text)
+                guarded = isinstance(self.cfg.get("reply_guard"), dict) and field is None
+                async for delta in self._guarded(text, source, metrics, tel) if guarded else source:
+                    if metrics["llm_ttft_ms"] is None:
+                        metrics["llm_ttft_ms"] = ms(t)
+                        tel("edge.llm.first_token", dur_ms=metrics["llm_ttft_ms"])
+                    raw.append(delta)
+                    if field is not None:
+                        if closed:
+                            continue
+                        delta, closed = field.push(delta)
+                    if delta:
+                        self.emit({"type": "reply_delta", "text": delta})
+                    buffer += delta
+                    while True:
+                        chunk, buffer = cut(buffer, first, False)
+                        if not chunk:
+                            break
+                        first = False
+                        speak(chunk)
+                chunk, _ = cut(buffer, first, True)
+                if chunk:
                     speak(chunk)
-            chunk, _ = cut(buffer, first, True)
-            if chunk:
-                speak(chunk)
-            reply = {"type": "reply", "text": " ".join(spoken)}
-            if field is not None:
-                reply["raw"] = "".join(raw)
-            self.emit(reply)
-            sentences.put_nowait(None)
+                reply = {"type": "reply", "text": " ".join(spoken)}
+                if field is not None:
+                    reply["raw"] = "".join(raw)
+                self.emit(reply)
+            finally:
+                sentences.put_nowait(None)
 
         thinker = asyncio.create_task(think())
+        missing = 0
         try:
             while True:
-                queue = await sentences.get()
-                if queue is None:
+                item = await sentences.get()
+                if item is None:
                     break
+                sentence, queue = item
                 while (chunk := await queue.get()) is not None:
                     if isinstance(chunk, Exception):
-                        raise chunk
+                        if metrics["ttfa_ms"] is None:
+                            raise chunk
+                        missing += 1
+                        tel("edge.tts.sentence_failed", level="warn", chars=len(sentence), error=type(chunk).__name__,
+                            requestId=getattr(chunk, "request_id", None))
+                        self.emit({"type": "sentence_failed", "text": sentence, "message": repr(chunk)[:200]})
+                        continue
                     if metrics["ttfa_ms"] is None:
-                        metrics["ttfa_ms"] = ms(ended)
-                        self.emit({"type": "audio_start"})
+                        self._first_reply_audio(ended, metrics)
                     self.out.push(chunk)
                     await asyncio.sleep(0)
             await thinker
             if metrics["ttfa_ms"] is not None:
                 await self.out.drained.wait()
                 self.emit({"type": "audio_end"})
-            self.emit({"type": "metrics", **metrics, "turnId": self.turn_id})
-            self.emit({"type": "done", "turnId": self.turn_id})
+            self.emit(self._metrics_event(metrics))
+            self.emit({"type": "done", "turnId": self.turn_id, "served": self._served(metrics, self.cfg, fields),
+                       **({"missing_audio": missing} if missing else {})})
         finally:
             thinker.cancel()
             for task in synths:
@@ -378,14 +788,12 @@ class Session:
     async def _turn_s2s(self, audio: bytes, ended: float, metrics: dict, spoken: list[str], tel) -> str | None:
         """EDGE_UPSTREAM_MODE=s2s: the replica's own /v1/s2s answers the turn; the edge re-emits it in the realtime
         events and still applies the hallucination guard on the transcript (abandoning the call when it trips)."""
-        ms = lambda since: round((time.monotonic() - since) * 1000)  # noqa: E731
-        cfg = {**self.cfg, "messages": self.messages}
+        cfg = {**self.cfg, "messages": self.messages, "opener": None}
         heard_text = None
         async for kind, item in self.up.s2s(audio, cfg, self.trace_id):
             if kind == "A":
                 if metrics["ttfa_ms"] is None:
-                    metrics["ttfa_ms"] = ms(ended)
-                    self.emit({"type": "audio_start"})
+                    self._first_reply_audio(ended, metrics)
                 self.out.push(item)
                 continue
             kind_e = item.get("type")
@@ -397,6 +805,10 @@ class Session:
                     chars=len(heard_text))
                 if not passed:
                     return None
+                rule = match_rule(self.cfg.get("intercepts"), heard_text)
+                if rule:
+                    await self._intercept(rule, ended, metrics, tel)
+                    return None
             elif kind_e == "llm_first_token":
                 metrics["llm_ttft_ms"] = item.get("at_ms")
                 tel("edge.llm.first_token", dur_ms=item.get("at_ms"))
@@ -406,12 +818,14 @@ class Session:
             elif kind_e == "error":
                 raise RuntimeError(item.get("message", "s2s error"))
             elif kind_e == "done":
+                metrics["tts_retries"] = item.get("tts_retries", 0)
+                metrics["tts_overlong"] = item.get("tts_overlong", 0)
                 self.emit({"type": "reply", "text": item.get("reply", " ".join(spoken))})
         if metrics["ttfa_ms"] is not None:
             await self.out.drained.wait()
             self.emit({"type": "audio_end"})
-        self.emit({"type": "metrics", **metrics, "turnId": self.turn_id})
-        self.emit({"type": "done", "turnId": self.turn_id})
+        self.emit(self._metrics_event(metrics))
+        self.emit({"type": "done", "turnId": self.turn_id, "served": self._served(metrics, self.cfg, await self.up.voice_fields(self.cfg))})
         return heard_text
 
     async def close(self) -> None:

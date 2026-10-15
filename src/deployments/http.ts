@@ -6,13 +6,24 @@
  *   PATCH  /v1/deployments/:name               update an existing one (e.g. { minReplicas, maxReplicas })
  *   GET    /v1/deployments/:name               status + replicas
  *   DELETE /v1/deployments/:name               release every replica and forget the spec
- *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic)
+ *   GET    /v1/deployments/:name/capacity      session ceiling and measured boot / resume times per machine type
+ *   POST   /v1/deployments/:name/wake          start replicas now (pre-warm before traffic); a client key obeys its
+ *                                              policy: never with neverWake, not outside class without autoWakeOutsideClass;
+ *                                              a key with wakeDeployments: only those, outside class, as a start of startIdleMinutes
  *   POST   /v1/deployments/:name/park          done for now: scale to minReplicas at once (power off under idleAction stop)
+ *   POST   /v1/deployments/:name/start         a client key with canStartGpu: keep one GPU up for { minutes } (client-gpu.ts)
+ *   POST   /v1/deployments/:name/extend        the same key: { minutes } more on the GPU it started
  *   *      /v1/deployments/:name/invoke/<path> forwarded to a ready replica as /<path> (waits through cold start)
  *   GET    /v1/profiles                        list profiles (built-in + stored)
  *   PUT    /v1/profiles/:name                  create or replace a profile
  *   DELETE /v1/profiles/:name                  delete a stored profile
  *   GET    /v1/images                          the caller's app images plus other apps' `shared` ones (admin: all)
+ *   GET|PUT /v1/apps/:app/limits               the app's own daily budgets `{ dailyRequests?, dailyTokens? }` over the
+ *                                              gateway defaults (APP_DAILY_*); PUT is admin only, null = default
+ *   GET|PUT /v1/apps/:app/profile              what the app needs: `{ requiresGpu, gpuDeployments }` (apps.ts); PUT by an
+ *                                              admin, or by the app's own key naming only its own deployments
+ *   GET    /v1/apps/:app/status                GPU status of the app's profile: mode gpu | degraded | down, the probe of
+ *                                              each deployment, the cloud fallback in use (app-gpu-health.ts)
  *   GET    /v1/apps/:app/fallback              direct-fallback plan with provider keys (app-fallback.ts); the app's
  *                                              own key, or an admin key with `X-App: <app>`
  *   POST   /v1/apps/:app/stability-report      instability events buffered by the SDK while the gateway was down
@@ -23,24 +34,32 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { Readable } from 'stream';
 import { DeploymentController, DeploymentError } from './controller';
 import { PROBE_PORT, SpecError } from './spec';
 import { AppError, APP_ID_RE, type AppRegistry } from './apps';
+import type { AppDevices } from './app-devices';
 import type { AppFallbackService } from './app-fallback';
-import type { ClientStabilityLog } from './stability';
-import type { DeploymentSpec, ProbeResult, ReplicaMachine, ReplicaProbe } from './types';
+import type { AppGpuHealth } from './app-gpu-health';
+import { MAX_REPORTS_PER_MINUTE, type ClientStabilityLog } from './stability';
+import type { DeploymentSpec, ProbeResult, ProfileSpec, ReplicaMachine, ReplicaProbe } from './types';
+import type { ClientGpu } from './client-gpu';
+import { mayWakeNow, type GpuPolicy } from '../config/access-keys';
+import { classWindowOpen } from './autoscale';
 import { createLogger } from '../logger';
+import { replicaTls } from './replica-tls';
 
 const log = createLogger('deployments-http');
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { requestIdOf } from '../gateway/proxy/http-conventions';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
+import { noteStreamCut, type StreamCut } from '../telemetry/stream-cuts';
 
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
 const MAX_ADMIN_BODY = 16 * 1024 * 1024;
+const MAX_STABILITY_BODY = 512 * 1024;
 const INVOKE_TIMEOUT_MS = 15 * 60_000;
+export const INVOKE_IDLE_MS = 5 * 60_000;
 const HOP_BY_HOP = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding',
   'upgrade', 'authorization', 'content-length', 'x-aigw-token', 'x-aigw-wait', 'x-gateway-no-wake', 'x-forwarded-for', 'x-forwarded-host',
@@ -92,7 +111,9 @@ export class HttpReplicaProbe implements ReplicaProbe {
   async check(machine: ReplicaMachine, spec: DeploymentSpec, token: string): Promise<ProbeResult> {
     if (!machine.ip) return 'down';
     const headers = { 'X-Aigw-Token': token };
-    const get = (path: string) => this.fetchImpl(`${replicaBase(machine, !!spec.exposure)}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
+    const base = replicaBase(machine, !!spec.exposure);
+    const tls = replicaTls(base, token);
+    const get = (path: string) => this.fetchImpl(`${base}${path}`, { headers, signal: AbortSignal.timeout(this.timeoutMs), ...tls });
     const marker = await get('/__aigw/ready').catch(() => null);
     if (!marker?.ok) return 'down';
     const health = await get(spec.healthPath).catch(() => null);
@@ -101,9 +122,12 @@ export class HttpReplicaProbe implements ReplicaProbe {
   }
 }
 
-/** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`. */
-export function replicaBase(machine: ReplicaMachine, exposed = false): string {
-  return exposed && machine.ip && !machine.ip.includes(':') ? `http://${machine.ip}:${PROBE_PORT}` : `http://${machine.ip}`;
+/** `ip` may carry a port (local tests); real replicas listen on :80, exposed ones on `PROBE_PORT`; `tls` fronts (Vast) speak TLS. */
+export function replicaBase(machine: Pick<ReplicaMachine, 'ip' | 'tls'>, exposed = false): string {
+  const scheme = machine.tls ? 'https' : 'http';
+  if (!machine.ip || machine.ip.includes(':')) return `${scheme}://${machine.ip}`;
+  if (exposed) return `${scheme}://${machine.ip}:${PROBE_PORT}`;
+  return machine.tls ? `https://${machine.ip}:80` : `http://${machine.ip}`;
 }
 
 /**
@@ -143,6 +167,11 @@ export function replicaTarget(base: string, rest: string, query: string): URL | 
   return url.origin === origin && url.pathname.startsWith('/') ? url : null;
 }
 
+function withoutSecrets(spec: ProfileSpec): ProfileSpec {
+  const { env, envByMachineType, registryAuth, bootScript, files, fileUrls, ...rest } = spec as Record<string, unknown>;
+  return rest as ProfileSpec;
+}
+
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string | number> = {}): void {
   if (res.headersSent) { res.end(); return; }
   res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
@@ -160,8 +189,8 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const raw = await readBody(req, MAX_ADMIN_BODY);
+async function readJson(req: IncomingMessage, limit = MAX_ADMIN_BODY): Promise<Record<string, unknown>> {
+  const raw = await readBody(req, limit);
   if (!raw.length) return {};
   let parsed: unknown;
   try {
@@ -182,20 +211,28 @@ export interface DeploymentRoutesOptions {
   /** Mutations (PUT/PATCH/DELETE/wake, profiles) require this. Default: nobody (fail closed). */
   isAdmin?: (req: IncomingMessage) => boolean;
   fetchImpl?: typeof fetch;
+  invokeIdleMs?: number;
   /** Status of the declared deployments (`declared.ts`), listed as `declared` by `GET /v1/deployments`. */
   declaredStatus?: () => unknown;
   /** An app replaced its routes (`PUT /v1/apps/:app/routes`): re-mount the providers. */
   onRoutesChange?: () => void;
   /** Direct-fallback plans (`GET /v1/apps/:app/fallback`). Without it that path answers 404. */
   fallback?: AppFallbackService;
+  /** App GPU status (`/v1/apps/:app/status`). Without it that path answers 404. */
+  gpuHealth?: AppGpuHealth;
   /** SDK instability reports (`/v1/apps/:app/stability-report`). Without it those paths answer 404. */
   stability?: ClientStabilityLog;
+  devices?: AppDevices;
+  clientGpu?: ClientGpu;
+  keyOf?: (req: IncomingMessage) => { keyId: string; user: string; app: string; policy: GpuPolicy } | null;
+  log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
 export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
   const { controller } = opts;
   const isAdmin = opts.isAdmin ?? (() => false);
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const idleMs = opts.invokeIdleMs ?? (Number(process.env.INVOKE_IDLE_TIMEOUT_MS) || INVOKE_IDLE_MS);
 
   /**
    * The app this request acts for: `X-App` from an admin key, else the key's own user; null = admin acting globally.
@@ -231,20 +268,61 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       return send(res, 200, { apps: registry.list().filter(a => a.id === own) });
     }
     if (!mayUseApp(req, app)) return send(res, 403, { error: `this key cannot use app '${app}'` });
+    if (!sub && method === 'PATCH') {
+      const body = await readJson(req);
+      for (const key of Object.keys(body)) if (key !== 'requireDevice') throw new AppError(400, `unknown field '${key}'`);
+      return send(res, 200, { id: app, requireDevice: await registry.setRequireDevice(app, body.requireDevice) });
+    }
     if (!sub) {
       if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
       const account = registry.get(app);
       const deployments = controller.list().filter(d => d.app === app).map(d => ({ name: d.name, status: d.status, appImage: d.appImage }));
-      return send(res, 200, { id: app, createdAt: account?.createdAt ?? null, images: Object.values(account?.images ?? {}), deployments });
+      return send(res, 200, {
+        id: app, createdAt: account?.createdAt ?? null, requireDevice: account?.requireDevice ?? false,
+        images: Object.values(account?.images ?? {}), deployments,
+      });
+    }
+    if (sub === 'devices') {
+      if (!opts.devices) return send(res, 404, { error: 'app devices are not enabled on this gateway' });
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const out = await opts.devices.route(app, method, parts.slice(4), query, opts.userOf?.(req) ?? 'admin', () => readJson(req));
+      return send(res, out.status, out.body);
     }
     if (sub === 'routes' && !imageName) {
       if (method === 'GET') return send(res, 200, { app, routes: registry.get(app)?.routes ?? {} });
       if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
-      // An admin sets any route; the app's own key only reorders/re-aliases what it already has, plus its own deployments.
-      const routes = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? {}
-        : { restrictedTo: (deployment) => controller.get(deployment)?.app === app });
+      // An admin sets any route but to another app's deployment; the app's own key only reorders/re-aliases what it already has, plus its own deployments.
+      const appOf = (deployment: string) => controller.get(deployment)?.app ?? null;
+      const { routes, cloudFallbackAdded } = await registry.putRoutes(app, await readJson(req), isAdmin(req) ? { appOf }
+        : { appOf, restrictedTo: (deployment) => appOf(deployment) === app });
+      if (cloudFallbackAdded.length) opts.log?.('apps: cloud fallback appended to chains that had none', { app, added: cloudFallbackAdded });
       opts.onRoutesChange?.();
-      return send(res, 200, { app, routes });
+      return send(res, 200, { app, routes, ...(cloudFallbackAdded.length ? { cloudFallbackAdded } : {}) });
+    }
+    if (sub === 'limits' && !imageName) {
+      if (method === 'GET') return send(res, 200, { app, limits: registry.get(app)?.limits ?? {} });
+      if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
+      if (!isAdmin(req)) return send(res, 403, { error: 'only an admin key may set an app\'s limits' });
+      return send(res, 200, { app, limits: await registry.putLimits(app, await readJson(req)) });
+    }
+    if (sub === 'profile' && !imageName) {
+      if (method === 'GET') return send(res, 200, { app, profile: registry.get(app)?.profile ?? null });
+      if (method !== 'PUT') return send(res, 405, { error: 'method not allowed' });
+      const profile = await registry.putProfile(app, await readJson(req), isAdmin(req) ? {}
+        : { ownsDeployment: (deployment) => controller.get(deployment)?.app === app });
+      const warnings = profile.gpuDeployments.flatMap((name) => {
+        const view = controller.get(name);
+        if (!view) return [`'${name}' is not registered on this gateway`];
+        return view.spec.warmSchedule?.length ? [] : [`'${name}' has no warmSchedule: it is only up after a request wakes it`];
+      });
+      return send(res, 200, { app, profile, ...(warnings.length ? { warnings } : {}) });
+    }
+    if (sub === 'status' && !imageName) {
+      if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+      if (!opts.gpuHealth) return send(res, 404, { error: 'app status is not enabled on this gateway' });
+      const status = opts.gpuHealth.status(app);
+      return status ? send(res, 200, status, { 'Cache-Control': 'no-store' })
+        : send(res, 404, { error: `app '${app}' has no profile (PUT /v1/apps/${app}/profile)` });
     }
     if (sub === 'fallback' && !imageName) {
       if (method !== 'GET') return send(res, 405, { error: 'method not allowed' });
@@ -258,7 +336,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (sub === 'stability-report' && !imageName) {
       if (!opts.stability) return send(res, 404, { error: 'stability reports are not enabled on this gateway' });
       if (method === 'POST') {
-        const accepted = opts.stability.append(app, await readJson(req));
+        const accepted = opts.stability.append(app, await readJson(req, MAX_STABILITY_BODY));
+        if (accepted === null) return send(res, 429, { error: `at most ${MAX_REPORTS_PER_MINUTE} stability reports a minute per app` }, { 'Retry-After': '60' });
         return send(res, 200, { ok: true, accepted });
       }
       if (method === 'GET') {
@@ -276,6 +355,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (method === 'GET') {
       const image = registry.image(app, imageName);
       return image ? send(res, 200, image) : send(res, 404, { error: `app '${app}' has no image '${imageName}'` });
+    }
+    if ((method === 'PUT' || method === 'DELETE') && !isAdmin(req)) {
+      return send(res, 403, { error: 'saved app images run with the deployment\'s secrets: only an admin key may change them' });
     }
     if (method === 'PUT') {
       const { image, created } = await registry.putImage(app, imageName, await readJson(req));
@@ -302,7 +384,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     if (!replicaTarget('http://replica.invalid', rest, query)) return send(res, 400, { error: 'invoke path must be a plain relative path (no scheme, //, backslash or ./.. segments)' });
     const exclude = new Set<string>();
     // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves; none ready = 503 at once, nothing woken.
-    const noWake = noWakeActive();
+    const noWake = noWakeActive(name);
     for (let attempt = 0; attempt < 2; attempt++) {
       let lease;
       try {
@@ -320,7 +402,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           method,
           headers: { ...headers, ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
           body: body && body.length ? new Uint8Array(body) : undefined,
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS)]),
+          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(INVOKE_TIMEOUT_MS), ...(lease.signal ? [lease.signal] : [])]),
+          ...(replicaTls(target.href, lease.token)),
         });
       } catch (err) {
         // The client going away says nothing about the replica, and running out of time means busy: neither is a strike
@@ -328,7 +411,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         const timedOut = err instanceof Error && err.name === 'TimeoutError';
         lease.done(abort.signal.aborted ? 'cancelled' : timedOut ? 'timeout' : true);
         if (abort.signal.aborted) return;
-        exclude.add(lease.machine.id);
+        if ((controller.get(name)?.replicas.length ?? 0) > 1) exclude.add(lease.machine.id);
         if (attempt === 1) {
           log.warn({ deployment: name, error: err instanceof Error ? err.message : String(err) }, 'invoke: replica unreachable');
           throw new DeploymentError(502, 'replica unreachable');
@@ -342,21 +425,59 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
           if (!HOP_BY_HOP.has(k) && k !== 'content-encoding') out[k] = v;
         });
         res.writeHead(upstream.status, out);
-        if (upstream.body && method !== 'HEAD') {
-          await new Promise<void>((resolve, reject) => {
-            const stream = Readable.fromWeb(upstream.body as unknown as import('stream/web').ReadableStream);
-            stream.on('error', reject);
-            res.on('close', resolve);
-            stream.pipe(res);
-          });
-        } else {
+        const cut = upstream.body && method !== 'HEAD' ? await relay(upstream.body, res) : null;
+        if (!cut || abort.signal.aborted) {
           res.end();
+        } else {
+          res.destroy();
+          lease.done(cut === 'stalled' ? 'timeout' : true);
+          noteStreamCut({ deployment: name, replica: lease.machine.id, stage: 'invoke' }, cut, rest);
+          log.warn({ deployment: name, replica: lease.machine.id, path: rest, cut }, 'invoke: replica stream cut after the response started');
         }
       } finally {
-        lease.done(false);
+        lease.done(upstream.status >= 500 ? 'errored' : false);
       }
       return;
     }
+  }
+
+  async function relay(body: ReadableStream<Uint8Array>, res: ServerResponse): Promise<StreamCut | null> {
+    const reader = body.getReader();
+    try {
+      for (;;) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const idle = new Promise<'stalled'>((resolve) => { timer = setTimeout(() => resolve('stalled'), idleMs); });
+        const next = await Promise.race([reader.read().catch(() => 'truncated' as const), idle]).finally(() => clearTimeout(timer));
+        if (typeof next === 'string') return next;
+        if (next.done) return null;
+        if (!res.write(next.value)) await new Promise<void>((resolve) => { res.once('drain', resolve); res.once('close', resolve); });
+        if (res.destroyed) return null;
+      }
+    } finally {
+      void reader.cancel().catch(() => {});
+    }
+  }
+
+  function gpuClient(req: IncomingMessage, name: string) {
+    const key = opts.keyOf?.(req) ?? null;
+    if (!key?.policy.canStartGpu) {
+      throw new DeploymentError(403, 'this API key cannot manage deployments (a client key needs canStartGpu: ask an admin, PUT /v1/admin/access/keys/policy)');
+    }
+    if (controller.get(name)?.app !== key.app) throw new DeploymentError(403, `this API key cannot start or stop deployment '${name}' (not its app's)`);
+    return key;
+  }
+
+  /** A client key that may not start a GPU now (never, not this one, or not at this time) is refused; the fallback answers. */
+  function refuseWake(policy: GpuPolicy, name: string): void {
+    if (policy.neverWake) throw new DeploymentError(403, `this API key never wakes a GPU: '${name}' answers from a ready replica or the cloud fallback`);
+    const classOpen = classWindowOpen(controller.list(), Date.now());
+    if (mayWakeNow(policy, classOpen, controller.get(name))) return;
+    const own = policy.wakeDeployments;
+    if (own.length && !classOpen) {
+      throw new DeploymentError(403, `this API key wakes only its test deployments (${own.join(', ')}), not '${name}': it answers from a ready replica or the cloud fallback`);
+    }
+    if (own.length) throw new DeploymentError(403, `during a class window this API key cannot wake '${name}': the class GPUs are the students'`);
+    throw new DeploymentError(403, `outside the class window this API key cannot wake '${name}': the cloud fallback answers`);
   }
 
   async function route(req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<void> {
@@ -376,7 +497,10 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     }
 
     if (kind === 'profiles') {
-      if (!name && method === 'GET') return send(res, 200, { profiles: controller.listProfiles() });
+      if (!name && method === 'GET') {
+        const profiles = controller.listProfiles();
+        return send(res, 200, { profiles: isAdmin(req) ? profiles : profiles.map(p => (p.builtin ? p : { ...p, spec: withoutSecrets(p.spec) })) });
+      }
       if (name && !action && method === 'PUT') { admin(); return send(res, 200, await controller.putProfile(name, await readJson(req))); }
       if (name && !action && method === 'DELETE') {
         admin();
@@ -396,6 +520,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         return send(res, 200, {
           // An app key sees its own deployments' counts and bill, never the namespace's (QA 2026-10-07).
           namespace: controller.namespace, scope: filter ? 'app' : 'all', health: controller.health(own ?? undefined), deployments,
+          ...(own ? {} : { pendingNetworkReleases: controller.pendingNetworkReleases() }),
           ...(opts.declaredStatus && !own ? { declared: opts.declaredStatus() } : {}),
         });
       }
@@ -408,17 +533,53 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
         if (!own || controller.get(name)?.app !== own) return send(res, 403, { error: `this API key cannot invoke deployment '${name}'` });
       }
       // The proxy kills sockets idle for PROXY_TOTAL_TIMEOUT_MS (60 s). A request waiting through a cold start sends
-      // and receives nothing for minutes by design; its own bounds are coldStartWaitSeconds and INVOKE_TIMEOUT_MS.
+      // and receives nothing for minutes by design; its own bounds are coldStartWaitSeconds (capped by the gateway's
+      // maximum wait, DEPLOYMENTS_MAX_WAIT_SECONDS) and INVOKE_TIMEOUT_MS.
       req.socket?.setTimeout(0);
       const rest = parts.slice(4).join('/') + (path.endsWith('/') && parts.length > 4 ? '/' : '');
       return invoke(req, res, name, rest, query, method);
     }
-    if (action === 'wake' && method === 'POST') { admin(); return send(res, 202, controller.wake(name)); }
-    if (action === 'park' && method === 'POST') { admin(); return send(res, 202, await controller.park(name)); }
+    if ((action === 'start' || action === 'extend') && method === 'POST') {
+      if (!opts.clientGpu) return send(res, 404, { error: 'GPU start is not enabled on this gateway' });
+      const key = isAdmin(req) ? null : gpuClient(req, name);
+      if (key) refuseWake(key.policy, key.policy.gpuDailyEur !== null ? opts.clientGpu.testCopyOf(name)?.name ?? name : name);
+      const minutes = (await readJson(req)).minutes;
+      const starter = key ?? { keyId: `admin:${opts.userOf?.(req) ?? 'admin'}`, user: opts.userOf?.(req) ?? 'admin' };
+      const policy = key?.policy ?? { autoWake: true, autoWakeOutsideClass: true, canStartGpu: true, neverWake: false, countsAsUse: true, gpuDailyEur: null, startIdleMinutes: 10, wakeDeployments: [] };
+      return send(res, 202, await opts.clientGpu.start(starter, policy, name, minutes, action === 'extend'));
+    }
+    if (action === 'wake' && method === 'POST') {
+      if (!isAdmin(req)) {
+        const key = gpuClient(req, name);
+        refuseWake(key.policy, name);
+        if (key.policy.wakeDeployments.length && opts.clientGpu) {
+          return send(res, 202, await opts.clientGpu.start(key, key.policy, name, key.policy.startIdleMinutes));
+        }
+        if (key.policy.gpuDailyEur !== null) return send(res, 403, { error: `this key has a daily GPU cap: use POST /v1/deployments/${name}/start {"minutes": N}` });
+      }
+      return send(res, 202, controller.wake(name));
+    }
+    if (action === 'park' && method === 'POST') {
+      const key = isAdmin(req) ? null : gpuClient(req, name);
+      if (key) await opts.clientGpu?.forget(key.keyId, name);
+      return send(res, 202, await controller.park(name));
+    }
     if (action === 'warm' && method === 'POST') {
       admin();
       const body = await readJson(req);
       return send(res, 202, await controller.warm(name, body.replicas as number, body.untilMinutes as number));
+    }
+    if (action === 'capacity' && method === 'GET') {
+      const own = appOf(req);
+      const capacity = own && controller.get(name)?.app !== own ? null : controller.capacity(name);
+      return capacity ? send(res, 200, capacity) : send(res, 404, { error: `deployment '${name}' not found` });
+    }
+    if (action === 'offers' && method === 'GET') {
+      admin();
+      const params = new URLSearchParams(query.slice(1));
+      const cap = Number(params.get('maxEurPerHour'));
+      const preview = await controller.offers(name, params.get('machineType') ?? undefined, cap > 0 && cap <= 50 ? cap : undefined);
+      return preview ? send(res, 200, { deployment: name, ...preview }) : send(res, 404, { error: `deployment '${name}' has no vast placement` });
     }
     if (action) return send(res, 404, { error: `unknown action '${action}'` });
 

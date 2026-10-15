@@ -9,14 +9,15 @@
  *
  * Priority: the palco value WINS over the process environment (Railway variables) for every key except the few
  * that must stay with the host — `isEnvPinned`: the token and its aliases, PORT, NODE_ENV, GATEWAY_API_KEYS,
- * HOSTNAME, RAILWAY_* and every endpoint override (`isEndpointOverride`: *_URL, *_BASE, *_HOST, *_ENDPOINT); none of
- * them can be written through `PUT /v1/admin/keys` either. DEPLOYMENTS_NAMESPACE / DEPLOYMENTS_STATE_DIR /
- * DEPLOYMENTS_ENABLED and the provider API bases (`*_BASE`, `*_BASE_URL`) are never taken from the palco at all. So rotating a key on the palco is enough; a stale Railway variable
+ * HOSTNAME and RAILWAY_*; none of them can be written through `PUT /v1/admin/keys` either. DEPLOYMENTS_NAMESPACE /
+ * DEPLOYMENTS_STATE_DIR / DEPLOYMENTS_ENABLED and every endpoint override (`isEndpointOverride`: *_URL, *_BASE,
+ * *_HOST, *_ENDPOINT) are never taken from the palco at all. So rotating a key on the palco is enough; a stale Railway variable
  * cannot shadow it. Keys are re-read periodically and on demand by `KeyManager` (src/config/key-manager.ts).
  *
  * The same token is also accepted as a Bearer by the gateway itself (see `serve.ts`), so agents call it with the
  * credential they already carry.
  */
+import { readStateFile, writeStateFile } from '../deployments/state-file';
 
 /** Aliases that carry the same secret on Railway / Cloud Agent (kept in sync with parle `principalSandboxToken`). */
 export const TOKEN_ALIASES = ['SANDBOX_TOKEN', 'PALCO_PROXY_TOKEN', 'PALCO_PROXY', 'VMOS_PROXY_TOKEN', 'VMOS_PROXY', 'PROXY_TOKEN'] as const;
@@ -29,7 +30,9 @@ const ENV_PINNED = new Set<string>([...TOKEN_ALIASES, 'PORT', 'NODE_ENV', 'GATEW
  * A local gateway that got the real SCW_SECRET_KEY from the palco plus the production namespace would release the
  * production replicas as orphans (controller reconcile) — the namespace must come from the host only.
  */
-const HOST_ONLY = new Set<string>(['DEPLOYMENTS_NAMESPACE', 'DEPLOYMENTS_STATE_DIR', 'DEPLOYMENTS_ENABLED']);
+const HOST_ONLY = new Set<string>([
+  'DEPLOYMENTS_NAMESPACE', 'DEPLOYMENTS_STATE_DIR', 'DEPLOYMENTS_ENABLED', 'ACCEPT_SANDBOX_TOKEN_AS_KEY', 'SANDBOX_TOKEN_ADMIN', 'SANDBOX_TOKEN_APP',
+]);
 
 /**
  * Names that point the gateway at a host: `OPENROUTER_API_BASE`, `GROQ_API_BASE`, `WHISPER_SERVER_BASE_URL`,
@@ -75,21 +78,24 @@ export const SANDBOX_USER = 'sandbox';
 /**
  * The gateway's client keys: `GATEWAY_API_KEYS` ("key:user", comma-separated). The SANDBOX_TOKEN (and its aliases)
  * is the dev API's master key — the gateway uses it only to FETCH its own provider keys from the palco — and is NOT a
- * client key nor an admin (owner decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` restores the old behaviour
- * (accepted as user `sandbox`, admin) for the transition, until the parle build that sends its own AI_GATEWAY_KEY ships.
+ * client key nor an admin (owner decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` accepts it as user `sandbox`
+ * for the transition: a client like any other (never an admin, no-wake). Only two roles exist (owner, 10/10/2026):
+ * admin manages, a client calls the APIs; a developer is a client.
  */
-export function gatewayClientKeys(env: Record<string, string | undefined>): { keys: string[]; sandboxAdmins: string[]; warnings: string[] } {
+export function gatewayClientKeys(env: Record<string, string | undefined>): { keys: string[]; warnings: string[] } {
   const keys = (env.GATEWAY_API_KEYS ?? '').split(',').map(k => k.trim()).filter(Boolean);
-  const warnings: string[] = [];
+  const warnings: string[] = env.SANDBOX_TOKEN_ADMIN?.trim()
+    ? ['SANDBOX_TOKEN_ADMIN is no longer read: the dev token is a client, never an admin — remove the variable']
+    : [];
   const token = principalSandboxToken(env);
-  if (env.ACCEPT_SANDBOX_TOKEN_AS_KEY?.trim() !== '1' || !token) return { keys, sandboxAdmins: [], warnings };
+  if (env.ACCEPT_SANDBOX_TOKEN_AS_KEY?.trim() !== '1' || !token) return { keys, warnings };
   if (/[,:]/.test(token)) {
     warnings.push('SANDBOX_TOKEN contains , or : — not accepted as an API key');
-    return { keys, sandboxAdmins: [], warnings };
+    return { keys, warnings };
   }
-  warnings.push('ACCEPT_SANDBOX_TOKEN_AS_KEY=1: the SANDBOX_TOKEN is accepted as an admin client key (transition only — '
-    + 'give the client its own GATEWAY_API_KEYS entry and remove the flag)');
-  return { keys: [...keys, `${token}:${SANDBOX_USER}`], sandboxAdmins: [SANDBOX_USER], warnings };
+  warnings.push('ACCEPT_SANDBOX_TOKEN_AS_KEY=1: the SANDBOX_TOKEN is accepted as a no-wake client key '
+    + '(transition only — give the client its own GATEWAY_API_KEYS entry and remove the flag)');
+  return { keys: [...keys, `${token}:${SANDBOX_USER}`], warnings };
 }
 
 export function sandboxEnvUrls(env: Record<string, string | undefined>): string[] {
@@ -130,8 +136,8 @@ export async function loadSandboxEnv(
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) { result.errors.push(`${url}: not an object`); continue; }
       for (const [key, value] of Object.entries(payload)) {
         if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof value !== 'string' || !value.trim()) continue;
-        // Pinned keys stay with the host when it has them; everything else follows the palco.
-        if (isHostOnly(key) || (isEnvPinned(key) && env[key]?.trim())) continue;
+        if (isHostOnly(key) || isEndpointOverride(key)) continue;
+        if (isEnvPinned(key) && env[key]?.trim() && env[key] !== value.trim()) continue;
         result.received.push(key);
         if (env[key] === value.trim()) continue;
         env[key] = value.trim();
@@ -144,4 +150,21 @@ export async function loadSandboxEnv(
     }
   }
   return result;
+}
+
+export async function saveSandboxCache(path: string, env: Record<string, string | undefined>, names: string[]): Promise<void> {
+  const values = Object.fromEntries(names.flatMap(name => (env[name]?.trim() ? [[name, env[name]!.trim()]] : [])));
+  await writeStateFile(path, JSON.stringify(values));
+}
+
+export async function applySandboxCache(path: string, env: Record<string, string | undefined>): Promise<string[]> {
+  const { data } = await readStateFile<Record<string, unknown>>(path).catch(() => ({ data: null }));
+  const applied: string[] = [];
+  for (const [key, value] of Object.entries(data ?? {})) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || typeof value !== 'string' || !value.trim()) continue;
+    if (isHostOnly(key) || isEndpointOverride(key) || (isEnvPinned(key) && env[key]?.trim())) continue;
+    env[key] = value.trim();
+    applied.push(key);
+  }
+  return applied;
 }

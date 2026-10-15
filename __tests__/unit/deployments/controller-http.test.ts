@@ -15,6 +15,7 @@ import { FileDeploymentStore, MemoryDeploymentStore } from '../../../src/deploym
 import { AppRegistry, FileAppStore, MemoryAppStore } from '../../../src/deployments/apps';
 import type { DeploymentStore } from '../../../src/deployments/types';
 import { FakeCloud, until } from './_fake-cloud';
+import { resetStreamCuts, streamCuts } from '../../../src/telemetry/stream-cuts';
 
 const ADMIN = 'admin-key-0123456789';
 const SITE = 'site-key-0123456789';
@@ -23,11 +24,12 @@ const AS_SITE = { 'x-app': 'site-a' };
 
 interface Harness { cloud: FakeCloud; controller: DeploymentController; server: Server; base: string }
 
-async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown } = {}): Promise<Harness> {
+async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTotal?: number; onRoutesChange?: () => void; declaredStatus?: () => unknown; invokeIdleMs?: number; maxWaitSeconds?: number } = {}): Promise<Harness> {
   const cloud = opts.cloud ?? new FakeCloud();
   const controller = new DeploymentController({
     backend: cloud, store: opts.store ?? new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000),
     namespace: 'test', reconcileMs: 50, maxTotalReplicas: opts.maxTotal ?? 6,
+    ...(opts.maxWaitSeconds ? { maxColdStartWaitSeconds: opts.maxWaitSeconds } : {}),
   });
   await controller.init();
   controller.start();
@@ -39,6 +41,7 @@ async function harness(opts: { store?: DeploymentStore; cloud?: FakeCloud; maxTo
     isAdmin: (req) => req.headers.authorization === `Bearer ${ADMIN}`,
     userOf: (req) => (req.headers.authorization === `Bearer ${SITE}` ? 'site-a' : req.headers.authorization === `Bearer ${ADMIN}` ? 'owner' : null),
     onRoutesChange: opts.onRoutesChange,
+    ...(opts.invokeIdleMs ? { invokeIdleMs: opts.invokeIdleMs } : {}),
     ...(opts.declaredStatus ? { declaredStatus: opts.declaredStatus } : {}),
   });
   const server = createProxyServer({
@@ -62,7 +65,7 @@ let h: Harness;
 const extra: Harness[] = [];
 
 async function close(x: Harness) {
-  x.controller.stop();
+  await x.controller.stop();
   x.server.closeAllConnections();
   await new Promise<void>(r => x.server.close(() => r()));
 }
@@ -115,6 +118,27 @@ describe('deployments API', () => {
     expect(view.autoscale).toMatchObject({ floor: 2, desired: 2 });
   });
 
+  it('PATCH scaling.hold freezes the replica count; GET …/capacity reports ceiling and boot time, to the owning app only', async () => {
+    await call(h, 'PUT', '/v1/deployments/class', { profile: 'cpu-echo', maxReplicas: 2 }, ADMIN, AS_SITE);
+    expect((await call(h, 'PATCH', '/v1/deployments/class', { scaling: { hold: { replicas: 2, untilMinutes: 30 } } }, SITE)).status).toBe(403);
+    expect((await call(h, 'PATCH', '/v1/deployments/class', { scaling: { hold: { replicas: 3, untilMinutes: 30 } } })).status).toBe(400);
+    const held = await call(h, 'PATCH', '/v1/deployments/class', { scaling: { hold: { replicas: 2, untilMinutes: 30 } } });
+    expect(held.status).toBe(200);
+    expect((await held.json()) as { hold: unknown; spec: { scaling?: unknown } }).toMatchObject({ hold: { replicas: 2 }, desiredReplicas: 2 });
+    await until(() => h.cloud.created.length === 2);
+    const capacity = await call(h, 'GET', '/v1/deployments/class/capacity', undefined, SITE);
+    expect(capacity.status).toBe(200);
+    expect(await capacity.json()).toMatchObject({
+      deployment: 'class', mode: null, hold: { replicas: 2 },
+      capacity: [{ ceiling: { sessions: 8, source: 'default' }, boot: { source: expect.stringMatching(/default|measured/) }, confident: false }],
+    });
+    await call(h, 'PUT', '/v1/deployments/other', { profile: 'cpu-echo' });
+    expect((await call(h, 'GET', '/v1/deployments/other/capacity', undefined, SITE)).status).toBe(404);
+    expect((await call(h, 'GET', '/v1/deployments/nope/capacity')).status).toBe(404);
+    const released = await call(h, 'PATCH', '/v1/deployments/class', { scaling: { hold: null } });
+    expect((await released.json()) as { hold: unknown }).toMatchObject({ hold: null });
+  });
+
   it('lists built-in profiles and stores new ones', async () => {
     const names = ((await (await call(h, 'GET', '/v1/profiles')).json()) as { profiles: { name: string }[] }).profiles.map(p => p.name);
     expect(names).toEqual(expect.arrayContaining(['qwen3-tts', 'qwen3-tts-clone', 'cpu-echo']));
@@ -145,6 +169,18 @@ describe('deployments API', () => {
     await until(() => h.cloud.created.length === 1);
     expect(Object.keys(h.cloud.created[0].files!)).toEqual(['aigw-pack-0']);
     expect(Buffer.from(h.cloud.created[0].files!['aigw-pack-0']).toString()).toBe('RIFF');
+  });
+
+  it('fileUrls: the view names the files and never returns their URLs', async () => {
+    const res = await call(h, 'PUT', '/v1/deployments/vm2', {
+      bootScript: 'true', machineType: 'DEV1-S', maxEurPerHour: 0.05, files: { 'ref-a': 'UklGRg==' },
+      fileUrls: { 'voices.json': { url: 'https://assets.example/v.json?sig=secret-signature', sha256: 'a'.repeat(64) } },
+    });
+    const text = await res.text();
+    expect(res.status).toBe(201);
+    expect(text).not.toContain('secret-signature');
+    expect(JSON.parse(text).spec.fileKeys).toEqual(['ref-a', 'voices.json']);
+    expect(JSON.parse(text).spec.fileUrls).toBeUndefined();
   });
 
   it('never returns env values or registry credentials', async () => {
@@ -205,6 +241,25 @@ describe('deployments API', () => {
     expect(res.status).toBe(200);
   });
 
+  it('caps the cold-start wait at the gateway maximum: a stored 840 s or X-Aigw-Wait: 840 answers 503 + Retry-After in time, with a warning in the view', async () => {
+    const capped = await harness({ maxWaitSeconds: 1 });
+    extra.push(capped);
+    capped.cloud.bootMs = 60_000;
+    const put = await call(capped, 'PUT', '/v1/deployments/slow', { profile: 'cpu-echo', coldStartWaitSeconds: 840 }, ADMIN, AS_SITE);
+    expect(put.status).toBe(201);
+    expect(((await put.json()) as { warnings: string[] }).warnings).toEqual([expect.stringMatching(/coldStartWaitSeconds 840 .* maximum wait of 1 s \(DEPLOYMENTS_MAX_WAIT_SECONDS\)/)]);
+    for (const headers of [{}, { 'x-aigw-wait': '840' }]) {
+      const started = Date.now();
+      const res = await call(capped, 'GET', '/v1/deployments/slow/invoke/', undefined, SITE, headers);
+      expect(res.status).toBe(503);
+      expect(res.headers.get('retry-after')).toBe('30');
+      expect(((await res.json()) as { status: string }).status).toBe('warming');
+      expect(Date.now() - started).toBeLessThan(4000);
+    }
+    const within = await call(h, 'PUT', '/v1/deployments/ok', { profile: 'cpu-echo', coldStartWaitSeconds: 240 }, ADMIN, AS_SITE);
+    expect(((await within.json()) as { warnings: string[] }).warnings).toEqual([]);
+  });
+
   it('answers 503 + Retry-After when the replica is not ready within the wait', async () => {
     h.cloud.bootMs = 60_000;
     await call(h, 'PUT', '/v1/deployments/slow', { profile: 'cpu-echo' }, ADMIN, AS_SITE);
@@ -259,9 +314,14 @@ describe('deployments API', () => {
     expect(view.publicIp).toBe('51.15.0.1');
     expect(h.cloud.created[0]!.network).toMatchObject({ ipId: 'ip-rtc', groupId: 'sg-rtc' });
     const nginx = /echo '([A-Za-z0-9+/=]+)' \| base64 -d > \/srv\/aigw\/nginx\.conf/.exec(h.cloud.created[0]!.cloudInit)![1]!;
-    expect(Buffer.from(nginx, 'base64').toString()).toContain('listen 8089 default_server');
+    expect(Buffer.from(nginx, 'base64').toString()).toContain('listen 8089 ssl default_server');
+    const before = h.cloud.networkCalls;
+    await call(h, 'PATCH', '/v1/deployments/rtc', { exposure: { ports: [{ protocol: 'tcp', port: 443 }, { protocol: 'udp', port: 7882 }, { protocol: 'tcp', port: 7881 }] } });
+    await until(() => h.cloud.networkCalls > before);
     expect((await call(h, 'DELETE', '/v1/deployments/rtc')).status).toBe(200);
     await until(() => h.cloud.releasedNetworks.includes('ip-rtc'));
+    await until(async () => (await (await call(h, 'GET', '/v1/deployments')).json() as { pendingNetworkReleases: unknown[] }).pendingNetworkReleases.length === 0);
+    expect((await (await call(h, 'GET', '/v1/deployments', undefined, SITE)).json() as Record<string, unknown>).pendingNetworkReleases).toBeUndefined();
   });
 
   it("idleAction 'stop': idle powers the replica off (kept, not deleted) and the next demand powers it back on", async () => {
@@ -390,6 +450,7 @@ describe('deployments API', () => {
       const res = await call(again, 'GET', '/v1/deployments/keep/invoke/', undefined, SITE);
       expect(res.status).toBe(200);
     } finally {
+      for (const x of extra.splice(0)) await close(x);
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -443,8 +504,8 @@ describe('app accounts: saved image addresses per app', () => {
   it('apps are isolated: a key sees and edits only its own app, cannot act for another', async () => {
     await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000 }, ADMIN, asParle);
     await call(h, 'PUT', '/v1/deployments/parle-echo', { profile: 'cpu-echo' }, ADMIN, asParle);
-    // site-a (a normal key) manages its own account…
-    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE)).status).toBe(201);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE)).status).toBe(403);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, ADMIN, { 'x-app': 'site-a' })).status).toBe(201);
     // …but not parle's, and cannot impersonate it
     expect((await call(h, 'GET', '/v1/apps/parle', undefined, SITE)).status).toBe(403);
     expect((await call(h, 'GET', '/v1/apps/site-a', undefined, SITE, asParle)).status).toBe(403);
@@ -464,6 +525,15 @@ describe('app accounts: saved image addresses per app', () => {
     expect((await call(h, 'PUT', '/v1/apps/parle/images/x', { image: SPEECH, registryAuth: { password: 'p' } }, ADMIN, asParle)).status).toBe(400);
     expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'missing' }, ADMIN, asParle)).status).toBe(404);
     expect((await call(h, 'PUT', '/v1/deployments/y', { appImage: 'speech-stack' }, ADMIN)).status).toBe(400);
+  });
+
+  it('an app\'s daily budgets: an admin sets them, the app key reads and cannot raise them', async () => {
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: 60_000, dailyTokens: null }, ADMIN, AS_SITE)).status).toBe(200);
+    expect(await (await call(h, 'GET', '/v1/apps/site-a/limits', undefined, SITE)).json()).toEqual({ app: 'site-a', limits: { dailyRequests: 60_000 } });
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: 9_999_999 }, SITE)).status).toBe(403);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { dailyRequests: -1 }, ADMIN, AS_SITE)).status).toBe(400);
+    expect((await call(h, 'PUT', '/v1/apps/site-a/limits', { perMinute: 1 }, ADMIN, AS_SITE)).status).toBe(400);
+    expect(await (await call(h, 'GET', '/v1/apps/site-a/limits', undefined, ADMIN, AS_SITE)).json()).toEqual({ app: 'site-a', limits: { dailyRequests: 60_000 } });
   });
 
   it('an app owns its aliases: PUT routes validates, re-mounts the providers, and refuses another app\'s alias', async () => {
@@ -534,7 +604,7 @@ describe('app accounts: saved image addresses per app', () => {
   const listImages = async (key = ADMIN, headers: Record<string, string> = {}) =>
     ((await (await call(h, 'GET', '/v1/images', undefined, key, headers)).json()) as { images: Listed[] }).images;
 
-  it('images are private by default: another app neither lists nor deploys them, and only the owner or an admin edits them', async () => {
+  it('images are private by default: another app neither lists nor deploys them, and only an admin edits them', async () => {
     const res = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000 }, ADMIN, asParle);
     expect(((await res.json()) as Listed).visibility).toBe('private');
     expect(await listImages(SITE)).toEqual([]);
@@ -555,7 +625,7 @@ describe('app accounts: saved image addresses per app', () => {
   it('a shared image is listed for other apps and deployable by them as owner/name; the deployment stays with the deploying app', async () => {
     await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { image: SPEECH, port: 8000, defaults: { machineType: 'DEV1-S' } }, ADMIN, asParle);
     await call(h, 'PUT', '/v1/apps/parle/images/internal', { image: SPEECH_OLD, port: 8000 }, ADMIN, asParle);
-    await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, SITE);
+    await call(h, 'PUT', '/v1/apps/site-a/images/web', { image: 'ghcr.io/site-a/web:1', port: 80 }, ADMIN, AS_SITE);
     const shared = await call(h, 'PUT', '/v1/apps/parle/images/speech-stack', { visibility: 'shared' }, ADMIN, asParle);
     expect(await shared.json()).toMatchObject({ image: SPEECH, port: 8000, visibility: 'shared' });
 
@@ -604,5 +674,73 @@ describe('app accounts: saved image addresses per app', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('invoke: a replica stream that does not end', () => {
+  type Script = (res: import('http').ServerResponse, n: number) => void;
+
+  async function scripted(x: Harness, script: Script) {
+    await call(x, 'PUT', '/v1/deployments/cut', { profile: 'cpu-echo', minReplicas: 1 }, ADMIN, AS_SITE);
+    await until(() => x.controller.get('cut')!.status === 'ready');
+    const fake = [...x.cloud.machines.values()][0];
+    const probe = fake.server.listeners('request')[0] as (...a: unknown[]) => void;
+    fake.server.removeAllListeners('request');
+    let n = 0;
+    fake.server.on('request', (req, res) => {
+      if (req.url !== '/stream') return probe(req, res);
+      req.resume();
+      script(res, ++n);
+    });
+    const outcomes: unknown[] = [];
+    const acquire = x.controller.acquire.bind(x.controller);
+    x.controller.acquire = (async (...args: Parameters<typeof acquire>) => {
+      const lease = await acquire(...args);
+      const done = lease.done;
+      lease.done = (outcome) => { outcomes.push(outcome); done(outcome); };
+      return lease;
+    }) as typeof x.controller.acquire;
+    resetStreamCuts();
+    return outcomes;
+  }
+
+  const read = async (x: Harness, headers: Record<string, string> = {}) => {
+    const res = await call(x, 'GET', '/v1/deployments/cut/invoke/stream', undefined, SITE, headers);
+    const text = await res.text().then(t => `ended:${t}`, () => 'connection error');
+    return { status: res.status, text };
+  };
+
+  it('regression: a replica that resets mid-body gives the client a connection error, a failed lease and a count', async () => {
+    const outcomes = await scripted(h, (res) => { res.writeHead(200); res.write('half'); setTimeout(() => res.socket!.destroy(), 30); });
+    expect(await read(h)).toEqual({ status: 200, text: 'connection error' }); // before: 'ended:half', a cut that looked complete
+    await until(() => outcomes.length > 0);
+    expect(outcomes[0]).toBe(true);
+    expect(streamCuts()).toEqual([expect.objectContaining({ deployment: 'cut', stage: 'invoke', truncated: 1, stalled: 0 })]);
+  });
+
+  it('regression: a replica that stops sending is cut at the idle limit, as busy (no health strike)', async () => {
+    await close(h);
+    await h.cloud.closeAll();
+    h = await harness({ invokeIdleMs: 150 });
+    const outcomes = await scripted(h, (res) => { res.writeHead(200); res.write('half'); });
+    const started = Date.now();
+    expect(await read(h)).toEqual({ status: 200, text: 'connection error' }); // before: never ended
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(outcomes[0]).toBe('timeout');
+    expect(streamCuts()).toEqual([expect.objectContaining({ stage: 'invoke', truncated: 0, stalled: 1 })]);
+  });
+
+  it('a long gap under the idle limit and a clean end pass through untouched', async () => {
+    const outcomes = await scripted(h, (res) => { res.writeHead(200); res.write('a'); setTimeout(() => res.end('b'), 300); });
+    expect(await read(h)).toEqual({ status: 200, text: 'ended:ab' });
+    expect(outcomes[0]).toBe(false);
+    expect(streamCuts()).toEqual([]);
+  });
+
+  it('regression: a failed connection to the only replica is retried on it, not waited out for the whole X-Aigw-Wait', async () => {
+    await scripted(h, (res, n) => { if (n === 1) res.socket!.destroy(); else res.end('ok'); });
+    const started = Date.now();
+    expect(await read(h, { 'x-aigw-wait': '4' })).toEqual({ status: 200, text: 'ended:ok' }); // before: 503 after the 4 s
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 });

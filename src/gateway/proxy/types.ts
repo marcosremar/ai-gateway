@@ -129,6 +129,8 @@ export interface ProxyConfig {
   port?: number;
   /** Valid Bearer tokens for API authentication. Empty or absent = open mode. */
   apiKeys?: string[];
+  /** Live key registry (keys issued and revoked at runtime); wins over `apiKeys`. */
+  keyRegistry?: { readonly size: number; resolve(token: string): { userId: string } | null };
   /** Provider instances for all modalities */
   providers: ProviderMapping;
   /** Response cache for caching LLM/STT responses */
@@ -141,6 +143,7 @@ export interface ProxyConfig {
   hostname?: string;
   /** Custom exact-path route handlers */
   customRoutes?: CustomRoute[];
+  ttsCache?: ProxyTtsCache;
   /**
    * Exact-path routes that authenticate themselves, matched BEFORE the gateway's API-key check (e.g. telemetry ingest,
    * which takes realtime session tokens and replica signatures). The handler owns auth and the response.
@@ -169,9 +172,29 @@ export interface ProxyConfig {
    */
   appLimits?: {
     check(
-      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>, opts?: { charge?: boolean },
+      userId: string, kind: import('./app-limits').InferenceKind, body: Record<string, unknown>,
+      opts?: { charge?: boolean; receipt?: import('./app-limits').Charge },
     ): import('./app-limits').AppLimitDenial | null;
+    refund?(userId: string, charged: import('./app-limits').Charge): void;
   };
+  /**
+   * Called after an inference request (chat / STT / TTS / embeddings / images) was answered by its route, before the
+   * response is sent — usage metering (src/accounts). Must be cheap and must not throw; errors are logged and ignored.
+   */
+  onInference?: (event: {
+    userId: string; kind: import('./app-limits').InferenceKind; headers: Record<string, unknown>;
+    body: unknown; rawBody: Buffer; status: number; response: unknown;
+  }) => void;
+  /**
+   * Called after a chat / STT / TTS request was answered by its route, with the origin headers (`X-Gateway-Provider`…);
+   * the headers it returns are added to the response (a GPU app's cloud answer: `X-Gateway-Status: degraded`). Must
+   * be cheap; errors are logged and ignored.
+   */
+  onServed?: (event: { userId: string; kind: import('./app-limits').InferenceKind; status: number; headers: Record<string, string> | undefined }) =>
+    Record<string, string> | undefined;
+  deviceGate?: (
+    userId: string, headers: import('http').IncomingHttpHeaders, kind: string,
+  ) => import('./app-limits').AppLimitDenial | null;
   /**
    * `GET /health?deep=1`: per-provider probes + deployments. Plain `GET /health` stays a cheap unauthenticated
    * liveness check (status only); the deep one needs a valid key that `authorize` accepts as admin (403 for another
@@ -187,6 +210,11 @@ export interface ProxyConfig {
    * upstream call). The unauthenticated `GET /health` never carries them.
    */
   healthDetails?: (viewer: import('./health-view').HealthViewer) => Record<string, unknown>;
+  autoWake?: (bearer: string) => boolean;
+  /** With autoWake false: the deployments this key may still wake (its test copies, access-keys.ts `wakeDeployments`). */
+  mayWake?: (bearer: string, deployment: string) => boolean;
+  /** False = this key's requests never renew a deployment's idle clock (a dev key, access-keys.ts `countsAsUse`). */
+  countsAsUse?: (bearer: string) => boolean;
 }
 
 /**
@@ -210,6 +238,11 @@ export interface ProxyRoute {
  * The raw HTTP request is parsed into this shape so that route handlers
  * work with a consistent interface regardless of the underlying transport.
  */
+export interface ProxyTtsCache {
+  cache: import('./tts-cache').TtsCache;
+  requiresGpu?: (userId: string) => boolean;
+}
+
 export interface ProxyRequest {
   /** HTTP method (GET, POST, etc.) */
   method: string;

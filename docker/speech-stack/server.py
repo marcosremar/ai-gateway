@@ -9,31 +9,49 @@ first audio:
 
 POST /v1/s2s       multipart: `file` (audio, any ffmpeg/PyAV format) + `config` (JSON, see S2SConfig below).
                    Response `application/x-aigw-s2s`: frames of [1 byte kind][4 bytes big-endian length][payload]
-                     kind "E" = JSON event (transcript, sentence, timing, done, error), kind "A" = raw PCM s16le mono
+                     kind "E" = JSON event (transcript, sentence, timing, opener, deadline_missed, done, error), kind "A" = raw PCM s16le mono
                      24 kHz. No base64 on the hot path. `?format=ndjson` gives JSON lines (audio as base64) for debugging.
+                   A turn ends with `done` {sentences, spoken, skipped, audio_ms, tts_retries, tts_overlong, …} or with `error` {stage: stt|llm|tts,
+                     code: stage_failed|upstream_stalled, unspoken?}: a stage that raises, sends nothing for
+                     S2S_MAX_GAP_S (8) or keeps the turn past S2S_DEADLINE_S (40) ends it in-band, never silently.
 POST /v1/audio/transcriptions   OpenAI-shaped STT (multipart `file`, `language`, `prompt`).
 WS   /ws/audio-stream           real-time STT: binary Int16 PCM 16 kHz frames in, {"text": <full running text>}
                                 out per decode — the protocol the gateway's streaming STT router already speaks.
 POST /v1/chat/completions       proxied to the LLM (streaming passes through).
-POST /v1/audio/speech           proxied to the TTS (streaming passes through).
+POST /v1/audio/speech           proxied to the TTS (streaming passes through). A `model` containing "kokoro" is spoken
+                                by Kokoro-82M (ONNX, on the CPU, in this process) instead: see kokoro_speech.
+                   Both: an engine that breaks the body, sends nothing for PROXY_MAX_GAP_S (8) or keeps the request past
+                     PROXY_DEADLINE_S (120) never ends as a clean answer. Before the response started: 502 / 504 with an
+                     OpenAI `error`. After: SSE gets a last `data: {"error": {code: stage_failed|upstream_stalled}}`
+                     event; any other body (audio, JSON) has its connection aborted. Counted in /health `proxy`.
 GET  /refs/<id>.wav             reference voices (from /files/voices.json, see load_voices).
-GET  /health                    200 only when the three models answered a warm-up.
+GET  /health                    200 only when the three models answered a warm-up; `kokoro.status` = loading|loaded|failed
+                                (Kokoro loads in the background and never holds the 200).
+GET  /debug/gpu                 GPU memory now, in MiB per card (nvidia-smi): used, total, free.
+GET  /debug/logs?engine=tts|llm|stt&tail=N&match=text   last lines of an engine's log (stt = this process), secrets
+                                scrubbed; every TTS request logs `tts <request_id> …` here and the same id in the TTS log.
 """
 
 import asyncio
 import base64
+import hashlib
+import io
+import ipaddress
 import json
+import math
 import os
 import re
 import struct
 import subprocess
 import time
+import uuid
+import wave
 from pathlib import Path
 
 import httpx
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from faster_whisper import WhisperModel
 
 from stt_batch import SttBatcher
@@ -43,6 +61,7 @@ TTS_URL = "http://127.0.0.1:8091"
 LLM_URL = "http://127.0.0.1:8092"
 TTS_MODEL = os.environ.get("TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
 STT_MODEL = os.environ.get("STT_MODEL", "large-v3")
+MODELS = {"stt": STT_MODEL, "llm": os.environ.get("LLM_FILE", "llm"), "tts": TTS_MODEL}
 STT_BEAM = int(os.environ.get("STT_BEAM", "1"))
 # Utterances arriving within STT_BATCH_WINDOW_MS share one GPU pass, up to STT_BATCH clips (stt_batch.py). L4: 4,
 # L40S: 8 — the batch's encoder activations must fit next to the TTS and the LLM.
@@ -52,6 +71,16 @@ TTS_PARALLEL = int(os.environ.get("TTS_PARALLEL", "2"))
 FIRST_MIN_WORDS = int(os.environ.get("FIRST_MIN_WORDS", "3"))
 MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "160"))
 SAMPLE_RATE = 24000
+S2S_MAX_GAP_S = float(os.environ.get("S2S_MAX_GAP_S", "8"))
+S2S_DEADLINE_S = float(os.environ.get("S2S_DEADLINE_S", "40"))
+PROXY_MAX_GAP_S = float(os.environ.get("PROXY_MAX_GAP_S", "8"))
+PROXY_DEADLINE_S = float(os.environ.get("PROXY_DEADLINE_S", "120"))
+TTS_MAX_SECONDS = float(os.environ.get("TTS_MAX_SECONDS", "3"))
+TTS_MAX_SECONDS_PER_CHAR = float(os.environ.get("TTS_MAX_SECONDS_PER_CHAR", "0.2"))
+TTS_MAX_LEAD_SECONDS = float(os.environ.get("TTS_MAX_LEAD_SECONDS", "1"))
+TTS_SILENCE_RMS = 300
+TTS_OVERLONG_RATIO = 0.9
+TTS_FRAMES_PER_SECOND = 12.5
 REFS = Path("/srv/refs")
 FILES = Path("/files")
 
@@ -64,6 +93,10 @@ stt_batcher = SttBatcher(stt, max_batch=STT_BATCH, window_ms=STT_BATCH_WINDOW_MS
 client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), limits=httpx.Limits(max_connections=64))
 voices: dict[str, dict] = {}
 ready = {"ok": False, "detail": "starting"}
+turns = {"started": 0, "done": 0, "failed": {}, "stalled": {}}
+kokoro_state: dict = {"status": "loading"}
+kokoro_engine = None
+proxied = {stage: {"started": 0, "done": 0, "failed": 0, "stalled": 0} for stage in ("chat", "speech")}
 app = FastAPI()
 
 
@@ -91,10 +124,27 @@ def load_voices() -> None:
 
 # ── Hear ─────────────────────────────────────────────────────────────────────
 
+def wav_pcm16_16k(data: bytes) -> np.ndarray | None:
+    try:
+        with wave.open(io.BytesIO(data)) as clip:
+            if (clip.getnchannels(), clip.getsampwidth(), clip.getframerate(), clip.getcomptype()) != (1, 2, 16000, "NONE"):
+                return None
+            frames = clip.readframes(clip.getnframes())
+    except (wave.Error, EOFError, struct.error):
+        return None
+    if len(frames) < 2:
+        return None
+    return np.frombuffer(frames[:len(frames) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
+
+
 def decode_16k(data: bytes) -> np.ndarray:
     """Any container/codec → mono float32 16 kHz via ffmpeg. faster-whisper 1.2.1 decodes with PyAV through an
     `open(metadata_errors=…)` argument that PyAV 19 removed (2026-10-04: every /v1/s2s failed with TypeError), so the
-    audio never goes through PyAV here."""
+    audio never goes through PyAV here. A WAV that is already PCM16 mono 16 kHz (what the realtime edge sends) is read
+    in-process, without the ffmpeg subprocess."""
+    pcm = wav_pcm16_16k(data)
+    if pcm is not None:
+        return pcm
     out = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-f", "f32le", "-ac", "1", "-ar", "16000", "pipe:1"],
                          input=data, capture_output=True, check=True).stdout
     return np.frombuffer(out, dtype=np.float32)
@@ -102,8 +152,10 @@ def decode_16k(data: bytes) -> np.ndarray:
 
 def transcribe_sync(data: bytes, language: str | None, prompt: str | None) -> dict:
     started = time.perf_counter()
-    heard = stt_batcher.transcribe(decode_16k(data), language, prompt)
-    return {**heard, "ms": round((time.perf_counter() - started) * 1000)}
+    audio = decode_16k(data)
+    audio_ms = round((time.perf_counter() - started) * 1000)
+    heard = stt_batcher.transcribe(audio, language, prompt)
+    return {**heard, "audio_ms": audio_ms, "ms": round((time.perf_counter() - started) * 1000)}
 
 
 # ── Think: stream tokens, cut sentences ──────────────────────────────────────
@@ -114,6 +166,7 @@ CLAUSE_END = re.compile(r"[,;:—–](?=\s)")  # needs the following space, so "
 
 ABBREVIATIONS = {"sr", "sra", "srta", "dr", "dra", "prof", "profa", "av", "etc", "ex", "nº", "n", "mr", "mrs", "st", "m", "mme"}
 MIN_SENTENCE_WORDS = 2
+CUT_EAGER = os.environ.get("CUT_EAGER", "0") == "1"
 
 
 def cut(buffer: str, first: bool, final: bool) -> tuple[str | None, str]:
@@ -123,7 +176,7 @@ def cut(buffer: str, first: bool, final: bool) -> tuple[str | None, str]:
     The FIRST chunk also cuts at a clause mark once it has FIRST_MIN_WORDS words, so the first audio does not wait for
     a long sentence. Anything longer than MAX_CHUNK_CHARS cuts at the last space."""
     for match in SENTENCE_END.finditer(buffer):
-        if match.end() == len(buffer) and not final:
+        if match.end() == len(buffer) and not final and not (CUT_EAGER and match.group()[-1] in "!?"):
             break  # "3." may still become "3.50": a mark at the end of the stream so far waits for the next token
         head = buffer[:match.end()]
         last_word = head[:match.start()].split()[-1:] or [""]
@@ -228,36 +281,167 @@ class JsonField:
         return ch
 
 
-async def llm_stream(messages: list[dict], max_tokens: int, temperature: float, response_format: dict | None = None):
+DEFAULT_SLOT_CTX = 2048
+CONTEXT_MARGIN = 64
+BYTES_PER_TOKEN = 3
+MESSAGE_TOKENS = 8
+DROP_PAIRS = 8
+
+
+def estimate_tokens(text: str | None) -> int:
+    return MESSAGE_TOKENS + -(-len(str(text).encode()) // BYTES_PER_TOKEN) if text else 0
+
+
+def fit_history(system: str | None, history: list[dict], user: str, max_tokens: int, ctx: int, harder: bool = False) -> list[dict]:
+    pairs: list[list[dict]] = []
+    for message in history:
+        if message.get("role") == "system":
+            continue
+        if message.get("role") == "user" or not pairs:
+            pairs.append([])
+        pairs[-1].append(message)
+    pinned = sum(estimate_tokens(m.get("content")) for m in history if m.get("role") == "system")
+    room = (ctx - max_tokens - CONTEXT_MARGIN - estimate_tokens(system) - estimate_tokens(user) - pinned) // (2 if harder else 1)
+    sizes = [sum(estimate_tokens(m.get("content")) for m in pair) for pair in pairs]
+    drop = 0
+    while drop < len(pairs) and sum(sizes[drop:]) > room:
+        drop += DROP_PAIRS
+    kept = {id(m) for pair in pairs[drop:] for m in pair}
+    return [m for m in history if m.get("role") == "system" or id(m) in kept]
+
+
+LLM_TIMINGS = ("cache_n", "prompt_n", "prompt_ms", "predicted_n", "predicted_ms")
+STT_TIMINGS = ("audio_ms", "queue_ms", "decode_ms", "batch")
+
+
+def llm_chunk(line: str, timings: dict) -> str | None:
+    if not line.startswith("data: ") or line == "data: [DONE]":
+        return None
+    chunk = json.loads(line[6:])
+    timings.update({k: v for k, v in (chunk.get("timings") or {}).items() if k in LLM_TIMINGS})
+    return ((chunk.get("choices") or [{}])[0].get("delta") or {}).get("content")
+
+
+def stage_times(heard: dict, heard_at: int, first_token: int | None, first_cut: int | None, first_audio: int | None,
+                timings: dict) -> dict:
+    gap = lambda later, earlier: None if later is None or earlier is None else later - earlier  # noqa: E731
+    return {**{f"stt_{k}": heard[k] for k in STT_TIMINGS if k in heard},
+            "llm_first_token_ms": gap(first_token, heard_at), **{f"llm_{k}": v for k, v in timings.items()},
+            "text_wait_ms": gap(first_cut, first_token), "tts_first_chunk_ms": gap(first_audio, first_cut)}
+
+
+async def llm_stream(messages: list[dict], max_tokens: int, temperature: float, response_format: dict | None = None,
+                     timings: dict | None = None):
+    timings = {} if timings is None else timings
     body = {"model": "llm", "messages": messages, "stream": True, "max_tokens": max_tokens, "temperature": temperature,
-            "chat_template_kwargs": {"enable_thinking": False}}
+            "chat_template_kwargs": {"enable_thinking": False}, "timings_per_token": True}
     if response_format:
         body["response_format"] = response_format
     async with client.stream("POST", f"{LLM_URL}/v1/chat/completions", json=body) as res:
         if res.status_code != 200:
             raise RuntimeError(f"llm http {res.status_code}: {(await res.aread())[:200]!r}")
         async for line in res.aiter_lines():
-            if not line.startswith("data: ") or line == "data: [DONE]":
-                continue
-            delta = json.loads(line[6:])["choices"][0].get("delta", {}).get("content")
+            delta = llm_chunk(line, timings)
             if delta:
                 yield delta
 
 
+async def llm_slot_ctx() -> int:
+    try:
+        return int((await client.get(f"{LLM_URL}/props")).json()["default_generation_settings"]["n_ctx"])
+    except Exception as error:  # noqa: BLE001
+        print("llm props", repr(error), flush=True)
+        return DEFAULT_SLOT_CTX
+
+
+async def llm_turn(cfg: dict, user: str, timings: dict):
+    system, history, max_tokens = cfg.get("system"), list(cfg.get("messages") or []), int(cfg.get("max_tokens", 160))
+    ctx = ready.get("llm_ctx", DEFAULT_SLOT_CTX)
+    kept = fit_history(system, history, user, max_tokens, ctx)
+    for harder in (False, True):
+        messages = ([{"role": "system", "content": system}] if system else []) + kept + [{"role": "user", "content": user}]
+        try:
+            async for delta in llm_stream(messages, max_tokens, float(cfg.get("temperature", 0.6)), cfg.get("response_format"), timings):
+                yield delta
+            return
+        except RuntimeError as error:
+            fewer = fit_history(system, history, user, max_tokens, ctx, True)
+            if harder or "context size" not in str(error) or len(fewer) == len(kept):
+                raise
+            print("s2s history trimmed again", len(kept), "->", len(fewer), flush=True)
+            kept = fewer
+
+
 # ── Speak ────────────────────────────────────────────────────────────────────
 
-async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue) -> None:
-    """Raw PCM s16le 24 kHz chunks of one sentence into `out`, then None. vLLM-Omni streams the Code2Wav chunks as soon
-    as they decode with `stream: true` + `stream_format: "audio"` (pcm/wav only)."""
+def silent(chunk: bytes) -> bool:
+    samples = np.frombuffer(chunk[: len(chunk) // 2 * 2], dtype=np.int16).astype(np.float64)
+    return not len(samples) or float(np.sqrt(np.mean(samples ** 2))) <= TTS_SILENCE_RMS
+
+
+async def tts_stream(text: str, language: str, voice: dict, out: asyncio.Queue, stats: dict | None = None) -> int:
+    """Raw PCM s16le 24 kHz chunks of one sentence into `out`, then None; returns how many times it started over.
+    vLLM-Omni streams the Code2Wav chunks as soon as they decode with `stream: true` + `stream_format: "audio"`
+    (pcm/wav only). A sentence that was heard and runs to its cap (the engine's `max_new_tokens` stop, which ends the
+    stream as an error, or more audio than the cap) is cut there and counted in `stats["tts_overlong"]`: the turn goes
+    on. It is not asked again (the learner already heard part of it) and nothing is held to detect it earlier."""
+    limit = TTS_MAX_SECONDS + TTS_MAX_SECONDS_PER_CHAR * len(text)
+    limit_bytes = int(limit * SAMPLE_RATE) * 2
     body = {"model": TTS_MODEL, "input": text, "task_type": "Base", "language": language, "ref_audio": voice["audio"],
-            "ref_text": voice["text"], "response_format": "pcm", "stream": True, "stream_format": "audio"}
+            "ref_text": voice["text"], "response_format": "pcm", "stream": True, "stream_format": "audio",
+            "max_new_tokens": math.ceil(limit * TTS_FRAMES_PER_SECOND)}
     try:
-        async with client.stream("POST", f"{TTS_URL}/v1/audio/speech", json=body) as res:
-            if res.status_code != 200:
-                raise RuntimeError(f"tts http {res.status_code}: {(await res.aread())[:200]!r}")
-            async for chunk in res.aiter_bytes():
-                if chunk:
-                    await out.put(chunk)
+        for attempt in (0, 1):
+            request_id = uuid.uuid4().hex[:12]
+            body["extra_params"] = {"request_id": request_id}
+            held: list[bytes] = []
+            sent, spoke, heard, started, outcome = 0, attempt == 1, False, time.time(), "ok"
+            try:
+                async with client.stream("POST", f"{TTS_URL}/v1/audio/speech", json=body) as res:
+                    if res.status_code != 200:
+                        raise RuntimeError(f"tts http {res.status_code}: {(await res.aread())[:200]!r}")
+                    async for chunk in res.aiter_bytes():
+                        if not chunk:
+                            continue
+                        sent += len(chunk)
+                        if sent > limit_bytes:
+                            if not heard:
+                                raise RuntimeError(f"tts runaway: over {limit:.1f} s of audio for {len(text)} characters")
+                            await out.put(chunk[:len(chunk) - (sent - limit_bytes)])
+                            outcome = "overlong"
+                            break
+                        if not spoke and sent > len(chunk) and silent(chunk):
+                            held.append(chunk)
+                            if sent > TTS_MAX_LEAD_SECONDS * SAMPLE_RATE * 2:
+                                outcome = "retry: silent lead"
+                                break
+                            continue
+                        heard = heard or not silent(chunk)
+                        spoke = spoke or heard
+                        for item in (*held, chunk):
+                            await out.put(item)
+                        held.clear()
+                if outcome == "ok":
+                    for item in held:
+                        await out.put(item)
+                if outcome in ("ok", "overlong"):
+                    return attempt
+            except Exception as error:
+                if heard and sent >= TTS_OVERLONG_RATIO * limit_bytes:
+                    outcome = "overlong"
+                    return attempt
+                outcome = ("retry: " if not spoke else "") + repr(error)[:160]
+                if spoke:
+                    raise
+            finally:
+                print("tts", request_id, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)), f"chars={len(text)}",
+                      f"max_new_tokens={body['max_new_tokens']}", f"audio_s={sent / 2 / SAMPLE_RATE:.2f}",
+                      f"ms={round((time.time() - started) * 1000)}", f"outcome={outcome}", flush=True)
+                if outcome == "overlong" and stats is not None:
+                    stats["tts_overlong"] = stats.get("tts_overlong", 0) + 1
+    except Exception as error:
+        await out.put(error)
+        raise
     finally:
         await out.put(None)
 
@@ -269,10 +453,114 @@ def frame(kind: bytes, payload: bytes) -> bytes:
     return kind + struct.pack(">I", len(payload)) + payload
 
 
+MAX_FIRST_AUDIO_DEADLINE_MS = 2500
+FIRST_AUDIO_DEADLINE_MS = min(MAX_FIRST_AUDIO_DEADLINE_MS, int(os.environ.get("FIRST_AUDIO_DEADLINE_MS", "2000")))
+FIRST_AUDIO_MARGIN_MS = int(os.environ.get("FIRST_AUDIO_MARGIN_MS", "300"))
+MAX_OPENER_LINES = 8
+MAX_OPENERS = 256
+openers: dict[str, asyncio.Task] = {}
+
+
+def opener_lines(cfg: dict) -> list[str]:
+    opener = cfg.get("opener")
+    lines = opener.get("lines") if isinstance(opener, dict) else None
+    if not isinstance(lines, list):
+        return []
+    return [line.strip() for line in lines if isinstance(line, str) and line.strip()][:MAX_OPENER_LINES]
+
+
+def opener_key(voice: dict, lang: str, line: str) -> str:
+    return hashlib.sha256(json.dumps([voice["audio"], voice["text"], lang, line]).encode()).hexdigest()
+
+
+def trim_lead(pcm: bytes) -> bytes:
+    samples = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16)
+    loud = np.flatnonzero(np.abs(samples.astype(np.int32)) > 328)
+    return pcm if not len(loud) else samples[max(0, int(loud[0]) - 240):].tobytes()
+
+
+async def synth_opener(line: str, lang: str, voice: dict) -> bytes:
+    queue: asyncio.Queue = asyncio.Queue()
+    await tts_stream(line, LANGUAGE.get(lang, "Portuguese"), voice, queue)
+    chunks = [queue.get_nowait() for _ in range(queue.qsize())]
+    return trim_lead(b"".join(chunk for chunk in chunks if isinstance(chunk, bytes)))
+
+
+def forget_failed_opener(key: str, task: asyncio.Task) -> None:
+    if (task.cancelled() or task.exception() is not None) and openers.get(key) is task:
+        del openers[key]
+
+
+def warm_openers(cfg: dict, voice: dict, lang: str) -> None:
+    for line in opener_lines(cfg):
+        key = opener_key(voice, lang, line)
+        if key in openers:
+            continue
+        while len(openers) >= MAX_OPENERS:
+            openers.pop(next(iter(openers)))
+        task = openers[key] = asyncio.create_task(synth_opener(line, lang, voice))
+        task.add_done_callback(lambda done, key=key: forget_failed_opener(key, done))
+
+
+def pick_opener(cfg: dict, voice: dict, lang: str) -> tuple[int, str, bytes] | None:
+    lines = opener_lines(cfg)
+    start = len(cfg.get("messages") or []) // 2
+    for step in range(len(lines)):
+        index = (start + step) % len(lines)
+        task = openers.get(opener_key(voice, lang, lines[index]))
+        if task is not None and task.done() and not task.cancelled() and task.exception() is None and task.result():
+            return index, lines[index], task.result()
+    return None
+
+
+async def first_audio_deadline(frames, state: dict, cfg: dict, voice: dict, lang: str, ms, event, pcm):
+    asked = cfg.get("first_audio_deadline_ms")
+    deadline = min(asked if isinstance(asked, int) and asked > 0 else FIRST_AUDIO_DEADLINE_MS, MAX_FIRST_AUDIO_DEADLINE_MS)
+    endpoint = cfg.get("endpoint_ms")
+    endpoint = round(endpoint) if isinstance(endpoint, (int, float)) and endpoint > 0 else 0
+    state.update(deadline_ms=deadline, endpoint_ms=endpoint, opener=None, first_sound_ms=None, deadline_missed=False)
+    warm_openers(cfg, voice, lang)
+    due = lambda at: asyncio.ensure_future(asyncio.sleep(max(0.0, (at - endpoint - ms()) / 1000)))  # noqa: E731
+    timer, last = due(deadline - FIRST_AUDIO_MARGIN_MS), False
+    step = asyncio.ensure_future(frames.__anext__())
+    try:
+        while True:
+            await asyncio.wait({step, timer} if timer else {step}, return_when=asyncio.FIRST_COMPLETED)
+            if timer and timer.done():
+                timer = None
+                if state["first_sound_ms"] is not None:
+                    continue
+                picked = None if last else pick_opener(cfg, voice, lang)
+                if picked:
+                    index, line, audio = picked
+                    state.update(opener=line, first_sound_ms=ms())
+                    yield event({"type": "opener", "state": "start", "text": line, "index": index,
+                                 "audio_ms": len(audio) // 48, "at_ms": state["first_sound_ms"]})
+                    yield pcm(audio)
+                    yield event({"type": "opener", "state": "end", "index": index})
+                elif last:
+                    state["deadline_missed"] = True
+                    yield event({"type": "deadline_missed", "deadline_ms": deadline, "at_ms": ms()})
+                else:
+                    timer, last = due(deadline), True
+                continue
+            try:
+                item = step.result()
+            except StopAsyncIteration:
+                return
+            yield item
+            step = asyncio.ensure_future(frames.__anext__())
+    finally:
+        step.cancel()
+        if timer:
+            timer.cancel()
+
+
 @app.post("/v1/s2s")
 async def s2s(request: Request, file: UploadFile = File(...), config: str = Form("{}")):
     """config: {"messages": [...history, OpenAI shape], "system": str, "language": "pt", "voice": id |
-    {"audio": url-or-data-url, "text": transcript}, "max_tokens": 160, "temperature": 0.6, "stt_prompt": str}"""
+    {"audio": url-or-data-url, "text": transcript}, "max_tokens": 160, "temperature": 0.6, "stt_prompt": str,
+    "first_audio_deadline_ms": 2000, "endpoint_ms": silence the client waited before posting, "opener": {"lines": [str]}}"""
     t0 = time.perf_counter()
     cfg = json.loads(config or "{}")
     audio = await file.read()
@@ -283,6 +571,7 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         raise HTTPException(400, "voice must be a known id or {audio, text}")
     ndjson = request.query_params.get("format") == "ndjson"
     ms = lambda: round((time.perf_counter() - t0) * 1000)  # noqa: E731
+    sound: dict = {}
 
     def event(payload: dict) -> bytes:
         return (json.dumps(payload) + "\n").encode() if ndjson else frame(b"E", json.dumps(payload).encode())
@@ -291,29 +580,61 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         return (json.dumps({"type": "audio", "pcm": base64.b64encode(chunk).decode()}) + "\n").encode() if ndjson \
             else frame(b"A", chunk)
 
+    state = {"stage": "stt", "voiced": 0, "partial": False, "audio_bytes": 0, "tts_retries": 0, "tts_overlong": 0}
+    reply: list[str] = []
+    tasks: list[asyncio.Task] = []
+    turns["started"] += 1
+
+    def failed(kind: str, code: str, error: BaseException) -> bytes:
+        stage = state["stage"]
+        turns[kind][stage] = turns[kind].get(stage, 0) + 1
+        unspoken = " ".join(reply[state["voiced"] + state["partial"]:])
+        print("s2s", kind, stage, f"{ms()}ms", f"voiced={state['voiced']}/{len(reply)}", repr(error)[:300], flush=True)
+        return event({"type": "error", "stage": stage, "code": code, "message": repr(error)[:300], "at_ms": ms(),
+                      **({"unspoken": unspoken} if unspoken else {})})
+
+    async def bounded():
+        source = run()
+        try:
+            while True:
+                left = min(S2S_MAX_GAP_S, S2S_DEADLINE_S - (time.perf_counter() - t0))
+                try:
+                    yield await asyncio.wait_for(source.__anext__(), max(left, 0))
+                except StopAsyncIteration:
+                    return
+                except asyncio.TimeoutError:
+                    why = f"no output for {S2S_MAX_GAP_S} s" if left >= S2S_MAX_GAP_S else f"turn longer than {S2S_DEADLINE_S} s"
+                    yield failed("stalled", "upstream_stalled", TimeoutError(why))
+                    return
+        finally:
+            await source.aclose()
+            for task in tasks:
+                task.cancel()
+
     async def run():
         try:
             heard = await asyncio.to_thread(transcribe_sync, audio, lang, cfg.get("stt_prompt"))
-            meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio") if k in heard}
-            yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": ms(), **meta})
+            meta = {k: heard[k] for k in ("no_speech_prob", "avg_logprob", "compression_ratio", "speech_ms") if k in heard}
+            heard_at = ms()
+            state["stage"] = "llm"
+            yield event({"type": "transcript", "text": heard["text"], "stt_ms": heard["ms"], "at_ms": heard_at, **meta,
+                         "stt": {k: heard[k] for k in STT_TIMINGS if k in heard}})
             template = cfg.get("user_template") or ""
             user = template.replace("{{transcript}}", heard["text"]) if "{{transcript}}" in template else heard["text"]
-            messages = ([{"role": "system", "content": cfg["system"]}] if cfg.get("system") else []) \
-                + list(cfg.get("messages") or []) + [{"role": "user", "content": user}]
             gate = asyncio.Semaphore(TTS_PARALLEL)
             sentences: asyncio.Queue = asyncio.Queue()  # (text, audio queue) in speaking order, None at the end
-            reply = []
 
             field = JsonField(cfg["speak_field"]) if cfg.get("speak_field") else None
             raw: list[str] = []
+            timings: dict = {}
+            marks: dict = {}
 
             async def think():
                 buffer, first, first_token, field_closed = "", True, None, False
-                async for delta in llm_stream(messages, int(cfg.get("max_tokens", 160)), float(cfg.get("temperature", 0.6)),
-                                              cfg.get("response_format")):
+                async for delta in llm_turn(cfg, user, timings):
                     if first_token is None:
-                        first_token = ms()
-                        await sentences.put(("__event__", {"type": "llm_first_token", "at_ms": first_token}))
+                        first_token = marks["first_token"] = ms()
+                        await sentences.put(("__event__", {"type": "llm_first_token", "at_ms": first_token, "llm": dict(timings)}))
                     raw.append(delta)
                     if field is not None:
                         if field_closed:
@@ -337,34 +658,57 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
 
                 async def synth():
                     async with gate:
-                        await tts_stream(text, LANGUAGE.get(lang, "Portuguese"), voice, queue)
-                asyncio.create_task(synth())
+                        state["tts_retries"] += await tts_stream(text, LANGUAGE.get(lang, "Portuguese"), voice, queue, state)
+                tasks.append(asyncio.create_task(synth()))
                 await sentences.put((text, queue, ms()))
 
-            thinker = asyncio.create_task(think())
+            async def think_or_fail():
+                try:
+                    await think()
+                except Exception as error:  # noqa: BLE001
+                    await sentences.put(error)
+
+            thinker = asyncio.create_task(think_or_fail())
+            tasks.append(thinker)
             first_audio = None
             while True:
                 item = await sentences.get()
                 if item is None:
                     break
+                if isinstance(item, Exception):
+                    raise item
                 if item[0] == "__event__":
                     yield event(item[1])
                     continue
                 text, queue, cut_at = item
+                marks.setdefault("first_cut", cut_at)
                 yield event({"type": "sentence", "text": text, "cut_at_ms": cut_at})
+                state["stage"] = "tts"
                 while (chunk := await queue.get()) is not None:
+                    if isinstance(chunk, Exception):
+                        raise chunk
+                    state["partial"] = True
+                    state["audio_bytes"] += len(chunk)
                     if first_audio is None:
                         first_audio = ms()
+                        if sound["first_sound_ms"] is None:
+                            sound["first_sound_ms"] = first_audio
                         yield event({"type": "first_audio", "at_ms": first_audio})
                     yield pcm(chunk)
+                state.update(stage="llm", partial=False, voiced=state["voiced"] + 1)
             await thinker
+            turns["done"] += 1
             yield event({"type": "done", "reply": " ".join(reply), "transcript": heard["text"], "stt_ms": heard["ms"],
-                         "first_audio_ms": first_audio, "total_ms": ms(),
+                         "first_audio_ms": first_audio, "total_ms": ms(), **sound,
+                         "sentences": len(reply), "spoken": state["voiced"], "skipped": len(reply) - state["voiced"],
+                         "audio_ms": round(state["audio_bytes"] / 2 / SAMPLE_RATE * 1000), "tts_retries": state["tts_retries"],
+                         "tts_overlong": state["tts_overlong"],
+                         "stages": stage_times(heard, heard_at, marks.get("first_token"), marks.get("first_cut"), first_audio, timings),
                          **({"reply_raw": "".join(raw)} if field is not None else {})})
         except Exception as error:  # noqa: BLE001 — the stream already started: report in-band
-            yield event({"type": "error", "message": repr(error)[:300], "at_ms": ms()})
+            yield failed("failed", "stage_failed", error)
 
-    return StreamingResponse(run(), media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
+    return StreamingResponse(first_audio_deadline(bounded(), sound, cfg, voice, lang, ms, event, pcm), media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
                              headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
 
 
@@ -423,20 +767,61 @@ async def audio_stream(ws: WebSocket, language: str = "", chunk_size: float = 1.
     finally:
         closed = True
         decoder.cancel()
-        for msg in await asyncio.to_thread(session.finish):
-            await send(msg)
 
 
-async def proxy(request: Request, url: str):
+def wants_stream(body: bytes) -> bool:
+    try:
+        return json.loads(body).get("stream") is True
+    except (ValueError, AttributeError):
+        return False
+
+
+async def proxy(request: Request, url: str, stage: str):
+    t0 = time.perf_counter()
     body = await request.body()
-    upstream = await client.send(client.build_request("POST", url, content=body,
-                                                      headers={"content-type": request.headers.get("content-type", "application/json")}),
-                                 stream=True)
+    proxied[stage]["started"] += 1
+
+    def cut(error: BaseException) -> dict:
+        kind = "stalled" if isinstance(error, asyncio.TimeoutError) else "failed"
+        proxied[stage][kind] += 1
+        print("proxy", kind, stage, f"{round((time.perf_counter() - t0) * 1000)}ms", repr(error)[:300], flush=True)
+        return {"error": {"message": f"{stage} upstream {kind}: {error!r}"[:300], "type": "upstream_error",
+                          "code": "upstream_stalled" if kind == "stalled" else "stage_failed"}}
+
+    async def within(step, gap: bool):
+        left = PROXY_DEADLINE_S - (time.perf_counter() - t0)
+        if gap and left >= PROXY_MAX_GAP_S:
+            left, why = PROXY_MAX_GAP_S, f"no data for {PROXY_MAX_GAP_S} s"
+        else:
+            why = f"request longer than {PROXY_DEADLINE_S} s"
+        try:
+            return await asyncio.wait_for(step, max(left, 0))
+        except asyncio.TimeoutError:
+            raise asyncio.TimeoutError(why) from None
+
+    try:
+        upstream = await within(client.send(client.build_request(
+            "POST", url, content=body, headers={"content-type": request.headers.get("content-type", "application/json")}),
+            stream=True), wants_stream(body))
+    except (asyncio.TimeoutError, httpx.HTTPError) as error:
+        return JSONResponse(cut(error), status_code=504 if isinstance(error, asyncio.TimeoutError) else 502)
+    sse = "text/event-stream" in upstream.headers.get("content-type", "")
 
     async def chunks():
+        source = upstream.aiter_raw()
         try:
-            async for chunk in upstream.aiter_raw():
-                yield chunk
+            while True:
+                try:
+                    yield await within(source.__anext__(), True)
+                except StopAsyncIteration:
+                    proxied[stage]["done"] += 1
+                    return
+                except (asyncio.TimeoutError, httpx.HTTPError) as error:
+                    event = cut(error)
+                    if not sse:
+                        raise
+                    yield b"\n\ndata: " + json.dumps(event).encode() + b"\n\n"
+                    return
         finally:
             await upstream.aclose()
     return StreamingResponse(chunks(), status_code=upstream.status_code,
@@ -445,12 +830,19 @@ async def proxy(request: Request, url: str):
 
 @app.post("/v1/chat/completions")
 async def chat(request: Request):
-    return await proxy(request, f"{LLM_URL}/v1/chat/completions")
+    return await proxy(request, f"{LLM_URL}/v1/chat/completions", "chat")
 
 
 @app.post("/v1/audio/speech")
 async def speech(request: Request):
-    return await proxy(request, f"{TTS_URL}/v1/audio/speech")
+    body = await request.body()
+    try:
+        asked = json.loads(body)
+    except ValueError:
+        asked = None
+    if isinstance(asked, dict) and "kokoro" in str(asked.get("model", "")).lower():
+        return await kokoro_speech(asked)
+    return await proxy(request, f"{TTS_URL}/v1/audio/speech", "speech")
 
 
 @app.get("/refs/{name}")
@@ -466,9 +858,166 @@ async def list_voices():
     return {"voices": [{"id": k, **{f: v[f] for f in v if f != "audio"}} for k, v in voices.items()]}
 
 
+# ── Kokoro-82M: stock voices, CPU, next to Qwen3-TTS ─────────────────────────
+
+KOKORO_DIR = Path(os.environ.get("KOKORO_DIR", "/models/kokoro"))
+KOKORO_VOICES = {"pt": ("pf_dora", "pm_alex"), "en": ("af_heart", "am_michael"), "fr": ("ff_siwis", "ff_siwis"),
+                 "es": ("ef_dora", "em_alex"), "it": ("if_sara", "im_nicola")}
+KOKORO_ESPEAK = {"a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "h": "hi", "i": "it", "j": "ja", "p": "pt-br", "z": "cmn"}
+LANGUAGE_CODES = {"portuguese": "pt", "english": "en", "french": "fr", "spanish": "es", "italian": "it"}
+KOKORO_FORMATS = {"mp3": "audio/mpeg", "opus": "audio/ogg", "aac": "audio/aac", "flac": "audio/flac"}
+
+
+def language_code(value) -> str | None:
+    text = str(value or "").strip().lower()
+    return LANGUAGE_CODES.get(text) or (text[:2] if text[:2] in KOKORO_VOICES else None)
+
+
+def kokoro_voice(voice, language, known) -> tuple[str, str]:
+    """(Kokoro voice, espeak language). A Kokoro voice the client names is kept; anything else (a cast id, an OpenAI
+    name) becomes the language's stock voice, masculine for an `xx-m-…` id. The text's language wins over the voice's."""
+    code = language_code(language)
+    voice = str(voice or "")
+    if voice not in known:
+        masculine = bool(re.match(r"^[a-z]{2}-m-", voice, re.I))
+        voice = KOKORO_VOICES[code or "pt"][masculine]
+    lang = {"pt": "pt-br", "en": "en-us", "fr": "fr-fr", "es": "es", "it": "it"}.get(code) or KOKORO_ESPEAK.get(voice[0], "pt-br")
+    return voice, lang
+
+
+def pcm16(samples: np.ndarray) -> bytes:
+    return (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+
+
+def wav_header(data_bytes: int) -> bytes:
+    return (b"RIFF" + struct.pack("<I", min(36 + data_bytes, 0xFFFFFFFF)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE, SAMPLE_RATE * 2, 2, 16)
+            + b"data" + struct.pack("<I", data_bytes))
+
+
+def openai_error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse({"error": {"message": message, "type": "invalid_request_error" if status == 400 else "upstream_error", "code": code}},
+                        status_code=status)
+
+
+async def kokoro_speech(asked: dict):
+    """OpenAI `/v1/audio/speech` on Kokoro: `input`, `voice` (a Kokoro voice, or any id → the language's stock voice),
+    `language` (ISO code or name; default the voice's), `speed` (0.5–2), `response_format` pcm (s16le mono 24 kHz, as
+    the Qwen path) | wav (default) | mp3 | opus | aac | flac, `stream: true` (pcm/wav) sends each sentence as it is made."""
+    text = str(asked.get("input") or "").strip()
+    if not text:
+        return openai_error(400, "invalid_input", "input is empty")
+    if kokoro_engine is None:
+        return openai_error(503, f"kokoro_{kokoro_state['status']}", f"kokoro is {kokoro_state['status']}: {kokoro_state.get('detail', '')}".strip(": "))
+    voice, lang = kokoro_voice(asked.get("voice"), asked.get("language"), kokoro_state["voices"])
+    try:
+        speed = min(2.0, max(0.5, float(asked.get("speed") or 1.0)))
+    except (TypeError, ValueError):
+        return openai_error(400, "invalid_speed", "speed must be a number")
+    fmt = str(asked.get("response_format") or "wav")
+    if fmt not in ("pcm", "wav", *KOKORO_FORMATS):
+        return openai_error(400, "invalid_response_format", f"response_format must be pcm, wav or one of {', '.join(KOKORO_FORMATS)}")
+    if asked.get("stream") is True and fmt in ("pcm", "wav"):
+        async def chunks():
+            if fmt == "wav":
+                yield wav_header(0xFFFFFFFF - 36)
+            async for samples, _ in kokoro_engine.create_stream(text, voice=voice, speed=speed, lang=lang):
+                yield pcm16(samples)
+        return StreamingResponse(chunks(), media_type="audio/pcm" if fmt == "pcm" else "audio/wav", headers={"X-Accel-Buffering": "no"})
+    try:
+        samples, _ = await asyncio.to_thread(kokoro_engine.create, text, voice=voice, speed=speed, lang=lang)
+    except Exception as error:  # noqa: BLE001
+        print("kokoro", voice, lang, repr(error)[:300], flush=True)
+        return openai_error(502, "stage_failed", f"kokoro: {error!r}"[:300])
+    audio = pcm16(samples)
+    if fmt == "pcm":
+        return Response(audio, media_type="audio/pcm")
+    if fmt == "wav":
+        return Response(wav_header(len(audio)) + audio, media_type="audio/wav")
+    encoded = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-loglevel", "error", "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1",
+                                                      "-i", "pipe:0", "-f", {"aac": "adts"}.get(fmt, fmt), "pipe:1"],
+                                      input=audio, capture_output=True, check=True)
+    return Response(encoded.stdout, media_type=KOKORO_FORMATS[fmt])
+
+
+def load_kokoro_sync():
+    from kokoro_onnx import EspeakConfig, Kokoro
+    engine = Kokoro(str(KOKORO_DIR / "model.onnx"), str(KOKORO_DIR / "voices.npz"),
+                    espeak_config=EspeakConfig(data_path=os.environ.get("KOKORO_ESPEAK_DATA") or None))
+    engine.create("Olá, bom dia.", voice="pf_dora", lang="pt-br")
+    return engine
+
+
+async def load_kokoro() -> None:
+    global kokoro_engine
+    try:
+        engine = await asyncio.to_thread(load_kokoro_sync)
+        kokoro_state.update(status="loaded", voices=engine.get_voices())
+        kokoro_engine = engine
+    except Exception as error:  # noqa: BLE001 — Kokoro failing never takes the Qwen3-TTS path down
+        kokoro_state.update(status="failed", detail=repr(error)[:300])
+        print("kokoro", repr(error)[:300], flush=True)
+
+
+# ── Engine logs ──────────────────────────────────────────────────────────────
+
+LOG_DIR = Path("/var/log")
+LOG_ENGINES = ("tts", "llm", "stt")
+LOG_MAX_TAIL = 2000
+LOG_MAX_LINE = 2000
+SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL", re.I)
+SECRET_VALUES = sorted((v for k, v in os.environ.items() if SECRET_ENV.search(k) and len(v) >= 8), key=len, reverse=True)
+SECRET_TEXT = re.compile(r"(?i)\b(bearer\s+|[\w-]*(?:token|secret|password|passwd|api[_-]?key|authorization)[\w-]*[\"']?\s*[=:]\s*[\"']?)"
+                         r"[^\s\"',;&]{12,}|\b(?:hf|sk|ghp|scw)[_-][A-Za-z0-9_-]{16,}")
+
+
+def scrub(line: str) -> str:
+    for value in SECRET_VALUES:
+        line = line.replace(value, "[redacted]")
+    return SECRET_TEXT.sub(lambda found: (found.group(1) or "") + "[redacted]", line)[:LOG_MAX_LINE]
+
+
+def log_tail(engine: str, tail: int, match: str) -> list[str]:
+    lines: list[str] = []
+    for path in (LOG_DIR / f"{engine}.log.1", LOG_DIR / f"{engine}.log"):
+        if path.exists():
+            lines += [line for line in path.read_text(errors="replace").splitlines() if match in line]
+    return [scrub(line) for line in lines[-max(1, min(tail, LOG_MAX_TAIL)):]]
+
+
+def behind_front(host: str | None) -> bool:
+    try:
+        return ipaddress.ip_address(host or "").is_private
+    except ValueError:
+        return False
+
+
+@app.get("/debug/logs")
+async def debug_logs(request: Request, engine: str = "tts", tail: int = 200, match: str = ""):
+    if not behind_front(request.client.host if request.client else None):
+        raise HTTPException(403, "only through the replica's token-gated front")
+    if engine not in LOG_ENGINES:
+        raise HTTPException(400, f"engine must be one of {', '.join(LOG_ENGINES)}")
+    return PlainTextResponse("\n".join(await asyncio.to_thread(log_tail, engine, tail, match)) + "\n")
+
+
+def gpu_memory() -> list[dict]:
+    out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                         capture_output=True, text=True, timeout=5, check=True).stdout
+    cards = [[int(value) for value in line.split(",")] for line in out.splitlines() if line.strip()]
+    return [{"used_mb": used, "total_mb": total, "free_mb": total - used} for used, total in cards]
+
+
+@app.get("/debug/gpu")
+async def debug_gpu(request: Request):
+    if not behind_front(request.client.host if request.client else None):
+        raise HTTPException(403, "only through the replica's token-gated front")
+    return {"gpu": await asyncio.to_thread(gpu_memory)}
+
+
 @app.get("/health")
 async def health():
-    return JSONResponse({**ready, "stt": stt_batcher.stats}, status_code=200 if ready["ok"] else 503)
+    return JSONResponse({**ready, "models": MODELS, "stt": stt_batcher.stats, "s2s": turns, "proxy": proxied,
+                         "kokoro": {k: v for k, v in kokoro_state.items() if k != "voices"}}, status_code=200 if ready["ok"] else 503)
 
 
 # ── Warm-up: the first real request must not pay kernel loads ───────────────
@@ -480,11 +1029,17 @@ async def warm() -> None:
         await asyncio.gather(*[asyncio.to_thread(stt_batcher.transcribe, silence, "pt") for _ in range(STT_BATCH)])
         async for _ in llm_stream([{"role": "user", "content": "Diga oi."}], 8, 0.0):
             pass
+        ready["llm_ctx"] = await llm_slot_ctx()
         voice = next(iter(voices.values()), None)
         if voice:
             for line in ("Olá, bom dia.", "Tudo bem? Então vamos lá."):
                 queue: asyncio.Queue = asyncio.Queue()
                 await tts_stream(line, "Portuguese", voice, queue)
+        for name, other in list(voices.items())[1:]:
+            try:
+                await tts_stream("Olá, bom dia.", LANGUAGE.get(other.get("lang", "pt")[:2], "Portuguese"), other, asyncio.Queue())
+            except Exception as error:  # noqa: BLE001
+                print("warm voice", name, repr(error), flush=True)
         ready.update(ok=True, detail="warm", voices=len(voices))
     except Exception as error:  # noqa: BLE001
         ready.update(ok=False, detail=f"warm failed: {error!r}"[:300])
@@ -493,3 +1048,4 @@ async def warm() -> None:
 @app.on_event("startup")
 async def startup() -> None:
     asyncio.create_task(warm())
+    asyncio.create_task(load_kokoro())

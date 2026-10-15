@@ -1,0 +1,7 @@
+{
+  "name": "parle-livekit",
+  "description": "parle: the LiveKit server on one Scaleway POP2-HC-48C-96G, registered by its owner; declared here only the monthly ceiling",
+  "spec": {
+    "scaling": { "budget": { "eurPerMonth": 60 } }
+  }
+}

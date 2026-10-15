@@ -4,7 +4,7 @@
  * The namespace keeps two gateways sharing one Scaleway project from adopting (or deleting) each other's machines.
  */
 
-import { ScalewayClient } from '../cpu-providers/scaleway-client';
+import { KNOWN_ZONES, PartialListError, ScalewayClient, type ScalewayFirewallRule } from '../cpu-providers/scaleway-client';
 import type { GpuInstance, ProviderCredentials } from '../gpu-providers/types';
 import { DEFAULT_RT_UDP_PORTS } from './cloud-init';
 import { PROBE_PORT } from './spec';
@@ -19,7 +19,8 @@ const GPU_OS_IMAGE_FR_PAR_2 = '3307b9e4-3cfa-49b5-896e-ce914e4ef4aa';
 
 type ScalewayLike = Pick<ScalewayClient, 'createInstance' | 'listInstancesByTag' | 'releaseInstance' | 'getHourlyPrice' | 'imageLike'>
   & Partial<Pick<ScalewayClient, 'reserveRoutedIp' | 'listIps' | 'deleteIp' | 'createSecurityGroup' | 'listSecurityGroups'
-    | 'deleteSecurityGroup' | 'startInstance' | 'stopInstance' | 'listGpuOffers' | 'defaultProjectId'>>;
+    | 'deleteSecurityGroup' | 'listSecurityGroupRules' | 'addSecurityGroupRule' | 'deleteSecurityGroupRule' | 'startInstance'
+    | 'stopInstance' | 'listGpuOffers' | 'defaultProjectId'>>;
 
 /**
  * The one port a gateway-only replica opens: its token-gated nginx (cloud-init.ts `nginxConfig`, :80). Everything else
@@ -44,15 +45,30 @@ export function realtimeRule(spec: Pick<DeploymentSpec, 'realtime'>): { protocol
   return { protocol: 'UDP', port: lo, portTo: hi };
 }
 
+function base64Forms(secret: string): string[] {
+  const bytes = Buffer.byteLength(secret);
+  return [0, 1, 2].map(k => Buffer.from('\0'.repeat(k) + secret).toString('base64').slice(Math.ceil((8 * k) / 6), Math.floor((8 * (k + bytes)) / 6)));
+}
+
+export function scalewayRegistryOf(image: string): string | null {
+  return /^(rg\.[a-z]{2}-[a-z]{3}\.scw\.cloud)\//.exec(image)?.[1] ?? null;
+}
+
+const TOKEN_KEY_TAG = 'aigw-rk-';
+export const TLS_TAG = 'aigw-tls';
+
 function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachine | null {
   const meta = (inst.providerMeta ?? {}) as Record<string, unknown>;
   const tags = (meta.tags as string[] | undefined) ?? [];
   const deployment = tags.find(t => t.startsWith('aigw-dep-'))?.slice('aigw-dep-'.length) ?? fallbackDeployment;
   if (!deployment) return null;
   const created = typeof meta.createdAt === 'string' ? Date.parse(meta.createdAt) : NaN;
+  const tokenKey = tags.find(t => t.startsWith(TOKEN_KEY_TAG))?.slice(TOKEN_KEY_TAG.length);
   return {
     id: inst.instanceId,
     deployment,
+    ...(tokenKey ? { tokenKey } : {}),
+    ...(tags.includes(TLS_TAG) ? { tls: true } : {}),
     ip: inst.ipAddress ?? null,
     state: typeof meta.state === 'string' ? meta.state : String(inst.status ?? 'starting'),
     createdAt: Number.isFinite(created) ? created : Date.now(),
@@ -65,7 +81,7 @@ function toMachine(inst: GpuInstance, fallbackDeployment?: string): ReplicaMachi
 
 export class ScalewayDeploymentBackend implements DeploymentBackend {
   readonly provider = 'scaleway' as const;
-  private readonly credentials: ProviderCredentials;
+  private credentials: ProviderCredentials;
   private readonly client: ScalewayLike;
 
   /**
@@ -73,9 +89,33 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
    * not wait minutes for a detach; its process lives on to finish them); the reaper, a cron process that exits right
    * after, must — or its volumes would keep billing (scripts/reap-orphans.ts).
    */
-  constructor(secretKey: string, private readonly opts: { projectId?: string; client?: ScalewayLike; awaitVolumes?: boolean } = {}) {
+  constructor(secretKey: string, private readonly opts: {
+    projectId?: string; client?: ScalewayLike; awaitVolumes?: boolean; registrySecret?: string; gpuOff?: string;
+  } = {}) {
     this.credentials = { apiKey: secretKey } as ProviderCredentials;
     this.client = opts.client ?? new ScalewayClient();
+  }
+
+  get gpuOff(): string | null { return this.opts.gpuOff ?? null; }
+
+  get secretKey(): string { return this.credentials.apiKey as string; }
+
+  get projectId(): string | undefined { return this.opts.projectId; }
+
+  get registrySecret(): string | undefined { return this.opts.registrySecret; }
+
+  async rotateCredentials(next: { secretKey: string; projectId?: string; registrySecret?: string }): Promise<void> {
+    const credentials = { apiKey: next.secretKey } as ProviderCredentials;
+    try {
+      await this.client.listInstancesByTag(DEPLOY_TAG, credentials, next.projectId ? { projectId: next.projectId } : {});
+    } catch (err) {
+      if (!(err instanceof PartialListError) || err.failedZones.length >= KNOWN_ZONES.length) {
+        throw new Error(`the new Scaleway credentials were refused: ${err instanceof Error ? err.message.slice(0, 200) : 'error'}`);
+      }
+    }
+    this.credentials = credentials;
+    this.opts.projectId = next.projectId;
+    this.opts.registrySecret = next.registrySecret;
   }
 
   private async osImage(input: CreateReplicaInput): Promise<string | undefined> {
@@ -90,6 +130,15 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   async createReplica(input: CreateReplicaInput): Promise<ReplicaMachine> {
     const { spec } = input;
+    const secret = this.credentials.apiKey as string;
+    const files = Object.values(input.files ?? {}).map(bytes => Buffer.from(bytes).toString('utf8'));
+    const forms = secret ? [secret, ...base64Forms(secret)] : [];
+    if ([input.cloudInit, ...files].some(text => forms.some(form => text.includes(form)))) {
+      throw new Error('refusing to send the Scaleway API secret to a machine (user_data); use a read-only registry credential');
+    }
+    if (scalewayRegistryOf(spec.image) && !spec.registryAuth && !spec.bootScript && !this.registryAuthFor(spec.image)) {
+      throw new Error(`${spec.image} is on the private Scaleway registry: set SCW_REGISTRY_SECRET_KEY (a registry read-only IAM key)`);
+    }
     const imageId = await this.osImage(input);
     // Every replica gets a firewall: an exposed one its deployment's (declared ports + probe), any other the
     // namespace's gateway-only group. Without one Scaleway attaches the project's "Default security group", whose
@@ -101,7 +150,7 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
       commercialType: spec.machineType,
       ...(imageId ? { imageId } : {}),
       ...(spec.volumeGb ? { volumeGb: spec.volumeGb } : {}),
-      tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name)],
+      tags: [DEPLOY_TAG, nsTag(input.namespace), depTag(spec.name), TLS_TAG, ...(input.tokenKey ? [`${TOKEN_KEY_TAG}${input.tokenKey}`] : [])],
       cloudInit: input.cloudInit,
       securityGroupId,
       ...(input.network ? { publicIpIds: [input.network.ipId] } : {}),
@@ -116,10 +165,27 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
 
   async listReplicas(namespace: string): Promise<ReplicaMachine[]> {
     const list = await this.client.listInstancesByTag(nsTag(namespace), this.credentials,
-      this.opts.projectId ? { projectId: this.opts.projectId } : {});
+      this.opts.projectId ? { projectId: this.opts.projectId } : {}).catch(async (err: unknown) => {
+      if (!(err instanceof PartialListError)) throw err;
+      throw new PartialListError(await this.machinesOf(err.items as GpuInstance[]), err.failedZones, err.message);
+    });
+    return this.machinesOf(list);
+  }
+
+  private async machinesOf(list: GpuInstance[]): Promise<ReplicaMachine[]> {
     const machines = list.map(inst => toMachine(inst)).filter((m): m is ReplicaMachine => m !== null);
     // The list does not carry the price (a replica adopted after a restart showed `null`): the catalog has it.
     return Promise.all(machines.map(async m => (m.pricePerHour == null ? { ...m, pricePerHour: await this.priceOrNull(m) } : m)));
+  }
+
+  async listForeign(namespace: string): Promise<Array<ReplicaMachine & { namespace: string }>> {
+    const list = await this.client.listInstancesByTag(DEPLOY_TAG, this.credentials, this.opts.projectId ? { projectId: this.opts.projectId } : {});
+    return list.flatMap((inst) => {
+      const tags = ((inst.providerMeta ?? {}) as { tags?: string[] }).tags ?? [];
+      const ns = tags.find(t => t.startsWith('aigw-ns-'))?.slice('aigw-ns-'.length);
+      const machine = toMachine(inst);
+      return machine && ns && ns !== namespace ? [{ ...machine, namespace: ns }] : [];
+    });
   }
 
   /** Catalog price of a listed machine, looked up once an hour per zone+type (the list runs every 20 s). */
@@ -191,7 +257,8 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
   /**
    * Reserved IP + firewall of an exposed deployment, tagged like its replicas. `known` (from the deployment record) is
    * reused while it still exists; otherwise any IP/firewall already tagged for this deployment is (a create that died
-   * after reserving must not leak a second IP — the 06/10/2026 LiveKit leak).
+   * after reserving must not leak a second IP — the 06/10/2026 LiveKit leak). A reused firewall gets its rules brought
+   * to what the spec asks for now (`reconcileRules`).
    */
   async ensureNetwork(spec: DeploymentSpec, namespace: string, known?: DeploymentNetwork): Promise<DeploymentNetwork> {
     if (!spec.exposure) throw new Error(`deployment '${spec.name}' has no exposure`);
@@ -202,17 +269,31 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
     const ip = (known?.zone === zone ? ips.find(i => i.id === known.ipId) : undefined) ?? ips[0]
       ?? await this.need('reserveRoutedIp')(zone, this.credentials, { projectId, tags });
     const groupName = `aigw-${namespace}-${spec.name}`;
-    const groups = await this.need('listSecurityGroups')(zone, this.credentials, { projectId, name: groupName });
-    const groupId = (known?.zone === zone ? groups.find(g => g.id === known.groupId)?.id : undefined) ?? groups[0]?.id
-      ?? await this.need('createSecurityGroup')(zone, this.credentials, {
-        projectId, name: groupName, tags, description: `ai-gateway exposed deployment ${spec.name}`,
-        rules: [
-          ...[...spec.exposure.ports, { protocol: 'tcp' as const, port: PROBE_PORT, to: undefined }]
-            .map(r => ({ protocol: r.protocol === 'udp' ? 'UDP' as const : 'TCP' as const, port: r.port, ...(r.to ? { portTo: r.to } : {}) })),
-          ...(realtimeRule(spec) ? [realtimeRule(spec)!] : []),
-        ],
-      });
+    const groups = (await this.need('listSecurityGroups')(zone, this.credentials, { projectId, name: groupName })).filter(g => g.name === groupName);
+    const rt = realtimeRule(spec);
+    const rules: ScalewayFirewallRule[] = [
+      ...[...spec.exposure.ports, { protocol: 'tcp' as const, port: PROBE_PORT, to: undefined }]
+        .map(r => ({ protocol: r.protocol === 'udp' ? 'UDP' as const : 'TCP' as const, port: r.port, ...(r.to ? { portTo: r.to } : {}) })),
+      ...(rt ? [rt] : []),
+    ];
+    const existing = (known?.zone === zone ? groups.find(g => g.id === known.groupId)?.id : undefined) ?? groups[0]?.id;
+    if (existing) await this.reconcileRules(zone, existing, rules);
+    const groupId = existing ?? await this.need('createSecurityGroup')(zone, this.credentials, {
+      projectId, name: groupName, tags, description: `ai-gateway exposed deployment ${spec.name}`, rules,
+    });
     return { zone, ipId: ip.id, ip: ip.address, groupId };
+  }
+
+  private async reconcileRules(zone: string, groupId: string, wanted: ScalewayFirewallRule[]): Promise<void> {
+    const keyOf = (r: { protocol: string; port: number | null; portTo?: number | null }) => `${r.protocol}:${r.port}-${r.portTo || r.port}`;
+    const missing = new Map(wanted.map(r => [keyOf(r), r]));
+    for (const rule of await this.need('listSecurityGroupRules')(zone, groupId, this.credentials)) {
+      const ours = rule.editable && rule.direction === 'inbound' && rule.action === 'accept' && rule.ipRange === '0.0.0.0/0'
+        && (rule.protocol === 'TCP' || rule.protocol === 'UDP') && rule.port !== null;
+      if (!ours) continue;
+      if (!missing.delete(keyOf(rule))) await this.need('deleteSecurityGroupRule')(zone, groupId, rule.id, this.credentials);
+    }
+    for (const rule of missing.values()) await this.need('addSecurityGroupRule')(zone, groupId, rule, this.credentials);
   }
 
   /**
@@ -250,9 +331,11 @@ export class ScalewayDeploymentBackend implements DeploymentBackend {
     return offers.map(o => ({ zone: o.zone, machineType: o.commercialType, hourlyPrice: o.hourlyPrice, availability: o.availability }));
   }
 
-  /** Scaleway Container Registry (`rg.<region>.scw.cloud/<namespace>/…`) logs in with user `nologin` and the API secret. */
+  /** Scaleway Container Registry (`rg.<region>.scw.cloud/<namespace>/…`) logs in with user `nologin` and SCW_REGISTRY_SECRET_KEY. */
   registryAuthFor(image: string): RegistryAuth | null {
-    const server = /^(rg\.[a-z]{2}-[a-z]{3}\.scw\.cloud)\//.exec(image)?.[1];
-    return server ? { server, username: 'nologin', password: this.credentials.apiKey as string } : null;
+    const server = scalewayRegistryOf(image);
+    const password = this.opts.registrySecret?.trim();
+    if (!server || !password || password === this.credentials.apiKey) return null;
+    return { server, username: 'nologin', password };
   }
 }

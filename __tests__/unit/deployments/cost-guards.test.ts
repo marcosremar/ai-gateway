@@ -229,3 +229,31 @@ describe('DELETE while a replica is being created', () => {
     expect(cloud.releaseAttempts).toBe(3);
   });
 });
+
+describe('the replica cap keeps the floor of every deployment (vast stress D6)', () => {
+  it('a burst above its own floor leaves the slot another deployment needs for its minReplicas', async () => {
+    const cloud = new FakeCloud();
+    const controller = new DeploymentController({
+      backend: cloud, store: new MemoryDeploymentStore(), probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 20,
+      maxTotalReplicas: 2,
+    });
+    controllers.push(controller);
+    clouds.push(cloud);
+    await controller.init();
+    await controller.put('burst', { profile: 'cpu-echo', maxReplicas: 2, maxEurPerHour: 2, scaling: { hold: { replicas: 2, untilMinutes: 60 } } });
+    await controller.put('kept', { profile: 'cpu-echo', minReplicas: 1, maxEurPerHour: 2 });
+    controller.start();
+    await until(() => controller.get('kept')!.status === 'ready', 3000);
+    await wait(150);
+    expect(cloud.created.map(c => c.spec.name).sort()).toEqual(['burst', 'kept']);
+    expect(controller.get('burst')!.lastError).toMatch(/replica cap reached/);
+  });
+
+  it('a deployment below its own floor still fills it up to the cap', async () => {
+    const x = await setup({ maxTotalReplicas: 2 });
+    await x.controller.put('kept', { profile: 'cpu-echo', minReplicas: 1, maxEurPerHour: 2, paused: true });
+    await x.controller.put('own', { profile: 'cpu-echo', minReplicas: 2, maxReplicas: 2, maxEurPerHour: 2 });
+    await until(() => x.cloud.created.length === 2, 3000);
+    expect(x.cloud.created.map(c => c.spec.name)).toEqual(['own', 'own']);
+  });
+});

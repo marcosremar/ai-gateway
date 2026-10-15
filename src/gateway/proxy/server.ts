@@ -11,16 +11,16 @@ import { validateAuth } from './middleware/auth';
 import { RateLimiter } from './middleware/rate-limit';
 import { SECURITY_HEADERS, applySecurityHeaders } from '../../middleware/security-headers';
 import { handleChatCompletions } from './routes/chat-completions';
-import { inferenceKindOf } from './app-limits';
+import { denialError, inferenceKindOf } from './app-limits';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
 import { sttFilterStats } from './routes/stt-filter';
-import { markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, withNoWakeScope } from './no-wake';
+import { markNoUse, markNoWake, NO_WAKE_HEADER, noWakeStats, requestIsNoWake, withNoWakeScope } from './no-wake';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
-import { createLogger, withLogContext } from '../../logger';
-import { ApiKeyRegistry } from './middleware/api-keys';
+import { createLogger, getLogContext, withLogContext } from '../../logger';
+import { ApiKeyRegistry, bearerToken } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from './internal-subrequest';
 import {
@@ -164,7 +164,9 @@ function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: s
           }
         }
       } catch {
-        // Client disconnected mid-stream — not an error
+        // The upstream body broke mid-stream: the client must see a cut connection, never a clean end.
+        clientGone = true;
+        res.destroy();
       } finally {
         if (!clientGone) res.end();
       }
@@ -441,7 +443,7 @@ let peakConnections = 0;
 const userConcurrency = new Map<string, number>();
 const RESERVED_FIELD_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 /**
- * Requests in flight per API key user. One key usually serves a whole application (parle: every student of a school
+ * Requests in flight per API key user. One key usually serves a whole application (parle: every student of a class
  * on the same key), so the old default of 20 turned a class of 25 speaking at once into 429s (prod stress 2026-10-06:
  * 21/50 served at 50 concurrent, the rest "Too many concurrent requests (limit: 20)"). The limit guards the gateway
  * against one runaway caller, not against an app's normal load; upstream capacity is governed by the providers.
@@ -484,7 +486,7 @@ export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   // Build the API key registry for user identity resolution.
   // Supports both legacy format ("key1,key2") and new format ("key1:user1,key2:user2").
-  const keyRegistry = new ApiKeyRegistry(apiKeys.join(','));
+  const keyRegistry = config.keyRegistry ?? new ApiKeyRegistry(apiKeys.join(','));
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
   const concurrency = concurrencyLimits();
 
@@ -585,16 +587,22 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
       userId = 'localhost';
     } else {
-      const token = (authHeader || '').replace(/^Bearer\s+/i, '');
-      const resolved = keyRegistry.resolve(token);
+      const resolved = keyRegistry.resolve(bearerToken(authHeader));
       if (!resolved) {
         sendError(res, 401, 'Invalid or missing API key', requestId);
         return;
       }
       userId = resolved.userId;
     }
+    const logContext = getLogContext();
+    if (logContext) logContext.userId = userId;
     // No-wake mode (no-wake.ts): deployment targets with no ready replica are skipped, never woken.
     if (requestIsNoWake(req.headers[NO_WAKE_HEADER], userId)) markNoWake();
+    else if (config.autoWake?.(bearerToken(authHeader)) === false) {
+      const bearer = bearerToken(authHeader);
+      markNoWake(config.mayWake && ((deployment: string) => config.mayWake!(bearer, deployment)));
+    }
+    if (config.countsAsUse?.(bearerToken(authHeader)) === false) markNoUse();
     if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
       config.onAuth(token).catch((err) => {
@@ -707,6 +715,15 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
       sendError(res, 410, 'WebSocket transport is removed. Use POST /v1/s2s (speech-to-speech) or POST /v1/chat/completions instead.', requestId);
       return;
+    }
+
+    const deviceKind = method === 'POST' && path === '/v1/s2s' ? 's2s' : inferenceKindOf(method, path);
+    if (config.deviceGate && deviceKind && !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress)) {
+      const denial = config.deviceGate(userId, req.headers, deviceKind);
+      if (denial) {
+        sendResponse(res, { status: denial.status, body: { error: denialError(denial) } }, requestId);
+        return;
+      }
     }
 
     // Custom routes (bypass body parsing — handler owns the request)
@@ -836,13 +853,14 @@ export function createProxyServer(config: ProxyConfig): Server {
       // An s2s turn's own stages (loopback, internal sub-request) were charged once when the turn was admitted
       // (src/s2s/access.ts): their aliases are still checked, the daily budget is not charged twice.
       const kind = config.appLimits ? inferenceKindOf(method, path) : null;
+      const charged = { requests: 0, tokens: 0 };
       if (kind && config.appLimits) {
         const fields = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
         const charge = !isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress);
-        const denial = config.appLimits.check(userId, kind, fields, { charge });
+        const denial = config.appLimits.check(userId, kind, fields, { charge, receipt: charged });
         if (denial) {
           if (denial.retryAfterSeconds) res.setHeader('Retry-After', denial.retryAfterSeconds);
-          sendResponse(res, { status: denial.status, body: { error: { message: denial.message, type: denial.type } } }, requestId);
+          sendResponse(res, { status: denial.status, body: { error: denialError(denial) } }, requestId);
           return;
         }
       }
@@ -876,7 +894,8 @@ export function createProxyServer(config: ProxyConfig): Server {
         if (!config.providers.tts && !config.providers.unavailable?.tts) {
           proxyRes = { status: 404, body: { error: { message: 'No TTS providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts);
+          proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts ?? {}, config.providers.unavailable?.tts, undefined,
+            config.ttsCache ? { cache: config.ttsCache.cache, scope: userId, gpuOnly: config.ttsCache.requiresGpu?.(userId) ?? false } : undefined);
         }
       } else if (method === 'POST' && path === '/v1/audio/transcriptions') {
         if (!config.providers.stt && !config.providers.unavailable?.stt) {
@@ -895,6 +914,24 @@ export function createProxyServer(config: ProxyConfig): Server {
         proxyRes = { status: 404, body: { error: { message: `Route not found: ${method} ${url}`, type: 'invalid_request_error' } } };
       }
 
+      if (proxyRes.status >= 500) config.appLimits?.refund?.(userId, charged);
+      const servedKind = config.onInference ? inferenceKindOf(method, path) : null;
+      if (servedKind) {
+        try {
+          config.onInference!({ userId, kind: servedKind, headers: req.headers, body, rawBody, status: proxyRes.status, response: proxyRes.body });
+        } catch (err) {
+          log.error({ err }, 'onInference hook failed');
+        }
+      }
+      const answeredKind = config.onServed ? inferenceKindOf(method, path) : null;
+      if (answeredKind) {
+        try {
+          const extra = config.onServed!({ userId, kind: answeredKind, status: proxyRes.status, headers: proxyRes.headers });
+          if (extra) proxyRes = { ...proxyRes, headers: { ...proxyRes.headers, ...extra } };
+        } catch (err) {
+          log.error({ err }, 'onServed hook failed');
+        }
+      }
       sendResponse(res, proxyRes, requestId);
     } catch (err) {
       if (err instanceof BodyTimeoutError) {

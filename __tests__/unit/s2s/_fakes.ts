@@ -28,32 +28,36 @@ async function* chunked(bytes: Uint8Array, size: number, delayMs = 0): AsyncIter
 }
 
 export interface FakeStagesOptions {
-  heard?: string;
-  reply?: string;
+  heard?: string | string[];
+  reply?: string | ((heard: string) => string);
   sttMs?: number;
   tokenMs?: number;
   ttsMs?: number;
   failTtsFor?: string;
   failSttWith?: string;
+  mp3For?: string;
   breakLlmAfter?: number;
 }
 
 /** Stage client with call log: STT returns `heard`, the LLM streams `reply` in 3-char tokens, TTS returns WAV whose
  *  PCM is the sentence's UTF-8 bytes (so the test can read back what was voiced). */
 export function fakeStages(o: FakeStagesOptions = {}) {
-  const calls: Array<{ stage: string; at: number; text?: string; cfg?: S2SConfig }> = [];
+  const calls: Array<{ stage: string; at: number; text?: string; cfg?: S2SConfig; hedgeMs?: number; signal?: AbortSignal }> = [];
+  let heardCalls = 0;
   const t0 = performance.now();
   const at = () => Math.round(performance.now() - t0);
   const stages: StageClient = {
-    async transcribe(_audio, _ct, cfg) {
-      calls.push({ stage: 'stt', at: at(), cfg });
+    async transcribe(_audio, _ct, cfg, signal, hedgeMs) {
+      calls.push({ stage: 'stt', at: at(), cfg, hedgeMs, signal });
+      const text = Array.isArray(o.heard) ? o.heard[Math.min(heardCalls++, o.heard.length - 1)] : o.heard;
       await sleep(o.sttMs ?? 5);
       if (o.failSttWith) throw new Error(o.failSttWith);
-      return { text: o.heard ?? 'Bom dia, eu queria um pão.', provider: 'deployment:parle-speech', fallback: null };
+      return { text: text ?? 'Bom dia, eu queria um pão.', provider: 'deployment:parle-speech', fallback: null };
     },
-    async chatStream(messages, cfg) {
-      calls.push({ stage: 'llm', at: at(), text: messages[messages.length - 1].content, cfg });
-      const reply = o.reply ?? 'Bom dia, querida! Aqui está o seu pão.';
+    async chatStream(messages, cfg, signal, hedgeMs) {
+      const asked = messages[messages.length - 1].content;
+      calls.push({ stage: 'llm', at: at(), text: asked, cfg, hedgeMs, signal });
+      const reply = (typeof o.reply === 'function' ? o.reply(asked) : o.reply) ?? 'Bom dia, querida! Aqui está o seu pão.';
       async function* deltas() {
         for (let i = 0, n = 0; i < reply.length; i += 3, n++) {
           if (o.breakLlmAfter !== undefined && n >= o.breakLlmAfter) throw new Error('llm stream broke');
@@ -63,10 +67,11 @@ export function fakeStages(o: FakeStagesOptions = {}) {
       }
       return { deltas: deltas(), provider: 'openrouter:qwen/qwen3.5-9b', fallback: 'cold' };
     },
-    async speak(text): Promise<SpokenAudio> {
-      calls.push({ stage: 'tts', at: at(), text });
+    async speak(text, _cfg, _signal, hedgeMs): Promise<SpokenAudio> {
+      calls.push({ stage: 'tts', at: at(), text, hedgeMs });
       await sleep(o.ttsMs ?? 5);
       if (o.failTtsFor && text.includes(o.failTtsFor)) throw new Error('tts 503');
+      if (o.mp3For && text.includes(o.mp3For)) return { body: chunked(new TextEncoder().encode(text), 64), contentType: 'audio/mpeg', provider: 'openrouter:mai-tts', fallback: null };
       return { body: chunked(wav(new TextEncoder().encode(text)), 7, 1), contentType: 'audio/wav', provider: 'deployment:parle-qwen-tts', fallback: null };
     },
   };

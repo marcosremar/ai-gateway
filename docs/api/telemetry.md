@@ -88,7 +88,7 @@ decided per trace so a sampled trace is complete.
 2. **Beacon:** `navigator.sendBeacon` cannot set headers, so the session token may ride in the body
    (`{"token":"…","events":[…]}`), sent as `text/plain` (no CORS preflight).
 3. **App keys are server-to-server:** refused (403 `browser_app_key`) when the request has `Origin` or
-   `Sec-Fetch-Site` (Node and Bun `fetch` send neither); the SANDBOX_TOKEN family is always refused (403 `master_key`).
+   `Sec-Fetch-Site` (Node and Bun `fetch` send neither); the SANDBOX_TOKEN family is always refused, with the same `401 invalid_key` as a wrong key. An address with 20 failed credentials in a minute gets `429` for the rest of that minute.
 4. **Source per credential:** session token → always `browser`; edge → `edge` or `model`; app key → `app`, `browser`,
    `edge` or `model` as sent; `gateway` only from the gateway itself.
 5. **Clock sanity:** a source `ts` more than 24 h from the receive time is replaced by it and flagged
@@ -111,8 +111,10 @@ Unknown names are still accepted; these are the names the components emit.
 | `rt.ice.state` / `rt.ice.failed` | ICE state changes / failure (`state`, `candidateType`) |
 | `rt.turn.used` | TURN relay in use |
 | `vad.segment` | the browser VAD closed a segment (`durMs`, `speechMs`) |
-| `turn.first_audio` | first reply audio of a turn (`durMs` from end of speech; `turnId`) |
-| `turn.done` | turn finished (`durMs`, outcome code) |
+| `turn.first_audio` | first reply audio of a turn (`durMs` from the end of the turn, `fromSpeechMs` from the learner's end of speech; `turnId`) |
+| `turn.first_sound` | first sound of a turn at the page, opener or reply (`durMs` from the learner's end of speech, `source`, `uplinkBufferedBytes`) |
+| `rt.opener.cached` | opener clips the SDK holds for its own deadline (`clips`, `lines`) |
+| `turn.done` | turn finished (`durMs`, outcome code, `firstSoundMs`, `networkDelayMs`, `clientOpener`) |
 | `ws.close` | WebSocket closed (`code`) |
 | `error` | client error (name/code only; the emitter's opt-in `captureErrors` reports window errors as `browser.error`) |
 
@@ -145,9 +147,13 @@ Same sink, same scrubber (`emitGatewayEvent`, `src/telemetry/emit.ts`); inside a
 | `route.unavailable` (error) | no link could serve (`codes`) |
 | `breaker.open` (warn) | a link's circuit just opened |
 | `stt.filtered` | hallucination filter hit (`codes`, `rawLength`, `emptied`, `language` — never the text) |
+| `app.budget_warning` / `app.budget_exhausted` | an app's daily budget reached 80 % / refused its first request (`app`, `budget`, `used`, `limit`, `resetAt`); once per app, budget and UTC day |
 | `autoscale.decision` / `autoscale.warm` / `autoscale.reclaim` | the controller changed its plan (`desired`, `reason`, `blockedBy`, `load`, `p95Ms`) |
 | `replica.creating` / `.ready` (`durMs` = boot) / `.unhealthy` / `.draining` / `.released` / `.parked` / `.power_on` / `.too_far` / `.create_failed` | replica lifecycle |
 | `provider.list_failed` | the provider list call failed |
+| `replica.stage_out` (warn) / `replica.stage_back` | one stage (`stage`: stt, chat, tts, s2s) of one replica left / rejoined the rotation after repeated failures |
+| `stage.on_fallback` (warn) / `stage.on_primary` (`durMs` = time on fallback) | a stage chain started / stopped being served by a link that is not its first (`stage`, `model`, `primary`, `serving`) |
+| `s2s.first_audio` | first audio of a `/v1/s2s` turn written to the client (`durMs` from the request) |
 
 Realtime control-plane events (`src/realtime/trace.ts`) plug in with `realtimeSinkToTelemetry(telemetry.ingest)`.
 

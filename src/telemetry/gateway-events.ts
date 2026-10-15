@@ -20,11 +20,21 @@ const MAP: Record<string, { event: string; level?: TelemetryLevel }> = {
   'deployments: replica ready': { event: 'replica.ready' },
   'deployments: replica unhealthy': { event: 'replica.unhealthy', level: 'warn' },
   'deployments: replica too far': { event: 'replica.too_far', level: 'warn' },
+  'deployments: stage out of rotation': { event: 'replica.stage_out', level: 'warn' },
+  'deployments: stage back in rotation': { event: 'replica.stage_back' },
   'deployments: draining replica': { event: 'replica.draining' },
   'deployments: releasing replica': { event: 'replica.released' },
+  'deployments: replica gone': { event: 'replica.gone', level: 'warn' },
   'deployments: parking replica (power off)': { event: 'replica.parked' },
   'deployments: powering parked replica on': { event: 'replica.power_on' },
   'deployments: list failed': { event: 'provider.list_failed', level: 'warn' },
+  'deployments: provider credit exhausted': { event: 'provider.credit_exhausted', level: 'error' },
+  'deployments: provider credit back': { event: 'provider.credit_back' },
+  'deployments: provider account refused': { event: 'provider.account_refused', level: 'error' },
+  'deployments: vast offer too far before renting': { event: 'replica.too_far_before_rent', level: 'warn' },
+  'deployments: stuck boot, releasing to retry': { event: 'replica.stuck_retry', level: 'warn' },
+  'deployments: stuck boot retried on another offer': { event: 'replica.stuck_retried' },
+  'deployments: stuck boot retries exhausted': { event: 'replica.stuck_exhausted', level: 'error' },
 };
 
 export function deploymentLogToTelemetry(msg: string, data?: Record<string, unknown>): void {

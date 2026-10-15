@@ -5,21 +5,34 @@
  * The controller is split by who owns what (pure move of the former `controller.ts`, 2026-10-07); each part extends the
  * previous one and `DeploymentController` (controller.ts) is the public class:
  *   controller-state.ts → controller-replicas.ts (create / release / probe) → controller-parking.ts (stop / park) →
+ *   controller-scaling.ts (the `scaling` block: load trace, budget ledger, measured boot times, capacity view) →
  *   controller-autoscale.ts (pressure, drains, reclaim) → controller-reconcile.ts (the planning tick) →
  *   controller-views.ts (views, health) → controller.ts (API, leases).
  */
 
-import type { PressureState } from './autoscale';
-import { replicaPhase, type ObservedReplica } from './planner';
-import { NAME_RE } from './spec';
+import { createHmac } from 'crypto';
+import { activeWindow, scheduleFloor, warmFloor, type PressureState } from './autoscale';
+import { bootEventAuth } from './boot-events';
+import { filesByUrl } from './boot-files';
+import { bootTimeoutMinutesOn, replicaPhase, type ObservedReplica } from './planner';
+import { GPU_CAP_RULE, NAME_RE } from './spec';
 import type { GateState } from './rtt-gate';
+import { externalInflightOn } from '../realtime/external-load';
 import type {
-  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentStore, Profile, ReplicaMachine, ReplicaProbe,
+  DeploymentBackend, DeploymentProvider, DeploymentRecord, DeploymentSpec, DeploymentStore, PendingNetworkRelease, Profile, ReplicaMachine,
+  ProbeResult, RegistryAuth, ReplicaProbe, ScalingMode,
 } from './types';
+import { BootTracker, logText } from './boot-track';
+import { CONTAINER_LOG_LINES, ContainerLogCache, type ContainerLog } from './container-logs';
+import { secretValues } from '../telemetry/alert-email';
+import { freshStuckRetry, type StuckRetryState } from './stuck-retry';
 
 export class DeploymentError extends Error {
-  /** `saturated`: replicas are ready but all at capacity (the caller should spill to its fallback, not wait). */
-  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated') {
+  /**
+   * `saturated`: replicas are ready but all at capacity (the caller should spill to its fallback, not wait).
+   * `stage_out`: the asked stage is out of rotation on every ready replica after repeated failures (same: fall back).
+   */
+  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number, readonly code?: 'saturated' | 'stage_out' | 'reserved') {
     super(message);
   }
 }
@@ -31,6 +44,7 @@ export interface ProbeState {
   readyAt?: number;
   /** Last time the replica answered a forwarded request (lease ended `ok`): a replica that just served is alive. */
   lastServedAt?: number;
+  erroredSinceServed?: boolean;
   /**
    * Alive but saturated: its health check timed out (or a request hit its time limit) while it had work. It keeps
    * serving what it has and gets no NEW request beyond `targetInflightPerReplica` until a probe answers again; it is
@@ -39,6 +53,7 @@ export interface ProbeState {
   busy?: boolean;
   /** Since when the liveness probe (the replica's front) has failed without a break: the machine is gone, not busy. */
   downSince?: number;
+  last?: ProbeResult;
 }
 
 /**
@@ -46,8 +61,11 @@ export interface ProbeState {
  * reset); `'timeout'` = the replica took longer than the caller's limit (busy, not dead); `'cancelled'` = the caller
  * gave up for its own reasons (a hedged fallback won, the client went away) and says nothing about the replica;
  * `'overloaded'` = the replica answered 429 (its own queue is full): busy, and pressure for the autoscaler.
+ * Two more only matter to the lease's stage (`acquire` `stage`, `STAGE_STRIKES`): `'errored'` = the replica answered
+ * 5xx (alive, so `ok` for its health, a strike for the stage); `'abandoned'` = the caller gave up before the first byte
+ * (`cancelled` for its health; a strike for the stage once it had waited the route's hedge delay).
  */
-export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled' | 'overloaded';
+export type LeaseOutcome = 'ok' | 'failed' | 'timeout' | 'cancelled' | 'overloaded' | 'errored' | 'abandoned';
 
 export interface Runtime {
   record: DeploymentRecord;
@@ -59,6 +77,7 @@ export interface Runtime {
   creating: number;
   backoffUntil: number;
   createFailures: number;
+  bootFailures: number;
   /** Creates that failed for lack of stock in every placement, in a row, and since when (null after a success). */
   stockOut: { since: number; failures: number } | null;
   lastPersistedRequestAt: number | null;
@@ -85,6 +104,9 @@ export interface Runtime {
   hedgeBaseMs?: number;
   /** When another deployment under pressure took this one's idle replica (it then counts as idle until a new request). */
   reclaimedAt: number | null;
+  bootTimeouts: number;
+  lostAt: number | null;
+  stuckRetry: StuckRetryState;
 }
 
 /** Why the deployment has the replica count it has (`GET /v1/deployments` → `autoscale`). */
@@ -110,10 +132,13 @@ export interface ControllerOptions {
   /** Single-backend shorthand (kept for callers and tests from before `backends`). */
   backend?: DeploymentBackend;
   store: DeploymentStore;
+  publicUrl?: string;
+  bootReporting?: boolean;
   probe: ReplicaProbe;
   namespace?: string;
   /** Cap on RUNNING replicas across all deployments (protects the bill); parked (stopped) ones do not count. */
   maxTotalReplicas?: number;
+  maxGpuPerApp?: number;
   /** Cap on parked (stopped) replicas across all deployments: they bill disk only, but they must not pile up. Default 8. */
   maxStoppedReplicas?: number;
   /** Ceiling (EUR/h) on the summed price of the running replicas of all deployments. Default 6; 0 = off. */
@@ -123,6 +148,7 @@ export interface ControllerOptions {
   /** Pause between retries of the release of a machine whose deployment was deleted while it was created. Default 2 s. */
   releaseRetryMs?: number;
   reconcileMs?: number;
+  maxColdStartWaitSeconds?: number;
   /** Replicas kept only by `minReplicas` go to zero after this long unused (planner `pinnedIdleOver`); 0 = off. */
   pinnedIdleMaxMs?: number;
   /**
@@ -134,6 +160,10 @@ export interface ControllerOptions {
   unhealthyStrikes?: number;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
+  sessions?: (deployment: string) => number | null;
+  defaultScalingMode?: ScalingMode;
+  checkImage?: (image: string, auth: RegistryAuth | null) => Promise<string | null>;
+  secrets?: () => string[];
 }
 
 export interface Lease {
@@ -141,6 +171,8 @@ export interface Lease {
   token: string;
   /** The deployment is exposed (`exposure`): its token-gated front is on `PROBE_PORT`, not :80. */
   exposed: boolean;
+  /** Aborted when the controller releases this replica or the provider stops listing it. */
+  signal?: AbortSignal;
   /**
    * Call once the forwarded request finished. `true`/`'failed'` = connection-level failure (marks the replica suspect),
    * `'timeout'` = it was too slow (busy), `'cancelled'` = the caller aborted it (hedge lost, client gone): neutral.
@@ -150,8 +182,13 @@ export interface Lease {
 
 export const DEFAULT_MAX_STOPPED = 8;
 export const DEFAULT_MAX_EUR_PER_HOUR = 6;
+
+export const machineTypesOf = (spec: DeploymentSpec): Set<string> => new Set(
+  [spec.machineType, ...(spec.placements ?? []).flatMap(p => p.machineType ?? []), ...(spec.candidates ?? []).map(c => c.machineType)]);
 export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
 export const DEFAULT_BUSY_GRACE_MS = 120_000;
+export const ERRORED_GRACE_MS = 20_000;
+export const DEFAULT_MAX_COLD_START_WAIT_SECONDS = 240;
 /**
  * A request turned away for lack of a ready replica counts as load for this long (≈ the time the fallback takes to
  * answer it, Little's law with W ≈ 1.5 s — the cloud LLM's p50 measured live on 2026-10-07 was 1.0–1.9 s): 16 refused
@@ -168,8 +205,13 @@ export function isParked(m: ReplicaMachine): boolean {
 
 export const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
+export function replicaTokenFor(deploymentSecret: string, tokenKey: string | undefined): string {
+  return tokenKey ? createHmac('sha256', deploymentSecret).update(`aigw-replica-v1:${tokenKey}`).digest('base64url') : deploymentSecret;
+}
+
 export abstract class ControllerState {
   protected readonly deployments = new Map<string, Runtime>();
+  protected readonly tokenKeys = new Map<string, string>();
   protected readonly profiles = new Map<string, Profile>();
   protected machines: ReplicaMachine[] = [];
   /**
@@ -189,20 +231,41 @@ export abstract class ControllerState {
   protected readonly parkedSince = new Map<string, number>();
   /** Last power-on of a parked replica, id → when: `maxHours` and the boot timeout count from here, not from creation. */
   protected readonly poweredOnAt = new Map<string, number>();
+  protected readonly startRefused = new Map<string, number>();
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
-  protected readonly pendingSpend = new Set<{ cost: number }>();
+  protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();
   protected readonly probes = new Map<string, ProbeState>();
+  protected readonly boots = new BootTracker();
+  protected readonly containerLogs = new ContainerLogCache(() => this.now());
+  protected readonly replicaGone = new Map<string, AbortController>();
+  protected goneSignal(id: string): AbortSignal {
+    let gone = this.replicaGone.get(id);
+    if (!gone) this.replicaGone.set(id, gone = new AbortController());
+    return gone.signal;
+  }
+  protected abortRequestsOfGoneReplicas(): void {
+    for (const [id, gone] of this.replicaGone) {
+      if (this.machines.some(m => m.id === id)) continue;
+      gone.abort(new Error(`replica ${id} was released`));
+      this.replicaGone.delete(id);
+    }
+  }
+  protected readonly releasing = new Map<string, { machine: ReplicaMachine; at: number }>();
   /** Replicas being drained before a scale-down, id → since: no new request; released once empty or after `drainSeconds`. */
   protected readonly draining = new Map<string, number>();
+  protected readonly networkReleases = new Map<string, PendingNetworkRelease>();
+  protected readonly stageStrikes = new Map<string, { failures: number; outUntil: number }>();
   protected reconciling: Promise<void> | null = null;
   protected rerun = false;
   protected timer: ReturnType<typeof setInterval> | null = null;
   protected lastListError: string | null = null;
+  protected failedZones = new Set<string>();
   protected readonly backends: Partial<Record<DeploymentProvider, DeploymentBackend>>;
   /** Provider of a machine that does not say (fakes, records from before `provider`). */
   protected readonly defaultProvider: DeploymentProvider;
   /** RTT gate per replica (backends with `measureRtt`, i.e. Vast), by machine id. */
   protected readonly gates = new Map<string, GateState>();
+  protected readonly udp = new Map<string, 'ok' | 'blocked'>();
   /** Machines created before this process started were adopted: measured for the view, never released by the gate. */
   protected readonly startedAt: number;
   readonly namespace: string;
@@ -214,7 +277,10 @@ export abstract class ControllerState {
     if (!NAME_RE.test(this.namespace)) throw new Error(`invalid deployments namespace '${this.namespace}'`);
     this.now = opts.now ?? Date.now;
     this.startedAt = this.now();
-    this.log = opts.log ?? (() => {});
+    this.log = (msg, data) => {
+      if (typeof data?.deployment === 'string') this.boots.line(data.deployment, typeof data.id === 'string' ? data.id : null, logText(msg, data), this.now());
+      opts.log?.(msg, data);
+    };
     this.backends = opts.backends ?? (opts.backend ? { [opts.backend.provider]: opts.backend } : {});
     const providers = Object.keys(this.backends) as DeploymentProvider[];
     if (!providers.length) throw new Error('deployments controller needs at least one backend');
@@ -227,16 +293,30 @@ export abstract class ControllerState {
     return backend;
   }
 
+  protected forVast(rt: Runtime, spec: DeploymentSpec): DeploymentSpec {
+    const bootTimeoutMinutes = bootTimeoutMinutesOn(spec, 'vast');
+    return filesByUrl({ ...spec, bootTimeoutMinutes }, rt.record.replicaToken, this.opts.publicUrl, this.now());
+  }
+
   protected providerOf(m: ReplicaMachine): DeploymentProvider {
     return m.provider ?? this.defaultProvider;
+  }
+
+  protected listStale(m: ReplicaMachine, failed: Set<DeploymentProvider>): boolean {
+    const provider = this.providerOf(m);
+    return failed.has(provider) || this.failedZones.has(`${provider}/${m.zone}`);
+  }
+
+  protected get maxColdStartWaitSeconds(): number {
+    return this.opts.maxColdStartWaitSeconds ?? DEFAULT_MAX_COLD_START_WAIT_SECONDS;
   }
 
   protected runtime(record: DeploymentRecord): Runtime {
     return {
       record, inflight: 0, waiting: 0, perReplica: new Map(), aboveSince: null, lastError: null, creating: 0,
-      backoffUntil: 0, createFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
+      backoffUntil: 0, createFailures: 0, bootFailures: 0, stockOut: null, lastPersistedRequestAt: record.lastRequestAt, waiters: new Set(), starting: new Map(),
       lastPlacement: null, rejected: [], spendNote: null, refusedAt: [], demandPeak: { value: 0, at: 0 },
-      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null,
+      samples: [], pressure: { highSince: null, desired: 0 }, reclaimedAt: null, bootTimeouts: 0, lostAt: null, stuckRetry: freshStuckRetry(),
       autoscale: { desired: 0, pressureWant: 0, reason: 'idle', blockedBy: null, floor: 0, warmFloor: 0, load: 0, p95Ms: null, errorRate: 0 },
     };
   }
@@ -252,9 +332,24 @@ export abstract class ControllerState {
       && replicaPhase(this.observed(m, 0)) === 'ready');
   }
 
+  protected stageOut(id: string, stage: string | undefined): boolean {
+    return stage !== undefined && (this.stageStrikes.get(`${id}|${stage}`)?.outUntil ?? 0) > this.now();
+  }
+
+  protected stagesOut(id: string): string[] {
+    return [...this.stageStrikes.keys()].filter(k => k.startsWith(`${id}|`)).map(k => k.slice(id.length + 1)).filter(s => this.stageOut(id, s));
+  }
+
+  protected noteLost(deployment: string | undefined): void {
+    const rt = deployment ? this.deployments.get(deployment) : undefined;
+    if (rt) rt.lostAt = this.now();
+  }
+
   /** Answered a forwarded request within `busyGraceMs`. */
   protected servedRecently(p: ProbeState | undefined): boolean {
-    return p?.lastServedAt != null && this.now() - p.lastServedAt < (this.opts.busyGraceMs ?? DEFAULT_BUSY_GRACE_MS);
+    if (p?.lastServedAt == null) return false;
+    const grace = this.opts.busyGraceMs ?? DEFAULT_BUSY_GRACE_MS;
+    return this.now() - p.lastServedAt < (p.erroredSinceServed ? Math.min(grace, ERRORED_GRACE_MS) : grace);
   }
 
   /** Requests refused in the last `REFUSED_HOLD_MS` (older ones pruned). */
@@ -286,6 +381,11 @@ export abstract class ControllerState {
     return this.readyMachines(name).filter(m => !this.draining.has(m.id));
   }
 
+  protected busyOn(rt: Runtime, replicaId: string): number {
+    const spec = rt.record.spec;
+    return (rt.perReplica.get(replicaId) ?? 0) + Math.ceil(externalInflightOn(spec.name, replicaId, spec.targetInflightPerReplica, this.now()));
+  }
+
   protected observed(m: ReplicaMachine, inflight: number): ObservedReplica {
     const p = this.probes.get(m.id) ?? { everReady: false, readyNow: false, failures: 0 };
     // A parked replica powered back on boots again: its boot (timeout, booting phase) AND its `maxHours` lifetime count
@@ -296,7 +396,14 @@ export abstract class ControllerState {
       machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight,
       ...(p.readyAt ? { readyAt: p.readyAt } : {}), ...(this.servedRecently(p) ? { servedRecently: true } : {}),
       ...(p.downSince !== undefined ? { downForMs: this.now() - p.downSince } : {}),
+      ...(machine.createdAt < this.startedAt ? { bootStartedAt: this.startedAt } : {}),
+      ...(this.adoptedPastBoot(machine) ? { adoptedPastBoot: true } : {}),
     };
+  }
+
+  protected adoptedPastBoot(m: ReplicaMachine): boolean {
+    const spec = this.deployments.get(m.deployment)?.record.spec;
+    return !!spec && m.createdAt + bootTimeoutMinutesOn(spec, this.providerOf(m)) * 60_000 <= this.startedAt;
   }
 
   protected parkedNow(m: ReplicaMachine): boolean {
@@ -330,11 +437,112 @@ export abstract class ControllerState {
     return sum;
   }
 
-  /** Why one more running replica billing `price` EUR/h is refused (replica cap, € ceiling), or null. */
-  protected capRefusal(price: number): string | null {
+  /** Why one more running replica billing `price` EUR/h is refused (GPU per app, replica cap, € ceiling), or null. */
+  protected capRefusal(price: number, name: string): string | null {
+    const slot = this.gpuSlotRefusal(name);
+    if (slot) return slot;
     const cap = this.opts.maxTotalReplicas ?? 6;
-    if (this.totalReplicas() >= cap) return `replica cap reached (${cap} across all deployments)`;
+    const total = this.totalReplicas();
+    const capped = `replica cap reached (${cap} across all deployments, DEPLOYMENTS_MAX_REPLICAS; held by ${this.slotHolders()}`;
+    if (total >= cap) return `${capped})`;
+    const kept = this.floorsKeptFor(name);
+    const keptSlots = kept.reduce((n, [, missing]) => n + missing, 0);
+    if (total + keptSlots >= cap) return `${capped}; ${keptSlots} kept for the minimum of ${kept.map(([d, n]) => `${d} ${n}`).join(', ')})`;
     return this.spendRefusal(price);
+  }
+
+  private heldSlots(): Map<string, number> {
+    const held = new Map<string, number>();
+    for (const m of this.runningMachines()) held.set(m.deployment, (held.get(m.deployment) ?? 0) + 1);
+    for (const [name, rt] of this.deployments) if (rt.creating) held.set(name, (held.get(name) ?? 0) + rt.creating);
+    return held;
+  }
+
+  private floorsKeptFor(name: string): Array<[string, number]> {
+    const held = this.heldSlots();
+    const floorOf = (rt: Runtime) => Math.max(rt.record.spec.minReplicas, warmFloor(rt.record.spec, rt.record.warm, this.now()));
+    const own = this.deployments.get(name);
+    if (!own || (held.get(name) ?? 0) < floorOf(own)) return [];
+    return [...this.deployments]
+      .filter(([other, rt]) => other !== name && !rt.record.spec.paused)
+      .map(([other, rt]): [string, number] => [other, floorOf(rt) - (held.get(other) ?? 0)])
+      .filter(([, missing]) => missing > 0);
+  }
+
+  protected inClass(rt: Runtime): boolean {
+    return scheduleFloor(rt.record.spec.warmSchedule, this.now()) > 0;
+  }
+
+  protected gpuAppOf(rt: Runtime | undefined): string | null {
+    return rt?.record.spec.gpu ? rt.record.app ?? rt.record.spec.name : null;
+  }
+
+  protected gpuHolders(app: string): string[] {
+    const ofApp = (m: ReplicaMachine) => this.gpuAppOf(this.deployments.get(m.deployment)) === app;
+    const machines = [...this.runningMachines(), ...[...this.releasing.values()].map(r => r.machine)].filter(ofApp).map(m => m.deployment);
+    const creating = [...this.deployments].flatMap(([name, rt]) => (this.gpuAppOf(rt) === app ? Array<string>(rt.creating).fill(name) : []));
+    return [...machines, ...creating];
+  }
+
+  protected classKeeper(rt: Runtime, app: string): string | null {
+    if (this.inClass(rt)) return null;
+    const keeper = [...this.deployments].find(([, o]) => o !== rt && !o.record.spec.paused && this.gpuAppOf(o) === app && this.inClass(o));
+    return keeper?.[0] ?? null;
+  }
+
+  private gpuSlot(name: string, counts: (holder: string) => boolean): string | null {
+    const rt = this.deployments.get(name);
+    const app = this.gpuAppOf(rt);
+    const cap = this.opts.maxGpuPerApp;
+    if (!rt || !app || cap === undefined) return null;
+    const keeper = this.classKeeper(rt, app);
+    if (keeper) return `${GPU_CAP_RULE}: app '${app}' keeps its GPU for '${keeper}' during the class window`;
+    const held = this.gpuHolders(app).filter(counts);
+    if (held.length < cap) return null;
+    return `${GPU_CAP_RULE}: app '${app}' already has ${held.length} (${[...new Set(held)].join(', ')}); the cloud fallback answers`;
+  }
+
+  protected gpuSlotRefusal(name: string): string | null {
+    return this.gpuSlot(name, () => true);
+  }
+
+  gpuSlotTaken(name: string): string | null {
+    const rt = this.deployments.get(name);
+    const evicts = (holder: string) => !!rt && this.inClass(rt) && !this.inClass(this.deployments.get(holder)!);
+    return this.gpuSlot(name, holder => holder !== name && !evicts(holder));
+  }
+
+  protected slotHolders(): string {
+    return [...this.heldSlots()].sort().map(([name, n]) => `${name} ${n}`).join(', ') || 'none';
+  }
+
+  protected reservedAgainst(name: string, machineType: string): { reason: string; endsAt: number } | null {
+    const now = this.now();
+    for (const [holder, rt] of this.deployments) {
+      const { reserveQuota, paused } = rt.record.spec;
+      if (!reserveQuota || holder === name || paused || rt.record.spec.machineType !== machineType) continue;
+      const window = activeWindow(reserveQuota.windows, now);
+      if (!window) continue;
+      const others = this.machines.filter(m => m.machineType === machineType && m.deployment !== holder).length
+        + [...this.pendingSpend].filter(s => s.machineType === machineType && s.deployment !== holder).length;
+      if (others < reserveQuota.quota - window.replicas) continue;
+      return {
+        endsAt: window.endsAt,
+        reason: `${machineType} is reserved for deployment '${holder}' until ${new Date(window.endsAt).toISOString()} `
+          + `(${window.replicas} of a quota of ${reserveQuota.quota}; other deployments hold ${others}): '${name}' may not take one now`,
+      };
+    }
+    return null;
+  }
+
+  protected reservationBlock(rt: Runtime): { reason: string; endsAt: number } | null {
+    let block: { reason: string; endsAt: number } | null = null;
+    for (const type of machineTypesOf(rt.record.spec)) {
+      const refused = this.reservedAgainst(rt.record.spec.name, type);
+      if (!refused) return null;
+      block ??= refused;
+    }
+    return block;
   }
 
   /** The € ceiling alone (a create in flight already holds its replica slot). */
@@ -352,6 +560,27 @@ export abstract class ControllerState {
   protected totalReplicas(): number {
     let creating = 0;
     for (const rt of this.deployments.values()) creating += rt.creating;
-    return this.runningMachines().length + creating;
+    return this.runningMachines().length + this.releasing.size + creating;
+  }
+
+  protected replicaToken(rt: Runtime, machine: ReplicaMachine): string {
+    const tokenKey = machine.tokenKey ?? this.tokenKeys.get(machine.id);
+    return replicaTokenFor(rt.record.secretPins?.[tokenKey ?? `id:${machine.id}`] ?? rt.record.replicaToken, tokenKey);
+  }
+
+  protected secretsOf(rt: Runtime, m: ReplicaMachine): string[] {
+    const { env, envByMachineType, registryAuth } = rt.record.spec;
+    const replicaToken = this.replicaToken(rt, m);
+    return [
+      ...(this.opts.secrets?.() ?? []), ...secretValues(Object.assign({}, ...Object.values(envByMachineType ?? {}), env)),
+      registryAuth?.password ?? '', rt.record.replicaToken, replicaToken, bootEventAuth(replicaToken),
+    ].filter(s => s.length >= 8);
+  }
+
+  protected containerLogOf(m: ReplicaMachine): Promise<ContainerLog> | null {
+    const backend = this.backends[this.providerOf(m)];
+    const rt = this.deployments.get(m.deployment);
+    if (!backend?.containerLogs || !rt) return null;
+    return this.containerLogs.read(m, () => backend.containerLogs!(m, CONTAINER_LOG_LINES), this.secretsOf(rt, m));
   }
 }

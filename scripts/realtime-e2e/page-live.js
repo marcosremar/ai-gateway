@@ -1,62 +1,40 @@
 // Live e2e page driver: the browser SDK against the real gateway + replica (e2e-live.ts).
-// window.liveRun({ transport, barge, forceRelay, voiceAfter }) — sanitized summary only (no transcript/audio/SDP).
+// window.liveRun({ transport, barge, forceRelay }) — sanitized summary only (no transcript/audio/SDP).
+import { audible, epoch, makeMeter, playRemote } from '/meter.js';
 import { createRealtimeSession, createWebRtcTransport, createWsTransport } from '/sdk.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function meter(state) {
-  return (stream) => {
-    if (!stream) return;
-    const el = new Audio();
-    el.srcObject = stream;
-    el.muted = true;
-    void el.play().catch(() => {});
-    const ctx = new AudioContext();
-    const an = ctx.createAnalyser();
-    ctx.createMediaStreamSource(stream).connect(an);
-    const buf = new Float32Array(an.fftSize);
-    state.meterTimer = setInterval(() => {
-      an.getFloatTimeDomainData(buf);
-      let s = 0;
-      for (const v of buf) s += v * v;
-      if (Math.sqrt(s / buf.length) > 0.02) {
-        state.loudFrames++;
-        if (state.firstLoudAt === null) state.firstLoudAt = performance.now();
-      }
-    }, 20);
-  };
-}
-
-function open(opts = {}) {
-  const state = { events: [], loudFrames: 0, firstLoudAt: null, vadEndAt: null, meterTimer: null, waiters: [] };
+function open(opts = {}, config = {}) {
+  const state = { events: [], mic: makeMeter(), clipTurn: null, waiters: [] };
   const sopts = {
     sessionEndpoint: '/api/rt-session',
-    getMicStream: () => navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    }),
+    getMicStream: async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      state.mic.stream(stream);
+      return stream;
+    },
+    config,
     onEvent: (e) => {
-      state.events.push({ ...e, at: performance.now() });
-      if (e.type === 'vad' && e.state === 'end' && state.vadEndAt === null) state.vadEndAt = performance.now();
+      state.events.push({ ...e, at: epoch() });
       for (const w of [...state.waiters]) if (w.pred(e)) { state.waiters.splice(state.waiters.indexOf(w), 1); w.done(); }
     },
-    onRemoteAudio: meter(state),
+    onRemoteAudio: playRemote,
     s2s: { url: '/api/s2s' },
     storage: null,
   };
   if (opts.transport) sopts.preferredTransports = [opts.transport];
-  // Capture the live transport so the page can send raw control frames (config_update with a clone voice).
-  const grab = (t) => { state.liveTransport = t; return t; };
   const webrtcFactory = (c) => {
     const o = c.descriptor?.transports.find((t) => t.type === 'webrtc');
     if (!o || o.type !== 'webrtc') return null;
     const deps = opts.forceRelay ? { RTCPeerConnection: RelayPC } : undefined;
-    return grab(createWebRtcTransport(c, o, deps));
+    return createWebRtcTransport(c, o, deps);
   };
   const wsFactory = (c) => {
     const o = c.descriptor?.transports.find((t) => t.type === 'ws');
-    return o ? grab(createWsTransport(c, o.url)) : null;
+    return o ? createWsTransport(c, o.url) : null;
   };
-  if (opts.forceRelay || opts.voiceAfter) sopts.transports = { webrtc: webrtcFactory, ws: wsFactory };
+  if (opts.forceRelay) sopts.transports = { webrtc: webrtcFactory, ws: wsFactory };
   state.session = createRealtimeSession(sopts);
   return state;
 }
@@ -78,14 +56,18 @@ function waitFor(state, pred, ms) {
 const KEEP = new Set(['type', 'state', 'final', 'code', 'interrupted', 'filtered', 'empty', 'transport', 'reason', 'from', 'ttfa_ms', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms', 'turnId', 'sessionId', 'traceId']);
 function summary(state, error) {
   const s = state.session;
+  const done = state.events.find(turnDone) ?? state.events.find((e) => e.type === 'audio_start');
+  const span = [...state.mic.spans].reverse().find((x) => done && x.end < done.at);
+  const turn = state.clipTurn ?? (span ? { at: span.start, ref: span.end, refGap: span.endGap } : null);
   return {
+    audible: turn ? audible(turn, state.events, Infinity) : null,
+    meter: state.mic.stats,
     transport: s.transport,
-    events: state.events.map((e) => ({ ...Object.fromEntries(Object.entries(e).filter(([k]) => KEEP.has(k))), ...(e.type === 'error' ? { message: String(e.message).slice(0, 120) } : {}), at: Math.round(e.at ?? 0) })),
-    loudFrames: state.loudFrames, traceId: s.traceId, sessionId: s.sessionId,
+    events: state.events.map((e) => ({ ...Object.fromEntries(Object.entries(e).filter(([k]) => KEEP.has(k))), ...(e.type === 'error' ? { message: String(e.message).slice(0, 120) } : {}), at: Math.round(e.at - performance.timeOrigin) })),
+    traceId: s.traceId, sessionId: s.sessionId,
     history: s.history.map((m) => m.role),
     interruptMs: state.interruptMs ?? null,
     metrics: { connectMs: s.metrics.connectMs, attempts: s.metrics.attempts, failovers: s.metrics.failovers, lastTurn: s.metrics.lastTurn },
-    ttfaBrowserMs: state.firstLoudAt !== null && state.vadEndAt !== null ? Math.round(state.firstLoudAt - state.vadEndAt) : null,
     ...(error ? { error: String(error) } : {}),
   };
 }
@@ -93,22 +75,26 @@ function summary(state, error) {
 const turnDone = (e) => e.type === 'done' && !e.empty;
 
 window.liveRun = async (opts = {}) => {
-  const state = open(opts);
+  const state = open(opts, await (await fetch('/config.json')).json());
   try {
     const connected = await state.session.connect();
     state.connectedAs = connected;
-    if (opts.voiceAfter && state.liveTransport) {
-      state.liveTransport.send({ type: 'config_update', voice: opts.voiceAfter.voice, ...(opts.voiceAfter.fallback_voice ? { fallback_voice: opts.voiceAfter.fallback_voice } : {}) });
-      state.voiceSent = true;
+    if (connected === 's2s-stream' || connected === 'post') {
+      const clip = await (await fetch('/clip.wav')).blob();
+      state.clipTurn = { at: epoch() - 1, ref: epoch() };
+      await sleep(opts.clipEndSilenceMs ?? 700);
+      await state.session.sendTurn(clip);
+      await sleep(500);
+      return summary(state);
     }
     if (opts.barge) {
       // Speak until the NPC starts answering, then barge in and measure the 'interrupted' latency.
       const speaking = await waitFor(state, (e) => e.type === 'audio_start', 90_000);
       if (!speaking) return summary(state, 'npc audio never started');
-      const t0 = performance.now();
+      const t0 = epoch();
       state.session.interrupt();
       const got = await waitFor(state, (e) => e.type === 'interrupted', 10_000);
-      state.interruptMs = got ? Math.round(performance.now() - t0) : null;
+      state.interruptMs = got ? Math.round(epoch() - t0) : null;
       await sleep(800);
       return summary(state);
     }
@@ -118,7 +104,6 @@ window.liveRun = async (opts = {}) => {
   } catch (err) {
     return summary(state, err);
   } finally {
-    clearInterval(state.meterTimer);
     state.session.close();
   }
 };

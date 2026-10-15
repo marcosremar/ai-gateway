@@ -161,6 +161,7 @@ describe('POST /v1/s2s: app limits on the primary path', () => {
     expect(res.status).toBe(429);
     expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
     expect(json(bytes).error.type).toBe('budget_exceeded');
+    expect(json(bytes).error).toMatchObject({ code: 'daily_budget_exhausted', budget: 'requests', reset_at: expect.stringMatching(/T00:00:00\.000Z$/) });
     expect(h.acquired).toEqual(['parle-speech']);
   });
 

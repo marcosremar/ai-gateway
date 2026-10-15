@@ -6,7 +6,7 @@
 import type { AddressInfo } from 'net';
 import { describe, expect, it } from 'vitest';
 import { buildServeProviders, deepHealthReport, type ServeInstances } from '../../../src/config/serve-providers';
-import { stageChainsReport } from '../../../src/config/stage-chains';
+import { createFallbackWatch, stageChainsReport } from '../../../src/config/stage-chains';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import { accountBreakerKey, breakerKey } from '../../../src/gateway/proxy/provider-routing';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
@@ -81,6 +81,53 @@ describe('stageChainsReport', () => {
         for (const l of report.links) if (l.target.startsWith('openrouter:')) expect(l.state).not.toBe('circuit_open');
       }
     }
+  });
+
+  it('a stage out of rotation on every ready replica of the primary reads circuit_open and on fallback; on some, ready with the reason', () => {
+    const { chains } = build({ deployments: true });
+    const stageOut = (ready: number, out: number) => (_name: string, stage: string) => ({ ready, out: stage === 'tts' ? out : 0 });
+    const all = stageChainsReport(chains, { deploymentStatus: () => 'ready', stageOut: stageOut(1, 1) });
+    for (const report of Object.values(all.stages.tts)) {
+      expect(report.links[0]).toMatchObject({ state: 'circuit_open', reason: expect.stringMatching(/tts out of rotation on 1 of 1 ready replicas/) });
+      expect(report.onFallback).toBe(true);
+    }
+    expect(all.stages.stt['parle-stt'].links[0]).toEqual({ target: expect.any(String), state: 'ready' });
+    expect(all.warnings.join('\n')).toMatch(/tts .*circuit_open/);
+    const some = stageChainsReport(chains, { deploymentStatus: () => 'ready', stageOut: stageOut(2, 1) });
+    for (const report of Object.values(some.stages.tts)) {
+      expect(report.links[0]).toMatchObject({ state: 'ready', reason: expect.stringMatching(/1 of 2 ready replicas/) });
+      expect(report.onFallback).toBe(false);
+    }
+  });
+
+  it('fallback watch: one field says whether any chain is on its fallback and since when; one log line per transition', () => {
+    const { chains } = build({ deployments: true });
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    let now = Date.parse('2026-10-07T10:00:00Z');
+    const watch = createFallbackWatch((msg, data) => logs.push([msg, data]), () => now);
+    const report = (status: string) => stageChainsReport(chains, { deploymentStatus: () => status }).stages;
+    const tts = Object.keys(chains.tts).length;
+    const all = Object.values(chains).reduce((n, byModel) => n + Object.keys(byModel).length, 0);
+
+    expect(watch(report('ready'))).toEqual({ active: false, since: null, chains: [] });
+    expect(logs).toEqual([]);
+
+    const down = watch(report('scaled-to-zero'));
+    expect(down.active).toBe(true);
+    expect(down.since).toBe('2026-10-07T10:00:00.000Z');
+    expect(down.chains).toHaveLength(all);
+    expect(down.chains.find(c => c.stage === 'stt')).toMatchObject({ model: 'parle-stt', primaryState: 'cold', serving: expect.stringMatching(/^openrouter:/) });
+    expect(logs.map(l => l[0])).toEqual(Array(all).fill('gateway: stage on fallback'));
+    expect(tts).toBeGreaterThan(0);
+
+    now += 60_000;
+    expect(watch(report('scaled-to-zero')).since).toBe('2026-10-07T10:00:00.000Z');
+    expect(logs).toHaveLength(all);
+
+    now += 60_000;
+    expect(watch(report('ready'))).toEqual({ active: false, since: null, chains: [] });
+    expect(logs.slice(all).map(l => l[0])).toEqual(Array(all).fill('gateway: stage back on primary'));
+    expect(logs[all]![1]).toMatchObject({ forMs: 120_000 });
   });
 
   it('an open account breaker (401/402) is reported on every link of that provider', () => {

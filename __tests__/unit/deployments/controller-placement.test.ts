@@ -8,6 +8,7 @@ import { DeploymentController } from '../../../src/deployments/controller';
 import { HttpReplicaProbe } from '../../../src/deployments/http';
 import { MemoryDeploymentStore } from '../../../src/deployments/store';
 import { reapIfGatewayDown } from '../../../src/deployments/reaper';
+import { DEFAULT_MAX_RTT_EXCESS_MS, gateDecision, gateNote, RTT_GATE_BUDGET_MS } from '../../../src/deployments/rtt-gate';
 import { FakeCloud, until } from './_fake-cloud';
 
 const controllers: DeploymentController[] = [];
@@ -74,17 +75,19 @@ describe('placement ladder', () => {
     expect(scaleway.created).toHaveLength(0);
   });
 
-  it('a credential error stops the walk (no burning through the ladder) and is recorded', async () => {
+  it('a credential error skips the rest of that provider (no burning through the ladder) and is recorded', async () => {
     const scaleway = new FakeCloud();
-    scaleway.failCreateFor = () => 'HTTP 401 unauthorized';
+    const tried: string[] = [];
+    scaleway.failCreateFor = (spec) => { tried.push(spec.zone); return 'HTTP 401 unauthorized'; };
     const controller = await make({ scaleway });
     await controller.put('tts', {
       image: 'me/app:1', port: 8000, minReplicas: 1,
       candidates: [{ zone: 'fr-par-2', machineType: 'L4-1-24G', maxEurPerHour: 1 }, { zone: 'fr-par-1', machineType: 'L4-1-24G', maxEurPerHour: 1 }],
     });
     await until(() => controller.get('tts')!.lastPlacement !== null);
-    expect(controller.get('tts')!.lastPlacement).toMatch(/^failed at scaleway L4-1-24G@fr-par-2: HTTP 401/);
+    expect(controller.get('tts')!.lastPlacement).toMatch(/^no replica placed; skipped: scaleway: chave recusada, HTTP 401 → nenhum outro provedor/);
     expect(controller.get('tts')!.lastError).toMatch(/HTTP 401/);
+    expect(tried).toEqual(['fr-par-2']);
   });
 
   it('placements go through the same walk, in the given order, and record lastPlacement too', async () => {
@@ -213,6 +216,31 @@ describe('RTT gate (Vast)', () => {
     await until(() => /earlier: .*RTT 60 ms > maxRttMs 50: released \(too-far\)/.test(controller.get('gpu')!.lastPlacement ?? ''));
   });
 
+  it('a replica still booting when the gateway restarts is gated like a fresh one; a serving one is adopted as is', async () => {
+    const vast = new FakeCloud(Date.now, 'vast');
+    vast.marketPriced = true;
+    vast.bootMs = 60_000;
+    vast.measureRtt = async () => { throw new Error('no answer yet'); };
+    const store = new MemoryDeploymentStore();
+    const first = new DeploymentController({ backends: { vast }, store, probe: new HttpReplicaProbe(1000), namespace: 'test' });
+    await first.init();
+    clouds.push(vast);
+    await first.put('booting', gpu);
+    await first.put('serving', gpu);
+    await until(() => vast.machines.size === 2);
+    const serving = [...vast.machines.values()].find(f => f.machine.deployment === 'serving')!;
+    serving.bootedAt = 0;
+    await new Promise(r => setTimeout(r, 5));
+    vast.measureRtt = async () => 90;
+    const second = new DeploymentController({ backends: { vast }, store, probe: new HttpReplicaProbe(1000), namespace: 'test' });
+    await second.init();
+    controllers.push(second);
+    await second.reconcile();
+    await second.reconcile();
+    expect(vast.releaseReasons).toEqual(['too-far']);
+    expect(vast.released).not.toContain(serving.machine.id);
+  });
+
   it('no RTT answer within the budget counts as too far; before it, the replica just waits (not served)', async () => {
     let offset = 0;
     const clock = () => Date.now() + offset;
@@ -234,6 +262,79 @@ describe('RTT gate (Vast)', () => {
     await controller.reconcile();
     expect(vast.releaseReasons).toEqual(['too-far']);
     expect(controller.get('gpu')!.lastPlacement).toMatch(/no RTT answer > maxRttMs 35: released \(too-far\)/);
+  });
+
+  it('with a baseline the gate is relative: the live French host (42 ms, Paris at 45) is kept, remembered, and both numbers show', async () => {
+    const vast = new FakeCloud(Date.now, 'vast');
+    vast.marketPriced = true;
+    vast.placementNote = 'offer 2 of 9: Paris, FR, $0.548/h; better-ranked offers passed over: offer 7 (Zurich, CH, $0.5/h): not available';
+    vast.measureRtt = async () => 42;
+    vast.measureBaselineRtt = async near => ({ anchor: `anchor-${near}`, rttMs: 45 });
+    const remembered: Array<[string, number]> = [];
+    vast.recordRtt = (m, rtt) => { remembered.push([m.id, rtt]); };
+    const controller = await make({ vast });
+    await controller.put('gpu', gpu);
+    await until(() => controller.get('gpu')!.status === 'ready');
+    const view = controller.get('gpu')!;
+    expect(vast.releaseReasons).toEqual([]);
+    expect(view.replicas).toEqual([expect.objectContaining({ rttMs: 42, rttBaselineMs: 45 })]);
+    expect(view.lastPlacement).toBe('vast RTX 5090 (≤ €1/h); offer 2 of 9: Paris, FR, $0.548/h; better-ranked offers passed over: '
+      + 'offer 7 (Zurich, CH, $0.5/h): not available; RTT 42 ms, baseline 45 ms (anchor-FR): −3 ms ≤ maxRttExcessMs 20: kept');
+    expect(remembered).toEqual([[view.replicas[0].id, 42]]);
+  });
+
+  it('a host far over the baseline is released; a failed baseline probe falls back to the absolute rule, it never opens the gate', async () => {
+    const vast = new FakeCloud(Date.now, 'vast');
+    vast.marketPriced = true;
+    vast.measureRtt = async () => 80;
+    vast.measureBaselineRtt = async () => ({ anchor: 's3.fr-par.scw.cloud', rttMs: 45 });
+    const controller = await make({ vast });
+    await controller.put('gpu', gpu);
+    await until(() => vast.releaseReasons.includes('too-far'));
+    await until(() => /RTT 80 ms, baseline 45 ms \(s3\.fr-par\.scw\.cloud\): \+35 ms > maxRttExcessMs 20: released \(too-far\)/.test(controller.get('gpu')!.lastPlacement ?? ''));
+
+    const blind = new FakeCloud(Date.now, 'vast');
+    blind.marketPriced = true;
+    blind.measureRtt = async () => 42;
+    blind.measureBaselineRtt = async () => { throw new Error('anchor unreachable'); };
+    const second = await make({ vast: blind });
+    await second.put('gpu', gpu);
+    await until(() => blind.releaseReasons.includes('too-far'));
+    await until(() => /RTT 42 ms > maxRttMs 35: released \(too-far\)/.test(second.get('gpu')!.lastPlacement ?? ''));
+  });
+
+  it('gateDecision: relative to the baseline, bounded by maxRttMs when the spec sets it, absolute without a baseline', () => {
+    const at = { firstSeenAt: 0, now: 1_000 };
+    expect(gateDecision({ ...at, rttMs: 42, baselineMs: 45 })).toBe('pass');
+    expect(gateDecision({ ...at, rttMs: 42 })).toBe('too-far');
+    expect(gateDecision({ ...at, rttMs: 42, baselineMs: null })).toBe('too-far');
+    expect(gateDecision({ ...at, rttMs: 55, baselineMs: 40 })).toBe('pass');
+    expect(gateDecision({ ...at, rttMs: 60, baselineMs: 40 })).toBe('pass');
+    expect(gateDecision({ ...at, rttMs: 61, baselineMs: 40 })).toBe('too-far');
+    expect(gateDecision({ ...at, rttMs: 55, baselineMs: 40, maxExcessMs: 10 })).toBe('too-far');
+    expect(gateDecision({ ...at, rttMs: 55, baselineMs: 40, maxRttMs: 50 })).toBe('too-far');
+    expect(gateDecision({ ...at, rttMs: 55, baselineMs: 40, maxRttMs: 120 })).toBe('pass');
+    expect(gateDecision({ ...at, rttMs: 55, maxRttMs: 120 })).toBe('pass');
+    expect(gateDecision({ ...at, rttMs: null, baselineMs: 40 })).toBe('wait');
+    expect(gateDecision({ firstSeenAt: 0, now: RTT_GATE_BUDGET_MS, rttMs: null, baselineMs: 40 })).toBe('too-far');
+    expect(gateNote({ ...at, rttMs: 55, baselineMs: 40, anchor: 'a', maxRttMs: 50 })).toBe('RTT 55 ms, baseline 40 ms (a): +15 ms ≤ maxRttExcessMs 20, maxRttMs 50');
+    expect(DEFAULT_MAX_RTT_EXCESS_MS).toBe(20);
+  });
+
+  it('the offers preview shows the gate in force, the baseline measured now and the verdict of known hosts', async () => {
+    const vast = new FakeCloud(Date.now, 'vast');
+    vast.marketPriced = true;
+    const row = { rank: 1, wouldTry: true, offerId: 1, machineId: 1, location: 'Paris, FR', distanceKm: 0, usdPerHour: 0.5, effectiveUsdPerHour: 0.5,
+      reliability: 0.99, inetDownMbps: 900, inetUpMbps: 900, cudaMax: 13, directPorts: 60, gpu: 'RTX 5090' };
+    vast.previewOffers = async () => [{ ...row, knownRttMs: 42 }, { ...row, rank: 2, knownRttMs: 70 }, { ...row, rank: 3, knownRttMs: null }];
+    vast.measureBaselineRtt = async () => ({ anchor: 's3.fr-par.scw.cloud', rttMs: 45 });
+    const controller = await make({ vast });
+    await controller.put('gpu', { ...gpu, minReplicas: 0 });
+    const preview = (await controller.offers('gpu'))!;
+    expect(preview.gate).toEqual({ near: 'FR', rule: 'relative', anchor: 's3.fr-par.scw.cloud', baselineMs: 45, maxRttExcessMs: 20, maxRttMs: null });
+    expect(preview.offers.map(o => o.gateVerdict)).toEqual(['pass', 'too-far', null]);
+    vast.measureBaselineRtt = async () => null;
+    expect((await controller.offers('gpu'))!.gate).toEqual({ near: 'FR', rule: 'absolute', anchor: null, baselineMs: null, maxRttExcessMs: 20, maxRttMs: 35 });
   });
 
   it('Scaleway replicas are not gated (no measureRtt)', async () => {

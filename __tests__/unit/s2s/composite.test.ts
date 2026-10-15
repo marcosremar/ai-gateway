@@ -18,7 +18,7 @@ describe('runComposite', () => {
   it('chains STT → streamed LLM → TTS per sentence, in speaking order, WAV header stripped', async () => {
     const { result, events, voiced, calls } = await run();
     expect(events.map(e => e.type)).toEqual([
-      'transcript', 'llm_first_token', 'sentence', 'audio_format', 'first_audio', 'sentence', 'done',
+      'transcript', 'llm_first_token', 'sentence', 'audio_format', 'first_audio', 'sentence_end', 'sentence', 'sentence_end', 'done',
     ]);
     expect(events.filter(e => e.type === 'sentence').map(e => e.text)).toEqual(['Bom dia, querida!', 'Aqui está o seu pão.']);
     expect(voiced).toBe('Bom dia, querida!Aqui está o seu pão.'); // PCM only, no RIFF header bytes
@@ -29,6 +29,9 @@ describe('runComposite', () => {
     // Who served each stage is reported
     expect(events[0]).toMatchObject({ provider: 'deployment:parle-speech' });
     expect(events[1]).toMatchObject({ provider: 'openrouter:qwen/qwen3.5-9b', fallback: 'cold' });
+    expect(events.at(-1)).toMatchObject({
+      type: 'done', served: { stt: 'deployment:parle-speech', llm: 'openrouter:qwen/qwen3.5-9b', tts: 'deployment:parle-qwen-tts', opener: false, transport: 's2s' },
+    });
   });
 
   it('starts the next sentence\'s TTS while the first is still being voiced (2 ahead)', async () => {
@@ -44,6 +47,15 @@ describe('runComposite', () => {
     expect(voiced).toBe('Bom dia, querida!');
     expect(result.missingAudio).toBe(1);
     expect(events[events.length - 1]).toMatchObject({ type: 'done', missing_audio: 1 });
+    expect(events[events.length - 1]).toMatchObject({ sentences: 2, spoken: 1, skipped: 1 });
+  });
+
+  // Babelcast audit 2026-10-12, M13: every sentence's TTS failed and the turn still ended `done` (first_audio_ms null).
+  it('a turn where no sentence could be voiced fails (never `done`)', async () => {
+    const events: S2SEvent[] = [];
+    await expect(run({ reply: 'Bom dia, querida!', failTtsFor: 'Bom' }, { emitEvent: e => events.push(e) })).rejects.toThrow(/none of the 1 sentence/);
+    expect(events.some(e => e.type === 'sentence_failed')).toBe(true);
+    expect(events.some(e => e.type === 'done')).toBe(false);
   });
 
   it('resumes from a known transcript without a second STT', async () => {

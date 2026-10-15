@@ -34,12 +34,14 @@ export async function startGateway(
     isAdmin: (u) => u === 'admin',
     charge: (u, n) => { charged.push([u, n]); return extra.deny ?? null; },
     pollMs: 0,
+    turnCheckMs: 0,
     telemetry: (e) => events.push(e),
     ...extra,
   });
   const server = createServer((req, res) => {
     const user = KEYS[String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')];
     if (!user) { res.writeHead(401); res.end('{"error":"proxy auth"}'); return; }
+    if (req.method === 'POST' && req.url === '/v1/realtime/updates') { void realtime.updateRoute.handler(req, res); return; }
     if (req.method === 'POST' && req.url === '/v1/realtime/sessions') {
       const run = () => realtime.route.handler(req, res);
       void (req.headers['x-gateway-no-wake'] ? runNoWake(run) : run());

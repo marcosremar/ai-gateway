@@ -13,6 +13,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { useTempHome } from '../temp-home';
+
+useTempHome();
 
 const DESTROY_TIMER_FILE = join(homedir(), '.babelcast', 'destroy_timer.json');
 

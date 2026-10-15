@@ -52,9 +52,9 @@ function b64urlJson(text: string): unknown {
 }
 
 /** The session config carried by the token (`cfg` claim). Readable by design: the token is signed, not encrypted. */
-export function configFromToken(token: string): Record<string, unknown> | null {
+export function configFromToken(token: string, byReference?: string): Record<string, unknown> | null {
   try {
-    const claims = b64urlJson(token.split('.')[1] ?? '') as { cfg?: unknown };
+    const claims = byReference ? { cfg: byReference } : b64urlJson(token.split('.')[1] ?? '') as { cfg?: unknown };
     if (typeof claims.cfg !== 'string') return null;
     const cfg = b64urlJson(claims.cfg);
     return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg as Record<string, unknown> : null;

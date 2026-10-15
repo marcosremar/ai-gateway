@@ -12,14 +12,18 @@ import statistics
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import aiohttp
 
-from clients import REPLICA_TOKEN, DEFAULT_CFG, RtcLearner, WsLearner, mint
+from clients import REPLICA_TOKEN, DEFAULT_CFG, RtcLearner, WsLearner, mint, shape_network
+from clients import mint_by_reference  # noqa: E402
+from aigw_edge import audio
 
 ROOT = Path(__file__).resolve().parents[1]
-UP_PORT, EDGE_PORT, EDGE_S2S_PORT, GW_PORT = 8900, 8920, 8940, 8950
+UP_PORT, EDGE_PORT, EDGE_S2S_PORT, GW_PORT, EDGE_VAST_PORT = 8900, 8920, 8940, 8950, 8970
+VAST_IP, VAST_UDP, VAST_SHIFT = "203.0.113.7", (50061, 50067), -9000
 TRACE = "4bf92f3577b34da6a3ce929d0e0e4736"
 telemetry_batches: list[dict] = []
 results: dict = {"checks": [], "latency": {}}
@@ -88,7 +92,8 @@ async def scenario_ws(base: str) -> None:
     check("ws: history grows per turn", roles == ["system", "user", "assistant", "user"], roles)
     check("ws: catalog voice → cloning fields", stats["last_tts"]["task_type"] == "Base"
           and stats["last_tts"]["ref_audio"].endswith("/refs/br-m-08.wav"), stats["last_tts"])
-    check("ws: partial transcripts relayed", stats["partials"] >= 1)
+    check("ws: no partial transcripts by default (EDGE_STT_PARTIALS unset)", stats["partials"] == 0
+          and all(e["final"] for e in learner.events.of("transcript")), stats["partials"])
     await learner.close()
 
 
@@ -130,6 +135,7 @@ async def scenario_barge_in(base: str) -> None:
     await learner.events.wait("interrupted", 5)
     check("barge-in: speech over NPC audio → interrupted", True)
     after = learner.events.types().index("interrupted") + 1
+    await learner.events.wait("done", 5, after=after)
     check("barge-in: interrupted is followed by done{interrupted}", learner.events.items[after][1] == {
         "type": "done", "interrupted": True, "turnId": learner.events.items[after][1].get("turnId")})
     await learner.events.wait("metrics", 15, after=after)
@@ -144,6 +150,31 @@ async def scenario_barge_in(base: str) -> None:
     pong = await learner.events.wait("pong", 3)
     check("ping → pong", pong.get("t") == 1)
     await learner.close()
+
+
+async def scenario_tts_guard(base: str) -> None:
+    async def turn(faults: list[str]) -> tuple[WsLearner, dict]:
+        async with aiohttp.ClientSession() as http:
+            await http.post(f"http://127.0.0.1:{UP_PORT}/__tts_faults", json={"Bom dia!": faults})
+            learner = await ws_turn(base)
+            await learner.events.wait("done", 15)
+            await learner.close()
+            await asyncio.sleep(0.5)
+            async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+                return learner, await r.json()
+
+    learner, stats = await turn(["runaway"])
+    metrics = learner.events.of("metrics")[0]
+    asked = [r for r in stats["tts_log"] if r["input"] == "Bom dia!"][-2:]
+    check("tts guard: a silent runaway is asked again once and counted (metrics.tts_retries)", metrics["tts_retries"] == 1
+          and [r["mode"] for r in asked] == ["runaway", "ok"] and learner.events.types().count("audio_start") == 1, metrics)
+    check("tts guard: the engine cap and a request id go with every attempt",
+          all(r["max_new_tokens"] == 58 and len(r["request_id"]) == 12 for r in asked) and asked[0]["request_id"] != asked[1]["request_id"], asked)
+    learner, stats = await turn(["runaway", "runaway"])
+    done = learner.events.of("done")[-1]
+    check("tts guard: silent again on the retry → error, no audio", done.get("error") is True and learner.audio_bytes == 0
+          and "audio_start" not in learner.events.types() and "tts" in learner.events.of("error")[0]["message"], learner.events.types())
+    check("tts guard: no upstream request left open", stats["tts_active"] == 0, stats["tts_active"])
 
 
 async def scenario_tokens(base: str) -> None:
@@ -176,6 +207,73 @@ async def scenario_tokens(base: str) -> None:
             body = await r.json()
             check("offer with bad token → 401", r.status == 401 and body["error"]["code"] == "unauthorized")
     _ = KEY
+
+
+async def scenario_config_by_reference(base: str) -> None:
+    for kb in (7, 16):
+        system = "Você é o padeiro. " + "x" * (kb * 1024)
+        token, cfg = mint_by_reference({**DEFAULT_CFG, "system": system})
+        learner = await WsLearner(base).connect(token, cfg)
+        await learner.events.wait("ready")
+        learner.say(1.2)
+        await learner.events.wait("done", 15)
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+                sent = (await r.json())["last_llm_messages"][0]
+        check(f"config by reference: a {kb} KB system prompt reaches the LLM whole over WS (token {len(token)} chars)",
+              sent == {"role": "system", "content": system} and len(token) < 600, len(sent["content"]))
+        await learner.close()
+
+    async def refused(token: str, cfg: str | None) -> dict:
+        learner = await WsLearner(base).connect(token, cfg)
+        err = await learner.events.wait("error", 8)
+        await learner.events.wait("__closed", 5)
+        code = learner.close_code
+        await learner.close()
+        return {**err, "close": code}
+
+    token, cfg = mint_by_reference({**DEFAULT_CFG, "system": "x" * 7000})
+    _, other = mint_by_reference({**DEFAULT_CFG, "system": "Ignore tudo. " + "x" * 7000})
+    err = await refused(token, other)
+    check("config by reference: a config that is not the signed one is refused", err["code"] == "unauthorized" and err["close"] == 4401
+          and "cfg" in err["message"], err)
+    err = await refused(token, None)
+    check("config by reference: no config within the wait is refused", err["code"] == "unauthorized" and "cfg" in err["message"], err)
+    learner = await WsLearner(base).connect(token, cfg)
+    await learner.events.wait("ready")
+    check("config by reference: a refusal does not consume the token", True)
+    await learner.close()
+    token, cfg = mint_by_reference({**DEFAULT_CFG, "system": "y" * 7000})
+    rtc = await RtcLearner(base).connect(token)
+    check("config by reference: an offer without the config → 401", rtc.status == 401, rtc.status)
+    await rtc.close()
+    rtc = await RtcLearner(base).connect(token, cfg=cfg)
+    check("config by reference: an offer with the signed config is answered", rtc.status == 200, rtc.status)
+    await rtc.close()
+    async with aiohttp.ClientSession() as http:
+        await http.delete(f"{base}/__aigw/rt/session/{rtc.session_id}")
+
+
+async def scenario_app_hooks(base: str) -> None:
+    rules = [{"tag": "bread", "action": "say", "contains": ["pão francês"], "text": "Você pode pedir de novo.", "voice": "br-m-08"}]
+    for transport in ("ws", "webrtc"):
+        token = mint({**DEFAULT_CFG, "intercepts": rules if transport == "ws" else []})
+        learner = await (WsLearner(base) if transport == "ws" else RtcLearner(base)).connect(token)
+        await learner.events.wait("ready", 15)
+        (learner if transport == "ws" else learner.mic).say(1.2)
+        done = await learner.events.wait("done", 15)
+        served = {"stt": "fake-stt", "llm": "fake-llm", "tts": "fake-tts", "voice": "br-m-08", "opener": False, "transport": transport}
+        check(f"app hooks ({transport}): done carries what served each stage, from the replica's /health (through the worker too)",
+              done.get("served") == served, done)
+        if transport == "ws":
+            types = learner.events.types()
+            check("app hooks (ws): an intercepted turn voices the app's line and never reaches the LLM",
+                  done.get("intercepted") is True and done.get("tag") == "bread" and "reply" not in types and learner.audio_bytes > 0
+                  and [t for t in types if t in ("intercept", "say", "audio_start")] == ["intercept", "say", "audio_start"], types)
+        await learner.close()
+        if transport == "webrtc":
+            async with aiohttp.ClientSession() as http:
+                await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
 
 
 async def scenario_capacity(base: str) -> None:
@@ -215,6 +313,10 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
     check("webrtc: transcript, reply, audio_start/end, metrics, done", all(k in types for k in
           ("transcript", "reply_delta", "reply", "audio_start", "audio_end", "metrics", "done")), types)
     check("webrtc: Opus audio heard by the learner", learner.loud_frames >= 50, f"{learner.loud_frames} loud 20 ms frames")
+    vad_end = next(at for at, e in learner.events.items if e["type"] == "vad" and e["state"] == "end")
+    heard_ms = round((vad_end - learner.mic.speech_end_at) * 1000)
+    check("webrtc: the end of speech reaches the VAD with no jitter-buffer wait (700 ms of silence, then under 80 ms)",
+          heard_ms < 780, heard_ms)
     m = learner.events.of("metrics")[0]
     results["latency"][f"webrtc_turn_{base[-4:]}"] = {**{k: m[k] for k in ("ttfa_ms", "stt_ms", "llm_ttft_ms", "tts_ttfb_ms")},
                                         "client_ttfa_from_speech_end_ms": round((learner.first_audio_at - learner.mic.speech_end_at) * 1000)}
@@ -226,6 +328,260 @@ async def scenario_webrtc(base: str, udp: tuple[int, int] = (50000, 50040)) -> N
     await learner.close()
 
 
+NETWORK_TURNS = 8
+NETWORKS = (("clean", 0.0, 0.0), ("2 % loss", 0.02, 0.0), ("5 % loss", 0.05, 0.0), ("10 % loss", 0.10, 0.0), ("40 ms jitter", 0.0, 0.04))
+
+
+async def scenario_webrtc_network(base: str) -> None:
+    for red, (name, loss, jitter_s) in ((red, network) for red in (False, True) for network in NETWORKS):
+        name = f"RED, {name}" if red else name
+        learner = await RtcLearner(base).connect(mint(), red=red)
+        await learner.events.wait("ready", 10)
+        learner.impair(loss, jitter_s)
+        ends, firsts, lost, fec, holes = [], [], 0, 0, 0
+        for _ in range(NETWORK_TURNS):
+            after, learner.first_audio_at = len(learner.events.items), None
+            learner.mic.say(1.2)
+            await learner.events.wait("done", 15, after)
+            at = {(e["type"], e.get("state")): t for t, e in learner.events.items[after:]}
+            ends.append(round((at[("vad", "end")] - learner.mic.speech_end_at) * 1000))
+            firsts.append(round((learner.first_audio_at - at[("audio_start", None)]) * 1000))
+            m = learner.events.of("metrics")[-1]
+            lost += m["uplink_lost_ms"]
+            fec += m["uplink_recovered_ms"]
+            async with aiohttp.ClientSession() as http:
+                async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+                    holes += (await r.json())["last_stt_holes"]
+            await asyncio.sleep(0.4)
+        results["latency"][f"webrtc {name}"] = {"end_of_turn_ms": ends, "first_frame_ms": firsts, "uplink_lost_ms": lost,
+                                                "uplink_recovered_ms": fec, "uplink_fec_pct": m["uplink_fec_pct"],
+                                                "uplink_red_pct": m["uplink_red_pct"], "silent_holes": holes,
+                                                **{k: m.get(k) for k in ("rtp_first_sent_ms", "rtp_late_p95_ms")}}
+        jitter_ms = round(jitter_s * 1000)
+        check(f"webrtc, {name}: the turn ends 700 ms after the speech, lost packets counted as elapsed time",
+              statistics.median(ends) < 770 + jitter_ms and max(ends) < 860 + jitter_ms, ends)
+        check(f"webrtc, {name}: the first reply frame is heard within one frame of audio_start",
+              statistics.median(firsts) <= 20 + jitter_ms, firsts)
+        check(f"webrtc, {name}: lost uplink audio is reported per turn (metrics.uplink_lost_ms)", (lost > 0) == (loss > 0), lost)
+        check(f"webrtc, {name}: the speech the STT gets keeps no silent hole beyond a burst FEC and concealment cannot bridge",
+              holes * 20 <= 0.05 * lost, {"holes": holes, "lost_ms": lost})
+        seen = {"recovered_ms": fec, "lost_ms": lost, "fec_pct": m["uplink_fec_pct"], "red_pct": m["uplink_red_pct"]}
+        if red:
+            check(f"webrtc, {name}: the redundant copies are seen and nearly all the lost audio is rebuilt (metrics.uplink_red_pct)",
+                  m["uplink_red_pct"] > 90 and 0.8 * lost <= fec <= lost, seen)
+        else:
+            check(f"webrtc, {name}: FEC is seen on the uplink and what it rebuilt is reported (metrics.uplink_recovered_ms, uplink_fec_pct)",
+                  m["uplink_fec_pct"] > 0 and (fec > 0) == (loss > 0) and fec <= lost and "useinbandfec=1" in learner.answer["sdp"], seen)
+        async with aiohttp.ClientSession() as http:
+            await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
+        await learner.close()
+    check("webrtc: the edge reports when the first reply packet left and how late the next 2 s were sent",
+          isinstance(m.get("rtp_first_sent_ms"), float) and m["rtp_late_p95_ms"] < 15, m)
+
+
+CONNECT_RUNS = int(os.environ.get("CONNECT_RUNS", "6"))
+SDK_FOREGROUND_MS, SDK_BACKGROUND_MS, SDK_TRIES, SDK_BACKOFF_MS = 3000, 12000, 2, 2000
+
+
+async def connect_like_sdk(base: str) -> tuple[RtcLearner, int]:
+    for attempt in range(1, SDK_TRIES + 1):
+        learner = await RtcLearner(base).connect(mint())
+        try:
+            await learner.events.wait("ready", SDK_BACKGROUND_MS / 1000)
+            return learner, attempt
+        except TimeoutError:
+            if getattr(learner, "session_id", None):
+                async with aiohttp.ClientSession() as http:
+                    await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
+            await learner.close()
+            if attempt == SDK_TRIES:
+                raise
+            await asyncio.sleep(SDK_BACKOFF_MS / 1000)
+
+
+async def scenario_webrtc_connect_loss(base: str) -> None:
+    budget = SDK_TRIES * SDK_BACKGROUND_MS + SDK_BACKOFF_MS
+    for loss in (0.0, 0.05, 0.10):
+        shape_network(loss, 0.075 if loss else 0.0)
+        times, retried, failed = [], 0, 0
+        try:
+            for _ in range(CONNECT_RUNS):
+                t = time.monotonic()
+                try:
+                    learner, attempts = await connect_like_sdk(base)
+                except TimeoutError:
+                    failed += 1
+                    continue
+                retried += attempts > 1
+                times.append(round((time.monotonic() - t) * 1000))
+                async with aiohttp.ClientSession() as http:
+                    await http.delete(f"{base}/__aigw/rt/session/{learner.session_id}")
+                await learner.close()
+        finally:
+            shape_network()
+        late = sum(ms > SDK_FOREGROUND_MS for ms in times)
+        results["latency"][f"webrtc connect, {round(loss * 100)} % loss + 75 ms each way"] = {
+            "ms": sorted(times), "over_foreground_budget": late, "second_try": retried, "failed": failed}
+        check(f"webrtc connect, {round(loss * 100)} % loss: every connection is up inside the SDK's background attempts "
+              f"({SDK_TRIES} × {SDK_BACKGROUND_MS} ms; its foreground budget is {SDK_FOREGROUND_MS})",
+              failed == 0 and max(times) < budget and retried <= 0.1 * CONNECT_RUNS,
+              {"max": max(times, default=None), "median": statistics.median(times) if times else None,
+               "over_foreground": f"{late}/{len(times)}", "second_try": retried, "failed": failed})
+
+
+async def scenario_vast(base: str) -> None:
+    lo, hi = VAST_UDP
+    async with aiohttp.ClientSession() as http:
+        async with http.get(f"{base}/__aigw/rt/status") as r:
+            status = await r.json()
+    check("vast: status reports the mapped probe port and PUBLIC_IPADDR", status["probePort"] == hi + VAST_SHIFT
+          and status["net"]["probePort"] == hi + VAST_SHIFT and status["net"]["publicIp"] == VAST_IP, status["net"])
+    learner = await RtcLearner(base).connect(mint())
+    lines = [line.split() for line in learner.answer.get("sdp", "").splitlines() if line.startswith("a=candidate")]
+    media = {port + VAST_SHIFT for port in range(lo, hi)}
+    check("vast: every candidate carries PUBLIC_IPADDR and a mapped media port", learner.status == 200 and lines
+          and all(c[4] == VAST_IP and int(c[5]) in media for c in lines), [(c[4], c[5]) for c in lines] or learner.answer)
+    check("vast: one bind address → one UDP port per session", len({c[5] for c in lines}) == 1)
+    loop = asyncio.get_running_loop()
+    reply = loop.create_future()
+
+    class Probe(asyncio.DatagramProtocol):
+        def datagram_received(self, data, _addr):
+            reply.done() or reply.set_result(data)
+
+    transport, _ = await loop.create_datagram_endpoint(Probe, remote_addr=("127.0.0.1", hi))
+    transport.sendto(b"AIGWP1" + b"n" * 16)
+    echoed = await asyncio.wait_for(reply, 2)
+    transport.close()
+    check("vast: the probe responder answers on the container port behind the mapping", echoed == b"AIGWR1" + b"n" * 16)
+    async with aiohttp.ClientSession() as http:
+        async with http.delete(f"{base}/__aigw/rt/session/{learner.session_id}") as r:
+            check("vast: DELETE session", r.status == 200)
+    await learner.close()
+
+
+async def scenario_reoffer(base: str) -> None:
+    async def offer_status(token: str, sdp: str) -> tuple[int, dict]:
+        async with aiohttp.ClientSession() as http:
+            async with http.post(f"{base}/__aigw/rt/offer", json={"sdp": sdp, "type": "offer", "token": token}) as r:
+                return r.status, await r.json()
+
+    async def active() -> int:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f"{base}/__aigw/rt/status") as r:
+                return (await r.json())["active"]
+
+    sid = uuid.uuid4().hex
+    token = mint(sid=sid)
+    first = await RtcLearner(base).connect(token)
+    await first.events.wait("ready", 10)
+    first.mic.say(1.2)
+    await first.events.wait("transcript", 15)
+    second = await RtcLearner(base).connect(token)
+    check("re-offer of a live session: accepted, same session id", second.status == 200 and second.session_id == sid,
+          second.answer.get("error"))
+    done = await second.events.wait("done", 15)
+    check("re-offer: the turn in progress ends on the new peer connection", done.get("turnId", "").endswith(":1")
+          and "done" not in first.events.types(), second.events.types())
+    check("re-offer: no second ready, one session on the replica", "ready" not in second.events.types() and await active() == 1)
+    for _ in range(50):
+        if first.pc.connectionState in ("closed", "failed") or first.dc.readyState == "closed":
+            break
+        await asyncio.sleep(0.1)
+    check("re-offer: the previous peer connection is closed by the edge",
+          first.pc.connectionState in ("closed", "failed") or first.dc.readyState == "closed", first.pc.connectionState)
+    seen = len(second.events.items)
+    second.mic.say(1.2)
+    done = await second.events.wait("done", 15, after=seen)
+    check("re-offer: the session kept its turns (second turn of the same session)", done.get("turnId", "").endswith(":2"), done)
+    sdp = second.pc.localDescription.sdp
+    status, body = await offer_status(mint(sid=sid, ttl=500), sdp)
+    check("re-offer with another token of the same sid → 401 replayed", status == 401 and "replayed" in body["error"]["message"], body)
+    check("re-offer refused: the live session is untouched", await active() == 1)
+    async with aiohttp.ClientSession() as http:
+        async with http.delete(f"{base}/__aigw/rt/session/{sid}") as r:
+            check("re-offer: DELETE ends the session", r.status == 200 and await active() == 0)
+    status, body = await offer_status(token, sdp)
+    check("re-offer after the session ended → 401 replayed", status == 401 and "replayed" in body["error"]["message"], body)
+    fallback = await WsLearner(base).connect(token)
+    await fallback.events.wait("ready")
+    status, body = await offer_status(token, sdp)
+    check("re-offer while the sid only lives on WS → 401 replayed", status == 401 and "replayed" in body["error"]["message"], body)
+    await fallback.close()
+    await first.close()
+    await second.close()
+    await asyncio.sleep(0.3)
+
+
+async def scenario_race(base: str, stages: bool) -> None:
+    async def status() -> dict:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f"{base}/__aigw/rt/status") as r:
+                return await r.json()
+
+    sid = uuid.uuid4().hex
+    token = mint(sid=sid)
+    ws = await WsLearner(base).connect(token)
+    await ws.events.wait("ready")
+    others = [await WsLearner(base).connect(mint()) for _ in range(2)]
+    for other in others:
+        await other.events.wait("ready")
+    rtc = await RtcLearner(base).connect(token, standby=True)
+    check("race: on a full replica the learner's own WebRTC offer is accepted while its WS session runs",
+          rtc.status == 200 and rtc.session_id == sid, rtc.answer.get("error"))
+    await rtc.events.wait("ready", 10)
+    now = await status()
+    check("race: both transports live, the learner counts once", now["active"] == 3 and now["available"] == 0
+          and now["byTransport"] == {"webrtc": 1, "ws": 3} and "__closed" not in ws.events.types(), now)
+    for other in others:
+        await other.close()
+    ws.say(1.2)
+    await ws.events.wait("done", 15)
+    await asyncio.sleep(0.3)
+    check("race: the turn spoken on WS runs once, the standby WebRTC session hears nothing",
+          rtc.events.types() == ["ready"] and rtc.loud_frames == 0, rtc.events.types())
+    await ws.close()
+    await asyncio.sleep(0.5)
+    now = await status()
+    check("race: closing the WS frees nothing but the WS, WebRTC carries on", now["active"] == 1
+          and now["byTransport"] == {"webrtc": 1, "ws": 0}, now)
+    rtc.activate()
+    await rtc.send({"type": "config_update", "messages": [{"role": "user", "content": "Bom dia"}, {"role": "assistant", "content": "Olá!"}]})
+    rtc.mic.say(1.2)
+    done = await rtc.events.wait("done", 15)
+    check("race: after the switch the microphone reaches the WebRTC session", done.get("turnId", "").endswith(":1")
+          and rtc.loud_frames >= 50, f"{rtc.loud_frames} loud frames")
+    if stages:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+                roles = [msg["role"] for msg in (await r.json())["last_llm_messages"]]
+        check("race: the replayed history reaches the model", roles == ["system", "user", "assistant", "user"], roles)
+    await rtc.close()
+    async with aiohttp.ClientSession() as http:
+        async with http.delete(f"{base}/__aigw/rt/session/{sid}") as r:
+            await r.read()
+    check("race: the slot is free once the WebRTC session ends", (await status())["active"] == 0)
+
+    sid = uuid.uuid4().hex
+    token = mint(sid=sid)
+    rtc = await RtcLearner(base).connect(token, standby=True)
+    await rtc.events.wait("ready", 10)
+    ws = await WsLearner(base).connect(token)
+    await ws.events.wait("ready")
+    async with aiohttp.ClientSession() as http:
+        async with http.delete(f"{base}/__aigw/rt/session/{sid}") as r:
+            deleted = r.status
+    now = await status()
+    check("race: giving up the WebRTC attempt (DELETE) leaves the WS session running", deleted == 200 and now["active"] == 1
+          and now["byTransport"] == {"webrtc": 0, "ws": 1} and "__closed" not in ws.events.types(), now)
+    ws.say(1.2)
+    await ws.events.wait("done", 15)
+    await ws.close()
+    await rtc.close()
+    await asyncio.sleep(0.3)
+    check("race: the slot is free once the WS closes", (await status())["active"] == 0)
+
+
 async def scenario_s2s(base: str) -> None:
     learner = await ws_turn(base)
     await learner.events.wait("done", 15)
@@ -233,6 +589,9 @@ async def scenario_s2s(base: str) -> None:
     check("s2s mode: transcript → reply → audio → done", all(k in types for k in
           ("transcript", "reply_delta", "reply", "audio_start", "audio_end", "metrics", "done")), types)
     results["latency"]["s2s_turn"] = learner.events.of("metrics")[0]
+    async with aiohttp.ClientSession() as http:
+        async with http.get(f"http://127.0.0.1:{UP_PORT}/__stats") as r:
+            check("EDGE_STT_PARTIALS=1: partial transcripts relayed", (await r.json())["partials"] >= 1)
     await learner.close()
     learner = await ws_turn(base, {**DEFAULT_CFG, "stt_prompt": "FAKE:Obrigado por assistir"})
     done = await learner.events.wait("done", 10)
@@ -323,12 +682,12 @@ def start_nginx():
     Path(d, "aigw.conf").write_text(conf)
     Path(d, "nginx.conf").write_text(
         f"pid {d}/nginx.pid; error_log {d}/error.log; daemon off; events {{}}\n"
-        f"http {{ access_log off; client_body_temp_path {d}; proxy_temp_path {d}; fastcgi_temp_path {d}; "
+        f"http {{ access_log {d}/access.log; client_body_temp_path {d}; proxy_temp_path {d}; fastcgi_temp_path {d}; "
         f"uwsgi_temp_path {d}; scgi_temp_path {d}; include {d}/aigw.conf; }}\n")
     return subprocess.Popen(["nginx", "-p", d, "-c", f"{d}/nginx.conf"]), d
 
 
-async def scenario_nginx() -> None:
+async def scenario_nginx(nginx_dir: str) -> None:
     front = f"http://127.0.0.1:{NGINX_PORT}"
     big_cfg = {**DEFAULT_CFG, "system": "x" * 4400}  # ~6 KB of base64url cfg in the URL, the contract's maximum
     token = mint(big_cfg)
@@ -353,6 +712,20 @@ async def scenario_nginx() -> None:
     await learner.events.wait("done", 15)
     check("nginx: WS upgrade through the token gate, 6 KB token, full turn", learner.audio_bytes > 0)
     await learner.close()
+    header_token = mint(big_cfg)
+    learner = WsLearner(front)
+    learner.http = aiohttp.ClientSession(headers={"X-Aigw-Token": GATE_TOKEN, "X-Aigw-Session-Token": header_token})
+    learner.ws = await learner.http.ws_connect(f"{front}/__aigw/rt/ws")
+    learner.tasks.append(asyncio.create_task(learner._read()))
+    learner.tasks.append(asyncio.create_task(learner._mic()))
+    await learner.events.wait("ready")
+    learner.say(1.2)
+    await learner.events.wait("done", 15)
+    check("nginx: WS with the session token in X-Aigw-Session-Token (no query), full turn", learner.audio_bytes > 0)
+    await learner.close()
+    logs = "".join(Path(nginx_dir, name).read_text() for name in ("access.log", "error.log") if Path(nginx_dir, name).exists())
+    check("nginx: neither session token is in the access or error log",
+          token.split(".")[1] not in logs and header_token.split(".")[1] not in logs and "/__aigw/rt/status" in logs)
     t = time.monotonic()
     rtc = RtcLearner(front)
     # The offer goes through nginx (the gateway's signaling path); media goes straight to the edge's UDP ports.
@@ -372,33 +745,50 @@ async def scenario_nginx() -> None:
 
 
 async def main() -> int:
+    audio.install()
     gw = await fake_gateway()
     nginx, nginx_dir = start_nginx()
     up = subprocess.Popen([sys.executable, str(ROOT / "tests" / "fake_upstream.py"), "--port", str(UP_PORT)])
     edge = start_edge(EDGE_PORT)
     # The second edge runs everything in one process (RT_RTC_WORKERS=0) and answers turns through /v1/s2s.
-    edge_s2s = start_edge(EDGE_S2S_PORT, EDGE_UPSTREAM_MODE="s2s", RT_UDP_PORTS="50041-50060", RT_RTC_WORKERS="0")
-    base, base_s2s = f"http://127.0.0.1:{EDGE_PORT}", f"http://127.0.0.1:{EDGE_S2S_PORT}"
+    edge_s2s = start_edge(EDGE_S2S_PORT, EDGE_UPSTREAM_MODE="s2s", RT_UDP_PORTS="50041-50060", RT_RTC_WORKERS="0",
+                          EDGE_STT_PARTIALS="1")
+    edge_vast = start_edge(EDGE_VAST_PORT, RT_UDP_PORTS=f"{VAST_UDP[0]}-{VAST_UDP[1]}", PUBLIC_IPADDR=VAST_IP, RT_UDP_BIND="0.0.0.0",
+                           **{f"VAST_UDP_PORT_{p}": str(p + VAST_SHIFT) for p in range(VAST_UDP[0], VAST_UDP[1] + 1)})
+    base, base_s2s, base_vast = (f"http://127.0.0.1:{p}" for p in (EDGE_PORT, EDGE_S2S_PORT, EDGE_VAST_PORT))
     try:
         await wait_ready(base)
         await wait_ready(base_s2s)
-        for scenario in (scenario_tokens, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
-                         scenario_capacity, scenario_webrtc):
+        await wait_ready(base_vast)
+        only = [globals()[name] for name in os.environ.get("ONLY", "").split(",") if name]
+        for scenario in only:
+            await asyncio.sleep(2)
             await scenario(base)
+        if only:
+            return 0
+        for scenario in (scenario_tokens, scenario_config_by_reference, scenario_app_hooks, scenario_ws, scenario_client_vad, scenario_filtered, scenario_barge_in,
+                         scenario_capacity, scenario_webrtc, scenario_webrtc_network, scenario_webrtc_connect_loss):
+            await scenario(base)
+        await scenario_reoffer(base)
+        await scenario_race(base, stages=True)
         await scenario_s2s(base_s2s)
         await scenario_webrtc(base_s2s, (50041, 50060))
+        await scenario_reoffer(base_s2s)
+        await scenario_race(base_s2s, stages=False)
         await scenario_telemetry(base)
+        await scenario_vast(base_vast)
         if nginx:
-            await scenario_nginx()
+            await scenario_nginx(nginx_dir)
         else:
             print("SKIP nginx scenario (no nginx or bun)")
+        await scenario_tts_guard(base)
         return 0
     except Exception as error:  # noqa: BLE001
         results["error"] = repr(error)
         print("ERROR", repr(error), flush=True)
         return 1
     finally:
-        for proc in (edge, edge_s2s, up, nginx):
+        for proc in (edge, edge_s2s, edge_vast, up, nginx):
             if proc:
                 proc.terminate()
         if nginx_dir:
@@ -409,7 +799,6 @@ async def main() -> int:
         results["summary"] = f"{passed}/{len(results['checks'])} checks passed"
         print(json.dumps(results["latency"], indent=1))
         print(results["summary"])
-        _ = statistics
 
 
 if __name__ == "__main__":

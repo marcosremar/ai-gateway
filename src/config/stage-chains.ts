@@ -12,11 +12,13 @@
  *   disabled     deployments are off on this gateway (no SCW_SECRET_KEY)
  *   no_key       provider key missing or rejected
  *   blocked      refused by the provider account's data policy (ZDR), skipped for a while
- *   circuit_open repeated failures, skipped for < 30 s
+ *   circuit_open repeated failures, skipped for < 30 s (the target's breaker, or the stage out of rotation on every
+ *                ready replica of a deployment)
  */
 
 import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-breaker';
 import { isTargetCircuitOpen } from '../gateway/proxy/provider-routing';
+import { emitGatewayEvent } from '../telemetry/emit';
 
 export interface ChainLinkSpec {
   /** `deployment:<name>` or `<provider>:<upstream model>`. */
@@ -46,6 +48,7 @@ export interface ChainReport {
 export interface ChainHealthDeps {
   /** Deployment status (`DeploymentView.status`), or null when it does not exist. Absent = deployments are off. */
   deploymentStatus?: (name: string) => string | null;
+  stageOut?: (name: string, stage: string) => { ready: number; out: number };
   /** Reason a declared deployment is still pending, or null. */
   declaredPending?: (name: string) => string | null;
   breakers?: CircuitBreakerRegistry;
@@ -76,6 +79,11 @@ function linkReport(link: ChainLinkSpec, deps: ChainHealthDeps, stage: string): 
   if (deps.breakers && isTargetCircuitOpen(deps.breakers, stage, link)) {
     return { target, state: 'circuit_open', reason: 'repeated failures (retrying in < 30 s)' };
   }
+  const replicas = link.deployment !== undefined ? deps.stageOut?.(link.deployment, stage) : undefined;
+  if (replicas?.out) {
+    const reason = `${stage} out of rotation on ${replicas.out} of ${replicas.ready} ready replicas after repeated failures`;
+    return { target, state: replicas.out >= replicas.ready ? 'circuit_open' : 'ready', reason };
+  }
   return { target, state: 'ready' };
 }
 
@@ -83,6 +91,43 @@ export function chainReport(links: ChainLinkSpec[], deps: ChainHealthDeps, stage
   const reports = links.map(l => linkReport(l, deps, stage));
   const serving = reports.find(r => r.state === 'ready')?.target ?? null;
   return { serving, onFallback: serving !== null && serving !== reports[0]?.target, links: reports };
+}
+
+export interface FallbackStatus {
+  active: boolean;
+  since: string | null;
+  chains: Array<{ stage: string; model: string; primary: string; primaryState: LinkState; serving: string; since: string }>;
+}
+
+export function createFallbackWatch(
+  log: (msg: string, data: Record<string, unknown>) => void, now: () => number = Date.now,
+): (stages: Record<string, Record<string, ChainReport>>) => FallbackStatus {
+  const since = new Map<string, number>();
+  return (stages) => {
+    const chains: FallbackStatus['chains'] = [];
+    for (const [stage, byModel] of Object.entries(stages)) {
+      for (const [model, report] of Object.entries(byModel)) {
+        const key = `${stage} ${model}`;
+        const primary = report.links[0];
+        if (report.onFallback && report.serving && primary) {
+          const data = { stage, model, primary: primary.target, primaryState: primary.state, serving: report.serving };
+          if (!since.has(key)) {
+            since.set(key, now());
+            log('gateway: stage on fallback', { ...data, reason: primary.reason ?? null });
+            emitGatewayEvent('stage.on_fallback', { level: 'warn', attrs: data });
+          }
+          chains.push({ ...data, since: new Date(since.get(key)!).toISOString() });
+        } else if (report.serving && since.has(key)) {
+          const forMs = now() - since.get(key)!;
+          since.delete(key);
+          log('gateway: stage back on primary', { stage, model, primary: report.serving, forMs });
+          emitGatewayEvent('stage.on_primary', { durMs: forMs, attrs: { stage, model, primary: report.serving } });
+        }
+      }
+    }
+    const first = chains.length ? chains.reduce((a, b) => (a.since <= b.since ? a : b)).since : null;
+    return { active: chains.length > 0, since: first, chains };
+  };
 }
 
 /** Per stage → per model chain report, plus one warning per chain whose first link cannot serve. */

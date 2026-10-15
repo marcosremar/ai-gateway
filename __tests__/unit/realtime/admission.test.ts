@@ -4,9 +4,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  decodeSessionConfig, deriveRealtimeKey, externalLoadOf, orderTransports, pickReplica, sessionCharge, verifySessionToken,
+  configDigest, decodeSessionConfig, deriveRealtimeKey, RT_MAX_CFG_REF_CHARS, distinctSessions, externalLoadOf, orderTransports, pickReplica, refusedSessions, sessionCharge, verifySessionToken,
 } from '../../../src/realtime';
 import { _resetExternalLoad } from '../../../src/realtime/external-load';
+import { promptOverflow } from '../../../src/s2s/history';
+import { parseEdgeStatus } from '../../../src/realtime/edge-status';
 import { fakeController, REPLICA_TOKEN, startFakeEdge, type FakeEdge } from './_fakes';
 import { startGateway, type TestGateway } from './_gateway';
 
@@ -33,6 +35,63 @@ describe('orderTransports / pickReplica / sessionCharge', () => {
     expect(pickReplica([{ ...a, pending: 6 }], ['webrtc'])).toBeNull();
     expect(sessionCharge(600)).toBe(40);
     expect(sessionCharge(61, 2)).toBe(4);
+  });
+
+  it('a replica shedding load (first audio over the deadline) reports no free slot under its cap: sessions go elsewhere', () => {
+    const shedding = parseEdgeStatus({ active: 2, max: 4, available: 0, transports: ['webrtc', 'ws'], firstAudioMaxMs: 2300, shedding: true })!;
+    const healthy = parseEdgeStatus({ active: 3, max: 4, available: 1, transports: ['webrtc', 'ws'], firstAudioMaxMs: 1400 })!;
+    expect([shedding.available, shedding.firstAudioMaxMs, healthy.firstAudioMaxMs]).toEqual([0, 2300, 1400]);
+    expect(parseEdgeStatus({ active: 1, max: 4 })!.firstAudioMaxMs).toBeNull();
+    const at = (id: string, status: typeof shedding) => ({ id, base: `http://${id}`, status, pending: 0 });
+    expect(pickReplica([at('shedding', shedding), at('healthy', healthy)], ['ws'])!.id).toBe('healthy');
+    expect(pickReplica([at('shedding', shedding)], ['ws'])).toBeNull();
+  });
+
+  it('prefers the better media path among replicas with a free slot: direct, unprobed, relay, ws; then free slots', () => {
+    const on = (id: string, path: 'direct' | 'relay' | 'ws' | 'unknown' | null, active: number, pending = 0) => ({
+      id, base: `http://${id}`, pending,
+      status: {
+        active, max: 8, available: 8 - active, transports: (path === 'ws' ? ['ws'] : ['webrtc', 'ws']) as Array<'webrtc' | 'ws'>, udpPorts: null, probePort: 50100,
+        net: path ? { path, udpInbound: 'unknown' as const, publicIp: null, checkedAt: null } : null,
+      },
+    });
+    const ladder = ['webrtc', 'ws'] as const;
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 0), on('direct', 'direct', 7)], [...ladder])!.id).toBe('direct');
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 6), on('direct', 'direct', 7, 1)], [...ladder])!.id).toBe('relay');
+    expect(pickReplica([on('ws', 'ws', 0), on('relay', 'relay', 8), on('direct', 'direct', 8)], [...ladder])!.id).toBe('ws');
+    expect(pickReplica([on('relay', 'relay', 0), on('old-edge', null, 5), on('unprobed', 'unknown', 6)], [...ladder])!.id).toBe('old-edge');
+    expect(pickReplica([on('d1', 'direct', 5), on('d2', 'direct', 2)], [...ladder])!.id).toBe('d2');
+  });
+});
+
+describe('a system prompt larger than the LLM context per session (T3)', () => {
+  let edge: FakeEdge;
+  let gw: TestGateway;
+  beforeEach(async () => { _resetExternalLoad(); edge = await startFakeEdge(); });
+  afterEach(async () => { await gw?.close(); await edge.close(); });
+  const LONG = 'Você é a Lia, atendente da padaria em Copacabana. '.repeat(320);
+
+  it('promptOverflow: 16 KB of Portuguese does not fit 2048 tokens, fits 8192; a short prompt fits', () => {
+    expect(Buffer.byteLength(LONG)).toBeGreaterThan(16_000);
+    expect(promptOverflow({ system: LONG }, 2048)).toMatch(/about \d+ tokens before the learner speaks .* 2048-token context/);
+    expect(promptOverflow({ system: LONG }, 8192)).toBeNull();
+    expect(promptOverflow({ system: 'Tu es Lia.' }, 2048)).toBeNull();
+    expect(promptOverflow({ system: 'x'.repeat(5000), max_tokens: 160 }, 2048)).toBeNull();
+    expect(promptOverflow({ system: 'x'.repeat(5000), max_tokens: 300 }, 2048)).not.toBeNull();
+    expect(promptOverflow({ system: 'x', messages: [{ role: 'system', content: LONG }] }, 2048)).not.toBeNull();
+  });
+
+  it('refused at admission with prompt_too_large (413), nothing woken nor charged; a deployment with a larger context admits it', async () => {
+    const small = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(small.controller);
+    const res = await gw.create({ config: { ...CONFIG, system: LONG } });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: { code: 'prompt_too_large', message: expect.stringMatching(/every turn would fail/) } });
+    expect(small.state.woken).toBe(0);
+    await gw.close();
+    const large = fakeController({ replicas: [{ id: 'r1', ip: edge.host }], spec: { machineType: 'L40S-1-48G', envByMachineType: { 'L40S-1-48G': { LLM_SLOT_CTX: '8192' } } } });
+    gw = await startGateway(large.controller);
+    expect((await gw.create({ config: { ...CONFIG, system: LONG } })).status).toBe(200);
   });
 });
 
@@ -67,6 +126,74 @@ describe('POST /v1/realtime/sessions', () => {
     expect(externalLoadOf('speech')).toMatchObject({ active: 0, max: 8, replicas: 1 });
   });
 
+  it('config size: 3 KB rides in the token as before; 7 KB and 16 KB go by reference (digest in the token, config in the descriptor); 25 KB is refused', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }], spec: { env: { LLM_SLOT_CTX: '16384' } } });
+    gw = await startGateway(controller);
+    const admit = async (kb: number) => {
+      const config = { ...CONFIG, system: 'é'.repeat(kb * 512) };
+      const res = await gw.create({ config });
+      const body = await res.json() as Record<string, any>;
+      const verdict = res.ok ? verifySessionToken(body.token, deriveRealtimeKey(REPLICA_TOKEN), Math.floor(Date.now() / 1000)) : null;
+      return { config, status: res.status, body, claims: verdict && 'claims' in verdict ? verdict.claims : null };
+    };
+    const small = await admit(3);
+    expect(small.body.cfg).toBeUndefined();
+    expect(small.claims!.cfd).toBeUndefined();
+    expect(decodeSessionConfig(small.claims!.cfg)).toEqual(small.config);
+    for (const kb of [7, 16]) {
+      const large = await admit(kb);
+      expect(large.status).toBe(200);
+      expect(large.claims).toMatchObject({ cfg: '', cfd: configDigest(large.body.cfg) });
+      expect(decodeSessionConfig(large.body.cfg)).toEqual(large.config);
+      expect(large.body.token.length).toBeLessThan(600);
+      expect(large.body.transports[1].url.length).toBeLessThan(700);
+    }
+    expect((await admit(25)).status).toBe(413);
+    expect(small.body.limits.maxConfigChars).toBe(RT_MAX_CFG_REF_CHARS);
+    expect(configDigest('abc')).toBe('ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0');
+  });
+
+  it('intercept rules are checked at admission: a bounded list of plain phrases, no patterns', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const rule = { tag: 'repeat', action: 'drop', contains: ['pode repetir'] };
+    const status = async (intercepts: unknown) => (await gw.create({ config: { ...CONFIG, intercepts } })).status;
+    expect(await status([rule, { tag: 'options', action: 'say', whole: ['ajuda'], question: false, text: 'Você pode pedir um pão.', voice: 'rafa' }])).toBe(200);
+    for (const bad of [
+      'x', [{ ...rule, tag: 'Repeat!' }], [{ ...rule, action: 'webhook' }], [{ ...rule, contains: [] }], [{ ...rule, contains: ['x'.repeat(81)] }],
+      [{ ...rule, contains: Array(65).fill('x') }], [{ ...rule, contains: [/repete/] }], [{ ...rule, action: 'say' }], [{ ...rule, question: 'yes' }],
+      Array(33).fill(rule),
+    ]) expect(await status(bad)).toBe(400);
+    const guard = async (reply_guard: unknown) => (await gw.create({ config: { ...CONFIG, reply_guard } })).status;
+    expect(await guard({ deny: ['sure', 'bien sûr'], note: 'Responda só em português.' })).toBe(200);
+    for (const bad of ['pt', {}, { deny: [] }, { deny: ['x'], note: '' }, { deny: Array(257).fill('x') }]) expect(await guard(bad)).toBe(400);
+  });
+
+  it('POST /v1/realtime/updates signs an update for a session of the caller\'s app: bound to the session, ordered, validated', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const session = await (await gw.create({ config: CONFIG })).json() as Record<string, any>;
+    const sign = (body: unknown, key = 'key-parle') => fetch(`${gw.url}/v1/realtime/updates`, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: JSON.stringify(body) });
+    const update = { system: 'Tu es Lia, à la boulangerie.', drop_turn: `${session.sessionId}:2`, say: { text: 'Bem-vinda!', history: true } };
+    const res = await sign({ token: session.token, update });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ sessionId: session.sessionId, n: expect.any(Number) });
+    const [, payload] = body.signed.split('.');
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    expect(Object.keys(claims)).toEqual(['sid', 'upd', 'n', 'iat', 'exp']);
+    expect(claims).toMatchObject({ sid: session.sessionId, n: body.n });
+    expect(claims.exp).toBe(JSON.parse(Buffer.from(session.token.split('.')[1], 'base64url').toString()).exp);
+    expect(decodeSessionConfig(claims.upd)).toEqual(update);
+    expect((await sign({ token: session.token, update }, 'key-other')).status).toBe(403);
+    expect((await sign({ token: session.token, update }, 'key-admin')).status).toBe(200);
+    expect((await sign({ token: `${session.token}x`, update })).status).toBe(401);
+    expect((await sign({ token: session.token })).status).toBe(400);
+    expect((await sign({ token: session.token, update: { say: { text: '' } } })).status).toBe(400);
+    expect((await sign({ token: session.token, update: { intercepts: [{ tag: 'x' }] } })).status).toBe(400);
+    expect((await sign({ token: session.token, update: { system: 'x'.repeat(25_000) } })).status).toBe(413);
+  });
+
   it('only offers the edge transports the replica speaks', async () => {
     edge.status = { active: 0, max: 4, transports: ['ws'] };
     const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
@@ -88,6 +215,19 @@ describe('POST /v1/realtime/sessions', () => {
     expect(gw.charged).toHaveLength(2);
   });
 
+  it('counts students, not requests: one session retrying a full replica is one refused session, two are two', async () => {
+    edge.status = { active: 8, max: 8, transports: ['webrtc', 'ws'] };
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const ana = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+    const rui = '00-1bf7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+    for (let i = 0; i < 3; i++) expect((await gw.create({ config: CONFIG }, { traceparent: ana })).status).toBe(503);
+    expect((await gw.create({ config: CONFIG }, { traceparent: rui })).status).toBe(503);
+    expect(refusedSessions('speech', 60_000)).toBe(2);
+    expect(distinctSessions('speech', 60_000)).toBe(2);
+    expect(externalLoadOf('speech')).toMatchObject({ active: 8, max: 8 });
+  });
+
   it('cold deployment: wakes it and answers 503 + Retry-After + fallback at once', async () => {
     const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host, phase: 'booting' }] });
     gw = await startGateway(controller);
@@ -97,6 +237,44 @@ describe('POST /v1/realtime/sessions', () => {
     expect(await res.json()).toMatchObject({ error: { code: 'cold' }, fallback: { transport: 's2s-stream' } });
     expect(state.woken).toBe(1);
     expect(gw.charged).toEqual([]);
+  });
+
+  it('a draining replica keeps reporting its seated sessions (a stale report reads as empty and the drain releases it)', async () => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host, draining: true }] });
+    const listed = { ...controller, list: () => [{ name: 'speech' }] as never, specOf: () => ({ realtime: {} }) as never };
+    gw = await startGateway(listed, { netProbeMs: 0 });
+    edge.status = { ...edge.status!, active: 2 };
+    await gw.realtime.service.probeAll();
+    expect(externalLoadOf('speech').active).toBe(2);
+  });
+
+  it('sessions admitted by a previous gateway process keep the deployment awake (the session table died with it)', async () => {
+    const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    const listed = { ...controller, list: () => [{ name: 'speech' }] as never, specOf: () => ({ realtime: {} }) as never };
+    gw = await startGateway(listed, { netProbeMs: 0 });
+    await gw.realtime.service.probeAll();
+    expect(state.woken).toBe(0);
+    edge.status = { ...edge.status!, active: 2 };
+    gw.realtime.service.status.invalidate('r1');
+    await gw.realtime.service.probeAll();
+    expect(state.woken).toBe(1);
+  });
+
+  it('a replica with a stage out of rotation takes no new session: the healthy one does, else 503 degraded + fallback', async () => {
+    const { controller, state } = fakeController({ replicas: [{ id: 'r1', ip: edge.host, stagesOut: ['tts'] }, { id: 'r2', ip: edge.host }] });
+    gw = await startGateway(controller);
+    const admitted = await gw.create({ config: CONFIG });
+    expect(admitted.status).toBe(200);
+    expect((await admitted.json() as { limits: { replica: { pending: number } } }).limits.replica.pending).toBe(1);
+    expect(gw.events.find(e => e.event === 'rt.session.admitted')!.attrs).toMatchObject({ replica: 'r2' });
+
+    state.replicas = [{ id: 'r1', ip: edge.host, stagesOut: ['tts'] }];
+    const refused = await gw.create({ config: CONFIG });
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get('retry-after')).toBe('30');
+    expect(await refused.json()).toMatchObject({ error: { code: 'degraded', message: expect.stringContaining('tts') }, fallback: { transport: 's2s-stream', url: '/v1/s2s' } });
+    expect(state.woken).toBe(0);
+    expect(gw.charged).toHaveLength(1);
   });
 
   it('no-wake: a cold deployment is not woken', async () => {
@@ -131,12 +309,18 @@ describe('POST /v1/realtime/sessions', () => {
 
   it('budget denial, oversize config and bad bodies', async () => {
     const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
-    gw = await startGateway(controller, { deny: { status: 429, type: 'budget_exceeded', message: 'over', retryAfterSeconds: 99 } });
+    gw = await startGateway(controller, {
+      deny: { status: 429, type: 'budget_exceeded', message: 'over', retryAfterSeconds: 99, code: 'daily_budget_exhausted', budget: 'requests', resetAt: '2026-10-08T00:00:00.000Z' },
+    });
     const denied = await gw.create({ config: CONFIG });
     expect(denied.status).toBe(429);
     expect(denied.headers.get('retry-after')).toBe('99');
-    const big = await gw.create({ config: { ...CONFIG, system: 'x'.repeat(7000) } });
+    expect(await denied.json()).toMatchObject({
+      error: { code: 'budget_exceeded' }, reason: 'daily_budget_exhausted', budget: 'requests', reset_at: '2026-10-08T00:00:00.000Z',
+    });
+    const big = await gw.create({ config: { ...CONFIG, system: 'x'.repeat(25_000) } });
     expect(big.status).toBe(413);
+    expect(await big.json()).toMatchObject({ error: { code: 'config_too_large' } });
     expect((await gw.create({ transports: ['webrtc'] })).status).toBe(400);
     expect((await gw.create({ config: CONFIG, transports: ['carrier-pigeon'] })).status).toBe(400);
   });
@@ -154,3 +338,50 @@ describe('POST /v1/realtime/sessions', () => {
     expect((await gw.create({ config: CONFIG })).status).toBe(200);
   });
 });
+
+describe('WebRTC is offered only where UDP was proven', () => {
+  let edge: FakeEdge;
+  let gw: TestGateway;
+  beforeEach(async () => { _resetExternalLoad(); edge = await startFakeEdge(); });
+  afterEach(async () => { await gw?.close(); await edge.close(); });
+
+  const withNet = (udpInbound: 'unknown' | 'ok' | 'blocked', path: 'unknown' | 'direct' | 'relay' | 'ws') => ({
+    active: 0, max: 4, transports: ['webrtc', 'ws'], probePort: 41008, net: { path, udpInbound, publicIp: '203.0.113.9', checkedAt: udpInbound === 'unknown' ? null : 1 },
+  }) as never;
+  const types = async (res: Response) => ((await res.json()) as { transports: Array<{ type: string }> }).transports.map(t => t.type);
+  const open = async (probe: 'ok' | 'blocked', after: Parameters<typeof withNet>) => {
+    const { controller } = fakeController({ replicas: [{ id: 'r1', ip: edge.host }] });
+    const noted: unknown[] = [];
+    controller.noteUdp = async (...args) => { noted.push(args); };
+    let probes = 0;
+    gw = await startGateway(controller, {
+      netProbeMs: 0,
+      probeUdpImpl: async () => { probes++; edge.status = withNet(...after); return { result: probe, rttMs: probe === 'ok' ? 31 : null, tries: 3 }; },
+    });
+    return { noted, probes: () => probes };
+  };
+
+  it('a fresh replica is probed before the first answer; blocked UDP sends every learner of the class straight to ws and the controller is told once', async () => {
+    edge.status = withNet('unknown', 'unknown');
+    const { noted, probes } = await open('blocked', ['blocked', 'unknown']);
+    const answers = await Promise.all([1, 2, 3].map(() => gw.create({ config: CONFIG, prefer: 'webrtc' })));
+    for (const res of answers) expect(await types(res)).toEqual(['ws', 's2s-stream', 'post']);
+    expect(probes()).toBe(1);
+    expect(noted).toEqual([['speech', 'r1', 'blocked', { path: undefined, active: 0 }]]);
+    expect(gw.events.find(e => e.event === 'rt.session.admitted')?.attrs).toMatchObject({ udp: 'blocked' });
+  });
+
+  it('UDP that answers keeps WebRTC first; a relay keeps it too; an edge from before the probe is trusted as before', async () => {
+    edge.status = withNet('unknown', 'unknown');
+    const { noted } = await open('ok', ['ok', 'direct']);
+    expect(await types(await gw.create({ config: CONFIG }))).toEqual(['webrtc', 'ws', 's2s-stream', 'post']);
+    expect(noted).toEqual([['speech', 'r1', 'ok', { path: undefined, active: 0 }]]);
+    edge.status = withNet('blocked', 'relay');
+    gw.realtime.service.status.invalidate('r1');
+    expect(await types(await gw.create({ config: CONFIG }))).toEqual(['webrtc', 'ws', 's2s-stream', 'post']);
+    edge.status = { active: 0, max: 4, transports: ['webrtc', 'ws'] };
+    gw.realtime.service.status.invalidate('r1');
+    expect(await types(await gw.create({ config: CONFIG }))).toEqual(['webrtc', 'ws', 's2s-stream', 'post']);
+  });
+});
+

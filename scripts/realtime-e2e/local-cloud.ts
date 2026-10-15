@@ -47,6 +47,7 @@ export interface LocalCloudOptions {
   python: string;
   gatewayUrl: () => string;
   maxSessions: number;
+  modelScript?: string;
   log: (line: string) => void;
 }
 
@@ -77,7 +78,7 @@ export class LocalEdgeCloud implements DeploymentBackend {
       },
     };
     this.replicas.set(id, rep);
-    rep.procs.up = this.spawn(rep, 'model', this.opts.python, ['tests/fake_upstream.py', '--port', String(up)]);
+    rep.procs.up = this.spawn(rep, 'model', this.opts.python, [this.opts.modelScript ?? 'tests/fake_upstream.py', '--port', String(up)]);
     this.startEdge(rep);
     // The cloud-init's own front, served from this replica's directory instead of /srv/aigw.
     const conf = nginxConfig(input.replicaToken, front, up, edge).replace('/srv/aigw/ready.json', join(dir, 'ready.json'));

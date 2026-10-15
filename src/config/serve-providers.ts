@@ -24,6 +24,7 @@ import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-
 import { accountPolicyGuards, type AccountPolicyGuards } from '../gateway/proxy/account-policy-guard';
 import { voiceForGender, type VoiceByGender, type VoiceGender } from './tts-fallback-voices';
 import type { ChainLinkSpec } from './stage-chains';
+import { withCloudFallback } from './cloud-fallback';
 
 type Stage = 'chat' | 'stt' | 'tts';
 type StageProvider<S extends Stage> = S extends 'chat' ? LLMProvider : S extends 'stt' ? STTProvider : TTSProvider;
@@ -72,6 +73,8 @@ export const DEPLOYMENT_FIRST_BYTE_MS: Record<Stage, number> = { stt: 4_000, cha
 
 /** After this long without an answer from a deployment, the fallback starts in parallel (DEPLOYMENT_HEDGE_MS; 0 = off). */
 export const DEPLOYMENT_HEDGE_MS = 1_500;
+/** A chain's last link, a deployment with no live fallback after it, waits this long for a booting replica (DEPLOYMENT_COLD_WAIT_MS). */
+export const DEPLOYMENT_COLD_WAIT_MS = 2_000;
 /** Adaptive hedge (`deploymentHedge`): the longest wait before the fallback starts, as a share of the target's timeout. */
 export const HEDGE_CAP_OF_TIMEOUT = 0.75;
 
@@ -122,6 +125,10 @@ export interface RouteEntrySpec {
   preferFallbackVoice?: boolean;
   /** TTS only: a refusal by the account's data policy (ZDR) takes this target out for a while (`account-policy-guard.ts`). */
   accountPolicyGuard?: boolean;
+  order?: 'benchmark';
+  benchmarkDataset?: string;
+  equivalent?: string;
+  language?: string;
 }
 export type ModelRoutesSpec = Partial<Record<Stage, Record<string, RouteEntrySpec[]>>>;
 
@@ -137,6 +144,8 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
   }
   if (raw && typeof raw === 'object' && typeof (raw as RouteEntrySpec).provider === 'string') {
     const e = raw as RouteEntrySpec;
+    const benchmarkOrder = e.order === 'benchmark' && typeof e.benchmarkDataset === 'string' && e.benchmarkDataset.trim();
+    if (e.order !== undefined && !benchmarkOrder) return null;
     return {
       provider: e.provider,
       ...(typeof e.model === 'string' ? { model: e.model } : {}),
@@ -150,6 +159,9 @@ function parseEntry(raw: unknown): RouteEntrySpec | null {
       ...(isVoiceGenders(e.voiceGenders) ? { voiceGenders: e.voiceGenders } : {}),
       ...(e.preferFallbackVoice === true ? { preferFallbackVoice: true } : {}),
       ...(e.accountPolicyGuard === true ? { accountPolicyGuard: true } : {}),
+      ...(benchmarkOrder ? { order: 'benchmark' as const, benchmarkDataset: benchmarkOrder } : {}),
+      ...(typeof e.equivalent === 'string' && e.equivalent.trim() ? { equivalent: e.equivalent.trim() } : {}),
+      ...(typeof e.language === 'string' && e.language.trim() ? { language: e.language.trim() } : {}),
     };
   }
   return null;
@@ -188,7 +200,7 @@ export interface BuildServeProvidersOptions {
   env?: Record<string, string | undefined>;
   openrouter: OpenRouterKeyState;
   /** Returns a provider backed by deployment `name`, or null when the deployments service is off. */
-  deploymentProvider?: (stage: Stage, name: string) => StageProvider<Stage> | null;
+  deploymentProvider?: (stage: Stage, name: string, opts?: { coldWaitMs?: number }) => StageProvider<Stage> | null;
   /**
    * Adaptive hedge of a deployment target (`DeploymentController.hedgeDelayMs`): the delay before the fallback starts in
    * parallel, from the replica's state and recent p95, between `baseMs` (DEPLOYMENT_HEDGE_MS) and `capMs`; null = none.
@@ -205,6 +217,15 @@ export interface BuildServeProvidersOptions {
   deploymentExists?: (name: string) => boolean;
   /** Account-policy guards (default: the process-wide registry, kept across remounts). */
   policyGuards?: AccountPolicyGuards;
+  benchmarkRank?: (stage: Stage, dataset: string) => ReadonlyMap<string, number>;
+  reorderFor?: (stage: Stage, alias: string) => boolean;
+}
+
+export function orderByBenchmark(entries: RouteEntrySpec[], gatewayModel: string, rank: ReadonlyMap<string, number>): RouteEntrySpec[] {
+  const [primary, ...rest] = entries;
+  const rankOf = (e: RouteEntrySpec) => rank.get(`${e.provider}:${e.model ?? gatewayModel}`);
+  const ranked = rest.filter(e => rankOf(e) !== undefined).sort((a, b) => (rankOf(a) ?? 0) - (rankOf(b) ?? 0));
+  return [primary, ...ranked, ...rest.filter(e => rankOf(e) === undefined)];
 }
 
 export interface ServeProvidersResult {
@@ -215,6 +236,13 @@ export interface ServeProvidersResult {
 }
 
 const OPENROUTER_PASSTHROUGH = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i;
+
+export function equivalenceGroup(stage: Stage, e: RouteEntrySpec, model: string): string {
+  if (stage === 'stt') return e.equivalent ? `eq:${e.equivalent}` : `stt:${e.language ?? 'multi'}`;
+  if (stage === 'chat') return e.equivalent ? `eq:${e.equivalent}` : `model:${model}`;
+  const voice = e.voice ?? (e.voices ? `f=${e.voices.feminine},m=${e.voices.masculine}` : null);
+  return voice && e.equivalent ? `eq:${e.equivalent}|voice:${voice}` : `model:${model}|voice:${voice ?? 'pedida'}`;
+}
 
 export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProvidersResult {
   const { instances, openrouter } = opts;
@@ -231,6 +259,7 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   const deploymentTimeoutMs = (stage: Stage) =>
     positiveMs(env[`DEPLOYMENT_${stage.toUpperCase()}_TIMEOUT_MS`]) || positiveMs(env.DEPLOYMENT_TIMEOUT_MS) || DEPLOYMENT_FIRST_BYTE_MS[stage];
   const hedgeMs = positiveMs(env.DEPLOYMENT_HEDGE_MS) ?? DEPLOYMENT_HEDGE_MS;
+  const coldWaitMs = positiveMs(env.DEPLOYMENT_COLD_WAIT_MS) ?? DEPLOYMENT_COLD_WAIT_MS;
   const guards = opts.policyGuards ?? accountPolicyGuards;
   const extras = (e: RouteEntrySpec) => ({
     ...(e.voice ? { voice: e.voice } : {}), ...(e.fixedVoice ? { fixedVoice: true } : {}), ...(e.extraBody ? { extraBody: e.extraBody } : {}),
@@ -285,19 +314,27 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   const unavailable: Record<Stage, Record<string, string[]>> = { chat: {}, stt: {}, tts: {} };
   const chains: Record<Stage, Record<string, ChainLinkSpec[]>> = { chat: {}, stt: {}, tts: {} };
   let described: Record<Stage, Set<string>> = { chat: new Set(), stt: new Set(), tts: new Set() };
-  function chainFor<S extends Stage>(stage: S, model: string, entries: RouteEntrySpec[]): Array<RouteTarget<StageProvider<S>>> {
+  function chainFor<S extends Stage>(stage: S, model: string, declared: RouteEntrySpec[]): Array<RouteTarget<StageProvider<S>>> {
+    const dataset = declared[0]?.order === 'benchmark' ? declared[0].benchmarkDataset : undefined;
+    const entries = dataset && opts.benchmarkRank ? orderByBenchmark(declared, model, opts.benchmarkRank(stage, dataset)) : declared;
     const targets: Array<RouteTarget<StageProvider<S>>> = [];
     const reasons: string[] = [];
     const links: ChainLinkSpec[] = [];
+    const reorder = opts.reorderFor?.(stage, model) !== false;
     for (const e of entries) {
       const r = resolve(stage, model, e);
       links.push(linkOf(e.provider === 'deployment' ? { ...e, deployment: deploymentOf(e) } : e, model, r));
-      if (typeof r !== 'string') targets.push(r);
+      if (typeof r !== 'string') targets.push(reorder && e.provider !== 'deployment' ? { ...r, group: equivalenceGroup(stage, e, r.model ?? model), chainKey: `${stage}|${model}` } : r);
       else if (!reasons.includes(r)) reasons.push(r);
     }
     if (described[stage as Stage].has(model)) chains[stage as Stage][model] = links;
     // Kept even when other entries were mounted: the 503 must also say that the fallback has no key.
     if (reasons.length) (unavailable[stage as Stage] as Record<string, string[]>)[model] = reasons;
+    const last = targets[targets.length - 1];
+    if (last?.providerId.startsWith('deployment:')) {
+      const waiting = opts.deploymentProvider?.(stage, last.providerId.slice('deployment:'.length), { coldWaitMs });
+      if (waiting) last.provider = waiting as StageProvider<S>;
+    }
     return targets;
   }
 
@@ -311,9 +348,13 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
   }
   for (const [model, chain] of Object.entries(STT_CHAINS)) specs.stt[model] = chain.map(([provider, m]) => ({ provider, model: m }));
   for (const [model, chain] of Object.entries(TTS_CHAINS)) specs.tts[model] = chain.map(([provider, m]) => ({ provider, model: m }));
-  // Each app's own aliases (PUT /v1/apps/:app/routes), then MODEL_ROUTES on top (same model = replaced).
-  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.appRoutes?.[stage] ?? {});
-  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], opts.modelRoutes?.[stage] ?? {});
+  // Each app's own aliases (PUT /v1/apps/:app/routes), then MODEL_ROUTES on top (same model = replaced). Every declared
+  // chain ends in the cloud: one without a cloud link gets the stage default appended (cloud-fallback.ts).
+  const appRoutes = withCloudFallback(opts.appRoutes ?? {});
+  const modelRoutes = withCloudFallback(opts.modelRoutes ?? {});
+  const cloudFallbackAdded = [...appRoutes.added, ...modelRoutes.added].map(a => `${a.stage} ${a.alias} + ${a.added.join(', ')}`);
+  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], appRoutes.routes[stage] ?? {});
+  for (const stage of ['chat', 'stt', 'tts'] as const) Object.assign(specs[stage], modelRoutes.routes[stage] ?? {});
   // Chains reported by /health: every app's aliases and whatever MODEL_ROUTES declares.
   const declaredModels = (stage: Stage) => [...Object.keys(opts.appRoutes?.[stage] ?? {}), ...Object.keys(opts.modelRoutes?.[stage] ?? {})];
   described = {
@@ -380,6 +421,8 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       chatFallback: chatFallbackChain.map(e => `${e.providerId}:${e.model}`),
       // Entries whose own deployment is not registered and that go to their `oneGpuDeployment` instead.
       ...(oneGpu.length ? { oneGpu } : {}),
+      // Chains that had no cloud link and got the default one at mount.
+      ...(cloudFallbackAdded.length ? { cloudFallbackAdded } : {}),
       // Models with no provider at all (the rest of `unavailable` are chains that lost some entries).
       unavailable: {
         chat: Object.keys(unavailable.chat).filter(m => !chatRoutes[m]),
@@ -411,10 +454,10 @@ export interface DeepHealthDeps {
   providers: Pick<ProviderMapping, 'chatRoutes' | 'stt' | 'tts' | 'unavailable'>;
   deployments?: {
     health(): { deployments: number; replicas: number; listError: string | null };
-    list(): Array<{ name: string; status: string; replicas: Array<{ phase: string }>; lastError: string | null }>;
+    list(): Array<{ name: string; status: string; replicas: Array<{ phase: string; stagesOut?: string[] }>; lastError: string | null }>;
   } | null;
-  /** Effective chain per stage (`stage-chains.ts`). */
-  chains?: () => { stages: unknown; warnings: string[] };
+  /** Effective chain per stage (`stage-chains.ts`), with whatever else the gateway reports beside it (fallback, latency). */
+  chains?: () => { stages: unknown; warnings: string[] } & Record<string, unknown>;
   /** Declared deployments' status (`deployments/declared.ts`). */
   declared?: () => unknown;
 }
@@ -440,13 +483,14 @@ export async function deepHealthReport(deps: DeepHealthDeps): Promise<{ status: 
     items: deps.deployments.list().map(d => ({
       name: d.name, status: d.status, replicas: d.replicas.length,
       ready: d.replicas.filter(r => r.phase === 'ready').length, lastError: d.lastError,
+      stagesOut: [...new Set(d.replicas.flatMap(r => r.stagesOut ?? []))],
     })),
   } : null;
   return {
     status: 200,
     body: {
       status: failing.length ? 'degraded' : 'ok',
-      ...(chains ? { stages: chains.stages, warnings: chains.warnings } : {}),
+      ...chains,
       ...(deps.declared ? { declared: deps.declared() } : {}),
       providers,
       circuits: deps.breakers.allStats(),

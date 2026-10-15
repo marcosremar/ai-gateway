@@ -31,6 +31,11 @@ export class FakeCloud implements DeploymentBackend {
   marketPriced?: boolean;
   /** RTT gate hook (Vast-like backends); absent = no gate. */
   measureRtt?: (machine: ReplicaMachine) => Promise<number | null>;
+  measureBaselineRtt?: DeploymentBackend['measureBaselineRtt'];
+  recordRtt?: DeploymentBackend['recordRtt'];
+  noteHost?: DeploymentBackend['noteHost'];
+  previewOffers?: DeploymentBackend['previewOffers'];
+  placementNote?: string;
   releaseReasons: Array<string | undefined> = [];
   bootMs = 50;
   registryAuthFor?: (image: string) => RegistryAuth | null;
@@ -52,6 +57,8 @@ export class FakeCloud implements DeploymentBackend {
       machine: {
         id, deployment: input.spec.name, ip: null, state: 'running', createdAt: this.now(),
         zone: input.spec.zone, machineType: input.spec.machineType, pricePerHour: this.price,
+        ...(input.tokenKey ? { tokenKey: input.tokenKey } : {}),
+        ...(this.placementNote ? { placementNote: this.placementNote } : {}),
       },
       server: createServer(),
       token: input.replicaToken,

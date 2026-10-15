@@ -5,9 +5,10 @@
  * The replica must speak the OpenAI shapes (`POST /v1/chat/completions`, `/v1/audio/transcriptions`,
  * `/v1/audio/speech`) — vLLM, vLLM-Omni (Qwen3-TTS) and the parle-speech image do.
  *
- * Cold start: a request does NOT wait for a replica by default (`waitMs` 0). A deployment scaled to zero answers
- * 503 at once (and starts scaling up), so the chain moves to the fallback provider instead of making the user wait
- * minutes; once the replica is ready, traffic returns to it.
+ * Cold start: a deployment link with a live fallback after it does not wait (`waitMs` 0): it answers 503 `cold` at once
+ * (and starts scaling up) so the fallback serves. The LAST link of a chain (no live fallback) waits up to `coldWaitMs`
+ * (DEPLOYMENT_COLD_WAIT_MS, default 2 s) for a booting replica. Either way the 503 carries the controller's Retry-After
+ * (30 s). A ready but saturated deployment never waits: it spills at once.
  */
 
 import type {
@@ -16,15 +17,20 @@ import type {
 } from '../gateway/providers/cloud/types';
 import { DeploymentError, type DeploymentController, type Lease, type LeaseOutcome } from './controller';
 import { replicaBase } from './http';
+import { replicaTls } from './replica-tls';
+import { qwenTokenCap } from './qwen-token-cap';
 import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
+import { FINISH_MARKER, USAGE_MARKER } from '../gateway/providers/cloud/openai-compat/stream-markers';
 
-type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake'>>;
+type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake' | 'list'>>;
 
 export interface DeploymentProviderOptions {
-  /** How long a request may wait for a replica to become ready (ms). Default 0 — fall back right away. */
+  /** How long a request may wait for a replica (ms), whatever the state. Absent: `coldWaitMs` while none is ready, else 0. */
   waitMs?: number;
+  /** Wait for a booting replica when none is ready (ms); default 0. Set on a chain's last link (serve-providers.ts). */
+  coldWaitMs?: number;
   /** Per-request timeout once a replica was found (ms). Default 120 s (the route's own, shorter timeout applies too). */
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
@@ -37,37 +43,66 @@ export interface DeploymentProviderOptions {
 class DeploymentCallError extends Error {
   /** No point retrying the same deployment within one request: fall back at once. */
   readonly skipRetry: boolean;
-  constructor(readonly status: number, message: string, readonly gatewayCode: string) {
+  constructor(readonly status: number, message: string, readonly gatewayCode: string, readonly retryAfterSec?: number) {
     super(message);
-    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable', 'saturated']
+    this.skipRetry = ['cold', 'paused', 'not_found', 'unreachable', 'timeout', 'voice_not_found', 'catalog_unavailable', 'saturated', 'circuit_open']
       .includes(gatewayCode);
   }
 }
 
+function hasReadyReplica(controller: Leaser, name: string): boolean {
+  return Boolean(controller.get(name)?.replicas?.some(r => r.phase === 'ready'));
+}
+
 /** Calls `path` on a ready replica of `name`; throws an Error with `.status` the fallback chain understands. */
+function testCopyOf(controller: Leaser, name: string) {
+  const app = controller.get(name)?.app;
+  return controller.list?.().find(d => d.spec.testFor === name && d.app === app) ?? null;
+}
+
+function readyTestCopy(controller: Leaser, name: string): string | null {
+  if (hasReadyReplica(controller, name)) return null;
+  const copy = testCopyOf(controller, name);
+  return copy?.replicas.some(r => r.phase === 'ready') ? copy.name : null;
+}
+
+/** A key that may not wake `asked` but may wake its test copy (access-keys.ts `wakeDeployments`) wakes the copy. */
+function wakeOwnTestCopy(controller: Leaser, asked: string): void {
+  const copy = testCopyOf(controller, asked)?.name;
+  if (copy && !noWakeActive(copy)) try { controller.wake?.(copy); } catch { /* deployment vanished meanwhile */ }
+}
+
 async function callReplica(
-  controller: Leaser, name: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal,
+  controller: Leaser, asked: string, path: string, init: RequestInit, opts: DeploymentProviderOptions, signal?: AbortSignal, stage?: string,
 ): Promise<Response> {
+  const testCopy = readyTestCopy(controller, asked);
+  if (testCopy && !noWakeActive(asked)) try { controller.wake?.(asked); } catch { /* deployment vanished meanwhile */ }
+  const name = testCopy ?? asked;
   let lease;
   // No-wake mode (gateway/proxy/no-wake.ts): a ready replica serves, a cold one is skipped as `cold` and never woken.
-  const noWake = noWakeActive();
+  const noWake = noWakeActive(name);
   try {
-    lease = await controller.acquire(name, noWake ? { waitMs: 0, noWake: true } : { waitMs: opts.waitMs ?? 0 });
+    const waitMs = noWake ? 0 : opts.waitMs ?? (opts.coldWaitMs && !hasReadyReplica(controller, name) ? opts.coldWaitMs : 0);
+    lease = await controller.acquire(name, { waitMs, ...(noWake ? { noWake: true } : {}), ...(waitMs && signal ? { signal } : {}), ...(stage ? { stage } : {}) });
   } catch (err) {
     if (!(err instanceof DeploymentError)) throw err;
+    const after = err.retryAfterSeconds;
     if (err.status === 404) throw new DeploymentCallError(404, err.message, 'not_found');
-    if (err.status === 409) throw new DeploymentCallError(503, err.message, 'paused');
+    if (err.status === 409) throw new DeploymentCallError(503, err.message, 'paused', after);
+    if (err.code === 'stage_out') throw new DeploymentCallError(503, err.message, 'circuit_open', after);
     // Every ready replica at capacity: spill this request to the fallback now (the replicas keep what they serve).
-    if (err.code === 'saturated') throw new DeploymentCallError(503, err.message, 'saturated');
+    if (err.code === 'saturated') throw new DeploymentCallError(503, err.message, 'saturated', after);
     // No ready replica (scaled to zero / booting): make sure it is scaling up, and let the chain fall back now.
-    if (noWake) recordNoWakeSkip();
+    if (noWake) { recordNoWakeSkip(); if (name === asked) wakeOwnTestCopy(controller, asked); }
     else try { controller.wake?.(name); } catch { /* deployment vanished meanwhile */ }
-    throw new DeploymentCallError(503, err.message, 'cold');
+    throw new DeploymentCallError(503, err.message, 'cold', after);
   }
   let res: Response;
   try {
-    res = await (opts.fetchImpl ?? fetch)(`${replicaBase(lease.machine, lease.exposed)}${path}`, {
+    const base = replicaBase(lease.machine, lease.exposed);
+    res = await (opts.fetchImpl ?? fetch)(`${base}${path}`, {
       ...init,
+      ...(replicaTls(base, lease.token)),
       // Child `traceparent` of the request being served: the replica (and its edge) log under the same trace.
       headers: { ...(init.headers as Record<string, string> | undefined), ...outgoingTraceHeaders(), 'X-Aigw-Token': lease.token },
       // The gateway aborts through `signal` when it gives up on this replica (route/target timeout): the request is
@@ -80,13 +115,13 @@ async function callReplica(
     // replica; a timeout means busy; only a connection failure makes it suspect (live QA 2026-10-07: 15 hedge losers
     // counted as failures marked a working L40S unhealthy and it was replaced).
     const callerTimedOut = (signal?.reason as { name?: string } | undefined)?.name === 'TimeoutError';
-    lease.done(signal?.aborted && !callerTimedOut ? 'cancelled' : timedOut ? 'timeout' : true);
+    lease.done(signal?.aborted && !callerTimedOut ? 'abandoned' : timedOut ? 'timeout' : true);
     throw new DeploymentCallError(timedOut ? 504 : 502, `deployment '${name}': replica ${timedOut ? 'timed out' : 'unreachable'}`,
       timedOut ? 'timeout' : 'unreachable');
   }
   if (!res.ok) {
     // A 429 is the replica's own queue full: pressure for the autoscaler and a busy mark, never a strike.
-    lease.done(res.status === 429 ? 'overloaded' : false);
+    lease.done(res.status === 429 ? 'overloaded' : res.status >= 500 ? 'errored' : false);
     const text = await res.text().catch(() => '');
     // Any replica error moves on to the fallback (a 4xx from our own server is a deployment problem, not the
     // client's: the gateway already validated the request).
@@ -102,7 +137,8 @@ async function callReplica(
  * counted 0 in flight while it played. Outcomes follow `Lease.done`: `ok` when the body ends; `failed` when it breaks
  * (connection-level); `timeout` when our own or the caller's time limit cut it (busy, not dead); `cancelled` when the
  * caller cancels or aborts (hedge lost, client gone) or nobody read it within `maxMs` (it must not hold the lease, and
- * the deployment's demand, forever).
+ * the deployment's demand, forever); `errored` when the reader cancels it with a `DeploymentCallError` (the replica reported a
+ * failure inside a streamed body).
  */
 function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSignal): Response {
   if (!res.body) { lease.done(false); return res; }
@@ -131,8 +167,8 @@ function leasedBody(res: Response, lease: Lease, maxMs: number, signal?: AbortSi
         controller.error(err);
       }
     },
-    cancel(reason) { release('cancelled'); return reader.cancel(reason); },
-  });
+    cancel(reason) { release(reason instanceof DeploymentCallError ? 'errored' : 'cancelled'); return reader.cancel(reason); },
+  }, { highWaterMark: 0 });
   return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 
@@ -144,18 +180,18 @@ abstract class DeploymentProviderBase {
   getModels(): ModelInfo[] { return []; }
   /** Starts scaling up a cold deployment without sending a request (e.g. when an answer came from the cache). */
   prewarm(): void {
-    if (noWakeActive()) return;
+    if (noWakeActive(this.deployment)) return;
     const status = (this.controller.get(this.deployment) as { status?: string } | null)?.status;
     if (status === 'scaled-to-zero' || status === 'warming') this.controller.wake?.(this.deployment);
   }
-  protected call(path: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
-    return callReplica(this.controller, this.deployment, path, init, this.opts, signal);
+  protected call(path: string, init: RequestInit, signal?: AbortSignal, stage?: string): Promise<Response> {
+    return callReplica(this.controller, this.deployment, path, init, this.opts, signal, stage);
   }
 }
 
 export class DeploymentLLMProvider extends DeploymentProviderBase implements LLMProvider {
-  async chat(request: ChatRequest): Promise<ChatResponse> {
-    const res = await this.call('/v1/chat/completions', {
+  private post(request: ChatRequest, extra: Record<string, unknown> = {}): Promise<Response> {
+    return this.call('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -164,9 +200,54 @@ export class DeploymentLLMProvider extends DeploymentProviderBase implements LLM
         ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
         ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
         ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
+        ...extra,
         ...request.extraBody,
       }),
-    }, request.signal);
+    }, request.signal, 'chat');
+  }
+
+  async *chatStream(request: ChatRequest): AsyncGenerator<string, void, undefined> {
+    const res = await this.post(request, { stream: true, stream_options: { include_usage: true } });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finishReason: string | null = null;
+    let failure: DeploymentCallError | undefined;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith('data:')) continue;
+          let chunk: {
+            error?: { message?: string };
+            choices?: Array<{ delta?: { content?: string | null }; finish_reason?: string | null }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          };
+          try { chunk = JSON.parse(line.slice(5)); } catch { continue; }
+          if (chunk.error) {
+            failure = new DeploymentCallError(502, `deployment '${this.deployment}' stream broke: ${chunk.error.message ?? 'error'}`, 'error');
+            throw failure;
+          }
+          finishReason = chunk.choices?.[0]?.finish_reason ?? finishReason;
+          if (chunk.usage) yield `${USAGE_MARKER}${JSON.stringify(chunk.usage)}`;
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (delta) yield delta;
+        }
+      }
+      if (!finishReason) throw new DeploymentCallError(502, `deployment '${this.deployment}' stream ended without finish_reason`, 'truncated');
+      yield `${FINISH_MARKER}${finishReason}`;
+    } finally {
+      await reader.cancel(failure).catch(() => {});
+    }
+  }
+
+  async chat(request: ChatRequest): Promise<ChatResponse> {
+    const res = await this.post(request);
     const payload = await res.json() as {
       model?: string;
       choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
@@ -195,7 +276,7 @@ export class DeploymentSTTProvider extends DeploymentProviderBase implements STT
     if (request.language) form.append('language', request.language);
     if (request.prompt) form.append('prompt', request.prompt);
     form.append('response_format', format);
-    return this.call('/v1/audio/transcriptions', { method: 'POST', body: form }, request.signal);
+    return this.call('/v1/audio/transcriptions', { method: 'POST', body: form }, request.signal, 'stt');
   }
 
   async transcribe(request: STTRequest): Promise<STTResponse> {
@@ -216,7 +297,7 @@ export class DeploymentSTTProvider extends DeploymentProviderBase implements STT
   }
 }
 
-/** A voice of the replica's own catalog (`GET /refs/voices.json`, the parle Qwen3-TTS Base image). */
+/** A voice of the replica's own catalog (`VOICE_CATALOG_SOURCES`). */
 export interface ReplicaVoice { id: string; lang?: string; audio: string; text: string }
 interface ReplicaCatalog { model?: string; format?: string; voices: ReplicaVoice[] }
 
@@ -229,19 +310,50 @@ const LANGUAGE_NAMES: Record<string, string> = {
   ko: 'Korean', zh: 'Chinese', ru: 'Russian',
 };
 
-function languageName(value: unknown): string | undefined {
+export function languageName(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined;
   const code = value.trim().slice(0, 2).toLowerCase();
   return /^[a-z]{2}(-[a-z]{2})?$/i.test(value.trim()) ? LANGUAGE_NAMES[code] ?? value : value;
 }
 
-function catalogOf(raw: unknown): ReplicaCatalog | null {
+/** A Qwen3-TTS Base (cloning) model: it must never get `voice` without `ref_audio` (its engine dies on it). */
+export function isBaseTtsModel(model: string): boolean {
+  return /(^|[-_/])base($|[-_.])/i.test(model);
+}
+
+/** Kokoro on the speech-stack image speaks its own stock voices (`pf_dora`, …): never a clone from the catalog. */
+export function isKokoroModel(model: string): boolean {
+  return /kokoro/i.test(model);
+}
+
+export function catalogOf(raw: unknown): ReplicaCatalog | null {
   const input = raw as { model?: unknown; format?: unknown; voices?: unknown } | null;
   if (!input || !Array.isArray(input.voices)) return null;
   const voices = input.voices.filter((v): v is ReplicaVoice =>
     !!v && typeof v.id === 'string' && typeof v.audio === 'string' && typeof v.text === 'string');
   return { model: typeof input.model === 'string' ? input.model : undefined, format: typeof input.format === 'string' ? input.format : undefined, voices };
 }
+
+/**
+ * The speech-stack image (`docker/speech-stack`) has no `/refs/voices.json`: it lists its cast at `GET /v1/voices`
+ * (id, text, lang; no audio) and serves each reference at `/refs/<id>.wav` on its own server, the URL its TTS engine
+ * fetches in the container (`load_voices` in server.py).
+ */
+export const SPEECH_STACK_REFS = 'http://127.0.0.1:8000/refs';
+
+/** A list without one voice that has its reference text is no cloning catalog (a server's own speaker names, say). */
+export function speechStackCatalogOf(raw: unknown): ReplicaCatalog | null {
+  const voices = (raw as { voices?: unknown } | null)?.voices;
+  if (!Array.isArray(voices)) return null;
+  const catalog = catalogOf({
+    voices: voices.map(v => (v && typeof v === 'object' && typeof (v as { id?: unknown }).id === 'string'
+      ? { ...v, audio: `${SPEECH_STACK_REFS}/${(v as { id: string }).id}.wav` } : v)),
+  });
+  return catalog?.voices.length ? catalog : null;
+}
+
+/** Where a replica's voice catalog is read, in order: the parle Qwen3-TTS image's file, then the speech stack's list. */
+export const VOICE_CATALOG_SOURCES = [['/refs/voices.json', catalogOf], ['/v1/voices', speechStackCatalogOf]] as const;
 
 /**
  * TTS on a self-hosted replica.
@@ -268,7 +380,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
 
   /** True when the target model is a Qwen3-TTS Base (cloning) model, or the replica already showed a catalog. */
   private isCloningModel(model: string): boolean {
-    return this.cloning || /(^|[-_/])base($|[-_.])/i.test(model);
+    return this.cloning || isBaseTtsModel(model);
   }
 
   /**
@@ -280,14 +392,17 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     if (this.catalog && Date.now() - this.catalog.at < CATALOG_TTL_MS) return this.catalog.value;
     if (Date.now() < this.noCatalogUntil) return null;
     let value: ReplicaCatalog | null = null;
-    try {
-      const res = await this.call('/refs/voices.json', { method: 'GET' }, signal);
-      // A body left unread would hold the replica's lease until its safety timeout (leasedBody): read or cancel it.
-      if ((res.headers.get('content-type') ?? '').includes('json')) value = catalogOf(await res.json().catch(() => null));
-      else await res.body?.cancel().catch(() => {});
-    } catch (err) {
-      // The replica answered an HTTP error for the catalog (callReplica code 'error'): treated as "no catalog" below.
-      if (!(err instanceof DeploymentCallError) || err.gatewayCode !== 'error') throw err;
+    for (const [path, parse] of VOICE_CATALOG_SOURCES) {
+      try {
+        const res = await this.call(path, { method: 'GET' }, signal);
+        // A body left unread would hold the replica's lease until its safety timeout (leasedBody): read or cancel it.
+        if ((res.headers.get('content-type') ?? '').includes('json')) value = parse(await res.json().catch(() => null));
+        else await res.body?.cancel().catch(() => {});
+      } catch (err) {
+        // The replica answered an HTTP error for the catalog (callReplica code 'error'): treated as "no catalog" below.
+        if (!(err instanceof DeploymentCallError) || err.gatewayCode !== 'error') throw err;
+      }
+      if (value) break;
     }
     if (value) {
       this.catalog = { at: Date.now(), value };
@@ -309,7 +424,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
       ...(request.instructions ? { instructions: request.instructions } : {}),
     };
-    if (extra.ref_audio === undefined && request.voice) {
+    if (extra.ref_audio === undefined && request.voice && !isKokoroModel(request.model)) {
       const catalog = await this.voiceCatalog(request.signal);
       if (!catalog && this.isCloningModel(request.model)) {
         // A Base server must never get `voice` without `ref_audio` (its engine dies on it): no catalog → fall back.
@@ -335,6 +450,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
     // Explicit references from the client: same rule, `voice` would be read as a speaker name.
     if (extra.ref_audio !== undefined) delete body.voice;
     Object.assign(body, extra);
+    if (body.ref_audio !== undefined && body.max_new_tokens === undefined) body.max_new_tokens = qwenTokenCap(request.input);
     if (extra.language !== undefined) body.language = languageName(extra.language);
     if (request.stream && (format === 'wav' || format === 'pcm') && extra.stream === undefined) {
       Object.assign(body, { stream: true, stream_format: 'audio' });
@@ -347,7 +463,7 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(await this.body(request)),
-    }, request.signal);
+    }, request.signal, 'tts');
     // vLLM-Omni answers some errors (and SSE events without stream_format) as JSON: that is not audio.
     if ((res.headers.get('content-type') ?? '').includes('json') || !res.body) {
       const text = await res.text().catch(() => '');
