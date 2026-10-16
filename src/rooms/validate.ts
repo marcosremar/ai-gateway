@@ -111,6 +111,7 @@ export function parseLine(body: unknown, cfg: RoomsConfig, now: number): RoomLin
   const line: RoomLine = { id, original, originalLang, translations, ts: Math.floor(ts) };
   const delayMs = parseDelayMs(body.delayMs);
   if (delayMs !== undefined) line.delayMs = delayMs;
+  if (body.draft === true) line.draft = true;
   return line;
 }
 
