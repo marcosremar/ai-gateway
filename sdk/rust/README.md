@@ -121,7 +121,7 @@ with a `stream_error` instead of buffering a corrupt length prefix (`S2SFrameDec
 let rooms = gw.rooms().with(CallOptions::timeout(Duration::from_secs(5)));
 let room = rooms.create(&CreateRoom::new(["en", "es"]).title("Aula").original_lang("pt")).await?;
 rooms.publish_line(&room, &RoomLine { id: 1, original: "Olá".into(), original_lang: Some("pt".into()),
-    translations: [("en".to_string(), "Hello".to_string())].into(), ts_ms: Some(now_ms), delay_ms: Some(1800) }).await?;
+    translations: [("en".to_string(), "Hello".to_string())].into(), ts_ms: Some(now_ms), delay_ms: Some(1800), draft: false }).await?;
 rooms.publish_audio(&room, 1, "en", &wav_base64).await?;
 // PATCH /v1/rooms/:code {"youtubeUrl"} → 200 {code, youtubeUrl} (the stored, normalized link; None = cleared)
 let upd = rooms.update_youtube(&room, Some("https://youtu.be/…")).await?;

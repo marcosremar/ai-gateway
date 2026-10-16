@@ -11,7 +11,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 |---|---|---|---|
 | `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"], "serverDub"?, "youtubeUrl"?}` | `201 {"code","publishToken","url","expiresAt"}` |
 | `PATCH /v1/rooms/:code` | publish token (or the creating / an admin gateway key) | `{"youtubeUrl": "<link>" \| null}` | `200 {"code","youtubeUrl"}` |
-| `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?}` | `204` |
+| `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?, "draft"?}` | `204` |
 | `POST /v1/rooms/:code/audio` | publish token | `{"lineId", "lang", "wav": "<base64>"}` (≤ 2 MB decoded) | `204` (broadcast only, never stored) |
 | `POST /v1/rooms/:code/end` | publish token | — | `204` |
 | `GET /v1/rooms/:code` | public, CORS `*` | — | `200 {"code","title","originalLang","languages","createdAt","ended","expiresAt","youtubeUrl","lines":[…]}` / `404` |
@@ -22,6 +22,8 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 - `expiresAt` in the GET body is an addition to the original contract (the page shows it after the end).
 - `delayMs` (additive, optional): ms from the end of speech to the subtitle being ready, an integer 0–120000 (else 400).
   Stored and served back on the line (GET and WS); the page shows the median of the last 10 as "atraso 1,8 s".
+- `draft` (additive, optional): `true` = the presenter will still grow this line (same `id`). The server dub never voices
+  a draft; it voices the version without `draft`. Anything but `true` is ignored (absent = final, as with older apps).
 - `youtubeUrl` (additive, optional): where the same session is live on YouTube — the presenter's app sends the channel
   link (`https://www.youtube.com/channel/<id>/live`) and, once the broadcast is found, `https://youtu.be/<id>`. Strictly
   validated: an `https:` URL on `youtube.com`, `www.youtube.com`, `m.youtube.com` or `youtu.be`, no credentials, no port,
@@ -51,8 +53,15 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   presenter sent a clip for (checked again before delivering), and leaves a language alone while its presenter sent a clip in that language
   in the last `ROOM_SERVER_DUB_PRESENTER_QUIET_MS` (60000). Other languages are still voiced: the desktop app dubs one
   language while viewers may listen to another.
-- Bounded: per room and language one call in flight and one pending line; a newer line replaces an older pending one
-  (stale lines are dropped), and each line+language is voiced once (later corrections of the same id are not re-voiced).
+- In order and bounded: per room and language one call in flight, every final line voiced in id order (each at least the
+  wait after it arrived); past 4 waiting lines the oldest is dropped, a line older than one already voiced is skipped,
+  and each line+language is voiced once (later corrections of the same id are not re-voiced).
+- Catching up: the server tracks per language until when the listeners' clips play back to back (`mp3DurationMs`
+  counts the mp3 frames: Kokoro's mp3 is VBR and glued from several pieces, so neither the size nor ffprobe's estimate
+  is right) and asks Kokoro for `speed` = 1 + queued audio / 20 s, at most 1.3 (MAI-Voice is never sped up). Measured
+  on Kokoro: 1.3 → 18 % shorter. Simulated on a real 2 h room (593 lines, Kokoro 15 chars/s): dropped sentences on the
+  page 13.5 % (6 s cap, no speed-up) → 0.2 % (25 s cap), voice delay p50 2.6 → 4.0 s, p95 10.5 → 15.0 s (long
+  sentences dominate: a 300-character line is a 20 s clip).
   Each attempt has `ROOM_DUB_ATTEMPT_TIMEOUT_MS` (8 s; the OpenRouter SDK client has no timeout of its own): a stuck or
   failed Kokoro call is aborted and the line goes to MAI-Voice 2.1 Flash (`microsoft/mai-voice-2.1-flash`; en
   `en-US-Harper`, fr `fr-FR-Soleil`, pt `pt-BR-Luana`; other languages have no fallback), so a language is held at most
@@ -72,7 +81,7 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   first target language; the original only when the room has no translations. The live line and the original under it
   are always one line each: the font shrinks down to 70 %, then only the end of the sentence is shown behind "…".
   Dubbing ("Écouter le doublage") plays clips with Web Audio: one AudioContext, back-to-back scheduling with 10 ms fades (no
-  clicks), oldest pending clips dropped when more than 6 s is queued. While it is on, the live line switches to a line
+  clicks), oldest pending clips dropped when more than 25 s is queued. While it is on, the live line switches to a line
   when its clip starts playing (a line without a clip within 4 s is shown anyway) and the delay indicator shows the
   voice delay ("voz 3,2 s" = delayMs + wait until the clip played). Indicator: neutral < 3 s, amber 3–6 s, red above.
   Mobile unlock, inside the tap: `navigator.audioSession.type = 'playback'` and a silent `<audio>` played (otherwise the
