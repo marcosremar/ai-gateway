@@ -6,7 +6,8 @@
 
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import type { RoomsConfig } from './config';
-import { RoomDubber, type RoomClip, type RoomSynthesize, type RoomTranslate } from './dub';
+import type { LanguageTts, TtsClip } from '../tts';
+import { RoomDubber, type RoomTranslate } from './dub';
 import type { RoomStore } from './store';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 import {
@@ -47,7 +48,7 @@ export interface RoomServiceOptions {
   /** Background sweep + eviction interval (0 = none, tests call `sweep()`). */
   sweepIntervalMs?: number;
   /** Server dubbing synthesizer (Kokoro); none = the server never voices lines. Used only when `config.serverDub`. */
-  synthesize?: RoomSynthesize;
+  synthesize?: LanguageTts;
   /** False while the synthesizer cannot work (e.g. no API key). */
   synthesizeAvailable?: () => boolean;
   translate?: RoomTranslate;
@@ -323,7 +324,7 @@ export class RoomService {
   }
 
   /** A clip the server synthesized: only to the viewers listening to that language. */
-  private deliverServerClip(room: LiveRoom, lineId: number, lang: string, clip: RoomClip): void {
+  private deliverServerClip(room: LiveRoom, lineId: number, lang: string, clip: TtsClip): void {
     if (room.meta.ended) return;
     const wav = clip.audio.toString('base64');
     this.broadcast(room, { type: 'audio', lineId, lang, wav, format: clip.format }, v => v.listening?.(lang) === true);
