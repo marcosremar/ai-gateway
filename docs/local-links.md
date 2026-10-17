@@ -16,6 +16,27 @@ the stages `chat` (`/chat/completions`, streaming included), `stt` (`/audio/tran
 | `voice` | TTS only: the voice id of that server (sent as is). |
 | `equivalent` | Optional. Puts the link in an equivalence group with cloud links (reorder by health, cheaper-model hint). Without it the link is alone in its group. |
 
+## TTS: language and streaming
+
+- **Language.** The OpenAI speech API has no language field. A local link's TTS adds the request's `language` to the
+  body it sends, as an extra field, exactly as the client wrote it (`fr`, `pt-BR`, `French`; trimmed, at most 35
+  characters; a non-string is dropped):
+
+  ```json
+  { "model": "kokoro", "input": "Bonjour.", "voice": "ff_siwis", "response_format": "wav", "language": "fr" }
+  ```
+
+  A server that ignores unknown fields is unaffected; a server that speaks more than one language reads it (the parle
+  Mac stack: `tools/speech/local-voice/gateway.py`). No other client extra (`ref_audio`, `task_type`, `stream_format`…)
+  reaches a local link: those stay with the deployment replicas, and a cloud provider gets none.
+- **Streaming.** A `wav` or `pcm` request (with `stream` not `false`) passes the server's answer on as it arrives: the
+  gateway holds it only until the first audio past the WAV header (44 bytes), then forwards every chunk. A server that
+  synthesizes chunk by chunk (no `content-length`, chunked transfer) gives the client its first byte with its first
+  chunk; a server that answers the whole file at once is passed on the same way. The per-attempt timeout and the cloud
+  hedge then count the time to the first audio, not the whole sentence. An answer that ends before any audio, or a
+  JSON body, fails with code `empty` and the chain moves on (an answer without audio is never a success); an error
+  after the first audio chunk is sent can no longer fall back. Other formats (`mp3`, `opus`…) are read whole.
+
 ## How the gateway treats it
 
 - **Local, not cloud.** The link id is `local:<host>[/path]/<model>` (`X-Gateway-Provider`, telemetry `provider`,
@@ -40,6 +61,10 @@ the stages `chat` (`/chat/completions`, streaming included), `stt` (`/audio/tran
   goes to the address that was checked, so a DNS rebinding cannot swap it in between. A host listed in
   `LOCAL_LINK_ALLOW` (comma-separated host names or IPs) skips the check.
 - **A gateway off Railway** (your Mac, a dev box) reaches anything, `localhost` included.
+- **Where the gateway listens.** Off Railway `serve.ts` listens on `127.0.0.1` (`src/config/listen-host.ts`): with no
+  client key (open mode) only this machine reaches it, and its local links with it. `GATEWAY_HOST=0.0.0.0` opens it to
+  the network (do it only with `GATEWAY_API_KEYS` set); both Dockerfiles set it, since a container is reached through
+  its port mapping. On Railway it listens on `0.0.0.0` whatever `GATEWAY_HOST` says.
 
 ## Local gateway → llama.cpp or LM Studio
 

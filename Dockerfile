@@ -21,4 +21,8 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
 
 EXPOSE ${PORT:-4000}
 
+# A container listens on every interface (its port mapping or the platform proxy decides who reaches it);
+# off a container serve.ts listens on 127.0.0.1 unless on Railway (src/config/listen-host.ts).
+ENV GATEWAY_HOST=0.0.0.0
+
 CMD ["bun", "run", "serve.ts"]

@@ -58,6 +58,7 @@ import { createBalanceWatch } from './src/telemetry/balance-watch';
 import { createOverspendWatch, overspendLimitsFromEnv } from './src/telemetry/overspend';
 import { createFallbackProbe, fallbackLinks } from './src/telemetry/fallback-probe';
 import { applySandboxCache, gatewayClientKeys, principalSandboxToken, SANDBOX_USER, saveSandboxCache } from './src/config/sandbox-env';
+import { listenHost } from './src/config/listen-host';
 import {
   deploymentLogToTelemetry, emitGatewayEvent, latencyReport, realtimeSinkToTelemetry, sessionResolverFrom, setGatewayTelemetrySink, telemetryFromEnv,
   type LatencyReport,
@@ -103,6 +104,7 @@ if (sandboxEnv.source) {
 const SANDBOX_TOKEN = principalSandboxToken(process.env);
 
 const PORT = parseInt(process.env.PORT || '4000');
+const HOST = listenHost(process.env);
 const clientKeys = gatewayClientKeys(process.env);
 for (const w of clientKeys.warnings) log.warn({}, `WARNING: ${w}`);
 const API_KEYS = clientKeys.keys;
@@ -149,7 +151,7 @@ async function listOpenRouterModels(): Promise<string[]> {
     .filter((id): id is string => typeof id === 'string' && id.length > 0);
 }
 
-log.log({ port: PORT, apiKeys: access.size, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
+log.log({ host: HOST, port: PORT, apiKeys: access.size, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
 
 const prefixRoutes: PrefixRoute[] = [];
 const upgradeRoutes: UpgradeRoute[] = [];
@@ -604,7 +606,7 @@ await ttsCache?.load().catch((err: unknown) => log.warn({ error: err instanceof 
 
 const server = await startProxy({
   port: PORT,
-  hostname: '0.0.0.0',
+  hostname: HOST,
   apiKeys: API_KEYS,
   keyRegistry,
   providers,
