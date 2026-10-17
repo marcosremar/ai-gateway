@@ -89,6 +89,8 @@ describe('gateway TTS module', () => {
     });
     expect(other.provider.synthesize).not.toHaveBeenCalled();
     await expect(tts('नमस्ते', 'hi', voice)).rejects.toThrow(/does not speak hi/);
+    const streamed = link(async () => ({ audio: Buffer.alloc(0), stream: new Response('RIFFwav').body!, contentType: 'audio/wav' }) as never);
+    await expect(qwenCloneTts(() => [streamed as never], breakers())('Hallo', 'de', voice)).resolves.toEqual({ audio: Buffer.from('RIFFwav'), format: 'wav' });
     expect(['en', 'zh', 'ja', 'ko', 'de', 'fr', 'ru', 'pt-BR', 'es', 'it'].every(qwenSpeaks)).toBe(true);
     expect(qwenSpeaks('hi')).toBe(false);
   });
