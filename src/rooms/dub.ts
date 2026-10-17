@@ -51,7 +51,8 @@ export interface RoomDubberOptions {
   /** False while the synthesizer cannot work (e.g. no API key): nothing is scheduled. Default: always available. */
   available?: () => boolean;
   /** Delivers a clip to the room's listeners of `lang`. */
-  deliver: (room: LiveRoom, lineId: number, lang: string, clip: TtsClip) => void;
+  deliver: (room: LiveRoom, lineId: number, lang: string, clip: TtsClip, streamed: boolean) => void;
+  deliverChunk: (room: LiveRoom, lineId: number, lang: string, pcm: Buffer, seq: number) => void;
   translate?: RoomTranslate;
   addTranslation: (room: LiveRoom, lineId: number, lang: string, text: string) => void;
   /** Wait after a line before voicing it, so the presenter's own clip can arrive first. */
@@ -157,10 +158,15 @@ export class RoomDubber {
       stream: new TtsStream({
         now: this.opts.now,
         synthesize: (lineId, speed) => this.voice(room, s, lang, ls, lineId, speed),
-        deliver: (lineId, clip) => {
+        deliver: (lineId, clip, streamed) => {
           // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
-          if (this.rooms.get(room.meta.code) !== s || !this.wanted(room, s, lineId, lang)?.listen) return false;
-          this.opts.deliver(room, lineId, lang, clip);
+          if (!this.stillWanted(room, s, lineId, lang)) return false;
+          this.opts.deliver(room, lineId, lang, clip, streamed);
+          return true;
+        },
+        deliverChunk: (lineId, pcm, seq) => {
+          if (!this.stillWanted(room, s, lineId, lang)) return false;
+          this.opts.deliverChunk(room, lineId, lang, pcm, seq);
           return true;
         },
         dropped: (lineId) => this.opts.log('rooms: server dub dropped stale line', { code: room.meta.code, lang, lineId }),
@@ -168,6 +174,10 @@ export class RoomDubber {
     };
     s.langs.set(lang, ls);
     return ls;
+  }
+
+  private stillWanted(room: LiveRoom, s: RoomState, lineId: number, lang: string): boolean {
+    return this.rooms.get(room.meta.code) === s && Boolean(this.wanted(room, s, lineId, lang)?.listen);
   }
 
   private async voice(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number, speed: number): Promise<TtsClip | null> {

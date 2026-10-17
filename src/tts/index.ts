@@ -23,7 +23,12 @@ export const primaryLanguage = (lang: string): string => lang.split('-')[0]!.toL
 
 export const kokoroVoice = (lang: string): string | null => KOKORO_VOICES[primaryLanguage(lang)] ?? null;
 
-export interface TtsClip { audio: Buffer; format: string }
+export interface TtsClip { audio: Buffer; format: string; pcm?: AsyncIterable<Buffer> }
+
+export const PCM_RATE = 24_000;
+const PCM_BYTES_PER_MS = (PCM_RATE * 2) / 1000;
+const WAV_HEAD_BYTES = 44;
+const PCM_STALL_MS = 15_000;
 
 export type LanguageTts = (text: string, lang: string, speed?: number) => Promise<TtsClip>;
 
@@ -36,12 +41,45 @@ export function kokoroTts(links: () => Array<RouteTarget<TTSProvider>>, breakers
     const targets = links().map(l => ({ ...l, hedgeAfterMs: 0, group: `eq:kokoro|voice:${voice}`, chainKey: 'tts:kokoro' }));
     const { result } = await routeRequest(
       targets,
-      (t, signal) => t.provider.synthesize({ signal, model: t.model ?? KOKORO_MODEL, input: text, voice, responseFormat: 'mp3', ...(speed && speed !== 1 && { speed }) }),
+      (t, signal) => t.provider.synthesize({ signal, stream: true, model: t.model ?? KOKORO_MODEL, input: text, voice, responseFormat: 'wav', ...(speed && speed !== 1 && { speed }) }),
       { stage: 'tts', timeoutMs: TTS_CALL_TIMEOUT_MS, retriesPerProvider: 0, ...(breakers && { breakers }) },
     );
-    if (!result.audio.length) throw new Error(`${KOKORO_MODEL}: empty audio`);
-    return { audio: result.audio, format: 'mp3' };
+    if (result.stream) return { audio: Buffer.alloc(0), format: 'pcm', pcm: pcmOfWavStream(result.stream) };
+    if (result.audio.length <= WAV_HEAD_BYTES) throw new Error(`${KOKORO_MODEL}: empty audio`);
+    return { audio: result.audio, format: 'wav' };
   };
+}
+
+export async function* pcmOfWavStream(stream: ReadableStream<Uint8Array>, stallMs = PCM_STALL_MS): AsyncGenerator<Buffer> {
+  const reader = stream.getReader();
+  let skip = WAV_HEAD_BYTES;
+  let odd: Buffer = Buffer.alloc(0);
+  try {
+    for (;;) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stalled = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no audio for ${stallMs} ms`)), stallMs); });
+      const { value, done } = await Promise.race([reader.read(), stalled]).finally(() => clearTimeout(timer));
+      if (done) return;
+      let bytes = Buffer.concat([odd, Buffer.from(value)]);
+      const head = Math.min(skip, bytes.length);
+      skip -= head;
+      bytes = bytes.subarray(head);
+      const even = bytes.length - (bytes.length % 2);
+      odd = bytes.subarray(even);
+      if (even) yield bytes.subarray(0, even);
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
+export function pcmToWav(pcm: Buffer, rate = PCM_RATE): Buffer {
+  const head = Buffer.alloc(WAV_HEAD_BYTES);
+  head.write('RIFF', 0); head.writeUInt32LE(pcm.length + 36, 4); head.write('WAVEfmt ', 8);
+  head.writeUInt32LE(16, 16); head.writeUInt16LE(1, 20); head.writeUInt16LE(1, 22);
+  head.writeUInt32LE(rate, 24); head.writeUInt32LE(rate * 2, 28); head.writeUInt16LE(2, 32); head.writeUInt16LE(16, 34);
+  head.write('data', 36); head.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([head, pcm]);
 }
 
 export const QWEN_CLONE_MODEL = 'Qwen/Qwen3-TTS-12Hz-0.6B-Base';
@@ -160,15 +198,18 @@ export function mp3DurationMs(buf: Buffer): number {
 export const TTS_MAX_PARALLEL = 6;
 export const TTS_MAX_WAITING = 4;
 
+export const PCM_CHUNK_MIN_BYTES = PCM_BYTES_PER_MS * 250;
+
 export interface TtsStreamOptions {
   synthesize: (id: number, speed: number) => Promise<TtsClip | null>;
-  deliver: (id: number, clip: TtsClip) => boolean;
+  deliver: (id: number, clip: TtsClip, streamed: boolean) => boolean;
+  deliverChunk?: (id: number, pcm: Buffer, seq: number) => boolean;
   dropped: (id: number) => void;
   now: () => number;
 }
 
 interface Waiting { id: number; readyAt: number }
-interface Job { id: number; clip?: TtsClip | null }
+interface Job { id: number; clip?: TtsClip | null; parts: Buffer[]; sent: number; ended: boolean; muted: boolean }
 
 export class TtsStream {
   private waiting: Waiting[] = [];
@@ -208,25 +249,55 @@ export class TtsStream {
         this.timer.unref?.();
         return;
       }
-      const job: Job = { id: this.waiting.shift()!.id };
+      const job: Job = { id: this.waiting.shift()!.id, parts: [], sent: 0, ended: false, muted: false };
       this.jobs.push(job);
       const queuedMs = this.playEnd - this.opts.now() + (this.jobs.length - 1) * this.clipMs;
-      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs)).catch(() => null).then(clip => {
+      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs)).catch(() => null).then(async clip => {
         job.clip = clip;
+        if (clip?.pcm) await this.read(job, clip.pcm);
+        job.ended = true;
         this.flush();
         this.pump();
       });
     }
   }
 
+  private async read(job: Job, pcm: AsyncIterable<Buffer>): Promise<void> {
+    let pending: Buffer[] = [];
+    let size = 0;
+    const cut = () => { if (size) { job.parts.push(Buffer.concat(pending)); pending = []; size = 0; this.flush(); } };
+    try {
+      for await (const piece of pcm) {
+        if (this.closed) return;
+        pending.push(piece);
+        size += piece.length;
+        if (size >= PCM_CHUNK_MIN_BYTES) cut();
+      }
+    } catch {
+      return void cut();
+    }
+    cut();
+  }
+
   private flush(): void {
     if (this.closed) return;
-    while (this.jobs[0] && this.jobs[0].clip !== undefined) {
-      const { id, clip } = this.jobs.shift()!;
-      if (!clip || !this.opts.deliver(id, clip)) continue;
+    for (let job = this.jobs[0]; job; job = this.jobs[0]) {
+      if (job.clip === undefined) return;
+      if (job.clip?.pcm) this.sendParts(job);
+      if (!job.ended) return;
+      this.jobs.shift();
+      const clip = job.clip?.pcm ? (job.parts.length ? { audio: pcmToWav(Buffer.concat(job.parts)), format: 'wav' } : null) : job.clip;
+      if (!clip || job.muted || !this.opts.deliver(job.id, clip, Boolean(job.clip?.pcm))) continue;
       const ms = clipDurationMs(clip);
       this.clipMs = this.clipMs ? 0.7 * this.clipMs + 0.3 * ms : ms;
       this.playEnd = Math.max(this.opts.now(), this.playEnd) + ms;
+    }
+  }
+
+  private sendParts(job: Job): void {
+    while (!job.muted && job.sent < job.parts.length) {
+      if (this.opts.deliverChunk?.(job.id, job.parts[job.sent]!, job.sent) === false) job.muted = true;
+      job.sent++;
     }
   }
 }

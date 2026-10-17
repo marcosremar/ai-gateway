@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import {
-  QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, catchUpSpeed, deploymentClone, kokoroTts, kokoroVoice, mp3DurationMs, qwenCloneTts, qwenSpeaks, trimSilence, wavDurationMs,
+  PCM_CHUNK_MIN_BYTES, QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, TtsStream, catchUpSpeed, deploymentClone, kokoroTts, kokoroVoice, mp3DurationMs,
+  pcmOfWavStream, pcmToWav, qwenCloneTts, qwenSpeaks, trimSilence, wavDurationMs, type TtsClip,
 } from '../../../src/tts';
 import { DeploymentError } from '../../../src/deployments/controller-state';
 
-type Synth = (req: { input: string; model: string; voice: string; responseFormat?: string; speed?: number; signal?: AbortSignal; extra?: Record<string, unknown> }) => Promise<{ audio: Buffer; contentType: string }>;
+type Synth = (req: { input: string; model: string; voice: string; responseFormat?: string; speed?: number; stream?: boolean; signal?: AbortSignal; extra?: Record<string, unknown> }) => Promise<{ audio: Buffer; contentType: string; stream?: ReadableStream<Uint8Array> }>;
 
 let n = 0;
 const link = (synthesize: Synth) => {
@@ -14,6 +15,9 @@ const link = (synthesize: Synth) => {
 };
 const breakers = () => new CircuitBreakerRegistry({ failureThreshold: 5, resetTimeoutMs: 30_000 });
 const mp3 = async () => ({ audio: Buffer.from([1, 2, 3]), contentType: 'audio/mpeg' });
+const wav = (pcm: Buffer) => async () => ({ audio: pcmToWav(pcm), contentType: 'audio/wav' });
+const streamOf = (pieces: Buffer[]) => new ReadableStream<Uint8Array>({ start(c) { for (const p of pieces) c.enqueue(new Uint8Array(p)); c.close(); } });
+const collect = async (pcm: AsyncIterable<Buffer>) => { const out: Buffer[] = []; for await (const p of pcm) out.push(p); return Buffer.concat(out); };
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
@@ -26,26 +30,107 @@ describe('gateway TTS module', () => {
     expect(kokoroVoice('de')).toBeNull();
   });
 
-  it('asks the link for Kokoro in mp3 with the language voice, and the speed only when it is not 1', async () => {
-    const l = link(mp3);
+  it('asks the link for Kokoro as a WAV stream with the language voice, and the speed only when it is not 1', async () => {
+    const pcm = Buffer.alloc(200, 1);
+    const l = link(wav(pcm));
     const tts = kokoroTts(() => [l as never], breakers());
-    await expect(tts('Bonjour', 'fr-FR')).resolves.toEqual({ audio: Buffer.from([1, 2, 3]), format: 'mp3' });
+    await expect(tts('Bonjour', 'fr-FR')).resolves.toEqual({ audio: pcmToWav(pcm), format: 'wav' });
     await tts('hi', 'en', 1.2);
     await tts('hi', 'en', 1);
     const calls = l.provider.synthesize.mock.calls.map(c => c[0]);
-    expect(calls[0]).toMatchObject({ input: 'Bonjour', model: 'hexgrad/kokoro-82m', voice: 'ff_siwis', responseFormat: 'mp3' });
+    expect(calls[0]).toMatchObject({ input: 'Bonjour', model: 'hexgrad/kokoro-82m', voice: 'ff_siwis', responseFormat: 'wav', stream: true });
     expect(calls.map(c => c.speed)).toEqual([undefined, 1.2, undefined]);
     await expect(tts('Hallo', 'de')).rejects.toThrow(/no voice for de/);
   });
 
   it('never sends a sentence twice: a slow link is waited for, the next one is not called', async () => {
-    const slow = link(() => new Promise(res => setTimeout(() => res({ audio: Buffer.from('slow'), contentType: 'audio/mpeg' }), 10_000)));
+    const slow = link(() => new Promise(res => setTimeout(() => res({ audio: pcmToWav(Buffer.from('slow')), contentType: 'audio/wav' }), 10_000)));
     const other = link(mp3);
     const tts = kokoroTts(() => [slow as never, other as never], breakers());
     const clip = tts('Bonjour', 'fr');
     await vi.advanceTimersByTimeAsync(10_001);
-    await expect(clip).resolves.toEqual({ audio: Buffer.from('slow'), format: 'mp3' });
+    await expect(clip).resolves.toEqual({ audio: pcmToWav(Buffer.from('slow')), format: 'wav' });
     expect(other.provider.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('turns a streamed WAV into aligned PCM pieces, header stripped, odd bytes carried over', async () => {
+    const pcm = Buffer.from(Array.from({ length: 300 }, (_, i) => i % 256));
+    const whole = pcmToWav(pcm);
+    const pieces = [whole.subarray(0, 10), whole.subarray(10, 47), whole.subarray(47, 101), whole.subarray(101)];
+    const l = link(async () => ({ audio: Buffer.alloc(0), contentType: 'audio/wav', stream: streamOf(pieces) }));
+    const clip = await kokoroTts(() => [l as never], breakers())('Bonjour', 'fr');
+    expect(clip.format).toBe('pcm');
+    const out: Buffer[] = [];
+    for await (const p of clip.pcm!) out.push(p);
+    expect(out.every(p => p.length % 2 === 0)).toBe(true);
+    expect(Buffer.concat(out)).toEqual(pcm);
+  });
+
+  it('gives up on a PCM stream that stops sending', async () => {
+    const stuck = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array(pcmToWav(Buffer.alloc(100)))); } });
+    const read = collect(pcmOfWavStream(stuck, 1_000));
+    const failed = expect(read).rejects.toThrow(/no audio for 1000 ms/);
+    await vi.advanceTimersByTimeAsync(1_001);
+    await failed;
+  });
+
+  it('streams the head sentence as its pieces arrive and holds the next one until the head ends', async () => {
+    const gates: Array<{ push: (b: Buffer) => void; end: () => void }> = [];
+    const streamed = (): TtsClip => {
+      const queue: Buffer[] = [];
+      let wake: (() => void) | null = null;
+      let ended = false;
+      gates.push({ push: b => { queue.push(b); wake?.(); }, end: () => { ended = true; wake?.(); } });
+      return {
+        audio: Buffer.alloc(0), format: 'pcm',
+        pcm: (async function* () {
+          for (;;) {
+            if (queue.length) { yield queue.shift()!; continue; }
+            if (ended) return;
+            await new Promise<void>(r => { wake = r; });
+          }
+        })(),
+      };
+    };
+    const events: string[] = [];
+    const stream = new TtsStream({
+      now: () => Date.now(),
+      synthesize: async () => streamed(),
+      deliver: (id, clip, isStreamed) => { events.push(`clip ${id} ${clip.format} ${isStreamed} ${clip.audio.length - 44}`); return true; },
+      deliverChunk: (id, pcm, seq) => { events.push(`chunk ${id}.${seq} ${pcm.length}`); return true; },
+      dropped: () => {},
+    });
+    const piece = Buffer.alloc(PCM_CHUNK_MIN_BYTES, 1);
+    stream.push(1, 0);
+    stream.push(2, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    gates[1]!.push(piece);
+    gates[0]!.push(piece);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([`chunk 1.0 ${piece.length}`]);
+    gates[0]!.push(Buffer.alloc(10, 1));
+    gates[0]!.end();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([`chunk 1.0 ${piece.length}`, 'chunk 1.1 10', `clip 1 wav true ${piece.length + 10}`, `chunk 2.0 ${piece.length}`]);
+    gates[1]!.end();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.at(-1)).toBe(`clip 2 wav true ${piece.length}`);
+  });
+
+  it('delivers nothing for a stream that ends without audio and moves on to the next sentence', async () => {
+    const events: string[] = [];
+    const clips = [streamOf([]), streamOf([pcmToWav(Buffer.alloc(PCM_CHUNK_MIN_BYTES, 1))])];
+    const stream = new TtsStream({
+      now: () => Date.now(),
+      synthesize: async () => ({ audio: Buffer.alloc(0), format: 'pcm', pcm: pcmOfWavStream(clips.shift()!) }),
+      deliver: (id) => { events.push(`clip ${id}`); return true; },
+      deliverChunk: (id, _pcm, seq) => { events.push(`chunk ${id}.${seq}`); return true; },
+      dropped: () => {},
+    });
+    stream.push(1, 0);
+    stream.push(2, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(['chunk 2.0', 'clip 2']);
   });
 
   it('aborts a stuck call after TTS_CALL_TIMEOUT_MS', async () => {

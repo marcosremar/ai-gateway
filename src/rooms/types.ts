@@ -63,5 +63,6 @@ export type RoomServerMessage =
   | { type: 'line'; line: RoomLine }
   /** `wav` carries the base64 clip whatever its container; `format` (additive) names it when not WAV (`mp3`). */
   | { type: 'audio'; lineId: number; lang: string; wav: string; format?: string }
+  | { type: 'audio-chunk'; lineId: number; lang: string; seq: number; rate: number; pcm: string }
   | { type: 'ended' }
   | { type: 'pong' };

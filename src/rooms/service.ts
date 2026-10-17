@@ -6,7 +6,7 @@
 
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import type { RoomsConfig } from './config';
-import type { LanguageTts, TtsClip } from '../tts';
+import { PCM_RATE, type LanguageTts, type TtsClip } from '../tts';
 import { RoomDubber, type RoomTranslate, type RoomVoiceClone } from './dub';
 import type { RoomStore } from './store';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
@@ -24,6 +24,7 @@ export interface RoomViewer {
   listening?(lang: string): boolean;
   /** Whether this viewer shows `lang` on screen (the `view` of its `listen` message). */
   reading?(lang: string): boolean;
+  takesChunks?(): boolean;
 }
 
 export interface LiveRoom {
@@ -87,7 +88,8 @@ export class RoomService {
     this.dubber = opts.synthesize && opts.config.serverDub
       ? new RoomDubber({
         synthesize: opts.synthesize, available: opts.synthesizeAvailable, clone: opts.clone,
-        deliver: (room, lineId, lang, clip) => this.deliverServerClip(room, lineId, lang, clip),
+        deliver: (room, lineId, lang, clip, streamed) => this.deliverServerClip(room, lineId, lang, clip, streamed),
+        deliverChunk: (room, lineId, lang, pcm, seq) => this.deliverServerChunk(room, lineId, lang, pcm, seq),
         translate: opts.translate, addTranslation: (room, lineId, lang, text) => this.addTranslation(room, lineId, lang, text),
         waitMs: opts.config.serverDubWaitMs, presenterQuietMs: opts.config.serverDubPresenterQuietMs, now: this.now, log: this.log,
       })
@@ -343,10 +345,15 @@ export class RoomService {
   }
 
   /** A clip the server synthesized: only to the viewers listening to that language. */
-  private deliverServerClip(room: LiveRoom, lineId: number, lang: string, clip: TtsClip): void {
+  private deliverServerClip(room: LiveRoom, lineId: number, lang: string, clip: TtsClip, streamed: boolean): void {
     if (room.meta.ended) return;
     const wav = clip.audio.toString('base64');
-    this.broadcast(room, { type: 'audio', lineId, lang, wav, format: clip.format }, v => v.listening?.(lang) === true);
+    this.broadcast(room, { type: 'audio', lineId, lang, wav, format: clip.format }, v => v.listening?.(lang) === true && !(streamed && v.takesChunks?.()));
+  }
+
+  private deliverServerChunk(room: LiveRoom, lineId: number, lang: string, pcm: Buffer, seq: number): void {
+    if (room.meta.ended) return;
+    this.broadcast(room, { type: 'audio-chunk', lineId, lang, seq, rate: PCM_RATE, pcm: pcm.toString('base64') }, v => v.listening?.(lang) === true && v.takesChunks?.() === true);
   }
 
   async end(room: LiveRoom): Promise<void> {

@@ -243,10 +243,10 @@ describe('room page: viewer settings', () => {
   });
 
   it('sends listen for the chosen translation only while dubbing is on', () => {
-    expect(JSON.parse(listenMsg(true, 'fr'))).toEqual({ type: 'listen', lang: 'fr', view: 'fr' });
-    expect(JSON.parse(listenMsg(false, 'fr'))).toEqual({ type: 'listen', lang: null, view: 'fr' });
-    expect(JSON.parse(listenMsg(true, 'orig'))).toEqual({ type: 'listen', lang: null, view: null });
-    expect(JSON.parse(listenMsg(true, null))).toEqual({ type: 'listen', lang: null, view: null });
+    expect(JSON.parse(listenMsg(true, 'fr'))).toEqual({ type: 'listen', lang: 'fr', view: 'fr', chunks: true });
+    expect(JSON.parse(listenMsg(false, 'fr'))).toEqual({ type: 'listen', lang: null, view: 'fr', chunks: true });
+    expect(JSON.parse(listenMsg(true, 'orig'))).toEqual({ type: 'listen', lang: null, view: null, chunks: true });
+    expect(JSON.parse(listenMsg(true, null))).toEqual({ type: 'listen', lang: null, view: null, chunks: true });
   });
 
   it('re-sends listen on every (re)connect, dub toggle and language change', () => {
