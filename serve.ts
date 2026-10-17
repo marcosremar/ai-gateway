@@ -63,7 +63,7 @@ import {
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
-import { createRooms, kokoroSynthesize, maiSynthesize, synthesizeWithFallback } from './src/rooms';
+import { createRooms, kokoroSynthesize, maiSynthesize, openRouterTranslate, synthesizeWithFallback } from './src/rooms';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
@@ -573,6 +573,7 @@ const rooms = createRooms({
   // presenter sends text only. Each attempt is time-bounded: the OpenRouter SDK client has no timeout of its own.
   synthesize: synthesizeWithFallback([kokoroSynthesize(openrouterTTS), maiSynthesize(openrouterTTS)]),
   synthesizeAvailable: () => openrouterTTS.isConfigured(),
+  translate: openRouterTranslate(openrouterLLM),
 });
 log.log({
   dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl,

@@ -15,6 +15,7 @@
 // Failures are logged, never thrown into the publish path.
 
 import type { LiveRoom } from './service';
+import type { RoomLine } from './types';
 
 /** Kokoro v1.0 voice per language (primary subtag). Languages Kokoro does not speak are not voiced. */
 export const KOKORO_ROOM_VOICES: Readonly<Record<string, string>> = {
@@ -23,8 +24,34 @@ export const KOKORO_ROOM_VOICES: Readonly<Record<string, string>> = {
 
 /** The Kokoro voice for a room language (`pt-BR` → `pf_dora`), or null when Kokoro does not speak it. */
 export function kokoroVoice(lang: string): string | null {
-  return KOKORO_ROOM_VOICES[lang.split('-')[0]!.toLowerCase()] ?? null;
+  return KOKORO_ROOM_VOICES[primary(lang)] ?? null;
 }
+
+const primary = (lang: string): string => lang.split('-')[0]!.toLowerCase();
+
+export type RoomTranslate = (text: string, from: string | null, to: string) => Promise<string>;
+
+export interface ChatLike {
+  chat(req: { model: string; messages: { role: 'system' | 'user'; content: string }[]; temperature?: number; timeoutMs?: number; extraBody?: Record<string, unknown> }): Promise<{ content: string }>;
+}
+
+const TRANSLATE_MODEL = 'google/gemini-2.5-flash-lite';
+const TRANSLATE_TIMEOUT_MS = 6_000;
+const languageName = (code: string): string => new Intl.DisplayNames(['en'], { type: 'language' }).of(code) ?? code;
+
+export const openRouterTranslate = (provider: ChatLike): RoomTranslate => async (text, from, to) => {
+  const res = await provider.chat({
+    model: TRANSLATE_MODEL,
+    temperature: 0,
+    timeoutMs: TRANSLATE_TIMEOUT_MS,
+    extraBody: { reasoning: { enabled: false } },
+    messages: [
+      { role: 'system', content: `Translate this live subtitle${from ? ` from ${languageName(from)}` : ''} into ${languageName(to)}. Reply with the translation only.` },
+      { role: 'user', content: text },
+    ],
+  });
+  return res.content.trim();
+};
 
 /** One synthesized clip: audio bytes and their container (`mp3`, `wav`…). */
 export interface RoomClip { audio: Buffer; format: string }
@@ -101,6 +128,8 @@ export interface RoomDubberOptions {
   available?: () => boolean;
   /** Delivers a clip to the room's listeners of `lang`. */
   deliver: (room: LiveRoom, lineId: number, lang: string, clip: RoomClip) => void;
+  translate?: RoomTranslate;
+  addTranslation: (room: LiveRoom, lineId: number, lang: string, text: string) => void;
   /** Wait after a line before voicing it, so the presenter's own clip can arrive first. */
   waitMs: number;
   /** A room whose presenter sent a clip within this window is not voiced by the server. */
@@ -155,6 +184,13 @@ export class RoomDubber {
     return room.meta.languages.filter(l => kokoroVoice(l) !== null);
   }
 
+  /** Kokoro languages the presenter does not publish: the server translates and voices them for whoever picks one. */
+  extraLanguages(room: LiveRoom): string[] {
+    if (!this.opts.translate) return [];
+    const taken = [...room.meta.languages, room.meta.originalLang ?? ''].map(primary);
+    return Object.keys(KOKORO_ROOM_VOICES).filter(l => !taken.includes(l));
+  }
+
   private state(code: string): RoomState {
     let s = this.rooms.get(code);
     if (!s) { s = { presenterAt: new Map(), presenterKeys: new Set(), langs: new Map() }; this.rooms.set(code, s); }
@@ -174,32 +210,38 @@ export class RoomDubber {
     if (s.presenterKeys.size > PRESENTER_KEYS_KEEP) s.presenterKeys.delete(s.presenterKeys.values().next().value!);
   }
 
-  /** Whether a line+language should be voiced right now (every spending condition). */
-  private eligible(room: LiveRoom, s: RoomState, lineId: number, lang: string): string | null {
+  /** The line, when someone listens to `lang` (voice) or reads an extra language (text), under every spending condition. */
+  private wanted(room: LiveRoom, s: RoomState, lineId: number, lang: string): { line: RoomLine; listen: boolean } | null {
     if (room.meta.ended || room.meta.serverDub === false) return null;
     if (this.presenterActive(s, lang) || s.presenterKeys.has(`${lineId}:${lang}`)) return null;
     const at = room.index.get(lineId);
     const line = at === undefined ? undefined : room.lines[at];
-    if (line?.draft) return null;
-    const text = (line?.translations[lang] ?? '').trim();
-    if (!text || !kokoroVoice(lang)) return null;
-    for (const v of room.viewers) if (v.listening?.(lang)) return text;
-    return null;
+    if (!line || line.draft || !kokoroVoice(lang)) return null;
+    const translated = !!line.translations[lang]?.trim();
+    const translatable = !!this.opts.translate && !!line.original.trim() && primary(line.originalLang ?? room.meta.originalLang ?? '') !== primary(lang);
+    if (!translated && !translatable) return null;
+    const extra = !room.meta.languages.includes(lang);
+    let read = false;
+    for (const v of room.viewers) {
+      if (v.listening?.(lang)) return { line, listen: true };
+      read ||= extra && !translated && v.reading?.(lang) === true;
+    }
+    return read ? { line, listen: false } : null;
   }
 
-  /** A line was published (added or replaced): schedule its voicing for the languages being listened to. */
+  /** A line was published (added or replaced), or a viewer changed language: schedule what someone listens to or reads. */
   onLine(room: LiveRoom, lineId: number): void {
     if (room.meta.serverDub === false || (this.opts.available && !this.opts.available())) return;
     const s = this.state(room.meta.code);
     const at = room.index.get(lineId);
     const line = at === undefined ? undefined : room.lines[at];
     if (!line) return;
-    for (const lang of Object.keys(line.translations)) {
-      if (!this.eligible(room, s, lineId, lang)) continue;
+    for (const lang of new Set([...Object.keys(line.translations), ...this.extraLanguages(room)])) {
+      if (!this.wanted(room, s, lineId, lang)) continue;
       let ls = s.langs.get(lang);
       if (!ls) { ls = { queue: [], busy: false, timer: null, done: [], playEnd: 0 }; s.langs.set(lang, ls); }
       if (ls.done.some(d => d >= lineId) || ls.queue.some(q => q.lineId === lineId)) continue;
-      ls.queue.push({ lineId, readyAt: this.opts.now() + this.opts.waitMs });
+      ls.queue.push({ lineId, readyAt: this.opts.now() + (s.presenterAt.has(lang) ? this.opts.waitMs : 0) });
       ls.queue.sort((a, b) => a.lineId - b.lineId);
       if (ls.queue.length > ROOM_DUB_QUEUE_MAX) this.opts.log('rooms: server dub dropped stale line', { code: room.meta.code, lang, lineId: ls.queue.shift()!.lineId });
       this.next(room, s, lang, ls);
@@ -221,15 +263,17 @@ export class RoomDubber {
   }
 
   private async run(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number): Promise<void> {
-    const text = this.eligible(room, s, lineId, lang);
-    if (!text) { this.next(room, s, lang, ls); return; }
+    const want = this.wanted(room, s, lineId, lang);
+    if (!want) { this.next(room, s, lang, ls); return; }
     ls.busy = true;
     ls.done.push(lineId);
     if (ls.done.length > DONE_KEEP) ls.done.shift();
     try {
+      const text = want.line.translations[lang]?.trim() || await this.translate(room, want.line, lang);
+      if (!want.listen) return;
       const clip = await this.opts.synthesize(text, lang, undefined, dubSpeed(ls.playEnd - this.opts.now()));
       // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
-      if (this.eligible(room, s, lineId, lang)) {
+      if (this.wanted(room, s, lineId, lang)?.listen) {
         this.opts.deliver(room, lineId, lang, clip);
         ls.playEnd = Math.max(this.opts.now(), ls.playEnd) + mp3DurationMs(clip.audio);
       }
@@ -239,6 +283,13 @@ export class RoomDubber {
       ls.busy = false;
       this.next(room, s, lang, ls);
     }
+  }
+
+  private async translate(room: LiveRoom, line: RoomLine, lang: string): Promise<string> {
+    const text = await this.opts.translate!(line.original, line.originalLang ?? room.meta.originalLang, lang);
+    if (!text) throw new Error('empty translation');
+    this.opts.addTranslation(room, line.id, lang, text);
+    return text;
   }
 
   /** The room left memory or ended: pending work is dropped. */

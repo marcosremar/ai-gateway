@@ -51,6 +51,8 @@ export interface PublicRoom {
    * (server dubbing off): any translation language may have clips.
    */
   dubLangs?: string[];
+  /** Additive: languages the presenter does not publish that the server translates and voices on demand. */
+  listenLangs?: string[];
   lines: RoomLine[];
 }
 

@@ -532,7 +532,7 @@ function dubbable(lang,dubLangs){
   if(!lang||lang==='orig')return false;
   return !Array.isArray(dubLangs)||dubLangs.indexOf(lang)>=0;
 }
-function listenMsg(on,lang){return JSON.stringify({type:'listen',lang:on&&lang&&lang!=='orig'?lang:null})}
+function listenMsg(on,lang){var l=lang&&lang!=='orig'?lang:null;return JSON.stringify({type:'listen',lang:on?l:null,view:l})}
 function dubStatus(s,L){
   if(!s.can)return {kind:'na',text:s.lang==='orig'?L.dubPick:L.dubNa};
   if(!s.on)return {kind:'off',text:L.dubOff};
@@ -786,13 +786,14 @@ function upsert(l){
 function pickDefault(){
   var prefs=(navigator.languages&&navigator.languages.length?navigator.languages:[navigator.language||'']);
   var saved=store.get('ucast-lang-'+CODE);
-  if(!(saved&&(saved==='orig'||room.languages.indexOf(saved)>=0)))saved=store.get('ucast-lang-last');
-  return pickLang(prefs,room.languages,saved);
+  if(!(saved&&(saved==='orig'||allLangs().indexOf(saved)>=0)))saved=store.get('ucast-lang-last');
+  return saved&&saved!=='orig'&&allLangs().indexOf(saved)>=0?saved:pickLang(prefs,room.languages,saved);
 }
+function allLangs(){return room.languages.concat(room.listenLangs||[])}
 function fillLangSelect(sel){
   sel.textContent='';
   var o=document.createElement('option');o.value='orig';o.textContent=room.originalLang?L.original+' ('+langName(room.originalLang)+')':L.original;sel.appendChild(o);
-  room.languages.forEach(function(c){var x=document.createElement('option');x.value=c;x.textContent=langName(c);sel.appendChild(x)});
+  allLangs().forEach(function(c){var x=document.createElement('option');x.value=c;x.textContent=langName(c);sel.appendChild(x)});
   sel.value=lang;
 }
 function buildSelect(){
@@ -888,7 +889,7 @@ function expectVoice(l){if(dub&&lang!=='orig'&&l.translations&&l.translations[la
 function onAudio(msg){
   if(!dub||!actx||msg.lang!==lang||typeof msg.wav!=='string')return;
   if(awaitId!=null&&msg.lineId>=awaitId)awaitId=null;
-  var m=M(msg.lineId);if(m.startedAt==null){m.pending=true;m.skip=false}
+  var m=M(msg.lineId);if(m.pending||m.startedAt!=null)return;m.pending=true;m.skip=false;
   var c={lineId:msg.lineId,buf:null},done=false,fmt=String(msg.format||'wav');pending.push(c);decoding++;
   var fail=function(){if(done)return;done=true;decoding--;
     track('audio',{action:'decode_error',format:fmt});dubErr=fmt;
