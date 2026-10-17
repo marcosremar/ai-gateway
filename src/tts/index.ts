@@ -70,7 +70,7 @@ export function qwenCloneTts(links: () => Array<RouteTarget<TTSProvider>>, break
       { stage: 'tts', timeoutMs: TTS_CALL_TIMEOUT_MS, retriesPerProvider: 1, ...(breakers && { breakers }) },
     );
     if (!result.audio.length) throw new Error(`${QWEN_CLONE_MODEL}: empty audio`);
-    return { audio: result.audio, format: 'wav' };
+    return { audio: trimSilence(result.audio), format: 'wav' };
   };
 }
 
@@ -85,6 +85,41 @@ export function deploymentClone(controller: Pick<DeploymentController, 'acquire'
     ready: () => Boolean(controller.get(name)?.replicas?.some(r => r.phase === 'ready')),
     synthesize: qwenCloneTts(() => [{ providerId: `deployment:${name}`, provider, model: QWEN_CLONE_MODEL }], breakers),
   };
+}
+
+const SILENT_BELOW_PEAK = 0.1;
+const TRIM_MARGIN_MS = 200;
+
+export function trimSilence(wav: Buffer): Buffer {
+  if (wav.length < 44 || wav.subarray(0, 4).toString('latin1') !== 'RIFF') return wav;
+  let channels = 0, rate = 0, bits = 0, start = 0, end = 0;
+  for (let at = 12; at + 8 <= wav.length;) {
+    const id = wav.subarray(at, at + 4).toString('latin1');
+    const size = wav.readUInt32LE(at + 4);
+    if (id === 'fmt ') { channels = wav.readUInt16LE(at + 10); rate = wav.readUInt32LE(at + 12); bits = wav.readUInt16LE(at + 22); }
+    if (id === 'data') { start = at + 8; end = Math.min(wav.length, start + size); break; }
+    at += 8 + size + (size & 1);
+  }
+  if (!start || bits !== 16 || !channels || !rate) return wav;
+  const frame = channels * 2;
+  const win = Math.max(1, Math.round(rate / 50)) * frame;
+  const loudness: number[] = [];
+  for (let at = start; at + win <= end; at += win) {
+    let sum = 0;
+    for (let i = at; i < at + win; i += 2) sum += wav.readInt16LE(i) ** 2;
+    loudness.push(Math.sqrt(sum / (win / 2)));
+  }
+  const peak = Math.max(0, ...loudness);
+  const first = loudness.findIndex(l => l > peak * SILENT_BELOW_PEAK);
+  if (!peak || first < 0) return wav;
+  const last = loudness.length - 1 - [...loudness].reverse().findIndex(l => l > peak * SILENT_BELOW_PEAK);
+  const margin = Math.round((rate * TRIM_MARGIN_MS) / 1000) * frame;
+  const from = Math.max(start, start + first * win - margin);
+  const to = Math.min(end, start + (last + 1) * win + margin);
+  const header = Buffer.from(wav.subarray(0, start));
+  header.writeUInt32LE(to - from, start - 4);
+  header.writeUInt32LE(header.length + (to - from) - 8, 4);
+  return Buffer.concat([header, wav.subarray(from, to)]);
 }
 
 export function wavDurationMs(buf: Buffer): number {
