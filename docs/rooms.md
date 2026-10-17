@@ -37,8 +37,9 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 
 Server → client: `{"type":"snapshot","room":<GET body>}` on connect, then `{"type":"line","line"}`,
 `{"type":"audio","lineId","lang","wav"}`, `{"type":"update","youtubeUrl"}` (room fields changed), `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
-and, optionally, `{"type":"listen","lang":"en"|null}`: once sent, audio clips arrive only for that language (`null` =
-none), so viewers who do not listen to the dubbing do not download it. The server pings every 25 s.
+and, optionally, `{"type":"listen","lang":"en"|null,"view":"en"|null}`: once sent, audio clips arrive only for `lang`
+(`null` = none), so viewers who do not listen to the dubbing do not download it; `view` (additive) is the language on
+screen, which makes the server translate lines into a `listenLangs` language for a reader. The server pings every 25 s.
 
 ## Server dubbing
 
@@ -49,29 +50,47 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   zh `zf_xiaobei`, hi `hf_alpha`. Other languages are not voiced.
 - Spend only on demand: a line+language is synthesized only while at least one viewer has sent `listen` for that
   language (a viewer that never sent `listen` does not count) and the line has a non-empty translation for it.
-- The presenter wins: the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500) after a line, skips a line+language the
+- The presenter wins: in a language the presenter has sent clips in, the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500)
+  after a line (elsewhere it voices at once — the wait was 1.5 s of delay on every line of rooms with no presenter
+  voice; the one first line that may get both voices is played once: the page ignores a second clip of a line), skips a line+language the
   presenter sent a clip for (checked again before delivering), and leaves a language alone while its presenter sent a clip in that language
   in the last `ROOM_SERVER_DUB_PRESENTER_QUIET_MS` (60000). Other languages are still voiced: the desktop app dubs one
   language while viewers may listen to another.
-- In order and bounded: per room and language one call in flight, every final line voiced in id order (each at least the
-  wait after it arrived); past 4 waiting lines the oldest is dropped, a line older than one already voiced is skipped,
-  and each line+language is voiced once (later corrections of the same id are not re-voiced).
+- Through the gateway TTS module (`src/tts`): each room language is a `TtsStream` — one Kokoro call per waiting line,
+  so more calls run at once while the provider is slow (up to `TTS_MAX_PARALLEL`, 6) and none is ever sent twice (no
+  hedge: no extra spend); clips delivered in id order (a slow line holds the ones behind it, never blocks their
+  synthesis; a translation goes out as soon as it is ready); past `TTS_MAX_WAITING` (4) waiting lines the oldest is
+  dropped, a line older than one already voiced is skipped, and each line+language is voiced once (later corrections
+  of the same id are not re-voiced). Synthesis is `kokoroTts`: the gateway's own routing (`routeRequest`: circuit
+  breakers, per-call timeout, link-reorder ranks equivalent Kokoro links by latency once there is more than one).
 - Catching up: the server tracks per language until when the listeners' clips play back to back (`mp3DurationMs`
   counts the mp3 frames: Kokoro's mp3 is VBR and glued from several pieces, so neither the size nor ffprobe's estimate
-  is right) and asks Kokoro for `speed` = 1 + queued audio / 20 s, at most 1.3 (MAI-Voice is never sped up). Measured
+  is right) and asks Kokoro for `speed` = 1 + queued audio / 20 s, at most 1.3 (`catchUpSpeed`; queued audio = what is
+  scheduled + the lines still being voiced × the average clip). Measured
   on Kokoro: 1.3 → 18 % shorter. Simulated on a real 2 h room (593 lines, Kokoro 15 chars/s): dropped sentences on the
   page 13.5 % (6 s cap, no speed-up) → 0.2 % (25 s cap), voice delay p50 2.6 → 4.0 s, p95 10.5 → 15.0 s (long
   sentences dominate: a 300-character line is a 20 s clip).
-  Each attempt has `ROOM_DUB_ATTEMPT_TIMEOUT_MS` (8 s; the OpenRouter SDK client has no timeout of its own): a stuck or
-  failed Kokoro call is aborted and the line goes to MAI-Voice 2.1 Flash (`microsoft/mai-voice-2.1-flash`; en
-  `en-US-Harper`, fr `fr-FR-Soleil`, pt `pt-BR-Luana`; other languages have no fallback), so a language is held at most
-  ~16 s. Failures are logged, never surface to the publisher.
+  Kokoro only (user decision 2026-10-17: no paid fallback voice — ElevenLabs/MAI-Voice cost 25–30× more): each call
+  has `TTS_CALL_TIMEOUT_MS` (15 s; the OpenRouter SDK client has no timeout of its own); a failed or stuck call
+  loses that line's voice (its text stays). Kokoro on OpenRouter (DeepInfra, Together) answered in 0.7–2.9 s per
+  sentence on 2026-10-16 and in 6–25 s on 2026-10-17; with the calls in parallel the voice then lags by about one call
+  instead of falling further behind. OpenRouter ignores `provider` routing on `/audio/speech` (measured 2026-10-17: a
+  request pinned to Together was served by DeepInfra), so the only way to pick the faster Kokoro is a second source
+  (another link in `kokoroTts`), which link-reorder then ranks automatically. Failures are logged, never surface to the publisher.
 - Server clips go out as `{"type":"audio","lineId","lang","wav":"<base64 mp3>","format":"mp3"}` (`wav` keeps its name;
   `format` is additive, absent = WAV) to the viewers listening to that language only.
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
   only for those; without `dubLangs` (server dubbing off) it offers every translation language as before.
+- Languages the presenter does not publish: the snapshot carries `listenLangs` (additive) = the Kokoro languages that are
+  neither a room language nor the spoken one (en, fr, es, pt, it, ja, zh, hi minus those). The page lists them in its
+  language menu; for a viewer that listens to or reads one, the server translates each final line from the original
+  (`openRouterTranslate`: OpenRouter `google/gemini-2.5-flash-lite`, reasoning off, 6 s), stores it on the line
+  (`translations[lang]`, broadcast as a `line` update so every viewer of that language sees it) and voices it for the
+  listeners. Switching language catches up from the latest line. Never into the spoken language; nothing without a
+  translator. In GPU mode the desktop app voices its own output language (cloned voice on the GPU) and sends the clips,
+  which win for that language; every other language comes from OpenRouter as in API mode.
 
 ## Viewer pages
 

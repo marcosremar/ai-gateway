@@ -45,6 +45,7 @@ export function createRoomWs(service: RoomService, log: (msg: string, data?: Rec
 
     let closed = false;
     let listen: string | null | undefined;
+    let view: string | null = null;
     const parser = new WsFrameParser(MAX_CLIENT_MESSAGE);
     const write = (opcode: number, payload: Uint8Array) => {
       if (closed || !socket.writable) return;
@@ -56,6 +57,7 @@ export function createRoomWs(service: RoomService, log: (msg: string, data?: Rec
       close: (c, reason) => shutdown(c, reason),
       wantsAudio: (lang) => listen === undefined || listen === lang,
       listening: (lang) => listen === lang,
+      reading: (lang) => view === lang,
     };
     if (!service.addViewer(room, viewer)) { socket.end(httpRefusal(503, 'room is at its viewer limit', { 'Retry-After': 30 })); return; }
 
@@ -73,10 +75,14 @@ export function createRoomWs(service: RoomService, log: (msg: string, data?: Rec
     }
 
     const onMessage = (data: Buffer) => {
-      let msg: { type?: unknown; lang?: unknown };
+      let msg: { type?: unknown; lang?: unknown; view?: unknown };
       try { msg = JSON.parse(data.toString('utf8')) as typeof msg; } catch { return; }
       if (msg?.type === 'ping') viewer.send('{"type":"pong"}');
-      else if (msg?.type === 'listen') listen = typeof msg.lang === 'string' ? msg.lang : null;
+      else if (msg?.type === 'listen') {
+        listen = typeof msg.lang === 'string' ? msg.lang : null;
+        view = typeof msg.view === 'string' ? msg.view : null;
+        service.viewerLanguageChanged(room!);
+      }
     };
     const onData = (chunk: Buffer) => {
       let messages;

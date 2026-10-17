@@ -64,7 +64,8 @@ import {
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
-import { createRooms, kokoroSynthesize, maiSynthesize, synthesizeWithFallback } from './src/rooms';
+import { createRooms, openRouterTranslate } from './src/rooms';
+import { KOKORO_MODEL, kokoroTts } from './src/tts';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
@@ -571,10 +572,11 @@ const rooms = createRooms({
   },
   userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
   log: (msg, data) => log.log(data ?? {}, msg),
-  // Server dubbing (Kokoro 82M via OpenRouter, MAI-Voice when Kokoro is stuck or fails) for listeners of rooms whose
-  // presenter sends text only. Each attempt is time-bounded: the OpenRouter SDK client has no timeout of its own.
-  synthesize: synthesizeWithFallback([kokoroSynthesize(openrouterTTS), maiSynthesize(openrouterTTS)]),
+  // Server dubbing (Kokoro only — no paid fallback voice) through the gateway TTS module: breakers, per-call timeout,
+  // one request per sentence. Another Kokoro source added to these links is ranked by latency automatically.
+  synthesize: kokoroTts(() => [{ providerId: 'openrouter', provider: openrouterTTS, model: KOKORO_MODEL }]),
   synthesizeAvailable: () => openrouterTTS.isConfigured(),
+  translate: openRouterTranslate(openrouterLLM),
 });
 log.log({
   dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl,
