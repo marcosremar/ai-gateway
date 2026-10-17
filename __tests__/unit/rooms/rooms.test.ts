@@ -6,11 +6,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, request, type Server } from 'http';
 import type { AddressInfo } from 'net';
-import { mkdtempSync, readdirSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import WebSocket from 'ws';
-import { CODE_RE, FileRoomStore, MAX_YOUTUBE_URL_CHARS, MemoryRoomStore, createRooms, linesFromJsonl, parseYoutubeUrl, type RoomStore, type RoomsConfig } from '../../../src/rooms';
+import { CODE_RE, FileRoomStore, MAX_YOUTUBE_URL_CHARS, MemoryRoomStore, createRooms, linesFromJsonl, parseYoutubeUrl, type CreateRoomsOptions, type RoomStore, type RoomsConfig } from '../../../src/rooms';
+import { VOICE_MAX_BYTES } from '../../../src/rooms/validate';
 
 const KEYS: Record<string, string> = { 'key-ucast': 'ucast', 'key-other': 'other', 'key-admin': 'admin' };
 const DAY = 86_400_000;
@@ -23,7 +24,7 @@ interface Gw {
   close(): Promise<void>;
 }
 
-async function startGateway(config: Partial<RoomsConfig> = {}, store: RoomStore = new MemoryRoomStore()): Promise<Gw> {
+async function startGateway(config: Partial<RoomsConfig> = {}, store: RoomStore = new MemoryRoomStore(), extra: Partial<CreateRoomsOptions> = {}): Promise<Gw> {
   const clock = { now: Date.UTC(2026, 9, 10, 12) };
   const userOfToken = (t: string) => KEYS[t] ?? null;
   const rooms = createRooms({
@@ -34,6 +35,7 @@ async function startGateway(config: Partial<RoomsConfig> = {}, store: RoomStore 
     userOf: (req) => userOfToken(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')) ?? 'anonymous',
     now: () => clock.now,
     sweepIntervalMs: 0,
+    ...extra,
   });
   const server = createServer((req, res) => {
     if (req.url === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"status":"ok"}'); return; }
@@ -502,6 +504,68 @@ describe('rooms youtubeUrl', () => {
       await g.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+describe('rooms speaker voice (PUT /v1/rooms/:code/voice)', () => {
+  const secret = Buffer.from('the speaker voice itself').toString('base64');
+  const refText = 'frase secreta de referência';
+  const body = { lang: 'pt', ref_audio: `data:audio/ogg;base64,${secret}`, ref_text: refText };
+  const put = (gw: Gw, code: string, b: unknown, token?: string) => fetch(`${gw.url}/v1/rooms/${code}/voice`, {
+    method: 'PUT', headers: { ...json, ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(b),
+  });
+  const filesUnder = (dir: string): string[] => readdirSync(dir, { withFileTypes: true })
+    .flatMap(e => e.isDirectory() ? filesUnder(join(dir, e.name)) : [readFileSync(join(dir, e.name), 'utf8')]);
+
+  it('takes the reference with the publish token, validates it, and never serves or stores it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rooms-voice-'));
+    const synthesize = async () => ({ audio: Buffer.from('x'), format: 'mp3' });
+    const gw = await startGateway({ dir }, new FileRoomStore(dir), { synthesize, translate: async (t) => t, clone: { synthesize, ready: () => true } });
+    try {
+      const room = await newRoom(gw);
+      const v = await viewer(gw, room.code);
+      expect((await put(gw, room.code, body)).status).toBe(401);
+      expect((await put(gw, room.code, body, 'key-other')).status).toBe(403);
+      expect((await post(gw, room.code, 'voice', body, room.publishToken)).status).toBe(405);
+      for (const bad of [{ ...body, ref_audio: 'https://evil.example/a.wav' }, { ...body, ref_audio: 'data:text/plain;base64,QUFB' },
+        { ...body, ref_audio: 'data:audio/wav;base64,not base64!' }, { ...body, ref_text: ' ' }, { ...body, lang: 'portuguese' }]) {
+        expect((await put(gw, room.code, bad, room.publishToken)).status, JSON.stringify(bad)).toBe(400);
+      }
+      const huge = { ...body, ref_audio: `data:audio/wav;base64,${'A'.repeat(Math.ceil(VOICE_MAX_BYTES * 4 / 3) + 1024)}` };
+      expect((await put(gw, room.code, huge, room.publishToken)).status).toBe(413);
+      expect((await put(gw, room.code, body, room.publishToken)).status).toBe(204);
+      expect((await put(gw, room.code, body, 'key-ucast')).status).toBe(204);
+      expect((await post(gw, room.code, 'lines', line(1), room.publishToken)).status).toBe(204);
+
+      const update = await v.next('update');
+      expect(update.dubLangs).toContain('de');
+      const served = [JSON.stringify(await (await fetch(`${gw.url}/v1/rooms/${room.code}`)).json()), JSON.stringify(v.messages), JSON.stringify(update)];
+      const late = await viewer(gw, room.code);
+      served.push(JSON.stringify(await late.next('snapshot')));
+      for (const text of [...served, ...filesUnder(dir)]) {
+        expect(text).not.toContain(secret);
+        expect(text).not.toContain(refText);
+      }
+      const pre = await fetch(`${gw.url}/v1/rooms/${room.code}/voice`, { method: 'OPTIONS' });
+      expect(pre.headers.get('access-control-allow-methods')).toContain('PUT');
+      expect((await post(gw, room.code, 'end', {}, room.publishToken)).status).toBe(204);
+      expect((await put(gw, room.code, body, room.publishToken)).status).toBe(409);
+      v.ws.close();
+      late.ws.close();
+    } finally {
+      await gw.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts and ignores the reference on a gateway without server dubbing', async () => {
+    const gw = await startGateway();
+    try {
+      const room = await newRoom(gw);
+      expect((await put(gw, room.code, body, room.publishToken)).status).toBe(204);
+      expect((await put(gw, 'ZZZZZZ', body, room.publishToken)).status).toBe(404);
+    } finally {
+      await gw.close();
     }
   });
 });

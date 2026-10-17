@@ -7,11 +7,11 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import type { RoomsConfig } from './config';
 import type { LanguageTts, TtsClip } from '../tts';
-import { RoomDubber, type RoomTranslate } from './dub';
+import { RoomDubber, type RoomTranslate, type RoomVoiceClone } from './dub';
 import type { RoomStore } from './store';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 import {
-  CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput, type UpdateRoomInput,
+  CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput, type UpdateRoomInput, type VoiceInput,
 } from './validate';
 
 /** A connected viewer (the WS layer implements it). */
@@ -52,6 +52,7 @@ export interface RoomServiceOptions {
   /** False while the synthesizer cannot work (e.g. no API key). */
   synthesizeAvailable?: () => boolean;
   translate?: RoomTranslate;
+  clone?: RoomVoiceClone;
 }
 
 const HOUR_MS = 3_600_000;
@@ -85,7 +86,7 @@ export class RoomService {
     this.log = opts.log ?? (() => {});
     this.dubber = opts.synthesize && opts.config.serverDub
       ? new RoomDubber({
-        synthesize: opts.synthesize, available: opts.synthesizeAvailable,
+        synthesize: opts.synthesize, available: opts.synthesizeAvailable, clone: opts.clone,
         deliver: (room, lineId, lang, clip) => this.deliverServerClip(room, lineId, lang, clip),
         translate: opts.translate, addTranslation: (room, lineId, lang, text) => this.addTranslation(room, lineId, lang, text),
         waitMs: opts.config.serverDubWaitMs, presenterQuietMs: opts.config.serverDubPresenterQuietMs, now: this.now, log: this.log,
@@ -305,6 +306,24 @@ export class RoomService {
     room.clipLangs.add(audio.lang);
     this.dubber?.onPresenterClip(room, audio.lineId, audio.lang);
     this.broadcast(room, { type: 'audio', lineId: audio.lineId, lang: audio.lang, wav: audio.wav }, v => v.wantsAudio(audio.lang));
+  }
+
+  setVoice(room: LiveRoom, input: VoiceInput): void {
+    if (room.meta.ended) throw new RoomError(409, 'room has ended');
+    room.touchedAt = this.now();
+    if (!this.dubber || room.meta.serverDub === false) return;
+    const langs = () => JSON.stringify(this.listenLangs(room));
+    const before = langs();
+    this.dubber.setVoice(room, input.lang, { refAudio: input.refAudio, refText: input.refText });
+    this.log('rooms: speaker voice received', { code: room.meta.code, lang: input.lang });
+    if (langs() === before) return;
+    const youtubeUrl = typeof room.meta.youtubeUrl === 'string' ? room.meta.youtubeUrl : null;
+    this.broadcast(room, { type: 'update', youtubeUrl, ...this.listenLangs(room) });
+  }
+
+  private listenLangs(room: LiveRoom): { dubLangs: string[]; listenLangs: string[] } {
+    const extra = this.extraLangs(room);
+    return { dubLangs: [...this.dubLangs(room), ...extra], listenLangs: extra };
   }
 
   /**

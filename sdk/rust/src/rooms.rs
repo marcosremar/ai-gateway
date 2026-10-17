@@ -194,6 +194,16 @@ impl Rooms<'_> {
         self.post(room, "audio", Body::json(&body)?, false).await
     }
 
+    pub async fn publish_voice(&self, room: &Room, lang: &str, ref_audio: &str, ref_text: &str) -> Result<()> {
+        let path = format!("/v1/rooms/{}/voice", enc(&room.code));
+        let body = serde_json::json!({ "lang": lang, "ref_audio": ref_audio, "ref_text": ref_text });
+        let spec = Spec::new(Method::PUT, path, TimeoutGroup::Rooms, &self.call)
+            .auth(Auth::Bearer(room.publish_token.clone()))
+            .body(Body::json(&body)?)
+            .idempotent(true);
+        self.client.fetch(&spec).await.map(|_| ())
+    }
+
     /// `POST /v1/rooms/:code/end`: ends the room (the text stays readable).
     pub async fn end(&self, room: &Room) -> Result<()> {
         self.post(room, "end", Body::json(&serde_json::json!({}))?, false).await

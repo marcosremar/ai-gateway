@@ -4,6 +4,7 @@
 //   PATCH /v1/rooms/:code          publish token: change room fields after creation ({"youtubeUrl"})
 //   POST /v1/rooms/:code/lines     publish token (or the creating / an admin gateway key)
 //   POST /v1/rooms/:code/audio     publish token; broadcast only
+//   PUT  /v1/rooms/:code/voice     publish token: the speaker's voice reference (memory only, never served)
 //   POST /v1/rooms/:code/end       publish token
 //   POST /v1/rooms/:code/events    public: the viewer page's analytics batches (events.ts), rate-limited
 //   GET  /v1/rooms/:code/events    admin gateway key: raw events of a room (also after the room expired)
@@ -18,7 +19,7 @@ import { errorTypeForStatus } from '../gateway/proxy/http-conventions';
 import { entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
 import { EVENTS_MAX_BYTES, parseEventBatch, type RoomEvents } from './events';
 import { appIdOf, type RoomService } from './service';
-import { RoomError, normalizeCode, parseAudio, parseCreate, parseLine, parseUpdate } from './validate';
+import { RoomError, VOICE_MAX_BYTES, normalizeCode, parseAudio, parseCreate, parseLine, parseUpdate, parseVoice } from './validate';
 
 export type KeyUser = (token: string) => { userId: string; admin: boolean } | null;
 
@@ -32,13 +33,14 @@ export interface RoomsHttpOptions {
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
-const API_PATH = /^\/v1\/rooms\/([^/]{1,32})(?:\/(lines|audio|end|ws|events))?\/?$/;
+const API_PATH = /^\/v1\/rooms\/([^/]{1,32})(?:\/(lines|audio|voice|end|ws|events))?\/?$/;
 const ANALYTICS_PATH = /^\/v1\/rooms-analytics\/?$/;
 const LIVE_PATH = /^\/live\/([^/]{1,32})\/?$/;
 const HOST_CODE_PATH = /^\/([A-Za-z0-9]{6})\/?$/;
 const CREATE_MAX_BYTES = 16 * 1024;
 const LINE_MAX_BYTES = 256 * 1024;
 const UPDATE_MAX_BYTES = 4 * 1024;
+const VOICE_BODY_MAX_BYTES = Math.ceil(VOICE_MAX_BYTES * 4 / 3) + 16 * 1024;
 const BODY_TIMEOUT_MS = 30_000;
 
 const API_HEADERS = {
@@ -159,10 +161,10 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, rawCode: string, action: string | undefined): Promise<void> {
     if (method === 'OPTIONS') {
-      sendEmpty(res, 204, { 'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': 86_400 });
+      sendEmpty(res, 204, { 'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': 86_400 });
       return;
     }
-    const allowed = action === undefined ? ['GET', 'HEAD', 'PATCH'] : action === 'ws' ? ['GET'] : action === 'events' ? ['GET', 'POST'] : ['POST'];
+    const allowed = action === undefined ? ['GET', 'HEAD', 'PATCH'] : action === 'ws' ? ['GET'] : action === 'events' ? ['GET', 'POST'] : action === 'voice' ? ['PUT'] : ['POST'];
     if (!allowed.includes(method)) { req.resume(); sendError(res, 405, `use ${allowed.join(' or ')}`, { Allow: allowed.join(', ') }); return; }
     if (action === 'ws') { sendError(res, 426, 'this path is a WebSocket', { Upgrade: 'websocket' }); return; }
     if (action === 'events' && method === 'GET') { await listEvents(req, res, rawCode); return; }
@@ -186,6 +188,8 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
     if (action === 'lines') {
       const line = parseLine(await readJson(req, LINE_MAX_BYTES), cfg, Date.now());
       await service.publishLine(room, line);
+    } else if (action === 'voice') {
+      service.setVoice(room, parseVoice(await readJson(req, VOICE_BODY_MAX_BYTES), cfg));
     } else if (action === 'audio') {
       service.publishAudio(room, parseAudio(await readJson(req, audioMaxBytes), cfg));
     } else {
