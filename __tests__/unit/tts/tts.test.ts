@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import {
-  QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, catchUpSpeed, deploymentClone, kokoroTts, kokoroVoice, mp3DurationMs, qwenCloneTts, qwenSpeaks, wavDurationMs,
+  QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, catchUpSpeed, deploymentClone, kokoroTts, kokoroVoice, mp3DurationMs, qwenCloneTts, qwenSpeaks, trimSilence, wavDurationMs,
 } from '../../../src/tts';
 import { DeploymentError } from '../../../src/deployments/controller-state';
 
@@ -119,6 +119,23 @@ describe('gateway TTS module', () => {
     await expect(clone.synthesize('Bonjour', 'fr', { refAudio: 'data:audio/wav;base64,UklGRg==', refText: 'olá' })).rejects.toThrow();
     expect(acquire).toHaveBeenCalledWith('babelcast-tts-clone', expect.objectContaining({ noWake: true, waitMs: 0 }));
     expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('trims the silence a clone starts and ends with, keeping 200 ms around the speech', () => {
+    const rate = 24_000;
+    const samples = [...Array(rate).fill(0), ...Array.from({ length: rate }, (_, i) => Math.round(8000 * Math.sin(i / 5))), ...Array(2 * rate).fill(3)];
+    const wav = Buffer.alloc(44 + samples.length * 2);
+    wav.write('RIFF', 0, 'latin1'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8, 'latin1');
+    wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(rate, 24);
+    wav.writeUInt32LE(rate * 2, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36, 'latin1');
+    wav.writeUInt32LE(samples.length * 2, 40);
+    samples.forEach((s, i) => wav.writeInt16LE(s, 44 + i * 2));
+    const trimmed = trimSilence(wav);
+    expect(wavDurationMs(wav)).toBe(4000);
+    expect(wavDurationMs(trimmed)).toBe(1400);
+    expect(trimmed.readUInt32LE(40)).toBe(trimmed.length - 44);
+    expect(trimmed.readUInt32LE(4)).toBe(trimmed.length - 8);
+    expect(trimSilence(Buffer.from('not audio'))).toEqual(Buffer.from('not audio'));
   });
 
   it('measures a WAV by its header byte rate', () => {
