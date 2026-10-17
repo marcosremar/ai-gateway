@@ -57,6 +57,17 @@ describe('boot phases', () => {
     // Poland, 894 Mbps (3.3 min promised), pulled in 10.4 min: kept.
     expect(pulling(10.4, 3.3).stuck).toBe(false);
   });
+
+  it('a history of hosts that had the image cached never limits a fresh pull below SLOW_PULL_FLOOR_MINUTES', () => {
+    const cached: BootRecord[] = [0.4, 0.5, 0.6].map((m, i) => ({
+      replicaId: `r${i}`, startedAt: 0, endedAt: (m + 3) * MIN, result: 'ready', reason: null,
+      phases: [{ phase: 'pulling', at: 0 }, { phase: 'loading', at: m * MIN }, { phase: 'ready', at: (m + 3) * MIN }],
+    }));
+    expect(expectedPhaseMinutes('pulling', cached)).toBe(SLOW_PULL_FLOOR_MINUTES);
+    expect(expectedPhaseMinutes('loading', cached)).toBe(5);
+    const fresh = bootStates([{ replicaId: 'r', phases: [{ phase: 'pulling', at: T0 - 2.6 * MIN }] }], cached, T0, 45)[0]!;
+    expect(fresh).toMatchObject({ stuck: false, expectedMinutes: SLOW_PULL_FLOOR_MINUTES });
+  });
 });
 
 describe('BootTracker', () => {
