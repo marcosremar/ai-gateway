@@ -6,7 +6,7 @@
 
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import type { RoomsConfig } from './config';
-import { RoomDubber, type RoomClip, type RoomSynthesize } from './dub';
+import { RoomDubber, type RoomClip, type RoomSynthesize, type RoomTranslate } from './dub';
 import type { RoomStore } from './store';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 import {
@@ -21,6 +21,8 @@ export interface RoomViewer {
   wantsAudio(lang: string): boolean;
   /** Whether this viewer explicitly listens to `lang` (sent `listen`): only these make the server voice a line. */
   listening?(lang: string): boolean;
+  /** Whether this viewer shows `lang` on screen (the `view` of its `listen` message). */
+  reading?(lang: string): boolean;
 }
 
 export interface LiveRoom {
@@ -48,6 +50,7 @@ export interface RoomServiceOptions {
   synthesize?: RoomSynthesize;
   /** False while the synthesizer cannot work (e.g. no API key). */
   synthesizeAvailable?: () => boolean;
+  translate?: RoomTranslate;
 }
 
 const HOUR_MS = 3_600_000;
@@ -83,6 +86,7 @@ export class RoomService {
       ? new RoomDubber({
         synthesize: opts.synthesize, available: opts.synthesizeAvailable,
         deliver: (room, lineId, lang, clip) => this.deliverServerClip(room, lineId, lang, clip),
+        translate: opts.translate, addTranslation: (room, lineId, lang, text) => this.addTranslation(room, lineId, lang, text),
         waitMs: opts.config.serverDubWaitMs, presenterQuietMs: opts.config.serverDubPresenterQuietMs, now: this.now, log: this.log,
       })
       : null;
@@ -190,11 +194,14 @@ export class RoomService {
 
   publicView(room: LiveRoom): PublicRoom {
     const m = room.meta;
+    const extra = this.extraLangs(room);
     return {
       code: m.code, title: m.title, originalLang: m.originalLang, languages: m.languages,
       createdAt: new Date(m.createdAt).toISOString(), ended: m.ended, expiresAt: this.expiresAt(m),
       youtubeUrl: typeof m.youtubeUrl === 'string' ? m.youtubeUrl : null,
-      ...(this.dubber ? { dubLangs: this.dubLangs(room) } : {}), lines: room.lines,
+      ...(this.dubber ? { dubLangs: [...this.dubLangs(room), ...extra] } : {}),
+      ...(extra.length ? { listenLangs: extra } : {}),
+      lines: room.lines,
     };
   }
 
@@ -202,6 +209,30 @@ export class RoomService {
   private dubLangs(room: LiveRoom): string[] {
     const voiced = this.dubber && room.meta.serverDub !== false ? this.dubber.voicedLanguages(room) : [];
     return room.meta.languages.filter(l => voiced.includes(l) || room.clipLangs.has(l));
+  }
+
+  private extraLangs(room: LiveRoom): string[] {
+    return this.dubber && room.meta.serverDub !== false ? this.dubber.extraLanguages(room) : [];
+  }
+
+  /** A viewer switched what it reads or listens to: its language catches up from the latest line. */
+  viewerLanguageChanged(room: LiveRoom): void {
+    const last = room.lines[room.lines.length - 1];
+    if (last) this.dubber?.onLine(room, last.id);
+  }
+
+  /** The server translated a line into a language the presenter does not publish: kept on the line and broadcast. */
+  private addTranslation(room: LiveRoom, lineId: number, lang: string, text: string): void {
+    const at = room.index.get(lineId);
+    const line = at === undefined ? undefined : room.lines[at];
+    if (!line || room.meta.ended) return;
+    const value = text.slice(0, this.config.maxFieldChars);
+    if (room.chars + value.length > this.config.maxRoomChars) return;
+    room.chars += value.length;
+    const updated = { ...line, translations: { ...line.translations, [lang]: value } };
+    room.lines[at!] = updated;
+    this.broadcast(room, { type: 'line', line: updated });
+    void this.opts.store.appendLine(room.meta.code, updated).catch(() => {});
   }
 
   // ── Publish auth ──────────────────────────────────────────────────────────

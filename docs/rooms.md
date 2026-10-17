@@ -37,8 +37,9 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 
 Server → client: `{"type":"snapshot","room":<GET body>}` on connect, then `{"type":"line","line"}`,
 `{"type":"audio","lineId","lang","wav"}`, `{"type":"update","youtubeUrl"}` (room fields changed), `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
-and, optionally, `{"type":"listen","lang":"en"|null}`: once sent, audio clips arrive only for that language (`null` =
-none), so viewers who do not listen to the dubbing do not download it. The server pings every 25 s.
+and, optionally, `{"type":"listen","lang":"en"|null,"view":"en"|null}`: once sent, audio clips arrive only for `lang`
+(`null` = none), so viewers who do not listen to the dubbing do not download it; `view` (additive) is the language on
+screen, which makes the server translate lines into a `listenLangs` language for a reader. The server pings every 25 s.
 
 ## Server dubbing
 
@@ -49,7 +50,9 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   zh `zf_xiaobei`, hi `hf_alpha`. Other languages are not voiced.
 - Spend only on demand: a line+language is synthesized only while at least one viewer has sent `listen` for that
   language (a viewer that never sent `listen` does not count) and the line has a non-empty translation for it.
-- The presenter wins: the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500) after a line, skips a line+language the
+- The presenter wins: in a language the presenter has sent clips in, the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500)
+  after a line (elsewhere it voices at once — the wait was 1.5 s of delay on every line of rooms with no presenter
+  voice; the one first line that may get both voices is played once: the page ignores a second clip of a line), skips a line+language the
   presenter sent a clip for (checked again before delivering), and leaves a language alone while its presenter sent a clip in that language
   in the last `ROOM_SERVER_DUB_PRESENTER_QUIET_MS` (60000). Other languages are still voiced: the desktop app dubs one
   language while viewers may listen to another.
@@ -72,6 +75,14 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
   only for those; without `dubLangs` (server dubbing off) it offers every translation language as before.
+- Languages the presenter does not publish: the snapshot carries `listenLangs` (additive) = the Kokoro languages that are
+  neither a room language nor the spoken one (en, fr, es, pt, it, ja, zh, hi minus those). The page lists them in its
+  language menu; for a viewer that listens to or reads one, the server translates each final line from the original
+  (`openRouterTranslate`: OpenRouter `google/gemini-2.5-flash-lite`, reasoning off, 6 s), stores it on the line
+  (`translations[lang]`, broadcast as a `line` update so every viewer of that language sees it) and voices it for the
+  listeners. Switching language catches up from the latest line. Never into the spoken language; nothing without a
+  translator. In GPU mode the desktop app voices its own output language (cloned voice on the GPU) and sends the clips,
+  which win for that language; every other language comes from OpenRouter as in API mode.
 
 ## Viewer pages
 

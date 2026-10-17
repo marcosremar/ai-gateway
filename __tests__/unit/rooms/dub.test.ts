@@ -14,15 +14,16 @@ import { parseLine } from '../../../src/rooms/validate';
 
 const WAIT = 100;
 
-interface FakeViewer extends RoomViewer { msgs: RoomServerMessage[]; listen: string | null | undefined }
+interface FakeViewer extends RoomViewer { msgs: RoomServerMessage[]; listen: string | null | undefined; view: string | null | undefined }
 
-function viewer(listen: string | null | undefined): FakeViewer {
+function viewer(listen: string | null | undefined, view: string | null | undefined = listen): FakeViewer {
   const v: FakeViewer = {
-    msgs: [], listen,
+    msgs: [], listen, view,
     send: (t) => { v.msgs.push(JSON.parse(t) as RoomServerMessage); },
     close: () => {},
     wantsAudio: (lang) => v.listen === undefined || v.listen === lang,
     listening: (lang) => v.listen === lang,
+    reading: (lang) => v.view === lang,
   };
   return v;
 }
@@ -62,16 +63,15 @@ describe('rooms server dubbing', () => {
     expect(kokoroVoice('de')).toBeNull();
   });
 
-  it('voices a line only for the language a viewer listens to, as mp3, after the wait', async () => {
+  it('voices a line only for the language a viewer listens to, as mp3, at once while the presenter sends no clips', async () => {
     const r = await room(service);
     const fr = viewer('fr');
     const silent = viewer(null);
     const legacy = viewer(undefined); // never sent listen: gets presenter clips, never causes server spend
     for (const v of [fr, silent, legacy]) service.addViewer(r, v);
     await service.publishLine(r, line(1));
-    expect(synth).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(WAIT + 1);
     expect(synth).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(0);
     expect(synth).toHaveBeenCalledWith('bonjour 1', 'fr', undefined, 1);
     expect(audios(fr)).toEqual([{ type: 'audio', lineId: 1, lang: 'fr', wav: Buffer.from('mp3:bonjour 1').toString('base64'), format: 'mp3' }]);
     expect(audios(silent)).toEqual([]);
@@ -110,8 +110,9 @@ describe('rooms server dubbing', () => {
     await vi.advanceTimersByTimeAsync(WAIT + 1);
     await service.publishLine(r, line(2));
     await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(synth).not.toHaveBeenCalled();
-    expect(audios(fr)).toEqual([{ type: 'audio', lineId: 1, lang: 'fr', wav: 'AAAA' }]);
+    expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1']);
+    expect(audios(fr).map(a => a.lineId)).toEqual([1, 1]);
+    expect(audios(fr).at(-1)).toEqual({ type: 'audio', lineId: 1, lang: 'fr', wav: 'AAAA' });
     // The presenter went quiet long enough: the server takes over.
     await vi.advanceTimersByTimeAsync(60_000);
     await service.publishLine(r, line(3));
@@ -155,10 +156,13 @@ describe('rooms server dubbing', () => {
     const r = await room(service);
     const fr = viewer('fr');
     service.addViewer(r, fr);
+    let release: (c: RoomClip) => void = () => {};
+    synth.mockImplementationOnce(async (text: string) => new Promise<RoomClip>(res => { release = () => res({ audio: Buffer.from(`mp3:${text}`), format: 'mp3' }); }));
     await service.publishLine(r, line(1));
     await service.publishLine(r, line(2));
     await service.publishLine(r, line(3));
     await service.publishLine(r, line(3, { fr: 'bonjour 3 (corrigé)' }));
+    release({ audio: Buffer.alloc(0), format: 'mp3' });
     await vi.advanceTimersByTimeAsync(WAIT + 1);
     expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1', 'bonjour 2', 'bonjour 3 (corrigé)']);
     await service.publishLine(r, line(3, { fr: 'encore' }));
@@ -257,6 +261,72 @@ describe('rooms server dubbing', () => {
     await kokoroSynthesize(provider)('hi', 'en', undefined, 1);
     await maiSynthesize(provider)('hi', 'en', undefined, 1.2);
     expect(provider.synthesize.mock.calls.map(c => (c as unknown as [{ speed?: number }])[0].speed)).toEqual([1.2, undefined, undefined]);
+  });
+
+  describe('languages the presenter does not publish', () => {
+    let translate: ReturnType<typeof vi.fn<(text: string, from: string | null, to: string) => Promise<string>>>;
+    beforeEach(() => {
+      translate = vi.fn(async (text: string, _from: string | null, to: string) => `${to}:${text}`);
+      service.stop();
+      service = new RoomService({
+        config: { ...roomsConfigFromEnv({}), dir: null, serverDubWaitMs: WAIT, serverDubPresenterQuietMs: 60_000 },
+        store: new MemoryRoomStore(), sweepIntervalMs: 0, synthesize: synth, translate,
+      });
+    });
+    const lines = (v: FakeViewer) => v.msgs.filter((m): m is Extract<RoomServerMessage, { type: 'line' }> => m.type === 'line').map(m => m.line);
+
+    it('offers every other Kokoro language and translates then voices one for its listener', async () => {
+      const r = await room(service, ['en', 'fr']);
+      expect(service.publicView(r).listenLangs).toEqual(['es', 'it', 'ja', 'zh', 'hi']);
+      expect(service.publicView(r).dubLangs).toEqual(['en', 'fr', 'es', 'it', 'ja', 'zh', 'hi']);
+      const es = viewer('es');
+      service.addViewer(r, es);
+      await service.publishLine(r, line(1));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(translate).toHaveBeenCalledWith('olá 1', 'pt', 'es');
+      expect(synth).toHaveBeenCalledWith('es:olá 1', 'es', undefined, 1);
+      expect(audios(es).map(a => a.lineId)).toEqual([1]);
+      expect(lines(es).at(-1)?.translations).toEqual({ en: 'hello 1', fr: 'bonjour 1', es: 'es:olá 1' });
+      expect(r.lines[0]!.translations.es).toBe('es:olá 1');
+    });
+
+    it('translates for a viewer who only reads the language, without voicing it', async () => {
+      const r = await room(service, ['en', 'fr']);
+      const es = viewer(null, 'es');
+      service.addViewer(r, es);
+      await service.publishLine(r, line(1));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(translate).toHaveBeenCalledTimes(1);
+      expect(synth).not.toHaveBeenCalled();
+      expect(lines(es).at(-1)?.translations.es).toBe('es:olá 1');
+    });
+
+    it('catches up from the latest line when a viewer switches to the language', async () => {
+      const r = await room(service, ['en', 'fr']);
+      const v = viewer(null, null);
+      service.addViewer(r, v);
+      await service.publishLine(r, line(1));
+      await service.publishLine(r, line(2));
+      v.listen = 'it';
+      v.view = 'it';
+      service.viewerLanguageChanged(r);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(translate.mock.calls.map(c => [c[0], c[2]])).toEqual([['olá 2', 'it']]);
+      expect(audios(v).map(a => a.lineId)).toEqual([2]);
+    });
+
+    it('never translates into the spoken language nor without a translator', async () => {
+      const r = await room(service, ['en', 'fr']);
+      expect(service.publicView(r).listenLangs).not.toContain('pt');
+      service.addViewer(r, viewer('pt'));
+      await service.publishLine(r, line(1));
+      await vi.advanceTimersByTimeAsync(WAIT + 1);
+      expect(translate).not.toHaveBeenCalled();
+      expect(synth).not.toHaveBeenCalled();
+      service.stop();
+      service = make();
+      expect(service.publicView(await room(service, ['en', 'fr'])).listenLangs).toBeUndefined();
+    });
   });
 
   it('logs synthesis failures without breaking publishing', async () => {

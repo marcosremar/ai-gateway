@@ -13,16 +13,16 @@ import { join } from 'path';
 import { roomsConfigFromEnv, type RoomsConfig } from './config';
 import { FileEventStore, MemoryEventStore, RoomEvents, type EventStore } from './events';
 import { createRoomsHttp, type KeyUser } from './http';
-import type { RoomSynthesize } from './dub';
+import type { RoomSynthesize, RoomTranslate } from './dub';
 import { RoomService } from './service';
 import { FileRoomStore, MemoryRoomStore, type RoomStore } from './store';
 import { createRoomWs } from './ws';
 
 export {
   KOKORO_MODEL, KOKORO_ROOM_VOICES, MAI_MODEL, MAI_ROOM_VOICES, ROOM_DUB_ATTEMPT_TIMEOUT_MS, ROOM_DUB_MAX_SPEED, ROOM_DUB_QUEUE_MAX, RoomDubber, dubSpeed, mp3DurationMs, kokoroSynthesize, kokoroVoice,
-  maiSynthesize, synthesizeWithFallback,
+  maiSynthesize, openRouterTranslate, synthesizeWithFallback,
 } from './dub';
-export type { RoomClip, RoomSynthesize } from './dub';
+export type { RoomClip, RoomSynthesize, RoomTranslate } from './dub';
 export { roomsConfigFromEnv, ROOMS_DEFAULTS } from './config';
 export type { RoomsConfig } from './config';
 export { RoomService, hashToken } from './service';
@@ -52,6 +52,8 @@ export interface CreateRoomsOptions {
   synthesize?: RoomSynthesize;
   /** False while the synthesizer cannot work (e.g. its API key is not set). */
   synthesizeAvailable?: () => boolean;
+  /** Translates lines into the Kokoro languages the presenter does not publish (serve.ts: OpenRouter). */
+  translate?: RoomTranslate;
 }
 
 export function createRooms(opts: CreateRoomsOptions) {
@@ -59,7 +61,7 @@ export function createRooms(opts: CreateRoomsOptions) {
   const store = opts.store ?? (config.dir ? new FileRoomStore(config.dir, opts.log) : new MemoryRoomStore());
   const service = new RoomService({
     config, store, now: opts.now, log: opts.log, sweepIntervalMs: opts.sweepIntervalMs,
-    synthesize: opts.synthesize, synthesizeAvailable: opts.synthesizeAvailable,
+    synthesize: opts.synthesize, synthesizeAvailable: opts.synthesizeAvailable, translate: opts.translate,
   });
   const eventStore = opts.eventStore ?? (config.dir ? new FileEventStore(join(config.dir, 'events')) : new MemoryEventStore());
   const events = new RoomEvents({ store: eventStore, retentionMs: config.eventsRetentionMs, now: opts.now, sweepIntervalMs: opts.sweepIntervalMs, log: opts.log });
