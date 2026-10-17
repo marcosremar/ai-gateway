@@ -50,6 +50,8 @@ class DeploymentCallError extends Error {
   }
 }
 
+const UNFINISHED_SENTENCE = /did not emit codec EOS/;
+
 function hasReadyReplica(controller: Leaser, name: string): boolean {
   return Boolean(controller.get(name)?.replicas?.some(r => r.phase === 'ready'));
 }
@@ -121,8 +123,8 @@ async function callReplica(
   }
   if (!res.ok) {
     // A 429 is the replica's own queue full: pressure for the autoscaler and a busy mark, never a strike.
-    lease.done(res.status === 429 ? 'overloaded' : res.status >= 500 ? 'errored' : false);
     const text = await res.text().catch(() => '');
+    lease.done(res.status === 429 ? 'overloaded' : res.status >= 500 && !UNFINISHED_SENTENCE.test(text) ? 'errored' : false);
     // Any replica error moves on to the fallback (a 4xx from our own server is a deployment problem, not the
     // client's: the gateway already validated the request).
     throw new DeploymentCallError(res.status >= 500 ? res.status : 502, `deployment '${name}' answered HTTP ${res.status}: ${text.slice(0, 200)}`,

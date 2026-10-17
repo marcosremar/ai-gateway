@@ -116,4 +116,19 @@ describe('deployment TTS provider on a replica whose TTS answers 500', () => {
     expect(await speak()).toMatchObject({ gatewayCode: 'circuit_open', skipRetry: true });
     expect(calls).toBe(STAGE_STRIKES);
   });
+
+  it('a sentence Qwen3-TTS Base did not finish is not a strike: the replica keeps serving TTS', async () => {
+    const { controller, ids } = await ready(1);
+    const provider = new DeploymentTTSProvider(controller, 'speech', {
+      fetchImpl: (async (url: string) => {
+        if (url.endsWith('/refs/voices.json') || url.endsWith('/v1/voices')) return new Response('', { status: 404 });
+        return new Response('{"error": {"message": "Qwen3-TTS Base did not emit codec EOS before its token budget (153/153 codec tokens)"}}', { status: 500 });
+      }) as typeof fetch,
+    });
+    for (let i = 0; i < STAGE_STRIKES + 2; i++) {
+      expect(await provider.synthesize({ input: 'oi', model: 'm', voice: 'v', extra: { ref_audio: 'data:audio/wav;base64,UklGRg==', ref_text: 'oi' } } as never)
+        .catch(err => err as { gatewayCode?: string })).toMatchObject({ gatewayCode: '5xx' });
+    }
+    expect(outOf(controller, ids[0]!)).toEqual([]);
+  });
 });
