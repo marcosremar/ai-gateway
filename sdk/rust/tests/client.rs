@@ -462,6 +462,22 @@ async fn publish_line_is_retried_as_idempotent_but_audio_is_not() {
 }
 
 #[tokio::test]
+async fn room_voice_is_put_with_the_publish_token_and_retried_as_idempotent() {
+    let mock = Mock::start().await;
+    mock.on("PUT", "/v1/rooms/ABC123/voice", vec![Reply::status(503).body("edge"), Reply::status(204)]);
+    let gw = GatewayClient::builder()
+        .base_url(mock.url())
+        .retry(RetryPolicy { backoff: vec![Duration::from_millis(5)], ..RetryPolicy::default() })
+        .build()
+        .unwrap();
+    gw.rooms().publish_voice(&room(), "pt", "data:audio/ogg;base64,T2dnUw==", "olá a todos").await.unwrap();
+    let reqs = mock.requests_to("/v1/rooms/ABC123/voice");
+    assert_eq!(reqs.len(), 2, "the reference replaces the previous one: retrying is safe");
+    assert_eq!((reqs[1].method.as_str(), reqs[1].header("authorization")), ("PUT", Some("Bearer pt-secret-1")));
+    assert_eq!(reqs[1].json(), json!({"lang": "pt", "ref_audio": "data:audio/ogg;base64,T2dnUw==", "ref_text": "olá a todos"}));
+}
+
+#[tokio::test]
 async fn room_create_errors_never_carry_the_publish_token() {
     let mock = Mock::start().await;
     mock.on("POST", "/v1/rooms", vec![

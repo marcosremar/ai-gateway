@@ -140,6 +140,24 @@ export function parseAudio(body: unknown, cfg: RoomsConfig): AudioInput {
   return { lineId, lang, wav };
 }
 
+export const VOICE_MAX_BYTES = 512 * 1024;
+const VOICE_DATA_URL = /^data:audio\/[a-z0-9.+-]+(?:;[a-z0-9=.+-]+)*;base64,([A-Za-z0-9+/]+={0,2})$/i;
+
+export interface VoiceInput { lang: string; refAudio: string; refText: string }
+
+export function parseVoice(body: unknown, cfg: RoomsConfig): VoiceInput {
+  if (!isObject(body)) throw new RoomError(400, 'body must be a JSON object');
+  const lang = parseLang(body.lang, 'lang');
+  const refAudio = body.ref_audio;
+  if (typeof refAudio !== 'string') throw new RoomError(400, 'ref_audio must be a data:audio/…;base64 URL');
+  if (refAudio.length > Math.ceil(VOICE_MAX_BYTES * 4 / 3) + 128) throw new RoomError(413, `ref_audio is larger than ${VOICE_MAX_BYTES} bytes`);
+  const payload = VOICE_DATA_URL.exec(refAudio)?.[1];
+  if (!payload || payload.length % 4 !== 0) throw new RoomError(400, 'ref_audio must be a data:audio/…;base64 URL');
+  const refText = text(body.ref_text, 'ref_text', cfg.maxFieldChars).trim();
+  if (!refText) throw new RoomError(400, 'ref_text must say what ref_audio says');
+  return { lang, refAudio, refText };
+}
+
 /** Characters a line adds to its room (memory bound). */
 export function lineChars(line: RoomLine): number {
   let n = line.original.length;

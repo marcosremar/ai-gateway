@@ -123,6 +123,8 @@ let room = rooms.create(&CreateRoom::new(["en", "es"]).title("Aula").original_la
 rooms.publish_line(&room, &RoomLine { id: 1, original: "Olá".into(), original_lang: Some("pt".into()),
     translations: [("en".to_string(), "Hello".to_string())].into(), ts_ms: Some(now_ms), delay_ms: Some(1800), draft: false }).await?;
 rooms.publish_audio(&room, 1, "en", &wav_base64).await?;
+// PUT /v1/rooms/:code/voice: the speaker's voice for server dubbing in that voice (memory only, never served)
+rooms.publish_voice(&room, "pt", "data:audio/ogg;base64,…", "what the reference says").await?;
 // PATCH /v1/rooms/:code {"youtubeUrl"} → 200 {code, youtubeUrl} (the stored, normalized link; None = cleared)
 let upd = rooms.update_youtube(&room, Some("https://youtu.be/…")).await?;
 rooms.end(&room).await?;
@@ -158,7 +160,7 @@ let deep = gw.health_deep().await?;  // ?deep=1 (admin)
 Rooms notes:
 - `publish_line` is idempotent: the gateway adds **or replaces** the line with the same `id`, so it is retried like
   the other idempotent calls (a corrected line can be re-sent with the same `id`). `publish_audio` (broadcast once)
-  and `end` are not retried.
+  and `end` are not retried. `publish_voice` replaces the room's reference for that language, so it is retried too.
 - `update_youtube` and `CreateRoom::youtube_url` need a gateway that serves `PATCH /v1/rooms/:code` and stores
   `youtubeUrl` (ai-gateway `main` ≥ 0f6ac49). Older gateways answer **405** to the PATCH and ignore `youtubeUrl` on
   create. A body-less 2xx is accepted too (the result then echoes the requested link).
@@ -239,6 +241,7 @@ of the current API).
 | `GET /v1/models` | — | — | `models()` |
 | Rooms create / lines / audio / end / GET | — | — | yes (babelcast parity) |
 | Rooms `PATCH /v1/rooms/:code` `{youtubeUrl}` | — | — | yes (`update_youtube`; ai-gateway `main` ≥ 0f6ac49, older gateways 405) |
+| Rooms `PUT /v1/rooms/:code/voice` `{lang, ref_audio, ref_text}` | — | — | yes (`publish_voice`; older gateways 404) |
 | Swap the API key at runtime, sharing the pool | — | — | `with_api_key`, `with_app` |
 | `POST /v1/activate` | — | — | yes (babelcast parity) |
 | `POST /v1/telemetry/app/events` (desktop-app telemetry) | — | — | `upload_app_events` (babelcast parity) |

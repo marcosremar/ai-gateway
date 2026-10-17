@@ -13,6 +13,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 | `PATCH /v1/rooms/:code` | publish token (or the creating / an admin gateway key) | `{"youtubeUrl": "<link>" \| null}` | `200 {"code","youtubeUrl"}` |
 | `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?, "draft"?}` | `204` |
 | `POST /v1/rooms/:code/audio` | publish token | `{"lineId", "lang", "wav": "<base64>"}` (≤ 2 MB decoded) | `204` (broadcast only, never stored) |
+| `PUT /v1/rooms/:code/voice` | publish token (or the creating / an admin gateway key) | `{"lang", "ref_audio": "data:audio/…;base64,…", "ref_text"}` (≤ 512 KB decoded) | `204` (memory only, never served) |
 | `POST /v1/rooms/:code/end` | publish token | — | `204` |
 | `GET /v1/rooms/:code` | public, CORS `*` | — | `200 {"code","title","originalLang","languages","createdAt","ended","expiresAt","youtubeUrl","lines":[…]}` / `404` |
 | `GET /v1/rooms/:code/ws` | public WebSocket | — | see below |
@@ -36,7 +37,8 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 ## WebSocket
 
 Server → client: `{"type":"snapshot","room":<GET body>}` on connect, then `{"type":"line","line"}`,
-`{"type":"audio","lineId","lang","wav"}`, `{"type":"update","youtubeUrl"}` (room fields changed), `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
+`{"type":"audio","lineId","lang","wav"}`, `{"type":"update","youtubeUrl","dubLangs"?,"listenLangs"?}` (room fields
+changed; the language lists when the speaker's voice switches them, see below), `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
 and, optionally, `{"type":"listen","lang":"en"|null,"view":"en"|null}`: once sent, audio clips arrive only for `lang`
 (`null` = none), so viewers who do not listen to the dubbing do not download it; `view` (additive) is the language on
 screen, which makes the server translate lines into a `listenLangs` language for a reader. The server pings every 25 s.
@@ -91,6 +93,29 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   listeners. Switching language catches up from the latest line. Never into the spoken language; nothing without a
   translator. In GPU mode the desktop app voices its own output language (cloned voice on the GPU) and sends the clips,
   which win for that language; every other language comes from OpenRouter as in API mode.
+
+### In the speaker's voice (GPU mode)
+
+When the presenter's app is in GPU mode it sends the voice of the person speaking: `PUT /v1/rooms/:code/voice`
+`{"lang": "<spoken language>", "ref_audio": "data:audio/ogg;base64,…", "ref_text": "<exactly what it says>"}` — the
+same 5–8 s reference its own dubbing clones (`bc-pipeline` `VoiceCloner`), once per spoken language and again when
+another person starts speaking. API and Local mode never send it.
+
+- Privacy: the reference is the speaker's voice. Kept in memory only (`RoomDubber` state, one per spoken language, the
+  latest replaces the previous one), never written to the room store, never in the GET body, the WS snapshot or any
+  message; dropped when the room ends or leaves memory (evicted, expired, gateway restart). `ref_audio` must be a
+  `data:audio/…;base64` URL (never a URL the gateway would fetch), at most 512 KB decoded; `ref_text` non-empty.
+  Accepted and ignored (204) when server dubbing is off.
+- Synthesis: `deploymentClone` (`src/tts`) — Qwen3-TTS 0.6B **Base** (`Qwen/Qwen3-TTS-12Hz-0.6B-Base`) on the
+  deployment `ROOM_VOICE_CLONE_DEPLOYMENT` (default `babelcast-tts-clone`, the first link of the babelcast app's
+  `babelcast-tts`), through `routeRequest` (one request per sentence, no hedge, 15 s), as WAV with `task_type: "Base"`,
+  `ref_audio`, `ref_text` and the target `language`. Used only while that deployment has a ready replica: the room
+  never wakes it (`noWake` lease, no wait); cold → Kokoro as above. A line is voiced in the voice of the reference for
+  its `originalLang`; no reference for that language, or the clone call failed → Kokoro (a language Kokoro lacks then
+  has no voice for that line). No catch-up `speed` on the clone.
+- Languages: while cloning (a reference arrived and the deployment is serving), `dubLangs` / `listenLangs` follow
+  Qwen3-TTS — en, zh, ja, ko, de, fr, ru, pt, es, it (German, Korean and Russian become available, Hindi does not);
+  otherwise Kokoro's. When a reference switches them, open pages get `{"type":"update"}` with the new lists.
 
 ## Viewer pages
 

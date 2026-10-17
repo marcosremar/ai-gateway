@@ -8,7 +8,7 @@ import {
   MemoryRoomStore, RoomService, roomsConfigFromEnv, type RoomsConfig,
 } from '../../../src/rooms';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
-import { TTS_CALL_TIMEOUT_MS, TTS_MAX_PARALLEL, TTS_MAX_WAITING, kokoroTts, type TtsClip } from '../../../src/tts';
+import { TTS_CALL_TIMEOUT_MS, TTS_MAX_PARALLEL, TTS_MAX_WAITING, kokoroTts, type TtsClip, type VoiceRef } from '../../../src/tts';
 import type { LiveRoom, RoomViewer } from '../../../src/rooms/service';
 import type { RoomLine, RoomServerMessage } from '../../../src/rooms/types';
 import { parseLine } from '../../../src/rooms/validate';
@@ -349,5 +349,96 @@ describe('rooms server dubbing', () => {
     await vi.advanceTimersByTimeAsync(TTS_CALL_TIMEOUT_MS + 1);
     expect(aborted?.aborted).toBe(true);
     expect(audios(fr).map(a => Buffer.from(a.wav, 'base64').toString())).toEqual(['kokoro:bonjour 2']);
+  });
+});
+
+describe("rooms server dubbing in the speaker's voice (GPU mode)", () => {
+  let clone: ReturnType<typeof vi.fn<(text: string, lang: string, voice: VoiceRef) => Promise<TtsClip>>>;
+  let ready: boolean;
+  const voice: VoiceRef = { refAudio: 'data:audio/ogg;base64,T2dnUw==', refText: 'olá a todos' };
+
+  beforeEach(() => {
+    ready = true;
+    clone = vi.fn(async (text: string) => ({ audio: Buffer.from(`wav:${text}`), format: 'wav' }));
+    service.stop();
+    service = new RoomService({
+      config: { ...roomsConfigFromEnv({}), dir: null, serverDubWaitMs: WAIT, serverDubPresenterQuietMs: 60_000 },
+      store: new MemoryRoomStore(), sweepIntervalMs: 0, synthesize: synth,
+      translate: async (text, _from, to) => `${to}:${text}`,
+      clone: { synthesize: clone, ready: () => ready },
+    });
+  });
+
+  it("clones the speaker's voice once the reference arrived and the clone deployment is serving", async () => {
+    const r = await room(service, ['en', 'fr', 'de']);
+    const de = viewer('de');
+    service.addViewer(r, de);
+    expect(service.publicView(r).dubLangs).toEqual(['en', 'fr', 'es', 'it', 'ja', 'zh', 'hi']);
+    service.setVoice(r, { lang: 'pt-BR', ...voice });
+    expect(service.publicView(r).dubLangs).toEqual(['en', 'fr', 'de', 'zh', 'ja', 'ko', 'ru', 'es', 'it']);
+    expect(service.publicView(r).listenLangs).toEqual(['zh', 'ja', 'ko', 'ru', 'es', 'it']);
+    expect(de.msgs.filter(m => m.type === 'update')).toEqual([
+      { type: 'update', youtubeUrl: null, dubLangs: service.publicView(r).dubLangs, listenLangs: service.publicView(r).listenLangs },
+    ]);
+    await service.publishLine(r, line(1, { en: 'hello 1', de: 'hallo 1' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clone).toHaveBeenCalledWith('hallo 1', 'de', voice);
+    expect(synth).not.toHaveBeenCalled();
+    expect(audios(de)).toEqual([{ type: 'audio', lineId: 1, lang: 'de', wav: Buffer.from('wav:hallo 1').toString('base64'), format: 'wav' }]);
+  });
+
+  it('stays on Kokoro, with its languages, while the clone deployment is not serving (never woken for the room)', async () => {
+    ready = false;
+    const r = await room(service, ['en', 'fr', 'de']);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    service.addViewer(r, viewer('de'));
+    service.setVoice(r, { lang: 'pt', ...voice });
+    expect(service.publicView(r).dubLangs).toEqual(['en', 'fr', 'es', 'it', 'ja', 'zh', 'hi']);
+    await service.publishLine(r, line(1, { fr: 'bonjour 1', de: 'hallo 1' }));
+    await vi.advanceTimersByTimeAsync(WAIT + 1);
+    expect(clone).not.toHaveBeenCalled();
+    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1', 'fr']]);
+    expect(audios(fr).map(a => a.format)).toEqual(['mp3']);
+  });
+
+  it('falls back to Kokoro when cloning fails, and loses only the voice of a language Kokoro lacks', async () => {
+    clone.mockRejectedValue(new Error('deployment cold'));
+    const r = await room(service, ['fr', 'de']);
+    const fr = viewer('fr');
+    const de = viewer('de');
+    service.addViewer(r, fr);
+    service.addViewer(r, de);
+    service.setVoice(r, { lang: 'pt', ...voice });
+    await service.publishLine(r, line(1, { fr: 'bonjour 1', de: 'hallo 1' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clone).toHaveBeenCalledTimes(2);
+    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1', 'fr']]);
+    expect(audios(fr).map(a => a.format)).toEqual(['mp3']);
+    expect(audios(de)).toEqual([]);
+  });
+
+  it("uses Kokoro for a line spoken in a language whose speaker's voice it does not have", async () => {
+    const r = await room(service, ['en', 'fr']);
+    service.addViewer(r, viewer('fr'));
+    service.setVoice(r, { lang: 'en', ...voice });
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clone).not.toHaveBeenCalled();
+    expect(synth).toHaveBeenCalledWith('bonjour 1', 'fr', 1);
+  });
+
+  it('replaces the reference with the latest one and drops it when the room ends', async () => {
+    const r = await room(service, ['fr']);
+    service.addViewer(r, viewer('fr'));
+    const next: VoiceRef = { refAudio: 'data:audio/wav;base64,UklGRg==', refText: 'outra pessoa' };
+    service.setVoice(r, { lang: 'pt', ...voice });
+    service.setVoice(r, { lang: 'pt', ...next });
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clone).toHaveBeenCalledWith('bonjour 1', 'fr', next);
+    await service.end(r);
+    expect(service.publicView(r).dubLangs).toEqual(['fr', 'en', 'es', 'it', 'ja', 'zh', 'hi']);
+    expect(() => service.setVoice(r, { lang: 'pt', ...voice })).toThrow(/ended/);
   });
 });
