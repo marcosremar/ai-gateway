@@ -72,7 +72,8 @@ export function expectedPhaseMinutes(phase: ActivePhase, past: BootRecord[]): nu
   const seen = past.filter(b => b.result === 'ready')
     .flatMap(b => phaseDurations(b.phases, b.endedAt).filter(p => p.phase === phase).map(p => p.ms / 60_000));
   const typical = median(seen);
-  return typical === null ? PHASE_DEFAULT_MINUTES[phase] : Math.max(2, Math.ceil(typical * 1.5));
+  const floor = phase === 'pulling' ? SLOW_PULL_FLOOR_MINUTES : 2;
+  return typical === null ? PHASE_DEFAULT_MINUTES[phase] : Math.max(floor, Math.ceil(typical * 1.5));
 }
 
 /**
