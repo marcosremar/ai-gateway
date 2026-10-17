@@ -22,6 +22,9 @@ const log = createLogger('audio-speech');
 
 const FORWARDED_EXTRAS = ['task_type', 'ref_audio', 'ref_text', 'language', 'stream_format', 'instructions'];
 
+/** A replica of a deployment or a local link: a server of ours that reads fields the OpenAI speech API lacks. */
+const ownServer = (providerId: string) => providerId.startsWith('deployment:') || providerId.startsWith('local:');
+
 export interface SpeechCache { cache: TtsCache; scope: string; gpuOnly: boolean }
 
 function capture(stream: ReadableStream<Uint8Array>, maxBytes: number, done: (audio: Buffer) => void): ReadableStream<Uint8Array> {
@@ -117,7 +120,9 @@ export async function handleAudioSpeech(
       targets,
       (t, signal) => t.provider.synthesize({
         signal,
-        ...(t.providerId.startsWith('deployment:') ? { extra } : {}),
+        // Client extras go only to our own servers: a replica gets them all; a local link reads `language` from them
+        // (local-link.ts `localSpeechExtras`). A cloud provider never sees them (OpenAI refuses unknown fields).
+        ...(ownServer(t.providerId) ? { extra } : {}),
         stream,
         model: t.model ?? model,
         input: body.input as string,

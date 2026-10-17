@@ -271,7 +271,7 @@ ai-gateway server start/stop/status      # Manage local dev server
 ### 10. Security Features
 
 - **API Key Authentication**: Bearer token auth on all endpoints (configurable)
-- **Localhost Exemption**: No auth required for localhost when GATEWAY_API_KEY not set
+- **Localhost Exemption**: No auth required for localhost when GATEWAY_API_KEY not set; off Railway `serve.ts` listens on `127.0.0.1` unless `GATEWAY_HOST` says otherwise (the Dockerfiles set `0.0.0.0`; Railway always listens on `0.0.0.0`, `src/config/listen-host.ts`)
 - **HMAC-SHA256 GPU Tokens**: 60s TTL tokens for GPU pod authentication
 - **Recall Webhook Auth**: Token validation for Recall.ai audio endpoint
 - **Constant-Time String Compare**: Timing-safe comparison prevents timing attacks

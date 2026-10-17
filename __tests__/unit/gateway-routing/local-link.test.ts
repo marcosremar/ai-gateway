@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildServeProviders, equivalenceGroup, parseModelRoutes, type ServeInstances } from '../../../src/config/serve-providers';
 import { withCloudFallback } from '../../../src/config/cloud-fallback';
 import { stageChainsReport } from '../../../src/config/stage-chains';
@@ -9,7 +9,10 @@ import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/cir
 import {
   LOCAL_LINK_MAX_BYTES, localLinkFetch, localLinkId, localLinkProvider, localLinkRefusal, parseLinkBaseUrl,
 } from '../../../src/gateway/providers/cloud/openai-compat/local-link';
-import type { LLMProvider, STTProvider, TTSProvider } from '../../../src/gateway/providers/cloud/types';
+import { localSpeechExtras } from '../../../src/gateway/providers/cloud/openai-compat/local-link';
+import { WAV_HEADER_BYTES } from '../../../src/gateway/providers/cloud/openai-compat/openai-compat-tts';
+import type { LLMProvider, STTProvider, TTSProvider, TTSRequest } from '../../../src/gateway/providers/cloud/types';
+import { handleAudioSpeech } from '../../../src/gateway/proxy/routes/audio-speech';
 import { breakerKey, failureCode, providerHeader, routeRequest, type RouteTarget } from '../../../src/gateway/proxy/provider-routing';
 import { setGatewayTelemetrySink } from '../../../src/telemetry/emit';
 import type { TelemetryEvent } from '../../../src/telemetry/contract';
@@ -28,6 +31,11 @@ const instances = (): ServeInstances => ({
 
 interface Seen { path: string; auth: string | undefined; host: string | undefined; body: string }
 const seen: Seen[] = [];
+/** A streamed TTS answer (model `chunked`) holds its last chunk until the test calls this. */
+let releaseLast: (() => void) | null = null;
+const lastChunkHeld = () => new Promise<void>((resolve) => { releaseLast = resolve; });
+const FIRST_CHUNK = 4_800;
+const LAST_CHUNK = 9_600;
 let server: Server;
 let base = '';
 
@@ -65,7 +73,22 @@ beforeAll(async () => {
       return;
     }
     if (req.url?.endsWith('/audio/speech')) {
-      res.writeHead(200, { 'content-type': 'audio/wav' }).end(probeWav());
+      const { model } = JSON.parse(body) as { model: string };
+      const wav = probeWav();
+      if (model === 'chunked') {
+        // Like the parle Mac stack: the WAV header at once, then each synthesized chunk, no content-length.
+        res.writeHead(200, { 'content-type': 'audio/wav' });
+        res.write(wav.subarray(0, WAV_HEADER_BYTES));
+        const held = lastChunkHeld();
+        setTimeout(() => {
+          res.write(Buffer.alloc(FIRST_CHUNK, 1));
+          void held.then(() => res.end(Buffer.alloc(LAST_CHUNK, 2)));
+        }, 20);
+        return;
+      }
+      if (model === 'header-only') { res.writeHead(200, { 'content-type': 'audio/wav' }).end(wav.subarray(0, WAV_HEADER_BYTES)); return; }
+      if (model === 'json') { res.writeHead(200, { 'content-type': 'application/json' }).end('{"detail":"model loading, try again"}'); return; }
+      res.writeHead(200, { 'content-type': 'audio/wav' }).end(wav);
       return;
     }
     res.writeHead(404).end();
@@ -75,7 +98,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => new Promise<void>(resolve => server.close(() => resolve())));
-afterEach(() => { seen.length = 0; setGatewayTelemetrySink(null); });
+afterEach(() => { seen.length = 0; setGatewayTelemetrySink(null); releaseLast?.(); releaseLast = null; });
 
 const entry = (extra: Record<string, unknown> = {}) => ({ provider: 'openai-compatible', baseUrl: `${base}/v1`, model: 'qwen2.5-7b', ...extra });
 
@@ -311,5 +334,107 @@ describe('same treatment as other links', () => {
     expect(svc?.links.map(l => l.kind)).toEqual(['local', 'cloud']);
     expect(svc?.verdict).toBe('garantido');
     expect(providerHeader({ providerId: local.providerId, model: 'qwen2.5-7b' })).toBe(local.target);
+  });
+});
+
+async function readAll(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const chunks: Uint8Array[] = [];
+  const reader = stream.getReader();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return Buffer.concat(chunks);
+    chunks.push(value);
+  }
+}
+
+const ttsLink = (model = 'kokoro') => buildServeProviders({
+  instances: instances(), env: {}, openrouter: { state: 'valid' }, appRoutes: { tts: { 'mac-tts': [entry({ model })] } },
+}).providers.tts!['mac-tts']![0]! as RouteTarget<TTSProvider>;
+
+/** The cloud fallback of a TTS chain, recording what it was asked. */
+function cloudTts() {
+  const cloud = vi.fn(async (_r: TTSRequest) => ({ audio: probeWav(), contentType: 'audio/wav' }));
+  const provider = { providerId: 'openrouter', isConfigured: () => true, getModels: () => [], getVoices: () => [], synthesize: cloud };
+  return { cloud, fallback: { providerId: 'openrouter', model: 'hexgrad/kokoro-82m', provider } as unknown as RouteTarget<TTSProvider> };
+}
+
+const speak = (t: RouteTarget<TTSProvider>, extra: Partial<TTSRequest> = {}) =>
+  t.provider.synthesize({ input: 'Bonjour.', model: t.model!, voice: 'ff_siwis', responseFormat: 'wav', ...extra });
+
+describe('TTS on a local link: the language goes along (QA parle 16/10/2026: French arrived as Portuguese)', () => {
+  it('only the client language is an extra field of a local link, trimmed, as written', () => {
+    expect(localSpeechExtras({ language: ' fr ', ref_audio: 'data:audio/wav;base64,UklGRg==', task_type: 'Base', stream_format: 'sse' }))
+      .toEqual({ language: 'fr' });
+    expect(localSpeechExtras({ language: 'pt-BR' })).toEqual({ language: 'pt-BR' });
+    expect(localSpeechExtras({ language: 'French' })).toEqual({ language: 'French' });
+    for (const language of [undefined, '', '  ', 42, ['fr'], 'x'.repeat(36)]) expect(localSpeechExtras({ language })).toEqual({});
+    expect(localSpeechExtras(undefined)).toEqual({});
+  });
+
+  it('the server gets `language` in the OpenAI speech body, and no other client extra', async () => {
+    await speak(ttsLink(), { extra: { language: 'fr', ref_audio: 'data:audio/wav;base64,UklGRg==', task_type: 'Base' } });
+    const sent = JSON.parse(seen[0]!.body) as Record<string, unknown>;
+    expect(sent).toMatchObject({ model: 'kokoro', input: 'Bonjour.', voice: 'ff_siwis', response_format: 'wav', language: 'fr' });
+    expect(Object.keys(sent).sort()).toEqual(['input', 'language', 'model', 'response_format', 'voice']);
+    await speak(ttsLink());
+    expect(JSON.parse(seen[1]!.body)).not.toHaveProperty('language');
+  });
+
+  it('POST /v1/audio/speech: a French request reaches the local link with its language; the cloud fallback never sees it', async () => {
+    const local = ttsLink();
+    const { cloud, fallback } = cloudTts();
+    const body = { model: 'mac-tts', input: 'Bonjour, vous voulez du pain ?', voice: 'ff_siwis', response_format: 'wav', language: 'fr' };
+    const res = await handleAudioSpeech({ method: 'POST', url: '/v1/audio/speech', headers: {}, rawBody: Buffer.alloc(0), body },
+      { 'mac-tts': [local, fallback] } as never);
+    expect(res.status).toBe(200);
+    expect(res.headers?.['X-Gateway-Provider']).toBe(local.providerId);
+    await readAll(res.stream!);
+    expect(JSON.parse(seen[0]!.body)).toMatchObject({ language: 'fr', input: 'Bonjour, vous voulez du pain ?' });
+    expect(cloud).not.toHaveBeenCalled();
+  });
+});
+
+describe('TTS on a local link streams a wav/pcm answer from its first audio chunk', () => {
+  it('synthesize resolves with the first chunk while the server still holds the rest (before: the whole WAV was read first)', async () => {
+    const pending = speak(ttsLink('chunked'), { stream: true });
+    const first = await Promise.race([pending, new Promise<'buffered'>(r => setTimeout(() => r('buffered'), 2_000))]);
+    expect(first).not.toBe('buffered');
+    const res = first as Awaited<typeof pending>;
+    expect(res.contentType).toBe('audio/wav');
+    expect(res.audio.length).toBe(0);
+    const reader = res.stream!.getReader();
+    let got = 0;
+    while (got <= WAV_HEADER_BYTES) got += (await reader.read()).value!.byteLength;
+    expect(got).toBe(WAV_HEADER_BYTES + FIRST_CHUNK); // header + first chunk, the last one still held by the server
+    releaseLast!();
+    for (let r = await reader.read(); !r.done; r = await reader.read()) got += r.value.byteLength;
+    expect(got).toBe(WAV_HEADER_BYTES + FIRST_CHUNK + LAST_CHUNK);
+  });
+
+  it('without `stream` (or for mp3) the answer is read whole, as before', async () => {
+    const whole = await speak(ttsLink());
+    expect(whole.stream).toBeUndefined();
+    expect(whole.audio.length).toBe(probeWav().length);
+    const mp3 = await speak(ttsLink(), { stream: true, responseFormat: 'mp3' });
+    expect(mp3.stream).toBeUndefined();
+  });
+
+  it('a header with no audio, or a JSON body, is a failure (code empty), never a mute success', async () => {
+    const headerOnly = await speak(ttsLink('header-only'), { stream: true }).catch(e => e as Error);
+    expect(failureCode(headerOnly)).toBe('empty');
+    expect(headerOnly.message).toMatch(/ended with no audio \(44 bytes\)/);
+    const json = await speak(ttsLink('json'), { stream: true }).catch(e => e as Error);
+    expect(failureCode(json)).toBe('empty');
+    expect(json.message).toMatch(/answered JSON, not audio/);
+  });
+
+  it('POST /v1/audio/speech: a local link that ends with no audio falls back to the cloud, which answers', async () => {
+    const { cloud, fallback } = cloudTts();
+    const body = { model: 'mac-tts', input: 'Bonjour.', voice: 'ff_siwis', response_format: 'wav', language: 'fr' };
+    const res = await handleAudioSpeech({ method: 'POST', url: '/v1/audio/speech', headers: {}, rawBody: Buffer.alloc(0), body },
+      { 'mac-tts': [ttsLink('header-only'), fallback] } as never);
+    expect(res.status).toBe(200);
+    expect(res.headers?.['X-Gateway-Provider']).toBe('openrouter:hexgrad/kokoro-82m');
+    expect(cloud.mock.calls[0]![0].extra).toBeUndefined();
   });
 });
