@@ -1,15 +1,15 @@
 // ── AI Gateway — Live subtitle rooms: server-side dubbing ────────────────────
-// When the presenter's app publishes text only, the gateway voices each line itself (Kokoro 82M through OpenRouter,
-// MAI-Voice as fallback, each attempt time-bounded; injected by serve.ts as a `RoomSynthesize`) for the languages someone is actually listening to. Spending rules:
+// When the presenter's app publishes text only, the gateway voices each line itself (Kokoro 82M through OpenRouter only,
+// each call time-bounded; injected by serve.ts as a `RoomSynthesize`) for the languages someone is actually listening to. Spending rules:
 //   - a language is voiced only while at least one viewer explicitly listens to it (`listen` message), it has a
 //     non-empty translation in the line and Kokoro has a voice for it;
 //   - the presenter's own clips win: a language the presenter sent a clip for recently is left alone (other languages are
 //     still voiced — the desktop app dubs one language, viewers may listen to another), and a line+language the
 //     presenter voiced is never synthesized (checked before and after the call);
 //   - a draft line (the presenter will still grow it) is not voiced; its final version is;
-//   - per room and language one call at a time, every line voiced in order, each at least `waitMs` after it arrived;
-//     past ROOM_DUB_QUEUE_MAX waiting lines the oldest is dropped (a backlog cannot build up), and a line+language is
-//     voiced once;
+//   - per room and language up to ROOM_DUB_PARALLEL calls at once (Kokoro can take seconds per sentence), clips
+//     delivered in line order; a translation goes out as soon as it is ready; past ROOM_DUB_QUEUE_MAX waiting lines the
+//     oldest is dropped (a backlog cannot build up), and a line+language is voiced once;
 //   - the listeners hear the clips back to back: the more audio they still have queued, the faster Kokoro speaks
 //     (`dubSpeed`, up to ROOM_DUB_MAX_SPEED) so the voice catches up instead of the page dropping sentences.
 // Failures are logged, never thrown into the publish path.
@@ -65,35 +65,22 @@ export interface TtsLike {
 }
 
 export const KOKORO_MODEL = 'hexgrad/kokoro-82m';
-export const MAI_MODEL = 'microsoft/mai-voice-2.1-flash';
-
-/** MAI-Voice voice per language: the fallback when Kokoro is stuck or failing. Only voices already used in production. */
-export const MAI_ROOM_VOICES: Readonly<Record<string, string>> = {
-  en: 'en-US-Harper:MAI-Voice-2-Flash', fr: 'fr-FR-Soleil:MAI-Voice-2-Flash', pt: 'pt-BR-Luana:MAI-Voice-2-Flash',
-};
 
 /**
- * Budget of one synthesis attempt. The OpenRouter SDK client has no timeout of its own (SDK default: 10 min) and a
- * room language is voiced one call at a time, so a stuck call would mute that language; a line is a sentence, which
- * Kokoro voices in about a second.
+ * Budget of one synthesis call (the OpenRouter SDK client has no timeout of its own). Kokoro on OpenRouter took
+ * 0.7–2.9 s per sentence on 2026-10-16 and 6–25 s on 2026-10-17 (both providers, DeepInfra and Together, loaded):
+ * the calls run in parallel, so a slow sentence delays the voice without blocking the next ones.
  */
-export const ROOM_DUB_ATTEMPT_TIMEOUT_MS = 8_000;
-
-function openRouterSynthesize(provider: TtsLike, model: string, voices: Readonly<Record<string, string>>, honoursSpeed: boolean): RoomSynthesize {
-  return async (text, lang, signal, speed) => {
-    const voice = voices[lang.split('-')[0]!.toLowerCase()];
-    if (!voice) throw new Error(`${model} has no voice for ${lang}`);
-    const res = await provider.synthesize({ input: text, model, voice, responseFormat: 'mp3', signal, ...(honoursSpeed && speed && speed !== 1 && { speed }) });
-    if (!res.audio.length) throw new Error(`${model}: empty audio`);
-    return { audio: res.audio, format: 'mp3' };
-  };
-}
+export const ROOM_DUB_ATTEMPT_TIMEOUT_MS = 15_000;
 
 /** Kokoro 82M (mp3) through an OpenAI-compatible TTS provider — OpenRouter in production. */
-export const kokoroSynthesize = (provider: TtsLike): RoomSynthesize => openRouterSynthesize(provider, KOKORO_MODEL, KOKORO_ROOM_VOICES, true);
-
-/** MAI-Voice 2.1 Flash (mp3) through OpenRouter, for the languages in `MAI_ROOM_VOICES`. */
-export const maiSynthesize = (provider: TtsLike): RoomSynthesize => openRouterSynthesize(provider, MAI_MODEL, MAI_ROOM_VOICES, false);
+export const kokoroSynthesize = (provider: TtsLike): RoomSynthesize => async (text, lang, signal, speed) => {
+  const voice = kokoroVoice(lang);
+  if (!voice) throw new Error(`${KOKORO_MODEL} has no voice for ${lang}`);
+  const res = await provider.synthesize({ input: text, model: KOKORO_MODEL, voice, responseFormat: 'mp3', signal, ...(speed && speed !== 1 && { speed }) });
+  if (!res.audio.length) throw new Error(`${KOKORO_MODEL}: empty audio`);
+  return { audio: res.audio, format: 'mp3' };
+};
 
 async function withTimeout<T>(call: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
   const ctl = new AbortController();
@@ -139,13 +126,15 @@ export interface RoomDubberOptions {
 }
 
 interface QueuedLine { lineId: number; readyAt: number }
-interface LangState { queue: QueuedLine[]; busy: boolean; timer: ReturnType<typeof setTimeout> | null; done: number[]; playEnd: number }
+interface Job { lineId: number; clip?: RoomClip | null }
+interface LangState { queue: QueuedLine[]; jobs: Job[]; timer: ReturnType<typeof setTimeout> | null; done: number[]; playEnd: number }
 interface RoomState { presenterAt: Map<string, number>; presenterKeys: Set<string>; langs: Map<string, LangState> }
 
 /** Line ids remembered per language / presenter clips remembered per room (dedup only; old entries roll off). */
 const DONE_KEEP = 64;
 const PRESENTER_KEYS_KEEP = 512;
 export const ROOM_DUB_QUEUE_MAX = 4;
+export const ROOM_DUB_PARALLEL = 3;
 
 export const ROOM_DUB_MAX_SPEED = 1.3;
 const SPEED_RAMP_MS = 20_000;
@@ -239,7 +228,7 @@ export class RoomDubber {
     for (const lang of new Set([...Object.keys(line.translations), ...this.extraLanguages(room)])) {
       if (!this.wanted(room, s, lineId, lang)) continue;
       let ls = s.langs.get(lang);
-      if (!ls) { ls = { queue: [], busy: false, timer: null, done: [], playEnd: 0 }; s.langs.set(lang, ls); }
+      if (!ls) { ls = { queue: [], jobs: [], timer: null, done: [], playEnd: 0 }; s.langs.set(lang, ls); }
       if (ls.done.some(d => d >= lineId) || ls.queue.some(q => q.lineId === lineId)) continue;
       ls.queue.push({ lineId, readyAt: this.opts.now() + (s.presenterAt.has(lang) ? this.opts.waitMs : 0) });
       ls.queue.sort((a, b) => a.lineId - b.lineId);
@@ -249,39 +238,51 @@ export class RoomDubber {
   }
 
   private next(room: LiveRoom, s: RoomState, lang: string, ls: LangState): void {
-    if (ls.busy || ls.timer || this.rooms.get(room.meta.code) !== s) return;
-    const head = ls.queue[0];
-    if (!head) return;
-    const wait = head.readyAt - this.opts.now();
-    if (wait > 0) {
-      ls.timer = setTimeout(() => { ls.timer = null; this.next(room, s, lang, ls); }, wait);
-      ls.timer.unref?.();
-      return;
+    if (ls.timer || this.rooms.get(room.meta.code) !== s) return;
+    while (ls.queue[0] && ls.jobs.length < ROOM_DUB_PARALLEL) {
+      const wait = ls.queue[0].readyAt - this.opts.now();
+      if (wait > 0) {
+        ls.timer = setTimeout(() => { ls.timer = null; this.next(room, s, lang, ls); }, wait);
+        ls.timer.unref?.();
+        return;
+      }
+      this.start(room, s, lang, ls, ls.queue.shift()!.lineId);
     }
-    ls.queue.shift();
-    void this.run(room, s, lang, ls, head.lineId);
   }
 
-  private async run(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number): Promise<void> {
+  private start(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number): void {
     const want = this.wanted(room, s, lineId, lang);
-    if (!want) { this.next(room, s, lang, ls); return; }
-    ls.busy = true;
+    if (!want) return;
     ls.done.push(lineId);
     if (ls.done.length > DONE_KEEP) ls.done.shift();
+    const job: Job = { lineId };
+    ls.jobs.push(job);
+    void this.voice(room, lang, ls, want).then(clip => {
+      job.clip = clip;
+      this.flush(room, s, lang, ls);
+      this.next(room, s, lang, ls);
+    });
+  }
+
+  private async voice(room: LiveRoom, lang: string, ls: LangState, want: { line: RoomLine; listen: boolean }): Promise<RoomClip | null> {
     try {
       const text = want.line.translations[lang]?.trim() || await this.translate(room, want.line, lang);
-      if (!want.listen) return;
-      const clip = await this.opts.synthesize(text, lang, undefined, dubSpeed(ls.playEnd - this.opts.now()));
-      // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
-      if (this.wanted(room, s, lineId, lang)?.listen) {
-        this.opts.deliver(room, lineId, lang, clip);
-        ls.playEnd = Math.max(this.opts.now(), ls.playEnd) + mp3DurationMs(clip.audio);
-      }
+      if (!want.listen) return null;
+      return await this.opts.synthesize(text, lang, undefined, dubSpeed(ls.playEnd - this.opts.now()));
     } catch (err) {
-      this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId, error: err instanceof Error ? err.message : String(err) });
-    } finally {
-      ls.busy = false;
-      this.next(room, s, lang, ls);
+      this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId: want.line.id, error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  }
+
+  private flush(room: LiveRoom, s: RoomState, lang: string, ls: LangState): void {
+    if (this.rooms.get(room.meta.code) !== s) return;
+    while (ls.jobs[0] && ls.jobs[0].clip !== undefined) {
+      const { lineId, clip } = ls.jobs.shift()!;
+      // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
+      if (!clip || !this.wanted(room, s, lineId, lang)?.listen) continue;
+      this.opts.deliver(room, lineId, lang, clip);
+      ls.playEnd = Math.max(this.opts.now(), ls.playEnd) + mp3DurationMs(clip.audio);
     }
   }
 
@@ -296,7 +297,7 @@ export class RoomDubber {
   forget(code: string): void {
     const s = this.rooms.get(code);
     if (!s) return;
-    for (const ls of s.langs.values()) { if (ls.timer) clearTimeout(ls.timer); ls.timer = null; ls.queue = []; }
+    for (const ls of s.langs.values()) { if (ls.timer) clearTimeout(ls.timer); ls.timer = null; ls.queue = []; ls.jobs = []; }
     this.rooms.delete(code);
   }
 

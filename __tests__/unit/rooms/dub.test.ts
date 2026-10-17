@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  MemoryRoomStore, ROOM_DUB_MAX_SPEED, ROOM_DUB_QUEUE_MAX, RoomService, dubSpeed, kokoroSynthesize, mp3DurationMs, kokoroVoice, maiSynthesize, roomsConfigFromEnv,
+  MemoryRoomStore, ROOM_DUB_MAX_SPEED, ROOM_DUB_QUEUE_MAX, RoomService, ROOM_DUB_PARALLEL, dubSpeed, kokoroSynthesize, mp3DurationMs, kokoroVoice, roomsConfigFromEnv,
   synthesizeWithFallback, type RoomClip, type RoomsConfig,
 } from '../../../src/rooms';
 import type { LiveRoom, RoomViewer } from '../../../src/rooms/service';
@@ -152,57 +152,46 @@ describe('rooms server dubbing', () => {
     expect(synth).not.toHaveBeenCalled();
   });
 
-  it('voices every line in order, each once, with its latest text', async () => {
+  it('voices every line once, at most ROOM_DUB_PARALLEL at a time, delivered in order, with the latest text of a waiting line', async () => {
     const r = await room(service);
     const fr = viewer('fr');
     service.addViewer(r, fr);
-    let release: (c: RoomClip) => void = () => {};
-    synth.mockImplementationOnce(async (text: string) => new Promise<RoomClip>(res => { release = () => res({ audio: Buffer.from(`mp3:${text}`), format: 'mp3' }); }));
-    await service.publishLine(r, line(1));
-    await service.publishLine(r, line(2));
-    await service.publishLine(r, line(3));
-    await service.publishLine(r, line(3, { fr: 'bonjour 3 (corrigé)' }));
-    release({ audio: Buffer.alloc(0), format: 'mp3' });
-    await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1', 'bonjour 2', 'bonjour 3 (corrigé)']);
-    await service.publishLine(r, line(3, { fr: 'encore' }));
+    const releases: (() => void)[] = [];
+    synth.mockImplementation(async (text: string) => new Promise<RoomClip>(res => releases.push(() => res({ audio: Buffer.from(`mp3:${text}`), format: 'mp3' }))));
+    for (let id = 1; id <= ROOM_DUB_PARALLEL + 1; id++) await service.publishLine(r, line(id));
+    await service.publishLine(r, line(ROOM_DUB_PARALLEL + 1, { fr: 'corrigé' }));
+    expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1', 'bonjour 2', 'bonjour 3']);
+    releases[2]!();
+    releases[1]!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(audios(fr)).toEqual([]);
+    releases[0]!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(audios(fr).map(a => a.lineId)).toEqual([1, 2, 3]);
+    releases[3]!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1', 'bonjour 2', 'bonjour 3', 'corrigé']);
+    await service.publishLine(r, line(4, { fr: 'encore' }));
     await service.publishLine(r, line(2, { fr: 'en retard' }));
     await vi.advanceTimersByTimeAsync(WAIT * 3);
-    expect(synth).toHaveBeenCalledTimes(3);
-    expect(audios(fr).map(a => a.lineId)).toEqual([1, 2, 3]);
+    expect(synth).toHaveBeenCalledTimes(4);
+    expect(audios(fr).map(a => a.lineId)).toEqual([1, 2, 3, 4]);
   });
 
-  it('keeps one call in flight per language and voices the lines that arrived meanwhile, in order', async () => {
-    const r = await room(service);
-    service.addViewer(r, viewer('fr'));
-    let release: (c: RoomClip) => void = () => {};
-    synth.mockImplementationOnce(() => new Promise<RoomClip>(res => { release = res; }));
-    await service.publishLine(r, line(1));
-    await vi.advanceTimersByTimeAsync(WAIT + 1);
-    await service.publishLine(r, line(2));
-    await service.publishLine(r, line(3));
-    await vi.advanceTimersByTimeAsync(WAIT * 3);
-    expect(synth).toHaveBeenCalledTimes(1);
-    release({ audio: Buffer.from('one'), format: 'mp3' });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1', 'bonjour 2', 'bonjour 3']);
-  });
-
-  it('falls behind by at most ROOM_DUB_QUEUE_MAX lines: the oldest waiting one is dropped', async () => {
+  it('falls behind by at most ROOM_DUB_QUEUE_MAX waiting lines: the oldest waiting one is dropped', async () => {
     const log = vi.fn();
     service.stop();
     service = new RoomService({ config: { ...roomsConfigFromEnv({}), dir: null, serverDubWaitMs: WAIT, serverDubPresenterQuietMs: 60_000 }, store: new MemoryRoomStore(), sweepIntervalMs: 0, log, synthesize: synth });
     const r = await room(service);
     service.addViewer(r, viewer('fr'));
-    let release: (c: RoomClip) => void = () => {};
-    synth.mockImplementationOnce(() => new Promise<RoomClip>(res => { release = res; }));
-    await service.publishLine(r, line(1));
-    await vi.advanceTimersByTimeAsync(WAIT + 1);
-    for (let id = 2; id <= ROOM_DUB_QUEUE_MAX + 2; id++) await service.publishLine(r, line(id));
-    expect(log).toHaveBeenCalledWith('rooms: server dub dropped stale line', expect.objectContaining({ lang: 'fr', lineId: 2 }));
-    release({ audio: Buffer.from('one'), format: 'mp3' });
-    await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1', ...Array.from({ length: ROOM_DUB_QUEUE_MAX }, (_, i) => `bonjour ${i + 3}`)]);
+    const releases: (() => void)[] = [];
+    synth.mockImplementation(async (text: string) => new Promise<RoomClip>(res => releases.push(() => res({ audio: Buffer.from(text), format: 'mp3' }))));
+    const last = ROOM_DUB_PARALLEL + ROOM_DUB_QUEUE_MAX + 1;
+    for (let id = 1; id <= last; id++) await service.publishLine(r, line(id));
+    expect(log).toHaveBeenCalledWith('rooms: server dub dropped stale line', expect.objectContaining({ lang: 'fr', lineId: ROOM_DUB_PARALLEL + 1 }));
+    while (releases.length) { releases.shift()!(); await vi.advanceTimersByTimeAsync(0); }
+    const voiced = Array.from({ length: last }, (_, i) => i + 1).filter(id => id !== ROOM_DUB_PARALLEL + 1);
+    expect(synth.mock.calls.map(c => c[0])).toEqual(voiced.map(id => `bonjour ${id}`));
   });
 
   it('waits for the final version of a growing line and voices its final text', async () => {
@@ -255,12 +244,11 @@ describe('rooms server dubbing', () => {
     expect(mp3DurationMs(Buffer.from('not audio'))).toBe(0);
   });
 
-  it('asks Kokoro for the speed, never MAI-Voice', async () => {
+  it('asks Kokoro for the speed only when it is not 1', async () => {
     const provider = { synthesize: vi.fn(async () => ({ audio: Buffer.from('mp3') })) };
     await kokoroSynthesize(provider)('hi', 'en', undefined, 1.2);
     await kokoroSynthesize(provider)('hi', 'en', undefined, 1);
-    await maiSynthesize(provider)('hi', 'en', undefined, 1.2);
-    expect(provider.synthesize.mock.calls.map(c => (c as unknown as [{ speed?: number }])[0].speed)).toEqual([1.2, undefined, undefined]);
+    expect(provider.synthesize.mock.calls.map(c => (c as unknown as [{ speed?: number }])[0].speed)).toEqual([1.2, undefined]);
   });
 
   describe('languages the presenter does not publish', () => {
@@ -367,34 +355,30 @@ describe('rooms server dubbing', () => {
     const provider = { synthesize: vi.fn(async () => ({ audio: Buffer.from([1, 2, 3]) })) };
     await expect(kokoroSynthesize(provider)('Bonjour', 'fr-FR')).resolves.toEqual({ audio: Buffer.from([1, 2, 3]), format: 'mp3' });
     expect(provider.synthesize).toHaveBeenCalledWith({ input: 'Bonjour', model: 'hexgrad/kokoro-82m', voice: 'ff_siwis', responseFormat: 'mp3' });
-    await expect(maiSynthesize(provider)('Hola', 'es')).rejects.toThrow(/no voice for es/);
+    await expect(kokoroSynthesize(provider)('Hallo', 'de')).rejects.toThrow(/no voice for de/);
   });
 
-  it('a stuck Kokoro call times out into MAI-Voice and does not hold the next line of that language', async () => {
+  it('a stuck Kokoro call times out without holding the next lines of that language', async () => {
     const TIMEOUT = 5_000;
     let aborted: AbortSignal | undefined;
     const kokoro = vi.fn((text: string, _lang: string, signal?: AbortSignal) => {
       if (text === 'bonjour 1') { aborted = signal; return new Promise<RoomClip>(() => {}); }
       return Promise.resolve({ audio: Buffer.from(`kokoro:${text}`), format: 'mp3' });
     });
-    const mai = vi.fn(async (text: string) => ({ audio: Buffer.from(`mai:${text}`), format: 'mp3' }));
-    synth = vi.fn(synthesizeWithFallback([kokoro, mai], TIMEOUT));
+    synth = vi.fn(synthesizeWithFallback([kokoro], TIMEOUT));
     service.stop();
     service = make();
     const r = await room(service);
     const fr = viewer('fr');
     service.addViewer(r, fr);
-
     await service.publishLine(r, line(1));
-    await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(kokoro).toHaveBeenCalledTimes(1);
-    expect(mai).not.toHaveBeenCalled();
     await service.publishLine(r, line(2));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kokoro).toHaveBeenCalledTimes(2);
+    expect(audios(fr)).toEqual([]);
     await vi.advanceTimersByTimeAsync(TIMEOUT);
     expect(aborted?.aborted).toBe(true);
-    expect(mai).toHaveBeenCalledWith('bonjour 1', 'fr', expect.any(AbortSignal), 1);
-    await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(audios(fr).map(a => Buffer.from(a.wav, 'base64').toString())).toEqual(['mai:bonjour 1', 'kokoro:bonjour 2']);
+    expect(audios(fr).map(a => Buffer.from(a.wav, 'base64').toString())).toEqual(['kokoro:bonjour 2']);
   });
 
   it('every voice stuck: the line fails after one budget per attempt and the next line is voiced', async () => {

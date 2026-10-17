@@ -19,8 +19,8 @@ import { FileRoomStore, MemoryRoomStore, type RoomStore } from './store';
 import { createRoomWs } from './ws';
 
 export {
-  KOKORO_MODEL, KOKORO_ROOM_VOICES, MAI_MODEL, MAI_ROOM_VOICES, ROOM_DUB_ATTEMPT_TIMEOUT_MS, ROOM_DUB_MAX_SPEED, ROOM_DUB_QUEUE_MAX, RoomDubber, dubSpeed, mp3DurationMs, kokoroSynthesize, kokoroVoice,
-  maiSynthesize, openRouterTranslate, synthesizeWithFallback,
+  KOKORO_MODEL, KOKORO_ROOM_VOICES, ROOM_DUB_ATTEMPT_TIMEOUT_MS, ROOM_DUB_MAX_SPEED, ROOM_DUB_PARALLEL, ROOM_DUB_QUEUE_MAX, RoomDubber, dubSpeed, mp3DurationMs, kokoroSynthesize, kokoroVoice,
+  openRouterTranslate, synthesizeWithFallback,
 } from './dub';
 export type { RoomClip, RoomSynthesize, RoomTranslate } from './dub';
 export { roomsConfigFromEnv, ROOMS_DEFAULTS } from './config';
