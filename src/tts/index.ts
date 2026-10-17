@@ -67,7 +67,7 @@ export function qwenCloneTts(links: () => Array<RouteTarget<TTSProvider>>, break
         });
         return r.stream ? { ...r, audio: Buffer.from(await new Response(r.stream).arrayBuffer()) } : r;
       },
-      { stage: 'tts', timeoutMs: TTS_CALL_TIMEOUT_MS, retriesPerProvider: 0, ...(breakers && { breakers }) },
+      { stage: 'tts', timeoutMs: TTS_CALL_TIMEOUT_MS, retriesPerProvider: 1, ...(breakers && { breakers }) },
     );
     if (!result.audio.length) throw new Error(`${QWEN_CLONE_MODEL}: empty audio`);
     return { audio: result.audio, format: 'wav' };

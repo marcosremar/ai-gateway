@@ -95,6 +95,16 @@ describe('gateway TTS module', () => {
     expect(qwenSpeaks('hi')).toBe(false);
   });
 
+  it('retries a clone the model did not finish (HTTP 500) once on the same deployment', async () => {
+    const runaway = Object.assign(new Error('Qwen3-TTS Base did not emit codec EOS before its token budget'), { status: 500 });
+    let calls = 0;
+    const l = { ...link(async () => { calls++; if (calls === 1) throw runaway; return { audio: Buffer.from('RIFF'), contentType: 'audio/wav' }; }), providerId: 'deployment:clone-test' };
+    const clip = qwenCloneTts(() => [l as never], breakers())('Hallo', 'de', { refAudio: 'data:audio/wav;base64,UklGRg==', refText: 'olá' });
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(clip).resolves.toEqual({ audio: Buffer.from('RIFF'), format: 'wav' });
+    expect(calls).toBe(2);
+  });
+
   it('never wakes the clone deployment: no ready replica = not ready, and a call fails at once without waking it', async () => {
     const wake = vi.fn();
     const acquire = vi.fn(async () => { throw new DeploymentError(503, 'no ready replica (no-wake: not woken)', 30); });
