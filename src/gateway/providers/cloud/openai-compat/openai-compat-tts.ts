@@ -55,6 +55,48 @@ export interface OpenAICompatTTSConfig {
   /** Send the requested voice as-is (aggregators whose voices depend on the model, e.g. OpenRouter). */
   passthroughVoices?: boolean;
   pcmAsWavRate?: number;
+  /**
+   * With `request.stream` and a wav/pcm answer, pass the body on as the server sends it, from its first audio chunk
+   * (`untilFirstAudio`), instead of reading the whole sentence first. For a server that synthesizes chunk by chunk (a
+   * local link: Kokoro-FastAPI, the parle Mac stack) the client's first byte then arrives with the first chunk. Cloud
+   * providers keep the whole answer (an error mid-body could not fall back any more).
+   */
+  streamAudio?: boolean;
+}
+
+/** Bytes of a canonical WAV header (RIFF + fmt + data): what a streamed WAV sends before its first sample. */
+export const WAV_HEADER_BYTES = 44;
+
+const noAudio = (label: string, why: string) => Object.assign(new Error(`${label}: ${why}`), { status: 502, gatewayCode: 'empty' });
+
+/**
+ * Holds a streamed answer until it carries more than `headerBytes` (a WAV header alone is not audio), then passes it on
+ * chunk by chunk as it arrives. An answer that ends before any sample fails with code `empty`, so the chain moves on
+ * instead of the client getting a mute turn (an answer without audio is never a success). Resolving at the first audio
+ * chunk makes the attempt timeout and the hedge measure time to first audio, not the time of the whole sentence.
+ */
+async function untilFirstAudio(body: ReadableStream<Uint8Array>, headerBytes: number, label: string): Promise<ReadableStream<Uint8Array>> {
+  const reader = body.getReader();
+  const held: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size <= headerBytes) {
+      const { value, done } = await reader.read();
+      if (done) throw noAudio(label, `the answer ended with no audio (${size} bytes)`);
+      if (value?.byteLength) { held.push(value); size += value.byteLength; }
+    }
+  } catch (err) {
+    reader.cancel().catch(() => {});
+    throw err;
+  }
+  return new ReadableStream<Uint8Array>({
+    start(controller) { for (const chunk of held) controller.enqueue(chunk); },
+    async pull(controller) {
+      const { value, done } = await reader.read();
+      if (done) controller.close(); else controller.enqueue(value);
+    },
+    cancel: (reason) => reader.cancel(reason),
+  });
 }
 
 function wavHeader(rate: number, dataBytes: number): Buffer {
@@ -116,6 +158,14 @@ export class OpenAICompatTTSProvider implements TTSProvider {
     return (allowed && !allowed.includes(fmt)) ? (this.config.defaultFormat || 'wav') : fmt;
   }
 
+  /**
+   * Fields outside the OpenAI speech API that this provider's server reads, merged into the request body. None by
+   * default: OpenAI refuses an unknown field. A local link sends the client's `language` (local-link.ts).
+   */
+  protected bodyExtras(_request: TTSRequest): Record<string, unknown> {
+    return {};
+  }
+
   async synthesize(request: TTSRequest): Promise<TTSResponse> {
     const client = this.getClient();
     const asWav = request.responseFormat === 'wav' && !!this.config.pcmAsWavRate && !this.config.allowedFormats?.includes('wav');
@@ -128,6 +178,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
       response_format: format as OpenAI.Audio.SpeechCreateParams['response_format'],
       ...(request.speed && { speed: request.speed }),
       ...(request.instructions && { instructions: request.instructions }),
+      ...this.bodyExtras(request),
     };
 
     const response = await client.audio.speech.create(params, request.signal ? { signal: request.signal } : undefined);
@@ -151,8 +202,16 @@ export class OpenAICompatTTSProvider implements TTSProvider {
       const pcm = Buffer.from(await response.arrayBuffer());
       return { audio: Buffer.concat([wavHeader(rate, pcm.length), pcm]), contentType: 'audio/wav' };
     }
+    const contentType = FORMAT_TO_CONTENT_TYPE[format] || 'audio/mpeg';
+    if (this.config.streamAudio && request.stream && response.body && (format === 'wav' || format === 'pcm')) {
+      if ((response.headers.get('content-type') ?? '').includes('json')) {
+        throw noAudio(this.providerId, `the server answered JSON, not audio: ${(await response.text().catch(() => '')).slice(0, 200)}`);
+      }
+      const body = response.body as unknown as ReadableStream<Uint8Array>;
+      return { audio: Buffer.alloc(0), contentType, stream: await untilFirstAudio(body, format === 'wav' ? WAV_HEADER_BYTES : 0, this.providerId) };
+    }
     const arrayBuffer = await response.arrayBuffer();
-    return { audio: Buffer.from(arrayBuffer), contentType: FORMAT_TO_CONTENT_TYPE[format] || 'audio/mpeg' };
+    return { audio: Buffer.from(arrayBuffer), contentType };
   }
 
   async synthesizeStream(request: TTSRequest): Promise<ReadableStream<Uint8Array>> {
@@ -166,6 +225,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
       response_format: format as OpenAI.Audio.SpeechCreateParams['response_format'],
       ...(request.speed && { speed: request.speed }),
       ...(request.instructions && { instructions: request.instructions }),
+      ...this.bodyExtras(request),
     };
 
     const response = await client.audio.speech.create(params, request.signal ? { signal: request.signal } : undefined);

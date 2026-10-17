@@ -99,7 +99,7 @@ Use the vocabulary from `domain-model.md` in all code and prompts. Respect the b
   - Deepgram: STT
   - Modal: TTS (MOSS-TTS)
 - **GPU Providers** (self-hosted): RunPod, Vast.ai, TensorDock, Modal, SnapGPU
-- **Local links** (`openai-compatible`): a route entry `{provider: "openai-compatible", baseUrl, model, apiKeyEnv?}` reaches any OpenAI-compatible server (llama.cpp, LM Studio, vLLM, Ollama, MLX, the owner's Mac through a tunnel) for chat, STT and TTS. Named `local:<host>/<model>`, never counted as the cloud fallback (one is still appended), admin-only to write, SSRF-checked on Railway at mount and on every call (`LOCAL_LINK_ALLOW` for a tunnel host): [`docs/local-links.md`](docs/local-links.md)
+- **Local links** (`openai-compatible`): a route entry `{provider: "openai-compatible", baseUrl, model, apiKeyEnv?}` reaches any OpenAI-compatible server (llama.cpp, LM Studio, vLLM, Ollama, MLX, the owner's Mac through a tunnel) for chat, STT and TTS. Named `local:<host>/<model>`, never counted as the cloud fallback (one is still appended), admin-only to write, SSRF-checked on Railway at mount and on every call (`LOCAL_LINK_ALLOW` for a tunnel host); its TTS sends the request's `language` as an extra body field and streams a wav/pcm answer from its first audio chunk: [`docs/local-links.md`](docs/local-links.md)
 - **Provider Fallback Chains**: Declarative, config-driven fallback with cooldown and credit exhaustion tracking
 - **Request Coalescing**: Deduplicate identical concurrent requests (share single upstream call)
 - **Response Cache**: Cache responses for deterministic requests
@@ -276,7 +276,7 @@ ai-gateway server start/stop/status      # Manage local dev server
 ### 10. Security Features
 
 - **API Key Authentication**: Bearer token auth on all endpoints (configurable)
-- **Localhost Exemption**: No auth required for localhost when GATEWAY_API_KEY not set
+- **Localhost Exemption**: No auth required for localhost when GATEWAY_API_KEY not set; off Railway `serve.ts` listens on `127.0.0.1` unless `GATEWAY_HOST` says otherwise (the Dockerfiles set `0.0.0.0`; Railway always listens on `0.0.0.0`, `src/config/listen-host.ts`)
 - **HMAC-SHA256 GPU Tokens**: 60s TTL tokens for GPU pod authentication
 - **Recall Webhook Auth**: Token validation for Recall.ai audio endpoint
 - **Constant-Time String Compare**: Timing-safe comparison prevents timing attacks

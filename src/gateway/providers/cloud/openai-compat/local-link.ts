@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import OpenAI from 'openai';
 import { onRailway } from '../../../../deployments/real-machines';
 import { isPrivateUrl } from '../../../pipeline/ssrf-protection';
-import type { LLMProvider, ProviderId, STTProvider, TTSProvider } from '../types';
+import type { LLMProvider, ProviderId, STTProvider, TTSProvider, TTSRequest } from '../types';
 import { OpenAICompatLLMProvider, type OpenAICompatLLMConfig } from './openai-compat-llm';
 import { OpenAICompatSTTProvider } from './openai-compat-stt';
 import { OpenAICompatTTSProvider } from './openai-compat-tts';
@@ -119,9 +119,26 @@ class LocalSTT extends OpenAICompatSTTProvider {
   override isConfigured(): boolean { return this.link.configured(); }
 }
 
+/** Longest `language` a local link passes on: a BCP 47 tag (`pt-BR`) or a language name (`French`), never a payload. */
+const LANGUAGE_MAX_CHARS = 35;
+
+/**
+ * Fields a local link's TTS adds to the OpenAI speech body: the client's `language`, as sent (`fr`, `pt-BR`,
+ * `French`). The OpenAI speech API has no such field, but a local server that speaks more than one language needs it
+ * (QA parle 16/10/2026: without it a French line reached the Mac's server as Portuguese). docs/local-links.md § TTS.
+ */
+export function localSpeechExtras(extra: Record<string, unknown> | undefined): Record<string, unknown> {
+  const language = typeof extra?.language === 'string' ? extra.language.trim() : '';
+  return language && language.length <= LANGUAGE_MAX_CHARS ? { language } : {};
+}
+
+/** TTS on a local link: the client's language goes along, and a wav/pcm answer streams from its first audio chunk. */
 class LocalTTS extends OpenAICompatTTSProvider {
-  constructor(private readonly link: LocalLinkClient, config: OpenAICompatLLMConfig) { super({ ...config, models: [], voices: [], passthroughVoices: true }); }
+  constructor(private readonly link: LocalLinkClient, config: OpenAICompatLLMConfig) {
+    super({ ...config, models: [], voices: [], passthroughVoices: true, streamAudio: true });
+  }
   protected override getClient(): OpenAI { return this.link.get(); }
+  protected override bodyExtras(request: TTSRequest): Record<string, unknown> { return localSpeechExtras(request.extra); }
   override isConfigured(): boolean { return this.link.configured(); }
 }
 

@@ -25,7 +25,8 @@ curl -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" ...
 ```
 
 Set `GATEWAY_API_KEYS` on the server (comma-separated; `key:user` names the user). When no key is configured, only
-localhost requests are allowed. Keys are also issued, rotated and revoked at runtime (§ Access at runtime), and the
+localhost requests are allowed. Off Railway the gateway also listens on `127.0.0.1` only (`GATEWAY_HOST=0.0.0.0` opens
+it; the Dockerfiles set it); on Railway it listens on `0.0.0.0`. Keys are also issued, rotated and revoked at runtime (§ Access at runtime), and the
 admin list replaced, without a deploy. The `SANDBOX_TOKEN` (and its aliases) is **not** a client key: it is the dev API's
 master key, which the gateway uses only to fetch its own provider keys from the palco, and it gets `401` here (owner
 decision 06/10/2026). `ACCEPT_SANDBOX_TOKEN_AS_KEY=1` (transition only, default off, logs a `WARNING`) accepts it
