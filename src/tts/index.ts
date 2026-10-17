@@ -10,6 +10,8 @@
 import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-breaker';
 import type { TTSProvider } from '../gateway/providers/cloud/types';
 import { routeRequest, type RouteTarget } from '../gateway/proxy/provider-routing';
+import type { DeploymentController } from '../deployments/controller';
+import { DeploymentTTSProvider } from '../deployments/inference-providers';
 
 export const KOKORO_MODEL = 'hexgrad/kokoro-82m';
 
@@ -41,6 +43,57 @@ export function kokoroTts(links: () => Array<RouteTarget<TTSProvider>>, breakers
     return { audio: result.audio, format: 'mp3' };
   };
 }
+
+export const QWEN_CLONE_MODEL = 'Qwen/Qwen3-TTS-12Hz-0.6B-Base';
+
+export const QWEN_LANGUAGES: readonly string[] = ['en', 'zh', 'ja', 'ko', 'de', 'fr', 'ru', 'pt', 'es', 'it'];
+
+export const qwenSpeaks = (lang: string): boolean => QWEN_LANGUAGES.includes(primaryLanguage(lang));
+
+export interface VoiceRef { refAudio: string; refText: string }
+
+export type CloneTts = (text: string, lang: string, voice: VoiceRef) => Promise<TtsClip>;
+
+export function qwenCloneTts(links: () => Array<RouteTarget<TTSProvider>>, breakers?: CircuitBreakerRegistry): CloneTts {
+  return async (text, lang, voice) => {
+    if (!qwenSpeaks(lang)) throw new Error(`${QWEN_CLONE_MODEL} does not speak ${lang}`);
+    const targets = links().map(l => ({ ...l, hedgeAfterMs: 0, chainKey: 'tts:qwen-clone' }));
+    const { result } = await routeRequest(
+      targets,
+      async (t, signal) => {
+        const r = await t.provider.synthesize({
+          signal, model: t.model ?? QWEN_CLONE_MODEL, input: text, voice: 'clone', responseFormat: 'wav',
+          extra: { task_type: 'Base', ref_audio: voice.refAudio, ref_text: voice.refText, language: primaryLanguage(lang) },
+        });
+        return r.stream ? { ...r, audio: Buffer.from(await new Response(r.stream).arrayBuffer()) } : r;
+      },
+      { stage: 'tts', timeoutMs: TTS_CALL_TIMEOUT_MS, retriesPerProvider: 0, ...(breakers && { breakers }) },
+    );
+    if (!result.audio.length) throw new Error(`${QWEN_CLONE_MODEL}: empty audio`);
+    return { audio: result.audio, format: 'wav' };
+  };
+}
+
+export interface DeploymentClone { ready: () => boolean; synthesize: CloneTts }
+
+export function deploymentClone(controller: Pick<DeploymentController, 'acquire' | 'get'>, name: string, breakers?: CircuitBreakerRegistry): DeploymentClone {
+  const provider = new DeploymentTTSProvider(
+    { get: (n) => controller.get(n), acquire: (n, opts) => controller.acquire(n, { ...opts, noWake: true }) },
+    name, { waitMs: 0 },
+  );
+  return {
+    ready: () => Boolean(controller.get(name)?.replicas?.some(r => r.phase === 'ready')),
+    synthesize: qwenCloneTts(() => [{ providerId: `deployment:${name}`, provider, model: QWEN_CLONE_MODEL }], breakers),
+  };
+}
+
+export function wavDurationMs(buf: Buffer): number {
+  if (buf.length < 44 || buf.subarray(0, 4).toString('latin1') !== 'RIFF') return 0;
+  const byteRate = buf.readUInt32LE(28);
+  return byteRate ? ((buf.length - 44) * 1000) / byteRate : 0;
+}
+
+export const clipDurationMs = (clip: TtsClip): number => (clip.format === 'wav' ? wavDurationMs(clip.audio) : mp3DurationMs(clip.audio));
 
 export const TTS_MAX_SPEED = 1.3;
 const SPEED_RAMP_MS = 20_000;
@@ -136,7 +189,7 @@ export class TtsStream {
     while (this.jobs[0] && this.jobs[0].clip !== undefined) {
       const { id, clip } = this.jobs.shift()!;
       if (!clip || !this.opts.deliver(id, clip)) continue;
-      const ms = mp3DurationMs(clip.audio);
+      const ms = clipDurationMs(clip);
       this.clipMs = this.clipMs ? 0.7 * this.clipMs + 0.3 * ms : ms;
       this.playEnd = Math.max(this.opts.now(), this.playEnd) + ms;
     }

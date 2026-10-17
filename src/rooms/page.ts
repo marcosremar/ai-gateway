@@ -1033,7 +1033,8 @@ function connect(){
     if(m.type==='snapshot'){applyRoom(m.room);if(!m.room.ended){setPill('live','live');setNotice(null)}}
     else if(m.type==='line'&&room)upsert(m.line);
     else if(m.type==='audio')onAudio(m);
-    else if(m.type==='update'){if(room)room.youtubeUrl=m.youtubeUrl;applyYoutube(m.youtubeUrl)}
+    else if(m.type==='update'){if(room)room.youtubeUrl=m.youtubeUrl;applyYoutube(m.youtubeUrl);
+      if(room&&m.dubLangs){room.dubLangs=m.dubLangs;room.listenLangs=m.listenLangs;buildSelect();updateDubButton()}}
     else if(m.type==='ended')showEnded();};
   s.onclose=function(){if(ping)clearInterval(ping);if(ws===s)ws=null;if(ended||gone)return;
     setPill('wait','reconnecting');if(joined)track('ui',{action:'reconnect'});

@@ -14,13 +14,13 @@ import { roomsConfigFromEnv, type RoomsConfig } from './config';
 import { FileEventStore, MemoryEventStore, RoomEvents, type EventStore } from './events';
 import { createRoomsHttp, type KeyUser } from './http';
 import type { LanguageTts } from '../tts';
-import type { RoomTranslate } from './dub';
+import type { RoomTranslate, RoomVoiceClone } from './dub';
 import { RoomService } from './service';
 import { FileRoomStore, MemoryRoomStore, type RoomStore } from './store';
 import { createRoomWs } from './ws';
 
 export { RoomDubber, openRouterTranslate } from './dub';
-export type { RoomTranslate } from './dub';
+export type { RoomTranslate, RoomVoiceClone } from './dub';
 export { roomsConfigFromEnv, ROOMS_DEFAULTS } from './config';
 export type { RoomsConfig } from './config';
 export { RoomService, hashToken } from './service';
@@ -52,6 +52,7 @@ export interface CreateRoomsOptions {
   synthesizeAvailable?: () => boolean;
   /** Translates lines into the Kokoro languages the presenter does not publish (serve.ts: OpenRouter). */
   translate?: RoomTranslate;
+  clone?: RoomVoiceClone;
 }
 
 export function createRooms(opts: CreateRoomsOptions) {
@@ -59,7 +60,7 @@ export function createRooms(opts: CreateRoomsOptions) {
   const store = opts.store ?? (config.dir ? new FileRoomStore(config.dir, opts.log) : new MemoryRoomStore());
   const service = new RoomService({
     config, store, now: opts.now, log: opts.log, sweepIntervalMs: opts.sweepIntervalMs,
-    synthesize: opts.synthesize, synthesizeAvailable: opts.synthesizeAvailable, translate: opts.translate,
+    synthesize: opts.synthesize, synthesizeAvailable: opts.synthesizeAvailable, translate: opts.translate, clone: opts.clone,
   });
   const eventStore = opts.eventStore ?? (config.dir ? new FileEventStore(join(config.dir, 'events')) : new MemoryEventStore());
   const events = new RoomEvents({ store: eventStore, retentionMs: config.eventsRetentionMs, now: opts.now, sweepIntervalMs: opts.sweepIntervalMs, log: opts.log });

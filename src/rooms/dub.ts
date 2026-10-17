@@ -12,7 +12,10 @@
 //     ready, and a line+language is voiced once.
 // Failures are logged, never thrown into the publish path.
 
-import { KOKORO_VOICES, TtsStream, kokoroVoice, primaryLanguage as primary, type LanguageTts, type TtsClip } from '../tts';
+import {
+  KOKORO_VOICES, QWEN_LANGUAGES, TtsStream, kokoroVoice, primaryLanguage as primary, qwenSpeaks, type DeploymentClone, type LanguageTts, type TtsClip,
+  type VoiceRef,
+} from '../tts';
 import type { LiveRoom } from './service';
 import type { RoomLine } from './types';
 
@@ -40,8 +43,11 @@ export const openRouterTranslate = (provider: ChatLike): RoomTranslate => async 
   return res.content.trim();
 };
 
+export type RoomVoiceClone = DeploymentClone;
+
 export interface RoomDubberOptions {
   synthesize: LanguageTts;
+  clone?: RoomVoiceClone;
   /** False while the synthesizer cannot work (e.g. no API key): nothing is scheduled. Default: always available. */
   available?: () => boolean;
   /** Delivers a clip to the room's listeners of `lang`. */
@@ -57,7 +63,7 @@ export interface RoomDubberOptions {
 }
 
 interface LangState { stream: TtsStream; done: number[] }
-interface RoomState { presenterAt: Map<string, number>; presenterKeys: Set<string>; langs: Map<string, LangState> }
+interface RoomState { presenterAt: Map<string, number>; presenterKeys: Set<string>; langs: Map<string, LangState>; voices: Map<string, VoiceRef> }
 
 /** Line ids remembered per language / presenter clips remembered per room (dedup only; old entries roll off). */
 const DONE_KEEP = 64;
@@ -70,19 +76,31 @@ export class RoomDubber {
 
   /** Languages the server can voice in this room (Kokoro-supported). */
   voicedLanguages(room: LiveRoom): string[] {
-    return room.meta.languages.filter(l => kokoroVoice(l) !== null);
+    return room.meta.languages.filter(l => this.speaks(room, l));
+  }
+
+  setVoice(room: LiveRoom, lang: string, voice: VoiceRef): void {
+    this.state(room.meta.code).voices.set(primary(lang), voice);
+  }
+
+  private cloning(room: LiveRoom): boolean {
+    return !!this.rooms.get(room.meta.code)?.voices.size && !!this.opts.clone?.ready();
+  }
+
+  private speaks(room: LiveRoom, lang: string): boolean {
+    return this.cloning(room) ? qwenSpeaks(lang) : kokoroVoice(lang) !== null;
   }
 
   /** Kokoro languages the presenter does not publish: the server translates and voices them for whoever picks one. */
   extraLanguages(room: LiveRoom): string[] {
     if (!this.opts.translate) return [];
     const taken = [...room.meta.languages, room.meta.originalLang ?? ''].map(primary);
-    return Object.keys(KOKORO_VOICES).filter(l => !taken.includes(l));
+    return (this.cloning(room) ? QWEN_LANGUAGES : Object.keys(KOKORO_VOICES)).filter(l => !taken.includes(l));
   }
 
   private state(code: string): RoomState {
     let s = this.rooms.get(code);
-    if (!s) { s = { presenterAt: new Map(), presenterKeys: new Set(), langs: new Map() }; this.rooms.set(code, s); }
+    if (!s) { s = { presenterAt: new Map(), presenterKeys: new Set(), langs: new Map(), voices: new Map() }; this.rooms.set(code, s); }
     return s;
   }
 
@@ -105,7 +123,7 @@ export class RoomDubber {
     if (this.presenterActive(s, lang) || s.presenterKeys.has(`${lineId}:${lang}`)) return null;
     const at = room.index.get(lineId);
     const line = at === undefined ? undefined : room.lines[at];
-    if (!line || line.draft || !kokoroVoice(lang)) return null;
+    if (!line || line.draft || !this.speaks(room, lang)) return null;
     const translated = !!line.translations[lang]?.trim();
     const translatable = !!this.opts.translate && !!line.original.trim() && primary(line.originalLang ?? room.meta.originalLang ?? '') !== primary(lang);
     if (!translated && !translatable) return null;
@@ -159,11 +177,24 @@ export class RoomDubber {
     if (ls.done.length > DONE_KEEP) ls.done.shift();
     try {
       const text = want.line.translations[lang]?.trim() || await this.translate(room, want.line, lang);
-      return want.listen ? await this.opts.synthesize(text, lang, speed) : null;
+      return want.listen ? await this.speak(room, s, want.line, text, lang, speed) : null;
     } catch (err) {
       this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId, error: err instanceof Error ? err.message : String(err) });
       return null;
     }
+  }
+
+  private async speak(room: LiveRoom, s: RoomState, line: RoomLine, text: string, lang: string, speed: number): Promise<TtsClip> {
+    const voice = this.cloning(room) ? s.voices.get(primary(line.originalLang ?? room.meta.originalLang ?? '')) : undefined;
+    if (voice) {
+      try {
+        return await this.opts.clone!.synthesize(text, lang, voice);
+      } catch (err) {
+        if (!kokoroVoice(lang)) throw err;
+        this.opts.log('rooms: voice clone failed, Kokoro instead', { code: room.meta.code, lang, lineId: line.id, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    return this.opts.synthesize(text, lang, speed);
   }
 
   private async translate(room: LiveRoom, line: RoomLine, lang: string): Promise<string> {

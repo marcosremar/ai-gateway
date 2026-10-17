@@ -65,7 +65,7 @@ import {
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
 import { createRooms, openRouterTranslate } from './src/rooms';
-import { KOKORO_MODEL, kokoroTts } from './src/tts';
+import { KOKORO_MODEL, deploymentClone, kokoroTts } from './src/tts';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
@@ -577,6 +577,7 @@ const rooms = createRooms({
   synthesize: kokoroTts(() => [{ providerId: 'openrouter', provider: openrouterTTS, model: KOKORO_MODEL }]),
   synthesizeAvailable: () => openrouterTTS.isConfigured(),
   translate: openRouterTranslate(openrouterLLM),
+  ...(controller && { clone: deploymentClone(controller, process.env.ROOM_VOICE_CLONE_DEPLOYMENT?.trim() || 'babelcast-tts-clone') }),
 });
 log.log({
   dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl,

@@ -99,11 +99,12 @@ pub fn gateway_methods(path: &str) -> Option<&'static [&'static str]> {
     Some(match seg.as_slice() {
         ["health"] | ["v1", "models"] => get,
         ["v1", "audio", "transcriptions"] | ["v1", "chat", "completions"] | ["v1", "audio", "speech"] | ["v1", "s2s"] | ["v1", "activate"] => post,
-        // src/rooms/http.ts: no action → GET, HEAD, PATCH; lines/audio/end → POST; events → GET, POST; ws → GET.
+        // src/rooms/http.ts: no action → GET, HEAD, PATCH; lines/audio/end → POST; events → GET, POST; voice → PUT; ws → GET.
         ["v1", "rooms"] => post,
         ["v1", "rooms", _] => &["GET", "HEAD", "PATCH"],
         ["v1", "rooms", _, "lines" | "audio" | "end"] => post,
         ["v1", "rooms", _, "events"] => &["GET", "POST"],
+        ["v1", "rooms", _, "voice"] => &["PUT"],
         ["v1", "rooms", _, "ws"] => get,
         // src/deployments/http.ts
         ["v1", "deployments"] => get,

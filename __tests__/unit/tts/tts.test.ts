@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
-import { TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, catchUpSpeed, kokoroTts, kokoroVoice, mp3DurationMs } from '../../../src/tts';
+import {
+  QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, catchUpSpeed, deploymentClone, kokoroTts, kokoroVoice, mp3DurationMs, qwenCloneTts, qwenSpeaks, wavDurationMs,
+} from '../../../src/tts';
+import { DeploymentError } from '../../../src/deployments/controller-state';
 
-type Synth = (req: { input: string; model: string; voice: string; responseFormat?: string; speed?: number; signal?: AbortSignal }) => Promise<{ audio: Buffer; contentType: string }>;
+type Synth = (req: { input: string; model: string; voice: string; responseFormat?: string; speed?: number; signal?: AbortSignal; extra?: Record<string, unknown> }) => Promise<{ audio: Buffer; contentType: string }>;
 
 let n = 0;
 const link = (synthesize: Synth) => {
@@ -72,5 +75,47 @@ describe('gateway TTS module', () => {
     const audio = Buffer.concat([id3, ...Array(10).fill(frame(8, 192)), ...Array(10).fill(frame(4, 96))]);
     expect(mp3DurationMs(audio)).toBeCloseTo(480, 6);
     expect(mp3DurationMs(Buffer.from('not audio'))).toBe(0);
+  });
+
+  it("asks the clone deployment for one WAV per sentence with the speaker's reference and the target language", async () => {
+    const l = link(async () => ({ audio: Buffer.from('RIFF'), contentType: 'audio/wav' }));
+    const other = link(mp3);
+    const tts = qwenCloneTts(() => [{ ...l, model: QWEN_CLONE_MODEL } as never, other as never], breakers());
+    const voice = { refAudio: 'data:audio/ogg;base64,T2dnUw==', refText: 'olá a todos' };
+    await expect(tts('Hallo zusammen', 'de-DE', voice)).resolves.toEqual({ audio: Buffer.from('RIFF'), format: 'wav' });
+    expect(l.provider.synthesize.mock.calls[0]![0]).toMatchObject({
+      input: 'Hallo zusammen', model: QWEN_CLONE_MODEL, responseFormat: 'wav',
+      extra: { task_type: 'Base', ref_audio: voice.refAudio, ref_text: voice.refText, language: 'de' },
+    });
+    expect(other.provider.synthesize).not.toHaveBeenCalled();
+    await expect(tts('नमस्ते', 'hi', voice)).rejects.toThrow(/does not speak hi/);
+    const streamed = link(async () => ({ audio: Buffer.alloc(0), stream: new Response('RIFFwav').body!, contentType: 'audio/wav' }) as never);
+    await expect(qwenCloneTts(() => [streamed as never], breakers())('Hallo', 'de', voice)).resolves.toEqual({ audio: Buffer.from('RIFFwav'), format: 'wav' });
+    expect(['en', 'zh', 'ja', 'ko', 'de', 'fr', 'ru', 'pt-BR', 'es', 'it'].every(qwenSpeaks)).toBe(true);
+    expect(qwenSpeaks('hi')).toBe(false);
+  });
+
+  it('never wakes the clone deployment: no ready replica = not ready, and a call fails at once without waking it', async () => {
+    const wake = vi.fn();
+    const acquire = vi.fn(async () => { throw new DeploymentError(503, 'no ready replica (no-wake: not woken)', 30); });
+    let replicas: Array<{ phase: string }> = [];
+    const controller = { acquire, wake, get: () => ({ replicas }) };
+    const clone = deploymentClone(controller as never, 'babelcast-tts-clone', breakers());
+    expect(clone.ready()).toBe(false);
+    replicas = [{ phase: 'booting' }];
+    expect(clone.ready()).toBe(false);
+    replicas = [{ phase: 'ready' }];
+    expect(clone.ready()).toBe(true);
+    await expect(clone.synthesize('Bonjour', 'fr', { refAudio: 'data:audio/wav;base64,UklGRg==', refText: 'olá' })).rejects.toThrow();
+    expect(acquire).toHaveBeenCalledWith('babelcast-tts-clone', expect.objectContaining({ noWake: true, waitMs: 0 }));
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('measures a WAV by its header byte rate', () => {
+    const wav = Buffer.alloc(44 + 48_000);
+    wav.write('RIFF', 0, 'latin1');
+    wav.writeUInt32LE(48_000, 28);
+    expect(wavDurationMs(wav)).toBe(1000);
+    expect(wavDurationMs(Buffer.from('not audio'))).toBe(0);
   });
 });

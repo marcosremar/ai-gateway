@@ -59,7 +59,7 @@ export interface PublicRoom {
 export type RoomServerMessage =
   | { type: 'snapshot'; room: PublicRoom }
   /** Room fields changed after creation (`PATCH /v1/rooms/:code`). */
-  | { type: 'update'; youtubeUrl: string | null }
+  | { type: 'update'; youtubeUrl: string | null; dubLangs?: string[]; listenLangs?: string[] }
   | { type: 'line'; line: RoomLine }
   /** `wav` carries the base64 clip whatever its container; `format` (additive) names it when not WAV (`mp3`). */
   | { type: 'audio'; lineId: number; lang: string; wav: string; format?: string }
