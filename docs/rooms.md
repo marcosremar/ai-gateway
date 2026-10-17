@@ -37,11 +37,13 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 ## WebSocket
 
 Server → client: `{"type":"snapshot","room":<GET body>}` on connect, then `{"type":"line","line"}`,
-`{"type":"audio","lineId","lang","wav"}`, `{"type":"update","youtubeUrl","dubLangs"?,"listenLangs"?}` (room fields
+`{"type":"audio","lineId","lang","wav"}`, `{"type":"audio-chunk","lineId","lang","seq","rate","pcm"}` (a piece of a
+server-voiced line while it is being synthesized, see below), `{"type":"update","youtubeUrl","dubLangs"?,"listenLangs"?}` (room fields
 changed; the language lists when the speaker's voice switches them, see below), `{"type":"ended"}`. Client → server: `{"type":"ping"}` (→ `{"type":"pong"}`)
-and, optionally, `{"type":"listen","lang":"en"|null,"view":"en"|null}`: once sent, audio clips arrive only for `lang`
+and, optionally, `{"type":"listen","lang":"en"|null,"view":"en"|null,"chunks":true?}`: once sent, audio clips arrive only for `lang`
 (`null` = none), so viewers who do not listen to the dubbing do not download it; `view` (additive) is the language on
-screen, which makes the server translate lines into a `listenLangs` language for a reader. The server pings every 25 s.
+screen, which makes the server translate lines into a `listenLangs` language for a reader; `chunks` (additive) asks
+for server-voiced lines as `audio-chunk` pieces instead of one `audio` clip. The server pings every 25 s.
 
 ## Server dubbing
 
@@ -65,9 +67,9 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   dropped, a line older than one already voiced is skipped, and each line+language is voiced once (later corrections
   of the same id are not re-voiced). Synthesis is `kokoroTts`: the gateway's own routing (`routeRequest`: circuit
   breakers, per-call timeout, link-reorder ranks equivalent Kokoro links by latency once there is more than one).
-- Catching up: the server tracks per language until when the listeners' clips play back to back (`mp3DurationMs`
-  counts the mp3 frames: Kokoro's mp3 is VBR and glued from several pieces, so neither the size nor ffprobe's estimate
-  is right) and asks Kokoro for `speed` = 1 + queued audio / 20 s, at most 1.3 (`catchUpSpeed`; queued audio = what is
+- Catching up: the server tracks per language until when the listeners' clips play back to back (`clipDurationMs`:
+  the PCM length; for an mp3 clip `mp3DurationMs` counts the frames, since a VBR mp3 glued from several pieces fools
+  both the size and ffprobe) and asks Kokoro for `speed` = 1 + queued audio / 20 s, at most 1.3 (`catchUpSpeed`; queued audio = what is
   scheduled + the lines still being voiced × the average clip). Measured
   on Kokoro: 1.3 → 18 % shorter. Simulated on a real 2 h room (593 lines, Kokoro 15 chars/s): dropped sentences on the
   page 13.5 % (6 s cap, no speed-up) → 0.2 % (25 s cap), voice delay p50 2.6 → 4.0 s, p95 10.5 → 15.0 s (long
@@ -79,8 +81,16 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   instead of falling further behind. OpenRouter ignores `provider` routing on `/audio/speech` (measured 2026-10-17: a
   request pinned to Together was served by DeepInfra), so the only way to pick the faster Kokoro is a second source
   (another link in `kokoroTts`), which link-reorder then ranks automatically. Failures are logged, never surface to the publisher.
-- Server clips go out as `{"type":"audio","lineId","lang","wav":"<base64 mp3>","format":"mp3"}` (`wav` keeps its name;
-  `format` is additive, absent = WAV) to the viewers listening to that language only.
+- Streamed voice: Kokoro is asked for a streamed WAV (OpenRouter `pcm`, 24 kHz s16 mono; `pcmOfWavStream` drops the
+  header, keeps the samples aligned and gives up after 15 s without bytes). Viewers that sent `"chunks":true` get the
+  head line's PCM as it arrives, in pieces of at least 250 ms:
+  `{"type":"audio-chunk","lineId","lang","seq","rate":24000,"pcm":"<base64 s16le>"}` (seq from 0); the other listeners
+  get the whole line as `{"type":"audio","lineId","lang","wav":"<base64 WAV>","format":"wav"}` once it is complete.
+  Lines still go out in id order: a line synthesized while an earlier one is still streaming waits and is sent right
+  after it. Measured 2026-10-18 on OpenRouter Kokoro (typical lines, 72–168 chars): first audio 0.7–6.5 s after the
+  request (queueing upstream, not length), the whole clip 0.4–0.65 s later — that is what streaming saves. Splitting a
+  sentence at its first comma saved ~80 ms (median 1050 → 969 ms over 9 pairs), so lines are not split. Cost: PCM is
+  ~64 KB/s of speech on the wire (base64) vs ~7.5 KB/s for Kokoro's 60 kbit/s mp3. Only to that language's listeners.
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
@@ -125,7 +135,8 @@ another person starts speaking. API and Local mode never send it.
   first target language; the original only when the room has no translations. The live line and the original under it
   are always one line each: the font shrinks down to 70 %, then only the end of the sentence is shown behind "…".
   Dubbing ("Écouter le doublage") plays clips with Web Audio: one AudioContext, back-to-back scheduling with 10 ms fades (no
-  clicks), oldest pending clips dropped when more than 25 s is queued. While it is on, the live line switches to a line
+  clicks; the `audio-chunk` pieces of one line join without a fade, it fades in only at its start or after a gap),
+  oldest pending lines dropped whole (never part of a line) when more than 25 s is queued. While it is on, the live line switches to a line
   when its clip starts playing (a line without a clip within 4 s is shown anyway) and the delay indicator shows the
   voice delay ("voz 3,2 s" = delayMs + wait until the clip played). Indicator: neutral < 3 s, amber 3–6 s, red above.
   Mobile unlock, inside the tap: `navigator.audioSession.type = 'playback'` and a silent `<audio>` played (otherwise the

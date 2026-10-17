@@ -532,7 +532,8 @@ function dubbable(lang,dubLangs){
   if(!lang||lang==='orig')return false;
   return !Array.isArray(dubLangs)||dubLangs.indexOf(lang)>=0;
 }
-function listenMsg(on,lang){var l=lang&&lang!=='orig'?lang:null;return JSON.stringify({type:'listen',lang:on?l:null,view:l})}
+function listenMsg(on,lang){var l=lang&&lang!=='orig'?lang:null;return JSON.stringify({type:'listen',lang:on?l:null,view:l,chunks:true})}
+function s16ToFloat(bin){var n=bin.length>>1,out=new Float32Array(n);for(var i=0;i<n;i++){var v=bin.charCodeAt(2*i)|(bin.charCodeAt(2*i+1)<<8);out[i]=(v>=32768?v-65536:v)/32768}return out}
 function dubStatus(s,L){
   if(!s.can)return {kind:'na',text:s.lang==='orig'?L.dubPick:L.dubNa};
   if(!s.on)return {kind:'off',text:L.dubOff};
@@ -858,9 +859,10 @@ function stopAudio(){
 function pump(){
   pumpTimer=null;if(!dub||!actx)return;
   var t=actx.currentTime,durs=pending.map(function(c){return c.buf?c.buf.duration:0});
-  var n=backlogDrop(qEnd-t,durs,MAX_BACKLOG_S);
-  if(n){stat.drops+=n;track('audio',{action:'drop',n:n})}
-  for(var i=0;i<n;i++){var d=pending.shift(),m=M(d.lineId);if(m.startedAt==null){m.pending=false;m.skip=true}}
+  var n=backlogDrop(qEnd-t,durs,MAX_BACKLOG_S),gone={},dropped=0;
+  for(var i=0;i<n;i++){var id=pending[i].lineId;if(M(id).startedAt==null&&!gone[id]){gone[id]=1;dropped++}}
+  if(dropped){stat.drops+=dropped;track('audio',{action:'drop',n:dropped});
+    pending=pending.filter(function(c){return !gone[c.lineId]});for(var k in gone){var dm=M(k);dm.pending=false;dm.skip=true}}
   while(pending.length&&pending[0].buf&&qEnd-actx.currentTime<0.5)schedule(pending.shift());
   if(pending.length)pumpTimer=setTimeout(pump,100);
   updateDubUi();
@@ -869,14 +871,16 @@ function schedule(c){
   var start=nextStart(actx.currentTime,qEnd,LEAD_S),dur=c.buf.duration;
   if(qEnd>0){var gap=start-qEnd;if(gap>0.02&&gap<3){stat.gaps++;stat.gapMs+=gap*1000}}
   var src=actx.createBufferSource(),g=actx.createGain(),f=Math.min(FADE_S,dur/4);
+  var fadeIn=!c.part||M(c.lineId).startedAt==null||start>qEnd+0.001;
   src.buffer=c.buf;
-  g.gain.setValueAtTime(0,start);g.gain.linearRampToValueAtTime(1,start+f);
-  g.gain.setValueAtTime(1,start+dur-f);g.gain.linearRampToValueAtTime(0,start+dur);
+  if(fadeIn){g.gain.setValueAtTime(0,start);g.gain.linearRampToValueAtTime(1,start+f)}else g.gain.setValueAtTime(1,start);
+  if(!c.part){g.gain.setValueAtTime(1,start+dur-f);g.gain.linearRampToValueAtTime(0,start+dur)}
   src.connect(g);g.connect(outGain);src.start(start);
   src.onended=function(){var i=playingSrc.indexOf(src);if(i>=0)playingSrc.splice(i,1);try{g.disconnect()}catch(e){}updateDubUi()};
   playingSrc.push(src);qEnd=start+dur;
   var m=M(c.lineId),at=now()+(start-actx.currentTime)*1000;
   if(m.startedAt==null){m.startedAt=at;m.durMs=dur*1000;m.pending=false;m.skip=false;setTimeout(function(){onClipStart(c.lineId)},Math.max(0,at-now()))}
+  else if(c.part)m.durMs+=dur*1000;
 }
 function onClipStart(id){
   var m=meta[id],l=byId[id];stat.clips++;
@@ -898,6 +902,15 @@ function onAudio(msg){
   var ab;try{ab=b64Buf(msg.wav)}catch(e){fail();return}
   try{var p=actx.decodeAudioData(ab,ok,fail);if(p&&p.then)p.then(ok,fail)}catch(e){fail()}
   updateDubUi();
+}
+function onAudioChunk(msg){
+  if(!dub||!actx||msg.lang!==lang||typeof msg.pcm!=='string')return;
+  if(awaitId!=null&&msg.lineId>=awaitId)awaitId=null;
+  var samples;try{samples=s16ToFloat(atob(msg.pcm))}catch(e){return}
+  if(!samples.length)return;
+  var m=M(msg.lineId);if(m.startedAt==null){m.pending=true;m.skip=false}
+  var buf=actx.createBuffer(1,samples.length,msg.rate||24000);buf.getChannelData(0).set(samples);
+  pending.push({lineId:msg.lineId,buf:buf,part:true});pump();
 }
 function canDub(){return !ended&&dubbable(lang,room&&room.dubLangs)}
 function updateDubButton(){
@@ -1033,6 +1046,7 @@ function connect(){
     if(m.type==='snapshot'){applyRoom(m.room);if(!m.room.ended){setPill('live','live');setNotice(null)}}
     else if(m.type==='line'&&room)upsert(m.line);
     else if(m.type==='audio')onAudio(m);
+    else if(m.type==='audio-chunk')onAudioChunk(m);
     else if(m.type==='update'){if(room)room.youtubeUrl=m.youtubeUrl;applyYoutube(m.youtubeUrl);
       if(room&&m.dubLangs){room.dubLangs=m.dubLangs;room.listenLangs=m.listenLangs;buildSelect();updateDubButton()}}
     else if(m.type==='ended')showEnded();};

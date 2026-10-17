@@ -8,7 +8,7 @@ import {
   MemoryRoomStore, RoomService, roomsConfigFromEnv, type RoomsConfig,
 } from '../../../src/rooms';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
-import { TTS_CALL_TIMEOUT_MS, TTS_MAX_PARALLEL, TTS_MAX_WAITING, kokoroTts, type TtsClip, type VoiceRef } from '../../../src/tts';
+import { TTS_CALL_TIMEOUT_MS, TTS_MAX_PARALLEL, TTS_MAX_WAITING, kokoroTts, type TtsClip, type VoiceRef, pcmToWav } from '../../../src/tts';
 import type { LiveRoom, RoomViewer } from '../../../src/rooms/service';
 import type { RoomLine, RoomServerMessage } from '../../../src/rooms/types';
 import { parseLine } from '../../../src/rooms/validate';
@@ -332,7 +332,7 @@ describe('rooms server dubbing', () => {
       synthesizeStream: () => Promise.reject(new Error('no stream')),
       synthesize: vi.fn(({ input, signal }: { input: string; signal?: AbortSignal }) => {
         if (input === 'bonjour 1') { aborted = signal; return new Promise<never>(() => {}); }
-        return Promise.resolve({ audio: Buffer.from(`kokoro:${input}`), contentType: 'audio/mpeg' });
+        return Promise.resolve({ audio: pcmToWav(Buffer.from(`kokoro:${input}`)), contentType: 'audio/wav' });
       }),
     };
     synth = vi.fn(kokoroTts(() => [{ providerId: 'test-kokoro-room', provider: provider as never, model: 'hexgrad/kokoro-82m' }], new CircuitBreakerRegistry({ failureThreshold: 5, resetTimeoutMs: 30_000 })));
@@ -348,7 +348,7 @@ describe('rooms server dubbing', () => {
     expect(audios(fr)).toEqual([]);
     await vi.advanceTimersByTimeAsync(TTS_CALL_TIMEOUT_MS + 1);
     expect(aborted?.aborted).toBe(true);
-    expect(audios(fr).map(a => Buffer.from(a.wav, 'base64').toString())).toEqual(['kokoro:bonjour 2']);
+    expect(audios(fr).map(a => Buffer.from(a.wav, 'base64').subarray(44).toString())).toEqual(['kokoro:bonjour 2']);
   });
 });
 
