@@ -129,6 +129,8 @@ another person starts speaking. API and Local mode never send it.
 
 ## Viewer pages
 
+Local preview: `bun --watch scripts/room-page-demo.ts` serves a demo room on `http://localhost:4610/live/<CODE>` (real rooms code, lines every 5 s, silent server voice) and restarts on every edit of `src/rooms/page.ts`. The pages use the self-hosted Bricolage Grotesque (OFL, `src/rooms/fonts`, served at `/live/fonts/*` with a one-year cache).
+
 - `https://<ROOMS_PUBLIC_HOST>/<CODE>` (Host header match) and `/live/<CODE>` on any host: the room page (French by default, one
   self-contained HTML document, CSP with a per-response nonce, no CDN). Default language: the viewer's saved choice
   for that room, else the first browser language the room publishes (primary subtag: `en-US` → `en`), else the room's
