@@ -12,7 +12,7 @@ import { TTS_CALL_TIMEOUT_MS, TTS_MAX_PARALLEL, TTS_MAX_WAITING, kokoroTts, type
 import type { LiveRoom, RoomViewer } from '../../../src/rooms/service';
 import type { RoomLine, RoomServerMessage } from '../../../src/rooms/types';
 import { parseLine } from '../../../src/rooms/validate';
-import { pacedSpeed, speakerPace } from '../../../src/rooms/dub';
+import { pacedSpeed, speakable, speakerPace } from '../../../src/rooms/dub';
 
 const WAIT = 100;
 
@@ -32,7 +32,7 @@ function viewer(listen: string | null | undefined, view: string | null | undefin
 
 const audios = (v: FakeViewer) => v.msgs.filter((m): m is Extract<RoomServerMessage, { type: 'audio' }> => m.type === 'audio');
 
-const line = (id: number, translations: Record<string, string> = { en: `hello ${id}`, fr: `bonjour ${id}` }): RoomLine =>
+const line = (id: number, translations: Record<string, string> = { en: `hello ${id}.`, fr: `bonjour ${id}.` }): RoomLine =>
   ({ id, original: `olá ${id}`, originalLang: 'pt', translations, ts: 1_000 + id });
 
 let synth: ReturnType<typeof vi.fn<(text: string, lang: string, speed?: number) => Promise<TtsClip>>>;
@@ -67,8 +67,8 @@ describe('rooms server dubbing', () => {
     await service.publishLine(r, line(1));
     expect(synth).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(0);
-    expect(synth).toHaveBeenCalledWith('bonjour 1', 'fr', 1);
-    expect(audios(fr)).toEqual([{ type: 'audio', lineId: 1, lang: 'fr', wav: Buffer.from('mp3:bonjour 1').toString('base64'), format: 'mp3' }]);
+    expect(synth).toHaveBeenCalledWith('bonjour 1.', 'fr', 1);
+    expect(audios(fr)).toEqual([{ type: 'audio', lineId: 1, lang: 'fr', wav: Buffer.from('mp3:bonjour 1.').toString('base64'), format: 'mp3' }]);
     expect(audios(silent)).toEqual([]);
     expect(audios(legacy)).toEqual([]);
     expect(service.publicView(r).dubLangs).toEqual(['en', 'fr']);
@@ -92,7 +92,7 @@ describe('rooms server dubbing', () => {
     await service.publishLine(r, line(2));
     service.publishAudio(r, { lineId: 2, lang: 'en', wav: 'AAAA' });
     await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1', 'fr'], ['bonjour 2', 'fr']]);
+    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1.', 'fr'], ['bonjour 2.', 'fr']]);
     expect(audios(fr).map(a => a.lineId)).toEqual([1, 2]);
   });
 
@@ -105,14 +105,14 @@ describe('rooms server dubbing', () => {
     await vi.advanceTimersByTimeAsync(WAIT + 1);
     await service.publishLine(r, line(2));
     await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1']);
+    expect(synth.mock.calls.map(c => c[0])).toEqual(['bonjour 1.']);
     expect(audios(fr).every(a => a.lineId === 1)).toBe(true);
     expect(audios(fr).at(-1)).toEqual({ type: 'audio', lineId: 1, lang: 'fr', wav: 'AAAA' });
     // The presenter went quiet long enough: the server takes over.
     await vi.advanceTimersByTimeAsync(60_000);
     await service.publishLine(r, line(3));
     await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(synth).toHaveBeenCalledWith('bonjour 3', 'fr', expect.any(Number));
+    expect(synth).toHaveBeenCalledWith('bonjour 3.', 'fr', expect.any(Number));
   });
 
   it('does not deliver a clip the presenter sent while the server was synthesizing', async () => {
@@ -157,7 +157,7 @@ describe('rooms server dubbing', () => {
     const first = Array.from({ length: TTS_MAX_PARALLEL }, (_, i) => i + 1);
     for (let id = 1; id <= waiting; id++) await service.publishLine(r, line(id));
     await service.publishLine(r, line(waiting, { fr: 'corrigé' }));
-    expect(synth.mock.calls.map(c => c[0])).toEqual(first.map(id => `bonjour ${id}`));
+    expect(synth.mock.calls.map(c => c[0])).toEqual(first.map(id => `bonjour ${id}.`));
     for (let i = TTS_MAX_PARALLEL - 1; i >= 1; i--) releases[i]!();
     await vi.advanceTimersByTimeAsync(0);
     expect(audios(fr)).toEqual([]);
@@ -166,7 +166,7 @@ describe('rooms server dubbing', () => {
     expect(audios(fr).map(a => a.lineId)).toEqual(first);
     releases[TTS_MAX_PARALLEL]!();
     await vi.advanceTimersByTimeAsync(0);
-    expect(synth.mock.calls.at(-1)![0]).toBe('corrigé');
+    expect(synth.mock.calls.at(-1)![0]).toBe('corrigé.');
     await service.publishLine(r, line(waiting, { fr: 'encore' }));
     await service.publishLine(r, line(2, { fr: 'en retard' }));
     await vi.advanceTimersByTimeAsync(WAIT * 3);
@@ -187,7 +187,7 @@ describe('rooms server dubbing', () => {
     expect(log).toHaveBeenCalledWith('rooms: server dub dropped stale line', expect.objectContaining({ lang: 'fr', lineId: TTS_MAX_PARALLEL + 1 }));
     while (releases.length) { releases.shift()!(); await vi.advanceTimersByTimeAsync(0); }
     const voiced = Array.from({ length: last }, (_, i) => i + 1).filter(id => id !== TTS_MAX_PARALLEL + 1);
-    expect(synth.mock.calls.map(c => c[0])).toEqual(voiced.map(id => `bonjour ${id}`));
+    expect(synth.mock.calls.map(c => c[0])).toEqual(voiced.map(id => `bonjour ${id}.`));
   });
 
   it('waits for the final version of a growing line and voices its final text', async () => {
@@ -199,7 +199,7 @@ describe('rooms server dubbing', () => {
     expect(synth).not.toHaveBeenCalled();
     await service.publishLine(r, line(1, { en: 'The churn rate remains our main concern' }));
     await vi.advanceTimersByTimeAsync(WAIT + 1);
-    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['The churn rate remains our main concern', 'en']]);
+    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['The churn rate remains our main concern.', 'en']]);
     expect(audios(en).map(a => a.lineId)).toEqual([1]);
   });
 
@@ -209,6 +209,14 @@ describe('rooms server dubbing', () => {
     expect(parseLine({ ...body, draft: true }, cfg, 0).draft).toBe(true);
     expect(parseLine(body, cfg, 0)).not.toHaveProperty('draft');
     expect(parseLine({ ...body, draft: 'yes' }, cfg, 0)).not.toHaveProperty('draft');
+  });
+
+  it('a line always ends like a sentence, so the voice closes it instead of trailing off', () => {
+    expect(speakable('bonjour')).toBe('bonjour.');
+    expect(speakable('ça va ?')).toBe('ça va ?');
+    expect(speakable('Attention !')).toBe('Attention !');
+    expect(speakable('il a dit « oui. »')).toBe('il a dit « oui. »');
+    expect(speakable('et puis…')).toBe('et puis…');
   });
 
   it("follows the speaker's pace: faster for a fast speaker, slower for a slow one, within bounds, on top of the catch-up", async () => {
@@ -223,7 +231,7 @@ describe('rooms server dubbing', () => {
     service.addViewer(r, viewer('fr'));
     await service.publishLine(r, { ...said, speechMs: 1_000 });
     await vi.advanceTimersByTimeAsync(0);
-    expect(synth).toHaveBeenCalledWith('bonjour 1', 'fr', 1.2);
+    expect(synth).toHaveBeenCalledWith('bonjour 1.', 'fr', 1.2);
     const cfg = roomsConfigFromEnv({});
     expect(parseLine({ id: 1, original: 'olá', speechMs: 2_400 }, cfg, 0).speechMs).toBe(2_400);
     expect(() => parseLine({ id: 1, original: 'olá', speechMs: -1 }, cfg, 0)).toThrow('speechMs');
@@ -241,7 +249,7 @@ describe('rooms server dubbing', () => {
     await vi.advanceTimersByTimeAsync(0);
     await service.publishLine(r, line(2));
     await service.publishLine(r, line(3));
-    expect(synth.mock.calls.map(c => [c[0], c[2]])).toEqual([['bonjour 1', 1], ['bonjour 2', 1.2], ['bonjour 3', 1.3]]);
+    expect(synth.mock.calls.map(c => [c[0], c[2]])).toEqual([['bonjour 1.', 1], ['bonjour 2.', 1.2], ['bonjour 3.', 1.3]]);
   });
 
   describe('languages the presenter does not publish', () => {
@@ -265,9 +273,9 @@ describe('rooms server dubbing', () => {
       await service.publishLine(r, line(1));
       await vi.advanceTimersByTimeAsync(0);
       expect(translate).toHaveBeenCalledWith('olá 1', 'pt', 'es');
-      expect(synth).toHaveBeenCalledWith('es:olá 1', 'es', 1);
+      expect(synth).toHaveBeenCalledWith('es:olá 1.', 'es', 1);
       expect(audios(es).map(a => a.lineId)).toEqual([1]);
-      expect(lines(es).at(-1)?.translations).toEqual({ en: 'hello 1', fr: 'bonjour 1', es: 'es:olá 1' });
+      expect(lines(es).at(-1)?.translations).toEqual({ en: 'hello 1.', fr: 'bonjour 1.', es: 'es:olá 1' });
       expect(r.lines[0]!.translations.es).toBe('es:olá 1');
     });
 
@@ -365,7 +373,7 @@ describe('rooms server dubbing', () => {
       providerId: 'test-kokoro', getModels: () => [], getVoices: () => [], isConfigured: () => true,
       synthesizeStream: () => Promise.reject(new Error('no stream')),
       synthesize: vi.fn(({ input, signal }: { input: string; signal?: AbortSignal }) => {
-        if (input === 'bonjour 1') { aborted = signal; return new Promise<never>(() => {}); }
+        if (input === 'bonjour 1.') { aborted = signal; return new Promise<never>(() => {}); }
         return Promise.resolve({ audio: pcmToWav(Buffer.from(`kokoro:${input}`)), contentType: 'audio/wav' });
       }),
     };
@@ -382,7 +390,7 @@ describe('rooms server dubbing', () => {
     expect(audios(fr)).toEqual([]);
     await vi.advanceTimersByTimeAsync(TTS_CALL_TIMEOUT_MS + 1);
     expect(aborted?.aborted).toBe(true);
-    expect(audios(fr).map(a => Buffer.from(a.wav, 'base64').subarray(44).toString())).toEqual(['kokoro:bonjour 2']);
+    expect(audios(fr).map(a => Buffer.from(a.wav, 'base64').subarray(44).toString())).toEqual(['kokoro:bonjour 2.']);
   });
 });
 
@@ -414,11 +422,11 @@ describe("rooms server dubbing in the speaker's voice (GPU mode)", () => {
     expect(de.msgs.filter(m => m.type === 'update')).toEqual([
       { type: 'update', youtubeUrl: null, dubLangs: service.publicView(r).dubLangs, listenLangs: service.publicView(r).listenLangs },
     ]);
-    await service.publishLine(r, line(1, { en: 'hello 1', de: 'hallo 1' }));
+    await service.publishLine(r, line(1, { en: 'hello 1.', de: 'hallo 1.' }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(clone).toHaveBeenCalledWith('hallo 1', 'de', voice);
+    expect(clone).toHaveBeenCalledWith('hallo 1.', 'de', voice);
     expect(synth).not.toHaveBeenCalled();
-    expect(audios(de)).toEqual([{ type: 'audio', lineId: 1, lang: 'de', wav: Buffer.from('wav:hallo 1').toString('base64'), format: 'wav' }]);
+    expect(audios(de)).toEqual([{ type: 'audio', lineId: 1, lang: 'de', wav: Buffer.from('wav:hallo 1.').toString('base64'), format: 'wav' }]);
   });
 
   it('stays on Kokoro, with its languages, while the clone deployment is not serving (never woken for the room)', async () => {
@@ -429,10 +437,10 @@ describe("rooms server dubbing in the speaker's voice (GPU mode)", () => {
     service.addViewer(r, viewer('de'));
     service.setVoice(r, { lang: 'pt', ...voice });
     expect(service.publicView(r).dubLangs).toEqual(['en', 'fr', 'es', 'it', 'ja', 'zh', 'hi']);
-    await service.publishLine(r, line(1, { fr: 'bonjour 1', de: 'hallo 1' }));
+    await service.publishLine(r, line(1, { fr: 'bonjour 1.', de: 'hallo 1.' }));
     await vi.advanceTimersByTimeAsync(WAIT + 1);
     expect(clone).not.toHaveBeenCalled();
-    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1', 'fr']]);
+    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1.', 'fr']]);
     expect(audios(fr).map(a => a.format)).toEqual(['mp3']);
   });
 
@@ -444,10 +452,10 @@ describe("rooms server dubbing in the speaker's voice (GPU mode)", () => {
     service.addViewer(r, fr);
     service.addViewer(r, de);
     service.setVoice(r, { lang: 'pt', ...voice });
-    await service.publishLine(r, line(1, { fr: 'bonjour 1', de: 'hallo 1' }));
+    await service.publishLine(r, line(1, { fr: 'bonjour 1.', de: 'hallo 1.' }));
     await vi.advanceTimersByTimeAsync(0);
     expect(clone).toHaveBeenCalledTimes(2);
-    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1', 'fr']]);
+    expect(synth.mock.calls.map(c => [c[0], c[1]])).toEqual([['bonjour 1.', 'fr']]);
     expect(audios(fr).map(a => a.format)).toEqual(['mp3']);
     expect(audios(de)).toEqual([]);
   });
@@ -459,7 +467,7 @@ describe("rooms server dubbing in the speaker's voice (GPU mode)", () => {
     await service.publishLine(r, line(1));
     await vi.advanceTimersByTimeAsync(0);
     expect(clone).not.toHaveBeenCalled();
-    expect(synth).toHaveBeenCalledWith('bonjour 1', 'fr', 1);
+    expect(synth).toHaveBeenCalledWith('bonjour 1.', 'fr', 1);
   });
 
   it('replaces the reference with the latest one and drops it when the room ends', async () => {
@@ -470,7 +478,7 @@ describe("rooms server dubbing in the speaker's voice (GPU mode)", () => {
     service.setVoice(r, { lang: 'pt', ...next });
     await service.publishLine(r, line(1));
     await vi.advanceTimersByTimeAsync(0);
-    expect(clone).toHaveBeenCalledWith('bonjour 1', 'fr', next);
+    expect(clone).toHaveBeenCalledWith('bonjour 1.', 'fr', next);
     await service.end(r);
     expect(service.publicView(r).dubLangs).toEqual(['fr', 'en', 'es', 'it', 'ja', 'zh', 'hi']);
     expect(() => service.setVoice(r, { lang: 'pt', ...voice })).toThrow(/ended/);

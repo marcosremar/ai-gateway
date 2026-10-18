@@ -81,6 +81,8 @@ export function speakerPace(line: RoomLine): number {
   return Math.min(FASTEST_PACE, Math.max(SLOWEST_PACE, pace));
 }
 
+export const speakable = (text: string): string => /[.!?…。！？][\s"'»”)]*$/u.test(text) ? text : `${text}.`;
+
 export const pacedSpeed = (catchUp: number, line: RoomLine): number =>
   Math.round(Math.min(TTS_MAX_SPEED, catchUp * speakerPace(line)) * 20) / 20;
 
@@ -201,7 +203,7 @@ export class RoomDubber {
     if (ls.done.length > DONE_KEEP) ls.done.shift();
     try {
       const text = want.line.translations[lang]?.trim() || await this.translate(room, want.line, lang);
-      return want.listen ? await this.speak(room, s, want.line, text, lang, speed) : null;
+      return want.listen ? await this.speak(room, s, want.line, speakable(text), lang, speed) : null;
     } catch (err) {
       this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId, error: err instanceof Error ? err.message : String(err) });
       return null;
