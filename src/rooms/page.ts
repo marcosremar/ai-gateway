@@ -528,6 +528,10 @@ function wordStarts(text,start,dur){
   return out;
 }
 function spokenCount(starts,t){var n=0;while(n<starts.length&&starts[n]<=t)n++;return n}
+function karaokeSpan(m,text,original,synced){
+  if(!synced||m.startedAt==null||!m.durMs)return {start:m.arrivedAt,dur:speechMs(original)};
+  return {start:m.startedAt,dur:m.parts?Math.max(m.durMs,speechMs(text)):m.durMs};
+}
 var UIS=['fr','pt','en'];
 var SETTINGS_DEFAULTS={ui:'fr',mode:'translation',showOrig:false,volume:0.9,sync:true,size:0,theme:'auto',autoScroll:true,showTimes:true};
 var SIZE_MIN=-3,SIZE_MAX=7,MODES=['translation','transcript','bilingual','full'],THEMES=['dark','light','auto'];
@@ -746,9 +750,8 @@ function fit(el,text,px){
 var kRaf=null;
 function wordsOf(t){return String(t||'').split(/\s+/).filter(Boolean)}
 function karaokeAt(l,text){
-  var m=M(l.id),start=m.arrivedAt,dur=speechMs(l.original);
-  if(syncOn()&&m.startedAt!=null&&m.durMs){start=m.startedAt;dur=m.durMs}
-  return spokenCount(wordStarts(text,start,dur),now());
+  var s=karaokeSpan(M(l.id),text,l.original,syncOn());
+  return spokenCount(wordStarts(text,s.start,s.dur),now());
 }
 function paintWords(el,k){
   var w=wordsOf(el._shown),drop=wordsOf(el._full).length-w.length,said=Math.max(0,k-drop);
@@ -774,7 +777,7 @@ function paintKaraoke(){
   });
   if(busy&&!kRaf)kRaf=requestAnimationFrame(function(){kRaf=null;paintKaraoke()});
 }
-function syncOn(){return dub&&settings.sync&&lang!=='orig'}
+function syncOn(){return dub&&settings.sync}
 function currentLine(){
   var from=Math.max(0,lines.length-60),entries=[];
   for(var i=from;i<lines.length;i++){var l=lines[i],m=M(l.id);entries.push({id:l.id,arrivedAt:m.arrivedAt,startedAt:m.startedAt,pending:m.pending,skip:m.skip})}
@@ -931,6 +934,7 @@ function schedule(c){
   var m=M(c.lineId),at=now()+(start-actx.currentTime)*1000;
   if(m.startedAt==null){m.startedAt=at;m.durMs=dur*1000;m.pending=false;m.skip=false;setTimeout(function(){onClipStart(c.lineId)},Math.max(0,at-now()))}
   else if(c.part)m.durMs+=dur*1000;
+  if(c.part)m.parts=true;
 }
 function onClipStart(id){
   var m=meta[id],l=byId[id];stat.clips++;
