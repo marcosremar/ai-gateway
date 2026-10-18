@@ -93,6 +93,7 @@ interface VastInstance {
   id: number;
   label?: string | null;
   actual_status?: string | null;
+  intended_status?: string | null;
   status_msg?: string | null;
   public_ipaddr?: string | null;
   ports?: Record<string, Array<{ HostPort?: string }> | undefined> | null;
@@ -127,7 +128,8 @@ export function vastBootError(i: { actual_status?: string | null; status_msg?: s
   return i.actual_status !== 'running' && i.status_msg && IMAGE_PULL_FAILED.test(i.status_msg) ? i.status_msg.trim().slice(0, 300) : null;
 }
 
-export function vastState(status: string | null | undefined): string {
+export function vastState(status: string | null | undefined, intended?: string | null): string {
+  if (intended === 'stopped') return status === 'running' ? 'stopping' : 'stopped';
   if (status === 'running') return 'running';
   if (status === 'exited' || status === 'stopped' || status === 'offline') return 'exited';
   return 'starting';
@@ -406,7 +408,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       return {
         id, rest: i.label!.slice(prefix.length).split(':'), provider: 'vast' as const, tls: true,
         ip: i.public_ipaddr && hostPort ? `${i.public_ipaddr.trim()}:${hostPort}` : null,
-        state: vastState(i.actual_status),
+        state: vastState(i.actual_status, i.intended_status),
         createdAt: typeof i.start_date === 'number' ? Math.round(i.start_date * 1000) : this.now(),
         zone: i.geolocation ?? '', machineType: i.gpu_name ?? '',
         pricePerHour: typeof i.dph_total === 'number' ? Math.round((i.dph_total / EUR_TO_USD) * 1000) / 1000 : null,
@@ -437,6 +439,17 @@ export class VastDeploymentBackend implements DeploymentBackend {
     }
     this.hostOf.delete(machine.id);
     if (this.listCache) this.listCache.machines = this.listCache.machines.filter(m => m.id !== machine.id); // not listed again as alive
+  }
+
+  async stopReplica(machine: ReplicaMachine): Promise<void> {
+    await this.call('PUT', `/instances/${machine.id}/`, { state: 'stopped' });
+    this.listCache = null;
+  }
+
+  async startReplica(machine: ReplicaMachine): Promise<void> {
+    const answer = await this.call<{ success?: boolean; msg?: string }>('PUT', `/instances/${machine.id}/`, { state: 'running' });
+    this.listCache = null;
+    if (answer.success === false) throw new Error(`vast start ${machine.id}: no capacity (${answer.msg ?? 'refused'})`);
   }
 
   async containerLogs(machine: ReplicaMachine, tail: number): Promise<string> {

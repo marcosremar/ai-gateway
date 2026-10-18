@@ -10,7 +10,7 @@ import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastPortCount, vastUdpRange } from '../../../src/deployments/realtime-ports';
 import { buildSpec, VAST_ENV_MAX_BYTES, vastEnvBytes } from '../../../src/deployments/spec';
 import { bootReportFor } from '../../../src/deployments/boot-events';
-import { pullMinutes } from '../../../src/deployments/placements';
+import { isOutOfStock, pullMinutes } from '../../../src/deployments/placements';
 import {
   BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, lowestRtt, MEASURED_RTT_MS, MIN_RELIABILITY,
   UDP_BLOCKED_HOST_MS, VastDeploymentBackend, vastState,
@@ -202,6 +202,28 @@ describe('VastDeploymentBackend', () => {
     ]);
     expect(list[0].createdAt).toBe(1700000000500);
     expect(vastState('created')).toBe('starting');
+  });
+
+  it('parking: stop and start are PUT state, a parked instance lists as stopped, a refused start is out of stock', async () => {
+    const { calls, fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'PUT' && url.endsWith('/instances/9/')) return { body: { success: false, msg: 'GPU unavailable' } };
+      if (method === 'PUT') return { body: { success: true } };
+      return { body: { instances: [
+        { id: 6, label: 'aigw:prod:tts', actual_status: 'exited', intended_status: 'stopped' },
+        { id: 7, label: 'aigw:prod:tts', actual_status: 'running', intended_status: 'stopped' },
+        { id: 8, label: 'aigw:prod:tts', actual_status: 'exited', intended_status: 'running' },
+      ] } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    expect((await backend.listReplicas('prod')).map(m => [m.id, m.state])).toEqual([['6', 'stopped'], ['7', 'stopping'], ['8', 'exited']]);
+    const [six] = await backend.listReplicas('prod');
+    await backend.stopReplica(six);
+    await backend.startReplica(six);
+    expect(calls.filter(c => c.method === 'PUT').map(c => [c.url.split('/v0')[1], c.body])).toEqual([
+      ['/instances/6/', { state: 'stopped' }], ['/instances/6/', { state: 'running' }],
+    ]);
+    const err = await backend.startReplica({ ...six, id: '9' }).catch(e => e);
+    expect(isOutOfStock(err)).toBe(true);
   });
 
   it('a failed list throws (never reads as "nothing is running")', async () => {

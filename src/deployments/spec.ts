@@ -527,7 +527,6 @@ export function vastRefusal(spec: DeploymentSpec, fallback = false): string | nu
     return `realtime on vast maps one port per UDP media port and this spec needs ${vastPortCount(spec)} `
       + `(2 per session per worker + the probe port + 2 TCP); a host gives at most ${VAST_MAX_PORTS}: lower realtime.maxSessions or narrow realtime.udpPorts`;
   }
-  if (spec.idleAction === 'stop' && !fallback) return "idleAction 'stop' is not supported on vast";
   const bytes = vastEnvBytes(spec);
   if (bytes > VAST_ENV_MAX_BYTES) {
     return `vast accepts ${VAST_ENV_MAX_BYTES / 1000} KB of env per instance and this bootScript + env needs about ${Math.ceil(bytes / 1000)} KB `
