@@ -98,15 +98,13 @@ export function qwenCloneTts(links: () => Array<RouteTarget<TTSProvider>>, break
     const targets = links().map(l => ({ ...l, hedgeAfterMs: 0, chainKey: 'tts:qwen-clone' }));
     const { result } = await routeRequest(
       targets,
-      async (t, signal) => {
-        const r = await t.provider.synthesize({
-          signal, model: t.model ?? QWEN_CLONE_MODEL, input: text, voice: 'clone', responseFormat: 'wav',
-          extra: { task_type: 'Base', ref_audio: voice.refAudio, x_vector_only_mode: true, language: primaryLanguage(lang) },
-        });
-        return r.stream ? { ...r, audio: Buffer.from(await new Response(r.stream).arrayBuffer()) } : r;
-      },
+      (t, signal) => t.provider.synthesize({
+        signal, stream: true, model: t.model ?? QWEN_CLONE_MODEL, input: text, voice: 'clone', responseFormat: 'wav',
+        extra: { task_type: 'Base', ref_audio: voice.refAudio, x_vector_only_mode: true, language: primaryLanguage(lang) },
+      }),
       { stage: 'tts', timeoutMs: TTS_CALL_TIMEOUT_MS, retriesPerProvider: 1, ...(breakers && { breakers }) },
     );
+    if (result.stream) return { audio: Buffer.alloc(0), format: 'pcm', pcm: trimStreamSilence(pcmOfWavStream(result.stream)) };
     if (!result.audio.length) throw new Error(`${QWEN_CLONE_MODEL}: empty audio`);
     return { audio: trimSilence(result.audio), format: 'wav' };
   };
@@ -127,6 +125,41 @@ export function deploymentClone(controller: Pick<DeploymentController, 'acquire'
 
 const SILENT_BELOW_PEAK = 0.1;
 const TRIM_MARGIN_MS = 200;
+const STREAM_LOUD_SAMPLE = 1000;
+
+const loud = (pcm: Buffer, at: number): boolean => Math.abs(pcm.readInt16LE(at)) >= STREAM_LOUD_SAMPLE;
+
+function firstLoud(pcm: Buffer): number {
+  for (let at = 0; at + 1 < pcm.length; at += 2) if (loud(pcm, at)) return at;
+  return -1;
+}
+
+function lastLoud(pcm: Buffer): number {
+  for (let at = pcm.length - 2; at >= 0; at -= 2) if (loud(pcm, at)) return at;
+  return -1;
+}
+
+export async function* trimStreamSilence(pcm: AsyncIterable<Buffer>, rate = PCM_RATE): AsyncGenerator<Buffer> {
+  const margin = Math.round((rate * TRIM_MARGIN_MS) / 1000) * 2;
+  let held: Buffer = Buffer.alloc(0);
+  let started = false;
+  for await (const chunk of pcm) {
+    let data = Buffer.concat([held, chunk]);
+    held = Buffer.alloc(0);
+    if (lastLoud(data) < 0) {
+      held = started ? data : data.subarray(Math.max(0, data.length - margin));
+      continue;
+    }
+    if (!started) {
+      data = data.subarray(Math.max(0, firstLoud(data) - margin));
+      started = true;
+    }
+    const end = lastLoud(data) + 2;
+    yield data.subarray(0, end);
+    held = data.subarray(end);
+  }
+  if (started && held.length) yield held.subarray(0, Math.min(margin, held.length));
+}
 
 export function trimSilence(wav: Buffer): Buffer {
   if (wav.length < 44 || wav.subarray(0, 4).toString('latin1') !== 'RIFF') return wav;
