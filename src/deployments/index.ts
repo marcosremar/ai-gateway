@@ -195,6 +195,7 @@ export function deploymentsFromEnv(
     /** An app replaced its routes: the caller re-mounts the providers. */
     onRoutesChange?: () => void;
     keyOf?: DeploymentRoutesOptions['keyOf'];
+    appKeyWakes?: DeploymentRoutesOptions['appKeyWakes'];
     gpuHealth?: Pick<AppGpuHealthOptions, 'cloudLinks' | 'onDegraded'>;
     audit?: DeploymentRoutesOptions['audit'];
   },
@@ -264,6 +265,7 @@ export function deploymentsFromEnv(
     gpuValidation,
     ...(opts.audit ? { audit: opts.audit } : {}),
     ...(opts.keyOf ? { keyOf: opts.keyOf } : {}),
+    ...(opts.appKeyWakes ? { appKeyWakes: opts.appKeyWakes } : {}),
     apps,
     devices,
     userOf: opts.userOf,

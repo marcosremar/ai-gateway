@@ -117,12 +117,15 @@ describe('GPU policy per client key (owner, 10/10/2026)', () => {
   });
 });
 
+const APP_USER_KEY = 'ucast_live_user-activation-key';
+
 const ALL_DAY = [{ start: '00:00', end: '12:00', minReplicas: 1 }, { start: '12:00', end: '00:00', minReplicas: 1 }];
 
 function stubController(classOpen = { now: false }, withTestCopy = false) {
   const deployments: Record<string, { app: string; warm: null; testFor?: string }> = {
     'parle-speech': { app: 'parle', warm: null }, 'site-gpu': { app: 'site', warm: null },
     'parle-qwen-tts': { app: 'parle', warm: null },
+    'babelcast-tts-clone': { app: 'babelcast', warm: null }, 'babelcast-3090': { app: 'babelcast', warm: null },
     ...(withTestCopy ? { 'parle-speech-test': { app: 'parle', warm: null, testFor: 'parle-speech' } } : {}),
   };
   const calls: string[] = [];
@@ -155,6 +158,7 @@ async function routes(withTestCopy = false) {
       if (!found) return null;
       return { keyId: found.keyId, user: found.userId, app: found.userId === 'parle-dev' ? 'parle' : found.userId, policy: access.policyOf(found.keyId) };
     },
+    appKeyWakes: (req, name) => token(req) === APP_USER_KEY && name === 'babelcast-tts-clone',
   });
   const call = (key: string, method: string, path: string, body: unknown = {}) => new Promise<{ status: number; body: string }>((resolve) => {
     let status = 0;
@@ -209,6 +213,18 @@ describe('POST /v1/deployments/:name/start — a client turns its own GPU on wit
     expect(JSON.parse(devWake.body).error).toMatch(/use POST \/v1\/deployments\/parle-speech\/start/);
     expect((await r.call(DEV, 'POST', '/v1/deployments/parle-speech/park')).status).toBe(202);
     expect(r.calls).toEqual(['wake parle-speech', 'park parle-speech', 'park parle-speech']);
+  });
+});
+
+describe('app users wake the voice-clone GPU (owner, 18/10/2026: "Clonar a voz" on keeps it up)', () => {
+  it('an activation key wakes only the listed deployment; every other wake and every other action stays refused', async () => {
+    const r = await routes();
+    expect((await r.call(APP_USER_KEY, 'POST', '/v1/deployments/babelcast-tts-clone/wake')).status).toBe(202);
+    for (const path of ['/v1/deployments/babelcast-3090/wake', '/v1/deployments/parle-speech/wake', '/v1/deployments/babelcast-tts-clone/park', '/v1/deployments/babelcast-tts-clone/start']) {
+      expect((await r.call(APP_USER_KEY, 'POST', path)).status, path).toBe(403);
+    }
+    expect((await r.call(OTHER, 'POST', '/v1/deployments/babelcast-tts-clone/wake')).status).toBe(403);
+    expect(r.calls).toEqual(['wake babelcast-tts-clone']);
   });
 });
 

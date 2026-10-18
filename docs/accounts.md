@@ -12,6 +12,9 @@ Code: `src/accounts/`. Tests: `__tests__/unit/accounts/`.
   **shared by every account**), rooms, telemetry, devices.
 - Never admin. If `ACCOUNTS_APP` is ever in the admin list, activation keys are refused (fail closed) and the boot log
   says so.
+- May wake (`POST /v1/deployments/:name/wake`) only the deployments in `ACCOUNTS_WAKE_DEPLOYMENTS` (comma-separated,
+  default `babelcast-tts-clone`): the app keeps the voice-clone GPU up while subtitles run with "Clonar a voz" on. Park,
+  start and every other deployment stay admin-only.
 - Stored as `HMAC-SHA256(ACCOUNTS_HASH_PEPPER, key)` only; the full key is shown once, at creation.
 - On top of the app limits, each request is metered per user and per key and admitted against the user's quota.
 
