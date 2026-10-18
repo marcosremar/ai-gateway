@@ -20,7 +20,7 @@ const ttsCooldownTracker = new CooldownTracker();
 
 const log = createLogger('audio-speech');
 
-const FORWARDED_EXTRAS = ['task_type', 'ref_audio', 'ref_text', 'language', 'stream_format', 'instructions'];
+const FORWARDED_EXTRAS = ['task_type', 'ref_audio', 'ref_text', 'language', 'stream_format', 'instructions', 'x_vector_only_mode'];
 
 /** A replica of a deployment or a local link: a server of ours that reads fields the OpenAI speech API lacks. */
 const ownServer = (providerId: string) => providerId.startsWith('deployment:') || providerId.startsWith('local:');
