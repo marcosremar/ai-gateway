@@ -105,6 +105,10 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   whole sentence 0.25–0.7 s, voice after 0.2–0.4 s of silence); local room line → first piece on the page p50
   ~150–250 ms with one language, ~250–370 ms with two at once (the machine's load swings it), vs 11.7 s on OpenRouter
   that night. Pauses as quiet as the stock model (−45 dB); TorchStream's running statistics left −20 to −30 dB of noise.
+  Portuguese (2026-10-18): stressed é/ê, ó/ô come from Wiktionary (`vowels.py`, `pt_vowels.tsv`, same table as the
+  desktop app); `normalize.py` writes ordinals, decimals, phone numbers, units, Av./nº and acronyms as people say them
+  ("IBGE" spelled, "SUS" read as a word). Whisper round trip on 105 pt sentences: 4.7 % WER. The server loads the
+  espeak-ng 1.52 bundled with espeakng-loader itself — misaki only sets a library on macOS/Windows, so on Linux it failed.
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
