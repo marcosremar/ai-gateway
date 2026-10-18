@@ -13,6 +13,7 @@ import { join } from 'path';
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/providers/cloud/openrouter';
+import { kokoroStreamTTS } from './src/gateway/providers/cloud/kokoro-stream';
 import { openaiSTT } from './src/gateway/providers/cloud/openai';
 import { fireworksSTT } from './src/gateway/providers/cloud/fireworks';
 import { deepgramSTT } from './src/gateway/providers/cloud/deepgram';
@@ -576,14 +577,17 @@ const rooms = createRooms({
   log: (msg, data) => log.log(data ?? {}, msg),
   // Server dubbing (Kokoro only — no paid fallback voice) through the gateway TTS module: breakers, per-call timeout,
   // one request per sentence. Another Kokoro source added to these links is ranked by latency automatically.
-  synthesize: kokoroTts(() => [{ providerId: 'openrouter', provider: openrouterTTS, model: KOKORO_MODEL }]),
-  synthesizeAvailable: () => openrouterTTS.isConfigured(),
+  synthesize: kokoroTts(() => [
+    ...(kokoroStreamTTS.isConfigured() ? [{ providerId: 'self-hosted' as const, provider: kokoroStreamTTS, model: KOKORO_MODEL }] : []),
+    ...(openrouterTTS.isConfigured() ? [{ providerId: 'openrouter' as const, provider: openrouterTTS, model: KOKORO_MODEL }] : []),
+  ]),
+  synthesizeAvailable: () => kokoroStreamTTS.isConfigured() || openrouterTTS.isConfigured(),
   translate: openRouterTranslate(openrouterLLM),
   ...(controller && { clone: deploymentClone(controller, process.env.ROOM_VOICE_CLONE_DEPLOYMENT?.trim() || 'babelcast-tts-clone') }),
 });
 log.log({
   dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl,
-  serverDub: rooms.config.serverDub && openrouterTTS.isConfigured(),
+  serverDub: rooms.config.serverDub && (kokoroStreamTTS.isConfigured() || openrouterTTS.isConfigured()),
 }, 'Rooms enabled');
 // Desktop-app field telemetry (src/app-telemetry, docs/app-telemetry.md): opt-in batches from the ucast.me app with a
 // gateway key, admin summary/listing. Day files on the same volume as rooms.

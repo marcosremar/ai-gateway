@@ -91,6 +91,17 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   request (queueing upstream, not length), the whole clip 0.4–0.65 s later — that is what streaming saves. Splitting a
   sentence at its first comma saved ~80 ms (median 1050 → 969 ms over 9 pairs), so lines are not split. Cost: PCM is
   ~64 KB/s of speech on the wire (base64) vs ~7.5 KB/s for Kokoro's 60 kbit/s mp3. Only to that language's listeners.
+- Own Kokoro (`docker/kokoro-stream`, models in `marcosremar2/kokoro-82m-streaming-onnx`): with `KOKORO_STREAM_URL`
+  and `KOKORO_STREAM_API_KEY` set it is the first Kokoro link and OpenRouter the second (a voice it lacks — ja, zh —
+  or a 503 `busy` falls through). Kokoro split into three ONNX parts: the text/prosody part and the harmonic source run
+  on the whole sentence, the vocoder (~97 % of the CPU time) runs in windows of frames with per-voice average norm
+  statistics, then the stream switches to the exact vocoder pass (10 ms crossfade) as soon as it is ready. The leading
+  pause token (0.2–0.5 s of silence) is skipped and long first sentences start with their first clause. Measured
+  2026-10-18 on an Apple M5 CPU (loaded): first 250 ms of voice 0.14–0.22 s after the request (stock Kokoro: whole
+  sentence 0.25–0.7 s, voice after 0.2–0.4 s of silence); in a local room with this gateway, line → first piece on the
+  page p50 146–156 ms with one language, 211–225 ms with two at once (each piece's first window has its own
+  8-thread session, `KOKORO_OPENING_THREADS`; with one shared 4-thread pool two first windows fought: 264–281 ms),
+  vs 11.7 s on OpenRouter that night. Pauses as quiet as the stock model (−45 dB); TorchStream's running statistics left −20 to −30 dB of noise.
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
