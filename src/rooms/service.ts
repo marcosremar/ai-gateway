@@ -311,7 +311,7 @@ export class RoomService {
     if (newLang && this.dubber) {
       this.broadcast(room, { type: 'update', youtubeUrl: typeof room.meta.youtubeUrl === 'string' ? room.meta.youtubeUrl : null, ...this.listenLangs(room) });
     }
-    this.dubber?.onPresenterClip(room, audio.lineId, audio.lang);
+    if (audio.lang !== room.meta.originalLang) this.dubber?.onPresenterClip(room, audio.lineId, audio.lang);
     this.broadcast(room, { type: 'audio', lineId: audio.lineId, lang: audio.lang, wav: audio.wav }, v => v.wantsAudio(audio.lang));
   }
 
