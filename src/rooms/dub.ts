@@ -13,7 +13,7 @@
 // Failures are logged, never thrown into the publish path.
 
 import {
-  KOKORO_VOICES, QWEN_LANGUAGES, TtsStream, kokoroVoice, primaryLanguage as primary, qwenSpeaks, type DeploymentClone, type LanguageTts, type TtsClip,
+  KOKORO_VOICES, QWEN_LANGUAGES, TTS_MAX_SPEED, TtsStream, kokoroVoice, primaryLanguage as primary, qwenSpeaks, type DeploymentClone, type LanguageTts, type TtsClip,
   type VoiceRef,
 } from '../tts';
 import type { LiveRoom } from './service';
@@ -69,6 +69,20 @@ interface RoomState { presenterAt: Map<string, number>; presenterKeys: Set<strin
 /** Line ids remembered per language / presenter clips remembered per room (dedup only; old entries roll off). */
 const DONE_KEEP = 64;
 const PRESENTER_KEYS_KEEP = 512;
+
+const KOKORO_LETTERS_PER_SECOND = 14;
+const SLOWEST_PACE = 0.85;
+const FASTEST_PACE = 1.2;
+
+export function speakerPace(line: RoomLine): number {
+  const letters = line.original.match(/\p{L}/gu)?.length ?? 0;
+  if (!line.speechMs || letters < 10) return 1;
+  const pace = (letters * 1000) / line.speechMs / KOKORO_LETTERS_PER_SECOND;
+  return Math.min(FASTEST_PACE, Math.max(SLOWEST_PACE, pace));
+}
+
+export const pacedSpeed = (catchUp: number, line: RoomLine): number =>
+  Math.round(Math.min(TTS_MAX_SPEED, catchUp * speakerPace(line)) * 20) / 20;
 
 export class RoomDubber {
   private readonly rooms = new Map<string, RoomState>();
@@ -204,7 +218,7 @@ export class RoomDubber {
         this.opts.log('rooms: voice clone failed, Kokoro instead', { code: room.meta.code, lang, lineId: line.id, error: err instanceof Error ? err.message : String(err) });
       }
     }
-    return this.opts.synthesize(text, lang, speed);
+    return this.opts.synthesize(text, lang, pacedSpeed(speed, line));
   }
 
   private async translate(room: LiveRoom, line: RoomLine, lang: string): Promise<string> {

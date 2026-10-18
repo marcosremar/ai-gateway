@@ -12,6 +12,7 @@ import { TTS_CALL_TIMEOUT_MS, TTS_MAX_PARALLEL, TTS_MAX_WAITING, kokoroTts, type
 import type { LiveRoom, RoomViewer } from '../../../src/rooms/service';
 import type { RoomLine, RoomServerMessage } from '../../../src/rooms/types';
 import { parseLine } from '../../../src/rooms/validate';
+import { pacedSpeed, speakerPace } from '../../../src/rooms/dub';
 
 const WAIT = 100;
 
@@ -208,6 +209,24 @@ describe('rooms server dubbing', () => {
     expect(parseLine({ ...body, draft: true }, cfg, 0).draft).toBe(true);
     expect(parseLine(body, cfg, 0)).not.toHaveProperty('draft');
     expect(parseLine({ ...body, draft: 'yes' }, cfg, 0)).not.toHaveProperty('draft');
+  });
+
+  it("follows the speaker's pace: faster for a fast speaker, slower for a slow one, within bounds, on top of the catch-up", async () => {
+    const said = { ...line(1), original: 'a nossa principal preocupação' };
+    expect(speakerPace({ ...said, speechMs: 1_800 })).toBeCloseTo(26 / 1.8 / 14);
+    expect(speakerPace({ ...said, speechMs: 1_000 })).toBe(1.2);
+    expect(speakerPace({ ...said, speechMs: 6_000 })).toBe(0.85);
+    expect(speakerPace(said)).toBe(1);
+    expect(speakerPace({ ...line(1), speechMs: 100 })).toBe(1);
+    expect(pacedSpeed(1.25, { ...said, speechMs: 1_000 })).toBe(1.3);
+    const r = await room(service);
+    service.addViewer(r, viewer('fr'));
+    await service.publishLine(r, { ...said, speechMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(synth).toHaveBeenCalledWith('bonjour 1', 'fr', 1.2);
+    const cfg = roomsConfigFromEnv({});
+    expect(parseLine({ id: 1, original: 'olá', speechMs: 2_400 }, cfg, 0).speechMs).toBe(2_400);
+    expect(() => parseLine({ id: 1, original: 'olá', speechMs: -1 }, cfg, 0)).toThrow('speechMs');
   });
 
   it('speaks faster the more audio the listeners have queued, counting the sentences still being voiced', async () => {

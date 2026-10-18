@@ -11,7 +11,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 |---|---|---|---|
 | `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"], "serverDub"?, "youtubeUrl"?}` | `201 {"code","publishToken","url","expiresAt"}` |
 | `PATCH /v1/rooms/:code` | publish token (or the creating / an admin gateway key) | `{"youtubeUrl": "<link>" \| null}` and/or `{"serverDub": true \| false}` (the app's "Dublagem" switch; off = text only, the open pages lose the listen button) | `200 {"code","youtubeUrl","serverDub"}` |
-| `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?, "draft"?}` | `204` |
+| `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?, "speechMs"?, "draft"?}` | `204` |
 | `POST /v1/rooms/:code/audio` | publish token | `{"lineId", "lang", "wav": "<base64>"}` (≤ 2 MB decoded) | `204` (broadcast only, never stored) |
 | `PUT /v1/rooms/:code/voice` | publish token (or the creating / an admin gateway key) | `{"lang", "ref_audio": "data:audio/…;base64,…", "ref_text"}` (≤ 512 KB decoded) | `204` (memory only, never served) |
 | `POST /v1/rooms/:code/end` | publish token | — | `204` |
@@ -22,6 +22,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 - `id` is monotonic per room; re-sending an id replaces that line (idempotent). Out-of-order ids are kept in id order.
 - `expiresAt` in the GET body is an addition to the original contract (the page shows it after the end).
 - `delayMs` (additive, optional): ms from the end of speech to the subtitle being ready, an integer 0–120000 (else 400).
+- `speechMs` (additive, optional): how long the speaker took to say the line, ms, 0–120000. The server dub speaks at the speaker's pace: letters of `original` per second against Kokoro's 14, clamped to 0.85–1.2×, multiplied by the catch-up speed (≤ 1.3×).
   Stored and served back on the line (GET and WS); the page shows the median of the last 10 as "atraso 1,8 s".
 - `draft` (additive, optional): `true` = the presenter will still grow this line (same `id`). The server dub never voices
   a draft; it voices the version without `draft`. Anything but `true` is ignored (absent = final, as with older apps).
@@ -91,6 +92,19 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   request (queueing upstream, not length), the whole clip 0.4–0.65 s later — that is what streaming saves. Splitting a
   sentence at its first comma saved ~80 ms (median 1050 → 969 ms over 9 pairs), so lines are not split. Cost: PCM is
   ~64 KB/s of speech on the wire (base64) vs ~7.5 KB/s for Kokoro's 60 kbit/s mp3. Only to that language's listeners.
+- Own Kokoro (`docker/kokoro-stream`, models in `marcosremar2/kokoro-82m-streaming-onnx`): with `KOKORO_STREAM_URL`
+  and `KOKORO_STREAM_API_KEY` set it is the first Kokoro link and OpenRouter the second (a voice it lacks — ja, zh —
+  or a 503 `busy` falls through). Kokoro split into two ONNX parts: the text/prosody part and the harmonic source run
+  on the whole sentence; the vocoder (~97 % of the CPU time) runs in windows of frames. It is Kokoro's own generator
+  with its instance norms (statistics over the whole sentence) replaced by fixed scale/shift, fine-tuned 1 h 20
+  against the original (`training/`), so a sentence streamed in windows is identical to the whole one (≥ 93 dB SNR)
+  and sounds like the original (Whisper WER 2.7 % vs 2.7 %, DNSMOS 3.43 vs 3.41 on 25 sentences). The leading pause
+  token (0.2–0.5 s of silence) is skipped, long first sentences start with their first clause, and each sentence's
+  first window has its own 8-thread session (`KOKORO_OPENING_THREADS`; later windows `KOKORO_LATER_THREADS`, 2).
+  Measured 2026-10-18 on an Apple M5 CPU (loaded): first 250 ms of voice 0.14–0.22 s after the request (stock Kokoro:
+  whole sentence 0.25–0.7 s, voice after 0.2–0.4 s of silence); local room line → first piece on the page p50
+  ~150–250 ms with one language, ~250–370 ms with two at once (the machine's load swings it), vs 11.7 s on OpenRouter
+  that night. Pauses as quiet as the stock model (−45 dB); TorchStream's running statistics left −20 to −30 dB of noise.
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")

@@ -364,7 +364,7 @@ async fn rooms_use_the_gateway_key_to_create_and_the_publish_token_after() {
     let mut translations = BTreeMap::new();
     translations.insert("en".to_string(), "Hello".to_string());
     rooms
-        .publish_line(&room, &RoomLine { id: 7, original: "Olá".into(), original_lang: Some("pt".into()), translations, ts_ms: Some(1000), delay_ms: Some(1800), draft: true })
+        .publish_line(&room, &RoomLine { id: 7, original: "Olá".into(), original_lang: Some("pt".into()), translations, ts_ms: Some(1000), delay_ms: Some(1800), speech_ms: Some(2400), draft: true })
         .await
         .unwrap();
     rooms.publish_audio(&room, 7, "en", "UklGRg==").await.unwrap();
@@ -379,7 +379,7 @@ async fn rooms_use_the_gateway_key_to_create_and_the_publish_token_after() {
     assert_eq!(reqs[0].header("authorization"), Some("Bearer test-key"));
     assert_eq!(reqs[0].json(), json!({"title": "Aula", "originalLang": "pt", "languages": ["en", "es"], "youtubeUrl": "https://youtu.be/x"}));
     assert_eq!(reqs[1].header("authorization"), Some("Bearer pt-1"));
-    assert_eq!(reqs[1].json(), json!({"id": 7, "original": "Olá", "originalLang": "pt", "translations": {"en": "Hello"}, "ts": 1000, "delayMs": 1800, "draft": true}));
+    assert_eq!(reqs[1].json(), json!({"id": 7, "original": "Olá", "originalLang": "pt", "translations": {"en": "Hello"}, "ts": 1000, "delayMs": 1800, "speechMs": 2400, "draft": true}));
     assert_eq!(reqs[2].json(), json!({"lineId": 7, "lang": "en", "wav": "UklGRg=="}));
     assert_eq!((reqs[3].method.as_str(), reqs[3].header("authorization")), ("PATCH", Some("Bearer pt-1")));
     assert_eq!(reqs[3].json(), json!({"youtubeUrl": null}));

@@ -117,6 +117,8 @@ export function parseLine(body: unknown, cfg: RoomsConfig, now: number): RoomLin
   const line: RoomLine = { id, original, originalLang, translations, ts: Math.floor(ts) };
   const delayMs = parseDelayMs(body.delayMs);
   if (delayMs !== undefined) line.delayMs = delayMs;
+  const speechMs = parseDelayMs(body.speechMs, 'speechMs');
+  if (speechMs !== undefined) line.speechMs = speechMs;
   if (body.draft === true) line.draft = true;
   return line;
 }
@@ -125,10 +127,10 @@ export function parseLine(body: unknown, cfg: RoomsConfig, now: number): RoomLin
 export const MAX_DELAY_MS = 120_000;
 
 /** Optional `delayMs` of a line: absent/null → undefined; else an integer 0…MAX_DELAY_MS or a 400. */
-export function parseDelayMs(v: unknown): number | undefined {
+export function parseDelayMs(v: unknown, field = 'delayMs'): number | undefined {
   if (v === undefined || v === null) return undefined;
   if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0 || v > MAX_DELAY_MS) {
-    throw new RoomError(400, `delayMs must be an integer between 0 and ${MAX_DELAY_MS}`);
+    throw new RoomError(400, `${field} must be an integer between 0 and ${MAX_DELAY_MS}`);
   }
   return v;
 }
