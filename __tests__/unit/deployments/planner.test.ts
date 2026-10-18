@@ -162,6 +162,15 @@ describe('planReplicas', () => {
     expect(plan.release).toEqual([]);
   });
 
+  it('a wake whose boots keep failing keeps trying until bootTimeoutMinutes, not just idleMinutes (18/10/2026: 7 too-far hosts)', () => {
+    const s = spec({ minReplicas: 0, idleMinutes: 15, bootTimeoutMinutes: 45 });
+    const wake = NOW - 19 * MIN;
+    expect(planReplicas({ ...base, spec: s, lastRequestAt: wake, replicas: [] }).desired).toBe(0);
+    expect(planReplicas({ ...base, spec: s, lastRequestAt: wake, failedBootAt: NOW - MIN, replicas: [] }).desired).toBe(1);
+    expect(planReplicas({ ...base, spec: s, now: wake + 46 * MIN, lastRequestAt: wake, failedBootAt: wake + 44 * MIN, replicas: [] }).desired).toBe(0);
+    expect(planReplicas({ ...base, spec: s, lastRequestAt: wake, failedBootAt: wake - MIN, replicas: [] }).desired).toBe(0);
+  });
+
   it('the idle window starts when the replica became ready, then going idle scales to zero', () => {
     const s = spec({ minReplicas: 0, idleMinutes: 4 });
     const readyAt = NOW - 2 * MIN;
