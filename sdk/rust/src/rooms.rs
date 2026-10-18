@@ -115,6 +115,8 @@ pub struct RoomLine {
     /// End of speech → caption delay, ms (the page shows the median).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delay_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speech_ms: Option<u64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub draft: bool,
 }

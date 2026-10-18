@@ -45,7 +45,7 @@ class Front(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, input_ids, ref_s, speed):
+    def forward(self, input_ids, ref_s, speed, token_rate, token_semitones):
         m = self.model
         lengths = torch.full((input_ids.shape[0],), input_ids.shape[-1], dtype=torch.long)
         text_mask = torch.zeros_like(input_ids, dtype=torch.bool)
@@ -53,13 +53,15 @@ class Front(nn.Module):
         s = ref_s[:, 128:]
         d = m.predictor.text_encoder(d_en, s, lengths, text_mask)
         x, _ = m.predictor.lstm(d)
-        duration = torch.sigmoid(m.predictor.duration_proj(x)).sum(axis=-1) / speed
+        duration = torch.sigmoid(m.predictor.duration_proj(x)).sum(axis=-1) / speed * token_rate
         durations = torch.round(duration).clamp(min=1).long().squeeze()
         indices = torch.repeat_interleave(torch.arange(input_ids.shape[1]), durations)
         aln = torch.zeros((input_ids.shape[1], indices.shape[0]))
         aln[indices, torch.arange(indices.shape[0])] = 1
         aln = aln.unsqueeze(0)
         F0_curve, N = m.predictor.F0Ntrain(d.transpose(-1, -2) @ aln, s)
+        frame_semitones = torch.repeat_interleave(token_semitones.unsqueeze(0) @ aln[0], 2)
+        F0_curve = F0_curve * torch.pow(2.0, frame_semitones / 12).unsqueeze(0)
         asr = m.text_encoder(input_ids, lengths, text_mask) @ aln
         dec = m.decoder
         style = ref_s[:, :128]
@@ -116,9 +118,10 @@ def main() -> None:
     ids = torch.LongTensor([[0, *torch.randint(1, 100, (48,)).tolist(), 0]])
     ref_s = packs["af_heart"][47]
     with torch.no_grad():
-        x, har, _ = front(ids, ref_s, torch.ones(1))
+        controls = (torch.ones(1), torch.ones(ids.shape[1]), torch.zeros(ids.shape[1]))
+        x, har, _ = front(ids, ref_s, *controls)
     exports = [
-        ("front.onnx", front, (ids, ref_s, torch.ones(1)), ["input_ids", "ref_s", "speed"], ["x", "har", "durations"], {"input_ids": {1: "tokens"}, "x": {2: "frames"}, "har": {2: "har_frames"}, "durations": {0: "tokens"}}),
+        ("front.onnx", front, (ids, ref_s, *controls), ["input_ids", "ref_s", "speed", "token_rate", "token_semitones"], ["x", "har", "durations"], {"input_ids": {1: "tokens"}, "token_rate": {0: "tokens"}, "token_semitones": {0: "tokens"}, "x": {2: "frames"}, "har": {2: "har_frames"}, "durations": {0: "tokens"}}),
         ("generator_streaming.onnx", StreamingGenerator(model.decoder.generator, istftnet, Path(opts.streaming_weights)), (x, ref_s[:, :128], har), ["x", "style", "har"], ["audio"], {"x": {2: "frames"}, "har": {2: "har_frames"}, "audio": {0: "samples"}}),
     ]
     for name, module, inputs, input_names, output_names, axes in exports:

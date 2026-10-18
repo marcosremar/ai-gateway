@@ -11,7 +11,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 |---|---|---|---|
 | `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"], "serverDub"?, "youtubeUrl"?}` | `201 {"code","publishToken","url","expiresAt"}` |
 | `PATCH /v1/rooms/:code` | publish token (or the creating / an admin gateway key) | `{"youtubeUrl": "<link>" \| null}` and/or `{"serverDub": true \| false}` (the app's "Dublagem" switch; off = text only, the open pages lose the listen button) | `200 {"code","youtubeUrl","serverDub"}` |
-| `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?, "draft"?}` | `204` |
+| `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?, "speechMs"?, "draft"?}` | `204` |
 | `POST /v1/rooms/:code/audio` | publish token | `{"lineId", "lang", "wav": "<base64>"}` (≤ 2 MB decoded) | `204` (broadcast only, never stored) |
 | `PUT /v1/rooms/:code/voice` | publish token (or the creating / an admin gateway key) | `{"lang", "ref_audio": "data:audio/…;base64,…", "ref_text"}` (≤ 512 KB decoded) | `204` (memory only, never served) |
 | `POST /v1/rooms/:code/end` | publish token | — | `204` |
@@ -22,6 +22,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 - `id` is monotonic per room; re-sending an id replaces that line (idempotent). Out-of-order ids are kept in id order.
 - `expiresAt` in the GET body is an addition to the original contract (the page shows it after the end).
 - `delayMs` (additive, optional): ms from the end of speech to the subtitle being ready, an integer 0–120000 (else 400).
+- `speechMs` (additive, optional): how long the speaker took to say the line, ms, 0–120000. The server dub speaks at the speaker's pace: letters of `original` per second against Kokoro's 14, clamped to 0.85–1.2×, multiplied by the catch-up speed (≤ 1.3×).
   Stored and served back on the line (GET and WS); the page shows the median of the last 10 as "atraso 1,8 s".
 - `draft` (additive, optional): `true` = the presenter will still grow this line (same `id`). The server dub never voices
   a draft; it voices the version without `draft`. Anything but `true` is ignored (absent = final, as with older apps).
