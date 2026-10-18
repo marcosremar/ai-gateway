@@ -101,7 +101,7 @@ export function qwenCloneTts(links: () => Array<RouteTarget<TTSProvider>>, break
       async (t, signal) => {
         const r = await t.provider.synthesize({
           signal, model: t.model ?? QWEN_CLONE_MODEL, input: text, voice: 'clone', responseFormat: 'wav',
-          extra: { task_type: 'Base', ref_audio: voice.refAudio, ref_text: voice.refText, language: primaryLanguage(lang) },
+          extra: { task_type: 'Base', ref_audio: voice.refAudio, x_vector_only_mode: true, language: primaryLanguage(lang) },
         });
         return r.stream ? { ...r, audio: Buffer.from(await new Response(r.stream).arrayBuffer()) } : r;
       },
