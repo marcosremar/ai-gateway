@@ -8,9 +8,9 @@ import { ROOM_PAGE_LOGIC, UI_LANGS, UI_TEXT, roomPage } from '../../../src/rooms
 
 interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
-interface Settings { ui: string; mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean; showDelay: boolean }
+interface Settings { ui: string; mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -18,7 +18,6 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   nextStart(now: number, prevEnd: number, lead: number): number;
   backlogDrop(ahead: number, durs: number[], maxSec: number): number;
   median(values: number[]): number | null;
-  delayLabel(ms: number, voice: boolean, L: Record<string, string>): { text: string; level: 'ok' | 'warn' | 'bad' };
   normalizeSettings(raw: unknown): Settings;
   parseSettings(json: string | null, legacyOrig: string | null): Settings;
   textSizes(step: number, vw: number): { live: number; tx: number };
@@ -35,7 +34,7 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   dubStatus(s: { can: boolean; lang: string; on: boolean; ctx: string | null; error: string | null; playing: boolean; loading: boolean }, L: Record<string, string>): { kind: string; text: string };
   silentWav(rate: number, samples: number): string;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, delayLabel, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -176,34 +175,24 @@ describe('room page: clip scheduling', () => {
   });
 });
 
-describe('room page: delay indicator', () => {
+describe('room page: delay median (analytics)', () => {
   it('uses the median of the values', () => {
     expect(median([])).toBeNull();
     expect(median([5000, 1000, 2000])).toBe(2000);
     expect(median([1000, 2000, 3000, 9000])).toBe(2500);
   });
-
-  it('labels in the interface language with one decimal and colors by threshold', () => {
-    expect(delayLabel(1849, false, UI_TEXT.fr)).toEqual({ text: 'délai 1,8 s', level: 'ok' });
-    expect(delayLabel(1849, false, UI_TEXT.en)).toEqual({ text: 'delay 1.8 s', level: 'ok' });
-    expect(delayLabel(1849, false, UI_TEXT.pt)).toEqual({ text: 'atraso 1,8 s', level: 'ok' });
-    expect(delayLabel(3200, true, UI_TEXT.pt)).toEqual({ text: 'voz 3,2 s', level: 'warn' });
-    expect(delayLabel(2999, false, UI_TEXT.pt).level).toBe('ok');
-    expect(delayLabel(6000, false, UI_TEXT.pt).level).toBe('warn');
-    expect(delayLabel(6001, false, UI_TEXT.pt).level).toBe('bad');
-  });
 });
-const DEFAULTS: Settings = { ui: 'fr', mode: 'translation', showOrig: false, volume: 0.9, sync: true, size: 0, theme: 'auto', autoScroll: true, showTimes: true, showDelay: true };
+const DEFAULTS: Settings = { ui: 'fr', mode: 'translation', showOrig: false, volume: 0.9, sync: true, size: 0, theme: 'auto', autoScroll: true, showTimes: true };
 
 describe('room page: viewer settings', () => {
-  it('defaults: translation, original hidden, voice sync on, automatic theme, auto-scroll, times and delay shown', () => {
+  it('defaults: translation, original hidden, voice sync on, automatic theme, auto-scroll, times shown', () => {
     expect({ ...parseSettings(null, null) }).toEqual(DEFAULTS);
     expect({ ...parseSettings('not json', null) }).toEqual(DEFAULTS);
     expect({ ...parseSettings('[1,2]', null) }).toEqual(DEFAULTS);
   });
 
   it('round-trips a saved choice and validates every field independently', () => {
-    const saved: Settings = { ui: 'en', mode: 'bilingual', showOrig: true, volume: 0.35, sync: false, size: 4, theme: 'light', autoScroll: false, showTimes: false, showDelay: false };
+    const saved: Settings = { ui: 'en', mode: 'bilingual', showOrig: true, volume: 0.35, sync: false, size: 4, theme: 'light', autoScroll: false, showTimes: false };
     expect({ ...parseSettings(JSON.stringify(saved), null) }).toEqual(saved);
     const bad = { mode: 'karaoke', theme: 'pink', volume: 3, size: 99, sync: 'yes', showTimes: 0, autoScroll: false };
     expect({ ...normalizeSettings(bad) }).toEqual({ ...DEFAULTS, size: 7, autoScroll: false });
@@ -306,7 +295,7 @@ describe('room page: viewer settings', () => {
 
   it('ships the mobile layout: brand colors, safe-area insets, no inline styles', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
-    for (const s of ['#2F6A80', '#252528', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html,body{overflow-x:hidden}', 'Écouter le doublage']) {
+    for (const s of ['#2F6A80', '#0A1220', 'env(safe-area-inset-top)', 'env(safe-area-inset-bottom)', 'viewport-fit=cover', 'html{overflow-x:hidden', 'Écouter le doublage']) {
       expect(html).toContain(s);
     }
     // No CDN: every absolute URL in the page is an SVG/XML namespace on www.w3.org.
@@ -317,10 +306,12 @@ describe('room page: viewer settings', () => {
   it('ships an accessible settings sheet', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
     for (const s of ['role="dialog"', 'aria-modal="true"', 'aria-labelledby="sheetTitle"', 'aria-haspopup="dialog"', "e.key==='Escape'", "localStorage.setItem",
-      'Transcription seule', 'Bilingue', 'Texte complet seul', 'Synchroniser les sous-titres avec la voix', 'Défilement automatique du texte complet', 'Afficher les heures', 'Afficher le délai', 'Automatique']) {
+      'Transcription seule', 'Bilingue', 'Texte complet seul', 'Synchroniser les sous-titres avec la voix', 'Défilement automatique du texte complet', 'Afficher les heures', 'Automatique']) {
       expect(html).toContain(s);
     }
     expect(html).not.toMatch(/ style="/); // CSP: no inline style attributes
+    expect(html).not.toContain('id="delay"');
+    expect(html).not.toContain('Afficher le délai');
   });
 });
 describe('room page: analytics helpers', () => {

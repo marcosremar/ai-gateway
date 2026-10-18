@@ -34,7 +34,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     modesLabel: "Mode d'affichage", qTranslation: 'Sous-titres traduits',
     qBilingual: 'Sous-titres doubles (original + traduction)', qTranscript: 'Transcription (langue originale)', qFull: 'Texte complet',
     copy: 'Copier le texte', copied: 'Copié !', settings: 'Réglages', settingsTitle: "Réglages d'affichage", close: 'Fermer les réglages',
-    newLines: 'Nouvelles phrases ↓', uiLang: "Langue de l'interface", mode: 'Mode',
+    backToTop: 'Revenir en haut', uiLang: "Langue de l'interface", mode: 'Mode',
     mTranslation: 'Traduction', mTranslationD: 'Traduction en avant ; la phrase originale en dessous est facultative',
     mTranscript: 'Transcription seule', mTranscriptD: 'Seulement la phrase originale, sans traduction',
     mBilingual: 'Bilingue', mBilingualD: 'Traduction et phrase originale, toujours',
@@ -42,9 +42,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     showOrig: 'Afficher la phrase originale en dessous', dubbing: 'Doublage', listenDub: 'Écouter le doublage', volume: 'Volume',
     volumeAria: 'Volume du doublage', sync: 'Synchroniser les sous-titres avec la voix', size: 'Taille du texte', smaller: 'Réduire le texte',
     bigger: 'Agrandir le texte', theme: 'Thème', dark: 'Sombre', light: 'Clair', auto: 'Automatique', fullText: 'Texte complet',
-    autoScroll: 'Défilement automatique du texte complet', showTimes: 'Afficher les heures', showDelay: 'Afficher le délai',
-    delay: 'délai', voice: 'voix', delayTipText: 'Délai des sous-titres par rapport à la parole (médiane des 10 dernières phrases)',
-    delayTipVoice: 'Délai de la voix par rapport à la parole (médiane des dernières phrases)',
+    autoScroll: 'Défilement automatique du texte complet', showTimes: 'Afficher les heures',
     endedNotice: 'Session terminée — texte disponible jusqu’au {d}.',
     gone: 'Cette session n’existe plus (le texte reste disponible {n} jours après la dernière prise de parole).',
     noDub: 'Ce navigateur ne lit pas le doublage.', current: 'Sous-titre en cours', langCap: 'Langue',
@@ -59,7 +57,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     options: 'Opções', langLabel: 'Idioma da legenda', original: 'Original', modesLabel: 'Modo de exibição',
     qTranslation: 'Legenda traduzida', qBilingual: 'Legenda dupla (original + tradução)',
     qTranscript: 'Transcrição (fala original)', qFull: 'Texto completo', copy: 'Copiar texto', copied: 'Copiado!', settings: 'Ajustes',
-    settingsTitle: 'Ajustes de exibição', close: 'Fechar ajustes', newLines: 'Novas falas ↓', uiLang: 'Idioma da interface', mode: 'Modo',
+    settingsTitle: 'Ajustes de exibição', close: 'Fechar ajustes', backToTop: 'Voltar ao topo', uiLang: 'Idioma da interface', mode: 'Modo',
     mTranslation: 'Tradução', mTranslationD: 'Tradução em destaque; a fala original embaixo é opcional',
     mTranscript: 'Só transcrição', mTranscriptD: 'Só a fala original, sem tradução',
     mBilingual: 'Bilíngue', mBilingualD: 'Tradução e fala original, sempre',
@@ -67,9 +65,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     showOrig: 'Mostrar a fala original embaixo', dubbing: 'Dublagem', listenDub: 'Ouvir dublagem', volume: 'Volume',
     volumeAria: 'Volume da dublagem', sync: 'Sincronizar legenda com a voz', size: 'Tamanho do texto', smaller: 'Diminuir o texto',
     bigger: 'Aumentar o texto', theme: 'Tema', dark: 'Escuro', light: 'Claro', auto: 'Automático', fullText: 'Texto completo',
-    autoScroll: 'Rolagem automática do texto completo', showTimes: 'Mostrar horários', showDelay: 'Mostrar atraso',
-    delay: 'atraso', voice: 'voz', delayTipText: 'Atraso da legenda em relação à fala (mediana das últimas 10 falas)',
-    delayTipVoice: 'Atraso da voz em relação à fala (mediana das últimas falas)',
+    autoScroll: 'Rolagem automática do texto completo', showTimes: 'Mostrar horários',
     endedNotice: 'Sessão encerrada — texto disponível até {d}.',
     gone: 'Esta sessão não existe mais (o texto fica disponível por {n} dias após a última fala).',
     noDub: 'Este navegador não reproduz a dublagem.', current: 'Legenda atual', langCap: 'Idioma',
@@ -84,7 +80,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     options: 'Options', langLabel: 'Subtitle language', original: 'Original', modesLabel: 'Display mode',
     qTranslation: 'Translated subtitles', qBilingual: 'Dual subtitles (original + translation)',
     qTranscript: 'Transcript (original speech)', qFull: 'Full text', copy: 'Copy text', copied: 'Copied!', settings: 'Settings',
-    settingsTitle: 'Display settings', close: 'Close settings', newLines: 'New lines ↓', uiLang: 'Interface language', mode: 'Mode',
+    settingsTitle: 'Display settings', close: 'Close settings', backToTop: 'Back to top', uiLang: 'Interface language', mode: 'Mode',
     mTranslation: 'Translation', mTranslationD: 'Translation first; the original underneath is optional',
     mTranscript: 'Transcript only', mTranscriptD: 'Only the original speech, no translation',
     mBilingual: 'Bilingual', mBilingualD: 'Translation and original, always',
@@ -92,9 +88,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     showOrig: 'Show the original underneath', dubbing: 'Dubbing', listenDub: 'Listen to dubbing', volume: 'Volume',
     volumeAria: 'Dubbing volume', sync: 'Sync subtitles with the voice', size: 'Text size', smaller: 'Smaller text',
     bigger: 'Bigger text', theme: 'Theme', dark: 'Dark', light: 'Light', auto: 'Automatic', fullText: 'Full text',
-    autoScroll: 'Auto-scroll the full text', showTimes: 'Show times', showDelay: 'Show delay',
-    delay: 'delay', voice: 'voice', delayTipText: 'Subtitle delay behind the speech (median of the last 10 lines)',
-    delayTipVoice: 'Voice delay behind the speech (median of the last lines)',
+    autoScroll: 'Auto-scroll the full text', showTimes: 'Show times',
     endedNotice: 'Session ended — text available until {d}.',
     gone: 'This session no longer exists (the text stays available {n} days after the last words).',
     noDub: 'This browser cannot play the dubbing.', current: 'Current subtitle', langCap: 'Language',
@@ -121,8 +115,6 @@ export function pageCsp(nonce: string): string {
   ].join('; ');
 }
 
-export const FONT_FILES = ['bricolage-5.3-latin.woff2', 'bricolage-5.3-latin-ext.woff2'];
-
 const BASE_CSS = `
 @font-face{font-family:"Bricolage";font-style:normal;font-weight:200 800;font-display:swap;src:url(/live/fonts/bricolage-5.3-latin.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 @font-face{font-family:"Bricolage";font-style:normal;font-weight:200 800;font-display:swap;src:url(/live/fonts/bricolage-5.3-latin-ext.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
@@ -146,7 +138,7 @@ function shell(title: string, css: string, body: string, script: string, nonce: 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#252528">
+<meta name="theme-color" content="#0A1220">
 <meta name="robots" content="noindex">
 <title>${esc(title)}</title>
 <link rel="icon" href="${ICON}">
@@ -217,16 +209,12 @@ const ROOM_CSS = `
 :root{--bad:#FF7A70;--live-bg:rgba(127,184,204,.14);--shade:rgba(4,8,16,.6);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right));--rail:3.4rem}
 html[data-theme="light"]{${LIGHT_VARS}}
 @media (prefers-color-scheme:light){html[data-theme="auto"]{${LIGHT_VARS}}}
-html,body{overflow-x:hidden}
-html{scrollbar-color:var(--line) transparent}
+html{overflow-x:hidden;scrollbar-color:var(--line) transparent}
 .wrap{max-width:48rem;margin:0 auto;min-width:0}
 header{position:sticky;top:0;z-index:5;background:linear-gradient(var(--bg) 82%,transparent);padding:max(10px,env(safe-area-inset-top)) var(--pad-r) 14px var(--pad)}
 .top{display:flex;align-items:center;gap:10px;min-width:0;height:34px}
 .top .logo{flex:none;font-size:1.06rem}
 .top h1{flex:1;min-width:0;margin:0;font-size:.9rem;font-weight:500;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.delay{flex:none;white-space:nowrap;font-size:.75rem;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums}
-.delay.warn{color:var(--warn)}
-.delay.bad{color:var(--bad)}
 .pill{flex:none;display:inline-flex;align-items:center;gap:7px;white-space:nowrap;font-size:.75rem;font-weight:700;border-radius:999px;padding:5px 11px;background:var(--surface);color:var(--muted);text-transform:lowercase;letter-spacing:.01em}
 .pill.live{background:var(--live-bg);color:var(--accent)}
 .pill.live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent)}
@@ -313,7 +301,14 @@ header:has(.pill.live) .logo .mark::after{content:"";position:absolute;inset:0;b
 .no-times #tx p{display:block}
 .no-times .txh{padding-left:var(--pad)}
 .mode-full #tx p.cur::before{display:none}
-#more{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--brand);color:var(--brand-ink);border:0;border-radius:999px;padding:11px 18px;font-weight:800;white-space:nowrap;box-shadow:0 10px 28px -8px rgba(0,0,0,.6);display:none;cursor:pointer}
+#more{position:fixed;right:var(--pad-r);bottom:max(18px,env(safe-area-inset-bottom));z-index:6;width:52px;height:52px;border-radius:50%;border:0;background:var(--brand);color:var(--brand-ink);box-shadow:0 12px 28px -8px rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;cursor:pointer;opacity:0;transform:translateY(12px) scale(.9);pointer-events:none;transition:opacity .2s,transform .25s cubic-bezier(.16,1,.3,1)}
+#more.show{opacity:1;transform:none;pointer-events:auto}
+#more .ico{width:22px;height:22px;stroke-width:2.4}
+#more:hover{background:var(--brand-hi)}
+#more:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.condensed .ctl,.condensed .tools{display:none}
+.condensed .now{min-height:0;padding-top:12px;padding-bottom:12px}
+@media (prefers-reduced-motion:reduce){#more{transition:none}}
 .backdrop{position:fixed;inset:0;z-index:20;background:var(--shade)}
 .sheet{position:fixed;z-index:21;left:0;right:0;bottom:0;max-height:85vh;max-height:85dvh;overflow-y:auto;overscroll-behavior:contain;background:var(--surface);color:var(--text);border-radius:24px 24px 0 0;border-top:1px solid var(--line);padding:4px var(--pad-r) calc(16px + env(safe-area-inset-bottom)) var(--pad);box-shadow:0 -12px 36px rgba(0,0,0,.4)}
 .backdrop[hidden],.sheet[hidden]{display:none}
@@ -381,7 +376,7 @@ const opt = (mode: string, k: string) =>
 const uiOptions = UI_LANGS.map(l => `<option value="${l}">${esc(UI_TEXT[l].name)}</option>`).join('');
 
 const ROOM_BODY = `<header><div class="wrap">
-<div class="top">${logo()}<h1 id="title" ${txt('title')}</h1><span id="delay" class="delay" hidden></span><span id="pill" class="pill wait" ${txt('connecting')}</span></div>
+<div class="top">${logo()}<h1 id="title" ${txt('title')}</h1><span id="pill" class="pill wait" ${txt('connecting')}</span></div>
 <section class="now" aria-live="polite" data-ia="current" aria-label="${esc(T.current)}"><div id="liveMain" class="fit empty">${esc(T.waiting)}</div><div id="liveOrig" class="fit" hidden></div></section>
 <div class="ctl">
 <label class="lang"><span class="cap" ${txt('langCap')}</span><select id="lang" data-ia="langLabel" aria-label="${esc(T.langLabel)}"></select></label>
@@ -399,7 +394,7 @@ ${QUICK_MODES.map(([m, k, p]) => `<button class="btn mb" type="button" data-m="$
 <div class="notice-wrap"><div id="notice" class="notice" role="status"></div></div>
 <div class="txh" aria-hidden="true" ${txt('fullText')}</div>
 <main id="tx" data-ia="fullText" aria-label="${esc(T.fullText)}"></main>
-<button id="more" type="button" ${txt('newLines')}</button>
+<button id="more" type="button" data-ia="backToTop" aria-label="${esc(T.backToTop)}">${ico('<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>')}</button>
 <div id="backdrop" class="backdrop" hidden></div>
 <div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1" hidden>
 <div class="sheet-head"><h2 id="sheetTitle" ${txt('settingsTitle')}</h2><button id="sClose" class="btn" type="button" data-ia="close" aria-label="${esc(T.close)}">✕</button></div>
@@ -427,7 +422,6 @@ ${opt('full', 'mFull')}
 <fieldset class="grp"><legend ${txt('fullText')}</legend>
 <label class="row"><span ${txt('autoScroll')}</span><input id="sScroll" type="checkbox" role="switch"></label>
 <label class="row"><span ${txt('showTimes')}</span><input id="sTimes" type="checkbox" role="switch"></label>
-<label class="row"><span ${txt('showDelay')}</span><input id="sDelay" type="checkbox" role="switch"></label>
 </fieldset>
 </div>`;
 
@@ -447,8 +441,7 @@ ${opt('full', 'mFull')}
  *   - nextStart(now, prevEnd, lead): start of the next clip on the AudioContext timeline — back to back, never overlapping.
  *   - backlogDrop(ahead, durs, maxSec): how many of the OLDEST pending clips to drop so that the audio still to play
  *     (`ahead` already scheduled + pending durations) is ≤ maxSec; the newest clip is always kept.
- *   - median(values), delayLabel(ms, voice, L): the delay indicator in the interface language L ("délai 1,8 s" / "voix 3,2 s";
- *     ok < 3 s ≤ warn ≤ 6 s < bad).
+ *   - median(values): the delay median sent with the analytics samples (the page does not show it).
  *   - karaoke: speechMs(text) estimates how long `text` took to say (CHARS_PER_S, ~150 words/min); wordStarts(text, start,
  *     dur) spreads the words of `text` over [start, start+dur] by character length; spokenCount(starts, t) is how many
  *     words are already said at t (those are coloured). The publisher sends no word timestamps, so the times are an
@@ -520,10 +513,6 @@ function median(a){
   var s=a.slice().sort(function(x,y){return x-y}),m=s.length>>1;
   return s.length%2?s[m]:(s[m-1]+s[m])/2;
 }
-function delayLabel(ms,voice,L){
-  var s=(Math.round(ms/100)/10).toFixed(1).replace('.',L.dec);
-  return {text:(voice?L.voice:L.delay)+' '+s+' s',level:ms<3000?'ok':ms<=6000?'warn':'bad'};
-}
 var CHARS_PER_S=15;
 function speechMs(text){return Math.max(800,String(text==null?'':text).length*1000/CHARS_PER_S)}
 function wordStarts(text,start,dur){
@@ -534,7 +523,7 @@ function wordStarts(text,start,dur){
 }
 function spokenCount(starts,t){var n=0;while(n<starts.length&&starts[n]<=t)n++;return n}
 var UIS=['fr','pt','en'];
-var SETTINGS_DEFAULTS={ui:'fr',mode:'translation',showOrig:false,volume:0.9,sync:true,size:0,theme:'auto',autoScroll:true,showTimes:true,showDelay:true};
+var SETTINGS_DEFAULTS={ui:'fr',mode:'translation',showOrig:false,volume:0.9,sync:true,size:0,theme:'auto',autoScroll:true,showTimes:true};
 var SIZE_MIN=-3,SIZE_MAX=7,MODES=['translation','transcript','bilingual','full'],THEMES=['dark','light','auto'];
 function normalizeSettings(raw){
   var s={},k;for(k in SETTINGS_DEFAULTS)s[k]=SETTINGS_DEFAULTS[k];
@@ -542,7 +531,7 @@ function normalizeSettings(raw){
   if(MODES.indexOf(raw.mode)>=0)s.mode=raw.mode;
   if(THEMES.indexOf(raw.theme)>=0)s.theme=raw.theme;
   if(UIS.indexOf(raw.ui)>=0)s.ui=raw.ui;
-  ['showOrig','sync','autoScroll','showTimes','showDelay'].forEach(function(b){if(typeof raw[b]==='boolean')s[b]=raw[b]});
+  ['showOrig','sync','autoScroll','showTimes'].forEach(function(b){if(typeof raw[b]==='boolean')s[b]=raw[b]});
   if(typeof raw.volume==='number'&&raw.volume>=0&&raw.volume<=1)s.volume=raw.volume;
   if(typeof raw.size==='number'&&isFinite(raw.size))s.size=Math.max(SIZE_MIN,Math.min(SIZE_MAX,Math.round(raw.size)));
   return s;
@@ -663,7 +652,7 @@ function flush(beacon){
     if(!sent){try{fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body,keepalive:true}).catch(function(){})}catch(e){}}
   }
 }
-function snapshot(){return {ui:settings.ui,lang:lang||'orig',mode:settings.mode,showOrig:settings.showOrig,dub:dub,volume:settings.volume,sync:settings.sync,size:settings.size,theme:settings.theme,autoScroll:settings.autoScroll,showTimes:settings.showTimes,showDelay:settings.showDelay}}
+function snapshot(){return {ui:settings.ui,lang:lang||'orig',mode:settings.mode,showOrig:settings.showOrig,dub:dub,volume:settings.volume,sync:settings.sync,size:settings.size,theme:settings.theme,autoScroll:settings.autoScroll,showTimes:settings.showTimes}}
 function trackJoin(){
   if(joined)return;joined=true;var u=uaInfo(navigator.userAgent,navigator.maxTouchPoints||0);
   track('join',{ua:u.ua,os:u.os,device:u.device,vw:window.innerWidth,vh:window.innerHeight,dpr:window.devicePixelRatio||1,
@@ -805,19 +794,9 @@ function markCurrent(id){
 }
 
 // ── delay indicator: rolling median of the last 10 lines (text) or of the last 10 clips (voice) ──
-function updateDelay(){
-  var el=$('delay');
-  if(ended||gone||!settings.showDelay){el.hidden=true;return}
-  var voice=dub&&lang!=='orig'&&voiceDelays.length>0,vals=[];
-  if(voice)vals=voiceDelays.slice(-10);
-  else for(var i=lines.length-1;i>=0&&vals.length<10;i--)if(typeof lines[i].delayMs==='number')vals.push(lines[i].delayMs);
-  var m=median(vals);if(m==null){el.hidden=true;return}
-  var d=delayLabel(m,voice,L);el.hidden=false;el.textContent=d.text;el.className='delay '+d.level;
-  el.title=voice?L.delayTipVoice:L.delayTipText;
-}
 
 // ── transcript ──
-function atBottom(){return window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-80}
+function atTop(){return window.scrollY<=40}
 function para(l){
   var p=document.createElement('p'),v=view(l);
   p.setAttribute('data-id',String(l.id));if(v.miss)p.className='miss';if(l.id===liveId)p.classList.add('cur');
@@ -826,24 +805,21 @@ function para(l){
   if(v.sub){var o=document.createElement('span');o.className='o';o.textContent=v.sub;p.appendChild(o)}
   return p;
 }
-var firstRender=true;
 function renderAll(){
-  var tx=$('tx'),stick=firstRender||(settings.autoScroll&&atBottom());tx.textContent='';
-  var frag=document.createDocumentFragment();for(var i=0;i<lines.length;i++)frag.appendChild(para(lines[i]));tx.appendChild(frag);
-  if(lines.length)firstRender=false;
-  renderLive();updateDelay();if(stick)scrollEnd();
+  var tx=$('tx');tx.textContent='';
+  var frag=document.createDocumentFragment();for(var i=lines.length-1;i>=0;i--)frag.appendChild(para(lines[i]));tx.appendChild(frag);
+  renderLive();
 }
-function scrollEnd(){window.scrollTo(0,document.documentElement.scrollHeight);$('more').style.display='none'}
 function upsert(l){
-  var stick=settings.autoScroll&&atBottom(),tx=$('tx'),old=byId[l.id];
+  var stick=settings.autoScroll&&atTop(),tx=$('tx'),old=byId[l.id];
   if(old){lines[lines.indexOf(old)]=l;byId[l.id]=l;var el=tx.querySelector('p[data-id="'+l.id+'"]');if(el)tx.replaceChild(para(l),el)}
   else{
     byId[l.id]=l;M(l.id).arrivedAt=now();stat.lines++;if(l.ts>1e11)stat.lag.push(Date.now()-l.ts);var i=lines.length;while(i>0&&lines[i-1].id>l.id)i--;lines.splice(i,0,l);
-    var next=lines[i+1]?tx.querySelector('p[data-id="'+lines[i+1].id+'"]'):null;tx.insertBefore(para(l),next);
+    var newer=lines[i+1]?tx.querySelector('p[data-id="'+lines[i+1].id+'"]'):null;tx.insertBefore(para(l),newer?newer.nextSibling:tx.firstChild);
     if(dub){setTimeout(renderLive,AUDIO_WAIT_MS+20);expectVoice(l)}
   }
-  renderLive();updateDelay();
-  if(stick)scrollEnd();else if(!atBottom())$('more').style.display='block';
+  renderLive();
+  if(stick)window.scrollTo(0,0);
 }
 
 // ── languages ──
@@ -952,7 +928,7 @@ function onClipStart(id){
   var m=meta[id],l=byId[id];stat.clips++;
   if(m&&m.arrivedAt>0&&m.startedAt!=null)stat.drift.push(syncOn()?now()-m.startedAt:m.startedAt-m.arrivedAt);
   if(m&&l&&m.arrivedAt>0&&m.startedAt!=null){voiceDelays.push((typeof l.delayMs==='number'?l.delayMs:0)+(m.startedAt-m.arrivedAt));if(voiceDelays.length>10)voiceDelays.shift()}
-  renderLive();updateDelay();updateDubUi();
+  renderLive();updateDubUi();
 }
 /** A line arrived while listening: its voice is on the way (the toggle says "carregando voz…" for a while). */
 function expectVoice(l){if(dub&&lang!=='orig'&&l.translations&&l.translations[lang]){awaitId=l.id;awaitAt=now();updateDubUi()}}
@@ -990,7 +966,7 @@ function setDub(on,from){
   if(from&&on!==dub){track('setting',{key:'dub',value:on,from:from});track('audio',{action:on?'play':'pause'})}
   dub=on;var b=$('dub');b.setAttribute('aria-pressed',on?'true':'false');
   if(!on){stopAudio();voiceDelays=[];if(unlockEl){try{unlockEl.pause()}catch(e){}}}
-  sendListen();renderLive();updateDelay();updateDubUi();if(!sheet.hidden)syncSheet();
+  sendListen();renderLive();updateDubUi();if(!sheet.hidden)syncSheet();
 }
 /** The toggle: while the OS holds the sound (context suspended), a tap re-activates it instead of switching it off. */
 $('dub').addEventListener('click',function(){if(locked()){unlockAudio();updateDubUi();track('audio',{action:'resume'});return}setDub(!dub,'toolbar')});
@@ -1020,7 +996,7 @@ function syncSheet(){
   $('sVol').value=String(Math.round(settings.volume*100));$('sVol').setAttribute('aria-valuetext',Math.round(settings.volume*100)+'%');
   $('sSync').checked=settings.sync;
   $('sSize').textContent=(100+settings.size*10)+'%';$('sSmaller').disabled=settings.size<=SIZE_MIN;$('sBigger').disabled=settings.size>=SIZE_MAX;
-  $('sScroll').checked=settings.autoScroll;$('sTimes').checked=settings.showTimes;$('sDelay').checked=settings.showDelay;
+  $('sScroll').checked=settings.autoScroll;$('sTimes').checked=settings.showTimes;
 }
 function placeSheet(){
   if(window.innerWidth>=768){var r=$('gear').getBoundingClientRect(),top=Math.round(r.bottom+8);
@@ -1060,7 +1036,6 @@ $('sSmaller').addEventListener('click',function(){setSetting('size',settings.siz
 $('sBigger').addEventListener('click',function(){setSetting('size',settings.size+1,'sheet')});
 $('sScroll').addEventListener('change',function(e){setSetting('autoScroll',e.target.checked,'sheet')});
 $('sTimes').addEventListener('change',function(e){setSetting('showTimes',e.target.checked,'sheet')});
-$('sDelay').addEventListener('change',function(e){setSetting('showDelay',e.target.checked,'sheet')});
 
 // ── copy ──
 $('copy').addEventListener('click',function(){
@@ -1071,8 +1046,12 @@ $('copy').addEventListener('click',function(){
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(ok,fallback)}else fallback();
   function fallback(){var a=document.createElement('textarea');a.value=t;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{document.execCommand('copy');ok()}catch(e){}document.body.removeChild(a)}
 });
-$('more').addEventListener('click',function(){track('ui',{action:'more'});scrollEnd()});
-window.addEventListener('scroll',function(){if(atBottom())$('more').style.display='none'},{passive:true});
+$('more').addEventListener('click',function(){track('ui',{action:'top'});window.scrollTo({top:0,behavior:'smooth'})});
+window.addEventListener('scroll',function(){
+  var y=window.scrollY,b=document.body.classList;
+  if(y>160)b.add('condensed');else if(y<40)b.remove('condensed');
+  $('more').classList.toggle('show',y>400);
+},{passive:true});
 
 // ── state ──
 function setPill(kind,k){pillKey=k;var p=$('pill');p.className='pill '+kind;p.textContent=L[k]}
@@ -1081,7 +1060,7 @@ function showEnded(){
   ended=true;setPill('','ended');setDub(false);updateDubButton();
   var until=expiresAt||new Date(Date.now()+DAYS*864e5).toISOString();
   setNotice('endedNotice',{d:fmtDate(until)});
-  renderLive();updateDelay();
+  renderLive();
 }
 function applyRoom(r){
   room=r;expiresAt=r.expiresAt||null;lines=[];byId={};
@@ -1097,7 +1076,7 @@ function applyYoutube(u){
   if(ok){a.href=ok;a.hidden=false}else{a.hidden=true;a.removeAttribute('href')}
 }
 $('yt').addEventListener('click',function(){track('ui',{action:'youtube'})});
-function notFound(){gone=true;setPill('','ended');updateDelay();setNotice('gone',{n:DAYS})}
+function notFound(){gone=true;setPill('','ended');setNotice('gone',{n:DAYS})}
 
 // ── socket, reconnect with backoff ──
 /** Tells the server which language this viewer listens to — on every (re)connect, dub toggle and language change. */
