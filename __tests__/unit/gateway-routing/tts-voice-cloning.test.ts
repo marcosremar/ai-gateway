@@ -88,16 +88,19 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     expect(or.synthesize).not.toHaveBeenCalled();
   });
 
-  it('client extras (ref_audio, ref_text, task_type, language, stream_format, x_vector_only_mode) are forwarded intact; unknown ones are dropped', async () => {
+  it('client extras (ref_audio, ref_text, task_type, language, stream_format, x_vector_only_mode, non_streaming_mode) are forwarded intact, extra_params only as in-range sampling knobs; unknown ones are dropped', async () => {
     const r = replica();
     const dep = new DeploymentTTSProvider(controller(), 'parle-qwen-tts', { fetchImpl: r.fetchImpl as never });
     await handleAudioSpeech(req({
       model: 'parle-tts', input: 'Salut', voice: 'custom', response_format: 'wav',
       task_type: 'Base', ref_audio: 'data:audio/wav;base64,UklGRg==', ref_text: 'Bonjour.', language: 'fr', stream_format: 'audio', x_vector_only_mode: true, x_custom: 1,
+      non_streaming_mode: true, extra_params: { temperature: 1, top_p: 0.95, top_k: 50.5, seed: 3, repetition_penalty: 9 },
     }), chain(dep, kokoro()), undefined, new CircuitBreakerRegistry());
     expect(r.speechBodies[0]).toMatchObject({
       task_type: 'Base', ref_audio: 'data:audio/wav;base64,UklGRg==', ref_text: 'Bonjour.', language: 'French', stream_format: 'audio', x_vector_only_mode: true,
+      non_streaming_mode: true,
     });
+    expect(r.speechBodies[0]!.extra_params).toEqual({ temperature: 1, top_p: 0.95 });
     expect(r.speechBodies[0]).not.toHaveProperty('x_custom');
     expect(r.speechBodies[0]).not.toHaveProperty('voice');
     // An explicit ref_audio skips the catalog lookup.

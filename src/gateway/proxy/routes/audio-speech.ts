@@ -20,7 +20,19 @@ const ttsCooldownTracker = new CooldownTracker();
 
 const log = createLogger('audio-speech');
 
-const FORWARDED_EXTRAS = ['task_type', 'ref_audio', 'ref_text', 'language', 'stream_format', 'instructions', 'x_vector_only_mode'];
+const FORWARDED_EXTRAS = ['task_type', 'ref_audio', 'ref_text', 'language', 'stream_format', 'instructions', 'x_vector_only_mode', 'non_streaming_mode'];
+
+const SAMPLING_LIMITS: Record<string, [number, number]> = { temperature: [0, 2], top_p: [0, 1], top_k: [1, 200] };
+
+export function samplingParams(asked: unknown): Record<string, number> | undefined {
+  if (!asked || typeof asked !== 'object') return undefined;
+  const picked = Object.entries(SAMPLING_LIMITS).flatMap(([name, [lo, hi]]) => {
+    const value = (asked as Record<string, unknown>)[name];
+    const ok = typeof value === 'number' && value >= lo && value <= hi && (name !== 'top_k' || Number.isInteger(value));
+    return ok ? [[name, value as number] as const] : [];
+  });
+  return picked.length ? Object.fromEntries(picked) : undefined;
+}
 
 /** A replica of a deployment or a local link: a server of ours that reads fields the OpenAI speech API lacks. */
 const ownServer = (providerId: string) => providerId.startsWith('deployment:') || providerId.startsWith('local:');
@@ -91,6 +103,8 @@ export async function handleAudioSpeech(
   const extra: Record<string, unknown> = Object.fromEntries(FORWARDED_EXTRAS.filter(k => body[k] !== undefined).map(k => [k, body[k]]));
   const asked = body.max_new_tokens;
   if (typeof asked === 'number' && Number.isInteger(asked) && asked > 0 && asked <= qwenTokenCap(String(body.input))) extra.max_new_tokens = asked;
+  const sampling = samplingParams(body.extra_params);
+  if (sampling) extra.extra_params = sampling;
   const format = (body.response_format as string | undefined) || 'mp3';
   // wav/pcm can be streamed (first bytes before the whole sentence); `stream: false` turns it off.
   const stream = (format === 'wav' || format === 'pcm') && body.stream !== false;
