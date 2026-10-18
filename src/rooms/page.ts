@@ -209,8 +209,7 @@ const ROOM_CSS = `
 :root{--bad:#FF7A70;--live-bg:rgba(127,184,204,.14);--shade:rgba(4,8,16,.6);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right));--rail:3.4rem}
 html[data-theme="light"]{${LIGHT_VARS}}
 @media (prefers-color-scheme:light){html[data-theme="auto"]{${LIGHT_VARS}}}
-html,body{overflow-x:hidden}
-html{scrollbar-color:var(--line) transparent}
+html{overflow-x:hidden;scrollbar-color:var(--line) transparent}
 .wrap{max-width:48rem;margin:0 auto;min-width:0}
 header{position:sticky;top:0;z-index:5;background:linear-gradient(var(--bg) 82%,transparent);padding:max(10px,env(safe-area-inset-top)) var(--pad-r) 14px var(--pad)}
 .top{display:flex;align-items:center;gap:10px;min-width:0;height:34px}
