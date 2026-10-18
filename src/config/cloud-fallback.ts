@@ -10,8 +10,8 @@
  * Defaults: the models parle already uses and measured as its fallback (gateway report 2026-10-12, M5/M6/M11):
  *   STT  OpenRouter whisper-large-v3-turbo (0.5–0.9 s), then Groq;
  *   chat OpenRouter gemini-2.5-flash-lite, reasoning off (0.42–0.62 s, against 0.77–1.38 s for llama-3.3-70b);
- *   TTS  OpenRouter MAI-Voice 2.1 flash, then Kokoro 82M — stock voices by the gender of the requested voice, since a
- *        cloud TTS cannot speak an app's cloned cast voice (`tts-fallback-voices.ts`).
+ *   TTS  OpenRouter Kokoro 82M — stock voices by the gender of the requested voice, since a cloud TTS cannot speak an
+ *        app's cloned cast voice (`tts-fallback-voices.ts`). Never MAI-Voice (owner decision 2026-10-18).
  */
 
 import type { ModelRoutesSpec, RouteEntrySpec } from './serve-providers';
@@ -21,8 +21,6 @@ import { OPENAI_COMPATIBLE } from '../gateway/providers/cloud/openai-compat/loca
 type Stage = keyof ModelRoutesSpec;
 const STAGES: Stage[] = ['chat', 'stt', 'tts'];
 
-export const MAI_VOICE_TTS_MODEL = 'microsoft/mai-voice-2.1-flash';
-
 export const DEFAULT_CLOUD_FALLBACK: Record<Stage, RouteEntrySpec[]> = {
   stt: [
     { provider: 'openrouter', model: 'openai/whisper-large-v3-turbo' },
@@ -30,7 +28,6 @@ export const DEFAULT_CLOUD_FALLBACK: Record<Stage, RouteEntrySpec[]> = {
   ],
   chat: [{ provider: 'openrouter', model: 'google/gemini-2.5-flash-lite', extraBody: { reasoning: { enabled: false } } }],
   tts: [
-    { provider: 'openrouter', model: MAI_VOICE_TTS_MODEL, voices: { feminine: 'en-US-Harper:MAI-Voice-2-Flash', masculine: 'en-US-Ethan:MAI-Voice-2-Flash' } },
     { provider: 'openrouter', model: KOKORO_TTS_MODEL, voices: { feminine: 'af_heart', masculine: 'am_michael' }, preferFallbackVoice: true },
   ],
 };
