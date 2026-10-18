@@ -212,7 +212,8 @@ export class RoomService {
   /** Languages a listener can hear dubbed: server-voiced (unless the room opted out) + presenter clip languages. */
   private dubLangs(room: LiveRoom): string[] {
     const voiced = this.dubber && room.meta.serverDub !== false ? this.dubber.voicedLanguages(room) : [];
-    return room.meta.languages.filter(l => voiced.includes(l) || room.clipLangs.has(l));
+    const speaker = room.meta.originalLang && room.clipLangs.has(room.meta.originalLang) ? [room.meta.originalLang] : [];
+    return [...room.meta.languages.filter(l => voiced.includes(l) || room.clipLangs.has(l)), ...speaker];
   }
 
   private extraLangs(room: LiveRoom): string[] {
@@ -305,7 +306,11 @@ export class RoomService {
   publishAudio(room: LiveRoom, audio: AudioInput): void {
     if (room.meta.ended) throw new RoomError(409, 'room has ended');
     room.touchedAt = this.now();
+    const newLang = !room.clipLangs.has(audio.lang);
     room.clipLangs.add(audio.lang);
+    if (newLang && this.dubber) {
+      this.broadcast(room, { type: 'update', youtubeUrl: typeof room.meta.youtubeUrl === 'string' ? room.meta.youtubeUrl : null, ...this.listenLangs(room) });
+    }
     this.dubber?.onPresenterClip(room, audio.lineId, audio.lang);
     this.broadcast(room, { type: 'audio', lineId: audio.lineId, lang: audio.lang, wav: audio.wav }, v => v.wantsAudio(audio.lang));
   }

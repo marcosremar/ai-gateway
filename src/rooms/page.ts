@@ -39,7 +39,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     mTranscript: 'Transcription seule', mTranscriptD: 'Seulement la phrase originale, sans traduction',
     mBilingual: 'Bilingue', mBilingualD: 'Traduction et phrase originale, toujours',
     mFull: 'Texte complet seul', mFullD: 'Sans la ligne en direct, pour lire le texte',
-    showOrig: 'Afficher la phrase originale en dessous', dubbing: 'Doublage', listenDub: 'Écouter le doublage', volume: 'Volume',
+    showOrig: 'Afficher la phrase originale en dessous', dubbing: 'Doublage', listenDub: 'Écouter le doublage', listenOrig: 'Écouter la voix originale', volume: 'Volume',
     volumeAria: 'Volume du doublage', sync: 'Synchroniser les sous-titres avec la voix', size: 'Taille du texte', smaller: 'Réduire le texte',
     bigger: 'Agrandir le texte', theme: 'Thème', dark: 'Sombre', light: 'Clair', auto: 'Automatique', fullText: 'Texte complet',
     autoScroll: 'Défilement automatique du texte complet', showTimes: 'Afficher les heures',
@@ -62,7 +62,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     mTranscript: 'Só transcrição', mTranscriptD: 'Só a fala original, sem tradução',
     mBilingual: 'Bilíngue', mBilingualD: 'Tradução e fala original, sempre',
     mFull: 'Só texto completo', mFullD: 'Sem a linha ao vivo, para ler o texto',
-    showOrig: 'Mostrar a fala original embaixo', dubbing: 'Dublagem', listenDub: 'Ouvir dublagem', volume: 'Volume',
+    showOrig: 'Mostrar a fala original embaixo', dubbing: 'Dublagem', listenDub: 'Ouvir dublagem', listenOrig: 'Ouvir a voz original', volume: 'Volume',
     volumeAria: 'Volume da dublagem', sync: 'Sincronizar legenda com a voz', size: 'Tamanho do texto', smaller: 'Diminuir o texto',
     bigger: 'Aumentar o texto', theme: 'Tema', dark: 'Escuro', light: 'Claro', auto: 'Automático', fullText: 'Texto completo',
     autoScroll: 'Rolagem automática do texto completo', showTimes: 'Mostrar horários',
@@ -85,7 +85,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     mTranscript: 'Transcript only', mTranscriptD: 'Only the original speech, no translation',
     mBilingual: 'Bilingual', mBilingualD: 'Translation and original, always',
     mFull: 'Full text only', mFullD: 'No live line, for reading the text',
-    showOrig: 'Show the original underneath', dubbing: 'Dubbing', listenDub: 'Listen to dubbing', volume: 'Volume',
+    showOrig: 'Show the original underneath', dubbing: 'Dubbing', listenDub: 'Listen to dubbing', listenOrig: 'Listen to the original voice', volume: 'Volume',
     volumeAria: 'Dubbing volume', sync: 'Sync subtitles with the voice', size: 'Text size', smaller: 'Smaller text',
     bigger: 'Bigger text', theme: 'Theme', dark: 'Dark', light: 'Light', auto: 'Automatic', fullText: 'Full text',
     autoScroll: 'Auto-scroll the full text', showTimes: 'Show times',
@@ -580,11 +580,12 @@ function lineView(mode,showOrig,lang,hasTr){
   if(!hasTr)return {main:'orig',sub:false,miss:true};
   return {main:'tr',sub:mode==='bilingual'||!!showOrig,miss:false};
 }
-function dubbable(lang,dubLangs){
-  if(!lang||lang==='orig')return false;
+function dubbable(lang,dubLangs,originalLang){
+  if(!lang)return false;
+  if(lang==='orig')return !!originalLang&&Array.isArray(dubLangs)&&dubLangs.indexOf(originalLang)>=0;
   return !Array.isArray(dubLangs)||dubLangs.indexOf(lang)>=0;
 }
-function listenMsg(on,lang){var l=lang&&lang!=='orig'?lang:null;return JSON.stringify({type:'listen',lang:on?l:null,view:l,chunks:true})}
+function listenMsg(on,lang,originalLang){var view=lang&&lang!=='orig'?lang:null,heard=lang==='orig'?originalLang||null:view;return JSON.stringify({type:'listen',lang:on?heard:null,view:view,chunks:true})}
 function s16ToFloat(bin){var n=bin.length>>1,out=new Float32Array(n);for(var i=0;i<n;i++){var v=bin.charCodeAt(2*i)|(bin.charCodeAt(2*i+1)<<8);out[i]=(v>=32768?v-65536:v)/32768}return out}
 function dubStatus(s,L){
   if(!s.can)return {kind:'na',text:s.lang==='orig'?L.dubPick:L.dubNa};
@@ -891,6 +892,7 @@ function updateDubUi(){
   var st=dubStatus({can:canDub(),lang:lang,on:dub,ctx:actx?actx.state:null,error:dubErr,playing:playing,loading:decoding>0||pending.length>0||awaiting},L);
   if(st.kind!==dubKind){dubKind=st.kind;b.setAttribute('data-state',st.kind)}
   var ds=$('dubState');if(ds.textContent!==st.text)ds.textContent=st.text;
+  var dt=b.querySelector('.dt'),key=lang==='orig'?'listenOrig':'listenDub';if(dt&&dt.getAttribute('data-i')!==key){dt.setAttribute('data-i',key);dt.textContent=L[key]}
   if(dub&&!dubTick)dubTick=setInterval(updateDubUi,400);else if(!dub&&dubTick){clearInterval(dubTick);dubTick=null}
 }
 function stopAudio(){
@@ -933,7 +935,7 @@ function onClipStart(id){
 /** A line arrived while listening: its voice is on the way (the toggle says "carregando voz…" for a while). */
 function expectVoice(l){if(dub&&lang!=='orig'&&l.translations&&l.translations[lang]){awaitId=l.id;awaitAt=now();updateDubUi()}}
 function onAudio(msg){
-  if(!dub||!actx||msg.lang!==lang||typeof msg.wav!=='string')return;
+  if(!dub||!actx||msg.lang!==heardLang()||typeof msg.wav!=='string')return;
   if(awaitId!=null&&msg.lineId>=awaitId)awaitId=null;
   var m=M(msg.lineId);if(m.pending||m.startedAt!=null)return;m.pending=true;m.skip=false;
   var c={lineId:msg.lineId,buf:null},done=false,fmt=String(msg.format||'wav');pending.push(c);decoding++;
@@ -946,7 +948,7 @@ function onAudio(msg){
   updateDubUi();
 }
 function onAudioChunk(msg){
-  if(!dub||!actx||msg.lang!==lang||typeof msg.pcm!=='string')return;
+  if(!dub||!actx||msg.lang!==heardLang()||typeof msg.pcm!=='string')return;
   if(awaitId!=null&&msg.lineId>=awaitId)awaitId=null;
   var samples;try{samples=s16ToFloat(atob(msg.pcm))}catch(e){return}
   if(!samples.length)return;
@@ -954,7 +956,8 @@ function onAudioChunk(msg){
   var buf=actx.createBuffer(1,samples.length,msg.rate||24000);buf.getChannelData(0).set(samples);
   pending.push({lineId:msg.lineId,buf:buf,part:true});pump();
 }
-function canDub(){return !ended&&dubbable(lang,room&&room.dubLangs)}
+function canDub(){return !ended&&dubbable(lang,room&&room.dubLangs,room&&room.originalLang)}
+function heardLang(){return lang==='orig'?room&&room.originalLang:lang}
 function updateDubButton(){
   var b=$('dub'),can=canDub();b.disabled=!can;
   b.title=can?'':(lang==='orig'?L.dubTipPick:L.dubTipNa);
@@ -1080,7 +1083,7 @@ function notFound(){gone=true;setPill('','ended');setNotice('gone',{n:DAYS})}
 
 // ── socket, reconnect with backoff ──
 /** Tells the server which language this viewer listens to — on every (re)connect, dub toggle and language change. */
-function sendListen(){if(ws&&ws.readyState===1)ws.send(listenMsg(dub,lang))}
+function sendListen(){if(ws&&ws.readyState===1)ws.send(listenMsg(dub,lang,room&&room.originalLang))}
 function connect(){
   if(ended||gone)return;
   var proto=location.protocol==='https:'?'wss:':'ws:';
