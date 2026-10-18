@@ -23,7 +23,7 @@ describe('withCloudFallback', () => {
     const { routes, added } = withCloudFallback(BABELCAST);
     expect(targets(routes.stt?.['babelcast-stt'])).toEqual(['deployment:babelcast-speech', 'openrouter:openai/whisper-large-v3-turbo', 'groq:whisper-large-v3-turbo']);
     expect(targets(routes.chat?.['babelcast-llm'])).toEqual(['deployment:babelcast-speech', 'openrouter:google/gemini-2.5-flash-lite']);
-    expect(targets(routes.tts?.['babelcast-tts'])).toEqual(['deployment:babelcast-tts', 'openrouter:microsoft/mai-voice-2.1-flash', 'openrouter:hexgrad/kokoro-82m']);
+    expect(targets(routes.tts?.['babelcast-tts'])).toEqual(['deployment:babelcast-tts', 'openrouter:hexgrad/kokoro-82m']);
     expect(routes.chat?.['babelcast-llm']?.[0]).toEqual(BABELCAST.chat!['babelcast-llm'][0]);
     expect(added.map(a => `${a.stage} ${a.alias}`)).toEqual(['chat babelcast-llm', 'stt babelcast-stt', 'tts babelcast-tts']);
   });
@@ -94,7 +94,7 @@ describe('app routes: a chain without a cloud link is completed, an explicit opt
     expect(added.map(a => `${a.app} ${a.alias}`)).toEqual(['babelcast babelcast-llm', 'babelcast babelcast-stt', 'babelcast babelcast-tts']);
     const saved = await store.load();
     expect(targets(saved.babelcast.routes?.tts?.['babelcast-tts'])[0]).toBe('deployment:babelcast-tts');
-    expect(targets(saved.babelcast.routes?.tts?.['babelcast-tts'])).toContain('openrouter:microsoft/mai-voice-2.1-flash');
+    expect(targets(saved.babelcast.routes?.tts?.['babelcast-tts'])).toContain('openrouter:hexgrad/kokoro-82m');
     expect(saved.babelcast.limits).toEqual({ dailyRequests: 9 });
     expect(saved.parle.routes).toEqual(PARLE_STT);
     expect(await apps.ensureCloudFallback()).toEqual([]);
@@ -120,7 +120,7 @@ describe('mounting: a GPU-only chain is served by the cloud when its deployment 
     expect(built.providers.stt?.['babelcast-stt']?.map(t => `${t.providerId}:${t.model}`))
       .toEqual(['openrouter:openai/whisper-large-v3-turbo', 'groq:whisper-large-v3-turbo']);
     expect(built.providers.chatRoutes?.['babelcast-llm']?.map(t => t.model)).toEqual(['google/gemini-2.5-flash-lite']);
-    expect(built.providers.tts?.['babelcast-tts']?.map(t => t.model)).toEqual(['microsoft/mai-voice-2.1-flash', 'hexgrad/kokoro-82m']);
+    expect(built.providers.tts?.['babelcast-tts']?.map(t => t.model)).toEqual(['hexgrad/kokoro-82m']);
     expect(built.providers.stt?.['env-stt']?.length).toBe(2);
     expect(built.summary.cloudFallbackAdded).toEqual(expect.arrayContaining([expect.stringMatching(/^stt env-stt \+ openrouter/)]));
     expect(built.chains.stt['babelcast-stt'].map(l => l.target)).toEqual(['deployment:babelcast-speech', 'openrouter:openai/whisper-large-v3-turbo', 'groq:whisper-large-v3-turbo']);
