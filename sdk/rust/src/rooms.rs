@@ -227,6 +227,15 @@ impl Rooms<'_> {
         f.json(&path)
     }
 
+    pub async fn update_server_dub(&self, room: &Room, on: bool) -> Result<()> {
+        let path = format!("/v1/rooms/{}", enc(&room.code));
+        let spec = Spec::new(Method::PATCH, path, TimeoutGroup::Rooms, &self.call)
+            .auth(Auth::Bearer(room.publish_token.clone()))
+            .body(Body::json(&serde_json::json!({ "serverDub": on }))?)
+            .idempotent(true);
+        self.client.fetch(&spec).await.map(|_| ())
+    }
+
     async fn post(&self, room: &Room, what: &str, body: Body, idempotent: bool) -> Result<()> {
         let path = format!("/v1/rooms/{}/{what}", enc(&room.code));
         let spec = Spec::new(Method::POST, path, TimeoutGroup::Rooms, &self.call)

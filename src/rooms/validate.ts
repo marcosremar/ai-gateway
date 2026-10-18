@@ -62,12 +62,18 @@ export interface CreateRoomInput {
 }
 
 /** `PATCH /v1/rooms/:code`: the room fields a publisher may change after creation. */
-export interface UpdateRoomInput { youtubeUrl: string | null }
+export interface UpdateRoomInput { youtubeUrl?: string | null; serverDub?: boolean }
 
 export function parseUpdate(body: unknown): UpdateRoomInput {
   if (!isObject(body)) throw new RoomError(400, 'body must be a JSON object');
-  if (!('youtubeUrl' in body)) throw new RoomError(400, 'nothing to update: send {"youtubeUrl": "<link>" | null}');
-  return { youtubeUrl: parseYoutubeUrl(body.youtubeUrl) };
+  if (!('youtubeUrl' in body) && !('serverDub' in body)) {
+    throw new RoomError(400, 'nothing to update: send {"youtubeUrl": "<link>" | null} and/or {"serverDub": true | false}');
+  }
+  if ('serverDub' in body && typeof body.serverDub !== 'boolean') throw new RoomError(400, 'serverDub must be a boolean');
+  return {
+    ...('youtubeUrl' in body ? { youtubeUrl: parseYoutubeUrl(body.youtubeUrl) } : {}),
+    ...('serverDub' in body ? { serverDub: body.serverDub as boolean } : {}),
+  };
 }
 
 export function parseCreate(body: unknown, cfg: RoomsConfig): CreateRoomInput {

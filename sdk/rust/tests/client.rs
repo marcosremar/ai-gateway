@@ -393,6 +393,23 @@ fn room() -> ai_gateway_sdk::Room {
 }
 
 #[tokio::test]
+async fn room_server_dub_update_sends_the_flag_with_the_publish_token() {
+    let mock = Mock::start().await;
+    mock.on("PATCH", "/v1/rooms/ABC123", vec![
+        Reply::json(200, json!({"code": "ABC123", "youtubeUrl": null, "serverDub": false})),
+        Reply::json(400, json!({"error": {"message": "nothing to update", "type": "invalid_request_error"}})),
+    ]);
+    let gw = client(&mock);
+    gw.rooms().update_server_dub(&room(), false).await.unwrap();
+    let err = gw.rooms().update_server_dub(&room(), true).await.unwrap_err();
+    assert_eq!(err.status(), Some(400), "an older gateway");
+    let reqs = mock.requests();
+    assert_eq!((reqs[0].method.as_str(), reqs[0].header("authorization")), ("PATCH", Some("Bearer pt-secret-1")));
+    assert_eq!(reqs[0].json(), json!({"serverDub": false}));
+    assert_eq!(reqs[1].json(), json!({"serverDub": true}));
+}
+
+#[tokio::test]
 async fn room_youtube_update_accepts_200_json_and_204_and_surfaces_405_of_older_gateways() {
     let mock = Mock::start().await;
     mock.on("PATCH", "/v1/rooms/ABC123", vec![

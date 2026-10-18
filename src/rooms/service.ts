@@ -333,15 +333,20 @@ export class RoomService {
    * broadcast to the open pages as `{"type":"update"}`; an unchanged value is a no-op.
    */
   async update(room: LiveRoom, input: UpdateRoomInput): Promise<void> {
-    const before = typeof room.meta.youtubeUrl === 'string' ? room.meta.youtubeUrl : null;
-    if (before === input.youtubeUrl) return;
-    room.meta.youtubeUrl = input.youtubeUrl;
+    const youtubeBefore = typeof room.meta.youtubeUrl === 'string' ? room.meta.youtubeUrl : null;
+    const dubBefore = room.meta.serverDub !== false;
+    const youtubeUrl = input.youtubeUrl === undefined ? youtubeBefore : input.youtubeUrl;
+    const serverDub = input.serverDub ?? dubBefore;
+    if (youtubeUrl === youtubeBefore && serverDub === dubBefore) return;
+    room.meta.youtubeUrl = youtubeUrl;
+    if (serverDub) delete room.meta.serverDub;
+    else room.meta.serverDub = false;
     room.meta.lastActivityAt = this.now();
     room.touchedAt = this.now();
     room.metaSavedAt = this.now();
     await this.opts.store.saveMeta(room.meta);
-    this.log('rooms: updated', { code: room.meta.code, youtube: input.youtubeUrl !== null });
-    this.broadcast(room, { type: 'update', youtubeUrl: input.youtubeUrl });
+    this.log('rooms: updated', { code: room.meta.code, youtube: youtubeUrl !== null, serverDub });
+    this.broadcast(room, { type: 'update', youtubeUrl, ...(serverDub !== dubBefore && this.dubber ? this.listenLangs(room) : {}) });
   }
 
   /** A clip the server synthesized: only to the viewers listening to that language. */
