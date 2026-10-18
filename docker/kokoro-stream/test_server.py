@@ -1,4 +1,8 @@
+import os
+import sys
+
 import numpy as np
+import pytest
 
 import server
 
@@ -74,3 +78,15 @@ def test_stressed_e_and_o_follow_the_dictionary_and_the_word_before():
         ("bom", "bˈõ", "bˈõ"),
     ]:
         assert server.fix_vowels(text, espeak) == fixed, text
+
+
+def test_providers_are_a_comma_separated_list_and_cpu_by_default():
+    assert server.providers("CUDAExecutionProvider, CPUExecutionProvider") == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    if "KOKORO_PROVIDERS" not in os.environ:
+        assert server.PROVIDERS == ["CPUExecutionProvider"]
+
+
+@pytest.mark.skipif(sys.platform == "darwin" and not os.environ.get("ESPEAK_DATA"), reason="espeakng-loader's macOS build ignores its data path: set ESPEAK_DATA and ESPEAK_LIBRARY")
+def test_espeak_phonemizes_every_language():
+    for voice, text in server.WARM_UP.items():
+        assert any(mark in server.phonemize(text, voice) for mark in server.STRESS), voice
