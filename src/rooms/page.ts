@@ -342,10 +342,14 @@ header:has(.pill.live) .logo .mark::after{content:"";position:absolute;inset:0;b
 .row input[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .row input[type=range]{flex:1 1 auto;min-width:0;max-width:12rem;accent-color:var(--brand-hi)}
 .row.off{opacity:.5}
-.seg{display:flex;gap:8px;flex-wrap:wrap}
-.seg label{flex:1 1 0;min-width:5.5rem;display:flex;align-items:center;justify-content:center;gap:6px;height:42px;border:1px solid var(--line);border-radius:12px;cursor:pointer;font-size:.9rem;font-weight:600}
-.seg label:has(input:checked){border-color:var(--brand-hi);background:var(--live-bg)}
-.seg input{accent-color:var(--brand-hi);margin:0}
+.seg{display:flex;gap:4px;padding:4px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+.seg label{position:relative;flex:1 1 auto;min-width:0;display:flex;align-items:center;justify-content:center;gap:6px;height:40px;padding:0 10px;border-radius:10px;cursor:pointer;font-size:.88rem;font-weight:600;color:var(--muted);white-space:nowrap;transition:background .15s,color .15s}
+.seg label span{overflow:hidden;text-overflow:ellipsis}
+.seg label:hover{color:var(--text)}
+.seg label:has(input:checked){background:var(--brand);color:var(--brand-ink)}
+.seg label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg svg{flex:none;width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .stepper{display:flex;align-items:center;gap:12px}
 .stepper output{min-width:3.5rem;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
 @media (min-width:768px){.top{height:38px}.now{padding:28px 32px;min-height:168px;border-radius:28px}.lang{flex-basis:12rem}:root{--rail:3.8rem}
@@ -417,7 +421,7 @@ ${opt('full', 'mFull')}
 <div class="grp"><span class="lbl" id="sSizeLbl" ${txt('size')}</span><div class="stepper" role="group" aria-labelledby="sSizeLbl">
 <button id="sSmaller" class="btn" type="button" data-ia="smaller" aria-label="${esc(T.smaller)}">A−</button><output id="sSize" aria-live="polite">100%</output><button id="sBigger" class="btn" type="button" data-ia="bigger" aria-label="${esc(T.bigger)}">A+</button></div></div>
 <fieldset class="grp"><legend ${txt('theme')}</legend><div class="seg">
-<label><input type="radio" name="sTheme" value="dark"><span ${txt('dark')}</span></label><label><input type="radio" name="sTheme" value="light"><span ${txt('light')}</span></label><label><input type="radio" name="sTheme" value="auto"><span ${txt('auto')}</span></label>
+<label><input type="radio" name="sTheme" value="dark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg><span ${txt('dark')}</span></label><label><input type="radio" name="sTheme" value="light"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><span ${txt('light')}</span></label><label><input type="radio" name="sTheme" value="auto"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg><span ${txt('auto')}</span></label>
 </div></fieldset>
 <fieldset class="grp"><legend ${txt('fullText')}</legend>
 <label class="row"><span ${txt('autoScroll')}</span><input id="sScroll" type="checkbox" role="switch"></label>
