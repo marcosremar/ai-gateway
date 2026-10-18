@@ -325,6 +325,21 @@ describe('rooms server dubbing', () => {
     expect(service.publicView(r).dubLangs).toEqual(['en']);
   });
 
+  it("the speaker's own voice: a clip in the original language makes it listenable, announced once, sent only to who listens to it", async () => {
+    const r = await room(service, ['en', 'fr']);
+    const original = viewer('pt', null), dubbed = viewer('en');
+    service.addViewer(r, original); service.addViewer(r, dubbed);
+    expect(service.publicView(r).dubLangs).not.toContain('pt');
+    service.publishAudio(r, { lineId: 1, lang: 'pt', wav: 'AAAA' });
+    service.publishAudio(r, { lineId: 2, lang: 'pt', wav: 'BBBB' });
+    expect(service.publicView(r).dubLangs).toContain('pt');
+    expect(original.msgs.filter(m => m.type === 'update')).toHaveLength(1);
+    expect(audios(original).map(a => a.wav)).toEqual(['AAAA', 'BBBB']);
+    expect(audios(dubbed)).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(WAIT * 3);
+    expect(synth.mock.calls.map(c => c[1])).not.toContain('pt');
+  });
+
   it('a stuck Kokoro call is aborted after TTS_CALL_TIMEOUT_MS without holding the next lines of that language', async () => {
     let aborted: AbortSignal | undefined;
     const provider = {

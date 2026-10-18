@@ -29,8 +29,8 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   speechMs(text: string): number;
   safeYoutubeUrl(u: unknown): string | null;
   youtubeLabel(prefs: string[]): string;
-  dubbable(lang: string, dubLangs: string[] | undefined): boolean;
-  listenMsg(on: boolean, lang: string | null): string;
+  dubbable(lang: string, dubLangs: string[] | undefined, originalLang?: string): boolean;
+  listenMsg(on: boolean, lang: string | null, originalLang?: string): string;
   dubStatus(s: { can: boolean; lang: string; on: boolean; ctx: string | null; error: string | null; playing: boolean; loading: boolean }, L: Record<string, string>): { kind: string; text: string };
   silentWav(rate: number, samples: number): string;
 };
@@ -229,18 +229,22 @@ describe('room page: viewer settings', () => {
     expect(dubbable('de', undefined)).toBe(true);
     expect(dubbable('orig', undefined)).toBe(false);
     expect(dubbable('orig', ['en'])).toBe(false);
+    expect(dubbable('orig', ['en'], 'fr')).toBe(false);
+    expect(dubbable('orig', ['en', 'fr'], 'fr')).toBe(true);
   });
 
   it('sends listen for the chosen translation only while dubbing is on', () => {
     expect(JSON.parse(listenMsg(true, 'fr'))).toEqual({ type: 'listen', lang: 'fr', view: 'fr', chunks: true });
     expect(JSON.parse(listenMsg(false, 'fr'))).toEqual({ type: 'listen', lang: null, view: 'fr', chunks: true });
     expect(JSON.parse(listenMsg(true, 'orig'))).toEqual({ type: 'listen', lang: null, view: null, chunks: true });
+    expect(JSON.parse(listenMsg(true, 'orig', 'fr'))).toEqual({ type: 'listen', lang: 'fr', view: null, chunks: true });
+    expect(JSON.parse(listenMsg(false, 'orig', 'fr'))).toEqual({ type: 'listen', lang: null, view: null, chunks: true });
     expect(JSON.parse(listenMsg(true, null))).toEqual({ type: 'listen', lang: null, view: null, chunks: true });
   });
 
   it('re-sends listen on every (re)connect, dub toggle and language change', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
-    expect(html).toContain('ws.send(listenMsg(dub,lang))');
+    expect(html).toContain('ws.send(listenMsg(dub,lang,room&&room.originalLang))');
     expect(html).toContain('s.onopen=function(){opened=true;attempt=0;sendListen()');
     expect(html).toMatch(/function setLang\([^)]*\)\{[\s\S]*?sendListen\(\)/);
     expect(html).toMatch(/function setDub\([^)]*\)\{[\s\S]*?sendListen\(\)/);
