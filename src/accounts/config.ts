@@ -31,6 +31,7 @@ export interface AccountsConfig {
   usagePath: string | null;
   /** Gateway app every activation key acts as (its routes, limits, devices). Never an admin user. */
   app: string;
+  wakeDeployments: string[];
   /** Hosts whose `/`, `/signup`, `/login`, … serve the account pages (Host header match). */
   siteHosts: string[];
   /** Public base of the site, used in e-mailed links (`<base>/reset?token=…`). */
@@ -53,6 +54,7 @@ export interface AccountsConfig {
 
 export const ACCOUNTS_DEFAULTS = {
   APP: 'babelcast',
+  WAKE_DEPLOYMENTS: 'babelcast-tts-clone',
   SITE_HOSTS: 'ucast.me,www.ucast.me,app.ucast.me',
   PUBLIC_BASE_URL: 'https://ucast.me',
   DOWNLOAD_URL: 'https://github.com/marcosremar/babelcast/releases/latest',
@@ -85,6 +87,7 @@ export function accountsConfigFromEnv(env: Record<string, string | undefined> = 
     statePath: join(dir, 'accounts.json'),
     usagePath: join(dir, 'account-usage.json'),
     app: env.ACCOUNTS_APP?.trim() || ACCOUNTS_DEFAULTS.APP,
+    wakeDeployments: (env.ACCOUNTS_WAKE_DEPLOYMENTS ?? ACCOUNTS_DEFAULTS.WAKE_DEPLOYMENTS).split(',').map(d => d.trim()).filter(Boolean),
     siteHosts: (env.ACCOUNTS_SITE_HOSTS ?? ACCOUNTS_DEFAULTS.SITE_HOSTS).split(',').map(h => h.trim().toLowerCase()).filter(Boolean),
     publicBaseUrl: (env.ACCOUNTS_PUBLIC_BASE_URL?.trim() || ACCOUNTS_DEFAULTS.PUBLIC_BASE_URL).replace(/\/+$/, ''),
     downloadUrl: env.ACCOUNTS_DOWNLOAD_URL?.trim() || ACCOUNTS_DEFAULTS.DOWNLOAD_URL,

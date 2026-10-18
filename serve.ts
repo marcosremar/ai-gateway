@@ -190,6 +190,8 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
     const app = found.userId === SANDBOX_USER ? process.env.SANDBOX_TOKEN_APP?.trim() || SANDBOX_USER : found.userId;
     return { keyId: found.keyId, user: found.userId, app, policy: access.policyOf(found.keyId) };
   },
+  appKeyWakes: (req, name) => Boolean(accounts?.resolveAppKey((req.headers.authorization || '').replace(/^Bearer\s+/i, '')))
+    && accounts!.config.wakeDeployments.includes(name),
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
   log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); incidents.fromDeploymentLog(msg, data); },
   declaredStatus: () => declared?.status() ?? [],

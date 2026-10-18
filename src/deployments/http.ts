@@ -234,6 +234,7 @@ export interface DeploymentRoutesOptions {
   gpuValidation?: GpuValidation;
   audit?: (entry: { actor: string; action: string; names: string[]; ok: boolean; detail?: string }) => void;
   keyOf?: (req: IncomingMessage) => { keyId: string; user: string; app: string; policy: GpuPolicy } | null;
+  appKeyWakes?: (req: IncomingMessage, name: string) => boolean;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
@@ -651,7 +652,7 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
       return send(res, 202, await opts.clientGpu.start(starter, policy, name, minutes, action === 'extend'));
     }
     if (action === 'wake' && method === 'POST') {
-      if (!isAdmin(req)) {
+      if (!isAdmin(req) && !opts.appKeyWakes?.(req, name)) {
         const key = gpuClient(req, name);
         refuseWake(key.policy, name);
         if (key.policy.wakeDeployments.length && opts.clientGpu) {
