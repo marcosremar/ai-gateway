@@ -63,6 +63,19 @@ describe('idleAction stop: a stopping replica is not halted', () => {
     expect(x.controller.health().stopped).toBe(1);
   });
 
+  it('a parked replica that still lists as exited right after power-on (Vast, 18/10/2026) comes back, not deleted', async () => {
+    const x = await setup({}, undefined);
+    await x.controller.put('park', { ...PARKING });
+    await parkIt(x, 'park', 1);
+    await until(() => x.controller.get('park')!.replicas[0]?.providerState === 'stopped', 3000);
+    x.cloud.startLagMs = 300;
+    x.controller.wake('park');
+    await until(() => x.controller.get('park')!.status === 'ready', 4000);
+    expect(x.cloud.starts).toHaveLength(1);
+    expect(x.cloud.released).toEqual([]);
+    expect(x.cloud.created).toHaveLength(1);
+  });
+
   it('a replica adopted while `stopping` (gateway restart) is also left alone', async () => {
     const x = await setup();
     x.cloud.stoppingMs = 300;
