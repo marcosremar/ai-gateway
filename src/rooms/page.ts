@@ -138,7 +138,7 @@ function shell(title: string, css: string, body: string, script: string, nonce: 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#252528">
+<meta name="theme-color" content="#0A1220">
 <meta name="robots" content="noindex">
 <title>${esc(title)}</title>
 <link rel="icon" href="${ICON}">
