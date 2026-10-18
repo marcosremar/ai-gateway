@@ -47,6 +47,7 @@ def test_numbers_and_abbreviations_are_spoken_per_language():
     assert server.spoken("Comprei 1 kg e 500 g a 80 km/h na Av. Paulista.", "pf_dora") == "Comprei um quilo e quinhentos gramas a oitenta quilômetros por hora na avenida Paulista."
     assert server.spoken("O IBGE e a UFRJ no SUS, século XXI, porque sim.", "pf_dora") == "O i bê gê é e a u efe erre jota no sus, século XXI, porquê sim."
     assert server.spoken("ATENÇÃO: O SUS", "pf_dora") == "ATENÇÃO: O SUS"
+    assert server.spoken("Placar 3/45/2026.", "pf_dora") == "Placar três/quarenta e cinco/dois mil e vinte e seis."
 
 
 def test_the_last_word_of_a_phrase_is_longer_and_a_question_rises():
