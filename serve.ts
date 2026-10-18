@@ -13,6 +13,7 @@ import { join } from 'path';
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/providers/cloud/openrouter';
+import { modalKokoroTTS } from './src/gateway/providers/cloud/modal-kokoro';
 import { openaiSTT } from './src/gateway/providers/cloud/openai';
 import { fireworksSTT } from './src/gateway/providers/cloud/fireworks';
 import { deepgramSTT } from './src/gateway/providers/cloud/deepgram';
@@ -576,8 +577,11 @@ const rooms = createRooms({
   log: (msg, data) => log.log(data ?? {}, msg),
   // Server dubbing (Kokoro only — no paid fallback voice) through the gateway TTS module: breakers, per-call timeout,
   // one request per sentence. Another Kokoro source added to these links is ranked by latency automatically.
-  synthesize: kokoroTts(() => [{ providerId: 'openrouter', provider: openrouterTTS, model: KOKORO_MODEL }]),
-  synthesizeAvailable: () => openrouterTTS.isConfigured(),
+  synthesize: kokoroTts(() => [
+    { providerId: 'openrouter', provider: openrouterTTS, model: KOKORO_MODEL },
+    ...(process.env.MODAL_KOKORO_URL ? [{ providerId: 'modal' as const, provider: modalKokoroTTS, model: 'kokoro-82m' }] : []),
+  ]),
+  synthesizeAvailable: () => openrouterTTS.isConfigured() || Boolean(process.env.MODAL_KOKORO_URL),
   translate: openRouterTranslate(openrouterLLM),
   ...(controller && { clone: deploymentClone(controller, process.env.ROOM_VOICE_CLONE_DEPLOYMENT?.trim() || 'babelcast-tts-clone') }),
 });
