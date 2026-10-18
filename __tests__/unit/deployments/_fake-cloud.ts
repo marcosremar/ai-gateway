@@ -42,6 +42,8 @@ export class FakeCloud implements DeploymentBackend {
   appDelayMs = 0;
   /** A stop is listed `stopping` for this long (Scaleway: ~1 min) before `stopped`; 0 = `stopped` at once. */
   stoppingMs = 0;
+  startLagMs = 0;
+  private startSettlesAt = new Map<string, number>();
   private stopSettlesAt = new Map<string, number>();
   private seq = 0;
 
@@ -99,6 +101,11 @@ export class FakeCloud implements DeploymentBackend {
       if (!fake) this.stopSettlesAt.delete(id);
       else if (Date.now() >= at) { fake.machine.state = 'stopped'; this.stopSettlesAt.delete(id); }
     }
+    for (const [id, at] of this.startSettlesAt) {
+      const fake = this.machines.get(id);
+      if (!fake) this.startSettlesAt.delete(id);
+      else if (Date.now() >= at) { fake.machine.state = 'running'; this.startSettlesAt.delete(id); }
+    }
     return [...this.machines.values()].map(m => ({ ...m.machine }));
   }
 
@@ -150,8 +157,9 @@ export class FakeCloud implements DeploymentBackend {
     const fake = this.machines.get(machine.id)!;
     this.starts.push(machine.id);
     this.stopSettlesAt.delete(machine.id);
-    fake.machine.state = 'running';
-    fake.bootedAt = Date.now() + this.bootMs;
+    fake.machine.state = this.startLagMs > 0 ? 'exited' : 'running';
+    if (this.startLagMs > 0) this.startSettlesAt.set(machine.id, Date.now() + this.startLagMs);
+    fake.bootedAt = Date.now() + this.startLagMs + this.bootMs;
   }
 
   /** Machine dies without the provider noticing (connection refused). */

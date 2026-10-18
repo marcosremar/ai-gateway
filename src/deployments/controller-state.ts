@@ -194,6 +194,7 @@ export const DEFAULT_MAX_EUR_PER_HOUR = 6;
 export const machineTypesOf = (spec: DeploymentSpec): Set<string> => new Set(
   [spec.machineType, ...(spec.placements ?? []).flatMap(p => p.machineType ?? []), ...(spec.candidates ?? []).map(c => c.machineType)]);
 export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
+export const RESUME_LISTS_STOPPED_MS = 5 * 60_000;
 export const DEFAULT_BUSY_GRACE_MS = 120_000;
 export const ERRORED_GRACE_MS = 20_000;
 export const DEFAULT_MAX_COLD_START_WAIT_SECONDS = 240;
@@ -399,7 +400,8 @@ export abstract class ControllerState {
     // A parked replica powered back on boots again: its boot (timeout, booting phase) AND its `maxHours` lifetime count
     // from the last power-on, not from the day the machine was created (a parked replica is not running).
     const startedAt = this.poweredOnAt.get(m.id);
-    const machine = startedAt !== undefined ? { ...m, createdAt: Math.max(m.createdAt, startedAt) } : m;
+    const resuming = startedAt !== undefined && this.now() - startedAt < RESUME_LISTS_STOPPED_MS && (m.state === 'exited' || m.state === 'stopped');
+    const machine = startedAt !== undefined ? { ...m, createdAt: Math.max(m.createdAt, startedAt), ...(resuming ? { state: 'starting' } : {}) } : m;
     return {
       machine, everReady: p.everReady, readyNow: p.readyNow, failures: p.failures, inflight,
       ...(p.readyAt ? { readyAt: p.readyAt } : {}), ...(this.servedRecently(p) ? { servedRecently: true } : {}),
