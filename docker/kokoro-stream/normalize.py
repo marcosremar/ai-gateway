@@ -22,7 +22,7 @@ CURRENCY = {
     "€": {"es": ("euro", "euros", "céntimo", "céntimos", "con"), "fr": ("euro", "euros", "centime", "centimes", "et"), "it": ("euro", "euro", "centesimo", "centesimi", "e"), "pt": ("euro", "euros", "centavo", "centavos", "e")},
     "$": {"en": ("dollar", "dollars", "cent", "cents", "and")},
 }
-HOUR_WORD = {"pt": "horas", "es": "", "fr": "heures", "it": "", "en": ""}
+HOUR_WORD = {"pt": ("hora", "horas"), "es": ("", ""), "fr": ("heure", "heures"), "it": ("", ""), "en": ("", "")}
 
 
 def words(n: int, lang: str) -> str:
@@ -37,12 +37,19 @@ def money(units: int, cents: int, names: tuple, lang: str) -> str:
     return spoken
 
 
-def time_of_day(hours: int, minutes: int, lang: str, meridiem: str = "") -> str:
+def hours_said(hours: int, lang: str) -> str:
+    spoken = words(hours, lang)
+    return re.sub(r"\bdois$", "duas", re.sub(r"\bum$", "uma", spoken)) if lang == "pt" else spoken
+
+
+def time_of_day(hours: int, minutes: int, lang: str, meridiem: str = "") -> str | None:
+    if hours > 24 or minutes > 59:
+        return None
     if lang == "en":
         spoken = words(hours, lang) + (f" {words(minutes, lang)}" if minutes else "")
         return spoken + (f" {' '.join(meridiem.replace('.', '').lower())}" if meridiem else "")
-    hour_word = HOUR_WORD[lang]
-    spoken = f"{words(hours, lang)} {hour_word}".strip()
+    hour_word = HOUR_WORD[lang][hours != 1]
+    spoken = f"{hours_said(hours, lang)} {hour_word}".strip()
     if minutes:
         spoken += f" {'e' if lang in ('pt', 'it') else 'y' if lang == 'es' else ''} {words(minutes, lang)}".replace("  ", " ")
     return spoken
@@ -127,9 +134,9 @@ def normalize(text: str, lang: str) -> str:
         text = re.sub(rf"\b{MONTH}/{DAY}/(\d{{4}})\b", lambda m: date(int(m[2]), int(m[1]), int(m[3]), lang), text)
     else:
         text = re.sub(rf"\b{DAY}/{MONTH}/(\d{{4}})\b", lambda m: date(int(m[1]), int(m[2]), int(m[3]), lang), text)
-    text = re.sub(r"\b(\d{1,2})[h:](\d{2})(?:\s?([ap]\.?m\.?))?", lambda m: time_of_day(int(m[1]), int(m[2]), lang, m[3] or ""), text)
+    text = re.sub(r"\b(\d{1,2})[h:](\d{2})(?:\s?([ap]\.?m\.?))?", lambda m: time_of_day(int(m[1]), int(m[2]), lang, m[3] or "") or m[0], text)
     if lang != "en":
-        text = re.sub(r"\b(\d{1,2})h\b", lambda m: time_of_day(int(m[1]), 0, lang), text)
+        text = re.sub(r"\b(\d{1,2})h\b", lambda m: time_of_day(int(m[1]), 0, lang) or m[0], text)
     if lang in ORDINAL_LANGS:
         text = re.sub(r"\b(\d+)\s?([ºª])(?!C)", lambda m: ordinal(int(m[1]), m[2] == "ª", lang), text)
     text = UNIT_PATTERN.sub(lambda m: unit(m[1], m[2], lang), text)

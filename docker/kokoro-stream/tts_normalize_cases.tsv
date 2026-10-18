@@ -1,0 +1,24 @@
+lang	input	expected	only
+pt-br	O Dr. Silva paga R$ 10,50.	O doutor Silva paga 10 reais e 50 centavos.
+pt-br	O Dr. Silva chega às 9h e paga R$ 1.	O doutor Silva chega às 9 horas e paga 1 real.
+pt-br	Custou R$ 1,01.	Custou 1 real e 1 centavo.
+pt-br	A reunião é às 14h30 do dia 18/10/2026 e custa R$ 10,50.	A reunião é às 14 horas e 30 do dia 18 de outubro de 2026 e custa 10 reais e 50 centavos.
+pt-br	Paguei R$ 1.250,90 a 38,5 graus, em 2º lugar.	Paguei 1250 reais e 90 centavos a 38 vírgula 5 graus, em 2º lugar.
+pt-br	Foram 1.000.000 de pessoas na 3ª vez.	Foram 1000000 de pessoas na 3ª vez.
+pt-br	Ligue (11) 98765-4321 às 18h.	Ligue 11, 9 8 7 6 5, 4 3 2 1 às 18 horas.
+pt-br	Comprei 2 kg, 1 kg e 500 g a 80 km/h na Av. Paulista, nº 5.	Comprei 2 quilos, 1 quilo e 500 gramas a 80 quilômetros por hora na avenida Paulista, número 5.
+pt-br	Faz 25 °C e bebi 1,5 L em 30 min.	Faz 25 graus e bebi 1 vírgula 5 litros em 30 minutos.
+pt-br	Porque sim, porque eu quero. Por que não?	Porquê sim, porquê eu quero. Por que não?
+pt-br	O IBGE, o PIB, o INSS e a UFRJ no SUS, século XXI.	O i bê gê é, o pib, o i ene esse esse e a u efe erre jota no sus, século XXI.
+pt-br	ATENÇÃO: O SUS	ATENÇÃO: O SUS
+pt-br	Placar 3/45/2026 e 25:99.	Placar 3/45/2026 e 25:99.
+pt-br	A aula é à 1h, o almoço às 12h e o jogo às 2h.	A aula é à uma hora, o almoço às 12 horas e o jogo às duas horas.
+pt-br	O voo sai às 21h e chega às 22h30.	O voo sai às vinte e uma horas e chega às vinte e duas horas e 30.
+pt-br	À 1h01 e às 21:00.	À uma hora e 1 e às vinte e uma horas.
+es	El Dr. García llega a las 14:30 del 18/10/2026 y paga 10,50 €.	El doctor García llega a las 14 y 30 del 18 de octubre de 2026 y paga 10 euros con 50 céntimos.
+fr-fr	M. Dupont arrive à 14h30 le 18/10/2026 et paie 10,50 €.	monsieur Dupont arrive à 14 heures 30 le 18 octobre 2026 et paie 10 euros et 50 centimes.
+it	Il Dott. Rossi arriva alle 14:30 del 18/10/2026 e paga 10,50 €.	Il dottor Rossi arriva alle 14 e 30 del 18 ottobre 2026 e paga 10 euro e 50 centesimi.
+en-us	Dr. Smith pays $10.50 on 10/18/2026 with 25% off.	doctor Smith pays 10 dollars and 50 cents on October 18th, 2026 with 25 percent off.
+en-us	See you at 2:30 pm today.	See you at two thirty p m today.	python
+en-us	See you at 2:30 pm today.	See you at 2:30 pm today.	rust
+hi	नमस्ते 5	नमस्ते 5

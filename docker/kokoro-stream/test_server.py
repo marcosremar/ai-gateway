@@ -1,10 +1,18 @@
+import asyncio
+import json
 import os
+import re
 import sys
+import threading
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 import server
+from normalize import ordinal, words
+
+CASES = Path(__file__).with_name("tts_normalize_cases.tsv")
 
 
 def test_a_long_first_sentence_starts_with_its_first_clause():
@@ -39,15 +47,73 @@ def test_emphasis_marks_are_removed_and_their_words_kept():
     assert server.without_emphasis("Foi *incrível*, de verdade!") == ("Foi incrível, de verdade!", ["incrível"])
 
 
+def with_numbers_in_words(expected: str, voice: str) -> str:
+    language = server.NUMBER_LANGUAGES.get(voice)
+    if not language:
+        return expected
+    expected = re.sub(r"(\d+)([ºª])", lambda m: ordinal(int(m[1]), m[2] == "ª", language), expected)
+    return re.sub(r"\d+", lambda m: words(int(m[0]), language), expected)
+
+
 def test_numbers_and_abbreviations_are_spoken_per_language():
-    assert server.spoken("O Dr. Silva paga R$ 10,50.", "pf_dora") == "O doutor Silva paga dez reais e cinquenta centavos."
-    assert server.spoken("नमस्ते 5", "hf_alpha") == "नमस्ते 5"
-    assert server.spoken("Paguei R$ 1.250,90 a 38,5 graus, em 2º lugar.", "pf_dora") == "Paguei mil duzentos e cinquenta reais e noventa centavos a trinta e oito vírgula cinco graus, em segundo lugar."
-    assert server.spoken("Ligue (11) 98765-4321 às 18h.", "pf_dora") == "Ligue onze, nove oito sete seis cinco, quatro três dois um às dezoito horas."
-    assert server.spoken("Comprei 1 kg e 500 g a 80 km/h na Av. Paulista.", "pf_dora") == "Comprei um quilo e quinhentos gramas a oitenta quilômetros por hora na avenida Paulista."
-    assert server.spoken("O IBGE e a UFRJ no SUS, século XXI, porque sim.", "pf_dora") == "O i bê gê é e a u efe erre jota no sus, século XXI, porquê sim."
-    assert server.spoken("ATENÇÃO: O SUS", "pf_dora") == "ATENÇÃO: O SUS"
-    assert server.spoken("Placar 3/45/2026.", "pf_dora") == "Placar três/quarenta e cinco/dois mil e vinte e seis."
+    voices = {language: letter for letter, language in server.LANGUAGES.items()}
+    for line in CASES.read_text(encoding="utf-8").splitlines()[1:]:
+        lang, text, expected, *only = line.split("\t")
+        if only == ["rust"]:
+            continue
+        voice = voices[lang]
+        assert server.spoken(text, voice) == with_numbers_in_words(expected, voice), text
+
+
+class Session:
+    def __init__(self, provider: str):
+        self.provider = provider
+
+    def get_providers(self) -> list[str]:
+        return [self.provider, "CPUExecutionProvider"]
+
+
+class Request:
+    headers: dict = {}
+
+    def __init__(self, body: dict):
+        self.body = body
+
+    async def json(self) -> dict:
+        return self.body
+
+
+@pytest.fixture
+def loaded(monkeypatch):
+    stub = server.Engine(front=Session("CUDAExecutionProvider"), generator=Session("CPUExecutionProvider"), opening=Session("CUDAExecutionProvider"), vocab={}, voices={"pf_dora": None})
+    monkeypatch.setattr(server, "engine", stub)
+    monkeypatch.setattr(server, "slots", threading.BoundedSemaphore(8))
+
+
+def test_a_bad_request_is_refused_before_any_audio_is_streamed(loaded):
+    for body, code in [
+        ({"input": "Olá.", "voice": "pf_dora", "speed": "fast"}, "invalid_speed"),
+        ({"input": "Olá.", "voice": "pf_dora", "speed": 10}, "invalid_speed"),
+        ({"input": "Olá.", "voice": "pf_dora", "speed": 0.1}, "invalid_speed"),
+        ({"input": "Código 1" + "0" * 40 + ".", "voice": "pf_dora"}, "invalid_input"),
+        ({"input": " ", "voice": "pf_dora"}, "invalid_input"),
+        ({"input": "Olá.", "voice": "xx_nobody"}, "invalid_voice"),
+    ]:
+        response = asyncio.run(server.speech(Request(body)))
+        assert response.status_code == 400 and json.loads(response.body)["error"]["code"] == code, body
+    for speed in [None, 0.25, 1.5, 4]:
+        response = asyncio.run(server.speech(Request({"input": "Às 21h.", "voice": "pf_dora", "speed": speed})))
+        assert response.status_code == 200 and response.media_type.startswith("audio/pcm"), speed
+
+
+def test_health_names_the_onnx_provider_each_session_runs_on(loaded, monkeypatch):
+    monkeypatch.setattr(server, "MODEL_REVISION", "8bc34e5")
+    assert server.health() == {
+        "status": "ok",
+        "voices": ["pf_dora"],
+        "providers": {"front": "CUDAExecutionProvider", "generator": "CPUExecutionProvider", "opening": "CUDAExecutionProvider"},
+        "revision": "8bc34e5",
+    }
 
 
 def test_the_last_word_of_a_phrase_is_longer_and_a_question_rises():
