@@ -241,6 +241,7 @@ of the current API).
 | `GET /v1/models` | — | — | `models()` |
 | Rooms create / lines / audio / end / GET | — | — | yes (babelcast parity) |
 | Rooms `PATCH /v1/rooms/:code` `{youtubeUrl}` | — | — | yes (`update_youtube`; ai-gateway `main` ≥ 0f6ac49, older gateways 405) |
+| Rooms `PATCH /v1/rooms/:code` `{serverDub}` | — | — | yes (`update_server_dub`; older gateways 400) |
 | Rooms `PUT /v1/rooms/:code/voice` `{lang, ref_audio, ref_text}` | — | — | yes (`publish_voice`; older gateways 404) |
 | Swap the API key at runtime, sharing the pool | — | — | `with_api_key`, `with_app` |
 | `POST /v1/activate` | — | — | yes (babelcast parity) |

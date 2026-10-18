@@ -406,6 +406,38 @@ describe('rooms line delayMs', () => {
     }
   });
 });
+describe('rooms serverDub', () => {
+  it('PATCH turns the server voice off and on: open pages lose and get back the languages they can listen to', async () => {
+    const synthesize = async () => ({ audio: Buffer.from('x'), format: 'mp3' });
+    const gw = await startGateway({}, undefined, { synthesize });
+    try {
+      const room = await newRoom(gw);
+      const patch = (body: unknown) => fetch(`${gw.url}/v1/rooms/${room.code}`, {
+        method: 'PATCH', headers: { ...json, Authorization: `Bearer ${room.publishToken}` }, body: JSON.stringify(body),
+      });
+      const dubLangs = async () => ((await (await fetch(`${gw.url}/v1/rooms/${room.code}`)).json()) as Record<string, unknown>).dubLangs;
+      const v = await viewer(gw, room.code);
+      const voiced = ((await v.next('snapshot')).room as Record<string, unknown>).dubLangs;
+      expect(voiced).not.toEqual([]);
+
+      expect((await patch({ serverDub: 'no' })).status).toBe(400);
+      const off = await patch({ serverDub: false });
+      expect(await off.json()).toEqual({ code: room.code, youtubeUrl: null, serverDub: false });
+      expect(await v.next('update')).toEqual({ type: 'update', youtubeUrl: null, dubLangs: [], listenLangs: [] });
+      expect(await dubLangs()).toEqual([]);
+      expect((await patch({ serverDub: false })).status).toBe(200);
+      await new Promise(r => setTimeout(r, 80));
+      expect(v.messages.filter(m => m.type === 'update')).toHaveLength(0);
+
+      expect((await patch({ serverDub: true })).status).toBe(200);
+      expect((await v.next('update')).dubLangs).toEqual(voiced);
+      expect(await dubLangs()).toEqual(voiced);
+      v.ws.close();
+    } finally {
+      await gw.close();
+    }
+  });
+});
 describe('rooms youtubeUrl', () => {
   const patch = (gw: Gw, code: string, body: unknown, token?: string) => fetch(`${gw.url}/v1/rooms/${code}`, {
     method: 'PATCH', headers: { ...json, ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body),
@@ -458,7 +490,7 @@ describe('rooms youtubeUrl', () => {
 
     const ok = await patch(gw, room.code, { youtubeUrl: link }, room.publishToken);
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ code: room.code, youtubeUrl: link });
+    expect(await ok.json()).toEqual({ code: room.code, youtubeUrl: link, serverDub: true });
     expect(await v.next('update')).toEqual({ type: 'update', youtubeUrl: link });
     expect((await getRoom(gw, room.code)).youtubeUrl).toBe(link);
 
