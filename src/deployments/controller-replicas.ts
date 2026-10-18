@@ -7,6 +7,7 @@
 import { replicaCloudInit } from './cloud-init';
 import { randomBytes } from 'crypto';
 import { bootEventAuth, bootReportFor, parseBootEvent, sameAuth } from './boot-events';
+import { FAILURE_REASONS } from './boot-track';
 import { ControllerState, replicaTokenFor, type Runtime } from './controller-state';
 import { packFiles } from './file-pack';
 import { withGpuType } from './gpu-type';
@@ -121,6 +122,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
     this.log('deployments: releasing replica', { deployment: m.deployment, id: m.id, reason, busy: rt ? this.busyOn(rt, m.id) : 0 });
     this.boots.finish(m.id, reason, this.now());
     if ((reason === 'unhealthy' || reason === 'halted') && this.probes.get(m.id)?.everReady) this.noteLost(m.deployment);
+    if (rt && FAILURE_REASONS.has(reason) && !this.probes.get(m.id)?.everReady) rt.failedBootAt = this.now();
     try {
       await this.backendOf(this.providerOf(m)).releaseReplica(m, reason);
       this.machines = this.machines.filter(x => x.id !== m.id);

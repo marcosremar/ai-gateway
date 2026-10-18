@@ -84,6 +84,7 @@ export interface PlanInput {
   inflight: number;
   waiting: number;
   lastRequestAt: number | null;
+  failedBootAt?: number | null;
   /** Gateway-wide: replicas kept by `minReplicas` alone go to zero after this long unused (0/absent = off). */
   pinnedIdleMaxMs?: number;
   /** When the spec last changed (a PUT/PATCH is intent: it restarts the pinned-idle clock). */
@@ -137,7 +138,7 @@ export function replicaPhase(r: ObservedReplica): ReplicaPhase {
   return 'booting';
 }
 
-type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'now' | 'pinnedIdleMaxMs' | 'specUpdatedAt' | 'demand'
+type ActivityInput = Pick<PlanInput, 'spec' | 'inflight' | 'waiting' | 'lastRequestAt' | 'failedBootAt' | 'now' | 'pinnedIdleMaxMs' | 'specUpdatedAt' | 'demand'
   | 'autoscaleWant' | 'floor' | 'autoscaleOnly' | 'hold'>
   & { replicas?: ObservedReplica[] };
 
@@ -160,6 +161,8 @@ export function isActive(input: ActivityInput): boolean {
   // Cold start: if nothing was ready at the request, the clock starts when the first replica could serve it.
   const servedAtRequest = replicas.some(r => r.readyAt != null && r.readyAt <= last);
   const firstReadyAfter = Math.min(...replicas.map(r => r.readyAt ?? Infinity).filter(t => t > last));
+  const neverServed = !servedAtRequest && !Number.isFinite(firstReadyAfter);
+  if (neverServed && (input.failedBootAt ?? -Infinity) > last && input.now - last < input.spec.bootTimeoutMinutes * 60_000) return true;
   const idleFrom = servedAtRequest || !Number.isFinite(firstReadyAfter) ? last : firstReadyAfter;
   return input.now - idleFrom < windowMs;
 }
