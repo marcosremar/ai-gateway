@@ -162,7 +162,7 @@ describe('gateway TTS module', () => {
     expect(mp3DurationMs(Buffer.from('not audio'))).toBe(0);
   });
 
-  it("asks the clone deployment for one WAV per sentence with the speaker's reference and the target language", async () => {
+  it("asks the clone deployment for one WAV per sentence in the speaker's timbre only (no accent, no reference text) and the target language", async () => {
     const l = link(async () => ({ audio: Buffer.from('RIFF'), contentType: 'audio/wav' }));
     const other = link(mp3);
     const tts = qwenCloneTts(() => [{ ...l, model: QWEN_CLONE_MODEL } as never, other as never], breakers());
@@ -170,8 +170,9 @@ describe('gateway TTS module', () => {
     await expect(tts('Hallo zusammen', 'de-DE', voice)).resolves.toEqual({ audio: Buffer.from('RIFF'), format: 'wav' });
     expect(l.provider.synthesize.mock.calls[0]![0]).toMatchObject({
       input: 'Hallo zusammen', model: QWEN_CLONE_MODEL, responseFormat: 'wav',
-      extra: { task_type: 'Base', ref_audio: voice.refAudio, ref_text: voice.refText, language: 'de' },
+      extra: { task_type: 'Base', ref_audio: voice.refAudio, x_vector_only_mode: true, language: 'de' },
     });
+    expect(l.provider.synthesize.mock.calls[0]![0].extra).not.toHaveProperty('ref_text');
     expect(other.provider.synthesize).not.toHaveBeenCalled();
     await expect(tts('नमस्ते', 'hi', voice)).rejects.toThrow(/does not speak hi/);
     const streamed = link(async () => ({ audio: Buffer.alloc(0), stream: new Response('RIFFwav').body!, contentType: 'audio/wav' }) as never);
