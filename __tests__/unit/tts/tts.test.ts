@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import {
   PCM_CHUNK_MIN_BYTES, QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, TtsStream, catchUpSpeed, deploymentClone, kokoroTts, kokoroVoice, mp3DurationMs,
-  pcmOfWavStream, pcmToWav, qwenCloneTts, qwenSpeaks, trimSilence, wavDurationMs, type TtsClip,
+  pcmOfWavStream, pcmToWav, qwenCloneTts, qwenSpeaks, trimSilence, trimStreamSilence, wavDurationMs, type TtsClip,
 } from '../../../src/tts';
 import { DeploymentError } from '../../../src/deployments/controller-state';
 
@@ -18,6 +18,10 @@ const mp3 = async () => ({ audio: Buffer.from([1, 2, 3]), contentType: 'audio/mp
 const wav = (pcm: Buffer) => async () => ({ audio: pcmToWav(pcm), contentType: 'audio/wav' });
 const streamOf = (pieces: Buffer[]) => new ReadableStream<Uint8Array>({ start(c) { for (const p of pieces) c.enqueue(new Uint8Array(p)); c.close(); } });
 const collect = async (pcm: AsyncIterable<Buffer>) => { const out: Buffer[] = []; for await (const p of pcm) out.push(p); return Buffer.concat(out); };
+const s16 = (samples: number[]) => { const b = Buffer.alloc(samples.length * 2); samples.forEach((v, i) => b.writeInt16LE(v, i * 2)); return b; };
+const tone = (n: number) => Array.from({ length: n }, (_, i) => Math.round(8000 * Math.sin(i / 5)) || 2000);
+const quiet = (n: number) => Array(n).fill(3);
+async function* pieces(buf: Buffer, size: number) { for (let at = 0; at < buf.length; at += size) yield buf.subarray(at, at + size); }
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
@@ -175,8 +179,12 @@ describe('gateway TTS module', () => {
     expect(l.provider.synthesize.mock.calls[0]![0].extra).not.toHaveProperty('ref_text');
     expect(other.provider.synthesize).not.toHaveBeenCalled();
     await expect(tts('नमस्ते', 'hi', voice)).rejects.toThrow(/does not speak hi/);
-    const streamed = link(async () => ({ audio: Buffer.alloc(0), stream: new Response('RIFFwav').body!, contentType: 'audio/wav' }) as never);
-    await expect(qwenCloneTts(() => [streamed as never], breakers())('Hallo', 'de', voice)).resolves.toEqual({ audio: Buffer.from('RIFFwav'), format: 'wav' });
+    expect(l.provider.synthesize.mock.calls[0]![0]).toMatchObject({ stream: true });
+    const speech = s16([...quiet(24_000), ...tone(4_800), ...quiet(24_000)]);
+    const streamed = link(async () => ({ audio: Buffer.alloc(0), stream: new Response(Buffer.concat([Buffer.alloc(44), speech])).body!, contentType: 'audio/wav' }) as never);
+    const clip = await qwenCloneTts(() => [streamed as never], breakers())('Hallo', 'de', voice);
+    expect(clip.format).toBe('pcm');
+    expect((await collect(clip.pcm!)).length).toBe((4_800 + 4_800 + 4_800) * 2);
     expect(['en', 'zh', 'ja', 'ko', 'de', 'fr', 'ru', 'pt-BR', 'es', 'it'].every(qwenSpeaks)).toBe(true);
     expect(qwenSpeaks('hi')).toBe(false);
   });
@@ -205,6 +213,13 @@ describe('gateway TTS module', () => {
     await expect(clone.synthesize('Bonjour', 'fr', { refAudio: 'data:audio/wav;base64,UklGRg==', refText: 'olá' })).rejects.toThrow();
     expect(acquire).toHaveBeenCalledWith('babelcast-tts-clone', expect.objectContaining({ noWake: true, waitMs: 0 }));
     expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('a streamed clone voice loses its silence at both ends as it arrives, keeping 200 ms, and keeps pauses inside', async () => {
+    const audio = s16([...quiet(24_000), ...tone(2_400), ...quiet(12_000), ...tone(2_400), ...quiet(36_000)]);
+    const out = await collect(trimStreamSilence(pieces(audio, 2_002)));
+    expect(out.length).toBe((4_800 + 2_400 + 12_000 + 2_400 + 4_800) * 2);
+    expect(await collect(trimStreamSilence(pieces(s16(quiet(48_000)), 4_000)))).toEqual(Buffer.alloc(0));
   });
 
   it('trims the silence a clone starts and ends with, keeping 200 ms around the speech', () => {
