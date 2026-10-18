@@ -8,20 +8,23 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import espeakng_loader
 import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from phonemizer.backend.espeak.wrapper import EspeakWrapper
 
 if os.environ.get("ESPEAK_DATA"):
-    import espeakng_loader
-
     espeakng_loader.get_data_path = lambda: os.environ["ESPEAK_DATA"]
     espeakng_loader.get_library_path = lambda: os.environ["ESPEAK_LIBRARY"]
+EspeakWrapper.set_library(espeakng_loader.get_library_path())
+EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
 
 from misaki import espeak  # noqa: E402
 
 from normalize import normalize  # noqa: E402
+from vowels import fix as fix_vowels  # noqa: E402
 
 MODEL_DIR = Path(os.environ.get("KOKORO_STREAM_DIR", "/models/kokoro-stream"))
 API_KEY = os.environ.get("KOKORO_API_KEY", "")
@@ -88,7 +91,8 @@ def phonemize(text: str, voice: str) -> str:
     language = LANGUAGES[voice[0]]
     if language not in phonemizers:
         phonemizers[language] = espeak.EspeakG2P(language=language)
-    return phonemizers[language](text)
+    phonemes = phonemizers[language](text)
+    return fix_vowels(text, phonemes) if language == "pt-br" else phonemes
 
 
 def pieces(text: str) -> list[str]:

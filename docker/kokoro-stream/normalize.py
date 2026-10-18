@@ -11,7 +11,7 @@ MONTHS = {
     "en": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
 }
 ABBREVIATIONS = {
-    "pt": {"Dr.": "doutor", "Dra.": "doutora", "Sr.": "senhor", "Sra.": "senhora", "Prof.": "professor", "etc.": "et cetera"},
+    "pt": {"Dr.": "doutor", "Dra.": "doutora", "Sr.": "senhor", "Sra.": "senhora", "Prof.": "professor", "etc.": "et cetera", "Av.": "avenida", "nº": "número", "pág.": "página"},
     "es": {"Dr.": "doctor", "Dra.": "doctora", "Sr.": "señor", "Sra.": "señora", "Prof.": "profesor", "etc.": "etcétera"},
     "fr": {"M.": "monsieur", "Mme": "madame", "Dr": "docteur", "Pr": "professeur", "etc.": "et cetera"},
     "it": {"Dott.": "dottor", "Sig.": "signor", "Sig.ra": "signora", "Prof.": "professor", "ecc.": "eccetera"},
@@ -26,7 +26,7 @@ HOUR_WORD = {"pt": "horas", "es": "", "fr": "heures", "it": "", "en": ""}
 
 
 def words(n: int, lang: str) -> str:
-    return num2words(n, lang=NUM_LANG[lang])
+    return num2words(n, lang=NUM_LANG[lang]).replace(",", "")
 
 
 def money(units: int, cents: int, names: tuple, lang: str) -> str:
@@ -58,9 +58,63 @@ def date(day: int, month: int, year: int, lang: str) -> str:
     return f"{words(day, lang)}{joiner}{name}{joiner}{words(year, lang)}"
 
 
+DECIMAL_WORD = {"pt": "vírgula", "es": "coma", "fr": "virgule", "it": "virgola", "en": "point"}
+PERCENT_WORD = {"pt": "por cento", "es": "por ciento", "fr": "pour cent", "it": "per cento", "en": "percent"}
+UNITS = {
+    "pt": {"km/h": ("quilômetro por hora", "quilômetros por hora"), "km": ("quilômetro", "quilômetros"), "kg": ("quilo", "quilos"), "mg": ("miligrama", "miligramas"), "ml": ("mililitro", "mililitros"), "cm": ("centímetro", "centímetros"), "mm": ("milímetro", "milímetros"), "min": ("minuto", "minutos"), "°C": ("grau", "graus"), "ºC": ("grau", "graus"), "g": ("grama", "gramas"), "m": ("metro", "metros"), "L": ("litro", "litros")},
+    "es": {"km/h": ("kilómetro por hora", "kilómetros por hora"), "km": ("kilómetro", "kilómetros"), "kg": ("kilo", "kilos"), "mg": ("miligramo", "miligramos"), "ml": ("mililitro", "mililitros"), "cm": ("centímetro", "centímetros"), "mm": ("milímetro", "milímetros"), "min": ("minuto", "minutos"), "°C": ("grado", "grados"), "ºC": ("grado", "grados"), "g": ("gramo", "gramos"), "m": ("metro", "metros"), "L": ("litro", "litros")},
+    "fr": {"km/h": ("kilomètre heure", "kilomètres heure"), "km": ("kilomètre", "kilomètres"), "kg": ("kilo", "kilos"), "mg": ("milligramme", "milligrammes"), "ml": ("millilitre", "millilitres"), "cm": ("centimètre", "centimètres"), "mm": ("millimètre", "millimètres"), "min": ("minute", "minutes"), "°C": ("degré", "degrés"), "g": ("gramme", "grammes"), "m": ("mètre", "mètres"), "L": ("litre", "litres")},
+    "it": {"km/h": ("chilometro orario", "chilometri orari"), "km": ("chilometro", "chilometri"), "kg": ("chilo", "chili"), "mg": ("milligrammo", "milligrammi"), "ml": ("millilitro", "millilitri"), "cm": ("centimetro", "centimetri"), "mm": ("millimetro", "millimetri"), "min": ("minuto", "minuti"), "°C": ("grado", "gradi"), "g": ("grammo", "grammi"), "m": ("metro", "metri"), "L": ("litro", "litri")},
+    "en": {"km/h": ("kilometer per hour", "kilometers per hour"), "km": ("kilometer", "kilometers"), "kg": ("kilo", "kilos"), "mg": ("milligram", "milligrams"), "ml": ("milliliter", "milliliters"), "cm": ("centimeter", "centimeters"), "mm": ("millimeter", "millimeters"), "min": ("minute", "minutes"), "°C": ("degree", "degrees"), "g": ("gram", "grams"), "m": ("meter", "meters"), "L": ("liter", "liters")},
+}
+LETTERS_PT = {"A": "a", "B": "bê", "C": "cê", "D": "dê", "E": "é", "F": "efe", "G": "gê", "H": "agá", "I": "i", "J": "jota", "K": "cá", "L": "ele", "M": "eme", "N": "ene", "O": "ó", "P": "pê", "Q": "quê", "R": "erre", "S": "esse", "T": "tê", "U": "u", "V": "vê", "W": "dáblio", "X": "xis", "Y": "ípsilon", "Z": "zê"}
+ACRONYMS_READ_AS_WORDS_PT = {
+    "ONU", "SUS", "UPA", "USP", "PIB", "ENEM", "SAMU", "FIFA", "NASA", "UNESCO", "UNICEF", "OTAN", "MEC", "DETRAN", "PROCON", "INEP", "IPEA", "IPCA",
+    "SELIC", "FUNAI", "IBAMA", "UNICAMP", "UNESP", "UNIFESP", "EMBRAPA", "ANVISA", "ANATEL", "ANEEL", "CAPES", "SEBRAE", "SENAI", "SENAC", "SESC", "SESI",
+    "AIDS", "LED", "PIN", "CEP", "PUC", "ITA", "INPE", "ETEC", "FATEC", "UNIP", "OVNI", "LASER", "RADAR", "COVID",
+}
+ORDINAL_LANGS = {"pt", "es", "it"}
+UNIT_PATTERN = re.compile(r"(\d+(?:[.,]\d+)?)\s?(km/h|km|kg|mg|ml|cm|mm|min|°C|ºC|g|m|L)(?![\w/])")
+PHONE = re.compile(r"\(?\b(\d{2})\)?\s?(\d{4,5})-(\d{4})\b")
+ACRONYM = re.compile(r"\b[A-Z]{2,5}\b")
+ROMAN = re.compile(r"^[IVX]+$")
+DAY = r"(0?[1-9]|[12]\d|3[01])"
+MONTH = r"(0?[1-9]|1[0-2])"
+
+
+def digit_by_digit(digits: str, lang: str) -> str:
+    return " ".join(words(int(d), lang) for d in digits)
+
+
+def ordinal(n: int, feminine: bool, lang: str) -> str:
+    spoken = num2words(n, lang=NUM_LANG[lang], to="ordinal")
+    return re.sub(r"o\b", "a", spoken) if feminine else spoken
+
+
+def unit(number: str, symbol: str, lang: str) -> str:
+    names = UNITS[lang].get(symbol)
+    if not names:
+        return f"{number} {symbol}"
+    return f"{number} {names[0] if number == '1' else names[1]}"
+
+
+def acronym(token: str, text: str) -> str:
+    if text.upper() == text or ROMAN.match(token):
+        return token
+    if token in ACRONYMS_READ_AS_WORDS_PT:
+        return token.lower()
+    return " ".join(LETTERS_PT[c] for c in token)
+
+
 def normalize(text: str, lang: str) -> str:
+    if lang == "pt":
+        text = re.sub(r"\b([Pp])orque\b", r"\1orquê", text)
+        text = ACRONYM.sub(lambda m: acronym(m[0], text), text)
     for short, spoken in ABBREVIATIONS[lang].items():
         text = re.sub(rf"(?<!\w){re.escape(short)}(?=\s|$)", spoken, text)
+    text = PHONE.sub(lambda m: f"{words(int(m[1]), lang)}, {digit_by_digit(m[2], lang)}, {digit_by_digit(m[3], lang)}", text)
+    thousands = "," if lang == "en" else "."
+    text = re.sub(rf"(?<=\d){re.escape(thousands)}(?=\d{{3}}\b)", "", text)
     for symbol, by_lang in CURRENCY.items():
         names = by_lang.get(lang)
         if not names:
@@ -70,10 +124,16 @@ def normalize(text: str, lang: str) -> str:
         text = re.sub(before, lambda m: money(int(m[1]), int(m[2] or 0), names, lang), text)
         text = re.sub(after, lambda m: money(int(m[1]), int(m[2] or 0), names, lang), text)
     if lang == "en":
-        text = re.sub(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", lambda m: date(int(m[2]), int(m[1]), int(m[3]), lang), text)
+        text = re.sub(rf"\b{MONTH}/{DAY}/(\d{{4}})\b", lambda m: date(int(m[2]), int(m[1]), int(m[3]), lang), text)
     else:
-        text = re.sub(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", lambda m: date(int(m[1]), int(m[2]), int(m[3]), lang), text)
+        text = re.sub(rf"\b{DAY}/{MONTH}/(\d{{4}})\b", lambda m: date(int(m[1]), int(m[2]), int(m[3]), lang), text)
     text = re.sub(r"\b(\d{1,2})[h:](\d{2})(?:\s?([ap]\.?m\.?))?", lambda m: time_of_day(int(m[1]), int(m[2]), lang, m[3] or ""), text)
-    text = re.sub(r"\b(\d+)[,.](\d+)\s?%", lambda m: f"{words(int(m[1]), lang)} {'point' if lang == 'en' else 'vírgula' if lang == 'pt' else 'coma' if lang == 'es' else 'virgule' if lang == 'fr' else 'virgola'} {words(int(m[2]), lang)} {'percent' if lang == 'en' else 'por cento' if lang in ('pt', 'es') else 'pour cent' if lang == 'fr' else 'per cento'}", text)
-    text = re.sub(r"\b(\d+)\s?%", lambda m: f"{words(int(m[1]), lang)} {'percent' if lang == 'en' else 'por cento' if lang in ('pt', 'es') else 'pour cent' if lang == 'fr' else 'per cento'}", text)
+    if lang != "en":
+        text = re.sub(r"\b(\d{1,2})h\b", lambda m: time_of_day(int(m[1]), 0, lang), text)
+    if lang in ORDINAL_LANGS:
+        text = re.sub(r"\b(\d+)\s?([ºª])(?!C)", lambda m: ordinal(int(m[1]), m[2] == "ª", lang), text)
+    text = UNIT_PATTERN.sub(lambda m: unit(m[1], m[2], lang), text)
+    decimal = "." if lang == "en" else ","
+    text = re.sub(rf"\b(\d+){re.escape(decimal)}(\d+)", lambda m: f"{m[1]} {DECIMAL_WORD[lang]} {m[2]}", text)
+    text = re.sub(r"\b(\d+)\s?%", lambda m: f"{m[1]} {PERCENT_WORD[lang]}", text)
     return re.sub(r"\d+", lambda m: words(int(m[0]), lang), text)

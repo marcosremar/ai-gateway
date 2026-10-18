@@ -7,5 +7,5 @@ ENV KOKORO_STREAM_DIR=/models/kokoro-stream
 RUN hf download "$KOKORO_STREAM_REPO" --revision "$KOKORO_STREAM_REVISION" --local-dir "$KOKORO_STREAM_DIR" \
  && cd "$KOKORO_STREAM_DIR" && sha256sum -c models.sha256 && rm -rf .cache
 WORKDIR /app
-COPY server.py normalize.py ./
+COPY server.py normalize.py vowels.py pt_vowels.tsv ./
 CMD ["sh", "-c", "exec uvicorn server:app --host :: --port ${PORT:-8000}"]
