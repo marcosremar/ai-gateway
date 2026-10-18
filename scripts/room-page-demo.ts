@@ -1,11 +1,11 @@
 import { createServer } from 'http';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
 import { join } from 'path';
 import { createRooms } from '../src/rooms';
 
 const PORT = Number(process.env.ROOM_DEMO_PORT ?? 4610);
-const DIR = join(tmpdir(), 'room-page-demo');
+const DIR = join(homedir(), '.ai-gateway', 'room-page-demo');
 const EVERY_MS = 5_000;
 
 const TALK: Array<{ fr: string; en: string; de: string; es: string; pt: string }> = [
@@ -45,7 +45,7 @@ rooms.mount(server);
 server.listen(PORT);
 
 const savedPath = join(DIR, 'room.json');
-const savedCode: string | null = existsSync(savedPath) ? JSON.parse(readFileSync(savedPath, 'utf8')).code : null;
+const savedCode = ((): string | null => { try { return JSON.parse(readFileSync(savedPath, 'utf8')).code; } catch { return null; } })();
 const existing = savedCode ? await rooms.service.get(savedCode) : null;
 const code = existing?.meta.code ?? (await rooms.service.create({
   title: 'L’IA en classe : ce qui change pour les élèves', originalLang: 'fr', languages: ['en', 'de', 'es', 'pt'],
