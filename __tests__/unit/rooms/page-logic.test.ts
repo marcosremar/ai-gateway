@@ -211,6 +211,8 @@ describe('room page: viewer settings', () => {
     expect(textSizes(-3, 320)).toEqual({ live: 20, tx: 14 });
     expect(textSizes(7, 1280)).toEqual({ live: 56, tx: 24 });
     expect(textSizes(-99, 200).live).toBe(20);
+    expect(textSizes(0, 999).live).toBe(36);
+    expect(textSizes(0, 1366).live).toBe(46);
     expect(textSizes(99, 4000).tx).toBe(24);
   });
 

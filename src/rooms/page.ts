@@ -357,6 +357,15 @@ header{position:sticky;top:0;z-index:5;background:linear-gradient(var(--bg) 82%,
 @media (min-width:768px){.top{height:38px}.now{padding:28px 32px;min-height:168px;border-radius:28px}.lang{flex-basis:12rem}:root{--rail:3.8rem}
 .backdrop{background:transparent}
 .sheet{left:auto;bottom:auto;top:100px;right:16px;width:380px;border:1px solid var(--line);border-radius:20px;padding:4px 20px 16px;box-shadow:0 18px 48px -12px rgba(0,0,0,.55)}}
+@media (min-width:1000px){
+body{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(340px,1fr);grid-template-rows:auto auto 1fr;grid-template-areas:"head notice" "head txh" "head tx";align-items:start;column-gap:clamp(24px,3vw,56px);max-width:1520px;margin:0 auto;padding:0 clamp(16px,3vw,48px)}
+header{grid-area:head;height:100vh;height:100dvh;display:flex;flex-direction:column;padding-left:0;padding-right:0;background:none}
+header .wrap{max-width:none;width:100%}
+.now,.condensed .now{flex:none;min-height:clamp(220px,44vh,460px);padding:36px 44px}
+.condensed .ctl,.condensed .tools{display:flex}
+.notice-wrap{grid-area:notice;padding:0}
+.txh{grid-area:txh;max-width:none;margin:22px 0 0;padding:0 0 6px calc(var(--rail) + 18px)}
+#tx{grid-area:tx;max-width:none;width:100%;margin:0;padding:0 0 96px}}
 `;
 
 const ico = (paths: string) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths}</svg>`;
@@ -553,7 +562,7 @@ function parseSettings(json,legacyOrig){
   return s;
 }
 function textSizes(step,vw){
-  var base=Math.max(20,Math.min(36,Math.round(vw/13)));
+  var base=Math.max(20,Math.min(vw>=1000?46:36,Math.round(vw/13)));
   return {live:Math.max(20,Math.min(56,Math.round(base*(1+0.1*step)))),tx:Math.max(14,Math.min(24,17+step))};
 }
 function uaInfo(ua,touch){
