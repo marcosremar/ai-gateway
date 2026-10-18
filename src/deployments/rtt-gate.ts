@@ -7,10 +7,15 @@
  * gateway's own uplink jitter, needs no third-party host (the Scaleway S3 anchor went with Scaleway, 16/10/2026) and
  * makes the excess the path from the gateway's region (Railway europe-west4, Amsterdam; Paris read 9–10 ms from there).
  * Without a baseline the excess is the raw RTT. `DEFAULT_MAX_RTT_EXCESS_MS` = 30 keeps what the old Paris anchor + 20
- * kept (UK and Swiss hosts at 15–18 ms in, the ~60 ms Slovak host of 06/10 out).
+ * kept (UK and Swiss hosts at 15–18 ms in, the ~60 ms Slovak host of 06/10 out). A baseline under `BASELINE_FLOOR_MS`
+ * counts as that floor: right after a deploy the edge read 2 ms (10+ before) and every European host was refused
+ * (18/10/2026, 7 boots in a row).
  */
 
 export const DEFAULT_MAX_RTT_EXCESS_MS = 30;
+export const BASELINE_FLOOR_MS = 10;
+const excessMs = (rttMs: number, baselineMs: number | null | undefined): number =>
+  rttMs - (baselineMs == null ? 0 : Math.max(baselineMs, BASELINE_FLOOR_MS));
 export const RTT_ANCHOR_PORT = 80;
 
 export interface RttBaseline { anchor: string; rttMs: number; quietMs?: number }
@@ -53,14 +58,14 @@ export interface GateInput {
 /** Pure decision for one measurement. `rttMs` null = no sample this time. */
 export function gateDecision(input: GateInput): GateDecision {
   if (input.rttMs == null) return input.now - input.firstSeenAt >= RTT_GATE_BUDGET_MS ? 'too-far' : 'wait';
-  const near = input.rttMs - (input.baselineMs ?? 0) <= (input.maxExcessMs ?? DEFAULT_MAX_RTT_EXCESS_MS);
+  const near = excessMs(input.rttMs, input.baselineMs) <= (input.maxExcessMs ?? DEFAULT_MAX_RTT_EXCESS_MS);
   return near && (input.maxRttMs === undefined || input.rttMs <= input.maxRttMs) ? 'pass' : 'too-far';
 }
 
 export function gateNote(input: GateInput & { anchor?: string }): string {
   const maxExcess = input.maxExcessMs ?? DEFAULT_MAX_RTT_EXCESS_MS;
   if (input.rttMs == null) return `no RTT answer > maxRttExcessMs ${maxExcess}`;
-  const excess = Math.round(input.rttMs - (input.baselineMs ?? 0));
+  const excess = Math.round(excessMs(input.rttMs, input.baselineMs));
   const bound = input.maxRttMs === undefined ? '' : `, maxRttMs ${input.maxRttMs}`;
   const base = input.baselineMs == null ? 'no baseline' : `baseline ${input.baselineMs} ms (${input.anchor ?? 'anchor'})`;
   return `RTT ${input.rttMs} ms, ${base}: `

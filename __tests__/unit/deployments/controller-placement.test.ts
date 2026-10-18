@@ -319,6 +319,8 @@ describe('RTT gate (Vast)', () => {
     expect(gateDecision({ ...at, rttMs: 55, maxExcessMs: 50 })).toBe('too-far');
     expect(gateDecision({ ...at, rttMs: 36, baselineMs: 10, maxExcessMs: 50 })).toBe('pass');
     expect(gateDecision({ ...at, rttMs: null, baselineMs: 40 })).toBe('wait');
+    expect(gateDecision({ ...at, rttMs: 23, baselineMs: 2, maxExcessMs: 20 })).toBe('pass');
+    expect(gateDecision({ ...at, rttMs: 31, baselineMs: 2, maxExcessMs: 20 })).toBe('too-far');
     expect(gateDecision({ firstSeenAt: 0, now: RTT_GATE_BUDGET_MS, rttMs: null, baselineMs: 40 })).toBe('too-far');
     expect(gateNote({ ...at, rttMs: 55, baselineMs: 40, anchor: 'a', maxRttMs: 50 })).toBe('RTT 55 ms, baseline 40 ms (a): +15 ms ≤ maxRttExcessMs 30, maxRttMs 50');
     expect(gateNote({ ...at, rttMs: 36 })).toBe('RTT 36 ms, no baseline: +36 ms > maxRttExcessMs 30');
