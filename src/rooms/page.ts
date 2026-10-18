@@ -39,7 +39,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     mTranscript: 'Transcription seule', mTranscriptD: 'Seulement la phrase originale, sans traduction',
     mBilingual: 'Bilingue', mBilingualD: 'Traduction et phrase originale, toujours',
     mFull: 'Texte complet seul', mFullD: 'Sans la ligne en direct, pour lire le texte',
-    showOrig: 'Afficher la phrase originale en dessous', dubbing: 'Doublage', listenDub: 'Écouter le doublage', listenOrig: 'Écouter la voix originale', volume: 'Volume',
+    showOrig: 'Afficher la phrase originale en dessous', dubbing: 'Doublage', listenDub: 'Écouter le doublage', listenOrig: 'Écouter la voix originale', stopListen: 'Arrêter l’écoute', volume: 'Volume',
     volumeAria: 'Volume du doublage', sync: 'Synchroniser les sous-titres avec la voix', size: 'Taille du texte', smaller: 'Réduire le texte',
     bigger: 'Agrandir le texte', theme: 'Thème', dark: 'Sombre', light: 'Clair', auto: 'Automatique', fullText: 'Texte complet',
     autoScroll: 'Défilement automatique du texte complet', showTimes: 'Afficher les heures',
@@ -62,7 +62,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     mTranscript: 'Só transcrição', mTranscriptD: 'Só a fala original, sem tradução',
     mBilingual: 'Bilíngue', mBilingualD: 'Tradução e fala original, sempre',
     mFull: 'Só texto completo', mFullD: 'Sem a linha ao vivo, para ler o texto',
-    showOrig: 'Mostrar a fala original embaixo', dubbing: 'Dublagem', listenDub: 'Ouvir dublagem', listenOrig: 'Ouvir a voz original', volume: 'Volume',
+    showOrig: 'Mostrar a fala original embaixo', dubbing: 'Dublagem', listenDub: 'Ouvir dublagem', listenOrig: 'Ouvir a voz original', stopListen: 'Parar de ouvir', volume: 'Volume',
     volumeAria: 'Volume da dublagem', sync: 'Sincronizar legenda com a voz', size: 'Tamanho do texto', smaller: 'Diminuir o texto',
     bigger: 'Aumentar o texto', theme: 'Tema', dark: 'Escuro', light: 'Claro', auto: 'Automático', fullText: 'Texto completo',
     autoScroll: 'Rolagem automática do texto completo', showTimes: 'Mostrar horários',
@@ -85,7 +85,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     mTranscript: 'Transcript only', mTranscriptD: 'Only the original speech, no translation',
     mBilingual: 'Bilingual', mBilingualD: 'Translation and original, always',
     mFull: 'Full text only', mFullD: 'No live line, for reading the text',
-    showOrig: 'Show the original underneath', dubbing: 'Dubbing', listenDub: 'Listen to dubbing', listenOrig: 'Listen to the original voice', volume: 'Volume',
+    showOrig: 'Show the original underneath', dubbing: 'Dubbing', listenDub: 'Listen to dubbing', listenOrig: 'Listen to the original voice', stopListen: 'Stop listening', volume: 'Volume',
     volumeAria: 'Dubbing volume', sync: 'Sync subtitles with the voice', size: 'Text size', smaller: 'Smaller text',
     bigger: 'Bigger text', theme: 'Theme', dark: 'Dark', light: 'Light', auto: 'Automatic', fullText: 'Full text',
     autoScroll: 'Auto-scroll the full text', showTimes: 'Show times',
@@ -219,7 +219,6 @@ header{position:sticky;top:0;z-index:5;background:linear-gradient(var(--bg) 82%,
 .pill.live{background:var(--live-bg);color:var(--accent)}
 .pill.live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent)}
 .pill.wait{color:var(--warn)}
-header:has(.pill.live) .logo .mark::after{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid var(--accent);animation:onair 2.4s cubic-bezier(.16,1,.3,1) infinite}
 @keyframes onair{0%{transform:scale(1);opacity:.7}100%{transform:scale(2.3);opacity:0}}
 .btn.yt{flex:none;border:1px solid var(--line);color:var(--text);text-decoration:none;font-weight:700}
 .btn.yt[hidden]{display:none}
@@ -247,6 +246,9 @@ header:has(.pill.live) .logo .mark::after{content:"";position:absolute;inset:0;b
 .dub .ds{font-size:.8rem;line-height:1.15;color:var(--muted);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
 .dub[aria-pressed="true"]{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}
 .dub[aria-pressed="true"] .ic{background:var(--brand-ink);color:var(--brand)}
+.dub .ic .stop{display:none}
+.dub[aria-pressed="true"] .ic .hp{display:none}
+.dub[aria-pressed="true"] .ic .stop{display:block;fill:currentColor;stroke:none}
 .dub[aria-pressed="true"] .ds{color:var(--brand-ink);font-weight:600}
 .dub[data-state="playing"] .ic::after{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid var(--brand-ink);animation:onair 1.8s cubic-bezier(.16,1,.3,1) infinite}
 .dub[data-state="loading"] .ic{animation:pulse 1.2s infinite}
@@ -257,7 +259,7 @@ header:has(.pill.live) .logo .mark::after{content:"";position:absolute;inset:0;b
 .dub:disabled .ic{background:var(--raised);color:var(--muted)}
 .dub:disabled .dt{color:var(--muted)}
 .dub:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-@media (prefers-reduced-motion:reduce){header:has(.pill.live) .logo .mark::after,.dub .ic,.dub .ic::after{animation:none!important;display:none}}
+@media (prefers-reduced-motion:reduce){.dub .ic{animation:none!important}.dub .ic::after{display:none}}
 .tools{display:flex;gap:8px;margin-top:10px;align-items:center;min-width:0}
 .sheet select{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:0 10px;height:44px}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:40px;background:transparent;border:1px solid var(--line);border-radius:12px;padding:0 12px;cursor:pointer;white-space:nowrap;font-size:.9rem;font-weight:600;color:var(--text)}
@@ -384,7 +386,7 @@ const ROOM_BODY = `<header><div class="wrap">
 <section class="now" aria-live="polite" data-ia="current" aria-label="${esc(T.current)}"><div id="liveMain" class="fit empty">${esc(T.waiting)}</div><div id="liveOrig" class="fit" hidden></div></section>
 <div class="ctl">
 <label class="lang"><span class="cap" ${txt('langCap')}</span><select id="lang" data-ia="langLabel" aria-label="${esc(T.langLabel)}"></select></label>
-<button id="dub" class="dub" type="button" aria-pressed="false" aria-describedby="dubState" data-state="off"><span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="5" height="7" rx="2"/><rect x="16" y="14" width="5" height="7" rx="2"/></svg></span><span class="dl"><span class="dt" ${txt('listenDub')}</span><span id="dubState" class="ds" aria-live="polite" ${txt('dubOff')}</span></span></button>
+<button id="dub" class="dub" type="button" aria-pressed="false" aria-describedby="dubState" data-state="off"><span class="ic" aria-hidden="true"><svg class="hp" viewBox="0 0 24 24" focusable="false"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="5" height="7" rx="2"/><rect x="16" y="14" width="5" height="7" rx="2"/></svg><svg class="stop" viewBox="0 0 24 24" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg></span><span class="dl"><span class="dt" ${txt('listenDub')}</span><span id="dubState" class="ds" aria-live="polite" ${txt('dubOff')}</span></span></button>
 </div>
 <div class="tools" role="toolbar" data-ia="options" aria-label="${esc(T.options)}">
 <div class="modes" role="group" data-ia="modesLabel" aria-label="${esc(T.modesLabel)}">
@@ -896,7 +898,7 @@ function updateDubUi(){
   var st=dubStatus({can:canDub(),lang:lang,on:dub,ctx:actx?actx.state:null,error:dubErr,playing:playing,loading:decoding>0||pending.length>0||awaiting},L);
   if(st.kind!==dubKind){dubKind=st.kind;b.setAttribute('data-state',st.kind)}
   var ds=$('dubState');if(ds.textContent!==st.text)ds.textContent=st.text;
-  var dt=b.querySelector('.dt'),key=lang==='orig'?'listenOrig':'listenDub';if(dt&&dt.getAttribute('data-i')!==key){dt.setAttribute('data-i',key);dt.textContent=L[key]}
+  var dt=b.querySelector('.dt'),key=dub?'stopListen':lang==='orig'?'listenOrig':'listenDub';if(dt&&dt.getAttribute('data-i')!==key){dt.setAttribute('data-i',key);dt.textContent=L[key]}
   if(dub&&!dubTick)dubTick=setInterval(updateDubUi,400);else if(!dub&&dubTick){clearInterval(dubTick);dubTick=null}
 }
 function stopAudio(){
