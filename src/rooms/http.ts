@@ -17,7 +17,8 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { bearerToken } from '../gateway/proxy/middleware/api-keys';
 import { errorTypeForStatus } from '../gateway/proxy/http-conventions';
 import { readFileSync } from 'fs';
-import { FONT_FILES, entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
+import { FONT_PATHS } from './font-files';
+import { entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
 import { EVENTS_MAX_BYTES, parseEventBatch, type RoomEvents } from './events';
 import { appIdOf, type RoomService } from './service';
 import { RoomError, VOICE_MAX_BYTES, normalizeCode, parseAudio, parseCreate, parseLine, parseUpdate, parseVoice } from './validate';
@@ -39,10 +40,10 @@ const ANALYTICS_PATH = /^\/v1\/rooms-analytics\/?$/;
 const LIVE_PATH = /^\/live\/([^/]{1,32})\/?$/;
 const HOST_CODE_PATH = /^\/([A-Za-z0-9]{6})\/?$/;
 const FONT_PATH = /^\/live\/fonts\/([a-z0-9.-]+\.woff2)$/;
-const readFont = (file: string): Array<[string, Buffer]> => {
-  try { return [[file, readFileSync(new URL(`./fonts/${file}`, import.meta.url))]]; } catch { return []; }
+const readFont = ([name, path]: [string, string]): Array<[string, Buffer]> => {
+  try { return [[name, readFileSync(path)]]; } catch { return []; }
 };
-const FONTS = new Map(FONT_FILES.flatMap(readFont));
+const FONTS = new Map(Object.entries(FONT_PATHS).flatMap(readFont));
 const CREATE_MAX_BYTES = 16 * 1024;
 const LINE_MAX_BYTES = 256 * 1024;
 const UPDATE_MAX_BYTES = 4 * 1024;

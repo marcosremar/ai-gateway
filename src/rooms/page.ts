@@ -42,9 +42,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     showOrig: 'Afficher la phrase originale en dessous', dubbing: 'Doublage', listenDub: 'Écouter le doublage', volume: 'Volume',
     volumeAria: 'Volume du doublage', sync: 'Synchroniser les sous-titres avec la voix', size: 'Taille du texte', smaller: 'Réduire le texte',
     bigger: 'Agrandir le texte', theme: 'Thème', dark: 'Sombre', light: 'Clair', auto: 'Automatique', fullText: 'Texte complet',
-    autoScroll: 'Défilement automatique du texte complet', showTimes: 'Afficher les heures', showDelay: 'Afficher le délai',
-    delay: 'délai', voice: 'voix', delayTipText: 'Délai des sous-titres par rapport à la parole (médiane des 10 dernières phrases)',
-    delayTipVoice: 'Délai de la voix par rapport à la parole (médiane des dernières phrases)',
+    autoScroll: 'Défilement automatique du texte complet', showTimes: 'Afficher les heures',
     endedNotice: 'Session terminée — texte disponible jusqu’au {d}.',
     gone: 'Cette session n’existe plus (le texte reste disponible {n} jours après la dernière prise de parole).',
     noDub: 'Ce navigateur ne lit pas le doublage.', current: 'Sous-titre en cours', langCap: 'Langue',
@@ -67,9 +65,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     showOrig: 'Mostrar a fala original embaixo', dubbing: 'Dublagem', listenDub: 'Ouvir dublagem', volume: 'Volume',
     volumeAria: 'Volume da dublagem', sync: 'Sincronizar legenda com a voz', size: 'Tamanho do texto', smaller: 'Diminuir o texto',
     bigger: 'Aumentar o texto', theme: 'Tema', dark: 'Escuro', light: 'Claro', auto: 'Automático', fullText: 'Texto completo',
-    autoScroll: 'Rolagem automática do texto completo', showTimes: 'Mostrar horários', showDelay: 'Mostrar atraso',
-    delay: 'atraso', voice: 'voz', delayTipText: 'Atraso da legenda em relação à fala (mediana das últimas 10 falas)',
-    delayTipVoice: 'Atraso da voz em relação à fala (mediana das últimas falas)',
+    autoScroll: 'Rolagem automática do texto completo', showTimes: 'Mostrar horários',
     endedNotice: 'Sessão encerrada — texto disponível até {d}.',
     gone: 'Esta sessão não existe mais (o texto fica disponível por {n} dias após a última fala).',
     noDub: 'Este navegador não reproduz a dublagem.', current: 'Legenda atual', langCap: 'Idioma',
@@ -92,9 +88,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     showOrig: 'Show the original underneath', dubbing: 'Dubbing', listenDub: 'Listen to dubbing', volume: 'Volume',
     volumeAria: 'Dubbing volume', sync: 'Sync subtitles with the voice', size: 'Text size', smaller: 'Smaller text',
     bigger: 'Bigger text', theme: 'Theme', dark: 'Dark', light: 'Light', auto: 'Automatic', fullText: 'Full text',
-    autoScroll: 'Auto-scroll the full text', showTimes: 'Show times', showDelay: 'Show delay',
-    delay: 'delay', voice: 'voice', delayTipText: 'Subtitle delay behind the speech (median of the last 10 lines)',
-    delayTipVoice: 'Voice delay behind the speech (median of the last lines)',
+    autoScroll: 'Auto-scroll the full text', showTimes: 'Show times',
     endedNotice: 'Session ended — text available until {d}.',
     gone: 'This session no longer exists (the text stays available {n} days after the last words).',
     noDub: 'This browser cannot play the dubbing.', current: 'Current subtitle', langCap: 'Language',
@@ -120,8 +114,6 @@ export function pageCsp(nonce: string): string {
     'media-src blob: data:', 'img-src data:', "font-src 'self'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'self'",
   ].join('; ');
 }
-
-export const FONT_FILES = ['bricolage-5.3-latin.woff2', 'bricolage-5.3-latin-ext.woff2'];
 
 const BASE_CSS = `
 @font-face{font-family:"Bricolage";font-style:normal;font-weight:200 800;font-display:swap;src:url(/live/fonts/bricolage-5.3-latin.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
@@ -224,9 +216,6 @@ header{position:sticky;top:0;z-index:5;background:linear-gradient(var(--bg) 82%,
 .top{display:flex;align-items:center;gap:10px;min-width:0;height:34px}
 .top .logo{flex:none;font-size:1.06rem}
 .top h1{flex:1;min-width:0;margin:0;font-size:.9rem;font-weight:500;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.delay{flex:none;white-space:nowrap;font-size:.75rem;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums}
-.delay.warn{color:var(--warn)}
-.delay.bad{color:var(--bad)}
 .pill{flex:none;display:inline-flex;align-items:center;gap:7px;white-space:nowrap;font-size:.75rem;font-weight:700;border-radius:999px;padding:5px 11px;background:var(--surface);color:var(--muted);text-transform:lowercase;letter-spacing:.01em}
 .pill.live{background:var(--live-bg);color:var(--accent)}
 .pill.live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent)}
@@ -381,7 +370,7 @@ const opt = (mode: string, k: string) =>
 const uiOptions = UI_LANGS.map(l => `<option value="${l}">${esc(UI_TEXT[l].name)}</option>`).join('');
 
 const ROOM_BODY = `<header><div class="wrap">
-<div class="top">${logo()}<h1 id="title" ${txt('title')}</h1><span id="delay" class="delay" hidden></span><span id="pill" class="pill wait" ${txt('connecting')}</span></div>
+<div class="top">${logo()}<h1 id="title" ${txt('title')}</h1><span id="pill" class="pill wait" ${txt('connecting')}</span></div>
 <section class="now" aria-live="polite" data-ia="current" aria-label="${esc(T.current)}"><div id="liveMain" class="fit empty">${esc(T.waiting)}</div><div id="liveOrig" class="fit" hidden></div></section>
 <div class="ctl">
 <label class="lang"><span class="cap" ${txt('langCap')}</span><select id="lang" data-ia="langLabel" aria-label="${esc(T.langLabel)}"></select></label>
@@ -427,7 +416,6 @@ ${opt('full', 'mFull')}
 <fieldset class="grp"><legend ${txt('fullText')}</legend>
 <label class="row"><span ${txt('autoScroll')}</span><input id="sScroll" type="checkbox" role="switch"></label>
 <label class="row"><span ${txt('showTimes')}</span><input id="sTimes" type="checkbox" role="switch"></label>
-<label class="row"><span ${txt('showDelay')}</span><input id="sDelay" type="checkbox" role="switch"></label>
 </fieldset>
 </div>`;
 
@@ -447,8 +435,7 @@ ${opt('full', 'mFull')}
  *   - nextStart(now, prevEnd, lead): start of the next clip on the AudioContext timeline — back to back, never overlapping.
  *   - backlogDrop(ahead, durs, maxSec): how many of the OLDEST pending clips to drop so that the audio still to play
  *     (`ahead` already scheduled + pending durations) is ≤ maxSec; the newest clip is always kept.
- *   - median(values), delayLabel(ms, voice, L): the delay indicator in the interface language L ("délai 1,8 s" / "voix 3,2 s";
- *     ok < 3 s ≤ warn ≤ 6 s < bad).
+ *   - median(values): the delay median sent with the analytics samples (the page does not show it).
  *   - karaoke: speechMs(text) estimates how long `text` took to say (CHARS_PER_S, ~150 words/min); wordStarts(text, start,
  *     dur) spreads the words of `text` over [start, start+dur] by character length; spokenCount(starts, t) is how many
  *     words are already said at t (those are coloured). The publisher sends no word timestamps, so the times are an
@@ -520,10 +507,6 @@ function median(a){
   var s=a.slice().sort(function(x,y){return x-y}),m=s.length>>1;
   return s.length%2?s[m]:(s[m-1]+s[m])/2;
 }
-function delayLabel(ms,voice,L){
-  var s=(Math.round(ms/100)/10).toFixed(1).replace('.',L.dec);
-  return {text:(voice?L.voice:L.delay)+' '+s+' s',level:ms<3000?'ok':ms<=6000?'warn':'bad'};
-}
 var CHARS_PER_S=15;
 function speechMs(text){return Math.max(800,String(text==null?'':text).length*1000/CHARS_PER_S)}
 function wordStarts(text,start,dur){
@@ -534,7 +517,7 @@ function wordStarts(text,start,dur){
 }
 function spokenCount(starts,t){var n=0;while(n<starts.length&&starts[n]<=t)n++;return n}
 var UIS=['fr','pt','en'];
-var SETTINGS_DEFAULTS={ui:'fr',mode:'translation',showOrig:false,volume:0.9,sync:true,size:0,theme:'auto',autoScroll:true,showTimes:true,showDelay:true};
+var SETTINGS_DEFAULTS={ui:'fr',mode:'translation',showOrig:false,volume:0.9,sync:true,size:0,theme:'auto',autoScroll:true,showTimes:true};
 var SIZE_MIN=-3,SIZE_MAX=7,MODES=['translation','transcript','bilingual','full'],THEMES=['dark','light','auto'];
 function normalizeSettings(raw){
   var s={},k;for(k in SETTINGS_DEFAULTS)s[k]=SETTINGS_DEFAULTS[k];
@@ -542,7 +525,7 @@ function normalizeSettings(raw){
   if(MODES.indexOf(raw.mode)>=0)s.mode=raw.mode;
   if(THEMES.indexOf(raw.theme)>=0)s.theme=raw.theme;
   if(UIS.indexOf(raw.ui)>=0)s.ui=raw.ui;
-  ['showOrig','sync','autoScroll','showTimes','showDelay'].forEach(function(b){if(typeof raw[b]==='boolean')s[b]=raw[b]});
+  ['showOrig','sync','autoScroll','showTimes'].forEach(function(b){if(typeof raw[b]==='boolean')s[b]=raw[b]});
   if(typeof raw.volume==='number'&&raw.volume>=0&&raw.volume<=1)s.volume=raw.volume;
   if(typeof raw.size==='number'&&isFinite(raw.size))s.size=Math.max(SIZE_MIN,Math.min(SIZE_MAX,Math.round(raw.size)));
   return s;
@@ -663,7 +646,7 @@ function flush(beacon){
     if(!sent){try{fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body,keepalive:true}).catch(function(){})}catch(e){}}
   }
 }
-function snapshot(){return {ui:settings.ui,lang:lang||'orig',mode:settings.mode,showOrig:settings.showOrig,dub:dub,volume:settings.volume,sync:settings.sync,size:settings.size,theme:settings.theme,autoScroll:settings.autoScroll,showTimes:settings.showTimes,showDelay:settings.showDelay}}
+function snapshot(){return {ui:settings.ui,lang:lang||'orig',mode:settings.mode,showOrig:settings.showOrig,dub:dub,volume:settings.volume,sync:settings.sync,size:settings.size,theme:settings.theme,autoScroll:settings.autoScroll,showTimes:settings.showTimes}}
 function trackJoin(){
   if(joined)return;joined=true;var u=uaInfo(navigator.userAgent,navigator.maxTouchPoints||0);
   track('join',{ua:u.ua,os:u.os,device:u.device,vw:window.innerWidth,vh:window.innerHeight,dpr:window.devicePixelRatio||1,
@@ -805,16 +788,6 @@ function markCurrent(id){
 }
 
 // ── delay indicator: rolling median of the last 10 lines (text) or of the last 10 clips (voice) ──
-function updateDelay(){
-  var el=$('delay');
-  if(ended||gone||!settings.showDelay){el.hidden=true;return}
-  var voice=dub&&lang!=='orig'&&voiceDelays.length>0,vals=[];
-  if(voice)vals=voiceDelays.slice(-10);
-  else for(var i=lines.length-1;i>=0&&vals.length<10;i--)if(typeof lines[i].delayMs==='number')vals.push(lines[i].delayMs);
-  var m=median(vals);if(m==null){el.hidden=true;return}
-  var d=delayLabel(m,voice,L);el.hidden=false;el.textContent=d.text;el.className='delay '+d.level;
-  el.title=voice?L.delayTipVoice:L.delayTipText;
-}
 
 // ── transcript ──
 function atBottom(){return window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-80}
@@ -831,7 +804,7 @@ function renderAll(){
   var tx=$('tx'),stick=firstRender||(settings.autoScroll&&atBottom());tx.textContent='';
   var frag=document.createDocumentFragment();for(var i=0;i<lines.length;i++)frag.appendChild(para(lines[i]));tx.appendChild(frag);
   if(lines.length)firstRender=false;
-  renderLive();updateDelay();if(stick)scrollEnd();
+  renderLive();if(stick)scrollEnd();
 }
 function scrollEnd(){window.scrollTo(0,document.documentElement.scrollHeight);$('more').style.display='none'}
 function upsert(l){
@@ -842,7 +815,7 @@ function upsert(l){
     var next=lines[i+1]?tx.querySelector('p[data-id="'+lines[i+1].id+'"]'):null;tx.insertBefore(para(l),next);
     if(dub){setTimeout(renderLive,AUDIO_WAIT_MS+20);expectVoice(l)}
   }
-  renderLive();updateDelay();
+  renderLive();
   if(stick)scrollEnd();else if(!atBottom())$('more').style.display='block';
 }
 
@@ -952,7 +925,7 @@ function onClipStart(id){
   var m=meta[id],l=byId[id];stat.clips++;
   if(m&&m.arrivedAt>0&&m.startedAt!=null)stat.drift.push(syncOn()?now()-m.startedAt:m.startedAt-m.arrivedAt);
   if(m&&l&&m.arrivedAt>0&&m.startedAt!=null){voiceDelays.push((typeof l.delayMs==='number'?l.delayMs:0)+(m.startedAt-m.arrivedAt));if(voiceDelays.length>10)voiceDelays.shift()}
-  renderLive();updateDelay();updateDubUi();
+  renderLive();updateDubUi();
 }
 /** A line arrived while listening: its voice is on the way (the toggle says "carregando voz…" for a while). */
 function expectVoice(l){if(dub&&lang!=='orig'&&l.translations&&l.translations[lang]){awaitId=l.id;awaitAt=now();updateDubUi()}}
@@ -990,7 +963,7 @@ function setDub(on,from){
   if(from&&on!==dub){track('setting',{key:'dub',value:on,from:from});track('audio',{action:on?'play':'pause'})}
   dub=on;var b=$('dub');b.setAttribute('aria-pressed',on?'true':'false');
   if(!on){stopAudio();voiceDelays=[];if(unlockEl){try{unlockEl.pause()}catch(e){}}}
-  sendListen();renderLive();updateDelay();updateDubUi();if(!sheet.hidden)syncSheet();
+  sendListen();renderLive();updateDubUi();if(!sheet.hidden)syncSheet();
 }
 /** The toggle: while the OS holds the sound (context suspended), a tap re-activates it instead of switching it off. */
 $('dub').addEventListener('click',function(){if(locked()){unlockAudio();updateDubUi();track('audio',{action:'resume'});return}setDub(!dub,'toolbar')});
@@ -1020,7 +993,7 @@ function syncSheet(){
   $('sVol').value=String(Math.round(settings.volume*100));$('sVol').setAttribute('aria-valuetext',Math.round(settings.volume*100)+'%');
   $('sSync').checked=settings.sync;
   $('sSize').textContent=(100+settings.size*10)+'%';$('sSmaller').disabled=settings.size<=SIZE_MIN;$('sBigger').disabled=settings.size>=SIZE_MAX;
-  $('sScroll').checked=settings.autoScroll;$('sTimes').checked=settings.showTimes;$('sDelay').checked=settings.showDelay;
+  $('sScroll').checked=settings.autoScroll;$('sTimes').checked=settings.showTimes;
 }
 function placeSheet(){
   if(window.innerWidth>=768){var r=$('gear').getBoundingClientRect(),top=Math.round(r.bottom+8);
@@ -1060,7 +1033,6 @@ $('sSmaller').addEventListener('click',function(){setSetting('size',settings.siz
 $('sBigger').addEventListener('click',function(){setSetting('size',settings.size+1,'sheet')});
 $('sScroll').addEventListener('change',function(e){setSetting('autoScroll',e.target.checked,'sheet')});
 $('sTimes').addEventListener('change',function(e){setSetting('showTimes',e.target.checked,'sheet')});
-$('sDelay').addEventListener('change',function(e){setSetting('showDelay',e.target.checked,'sheet')});
 
 // ── copy ──
 $('copy').addEventListener('click',function(){
@@ -1081,7 +1053,7 @@ function showEnded(){
   ended=true;setPill('','ended');setDub(false);updateDubButton();
   var until=expiresAt||new Date(Date.now()+DAYS*864e5).toISOString();
   setNotice('endedNotice',{d:fmtDate(until)});
-  renderLive();updateDelay();
+  renderLive();
 }
 function applyRoom(r){
   room=r;expiresAt=r.expiresAt||null;lines=[];byId={};
@@ -1097,7 +1069,7 @@ function applyYoutube(u){
   if(ok){a.href=ok;a.hidden=false}else{a.hidden=true;a.removeAttribute('href')}
 }
 $('yt').addEventListener('click',function(){track('ui',{action:'youtube'})});
-function notFound(){gone=true;setPill('','ended');updateDelay();setNotice('gone',{n:DAYS})}
+function notFound(){gone=true;setPill('','ended');setNotice('gone',{n:DAYS})}
 
 // ── socket, reconnect with backoff ──
 /** Tells the server which language this viewer listens to — on every (re)connect, dub toggle and language change. */
