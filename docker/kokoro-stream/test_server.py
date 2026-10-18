@@ -25,9 +25,3 @@ def test_the_first_piece_starts_20_ms_before_the_voice():
 def test_silence_alone_is_kept():
     silence = np.zeros(1000, dtype=np.float32)
     assert len(server.from_voice(silence)) == 1000
-
-
-def test_the_switch_to_the_exact_audio_fades_over_the_window_tail():
-    faded = server.crossfade(np.ones(4, dtype=np.float32), np.zeros(10, dtype=np.float32))
-    assert faded[0] == 1 and faded[3] == 0 and faded[9] == 0
-    assert server.crossfade(None, np.ones(3, dtype=np.float32)).tolist() == [1, 1, 1]

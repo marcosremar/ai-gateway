@@ -4,7 +4,6 @@ import re
 import struct
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,9 +24,9 @@ from misaki import espeak  # noqa: E402
 MODEL_DIR = Path(os.environ.get("KOKORO_STREAM_DIR", "/models/kokoro-stream"))
 API_KEY = os.environ.get("KOKORO_API_KEY", "")
 THREADS = int(os.environ.get("KOKORO_THREADS", "4"))
-EXACT_THREADS = int(os.environ.get("KOKORO_EXACT_THREADS", "2"))
 OPENING_THREADS = int(os.environ.get("KOKORO_OPENING_THREADS", str(2 * THREADS)))
-MAX_PARALLEL = int(os.environ.get("KOKORO_MAX_PARALLEL", "4"))
+LATER_THREADS = int(os.environ.get("KOKORO_LATER_THREADS", "2"))
+MAX_PARALLEL = int(os.environ.get("KOKORO_MAX_PARALLEL", "8"))
 RATE = 24_000
 SAMPLES_PER_FRAME = 300
 HAR_PER_FRAME = 60
@@ -35,7 +34,6 @@ FIRST_FRAMES = 36
 CHUNK_FRAMES = 64
 CONTEXT_FRAMES = 8
 LEAD_SECONDS = 0.6
-FADE_SAMPLES = 240
 KEPT_PAUSE_FRAMES = 6
 VOICE_LEVEL = 10 ** (-50 / 20)
 ONSET_MARGIN_SAMPLES = 480
@@ -48,11 +46,9 @@ WARM_UP = {"a": "Hello, let us begin.", "b": "Hello, let us begin.", "e": "Hola,
 @dataclass
 class Engine:
     front: ort.InferenceSession
-    exact: ort.InferenceSession
-    window: ort.InferenceSession
+    generator: ort.InferenceSession
     opening: ort.InferenceSession
     vocab: dict[str, int]
-    priors: dict[str, np.ndarray]
     voices: dict[str, np.ndarray]
 
 
@@ -67,18 +63,15 @@ def session(path: Path, threads: int) -> ort.InferenceSession:
 def load(model_dir: Path) -> Engine:
     return Engine(
         front=session(model_dir / "front.onnx", THREADS),
-        exact=session(model_dir / "generator.onnx", EXACT_THREADS),
-        window=session(model_dir / "generator_window.onnx", THREADS),
-        opening=session(model_dir / "generator_window.onnx", OPENING_THREADS),
+        generator=session(model_dir / "generator_streaming.onnx", LATER_THREADS),
+        opening=session(model_dir / "generator_streaming.onnx", OPENING_THREADS),
         vocab=json.loads((model_dir / "config.json").read_text())["vocab"],
-        priors=dict(np.load(model_dir / "priors.npz")),
         voices={p.stem: np.fromfile(p, dtype=np.float32).reshape(-1, 1, 256) for p in (model_dir / "voices").glob("*.bin") if p.stem[0] in LANGUAGES},
     )
 
 
 engine: Engine | None = None
 phonemizers: dict[str, espeak.EspeakG2P] = {}
-background = ThreadPoolExecutor(max_workers=MAX_PARALLEL)
 slots = threading.BoundedSemaphore(MAX_PARALLEL)
 
 
@@ -109,19 +102,8 @@ def to_pcm(samples: np.ndarray) -> bytes:
     return (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
 
 
-def crossfade(tail: np.ndarray | None, rest: np.ndarray) -> np.ndarray:
-    n = min(len(tail), len(rest)) if tail is not None else 0
-    if not n:
-        return rest
-    ramp = np.linspace(0, 1, n, dtype=np.float32)
-    faded = rest.copy()
-    faded[:n] = tail[:n] * (1 - ramp) + rest[:n] * ramp
-    return faded
-
-
 def speak(e: Engine, text: str, voice: str, speed: float):
     pack = e.voices[voice]
-    means, variances = e.priors[voice] if voice in e.priors else (None, None)
     started = None
     produced = 0
     for piece in pieces(text):
@@ -132,39 +114,22 @@ def speak(e: Engine, text: str, voice: str, speed: float):
         x, har, durations = e.front.run(None, {"input_ids": np.array([[0, *ids, 0]], dtype=np.int64), "ref_s": ref_s, "speed": np.array([speed], dtype=np.float32)})
         style = ref_s[:, :128]
         frames = x.shape[2]
-        exact = lambda: background.submit(e.exact.run, None, {"x": x, "style": style, "har": har})
-        whole = None
         at = first = min(2 * max(int(durations[0]) - KEPT_PAUSE_FRAMES, 0), frames)
-        tail = None
-        while means is not None and at < frames and not (whole and whole.done()):
+        while at < frames:
             if started is not None:
                 ahead = produced / RATE - (time.perf_counter() - started)
                 if ahead > LEAD_SECONDS:
-                    whole = whole or exact()
-                    try:
-                        whole.result(timeout=ahead - LEAD_SECONDS)
-                    except TimeoutError:
-                        pass
-                    continue
+                    time.sleep(ahead - LEAD_SECONDS)
             end = min(at + (FIRST_FRAMES if at == first else CHUNK_FRAMES), frames)
             lo, hi = max(at - CONTEXT_FRAMES, 0), min(end + CONTEXT_FRAMES, frames)
-            audio = (e.opening if at == first else e.window).run(None, {"x": x[:, :, lo:hi], "style": style, "har": har[:, :, lo * HAR_PER_FRAME : hi * HAR_PER_FRAME + 1], "means": means, "variances": variances})[0]
-            start, stop = (at - lo) * SAMPLES_PER_FRAME, (end - lo) * SAMPLES_PER_FRAME
-            tail = audio[stop : stop + FADE_SAMPLES]
-            chunk = from_voice(audio[start:stop]) if at == first else audio[start:stop]
+            audio = (e.opening if at == first else e.generator).run(None, {"x": x[:, :, lo:hi], "style": style, "har": har[:, :, lo * HAR_PER_FRAME : hi * HAR_PER_FRAME + 1]})[0]
+            chunk = audio[(at - lo) * SAMPLES_PER_FRAME : (end - lo) * SAMPLES_PER_FRAME]
+            if at == first:
+                chunk = from_voice(chunk)
             yield to_pcm(chunk)
-            whole = whole or exact()
             started = started or time.perf_counter()
             produced += len(chunk)
             at = end
-        whole = whole or exact()
-        rest = crossfade(tail, whole.result()[0][at * SAMPLES_PER_FRAME :])
-        if at == first:
-            rest = from_voice(rest)
-        if len(rest):
-            yield to_pcm(rest)
-            started = started or time.perf_counter()
-            produced += len(rest)
 
 
 def wav_header() -> bytes:
@@ -192,7 +157,7 @@ app = FastAPI(lifespan=lifespan)
 def health():
     if engine is None:
         return error(503, "loading", "kokoro is loading")
-    return {"status": "ok", "voices": sorted(engine.voices), "streaming": sorted(engine.priors)}
+    return {"status": "ok", "voices": sorted(engine.voices)}
 
 
 @app.post("/v1/audio/speech")
