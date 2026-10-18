@@ -192,7 +192,7 @@ describe('candidates, near and provider vast', () => {
     expect(() => buildSpec('x', { image: 'a', port: 8000, ...body }, { profiles })).toThrow(message);
   });
 
-  it('vast: boot-script mode with the base image, GPU on, any port; files kept for the signed links, no exposure or stop', () => {
+  it('vast: boot-script mode with the base image, GPU on, any port; files kept for the signed links, no exposure; stop parks it', () => {
     const spec = buildSpec('x', { ...vast, port: 8010 }, { profiles });
     expect(spec).toMatchObject({ provider: 'vast', gpu: true, port: 8010, machineType: 'RTX 5090' });
     expect(buildSpec('x', { ...vast, port: 8010, maxRttMs: 40 }, { profiles }).maxRttMs).toBe(40);
@@ -203,7 +203,7 @@ describe('candidates, near and provider vast', () => {
     expect(() => buildSpec('x', { ...vast, bootScript: 'x'.repeat(16_000) }, { profiles })).toThrow(/vast accepts 32 KB of env/);
     expect(() => buildSpec('x', { ...vast, bootScript: 'x'.repeat(12_000) }, { profiles })).not.toThrow();
     expect(() => buildSpec('x', { ...vast, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles })).toThrow(/exposure/);
-    expect(() => buildSpec('x', { ...vast, idleAction: 'stop' }, { profiles })).toThrow(/idleAction 'stop'/);
+    expect(buildSpec('x', { ...vast, idleAction: 'stop' }, { profiles }).idleAction).toBe('stop');
     // A Vast candidate on a Scaleway spec brings the same rules.
     expect(() => buildSpec('x', { image: 'a', port: 8000, candidates: [{ provider: 'vast', machineType: 'RTX 5090', maxEurPerHour: 1 }] },
       { profiles })).toThrow(/need bootScript and image/);

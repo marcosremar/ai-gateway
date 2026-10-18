@@ -156,7 +156,7 @@ describe('realtime spec validation', () => {
     expect(() => buildSpec('v', { ...vast, realtime: { udpPorts: [50000, 50100] } }, { profiles })).toThrow(/needs 103 .* at most 64/);
     expect(() => buildSpec('v', { ...vast, realtime: {}, exposure: { ports: [{ protocol: 'tcp', port: 443 }] } }, { profiles }))
       .toThrow('exposure is not supported on vast');
-    expect(() => buildSpec('v', { ...vast, realtime: {}, idleAction: 'stop' }, { profiles })).toThrow("idleAction 'stop' is not supported on vast");
+    expect(buildSpec('v', { ...vast, realtime: {}, idleAction: 'stop' }, { profiles }).idleAction).toBe('stop');
     expect(() => buildSpec('v', { ...vast, realtime: {}, bootScript: 'x'.repeat(15_000) }, { profiles })).toThrow(/vast accepts 32 KB of env/);
   });
 
