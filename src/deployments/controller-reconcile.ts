@@ -128,6 +128,7 @@ export abstract class ReconcileLoop extends AutoscaleControl {
     for (const id of [...this.gates.keys()]) if (!this.machines.some(m => m.id === id)) this.gates.delete(id);
     for (const id of [...this.udp.keys()]) if (!this.machines.some(m => m.id === id)) this.udp.delete(id);
     for (const id of [...this.poweredOnAt.keys()]) if (!this.machines.some(m => m.id === id)) this.poweredOnAt.delete(id);
+    for (const id of [...this.resumeSince.keys()]) if (!this.machines.some(m => m.id === id)) this.resumeSince.delete(id);
     for (const id of [...this.startRefused.keys()]) if (!this.machines.some(m => m.id === id)) this.startRefused.delete(id);
     for (const key of [...this.stageStrikes.keys()]) if (!this.machines.some(m => key.startsWith(`${m.id}|`))) this.stageStrikes.delete(key);
     this.trackParking(failed);
@@ -157,6 +158,8 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       this.log('deployments: boot failed on the provider', { deployment: name, id: m.id, error: m.bootError });
       await this.release(m, 'boot-failed');
     }
+    // Before the stuck-boot retry: a resume past its deadline is given up as such (no retry of the episode spent on it).
+    await this.releaseFailedResumes(rt, failed);
     await this.retryStuckBoots(rt);
     const all = this.machines.filter(m => m.deployment === name);
     // `idleAction: 'stop'`: powered-off replicas are parked — outside the plan, powered back on before creating any.
@@ -278,6 +281,34 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       });
       if (captured) await within(captured, STUCK_LOG_WAIT_MS);
       await this.release(m, stuck.failed ? 'boot-failed' : 'boot-stuck');
+    }
+  }
+
+  /**
+   * A parked replica powered on that is still not serving past its resume deadline (`resumeDeadlineMs`) is given up:
+   * released as `resume-timeout`, so this tick's plan rents a fresh one. Before, a machine Vast accepted to start but
+   * could not resume waited for the `halted` rule (5 min, if listed exited), the 35-min boot timeout (listed starting)
+   * or — still listed stopped — was powered on again every `PARKED_START_GRACE_MS` while counting as capacity, and no
+   * fresh replica was ever rented. Not judged on a stale list (the release would act on what we cannot see).
+   */
+  private async releaseFailedResumes(rt: Runtime, failed: Set<DeploymentProvider>): Promise<void> {
+    const now = this.now();
+    for (const m of this.machines.filter(x => x.deployment === rt.record.spec.name && this.resumeSince.has(x.id))) {
+      if (this.listStale(m, failed) || this.stoppingNow(m) || this.probes.get(m.id)?.everReady) continue;
+      const waitedMs = now - this.resumeSince.get(m.id)!;
+      const deadlineMs = this.resumeDeadlineMs(rt, m);
+      if (waitedMs < deadlineMs) continue;
+      const seconds = Math.round(waitedMs / 1000);
+      const deadlineSeconds = Math.round(deadlineMs / 1000);
+      rt.lastError = `resume ${m.id}: not serving ${seconds} s after its power-on (deadline ${deadlineSeconds} s, `
+        + `listed ${m.providerStatus ?? m.state}): released, a fresh replica is rented`;
+      this.log('deployments: resume timed out, releasing to rent a fresh replica', {
+        deployment: m.deployment, id: m.id, seconds, deadlineSeconds, state: m.state, providerStatus: m.providerStatus ?? null,
+      });
+      await this.release(m, 'resume-timeout');
+      if (this.machines.some(x => x.id === m.id)) continue; // the release failed (lastError says why): tried again next tick
+      this.resumeSince.delete(m.id);
+      rt.starting.delete(m.id);
     }
   }
 

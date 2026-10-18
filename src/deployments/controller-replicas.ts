@@ -44,6 +44,7 @@ export abstract class ReplicaLifecycle extends ControllerState {
       rt.lostAt = null;
       if (!p.everReady && m.createdAt >= this.startedAt) this.backends[this.providerOf(m)]?.noteHost?.(m, { bootMs: this.now() - m.createdAt });
       p.readyAt ??= this.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
+      this.resumeSince.delete(m.id);
     } else if (result === 'busy' && p.everReady && (this.busyOn(rt, m.id) > 0 || this.servedRecently(p))) {
       // Alive (its front answers) and working: the health check queued behind the work. Keep it serving what it can.
       p.busy = true;

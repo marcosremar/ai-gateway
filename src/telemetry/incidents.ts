@@ -19,6 +19,7 @@ const TOKEN = /[\s|,;()[\]]+/;
 const ACTION_LOGS: Record<string, IncidentActionKind> = {
   'deployments: parking replica (power off)': 'park',
   'deployments: stuck boot, releasing to retry': 'retry',
+  'deployments: resume timed out, releasing to rent a fresh replica': 'retry',
 };
 
 export const alertSummary = (data: Record<string, unknown>) => Object.entries(data).filter(([k]) => k !== 'at')

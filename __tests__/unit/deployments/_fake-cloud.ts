@@ -43,6 +43,8 @@ export class FakeCloud implements DeploymentBackend {
   /** A stop is listed `stopping` for this long (Scaleway: ~1 min) before `stopped`; 0 = `stopped` at once. */
   stoppingMs = 0;
   startLagMs = 0;
+  /** A power-on is accepted but never resumes: the machine stays listed in this state and never answers. */
+  resumeFailsAs: string | null = null;
   private startSettlesAt = new Map<string, number>();
   private stopSettlesAt = new Map<string, number>();
   private seq = 0;
@@ -157,6 +159,10 @@ export class FakeCloud implements DeploymentBackend {
     const fake = this.machines.get(machine.id)!;
     this.starts.push(machine.id);
     this.stopSettlesAt.delete(machine.id);
+    if (this.resumeFailsAs) { // accepted, but the host never resumes it (Vast 18-19/10/2026: its GPU rented meanwhile)
+      fake.machine.state = this.resumeFailsAs;
+      return;
+    }
     fake.machine.state = this.startLagMs > 0 ? 'exited' : 'running';
     if (this.startLagMs > 0) this.startSettlesAt.set(machine.id, Date.now() + this.startLagMs);
     fake.bootedAt = Date.now() + this.startLagMs + this.bootMs;

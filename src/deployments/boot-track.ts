@@ -7,7 +7,7 @@ export type ActivePhase = Exclude<BootPhase, 'ready'>;
 export const PHASE_DEFAULT_MINUTES: Record<ActivePhase, number> = { placing: 3, provisioning: 5, pulling: 15, starting: 15, loading: 10 };
 export const BOOT_LOG_LINES = 100;
 export const BOOTS_KEPT = 5;
-export const FAILURE_REASONS = new Set(['boot-timeout', 'boot-stuck', 'boot-failed', 'unhealthy', 'halted', 'too-far', 'gone']);
+export const FAILURE_REASONS = new Set(['boot-timeout', 'boot-stuck', 'boot-failed', 'unhealthy', 'halted', 'too-far', 'gone', 'resume-timeout']);
 
 export interface PhaseMark { phase: BootPhase; at: number }
 export interface BootRecord {
