@@ -34,7 +34,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     modesLabel: "Mode d'affichage", qTranslation: 'Sous-titres traduits',
     qBilingual: 'Sous-titres doubles (original + traduction)', qTranscript: 'Transcription (langue originale)', qFull: 'Texte complet',
     copy: 'Copier le texte', copied: 'Copié !', settings: 'Réglages', settingsTitle: "Réglages d'affichage", close: 'Fermer les réglages',
-    newLines: 'Nouvelles phrases ↓', uiLang: "Langue de l'interface", mode: 'Mode',
+    backToTop: 'Revenir en haut', uiLang: "Langue de l'interface", mode: 'Mode',
     mTranslation: 'Traduction', mTranslationD: 'Traduction en avant ; la phrase originale en dessous est facultative',
     mTranscript: 'Transcription seule', mTranscriptD: 'Seulement la phrase originale, sans traduction',
     mBilingual: 'Bilingue', mBilingualD: 'Traduction et phrase originale, toujours',
@@ -57,7 +57,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     options: 'Opções', langLabel: 'Idioma da legenda', original: 'Original', modesLabel: 'Modo de exibição',
     qTranslation: 'Legenda traduzida', qBilingual: 'Legenda dupla (original + tradução)',
     qTranscript: 'Transcrição (fala original)', qFull: 'Texto completo', copy: 'Copiar texto', copied: 'Copiado!', settings: 'Ajustes',
-    settingsTitle: 'Ajustes de exibição', close: 'Fechar ajustes', newLines: 'Novas falas ↓', uiLang: 'Idioma da interface', mode: 'Modo',
+    settingsTitle: 'Ajustes de exibição', close: 'Fechar ajustes', backToTop: 'Voltar ao topo', uiLang: 'Idioma da interface', mode: 'Modo',
     mTranslation: 'Tradução', mTranslationD: 'Tradução em destaque; a fala original embaixo é opcional',
     mTranscript: 'Só transcrição', mTranscriptD: 'Só a fala original, sem tradução',
     mBilingual: 'Bilíngue', mBilingualD: 'Tradução e fala original, sempre',
@@ -80,7 +80,7 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
     options: 'Options', langLabel: 'Subtitle language', original: 'Original', modesLabel: 'Display mode',
     qTranslation: 'Translated subtitles', qBilingual: 'Dual subtitles (original + translation)',
     qTranscript: 'Transcript (original speech)', qFull: 'Full text', copy: 'Copy text', copied: 'Copied!', settings: 'Settings',
-    settingsTitle: 'Display settings', close: 'Close settings', newLines: 'New lines ↓', uiLang: 'Interface language', mode: 'Mode',
+    settingsTitle: 'Display settings', close: 'Close settings', backToTop: 'Back to top', uiLang: 'Interface language', mode: 'Mode',
     mTranslation: 'Translation', mTranslationD: 'Translation first; the original underneath is optional',
     mTranscript: 'Transcript only', mTranscriptD: 'Only the original speech, no translation',
     mBilingual: 'Bilingual', mBilingualD: 'Translation and original, always',
@@ -302,7 +302,14 @@ header:has(.pill.live) .logo .mark::after{content:"";position:absolute;inset:0;b
 .no-times #tx p{display:block}
 .no-times .txh{padding-left:var(--pad)}
 .mode-full #tx p.cur::before{display:none}
-#more{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--brand);color:var(--brand-ink);border:0;border-radius:999px;padding:11px 18px;font-weight:800;white-space:nowrap;box-shadow:0 10px 28px -8px rgba(0,0,0,.6);display:none;cursor:pointer}
+#more{position:fixed;right:var(--pad-r);bottom:max(18px,env(safe-area-inset-bottom));z-index:6;width:52px;height:52px;border-radius:50%;border:0;background:var(--brand);color:var(--brand-ink);box-shadow:0 12px 28px -8px rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;cursor:pointer;opacity:0;transform:translateY(12px) scale(.9);pointer-events:none;transition:opacity .2s,transform .25s cubic-bezier(.16,1,.3,1)}
+#more.show{opacity:1;transform:none;pointer-events:auto}
+#more .ico{width:22px;height:22px;stroke-width:2.4}
+#more:hover{background:var(--brand-hi)}
+#more:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.condensed .ctl,.condensed .tools{display:none}
+.condensed .now{min-height:0;padding-top:12px;padding-bottom:12px}
+@media (prefers-reduced-motion:reduce){#more{transition:none}}
 .backdrop{position:fixed;inset:0;z-index:20;background:var(--shade)}
 .sheet{position:fixed;z-index:21;left:0;right:0;bottom:0;max-height:85vh;max-height:85dvh;overflow-y:auto;overscroll-behavior:contain;background:var(--surface);color:var(--text);border-radius:24px 24px 0 0;border-top:1px solid var(--line);padding:4px var(--pad-r) calc(16px + env(safe-area-inset-bottom)) var(--pad);box-shadow:0 -12px 36px rgba(0,0,0,.4)}
 .backdrop[hidden],.sheet[hidden]{display:none}
@@ -388,7 +395,7 @@ ${QUICK_MODES.map(([m, k, p]) => `<button class="btn mb" type="button" data-m="$
 <div class="notice-wrap"><div id="notice" class="notice" role="status"></div></div>
 <div class="txh" aria-hidden="true" ${txt('fullText')}</div>
 <main id="tx" data-ia="fullText" aria-label="${esc(T.fullText)}"></main>
-<button id="more" type="button" ${txt('newLines')}</button>
+<button id="more" type="button" data-ia="backToTop" aria-label="${esc(T.backToTop)}">${ico('<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>')}</button>
 <div id="backdrop" class="backdrop" hidden></div>
 <div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1" hidden>
 <div class="sheet-head"><h2 id="sheetTitle" ${txt('settingsTitle')}</h2><button id="sClose" class="btn" type="button" data-ia="close" aria-label="${esc(T.close)}">✕</button></div>
@@ -790,7 +797,7 @@ function markCurrent(id){
 // ── delay indicator: rolling median of the last 10 lines (text) or of the last 10 clips (voice) ──
 
 // ── transcript ──
-function atBottom(){return window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-80}
+function atTop(){return window.scrollY<=40}
 function para(l){
   var p=document.createElement('p'),v=view(l);
   p.setAttribute('data-id',String(l.id));if(v.miss)p.className='miss';if(l.id===liveId)p.classList.add('cur');
@@ -799,24 +806,21 @@ function para(l){
   if(v.sub){var o=document.createElement('span');o.className='o';o.textContent=v.sub;p.appendChild(o)}
   return p;
 }
-var firstRender=true;
 function renderAll(){
-  var tx=$('tx'),stick=firstRender||(settings.autoScroll&&atBottom());tx.textContent='';
-  var frag=document.createDocumentFragment();for(var i=0;i<lines.length;i++)frag.appendChild(para(lines[i]));tx.appendChild(frag);
-  if(lines.length)firstRender=false;
-  renderLive();if(stick)scrollEnd();
+  var tx=$('tx');tx.textContent='';
+  var frag=document.createDocumentFragment();for(var i=lines.length-1;i>=0;i--)frag.appendChild(para(lines[i]));tx.appendChild(frag);
+  renderLive();
 }
-function scrollEnd(){window.scrollTo(0,document.documentElement.scrollHeight);$('more').style.display='none'}
 function upsert(l){
-  var stick=settings.autoScroll&&atBottom(),tx=$('tx'),old=byId[l.id];
+  var stick=settings.autoScroll&&atTop(),tx=$('tx'),old=byId[l.id];
   if(old){lines[lines.indexOf(old)]=l;byId[l.id]=l;var el=tx.querySelector('p[data-id="'+l.id+'"]');if(el)tx.replaceChild(para(l),el)}
   else{
     byId[l.id]=l;M(l.id).arrivedAt=now();stat.lines++;if(l.ts>1e11)stat.lag.push(Date.now()-l.ts);var i=lines.length;while(i>0&&lines[i-1].id>l.id)i--;lines.splice(i,0,l);
-    var next=lines[i+1]?tx.querySelector('p[data-id="'+lines[i+1].id+'"]'):null;tx.insertBefore(para(l),next);
+    var newer=lines[i+1]?tx.querySelector('p[data-id="'+lines[i+1].id+'"]'):null;tx.insertBefore(para(l),newer?newer.nextSibling:tx.firstChild);
     if(dub){setTimeout(renderLive,AUDIO_WAIT_MS+20);expectVoice(l)}
   }
   renderLive();
-  if(stick)scrollEnd();else if(!atBottom())$('more').style.display='block';
+  if(stick)window.scrollTo(0,0);
 }
 
 // ── languages ──
@@ -1043,8 +1047,12 @@ $('copy').addEventListener('click',function(){
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(ok,fallback)}else fallback();
   function fallback(){var a=document.createElement('textarea');a.value=t;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{document.execCommand('copy');ok()}catch(e){}document.body.removeChild(a)}
 });
-$('more').addEventListener('click',function(){track('ui',{action:'more'});scrollEnd()});
-window.addEventListener('scroll',function(){if(atBottom())$('more').style.display='none'},{passive:true});
+$('more').addEventListener('click',function(){track('ui',{action:'top'});window.scrollTo({top:0,behavior:'smooth'})});
+window.addEventListener('scroll',function(){
+  var y=window.scrollY,b=document.body.classList;
+  if(y>160)b.add('condensed');else if(y<40)b.remove('condensed');
+  $('more').classList.toggle('show',y>400);
+},{passive:true});
 
 // ── state ──
 function setPill(kind,k){pillKey=k;var p=$('pill');p.className='pill '+kind;p.textContent=L[k]}
