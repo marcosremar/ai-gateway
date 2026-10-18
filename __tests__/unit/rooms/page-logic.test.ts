@@ -10,7 +10,7 @@ interface Fit { px: number; text: string }
 type Measure = (s: string, px: number) => number;
 interface Settings { ui: string; mode: string; showOrig: boolean; volume: number; sync: boolean; size: number; theme: string; autoScroll: boolean; showTimes: boolean }
 interface LiveEntry { id: number; arrivedAt: number; startedAt: number | null; pending: boolean; skip: boolean }
-const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel })`)
+const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, nextStart, backlogDrop, median, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, karaokeSpan, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel })`)
   .runInContext(createContext({})) as {
   pickLang(prefs: string[], languages: string[], saved: string | null): string;
   fitLine(text: string, maxWidth: number, basePx: number, measure: Measure): Fit;
@@ -27,6 +27,7 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   wordStarts(text: string, start: number, dur: number): number[];
   spokenCount(starts: number[], t: number): number;
   speechMs(text: string): number;
+  karaokeSpan(m: { arrivedAt: number; startedAt: number | null; durMs?: number; parts?: boolean }, text: string, original: string, synced: boolean): { start: number; dur: number };
   safeYoutubeUrl(u: unknown): string | null;
   youtubeLabel(prefs: string[]): string;
   dubbable(lang: string, dubLangs: string[] | undefined, originalLang?: string): boolean;
@@ -34,7 +35,7 @@ const logic = new Script(`${ROOM_PAGE_LOGIC}; ({ pickLang, fitLine, pickLive, ne
   dubStatus(s: { can: boolean; lang: string; on: boolean; ctx: string | null; error: string | null; playing: boolean; loading: boolean }, L: Record<string, string>): { kind: string; text: string };
   silentWav(rate: number, samples: number): string;
 };
-const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel } = logic;
+const { pickLang, fitLine, pickLive, nextStart, backlogDrop, median, normalizeSettings, parseSettings, textSizes, lineView, uaInfo, refOf, wordStarts, spokenCount, speechMs, karaokeSpan, dubbable, listenMsg, dubStatus, silentWav, safeYoutubeUrl, youtubeLabel } = logic;
 
 /** Monospace stand-in: every character is 0.5 em wide. */
 const mono: Measure = (s, px) => s.length * px * 0.5;
@@ -349,6 +350,16 @@ describe('room page: analytics helpers', () => {
 });
 
 describe('room page: karaoke highlight', () => {
+  it('karaoke follows the voice that plays (dub or original): its start and its real length; a voice still streaming never runs ahead', () => {
+    const line = 'Bonjour à tous et merci d’être venus aussi nombreux ce matin.';
+    const text = 'Good morning everyone, and thank you for coming in such numbers this morning.';
+    expect(karaokeSpan({ arrivedAt: 100, startedAt: null }, text, line, true)).toEqual({ start: 100, dur: speechMs(line) });
+    expect(karaokeSpan({ arrivedAt: 100, startedAt: 900, durMs: 4200 }, text, line, false)).toEqual({ start: 100, dur: speechMs(line) });
+    expect(karaokeSpan({ arrivedAt: 100, startedAt: 900, durMs: 4200 }, text, line, true)).toEqual({ start: 900, dur: 4200 });
+    expect(karaokeSpan({ arrivedAt: 100, startedAt: 900, durMs: 600, parts: true }, text, line, true)).toEqual({ start: 900, dur: speechMs(text) });
+    expect(karaokeSpan({ arrivedAt: 100, startedAt: 900, durMs: 9000, parts: true }, text, line, true)).toEqual({ start: 900, dur: 9000 });
+  });
+
   it('marks the words whose start time has passed, never skipping or going back', () => {
     const starts = wordStarts('and I started to feel sick', 1000, 2600);
     expect(starts).toHaveLength(6);
@@ -374,7 +385,7 @@ describe('room page: karaoke highlight', () => {
 
   it('ships the karaoke painting in the page', () => {
     const { html } = roomPage('ABC123', { basePath: '/', retentionDays: 30 });
-    for (const s of ['function paintKaraoke', 'spokenCount(wordStarts(text,start,dur),now())', 'm.durMs=dur*1000', '.k{color:var(--accent)']) expect(html).toContain(s);
+    for (const s of ['function paintKaraoke', 'spokenCount(wordStarts(text,s.start,s.dur),now())', 'm.durMs=dur*1000', '.k{color:var(--accent)']) expect(html).toContain(s);
   });
 });
 
