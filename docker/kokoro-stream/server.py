@@ -27,6 +27,7 @@ from normalize import normalize  # noqa: E402
 from vowels import fix as fix_vowels  # noqa: E402
 
 MODEL_DIR = Path(os.environ.get("KOKORO_STREAM_DIR", "/models/kokoro-stream"))
+MODEL_REVISION = os.environ.get("KOKORO_STREAM_REVISION")
 API_KEY = os.environ.get("KOKORO_API_KEY", "")
 THREADS = int(os.environ.get("KOKORO_THREADS", "4"))
 OPENING_THREADS = int(os.environ.get("KOKORO_OPENING_THREADS", str(2 * THREADS)))
@@ -43,6 +44,8 @@ KEPT_PAUSE_FRAMES = 6
 VOICE_LEVEL = 10 ** (-50 / 20)
 ONSET_MARGIN_SAMPLES = 480
 MAX_TOKENS = 510
+MIN_SPEED = 0.25
+MAX_SPEED = 4.0
 FIRST_PIECE_CHARS = 100
 LANGUAGES = {"a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "i": "it", "p": "pt-br", "h": "hi"}
 NUMBER_LANGUAGES = {"a": "en", "b": "en", "e": "es", "f": "fr", "i": "it", "p": "pt"}
@@ -128,6 +131,22 @@ def spoken(text: str, voice: str) -> str:
     return normalize(text, language) if language else text
 
 
+def spoken_segments(text: str, voice: str) -> list[tuple[str, list[str], int]]:
+    said = []
+    for segment, pause_ms in segments(text):
+        plain, emphasis = without_emphasis(segment)
+        said.append((spoken(plain, voice), [spoken(word, voice) for word in emphasis], pause_ms))
+    return said
+
+
+def speed_of(value) -> float | None:
+    try:
+        speed = float(value or 1)
+    except (TypeError, ValueError):
+        return None
+    return speed if MIN_SPEED <= speed <= MAX_SPEED else None
+
+
 def word_spans(chars: list[str]) -> list[tuple[int, int]]:
     spans, start = [], 0
     for i, c in enumerate(chars + [" "]):
@@ -179,14 +198,13 @@ def to_pcm(samples: np.ndarray) -> bytes:
     return (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
 
 
-def speak(e: Engine, text: str, voice: str, speed: float):
+def speak(e: Engine, said: list[tuple[str, list[str], int]], voice: str, speed: float):
     pack = e.voices[voice]
     started = None
     produced = 0
-    for segment, pause_ms in segments(text):
-        plain, emphasis = without_emphasis(segment)
-        emphasis_ps = [phonemize(spoken(word, voice), voice) for word in emphasis]
-        for piece in pieces(spoken(plain, voice)):
+    for plain, emphasis, pause_ms in said:
+        emphasis_ps = [phonemize(word, voice) for word in emphasis]
+        for piece in pieces(plain):
             chars = [p for p in phonemize(piece, voice) if p in e.vocab][:MAX_TOKENS]
             if not chars:
                 continue
@@ -232,7 +250,7 @@ async def lifespan(_: FastAPI):
     global engine
     loaded = load(MODEL_DIR)
     for voice in sorted(loaded.voices):
-        b"".join(speak(loaded, WARM_UP[voice[0]], voice, 1.0))
+        b"".join(speak(loaded, spoken_segments(WARM_UP[voice[0]], voice), voice, 1.0))
     engine = loaded
     yield
 
@@ -244,7 +262,8 @@ app = FastAPI(lifespan=lifespan)
 def health():
     if engine is None:
         return error(503, "loading", "kokoro is loading")
-    return {"status": "ok", "voices": sorted(engine.voices)}
+    providers = {name: getattr(engine, name).get_providers()[0] for name in ("front", "generator", "opening")}
+    return {"status": "ok", "voices": sorted(engine.voices), "providers": providers, "revision": MODEL_REVISION}
 
 
 @app.post("/v1/audio/speech")
@@ -263,6 +282,13 @@ async def speech(request: Request):
         return error(400, "invalid_voice", f"voice must be one of {', '.join(sorted(engine.voices))}")
     if fmt not in ("pcm", "wav"):
         return error(400, "invalid_response_format", "response_format must be pcm or wav")
+    speed = speed_of(body.get("speed"))
+    if speed is None:
+        return error(400, "invalid_speed", f"speed must be a number from {MIN_SPEED} to {MAX_SPEED}")
+    try:
+        said = spoken_segments(text, voice)
+    except OverflowError:
+        return error(400, "invalid_input", "input has a number too large to read aloud")
     if not slots.acquire(blocking=False):
         return error(503, "busy", "all synthesis slots are in use")
 
@@ -270,7 +296,7 @@ async def speech(request: Request):
         try:
             if fmt == "wav":
                 yield wav_header()
-            yield from speak(engine, text, voice, float(body.get("speed") or 1))
+            yield from speak(engine, said, voice, speed)
         finally:
             slots.release()
 

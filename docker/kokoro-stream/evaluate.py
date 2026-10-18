@@ -49,7 +49,7 @@ def synthesize(engine, text: str, voice: str, options: dict) -> tuple[np.ndarray
     started = time.perf_counter()
     first = None
     pcm = b""
-    for chunk in server.speak(engine, text, voice, options.get("speed", 1.0)):
+    for chunk in server.speak(engine, server.spoken_segments(text, voice), voice, options.get("speed", 1.0)):
         first = first or time.perf_counter() - started
         pcm += chunk
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32767, first * 1000
