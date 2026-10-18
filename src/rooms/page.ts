@@ -617,7 +617,7 @@ const ROOM_SCRIPT = String.raw`(function(){
 'use strict';
 ${ROOM_PAGE_LOGIC}
 var CODE=__CODE__,DAYS=__DAYS__,APP=__APP__,UI=__UI__;
-var AUDIO_WAIT_MS=4000,MAX_BACKLOG_S=25,FADE_S=0.01,LEAD_S=0.05;
+var AUDIO_WAIT_MS=4000,MAX_BACKLOG_S=6,FADE_S=0.01,LEAD_S=0.05;
 var $=function(id){return document.getElementById(id)};
 var store={get:function(k){try{return localStorage.getItem(k)}catch(e){return null}},set:function(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
 var SETTINGS_KEY='ucast-settings-'+APP;
