@@ -16,7 +16,8 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { bearerToken } from '../gateway/proxy/middleware/api-keys';
 import { errorTypeForStatus } from '../gateway/proxy/http-conventions';
-import { entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
+import { readFileSync } from 'fs';
+import { FONT_FILES, entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
 import { EVENTS_MAX_BYTES, parseEventBatch, type RoomEvents } from './events';
 import { appIdOf, type RoomService } from './service';
 import { RoomError, VOICE_MAX_BYTES, normalizeCode, parseAudio, parseCreate, parseLine, parseUpdate, parseVoice } from './validate';
@@ -37,6 +38,8 @@ const API_PATH = /^\/v1\/rooms\/([^/]{1,32})(?:\/(lines|audio|voice|end|ws|event
 const ANALYTICS_PATH = /^\/v1\/rooms-analytics\/?$/;
 const LIVE_PATH = /^\/live\/([^/]{1,32})\/?$/;
 const HOST_CODE_PATH = /^\/([A-Za-z0-9]{6})\/?$/;
+const FONT_PATH = /^\/live\/fonts\/([a-z0-9.-]+\.woff2)$/;
+const FONTS = new Map(FONT_FILES.map(f => [f, readFileSync(new URL(`./fonts/${f}`, import.meta.url))]));
 const CREATE_MAX_BYTES = 16 * 1024;
 const LINE_MAX_BYTES = 256 * 1024;
 const UPDATE_MAX_BYTES = 4 * 1024;
@@ -242,6 +245,12 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
     if (apiMatch) return run(api(req, res, method, apiMatch[1]!, apiMatch[2]), 'api');
     if (ANALYTICS_PATH.test(path)) return run(analytics(req, res, method), 'analytics');
     if (!isGet) return false;
+    const font = FONTS.get(FONT_PATH.exec(path)?.[1] ?? '');
+    if (font) {
+      res.writeHead(200, { 'Content-Type': 'font/woff2', 'Content-Length': font.length, 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' });
+      res.end(method === 'HEAD' ? undefined : font);
+      return true;
+    }
     if (cfg.publicHost && hostOf(req) === cfg.publicHost) {
       if (path === '/') { sendPage(res, 200, entryPage({ basePath: '/', retentionDays })); return true; }
       const hostCode = HOST_CODE_PATH.exec(path)?.[1];
