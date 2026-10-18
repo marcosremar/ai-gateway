@@ -55,6 +55,15 @@ QUESTION_RISE_SEMITONES = 3.0
 WARM_UP = {"a": "Hello, let us begin.", "b": "Hello, let us begin.", "e": "Hola, empecemos.", "f": "Bonjour, commençons.", "i": "Ciao, iniziamo.", "p": "Olá, vamos começar.", "h": "नमस्ते, शुरू करते हैं।"}
 
 
+def providers(value: str) -> list[str]:
+    return [p.strip() for p in value.split(",") if p.strip()]
+
+
+PROVIDERS = providers(os.environ.get("KOKORO_PROVIDERS", "CPUExecutionProvider"))
+if "CUDAExecutionProvider" in PROVIDERS and hasattr(ort, "preload_dlls"):
+    ort.preload_dlls()
+
+
 @dataclass
 class Engine:
     front: ort.InferenceSession
@@ -69,7 +78,7 @@ def session(path: Path, threads: int) -> ort.InferenceSession:
     opts.intra_op_num_threads = threads
     opts.inter_op_num_threads = 1
     opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-    return ort.InferenceSession(str(path), opts, providers=["CPUExecutionProvider"])
+    return ort.InferenceSession(str(path), opts, providers=PROVIDERS)
 
 
 def load(model_dir: Path) -> Engine:

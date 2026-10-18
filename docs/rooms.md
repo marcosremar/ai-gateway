@@ -109,6 +109,7 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   desktop app); `normalize.py` writes ordinals, decimals, phone numbers, units, Av./nº and acronyms as people say them
   ("IBGE" spelled, "SUS" read as a word). Whisper round trip on 105 pt sentences: 4.7 % WER. The server loads the
   espeak-ng 1.52 bundled with espeakng-loader itself — misaki only sets a library on macOS/Windows, so on Linux it failed.
+  On a GPU: install onnxruntime-gpu and set `KOKORO_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider` (default CPU).
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")

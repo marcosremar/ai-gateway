@@ -1,0 +1,9 @@
+onnxruntime==1.24.4
+numpy==2.4.4
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+misaki==0.7.4
+phonemizer-fork==3.3.2
+espeakng-loader==0.2.4
+num2words==0.5.14
+huggingface_hub>=0.34
