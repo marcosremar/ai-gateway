@@ -78,6 +78,8 @@ UNIT_PATTERN = re.compile(r"(\d+(?:[.,]\d+)?)\s?(km/h|km|kg|mg|ml|cm|mm|min|°C|
 PHONE = re.compile(r"\(?\b(\d{2})\)?\s?(\d{4,5})-(\d{4})\b")
 ACRONYM = re.compile(r"\b[A-Z]{2,5}\b")
 ROMAN = re.compile(r"^[IVX]+$")
+DAY = r"(0?[1-9]|[12]\d|3[01])"
+MONTH = r"(0?[1-9]|1[0-2])"
 
 
 def digit_by_digit(digits: str, lang: str) -> str:
@@ -122,9 +124,9 @@ def normalize(text: str, lang: str) -> str:
         text = re.sub(before, lambda m: money(int(m[1]), int(m[2] or 0), names, lang), text)
         text = re.sub(after, lambda m: money(int(m[1]), int(m[2] or 0), names, lang), text)
     if lang == "en":
-        text = re.sub(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", lambda m: date(int(m[2]), int(m[1]), int(m[3]), lang), text)
+        text = re.sub(rf"\b{MONTH}/{DAY}/(\d{{4}})\b", lambda m: date(int(m[2]), int(m[1]), int(m[3]), lang), text)
     else:
-        text = re.sub(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", lambda m: date(int(m[1]), int(m[2]), int(m[3]), lang), text)
+        text = re.sub(rf"\b{DAY}/{MONTH}/(\d{{4}})\b", lambda m: date(int(m[1]), int(m[2]), int(m[3]), lang), text)
     text = re.sub(r"\b(\d{1,2})[h:](\d{2})(?:\s?([ap]\.?m\.?))?", lambda m: time_of_day(int(m[1]), int(m[2]), lang, m[3] or ""), text)
     if lang != "en":
         text = re.sub(r"\b(\d{1,2})h\b", lambda m: time_of_day(int(m[1]), 0, lang), text)
