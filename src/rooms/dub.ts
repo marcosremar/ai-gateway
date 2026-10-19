@@ -1,8 +1,12 @@
 // ── AI Gateway — Live subtitle rooms: server-side dubbing ────────────────────
-// When the presenter's app publishes text only, the gateway voices each line itself (Kokoro through the gateway TTS
-// module, src/tts: injected by serve.ts as a `LanguageTts`) for the languages someone is actually listening to. Spending rules:
+// When the presenter's app publishes text only, the gateway voices each line itself (through the gateway TTS module,
+// src/tts, injected by serve.ts) for the languages someone is actually listening to. Voice, first that can:
+//   1. the speaker's cloned voice (Qwen3-TTS Base) while the clone deployment already serves and a reference arrived;
+//   2. Pocket TTS (own speech server, one native voice per language: en fr de pt es it nl) when it is mounted;
+//   3. Kokoro (own speech server, then OpenRouter) — the languages Pocket lacks, and a Pocket 503 loading/busy or error.
+// Spending rules:
 //   - a language is voiced only while at least one viewer explicitly listens to it (`listen` message), it has a
-//     non-empty translation in the line and Kokoro has a voice for it;
+//     non-empty translation in the line and a voice above speaks it;
 //   - the presenter's own clips win: a language the presenter sent a clip for recently is left alone (other languages are
 //     still voiced — the desktop app dubs one language, viewers may listen to another), and a line+language the
 //     presenter voiced is never synthesized (checked before and after the call);
@@ -13,8 +17,8 @@
 // Failures are logged, never thrown into the publish path.
 
 import {
-  KOKORO_VOICES, QWEN_LANGUAGES, TTS_MAX_SPEED, TtsStream, kokoroVoice, primaryLanguage as primary, qwenSpeaks, type DeploymentClone, type LanguageTts, type TtsClip,
-  type VoiceRef,
+  KOKORO_VOICES, POCKET_LANGUAGE_CODES, QWEN_LANGUAGES, TTS_MAX_PARALLEL, TTS_MAX_SPEED, TtsStream, kokoroVoice, pocketRoomVoice, primaryLanguage as primary, qwenSpeaks,
+  type DeploymentClone, type LanguageTts, type TtsClip, type VoiceRef,
 } from '../tts';
 import type { LiveRoom } from './service';
 import type { RoomLine } from './types';
@@ -27,6 +31,7 @@ export interface ChatLike {
 
 const TRANSLATE_MODEL = 'google/gemini-2.5-flash-lite';
 const TRANSLATE_TIMEOUT_MS = 6_000;
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const languageName = (code: string): string => new Intl.DisplayNames(['en'], { type: 'language' }).of(code) ?? code;
 
 export const openRouterTranslate = (provider: ChatLike): RoomTranslate => async (text, from, to) => {
@@ -45,8 +50,17 @@ export const openRouterTranslate = (provider: ChatLike): RoomTranslate => async 
 
 export type RoomVoiceClone = DeploymentClone;
 
-export interface RoomDubberOptions {
+/** Pocket TTS (serve.ts: `pocketTts` from src/tts) — the first non-clone voice for the languages it speaks. */
+export interface RoomPocket {
   synthesize: LanguageTts;
+  /** False while Pocket is not mounted (no POCKET_TTS_API_KEY): Kokoro alone, as before. */
+  available: () => boolean;
+}
+
+export interface RoomDubberOptions {
+  /** Kokoro: the voice of the languages Pocket does not speak, and the fallback when Pocket cannot answer. */
+  synthesize: LanguageTts;
+  pocket?: RoomPocket;
   clone?: RoomVoiceClone;
   /** False while the synthesizer cannot work (e.g. no API key): nothing is scheduled. Default: always available. */
   available?: () => boolean;
@@ -91,7 +105,7 @@ export class RoomDubber {
 
   constructor(private readonly opts: RoomDubberOptions) {}
 
-  /** Languages the server can voice in this room (Kokoro-supported). */
+  /** Languages the server can voice in this room (clone, Pocket or Kokoro). */
   voicedLanguages(room: LiveRoom): string[] {
     return room.meta.languages.filter(l => this.speaks(room, l));
   }
@@ -105,14 +119,25 @@ export class RoomDubber {
   }
 
   private speaks(room: LiveRoom, lang: string): boolean {
-    return this.cloning(room) ? qwenSpeaks(lang) : kokoroVoice(lang) !== null;
+    return this.cloning(room) ? qwenSpeaks(lang) : this.stockSpeaks(lang);
   }
 
-  /** Kokoro languages the presenter does not publish: the server translates and voices them for whoever picks one. */
+  /** Pocket is mounted and has a voice for `lang`. */
+  private pocketSpeaks(lang: string): boolean {
+    return pocketRoomVoice(lang) !== null && !!this.opts.pocket?.available();
+  }
+
+  /** The voices that need no reference: Pocket, then Kokoro. */
+  private stockSpeaks(lang: string): boolean {
+    return this.pocketSpeaks(lang) || kokoroVoice(lang) !== null;
+  }
+
+  /** Languages the presenter does not publish: the server translates and voices them for whoever picks one. */
   extraLanguages(room: LiveRoom): string[] {
     if (!this.opts.translate) return [];
     const taken = [...room.meta.languages, room.meta.originalLang ?? ''].map(primary);
-    return (this.cloning(room) ? QWEN_LANGUAGES : Object.keys(KOKORO_VOICES)).filter(l => !taken.includes(l));
+    const stock = [...new Set([...Object.keys(KOKORO_VOICES), ...(this.opts.pocket?.available() ? POCKET_LANGUAGE_CODES : [])])];
+    return (this.cloning(room) ? QWEN_LANGUAGES : stock).filter(l => !taken.includes(l));
   }
 
   private state(code: string): RoomState {
@@ -155,7 +180,7 @@ export class RoomDubber {
 
   /** A line was published (added or replaced), or a viewer changed language: schedule what someone listens to or reads. */
   onLine(room: LiveRoom, lineId: number): void {
-    if (room.meta.serverDub === false || (this.opts.available && !this.opts.available())) return;
+    if (room.meta.serverDub === false || !this.available()) return;
     const s = this.state(room.meta.code);
     const at = room.index.get(lineId);
     const line = at === undefined ? undefined : room.lines[at];
@@ -166,6 +191,11 @@ export class RoomDubber {
       if (ls.done.some(d => d >= lineId) || ls.stream.has(lineId)) continue;
       ls.stream.push(lineId, this.opts.now() + (s.presenterAt.has(lang) ? this.opts.waitMs : 0));
     }
+  }
+
+  /** Kokoro or Pocket can work (a key is set). */
+  private available(): boolean {
+    return !this.opts.available || this.opts.available() || !!this.opts.pocket?.available();
   }
 
   private langState(room: LiveRoom, s: RoomState, lang: string): LangState {
@@ -186,6 +216,10 @@ export class RoomDubber {
           return true;
         },
         dropped: (lineId) => this.opts.log('rooms: server dub dropped stale line', { code: room.meta.code, lang, lineId }),
+        // Pocket speaks one sentence at a time per language (a second call waits ≤ 2 s, then 503 busy → Kokoro, another
+        // voice): one call at a time keeps the room on one voice. It speaks ~2× faster than real time, so the next line
+        // is ready before the listeners finish this one.
+        maxParallel: () => (!this.cloning(room) && this.pocketSpeaks(lang) ? 1 : TTS_MAX_PARALLEL),
       }),
     };
     s.langs.set(lang, ls);
@@ -216,8 +250,17 @@ export class RoomDubber {
       try {
         return await this.opts.clone!.synthesize(text, lang, voice);
       } catch (err) {
+        if (!this.stockSpeaks(lang)) throw err;
+        this.opts.log('rooms: voice clone failed, stock voice instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
+      }
+    }
+    if (this.pocketSpeaks(lang)) {
+      try {
+        // No speed: Pocket has none (see pocketTts) — the speaker's pace and the catch-up apply to Kokoro only.
+        return await this.opts.pocket!.synthesize(text, lang);
+      } catch (err) {
         if (!kokoroVoice(lang)) throw err;
-        this.opts.log('rooms: voice clone failed, Kokoro instead', { code: room.meta.code, lang, lineId: line.id, error: err instanceof Error ? err.message : String(err) });
+        this.opts.log('rooms: Pocket failed, Kokoro instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
       }
     }
     return this.opts.synthesize(text, lang, pacedSpeed(speed, line));
