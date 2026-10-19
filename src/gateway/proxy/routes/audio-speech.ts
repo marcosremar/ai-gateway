@@ -15,6 +15,7 @@ import {
   errorResponse, normalizeTargets, providerUnavailableResponse, redactSecrets, routeRequest, stageBudgetMs,
 } from '../provider-routing';
 import type { CircuitBreakerRegistry } from '../../providers/cloud/circuit-breaker';
+import { isOwnSpeechProvider } from '../../providers/cloud/kokoro-stream/ids';
 
 const ttsCooldownTracker = new CooldownTracker();
 
@@ -34,8 +35,12 @@ export function samplingParams(asked: unknown): Record<string, number> | undefin
   return picked.length ? Object.fromEntries(picked) : undefined;
 }
 
-/** A replica of a deployment or a local link: a server of ours that reads fields the OpenAI speech API lacks. */
-const ownServer = (providerId: string) => providerId.startsWith('deployment:') || providerId.startsWith('local:');
+/**
+ * A replica of a deployment, a local link or the gateway's own speech server (`kokoro-stream`, `pocket`): a server of
+ * ours that reads fields the OpenAI speech API lacks (the speech server only takes `language` from them, route-tts.ts).
+ */
+const ownServer = (providerId: string) =>
+  providerId.startsWith('deployment:') || providerId.startsWith('local:') || isOwnSpeechProvider(providerId);
 
 export interface SpeechCache { cache: TtsCache; scope: string; gpuOnly: boolean }
 

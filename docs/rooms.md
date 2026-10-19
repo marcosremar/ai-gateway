@@ -110,6 +110,35 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   ("IBGE" spelled, "SUS" read as a word). Whisper round trip on 105 pt sentences: 4.7 % WER. The server loads the
   espeak-ng 1.52 bundled with espeakng-loader itself — misaki only sets a library on macOS/Windows, so on Linux it failed.
   On a GPU: install onnxruntime-gpu and set `KOKORO_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider` (default CPU).
+- **Own speech server in the app chains** (2026-10-19, `src/gateway/providers/cloud/kokoro-stream/route-tts.ts`): the
+  same server is also a link of the app TTS aliases — `{"provider": "kokoro-stream", "model": "hexgrad/kokoro-82m"}`
+  (mounted with `KOKORO_STREAM_API_KEY`) and `{"provider": "pocket", "model": "pocket"}` (mounted with
+  `POCKET_TTS_API_KEY`; `POCKET_TTS_URL`, default `KOKORO_STREAM_URL`). Why: 2026-10-19 right after a deploy both
+  babelcast GPUs were off and OpenRouter timed out at the 8 s TTS budget, so the app's dubbing line got 503. Only wav/pcm
+  requests go to it (mp3 & co. → 415, the chain moves on without feeding a breaker). The voice comes from the request's
+  `language` ("Portuguese", "pt", "pt-BR"…): Kokoro keeps a voice it has in that language, else `af_heart`/`ef_dora`/
+  `ff_siwis`/`pf_dora`/`if_sara`/`hf_alpha` (all feminine — the only voices exported, `export.py`); Pocket keeps a Pocket
+  voice the app names (`rafael`, `estelle`, `alba`…), else the language's voice by the gender of a Qwen3 preset ("Ryan"
+  → pt `rafael`, en `marius`; "Vivian" → pt `estelle`, en `alba`). No language it speaks → refused, next link. Time to
+  first audio: hedge 1.5 s (`OWN_TTS_HEDGE_MS`) — the cloud link behind it starts in parallel — and 4 s limit
+  (`OWN_TTS_TIMEOUT_MS`); a stuck synthesis falls back instead of handing out a silent stream (the provider now resolves
+  at the first PCM bytes). Order: after the deployments, BEFORE OpenRouter (next to the gateway, first audio
+  ~0.15–0.4 s, no per-call cost); behind a hanging OpenRouter it would still answer through the cloud hedge
+  (min(4 s, half the budget left)), but ~4 s late. The fallback probe speaks "Bom dia." to it with `language: pt`. It is
+  not a cloud link: a chain of only these still gets the OpenRouter default appended.
+- **Pocket TTS** (Kyutai, CPU, `docker/kokoro-stream/pocket.py`): `"model": "pocket"` on the same `/v1/audio/speech`,
+  off unless `POCKET_TTS=1` on the server. One model per language (en fr de pt es it nl, ~220 MB each), loaded in the
+  background — at start for `POCKET_PRELOAD` (e.g. `pt,en,fr,es`), else on the first request, which gets 503 `loading`
+  (the gateway speaks that line with Kokoro). One sentence at a time per language (`POCKET_WAIT_S`, 2 s, then 503
+  `busy`); `POCKET_THREADS` (4) torch threads; `POCKET_QUANTIZE=1` int8. Predefined voices only (public weights without
+  voice cloning, no HF token). `speed` is ignored. Measured on this laptop's CPU (Core Ultra 7, loaded): first audio
+  0.16 s, 3.8 s of speech in 1.8 s; load + warm-up of one language ~60 s. The image bakes the weights and default voices
+  of `POCKET_BAKE` (pt,en,fr,es,it,de) at build (`WITH_POCKET=0` leaves Pocket out: no torch).
+- Deploying the server: no image is built by hand. `.github/workflows/kokoro-stream.yml` builds it on every PR that
+  touches it and pushes `ghcr.io/<owner>/kokoro-stream:<date>` from main; or a Railway service builds it from the repo
+  (root `docker/kokoro-stream`, config `docker/kokoro-stream/railway.json`). The server's `KOKORO_API_KEY` is the
+  gateway's `KOKORO_STREAM_API_KEY` (and `POCKET_TTS_API_KEY` when Pocket is on); `KOKORO_STREAM_URL` =
+  `http://<service>.railway.internal:<port>/v1` (private network, not a local link: no `localLinkRefusal`).
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")

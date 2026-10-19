@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from misaki import espeak  # noqa: E402
 
 from normalize import normalize  # noqa: E402
 from vowels import fix as fix_vowels  # noqa: E402
+import pocket as pocket_engine  # noqa: E402
 
 MODEL_DIR = Path(os.environ.get("KOKORO_STREAM_DIR", "/models/kokoro-stream"))
 MODEL_REVISION = os.environ.get("KOKORO_STREAM_REVISION")
@@ -237,8 +239,8 @@ def speak(e: Engine, said: list[tuple[str, list[str], int]], voice: str, speed: 
             produced += len(silence)
 
 
-def wav_header() -> bytes:
-    return b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, RATE, RATE * 2, 2, 16) + b"data" + struct.pack("<I", 0xFFFFFFFF)
+def wav_header(rate: int = RATE) -> bytes:
+    return b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", 0xFFFFFFFF)
 
 
 def error(status: int, code: str, message: str) -> JSONResponse:
@@ -248,6 +250,7 @@ def error(status: int, code: str, message: str) -> JSONResponse:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global engine
+    pocket.preload()
     loaded = load(MODEL_DIR)
     for voice in sorted(loaded.voices):
         b"".join(speak(loaded, spoken_segments(WARM_UP[voice[0]], voice), voice, 1.0))
@@ -255,6 +258,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
+pocket = pocket_engine.Pocket.from_env()
 app = FastAPI(lifespan=lifespan)
 
 
@@ -263,16 +267,19 @@ def health():
     if engine is None:
         return error(503, "loading", "kokoro is loading")
     providers = {name: getattr(engine, name).get_providers()[0] for name in ("front", "generator", "opening")}
-    return {"status": "ok", "voices": sorted(engine.voices), "providers": providers, "revision": MODEL_REVISION}
+    extra = {"pocket": pocket.health()} if pocket.enabled else {}
+    return {"status": "ok", "voices": sorted(engine.voices), "providers": providers, "revision": MODEL_REVISION, **extra}
 
 
 @app.post("/v1/audio/speech")
 async def speech(request: Request):
     if API_KEY and request.headers.get("authorization") != f"Bearer {API_KEY}":
         return error(401, "unauthorized", "missing or wrong API key")
+    body = await request.json()
+    if str(body.get("model") or "") in pocket_engine.MODELS:
+        return await pocket_speech(body)
     if engine is None:
         return error(503, "loading", "kokoro is loading")
-    body = await request.json()
     text = str(body.get("input") or "").strip()
     voice = str(body.get("voice") or "")
     fmt = body.get("response_format") or "pcm"
@@ -301,3 +308,55 @@ async def speech(request: Request):
             slots.release()
 
     return StreamingResponse(stream(), media_type=f"audio/{fmt};rate={RATE}")
+
+
+def pocket_text(text: str, lang: str) -> str:
+    """Kokoro's markup off (`[pause:ms]`, `*emphasis*`), numbers and units written out where normalize.py knows the language."""
+    plain = re.sub(r"\s+", " ", re.sub(r"\[pause:\d+\]", " ", text).replace("*", "")).strip()
+    return normalize(plain, lang) if lang in NUMBER_LANGUAGES.values() else plain
+
+
+async def pocket_speech(body: dict):
+    """`"model": "pocket"`: Pocket TTS (pocket.py). Refused before any audio when it cannot answer."""
+    if not pocket.enabled:
+        return error(400, "invalid_model", "Pocket TTS is off on this server (POCKET_TTS=1 turns it on)")
+    text = str(body.get("input") or "").strip()
+    voice = str(body.get("voice") or "")
+    fmt = body.get("response_format") or "pcm"
+    if not text:
+        return error(400, "invalid_input", "input is empty")
+    if voice not in pocket_engine.VOICES:
+        return error(400, "invalid_voice", f"voice must be one of {', '.join(sorted(pocket_engine.VOICES))}")
+    lang = pocket_engine.language_code(body.get("language")) if body.get("language") else pocket_engine.VOICES[voice]
+    if not lang:
+        return error(400, "invalid_language", f"language must be one of {', '.join(sorted(pocket_engine.LANGUAGES))}")
+    if fmt not in ("pcm", "wav"):
+        return error(400, "invalid_response_format", "response_format must be pcm or wav")
+    if speed_of(body.get("speed")) is None:
+        return error(400, "invalid_speed", f"speed must be a number from {MIN_SPEED} to {MAX_SPEED}")
+    try:
+        said = pocket_text(text, lang)
+    except OverflowError:
+        return error(400, "invalid_input", "input has a number too large to read aloud")
+    if pocket.model(lang) is None:
+        return error(503, "loading", f"pocket {lang} is loading")
+    if not await asyncio.to_thread(pocket.acquire, lang):
+        return error(503, "busy", f"pocket {lang} is speaking another sentence")
+    try:
+        await asyncio.to_thread(pocket.voice_state, lang, voice)
+    except Exception as err:  # noqa: BLE001 — a voice that cannot be fetched is the request's problem, not a crash
+        pocket.release(lang)
+        return error(503, "voice_unavailable", f"pocket voice {voice} for {lang}: {str(err)[:160]}")
+    rate = pocket.rate(lang)
+    stop = threading.Event()
+
+    def stream():
+        try:
+            if fmt == "wav":
+                yield wav_header(rate)
+            yield from pocket.speak(lang, voice, said, stop)
+        finally:
+            stop.set()
+            pocket.release(lang)
+
+    return StreamingResponse(stream(), media_type=f"audio/{fmt};rate={rate}")

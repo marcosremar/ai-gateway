@@ -14,6 +14,7 @@ import { isTimeoutError, type CooldownTracker, type FallbackEntry } from '../pro
 import { createLogger } from '../../logger';
 import { emitGatewayEvent } from '../../telemetry/emit';
 import { linkKey, namesItself, orderTargets, recordLinkOutcome } from './link-reorder';
+import { OWN_SPEECH_KEY_ENV } from '../providers/cloud/kokoro-stream/ids';
 import type { ProxyResponse } from './types';
 
 const log = createLogger('provider-routing');
@@ -80,7 +81,7 @@ export const PROVIDER_KEY_ENV: Record<string, string> = {
 /** Why a provider cannot be used right now, in words a client can act on. */
 export function notConfiguredReason(providerId: string): string {
   if (providerId.startsWith('deployment:')) return `${providerId}: deployment not found on this gateway`;
-  const env = PROVIDER_KEY_ENV[providerId];
+  const env = PROVIDER_KEY_ENV[providerId] ?? OWN_SPEECH_KEY_ENV[providerId];
   return env ? `${providerId}: ${env} is not set` : `${providerId}: not configured`;
 }
 

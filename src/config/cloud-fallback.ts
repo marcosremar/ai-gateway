@@ -17,6 +17,7 @@
 import type { ModelRoutesSpec, RouteEntrySpec } from './serve-providers';
 import { KOKORO_TTS_MODEL } from './tts-fallback-voices';
 import { OPENAI_COMPATIBLE } from '../gateway/providers/cloud/openai-compat/local-link';
+import { isOwnSpeechProvider } from '../gateway/providers/cloud/kokoro-stream/ids';
 
 type Stage = keyof ModelRoutesSpec;
 const STAGES: Stage[] = ['chat', 'stt', 'tts'];
@@ -32,7 +33,12 @@ export const DEFAULT_CLOUD_FALLBACK: Record<Stage, RouteEntrySpec[]> = {
   ],
 };
 
-export const isCloudLink = (e: RouteEntrySpec): boolean => e.provider !== 'deployment' && e.provider !== OPENAI_COMPATIBLE;
+/**
+ * The gateway's own speech server (`kokoro-stream`, `pocket`) is no cloud link either: one more machine that can be
+ * down (or not deployed yet), so a chain of only those still gets the OpenRouter default after it.
+ */
+export const isCloudLink = (e: RouteEntrySpec): boolean =>
+  e.provider !== 'deployment' && e.provider !== OPENAI_COMPATIBLE && !isOwnSpeechProvider(e.provider);
 
 export interface CloudFallbackAdded { stage: Stage; alias: string; added: string[] }
 

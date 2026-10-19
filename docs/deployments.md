@@ -277,6 +277,12 @@ student audio to it.
 - **babelcast's chain** (the app's own routes; the owner sets them): `babelcast-stt` → `deployment:babelcast-3090` →
   `deployment:babelcast-speech` → OpenRouter whisper-large-v3-turbo → Groq; `babelcast-llm` → `deployment:babelcast-3090`
   → `deployment:babelcast-speech` → OpenRouter gemini-2.5-flash-lite; `babelcast-tts` unchanged.
+- **The speech server in babelcast's TTS chains** (19/10/2026, docs/rooms.md § Own speech server): `babelcast-tts` =
+  `deployment:babelcast-tts-clone` → `deployment:babelcast-tts` → `kokoro-stream` → OpenRouter Kokoro (with
+  `voiceGenders` for the Qwen3 presets, so "Ryan" falls back to `am_michael`, not `af_heart`); new alias
+  `babelcast-tts-pocket` = `pocket` → `kokoro-stream` → OpenRouter Kokoro (the app picks Pocket TTS for dubbing with it,
+  sending `language` and `response_format: "wav"`). Stored routes: applied by the owner with the full
+  `PUT /v1/apps/babelcast/routes` body, once the server runs and its key is set on the gateway.
 - **`babelcast-tts-kokoro`** (14/10/2026): Kokoro-82M on the speech-stack image (CPU, next to Qwen3-TTS; see
   `docker/speech-stack/README.md`), for an app that wants stock voices instead of the cloned ones. Chain:
   `deployment:babelcast-3090:kokoro` → `deployment:babelcast-speech:kokoro` → `openrouter:hexgrad/kokoro-82m` (the same
