@@ -265,3 +265,38 @@ def test_pocket_language_names_and_codes():
     assert [server.pocket_engine.language_code(v) for v in ["Portuguese", "pt-BR", "pt_br", "FR", "dutch"]] == ["pt", "pt", "pt", "fr", "nl"]
     assert [server.pocket_engine.language_code(v) for v in [None, "", "ja", "Japanese", 3]] == [None, None, None, None, None]
     assert server.pocket_engine.codes("pt, fr ,xx,") == ["pt", "fr"]
+
+
+def test_an_idle_pocket_language_is_unloaded_and_loads_again_on_its_next_request(monkeypatch):
+    now = [1000.0]
+    models: dict[str, FakePocketModel] = {}
+
+    def loader(lang: str) -> FakePocketModel:
+        models[lang] = FakePocketModel(lang)
+        return models[lang]
+
+    engine = server.pocket_engine.Pocket(enabled=True, loader=loader, wait_s=0.05, idle_unload_s=900, clock=lambda: now[0])
+    monkeypatch.setattr(server, "pocket", engine)
+    loaded_language(engine, "pt")
+    loaded_language(engine, "fr")
+    now[0] += 600
+    response = speak_pocket({"input": "Olá.", "voice": "rafael", "language": "pt"})
+    asyncio.run(collect(response))
+    now[0] += 400
+    assert engine.unload_idle() == ["fr"], "pt spoke 400 s ago, fr has been idle 1000 s"
+    assert engine.health()["languages"]["fr"] == "unloaded" and "fr" not in engine.models
+    assert not [k for k in engine.states if k[0] == "fr"], "its voice states are dropped too"
+    assert engine.acquire("pt")
+    now[0] += 2000
+    assert engine.unload_idle() == [], "a language speaking a sentence is never unloaded"
+    engine.release("pt")
+    now[0] += 2000
+    assert engine.unload_idle() == ["pt"]
+    response = speak_pocket({"input": "Bonjour.", "voice": "estelle", "language": "fr"})
+    assert response.status_code == 503 and json.loads(response.body)["error"]["code"] == "loading"
+    loaded_language(engine, "fr")
+    assert engine.health()["languages"]["fr"] == "loaded"
+    never = server.pocket_engine.Pocket(enabled=True, loader=loader, idle_unload_s=0, clock=lambda: now[0])
+    loaded_language(never, "es")
+    now[0] += 10**6
+    assert never.unload_idle() == [] and "es" in never.models

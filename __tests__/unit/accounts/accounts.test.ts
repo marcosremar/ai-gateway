@@ -412,6 +412,24 @@ describe('metering and quota', () => {
     expect((await stt(gw, k.key, 1)).status).toBe(200);
   });
 
+  it('a transcription stream is admitted against the quota, metered as it streams and counted once at the end', async () => {
+    const gw = await startGateway({ quota: { ...NO_QUOTA, audioSeconds: 40 } });
+    const s = await signup(gw);
+    const k = await newKey(gw, s, 'Stream');
+    expect(gw.accounts.streamMeter(`Bearer ${APP_KEY}`), 'not an activation key').toBeNull();
+    expect(gw.accounts.streamMeter('Bearer ucast_live_unknown'), 'unknown key: the proxy answers').toBeNull();
+    const meter = gw.accounts.streamMeter(`Bearer ${k.key}`)!;
+    expect(meter).not.toHaveProperty('denial');
+    const m = meter as { add(s: number): unknown; end(): void };
+    expect(m.add(15)).toBeNull();
+    expect(m.add(30)).toMatchObject({ status: 402, code: 'quota_exceeded', type: 'quota_exceeded' });
+    m.end();
+    m.end();
+    const u = await call(gw, 'GET', '/v1/account/usage?days=1', { headers: { Cookie: s.cookie } });
+    expect(u.json.days.at(-1)).toMatchObject({ requests: 1, sttRequests: 1, audioSeconds: 45 });
+    expect(gw.accounts.streamMeter(`Bearer ${k.key}`)).toMatchObject({ denial: { status: 402, code: 'quota_exceeded' } });
+  });
+
   it('over the daily request cap → 429 with Retry-After', async () => {
     const gw = await startGateway({ quota: { ...NO_QUOTA, requestsPerDay: 2 } });
     const k = await newKey(gw, await signup(gw));

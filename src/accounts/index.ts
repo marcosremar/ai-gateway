@@ -8,7 +8,8 @@
 //   - `init()` / `stop()`   load and flush the state (accounts.json, account-usage.json on the volume);
 //   - `resolveAppKey`       the extra entry of the gateway key registry;
 //   - `mount(server)`       the account API, the pages and the quota gate, in front of the proxy's listeners;
-//   - `recordInference`     the proxy's `onInference` hook (usage of each STT/LLM/TTS request).
+//   - `recordInference`     the proxy's `onInference` hook (usage of each STT/LLM/TTS request);
+//   - `streamMeter`         admission and metering of a streaming STT session (a WebSocket, not a request).
 
 import type { IncomingMessage, Server, ServerResponse } from 'http';
 import { accountsConfigFromEnv, type AccountsConfig } from './config';
@@ -78,6 +79,8 @@ export function createAccounts(opts: CreateAccountsOptions = {}) {
     mount,
     handle: http.handle,
     recordInference: http.recordInference,
+    /** Metering of a streaming STT session of an activation key (`GET /v1/audio/transcriptions/stream`). */
+    streamMeter: http.streamMeter,
     async stop(): Promise<void> {
       await service.stop();
       await usage.flush();

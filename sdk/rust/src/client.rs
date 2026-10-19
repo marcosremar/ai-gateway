@@ -51,6 +51,9 @@ pub(crate) struct Inner {
     pub api_key: Option<String>,
     pub app: Option<String>,
     pub http: reqwest::Client,
+    /// HTTP/1.1-only client of the WebSocket upgrades (`transcribe_stream`): an HTTP/2 connection cannot be upgraded.
+    /// `None` with a custom [`GatewayClientBuilder::http_client`], which then serves the upgrades too.
+    pub ws_http: Option<reqwest::Client>,
     pub timeouts: Timeouts,
     pub retry: RetryPolicy,
     pub breaker: Option<Arc<GatewayBreaker>>,
@@ -206,24 +209,32 @@ impl GatewayClientBuilder {
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(GatewayError::Config(format!("GatewayClient: base_url must be http(s), got {base_url:?}")));
         }
+        let custom = self.http.is_some();
+        let user_agent = self.user_agent.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string());
+        let connect_timeout = self.connect_timeout;
+        let build = |http1_only: bool| {
+            let mut b = reqwest::Client::builder().user_agent(user_agent.clone());
+            if let Some(t) = connect_timeout {
+                b = b.connect_timeout(t);
+            }
+            if http1_only {
+                b = b.http1_only();
+            }
+            b.build()
+                .map_err(|e| GatewayError::Config(format!("GatewayClient: http client: {e}")))
+        };
         let http = match self.http {
             Some(c) => c,
-            None => {
-                let mut b = reqwest::Client::builder()
-                    .user_agent(self.user_agent.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()));
-                if let Some(t) = self.connect_timeout {
-                    b = b.connect_timeout(t);
-                }
-                b.build()
-                    .map_err(|e| GatewayError::Config(format!("GatewayClient: http client: {e}")))?
-            }
+            None => build(false)?,
         };
+        let ws_http = if custom { None } else { Some(build(true)?) };
         Ok(GatewayClient {
             inner: Arc::new(Inner {
                 base_url,
                 api_key: self.api_key,
                 app: self.app,
                 http,
+                ws_http,
                 timeouts: self.timeouts,
                 retry: self.retry,
                 breaker: self.breaker.map(|c| Arc::new(GatewayBreaker::new(c))),
@@ -284,6 +295,7 @@ impl GatewayClient {
             api_key: i.api_key.clone(),
             app: i.app.clone(),
             http: i.http.clone(),
+            ws_http: i.ws_http.clone(),
             timeouts: i.timeouts,
             retry: i.retry.clone(),
             breaker: i.breaker.clone(),
