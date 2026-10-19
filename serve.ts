@@ -18,6 +18,7 @@ import { POCKET_PROVIDER, ownSpeechProviders } from './src/gateway/providers/clo
 import { openaiSTT } from './src/gateway/providers/cloud/openai';
 import { fireworksSTT } from './src/gateway/providers/cloud/fireworks';
 import { deepgramSTT } from './src/gateway/providers/cloud/deepgram';
+import { mistralSTT } from './src/gateway/providers/cloud/mistral';
 import { zaiLLM, ZAI_LLM_MODELS } from './src/gateway/providers/cloud/zai';
 import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } from './src/deployments/inference-providers';
 import {
@@ -316,7 +317,7 @@ function mountProviders() {
   const built = buildServeProviders({
     instances: {
       chat: { groq: groqLLM, openrouter: openrouterLLM, zai: zaiLLM },
-      stt: { groq: groqSTT, openrouter: openrouterSTT, openai: openaiSTT, fireworks: fireworksSTT, deepgram: deepgramSTT },
+      stt: { groq: groqSTT, openrouter: openrouterSTT, openai: openaiSTT, fireworks: fireworksSTT, deepgram: deepgramSTT, mistral: mistralSTT },
       // `kokoro-stream` / `pocket`: the speech server the rooms use (docker/kokoro-stream), as a link of the app chains;
       // mounted only with KOKORO_STREAM_API_KEY / POCKET_TTS_API_KEY (route-tts.ts).
       tts: { groq: groqTTS, openrouter: openrouterTTS, ...ownSpeech },

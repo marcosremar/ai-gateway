@@ -29,7 +29,7 @@ Use the vocabulary from `domain-model.md` in all code and prompts. Respect the b
 ### 1. Core AI Pipeline (STT → LLM → TTS)
 
 - **Speech-to-Speech Translation** — `POST /v1/speech`: audio in, JSON with transcription + translation + audio out
-- **STT** (Speech-to-Text): Whisper via Groq, OpenAI, Deepgram, Fireworks, Ollama. Supports rolling prior-segment context, LLM-expanded domain prompts, glossary term injection, word timestamps
+- **STT** (Speech-to-Text): Whisper via Groq, OpenAI, Deepgram, Fireworks, Ollama; Voxtral via Mistral on its EU endpoint (`mistral`, `MISTRAL_API_KEY`), the EU cloud fallback of an app whose audio stays in the EU. Supports rolling prior-segment context, LLM-expanded domain prompts, glossary term injection, word timestamps
 - **LLM** (Translation): Chat completion via Groq, Fireworks, OpenRouter, Ollama. Translation cache (LRU) for repeated phrases, adaptive max tokens
 - **TTS** (Text-to-Speech): Audio synthesis via Groq, OpenAI, Modal (MOSS-TTS), Canopy Labs Orpheus, Kokoro. Voice clone support with reference audio + text conditioning
 - **Hybrid Routing**: GPU vs cloud per-stage with request racing (GPU + cloud fire in parallel, fastest wins)
