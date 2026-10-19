@@ -15,7 +15,7 @@ import {
   BAD_HOST_MS, EUR_TO_USD, KNOWN_RTT_MAX_HOSTS, KNOWN_RTT_MS, LIST_CACHE_MS, LIST_STALE_MAX_MS, lowestRtt, MEASURED_RTT_MS, MIN_RELIABILITY,
   UDP_BLOCKED_HOST_MS, VastDeploymentBackend, vastState,
 } from '../../../src/deployments/vast-backend';
-import { FileHostStore, type HostRecord, type HostStore } from '../../../src/deployments/host-reputation';
+import { FileHostStore, IMAGES_PER_HOST, withImageBoot, type HostRecord, type HostStore } from '../../../src/deployments/host-reputation';
 import type { DeploymentSpec } from '../../../src/deployments/types';
 import { until } from './_fake-cloud';
 
@@ -476,7 +476,9 @@ describe('VastDeploymentBackend host reputation', () => {
     });
     expect(report.skipped).toEqual([]);
     expect(report.hosts.find(h => h.host === 107)).toMatchObject({ bootsFailed: 1, rttMs: 136, baselineMs: 71, lastError: 'too-far', lastErrorAt: 1_000_000 });
-    expect((await after.backend.createReplica(after.input)).placementNote).toBe('offer 1 of 3: London, GB, $0.49/h, passed the RTT gate at 53 ms');
+    expect(report.offers[0].host!.images).toEqual({ 'vllm/vllm-omni:v0.28.0': 392_562 });
+    expect((await after.backend.createReplica(after.input)).placementNote)
+      .toBe('offer 1 of 3: London, GB, $0.49/h, passed the RTT gate at 53 ms, booted this image here before in 7 min');
     after.clock.now += MEASURED_RTT_MS + 1;
     expect((await after.backend.previewOffers(after.input.spec)).map(o => [o.location, o.knownRttMs]))
       .toEqual([['Lyon, FR', null], ['Paris, FR', null], ['London, GB', null], ['Zurich, CH', null]]);
@@ -498,6 +500,44 @@ describe('VastDeploymentBackend host reputation', () => {
     backend.noteHost(paris, { bootMs: 400_000 });
     expect((await backend.previewOffers(input.spec)).map(o => [o.location, o.host?.bootsOk ?? 0]))
       .toEqual([['Paris, FR', 1], ['Lyon, FR', 0], ['Zurich, CH', 0], ['London, GB', 0]]);
+  });
+
+  it('a host that booted THIS image goes before one that booted another image, the faster boot first; still after the users\' country', async () => {
+    let only: number | null = null;
+    const { fetchImpl } = fakeVast(({ method, url }) => {
+      if (method === 'POST') return { body: { offers: only === null ? market : market.filter(o => o.machine_id === only) } };
+      if (method === 'PUT') return { body: { success: true, new_contract: Number(url.match(/asks\/(\d+)/)![1]) * 100 } };
+      return { body: { success: true } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl, now: () => 1_000_000 });
+    const vllm = vastSpec();
+    const stack = vastSpec({ image: 'ghcr.io/marcosremar/speech-stack:20261011-0200' });
+    const bootOn = async (host: number, spec: DeploymentSpec, minutes: number) => {
+      only = host;
+      const m = await backend.createReplica({ spec, replicaToken: TOKEN, cloudInit: '', namespace: 'prod' });
+      backend.noteHost(m, { bootMs: minutes * 60_000 });
+      await backend.releaseReplica(m, 'scale-down');
+      only = null;
+    };
+    await bootOn(107, vllm, 14); // Lyon, the cheaper French host: the vllm image in 14 min
+    await bootOn(102, vllm, 4); // Paris: the vllm image in 4 min (its layers were still on the host)
+    await bootOn(102, stack, 9); // Paris: the speech-stack image in 9 min
+    const order = async (spec: DeploymentSpec) => (await backend.previewOffers(spec)).map(o => o.location);
+    // Until 19/10/2026 both French hosts were only "proven" and the cheaper Lyon came first for every image.
+    expect(await order(vllm)).toEqual(['Paris, FR', 'Lyon, FR', 'Zurich, CH', 'London, GB']);
+    expect(await order(stack)).toEqual(['Paris, FR', 'Lyon, FR', 'Zurich, CH', 'London, GB']);
+    expect(await order(vastSpec({ image: 'ubuntu:24.04' }))).toEqual(['Lyon, FR', 'Paris, FR', 'Zurich, CH', 'London, GB']);
+    const paris = (await backend.offersReport(stack)).offers[0].host!;
+    expect(paris.images).toEqual({ 'vllm/vllm-omni:v0.28.0': 4 * 60_000, 'ghcr.io/marcosremar/speech-stack:20261011-0200': 9 * 60_000 });
+    expect(paris.bootsOk).toBe(2);
+  });
+
+  it('a host keeps the boots of its last 5 images, the image booted again moving to the end', () => {
+    let images: Record<string, number> | undefined;
+    for (let i = 1; i <= 6; i++) images = withImageBoot(images, `img:${i}`, i);
+    expect(Object.keys(images!)).toEqual(['img:2', 'img:3', 'img:4', 'img:5', 'img:6']);
+    expect(withImageBoot(images, 'img:3', 30)).toEqual({ 'img:2': 2, 'img:4': 4, 'img:5': 5, 'img:6': 6, 'img:3': 30 });
+    expect(IMAGES_PER_HOST).toBe(5);
   });
 
   it('a host whose inbound UDP was blocked is skipped only for a spec that requires WebRTC, and only for a day', async () => {
@@ -748,7 +788,21 @@ describe('euOnly: student audio does not leave the EU (owner, 05/10/2026 and 14/
     expect((await backend.pickOffers(vastSpec({ euOnly: true }))).map(o => o.geolocation)).toEqual(['Paris, FR', 'Warsaw, PL']);
     expect(calls[0].body!.limit).toBe(1000);
     expect((await backend.pickOffers(vastSpec())).map(o => o.geolocation)).toEqual(['Paris, FR', 'London, GB', 'Zurich, CH', 'Oslo, NO', 'Warsaw, PL']);
-    expect(backend.searchBody(vastSpec(), 0.97).limit).toBe(100);
+    expect(backend.searchBody(vastSpec(), 0.97).limit).toBe(1000);
     expect(() => vastSpec({ euOnly: 'yes' })).toThrow('euOnly must be a boolean');
+  });
+});
+
+describe('the offer search is not cut before the near hosts are seen', () => {
+  it('a near host priced above the 100 cheapest far ones is still found (the API sorts worldwide by price, then cuts)', async () => {
+    const far = Array.from({ length: 150 }, (_, i) => ({ id: i + 1, machine_id: 1000 + i, geolocation: 'Dallas, US', dph_total: 0.1 + i / 10_000, reliability2: 0.99, inet_down: 900 }));
+    const paris = { id: 999, machine_id: 9999, geolocation: 'Paris, FR', dph_total: 0.29, reliability2: 0.99, inet_down: 900 };
+    const { calls, fetchImpl } = fakeVast(({ body }) => {
+      const sorted = [...far, paris].sort((a, b) => a.dph_total - b.dph_total);
+      return { body: { offers: sorted.slice(0, Number(body?.limit ?? 100)) } };
+    });
+    const backend = new VastDeploymentBackend('k', { fetch: fetchImpl });
+    expect((await backend.pickOffers(vastSpec())).map(o => o.geolocation)).toEqual(['Paris, FR']);
+    expect(calls[0].body!.limit).toBe(1000);
   });
 });

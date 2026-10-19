@@ -451,9 +451,12 @@ describe('deployments API', () => {
   });
 
   it("idleAction 'stop': idle powers the replica off (kept, not deleted) and the next demand powers it back on", async () => {
+    const boots: number[] = [];
+    h.cloud.noteHost = (_m, note) => { if (note.bootMs !== undefined) boots.push(note.bootMs); };
     await call(h, 'PUT', '/v1/deployments/park', { profile: 'cpu-echo', idleMinutes: 1, idleAction: 'stop' });
     await call(h, 'POST', '/v1/deployments/park/wake');
     await until(() => h.controller.get('park')!.status === 'ready');
+    expect(boots).toHaveLength(1); // the fresh boot is remembered for the host
     const internals = h.controller as unknown as {
       deployments: Map<string, { record: { lastRequestAt: number } }>; probes: Map<string, { readyAt?: number }>;
     };
@@ -467,6 +470,8 @@ describe('deployments API', () => {
     await until(() => h.controller.get('park')!.status === 'ready', 3000);
     expect(h.cloud.starts).toHaveLength(1);
     expect(h.cloud.created).toHaveLength(1);
+    // The power-on is no fresh boot: no pull, and `createdAt` is the first rent (its "boot" would read the whole park).
+    expect(boots).toHaveLength(1);
 
     // POST /park: the caller is done now (its traffic bypassed the gateway) → powered off at once, no idle wait.
     expect((await call(h, 'POST', '/v1/deployments/park/park')).status).toBe(202);

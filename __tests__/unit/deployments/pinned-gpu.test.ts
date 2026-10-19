@@ -47,7 +47,7 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
     expect((await x.reconciler.reconcile())[0].state).toBe('applied');
     const spec = x.controller.specOf(NAME)!;
     expect(spec).toMatchObject({
-      provider: 'vast', machineType: 'RTX 3090', minReplicas: 1, maxReplicas: 1, idleMinutes: 60, idleAction: 'delete',
+      provider: 'vast', machineType: 'RTX 3090', minReplicas: 1, maxReplicas: 1, idleMinutes: 60, idleAction: 'stop',
       testFor: 'babelcast-speech', image: 'ghcr.io/marcosremar/speech-stack:20261011-0200',
     });
     expect(spec.maxEurPerHour).toBeLessThanOrEqual(0.3);
@@ -56,7 +56,7 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
     expect(x.controller.get(NAME)!.app).toBe('babelcast');
   });
 
-  it('wakes to one replica by itself, parks after 60 min with no request, and the next request wakes it', async () => {
+  it('wakes to one replica by itself, parks after 60 min with no request (powered off, disk kept), and the next request powers the same host back on', async () => {
     const x = await setup();
     await x.reconciler.reconcile();
     x.controller.start();
@@ -68,17 +68,19 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
 
     x.clock.t += 59 * 60_000;
     await wait(100);
-    expect(x.vast.released).toHaveLength(0);
+    expect(x.vast.stops).toHaveLength(0);
 
     x.clock.t += 2 * 60_000;
-    await until(() => x.vast.released.length === 1);
+    await until(() => x.vast.stops.length === 1);
     expect(x.controller.get(NAME)!.pinned).toEqual({ idleMinutes: 60, parked: true });
     await wait(100);
-    expect(x.vast.created).toHaveLength(1);
+    expect(x.vast.released).toHaveLength(0);
+    expect([...x.vast.machines.values()].map(m => m.machine.state)).toEqual(['stopped']);
 
     const lease = await x.controller.acquire(NAME, { waitMs: 3000 });
     lease.done();
-    expect(x.vast.created).toHaveLength(2);
+    expect(x.vast.created).toHaveLength(1);
+    expect(x.vast.starts).toHaveLength(1);
     expect(x.controller.get(NAME)!.pinned!.parked).toBe(false);
   });
 

@@ -81,9 +81,12 @@ export function expectedPhaseMinutes(phase: ActivePhase, past: BootRecord[]): nu
  * the limit is `SLOW_PULL_FACTOR` × the download the host's `inet_down` promises, at least `SLOW_PULL_FLOOR_MINUTES`,
  * never later than the history rule. Calibration (15/10/2026): Poland, 894 Mbps, pulled the 22.3 GB speech-stack in
  * 10.4 min against 3.3 min promised (3.1×); two Bulgarian hosts sat 15 min in `pulling` and never finished.
+ * The floor is 12 min (was 8): every pull of that image that finished took 8.6–10.4 min whatever the host's
+ * `inet_down` (babelcast-3090, 4 boots to 19/10/2026: 516–539 s), so at 8 a host promising 1.5 min (2000 Mbps) would
+ * be released as stuck a minute before its pull ends, and avoided for an hour.
  */
 export const SLOW_PULL_FACTOR = 4;
-export const SLOW_PULL_FLOOR_MINUTES = 8;
+export const SLOW_PULL_FLOOR_MINUTES = 12;
 
 export function pullLimitMinutes(history: number, expectedPullMinutes: number | undefined): number {
   return expectedPullMinutes ? Math.min(history, Math.max(SLOW_PULL_FLOOR_MINUTES, Math.ceil(SLOW_PULL_FACTOR * expectedPullMinutes))) : history;

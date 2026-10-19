@@ -254,6 +254,12 @@ student audio to it.
   `DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES`, default 60) takes it to zero after 60 min with no request (a dev key with
   `countsAsUse: false` does not count) and no spec change; the next request, `wake` or a PATCH brings it back.
   `idleMinutes: 60` is what applies once it is unpinned. The view carries `pinned: { idleMinutes, parked }`.
+- **Parked, not deleted** (`idleAction: "stop"`, 19/10/2026, like `babelcast-tts-clone`): going to zero stops the Vast
+  instance with its 80 GB disk (billed while parked, the GPU free for other renters); the next request starts the same
+  host with the image and the models on disk, skipping the ~9-min pull of a ~15-min fresh boot (measured to 19/10:
+  placing 1–2 s, provisioning 26–39 s, pulling 516–539 s, starting 263–440 s). What remains is the container's own
+  start (`starting`: nginx, then vLLM-Omni, llama.cpp and Whisper one after the other). A host Vast cannot give back
+  (GPU rented meanwhile) is replaced by a fresh rent; a park unused for 72 h is deleted (`DEPLOYMENTS_PARKED_MAX_HOURS`).
 - **No respawn loop.** No offer under the cap (`out_of_stock`) → the create back-off (1, 2, 5, then 10 min) and the
   `deployment.out_of_stock` alert; no credit (`insufficient_credit`) → one try per 10 min and
   `provider.credit_exhausted`. The € ceilings (`DEPLOYMENTS_MAX_EUR_PER_HOUR`, `scaling.budget` €140/month, a key's
@@ -777,13 +783,16 @@ is above the floor again.
   `reliability2 ≥ 0.97` (0.95 only when nothing passes), `inet_down ≥ 500`, `direct_port_count ≥ 1` (with `realtime`:
   its UDP ports + 2),
   `dph_total ≤ maxEurPerHour × 1.05` (`EUR_TO_USD`, deliberately below the market rate so the USD cap is never looser
-  than the EUR one). Cap and floors are re-checked client side.
+  than the EUR one), sorted by price, `limit` 1000 (`VAST_SEARCH_LIMIT`; until 19/10/2026 100 unless `euOnly`: the API
+  cuts the worldwide price order before the ranking drops the far hosts, so 100 cheaper US/Asian offers could hide
+  every European one). Cap and floors are re-checked client side.
 - **Ranking** (`rankOffers`): first the hosts that already passed the RTT gate in the last 24 h (the backend remembers
   up to 200 by `machine_id`, on disk; lowest RTT over the anchor first, in 5-ms bands), then the distance band of the
   host's country (from `geolocation`, the country after the last comma) from `near`; hosts beyond 2500 km only when no
   nearer one exists and the spec has `allowFar`. From France, DE/CH/BE/NL (band 0) beat SK/PL (band 2) and RO (band 3)
   even when those are cheaper. Inside a band: a host in the `near` country itself before one across a border (a French
-  host before a cheaper British, Swiss or Dutch one), then a host that booted our image before, then, with `imageGb`
+  host before a cheaper British, Swiss or Dutch one), then a host that booted **this** image before (by its measured
+  boot, in 2-min bands: its Docker may still hold the layers), then one that booted another of our images, then, with `imageGb`
   (the compressed image, what a host downloads; `parle-speech`: 22.3 GB), the estimated boot in 2-min bands
   (`bootMinutes`: `imageGb ÷ min(inet_down, 2000 Mbps)` plus `30 min × (1 − reliability2)`), then effective price
   `dph_total × (1 + 4 × (1 − reliability2))`
@@ -868,7 +877,8 @@ after two `too-far` releases). Up to 200 hosts, the least recently used dropped 
 |---|---|
 | `location`, `lastUsedAt` | an offer of the host is rented |
 | `rttMs`, `baselineMs`, `rttAt` | the RTT gate passed (`rttAt` set; a pass also clears `lastError` and `avoidUntil`), or released it as too far (`rttAt` untouched: the numbers are kept for the operator, the host is not "known good") |
-| `bootsOk`, `bootMs` | its replica answered ready for the first time (create → ready, ms); clears `lastError` |
+| `bootsOk`, `bootMs` | its replica answered ready for the first time (create → ready, ms); clears `lastError`. A parked replica powered back on is not a boot (no pull; `createdAt` is its first rent) |
+| `images` | same moment: image reference → that boot's ms, the last 5 images (`IMAGES_PER_HOST`) |
 | `udp`, `udpAt` | the gateway's UDP probe of its replica answered `ok` or `blocked` (§ realtime-edge.md, Reachability) |
 | `bootsFailed`, `lastError`, `lastErrorAt`, `avoidUntil` | its replica was released as `too-far` (not avoided by time: its kept RTT decides, § RTT gate), `boot-timeout` (1 h) or `udp-blocked` (see below) |
 
@@ -879,8 +889,11 @@ How the selection uses it (`rankedOffers` in `vast-backend.ts`, `rankOffers` in 
   than 24 h ago (`UDP_BLOCKED_HOST_MS`); a deployment that can use the WebSocket rung still rents it.
 - **First**: hosts that passed the RTT gate in the last 24 h, by **RTT over the anchor** (`rttMs − baselineMs`, in 5-ms
   bands; the raw RTT when no baseline was measured) — not by price.
-- Then, as before, the distance band and the users' own country; inside those, a host that **booted our image
-  before** (`bootsOk` > 0, no later failure) goes before an unknown one, then the effective price.
+- Then, as before, the distance band and the users' own country; inside those, a host that **booted this image
+  before** (`images[spec.image]`, no later failure; the fastest measured boot first, in 2-min bands), then one that
+  booted another of our images (`bootsOk` > 0), then an unknown one, then the effective price. `placementNote` says
+  `booted this image here before in N min`. `inet_down` alone did not predict the pull of the 22.3 GB speech-stack
+  (894 Mbps: 10.4 min; babelcast-3090's hosts: 8.6–9.0 min each time), a host's own past boot does.
 - The gate itself is unchanged (`maxRttExcessMs`, `maxRttMs`): reputation only decides which offer is tried first.
 
 A host never measured is still ranked by distance, country and price, and the gate decides after the rental (the
@@ -1087,8 +1100,9 @@ The Scaleway Instance API has no console output, so the boot script itself pushe
   receiving bytes is not stuck by its phase time (only by the boot timeout); a reported failure makes the boot stuck at
   once (release `boot-failed`, the stuck-retry rules). A Vast pull reports nothing (the image is the container), so
   with `imageGb` its limit comes from the rented host's measured `inet_down`: 4× the download it promises, at least
-  8 min, never later than the history rule (`pullLimitMinutes`; Poland, 894 Mbps, pulled 22.3 GB in 10.4 min against
-  3.3 promised). Retries per stuck episode: 4 (`STUCK_RETRY_MAX`). The GPU page shows «puxando a imagem 12,3/21 GB · camadas 7/23»
+  12 min, never later than the history rule (`pullLimitMinutes`; Poland, 894 Mbps, pulled 22.3 GB in 10.4 min against
+  3.3 promised; the floor was 8 min until 19/10/2026, under the 8.6–9.0 min every babelcast-3090 pull of the same image
+  took, so a 2000 Mbps host promising 1.5 min would have been released a minute before its pull ended). Retries per stuck episode: 4 (`STUCK_RETRY_MAX`). The GPU page shows «puxando a imagem 12,3/21 GB · camadas 7/23»
   (the total is the previous ready boot's pulled bytes) and the lines prefixed `replica:`.
 - Off: `BOOT_REPORTING=0` on the gateway (default on, with a public URL). New replicas then get exactly the previous
   script, and the route answers `401`.
