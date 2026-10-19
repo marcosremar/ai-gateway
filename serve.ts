@@ -14,6 +14,7 @@ import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/providers/cloud/openrouter';
 import { kokoroStreamTTS } from './src/gateway/providers/cloud/kokoro-stream';
+import { ownSpeechProviders } from './src/gateway/providers/cloud/kokoro-stream/route-tts';
 import { openaiSTT } from './src/gateway/providers/cloud/openai';
 import { fireworksSTT } from './src/gateway/providers/cloud/fireworks';
 import { deepgramSTT } from './src/gateway/providers/cloud/deepgram';
@@ -309,12 +310,15 @@ if (declared) {
 const bootRegistryWarning = deployments?.registryWarning() ?? null;
 if (bootRegistryWarning) log.error({}, `ERROR: ${bootRegistryWarning}`);
 
+const ownSpeech = ownSpeechProviders(process.env);
 function mountProviders() {
   const built = buildServeProviders({
     instances: {
       chat: { groq: groqLLM, openrouter: openrouterLLM, zai: zaiLLM },
       stt: { groq: groqSTT, openrouter: openrouterSTT, openai: openaiSTT, fireworks: fireworksSTT, deepgram: deepgramSTT },
-      tts: { groq: groqTTS, openrouter: openrouterTTS },
+      // `kokoro-stream` / `pocket`: the speech server the rooms use (docker/kokoro-stream), as a link of the app chains;
+      // mounted only with KOKORO_STREAM_API_KEY / POCKET_TTS_API_KEY (route-tts.ts).
+      tts: { groq: groqTTS, openrouter: openrouterTTS, ...ownSpeech },
     },
     env: process.env,
     openrouter: openrouterKey,

@@ -28,6 +28,7 @@ import { withCloudFallback } from './cloud-fallback';
 import {
   isLinkKeyEnv, localLinkId, localLinkProvider, localLinkRefusal, OPENAI_COMPATIBLE, parseLinkBaseUrl,
 } from '../gateway/providers/cloud/openai-compat/local-link';
+import { isOwnSpeechProvider, OWN_TTS_HEDGE_MS, OWN_TTS_TIMEOUT_MS } from '../gateway/providers/cloud/kokoro-stream/ids';
 
 type Stage = 'chat' | 'stt' | 'tts';
 type StageProvider<S extends Stage> = S extends 'chat' ? LLMProvider : S extends 'stt' ? STTProvider : TTSProvider;
@@ -328,6 +329,14 @@ export function buildServeProviders(opts: BuildServeProvidersOptions): ServeProv
       return {
         ...extras(e), providerId: e.provider, model, unavailableNow: () => guard.reason(),
         provider: guard.wrapTTS(provider as TTSProvider) as StageProvider<S>,
+      };
+    }
+    // The gateway's own speech server (route-tts.ts): a short time to first audio and a hedge, so a stuck server
+    // leaves most of the TTS budget to the cloud link behind it.
+    if (stage === 'tts' && isOwnSpeechProvider(e.provider)) {
+      return {
+        ...extras(e), providerId: e.provider, provider, model,
+        timeoutMs: positiveMs(env.OWN_TTS_TIMEOUT_MS) || OWN_TTS_TIMEOUT_MS, hedgeAfterMs: positiveMs(env.OWN_TTS_HEDGE_MS) ?? OWN_TTS_HEDGE_MS,
       };
     }
     return { ...extras(e), providerId: e.provider, provider, model };

@@ -156,3 +156,112 @@ def test_providers_are_a_comma_separated_list_and_cpu_by_default():
 def test_espeak_phonemizes_every_language():
     for voice, text in server.WARM_UP.items():
         assert any(mark in server.phonemize(text, voice) for mark in server.STRESS), voice
+
+
+class FakePocketModel:
+    sample_rate = 24_000
+
+    def __init__(self, lang: str):
+        self.lang = lang
+        self.spoken: list[tuple[str, str]] = []
+
+    def get_state_for_audio_prompt(self, voice: str) -> dict:
+        return {"voice": voice}
+
+    def generate_audio_stream(self, state: dict, text: str, stop=None):
+        self.spoken.append((state["voice"], text))
+        yield np.full(2400, 0.5, dtype=np.float32)
+        yield np.zeros(1200, dtype=np.float32)
+
+
+@pytest.fixture
+def pocket(monkeypatch):
+    models: dict[str, FakePocketModel] = {}
+
+    def loader(lang: str) -> FakePocketModel:
+        models[lang] = FakePocketModel(lang)
+        return models[lang]
+
+    engine = server.pocket_engine.Pocket(enabled=True, loader=loader, wait_s=0.05)
+    monkeypatch.setattr(server, "pocket", engine)
+    return engine, models
+
+
+def speak_pocket(body: dict):
+    return asyncio.run(server.speech(Request({"model": "pocket", **body})))
+
+
+def loaded_language(engine, lang: str) -> None:
+    engine.model(lang)
+    for _ in range(200):
+        if engine.status.get(lang) == "loaded":
+            return
+        threading.Event().wait(0.01)
+    raise AssertionError(engine.health())
+
+
+async def collect(response) -> bytes:
+    return b"".join([chunk async for chunk in response.body_iterator])
+
+
+def test_pocket_is_refused_while_off_and_kokoro_keeps_its_requests(monkeypatch):
+    monkeypatch.setattr(server, "pocket", server.pocket_engine.Pocket(enabled=False, loader=lambda lang: None))
+    response = speak_pocket({"input": "Olá.", "voice": "rafael", "language": "pt"})
+    assert response.status_code == 400 and json.loads(response.body)["error"]["code"] == "invalid_model"
+
+
+def test_a_pocket_language_loads_in_the_background_and_its_first_request_is_told_so(pocket):
+    engine, models = pocket
+    response = speak_pocket({"input": "Olá.", "voice": "rafael", "language": "Portuguese"})
+    assert response.status_code == 503 and json.loads(response.body)["error"]["code"] == "loading"
+    loaded_language(engine, "pt")
+    assert models["pt"].spoken == [("estelle", "Olá.")], "warmed up with the language's default voice"
+    response = speak_pocket({"input": "Bom *dia*,[pause:300] tudo bem?", "voice": "rafael", "language": "pt-BR", "response_format": "wav"})
+    assert response.status_code == 200 and response.media_type == "audio/wav;rate=24000"
+    audio = asyncio.run(collect(response))
+    assert audio[:4] == b"RIFF" and len(audio) == 44 + 2 * 3600
+    assert models["pt"].spoken[-1] == ("rafael", "Bom dia, tudo bem?")
+    assert engine.locks["pt"].acquire(blocking=False), "the language is free again after the sentence"
+
+
+def test_pocket_without_a_language_speaks_the_voice_language(pocket):
+    engine, models = pocket
+    loaded_language(engine, "es")
+    response = speak_pocket({"input": "Hola.", "voice": "lola"})
+    assert response.status_code == 200 and response.media_type == "audio/pcm;rate=24000"
+    assert len(asyncio.run(collect(response))) == 2 * 3600
+
+
+def test_a_bad_pocket_request_is_refused_before_any_audio(pocket):
+    for body, code in [
+        ({"input": "Olá.", "voice": "Ryan", "language": "pt"}, "invalid_voice"),
+        ({"input": "Olá.", "voice": "rafael", "language": "Klingon"}, "invalid_language"),
+        ({"input": "Olá.", "voice": "rafael", "language": "ja"}, "invalid_language"),
+        ({"input": " ", "voice": "rafael"}, "invalid_input"),
+        ({"input": "Olá.", "voice": "rafael", "response_format": "mp3"}, "invalid_response_format"),
+        ({"input": "Olá.", "voice": "rafael", "speed": 9}, "invalid_speed"),
+    ]:
+        response = speak_pocket(body)
+        assert response.status_code == 400 and json.loads(response.body)["error"]["code"] == code, body
+
+
+def test_one_sentence_at_a_time_per_language(pocket):
+    engine, _ = pocket
+    loaded_language(engine, "fr")
+    assert engine.acquire("fr")
+    response = speak_pocket({"input": "Bonjour.", "voice": "estelle", "language": "fr"})
+    assert response.status_code == 503 and json.loads(response.body)["error"]["code"] == "busy"
+    engine.release("fr")
+
+
+def test_health_reports_pocket_only_when_it_is_on(loaded, pocket):
+    engine, _ = pocket
+    loaded_language(engine, "en")
+    assert server.health()["pocket"]["languages"]["en"] == "loaded"
+    assert server.health()["pocket"]["languages"]["de"] == "not_loaded"
+
+
+def test_pocket_language_names_and_codes():
+    assert [server.pocket_engine.language_code(v) for v in ["Portuguese", "pt-BR", "pt_br", "FR", "dutch"]] == ["pt", "pt", "pt", "fr", "nl"]
+    assert [server.pocket_engine.language_code(v) for v in [None, "", "ja", "Japanese", 3]] == [None, None, None, None, None]
+    assert server.pocket_engine.codes("pt, fr ,xx,") == ["pt", "fr"]
