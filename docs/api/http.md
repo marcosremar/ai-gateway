@@ -682,6 +682,14 @@ A filtered (empty) answer is never cached. `GET /health?details=1` (admin key) c
 `withMetadata`, `byReason`, `filteredRate`); filtered answers log reasons and lengths only, never the text.
 Entry points, what each filters and how: [docs/stt-hallucination-filter.md](../stt-hallucination-filter.md).
 
+### `GET /v1/audio/transcriptions/stream` (WebSocket)
+
+Streaming STT of an app's STT alias on its own GPU deployment (Whisper large-v3 on the speech-stack, the vocabulary
+prompt on every decode): PCM16 16 kHz frames up, `partial` (with its `stable` prefix) and `final` events down, one
+utterance at a time. Same admission as the batch route; when the GPU cannot stream the upgrade is refused before the
+handshake (`503 gpu_not_ready`, `404 no_streaming_backend`…) and the client stays on the batch route. Contract:
+[stt-stream.md](stt-stream.md).
+
 ### `POST /v1/chat/completions`
 
 ```bash

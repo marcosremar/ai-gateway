@@ -384,5 +384,45 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     usage.record(found.user.id, found.key.id, delta);
   }
 
-  return { handle, recordInference, cookieName };
+  /**
+   * A streaming STT session (`GET /v1/audio/transcriptions/stream`) of an activation key: admitted like a metered request
+   * (the `audioSeconds` monthly quota and the daily request cap), its audio added to the account as it streams (`add`
+   * says when the monthly quota is now over: the stream ends), and counted as one request and one STT request when it
+   * ends. `null` = not an activation key, or an unknown one (the proxy's own key check answers).
+   */
+  function streamMeter(authorization: string | undefined): { denial: StreamDenial } | {
+    add(audioSeconds: number): StreamDenial | null; end(): void;
+  } | null {
+    const bearer = bearerToken(authorization);
+    if (!bearer.startsWith(KEY_PREFIX)) return null;
+    const found = service.keyOf(bearer);
+    if (!found) return null;
+    const refused = service.checkQuota(found.user, ['audioSeconds']);
+    if (refused) return { denial: denialOf(refused) };
+    let ended = false;
+    return {
+      add(audioSeconds: number): StreamDenial | null {
+        if (audioSeconds > 0) usage.record(found.user.id, found.key.id, { audioSeconds });
+        const over = service.checkQuota(found.user, ['audioSeconds'], 0);
+        return over ? denialOf(over) : null;
+      },
+      end(): void {
+        if (ended) return;
+        ended = true;
+        usage.record(found.user.id, found.key.id, { requests: 1, sttRequests: 1 });
+      },
+    };
+  }
+
+  return { handle, recordInference, cookieName, streamMeter };
+}
+
+/** A refusal of a streaming session, in the shape the stream route answers before its handshake. */
+export interface StreamDenial { status: number; message: string; type: string; code: string; retryAfterSeconds?: number }
+
+function denialOf(err: AccountError): StreamDenial {
+  const { retryAfterSeconds } = err.extra as { retryAfterSeconds?: number };
+  const type = err.status === 402 ? 'quota_exceeded' : err.status === 429 ? 'rate_limit_error' : err.status === 401 ? 'authentication_error'
+    : err.status === 403 ? 'permission_error' : err.status >= 500 ? 'server_error' : 'invalid_request_error';
+  return { status: err.status, message: err.message, type, code: err.code, ...(retryAfterSeconds ? { retryAfterSeconds } : {}) };
 }

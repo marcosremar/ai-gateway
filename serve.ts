@@ -65,6 +65,7 @@ import {
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
+import { createTranscriptionStream, STT_STREAM_PATH } from './src/gateway/proxy/routes/transcription-stream';
 import { createRooms, openRouterTranslate } from './src/rooms';
 import { KOKORO_MODEL, deploymentClone, kokoroTts } from './src/tts';
 import { appTelemetryFromEnv } from './src/app-telemetry';
@@ -606,6 +607,41 @@ const deviceGate = deployments && ((userId: string, headers: import('http').Inco
   const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
   return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
 });
+
+// GET /v1/audio/transcriptions/stream (WebSocket, docs/api/stt-stream.md): streaming STT of an app's STT alias on its
+// own GPU deployment (speech-stack /ws/audio-stream), with the batch route's admission: app aliases and daily budget,
+// device gate, activation-key quota (metered while it streams). A GPU that is not ready refuses before the handshake
+// (503 gpu_not_ready) and the caller falls back to POST /v1/audio/transcriptions.
+const bearerOf = (req: import('http').IncomingMessage) => String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+const sttStream = createTranscriptionStream({
+  controller,
+  deploymentsOf: (model) => (chains.stt?.[model] ?? []).flatMap(l => (l.deployment && !l.notMounted ? [l.deployment] : [])),
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(bearerOf(req))?.userId ?? null : 'localhost'),
+  isAdmin: (userId) => adminUsers.has(userId) || (!keysConfigured() && userId === 'localhost'),
+  ...(appLimits ? {
+    admit: (userId: string, model: string) => appLimits.check(userId, 'stt', { model }),
+    charge: (userId: string, requests: number) => appLimits.chargeRequests(userId, requests),
+  } : {}),
+  ...(deviceGate ? { deviceGate: (userId: string, headers: import('http').IncomingHttpHeaders) => deviceGate(userId, headers, 'stt') } : {}),
+  ...(accounts ? { meter: (req: import('http').IncomingMessage) => accounts.streamMeter(req.headers.authorization) } : {}),
+  // An activation key counts per account (every desktop user resolves as the same app user), any other key per key.
+  callerOf: (req, userId) => {
+    const bearer = bearerOf(req);
+    const account = accounts?.service.keyOf(bearer)?.user.id;
+    return account ? `account:${account}` : access.resolve(bearer)?.keyId ?? userId;
+  },
+  maxStreamsPerCaller: optionalMs(process.env.STT_STREAM_MAX_PER_KEY),
+  maxSessionMs: (optionalMs(process.env.STT_STREAM_MAX_MINUTES) ?? 0) > 0 ? optionalMs(process.env.STT_STREAM_MAX_MINUTES)! * 60_000 : undefined,
+  idleMs: optionalMs(process.env.STT_STREAM_IDLE_MS),
+  acquireWaitMs: optionalMs(process.env.STT_STREAM_ACQUIRE_WAIT_MS),
+  onEnd: (s) => emitGatewayEvent('stt.stream', {
+    level: s.closeCode === 1000 || s.closeCode === 1001 ? 'info' : 'warn',
+    attrs: { app: appOfUser(s.userId), model: s.model, deployment: s.deployment, replica: s.replica, audioSeconds: s.audioSeconds,
+      durationMs: s.durationMs, finals: s.finals, closeCode: s.closeCode, reason: s.reason, from: s.from },
+  }),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+upgradeRoutes.push({ prefix: STT_STREAM_PATH, handler: (req, socket, head) => sttStream.handleUpgrade(req, socket, head) });
 
 const ttsCache = ttsCacheFromEnv(process.env, stateDir);
 await ttsCache?.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'TTS cache: disk tier unreadable, memory only'));

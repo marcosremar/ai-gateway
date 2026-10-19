@@ -10,7 +10,10 @@ FROM ghcr.io/marcosremar/aigw-edge:${EDGE_TAG}@${EDGE_DIGEST} AS edge
 
 FROM vllm/vllm-omni:v0.28.0@sha256:6f8be103eaf0055448cf7578cfd621405fd669079d4361bd58896326b2bf722a
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl libgomp1 espeak-ng && rm -rf /var/lib/apt/lists/*
+# nginx + openssl + curl: the replica front the gateway's boot script writes (src/deployments/cloud-init.ts) — it installs
+# them with apt-get only when missing, which cost every Vast boot an apt update + install before the health loop.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl libgomp1 espeak-ng nginx openssl \
+ && rm -rf /var/lib/apt/lists/* && nginx -v && openssl version
 # llama.cpp is built on CUDA 12.8; this base is CUDA 13: llama-server runs with its own CUDA 12 libs (below)…
 COPY --from=llama /app /opt/llama
 # …and the exact CUDA 12 libs it was built against, NCCL included: without libnccl.so.2 its CUDA backend does not load

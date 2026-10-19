@@ -1,0 +1,43 @@
+name: Rust SDK
+
+# sdk/rust is a standalone crate (its own [workspace] and Cargo.lock) that the babelcast desktop app pins by git rev:
+# build and test it here, before an app bump finds a compile error.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sdk/rust/**'
+      - '.github/workflows/rust-sdk.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/rust/**'
+      - '.github/workflows/rust-sdk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-sdk-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: cargo test (sdk/rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: sdk/rust
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Toolchain (the runner's rustup, stable)
+        run: rustup toolchain install stable --profile minimal && rustup default stable && cargo --version
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Tests (unit, doc and the scripted-server integration tests; tests/live.rs skips without a gateway)
+        run: cargo test --locked

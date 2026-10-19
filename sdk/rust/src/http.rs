@@ -294,8 +294,13 @@ impl GatewayClient {
     }
 
     fn request(&self, spec: &Spec<'_>) -> Result<reqwest::RequestBuilder> {
+        self.request_with(&self.inner.http, spec)
+    }
+
+    /// The request of `spec` (URL, credential, device / request-id headers, body) on `http`.
+    pub(crate) fn request_with(&self, http: &reqwest::Client, spec: &Spec<'_>) -> Result<reqwest::RequestBuilder> {
         let url = format!("{}{}", self.inner.base_url, spec.path);
-        let mut rb = self.inner.http.request(spec.method.clone(), url);
+        let mut rb = http.request(spec.method.clone(), url);
         match &spec.auth {
             Auth::Key => {
                 if let Some(key) = self.inner.api_key.as_deref() {
@@ -381,7 +386,7 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
 }
 
 /// Runs `fut` until `deadline` (`None` when it fired first).
-async fn within<F: std::future::Future>(deadline: Option<Instant>, fut: F) -> Option<F::Output> {
+pub(crate) async fn within<F: std::future::Future>(deadline: Option<Instant>, fut: F) -> Option<F::Output> {
     match deadline {
         Some(d) => tokio::time::timeout_at(d, fut).await.ok(),
         None => Some(fut.await),
@@ -395,7 +400,7 @@ async fn within<F: std::future::Future>(deadline: Option<Instant>, fut: F) -> Op
 /// - connect / timeout errors (refused, DNS, TLS handshake, connect timeout): the gateway could not be reached —
 ///   `Http { unreachable: true }`, retried for idempotent calls and counted by the breaker;
 /// - anything else (connection reset after the request went out, protocol error): `Http { unreachable: false }`.
-fn send_error(path: &str, e: reqwest::Error) -> GatewayError {
+pub(crate) fn send_error(path: &str, e: reqwest::Error) -> GatewayError {
     if e.is_builder() {
         return GatewayError::Config(format!("invalid request for {path}: {}", error_chain(&e)));
     }

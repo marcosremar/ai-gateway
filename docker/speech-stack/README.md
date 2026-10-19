@@ -13,12 +13,33 @@ sent to the TTS at once, so the student hears the first words before the reply i
 `/v1/s2s` config may carry `response_format` (passed to llama.cpp) and `speak_field`: then only that field of the JSON
 answer is voiced, as it streams, and `done.reply_raw` has the whole JSON (`JsonField`, tests in `test_json_field.py`).
 
-`WS /ws/audio-stream?language=pt&chunk_size=1.0` is the real-time STT the gateway's streaming router rides: binary
-Int16 PCM 16 kHz frames in, `{"text": "<full running transcript>"}` out on every decode (`stt_stream.py` — windowed
-decode on the same `SttBatcher`, commits on silence; `test_stt_stream.py`). A `{"type":"flush"}` text frame forces the
-open buffer through the decoder. Until `/health` is warm the socket closes with 1013 so the client can hedge.
+`WS /ws/audio-stream?language=pt&chunk_size=1.0` is the real-time STT (`stt_stream.py`, windowed decode on the same
+`SttBatcher`): binary Int16 PCM 16 kHz frames in. Two output shapes:
 
-Files: `Dockerfile`, `start.sh` (start order TTS → LLM → STT; refuses to start if llama.cpp sees no `CUDA0`),
+- legacy (the gateway's `StreamingSTTRouter`): `{"text": "<full running transcript>"}` on every decode;
+- `segments=1` (the gateway's `GET /v1/audio/transcriptions/stream`, [docs/api/stt-stream.md](../../docs/api/stt-stream.md)):
+  `{"type":"ready"}`, then per utterance `partial` events (`text` always starts with its `stable` part, which never
+  changes: the words two decodes in a row agree on) and one `final` (`reason` silence | max_length | flush, decoded
+  fresh over the utterance's audio, with `language`, `avg_logprob`, `no_speech_prob`, `compression_ratio`,
+  `speech_ms`, `start_ms`/`end_ms` on the stream clock). `window` (20 s) caps an utterance: it is cut at its quietest
+  100 ms in the last 3 s, the head is the final and the rest opens the next window (no audio decoded twice, no word
+  repeated across the cut); `silence` (0.9 s) of RMS < 0.008 ends it. A window with no loud 100 ms frame is dropped
+  without a decode.
+
+`prompt` (query, or `{"type":"config","prompt":…,"language":…}` at any time) is faster-whisper's `initial_prompt` on
+every decode of the stream, as `prompt` on `/v1/audio/transcriptions`. `{"type":"flush"}` decodes the open buffer and
+ends the utterance. Until Whisper is loaded the socket closes with 1013 so the client can hedge. Tests:
+`test_stt_stream.py` (session logic), `test_audio_stream_ws.py` (the socket over Starlette's test client).
+
+**Boot (2026-10-19):** `start.sh` starts the orchestrator (uvicorn) first, so `/health` answers at once — 503 with
+`stages: {stt, llm, tts}` (`waiting|loading|warming|loaded|failed`, seconds since start, detail) until the three are warm,
+then 200. The engines still come up in order on the card (vLLM-Omni alone first: it sizes its KV cache from the free
+memory it measures; then llama.cpp), but Whisper loads as soon as the TTS answers — next to the LLM's load, not after
+it — and each stage warms as soon as its engine is up, in parallel (`boot()` in `server.py`; `STT_AFTER_TTS=0` drops the
+wait for the TTS). The image carries nginx and openssl: the gateway's Vast boot script only `apt-get install`s them when
+missing (an older image still boots, paying that install).
+
+Files: `Dockerfile`, `start.sh` (orchestrator first, engines TTS → LLM; refuses to start if llama.cpp sees no `CUDA0`),
 `server.py` (orchestrator + API, see its docstring), `test_cut.py` (sentence cutter), `bench.py` (latency bench).
 Build: `.github/workflows/speech-stack.yml` → `ghcr.io/marcosremar/speech-stack:<tag>` (public).
 Deploy: `PUT /v1/deployments/<name>` with that `image`, `port: 8000`, `healthPath: /health`, `provider: vast`, `machineType: RTX 3090`,
@@ -112,7 +133,7 @@ prompt similarity (`--slot-prompt-similarity`, default 0.10), so the stack sends
 `llm_predicted_n`, `llm_predicted_ms`, `text_wait_ms` (first token → first sentence cut), `tts_first_chunk_ms` (cut → first
 PCM). Numbers only. `/v1/audio/transcriptions` returns the same four STT fields. `bench.py` prints p50/p95 of each stage.
 
-Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times tts_stream s2s_turn debug_logs kokoro; do python3 docker/speech-stack/test_$t.py; done`
+Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stt_stream audio_stream_ws stage_times tts_stream s2s_turn debug_logs kokoro; do python3 docker/speech-stack/test_$t.py; done`
 (numpy only; `git add -f` a new one, the repo's `TEST_*` ignore rule matches them on macOS).
 
 ## Single-stage proxies never end a broken stream cleanly (2026-10-08)
