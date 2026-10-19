@@ -150,6 +150,15 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   voice cloning, no HF token). `speed` is ignored. Measured on this laptop's CPU (Core Ultra 7, loaded): first audio
   0.16 s, 3.8 s of speech in 1.8 s; load + warm-up of one language ~60 s. The image bakes the weights and default voices
   of `POCKET_BAKE` (pt,en,fr,es,it,de) at build (`WITH_POCKET=0` leaves Pocket out: no torch).
+  **Own model per language** (`POCKET_CUSTOM`, `<language> <voice> <config.yaml> <voice.safetensors>`, comma-separated):
+  that language loads its own config and speaks only its fixed voice, whatever Pocket voice the gateway names (rooms
+  send pt `rafael`; predefined voices do not run on other weights), numbers through `normalize.py` as always; `/health`
+  shows `pocket.custom`. Brazilian Portuguese = [Erinome](https://huggingface.co/marcosremar2/pocket-tts-erinome-pt)
+  (6 layers, fine-tuned from Kyutai's `portuguese_24l` and distilled): `POCKET_CUSTOM="pt erinome
+  hf://marcosremar2/pocket-tts-erinome-pt/erinome_6l.yaml@84dc5f224359dcb5ab0a862688cabe54a4f40389
+  hf://marcosremar2/pocket-tts-erinome-pt/erinome_6l_voice.safetensors@84dc5f224359dcb5ab0a862688cabe54a4f40389"` (one
+  line). The image bakes it at build (the Dockerfile's `POCKET_CUSTOM` build arg defaults to it; Railway passes the
+  service variable as that build arg), but the server only uses it with `POCKET_CUSTOM` set at run time.
 - Deploying the server: no image is built by hand. `.github/workflows/kokoro-stream.yml` builds it on every PR that
   touches it and pushes `ghcr.io/<owner>/kokoro-stream:<date>` from main; or a Railway service builds it from the repo
   (root `docker/kokoro-stream`, config `docker/kokoro-stream/railway.json`). The server's `KOKORO_API_KEY` is the

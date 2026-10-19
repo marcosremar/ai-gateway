@@ -80,3 +80,7 @@ jobs:
           docker run --rm --network none -e HF_HUB_OFFLINE=1 -e POCKET_THREADS=2 \
             ghcr.io/${{ github.repository_owner }}/kokoro-stream:${{ steps.meta.outputs.tag }} \
             python -X utf8 -c "import pocket; p = pocket.Pocket.from_env({'POCKET_TTS': '1'}); m = pocket.load_language('pt', 2, False); s = m.get_state_for_audio_prompt('rafael'); n = sum(len(c) for c in m.generate_audio_stream(s, 'Bom dia.')); print('pocket pt samples', n); assert n > 4800"
+          custom=$(sed -n 's/^ARG POCKET_CUSTOM="\(.*\)"$/\1/p' docker/kokoro-stream/Dockerfile)
+          docker run --rm --network none -e HF_HUB_OFFLINE=1 -e POCKET_THREADS=2 -e POCKET_CUSTOM="$custom" \
+            ghcr.io/${{ github.repository_owner }}/kokoro-stream:${{ steps.meta.outputs.tag }} \
+            python -X utf8 -c "import os, pocket; p = pocket.Pocket.from_env({**os.environ, 'POCKET_TTS': '1'}); p.models['pt'] = p.loader('pt'); n = len(b''.join(p.speak('pt', 'rafael', 'Bom dia, são oito horas.'))); print('pocket', p.health()['custom'], 'bytes', n); assert n > 24000"

@@ -164,8 +164,10 @@ class FakePocketModel:
     def __init__(self, lang: str):
         self.lang = lang
         self.spoken: list[tuple[str, str]] = []
+        self.prompts: list[str] = []
 
     def get_state_for_audio_prompt(self, voice: str) -> dict:
+        self.prompts.append(voice)
         return {"voice": voice}
 
     def generate_audio_stream(self, state: dict, text: str, stop=None):
@@ -300,3 +302,59 @@ def test_an_idle_pocket_language_is_unloaded_and_loads_again_on_its_next_request
     loaded_language(never, "es")
     now[0] += 10**6
     assert never.unload_idle() == [] and "es" in never.models
+
+
+ERINOME = {"pt": ("erinome", "hf://me/erinome/erinome_6l.yaml@84dc", "hf://me/erinome/erinome_6l_voice.safetensors@84dc")}
+
+
+def test_a_custom_pocket_model_speaks_its_language_with_its_own_voice_whatever_voice_is_asked(monkeypatch):
+    models: dict[str, FakePocketModel] = {}
+
+    def loader(lang: str) -> FakePocketModel:
+        models[lang] = FakePocketModel(lang)
+        return models[lang]
+
+    engine = server.pocket_engine.Pocket(enabled=True, loader=loader, wait_s=0.05, custom=ERINOME)
+    monkeypatch.setattr(server, "pocket", engine)
+    loaded_language(engine, "pt")
+    loaded_language(engine, "fr")
+    voice_file = ERINOME["pt"][2]
+    assert models["pt"].spoken == [(voice_file, "Olá.")], "warmed up with its own voice"
+    for voice in ["rafael", "estelle", "erinome"]:
+        response = speak_pocket({"input": "São 8h30.", "voice": voice, "language": "pt-BR"})
+        assert response.status_code == 200, voice
+        asyncio.run(collect(response))
+        assert models["pt"].spoken[-1] == (voice_file, "São oito horas e trinta."), "numbers written out first"
+    asyncio.run(collect(speak_pocket({"input": "Bom dia.", "voice": "erinome"})))
+    assert models["pt"].spoken[-1] == (voice_file, "Bom dia."), "its voice says its language"
+    asyncio.run(collect(speak_pocket({"input": "Bonjour.", "voice": "estelle", "language": "fr"})))
+    assert models["fr"].spoken[-1] == ("estelle", "Bonjour."), "the other languages keep the predefined voices"
+    assert set(engine.states) == {("pt", "erinome"), ("fr", "estelle")} and models["pt"].prompts == [voice_file]
+    assert engine.health()["custom"] == {"pt": "erinome"}
+    plain = server.pocket_engine.Pocket(enabled=True, loader=loader)
+    assert "erinome" not in plain.voices() and "custom" not in plain.health()
+
+
+def test_pocket_custom_comes_from_the_env_and_is_loaded_and_baked_from_its_config(monkeypatch):
+    spec = "pt erinome hf://me/erinome/erinome_6l.yaml@84dc hf://me/erinome/erinome_6l_voice.safetensors@84dc"
+    custom_models = server.pocket_engine.custom_models
+    assert custom_models(spec) == ERINOME and custom_models(f" Portuguese {spec[3:]} ,") == ERINOME
+    assert custom_models("") == {}
+    for bad in ["pt erinome erinome_6l.yaml", "ja voice a.yaml b.safetensors"]:
+        with pytest.raises(ValueError):
+            custom_models(bad)
+    loaded: list[FakePocketModel] = []
+
+    def load_language(lang, threads, quantize, device="cpu", config=None):
+        loaded.append(FakePocketModel(f"{lang} {config}"))
+        return loaded[-1]
+
+    monkeypatch.setattr(server.pocket_engine, "load_language", load_language)
+    engine = server.pocket_engine.Pocket.from_env({"POCKET_TTS": "1", "POCKET_CUSTOM": spec})
+    engine.loader("pt")
+    engine.loader("fr")
+    assert [m.lang for m in loaded] == [f"pt {ERINOME['pt'][1]}", "fr None"]
+    assert server.pocket_engine.Pocket.from_env({"POCKET_TTS": "1"}).custom == {}
+    loaded.clear()
+    server.pocket_engine.bake(["pt"], ERINOME)
+    assert [(m.lang, m.prompts) for m in loaded] == [("pt None", ["rafael", "estelle"]), (f"pt {ERINOME['pt'][1]}", [ERINOME["pt"][2]])]

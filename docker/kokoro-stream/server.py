@@ -325,9 +325,10 @@ async def pocket_speech(body: dict):
     fmt = body.get("response_format") or "pcm"
     if not text:
         return error(400, "invalid_input", "input is empty")
-    if voice not in pocket_engine.VOICES:
-        return error(400, "invalid_voice", f"voice must be one of {', '.join(sorted(pocket_engine.VOICES))}")
-    lang = pocket_engine.language_code(body.get("language")) if body.get("language") else pocket_engine.VOICES[voice]
+    voices = pocket.voices()
+    if voice not in voices:
+        return error(400, "invalid_voice", f"voice must be one of {', '.join(sorted(voices))}")
+    lang = pocket_engine.language_code(body.get("language")) if body.get("language") else voices[voice]
     if not lang:
         return error(400, "invalid_language", f"language must be one of {', '.join(sorted(pocket_engine.LANGUAGES))}")
     if fmt not in ("pcm", "wav"):

@@ -10,6 +10,9 @@
   (default 2 s) for it, then gets 503 `busy`.
 - Predefined voices only (`rafael`, `estelle`, `alba`…; the "without voice cloning" weights, public, no HF token).
   Any voice speaks any language with an accent; the gateway sends the language's own voice unless the app names one.
+- `POCKET_CUSTOM` (`<language> <voice> <config.yaml> <voice.safetensors>`, comma-separated): that language loads its
+  own model and speaks only its own fixed voice, whatever voice the request names (predefined voices do not run on
+  other weights).
 - Audio: the model's stream of float chunks as 24 kHz s16le PCM, from the first chunk. `speed` is accepted and ignored
   (Pocket has no speed control).
 - Memory: a language not used for `POCKET_IDLE_UNLOAD_S` (default 900 s; 0 = never) is unloaded — its model and voice
@@ -74,12 +77,23 @@ def to_pcm(samples: np.ndarray) -> bytes:
     return (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
 
 
-def load_language(lang: str, threads: int, quantize: bool, device: str = "cpu") -> Any:
+def custom_models(value: str) -> dict[str, tuple[str, str, str]]:
+    custom = {}
+    for entry in filter(str.strip, value.split(",")):
+        fields = entry.split()
+        lang = language_code(fields[0])
+        if len(fields) != 4 or not lang:
+            raise ValueError(f"POCKET_CUSTOM entry {entry.strip()!r} is not '<language> <voice> <config.yaml> <voice.safetensors>'")
+        custom[lang] = (fields[1], fields[2], fields[3])
+    return custom
+
+
+def load_language(lang: str, threads: int, quantize: bool, device: str = "cpu", config: str | None = None) -> Any:
     import torch
     from pocket_tts import TTSModel
 
     torch.set_num_threads(threads)
-    model = TTSModel.load_model(language=LANGUAGES[lang], quantize=quantize)
+    model = TTSModel.load_model(config=config, quantize=quantize) if config else TTSModel.load_model(language=LANGUAGES[lang], quantize=quantize)
     return model.to(device) if device != "cpu" else model
 
 
@@ -99,8 +113,10 @@ def give_memory_back() -> None:
 
 class Pocket:
     def __init__(self, enabled: bool, loader: Callable[[str], Any], preload: list[str] | None = None, wait_s: float = 2.0,
-                 idle_unload_s: float = DEFAULT_IDLE_UNLOAD_S, clock: Callable[[], float] = time.monotonic):
+                 idle_unload_s: float = DEFAULT_IDLE_UNLOAD_S, clock: Callable[[], float] = time.monotonic,
+                 custom: dict[str, tuple[str, str, str]] | None = None):
         self.enabled = enabled
+        self.custom = custom or {}
         self.loader = loader
         self.preload_languages = preload or []
         self.wait_s = wait_s
@@ -122,12 +138,14 @@ class Pocket:
         threads = int(env.get("POCKET_THREADS", "4"))
         quantize = env.get("POCKET_QUANTIZE") == "1"
         device = env.get("POCKET_DEVICE", "cpu") or "cpu"
+        custom = custom_models(env.get("POCKET_CUSTOM", ""))
         return cls(
             enabled=env.get("POCKET_TTS") == "1",
-            loader=lambda lang: load_language(lang, threads, quantize, device),
+            loader=lambda lang: load_language(lang, threads, quantize, device, custom[lang][1] if lang in custom else None),
             preload=codes(env.get("POCKET_PRELOAD", "")),
             wait_s=float(env.get("POCKET_WAIT_S", "2")),
             idle_unload_s=float(env.get("POCKET_IDLE_UNLOAD_S", str(DEFAULT_IDLE_UNLOAD_S))),
+            custom=custom,
         )
 
     def preload(self) -> None:
@@ -193,8 +211,8 @@ class Pocket:
     def _load(self, lang: str) -> None:
         try:
             model = self.loader(lang)
-            voice = DEFAULT_VOICES[lang][1]
-            state = model.get_state_for_audio_prompt(voice)
+            voice, prompt = self.prompt(lang, DEFAULT_VOICES[lang][1])
+            state = model.get_state_for_audio_prompt(prompt)
             for _ in model.generate_audio_stream(state, WARM_UP[lang]):
                 pass
             with self.guard:
@@ -210,10 +228,18 @@ class Pocket:
                 self.failed_at[lang] = time.monotonic()
                 self.errors[lang] = str(err)[:200]
 
+    def voices(self) -> dict[str, str]:
+        return {**VOICES, **{voice: lang for lang, (voice, _, _) in self.custom.items()}}
+
+    def prompt(self, lang: str, voice: str) -> tuple[str, str]:
+        custom = self.custom.get(lang)
+        return (custom[0], custom[2]) if custom else (voice, voice)
+
     def voice_state(self, lang: str, voice: str) -> Any:
+        voice, prompt = self.prompt(lang, voice)
         key = (lang, voice)
         if key not in self.states:
-            self.states[key] = self.models[lang].get_state_for_audio_prompt(voice)
+            self.states[key] = self.models[lang].get_state_for_audio_prompt(prompt)
         return self.states[key]
 
     def acquire(self, lang: str) -> bool:
@@ -240,21 +266,26 @@ class Pocket:
             "enabled": self.enabled,
             "languages": {lang: self.status.get(lang, "not_loaded") for lang in LANGUAGES},
             "idle_unload_s": self.idle_unload_s,
+            **({"custom": {lang: voice for lang, (voice, _, _) in self.custom.items()}} if self.custom else {}),
             **({"errors": dict(self.errors)} if self.errors else {}),
         }
 
 
-def bake(languages: list[str]) -> None:
+def bake(languages: list[str], custom: dict[str, tuple[str, str, str]] | None = None) -> None:
     """Image build: downloads each language's weights and its default voices into HF_HOME (no network at start)."""
+    threads = int(os.environ.get("POCKET_THREADS", "4"))
     for lang in languages:
-        model = load_language(lang, int(os.environ.get("POCKET_THREADS", "4")), False)
+        model = load_language(lang, threads, False)
         for voice in DEFAULT_VOICES[lang]:
             model.get_state_for_audio_prompt(voice)
         print(f"pocket: {lang} baked", flush=True)
+    for lang, (voice, config, prompt) in (custom or {}).items():
+        load_language(lang, threads, False, config=config).get_state_for_audio_prompt(prompt)
+        print(f"pocket: {lang} {voice} baked", flush=True)
 
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "bake":
-        bake(codes(sys.argv[2]))
+        bake(codes(sys.argv[2]), custom_models(os.environ.get("POCKET_CUSTOM", "")))
     else:
         sys.exit("usage: python pocket.py bake pt,fr,en,es,it,de")
