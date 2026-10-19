@@ -156,6 +156,30 @@ describe('TTS on a Qwen3-TTS Base deployment', () => {
     expect(or.synthesize.mock.calls[0][0]).toMatchObject({ model: 'hexgrad/kokoro-82m', voice: 'pf_dora' });
   });
 
+  it('pocket on a speech-stack replica (babelcast-tts-pocket): the language own Pocket voice, no clone lookup; mp3 or an unknown language moves on', async () => {
+    const r = replica({ speechStack: true });
+    const dep = new DeploymentTTSProvider(controller(), 'babelcast-3090', { fetchImpl: r.fetchImpl as never });
+    const or = kokoro();
+    const pocketChain = (d: TTSProvider) => ({ 'babelcast-tts-pocket': [
+      { providerId: 'deployment:babelcast-3090', provider: d, model: 'pocket' },
+      { providerId: 'openrouter', provider: or, model: 'hexgrad/kokoro-82m', voice: 'pf_dora' },
+    ] });
+    const body = { model: 'babelcast-tts-pocket', input: 'Bom dia!', voice: 'Ryan', language: 'Portuguese', response_format: 'wav', stream: true };
+    const res = await handleAudioSpeech(req(body), pocketChain(dep), undefined, new CircuitBreakerRegistry());
+    expect(res.headers).toMatchObject({ 'X-Gateway-Provider': 'deployment:babelcast-3090' });
+    expect(r.speechBodies[0]).toEqual({ model: 'pocket', input: 'Bom dia!', voice: 'rafael', language: 'pt', response_format: 'wav', stream: true, stream_format: 'audio' });
+    expect(r.fetchImpl.mock.calls.some(([u]) => String(u).endsWith('/v1/voices'))).toBe(false);
+    await handleAudioSpeech(req({ ...body, voice: 'Vivian', language: 'fr', stream: false }), pocketChain(dep), undefined, new CircuitBreakerRegistry());
+    expect(r.speechBodies[1]).toMatchObject({ voice: 'estelle', language: 'fr' });
+    expect(or.synthesize).not.toHaveBeenCalled();
+
+    const mp3 = await handleAudioSpeech(req({ ...body, response_format: 'mp3', stream: false }), pocketChain(dep), undefined, new CircuitBreakerRegistry());
+    expect(mp3.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:hexgrad/kokoro-82m' });
+    const ja = await handleAudioSpeech(req({ ...body, language: 'Japanese', stream: false }), pocketChain(dep), undefined, new CircuitBreakerRegistry());
+    expect(ja.headers).toMatchObject({ 'X-Gateway-Provider': 'openrouter:hexgrad/kokoro-82m' });
+    expect(r.speechBodies).toHaveLength(2);
+  });
+
   it('a CustomVoice replica without catalog gets the request as sent (OpenAI shape), mp3 not in stream mode', async () => {
     const r = replica({ catalog: false });
     const dep = new DeploymentTTSProvider(controller(), 'qwen3-tts', { fetchImpl: r.fetchImpl as never });

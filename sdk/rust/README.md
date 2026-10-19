@@ -125,6 +125,18 @@ The WebSocket client is in the crate (reqwest's HTTP/1.1 upgrade + an RFC 6455 c
 upgrade goes through an HTTP/1.1-only reqwest client (an HTTP/2 connection cannot be upgraded); with a custom
 `http_client(..)`, that client must be able to speak HTTP/1.1.
 
+## TTS engine of the GPU — `POST /v1/audio/speech/engine`
+
+The speech-stack GPU keeps ONE of Qwen3-TTS / Kokoro / Pocket loaded. When a session starts with its TTS alias, tell it:
+
+```rust
+match gw.select_tts_engine("babelcast-tts-pocket", false).await {
+    Ok(c) => println!("{:?} on {:?}", c.engine, c.deployment),   // selected, or nothing to choose (c.reason)
+    Err(e) if e.code() == "engine_in_use" => { /* another engine in use there: lines fall back; or force: true */ }
+    Err(e) => eprintln!("{e}"),                                  // gpu_not_ready (503): requests fall back meanwhile
+}
+```
+
 ## Speech-to-speech — `POST /v1/s2s`
 
 ```rust

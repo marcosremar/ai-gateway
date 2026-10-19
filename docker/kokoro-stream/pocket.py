@@ -12,10 +12,18 @@
   Any voice speaks any language with an accent; the gateway sends the language's own voice unless the app names one.
 - Audio: the model's stream of float chunks as 24 kHz s16le PCM, from the first chunk. `speed` is accepted and ignored
   (Pocket has no speed control).
+- Memory: a language not used for `POCKET_IDLE_UNLOAD_S` (default 900 s; 0 = never) is unloaded — its model and voice
+  states dropped and the memory given back (gc, `malloc_trim`, CUDA cache) — and loads again on its next request (503
+  `loading` meanwhile). Preloaded languages too: `POCKET_PRELOAD` only spares the first request after a start.
+- `POCKET_DEVICE` (default `cpu`): `cuda` moves each loaded model to the GPU (experimental; Pocket is built for CPU).
+
+The same file is vendored in docker/speech-stack (the GPU image's Pocket sidecar); test_pocket_vendored.py there keeps
+the two copies identical.
 """
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import threading
@@ -46,6 +54,7 @@ DEFAULT_VOICES = {
 MODELS = {"pocket", "pocket-tts", "kyutai/pocket-tts"}
 WARM_UP = {"en": "Hello.", "fr": "Bonjour.", "de": "Hallo.", "pt": "Olá.", "es": "Hola.", "it": "Ciao.", "nl": "Hallo."}
 RETRY_FAILED_S = 60.0
+DEFAULT_IDLE_UNLOAD_S = 900.0
 
 
 def language_code(value: Any) -> str | None:
@@ -65,20 +74,40 @@ def to_pcm(samples: np.ndarray) -> bytes:
     return (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
 
 
-def load_language(lang: str, threads: int, quantize: bool) -> Any:
+def load_language(lang: str, threads: int, quantize: bool, device: str = "cpu") -> Any:
     import torch
     from pocket_tts import TTSModel
 
     torch.set_num_threads(threads)
-    return TTSModel.load_model(language=LANGUAGES[lang], quantize=quantize)
+    model = TTSModel.load_model(language=LANGUAGES[lang], quantize=quantize)
+    return model.to(device) if device != "cpu" else model
+
+
+def give_memory_back() -> None:
+    """After a model is dropped: collect it, return freed heap pages to the OS (glibc) and empty the CUDA cache."""
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+    torch = sys.modules.get("torch")
+    if torch is not None and getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class Pocket:
-    def __init__(self, enabled: bool, loader: Callable[[str], Any], preload: list[str] | None = None, wait_s: float = 2.0):
+    def __init__(self, enabled: bool, loader: Callable[[str], Any], preload: list[str] | None = None, wait_s: float = 2.0,
+                 idle_unload_s: float = DEFAULT_IDLE_UNLOAD_S, clock: Callable[[], float] = time.monotonic):
         self.enabled = enabled
         self.loader = loader
         self.preload_languages = preload or []
         self.wait_s = wait_s
+        self.idle_unload_s = idle_unload_s
+        self.clock = clock
+        self.last_used: dict[str, float] = {}
+        self.reaper: threading.Thread | None = None
         self.models: dict[str, Any] = {}
         self.states: dict[tuple[str, str], Any] = {}
         self.status: dict[str, str] = {}
@@ -92,17 +121,61 @@ class Pocket:
         env = dict(os.environ if env is None else env)
         threads = int(env.get("POCKET_THREADS", "4"))
         quantize = env.get("POCKET_QUANTIZE") == "1"
+        device = env.get("POCKET_DEVICE", "cpu") or "cpu"
         return cls(
             enabled=env.get("POCKET_TTS") == "1",
-            loader=lambda lang: load_language(lang, threads, quantize),
+            loader=lambda lang: load_language(lang, threads, quantize, device),
             preload=codes(env.get("POCKET_PRELOAD", "")),
             wait_s=float(env.get("POCKET_WAIT_S", "2")),
+            idle_unload_s=float(env.get("POCKET_IDLE_UNLOAD_S", str(DEFAULT_IDLE_UNLOAD_S))),
         )
 
     def preload(self) -> None:
+        """At start: loads the `POCKET_PRELOAD` languages and starts the idle reaper."""
         if self.enabled:
             for lang in self.preload_languages:
                 self.model(lang)
+            self.start_reaper()
+
+    def start_reaper(self) -> None:
+        if self.idle_unload_s <= 0 or self.reaper is not None:
+            return
+        period = max(1.0, min(60.0, self.idle_unload_s / 4))
+
+        def loop() -> None:
+            while True:
+                time.sleep(period)
+                self.unload_idle()
+
+        self.reaper = threading.Thread(target=loop, name="pocket-idle-unload", daemon=True)
+        self.reaper.start()
+
+    def unload_idle(self) -> list[str]:
+        """Unloads every language idle for `idle_unload_s` and not speaking now; returns them."""
+        if self.idle_unload_s <= 0:
+            return []
+        now = self.clock()
+        idle = [lang for lang in list(self.models) if now - self.last_used.get(lang, now) >= self.idle_unload_s]
+        return [lang for lang in idle if self.unload(lang)]
+
+    def unload(self, lang: str) -> bool:
+        """Drops a language's model and voice states (False while it is speaking a sentence)."""
+        if not self.locks[lang].acquire(blocking=False):
+            return False
+        try:
+            with self.guard:
+                if lang not in self.models:
+                    return False
+                del self.models[lang]
+                for key in [k for k in self.states if k[0] == lang]:
+                    del self.states[key]
+                self.status[lang] = "unloaded"
+                self.last_used.pop(lang, None)
+        finally:
+            self.locks[lang].release()
+        give_memory_back()
+        print(f"pocket: {lang} unloaded (idle)", flush=True)
+        return True
 
     def model(self, lang: str) -> Any | None:
         """The loaded model, or None while it loads (a load starts in the background if none is running)."""
@@ -128,6 +201,7 @@ class Pocket:
                 self.models[lang] = model
                 self.states[(lang, voice)] = state
                 self.status[lang] = "loaded"
+                self.last_used[lang] = self.clock()
                 self.errors.pop(lang, None)
         except Exception as err:  # noqa: BLE001 — reported on /health, retried after RETRY_FAILED_S
             print(f"pocket: loading {lang} failed: {err}", file=sys.stderr, flush=True)
@@ -143,9 +217,13 @@ class Pocket:
         return self.states[key]
 
     def acquire(self, lang: str) -> bool:
-        return self.locks[lang].acquire(timeout=self.wait_s)
+        got = self.locks[lang].acquire(timeout=self.wait_s)
+        if got:
+            self.last_used[lang] = self.clock()
+        return got
 
     def release(self, lang: str) -> None:
+        self.last_used[lang] = self.clock()
         self.locks[lang].release()
 
     def rate(self, lang: str) -> int:
@@ -161,6 +239,7 @@ class Pocket:
         return {
             "enabled": self.enabled,
             "languages": {lang: self.status.get(lang, "not_loaded") for lang in LANGUAGES},
+            "idle_unload_s": self.idle_unload_s,
             **({"errors": dict(self.errors)} if self.errors else {}),
         }
 

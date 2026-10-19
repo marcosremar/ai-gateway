@@ -38,6 +38,7 @@ pub mod s2s;
 mod stream;
 pub mod stt_stream;
 pub mod telemetry;
+pub mod tts_engine;
 pub mod types;
 
 pub use account::Activation;
@@ -65,4 +66,5 @@ pub use stt_stream::{
     TranscriptionStream, STT_STREAM_PATH,
 };
 pub use telemetry::AppEventsBatch;
+pub use tts_engine::{TtsEngineChoice, TTS_ENGINE_PATH};
 pub use types::{CallOptions, HealthReport, Served, TimeoutGroup, Timeouts};

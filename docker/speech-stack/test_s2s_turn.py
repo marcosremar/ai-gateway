@@ -30,7 +30,9 @@ ns: dict = {"asyncio": asyncio, "math": math, "uuid": uuid, "TTS_FRAMES_PER_SECO
             "HTTPException": Exception, "StreamingResponse": lambda body, **_: body, "client": None, "TTS_URL": "",
             "LLM_URL": "", "TTS_MODEL": "tts", "FIRST_MIN_WORDS": 3, "MAX_CHUNK_CHARS": 160, "TTS_PARALLEL": 2, "SAMPLE_RATE": 24000,
             "S2S_MAX_GAP_S": 0.3, "S2S_DEADLINE_S": 5.0, "TTS_MAX_SECONDS": 3.0, "TTS_MAX_SECONDS_PER_CHAR": 0.2,
-            "voices": {"v": {"audio": "a", "text": "t"}}, "turns": turns, "ready": {}}
+            "voices": {"v": {"audio": "a", "text": "t"}}, "turns": turns, "ready": {},
+            "tts_manager": SimpleNamespace(admit=lambda name: SimpleNamespace(ok=True)), "hold": lambda response, engine: response,
+            "JSONResponse": object}
 exec(src[src.index("SENTENCE_END ="):src.index("# ── Single-stage endpoints")], ns)
 ns["transcribe_sync"] = lambda *_: {"text": "oi", "ms": 1}
 REPLY = ["Bom dia! ", "Aqui está o pão. ", "Até logo, amiga."]

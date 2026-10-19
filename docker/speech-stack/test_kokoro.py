@@ -35,8 +35,17 @@ async def proxy(request: Request, url: str, stage: str):
     return Response(b"qwen", media_type="audio/pcm")
 
 
+class AdmitAll:
+    from tts_engines import Admit
+    def admit(self, name): return self.Admit(True)
+    def begin(self, name): pass
+    def end(self, name): pass
+
+
+from tts_engines import EngineManager, engine_of  # noqa: E402
+
 app = FastAPI()
-ns: dict = {"app": app, "Request": Request, "Response": Response, "JSONResponse": JSONResponse,
+ns: dict = {"tts_manager": AdmitAll(), "engine_of": engine_of, "POCKET_URL": "http://pocket", "app": app, "Request": Request, "Response": Response, "JSONResponse": JSONResponse,
             "StreamingResponse": StreamingResponse, "asyncio": asyncio, "json": json, "np": np, "os": os, "re": re,
             "struct": struct, "subprocess": subprocess, "Path": Path, "SAMPLE_RATE": 24000, "TTS_URL": "http://tts", "proxy": proxy,
             "kokoro_state": {"status": "loading"}, "kokoro_engine": None}
@@ -90,5 +99,21 @@ assert speak(model="kokoro", speed=9).status_code == 200 and calls[-1]["speed"] 
 assert speak(model="kokoro", speed="fast").status_code == 400
 assert speak(model="kokoro", response_format="ulaw").status_code == 400
 assert speak(model="kokoro", input="  ").status_code == 400
+# One engine at a time: with Qwen3-TTS active and in use, a Kokoro request is refused at once (the gateway falls back).
+class Idle:
+    async def load(self): pass
+    async def unload(self): pass
+
+
+ns["tts_manager"] = EngineManager({"qwen": Idle(), "kokoro": Idle(), "pocket": Idle()}, switch_idle_s=120, log=lambda line: None)
+ns["tts_manager"].mark_loaded("qwen")
+res = speak(model="kokoro", voice="pf_dora")
+assert res.status_code == 503 and res.json()["error"]["code"] == "tts_engine_busy" and res.headers["retry-after"] == "120", res.text
+res = speak(model="pocket", voice="rafael")
+assert res.status_code == 503 and res.json()["error"]["code"] == "tts_engine_busy", res.text
+before = len(proxied)
+res = speak(model="Qwen/Qwen3-TTS-12Hz-0.6B-Base", voice="br-f-01", response_format="pcm")
+assert res.status_code == 200 and len(proxied) == before + 1 and ns["tts_manager"].inflight["qwen"] == 0, "counted while it streams, then released"
+print("ok: one TTS engine at a time — a request for another engine gets 503 tts_engine_busy with Retry-After")
 print("ok: model *kokoro* → Kokoro with the language's stock voice (or the Kokoro voice asked), pcm/wav/stream as the Qwen path;"
       " any other model → the Qwen3-TTS proxy untouched; 503 while Kokoro loads")

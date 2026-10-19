@@ -237,6 +237,8 @@ The image keeps the models; the five files of `/opt/s2s` can come from the deplo
 }
 ```
 
+- Since 2026-10-19 the code is `start.sh`, `server.py`, `stt_batch.py`, `stt_stream.py`, `tts_engines.py`,
+  `pocket_server.py`, `pocket.py`, `normalize.py` and `qwen3_tts.yaml`: ship them all.
 - `files` and `env` replace the stored ones as a whole (`buildSpec`): send the voice catalog and the current env again.
 - Budget: all files together ≤ 1 680 000 bytes (`MAX_FILES_BYTES`, 14 user_data keys of 120 000); the four code files are
   about 45 KB. The cloud-init itself must stay under 127 998 bytes and is 3.5 KB with this spec.
@@ -264,8 +266,8 @@ The image keeps the models; the five files of `/opt/s2s` can come from the deplo
 - Errors are OpenAI-shaped: 400 (empty input, unknown format), 503 `kokoro_loading` / `kokoro_failed`, 502 `stage_failed`.
 
 Kokoro runs on the **CPU** (onnxruntime) inside the orchestrator: no GPU memory is taken from vLLM-Omni, llama.cpp or
-Whisper. It loads in the background at startup and never holds `/health`'s 200: `GET /health` → `kokoro: {status:
-loading|loaded|failed, detail?}`. Image: `onnx-community/Kokoro-82M-v1.0-ONNX` at a pinned revision, `onnx/model.onnx`
+Whisper. Since 2026-10-19 it is loaded only when it is the chosen engine (§ One TTS engine at a time); `GET /health` →
+`kokoro: {status: unloaded|loading|loaded|failed, detail?}`. Image: `onnx-community/Kokoro-82M-v1.0-ONNX` at a pinned revision, `onnx/model.onnx`
 checked by sha256, the voice files packed into `/models/kokoro/voices.npz`; espeak-ng from apt. The build speaks one line
 with `pf_dora`, so a broken phonemizer fails the build. Measured on an M-series Mac CPU (2026-10-14, warm): 0.5 s for a 2.1 s pt
 sentence (about 4× real time). `test_kokoro.py` checks the engine
@@ -273,3 +275,46 @@ choice, the voice mapping and the formats with a fake engine.
 
 Through the gateway: the replica's TTS provider sends a `kokoro` model's `voice` as is (no clone lookup in `/v1/voices`).
 babelcast's alias is `babelcast-tts-kokoro` (`docs/deployments.md`).
+
+## One TTS engine at a time: Qwen3-TTS, Kokoro or Pocket TTS (2026-10-19)
+
+The three TTS engines are in the image and can all be chosen, but only the chosen one is loaded (`tts_engines.py`):
+
+| Engine | `model` on `/v1/audio/speech` | Where | Memory while loaded |
+|---|---|---|---|
+| Qwen3-TTS 0.6B Base (voice cloning) | anything else (e.g. `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) | vLLM-Omni process, GPU | `TTS_STAGE0_MB` of VRAM reserved (7400 on 24 GB cards, 9600 on the 5090, 12000 on the L40S, 20000 on an H100) |
+| Kokoro-82M v1.0 (ONNX fp32, 54 voices) | contains `kokoro` | in the orchestrator, CPU | host RAM only (the fp32 `model.onnx` + the voice pack); no VRAM |
+| Pocket TTS (Kyutai, pocket-tts 3.3.0) | contains `pocket` | `pocket_server.py`, its own process on the base image's Python and CUDA torch; CPU by default (`POCKET_DEVICE=cuda` experimental) | host RAM: ~220 MB of weights per loaded language plus the torch runtime of the process; no VRAM on CPU |
+
+Whisper and the LLM are never touched. Switching unloads the active engine before loading the next one: vLLM-Omni's
+process group is stopped (its VRAM is free when it exits) and started again from `/tmp/aigw-tts.sh` (written by
+`start.sh`; 1–2 min with the warm-up); Kokoro is dropped (gc + `malloc_trim`); the Pocket process is stopped. The
+engines' processes get the environment `start.sh` had before it added `/opt/wenv`'s CUDA 12 libraries
+(`BASE_LD_LIBRARY_PATH`): vLLM-Omni and torch are CUDA 13.
+
+- **Boot:** `TTS_ENGINE` (default `qwen`) — `start.sh` starts vLLM-Omni first on the card only for `qwen`;
+  `kokoro` / `pocket` are loaded by the orchestrator; `none` loads nothing until the first request. `TTS_ENGINES`
+  (default `qwen,kokoro,pocket`) is what may be chosen at all (a request for another one: 400 `engine_disabled`).
+- **Choosing:** `POST /v1/tts/engine {"engine": "pocket", "force"?: bool, "wait"?: bool}` (through the token-gated front
+  only; the gateway's `POST /v1/audio/speech/engine` calls it with the engine of an app's TTS alias when a session
+  starts). `GET /v1/tts/engine` and `/health` → `tts: {active, switching_to, engines: {qwen|kokoro|pocket: {status,
+  for_s, inflight, detail?}}, switch_idle_s, switches}`.
+- **No thrashing:** a request for an engine that is not loaded gets a quick 503 (`tts_engine_loading` |
+  `tts_engine_busy`, with `Retry-After`) so the gateway speaks that line with the alias's next link (the CPU voice
+  server); it starts the switch only when the active engine has been idle (no sentence in flight, none for
+  `TTS_SWITCH_IDLE_S`, default 120 s). The select endpoint follows the same rule unless `force`. Before unloading, a
+  switch waits (≤ 30 s) for the old engine's sentences in flight. Rationale: a Qwen3-TTS start costs 1–2 minutes, so
+  two apps with different engines on one replica would otherwise keep it switching and never serving; with the rule the
+  engine in use keeps the GPU and the other alias falls back without waiting.
+- `/v1/s2s` speaks with Qwen3-TTS: it is refused with 503 before any byte while another engine is active (the
+  gateway's s2s route answers with its composed fallback). Parle's deployments should keep `TTS_ENGINES=qwen` (or not
+  route Kokoro/Pocket to them) before they move to this image.
+- **Pocket:** `pocket.py` and `normalize.py` are the CPU voice server's (docker/kokoro-stream), vendored byte for byte
+  (`test_pocket_vendored.py` fails when they drift). pocket-tts is installed into the base Python with every package
+  already there pinned (no second torch, vLLM-Omni's environment unchanged). The weights and default voices of
+  `POCKET_BAKE` (pt,en,fr,es,it,de) are baked at build. A voice Pocket does not know becomes the language's own voice
+  (by gender for a Qwen3 preset or an `xx-m-…` id). In the sidecar too a language unloads after
+  `POCKET_IDLE_UNLOAD_S` (900 s) without a sentence; `POCKET_PRELOAD` loads some at its start.
+
+Tests: `test_tts_engines.py` (switch rules, drain, failures), `test_pocket_vendored.py` (the sidecar with a fake model,
+vendored copies identical), `test_kokoro.py` (the speech route refuses another engine with 503).

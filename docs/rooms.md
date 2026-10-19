@@ -130,7 +130,9 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   off unless `POCKET_TTS=1` on the server. One model per language (en fr de pt es it nl, ~220 MB each), loaded in the
   background — at start for `POCKET_PRELOAD` (e.g. `pt,en,fr,es`), else on the first request, which gets 503 `loading`
   (the gateway speaks that line with Kokoro). One sentence at a time per language (`POCKET_WAIT_S`, 2 s, then 503
-  `busy`); `POCKET_THREADS` (4) torch threads; `POCKET_QUANTIZE=1` int8. Predefined voices only (public weights without
+  `busy`); `POCKET_THREADS` (4) torch threads; `POCKET_QUANTIZE=1` int8. A language not used for `POCKET_IDLE_UNLOAD_S`
+  (900 s; 0 = never) is unloaded (model and voice states dropped, memory given back) and loads again on its next
+  request — preloaded ones too; Kokoro stays loaded as the always-on fallback. Predefined voices only (public weights without
   voice cloning, no HF token). `speed` is ignored. Measured on this laptop's CPU (Core Ultra 7, loaded): first audio
   0.16 s, 3.8 s of speech in 1.8 s; load + warm-up of one language ~60 s. The image bakes the weights and default voices
   of `POCKET_BAKE` (pt,en,fr,es,it,de) at build (`WITH_POCKET=0` leaves Pocket out: no torch).

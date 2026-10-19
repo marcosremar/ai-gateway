@@ -67,6 +67,7 @@ import {
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
 import { createTranscriptionStream, STT_STREAM_PATH } from './src/gateway/proxy/routes/transcription-stream';
+import { createTtsEngineRoute, TTS_ENGINE_PATH } from './src/gateway/proxy/routes/tts-engine';
 import { createRooms, openRouterTranslate } from './src/rooms';
 import { KOKORO_MODEL, deploymentClone, kokoroTts } from './src/tts';
 import { appTelemetryFromEnv } from './src/app-telemetry';
@@ -646,6 +647,16 @@ const sttStream = createTranscriptionStream({
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 upgradeRoutes.push({ prefix: STT_STREAM_PATH, handler: (req, socket, head) => sttStream.handleUpgrade(req, socket, head) });
+// POST /v1/audio/speech/engine: the TTS engine (Qwen3-TTS | Kokoro | Pocket) the GPU behind a TTS alias keeps loaded —
+// the speech-stack loads one at a time; the app calls this when a session starts with its TTS alias.
+const ttsEngineRoute = createTtsEngineRoute({
+  controller,
+  linksOf: (model) => (chains.tts?.[model] ?? []).flatMap(l => (l.deployment && !l.notMounted ? [{ deployment: l.deployment, upstreamModel: l.upstreamModel ?? model }] : [])),
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(bearerOf(req))?.userId ?? null : 'localhost'),
+  isAdmin: (userId) => adminUsers.has(userId) || (!keysConfigured() && userId === 'localhost'),
+  aliasesOf: (userId) => appAliasesOf(userId, 'tts'),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
 
 const ttsCache = ttsCacheFromEnv(process.env, stateDir);
 await ttsCache?.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'TTS cache: disk tier unreadable, memory only'));
@@ -679,7 +690,8 @@ const server = await startProxy({
     ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), fallbackProbe: fallbackProbe.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [], clientGpu: deployments?.clientGpu.report() ?? null }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [], clientGpu: deployments?.clientGpu.report(viewer.userId) ?? null }),
   customRoutes: [
-    ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
+    ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute },
+    { method: 'POST', path: TTS_ENGINE_PATH, handler: ttsEngineRoute }, realtime.route, realtime.updateRoute,
     rooms.route, ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
     ...(benchmarks ? createModelBenchmarkRoutes({ store: benchmarks, gate: adminGate, onChange: () => remount?.() }) : []),
   ],

@@ -21,8 +21,14 @@ WS   /ws/audio-stream           real-time STT: binary Int16 PCM 16 kHz frames in
                                 segments=1 per-utterance partial/final events (stt_stream.py). Text frames: {"type":
                                 "flush"}, {"type": "config", "prompt", "language"}. Closes 1013 until STT is loaded.
 POST /v1/chat/completions       proxied to the LLM (streaming passes through).
-POST /v1/audio/speech           proxied to the TTS (streaming passes through). A `model` containing "kokoro" is spoken
-                                by Kokoro-82M (ONNX, on the CPU, in this process) instead: see kokoro_speech.
+POST /v1/audio/speech           the TTS engine the `model` names (tts_engines.engine_of): "kokoro…" → Kokoro-82M (ONNX,
+                                CPU, in this process, see kokoro_speech), "pocket…" → Pocket TTS (its own process,
+                                pocket_server.py, proxied), anything else → Qwen3-TTS on vLLM-Omni (proxied, streaming
+                                passes through). ONE engine is loaded at a time (tts_engines.py): a request for another
+                                one gets a quick 503 (tts_engine_loading | tts_engine_busy, Retry-After) and the gateway
+                                speaks that line with its next link.
+GET|POST /v1/tts/engine         the active TTS engine and each engine's state | {"engine": "qwen"|"kokoro"|"pocket",
+                                "force"?: bool, "wait"?: bool} selects it (unloads the others; gateway / admin only).
                    Both: an engine that breaks the body, sends nothing for PROXY_MAX_GAP_S (8) or keeps the request past
                      PROXY_DEADLINE_S (120) never ends as a clean answer. Before the response started: 502 / 504 with an
                      OpenAI `error`. After: SSE gets a last `data: {"error": {code: stage_failed|upstream_stalled}}`
@@ -30,7 +36,8 @@ POST /v1/audio/speech           proxied to the TTS (streaming passes through). A
 GET  /refs/<id>.wav             reference voices (from /files/voices.json, see load_voices).
 GET  /health                    200 only when the three models answered a warm-up; `stages.{stt,llm,tts}.status` =
                                 waiting|loading|warming|loaded|failed (uvicorn is up at once, the stages load in background
-                                tasks, see boot()); `kokoro.status` = loading|loaded|failed (never holds the 200).
+                                tasks, see boot()); `tts` = the engine manager's view (active engine, per-engine status);
+                                the boot engine is TTS_ENGINE (qwen; kokoro | pocket | none).
 GET  /debug/gpu                 GPU memory now, in MiB per card (nvidia-smi): used, total, free.
 GET  /debug/logs?engine=tts|llm|stt&tail=N&match=text   last lines of an engine's log (stt = this process), secrets
                                 scrubbed; every TTS request logs `tts <request_id> …` here and the same id in the TTS log.
@@ -38,6 +45,7 @@ GET  /debug/logs?engine=tts|llm|stt&tail=N&match=text   last lines of an engine'
 
 import asyncio
 import base64
+import gc
 import hashlib
 import io
 import ipaddress
@@ -45,6 +53,7 @@ import json
 import math
 import os
 import re
+import signal
 import struct
 import subprocess
 import time
@@ -60,9 +69,21 @@ from faster_whisper import WhisperModel
 
 from stt_batch import SttBatcher
 from stt_stream import SttStream
+from tts_engines import ENGINES, EngineManager, engine_of
 
 TTS_URL = "http://127.0.0.1:8091"
 LLM_URL = "http://127.0.0.1:8092"
+POCKET_PORT = int(os.environ.get("POCKET_PORT", "8093"))
+POCKET_URL = f"http://127.0.0.1:{POCKET_PORT}"
+# The TTS engine loaded at boot (start.sh starts vLLM-Omni only for qwen) and the engines that may be chosen.
+TTS_BOOT = os.environ.get("TTS_ENGINE", "qwen").strip().lower() or "qwen"
+TTS_ENGINES = [e for e in (x.strip().lower() for x in os.environ.get("TTS_ENGINES", ",".join(ENGINES)).split(",")) if e in ENGINES]
+TTS_SWITCH_IDLE_S = float(os.environ.get("TTS_SWITCH_IDLE_S", "120"))
+# start.sh writes the vLLM-Omni command (to start it again after a switch) and its pid; child processes get the
+# environment start.sh had before it added the CUDA 12 libs of /opt/wenv (vLLM-Omni and torch are CUDA 13).
+TTS_START_SCRIPT = os.environ.get("TTS_START_SCRIPT", "/tmp/aigw-tts.sh")
+TTS_PID_FILE = os.environ.get("TTS_PID_FILE", "/tmp/aigw-tts.pid")
+BASE_PYTHON = os.environ.get("BASE_PYTHON", "python3")
 TTS_MODEL = os.environ.get("TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
 STT_MODEL = os.environ.get("STT_MODEL", "large-v3")
 MODELS = {"stt": STT_MODEL, "llm": os.environ.get("LLM_FILE", "llm"), "tts": TTS_MODEL}
@@ -101,9 +122,9 @@ ready = {"ok": False, "detail": "starting"}
 BOOT_T0 = time.monotonic()
 stages: dict[str, dict] = {name: {"status": "waiting", "at_s": 0.0} for name in ("stt", "llm", "tts")}
 turns = {"started": 0, "done": 0, "failed": {}, "stalled": {}}
-kokoro_state: dict = {"status": "loading"}
+kokoro_state: dict = {"status": "unloaded"}
 kokoro_engine = None
-proxied = {stage: {"started": 0, "done": 0, "failed": 0, "stalled": 0} for stage in ("chat", "speech")}
+proxied = {stage: {"started": 0, "done": 0, "failed": 0, "stalled": 0} for stage in ("chat", "speech", "pocket")}
 app = FastAPI()
 
 
@@ -578,6 +599,11 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
     voice = voices.get(voice) if isinstance(voice, str) else voice
     if not voice or "audio" not in voice or "text" not in voice:
         raise HTTPException(400, "voice must be a known id or {audio, text}")
+    verdict = tts_manager.admit("qwen")
+    if not verdict.ok:
+        # Before any byte: the gateway's s2s route answers with its composed fallback.
+        return JSONResponse({"error": {"message": verdict.message, "type": "upstream_error", "code": verdict.code}}, status_code=503,
+                            headers={"Retry-After": str(verdict.retry_after)})
     ndjson = request.query_params.get("format") == "ndjson"
     ms = lambda: round((time.perf_counter() - t0) * 1000)  # noqa: E731
     sound: dict = {}
@@ -717,8 +743,9 @@ async def s2s(request: Request, file: UploadFile = File(...), config: str = Form
         except Exception as error:  # noqa: BLE001 — the stream already started: report in-band
             yield failed("failed", "stage_failed", error)
 
-    return StreamingResponse(first_audio_deadline(bounded(), sound, cfg, voice, lang, ms, event, pcm), media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
-                             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
+    return hold(StreamingResponse(first_audio_deadline(bounded(), sound, cfg, voice, lang, ms, event, pcm),
+                                  media_type="application/x-ndjson" if ndjson else "application/x-aigw-s2s",
+                                  headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"}), "qwen")
 
 
 # ── Single-stage endpoints ───────────────────────────────────────────────────
@@ -871,9 +898,58 @@ async def speech(request: Request):
         asked = json.loads(body)
     except ValueError:
         asked = None
-    if isinstance(asked, dict) and "kokoro" in str(asked.get("model", "")).lower():
-        return await kokoro_speech(asked)
-    return await proxy(request, f"{TTS_URL}/v1/audio/speech", "speech")
+    engine = engine_of(asked.get("model") if isinstance(asked, dict) else None)
+    verdict = tts_manager.admit(engine)
+    if not verdict.ok:
+        return JSONResponse({"error": {"message": verdict.message, "type": "upstream_error", "code": verdict.code}},
+                            status_code=400 if verdict.code == "engine_disabled" else 503,
+                            headers={"Retry-After": str(verdict.retry_after)} if verdict.retry_after else {})
+    if engine == "kokoro":
+        return hold(await kokoro_speech(asked), engine)
+    if engine == "pocket":
+        return hold(await proxy(request, f"{POCKET_URL}/v1/audio/speech", "pocket"), engine)
+    return hold(await proxy(request, f"{TTS_URL}/v1/audio/speech", "speech"), engine)
+
+
+def hold(response, engine: str):
+    """Counts the request in flight on `engine` until its body is sent (a switch waits for it before unloading)."""
+    tts_manager.begin(engine)
+    body = getattr(response, "body_iterator", None)
+    if body is None:
+        tts_manager.end(engine)
+        return response
+
+    async def counted():
+        try:
+            async for chunk in body:
+                yield chunk
+        finally:
+            tts_manager.end(engine)
+
+    response.body_iterator = counted()
+    return response
+
+
+@app.get("/v1/tts/engine")
+async def tts_engine_state():
+    return tts_manager.view()
+
+
+@app.post("/v1/tts/engine")
+async def tts_engine_select(request: Request):
+    """{"engine": "qwen"|"kokoro"|"pocket", "force": false, "wait": false}: the engine an app's session speaks with.
+    Without `force`, refused (409 in_use) while another engine is in use; `wait` answers once it is loaded."""
+    if not behind_front(request.client.host if request.client else None):
+        raise HTTPException(403, "only through the replica's token-gated front")
+    try:
+        asked = json.loads(await request.body() or b"{}")
+    except ValueError:
+        asked = None
+    if not isinstance(asked, dict) or not isinstance(asked.get("engine"), str):
+        return openai_error(400, "invalid_engine", f"engine must be one of {', '.join(tts_manager.engines)}")
+    answer = await tts_manager.select(asked["engine"].strip().lower(), force=asked.get("force") is True, wait=asked.get("wait") is True)
+    status = 200 if answer["ok"] else 409 if answer.get("code") == "in_use" else 400
+    return JSONResponse(answer, status_code=status)
 
 
 @app.get("/refs/{name}")
@@ -978,15 +1054,115 @@ def load_kokoro_sync():
     return engine
 
 
-async def load_kokoro() -> None:
-    global kokoro_engine
+def give_memory_back() -> None:
+    gc.collect()
     try:
-        engine = await asyncio.to_thread(load_kokoro_sync)
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+class KokoroEngine:
+    """Kokoro-82M in this process (ONNX, CPU): loaded when chosen, dropped when another engine is."""
+
+    async def load(self) -> None:
+        global kokoro_engine
+        kokoro_state.clear()
+        kokoro_state["status"] = "loading"
+        try:
+            engine = await asyncio.to_thread(load_kokoro_sync)
+        except Exception as error:
+            kokoro_state.update(status="failed", detail=repr(error)[:300])
+            raise
         kokoro_state.update(status="loaded", voices=engine.get_voices())
         kokoro_engine = engine
-    except Exception as error:  # noqa: BLE001 — Kokoro failing never takes the Qwen3-TTS path down
-        kokoro_state.update(status="failed", detail=repr(error)[:300])
-        print("kokoro", repr(error)[:300], flush=True)
+
+    async def unload(self) -> None:
+        global kokoro_engine
+        kokoro_engine = None
+        kokoro_state.clear()
+        kokoro_state["status"] = "unloaded"
+        await asyncio.to_thread(give_memory_back)
+
+
+def child_env() -> dict:
+    """The environment of the engines' processes: without the CUDA 12 libs the orchestrator runs with."""
+    env = dict(os.environ)
+    env["LD_LIBRARY_PATH"] = os.environ.get("BASE_LD_LIBRARY_PATH", "")
+    return env
+
+
+class ProcessEngine:
+    """An engine that is a process group of its own: started on load, stopped (SIGTERM, then SIGKILL) on unload — which
+    is what gives its GPU / host memory back. `pid_file` adopts the process start.sh started at boot."""
+
+    def __init__(self, name: str, command: list[str], health_url: str, log_path: str, pid_file: str | None = None,
+                 warm=None, stop_s: float = 30.0):
+        self.name, self.command, self.health_url, self.log_path = name, command, health_url, log_path
+        self.pid_file, self.warm, self.stop_s = pid_file, warm, stop_s
+        self.pid: int | None = None
+
+    def adopt(self) -> None:
+        if self.pid_file and Path(self.pid_file).exists():
+            try:
+                self.pid = int(Path(self.pid_file).read_text().strip())
+            except ValueError:
+                self.pid = None
+
+    async def load(self) -> None:
+        if not await self.answering():
+            log = open(self.log_path, "ab")  # noqa: SIM115 — handed to the child
+            proc = subprocess.Popen(self.command, stdout=log, stderr=subprocess.STDOUT, env=child_env(), start_new_session=True,
+                                    cwd=str(Path(__file__).parent))
+            log.close()
+            self.pid = proc.pid
+            if self.pid_file:
+                Path(self.pid_file).write_text(str(proc.pid))
+            print("tts engine", self.name, "started, pid", proc.pid, flush=True)
+        await engine_up(self.health_url)
+        if self.warm:
+            await self.warm()
+
+    async def answering(self) -> bool:
+        try:
+            return (await client.get(self.health_url, timeout=2.0)).status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    async def unload(self) -> None:
+        if self.pid is None:
+            self.adopt()
+        if self.pid is None:
+            raise RuntimeError(f"{self.name}: no process to stop")
+        try:
+            group = os.getpgid(self.pid)
+        except ProcessLookupError:
+            group = None
+        for sig, wait_s in ((signal.SIGTERM, self.stop_s), (signal.SIGKILL, 10.0)):
+            if group is None:
+                break
+            try:
+                os.killpg(group, sig)
+            except ProcessLookupError:
+                break
+            deadline = time.monotonic() + wait_s
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(group, 0)
+                except ProcessLookupError:
+                    group = None
+                    break
+                await asyncio.sleep(0.5)
+        try:
+            os.waitpid(self.pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        self.pid = None
+        if self.pid_file:
+            Path(self.pid_file).unlink(missing_ok=True)
+        print("tts engine", self.name, "stopped", flush=True)
 
 
 # ── Engine logs ──────────────────────────────────────────────────────────────
@@ -1048,7 +1224,7 @@ async def debug_gpu(request: Request):
 @app.get("/health")
 async def health():
     return JSONResponse({**ready, "models": MODELS, "stages": stages, "stt": stt_batcher.stats if stt_batcher else {},
-                         "s2s": turns, "proxy": proxied,
+                         "tts": tts_manager.view(), "s2s": turns, "proxy": proxied,
                          "kokoro": {k: v for k, v in kokoro_state.items() if k != "voices"}}, status_code=200 if ready["ok"] else 503)
 
 
@@ -1090,7 +1266,7 @@ def load_stt_sync() -> SttBatcher:
 
 async def boot_stt() -> None:
     global stt_batcher
-    if STT_AFTER_TTS:
+    if STT_AFTER_TTS and TTS_BOOT == "qwen":
         stage("stt", "waiting", "for the TTS engine (GPU memory order)")
         await engine_up(f"{TTS_URL}/health")
     stage("stt", "loading")
@@ -1115,9 +1291,26 @@ async def boot_llm() -> None:
 async def boot_tts() -> None:
     stage("tts", "loading", "reference voices")
     await asyncio.to_thread(load_voices)
-    stage("tts", "waiting", "for vLLM-Omni")
-    await engine_up(f"{TTS_URL}/health")
-    stage("tts", "warming")
+    if TTS_BOOT == "qwen" and "qwen" in tts_manager.engines:
+        # start.sh started vLLM-Omni first on the card: adopt it (pid file) once it answers and is warm.
+        stage("tts", "waiting", "for vLLM-Omni")
+        qwen_engine.adopt()
+
+        async def up_and_warm():
+            await engine_up(f"{TTS_URL}/health")
+            stage("tts", "warming")
+            await warm_qwen()
+        await tts_manager.adopt("qwen", up_and_warm)
+    elif TTS_BOOT in tts_manager.engines:
+        stage("tts", "loading", TTS_BOOT)
+        await tts_manager.select(TTS_BOOT, force=True, wait=True)
+        if not tts_manager.loaded(TTS_BOOT):
+            raise RuntimeError(f"{TTS_BOOT}: {tts_manager.status[TTS_BOOT].get('detail', 'failed')}")
+    stage("tts", "loaded", None if TTS_BOOT in tts_manager.engines else "no TTS engine at boot: the first request loads one")
+
+
+async def warm_qwen() -> None:
+    """The first real request must not pay kernel loads: every catalog voice speaks once."""
     voice = next(iter(voices.values()), None)
     if voice:
         for line in ("Olá, bom dia.", "Tudo bem? Então vamos lá."):
@@ -1128,7 +1321,6 @@ async def boot_tts() -> None:
             await tts_stream("Olá, bom dia.", LANGUAGE.get(other.get("lang", "pt")[:2], "Portuguese"), other, asyncio.Queue())
         except Exception as error:  # noqa: BLE001
             print("warm voice", name, repr(error), flush=True)
-    stage("tts", "loaded")
 
 
 async def boot() -> None:
@@ -1149,7 +1341,14 @@ async def boot() -> None:
     print("boot", json.dumps({k: v["at_s"] for k, v in stages.items()}), ready["detail"], flush=True)
 
 
+qwen_engine = ProcessEngine("qwen", ["bash", TTS_START_SCRIPT], f"{TTS_URL}/health", "/var/log/tts.log", pid_file=TTS_PID_FILE,
+                            warm=warm_qwen)
+pocket_process = ProcessEngine("pocket", [BASE_PYTHON, str(Path(__file__).with_name("pocket_server.py")), str(POCKET_PORT)],
+                               f"{POCKET_URL}/health", "/var/log/pocket.log")
+tts_manager = EngineManager({name: {"qwen": qwen_engine, "kokoro": KokoroEngine(), "pocket": pocket_process}[name] for name in TTS_ENGINES},
+                            switch_idle_s=TTS_SWITCH_IDLE_S, log=lambda line: print(line, flush=True))
+
+
 @app.on_event("startup")
 async def startup() -> None:
     asyncio.create_task(boot())
-    asyncio.create_task(load_kokoro())

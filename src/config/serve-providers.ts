@@ -476,7 +476,7 @@ function linkOf(e: RouteEntrySpec, gatewayModel: string, r: RouteTarget<unknown>
   const target = linkTarget(e, e.model ?? gatewayModel);
   const base = {
     target, providerId: isDeployment || target.startsWith('local:') ? target : e.provider,
-    ...(isDeployment ? { deployment: e.deployment ?? '' } : { model: e.model ?? gatewayModel }),
+    ...(isDeployment ? { deployment: e.deployment ?? '', upstreamModel: e.model ?? gatewayModel } : { model: e.model ?? gatewayModel }),
   };
   if (typeof r === 'string') return { ...base, notMounted: r };
   return { ...base, ...(r.unavailableNow ? { unavailableNow: r.unavailableNow } : {}) };
