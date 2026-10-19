@@ -143,7 +143,8 @@ async function call(link: FallbackLink, signal: AbortSignal, heard?: Buffer): Pr
     return HEARD.test(plain(r.text ?? '')) ? { content: 'ok', note: null } : { content: 'mismatch', note: `ouviu ${quote(r.text ?? '')} em vez de «bom dia»` };
   }
   if (link.stage === 'tts') {
-    const res = await (link.provider as TTSProvider).synthesize({ input: SAID, model: link.model, voice: link.voice ?? '', signal });
+    // `extra.language`: the gateway's own speech server picks its voice by language (route-tts.ts); cloud links ignore it.
+    const res = await (link.provider as TTSProvider).synthesize({ input: SAID, model: link.model, voice: link.voice ?? '', signal, extra: { language: 'pt' } });
     const audio = await audioOf(res);
     if (!audio.length) throw new Error('empty audio');
     return audioCheck(audio, res.contentType ?? '');
