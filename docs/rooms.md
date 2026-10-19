@@ -53,6 +53,20 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
 
 - Voices (primary subtag): en `af_heart`, fr `ff_siwis`, es `ef_dora`, pt `pf_dora`, it `if_sara`, ja `jf_alpha`,
   zh `zf_xiaobei`, hi `hf_alpha`. Other languages are not voiced.
+- **Pocket TTS first (user decision 2026-10-19)**: with `POCKET_TTS_API_KEY` set (the `pocket` provider is mounted, see
+  below) the rooms speak Pocket's languages with Pocket (`pocketTts`, src/tts): en `alba`, fr `estelle`, de `juergen`,
+  pt `rafael`, es `lola`, it `giovanni`, nl `daan` — the voice recorded in each language (any Pocket voice speaks every
+  language, but with its own accent; a room knows nothing of the speaker's gender). German and Dutch become dubbable
+  (`dubLangs` / `listenLangs`). Order per line: the speaker's clone (below) → Pocket → Kokoro. A Pocket 503 `loading`
+  (a language loaded on its first request: de, it, nl… unless in `POCKET_PRELOAD`) or `busy`, an error, or no first
+  audio within 4 s (`POCKET_FIRST_AUDIO_MS`) → that line goes to Kokoro (own server, then OpenRouter); a language only
+  Pocket speaks (de, nl) loses that line's voice. Loading/busy never feed the breaker (`cold`/`saturated`, neutral);
+  real failures do (`tts:pocket:pocket`, shared with the app chains' `pocket` link). Streamed like Kokoro (24 kHz PCM
+  pieces to the page). **No speed**: Pocket has none (the server ignores `speed`), so Pocket lines get neither the
+  speaker's pace nor the catch-up speed — Pocket speaks ~2× faster than real time, the backlog bound (4 waiting) and
+  the page's 6 s drop still apply. **One call at a time per room language** (`TtsStream` `maxParallel` 1): the server
+  speaks one sentence at a time per language and a second call waits ≤ 2 s then gets 503 `busy`, which would switch
+  that line to Kokoro's (other) voice. Without the key: Kokoro alone, as before.
 - Spend only on demand: a line+language is synthesized only while at least one viewer has sent `listen` for that
   language (a viewer that never sent `listen` does not count) and the line has a non-empty translation for it.
 - The presenter wins: in a language the presenter has sent clips in, the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500)
@@ -144,7 +158,7 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
   only for those; without `dubLangs` (server dubbing off) it offers every translation language as before.
 - Languages the presenter does not publish: the snapshot carries `listenLangs` (additive) = the Kokoro languages that are
-  neither a room language nor the spoken one (en, fr, es, pt, it, ja, zh, hi minus those). The page lists them in its
+  neither a room language nor the spoken one (en, fr, es, pt, it, ja, zh, hi minus those; + de, nl with Pocket). The page lists them in its
   language menu; for a viewer that listens to or reads one, the server translates each final line from the original
   (`openRouterTranslate`: OpenRouter `google/gemini-2.5-flash-lite`, reasoning off, 6 s), stores it on the line
   (`translations[lang]`, broadcast as a `line` update so every viewer of that language sees it) and voices it for the
@@ -169,11 +183,11 @@ another person starts speaking. API and Local mode never send it.
   `babelcast-tts`), through `routeRequest` (one request per sentence, no hedge, 15 s), as WAV with `task_type: "Base"`,
   `ref_audio`, `ref_text` and the target `language`. Used only while that deployment has a ready replica: the room
   never wakes it (`noWake` lease, no wait); cold → Kokoro as above. A line is voiced in the voice of the reference for
-  its `originalLang`; no reference for that language, or the clone call failed → Kokoro (a language Kokoro lacks then
-  has no voice for that line). No catch-up `speed` on the clone.
+  its `originalLang`; no reference for that language, or the clone call failed → Pocket, then Kokoro (a language neither
+  speaks then has no voice for that line). No catch-up `speed` on the clone.
 - Languages: while cloning (a reference arrived and the deployment is serving), `dubLangs` / `listenLangs` follow
-  Qwen3-TTS — en, zh, ja, ko, de, fr, ru, pt, es, it (German, Korean and Russian become available, Hindi does not);
-  otherwise Kokoro's. When a reference switches them, open pages get `{"type":"update"}` with the new lists.
+  Qwen3-TTS — en, zh, ja, ko, de, fr, ru, pt, es, it (Korean and Russian become available, Hindi and Dutch do not);
+  otherwise Kokoro's plus Pocket's. When a reference switches them, open pages get `{"type":"update"}` with the new lists.
 
 ## Viewer pages
 
