@@ -89,7 +89,8 @@ export const BUILTIN_PROFILES: Profile[] = [
       // Cold start is a measured 8–9 min (pull + model load + warm-up): the 240 s default would fail every cold call.
       coldStartWaitSeconds: 600,
       bootTimeoutMinutes: 20,
-      // Vast cannot park a replica: it is deleted when idle.
+      // Deleted when idle by default; a declaration may park it instead (`idleAction: 'stop'`, Vast since 18/10/2026:
+      // the disk stays, billed, and the next wake skips the ~9-min pull).
       idleAction: 'delete',
       // Measured 2026-10-04 (docker/speech-stack/README.md): L4 24 GB fits STT_BATCH 4 / LLM 8 slots beside the TTS
       // (more OOMs); the L40S 48 GB takes STT_BATCH 8 / LLM 16 / a 12 GB TTS stage. RT_MAX_SESSIONS is the realtime

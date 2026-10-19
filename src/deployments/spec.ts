@@ -494,7 +494,7 @@ export function usesScaleway(spec: Pick<DeploymentSpec, 'provider' | 'candidates
  * Vast runs ONE container per host (no systemd, no Docker-in-Docker): the replica is `image` as the container with
  * `bootScript` as its onstart, the app on `127.0.0.1:<port>`. No user_data metadata service (no `files`: `fileUrls`
  * are downloaded at boot instead), no reserved
- * IP/firewall (no `exposure`), no power-off parking (no `idleAction: 'stop'`). `realtime` runs the edge inside that
+ * IP/firewall (no `exposure`); `idleAction: 'stop'` parks by stopping the instance (disk kept). `realtime` runs the edge inside that
  * container, one mapped port per UDP media port (`realtime-ports.ts`). Vast refuses a create whose env passes
  * 32 KB in total (`invalid env arguments, total length > 32KB`, live 2026-10-08), and the init script travels there.
  */

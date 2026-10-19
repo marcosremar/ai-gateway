@@ -13,7 +13,7 @@ import { probeConnectRtt, probeRtt } from '../gateway/providers/gpu/rtt-probe';
 import { vastReplicaInit } from './cloud-init';
 import { MIN_HOST_LEFT_MS, vastEndsAt } from './expiry';
 import { countryDistanceKm, EU_COUNTRIES } from './geo';
-import { HostReputation, type HostRecord, type HostStore } from './host-reputation';
+import { HostReputation, withImageBoot, type HostRecord, type HostStore } from './host-reputation';
 import { bootMinutes, countryOf, DEFAULT_NEAR, effectivePrice, pullMinutes, rankOffers, type VastOffer } from './placements';
 import { vastPortCount, vastUdpRange } from './realtime-ports';
 import { gateDecision, gateNote, RTT_ANCHOR_PORT, type RttBaseline } from './rtt-gate';
@@ -73,6 +73,12 @@ export const CREDIT_CHECK_MS = 60_000;
 
 /** Offers tried per create (a rented-in-between offer answers "not available"); more would only slow the walk. */
 export const MAX_RENT_TRIES = 5;
+/**
+ * Offers asked per search. The API sorts by price worldwide and cuts at `limit` BEFORE the ranking drops the far ones:
+ * at 100, the cheapest US/Asian offers could fill the page and leave no European one to rank (`euOnly` already asked
+ * 1000). The ranking keeps only hosts near `near` (or far ones with `allowFar`), so every spec asks for the full page.
+ */
+export const VAST_SEARCH_LIMIT = 1000;
 
 /** The instance list is reused this long: a reconcile kick storm must not become a request storm (Vast rate-limits it). */
 export const LIST_CACHE_MS = 5_000;
@@ -171,6 +177,8 @@ export class VastDeploymentBackend implements DeploymentBackend {
   private readonly hosts: HostReputation;
   /** instance id → host machine_id (from create and list). */
   private readonly hostOf = new Map<string, number>();
+  /** instance id → the image it was rented with (from create): a first ready is remembered as that image's boot. */
+  private readonly imageOf = new Map<string, string>();
   /** Last good `/instances/` answer (briefly reused, and served while Vast rate-limits). */
   private listCache: { at: number; machines: ReplicaMachine[]; namespace: string } | null = null;
   private listBackoffUntil = 0;
@@ -251,7 +259,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       ...(spec.minCpuCores ? { cpu_cores_effective: { gte: spec.minCpuCores } } : {}),
       ...(spec.minRamGb ? { cpu_ram: { gte: spec.minRamGb * 1024 } } : {}),
       order: [['dph_total', 'asc']],
-      limit: spec.euOnly ? 1000 : 100,
+      limit: VAST_SEARCH_LIMIT,
     };
   }
 
@@ -266,6 +274,10 @@ export class VastDeploymentBackend implements DeploymentBackend {
     const all = this.hosts.list();
     const knownRtt = new Map(all.filter(h => this.knownGood(h, now)).map(h => [h.host, h.rttMs! - (h.baselineMs ?? 0)]));
     const proven = new Set(all.filter(h => h.bootsOk > 0 && h.lastError == null).map(h => h.host));
+    const imageBoots = new Map(all.flatMap((h) => {
+      const ms = h.lastError == null ? h.images?.[spec.image] : undefined;
+      return ms === undefined ? [] : [[h.host, ms / 60_000] as const];
+    }));
     const usdCap = spec.maxEurPerHour * EUR_TO_USD;
     let skipped: SkippedOffer[] = [];
     for (const reliability of [MIN_RELIABILITY, FALLBACK_RELIABILITY]) {
@@ -284,7 +296,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         offerId: o.id, machineId: o.machine_id ?? null, location: o.geolocation ?? null, usdPerHour: o.dph_total, reason: reasons.get(o)!,
       }));
       const ranked = rankOffers(valid.filter(o => !reasons.get(o)), {
-        near: spec.near ?? DEFAULT_NEAR, ...(spec.allowFar ? { allowFar: true } : {}), knownRtt, proven,
+        near: spec.near ?? DEFAULT_NEAR, ...(spec.allowFar ? { allowFar: true } : {}), knownRtt, proven, imageBoots,
         ...(spec.imageGb ? { imageGb: spec.imageGb } : {}),
       });
       if (ranked.length) return { ranked, skipped };
@@ -329,6 +341,9 @@ export class VastDeploymentBackend implements DeploymentBackend {
         if (!res.success || res.new_contract == null) throw new Error(`not available: ${res.error ?? res.msg ?? 'success=false'}`);
         const id = String(res.new_contract);
         input.onCreated?.(id); // the cached list lacks it; the controller keeps a fresh create until a list shows it
+        this.imageOf.set(id, spec.image);
+        // Read before `note` below, which would make it look freshly used.
+        const bootedBefore = this.hosts.get(offer.machine_id)?.images?.[spec.image];
         if (offer.machine_id !== undefined) {
           this.hostOf.set(id, offer.machine_id);
           this.hosts.note(offer.machine_id, { location: offer.geolocation ?? null });
@@ -337,10 +352,12 @@ export class VastDeploymentBackend implements DeploymentBackend {
         this.log('deployments: vast offer rented', {
           deployment: spec.name, id, offer: offer.id, host: offer.machine_id, location: offer.geolocation, usdPerHour: offer.dph_total,
           inetDownMbps: offer.inet_down, reliability: offer.reliability2, rank, of: offers.length, skipped: misses,
+          ...(bootedBefore !== undefined ? { imageBootedBeforeMs: bootedBefore } : {}),
         });
         const host = this.hosts.get(offer.machine_id);
         return {
           placementNote: `offer ${rank} of ${offers.length}: ${describeOffer(offer, spec.imageGb)}${this.knownGood(host, this.now()) ? `, passed the RTT gate at ${host.rttMs} ms` : ''}`
+            + (bootedBefore !== undefined ? `, booted this image here before in ${Math.round(bootedBefore / 60_000)} min` : '')
             + (misses.length ? `; better-ranked offers passed over: ${misses.join('; ')}` : ''),
           id, deployment: spec.name, ip: null, state: 'starting', createdAt: this.now(), provider: 'vast', tls: true,
           zone: offer.geolocation ?? '', machineType: offer.gpu_name ?? spec.machineType,
@@ -438,6 +455,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       if (!(err instanceof VastApiError && err.status === 404)) throw err;
     }
     this.hostOf.delete(machine.id);
+    this.imageOf.delete(machine.id);
     if (this.listCache) this.listCache.machines = this.listCache.machines.filter(m => m.id !== machine.id); // not listed again as alive
   }
 
@@ -554,9 +572,12 @@ export class VastDeploymentBackend implements DeploymentBackend {
     const host = this.hostOf.get(machine.id);
     if (host === undefined) return;
     const { bootMs, udp, ...rtt } = note;
+    const known = this.hosts.get(host);
+    const image = this.imageOf.get(machine.id);
     this.hosts.note(host, {
       ...rtt,
-      ...(bootMs !== undefined ? { bootMs, bootsOk: (this.hosts.get(host)?.bootsOk ?? 0) + 1, lastError: null } : {}),
+      ...(bootMs !== undefined ? { bootMs, bootsOk: (known?.bootsOk ?? 0) + 1, lastError: null } : {}),
+      ...(bootMs !== undefined && image ? { images: withImageBoot(known?.images, image, bootMs) } : {}),
       ...(udp ? { udp, udpAt: this.now() } : {}),
     });
   }

@@ -48,6 +48,22 @@ describe('rankOffers: time to ready inside a distance band', () => {
     expect(rankOffers([slowCheap, fastDear], { near: 'FR', imageGb: IMAGE_GB, proven: new Set([10]) }).map(o => o.id)).toEqual([1, 2]);
   });
 
+  it('a host that booted this image goes first in its country (fastest measured boot first), then one that booted another image, then the rest', () => {
+    const cheapNew = offer(1, 'Lyon, FR', 0.15, 0.99, 8000);
+    const otherImage = offer(2, 'Paris, FR', 0.20);
+    const slowSame = offer(3, 'Paris, FR', 0.25);
+    const fastSame = offer(4, 'Paris, FR', 0.29);
+    const sameAbroad = offer(5, 'Frankfurt, DE', 0.10);
+    const all = [cheapNew, otherImage, slowSame, fastSame, sameAbroad];
+    const imageBoots = new Map([[30, 14], [40, 9], [50, 5]]);
+    const proven = new Set([20, 30, 40, 50]);
+    expect(rankOffers(all, { near: 'FR', imageGb: IMAGE_GB, proven, imageBoots }).map(o => o.id)).toEqual([4, 3, 2, 1, 5]);
+    // Measured boots closer than BOOT_BAND_MINUTES tie: price decides.
+    expect(rankOffers([slowSame, fastSame], { near: 'FR', imageBoots: new Map([[30, 9.5], [40, 8.5]]) }).map(o => o.id)).toEqual([3, 4]);
+    // Without the per-image memory: "proven" only, as before.
+    expect(rankOffers(all, { near: 'FR', imageGb: IMAGE_GB, proven }).map(o => o.id)).toEqual([2, 3, 4, 1, 5]);
+  });
+
   it('close estimates tie and price decides; distance still comes first', () => {
     const a = offer(1, 'Warsaw, PL', 0.20, 0.99, 1500);
     const b = offer(2, 'Krakow, PL', 0.15, 0.99, 1200);

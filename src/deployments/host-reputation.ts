@@ -16,6 +16,17 @@ export interface HostRecord {
   lastErrorAt: number | null;
   avoidUntil: number;
   lastUsedAt: number;
+  /** Image reference → ms of its last fresh boot here (rent → ready; a power-on of a parked replica is not one). */
+  images?: Record<string, number>;
+}
+
+/** Images remembered per host (the most recent boots). */
+export const IMAGES_PER_HOST = 5;
+
+/** `images` with `image` booted in `bootMs`, most recent last, at most `IMAGES_PER_HOST`. */
+export function withImageBoot(images: Record<string, number> | undefined, image: string, bootMs: number): Record<string, number> {
+  const rest = Object.entries(images ?? {}).filter(([ref]) => ref !== image);
+  return Object.fromEntries([...rest, [image, bootMs] as const].slice(-IMAGES_PER_HOST));
 }
 
 export interface HostStore {

@@ -42,7 +42,8 @@ export abstract class ReplicaLifecycle extends ControllerState {
       }
       rt.bootTimeouts = 0;
       rt.lostAt = null;
-      if (!p.everReady && m.createdAt >= this.startedAt) this.backends[this.providerOf(m)]?.noteHost?.(m, { bootMs: this.now() - m.createdAt });
+      // A fresh boot only: a parked replica powered back on (`poweredOnAt`) did not pull, and `createdAt` is its first rent.
+      if (!p.everReady && m.createdAt >= this.startedAt && !this.poweredOnAt.has(m.id)) this.backends[this.providerOf(m)]?.noteHost?.(m, { bootMs: this.now() - m.createdAt });
       p.readyAt ??= this.now(); p.everReady = true; p.readyNow = true; p.failures = 0; p.busy = false; rt.starting.delete(m.id);
     } else if (result === 'busy' && p.everReady && (this.busyOn(rt, m.id) > 0 || this.servedRecently(p))) {
       // Alive (its front answers) and working: the health check queued behind the work. Keep it serving what it can.
