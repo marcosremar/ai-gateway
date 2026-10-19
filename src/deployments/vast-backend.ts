@@ -45,7 +45,10 @@ export const MEASURED_RTT_MS = 7 * 24 * 3_600_000;
 export const KNOWN_RTT_MS = 24 * 3_600_000;
 export const KNOWN_RTT_MAX_HOSTS = 200;
 export const UDP_BLOCKED_HOST_MS = 24 * 3_600_000;
-const FAILURE_AVOID_MS = new Map([['too-far', 0], ['boot-timeout', BAD_HOST_MS], ['boot-stuck', BAD_HOST_MS], ['udp-blocked', 0]]);
+// `resume-timeout`: the host accepted a power-on of our parked instance but never resumed it (its GPU rented meanwhile).
+const FAILURE_AVOID_MS = new Map([
+  ['too-far', 0], ['boot-timeout', BAD_HOST_MS], ['boot-stuck', BAD_HOST_MS], ['resume-timeout', BAD_HOST_MS], ['udp-blocked', 0],
+]);
 /** RTT samples per measurement (median) and per-sample timeout: one gate check stays within a few seconds. */
 export const RTT_SAMPLES = 5;
 export const RTT_SAMPLE_TIMEOUT_MS = 2_000;

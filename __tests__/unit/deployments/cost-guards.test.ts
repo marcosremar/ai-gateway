@@ -88,6 +88,98 @@ describe('idleAction stop: a stopping replica is not halted', () => {
   });
 });
 
+describe('resume deadline: a parked replica powered on that never resumes is given up (Vast, 18-19/10/2026)', () => {
+  const GAVE_UP = 'deployments: resume timed out, releasing to rent a fresh replica';
+
+  /** Parks `park`, then powers it on with a cloud that accepts the start but never resumes it (listed `state`). */
+  async function resumeThatFails(state: string, opts: Partial<ControllerOptions> = {}) {
+    const x = await setup(opts);
+    await x.controller.put('park', { ...PARKING });
+    await parkIt(x, 'park', 1);
+    await until(() => x.controller.get('park')!.replicas[0]?.providerState === 'stopped', 3000);
+    const parked = x.controller.get('park')!.replicas[0]!.id;
+    x.cloud.resumeFailsAs = state;
+    x.controller.wake('park');
+    await until(() => x.cloud.starts.length === 1, 3000);
+    return { ...x, parked };
+  }
+
+  it('listed exited: still starting during the grace, released as resume-timeout past the deadline, and a fresh replica serves', async () => {
+    const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+    const x = await resumeThatFails('exited', { log: (msg, data) => logs.push([msg, data]) });
+    x.clock.t += 3 * 60_000; // inside the #214 grace and the deadline (no measured resume: 2 × 180 s = 6 min)
+    x.controller.wake('park');
+    await wait(150);
+    expect(x.cloud.released).toEqual([]);
+    expect(x.cloud.created).toHaveLength(1);
+    x.clock.t += 4 * 60_000; // 7 min after the power-on
+    x.controller.wake('park');
+    await until(() => x.cloud.releaseReasons.includes('resume-timeout'), 3000);
+    expect(x.cloud.released).toEqual([x.parked]);
+    await until(() => x.controller.get('park')!.status === 'ready', 3000);
+    expect(x.cloud.created).toHaveLength(2);
+    expect(x.cloud.starts).toHaveLength(1);
+    expect(logs.find(([msg]) => msg === GAVE_UP)?.[1]).toMatchObject({ deployment: 'park', id: x.parked, deadlineSeconds: 360, state: 'exited' });
+  });
+
+  it('still listed stopped: powered on again meanwhile (counted as capacity), but the deadline counts from the first power-on', async () => {
+    const x = await resumeThatFails('stopped');
+    for (const n of [2, 3]) {
+      x.clock.t += 2 * 60_000; // past PARKED_START_GRACE_MS: still stopped, so powered on again
+      x.controller.wake('park');
+      await until(() => x.cloud.starts.length === n, 3000);
+    }
+    // Before: powered on every 90 s for up to parkedMaxMs (72 h), never a fresh replica.
+    expect(x.cloud.created).toHaveLength(1);
+    expect(x.cloud.released).toEqual([]);
+    x.clock.t += 3 * 60_000; // 7 min after the first power-on, 3 min after the last one
+    x.controller.wake('park');
+    await until(() => x.cloud.releaseReasons.includes('resume-timeout'), 3000);
+    await until(() => x.controller.get('park')!.status === 'ready', 3000);
+    expect(x.cloud.released).toEqual([x.parked]);
+    expect(x.cloud.created).toHaveLength(2);
+    expect(x.cloud.starts).toHaveLength(3);
+  });
+
+  it('a resume that serves within the deadline is kept, also long after its power-on', async () => {
+    const x = await setup();
+    await x.controller.put('park', { ...PARKING });
+    await parkIt(x, 'park', 1);
+    await until(() => x.controller.get('park')!.replicas[0]?.providerState === 'stopped', 3000);
+    x.cloud.startLagMs = 300; // listed exited for a while after the power-on, then boots
+    x.controller.wake('park');
+    await until(() => x.cloud.starts.length === 1, 3000);
+    x.clock.t += 3 * 60_000; // a slow resume, still within the deadline
+    x.controller.wake('park');
+    await until(() => x.controller.get('park')!.status === 'ready', 4000);
+    x.clock.t += 10 * 60_000; // long past the deadline, but it served: nothing to give up
+    x.controller.wake('park');
+    await wait(150);
+    expect(x.cloud.released).toEqual([]);
+    expect(x.cloud.created).toHaveLength(1);
+    expect(x.cloud.starts).toHaveLength(1);
+    expect(x.controller.get('park')!.status).toBe('ready');
+  });
+
+  it('the deadline is 2 × the measured median resume, at least 4 min and at most the boot timeout', async () => {
+    const x = await setup();
+    await x.controller.put('park', { ...PARKING });
+    type Rt = { record: { spec: { machineType: string; image: string }; measured?: Record<string, { boot: number[]; resume: number[] }> } };
+    const internals = x.controller as unknown as { deployments: Map<string, Rt>; resumeDeadlineMs(rt: Rt, m: ReplicaMachine): number };
+    const rt = internals.deployments.get('park')!;
+    const { machineType, image } = rt.record.spec;
+    const m: ReplicaMachine = { id: 'r', deployment: 'park', ip: null, state: 'exited', createdAt: x.clock.t, zone: 'fr-par-2', machineType, pricePerHour: null };
+    const deadlineSeconds = (resume: number[]) => {
+      rt.record.measured = { [`${machineType}|${image}`]: { boot: [], resume } };
+      return internals.resumeDeadlineMs(rt, m) / 1000;
+    };
+    expect(deadlineSeconds([])).toBe(360); // DEFAULT_RESUME_SECONDS × 2
+    expect(deadlineSeconds([115, 126, 137])).toBe(252); // the clone's 3090, measured
+    expect(deadlineSeconds([60])).toBe(240); // floor: 4 min
+    expect(deadlineSeconds([3_600])).toBe(15 * 60); // ceiling: cpu-echo's bootTimeoutMinutes
+  });
+});
+
 describe('parked replicas and the caps', () => {
   it('a parked replica does not use a slot of the running cap', async () => {
     const x = await setup({ maxTotalReplicas: 1 });

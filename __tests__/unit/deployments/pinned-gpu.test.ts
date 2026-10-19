@@ -121,6 +121,9 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
     await x.reconciler.reconcile();
     x.controller.start();
     await until(() => create.mock.calls.length === 1);
+    // The back-off counts from when the failure is handled, a few microtasks after the call: wait for it before moving
+    // the clock (moved in between, the 10 min counted from the moved clock and the retry never came — CI on Node, PR #224).
+    await until(() => /insufficient_credit/.test(x.controller.get(NAME)!.lastError ?? ''));
     x.clock.t += 9 * 60_000;
     await wait(300);
     expect(create).toHaveBeenCalledTimes(1);

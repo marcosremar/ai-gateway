@@ -35,6 +35,7 @@ const MAP: Record<string, { event: string; level?: TelemetryLevel }> = {
   'deployments: stuck boot, releasing to retry': { event: 'replica.stuck_retry', level: 'warn' },
   'deployments: stuck boot retried on another offer': { event: 'replica.stuck_retried' },
   'deployments: stuck boot retries exhausted': { event: 'replica.stuck_exhausted', level: 'error' },
+  'deployments: resume timed out, releasing to rent a fresh replica': { event: 'replica.resume_timeout', level: 'warn' },
 };
 
 export function deploymentLogToTelemetry(msg: string, data?: Record<string, unknown>): void {
