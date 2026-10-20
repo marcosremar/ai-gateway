@@ -536,6 +536,51 @@ describe('pages and host routing', () => {
   });
 });
 
+describe('admin: users and access keys', () => {
+  const ADMIN = 'dono@ucast.me';
+
+  it('lists users only for an admin e-mail', async () => {
+    const gw = await startGateway({ adminEmails: [ADMIN] });
+    const ana = await signup(gw, 'ana@example.com');
+    const admin = await signup(gw, ADMIN);
+    // A plain user gets 403 and no data.
+    const denied = await call(gw, 'GET', '/v1/account/users', { headers: { Cookie: ana.cookie } });
+    expect(denied.status).toBe(403);
+    expect(denied.text).not.toContain('ana@example.com');
+    // The admin sees everyone, newest first.
+    const r = await call(gw, 'GET', '/v1/account/users', { headers: { Cookie: admin.cookie } });
+    expect(r.status).toBe(200);
+    const emails = (r.json.users as Array<{ email: string }>).map(u => u.email);
+    expect([...emails].sort()).toEqual([ADMIN, 'ana@example.com'].sort());
+    expect(r.json.users[0].createdAt).toBeTruthy();
+    expect(r.json.users[0].lastSeenAt).toBeTruthy();
+  });
+
+  it('sends a new activation key by e-mail, never in the API answer', async () => {
+    const gw = await startGateway({ adminEmails: [ADMIN] });
+    const ana = await signup(gw, 'ana@example.com');
+    const admin = await signup(gw, ADMIN);
+    const users = (await call(gw, 'GET', '/v1/account/users', { headers: { Cookie: admin.cookie } })).json.users as Array<{ id: string; email: string }>;
+    const anaId = users.find(u => u.email === 'ana@example.com')!.id;
+    // Not an admin: refused. Without CSRF: refused. Unknown user: 404.
+    expect((await call(gw, 'POST', `/v1/account/users/${anaId}/access-key`, { headers: { Cookie: ana.cookie, 'X-CSRF-Token': ana.csrf }, body: {} })).status).toBe(403);
+    expect((await call(gw, 'POST', `/v1/account/users/${anaId}/access-key`, { headers: { Cookie: admin.cookie }, body: {} })).status).toBe(403);
+    expect((await call(gw, 'POST', '/v1/account/users/usr_nope/access-key', { headers: { Cookie: admin.cookie, 'X-CSRF-Token': admin.csrf }, body: {} })).status).toBe(404);
+    // The happy path: the key goes to Ana's inbox and activates the app.
+    const r = await call(gw, 'POST', `/v1/account/users/${anaId}/access-key`, { headers: { Cookie: admin.cookie, 'X-CSRF-Token': admin.csrf }, body: { deviceName: 'Notebook da Ana' } });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ ok: true, email: 'ana@example.com' });
+    expect(r.text).not.toContain('ucast_live_');
+    const mail = gw.mails.find(m => m.to === 'ana@example.com' && m.subject.includes('chave'));
+    expect(mail).toBeTruthy();
+    const key = /ucast_live_[A-Za-z0-9_-]{43}/.exec(mail!.text)?.[0];
+    expect(key).toBeTruthy();
+    const act = await call(gw, 'POST', '/v1/activate', { body: { key, deviceName: 'Notebook da Ana' } });
+    expect(act.status).toBe(200);
+    expect(act.json.email).toBe('ana@example.com');
+  });
+});
+
 describe('helpers', () => {
   it('reads WAV durations', () => {
     expect(wavSeconds(wav(2.5))).toBeCloseTo(2.5, 3);

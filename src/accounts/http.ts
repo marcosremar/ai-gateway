@@ -180,7 +180,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, path: string): Promise<void> {
     const ip = RateLimiter.clientIp(req);
-    const route = `${method} ${path.replace(/^\/v1\/account\/keys\/[^/]+/, '/v1/account/keys/:id')}`;
+    const route = `${method} ${path.replace(/^\/v1\/account\/keys\/[^/]+/, '/v1/account/keys/:id').replace(/^\/v1\/account\/users\/[^/]+\/access-key$/, '/v1/account/users/:id/access-key')}`;
     switch (route) {
       case 'POST /v1/account/signup': {
         sameSiteForm(req);
@@ -262,6 +262,23 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         const w = writer(req);
         req.resume();
         send(res, 200, await service.revokeKey(w.user.id, m[1]!));
+        return;
+      }
+      case 'GET /v1/account/users': {
+        const w = who(req, false);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        send(res, 200, { users: service.listUsers() });
+        return;
+      }
+      case 'POST /v1/account/users/:id/access-key': {
+        const m = /^\/v1\/account\/users\/([A-Za-z0-9_]{1,64})\/access-key$/.exec(path);
+        if (!m) break;
+        const w = writer(req);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        limit(`admin:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
+        const body = await readJson(req);
+        const { email } = await service.sendAccessKey(m[1]!, body.deviceName);
+        send(res, 200, { ok: true, email });
         return;
       }
       case 'POST /v1/activate': {
