@@ -14,6 +14,6 @@ RUN hf download "$KOKORO_STREAM_REPO" --revision "$KOKORO_STREAM_REVISION" --loc
  && cd "$KOKORO_STREAM_DIR" && sha256sum -c models.sha256 && rm -rf .cache
 WORKDIR /app
 COPY server.py normalize.py vowels.py pt_vowels.tsv pocket.py ./
-ARG POCKET_CUSTOM="pt erinome hf://marcosremar2/pocket-tts-erinome-pt/erinome_6l.yaml@84dc5f224359dcb5ab0a862688cabe54a4f40389 hf://marcosremar2/pocket-tts-erinome-pt/erinome_6l_voice.safetensors@84dc5f224359dcb5ab0a862688cabe54a4f40389"
+ARG POCKET_CUSTOM="pt erinome hf://marcosremar2/pocket-tts-erinome-pt/erinome_6l.yaml@3d1c596927606badfd643a01682b0feedcd58daa hf://marcosremar2/pocket-tts-erinome-pt/erinome_6l_voice.safetensors@3d1c596927606badfd643a01682b0feedcd58daa"
 RUN if [ "$WITH_POCKET" = 1 ]; then python -X utf8 pocket.py bake "$POCKET_BAKE" && rm -rf "$HF_HOME/xet"; fi
 CMD ["sh", "-c", "exec uvicorn server:app --host :: --port ${PORT:-8000}"]
