@@ -16,8 +16,8 @@ const SETTINGS_PATH = path.join(configDir, 'latency-settings.json');
 
 // ── GPU Priority Defaults ────────────────────────────────────────────────────
 
-// Default GPU priority — EMPTY means no filtering (all GPU types shown)
-// To enable filtering, set gpuPriorityList in latency-settings.json
+// Default GPU priority. This is only a fallback/preference order; it must not
+// reject explicitly requested GPU types.
 export const DEFAULT_GPU_PRIORITY: string[] = [];
 
 // Per-provider defaults — empty = no filtering
@@ -35,7 +35,7 @@ interface DeploySettings {
   intervalMin:           number;                   // latency probe interval in minutes
   lastRunAt:             number;                   // ms timestamp of last probe cycle
   maxLatencyMs:          number;                   // deploy threshold (0 = disabled)
-  gpuPriorityList:       string[];                 // global GPU priority fallback
+  gpuPriorityList:       string[];                 // global GPU priority fallback/preference
   gpuPriorityByProvider: Record<string, string[]>; // per-provider GPU priority overrides
   gpuSortBy:             GpuSortBy;               // offer selection criteria
   deployTimeoutMin:      number;                   // max wait per provider (min 3, max 60)
@@ -204,11 +204,11 @@ export function setLatencyMaxMs(maxLatencyMs: number): void {
 
 export function getGpuPriorityList(): string[] { return _s.gpuPriorityList; }
 
-// Returns true if GPU type filtering is disabled
+// Returns true when auto-selection has no priority list and should score all GPUs.
 export function isGpuFilterDisabled(): boolean { return _s.gpuPriorityList.length === 0; }
 
 export function setGpuPriorityList(list: string[]): void {
-  _s.gpuPriorityList = list.length > 0 ? list : [...DEFAULT_GPU_PRIORITY];
+  _s.gpuPriorityList = [...list];
   saveDeploySettings();
 }
 
@@ -220,9 +220,7 @@ export function getGpuPriorityForProvider(provider: string): string[] {
 
 export function setGpuPriorityForProvider(provider: string, list: string[]): void {
   if (!_s.gpuPriorityByProvider) _s.gpuPriorityByProvider = {};
-  _s.gpuPriorityByProvider[provider] = list.length > 0
-    ? list
-    : [...(DEFAULT_GPU_PRIORITY_BY_PROVIDER[provider] ?? DEFAULT_GPU_PRIORITY)];
+  _s.gpuPriorityByProvider[provider] = [...list];
   saveDeploySettings();
 }
 

@@ -79,6 +79,8 @@ export interface DeploymentState {
    * via hibernateRestore. Undefined when the pod is not paused.
    */
   pausedMode?: 'stop' | 'hibernate';
+  /** Set when the host passed the speed test only via degraded-accept (slow but usable). */
+  networkDegraded?: boolean;
 }
 
 // ── Mutable deploy state ────────────────────────────────────────────────────

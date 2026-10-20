@@ -18,13 +18,19 @@ export interface BuiltinContext {
   allowedReadDirs?: string[];
   /** Max bytes to read from any single source (default 256KB). */
   maxBytes?: number;
+  /** SearXNG base URL (e.g. https://searxng-auth.fly.dev). Enables web_search builtin. */
+  searxngUrl?: string;
+  /** SearXNG basic-auth user. */
+  searxngUser?: string;
+  /** SearXNG basic-auth password. */
+  searxngPassword?: string;
 }
 
 const DEFAULT_MAX_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 export function listBuiltinTools(): string[] {
-  return ['current_time', 'http_get', 'read_file', 'json_extract'];
+  return ['current_time', 'http_get', 'read_file', 'json_extract', 'web_search'];
 }
 
 export function makeBuiltin(name: string, ctx: BuiltinContext = {}): ToolHandler | null {
@@ -37,6 +43,8 @@ export function makeBuiltin(name: string, ctx: BuiltinContext = {}): ToolHandler
       return makeReadFile(ctx);
     case 'json_extract':
       return makeJsonExtract();
+    case 'web_search':
+      return makeWebSearch(ctx);
     default:
       return null;
   }
@@ -150,6 +158,45 @@ function makeJsonExtract(): ToolHandler {
         }
       }
       return JSON.stringify(value ?? null);
+    },
+  };
+}
+
+function makeWebSearch(ctx: BuiltinContext): ToolHandler {
+  const baseUrl = ctx.searxngUrl || process.env.SEARXNG_URL || '';
+  const user = ctx.searxngUser || process.env.SEARXNG_USER || '';
+  const password = ctx.searxngPassword || process.env.SEARXNG_PASSWORD || '';
+  return {
+    name: 'web_search',
+    timeoutMs: 20_000,
+    invoke: async (input, runCtx) => {
+      if (!baseUrl) throw new Error('web_search: SEARXNG_URL not configured');
+      const query = (input as { query?: unknown })?.query;
+      if (typeof query !== 'string' || !query) throw new Error('web_search requires {query:string}');
+      const categories = (input as { categories?: unknown })?.categories;
+      const language = (input as { language?: unknown })?.language;
+      const maxResults = Number((input as { max_results?: unknown })?.max_results) || 10;
+      const url = new URL('/search', baseUrl);
+      url.searchParams.set('q', query);
+      url.searchParams.set('format', 'json');
+      if (typeof categories === 'string') url.searchParams.set('categories', categories);
+      if (typeof language === 'string') url.searchParams.set('language', language);
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (user && password) headers.Authorization = 'Basic ' + Buffer.from(`${user}:${password}`).toString('base64');
+      const res = await fetch(url.toString(), { method: 'GET', headers, signal: runCtx.signal });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`web_search: SearXNG HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const data = await res.json() as { results?: Array<{ url?: string; title?: string; content?: string; engine?: string; score?: number }> };
+      const results = (data.results || []).slice(0, maxResults).map(r => ({
+        title: r.title || '',
+        url: r.url || '',
+        snippet: (r.content || '').slice(0, 300),
+        engine: r.engine || '',
+        score: r.score || 0,
+      }));
+      return JSON.stringify({ query, result_count: results.length, results });
     },
   };
 }

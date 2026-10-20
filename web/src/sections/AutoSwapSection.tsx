@@ -232,8 +232,34 @@ export function AutoSwapSection() {
           </div>
         </CardHeader>
 
-        {(benchResult || benchError) && (
+        {(benchRunning || benchResult || benchError) && (
           <CardBody>
+            {benchRunning && (
+              <div className="space-y-2 mb-4">
+                <div className="flex items-center justify-between text-xs">
+                  <span style={{ color: 'var(--color-text)' }}>Benchmark in progress…</span>
+                  <span className="font-mono" style={{ color: 'var(--color-text-muted)' }}>~30s</span>
+                </div>
+                <div
+                  className="w-full h-1.5 rounded-full overflow-hidden"
+                  style={{ background: 'var(--color-border)' }}
+                  role="progressbar"
+                  aria-label="Benchmark running"
+                >
+                  <div
+                    className="h-full"
+                    style={{
+                      width: '40%',
+                      background: 'linear-gradient(90deg, transparent, #a78bfa, transparent)',
+                      animation: 'indeterminate-progress 1.4s ease-in-out infinite',
+                    }}
+                  />
+                </div>
+                <p className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
+                  Sending phrases through detection pipeline. Result appears below when done.
+                </p>
+              </div>
+            )}
             {benchError && <AlertBanner variant="error">{benchError}</AlertBanner>}
 
             {benchResult && (

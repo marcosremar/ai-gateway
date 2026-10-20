@@ -118,6 +118,8 @@ export type ProviderMeta =
   | SnapgpuProviderMeta
   | GenericProviderMeta;
 
+export type VastSearchMode = 'high_quality' | 'full';
+
 export interface GpuInstance {
   instanceId: string;
   instanceName?: string;
@@ -208,6 +210,8 @@ export interface InstanceSpec {
   raceCount?: number;
   /** Vast.ai-only: require direct-port, high-reliability offers and skip SSH-only fallback for faster boot. */
   strictFastBoot?: boolean;
+  /** Vast.ai offer-search profile passed through deploy request (`searchMode`). */
+  searchMode?: VastSearchMode;
   /** Vast.ai-only: opt-in to deverified/unverified hosts when no verified offer is rentable.
    *  Trade-off: lower availability blocker, but host may be reclaimed mid-boot.
    *  Default false (verified-only, safer). */

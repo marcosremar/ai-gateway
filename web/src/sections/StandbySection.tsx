@@ -157,6 +157,19 @@ export function StandbySection() {
     </div>
   );
 
+  if (error && !settings) return (
+    <div className="p-6">
+      <AlertBanner variant="error">
+        Failed to load standby settings: {error}
+      </AlertBanner>
+      <div className="mt-4 flex justify-center">
+        <Button onClick={() => { setLoading(true); setError(null); load(); }} size="sm">
+          <RefreshCw className="w-3.5 h-3.5" /> Retry
+        </Button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-6 p-6">
       <SectionHeader

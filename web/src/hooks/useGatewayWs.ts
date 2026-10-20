@@ -70,6 +70,7 @@ export function useGatewayWs(): GatewayWsState {
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
   const mountedRef = useRef(true);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
@@ -83,7 +84,9 @@ export function useGatewayWs(): GatewayWsState {
     const port = locationPort === 3000 ? 4001 : locationPort + 1;
     // Skip WS on HTTPS production (Fly.io only exposes one port)
     if (isSecure) return;
-    const url = `ws://${host}:${port}/`;
+    const apiKey = process.env.NEXT_PUBLIC_GATEWAY_API_KEY || '';
+    const tokenQs = apiKey ? `?token=${encodeURIComponent(apiKey)}` : '';
+    const url = `ws://${host}:${port}/${tokenQs}`;
 
     try {
       const ws = new WebSocket(url);
@@ -181,10 +184,14 @@ export function useGatewayWs(): GatewayWsState {
         if (!mountedRef.current) return;
         setState(s => ({ ...s, connected: false }));
         wsRef.current = null;
-        // Reconnect with exponential backoff
+        // Reconnect with exponential backoff (max 30s)
         const delay = Math.min(1000 * Math.pow(2, retryRef.current), 30000);
         retryRef.current++;
-        setTimeout(connect, delay);
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          if (mountedRef.current) connect();
+        }, delay);
       };
 
       ws.onerror = () => { ws.close(); };
@@ -192,7 +199,11 @@ export function useGatewayWs(): GatewayWsState {
       // Connection failed — retry
       const delay = Math.min(1000 * Math.pow(2, retryRef.current), 30000);
       retryRef.current++;
-      setTimeout(connect, delay);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (mountedRef.current) connect();
+      }, delay);
     }
   }, []);
 
@@ -201,7 +212,18 @@ export function useGatewayWs(): GatewayWsState {
     connect();
     return () => {
       mountedRef.current = false;
-      wsRef.current?.close();
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        ws.onopen = null;
+        try { ws.close(); } catch { /* no-op */ }
+      }
       wsRef.current = null;
     };
   }, [connect]);

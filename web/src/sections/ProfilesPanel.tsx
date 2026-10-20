@@ -227,22 +227,68 @@ export default function AppsPanel({
     setShowInput(false);
   };
 
+  const [filter, setFilter] = useState('');
+  const visibleApps = apps.filter(p => p.name.toLowerCase().includes(filter.toLowerCase()));
+
+  const setAllEnabled = (enabled: boolean) => {
+    setApps(prev => {
+      const next = prev.map(p => ({ ...p, enabled }));
+      patchProviderConfig({ apps: next } as any).catch(console.error);
+      return next;
+    });
+  };
+
   return (
     <>
       <div className="rounded-xl border overflow-hidden" style={{ borderColor: 'var(--color-border)' }}>
-        <div className="flex items-center justify-between px-4 py-2.5" style={{
+        <div className="flex items-center justify-between px-4 py-2.5 gap-2" style={{
           background: 'var(--color-surface)', borderBottom: '1px solid var(--color-border)',
         }}>
           <p className="text-xs font-semibold">Apps</p>
           <p className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
-            {apps.length > 0 ? `${apps.length} saved · click to load · toggle to enable/disable` : 'Save current config as a profile'}
+            {apps.length > 0 ? `${visibleApps.length}${visibleApps.length !== apps.length ? `/${apps.length}` : ''} · click to load · toggle to enable/disable` : 'Save current config as a profile'}
           </p>
         </div>
 
-        {apps.length > 0 ? (
+        {apps.length > 1 && (
+          <div className="flex items-center gap-2 px-3 py-2 border-b"
+            style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)' }}>
+            <input
+              type="text"
+              value={filter}
+              onChange={e => setFilter(e.target.value)}
+              placeholder="Search apps..."
+              aria-label="Search apps"
+              className="flex-1 rounded-md border px-2 py-1 text-[11px] outline-none"
+              style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}
+            />
+            <button
+              type="button"
+              onClick={() => setAllEnabled(true)}
+              className="text-[10px] px-2 py-1 rounded border cursor-pointer"
+              style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}
+              title="Enable all apps"
+            >
+              Enable all
+            </button>
+            <button
+              type="button"
+              onClick={() => setAllEnabled(false)}
+              className="text-[10px] px-2 py-1 rounded border cursor-pointer"
+              style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}
+              title="Disable all apps"
+            >
+              Disable all
+            </button>
+          </div>
+        )}
+
+        {visibleApps.length > 0 ? (
           <div className="p-2" style={{ background: 'var(--color-bg)' }}>
             <div className="flex flex-col gap-1.5">
-              {apps.map((p, i) => (
+              {visibleApps.map((p) => {
+                const i = apps.indexOf(p);
+                return (
                 <AppItem key={p.id} profile={p} index={i}
                   isActive={activeAppId === p.id}
                   onApply={onApplyApp}
@@ -255,8 +301,13 @@ export default function AppsPanel({
                   onToggleEnabled={toggleEnabled}
                   onDuplicate={duplicateApp}
                 />
-              ))}
+                );
+              })}
             </div>
+          </div>
+        ) : apps.length > 0 ? (
+          <div className="px-4 py-5 text-center" style={{ background: 'var(--color-bg)' }}>
+            <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No apps match &ldquo;{filter}&rdquo;</p>
           </div>
         ) : (
           <div className="px-4 py-5 text-center" style={{ background: 'var(--color-bg)' }}>

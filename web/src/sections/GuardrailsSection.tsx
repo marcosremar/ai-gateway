@@ -4,12 +4,12 @@ import { useGateway } from '@/hooks/useGateway';
 import { Spinner } from '@/components/ui';
 
 const RULE_TYPES = [
-  { type: 'regex', label: 'Regex Match', description: 'Bloqueia/permite requests por padrão regex', color: '#60a5fa' },
-  { type: 'jsonSchema', label: 'JSON Schema', description: 'Valida se a resposta do LLM bate com um schema', color: '#a78bfa' },
-  { type: 'containsCode', label: 'Contém Código', description: 'Detecta código (SQL, Python, TypeScript, etc.)', color: '#f59e0b' },
-  { type: 'webhook', label: 'Webhook', description: 'Chama endpoint externo para decidir pass/block', color: '#34d399' },
-  { type: 'notNull', label: 'Not Null', description: 'Garante que a resposta não está vazia', color: '#fb923c' },
-  { type: 'modelWhitelist', label: 'Model Allowlist', description: 'Permite ou bloqueia modelos específicos', color: '#e879f9' },
+  { type: 'regex', label: 'Regex Match', description: 'Block/allow requests by regex pattern', color: '#60a5fa' },
+  { type: 'jsonSchema', label: 'JSON Schema', description: 'Validate LLM response against a schema', color: '#a78bfa' },
+  { type: 'containsCode', label: 'Contains Code', description: 'Detect code (SQL, Python, TypeScript, etc.)', color: '#f59e0b' },
+  { type: 'webhook', label: 'Webhook', description: 'Call external endpoint to decide pass/block', color: '#34d399' },
+  { type: 'notNull', label: 'Not Null', description: 'Ensure response is not empty', color: '#fb923c' },
+  { type: 'modelWhitelist', label: 'Model Allowlist', description: 'Allow or block specific models', color: '#e879f9' },
 ];
 
 function StatBox({ label, value, color }: { label: string; value: number; color: string }) {
@@ -50,16 +50,16 @@ export function GuardrailsSection() {
           <h2 className="text-lg font-bold">Guardrails</h2>
         </div>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-          Regras que filtram e validam requests/responses antes e depois do LLM.
+          Rules that filter and validate requests/responses before and after the LLM.
         </p>
       </div>
 
       {/* Stats */}
       <div className="grid grid-cols-4 gap-3">
         <StatBox label="Total" value={g?.totalEvaluations ?? 0} color="#a1a1aa" />
-        <StatBox label="Passou" value={g?.passed ?? 0} color="#4ade80" />
-        <StatBox label="Bloqueado" value={g?.blocked ?? 0} color="#f87171" />
-        <StatBox label="Auditado" value={g?.audited ?? 0} color="#fbbf24" />
+        <StatBox label="Passed" value={g?.passed ?? 0} color="#4ade80" />
+        <StatBox label="Blocked" value={g?.blocked ?? 0} color="#f87171" />
+        <StatBox label="Audited" value={g?.audited ?? 0} color="#fbbf24" />
       </div>
 
       {/* Block rate bar */}
@@ -67,7 +67,7 @@ export function GuardrailsSection() {
         <div className="rounded-xl border p-4"
           style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[12px] font-semibold">Taxa de bloqueio</span>
+            <span className="text-[12px] font-semibold">Block rate</span>
             <span className="font-mono text-sm font-bold" style={{ color: blockRate > 10 ? '#f87171' : '#4ade80' }}>
               {blockRate}%
             </span>
@@ -78,7 +78,7 @@ export function GuardrailsSection() {
           </div>
           {g?.lastBlockedAt && (
             <p className="text-[10px] mt-2" style={{ color: 'var(--color-text-muted)' }}>
-              Último bloqueio: {new Date(g.lastBlockedAt).toLocaleString()}
+              Last block: {new Date(g.lastBlockedAt).toLocaleString()}
             </p>
           )}
         </div>
@@ -89,7 +89,7 @@ export function GuardrailsSection() {
         <div className="rounded-xl border overflow-hidden"
           style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
           <div className="px-4 py-2.5 border-b" style={{ borderColor: 'var(--color-border)' }}>
-            <span className="text-[12px] font-semibold">Regras ativadas</span>
+            <span className="text-[12px] font-semibold">Triggered rules</span>
           </div>
           <div className="divide-y" style={{ borderColor: 'var(--color-border)' }}>
             {Object.entries(g!.ruleHits)
@@ -120,7 +120,7 @@ export function GuardrailsSection() {
       <div className="rounded-xl border overflow-hidden"
         style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
         <div className="px-4 py-2.5 border-b" style={{ borderColor: 'var(--color-border)' }}>
-          <span className="text-[12px] font-semibold">Tipos de regra disponíveis</span>
+          <span className="text-[12px] font-semibold">Available rule types</span>
         </div>
         <div className="divide-y" style={{ borderColor: 'var(--color-border)' }}>
           {RULE_TYPES.map(({ type, label, description, color }) => (
@@ -136,7 +136,7 @@ export function GuardrailsSection() {
                   {g?.ruleHits?.[type] ? (
                     <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ml-auto"
                       style={{ background: 'rgba(248,113,113,0.1)', color: '#f87171', border: '1px solid rgba(248,113,113,0.2)' }}>
-                      {g.ruleHits[type]}× ativado
+                      {g.ruleHits[type]}× triggered
                     </span>
                   ) : null}
                 </div>
@@ -154,9 +154,9 @@ export function GuardrailsSection() {
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-muted)" strokeWidth="1.5" strokeLinecap="round" className="mx-auto mb-3 opacity-40">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
           </svg>
-          <p className="text-sm font-medium mb-1">Nenhuma regra ativa ainda</p>
+          <p className="text-sm font-medium mb-1">No active rules yet</p>
           <p className="text-[12px]" style={{ color: 'var(--color-text-muted)' }}>
-            Configure um <code className="font-mono">GuardrailEngine</code> no <code className="font-mono">ProxyConfig</code> para ativar filtragem de requests.
+            Configure a <code className="font-mono">GuardrailEngine</code> in <code className="font-mono">ProxyConfig</code> to enable request filtering.
           </p>
         </div>
       )}

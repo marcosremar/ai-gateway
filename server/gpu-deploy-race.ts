@@ -211,6 +211,11 @@ export async function startDeployRace(
           // copies them into `extra`; we just need to forward them to the
           // provider client so they reach the search payload.
           ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
+          // Deploy-level race already creates N instances; pin the internal Vast
+          // offer-hedge to 1 so each slot spawns exactly one instance (no 2N blow-up).
+          raceCount: 1,
+          ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
+          ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
           ...(extra.strictFastBoot ? { strictFastBoot: extra.strictFastBoot } : {}),
           ...(extra.label ? { label: extra.label } : {}),
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),

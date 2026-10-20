@@ -916,8 +916,10 @@ import {
   listPresets,
   runNumericChecks,
   runCompare,
+  preflightChecks,
   BUNDLED_PLUGINS,
 } from '../src/modules/gpu-finetune';
+import type { PreflightResult } from '../src/modules/gpu-finetune';
 import type {
   GpuJobRunner,
   FinetuneProbe,
@@ -2147,6 +2149,20 @@ function recordFinetuneRun(spec: Partial<FinetuneOpts>, instanceInfo: Record<str
   const id = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   finetuneStateStore().save({ id, ts: new Date().toISOString(), spec, instance: instanceInfo });
   return id;
+}
+
+// Live fail-fast checks (HF reachability, token write-access, R2 creds, script)
+// before any GPU spend. Prints a one-line-per-check report. Returns the result
+// so callers decide whether to abort (submit) or just report (validate).
+async function runFinetunePreflight(spec: Partial<FinetuneOpts>): Promise<PreflightResult> {
+  const result = await preflightChecks(spec, process.env);
+  for (const ch of result.checks) {
+    const icon = ch.status === 'ok' ? `${c.green}✓${c.reset}`
+      : ch.status === 'warn' ? `${c.yellow}!${c.reset}`
+      : `${c.red}✗${c.reset}`;
+    console.log(`  ${icon} ${ch.name}: ${ch.detail}`);
+  }
+  return result;
 }
 
 // gpu finetune compare — A/B WER test multiple ckpts via Whisper roundtrip.
@@ -5836,13 +5852,15 @@ Subcommands:
   submit | run    Provision + run finetune (one-shot, foreground)
                   Smoke runs FIRST by default → only proceeds to full if OK.
                   --no-smoke / --smoke (smoke-only) / --dry-run / --no-estimate
+                  Preflight (HF reachable + token write + R2 creds + script)
+                  runs before GPU spend. --skip-preflight bypass / --preflight-only diagnose
   status          Show saved instance info
   logs [-f]       Tail /workspace/.job.log
   metrics         GPU/VRAM/RAM/DISK/NET snapshot
   cancel          Terminate saved instance (--force)
   history         Show last 20 finetune runs with totals
   estimate        Predict total wall time + cost from spec (no spend)
-  validate        Schema-check spec.yaml + local dataset (no spend)
+  validate        Schema + live preflight (HF/R2/script, no spend). --no-preflight = schema only
   lr-find         Sequential mini-trains @ {1e-6..5e-4} → suggest best LR
   sweep --trials N  Parallel hyperparam search (N spot instances)
   deploy <ckpt>   Push ckpt to --push-to-hf or print local IARATTS_CKPT cmd
@@ -6902,6 +6920,26 @@ Per-app isolation:
                 specErrs.forEach((e) => console.error(`  - ${e}`));
                 process.exit(1);
               }
+              // Fail-fast preflight: live HF/R2/script checks before GPU spend.
+              // Skipped on --dry-run/--skip-preflight; --preflight-only exits after.
+              const preflightOnly = hasFlag(args, '--preflight-only');
+              if (!hasFlag(args, '--skip-preflight') && (!hasFlag(args, '--dry-run') || preflightOnly)) {
+                console.log('[preflight] checking dataset/model/token/storage…');
+                const pf = await runFinetunePreflight({
+                  ...specForValidation,
+                  scriptPath: script,
+                  model: getArg(args, '--model') || spec.model,
+                  pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
+                  prepare: spec.prepare,
+                  r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
+                  resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
+                } as Partial<FinetuneOpts>);
+                if (!pf.ok) {
+                  console.error('✗ preflight failed — aborting before GPU spend. Fix the above or pass --skip-preflight.');
+                  process.exit(1);
+                }
+                if (preflightOnly) { console.log('✓ preflight passed (--preflight-only, not deploying)'); break; }
+              }
               // #4 Show estimate before submit (unless dry-run already does).
               // Merge CLI overrides so the prediction reflects what'll actually run.
               if (!hasFlag(args, '--dry-run') && !hasFlag(args, '--no-estimate')) {
@@ -6967,6 +7005,11 @@ Per-app isolation:
                 // from latest checkpoint). The count IS the crash-loop guard — set
                 // 0 to disable. Capped at 10 by validateSpec.
                 retryOnPreempt: getArg(args, '--retry-on-preempt') ? parseInt(getArg(args, '--retry-on-preempt')!) : (spec.retryOnPreempt ?? 3),
+                // R2/S3 durable storage — flags OR spec (yaml). Without these the
+                // runner can't restore/backup checkpoints across spot preemption.
+                r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
+                r2Prefix: getArg(args, '--r2-prefix') || spec.r2Prefix,
+                resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
                 incremental: hasFlag(args, '--incremental') || spec.incremental === true,
                 autoFix: hasFlag(args, '--auto-fix') || spec.autoFix === true,
                 plugin: getArg(args, '--plugin') || spec.plugin,
@@ -7059,8 +7102,22 @@ Per-app isolation:
               const dsPath = validateSpec.dataset && !String(validateSpec.dataset).startsWith('hf://') ? String(validateSpec.dataset) : '';
               const dsErrs = dsPath ? validateDatasetLocal(dsPath, validateSpec.type || 'audio') : [];
               const all = [...errs, ...dsErrs];
-              if (all.length === 0) console.log('✓ spec valid');
-              else { console.error('✗ spec errors:'); all.forEach((e) => console.error(`  - ${e}`)); process.exit(1); }
+              if (all.length > 0) { console.error('✗ spec errors:'); all.forEach((e) => console.error(`  - ${e}`)); process.exit(1); }
+              console.log('✓ schema valid');
+              // Live preflight (HF/R2/script) unless --no-preflight — same checks as submit.
+              if (!hasFlag(args, '--no-preflight')) {
+                console.log('[preflight] checking dataset/model/token/storage…');
+                const pf = await runFinetunePreflight({
+                  ...validateSpec,
+                  scriptPath: validateSpec.script,
+                  model: getArg(args, '--model') || spec.model,
+                  pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
+                  prepare: spec.prepare,
+                  r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
+                  resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
+                } as Partial<FinetuneOpts>);
+                if (!pf.ok) process.exit(1);
+              }
             } else if (sub === 'lr-find') {
               await cmdGpuFinetuneLrFind({
                 ...spec,

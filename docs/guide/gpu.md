@@ -34,7 +34,9 @@ VAST_API_KEY=...
 
 ## GPU Types
 
-GPU type names must match the provider allowlist exactly:
+GPU type names should match the provider marketplace names. `gpuPriorityList`
+is only a fallback/preference order when no GPU is requested; it does not block
+cheaper GPU types chosen explicitly for smoke tests.
 
 **RunPod:**
 - `NVIDIA GeForce RTX 5090` — Blackwell (CUDA 12.8), fastest

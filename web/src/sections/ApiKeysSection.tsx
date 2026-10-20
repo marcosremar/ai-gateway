@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { getApiKeys, setApiKeys, type ApiKeyEntry } from '@/lib/gateway';
 import {
   Card, CardHeader, CardBody, Button, StatusBadge, AlertBanner,
-  Spinner, SectionHeader, CardSectionHeader, IconBox,
+  Spinner, SectionHeader, CardSectionHeader, IconBox, SaveBar,
 } from '@/components/ui';
 import { Cloud, ServerCog, Eye, EyeOff, Save, Check, KeyRound, AlertTriangle } from 'lucide-react';
 
@@ -79,27 +79,16 @@ export function ApiKeysSection() {
 
   return (
     <div className="p-6 space-y-5">
+      <SaveBar
+        hasChanges={hasChanges}
+        saving={saving}
+        saved={saved}
+        onSave={handleSave}
+        label="Save Changes"
+      />
       <SectionHeader
         title="API Keys"
         subtitle="Configure provider API keys. Saved to the gateway .env file."
-        action={
-          <div className="flex items-center gap-2">
-            {saved && (
-              <span className="flex items-center gap-1 text-xs text-emerald-400">
-                <Check className="w-3.5 h-3.5" /> Saved
-              </span>
-            )}
-            <Button
-              onClick={handleSave}
-              disabled={!hasChanges}
-              isLoading={saving}
-              loadingText="Saving..."
-              size="sm"
-            >
-              <Save className="w-3.5 h-3.5" /> Save Changes
-            </Button>
-          </div>
-        }
       />
 
       {error && <AlertBanner variant="error">{error}</AlertBanner>}

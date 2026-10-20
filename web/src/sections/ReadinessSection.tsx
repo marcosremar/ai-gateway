@@ -133,6 +133,9 @@ export function ReadinessSection() {
         setSttTargetMs(s.targets?.stt ?? 800);
         setLlmTargetMs(s.targets?.llm ?? 2000);
         setTtsTargetMs(s.targets?.tts ?? 1500);
+        setBenchMaxRuns(s.benchMaxRuns ?? 20);
+        setBenchMarginPct(s.benchMarginPct ?? 10);
+        setShadowRunsVal(s.shadowRuns ?? 5);
         setP95Multiplier(s.p95DemotionMultiplier ?? 2);
         setRepechageMax(s.repechageMaxAttempts ?? 3);
       }

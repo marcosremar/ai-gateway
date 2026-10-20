@@ -321,6 +321,11 @@ interface DeployConfig {
   llmModel: string;
   interruptible: boolean | undefined;
   raceCount: number;
+  /** Internal Vast offer-hedge count (distinct from deploy-level raceCount). 1 ⇒ exactly
+   *  one billed instance. Undefined ⇒ provider default (Vast hedges 2). */
+  offerRaceCount?: number;
+  /** Reject SSH-only offers — require at least one direct port (avoids tunnel hangs). */
+  requireDirectPort?: boolean;
   deployEnv: Record<string, string>;
   dockerStartCmd: string;
   onstart: string;
@@ -368,6 +373,12 @@ interface DeployConfig {
    * permissive search (zombie-prone).
    */
   strictFastBoot: boolean;
+  /**
+   * Vast search profile for offer selection.
+   * `high_quality` (default): stricter default filters for speed/reliability.
+   * `full`: broader path for higher availability/cheaper offers.
+   */
+  searchMode: 'high_quality' | 'full';
   /**
    * Vast.ai-only: opt-in to deverified/unverified rentable hosts.
    * When false (default), only Vast-verified hosts are eligible. Set true
@@ -452,12 +463,19 @@ async function _validateDeployRequest(
   }
   log.log(`[req=${requestId}] deploy label="${label}"`);
 
-  // Strict fast-boot filter — opt-out via body.strictFastBoot=false.
-  // Defaults to true so the most common path (user races 3 random hosts)
-  // is the safe one. The looser filter lives in the existing offer
-  // search (reliability>=0.95) and is preserved for callers that
-  // explicitly set strictFastBoot=false.
-  const strictFastBoot = body.strictFastBoot === false ? false : true;
+  // searchMode is the preferred switch; strictFastBoot stays for legacy clients.
+  const rawSearchMode = typeof body.searchMode === 'string'
+    ? body.searchMode.trim().toLowerCase()
+    : '';
+  const parsedSearchMode = rawSearchMode === 'high_quality' || rawSearchMode === 'full'
+    ? rawSearchMode
+    : '';
+  if (rawSearchMode && parsedSearchMode !== rawSearchMode) {
+    throw { status: 400, message: `Invalid searchMode "${rawSearchMode}". Expected "high_quality" or "full".` };
+  }
+  const strictFastBoot = body.strictFastBoot === true ? true : body.strictFastBoot === false ? false : undefined;
+  const searchMode = parsedSearchMode || (strictFastBoot === false ? 'full' : 'high_quality');
+  const effectiveStrictFastBoot = strictFastBoot ?? (searchMode === 'high_quality');
   const allowUnverified = body.allowUnverified === true ? true : undefined;
   const noTierCascade = body.noTierCascade === true ? true : undefined;
 
@@ -579,6 +597,19 @@ async function _validateDeployRequest(
     raceCount = getDeployRaceCount();
   }
 
+  // Internal Vast offer-hedge count (distinct from deploy-level raceCount above).
+  // 1 ⇒ exactly one billed instance — no duplicate spawn. Undefined ⇒ provider default (2).
+  const offerRaceCountRaw = body.offerRaceCount;
+  let offerRaceCount: number | undefined;
+  if (typeof offerRaceCountRaw === 'number' && Number.isFinite(offerRaceCountRaw) && offerRaceCountRaw >= 1) {
+    offerRaceCount = Math.min(Math.floor(offerRaceCountRaw), 5);
+  } else if (typeof offerRaceCountRaw !== 'undefined') {
+    throw { status: 400, message: 'offerRaceCount must be a positive number between 1 and 5' };
+  }
+
+  // Reject SSH-only offers — require at least one direct port (avoids tunnel hangs).
+  const requireDirectPort = body.requireDirectPort === true ? true : undefined;
+
   // Custom env vars, Docker start command, and container disk
   const customEnv = (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env))
     ? body.env as Record<string, string> : {};
@@ -592,24 +623,16 @@ async function _validateDeployRequest(
   const deployEnv: Record<string, string> = { ...customEnv };
   if (llmModel) deployEnv.CONF_LLM_MODEL = llmModel;
 
-  // Enforce GPU allowlist — only tested & approved GPUs are permitted.
-  // When gpuPriorityList is empty, filtering is disabled — allow all types.
-  const effectiveAllowed = new Set(getGpuPriorityList());
-  const allowlistActive = effectiveAllowed.size > 0;
   if (gpuTypes.length > 0) {
-    if (allowlistActive) {
-      const rejected = gpuTypes.filter(g => !effectiveAllowed.has(g));
-      if (rejected.length > 0) {
-        log.warn(`[req=${requestId}] Rejected non-tested GPU(s): ${rejected.join(', ')}`);
-      }
-      gpuTypes = gpuTypes.filter(g => effectiveAllowed.has(g));
-      if (gpuTypes.length === 0) {
-        throw { status: 400, message: `None of the requested GPUs are in the tested allowlist. Allowed: ${[...effectiveAllowed].join(', ')}` };
+    const prioritySet = new Set(getGpuPriorityList());
+    if (prioritySet.size > 0) {
+      const outsidePriority = gpuTypes.filter(g => !prioritySet.has(g));
+      if (outsidePriority.length > 0) {
+        log.log(`[req=${requestId}] Requested GPU(s) outside priority list accepted: ${outsidePriority.join(', ')}`);
       }
     }
-    // else: allowlist disabled (empty list) — accept all requested GPU types
   } else if (!autoSelectGpu) {
-    // No GPU specified and no auto-select — use user-configured priority list from settings
+    // No GPU specified and no auto-select: use user-configured priority list as fallback.
     const userList = getGpuPriorityList();
     gpuTypes = userList.length > 0 ? userList : await getVerifiedGpuTypes(dockerImage);
     log.log(`[req=${requestId}] No GPU specified — using priority list: ${gpuTypes.join(', ')}`);
@@ -645,7 +668,7 @@ async function _validateDeployRequest(
     requireDockerManifest,
     runSmokeTests,
     gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, preferSsd,
-    storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
+    storageGb, hfToken, llmModel, interruptible, raceCount, offerRaceCount, requireDirectPort, deployEnv,
     dockerStartCmd, onstart, containerDiskInGb, volumeId,
     providerFilter,
     templateHashId: typeof body.templateHashId === 'string' && body.templateHashId.length > 0
@@ -662,7 +685,8 @@ async function _validateDeployRequest(
     canaryTrafficStep,
     devMode,
     label,
-    strictFastBoot,
+    strictFastBoot: effectiveStrictFastBoot,
+    searchMode,
     allowUnverified,
     noTierCascade,
   };
@@ -1004,7 +1028,7 @@ function _startDeployAndRespond(
   res: ServerResponse,
   isFinetune = false,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, strictFastBoot, allowUnverified, noTierCascade, minInetDownMbps } = config;
+  const { raceCount, offerRaceCount, requireDirectPort, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, strictFastBoot, searchMode, allowUnverified, noTierCascade, minInetDownMbps } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
@@ -1042,6 +1066,7 @@ function _startDeployAndRespond(
     // client uses `label` for the instance label (orphan reconciliation)
     // and `strictFastBoot` to bump the host-quality threshold + suppress
     // the SSH-only-host phase-2 fallback.
+    ...(searchMode ? { searchMode } : {}),
     ...(label ? { label } : {}),
     ...(strictFastBoot ? { strictFastBoot } : {}),
     ...(allowUnverified ? { allowUnverified } : {}),
@@ -1054,6 +1079,9 @@ function _startDeployAndRespond(
     ...(canary ? { canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep } : {}),
     // Cost-control flags propagated to deploy loop / cascade.
     raceCount,
+    // Internal Vast offer-hedge override (1 ⇒ no duplicate spawn) + SSH-only rejection.
+    ...(typeof offerRaceCount === 'number' ? { offerRaceCount } : {}),
+    ...(requireDirectPort ? { requireDirectPort } : {}),
     ...(noTierCascade ? { noTierCascade } : {}),
   };
 
@@ -1437,17 +1465,25 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   setRequestIdHeader(res, requestId);
   log.log(`GPU terminate requested`);
 
-  // Acquire lock to prevent concurrent lifecycle operations
-  if (deployLock) {
-    res.writeHead(409, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
-    return;
-  }
-  setDeployLock(true);
-
   let body: Record<string, unknown>;
   try { body = await readJsonBody(req); }
-  catch (e) { handleBodyError(res, e); setDeployLock(false); return; }
+  catch (e) { handleBodyError(res, e); return; }
+
+  // Acquire lock to prevent concurrent lifecycle operations.
+  // A force terminate breaks the lock: an in-flight deploy (status "creating")
+  // that is leaking money MUST be cancellable, otherwise the deploy lock turns
+  // a runaway hedged race into an unkillable cost cascade (the exact incident
+  // that motivated this path). Forcing here aborts the deploy promise's hold.
+  const forceTerminate = body.force === true || body.force === '1';
+  if (deployLock && !forceTerminate) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment, or pass {"force":true} to break the lock and terminate an in-flight deploy', status: deployState.status }));
+    return;
+  }
+  if (deployLock && forceTerminate) {
+    log.warn(`[req=${requestId}] force terminate breaking held deploy lock (status=${deployState.status})`);
+  }
+  setDeployLock(true);
 
   // Per-app isolation: when caller authenticated as a per-app key, refuse
   // to terminate an instance whose label-owner doesn't match. Looks up the
@@ -1456,7 +1492,7 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   // and bypass the check.
   const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
   const targetInstanceId = typeof body.instanceId === 'string' ? body.instanceId : '';
-  const force = body.force === true || body.force === '1';
+  const force = forceTerminate;
   if (callerUserId && targetInstanceId && !force) {
     try {
       const ownerCheckResult = await _resolveInstanceOwner(targetInstanceId, body);

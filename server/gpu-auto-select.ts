@@ -313,13 +313,12 @@ export async function autoSelectCheapestGpu(
     log.log(`[gpu] autoSelectGpu: sort=${sortBy}, top 5: ${topOffers.join(', ')}`);
   }
 
-  // GPU type filtering — disabled when priority list is empty (show all GPUs)
+  // GPU priority: prefer configured types when they are available, then fall back to any suitable GPU.
   let prioritized = ranked;
   let allowedOfferCount = ranked.length;
   if (isGpuFilterDisabled()) {
-    log.log(`[gpu] autoSelectCheapestGpu: GPU filter disabled — showing all GPU types`);
+    log.log(`[gpu] autoSelectCheapestGpu: no GPU priority list configured; scoring all GPU types`);
   } else {
-    // Prefer allowlisted GPUs, then fall back to any suitable GPU.
     // Providers use varying naming formats (e.g. "RTX 4090" vs "NVIDIA GeForce RTX 4090")
     // so we normalize names for comparison: strip "NVIDIA", "GeForce", spaces, and lowercase.
     const normalize = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
@@ -331,7 +330,7 @@ export async function autoSelectCheapestGpu(
     allowedOfferCount = allowedOffers.length;
     prioritized = allowedOffers.length > 0 ? allowedOffers : ranked;
     if (allowedOffers.length === 0) {
-      log.warn(`[gpu] autoSelectGpu: no offers match allowlist, using best available. Sample types: ${ranked.slice(0, 5).map(o => `${o.gpuName}(${o.gpuType})`).join(', ')}`);
+      log.warn(`[gpu] autoSelectGpu: no offers match priority list, using best available. Sample types: ${ranked.slice(0, 5).map(o => `${o.gpuName}(${o.gpuType})`).join(', ')}`);
     }
   }
 
@@ -349,6 +348,6 @@ export async function autoSelectCheapestGpu(
     }
   }
 
-  log.log(`[gpu] autoSelectGpu: ${ranked.length} suitable offers (${allowedOfferCount} in allowlist, ${gpuTypeReps.size} with reputation) → ${uniqueTypes.length} GPU types: ${uniqueTypes.join(', ')}`);
+  log.log(`[gpu] autoSelectGpu: ${ranked.length} suitable offers (${allowedOfferCount} in priority list, ${gpuTypeReps.size} with reputation) → ${uniqueTypes.length} GPU types: ${uniqueTypes.join(', ')}`);
   return uniqueTypes;
 }
