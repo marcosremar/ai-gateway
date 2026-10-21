@@ -837,9 +837,10 @@ export class RunpodClient extends AbstractGpuProvider {
     const gpuTypesToTry = [...new Set(rawGpuTypes.map((t) => {
       const mapped = RUNPOD_GPU_TYPE_MAP[t] ?? t;
       // Warn loudly when a legacy/unavailable GPU is silently substituted.
+      // 4080→4090 is more expensive; user should know they're paying more.
       const isLegacySub = (t === 'RTX 4080' || t === 'RTX4080' || t === 'RTX A4000' || t === 'RTXA4000') && mapped !== t;
       if (isLegacySub) {
-        this.log.warn(`[runpod] GPU type "${t}" not available — substituting "${mapped}" (cost may differ).`);
+        this.log.warn(`[runpod] GPU type "${t}" not available — substituting "${mapped}" (cost may differ). Update your gpuTypes to silence this.`);
       }
       return mapped;
     }))];
@@ -942,7 +943,10 @@ export class RunpodClient extends AbstractGpuProvider {
                 volumeInGb: basePodConfig.volumeInGb,
               },
             });
-            // Ghost pods are billed until deleted; retry up to 3x then surface.
+            // Ghost pods are billed until deleted; retry up to 3x then surface
+            // for the orphan sweep / cost monitor. Empty-catch (previous code)
+            // could leave a $X/hr ghost running for up to 15 min until orphan
+            // cleanup picks it up.
             let ghostDeleted = false;
             for (let ghostAttempt = 1; ghostAttempt <= 3; ghostAttempt++) {
               try {

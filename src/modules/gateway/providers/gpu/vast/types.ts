@@ -143,12 +143,12 @@ export interface VastCredentials {
   apiKey: string;
 }
 
-export type VastInstanceStatus =
-  | 'running'
-  | 'created'
-  | 'loading'
-  | 'stopping'
-  | 'stopped'
+export type VastInstanceStatus = 
+  | 'running' 
+  | 'created' 
+  | 'loading' 
+  | 'stopping' 
+  | 'stopped' 
   | 'terminated'
   | 'error'
   | 'queued';

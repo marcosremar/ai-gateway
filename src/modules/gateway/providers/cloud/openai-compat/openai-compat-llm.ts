@@ -71,7 +71,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),
       ...(request.stream && { stream: request.stream }),
-    }, { signal: controller.signal }) as unknown as OpenAI.ChatCompletion;
+    }, { signal: controller.signal }) as OpenAI.ChatCompletion;
 
     return {
       content: completion.choices[0]?.message?.content || '',
@@ -99,14 +99,18 @@ export class OpenAICompatLLMProvider implements LLMProvider {
    */
   async *chatStream(request: ChatRequest): AsyncGenerator<string, void, undefined> {
     const client = this.getClient();
-    // Match non-streaming chat() timeout. Without abort wiring a stalled
-    // provider stream hangs the consumer indefinitely.
+    // Match non-streaming chat() timeout behaviour. Without abort wiring, a
+    // stalled provider stream hangs the consumer indefinitely; the for-await
+    // loop only releases on normal stream end. AbortSignal.timeout fires the
+    // signal after `timeoutMs` of inactivity at the OpenAI SDK layer, which
+    // the SDK propagates to the underlying fetch.
     const timeoutMs = request.timeoutMs || 120_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+    let stream: AsyncIterable<OpenAI.ChatCompletionChunk> | null = null;
     try {
-      const stream = await client.chat.completions.create({
+      stream = await client.chat.completions.create({
         model: request.model || this.config.defaultModel || '',
         messages: request.messages as OpenAI.ChatCompletionMessageParam[],
         ...(request.temperature !== undefined && { temperature: request.temperature }),
@@ -135,6 +139,8 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       throw err;
     } finally {
       clearTimeout(timer);
+      // Best-effort signal abort so caller-side early-termination (consumer
+      // breaks out of for-await) also cancels in-flight HTTP request.
       try { controller.abort(); } catch { /* no-op */ }
     }
   }

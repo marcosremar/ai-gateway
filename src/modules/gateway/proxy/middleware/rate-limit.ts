@@ -85,8 +85,9 @@ export class RateLimiter {
     const auth = req.headers.authorization;
     if (auth) {
       const token = auth.replace(/^Bearer\s+/i, '').trim();
-      // Always hash if a token is present — short tokens previously fell
-      // through to IP bucketing, letting `Bearer x` escape per-key limits.
+      // Always hash if a token is present — previous code fell through to IP
+      // bucketing for tokens <8 chars, letting a caller send `Bearer x` to
+      // escape per-key limits and join the (possibly NAT-shared) IP bucket.
       if (token.length > 0) {
         return `key:${hashToken(token)}`;
       }

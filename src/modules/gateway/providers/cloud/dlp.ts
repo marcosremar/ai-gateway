@@ -1,6 +1,6 @@
 /**
  * DLP - Data Loss Prevention for AI requests and responses.
- *
+ * 
  * Similar to Cloudflare AI Gateway DLP:
  * - Detects PII: credit cards, SSN, emails, phone numbers
  * - Custom patterns via regex
@@ -78,19 +78,22 @@ export interface DLPOptions {
 const PATTERNS = {
   // Credit Card - major brands (Visa, Mastercard, Amex, Discover)
   creditCard: /\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})\b/g,
-
+  
   // SSN - US Social Security Number (XXX-XX-XXXX)
   ssn: /\b(?!000|666|9\d{2})[0-9]{3}[-\s]?(?!00)[0-9]{2}[-\s]?(?!0000)[0-9]{4}\b/g,
-
+  
   // Email addresses
   email: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
-
-  // Phone numbers - various formats
-  phone: /\b(?:\+?1[-.\s]?)?(?:\(?[0-9]{3}\)?[-.\s]?)?[0-9]{3}[-.\s]?[0-9]{4}\b/g,
-
+  
+  // Phone numbers — require area code or country code so we don't match
+  // any 7-digit number (timestamps, IDs, line numbers etc). Previously the
+  // first two groups were both optional, reducing the pattern to /\d{3}-?\d{4}/
+  // which had massive false-positive rate.
+  phone: /\b(?:\+?1[-.\s]?)?(?:\(?[0-9]{3}\)?[-.\s]?)[0-9]{3}[-.\s]?[0-9]{4}\b/g,
+  
   // IP addresses (IPv4)
   ipAddress: /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g,
-
+  
   // Date of birth patterns
   dateOfBirth: /\b(?:DOB|D\.O\.B|birth.?date)[:\s]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b/gi,
 };
@@ -120,7 +123,7 @@ export const DEFAULT_DLP_CONFIG: DLPConfig = {
 
 /**
  * Detect PII in text.
- *
+ * 
  * @param text - Text to scan for PII
  * @param config - DLP configuration
  * @param options - Per-request options
@@ -142,7 +145,7 @@ export function detectPII(
 
   const detectedTypes: string[] = [];
   const matches: DLPMatch[] = [];
-
+  
   // Determine which patterns to check
   const patternsToCheck = options?.patterns
     ? { ...config.patterns, ...options.patterns }
@@ -157,7 +160,7 @@ export function detectPII(
 
     // Reset regex state
     regex.lastIndex = 0;
-
+    
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
       const value = match[0];
@@ -180,10 +183,22 @@ export function detectPII(
   if (config.customPatterns) {
     for (const custom of config.customPatterns) {
       try {
+        // ReDoS guard: reject patterns with nested quantifiers that are the
+        // canonical catastrophic-backtracking shape `(...)+`, `(...){2,}`,
+        // `(.*)+` etc. Operator-supplied patterns can otherwise lock the
+        // event loop for seconds on adversarial input.
+        if (/\([^)]*[+*][^)]*\)[+*{]/.test(custom.pattern) || /\(\.\*\)[+*]/.test(custom.pattern)) {
+          continue;
+        }
+        // Length cap on input — even safe regex on 10MB text can churn.
+        const scanText = text.length > 100_000 ? text.slice(0, 100_000) : text;
         const regex = new RegExp(custom.pattern, 'gi');
         let match: RegExpExecArray | null;
+        let iterations = 0;
+        const MAX_ITERS = 10_000;
 
-        while ((match = regex.exec(text)) !== null) {
+        while ((match = regex.exec(scanText)) !== null) {
+          if (++iterations > MAX_ITERS) break;
           const value = match[0];
           // Same zero-width guard as the built-in pattern loop above.
           if (value.length === 0) { regex.lastIndex++; continue; }
@@ -212,7 +227,7 @@ export function detectPII(
   // 5 credit cards still counted as 1 type).
   const uniqueTypes = [...new Set(detectedTypes)];
   const detected = matches.length >= (config.minMatches || 1);
-
+  
   // Determine action
   const action = detected ? config.action : 'allow';
 
@@ -268,7 +283,7 @@ export function createDLPMiddleware(config: DLPConfig) {
      */
     scanRequest: (body: unknown, options?: DLPOptions): DLPResult => {
       let text = '';
-
+      
       if (typeof body === 'string') {
         text = body;
       } else if (body && typeof body === 'object') {
@@ -325,7 +340,7 @@ export const COMPLIANCE_PATTERNS = {
     ipAddress: true,
     dateOfBirth: true,
   },
-
+  
   // HIPAA (Healthcare)
   hipaa: {
     creditCard: false,
@@ -335,7 +350,7 @@ export const COMPLIANCE_PATTERNS = {
     ipAddress: false,
     dateOfBirth: true,
   },
-
+  
   // PCI DSS (Payment Cards)
   pci: {
     creditCard: true,

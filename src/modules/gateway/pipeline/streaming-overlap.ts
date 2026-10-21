@@ -77,6 +77,7 @@ export class StreamingOverlap {
     llmStream: AsyncIterable<string>,
     ttsFn: (text: string) => Promise<Buffer>,
     onAudioChunk: (audio: Buffer, chunkIndex: number) => void,
+    onChunkSkipped?: (chunkIndex: number, reason: string) => void,
   ): Promise<string> {
     this._totalRequests++;
 
@@ -99,6 +100,10 @@ export class StreamingOverlap {
           onAudioChunk(audio, nextEmitIdx);
         } else {
           failedChunks.delete(nextEmitIdx);
+          // Notify caller that chunk N was skipped — without this signal,
+          // consumers tracking expected chunk count (transcript<->audio
+          // alignment, recording/replay) silently lost the slot.
+          onChunkSkipped?.(nextEmitIdx, 'tts_failed');
         }
         nextEmitIdx++;
       }

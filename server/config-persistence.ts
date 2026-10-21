@@ -349,7 +349,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
   pipelineStt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],
   pipelineLlm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }],
   pipelineTts: [{ provider: 'gpu', model: 'qwen3-tts' }, { provider: 'modal', model: 'qwen3-tts' }],
-  idleTimeoutMin: 5, // cold-start plan A3: was 15; stop→resume is cheaper than idle billing
+  idleTimeoutMin: 10, // auto-stop after 10 min idle; stop→resume is cheaper than idle billing
   updatedAt: 0,
 };
 

@@ -922,7 +922,7 @@ async function cmdGpuLogs() {
 import {
   tcpProbe,
   pickProbeTarget,
-} from '../src/modules/gateway/providers/gpu/livenessProbe';
+} from '../src/gateway/providers/gpu/livenessProbe';
 
 // Finetune module — GPU finetune orchestration with DI + SOLID principles.
 import {
@@ -5660,7 +5660,7 @@ function requireHyperstackKey(): string {
 }
 
 async function getHyperstackClient() {
-  const { HyperstackClient } = await import('../src/modules/gateway/providers/gpu/hyperstack-client');
+  const { HyperstackClient } = await import('../src/gateway/providers/gpu/hyperstack-client');
   return new HyperstackClient();
 }
 
@@ -8493,7 +8493,7 @@ Per-app isolation:
 // ── Lightning AI studio commands ────────────────────────────────────────────
 
 const LIGHTNING_API_BASE = 'https://lightning.ai/v1';
-const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface LightningEnvConfig {
   apiKey: string;

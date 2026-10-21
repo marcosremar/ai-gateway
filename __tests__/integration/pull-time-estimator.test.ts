@@ -213,7 +213,7 @@ describe('Pull Time Learning — Gateway Integration', () => {
       const res = await fetch('http://localhost:4000/v1/gpu/latency/settings', {
         signal: AbortSignal.timeout(2000),
       });
-      gatewayAvailable = res.ok;
+      gatewayAvailable = res.ok && (res.headers.get('content-type') ?? '').includes('application/json');
     } catch {
       gatewayAvailable = false;
     }

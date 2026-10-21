@@ -106,6 +106,13 @@ export function setDailySpendResetDate(v: string) {
   _schedulePersist();
 }
 
+export function rolloverDailySpendIfNewDay(today: string = new Date().toISOString().slice(0, 10)): boolean {
+  if (today === dailySpendResetDate) return false;
+  setDailyGpuSpendUsd(0);
+  setDailySpendResetDate(today);
+  return true;
+}
+
 /** Force-flush pending persistence; call before process exit. */
 export function flushDailySpend(): void {
   if (_persistTimer) {

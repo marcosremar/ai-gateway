@@ -66,7 +66,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const [terminating, setTerminating] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [raceCount, setRaceCount] = useState(1);
-  const [idleTimeoutMin, setIdleTimeoutMin] = useState(15);
+  const [idleTimeoutMin, setIdleTimeoutMin] = useState(10);
   const [timeoutDirty, setTimeoutDirty] = useState(false);
   const [deployProvider, setDeployProvider] = useState<string>('auto');
   const [overrideImage, setOverrideImage] = useState<string | null>(null);
@@ -559,7 +559,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                       <span className="flex items-center gap-1"><Timer className="w-3 h-3" style={{ color: '#f59e0b' }} />Idle</span>
                     </span>
                     <div className="flex gap-1">
-                      {[5, 15, 30, 60, 0].map(min => (
+                      {[5, 10, 15, 30, 60, 0].map(min => (
                         <button key={min} onClick={() => { setIdleTimeoutMin(min); setTimeoutDirty(true); }}
                           className="px-2 py-[3px] rounded-md text-[10px] font-medium transition-all cursor-pointer"
                           style={{

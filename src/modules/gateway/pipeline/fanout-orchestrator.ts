@@ -98,8 +98,19 @@ export async function runFanoutOrchestrator(
   opts: FanoutOpts,
   deps: FanoutDeps,
 ): Promise<void> {
-  const { targets, speaker, style = 'default' } = opts;
-  if (targets.length === 0) return;
+  const { targets: rawTargets, speaker, style = 'default' } = opts;
+  if (rawTargets.length === 0) return;
+
+  // Dedupe + cap to prevent cost amplification from malformed or malicious
+  // requests. Without this, `targets:['fr','fr','fr',...]` ran LLM+TTS once
+  // per duplicate (translation cache populated AFTER race resolves, so
+  // concurrent dupes all miss). FANOUT_MAX caps the worst case at 16
+  // targets per audio chunk.
+  const FANOUT_MAX = 16;
+  const targets = [...new Set(rawTargets)].slice(0, FANOUT_MAX);
+  if (targets.length < rawTargets.length) {
+    log.warn(`Fan-out targets reduced ${rawTargets.length}→${targets.length} (dedupe + cap ${FANOUT_MAX})`);
+  }
 
   const { routing, sideEffects: fx, executors: ex, langNames: langs } = deps;
 

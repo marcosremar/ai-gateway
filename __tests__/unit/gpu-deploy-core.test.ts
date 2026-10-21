@@ -1127,7 +1127,7 @@ describe('GPU Deploy - Core Logic', () => {
     });
 
     it('should export IDLE_TIMEOUT_MS', () => {
-      expect(gpuDeploy.IDLE_TIMEOUT_MS).toBe(5 * 60_000);
+      expect(gpuDeploy.IDLE_TIMEOUT_MS).toBe(10 * 60_000);
     });
 
     it('should export IDLE_DESTROY_MS', () => {

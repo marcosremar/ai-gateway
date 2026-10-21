@@ -83,18 +83,18 @@ export async function createTemplate(
         }),
       }
     );
-
+    
     if (!response.success) {
-      return {
-        id: 0,
-        success: false,
-        error: response.error || 'Unknown error creating template'
+      return { 
+        id: 0, 
+        success: false, 
+        error: response.error || 'Unknown error creating template' 
       };
     }
-
-    return {
-      id: response.template?.id || 0,
-      success: true
+    
+    return { 
+      id: response.template?.id || 0, 
+      success: true 
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -130,12 +130,12 @@ export async function updateTemplate(
         body: JSON.stringify(updates),
       }
     );
-
+    
     if (!response.success) {
       log.error(`Failed to update template ${templateId}:`, response.error);
       return false;
     }
-
+    
     log.log(`Template ${templateId} updated successfully`);
     return true;
   } catch (err) {

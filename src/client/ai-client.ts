@@ -936,7 +936,7 @@ export class AIClient {
         if (eligibleOffers.length === 0) continue;
 
         // Get the best (cheapest) offer
-        const bestOffer = eligibleOffers.reduce((best, o) => 
+        const bestOffer = eligibleOffers.reduce((best, o) =>
           o.pricePerHr < best.pricePerHr ? o : best, eligibleOffers[0]);
 
         // Calculate score (0-100)

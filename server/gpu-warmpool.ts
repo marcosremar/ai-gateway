@@ -27,6 +27,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readJsonBody } from './http-utils';
+import { PORT } from './config';
 import { createLogger } from '../src/logger';
 
 const log = createLogger('gpu-warmpool');
@@ -92,6 +93,15 @@ export function pickNextWorker(workers: WarmWorker[]): WarmWorker | undefined {
     .sort((a, b) => (a.lastAcquireMs ?? Infinity) - (b.lastAcquireMs ?? Infinity) || a.createdAt - b.createdAt)[0];
 }
 
+export function markInterruptedWorkersLost(workers: WarmWorker[]): void {
+  for (const w of workers) {
+    if (w.state === 'provisioning' || w.state === 'resuming') {
+      w.state = 'lost';
+      w.lastError = 'interrupted by gateway restart';
+    }
+  }
+}
+
 /** Minimal HTTP transport, injectable for tests. */
 export type Transport = (
   method: string,
@@ -101,7 +111,7 @@ export type Transport = (
 ) => Promise<{ status: number; json: Record<string, unknown> }>;
 
 function gatewayBase(): string {
-  return process.env.WARMPOOL_GATEWAY_URL || `http://127.0.0.1:${process.env.PORT || '8080'}`;
+  return process.env.WARMPOOL_GATEWAY_URL || `http://127.0.0.1:${PORT}`;
 }
 
 const defaultTransport: Transport = async (method, path, body, opts) => {
@@ -123,8 +133,8 @@ function loadState(): WarmPoolState {
   try {
     if (existsSync(STATE_FILE)) {
       const s = JSON.parse(readFileSync(STATE_FILE, 'utf8')) as WarmPoolState;
-      // A gateway restart kills any in-flight provision loop.
       s.provisioning = false;
+      markInterruptedWorkersLost(s.workers ?? []);
       return s;
     }
   } catch (err) {
@@ -156,6 +166,15 @@ export class WarmPool {
     if (this.persistToDisk) saveState(this.state);
   }
 
+  private opChain: Promise<unknown> = Promise.resolve();
+  private generation = 0;
+
+  private withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.opChain.then(fn, fn);
+    this.opChain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   private ollamaOnstart(model: string): string {
     return `ollama serve & sleep 2; OLLAMA_HOST=127.0.0.1:8000 ollama pull ${model}; wait`;
   }
@@ -165,16 +184,25 @@ export class WarmPool {
     if (this.state.provisioning) throw new Error('Provision already in progress');
     this.state.config = config;
     this.state.provisioning = true;
+    const gen = this.generation;
     this.persist();
     try {
       const alive = this.state.workers.filter((w) => w.state !== 'terminated' && w.state !== 'lost');
       for (let i = alive.length; i < config.size; i++) {
+        if (this.generation !== gen) { log.warn('Provision aborted: pool torn down'); break; }
         const slot = `warmpool-${Date.now().toString(36)}-${i}`;
         const worker: WarmWorker = { slot, state: 'provisioning', model: config.model, createdAt: Date.now() };
         this.state.workers.push(worker);
         this.persist();
         try {
           await this.provisionWorker(worker, config);
+          if (this.generation !== gen) {
+            await this.slotCall('POST', '/v1/gpu/terminate', worker.slot).catch(() => {});
+            worker.state = 'terminated';
+            this.persist();
+            log.warn(`Worker ${slot} terminated: pool torn down during provision`);
+            break;
+          }
           log.log(`Worker ${slot} provisioned and stopped (host ${worker.sshHost}, ${worker.gpuType})`);
         } catch (err) {
           worker.state = 'lost';
@@ -277,7 +305,11 @@ export class WarmPool {
    * (an HTTP 200 is not enough — ollama accepts requests mid-load, see ollama#15016).
    * Fails over across workers; marks unresponsive ones as lost.
    */
-  async acquire(): Promise<{ worker: WarmWorker; acquireMs: number; inferenceMs: number }> {
+  acquire(): Promise<{ worker: WarmWorker; acquireMs: number; inferenceMs: number }> {
+    return this.withLock(() => this._acquire());
+  }
+
+  private async _acquire(): Promise<{ worker: WarmWorker; acquireMs: number; inferenceMs: number }> {
     const active = this.state.workers.find((w) => w.state === 'active');
     if (active) return { worker: active, acquireMs: 0, inferenceMs: 0 };
 
@@ -329,7 +361,11 @@ export class WarmPool {
   }
 
   /** Stop the active worker back into the pool. */
-  async release(): Promise<WarmWorker> {
+  release(): Promise<WarmWorker> {
+    return this.withLock(() => this._release());
+  }
+
+  private async _release(): Promise<WarmWorker> {
     const worker = this.state.workers.find((w) => w.state === 'active');
     if (!worker) throw new Error('No active worker to release');
     const stop = await this.slotCall('POST', '/v1/gpu/stop', worker.slot, {}, 60_000);
@@ -340,7 +376,12 @@ export class WarmPool {
   }
 
   /** Terminate every worker and clear the pool. */
-  async teardown(): Promise<{ terminated: string[] }> {
+  teardown(): Promise<{ terminated: string[] }> {
+    return this.withLock(() => this._teardown());
+  }
+
+  private async _teardown(): Promise<{ terminated: string[] }> {
+    this.generation++;
     const terminated: string[] = [];
     for (const worker of this.state.workers) {
       if (worker.state === 'terminated') continue;

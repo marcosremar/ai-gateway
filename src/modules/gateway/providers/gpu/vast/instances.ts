@@ -79,18 +79,18 @@ export async function createInstance(
         }),
       }
     );
-
+    
     if (!response.success) {
-      return {
-        id: '',
-        success: false,
-        error: response.error || 'Unknown error creating instance'
+      return { 
+        id: '', 
+        success: false, 
+        error: response.error || 'Unknown error creating instance' 
       };
     }
-
-    return {
-      id: String(response.instance?.id || ''),
-      success: true
+    
+    return { 
+      id: String(response.instance?.id || ''), 
+      success: true 
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -222,22 +222,22 @@ export async function waitForStatus(
 ): Promise<boolean> {
   const { timeoutMs = 300000, intervalMs = 5000 } = options;
   const startTime = Date.now();
-
+  
   while (Date.now() - startTime < timeoutMs) {
     const status = await getInstanceStatus(instanceId, credentials);
-
+    
     if (status === targetStatus) {
       return true;
     }
-
+    
     if (status === 'error' || status === 'terminated') {
       log.error(`Instance ${instanceId} reached terminal status: ${status}`);
       return false;
     }
-
+    
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
-
+  
   log.warn(`Timeout waiting for instance ${instanceId} to reach ${targetStatus}`);
   return false;
 }

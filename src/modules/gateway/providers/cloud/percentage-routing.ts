@@ -1,6 +1,6 @@
 /**
  * Percentage-based routing for A/B testing and gradual rollouts.
- *
+ * 
  * Enables routing a percentage of traffic to different providers/models.
  * Useful for:
  * - A/B testing new models
@@ -39,20 +39,20 @@ export interface PercentageRoutingOptions {
  */
 export function selectPercentageRoute(options: PercentageRoutingOptions): PercentageRoute | null {
   const { routes, hashKey, seed, sticky = true } = options;
-
+  
   if (routes.length === 0) return null;
 
   if (!sticky) return selectRandomRoute(routes);
-
+  
   // Generate deterministic number from hashKey
   const hash = createHash('sha256')
     .update(seed ?? hashKey)
     .digest();
-
+  
   // Use first 2 bytes for 0-100 range
   const hashValue = (hash[0] << 8) | hash[1];
   const percentage = (hashValue / 65535) * 100;
-
+  
   // Find which route this percentage maps to
   let cumulative = 0;
   for (const route of routes) {
@@ -61,10 +61,10 @@ export function selectPercentageRoute(options: PercentageRoutingOptions): Percen
       return route;
     }
   }
-
+  
   // If percentages don't sum to 100, could fall through to last route
   // or return null if there's an "other" catch-all
-
+  
   return routes[routes.length - 1] || null;
 }
 
@@ -74,10 +74,10 @@ export function selectPercentageRoute(options: PercentageRoutingOptions): Percen
  */
 export function selectRandomRoute(routes: PercentageRoute[]): PercentageRoute | null {
   if (routes.length === 0) return null;
-
+  
   const totalPercentage = routes.reduce((sum, r) => sum + r.percentage, 0);
   const random = Math.random() * totalPercentage;
-
+  
   let cumulative = 0;
   for (const route of routes) {
     cumulative += route.percentage;
@@ -85,7 +85,7 @@ export function selectRandomRoute(routes: PercentageRoute[]): PercentageRoute | 
       return route;
     }
   }
-
+  
   return routes[routes.length - 1];
 }
 
@@ -104,7 +104,7 @@ export function buildPercentageRoutes(
 
 /**
  * Example usage:
- *
+ * 
  * // A/B test: 80% Groq, 20% OpenAI
  * const route = selectPercentageRoute({
  *   routes: [
@@ -113,7 +113,7 @@ export function buildPercentageRoutes(
  *   ],
  *   hashKey: userId,  // Same user always gets same route
  * });
- *
+ * 
  * // Gradual rollout: start with 10%
  * const route = selectPercentageRoute({
  *   routes: [

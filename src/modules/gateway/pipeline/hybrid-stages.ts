@@ -13,6 +13,17 @@ import { createLogger } from '../../logger';
 
 const log = createLogger('hybrid-stages');
 
+function assertValidAudio(result: GpuTTSResult, provider: string): GpuTTSResult {
+  const audioLength = Buffer.isBuffer(result.audio) ? result.audio.length : Buffer.from(result.audio).length;
+  if (audioLength === 0) {
+    throw new Error(`${provider} returned empty audio`);
+  }
+  if (!result.contentType?.trim()) {
+    throw new Error(`${provider} returned missing audio content type`);
+  }
+  return result;
+}
+
 /** Transcription / LLM / TTS client surface needed for cloud-side races. */
 export interface HybridStagesClient {
   transcribe(audio: Buffer, profile: AIProfile): Promise<{
@@ -286,7 +297,10 @@ export async function runTtsStage(
     log.log(`Adding GPU candidate (endpoint=${ttsGpuEp})`);
     ttsCandidates.push({
       name: 'gpu', timeoutMs: ttsTimeout,
-      run: (signal) => deps.fetchGpuTTS(ttsGpuEp!, translatedText, targetName, speaker || 'Ryan', signal, referenceAudio, refText, requestId),
+      run: async (signal) => assertValidAudio(
+        await deps.fetchGpuTTS(ttsGpuEp!, translatedText, targetName, speaker || 'Ryan', signal, referenceAudio, refText, requestId),
+        'gpu',
+      ),
     });
   }
   if (isCloneRequest) {
@@ -302,7 +316,7 @@ export async function runTtsStage(
             referenceAudio, refText,
           });
           log.log(`Modal clone OK: ${r.audio.length} bytes (${r.contentType})`);
-          return { audio: r.audio as Buffer, contentType: r.contentType, used_gpu: false };
+          return assertValidAudio({ audio: r.audio as Buffer, contentType: r.contentType, used_gpu: false }, 'modal');
         } catch (err) {
           log.error(`Modal clone FAILED: ${err instanceof Error ? err.message : err}`);
           throw err;
@@ -313,7 +327,10 @@ export async function runTtsStage(
     if (MODAL_URL && !(ttsOnGpu && deps.currentGpuEndpoint() === MODAL_URL)) {
       ttsCandidates.push({
         name: 'modal-babelcast', timeoutMs: 20_000,
-        run: (signal) => deps.fetchGpuTTS(MODAL_URL, translatedText, targetName, speaker || 'Ryan', signal, undefined, undefined, requestId),
+        run: async (signal) => assertValidAudio(
+          await deps.fetchGpuTTS(MODAL_URL, translatedText, targetName, speaker || 'Ryan', signal, undefined, undefined, requestId),
+          'modal-babelcast',
+        ),
       });
     }
     log.log(`Adding cloud TTS candidate (${deps.getCloudProviderName()})`);
@@ -322,7 +339,7 @@ export async function runTtsStage(
       run: async (signal) => {
         if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
         const r = await deps.client.synthesize(translatedText, cloudProfile);
-        return { audio: r.audio as Buffer, contentType: r.contentType, used_gpu: false };
+        return assertValidAudio({ audio: r.audio as Buffer, contentType: r.contentType, used_gpu: false }, deps.getCloudProviderName());
       },
     });
   }
@@ -351,9 +368,10 @@ export async function runTtsStage(
         const r = await deps.client.synthesize(translatedText, {
           ...cloudProfile, referenceAudio: undefined, refText: undefined, tts: undefined,
         });
-        audioRaw = Buffer.isBuffer(r.audio) ? r.audio : Buffer.from(r.audio);
+        const valid = assertValidAudio({ audio: r.audio as Buffer, contentType: r.contentType, used_gpu: false }, 'cloud/preset-fallback');
+        audioRaw = Buffer.isBuffer(valid.audio) ? valid.audio : Buffer.from(valid.audio);
         audioB64 = audioRaw.toString('base64');
-        contentType = r.contentType;
+        contentType = valid.contentType;
         ttsProvider = `${r.provider || 'cloud'}/preset-fallback`;
         ttsMs = Date.now() - fallbackT0;
         log.log(`Fallback OK: ${ttsProvider} (${ttsMs}ms, ${audioB64.length} bytes b64)`);

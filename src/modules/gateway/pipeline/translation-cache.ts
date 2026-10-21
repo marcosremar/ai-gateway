@@ -25,6 +25,12 @@ export class LRUCache<V = { text: string; ts: number }> {
     return value;
   }
 
+  /** Read without promoting LRU position. Use when the caller may reject
+   *  the entry (e.g. TTL check) — avoids polluting MRU end with stale keys. */
+  peek(key: string): V | undefined {
+    return this.cache.get(key);
+  }
+
   set(key: string, value: V): void {
     if (this.cache.has(key)) {
       this.cache.delete(key);
@@ -93,6 +99,10 @@ export function startTranslationCacheSweep(): void {
     }
     if (swept > 0) log.log(`Swept ${swept} expired translation entries`);
   }, 5 * 60_000);
+  // Unref so this timer doesn't keep short-lived processes (CLI, tests) alive.
+  // Long-running gateway server unaffected — Node only exits when ALL refs
+  // drop, and the HTTP server keeps a ref while listening.
+  translationCacheSweepTimer.unref?.();
 }
 
 export function stopTranslationCacheSweep(): void {
@@ -107,13 +117,19 @@ startTranslationCacheSweep();
 
 export function getCachedTranslation(text: string, srcLang: string, tgtLang: string, style = 'default'): string | null {
   const key = `${srcLang}|${tgtLang}|${style}|${text}`;
-  const entry = translationCache.get(key);
+  // Peek first so an expired entry doesn't get LRU-promoted ahead of valid
+  // ones. Previous code called .get() (which promotes), then checked TTL —
+  // expired entries kept getting bumped to MRU end and evicted younger
+  // valid entries during long meetings.
+  const entry = translationCache.peek(key);
   if (!entry) { cacheMisses++; return null; }
   if (Date.now() - entry.ts > TRANSLATION_CACHE_TTL_MS) {
     translationCache.delete(key);
     cacheMisses++;
     return null;
   }
+  // Now that TTL passed, do the real .get() to promote LRU position.
+  translationCache.get(key);
   cacheHits++;
   return entry.text;
 }

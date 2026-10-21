@@ -22,7 +22,7 @@ import { DiscordAlertChannel } from '../src/alerting/channels/discord';
 import { GenericWebhookAlertChannel } from '../src/alerting/channels/webhook';
 import type { AlertChannel, AlertSeverity } from '../src/alerting/types';
 import { listDeploySlots } from '../src/gateway/state/deploy-state';
-import { deployState, dailyGpuSpendUsd, setDailyGpuSpendUsd } from './state';
+import { deployState, dailyGpuSpendUsd, setDailyGpuSpendUsd, rolloverDailySpendIfNewDay } from './state';
 import { createLogger } from '../src/logger';
 
 const log = createLogger('gpu-telemetry');
@@ -183,6 +183,7 @@ function saveSpendHistory(history: Record<string, number>): void {
 
 function accrualTick(): void {
   const now = Date.now();
+  rolloverDailySpendIfNewDay(todayKey());
   const elapsedHr = _lastAccrualAt > 0 ? (now - _lastAccrualAt) / 3_600_000 : 0;
   _lastAccrualAt = now;
 

@@ -47,43 +47,43 @@ export async function searchOffers(
 ): Promise<RunpodOffer[]> {
   try {
     let offers = await listOffers(credentials);
-
+    
     // Apply filters
     if (filters.gpuType) {
       const fullGpuType = RUNPOD_GPU_TYPE_MAP[filters.gpuType] || filters.gpuType;
       offers = offers.filter(o => o.gpuType.displayName === fullGpuType);
     }
-
+    
     if (filters.minVcpu) {
       offers = offers.filter(o => o.minVcpu >= filters.minVcpu!);
     }
-
+    
     if (filters.minMemory) {
       offers = offers.filter(o => o.minMemory >= filters.minMemory!);
     }
-
+    
     if (filters.minGpuCount) {
       offers = offers.filter(o => o.maxPodGpuCount >= filters.minGpuCount!);
     }
-
+    
     if (filters.maxPrice) {
-      offers = offers.filter(o =>
-        o.communityPrice <= filters.maxPrice! ||
+      offers = offers.filter(o => 
+        o.communityPrice <= filters.maxPrice! || 
         o.securePrice <= filters.maxPrice!
       );
     }
-
+    
     if (filters.dataCenterId) {
       offers = offers.filter(o => o.dataCenterId === filters.dataCenterId);
     }
-
+    
     if (filters.region) {
       const datacenterIds = resolveDatacenterIds(filters.region);
       if (datacenterIds) {
         offers = offers.filter(o => datacenterIds.includes(o.dataCenterId));
       }
     }
-
+    
     if (filters.cloudType && filters.cloudType !== 'BOTH') {
       // Filter based on availability in specific cloud type
       offers = offers.filter(o => {
@@ -96,14 +96,14 @@ export async function searchOffers(
         return true;
       });
     }
-
+    
     // Sort by price (cheapest first)
     offers.sort((a, b) => {
       const priceA = Math.min(a.communityPrice || Infinity, a.securePrice || Infinity);
       const priceB = Math.min(b.communityPrice || Infinity, b.securePrice || Infinity);
       return priceA - priceB;
     });
-
+    
     log.log(`Found ${offers.length} offers matching filters`);
     return offers;
   } catch (err) {
@@ -131,7 +131,7 @@ export async function getBestOffer(
     },
     credentials
   );
-
+  
   return offers.length > 0 ? offers[0] : null;
 }
 
@@ -142,9 +142,9 @@ export async function getOffersByGpuType(
   credentials: RunpodCredentials
 ): Promise<Record<string, RunpodOffer[]>> {
   const offers = await listOffers(credentials);
-
+  
   const grouped: Record<string, RunpodOffer[]> = {};
-
+  
   for (const offer of offers) {
     const gpuName = offer.gpuType.displayName;
     if (!grouped[gpuName]) {
@@ -152,7 +152,7 @@ export async function getOffersByGpuType(
     }
     grouped[gpuName].push(offer);
   }
-
+  
   // Sort each group by price
   for (const gpuName of Object.keys(grouped)) {
     grouped[gpuName].sort((a, b) => {
@@ -161,7 +161,7 @@ export async function getOffersByGpuType(
       return priceA - priceB;
     });
   }
-
+  
   return grouped;
 }
 
@@ -172,15 +172,15 @@ export async function getCheapestOffers(
   credentials: RunpodCredentials
 ): Promise<Record<string, RunpodOffer>> {
   const grouped = await getOffersByGpuType(credentials);
-
+  
   const cheapest: Record<string, RunpodOffer> = {};
-
+  
   for (const [gpuName, offers] of Object.entries(grouped)) {
     if (offers.length > 0) {
       cheapest[gpuName] = offers[0];
     }
   }
-
+  
   return cheapest;
 }
 
@@ -195,9 +195,9 @@ export function estimateCost(
     cloudType: 'COMMUNITY' | 'SECURE';
   }
 ): number {
-  const pricePerHour = config.cloudType === 'COMMUNITY'
-    ? offer.communityPrice
+  const pricePerHour = config.cloudType === 'COMMUNITY' 
+    ? offer.communityPrice 
     : offer.securePrice;
-
+  
   return pricePerHour * config.gpuCount * config.hours;
 }

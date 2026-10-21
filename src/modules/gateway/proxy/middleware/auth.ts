@@ -51,7 +51,10 @@ export function validateAuth(authHeader: string | undefined, validKeys: string[]
     log.warn('Empty Bearer token');
     return false;
   }
-  // Iterate ALL keys (no short-circuit) — leaks key index via timing otherwise.
+  // Iterate ALL keys (no short-circuit) — `.some()` exits on first match,
+  // so a token matching key #1 returns faster than one matching key #N.
+  // Across many requests, attacker can detect which slot their guess
+  // matches via timing, leaking key index. OR-reduce all comparisons.
   let valid = false;
   for (const key of validKeys) {
     if (safeEqual(token, key)) valid = true;

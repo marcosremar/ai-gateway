@@ -23,6 +23,7 @@ import {
 import { createDeploySlot, getDeploySlot, listDeploySlots } from '../src/gateway/state/deploy-state';
 import type { DeploySlot, DeploymentState } from '../src/gateway/state/deploy-state';
 import { triggerStandbyDeploy, initiateHandover, cancelStandby, startStandbyMonitor } from './gpu-standby';
+import { recordDeployIntent } from './gpu-deploy-intent';
 /** Derive the owner (app userId) from a namespaced deploy label (<userId>/<task>). */
 export function ownerFromLabel(label: string | undefined | null): string | null {
   return label && label.includes('/') ? label.split('/')[0] : null;
@@ -1424,7 +1425,7 @@ function _startDeployAndRespond(
   };
 
   // Caller intent for this image — gates autonomous redeploys (finding #26).
-  require('./gpu-deploy-intent').recordDeployIntent(resolvedDockerImage);
+  recordDeployIntent(resolvedDockerImage);
 
   // Resolve before creating the deploy promise: a throw between promise
   // creation and handler attachment would orphan it with the lock held.
@@ -1809,7 +1810,7 @@ export async function autoBootFromProfile(): Promise<void> {
   const gd = activeApp.gpuDeploy;
   log.log(`[gpu] Auto-booting GPU for app: ${activeApp.name} (${gd.dockerImage})`);
   // bootOnStartup is config-declared intent (finding #26).
-  require('./gpu-deploy-intent').recordDeployIntent(gd.dockerImage || '');
+  recordDeployIntent(gd.dockerImage || '');
   const requestId = 'startup:autoboot';
 
   setDeployLock(true);
@@ -2539,7 +2540,7 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   const resumeSlot = resumeCallerId ? findCallerDeploySlot(resumeCallerId, mergeSlotQueryParams(req, body)) : undefined;
   // A resume is caller intent for the pod's image — permits the fresh-deploy
   // fallback and auto-recovery for this image (finding #26).
-  require('./gpu-deploy-intent').recordDeployIntent(resumeSlot?.state.dockerImage || deployState.dockerImage || '');
+  recordDeployIntent(resumeSlot?.state.dockerImage || deployState.dockerImage || '');
   if (resumeSlot?.state.podId && resumeSlot.state.status === 'stopped' && deployState.status === 'idle') {
     const slotState = resumeSlot.state;
     const provider = (slotState.provider || 'vast') as ProviderName;

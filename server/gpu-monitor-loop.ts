@@ -18,7 +18,7 @@ import {
   setGpuHealthy, setLastRequestTime,
   monitorInterval, setMonitorInterval,
   lastRequestTime, lastModelRequestTime, setLastModelRequestTime,
-  DAILY_BUDGET_USD, dailyGpuSpendUsd, setDailyGpuSpendUsd, dailySpendResetDate, setDailySpendResetDate,
+  DAILY_BUDGET_USD, dailyGpuSpendUsd, setDailyGpuSpendUsd, rolloverDailySpendIfNewDay,
   updateGpuModelWarmth, isStageWarm,
   isGpuReadyForProduction, getPerStageP95, setGpuReadyForProduction, setServiceReadiness,
   perStageLatencyRing,
@@ -46,7 +46,7 @@ export { GPU_MONITOR_INTERVAL_MS } from './gpu-health-metrics';
 // (no hourly billing), then auto-destroys after IDLE_DESTROY_MS (2h) if not
 // resumed — preserving the option for the user to come back without waiting
 // for a cold boot.
-export let IDLE_TIMEOUT_MS = 5 * 60_000;    // auto-STOP (pause) after 5 min idle (configurable via API)
+export let IDLE_TIMEOUT_MS = 10 * 60_000;    // auto-STOP (pause) after 10 min idle (configurable via API)
 export function setIdleTimeoutMs(ms: number) { IDLE_TIMEOUT_MS = ms; }
 export let IDLE_DESTROY_MS = 2 * 60 * 60_000; // auto-DESTROY 2 hours after stop (configurable)
 export function setIdleDestroyMs(ms: number) { IDLE_DESTROY_MS = ms; }
@@ -337,8 +337,7 @@ export function scheduleNextMonitorProbe() {
 
       // Budget tracking: accumulate GPU spend with enforcement
       if (deployState.costPerHr > 0) {
-        const today = new Date().toISOString().slice(0, 10);
-        if (today !== dailySpendResetDate) { setDailyGpuSpendUsd(0); setDailySpendResetDate(today); budgetSoftWarned = false; budgetWarned50 = false; }
+        if (rolloverDailySpendIfNewDay()) { budgetSoftWarned = false; budgetWarned50 = false; }
         // First probe after restart: charge for elapsed time since deploy
         // started (clamped to today midnight UTC so we don't backdate spend
         // across calendar boundaries). Previously fell back to monitorDelayMs

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fly-computer": {
+      "command": "python3",
+      "args": ["/Volumes/HD 1TB/projects/ai-gateway/fly-computer-mcp/server.py"],
+      "env": { "FLY_APP": "weathered-canyon-498" }
+    }
+  }
+}

@@ -30,6 +30,11 @@ export interface ChatCompletionsDeps {
   providerAdapters?: Record<string, ChatProviderAdapter>;
 }
 
+export interface ChatProfileLlmEntry {
+  provider?: string;
+  model?: string;
+}
+
 export interface OpenAiChatResponse {
   id: string;
   object: 'chat.completion';
@@ -75,6 +80,20 @@ export function resolveChatProvider(
     }
   }
   return { provider, resolvedModel };
+}
+
+/**
+ * Convert an app/profile LLM entry into the same model selector accepted by
+ * resolveChatProvider(). Profiles store provider and model separately, while
+ * chat completions routing uses provider/model shorthand for direct adapters.
+ */
+export function resolveProfileChatModel(entry?: ChatProfileLlmEntry): string {
+  const provider = typeof entry?.provider === 'string' ? entry.provider.trim() : '';
+  const model = typeof entry?.model === 'string' ? entry.model.trim() : '';
+  if (!provider) return model;
+  if (!model || model === provider || model.startsWith(`${provider}/`)) return model || provider;
+  if (provider === 'gpu' || provider === 'self-hosted') return model;
+  return `${provider}/${model}`;
 }
 
 /** Build the OpenAI-compatible JSON body for a chat.completion response. */

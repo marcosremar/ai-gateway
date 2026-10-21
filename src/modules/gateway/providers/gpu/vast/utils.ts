@@ -22,22 +22,22 @@ export async function vastRequest<T>(
     'Accept': 'application/json',
     ...(options.headers as Record<string, string>),
   };
-
+  
   // Add Authorization header if API key provided
   if (credentials.apiKey) {
     headers['Authorization'] = `Bearer ${credentials.apiKey}`;
   }
-
+  
   const response = await fetch(url, {
     ...options,
     headers,
   });
-
+  
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
     throw new Error(`Vast.ai API error: HTTP ${response.status} ${errorText.substring(0, 300)}`);
   }
-
+  
   const data = await response.json() as T;
   return data;
 }
@@ -67,16 +67,16 @@ export function calculateOfferScore(offer: {
 }): number {
   // Lower price is better (inverted)
   const priceScore = offer.dph_total > 0 ? 100 / offer.dph_total : 0;
-
+  
   // Higher reliability is better
   const reliabilityScore = offer.reliability * 100;
-
+  
   // Higher performance is better
   const perfScore = offer.dlperf;
-
+  
   // Higher bandwidth is better
   const bandwidthScore = (offer.inet_up + offer.inet_down) / 100;
-
+  
   // Weighted combination
   return priceScore * 0.3 + reliabilityScore * 0.3 + perfScore * 0.2 + bandwidthScore * 0.2;
 }
@@ -95,7 +95,7 @@ export function formatInstanceStatus(status: string): string {
     'error': 'error',
     'queued': 'queued',
   };
-
+  
   return statusMap[status.toLowerCase()] || status.toLowerCase();
 }
 

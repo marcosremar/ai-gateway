@@ -68,8 +68,8 @@ export type { TierActionResult, TierDetail } from './tier-lifecycle';
 
 // ── Load Balancer ─────────────────────────────────────────────────────────
 export { LoadBalancer } from './load-balancer';
-export type {
-  LoadBalanceStrategy,
+export type { 
+  LoadBalanceStrategy, 
   RequestPriority,
   TierLatencyMetrics,
   TierConnectionMetrics,

@@ -79,6 +79,15 @@ export interface DeploymentState {
    * via hibernateRestore. Undefined when the pod is not paused.
    */
   pausedMode?: 'stop' | 'hibernate';
+  /** Set when the host passed the speed test only via degraded-accept (slow but usable). */
+  networkDegraded?: boolean;
+  /**
+   * Owner identity (the app/userId resolved from the deploying API key) — the
+   * basis for per-key isolation: status/logs are hidden from, and stop/resume/
+   * terminate/clobber are refused to, callers whose userId differs. null/undefined
+   * = anonymous/loopback (admin, sees everything). Also read by the heartbeat guard.
+   */
+  userId?: string | null;
 }
 
 // ── Mutable deploy state ────────────────────────────────────────────────────
@@ -113,6 +122,54 @@ export function setDeployModalApiKey(v: string) { deployModalApiKey = v; }
 export function setDeployHyperstackApiKey(v: string) { deployHyperstackApiKey = v; }
 export function setActiveProvider(v: ProviderName | '') { activeProvider = v; }
 export function setGpuHealthy(v: boolean) { gpuHealthy = v; }
+
+// ── Per-owner deploy slots (multi-tenant concurrency — step 1: foundation) ────
+// A DeploySlot bundles all mutable state for ONE concurrent deploy. The module
+// globals above are the implicit "default" slot (loopback/admin + the production
+// serving pod, which inference routes to). Named slots let app-keyed deploys
+// (e.g. finetune jobs) run concurrently without clobbering the default slot.
+// Step 1 only introduces the type + registry + a fresh-state factory; later
+// steps thread an optional slot through setDeployState / the deploy loop /
+// monitor / persistence. With no slot passed, behavior is byte-identical.
+export interface DeploySlot {
+  ownerKey: string;                 // resolved userId, or 'default'
+  state: DeploymentState;
+  cancelled: boolean;
+  lock: boolean;
+  promise: Promise<void> | null;
+  persistFile: string;              // per-slot persistence path (used in step 4)
+}
+
+/** Build a clean idle DeploymentState (same shape as the global initializer). */
+export function freshDeploymentState(userId?: string | null): DeploymentState {
+  return {
+    status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '',
+    startedAt: 0, retryCount: 0, provider: '', alert: '', alertLevel: 'info', alertHistory: [], sshHost: '', sshPort: 0,
+    lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], pullHistory: [],
+    warmingStatus: { phase: 'idle', startedAt: 0 }, deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0,
+    templateHashId: '', userId: userId ?? null,
+  };
+}
+
+const _deploySlots = new Map<string, DeploySlot>();
+const _slugifyOwner = (u: string) => u.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+
+/** Get-or-create the deploy slot for an owner userId (named, non-default slot). */
+export function createDeploySlot(userId: string): DeploySlot {
+  const existing = _deploySlots.get(userId);
+  if (existing) return existing;
+  const slot: DeploySlot = {
+    ownerKey: userId,
+    state: freshDeploymentState(userId),
+    cancelled: false, lock: false, promise: null,
+    persistFile: join(homedir(), '.babelcast', `active_deploy.${_slugifyOwner(userId)}.json`),
+  };
+  _deploySlots.set(userId, slot);
+  return slot;
+}
+export function getDeploySlot(userId: string): DeploySlot | undefined { return _deploySlots.get(userId); }
+export function listDeploySlots(): DeploySlot[] { return [..._deploySlots.values()]; }
+export function deleteDeploySlot(userId: string): void { _deploySlots.delete(userId); }
 
 // ── Active deploy persistence ────────────────────────────────────────────────
 // Persists active deploy to ~/.babelcast/active_deploy.json so we can reconnect
@@ -174,6 +231,10 @@ export function persistDeployState(): void {
       providerMeta: deployState.providerMeta ?? {},
       savedAt: Date.now(),
       status: deployState.status,
+      // Carry the deploy correlation id through persistence so the orphan
+      // sweep on the next gateway start can match a stray pod back to its
+      // owning deploy session instead of nuking it as untracked.
+      ...(deployState.deployId ? { deployId: deployState.deployId } : {}),
       ...(isStopped ? { stoppedAt: Date.now() } : {}),
       ...(deployState.devMode ? { devMode: true } : {}),
       ...(deployState.readinessProbe ? { readinessProbe: deployState.readinessProbe } : {}),

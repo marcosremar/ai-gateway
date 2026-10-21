@@ -320,7 +320,7 @@ describe('Regression: STT sessions (#836)', () => {
 describe('Regression: Race deploy (#837)', () => {
   it('try/finally around Promise.all', () => {
     const src = readSrc('server/gpu-deploy-race.ts');
-    const fn = fnBody(src, 'export async function startDeployRace', 25000);
+    const fn = fnBody(src, 'export async function startDeployRace', 40000);
     expect(fn).toContain('try {');
     expect(fn).toContain('await Promise.all(candidates.map');
     expect(fn).toContain('Force-cleaned');

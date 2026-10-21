@@ -1,6 +1,6 @@
 /**
  * OpenAI Audio Models Catalog
- *
+ * 
  * Comprehensive listing of all OpenAI audio models available for STT and TTS.
  * Source: https://platform.openai.com/docs/models
  */

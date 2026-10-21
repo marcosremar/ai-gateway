@@ -1,0 +1,15 @@
+app = "weathered-canyon-498"
+primary_region = "gru"
+
+[build]
+
+[env]
+  IDLE_STOP_MS = "1800000"
+
+[[mounts]]
+  source = "igdata"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2048"

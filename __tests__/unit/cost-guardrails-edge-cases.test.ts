@@ -161,6 +161,7 @@ describe('isAccountOwned — env parsing edge cases', () => {
   });
 
   it('Modal sweep defaults to app stop, but can be forced back to prefix-only mode', async () => {
+    delete process.env.AIGW_MODAL_STOP_UNTRACKED;
     const { prefixesForProvider, GATEWAY_NAME_PREFIXES } = await import('../../server/gpu-orphan-cleanup');
     expect(prefixesForProvider('modal')).toEqual([]);
 

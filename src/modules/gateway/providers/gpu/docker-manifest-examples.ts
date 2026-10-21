@@ -1,11 +1,11 @@
 /**
  * Example Service Manifest for babelcast-subtitle
- *
+ * 
  * This file should be served at GET /v1/manifest by the GPU service.
  * It enables automatic registration as an AI provider in the gateway.
- *
+ * 
  * For FastAPI (babelcast-subtitle), add this endpoint to server.py:
- *
+ * 
  * @app.get("/v1/manifest")
  * async def get_manifest():
  *     return {

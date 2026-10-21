@@ -31,7 +31,7 @@ export async function searchOffers(
   try {
     // Build query string
     const params = new URLSearchParams();
-
+    
     if (filters.gpuName) {
       params.set('gpu_name', filters.gpuName);
     }
@@ -56,30 +56,30 @@ export async function searchOffers(
     if (filters.verifiedOnly) {
       params.set('verified', 'true');
     }
-
+    
     const queryString = params.toString();
     const endpoint = `/bundles/${queryString ? '?' + queryString : ''}`;
-
+    
     const response = await vastRequest<{ offers: VastOffer[] }>(
       endpoint,
       credentials
     );
-
+    
     let offers = response.offers || [];
-
+    
     // Calculate scores for sorting
     offers = offers.map(offer => ({
       ...offer,
       score: calculateOfferScore(offer),
     }));
-
+    
     // Sort results
     const orderBy = filters.orderBy || 'score';
     const orderDir = filters.orderDir || 'desc';
-
+    
     offers.sort((a, b) => {
       let comparison = 0;
-
+      
       switch (orderBy) {
         case 'price':
           comparison = a.dph_total - b.dph_total;
@@ -95,10 +95,10 @@ export async function searchOffers(
           comparison = (a.score || 0) - (b.score || 0);
           break;
       }
-
+      
       return orderDir === 'asc' ? comparison : -comparison;
     });
-
+    
     log.log(`Found ${offers.length} offers matching filters`);
     return offers;
   } catch (err) {
@@ -128,11 +128,11 @@ export async function getBestOffer(
     },
     credentials
   );
-
+  
   if (offers.length === 0) {
     return null;
   }
-
+  
   // Filter by reliability if specified
   if (options.minReliability) {
     const reliableOffers = offers.filter(o => o.reliability >= options.minReliability!);
@@ -140,7 +140,7 @@ export async function getBestOffer(
       return reliableOffers[0];
     }
   }
-
+  
   return offers[0];
 }
 
@@ -151,9 +151,9 @@ export async function getOffersByGpuType(
   credentials: VastCredentials
 ): Promise<Record<string, VastOffer[]>> {
   const offers = await searchOffers({}, credentials);
-
+  
   const grouped: Record<string, VastOffer[]> = {};
-
+  
   for (const offer of offers) {
     const gpuName = offer.gpu_name;
     if (!grouped[gpuName]) {
@@ -161,12 +161,12 @@ export async function getOffersByGpuType(
     }
     grouped[gpuName].push(offer);
   }
-
+  
   // Sort each group by score
   for (const gpuName of Object.keys(grouped)) {
     grouped[gpuName].sort((a, b) => (b.score || 0) - (a.score || 0));
   }
-
+  
   return grouped;
 }
 
@@ -177,9 +177,9 @@ export async function getCheapestOffers(
   credentials: VastCredentials
 ): Promise<Record<string, VastOffer>> {
   const grouped = await getOffersByGpuType(credentials);
-
+  
   const cheapest: Record<string, VastOffer> = {};
-
+  
   for (const [gpuName, offers] of Object.entries(grouped)) {
     if (offers.length > 0) {
       // Sort by price ascending
@@ -187,6 +187,6 @@ export async function getCheapestOffers(
       cheapest[gpuName] = sorted[0];
     }
   }
-
+  
   return cheapest;
 }

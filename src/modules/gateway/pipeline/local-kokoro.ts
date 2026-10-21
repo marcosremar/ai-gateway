@@ -6,7 +6,6 @@ import { fileURLToPath } from 'url';
 const log = createLogger('local-kokoro');
 
 const DEFAULT_PORT = 8001;
-// import.meta.dir is Bun-specific; fall back to Node's import.meta.url
 const __dir = (import.meta as any).dir ?? dirname(fileURLToPath(import.meta.url));
 const VENV_DIR = join(__dir, '..', '..', '..', '.venv-kokoro');
 const SERVER_DIR = join(__dir, '..', '..', '..', 'dockers', 'kokoro-tts');
@@ -19,6 +18,29 @@ export function getLocalKokoroUrl(): string | null {
   if (process.env.LOCAL_KOKORO_URL) return process.env.LOCAL_KOKORO_URL;
   if (process.env.LOCAL_KOKORO_DISABLED === '1') return null;
   return _url;
+}
+
+async function probeHealth(url: string, timeoutMs = 1_500): Promise<boolean> {
+  try {
+    const res = await fetch(`${url.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return false;
+    const body = await res.json() as { status?: string };
+    return body.status === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+/** Fast poll at startup — 250ms then backoff to 1.5s (was fixed 2s). */
+async function waitForHealth(url: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let delayMs = 250;
+  while (Date.now() < deadline) {
+    if (await probeHealth(url)) return true;
+    await new Promise(r => setTimeout(r, delayMs));
+    delayMs = Math.min(Math.round(delayMs * 1.4), 1_500);
+  }
+  return false;
 }
 
 export async function startLocalKokoro(): Promise<string | null> {
@@ -34,6 +56,17 @@ export async function startLocalKokoro(): Promise<string | null> {
   }
 
   const port = parseInt(process.env.LOCAL_KOKORO_PORT || String(DEFAULT_PORT), 10);
+  const url = `http://127.0.0.1:${port}`;
+
+  // Reuse an already-running local server (gateway restart, parallel dev tools).
+  if (await probeHealth(url)) {
+    _url = url;
+    log.log(`reusing existing Kokoro at ${url}`);
+    if (!healthCheckInterval) {
+      healthCheckInterval = setInterval(() => { void probeHealth(url).then(ok => { if (!ok) log.warn('local Kokoro health check failed'); }); }, 30_000);
+    }
+    return _url;
+  }
 
   const pythonBin = join(VENV_DIR, 'bin', 'python3');
   if (!existsSync(pythonBin)) {
@@ -59,9 +92,7 @@ export async function startLocalKokoro(): Promise<string | null> {
       env: { ...process.env, PYTHONUNBUFFERED: '1' },
     });
 
-    const url = `http://127.0.0.1:${port}`;
-
-    const ready = await waitForHealth(url, 60_000);
+    const ready = await waitForHealth(url, 90_000);
     if (!ready) {
       log.warn('local Kokoro did not become healthy in time, killing');
       proc.kill();
@@ -72,36 +103,14 @@ export async function startLocalKokoro(): Promise<string | null> {
     _url = url;
     log.log(`local Kokoro TTS ready at ${url}`);
 
-    healthCheckInterval = setInterval(() => checkHealth(url), 30_000);
+    healthCheckInterval = setInterval(() => {
+      void probeHealth(url).then(ok => { if (!ok) log.warn('local Kokoro health check failed'); });
+    }, 30_000);
 
     return _url;
   } catch (e) {
     log.error(`failed to start local Kokoro: ${e instanceof Error ? e.message : e}`);
     return null;
-  }
-}
-
-async function waitForHealth(url: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(3_000) });
-      if (res.ok) {
-        const body = await res.json() as any;
-        if (body.status === 'ok') return true;
-      }
-    } catch {}
-    await new Promise(r => setTimeout(r, 2_000));
-  }
-  return false;
-}
-
-async function checkHealth(url: string): Promise<void> {
-  try {
-    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5_000) });
-    if (!res.ok) log.warn(`local Kokoro health check failed: ${res.status}`);
-  } catch (e) {
-    log.warn(`local Kokoro health check error: ${e instanceof Error ? e.message : e}`);
   }
 }
 

@@ -9,6 +9,56 @@ import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import path from 'path';
 import type { GpuProviderClient, ProviderCredentials } from './types';
 
+/**
+ * Exponential backoff cooldown with ±20% jitter (fix #4a), capped at maxMs.
+ * Pure + injectable RNG for testing.
+ */
+export function computeBackoffCooldownMs(
+  baseMs: number, maxMs: number, failCount: number, rand: () => number = Math.random,
+): number {
+  const raw = Math.min(baseMs * Math.pow(2, Math.max(0, failCount - 1)), maxMs);
+  const jitter = 1 + (rand() * 0.4 - 0.2); // ±20%
+  return Math.min(Math.max(0, Math.round(raw * jitter)), maxMs);
+}
+
+/**
+ * Fix #7: move probe-confirmed-unavailable providers to the END of the cascade
+ * without otherwise reordering (stable partition). Keeps the configured priority
+ * among working providers but stops wasting an early deploy attempt on a provider
+ * the parallel probe already knows is down.
+ */
+export function deprioritizeUnavailable<T extends { name: string }>(tiers: T[], unavailable: Set<string>): T[] {
+  if (unavailable.size === 0) return tiers;
+  const working = tiers.filter(t => !unavailable.has(t.name));
+  const dead = tiers.filter(t => unavailable.has(t.name));
+  return [...working, ...dead];
+}
+
+/**
+ * Fix #4b: detect a provider-level HARD block (not a transient failure) — e.g.
+ * RunPod's "machine quota is 0 / account blocked" abuse flag, or KYC/preflight
+ * blocks. These last ~hours, so retrying the provider 60s later just re-hits the
+ * blocked account; callers should apply a long cooldown instead.
+ */
+const HARD_BLOCK_SIGNATURES = [
+  'machine quota is 0', 'account blocked', 'preflight blocked', 'abuse', 'kyc',
+];
+export function isProviderHardBlock(message: string): boolean {
+  const m = (message || '').toLowerCase();
+  return HARD_BLOCK_SIGNATURES.some(s => m.includes(s));
+}
+
+/**
+ * Per-key isolation: derive the owner userId from a namespaced deploy label
+ * `<userId>/<task>`. Returns null for labels without a namespace (admin/raw),
+ * so callers treat them as ownerless.
+ */
+export function ownerFromLabel(label: string | undefined | null): string | null {
+  if (!label || !label.includes('/')) return null;
+  const owner = label.split('/')[0].trim();
+  return owner || null;
+}
+
 // ── Provider Name & Tier ────────────────────────────────────────────────────
 
 export type ProviderName =
@@ -149,7 +199,9 @@ export class ProviderCooldownTracker {
         `(${recent.length} failures in the last ${Math.round(ProviderCooldownTracker.AUTO_BLACKLIST_WINDOW_MS / 60_000)}min)`
       );
     } else {
-      cooldownMs = Math.min(this.baseCooldownMs * Math.pow(2, failCount - 1), this.maxCooldownMs);
+      // Fix #4a: ±20% jitter so multiple providers/restarts don't retry in
+      // lock-step (synchronized retry storms re-trigger provider rate limits).
+      cooldownMs = computeBackoffCooldownMs(this.baseCooldownMs, this.maxCooldownMs, failCount);
     }
 
     this.cooldowns.set(name, {
@@ -169,6 +221,22 @@ export class ProviderCooldownTracker {
       failedAt: Date.now(),
       cooldownUntilMs: Date.now() + BILLING_COOLDOWN_MS,
       failCount,
+    });
+    await this.persist();
+  }
+
+  /**
+   * Fix #4b: record a provider HARD block (abuse flag / quota-0 / KYC). Unlike
+   * recordFailure/recordBillingFailure this BYPASSES MAX_COOLDOWN_MS — a 24h
+   * block must actually skip the provider for 24h, not 15min. Persisted.
+   */
+  async recordHardBlock(name: string, ttlMs = 24 * 60 * 60_000): Promise<void> {
+    const now = Date.now();
+    const existing = this.cooldowns.get(name);
+    this.cooldowns.set(name, {
+      failedAt: now,
+      cooldownUntilMs: now + Math.max(0, ttlMs),
+      failCount: (existing?.failCount ?? 0) + 1,
     });
     await this.persist();
   }
@@ -302,6 +370,26 @@ export function filterTiers(
     return { error: `Provider '${forceProvider}' not available. Available: ${tiers.map(t => t.name).join(', ')}` };
   }
   return { tiers: [forced] };
+}
+
+/**
+ * Drop the Modal tier when the deploy is for a Docker image (not a `.py` serve
+ * script). The race loop silently substitutes Docker images with
+ * `docker/modal/babelcast.py` and "wins" against the existing babelcast Modal
+ * serve endpoint in a few seconds, hijacking the user's intended deploy.
+ *
+ * Modal is kept when:
+ *   - `forceProvider === 'modal'` (user explicitly asked for it), OR
+ *   - `dockerImage` ends with `.py` (legitimate Modal deploy script).
+ */
+export function dropModalForDockerImage(
+  tiers: GpuTier[],
+  dockerImage: string,
+  forceProvider?: ProviderName,
+): GpuTier[] {
+  if (forceProvider === 'modal') return tiers;
+  if (dockerImage.endsWith('.py')) return tiers;
+  return tiers.filter(t => t.name !== 'modal');
 }
 
 // ── Default Storage per Provider ────────────────────────────────────────────

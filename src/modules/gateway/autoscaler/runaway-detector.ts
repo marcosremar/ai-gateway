@@ -97,8 +97,12 @@ export class RunawayDetector {
     // Record this event.
     state.starts.push(t);
 
-    // Did we just cross the threshold? Pause if so. Use `>=` so the Nth
-    // event trips the gate (was `>`, allowing maxStarts+1 burns first).
+    // Did we just cross the threshold? Pause if so. The caller's deploy
+    // does NOT proceed — it was the trigger, so refusing it breaks the
+    // loop immediately instead of allowing one more burn before the
+    // pause takes effect. Use `>=` so the Nth event in window trips the
+    // gate (doc says "6 events in 2 minutes is a runaway"); previous `>`
+    // allowed maxStarts+1 before tripping.
     if (state.starts.length >= this.maxStarts) {
       state.pausedUntilMs = t + this.pauseMs;
       state.pauseReason = `${state.starts.length} deploy_started events in ${this.windowMs / 1000}s`;

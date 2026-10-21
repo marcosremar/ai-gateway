@@ -353,6 +353,7 @@ function buildChain(
       model: route.upstreamModel?.(requestedModel) ?? requestedModel,
       instance: route.provider,
     });
+    seen.add(route.providerId);
     break;
   }
 
@@ -380,9 +381,11 @@ function buildSSEStream(
   const created = Math.floor(Date.now() / 1000);
   const startMs = Date.now();
 
-  // Track the active generator + timeout so cancel() can stop both on
-  // client disconnect (otherwise upstream generator keeps running and
-  // we keep paying for tokens until the silence timeout fires).
+  // Track the active generator + timeout from outside `start()` so cancel()
+  // (fired when the consumer disconnects) can stop both. Without this, a
+  // client that drops mid-stream leaves the upstream generator running and
+  // the gateway keeps consuming (and billing) tokens until the 30s silence
+  // timeout fires.
   let activeGen: AsyncGenerator<string> | null = null;
   let activeTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
@@ -474,7 +477,8 @@ function buildSSEStream(
       }
     },
     cancel() {
-      // Consumer disconnected — stop upstream generator and clear pending timeout.
+      // Consumer disconnected. Stop the upstream generator and clear the
+      // pending timeout so we stop consuming (and billing) tokens.
       if (activeTimeoutId) {
         clearTimeout(activeTimeoutId);
         activeTimeoutId = null;

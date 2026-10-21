@@ -1,6 +1,6 @@
 /**
  * Vast.ai Client — Modular Implementation
- *
+ * 
  * Split from the original 2765-line vast-client.ts into focused modules:
  * - types.ts: TypeScript interfaces and types
  * - utils.ts: Utility functions and API helpers

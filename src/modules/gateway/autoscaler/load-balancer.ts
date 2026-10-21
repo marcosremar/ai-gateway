@@ -18,10 +18,10 @@
 import type { StateStore } from '../../deps';
 import type { GpuTierState } from '../../types';
 
-export type LoadBalanceStrategy =
-  | 'hash'
-  | 'least-latency'
-  | 'weighted-round-robin'
+export type LoadBalanceStrategy = 
+  | 'hash' 
+  | 'least-latency' 
+  | 'weighted-round-robin' 
   | 'affinity'
   | 'least-busy'
   | 'priority';
@@ -98,7 +98,7 @@ export class LoadBalancer {
   private priorityQueueConfig: PriorityQueueConfig;
 
   constructor(
-    stateStore: StateStore,
+    stateStore: StateStore, 
     tokenBucketConfig?: Partial<TokenBucketConfig>,
     priorityQueueConfig?: Partial<PriorityQueueConfig>,
   ) {
@@ -331,8 +331,8 @@ export class LoadBalancer {
   // ── Priority Queue Strategy ───────────────────────────────────────────────────
 
   private async selectPriority(
-    userId: string,
-    readyTiers: GpuTierState[],
+    userId: string, 
+    readyTiers: GpuTierState[], 
     priority: RequestPriority,
   ): Promise<number> {
     // For urgent requests, prefer least-busy
@@ -348,7 +348,7 @@ export class LoadBalancer {
     if (tier) {
       const connections = await this.getTierConnections(tier.tierIndex);
       const loadFactor = (connections?.activeConnections ?? 0) / Math.max(1, this.priorityQueueConfig.maxQueueSize);
-
+      
       // If load > 70%, use least-busy instead
       if (loadFactor > 0.7) {
         return this.selectLeastBusy(readyTiers);
@@ -406,9 +406,15 @@ export class LoadBalancer {
       // Not enough tokens — persist the refill credit so the next call sees it
       await this.stateStore.set(key, JSON.stringify(state), 3600);
       return false;
-    } catch {
-      // On error, allow the request (fail open)
-      return true;
+    } catch (err) {
+      // Fail-CLOSED on stateStore errors. A previous "fail open" policy
+      // could be exploited: a caller crafting requests that trigger
+      // stateStore JSON.parse errors (e.g. via a corrupted bucket left from
+      // a prior abort) would bypass rate limiting entirely. Better to
+      // refuse a few requests under degraded state than to silently grant
+      // unlimited throughput.
+      console.warn('[load-balancer] tryConsume failed-closed:', err instanceof Error ? err.message : String(err));
+      return false;
     }
   }
 
@@ -451,7 +457,7 @@ export class LoadBalancer {
    * Check if request should be rate limited based on priority.
    */
   async checkRateLimit(
-    clientId: string,
+    clientId: string, 
     priority: RequestPriority = 'normal',
   ): Promise<{ allowed: boolean; remainingTokens: number; retryAfterMs?: number }> {
     const tokensNeeded = priority === 'urgent' ? 1 : priority === 'high' ? 2 : 3;

@@ -4,9 +4,63 @@
  */
 
 import { spawn, type ChildProcess } from 'child_process';
+import { connect as netConnect } from 'net';
+import { existsSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 import { createLogger } from '../../../logger';
 
 const log = createLogger('ssh-tunnel');
+
+/**
+ * Resolve an SSH identity file to pass with `-i` (fix #5). Relying on the ambient
+ * agent silently yields "Permission denied" → exit 255 when the gateway runs
+ * without the Vast key loaded. Honors VAST_SSH_KEY / AIGW_SSH_KEY, else the
+ * common default keys.
+ */
+export function resolveSshIdentity(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const explicit = env.VAST_SSH_KEY || env.AIGW_SSH_KEY;
+  if (explicit && existsSync(explicit)) return explicit;
+  for (const name of ['id_ed25519', 'id_rsa', 'id_ecdsa']) {
+    const p = join(homedir(), '.ssh', name);
+    if (existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+/** Raw TCP connect probe — resolves true if the local port accepts within timeoutMs. */
+export function tcpProbe(port: number, timeoutMs: number, host = '127.0.0.1'): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const sock = netConnect({ port, host });
+    const done = (ok: boolean) => { clearTimeout(t); try { sock.destroy(); } catch { /* noop */ } resolve(ok); };
+    const t = setTimeout(() => done(false), timeoutMs);
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+  });
+}
+
+/** Build the ssh tunnel argv (pure, testable). Adds `-i` + IdentitiesOnly when an identity is given. */
+export function buildSshArgs(opts: {
+  localPort: number; remotePort: number; sshPort: number; sshHost: string;
+  identityFile?: string; logLevel?: string;
+}): string[] {
+  const args = [
+    '-N',
+    '-L', `${opts.localPort}:localhost:${opts.remotePort}`,
+    '-p', String(opts.sshPort),
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'ConnectTimeout=15',
+    '-o', 'ServerAliveInterval=60',
+    '-o', 'ServerAliveCountMax=5',
+    '-o', 'TCPKeepAlive=yes',
+    '-o', `LogLevel=${opts.logLevel ?? 'ERROR'}`,
+    '-o', 'ExitOnForwardFailure=yes',
+  ];
+  if (opts.identityFile) args.push('-i', opts.identityFile, '-o', 'IdentitiesOnly=yes');
+  args.push(`root@${opts.sshHost}`);
+  return args;
+}
 
 let nextLocalPort = 19000;
 
@@ -21,6 +75,9 @@ export class SshTunnel {
   private _closed = false;
   private _reconnectAttempts = 0;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _stderr = '';
+  /** Last ssh failure reason (code + stderr tail) — read by vast-client (fix #5). */
+  public lastError: string | null = null;
 
   constructor(
     public readonly sshHost: string,
@@ -72,20 +129,15 @@ export class SshTunnel {
       };
 
       try {
-        this.proc = spawn('ssh', [
-          '-N',
-          '-L', `${this._localPort}:localhost:${this.remotePort}`,
-          '-p', String(this.sshPort),
-          '-o', 'StrictHostKeyChecking=no',
-          '-o', 'UserKnownHostsFile=/dev/null',
-          '-o', 'ConnectTimeout=15',
-          '-o', 'ServerAliveInterval=60',
-          '-o', 'ServerAliveCountMax=5',
-          '-o', 'TCPKeepAlive=yes',
-          '-o', 'LogLevel=ERROR',
-          '-o', 'ExitOnForwardFailure=yes',
-          `root@${this.sshHost}`,
-        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        const identityFile = resolveSshIdentity();
+        this.proc = spawn('ssh', buildSshArgs({
+          localPort: this._localPort, remotePort: this.remotePort,
+          sshPort: this.sshPort, sshHost: this.sshHost, identityFile,
+        }), { stdio: ['ignore', 'pipe', 'pipe'] });
+
+        // Capture stderr so a 255 has a real reason (auth vs refused vs proxy)
+        // instead of the old discarded-stderr mystery.
+        this.proc.stderr?.on('data', (b: Buffer) => { this._stderr = (this._stderr + b.toString()).slice(-1000); });
 
         this.proc.on('error', (err) => {
           log.warn(`Process error: ${err.message}`);
@@ -98,7 +150,9 @@ export class SshTunnel {
           const wasOpen = this._open;
           this._open = false;
           if (code !== 0 && code !== null) {
-            log.warn(`Exited with code ${code}`);
+            const tail = this._stderr.trim().split('\n').slice(-2).join(' ').slice(0, 300);
+            this.lastError = `code ${code}${tail ? `: ${tail}` : ''}`;
+            log.warn(`Exited with ${this.lastError}`);
           }
           if (wasOpen && !this._closed) {
             this._scheduleReconnect();
@@ -118,10 +172,19 @@ export class SshTunnel {
               log.log(`Connected: localhost:${this._localPort} -> ${this.sshHost}:${this.sshPort}:${this.remotePort}`);
               finish(true);
             } else {
-              this._open = true;
-              this._reconnectAttempts = 0;
-              log.log(`Tunnel open (health not yet responding): localhost:${this._localPort} -> ${this.sshHost}:${this.sshPort}`);
-              finish(true);
+              // Fix #5: don't accept optimistically. Validate the forward with a raw
+              // TCP connect — only "open" if the local port actually accepts (app may
+              // still be booting). A non-forwarding tunnel must NOT be accepted.
+              const tcpOk = await tcpProbe(this._localPort, 2000);
+              if (tcpOk) {
+                this._open = true;
+                this._reconnectAttempts = 0;
+                log.log(`Tunnel forward up (app not yet responding): localhost:${this._localPort} -> ${this.sshHost}:${this.sshPort}`);
+                finish(true);
+              } else {
+                this.lastError = this.lastError ?? 'tunnel forward not established (local port not accepting)';
+                finish(false);
+              }
             }
           } catch {
             finish(false);

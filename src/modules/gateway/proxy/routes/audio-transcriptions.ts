@@ -22,7 +22,9 @@ const sttCache = new Map<string, { text: string; expiresAt: number }>();
 let cacheWriteInProgress = false;
 
 function sttCacheKey(audioHash: string, model: string, language?: string, responseFormat?: string): string {
-  // Include response_format — different formats are structurally different.
+  // Include response_format — verbose_json/srt/vtt produce structurally
+  // different responses; without it, a hit from a `verbose_json` request
+  // could be returned to a `srt`-format request as plain JSON.
   return `${audioHash}:${model}:${language ?? '*'}:${responseFormat ?? 'json'}`;
 }
 

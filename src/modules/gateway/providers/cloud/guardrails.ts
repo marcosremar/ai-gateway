@@ -1,11 +1,11 @@
 /**
  * Guardrails - Content moderation for AI prompts and responses.
- *
+ * 
  * Similar to Cloudflare AI Gateway guardrails:
  * - Filters: hate, harassment, self_harm, sexual, violence
  * - Actions: block, audit, allow
  * - Per-request configuration
- *
+ * 
  * Uses local keyword matching + optional external moderation API.
  */
 
@@ -97,7 +97,7 @@ export const DEFAULT_GUARDRAIL_CONFIG: GuardrailConfig = {
 
 /**
  * Check content against guardrails.
- *
+ * 
  * @param text - Text to check (prompt or response)
  * @param config - Guardrail configuration
  * @param options - Per-request options
@@ -121,9 +121,9 @@ export function checkContent(
   const textLower = text.toLowerCase();
   const triggeredCategories: string[] = [];
   const allMatches: string[] = [];
-
+  
   // Determine which filters to check
-  const filtersToCheck = options?.filters
+  const filtersToCheck = options?.filters 
     ? { ...config.filters, ...options.filters }
     : config.filters;
 
@@ -136,23 +136,33 @@ export function checkContent(
     const patterns = KEYWORD_PATTERNS[patternKey] || [];
 
     for (const pattern of patterns) {
-      // Check if pattern is in text (case insensitive)
-      if (textLower.includes(pattern.toLowerCase())) {
+      // Prefix word-boundary match — `\b<pattern>` lets stems match their
+      // inflected forms ("harass" → "harassing", "kill" → "killing") but
+      // still rejects substring false positives like "kill" in "skillet"
+      // or "hate" in "whatever" where there's no leading word boundary.
+      const escaped = pattern.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`\\b${escaped}`, 'i');
+      if (re.test(textLower)) {
         triggeredCategories.push(category);
         allMatches.push(pattern);
         break; // Only flag category once
       }
     }
+  }
 
-    // Check custom keywords
-    if (config.customKeywords) {
-      for (const keyword of config.customKeywords) {
-        if (textLower.includes(keyword.toLowerCase())) {
-          if (!triggeredCategories.includes('custom')) {
-            triggeredCategories.push('custom');
-          }
-          allMatches.push(keyword);
+  // Custom keywords scanned ONCE per request (was previously inside the
+  // per-category loop, recording each match N times where N = enabled
+  // category count, inflating `confidence = matches.length * 20` and
+  // triggering false-positive blocks).
+  if (config.customKeywords) {
+    const seenCustomKeyword = new Set<string>();
+    for (const keyword of config.customKeywords) {
+      if (textLower.includes(keyword.toLowerCase()) && !seenCustomKeyword.has(keyword)) {
+        seenCustomKeyword.add(keyword);
+        if (!triggeredCategories.includes('custom')) {
+          triggeredCategories.push('custom');
         }
+        allMatches.push(keyword);
       }
     }
   }
@@ -224,7 +234,7 @@ export function createGuardrailMiddleware(config: GuardrailConfig) {
     checkRequest: (body: unknown, options?: GuardrailOptions): GuardrailResult => {
       // Extract text from common request formats
       let text = '';
-
+      
       if (typeof body === 'string') {
         text = body;
       } else if (body && typeof body === 'object') {
