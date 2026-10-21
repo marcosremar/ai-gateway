@@ -332,3 +332,24 @@ export interface GatewayState {
   /** A plan is in memory (its age does not matter while the gateway is down). */
   planLoaded: boolean;
 }
+
+export type CallPhase = 'ready' | 'waking' | 'parked' | 'down';
+
+export interface CallsHealth {
+  own: { phase: CallPhase; url: string | null; checkedAt: string | null; rooms: number; participants: number; idleSince: string | null };
+  cloud: { configured: boolean; minutesLeft: number };
+}
+
+export interface CallTokenRequest extends CallOptions {
+  app: string;
+  room: string;
+  identity: string;
+  name?: string;
+  metadata?: string;
+  canPublish?: boolean;
+  canSubscribe?: boolean;
+  ttlSeconds?: number;
+  reserve?: 'allow' | 'deny';
+}
+
+export interface CallToken { url: string; token: string; server: 'own' | 'cloud'; room: string; expiresAt: string }

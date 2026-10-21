@@ -123,6 +123,10 @@ Use the vocabulary from `domain-model.md` in all code and prompts. Respect the b
 - **Message Size Guard**: 5MB max payload, reject oversized with 1009
 - **Idle Timeout**: 120 second WebSocket idle timeout
 
+### 5b. Calls (LiveKit, `src/calls`)
+
+- **parle's own LiveKit, owned by the gateway (owner, 21/10/2026)**: Railway services `livekit` + `livekit-egress` (project `parle-game`, production, EU). Room tokens from the gateway; nobody in a room (no participant, no active egress) for 15 min outside the parle class window → `deploymentStop`; the next request → `deploymentRedeploy(usePreviousImageTag)` of the last built image (re-reads the TCP proxy port). Own server off or silent → the LiveKit Cloud reserve within `LIVEKIT_CLOUD_BUDGET_MINUTES` (420 participant-min/month), else `503 call_starting`. A dev key never wakes it nor gets the Cloud; only the production gateway switches it (rule 6). Config `src/calls/parle.json` (replaces the retired `parle-livekit` declaration). SDK: `client.calls.*` (node), `joinCall` (`@parle/ai-gateway/calls`, browser). Load tool `scripts/calls-load.ts`. [`docs/calls.md`](docs/calls.md)
+
 ### 6. HTTP API Endpoints
 
 **Speech Pipeline:**
@@ -163,6 +167,12 @@ Use the vocabulary from `domain-model.md` in all code and prompts. Respect the b
 - `POST /v1/docker/build` — Start Docker image build
 - `GET /v1/docker/builds` — List all builds
 - `GET /v1/docker/images` — List successfully built images
+
+**Calls (LiveKit):**
+- `GET /v1/calls/health` — own server phase (ready/waking/parked/down), rooms, participants, Cloud configured
+- `POST /v1/calls/wake` — renew the idle clock, redeploy the stopped servers (dev key: read only)
+- `POST /v1/calls/park` — stop now (never with a participant; app key not in the class window)
+- `POST /v1/calls/token` — room token: own server, else Cloud reserve, else 503 `call_starting`
 
 **Meeting Bots:**
 - `POST /v1/bot/deploy` — Deploy meeting bot

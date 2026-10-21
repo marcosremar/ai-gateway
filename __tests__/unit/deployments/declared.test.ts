@@ -21,6 +21,7 @@ import { vastUnfit } from '../../../src/deployments/placement-walk';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
 import { vastRefusal } from '../../../src/deployments/spec';
 import { FakeCloud, until } from './_fake-cloud';
+import CALLS_CONFIG from '../../../src/calls/parle.json';
 import parkedShadow from '../../../src/deployments/parked/parle-bridge-shadow.json';
 import parkedShadowTest from '../../../src/deployments/parked/parle-bridge-shadow-test.json';
 
@@ -234,7 +235,7 @@ describe('declared parle-speech spec', () => {
   });
 });
 
-describe('declarations owned by another registrant (parle-livekit)', () => {
+describe('declarations owned by another registrant', () => {
   const GPU = {
     image: 'vllm/vllm-omni:v0.28.0', port: 8091, healthPath: '/health', machineType: 'L4-1-24G', zone: 'fr-par-2', gpu: true,
     minReplicas: 0, maxReplicas: 2, minActiveReplicas: 2, idleMinutes: 15, bootTimeoutMinutes: 45, maxEurPerHour: 1,
@@ -243,8 +244,13 @@ describe('declarations owned by another registrant (parle-livekit)', () => {
 
   it('every parle deployment has a monthly ceiling; parle-speech is 1 warm Mon-Thu 16:40-20:30 Paris', () => {
     const budget = (name: string) => (DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.scaling as { budget: { eurPerMonth: number } }).budget.eurPerMonth;
-    expect(['parle-speech', 'parle-livekit'].map(budget)).toEqual([450, 60]);
+    expect(['parle-speech'].map(budget)).toEqual([450]);
     expect((speech.spec.warmSchedule as unknown[])[0]).toMatchObject({ ...CLASS_WINDOW, minReplicas: 1 });
+  });
+
+  it('the parle LiveKit is no deployment any more: src/calls owns its Railway services (21/10/2026)', () => {
+    expect(DECLARED_DEPLOYMENTS.map(d => d.name)).not.toContain('parle-livekit');
+    expect(CALLS_CONFIG).toMatchObject({ app: 'parle', environment: 'production', services: ['livekit', 'livekit-egress'], idleMinutes: 15 });
   });
 
   it('every declared GPU ladder is one RTX 3090, one replica at most (owner, 14/10/2026)', () => {
@@ -276,7 +282,7 @@ describe('declarations owned by another registrant (parle-livekit)', () => {
       "Scaleway desativada (dono, 14/10/2026): 'some-tts' asks for scaleway L4-1-24G; GPUs run on vast only (provider \"vast\")",
     );
     await expect(c.put('some-tts', { ...GPU, candidates: [{ zone: 'nl-ams-1', machineType: 'L4-1-24G', maxEurPerHour: 1 }] })).rejects.toThrow(/^Scaleway desativada [^]*$/);
-    await expect(c.put('parle-livekit', { ...GPU, machineType: 'POP2-HC-48C-96G', gpu: false, bootScript: 'echo lk' })).resolves.toBeTruthy();
+    await expect(c.put('some-cpu', { ...GPU, machineType: 'POP2-HC-48C-96G', gpu: false, bootScript: 'echo cpu' })).resolves.toBeTruthy();
     await expect(c.put('some-tts', { ...GPU, paused: true })).resolves.toBeTruthy();
     await expect(c.put('some-tts', { paused: false })).rejects.toThrow(off);
   });
