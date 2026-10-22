@@ -153,6 +153,11 @@ export class MachineController {
     if (this.records().filter(m => ACTIVE.has(m.status)).length >= this.limits.maxRunning) {
       throw new MachineError(429, `the gateway already runs ${this.limits.maxRunning} machines (MACHINES_MAX_RUNNING): release one first`);
     }
+    const hourlyCap = this.limits.ownerMaxUsdPerHour?.[owner];
+    if (hourlyCap !== undefined && request.maxUsdPerHour > hourlyCap + 1e-9) {
+      throw new MachineError(403, `app '${owner}' may rent at most $${hourlyCap}/h (MACHINES_OWNER_MAX_USD_PER_HOUR): `
+        + `maxUsdPerHour ${request.maxUsdPerHour} is above it`);
+    }
     this.checkBudget(owner, input.holder, request.maxUsdPerHour * input.maxHours);
     this.checkGpuSlot(owner, request);
     const record: MachineRecord = {

@@ -23,6 +23,17 @@ describe('machines controller', () => {
     expect(ctl.costs('palco').machines[0].costUsd).toBeCloseTo(0.2, 4);
   });
 
+  it('an owner with an hourly cap cannot ask for a dearer machine (palco: $0.13/h)', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    const ctl = makeController({ backends: { vast }, now: c.now, limits: { ownerMaxUsdPerHour: { palco: 0.13 } } });
+    await expect(ctl.create('palco', input({ maxUsdPerHour: 0.5 }))).rejects.toMatchObject({ status: 403 });
+    expect(vast.machines.size).toBe(0);
+    vast.price = 0.1;
+    await expect(ctl.create('palco', input({ maxUsdPerHour: 0.13 }))).resolves.toMatchObject({ owner: 'palco', status: 'running' });
+    await expect(ctl.create('parle', input({ maxUsdPerHour: 0.5 }))).resolves.toMatchObject({ owner: 'parle' });
+  });
+
   it('cheapest: tries providers by quote and falls back to the next on a failure', async () => {
     const c = clock();
     const vast = new FakeMachineCloud('vast', c.now);

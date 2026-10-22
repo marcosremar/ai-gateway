@@ -97,6 +97,7 @@ export interface MachineLimits {
     maxLifetimeHours: number;
   defaultIdleMinutes: number;
   maxUsdPerHour: number;
+    ownerMaxUsdPerHour?: Record<string, number>;
   maxRunning: number;
   ownerUsdPerDay: number;
   ownerUsdPerMonth: number;
