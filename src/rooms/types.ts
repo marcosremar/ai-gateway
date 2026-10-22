@@ -1,6 +1,8 @@
 // ── AI Gateway — Live subtitle rooms: types ──────────────────────────────────
 // The wire shapes of docs/rooms.md (the presenter's desktop app is built against them — change only additively).
 
+import type { RoomVoiceEngine } from '../tts';
+
 /** One subtitle line as published and as served. */
 export interface RoomLine {
   id: number;
@@ -63,7 +65,7 @@ export type RoomServerMessage =
   | { type: 'update'; youtubeUrl: string | null; dubLangs?: string[]; listenLangs?: string[] }
   | { type: 'line'; line: RoomLine }
   /** `wav` carries the base64 clip whatever its container; `format` (additive) names it when not WAV (`mp3`). */
-  | { type: 'audio'; lineId: number; lang: string; wav: string; format?: string }
+  | { type: 'audio'; lineId: number; lang: string; wav: string; format?: string; engine?: RoomVoiceEngine }
   | { type: 'audio-chunk'; lineId: number; lang: string; seq: number; rate: number; pcm: string }
   | { type: 'ended' }
   | { type: 'pong' };

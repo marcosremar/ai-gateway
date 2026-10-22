@@ -68,7 +68,7 @@ describe('rooms server dubbing', () => {
     expect(synth).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(0);
     expect(synth).toHaveBeenCalledWith('bonjour 1.', 'fr', 1);
-    expect(audios(fr)).toEqual([{ type: 'audio', lineId: 1, lang: 'fr', wav: Buffer.from('mp3:bonjour 1.').toString('base64'), format: 'mp3' }]);
+    expect(audios(fr)).toEqual([{ type: 'audio', lineId: 1, lang: 'fr', wav: Buffer.from('mp3:bonjour 1.').toString('base64'), format: 'mp3', engine: 'kokoro' }]);
     expect(audios(silent)).toEqual([]);
     expect(audios(legacy)).toEqual([]);
     expect(service.publicView(r).dubLangs).toEqual(['en', 'fr']);
@@ -426,7 +426,7 @@ describe("rooms server dubbing in the speaker's voice (GPU mode)", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(clone).toHaveBeenCalledWith('hallo 1.', 'de', voice);
     expect(synth).not.toHaveBeenCalled();
-    expect(audios(de)).toEqual([{ type: 'audio', lineId: 1, lang: 'de', wav: Buffer.from('wav:hallo 1.').toString('base64'), format: 'wav' }]);
+    expect(audios(de)).toEqual([{ type: 'audio', lineId: 1, lang: 'de', wav: Buffer.from('wav:hallo 1.').toString('base64'), format: 'wav', engine: 'clone' }]);
   });
 
   it('stays on Kokoro, with its languages, while the clone deployment is not serving (never woken for the room)', async () => {

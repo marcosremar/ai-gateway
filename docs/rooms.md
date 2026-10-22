@@ -101,6 +101,9 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   head line's PCM as it arrives, in pieces of at least 250 ms:
   `{"type":"audio-chunk","lineId","lang","seq","rate":24000,"pcm":"<base64 s16le>"}` (seq from 0); the other listeners
   get the whole line as `{"type":"audio","lineId","lang","wav":"<base64 WAV>","format":"wav"}` once it is complete.
+  A clip the server voiced also carries `"engine"`: `"clone"` (Qwen3-TTS in the speaker's voice), `"pocket"` or
+  `"kokoro"`. `__tests__/room-dub-live.test.ts` (`ROOMS_LIVE_URL`, `GATEWAY_API_KEY`; `ROOM_DUB_CLONE=1`,
+  `ROOM_DUB_STT_MODEL`, `ROOM_DUB_EXPECT_ENGINE`) checks a French speaker dubbed in English on a running gateway.
   Lines still go out in id order: a line synthesized while an earlier one is still streaming waits and is sent right
   after it. Measured 2026-10-18 on OpenRouter Kokoro (typical lines, 72–168 chars): first audio 0.7–6.5 s after the
   request (queueing upstream, not length), the whole clip 0.4–0.65 s later — that is what streaming saves. Splitting a
