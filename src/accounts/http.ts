@@ -22,6 +22,7 @@ import {
   type PageLinks, type RenderedPage,
 } from './pages';
 import { ATTEMPT_LIMITS, AttemptLimiter, type Window } from './rate-limit';
+import { pageLang } from './page-strings';
 import { AccountError, KEY_PREFIX, normalizeEmail, type AccountService, type User } from './service';
 import { audioSecondsOf, llmTokensOf, wavSeconds, type Counter, type Counters, type UsageMeter } from './usage';
 
@@ -305,7 +306,8 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   function links(req: IncomingMessage): PageLinks {
     const site = siteHosts.has(hostName(hostOf(req)));
     const p = site ? '' : '/account';
-    return { home: site ? '/' : '/account', signup: `${p}/signup`, login: `${p}/login`, forgot: `${p}/forgot`, reset: `${p}/reset`, account: '/account', download: cfg.downloadUrl };
+    return { home: site ? '/' : '/account', signup: `${p}/signup`, login: `${p}/login`, forgot: `${p}/forgot`, reset: `${p}/reset`, account: '/account', download: cfg.downloadUrl,
+      lang: pageLang(parseCookies(req.headers.cookie).get('ucast_lang'), req.headers['accept-language']) };
   }
 
   const PAGES: Partial<Record<string, (l: PageLinks) => RenderedPage>> = {

@@ -546,6 +546,19 @@ describe('pages and host routing', () => {
     expect(dash.text).toContain('Sua chave de ativação');
     expect(dash.text).not.toMatch(/ style="/);
   });
+
+  it('speaks the site language: the ucast_lang cookie, then Accept-Language, else Portuguese', async () => {
+    const gw = await startGateway();
+    const login = (headers: Record<string, string>) => call(gw, 'GET', '/login', { host: SITE, headers }).then(r => r.text);
+    expect(await login({ Cookie: 'ucast_lang=fr' })).toContain('lang="fr"');
+    expect(await login({ Cookie: 'ucast_lang=en', 'Accept-Language': 'fr' })).toContain('Sign in to see your activation key');
+    expect(await login({ 'Accept-Language': 'fr-FR,fr;q=0.9' })).toContain('Mot de passe oublié');
+    expect(await login({ 'Accept-Language': 'de-DE' })).toContain('lang="en"');
+    expect(await login({})).toContain('lang="pt-BR"');
+    const dash = (await call(gw, 'GET', '/account', { host: SITE, headers: { Cookie: 'ucast_lang=en' } })).text;
+    expect(dash).toContain(String.raw`text.replace(/\{(\w+)\}/g,`);
+    expect(dash).toContain('"signedInAs":"Signed in as {email}."');
+  });
 });
 
 describe('admin: users and access keys', () => {
