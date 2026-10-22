@@ -42,6 +42,13 @@ export class FakeMachineCloud implements MachineBackend {
     return [...this.machines.values()].filter(m => m.namespace === namespace).map(({ namespace: _ns, input: _in, ...m }) => m);
   }
 
+  creditUsd: number | null = 50;
+  paused: string[] = [];
+  resumed: string[] = [];
+  async credit(): Promise<number | null> { return this.creditUsd; }
+  async pause(providerId: string): Promise<void> { this.paused.push(providerId); }
+  async resume(providerId: string): Promise<void> { this.resumed.push(providerId); }
+
   async release(providerId: string): Promise<void> {
     this.released.push(providerId);
     this.machines.delete(providerId);
@@ -50,7 +57,7 @@ export class FakeMachineCloud implements MachineBackend {
 
 export const LIMITS: MachineLimits = {
   maxHours: 24, maxLifetimeHours: 72, defaultIdleMinutes: 30, maxUsdPerHour: 2, maxRunning: 20,
-  ownerUsdPerDay: 10, ownerUsdPerMonth: 150, holderUsdPerDay: 6, globalUsdPerDay: 20, createTimeoutMs: 15 * 60_000,
+  pauseBelowUsd: 1, ownerUsdPerDay: 10, ownerUsdPerMonth: 150, holderUsdPerDay: 6, globalUsdPerDay: 20, createTimeoutMs: 15 * 60_000,
 };
 
 export const HOUR = 3_600_000;

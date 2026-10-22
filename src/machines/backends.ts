@@ -248,6 +248,20 @@ export class VastMachineBackend implements MachineBackend {
   async release(providerId: string): Promise<void> {
     await this.call('DELETE', `/instances/${encodeURIComponent(providerId)}/`);
   }
+
+  async credit(): Promise<number | null> {
+    const user = await this.call<{ credit?: unknown }>('GET', '/users/current/');
+    return typeof user.credit === 'number' ? user.credit : null;
+  }
+
+  async pause(providerId: string): Promise<void> {
+    await this.call('PUT', `/instances/${encodeURIComponent(providerId)}/`, { state: 'stopped' });
+  }
+
+  async resume(providerId: string): Promise<void> {
+    const answer = await this.call<{ success?: boolean; msg?: string }>('PUT', `/instances/${encodeURIComponent(providerId)}/`, { state: 'running' });
+    if (answer.success === false) throw new Error(`vast resume ${providerId}: no capacity (${answer.msg ?? 'refused'})`);
+  }
 }
 
 export class RunpodMachineBackend implements MachineBackend {

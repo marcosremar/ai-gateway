@@ -182,3 +182,41 @@ describe('machines controller', () => {
     expect(ctl.get(m.id)).toMatchObject({ status: 'released', endReason: 'lost' });
   });
 });
+
+describe('machines paused for low credit', () => {
+  it('pauses running machines below US$ 1, keeps them out of the orphan reaper, and resumes after a top-up', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    const ctl = makeController({ backends: { vast }, now: c.now });
+    const m = await ctl.create('palco', input());
+    vast.creditUsd = 0.8;
+    c.advance(HOUR);
+    await ctl.reconcile();
+    expect(ctl.get(m.id)).toMatchObject({ status: 'paused' });
+    expect(vast.paused).toEqual([m.providerId]);
+    c.advance(HOUR / 4);
+    await ctl.reconcile();
+    expect(vast.released).toEqual([]);
+    await expect(ctl.resume(m.id)).rejects.toMatchObject({ status: 402 });
+    vast.creditUsd = 20;
+    expect(await ctl.resume(m.id)).toMatchObject({ status: 'running', pausedAt: null });
+    expect(vast.resumed).toEqual([m.providerId]);
+  });
+
+  it('does nothing at or above the floor, and a paused machine is still released at its deadline', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    const ctl = makeController({ backends: { vast }, now: c.now });
+    const m = await ctl.create('palco', input({}, 2));
+    vast.creditUsd = 1;
+    await ctl.reconcile();
+    expect(vast.paused).toEqual([]);
+    vast.creditUsd = 0.5;
+    await ctl.reconcile();
+    expect(ctl.get(m.id)?.status).toBe('paused');
+    c.advance(3 * HOUR);
+    await ctl.reconcile();
+    expect(ctl.get(m.id)?.status).toBe('released');
+    expect(vast.released).toEqual([m.providerId]);
+  });
+});

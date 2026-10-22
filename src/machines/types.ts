@@ -2,7 +2,7 @@ import type { ExposedPort } from '../deployments/types';
 
 export type MachineProvider = 'scaleway' | 'vast' | 'runpod';
 
-export type MachineStatus = 'creating' | 'running' | 'released' | 'failed';
+export type MachineStatus = 'creating' | 'running' | 'paused' | 'released' | 'failed';
 
 export interface MachineRequest {
     provider: MachineProvider | 'cheapest';
@@ -41,6 +41,8 @@ export interface MachineRecord {
   idleMinutes: number;
   lastSeenAt: number;
   endReason: string | null;
+  /** When the gateway paused it for lack of provider credit (`MACHINES_PAUSE_BELOW_USD`); null while running. */
+  pausedAt?: number | null;
   jobId: string | null;
   lastError: string | null;
 }
@@ -91,6 +93,11 @@ export interface MachineBackend {
     list(namespace: string): Promise<ProviderMachine[]>;
     release(providerId: string): Promise<void>;
   offers?(request: MachineRequest): Promise<unknown[]>;
+  /** Account credit in USD (`null` = unknown). With `pause`/`resume`, the controller pauses machines when it falls too low. */
+  credit?(): Promise<number | null>;
+  /** Power off keeping the disk (billed for storage only), and power back on. */
+  pause?(providerId: string): Promise<void>;
+  resume?(providerId: string): Promise<void>;
 }
 
 export interface MachineLimits {
@@ -99,6 +106,7 @@ export interface MachineLimits {
   defaultIdleMinutes: number;
   maxUsdPerHour: number;
     ownerMaxUsdPerHour?: Record<string, number>;
+  pauseBelowUsd?: number;
   maxRunning: number;
   ownerUsdPerDay: number;
   ownerUsdPerMonth: number;

@@ -14,6 +14,8 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const KEEP_ENDED_MS = 40 * DAY;
 const ACTIVE = new Set(['creating', 'running']);
+/** Machines that still exist at the provider: active ones and the paused ones (kept for their disk). */
+const HELD = new Set(['creating', 'running', 'paused']);
 const isGpuRequest = (r: MachineRequest) => r.provider !== 'scaleway' || isGpuMachineType(r.machineType);
 
 export interface MachineControllerOptions {
@@ -255,7 +257,7 @@ export class MachineController {
   async release(id: string, reason: string): Promise<MachineRecord> {
     const m = this.state.machines[id];
     if (!m) throw new MachineError(404, `machine '${id}' not found`);
-    if (!ACTIVE.has(m.status)) return m;
+    if (!HELD.has(m.status)) return m;
     m.endReason = m.endReason ?? reason;
     if (m.status === 'creating' && !m.providerId) {
       m.status = 'failed';
@@ -282,6 +284,57 @@ export class MachineController {
     return this.reconciling;
   }
 
+  /** A provider whose credit is under `pauseBelowUsd` gets its running machines paused (disk kept) before the account runs dry. */
+  private async pauseForCredit(): Promise<void> {
+    const floor = this.limits.pauseBelowUsd ?? 0;
+    if (floor <= 0) return;
+    for (const provider of this.providers) {
+      const backend = this.opts.backends[provider]!;
+      if (!backend.credit || !backend.pause) continue;
+      const running = this.records().filter(m => m.provider === provider && m.status === 'running' && !m.endReason);
+      if (!running.length) continue;
+      const balance = await backend.credit().catch((err: unknown) => { this.log('machines: credit read failed', { provider, error: errText(err) }); return null; });
+      if (balance == null || balance >= floor) continue;
+      for (const m of running) {
+        try {
+          await backend.pause(m.providerId!);
+          m.status = 'paused';
+          m.pausedAt = this.now();
+          m.lastError = `paused: ${provider} credit $${balance.toFixed(2)} is below $${floor} (MACHINES_PAUSE_BELOW_USD); top up, then POST /v1/machines/${m.id}/resume`;
+          this.log('machines: paused for low credit', { id: m.id, provider, balanceUsd: balance, floorUsd: floor });
+        } catch (err) {
+          this.log('machines: pause failed', { id: m.id, provider, error: errText(err) });
+        }
+      }
+      await this.save();
+    }
+  }
+
+  /** Powers a paused machine back on once the provider's credit is above the floor again. */
+  async resume(id: string): Promise<MachineRecord> {
+    const m = this.state.machines[id];
+    if (!m) throw new MachineError(404, `machine '${id}' not found`);
+    if (m.status !== 'paused' || m.endReason) throw new MachineError(409, `machine '${id}' is ${m.endReason ? 'being released' : m.status}, not paused`);
+    const backend = this.opts.backends[m.provider!]!;
+    const floor = this.limits.pauseBelowUsd ?? 0;
+    const balance = backend.credit ? await backend.credit().catch(() => null) : null;
+    if (floor > 0 && balance != null && balance < floor) {
+      throw new MachineError(402, `${m.provider} credit is $${balance.toFixed(2)}, below $${floor} (MACHINES_PAUSE_BELOW_USD): top up the account first`);
+    }
+    try {
+      await backend.resume!(m.providerId!);
+    } catch (err) {
+      throw new MachineError(409, `could not resume: ${errText(err)}`);
+    }
+    m.status = 'running';
+    m.pausedAt = null;
+    m.lastError = null;
+    m.lastSeenAt = this.now();
+    await this.save();
+    this.log('machines: resumed', { id, provider: m.provider });
+    return m;
+  }
+
   private async reconcileOnce(): Promise<void> {
     const now = this.now();
     const seen = new Map<string, ProviderMachine>();
@@ -294,8 +347,14 @@ export class MachineController {
         this.log('machines: list failed', { provider, error: errText(err) });
       }
     }
-    for (const m of this.records().filter(r => ACTIVE.has(r.status))) {
+    await this.pauseForCredit();
+    for (const m of this.records().filter(r => HELD.has(r.status))) {
       const pm = seen.get(m.id);
+      if (m.status === 'paused') {
+        const over = m.endReason ?? (now >= m.deadlineAt ? 'deadline' : now - m.createdAt >= this.limits.maxLifetimeHours * HOUR ? 'lifetime' : null);
+        if (over && (await this.release(m.id, over)).status === 'released') seen.delete(m.id);
+        continue;
+      }
       if (m.status === 'creating' && !this.creating.has(m.id)) {
         if (pm) {
           this.adopt(m, pm);
@@ -336,7 +395,7 @@ export class MachineController {
   private async reapOrphans(seen: Map<string, ProviderMachine>, now: number): Promise<void> {
     for (const pm of seen.values()) {
       const m = this.state.machines[pm.machineId];
-      if ((m && ACTIVE.has(m.status)) || this.creating.has(pm.machineId)) continue;
+      if ((m && HELD.has(m.status)) || this.creating.has(pm.machineId)) continue;
       if (now - pm.createdAt < (this.opts.orphanGraceMs ?? 10 * 60_000)) continue;
       try {
         await this.opts.backends[pm.provider]!.release(pm.providerId);
