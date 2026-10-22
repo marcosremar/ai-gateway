@@ -99,7 +99,9 @@ export class MachineController {
 
   costUsd(m: MachineRecord, from = -Infinity, to = this.now()): number {
     if (m.startedAt == null || m.usdPerHour == null) return 0;
-    const ms = Math.min(m.endedAt ?? to, to) - Math.max(m.startedAt, from);
+    // Paused machines stop accruing the hourly price (only their disk is billed).
+    const until = m.status === 'paused' && m.pausedAt != null ? m.pausedAt : m.endedAt ?? to;
+    const ms = Math.min(until, to) - Math.max(m.startedAt, from);
     return ms > 0 ? (ms / HOUR) * m.usdPerHour : 0;
   }
 
@@ -135,7 +137,8 @@ export class MachineController {
 
   private checkGpuSlot(owner: string, request: MachineRequest): void {
     if (!isGpuRequest(request)) return;
-    const held = this.records().filter(m => m.owner === owner && ACTIVE.has(m.status) && isGpuRequest(m.request));
+    // A paused GPU still holds the app's slot: resuming it later must not make two.
+    const held = this.records().filter(m => m.owner === owner && HELD.has(m.status) && isGpuRequest(m.request));
     if (held.length < MAX_GPU_PER_APP) return;
     throw new MachineError(409, `${GPU_CAP_RULE}: app '${owner}' already has GPU machine ${held.map(m => m.id).join(', ')}; `
       + 'release it first (DELETE /v1/machines/:id)');
