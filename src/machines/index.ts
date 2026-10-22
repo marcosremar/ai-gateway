@@ -26,7 +26,7 @@ function num(raw: string | undefined, fallback: number, min = 0): number {
   return raw?.trim() && Number.isFinite(n) && n >= min ? n : fallback;
 }
 
-/** `MACHINES_OWNER_MAX_USD_PER_HOUR="palco=0.13,other=1"`: an hourly price cap per app, stricter than the global one. */
+/** `MACHINES_OWNER_MAX_USD_PER_HOUR="palco=0.16,other=1"`: an hourly price cap per app, stricter than the global one. */
 function ownerHourlyCaps(raw: string | undefined): Record<string, number> {
   const caps: Record<string, number> = {};
   for (const pair of (raw ?? '').split(',')) {
@@ -39,7 +39,7 @@ function ownerHourlyCaps(raw: string | undefined): Record<string, number> {
 
 export function machineLimitsFromEnv(env: Env): MachineLimits {
   return {
-    ownerMaxUsdPerHour: { palco: 0.13, ...ownerHourlyCaps(env.MACHINES_OWNER_MAX_USD_PER_HOUR) },
+    ownerMaxUsdPerHour: { palco: 0.16, ...ownerHourlyCaps(env.MACHINES_OWNER_MAX_USD_PER_HOUR) },
     maxHours: num(env.MACHINES_MAX_HOURS, 24, 0.1),
     maxLifetimeHours: num(env.MACHINES_MAX_LIFETIME_HOURS, 72, 0.1),
     defaultIdleMinutes: num(env.MACHINES_IDLE_MINUTES, 30, 5),
