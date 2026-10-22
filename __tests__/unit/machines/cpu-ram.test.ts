@@ -6,6 +6,16 @@ import { LIMITS } from './_fake-machines';
 const body = { machineType: 'RTX 3060', maxUsdPerHour: 0.3, maxHours: 1, image: 'ubuntu:24.04' };
 
 describe('machines chosen by CPU and RAM', () => {
+  it('minGpuFrac is validated, forces vast and skips sliced offers', async () => {
+    expect(parseMachineInput({ ...body, minGpuFrac: 1 }, LIMITS).request).toMatchObject({ provider: 'vast', minGpuFrac: 1 });
+    expect(() => parseMachineInput({ ...body, minGpuFrac: 0 }, LIMITS)).toThrow(/minGpuFrac/);
+    expect(() => parseMachineInput({ ...body, provider: 'runpod', minGpuFrac: 1 }, LIMITS)).toThrow(/vast/);
+    const asked: Array<Record<string, unknown>> = [];
+    const market = { currentKey: 'k', pickOffers: async (spec: Record<string, unknown>) => { asked.push(spec); return []; } };
+    await new VastMachineBackend(market as never).quote(parseMachineInput({ ...body, minGpuFrac: 1 }, LIMITS).request);
+    expect(asked[0]).toMatchObject({ minGpuFrac: 1 });
+  });
+
   it('minCpuCores/minRamGb send a cheapest request to vast and are refused on scaleway and runpod', () => {
     expect(parseMachineInput({ ...body, minCpuCores: 32, minRamGb: 64 }, LIMITS).request).toMatchObject({ provider: 'vast', minCpuCores: 32, minRamGb: 64 });
     expect(parseMachineInput(body, LIMITS).request.provider).toBe('cheapest');

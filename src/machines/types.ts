@@ -18,6 +18,7 @@ export interface MachineRequest {
     near?: string;
   minCpuCores?: number;
   minRamGb?: number;
+    minGpuFrac?: number;
   vm?: boolean;
 }
 

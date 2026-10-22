@@ -868,7 +868,9 @@ Machine body:
 | `onstart` | bash run as root once the host is up (machines only) |
 | `env` | container environment; values never come back (only `envKeys`) |
 | `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `minGpuFrac` | Vast only, 0.01–1: skip offers that rent less than that share of the physical GPU (`gpu_frac`; 1 = the whole card). Vast lists RTX A4000 slices of 0.12–0.5 with the full card's VRAM, so ask `1` for a whole card |
 | `vm` | `true`: a Vast KVM virtual machine (hosts with `vms_enabled`) instead of a container; `image` defaults to `docker.io/vastai/kvm:ubuntu_terminal` and must be a `docker.io/vastai/kvm` tag; `sshPublicKey` goes on the Vast account (a VM reads only those); `machineType: "any"` takes any GPU |
+| per-app hourly cap | `MACHINES_OWNER_MAX_USD_PER_HOUR="palco=0.16,app=usd"` (default `palco=0.16`): `POST /v1/machines` answers 403 when `maxUsdPerHour` is above the app's cap |
 | `minCpuCores` / `minRamGb` | Vast host with at least that many effective CPU cores / GB of RAM; sends a `cheapest` request to Vast, 400 on Scaleway/RunPod (name a `machineType` that has them) |
 | `holder` | the agent inside the owner (its own 24 h cap) |
 

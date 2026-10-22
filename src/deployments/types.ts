@@ -156,6 +156,8 @@ export interface DeploymentSpec {
   near?: string;
   minCpuCores?: number;
   minRamGb?: number;
+  /** Vast: share of the physical GPU the offer gives (`gpu_frac`, 1 = the whole card); offers below it are skipped. */
+  minGpuFrac?: number;
   vm?: boolean;
   /** Accept a far host/zone (beyond `MAX_NEAR_KM` of `near`) when nothing nearer exists. Default false. */
   allowFar?: boolean;
