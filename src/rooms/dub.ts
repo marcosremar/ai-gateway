@@ -248,7 +248,7 @@ export class RoomDubber {
     const voice = this.cloning(room) ? s.voices.get(primary(line.originalLang ?? room.meta.originalLang ?? '')) : undefined;
     if (voice) {
       try {
-        return await this.opts.clone!.synthesize(text, lang, voice);
+        return { ...await this.opts.clone!.synthesize(text, lang, voice), engine: 'clone' };
       } catch (err) {
         if (!this.stockSpeaks(lang)) throw err;
         this.opts.log('rooms: voice clone failed, stock voice instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
@@ -257,13 +257,13 @@ export class RoomDubber {
     if (this.pocketSpeaks(lang)) {
       try {
         // No speed: Pocket has none (see pocketTts) — the speaker's pace and the catch-up apply to Kokoro only.
-        return await this.opts.pocket!.synthesize(text, lang);
+        return { ...await this.opts.pocket!.synthesize(text, lang), engine: 'pocket' };
       } catch (err) {
         if (!kokoroVoice(lang)) throw err;
         this.opts.log('rooms: Pocket failed, Kokoro instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
       }
     }
-    return this.opts.synthesize(text, lang, pacedSpeed(speed, line));
+    return { ...await this.opts.synthesize(text, lang, pacedSpeed(speed, line)), engine: 'kokoro' };
   }
 
   private async translate(room: LiveRoom, line: RoomLine, lang: string): Promise<string> {

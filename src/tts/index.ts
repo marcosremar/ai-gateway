@@ -25,7 +25,8 @@ export const primaryLanguage = (lang: string): string => lang.split('-')[0]!.toL
 
 export const kokoroVoice = (lang: string): string | null => KOKORO_VOICES[primaryLanguage(lang)] ?? null;
 
-export interface TtsClip { audio: Buffer; format: string; pcm?: AsyncIterable<Buffer> }
+export interface TtsClip { audio: Buffer; format: string; pcm?: AsyncIterable<Buffer>; engine?: RoomVoiceEngine }
+export type RoomVoiceEngine = 'clone' | 'pocket' | 'kokoro';
 
 export const PCM_RATE = 24_000;
 const PCM_BYTES_PER_MS = (PCM_RATE * 2) / 1000;

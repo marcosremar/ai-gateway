@@ -360,7 +360,7 @@ export class RoomService {
   private deliverServerClip(room: LiveRoom, lineId: number, lang: string, clip: TtsClip, streamed: boolean): void {
     if (room.meta.ended) return;
     const wav = clip.audio.toString('base64');
-    this.broadcast(room, { type: 'audio', lineId, lang, wav, format: clip.format }, v => v.listening?.(lang) === true && !(streamed && v.takesChunks?.()));
+    this.broadcast(room, { type: 'audio', lineId, lang, wav, format: clip.format, engine: clip.engine }, v => v.listening?.(lang) === true && !(streamed && v.takesChunks?.()));
   }
 
   private deliverServerChunk(room: LiveRoom, lineId: number, lang: string, pcm: Buffer, seq: number): void {

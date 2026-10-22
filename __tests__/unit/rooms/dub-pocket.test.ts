@@ -107,6 +107,7 @@ describe('rooms server dubbing with Pocket TTS', () => {
     expect(pocket).toHaveBeenCalledTimes(3);
     expect(kokoro.mock.calls).toEqual([['bonjour 1.', 'fr', 1.2], ['bonjour 2.', 'fr', 1]]);
     expect(said(fr)).toEqual(['kokoro:bonjour 1.', 'kokoro:bonjour 2.', 'pocket:bonjour 3.']);
+    expect(audios(fr).map(a => a.engine)).toEqual(['kokoro', 'kokoro', 'pocket']);
     expect(log).toHaveBeenCalledWith('rooms: Pocket failed, Kokoro instead', expect.objectContaining({ lang: 'fr', lineId: 1, error: '503 pocket fr is loading' }));
   });
 
@@ -165,6 +166,7 @@ describe('rooms server dubbing with Pocket TTS', () => {
     expect(kokoro).not.toHaveBeenCalled();
     expect(said(fr)).toEqual(['clone:bonjour 1.']);
     expect(said(de)).toEqual(['pocket:hallo 1.']);
+    expect([...audios(fr), ...audios(de)].map(a => a.engine)).toEqual(['clone', 'pocket']);
   });
 
   it('a reference with the clone GPU parked: Pocket, not the clone', async () => {
