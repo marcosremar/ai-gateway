@@ -1019,6 +1019,7 @@ export type {
   InstabilityOptions, ModelRoutesSpec, Profile, ReplicaView,
   RouteChange, RouteEntrySpec, S2SConfig, S2SEvent, S2SFrame, S2SRequest, S2SStream, Served, SpeechRequest,
   SpeechResult, TimeoutGroup, Transcription, TranscribeRequest,
+  CallPhase, CallsHealth, CallToken, CallTokenRequest,
 } from './gateway-types';
 
 // ── Telemetry (docs/api/telemetry.md): server-side batching emitter, authenticated with the app key. ──

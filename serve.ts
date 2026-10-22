@@ -70,6 +70,7 @@ import { createRealtime } from './src/realtime';
 import { createTranscriptionStream, STT_STREAM_PATH } from './src/gateway/proxy/routes/transcription-stream';
 import { createTtsEngineRoute, TTS_ENGINE_PATH } from './src/gateway/proxy/routes/tts-engine';
 import { createRooms, openRouterTranslate } from './src/rooms';
+import { createCalls } from './src/calls';
 import { KOKORO_MODEL, POCKET_TTS_MODEL, deploymentClone, kokoroTts, pocketTts } from './src/tts';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
@@ -184,6 +185,9 @@ const opsAlerts = createOpsAlerts((alert) => {
   if (out) void alertMailer?.send(out.mail).then((id) => { if (id && out.opens && incident) incidents.markMailed(incident.id); });
   return alertWebhook?.send(alert);
 }, Date.now, OPS_ALERT_DEDUP_MS, OPS_ALERT_BOOT_QUIET_MS, incidents);
+const deploymentLog = (msg: string, data?: Record<string, unknown>) => {
+  log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); incidents.fromDeploymentLog(msg, data);
+};
 // Declared deployments (src/deployments/declared/*.json): registered at boot and every 5 min, never woken here.
 let declared: DeclaredDeploymentReconciler | null = null;
 const configuredDeployments = deploymentsFromEnv(process.env, {
@@ -198,7 +202,7 @@ const configuredDeployments = deploymentsFromEnv(process.env, {
   appKeyWakes: (req, name) => Boolean(accounts?.resolveAppKey((req.headers.authorization || '').replace(/^Bearer\s+/i, '')))
     && accounts!.config.wakeDeployments.includes(name),
   // Autoscale decisions and replica lifecycle also become gateway telemetry events (src/telemetry/gateway-events.ts).
-  log: (msg, data) => { log.log(data ?? {}, msg); deploymentLogToTelemetry(msg, data); opsAlerts.fromDeploymentLog(msg, data); incidents.fromDeploymentLog(msg, data); },
+  log: deploymentLog,
   declaredStatus: () => declared?.status() ?? [],
   // An app sent new routes (PUT /v1/apps/:app/routes): mount them now, like a key change does.
   onRoutesChange: () => remount?.(),
@@ -667,6 +671,18 @@ const ttsEngineRoute = createTtsEngineRoute({
   log: (msg, data) => log.log(data ?? {}, msg),
 });
 
+const calls = await createCalls({
+  env: process.env, stateDir, log: deploymentLog,
+  callerOf: (req) => {
+    if (!keysConfigured()) return { user: 'localhost', admin: true, countsAsUse: true };
+    const bearer = bearerOf(req);
+    const userId = keyRegistry.resolve(bearer)?.userId;
+    return userId ? { user: userId, admin: adminUsers.has(userId), countsAsUse: access.policyOf(access.resolve(bearer)?.keyId).countsAsUse } : null;
+  },
+});
+calls?.start();
+log.log({ enabled: Boolean(calls), power: calls?.power ?? false }, 'Calls');
+
 const ttsCache = ttsCacheFromEnv(process.env, stateDir);
 await ttsCache?.load().catch((err: unknown) => log.warn({ error: err instanceof Error ? err.message : String(err) }, 'TTS cache: disk tier unreadable, memory only'));
 
@@ -701,7 +717,7 @@ const server = await startProxy({
   customRoutes: [
     ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute },
     { method: 'POST', path: TTS_ENGINE_PATH, handler: ttsEngineRoute }, realtime.route, realtime.updateRoute,
-    rooms.route, ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
+    rooms.route, ...(calls?.routes ?? []), ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
     ...(benchmarks ? createModelBenchmarkRoutes({ store: benchmarks, gate: adminGate, onChange: () => remount?.() }) : []),
   ],
   publicRoutes: [...(telemetry?.publicRoutes ?? []), ...(controller ? [bootFilesRoute(controller), bootEventsRoute(controller)] : []), ...(machines ? [machines.reportRoute] : [])],
@@ -839,6 +855,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     void deployments?.devices.flush().catch(() => {});
     realtime.stop();
     rooms.stop();
+    calls?.stop();
     appTelemetry?.stop();
     declared?.stop();
     deployments?.clientGpu.stop();

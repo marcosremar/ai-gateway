@@ -2,7 +2,7 @@
  * Bot / CPU provider chain — ownership filters + credential-based fallback order.
  *
  * Ownership prefixes prevent orphan sweeps from terminating unrelated VMs
- * (e.g. parle-livekit, parle-qwen-tts) that share the same Scaleway/Railway account.
+ * (e.g. livekit, parle-qwen-tts) that share the same Scaleway/Railway account.
  */
 
 export const BOT_NAME_PREFIXES = ['babelcast-bot', 'aigw-bot'] as const;

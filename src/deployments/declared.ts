@@ -31,7 +31,6 @@ import { randomBytes } from 'crypto';
 import babelcast3090 from './declared/babelcast-3090.json';
 import babelcastSpeech from './declared/babelcast-speech.json';
 import babelcastTts from './declared/babelcast-tts.json';
-import parleLivekit from './declared/parle-livekit.json';
 import parleSpeech from './declared/parle-speech.json';
 import parleSpeechTest from './declared/parle-speech-test.json';
 import { DEFAULT_SCALING_MODE } from './scaling-spec';
@@ -60,7 +59,7 @@ export interface DeclaredDeployment {
  * `babelcast-speech` and `babelcast-tts` own only their app (`babelcast`): no spec field, no machine.
  */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
-  parleSpeech, parleSpeechTest, parleLivekit,
+  parleSpeech, parleSpeechTest,
   babelcastSpeech, babelcastTts, babelcast3090,
 ] as DeclaredDeployment[];
 

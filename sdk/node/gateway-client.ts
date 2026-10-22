@@ -22,6 +22,7 @@ import {
   type DeploymentList, type DeploymentPutBody, type DeploymentView, type FallbackPlan, type FetchLike, type GatewayClientOptions,
   type GatewayState, type HealthReport, type InstabilityEvent, type ModelRoutesSpec, type S2SRequest, type S2SStream, type SpeechRequest,
   type SpeechResult, type TimeoutGroup, type Transcription, type TranscribeRequest,
+  type CallPhase, type CallsHealth, type CallToken, type CallTokenRequest,
 } from './gateway-types';
 
 interface GwSpec {
@@ -354,6 +355,16 @@ export class GatewayClient {
   };
 
   invokeUrl(name: string): string { return this.deployments.invokeUrl(name); }
+
+  readonly calls = {
+    health: (call?: CallOptions): Promise<CallsHealth> => this.getJson('/v1/calls/health', 'health', call),
+    wake: (req: CallOptions & { app: string }): Promise<{ phase: CallPhase }> =>
+      this.gw({ method: 'POST', path: '/v1/calls/wake', group: 'admin', call: req, json: bodyOf(req), idempotent: true }, r => r.json()),
+    park: (req: CallOptions & { app: string }): Promise<{ phase: CallPhase; services: string[] }> =>
+      this.gw({ method: 'POST', path: '/v1/calls/park', group: 'admin', call: req, json: bodyOf(req), idempotent: true }, r => r.json()),
+    token: (req: CallTokenRequest): Promise<CallToken> =>
+      this.gw({ method: 'POST', path: '/v1/calls/token', group: 'admin', call: req, json: bodyOf(req) }, r => r.json()),
+  };
 
   // ── App accounts (never direct) ───────────────────────────────────────────
 

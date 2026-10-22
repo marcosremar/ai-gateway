@@ -1,0 +1,8 @@
+{
+  "app": "parle",
+  "description": "parle: its own LiveKit (Railway project parle-game, environment production, EU), owned by the gateway since 21/10/2026. No participant for idleMinutes → the gateway stops livekit and livekit-egress; the first request redeploys their last image. Never parked inside the parle class window (the warmSchedule of the parle declared deployments). livekit-redis stays up.",
+  "environment": "production",
+  "services": ["livekit", "livekit-egress"],
+  "idleMinutes": 15,
+  "cloudBudgetMinutes": 420
+}

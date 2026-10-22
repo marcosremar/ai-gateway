@@ -34,6 +34,11 @@
     "gzip": 2814,
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
+  "calls": {
+    "raw": 1562,
+    "gzip": 703,
+    "reason": "calls: new entry for the gateway-owned LiveKit calls module (#233)"
+  },
   "client": {
     "raw": 140840,
     "gzip": 34825,
