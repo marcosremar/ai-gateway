@@ -93,6 +93,50 @@ while let Some(chunk) = pcm.next().await { player.push(&chunk?); }
 errors). `served.is_degraded()` is `X-Gateway-Status: degraded`: an app whose profile requires its GPU was answered by
 the cloud reserve.
 
+## Streaming transcription — `GET /v1/audio/transcriptions/stream` (WebSocket)
+
+Whisper large-v3 on the app's own GPU, the vocabulary prompt on every decode ([docs/api/stt-stream.md](../../docs/api/stt-stream.md)).
+Every refusal comes before the handshake as a normal `Status` error with the batch route's codes: fall back to
+`gw.transcribe(..)` on any of them.
+
+```rust
+let stream = match gw.transcribe_stream(
+    TranscribeStreamRequest::new("babelcast-stt").language("pt").prompt(slide_terms).chunk_size(1.0).window(8.0),
+).await {
+    Ok(s) => s,                                  // s.ready().provider == Some("deployment:babelcast-3090")
+    Err(e) => return batch_fallback(e),          // e.code(): gpu_not_ready (503, Retry-After), no_streaming_backend, …
+};
+let (tx, mut rx) = stream.split();
+tx.send_samples(&pcm_16k).await?;                // or send_pcm(&le_bytes); frames of 20–100 ms
+tx.set_prompt(Some(&new_slide_terms)).await?;    // the slide changed (takes effect on the next decode)
+tx.set_language("fr").await?;                    // the speaker switched language
+tx.flush().await?;                               // end the open utterance now
+while let Some(event) = rx.next_event().await {  // cancel-safe (select! is fine)
+    match event? {
+        SttStreamEvent::Partial(p) => show(&p.stable, p.provisional()),   // stable words never change
+        SttStreamEvent::Final(f) => commit(f.utterance, &f.text),         // decoded fresh; "" + f.filtered = hallucination
+        SttStreamEvent::Closed { code, reason } => { /* 1013 gpu_lost → reconnect or batch; 1008 → stop */ break }
+        _ => {}
+    }
+}
+```
+
+The WebSocket client is in the crate (reqwest's HTTP/1.1 upgrade + an RFC 6455 client codec): no extra dependency. The
+upgrade goes through an HTTP/1.1-only reqwest client (an HTTP/2 connection cannot be upgraded); with a custom
+`http_client(..)`, that client must be able to speak HTTP/1.1.
+
+## TTS engine of the GPU — `POST /v1/audio/speech/engine`
+
+The speech-stack GPU keeps ONE of Qwen3-TTS / Kokoro / Pocket loaded. When a session starts with its TTS alias, tell it:
+
+```rust
+match gw.select_tts_engine("babelcast-tts-pocket", false).await {
+    Ok(c) => println!("{:?} on {:?}", c.engine, c.deployment),   // selected, or nothing to choose (c.reason)
+    Err(e) if e.code() == "engine_in_use" => { /* another engine in use there: lines fall back; or force: true */ }
+    Err(e) => eprintln!("{e}"),                                  // gpu_not_ready (503): requests fall back meanwhile
+}
+```
+
 ## Speech-to-speech — `POST /v1/s2s`
 
 ```rust

@@ -49,7 +49,7 @@ const savedCode = ((): string | null => { try { return JSON.parse(readFileSync(s
 const existing = savedCode ? await rooms.service.get(savedCode) : null;
 const code = existing?.meta.code ?? (await rooms.service.create({
   title: 'L’IA en classe : ce qui change pour les élèves', originalLang: 'fr', languages: ['en', 'de', 'es', 'pt'],
-  serverDub: true, youtubeUrl: 'https://www.youtube.com/channel/UCdemo/live',
+  serverDub: true, youtubeUrl: null,
 }, 'demo')).code;
 writeFileSync(savedPath, JSON.stringify({ code }));
 console.log(`room page: http://localhost:${PORT}/live/${code}`);

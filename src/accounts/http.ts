@@ -180,7 +180,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, path: string): Promise<void> {
     const ip = RateLimiter.clientIp(req);
-    const route = `${method} ${path.replace(/^\/v1\/account\/keys\/[^/]+/, '/v1/account/keys/:id')}`;
+    const route = `${method} ${path.replace(/^\/v1\/account\/keys\/[^/]+/, '/v1/account/keys/:id').replace(/^\/v1\/account\/users\/[^/]+\/access-key$/, '/v1/account/users/:id/access-key')}`;
     switch (route) {
       case 'POST /v1/account/signup': {
         sameSiteForm(req);
@@ -262,6 +262,23 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         const w = writer(req);
         req.resume();
         send(res, 200, await service.revokeKey(w.user.id, m[1]!));
+        return;
+      }
+      case 'GET /v1/account/users': {
+        const w = who(req, false);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        send(res, 200, { users: service.listUsers() });
+        return;
+      }
+      case 'POST /v1/account/users/:id/access-key': {
+        const m = /^\/v1\/account\/users\/([A-Za-z0-9_]{1,64})\/access-key$/.exec(path);
+        if (!m) break;
+        const w = writer(req);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        limit(`admin:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
+        const body = await readJson(req);
+        const { email } = await service.sendAccessKey(m[1]!, body.deviceName);
+        send(res, 200, { ok: true, email });
         return;
       }
       case 'POST /v1/activate': {
@@ -384,5 +401,45 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     usage.record(found.user.id, found.key.id, delta);
   }
 
-  return { handle, recordInference, cookieName };
+  /**
+   * A streaming STT session (`GET /v1/audio/transcriptions/stream`) of an activation key: admitted like a metered request
+   * (the `audioSeconds` monthly quota and the daily request cap), its audio added to the account as it streams (`add`
+   * says when the monthly quota is now over: the stream ends), and counted as one request and one STT request when it
+   * ends. `null` = not an activation key, or an unknown one (the proxy's own key check answers).
+   */
+  function streamMeter(authorization: string | undefined): { denial: StreamDenial } | {
+    add(audioSeconds: number): StreamDenial | null; end(): void;
+  } | null {
+    const bearer = bearerToken(authorization);
+    if (!bearer.startsWith(KEY_PREFIX)) return null;
+    const found = service.keyOf(bearer);
+    if (!found) return null;
+    const refused = service.checkQuota(found.user, ['audioSeconds']);
+    if (refused) return { denial: denialOf(refused) };
+    let ended = false;
+    return {
+      add(audioSeconds: number): StreamDenial | null {
+        if (audioSeconds > 0) usage.record(found.user.id, found.key.id, { audioSeconds });
+        const over = service.checkQuota(found.user, ['audioSeconds'], 0);
+        return over ? denialOf(over) : null;
+      },
+      end(): void {
+        if (ended) return;
+        ended = true;
+        usage.record(found.user.id, found.key.id, { requests: 1, sttRequests: 1 });
+      },
+    };
+  }
+
+  return { handle, recordInference, cookieName, streamMeter };
+}
+
+/** A refusal of a streaming session, in the shape the stream route answers before its handshake. */
+export interface StreamDenial { status: number; message: string; type: string; code: string; retryAfterSeconds?: number }
+
+function denialOf(err: AccountError): StreamDenial {
+  const { retryAfterSeconds } = err.extra as { retryAfterSeconds?: number };
+  const type = err.status === 402 ? 'quota_exceeded' : err.status === 429 ? 'rate_limit_error' : err.status === 401 ? 'authentication_error'
+    : err.status === 403 ? 'permission_error' : err.status >= 500 ? 'server_error' : 'invalid_request_error';
+  return { status: err.status, message: err.message, type, code: err.code, ...(retryAfterSeconds ? { retryAfterSeconds } : {}) };
 }

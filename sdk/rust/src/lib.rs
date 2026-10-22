@@ -36,7 +36,9 @@ pub mod openai;
 pub mod rooms;
 pub mod s2s;
 mod stream;
+pub mod stt_stream;
 pub mod telemetry;
+pub mod tts_engine;
 pub mod types;
 
 pub use account::Activation;
@@ -59,5 +61,10 @@ pub use s2s::{
     S2SConfig, S2SEvent, S2SFrame, S2SFrameDecoder, S2SMessage, S2SModels, S2SRequest, S2SStream, S2S_MAX_FRAME_BYTES,
 };
 pub use stream::{ChatStream, SpeechStream};
+pub use stt_stream::{
+    SttStreamEvent, SttStreamReceiver, SttStreamSender, StreamFinal, StreamPartial, StreamReady, TranscribeStreamRequest,
+    TranscriptionStream, STT_STREAM_PATH,
+};
 pub use telemetry::AppEventsBatch;
+pub use tts_engine::{TtsEngineChoice, TTS_ENGINE_PATH};
 pub use types::{CallOptions, HealthReport, Served, TimeoutGroup, Timeouts};

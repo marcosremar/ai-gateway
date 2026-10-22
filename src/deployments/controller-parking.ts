@@ -52,6 +52,7 @@ export abstract class ParkingControl extends ReplicaLifecycle {
       await backend.stopReplica(m);
       this.stopping.set(m.id, this.now());
       this.poweredOnAt.delete(m.id);
+      this.resumeSince.delete(m.id);
       this.probes.delete(m.id);
     } catch (err) {
       const rt = this.deployments.get(m.deployment);
@@ -67,13 +68,17 @@ export abstract class ParkingControl extends ReplicaLifecycle {
     }
     rt.starting.set(m.id, this.now());
     this.poweredOnAt.set(m.id, this.now());
+    // A re-power-on of a machine still listed stopped keeps the first one: the resume deadline counts from there.
+    if (!this.resumeSince.has(m.id)) this.resumeSince.set(m.id, this.now());
     this.log('deployments: powering parked replica on', { deployment: m.deployment, id: m.id });
     try {
       await this.backendOf(this.providerOf(m)).startReplica!(m);
     } catch (err) {
       this.poweredOnAt.delete(m.id);
       rt.lastError = `start ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
+      // Any other error is retried as a pending start (still counted as capacity): the resume deadline bounds it.
       if (!isOutOfStock(err)) return true;
+      this.resumeSince.delete(m.id);
       rt.starting.delete(m.id);
       this.startRefused.set(m.id, this.now());
       return false;

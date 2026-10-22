@@ -412,6 +412,24 @@ describe('metering and quota', () => {
     expect((await stt(gw, k.key, 1)).status).toBe(200);
   });
 
+  it('a transcription stream is admitted against the quota, metered as it streams and counted once at the end', async () => {
+    const gw = await startGateway({ quota: { ...NO_QUOTA, audioSeconds: 40 } });
+    const s = await signup(gw);
+    const k = await newKey(gw, s, 'Stream');
+    expect(gw.accounts.streamMeter(`Bearer ${APP_KEY}`), 'not an activation key').toBeNull();
+    expect(gw.accounts.streamMeter('Bearer ucast_live_unknown'), 'unknown key: the proxy answers').toBeNull();
+    const meter = gw.accounts.streamMeter(`Bearer ${k.key}`)!;
+    expect(meter).not.toHaveProperty('denial');
+    const m = meter as { add(s: number): unknown; end(): void };
+    expect(m.add(15)).toBeNull();
+    expect(m.add(30)).toMatchObject({ status: 402, code: 'quota_exceeded', type: 'quota_exceeded' });
+    m.end();
+    m.end();
+    const u = await call(gw, 'GET', '/v1/account/usage?days=1', { headers: { Cookie: s.cookie } });
+    expect(u.json.days.at(-1)).toMatchObject({ requests: 1, sttRequests: 1, audioSeconds: 45 });
+    expect(gw.accounts.streamMeter(`Bearer ${k.key}`)).toMatchObject({ denial: { status: 402, code: 'quota_exceeded' } });
+  });
+
   it('over the daily request cap → 429 with Retry-After', async () => {
     const gw = await startGateway({ quota: { ...NO_QUOTA, requestsPerDay: 2 } });
     const k = await newKey(gw, await signup(gw));
@@ -515,6 +533,51 @@ describe('pages and host routing', () => {
     const dash = await call(gw, 'GET', '/account', { host: SITE });
     expect(dash.text).toContain('Sua chave de ativação');
     expect(dash.text).not.toMatch(/ style="/);
+  });
+});
+
+describe('admin: users and access keys', () => {
+  const ADMIN = 'dono@ucast.me';
+
+  it('lists users only for an admin e-mail', async () => {
+    const gw = await startGateway({ adminEmails: [ADMIN] });
+    const ana = await signup(gw, 'ana@example.com');
+    const admin = await signup(gw, ADMIN);
+    // A plain user gets 403 and no data.
+    const denied = await call(gw, 'GET', '/v1/account/users', { headers: { Cookie: ana.cookie } });
+    expect(denied.status).toBe(403);
+    expect(denied.text).not.toContain('ana@example.com');
+    // The admin sees everyone, newest first.
+    const r = await call(gw, 'GET', '/v1/account/users', { headers: { Cookie: admin.cookie } });
+    expect(r.status).toBe(200);
+    const emails = (r.json.users as Array<{ email: string }>).map(u => u.email);
+    expect([...emails].sort()).toEqual([ADMIN, 'ana@example.com'].sort());
+    expect(r.json.users[0].createdAt).toBeTruthy();
+    expect(r.json.users[0].lastSeenAt).toBeTruthy();
+  });
+
+  it('sends a new activation key by e-mail, never in the API answer', async () => {
+    const gw = await startGateway({ adminEmails: [ADMIN] });
+    const ana = await signup(gw, 'ana@example.com');
+    const admin = await signup(gw, ADMIN);
+    const users = (await call(gw, 'GET', '/v1/account/users', { headers: { Cookie: admin.cookie } })).json.users as Array<{ id: string; email: string }>;
+    const anaId = users.find(u => u.email === 'ana@example.com')!.id;
+    // Not an admin: refused. Without CSRF: refused. Unknown user: 404.
+    expect((await call(gw, 'POST', `/v1/account/users/${anaId}/access-key`, { headers: { Cookie: ana.cookie, 'X-CSRF-Token': ana.csrf }, body: {} })).status).toBe(403);
+    expect((await call(gw, 'POST', `/v1/account/users/${anaId}/access-key`, { headers: { Cookie: admin.cookie }, body: {} })).status).toBe(403);
+    expect((await call(gw, 'POST', '/v1/account/users/usr_nope/access-key', { headers: { Cookie: admin.cookie, 'X-CSRF-Token': admin.csrf }, body: {} })).status).toBe(404);
+    // The happy path: the key goes to Ana's inbox and activates the app.
+    const r = await call(gw, 'POST', `/v1/account/users/${anaId}/access-key`, { headers: { Cookie: admin.cookie, 'X-CSRF-Token': admin.csrf }, body: { deviceName: 'Notebook da Ana' } });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ ok: true, email: 'ana@example.com' });
+    expect(r.text).not.toContain('ucast_live_');
+    const mail = gw.mails.find(m => m.to === 'ana@example.com' && m.subject.includes('chave'));
+    expect(mail).toBeTruthy();
+    const key = /ucast_live_[A-Za-z0-9_-]{43}/.exec(mail!.text)?.[0];
+    expect(key).toBeTruthy();
+    const act = await call(gw, 'POST', '/v1/activate', { body: { key, deviceName: 'Notebook da Ana' } });
+    expect(act.status).toBe(200);
+    expect(act.json.email).toBe('ana@example.com');
   });
 });
 

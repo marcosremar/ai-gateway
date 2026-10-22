@@ -100,12 +100,15 @@ export const UI_TEXT: Record<UiLang, Record<string, string>> = {
 };
 const T = UI_TEXT.fr;
 
+/** The logo always goes to the public landing page. */
+const LANDING_URL = 'https://ucast.me/';
+
 const LOGO_MARK = '<span class="mark"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="disc" cx="16" cy="16" r="16"/><circle class="ring" cx="16" cy="16" r="9.33"/></svg></span>';
 const logo = (href?: string) => {
   const inner = `${LOGO_MARK}<span class="word">ucast<b>.me</b></span>`;
   return href ? `<a class="logo" href="${esc(href)}" aria-label="ucast.me">${inner}</a>` : `<span class="logo" aria-label="ucast.me">${inner}</span>`;
 };
-const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%232F6A80'/%3E%3Ccircle cx='16' cy='16' r='9.33' fill='none' stroke='%232D2D31' stroke-width='4'/%3E%3C/svg%3E";
+const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%234CC3CB'/%3E%3Ccircle cx='16' cy='16' r='9.33' fill='none' stroke='%2304161A' stroke-width='4'/%3E%3C/svg%3E";
 
 /** Content-Security-Policy of a page rendered with `nonce`. */
 export function pageCsp(nonce: string): string {
@@ -118,7 +121,7 @@ export function pageCsp(nonce: string): string {
 const BASE_CSS = `
 @font-face{font-family:"Bricolage";font-style:normal;font-weight:200 800;font-display:swap;src:url(/live/fonts/bricolage-5.3-latin.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 @font-face{font-family:"Bricolage";font-style:normal;font-weight:200 800;font-display:swap;src:url(/live/fonts/bricolage-5.3-latin-ext.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
-:root{color-scheme:dark;--bg:#0A1220;--surface:#111C30;--raised:#17253F;--line:#22324F;--text:#EEF3F9;--muted:#93A6BC;--accent:#7FB8CC;--brand:#2F6A80;--brand-hi:#3A8099;--brand-ink:#F4FAFC;--warn:#F5B14C;--spot:rgba(127,184,204,.13)}
+:root{color-scheme:dark;--bg:#0C1A1E;--surface:#11242A;--raised:#172F37;--line:#234049;--text:#EEF5F6;--muted:#A9C0C5;--accent:#4CC3CB;--brand:#4CC3CB;--brand-hi:#5FD3DA;--brand-ink:#04161A;--warn:#F5B14C;--spot:rgba(76,195,203,.13)}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font-family:"Bricolage",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-optical-sizing:auto;-webkit-text-size-adjust:100%;-webkit-font-smoothing:antialiased}
 ::selection{background:var(--brand);color:var(--brand-ink)}
@@ -138,7 +141,7 @@ function shell(title: string, css: string, body: string, script: string, nonce: 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0A1220">
+<meta name="theme-color" content="#0C1A1E">
 <meta name="robots" content="noindex">
 <title>${esc(title)}</title>
 <link rel="icon" href="${ICON}">
@@ -180,7 +183,7 @@ f.addEventListener('submit',function(e){e.preventDefault();var v=(c.value||'').t
 export function entryPage(opts: PageOptions): RenderedPage {
   const nonce = randomBytes(16).toString('base64');
   const form = entryForm(opts.basePath);
-  const body = `<main>${logo(opts.basePath)}
+  const body = `<main>${logo(LANDING_URL)}
 <h1>Saisissez le code de la session</h1>
 <p>Le code figure sur le QR code ou sur l’écran de la personne qui présente.</p>
 ${form.body}</main>`;
@@ -191,7 +194,7 @@ export function notFoundPage(opts: PageOptions, code: string | null): RenderedPa
   const nonce = randomBytes(16).toString('base64');
   const form = entryForm(opts.basePath);
   const which = code ? `La session <strong>${esc(code)}</strong> n’existe pas` : 'Cette session n’existe pas';
-  const body = `<main>${logo(opts.basePath)}
+  const body = `<main>${logo(LANDING_URL)}
 <h1>Session introuvable</h1>
 <p>${which} ou a expiré — le texte d’une session reste disponible ${opts.retentionDays} jours après la dernière prise de parole. Vérifiez le code et réessayez.</p>
 ${form.body}</main>`;
@@ -203,10 +206,10 @@ ${form.body}</main>`;
 // line per language) and one compact toolbar — over a calm transcript column. Spacing scale 4/8/12/16/24 px.
 // Every display setting is the viewer's own (settings sheet behind the gear; localStorage, never sent anywhere).
 
-const LIGHT_VARS = '--bg:#F2F5F9;--surface:#FFFFFF;--raised:#E8EEF5;--line:#D3DCE7;--text:#0F1A2E;--muted:#4D5D73;--accent:#2F6A80;--brand:#2F6A80;--brand-hi:#26586B;--brand-ink:#FFFFFF;--warn:#8a5a00;--bad:#c4262e;--live-bg:rgba(47,106,128,.12);--shade:rgba(15,26,46,.28);--spot:rgba(47,106,128,.09);color-scheme:light';
+const LIGHT_VARS = '--bg:#F2F7F8;--surface:#FFFFFF;--raised:#E6F0F1;--line:#CCDDDF;--text:#0E1E21;--muted:#527076;--accent:#0B6B72;--brand:#0B6B72;--brand-hi:#0A5A60;--brand-ink:#FFFFFF;--warn:#8a5a00;--bad:#c4262e;--live-bg:rgba(11,107,114,.12);--shade:rgba(14,30,33,.28);--spot:rgba(11,107,114,.09);color-scheme:light';
 
 const ROOM_CSS = `
-:root{--bad:#FF7A70;--live-bg:rgba(127,184,204,.14);--shade:rgba(4,8,16,.6);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right));--rail:3.4rem}
+:root{--bad:#FF7A70;--live-bg:rgba(76,195,203,.14);--shade:rgba(2,10,12,.6);--tx:17px;--pad:max(16px,env(safe-area-inset-left));--pad-r:max(16px,env(safe-area-inset-right));--rail:3.4rem}
 html[data-theme="light"]{${LIGHT_VARS}}
 @media (prefers-color-scheme:light){html[data-theme="auto"]{${LIGHT_VARS}}}
 html{overflow-x:hidden;scrollbar-color:var(--line) transparent}
@@ -391,7 +394,7 @@ const opt = (mode: string, k: string) =>
 const uiOptions = UI_LANGS.map(l => `<option value="${l}">${esc(UI_TEXT[l].name)}</option>`).join('');
 
 const ROOM_BODY = `<header><div class="wrap">
-<div class="top">${logo()}<h1 id="title" ${txt('title')}</h1><span id="pill" class="pill wait" ${txt('connecting')}</span></div>
+<div class="top">${logo(LANDING_URL)}<h1 id="title" ${txt('title')}</h1><span id="pill" class="pill wait" ${txt('connecting')}</span></div>
 <section class="now" aria-live="polite" data-ia="current" aria-label="${esc(T.current)}"><div id="liveMain" class="fit empty">${esc(T.waiting)}</div><div id="liveOrig" class="fit" hidden></div></section>
 <div class="ctl">
 <label class="lang"><span class="cap" ${txt('langCap')}</span><select id="lang" data-ia="langLabel" aria-label="${esc(T.langLabel)}"></select></label>

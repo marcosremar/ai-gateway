@@ -682,6 +682,24 @@ A filtered (empty) answer is never cached. `GET /health?details=1` (admin key) c
 `withMetadata`, `byReason`, `filteredRate`); filtered answers log reasons and lengths only, never the text.
 Entry points, what each filters and how: [docs/stt-hallucination-filter.md](../stt-hallucination-filter.md).
 
+### `GET /v1/audio/transcriptions/stream` (WebSocket)
+
+Streaming STT of an app's STT alias on its own GPU deployment (Whisper large-v3 on the speech-stack, the vocabulary
+prompt on every decode): PCM16 16 kHz frames up, `partial` (with its `stable` prefix) and `final` events down, one
+utterance at a time. Same admission as the batch route; when the GPU cannot stream the upgrade is refused before the
+handshake (`503 gpu_not_ready`, `404 no_streaming_backend`…) and the client stays on the batch route. Contract:
+[stt-stream.md](stt-stream.md).
+
+### `POST /v1/audio/speech/engine`
+
+`{"model": "<the app's TTS alias>", "force"?: false}` — the speech-stack GPU loads ONE TTS engine at a time (Qwen3-TTS,
+Kokoro or Pocket TTS; docker/speech-stack/README.md § One TTS engine at a time). This tells the deployment of the
+alias's first `deployment:` link to switch to the engine that link's model names (`…:pocket`, `…:kokoro`, else
+Qwen3-TTS) — call it when a session starts. 200 `{ok, deployment, engine, selected, replica}` (`selected: false` with
+`reason: no_gpu_link | no_engine_choice` when there is nothing to choose); 409 `engine_in_use` (another engine in use
+there; `force: true` switches anyway); 503 `gpu_not_ready` + Retry-After; 403 for an alias of another app. Code:
+`src/gateway/proxy/routes/tts-engine.ts`; Rust SDK `GatewayClient::select_tts_engine`.
+
 ### `POST /v1/chat/completions`
 
 ```bash

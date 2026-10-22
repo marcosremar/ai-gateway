@@ -23,6 +23,7 @@ import { applyWhisperSegments } from '../gateway/providers/cloud/stt-segments';
 import { noWakeActive, recordNoWakeSkip } from '../gateway/proxy/no-wake';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
 import { FINISH_MARKER, USAGE_MARKER } from '../gateway/providers/cloud/openai-compat/stream-markers';
+import { languageCode, pocketVoice } from '../gateway/providers/cloud/kokoro-stream/route-tts';
 
 type Leaser = Pick<DeploymentController, 'acquire' | 'get'> & Partial<Pick<DeploymentController, 'wake' | 'list'>>;
 
@@ -328,6 +329,11 @@ export function isKokoroModel(model: string): boolean {
   return /kokoro/i.test(model);
 }
 
+/** Pocket TTS on the speech-stack image (`pocket_server.py`): its own predefined voices, wav/pcm only. */
+export function isPocketModel(model: string): boolean {
+  return /pocket/i.test(model);
+}
+
 export function catalogOf(raw: unknown): ReplicaCatalog | null {
   const input = raw as { model?: unknown; format?: unknown; voices?: unknown } | null;
   if (!input || !Array.isArray(input.voices)) return null;
@@ -426,6 +432,17 @@ export class DeploymentTTSProvider extends DeploymentProviderBase implements TTS
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
       ...(request.instructions ? { instructions: request.instructions } : {}),
     };
+    if (isPocketModel(request.model)) {
+      // Same choice of voice as the CPU voice server's Pocket link (route-tts.ts): the language's own voice unless the
+      // app names a Pocket voice; a language Pocket has no model for, or a format it does not make, moves on at once.
+      if (format !== 'wav' && format !== 'pcm') throw new DeploymentCallError(415, `Pocket TTS answers wav or pcm, not ${format}`, 'error');
+      const pocket = pocketVoice(request.voice, languageCode(extra.language));
+      if (!pocket) throw new DeploymentCallError(400, `Pocket TTS does not speak ${String(extra.language ?? request.voice)}`, 'error');
+      body.voice = pocket.voice;
+      body.language = pocket.language;
+      if (request.stream && extra.stream === undefined) Object.assign(body, { stream: true, stream_format: 'audio' });
+      return body;
+    }
     if (extra.ref_audio === undefined && request.voice && !isKokoroModel(request.model)) {
       const catalog = await this.voiceCatalog(request.signal);
       if (!catalog && this.isCloningModel(request.model)) {

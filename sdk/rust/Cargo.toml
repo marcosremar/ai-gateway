@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 # rustls only (no OpenSSL): builds with the GNU toolchain on Windows.
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
-tokio = { version = "1", features = ["time", "sync"] }
+tokio = { version = "1", features = ["time", "sync", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

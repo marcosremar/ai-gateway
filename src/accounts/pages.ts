@@ -15,7 +15,10 @@ const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '
 const esc = (s: string) => s.replace(/[&<>"']/g, c => HTML_ESCAPES[c] ?? c);
 const js = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
 
-const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2319c2b4'/%3E%3Crect x='7' y='12' width='18' height='3' rx='1.5' fill='%231b1b1f'/%3E%3Crect x='10' y='18' width='12' height='3' rx='1.5' fill='%231b1b1f'/%3E%3C/svg%3E";
+const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234cc3cb'/%3E%3Crect x='7' y='12' width='18' height='3' rx='1.5' fill='%2304161a'/%3E%3Crect x='10' y='18' width='12' height='3' rx='1.5' fill='%2304161a'/%3E%3C/svg%3E";
+
+/** The logo always goes to the public landing page, even on the account hosts. */
+const LANDING_URL = 'https://ucast.me/';
 
 export function accountPageCsp(nonce: string): string {
   return [
@@ -25,26 +28,31 @@ export function accountPageCsp(nonce: string): string {
 }
 
 const CSS = `
-:root{color-scheme:dark;--bg:#1b1b1f;--surface:#24242a;--surface2:#2c2c33;--line:#34343c;--text:#ececf1;--muted:#a3a3ae;--accent:#19c2b4;--accent-ink:#06211f;--warn:#e0a84a;--bad:#ff7d7d;--ok:#5fd39a}
-@media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f6f6f8;--surface:#fff;--surface2:#f0f0f4;--line:#dcdce4;--text:#1b1b1f;--muted:#5b5b66;--accent:#0b7d74;--accent-ink:#fff;--warn:#8a5a00;--bad:#c4262e;--ok:#1d7a4b}}
+:root{color-scheme:dark;--bg:#0a1012;--surface:#0f181b;--surface2:#122025;--line:rgba(233,244,245,.1);--line-strong:rgba(233,244,245,.18);--text:#e9f2f3;--muted:#8ba5a8;--accent:#4cc3cb;--accent-ink:#04161a;--accent-dim:rgba(76,195,203,.38);--warn:#e0a458;--bad:#ff7d7d;--ok:#5fd39a}
+@media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f4f7f7;--surface:#fff;--surface2:#eef3f4;--line:rgba(10,35,38,.12);--line-strong:rgba(10,35,38,.22);--text:#0e1e21;--muted:#5b7377;--accent:#0b6b72;--accent-ink:#fff;--accent-dim:rgba(11,107,114,.35);--warn:#8a5a00;--bad:#c4262e;--ok:#1d7a4b}}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-text-size-adjust:100%;line-height:1.5}
+::selection{background:var(--accent);color:var(--accent-ink)}
 a{color:var(--accent)}
 button,input{font:inherit;color:inherit}
-.top{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:56rem;margin:0 auto;padding:16px max(16px,env(safe-area-inset-left))}
-.brand{font-weight:700;letter-spacing:.02em;color:var(--text);text-decoration:none;font-size:1.15rem}.brand b{color:var(--accent)}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:56rem;margin:0 auto;padding:16px max(16px,env(safe-area-inset-left));border-bottom:1px solid var(--line)}
+.brand{font-family:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;font-weight:700;letter-spacing:-.02em;color:var(--text);text-decoration:none;font-size:1.15rem}.brand b{color:var(--accent)}
 main{max-width:56rem;margin:0 auto;padding:8px 16px 48px}
 .narrow{max-width:26rem;margin:4vh auto 0}
-h1{font-size:1.5rem;margin:8px 0 6px}h2{font-size:1.1rem;margin:0 0 4px}
+h1{font-size:1.5rem;margin:8px 0 6px;letter-spacing:-.02em}h2{font-size:1.1rem;margin:0 0 4px;letter-spacing:-.01em}
 p.lead{color:var(--muted);margin:0 0 20px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px;margin:0 0 16px}
 label{display:block;font-weight:600;font-size:.92rem;margin:14px 0 6px}
-input[type=email],input[type=password],input[type=text]{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:1rem}
+input[type=email],input[type=password],input[type=text]{width:100%;background:var(--bg);border:1px solid var(--line-strong);border-radius:10px;padding:12px 14px;font-size:1rem}
 input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;background:var(--accent);color:var(--accent-ink);border:0;border-radius:10px;padding:0 18px;font-weight:700;cursor:pointer;text-decoration:none}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;background:var(--accent);color:var(--accent-ink);border:0;border-radius:10px;padding:0 18px;font-weight:700;cursor:pointer;text-decoration:none;transition:transform .12s cubic-bezier(.16,1,.3,1)}
+.btn:hover{filter:brightness(1.08)}
+.btn:active{transform:translateY(1px)}
 .btn.full{width:100%;margin-top:18px}
-.btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+.btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line-strong)}
+.btn.ghost:hover{border-color:var(--accent);color:var(--accent);filter:none}
 .btn.danger{background:transparent;color:var(--bad);border:1px solid var(--line);min-height:36px;padding:0 12px;font-weight:600}
+.btn.danger:hover{border-color:var(--bad);filter:none}
 .btn[disabled]{opacity:.6;cursor:wait}
 .hint{color:var(--muted);font-size:.88rem;margin:6px 0 0}
 .alt{color:var(--muted);text-align:center;margin:18px 0 0;font-size:.95rem}
@@ -69,6 +77,10 @@ th{color:var(--muted);font-weight:600}
 .scroll{overflow-x:auto}
 .hero{text-align:center;padding:8vh 0 4vh}.hero h1{font-size:2rem}.hero p{color:var(--muted);max-width:32rem;margin:0 auto 24px}
 .hero .row{justify-content:center}.hero .hint{margin-top:18px}
+.users{list-style:none;margin:12px 0 0;padding:0}
+.users li{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:12px 0}
+.users .name{font-weight:600}.users .meta{color:var(--muted);font-size:.85rem}
+#uq{margin:12px 0 4px}
 #kf{margin-top:12px}#dev{flex:1;min-width:12rem;width:auto}#who{margin:0}.btnrow{margin:12px 0 0}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 @media (max-width:480px){.keybox{flex-direction:column}.top{padding:12px 16px}}
@@ -80,14 +92,14 @@ function shell(title: string, body: string, script: string, nonce: string, links
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#1b1b1f">
+<meta name="theme-color" content="#0a1012">
 <meta name="referrer" content="no-referrer">
 <title>${esc(title)}</title>
 <link rel="icon" href="${ICON}">
 <style nonce="${nonce}">${CSS}</style>
 </head>
 <body>
-<header class="top"><a class="brand" href="${esc(links.home)}"><b>u</b>cast.me</a><nav class="row">${nav}</nav></header>
+<header class="top"><a class="brand" href="${LANDING_URL}" title="Voltar para a página inicial">ucast<b>.me</b></a><nav class="row">${nav}</nav></header>
 <main id="main">
 ${body}
 </main>
@@ -203,7 +215,12 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 <div class="grid" id="stats"></div>
 <div class="scroll"><table id="days"><caption class="sr">Uso por dia, últimos 30 dias</caption><thead><tr><th scope="col">Dia</th><th scope="col">Transcrição</th><th scope="col">Tradução</th><th scope="col">Dublagem</th><th scope="col">Salas</th><th scope="col">Pedidos</th></tr></thead><tbody></tbody></table></div></section>
 <section class="card" aria-labelledby="dh"><h2 id="dh">Baixar o app</h2><p class="hint">Instale o ucast.me, abra “Ativar o ucast.me” e cole a sua chave.</p>
-<p class="btnrow"><a class="btn" href="${esc(links.download)}" rel="noopener">Baixar o ucast.me</a></p></section>`;
+<p class="btnrow"><a class="btn" href="${esc(links.download)}" rel="noopener">Baixar o ucast.me</a></p></section>
+<section class="card" id="admin" aria-labelledby="ah" hidden><h2 id="ah">Usuários</h2>
+<p class="hint">Selecione um usuário da lista para enviar uma chave de acesso nova por e-mail.</p>
+<label class="sr" for="uq">Buscar usuário</label><input id="uq" type="text" placeholder="Buscar por e-mail…" autocomplete="off">
+<div id="um" class="msg" role="alert" aria-live="polite"></div>
+<ul id="users" class="users" aria-label="Usuários"></ul></section>`;
   const script = `(function(){
 var gm=$('gm'),km=$('km');
 function fmtMin(s){var m=s/60;return m<10?m.toFixed(1).replace('.',','):String(Math.round(m))}
@@ -236,9 +253,25 @@ s.appendChild(stat('Salas ao vivo',mo.rooms,lim.rooms,n,''));
 var tb=$('days').tBodies[0];tb.textContent='';u.days.slice().reverse().forEach(function(d){if(!d.requests&&!d.rooms)return;var tr=document.createElement('tr');
 [d.day.split('-').reverse().join('/'),fmtMin(d.audioSeconds)+' min',n(d.llmTokens),n(d.ttsChars),n(d.rooms),n(d.requests)].forEach(function(t){var td=document.createElement('td');td.textContent=t;tr.appendChild(td)});tb.appendChild(tr)});
 if(!tb.rows.length){var tr=document.createElement('tr');var td=document.createElement('td');td.colSpan=6;td.className='meta';td.textContent='Sem uso nos últimos 30 dias.';tr.appendChild(td);tb.appendChild(tr)}})}
+var USERS=[],um=$('um');
+function drawUsers(){var ul=$('users');ul.textContent='';var q=($('uq').value||'').trim().toLowerCase();
+var list=USERS.filter(function(u){return !q||(u.email||'').toLowerCase().indexOf(q)>=0});
+if(!list.length){var li=document.createElement('li');li.className='meta';li.textContent=q?'Nenhum usuário encontrado.':'Nenhum usuário ainda.';ul.appendChild(li);return}
+list.forEach(function(u){var li=document.createElement('li');
+var info=document.createElement('div');var nm=document.createElement('div');nm.className='name';nm.textContent=u.email;
+var meta=document.createElement('div');meta.className='meta';meta.textContent='desde '+when(u.createdAt)+(u.lastSeenAt?'  ·  ativo '+when(u.lastSeenAt):'');
+info.appendChild(nm);info.appendChild(meta);li.appendChild(info);
+var b=document.createElement('button');b.className='btn ghost';b.type='button';b.textContent='Enviar chave';
+b.setAttribute('aria-label','Enviar chave de acesso para '+u.email);
+b.addEventListener('click',function(){if(!confirm('Enviar uma chave de acesso nova para '+u.email+'?'))return;
+busy(b,true,'Enviando…');api('/v1/account/users/'+encodeURIComponent(u.id)+'/access-key','POST',{}).then(function(r){busy(b,false,'Enviar chave');
+if(r.ok){show(um,'Chave enviada para '+u.email+'.','ok')}else{show(um,errText(r))}},function(){busy(b,false,'Enviar chave');show(um,'Sem conexão. Tente de novo.')})});
+li.appendChild(b);ul.appendChild(li)})}
+$('uq').addEventListener('input',drawUsers);
+function loadUsers(){return api('/v1/account/users').then(function(r){if(!r.ok)return;USERS=r.body.users||[];$('admin').hidden=false;drawUsers()})}
 api('/v1/account/me').then(function(r){if(r.status===401){location.href=${js(links.login)};return}
 if(!r.ok){show(gm,errText(r));return}CSRF=r.body.csrfToken||'';$('who').textContent=r.body.email;
-$('lead').textContent='Conectado como '+r.body.email+'.';loadKeys();loadUsage()},function(){show(gm,'Sem conexão. Recarregue a página.')});
+$('lead').textContent='Conectado como '+r.body.email+'.';loadKeys();loadUsage();loadUsers()},function(){show(gm,'Sem conexão. Recarregue a página.')});
 $('kf').addEventListener('submit',function(e){e.preventDefault();show(km,'');var b=$('kb');busy(b,true,'Criando…');
 api('/v1/account/keys','POST',{deviceName:$('dev').value}).then(function(r){busy(b,false,'Criar chave');if(!r.ok){show(km,errText(r));return}
 $('nk').textContent=r.body.key;$('new').hidden=false;$('dev').value='';$('copy').focus();loadKeys()})});

@@ -28,6 +28,9 @@ export interface ChainLinkSpec {
   /** Upstream model of a cloud link (breakers are per stage + provider + model, `breakerKey`). */
   model?: string;
   deployment?: string;
+  /** The model a deployment link sends its replica (`deployment:<name>:<model>`, else the alias): the speech-stack picks
+   *  its TTS engine from it (`kokoro…`, `pocket…`, else Qwen3-TTS). */
+  upstreamModel?: string;
   /** Why the link could not be mounted at all. */
   notMounted?: string;
   unavailableNow?: () => string | null;

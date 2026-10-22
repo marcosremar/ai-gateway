@@ -10,7 +10,10 @@ FROM ghcr.io/marcosremar/aigw-edge:${EDGE_TAG}@${EDGE_DIGEST} AS edge
 
 FROM vllm/vllm-omni:v0.28.0@sha256:6f8be103eaf0055448cf7578cfd621405fd669079d4361bd58896326b2bf722a
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl libgomp1 espeak-ng && rm -rf /var/lib/apt/lists/*
+# nginx + openssl + curl: the replica front the gateway's boot script writes (src/deployments/cloud-init.ts) — it installs
+# them with apt-get only when missing, which cost every Vast boot an apt update + install before the health loop.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl libgomp1 espeak-ng nginx openssl \
+ && rm -rf /var/lib/apt/lists/* && nginx -v && openssl version
 # llama.cpp is built on CUDA 12.8; this base is CUDA 13: llama-server runs with its own CUDA 12 libs (below)…
 COPY --from=llama /app /opt/llama
 # …and the exact CUDA 12 libs it was built against, NCCL included: without libnccl.so.2 its CUDA backend does not load
@@ -60,10 +63,30 @@ RUN /opt/wenv/bin/hf download "$KOKORO_REPO" --include 'onnx/model.onnx' 'voices
       a, sr = k.create('Olá, bom dia.', voice='pf_dora', lang='pt-br'); print(len(k.get_voices()), 'voices', len(a) / sr, 's'); \
       assert len(k.get_voices()) >= 50 and sr == 24000 and len(a) > sr // 2"
 
+# Pocket TTS (Kyutai) on the base image's own Python and CUDA torch — no second torch (the CPU voice server's
+# requirements-pocket.txt pins a CPU torch; not here). pocket-tts and num2words are installed with every package the base
+# already has pinned (constraints), so vLLM-Omni's environment does not move; when pocket-tts's own pins do not resolve
+# against the base, it goes in with --no-deps plus whichever of its dependencies are missing. It runs as its own process
+# (pocket_server.py), started only when Pocket is the chosen TTS engine (tts_engines.py).
+ARG POCKET_TTS_VERSION=3.3.0
+ARG POCKET_BAKE=pt,en,fr,es,it,de
+RUN PY=$(command -v python3) && "$PY" -c "import torch; print('base torch', torch.__version__, 'cuda', torch.version.cuda)" \
+ && uv pip freeze --python "$PY" | grep -E '^[A-Za-z0-9_.-]+==[^ ]+$' > /tmp/base-pins.txt \
+ && { uv pip install --python "$PY" --break-system-packages --no-cache -c /tmp/base-pins.txt "pocket-tts==$POCKET_TTS_VERSION" 'num2words==0.5.14' \
+   || { echo "pocket-tts pins do not resolve against the base: --no-deps + the missing dependencies" \
+     && uv pip install --python "$PY" --break-system-packages --no-cache --no-deps "pocket-tts==$POCKET_TTS_VERSION" \
+     && uv pip install --python "$PY" --break-system-packages --no-cache -c /tmp/base-pins.txt einops sentencepiece safetensors scipy \
+          typer 'num2words==0.5.14'; }; } \
+ && "$PY" -c "import torch, pocket_tts, num2words, fastapi, uvicorn; print('pocket-tts on torch', torch.__version__)" \
+ && rm -f /tmp/base-pins.txt
+# Weights and default voices of the POCKET_BAKE languages (~220 MB each) baked at build: no download at start.
+COPY pocket.py normalize.py /opt/s2s/
+RUN cd /opt/s2s && python3 -X utf8 pocket.py bake "$POCKET_BAKE" && rm -rf /models/hf/xet
+
 COPY --from=edge /app /opt/aigw-edge
 RUN uv venv --python 3.12 /opt/aigw-edge/venv && uv pip install --python /opt/aigw-edge/venv/bin/python --no-cache \
     --only-binary :all: aiortc==1.15.0 aiohttp==3.14.4 'numpy>=1.26,<3'
-COPY start.sh server.py stt_batch.py stt_stream.py qwen3_tts.yaml /opt/s2s/
+COPY start.sh server.py stt_batch.py stt_stream.py tts_engines.py pocket_server.py pocket.py normalize.py qwen3_tts.yaml /opt/s2s/
 RUN cd /opt/aigw-edge && venv/bin/python -c 'import aigw_edge.server' && ls -l /opt/aigw-edge /opt/aigw-edge/aigw_edge \
  && grep -n repetition_penalty /opt/s2s/qwen3_tts.yaml && sha256sum /opt/s2s/*
 EXPOSE 8000

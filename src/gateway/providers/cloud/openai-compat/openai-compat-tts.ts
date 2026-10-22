@@ -186,7 +186,13 @@ export class OpenAICompatTTSProvider implements TTSProvider {
     if (asWav) {
       const rate = Number(/rate=(\d+)/.exec(response.headers.get('content-type') ?? '')?.[1]) || this.config.pcmAsWavRate!;
       if (request.stream && response.body) {
-        const body = response.body as unknown as ReadableStream<Uint8Array>;
+        if (this.config.streamAudio && (response.headers.get('content-type') ?? '').includes('json')) {
+          throw noAudio(this.providerId, `the server answered JSON, not audio: ${(await response.text().catch(() => '')).slice(0, 200)}`);
+        }
+        const raw = response.body as unknown as ReadableStream<Uint8Array>;
+        // A server that streams (`streamAudio`): resolve at its first PCM bytes, so the attempt timeout and the hedge
+        // measure time to first audio — a stuck synthesis falls back instead of handing the client a silent stream.
+        const body = this.config.streamAudio ? await untilFirstAudio(raw, 0, this.providerId) : raw;
         const reader = body.getReader();
         let sentHead = false;
         const stream = new ReadableStream<Uint8Array>({

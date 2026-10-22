@@ -13,12 +13,33 @@ sent to the TTS at once, so the student hears the first words before the reply i
 `/v1/s2s` config may carry `response_format` (passed to llama.cpp) and `speak_field`: then only that field of the JSON
 answer is voiced, as it streams, and `done.reply_raw` has the whole JSON (`JsonField`, tests in `test_json_field.py`).
 
-`WS /ws/audio-stream?language=pt&chunk_size=1.0` is the real-time STT the gateway's streaming router rides: binary
-Int16 PCM 16 kHz frames in, `{"text": "<full running transcript>"}` out on every decode (`stt_stream.py` — windowed
-decode on the same `SttBatcher`, commits on silence; `test_stt_stream.py`). A `{"type":"flush"}` text frame forces the
-open buffer through the decoder. Until `/health` is warm the socket closes with 1013 so the client can hedge.
+`WS /ws/audio-stream?language=pt&chunk_size=1.0` is the real-time STT (`stt_stream.py`, windowed decode on the same
+`SttBatcher`): binary Int16 PCM 16 kHz frames in. Two output shapes:
 
-Files: `Dockerfile`, `start.sh` (start order TTS → LLM → STT; refuses to start if llama.cpp sees no `CUDA0`),
+- legacy (the gateway's `StreamingSTTRouter`): `{"text": "<full running transcript>"}` on every decode;
+- `segments=1` (the gateway's `GET /v1/audio/transcriptions/stream`, [docs/api/stt-stream.md](../../docs/api/stt-stream.md)):
+  `{"type":"ready"}`, then per utterance `partial` events (`text` always starts with its `stable` part, which never
+  changes: the words two decodes in a row agree on) and one `final` (`reason` silence | max_length | flush, decoded
+  fresh over the utterance's audio, with `language`, `avg_logprob`, `no_speech_prob`, `compression_ratio`,
+  `speech_ms`, `start_ms`/`end_ms` on the stream clock). `window` (20 s) caps an utterance: it is cut at its quietest
+  100 ms in the last 3 s, the head is the final and the rest opens the next window (no audio decoded twice, no word
+  repeated across the cut); `silence` (0.9 s) of RMS < 0.008 ends it. A window with no loud 100 ms frame is dropped
+  without a decode.
+
+`prompt` (query, or `{"type":"config","prompt":…,"language":…}` at any time) is faster-whisper's `initial_prompt` on
+every decode of the stream, as `prompt` on `/v1/audio/transcriptions`. `{"type":"flush"}` decodes the open buffer and
+ends the utterance. Until Whisper is loaded the socket closes with 1013 so the client can hedge. Tests:
+`test_stt_stream.py` (session logic), `test_audio_stream_ws.py` (the socket over Starlette's test client).
+
+**Boot (2026-10-19):** `start.sh` starts the orchestrator (uvicorn) first, so `/health` answers at once — 503 with
+`stages: {stt, llm, tts}` (`waiting|loading|warming|loaded|failed`, seconds since start, detail) until the three are warm,
+then 200. The engines still come up in order on the card (vLLM-Omni alone first: it sizes its KV cache from the free
+memory it measures; then llama.cpp), but Whisper loads as soon as the TTS answers — next to the LLM's load, not after
+it — and each stage warms as soon as its engine is up, in parallel (`boot()` in `server.py`; `STT_AFTER_TTS=0` drops the
+wait for the TTS). The image carries nginx and openssl: the gateway's Vast boot script only `apt-get install`s them when
+missing (an older image still boots, paying that install).
+
+Files: `Dockerfile`, `start.sh` (orchestrator first, engines TTS → LLM; refuses to start if llama.cpp sees no `CUDA0`),
 `server.py` (orchestrator + API, see its docstring), `test_cut.py` (sentence cutter), `bench.py` (latency bench).
 Build: `.github/workflows/speech-stack.yml` → `ghcr.io/marcosremar/speech-stack:<tag>` (public).
 Deploy: `PUT /v1/deployments/<name>` with that `image`, `port: 8000`, `healthPath: /health`, `provider: vast`, `machineType: RTX 3090`,
@@ -112,7 +133,7 @@ prompt similarity (`--slot-prompt-similarity`, default 0.10), so the stack sends
 `llm_predicted_n`, `llm_predicted_ms`, `text_wait_ms` (first token → first sentence cut), `tts_first_chunk_ms` (cut → first
 PCM). Numbers only. `/v1/audio/transcriptions` returns the same four STT fields. `bench.py` prints p50/p95 of each stage.
 
-Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stage_times tts_stream s2s_turn debug_logs kokoro; do python3 docker/speech-stack/test_$t.py; done`
+Tests without a GPU: `for t in cut json_field wav_fast_path stt_queue stt_stream audio_stream_ws stage_times tts_stream s2s_turn debug_logs kokoro; do python3 docker/speech-stack/test_$t.py; done`
 (numpy only; `git add -f` a new one, the repo's `TEST_*` ignore rule matches them on macOS).
 
 ## Single-stage proxies never end a broken stream cleanly (2026-10-08)
@@ -216,6 +237,8 @@ The image keeps the models; the five files of `/opt/s2s` can come from the deplo
 }
 ```
 
+- Since 2026-10-19 the code is `start.sh`, `server.py`, `stt_batch.py`, `stt_stream.py`, `tts_engines.py`,
+  `pocket_server.py`, `pocket.py`, `normalize.py` and `qwen3_tts.yaml`: ship them all.
 - `files` and `env` replace the stored ones as a whole (`buildSpec`): send the voice catalog and the current env again.
 - Budget: all files together ≤ 1 680 000 bytes (`MAX_FILES_BYTES`, 14 user_data keys of 120 000); the four code files are
   about 45 KB. The cloud-init itself must stay under 127 998 bytes and is 3.5 KB with this spec.
@@ -243,8 +266,8 @@ The image keeps the models; the five files of `/opt/s2s` can come from the deplo
 - Errors are OpenAI-shaped: 400 (empty input, unknown format), 503 `kokoro_loading` / `kokoro_failed`, 502 `stage_failed`.
 
 Kokoro runs on the **CPU** (onnxruntime) inside the orchestrator: no GPU memory is taken from vLLM-Omni, llama.cpp or
-Whisper. It loads in the background at startup and never holds `/health`'s 200: `GET /health` → `kokoro: {status:
-loading|loaded|failed, detail?}`. Image: `onnx-community/Kokoro-82M-v1.0-ONNX` at a pinned revision, `onnx/model.onnx`
+Whisper. Since 2026-10-19 it is loaded only when it is the chosen engine (§ One TTS engine at a time); `GET /health` →
+`kokoro: {status: unloaded|loading|loaded|failed, detail?}`. Image: `onnx-community/Kokoro-82M-v1.0-ONNX` at a pinned revision, `onnx/model.onnx`
 checked by sha256, the voice files packed into `/models/kokoro/voices.npz`; espeak-ng from apt. The build speaks one line
 with `pf_dora`, so a broken phonemizer fails the build. Measured on an M-series Mac CPU (2026-10-14, warm): 0.5 s for a 2.1 s pt
 sentence (about 4× real time). `test_kokoro.py` checks the engine
@@ -252,3 +275,46 @@ choice, the voice mapping and the formats with a fake engine.
 
 Through the gateway: the replica's TTS provider sends a `kokoro` model's `voice` as is (no clone lookup in `/v1/voices`).
 babelcast's alias is `babelcast-tts-kokoro` (`docs/deployments.md`).
+
+## One TTS engine at a time: Qwen3-TTS, Kokoro or Pocket TTS (2026-10-19)
+
+The three TTS engines are in the image and can all be chosen, but only the chosen one is loaded (`tts_engines.py`):
+
+| Engine | `model` on `/v1/audio/speech` | Where | Memory while loaded |
+|---|---|---|---|
+| Qwen3-TTS 0.6B Base (voice cloning) | anything else (e.g. `Qwen/Qwen3-TTS-12Hz-0.6B-Base`) | vLLM-Omni process, GPU | `TTS_STAGE0_MB` of VRAM reserved (7400 on 24 GB cards, 9600 on the 5090, 12000 on the L40S, 20000 on an H100) |
+| Kokoro-82M v1.0 (ONNX fp32, 54 voices) | contains `kokoro` | in the orchestrator, CPU | host RAM only (the fp32 `model.onnx` + the voice pack); no VRAM |
+| Pocket TTS (Kyutai, pocket-tts 3.3.0) | contains `pocket` | `pocket_server.py`, its own process on the base image's Python and CUDA torch; CPU by default (`POCKET_DEVICE=cuda` experimental) | host RAM: ~220 MB of weights per loaded language plus the torch runtime of the process; no VRAM on CPU |
+
+Whisper and the LLM are never touched. Switching unloads the active engine before loading the next one: vLLM-Omni's
+process group is stopped (its VRAM is free when it exits) and started again from `/tmp/aigw-tts.sh` (written by
+`start.sh`; 1–2 min with the warm-up); Kokoro is dropped (gc + `malloc_trim`); the Pocket process is stopped. The
+engines' processes get the environment `start.sh` had before it added `/opt/wenv`'s CUDA 12 libraries
+(`BASE_LD_LIBRARY_PATH`): vLLM-Omni and torch are CUDA 13.
+
+- **Boot:** `TTS_ENGINE` (default `qwen`) — `start.sh` starts vLLM-Omni first on the card only for `qwen`;
+  `kokoro` / `pocket` are loaded by the orchestrator; `none` loads nothing until the first request. `TTS_ENGINES`
+  (default `qwen,kokoro,pocket`) is what may be chosen at all (a request for another one: 400 `engine_disabled`).
+- **Choosing:** `POST /v1/tts/engine {"engine": "pocket", "force"?: bool, "wait"?: bool}` (through the token-gated front
+  only; the gateway's `POST /v1/audio/speech/engine` calls it with the engine of an app's TTS alias when a session
+  starts). `GET /v1/tts/engine` and `/health` → `tts: {active, switching_to, engines: {qwen|kokoro|pocket: {status,
+  for_s, inflight, detail?}}, switch_idle_s, switches}`.
+- **No thrashing:** a request for an engine that is not loaded gets a quick 503 (`tts_engine_loading` |
+  `tts_engine_busy`, with `Retry-After`) so the gateway speaks that line with the alias's next link (the CPU voice
+  server); it starts the switch only when the active engine has been idle (no sentence in flight, none for
+  `TTS_SWITCH_IDLE_S`, default 120 s). The select endpoint follows the same rule unless `force`. Before unloading, a
+  switch waits (≤ 30 s) for the old engine's sentences in flight. Rationale: a Qwen3-TTS start costs 1–2 minutes, so
+  two apps with different engines on one replica would otherwise keep it switching and never serving; with the rule the
+  engine in use keeps the GPU and the other alias falls back without waiting.
+- `/v1/s2s` speaks with Qwen3-TTS: it is refused with 503 before any byte while another engine is active (the
+  gateway's s2s route answers with its composed fallback). Parle's deployments should keep `TTS_ENGINES=qwen` (or not
+  route Kokoro/Pocket to them) before they move to this image.
+- **Pocket:** `pocket.py` and `normalize.py` are the CPU voice server's (docker/kokoro-stream), vendored byte for byte
+  (`test_pocket_vendored.py` fails when they drift). pocket-tts is installed into the base Python with every package
+  already there pinned (no second torch, vLLM-Omni's environment unchanged). The weights and default voices of
+  `POCKET_BAKE` (pt,en,fr,es,it,de) are baked at build. A voice Pocket does not know becomes the language's own voice
+  (by gender for a Qwen3 preset or an `xx-m-…` id). In the sidecar too a language unloads after
+  `POCKET_IDLE_UNLOAD_S` (900 s) without a sentence; `POCKET_PRELOAD` loads some at its start.
+
+Tests: `test_tts_engines.py` (switch rules, drain, failures), `test_pocket_vendored.py` (the sidecar with a fake model,
+vendored copies identical), `test_kokoro.py` (the speech route refuses another engine with 503).

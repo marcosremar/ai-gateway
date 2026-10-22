@@ -8,6 +8,8 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from tts_engines import Admit, engine_of
+
 src = Path(__file__).with_name("server.py").read_text()
 GAP, DEADLINE, STEP = 0.4, 1.5, 0.05
 DELTAS = [f'data: {{"choices": [{{"delta": {{"content": "t{i} "}}}}]}}\n\n'.encode() for i in range(6)]
@@ -66,6 +68,17 @@ def last_event(body: bytes) -> dict:
     return json.loads(body.strip().split(b"\n\n")[-1][6:])
 
 
+class AdmitAll:
+    def admit(self, name):
+        return Admit(True)
+
+    def begin(self, name):
+        pass
+
+    def end(self, name):
+        pass
+
+
 async def main():
     fake = await asyncio.start_server(engine, "127.0.0.1", 0)
     engine_url = f"http://127.0.0.1:{fake.sockets[0].getsockname()[1]}"
@@ -74,7 +87,8 @@ async def main():
                 "asyncio": asyncio, "json": json, "time": time, "httpx": httpx, "LLM_URL": engine_url, "TTS_URL": engine_url,
                 "client": httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0)),
                 "PROXY_MAX_GAP_S": GAP, "PROXY_DEADLINE_S": DEADLINE,
-                "proxied": {stage: {"started": 0, "done": 0, "failed": 0, "stalled": 0} for stage in ("chat", "speech")}}
+                "proxied": {stage: {"started": 0, "done": 0, "failed": 0, "stalled": 0} for stage in ("chat", "speech")},
+                "tts_manager": AdmitAll(), "engine_of": engine_of, "POCKET_URL": engine_url}
     exec(src[src.index("def wants_stream("):src.index('@app.get("/refs/{name}")')], ns)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="critical"))
     serving = asyncio.create_task(server.serve())

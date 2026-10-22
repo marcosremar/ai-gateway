@@ -10,6 +10,7 @@ export interface RoomLine {
   ts: number;
   /** Additive: ms from the end of speech to the subtitle being ready (presenter-measured), 0–120000. */
   delayMs?: number;
+  speechMs?: number;
   draft?: boolean;
 }
 

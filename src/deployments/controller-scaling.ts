@@ -4,7 +4,10 @@ import { DEFAULT_RT_MAX_SESSIONS } from './cloud-init';
 import { placementsOf } from './placements';
 import { ParkingControl } from './controller-parking';
 import { activeWindow } from './autoscale';
-import { isParked, machineTypesOf, REFUSED_HOLD_MS, round3, type Runtime } from './controller-state';
+import {
+  isParked, machineTypesOf, REFUSED_HOLD_MS, RESUME_DEADLINE_FACTOR, RESUME_DEADLINE_MIN_MS, round3, type Runtime,
+} from './controller-state';
+import { bootTimeoutMinutesOn } from './planner';
 import {
   DEFAULT_BOOT_SECONDS, DEFAULT_RESUME_SECONDS, median, noteLoad, scalingDecision, type LoadSample,
 } from './scaling-policy';
@@ -73,6 +76,19 @@ export abstract class ScalingControl extends ParkingControl {
     const resume = median(measured?.resume) ?? DEFAULT_RESUME_SECONDS;
     const parked = this.machines.some(m => m.deployment === spec.name && this.parkedNow(m) && !this.isStarting(m));
     return { boot, resume, start: parked ? resume : boot, idle: Math.max(spec.idleAction === 'stop' ? resume : boot, spec.scaleDownDelaySeconds) };
+  }
+
+  /**
+   * How long a powered-on parked replica may take to serve before it is given up (`RESUME_DEADLINE_FACTOR` × the median
+   * measured resume of its machine type + image, else of the spec's, else `DEFAULT_RESUME_SECONDS`), clamped to
+   * [`RESUME_DEADLINE_MIN_MS`, boot timeout].
+   */
+  protected resumeDeadlineMs(rt: Runtime, m: ReplicaMachine): number {
+    const { spec, measured } = rt.record;
+    const samples = measured?.[measuredKey(m.machineType, imageOn(spec, m.machineType))]?.resume;
+    const resume = median(samples?.length ? samples : measured?.[measuredKey(spec.machineType, spec.image)]?.resume) ?? DEFAULT_RESUME_SECONDS;
+    const bootMs = bootTimeoutMinutesOn(spec, this.providerOf(m)) * 60_000;
+    return Math.min(bootMs, Math.max(RESUME_DEADLINE_MIN_MS, RESUME_DEADLINE_FACTOR * resume * 1000));
   }
 
   private monthSpent(rt: Runtime): boolean {

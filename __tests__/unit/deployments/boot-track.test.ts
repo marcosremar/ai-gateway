@@ -43,16 +43,19 @@ describe('boot phases', () => {
     expect(bootStates(at([['ready', 1]]), [], T0, 30)).toEqual([]);
   });
 
-  it('a pull slower than the host bandwidth promises is stuck early: 4× its download, at least 8 min, never later than history', () => {
+  it('a pull slower than the host bandwidth promises is stuck early: 4× its download, at least 12 min, never later than history', () => {
+    expect(SLOW_PULL_FLOOR_MINUTES).toBe(12);
     expect(pullLimitMinutes(15, undefined)).toBe(15);
     expect(pullLimitMinutes(15, 1)).toBe(SLOW_PULL_FLOOR_MINUTES);
-    expect(pullLimitMinutes(15, 2.5)).toBe(10);
+    expect(pullLimitMinutes(15, 3.3)).toBe(14);
     expect(pullLimitMinutes(15, 6)).toBe(15);
     const pulling = (minutes: number, expectedPull?: number) => bootStates(
       [{ replicaId: 'r', phases: [{ phase: 'pulling', at: T0 - minutes * MIN }] }], [], T0, 35, () => expectedPull,
     )[0]!;
     // 15/10/2026: two Bulgarian hosts sat 15 min in pulling; a 2000 Mbps host promises the 22.3 GB image in 1.5 min.
-    expect(pulling(9, 1.5)).toMatchObject({ stuck: true, expectedMinutes: SLOW_PULL_FLOOR_MINUTES });
+    expect(pulling(13, 1.5)).toMatchObject({ stuck: true, expectedMinutes: SLOW_PULL_FLOOR_MINUTES });
+    // babelcast-3090, 19/10/2026: every pull of that image took 8.6–9.0 min, whatever the host promised — kept.
+    expect(pulling(9, 1.5).stuck).toBe(false);
     expect(pulling(9).stuck).toBe(false);
     // Poland, 894 Mbps (3.3 min promised), pulled in 10.4 min: kept.
     expect(pulling(10.4, 3.3).stuck).toBe(false);

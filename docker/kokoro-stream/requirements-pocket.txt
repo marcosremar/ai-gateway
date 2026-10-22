@@ -1,0 +1,4 @@
+# Pocket TTS (Kyutai) next to Kokoro (pocket.py, POCKET_TTS=1). CPU-only torch: the CUDA wheels are ~2 GB more.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+pocket-tts==3.3.0

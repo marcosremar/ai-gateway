@@ -322,6 +322,52 @@ export class AccountService {
 
   get userCount(): number { return this.state.users.length; }
 
+  // ── Admin (ACCOUNTS_ADMIN_EMAILS) ─────────────────────────────────────────
+
+  /** True when the account's e-mail is on the admin list. */
+  isAdminUser(user: User): boolean {
+    return this.opts.config.adminEmails.includes(user.email);
+  }
+
+  /** Every active account, newest first, with the last session activity of each. Admin routes only. */
+  listUsers(): Array<{ id: string; email: string; createdAt: string; lastSeenAt: string | null }> {
+    const seen = new Map<string, number>();
+    for (const s of this.state.sessions) {
+      const prev = seen.get(s.userId) ?? 0;
+      if (s.lastSeenAt > prev) seen.set(s.userId, s.lastSeenAt);
+    }
+    return this.state.users
+      .filter(u => !u.disabledAt)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(u => ({ id: u.id, email: u.email, createdAt: iso(u.createdAt)!, lastSeenAt: iso(seen.get(u.id)) }));
+  }
+
+  /**
+   * Creates an activation key for another account and e-mails the full key to its owner (admin action). The key never
+   * appears in the API answer — only in the e-mail. The per-user key limit does not apply here (an admin may replace a
+   * lost key of an account already at the limit; revoking old ones stays the owner's job).
+   */
+  async sendAccessKey(targetId: string, deviceName: unknown): Promise<{ email: string; view: KeyView }> {
+    const user = this.state.users.find(u => u.id === targetId);
+    if (!user || user.disabledAt) throw new AccountError(404, 'Usuário não encontrado.', 'user_not_found');
+    const key = `${KEY_PREFIX}${randomBytes(32).toString('base64url')}`;
+    const hash = this.hash(key);
+    const k: ActivationKey = {
+      id: `akey_${hash.slice(0, 16)}`, userId: user.id, hash, prefix: key.slice(0, KEY_PREFIX.length + 4),
+      deviceName: cleanDeviceName(deviceName), createdAt: this.now(),
+    };
+    this.state.keys.push(k);
+    this.byKeyHash.set(hash, k);
+    await this.save();
+    await this.opts.email.send({
+      to: user.email, subject: 'Sua chave de acesso ao ucast.me',
+      text: `Esta é a sua chave de ativação do ucast.me:\n\n${key}\n\nCole-a no app, em "Ativar o ucast.me". Ela só foi enviada por e-mail — guarde-a bem. Se você não esperava esta chave, ignore este e-mail.`,
+      html: `<p>Esta é a sua chave de ativação do ucast.me:</p><p><code style="font-size:1.05em">${key}</code></p><p>Cole-a no app, em “Ativar o ucast.me”. Ela só foi enviada por e-mail — guarde-a bem.</p><p>Se você não esperava esta chave, ignore este e-mail.</p>`,
+    });
+    this.opts.log?.('accounts: admin sent access key', { userId: user.id, keyId: k.id });
+    return { email: user.email, view: this.view(k) };
+  }
+
   async activate(token: unknown, deviceName: unknown, appVersion: unknown): Promise<{ user: User; key: ActivationKey }> {
     const found = typeof token === 'string' ? this.keyOf(token.trim()) : null;
     if (!found) throw new AccountError(401, 'Chave de ativação inválida ou revogada.', 'invalid_key');

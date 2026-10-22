@@ -402,7 +402,9 @@ describe('admin page (/admin)', () => {
     const at = html.indexOf('<b class="mono">babelcast-3090');
     const row = html.slice(at, html.indexOf('</tr>', at));
     expect(row).toContain('Iniciando');
-    expect(row).toContain('puxando a imagem há 3 min · esperado 10 min');
+    // «esperado» is the phase's stuck limit (`BootState.expectedMinutes`, the number «Travou em …» is judged against):
+    // past pulls of 6 and 7 min → 1.5 × 6.5 = 10, raised to the pull floor `SLOW_PULL_FLOOR_MINUTES` (12 since 19/10/2026).
+    expect(row).toContain('puxando a imagem há 3 min · esperado 12 min');
     expect(row).toContain('href="/admin/gpus/babelcast-3090"');
     expect(html).toMatch(/GPUs e máquinas[^]*?2 iniciando/);
     expect(html).toMatch(/<code>babelcast-3090<\/code>[^]*?Iniciando · puxando a imagem há 3 min/);

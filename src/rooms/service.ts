@@ -7,7 +7,7 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import type { RoomsConfig } from './config';
 import { PCM_RATE, type LanguageTts, type TtsClip } from '../tts';
-import { RoomDubber, type RoomTranslate, type RoomVoiceClone } from './dub';
+import { RoomDubber, type RoomPocket, type RoomTranslate, type RoomVoiceClone } from './dub';
 import type { RoomStore } from './store';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 import {
@@ -54,6 +54,8 @@ export interface RoomServiceOptions {
   synthesizeAvailable?: () => boolean;
   translate?: RoomTranslate;
   clone?: RoomVoiceClone;
+  /** Pocket TTS, the first stock voice for its languages (Kokoro behind it). */
+  pocket?: RoomPocket;
 }
 
 const HOUR_MS = 3_600_000;
@@ -87,7 +89,7 @@ export class RoomService {
     this.log = opts.log ?? (() => {});
     this.dubber = opts.synthesize && opts.config.serverDub
       ? new RoomDubber({
-        synthesize: opts.synthesize, available: opts.synthesizeAvailable, clone: opts.clone,
+        synthesize: opts.synthesize, available: opts.synthesizeAvailable, clone: opts.clone, pocket: opts.pocket,
         deliver: (room, lineId, lang, clip, streamed) => this.deliverServerClip(room, lineId, lang, clip, streamed),
         deliverChunk: (room, lineId, lang, pcm, seq) => this.deliverServerChunk(room, lineId, lang, pcm, seq),
         translate: opts.translate, addTranslation: (room, lineId, lang, text) => this.addTranslation(room, lineId, lang, text),

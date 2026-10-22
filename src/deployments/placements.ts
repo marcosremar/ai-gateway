@@ -10,7 +10,8 @@
  * The ranking is pure, no I/O — the Vast backend ranks market offers with `rankOffers`. The owner's three goals:
  * reliable, cheap, low latency for users in France. Distance decides first (`geo.ts`: great-circle km from the `near`
  * country, in 500-km bands — latency is physics, EU membership is not); inside a band, a host in the users' own country
- * goes before one across a border, a host that already booted our image before one that never did, then the shortest
+ * goes before one across a border, a host that already booted this image (fastest measured boot first) before one that
+ * booted another of ours, before one that never did, then the shortest
  * estimated boot (`bootMinutes`, when the spec gives `imageGb`), then the cheapest *effective* price, where an
  * unreliable host is priced as if it cost more. Vast hosts are then measured (`rtt-gate.ts`), and one that passed sorts
  * first on later creates.
@@ -178,25 +179,40 @@ export interface RankOffersOptions {
   /** Host machine id → RTT (ms) it measured when it last passed the RTT gate. */
   knownRtt?: ReadonlyMap<number, number>;
   proven?: ReadonlySet<number>;
+  /**
+   * Host machine id → minutes its last fresh boot (rent → ready) of THIS spec's image took. The host's Docker may still
+   * hold the layers, and it is the only measured time-to-ready there is: `inet_down` did not predict the pull of the
+   * 22.3 GB speech-stack (Poland, 894 Mbps: 10.4 min; babelcast-3090's hosts: 8.6–9.0 min every time).
+   */
+  imageBoots?: ReadonlyMap<number, number>;
 }
 
 export const KNOWN_RTT_BAND_MS = 5;
 
+/** How a host proved itself with our images: booted this very image, another one, or never. */
+const SAME_IMAGE = 0;
+const OTHER_IMAGE = 1;
+const NEVER = 2;
+
 /**
  * Offers ordered best first: hosts that already passed the RTT gate (by measured RTT, in 5-ms bands), then distance
- * band, then the users' own country before a neighbour, then `proven` hosts (booted our image before), then estimated
- * boot in `BOOT_BAND_MINUTES` bands (with `imageGb`), then effective price, then download bandwidth (faster pull).
+ * band, then the users' own country before a neighbour, then hosts that booted this image before (by that measured
+ * boot, in `BOOT_BAND_MINUTES` bands), then `proven` hosts (booted another of our images), then estimated boot in
+ * `BOOT_BAND_MINUTES` bands (with `imageGb`), then effective price, then download bandwidth (faster pull).
  */
 export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: RankOffersOptions): T[] {
   const usable = offers.filter(o => o.machine_id === undefined || !opts.avoidMachines?.has(o.machine_id));
   const scored = usable.map((o) => {
     const cc = countryOf(o.geolocation);
     const rtt = o.machine_id === undefined ? undefined : opts.knownRtt?.get(o.machine_id);
+    const booted = o.machine_id === undefined ? undefined : opts.imageBoots?.get(o.machine_id);
+    const proof = booted !== undefined ? SAME_IMAGE : o.machine_id !== undefined && opts.proven?.has(o.machine_id) ? OTHER_IMAGE : NEVER;
     return {
       o, near: isNear(cc, opts.near), bucket: distanceBucket(cc, opts.near), eff: effectivePrice(o),
       known: rtt === undefined ? Infinity : Math.floor(rtt / KNOWN_RTT_BAND_MS), abroad: cc === opts.near.toUpperCase() ? 0 : 1,
-      unproven: o.machine_id !== undefined && opts.proven?.has(o.machine_id) ? 0 : 1,
-      boot: opts.imageGb ? Math.floor(bootMinutes(o, opts.imageGb) / BOOT_BAND_MINUTES) : 0,
+      proof,
+      boot: booted !== undefined ? Math.floor(booted / BOOT_BAND_MINUTES)
+        : opts.imageGb ? Math.floor(bootMinutes(o, opts.imageGb) / BOOT_BAND_MINUTES) : 0,
     };
   });
   const near = scored.filter(t => t.near);
@@ -204,7 +220,7 @@ export function rankOffers<T extends VastOffer>(offers: readonly T[], opts: Rank
   const byBucket = (a: number, b: number) => (a === b ? 0 : a < b ? -1 : 1); // Infinity-safe
   return pool
     .sort((a, b) => byBucket(a.known, b.known) || byBucket(a.bucket, b.bucket) || a.abroad - b.abroad
-      || a.unproven - b.unproven || a.boot - b.boot || a.eff - b.eff
+      || a.proof - b.proof || a.boot - b.boot || a.eff - b.eff
       || (b.o.inet_down || 0) - (a.o.inet_down || 0))
     .map(t => t.o);
 }

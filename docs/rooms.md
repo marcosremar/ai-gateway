@@ -11,7 +11,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 |---|---|---|---|
 | `POST /v1/rooms` | gateway key | `{"title"?, "originalLang"?, "languages": ["en","es"], "serverDub"?, "youtubeUrl"?}` | `201 {"code","publishToken","url","expiresAt"}` |
 | `PATCH /v1/rooms/:code` | publish token (or the creating / an admin gateway key) | `{"youtubeUrl": "<link>" \| null}` and/or `{"serverDub": true \| false}` (the app's "Dublagem" switch; off = text only, the open pages lose the listen button) | `200 {"code","youtubeUrl","serverDub"}` |
-| `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?, "draft"?}` | `204` |
+| `POST /v1/rooms/:code/lines` | publish token (or the creating / an admin gateway key) | `{"id", "original", "originalLang"?, "translations": {"en": "…"}, "ts"?, "delayMs"?, "speechMs"?, "draft"?}` | `204` |
 | `POST /v1/rooms/:code/audio` | publish token | `{"lineId", "lang", "wav": "<base64>"}` (≤ 2 MB decoded) | `204` (broadcast only, never stored) |
 | `PUT /v1/rooms/:code/voice` | publish token (or the creating / an admin gateway key) | `{"lang", "ref_audio": "data:audio/…;base64,…", "ref_text"}` (≤ 512 KB decoded) | `204` (memory only, never served) |
 | `POST /v1/rooms/:code/end` | publish token | — | `204` |
@@ -22,6 +22,7 @@ transcript stays readable for `ROOMS_RETENTION_DAYS` (30) after the last activit
 - `id` is monotonic per room; re-sending an id replaces that line (idempotent). Out-of-order ids are kept in id order.
 - `expiresAt` in the GET body is an addition to the original contract (the page shows it after the end).
 - `delayMs` (additive, optional): ms from the end of speech to the subtitle being ready, an integer 0–120000 (else 400).
+- `speechMs` (additive, optional): how long the speaker took to say the line, ms, 0–120000. The server dub speaks at the speaker's pace: letters of `original` per second against Kokoro's 14, clamped to 0.85–1.2×, multiplied by the catch-up speed (≤ 1.3×).
   Stored and served back on the line (GET and WS); the page shows the median of the last 10 as "atraso 1,8 s".
 - `draft` (additive, optional): `true` = the presenter will still grow this line (same `id`). The server dub never voices
   a draft; it voices the version without `draft`. Anything but `true` is ignored (absent = final, as with older apps).
@@ -52,6 +53,20 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
 
 - Voices (primary subtag): en `af_heart`, fr `ff_siwis`, es `ef_dora`, pt `pf_dora`, it `if_sara`, ja `jf_alpha`,
   zh `zf_xiaobei`, hi `hf_alpha`. Other languages are not voiced.
+- **Pocket TTS first (user decision 2026-10-19)**: with `POCKET_TTS_API_KEY` set (the `pocket` provider is mounted, see
+  below) the rooms speak Pocket's languages with Pocket (`pocketTts`, src/tts): en `alba`, fr `estelle`, de `juergen`,
+  pt `rafael`, es `lola`, it `giovanni`, nl `daan` — the voice recorded in each language (any Pocket voice speaks every
+  language, but with its own accent; a room knows nothing of the speaker's gender). German and Dutch become dubbable
+  (`dubLangs` / `listenLangs`). Order per line: the speaker's clone (below) → Pocket → Kokoro. A Pocket 503 `loading`
+  (a language loaded on its first request: de, it, nl… unless in `POCKET_PRELOAD`) or `busy`, an error, or no first
+  audio within 4 s (`POCKET_FIRST_AUDIO_MS`) → that line goes to Kokoro (own server, then OpenRouter); a language only
+  Pocket speaks (de, nl) loses that line's voice. Loading/busy never feed the breaker (`cold`/`saturated`, neutral);
+  real failures do (`tts:pocket:pocket`, shared with the app chains' `pocket` link). Streamed like Kokoro (24 kHz PCM
+  pieces to the page). **No speed**: Pocket has none (the server ignores `speed`), so Pocket lines get neither the
+  speaker's pace nor the catch-up speed — Pocket speaks ~2× faster than real time, the backlog bound (4 waiting) and
+  the page's 6 s drop still apply. **One call at a time per room language** (`TtsStream` `maxParallel` 1): the server
+  speaks one sentence at a time per language and a second call waits ≤ 2 s then gets 503 `busy`, which would switch
+  that line to Kokoro's (other) voice. Without the key: Kokoro alone, as before.
 - Spend only on demand: a line+language is synthesized only while at least one viewer has sent `listen` for that
   language (a viewer that never sent `listen` does not count) and the line has a non-empty translation for it.
 - The presenter wins: in a language the presenter has sent clips in, the server waits `ROOM_SERVER_DUB_WAIT_MS` (1500)
@@ -91,12 +106,70 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   request (queueing upstream, not length), the whole clip 0.4–0.65 s later — that is what streaming saves. Splitting a
   sentence at its first comma saved ~80 ms (median 1050 → 969 ms over 9 pairs), so lines are not split. Cost: PCM is
   ~64 KB/s of speech on the wire (base64) vs ~7.5 KB/s for Kokoro's 60 kbit/s mp3. Only to that language's listeners.
+- Own Kokoro (`docker/kokoro-stream`, models in `marcosremar2/kokoro-82m-streaming-onnx`): with `KOKORO_STREAM_URL`
+  and `KOKORO_STREAM_API_KEY` set it is the first Kokoro link and OpenRouter the second (a voice it lacks — ja, zh —
+  or a 503 `busy` falls through). Kokoro split into two ONNX parts: the text/prosody part and the harmonic source run
+  on the whole sentence; the vocoder (~97 % of the CPU time) runs in windows of frames. It is Kokoro's own generator
+  with its instance norms (statistics over the whole sentence) replaced by fixed scale/shift, fine-tuned 1 h 20
+  against the original (`training/`), so a sentence streamed in windows is identical to the whole one (≥ 93 dB SNR)
+  and sounds like the original (Whisper WER 2.7 % vs 2.7 %, DNSMOS 3.43 vs 3.41 on 25 sentences). The leading pause
+  token (0.2–0.5 s of silence) is skipped, long first sentences start with their first clause, and each sentence's
+  first window has its own 8-thread session (`KOKORO_OPENING_THREADS`; later windows `KOKORO_LATER_THREADS`, 2).
+  Measured 2026-10-18 on an Apple M5 CPU (loaded): first 250 ms of voice 0.14–0.22 s after the request (stock Kokoro:
+  whole sentence 0.25–0.7 s, voice after 0.2–0.4 s of silence); local room line → first piece on the page p50
+  ~150–250 ms with one language, ~250–370 ms with two at once (the machine's load swings it), vs 11.7 s on OpenRouter
+  that night. Pauses as quiet as the stock model (−45 dB); TorchStream's running statistics left −20 to −30 dB of noise.
+  Portuguese (2026-10-18): stressed é/ê, ó/ô come from Wiktionary (`vowels.py`, `pt_vowels.tsv`, same table as the
+  desktop app); `normalize.py` writes ordinals, decimals, phone numbers, units, Av./nº and acronyms as people say them
+  ("IBGE" spelled, "SUS" read as a word). Whisper round trip on 105 pt sentences: 4.7 % WER. The server loads the
+  espeak-ng 1.52 bundled with espeakng-loader itself — misaki only sets a library on macOS/Windows, so on Linux it failed.
+  On a GPU: install onnxruntime-gpu and set `KOKORO_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider` (default CPU).
+- **Own speech server in the app chains** (2026-10-19, `src/gateway/providers/cloud/kokoro-stream/route-tts.ts`): the
+  same server is also a link of the app TTS aliases — `{"provider": "kokoro-stream", "model": "hexgrad/kokoro-82m"}`
+  (mounted with `KOKORO_STREAM_API_KEY`) and `{"provider": "pocket", "model": "pocket"}` (mounted with
+  `POCKET_TTS_API_KEY`; `POCKET_TTS_URL`, default `KOKORO_STREAM_URL`). Why: 2026-10-19 right after a deploy both
+  babelcast GPUs were off and OpenRouter timed out at the 8 s TTS budget, so the app's dubbing line got 503. Only wav/pcm
+  requests go to it (mp3 & co. → 415, the chain moves on without feeding a breaker). The voice comes from the request's
+  `language` ("Portuguese", "pt", "pt-BR"…): Kokoro keeps a voice it has in that language, else `af_heart`/`ef_dora`/
+  `ff_siwis`/`pf_dora`/`if_sara`/`hf_alpha` (all feminine — the only voices exported, `export.py`); Pocket keeps a Pocket
+  voice the app names (`rafael`, `estelle`, `alba`…), else the language's voice by the gender of a Qwen3 preset ("Ryan"
+  → pt `rafael`, en `marius`; "Vivian" → pt `estelle`, en `alba`). No language it speaks → refused, next link. Time to
+  first audio: hedge 1.5 s (`OWN_TTS_HEDGE_MS`) — the cloud link behind it starts in parallel — and 4 s limit
+  (`OWN_TTS_TIMEOUT_MS`); a stuck synthesis falls back instead of handing out a silent stream (the provider now resolves
+  at the first PCM bytes). Order: after the deployments, BEFORE OpenRouter (next to the gateway, first audio
+  ~0.15–0.4 s, no per-call cost); behind a hanging OpenRouter it would still answer through the cloud hedge
+  (min(4 s, half the budget left)), but ~4 s late. The fallback probe speaks "Bom dia." to it with `language: pt`. It is
+  not a cloud link: a chain of only these still gets the OpenRouter default appended.
+- **Pocket TTS** (Kyutai, CPU, `docker/kokoro-stream/pocket.py`): `"model": "pocket"` on the same `/v1/audio/speech`,
+  off unless `POCKET_TTS=1` on the server. One model per language (en fr de pt es it nl, ~220 MB each), loaded in the
+  background — at start for `POCKET_PRELOAD` (e.g. `pt,en,fr,es`), else on the first request, which gets 503 `loading`
+  (the gateway speaks that line with Kokoro). One sentence at a time per language (`POCKET_WAIT_S`, 2 s, then 503
+  `busy`); `POCKET_THREADS` (4) torch threads; `POCKET_QUANTIZE=1` int8. A language not used for `POCKET_IDLE_UNLOAD_S`
+  (900 s; 0 = never) is unloaded (model and voice states dropped, memory given back) and loads again on its next
+  request — preloaded ones too; Kokoro stays loaded as the always-on fallback. Predefined voices only (public weights without
+  voice cloning, no HF token). `speed` is ignored. Measured on this laptop's CPU (Core Ultra 7, loaded): first audio
+  0.16 s, 3.8 s of speech in 1.8 s; load + warm-up of one language ~60 s. The image bakes the weights and default voices
+  of `POCKET_BAKE` (pt,en,fr,es,it,de) at build (`WITH_POCKET=0` leaves Pocket out: no torch).
+  **Own model per language** (`POCKET_CUSTOM`, `<language> <voice> <config.yaml> <voice.safetensors>`, comma-separated):
+  that language loads its own config and speaks only its fixed voice, whatever Pocket voice the gateway names (rooms
+  send pt `rafael`; predefined voices do not run on other weights), numbers through `normalize.py` as always; `/health`
+  shows `pocket.custom`. Brazilian Portuguese = [Erinome](https://huggingface.co/marcosremar2/pocket-tts-erinome-pt)
+  (6 layers, fine-tuned from Kyutai's `portuguese_24l` and distilled): `POCKET_CUSTOM="pt erinome
+  hf://marcosremar2/pocket-tts-erinome-pt/erinome_6l.yaml@3d1c596927606badfd643a01682b0feedcd58daa
+  hf://marcosremar2/pocket-tts-erinome-pt/erinome_6l_voice.safetensors@3d1c596927606badfd643a01682b0feedcd58daa"` (one
+  line). The image bakes it at build (the Dockerfile's `POCKET_CUSTOM` build arg defaults to it; Railway passes the
+  service variable as that build arg), but the server only uses it with `POCKET_CUSTOM` set at run time.
+- Deploying the server: no image is built by hand. `.github/workflows/kokoro-stream.yml` builds it on every PR that
+  touches it and pushes `ghcr.io/<owner>/kokoro-stream:<date>` from main; or a Railway service builds it from the repo
+  (root `docker/kokoro-stream`, config `docker/kokoro-stream/railway.json`). The server's `KOKORO_API_KEY` is the
+  gateway's `KOKORO_STREAM_API_KEY` (and `POCKET_TTS_API_KEY` when Pocket is on); `KOKORO_STREAM_URL` =
+  `http://<service>.railway.internal:<port>/v1` (private network, not a local link: no `localLinkRefusal`).
 - Off everywhere with `ROOM_SERVER_DUB=0`; per room with `"serverDub": false` in `POST /v1/rooms` (default true).
 - With server dubbing on, the GET body / snapshot carries `dubLangs` (additive): the languages a listener can hear
   (server-voiced unless the room opted out, plus those the presenter sent clips for). The page offers dubbing ("Écouter le doublage")
   only for those; without `dubLangs` (server dubbing off) it offers every translation language as before.
 - Languages the presenter does not publish: the snapshot carries `listenLangs` (additive) = the Kokoro languages that are
-  neither a room language nor the spoken one (en, fr, es, pt, it, ja, zh, hi minus those). The page lists them in its
+  neither a room language nor the spoken one (en, fr, es, pt, it, ja, zh, hi minus those; + de, nl with Pocket). The page lists them in its
   language menu; for a viewer that listens to or reads one, the server translates each final line from the original
   (`openRouterTranslate`: OpenRouter `google/gemini-2.5-flash-lite`, reasoning off, 6 s), stores it on the line
   (`translations[lang]`, broadcast as a `line` update so every viewer of that language sees it) and voices it for the
@@ -121,11 +194,11 @@ another person starts speaking. API and Local mode never send it.
   `babelcast-tts`), through `routeRequest` (one request per sentence, no hedge, 15 s), as WAV with `task_type: "Base"`,
   `ref_audio`, `ref_text` and the target `language`. Used only while that deployment has a ready replica: the room
   never wakes it (`noWake` lease, no wait); cold → Kokoro as above. A line is voiced in the voice of the reference for
-  its `originalLang`; no reference for that language, or the clone call failed → Kokoro (a language Kokoro lacks then
-  has no voice for that line). No catch-up `speed` on the clone.
+  its `originalLang`; no reference for that language, or the clone call failed → Pocket, then Kokoro (a language neither
+  speaks then has no voice for that line). No catch-up `speed` on the clone.
 - Languages: while cloning (a reference arrived and the deployment is serving), `dubLangs` / `listenLangs` follow
-  Qwen3-TTS — en, zh, ja, ko, de, fr, ru, pt, es, it (German, Korean and Russian become available, Hindi does not);
-  otherwise Kokoro's. When a reference switches them, open pages get `{"type":"update"}` with the new lists.
+  Qwen3-TTS — en, zh, ja, ko, de, fr, ru, pt, es, it (Korean and Russian become available, Hindi and Dutch do not);
+  otherwise Kokoro's plus Pocket's. When a reference switches them, open pages get `{"type":"update"}` with the new lists.
 
 ## Viewer pages
 

@@ -6,6 +6,8 @@
 //   - `TtsStream`: the sentences of one stream (a room language) voiced in parallel when the provider is slow (one call
 //     per waiting sentence, up to TTS_MAX_PARALLEL), delivered in order, at most TTS_MAX_WAITING waiting, and spoken
 //     faster while the listeners have audio queued (`catchUpSpeed`: scheduled audio + sentences still being voiced).
+//   - `pocketTts(links)`: Pocket TTS (Kyutai) on the gateway's own speech server, one native voice per language;
+//     the rooms' first voice for its languages, Kokoro behind it.
 
 import type { CircuitBreakerRegistry } from '../gateway/providers/cloud/circuit-breaker';
 import type { TTSProvider } from '../gateway/providers/cloud/types';
@@ -46,6 +48,60 @@ export function kokoroTts(links: () => Array<RouteTarget<TTSProvider>>, breakers
     );
     if (result.stream) return { audio: Buffer.alloc(0), format: 'pcm', pcm: pcmOfWavStream(result.stream) };
     if (result.audio.length <= WAV_HEAD_BYTES) throw new Error(`${KOKORO_MODEL}: empty audio`);
+    return { audio: result.audio, format: 'wav' };
+  };
+}
+
+/**
+ * Pocket TTS (Kyutai, CPU, `docker/kokoro-stream/pocket.py`) voice the rooms speak each language with: the voice
+ * recorded in that language (en: `alba`, Pocket's own default). Any Pocket voice speaks every Pocket language, but with
+ * its own accent; rooms have no notion of the speaker's gender, so the native voice wins over a gender match.
+ */
+export const POCKET_ROOM_VOICES: Readonly<Record<string, string>> = {
+  en: 'alba', fr: 'estelle', de: 'juergen', pt: 'rafael', es: 'lola', it: 'giovanni', nl: 'daan',
+};
+
+export const POCKET_TTS_MODEL = 'pocket';
+
+export const POCKET_LANGUAGE_CODES: readonly string[] = Object.keys(POCKET_ROOM_VOICES);
+
+export const pocketRoomVoice = (lang: string): string | null => POCKET_ROOM_VOICES[primaryLanguage(lang)] ?? null;
+
+/**
+ * Time to Pocket's FIRST audio before the line goes to Kokoro: the server waits up to 2 s (`POCKET_WAIT_S`) for a
+ * language busy with another sentence before answering 503 `busy`, and starts speaking ~0.2–0.5 s after that.
+ */
+export const POCKET_FIRST_AUDIO_MS = 4_000;
+
+/** Pocket's 503s that say nothing about its health (a language still loading, a language busy): no breaker is fed. */
+function pocketNeutral(err: unknown): unknown {
+  const e = err as { status?: unknown; code?: unknown; error?: { code?: unknown } } | null;
+  if (!e || typeof e !== 'object' || e.status !== 503) return err;
+  const code = e.code ?? e.error?.code;
+  const neutral = code === 'loading' ? 'cold' : code === 'busy' ? 'saturated' : null;
+  return neutral ? Object.assign(e, { gatewayCode: neutral }) : err;
+}
+
+/**
+ * Pocket TTS through the gateway's own routing (breakers, per-call first-audio limit). One request per sentence, no
+ * hedge. `speed` is not sent: Pocket has no speed control (the server accepts and ignores it), so a Pocket line is
+ * spoken at Pocket's own pace — no speaker pace, no catch-up speed.
+ */
+export function pocketTts(links: () => Array<RouteTarget<TTSProvider>>, breakers?: CircuitBreakerRegistry): LanguageTts {
+  return async (text, lang) => {
+    const voice = pocketRoomVoice(lang);
+    if (!voice) throw new Error(`Pocket TTS does not speak ${lang}`);
+    const targets = links().map(l => ({ ...l, hedgeAfterMs: 0, chainKey: 'tts:pocket' }));
+    const { result } = await routeRequest(
+      targets,
+      (t, signal) => t.provider.synthesize({
+        signal, stream: true, model: t.model ?? POCKET_TTS_MODEL, input: text, voice, responseFormat: 'wav',
+        extra: { language: primaryLanguage(lang) },
+      }).catch((err: unknown) => { throw pocketNeutral(err); }),
+      { stage: 'tts', timeoutMs: POCKET_FIRST_AUDIO_MS, retriesPerProvider: 0, ...(breakers && { breakers }) },
+    );
+    if (result.stream) return { audio: Buffer.alloc(0), format: 'pcm', pcm: pcmOfWavStream(result.stream) };
+    if (result.audio.length <= WAV_HEAD_BYTES) throw new Error('pocket: empty audio');
     return { audio: result.audio, format: 'wav' };
   };
 }
@@ -239,6 +295,8 @@ export interface TtsStreamOptions {
   deliverChunk?: (id: number, pcm: Buffer, seq: number) => boolean;
   dropped: (id: number) => void;
   now: () => number;
+  /** Calls at once, read before each start (default TTS_MAX_PARALLEL): 1 for a provider that speaks one sentence at a time. */
+  maxParallel?: () => number;
 }
 
 interface Waiting { id: number; readyAt: number }
@@ -275,7 +333,7 @@ export class TtsStream {
 
   private pump(): void {
     if (this.timer || this.closed) return;
-    while (this.waiting[0] && this.jobs.length < TTS_MAX_PARALLEL) {
+    while (this.waiting[0] && this.jobs.length < Math.max(1, this.opts.maxParallel?.() ?? TTS_MAX_PARALLEL)) {
       const wait = this.waiting[0].readyAt - this.opts.now();
       if (wait > 0) {
         this.timer = setTimeout(() => { this.timer = null; this.pump(); }, wait);

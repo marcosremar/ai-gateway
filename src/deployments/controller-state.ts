@@ -195,6 +195,15 @@ export const machineTypesOf = (spec: DeploymentSpec): Set<string> => new Set(
   [spec.machineType, ...(spec.placements ?? []).flatMap(p => p.machineType ?? []), ...(spec.candidates ?? []).map(c => c.machineType)]);
 export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
 export const RESUME_LISTS_STOPPED_MS = 5 * 60_000;
+/**
+ * A parked replica powered on that is not serving after `RESUME_DEADLINE_FACTOR` × its measured median resume (default
+ * `DEFAULT_RESUME_SECONDS`), at least `RESUME_DEADLINE_MIN_MS` and at most the boot timeout, is given up: released as
+ * `resume-timeout` and a fresh replica is rented. Production 18-19/10/2026: Vast powered the clone's 3090 on but the
+ * host could not resume it (its GPU rented by someone else) and the deployment stayed `warming` (a healthy resume
+ * takes 115–137 s).
+ */
+export const RESUME_DEADLINE_FACTOR = 2;
+export const RESUME_DEADLINE_MIN_MS = 4 * 60_000;
 export const DEFAULT_BUSY_GRACE_MS = 120_000;
 export const ERRORED_GRACE_MS = 20_000;
 export const DEFAULT_MAX_COLD_START_WAIT_SECONDS = 240;
@@ -240,6 +249,12 @@ export abstract class ControllerState {
   protected readonly parkedSince = new Map<string, number>();
   /** Last power-on of a parked replica, id → when: `maxHours` and the boot timeout count from here, not from creation. */
   protected readonly poweredOnAt = new Map<string, number>();
+  /**
+   * Parked replicas powered on that have not served since, id → FIRST power-on of that resume. Unlike `poweredOnAt` it
+   * is not moved by the re-power-ons of a machine still listed stopped (every `PARKED_START_GRACE_MS`), so the resume
+   * deadline (`RESUME_DEADLINE_*`) counts from the first one. Cleared once ready, at the next park, or when it is gone.
+   */
+  protected readonly resumeSince = new Map<string, number>();
   protected readonly startRefused = new Map<string, number>();
   /** Creates in flight: the price each is expected to bill, so concurrent creates cannot jointly pass the € ceiling. */
   protected readonly pendingSpend = new Set<{ cost: number; deployment?: string; provider?: DeploymentProvider; machineType?: string }>();

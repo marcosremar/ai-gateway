@@ -14,9 +14,12 @@ import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/providers/cloud/openrouter';
 import { modalKokoroTTS } from './src/gateway/providers/cloud/modal-kokoro';
+import { kokoroStreamTTS } from './src/gateway/providers/cloud/kokoro-stream';
+import { POCKET_PROVIDER, ownSpeechProviders } from './src/gateway/providers/cloud/kokoro-stream/route-tts';
 import { openaiSTT } from './src/gateway/providers/cloud/openai';
 import { fireworksSTT } from './src/gateway/providers/cloud/fireworks';
 import { deepgramSTT } from './src/gateway/providers/cloud/deepgram';
+import { mistralSTT } from './src/gateway/providers/cloud/mistral';
 import { zaiLLM, ZAI_LLM_MODELS } from './src/gateway/providers/cloud/zai';
 import { DeploymentLLMProvider, DeploymentSTTProvider, DeploymentTTSProvider } from './src/deployments/inference-providers';
 import {
@@ -65,8 +68,10 @@ import {
   type LatencyReport,
 } from './src/telemetry';
 import { createRealtime } from './src/realtime';
+import { createTranscriptionStream, STT_STREAM_PATH } from './src/gateway/proxy/routes/transcription-stream';
+import { createTtsEngineRoute, TTS_ENGINE_PATH } from './src/gateway/proxy/routes/tts-engine';
 import { createRooms, openRouterTranslate } from './src/rooms';
-import { KOKORO_MODEL, deploymentClone, kokoroTts } from './src/tts';
+import { KOKORO_MODEL, POCKET_TTS_MODEL, deploymentClone, kokoroTts, pocketTts } from './src/tts';
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
@@ -308,12 +313,15 @@ if (declared) {
 const bootRegistryWarning = deployments?.registryWarning() ?? null;
 if (bootRegistryWarning) log.error({}, `ERROR: ${bootRegistryWarning}`);
 
+const ownSpeech = ownSpeechProviders(process.env);
 function mountProviders() {
   const built = buildServeProviders({
     instances: {
       chat: { groq: groqLLM, openrouter: openrouterLLM, zai: zaiLLM },
-      stt: { groq: groqSTT, openrouter: openrouterSTT, openai: openaiSTT, fireworks: fireworksSTT, deepgram: deepgramSTT },
-      tts: { groq: groqTTS, openrouter: openrouterTTS },
+      stt: { groq: groqSTT, openrouter: openrouterSTT, openai: openaiSTT, fireworks: fireworksSTT, deepgram: deepgramSTT, mistral: mistralSTT },
+      // `kokoro-stream` / `pocket`: the speech server the rooms use (docker/kokoro-stream), as a link of the app chains;
+      // mounted only with KOKORO_STREAM_API_KEY / POCKET_TTS_API_KEY (route-tts.ts).
+      tts: { groq: groqTTS, openrouter: openrouterTTS, ...ownSpeech },
     },
     env: process.env,
     openrouter: openrouterKey,
@@ -568,6 +576,7 @@ realtimeSessionOf = sessionResolverFrom(realtime.service);
 if (deployments) deployments.devices.onBlock = (app, device) => { void realtime.service.endDeviceSessions(app, device); };
 // Live subtitle rooms (src/rooms, docs/rooms.md): POST /v1/rooms with a gateway key; publishing with the room's own
 // token, the transcript, the viewer WebSocket and the viewer pages (ROOMS_PUBLIC_HOST, /live/:code) mounted in front.
+const roomPocket = ownSpeech[POCKET_PROVIDER]!;
 const rooms = createRooms({
   keyUser: (token) => {
     const userId = keyRegistry.resolve(token)?.userId;
@@ -575,19 +584,27 @@ const rooms = createRooms({
   },
   userOf: (req) => (keysConfigured() ? keyRegistry.resolve(String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, ''))?.userId ?? 'anonymous' : 'localhost'),
   log: (msg, data) => log.log(data ?? {}, msg),
-  // Server dubbing (Kokoro only — no paid fallback voice) through the gateway TTS module: breakers, per-call timeout,
+  // Server dubbing (Pocket, then Kokoro — no paid fallback voice) through the gateway TTS module: breakers, per-call timeout,
   // one request per sentence. Another Kokoro source added to these links is ranked by latency automatically.
   synthesize: kokoroTts(() => [
-    { providerId: 'openrouter', provider: openrouterTTS, model: KOKORO_MODEL },
+    ...(kokoroStreamTTS.isConfigured() ? [{ providerId: 'self-hosted' as const, provider: kokoroStreamTTS, model: KOKORO_MODEL }] : []),
+    ...(openrouterTTS.isConfigured() ? [{ providerId: 'openrouter' as const, provider: openrouterTTS, model: KOKORO_MODEL }] : []),
     ...(process.env.MODAL_KOKORO_URL ? [{ providerId: 'modal' as const, provider: modalKokoroTTS, model: 'kokoro-82m' }] : []),
   ]),
-  synthesizeAvailable: () => openrouterTTS.isConfigured() || Boolean(process.env.MODAL_KOKORO_URL),
+  synthesizeAvailable: () => kokoroStreamTTS.isConfigured() || openrouterTTS.isConfigured() || Boolean(process.env.MODAL_KOKORO_URL),
+  // Pocket TTS on the same speech server (POCKET_TTS_API_KEY): the rooms' voice for en fr de pt es it nl, Kokoro above
+  // behind it when Pocket answers 503 loading/busy or fails; Kokoro alone without the key (docs/rooms.md).
+  pocket: {
+    available: () => roomPocket.isConfigured(),
+    synthesize: pocketTts(() => (roomPocket.isConfigured() ? [{ providerId: POCKET_PROVIDER, provider: roomPocket, model: POCKET_TTS_MODEL }] : [])),
+  },
   translate: openRouterTranslate(openrouterLLM),
   ...(controller && { clone: deploymentClone(controller, process.env.ROOM_VOICE_CLONE_DEPLOYMENT?.trim() || 'babelcast-tts-clone') }),
 });
 log.log({
   dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl,
-  serverDub: rooms.config.serverDub && openrouterTTS.isConfigured(),
+  serverDub: rooms.config.serverDub && (kokoroStreamTTS.isConfigured() || openrouterTTS.isConfigured() || Boolean(process.env.MODAL_KOKORO_URL) || roomPocket.isConfigured()),
+  pocket: roomPocket.isConfigured(),
 }, 'Rooms enabled');
 // Desktop-app field telemetry (src/app-telemetry, docs/app-telemetry.md): opt-in batches from the ucast.me app with a
 // gateway key, admin summary/listing. Day files on the same volume as rooms.
@@ -605,6 +622,51 @@ if (appTelemetry) {
 const deviceGate = deployments && ((userId: string, headers: import('http').IncomingHttpHeaders, kind: string) => {
   const named = typeof headers['x-app'] === 'string' ? headers['x-app'].trim() : null;
   return deployments.devices.admit(adminUsers.has(userId) ? named : userId, headers[DEVICE_HEADER], kind);
+});
+
+// GET /v1/audio/transcriptions/stream (WebSocket, docs/api/stt-stream.md): streaming STT of an app's STT alias on its
+// own GPU deployment (speech-stack /ws/audio-stream), with the batch route's admission: app aliases and daily budget,
+// device gate, activation-key quota (metered while it streams). A GPU that is not ready refuses before the handshake
+// (503 gpu_not_ready) and the caller falls back to POST /v1/audio/transcriptions.
+const bearerOf = (req: import('http').IncomingMessage) => String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+const sttStream = createTranscriptionStream({
+  controller,
+  deploymentsOf: (model) => (chains.stt?.[model] ?? []).flatMap(l => (l.deployment && !l.notMounted ? [l.deployment] : [])),
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(bearerOf(req))?.userId ?? null : 'localhost'),
+  isAdmin: (userId) => adminUsers.has(userId) || (!keysConfigured() && userId === 'localhost'),
+  ...(appLimits ? {
+    admit: (userId: string, model: string) => appLimits.check(userId, 'stt', { model }),
+    charge: (userId: string, requests: number) => appLimits.chargeRequests(userId, requests),
+  } : {}),
+  ...(deviceGate ? { deviceGate: (userId: string, headers: import('http').IncomingHttpHeaders) => deviceGate(userId, headers, 'stt') } : {}),
+  ...(accounts ? { meter: (req: import('http').IncomingMessage) => accounts.streamMeter(req.headers.authorization) } : {}),
+  // An activation key counts per account (every desktop user resolves as the same app user), any other key per key.
+  callerOf: (req, userId) => {
+    const bearer = bearerOf(req);
+    const account = accounts?.service.keyOf(bearer)?.user.id;
+    return account ? `account:${account}` : access.resolve(bearer)?.keyId ?? userId;
+  },
+  maxStreamsPerCaller: optionalMs(process.env.STT_STREAM_MAX_PER_KEY),
+  maxSessionMs: (optionalMs(process.env.STT_STREAM_MAX_MINUTES) ?? 0) > 0 ? optionalMs(process.env.STT_STREAM_MAX_MINUTES)! * 60_000 : undefined,
+  idleMs: optionalMs(process.env.STT_STREAM_IDLE_MS),
+  acquireWaitMs: optionalMs(process.env.STT_STREAM_ACQUIRE_WAIT_MS),
+  onEnd: (s) => emitGatewayEvent('stt.stream', {
+    level: s.closeCode === 1000 || s.closeCode === 1001 ? 'info' : 'warn',
+    attrs: { app: appOfUser(s.userId), model: s.model, deployment: s.deployment, replica: s.replica, audioSeconds: s.audioSeconds,
+      durationMs: s.durationMs, finals: s.finals, closeCode: s.closeCode, reason: s.reason, from: s.from },
+  }),
+  log: (msg, data) => log.log(data ?? {}, msg),
+});
+upgradeRoutes.push({ prefix: STT_STREAM_PATH, handler: (req, socket, head) => sttStream.handleUpgrade(req, socket, head) });
+// POST /v1/audio/speech/engine: the TTS engine (Qwen3-TTS | Kokoro | Pocket) the GPU behind a TTS alias keeps loaded —
+// the speech-stack loads one at a time; the app calls this when a session starts with its TTS alias.
+const ttsEngineRoute = createTtsEngineRoute({
+  controller,
+  linksOf: (model) => (chains.tts?.[model] ?? []).flatMap(l => (l.deployment && !l.notMounted ? [{ deployment: l.deployment, upstreamModel: l.upstreamModel ?? model }] : [])),
+  userOf: (req) => (keysConfigured() ? keyRegistry.resolve(bearerOf(req))?.userId ?? null : 'localhost'),
+  isAdmin: (userId) => adminUsers.has(userId) || (!keysConfigured() && userId === 'localhost'),
+  aliasesOf: (userId) => appAliasesOf(userId, 'tts'),
+  log: (msg, data) => log.log(data ?? {}, msg),
 });
 
 const ttsCache = ttsCacheFromEnv(process.env, stateDir);
@@ -639,7 +701,8 @@ const server = await startProxy({
     ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), fallbackProbe: fallbackProbe.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [], clientGpu: deployments?.clientGpu.report() ?? null }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [], clientGpu: deployments?.clientGpu.report(viewer.userId) ?? null }),
   customRoutes: [
-    ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute }, realtime.route, realtime.updateRoute,
+    ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute },
+    { method: 'POST', path: TTS_ENGINE_PATH, handler: ttsEngineRoute }, realtime.route, realtime.updateRoute,
     rooms.route, ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
     ...(benchmarks ? createModelBenchmarkRoutes({ store: benchmarks, gate: adminGate, onChange: () => remount?.() }) : []),
   ],

@@ -48,6 +48,8 @@ export interface AccountsConfig {
   /** Days of daily usage rows kept. */
   usageRetentionDays: number;
   email: { resendApiKey: string; from: string; logLinks: boolean };
+  /** E-mails with access to the admin routes (list users, send activation keys). Empty = no admins. */
+  adminEmails: string[];
   /** HMAC pepper of the stored key / session / reset-token hashes. */
   pepper: string;
 }
@@ -117,6 +119,7 @@ export function accountsConfigFromEnv(env: Record<string, string | undefined> = 
       from: env.EMAIL_FROM?.trim() ?? '',
       logLinks: env.ACCOUNTS_LOG_EMAIL_LINKS?.trim() === '1',
     },
+    adminEmails: (env.ACCOUNTS_ADMIN_EMAILS ?? '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean),
     pepper: env.ACCOUNTS_HASH_PEPPER?.trim() || ACCOUNTS_DEFAULTS.PEPPER,
   };
 }
