@@ -134,6 +134,8 @@ export interface VastOffer {
   direct_port_start?: number;
   cpu_cores_effective?: number;
   cpu_ram?: number;
+  /** Share of the physical GPU this offer rents (1 = whole card). Absent: treated as whole. */
+  gpu_frac?: number;
 }
 
 /**

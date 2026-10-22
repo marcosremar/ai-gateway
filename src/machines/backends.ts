@@ -150,13 +150,20 @@ export class VastMachineBackend implements MachineBackend {
   private spec(request: MachineRequest): DeploymentSpec {
     return {
       name: 'machine', machineType: request.machineType, volumeGb: request.diskGb, maxEurPerHour: request.maxUsdPerHour / EUR_TO_USD,
-      near: request.near, allowFar: true, minCpuCores: request.minCpuCores, minRamGb: request.minRamGb, vm: request.vm,
+      near: request.near, allowFar: true, minCpuCores: request.minCpuCores, minRamGb: request.minRamGb, minGpuFrac: request.minGpuFrac, vm: request.vm,
     } as DeploymentSpec;
   }
 
   async offers(request: MachineRequest) {
     const needed = portKeys(request).length;
-    return (await this.market.pickOffers(this.spec(request)))
+    const types = [request.machineType, ...(request.alsoMachineTypes ?? [])];
+    const lists = await Promise.all(types.map(t => this.market.pickOffers({ ...this.spec(request), machineType: t }).catch((err: unknown) => {
+      if (types.length === 1) throw err;
+      return [];
+    })));
+    // One type keeps the market's own ranking (near the users, reliable hosts first); several are merged cheapest first.
+    const merged = types.length === 1 ? lists[0] : lists.flat().sort((a, b) => a.dph_total - b.dph_total);
+    return merged
       .filter(o => o.dph_total <= request.maxUsdPerHour && (o.direct_port_count === undefined || o.direct_port_count >= needed));
   }
 
@@ -247,6 +254,20 @@ export class VastMachineBackend implements MachineBackend {
 
   async release(providerId: string): Promise<void> {
     await this.call('DELETE', `/instances/${encodeURIComponent(providerId)}/`);
+  }
+
+  async credit(): Promise<number | null> {
+    const user = await this.call<{ credit?: unknown }>('GET', '/users/current/');
+    return typeof user.credit === 'number' ? user.credit : null;
+  }
+
+  async pause(providerId: string): Promise<void> {
+    await this.call('PUT', `/instances/${encodeURIComponent(providerId)}/`, { state: 'stopped' });
+  }
+
+  async resume(providerId: string): Promise<void> {
+    const answer = await this.call<{ success?: boolean; msg?: string }>('PUT', `/instances/${encodeURIComponent(providerId)}/`, { state: 'running' });
+    if (answer.success === false) throw new Error(`vast resume ${providerId}: no capacity (${answer.msg ?? 'refused'})`);
   }
 }
 

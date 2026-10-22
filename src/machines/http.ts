@@ -90,6 +90,7 @@ export function createMachineRoutes(opts: MachineRoutesOptions) {
     const m = owned(controller.get(id), who, 'machine', id);
     if (!action && method === 'GET') return send(res, 200, controller.view(m));
     if (!action && method === 'DELETE') return send(res, 200, controller.view(await controller.release(id, 'deleted')));
+    if (action === 'resume' && method === 'POST') return send(res, 200, controller.view(await controller.resume(id)));
     if (action === 'extend' && method === 'POST') {
       const body = await readJson(req);
       const hours = body.hours === undefined ? null : body.hours;

@@ -293,6 +293,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
         && (o.direct_port_count === undefined || o.direct_port_count >= vastPortCount(spec))
         && (!spec.minCpuCores || (o.cpu_cores_effective ?? 0) >= spec.minCpuCores)
         && (!spec.minRamGb || (o.cpu_ram ?? 0) >= spec.minRamGb * 1024)
+        && (!spec.minGpuFrac || (o.gpu_frac ?? 1) >= spec.minGpuFrac - 1e-9)
         && (!spec.euOnly || EU_COUNTRIES.has(countryOf(o.geolocation) ?? '')));
       const reasons = new Map(valid.map(o => [o, this.skipReason(this.hosts.get(o.machine_id), spec, now)]));
       skipped = valid.filter(o => reasons.get(o)).map(o => ({

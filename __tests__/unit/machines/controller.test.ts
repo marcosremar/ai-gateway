@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
+import { machineLimitsFromEnv } from '../../../src/machines';
 import { MachineError } from '../../../src/machines/spec';
 import { clock, FakeMachineCloud, HOUR, input, makeController, stateDir } from './_fake-machines';
 
@@ -21,6 +22,23 @@ describe('machines controller', () => {
     expect(existsSync(join(dir, 'machines.json.bak'))).toBe(true);
     c.advance(HOUR / 2);
     expect(ctl.costs('palco').machines[0].costUsd).toBeCloseTo(0.2, 4);
+  });
+
+  it('an owner with an hourly cap cannot ask for a dearer machine (palco: $0.16/h)', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    const ctl = makeController({ backends: { vast }, now: c.now, limits: { ownerMaxUsdPerHour: { palco: 0.16 } } });
+    await expect(ctl.create('palco', input({ maxUsdPerHour: 0.5 }))).rejects.toMatchObject({ status: 403 });
+    expect(vast.machines.size).toBe(0);
+    vast.price = 0.1;
+    await expect(ctl.create('palco', input({ maxUsdPerHour: 0.16 }))).resolves.toMatchObject({ owner: 'palco', status: 'running' });
+    await expect(ctl.create('parle', input({ maxUsdPerHour: 0.5 }))).resolves.toMatchObject({ owner: 'parle' });
+  });
+
+  it('the default machine limits cap palco at $0.16/h and MACHINES_OWNER_MAX_USD_PER_HOUR adds more', () => {
+    expect(machineLimitsFromEnv({}).ownerMaxUsdPerHour).toEqual({ palco: 0.16 });
+    expect(machineLimitsFromEnv({ MACHINES_OWNER_MAX_USD_PER_HOUR: 'palco=0.2, parle=1, junk, x=-1' }).ownerMaxUsdPerHour)
+      .toEqual({ palco: 0.2, parle: 1 });
   });
 
   it('cheapest: tries providers by quote and falls back to the next on a failure', async () => {
@@ -162,5 +180,43 @@ describe('machines controller', () => {
     vast.failList = false;
     await ctl.reconcile();
     expect(ctl.get(m.id)).toMatchObject({ status: 'released', endReason: 'lost' });
+  });
+});
+
+describe('machines paused for low credit', () => {
+  it('pauses running machines below US$ 1, keeps them out of the orphan reaper, and resumes after a top-up', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    const ctl = makeController({ backends: { vast }, now: c.now });
+    const m = await ctl.create('palco', input());
+    vast.creditUsd = 0.8;
+    c.advance(HOUR);
+    await ctl.reconcile();
+    expect(ctl.get(m.id)).toMatchObject({ status: 'paused' });
+    expect(vast.paused).toEqual([m.providerId]);
+    c.advance(HOUR / 4);
+    await ctl.reconcile();
+    expect(vast.released).toEqual([]);
+    await expect(ctl.resume(m.id)).rejects.toMatchObject({ status: 402 });
+    vast.creditUsd = 20;
+    expect(await ctl.resume(m.id)).toMatchObject({ status: 'running', pausedAt: null });
+    expect(vast.resumed).toEqual([m.providerId]);
+  });
+
+  it('does nothing at or above the floor, and a paused machine is still released at its deadline', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    const ctl = makeController({ backends: { vast }, now: c.now });
+    const m = await ctl.create('palco', input({}, 2));
+    vast.creditUsd = 1;
+    await ctl.reconcile();
+    expect(vast.paused).toEqual([]);
+    vast.creditUsd = 0.5;
+    await ctl.reconcile();
+    expect(ctl.get(m.id)?.status).toBe('paused');
+    c.advance(3 * HOUR);
+    await ctl.reconcile();
+    expect(ctl.get(m.id)?.status).toBe('released');
+    expect(vast.released).toEqual([m.providerId]);
   });
 });

@@ -251,7 +251,20 @@ const machineUserOf = (req: import('http').IncomingMessage) => keyRegistry.resol
 const configuredMachines = machinesFromEnv(process.env, {
   userOf: machineUserOf,
   isAdmin: (req) => adminUsers.has(machineUserOf(req) ?? ''),
-  log: (msg, data) => log.log(data ?? {}, msg),
+  log: (msg, data) => {
+    log.log(data ?? {}, msg);
+    if (msg !== 'machines: paused for low credit' && msg !== 'machines: resumed') return;
+    const paused = msg !== 'machines: resumed';
+    const event = paused ? 'machines.paused_low_credit' : 'machines.resumed';
+    alertLog.record(event, data ?? {});
+    void alertWebhook?.send({ event, data: data ?? {} });
+    if (paused) {
+      void alertMailer?.send({
+        kind: 'machines.paused_low_credit', level: 'urgent', subject: `máquina ${String(data?.id)} pausada: crédito ${String(data?.provider)} abaixo de US$ ${String(data?.floorUsd)}`,
+        body: `A máquina ${String(data?.id)} (${String(data?.owner)}) foi pausada porque o crédito da ${String(data?.provider)} está em US$ ${Number(data?.balanceUsd).toFixed(2)}. O disco fica guardado. Recarregue a conta: com crédito acima do limite de retoma ela volta sozinha, ou use POST /v1/machines/${String(data?.id)}/resume.`,
+      });
+    }
+  },
   onRailway: Boolean(process.env.RAILWAY_ENVIRONMENT_ID || process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID),
 });
 const machines = configuredMachines && await configuredMachines.controller.init().then(() => configuredMachines, (err: unknown) => {
