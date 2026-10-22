@@ -86,7 +86,7 @@ describe('gateway TTS module', () => {
       let ended = false;
       gates.push({ push: b => { queue.push(b); wake?.(); }, end: () => { ended = true; wake?.(); } });
       return {
-        audio: Buffer.alloc(0), format: 'pcm',
+        audio: Buffer.alloc(0), format: 'pcm', engine: 'pocket',
         pcm: (async function* () {
           for (;;) {
             if (queue.length) { yield queue.shift()!; continue; }
@@ -100,7 +100,7 @@ describe('gateway TTS module', () => {
     const stream = new TtsStream({
       now: () => Date.now(),
       synthesize: async () => streamed(),
-      deliver: (id, clip, isStreamed) => { events.push(`clip ${id} ${clip.format} ${isStreamed} ${clip.audio.length - 44}`); return true; },
+      deliver: (id, clip, isStreamed) => { events.push(`clip ${id} ${clip.format} ${clip.engine} ${isStreamed} ${clip.audio.length - 44}`); return true; },
       deliverChunk: (id, pcm, seq) => { events.push(`chunk ${id}.${seq} ${pcm.length}`); return true; },
       dropped: () => {},
     });
@@ -115,10 +115,10 @@ describe('gateway TTS module', () => {
     gates[0]!.push(Buffer.alloc(10, 1));
     gates[0]!.end();
     await vi.advanceTimersByTimeAsync(0);
-    expect(events).toEqual([`chunk 1.0 ${piece.length}`, 'chunk 1.1 10', `clip 1 wav true ${piece.length + 10}`, `chunk 2.0 ${piece.length}`]);
+    expect(events).toEqual([`chunk 1.0 ${piece.length}`, 'chunk 1.1 10', `clip 1 wav pocket true ${piece.length + 10}`, `chunk 2.0 ${piece.length}`]);
     gates[1]!.end();
     await vi.advanceTimersByTimeAsync(0);
-    expect(events.at(-1)).toBe(`clip 2 wav true ${piece.length}`);
+    expect(events.at(-1)).toBe(`clip 2 wav pocket true ${piece.length}`);
   });
 
   it('delivers nothing for a stream that ends without audio and moves on to the next sentence', async () => {

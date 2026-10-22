@@ -378,7 +378,7 @@ export class TtsStream {
       if (job.clip?.pcm) this.sendParts(job);
       if (!job.ended) return;
       this.jobs.shift();
-      const clip = job.clip?.pcm ? (job.parts.length ? { audio: pcmToWav(Buffer.concat(job.parts)), format: 'wav' } : null) : job.clip;
+      const clip = job.clip?.pcm ? (job.parts.length ? { audio: pcmToWav(Buffer.concat(job.parts)), format: 'wav', engine: job.clip.engine } : null) : job.clip;
       if (!clip || job.muted || !this.opts.deliver(job.id, clip, Boolean(job.clip?.pcm))) continue;
       const ms = clipDurationMs(clip);
       this.clipMs = this.clipMs ? 0.7 * this.clipMs + 0.3 * ms : ms;
