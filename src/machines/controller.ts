@@ -295,16 +295,25 @@ export class MachineController {
       const backend = this.opts.backends[provider]!;
       if (!backend.credit || !backend.pause) continue;
       const running = this.records().filter(m => m.provider === provider && m.status === 'running' && !m.endReason);
-      if (!running.length) continue;
+      const waiting = this.records().filter(m => m.provider === provider && m.status === 'paused' && !m.endReason && m.pausedAt != null);
+      if (!running.length && !waiting.length) continue;
       const balance = await backend.credit().catch((err: unknown) => { this.log('machines: credit read failed', { provider, error: errText(err) }); return null; });
-      if (balance == null || balance >= floor) continue;
+      if (balance == null) continue;
+      const back = this.limits.resumeAboveUsd ?? 0;
+      if (back > 0 && balance >= Math.max(back, floor)) {
+        for (const m of waiting) {
+          await this.resume(m.id).catch((err: unknown) => this.log('machines: auto-resume failed', { id: m.id, provider, error: errText(err) }));
+        }
+        continue;
+      }
+      if (balance >= floor) continue;
       for (const m of running) {
         try {
           await backend.pause(m.providerId!);
           m.status = 'paused';
           m.pausedAt = this.now();
           m.lastError = `paused: ${provider} credit $${balance.toFixed(2)} is below $${floor} (MACHINES_PAUSE_BELOW_USD); top up, then POST /v1/machines/${m.id}/resume`;
-          this.log('machines: paused for low credit', { id: m.id, provider, balanceUsd: balance, floorUsd: floor });
+          this.log('machines: paused for low credit', { id: m.id, owner: m.owner, provider, balanceUsd: balance, floorUsd: floor });
         } catch (err) {
           this.log('machines: pause failed', { id: m.id, provider, error: errText(err) });
         }
@@ -334,7 +343,7 @@ export class MachineController {
     m.lastError = null;
     m.lastSeenAt = this.now();
     await this.save();
-    this.log('machines: resumed', { id, provider: m.provider });
+    this.log('machines: resumed', { id, provider: m.provider, owner: m.owner });
     return m;
   }
 

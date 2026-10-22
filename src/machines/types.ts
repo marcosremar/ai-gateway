@@ -109,6 +109,8 @@ export interface MachineLimits {
   maxUsdPerHour: number;
     ownerMaxUsdPerHour?: Record<string, number>;
   pauseBelowUsd?: number;
+  /** Paused machines come back on their own once the provider's credit reaches this (0 = only `POST /resume`). */
+  resumeAboveUsd?: number;
   maxRunning: number;
   ownerUsdPerDay: number;
   ownerUsdPerMonth: number;

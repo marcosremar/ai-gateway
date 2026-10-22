@@ -88,3 +88,35 @@ describe('paused machines and the app limits', () => {
       .rejects.toMatchObject({ status: 409 });
   });
 });
+
+describe('auto-resume', () => {
+  it('a paused machine comes back by itself only once the credit reaches the resume level', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    vast.price = 0.1;
+    const ctl = makeController({ backends: { vast }, now: c.now, limits: { ...LIMITS, resumeAboveUsd: 5 } });
+    const m = await ctl.create('palco', { request: { provider: 'vast', machineType: 'RTX A4000', maxUsdPerHour: 0.16, image: 'x/y:1', diskGb: 40, ports: [], env: {} }, maxHours: 8, idleMinutes: 0, holder: null });
+    vast.creditUsd = 0.5;
+    await ctl.reconcile();
+    expect(ctl.get(m.id)?.status).toBe('paused');
+    vast.creditUsd = 3;
+    await ctl.reconcile();
+    expect(ctl.get(m.id)?.status).toBe('paused');
+    vast.creditUsd = 6;
+    await ctl.reconcile();
+    expect(ctl.get(m.id)).toMatchObject({ status: 'running', pausedAt: null });
+    expect(vast.resumed).toEqual([m.providerId]);
+  });
+
+  it('resumeAboveUsd 0 leaves resuming to the owner', async () => {
+    const c = clock();
+    const vast = new FakeMachineCloud('vast', c.now);
+    const ctl = makeController({ backends: { vast }, now: c.now, limits: { ...LIMITS, resumeAboveUsd: 0 } });
+    const m = await ctl.create('palco', { request: { provider: 'vast', machineType: 'RTX A4000', maxUsdPerHour: 0.5, image: 'x/y:1', diskGb: 40, ports: [], env: {} }, maxHours: 8, idleMinutes: 0, holder: null });
+    vast.creditUsd = 0.5;
+    await ctl.reconcile();
+    vast.creditUsd = 100;
+    await ctl.reconcile();
+    expect(ctl.get(m.id)?.status).toBe('paused');
+  });
+});

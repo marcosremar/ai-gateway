@@ -40,6 +40,7 @@ function ownerHourlyCaps(raw: string | undefined): Record<string, number> {
 export function machineLimitsFromEnv(env: Env): MachineLimits {
   return {
     pauseBelowUsd: num(env.MACHINES_PAUSE_BELOW_USD, 1),
+    resumeAboveUsd: num(env.MACHINES_RESUME_ABOVE_USD, 5),
     ownerMaxUsdPerHour: { palco: 0.16, ...ownerHourlyCaps(env.MACHINES_OWNER_MAX_USD_PER_HOUR) },
     maxHours: num(env.MACHINES_MAX_HOURS, 24, 0.1),
     maxLifetimeHours: num(env.MACHINES_MAX_LIFETIME_HOURS, 72, 0.1),
