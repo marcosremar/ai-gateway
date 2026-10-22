@@ -86,9 +86,17 @@ export function parseMachineInput(body: Record<string, unknown>, limits: Machine
   if (near) request.near = near;
   if (body.minCpuCores !== undefined) request.minCpuCores = num(body.minCpuCores, 'minCpuCores', 1, 512);
   if (body.minRamGb !== undefined) request.minRamGb = num(body.minRamGb, 'minRamGb', 1, 4096);
+  if (body.alsoMachineTypes !== undefined) {
+    const also = body.alsoMachineTypes;
+    if (!Array.isArray(also) || also.length > 5 || also.some(t => typeof t !== 'string' || !/^[\w .-]{1,64}$/.test(t))) {
+      throw bad('alsoMachineTypes must list at most 5 GPU type names');
+    }
+    const unique = [...new Set(also as string[])].filter(t => t !== request.machineType);
+    if (unique.length) request.alsoMachineTypes = unique;
+  }
   if (body.minGpuFrac !== undefined) request.minGpuFrac = num(body.minGpuFrac, 'minGpuFrac', 0.01, 1);
-  if (request.minCpuCores || request.minRamGb || request.minGpuFrac) {
-    if (request.provider === 'scaleway' || request.provider === 'runpod') throw bad('minCpuCores/minRamGb/minGpuFrac choose a vast host; on scaleway and runpod name a machineType that has them');
+  if (request.minCpuCores || request.minRamGb || request.minGpuFrac || request.alsoMachineTypes) {
+    if (request.provider === 'scaleway' || request.provider === 'runpod') throw bad('minCpuCores/minRamGb/minGpuFrac/alsoMachineTypes choose a vast host; on scaleway and runpod name a machineType that has them');
     request.provider = 'vast';
   }
   if (body.vm === true) {

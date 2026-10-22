@@ -868,6 +868,7 @@ Machine body:
 | `onstart` | bash run as root once the host is up (machines only) |
 | `env` | container environment; values never come back (only `envKeys`) |
 | `zone` / `near` | Scaleway zone (default `fr-par-2`) / Vast country preference |
+| `alsoMachineTypes` | Vast only, up to 5 more GPU names accepted besides `machineType` (e.g. `["RTX 3060"]`): the offers of all types are merged and rented cheapest first, so a thin market of one type does not end in `out_of_stock` |
 | `minGpuFrac` | Vast only, 0.01–1: skip offers that rent less than that share of the physical GPU (`gpu_frac`; 1 = the whole card). Vast lists RTX A4000 slices of 0.12–0.5 with the full card's VRAM, so ask `1` for a whole card |
 | `vm` | `true`: a Vast KVM virtual machine (hosts with `vms_enabled`) instead of a container; `image` defaults to `docker.io/vastai/kvm:ubuntu_terminal` and must be a `docker.io/vastai/kvm` tag; `sshPublicKey` goes on the Vast account (a VM reads only those); `machineType: "any"` takes any GPU |
 | `POST /v1/machines/:id/resume` | powers a machine back on that the gateway paused (Vast credit under `MACHINES_PAUSE_BELOW_USD`, default 1 US$; 0 turns it off). The reconcile loop pauses running Vast machines (disk kept, storage billed) before the account runs dry; resume answers 402 while the credit is still under the floor. A paused machine still ends at its deadline |

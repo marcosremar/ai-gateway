@@ -156,7 +156,14 @@ export class VastMachineBackend implements MachineBackend {
 
   async offers(request: MachineRequest) {
     const needed = portKeys(request).length;
-    return (await this.market.pickOffers(this.spec(request)))
+    const types = [request.machineType, ...(request.alsoMachineTypes ?? [])];
+    const lists = await Promise.all(types.map(t => this.market.pickOffers({ ...this.spec(request), machineType: t }).catch((err: unknown) => {
+      if (types.length === 1) throw err;
+      return [];
+    })));
+    // One type keeps the market's own ranking (near the users, reliable hosts first); several are merged cheapest first.
+    const merged = types.length === 1 ? lists[0] : lists.flat().sort((a, b) => a.dph_total - b.dph_total);
+    return merged
       .filter(o => o.dph_total <= request.maxUsdPerHour && (o.direct_port_count === undefined || o.direct_port_count >= needed));
   }
 

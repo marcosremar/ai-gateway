@@ -19,6 +19,8 @@ export interface MachineRequest {
   minCpuCores?: number;
   minRamGb?: number;
     minGpuFrac?: number;
+  /** Vast: other GPU types accepted besides `machineType`; offers of all of them are ranked together by price. */
+  alsoMachineTypes?: string[];
   vm?: boolean;
 }
 

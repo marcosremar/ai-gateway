@@ -32,3 +32,28 @@ describe('machines chosen by CPU and RAM', () => {
     expect(asked[0]).toMatchObject({ minCpuCores: 32, minRamGb: 64 });
   });
 });
+
+describe('several GPU types in one request', () => {
+  it('alsoMachineTypes is validated and forces vast', () => {
+    const r = parseMachineInput({ ...body, machineType: 'RTX A4000', alsoMachineTypes: ['RTX 3060', 'RTX 3070', 'RTX A4000', 'RTX 3060'] }, LIMITS).request;
+    expect(r).toMatchObject({ provider: 'vast', alsoMachineTypes: ['RTX 3060', 'RTX 3070'] });
+    expect(() => parseMachineInput({ ...body, alsoMachineTypes: 'RTX 3060' }, LIMITS)).toThrow(/alsoMachineTypes/);
+    expect(() => parseMachineInput({ ...body, alsoMachineTypes: ['a', 'b', 'c', 'd', 'e', 'f'] }, LIMITS)).toThrow(/at most 5/);
+    expect(() => parseMachineInput({ ...body, provider: 'scaleway', machineType: 'RTX A4000', alsoMachineTypes: ['RTX 3060'] }, LIMITS)).toThrow(/vast/);
+  });
+
+  it('merges the offers of every type, cheapest first, and survives one type failing', async () => {
+    const offer = (id: number, dph: number) => ({ id, dph_total: dph, direct_port_count: 99 });
+    const market = {
+      currentKey: 'k',
+      pickOffers: async (spec: { machineType: string }) => {
+        if (spec.machineType === 'RTX 3070') throw new Error('vast down for this type');
+        return spec.machineType === 'RTX A4000' ? [offer(1, 0.15), offer(2, 0.2)] : [offer(3, 0.08), offer(4, 0.12)];
+      },
+    };
+    const backend = new VastMachineBackend(market as never);
+    const req = parseMachineInput({ ...body, machineType: 'RTX A4000', maxUsdPerHour: 0.16, alsoMachineTypes: ['RTX 3060', 'RTX 3070'] }, LIMITS).request;
+    expect((await backend.offers(req) as Array<{ id: number }>).map(o => o.id)).toEqual([3, 4, 1]);
+    expect(await backend.quote(req)).toBe(0.08);
+  });
+});
