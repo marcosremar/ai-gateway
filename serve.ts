@@ -13,6 +13,7 @@ import { join } from 'path';
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM, openrouterSTT, openrouterTTS } from './src/gateway/providers/cloud/openrouter';
+import { modalKokoroTTS } from './src/gateway/providers/cloud/modal-kokoro';
 import { kokoroStreamTTS } from './src/gateway/providers/cloud/kokoro-stream';
 import { POCKET_PROVIDER, ownSpeechProviders } from './src/gateway/providers/cloud/kokoro-stream/route-tts';
 import { openaiSTT } from './src/gateway/providers/cloud/openai';
@@ -592,8 +593,9 @@ const rooms = createRooms({
   synthesize: kokoroTts(() => [
     ...(kokoroStreamTTS.isConfigured() ? [{ providerId: 'self-hosted' as const, provider: kokoroStreamTTS, model: KOKORO_MODEL }] : []),
     ...(openrouterTTS.isConfigured() ? [{ providerId: 'openrouter' as const, provider: openrouterTTS, model: KOKORO_MODEL }] : []),
+    ...(process.env.MODAL_KOKORO_URL ? [{ providerId: 'modal' as const, provider: modalKokoroTTS, model: 'kokoro-82m' }] : []),
   ]),
-  synthesizeAvailable: () => kokoroStreamTTS.isConfigured() || openrouterTTS.isConfigured(),
+  synthesizeAvailable: () => kokoroStreamTTS.isConfigured() || openrouterTTS.isConfigured() || Boolean(process.env.MODAL_KOKORO_URL),
   // Pocket TTS on the same speech server (POCKET_TTS_API_KEY): the rooms' voice for en fr de pt es it nl, Kokoro above
   // behind it when Pocket answers 503 loading/busy or fails; Kokoro alone without the key (docs/rooms.md).
   pocket: {
@@ -605,7 +607,7 @@ const rooms = createRooms({
 });
 log.log({
   dir: rooms.config.dir, publicHost: rooms.config.publicHost, publicBaseUrl: rooms.config.publicBaseUrl,
-  serverDub: rooms.config.serverDub && (kokoroStreamTTS.isConfigured() || openrouterTTS.isConfigured() || roomPocket.isConfigured()),
+  serverDub: rooms.config.serverDub && (kokoroStreamTTS.isConfigured() || openrouterTTS.isConfigured() || Boolean(process.env.MODAL_KOKORO_URL) || roomPocket.isConfigured()),
   pocket: roomPocket.isConfigured(),
 }, 'Rooms enabled');
 // Desktop-app field telemetry (src/app-telemetry, docs/app-telemetry.md): opt-in batches from the ucast.me app with a
