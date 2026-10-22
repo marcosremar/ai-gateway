@@ -299,6 +299,18 @@ describe('sign-up, login, session', () => {
     // No CORS on account routes.
     expect(sameOrigin.headers['access-control-allow-origin']).toBeUndefined();
   });
+
+  it('pages on the public site host (ucast.me proxies /login and /v1/account/* to the gateway) may write', async () => {
+    const gw = await startGateway();
+    const site = { Origin: `https://${SITE}`, 'Sec-Fetch-Site': 'same-origin' };
+    const login = await call(gw, 'POST', '/v1/account/signup', { headers: site, body: { email: 'site@example.com', password: 'senha-forte-123' } });
+    expect(login.status).toBe(201);
+    const s = await signup(gw, 'outra@example.com');
+    const key = await call(gw, 'POST', '/v1/account/keys', { headers: { ...site, Cookie: s.cookie, 'X-CSRF-Token': s.csrf }, body: { deviceName: 'site' } });
+    expect(key.status).toBe(201);
+    const lookalike = await call(gw, 'POST', '/v1/account/keys', { headers: { Origin: `https://${SITE}.evil.example`, Cookie: s.cookie, 'X-CSRF-Token': s.csrf }, body: { deviceName: 'x' } });
+    expect(lookalike.status).toBe(403);
+  });
 });
 
 describe('activation keys', () => {
