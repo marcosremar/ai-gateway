@@ -135,7 +135,7 @@ async function ensureLocalServer(): Promise<void> {
   }
 
   // The gateway entry point (the legacy server/ws-server.ts was removed with the rest of server/).
-  const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), '..');
+  const repoRoot = resolve(import.meta.dir, '..');
   const entryPath = resolve(repoRoot, 'serve.ts');
   if (!existsSync(entryPath)) {
     console.error('Cannot auto-start: serve.ts not found');
