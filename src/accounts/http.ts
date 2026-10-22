@@ -103,13 +103,20 @@ function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
 const hostOf = (req: IncomingMessage) => String(req.headers.host ?? '').trim().toLowerCase();
 const hostName = (host: string) => host.replace(/:\d+$/, '');
 
-/** A browser request from another site (or a page we did not serve) is refused. Non-browser clients send neither header. */
-export function isCrossSite(req: IncomingMessage): boolean {
+/**
+ * A browser request from another site (or a page we did not serve) is refused. Non-browser clients send neither header.
+ * `trustedHosts` are our own site hosts (ucast.me proxies /login and /v1/account/* here, so its pages post with
+ * Origin https://ucast.me while the Host is the gateway's).
+ */
+export function isCrossSite(req: IncomingMessage, trustedHosts: ReadonlySet<string> = new Set()): boolean {
   const site = req.headers['sec-fetch-site'];
   if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') return true;
   const origin = req.headers.origin;
   if (typeof origin !== 'string' || !origin) return false;
-  try { return new URL(origin).host.toLowerCase() !== hostOf(req); } catch { return true; }
+  try {
+    const host = new URL(origin).host.toLowerCase();
+    return host !== hostOf(req) && !trustedHosts.has(hostName(host));
+  } catch { return true; }
 }
 
 function parseCookies(header: string | undefined): Map<string, string> {
@@ -166,14 +173,14 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   /** A cookie-authenticated write: same-origin and the session's CSRF token. */
   function writer(req: IncomingMessage): { user: User; token: string } {
     const w = who(req, false);
-    if (isCrossSite(req) || !service.checkCsrf({ csrf: w.csrf! }, req.headers['x-csrf-token'])) {
+    if (isCrossSite(req, siteHosts) || !service.checkCsrf({ csrf: w.csrf! }, req.headers['x-csrf-token'])) {
       throw new AccountError(403, 'Sessão expirada nesta página. Recarregue e tente de novo.', 'csrf_failed');
     }
     return { user: w.user, token: w.token! };
   }
 
   function sameSiteForm(req: IncomingMessage): void {
-    if (isCrossSite(req)) throw new AccountError(403, 'Pedido de outra origem recusado.', 'cross_site');
+    if (isCrossSite(req, siteHosts)) throw new AccountError(403, 'Pedido de outra origem recusado.', 'cross_site');
   }
 
   const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl });
