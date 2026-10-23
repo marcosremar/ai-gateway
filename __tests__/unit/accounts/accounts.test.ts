@@ -369,6 +369,14 @@ describe('sign-up, login, session', () => {
     expect(stripe.calls.some(c => c.method === 'DELETE' && c.path === '/customers/cus_1')).toBe(true);
   });
 
+  it('an admin account has no plan limits', async () => {
+    const gw = await startGateway({ adminEmails: ['dono@ucast.me'] }, { stripe: fakeStripe().fetchImpl });
+    const owner = await signup(gw, 'dono@ucast.me');
+    const user = await signup(gw, 'ana@example.com');
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: owner.cookie } })).json.quota.limits.audioSeconds).toBe(0);
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: user.cookie } })).json.quota.limits.audioSeconds).toBe(2 * 3600);
+  });
+
   it('over the plan limit the account stops with a link to the next plan', async () => {
     const gw = await startGateway({}, { stripe: fakeStripe().fetchImpl });
     await signup(gw);

@@ -448,7 +448,8 @@ export class AccountService {
   // ── Quota ─────────────────────────────────────────────────────────────────
 
   limitsOf(user: User): Quota {
-    return { ...this.config.quota, ...(this.opts.planLimits ? planOf(user.plan).quota : {}), ...user.quota };
+    const planQuota = this.opts.planLimits && !this.isAdminUser(user) ? planOf(user.plan).quota : {};
+    return { ...this.config.quota, ...planQuota, ...user.quota };
   }
 
   userByStripeCustomer(customerId: string): User | undefined {
