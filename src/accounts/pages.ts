@@ -94,6 +94,14 @@ input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px var(--screen) inset;-webkit
 .plan ul{list-style:none;margin:6px 0 10px;padding:0;color:var(--ink-2);font-size:.9rem;flex:1}
 .plan li{padding:3px 0}
 .plan .btn{width:100%}
+.linkish{background:none;border:0;padding:0;color:var(--ink-3);font-size:.86rem;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.linkish:hover{color:var(--ink)}
+.quiet{margin-top:28px}
+.quiet summary{cursor:pointer;color:var(--ink-3);font-size:.86rem;padding:6px 0;list-style:none}
+.quiet summary::-webkit-details-marker{display:none}
+.quiet summary::before{content:"›";display:inline-block;margin-right:8px;transition:transform .2s var(--ease)}
+.quiet[open] summary::before{transform:rotate(90deg)}
+.quiet[open] summary{margin-bottom:12px}
 .notice{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center;justify-content:space-between;border-color:rgba(224,164,88,.35)}
 .notice p{margin:0;color:var(--amber)}
 .notice .msg{flex-basis:100%;margin:0}
@@ -319,18 +327,19 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 <section class="card" id="billing" aria-labelledby="bh" hidden><h2 id="bh">${t.client.planHeading}</h2><p class="hint" id="bp"></p>
 <div id="bm" class="msg" role="status" aria-live="polite"></div>
 <div class="plans" id="plans"></div>
-<p class="btnrow"><button id="manage" class="btn ghost" type="button" hidden>${t.client.manage}</button></p></section>
+<p class="hint"><button id="manage" class="linkish" type="button" hidden>${t.client.manage}</button></p></section>
 <section class="card" id="admin" aria-labelledby="ah" hidden><h2 id="ah">${t.adminHeading}</h2>
 <div class="scroll"><table id="days"><caption class="hint">${t.usageCaption}</caption><thead><tr><th scope="col">${t.day}</th><th scope="col">${t.transcription}</th><th scope="col">${t.translation}</th><th scope="col">${t.dubbing}</th><th scope="col">${t.rooms}</th><th scope="col">${t.requests}</th></tr></thead><tbody></tbody></table></div>
 <h3>${t.usersHeading}</h3><p class="hint">${t.usersHint}</p>
 <label class="sr" for="uq">${t.searchUser}</label><input id="uq" type="text" placeholder="${esc(t.searchPlaceholder)}" autocomplete="off">
 <div id="um" class="msg" role="alert" aria-live="polite"></div>
 <ul id="users" class="users" aria-label="${esc(t.usersHeading)}"></ul></section>
+<details class="quiet"><summary>${t.accountSettings}</summary>
 <section class="card" aria-labelledby="xh"><h2 id="xh">${t.deleteHeading}</h2><p class="hint">${t.deleteHint}</p>
 <form id="xf" class="row"><label class="sr" for="xpw">${t.deletePassword}</label>
 <input id="xpw" type="password" autocomplete="current-password" placeholder="${esc(t.deletePassword)}" required>
 <button id="xb" class="btn danger" type="submit">${t.deleteButton}</button></form>
-<div id="xm" class="msg" role="alert" aria-live="polite"></div></section>`;
+<div id="xm" class="msg" role="alert" aria-live="polite"></div></section></details>`;
   const plans = Object.values(PLANS).map(p => ({ id: p.id, price: p.priceCents / 100, hours: p.quota.audioSeconds / 3600, dubMinutes: Math.round(p.quota.ttsChars / DUB_CHARS_PER_SECOND / 60), rooms: p.quota.rooms }));
   const script = `(function(){
 var gm=$('gm'),km=$('km'),ADMIN=false,BILLING=false,PLAN='free',PLANS=${js(plans)},WANT=new URLSearchParams(location.search).get('plan');
