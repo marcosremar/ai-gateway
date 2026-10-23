@@ -28,8 +28,8 @@ describe('composed s2s fallback models from the calling app', () => {
 });
 
 describe('spend limits from env', () => {
-  it('defaults: 8 stopped, 6 €/h, parked 72 h', () => {
-    expect(spendLimitsFromEnv({})).toEqual({ maxStoppedReplicas: 8, maxEurPerHour: 6, parkedMaxMs: 72 * 3_600_000 });
+  it('defaults: 8 stopped, 6 €/h, parked 12 h', () => {
+    expect(spendLimitsFromEnv({})).toEqual({ maxStoppedReplicas: 8, maxEurPerHour: 6, parkedMaxMs: 12 * 3_600_000 });
   });
   it('reads the three variables; 0 turns the € ceiling and the park limit off; junk falls back', () => {
     expect(spendLimitsFromEnv({ DEPLOYMENTS_MAX_STOPPED: '3', DEPLOYMENTS_MAX_EUR_PER_HOUR: '0', DEPLOYMENTS_PARKED_MAX_HOURS: '0' }))

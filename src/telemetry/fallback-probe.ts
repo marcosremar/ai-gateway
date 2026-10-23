@@ -1,7 +1,8 @@
 /**
  * Fallback probe: the gateway checks by itself that every cloud link of the app alias chains answers.
  *
- * At boot (after `FALLBACK_PROBE_DELAY_MS`) and every `FALLBACK_PROBE_MINUTES` (default 15; 0 = off), each distinct
+ * At boot (after `FALLBACK_PROBE_DELAY_MS`) and every `FALLBACK_PROBE_MINUTES` (default 15; 0 = off) in a class window, every
+ * `FALLBACK_PROBE_IDLE_MINUTES` (default 60) outside it, each distinct
  * cloud link (stage + provider + model + voice; `deployment:` links are never called, so no GPU wakes) gets a minimal
  * request straight on its provider instance: STT a 0.6 s WAV, TTS two words in the link's own voice, chat a few
  * tokens with the link's `extraBody`. Failures go to `onResults` (ops alerts); `/health?details=1` shows `snapshot()`.
@@ -15,6 +16,7 @@ type Stage = 'chat' | 'stt' | 'tts';
 type Env = Record<string, string | undefined>;
 
 export const DEFAULT_FALLBACK_PROBE_MINUTES = 15;
+export const DEFAULT_FALLBACK_PROBE_IDLE_MINUTES = 60;
 export const DEFAULT_FALLBACK_PROBE_DELAY_MS = 30_000;
 export const FALLBACK_PROBE_TIMEOUT_MS = 20_000;
 export const FALLBACK_PROBE_CALLER = 'teste-das-reservas';
@@ -184,9 +186,12 @@ const num = (v: string | undefined, d: number) => (v !== undefined && v.trim() !
 
 export function createFallbackProbe(opts: {
   env: Env; links: () => FallbackLink[]; onResults: (results: FallbackProbeResult[]) => unknown;
-  now?: () => number; log?: (msg: string, data?: Record<string, unknown>) => void;
+  now?: () => number; log?: (msg: string, data?: Record<string, unknown>) => void; inClass?: () => boolean;
 }) {
   const minutes = num(opts.env.FALLBACK_PROBE_MINUTES, DEFAULT_FALLBACK_PROBE_MINUTES);
+  const idleMinutes = num(opts.env.FALLBACK_PROBE_IDLE_MINUTES, DEFAULT_FALLBACK_PROBE_IDLE_MINUTES);
+  const clock = opts.now ?? Date.now;
+  let lastRunAt = -Infinity;
   const delayMs = num(opts.env.FALLBACK_PROBE_DELAY_MS, DEFAULT_FALLBACK_PROBE_DELAY_MS);
   const timeoutMs = num(opts.env.FALLBACK_PROBE_TIMEOUT_MS, FALLBACK_PROBE_TIMEOUT_MS);
   const enforce = opts.env.FALLBACK_PROBE_CONTENT?.trim() === 'enforce';
@@ -194,6 +199,7 @@ export function createFallbackProbe(opts: {
   const timers: Array<ReturnType<typeof setTimeout>> = [];
 
   async function check(): Promise<FallbackProbeResult[]> {
+    lastRunAt = clock();
     const before = new Map(results.map(r => [`${r.stage}|${r.target}|${r.voice ?? ''}`, r.ok]));
     const links = opts.links();
     const probe = (link: FallbackLink, heard?: Buffer) => probeLink(link, { timeoutMs, env: opts.env, enforce, ...(heard ? { heard } : {}), ...(opts.now ? { now: opts.now } : {}) });
@@ -210,10 +216,15 @@ export function createFallbackProbe(opts: {
     return results;
   }
 
+  /** Outside a class nobody waits on the reserve minute by minute: each probe calls paid models (owner, 23/10/2026). */
+  const dueNow = () => (opts.inClass?.() ?? true) || clock() - lastRunAt >= idleMinutes * 60_000 - 1_000;
+
   return {
     check,
+    dueNow,
     snapshot: () => ({
       intervalMinutes: minutes,
+      idleIntervalMinutes: idleMinutes,
       ok: results.filter(r => r.ok).length,
       failing: results.filter(r => !r.ok).map(r => r.target),
       links: results,
@@ -221,7 +232,8 @@ export function createFallbackProbe(opts: {
     start(): void {
       if (minutes <= 0) return;
       const run = () => void check().catch(err => opts.log?.('fallback probe failed', { error: err instanceof Error ? err.message : String(err) }));
-      timers.push(setTimeout(run, delayMs), setInterval(run, minutes * 60_000));
+      const tick = () => { if (dueNow()) run(); };
+      timers.push(setTimeout(run, delayMs), setInterval(tick, minutes * 60_000));
       for (const t of timers) t.unref?.();
     },
     stop(): void { for (const t of timers.splice(0)) clearTimeout(t); },

@@ -151,7 +151,7 @@ export function privateImageWarning(specs: DeploymentSpec[], scaleway: Pick<Scal
  *   DEPLOYMENTS_MAX_REPLICAS replica cap across all deployments; default 6
  *   DEPLOYMENTS_MAX_STOPPED  parked (stopped) replica cap, apart from the running cap; default 8 (spend-limits.ts)
  *   DEPLOYMENTS_MAX_EUR_PER_HOUR  ceiling on the summed hourly price of all running replicas; default 6, 0 = off
- *   DEPLOYMENTS_PARKED_MAX_HOURS  a parked replica unused this long is deleted; default 72, 0 = off
+ *   DEPLOYMENTS_PARKED_MAX_HOURS  a parked replica unused this long is deleted; default 12, 0 = off
  *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = no
  *                            admin at all — never "every key" (fail closed, 06/10/2026)
  *   Direct fallback (`GET /v1/apps/:app/fallback`, app-fallback.ts): OPENROUTER_PROVISIONING_KEY (mint per-app keys),

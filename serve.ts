@@ -370,9 +370,10 @@ function mountProviders() {
 const providers = mountProviders();
 remount = () => replaceProviderMapping(providers as Record<string, unknown>, mountProviders() as Record<string, unknown>);
 
-// Every cloud link of the alias chains gets a minimal real request at boot and every 15 min (never a deployment).
+// Every cloud link of the alias chains gets a minimal real request at boot, every 15 min in class, hourly outside (never a deployment).
 const fallbackProbe = createFallbackProbe({
   env: process.env,
+  inClass: () => classWindowOpen(deployments?.controller.list() ?? [], Date.now()),
   links: () => fallbackLinks(chains, providers),
   onResults: (results) => opsAlerts.fromFallbackProbes(results),
   log: (msg, data) => log.warn(data ?? {}, msg),
