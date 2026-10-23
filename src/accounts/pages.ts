@@ -16,75 +16,108 @@ const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '
 const esc = (s: string) => s.replace(/[&<>"']/g, c => HTML_ESCAPES[c] ?? c);
 const js = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
 
-const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234cc3cb'/%3E%3Crect x='7' y='12' width='18' height='3' rx='1.5' fill='%2304161a'/%3E%3Crect x='10' y='18' width='12' height='3' rx='1.5' fill='%2304161a'/%3E%3C/svg%3E";
+const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%234cc3cb'/%3E%3Ccircle cx='16' cy='16' r='9.33' fill='none' stroke='%230a1012' stroke-width='4'/%3E%3C/svg%3E";
+const LOGO_MARK = '<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle cx="16" cy="16" r="16" fill="#4cc3cb"/><circle cx="16" cy="16" r="9.33" fill="none" stroke="#0a1012" stroke-width="4"/></svg>';
 
 /** The logo always goes to the public landing page, even on the account hosts. */
 const LANDING_URL = 'https://ucast.me/';
 
 export function accountPageCsp(nonce: string): string {
   return [
-    "default-src 'none'", `script-src 'nonce-${nonce}'`, `style-src 'nonce-${nonce}'`, "connect-src 'self'", 'img-src data:',
+    "default-src 'none'", `script-src 'nonce-${nonce}'`, `style-src 'nonce-${nonce}'`, "connect-src 'self'", 'img-src data:', "font-src 'self'",
     "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'",
   ].join('; ');
 }
 
 const CSS = `
-:root{color-scheme:dark;--bg:#0a1012;--surface:#0f181b;--surface2:#122025;--line:rgba(233,244,245,.1);--line-strong:rgba(233,244,245,.18);--text:#e9f2f3;--muted:#8ba5a8;--accent:#4cc3cb;--accent-ink:#04161a;--accent-dim:rgba(76,195,203,.38);--warn:#e0a458;--bad:#ff7d7d;--ok:#5fd39a}
-@media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f4f7f7;--surface:#fff;--surface2:#eef3f4;--line:rgba(10,35,38,.12);--line-strong:rgba(10,35,38,.22);--text:#0e1e21;--muted:#5b7377;--accent:#0b6b72;--accent-ink:#fff;--accent-dim:rgba(11,107,114,.35);--warn:#8a5a00;--bad:#c4262e;--ok:#1d7a4b}}
+@font-face{font-family:Archivo;src:url(/fonts/archivo-latin.woff2) format("woff2");font-weight:100 900;font-display:swap}
+@font-face{font-family:"JetBrains Mono";src:url(/fonts/jetbrains-mono-latin.woff2) format("woff2");font-weight:100 800;font-display:swap}
+:root{color-scheme:dark;--glass:#0a1012;--glass-2:#0d1517;--panel:#0f181b;--screen:#080d0f;--ink:#e9f2f3;--ink-2:#a3b8bb;--ink-3:#8ba5a8;--phos:#4cc3cb;--phos-ink:#04161a;--amber:#e0a458;--ok:#5fd39a;--hairline:rgba(233,241,234,.1);--hairline-2:rgba(233,241,234,.18);--sans:Archivo,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;--mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;--ease:cubic-bezier(.16,1,.3,1)}
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-text-size-adjust:100%;line-height:1.5}
-::selection{background:var(--accent);color:var(--accent-ink)}
-a{color:var(--accent)}
+html,body{margin:0;background:var(--glass);color:var(--ink);font-family:var(--sans);-webkit-text-size-adjust:100%;line-height:1.5;-webkit-font-smoothing:antialiased}
+html{scrollbar-color:var(--hairline-2) var(--glass)}
+::selection{background:var(--phos);color:var(--phos-ink)}
+a{color:var(--phos);text-underline-offset:3px;text-decoration-thickness:1px}
+a:hover{text-decoration-thickness:2px}
 button,input{font:inherit;color:inherit}
-.top{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:56rem;margin:0 auto;padding:16px max(16px,env(safe-area-inset-left));border-bottom:1px solid var(--line)}
-.brand{font-family:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;font-weight:700;letter-spacing:-.02em;color:var(--text);text-decoration:none;font-size:1.15rem}.brand b{color:var(--accent)}
-main{max-width:56rem;margin:0 auto;padding:8px 16px 48px}
-.narrow{max-width:26rem;margin:4vh auto 0}
-h1{font-size:1.5rem;margin:8px 0 6px;letter-spacing:-.02em}h2{font-size:1.1rem;margin:0 0 4px;letter-spacing:-.01em}
-p.lead{color:var(--muted);margin:0 0 20px}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px;margin:0 0 16px}
-label{display:block;font-weight:600;font-size:.92rem;margin:14px 0 6px}
-input[type=email],input[type=password],input[type=text]{width:100%;background:var(--bg);border:1px solid var(--line-strong);border-radius:10px;padding:12px 14px;font-size:1rem}
-input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;background:var(--accent);color:var(--accent-ink);border:0;border-radius:10px;padding:0 18px;font-weight:700;cursor:pointer;text-decoration:none;transition:transform .12s cubic-bezier(.16,1,.3,1)}
-.btn:hover{filter:brightness(1.08)}
-.btn:active{transform:translateY(1px)}
-.btn.full{width:100%;margin-top:18px}
-.btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line-strong)}
-.btn.ghost:hover{border-color:var(--accent);color:var(--accent);filter:none}
-.btn.danger{background:transparent;color:var(--bad);border:1px solid var(--line);min-height:36px;padding:0 12px;font-weight:600}
-.btn.danger:hover{border-color:var(--bad);filter:none}
-.btn[disabled]{opacity:.6;cursor:wait}
-.hint{color:var(--muted);font-size:.88rem;margin:6px 0 0}
-.alt{color:var(--muted);text-align:center;margin:18px 0 0;font-size:.95rem}
-.msg{border-radius:10px;padding:10px 12px;margin:14px 0 0;font-size:.95rem}
+input{caret-color:var(--phos)}
+:focus-visible{outline:2px solid var(--phos);outline-offset:3px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:68rem;margin:0 auto;padding:18px max(20px,env(safe-area-inset-left));border-bottom:1px solid var(--hairline)}
+.brand{display:inline-flex;align-items:center;gap:10px;color:var(--ink);text-decoration:none;font-weight:800;font-size:1.15rem;letter-spacing:-.02em}
+.brand svg{width:26px;height:26px;flex:none}
+.brand b{color:var(--phos);font-weight:600}
+main{max-width:68rem;margin:0 auto;padding:8px 20px 64px}
+.narrow{max-width:27rem;margin:7vh auto 0}
+.bench{display:grid;grid-template-columns:minmax(0,27rem) minmax(0,1fr);gap:clamp(40px,7vw,104px);align-items:start;margin-top:7vh}
+.bench .narrow{margin:0}
+main>h1{margin-top:clamp(32px,6vh,56px)}
+h1{font-size:clamp(1.75rem,3.4vw,2.35rem);font-weight:700;line-height:1.08;margin:0 0 12px;letter-spacing:-.03em;text-wrap:balance}
+h2{font-size:1.1rem;margin:0 0 4px;letter-spacing:-.015em}
+p.lead{color:var(--ink-2);margin:0 0 28px;max-width:38ch;text-wrap:pretty}
+.card{background:var(--panel);border:1px solid var(--hairline);border-radius:4px;padding:22px;margin:0 0 16px}
+form.card{padding:24px 24px 26px}
+label{display:block;font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin:18px 0 8px}
+form label:first-child{margin-top:0}
+input[type=email],input[type=password],input[type=text]{width:100%;height:48px;background:var(--screen);border:1px solid var(--hairline-2);border-radius:3px;padding:0 14px;font-size:1rem;transition:border-color .2s var(--ease)}
+input:hover{border-color:rgba(233,241,234,.28)}
+input:focus{outline:none;border-color:var(--phos)}
+input:focus-visible{outline:2px solid var(--phos);outline-offset:2px}
+input::placeholder{color:var(--ink-3);opacity:1}
+input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px var(--screen) inset;-webkit-text-fill-color:var(--ink);caret-color:var(--phos)}
+.field{position:relative}
+.field input{padding-right:92px}
+.reveal{position:absolute;right:6px;top:6px;height:36px;padding:0 10px;background:transparent;border:0;border-radius:2px;font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);cursor:pointer}
+.reveal:hover{color:var(--ink)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:46px;background:var(--phos);color:var(--phos-ink);border:0;border-radius:3px;padding:0 20px;font-weight:700;letter-spacing:-.005em;cursor:pointer;text-decoration:none;box-shadow:0 1px 0 rgba(255,255,255,.18) inset,0 2px 0 #2a7f86;transition:transform .12s var(--ease),box-shadow .12s var(--ease),filter .2s}
+.btn:hover{filter:brightness(1.06)}
+.btn:active{transform:translateY(1px);box-shadow:0 1px 0 rgba(255,255,255,.12) inset,0 1px 0 #2a7f86}
+.btn.full{width:100%;margin-top:24px;min-height:50px;font-size:1.02rem}
+.btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--hairline-2);box-shadow:none}
+.btn.ghost:hover{border-color:var(--phos);color:var(--phos);filter:none}
+.btn.danger{background:transparent;color:var(--amber);border:1px solid var(--hairline);box-shadow:none;min-height:36px;padding:0 12px;font-weight:600}
+.btn.danger:hover{border-color:var(--amber);filter:none}
+.btn[disabled]{opacity:.55;cursor:progress;transform:none}
+.hint{color:var(--ink-3);font-size:.86rem;margin:8px 0 0}
+.alt{color:var(--ink-2);margin:22px 0 0;font-size:.95rem}
+.msg{display:flex;gap:10px;align-items:baseline;border:1px solid var(--hairline);border-radius:3px;padding:11px 13px;margin:18px 0 0;font-size:.93rem;background:var(--screen)}
+.msg::before{content:"";flex:none;width:7px;height:7px;border-radius:50%;transform:translateY(-1px);background:currentColor}
 .msg:empty{display:none}
-.msg.err{background:rgba(255,125,125,.12);color:var(--bad)}
-.msg.ok{background:rgba(95,211,154,.12);color:var(--ok)}
+.msg.err{color:var(--amber);border-color:rgba(224,164,88,.35)}
+.msg.ok{color:var(--phos);border-color:rgba(76,195,203,.35)}
+.chain{list-style:none;margin:0;padding:0;border-top:1px solid var(--hairline)}
+.chain li{display:grid;grid-template-columns:auto 1fr auto;gap:4px 16px;align-items:baseline;padding:18px 0;border-bottom:1px solid var(--hairline)}
+.chain .ch{font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--phos)}
+.chain .name{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:-.01em}
+.chain .name::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--hairline-2)}
+.chain li:first-child .name::before{background:var(--phos);box-shadow:0 0 6px rgba(76,195,203,.6)}
+.chain .read{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--ink-3);text-align:right;font-variant-numeric:tabular-nums}
+.chain .claim{grid-column:2/4;color:var(--ink-2);font-size:.93rem;margin:0}
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .keybox{display:flex;gap:8px;align-items:stretch;margin:10px 0 6px}
-.keybox code{flex:1;min-width:0;overflow-wrap:anywhere;background:var(--bg);border:1px solid var(--accent);border-radius:10px;padding:12px;font-size:.95rem}
+.keybox code{flex:1;min-width:0;overflow-wrap:anywhere;background:var(--screen);border:1px solid var(--phos);border-radius:3px;padding:12px;font-family:var(--mono);font-size:.92rem}
 .keys{list-style:none;margin:12px 0 0;padding:0}
-.keys li{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:12px 0}
-.keys .name{font-weight:600}.keys .meta{color:var(--muted);font-size:.85rem}
+.keys li{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;border-top:1px solid var(--hairline);padding:12px 0}
+.keys .name{font-weight:600}.keys .meta{color:var(--ink-3);font-size:.85rem;font-family:var(--mono);font-variant-numeric:tabular-nums}
 .keys .off{opacity:.55}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(12rem,1fr));gap:12px;margin-top:12px}
-.stat{background:var(--surface2);border-radius:12px;padding:14px}
-.stat .v{font-size:1.35rem;font-weight:700}.stat .l{color:var(--muted);font-size:.85rem}
-.bar{height:6px;border-radius:3px;background:var(--line);margin-top:8px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:.9rem}
-th,td{text-align:right;padding:6px 8px;border-top:1px solid var(--line);white-space:nowrap}th:first-child,td:first-child{text-align:left}
-th{color:var(--muted);font-weight:600}
+.stat{background:var(--screen);border:1px solid var(--hairline);border-radius:3px;padding:14px}
+.stat .v{font-family:var(--mono);font-size:1.3rem;font-weight:600;font-variant-numeric:tabular-nums}.stat .l{color:var(--ink-3);font-size:.85rem}
+.bar{height:4px;border-radius:2px;background:var(--hairline);margin-top:10px;overflow:hidden}.bar i{display:block;height:100%;background:var(--phos)}
+table{width:100%;border-collapse:collapse;margin-top:12px;font-size:.9rem;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:7px 8px;border-top:1px solid var(--hairline);white-space:nowrap}th:first-child,td:first-child{text-align:left}
+th{color:var(--ink-3);font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
 .scroll{overflow-x:auto}
-.hero{text-align:center;padding:8vh 0 4vh}.hero h1{font-size:2rem}.hero p{color:var(--muted);max-width:32rem;margin:0 auto 24px}
+.hero{text-align:center;padding:8vh 0 4vh}.hero h1{font-size:2.2rem}.hero p{color:var(--ink-2);max-width:32rem;margin:0 auto 24px}
 .hero .row{justify-content:center}.hero .hint{margin-top:18px}
 .users{list-style:none;margin:12px 0 0;padding:0}
-.users li{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:12px 0}
-.users .name{font-weight:600}.users .meta{color:var(--muted);font-size:.85rem}
+.users li{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;border-top:1px solid var(--hairline);padding:12px 0}
+.users .name{font-weight:600}.users .meta{color:var(--ink-3);font-size:.85rem}
 #uq{margin:12px 0 4px}
-#kf{margin-top:12px}#dev{flex:1;min-width:12rem;width:auto}#who{margin:0}.btnrow{margin:12px 0 0}
+#kf{margin-top:12px}#dev{flex:1;min-width:12rem;width:auto}#who{margin:0;font-family:var(--mono);font-size:12px}.btnrow{margin:12px 0 0}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
-@media (max-width:480px){.keybox{flex-direction:column}.top{padding:12px 16px}}
+@media (max-width:860px){.bench{grid-template-columns:1fr;gap:44px;margin-top:5vh}.narrow{margin-top:5vh}}
+@media (max-width:480px){.keybox{flex-direction:column}.top{padding:14px 18px}main{padding:4px 18px 48px}form.card{padding:20px 18px 22px}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
 
 const stringsOf = (links: PageLinks) => PAGE_STRINGS[links.lang];
@@ -103,7 +136,7 @@ function shell(title: string, body: string, script: string, nonce: string, links
 <style nonce="${nonce}">${CSS}</style>
 </head>
 <body>
-<header class="top"><a class="brand" href="${LANDING_URL}" title="${esc(t.home)}">ucast<b>.me</b></a><nav class="row">${nav}</nav></header>
+<header class="top"><a class="brand" href="${LANDING_URL}" title="${esc(t.home)}">${LOGO_MARK}<span>ucast<b>.me</b></span></a><nav class="row">${nav}</nav></header>
 <main id="main">
 ${body}
 </main>
@@ -127,16 +160,29 @@ function errText(res){var e=(res.body&&res.body.error)||{};return L.errors[e.cod
 function fill(text,vars){return text.replace(/\\{(\\w+)\\}/g,function(_,k){return vars[k]})}
 function show(el,text,kind){el.className='msg '+(kind||'err');el.textContent=text||''}
 function busy(btn,on,label){btn.disabled=on;if(label)btn.textContent=label}
+document.querySelectorAll('.reveal').forEach(function(b){var i=$(b.getAttribute('aria-controls'));b.addEventListener('click',function(){var hidden=i.type==='password';i.type=hidden?'text':'password';b.textContent=hidden?L.hide:L.show;b.setAttribute('aria-pressed',String(hidden));i.focus()})});
 `;
 
-function formPage(title: string, heading: string, lead: string, fields: string, button: string, alt: string, script: string, links: PageLinks): RenderedPage {
+function formPage(title: string, heading: string, lead: string, fields: string, button: string, alt: string, script: string, links: PageLinks, aside = ''): RenderedPage {
   const nonce = randomBytes(16).toString('base64');
-  const body = `<div class="narrow"><h1>${heading}</h1><p class="lead">${lead}</p>
+  const form = `<div class="narrow"><h1>${heading}</h1><p class="lead">${lead}</p>
 <form id="f" class="card" novalidate>${fields}
 <div id="m" class="msg" role="alert" aria-live="polite"></div>
 <button id="b" class="btn full" type="submit">${button}</button></form>
 <p class="alt">${alt}</p></div>`;
+  const body = aside ? `<div class="bench">${form}${aside}</div>` : form;
   return { html: shell(title, body, script, nonce, links), nonce };
+}
+
+function passwordField(links: PageLinks, label: string, autocomplete: string, extra: string): string {
+  const t = stringsOf(links);
+  return `<label for="password">${label}</label><div class="field"><input id="password" name="password" type="password" autocomplete="${autocomplete}" ${extra}><button class="reveal" type="button" aria-controls="password" aria-pressed="false">${t.client.show}</button></div>`;
+}
+
+function setupChain(links: PageLinks): string {
+  const t = stringsOf(links);
+  const steps = t.steps.map((step, i) => `<li><span class="ch">CH${i + 1}</span><span class="name">${step.name}</span><span class="read">${step.read}</span><p class="claim">${step.claim}</p></li>`).join('');
+  return `<aside aria-label="${esc(t.stepsLabel)}"><ol class="chain">${steps}</ol></aside>`;
 }
 
 const emailField = (links: PageLinks) => `<label for="email">${esc(stringsOf(links).email)}</label><input id="email" name="email" type="email" autocomplete="email" inputmode="email" required autofocus>`;
@@ -144,7 +190,7 @@ const emailField = (links: PageLinks) => `<label for="email">${esc(stringsOf(lin
 export function signupPage(links: PageLinks): RenderedPage {
   const t = stringsOf(links);
   return formPage(t.signupTitle, t.signupHeading, t.signupLead,
-    `${emailField(links)}<label for="password">${t.password}</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required aria-describedby="ph"><p id="ph" class="hint">${t.minLength}</p>`,
+    `${emailField(links)}${passwordField(links, t.password, 'new-password', 'minlength="8" required aria-describedby="ph"')}<p id="ph" class="hint">${t.minLength}</p>`,
     t.signupButton, `${t.haveAccount} <a href="${esc(links.login)}">${t.signIn}</a>`,
     `(function(){var f=$('f'),b=$('b'),m=$('m');f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
 var email=$('email').value.trim(),pw=$('password').value;
@@ -152,13 +198,13 @@ if(!email||email.indexOf('@')<1){show(m,L.invalidEmail);$('email').focus();retur
 if(pw.length<8){show(m,L.shortPassword);$('password').focus();return}
 busy(b,true,L.creating);api('/v1/account/signup','POST',{email:email,password:pw}).then(function(r){
 if(r.ok){location.href=${js(links.account)};return}busy(b,false,L.signupButton);show(m,errText(r))},function(){busy(b,false,L.signupButton);show(m,L.offline)})})})();`,
-    links);
+    links, setupChain(links));
 }
 
 export function loginPage(links: PageLinks): RenderedPage {
   const t = stringsOf(links);
   return formPage(t.loginTitle, t.signIn, t.loginLead,
-    `${emailField(links)}<label for="password">${t.password}</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+    `${emailField(links)}${passwordField(links, t.password, 'current-password', 'required')}
 <p class="hint"><a href="${esc(links.forgot)}">${t.forgotLink}</a></p>`,
     t.signIn, `${t.noAccount} <a href="${esc(links.signup)}">${t.signupButton}</a>`,
     `(function(){var f=$('f'),b=$('b'),m=$('m');f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
@@ -183,7 +229,7 @@ function(){busy(b,false,L.forgotButton);show(m,L.offline)})})})();`,
 export function resetPage(links: PageLinks): RenderedPage {
   const t = stringsOf(links);
   return formPage(t.resetTitle, t.resetHeading, t.resetLead,
-    `<label for="password">${t.newPassword}</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required autofocus aria-describedby="ph"><p id="ph" class="hint">${t.minLength}</p>`,
+    `${passwordField(links, t.newPassword, 'new-password', 'minlength="8" required autofocus aria-describedby="ph"')}<p id="ph" class="hint">${t.minLength}</p>`,
     t.resetButton, `<a href="${esc(links.login)}">${t.backToLogin}</a>`,
     `(function(){var f=$('f'),b=$('b'),m=$('m');var t=(location.hash.match(/token=([A-Za-z0-9_-]+)/)||[])[1]||'';
 if(t&&history.replaceState)history.replaceState(null,'',location.pathname);

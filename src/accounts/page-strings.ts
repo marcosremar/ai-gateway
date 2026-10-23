@@ -25,8 +25,15 @@ const PT = {
   downloadHint: 'Instale o ucast.me, abra “Ativar o ucast.me” e cole a sua chave.', downloadButton: 'Baixar o ucast.me',
   usersHeading: 'Usuários', usersHint: 'Selecione um usuário da lista para enviar uma chave de acesso nova por e-mail.',
   searchUser: 'Buscar usuário', searchPlaceholder: 'Buscar por e-mail…',
+  stepsLabel: 'Do cadastro ao app',
+  steps: [
+    { name: 'Conta', read: 'E-MAIL + SENHA', claim: 'Um cadastro só, sem cartão.' },
+    { name: 'Chave', read: 'UCAST_LIVE_…', claim: 'Gere uma chave de ativação para cada computador.' },
+    { name: 'App', read: 'WIN · MAC', claim: 'Cole a chave no ucast.me e comece a legendar.' },
+  ],
   notFoundTitle: 'Página não encontrada · ucast.me', notFoundHeading: 'Página não encontrada', backHome: 'Voltar ao início',
   client: {
+    show: 'Mostrar', hide: 'Ocultar',
     generic: 'Algo deu errado. Tente de novo.', offline: 'Sem conexão. Tente de novo.', offlineReload: 'Sem conexão. Recarregue a página.',
     invalidEmail: 'Informe um e-mail válido.', shortPassword: 'A senha precisa ter pelo menos 8 caracteres.', emailAndPassword: 'Informe e-mail e senha.',
     creating: 'Criando…', signingIn: 'Entrando…', sending: 'Enviando…', saving: 'Salvando…',
@@ -72,8 +79,15 @@ const EN: PageStrings = {
   downloadHint: 'Install ucast.me, open “Activate ucast.me” and paste your key.', downloadButton: 'Download ucast.me',
   usersHeading: 'Users', usersHint: 'Pick a user from the list to e-mail them a new access key.',
   searchUser: 'Search users', searchPlaceholder: 'Search by e-mail…',
+  stepsLabel: 'From sign-up to the app',
+  steps: [
+    { name: 'Account', read: 'E-MAIL + PASSWORD', claim: 'One sign-up, no card.' },
+    { name: 'Key', read: 'UCAST_LIVE_…', claim: 'Create an activation key for each computer.' },
+    { name: 'App', read: 'WIN · MAC', claim: 'Paste the key into ucast.me and start subtitling.' },
+  ],
   notFoundTitle: 'Page not found · ucast.me', notFoundHeading: 'Page not found', backHome: 'Back to the home page',
   client: {
+    show: 'Show', hide: 'Hide',
     generic: 'Something went wrong. Please try again.', offline: 'No connection. Please try again.', offlineReload: 'No connection. Reload the page.',
     invalidEmail: 'Enter a valid e-mail.', shortPassword: 'The password needs at least 8 characters.', emailAndPassword: 'Enter your e-mail and password.',
     creating: 'Creating…', signingIn: 'Signing in…', sending: 'Sending…', saving: 'Saving…',
@@ -127,8 +141,15 @@ const FR: PageStrings = {
   downloadHint: 'Installez ucast.me, ouvrez « Activer ucast.me » et collez votre clé.', downloadButton: 'Télécharger ucast.me',
   usersHeading: 'Utilisateurs', usersHint: 'Choisissez un utilisateur pour lui envoyer une nouvelle clé d’accès par e-mail.',
   searchUser: 'Rechercher un utilisateur', searchPlaceholder: 'Rechercher par e-mail…',
+  stepsLabel: 'De l’inscription à l’application',
+  steps: [
+    { name: 'Compte', read: 'E-MAIL + MOT DE PASSE', claim: 'Une seule inscription, sans carte.' },
+    { name: 'Clé', read: 'UCAST_LIVE_…', claim: 'Créez une clé d’activation pour chaque ordinateur.' },
+    { name: 'Application', read: 'WIN · MAC', claim: 'Collez la clé dans ucast.me et commencez à sous-titrer.' },
+  ],
   notFoundTitle: 'Page introuvable · ucast.me', notFoundHeading: 'Page introuvable', backHome: 'Retour à l’accueil',
   client: {
+    show: 'Afficher', hide: 'Masquer',
     generic: 'Une erreur est survenue. Réessayez.', offline: 'Pas de connexion. Réessayez.', offlineReload: 'Pas de connexion. Rechargez la page.',
     invalidEmail: 'Saisissez un e-mail valide.', shortPassword: 'Le mot de passe doit contenir au moins 8 caractères.', emailAndPassword: 'Saisissez votre e-mail et votre mot de passe.',
     creating: 'Création…', signingIn: 'Connexion…', sending: 'Envoi…', saving: 'Enregistrement…',
