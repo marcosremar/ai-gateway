@@ -193,7 +193,7 @@ export const DEFAULT_MAX_EUR_PER_HOUR = 6;
 
 export const machineTypesOf = (spec: DeploymentSpec): Set<string> => new Set(
   [spec.machineType, ...(spec.placements ?? []).flatMap(p => p.machineType ?? []), ...(spec.candidates ?? []).map(c => c.machineType)]);
-export const DEFAULT_PARKED_MAX_MS = 72 * 3_600_000;
+export const DEFAULT_PARKED_MAX_MS = 12 * 3_600_000;
 export const RESUME_LISTS_STOPPED_MS = 5 * 60_000;
 /**
  * A parked replica powered on that is not serving after `RESUME_DEADLINE_FACTOR` × its measured median resume (default

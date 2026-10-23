@@ -5,7 +5,7 @@
  *   DEPLOYMENTS_MAX_EUR_PER_HOUR   ceiling on the summed hourly price of all running replicas; default 6, 0 = off. A create
  *                                  that would pass it is refused with a clear `lastError`.
  *   DEPLOYMENTS_PARKED_MAX_HOURS   a parked replica unused this long is deleted (a forgotten park bills its disk
- *                                  forever); default 72 (a weekend), 0 = off.
+ *                                  forever); default 12 (a parked 3090 disk costs more than a fresh boot after that), 0 = off.
  */
 
 import { DEFAULT_MAX_EUR_PER_HOUR, DEFAULT_MAX_STOPPED, DEFAULT_PARKED_MAX_MS } from './controller';

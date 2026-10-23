@@ -155,7 +155,7 @@ as an unregistered deployment and goes to its `oneGpuDeployment` (docs/api/http.
   key's `/start` too. `maxReplicas` above 1 is never reached.
 - **A stuck boot never holds two:** the retry releases the stuck machine first; a released machine counts until the
   provider list stops showing it, and only then is the next one rented.
-- **The boot race is one GPU (15/10/2026):** a deployment with `bootRace: 2` (`parle-speech`, `parle-speech-test`)
+- **The boot race is one GPU (15/10/2026):** a deployment with `bootRace: 2` (`parle-speech`; the test copy boots one offer since 23/10/2026)
   whose warm floor (schedule, `/warm`, a key's `/start`) asks for a replica while none is ready rents 2 offers at once
   (`planReplicas` `race`); the first ready stays and the other, still booting, is released at once (`race-lost`, the host
   is not blamed). The race's extra boot does not count against the cap of its own deployment (`raceExtra`), so the
@@ -259,7 +259,7 @@ student audio to it.
   host with the image and the models on disk, skipping the ~9-min pull of a ~15-min fresh boot (measured to 19/10:
   placing 1–2 s, provisioning 26–39 s, pulling 516–539 s, starting 263–440 s). What remains is the container's own
   start (`starting`: nginx, then vLLM-Omni, llama.cpp and Whisper one after the other). A host Vast cannot give back
-  (GPU rented meanwhile) is replaced by a fresh rent; a park unused for 72 h is deleted (`DEPLOYMENTS_PARKED_MAX_HOURS`).
+  (GPU rented meanwhile) is replaced by a fresh rent; a park unused for 12 h is deleted (`DEPLOYMENTS_PARKED_MAX_HOURS`).
 - **No respawn loop.** No offer under the cap (`out_of_stock`) → the create back-off (1, 2, 5, then 10 min) and the
   `deployment.out_of_stock` alert; no credit (`insufficient_credit`) → one try per 10 min and
   `provider.credit_exhausted`. The € ceilings (`DEPLOYMENTS_MAX_EUR_PER_HOUR`, `scaling.budget` €140/month, a key's
@@ -639,7 +639,7 @@ trend window are design choices to pilot, not published values.
 | `DEPLOYMENTS_MAX_REPLICAS` | 6 | RUNNING replicas across all deployments. Parked (stopped) replicas do not count: they bill no compute. A `PUT` with `maxReplicas` above it is refused (400) with the cap in the message. The floor of every unpaused deployment (`minReplicas`, or its active warm window) is kept inside the cap: a deployment already at its own floor does not take the last slots another one still needs for its floor (`… kept for the minimum of <name> <n>`). |
 | `DEPLOYMENTS_MAX_STOPPED` | 8 | Parked replicas (`idleAction: "stop"`, they bill disk). Past it, an idle replica is deleted instead of parked. |
 | `DEPLOYMENTS_MAX_EUR_PER_HOUR` | 6 | Sum of `pricePerHour` of all running replicas (+ creates in flight). A create or power-on that would pass it is refused; `lastError` says `spend ceiling reached` (a market-priced Vast offer counts at its `maxEurPerHour` cap). `0` = off. |
-| `DEPLOYMENTS_PARKED_MAX_HOURS` | 72 | A parked replica unused this long is deleted (a forgotten park bills its disk forever). `0` = off. |
+| `DEPLOYMENTS_PARKED_MAX_HOURS` | 12 | A parked replica unused this long is deleted (a forgotten park bills its disk forever). `0` = off. |
 | `DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES` | 60 | A `minReplicas` pin unused this long goes to zero (running replicas; it does not touch parked ones — that is the line above). |
 
 `GET /v1/deployments` (`health`) and `GET /health?deep=1` show `running`, `maxReplicas`, `stopped`, `maxStopped`,

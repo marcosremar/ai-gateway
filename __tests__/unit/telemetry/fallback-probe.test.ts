@@ -113,6 +113,22 @@ describe('fallback probe: every cloud link of the alias chains is called for rea
     probe.stop();
     expect(called).toBe(0);
   });
+
+  it('every 15 min in a class window, hourly outside it (each probe calls paid models; owner, 23/10/2026)', async () => {
+    let t = 0;
+    let inClass = false;
+    const probe = createFallbackProbe({ env: {}, links: () => [], onResults: () => {}, now: () => t, inClass: () => inClass });
+    expect(probe.dueNow()).toBe(true);
+    await probe.check();
+    t += 15 * 60_000;
+    expect(probe.dueNow()).toBe(false);
+    t += 45 * 60_000;
+    expect(probe.dueNow()).toBe(true);
+    await probe.check();
+    inClass = true;
+    t += 15 * 60_000;
+    expect(probe.dueNow()).toBe(true);
+  });
 });
 
 describe('fallback probe: the answer itself is checked, not only the HTTP status', () => {

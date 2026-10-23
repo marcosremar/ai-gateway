@@ -462,6 +462,7 @@ describe('declared parle-speech-test: the test copy of parle-speech on the same 
     expect(spec.image).toBe(c.specOf('parle-speech')!.image);
     expect(placementsOf(spec).map(p => `${p.provider} ${p.machineType}`)).toEqual(['vast RTX 3090']);
     expect(spec.warmSchedule).toBeUndefined();
+    expect(spec.bootRace ?? 1).toBe(1); // no class waits on the test copy: one offer per boot (owner, 23/10/2026)
     expect(c.get('parle-speech-test')!.app).toBe('parle');
     expect(c.get('parle-speech')!.app).toBe('parle');
     expect(cloud.created).toHaveLength(0);
