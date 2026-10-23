@@ -135,7 +135,7 @@ const accounts = await configuredAccounts.init().then(() => configuredAccounts, 
   return null;
 });
 if (accounts) {
-  log.log({ app: accounts.config.app, siteHosts: accounts.config.siteHosts, users: accounts.service.userCount, email: accounts.emailConfigured ? 'resend' : 'none' }, 'Accounts enabled');
+  log.log({ app: accounts.config.app, siteHosts: accounts.config.siteHosts, users: accounts.service.userCount, email: accounts.emailConfigured ? 'resend' : 'none', billing: accounts.billingConfigured ? 'stripe' : 'none' }, 'Accounts enabled');
   if (adminUsers.has(accounts.config.app)) log.error({ app: accounts.config.app }, 'ACCOUNTS: the accounts app is an ADMIN user — activation keys are refused until it is removed from the admin list');
 }
 /** Every gateway key: the access keys (env, issued, sandbox) and the accounts' activation keys. */

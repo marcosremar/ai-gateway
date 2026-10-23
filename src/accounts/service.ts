@@ -9,6 +9,7 @@ import type { AccountsConfig, Quota, QuotaMetric } from './config';
 import type { EmailSender } from './email';
 import { dummyHash, hashPassword, passwordProblem, verifyPassword } from './password';
 import { nextDayStart, nextMonthStart, type Counters, type UsageMeter } from './usage';
+import { nextPlan, planOf } from './plans';
 
 export const KEY_PREFIX = 'ucast_live_';
 const KEY_RE = /^ucast_live_[A-Za-z0-9_-]{43}$/;
@@ -34,7 +35,12 @@ export interface User {
   disabledAt?: number;
   /** Set at sign-up until the link in the confirmation e-mail is opened; accounts from before verification have none. */
   emailUnverified?: boolean;
+  stripeCustomerId?: string;
+  planRenewsAt?: number;
+  planCancelsAtPeriodEnd?: boolean;
 }
+
+export type BillingFields = Partial<Pick<User, 'plan' | 'stripeCustomerId' | 'planRenewsAt' | 'planCancelsAtPeriodEnd'>>;
 
 interface Session { hash: string; userId: string; csrf: string; createdAt: number; expiresAt: number; lastSeenAt: number }
 
@@ -61,7 +67,7 @@ export interface KeyView {
   lastActivatedAt: string | null; appVersion: string | null; revokedAt: string | null; active: boolean;
 }
 
-export interface QuotaView { plan: string; limits: Quota; month: Counters; today: Counters; monthResetsAt: string; dayResetsAt: string }
+export interface QuotaView { plan: string; limits: Quota; month: Counters; today: Counters; monthResetsAt: string; dayResetsAt: string; planRenewsAt: string | null; planCancelsAtPeriodEnd: boolean }
 
 const iso = (ms: number | undefined) => (ms ? new Date(ms).toISOString() : null);
 
@@ -88,6 +94,8 @@ export interface AccountServiceOptions {
   email: EmailSender;
   /** True when a gateway user id is an admin: the accounts app must never be one (keys then refused, fail closed). */
   isAdmin?: (userId: string) => boolean;
+  /** Plan limits (plans.ts) apply: billing is configured. */
+  planLimits?: boolean;
   now?: () => number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
@@ -295,9 +303,13 @@ export class AccountService {
   }
 
   /** Needs the current password: removes the user, sessions, keys, pending links and usage rows. */
-  async deleteAccount(user: User, password: unknown): Promise<void> {
+  async checkPassword(user: User, password: unknown): Promise<void> {
     const pw = typeof password === 'string' ? password.slice(0, 1024) : '';
     if (!await verifyPassword(pw, user.passwordHash)) throw new AccountError(401, 'Senha incorreta.', 'wrong_password');
+  }
+
+  async deleteAccount(user: User, password: unknown): Promise<void> {
+    await this.checkPassword(user, password);
     const notMine = (x: { userId: string }) => x.userId !== user.id;
     this.state.users = this.state.users.filter(u => u.id !== user.id);
     this.state.sessions = this.state.sessions.filter(notMine);
@@ -436,7 +448,20 @@ export class AccountService {
   // ── Quota ─────────────────────────────────────────────────────────────────
 
   limitsOf(user: User): Quota {
-    return { ...this.config.quota, ...user.quota };
+    return { ...this.config.quota, ...(this.opts.planLimits ? planOf(user.plan).quota : {}), ...user.quota };
+  }
+
+  userByStripeCustomer(customerId: string): User | undefined {
+    return this.state.users.find(u => u.stripeCustomerId === customerId && !u.disabledAt);
+  }
+
+  async setBilling(user: User, fields: BillingFields): Promise<void> {
+    for (const [k, v] of Object.entries(fields) as Array<[keyof BillingFields, unknown]>) {
+      if (v === undefined) delete user[k];
+      else (user as unknown as Record<string, unknown>)[k] = v;
+    }
+    if (!user.plan) user.plan = this.config.plan;
+    await this.save();
   }
 
   quotaView(user: User): QuotaView {
@@ -444,6 +469,7 @@ export class AccountService {
     return {
       plan: user.plan, limits: this.limitsOf(user), month: this.opts.usage.month(user.id), today: this.opts.usage.today(user.id),
       monthResetsAt: new Date(nextMonthStart(now)).toISOString(), dayResetsAt: new Date(nextDayStart(now)).toISOString(),
+      planRenewsAt: iso(user.planRenewsAt), planCancelsAtPeriodEnd: Boolean(user.planCancelsAtPeriodEnd),
     };
   }
 
@@ -466,8 +492,9 @@ export class AccountService {
       if (limits[m] > 0 && month[m] >= limits[m]) {
         const resetAt = new Date(nextMonthStart(now));
         const day = resetAt.toISOString().slice(0, 10).split('-').reverse().join('/');
-        return new AccountError(402, `${QUOTA_LABEL[m](limits[m])} Ela renova em ${day}.`, 'quota_exceeded',
-          { metric: m, limit: limits[m], used: month[m], reset_at: resetAt.toISOString() });
+        const upgrade = this.opts.planLimits ? nextPlan(user.plan) : null;
+        return new AccountError(402, `${QUOTA_LABEL[m](limits[m])} Ela renova em ${day}.${upgrade ? ` Para continuar agora, mude de plano em ${this.config.publicBaseUrl}/account.` : ''}`, 'quota_exceeded',
+          { metric: m, limit: limits[m], used: month[m], reset_at: resetAt.toISOString(), ...(upgrade ? { upgrade_url: `${this.config.publicBaseUrl}/account?plan=${upgrade}` } : {}) });
       }
     }
     return null;

@@ -1,3 +1,4 @@
+import { createHmac } from 'crypto';
 /**
  * ucast.me accounts (src/accounts, docs/accounts.md) in front of the REAL proxy server (createProxyServer), wired as
  * serve.ts does: a key registry made of the access keys + the activation keys, the admin access routes, per-app limits,
@@ -55,9 +56,38 @@ const fakeLlm: LLMProvider = {
   chat: async (r) => ({ content: 'hello', model: r.model, usage: { promptTokens: 30, completionTokens: 12, totalTokens: 42 } }),
 };
 
+const WEBHOOK_SECRET = 'whsec_test';
+
+function fakeStripe() {
+  const calls: Array<{ method: string; path: string; body: string }> = [];
+  const state = { subscriptions: [] as unknown[] };
+  const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? 'GET';
+    const path = url.pathname.replace('/v1', '');
+    calls.push({ method, path: `${path}${url.search}`, body: String(init?.body ?? '') });
+    if (path === '/prices') return json({ data: [{ id: 'price_pro', lookup_key: 'ucast_pro_monthly' }, { id: 'price_events', lookup_key: 'ucast_events_monthly' }] });
+    if (path === '/customers' && method === 'POST') return json({ id: 'cus_1' });
+    if (path === '/checkout/sessions') return json({ url: 'https://checkout.stripe.com/c/pay/cs_test_1' });
+    if (path === '/billing_portal/sessions') return json({ url: 'https://billing.stripe.com/p/session/test_1' });
+    if (path === '/subscriptions') return json({ data: state.subscriptions });
+    if (path === '/customers/cus_1' && method === 'DELETE') return json({ id: 'cus_1', deleted: true });
+    return new Response('{"error":{"message":"unexpected"}}', { status: 404 });
+  }) as typeof fetch;
+  return { fetchImpl, calls, state };
+}
+
+function signedEvent(event: unknown, nowMs: number, secret = WEBHOOK_SECRET) {
+  const raw = JSON.stringify(event);
+  const t = Math.floor(nowMs / 1000);
+  const v1 = createHmac('sha256', secret).update(`${t}.${raw}`).digest('hex');
+  return { raw, header: `t=${t},v1=${v1}` };
+}
+
 const NO_QUOTA = { audioSeconds: 0, llmTokens: 0, ttsChars: 0, rooms: 0, requestsPerDay: 0, concurrentRequests: 0 };
 
-interface GwOpts { adminApp?: boolean; dir?: string; appEnv?: Record<string, string>; sessionRequests?: number; hold?: Promise<void> }
+interface GwOpts { adminApp?: boolean; dir?: string; appEnv?: Record<string, string>; sessionRequests?: number; hold?: Promise<void>; stripe?: typeof fetch }
 
 async function startGateway(config: Partial<AccountsConfig> = {}, opts: GwOpts = {}): Promise<Gw> {
   const clock = { now: Date.UTC(2026, 9, 10, 12) };
@@ -67,7 +97,8 @@ async function startGateway(config: Partial<AccountsConfig> = {}, opts: GwOpts =
   const access = new AccessKeys({ GATEWAY_API_KEYS: `${ADMIN_KEY}:ops,${APP_KEY}:babelcast` }, { now: () => clock.now });
   access.setBaseAdmins(opts.adminApp ? ['ops', 'babelcast'] : ['ops']);
   const accounts = createAccounts({
-    env: {},
+    env: opts.stripe ? { STRIPE_SECRET_KEY: 'sk_test_fake', STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET } : {},
+    ...(opts.stripe ? { stripeFetch: opts.stripe } : {}),
     config: {
       statePath: join(dir, 'accounts.json'), usagePath: join(dir, 'account-usage.json'),
       siteHosts: [SITE], publicBaseUrl: 'https://ucast.me', cookieSecure: true, ...config,
@@ -289,6 +320,60 @@ describe('sign-up, login, session', () => {
     expect((await call(gw, 'POST', '/v1/account/signup', { body: { email: 'u11@example.com', password: 'senha-forte-123' } })).status).toBe(429);
     for (let i = 0; i < 5; i++) expect((await call(gw, 'POST', '/v1/account/password/forgot', { body: { email: 'u1@example.com' } })).status).toBe(200);
     expect(gw.mails.filter(m => m.to === 'u1@example.com' && m.subject.includes('senha'))).toHaveLength(3);
+  });
+
+  it('without Stripe the plan routes are off and no plan limits apply', async () => {
+    const gw = await startGateway();
+    const s = await signup(gw);
+    const headers = { Cookie: s.cookie, 'X-CSRF-Token': s.csrf };
+    const me = await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } });
+    expect(me.json.billing).toBe(false);
+    expect(me.json.quota.limits.audioSeconds).toBe(0);
+    expect((await call(gw, 'POST', '/v1/account/billing/checkout', { headers, body: { plan: 'pro' } })).json.error.code).toBe('billing_off');
+  });
+
+  it('with Stripe: free limits, checkout, sync to the paid plan, portal, webhook back to free, customer removed with the account', async () => {
+    const stripe = fakeStripe();
+    const gw = await startGateway({}, { stripe: stripe.fetchImpl });
+    const s = await signup(gw);
+    const headers = { Cookie: s.cookie, 'X-CSRF-Token': s.csrf };
+    const me = await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } });
+    expect(me.json.billing).toBe(true);
+    expect(me.json.quota.limits.audioSeconds).toBe(2 * 3600);
+    expect((await call(gw, 'POST', '/v1/account/billing/checkout', { headers, body: { plan: 'gold' } })).json.error.code).toBe('invalid_plan');
+    const checkout = await call(gw, 'POST', '/v1/account/billing/checkout', { headers, body: { plan: 'pro' } });
+    expect(checkout.json.url).toBe('https://checkout.stripe.com/c/pay/cs_test_1');
+    const session = stripe.calls.find(c => c.path === '/checkout/sessions')!;
+    expect(session.body).toContain('mode=subscription');
+    expect(session.body).toContain('customer=cus_1');
+    expect(decodeURIComponent(session.body)).toContain('line_items[0][price]=price_pro');
+    expect(decodeURIComponent(session.body)).toContain('success_url=https://ucast.me/account?billing=success');
+    stripe.state.subscriptions = [{ status: 'active', customer: 'cus_1', current_period_end: 1_793_000_000, cancel_at_period_end: false, items: { data: [{ price: { lookup_key: 'ucast_pro_monthly' } }] } }];
+    const synced = await call(gw, 'POST', '/v1/account/billing/sync', { headers, body: {} });
+    expect(synced.json.plan).toBe('pro');
+    expect(synced.json.quota.limits.audioSeconds).toBe(20 * 3600);
+    expect(synced.json.quota.planRenewsAt).toBe(new Date(1_793_000_000_000).toISOString());
+    expect((await call(gw, 'POST', '/v1/account/billing/portal', { headers, body: {} })).json.url).toContain('billing.stripe.com');
+    stripe.state.subscriptions = [];
+    const bad = signedEvent({ type: 'customer.subscription.deleted', data: { object: { customer: 'cus_1' } } }, gw.clock.now, 'whsec_other');
+    expect((await call(gw, 'POST', '/v1/billing/stripe/webhook', { headers: { 'Stripe-Signature': bad.header, 'Content-Type': 'application/json' }, raw: Buffer.from(bad.raw) })).status).toBe(400);
+    const ok = signedEvent({ type: 'customer.subscription.deleted', data: { object: { customer: 'cus_1' } } }, gw.clock.now);
+    expect((await call(gw, 'POST', '/v1/billing/stripe/webhook', { headers: { 'Stripe-Signature': ok.header, 'Content-Type': 'application/json' }, raw: Buffer.from(ok.raw) })).status).toBe(200);
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } })).json.plan).toBe('free');
+    expect((await call(gw, 'DELETE', '/v1/account/me', { headers, body: { password: 'senha-forte-123' } })).status).toBe(200);
+    expect(stripe.calls.some(c => c.method === 'DELETE' && c.path === '/customers/cus_1')).toBe(true);
+  });
+
+  it('over the plan limit the account stops with a link to the next plan', async () => {
+    const gw = await startGateway({}, { stripe: fakeStripe().fetchImpl });
+    await signup(gw);
+    const user = (gw.accounts.service as unknown as { state: { users: Array<{ id: string; email: string }> } }).state.users.find(u => u.email === 'ana@example.com')! as Parameters<typeof gw.accounts.service.checkQuota>[0];
+    expect(gw.accounts.service.checkQuota(user, ['audioSeconds'])).toBeNull();
+    gw.accounts.usage.record(user.id, 'akey_x', { audioSeconds: 2 * 3600 });
+    const over = gw.accounts.service.checkQuota(user, ['audioSeconds'])!;
+    expect(over.status).toBe(402);
+    expect(over.extra.upgrade_url).toBe('https://ucast.me/account?plan=pro');
+    expect(over.message).toContain('mude de plano');
   });
 
   it('a new account confirms its e-mail before creating keys; old links and other accounts are not affected', async () => {

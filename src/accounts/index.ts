@@ -15,6 +15,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'http';
 import { accountsConfigFromEnv, type AccountsConfig } from './config';
 import { createEmailSender, type EmailSender } from './email';
 import { createAccountsHttp } from './http';
+import { BillingService, billingConfigFromEnv } from './billing';
 import { AttemptLimiter } from './rate-limit';
 import { AccountService } from './service';
 import { UsageMeter } from './usage';
@@ -38,6 +39,8 @@ export interface CreateAccountsOptions {
   log?: (msg: string, data?: Record<string, unknown>) => void;
   /** Requests a realtime session is worth against the account's daily budget (the app budget's charge). */
   sessionRequests?: () => number;
+  /** Stripe's HTTP client (tests). */
+  stripeFetch?: typeof fetch;
 }
 
 export function createAccounts(opts: CreateAccountsOptions = {}) {
@@ -45,9 +48,11 @@ export function createAccounts(opts: CreateAccountsOptions = {}) {
   const now = opts.now ?? Date.now;
   const email = opts.email ?? createEmailSender({ ...config.email, log: opts.log });
   const usage = new UsageMeter({ path: config.usagePath, retentionDays: config.usageRetentionDays, now, log: opts.log });
-  const service = new AccountService({ config, usage, email, isAdmin: opts.isAdmin, now, log: opts.log });
+  const billingConfig = billingConfigFromEnv(opts.env ?? process.env, config.publicBaseUrl);
+  const service = new AccountService({ config, usage, email, isAdmin: opts.isAdmin, planLimits: Boolean(billingConfig), now, log: opts.log });
+  const billing = billingConfig ? new BillingService(billingConfig, service, opts.stripeFetch, now) : null;
   const limiter = new AttemptLimiter(now);
-  const http = createAccountsHttp({ service, usage, limiter, log: opts.log, sessionRequests: opts.sessionRequests });
+  const http = createAccountsHttp({ service, usage, limiter, log: opts.log, sessionRequests: opts.sessionRequests, billing });
 
   /** Puts the account routes and the quota gate in front of the proxy's listeners (call after the rooms' mount). */
   function mount(server: Server): void {
@@ -69,6 +74,7 @@ export function createAccounts(opts: CreateAccountsOptions = {}) {
     usage,
     limiter,
     emailConfigured: email.configured,
+    billingConfigured: Boolean(billing),
     async init(): Promise<void> {
       await service.load();
       await usage.load();
