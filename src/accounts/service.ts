@@ -14,6 +14,7 @@ export const KEY_PREFIX = 'ucast_live_';
 const KEY_RE = /^ucast_live_[A-Za-z0-9_-]{43}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const DEVICE_MAX = 60;
+const VERIFY_TTL_MS = 48 * 60 * 60_000;
 
 export class AccountError extends Error {
   constructor(readonly status: number, message: string, readonly code: string, readonly extra: Record<string, unknown> = {}) {
@@ -31,6 +32,8 @@ export interface User {
   /** Per-user override of the default quota (plans, later). */
   quota?: Partial<Quota>;
   disabledAt?: number;
+  /** Set at sign-up until the link in the confirmation e-mail is opened; accounts from before verification have none. */
+  emailUnverified?: boolean;
 }
 
 interface Session { hash: string; userId: string; csrf: string; createdAt: number; expiresAt: number; lastSeenAt: number }
@@ -51,7 +54,7 @@ export interface ActivationKey {
 
 interface ResetToken { hash: string; userId: string; expiresAt: number; usedAt?: number }
 
-interface State { version: 1; users: User[]; sessions: Session[]; keys: ActivationKey[]; resets: ResetToken[] }
+interface State { version: 1; users: User[]; sessions: Session[]; keys: ActivationKey[]; resets: ResetToken[]; verifications: ResetToken[] }
 
 export interface KeyView {
   id: string; prefix: string; deviceName: string; createdAt: string; lastUsedAt: string | null;
@@ -90,7 +93,7 @@ export interface AccountServiceOptions {
 }
 
 export class AccountService {
-  private state: State = { version: 1, users: [], sessions: [], keys: [], resets: [] };
+  private state: State = { version: 1, users: [], sessions: [], keys: [], resets: [], verifications: [] };
   private readonly byKeyHash = new Map<string, ActivationKey>();
   private dirty = false;
   private chain: Promise<void> = Promise.resolve();
@@ -113,7 +116,7 @@ export class AccountService {
     if (!path) return;
     const read = await readStateFile<State>(path);
     if (read.from === 'backup') this.opts.log?.('accounts: STATE FILE UNREADABLE, recovered from the last good backup', { problem: read.problem });
-    if (read.data) this.state = { version: 1, users: read.data.users ?? [], sessions: read.data.sessions ?? [], keys: read.data.keys ?? [], resets: read.data.resets ?? [] };
+    if (read.data) this.state = { version: 1, users: read.data.users ?? [], sessions: read.data.sessions ?? [], keys: read.data.keys ?? [], resets: read.data.resets ?? [], verifications: read.data.verifications ?? [] };
     this.reindex();
   }
 
@@ -139,6 +142,7 @@ export class AccountService {
     const now = this.now();
     this.state.sessions = this.state.sessions.filter(s => s.expiresAt > now);
     this.state.resets = this.state.resets.filter(r => r.expiresAt > now && !r.usedAt);
+    this.state.verifications = this.state.verifications.filter(v => v.expiresAt > now && !v.usedAt);
     const path = this.opts.config.statePath;
     if (!path) return Promise.resolve();
     const text = JSON.stringify(this.state, null, 2);
@@ -176,9 +180,10 @@ export class AccountService {
       throw new AccountError(400, 'Não foi possível criar a conta com estes dados. Se você já tem conta, entre ou recupere a senha.', 'signup_refused');
     }
     const now = this.now();
-    const user: User = { id: `usr_${randomUUID().replace(/-/g, '')}`, email, passwordHash: await hashPassword(pw), plan: this.config.plan, createdAt: now, passwordChangedAt: now };
+    const user: User = { id: `usr_${randomUUID().replace(/-/g, '')}`, email, passwordHash: await hashPassword(pw), plan: this.config.plan, createdAt: now, passwordChangedAt: now, emailUnverified: true };
     this.state.users.push(user);
     const session = await this.openSession(user);
+    await this.sendVerification(user);
     this.opts.log?.('accounts: signup', { userId: user.id });
     return { user, session };
   }
@@ -262,6 +267,54 @@ export class AccountService {
     await this.save();
   }
 
+  // ── E-mail verification and account deletion ─────────────────────────────
+
+  async sendVerification(user: User): Promise<void> {
+    if (!user.emailUnverified) return;
+    const token = randomBytes(32).toString('base64url');
+    this.state.verifications = this.state.verifications.filter(v => v.userId !== user.id);
+    this.state.verifications.push({ hash: this.hash(token), userId: user.id, expiresAt: this.now() + VERIFY_TTL_MS });
+    await this.save();
+    const link = `${this.config.publicBaseUrl}/verify#token=${token}`;
+    await this.opts.email.send({
+      to: user.email, subject: 'Confirme seu e-mail no ucast.me',
+      text: `Para confirmar o e-mail da sua conta no ucast.me, abra: ${link}\nO link vale por 48 horas. Se não foi você, ignore este e-mail.`,
+      html: `<p>Para confirmar o e-mail da sua conta no ucast.me, <a href="${link}">clique aqui</a>.</p><p>O link vale por 48 horas. Se não foi você, ignore este e-mail.</p>`,
+    }).catch((err: unknown) => this.opts.log?.('accounts: verification e-mail failed', { error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  async verifyEmail(token: unknown): Promise<void> {
+    const now = this.now();
+    const hash = typeof token === 'string' && token.length <= 128 ? this.hash(token) : '';
+    const v = this.state.verifications.find(x => x.hash === hash && !x.usedAt && x.expiresAt > now);
+    const user = v ? this.userById(v.userId) : undefined;
+    if (!v || !user) throw new AccountError(400, 'Este link de confirmação é inválido ou expirou. Peça um novo na sua conta.', 'invalid_verify_token');
+    v.usedAt = now;
+    delete user.emailUnverified;
+    await this.save();
+  }
+
+  /** Needs the current password: removes the user, sessions, keys, pending links and usage rows. */
+  async deleteAccount(user: User, password: unknown): Promise<void> {
+    const pw = typeof password === 'string' ? password.slice(0, 1024) : '';
+    if (!await verifyPassword(pw, user.passwordHash)) throw new AccountError(401, 'Senha incorreta.', 'wrong_password');
+    const notMine = (x: { userId: string }) => x.userId !== user.id;
+    this.state.users = this.state.users.filter(u => u.id !== user.id);
+    this.state.sessions = this.state.sessions.filter(notMine);
+    this.state.resets = this.state.resets.filter(notMine);
+    this.state.verifications = this.state.verifications.filter(notMine);
+    this.state.keys = this.state.keys.filter(notMine);
+    this.reindex();
+    this.opts.usage.forget(user.id);
+    await this.save();
+    this.opts.log?.('accounts: account deleted', { userId: user.id });
+    void this.opts.email.send({
+      to: user.email, subject: 'Sua conta no ucast.me foi excluída',
+      text: 'Sua conta no ucast.me, as chaves de ativação e o histórico de uso foram excluídos. Se não foi você, fale com a gente pelo site ucast.me.',
+      html: '<p>Sua conta no ucast.me, as chaves de ativação e o histórico de uso foram excluídos.</p><p>Se não foi você, fale com a gente pelo site <a href="https://ucast.me">ucast.me</a>.</p>',
+    }).catch(() => {});
+  }
+
   // ── Activation keys ───────────────────────────────────────────────────────
 
   private view(k: ActivationKey): KeyView {
@@ -276,6 +329,7 @@ export class AccountService {
   }
 
   async createKey(userId: string, deviceName: unknown): Promise<{ key: string; view: KeyView }> {
+    if (this.userById(userId)?.emailUnverified) throw new AccountError(403, 'Confirme seu e-mail antes de criar uma chave.', 'email_not_verified');
     if (this.state.keys.filter(k => k.userId === userId && !k.revokedAt).length >= this.config.maxKeysPerUser) {
       throw new AccountError(409, `Você já tem ${this.config.maxKeysPerUser} chaves ativas. Revogue uma antes de criar outra.`, 'too_many_keys');
     }

@@ -61,6 +61,11 @@ export class UsageMeter {
     this.schedule();
   }
 
+  forget(userId: string): void {
+    for (const users of Object.values(this.rows)) delete users[userId];
+    this.schedule();
+  }
+
   /** Totals of a user over the days `from`..`to` (inclusive, YYYY-MM-DD). */
   private total(userId: string, pick: (day: string) => boolean, keyId?: string): Counters {
     const out = zeroCounters();

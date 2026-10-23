@@ -1,10 +1,11 @@
 // ── AI Gateway — ucast.me accounts: HTTP ─────────────────────────────────────
 // Served in front of the proxy (index.ts `mount`), like the rooms: these routes authenticate themselves.
-//   POST /v1/account/signup | /login | /logout | /password/forgot | /password/reset
+//   POST /v1/account/signup | /login | /logout | /password/forgot | /password/reset | /verify {token}
+//   POST /v1/account/verify/resend, DELETE /v1/account/me {password}   (session cookie + CSRF)
 //   GET  /v1/account/me | /usage        (session cookie, or an activation key as Bearer — read-only)
 //   GET|POST /v1/account/keys, DELETE /v1/account/keys/:id (or POST …/:id/revoke)   (session cookie + CSRF)
 //   POST /v1/activate {key, deviceName, appVersion}
-//   Pages: on ACCOUNTS_SITE_HOSTS `/`, `/signup`, `/login`, `/forgot`, `/reset`, `/account`; on any host `/account[/…]`.
+//   Pages: on ACCOUNTS_SITE_HOSTS `/`, `/signup`, `/login`, `/forgot`, `/reset`, `/verify`, `/account`; on any host `/account[/…]`.
 // And the quota gate: a metered request carrying an activation key is refused (402/429) when the account is over its
 // quota or already has its limit of requests in flight, otherwise passed on to the proxy and counted when it succeeds.
 //
@@ -18,7 +19,7 @@ import { bearerToken } from '../gateway/proxy/middleware/api-keys';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from '../gateway/proxy/internal-subrequest';
 import type { QuotaMetric } from './config';
 import {
-  accountPageCsp, dashboardPage, forgotPage, homePage, loginPage, notFoundAccountPage, resetPage, signupPage,
+  accountPageCsp, dashboardPage, forgotPage, homePage, loginPage, notFoundAccountPage, resetPage, signupPage, verifyPage,
   type PageLinks, type RenderedPage,
 } from './pages';
 import { ATTEMPT_LIMITS, AttemptLimiter, type Window } from './rate-limit';
@@ -184,7 +185,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     if (isCrossSite(req, siteHosts)) throw new AccountError(403, 'Pedido de outra origem recusado.', 'cross_site');
   }
 
-  const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user) });
+  const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user), emailVerified: !user.emailUnverified });
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, path: string): Promise<void> {
     const ip = RateLimiter.clientIp(req);
@@ -232,6 +233,30 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         const body = await readJson(req);
         limit(`reset:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
         await service.resetPassword(body.token, body.password);
+        send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
+        return;
+      }
+      case 'POST /v1/account/verify': {
+        sameSiteForm(req);
+        limit(`verify:ip:${ip}`, ATTEMPT_LIMITS.verifyPerIp);
+        const body = await readJson(req);
+        await service.verifyEmail(body.token);
+        send(res, 200, { ok: true });
+        return;
+      }
+      case 'POST /v1/account/verify/resend': {
+        const w = writer(req);
+        req.resume();
+        limit(`verify:user:${w.user.id}`, ATTEMPT_LIMITS.verifyResendPerUser);
+        await service.sendVerification(w.user);
+        send(res, 200, { ok: true });
+        return;
+      }
+      case 'DELETE /v1/account/me': {
+        const w = writer(req);
+        limit(`delete:user:${w.user.id}`, ATTEMPT_LIMITS.deletePerUser);
+        const body = await readJson(req);
+        await service.deleteAccount(w.user, body.password);
         send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
         return;
       }
@@ -306,12 +331,12 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   function links(req: IncomingMessage): PageLinks {
     const site = siteHosts.has(hostName(hostOf(req)));
     const p = site ? '' : '/account';
-    return { home: site ? '/' : '/account', signup: `${p}/signup`, login: `${p}/login`, forgot: `${p}/forgot`, reset: `${p}/reset`, account: '/account', download: cfg.downloadUrl,
+    return { home: site ? '/' : '/account', signup: `${p}/signup`, login: `${p}/login`, forgot: `${p}/forgot`, reset: `${p}/reset`, verify: `${p}/verify`, account: '/account', download: cfg.downloadUrl,
       lang: pageLang(parseCookies(req.headers.cookie).get('ucast_lang'), req.headers['accept-language']) };
   }
 
   const PAGES: Partial<Record<string, (l: PageLinks) => RenderedPage>> = {
-    '/signup': signupPage, '/login': loginPage, '/forgot': forgotPage, '/reset': resetPage, '': dashboardPage,
+    '/signup': signupPage, '/login': loginPage, '/forgot': forgotPage, '/reset': resetPage, '/verify': verifyPage, '': dashboardPage,
   };
 
   function page(req: IncomingMessage, res: ServerResponse, path: string): boolean {
@@ -320,7 +345,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     if (site && clean === '/') { sendPage(res, 200, homePage(links(req))); return true; }
     let sub: string | null = null;
     if (clean === '/account' || clean.startsWith('/account/')) sub = clean.slice('/account'.length);
-    else if (site && ['/signup', '/login', '/forgot', '/reset'].includes(clean)) sub = clean;
+    else if (site && ['/signup', '/login', '/forgot', '/reset', '/verify'].includes(clean)) sub = clean;
     if (sub === null) return false;
     const render = Object.hasOwn(PAGES, sub) ? PAGES[sub] : undefined;
     sendPage(res, render ? 200 : 404, (render ?? notFoundAccountPage)(links(req)));
