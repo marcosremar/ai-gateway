@@ -354,6 +354,11 @@ describe('sign-up, login, session', () => {
     expect(synced.json.quota.limits.audioSeconds).toBe(20 * 3600);
     expect(synced.json.quota.planRenewsAt).toBe(new Date(1_793_000_000_000).toISOString());
     expect((await call(gw, 'POST', '/v1/account/billing/portal', { headers, body: {} })).json.url).toContain('billing.stripe.com');
+    stripe.state.subscriptions = [{ status: 'active', customer: 'cus_1', cancel_at: 1_795_000_000, cancel_at_period_end: false, items: { data: [{ price: { lookup_key: 'ucast_pro_monthly' }, current_period_end: 1_795_000_000 }] } }];
+    const cancelling = await call(gw, 'POST', '/v1/account/billing/sync', { headers, body: {} });
+    expect(cancelling.json.plan).toBe('pro');
+    expect(cancelling.json.quota.planCancelsAtPeriodEnd).toBe(true);
+    expect(cancelling.json.quota.planRenewsAt).toBe(new Date(1_795_000_000_000).toISOString());
     stripe.state.subscriptions = [];
     const bad = signedEvent({ type: 'customer.subscription.deleted', data: { object: { customer: 'cus_1' } } }, gw.clock.now, 'whsec_other');
     expect((await call(gw, 'POST', '/v1/billing/stripe/webhook', { headers: { 'Stripe-Signature': bad.header, 'Content-Type': 'application/json' }, raw: Buffer.from(bad.raw) })).status).toBe(400);

@@ -425,7 +425,7 @@ $('lead').textContent=fill(L.signedInAs,{email:r.body.email});$('admin').hidden=
 if(!r.body.emailVerified){$('vb').hidden=false;$('dev').disabled=true;$('kb').disabled=true}loadKeys();var back=new URLSearchParams(location.search).get('billing');
 if(back&&history.replaceState)history.replaceState(null,'',location.pathname);
 if(back==='cancel')show($('bm'),L.billingCancelled);
-(back==='success'&&BILLING?api('/v1/account/billing/sync','POST',{}).then(function(s){if(s.ok)show($('bm'),L.billingDone,'ok')}):Promise.resolve()).then(loadUsage).then(function(){if(back||(WANT&&BILLING))$('billing').scrollIntoView({block:'start'})});if(ADMIN)loadUsers()},function(){show(gm,L.offlineReload)});
+((back==='success'||back==='portal')&&BILLING?api('/v1/account/billing/sync','POST',{}).then(function(s){if(s.ok&&back==='success')show($('bm'),L.billingDone,'ok')}):Promise.resolve()).then(loadUsage).then(function(){if(back||(WANT&&BILLING))$('billing').scrollIntoView({block:'start'})});if(ADMIN)loadUsers()},function(){show(gm,L.offlineReload)});
 $('kf').addEventListener('submit',function(e){e.preventDefault();show(km,'');var dev=$('dev').value.trim();if(!dev){$('dev').focus();return}var b=$('kb');busy(b,true,L.creating);
 api('/v1/account/keys','POST',{deviceName:dev}).then(function(r){busy(b,false,L.createKey);if(!r.ok){show(km,errText(r));return}
 $('nk').textContent=r.body.key;$('new').hidden=false;$('copy').focus();loadKeys()})});
