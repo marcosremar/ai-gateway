@@ -205,7 +205,8 @@ export abstract class ReconcileLoop extends AutoscaleControl {
       if (this.now() - (this.startRefused.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
       toCreate--;
       if (this.now() - (rt.starting.get(m.id) ?? -Infinity) < PARKED_START_GRACE_MS) continue;
-      const refusal = this.capRefusal(m.pricePerHour ?? 0, name);
+      // Below the credit floor a power-on bills GPU time it cannot serve (Vast, 22-23/10/2026: retried every 100 s).
+      const refusal = this.capRefusal(m.pricePerHour ?? 0, name) ?? this.creditRefusal(m);
       if (refusal) { rt.lastError = refusal; blockedBy = refusal; break; }
       if (!(await this.unpark(rt, m))) toCreate++;
     }

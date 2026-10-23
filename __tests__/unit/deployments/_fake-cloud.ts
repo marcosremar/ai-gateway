@@ -34,6 +34,7 @@ export class FakeCloud implements DeploymentBackend {
   measureBaselineRtt?: DeploymentBackend['measureBaselineRtt'];
   recordRtt?: DeploymentBackend['recordRtt'];
   noteHost?: DeploymentBackend['noteHost'];
+  creditIssue?: DeploymentBackend['creditIssue'];
   previewOffers?: DeploymentBackend['previewOffers'];
   placementNote?: string;
   releaseReasons: Array<string | undefined> = [];

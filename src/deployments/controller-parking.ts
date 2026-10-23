@@ -23,9 +23,17 @@ export abstract class ParkingControl extends ReplicaLifecycle {
       if (this.stopping.has(m.id) && (m.state === 'stopped' || now - this.stopping.get(m.id)! > STOPPING_MAX_MS)) this.stopping.delete(m.id);
     }
     for (const id of [...this.stopping.keys()]) if (!this.machines.some(m => m.id === id)) this.stopping.delete(id);
-    const parkedIds = new Set(this.machines.filter(m => this.parkedNow(m) && !this.stoppingNow(m)).map(m => m.id));
-    for (const id of parkedIds) if (!this.parkedSince.has(id)) this.parkedSince.set(id, now);
+    const parked = this.machines.filter(m => this.parkedNow(m) && !this.stoppingNow(m));
+    for (const m of parked) if (!this.parkedSince.has(m.id)) this.parkedSince.set(m.id, this.parkedClockStart(m, now));
+    const parkedIds = new Set(parked.map(m => m.id));
     for (const id of [...this.parkedSince.keys()]) if (!parkedIds.has(id)) this.parkedSince.delete(id);
+  }
+
+  /** Adopted after a restart: unused since the last real use, else each deploy reset `parkedMaxMs` (Vast disk, 19-23/10/2026). */
+  private parkedClockStart(m: ReplicaMachine, now: number): number {
+    if (m.createdAt >= this.startedAt) return now;
+    const lastUse = this.deployments.get(m.deployment)?.record.lastRequestAt ?? m.createdAt;
+    return Math.min(now, Math.max(m.createdAt, lastUse));
   }
 
   /** Parked replicas left unused past `parkedMaxMs` are deleted; returns the ones that stay. */

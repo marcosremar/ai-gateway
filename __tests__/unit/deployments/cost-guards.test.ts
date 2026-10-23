@@ -228,6 +228,36 @@ describe('parked replicas and the caps', () => {
     await until(() => x.cloud.released.length === 1, 3000);
     expect(x.cloud.releaseReasons).toEqual(['parked-too-long']);
   });
+
+  it('a gateway restart does not reset the forgotten-park clock (Vast, babelcast-3090 parked 19/10 still billed 23/10/2026)', async () => {
+    const store = new MemoryDeploymentStore();
+    const x = await setup({ parkedMaxMs: 6 * 3_600_000, store });
+    await x.controller.put('a', { ...PARKING });
+    await parkIt(x, 'a', 1);
+    x.controller.stop();
+    x.clock.t += 7 * 3_600_000;
+    const restarted = new DeploymentController({
+      backend: x.cloud, store, probe: new HttpReplicaProbe(1000), namespace: 'test', reconcileMs: 20, maxTotalReplicas: 6,
+      parkedMaxMs: 6 * 3_600_000, now: () => x.clock.t,
+    });
+    controllers.push(restarted);
+    await restarted.init();
+    restarted.start();
+    await until(() => x.cloud.released.length === 1, 3000);
+    expect(x.cloud.releaseReasons).toEqual(['parked-too-long']);
+  });
+
+  it('no power-on of a parked replica while the provider is below its credit floor (Vast, 22-23/10/2026)', async () => {
+    const x = await setup();
+    await x.controller.put('a', { ...PARKING });
+    await parkIt(x, 'a', 1);
+    await until(() => x.controller.get('a')!.replicas[0]?.providerState === 'stopped', 3000);
+    x.cloud.creditIssue = () => ({ provider: 'vast', message: 'Vast credit $0.45 is below the floor $1', balanceUsd: 0.45, floorUsd: 1, since: 0, at: 0 });
+    x.controller.wake('a');
+    await wait(150);
+    expect(x.cloud.starts).toEqual([]);
+    expect(x.controller.get('a')!.lastError).toMatch(/below the floor/);
+  });
 });
 
 describe('maxHours counts from the last power-on', () => {
