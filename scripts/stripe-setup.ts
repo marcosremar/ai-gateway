@@ -1,5 +1,5 @@
 // Creates the ucast.me plans in a Stripe account (test or live, by the key), idempotently:
-//   bun scripts/stripe-setup.ts <key file> <webhook url> <webhook secret out file>
+//   bun scripts/stripe-setup.ts <key file> <webhook url | -> <webhook secret out file>
 // Products + monthly EUR prices found by lookup key (src/accounts/plans.ts), the webhook endpoint (its signing secret
 // is written to the out file, chmod 600, never printed) and the Customer Portal configuration.
 
@@ -48,8 +48,10 @@ for (const plan of PAID_PLANS) {
   console.log(`${plan.id}: created price ${price.id} at ${plan.priceCents / 100} EUR/month`);
 }
 
-const hooks = await stripe<{ data: Array<{ id: string; url: string }> }>('GET', '/webhook_endpoints', { limit: 100 });
-if (hooks.data.some(h => h.url === webhookUrl)) {
+const hooks = webhookUrl === '-' ? { data: [] } : await stripe<{ data: Array<{ id: string; url: string }> }>('GET', '/webhook_endpoints', { limit: 100 });
+if (webhookUrl === '-') {
+  console.log('webhook skipped');
+} else if (hooks.data.some(h => h.url === webhookUrl)) {
   console.log(`webhook already points to ${webhookUrl} (its secret is in the Stripe dashboard)`);
 } else {
   const params: Record<string, string> = { url: webhookUrl, description: 'ucast.me accounts' };

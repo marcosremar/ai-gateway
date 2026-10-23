@@ -38,7 +38,7 @@ export function verifyStripeSignature(raw: string, header: string | undefined, s
 }
 
 interface StripeSubscription {
-  status: string; customer: string; current_period_end?: number; cancel_at_period_end?: boolean;
+  status: string; customer: string; current_period_end?: number; cancel_at_period_end?: boolean; cancel_at?: number | null;
   items: { data: Array<{ price: { lookup_key: string | null }; current_period_end?: number }> };
 }
 
@@ -99,7 +99,7 @@ export class BillingService {
 
   async portal(user: User): Promise<string> {
     if (!user.stripeCustomerId) throw new AccountError(400, 'Você ainda não tem uma assinatura.', 'no_subscription');
-    const session = await this.call<{ url: string }>('POST', '/billing_portal/sessions', { customer: user.stripeCustomerId, return_url: `${this.cfg.publicBaseUrl}/account` });
+    const session = await this.call<{ url: string }>('POST', '/billing_portal/sessions', { customer: user.stripeCustomerId, return_url: `${this.cfg.publicBaseUrl}/account?billing=portal` });
     return session.url;
   }
 
@@ -109,11 +109,11 @@ export class BillingService {
     const subs = await this.call<{ data: StripeSubscription[] }>('GET', '/subscriptions', { customer: user.stripeCustomerId, status: 'all', limit: 10 });
     const live = subs.data.find(s => LIVE_STATUSES.has(s.status) && planByLookupKey(s.items.data[0]?.price.lookup_key));
     const item = live?.items.data[0];
-    const periodEnd = live?.current_period_end ?? item?.current_period_end;
+    const periodEnd = live?.cancel_at ?? live?.current_period_end ?? item?.current_period_end;
     await this.accounts.setBilling(user, {
       plan: live ? planByLookupKey(item?.price.lookup_key)!.id : PLANS.free.id,
       planRenewsAt: periodEnd ? periodEnd * 1000 : undefined,
-      planCancelsAtPeriodEnd: live?.cancel_at_period_end || undefined,
+      planCancelsAtPeriodEnd: live?.cancel_at_period_end || Boolean(live?.cancel_at) || undefined,
     });
   }
 
