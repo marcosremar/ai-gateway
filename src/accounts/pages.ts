@@ -8,7 +8,7 @@ import { PAGE_STRINGS, type PageLang } from './page-strings';
 export interface RenderedPage { html: string; nonce: string }
 
 export interface PageLinks {
-  home: string; signup: string; login: string; forgot: string; reset: string; account: string;
+  home: string; signup: string; login: string; forgot: string; reset: string; verify: string; account: string;
   download: string; lang: PageLang;
 }
 
@@ -82,6 +82,11 @@ input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px var(--screen) inset;-webkit
 .msg{display:flex;gap:10px;align-items:baseline;border:1px solid var(--hairline);border-radius:3px;padding:11px 13px;margin:18px 0 0;font-size:.93rem;background:var(--screen)}
 .msg::before{content:"";flex:none;width:7px;height:7px;border-radius:50%;transform:translateY(-1px);background:currentColor}
 .msg:empty{display:none}
+.notice{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center;justify-content:space-between;border-color:rgba(224,164,88,.35)}
+.notice p{margin:0;color:var(--amber)}
+.notice .msg{flex-basis:100%;margin:0}
+#xpw{flex:1;min-width:12rem;width:auto}
+input:disabled{opacity:.5;cursor:not-allowed}
 .msg.err{color:var(--amber);border-color:rgba(224,164,88,.35)}
 .msg.ok{color:var(--phos);border-color:rgba(76,195,203,.35)}
 .chain{list-style:none;margin:0;padding:0;border-top:1px solid var(--hairline)}
@@ -250,6 +255,20 @@ busy(b,false,L.resetButton);show(m,errText(r))},function(){busy(b,false,L.resetB
     links);
 }
 
+export function verifyPage(links: PageLinks): RenderedPage {
+  const t = stringsOf(links);
+  const nonce = randomBytes(16).toString('base64');
+  const body = `<div class="narrow"><h1>${t.verifyHeading}</h1><p class="lead" id="vl">${t.verifyLead}</p>
+<div id="m" class="msg" role="alert" aria-live="polite"></div>
+<p class="btnrow"><a id="go" class="btn" href="${esc(links.account)}" hidden>${t.goAccount}</a></p></div>`;
+  const script = `(function(){var m=$('m'),go=$('go');var t=(location.hash.match(/token=([A-Za-z0-9_-]+)/)||[])[1]||'';
+if(t&&history.replaceState)history.replaceState(null,'',location.pathname);
+function done(text,kind){$('vl').hidden=true;show(m,text,kind);go.hidden=false}
+if(!t){done(L.verifyMissing);return}
+api('/v1/account/verify','POST',{token:t}).then(function(r){if(r.ok){done(L.verified,'ok');return}done(errText(r))},function(){done(L.offline)})})();`;
+  return { html: shell(t.verifyTitle, body, script, nonce, links), nonce };
+}
+
 export function homePage(links: PageLinks): RenderedPage {
   const t = stringsOf(links);
   const nonce = randomBytes(16).toString('base64');
@@ -266,6 +285,7 @@ export function dashboardPage(links: PageLinks): RenderedPage {
   const nav = `<span id="who" class="hint"></span><button id="out" class="btn ghost" type="button">${t.signOut}</button>`;
   const body = `<h1>${t.dashHeading}</h1><p class="lead" id="lead">${t.loading}</p>
 <div id="gm" class="msg" role="alert" aria-live="polite"></div>
+<div id="vb" class="card notice" hidden><p>${t.verifyNotice}</p><button id="vr" class="btn ghost" type="button">${t.resendVerify}</button><div id="vm" class="msg" role="status" aria-live="polite"></div></div>
 <section class="card" aria-labelledby="sh"><h2 id="sh">${t.setupHeading}</h2>
 <ol class="chain steps">
 <li id="s1"><span class="ch">CH1</span><span class="name">${t.stepDownload}</span><span class="read">WIN · MAC</span>
@@ -289,7 +309,12 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 <h3>${t.usersHeading}</h3><p class="hint">${t.usersHint}</p>
 <label class="sr" for="uq">${t.searchUser}</label><input id="uq" type="text" placeholder="${esc(t.searchPlaceholder)}" autocomplete="off">
 <div id="um" class="msg" role="alert" aria-live="polite"></div>
-<ul id="users" class="users" aria-label="${esc(t.usersHeading)}"></ul></section>`;
+<ul id="users" class="users" aria-label="${esc(t.usersHeading)}"></ul></section>
+<section class="card" aria-labelledby="xh"><h2 id="xh">${t.deleteHeading}</h2><p class="hint">${t.deleteHint}</p>
+<form id="xf" class="row"><label class="sr" for="xpw">${t.deletePassword}</label>
+<input id="xpw" type="password" autocomplete="current-password" placeholder="${esc(t.deletePassword)}" required>
+<button id="xb" class="btn danger" type="submit">${t.deleteButton}</button></form>
+<div id="xm" class="msg" role="alert" aria-live="polite"></div></section>`;
   const script = `(function(){
 var gm=$('gm'),km=$('km'),ADMIN=false;
 function minutes(s){return (s/60).toLocaleString(L.locale,{maximumFractionDigits:s<600?1:0})}
@@ -346,13 +371,18 @@ $('uq').addEventListener('input',drawUsers);
 function loadUsers(){return api('/v1/account/users').then(function(r){if(!r.ok)return;USERS=r.body.users||[];drawUsers()})}
 api('/v1/account/me').then(function(r){if(r.status===401){location.href=${js(links.login)};return}
 if(!r.ok){show(gm,errText(r));return}CSRF=r.body.csrfToken||'';ADMIN=!!r.body.admin;$('who').textContent=r.body.email;
-$('lead').textContent=fill(L.signedInAs,{email:r.body.email});$('admin').hidden=!ADMIN;loadKeys();loadUsage();if(ADMIN)loadUsers()},function(){show(gm,L.offlineReload)});
+$('lead').textContent=fill(L.signedInAs,{email:r.body.email});$('admin').hidden=!ADMIN;
+if(!r.body.emailVerified){$('vb').hidden=false;$('dev').disabled=true;$('kb').disabled=true}loadKeys();loadUsage();if(ADMIN)loadUsers()},function(){show(gm,L.offlineReload)});
 $('kf').addEventListener('submit',function(e){e.preventDefault();show(km,'');var dev=$('dev').value.trim();if(!dev){$('dev').focus();return}var b=$('kb');busy(b,true,L.creating);
 api('/v1/account/keys','POST',{deviceName:dev}).then(function(r){busy(b,false,L.createKey);if(!r.ok){show(km,errText(r));return}
 $('nk').textContent=r.body.key;$('new').hidden=false;$('copy').focus();loadKeys()})});
 $('copy').addEventListener('click',function(){var t=$('nk').textContent,c=$('copy');
 (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){c.textContent=L.copied},function(){
 var r=document.createRange();r.selectNodeContents($('nk'));var sel=getSelection();sel.removeAllRanges();sel.addRange(r);c.textContent=L.selected})});
+$('vr').addEventListener('click',function(){var b=$('vr');busy(b,true);api('/v1/account/verify/resend','POST',{}).then(function(r){busy(b,false);show($('vm'),r.ok?L.verifySent:errText(r),r.ok?'ok':'err')},function(){busy(b,false);show($('vm'),L.offline)})});
+$('xf').addEventListener('submit',function(e){e.preventDefault();var xm=$('xm'),b=$('xb'),pw=$('xpw').value;show(xm,'');if(!pw){$('xpw').focus();return}
+if(!confirm(L.deleteConfirm))return;busy(b,true,L.deleting);
+api('/v1/account/me','DELETE',{password:pw}).then(function(r){if(r.ok){location.href=${js(links.home)};return}busy(b,false,${js(t.deleteButton)});show(xm,errText(r))},function(){busy(b,false,${js(t.deleteButton)});show(xm,L.offline)})});
 $('out').addEventListener('click',function(){api('/v1/account/logout','POST',{}).then(function(){location.href=${js(links.login)}})});
 })();`;
   return { html: shell(t.dashTitle, body, script, nonce, links, nav), nonce };

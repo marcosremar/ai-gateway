@@ -145,9 +145,18 @@ function call(gw: Gw, method: string, path: string, o: { headers?: Record<string
 
 const cookieOf = (r: Res) => String((r.headers['set-cookie'] as string[] | undefined)?.[0] ?? '').split(';')[0]!;
 
-async function signup(gw: Gw, email = 'Ana@Example.com', password = 'senha-forte-123') {
+function takeVerification(gw: Gw, email: string): string | null {
+  const i = gw.mails.findIndex(m => m.to === email.toLowerCase() && m.subject.includes('Confirme'));
+  if (i < 0) return null;
+  const [mail] = gw.mails.splice(i, 1);
+  return /#token=([A-Za-z0-9_-]+)/.exec(mail!.text)![1]!;
+}
+
+async function signup(gw: Gw, email = 'Ana@Example.com', password = 'senha-forte-123', verify = true) {
   const r = await call(gw, 'POST', '/v1/account/signup', { body: { email, password } });
   expect(r.status).toBe(201);
+  const token = takeVerification(gw, email);
+  if (verify && token) expect((await call(gw, 'POST', '/v1/account/verify', { body: { token } })).status).toBe(200);
   return { cookie: cookieOf(r), csrf: r.json.csrfToken as string };
 }
 
@@ -279,7 +288,40 @@ describe('sign-up, login, session', () => {
     for (let i = 0; i < 10; i++) await call(gw, 'POST', '/v1/account/signup', { body: { email: `u${i}@example.com`, password: 'senha-forte-123' } });
     expect((await call(gw, 'POST', '/v1/account/signup', { body: { email: 'u11@example.com', password: 'senha-forte-123' } })).status).toBe(429);
     for (let i = 0; i < 5; i++) expect((await call(gw, 'POST', '/v1/account/password/forgot', { body: { email: 'u1@example.com' } })).status).toBe(200);
-    expect(gw.mails.filter(m => m.to === 'u1@example.com')).toHaveLength(3);
+    expect(gw.mails.filter(m => m.to === 'u1@example.com' && m.subject.includes('senha'))).toHaveLength(3);
+  });
+
+  it('a new account confirms its e-mail before creating keys; old links and other accounts are not affected', async () => {
+    const gw = await startGateway();
+    const s = await signup(gw, 'nova@example.com', 'senha-forte-123', false);
+    const headers = { Cookie: s.cookie, 'X-CSRF-Token': s.csrf };
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } })).json.emailVerified).toBe(false);
+    const refused = await call(gw, 'POST', '/v1/account/keys', { headers, body: { deviceName: 'Mac' } });
+    expect(refused.status).toBe(403);
+    expect(refused.json.error.code).toBe('email_not_verified');
+    expect((await call(gw, 'POST', '/v1/account/verify/resend', { headers, body: {} })).status).toBe(200);
+    const token = takeVerification(gw, 'nova@example.com')!;
+    expect((await call(gw, 'POST', '/v1/account/verify', { body: { token: 'nope' } })).json.error.code).toBe('invalid_verify_token');
+    expect((await call(gw, 'POST', '/v1/account/verify', { body: { token } })).status).toBe(200);
+    expect((await call(gw, 'POST', '/v1/account/verify', { body: { token } })).status).toBe(400);
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } })).json.emailVerified).toBe(true);
+    await newKey(gw, s);
+  });
+
+  it('deletes the account with its password: sessions, keys and usage go, the e-mail can sign up again', async () => {
+    const gw = await startGateway();
+    const s = await signup(gw);
+    const k = await newKey(gw, s);
+    const headers = { Cookie: s.cookie, 'X-CSRF-Token': s.csrf };
+    expect((await call(gw, 'DELETE', '/v1/account/me', { headers: { Cookie: s.cookie }, body: { password: 'senha-forte-123' } })).status).toBe(403);
+    expect((await call(gw, 'DELETE', '/v1/account/me', { headers, body: { password: 'errada-errada' } })).json.error.code).toBe('wrong_password');
+    const gone = await call(gw, 'DELETE', '/v1/account/me', { headers, body: { password: 'senha-forte-123' } });
+    expect(gone.status).toBe(200);
+    expect(String(gone.headers['set-cookie'])).toContain('Max-Age=0');
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } })).status).toBe(401);
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Authorization: `Bearer ${k.key}` } })).status).toBe(401);
+    expect(gw.mails.some(m => m.to === 'ana@example.com' && m.subject.includes('excluída'))).toBe(true);
+    await signup(gw);
   });
 
   it('cookie writes need the CSRF token and a same-origin request; JSON-less or cross-site forms are refused', async () => {

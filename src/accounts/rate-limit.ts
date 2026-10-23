@@ -11,6 +11,9 @@ export const ATTEMPT_LIMITS = {
   resetPerEmail: { limit: 3, windowMs: 60 * 60_000 },
   resetPerIp: { limit: 20, windowMs: 60 * 60_000 },
   activatePerIp: { limit: 30, windowMs: 10 * 60_000 },
+  verifyPerIp: { limit: 30, windowMs: 60 * 60_000 },
+  verifyResendPerUser: { limit: 3, windowMs: 60 * 60_000 },
+  deletePerUser: { limit: 5, windowMs: 15 * 60_000 },
 } as const satisfies Record<string, Window>;
 
 export class AttemptLimiter {
