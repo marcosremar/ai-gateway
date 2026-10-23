@@ -184,7 +184,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     if (isCrossSite(req, siteHosts)) throw new AccountError(403, 'Pedido de outra origem recusado.', 'cross_site');
   }
 
-  const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl });
+  const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user) });
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, path: string): Promise<void> {
     const ip = RateLimiter.clientIp(req);

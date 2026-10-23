@@ -543,7 +543,8 @@ describe('pages and host routing', () => {
     // Not the site host: `/signup` and `/` are left to the proxy (which wants a key).
     expect((await call(gw, 'GET', '/signup')).status).toBe(401);
     const dash = await call(gw, 'GET', '/account', { host: SITE });
-    expect(dash.text).toContain('Sua chave de ativação');
+    expect(dash.text).toContain('Comece em três passos');
+    expect(dash.text).toContain("if(ADMIN)loadUsers()");
     expect(dash.text).not.toMatch(/ style="/);
   });
 
@@ -568,6 +569,8 @@ describe('admin: users and access keys', () => {
     const gw = await startGateway({ adminEmails: [ADMIN] });
     const ana = await signup(gw, 'ana@example.com');
     const admin = await signup(gw, ADMIN);
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: ana.cookie } })).json.admin).toBe(false);
+    expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: admin.cookie } })).json.admin).toBe(true);
     // A plain user gets 403 and no data.
     const denied = await call(gw, 'GET', '/v1/account/users', { headers: { Cookie: ana.cookie } });
     expect(denied.status).toBe(403);
