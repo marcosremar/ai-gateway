@@ -2,6 +2,8 @@
 // Served in front of the proxy (index.ts `mount`), like the rooms: these routes authenticate themselves.
 //   POST /v1/account/signup | /login | /logout | /password/forgot | /password/reset | /verify {token}
 //   POST /v1/account/verify/resend, DELETE /v1/account/me {password}   (session cookie + CSRF)
+//   POST /v1/account/billing/checkout {plan} | /portal | /sync   (session cookie + CSRF; Stripe, when configured)
+//   POST /v1/billing/stripe/webhook   (Stripe-Signature)
 //   GET  /v1/account/me | /usage        (session cookie, or an activation key as Bearer — read-only)
 //   GET|POST /v1/account/keys, DELETE /v1/account/keys/:id (or POST …/:id/revoke)   (session cookie + CSRF)
 //   POST /v1/activate {key, deviceName, appVersion}
@@ -24,6 +26,7 @@ import {
 } from './pages';
 import { ATTEMPT_LIMITS, AttemptLimiter, type Window } from './rate-limit';
 import { pageLang } from './page-strings';
+import type { BillingService } from './billing';
 import { AccountError, KEY_PREFIX, normalizeEmail, type AccountService, type User } from './service';
 import { audioSecondsOf, llmTokensOf, wavSeconds, type Counter, type Counters, type UsageMeter } from './usage';
 
@@ -66,11 +69,20 @@ function sendPage(res: ServerResponse, status: number, page: RenderedPage): void
   res.end(page.html);
 }
 
-function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   if (!String(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
     req.resume();
-    return Promise.reject(new AccountError(415, 'Envie o corpo como JSON.', 'unsupported_media_type'));
+    throw new AccountError(415, 'Envie o corpo como JSON.', 'unsupported_media_type');
   }
+  const text = await readText(req);
+  try {
+    const v: unknown = JSON.parse(text || '{}');
+    if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not an object');
+    return v as Record<string, unknown>;
+  } catch { throw new AccountError(400, 'JSON inválido.', 'invalid_json'); }
+}
+
+function readText(req: IncomingMessage): Promise<string> {
   if (Number(req.headers['content-length'] ?? 0) > BODY_MAX) {
     req.resume();
     return Promise.reject(new AccountError(413, 'Pedido grande demais.', 'body_too_large'));
@@ -79,7 +91,7 @@ function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
     const chunks: Buffer[] = [];
     let size = 0;
     let done = false;
-    const finish = (err: Error | null, value?: Record<string, unknown>) => {
+    const finish = (err: Error | null, value?: string) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
@@ -91,13 +103,7 @@ function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
       if (size > BODY_MAX) { finish(new AccountError(413, 'Pedido grande demais.', 'body_too_large')); req.resume(); return; }
       chunks.push(c);
     });
-    req.on('end', () => {
-      try {
-        const v: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-        if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not an object');
-        finish(null, v as Record<string, unknown>);
-      } catch { finish(new AccountError(400, 'JSON inválido.', 'invalid_json')); }
-    });
+    req.on('end', () => finish(null, Buffer.concat(chunks).toString('utf8')));
     req.on('error', (err) => finish(err));
   });
 }
@@ -137,10 +143,17 @@ export interface AccountsHttpOptions {
   log?: (msg: string, data?: Record<string, unknown>) => void;
   /** Requests a realtime session is worth (the app budget's charge, `RealtimeService.sessionRequests`); default 1. */
   sessionRequests?: () => number;
+  /** Stripe billing; null while STRIPE_SECRET_KEY is unset (no plan routes, no plan limits). */
+  billing?: BillingService | null;
 }
 
 export function createAccountsHttp(opts: AccountsHttpOptions) {
   const { service, usage } = opts;
+  const billing = opts.billing ?? null;
+  const billingOn = (): BillingService => {
+    if (!billing) throw new AccountError(503, 'Os planos pagos ainda não estão disponíveis.', 'billing_off');
+    return billing;
+  };
   const cfg = service.config;
   const limiter = opts.limiter ?? new AttemptLimiter(service.now);
   const log = opts.log ?? (() => {});
@@ -185,7 +198,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     if (isCrossSite(req, siteHosts)) throw new AccountError(403, 'Pedido de outra origem recusado.', 'cross_site');
   }
 
-  const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user), emailVerified: !user.emailUnverified });
+  const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user), emailVerified: !user.emailUnverified, billing: Boolean(billing) });
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, path: string): Promise<void> {
     const ip = RateLimiter.clientIp(req);
@@ -252,10 +265,36 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         send(res, 200, { ok: true });
         return;
       }
+      case 'POST /v1/account/billing/checkout': {
+        const w = writer(req);
+        const body = await readJson(req);
+        send(res, 200, { url: await billingOn().checkout(w.user, body.plan) });
+        return;
+      }
+      case 'POST /v1/account/billing/portal': {
+        const w = writer(req);
+        req.resume();
+        send(res, 200, { url: await billingOn().portal(w.user) });
+        return;
+      }
+      case 'POST /v1/account/billing/sync': {
+        const w = writer(req);
+        req.resume();
+        await billingOn().sync(w.user);
+        send(res, 200, { ...meView(w.user), quota: service.quotaView(w.user) });
+        return;
+      }
+      case 'POST /v1/billing/stripe/webhook': {
+        await billingOn().webhook(await readText(req), req.headers['stripe-signature'] as string | undefined);
+        send(res, 200, { received: true });
+        return;
+      }
       case 'DELETE /v1/account/me': {
         const w = writer(req);
         limit(`delete:user:${w.user.id}`, ATTEMPT_LIMITS.deletePerUser);
         const body = await readJson(req);
+        await service.checkPassword(w.user, body.password);
+        await billing?.forget(w.user);
         await service.deleteAccount(w.user, body.password);
         send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
         return;
@@ -405,7 +444,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   function handle(req: IncomingMessage, res: ServerResponse): boolean {
     const method = (req.method ?? 'GET').toUpperCase();
     const path = (req.url ?? '/').split('?')[0]!;
-    if (path.startsWith('/v1/account/') || path === '/v1/activate') {
+    if (path.startsWith('/v1/account/') || path === '/v1/activate' || path === '/v1/billing/stripe/webhook') {
       if (method === 'OPTIONS') { req.resume(); res.writeHead(204, API_HEADERS); res.end(); return true; }
       api(req, res, method, path).catch((err: unknown) => fail(res, err));
       return true;
