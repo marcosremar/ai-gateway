@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { alertEmailFromEnv } from '../../../src/telemetry/alert-email';
 
 // Owner, 24/10/2026: «não enviar mais e-mail». Alerts keep the log and ALERT_WEBHOOK_URL; e-mail only with ALERT_EMAIL=1.
+const RESEND_HOST = ['api', 'resend', 'com'].join('.');
 const ROOT = join(__dirname, '../../..');
 const filesUnder = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
   const path = join(dir, name);
@@ -27,7 +28,7 @@ describe('alert e-mail is off by default', () => {
 
   it('only the alert mailer and the account mailer call Resend', () => {
     const callers = [...filesUnder(join(ROOT, 'src')), join(ROOT, 'serve.ts')]
-      .filter(f => /https:\/\/api\.resend\.com\//.test(readFileSync(f, 'utf8'))).map(f => f.slice(ROOT.length + 1)).sort();
+      .filter(f => readFileSync(f, 'utf8').split(RESEND_HOST).length > 1).map(f => f.slice(ROOT.length + 1)).sort();
     expect(callers).toEqual(['src/accounts/email.ts', 'src/telemetry/alert-email.ts']);
   });
 });
