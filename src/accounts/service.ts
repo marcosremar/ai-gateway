@@ -10,6 +10,8 @@ import type { EmailSender } from './email';
 import { dummyHash, hashPassword, passwordProblem, verifyPassword } from './password';
 import { nextDayStart, nextMonthStart, type Counters, type UsageMeter } from './usage';
 import { nextPlan, planOf } from './plans';
+import * as mails from './email-templates';
+import type { PageLang } from './page-strings';
 
 export const KEY_PREFIX = 'ucast_live_';
 const KEY_RE = /^ucast_live_[A-Za-z0-9_-]{43}$/;
@@ -38,6 +40,7 @@ export interface User {
   stripeCustomerId?: string;
   planRenewsAt?: number;
   planCancelsAtPeriodEnd?: boolean;
+  lang?: PageLang;
 }
 
 export type BillingFields = Partial<Pick<User, 'plan' | 'stripeCustomerId' | 'planRenewsAt' | 'planCancelsAtPeriodEnd'>>;
@@ -171,7 +174,7 @@ export class AccountService {
    * Creates the account and a session. An e-mail already registered: when the password is the account's, this is a
    * login; otherwise the same generic refusal as any other (the owner gets an e-mail about the attempt).
    */
-  async signup(rawEmail: unknown, password: unknown): Promise<{ user: User; session: { token: string; csrf: string } }> {
+  async signup(rawEmail: unknown, password: unknown, lang: PageLang = 'pt'): Promise<{ user: User; session: { token: string; csrf: string } }> {
     const email = normalizeEmail(rawEmail);
     if (!email) throw new AccountError(400, 'Informe um e-mail válido.', 'invalid_email');
     const problem = passwordProblem(password);
@@ -180,18 +183,14 @@ export class AccountService {
     const existing = this.state.users.find(u => u.email === email);
     if (existing) {
       if (!existing.disabledAt && await verifyPassword(pw, existing.passwordHash)) return { user: existing, session: await this.openSession(existing) };
-      void this.opts.email.send({
-        to: email, subject: 'Tentativa de criar conta no ucast.me',
-        text: `Alguém tentou criar uma conta no ucast.me com este e-mail, que já tem conta. Se foi você, entre em ${this.config.publicBaseUrl}/login ou recupere a senha em ${this.config.publicBaseUrl}/forgot.`,
-        html: `<p>Alguém tentou criar uma conta no ucast.me com este e-mail, que já tem conta.</p><p>Se foi você, <a href="${this.config.publicBaseUrl}/login">entre</a> ou <a href="${this.config.publicBaseUrl}/forgot">recupere a senha</a>.</p>`,
-      }).catch(() => {});
+      void this.opts.email.send({ to: email, ...mails.signupAttempt(existing.lang ?? lang, `${this.config.publicBaseUrl}/login`, `${this.config.publicBaseUrl}/forgot`) }).catch(() => {});
       throw new AccountError(400, 'Não foi possível criar a conta com estes dados. Se você já tem conta, entre ou recupere a senha.', 'signup_refused');
     }
     const now = this.now();
-    const user: User = { id: `usr_${randomUUID().replace(/-/g, '')}`, email, passwordHash: await hashPassword(pw), plan: this.config.plan, createdAt: now, passwordChangedAt: now, emailUnverified: true };
+    const user: User = { id: `usr_${randomUUID().replace(/-/g, '')}`, email, passwordHash: await hashPassword(pw), plan: this.config.plan, createdAt: now, passwordChangedAt: now, emailUnverified: true, lang };
     this.state.users.push(user);
     const session = await this.openSession(user);
-    await this.sendVerification(user);
+    await this.sendVerification(user, true);
     this.opts.log?.('accounts: signup', { userId: user.id });
     return { user, session };
   }
@@ -252,11 +251,7 @@ export class AccountService {
     await this.save();
     const link = `${this.config.publicBaseUrl}/reset#token=${token}`;
     const minutes = Math.round(this.config.resetTtlMs / 60_000);
-    await this.opts.email.send({
-      to: user.email, subject: 'Redefinir sua senha do ucast.me',
-      text: `Para criar uma nova senha, abra: ${link}\nO link vale por ${minutes} minutos e só pode ser usado uma vez. Se não foi você, ignore este e-mail.`,
-      html: `<p>Para criar uma nova senha, <a href="${link}">clique aqui</a>.</p><p>O link vale por ${minutes} minutos e só pode ser usado uma vez. Se não foi você, ignore este e-mail.</p>`,
-    }).catch((err: unknown) => this.opts.log?.('accounts: reset e-mail failed', { error: err instanceof Error ? err.message : String(err) }));
+    await this.opts.email.send({ to: user.email, ...mails.resetPassword(user.lang ?? 'pt', link, minutes) }).catch((err: unknown) => this.opts.log?.('accounts: reset e-mail failed', { error: err instanceof Error ? err.message : String(err) }));
   }
 
   /** Sets the new password, burns the token and ends every session of the account. */
@@ -273,22 +268,19 @@ export class AccountService {
     user.passwordChangedAt = now;
     this.state.sessions = this.state.sessions.filter(s => s.userId !== user.id);
     await this.save();
+    void this.opts.email.send({ to: user.email, ...mails.passwordChanged(user.lang ?? 'pt', `${this.config.publicBaseUrl}/forgot`) }).catch(() => {});
   }
 
   // ── E-mail verification and account deletion ─────────────────────────────
 
-  async sendVerification(user: User): Promise<void> {
+  async sendVerification(user: User, welcome = false): Promise<void> {
     if (!user.emailUnverified) return;
     const token = randomBytes(32).toString('base64url');
     this.state.verifications = this.state.verifications.filter(v => v.userId !== user.id);
     this.state.verifications.push({ hash: this.hash(token), userId: user.id, expiresAt: this.now() + VERIFY_TTL_MS });
     await this.save();
     const link = `${this.config.publicBaseUrl}/verify#token=${token}`;
-    await this.opts.email.send({
-      to: user.email, subject: 'Confirme seu e-mail no ucast.me',
-      text: `Para confirmar o e-mail da sua conta no ucast.me, abra: ${link}\nO link vale por 48 horas. Se não foi você, ignore este e-mail.`,
-      html: `<p>Para confirmar o e-mail da sua conta no ucast.me, <a href="${link}">clique aqui</a>.</p><p>O link vale por 48 horas. Se não foi você, ignore este e-mail.</p>`,
-    }).catch((err: unknown) => this.opts.log?.('accounts: verification e-mail failed', { error: err instanceof Error ? err.message : String(err) }));
+    await this.opts.email.send({ to: user.email, ...mails.verifyEmail(user.lang ?? 'pt', link, welcome, this.config.downloadUrl) }).catch((err: unknown) => this.opts.log?.('accounts: verification e-mail failed', { error: err instanceof Error ? err.message : String(err) }));
   }
 
   async verifyEmail(token: unknown): Promise<void> {
@@ -320,11 +312,7 @@ export class AccountService {
     this.opts.usage.forget(user.id);
     await this.save();
     this.opts.log?.('accounts: account deleted', { userId: user.id });
-    void this.opts.email.send({
-      to: user.email, subject: 'Sua conta no ucast.me foi excluída',
-      text: 'Sua conta no ucast.me, as chaves de ativação e o histórico de uso foram excluídos. Se não foi você, fale com a gente pelo site ucast.me.',
-      html: '<p>Sua conta no ucast.me, as chaves de ativação e o histórico de uso foram excluídos.</p><p>Se não foi você, fale com a gente pelo site <a href="https://ucast.me">ucast.me</a>.</p>',
-    }).catch(() => {});
+    void this.opts.email.send({ to: user.email, ...mails.accountDeleted(user.lang ?? 'pt') }).catch(() => {});
   }
 
   // ── Activation keys ───────────────────────────────────────────────────────
@@ -425,11 +413,7 @@ export class AccountService {
     this.state.keys.push(k);
     this.byKeyHash.set(hash, k);
     await this.save();
-    await this.opts.email.send({
-      to: user.email, subject: 'Sua chave de acesso ao ucast.me',
-      text: `Esta é a sua chave de ativação do ucast.me:\n\n${key}\n\nCole-a no app, em "Ativar o ucast.me". Ela só foi enviada por e-mail — guarde-a bem. Se você não esperava esta chave, ignore este e-mail.`,
-      html: `<p>Esta é a sua chave de ativação do ucast.me:</p><p><code style="font-size:1.05em">${key}</code></p><p>Cole-a no app, em “Ativar o ucast.me”. Ela só foi enviada por e-mail — guarde-a bem.</p><p>Se você não esperava esta chave, ignore este e-mail.</p>`,
-    });
+    await this.opts.email.send({ to: user.email, ...mails.accessKey(user.lang ?? 'pt', key) });
     this.opts.log?.('accounts: admin sent access key', { userId: user.id, keyId: k.id });
     return { email: user.email, view: this.view(k) };
   }

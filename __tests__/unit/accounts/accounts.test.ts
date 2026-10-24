@@ -177,7 +177,7 @@ function call(gw: Gw, method: string, path: string, o: { headers?: Record<string
 const cookieOf = (r: Res) => String((r.headers['set-cookie'] as string[] | undefined)?.[0] ?? '').split(';')[0]!;
 
 function takeVerification(gw: Gw, email: string): string | null {
-  const i = gw.mails.findIndex(m => m.to === email.toLowerCase() && m.subject.includes('Confirme'));
+  const i = gw.mails.findIndex(m => m.to === email.toLowerCase() && /confirm/i.test(m.subject));
   if (i < 0) return null;
   const [mail] = gw.mails.splice(i, 1);
   return /#token=([A-Za-z0-9_-]+)/.exec(mail!.text)![1]!;
@@ -285,6 +285,24 @@ describe('sign-up, login, session', () => {
     await new Promise(r => setTimeout(r, 10));
     expect(gw.mails.some(m => m.subject.includes('Tentativa'))).toBe(true);
     expect((await call(gw, 'POST', '/v1/account/signup', { body: { email: 'ana@example.com', password: 'senha-forte-123' } })).status).toBe(201);
+  });
+
+  it('writes every account e-mail in the language the account signed up in', async () => {
+    const gw = await startGateway();
+    await call(gw, 'POST', '/v1/account/signup', { headers: { Cookie: 'ucast_lang=fr' }, body: { email: 'eve@example.com', password: 'senha-forte-123' } });
+    const welcome = gw.mails.find(m => m.to === 'eve@example.com')!;
+    expect(welcome.subject).toBe('Bienvenue sur ucast.me — confirmez votre e-mail');
+    expect(welcome.html).toContain('<html lang="fr">');
+    expect(welcome.text).toContain('Téléchargez l’app');
+    await call(gw, 'POST', '/v1/account/password/forgot', { body: { email: 'eve@example.com' } });
+    const reset = gw.mails.at(-1)!;
+    expect(reset.subject).toBe('Réinitialiser votre mot de passe ucast.me');
+    const token = /#token=([A-Za-z0-9_-]+)/.exec(reset.text)![1]!;
+    expect(reset.html).toContain(`reset#token=${token}`);
+    await call(gw, 'POST', '/v1/account/password/reset', { body: { token, password: 'nova-senha-456' } });
+    const changed = gw.mails.at(-1)!;
+    expect(changed.subject).toBe('Votre mot de passe ucast.me a été modifié');
+    expect(changed.text).toContain('https://ucast.me/forgot');
   });
 
   it('resets the password with the e-mailed one-time token and ends the old sessions', async () => {

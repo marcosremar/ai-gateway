@@ -208,7 +208,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         sameSiteForm(req);
         limit(`signup:ip:${ip}`, ATTEMPT_LIMITS.signupPerIp);
         const body = await readJson(req);
-        const { user, session } = await service.signup(body.email, body.password);
+        const { user, session } = await service.signup(body.email, body.password, links(req).lang);
         send(res, 201, { ...meView(user), csrfToken: session.csrf }, { 'Set-Cookie': cookie(session.token, Math.floor(cfg.sessionTtlMs / 1000)) });
         return;
       }
