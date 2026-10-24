@@ -11,6 +11,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
+import { createEmailSender } from '../../../src/accounts/email';
 import { AppLimits } from '../../../src/gateway/proxy/app-limits';
 import { AccessKeys } from '../../../src/config/access-keys';
 import { AdminGate } from '../../../src/config/admin-gate';
@@ -771,5 +772,15 @@ describe('helpers', () => {
   it('reads WAV durations', () => {
     expect(wavSeconds(wav(2.5))).toBeCloseTo(2.5, 3);
     expect(wavSeconds(Buffer.from('not a wav at all'))).toBeNull();
+  });
+});
+
+describe('resend sender', () => {
+  it('sends account mail with replies going to the support address', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => { bodies.push(JSON.parse(String(init.body))); return new Response('{}'); }) as unknown as typeof fetch;
+    const sender = createEmailSender({ resendApiKey: 're_test', from: 'ucast.me <no-reply@ucast.me>', replyTo: 'support@ucast.me', logLinks: false, fetchImpl });
+    await sender.send({ to: 'ana@example.com', subject: 's', text: 't', html: 'h' });
+    expect(bodies[0]).toMatchObject({ to: ['ana@example.com'], reply_to: 'support@ucast.me' });
   });
 });
