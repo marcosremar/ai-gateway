@@ -74,6 +74,7 @@ function fakeStripe() {
     if (path === '/billing_portal/sessions') return json({ url: 'https://billing.stripe.com/p/session/test_1' });
     if (path === '/subscriptions') return json({ data: state.subscriptions });
     if (path === '/customers/cus_1' && method === 'DELETE') return json({ id: 'cus_1', deleted: true });
+    if (path === '/customers/cus_1' && method === 'POST') return json({ id: 'cus_1' });
     return new Response('{"error":{"message":"unexpected"}}', { status: 404 });
   }) as typeof fetch;
   return { fetchImpl, calls, state };
@@ -304,6 +305,30 @@ describe('sign-up, login, session', () => {
     const changed = gw.mails.at(-1)!;
     expect(changed.subject).toBe('Votre mot de passe ucast.me a été modifié');
     expect(changed.text).toContain('https://ucast.me/forgot');
+  });
+
+  it('writes the reset e-mail in the language of the page it was asked from, even for an account made in another language', async () => {
+    const gw = await startGateway();
+    await signup(gw, 'ana@example.com');
+    await call(gw, 'POST', '/v1/account/password/forgot', { headers: { Cookie: 'ucast_lang=en' }, body: { email: 'ana@example.com' } });
+    expect(gw.mails.at(-1)!.subject).toBe('Reset your ucast.me password');
+    await call(gw, 'POST', '/v1/account/password/forgot', { headers: { Cookie: 'ucast_lang=fr' }, body: { email: 'ana@example.com' } });
+    expect(gw.mails.at(-1)!.subject).toBe('Réinitialiser votre mot de passe ucast.me');
+  });
+
+  it('opens Stripe checkout and the portal in the page language and records it on the customer', async () => {
+    const stripe = fakeStripe();
+    const gw = await startGateway({}, { stripe: stripe.fetchImpl });
+    const s = await signup(gw);
+    const headers = { Cookie: `${s.cookie}; ucast_lang=fr`, 'X-CSRF-Token': s.csrf };
+    await call(gw, 'POST', '/v1/account/billing/checkout', { headers, body: { plan: 'pro' } });
+    const created = stripe.calls.find(c => c.method === 'POST' && c.path === '/customers')!;
+    expect(created.body).toContain('preferred_locales%5B0%5D=fr');
+    expect(stripe.calls.find(c => c.path === '/checkout/sessions')!.body).toContain('locale=fr');
+    await call(gw, 'POST', '/v1/account/billing/checkout', { headers: { ...headers, Cookie: `${s.cookie}; ucast_lang=en` }, body: { plan: 'pro' } });
+    expect(stripe.calls.find(c => c.path === '/customers/cus_1' && c.method === 'POST')!.body).toContain('preferred_locales%5B0%5D=en');
+    await call(gw, 'POST', '/v1/account/billing/portal', { headers, body: {} });
+    expect(stripe.calls.find(c => c.path === '/billing_portal/sessions')!.body).toContain('locale=fr');
   });
 
   it('resets the password with the e-mailed one-time token and ends the old sessions', async () => {

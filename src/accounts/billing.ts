@@ -6,10 +6,12 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { AccountError, type AccountService, type User } from './service';
 import { PAID_PLANS, PLANS, planByLookupKey, type PlanId } from './plans';
+import type { PageLang } from './page-strings';
 
 const API = 'https://api.stripe.com/v1';
 const SIGNATURE_TOLERANCE_S = 300;
 const LIVE_STATUSES = new Set(['active', 'trialing', 'past_due']);
+const STRIPE_LOCALE: Record<PageLang, string> = { pt: 'pt-BR', en: 'en', fr: 'fr' };
 
 export interface BillingConfig { secretKey: string; webhookSecret: string; publicBaseUrl: string }
 
@@ -77,19 +79,22 @@ export class BillingService {
     return id;
   }
 
-  private async customerOf(user: User): Promise<string> {
-    if (user.stripeCustomerId) return user.stripeCustomerId;
-    const customer = await this.call<{ id: string }>('POST', '/customers', { email: user.email, 'metadata[userId]': user.id });
+  private async customerOf(user: User, lang: PageLang): Promise<string> {
+    if (user.stripeCustomerId) {
+      await this.call('POST', `/customers/${encodeURIComponent(user.stripeCustomerId)}`, { 'preferred_locales[0]': STRIPE_LOCALE[lang] });
+      return user.stripeCustomerId;
+    }
+    const customer = await this.call<{ id: string }>('POST', '/customers', { email: user.email, 'metadata[userId]': user.id, 'preferred_locales[0]': STRIPE_LOCALE[lang] });
     await this.accounts.setBilling(user, { stripeCustomerId: customer.id });
     return customer.id;
   }
 
-  async checkout(user: User, plan: unknown): Promise<string> {
+  async checkout(user: User, plan: unknown, lang: PageLang = user.lang ?? 'pt'): Promise<string> {
     if (plan !== 'pro' && plan !== 'events') throw new AccountError(400, 'Escolha um plano.', 'invalid_plan');
     const price = await this.priceIdOf(plan);
     const base = this.cfg.publicBaseUrl;
     const session = await this.call<{ url: string }>('POST', '/checkout/sessions', {
-      mode: 'subscription', customer: await this.customerOf(user), client_reference_id: user.id,
+      mode: 'subscription', customer: await this.customerOf(user, lang), client_reference_id: user.id, locale: STRIPE_LOCALE[lang],
       'line_items[0][price]': price, 'line_items[0][quantity]': 1, allow_promotion_codes: true,
       'subscription_data[metadata][userId]': user.id,
       success_url: `${base}/account?billing=success`, cancel_url: `${base}/account?billing=cancel`,
@@ -97,9 +102,9 @@ export class BillingService {
     return session.url;
   }
 
-  async portal(user: User): Promise<string> {
+  async portal(user: User, lang: PageLang = user.lang ?? 'pt'): Promise<string> {
     if (!user.stripeCustomerId) throw new AccountError(400, 'Você ainda não tem uma assinatura.', 'no_subscription');
-    const session = await this.call<{ url: string }>('POST', '/billing_portal/sessions', { customer: user.stripeCustomerId, return_url: `${this.cfg.publicBaseUrl}/account?billing=portal` });
+    const session = await this.call<{ url: string }>('POST', '/billing_portal/sessions', { customer: user.stripeCustomerId, locale: STRIPE_LOCALE[lang], return_url: `${this.cfg.publicBaseUrl}/account?billing=portal` });
     return session.url;
   }
 
