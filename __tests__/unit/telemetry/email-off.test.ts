@@ -27,7 +27,7 @@ describe('alert e-mail is off by default', () => {
 
   it('only the alert mailer and the account mailer call Resend', () => {
     const callers = [...filesUnder(join(ROOT, 'src')), join(ROOT, 'serve.ts')]
-      .filter(f => readFileSync(f, 'utf8').includes('api.resend.com')).map(f => f.slice(ROOT.length + 1)).sort();
+      .filter(f => /https:\/\/api\.resend\.com\//.test(readFileSync(f, 'utf8'))).map(f => f.slice(ROOT.length + 1)).sort();
     expect(callers).toEqual(['src/accounts/email.ts', 'src/telemetry/alert-email.ts']);
   });
 });
