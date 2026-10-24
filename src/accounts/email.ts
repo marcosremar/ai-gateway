@@ -10,7 +10,7 @@ export interface EmailSender {
 }
 
 export function createEmailSender(opts: {
-  resendApiKey: string; from: string; logLinks: boolean;
+  resendApiKey: string; from: string; replyTo?: string; logLinks: boolean;
   fetchImpl?: typeof fetch;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }): EmailSender {
@@ -23,7 +23,7 @@ export function createEmailSender(opts: {
         const res = await fetchImpl('https://api.resend.com/emails', {
           method: 'POST',
           headers: { Authorization: `Bearer ${opts.resendApiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: opts.from, to: [msg.to], subject: msg.subject, text: msg.text, html: msg.html }),
+          body: JSON.stringify({ from: opts.from, to: [msg.to], reply_to: opts.replyTo || undefined, subject: msg.subject, text: msg.text, html: msg.html }),
           signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) throw new Error(`resend answered ${res.status}`);

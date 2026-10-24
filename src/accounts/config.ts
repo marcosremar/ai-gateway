@@ -47,7 +47,7 @@ export interface AccountsConfig {
   quota: Quota;
   /** Days of daily usage rows kept. */
   usageRetentionDays: number;
-  email: { resendApiKey: string; from: string; logLinks: boolean };
+  email: { resendApiKey: string; from: string; replyTo: string; logLinks: boolean };
   /** E-mails with access to the admin routes (list users, send activation keys). Empty = no admins. */
   adminEmails: string[];
   /** HMAC pepper of the stored key / session / reset-token hashes. */
@@ -55,6 +55,7 @@ export interface AccountsConfig {
 }
 
 export const ACCOUNTS_DEFAULTS = {
+  SUPPORT_EMAIL: 'support@ucast.me',
   APP: 'babelcast',
   WAKE_DEPLOYMENTS: 'babelcast-tts-clone',
   SITE_HOSTS: 'ucast.me,www.ucast.me,app.ucast.me',
@@ -117,6 +118,7 @@ export function accountsConfigFromEnv(env: Record<string, string | undefined> = 
     email: {
       resendApiKey: env.RESEND_API_KEY?.trim() ?? '',
       from: env.EMAIL_FROM?.trim() ?? '',
+      replyTo: env.ACCOUNTS_SUPPORT_EMAIL?.trim() || ACCOUNTS_DEFAULTS.SUPPORT_EMAIL,
       logLinks: env.ACCOUNTS_LOG_EMAIL_LINKS?.trim() === '1',
     },
     adminEmails: (env.ACCOUNTS_ADMIN_EMAILS ?? '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean),

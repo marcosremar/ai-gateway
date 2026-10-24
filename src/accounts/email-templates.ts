@@ -23,12 +23,12 @@ interface Block {
   after?: string[];
 }
 
-interface Chrome { why: string; fallback: string }
+interface Chrome { help: string; why: string; fallback: string }
 
 const CHROME: Record<PageLang, Chrome> = {
-  pt: { why: 'Você recebeu este e-mail porque há uma conta ucast.me com este endereço.', fallback: 'Se o botão não funcionar, copie este link no navegador:' },
-  en: { why: 'You are receiving this because there is a ucast.me account with this address.', fallback: 'If the button does not work, paste this link into your browser:' },
-  fr: { why: 'Vous recevez cet e-mail car un compte ucast.me existe avec cette adresse.', fallback: 'Si le bouton ne fonctionne pas, copiez ce lien dans votre navigateur :' },
+  pt: { help: 'Dúvidas? Responda a este e-mail.', why: 'Você recebeu este e-mail porque há uma conta ucast.me com este endereço.', fallback: 'Se o botão não funcionar, copie este link no navegador:' },
+  en: { help: 'Questions? Just reply to this e-mail.', why: 'You are receiving this because there is a ucast.me account with this address.', fallback: 'If the button does not work, paste this link into your browser:' },
+  fr: { help: 'Une question ? Répondez simplement à cet e-mail.', why: 'Vous recevez cet e-mail car un compte ucast.me existe avec cette adresse.', fallback: 'Si le bouton ne fonctionne pas, copiez ce lien dans votre navigateur :' },
 };
 
 const paragraph = (s: string): string => `<p style="margin:0 0 16px;font:400 16px/1.6 ${FONT};color:${INK_2}">${escape(s)}</p>`;
@@ -53,10 +53,10 @@ function render(lang: PageLang, subject: string, b: Block): Mail {
 ${b.intro.map(paragraph).join('')}${b.button ? button(b.button) : ''}${steps}${code}${(b.after ?? []).map(paragraph).join('')}${fallback}
 </td></tr>
 <tr><td style="padding:28px 0 0;border-bottom:1px solid #e6eced"></td></tr>
-<tr><td style="padding:16px 0 0;font:400 12px/1.5 ${FONT};color:${MUTED}">${escape(c.why)}<br><a href="${SITE}" style="color:${MUTED}">ucast.me</a></td></tr>
+<tr><td style="padding:16px 0 0;font:400 12px/1.5 ${FONT};color:${MUTED}">${escape(c.help)}<br>${escape(c.why)}<br><a href="${SITE}" style="color:${MUTED}">ucast.me</a></td></tr>
 </table></td></tr></table></body></html>`;
   const text = [b.heading, '', ...b.intro, ...(b.button ? ['', `${b.button.label}: ${b.button.href}`] : []),
-    ...(b.steps ? ['', ...b.steps.map((s, i) => `${i + 1}. ${s}`)] : []), ...(b.code ? ['', b.code] : []), ...(b.after?.length ? ['', ...b.after] : []), '', '—', c.why, SITE].join('\n');
+    ...(b.steps ? ['', ...b.steps.map((s, i) => `${i + 1}. ${s}`)] : []), ...(b.code ? ['', b.code] : []), ...(b.after?.length ? ['', ...b.after] : []), '', '—', c.help, c.why, SITE].join('\n');
   return { subject, html, text };
 }
 
@@ -107,9 +107,9 @@ export function signupAttempt(lang: PageLang, loginLink: string, forgotLink: str
 
 export function accountDeleted(lang: PageLang): Mail {
   const t = {
-    pt: { subject: 'Sua conta no ucast.me foi excluída', heading: 'Sua conta foi excluída', intro: ['A conta, as chaves de ativação e o histórico de uso foram apagados. Uma assinatura ativa foi cancelada.', 'Se não foi você, fale com a gente pelo site ucast.me.'] },
-    en: { subject: 'Your ucast.me account was deleted', heading: 'Your account was deleted', intro: ['The account, its activation keys and usage history were erased. Any active subscription was cancelled.', 'If this was not you, reach us through ucast.me.'] },
-    fr: { subject: 'Votre compte ucast.me a été supprimé', heading: 'Votre compte a été supprimé', intro: ['Le compte, ses clés d’activation et l’historique d’utilisation ont été effacés. Tout abonnement actif a été résilié.', 'Si ce n’était pas vous, contactez-nous via ucast.me.'] },
+    pt: { subject: 'Sua conta no ucast.me foi excluída', heading: 'Sua conta foi excluída', intro: ['A conta, as chaves de ativação e o histórico de uso foram apagados. Uma assinatura ativa foi cancelada.', 'Se não foi você, responda a este e-mail.'] },
+    en: { subject: 'Your ucast.me account was deleted', heading: 'Your account was deleted', intro: ['The account, its activation keys and usage history were erased. Any active subscription was cancelled.', 'If this was not you, reply to this e-mail.'] },
+    fr: { subject: 'Votre compte ucast.me a été supprimé', heading: 'Votre compte a été supprimé', intro: ['Le compte, ses clés d’activation et l’historique d’utilisation ont été effacés. Tout abonnement actif a été résilié.', 'Si ce n’était pas vous, répondez à cet e-mail.'] },
   }[lang];
   return render(lang, t.subject, { heading: t.heading, intro: t.intro });
 }
