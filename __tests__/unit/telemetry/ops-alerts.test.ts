@@ -19,7 +19,7 @@ function rig(bootQuietMs = 0, start = '2026-10-12T16:00:00Z') {
 }
 
 describe('ops alerts (O3): what reaches ALERT_WEBHOOK_URL', () => {
-  it('a failed create, out of stock and no Vast credit are told apart; the same alert is sent once per 30 min', async () => {
+  it('a failed create, out of stock and no Vast credit are told apart; the same alert is sent once per 30 min, the Vast credit once', async () => {
     const { alerts, sent, advance } = rig();
     alerts.fromDeploymentLog('deployments: create failed', { deployment: 'parle-speech', error: 'create: L40S-1-48G out of stock in fr-par-2; out_of_stock' });
     alerts.fromDeploymentLog('deployments: create failed', { deployment: 'parle-speech', error: 'create: vast HTTP 400: insufficient_credit' });
@@ -36,7 +36,7 @@ describe('ops alerts (O3): what reaches ALERT_WEBHOOK_URL', () => {
     alerts.fromDeploymentLog('deployments: create failed', { deployment: 'parle-speech', error: 'create: image not found' });
     alerts.fromDeploymentLog('deployments: provider credit exhausted', { provider: 'vast', balanceUsd: 0.4, floorUsd: 1 });
     await flush();
-    expect(sent.slice(3).map(a => a.event)).toEqual(['deployment.create_failed', 'provider.credit_exhausted']);
+    expect(sent.slice(3).map(a => a.event)).toEqual(['deployment.create_failed']);
   });
 
   it('a replica released or gone with sessions on it alerts; an empty scale-down does not', async () => {

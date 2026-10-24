@@ -135,7 +135,8 @@ describe('alert email (Resend)', () => {
 
   it('needs ALERT_EMAIL_TO and RESEND_API_KEY; the list splits on commas', () => {
     expect(alertEmailFromEnv({ RESEND_API_KEY: 're_x' })).toBeNull();
-    expect(alertEmailFromEnv({ RESEND_API_KEY: 're_x', ALERT_EMAIL_TO: 'a@x.com, b@y.com' })).toMatchObject({ to: ['a@x.com', 'b@y.com'] });
+    expect(alertEmailFromEnv({ RESEND_API_KEY: 're_x', ALERT_EMAIL_TO: 'a@x.com, b@y.com' })).toBeNull();
+    expect(alertEmailFromEnv({ RESEND_API_KEY: 're_x', ALERT_EMAIL_TO: 'a@x.com, b@y.com', ALERT_EMAIL: '1' })).toMatchObject({ to: ['a@x.com', 'b@y.com'] });
   });
 
   it('posts to Resend, returns the id, and never puts a secret in subject or body', async () => {

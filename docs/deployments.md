@@ -1213,7 +1213,7 @@ the gateway with the credential they already carry. Code: `src/config/sandbox-en
 | `GATEWAY_API_KEYS` | `key:site-a,key2:site-b,adminkey:owner` — one key per site |
 | `DEPLOYMENTS_ADMIN_USERS` | e.g. `owner`; others can only read and invoke their own app's deployments. Empty = no admin at all (boot `WARNING`) |
 | `ALERT_WEBHOOK_URL` | optional (the owner sets it on the `ai-gateway` and `ai-gateway-reaper` services): a JSON `POST` (`{event, data}`, not Slack's `text` shape; the same line is logged as `ALERT <event>`) for `app.budget_warning` (80 %) / `app.budget_exhausted`; `deployment.create_failed`, `deployment.out_of_stock` (a create that failed, per deployment, at most once per 30 min) and `provider.credit_exhausted` (the Vast credit under its floor, or a create refused as `insufficient_credit`; once per 30 min); `replica.lost_with_sessions` (a replica released or no longer listed by the provider while it carried requests or realtime sessions); `stage.reserve_down` (a fallback link of a stage chain went `no_key`, `missing`, `pending`, `disabled` or `blocked`) and `stage.no_link` (no link of a chain can serve), once when it happens and again only after it recovered; `reaper.foreign_quota_held` / `reaper.not_checked` (reaper service) |
-| `ALERT_EMAIL_TO`, `RESEND_API_KEY`, `MAIL_FROM`, `ALERT_DAILY_DIGEST`, `BALANCE_*` | optional, from the dev API: email (Resend) for the same ops alerts and for low balances / expiring or refused keys read every `BALANCE_CHECK_MINUTES` (15); thresholds and dedup in `docs/api/http.md` § `balances` |
+| `ALERT_EMAIL`, `ALERT_EMAIL_TO`, `RESEND_API_KEY`, `MAIL_FROM`, `ALERT_DAILY_DIGEST`, `BALANCE_*` | **e-mail off unless `ALERT_EMAIL=1`** (owner, 24/10/2026: «não enviar mais e-mail»; alerts still go to the log, the admin panel and `ALERT_WEBHOOK_URL`); with it: email (Resend) for the same ops alerts and for low balances / expiring or refused keys read every `BALANCE_CHECK_MINUTES` (15); thresholds and dedup in `docs/api/http.md` § `balances` |
 | `INCIDENT_QUIET_MIN` | ops alerts are grouped into incidents (same event and target, `<state dir>/incidents.json`, last 200): an incident closes when its checker no longer sees the condition (idle/outside-window GPU, voice turns, turn latency, reserve probe, stage chains) or, for one-shot alerts (create failed, out of stock, stuck boot, credit, lost sessions), after this many quiet minutes (30). It records its alerts, the actions taken (park from the panel or the gateway, stuck-boot retry, reserve reorder) and how it ended; `/admin/atividade` › Incidentes, and the open ones on the overview. E-mail: one when an incident opens and one when it is resolved; the warn alerts in between send none, an urgent one still reminds at most once an hour (the existing repeat gate) |
 | `APP_MAX_TOKENS`, `APP_DAILY_REQUESTS`, `APP_DAILY_TOKENS` | limits of non-admin app keys (1024, 5000, 2 000 000), the default for every app; an admin sets one app's own daily budgets with `PUT /v1/apps/:app/limits {dailyRequests?, dailyTokens?}` (stored in `apps.json`, applied at once, `null` = default, `0` = no budget): size them for a class with the formula in `docs/api/http.md` § App keys, or the fallback answers 429 mid-lesson until 00:00 UTC |
 | `DEPLOYMENTS_STATE_DIR=/data` + a Railway volume on `/data` + `RAILWAY_RUN_UID=0` | specs survive deploys (the image runs as a non-root user; the volume is root-owned). `deployments.json` and `apps.json` are written tmp + fsync + rename with the previous good copy in `.bak`; an unreadable file is restored from `.bak` (the bad one kept as `.corrupt-<ms>`, `STATE FILE UNREADABLE` on stderr); with no usable backup the gateway starts with deployments off (`DEPLOYMENTS DISABLED`) and the cloud routes up. A failed write is logged (`STATE WRITE FAILED`) and shown as `stateWriteError` in `/health?deep=1`. With no state file at all, machines of unknown deployments are kept 5 min before the orphan sweep (declared deployments register first). `app-budgets.json` keeps the app daily counts across restarts; `client-stability.jsonl` rotates to `.1` at 5 MB, 20 reports/min per app, 512 KB per report |
@@ -1284,6 +1284,27 @@ Inside the gateway process, without a cron of its own:
 | Orphan replicas of this namespace, failed releases | the controller loop | next tick (retried until gone) |
 | Image build machines (`aigw-build`) | the janitor (`src/deployments/janitor.ts`, every 5 min) | older than 3 h |
 | SBS volumes Scaleway created with a server (`…_sbs_volume_N`), detached | the janitor | detached for 1 h |
+| Any Vast instance of the account that no gateway declared (made by hand, old script, other app), stopped/offline | the Vast sweep (`src/deployments/vast-sweep.ts`, every 15 min) | stopped for 24 h (`VAST_SWEEP_STOPPED_HOURS`) |
+| Any stopped Vast instance, declared or not, while the Vast credit is under `VAST_MIN_CREDIT_USD` (or ≤ 0) | the Vast sweep | at once: the disk deepens the negative balance |
+
+### Vast account sweep (owner, 24/10/2026)
+
+Instance 54045930 (`voice-gpu@dev`, made outside the gateway) sat stopped 20 days billing ~US$ 0.40/day of disk: the
+controller and the reaper only see labels `aigw:` / `aigw-m:`. The sweep lists **every** instance of the account and,
+per instance: a label with the word `keep` is never touched; a running one is never destroyed (undeclared → alert
+`vast.undeclared_running`, once a day); a stopped declared one is left to its gateway (12 h parked rule) unless the credit
+is gone; a stopped undeclared one goes after 24 h. "Stopped since" is the first sweep that saw it stopped (Vast gives no
+stop date), kept in `vast-sweep.json` in the state dir so a redeploy does not restart it. Every destroy logs and alerts
+before (`vast.destroying`) and after (`vast.destroyed`); the sweep also refreshes the credit, so below the floor no
+rent and no power-on is tried (`startReplica` checks it too) and one `provider.credit_exhausted` alert says the balance,
+the instances and the cost per day, again only after `provider credit back`.
+
+| Env | Default | |
+|---|---|---|
+| `VAST_SWEEP_DESTROY` | unset = **dry run** | `1`: destroys; unset: logs `vast-sweep: would destroy instance` and alerts `vast.would_destroy` (once a day per instance) |
+| `VAST_SWEEP` | on (Railway only) | `0` turns the sweep off |
+| `VAST_SWEEP_STOPPED_HOURS` | 24 | at least 1 |
+| `VAST_SWEEP_INTERVAL_MINUTES` | 15 | |
 
 The janitor covers Scaleway only (a deleted Vast instance takes its disk with it; Vast has no build machines).
 The janitor is on by default on Railway (`DEPLOYMENTS_JANITOR=0` turns it off; `=1` turns it on elsewhere). When the

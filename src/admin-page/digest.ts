@@ -141,7 +141,7 @@ export function digestBlock(ctx: Ctx): { actions: string; body: string } {
   if (!d || ctx.view) return { actions: '', body: '' };
   const last = d.lastSentAt ? `Último resumo enviado em ${shortDate(d.lastSentAt)} (${DIGEST_KIND[d.lastKind ?? ''] ?? 'resumo'})` : 'Nenhum resumo enviado ainda';
   const when = d.enabled ? 'por e-mail às segundas, 8h de Paris, e na hora quando surge uma sugestão de alto impacto'
-    : 'e-mail desligado: configure ALERT_EMAIL_TO e RESEND_API_KEY';
+    : 'e-mail desligado (dono, 24/10/2026): ALERT_EMAIL=1 com ALERT_EMAIL_TO e RESEND_API_KEY religa';
   return {
     actions: d.enabled ? form('/admin/digest', ctx.csrf, 'Enviar resumo agora', 'Enviar agora por e-mail o resumo das sugestões abertas?', {}, 'quiet', ctx.path) : '',
     body: `<p class="digest">${esc(last)} · ${esc(when)}</p>`,

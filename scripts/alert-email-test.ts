@@ -13,7 +13,7 @@ for (const r of readings) {
 
 const config = alertEmailFromEnv(env);
 if (!config) {
-  console.error('RESEND_API_KEY or ALERT_EMAIL_TO missing: no email sent');
+  console.error('alert e-mail off (needs ALERT_EMAIL=1, RESEND_API_KEY and ALERT_EMAIL_TO): no email sent');
   process.exit(1);
 }
 const mailer = createAlertMailer({ ...config, secrets: () => secretValues(env), log: (msg, data) => console.log(msg, JSON.stringify(data ?? {})) });

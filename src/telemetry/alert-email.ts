@@ -30,7 +30,9 @@ export function createRepeatGate(now: () => number = Date.now) {
   };
 }
 
+/** Alert, balance and digest e-mails are off unless `ALERT_EMAIL=1` (owner, 24/10/2026: «não enviar mais e-mail»); the log and ALERT_WEBHOOK_URL still get every alert. */
 export function alertEmailFromEnv(env: Record<string, string | undefined>) {
+  if (env.ALERT_EMAIL?.trim() !== '1') return null;
   const to = (env.ALERT_EMAIL_TO ?? '').split(/[,;\s]+/).map(s => s.trim()).filter(s => s.includes('@'));
   const apiKey = env.RESEND_API_KEY?.trim();
   if (!to.length || !apiKey) return null;
@@ -79,6 +81,17 @@ const OPS_TEXT: Record<string, { level: AlertLevel; subject: string; todo: strin
   'provider.credit_exhausted': {
     level: 'urgent', subject: 'crédito do provedor esgotado',
     todo: 'Não se resolve sozinho: recarregue a conta do provedor (Vast: https://cloud.vast.ai/billing/; desde 14/10/2026 a Vast é o único provedor de GPU) e desligue máquinas que ninguém usa.',
+  },
+  'vast.would_destroy': {
+    level: 'warn', subject: 'Vast: instância parada que a varredura destruiria (dry run)',
+    todo: 'Nada foi apagado: a varredura da conta Vast está em dry run. Para apagar, VAST_SWEEP_DESTROY=1 no gateway; para guardar a máquina, ponha «keep» no label dela.',
+  },
+  'vast.destroying': { level: 'warn', subject: 'Vast: apagando instância parada', todo: 'A varredura da conta Vast vai apagar esta instância (e o disco dela). Para guardar outra, ponha «keep» no label.' },
+  'vast.destroyed': { level: 'warn', subject: 'Vast: instância parada apagada', todo: 'O disco parou de cobrar. Nada a fazer.' },
+  'vast.destroy_failed': { level: 'urgent', subject: 'Vast: falhou apagar instância parada', todo: 'A varredura tenta de novo no próximo ciclo; veja o erro abaixo e o painel da Vast.' },
+  'vast.undeclared_running': {
+    level: 'warn', subject: 'Vast: instância ligada que nenhum gateway declarou',
+    todo: 'O gateway não apaga máquina ligada. Se ninguém a usa, pare ou apague no painel da Vast; ponha «keep» no label para silenciar.',
   },
   'provider.account_refused': {
     level: 'urgent', subject: 'provedor recusou a conta (permissão ou chave): não se resolve sozinho',

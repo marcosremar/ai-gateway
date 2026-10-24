@@ -25,6 +25,17 @@ export const TURN_P95_LIMIT_MS = 3_000;
 export const TURN_P95_MIN_TURNS = 10;
 const TURN_EVENTS = ['turn.first_audio', 's2s.first_audio'];
 
+/** Vast says when its credit is back (`provider credit back`): until then one credit alert, never one per cycle (24/10/2026). */
+const creditRepeat = (provider: string) => (provider === 'vast' ? Infinity : OPS_ALERT_DEDUP_MS);
+const DAY_MS = 24 * 3_600_000;
+const VAST_SWEEP_EVENTS: Record<string, { event: string; repeatMs: number }> = {
+  'vast-sweep: would destroy instance': { event: 'vast.would_destroy', repeatMs: DAY_MS },
+  'vast-sweep: destroying instance': { event: 'vast.destroying', repeatMs: Infinity },
+  'vast-sweep: instance destroyed': { event: 'vast.destroyed', repeatMs: Infinity },
+  'vast-sweep: destroy failed': { event: 'vast.destroy_failed', repeatMs: OPS_ALERT_DEDUP_MS },
+  'vast-sweep: undeclared instance running': { event: 'vast.undeclared_running', repeatMs: DAY_MS },
+};
+
 const RESERVE_DOWN = new Set(['no_key', 'missing', 'pending', 'disabled', 'blocked']);
 
 export function createOpsAlerts(
@@ -49,8 +60,17 @@ export function createOpsAlerts(
   return {
     fromDeploymentLog(msg: string, data: Record<string, unknown> = {}): void {
       const deployment = String(data.deployment ?? '');
-      if (msg === 'deployments: provider credit exhausted') {
-        fire('provider.credit_exhausted', String(data.provider ?? ''), data);
+      if (msg === 'deployments: provider credit exhausted' || msg === 'vast-sweep: no credit') {
+        fire('provider.credit_exhausted', String(data.provider ?? ''), data, creditRepeat(String(data.provider ?? '')));
+        return;
+      }
+      if (msg === 'deployments: provider credit back') {
+        sentAt.delete(`provider.credit_exhausted|${String(data.provider ?? '')}`);
+        return;
+      }
+      const sweepEvent = VAST_SWEEP_EVENTS[msg];
+      if (sweepEvent) {
+        fire(sweepEvent.event, String(data.id ?? ''), data, sweepEvent.repeatMs);
         return;
       }
       if (msg === 'deployments: provider account refused') {
@@ -58,7 +78,7 @@ export function createOpsAlerts(
         const next = typeof data.next === 'string' ? `usando a ${providerName(data.next)}` : `nenhum outro provedor para ${deployment}`;
         const headline = `a ${providerName(provider)} recusou criar servidor: ${String(data.reason)} — não se resolve sozinho: ${String(data.fix)}; ${next}`;
         const facts = { provider, deployment, headline, status: data.status ?? null, error: data.error };
-        if (/crédito/.test(String(data.reason))) fire('provider.credit_exhausted', provider, facts);
+        if (/crédito/.test(String(data.reason))) fire('provider.credit_exhausted', provider, facts, creditRepeat(provider));
         else fire('provider.account_refused', provider, facts, ACCOUNT_REFUSED_REPEAT_MS);
         return;
       }
@@ -73,7 +93,9 @@ export function createOpsAlerts(
       if (msg === 'deployments: create failed' || msg === 'deployments: boot failed on the provider') {
         const error = String(data.error ?? '');
         const refused = accountRefusal(new Error(error));
-        if (/insufficient_credit|insufficient credit|not enough credit/i.test(error)) fire('provider.credit_exhausted', 'vast', { provider: 'vast', deployment, error });
+        if (/insufficient_credit|insufficient credit|not enough credit/i.test(error)) {
+          fire('provider.credit_exhausted', 'vast', { provider: 'vast', deployment, error }, creditRepeat('vast'));
+        }
         else if (refused) {
           const provider = /\b(scaleway|vast)\b/i.exec(error)?.[1].toLowerCase() ?? 'provedor';
           const headline = `a ${providerName(provider)} recusou criar servidor para ${deployment}: ${refused.reason} — não se resolve sozinho: ${refused.fix}`;

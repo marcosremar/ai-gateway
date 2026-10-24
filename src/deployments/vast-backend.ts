@@ -114,6 +114,19 @@ interface VastInstance {
   duration?: number | null;
   gpu_name?: string;
   geolocation?: string | null;
+  /** USD per hour the disk bills, running or stopped. */
+  storage_total_cost?: number | null;
+}
+
+export interface VastAccountInstance {
+  id: string;
+  label: string;
+  state: string;
+  providerStatus: string | null;
+  createdAt: number | null;
+  gpu: string;
+  usdPerHour: number | null;
+  diskUsdPerHour: number | null;
 }
 
 /** Blackwell (RTX 50xx, B100/B200) needs CUDA 12.8 drivers; everything else is fine with 12.4. */
@@ -453,14 +466,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
       const now = this.now();
       this.hosts.note(host, { bootsFailed: (this.hosts.get(host)?.bootsFailed ?? 0) + 1, lastError: reason, lastErrorAt: now, avoidUntil: now + avoidMs });
     }
-    try {
-      await this.call('DELETE', `/instances/${machine.id}/`);
-    } catch (err) {
-      if (!(err instanceof VastApiError && err.status === 404)) throw err;
-    }
-    this.hostOf.delete(machine.id);
-    this.imageOf.delete(machine.id);
-    if (this.listCache) this.listCache.machines = this.listCache.machines.filter(m => m.id !== machine.id); // not listed again as alive
+    await this.destroyInstance(machine.id);
   }
 
   async stopReplica(machine: ReplicaMachine): Promise<void> {
@@ -469,6 +475,7 @@ export class VastDeploymentBackend implements DeploymentBackend {
   }
 
   async startReplica(machine: ReplicaMachine): Promise<void> {
+    await this.checkCredit();
     const answer = await this.call<{ success?: boolean; msg?: string }>('PUT', `/instances/${machine.id}/`, { state: 'running' });
     this.listCache = null;
     if (answer.success === false) throw new Error(`vast start ${machine.id}: no capacity (${answer.msg ?? 'refused'})`);
@@ -540,6 +547,14 @@ export class VastDeploymentBackend implements DeploymentBackend {
 
   private async checkCredit(): Promise<void> {
     if (!this.credit && this.now() - this.creditCheckedAt < CREDIT_CHECK_MS) return;
+    await this.refreshCredit();
+    if (this.credit) throw new Error(`insufficient_credit: ${this.credit.message}; top up the Vast account`);
+  }
+
+  get creditFloorUsd(): number { return this.minCreditUsd; }
+
+  /** Reads the account credit and updates `creditIssue()` (which blocks rents and power-ons); null = unreadable, state kept. */
+  async refreshCredit(): Promise<number | null> {
     let balance: number | null = null;
     try {
       const user = await this.call<{ credit?: unknown }>('GET', '/users/current/');
@@ -547,20 +562,49 @@ export class VastDeploymentBackend implements DeploymentBackend {
     } catch {
       balance = null;
     }
-    if (balance == null) return;
+    if (balance == null) return null;
     this.creditCheckedAt = this.now();
     if (balance < this.minCreditUsd) {
-      this.creditExhausted(`Vast credit $${balance.toFixed(2)} is below the floor $${this.minCreditUsd} (VAST_MIN_CREDIT_USD)`, balance);
+      this.markCreditExhausted(`Vast credit $${balance.toFixed(2)} is below the floor $${this.minCreditUsd} (VAST_MIN_CREDIT_USD)`, balance);
+      return balance;
     }
     if (this.credit) this.log('deployments: provider credit back', { provider: 'vast', balanceUsd: balance });
     this.credit = null;
+    return balance;
   }
 
-  private creditExhausted(message: string, balanceUsd: number | null): never {
+  private markCreditExhausted(message: string, balanceUsd: number | null): void {
     const now = this.now();
     if (!this.credit) this.log('deployments: provider credit exhausted', { provider: 'vast', balanceUsd, floorUsd: this.minCreditUsd, error: message });
     this.credit = { provider: 'vast', message, balanceUsd, floorUsd: this.minCreditUsd, since: this.credit?.since ?? now, at: now };
+  }
+
+  private creditExhausted(message: string, balanceUsd: number | null): never {
+    this.markCreditExhausted(message, balanceUsd);
     throw new Error(`insufficient_credit: ${message}; top up the Vast account`);
+  }
+
+  /** Every instance of the account, whoever made it (vast-sweep.ts). */
+  async accountInstances(): Promise<VastAccountInstance[]> {
+    const { instances = [] } = await this.call<{ instances?: VastInstance[] }>('GET', '/instances/');
+    return instances.map(i => ({
+      id: String(i.id), label: i.label ?? '', state: vastState(i.actual_status, i.intended_status), providerStatus: i.actual_status ?? null,
+      createdAt: typeof i.start_date === 'number' ? Math.round(i.start_date * 1000) : null, gpu: i.gpu_name ?? '',
+      usdPerHour: typeof i.dph_total === 'number' ? i.dph_total : null,
+      diskUsdPerHour: typeof i.storage_total_cost === 'number' ? i.storage_total_cost : null,
+    }));
+  }
+
+  /** Deletes an instance and its disk; already gone (404) counts as done. */
+  async destroyInstance(id: string): Promise<void> {
+    try {
+      await this.call('DELETE', `/instances/${id}/`);
+    } catch (err) {
+      if (!(err instanceof VastApiError && err.status === 404)) throw err;
+    }
+    this.hostOf.delete(id);
+    this.imageOf.delete(id);
+    if (this.listCache) this.listCache.machines = this.listCache.machines.filter(m => m.id !== id);
   }
 
   creditIssue(): CreditIssue | null {

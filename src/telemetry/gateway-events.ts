@@ -36,6 +36,10 @@ const MAP: Record<string, { event: string; level?: TelemetryLevel }> = {
   'deployments: stuck boot retried on another offer': { event: 'replica.stuck_retried' },
   'deployments: stuck boot retries exhausted': { event: 'replica.stuck_exhausted', level: 'error' },
   'deployments: resume timed out, releasing to rent a fresh replica': { event: 'replica.resume_timeout', level: 'warn' },
+  'vast-sweep: would destroy instance': { event: 'vast.would_destroy', level: 'warn' },
+  'vast-sweep: instance destroyed': { event: 'vast.destroyed', level: 'warn' },
+  'vast-sweep: destroy failed': { event: 'vast.destroy_failed', level: 'error' },
+  'vast-sweep: undeclared instance running': { event: 'vast.undeclared_running', level: 'warn' },
 };
 
 export function deploymentLogToTelemetry(msg: string, data?: Record<string, unknown>): void {
