@@ -41,29 +41,37 @@ async function setup(log?: (msg: string, data?: Record<string, unknown>) => void
   return { controller, scaleway, vast, clock, reconciler };
 }
 
-describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for babelcast and the agents tests', () => {
-  it('is declared on Vast only, at most €0.30/h (owner, 15/10/2026), pinned by minReplicas at creation, owned by babelcast', async () => {
+describe('babelcast-3090 (owner, 13/10/2026): one RTX 3090 on Vast for babelcast and the agents tests, on demand only (owner, 24/10/2026)', () => {
+  it('is declared on Vast only, at most €0.30/h (owner, 15/10/2026), born scaled to zero (minReplicas 0, no warm window), owned by babelcast', async () => {
     const x = await setup();
     expect((await x.reconciler.reconcile())[0].state).toBe('applied');
     const spec = x.controller.specOf(NAME)!;
     expect(spec).toMatchObject({
-      provider: 'vast', machineType: 'RTX 3090', minReplicas: 1, maxReplicas: 1, idleMinutes: 60, idleAction: 'stop',
+      provider: 'vast', machineType: 'RTX 3090', minReplicas: 0, maxReplicas: 1, idleMinutes: 60, idleAction: 'stop',
       testFor: 'babelcast-speech', image: 'ghcr.io/marcosremar/speech-stack:20261011-0200',
     });
     expect(spec.maxEurPerHour).toBeLessThanOrEqual(0.3);
     expect(placementsOf(spec).map(p => p.provider)).toEqual(['vast']);
     expect(spec.warmSchedule).toBeUndefined();
+    expect(x.controller.get(NAME)!.status).toBe('scaled-to-zero');
+    expect(x.controller.get(NAME)!.pinned).toBeNull();
     expect(x.controller.get(NAME)!.app).toBe('babelcast');
   });
 
-  it('wakes to one replica by itself, parks after 60 min with no request (powered off, disk kept), and the next request powers the same host back on', async () => {
+  it('starts nothing by itself; a request wakes one replica, it parks after 60 min with no request (powered off, disk kept), and the next request powers the same host back on', async () => {
     const x = await setup();
     await x.reconciler.reconcile();
     x.controller.start();
+    await wait(300);
+    expect(x.controller.get(NAME)!.status).toBe('scaled-to-zero');
+    expect(x.vast.created).toHaveLength(0);
+    expect(x.scaleway.created).toHaveLength(0);
+
+    const first = await x.controller.acquire(NAME, { waitMs: 3000 });
+    first.done();
     await until(() => x.controller.get(NAME)!.status === 'ready');
     expect(x.vast.created).toHaveLength(1);
     expect(x.scaleway.created).toHaveLength(0);
-    expect(x.controller.get(NAME)!.pinned).toEqual({ idleMinutes: 60, parked: false });
     expect(x.controller.get(NAME)!.replicas[0]).toMatchObject({ provider: 'vast', pricePerHour: 0.18 });
 
     x.clock.t += 59 * 60_000;
@@ -72,7 +80,6 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
 
     x.clock.t += 2 * 60_000;
     await until(() => x.vast.stops.length === 1);
-    expect(x.controller.get(NAME)!.pinned).toEqual({ idleMinutes: 60, parked: true });
     await wait(100);
     expect(x.vast.released).toHaveLength(0);
     expect([...x.vast.machines.values()].map(m => m.machine.state)).toEqual(['stopped']);
@@ -81,13 +88,12 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
     lease.done();
     expect(x.vast.created).toHaveLength(1);
     expect(x.vast.starts).toHaveLength(1);
-    expect(x.controller.get(NAME)!.pinned!.parked).toBe(false);
   });
 
-  it('the operator toggle owns minReplicas: unpinned stays unpinned, the declared fields still come back', async () => {
+  it('an operator who pins it at 1 replica is put back to 0: the declared fields come back', async () => {
     const x = await setup();
     await x.reconciler.reconcile();
-    await x.controller.put(NAME, { minReplicas: 0, maxEurPerHour: 0.5 });
+    await x.controller.put(NAME, { minReplicas: 1, maxEurPerHour: 0.5 });
     expect((await x.reconciler.reconcile())[0].state).toBe('applied');
     expect(x.controller.specOf(NAME)).toMatchObject({ minReplicas: 0, maxEurPerHour: 0.3 });
     expect(x.controller.get(NAME)!.pinned).toBeNull();
@@ -102,6 +108,7 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
     x.vast.failCreate = 'out_of_stock: no vast offer for RTX 3090 under €0.19/h near FR';
     await x.reconciler.reconcile();
     x.controller.start();
+    x.controller.wake(NAME);
     await until(() => create.mock.calls.length === 1);
     await wait(300);
     expect(create).toHaveBeenCalledTimes(1);
@@ -122,6 +129,7 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
     x.vast.failCreate = 'insufficient_credit: Vast credit $0.40 is below the floor $1; top up the Vast account';
     await x.reconciler.reconcile();
     x.controller.start();
+    x.controller.wake(NAME);
     await until(() => create.mock.calls.length === 1);
     // The back-off counts from when the failure is handled, a few microtasks after the call: wait for it before moving
     // the clock (moved in between, the 10 min counted from the moved clock and the retry never came — CI on Node, PR #224).
@@ -138,7 +146,7 @@ describe('babelcast-3090 (owner, 13/10/2026): one pinned RTX 3090 on Vast for ba
 
 describe('babelcast-3090 price cap', () => {
   const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
-  const spec = buildSpec(NAME, { profile: 'speech-stack', image: decl.image!.default, ...decl.spec, minReplicas: 1 }, { profiles });
+  const spec = buildSpec(NAME, { profile: 'speech-stack', image: decl.image!.default, ...decl.spec }, { profiles });
 
   it('searches and rents only RTX 3090 offers at or under €0.30/h', async () => {
     const offers = [

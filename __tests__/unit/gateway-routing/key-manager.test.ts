@@ -6,7 +6,7 @@ import { createKeyAdminRoutes, KeyManager } from '../../../src/config/key-manage
 import { OpenAICompatLLMProvider } from '../../../src/gateway/providers/cloud/openai-compat/openai-compat-llm';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
 
-const PALCO = 'https://parle-palco.up.railway.app/api/sandbox-env';
+const PALCO = 'https://palco.ucast.me/api/sandbox-env';
 type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
 /** Fake palco: GET returns `store`, PUT merges into it. */

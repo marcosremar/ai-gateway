@@ -1,7 +1,7 @@
 /**
  * Orphan guard entry point (see src/deployments/reaper.ts). Runs as a Railway cron service next to the gateway:
  *
- *   SANDBOX_TOKEN=… GATEWAY_URL=https://ai-gateway.up.railway.app DEPLOYMENTS_NAMESPACE=prod \
+ *   SANDBOX_TOKEN=… GATEWAY_URL=https://ai-gateway.ucast.me DEPLOYMENTS_NAMESPACE=prod \
  *     AI_GATEWAY_ADMIN_KEY=… bun scripts/reap-orphans.ts [--apply]
  *
  * Without `--apply` it is a DRY RUN (lists what it would release, releases nothing) — the default when run by hand.

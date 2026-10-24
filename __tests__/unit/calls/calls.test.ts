@@ -125,9 +125,9 @@ describe('calls idle and class window', () => {
     expect((await service.health()).own.phase).toBe('waking');
   });
 
-  it('the declared parle window is Mon-Thu 16:40-20:30 Paris', () => {
+  it('parle has no declared window any more: it is never open (GPUs on demand only, owner 24/10/2026)', () => {
     const open = classOpenFor('parle');
-    expect(open(Date.parse('2026-10-21T15:00:00Z'))).toBe(true);
+    expect(open(Date.parse('2026-10-21T15:00:00Z'))).toBe(false);
     expect(open(Date.parse('2026-10-21T10:00:00Z'))).toBe(false);
     expect(open(Date.parse('2026-10-24T15:00:00Z'))).toBe(false);
   });

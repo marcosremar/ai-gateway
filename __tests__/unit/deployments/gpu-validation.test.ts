@@ -107,11 +107,11 @@ describe('GPU type validated on a real boot before production (owner, 15/10/2026
     await expect(v.setGpuType('parle-speech', 'RTX 5090', false, 'marcos')).rejects.toThrow(/ainda não validada/);
   });
 
-  it('«testar nesta GPU» is refused in or near the class window and while the app holds its one GPU', async () => {
-    const inClass = await setup(IN_CLASS);
-    await expect(inClass.v.startTrial('parle-speech', 'H100 SXM', 'marcos')).rejects.toThrow(/janela de aula aberta/);
-    const nearClass = await setup(BEFORE_CLASS);
-    await expect(nearClass.v.startTrial('parle-speech', 'H100 SXM', 'marcos')).rejects.toThrow(/abre antes de o teste terminar/);
+  it('«testar nesta GPU» is never refused for the hour (no class window, owner 24/10/2026), only while the app holds its one GPU', async () => {
+    for (const at of [IN_CLASS, BEFORE_CLASS]) {
+      const { v, c } = await setup(at);
+      expect(v.trialRefusal(c.get('parle-speech')!, 'H100 SXM')).toBeNull();
+    }
     const busy = await setup();
     busy.c.wake('parle-speech');
     await readyOn(busy.c, 'parle-speech');

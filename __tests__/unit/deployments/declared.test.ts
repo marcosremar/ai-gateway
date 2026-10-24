@@ -58,8 +58,7 @@ const OUTSIDE_CLASS = Date.parse('2026-10-11T12:00:00Z');
 const CLASS_WINDOW = { days: [1, 2, 3, 4], start: '16:40', end: '20:30', timeZone: 'Europe/Paris' };
 const DECLARED_EXTRA = {
   entrypoint: 'bash', args: ['/opt/s2s/start.sh'], coldStartWaitSeconds: 240, minCuda: 13, maxRttExcessMs: 50, maxReplicas: 1, env: {},
-  imageGb: 22.3, bootRace: 2,
-  warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }],
+  imageGb: 22.3, bootRace: 2, warmSchedule: [], minReplicas: 0,
 };
 /** The class ladder on Vast, EU hosts only: one RTX 3090, nothing pricier behind it (owner, 14/10/2026). */
 const CANDIDATES = [{ provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.22 }];
@@ -123,7 +122,7 @@ describe('declared parle-speech spec', () => {
 
   it('over the production spec: Vast RTX 3090 on an EU host, the ghcr image, no Scaleway place, the declared env; then in sync without another PUT', async () => {
     const { c, cloud } = await controller();
-    await c.put('parle-speech', { ...PRODUCTION, placements: [{ zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }], reserveQuota: { quota: 2, windows: [{ ...CLASS_WINDOW, minReplicas: 2 }] } });
+    await c.put('parle-speech', { ...PRODUCTION, placements: [{ zone: 'fr-par-1' }, { machineType: 'L4-1-24G' }], reserveQuota: { quota: 2, windows: [{ ...CLASS_WINDOW, minReplicas: 2 }] }, warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 1 }] });
     const before = c.specOf('parle-speech')!;
     const put = vi.spyOn(c, 'put');
     const r = new DeclaredDeploymentReconciler({ target: c, env: {} });
@@ -242,10 +241,11 @@ describe('declarations owned by another registrant', () => {
     scaling: { mode: 'balanced' }, bootScript: 'echo tts',
   };
 
-  it('every parle deployment has a monthly ceiling; parle-speech is 1 warm Mon-Thu 16:40-20:30 Paris', () => {
+  it('every parle deployment has a monthly ceiling; parle-speech is on demand only, with no warm window (owner, 24/10/2026)', () => {
     const budget = (name: string) => (DECLARED_DEPLOYMENTS.find(d => d.name === name)!.spec.scaling as { budget: { eurPerMonth: number } }).budget.eurPerMonth;
     expect(['parle-speech'].map(budget)).toEqual([450]);
-    expect((speech.spec.warmSchedule as unknown[])[0]).toMatchObject({ ...CLASS_WINDOW, minReplicas: 1 });
+    expect(speech.spec.warmSchedule).toEqual([]);
+    expect(speech.spec.minReplicas).toBe(0);
   });
 
   it('the parle LiveKit is no deployment any more: src/calls owns its Railway services (21/10/2026)', () => {
