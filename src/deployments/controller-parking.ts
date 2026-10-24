@@ -85,7 +85,7 @@ export abstract class ParkingControl extends ReplicaLifecycle {
       this.poweredOnAt.delete(m.id);
       rt.lastError = `start ${m.id}: ${err instanceof Error ? err.message : String(err)}`;
       // Any other error is retried as a pending start (still counted as capacity): the resume deadline bounds it.
-      if (!isOutOfStock(err)) return true;
+      if (!isOutOfStock(err) && !/insufficient_credit/.test(String(err))) return true;
       this.resumeSince.delete(m.id);
       rt.starting.delete(m.id);
       this.startRefused.set(m.id, this.now());

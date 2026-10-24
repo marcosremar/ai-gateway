@@ -27,6 +27,7 @@ import { GpuValidation } from './gpu-validation';
 import { ClientStabilityLog } from './stability';
 import { KNOWN_ZONES, ScalewayClient } from '../cpu-providers/scaleway-client';
 import { startJanitor, type JanitorCloud } from './janitor';
+import { startVastSweep, VastSweep, vastSweepFromEnv } from './vast-sweep';
 import { sessionsWanting } from '../realtime/external-load';
 import { SANDBOX_USER } from '../config/sandbox-env';
 import { secretValues } from '../telemetry/alert-email';
@@ -152,6 +153,10 @@ export function privateImageWarning(specs: DeploymentSpec[], scaleway: Pick<Scal
  *   DEPLOYMENTS_MAX_STOPPED  parked (stopped) replica cap, apart from the running cap; default 8 (spend-limits.ts)
  *   DEPLOYMENTS_MAX_EUR_PER_HOUR  ceiling on the summed hourly price of all running replicas; default 6, 0 = off
  *   DEPLOYMENTS_PARKED_MAX_HOURS  a parked replica unused this long is deleted; default 12, 0 = off
+ *   VAST_SWEEP=0             turns off the Vast account sweep (vast-sweep.ts; on by default on Railway)
+ *   VAST_SWEEP_DESTROY=1     the sweep destroys what its policy says; unset = dry run (logs and alerts only)
+ *   VAST_SWEEP_STOPPED_HOURS an undeclared instance stopped this long is destroyed; default 24, at least 1
+ *   VAST_SWEEP_INTERVAL_MINUTES  default 15
  *   DEPLOYMENTS_ADMIN_USERS  comma list of userIds (from GATEWAY_API_KEYS "key:user") allowed to manage; empty = no
  *                            admin at all — never "every key" (fail closed, 06/10/2026)
  *   Direct fallback (`GET /v1/apps/:app/fallback`, app-fallback.ts): OPENROUTER_PROVISIONING_KEY (mint per-app keys),
@@ -287,9 +292,15 @@ export function deploymentsFromEnv(
   // takes its disk with it.
   const stopJanitor = janitorOn && scaleway
     ? startJanitor({ cloud: scalewayJanitorCloud(() => scaleway.secretKey, () => scaleway.projectId), log: opts.log }) : undefined;
+  // Every instance of the Vast account, the undeclared ones too (vast-sweep.ts). Railway only, like the janitor.
+  const sweepEnv = vastSweepFromEnv(env);
+  const stopVastSweep = vast && sweepEnv.on && onRailway(env) ? startVastSweep(new VastSweep({
+    vast, statePath: join(stateDir, 'vast-sweep.json'), log: opts.log,
+    limits: { stoppedMaxMs: sweepEnv.stoppedMaxMs, destroy: sweepEnv.destroy, minCreditUsd: vast.creditFloorUsd },
+  }), sweepEnv.intervalMs, opts.log) : undefined;
   const registryWarning = () => privateImageWarning(controller.list().flatMap(v => controller.specOf(v.name) ?? []), scaleway);
   const rotateCredentials = (current: Record<string, string | undefined>) => rotateBackendCredentials({ scaleway, vast }, current);
-  return { controller, apps, devices, handler, upgrade: handler.upgrade, clientGpu, gpuHealth, gpuValidation, registryWarning, rotateCredentials, ...(stopJanitor ? { stopJanitor } : {}) };
+  return { controller, apps, devices, handler, upgrade: handler.upgrade, clientGpu, gpuHealth, gpuValidation, registryWarning, rotateCredentials, ...(stopJanitor || stopVastSweep ? { stopJanitor: () => { stopJanitor?.(); stopVastSweep?.(); } } : {}) };
 }
 
 export function vastCreditFloor(env: Record<string, string | undefined>): { minCreditUsd?: number } {

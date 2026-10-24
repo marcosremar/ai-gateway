@@ -1284,6 +1284,27 @@ Inside the gateway process, without a cron of its own:
 | Orphan replicas of this namespace, failed releases | the controller loop | next tick (retried until gone) |
 | Image build machines (`aigw-build`) | the janitor (`src/deployments/janitor.ts`, every 5 min) | older than 3 h |
 | SBS volumes Scaleway created with a server (`…_sbs_volume_N`), detached | the janitor | detached for 1 h |
+| Any Vast instance of the account that no gateway declared (made by hand, old script, other app), stopped/offline | the Vast sweep (`src/deployments/vast-sweep.ts`, every 15 min) | stopped for 24 h (`VAST_SWEEP_STOPPED_HOURS`) |
+| Any stopped Vast instance, declared or not, while the Vast credit is under `VAST_MIN_CREDIT_USD` (or ≤ 0) | the Vast sweep | at once: the disk deepens the negative balance |
+
+### Vast account sweep (owner, 24/10/2026)
+
+Instance 54045930 (`voice-gpu@dev`, made outside the gateway) sat stopped 20 days billing ~US$ 0.40/day of disk: the
+controller and the reaper only see labels `aigw:` / `aigw-m:`. The sweep lists **every** instance of the account and,
+per instance: a label with the word `keep` is never touched; a running one is never destroyed (undeclared → alert
+`vast.undeclared_running`, once a day); a stopped declared one is left to its gateway (12 h parked rule) unless the credit
+is gone; a stopped undeclared one goes after 24 h. "Stopped since" is the first sweep that saw it stopped (Vast gives no
+stop date), kept in `vast-sweep.json` in the state dir so a redeploy does not restart it. Every destroy logs and alerts
+before (`vast.destroying`) and after (`vast.destroyed`); the sweep also refreshes the credit, so below the floor no
+rent and no power-on is tried (`startReplica` checks it too) and one `provider.credit_exhausted` alert says the balance,
+the instances and the cost per day, again only after `provider credit back`.
+
+| Env | Default | |
+|---|---|---|
+| `VAST_SWEEP_DESTROY` | unset = **dry run** | `1`: destroys; unset: logs `vast-sweep: would destroy instance` and alerts `vast.would_destroy` (once a day per instance) |
+| `VAST_SWEEP` | on (Railway only) | `0` turns the sweep off |
+| `VAST_SWEEP_STOPPED_HOURS` | 24 | at least 1 |
+| `VAST_SWEEP_INTERVAL_MINUTES` | 15 | |
 
 The janitor covers Scaleway only (a deleted Vast instance takes its disk with it; Vast has no build machines).
 The janitor is on by default on Railway (`DEPLOYMENTS_JANITOR=0` turns it off; `=1` turns it on elsewhere). When the
