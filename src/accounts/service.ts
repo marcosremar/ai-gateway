@@ -240,10 +240,17 @@ export class AccountService {
   // ── Password reset ────────────────────────────────────────────────────────
 
   /** Always resolves the same way; an e-mail goes out only when the account exists. */
-  async requestReset(rawEmail: unknown): Promise<void> {
+  async rememberLanguage(user: User, lang: PageLang | undefined): Promise<void> {
+    if (!lang || user.lang === lang) return;
+    user.lang = lang;
+    await this.save();
+  }
+
+  async requestReset(rawEmail: unknown, lang?: PageLang): Promise<void> {
     const email = normalizeEmail(rawEmail);
     const user = email ? this.state.users.find(u => u.email === email && !u.disabledAt) : undefined;
     if (!user) return;
+    if (lang) user.lang = lang;
     const token = randomBytes(32).toString('base64url');
     const now = this.now();
     this.state.resets = this.state.resets.filter(r => r.userId !== user.id);

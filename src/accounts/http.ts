@@ -26,7 +26,7 @@ import {
   type PageLinks, type RenderedPage,
 } from './pages';
 import { ATTEMPT_LIMITS, AttemptLimiter, type Window } from './rate-limit';
-import { pageLang } from './page-strings';
+import { pageLang, type PageLang } from './page-strings';
 import type { BillingService } from './billing';
 import { AccountError, KEY_PREFIX, normalizeEmail, type AccountService, type User } from './service';
 import { audioSecondsOf, llmTokensOf, wavSeconds, type Counter, type Counters, type UsageMeter } from './usage';
@@ -220,6 +220,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         limit(`login:ip:${ip}`, ATTEMPT_LIMITS.loginPerIp);
         limit(`login:email:${email}`, ATTEMPT_LIMITS.loginPerEmail);
         const { user, session } = await service.login(body.email, body.password);
+        await service.rememberLanguage(user, requestLang(req));
         limiter.clear(`login:email:${email}`);
         send(res, 200, { ...meView(user), csrfToken: session.csrf }, { 'Set-Cookie': cookie(session.token, Math.floor(cfg.sessionTtlMs / 1000)) });
         return;
@@ -238,7 +239,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         limit(`reset:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
         const email = normalizeEmail(body.email);
         // Over the per-e-mail limit: same answer, nothing sent (no enumeration, no mail bombing).
-        if (email && !limiter.hit(`reset:email:${email}`, ATTEMPT_LIMITS.resetPerEmail)) await service.requestReset(email);
+        if (email && !limiter.hit(`reset:email:${email}`, ATTEMPT_LIMITS.resetPerEmail)) await service.requestReset(email, requestLang(req));
         send(res, 200, { ok: true });
         return;
       }
@@ -262,6 +263,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         const w = writer(req);
         req.resume();
         limit(`verify:user:${w.user.id}`, ATTEMPT_LIMITS.verifyResendPerUser);
+        await service.rememberLanguage(w.user, requestLang(req));
         await service.sendVerification(w.user);
         send(res, 200, { ok: true });
         return;
@@ -269,13 +271,15 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
       case 'POST /v1/account/billing/checkout': {
         const w = writer(req);
         const body = await readJson(req);
-        send(res, 200, { url: await billingOn().checkout(w.user, body.plan) });
+        await service.rememberLanguage(w.user, requestLang(req));
+        send(res, 200, { url: await billingOn().checkout(w.user, body.plan, w.user.lang) });
         return;
       }
       case 'POST /v1/account/billing/portal': {
         const w = writer(req);
         req.resume();
-        send(res, 200, { url: await billingOn().portal(w.user) });
+        await service.rememberLanguage(w.user, requestLang(req));
+        send(res, 200, { url: await billingOn().portal(w.user, w.user.lang) });
         return;
       }
       case 'POST /v1/account/billing/sync': {
@@ -367,6 +371,9 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     req.resume();
     throw new AccountError(404, 'Rota não encontrada.', 'not_found');
   }
+
+  const requestLang = (req: IncomingMessage): PageLang | undefined =>
+    parseCookies(req.headers.cookie).get('ucast_lang') || req.headers['accept-language'] ? links(req).lang : undefined;
 
   function links(req: IncomingMessage): PageLinks {
     const site = siteHosts.has(hostName(hostOf(req)));
