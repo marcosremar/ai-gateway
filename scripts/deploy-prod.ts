@@ -3,7 +3,7 @@ import { DECLARED_DEPLOYMENTS } from '../src/deployments/declared';
 import type { WarmScheduleEntry } from '../src/deployments/types';
 
 const RAILWAY_UP = ['railway', 'up', '--detach', '--service', 'ai-gateway', '--project', '2213991a-748b-4576-8bd1-f45232f722e3', '--environment', 'production'];
-const GATEWAY_URL = 'https://parle-ai-gateway.up.railway.app';
+const GATEWAY_URL = 'https://ai-gateway.ucast.me';
 const POLL_MS = 10_000;
 const LIVE_TIMEOUT_MS = 20 * 60_000;
 const PROBE_TIMEOUT_MS = 3 * 60_000;

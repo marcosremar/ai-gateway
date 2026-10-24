@@ -60,7 +60,7 @@ export function isEnvPinned(name: string): boolean {
 }
 
 export const DEFAULT_SANDBOX_ENV_URLS = [
-  'https://parle-palco.up.railway.app/api/sandbox-env',
+  'https://palco.ucast.me/api/sandbox-env',
   'https://ucast.me/api/sandbox-env',
 ];
 

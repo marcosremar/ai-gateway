@@ -5,7 +5,7 @@ def _token():
         if m: return m.group(1).strip()
     raise SystemExit('no SANDBOX_TOKEN')
 def env():
-    req = urllib.request.Request('https://parle-palco.up.railway.app/api/sandbox-env', headers={'Authorization': 'Bearer ' + _token()})
+    req = urllib.request.Request('https://palco.ucast.me/api/sandbox-env', headers={'Authorization': 'Bearer ' + _token()})
     data = json.load(urllib.request.urlopen(req, timeout=30))
     return data.get('env', data) if isinstance(data, dict) else data
 if __name__ == '__main__':

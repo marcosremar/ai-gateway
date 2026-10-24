@@ -1,50 +1,90 @@
 {
   "name": "babelcast-3090",
   "app": "babelcast",
-  "description": "babelcast: one RTX 3090 24 GB on Vast at most €0.30/h (owner, 15/10/2026), the speech-stack image (Whisper large-v3 + Qwen3.5-9B Q4, L4 settings), for babelcast and the agents' tests only; pinned at 1 replica, parked after 60 min with no request (DEPLOYMENTS_PINNED_IDLE_MAX_MINUTES) and woken by the next one. Parked = stopped with its disk (19/10/2026): a wake resumes the same host, no 9-min pull; deleted after 72 h unused. App babelcast: no parle route may name it",
+  "description": "babelcast: one RTX 3090 24 GB on Vast at most €0.30/h (owner, 15/10/2026), the speech-stack image (Whisper large-v3 + Qwen3.5-9B Q4, L4 settings), for babelcast and the agents' tests only; on demand only (owner, 24/10/2026): no minimum replica, it is born scaled to zero, a request wakes it and it parks after 60 min with no request. Parked = stopped with its disk (19/10/2026): a wake resumes the same host, no 9-min pull; deleted after 72 h unused. App babelcast: no parle route may name it",
   "profile": "speech-stack",
   "image": {
     "default": "ghcr.io/marcosremar/speech-stack:20261011-0200"
   },
-  "initial": { "minReplicas": 1 },
+  "initial": {
+    "minReplicas": 0
+  },
   "spec": {
     "testFor": "babelcast-speech",
     "provider": "vast",
     "machineType": "RTX 3090",
     "maxEurPerHour": 0.3,
     "placements": [],
+    "minReplicas": 0,
     "maxReplicas": 1,
     "idleMinutes": 60,
     "idleAction": "stop",
     "maxEurPerHourByMachineType": {
-      "RTX 3090": 0.3, "RTX 4090": 0.85, "RTX 5090": 0.85, "L40S": 0.85, "H100 SXM": 2.5, "H100 PCIE": 2.5
+      "RTX 3090": 0.3,
+      "RTX 4090": 0.85,
+      "RTX 5090": 0.85,
+      "L40S": 0.85,
+      "H100 SXM": 2.5,
+      "H100 PCIE": 2.5
     },
     "envByMachineType": {
       "RTX 3090": {
-        "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400",
-        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+        "STT_BATCH": "4",
+        "LLM_PARALLEL": "8",
+        "LLM_SLOT_CTX": "2048",
+        "TTS_STAGE0_MB": "7400",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       },
       "RTX 4090": {
-        "STT_BATCH": "4", "LLM_PARALLEL": "8", "LLM_SLOT_CTX": "2048", "TTS_STAGE0_MB": "7400", "RT_MAX_SESSIONS": "2",
-        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+        "STT_BATCH": "4",
+        "LLM_PARALLEL": "8",
+        "LLM_SLOT_CTX": "2048",
+        "TTS_STAGE0_MB": "7400",
+        "RT_MAX_SESSIONS": "2",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       },
       "L40S": {
-        "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "12000", "RT_MAX_SESSIONS": "4", "LLM_SLOT_CTX": "4096",
-        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+        "STT_BATCH": "8",
+        "LLM_PARALLEL": "16",
+        "TTS_STAGE0_MB": "12000",
+        "RT_MAX_SESSIONS": "4",
+        "LLM_SLOT_CTX": "4096",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       },
       "RTX 5090": {
-        "STT_BATCH": "8", "LLM_PARALLEL": "16", "TTS_STAGE0_MB": "9600", "RT_MAX_SESSIONS": "4",
-        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+        "STT_BATCH": "8",
+        "LLM_PARALLEL": "16",
+        "TTS_STAGE0_MB": "9600",
+        "RT_MAX_SESSIONS": "4",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       },
       "H100 SXM": {
-        "STT_BATCH": "16", "LLM_PARALLEL": "32", "LLM_SLOT_CTX": "4096", "TTS_STAGE0_MB": "20000", "RT_MAX_SESSIONS": "8",
-        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+        "STT_BATCH": "16",
+        "LLM_PARALLEL": "32",
+        "LLM_SLOT_CTX": "4096",
+        "TTS_STAGE0_MB": "20000",
+        "RT_MAX_SESSIONS": "8",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       },
       "H100 PCIE": {
-        "STT_BATCH": "16", "LLM_PARALLEL": "32", "LLM_SLOT_CTX": "4096", "TTS_STAGE0_MB": "20000", "RT_MAX_SESSIONS": "8",
-        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
+        "STT_BATCH": "16",
+        "LLM_PARALLEL": "32",
+        "LLM_SLOT_CTX": "4096",
+        "TTS_STAGE0_MB": "20000",
+        "RT_MAX_SESSIONS": "8",
+        "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "LLM_FILE": "Qwen3.5-9B-Q4_K_M.gguf"
       }
     },
-    "scaling": { "budget": { "eurPerMonth": 140 } }
+    "scaling": {
+      "budget": {
+        "eurPerMonth": 140
+      }
+    }
   }
 }
