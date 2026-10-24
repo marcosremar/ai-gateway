@@ -7,7 +7,8 @@
 //   GET  /v1/account/me | /usage        (session cookie, or an activation key as Bearer — read-only)
 //   GET|POST /v1/account/keys, DELETE /v1/account/keys/:id (or POST …/:id/revoke)   (session cookie + CSRF)
 //   POST /v1/activate {key, deviceName, appVersion}
-//   Pages: on ACCOUNTS_SITE_HOSTS `/`, `/signup`, `/login`, `/forgot`, `/reset`, `/verify`, `/account`; on any host `/account[/…]`.
+  //   Pages: on ACCOUNTS_SITE_HOSTS `/`, `/signup`, `/login`, `/forgot`, `/reset`, `/verify`, `/desktop`, `/account`;
+  //   on any host `/account[/…]` (incl. `/account/desktop` — handoff da chave para o app desktop).
 // And the quota gate: a metered request carrying an activation key is refused (402/429) when the account is over its
 // quota or already has its limit of requests in flight, otherwise passed on to the proxy and counted when it succeeds.
 //
@@ -21,7 +22,7 @@ import { bearerToken } from '../gateway/proxy/middleware/api-keys';
 import { isInternalSubrequest, SUBREQUEST_HEADER } from '../gateway/proxy/internal-subrequest';
 import type { QuotaMetric } from './config';
 import {
-  accountPageCsp, dashboardPage, forgotPage, homePage, loginPage, notFoundAccountPage, resetPage, signupPage, verifyPage,
+  accountPageCsp, dashboardPage, desktopPage, forgotPage, homePage, loginPage, notFoundAccountPage, resetPage, signupPage, verifyPage,
   type PageLinks, type RenderedPage,
 } from './pages';
 import { ATTEMPT_LIMITS, AttemptLimiter, type Window } from './rate-limit';
@@ -375,7 +376,8 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   }
 
   const PAGES: Partial<Record<string, (l: PageLinks) => RenderedPage>> = {
-    '/signup': signupPage, '/login': loginPage, '/forgot': forgotPage, '/reset': resetPage, '/verify': verifyPage, '': dashboardPage,
+    '/signup': signupPage, '/login': loginPage, '/forgot': forgotPage, '/reset': resetPage, '/verify': verifyPage,
+    '/desktop': desktopPage, '': dashboardPage,
   };
 
   function page(req: IncomingMessage, res: ServerResponse, path: string): boolean {
@@ -384,7 +386,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     if (site && clean === '/') { sendPage(res, 200, homePage(links(req))); return true; }
     let sub: string | null = null;
     if (clean === '/account' || clean.startsWith('/account/')) sub = clean.slice('/account'.length);
-    else if (site && ['/signup', '/login', '/forgot', '/reset', '/verify'].includes(clean)) sub = clean;
+    else if (site && ['/signup', '/login', '/forgot', '/reset', '/verify', '/desktop'].includes(clean)) sub = clean;
     if (sub === null) return false;
     const render = Object.hasOwn(PAGES, sub) ? PAGES[sub] : undefined;
     sendPage(res, render ? 200 : 404, (render ?? notFoundAccountPage)(links(req)));

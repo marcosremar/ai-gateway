@@ -222,28 +222,34 @@ const emailField = (links: PageLinks) => `<label for="email">${esc(stringsOf(lin
 
 export function signupPage(links: PageLinks): RenderedPage {
   const t = stringsOf(links);
+  const after = `function afterAuth(){var n=new URLSearchParams(location.search).get('next');
+if(n&&n.charAt(0)==='/'&&n.indexOf('//')<0&&(n==='/account'||n.indexOf('/account/')===0||n==='/desktop'||n.indexOf('/desktop?')===0||n.indexOf('/account/desktop')===0))return n;
+return ${js(links.account)}+location.search}`;
   return formPage(t.signupTitle, t.signupHeading, t.signupLead,
     `${emailField(links)}${passwordField(links, t.password, 'new-password', 'minlength="8" required aria-describedby="ph"')}<p id="ph" class="hint">${t.minLength}</p>`,
     t.signupButton, `${t.haveAccount} <a href="${esc(links.login)}">${t.signIn}</a>`,
-    `(function(){var f=$('f'),b=$('b'),m=$('m');toAccountIfSignedIn(${js(links.account)});f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
+    `(function(){${after};var f=$('f'),b=$('b'),m=$('m');toAccountIfSignedIn(afterAuth());f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
 var email=$('email').value.trim(),pw=$('password').value;
 if(!email||email.indexOf('@')<1){show(m,L.invalidEmail);$('email').focus();return}
 if(pw.length<8){show(m,L.shortPassword);$('password').focus();return}
 busy(b,true,L.creating);api('/v1/account/signup','POST',{email:email,password:pw}).then(function(r){
-if(r.ok){location.href=${js(links.account)}+location.search;return}busy(b,false,L.signupButton);show(m,errText(r))},function(){busy(b,false,L.signupButton);show(m,L.offline)})})})();`,
+if(r.ok){location.href=afterAuth();return}busy(b,false,L.signupButton);show(m,errText(r))},function(){busy(b,false,L.signupButton);show(m,L.offline)})})})();`,
     links, setupChain(links));
 }
 
 export function loginPage(links: PageLinks): RenderedPage {
   const t = stringsOf(links);
+  const after = `function afterAuth(){var n=new URLSearchParams(location.search).get('next');
+if(n&&n.charAt(0)==='/'&&n.indexOf('//')<0&&(n==='/account'||n.indexOf('/account/')===0||n==='/desktop'||n.indexOf('/desktop?')===0||n.indexOf('/account/desktop')===0))return n;
+return ${js(links.account)}+location.search}`;
   return formPage(t.loginTitle, t.signIn, t.loginLead,
     `${emailField(links)}${passwordField(links, t.password, 'current-password', 'required')}
 <p class="hint"><a href="${esc(links.forgot)}">${t.forgotLink}</a></p>`,
     t.signIn, `${t.noAccount} <a href="${esc(links.signup)}">${t.signupButton}</a>`,
-    `(function(){var f=$('f'),b=$('b'),m=$('m');toAccountIfSignedIn(${js(links.account)});f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
+    `(function(){${after};var f=$('f'),b=$('b'),m=$('m');toAccountIfSignedIn(afterAuth());f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
 var email=$('email').value.trim(),pw=$('password').value;if(!email||!pw){show(m,L.emailAndPassword);return}
 busy(b,true,L.signingIn);api('/v1/account/login','POST',{email:email,password:pw}).then(function(r){
-if(r.ok){location.href=${js(links.account)}+location.search;return}busy(b,false,L.signIn);show(m,errText(r))},function(){busy(b,false,L.signIn);show(m,L.offline)})})})();`,
+if(r.ok){location.href=afterAuth();return}busy(b,false,L.signIn);show(m,errText(r))},function(){busy(b,false,L.signIn);show(m,L.offline)})})})();`,
     links);
 }
 
@@ -439,6 +445,45 @@ api('/v1/account/me','DELETE',{password:pw}).then(function(r){if(r.ok){location.
 $('out').addEventListener('click',function(){api('/v1/account/logout','POST',{}).then(function(){location.href=${js(links.login)}})});
 })();`;
   return { html: shell(t.dashTitle, body, script, nonce, links, nav), nonce };
+}
+
+/**
+ * Handoff do app desktop: o ucast.me abre esta página com `?port=&state=&device=`.
+ * Se ainda não estiver logado, manda para /login?next=…; senão cria a chave deste
+ * computador e redireciona para `http://127.0.0.1:<port>/?key=…&state=…`.
+ */
+export function desktopPage(links: PageLinks): RenderedPage {
+  const t = stringsOf(links);
+  const nonce = randomBytes(16).toString('base64');
+  const body = `<div class="narrow"><h1>${esc(t.desktopHeading)}</h1>
+<p class="lead" id="lead">${esc(t.desktopLead)}</p>
+<div id="m" class="msg" role="alert" aria-live="polite"></div>
+<p class="btnrow"><a id="go" class="btn" href="${esc(links.account)}" hidden>${esc(t.goAccount)}</a></p></div>`;
+  const script = `(function(){
+var m=$('m'),lead=$('lead'),go=$('go');
+var q=new URLSearchParams(location.search);
+var port=q.get('port')||'', state=q.get('state')||'', device=(q.get('device')||'').trim()||L.defaultPc;
+var p=parseInt(port,10);
+function fail(text){lead.hidden=true;show(m,text);go.hidden=false}
+if(!state||!/^[A-Za-z0-9_-]{8,128}$/.test(state)){fail(L.desktopBadLink);return}
+if(!(p>=1024&&p<=65535)){fail(L.desktopBadLink);return}
+var loginNext=${js(links.login)}+'?next='+encodeURIComponent(location.pathname+location.search);
+api('/v1/account/me').then(function(r){
+if(r.status===401){location.replace(loginNext);return}
+if(!r.ok){fail(errText(r));return}
+CSRF=r.body.csrfToken||'';
+if(r.body.emailVerified===false){fail(L.desktopNeedVerify);return}
+lead.textContent=L.desktopCreating;
+api('/v1/account/keys','POST',{deviceName:device}).then(function(r2){
+if(!r2.ok){fail(errText(r2));return}
+var key=r2.body.key;
+if(!key||String(key).indexOf('ucast_live_')!==0){fail(L.generic);return}
+lead.textContent=L.desktopSending;
+location.replace('http://127.0.0.1:'+p+'/?key='+encodeURIComponent(key)+'&state='+encodeURIComponent(state));
+},function(){fail(L.offline)});
+},function(){fail(L.offline)});
+})();`;
+  return { html: shell(t.desktopTitle, body, script, nonce, links), nonce };
 }
 
 export function notFoundAccountPage(links: PageLinks): RenderedPage {
