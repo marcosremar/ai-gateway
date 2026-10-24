@@ -66,8 +66,16 @@ Per-user overrides live in `users[].quota` (plans, later).
 ## Pages
 
 On `ACCOUNTS_SITE_HOSTS` (default `ucast.me, www.ucast.me, app.ucast.me`): `/`, `/signup`, `/login`, `/forgot`,
-`/reset`, `/account`. On any host: `/account`, `/account/signup|login|forgot|reset`. Self-contained pt-BR HTML under a
-nonce CSP (`connect-src 'self'`, `frame-ancestors 'none'`).
+`/reset`, `/verify`, `/desktop`, `/account`. On any host: `/account`, `/account/signup|login|forgot|reset|verify|desktop`.
+Self-contained HTML (pt/en/fr) under a nonce CSP (`connect-src 'self'`, `frame-ancestors 'none'`).
+
+### Desktop handoff (`/account/desktop`)
+
+The ucast.me app’s “Entrar na conta” opens `/account/desktop?port=&state=&device=`. If the person is not signed in,
+the page sends them to `/login?next=/account/desktop?…`. Once signed in (and e-mail verified), it creates an activation
+key for `device` and redirects to `http://127.0.0.1:<port>/?key=…&state=…`. The app listens on that loopback port
+(same idea as the YouTube OAuth return) and stores the key in the system vault. Pasting a key by hand stays as an
+advanced option in the app.
 
 ## State
 
