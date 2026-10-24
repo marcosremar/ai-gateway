@@ -1107,7 +1107,7 @@ No secret is in the block; a provider without a key is absent.
 
 A `401`/`403` from a provider is **urgent** (“recusou a chave”).
 
-**Email.** With `RESEND_API_KEY` and `ALERT_EMAIL_TO` (comma-separated list; `MAIL_FROM` optional, all three from the
+**Email.** Off unless `ALERT_EMAIL=1` (owner, 24/10/2026). With it, `RESEND_API_KEY` and `ALERT_EMAIL_TO` (comma-separated list; `MAIL_FROM` optional, all three from the
 dev API) the gateway emails, through Resend, in Portuguese with the number and what to do: every `warn`/`urgent`
 balance reading above, and the ops alerts also sent to `ALERT_WEBHOOK_URL` — `provider.credit_exhausted`,
 `replica.lost_with_sessions`, `stage.no_link` (urgent), `deployment.create_failed`, `deployment.out_of_stock`,

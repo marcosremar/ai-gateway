@@ -30,7 +30,9 @@ export function createRepeatGate(now: () => number = Date.now) {
   };
 }
 
+/** Alert, balance and digest e-mails are off unless `ALERT_EMAIL=1` (owner, 24/10/2026: «não enviar mais e-mail»); the log and ALERT_WEBHOOK_URL still get every alert. */
 export function alertEmailFromEnv(env: Record<string, string | undefined>) {
+  if (env.ALERT_EMAIL?.trim() !== '1') return null;
   const to = (env.ALERT_EMAIL_TO ?? '').split(/[,;\s]+/).map(s => s.trim()).filter(s => s.includes('@'));
   const apiKey = env.RESEND_API_KEY?.trim();
   if (!to.length || !apiKey) return null;
