@@ -14,6 +14,26 @@ uses this crate itself — one copy of the code for every app.
   maximum that waits up to `end_grace_ms` for a pause and then cuts at the quietest point, drafts at pauses
   (`take_peek`) and on a timer (`peek_every_ms`).
 
+- **`MicCheck`**: what is wrong with the microphone, from the audio itself, so an app can tell the person what to
+  change. Fed each raw frame and the VAD's probability (no second VAD); a report over the last 30 s once there are
+  8 s of sound. Measured on the ucast.me benchmark's room grid (`scripts/voice-level-bench/README.md` has the
+  browser version's numbers too) — share of 10 s reports flagged, and the app's WER in that condition:
+
+  | condition | WER | far/echo | noisy | quiet | clipping | hum |
+  |---|---|---|---|---|---|---|
+  | clean talk / good room (RT60 0.4 s) / conversations / accents | 6.8–7.6 % | 0–3 % | 0 | 0 | 0 | 0 |
+  | room RT60 0.8 s at 3 m / 6 m | 10.7 / 17.2 % | 78 / 91 % | 0 | 0 | 0 | 0 |
+  | room RT60 1.2 s | 40.8 % | 100 % | 0 | 0 | 0 | 0 |
+  | babble at 10 dB | 33.7 % | 47 % | 0 | 0 | 0 | 0 |
+  | noise at 5 dB | 18.0 % | 82 % | 82 % | 0 | 0 | 0 |
+  | real table microphone (AMI sdm) | 37.8 % (headset 32.4 %) | 19 % | 10 % | 23 % | 0 | 6 % |
+  | quiet microphone −25 dB | 7.0 % | 0 | 0 | 100 % | 0 | 0 |
+  | clipped ×3 | 6.9 % | 0 | 0 | 0 | 85 % | 0 |
+  | 50 Hz hum −35 dB / 60 Hz −55 dB | 7.2 / 6.9 % | 0 | 0 | 0 | 0 | 100 / 4 % |
+
+  Only far/echo and noisy made the transcript worse (`MicIssue::hurts_transcription`); clipping, hum and a quiet
+  microphone are real (an audience or a recording hears them) but were transcribed through.
+
 Nothing here touches the network. ONNX Runtime is loaded at run time: set `ORT_DYLIB_PATH` or call
 `use_onnx_runtime_at(path)` before the first `SileroVad::new()` (the library: microsoft/onnxruntime 1.22.x).
 

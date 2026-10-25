@@ -24,8 +24,8 @@
 //! ```
 
 pub use ai_gateway_audio::{
-    use_onnx_runtime_at, Segmenter, SegmenterConfig, SileroVad, VadError, VadLevel, FRAME_SAMPLES,
-    SAMPLE_RATE,
+    release_handled_by_app, use_onnx_runtime_at, MicCheck, MicIssue, MicReport, Segmenter, SegmenterConfig, SileroVad,
+    VadError, VadLevel, FRAME_SAMPLES, SAMPLE_RATE,
 };
 
 use crate::client::GatewayClient;
@@ -45,6 +45,7 @@ pub struct SpeechDetector {
     segmenter: Segmenter,
     pending: Vec<f32>,
     quiet: u32,
+    mic: MicCheck,
 }
 
 impl Default for SpeechDetector {
@@ -75,6 +76,7 @@ impl SpeechDetector {
             segmenter: Segmenter::new(config),
             pending: Vec::with_capacity(FRAME_SAMPLES * 2),
             quiet: 0,
+            mic: MicCheck::new(),
         }
     }
 
@@ -100,6 +102,7 @@ impl SpeechDetector {
                 None => frame,
             };
             let prob = vad.process(heard)?;
+            self.mic.push(frame, prob);
             self.quiet = if prob < QUIET_PROB { self.quiet + 1 } else { 0 };
             if self.quiet == RESET_AFTER_QUIET_FRAMES {
                 vad.reset();
@@ -110,6 +113,12 @@ impl SpeechDetector {
         }
         self.pending.drain(..whole);
         Ok(done)
+    }
+
+    /// What is wrong with the microphone over the last 30 s (`None` before 8 s of sound): show
+    /// [`MicIssue::hurts_transcription`] ones as a reason for worse transcripts, the others for recordings.
+    pub fn mic_report(&self) -> Option<MicReport> {
+        self.mic.report()
     }
 
     /// The speech still open when the audio ends.
