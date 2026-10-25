@@ -27,3 +27,18 @@ untranscribed speech, so it is an upper bound); noise-only files (no speech at a
 Decision: on by default. It finds more speech in every set and never less, a far voice in the room most
 (es +26 points), and it never turns noise into speech; the extra "false" in the talks' gaps is real sound heard a
 little more, like the speech. `createVoiceActivityPipeline(..., null)` turns it off.
+
+## Microphone advice (`createMicCheck`), 2026-10-25
+
+`mic-check.ts` feeds `createMicCheck` the probabilities the real pipeline gives (null where the RMS gate kept Silero
+off); one report every 10 s, share of reports with each issue:
+
+| set | far/echo | noisy | quiet | clipping | hum |
+|---|---|---|---|---|---|
+| clean talks es/pt, accent en, conversations pt/de, good room (RT60 0.4 s) | 0–7 % | 0 | 0 | 0 | 0–2 % |
+| room RT60 0.8 s at 3 m / 6 m, RT60 1.2 s | 87 / 96 / 100 % | 0 | 0 | 0 | 0–2 % |
+| babble 10 dB / noise 5 dB | 64 / 85 % | 0 / 74 % | 0 | 0 | 0 |
+| real table microphone (AMI sdm) | 18 % | 11 % | 3 % | 0 | 11 % |
+| quiet −25 dB / 50 Hz hum −35 dB / 60 Hz hum −55 dB | 0 | 0 | 91 / 0 / 0 % | 0 | 2 / 100 / 5 % |
+
+Same thresholds as the Rust `MicCheck`; the Rust numbers (the desktop app's way) are in `sdk/rust-audio/README.md`.

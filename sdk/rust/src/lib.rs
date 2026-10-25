@@ -63,7 +63,7 @@ pub use s2s::{
     S2SConfig, S2SEvent, S2SFrame, S2SFrameDecoder, S2SMessage, S2SModels, S2SRequest, S2SStream, S2S_MAX_FRAME_BYTES,
 };
 #[cfg(feature = "audio")]
-pub use speech::{wav_16k, SpeechDetector};
+pub use speech::{wav_16k, MicIssue, MicReport, SpeechDetector};
 pub use stream::{ChatStream, SpeechStream};
 pub use stt_stream::{
     SttStreamEvent, SttStreamReceiver, SttStreamSender, StreamFinal, StreamPartial, StreamReady, TranscribeStreamRequest,

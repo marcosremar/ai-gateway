@@ -29,6 +29,8 @@ export type {
 } from './voice-activity';
 
 export { VOICE_LEVEL, createVoiceLevel } from './voice-level';
+export { ISSUES_THAT_HURT_TRANSCRIPTION, MIC_CHECK, createMicCheck } from './mic-check';
+export type { MicCheck, MicIssue, MicReport } from './mic-check';
 export type { VoiceLevel, VoiceLevelTuning } from './voice-level';
 
 export {

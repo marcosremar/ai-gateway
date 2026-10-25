@@ -13,9 +13,11 @@
 //! `exit()` (its 1.22 destructors abort otherwise); an app that does it itself calls [`release_handled_by_app`]. `ai-gateway-sdk` exposes all of it behind its
 //! `audio` feature (with a lazily created VAD), so an app that only calls the API never links ONNX Runtime.
 
+pub mod mic_check;
 pub mod segmenter;
 pub mod vad;
 
+pub use mic_check::{MicCheck, MicIssue, MicReport};
 pub use segmenter::{Segmenter, SegmenterConfig};
 pub use vad::{
     release_handled_by_app, use_onnx_runtime_at, SileroVad, VadError, VadLevel, FRAME_SAMPLES,
