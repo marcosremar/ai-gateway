@@ -1,0 +1,21 @@
+[package]
+name = "ai-gateway-audio"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "On-device speech detection for apps of the ai-gateway: Silero VAD (bundled, ONNX Runtime), a level for what the VAD hears, and the speech segmenter of the ucast.me desktop app. No network: works offline and before anything is sent to the gateway."
+readme = "README.md"
+publish = false
+
+# Standalone crate: never picked up by a parent workspace.
+[workspace]
+
+[lib]
+name = "ai_gateway_audio"
+path = "src/lib.rs"
+
+[dependencies]
+# The same ONNX Runtime binding as the ucast.me desktop app (bc-audio): one ORT per process, loaded at run time.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray", "load-dynamic"] }
+ndarray = "0.16"
+thiserror = "2"

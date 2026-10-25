@@ -125,6 +125,33 @@ The WebSocket client is in the crate (reqwest's HTTP/1.1 upgrade + an RFC 6455 c
 upgrade goes through an HTTP/1.1-only reqwest client (an HTTP/2 connection cannot be upgraded); with a custom
 `http_client(..)`, that client must be able to speak HTTP/1.1.
 
+## Speech detection on the device — feature `audio`
+
+```toml
+ai-gateway-sdk = { git = "https://github.com/marcosremar/ai-gateway", rev = "…", features = ["audio"] }
+```
+
+The ucast.me desktop app's front end for any Rust app (crate `ai-gateway-audio`, `sdk/rust-audio`): a level for
+what the VAD hears, Silero VAD and the speech segmenter. Without the feature nothing of it is compiled and ONNX
+Runtime is never linked; with it, the VAD is created on the first audio frame (ONNX Runtime from `ORT_DYLIB_PATH`
+or `use_onnx_runtime_at`).
+
+```rust
+use ai_gateway_sdk::SpeechDetector;
+
+let mut speech = SpeechDetector::new();                 // the app's settings, nothing loaded yet
+for chunk in mic_chunks {                               // 16 kHz mono f32, any size
+    for segment in speech.push(&chunk)? {               // a whole sentence, cut at a pause
+        let t = gw.transcribe_speech("parle-stt", &segment, Some("pt")).await?;
+        println!("{}", t.text);
+    }
+}
+```
+
+`SpeechDetector::with_config(SegmenterConfig { .. })` changes the segmentation, `.without_level()` turns the level
+off, `.segmenter()` reaches drafts at pauses (`take_peek`). The browser SDK has the same level in
+`sdk/browser/voice` (`createVoiceLevel`, on by default in `createVoiceActivityPipeline`).
+
 ## TTS engine of the GPU — `POST /v1/audio/speech/engine`
 
 The speech-stack GPU keeps ONE of Qwen3-TTS / Kokoro / Pocket loaded. When a session starts with its TTS alias, tell it:
@@ -283,6 +310,7 @@ of the current API).
 | `appRoutes` get/put, `apps` get/getImage/putImage/fallbackPlan | yes | — | yes (`apps()`) |
 | `health` / `health({deep})` | yes | `health`, `health_detail` | `health`, `health_deep`, `health_details`, `is_healthy` |
 | `GET /v1/models` | — | — | `models()` |
+| On-device speech detection (Silero VAD + level + segmenter) | — (browser: `sdk/browser/voice`, `createVoiceLevel`) | — | feature `audio`: `SpeechDetector`, `transcribe_speech` (crate `ai-gateway-audio`) |
 | Rooms create / lines / audio / end / GET | — | — | yes (babelcast parity) |
 | Rooms `PATCH /v1/rooms/:code` `{youtubeUrl}` | — | — | yes (`update_youtube`; ai-gateway `main` ≥ 0f6ac49, older gateways 405) |
 | Rooms `PATCH /v1/rooms/:code` `{serverDub}` | — | — | yes (`update_server_dub`; older gateways 400) |

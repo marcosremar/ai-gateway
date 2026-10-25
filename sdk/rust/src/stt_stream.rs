@@ -1029,7 +1029,7 @@ mod tests {
         .await;
 
         let gw = GatewayClient::new(base, "ucast_live_test").unwrap();
-        let mut stream = gw
+        let stream = gw
             .transcribe_stream(TranscribeStreamRequest::new("babelcast-stt").language("pt").prompt("Grafana"))
             .await
             .unwrap();

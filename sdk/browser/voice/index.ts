@@ -1,7 +1,7 @@
 /**
  * @parle/ai-gateway/voice — speech detection in the browser.
  *
- * RMS energy gate → Silero VAD v5 (onnxruntime-web, injected) → end-of-utterance silence, with Silero in a worker
+ * RMS energy gate → level (`createVoiceLevel`) → Silero VAD v5 (onnxruntime-web, injected) → end-of-utterance silence, with Silero in a worker
  * (main-thread fallback). High level: `createSpeechDetector` (one WAV per speaking turn). Lower level, for consumers
  * that wire their own sinks: the pure reducer (`createVoiceActivityPipeline`), the classifier pool
  * (`createSileroPool`), the frame worklet and the worker host (`serveSileroWorker`).
@@ -27,6 +27,9 @@ export type {
   VoiceFrameInput,
   VoiceStage,
 } from './voice-activity';
+
+export { VOICE_LEVEL, createVoiceLevel } from './voice-level';
+export type { VoiceLevel, VoiceLevelTuning } from './voice-level';
 
 export {
   SILERO_FRAME_SAMPLES,

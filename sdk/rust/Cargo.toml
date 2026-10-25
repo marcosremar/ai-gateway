@@ -24,6 +24,12 @@ thiserror = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 bytes = "1"
 httpdate = "1"
+# On-device speech detection (Silero VAD + level + segmenter), only with the `audio` feature: an app that just
+# calls the API never links ONNX Runtime.
+ai-gateway-audio = { path = "../rust-audio", optional = true }
+
+[features]
+audio = ["dep:ai-gateway-audio"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "io-util"] }
