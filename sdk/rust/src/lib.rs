@@ -35,6 +35,8 @@ mod http;
 pub mod openai;
 pub mod rooms;
 pub mod s2s;
+#[cfg(feature = "audio")]
+pub mod speech;
 mod stream;
 pub mod stt_stream;
 pub mod telemetry;
@@ -60,6 +62,8 @@ pub use rooms::{CreateRoom, Room, RoomLine, RoomSnapshot, RoomUpdate, Rooms};
 pub use s2s::{
     S2SConfig, S2SEvent, S2SFrame, S2SFrameDecoder, S2SMessage, S2SModels, S2SRequest, S2SStream, S2S_MAX_FRAME_BYTES,
 };
+#[cfg(feature = "audio")]
+pub use speech::{wav_16k, SpeechDetector};
 pub use stream::{ChatStream, SpeechStream};
 pub use stt_stream::{
     SttStreamEvent, SttStreamReceiver, SttStreamSender, StreamFinal, StreamPartial, StreamReady, TranscribeStreamRequest,

@@ -6,6 +6,7 @@ import {
   createVoiceActivityPipeline, type VadEffect, type VoiceActivityPipeline, type VoiceActivityTuning, type VoiceFrameClassifier,
 } from './voice-activity';
 import { addVoiceFrameWorklet, createVoiceFrameContext, createVoiceFrameNode } from './voice-frames';
+import { createVoiceLevel } from './voice-level';
 
 export interface SileroListener {
   connect(stream: MediaStream): void;
@@ -23,7 +24,9 @@ export async function startSileroListener(
   await addVoiceFrameWorklet(audio);
   const node = createVoiceFrameNode(audio);
   let source: MediaStreamAudioSourceNode | null = null;
-  let pipeline: VoiceActivityPipeline = createVoiceActivityPipeline(classifier, onEffect, tuning);
+  // One level per microphone, kept across restarts (it is the room's level, not the turn's).
+  const level = createVoiceLevel();
+  let pipeline: VoiceActivityPipeline = createVoiceActivityPipeline(classifier, onEffect, tuning, level);
   let queue = Promise.resolve();
   node.port.onmessage = (event: MessageEvent<Float32Array>) => {
     const current = pipeline;
@@ -37,7 +40,7 @@ export async function startSileroListener(
     },
     restart() {
       classifier.reset();
-      pipeline = createVoiceActivityPipeline(classifier, onEffect, tuning);
+      pipeline = createVoiceActivityPipeline(classifier, onEffect, tuning, level);
     },
     stop() {
       source?.disconnect();

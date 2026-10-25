@@ -11,6 +11,8 @@
  * While `silent` the classifier never runs (energy gate): Silero only scores frames after the RMS gate opened.
  */
 
+import { createVoiceLevel, type VoiceLevel } from './voice-level';
+
 export type VoiceStage = 'silent' | 'armed' | 'speech';
 
 export interface VoiceActivityTuning {
@@ -186,17 +188,24 @@ export interface VoiceActivityPipeline {
   classifiedFrames(): number;
 }
 
+/**
+ * `level`: what the classifier hears is levelled (`createVoiceLevel`, on by default; `null` = the frame as it came).
+ * Pass the same one across pipelines of one microphone (a `restart()` must not forget the room's level). The RMS
+ * gate always reads the frame as it came.
+ */
 export function createVoiceActivityPipeline(
   classifier: VoiceFrameClassifier,
   onEffect: (effect: VadEffect) => void,
   tuning: VoiceActivityTuning = VOICE_ACTIVITY_TUNING,
+  level: VoiceLevel | null = createVoiceLevel(),
 ): VoiceActivityPipeline {
   let state = initialVoiceActivity();
   let classified = 0;
   return {
     async push(frame) {
       const rms = rmsOf(frame);
-      const probability = state.stage === 'silent' ? null : await classifier.probability(frame);
+      const heard = level ? level.apply(frame) : frame;
+      const probability = state.stage === 'silent' ? null : await classifier.probability(heard);
       if (probability !== null) classified += 1;
       const next = stepVoiceActivity(state, { rms, probability }, tuning);
       state = next.state;
