@@ -158,5 +158,24 @@ assert s.tick() == [] and s.committed == "w1 w2", "a commit that changes nothing
 s.push(word(3))
 assert s.tick() == [{"text": "w1 w2 w3"}]
 assert s.finish() == [{"text": "w1 w2 w3", "final": True}]
+from stt_stream import join_tail
+assert join_tail("a b c", "b c d e") == "a b c d e"
+assert join_tail("a b c", "x y") is None
+ear = Ear()
+s = SttStream(ear, "pt", chunk_seconds=0.5, segments=True)
+pcm = b"".join(word(k, 0.5) for k in range(1, 17))
+s.push(pcm[: 3 * SAMPLE_RATE * 2])
+first = s.tick()
+assert ear.calls[-1]["samples"] == 3 * SAMPLE_RATE and first[0]["text"].startswith("w1"), (ear.calls[-1], first)
+for i in range(10):
+    at = (3 * SAMPLE_RATE + i * SAMPLE_RATE // 2) * 2
+    s.push(pcm[at: at + SAMPLE_RATE])
+    s.tick()
+    assert ear.calls[-1]["samples"] <= int(2.6 * SAMPLE_RATE), ear.calls[-1]
+assert s.shown.startswith("w1") and s.shown.endswith("w16"), s.shown
+final = s.finish()
+assert final[0]["text"].startswith("w1") and final[0]["text"].endswith("w16"), final
+assert ear.calls[-1]["samples"] == 8 * SAMPLE_RATE and not ear.calls[-1]["partial"], ear.calls[-1]
+
 print("stt stream: ok — partials with a stable prefix that never changes, finals on silence / full window (cut at the "
       "quietest point, no overlap) / flush, the prompt on every decode, silence never decoded, legacy shape unchanged")

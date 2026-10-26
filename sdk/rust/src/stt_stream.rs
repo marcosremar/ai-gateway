@@ -853,6 +853,157 @@ impl GatewayClient {
     }
 }
 
+// ── growing sentence (batch fallback) ───────────────────────────────────────
+
+/// Samples of audio a draft sends again so the new words join the line already showing (2 s at 16 kHz).
+pub const DRAFT_OVERLAP_SAMPLES: usize = 2 * 16_000;
+
+/// One open sentence transcribed by repeated batch calls (`POST /v1/audio/transcriptions`).
+///
+/// Each draft uploads only the audio that arrived since the previous draft, plus [`DRAFT_OVERLAP_SAMPLES`].
+/// [`GatewayClient::transcribe_growing`] does that POST. An 8 s sentence used to be decoded from scratch on
+/// every pass. The final is not this: the caller sends the whole sentence once. A tail whose overlap does not
+/// match is dropped and the next draft sends the whole sentence, instead of replacing the line with a fragment.
+#[derive(Debug, Default)]
+pub struct GrowingUtterance {
+    covered: usize,
+    hypothesis: String,
+}
+
+/// The slice of the sentence to upload for the next draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DraftPiece {
+    /// First sample of the audio the caller is holding.
+    pub start: usize,
+    /// The transcript must continue the line already showing.
+    pub continued: bool,
+}
+
+impl GrowingUtterance {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// `None` when `heard` was already transcribed. A shorter buffer (a new sentence) clears the cursor.
+    pub fn piece(&mut self, heard: usize) -> Option<DraftPiece> {
+        if self.covered > heard {
+            self.reset();
+        }
+        if !self.hypothesis.is_empty() && heard <= self.covered {
+            return None;
+        }
+        let continued = self.covered > DRAFT_OVERLAP_SAMPLES && heard > self.covered;
+        Some(DraftPiece { start: if continued { self.covered - DRAFT_OVERLAP_SAMPLES } else { 0 }, continued })
+    }
+
+    /// `transcript` is what the model returned for the piece. `Some` is the whole line to show.
+    /// `None` on a continuation that does not overlap: the cursor is cleared.
+    pub fn accept(&mut self, continued: bool, transcript: &str, heard: usize) -> Option<String> {
+        if !continued {
+            if transcript.trim().is_empty() {
+                return None;
+            }
+            self.hypothesis = transcript.to_string();
+            self.covered = heard;
+            return Some(self.hypothesis.clone());
+        }
+        match join_overlap(&self.hypothesis, transcript) {
+            Some(line) => {
+                self.hypothesis = line.clone();
+                self.covered = heard;
+                Some(line)
+            }
+            None => {
+                self.reset();
+                None
+            }
+        }
+    }
+}
+
+fn wav_from_pcm(samples: &[f32]) -> Vec<u8> {
+    let data_bytes = (samples.len() as u32) * 2;
+    let mut out = Vec::with_capacity(44 + data_bytes as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&16_000u32.to_le_bytes());
+    out.extend_from_slice(&32_000u32.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_bytes.to_le_bytes());
+    for s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+impl GatewayClient {
+    /// POSTs only the new piece of `samples` (16 kHz mono) and returns the whole line.
+    /// `None` when this audio was already sent, or the new words do not join the line.
+    pub async fn transcribe_growing(
+        &self,
+        utterance: &mut GrowingUtterance,
+        samples: &[f32],
+        model: &str,
+        language: Option<&str>,
+        prompt: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(piece) = utterance.piece(samples.len()) else {
+            return Ok(None);
+        };
+        let mut req = crate::openai::TranscribeRequest::new(model, wav_from_pcm(&samples[piece.start..]));
+        if let Some(language) = language {
+            req = req.language(language);
+        }
+        if let Some(prompt) = prompt {
+            req = req.prompt(prompt);
+        }
+        let text = self.transcribe(req).await?.text;
+        Ok(utterance.accept(piece.continued, &text, samples.len()))
+    }
+}
+
+fn bare_word(word: &str) -> String {
+    word.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
+}
+
+/// `new` was decoded from the end of `prev` plus what was said since.
+fn join_overlap(prev: &str, new: &str) -> Option<String> {
+    let prev_w: Vec<&str> = prev.split_whitespace().collect();
+    let new_w: Vec<&str> = new.split_whitespace().collect();
+    if prev_w.is_empty() {
+        return Some(new.to_string());
+    }
+    if new_w.is_empty() {
+        return Some(prev.to_string());
+    }
+    let limit = 12.min(prev_w.len()).min(new_w.len());
+    for k in (1..=limit).rev() {
+        let tail: Vec<String> = prev_w[prev_w.len() - k..].iter().map(|w| bare_word(w)).collect();
+        for skip in 0..3 {
+            if skip + k > new_w.len() {
+                continue;
+            }
+            let head: Vec<String> = new_w[skip..skip + k].iter().map(|w| bare_word(w)).collect();
+            if tail == head {
+                let rest = &new_w[skip + k..];
+                return Some(if rest.is_empty() { prev.to_string() } else { format!("{prev} {}", rest.join(" ")) });
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,6 +1068,24 @@ mod tests {
         assert_eq!(parse_event(r#"{"type":"pong"}"#), SttStreamEvent::Pong);
         assert!(matches!(parse_event(r#"{"type":"news"}"#), SttStreamEvent::Other(_)));
         assert!(matches!(parse_event("not json"), SttStreamEvent::Other(Value::String(_))));
+    }
+
+    #[test]
+    fn a_growing_sentence_uploads_only_the_new_audio_and_joins_the_line() {
+        let mut u = GrowingUtterance::new();
+        let first = u.piece(4 * 16_000).unwrap();
+        assert_eq!(first, DraftPiece { start: 0, continued: false });
+        assert_eq!(u.accept(false, "a reunião começa agora", 4 * 16_000).as_deref(), Some("a reunião começa agora"));
+        let tail = u.piece(6 * 16_000).unwrap();
+        assert_eq!(tail, DraftPiece { start: 2 * 16_000, continued: true });
+        assert_eq!(
+            u.accept(true, "começa agora e o orçamento", 6 * 16_000).as_deref(),
+            Some("a reunião começa agora e o orçamento")
+        );
+        assert!(u.piece(6 * 16_000).is_none());
+        assert!(u.accept(true, "o tempo fechou de vez", 8 * 16_000).is_none());
+        assert_eq!(u.piece(8 * 16_000).unwrap().start, 0);
+        assert_eq!(super::wav_from_pcm(&[0.0, 1.0, -1.0]).len(), 44 + 6);
     }
 
     #[test]

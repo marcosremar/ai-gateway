@@ -24,6 +24,7 @@ from typing import Any, Callable, Awaitable, Optional
 
 import httpx
 
+from gateway_sdk.growing import GrowingUtterance, wav_pcm16
 from gateway_sdk.types import (
     App,
     ApiKeyEntry,
@@ -616,6 +617,18 @@ class GatewaySDK:
                 fns[pid] = (lambda p: lambda: self._direct_transcribe(p, audio, language, prompt))(pid)
 
         return await self._realtime_fetch(fns, "/v1/transcribe", need_stt=True)
+
+    async def transcribe_growing(self, utterance: GrowingUtterance, samples, language: str = "fr", prompt: str = "") -> str | None:
+        """One draft of an open sentence: uploads only the new samples (plus 2 s) and returns the whole line.
+
+        None when this audio was already sent, or the new words do not join. The final is still
+        ``transcribe`` of the whole clip. ``samples`` are 16 kHz mono values in the int16 range.
+        """
+        piece = utterance.piece(len(samples))
+        if piece is None:
+            return None
+        result = await self.transcribe(wav_pcm16(samples[piece.start :]), language=language, prompt=prompt)
+        return utterance.accept(piece.continued, result.text, len(samples))
 
     async def _transcribe_batch(self, audio: bytes, language: str, prompt: str) -> TranscribeResponse:
         """BATCH mode: sequential gateway request with direct provider fallback."""

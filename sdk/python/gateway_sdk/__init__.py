@@ -11,6 +11,7 @@ Mirror SDK: ai-gateway/src/sdk/ (TypeScript)
 """
 
 from gateway_sdk.client import GatewaySDK
+from gateway_sdk.growing import DRAFT_OVERLAP_SAMPLES, DraftPiece, GrowingUtterance, wav_pcm16
 from gateway_sdk.types import RaceConfig, RetryMode
 from gateway_sdk.types import (
     ApiKeyEntry,
@@ -47,6 +48,10 @@ from gateway_sdk.types import (
 
 __all__ = [
     "GatewaySDK",
+    "GrowingUtterance",
+    "DraftPiece",
+    "DRAFT_OVERLAP_SAMPLES",
+    "wav_pcm16",
     "ApiKeyEntry",
     "ApiKeysResponse",
     "CatalogModel",
