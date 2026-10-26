@@ -40,7 +40,11 @@ export const MIC_CHECK = {
   quietDb: -50,
   clippedShare: 0.001,
   unsureVad: 0.95,
+  /** Far/echo only above this speech level (dBFS); quieter is studio-pause ambient. */
+  farMinSpeechDb: -40,
   noisySnrDb: 10,
+  /** VAD probability that counts as speech for the noisy check (see rust `NOISY_VOICED_PROB`). */
+  noisyVoicedProb: 0.85,
   humPeakDb: 8,
   humAudibleDb: -25,
 } as const;
@@ -126,11 +130,21 @@ export function createMicCheck(): MicCheck {
       }
       const issues: MicIssue[] = [];
       if (clippedShare > MIC_CHECK.clippedShare) issues.push('clipping');
-      if (vadConfidence !== null && vadConfidence < MIC_CHECK.unsureVad) issues.push('farOrEcho');
+      // Far/echo needs a long stretch of unsure speech (10 s), not studio pauses after leveling
+      // (presentation pauses ≈ 8 s / 30 s in 0.15..noisyVoicedProb; a real room mic ≈ 38 %).
+      const unsureSpeech = frames.filter((f) => f.prob >= 0.15 && f.prob < MIC_CHECK.noisyVoicedProb).length
+        >= framesIn(10);
+      if (unsureSpeech && speechDb >= MIC_CHECK.farMinSpeechDb && vadConfidence !== null && vadConfidence < MIC_CHECK.unsureVad) {
+        issues.push('farOrEcho');
+      }
       if (speechDb < MIC_CHECK.quietDb) issues.push('tooQuiet');
       const humming = hum !== null && hum.peakDb > MIC_CHECK.humPeakDb && hum.levelDb > MIC_CHECK.humAudibleDb;
+      // SNR from frames the VAD is sure are speech — not ambient the level boosts into mid probabilities.
+      // Same 8 s bar as minSoundS: a loud AC floor stays under it.
+      const voiced = frames.filter((f) => f.prob >= MIC_CHECK.noisyVoicedProb).map((f) => f.db);
+      const voicedDb = voiced.length >= framesIn(MIC_CHECK.minSoundS) ? median(voiced) : null;
       // A hum raises the floor too; then it is the hum, not a noisy room (and the hum was transcribed through).
-      if (!humming && noiseDb !== null && speechDb - noiseDb < MIC_CHECK.noisySnrDb) issues.push('noisy');
+      if (!humming && voicedDb !== null && noiseDb !== null && voicedDb - noiseDb < MIC_CHECK.noisySnrDb) issues.push('noisy');
       if (humming) issues.push('hum');
       return { speechDb, noiseDb, vadConfidence, clippedShare, hum, issues };
     },

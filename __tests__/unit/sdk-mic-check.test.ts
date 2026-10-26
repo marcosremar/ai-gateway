@@ -48,4 +48,77 @@ describe('mic check', () => {
     expect(session(-28, -70, 0.95, hum(-40))!.issues).toContain('hum');
     expect(session(-28, -70, 0.95, hum(-75))!.issues).not.toContain('hum');
   });
+
+  it('ambient noise alone is not a noisy room', () => {
+    const check = createMicCheck();
+    let seed = 9;
+    const noise = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return ((seed >>> 8) / 2 ** 24 - 0.5) * 3.46; };
+    const perS = Math.floor(SILERO_SAMPLE_RATE / SILERO_FRAME_SAMPLES);
+    let t = 0;
+    for (let i = 0; i < 30 * perS; i += 1) {
+      const loud = i % 4 < 2;
+      const amp = 10 ** ((loud ? -28 : -35) / 20);
+      const frame = new Float32Array(SILERO_FRAME_SAMPLES);
+      for (let j = 0; j < frame.length; j += 1) { t += 1; frame[j] = Math.max(-1, Math.min(1, noise() * amp)); }
+      check.push(frame, 0.05);
+    }
+    const r = check.report();
+    if (r) expect(r.issues).not.toContain('noisy');
+    if (r) expect(r.issues).not.toContain('farOrEcho');
+  });
+
+  it('silence with a high floor is not a noisy room', () => {
+    const check = createMicCheck();
+    let seed = 3;
+    const noise = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return ((seed >>> 8) / 2 ** 24 - 0.5) * 3.46; };
+    const perS = Math.floor(SILERO_SAMPLE_RATE / SILERO_FRAME_SAMPLES);
+    let t = 0;
+    for (let i = 0; i < 30 * perS; i += 1) {
+      const amp = 10 ** ((i % 4 === 0 ? -33 : -42) / 20);
+      const frame = new Float32Array(SILERO_FRAME_SAMPLES);
+      for (let j = 0; j < frame.length; j += 1) { t += 1; frame[j] = Math.max(-1, Math.min(1, noise() * amp)); }
+      check.push(frame, 0.05);
+    }
+    const r = check.report();
+    if (r) expect(r.issues).not.toContain('noisy');
+    if (r) expect(r.issues).not.toContain('farOrEcho');
+  });
+
+  it('mid VAD on the room floor is not a noisy room', () => {
+    // HVAC pauses after VadLevel: ~22 % mid prob, ~6 % ≥ 0.9 — must not warn Noisy.
+    const check = createMicCheck();
+    let seed = 7;
+    const noise = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return ((seed >>> 8) / 2 ** 24 - 0.5) * 3.46; };
+    const perS = Math.floor(SILERO_SAMPLE_RATE / SILERO_FRAME_SAMPLES);
+    let t = 0;
+    for (let i = 0; i < 30 * perS; i += 1) {
+      const amp = 10 ** (-40 / 20);
+      const frame = new Float32Array(SILERO_FRAME_SAMPLES);
+      for (let j = 0; j < frame.length; j += 1) { t += 1; frame[j] = Math.max(-1, Math.min(1, noise() * amp)); }
+      const rem = i % 50;
+      check.push(frame, rem <= 2 ? 0.92 : rem <= 13 ? 0.65 : 0.05);
+    }
+    const r = check.report();
+    if (r) expect(r.issues).not.toContain('noisy');
+  });
+
+  it('studio pauses with confident VAD fakes are not far or echo', () => {
+    const check = createMicCheck();
+    let seed = 11;
+    const noise = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return ((seed >>> 8) / 2 ** 24 - 0.5) * 3.46; };
+    const perS = Math.floor(SILERO_SAMPLE_RATE / SILERO_FRAME_SAMPLES);
+    let t = 0;
+    for (let i = 0; i < 30 * perS; i += 1) {
+      const amp = 10 ** ((i % 5 === 0 ? -40 : -55) / 20);
+      const frame = new Float32Array(SILERO_FRAME_SAMPLES);
+      for (let j = 0; j < frame.length; j += 1) { t += 1; frame[j] = Math.max(-1, Math.min(1, noise() * amp)); }
+      const rem = i % 50;
+      check.push(frame, rem <= 9 ? 0.92 : rem <= 17 ? 0.55 : 0.05);
+    }
+    const r = check.report();
+    if (r) {
+      expect(r.issues).not.toContain('farOrEcho');
+      expect(r.issues).not.toContain('noisy');
+    }
+  });
 });

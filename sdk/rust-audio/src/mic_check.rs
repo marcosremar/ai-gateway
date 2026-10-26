@@ -32,8 +32,15 @@ pub const CLIPPED_SHARE: f32 = 0.001;
 /// 65–91 %, RT60 1.2 s 100 %, babble at 10 dB 19–47 %, a real table microphone (AMI) 19 % — the conditions where
 /// the app's WER went from 6.8 % to 11–41 %.
 pub const UNSURE_VAD: f32 = 0.95;
+/// Far/echo only when the "speech" is at least this loud (dBFS). Studio pauses sit around −45…−50 and used to
+/// look far after VadLevel; a room mic with a real talker is around −29.
+pub const FAR_MIN_SPEECH_DB: f32 = -40.0;
 /// Speech less than this above the room's floor (dB) = noisy.
 pub const NOISY_SNR_DB: f32 = 10.0;
+/// VAD probability that counts as speech for the noisy check. Lower (0.5) also matched air-conditioning
+/// and other quiet ambient after `VadLevel` (room HVAC floor alone: ~22 % ≥ 0.5, ~11 % ≥ 0.8, ~6 % ≥ 0.9;
+/// clean talk ~65 % ≥ 0.9). 0.85 keeps the 5 dB noise case (measured ~70 % of reports) and drops the HVAC floor.
+pub const NOISY_VOICED_PROB: f32 = 0.85;
 /// A peak at 50/60 Hz and its harmonics this much above the bins next to it (dB)…
 pub const HUM_PEAK_DB: f32 = 8.0;
 /// …and loud enough to matter: no more than this below the speech (dB).
@@ -203,16 +210,28 @@ impl MicCheck {
         if clipped_share > CLIPPED_SHARE {
             issues.push(MicIssue::Clipping);
         }
-        if vad_confidence.is_some_and(|c| c < UNSURE_VAD) {
+        // Far/echo needs a long stretch of unsure speech, not studio pauses after VadLevel
+        // (presentation/ pt pauses: ~27 % in 0.15..0.85 ≈ 8 s / 30 s; a real room mic is ~38 %).
+        let unsure_speech = self
+            .frames
+            .iter()
+            .filter(|f| f.prob >= 0.15 && f.prob < NOISY_VOICED_PROB)
+            .count()
+            >= frames_in(10.0);
+        if unsure_speech && speech_db >= FAR_MIN_SPEECH_DB && vad_confidence.is_some_and(|c| c < UNSURE_VAD) {
             issues.push(MicIssue::FarOrEcho);
         }
         if speech_db < QUIET_DB {
             issues.push(MicIssue::TooQuiet);
         }
         let humming = hum.is_some_and(|(peak, level)| peak > HUM_PEAK_DB && level > HUM_AUDIBLE_DB);
+        // SNR from frames the VAD is sure are speech — not ambient the level boosts into mid probabilities.
+        // Same 8 s bar as MIN_SOUND_S: a loud AC floor (~11 % ≥ 0.85 → ~3 s / 30 s) stays under it.
+        let voiced: Vec<f32> = self.frames.iter().filter(|f| f.prob >= NOISY_VOICED_PROB).map(|f| f.db).collect();
+        let voiced_db = (voiced.len() >= frames_in(MIN_SOUND_S)).then(|| median(voiced));
         // A hum raises the floor too; then it is the hum, not a noisy room (the advice differs, and the hum was
         // transcribed through: WER 7.2 % vs 6.8 % clean).
-        if !humming && noise_db.is_some_and(|n| speech_db - n < NOISY_SNR_DB) {
+        if !humming && voiced_db.zip(noise_db).is_some_and(|(s, n)| s - n < NOISY_SNR_DB) {
             issues.push(MicIssue::Noisy);
         }
         if humming {
@@ -293,5 +312,120 @@ mod tests {
         assert!(loud.issues.contains(&MicIssue::Hum), "{loud:?}");
         let faint = session(-28.0, -70.0, 0.95, hum(-75.0)).unwrap();
         assert!(!faint.issues.contains(&MicIssue::Hum), "{faint:?}");
+    }
+
+    #[test]
+    fn ambient_noise_alone_is_not_a_noisy_room() {
+        // Room noise only, VAD silent: louder bursts above the floor used to count as "speech" within
+        // 10 dB of it → false Noisy. (Also must not require a report — FarOrEcho may still fire.)
+        let mut check = MicCheck::new();
+        let mut noise = Noise(9);
+        let per_s = SAMPLE_RATE as usize / FRAME_SAMPLES;
+        let mut t = 0usize;
+        for i in 0..(30 * per_s) {
+            let loud = i % 4 < 2;
+            let amp = 10f32.powf(if loud { -28.0 } else { -35.0 } / 20.0);
+            let frame: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|_| {
+                    t += 1;
+                    (noise.next() * amp).clamp(-1.0, 1.0)
+                })
+                .collect();
+            check.push(&frame, 0.05);
+        }
+        if let Some(r) = check.report() {
+            assert!(
+                !r.issues.contains(&MicIssue::Noisy) && !r.issues.contains(&MicIssue::FarOrEcho),
+                "{r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn silence_with_a_high_floor_is_not_a_noisy_room() {
+        // Steady floor, no one talking: bursts above the floor (or a VAD that fires on the same level)
+        // used to make speech_db ≈ noise_db → Noisy while the room was just quiet.
+        let mut check = MicCheck::new();
+        let mut noise = Noise(3);
+        let per_s = SAMPLE_RATE as usize / FRAME_SAMPLES;
+        let mut t = 0usize;
+        for i in 0..(30 * per_s) {
+            // Mostly −42 dBFS "silence"; every 4th frame a bit louder (−33) so the gate sees "sound".
+            let amp = 10f32.powf(if i % 4 == 0 { -33.0 } else { -42.0 } / 20.0);
+            let frame: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|_| {
+                    t += 1;
+                    (noise.next() * amp).clamp(-1.0, 1.0)
+                })
+                .collect();
+            check.push(&frame, 0.05);
+        }
+        if let Some(r) = check.report() {
+            assert!(
+                !r.issues.contains(&MicIssue::Noisy) && !r.issues.contains(&MicIssue::FarOrEcho),
+                "{r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mid_vad_on_the_room_floor_is_not_a_noisy_room() {
+        // Like the HVAC pauses in `room/` after VadLevel: ~20 % of frames at prob 0.5–0.8 on the floor,
+        // almost none ≥ 0.9. Used to warn Noisy while the person was silent.
+        let mut check = MicCheck::new();
+        let mut noise = Noise(7);
+        let per_s = SAMPLE_RATE as usize / FRAME_SAMPLES;
+        let mut t = 0usize;
+        for i in 0..(30 * per_s) {
+            let amp = 10f32.powf(-40.0 / 20.0);
+            let frame: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|_| {
+                    t += 1;
+                    (noise.next() * amp).clamp(-1.0, 1.0)
+                })
+                .collect();
+            // 22 % mid VAD (ambient after level), ~6 % ≥ 0.9 — mirrors room HVAC floor histogram.
+            let prob = match i % 50 {
+                0..=2 => 0.92,  // 6 %
+                3..=13 => 0.65, // 22 %
+                _ => 0.05,
+            };
+            check.push(&frame, prob);
+        }
+        if let Some(r) = check.report() {
+            assert!(!r.issues.contains(&MicIssue::Noisy), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn studio_pauses_with_confident_vad_fakes_are_not_far_or_echo() {
+        // presentation/ pauses after VadLevel: clear bursts + confident VAD fakes used to warn
+        // FarOrEcho (median confidence on clear frames just under 0.95) while nobody was talking.
+        let mut check = MicCheck::new();
+        let mut noise = Noise(11);
+        let per_s = SAMPLE_RATE as usize / FRAME_SAMPLES;
+        let mut t = 0usize;
+        for i in 0..(30 * per_s) {
+            let amp = 10f32.powf(if i % 5 == 0 { -40.0 } else { -55.0 } / 20.0);
+            let frame: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|_| {
+                    t += 1;
+                    (noise.next() * amp).clamp(-1.0, 1.0)
+                })
+                .collect();
+            // Under 8 s of mid (unsure) and under 8 s of ≥ 0.85 — like the measured pause histogram.
+            let prob = match i % 50 {
+                0..=9 => 0.92,   // 20 %
+                10..=17 => 0.55, // 16 %
+                _ => 0.05,
+            };
+            check.push(&frame, prob);
+        }
+        if let Some(r) = check.report() {
+            assert!(
+                !r.issues.contains(&MicIssue::FarOrEcho) && !r.issues.contains(&MicIssue::Noisy),
+                "{r:?}"
+            );
+        }
     }
 }
