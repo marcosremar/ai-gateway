@@ -35,6 +35,9 @@ pub const UNSURE_VAD: f32 = 0.95;
 /// Far/echo only when the "speech" is at least this loud (dBFS). Studio pauses sit around −45…−50 and used to
 /// look far after VadLevel; a room mic with a real talker is around −29.
 pub const FAR_MIN_SPEECH_DB: f32 = -40.0;
+/// "Sure speech" this quiet is not a voice: a table microphone's room tone makes Silero sure at −58 dBFS.
+/// Quieter speech is [`MicIssue::TooQuiet`]'s subject, never [`MicIssue::Noisy`]'s.
+pub const NOISY_MIN_SPEECH_DB: f32 = QUIET_DB;
 /// Speech less than this above the room's floor (dB) = noisy.
 pub const NOISY_SNR_DB: f32 = 10.0;
 /// VAD probability that counts as speech for the noisy check. Lower (0.5) also matched air-conditioning
@@ -73,6 +76,46 @@ impl MicIssue {
     }
 }
 
+/// What the microphone hears **when nobody is talking** — the pause floor, which decides whether an advice is
+/// even meaningful. Measured on the ucast.me benchmark sets (2026-10-26, `docs/medicoes.md` § piso): a single
+/// threshold cannot tell a clean studio pause from air-conditioning, and both from a real noisy room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Floor {
+    /// Digital zeros (muted channel, joined gaps): nothing to measure.
+    DigitalSilence,
+    /// Clean-talk pauses, −54 dBFS and quieter, no digital.
+    StudioQuiet,
+    /// Room tone / air-conditioning / projector: ~−40…−50 dBFS.
+    RoomAmbient,
+    /// Loud noise floor (~−38 dBFS and up) waiting to swallow the voice.
+    LoudFloor,
+    /// Real meeting recordings: some digital gaps plus a quiet floor.
+    MeetingFloor,
+}
+
+impl Floor {
+    /// The floor from the pauses: their median level and how much of them is digital silence.
+    fn of(pause_median_db: f32, digital_share: f32) -> Self {
+        if pause_median_db <= -90.0 || (digital_share >= 0.05 && pause_median_db <= -70.0) {
+            Floor::DigitalSilence
+        } else if digital_share >= 0.05 {
+            Floor::MeetingFloor
+        } else if pause_median_db <= -54.0 {
+            Floor::StudioQuiet
+        } else if pause_median_db <= -39.0 {
+            Floor::RoomAmbient
+        } else {
+            Floor::LoudFloor
+        }
+    }
+
+    /// Whether this floor alone should never produce an advice (nobody spoke).
+    pub fn is_quiet(self) -> bool {
+        !matches!(self, Floor::LoudFloor)
+    }
+}
+
 /// The numbers behind a report (dB are dBFS of the audio as it came from the microphone).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -90,6 +133,8 @@ pub struct MicReport {
     pub hum: Option<(f32, f32)>,
     /// What to tell the person, most harmful first (empty = nothing to change).
     pub issues: Vec<MicIssue>,
+    /// What the room sounds like while nobody talks (`None` with too few pauses to tell).
+    pub floor: Option<Floor>,
 }
 
 impl MicReport {
@@ -171,7 +216,7 @@ impl MicCheck {
     pub fn report(&self) -> Option<MicReport> {
         let silent: Vec<f32> = self.frames.iter().filter(|f| f.prob < 0.2 && f.db > -100.0).map(|f| f.db).collect();
         let noise_db = (silent.len() >= frames_in(2.0)).then(|| {
-            let mut s = silent;
+            let mut s = silent.clone();
             s.sort_by(|a, b| a.total_cmp(b));
             s[s.len() / 5]
         });
@@ -184,6 +229,15 @@ impl MicCheck {
             return None;
         }
         let speech_db = median(sound.iter().map(|f| f.db).collect());
+        // What the room does while nobody talks: the pause median (digital silence excluded, it has no level)
+        // and how much of the pauses is digital.
+        let floor = (silent.len() >= frames_in(2.0)).then(|| {
+            let mut levels = silent.clone();
+            levels.sort_by(|a, b| a.total_cmp(b));
+            let digital = self.frames.iter().filter(|f| f.prob < 0.2 && f.db <= -100.0).count();
+            let pause_frames = self.frames.iter().filter(|f| f.prob < 0.2).count().max(1);
+            Floor::of(levels[levels.len() / 2], digital as f32 / pause_frames as f32)
+        });
         // How sure the VAD is where the sound is clear: unsure there = far away or echoing.
         let vad_confidence = (clear.len() >= frames_in(4.0)).then(|| median(clear.iter().map(|f| f.prob).collect()));
         let clipped_share = sound.iter().map(|f| f.clipped as f32).sum::<f32>() / (sound.len() * FRAME_SAMPLES) as f32;
@@ -231,13 +285,15 @@ impl MicCheck {
         let voiced_db = (voiced.len() >= frames_in(MIN_SOUND_S)).then(|| median(voiced));
         // A hum raises the floor too; then it is the hum, not a noisy room (the advice differs, and the hum was
         // transcribed through: WER 7.2 % vs 6.8 % clean).
-        if !humming && voiced_db.zip(noise_db).is_some_and(|(s, n)| s - n < NOISY_SNR_DB) {
+        if !humming
+            && voiced_db.zip(noise_db).is_some_and(|(s, n)| s >= NOISY_MIN_SPEECH_DB && s - n < NOISY_SNR_DB)
+        {
             issues.push(MicIssue::Noisy);
         }
         if humming {
             issues.push(MicIssue::Hum);
         }
-        Some(MicReport { speech_db, noise_db, vad_confidence, clipped_share, hum, issues })
+        Some(MicReport { speech_db, noise_db, vad_confidence, clipped_share, hum, issues, floor })
     }
 }
 
@@ -426,6 +482,44 @@ mod tests {
                 !r.issues.contains(&MicIssue::FarOrEcho) && !r.issues.contains(&MicIssue::Noisy),
                 "{r:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_floor_is_named_from_the_pauses() {
+        // The five pauses the benchmark sets have (docs/medicoes.md § piso, 2026-10-26).
+        assert_eq!(Floor::of(-95.0, 0.6), Floor::DigitalSilence, "zeros");
+        assert_eq!(Floor::of(-120.0, 0.0), Floor::DigitalSilence, "all digital");
+        assert_eq!(Floor::of(-60.0, 0.17), Floor::MeetingFloor, "AMI headset");
+        assert_eq!(Floor::of(-58.0, 0.0), Floor::StudioQuiet, "clean talk");
+        assert_eq!(Floor::of(-43.0, 0.0), Floor::RoomAmbient, "HVAC");
+        assert_eq!(Floor::of(-38.0, 0.0), Floor::LoudFloor, "5 dB noise");
+        assert!(!Floor::LoudFloor.is_quiet() && Floor::RoomAmbient.is_quiet());
+    }
+
+    #[test]
+    fn a_table_microphone_with_only_room_tone_is_not_a_noisy_room() {
+        // AMI's table mic after VadLevel: sure VAD (≥ 0.85) on the floor at −58 dBFS, SNR ~6 dB.
+        // Used to warn Noisy while nobody was speaking — quieter than speech is TooQuiet's business.
+        let mut check = MicCheck::new();
+        let mut noise = Noise(13);
+        let per_s = SAMPLE_RATE as usize / FRAME_SAMPLES;
+        let mut t = 0usize;
+        for i in 0..(30 * per_s) {
+            // Digital gaps (as AMI has) mixed with a very quiet floor.
+            let digital = i % 7 == 0;
+            let amp = 10f32.powf(-58.0 / 20.0);
+            let frame: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|_| {
+                    t += 1;
+                    if digital { 0.0 } else { (noise.next() * amp).clamp(-1.0, 1.0) }
+                })
+                .collect();
+            check.push(&frame, if i % 3 == 0 { 0.95 } else { 0.05 });
+        }
+        if let Some(r) = check.report() {
+            assert!(!r.issues.contains(&MicIssue::Noisy), "{r:?}");
+            assert!(r.floor.is_some(), "the floor is still reported: {r:?}");
         }
     }
 }

@@ -12,6 +12,23 @@ import { SILERO_FRAME_SAMPLES, SILERO_SAMPLE_RATE } from './silero';
 export type MicIssue = 'clipping' | 'farOrEcho' | 'tooQuiet' | 'noisy' | 'hum';
 
 /**
+ * What the microphone hears **when nobody is talking** — the pause floor, which decides whether an advice is
+ * even meaningful. Same rules as `Floor` in the Rust crate. Measured on the ucast.me benchmark sets
+ * (2026-10-26, `docs/medicoes.md` § piso): one threshold cannot tell a clean studio pause from air-conditioning,
+ * nor either from a real noisy room.
+ */
+export type Floor = 'digitalSilence' | 'studioQuiet' | 'roomAmbient' | 'loudFloor' | 'meetingFloor';
+
+/** The floor from the pauses: their median level (dBFS) and how much of them is digital silence. */
+export function floorOf(pauseMedianDb: number, digitalShare: number): Floor {
+  if (pauseMedianDb <= -90 || (digitalShare >= 0.05 && pauseMedianDb <= -70)) return 'digitalSilence';
+  if (digitalShare >= 0.05) return 'meetingFloor';
+  if (pauseMedianDb <= -54) return 'studioQuiet';
+  if (pauseMedianDb <= -39) return 'roomAmbient';
+  return 'loudFloor';
+}
+
+/**
  * The issues that made the transcription worse on the benchmark (app WER, clean talk 6.8 %): far/echo 11–41 %, noisy
  * (5 dB) 18 %. Clipping (6.9 %), hum (6.9–7.2 %) and a quiet microphone (6.8–7.0 %) are real but were transcribed
  * through — show them for recordings or an audience, not as a reason for bad subtitles.
@@ -31,6 +48,8 @@ export interface MicReport {
   hum: { peakDb: number; levelDb: number } | null;
   /** What to tell the person, most harmful first (empty = nothing to change). */
   issues: MicIssue[];
+  /** What the room sounds like while nobody talks (null with too few pauses to tell). */
+  floor: Floor | null;
 }
 
 export const MIC_CHECK = {
@@ -43,6 +62,8 @@ export const MIC_CHECK = {
   /** Far/echo only above this speech level (dBFS); quieter is studio-pause ambient. */
   farMinSpeechDb: -40,
   noisySnrDb: 10,
+  /** "Sure speech" this quiet is room tone, not a voice (see rust `NOISY_MIN_SPEECH_DB`). */
+  noisyMinSpeechDb: -50,
   /** VAD probability that counts as speech for the noisy check (see rust `NOISY_VOICED_PROB`). */
   noisyVoicedProb: 0.85,
   humPeakDb: 8,
@@ -99,14 +120,23 @@ export function createMicCheck(): MicCheck {
       }
     },
     report() {
-      const silent = frames.filter((f) => f.prob < 0.2 && f.db > -100).map((f) => f.db).sort((a, b) => a - b);
-      const noiseDb = silent.length >= framesIn(2) ? silent[Math.floor(silent.length / 5)]! : null;
+      // Digital silence has no level: keep it out of `noiseDb` (as the Rust crate does) but count it for the floor.
+      const silentRaw = frames.filter((f) => f.prob < 0.2 && f.db > -100).map((f) => f.db).sort((a, b) => a - b);
+      const noiseDb = silentRaw.length >= framesIn(2) ? silentRaw[Math.floor(silentRaw.length / 5)]! : null;
       const gate = noiseDb === null ? -60 : noiseDb + 10;
       // Silero's confidence only where it ran (the RMS gate keeps it off on quiet frames: unknown, not unsure).
       const clear = frames.filter((f) => f.db > gate && f.known);
       const sound = frames.filter((f) => f.db > gate || f.prob >= 0.5);
       if (sound.length < framesIn(MIC_CHECK.minSoundS)) return null;
       const speechDb = median(sound.map((f) => f.db));
+      // What the room does while nobody talks: pause median (digital has no level) + digital share.
+      let floor: Floor | null = null;
+      if (silentRaw.length >= framesIn(2)) {
+        const levels = [...silentRaw].sort((a, b) => a - b);
+        const pauses = frames.filter((f) => f.prob < 0.2).length || 1;
+        const digital = frames.filter((f) => f.prob < 0.2 && f.db <= -100).length;
+        floor = floorOf(levels[Math.floor(levels.length / 2)]!, digital / pauses);
+      }
       const vadConfidence = clear.length >= framesIn(4) ? median(clear.map((f) => f.prob)) : null;
       const clippedShare = sound.reduce((a, f) => a + f.clipped, 0) / (sound.length * SILERO_FRAME_SAMPLES);
       let hum: MicReport['hum'] = null;
@@ -144,9 +174,12 @@ export function createMicCheck(): MicCheck {
       const voiced = frames.filter((f) => f.prob >= MIC_CHECK.noisyVoicedProb).map((f) => f.db);
       const voicedDb = voiced.length >= framesIn(MIC_CHECK.minSoundS) ? median(voiced) : null;
       // A hum raises the floor too; then it is the hum, not a noisy room (and the hum was transcribed through).
-      if (!humming && voicedDb !== null && noiseDb !== null && voicedDb - noiseDb < MIC_CHECK.noisySnrDb) issues.push('noisy');
+      if (!humming && voicedDb !== null && noiseDb !== null
+        && voicedDb >= MIC_CHECK.noisyMinSpeechDb && voicedDb - noiseDb < MIC_CHECK.noisySnrDb) {
+        issues.push('noisy');
+      }
       if (humming) issues.push('hum');
-      return { speechDb, noiseDb, vadConfidence, clippedShare, hum, issues };
+      return { speechDb, noiseDb, vadConfidence, clippedShare, hum, issues, floor };
     },
     clear() {
       frames = [];

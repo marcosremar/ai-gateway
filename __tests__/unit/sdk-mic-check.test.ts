@@ -3,7 +3,7 @@
  * `ai-gateway-audio`'s `mic_check` tests (Rust).
  */
 import { describe, expect, it } from 'vitest';
-import { createMicCheck, type MicReport } from '../../sdk/browser/voice/index';
+import { createMicCheck, floorOf, type MicReport } from '../../sdk/browser/voice/index';
 import { SILERO_FRAME_SAMPLES, SILERO_SAMPLE_RATE } from '../../sdk/browser/voice/silero';
 
 /** 30 s alternating 2 s of "speech" (noise at speechDb, probability prob) and 1 s of pause (noise at pauseDb). */
@@ -119,6 +119,36 @@ describe('mic check', () => {
     if (r) {
       expect(r.issues).not.toContain('farOrEcho');
       expect(r.issues).not.toContain('noisy');
+    }
+  });
+
+  it('names the floor from the pauses', () => {
+    expect(floorOf(-95, 0.6)).toBe('digitalSilence');
+    expect(floorOf(-120, 0)).toBe('digitalSilence');
+    expect(floorOf(-60, 0.17)).toBe('meetingFloor');
+    expect(floorOf(-58, 0)).toBe('studioQuiet');
+    expect(floorOf(-43, 0)).toBe('roomAmbient');
+    expect(floorOf(-38, 0)).toBe('loudFloor');
+  });
+
+  it('a table microphone with only room tone is not a noisy room', () => {
+    // AMI table mic after leveling: sure VAD on a −58 dBFS floor, SNR ~6 dB, digital gaps.
+    const check = createMicCheck();
+    let seed = 13;
+    const noise = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return ((seed >>> 8) / 2 ** 24 - 0.5) * 3.46; };
+    const perS = Math.floor(SILERO_SAMPLE_RATE / SILERO_FRAME_SAMPLES);
+    let t = 0;
+    for (let i = 0; i < 30 * perS; i += 1) {
+      const digital = i % 7 === 0;
+      const amp = 10 ** (-58 / 20);
+      const frame = new Float32Array(SILERO_FRAME_SAMPLES);
+      for (let j = 0; j < frame.length; j += 1) { t += 1; frame[j] = digital ? 0 : Math.max(-1, Math.min(1, noise() * amp)); }
+      check.push(frame, i % 3 === 0 ? 0.95 : 0.05);
+    }
+    const r = check.report();
+    if (r) {
+      expect(r.issues).not.toContain('noisy');
+      expect(r.floor).not.toBeNull();
     }
   });
 });
