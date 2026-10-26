@@ -31,6 +31,13 @@ macro_rules! call_options_setters {
             self.call.request_id = Some(id.into());
             self
         }
+
+        /// Never start (or keep alive) a rented machine for this call (`X-Gateway-No-Wake: 1`): a cold deployment
+        /// target is skipped and the route falls through to its cloud fallback.
+        pub fn no_wake(mut self, on: bool) -> Self {
+            self.call.no_wake = on;
+            self
+        }
     };
 }
 pub(crate) use call_options_setters;

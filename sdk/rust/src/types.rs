@@ -134,12 +134,24 @@ pub struct CallOptions {
     pub device: Option<String>,
     /// Request id sent as `X-Request-Id` (≤ 128 chars of `[A-Za-z0-9_.-]`; anything else is replaced by the gateway).
     pub request_id: Option<String>,
+    /// Sent as `X-Gateway-No-Wake: 1`: this call must never start (or keep starting) a rented machine.
+    ///
+    /// A deployment target with no ready replica is skipped with code `cold` (neutral: no circuit, no cooldown) and
+    /// the route falls through to its cloud fallback; nothing is woken and the idle clock is not touched. A replica
+    /// that is already ready is still used (it bills anyway). See `src/gateway/proxy/no-wake.ts`.
+    pub no_wake: bool,
 }
 
 impl CallOptions {
     /// Options with only a timeout.
     pub fn timeout(timeout: Duration) -> Self {
         Self { timeout: Some(timeout), ..Self::default() }
+    }
+
+    /// Never let this call start or keep alive a rented machine (`X-Gateway-No-Wake: 1`).
+    pub fn no_wake(mut self, on: bool) -> Self {
+        self.no_wake = on;
+        self
     }
 }
 

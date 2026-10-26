@@ -303,6 +303,7 @@ of the current API).
 | URL / key from env | no | no | yes (`AI_GATEWAY_URL`/`GATEWAY_URL`, `AI_GATEWAY_API_KEY`/`GATEWAY_API_KEY`, `GATEWAY_APP`) |
 | Per-group timeouts + per-call override | yes | per stage | yes (+ `rooms` group) |
 | `X-Gateway-Device`, `X-Request-Id` per call | device | — | both (`CallOptions`) |
+| `X-Gateway-No-Wake: 1` (never start or keep a rented machine; a cold target falls to the cloud) | — | — | `no_wake(true)` on every request and on `CallOptions` |
 | Typed error (status, code, body, Retry-After, served, unreachable) | `GatewayError` | `GatewayError` | `GatewayError` enum |
 | `served` from `X-Gateway-Provider` / `-Fallback` / `-Fallback-From` | yes | — | yes (+ `X-Request-Id`, `X-Gateway-Status`) |
 | Retry idempotent calls on connection errors | yes (2×) | yes | yes (2×) |
