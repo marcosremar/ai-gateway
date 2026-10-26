@@ -962,6 +962,9 @@ describe('coupons in the admin panel (session)', () => {
 describe('account page script', () => {
   it.each(['pt', 'en', 'fr'])('is valid JavaScript in %s and carries the coupon card and the admin panel', async (lang) => {
     const gw = await startGateway();
+    const signupPage = await call(gw, 'GET', '/signup', { host: SITE, headers: { 'Accept-Language': lang } });
+    for (const source of [...signupPage.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean)) expect(() => new Function(source)).not.toThrow();
+    expect(signupPage.text).toContain('id="inv"');
     const page = await call(gw, 'GET', '/account', { host: SITE, headers: { 'Accept-Language': lang } });
     expect(page.status).toBe(200);
     const scripts = [...page.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean);
@@ -1016,5 +1019,58 @@ describe('coupon invitations', () => {
     const made = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: {} });
     const single = await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code: made.json.coupons[0].code, email: 'ana@example.com' } });
     expect(single.json.error.code).toBe('coupon_email_registered');
+  });
+});
+
+describe('invitation sign-up (the e-mail link opens the sign-up already on the coupon)', () => {
+  const adminHeaders = { Authorization: `Bearer ${ADMIN_KEY}` };
+  const invite = async (gw: Gw, body: Record<string, unknown>) => {
+    const r = await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body });
+    expect(r.status).toBe(201);
+    return r.json.coupons[0].code as string;
+  };
+  const lookup = (gw: Gw, code: string) => call(gw, 'GET', `/v1/account/invite?code=${encodeURIComponent(code)}`);
+
+  it('links the e-mail to the invite, opens it, and the account is born on Pro with the e-mail confirmed', async () => {
+    const gw = await startGateway();
+    gw.mails.length = 0;
+    const code = await invite(gw, { emails: ['novo@example.com'], months: 3 });
+    expect(gw.mails[0]!.text).toContain(`https://ucast.me/signup?invite=${code}`);
+    const info = await lookup(gw, code.toLowerCase());
+    expect(info.json).toEqual({ email: 'novo@example.com', plan: 'pro', months: 3 });
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/signup', { body: { email: 'Novo@Example.com', password: 'senha-forte-123', invite: code } });
+    expect(r.status).toBe(201);
+    expect(gw.mails).toHaveLength(0);
+    const me = await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: cookieOf(r) } });
+    expect(me.json).toMatchObject({ emailVerified: true, plan: 'pro', quota: { viaCoupon: true, grantEndsAt: '2027-01-10T12:00:00.000Z' } });
+    expect((await lookup(gw, code)).json.error.code).toBe('coupon_used');
+  });
+
+  it('refuses a different e-mail for a bound invite and an unknown code, creating no account', async () => {
+    const gw = await startGateway();
+    const code = await invite(gw, { emails: ['novo@example.com'] });
+    const other = await call(gw, 'POST', '/v1/account/signup', { body: { email: 'intruso@example.com', password: 'senha-forte-123', invite: code } });
+    expect(other.status).toBe(400);
+    expect(other.json.error.code).toBe('coupon_email_mismatch');
+    expect((await call(gw, 'POST', '/v1/account/login', { body: { email: 'intruso@example.com', password: 'senha-forte-123' } })).status).toBe(401);
+    expect((await call(gw, 'POST', '/v1/account/signup', { body: { email: 'novo@example.com', password: 'senha-forte-123', invite: 'UCAST-NOPE-NOPE' } })).json.error.code).toBe('invalid_coupon');
+    expect((await lookup(gw, 'UCAST-NOPE-NOPE')).status).toBe(404);
+  });
+
+  it('a shared code is tied to no e-mail: the account still needs its e-mail confirmed, then the code is used on the account page', async () => {
+    const gw = await startGateway();
+    const code = await invite(gw, { maxUses: 5 });
+    expect((await lookup(gw, code)).json).toEqual({ email: null, plan: 'pro', months: 3 });
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/signup', { body: { email: 'turma@example.com', password: 'senha-forte-123', invite: code } });
+    expect(r.status).toBe(201);
+    const me = await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: cookieOf(r) } });
+    expect(me.json).toMatchObject({ emailVerified: false, quota: { viaCoupon: false } });
+    const token = takeVerification(gw, 'turma@example.com')!;
+    expect((await call(gw, 'POST', '/v1/account/verify', { body: { token } })).status).toBe(200);
+    const redeemed = await call(gw, 'POST', '/v1/account/coupon/redeem', { headers: { Cookie: cookieOf(r), 'X-CSRF-Token': r.json.csrfToken }, body: { code } });
+    expect(redeemed.status).toBe(200);
+    expect(redeemed.json.quota.viaCoupon).toBe(true);
   });
 });

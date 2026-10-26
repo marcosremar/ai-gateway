@@ -209,7 +209,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         sameSiteForm(req);
         limit(`signup:ip:${ip}`, ATTEMPT_LIMITS.signupPerIp);
         const body = await readJson(req);
-        const { user, session } = await service.signup(body.email, body.password, links(req).lang);
+        const { user, session } = await service.signup(body.email, body.password, links(req).lang, body.invite);
         send(res, 201, { ...meView(user), csrfToken: session.csrf }, { 'Set-Cookie': cookie(session.token, Math.floor(cfg.sessionTtlMs / 1000)) });
         return;
       }
@@ -266,6 +266,11 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         await service.rememberLanguage(w.user, requestLang(req));
         await service.sendVerification(w.user);
         send(res, 200, { ok: true });
+        return;
+      }
+      case 'GET /v1/account/invite': {
+        limit(`invite:ip:${ip}`, ATTEMPT_LIMITS.couponPerIp);
+        send(res, 200, service.inviteInfo(new URL(req.url ?? '/', 'http://x').searchParams.get('code')));
         return;
       }
       case 'GET /v1/account/coupons': {

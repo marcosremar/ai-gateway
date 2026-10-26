@@ -231,13 +231,16 @@ export function signupPage(links: PageLinks): RenderedPage {
 if(n&&n.charAt(0)==='/'&&n.indexOf('//')<0&&(n==='/account'||n.indexOf('/account/')===0||n==='/desktop'||n.indexOf('/desktop?')===0||n.indexOf('/account/desktop')===0))return n;
 return ${js(links.account)}+location.search}`;
   return formPage(t.signupTitle, t.signupHeading, t.signupLead,
-    `${emailField(links)}${passwordField(links, t.password, 'new-password', 'minlength="8" required aria-describedby="ph"')}<p id="ph" class="hint">${t.minLength}</p>`,
+    `<div id="inv" class="msg" role="status" aria-live="polite"></div>${emailField(links)}${passwordField(links, t.password, 'new-password', 'minlength="8" required aria-describedby="ph"')}<p id="ph" class="hint">${t.minLength}</p>`,
     t.signupButton, `${t.haveAccount} <a href="${esc(links.login)}">${t.signIn}</a>`,
-    `(function(){${after};var f=$('f'),b=$('b'),m=$('m');toAccountIfSignedIn(afterAuth());f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
+    `(function(){${after};var f=$('f'),b=$('b'),m=$('m'),INVITE=new URLSearchParams(location.search).get('invite');toAccountIfSignedIn(afterAuth());
+if(INVITE)api('/v1/account/invite?code='+encodeURIComponent(INVITE),'GET').then(function(r){if(!r.ok){INVITE=null;show($('inv'),errText(r));return}
+show($('inv'),fill(L.inviteBanner,{n:r.body.months}),'ok');document.querySelector('h1').textContent=L.inviteHeading;
+if(r.body.email){$('email').value=r.body.email;$('email').readOnly=true;$('password').focus()}});f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
 var email=$('email').value.trim(),pw=$('password').value;
 if(!email||email.indexOf('@')<1){show(m,L.invalidEmail);$('email').focus();return}
 if(pw.length<8){show(m,L.shortPassword);$('password').focus();return}
-busy(b,true,L.creating);api('/v1/account/signup','POST',{email:email,password:pw}).then(function(r){
+busy(b,true,L.creating);api('/v1/account/signup','POST',INVITE?{email:email,password:pw,invite:INVITE}:{email:email,password:pw}).then(function(r){
 if(r.ok){location.href=afterAuth();return}busy(b,false,L.signupButton);show(m,errText(r))},function(){busy(b,false,L.signupButton);show(m,L.offline)})})})();`,
     links, setupChain(links));
 }
@@ -447,7 +450,7 @@ $('uq').addEventListener('input',drawUsers);
 $('cf').addEventListener('submit',function(e){e.preventDefault();var code=$('cc').value.trim();if(!code)return;var b=$('cb');show($('cm'),'');busy(b,true,L.sending);
 api('/v1/account/coupon/redeem','POST',{code:code}).then(function(r){busy(b,false,L.couponButton);if(!r.ok){show($('cm'),errText(r));return}
 $('cc').value='';show($('cm'),fill(L.couponApplied,{date:day(r.body.quota.grantEndsAt)}),'ok');loadUsage()})});
-var pre=new URLSearchParams(location.search).get('code');if(pre)$('cc').value=pre.slice(0,40);
+var pre=new URLSearchParams(location.search).get('code')||new URLSearchParams(location.search).get('invite');if(pre)$('cc').value=pre.slice(0,40);
 function loadUsers(){return api('/v1/account/users').then(function(r){if(!r.ok)return;USERS=r.body.users||[];drawUsers()})}
 var COUPONS=[];
 function mailOpts(){return {months:Number($('cpm').value),lang:$('cpl').value}}

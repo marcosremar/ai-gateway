@@ -56,6 +56,7 @@ export interface Coupon {
   createdAt: number;
   expiresAt?: number;
   note?: string;
+  email?: string;
 }
 
 const COUPON_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -197,7 +198,7 @@ export class AccountService {
    * Creates the account and a session. An e-mail already registered: when the password is the account's, this is a
    * login; otherwise the same generic refusal as any other (the owner gets an e-mail about the attempt).
    */
-  async signup(rawEmail: unknown, password: unknown, lang: PageLang = 'pt'): Promise<{ user: User; session: { token: string; csrf: string } }> {
+  async signup(rawEmail: unknown, password: unknown, lang: PageLang = 'pt', invite?: unknown): Promise<{ user: User; session: { token: string; csrf: string } }> {
     const email = normalizeEmail(rawEmail);
     if (!email) throw new AccountError(400, 'Informe um e-mail válido.', 'invalid_email');
     const problem = passwordProblem(password);
@@ -209,12 +210,16 @@ export class AccountService {
       void this.opts.email.send({ to: email, ...mails.signupAttempt(existing.lang ?? lang, `${this.config.publicBaseUrl}/login`, `${this.config.publicBaseUrl}/forgot`) }).catch(() => {});
       throw new AccountError(400, 'Não foi possível criar a conta com estes dados. Se você já tem conta, entre ou recupere a senha.', 'signup_refused');
     }
+    const coupon = invite === undefined || invite === '' ? null : this.couponFor(invite);
+    if (coupon?.email && coupon.email !== email) throw new AccountError(400, 'Este convite é para outro e-mail.', 'coupon_email_mismatch');
+    const invited = Boolean(coupon && coupon.email === email);
     const now = this.now();
-    const user: User = { id: `usr_${randomUUID().replace(/-/g, '')}`, email, passwordHash: await hashPassword(pw), plan: this.config.plan, createdAt: now, passwordChangedAt: now, emailUnverified: true, lang };
+    const user: User = { id: `usr_${randomUUID().replace(/-/g, '')}`, email, passwordHash: await hashPassword(pw), plan: this.config.plan, createdAt: now, passwordChangedAt: now, ...(invited ? {} : { emailUnverified: true }), lang };
     this.state.users.push(user);
+    if (invited) this.grantFrom(user, coupon!);
     const session = await this.openSession(user);
-    await this.sendVerification(user, true);
-    this.opts.log?.('accounts: signup', { userId: user.id });
+    if (!invited) await this.sendVerification(user, true);
+    this.opts.log?.('accounts: signup', { userId: user.id, invited });
     return { user, session };
   }
 
@@ -515,6 +520,8 @@ export class AccountService {
     const wanted = typeof code === 'string' ? couponKey(code) : '';
     const coupon = wanted ? this.state.coupons.find(c => couponKey(c.code) === wanted) : undefined;
     if (!coupon) throw new AccountError(404, 'Código inválido.', 'invalid_coupon');
+    if (coupon.maxUses === 1) coupon.email = email;
+    await this.save();
     await this.opts.email.send({ to: email, ...mails.coupon(lang, coupon.code, coupon.months) });
     this.opts.log?.('accounts: admin sent coupon', { code: coupon.code });
     return email;
@@ -538,18 +545,32 @@ export class AccountService {
     return this.state.coupons.map(({ usedBy, ...coupon }) => ({ ...coupon, uses: usedBy.length }));
   }
 
-  async redeemCoupon(user: User, raw: unknown): Promise<PlanGrant> {
-    if (user.emailUnverified) throw new AccountError(403, 'Confirme seu e-mail antes de usar um código.', 'email_not_verified');
+  private couponFor(raw: unknown): Coupon {
     const wanted = typeof raw === 'string' ? couponKey(raw) : '';
     const coupon = wanted ? this.state.coupons.find(c => couponKey(c.code) === wanted) : undefined;
     if (!coupon) throw new AccountError(404, 'Código inválido.', 'invalid_coupon');
     if (coupon.expiresAt && coupon.expiresAt <= this.now()) throw new AccountError(410, 'Este código expirou.', 'coupon_expired');
     if (coupon.usedBy.length >= coupon.maxUses) throw new AccountError(409, 'Este código já foi usado.', 'coupon_used');
-    if (user.grant) throw new AccountError(409, 'Esta conta já usou um código.', 'coupon_already_redeemed');
+    return coupon;
+  }
+
+  private grantFrom(user: User, coupon: Coupon): void {
     user.grant = { plan: coupon.plan, endsAt: addMonths(this.now(), coupon.months), code: coupon.code };
     coupon.usedBy.push(user.id);
+  }
+
+  inviteInfo(raw: unknown): { email: string | null; plan: PlanId; months: number } {
+    const coupon = this.couponFor(raw);
+    return { email: coupon.email ?? null, plan: coupon.plan, months: coupon.months };
+  }
+
+  async redeemCoupon(user: User, raw: unknown): Promise<PlanGrant> {
+    if (user.emailUnverified) throw new AccountError(403, 'Confirme seu e-mail antes de usar um código.', 'email_not_verified');
+    const coupon = this.couponFor(raw);
+    if (user.grant) throw new AccountError(409, 'Esta conta já usou um código.', 'coupon_already_redeemed');
+    this.grantFrom(user, coupon);
     await this.save();
-    return user.grant;
+    return user.grant!;
   }
 
   userByStripeCustomer(customerId: string): User | undefined {
