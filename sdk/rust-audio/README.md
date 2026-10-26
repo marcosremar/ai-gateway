@@ -34,6 +34,25 @@ uses this crate itself — one copy of the code for every app.
   Only far/echo and noisy made the transcript worse (`MicIssue::hurts_transcription`); clipping, hum and a quiet
   microphone are real (an audience or a recording hears them) but were transcribed through.
 
+  **What "silence" is depends on the room.** Each report carries `floor` (`Floor`), classified from the pause
+  floors measured on the benchmark sets (2026-10-26, `docs/medicoes.md` § piso):
+
+  | `Floor` | pauses | while only that |
+  |---|---|---|
+  | `DigitalSilence` | zeros / muted channel (≤ −90 dBFS, or digital ≥ 5 %) | nothing |
+  | `MeetingFloor` | real meeting recordings (≥ 5 % digital gaps) | nothing |
+  | `StudioQuiet` | clean-talk pauses (≤ −54 dBFS) | nothing |
+  | `RoomAmbient` | air-conditioning / room tone (−54…−39 dBFS) | nothing |
+  | `LoudFloor` | loud noise at the floor (> −39 dBFS) | nothing until there is sure speech |
+
+  Show `report.advice_issues()`, not `report.issues`: on a quiet floor "noisy" is the floor itself, not the
+  voice. `Noisy` also needs the speech above −50 dBFS (a table mic's room tone made Silero sure at −58).
+
+  **A dead input never reaches a report** (it needs 8 s of sound): `MicCheck::silent_input()` says `Dead`
+  (15 s of digital zeros) or `Hiss` (15 s of loud hiss with no voice — a wireless receiver without its
+  transmitter), so a live app checks it every frame and restarts the capture. Both are in
+  `hurts_transcription()` (no audio, no subtitles) and have `is_silent_input()`.
+
 Nothing here touches the network. ONNX Runtime is loaded at run time: set `ORT_DYLIB_PATH` or call
 `use_onnx_runtime_at(path)` before the first `SileroVad::new()` (the library: microsoft/onnxruntime 1.22.x).
 
