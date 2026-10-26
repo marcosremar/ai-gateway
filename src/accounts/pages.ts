@@ -95,6 +95,8 @@ input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px var(--screen) inset;-webkit
 .plan li{padding:3px 0}
 .plan .btn{width:100%}
 #cpf input[type=number]{width:5.5rem;flex:none}
+textarea{width:100%;background:var(--screen);border:1px solid var(--hairline-2);border-radius:3px;padding:12px;font:inherit;color:inherit;resize:vertical}
+#cpi{margin:12px 0}
 .mini{display:flex;flex-direction:column;gap:2px;font-size:.8rem;color:var(--ink-3)}
 #cpf{align-items:flex-end}
 .linkish{background:none;border:0;padding:0;color:var(--ink-3);font-size:.86rem;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
@@ -347,13 +349,16 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 <div id="um" class="msg" role="alert" aria-live="polite"></div>
 <ul id="users" class="users" aria-label="${esc(t.usersHeading)}"></ul>
 <h3>${t.couponsHeading}</h3><p class="hint">${t.couponsHint}</p>
+<div class="row"><label class="mini"><span>${t.couponDuration}</span><select id="cpm">${[3, 6, 12].map(n => `<option value="${n}">${t.client.couponMonthsOf.replace('{n}', String(n))}</option>`).join('')}</select></label>
+<label class="mini"><span>${t.couponLang}</span><select id="cpl">${(['pt', 'en', 'fr'] as const).map(l => `<option value="${l}"${links.lang === l ? ' selected' : ''}>${{ pt: 'Português', en: 'English', fr: 'Français' }[l]}</option>`).join('')}</select></label></div>
+<form id="cpi" class="stack"><label class="sr" for="cpe">${t.couponInviteLabel}</label><textarea id="cpe" rows="3" placeholder="${esc(t.couponInvitePlaceholder)}" autocomplete="off" spellcheck="false"></textarea>
+<button id="cpb" class="btn" type="submit">${t.client.couponInvite}</button></form>
+<div id="cam" class="msg" role="status" aria-live="polite"></div>
+<details class="quiet"><summary>${t.couponMore}</summary>
 <form id="cpf" class="row"><label class="mini"><span>${t.couponCount}</span><input id="cpn" type="number" min="1" max="500" value="1"></label>
-<label class="mini"><span>${t.couponMonths}</span><input id="cpm" type="number" min="1" max="24" value="3"></label>
 <label class="mini"><span>${t.couponMaxUses}</span><input id="cpu" type="number" min="1" max="100000" value="1"></label>
 <input id="cpt" type="text" maxlength="80" placeholder="${esc(t.couponNote)}" aria-label="${esc(t.couponNote)}">
-<input id="cpe" type="text" placeholder="${esc(t.couponEmails)}" aria-label="${esc(t.couponEmails)}" autocomplete="off">
-<button id="cpb" class="btn" type="submit">${t.client.couponCreate}</button></form>
-<div id="cam" class="msg" role="status" aria-live="polite"></div>
+<button id="cpg" class="btn ghost" type="submit">${t.client.couponCreate}</button></form></details>
 <ul id="coupons" class="users" aria-label="${esc(t.couponsHeading)}"></ul></section>
 <details class="quiet"><summary>${t.accountSettings}</summary>
 <section class="card" aria-labelledby="xh"><h2 id="xh">${t.deleteHeading}</h2><p class="hint">${t.deleteHint}</p>
@@ -445,23 +450,36 @@ $('cc').value='';show($('cm'),fill(L.couponApplied,{date:day(r.body.quota.grantE
 var pre=new URLSearchParams(location.search).get('code');if(pre)$('cc').value=pre.slice(0,40);
 function loadUsers(){return api('/v1/account/users').then(function(r){if(!r.ok)return;USERS=r.body.users||[];drawUsers()})}
 var COUPONS=[];
+function mailOpts(){return {months:Number($('cpm').value),lang:$('cpl').value}}
+function note(text,ok){show($('cam'),text,ok?'ok':'err')}
 function drawCoupons(){var ul=$('coupons');ul.textContent='';
 if(!COUPONS.length){var li=document.createElement('li');li.className='meta';li.textContent=L.couponNone;ul.appendChild(li);return}
 COUPONS.slice().reverse().forEach(function(c){var li=document.createElement('li');var info=document.createElement('div');
 var nm=document.createElement('div');nm.className='name';nm.textContent=c.code;
 var meta=document.createElement('div');meta.className='meta';meta.textContent=(L.planNames[c.plan]||c.plan)+' · '+fill(L.couponMonthsOf,{n:c.months})+' · '+fill(L.couponUses,{used:c.uses,max:c.maxUses})+(c.note?' · '+c.note:'');
-info.appendChild(nm);info.appendChild(meta);li.appendChild(info);
-var b=document.createElement('button');b.className='btn ghost';b.type='button';b.textContent=L.couponSend;
-b.addEventListener('click',function(){var email=prompt(L.couponAsk);if(!email)return;busy(b,true,L.sending);
-api('/v1/account/coupons/send','POST',{code:c.code,email:email.trim()}).then(function(r){busy(b,false,L.couponSend);show($('cam'),r.ok?fill(L.couponSentTo,{email:r.body.email}):errText(r),r.ok?'ok':'err')},function(){busy(b,false,L.couponSend);show($('cam'),L.offline)})});
-li.appendChild(b);ul.appendChild(li)})}
+var form=document.createElement('form');form.className='row';form.hidden=true;
+var email=document.createElement('input');email.type='text';email.placeholder=L.couponEmailPlaceholder;email.setAttribute('aria-label',L.couponEmailPlaceholder);
+var go=document.createElement('button');go.className='btn';go.type='submit';go.textContent=L.couponSend;form.appendChild(email);form.appendChild(go);
+form.addEventListener('submit',function(e){e.preventDefault();var to=email.value.trim();if(!to)return;busy(go,true,L.sending);
+api('/v1/account/coupons/send','POST',Object.assign({code:c.code,email:to},mailOpts())).then(function(r){busy(go,false,L.couponSend);
+if(r.ok){note(fill(L.couponSentTo,{email:r.body.email}),true);email.value='';form.hidden=true}else{note(errText(r))}},function(){busy(go,false,L.couponSend);note(L.offline)})});
+info.appendChild(nm);info.appendChild(meta);info.appendChild(form);li.appendChild(info);
+var actions=document.createElement('div');actions.className='row';
+var copy=document.createElement('button');copy.className='btn ghost';copy.type='button';copy.textContent=L.couponCopy;
+copy.addEventListener('click',function(){(navigator.clipboard?navigator.clipboard.writeText(c.code):Promise.reject()).then(function(){copy.textContent=L.couponCopied;setTimeout(function(){copy.textContent=L.couponCopy},1500)},function(){})});
+var send=document.createElement('button');send.className='btn ghost';send.type='button';send.textContent=L.couponSend;
+send.addEventListener('click',function(){form.hidden=!form.hidden;if(!form.hidden)email.focus()});
+actions.appendChild(copy);actions.appendChild(send);li.appendChild(actions);ul.appendChild(li)})}
 function loadCoupons(){return api('/v1/account/coupons').then(function(r){if(!r.ok)return;COUPONS=r.body.coupons||[];drawCoupons()})}
-$('cpf').addEventListener('submit',function(e){e.preventDefault();var b=$('cpb');show($('cam'),'');
-var emails=$('cpe').value.split(/[\\s,;]+/).filter(Boolean);
-var body={count:Number($('cpn').value),months:Number($('cpm').value),maxUses:Number($('cpu').value),note:$('cpt').value.trim(),emails:emails};
-busy(b,true,L.sending);api('/v1/account/coupons','POST',body).then(function(r){busy(b,false,L.couponCreate);
-if(!r.ok){show($('cam'),errText(r));return}
-show($('cam'),fill(emails.length?L.couponCreatedSent:L.couponCreated,{n:r.body.coupons.length}),'ok');$('cpe').value='';loadCoupons()},function(){busy(b,false,L.couponCreate);show($('cam'),L.offline)})});
+$('cpi').addEventListener('submit',function(e){e.preventDefault();var emails=$('cpe').value.split(/[\\s,;]+/).filter(Boolean);
+if(!emails.length){note(L.couponNeedEmail);$('cpe').focus();return}var b=$('cpb');note('');busy(b,true,L.sending);
+api('/v1/account/coupons','POST',Object.assign({emails:emails},mailOpts())).then(function(r){busy(b,false,L.couponInvite);
+if(!r.ok){note(errText(r));return}var skipped=r.body.skipped||[];
+note(fill(L.couponInvited,{n:r.body.coupons.length})+(skipped.length?' '+fill(L.couponSkipped,{emails:skipped.join(', ')}):''),true);
+$('cpe').value=skipped.join('\\n');loadCoupons()},function(){busy(b,false,L.couponInvite);note(L.offline)})});
+$('cpf').addEventListener('submit',function(e){e.preventDefault();var b=$('cpg');note('');busy(b,true,L.sending);
+api('/v1/account/coupons','POST',{count:Number($('cpn').value),maxUses:Number($('cpu').value),note:$('cpt').value.trim(),months:Number($('cpm').value)}).then(function(r){busy(b,false,L.couponCreate);
+if(!r.ok){note(errText(r));return}note(fill(L.couponCreated,{n:r.body.coupons.length}),true);loadCoupons()},function(){busy(b,false,L.couponCreate);note(L.offline)})});
 api('/v1/account/me').then(function(r){if(r.status===401){location.href=${js(links.login)};return}
 if(!r.ok){show(gm,errText(r));return}CSRF=r.body.csrfToken||'';ADMIN=!!r.body.admin;BILLING=!!r.body.billing;$('who').textContent=r.body.email;
 $('lead').textContent=fill(L.signedInAs,{email:r.body.email});$('admin').hidden=!ADMIN;

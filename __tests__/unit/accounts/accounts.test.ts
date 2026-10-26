@@ -946,3 +946,51 @@ describe('account page script', () => {
     for (const id of ['cf', 'cc', 'cb', 'cm', 'cpf', 'cpb', 'cam', 'coupons']) expect(page.text).toContain(`id="${id}"`);
   });
 });
+
+describe('coupon invitations', () => {
+  const OWNER = 'dono@ucast.me';
+  const withSession = (s: { cookie: string; csrf: string }) => ({ Cookie: s.cookie, 'X-CSRF-Token': s.csrf });
+
+  it('writes the e-mail in the language the admin picks, whatever the page language', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/coupons', { headers: { ...withSession(owner), 'Accept-Language': 'fr' }, body: { emails: ['novo@example.com'], lang: 'en' } });
+    expect(r.status).toBe(201);
+    expect(gw.mails[0]!.subject).toBe('Your ucast.me code');
+    const code = r.json.coupons[0].code as string;
+    gw.mails.length = 0;
+    expect((await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code, email: 'outro@example.com', lang: 'pt' } })).status).toBe(200);
+    expect(gw.mails[0]!.subject).toBe('Seu código do ucast.me');
+    gw.mails.length = 0;
+    await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code, email: 'mais@example.com', lang: 'xx' } });
+    expect(gw.mails[0]!.subject).toMatch(/code|código/i);
+  });
+
+  it('invites any address without an account, skips and reports the ones that already have one', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    await signup(gw, 'ana@example.com');
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: { emails: ['ANA@example.com', 'novo@example.com', 'novo@example.com', 'outro@qualquer-lugar.org'] } });
+    expect(r.status).toBe(201);
+    expect(r.json.skipped).toEqual(['ana@example.com']);
+    expect(r.json.coupons).toHaveLength(2);
+    expect(gw.mails.map(m => m.to)).toEqual(['novo@example.com', 'outro@qualquer-lugar.org']);
+    const listed = await call(gw, 'GET', '/v1/account/coupons', { headers: withSession(owner) });
+    expect(listed.json.coupons).toHaveLength(2);
+  });
+
+  it('refuses a batch where every address already has an account, and a single send to one of them', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    await signup(gw, 'ana@example.com');
+    const all = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: { emails: ['ana@example.com', OWNER] } });
+    expect(all.status).toBe(409);
+    expect(all.json.error.code).toBe('coupon_email_registered');
+    expect((await call(gw, 'GET', '/v1/account/coupons', { headers: withSession(owner) })).json.coupons).toHaveLength(0);
+    const made = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: {} });
+    const single = await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code: made.json.coupons[0].code, email: 'ana@example.com' } });
+    expect(single.json.error.code).toBe('coupon_email_registered');
+  });
+});

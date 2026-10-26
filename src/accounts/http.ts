@@ -279,7 +279,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
         limit(`admin:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
         const body = await readJson(req);
-        send(res, 201, { coupons: await service.issueCoupons(body, body.emails, links(req).lang) });
+        send(res, 201, await service.issueCoupons(body, body.emails, mailLang(body.lang, links(req).lang)));
         return;
       }
       case 'POST /v1/account/coupons/send': {
@@ -287,7 +287,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
         limit(`admin:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
         const body = await readJson(req);
-        send(res, 200, { ok: true, email: await service.sendCoupon(body.code, body.email, links(req).lang) });
+        send(res, 200, { ok: true, email: await service.sendCoupon(body.code, body.email, mailLang(body.lang, links(req).lang)) });
         return;
       }
       case 'POST /v1/account/coupon/redeem': {
@@ -401,6 +401,8 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     req.resume();
     throw new AccountError(404, 'Rota não encontrada.', 'not_found');
   }
+
+  const mailLang = (raw: unknown, fallback: PageLang): PageLang => (raw === 'pt' || raw === 'en' || raw === 'fr' ? raw : fallback);
 
   const requestLang = (req: IncomingMessage): PageLang | undefined =>
     parseCookies(req.headers.cookie).get('ucast_lang') || req.headers['accept-language'] ? links(req).lang : undefined;

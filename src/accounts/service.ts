@@ -499,9 +499,19 @@ export class AccountService {
     return made;
   }
 
-  async sendCoupon(code: unknown, rawEmail: unknown, lang: PageLang): Promise<string> {
-    const email = normalizeEmail(rawEmail);
+  private hasAccount(email: string): boolean {
+    return this.state.users.some(u => u.email === email && !u.disabledAt);
+  }
+
+  private freeEmail(raw: unknown): string {
+    const email = normalizeEmail(raw);
     if (!email) throw new AccountError(400, 'Informe um e-mail válido.', 'invalid_email');
+    if (this.hasAccount(email)) throw new AccountError(409, 'Este e-mail já tem conta.', 'coupon_email_registered');
+    return email;
+  }
+
+  async sendCoupon(code: unknown, rawEmail: unknown, lang: PageLang): Promise<string> {
+    const email = this.freeEmail(rawEmail);
     const wanted = typeof code === 'string' ? couponKey(code) : '';
     const coupon = wanted ? this.state.coupons.find(c => couponKey(c.code) === wanted) : undefined;
     if (!coupon) throw new AccountError(404, 'Código inválido.', 'invalid_coupon');
@@ -510,12 +520,18 @@ export class AccountService {
     return email;
   }
 
-  async issueCoupons(input: Parameters<AccountService['createCoupons']>[0], rawEmails: unknown, lang: PageLang): Promise<Coupon[]> {
-    const emails = Array.isArray(rawEmails) ? rawEmails.map(normalizeEmail) : [];
-    if (emails.length > 200 || emails.some(e => e === null)) throw new AccountError(400, 'Informe e-mails válidos.', 'invalid_email');
-    const coupons = await this.createCoupons(emails.length ? { ...input, count: emails.length, maxUses: 1 } : input);
+  async issueCoupons(input: Parameters<AccountService['createCoupons']>[0], rawEmails: unknown, lang: PageLang): Promise<{ coupons: Coupon[]; skipped: string[] }> {
+    const list = Array.isArray(rawEmails) ? rawEmails : [];
+    if (list.length > 200) throw new AccountError(400, 'Informe até 200 e-mails.', 'invalid_email');
+    const valid = list.map(normalizeEmail);
+    if (valid.some(email => email === null)) throw new AccountError(400, 'Informe e-mails válidos.', 'invalid_email');
+    const unique = [...new Set(valid as string[])];
+    const skipped = unique.filter(email => this.hasAccount(email));
+    const emails = unique.filter(email => !skipped.includes(email));
+    if (unique.length && !emails.length) throw new AccountError(409, 'Todos esses e-mails já têm conta.', 'coupon_email_registered');
+    const coupons = await this.createCoupons(unique.length ? { ...input, count: emails.length, maxUses: 1 } : input);
     for (const [index, email] of emails.entries()) await this.sendCoupon(coupons[index]!.code, email, lang);
-    return coupons;
+    return { coupons, skipped };
   }
 
   listCoupons(): Array<Omit<Coupon, 'usedBy'> & { uses: number }> {
