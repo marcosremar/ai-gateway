@@ -46,6 +46,9 @@ from gateway_sdk.types import (
     DeployResponse,
 )
 
+# Microphone advice (VAD segmentation + what the room sounds like): `AudioSegmenter.mic_report()`.
+from gateway_sdk.audio import AudioSegment, AudioSegmenter, AudioSegmenterConfig, Floor, MicCheck, MicIssue, MicReport
+
 __all__ = [
     "GatewaySDK",
     "GrowingUtterance",
@@ -82,4 +85,11 @@ __all__ = [
     "GpuStatus",
     "DeployOptions",
     "DeployResponse",
+    "AudioSegment",
+    "AudioSegmenter",
+    "AudioSegmenterConfig",
+    "Floor",
+    "MicCheck",
+    "MicIssue",
+    "MicReport",
 ]

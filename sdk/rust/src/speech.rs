@@ -24,8 +24,8 @@
 //! ```
 
 pub use ai_gateway_audio::{
-    release_handled_by_app, use_onnx_runtime_at, MicCheck, MicIssue, MicReport, Segmenter, SegmenterConfig, SileroVad,
-    VadError, VadLevel, FRAME_SAMPLES, SAMPLE_RATE,
+    release_handled_by_app, use_onnx_runtime_at, Floor, MicCheck, MicIssue, MicReport, Segmenter, SegmenterConfig,
+    SileroVad, VadError, VadLevel, FRAME_SAMPLES, SAMPLE_RATE,
 };
 
 use crate::client::GatewayClient;
@@ -117,6 +117,8 @@ impl SpeechDetector {
 
     /// What is wrong with the microphone over the last 30 s (`None` before 8 s of sound): show
     /// [`MicIssue::hurts_transcription`] ones as a reason for worse transcripts, the others for recordings.
+    /// The room's own floor comes with it ([`MicReport::floor`]) and [`MicReport::advice_issues`] already hides
+    /// the ones that only describe a quiet room.
     pub fn mic_report(&self) -> Option<MicReport> {
         self.mic.report()
     }
@@ -181,8 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wav_is_16_bit_mono_at_16_khz_with_every_sample() {
-        let wav = wav_16k(&[0.0, 0.5, -1.0]);
+    fn the_wav_is_16_bit_mono_at_16_khz_with_every_sample() {        let wav = wav_16k(&[0.0, 0.5, -1.0]);
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
         assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);

@@ -17,7 +17,7 @@ pub mod mic_check;
 pub mod segmenter;
 pub mod vad;
 
-pub use mic_check::{MicCheck, MicIssue, MicReport};
+pub use mic_check::{Floor, MicCheck, MicIssue, MicReport};
 pub use segmenter::{Segmenter, SegmenterConfig};
 pub use vad::{
     release_handled_by_app, use_onnx_runtime_at, SileroVad, VadError, VadLevel, FRAME_SAMPLES,
