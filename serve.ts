@@ -76,6 +76,7 @@ import { KOKORO_MODEL, POCKET_TTS_MODEL, deploymentClone, kokoroTts, pocketTts }
 import { appTelemetryFromEnv } from './src/app-telemetry';
 import { machinesFromEnv } from './src/machines';
 import { createAccounts } from './src/accounts';
+import { createCouponRoutes } from './src/accounts/coupon-routes';
 import { ModelBenchmarkStore } from './src/model-benchmarks/store';
 import { createModelBenchmarkRoutes } from './src/model-benchmarks/routes';
 import { adminTraffic, createAdminPage, createAlertLog, createModelPrices, createSuggestionDigest, recommendations, usageCost, type AdminSnapshot } from './src/admin-page';
@@ -731,7 +732,7 @@ const server = await startProxy({
     ? { images: buildImages(), providerCredit: controller?.creditIssues() ?? [], balances: balanceWatch.snapshot(), fallbackProbe: fallbackProbe.snapshot(), ...chainHealth(), turn: realtime.service.turnHealth(), realtime: realtimeHealth(controller?.list() ?? []), streams: streamCuts(), appBudgets: appLimits?.budgets() ?? [], clientGpu: deployments?.clientGpu.report() ?? null }
     : { ...appStagesView(chainsNow(), (stage) => appAliasesOf(viewer.userId, stage)), appBudgets: appLimits?.budgets(viewer.userId) ?? [], clientGpu: deployments?.clientGpu.report(viewer.userId) ?? null }),
   customRoutes: [
-    ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), { method: 'POST', path: '/v1/s2s', handler: s2sRoute },
+    ...createKeyAdminRoutes(keyManager, adminGate), ...createAccessRoutes({ access, gate: adminGate, audit: keyAudit, deployments: controller }), ...(accounts ? createCouponRoutes({ service: accounts.service, gate: adminGate }) : []), { method: 'POST', path: '/v1/s2s', handler: s2sRoute },
     { method: 'POST', path: TTS_ENGINE_PATH, handler: ttsEngineRoute }, realtime.route, realtime.updateRoute,
     rooms.route, ...(calls?.routes ?? []), ...(appTelemetry?.routes ?? []), ...(telemetry?.adminRoutes ?? []),
     ...(benchmarks ? createModelBenchmarkRoutes({ store: benchmarks, gate: adminGate, onChange: () => remount?.() }) : []),

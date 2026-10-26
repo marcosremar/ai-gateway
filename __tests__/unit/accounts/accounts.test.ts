@@ -17,6 +17,7 @@ import { AccessKeys } from '../../../src/config/access-keys';
 import { AdminGate } from '../../../src/config/admin-gate';
 import { createAccessRoutes } from '../../../src/config/access-routes';
 import { KeyAudit } from '../../../src/config/key-audit';
+import { createCouponRoutes } from '../../../src/accounts/coupon-routes';
 import { createAccounts, hashPassword, verifyPassword, wavSeconds, type AccountsConfig } from '../../../src/accounts';
 import type { EmailMessage, EmailSender } from '../../../src/accounts/email';
 import type { LLMProvider, STTProvider } from '../../../src/gateway/providers/cloud/types';
@@ -125,6 +126,7 @@ async function startGateway(config: Partial<AccountsConfig> = {}, opts: GwOpts =
     deepHealth: { authorize: (t) => access.admins.has(keyRegistry.resolve(t)?.userId ?? ''), report: async () => ({ status: 200, body: { deep: true } }) },
     customRoutes: [
       ...createAccessRoutes({ access, gate, audit: new KeyAudit() }),
+      ...createCouponRoutes({ service: accounts.service, gate }),
       { method: 'POST', path: '/v1/rooms', handler: async (_req, res) => { res.writeHead(201, { 'Content-Type': 'application/json' }); res.end('{"code":"K7Q2XM"}'); } },
       { method: 'POST', path: '/v1/realtime/sessions', handler: async (req, res) => {
         req.resume();
@@ -807,5 +809,80 @@ describe('resend sender', () => {
     const sender = createEmailSender({ resendApiKey: 're_test', from: 'ucast.me <no-reply@ucast.me>', replyTo: 'support@ucast.me', logLinks: false, fetchImpl });
     await sender.send({ to: 'ana@example.com', subject: 's', text: 't', html: 'h' });
     expect(bodies[0]).toMatchObject({ to: ['ana@example.com'], reply_to: 'support@ucast.me' });
+  });
+});
+
+describe('coupons (a paid plan for a few months, no card)', () => {
+  const adminHeaders = { Authorization: `Bearer ${ADMIN_KEY}` };
+  const makeCoupons = async (gw: Gw, body: Record<string, unknown> = {}) => {
+    const r = await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body });
+    expect(r.status).toBe(201);
+    return r.json.coupons as Array<{ code: string }>;
+  };
+  const redeem = (gw: Gw, s: { cookie: string; csrf: string }, code: string) =>
+    call(gw, 'POST', '/v1/account/coupon/redeem', { headers: { Cookie: s.cookie, 'X-CSRF-Token': s.csrf }, body: { code } });
+  const me = async (gw: Gw, s: { cookie: string }) => (await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } })).json;
+
+  it('only the admin key creates and lists codes', async () => {
+    const gw = await startGateway();
+    expect((await call(gw, 'POST', '/v1/admin/coupons', { body: {} })).status).toBe(401);
+    expect((await call(gw, 'POST', '/v1/admin/coupons', { headers: { Authorization: `Bearer ${APP_KEY}` }, body: {} })).status).toBe(403);
+    const [coupon] = await makeCoupons(gw, { count: 2, note: 'turma A' });
+    expect(coupon!.code).toMatch(/^UCAST-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    const listed = await call(gw, 'GET', '/v1/admin/coupons', { headers: adminHeaders });
+    expect(listed.json.coupons).toHaveLength(2);
+    expect(listed.json.coupons[0]).toMatchObject({ plan: 'pro', months: 3, maxUses: 1, uses: 0, note: 'turma A' });
+    expect((await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { months: 0 } })).status).toBe(400);
+    expect((await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { plan: 'free' } })).status).toBe(400);
+  });
+
+  it('gives Pro for 3 months with no card, applies the Pro limits and returns to Free afterwards', async () => {
+    const gw = await startGateway({}, { stripe: fakeStripe().fetchImpl });
+    const s = await signup(gw);
+    expect((await me(gw, s)).quota).toMatchObject({ plan: 'free', viaCoupon: false });
+    const [coupon] = await makeCoupons(gw);
+    const done = await redeem(gw, s, coupon!.code.toLowerCase().replace(/-/g, ' '));
+    expect(done.status).toBe(200);
+    expect(done.json).toMatchObject({ plan: 'pro', quota: { plan: 'pro', viaCoupon: true, grantEndsAt: '2027-01-10T12:00:00.000Z' } });
+    expect(done.json.quota.limits.audioSeconds).toBe(20 * 3600);
+    gw.clock.now = Date.UTC(2027, 0, 11);
+    const again = await call(gw, 'POST', '/v1/account/login', { body: { email: 'ana@example.com', password: 'senha-forte-123' } });
+    const after = await me(gw, { cookie: cookieOf(again) });
+    expect(after.quota).toMatchObject({ plan: 'free', viaCoupon: false });
+    expect(after.quota.limits.audioSeconds).toBe(2 * 3600);
+  });
+
+  it('refuses unknown, used and second codes and codes past their date', async () => {
+    const gw = await startGateway();
+    const ana = await signup(gw);
+    const bia = await signup(gw, 'bia@example.com');
+    const [first, second] = await makeCoupons(gw, { count: 2 });
+    const [dated] = await makeCoupons(gw, { expiresAt: new Date(gw.clock.now + 86_400_000).toISOString() });
+    expect((await redeem(gw, ana, 'UCAST-NOPE-NOPE')).json.error.code).toBe('invalid_coupon');
+    expect((await redeem(gw, ana, first!.code)).status).toBe(200);
+    expect((await redeem(gw, bia, first!.code)).json.error.code).toBe('coupon_used');
+    expect((await redeem(gw, ana, second!.code)).json.error.code).toBe('coupon_already_redeemed');
+    gw.clock.now += 2 * 86_400_000;
+    expect((await redeem(gw, bia, dated!.code)).json.error.code).toBe('coupon_expired');
+  });
+
+  it('a shared code serves as many accounts as its limit and survives a restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'accounts-'));
+    try {
+      const gw = await startGateway({}, { dir });
+      const ana = await signup(gw);
+      const [coupon] = await makeCoupons(gw, { maxUses: 2, months: 6 });
+      expect((await redeem(gw, ana, coupon!.code)).json.quota.grantEndsAt).toBe('2027-04-10T12:00:00.000Z');
+      await gw.close();
+      const restarted = await startGateway({}, { dir });
+      const login = await call(restarted, 'POST', '/v1/account/login', { body: { email: 'ana@example.com', password: 'senha-forte-123' } });
+      expect((await me(restarted, { cookie: cookieOf(login) })).quota).toMatchObject({ plan: 'pro', viaCoupon: true });
+      const bia = await signup(restarted, 'bia@example.com');
+      const cris = await signup(restarted, 'cris@example.com');
+      expect((await redeem(restarted, bia, coupon!.code)).status).toBe(200);
+      expect((await redeem(restarted, cris, coupon!.code)).json.error.code).toBe('coupon_used');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -199,7 +199,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     if (isCrossSite(req, siteHosts)) throw new AccountError(403, 'Pedido de outra origem recusado.', 'cross_site');
   }
 
-  const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user), emailVerified: !user.emailUnverified, billing: Boolean(billing) });
+  const meView = (user: User) => ({ email: user.email, plan: service.effectivePlan(user), createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user), emailVerified: !user.emailUnverified, billing: Boolean(billing) });
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, path: string): Promise<void> {
     const ip = RateLimiter.clientIp(req);
@@ -266,6 +266,14 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         await service.rememberLanguage(w.user, requestLang(req));
         await service.sendVerification(w.user);
         send(res, 200, { ok: true });
+        return;
+      }
+      case 'POST /v1/account/coupon/redeem': {
+        const w = writer(req);
+        limit(`coupon:ip:${ip}`, ATTEMPT_LIMITS.couponPerIp);
+        const body = await readJson(req);
+        await service.redeemCoupon(w.user, body.code);
+        send(res, 200, { ...meView(w.user), quota: service.quotaView(w.user) });
         return;
       }
       case 'POST /v1/account/billing/checkout': {

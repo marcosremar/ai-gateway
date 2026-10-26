@@ -330,6 +330,9 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 </ol></section>
 <section class="card" aria-labelledby="uh"><h2 id="uh">${t.usageHeading}</h2><p class="hint" id="plan"></p>
 <div class="grid" id="stats"></div></section>
+<section class="card" aria-labelledby="ch"><h2 id="ch">${t.couponHeading}</h2><p class="hint">${t.couponHint}</p>
+<form id="cf" class="row"><input id="cc" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40" placeholder="UCAST-XXXX-XXXX" aria-label="${esc(t.couponHeading)}"><button id="cb" class="btn" type="submit">${t.client.couponButton}</button></form>
+<div id="cm" class="msg" role="status" aria-live="polite"></div></section>
 <section class="card" id="billing" aria-labelledby="bh" hidden><h2 id="bh">${t.client.planHeading}</h2><p class="hint" id="bp"></p>
 <div id="bm" class="msg" role="status" aria-live="polite"></div>
 <div class="plans" id="plans"></div>
@@ -378,7 +381,7 @@ ul.appendChild(li)})}
 function loadKeys(){return api('/v1/account/keys').then(function(r){if(r.ok)renderKeys(r.body.keys||[])})}
 function loadUsage(){return api('/v1/account/usage?days=30').then(function(r){if(!r.ok)return;var u=r.body,q=u.quota,mo=q.month;
 var lim=q.limits;PLAN=q.plan;
-$('plan').textContent=(BILLING?(L.planNames[q.plan]||q.plan):(q.plan==='free'?L.freePlan:q.plan))+' · '+L.renewsOn+' '+day(q.monthResetsAt);
+$('plan').textContent=(BILLING?(L.planNames[q.plan]||q.plan):(q.plan==='free'?L.freePlan:q.plan))+' · '+L.renewsOn+' '+day(q.monthResetsAt)+(q.viaCoupon?' · '+L.couponUntil+' '+day(q.grantEndsAt):'');
 var s=$('stats');s.textContent='';
 s.appendChild(stat(L.minutesSubtitled,minutes(mo.audioSeconds),'min',lim.audioSeconds>0?hours(lim.audioSeconds/3600):''));
 s.appendChild(stat(L.minutesDubbed,minutes(mo.ttsSeconds||0),'min',lim.ttsChars>0?dubbing(Math.round(lim.ttsChars/${DUB_CHARS_PER_SECOND}/60)):''));
@@ -393,7 +396,7 @@ if(!tb.rows.length){var tr=document.createElement('tr');var td=document.createEl
 function hours(h){return n(h)+' h'}
 function dubbing(m){return m>=60?n(m/60)+' h':n(m)+' min'}
 function money(v){return v.toLocaleString(L.locale,{style:'currency',currency:'EUR',maximumFractionDigits:v%1?2:0})}
-function renderPlans(q){$('billing').hidden=false;var box=$('plans');box.textContent='';var paid=q.plan!=='free';
+function renderPlans(q){$('billing').hidden=false;var box=$('plans');box.textContent='';var paid=q.plan!=='free'&&!q.viaCoupon;
 $('bp').textContent=q.planRenewsAt?fill(q.planCancelsAtPeriodEnd?L.endsOn:L.subscriptionRenewsOn,{date:day(q.planRenewsAt)}):'';
 $('manage').hidden=!paid;
 PLANS.forEach(function(p){var card=document.createElement('div');card.className='plan'+(p.id===q.plan?' current':p.id===WANT?' wanted':'');
@@ -424,6 +427,10 @@ busy(b,true,L.sending);api('/v1/account/users/'+encodeURIComponent(u.id)+'/acces
 if(r.ok){show(um,fill(L.keySent,{email:u.email}),'ok')}else{show(um,errText(r))}},function(){busy(b,false,L.sendNewKey);show(um,L.offline)})});
 li.appendChild(b);ul.appendChild(li)})}
 $('uq').addEventListener('input',drawUsers);
+$('cf').addEventListener('submit',function(e){e.preventDefault();var code=$('cc').value.trim();if(!code)return;var b=$('cb');show($('cm'),'');busy(b,true,L.sending);
+api('/v1/account/coupon/redeem','POST',{code:code}).then(function(r){busy(b,false,L.couponButton);if(!r.ok){show($('cm'),errText(r));return}
+$('cc').value='';show($('cm'),fill(L.couponApplied,{date:day(r.body.quota.grantEndsAt)}),'ok');loadUsage()})});
+var pre=new URLSearchParams(location.search).get('code');if(pre)$('cc').value=pre.slice(0,40);
 function loadUsers(){return api('/v1/account/users').then(function(r){if(!r.ok)return;USERS=r.body.users||[];drawUsers()})}
 api('/v1/account/me').then(function(r){if(r.status===401){location.href=${js(links.login)};return}
 if(!r.ok){show(gm,errText(r));return}CSRF=r.body.csrfToken||'';ADMIN=!!r.body.admin;BILLING=!!r.body.billing;$('who').textContent=r.body.email;

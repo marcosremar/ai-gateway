@@ -9,7 +9,7 @@ import type { AccountsConfig, Quota, QuotaMetric } from './config';
 import type { EmailSender } from './email';
 import { dummyHash, hashPassword, passwordProblem, verifyPassword } from './password';
 import { nextDayStart, nextMonthStart, type Counters, type UsageMeter } from './usage';
-import { nextPlan, planOf } from './plans';
+import { PAID_PLANS, higherPlan, nextPlan, planOf, type PlanId } from './plans';
 import * as mails from './email-templates';
 import type { PageLang } from './page-strings';
 
@@ -41,7 +41,30 @@ export interface User {
   planRenewsAt?: number;
   planCancelsAtPeriodEnd?: boolean;
   lang?: PageLang;
+  /** Paid plan given by a coupon: valid until `endsAt`, never charged, never renewed. */
+  grant?: PlanGrant;
 }
+
+export interface PlanGrant { plan: PlanId; endsAt: number; code: string }
+
+export interface Coupon {
+  code: string;
+  plan: PlanId;
+  months: number;
+  maxUses: number;
+  usedBy: string[];
+  createdAt: number;
+  expiresAt?: number;
+  note?: string;
+}
+
+const COUPON_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const couponKey = (code: string) => code.toUpperCase().replace(/[^A-Z0-9]/g, '');
+const addMonths = (ms: number, months: number) => {
+  const date = new Date(ms);
+  date.setUTCMonth(date.getUTCMonth() + months);
+  return date.getTime();
+};
 
 export type BillingFields = Partial<Pick<User, 'plan' | 'stripeCustomerId' | 'planRenewsAt' | 'planCancelsAtPeriodEnd'>>;
 
@@ -63,14 +86,14 @@ export interface ActivationKey {
 
 interface ResetToken { hash: string; userId: string; expiresAt: number; usedAt?: number }
 
-interface State { version: 1; users: User[]; sessions: Session[]; keys: ActivationKey[]; resets: ResetToken[]; verifications: ResetToken[] }
+interface State { version: 1; users: User[]; sessions: Session[]; keys: ActivationKey[]; resets: ResetToken[]; verifications: ResetToken[]; coupons: Coupon[] }
 
 export interface KeyView {
   id: string; prefix: string; deviceName: string; createdAt: string; lastUsedAt: string | null;
   lastActivatedAt: string | null; appVersion: string | null; revokedAt: string | null; active: boolean;
 }
 
-export interface QuotaView { plan: string; limits: Quota; month: Counters; today: Counters; monthResetsAt: string; dayResetsAt: string; planRenewsAt: string | null; planCancelsAtPeriodEnd: boolean }
+export interface QuotaView { plan: string; limits: Quota; month: Counters; today: Counters; monthResetsAt: string; dayResetsAt: string; grantEndsAt: string | null; viaCoupon: boolean; planRenewsAt: string | null; planCancelsAtPeriodEnd: boolean }
 
 const iso = (ms: number | undefined) => (ms ? new Date(ms).toISOString() : null);
 
@@ -104,7 +127,7 @@ export interface AccountServiceOptions {
 }
 
 export class AccountService {
-  private state: State = { version: 1, users: [], sessions: [], keys: [], resets: [], verifications: [] };
+  private state: State = { version: 1, users: [], sessions: [], keys: [], resets: [], verifications: [], coupons: [] };
   private readonly byKeyHash = new Map<string, ActivationKey>();
   private dirty = false;
   private chain: Promise<void> = Promise.resolve();
@@ -127,7 +150,7 @@ export class AccountService {
     if (!path) return;
     const read = await readStateFile<State>(path);
     if (read.from === 'backup') this.opts.log?.('accounts: STATE FILE UNREADABLE, recovered from the last good backup', { problem: read.problem });
-    if (read.data) this.state = { version: 1, users: read.data.users ?? [], sessions: read.data.sessions ?? [], keys: read.data.keys ?? [], resets: read.data.resets ?? [], verifications: read.data.verifications ?? [] };
+    if (read.data) this.state = { version: 1, users: read.data.users ?? [], sessions: read.data.sessions ?? [], keys: read.data.keys ?? [], resets: read.data.resets ?? [], verifications: read.data.verifications ?? [], coupons: read.data.coupons ?? [] };
     this.reindex();
   }
 
@@ -439,8 +462,58 @@ export class AccountService {
   // ── Quota ─────────────────────────────────────────────────────────────────
 
   limitsOf(user: User): Quota {
-    const planQuota = this.opts.planLimits && !this.isAdminUser(user) ? planOf(user.plan).quota : {};
+    const planQuota = this.opts.planLimits && !this.isAdminUser(user) ? planOf(this.effectivePlan(user)).quota : {};
     return { ...this.config.quota, ...planQuota, ...user.quota };
+  }
+
+  effectivePlan(user: User): PlanId {
+    const own = planOf(user.plan).id;
+    return user.grant && user.grant.endsAt > this.now() ? higherPlan(own, user.grant.plan) : own;
+  }
+
+  async createCoupons(input: { plan?: unknown; months?: unknown; count?: unknown; maxUses?: unknown; expiresAt?: unknown; note?: unknown }): Promise<Coupon[]> {
+    const plan = PAID_PLANS.find(p => p.id === (input.plan ?? 'pro'));
+    const integer = (value: unknown, fallback: number, min: number, max: number) => {
+      const n = value === undefined ? fallback : Number(value);
+      if (!Number.isInteger(n) || n < min || n > max) throw new AccountError(400, 'Valor inválido.', 'invalid_coupon_input');
+      return n;
+    };
+    if (!plan) throw new AccountError(400, 'Plano inválido.', 'invalid_coupon_input');
+    const months = integer(input.months, 3, 1, 24);
+    const count = integer(input.count, 1, 1, 500);
+    const maxUses = integer(input.maxUses, 1, 1, 100_000);
+    const expiresAt = input.expiresAt === undefined ? undefined : Date.parse(String(input.expiresAt));
+    if (expiresAt !== undefined && !(expiresAt > this.now())) throw new AccountError(400, 'Validade inválida.', 'invalid_coupon_input');
+    const note = typeof input.note === 'string' && input.note.trim() ? input.note.trim().slice(0, 80) : undefined;
+    const taken = new Set(this.state.coupons.map(c => couponKey(c.code)));
+    const made: Coupon[] = [];
+    while (made.length < count) {
+      const letters = Array.from(randomBytes(8), b => COUPON_ALPHABET[b % COUPON_ALPHABET.length]).join('');
+      const code = `UCAST-${letters.slice(0, 4)}-${letters.slice(4)}`;
+      if (taken.has(couponKey(code))) continue;
+      taken.add(couponKey(code));
+      made.push({ code, plan: plan.id, months, maxUses, usedBy: [], createdAt: this.now(), ...(expiresAt ? { expiresAt } : {}), ...(note ? { note } : {}) });
+    }
+    this.state.coupons.push(...made);
+    await this.save();
+    return made;
+  }
+
+  listCoupons(): Array<Omit<Coupon, 'usedBy'> & { uses: number }> {
+    return this.state.coupons.map(({ usedBy, ...coupon }) => ({ ...coupon, uses: usedBy.length }));
+  }
+
+  async redeemCoupon(user: User, raw: unknown): Promise<PlanGrant> {
+    const wanted = typeof raw === 'string' ? couponKey(raw) : '';
+    const coupon = wanted ? this.state.coupons.find(c => couponKey(c.code) === wanted) : undefined;
+    if (!coupon) throw new AccountError(404, 'Código inválido.', 'invalid_coupon');
+    if (coupon.expiresAt && coupon.expiresAt <= this.now()) throw new AccountError(410, 'Este código expirou.', 'coupon_expired');
+    if (coupon.usedBy.length >= coupon.maxUses) throw new AccountError(409, 'Este código já foi usado.', 'coupon_used');
+    if (user.grant) throw new AccountError(409, 'Esta conta já usou um código.', 'coupon_already_redeemed');
+    user.grant = { plan: coupon.plan, endsAt: addMonths(this.now(), coupon.months), code: coupon.code };
+    coupon.usedBy.push(user.id);
+    await this.save();
+    return user.grant;
   }
 
   userByStripeCustomer(customerId: string): User | undefined {
@@ -459,7 +532,9 @@ export class AccountService {
   quotaView(user: User): QuotaView {
     const now = this.now();
     return {
-      plan: user.plan, limits: this.limitsOf(user), month: this.opts.usage.month(user.id), today: this.opts.usage.today(user.id),
+      plan: this.effectivePlan(user), limits: this.limitsOf(user),
+      grantEndsAt: user.grant && user.grant.endsAt > now ? iso(user.grant.endsAt) : null,
+      viaCoupon: Boolean(user.grant && user.grant.endsAt > now && this.effectivePlan(user) !== planOf(user.plan).id), month: this.opts.usage.month(user.id), today: this.opts.usage.today(user.id),
       monthResetsAt: new Date(nextMonthStart(now)).toISOString(), dayResetsAt: new Date(nextDayStart(now)).toISOString(),
       planRenewsAt: iso(user.planRenewsAt), planCancelsAtPeriodEnd: Boolean(user.planCancelsAtPeriodEnd),
     };

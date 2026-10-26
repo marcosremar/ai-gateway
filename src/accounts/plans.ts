@@ -31,4 +31,6 @@ export const planByLookupKey = (key: string | null | undefined): Plan | null => 
 
 const ORDER: PlanId[] = ['free', 'pro', 'events'];
 
+export const higherPlan = (a: PlanId, b: PlanId): PlanId => (ORDER.indexOf(a) >= ORDER.indexOf(b) ? a : b);
+
 export const nextPlan = (id: string): PlanId | null => ORDER[ORDER.indexOf(planOf(id).id) + 1] ?? null;

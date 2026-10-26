@@ -87,3 +87,20 @@ disabled at boot (nothing overwritten), the rest of the gateway runs. Back the v
 
 `RESEND_API_KEY` + `EMAIL_FROM` → Resend. Without them nothing is sent; `ACCOUNTS_LOG_EMAIL_LINKS=1` writes the
 message (with the link) to the log — local development only.
+
+## Coupons
+
+A coupon gives a paid plan for a few months with no card and no Stripe subscription. The person signs up on the free
+plan, types the code on the account page (`/account?code=UCAST-XXXX-XXXX` fills the field) and the plan becomes
+`user.grant` = `{ plan, endsAt, code }`. The effective plan is the higher of the Stripe plan and the active grant, so a
+real subscription is never lowered; when `endsAt` passes the account is back on its own plan with nothing to cancel.
+
+- `POST /v1/account/coupon/redeem` `{ code }` (session + CSRF, 20 attempts per IP per hour): one code per account;
+  errors `invalid_coupon` (404), `coupon_expired` (410), `coupon_used` (409), `coupon_already_redeemed` (409).
+  The answer is `/me` with the new `quota.grantEndsAt` and `quota.viaCoupon`.
+- `POST /v1/admin/coupons` (admin key) `{ plan = "pro", months = 3, count = 1, maxUses = 1, expiresAt?, note? }` →
+  `{ coupons: [{ code, … }] }`; `GET /v1/admin/coupons` lists them with `uses`. Codes look like `UCAST-K7Q2-XM4P` and are
+  compared ignoring case, spaces and dashes. `maxUses > 1` makes a shared code (a class); `expiresAt` is the last day
+  the code can be redeemed, not the end of the plan.
+- State: `coupons` in `accounts.json` (`usedBy` holds the account ids). Quotas follow the effective plan only when
+  billing is configured, like the plan limits.
