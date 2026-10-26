@@ -42,7 +42,7 @@ const METERED: Record<string, { counter?: Counter; metrics: QuotaMetric[] }> = {
   '/v1/chat/completions': { counter: 'llmRequests', metrics: ['llmTokens'] },
   '/v1/audio/transcriptions': { counter: 'sttRequests', metrics: ['audioSeconds'] },
   '/v1/audio/speech': { counter: 'ttsRequests', metrics: ['ttsChars'] },
-  '/v1/rooms': { metrics: ['rooms'] },
+  '/v1/rooms': { metrics: [] }, // sala não é cota mensal: é 1 ativa por vez (o serviço de salas recusa a segunda)
   '/v1/s2s': { metrics: ['audioSeconds', 'llmTokens', 'ttsChars'] },
   '/v1/realtime/sessions': { metrics: ['audioSeconds', 'llmTokens', 'ttsChars'] },
 };
@@ -468,12 +468,20 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   const inFlight = new Map<string, number>();
 
   function gate(req: IncomingMessage, res: ServerResponse, method: string, path: string): boolean {
+    if (path === '/v1/rooms') delete req.headers['x-ucast-account'];
     if (method !== 'POST') return false;
     const metered = METERED[path];
     const bearer = bearerToken(req.headers.authorization);
     if (!metered || !bearer.startsWith(KEY_PREFIX)) return false;
+    const peeked = service.keyPeek(bearer);
+    const busy = peeked ? service.sessionBusy(peeked) : null;
+    if (busy) { req.resume(); sendError(res, busy); return true; }
     const found = service.keyOf(bearer);
     if (!found) return false; // the proxy answers 401
+    // A sala nasce com a conta que a criou: é o que o serviço de salas usa
+    // para valer "uma sala ao vivo por vez" por conta.
+    if (path === '/v1/rooms') req.headers['x-ucast-account'] = found.user.id;
+    if (busy) { req.resume(); sendError(res, busy); return true; }
     const internal = isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress);
     const requests = path === '/v1/realtime/sessions' ? Math.max(1, opts.sessionRequests?.() ?? 1) : 1;
     if (!internal) {
@@ -551,6 +559,9 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   } | null {
     const bearer = bearerToken(authorization);
     if (!bearer.startsWith(KEY_PREFIX)) return null;
+    const peeked = service.keyPeek(bearer);
+    const busy = peeked ? service.sessionBusy(peeked) : null;
+    if (busy) return { denial: denialOf(busy) };
     const found = service.keyOf(bearer);
     if (!found) return null;
     const refused = service.checkQuota(found.user, ['audioSeconds']);

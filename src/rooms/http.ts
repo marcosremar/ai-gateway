@@ -154,7 +154,12 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
   async function create(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const input = parseCreate(await readJson(req, CREATE_MAX_BYTES), cfg);
-      sendJson(res, 201, await service.create(input, opts.userOf(req)));
+      // A conta do ucast.me (o gate do accounts injeta o id depois de
+      // autenticar a chave de ativação; qualquer valor vindo de fora é
+      // sobrescrito por ele). Sem conta (outras apps do gateway) = sem a regra.
+      const header = req.headers['x-ucast-account'];
+      const accountId = typeof header === 'string' && header ? header : undefined;
+      sendJson(res, 201, await service.create(input, opts.userOf(req), accountId));
     } catch (err) { fail(res, err, 'create'); }
   }
 

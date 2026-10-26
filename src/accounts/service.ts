@@ -60,6 +60,8 @@ export interface Coupon {
 }
 
 const COUPON_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+/** A sessão de legendas é a atividade recente de uma chave da conta: outra chave da conta que chegar dentro desta janela é a segunda sessão. */
+const SESSION_WINDOW_MS = 3 * 60_000;
 const couponKey = (code: string) => code.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const addMonths = (ms: number, months: number) => {
   const date = new Date(ms);
@@ -386,6 +388,15 @@ export class AccountService {
     return this.view(k);
   }
 
+  /** A chave ativa do token SEM atualizar o lastUsedAt: a checagem de sessão
+   * roda antes da admissão, e a pedida recusada não pode parecer atividade. */
+  keyPeek(token: string): { key: ActivationKey; user: User } | null {
+    if (!token.startsWith(KEY_PREFIX) || !KEY_RE.test(token)) return null;
+    const key = this.byKeyHash.get(this.hash(token));
+    const user = key && !key.revokedAt ? this.userById(key.userId) : undefined;
+    return key && user ? { key, user } : null;
+  }
+
   /** The active key a bearer token is, with its user; null for anything else (other gateway keys included). */
   keyOf(token: string): { key: ActivationKey; user: User } | null {
     if (!token.startsWith(KEY_PREFIX) || !KEY_RE.test(token)) return null;
@@ -595,6 +606,32 @@ export class AccountService {
       monthResetsAt: new Date(nextMonthStart(now)).toISOString(), dayResetsAt: new Date(nextDayStart(now)).toISOString(),
       planRenewsAt: iso(user.planRenewsAt), planCancelsAtPeriodEnd: Boolean(user.planCancelsAtPeriodEnd),
     };
+  }
+
+  /**
+   * A sessão de legendas: a conta tem UMA por vez. Quem estálegendando agora é a chave com atividade recente (a
+   * pipeline fala com o gateway a cada poucos segundos enquanto roda); uma OUTRA chave da conta que chegar dentro da
+   * janela é a segunda sessão e é recusada com o nome do computador que está em uso. A mesma chave sempre passa (é a
+   * própria sessão), e quando a atividade da outra envelhece além da janela a conta fica livre — inclusive quando o
+   * app fechou sem avisar.
+   */
+  sessionBusy(found: { key: ActivationKey; user: User }): AccountError | null {
+    const now = this.now();
+    let other: ActivationKey | undefined;
+    for (const k of this.state.keys) {
+      if (k.userId !== found.user.id || k.revokedAt || k.id === found.key.id) continue;
+      if (k.lastUsedAt && now - k.lastUsedAt < SESSION_WINDOW_MS && (!other || (k.lastUsedAt ?? 0) > (other.lastUsedAt ?? 0))) other = k;
+    }
+    if (!other) return null;
+    // `found` aqui é o PAR PEEKADO (sem tocar o lastUsedAt): só a atividade
+    // real ANTERIOR à chegada diz que esta chave já estava em sessão — uma
+    // chave nova da conta não herda a vez, e a tentativa recusada não conta
+    // como atividade (o retryspam não conquista a sessão).
+    const mineRecent = found.key.lastUsedAt !== undefined && now - found.key.lastUsedAt < SESSION_WINDOW_MS;
+    if (mineRecent) return null;
+    return new AccountError(409,
+      `Esta conta já tem uma sessão de legendas em andamento em outro computador (${other.deviceName}). Encerre lá; se já encerrou, espere alguns minutos.`,
+      'session_busy', { scope: 'account', device: other.deviceName, keyId: other.id });
   }
 
   /**

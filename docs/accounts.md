@@ -48,11 +48,12 @@ per IP → 429 `too_many_attempts` + `Retry-After`.
 
 Metered when the bearer is an activation key: `POST /v1/chat/completions` (LLM tokens — provider `usage.total_tokens`,
 else prompt chars/4), `/v1/audio/transcriptions` (audio seconds — WAV header, else bytes/16 000), `/v1/audio/speech`
-(input characters, WAV seconds), `/v1/rooms` (rooms created), `/v1/s2s` and `/v1/realtime/sessions` (requests).
+(input characters, WAV seconds), `/v1/rooms` (rooms created — counted for the usage report only), `/v1/s2s` and `/v1/realtime/sessions` (requests).
 Only successful requests count. Counters per UTC day × user × key in `account-usage.json` (debounced atomic writes,
 `ACCOUNTS_USAGE_RETENTION_DAYS`, default 400).
 
-Quota (`ACCOUNT_QUOTA_*`): monthly audio minutes, LLM tokens, TTS characters, rooms (0 = unlimited, the default) →
+Quota (`ACCOUNT_QUOTA_*`): monthly audio minutes, LLM tokens and TTS characters →
+**Sessions: the account keeps ONE subtitle session at a time.** Whoever is captioning now is the key with recent activity (the pipeline talks to the gateway every few seconds while it runs); another key of the account arriving within 3 minutes of that activity is refused with 409 `session_busy`, naming the computer in use. The same key always passes, and once the other side stays silent past the window the account is free again — a closed app releases it without announcing. A refused attempt does not count as activity, so retrying does not take over the session.
 **402** `quota_exceeded` (`metric`, `limit`, `used`, `reset_at`, message in Portuguese). Per account, so one account
 cannot spend the others' share of the app (all activation keys are the same app): a daily request budget
 (`ACCOUNT_QUOTA_REQUESTS_DAY`, default **0 = off** since 2026-10-15 — live subtitles cost ~40 requests a minute, so the old 2000 stopped a talk after ~50 min; when set, a realtime session counts its whole app charge, `perMinute × ⌈ttl/60⌉` = 40

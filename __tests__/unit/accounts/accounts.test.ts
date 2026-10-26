@@ -128,7 +128,10 @@ async function startGateway(config: Partial<AccountsConfig> = {}, opts: GwOpts =
     customRoutes: [
       ...createAccessRoutes({ access, gate, audit: new KeyAudit() }),
       ...createCouponRoutes({ service: accounts.service, gate, emailLog: accounts.emailLog }),
-      { method: 'POST', path: '/v1/rooms', handler: async (_req, res) => { res.writeHead(201, { 'Content-Type': 'application/json' }); res.end('{"code":"K7Q2XM"}'); } },
+      { method: 'POST', path: '/v1/rooms', handler: async (req, res) => {
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 'K7Q2XM', account: req.headers['x-ucast-account'] ?? null }));
+      } },
       { method: 'POST', path: '/v1/realtime/sessions', handler: async (req, res) => {
         req.resume();
         await opts.hold;
@@ -569,11 +572,62 @@ describe('activation keys', () => {
 });
 
 describe('metering and quota', () => {
-  it('counts audio seconds, tokens, rooms and requests per user and per key, by day', async () => {
+  it('one subtitle session per account: a second key of the same account is the second session', async () => {
     const gw = await startGateway();
     const s = await signup(gw);
+    const a = await newKey(gw, s, 'Notebook do palco');
+    const b = await newKey(gw, s, 'PC de casa');
+    // A estálegendando: a primeira pedida de B é recusada, com o nome da
+    // máquina que está em uso.
+    expect((await stt(gw, a.key, 2)).status).toBe(200);
+    const busy = await stt(gw, b.key, 2);
+    expect(busy.status).toBe(409);
+    expect(busy.json.error).toMatchObject({ code: 'session_busy' });
+    expect(busy.json.error.message).toContain('Notebook do palco');
+    // O retry de B NÃO conquista a sessão: a tentativa recusada não é
+    // atividade — enquanto A estiver dentro da janela, B continua de fora.
+    gw.clock.now += 60_000;
+    expect((await stt(gw, b.key, 2)).status).toBe(409);
+    gw.clock.now += 60_000;
+    expect((await stt(gw, b.key, 2)).status).toBe(409);
+    // A própria sessão continua (a mesma chave passa; o keyOf renovou o
+    // lastUsedAt, então a atividade recente dela fala por si).
+    expect((await stt(gw, a.key, 2)).status).toBe(200);
+    // A sessão de A silencia: passada a janela, B entra (o app que fechou sem
+    // avisar também libera por aqui).
+    gw.clock.now += 3 * 60_000;
+    expect((await stt(gw, b.key, 2)).status).toBe(200);
+    // E agora B é a sessão: A que volta de imediato é recusada.
+    const back = await stt(gw, a.key, 2);
+    expect(back.status).toBe(409);
+    expect(back.json.error.message).toContain('PC de casa');
+    // Outra conta nunca é afetada.
+    const other = await newKey(gw, await signup(gw, 'bia@example.com'));
+    expect((await stt(gw, other.key, 2)).status).toBe(200);
+  });
+
+  it('the room creation carries the account id (a client-provided header is replaced); app keys carry none', async () => {
+    const gw = await startGateway();
+    const s = await signup(gw);
+    const k = await newKey(gw, s);
+    const spoofed = await call(gw, 'POST', '/v1/rooms', { headers: { Authorization: `Bearer ${k.key}`, 'x-ucast-account': 'usr_spoofed' }, body: { languages: ['en'] } });
+    expect(spoofed.status).toBe(201);
+    const account = (spoofed.json as { account: string }).account;
+    expect(account).toBeTruthy();
+    expect(account).not.toBe('usr_spoofed');
+    const byApp = await call(gw, 'POST', '/v1/rooms', { headers: { Authorization: `Bearer ${APP_KEY}`, 'x-ucast-account': 'usr_spoofed' }, body: { languages: ['en'] } });
+    expect(byApp.status).toBe(201);
+    expect((byApp.json as { account: string | null }).account).toBeNull();
+  });
+
+  it('counts audio seconds, tokens, rooms and requests per user and per key, by day', async () => {
+    const gw = await startGateway();
+    // Duas CONTAS: a regra de sessão (uma por conta) impede duas chaves da
+    // mesma conta de trabalharem juntas, então o retrato por chave usa uma
+    // chave em cada conta.
+    const s = await signup(gw);
     const a = await newKey(gw, s, 'A');
-    const b = await newKey(gw, s, 'B');
+    const b = await newKey(gw, await signup(gw, 'bia@example.com'), 'B');
     expect((await stt(gw, a.key, 2)).status).toBe(200);
     expect((await stt(gw, b.key, 3)).status).toBe(200);
     const chat = await call(gw, 'POST', '/v1/chat/completions', { headers: { Authorization: `Bearer ${a.key}` }, body: { model: 'llm', messages: [{ role: 'user', content: 'oi' }] } });
@@ -585,11 +639,11 @@ describe('metering and quota', () => {
     expect(u.status).toBe(200);
     const today = u.json.days.at(-1);
     expect(today.day).toBe('2026-10-10');
-    expect(today).toMatchObject({ requests: 4, sttRequests: 2, audioSeconds: 5, llmRequests: 1, llmTokens: 42, rooms: 1 });
+    expect(today).toMatchObject({ requests: 3, sttRequests: 1, audioSeconds: 2, llmRequests: 1, llmTokens: 42, rooms: 1 });
     const byKey = Object.fromEntries(u.json.byKey.map((x: { deviceName: string }) => [x.deviceName, x]));
     expect(byKey.A).toMatchObject({ audioSeconds: 2, llmTokens: 42, rooms: 1, requests: 3 });
-    expect(byKey.B).toMatchObject({ audioSeconds: 3, requests: 1 });
-    expect(u.json.quota.month.audioSeconds).toBe(5);
+    expect(byKey.B).toBeUndefined();
+    expect(u.json.quota.month.audioSeconds).toBe(2);
     // The app can read its own usage with the key (read-only).
     expect((await call(gw, 'GET', '/v1/account/usage', { headers: { Authorization: `Bearer ${a.key}` } })).status).toBe(200);
     // Durable.
