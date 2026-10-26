@@ -1009,6 +1009,8 @@ export class GatewayHttpClient {
 
 // ── GatewayClient: the client of the current API (docs/client.md). GatewayHttpClient above is the legacy client. ──
 export { GatewayClient } from './gateway-client';
+export { GrowingUtterance, wavPcm16, DRAFT_OVERLAP_SAMPLES } from './growing-utterance';
+export type { DraftPiece } from './growing-utterance';
 export { GatewayError, servedFrom } from './gateway-http';
 export { S2SFrameDecoder } from './s2s-frames';
 export { GATEWAY_CLIENT_TIMEOUTS } from './gateway-types';

@@ -14,8 +14,10 @@ with text. Two output shapes:
   audio, exactly as the batch route would, so it may still differ from the last partial; after it the next utterance
   starts (`utterance` + 1). `*_ms` are on the stream's audio clock (samples received / 16).
 
-Whisper is not a streaming model, so the session keeps an open window of at most `window_seconds` of audio and
-re-decodes it whenever `chunk_seconds` of new sound arrived. The utterance ends when the tail of the buffer has been
+Whisper is not a streaming model. A partial decodes only the audio since the previous partial, plus 2 s of
+overlap, and the text is joined onto the line already showing — an 8 s sentence used to be decoded from scratch on
+every chunk. The final still decodes the whole utterance once (cutting it scored 36.1% WER against 30.3%). The
+utterance ends when the tail of the buffer has been
 quieter than `silence_rms` for `silence_seconds` (the decode that saw it is the final: no extra GPU pass), or when the
 window is full: then the audio is cut at its quietest 100 ms in the last 3 s (between two words, not inside one) and
 only the head is decoded as the final; the rest opens the next window, so no audio is decoded twice and no word is
@@ -35,6 +37,8 @@ import re
 import threading
 
 import numpy as np
+
+print("ucast stt_stream: partials decode only the new audio", flush=True)
 
 SAMPLE_RATE = 16000
 FRAME = SAMPLE_RATE // 10
@@ -57,6 +61,29 @@ def clean_prompt(prompt) -> str | None:
 def bare(word: str) -> str:
     """A word compared without case or punctuation: "Hoje," and "hoje" agree."""
     return _WORD.sub("", word).casefold()
+
+
+# A partial repeats this much of the audio already shown, so the new words can be joined onto them.
+PARTIAL_OVERLAP_SECONDS = 2.0
+
+
+def join_tail(prev: str, new: str) -> str | None:
+    """`new` was decoded from the end of `prev` plus what was said since. None when the overlap does not match."""
+    prev_w, new_w = prev.split(), new.split()
+    if not prev_w:
+        return new
+    if not new_w:
+        return prev
+    limit = min(12, len(prev_w), len(new_w))
+    for k in range(limit, 0, -1):
+        tail = [bare(w) for w in prev_w[-k:]]
+        for skip in range(3):
+            if skip + k > len(new_w):
+                continue
+            if tail == [bare(w) for w in new_w[skip:skip + k]]:
+                rest = new_w[skip + k:]
+                return prev if not rest else prev + " " + " ".join(rest)
+    return None
 
 
 def frame_rms(audio: np.ndarray) -> np.ndarray:
@@ -90,6 +117,7 @@ class SttStream:
         self.stable: list[str] = []
         self.previous: list[str] = []
         self.shown = ""
+        self._partial_end = 0  # samples of this buffer already covered by a partial
         self._lock = threading.Lock()  # audio buffer (push runs on the event loop, decodes in a thread)
         self._decoding = threading.Lock()  # one decode at a time (tick and a flush's finish)
 
@@ -132,6 +160,7 @@ class SttStream:
             self.audio = self.audio[start:]
             self.consumed += start
             self.undecoded = max(0, len(self.audio) - (upto - start))
+        self._partial_end = 0
 
     def _quiet(self, audio: np.ndarray) -> bool:
         return len(audio) >= self.silence_samples and float(frame_rms(audio).max()) < self.silence_rms
@@ -228,7 +257,23 @@ class SttStream:
                     msgs = self._final(heard, "max_length", cut) if self.segments else self._legacy(heard["text"], True)
                     self._drop(cut)
                     return msgs
-                heard = self._decode(audio, partial=True)
+                overlap = int(PARTIAL_OVERLAP_SECONDS * SAMPLE_RATE)
+                tail_from = 0
+                if self.segments and self.shown and self._partial_end > overlap and n > self._partial_end:
+                    start = self._partial_end - overlap
+                    if n - start <= self.window_samples:
+                        tail_from = start
+                view = audio[tail_from:] if tail_from else audio
+                heard = self._decode(view, partial=True)
+                if tail_from:
+                    joined = join_tail(self.shown, heard["text"])
+                    if joined is None:
+                        self._partial_end = 0
+                        with self._lock:
+                            self.undecoded = max(0, len(self.audio) - n)
+                        return []
+                    heard = {**heard, "text": joined}
+                self._partial_end = n
             except Exception as error:  # noqa: BLE001 — one bad decode must not kill the stream
                 with self._lock:
                     self.undecoded = max(0, len(self.audio) - n)

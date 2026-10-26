@@ -36,4 +36,4 @@ jobs:
           platforms: linux/amd64
           push: true
           provenance: false
-          tags: ghcr.io/${{ github.repository_owner }}/speech-stack:20261025-stt
+          tags: ghcr.io/${{ github.repository_owner }}/speech-stack:20261026-stt

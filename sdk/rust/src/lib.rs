@@ -66,8 +66,8 @@ pub use s2s::{
 pub use speech::{wav_16k, MicIssue, MicReport, SpeechDetector};
 pub use stream::{ChatStream, SpeechStream};
 pub use stt_stream::{
-    SttStreamEvent, SttStreamReceiver, SttStreamSender, StreamFinal, StreamPartial, StreamReady, TranscribeStreamRequest,
-    TranscriptionStream, STT_STREAM_PATH,
+    DraftPiece, GrowingUtterance, SttStreamEvent, SttStreamReceiver, SttStreamSender, StreamFinal, StreamPartial,
+    StreamReady, TranscribeStreamRequest, TranscriptionStream, DRAFT_OVERLAP_SAMPLES, STT_STREAM_PATH,
 };
 pub use telemetry::AppEventsBatch;
 pub use tts_engine::{TtsEngineChoice, TTS_ENGINE_PATH};

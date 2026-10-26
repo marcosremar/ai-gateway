@@ -13,6 +13,7 @@
  */
 
 import { DirectCaller, FallbackPlanStore, trimTrailingSlashes } from './direct-fallback';
+import { GrowingUtterance, wavPcm16 } from './growing-utterance';
 import { GatewayBreaker } from './gateway-breaker';
 import { exchange, GatewayError, servedFrom } from './gateway-http';
 import { chatStreamOf, s2sStreamOf } from './gateway-streams';
@@ -243,6 +244,19 @@ export class GatewayClient {
         return { ...body, text: String(body.text ?? ''), served: servedFrom(res.headers) };
       });
     }, cause => this.direct!.transcribe(req, cause));
+  }
+
+  /**
+   * One draft of an open sentence: uploads only the audio since the last draft (plus 2 s) and
+   * returns the whole line. `null` when this audio was already sent, or the new words do not join.
+   * The final of the sentence is still a normal {@link transcribe} of the whole clip.
+   */
+  transcribeGrowing(utt: GrowingUtterance, pcm: Int16Array, req: Omit<TranscribeRequest, 'file'>): Promise<string | null> {
+    const piece = utt.piece(pcm.length);
+    if (!piece) return Promise.resolve(null);
+    const file = wavPcm16(pcm.subarray(piece.start));
+    return this.transcribe({ ...req, file, filename: req.filename ?? 'audio.wav' }).then(out =>
+      utt.accept(piece.continued, out.text, pcm.length));
   }
 
   private chatJson(req: ChatRequest, stream: boolean): Record<string, unknown> {
