@@ -114,6 +114,15 @@ export function accountDeleted(lang: PageLang): Mail {
   return render(lang, t.subject, { heading: t.heading, intro: t.intro });
 }
 
+export function coupon(lang: PageLang, code: string, months: number): Mail {
+  const t = {
+    pt: { subject: 'Seu código do ucast.me', heading: 'Seu código promocional', intro: `Este código libera ${months} ${months === 1 ? 'mês' : 'meses'} de uso do plano Pro, sem cartão.`, button: 'Criar a conta grátis', after: 'Depois de criar a conta, abra “Código promocional” na página da conta e digite o código.' },
+    en: { subject: 'Your ucast.me code', heading: 'Your promo code', intro: `This code unlocks ${months} ${months === 1 ? 'month' : 'months'} of the Pro plan, no card needed.`, button: 'Create your free account', after: 'After creating the account, open “Promo code” on the account page and enter the code.' },
+    fr: { subject: 'Votre code ucast.me', heading: 'Votre code promo', intro: `Ce code débloque ${months} mois d’utilisation du forfait Pro, sans carte.`, button: 'Créer votre compte gratuit', after: 'Après avoir créé le compte, ouvrez « Code promo » sur la page du compte et saisissez le code.' },
+  }[lang];
+  return render(lang, t.subject, { heading: t.heading, intro: [t.intro], code, button: { label: t.button, href: `${SITE}/signup` }, after: [t.after] });
+}
+
 export function accessKey(lang: PageLang, key: string): Mail {
   const t = {
     pt: { subject: 'Sua chave de acesso ao ucast.me', heading: 'Sua chave de ativação', intro: 'Cole esta chave no app, em “Ativar o ucast.me”.', after: 'Ela só foi enviada por este e-mail — guarde-a bem. Se você não esperava esta chave, ignore este e-mail.' },

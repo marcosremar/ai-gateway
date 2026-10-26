@@ -499,6 +499,25 @@ export class AccountService {
     return made;
   }
 
+  async sendCoupon(code: unknown, rawEmail: unknown, lang: PageLang): Promise<string> {
+    const email = normalizeEmail(rawEmail);
+    if (!email) throw new AccountError(400, 'Informe um e-mail válido.', 'invalid_email');
+    const wanted = typeof code === 'string' ? couponKey(code) : '';
+    const coupon = wanted ? this.state.coupons.find(c => couponKey(c.code) === wanted) : undefined;
+    if (!coupon) throw new AccountError(404, 'Código inválido.', 'invalid_coupon');
+    await this.opts.email.send({ to: email, ...mails.coupon(lang, coupon.code, coupon.months) });
+    this.opts.log?.('accounts: admin sent coupon', { code: coupon.code });
+    return email;
+  }
+
+  async issueCoupons(input: Parameters<AccountService['createCoupons']>[0], rawEmails: unknown, lang: PageLang): Promise<Coupon[]> {
+    const emails = Array.isArray(rawEmails) ? rawEmails.map(normalizeEmail) : [];
+    if (emails.length > 200 || emails.some(e => e === null)) throw new AccountError(400, 'Informe e-mails válidos.', 'invalid_email');
+    const coupons = await this.createCoupons(emails.length ? { ...input, count: emails.length, maxUses: 1 } : input);
+    for (const [index, email] of emails.entries()) await this.sendCoupon(coupons[index]!.code, email, lang);
+    return coupons;
+  }
+
   listCoupons(): Array<Omit<Coupon, 'usedBy'> & { uses: number }> {
     return this.state.coupons.map(({ usedBy, ...coupon }) => ({ ...coupon, uses: usedBy.length }));
   }

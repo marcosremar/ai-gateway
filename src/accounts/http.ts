@@ -268,6 +268,28 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         send(res, 200, { ok: true });
         return;
       }
+      case 'GET /v1/account/coupons': {
+        const w = who(req, false);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        send(res, 200, { coupons: service.listCoupons() });
+        return;
+      }
+      case 'POST /v1/account/coupons': {
+        const w = writer(req);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        limit(`admin:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
+        const body = await readJson(req);
+        send(res, 201, { coupons: await service.issueCoupons(body, body.emails, links(req).lang) });
+        return;
+      }
+      case 'POST /v1/account/coupons/send': {
+        const w = writer(req);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        limit(`admin:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
+        const body = await readJson(req);
+        send(res, 200, { ok: true, email: await service.sendCoupon(body.code, body.email, links(req).lang) });
+        return;
+      }
       case 'POST /v1/account/coupon/redeem': {
         const w = writer(req);
         limit(`coupon:ip:${ip}`, ATTEMPT_LIMITS.couponPerIp);

@@ -730,7 +730,7 @@ describe('pages and host routing', () => {
     expect((await call(gw, 'GET', '/signup')).status).toBe(401);
     const dash = await call(gw, 'GET', '/account', { host: SITE });
     expect(dash.text).toContain('Comece em três passos');
-    expect(dash.text).toContain("if(ADMIN)loadUsers()");
+    expect(dash.text).toContain("if(ADMIN){loadUsers();loadCoupons()}");
     expect(dash.text).not.toMatch(/ style="/);
   });
 
@@ -884,5 +884,65 @@ describe('coupons (a paid plan for a few months, no card)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('coupons in the admin panel (session)', () => {
+  const OWNER = 'dono@ucast.me';
+  const withSession = (s: { cookie: string; csrf: string }) => ({ Cookie: s.cookie, 'X-CSRF-Token': s.csrf });
+
+  it('only the admin account lists, creates and e-mails coupons', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    const ana = await signup(gw, 'ana@example.com');
+    expect((await call(gw, 'GET', '/v1/account/coupons', { headers: withSession(ana) })).status).toBe(403);
+    expect((await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(ana), body: { count: 1 } })).status).toBe(403);
+    expect((await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(ana), body: { code: 'x', email: 'a@b.co' } })).status).toBe(403);
+    const made = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: { count: 2, months: 3, note: 'turma B' } });
+    expect(made.status).toBe(201);
+    expect(made.json.coupons).toHaveLength(2);
+    const listed = await call(gw, 'GET', '/v1/account/coupons', { headers: withSession(owner) });
+    expect(listed.json.coupons.map((c: { uses: number }) => c.uses)).toEqual([0, 0]);
+  });
+
+  it('creating with e-mails sends one single-use code to each address, in the admin language', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/coupons', { headers: { ...withSession(owner), 'Accept-Language': 'fr' }, body: { emails: ['Bia@Example.com', 'cris@example.com'], months: 3 } });
+    expect(r.status).toBe(201);
+    expect(r.json.coupons).toHaveLength(2);
+    expect(gw.mails.map(m => m.to)).toEqual(['bia@example.com', 'cris@example.com']);
+    expect(gw.mails[0]!.subject).toBe('Votre code ucast.me');
+    expect(gw.mails[0]!.text).toContain(r.json.coupons[0].code);
+    expect(gw.mails[1]!.text).toContain(r.json.coupons[1].code);
+    expect(r.json.coupons.every((c: { maxUses: number }) => c.maxUses === 1)).toBe(true);
+  });
+
+  it('sends an existing code to one address and refuses a bad address or an unknown code', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    const made = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: {} });
+    const code = made.json.coupons[0].code as string;
+    gw.mails.length = 0;
+    const sent = await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code, email: 'Dani@Example.com' } });
+    expect(sent.json).toEqual({ ok: true, email: 'dani@example.com' });
+    expect(gw.mails).toHaveLength(1);
+    expect(gw.mails[0]!.text).toContain(code);
+    expect((await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code, email: 'not-an-email' } })).json.error.code).toBe('invalid_email');
+    expect((await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code: 'UCAST-NOPE-NOPE', email: 'a@b.co' } })).json.error.code).toBe('invalid_coupon');
+    expect((await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: { emails: ['ok@example.com', 'bad'] } })).json.error.code).toBe('invalid_email');
+  });
+});
+
+describe('account page script', () => {
+  it.each(['pt', 'en', 'fr'])('is valid JavaScript in %s and carries the coupon card and the admin panel', async (lang) => {
+    const gw = await startGateway();
+    const page = await call(gw, 'GET', '/account', { host: SITE, headers: { 'Accept-Language': lang } });
+    expect(page.status).toBe(200);
+    const scripts = [...page.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const source of scripts) expect(() => new Function(source)).not.toThrow();
+    for (const id of ['cf', 'cc', 'cb', 'cm', 'cpf', 'cpb', 'cam', 'coupons']) expect(page.text).toContain(`id="${id}"`);
   });
 });
