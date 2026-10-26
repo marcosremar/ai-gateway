@@ -52,6 +52,16 @@ export interface MicReport {
   floor: Floor | null;
 }
 
+/**
+ * The issues worth showing in this room, most harmful first. In a quiet floor (studio, room tone, meeting
+ * room) "noisy" is the floor itself, not the voice; "far away" still counts. Same rule as the Rust crate's
+ * `MicReport::advice_issues`, so every app of the gateway shows the same advice.
+ */
+export function adviceIssues(r: MicReport): MicIssue[] {
+  const quiet = r.floor !== null && r.floor !== 'loudFloor';
+  return r.issues.filter((i) => !(quiet && i === 'noisy'));
+}
+
 export const MIC_CHECK = {
   windowS: 30,
   minSoundS: 8,

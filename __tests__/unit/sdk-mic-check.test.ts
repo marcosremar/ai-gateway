@@ -3,7 +3,7 @@
  * `ai-gateway-audio`'s `mic_check` tests (Rust).
  */
 import { describe, expect, it } from 'vitest';
-import { createMicCheck, floorOf, type MicReport } from '../../sdk/browser/voice/index';
+import { adviceIssues, createMicCheck, floorOf, type MicReport } from '../../sdk/browser/voice/index';
 import { SILERO_FRAME_SAMPLES, SILERO_SAMPLE_RATE } from '../../sdk/browser/voice/silero';
 
 /** 30 s alternating 2 s of "speech" (noise at speechDb, probability prob) and 1 s of pause (noise at pauseDb). */
@@ -129,6 +129,21 @@ describe('mic check', () => {
     expect(floorOf(-58, 0)).toBe('studioQuiet');
     expect(floorOf(-43, 0)).toBe('roomAmbient');
     expect(floorOf(-38, 0)).toBe('loudFloor');
+  });
+
+  it('a quiet floor hides the noisy advice but keeps far away', () => {
+    const base = {
+      speechDb: -30, noiseDb: -36, vadConfidence: 0.9, clippedShare: 0, hum: null,
+      issues: ['farOrEcho', 'noisy', 'tooQuiet'] as const,
+    };
+    for (const floor of ['studioQuiet', 'roomAmbient', 'meetingFloor', 'digitalSilence'] as const) {
+      const kept = adviceIssues({ ...base, issues: [...base.issues], floor });
+      expect(kept).not.toContain('noisy');
+      expect(kept).toContain('farOrEcho');
+    }
+    for (const floor of ['loudFloor', null] as const) {
+      expect(adviceIssues({ ...base, issues: [...base.issues], floor })).toEqual([...base.issues]);
+    }
   });
 
   it('a table microphone with only room tone is not a noisy room', () => {

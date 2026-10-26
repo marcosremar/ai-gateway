@@ -141,6 +141,14 @@ impl MicReport {
     pub fn snr_db(&self) -> Option<f32> {
         self.noise_db.map(|n| self.speech_db - n)
     }
+
+    /// The issues worth showing in this room, most harmful first. In a quiet floor (studio, room tone,
+    /// meeting room) "noisy" is the floor itself, not the voice; "far away" still counts (the talker may
+    /// be across the room). Every app of the gateway gets the same rule from here.
+    pub fn advice_issues(&self) -> impl Iterator<Item = MicIssue> + '_ {
+        let quiet = self.floor.is_some_and(|f| f.is_quiet());
+        self.issues.iter().copied().filter(move |i| !(quiet && *i == MicIssue::Noisy))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -495,6 +503,30 @@ mod tests {
         assert_eq!(Floor::of(-43.0, 0.0), Floor::RoomAmbient, "HVAC");
         assert_eq!(Floor::of(-38.0, 0.0), Floor::LoudFloor, "5 dB noise");
         assert!(!Floor::LoudFloor.is_quiet() && Floor::RoomAmbient.is_quiet());
+    }
+
+    #[test]
+    fn a_quiet_floor_hides_the_noisy_advice_but_keeps_far_away() {
+        // Every app gets this from the report itself (not from app code).
+        let report = |floor: Option<Floor>, issues: Vec<MicIssue>| MicReport {
+            speech_db: -30.0,
+            noise_db: Some(-36.0),
+            vad_confidence: Some(0.9),
+            clipped_share: 0.0,
+            hum: None,
+            issues,
+            floor,
+        };
+        let all = vec![MicIssue::FarOrEcho, MicIssue::Noisy, MicIssue::TooQuiet];
+        for floor in [Floor::StudioQuiet, Floor::RoomAmbient, Floor::MeetingFloor, Floor::DigitalSilence] {
+            let kept: Vec<_> = report(Some(floor), all.clone()).advice_issues().collect();
+            assert!(!kept.contains(&MicIssue::Noisy), "{floor:?}: {kept:?}");
+            assert!(kept.contains(&MicIssue::FarOrEcho), "{floor:?}: a far voice still counts");
+        }
+        for floor in [Some(Floor::LoudFloor), None] {
+            let kept: Vec<_> = report(floor, all.clone()).advice_issues().collect();
+            assert_eq!(kept, all, "{floor:?}: a loud or unknown floor keeps the noisy advice");
+        }
     }
 
     #[test]
