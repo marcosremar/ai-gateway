@@ -666,5 +666,6 @@ const QUOTA_LABEL: Record<QuotaMetric, (limit: number) => string> = {
   audioSeconds: (l) => `Sua cota mensal de transcrição acabou (${Math.round(l / 60)} min).`,
   llmTokens: (l) => `Sua cota mensal de tradução acabou (${l.toLocaleString('pt-BR')} tokens).`,
   ttsChars: (l) => `Sua cota mensal de dublagem acabou (${l.toLocaleString('pt-BR')} caracteres).`,
+  ttsSeconds: (l) => `Sua cota mensal de dublagem acabou (${Math.round(l / 60)} min).`,
   rooms: (l) => `Sua cota mensal de salas ao vivo acabou (${l}).`,
 };

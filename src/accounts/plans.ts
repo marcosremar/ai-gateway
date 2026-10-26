@@ -12,15 +12,15 @@ export interface Plan {
   /** Monthly price in euro cents; 0 for the free plan. */
   priceCents: number;
   lookupKey: string | null;
-  quota: Pick<Quota, 'audioSeconds' | 'llmTokens' | 'ttsChars' | 'rooms'>;
+  quota: Pick<Quota, 'audioSeconds' | 'llmTokens' | 'ttsChars' | 'ttsSeconds' | 'rooms'>;
 }
 
 const HOUR = 3600;
 
 export const PLANS: Record<PlanId, Plan> = {
-  free: { id: 'free', priceCents: 0, lookupKey: null, quota: { audioSeconds: 2 * HOUR, llmTokens: 300_000, ttsChars: 25_000, rooms: 5 } },
-  pro: { id: 'pro', priceCents: 1900, lookupKey: 'ucast_pro_monthly', quota: { audioSeconds: 20 * HOUR, llmTokens: 3_000_000, ttsChars: 250_000, rooms: 0 } },
-  events: { id: 'events', priceCents: 5900, lookupKey: 'ucast_events_monthly', quota: { audioSeconds: 80 * HOUR, llmTokens: 12_000_000, ttsChars: 1_000_000, rooms: 0 } },
+  free: { id: 'free', priceCents: 0, lookupKey: null, quota: { audioSeconds: 2 * HOUR, llmTokens: 300_000, ttsChars: 25_000, ttsSeconds: 30 * 60, rooms: 5 } },
+  pro: { id: 'pro', priceCents: 1900, lookupKey: 'ucast_pro_monthly', quota: { audioSeconds: 20 * HOUR, llmTokens: 3_000_000, ttsChars: 250_000, ttsSeconds: 300 * 60, rooms: 0 } },
+  events: { id: 'events', priceCents: 5900, lookupKey: 'ucast_events_monthly', quota: { audioSeconds: 80 * HOUR, llmTokens: 12_000_000, ttsChars: 1_000_000, ttsSeconds: 1200 * 60, rooms: 0 } },
 };
 
 export const PAID_PLANS = [PLANS.pro, PLANS.events];

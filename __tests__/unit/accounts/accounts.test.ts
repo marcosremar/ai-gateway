@@ -89,7 +89,7 @@ function signedEvent(event: unknown, nowMs: number, secret = WEBHOOK_SECRET) {
   return { raw, header: `t=${t},v1=${v1}` };
 }
 
-const NO_QUOTA = { audioSeconds: 0, llmTokens: 0, ttsChars: 0, rooms: 0, requestsPerDay: 0, concurrentRequests: 0 };
+const NO_QUOTA = { audioSeconds: 0, llmTokens: 0, ttsChars: 0, ttsSeconds: 0, rooms: 0, requestsPerDay: 0, concurrentRequests: 0 };
 
 interface GwOpts { adminApp?: boolean; dir?: string; appEnv?: Record<string, string>; sessionRequests?: number; hold?: Promise<void>; stripe?: typeof fetch }
 

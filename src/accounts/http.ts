@@ -41,7 +41,7 @@ const API_HEADERS = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'no
 const METERED: Record<string, { counter?: Counter; metrics: QuotaMetric[] }> = {
   '/v1/chat/completions': { counter: 'llmRequests', metrics: ['llmTokens'] },
   '/v1/audio/transcriptions': { counter: 'sttRequests', metrics: ['audioSeconds'] },
-  '/v1/audio/speech': { counter: 'ttsRequests', metrics: ['ttsChars'] },
+  '/v1/audio/speech': { counter: 'ttsRequests', metrics: ['ttsChars', 'ttsSeconds'] },
   '/v1/rooms': { metrics: [] }, // sala não é cota mensal: é 1 ativa por vez (o serviço de salas recusa a segunda)
   '/v1/s2s': { metrics: ['audioSeconds', 'llmTokens', 'ttsChars'] },
   '/v1/realtime/sessions': { metrics: ['audioSeconds', 'llmTokens', 'ttsChars'] },
