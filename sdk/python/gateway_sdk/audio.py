@@ -44,6 +44,7 @@ import threading
 import wave
 from collections import deque
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Callable
 
 import numpy as np
@@ -53,6 +54,152 @@ log = logging.getLogger(__name__)
 # Silero VAD requires exactly 512 samples per window at 16kHz (32ms)
 VAD_WINDOW_SAMPLES = 512
 VAD_WINDOW_BYTES = VAD_WINDOW_SAMPLES * 2  # int16
+
+
+# ── Microphone advice: the room, not the voice ──────────────────────────────
+#
+# Same rules and thresholds as `ai-gateway-audio` (Rust) and `sdk/browser/voice/mic-check.ts`, measured on the
+# ucast.me benchmark sets (docs/medicoes.md § piso, 2026-10-26): what "silence" is differs per recording — digital
+# zeros, a clean studio pause, air-conditioning, a loud floor, a real meeting room — and a single threshold cannot
+# tell them apart. An app shows `advice_issues(report)` instead of `report.issues`.
+
+MIC_CHECK_WINDOW_S = 30.0
+MIC_CHECK_MIN_SOUND_S = 8.0
+MIC_CHECK_QUIET_DB = -50.0
+MIC_CHECK_NOISY_SNR_DB = 10.0
+MIC_CHECK_UNSURE_VAD = 0.95
+# VAD probability that counts as speech for the noisy check: 0.85 keeps the 5 dB noise case and drops the AC floor.
+MIC_CHECK_NOISY_VOICED_PROB = 0.85
+# Far/echo needs 10 s of unsure speech and a voice at least this loud.
+MIC_CHECK_FAR_MIN_SPEECH_DB = -40.0
+
+
+class MicIssue(str, Enum):
+    """Something the person can change, most harmful first."""
+    CLIPPING = "clipping"
+    FAR_OR_ECHO = "farOrEcho"
+    TOO_QUIET = "tooQuiet"
+    NOISY = "noisy"
+    HUM = "hum"
+
+
+class Floor(str, Enum):
+    """What the microphone hears when nobody talks."""
+    DIGITAL_SILENCE = "digitalSilence"
+    STUDIO_QUIET = "studioQuiet"
+    ROOM_AMBIENT = "roomAmbient"
+    LOUD_FLOOR = "loudFloor"
+    MEETING_FLOOR = "meetingFloor"
+
+
+def floor_of(pause_median_db: float, digital_share: float) -> Floor:
+    """The floor from the pauses: their median level (dBFS) and how much of them is digital silence."""
+    if pause_median_db <= -90.0 or (digital_share >= 0.05 and pause_median_db <= -70.0):
+        return Floor.DIGITAL_SILENCE
+    if digital_share >= 0.05:
+        return Floor.MEETING_FLOOR
+    if pause_median_db <= -54.0:
+        return Floor.STUDIO_QUIET
+    if pause_median_db <= -39.0:
+        return Floor.ROOM_AMBIENT
+    return Floor.LOUD_FLOOR
+
+
+@dataclass
+class MicReport:
+    """What the microphone sounds like over the last 30 s (dB are dBFS of the audio as captured)."""
+    speech_db: float
+    noise_db: float | None
+    vad_confidence: float | None
+    clipped_share: float
+    issues: list[MicIssue]
+    floor: Floor | None
+
+    def snr_db(self) -> float | None:
+        return None if self.noise_db is None else self.speech_db - self.noise_db
+
+    def advice_issues(self) -> list[MicIssue]:
+        """The issues worth showing: on a quiet floor "noisy" is the floor itself, not the voice."""
+        quiet = self.floor is not None and self.floor != Floor.LOUD_FLOOR
+        return [i for i in self.issues if not (quiet and i == MicIssue.NOISY)]
+
+
+class MicCheck:
+    """Keeps the last 30 s of frames (level, VAD probability, clipped samples) and turns them into a MicReport."""
+
+    def __init__(self) -> None:
+        self._frames: deque[tuple[float, float, int]] = deque(maxlen=int(MIC_CHECK_WINDOW_S * 16000 / VAD_WINDOW_SAMPLES))
+
+    def clear(self) -> None:
+        self._frames.clear()
+
+    def push(self, frame: "np.ndarray", probability: float) -> None:
+        """One 512-sample frame as it came from the microphone and the VAD's probability for it."""
+        samples = np.asarray(frame, dtype=np.float32)
+        if samples.size:
+            ms = float(np.mean(np.square(samples)))
+            db = 10.0 * math.log10(max(ms, 1e-18))
+            clipped = int(np.count_nonzero(np.abs(samples) >= 0.98))
+        else:
+            db, clipped = -180.0, 0
+        self._frames.append((db, float(probability), clipped))
+
+    def report(self) -> MicReport | None:
+        """None until there are 8 s of sound in the window."""
+        if not self._frames:
+            return None
+        frames = list(self._frames)
+        pauses = [(db, p) for db, p, _ in frames if p < 0.2]
+        levels = sorted(db for db, _ in pauses if db > -100.0)
+        noise_db = levels[len(levels) // 5] if len(levels) >= 2 * 16000 // VAD_WINDOW_SAMPLES else None
+        gate = -60.0 if noise_db is None else noise_db + 10.0
+        clear = [(db, p) for db, p, _ in frames if db > gate]
+        sound = [(db, p, c) for db, p, c in frames if db > gate or p >= 0.5]
+        if len(sound) < MIC_CHECK_MIN_SOUND_S * 16000 / VAD_WINDOW_SAMPLES:
+            return None
+
+        def median(values: list[float]) -> float:
+            ordered = sorted(values)
+            return ordered[len(ordered) // 2]
+
+        speech_db = median([db for db, _, _ in sound])
+        floor = None
+        if len(levels) >= 2 * 16000 // VAD_WINDOW_SAMPLES:
+            digital = sum(1 for db, p, _ in frames if p < 0.2 and db <= -100.0)
+            floor = floor_of(median(levels), digital / max(len(pauses), 1))
+        vad_confidence = median([p for _, p in clear]) if len(clear) >= 4 * 16000 // VAD_WINDOW_SAMPLES else None
+        clipped_share = sum(c for _, _, c in sound) / (len(sound) * VAD_WINDOW_SAMPLES)
+
+        issues: list[MicIssue] = []
+        if clipped_share > 0.001:
+            issues.append(MicIssue.CLIPPING)
+        unsure = sum(1 for _, p, _ in frames if 0.15 <= p < MIC_CHECK_NOISY_VOICED_PROB)
+        if (
+            unsure >= 10 * 16000 / VAD_WINDOW_SAMPLES
+            and speech_db >= MIC_CHECK_FAR_MIN_SPEECH_DB
+            and vad_confidence is not None
+            and vad_confidence < MIC_CHECK_UNSURE_VAD
+        ):
+            issues.append(MicIssue.FAR_OR_ECHO)
+        if speech_db < MIC_CHECK_QUIET_DB:
+            issues.append(MicIssue.TOO_QUIET)
+        voiced = [db for db, p, _ in frames if p >= MIC_CHECK_NOISY_VOICED_PROB]
+        voiced_db = median(voiced) if len(voiced) >= MIC_CHECK_MIN_SOUND_S * 16000 / VAD_WINDOW_SAMPLES else None
+        if (
+            voiced_db is not None
+            and noise_db is not None
+            and voiced_db >= MIC_CHECK_QUIET_DB
+            and voiced_db - noise_db < MIC_CHECK_NOISY_SNR_DB
+        ):
+            issues.append(MicIssue.NOISY)
+        return MicReport(
+            speech_db=speech_db,
+            noise_db=noise_db,
+            vad_confidence=vad_confidence,
+            clipped_share=clipped_share,
+            issues=issues,
+            floor=floor,
+        )
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -187,6 +334,8 @@ class AudioSegmenter:
         self._smoothed_prob = 0.0
         self._ambient_rms = 0.0
         self._last_level_time = 0.0
+        # What the room sounds like while nobody talks (pause floor / noise / far echo).
+        self._mic_check = MicCheck()
 
         # ── Pre-speech padding ring buffer ──
         frames_count = max(1, int(self._cfg.pre_speech_pad_ms / 32))
@@ -284,6 +433,13 @@ class AudioSegmenter:
         if self._vad_model is None:
             self.load_vad()
         self._process_frame(frame)
+
+    def mic_report(self) -> MicReport | None:
+        """What is wrong with the microphone over the last 30 s (None before 8 s of sound).
+
+        `report.floor` says what the room sounds like while nobody talks; show `report.advice_issues()`.
+        """
+        return self._mic_check.report()
 
     def flush(self) -> None:
         """Emit any remaining speech buffer (call on stop/cleanup)."""
@@ -495,6 +651,8 @@ class AudioSegmenter:
                     (1 - cfg.vad_smoothing_alpha) * raw_prob
                 )
                 prob = self._smoothed_prob
+                # The room, not the voice (same rules in every SDK).
+                self._mic_check.push(np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0, raw_prob)
 
                 # ── VAP history tracking ──
                 if cfg.vap_enabled:

@@ -150,6 +150,11 @@ for chunk in mic_chunks {                               // 16 kHz mono f32, any 
 
 `speech.mic_report()` says what is wrong with the microphone (far/echo, noisy, too quiet, clipping, hum; only
 `MicIssue::hurts_transcription()` ones made transcripts worse on the ucast.me benchmark — see `sdk/rust-audio/README.md`).
+The report also says what the room sounds like **while nobody talks** (`report.floor`: `DigitalSilence`,
+`StudioQuiet`, `RoomAmbient`, `LoudFloor`, `MeetingFloor`, from the benchmark's measured pause floors): show
+`report.advice_issues()` instead of `report.issues` — on a quiet floor "noisy" is the floor itself, not the voice.
+The Node SDK (`AudioSegmenter.micReport()`, `adviceIssues`) and the Python SDK (`AudioSegmenter.mic_report()`,
+`MicReport.advice_issues()`) carry the same rule.
 `SpeechDetector::with_config(SegmenterConfig { .. })` changes the segmentation, `.without_level()` turns the level
 off, `.segmenter()` reaches drafts at pauses (`take_peek`). The browser SDK has the same level in
 `sdk/browser/voice` (`createVoiceLevel`, on by default in `createVoiceActivityPipeline`).
@@ -313,7 +318,7 @@ of the current API).
 | `health` / `health({deep})` | yes | `health`, `health_detail` | `health`, `health_deep`, `health_details`, `is_healthy` |
 | `GET /v1/models` | — | — | `models()` |
 | On-device speech detection (Silero VAD + level + segmenter) | — (browser: `sdk/browser/voice`, `createVoiceLevel`) | — | feature `audio`: `SpeechDetector`, `transcribe_speech` (crate `ai-gateway-audio`) |
-| Microphone advice (far/echo, noisy, quiet, clipping, hum) | — (browser: `createMicCheck`) | — | feature `audio`: `SpeechDetector::mic_report`, `MicCheck` |
+| Microphone advice (far/echo, noisy, quiet, clipping, hum) + the room's floor | — (browser: `createMicCheck`) | `AudioSegmenter.micReport()` + `adviceIssues` (`sdk/node/audio`) |  `AudioSegmenter.mic_report()` + `MicReport.advice_issues()` (`sdk/python`) | feature `audio`: `SpeechDetector::mic_report`, `MicCheck`, `Floor`, `MicReport::advice_issues` |
 | Rooms create / lines / audio / end / GET | — | — | yes (babelcast parity) |
 | Rooms `PATCH /v1/rooms/:code` `{youtubeUrl}` | — | — | yes (`update_youtube`; ai-gateway `main` ≥ 0f6ac49, older gateways 405) |
 | Rooms `PATCH /v1/rooms/:code` `{serverDub}` | — | — | yes (`update_server_dub`; older gateways 400) |

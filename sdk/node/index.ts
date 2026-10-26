@@ -1022,6 +1022,10 @@ export type {
   CallPhase, CallsHealth, CallToken, CallTokenRequest,
 } from './gateway-types';
 
+// ── Microphone advice shared by every SDK: pause floor (silence / room tone / noise), far echo, clipping. ──
+export { adviceIssues, createMicCheck, floorOf, MIC_CHECK } from './audio';
+export type { Floor, MicCheck, MicIssue, MicReport } from './audio';
+
 // ── Telemetry (docs/api/telemetry.md): server-side batching emitter, authenticated with the app key. ──
 export { createServerTelemetry, TelemetryEmitter, newTraceId, traceparentOf } from './telemetry';
 export type { ServerTelemetryOptions, EmitFields, TelemetryContext, TelemetryStats } from './telemetry';

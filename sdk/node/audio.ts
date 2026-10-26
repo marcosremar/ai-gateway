@@ -125,6 +125,11 @@ export interface AudioSegment {
 export const VAD_WINDOW_SAMPLES = 512;
 const VAD_WINDOW_BYTES = VAD_WINDOW_SAMPLES * 2; // int16
 
+// The microphone advice (pause floor, noise, far/echo) shared by every SDK: same rules as the Rust crate.
+// Re-exported for consumers and imported here for the segmenter itself.
+import { createMicCheck, type MicCheck as MicCheckT, type MicReport as MicReportT } from '../browser/voice/mic-check';
+export { adviceIssues, createMicCheck, floorOf, MIC_CHECK } from '../browser/voice/mic-check';
+export type { Floor, MicCheck, MicIssue, MicReport } from '../browser/voice/mic-check';
 const DEFAULTS = {
   sampleRate: 16000,
   vadOnsetThreshold: 0.45,
@@ -192,6 +197,8 @@ export class AudioSegmenter {
   private onSegment?: (segment: AudioSegment) => void;
   private onLevel?: (rms: number) => void;
   private vadInference?: (samples: Float32Array) => number;
+  /** What the microphone hears while nobody talks; fed with every frame and the VAD probability. */
+  private micCheck: MicCheckT = createMicCheck();
 
   // VAD state
   private speechBuf: Int16Array[] = [];
@@ -346,6 +353,14 @@ export class AudioSegmenter {
    */
   feedFrame(frame: Int16Array): void {
     this.processFrame(frame);
+  }
+
+  /**
+   * What is wrong with the microphone over the last 30 s (null before 8 s of sound). `floor` says what the room
+   * sounds like while nobody talks; `adviceIssues(report)` keeps only what is worth telling the person.
+   */
+  micReport(): MicReportT | null {
+    return this.micCheck.report();
   }
 
   /**
@@ -516,18 +531,17 @@ export class AudioSegmenter {
       if (this.preSpeechBuf.length > this.preSpeechMaxFrames) this.preSpeechBuf.shift();
     } else {
       // VAD inference
-      let rawProb = 0;
-      if (this.vadInference) {
-        const float32 = new Float32Array(frame.length);
-        for (let i = 0; i < frame.length; i++) float32[i] = frame[i] / 32768;
-        rawProb = this.vadInference(float32);
-      }
+      const float32 = new Float32Array(frame.length);
+      for (let i = 0; i < frame.length; i++) float32[i] = frame[i] / 32768;
+      const rawProb = this.vadInference ? this.vadInference(float32) : 0;
 
       // Exponential smoothing
       this.smoothedProb =
         this.cfg.vadSmoothingAlpha * this.smoothedProb +
         (1 - this.cfg.vadSmoothingAlpha) * rawProb;
       const prob = this.smoothedProb;
+      // The room, not the voice: pause floor / noise / far echo (same rules in every SDK).
+      this.micCheck.push(float32, rawProb);
 
       // VAP history
       if (this.cfg.vapEnabled) {
